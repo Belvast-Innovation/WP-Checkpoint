@@ -22,6 +22,23 @@ final class UninstallSetting {
 	const NOTICE_FLAG = 'wpcheckpoint_uninstall_setting_notice';
 
 	/**
+	 * Notice flag values: a site-level "on" was found, or the network was too
+	 * large to scan and the super admin should confirm the setting anyway.
+	 */
+	const NOTICE_LEFTOVER  = 'leftover';
+	const NOTICE_UNSCANNED = 'unscanned';
+
+	/**
+	 * Networks with more sites than this are not scanned site by site.
+	 */
+	const SCAN_LIMIT = 50;
+
+	/**
+	 * Sites fetched per page when walking the whole network.
+	 */
+	const BATCH_SIZE = 500;
+
+	/**
 	 * Whether deleting data on uninstall is enabled.
 	 *
 	 * @return bool
@@ -48,11 +65,18 @@ final class UninstallSetting {
 	 * On multisite, initialise the network option once and detect leftover
 	 * per-site values.
 	 *
-	 * @return array{ran: bool, leftover: bool} "ran" is false when nothing had to be done.
+	 * Small networks are scanned site by site. Larger ones (more than
+	 * SCAN_LIMIT sites) are not: that would mean one query per site, and a
+	 * capped scan could miss exactly the site whose administrator needs the
+	 * notice; the notice is shown regardless, with neutral wording.
+	 *
+	 * @param int|null $site_count Number of sites; null queries the network (tests inject it).
+	 * @return array{ran: bool, scanned: bool, leftover: bool} "ran" is false when nothing had to be done.
 	 */
-	public static function migrate_multisite(): array {
+	public static function migrate_multisite( $site_count = null ): array {
 		$result = array(
 			'ran'      => false,
+			'scanned'  => false,
 			'leftover' => false,
 		);
 		if ( ! is_multisite() ) {
@@ -68,16 +92,41 @@ final class UninstallSetting {
 		update_site_option( self::OPTION, 0 );
 		$result['ran'] = true;
 
-		foreach ( self::site_ids() as $site_id ) {
+		if ( null === $site_count ) {
+			$site_count = (int) get_sites( array( 'count' => true ) );
+		}
+		if ( $site_count > self::SCAN_LIMIT ) {
+			update_site_option( self::NOTICE_FLAG, self::NOTICE_UNSCANNED );
+			return $result;
+		}
+
+		$result['scanned'] = true;
+		foreach ( self::site_ids( self::SCAN_LIMIT ) as $site_id ) {
 			if ( (bool) get_blog_option( $site_id, self::OPTION, false ) ) {
 				$result['leftover'] = true;
 				break;
 			}
 		}
 		if ( $result['leftover'] ) {
-			update_site_option( self::NOTICE_FLAG, 1 );
+			update_site_option( self::NOTICE_FLAG, self::NOTICE_LEFTOVER );
 		}
 		return $result;
+	}
+
+	/**
+	 * Why the confirmation notice is shown: NOTICE_LEFTOVER, NOTICE_UNSCANNED or ''.
+	 *
+	 * @return string
+	 */
+	public static function notice_reason(): string {
+		if ( ! is_multisite() ) {
+			return '';
+		}
+		$flag = get_site_option( self::NOTICE_FLAG, '' );
+		if ( self::NOTICE_UNSCANNED === $flag ) {
+			return self::NOTICE_UNSCANNED;
+		}
+		return empty( $flag ) ? '' : self::NOTICE_LEFTOVER;
 	}
 
 	/**
@@ -92,29 +141,42 @@ final class UninstallSetting {
 	/**
 	 * Remove the setting and the notice flag everywhere (uninstall).
 	 *
+	 * @param int $batch_size Sites per page while walking the network (tests use a small value).
 	 * @return void
 	 */
-	public static function delete_everywhere(): void {
+	public static function delete_everywhere( int $batch_size = self::BATCH_SIZE ): void {
 		Options::delete( self::OPTION );
 		if ( ! is_multisite() ) {
 			return;
 		}
 		delete_site_option( self::NOTICE_FLAG );
-		foreach ( self::site_ids() as $site_id ) {
-			delete_blog_option( $site_id, self::OPTION );
-		}
+		$batch_size = max( 1, $batch_size );
+		$offset     = 0;
+		do {
+			$ids     = self::site_ids( $batch_size, $offset );
+			$fetched = count( $ids );
+			foreach ( $ids as $site_id ) {
+				delete_blog_option( $site_id, self::OPTION );
+			}
+			$offset += $batch_size;
+		} while ( $fetched === $batch_size );
 	}
 
 	/**
-	 * Site IDs of the network (capped).
+	 * A page of site IDs.
 	 *
+	 * @param int $number Page size.
+	 * @param int $offset Offset.
 	 * @return int[]
 	 */
-	private static function site_ids(): array {
+	private static function site_ids( int $number, int $offset = 0 ): array {
 		$ids = get_sites(
 			array(
-				'number' => 1000,
-				'fields' => 'ids',
+				'number'  => $number,
+				'offset'  => $offset,
+				'fields'  => 'ids',
+				'orderby' => 'id',
+				'order'   => 'ASC',
 			)
 		);
 		return is_array( $ids ) ? array_map( 'intval', $ids ) : array();

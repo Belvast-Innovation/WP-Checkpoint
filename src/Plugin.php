@@ -156,6 +156,8 @@ final class Plugin {
 		$result = UninstallSetting::migrate_multisite();
 		if ( $result['leftover'] ) {
 			$this->directories()->log_event( 'Multisite: the "delete data on uninstall" setting is now network-wide and was initialised to off; a site-level "on" was found and must be confirmed again on the Settings tab.' );
+		} elseif ( $result['ran'] && ! $result['scanned'] ) {
+			$this->directories()->log_event( 'Multisite: the "delete data on uninstall" setting is now network-wide and was initialised to off; the network is too large to scan for site-level settings, so the super admin was asked to confirm it.' );
 		}
 	}
 

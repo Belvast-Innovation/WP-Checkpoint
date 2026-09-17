@@ -90,10 +90,13 @@ final class Notices {
 			);
 		}
 
-		if ( UninstallSetting::needs_confirmation() ) {
+		$reason = UninstallSetting::notice_reason();
+		if ( '' !== $reason ) {
 			$notices['uninstall_setting'] = array(
 				'type'        => 'warning',
-				'message'     => __( 'On multisite, the setting to delete data on uninstall is now network-wide and starts switched off. A site-level setting was found; please confirm the network-wide setting on the Settings tab.', 'wp-checkpoint' ),
+				'message'     => UninstallSetting::NOTICE_LEFTOVER === $reason
+					? __( 'On multisite, the setting to delete data on uninstall is now network-wide and starts switched off. A site-level setting was found; please confirm the network-wide setting on the Settings tab.', 'wp-checkpoint' )
+					: __( 'On multisite, the setting to delete data on uninstall is now network-wide and has been initialised to off. Please confirm it on the Settings tab.', 'wp-checkpoint' ),
 				'extra'       => '',
 				'dismissible' => true,
 				'link'        => array(

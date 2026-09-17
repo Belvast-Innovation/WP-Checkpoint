@@ -49,7 +49,7 @@ final class UninstallSettingTest extends WP_UnitTestCase {
 		$this->assertTrue( Uninstaller::should_delete_data() );
 		( new SettingsActions() )->run_save( false );
 		$this->assertFalse( Uninstaller::should_delete_data() );
-		$this->assertSame( array( 'ran' => false, 'leftover' => false ), UninstallSetting::migrate_multisite() );
+		$this->assertSame( array( 'ran' => false, 'scanned' => false, 'leftover' => false ), UninstallSetting::migrate_multisite() );
 	}
 
 	public function test_multisite_reads_the_network_option_only(): void {
@@ -76,10 +76,10 @@ final class UninstallSettingTest extends WP_UnitTestCase {
 
 		$result = UninstallSetting::migrate_multisite();
 
-		$this->assertSame( array( 'ran' => true, 'leftover' => true ), $result );
+		$this->assertSame( array( 'ran' => true, 'scanned' => true, 'leftover' => true ), $result );
 		$this->assertFalse( (bool) get_site_option( UninstallSetting::OPTION ), 'network value starts off' );
 		$this->assertTrue( UninstallSetting::needs_confirmation() );
-		$this->assertSame( array( 'ran' => false, 'leftover' => false ), UninstallSetting::migrate_multisite(), 'runs once' );
+		$this->assertSame( array( 'ran' => false, 'scanned' => false, 'leftover' => false ), UninstallSetting::migrate_multisite(), 'runs once' );
 
 		$dirs    = Plugin::instance()->directories();
 		$notices = ( new Notices( $dirs ) )->notices();
@@ -103,13 +103,63 @@ final class UninstallSettingTest extends WP_UnitTestCase {
 		$subsite = self::factory()->blog->create();
 		update_option( UninstallSetting::OPTION, false );
 		update_blog_option( $subsite, UninstallSetting::OPTION, false );
-		$this->assertSame( array( 'ran' => true, 'leftover' => false ), UninstallSetting::migrate_multisite() );
+		$this->assertSame( array( 'ran' => true, 'scanned' => true, 'leftover' => false ), UninstallSetting::migrate_multisite() );
 		$this->assertFalse( UninstallSetting::needs_confirmation() );
 		$this->assertArrayNotHasKey( 'uninstall_setting', ( new Notices( Plugin::instance()->directories() ) )->notices() );
 
 		delete_site_option( UninstallSetting::OPTION );
-		$this->assertSame( array( 'ran' => true, 'leftover' => false ), UninstallSetting::migrate_multisite(), 'no site option at all' );
+		$this->assertSame( array( 'ran' => true, 'scanned' => true, 'leftover' => false ), UninstallSetting::migrate_multisite(), 'no site option at all' );
 		$this->assertFalse( UninstallSetting::needs_confirmation() );
+	}
+
+	public function test_large_networks_are_not_scanned_but_still_get_the_notice(): void {
+		if ( ! is_multisite() ) {
+			$this->markTestSkipped( 'Multisite only.' );
+		}
+		update_option( UninstallSetting::OPTION, true );
+		$reads = 0;
+		add_filter( 'option_' . UninstallSetting::OPTION, static function ( $value ) use ( &$reads ) {
+			++$reads;
+			return $value;
+		} );
+
+		$result = UninstallSetting::migrate_multisite( UninstallSetting::SCAN_LIMIT + 1 );
+
+		$this->assertSame( array( 'ran' => true, 'scanned' => false, 'leftover' => false ), $result );
+		$this->assertSame( 0, $reads, 'no per-site scan' );
+		$this->assertFalse( (bool) get_site_option( UninstallSetting::OPTION ) );
+		$this->assertSame( UninstallSetting::NOTICE_UNSCANNED, UninstallSetting::notice_reason() );
+		$this->assertTrue( UninstallSetting::needs_confirmation() );
+		$message = ( new Notices( Plugin::instance()->directories() ) )->notices()['uninstall_setting']['message'];
+		$this->assertStringContainsString( 'initialised to off', $message );
+		$this->assertStringNotContainsString( 'site-level setting was found', $message );
+
+		Plugin::instance()->reset_directories();
+		delete_site_option( UninstallSetting::OPTION );
+		$this->assertSame( array( 'ran' => true, 'scanned' => true, 'leftover' => true ), UninstallSetting::migrate_multisite( UninstallSetting::SCAN_LIMIT ), 'at the limit the scan still runs' );
+		$this->assertSame( UninstallSetting::NOTICE_LEFTOVER, UninstallSetting::notice_reason() );
+	}
+
+	public function test_delete_everywhere_walks_the_network_in_batches(): void {
+		if ( ! is_multisite() ) {
+			$this->markTestSkipped( 'Multisite only.' );
+		}
+		$sites = array();
+		for ( $i = 0; $i < 5; $i++ ) {
+			$sites[] = self::factory()->blog->create();
+		}
+		foreach ( $sites as $site ) {
+			update_blog_option( $site, UninstallSetting::OPTION, true );
+		}
+		update_option( UninstallSetting::OPTION, true );
+		$this->assertGreaterThan( 2, get_sites( array( 'count' => true ) ) );
+
+		UninstallSetting::delete_everywhere( 2 );
+
+		foreach ( $sites as $site ) {
+			$this->assertFalse( get_blog_option( $site, UninstallSetting::OPTION ), "site {$site} cleaned" );
+		}
+		$this->assertFalse( get_option( UninstallSetting::OPTION ) );
 	}
 
 	public function test_plugin_logs_the_migration_when_a_leftover_on_is_found(): void {
