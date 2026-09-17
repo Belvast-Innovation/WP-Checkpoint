@@ -20,7 +20,9 @@ final class Paths {
 	 * rejected (trailing separators are stripped first, otherwise lstat would
 	 * follow the link): callers must remove the link, never what it points to.
 	 * The base directory itself is not considered inside. On Windows the
-	 * comparison ignores case, matching NTFS.
+	 * comparison ignores case, matching NTFS; note that realpath() there does
+	 * not resolve a symlink given as the final path component, so a symlinked
+	 * base makes every target fail the check (fail-closed).
 	 *
 	 * @param string $base   Directory the plugin created and owns.
 	 * @param string $target Path that is about to be deleted or written.
