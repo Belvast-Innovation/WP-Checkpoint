@@ -126,6 +126,8 @@ final class ReclaimActions {
 			);
 		}
 		$this->directories->finish_reclaim( $result['trusted_root'] );
+		// Jobs created for the replacement directory while the clone notice was pending can never continue.
+		( new \WPCheckpoint\Jobs\JobRepository( $this->directories ) )->settle_storage();
 		return array(
 			'ok'      => true,
 			'message' => $result['message'],

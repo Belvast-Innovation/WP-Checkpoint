@@ -214,6 +214,8 @@ final class Notices {
 		}
 		if ( 'clone_detected' === $id ) {
 			$this->directories->acknowledge_clone();
+			// Jobs bound to the previous directory can never continue now.
+			( new \WPCheckpoint\Jobs\JobRepository( $this->directories ) )->settle_storage();
 			return;
 		}
 		if ( 'auto_reclaimed' === $id ) {

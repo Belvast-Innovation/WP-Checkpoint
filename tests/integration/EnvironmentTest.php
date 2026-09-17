@@ -26,6 +26,8 @@ final class EnvironmentTest extends WP_UnitTestCase {
 		delete_site_transient( 'wpcheckpoint_lock_verify' );
 		$this->dirs = new Directories( array( 'is_web_request' => false, 'document_root' => '' ) );
 		$this->assertNotSame( '', $this->dirs->base() );
+		// The plugin singleton caches a redactor seeded with the storage token; this test made a new one.
+		Plugin::instance()->reset_directories();
 	}
 
 	public function tear_down(): void {

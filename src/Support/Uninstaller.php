@@ -7,6 +7,9 @@
 
 namespace WPCheckpoint\Support;
 
+use WPCheckpoint\Jobs\Job;
+use WPCheckpoint\Jobs\LockFile;
+
 defined( 'ABSPATH' ) || exit;
 
 /**
@@ -62,15 +65,48 @@ final class Uninstaller {
 	 */
 	public static function run(): void {
 		self::clear_transient_state();
+		self::cancel_jobs();
 
 		if ( ! self::should_delete_data() ) {
 			return;
 		}
 
 		self::delete_storage();
+		Schema::drop();
 		self::delete_options();
 		self::delete_user_meta();
-		// T010: drop the plugin tables.
+	}
+
+	/**
+	 * Cancel every queued, running or paused job and remove its lock file:
+	 * nothing can continue once the plugin is gone, and a driver still
+	 * holding a lock must stop before the directory or the table disappears.
+	 * Runs whether or not data is deleted, so a reinstall does not find jobs
+	 * that look alive.
+	 *
+	 * @return int Jobs cancelled.
+	 */
+	public static function cancel_jobs(): int {
+		global $wpdb;
+		if ( ! Schema::table_exists() ) {
+			return 0;
+		}
+		$table = $wpdb->base_prefix . Schema::JOBS_TABLE;
+		$state = Directories::load_state();
+		$path  = is_string( $state['path'] ) ? rtrim( $state['path'], '/\\' ) : '';
+		$live  = array( Job::QUEUED, Job::RUNNING, Job::PAUSED );
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix.
+		$rows = $wpdb->get_results( $wpdb->prepare( "SELECT id, storage_path FROM {$table} WHERE status IN (%s, %s, %s)", $live[0], $live[1], $live[2] ), ARRAY_A );
+		$now  = time();
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix.
+		$affected = $wpdb->query( $wpdb->prepare( "UPDATE {$table} SET status = %s, finished_at = %d, updated_at = %d, lock_token = '', locked_until = 0 WHERE status IN (%s, %s, %s)", Job::CANCELLED, $now, $now, $live[0], $live[1], $live[2] ) );
+		foreach ( is_array( $rows ) ? $rows : array() as $row ) {
+			// Only the current directory's files: another directory is another installation's.
+			if ( '' !== $path && Paths::same( (string) $row['storage_path'], $path, Paths::is_windows() ) ) {
+				LockFile::remove( $path, (int) $row['id'] );
+			}
+		}
+		return max( 0, (int) $affected );
 	}
 
 	/**
