@@ -215,6 +215,23 @@ final class EnvironmentTest extends WP_UnitTestCase {
 		$this->assertStringContainsString( 'Plugin: ' . WPCHECKPOINT_VERSION, $report );
 	}
 
+	public function test_multisite_subsite_hosts_never_appear_in_the_report(): void {
+		if ( ! is_multisite() ) {
+			$this->markTestSkipped( 'Multisite only.' );
+		}
+		$network_domain = get_network()->domain;
+		$this->assertContains( $network_domain, Environment::report_hosts() );
+
+		$subsite_host = 'clientb.' . $network_domain;
+		self::factory()->blog->create( array( 'domain' => $subsite_host, 'path' => '/' ) );
+		$checks = array( new \WPCheckpoint\Support\Check( 'x', 'loopback', 'Loopback', 'redirected', \WPCheckpoint\Support\Check::WARNING, 'redirected to https://' . $subsite_host . '/wp-json/ and to http://' . $network_domain . '/' ) );
+		$report = Report::text( $checks, Plugin::instance()->redactor(), array(), array(), Environment::report_hosts() );
+
+		$this->assertStringNotContainsString( 'clientb', $report );
+		$this->assertStringNotContainsStringIgnoringCase( $network_domain, $report );
+		$this->assertStringContainsString( 'https://{subdomain}.{site-host}/wp-json/ and to http://{site-host}/', $report );
+	}
+
 	public function test_actions_are_rate_limited_per_installation(): void {
 		$calls = 0;
 		add_filter( 'pre_http_request', static function () use ( &$calls ) {

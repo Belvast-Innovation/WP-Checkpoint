@@ -199,6 +199,13 @@ final class Environment {
 				$hosts[] = $host;
 			}
 		}
+		if ( is_multisite() ) {
+			// The network domain covers every sub-site of a sub-domain network.
+			$network = get_network();
+			if ( $network && is_string( $network->domain ) && '' !== $network->domain ) {
+				$hosts[] = $network->domain;
+			}
+		}
 		return array_values( array_unique( $hosts ) );
 	}
 

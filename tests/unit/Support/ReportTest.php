@@ -72,6 +72,7 @@ final class ReportTest extends TestCase {
 			new Check( 'a', 'misc', 'Mixed case host', 'http://EXAMPLE.com:8080/x and Example.COM alone', Check::INFO ),
 			new Check( 'b', 'misc', 'External', 'proxied via https://cdn.other-host.net/edge and ftp://user:pw@files.other.org/x', Check::INFO ),
 			new Check( 'c', 'misc', 'Subdomain', 'https://blog.example.com/feed', Check::INFO ),
+			new Check( 'c2', 'misc', 'Multisite sub-site', 'https://clienta.example.com/wp-admin/ and a.b.example.com', Check::INFO ),
 			new Check( 'd', 'misc', 'Lookalike', 'https://notexample.com/ and https://example.com.evil.net/', Check::INFO ),
 		);
 		$text = Report::text( $checks, new Redactor(), array(), array(), array( 'example.com', 'www.example.com' ) );
@@ -80,10 +81,19 @@ final class ReportTest extends TestCase {
 		$this->assertStringContainsString( 'http://{site-host}:8080/x and {site-host} alone', $text );
 		$this->assertStringContainsString( 'https://{external-host}/edge', $text );
 		$this->assertStringContainsString( 'ftp://user:[redacted]@{external-host}/x', $text );
-		$this->assertStringContainsString( 'https://blog.{site-host}/feed', $text );
+		$this->assertStringContainsString( 'https://{subdomain}.{site-host}/feed', $text );
+		$this->assertStringNotContainsString( 'blog.', $text );
 		$this->assertStringContainsString( 'https://{external-host}/ and https://{external-host}/', $text );
+		$this->assertStringContainsString( 'https://{subdomain}.{site-host}/wp-admin/ and {subdomain}.{site-host}', $text );
+		$this->assertStringNotContainsString( 'clienta', $text );
+		$this->assertStringNotContainsString( 'a.b.', $text );
 		$this->assertStringNotContainsStringIgnoringCase( 'example.com', $text );
 		$this->assertStringNotContainsString( 'other-host.net', $text );
+	}
+
+	public function test_site_on_a_subdomain_treats_the_parent_domain_as_external(): void {
+		$text = Report::mask_hosts( 'https://shop.example.com/x and https://example.com/y and www.shop.example.com and SHOP.example.com', array( 'shop.example.com' ) );
+		$this->assertSame( 'https://{site-host}/x and https://{external-host}/y and www.{site-host} and {site-host}', $text );
 	}
 
 	public function test_redaction_failure_replaces_everything(): void {

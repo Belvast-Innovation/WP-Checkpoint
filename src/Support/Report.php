@@ -57,10 +57,11 @@ final class Report {
 	}
 
 	/**
-	 * Replace the site's own host names with {site-host} (keeping a "www."
-	 * or other sub-domain label, the scheme, the port and the path so http
-	 * vs https and www vs non-www differences stay visible) and the host of
-	 * every other URL with {external-host}.
+	 * Replace the site's own host names with {site-host}. A "www." label is
+	 * kept (www vs non-www differences matter); any other sub-domain label
+	 * becomes {subdomain} so that site names of a sub-domain multisite
+	 * network never appear. Scheme, port and path are kept. The host of every
+	 * other URL becomes {external-host}.
 	 *
 	 * @param string   $text       Text.
 	 * @param string[] $site_hosts Site host names, with or without "www.".
@@ -88,7 +89,11 @@ final class Report {
 			$result      = preg_replace_callback(
 				'#(?<![\w.\-{])((?:[a-z0-9-]+\.)*?)(' . $alternation . ')(?![\w\-.]|\.[a-z])#i',
 				static function ( array $m ): string {
-					return strtolower( $m[1] ) . '{site-host}';
+					$prefix = strtolower( $m[1] );
+					if ( '' === $prefix ) {
+						return '{site-host}';
+					}
+					return 'www.' === $prefix ? 'www.{site-host}' : '{subdomain}.{site-host}';
 				},
 				$text
 			);
