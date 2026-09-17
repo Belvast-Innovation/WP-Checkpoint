@@ -1,0 +1,45 @@
+name: Feature request
+description: Suggest an idea or improvement for WP Checkpoint.
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion! Please describe the **problem** you want solved first — that helps us find the best solution, which may differ from the first idea.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      placeholder: "When I migrate client sites, I always have to…"
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: How would you like it to work?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and workarounds
+      description: What do you do today? Have you seen this solved elsewhere?
+  - type: dropdown
+    id: audience
+    attributes:
+      label: Who would benefit?
+      multiple: true
+      options:
+        - Single site owners
+        - WooCommerce stores
+        - Freelancers managing client sites
+        - Agencies
+        - Developers / WP-CLI users
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and this has not been suggested yet.
+          required: true

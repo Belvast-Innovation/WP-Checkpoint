@@ -1,0 +1,88 @@
+name: Bug report
+description: Something in WP Checkpoint does not work as expected.
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug!
+        **Security issues must not be reported here** — see SECURITY.md.
+        **Before posting logs, check that they contain no passwords, API keys, domain names or personal data you do not want to publish.** Logs downloaded from the plugin are redacted automatically, but please double-check.
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: A clear description of the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Go to Tools → WP Checkpoint → Backups
+        2. Click "Create backup"
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - Backup / export
+        - Restore / import
+        - Import from other plugins (.wpress etc.)
+        - Checkpoints / rollback
+        - Search & replace
+        - Conflict troubleshooting
+        - Storage destinations
+        - WP-CLI
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: data_loss
+    attributes:
+      label: Did this cause data loss or leave the site broken?
+      options:
+        - "No"
+        - "Yes — the site is broken or data is missing"
+    validations:
+      required: true
+  - type: input
+    id: plugin_version
+    attributes:
+      label: WP Checkpoint version
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment report
+      description: Paste the report from Tools → WP Checkpoint → Environment (it is redacted), or fill in WordPress / PHP / database / web server versions and your hosting provider.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: From the job log download. Please review for sensitive data first.
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I am using the latest version of WP Checkpoint.
+          required: true
+        - label: I searched existing issues and this has not been reported yet.
+          required: true

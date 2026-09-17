@@ -1,0 +1,45 @@
+<?xml version="1.0"?>
+<ruleset name="WP Checkpoint">
+	<description>Coding standards for WP Checkpoint.</description>
+
+	<file>wp-checkpoint.php</file>
+	<file>uninstall.php</file>
+	<file>src</file>
+	<file>restore</file>
+
+	<exclude-pattern>vendor/*</exclude-pattern>
+	<exclude-pattern>node_modules/*</exclude-pattern>
+
+	<arg name="extensions" value="php"/>
+	<arg value="sp"/>
+
+	<config name="testVersion" value="7.4-"/>
+	<config name="minimum_wp_version" value="6.9"/>
+
+	<rule ref="WordPress-Extra"/>
+	<rule ref="WordPress-Docs"/>
+	<rule ref="PHPCompatibilityWP"/>
+
+	<rule ref="WordPress.WP.I18n">
+		<properties>
+			<property name="text_domain" type="array">
+				<element value="wp-checkpoint"/>
+			</property>
+		</properties>
+	</rule>
+
+	<rule ref="WordPress.NamingConventions.PrefixAllGlobals">
+		<properties>
+			<property name="prefixes" type="array">
+				<element value="wpcheckpoint"/>
+				<element value="WPCheckpoint"/>
+				<element value="WPCHECKPOINT"/>
+			</property>
+		</properties>
+	</rule>
+
+	<!-- PSR-4 file names inside src/. -->
+	<rule ref="WordPress.Files.FileName">
+		<exclude-pattern>src/*</exclude-pattern>
+	</rule>
+</ruleset>

@@ -1,0 +1,46 @@
+{
+  "name": "belvast/wp-checkpoint",
+  "description": "Backup, migration and safe updates for WordPress.",
+  "type": "wordpress-plugin",
+  "license": "GPL-2.0-or-later",
+  "require": {
+    "php": ">=7.4"
+  },
+  "require-dev": {
+    "dealerdirect/phpcodesniffer-composer-installer": "^1.0",
+    "wp-coding-standards/wpcs": "^3.1",
+    "phpcompatibility/phpcompatibility-wp": "^2.1",
+    "phpstan/phpstan": "^2.0",
+    "szepeviktor/phpstan-wordpress": "^2.0",
+    "phpunit/phpunit": "^9.6",
+    "yoast/phpunit-polyfills": "^2.0",
+    "wp-phpunit/wp-phpunit": "*"
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "WPCheckpoint\\": "src/",
+      "WPCheckpoint\\Tests\\": "tests/"
+    }
+  },
+  "config": {
+    "allow-plugins": {
+      "dealerdirect/phpcodesniffer-composer-installer": true
+    },
+    "platform": {
+      "php": "7.4.33"
+    }
+  },
+  "scripts": {
+    "lint": "phpcs",
+    "lint:fix": "phpcbf",
+    "analyse": "phpstan analyse --memory-limit=1G",
+    "test:unit": [
+      "@putenv WPCHECKPOINT_TEST_SUITE=unit",
+      "phpunit --testsuite unit"
+    ],
+    "test:integration": [
+      "@putenv WPCHECKPOINT_TEST_SUITE=integration",
+      "phpunit --testsuite integration"
+    ]
+  }
+}

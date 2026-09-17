@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Help & support
+    url: https://wordpress.org/support/plugin/wp-checkpoint/
+    about: Questions about using WP Checkpoint belong in the WordPress.org support forum.
+  - name: Report a security vulnerability
+    url: https://github.com/Belvast-Innovation/WP-Checkpoint/security/advisories/new
+    about: Please report vulnerabilities privately. Never open a public issue for security problems.

@@ -1,0 +1,10 @@
+/vendor/
+/node_modules/
+/build/
+/.phpunit.result.cache
+*.log
+.DS_Store
+
+# Internal documents (local only during development; a public docs site will be published later)
+/docs/
+/CLAUDE.md

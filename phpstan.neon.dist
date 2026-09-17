@@ -1,0 +1,11 @@
+includes:
+    - vendor/szepeviktor/phpstan-wordpress/extension.neon
+parameters:
+    level: 6
+    phpVersion: 70400
+    paths:
+        - wp-checkpoint.php
+        - uninstall.php
+        - src
+    bootstrapFiles:
+        - tests/phpstan-bootstrap.php
