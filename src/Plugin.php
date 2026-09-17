@@ -13,7 +13,7 @@ use WPCheckpoint\Admin\Menu;
 use WPCheckpoint\Admin\Notices;
 use WPCheckpoint\Admin\ReclaimActions;
 use WPCheckpoint\Admin\Page;
-use WPCheckpoint\Admin\Settings;
+use WPCheckpoint\Admin\SettingsActions;
 use WPCheckpoint\Admin\Tabs;
 use WPCheckpoint\Admin\Tabs\BackupsTab;
 use WPCheckpoint\Admin\Tabs\CheckpointsTab;
@@ -25,6 +25,7 @@ use WPCheckpoint\Rest\StatusController;
 use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Support\Redactor;
 use WPCheckpoint\Support\Uninstaller;
+use WPCheckpoint\Support\UninstallSetting;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -101,7 +102,8 @@ final class Plugin {
 	 */
 	public function boot_admin(): void {
 		( new Menu( $this->admin_page() ) )->register();
-		( new Settings() )->register();
+		( new SettingsActions() )->register();
+		add_action( 'admin_init', array( $this, 'migrate_settings' ) );
 		( new DownloadHandler( $this->directories() ) )->register();
 		( new Notices( $this->directories() ) )->register();
 		( new EnvironmentActions( $this->directories() ) )->register();
@@ -132,6 +134,29 @@ final class Plugin {
 			$this->directories = new Directories();
 		}
 		return $this->directories;
+	}
+
+	/**
+	 * Drop the cached Directories instance (tests recreate storage between cases).
+	 *
+	 * @internal
+	 * @return void
+	 */
+	public function reset_directories(): void {
+		$this->directories = null;
+	}
+
+	/**
+	 * Multisite: initialise the network-wide uninstall setting once and warn
+	 * when a site-level "on" was left behind.
+	 *
+	 * @return void
+	 */
+	public function migrate_settings(): void {
+		$result = UninstallSetting::migrate_multisite();
+		if ( $result['leftover'] ) {
+			$this->directories()->log_event( 'Multisite: the "delete data on uninstall" setting is now network-wide and was initialised to off; a site-level "on" was found and must be confirmed again on the Settings tab.' );
+		}
 	}
 
 	/**

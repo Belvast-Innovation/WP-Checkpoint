@@ -375,7 +375,7 @@ final class Directories {
 			'to'   => (string) $this->context['abspath'],
 		);
 		$this->finish_reclaim();
-		$this->log_storage( sprintf( 'Storage directory %s reclaimed automatically after a deployment: ABSPATH changed from %s to %s.', $dir, $from, (string) $this->context['abspath'] ) );
+		$this->log_event( sprintf( 'Storage directory %s reclaimed automatically after a deployment: ABSPATH changed from %s to %s.', $dir, $from, (string) $this->context['abspath'] ) );
 		return true;
 	}
 
@@ -385,7 +385,7 @@ final class Directories {
 	 * @param string $message Message.
 	 * @return void
 	 */
-	private function log_storage( string $message ): void {
+	public function log_event( string $message ): void {
 		$logs = $this->logs();
 		if ( '' === $logs || ! is_dir( $logs ) ) {
 			return;

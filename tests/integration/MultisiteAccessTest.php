@@ -5,7 +5,7 @@ namespace WPCheckpoint\Tests\Integration;
 use WP_UnitTestCase;
 use WPCheckpoint\Admin\Menu;
 use WPCheckpoint\Admin\Page;
-use WPCheckpoint\Admin\Settings;
+use WPCheckpoint\Admin\SettingsActions;
 use WPCheckpoint\Plugin;
 use WPCheckpoint\Support\Guard;
 use WPCheckpoint\Support\Uninstaller;
@@ -39,8 +39,6 @@ final class MultisiteAccessTest extends WP_UnitTestCase {
 			$this->markTestSkipped( 'Multisite only.' );
 		}
 		require_once ABSPATH . 'wp-admin/includes/plugin.php';
-		( new Settings() )->register();
-		( new Settings() )->register_settings();
 	}
 
 	public function tear_down(): void {
@@ -100,31 +98,27 @@ final class MultisiteAccessTest extends WP_UnitTestCase {
 		$this->assertNotFalse( has_action( $this->menu->hook_suffix() ) );
 	}
 
-	public function test_options_php_capability_filter_requires_network_capability(): void {
+	public function test_site_admin_cannot_save_the_settings(): void {
+		update_site_option( Uninstaller::OPTION_DELETE_DATA, false );
 		wp_set_current_user( self::$site_admin );
-		$capability = apply_filters( 'option_page_capability_' . Settings::GROUP, 'manage_options' );
-		$this->assertSame( 'manage_network_options', $capability );
-		$this->assertFalse( current_user_can( $capability ), 'options.php would wp_die() for this user' );
+		$_REQUEST['_wpnonce']                       = Guard::nonce( SettingsActions::NONCE_ACTION );
+		$_POST[ Uninstaller::OPTION_DELETE_DATA ] = '1';
+		try {
+			$this->expectException( \WPDieException::class );
+			( new SettingsActions() )->save();
+		} finally {
+			unset( $_REQUEST['_wpnonce'], $_POST[ Uninstaller::OPTION_DELETE_DATA ] );
+			$this->assertFalse( (bool) get_site_option( Uninstaller::OPTION_DELETE_DATA ), 'network option unchanged' );
+		}
 	}
 
-	public function test_site_admin_cannot_change_the_setting_even_past_options_php(): void {
-		update_option( Uninstaller::OPTION_DELETE_DATA, false );
-		wp_set_current_user( self::$site_admin );
-
-		update_option( Uninstaller::OPTION_DELETE_DATA, '1' );
-
-		$this->assertFalse( Uninstaller::should_delete_data(), 'option value must not change' );
-		$codes = wp_list_pluck( get_settings_errors( Uninstaller::OPTION_DELETE_DATA ), 'code' );
-		$this->assertContains( 'wpcheckpoint_forbidden', $codes );
-	}
-
-	public function test_super_admin_can_change_the_setting(): void {
-		update_option( Uninstaller::OPTION_DELETE_DATA, false );
+	public function test_super_admin_saves_the_network_option(): void {
+		update_site_option( Uninstaller::OPTION_DELETE_DATA, false );
 		wp_set_current_user( self::$super_admin );
 
-		update_option( Uninstaller::OPTION_DELETE_DATA, '1' );
+		( new SettingsActions() )->run_save( true );
 
+		$this->assertTrue( (bool) get_site_option( Uninstaller::OPTION_DELETE_DATA ) );
 		$this->assertTrue( Uninstaller::should_delete_data() );
-		$this->assertSame( array(), get_settings_errors( Uninstaller::OPTION_DELETE_DATA ) );
 	}
 }

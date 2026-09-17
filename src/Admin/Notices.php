@@ -11,6 +11,7 @@ use WPCheckpoint\Support\CloneClassifier;
 use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Support\Guard;
 use WPCheckpoint\Support\Protection;
+use WPCheckpoint\Support\UninstallSetting;
 use WPCheckpoint\Admin\ReclaimActions;
 
 defined( 'ABSPATH' ) || exit;
@@ -86,6 +87,25 @@ final class Notices {
 				'dismissible' => true,
 				'link'        => $reclaim->marker_install_id_matches( (string) $state['previous_path'] ) ? array( ReclaimActions::confirmation_url(), __( 'This is the same site: review and continue with the original directory', 'wp-checkpoint' ) ) : array(),
 				'dismiss'     => __( 'Keep the new directory', 'wp-checkpoint' ),
+			);
+		}
+
+		if ( UninstallSetting::needs_confirmation() ) {
+			$notices['uninstall_setting'] = array(
+				'type'        => 'warning',
+				'message'     => __( 'On multisite, the setting to delete data on uninstall is now network-wide and starts switched off. A site-level setting was found; please confirm the network-wide setting on the Settings tab.', 'wp-checkpoint' ),
+				'extra'       => '',
+				'dismissible' => true,
+				'link'        => array(
+					add_query_arg(
+						array(
+							'page' => Page::SLUG,
+							'tab'  => 'settings',
+						),
+						admin_url( 'admin.php' )
+					),
+					__( 'Open the Settings tab', 'wp-checkpoint' ),
+				),
 			);
 		}
 
