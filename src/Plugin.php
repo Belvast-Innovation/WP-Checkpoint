@@ -7,7 +7,9 @@
 
 namespace WPCheckpoint;
 
+use WPCheckpoint\Admin\DownloadHandler;
 use WPCheckpoint\Admin\Menu;
+use WPCheckpoint\Admin\Notices;
 use WPCheckpoint\Admin\Page;
 use WPCheckpoint\Admin\Settings;
 use WPCheckpoint\Admin\Tabs;
@@ -17,6 +19,8 @@ use WPCheckpoint\Admin\Tabs\SettingsTab;
 use WPCheckpoint\Admin\Tabs\ToolsTab;
 use WPCheckpoint\Rest\Controller;
 use WPCheckpoint\Rest\StatusController;
+use WPCheckpoint\Support\Directories;
+use WPCheckpoint\Support\Redactor;
 use WPCheckpoint\Support\Uninstaller;
 
 defined( 'ABSPATH' ) || exit;
@@ -40,6 +44,20 @@ final class Plugin {
 	 * @var bool
 	 */
 	private $booted = false;
+
+	/**
+	 * Storage directories, created on first use.
+	 *
+	 * @var Directories|null
+	 */
+	private $directories = null;
+
+	/**
+	 * Redactor seeded with the installation's secrets.
+	 *
+	 * @var Redactor|null
+	 */
+	private $redactor = null;
 
 	/**
 	 * Get the plugin instance.
@@ -81,6 +99,38 @@ final class Plugin {
 	public function boot_admin(): void {
 		( new Menu( $this->admin_page() ) )->register();
 		( new Settings() )->register();
+		( new DownloadHandler( $this->directories() ) )->register();
+		( new Notices( $this->directories() ) )->register();
+	}
+
+	/**
+	 * Storage directories for this installation.
+	 *
+	 * @return Directories
+	 */
+	public function directories(): Directories {
+		if ( null === $this->directories ) {
+			$this->directories = new Directories();
+		}
+		return $this->directories;
+	}
+
+	/**
+	 * Redactor knowing the database credentials, keys and salts.
+	 *
+	 * @return Redactor
+	 */
+	public function redactor(): Redactor {
+		if ( null === $this->redactor ) {
+			$secrets = array();
+			foreach ( array( 'DB_PASSWORD', 'DB_USER', 'AUTH_KEY', 'SECURE_AUTH_KEY', 'LOGGED_IN_KEY', 'NONCE_KEY', 'AUTH_SALT', 'SECURE_AUTH_SALT', 'LOGGED_IN_SALT', 'NONCE_SALT' ) as $constant ) {
+				if ( defined( $constant ) && is_string( constant( $constant ) ) ) {
+					$secrets[] = constant( $constant );
+				}
+			}
+			$this->redactor = new Redactor( $secrets );
+		}
+		return $this->redactor;
 	}
 
 	/**
@@ -127,6 +177,8 @@ final class Plugin {
 	 */
 	public static function activate(): void {
 		update_option( Uninstaller::OPTION_VERSION, WPCHECKPOINT_VERSION, false );
+		// Activation from the admin is a proper web request: the best moment to choose the storage location.
+		self::instance()->directories()->base();
 		// T010: create/upgrade database tables via dbDelta.
 	}
 

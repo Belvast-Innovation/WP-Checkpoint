@@ -36,7 +36,15 @@ final class Uninstaller {
 	const OPTIONS = array(
 		self::OPTION_VERSION,
 		self::OPTION_DELETE_DATA,
+		Directories::OPTION,
 	);
+
+	/**
+	 * User meta keys the plugin owns.
+	 *
+	 * @var string[]
+	 */
+	const USER_META = array( 'wpcheckpoint_dismissed_notices' );
 
 	/**
 	 * Whether the user asked for a full clean-up.
@@ -59,9 +67,83 @@ final class Uninstaller {
 			return;
 		}
 
+		self::delete_storage();
 		self::delete_options();
-		// T003: delete the backup directory, guarded by Paths::is_inside().
+		self::delete_user_meta();
 		// T010: drop the plugin tables.
+	}
+
+	/**
+	 * Delete the storage directory, but only when it demonstrably belongs to
+	 * this installation.
+	 *
+	 * A custom directory (WPCHECKPOINT_STORAGE_DIR) is emptied of the plugin's
+	 * own sub-directories and files; the directory itself is left alone.
+	 *
+	 * @return array{deleted: int, failed: string[]}
+	 */
+	public static function delete_storage(): array {
+		$none  = array(
+			'deleted' => 0,
+			'failed'  => array(),
+		);
+		$state = Directories::load_state();
+		$path  = is_string( $state['path'] ) ? rtrim( $state['path'], '/\\' ) : '';
+		if ( '' === $path || ! is_dir( $path ) || Deleter::is_reparse( $path ) ) {
+			return $none;
+		}
+
+		$marker = $path . DIRECTORY_SEPARATOR . OwnerMarker::FILENAME;
+		if ( ! is_file( $marker ) ) {
+			return $none;
+		}
+		$contents = file_get_contents( $marker ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- tiny local file.
+		if ( ! is_string( $contents ) || ! OwnerMarker::matches( $contents, (string) $state['install_id'], ABSPATH ) ) {
+			return $none;
+		}
+
+		if ( Directories::SOURCE_CUSTOM === $state['source'] ) {
+			$result = $none;
+			foreach ( Directories::SUBDIRS as $sub ) {
+				if ( is_dir( $path . DIRECTORY_SEPARATOR . $sub ) ) {
+					$part               = Deleter::delete_tree( $path, $path . DIRECTORY_SEPARATOR . $sub );
+					$result['deleted'] += $part['deleted'];
+					$result['failed']   = array_merge( $result['failed'], $part['failed'] );
+				}
+			}
+			foreach ( array( 'index.php', '.htaccess', OwnerMarker::FILENAME ) as $file ) {
+				if ( is_file( $path . DIRECTORY_SEPARATOR . $file ) ) {
+					$part               = Deleter::delete_tree( $path, $path . DIRECTORY_SEPARATOR . $file );
+					$result['deleted'] += $part['deleted'];
+					$result['failed']   = array_merge( $result['failed'], $part['failed'] );
+				}
+			}
+			return $result;
+		}
+
+		if ( basename( $path ) !== Directories::DIR_PREFIX . $state['token'] ) {
+			return $none;
+		}
+		$result = Deleter::empty_directory( $path );
+		if ( array() === $result['failed'] ) {
+			if ( @rmdir( $path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_rmdir -- failure is reported below.
+				++$result['deleted'];
+			} else {
+				$result['failed'][] = $path;
+			}
+		}
+		return $result;
+	}
+
+	/**
+	 * Delete the plugin's user meta for every user.
+	 *
+	 * @return void
+	 */
+	public static function delete_user_meta(): void {
+		foreach ( self::USER_META as $key ) {
+			delete_metadata( 'user', 0, $key, '', true );
+		}
 	}
 
 	/**
@@ -80,7 +162,7 @@ final class Uninstaller {
 	 */
 	public static function delete_options(): void {
 		foreach ( self::OPTIONS as $option ) {
-			delete_option( $option );
+			Options::delete( $option );
 		}
 	}
 }

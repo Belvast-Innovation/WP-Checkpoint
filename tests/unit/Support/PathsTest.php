@@ -166,6 +166,17 @@ final class PathsTest extends TestCase {
 		$this->assertFalse( Paths::is_inside( $this->base(), '' ) );
 	}
 
+	public function test_same_or_inside_counts_the_base_itself(): void {
+		$this->assertTrue( Paths::is_same_or_inside( $this->base(), $this->base() ) );
+		$this->assertTrue( Paths::is_same_or_inside( $this->base(), $this->base() . '/' ) );
+		$this->assertTrue( Paths::is_same_or_inside( $this->base(), $this->base() . '/sub/deep.txt' ) );
+		$this->assertFalse( Paths::is_same_or_inside( $this->base(), $this->root . '/outside' ) );
+		$this->assertFalse( Paths::is_same_or_inside( $this->base(), $this->root . '/base-missing' ) );
+		$this->assertTrue( Paths::same( '/a/b/', '/a//b', false ) );
+		$this->assertFalse( Paths::same( '/a/B', '/a/b', false ) );
+		$this->assertTrue( Paths::same( 'C:\\A\\B', 'c:/a/b/', true ) );
+	}
+
 	public function test_base_must_be_a_directory(): void {
 		$this->assertFalse( Paths::is_inside( $this->base() . '/file.txt', $this->base() . '/file.txt' ) );
 	}

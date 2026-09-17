@@ -53,6 +53,8 @@ Please make sure that:
 - [ ] All globals use the `wpcheckpoint_` / `WPCHECKPOINT_` prefix or the `WPCheckpoint\` namespace
 - [ ] Every AJAX handler starts with `Guard::require_ajax( $action )` and every admin-post handler with `Guard::require_admin_post( $action )`; never call the `Guard::check_*` verdicts from handlers (a unit test enforces this)
 - [ ] REST controllers extend `WPCheckpoint\Rest\Controller` and use `permission_check`; new routes get an example request in `tests/integration/RestPermissionsTest.php`
+- [ ] Anything written to a log goes through `WPCheckpoint\Support\Logger` (never `file_put_contents` on a log file); new credential types are registered with `Redactor::add_secrets()`
+- [ ] Files are only ever deleted through `WPCheckpoint\Support\Deleter` inside the plugin's storage directory, never with a bare `unlink()`/`rmdir()` on user data
 - [ ] All output is escaped and all user-facing strings are translatable (text domain `wp-checkpoint`)
 - [ ] New behaviour is covered by tests; changes to the archive format are called out in the pull request description
 - [ ] The pull request description explains *why*, not only *what*

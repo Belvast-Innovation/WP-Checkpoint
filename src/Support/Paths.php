@@ -52,6 +52,47 @@ final class Paths {
 	}
 
 	/**
+	 * Whether $target is $base itself or a real descendant of it.
+	 *
+	 * Used for "is this location under the document root" questions where the
+	 * root itself counts. Symlinks are resolved on both sides.
+	 *
+	 * @param string $base   Directory.
+	 * @param string $target Path.
+	 * @return bool
+	 */
+	public static function is_same_or_inside( string $base, string $target ): bool {
+		if ( '' === $base || '' === $target ) {
+			return false;
+		}
+		$real_base   = realpath( $base );
+		$real_target = realpath( rtrim( $target, '/\\' ) );
+		if ( false === $real_base || false === $real_target ) {
+			return false;
+		}
+		$ci = self::is_windows();
+		return self::same( $real_base, $real_target, $ci ) || self::is_prefix( $real_base, $real_target, $ci );
+	}
+
+	/**
+	 * Whether two resolved paths denote the same location.
+	 *
+	 * @param string $a                First path.
+	 * @param string $b                Second path.
+	 * @param bool   $case_insensitive Fold case before comparing (Windows).
+	 * @return bool
+	 */
+	public static function same( string $a, string $b, bool $case_insensitive ): bool {
+		$a = rtrim( self::normalize( $a ), '/' );
+		$b = rtrim( self::normalize( $b ), '/' );
+		if ( $case_insensitive ) {
+			$a = strtolower( $a );
+			$b = strtolower( $b );
+		}
+		return $a === $b;
+	}
+
+	/**
 	 * Whether $target lies strictly below $base, comparing normalised paths.
 	 *
 	 * Separated from is_inside() so the comparison rules (separator

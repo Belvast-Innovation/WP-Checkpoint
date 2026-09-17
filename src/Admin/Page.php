@@ -7,6 +7,8 @@
 
 namespace WPCheckpoint\Admin;
 
+use WPCheckpoint\Plugin;
+
 defined( 'ABSPATH' ) || exit;
 
 /**
@@ -93,6 +95,7 @@ final class Page {
 	 * @return void
 	 */
 	public function render(): void {
+		Plugin::instance()->directories()->base();
 		$tabs   = $this->tabs();
 		$active = $tabs->resolve( $this->requested_tab() );
 		?>
