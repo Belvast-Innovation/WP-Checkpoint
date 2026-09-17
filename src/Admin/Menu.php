@@ -24,7 +24,8 @@ final class Menu {
 	private $page;
 
 	/**
-	 * Hook suffix returned by add_menu_page(), empty until registered.
+	 * Hook suffix returned by add_menu_page(), empty until it ran. Core returns
+	 * it even when the current user may not see the page.
 	 *
 	 * @var string
 	 */
@@ -67,7 +68,7 @@ final class Menu {
 	}
 
 	/**
-	 * Hook suffix of the registered page, empty when not registered or hidden.
+	 * Hook suffix of the menu page, empty until add_menu_page() ran.
 	 *
 	 * @return string
 	 */
