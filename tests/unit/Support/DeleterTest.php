@@ -155,7 +155,19 @@ final class DeleterTest extends TestCase {
 			$this->markTestSkipped( 'mklink /J failed: ' . implode( ' ', $output ) );
 		}
 		$this->assertFileExists( $junction . '\\inner.txt', 'junction resolves to the outside directory' );
-		$this->assertTrue( Deleter::is_reparse( $junction ), 'junction must be recognised as a reparse point' );
+		$diagnostics = array(
+			'is_link'              => is_link( $junction ),
+			'readlink(junction)'   => @readlink( $junction ),
+			'readlink(parent)'     => @readlink( dirname( $junction ) ),
+			'realpath(junction)'   => realpath( $junction ),
+			'realpath(child)'      => realpath( $junction . '\\inner.txt' ),
+			'realpath(parent)'     => realpath( dirname( $junction ) ),
+			'lstat mode'           => decoct( (int) ( @lstat( $junction )['mode'] ?? 0 ) ),
+			'stat mode'            => decoct( (int) ( @stat( $junction )['mode'] ?? 0 ) ),
+			'lstat ino / stat ino' => ( @lstat( $junction )['ino'] ?? '?' ) . ' / ' . ( @stat( $junction )['ino'] ?? '?' ),
+			'filetype'             => @filetype( $junction ),
+		);
+		$this->assertTrue( Deleter::is_reparse( $junction ), 'junction must be recognised as a reparse point: ' . var_export( $diagnostics, true ) );
 
 		$result = Deleter::delete_tree( $this->base(), $this->base() );
 		$this->assertNotEmpty( $result['failed'], 'base itself is refused' );
