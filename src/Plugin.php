@@ -11,6 +11,7 @@ use WPCheckpoint\Admin\DownloadHandler;
 use WPCheckpoint\Admin\EnvironmentActions;
 use WPCheckpoint\Admin\Menu;
 use WPCheckpoint\Admin\Notices;
+use WPCheckpoint\Admin\ReclaimActions;
 use WPCheckpoint\Admin\Page;
 use WPCheckpoint\Admin\Settings;
 use WPCheckpoint\Admin\Tabs;
@@ -104,6 +105,7 @@ final class Plugin {
 		( new DownloadHandler( $this->directories() ) )->register();
 		( new Notices( $this->directories() ) )->register();
 		( new EnvironmentActions( $this->directories() ) )->register();
+		( new ReclaimActions( $this->directories() ) )->register();
 		add_action( 'admin_enqueue_scripts', array( $this, 'enqueue_admin_assets' ) );
 	}
 
@@ -139,18 +141,9 @@ final class Plugin {
 	 */
 	public function redactor(): Redactor {
 		if ( null === $this->redactor ) {
-			$secrets = array();
-			foreach ( array( 'DB_PASSWORD', 'DB_USER', 'AUTH_KEY', 'SECURE_AUTH_KEY', 'LOGGED_IN_KEY', 'NONCE_KEY', 'AUTH_SALT', 'SECURE_AUTH_SALT', 'LOGGED_IN_SALT', 'NONCE_SALT' ) as $constant ) {
-				if ( defined( $constant ) && is_string( constant( $constant ) ) ) {
-					$secrets[] = constant( $constant );
-				}
-			}
 			// The random storage token protects the directory under wp-content; treat it as a secret.
-			$state = Directories::load_state();
-			if ( is_string( $state['token'] ) && '' !== $state['token'] ) {
-				$secrets[] = $state['token'];
-			}
-			$this->redactor = new Redactor( $secrets );
+			$state          = Directories::load_state();
+			$this->redactor = new Redactor( Redactor::installation_secrets( array( (string) $state['token'] ) ) );
 		}
 		return $this->redactor;
 	}
@@ -165,7 +158,7 @@ final class Plugin {
 		$tabs->add( new BackupsTab() );
 		$tabs->add( new CheckpointsTab() );
 		$tabs->add( new ToolsTab( $this->directories() ) );
-		$tabs->add( new SettingsTab() );
+		$tabs->add( new SettingsTab( $this->directories() ) );
 
 		return new Page( $tabs );
 	}
