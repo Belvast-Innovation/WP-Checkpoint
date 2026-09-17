@@ -12,10 +12,18 @@ use Yoast\PHPUnitPolyfills\TestCases\TestCase;
  */
 final class GuardUsageTest extends TestCase {
 
+	/**
+	 * Every shipped PHP file: src/ plus the two root entry files.
+	 *
+	 * @return array<string, string> Path relative to the plugin root => absolute path.
+	 */
 	private function source_files(): array {
-		$root  = dirname( __DIR__, 3 ) . '/src';
-		$files = array();
-		$it    = new \RecursiveIteratorIterator( new \RecursiveDirectoryIterator( $root, \FilesystemIterator::SKIP_DOTS ) );
+		$root  = dirname( __DIR__, 3 );
+		$files = array(
+			'wp-checkpoint.php' => $root . '/wp-checkpoint.php',
+			'uninstall.php'     => $root . '/uninstall.php',
+		);
+		$it    = new \RecursiveIteratorIterator( new \RecursiveDirectoryIterator( $root . '/src', \FilesystemIterator::SKIP_DOTS ) );
 		foreach ( $it as $file ) {
 			if ( 'php' === $file->getExtension() ) {
 				$files[ str_replace( '\\', '/', substr( $file->getPathname(), strlen( $root ) + 1 ) ) ] = $file->getPathname();
@@ -27,7 +35,7 @@ final class GuardUsageTest extends TestCase {
 
 	public function test_check_ajax_and_check_admin_post_are_only_used_inside_guard(): void {
 		foreach ( $this->source_files() as $relative => $path ) {
-			if ( 'Support/Guard.php' === $relative ) {
+			if ( 'src/Support/Guard.php' === $relative ) {
 				continue;
 			}
 			$source = file_get_contents( $path );
@@ -39,7 +47,7 @@ final class GuardUsageTest extends TestCase {
 
 	public function test_check_rest_is_only_used_by_the_rest_controller_base(): void {
 		foreach ( $this->source_files() as $relative => $path ) {
-			if ( in_array( $relative, array( 'Support/Guard.php', 'Rest/Controller.php' ), true ) ) {
+			if ( in_array( $relative, array( 'src/Support/Guard.php', 'src/Rest/Controller.php' ), true ) ) {
 				continue;
 			}
 			$this->assertStringNotContainsString( 'check_rest(', file_get_contents( $path ), "{$relative} must not call Guard::check_rest() directly; extend Rest\\Controller" );
@@ -48,8 +56,11 @@ final class GuardUsageTest extends TestCase {
 
 	public function test_scan_covers_the_known_entry_points(): void {
 		$files = $this->source_files();
-		$this->assertArrayHasKey( 'Support/Guard.php', $files );
-		$this->assertArrayHasKey( 'Rest/Controller.php', $files );
-		$this->assertStringContainsString( 'check_rest(', file_get_contents( $files['Rest/Controller.php'] ) );
+		$this->assertArrayHasKey( 'src/Support/Guard.php', $files );
+		$this->assertArrayHasKey( 'src/Rest/Controller.php', $files );
+		$this->assertArrayHasKey( 'wp-checkpoint.php', $files );
+		$this->assertArrayHasKey( 'uninstall.php', $files );
+		$this->assertFileExists( $files['uninstall.php'] );
+		$this->assertStringContainsString( 'check_rest(', file_get_contents( $files['src/Rest/Controller.php'] ) );
 	}
 }

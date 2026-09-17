@@ -88,6 +88,9 @@ final class Guard {
 		$error = self::check_ajax( $action, $field );
 		if ( null !== $error ) {
 			self::send_ajax_error( $error );
+			// wp_send_json_error() ends the request through wp_die(); another plugin can
+			// swap the wp_die_ajax_handler for one that returns, so never fall through.
+			exit;
 		}
 	}
 
@@ -103,6 +106,9 @@ final class Guard {
 		$error = self::check_admin_post( $action, $field );
 		if ( null !== $error ) {
 			self::die_admin_post( $error );
+			// wp_die() can be replaced through the wp_die_handler filter with a handler
+			// that returns, so never fall through into the protected handler.
+			exit;
 		}
 	}
 
