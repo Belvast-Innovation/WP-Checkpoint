@@ -28,7 +28,7 @@ final class LoggerTest extends TestCase {
 		$logger->info( 'Connecting as admin@example.com with hunter2!', array( 'note' => 'pw is hunter2!', 'url' => 'https://a/b' ) );
 		$logger->error( "multi\nline", array( 'password' => 'x' ) );
 
-		$this->assertMatchesRegularExpression( '#/job-export-12-[0-9a-f]{8}\.log$#', $logger->path() );
+		$this->assertMatchesRegularExpression( '#[/\\\\]job-export-12-[0-9a-f]{8}\.log$#', $logger->path() );
 		$lines = file( $logger->path(), FILE_IGNORE_NEW_LINES );
 		$this->assertCount( 2, $lines );
 		$this->assertMatchesRegularExpression( '/^\[\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\] INFO /', $lines[0] );

@@ -91,11 +91,15 @@ final class Deleter {
 	/**
 	 * Whether a path is a symbolic link, junction or other reparse point.
 	 *
-	 * The is_link() check covers symlinks (and junctions on recent PHP builds). As a
-	 * second check, resolving "path/." forces the path to be an intermediate
-	 * component, which realpath() resolves even on Windows; if that differs
-	 * from the parent's real path plus the entry name, the entry redirects
-	 * somewhere else.
+	 * The is_link() check covers symbolic links. Windows junctions are not
+	 * reported by is_link(); readlink() may still resolve them. As a last
+	 * check, a child entry is resolved through the directory: realpath()
+	 * resolves reparse points in intermediate path components on every
+	 * platform (PHP's Windows implementation strips a trailing "." before
+	 * resolving, so the entry must be a real child), and a result that is not
+	 * the parent's real path plus the entry name means the entry redirects
+	 * somewhere else. An empty directory has no child to probe; entering it
+	 * cannot delete anything, and rmdir() on a junction removes the junction.
 	 *
 	 * @param string $path Path to inspect (no trailing separator).
 	 * @return bool
@@ -111,13 +115,44 @@ final class Deleter {
 		if ( ! is_dir( $path ) ) {
 			return false;
 		}
+		if ( Paths::is_windows() && false !== @readlink( $path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- readlink() warns on ordinary directories.
+			return true;
+		}
+
 		$parent = realpath( dirname( $path ) );
-		$self   = realpath( $path . DIRECTORY_SEPARATOR . '.' );
-		if ( false === $parent || false === $self ) {
+		if ( false === $parent ) {
 			return false;
 		}
-		$expected = rtrim( $parent, '/\\' ) . DIRECTORY_SEPARATOR . basename( $path );
-		return ! Paths::same( $expected, $self, Paths::is_windows() );
+		$child = self::first_child( $path );
+		if ( '' === $child ) {
+			return false;
+		}
+		$resolved = realpath( $path . DIRECTORY_SEPARATOR . $child );
+		if ( false === $resolved ) {
+			return false;
+		}
+		$expected = rtrim( $parent, '/\\' ) . DIRECTORY_SEPARATOR . basename( $path ) . DIRECTORY_SEPARATOR . $child;
+		return ! Paths::same( $expected, $resolved, Paths::is_windows() );
+	}
+
+	/**
+	 * Name of the first entry inside a directory, or empty when it is empty
+	 * or unreadable.
+	 *
+	 * @param string $dir Directory.
+	 * @return string
+	 */
+	private static function first_child( string $dir ): string {
+		$entries = @scandir( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- unreadable directories simply yield no child.
+		if ( ! is_array( $entries ) ) {
+			return '';
+		}
+		foreach ( $entries as $entry ) {
+			if ( '.' !== $entry && '..' !== $entry ) {
+				return $entry;
+			}
+		}
+		return '';
 	}
 
 	/**
