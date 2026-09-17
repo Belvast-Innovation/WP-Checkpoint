@@ -7,6 +7,18 @@
 
 namespace WPCheckpoint;
 
+use WPCheckpoint\Admin\Menu;
+use WPCheckpoint\Admin\Page;
+use WPCheckpoint\Admin\Settings;
+use WPCheckpoint\Admin\Tabs;
+use WPCheckpoint\Admin\Tabs\BackupsTab;
+use WPCheckpoint\Admin\Tabs\CheckpointsTab;
+use WPCheckpoint\Admin\Tabs\SettingsTab;
+use WPCheckpoint\Admin\Tabs\ToolsTab;
+use WPCheckpoint\Rest\Controller;
+use WPCheckpoint\Rest\StatusController;
+use WPCheckpoint\Support\Uninstaller;
+
 defined( 'ABSPATH' ) || exit;
 
 /**
@@ -52,26 +64,69 @@ final class Plugin {
 		}
 		$this->booted = true;
 
-		add_action( 'init', array( $this, 'load_textdomain' ) );
+		add_action( 'rest_api_init', array( $this, 'register_rest_routes' ) );
 
-		// T002: register admin menu, REST routes, CLI commands here.
+		if ( is_admin() ) {
+			$this->boot_admin();
+		}
 	}
 
 	/**
-	 * Load translations.
+	 * Register the admin page and settings.
+	 *
+	 * Public so tests can boot the admin layer without is_admin().
 	 *
 	 * @return void
 	 */
-	public function load_textdomain(): void {
-		load_plugin_textdomain( 'wp-checkpoint', false, dirname( plugin_basename( WPCHECKPOINT_FILE ) ) . '/languages' );
+	public function boot_admin(): void {
+		( new Menu( $this->admin_page() ) )->register();
+		( new Settings() )->register();
 	}
 
 	/**
-	 * Activation hook.
+	 * The admin page with the built-in tabs.
+	 *
+	 * @return Page
+	 */
+	public function admin_page(): Page {
+		$tabs = new Tabs();
+		$tabs->add( new BackupsTab() );
+		$tabs->add( new CheckpointsTab() );
+		$tabs->add( new ToolsTab() );
+		$tabs->add( new SettingsTab() );
+
+		return new Page( $tabs );
+	}
+
+	/**
+	 * REST controllers to register. Later tasks append theirs here.
+	 *
+	 * @return Controller[]
+	 */
+	public function rest_controllers(): array {
+		return array(
+			new StatusController(),
+		);
+	}
+
+	/**
+	 * Register all REST routes.
+	 *
+	 * @return void
+	 */
+	public function register_rest_routes(): void {
+		foreach ( $this->rest_controllers() as $controller ) {
+			$controller->register_routes();
+		}
+	}
+
+	/**
+	 * Activation hook. Must stay silent: any output breaks activation.
 	 *
 	 * @return void
 	 */
 	public static function activate(): void {
+		update_option( Uninstaller::OPTION_VERSION, WPCHECKPOINT_VERSION, false );
 		// T010: create/upgrade database tables via dbDelta.
 	}
 

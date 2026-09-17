@@ -35,7 +35,7 @@ final class PluginBootTest extends WP_UnitTestCase {
 		$plugin = Plugin::instance();
 
 		$this->assertSame( $plugin, Plugin::instance() );
-		$this->assertSame( 10, has_action( 'init', array( $plugin, 'load_textdomain' ) ) );
+		$this->assertSame( 10, has_action( 'rest_api_init', array( $plugin, 'register_rest_routes' ) ) );
 	}
 
 	/**
