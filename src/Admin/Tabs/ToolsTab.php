@@ -8,9 +8,11 @@
 namespace WPCheckpoint\Admin\Tabs;
 
 use WPCheckpoint\Admin\EnvironmentActions;
+use WPCheckpoint\Admin\ReclaimActions;
 use WPCheckpoint\Admin\Tab;
 use WPCheckpoint\Plugin;
 use WPCheckpoint\Support\Check;
+use WPCheckpoint\Support\CloneClassifier;
 use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Support\Environment;
 use WPCheckpoint\Support\Guard;
@@ -75,6 +77,7 @@ final class ToolsTab implements Tab {
 		$state       = $directories->state();
 
 		$this->render_result_notice();
+		$this->render_reclaim_section( $directories );
 		?>
 		<h2><?php esc_html_e( 'Environment', 'wp-checkpoint' ); ?></h2>
 		<p class="wpcheckpoint-summary">
@@ -147,16 +150,104 @@ final class ToolsTab implements Tab {
 	private function render_result_notice(): void {
 		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- display-only flag set by our own redirect.
 		$result   = isset( $_GET[ EnvironmentActions::RESULT_PARAM ] ) ? sanitize_key( wp_unslash( $_GET[ EnvironmentActions::RESULT_PARAM ] ) ) : '';
+		$detail   = get_site_transient( 'wpcheckpoint_reclaim_message_' . get_current_user_id() );
+		$detail   = is_string( $detail ) ? $detail : '';
 		$messages = array(
-			'rechecked' => array( 'success', __( 'Environment re-checked.', 'wp-checkpoint' ) ),
-			'verified'  => array( 'success', __( 'Directory protection re-verified.', 'wp-checkpoint' ) ),
-			'locked'    => array( 'warning', __( 'That check ran less than a minute ago; please wait before running it again.', 'wp-checkpoint' ) ),
+			'rechecked'      => array( 'success', __( 'Environment re-checked.', 'wp-checkpoint' ) ),
+			'verified'       => array( 'success', __( 'Directory protection re-verified.', 'wp-checkpoint' ) ),
+			'locked'         => array( 'warning', __( 'That check ran less than a minute ago; please wait before running it again.', 'wp-checkpoint' ) ),
+			'reclaimed'      => array( 'success', '' === $detail ? __( 'The original storage directory is in use again.', 'wp-checkpoint' ) : $detail ),
+			'reclaim_failed' => array( 'error', '' === $detail ? __( 'The original storage directory could not be reclaimed.', 'wp-checkpoint' ) : $detail ),
 		);
 		if ( ! isset( $messages[ $result ] ) ) {
 			return;
 		}
+		if ( in_array( $result, array( 'reclaimed', 'reclaim_failed' ), true ) ) {
+			delete_site_transient( 'wpcheckpoint_reclaim_message_' . get_current_user_id() );
+		}
 		list( $type, $text ) = $messages[ $result ];
 		echo '<div class="notice notice-' . esc_attr( $type ) . ' inline"><p>' . esc_html( $text ) . '</p></div>';
+	}
+
+	/**
+	 * Confirmation block for reclaiming the original directory. Rendering
+	 * changes nothing; the POST goes to ReclaimActions.
+	 *
+	 * @param Directories $directories Storage directories.
+	 * @return void
+	 */
+	private function render_reclaim_section( Directories $directories ): void {
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- display-only navigation flag.
+		if ( ! isset( $_GET[ ReclaimActions::QUERY_FLAG ] ) || ! Guard::current_user_can() ) {
+			return;
+		}
+		$reclaim = $directories->reclaim();
+		$target  = $reclaim->target();
+		if ( '' === $target ) {
+			echo '<div class="notice notice-info inline"><p>' . esc_html__( 'There is no storage directory waiting to be reclaimed.', 'wp-checkpoint' ) . '</p></div>';
+			return;
+		}
+		$checks   = $reclaim->prechecks();
+		$facts    = $checks['facts'];
+		$verdict  = $reclaim->classify();
+		$state    = $directories->state();
+		$expected = ReclaimActions::expected_token( $target );
+		$verdicts = array(
+			CloneClassifier::DEPLOYMENT => __( 'The previous and the current WordPress directory are siblings under the same parent, which is how release-based deployments (Deployer, Capistrano, Trellis) work. The previous release may still exist on disk. If the old directory no longer serves this site, continuing with the original storage directory is the right choice.', 'wp-checkpoint' ),
+			CloneClassifier::MOVED      => __( 'The previous WordPress directory no longer exists or no longer holds WordPress. This looks like a move or a migration; continuing with the original storage directory is usually right.', 'wp-checkpoint' ),
+			CloneClassifier::CLONE      => __( 'The previous WordPress directory still exists and still holds WordPress somewhere else. This looks like a copy of the site; unless you know the other copy is gone, keep the new directory.', 'wp-checkpoint' ),
+		);
+		?>
+		<div class="wpcheckpoint-reclaim">
+			<h2><?php esc_html_e( 'Continue with the original storage directory?', 'wp-checkpoint' ); ?></h2>
+			<table class="widefat striped">
+				<tbody>
+					<tr><th scope="row"><?php esc_html_e( 'Original directory', 'wp-checkpoint' ); ?></th><td><code><?php echo esc_html( $target ); ?></code></td></tr>
+					<tr><th scope="row"><?php esc_html_e( 'Previous WordPress directory', 'wp-checkpoint' ); ?></th><td><code><?php echo esc_html( (string) $state['previous_abspath'] ); ?></code> <?php echo $verdict['previous_exists'] ? esc_html__( '(still exists)', 'wp-checkpoint' ) : esc_html__( '(no longer exists)', 'wp-checkpoint' ); ?></td></tr>
+					<tr><th scope="row"><?php esc_html_e( 'Current WordPress directory', 'wp-checkpoint' ); ?></th><td><code><?php echo esc_html( $directories->context()['abspath'] ); ?></code></td></tr>
+					<tr><th scope="row"><?php esc_html_e( 'Assessment', 'wp-checkpoint' ); ?></th><td><?php echo esc_html( $verdicts[ $verdict['verdict'] ] ); ?> <strong><?php echo CloneClassifier::RECOMMEND_ORIGINAL === $verdict['recommendation'] ? esc_html__( 'Recommended: continue with the original directory.', 'wp-checkpoint' ) : esc_html__( 'Recommended: keep the new directory.', 'wp-checkpoint' ); ?></strong></td></tr>
+					<tr><th scope="row"><?php esc_html_e( 'Backups in it', 'wp-checkpoint' ); ?></th><td><?php echo esc_html( (string) $facts['backups'] ); ?>
+					<?php
+					if ( $facts['latest_backup'] > 0 ) :
+						?>
+						(<?php /* translators: %s: human time difference */ echo esc_html( sprintf( __( 'newest %s ago', 'wp-checkpoint' ), human_time_diff( (int) $facts['latest_backup'] ) ) ); ?>)<?php endif; ?></td></tr>
+					<tr><th scope="row"><?php esc_html_e( 'Log files', 'wp-checkpoint' ); ?></th><td><?php echo esc_html( (string) $facts['logs'] ); ?></td></tr>
+					<tr><th scope="row"><?php esc_html_e( 'Owner marker install ID', 'wp-checkpoint' ); ?></th><td><?php echo $facts['install_id_matches'] ? esc_html__( 'matches this installation', 'wp-checkpoint' ) : esc_html__( 'belongs to another installation', 'wp-checkpoint' ); ?></td></tr>
+					<tr><th scope="row"><?php esc_html_e( 'Writable', 'wp-checkpoint' ); ?></th><td><?php echo $facts['writable'] ? esc_html__( 'yes', 'wp-checkpoint' ) : esc_html__( 'no', 'wp-checkpoint' ); ?></td></tr>
+					<tr><th scope="row"><?php esc_html_e( 'Job running in it', 'wp-checkpoint' ); ?></th><td><?php echo $facts['busy'] ? esc_html__( 'yes', 'wp-checkpoint' ) : esc_html__( 'no', 'wp-checkpoint' ); ?></td></tr>
+				</tbody>
+			</table>
+			<?php if ( ! $checks['ok'] ) : ?>
+				<div class="notice notice-error inline"><p><?php echo esc_html( implode( ' ', $checks['problems'] ) ); ?></p></div>
+			<?php else : ?>
+				<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+					<input type="hidden" name="action" value="<?php echo esc_attr( ReclaimActions::ACTION_RECLAIM ); ?>" />
+					<input type="hidden" name="_wpnonce" value="<?php echo esc_attr( Guard::nonce( ReclaimActions::NONCE_RECLAIM ) ); ?>" />
+					<p><label><input type="checkbox" name="wpcheckpoint_confirm" value="1" /> <?php esc_html_e( 'I understand that the other copy of this site (if any) will lose access to these backups.', 'wp-checkpoint' ); ?></label></p>
+					<p><label for="wpcheckpoint_token"><?php /* translators: %s: directory name */ echo esc_html( sprintf( __( 'Type the random part of the directory name (%s) to confirm:', 'wp-checkpoint' ), basename( $target ) ) ); ?></label> <input type="text" id="wpcheckpoint_token" name="wpcheckpoint_token" autocomplete="off" size="<?php echo esc_attr( (string) max( 12, strlen( $expected ) ) ); ?>" /></p>
+					<?php if ( '' !== $verdict['deploy_root'] ) : ?>
+						<p><label><input type="checkbox" name="wpcheckpoint_trust_root" value="1" /> <?php /* translators: %s: directory */ echo esc_html( sprintf( __( 'This site uses release-directory deployments: from now on, when the WordPress directory changes to another folder under %s, continue with the original storage directory automatically.', 'wp-checkpoint' ), $verdict['deploy_root'] ) ); ?></label></p>
+					<?php endif; ?>
+					<p>
+						<button type="submit" class="button button-primary"><?php esc_html_e( 'Continue with the original directory', 'wp-checkpoint' ); ?></button>
+						<a class="button" href="
+						<?php
+						echo esc_url(
+							add_query_arg(
+								array(
+									'page' => \WPCheckpoint\Admin\Page::SLUG,
+									'tab'  => 'tools',
+								),
+								admin_url( 'admin.php' )
+							)
+						);
+						?>
+												"><?php esc_html_e( 'Cancel', 'wp-checkpoint' ); ?></a>
+					</p>
+				</form>
+			<?php endif; ?>
+		</div>
+		<?php
 	}
 
 	/**

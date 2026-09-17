@@ -7,9 +7,11 @@
 
 namespace WPCheckpoint\Admin;
 
+use WPCheckpoint\Support\CloneClassifier;
 use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Support\Guard;
 use WPCheckpoint\Support\Protection;
+use WPCheckpoint\Admin\ReclaimActions;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -53,7 +55,7 @@ final class Notices {
 	/**
 	 * Notices for the current state, keyed by id.
 	 *
-	 * @return array<string, array{type: string, message: string, extra: string, dismissible: bool}>
+	 * @return array<string, array<string, mixed>>
 	 */
 	public function notices(): array {
 		$state   = $this->directories->state();
@@ -70,10 +72,28 @@ final class Notices {
 		}
 
 		if ( ! empty( $state['clone_detected'] ) ) {
+			$reclaim = $this->directories->reclaim();
+			$verdict = $reclaim->classify();
+			if ( CloneClassifier::CLONE === $verdict['verdict'] ) {
+				$message = __( 'This site looks like a copy: the WordPress directory changed and the previous one still exists. WP Checkpoint left the previous backup directory untouched and now uses a new one.', 'wp-checkpoint' );
+			} else {
+				$message = __( 'The WordPress directory changed (a deployment or a move?). WP Checkpoint left the previous backup directory untouched and now uses a new one. If this is the same site, you can continue with the original directory.', 'wp-checkpoint' );
+			}
 			$notices['clone_detected'] = array(
 				'type'        => 'warning',
-				'message'     => __( 'This site looks like a clone or a migrated copy: the stored backup directory belongs to another installation. WP Checkpoint left it untouched and now uses a new directory.', 'wp-checkpoint' ),
+				'message'     => $message,
 				'extra'       => '' !== $state['previous_path'] ? $state['previous_path'] : '',
+				'dismissible' => true,
+				'link'        => $reclaim->marker_install_id_matches( (string) $state['previous_path'] ) ? array( ReclaimActions::confirmation_url(), __( 'This is the same site: review and continue with the original directory', 'wp-checkpoint' ) ) : array(),
+				'dismiss'     => __( 'Keep the new directory', 'wp-checkpoint' ),
+			);
+		}
+
+		if ( ! empty( $state['auto_reclaimed'] ) && is_array( $state['auto_reclaimed'] ) ) {
+			$notices['auto_reclaimed'] = array(
+				'type'        => 'info',
+				'message'     => __( 'A new release was deployed and WP Checkpoint continued with the original storage directory automatically (trusted deployment root).', 'wp-checkpoint' ),
+				'extra'       => (string) $state['auto_reclaimed']['from'] . ' → ' . (string) $state['auto_reclaimed']['to'],
 				'dismissible' => true,
 			);
 		}
@@ -130,8 +150,13 @@ final class Notices {
 				<?php if ( '' !== $notice['extra'] ) : ?>
 					<pre class="wpcheckpoint-notice-extra"><?php echo esc_html( $notice['extra'] ); ?></pre>
 				<?php endif; ?>
+				<?php if ( ! empty( $notice['link'] ) ) : ?>
+					<p><a class="button button-primary button-small" href="<?php echo esc_url( $notice['link'][0] ); ?>"><?php echo esc_html( $notice['link'][1] ); ?></a>
+				<?php elseif ( $notice['dismissible'] ) : ?>
+					<p>
+				<?php endif; ?>
 				<?php if ( $notice['dismissible'] ) : ?>
-					<p><a class="button button-small" href="<?php echo esc_url( $this->dismiss_url( $id ) ); ?>"><?php esc_html_e( 'Dismiss', 'wp-checkpoint' ); ?></a></p>
+					<a class="button button-small" href="<?php echo esc_url( $this->dismiss_url( $id ) ); ?>"><?php echo esc_html( isset( $notice['dismiss'] ) ? $notice['dismiss'] : __( 'Dismiss', 'wp-checkpoint' ) ); ?></a></p>
 				<?php endif; ?>
 			</div>
 			<?php
@@ -166,6 +191,10 @@ final class Notices {
 		}
 		if ( 'clone_detected' === $id ) {
 			$this->directories->acknowledge_clone();
+			return;
+		}
+		if ( 'auto_reclaimed' === $id ) {
+			$this->directories->clear_auto_reclaimed();
 			return;
 		}
 		$dismissed        = $this->dismissed();
