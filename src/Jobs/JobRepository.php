@@ -363,8 +363,11 @@ final class JobRepository {
 	}
 
 	/**
-	 * Save the position of a running job; only the lock holder may. Resets
-	 * the back-off counter.
+	 * Save the position of a running job; only the lock holder may.
+	 *
+	 * Only real progress ($advanced) moves progress_at and resets the gate
+	 * back-off: a wait or a retried failure keeps the stall timestamp, so a
+	 * job that only ever waits is still given up after 24 hours by reap().
 	 *
 	 * @param Job                  $job      Job.
 	 * @param string               $token    Lock token.
@@ -372,31 +375,38 @@ final class JobRepository {
 	 * @param array<string, mixed> $cursor   Cursor (identifiers and offsets only).
 	 * @param int                  $progress Percentage.
 	 * @param string               $message  Progress text.
+	 * @param bool                 $advanced Whether the cursor really moved.
 	 * @return void
 	 * @throws StaleJob When the lock is no longer held with this token.
 	 */
-	public function save_progress( Job $job, string $token, string $step, array $cursor, int $progress, string $message = '' ): void {
+	public function save_progress( Job $job, string $token, string $step, array $cursor, int $progress, string $message = '', bool $advanced = true ): void {
 		global $wpdb;
 		self::assert_cursor_has_no_secrets( $cursor );
 		$now      = $this->now();
 		$progress = max( 0, min( 100, $progress ) );
+		$data     = array(
+			'step'             => $step,
+			'cursor_json'      => wp_json_encode( $cursor ),
+			'progress'         => $progress,
+			'progress_message' => $message,
+			'updated_at'       => $now,
+		);
+		$formats  = array( '%s', '%s', '%d', '%s', '%d' );
+		if ( $advanced ) {
+			$data['progress_at']   = $now;
+			$data['blocked_count'] = 0;
+			$formats[]             = '%d';
+			$formats[]             = '%d';
+		}
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin table; the WHERE on lock_token is the fence.
 		$affected = $wpdb->update(
 			self::table(),
-			array(
-				'step'             => $step,
-				'cursor_json'      => wp_json_encode( $cursor ),
-				'progress'         => $progress,
-				'progress_message' => $message,
-				'progress_at'      => $now,
-				'updated_at'       => $now,
-				'blocked_count'    => 0,
-			),
+			$data,
 			array(
 				'id'         => $job->id,
 				'lock_token' => $token,
 			),
-			array( '%s', '%s', '%d', '%s', '%d', '%d', '%d' ),
+			$formats,
 			array( '%d', '%s' )
 		);
 		if ( 1 !== (int) $affected && ! $this->holds_lock( $job->id, $token ) ) {
@@ -407,9 +417,11 @@ final class JobRepository {
 		$job->cursor           = $cursor;
 		$job->progress         = $progress;
 		$job->progress_message = $message;
-		$job->progress_at      = $now;
 		$job->updated_at       = $now;
-		$job->blocked_count    = 0;
+		if ( $advanced ) {
+			$job->progress_at   = $now;
+			$job->blocked_count = 0;
+		}
 	}
 
 	/**
@@ -430,7 +442,8 @@ final class JobRepository {
 	 * @param string $error Error message for failed (redacted before storing).
 	 * @param string $token Lock token; required when leaving running for anything but cancelled.
 	 * @return Job
-	 * @throws InvalidTransition When the state machine forbids the move or the token is missing. The write also throws StaleJob when the row no longer has the expected status (or the lock changed hands).
+	 * @throws InvalidTransition When the state machine forbids the move or the token is missing.
+	 * @throws StaleJob When the row no longer has the expected status (or the lock changed hands).
 	 */
 	public function transition( Job $job, string $to, string $error = '', string $token = '' ): Job {
 		if ( '' === $token && Job::RUNNING === $job->status && Job::CANCELLED !== $to ) {
