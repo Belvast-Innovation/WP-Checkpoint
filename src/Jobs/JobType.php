@@ -8,9 +8,9 @@
 namespace WPCheckpoint\Jobs;
 
 /**
- * Registered through JobTypes (filter wpcheckpoint_job_types). T011 adds the
- * Step contract the steps() method returns instances of; T010 only needs the
- * identity and ordering of steps to validate and display jobs.
+ * Registered through JobTypes (filter wpcheckpoint_job_types). The runner
+ * executes steps() in order; step_ids() is the same order for display and
+ * validation without instantiating the steps.
  */
 interface JobType {
 
@@ -34,4 +34,11 @@ interface JobType {
 	 * @return string[]
 	 */
 	public function step_ids(): array;
+
+	/**
+	 * The steps, in execution order (ids must match step_ids()).
+	 *
+	 * @return Step[]
+	 */
+	public function steps(): array;
 }

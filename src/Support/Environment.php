@@ -312,6 +312,20 @@ final class Environment {
 	}
 
 	/**
+	 * The task runtime limits measured by the last loopback probe, without
+	 * probing: null when nothing is cached (the runner then assumes limits).
+	 *
+	 * @return array<string, mixed>|null
+	 */
+	public static function cached_runtime() {
+		$cache = get_site_transient( self::CACHE );
+		if ( is_array( $cache ) && isset( $cache['loopback']['runtime'] ) && is_array( $cache['loopback']['runtime'] ) && array() !== $cache['loopback']['runtime'] ) {
+			return $cache['loopback']['runtime'];
+		}
+		return null;
+	}
+
+	/**
 	 * Cached probe results, refreshed when missing, expired or forced.
 	 *
 	 * @param bool $refresh Force a refresh.

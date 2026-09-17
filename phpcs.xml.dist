@@ -17,7 +17,10 @@
 	<config name="minimum_wp_version" value="6.9"/>
 
 	<rule ref="WordPress-Extra"/>
-	<rule ref="WordPress-Docs"/>
+	<rule ref="WordPress-Docs">
+		<!-- Exceptions thrown by callees are documented too; the sniff only counts throw statements in the body. -->
+		<exclude name="Squiz.Commenting.FunctionCommentThrowTag.WrongNumber"/>
+	</rule>
 	<rule ref="PHPCompatibilityWP"/>
 
 	<rule ref="WordPress.WP.I18n">
