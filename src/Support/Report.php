@@ -9,9 +9,29 @@ namespace WPCheckpoint\Support;
 
 /**
  * Renders checks as text and scrubs paths, host names and secrets. text()
- * is the only rendering entry point; its last step is the Redactor.
+ * is the only rendering entry point: the text is made valid UTF-8 first (so
+ * the /u patterns cannot fail on encoding), then masked, then redacted.
  */
 final class Report {
+
+	/**
+	 * Test seam: runs on the text after path masking and may return null to
+	 * simulate a failed masking step. Never set in production.
+	 *
+	 * @var callable|null
+	 */
+	private static $after_mask_paths_hook = null;
+
+	/**
+	 * Test seam setter.
+	 *
+	 * @internal
+	 * @param callable|null $hook Receives the masked text; returning null means "masking failed".
+	 * @return void
+	 */
+	public static function set_after_mask_paths_hook( $hook ): void {
+		self::$after_mask_paths_hook = is_callable( $hook ) ? $hook : null;
+	}
 
 	/**
 	 * Build the report.
@@ -50,8 +70,11 @@ final class Report {
 			}
 		}
 
-		$text = implode( "\n", $lines ) . "\n";
+		$text = Utf8::scrub( implode( "\n", $lines ) . "\n" );
 		$text = self::mask_paths( $text, $paths );
+		if ( null !== $text && null !== self::$after_mask_paths_hook ) {
+			$text = call_user_func( self::$after_mask_paths_hook, $text );
+		}
 		if ( null === $text ) {
 			return self::failure_text();
 		}

@@ -103,6 +103,16 @@ final class RedactorTest extends TestCase {
 		$this->assertStringContainsString( Redactor::MASK, $r->redact( $line ), 'works again once the limit is restored' );
 	}
 
+	public function test_invalid_utf8_does_not_prevent_redaction(): void {
+		$r   = new Redactor( array( 'Hunter2!x' ) );
+		$out = $r->redact( "\xD6\xD0 password=Hunter2!x \xE4\xB8 mail admin@example.com \xFF token=abc123" );
+		$this->assertStringNotContainsString( 'Hunter2!x', $out );
+		$this->assertStringNotContainsString( 'abc123', $out );
+		$this->assertStringContainsString( 'a***@example.com', $out );
+		$this->assertStringContainsString( \WPCheckpoint\Support\Utf8::REPLACEMENT, $out );
+		$this->assertSame( 1, preg_match( '//u', $out ) );
+	}
+
 	public function test_longer_secret_wins_over_its_prefix(): void {
 		$r = new Redactor( array( 'abcd', 'abcdefgh' ) );
 		$this->assertSame( Redactor::MASK . ' and ' . Redactor::MASK, $r->redact( 'abcdefgh and abcd' ) );
