@@ -55,6 +55,7 @@ final class ThresholdsTest extends TestCase {
 		$this->assertSame( Check::OK, Thresholds::loopback_status( 'reachable' ) );
 		$this->assertSame( Check::WARNING, Thresholds::loopback_status( 'http_auth' ) );
 		$this->assertSame( Check::WARNING, Thresholds::loopback_status( 'blocked' ) );
+		$this->assertSame( Check::WARNING, Thresholds::loopback_status( 'redirected' ) );
 		$this->assertSame( Check::ERROR, Thresholds::loopback_status( 'altered' ) );
 		$this->assertSame( Check::ERROR, Thresholds::loopback_status( 'unreachable' ) );
 	}

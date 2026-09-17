@@ -55,6 +55,15 @@ final class ProbeTest extends WP_UnitTestCase {
 		$this->assertSame( 403, $this->post( $challenge )->get_status(), 'a challenge is single use' );
 	}
 
+	public function test_challenge_in_the_query_string_is_ignored(): void {
+		$challenge = ProbeController::issue_challenge();
+		$request   = new WP_REST_Request( 'POST', '/wp-checkpoint/v1/probe' );
+		$request->set_query_params( array( 'challenge' => $challenge ) );
+		$this->assertSame( 403, rest_get_server()->dispatch( $request )->get_status() );
+
+		$this->assertSame( 200, $this->post( $challenge )->get_status(), 'the unused challenge still works from the body' );
+	}
+
 	public function test_revoked_and_expired_challenges_are_rejected(): void {
 		$challenge = ProbeController::issue_challenge();
 		ProbeController::revoke_challenge( $challenge );

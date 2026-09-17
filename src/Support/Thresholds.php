@@ -124,7 +124,7 @@ final class Thresholds {
 	/**
 	 * Status of a loopback probe outcome.
 	 *
-	 * @param string $outcome One of reachable|altered|http_auth|blocked|unreachable.
+	 * @param string $outcome One of reachable|altered|http_auth|blocked|redirected|unreachable.
 	 * @return string Check status.
 	 */
 	public static function loopback_status( string $outcome ): string {
@@ -133,6 +133,7 @@ final class Thresholds {
 				return Check::OK;
 			case 'http_auth':
 			case 'blocked':
+			case 'redirected':
 				return Check::WARNING;
 			default:
 				return Check::ERROR;

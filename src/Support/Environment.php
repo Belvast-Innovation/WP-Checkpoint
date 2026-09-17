@@ -231,6 +231,18 @@ final class Environment {
 		if ( 401 === $code ) {
 			return self::loopback_result( 'http_auth', $code, __( 'The site requires HTTP authentication, so it cannot call itself.', 'wp-checkpoint' ) );
 		}
+		if ( $code >= 300 && $code < 400 ) {
+			$location = (string) wp_remote_retrieve_header( $response, 'location' );
+			return self::loopback_result(
+				'redirected',
+				$code,
+				sprintf(
+					/* translators: %s: redirect target URL */
+					__( 'The request was redirected to %s. Check that the WordPress Address and Site Address under Settings → General match how the site is actually reached (http vs https, www vs non-www).', 'wp-checkpoint' ),
+					'' === $location ? __( '(no Location header)', 'wp-checkpoint' ) : $location
+				)
+			);
+		}
 		if ( 200 === $code ) {
 			if ( is_array( $body ) && isset( $body['challenge'] ) && hash_equals( $challenge, (string) $body['challenge'] ) ) {
 				return self::loopback_result( 'reachable', $code, __( 'The site can reach its own REST API.', 'wp-checkpoint' ), $body );

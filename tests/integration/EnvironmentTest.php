@@ -109,14 +109,21 @@ final class EnvironmentTest extends WP_UnitTestCase {
 			$this->assertStringContainsString( 'browser page open or by WP-CLI', $check->impact );
 			$this->assertSame( 'unknown', $this->find( $env->checks(), 'limits.task_memory' )->value );
 		}
+		if ( 'redirected' === $outcome ) {
+			$this->assertStringContainsString( 'WordPress Address and Site Address', $check->message );
+			$expected_target = false !== strpos( $check->value, '301' ) ? 'https://www.example.org/wp-json/wp-checkpoint/v1/probe' : '(no Location header)';
+			$this->assertStringContainsString( $expected_target, $check->message );
+		}
 	}
 
 	public function loopback_outcomes(): array {
-		$http = static function ( int $code, string $body ): array {
-			return array( 'response' => array( 'code' => $code, 'message' => '' ), 'body' => $body, 'headers' => array(), 'cookies' => array(), 'filename' => null );
+		$http = static function ( int $code, string $body, array $headers = array() ): array {
+			return array( 'response' => array( 'code' => $code, 'message' => '' ), 'body' => $body, 'headers' => $headers, 'cookies' => array(), 'filename' => null );
 		};
 		return array(
 			'echo is reachable'        => array( $this->echo_probe(), 'reachable', Check::OK ),
+			'301 is redirected'        => array( $http( 301, '', array( 'location' => 'https://www.example.org/wp-json/wp-checkpoint/v1/probe' ) ), 'redirected', Check::WARNING ),
+			'302 is redirected'        => array( $http( 302, '' ), 'redirected', Check::WARNING ),
 			'wrong echo is altered'    => array( $http( 200, '{"challenge":"deadbeef"}' ), 'altered', Check::ERROR ),
 			'cached page is altered'   => array( $http( 200, '<html>cached</html>' ), 'altered', Check::ERROR ),
 			'401 is http auth warning' => array( $http( 401, '' ), 'http_auth', Check::WARNING ),

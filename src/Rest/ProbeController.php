@@ -20,8 +20,10 @@ defined( 'ABSPATH' ) || exit;
  * that served it. Authenticated by a one-time challenge instead of a login:
  * the value is issued moments earlier by the environment check, stored as a
  * short-lived transient and deleted on first use. Without a valid challenge
- * the route returns 403 for everyone, logged in or not. The body never
- * includes paths or other sensitive data.
+ * the route returns 403 for everyone, logged in or not. The challenge is
+ * read from the request body only, never from the query string, so it does
+ * not end up in access logs. The response never includes paths or other
+ * sensitive data.
  */
 final class ProbeController extends Controller {
 
@@ -91,8 +93,8 @@ final class ProbeController extends Controller {
 	 * @return true|WP_Error
 	 */
 	public function check_challenge( WP_REST_Request $request ) {
-		$challenge = $request->get_param( 'challenge' );
-		if ( ! is_string( $challenge ) || 1 !== preg_match( '/^[a-f0-9]{32}$/', $challenge ) ) {
+		$challenge = self::body_challenge( $request );
+		if ( '' === $challenge ) {
 			return $this->forbidden();
 		}
 		$key = self::transient_key( $challenge );
@@ -113,7 +115,7 @@ final class ProbeController extends Controller {
 		$runtime  = Environment::runtime_values();
 		$response = new WP_REST_Response(
 			array(
-				'challenge'          => (string) $request->get_param( 'challenge' ),
+				'challenge'          => self::body_challenge( $request ),
 				'memory_limit'       => $runtime['memory_limit'],
 				'memory_bytes'       => $runtime['memory_bytes'],
 				'max_execution_time' => $runtime['max_execution_time'],
@@ -122,6 +124,20 @@ final class ProbeController extends Controller {
 		);
 		$response->header( 'Cache-Control', 'no-store' );
 		return $response;
+	}
+
+	/**
+	 * Challenge from the request body only; empty when absent or malformed.
+	 *
+	 * @param WP_REST_Request $request Incoming request.
+	 * @return string
+	 */
+	private static function body_challenge( WP_REST_Request $request ): string {
+		$body = $request->get_body_params();
+		if ( ! isset( $body['challenge'] ) || ! is_string( $body['challenge'] ) ) {
+			return '';
+		}
+		return 1 === preg_match( '/^[a-f0-9]{32}$/', $body['challenge'] ) ? $body['challenge'] : '';
 	}
 
 	/**
