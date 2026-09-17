@@ -203,7 +203,7 @@ final class EnvironmentTest extends WP_UnitTestCase {
 		$report = Report::text( $env->checks(), Plugin::instance()->redactor(), $env->report_paths(), array( 'Plugin' => WPCHECKPOINT_VERSION ), Environment::report_hosts() );
 		$token  = (string) $this->dirs->state()['token'];
 
-		$this->assertSame( array( wp_parse_url( home_url(), PHP_URL_HOST ) ), Environment::report_hosts() );
+		$this->assertSame( array( (string) wp_parse_url( home_url(), PHP_URL_HOST ) ), Environment::report_hosts(), 'hosts never carry a port' );
 		$this->assertStringNotContainsStringIgnoringCase( (string) wp_parse_url( home_url(), PHP_URL_HOST ), $report );
 		$this->assertStringNotContainsString( DB_PASSWORD, $report );
 		$this->assertStringNotContainsString( DB_NAME, $report );
@@ -219,8 +219,14 @@ final class EnvironmentTest extends WP_UnitTestCase {
 		if ( is_multisite() ) {
 			$this->markTestSkipped( 'Single site only.' );
 		}
-		update_option( 'home', 'http://example.org/shop' );
-		update_option( 'siteurl', 'http://example.org/shop/wp' );
+		// Priority 20 beats _config_wp_home() when the test config defines WP_HOME / WP_SITEURL.
+		add_filter( 'pre_option_home', static function () {
+			return 'http://example.org/shop';
+		}, 20 );
+		add_filter( 'pre_option_siteurl', static function () {
+			return 'http://example.org/shop/wp';
+		}, 20 );
+		$this->assertSame( 'http://example.org/shop', home_url() );
 		$this->assertSame( array( '/shop', '/shop/wp' ), Environment::report_site_paths() );
 
 		$checks = array( new Check( 'x', 'loopback', 'Loopback', 'redirected', Check::WARNING, 'redirected to https://example.org/shop/wp/wp-json/ and https://example.org/shopping/' ) );
@@ -234,6 +240,7 @@ final class EnvironmentTest extends WP_UnitTestCase {
 			$this->markTestSkipped( 'Multisite only.' );
 		}
 		$network_domain = get_network()->domain;
+		$masked_host    = '{site-host}' . ( false !== strpos( $network_domain, ':' ) ? substr( $network_domain, strpos( $network_domain, ':' ) ) : '' );
 		$clienta        = self::factory()->blog->create( array( 'domain' => $network_domain, 'path' => '/clienta/' ) );
 		self::factory()->blog->create( array( 'domain' => $network_domain, 'path' => '/client/' ) );
 
@@ -250,7 +257,7 @@ final class EnvironmentTest extends WP_UnitTestCase {
 		}
 
 		$this->assertStringNotContainsString( 'clienta/', $report );
-		$this->assertStringContainsString( 'https://{site-host}/{site-path}/wp-json/ and https://{site-host}/{site-path}/x and https://{site-host}/clientab/y', $report );
+		$this->assertStringContainsString( 'https://' . $masked_host . '/{site-path}/wp-json/ and https://' . $masked_host . '/{site-path}/x and https://' . $masked_host . '/clientab/y', $report );
 	}
 
 	public function test_multisite_subsite_hosts_never_appear_in_the_report(): void {
@@ -258,7 +265,9 @@ final class EnvironmentTest extends WP_UnitTestCase {
 			$this->markTestSkipped( 'Multisite only.' );
 		}
 		$network_domain = get_network()->domain;
-		$this->assertContains( $network_domain, Environment::report_hosts() );
+		$network_host   = (string) preg_replace( '/:\d+$/', '', $network_domain );
+		$masked_host    = '{site-host}' . substr( $network_domain, strlen( $network_host ) );
+		$this->assertContains( $network_host, Environment::report_hosts() );
 
 		$subsite_host = 'clientb.' . $network_domain;
 		self::factory()->blog->create( array( 'domain' => $subsite_host, 'path' => '/' ) );
@@ -266,8 +275,8 @@ final class EnvironmentTest extends WP_UnitTestCase {
 		$report = Report::text( $checks, Plugin::instance()->redactor(), array(), array(), Environment::report_hosts() );
 
 		$this->assertStringNotContainsString( 'clientb', $report );
-		$this->assertStringNotContainsStringIgnoringCase( $network_domain, $report );
-		$this->assertStringContainsString( 'https://{subdomain}.{site-host}/wp-json/ and to http://{site-host}/', $report );
+		$this->assertStringNotContainsStringIgnoringCase( $network_host, $report );
+		$this->assertStringContainsString( 'https://{subdomain}.' . $masked_host . '/wp-json/ and to http://' . $masked_host . '/', $report );
 	}
 
 	public function test_actions_are_rate_limited_per_installation(): void {

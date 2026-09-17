@@ -203,7 +203,7 @@ final class Environment {
 			// The network domain covers every sub-site of a sub-domain network.
 			$network = get_network();
 			if ( $network && is_string( $network->domain ) && '' !== $network->domain ) {
-				$hosts[] = $network->domain;
+				$hosts[] = (string) preg_replace( '/:\d+$/', '', $network->domain );
 			}
 		}
 		return array_values( array_unique( $hosts ) );
