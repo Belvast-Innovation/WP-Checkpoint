@@ -14,8 +14,8 @@ namespace WPCheckpoint\Jobs;
  * before it ever ran), running -> completed | failed | paused, paused ->
  * running, queued | running | paused -> cancelled, failed -> queued (retry,
  * cursor kept). completed and cancelled are
- * terminal. A job between two ticks is still "running": the lock is
- * released, the status is not.
+ * terminal. A job between two ticks is still "running": the database lock
+ * is released, the status and the lock file are not.
  */
 final class Job {
 
@@ -242,12 +242,13 @@ final class Job {
 	}
 
 	/**
-	 * Whether no further transition is possible.
+	 * Whether no further transition is possible. An unknown status (a
+	 * tampered row) is not terminal, and allows() rejects every move from it.
 	 *
 	 * @return bool
 	 */
 	public function is_terminal(): bool {
-		return array() === self::TRANSITIONS[ $this->status ];
+		return isset( self::TRANSITIONS[ $this->status ] ) && array() === self::TRANSITIONS[ $this->status ];
 	}
 
 	/**

@@ -53,6 +53,18 @@ final class JobTest extends TestCase {
 		}
 	}
 
+	public function test_unknown_status_is_neither_terminal_nor_movable(): void {
+		$job         = new Job();
+		$job->id     = 3;
+		$job->status = 'garbage';
+		$this->assertFalse( $job->is_terminal() );
+		foreach ( Job::statuses() as $to ) {
+			$this->assertFalse( $job->can_transition( $to ), $to );
+		}
+		$this->expectException( InvalidTransition::class );
+		$job->transition( Job::CANCELLED );
+	}
+
 	public function test_lock_validity(): void {
 		$job = new Job();
 		$this->assertFalse( $job->is_locked( 1000 ) );
