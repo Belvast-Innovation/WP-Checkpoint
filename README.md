@@ -25,17 +25,25 @@ Requirements: PHP 7.4+, Composer 2, Node.js 20+, Docker. Clone into a folder nam
 git clone https://github.com/Belvast-Innovation/WP-Checkpoint.git wp-checkpoint
 ```
 
-Then:
+Then install the tooling and run the checks:
 
 ```bash
-composer install
-npm install
-npx wp-env start          # http://localhost:8888 (admin / password)
-composer lint
-composer analyse
-composer test:unit
-npm run test:integration
+composer install          # PHPCS, PHPStan, PHPUnit (development only, nothing ships in the plugin)
+npm install               # @wordpress/env
+composer lint             # WordPress Coding Standards + PHP 7.4 compatibility
+composer analyse          # PHPStan
+composer test:unit        # pure PHP unit tests, no WordPress needed
 ```
+
+The integration tests run inside a WordPress install managed by wp-env, so Docker must be running:
+
+```bash
+npx wp-env start          # first start downloads images; site at http://localhost:8888 (admin / password)
+npm run test:integration  # runs `composer test:integration` inside the tests container
+npx wp-env stop
+```
+
+`npx wp-env run cli wp ...` runs WP-CLI against the development site, `npx wp-env destroy` throws the containers away. Continuous integration runs the same commands on PHP 7.4, 8.1, 8.3 and 8.4 (integration tests on 8.3).
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 
