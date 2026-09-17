@@ -161,7 +161,7 @@ final class JobRepository {
 	 */
 	public function find( int $id ) {
 		global $wpdb;
-		$table = self::table();
+		$table = $wpdb->base_prefix . Schema::JOBS_TABLE;
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix.
 		$row = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$table} WHERE id = %d", $id ), ARRAY_A );
 		return is_array( $row ) ? self::hydrate( $row ) : null;
@@ -176,7 +176,7 @@ final class JobRepository {
 	 */
 	public function list_jobs( array $statuses = array(), int $limit = 50 ): array {
 		global $wpdb;
-		$table    = self::table();
+		$table    = $wpdb->base_prefix . Schema::JOBS_TABLE;
 		$statuses = array_values( array_intersect( $statuses, Job::statuses() ) );
 		$limit    = max( 1, min( 500, $limit ) );
 		if ( array() === $statuses ) {
@@ -197,7 +197,7 @@ final class JobRepository {
 	 */
 	public function counts(): array {
 		global $wpdb;
-		$table  = self::table();
+		$table  = $wpdb->base_prefix . Schema::JOBS_TABLE;
 		$counts = array_fill_keys( Job::statuses(), 0 );
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix.
 		$rows = $wpdb->get_results( "SELECT status, COUNT(*) AS n FROM {$table} GROUP BY status", ARRAY_A );
@@ -274,7 +274,7 @@ final class JobRepository {
 		}
 		$now   = $this->now();
 		$token = bin2hex( random_bytes( 16 ) );
-		$table = self::table();
+		$table = $wpdb->base_prefix . Schema::JOBS_TABLE;
 		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix; the WHERE clause is the compare-and-set.
 		$affected = $wpdb->query(
 			$wpdb->prepare(
@@ -317,7 +317,7 @@ final class JobRepository {
 	public function heartbeat( Job $job, string $token, int $lease = self::LOCK_SECONDS ): bool {
 		global $wpdb;
 		$until = $this->now() + $lease;
-		$table = self::table();
+		$table = $wpdb->base_prefix . Schema::JOBS_TABLE;
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix.
 		$affected = $wpdb->query( $wpdb->prepare( "UPDATE {$table} SET locked_until = %d, updated_at = %d WHERE id = %d AND lock_token = %s", $until, $this->now(), $job->id, $token ) );
 		if ( 1 !== (int) $affected ) {
@@ -337,7 +337,7 @@ final class JobRepository {
 	 */
 	public function release( Job $job, string $token ): bool {
 		global $wpdb;
-		$table = self::table();
+		$table = $wpdb->base_prefix . Schema::JOBS_TABLE;
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix.
 		$affected = $wpdb->query( $wpdb->prepare( "UPDATE {$table} SET lock_token = '', locked_until = 0, updated_at = %d WHERE id = %d AND lock_token = %s", $this->now(), $job->id, $token ) );
 		if ( 1 !== (int) $affected ) {
@@ -534,7 +534,7 @@ final class JobRepository {
 	public function purge(): int {
 		global $wpdb;
 		$now     = $this->now();
-		$table   = self::table();
+		$table   = $wpdb->base_prefix . Schema::JOBS_TABLE;
 		$victims = array();
 
 		foreach ( self::RETENTION_SECONDS as $status => $seconds ) {

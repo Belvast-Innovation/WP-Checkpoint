@@ -25,6 +25,11 @@ final class Schema {
 	const CURRENT = 1;
 
 	/**
+	 * Jobs table name without the prefix.
+	 */
+	const JOBS_TABLE = 'wpcheckpoint_jobs';
+
+	/**
 	 * Oldest schema level the code in this plugin version can operate on.
 	 */
 	const MIN_COMPATIBLE = 1;
@@ -36,7 +41,7 @@ final class Schema {
 	 */
 	public static function jobs_table(): string {
 		global $wpdb;
-		return $wpdb->base_prefix . 'wpcheckpoint_jobs';
+		return $wpdb->base_prefix . self::JOBS_TABLE;
 	}
 
 	/**
@@ -80,7 +85,7 @@ final class Schema {
 	 */
 	public static function table_exists(): bool {
 		global $wpdb;
-		$table = self::jobs_table();
+		$table = $wpdb->base_prefix . self::JOBS_TABLE;
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- schema check.
 		return $table === $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $table ) ) );
 	}
@@ -154,7 +159,7 @@ final class Schema {
 	private static function create_jobs_table(): void {
 		global $wpdb;
 		require_once ABSPATH . 'wp-admin/includes/upgrade.php';
-		$table   = self::jobs_table();
+		$table   = $wpdb->base_prefix . self::JOBS_TABLE;
 		$collate = $wpdb->get_charset_collate();
 		$sql     = "CREATE TABLE {$table} (
 			id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
@@ -195,8 +200,8 @@ final class Schema {
 	 */
 	public static function drop(): void {
 		global $wpdb;
-		$table = self::jobs_table();
-		$wpdb->query( "DROP TABLE IF EXISTS {$table}" ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- table name built from the prefix; uninstall only.
+		$table = $wpdb->base_prefix . self::JOBS_TABLE;
+		$wpdb->query( "DROP TABLE IF EXISTS {$table}" ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- table name from the prefix and a constant; uninstall only.
 		Options::delete( self::OPTION );
 	}
 }
