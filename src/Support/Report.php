@@ -21,9 +21,10 @@ final class Report {
 	 * @param array<string, string> $paths      Placeholder => absolute path (e.g. "{abspath}" => ABSPATH).
 	 * @param array<string, string> $header     Extra header lines, label => value.
 	 * @param string[]              $site_hosts Host names of the site (home and site URL); never included in the report.
+	 * @param string[]              $site_paths URL path prefixes of the site (and of every site in a sub-directory network).
 	 * @return string
 	 */
-	public static function text( array $checks, Redactor $redactor, array $paths = array(), array $header = array(), array $site_hosts = array() ): string {
+	public static function text( array $checks, Redactor $redactor, array $paths = array(), array $header = array(), array $site_hosts = array(), array $site_paths = array() ): string {
 		$lines   = array( 'WP Checkpoint environment report' );
 		$lines[] = 'Generated: ' . gmdate( 'Y-m-d H:i:s' ) . ' UTC';
 		foreach ( $header as $label => $value ) {
@@ -51,7 +52,7 @@ final class Report {
 
 		$text = implode( "\n", $lines ) . "\n";
 		$text = self::mask_paths( $text, $paths );
-		$text = self::mask_hosts( $text, $site_hosts );
+		$text = self::mask_hosts( $text, $site_hosts, $site_paths );
 
 		return $redactor->redact( $text );
 	}
@@ -63,11 +64,18 @@ final class Report {
 	 * network never appear. Scheme, port and path are kept. The host of every
 	 * other URL becomes {external-host}.
 	 *
+	 * URLs on the site's host whose path starts with one of $site_paths (the
+	 * site's own sub-directory, or any site of a sub-directory network) get
+	 * that prefix replaced by /{site-path}, matched on path-segment boundaries
+	 * and longest first, so "/client" never matches "/clienta". Paths of
+	 * external URLs are left alone.
+	 *
 	 * @param string   $text       Text.
 	 * @param string[] $site_hosts Site host names, with or without "www.".
+	 * @param string[] $site_paths Site path prefixes such as "/shop" or "/clienta/".
 	 * @return string
 	 */
-	public static function mask_hosts( string $text, array $site_hosts ): string {
+	public static function mask_hosts( string $text, array $site_hosts, array $site_paths = array() ): string {
 		$hosts = array();
 		foreach ( $site_hosts as $host ) {
 			$host = strtolower( trim( (string) $host ) );
@@ -116,7 +124,54 @@ final class Report {
 		if ( null !== $result ) {
 			$text = $result;
 		}
-		return $text;
+
+		return self::mask_site_paths( $text, $site_paths );
+	}
+
+	/**
+	 * Replace site path prefixes after a {site-host} (with or without a
+	 * "www." / "{subdomain}." label and a port) by /{site-path}.
+	 *
+	 * @param string   $text       Text in which hosts are already masked.
+	 * @param string[] $site_paths Site path prefixes.
+	 * @return string
+	 */
+	public static function mask_site_paths( string $text, array $site_paths ): string {
+		$prefixes = array();
+		foreach ( $site_paths as $path ) {
+			$path = '/' . trim( str_replace( '\\', '/', (string) $path ), '/' );
+			if ( '/' !== $path ) {
+				$prefixes[ $path ] = true;
+			}
+		}
+		if ( array() === $prefixes ) {
+			return $text;
+		}
+		$prefixes = array_keys( $prefixes );
+		usort(
+			$prefixes,
+			static function ( string $a, string $b ): int {
+				return strlen( $b ) - strlen( $a );
+			}
+		);
+
+		$result = preg_replace_callback(
+			'#((?:www\.|\{subdomain\}\.)?\{site-host\}(?::\d+)?)(/[^\s"\'<>?\#]*)#',
+			static function ( array $m ) use ( $prefixes ): string {
+				$path = $m[2];
+				foreach ( $prefixes as $prefix ) {
+					if ( $path === $prefix ) {
+						return $m[1] . '/{site-path}';
+					}
+					if ( 0 === strpos( $path, $prefix . '/' ) ) {
+						return $m[1] . '/{site-path}' . substr( $path, strlen( $prefix ) );
+					}
+				}
+				return $m[0];
+			},
+			$text
+		);
+		return null === $result ? $text : $result;
 	}
 
 	/**

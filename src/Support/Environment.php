@@ -210,6 +210,37 @@ final class Environment {
 	}
 
 	/**
+	 * URL path prefixes that identify a site: the sub-directory this site is
+	 * installed in and, on a sub-directory network, every site's path.
+	 *
+	 * @return string[]
+	 */
+	public static function report_site_paths(): array {
+		$paths = array();
+		foreach ( array( home_url(), site_url() ) as $url ) {
+			$path = wp_parse_url( $url, PHP_URL_PATH );
+			if ( is_string( $path ) && '' !== trim( $path, '/' ) ) {
+				$paths[] = '/' . trim( $path, '/' );
+			}
+		}
+		if ( is_multisite() ) {
+			$site_ids = get_sites(
+				array(
+					'number' => 1000,
+					'fields' => 'ids',
+				)
+			);
+			foreach ( $site_ids as $site_id ) {
+				$site = get_site( $site_id );
+				if ( $site && '' !== trim( (string) $site->path, '/' ) ) {
+					$paths[] = '/' . trim( (string) $site->path, '/' );
+				}
+			}
+		}
+		return array_values( array_unique( $paths ) );
+	}
+
+	/**
 	 * Cached probe results, refreshed when missing, expired or forced.
 	 *
 	 * @param bool $refresh Force a refresh.

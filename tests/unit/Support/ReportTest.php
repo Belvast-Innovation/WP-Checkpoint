@@ -91,6 +91,31 @@ final class ReportTest extends TestCase {
 		$this->assertStringNotContainsString( 'other-host.net', $text );
 	}
 
+	public function test_site_paths_are_masked_on_the_site_host_only(): void {
+		$hosts = array( 'example.com' );
+		$cases = array(
+			'https://example.com/shop/wp-json/x'   => 'https://{site-host}/{site-path}/wp-json/x',
+			'https://example.com/shop'             => 'https://{site-host}/{site-path}',
+			'https://example.com/shop/'            => 'https://{site-host}/{site-path}/',
+			'https://www.example.com/shop/a'       => 'https://www.{site-host}/{site-path}/a',
+			'https://blog.example.com:8443/shop/a' => 'https://{subdomain}.{site-host}:8443/{site-path}/a',
+			'example.com/shop/bare'                => '{site-host}/{site-path}/bare',
+			'https://example.com/shopping/x'       => 'https://{site-host}/shopping/x',
+			'https://example.com/wp-json/shop/x'   => 'https://{site-host}/wp-json/shop/x',
+			'https://other.net/shop/x'             => 'https://{external-host}/shop/x',
+		);
+		foreach ( $cases as $in => $expected ) {
+			$this->assertSame( $expected, Report::mask_hosts( $in, $hosts, array( '/shop/' ) ), $in );
+		}
+
+		$this->assertSame(
+			'{site-host}/{site-path}/x {site-host}/{site-path}/y {site-host}/{site-path}',
+			Report::mask_hosts( 'example.com/clienta/x example.com/client/y example.com/client', $hosts, array( '/client', '/clienta' ) ),
+			'longest prefix first, on segment boundaries'
+		);
+		$this->assertSame( 'https://{site-host}/clientab/x', Report::mask_hosts( 'https://example.com/clientab/x', $hosts, array( '/client', '/clienta' ) ) );
+	}
+
 	public function test_site_on_a_subdomain_treats_the_parent_domain_as_external(): void {
 		$text = Report::mask_hosts( 'https://shop.example.com/x and https://example.com/y and www.shop.example.com and SHOP.example.com', array( 'shop.example.com' ) );
 		$this->assertSame( 'https://{site-host}/x and https://{external-host}/y and www.{site-host} and {site-host}', $text );

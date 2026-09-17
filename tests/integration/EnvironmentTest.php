@@ -215,6 +215,44 @@ final class EnvironmentTest extends WP_UnitTestCase {
 		$this->assertStringContainsString( 'Plugin: ' . WPCHECKPOINT_VERSION, $report );
 	}
 
+	public function test_single_site_in_a_subdirectory_masks_its_path(): void {
+		if ( is_multisite() ) {
+			$this->markTestSkipped( 'Single site only.' );
+		}
+		update_option( 'home', 'http://example.org/shop' );
+		update_option( 'siteurl', 'http://example.org/shop/wp' );
+		$this->assertSame( array( '/shop', '/shop/wp' ), Environment::report_site_paths() );
+
+		$checks = array( new Check( 'x', 'loopback', 'Loopback', 'redirected', Check::WARNING, 'redirected to https://example.org/shop/wp/wp-json/ and https://example.org/shopping/' ) );
+		$report = Report::text( $checks, Plugin::instance()->redactor(), array(), array(), Environment::report_hosts(), Environment::report_site_paths() );
+		$this->assertStringContainsString( 'https://{site-host}/{site-path}/wp-json/ and https://{site-host}/shopping/', $report );
+		$this->assertStringNotContainsString( '/shop/', $report );
+	}
+
+	public function test_multisite_subdirectory_site_paths_never_appear_in_the_report(): void {
+		if ( ! is_multisite() ) {
+			$this->markTestSkipped( 'Multisite only.' );
+		}
+		$network_domain = get_network()->domain;
+		$clienta        = self::factory()->blog->create( array( 'domain' => $network_domain, 'path' => '/clienta/' ) );
+		self::factory()->blog->create( array( 'domain' => $network_domain, 'path' => '/client/' ) );
+
+		switch_to_blog( $clienta );
+		try {
+			$paths = Environment::report_site_paths();
+			$this->assertContains( '/clienta', $paths, 'current site path' );
+			$this->assertContains( '/client', $paths, 'every site of the network' );
+
+			$checks = array( new Check( 'x', 'loopback', 'Loopback', 'redirected', Check::WARNING, 'redirected to https://' . $network_domain . '/clienta/wp-json/ and https://' . $network_domain . '/client/x and https://' . $network_domain . '/clientab/y' ) );
+			$report = Report::text( $checks, Plugin::instance()->redactor(), array(), array(), Environment::report_hosts(), $paths );
+		} finally {
+			restore_current_blog();
+		}
+
+		$this->assertStringNotContainsString( 'clienta/', $report );
+		$this->assertStringContainsString( 'https://{site-host}/{site-path}/wp-json/ and https://{site-host}/{site-path}/x and https://{site-host}/clientab/y', $report );
+	}
+
 	public function test_multisite_subsite_hosts_never_appear_in_the_report(): void {
 		if ( ! is_multisite() ) {
 			$this->markTestSkipped( 'Multisite only.' );
