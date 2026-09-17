@@ -88,8 +88,27 @@ final class Deleter {
 		return $result;
 	}
 
+	const REPARSE_LINK    = 'link';
+	const REPARSE_PLAIN   = 'plain';
+	const REPARSE_UNKNOWN = 'unknown';
+
 	/**
 	 * Whether a path is a symbolic link, junction or other reparse point.
+	 *
+	 * "Unknown" (an empty directory, or one whose entries are all links, on a
+	 * platform without a definite answer) counts as not a link here: entering
+	 * such a directory cannot delete anything behind a link. Callers that must
+	 * be sure (reclaiming a directory) use reparse_state() instead.
+	 *
+	 * @param string $path Path to inspect (no trailing separator).
+	 * @return bool
+	 */
+	public static function is_reparse( string $path ): bool {
+		return self::REPARSE_LINK === self::reparse_state( $path );
+	}
+
+	/**
+	 * Classify a path as a link, a plain entry, or undecidable.
 	 *
 	 * The is_link() check covers symbolic links. Windows junctions are not
 	 * reported by is_link(), but PHP's Windows readlink() returns the final
@@ -105,15 +124,15 @@ final class Deleter {
 	 * cannot delete anything, and rmdir() on a junction removes the junction.
 	 *
 	 * @param string $path Path to inspect (no trailing separator).
-	 * @return bool
+	 * @return string One of the REPARSE_* constants.
 	 */
-	public static function is_reparse( string $path ): bool {
+	public static function reparse_state( string $path ): string {
 		$path = rtrim( $path, '/\\' );
 		if ( '' === $path ) {
-			return false;
+			return self::REPARSE_PLAIN;
 		}
 		if ( is_link( $path ) ) {
-			return true;
+			return self::REPARSE_LINK;
 		}
 		if ( Paths::is_windows() ) {
 			// Checked before is_dir(): stat() reports a junction with mode 0, so
@@ -122,27 +141,28 @@ final class Deleter {
 			$final_parent = @readlink( dirname( $path ) ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
 			if ( is_string( $final ) && '' !== $final && is_string( $final_parent ) && '' !== $final_parent ) {
 				$expected = rtrim( self::strip_windows_prefix( $final_parent ), '/\\' ) . DIRECTORY_SEPARATOR . basename( $path );
-				return ! Paths::same( $expected, self::strip_windows_prefix( $final ), true );
+				return Paths::same( $expected, self::strip_windows_prefix( $final ), true ) ? self::REPARSE_PLAIN : self::REPARSE_LINK;
 			}
 		}
 		if ( ! is_dir( $path ) ) {
-			return false;
+			return self::REPARSE_PLAIN;
 		}
 
 		$parent = realpath( dirname( $path ) );
 		if ( false === $parent ) {
-			return false;
+			return self::REPARSE_UNKNOWN;
 		}
-		$child = self::first_child( $path );
+		$child = self::first_plain_child( $path );
 		if ( '' === $child ) {
-			return false;
+			// Empty, or only links inside: nothing to resolve through, so no definite answer.
+			return self::REPARSE_UNKNOWN;
 		}
 		$resolved = realpath( $path . DIRECTORY_SEPARATOR . $child );
 		if ( false === $resolved ) {
-			return false;
+			return self::REPARSE_UNKNOWN;
 		}
 		$expected = rtrim( $parent, '/\\' ) . DIRECTORY_SEPARATOR . basename( $path ) . DIRECTORY_SEPARATOR . $child;
-		return ! Paths::same( $expected, $resolved, Paths::is_windows() );
+		return Paths::same( $expected, $resolved, Paths::is_windows() ) ? self::REPARSE_PLAIN : self::REPARSE_LINK;
 	}
 
 	/**
@@ -162,19 +182,23 @@ final class Deleter {
 	}
 
 	/**
-	 * Name of the first entry inside a directory, or empty when it is empty
-	 * or unreadable.
+	 * Name of the first entry inside a directory that is not itself a link
+	 * (resolving a link would tell us about the link, not the directory).
+	 * Empty when the directory is empty, unreadable, or holds only links.
 	 *
 	 * @param string $dir Directory.
 	 * @return string
 	 */
-	private static function first_child( string $dir ): string {
+	private static function first_plain_child( string $dir ): string {
 		$entries = @scandir( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- unreadable directories simply yield no child.
 		if ( ! is_array( $entries ) ) {
 			return '';
 		}
 		foreach ( $entries as $entry ) {
-			if ( '.' !== $entry && '..' !== $entry ) {
+			if ( '.' === $entry || '..' === $entry ) {
+				continue;
+			}
+			if ( ! is_link( $dir . DIRECTORY_SEPARATOR . $entry ) ) {
 				return $entry;
 			}
 		}

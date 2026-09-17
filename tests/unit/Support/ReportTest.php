@@ -121,33 +121,56 @@ final class ReportTest extends TestCase {
 		$this->assertSame( 'https://{site-host}/x and https://{external-host}/y and www.{site-host} and {site-host}', $text );
 	}
 
+	public function test_invalid_utf8_is_scrubbed_and_the_report_still_masks(): void {
+		$hosts  = array( 'example.com' );
+		$paths  = array( '{abspath}' => '/home/johndoe/public_html' );
+		$checks = array(
+			new Check( 'a', 'php', 'open_basedir', "/home/johndoe/public_html:/tmp/\xD6\xD0\xB9\xFA", Check::INFO ),           // GBK 中国
+			new Check( 'b', 'server', 'Locale', "de_DE \xDCbergr\xF6\xDFe", Check::INFO ),                                      // Windows-1252 Übergröße
+			new Check( 'c', 'loopback', 'Loopback', "redirected to https://www.example.com/x\xE4\xB8", Check::WARNING ),        // truncated 中
+		);
+
+		$text = Report::text( $checks, new Redactor(), $paths, array(), $hosts, array() );
+
+		$this->assertNotSame( Report::failure_text(), $text, 'encoding problems must not withhold the report' );
+		$this->assertStringContainsString( \WPCheckpoint\Support\Utf8::REPLACEMENT, $text );
+		$this->assertStringContainsString( 'open_basedir: {abspath}:', $text );
+		$this->assertStringNotContainsString( 'johndoe', $text );
+		$this->assertStringNotContainsString( 'example.com', $text );
+		$this->assertStringContainsString( 'https://www.{site-host}/x', $text );
+		$this->assertSame( 1, preg_match( '//u', $text ), 'the report is valid UTF-8' );
+	}
+
 	public function test_masking_failure_withholds_the_whole_report(): void {
-		// Every masking pattern runs in UTF-8 mode, so invalid UTF-8 makes preg_replace()
-		// return null deterministically (unlike pcre.backtrack_limit, which PCRE JIT ignores).
-		$bad    = "\xB1\x31";
 		$hosts  = array( 'example.com' );
 		$paths  = array( '{abspath}' => '/home/johndoe/public_html' );
 		$checks = array(
 			new Check( 'x', 'g', 'Path', '/home/johndoe/public_html/wp-content/uploads', Check::INFO ),
-			new Check( 'y', 'g', 'URL', 'https://www.example.com/shop/wp-json/ password=hunter2 ' . $bad, Check::INFO ),
+			new Check( 'y', 'g', 'URL', 'https://www.example.com/shop/wp-json/ password=hunter2', Check::INFO ),
 		);
 
-		$text = Report::text( $checks, new Redactor(), $paths, array(), $hosts, array( '/shop' ) );
-
+		// Only a test seam can make a masking step fail now that the text is scrubbed first.
+		Report::set_after_mask_paths_hook( static function (): void {
+			// returns null
+		} );
+		try {
+			$text = Report::text( $checks, new Redactor(), $paths, array(), $hosts, array( '/shop' ) );
+		} finally {
+			Report::set_after_mask_paths_hook( null );
+		}
 		$this->assertSame( Report::failure_text(), $text );
 		$this->assertStringNotContainsString( 'johndoe', $text );
 		$this->assertStringNotContainsString( 'example.com', $text );
 		$this->assertStringNotContainsString( '/shop', $text );
 		$this->assertStringNotContainsString( 'hunter2', $text );
 
-		$this->assertNull( Report::mask_paths( 'x /home/johndoe/y ' . $bad, $paths ), 'mask_paths fails closed' );
-		$this->assertNull( Report::mask_hosts( 'https://example.com/shop/x ' . $bad, $hosts, array( '/shop' ) ), 'mask_hosts fails closed' );
-		$this->assertNull( Report::mask_site_paths( '{site-host}/shop/x ' . $bad, array( '/shop' ) ), 'mask_site_paths fails closed' );
+		$bad = "\xB1\x31";
+		$this->assertNull( Report::mask_paths( 'x /home/johndoe/y ' . $bad, $paths ), 'called directly, a masking step still fails closed on invalid UTF-8' );
+		$this->assertNull( Report::mask_hosts( 'https://example.com/shop/x ' . $bad, $hosts, array( '/shop' ) ) );
+		$this->assertNull( Report::mask_site_paths( '{site-host}/shop/x ' . $bad, array( '/shop' ) ) );
 
-		$checks[1] = new Check( 'y', 'g', 'URL', 'https://www.example.com/shop/wp-json/ password=hunter2', Check::INFO );
-		$text      = Report::text( $checks, new Redactor(), $paths, array(), $hosts, array( '/shop' ) );
-		$this->assertStringContainsString( 'https://www.{site-host}/{site-path}/wp-json/', $text, 'valid input still produces a report' );
+		$text = Report::text( $checks, new Redactor(), $paths, array(), $hosts, array( '/shop' ) );
+		$this->assertStringContainsString( 'https://www.{site-host}/{site-path}/wp-json/', $text, 'without the seam the report is produced' );
 		$this->assertStringContainsString( '{abspath}/wp-content/uploads', $text );
-		$this->assertStringNotContainsString( 'johndoe', $text );
 	}
 }

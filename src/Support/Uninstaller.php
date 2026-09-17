@@ -52,7 +52,7 @@ final class Uninstaller {
 	 * @return bool
 	 */
 	public static function should_delete_data(): bool {
-		return (bool) get_option( self::OPTION_DELETE_DATA, false );
+		return UninstallSetting::enabled();
 	}
 
 	/**
@@ -164,5 +164,6 @@ final class Uninstaller {
 		foreach ( self::OPTIONS as $option ) {
 			Options::delete( $option );
 		}
+		UninstallSetting::delete_everywhere();
 	}
 }

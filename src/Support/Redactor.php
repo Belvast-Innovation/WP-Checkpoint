@@ -148,6 +148,8 @@ final class Redactor {
 		if ( '' === $text ) {
 			return $text;
 		}
+		// Valid UTF-8 first: needles and patterns must not be thrown off by stray bytes.
+		$text = Utf8::scrub( $text );
 
 		if ( array() !== $this->needles ) {
 			$text = str_replace( array_keys( $this->needles ), self::MASK, $text );

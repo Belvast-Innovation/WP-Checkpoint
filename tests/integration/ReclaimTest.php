@@ -344,6 +344,25 @@ final class ReclaimTest extends WP_UnitTestCase {
 		$this->assertSame( CloneClassifier::CLONE, $hotfix->reclaim()->classify()['verdict'] );
 	}
 
+	public function test_undecidable_target_is_refused(): void {
+		list( , $base ) = $this->original();
+		$next = $this->site( 'releases/20260918' );
+		$next->base();
+
+		// An empty directory cannot be proven not to be a link (junction to an empty directory on Windows).
+		$empty = WP_CONTENT_DIR . '/wp-checkpoint-' . substr( basename( $base ), strlen( Directories::DIR_PREFIX ) ) . '-empty';
+		mkdir( $empty );
+		rename( $empty, $base . '-moved' );
+		$state                  = $next->state();
+		$state['previous_path'] = $base . '-moved';
+		$reclaim                = new StorageReclaim( $state, $next->context() );
+
+		$checks = $reclaim->prechecks();
+		$this->assertFalse( $checks['ok'] );
+		$this->assertStringContainsString( 'could not be confirmed', implode( ' ', $checks['problems'] ) );
+		rmdir( $base . '-moved' );
+	}
+
 	public function test_tools_tab_shows_the_confirmation_block_and_settings_show_the_trusted_root(): void {
 		list( , $base ) = $this->original();
 		$next = $this->site( 'releases/20260918' );

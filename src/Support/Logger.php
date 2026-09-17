@@ -159,12 +159,14 @@ final class Logger {
 	 * @return string
 	 */
 	public static function encode_context( array $context ): string {
+		// Invalid UTF-8 would make json_encode() drop values (partial output); scrub first so nothing is lost.
+		$context = Utf8::scrub_deep( $context );
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.json_encode_json_encode -- pure PHP class, also used where WordPress is not loaded.
 		$json = json_encode( $context, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR );
 		if ( is_string( $json ) ) {
 			return str_replace( array( "\r", "\n" ), ' ', $json );
 		}
-		// Encoding failed entirely (invalid UTF-8, recursion): fall back to a
+		// Encoding failed entirely (recursion, unsupported types): fall back to a
 		// key list so the line stays useful without leaking raw values.
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.json_encode_json_encode -- see above.
 		return '{"_unencodable_keys":' . json_encode( array_map( 'strval', array_keys( $context ) ) ) . '}';
@@ -181,7 +183,7 @@ final class Logger {
 			return;
 		}
 
-		$line = $this->redactor->redact( $line ) . "\n";
+		$line = $this->redactor->redact( Utf8::scrub( $line ) ) . "\n";
 
 		clearstatcache( true, $this->path );
 		$size = is_file( $this->path ) ? (int) filesize( $this->path ) : 0;

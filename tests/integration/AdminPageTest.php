@@ -5,11 +5,12 @@ namespace WPCheckpoint\Tests\Integration;
 use WP_UnitTestCase;
 use WPCheckpoint\Admin\Menu;
 use WPCheckpoint\Admin\Page;
-use WPCheckpoint\Admin\Settings;
+use WPCheckpoint\Admin\SettingsActions;
 use WPCheckpoint\Admin\Tab;
 use WPCheckpoint\Plugin;
 use WPCheckpoint\Support\Guard;
 use WPCheckpoint\Support\Uninstaller;
+use WPCheckpoint\Support\UninstallSetting;
 
 final class AdminPageTest extends WP_UnitTestCase {
 
@@ -62,14 +63,16 @@ final class AdminPageTest extends WP_UnitTestCase {
 	public function test_settings_tab_shows_uninstall_checkbox_reflecting_option(): void {
 		$_GET['tab'] = 'settings';
 
-		update_option( Uninstaller::OPTION_DELETE_DATA, false );
+		UninstallSetting::save( false );
 		$html = $this->render( Plugin::instance()->admin_page() );
 		$this->assertStringContainsString( 'name="' . Uninstaller::OPTION_DELETE_DATA . '"', $html );
 		$this->assertStringNotContainsString( "checked='checked'", $html );
-		$this->assertStringContainsString( 'action="options.php"', $html );
+		$this->assertStringContainsString( 'admin-post.php', $html );
+		$this->assertStringContainsString( 'value="' . SettingsActions::ACTION . '"', $html );
 		$this->assertStringContainsString( '_wpnonce', $html );
+		$this->assertStringNotContainsString( 'action="options.php"', $html );
 
-		update_option( Uninstaller::OPTION_DELETE_DATA, true );
+		UninstallSetting::save( true );
 		$html = $this->render( Plugin::instance()->admin_page() );
 		$this->assertStringContainsString( "checked='checked'", $html );
 	}
@@ -103,16 +106,12 @@ final class AdminPageTest extends WP_UnitTestCase {
 		$this->assertStringContainsString( 'pro-content', $html );
 	}
 
-	public function test_setting_is_registered_with_boolean_sanitizer(): void {
-		global $wp_registered_settings;
-		( new Settings() )->register_settings();
-
-		$this->assertArrayHasKey( Uninstaller::OPTION_DELETE_DATA, $wp_registered_settings );
-		$this->assertSame( 'boolean', $wp_registered_settings[ Uninstaller::OPTION_DELETE_DATA ]['type'] );
-
-		$this->assertTrue( sanitize_option( Uninstaller::OPTION_DELETE_DATA, '1' ) );
-		$this->assertTrue( sanitize_option( Uninstaller::OPTION_DELETE_DATA, 'on' ) );
-		$this->assertFalse( sanitize_option( Uninstaller::OPTION_DELETE_DATA, '' ) );
-		$this->assertFalse( sanitize_option( Uninstaller::OPTION_DELETE_DATA, 'anything-else' ) );
+	public function test_checkbox_values_are_normalised(): void {
+		foreach ( array( '1', 'on', 'true', 'yes', 1, true ) as $on ) {
+			$this->assertTrue( \WPCheckpoint\Admin\Settings::to_bool( $on ) );
+		}
+		foreach ( array( '', '0', 'off', 'anything-else', 0, false, null ) as $off ) {
+			$this->assertFalse( \WPCheckpoint\Admin\Settings::to_bool( $off ) );
+		}
 	}
 }

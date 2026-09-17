@@ -8,18 +8,19 @@
 namespace WPCheckpoint\Admin\Tabs;
 
 use WPCheckpoint\Admin\ReclaimActions;
-use WPCheckpoint\Admin\Settings;
+use WPCheckpoint\Admin\EnvironmentActions;
+use WPCheckpoint\Admin\SettingsActions;
 use WPCheckpoint\Plugin;
 use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Support\Guard;
 use WPCheckpoint\Admin\Tab;
-use WPCheckpoint\Support\Uninstaller;
+use WPCheckpoint\Support\UninstallSetting;
 
 defined( 'ABSPATH' ) || exit;
 
 /**
- * Plugin settings. Stored through the Settings API (options.php), which
- * performs its own capability and nonce checks.
+ * Plugin settings. Saved through one admin-post action (SettingsActions) so
+ * the same form works for site options and, on multisite, network options.
  */
 final class SettingsTab implements Tab {
 
@@ -63,11 +64,13 @@ final class SettingsTab implements Tab {
 	 * @return void
 	 */
 	public function render(): void {
-		$option  = Uninstaller::OPTION_DELETE_DATA;
-		$checked = Uninstaller::should_delete_data();
+		$option  = UninstallSetting::OPTION;
+		$checked = UninstallSetting::enabled();
+		$this->render_saved_notice();
 		?>
-		<form method="post" action="options.php">
-			<?php settings_fields( Settings::GROUP ); ?>
+		<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+			<input type="hidden" name="action" value="<?php echo esc_attr( SettingsActions::ACTION ); ?>" />
+			<input type="hidden" name="_wpnonce" value="<?php echo esc_attr( Guard::nonce( SettingsActions::NONCE_ACTION ) ); ?>" />
 			<table class="form-table" role="presentation">
 				<tr>
 					<th scope="row"><?php esc_html_e( 'Uninstall', 'wp-checkpoint' ); ?></th>
@@ -86,6 +89,19 @@ final class SettingsTab implements Tab {
 		</form>
 		<?php
 		$this->render_trusted_root();
+	}
+
+	/**
+	 * One-line confirmation after saving.
+	 *
+	 * @return void
+	 */
+	private function render_saved_notice(): void {
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- display-only flag set by our own redirect.
+		$result = isset( $_GET[ EnvironmentActions::RESULT_PARAM ] ) ? sanitize_key( wp_unslash( $_GET[ EnvironmentActions::RESULT_PARAM ] ) ) : '';
+		if ( SettingsActions::RESULT === $result ) {
+			echo '<div class="notice notice-success inline"><p>' . esc_html__( 'Settings saved.', 'wp-checkpoint' ) . '</p></div>';
+		}
 	}
 
 	/**

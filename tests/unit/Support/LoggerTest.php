@@ -39,12 +39,25 @@ final class LoggerTest extends TestCase {
 		$this->assertStringContainsString( '"password":"[redacted]"', $lines[1] );
 	}
 
-	public function test_unencodable_context_falls_back_to_key_list(): void {
-		$logger = new Logger( $this->dir . '/x.log', new Redactor() );
-		$logger->info( 'bad', array( 'blob' => "\xB1\x31", 'ok' => 1 ) );
-		$line = file_get_contents( $logger->path() );
+	public function test_invalid_utf8_in_context_and_message_is_scrubbed_not_dropped(): void {
+		$logger = new Logger( $this->dir . '/x.log', new Redactor( array( 'Hunter2!x' ) ) );
+		$logger->info( "bad \xFF message pw=Hunter2!x", array( 'blob' => "\xB1\x31", 'nested' => array( "k\xFE" => "v\xD6\xD0" ), 'ok' => 1 ) );
+		$line = (string) file_get_contents( $logger->path() );
 		$this->assertStringContainsString( '"ok":1', $line );
+		$this->assertStringContainsString( '"blob":"' . \WPCheckpoint\Support\Utf8::REPLACEMENT . '1"', $line, 'value kept, invalid byte replaced' );
+		$this->assertStringContainsString( '"k' . \WPCheckpoint\Support\Utf8::REPLACEMENT . '":"v' . \WPCheckpoint\Support\Utf8::REPLACEMENT . \WPCheckpoint\Support\Utf8::REPLACEMENT . '"', $line );
+		$this->assertStringNotContainsString( 'null', $line, 'nothing was dropped by JSON_PARTIAL_OUTPUT_ON_ERROR' );
+		$this->assertStringNotContainsString( 'Hunter2!x', $line );
 		$this->assertStringNotContainsString( "\xB1\x31", $line );
+		$this->assertSame( 1, preg_match( '//u', $line ) );
+	}
+
+	public function test_unencodable_values_become_null_but_the_line_is_written(): void {
+		$logger = new Logger( $this->dir . '/x.log', new Redactor() );
+		$logger->info( 'bad', array( 'blob' => fopen( 'php://memory', 'r' ), 'ok' => 1 ) );
+		$line = (string) file_get_contents( $logger->path() );
+		$this->assertStringContainsString( '"blob":null', $line, 'JSON_PARTIAL_OUTPUT_ON_ERROR replaces what cannot be encoded' );
+		$this->assertStringContainsString( '"ok":1', $line );
 	}
 
 	public function test_size_cap_writes_marker_and_stops(): void {

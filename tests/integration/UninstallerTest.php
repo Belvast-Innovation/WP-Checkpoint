@@ -4,12 +4,13 @@ namespace WPCheckpoint\Tests\Integration;
 
 use WP_UnitTestCase;
 use WPCheckpoint\Support\Uninstaller;
+use WPCheckpoint\Support\UninstallSetting;
 
 final class UninstallerTest extends WP_UnitTestCase {
 
 	public function test_keeps_options_by_default(): void {
 		update_option( Uninstaller::OPTION_VERSION, '1.2.3' );
-		delete_option( Uninstaller::OPTION_DELETE_DATA );
+		UninstallSetting::save( false );
 
 		$this->assertFalse( Uninstaller::should_delete_data() );
 		Uninstaller::run();
@@ -19,13 +20,16 @@ final class UninstallerTest extends WP_UnitTestCase {
 
 	public function test_deletes_options_when_opted_in(): void {
 		update_option( Uninstaller::OPTION_VERSION, '1.2.3' );
-		update_option( Uninstaller::OPTION_DELETE_DATA, true );
+		UninstallSetting::save( true );
 
 		$this->assertTrue( Uninstaller::should_delete_data() );
 		Uninstaller::run();
 
 		foreach ( Uninstaller::OPTIONS as $option ) {
 			$this->assertFalse( get_option( $option ), "{$option} should be deleted" );
+			if ( is_multisite() ) {
+				$this->assertFalse( get_site_option( $option ), "{$option} should be deleted network-wide" );
+			}
 		}
 	}
 

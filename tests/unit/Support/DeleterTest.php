@@ -144,6 +144,62 @@ final class DeleterTest extends TestCase {
 		$this->assertFalse( Deleter::is_reparse( $this->base() . '/missing' ) );
 	}
 
+	public function test_leading_link_child_does_not_make_the_directory_a_link(): void {
+		$this->require_symlinks();
+		// "0-link" sorts before "a" and "top.txt": the first scandir() entry is a link.
+		symlink( $this->root . '/outside/dir', $this->base() . '/0-link' );
+		mkdir( $this->base() . '/mixed' );
+		symlink( $this->root . '/outside/secret.txt', $this->base() . '/mixed/0-link' );
+		file_put_contents( $this->base() . '/mixed/real.txt', 'x' );
+
+		$this->assertSame( Deleter::REPARSE_PLAIN, Deleter::reparse_state( $this->base() ) );
+		$this->assertFalse( Deleter::is_reparse( $this->base() ) );
+		$this->assertSame( Deleter::REPARSE_PLAIN, Deleter::reparse_state( $this->base() . '/mixed' ) );
+
+		$result = Deleter::delete_tree( $this->base(), $this->base() . '/mixed' );
+		$this->assertSame( array(), $result['failed'] );
+		$this->assertDirectoryDoesNotExist( $this->base() . '/mixed' );
+		$this->assert_outside_untouched();
+	}
+
+	public function test_empty_or_link_only_directories_are_undecidable_but_deletable(): void {
+		$this->require_symlinks();
+		mkdir( $this->base() . '/empty' );
+		mkdir( $this->base() . '/links-only' );
+		symlink( $this->root . '/outside/dir', $this->base() . '/links-only/d' );
+		symlink( $this->root . '/outside/secret.txt', $this->base() . '/links-only/f' );
+
+		if ( Paths::is_windows() ) {
+			$this->assertNotSame( Deleter::REPARSE_LINK, Deleter::reparse_state( $this->base() . '/empty' ) );
+		} else {
+			$this->assertSame( Deleter::REPARSE_UNKNOWN, Deleter::reparse_state( $this->base() . '/empty' ) );
+			$this->assertSame( Deleter::REPARSE_UNKNOWN, Deleter::reparse_state( $this->base() . '/links-only' ) );
+		}
+		$this->assertFalse( Deleter::is_reparse( $this->base() . '/empty' ), 'unknown counts as not a link for deletion' );
+		$this->assertFalse( Deleter::is_reparse( $this->base() . '/links-only' ) );
+
+		$this->assertSame( array(), Deleter::delete_tree( $this->base(), $this->base() . '/empty' )['failed'] );
+		$this->assertSame( array(), Deleter::delete_tree( $this->base(), $this->base() . '/links-only' )['failed'] );
+		$this->assertDirectoryDoesNotExist( $this->base() . '/links-only' );
+		$this->assert_outside_untouched();
+	}
+
+	public function test_windows_junction_to_an_empty_directory_is_not_plain(): void {
+		if ( ! Paths::is_windows() ) {
+			$this->markTestSkipped( 'Windows only.' );
+		}
+		mkdir( $this->root . '\outside\empty' );
+		$junction = $this->base() . '\junction-empty';
+		exec( 'cmd /c mklink /J "' . $junction . '" "' . $this->root . '\outside\empty" 2>&1', $output, $code );
+		if ( 0 !== $code ) {
+			$this->markTestSkipped( 'mklink /J failed: ' . implode( ' ', $output ) );
+		}
+		$this->assertNotSame( Deleter::REPARSE_PLAIN, Deleter::reparse_state( $junction ), 'a junction to an empty directory must never be reported as plain; StorageReclaim refuses anything that is not plain' );
+		$this->assertSame( array(), Deleter::empty_directory( $this->base() )['failed'] );
+		$this->assertDirectoryDoesNotExist( $junction );
+		$this->assertDirectoryExists( $this->root . '\outside\empty', 'the junction target survives' );
+	}
+
 	public function test_windows_junction_is_removed_as_link(): void {
 		if ( ! Paths::is_windows() ) {
 			$this->markTestSkipped( 'Windows only.' );
