@@ -59,6 +59,28 @@ final class Redactor {
 	}
 
 	/**
+	 * Secret values of this installation: database credentials, keys, salts
+	 * and any extra values (the storage token). Missing constants are skipped.
+	 *
+	 * @param string[] $extra Additional secrets.
+	 * @return string[]
+	 */
+	public static function installation_secrets( array $extra = array() ): array {
+		$secrets = array();
+		foreach ( array( 'DB_PASSWORD', 'DB_USER', 'AUTH_KEY', 'SECURE_AUTH_KEY', 'LOGGED_IN_KEY', 'NONCE_KEY', 'AUTH_SALT', 'SECURE_AUTH_SALT', 'LOGGED_IN_SALT', 'NONCE_SALT' ) as $constant ) {
+			if ( defined( $constant ) && is_string( constant( $constant ) ) ) {
+				$secrets[] = constant( $constant );
+			}
+		}
+		foreach ( $extra as $value ) {
+			if ( is_string( $value ) && '' !== $value ) {
+				$secrets[] = $value;
+			}
+		}
+		return $secrets;
+	}
+
+	/**
 	 * Register additional secret values. Values can only be added, never removed.
 	 *
 	 * Internal API for the plugin's own components (storage destinations keep

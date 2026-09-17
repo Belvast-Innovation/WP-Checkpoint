@@ -100,14 +100,18 @@ final class Directories {
 		$stored = Options::get( self::OPTION, array() );
 		return array_merge(
 			array(
-				'install_id'     => '',
-				'token'          => '',
-				'path'           => '',
-				'source'         => '',
-				'provisional'    => false,
-				'verification'   => array(),
-				'clone_detected' => false,
-				'previous_path'  => '',
+				'install_id'          => '',
+				'token'               => '',
+				'path'                => '',
+				'source'              => '',
+				'provisional'         => false,
+				'verification'        => array(),
+				'clone_detected'      => false,
+				'previous_path'       => '',
+				'abspath'             => '',
+				'previous_abspath'    => '',
+				'trusted_deploy_root' => '',
+				'auto_reclaimed'      => array(),
 			),
 			is_array( $stored ) ? $stored : array()
 		);
@@ -210,9 +214,94 @@ final class Directories {
 	 */
 	public function acknowledge_clone(): void {
 		$this->base();
-		$this->state['clone_detected'] = false;
-		$this->state['previous_path']  = '';
+		$this->state['clone_detected']   = false;
+		$this->state['previous_path']    = '';
+		$this->state['previous_abspath'] = '';
 		$this->save_state();
+	}
+
+	/**
+	 * Environment of this instance.
+	 *
+	 * @return array{abspath: string, content_dir: string, document_root: string, is_web_request: bool, custom_dir: string}
+	 */
+	public function context(): array {
+		return $this->context;
+	}
+
+	/**
+	 * Reclaim helper bound to the current state.
+	 *
+	 * @return StorageReclaim
+	 */
+	public function reclaim(): StorageReclaim {
+		$this->base();
+		return new StorageReclaim( $this->state, $this->context );
+	}
+
+	/**
+	 * Switch back to a reclaimed directory after its marker was rewritten.
+	 *
+	 * @param string $trusted_root Deployment root to trust from now on ('' keeps the current setting).
+	 * @return void
+	 */
+	public function finish_reclaim( string $trusted_root = '' ): void {
+		$this->base();
+		$dir = (string) $this->state['previous_path'];
+		if ( '' === $dir ) {
+			return;
+		}
+		$abandoned = (string) $this->state['path'];
+		if ( '' !== $trusted_root ) {
+			$this->state['trusted_deploy_root'] = $trusted_root;
+		}
+		$this->state['clone_detected']   = false;
+		$this->state['previous_path']    = '';
+		$this->state['previous_abspath'] = '';
+		$this->state['token']            = self::SOURCE_CUSTOM === $this->state['source'] ? $this->state['token'] : substr( basename( $dir ), strlen( self::DIR_PREFIX ) );
+		$this->base                      = null;
+		$this->adopt( $dir, $this->source_for( $dir ), false );
+		$this->save_state();
+
+		if ( '' !== $abandoned && $abandoned !== $dir && is_dir( $abandoned ) && $this->holds_only_plugin_files( $abandoned ) ) {
+			Deleter::empty_directory( $abandoned );
+			@rmdir( $abandoned ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_rmdir -- best effort cleanup of the empty replacement directory.
+		}
+	}
+
+	/**
+	 * Forget the trusted deployment root.
+	 *
+	 * @return void
+	 */
+	public function untrust_deploy_root(): void {
+		$this->base();
+		$this->state['trusted_deploy_root'] = '';
+		$this->save_state();
+	}
+
+	/**
+	 * Clear the automatic take-over notice.
+	 *
+	 * @return void
+	 */
+	public function clear_auto_reclaimed(): void {
+		$this->base();
+		$this->state['auto_reclaimed'] = array();
+		$this->save_state();
+	}
+
+	/**
+	 * Source constant for a directory by its location.
+	 *
+	 * @param string $dir Directory.
+	 * @return string
+	 */
+	private function source_for( string $dir ): string {
+		if ( '' !== $this->context['custom_dir'] && Paths::same( $this->context['custom_dir'], $dir, Paths::is_windows() ) ) {
+			return self::SOURCE_CUSTOM;
+		}
+		return Paths::is_same_or_inside( $this->context['content_dir'], $dir ) ? self::SOURCE_CONTENT : self::SOURCE_OUTSIDE;
 	}
 
 	/**
@@ -252,16 +341,57 @@ final class Directories {
 					$this->maybe_migrate();
 					return;
 				}
-				// Same options, different installation: a clone or a migrated copy.
-				$this->state['clone_detected'] = true;
-				$this->state['previous_path']  = $existing;
-				$this->state['token']          = '';
-				$this->state['verification']   = array();
+				// Same options, different ABSPATH: a clone, a move, or a new release of a deployment.
+				$this->state['clone_detected']   = true;
+				$this->state['previous_path']    = $existing;
+				$this->state['previous_abspath'] = (string) $this->state['abspath'];
+				if ( $this->auto_reclaim( $existing ) ) {
+					return;
+				}
+				$this->state['token']        = '';
+				$this->state['verification'] = array();
 			}
 		}
 
 		$token = self::is_valid_token( $this->state['token'] ) ? $this->state['token'] : bin2hex( random_bytes( 6 ) );
 		$this->select( $token );
+	}
+
+	/**
+	 * Take a sibling release over without asking when the deployment root is trusted.
+	 *
+	 * @param string $dir The directory recorded in the state.
+	 * @return bool
+	 */
+	private function auto_reclaim( string $dir ): bool {
+		$reclaim = new StorageReclaim( $this->state, $this->context );
+		if ( ! $reclaim->auto() ) {
+			return false;
+		}
+		$from                          = (string) $this->state['previous_abspath'];
+		$this->state['auto_reclaimed'] = array(
+			'at'   => time(),
+			'from' => $from,
+			'to'   => (string) $this->context['abspath'],
+		);
+		$this->finish_reclaim();
+		$this->log_storage( sprintf( 'Storage directory %s reclaimed automatically after a deployment: ABSPATH changed from %s to %s.', $dir, $from, (string) $this->context['abspath'] ) );
+		return true;
+	}
+
+	/**
+	 * Append a line to logs/storage.log in the base directory.
+	 *
+	 * @param string $message Message.
+	 * @return void
+	 */
+	private function log_storage( string $message ): void {
+		$logs = $this->logs();
+		if ( '' === $logs || ! is_dir( $logs ) ) {
+			return;
+		}
+		$redactor = new Redactor( Redactor::installation_secrets( array( (string) $this->state['token'] ) ) );
+		( new Logger( $logs . DIRECTORY_SEPARATOR . 'storage.log', $redactor ) )->info( $message );
 	}
 
 	/**
@@ -419,12 +549,16 @@ final class Directories {
 	private function adopt( string $dir, string $source, bool $provisional ): void {
 		$this->base  = $dir;
 		$this->error = '';
-		$changed     = $dir !== $this->state['path'] || $source !== $this->state['source'] || $provisional !== (bool) $this->state['provisional'];
+		$abspath     = rtrim( Paths::normalize( (string) $this->context['abspath'] ), '/' ) . '/';
+		$changed     = $dir !== $this->state['path'] || $source !== $this->state['source'] || $provisional !== (bool) $this->state['provisional'] || $abspath !== $this->state['abspath'];
 		if ( $changed ) {
-			$this->state['path']         = $dir;
-			$this->state['source']       = $source;
-			$this->state['provisional']  = $provisional;
-			$this->state['verification'] = array();
+			if ( $dir !== $this->state['path'] ) {
+				$this->state['verification'] = array();
+			}
+			$this->state['path']        = $dir;
+			$this->state['source']      = $source;
+			$this->state['provisional'] = $provisional;
+			$this->state['abspath']     = $abspath;
 			$this->save_state();
 		}
 	}
