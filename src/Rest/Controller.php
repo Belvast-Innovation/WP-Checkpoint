@@ -17,9 +17,10 @@ defined( 'ABSPATH' ) || exit;
  * Fixes the namespace and provides the shared permission callback. Subclasses
  * must override register_routes(); the parent implementation only warns.
  *
- * Every route registered by a subclass must use permission_check() (or a
- * stricter check); the integration suite asserts that anonymous and
- * non-admin requests are rejected on all routes in the namespace.
+ * Every route registered by a subclass must use permission_check(); it is
+ * final so subclasses cannot weaken it. The integration suite asserts that
+ * anonymous and non-admin requests are rejected on all routes in the
+ * namespace and that no plugin route lives outside it.
  */
 abstract class Controller extends WP_REST_Controller {
 
@@ -41,7 +42,7 @@ abstract class Controller extends WP_REST_Controller {
 	 * @param WP_REST_Request $request Incoming request.
 	 * @return true|\WP_Error
 	 */
-	public function permission_check( WP_REST_Request $request ) {
+	final public function permission_check( WP_REST_Request $request ) {
 		return Guard::check_rest( $request );
 	}
 }

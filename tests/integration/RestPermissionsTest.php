@@ -41,6 +41,9 @@ final class RestPermissionsTest extends WP_UnitTestCase {
 	public static function wpSetUpBeforeClass( $factory ): void {
 		self::$subscriber = $factory->user->create( array( 'role' => 'subscriber' ) );
 		self::$admin      = $factory->user->create( array( 'role' => 'administrator' ) );
+		if ( is_multisite() ) {
+			grant_super_admin( self::$admin );
+		}
 	}
 
 	public function set_up(): void {
@@ -121,6 +124,19 @@ final class RestPermissionsTest extends WP_UnitTestCase {
 			$this->assertNotContains( $response->get_status(), array( 401, 403 ), "{$label} must not reject administrators" );
 			$this->assertNotSame( 400, $response->get_status(), "{$label} example request is invalid (400); fix EXAMPLES" );
 			$this->assertNotSame( 404, $response->get_status(), "{$label} example path does not match the route (404); fix EXAMPLES" );
+		}
+	}
+
+	public function test_plugin_routes_only_live_in_the_plugin_namespace(): void {
+		$prefix = '/' . Controller::ROUTE_NAMESPACE;
+		foreach ( array_keys( rest_get_server()->get_routes() ) as $route ) {
+			if ( false === stripos( $route, 'checkpoint' ) ) {
+				continue;
+			}
+			$this->assertTrue(
+				$route === $prefix || 0 === strpos( $route, $prefix . '/' ),
+				"Route {$route} mentions the plugin but is outside " . Controller::ROUTE_NAMESPACE . ', so the permission sweep would not cover it'
+			);
 		}
 	}
 
