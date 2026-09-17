@@ -115,16 +115,18 @@ final class Deleter {
 		if ( is_link( $path ) ) {
 			return true;
 		}
-		if ( ! is_dir( $path ) ) {
-			return false;
-		}
 		if ( Paths::is_windows() ) {
+			// Checked before is_dir(): stat() reports a junction with mode 0, so
+			// is_dir() and is_file() are both false for it.
 			$final        = @readlink( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- readlink() warns when it cannot resolve; handled below.
 			$final_parent = @readlink( dirname( $path ) ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
 			if ( is_string( $final ) && '' !== $final && is_string( $final_parent ) && '' !== $final_parent ) {
 				$expected = rtrim( self::strip_windows_prefix( $final_parent ), '/\\' ) . DIRECTORY_SEPARATOR . basename( $path );
 				return ! Paths::same( $expected, self::strip_windows_prefix( $final ), true );
 			}
+		}
+		if ( ! is_dir( $path ) ) {
+			return false;
 		}
 
 		$parent = realpath( dirname( $path ) );
