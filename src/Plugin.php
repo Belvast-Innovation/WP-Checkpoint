@@ -14,6 +14,8 @@ use WPCheckpoint\Admin\Notices;
 use WPCheckpoint\Admin\ReclaimActions;
 use WPCheckpoint\Admin\Page;
 use WPCheckpoint\Admin\SettingsActions;
+use WPCheckpoint\Jobs\JobRepository;
+use WPCheckpoint\Jobs\JobTypes;
 use WPCheckpoint\Admin\Tabs;
 use WPCheckpoint\Admin\Tabs\BackupsTab;
 use WPCheckpoint\Admin\Tabs\CheckpointsTab;
@@ -24,6 +26,7 @@ use WPCheckpoint\Rest\ProbeController;
 use WPCheckpoint\Rest\StatusController;
 use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Support\Redactor;
+use WPCheckpoint\Support\Schema;
 use WPCheckpoint\Support\Uninstaller;
 use WPCheckpoint\Support\UninstallSetting;
 
@@ -62,6 +65,20 @@ final class Plugin {
 	 * @var Redactor|null
 	 */
 	private $redactor = null;
+
+	/**
+	 * Job repository.
+	 *
+	 * @var JobRepository|null
+	 */
+	private $jobs = null;
+
+	/**
+	 * Job type registry.
+	 *
+	 * @var JobTypes|null
+	 */
+	private $job_types = null;
 
 	/**
 	 * Get the plugin instance.
@@ -144,6 +161,32 @@ final class Plugin {
 	 */
 	public function reset_directories(): void {
 		$this->directories = null;
+		$this->jobs        = null;
+		$this->redactor    = null; // The storage token is one of its secrets.
+	}
+
+	/**
+	 * Job repository bound to the storage directories.
+	 *
+	 * @return JobRepository
+	 */
+	public function jobs(): JobRepository {
+		if ( null === $this->jobs ) {
+			$this->jobs = new JobRepository( $this->directories(), $this->redactor() );
+		}
+		return $this->jobs;
+	}
+
+	/**
+	 * Registered job types (built-in ones are added by later tasks).
+	 *
+	 * @return JobTypes
+	 */
+	public function job_types(): JobTypes {
+		if ( null === $this->job_types ) {
+			$this->job_types = new JobTypes();
+		}
+		return $this->job_types;
 	}
 
 	/**
@@ -222,7 +265,7 @@ final class Plugin {
 		update_option( Uninstaller::OPTION_VERSION, WPCHECKPOINT_VERSION, false );
 		// Activation from the admin is a proper web request: the best moment to choose the storage location.
 		self::instance()->directories()->base();
-		// T010: create/upgrade database tables via dbDelta.
+		Schema::ensure();
 	}
 
 	/**

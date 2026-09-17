@@ -303,12 +303,16 @@ final class StorageReclaim {
 		if ( ! is_dir( $tmp ) ) {
 			return false;
 		}
-		if ( array() !== self::files( $tmp . '/' . self::JOB_LOCK_PATTERN ) ) {
-			return true;
+		foreach ( self::files( $tmp . '/' . self::JOB_LOCK_PATTERN ) as $lock ) {
+			// A lock file whose recorded expiry passed more than ACTIVITY_WINDOW ago is a leftover
+			// of a crashed process (the database lock expired with it); the reaper removes it.
+			if ( ! \WPCheckpoint\Jobs\LockFile::is_stale( $lock, time(), self::ACTIVITY_WINDOW ) ) {
+				return true;
+			}
 		}
 		$cutoff = time() - self::ACTIVITY_WINDOW;
 		foreach ( self::files( $tmp . '/*' ) as $file ) {
-			if ( in_array( basename( $file ), array( 'index.php', '.htaccess' ), true ) ) {
+			if ( in_array( basename( $file ), array( 'index.php', '.htaccess' ), true ) || \WPCheckpoint\Jobs\LockFile::job_id_from_path( $file ) > 0 ) {
 				continue;
 			}
 			if ( (int) filemtime( $file ) > $cutoff ) {

@@ -68,9 +68,9 @@ final class Uninstaller {
 		}
 
 		self::delete_storage();
+		Schema::drop();
 		self::delete_options();
 		self::delete_user_meta();
-		// T010: drop the plugin tables.
 	}
 
 	/**

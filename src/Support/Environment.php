@@ -612,9 +612,37 @@ final class Environment {
 	 * @return Check[]
 	 */
 	private function database_checks( array $db ): array {
-		$info = Thresholds::database( (string) $db['server_info'] );
-		$size = isset( $db['size'] ) ? $db['size'] : null;
+		$info   = Thresholds::database( (string) $db['server_info'] );
+		$size   = isset( $db['size'] ) ? $db['size'] : null;
+		$schema = Schema::stored();
+		$counts = array();
+		try {
+			$counts = ( new \WPCheckpoint\Jobs\JobRepository( $this->directories ) )->counts();
+		} catch ( \Throwable $e ) {
+			$counts = array();
+		}
+		if ( ! Schema::table_exists() ) {
+			$jobs = new Check( 'database.jobs', self::GROUP_DATABASE, __( 'Job table', 'wp-checkpoint' ), __( 'missing', 'wp-checkpoint' ), Check::ERROR, __( 'The table will be created when the plugin page is opened; if this persists, the database user lacks CREATE TABLE.', 'wp-checkpoint' ), __( 'No job can run without it.', 'wp-checkpoint' ) );
+		} elseif ( ! Schema::is_compatible() ) {
+			$jobs = new Check( 'database.jobs', self::GROUP_DATABASE, __( 'Job table', 'wp-checkpoint' ), sprintf( 'schema v%d (requires plugin schema %d)', $schema['version'], $schema['min_compatible'] ), Check::ERROR, __( 'The database structure was created by a newer version of WP Checkpoint and this version cannot use it. Please update the plugin.', 'wp-checkpoint' ), __( 'Jobs cannot be created or continued.', 'wp-checkpoint' ) );
+		} else {
+			$summary = array();
+			foreach ( $counts as $status => $n ) {
+				if ( $n > 0 ) {
+					$summary[] = $n . ' ' . $status;
+				}
+			}
+			$jobs = new Check(
+				'database.jobs',
+				self::GROUP_DATABASE,
+				__( 'Job table', 'wp-checkpoint' ),
+				sprintf( 'schema v%d', $schema['version'] ) . ( array() === $summary ? '' : ' (' . implode( ', ', $summary ) . ')' ),
+				Schema::is_newer() ? Check::WARNING : Check::OK,
+				Schema::is_newer() ? __( 'The database structure comes from a newer plugin version; this version can still use it.', 'wp-checkpoint' ) : ''
+			);
+		}
 		return array(
+			$jobs,
 			new Check(
 				'database.version',
 				self::GROUP_DATABASE,

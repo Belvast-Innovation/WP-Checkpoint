@@ -1,0 +1,411 @@
+<?php
+
+namespace WPCheckpoint\Tests\Integration;
+
+use WP_UnitTestCase;
+use WPCheckpoint\Admin\Notices;
+use WPCheckpoint\Admin\ReclaimActions;
+use WPCheckpoint\Jobs\InvalidTransition;
+use WPCheckpoint\Jobs\Job;
+use WPCheckpoint\Jobs\JobRepository;
+use WPCheckpoint\Jobs\JobsUnavailable;
+use WPCheckpoint\Jobs\LockFile;
+use WPCheckpoint\Jobs\StaleJob;
+use WPCheckpoint\Support\Deleter;
+use WPCheckpoint\Support\Directories;
+use WPCheckpoint\Support\Options;
+use WPCheckpoint\Support\Schema;
+use WPCheckpoint\Support\StorageReclaim;
+
+final class JobRepositoryTest extends WP_UnitTestCase {
+
+	/** @var Directories */
+	private $dirs;
+
+	/** @var string */
+	private $base;
+
+	/** @var int */
+	private $now;
+
+	/** @var JobRepository */
+	private $repo;
+
+	/** @var string */
+	private $root;
+
+	public function set_up(): void {
+		parent::set_up();
+		global $wpdb;
+		// The core test case rewrites CREATE TABLE into CREATE TEMPORARY TABLE, which
+		// SHOW TABLES cannot see; the plugin's own table is created for real and dropped again.
+		remove_filter( 'query', array( $this, '_create_temporary_tables' ) );
+		remove_filter( 'query', array( $this, '_drop_temporary_tables' ) );
+		$wpdb->query( 'DROP TABLE IF EXISTS ' . Schema::jobs_table() );
+		Options::delete( Schema::OPTION );
+		Options::delete( Directories::OPTION );
+		delete_site_transient( 'wpcheckpoint_jobs_reaped' );
+		delete_site_transient( 'wpcheckpoint_jobs_purged' );
+		$this->root = sys_get_temp_dir() . '/wpcheckpoint-jobs-' . bin2hex( random_bytes( 4 ) );
+		mkdir( $this->root . '/releases/a/wp-includes', 0755, true );
+		mkdir( $this->root . '/releases/b/wp-includes', 0755, true );
+		$this->dirs = $this->site( 'releases/a' );
+		$this->base = $this->dirs->base();
+		$this->assertNotSame( '', $this->base );
+		$this->now  = 1_800_000_000;
+		$this->repo = $this->repo_for( $this->dirs );
+		$this->assertSame( 'created', Schema::ensure()['action'] );
+	}
+
+	public function tear_down(): void {
+		global $wpdb;
+		$wpdb->query( 'DROP TABLE IF EXISTS ' . Schema::jobs_table() );
+		foreach ( glob( WP_CONTENT_DIR . '/wp-checkpoint-*' ) ?: array() as $dir ) {
+			Deleter::empty_directory( $dir );
+			@rmdir( $dir );
+		}
+		Deleter::empty_directory( $this->root );
+		@rmdir( $this->root );
+		Options::delete( Schema::OPTION );
+		Options::delete( Directories::OPTION );
+		parent::tear_down();
+	}
+
+	private function site( string $abspath ): Directories {
+		return new Directories( array( 'is_web_request' => false, 'document_root' => '', 'abspath' => $this->root . '/' . $abspath . '/' ) );
+	}
+
+	private function repo_for( Directories $dirs ): JobRepository {
+		return new JobRepository( $dirs, null, function (): int {
+			return $this->now;
+		} );
+	}
+
+	public function test_schema_is_created_once_and_recreated_when_the_table_is_dropped(): void {
+		global $wpdb;
+		$this->assertTrue( Schema::table_exists() );
+		$this->assertSame( array( 'version' => 1, 'min_compatible' => 1 ), Schema::stored() );
+		$this->assertSame( 'none', Schema::ensure()['action'] );
+		$this->assertStringStartsWith( $wpdb->base_prefix, Schema::jobs_table() );
+
+		$wpdb->query( 'DROP TABLE ' . Schema::jobs_table() );
+		$this->assertSame( 'created', Schema::ensure()['action'], 'a missing table is recreated' );
+		$this->assertTrue( Schema::table_exists() );
+	}
+
+	public function test_newer_but_compatible_schema_is_used_incompatible_is_refused(): void {
+		Options::set( Schema::OPTION, array( 'version' => Schema::CURRENT + 1, 'min_compatible' => Schema::CURRENT ) );
+		$this->assertSame( 'newer', Schema::ensure()['action'] );
+		$this->assertTrue( Schema::is_compatible() );
+		$this->assertTrue( Schema::is_newer() );
+		$this->assertSame( array( 'version' => Schema::CURRENT + 1, 'min_compatible' => Schema::CURRENT ), Schema::stored(), 'never downgraded' );
+		$job = $this->repo->create( 'export' );
+		$this->assertTrue( $this->repo->gate( $job )['allowed'] );
+
+		Options::set( Schema::OPTION, array( 'version' => Schema::CURRENT + 2, 'min_compatible' => Schema::CURRENT + 1 ) );
+		$this->assertSame( 'incompatible', Schema::ensure()['action'] );
+		$this->assertFalse( Schema::is_compatible() );
+		$gate = $this->repo->gate( $job );
+		$this->assertFalse( $gate['allowed'] );
+		$this->assertSame( 'schema', $gate['reason'] );
+		$this->expectException( JobsUnavailable::class );
+		$this->repo->create( 'export' );
+	}
+
+	public function test_create_and_find(): void {
+		$job = $this->repo->create( 'export', 42, array( 'table' => 'wp_posts', 'offset' => 0 ) );
+		$this->assertGreaterThan( 0, $job->id );
+		$this->assertSame( Job::QUEUED, $job->status );
+		$this->assertSame( get_current_blog_id(), $job->site_id );
+		$this->assertSame( 42, $job->owner_user );
+		$this->assertSame( array( 'table' => 'wp_posts', 'offset' => 0 ), $job->cursor );
+		$this->assertSame( $this->dirs->state()['token'], $job->storage_token );
+		$this->assertSame( $this->base, $job->storage_path );
+		$this->assertMatchesRegularExpression( '#^logs/job-' . $job->id . '-[0-9a-f]{8}\.log$#', $job->log_path );
+		$this->assertSame( $this->now, $job->created_at );
+		$this->assertSame( $this->now, $job->progress_at );
+		$this->assertNull( $this->repo->find( 999999 ) );
+		$this->assertSame( array( $job->id ), array_map( static function ( Job $j ) { return $j->id; }, $this->repo->list_jobs() ) );
+		$this->assertSame( 1, $this->repo->counts()[ Job::QUEUED ] );
+	}
+
+	public function test_cursor_must_not_contain_credentials(): void {
+		$this->expectException( \InvalidArgumentException::class );
+		$this->repo->create( 'export', 0, array( 'note' => 'db password is ' . DB_PASSWORD ) );
+	}
+
+	public function test_lock_is_a_compare_and_set_between_drivers(): void {
+		$job = $this->repo->create( 'export' );
+
+		$first = $this->repo->acquire( $job->id, 100 );
+		$this->assertNotNull( $first );
+		$this->assertSame( Job::RUNNING, $first['job']->status );
+		$this->assertSame( 1, $first['job']->attempts );
+		$this->assertSame( $this->now, $first['job']->started_at );
+		$this->assertSame( $this->now + 100, $first['job']->locked_until );
+		$lock = LockFile::path( $this->base, $job->id );
+		$this->assertFileExists( $lock );
+		$this->assertTrue( LockFile::is_owned_by( $lock, $first['token'] ) );
+		$this->assertStringNotContainsString( $first['token'], (string) file_get_contents( $lock ), 'only the hash is on disk' );
+
+		$this->assertNull( $this->repo->acquire( $job->id, 100 ), 'a second driver is refused while the lock is held' );
+		$this->assertFalse( $this->repo->heartbeat( $first['job'], 'someone-else', 100 ) );
+		$this->assertFalse( $this->repo->release( $first['job'], 'someone-else' ) );
+		$this->assertTrue( $this->repo->heartbeat( $first['job'], $first['token'], 200 ) );
+		$this->assertSame( $this->now + 200, $this->repo->find( $job->id )->locked_until );
+
+		$this->assertTrue( $this->repo->release( $first['job'], $first['token'] ) );
+		$this->assertFileDoesNotExist( $lock );
+		$this->assertSame( Job::RUNNING, $this->repo->find( $job->id )->status, 'still in progress between ticks' );
+
+		$second = $this->repo->acquire( $job->id, 100 );
+		$this->assertNotNull( $second, 'released locks can be taken again' );
+		$this->assertSame( 1, $second['job']->attempts, 'attempts only counts starts from queued' );
+	}
+
+	public function test_expired_lock_can_be_taken_over_and_the_lock_file_is_replaced(): void {
+		$job   = $this->repo->create( 'export' );
+		$first = $this->repo->acquire( $job->id, 100 );
+		$this->assertNotNull( $first );
+
+		$this->now += 101;
+		$second     = $this->repo->acquire( $job->id, 100 );
+		$this->assertNotNull( $second, 'the expired lock is taken over' );
+		$this->assertNotSame( $first['token'], $second['token'] );
+		$lock = LockFile::path( $this->base, $job->id );
+		$this->assertTrue( LockFile::is_owned_by( $lock, $second['token'] ) );
+		$this->assertFalse( LockFile::is_owned_by( $lock, $first['token'] ) );
+		$this->assertFalse( $this->repo->heartbeat( $first['job'], $first['token'] ), 'the old holder lost the lock' );
+		$this->assertFalse( $this->repo->release( $first['job'], $first['token'] ) );
+		$this->assertFileExists( $lock, 'the old holder cannot remove the new holder\'s lock file' );
+	}
+
+	public function test_transitions_are_guarded_by_the_expected_status(): void {
+		$job = $this->repo->create( 'export' );
+		$this->assertSame( Job::CANCELLED, $this->repo->transition( $job, Job::CANCELLED )->status );
+		$this->assertSame( $this->now, $this->repo->find( $job->id )->finished_at );
+
+		$job = $this->repo->create( 'export' );
+		$this->repo->acquire( $job->id );
+		$loaded = $this->repo->find( $job->id );
+		$stale  = $this->repo->find( $job->id );
+		$this->repo->transition( $loaded, Job::CANCELLED );
+		$this->assertFileDoesNotExist( LockFile::path( $this->base, $job->id ), 'terminal states drop the lock file' );
+		try {
+			$this->repo->transition( $stale, Job::FAILED, 'boom' );
+			$this->fail( 'expected StaleJob' );
+		} catch ( StaleJob $e ) {
+			$this->assertSame( Job::CANCELLED, $this->repo->find( $job->id )->status );
+		}
+
+		$this->expectException( InvalidTransition::class );
+		$this->repo->transition( $this->repo->find( $job->id ), Job::RUNNING );
+	}
+
+	public function test_concurrent_cancel_between_load_and_write_is_detected(): void {
+		$job = $this->repo->create( 'export' );
+		$this->repo->acquire( $job->id );
+		$running = $this->repo->find( $job->id );
+		$repo    = $this->repo;
+		$done    = false;
+		add_filter( 'query', function ( string $sql ) use ( $repo, $job, &$done ): string {
+			// Interleave: the first UPDATE guarded on "running" is preceded by a cancel from another driver.
+			if ( ! $done && false !== strpos( $sql, 'UPDATE' ) && false !== strpos( $sql, "'completed'" ) ) {
+				$done = true;
+				$repo->transition( $repo->find( $job->id ), Job::CANCELLED );
+			}
+			return $sql;
+		} );
+		try {
+			$this->expectException( StaleJob::class );
+			$this->repo->transition( $running, Job::COMPLETED );
+		} finally {
+			remove_all_filters( 'query' );
+			$this->assertSame( Job::CANCELLED, $this->repo->find( $job->id )->status );
+		}
+	}
+
+	public function test_failed_jobs_can_be_retried_keeping_the_cursor(): void {
+		$job = $this->repo->create( 'export' );
+		$this->repo->acquire( $job->id );
+		$job = $this->repo->find( $job->id );
+		$this->repo->save_progress( $job, 'db', array( 'table' => 'wp_posts', 'offset' => 500 ), 40, 'half way' );
+		$this->repo->transition( $job, Job::FAILED, 'disk full at ' . DB_PASSWORD );
+		$stored = $this->repo->find( $job->id );
+		$this->assertStringNotContainsString( DB_PASSWORD, $stored->last_error, 'errors are redacted before storing' );
+		$this->assertSame( 40, $stored->progress );
+
+		$this->repo->transition( $stored, Job::QUEUED );
+		$again = $this->repo->find( $job->id );
+		$this->assertSame( Job::QUEUED, $again->status );
+		$this->assertSame( array( 'table' => 'wp_posts', 'offset' => 500 ), $again->cursor );
+		$this->assertSame( 'db', $again->step );
+		$this->assertSame( 0, $again->finished_at );
+		$second = $this->repo->acquire( $job->id );
+		$this->assertSame( 2, $second['job']->attempts );
+	}
+
+	public function test_storage_gate_blocks_with_back_off_and_stalls_fail_after_a_day(): void {
+		$job = $this->repo->create( 'export' );
+		$this->assertSame( array( 'allowed' => true, 'reason' => '', 'message' => '', 'retry_after' => 0 ), $this->repo->gate( $job ) );
+
+		// Storage becomes unusable: the custom directory cannot be created because a file is in the way.
+		file_put_contents( $this->root . '/notadir', 'x' );
+		$broken = new Directories( array( 'is_web_request' => false, 'document_root' => '', 'custom_dir' => $this->root . '/notadir' ) );
+		$repo   = $this->repo_for( $broken );
+		$this->assertSame( '', $broken->base() );
+		$gate = $repo->gate( $job );
+		$this->assertFalse( $gate['allowed'] );
+		$this->assertSame( 'storage_unavailable', $gate['reason'] );
+		$this->assertSame( 5, $gate['retry_after'] );
+		foreach ( array( 15, 60, 300, 300, 300 ) as $expected ) {
+			$this->assertSame( $expected, $repo->record_blocked( $job ) );
+		}
+		$this->assertSame( 300, $repo->gate( $this->repo->find( $job->id ) )['retry_after'] );
+
+		// Progress resets the back-off.
+		$this->repo->save_progress( $this->repo->find( $job->id ), 's', array(), 1 );
+		$this->assertSame( 0, $this->repo->find( $job->id )->blocked_count );
+		$this->assertSame( 5, $repo->gate( $this->repo->find( $job->id ) )['retry_after'], 'the sequence starts over' );
+
+		// No progress for 24 hours: given up.
+		$this->now += JobRepository::STALL_SECONDS + 1;
+		$this->repo->reap();
+		$failed = $this->repo->find( $job->id );
+		$this->assertSame( Job::FAILED, $failed->status );
+		$this->assertStringContainsString( '24 hours', $failed->last_error );
+	}
+
+	public function test_a_locked_job_is_never_treated_as_stalled(): void {
+		$job = $this->repo->create( 'export' );
+		$this->now += JobRepository::STALL_SECONDS + 1;
+		$held = $this->repo->acquire( $job->id, 1000 );
+		$this->assertNotNull( $held );
+		$this->repo->reap();
+		$this->assertSame( Job::RUNNING, $this->repo->find( $job->id )->status );
+	}
+
+	public function test_jobs_of_a_replaced_directory_fail_when_the_clone_notice_is_dismissed(): void {
+		$old = $this->repo->create( 'export' );
+		$this->repo->acquire( $old->id );
+		$this->repo->release( $this->repo->find( $old->id ), $this->repo->find( $old->id )->lock_token ?: '' );
+		LockFile::write( $this->base, $old->id, 'x', $this->now + 100 );
+
+		$next = $this->site( 'releases/b' );
+		$next->base();
+		$this->assertTrue( $next->state()['clone_detected'] );
+		$repo = $this->repo_for( $next );
+		$gate = $repo->gate( $this->repo->find( $old->id ) );
+		$this->assertFalse( $gate['allowed'] );
+		$this->assertSame( 'storage_changed', $gate['reason'] );
+		$this->assertStringContainsString( 'clone notice', $gate['message'] );
+		$this->assertSame( 0, $repo->settle_storage(), 'nothing is settled while the notice is pending' );
+
+		( new Notices( $next ) )->record_dismissal( 'clone_detected' );
+
+		$failed = $repo->find( $old->id );
+		$this->assertSame( Job::FAILED, $failed->status );
+		$this->assertStringContainsString( 'storage directory changed', $failed->last_error );
+		$this->assertFileDoesNotExist( LockFile::path( $this->base, $old->id ) );
+	}
+
+	public function test_jobs_created_during_the_clone_fail_when_the_original_directory_is_reclaimed(): void {
+		$next = $this->site( 'releases/b' );
+		$next->base();
+		$repo_new = $this->repo_for( $next );
+		$during   = $repo_new->create( 'export' );
+		$repo_new->acquire( $during->id );
+		$repo_new->release( $repo_new->find( $during->id ), $repo_new->find( $during->id )->lock_token ?: '' );
+		LockFile::write( $next->base(), $during->id, 'x', $this->now + 100 );
+		$this->assertTrue( StorageReclaim::is_busy( $next->base() ) );
+
+		$token  = ReclaimActions::expected_token( $this->base );
+		$result = ( new ReclaimActions( $next ) )->run_reclaim( true, $token, false );
+		$this->assertTrue( $result['ok'], $result['message'] );
+
+		$failed = $repo_new->find( $during->id );
+		$this->assertSame( Job::FAILED, $failed->status );
+		$this->assertSame( $this->base, $next->base() );
+		$this->assertFileDoesNotExist( LockFile::path( $during->storage_path, $during->id ) );
+	}
+
+	public function test_stale_lock_files_do_not_block_reclaim_and_are_reaped(): void {
+		$job = $this->repo->create( 'export' );
+		// is_busy() judges with the real clock; the repository below uses the fake one.
+		LockFile::write( $this->base, $job->id, 'crashed', time() - StorageReclaim::ACTIVITY_WINDOW - 1 );
+		$this->assertFalse( StorageReclaim::is_busy( $this->base ), 'an expired lock file is not a running job' );
+		LockFile::write( $this->base, $job->id, 'fresh', time() + 60 );
+		$this->assertTrue( StorageReclaim::is_busy( $this->base ) );
+
+		LockFile::write( $this->base, 424242, 'orphan', $this->now + 60 );
+		LockFile::write( $this->base, $job->id, 'crashed', $this->now - JobRepository::LOCK_FILE_GRACE - 1 );
+		$this->repo->reap();
+		$this->assertFileDoesNotExist( LockFile::path( $this->base, 424242 ), 'no such job' );
+		$this->assertFileDoesNotExist( LockFile::path( $this->base, $job->id ), 'stale and not locked in the database' );
+	}
+
+	public function test_purge_respects_retention_and_the_row_cap_and_removes_logs(): void {
+		$keep_running = $this->repo->create( 'export' );
+		$this->repo->acquire( $keep_running->id );
+		$old_done = $this->repo->create( 'export' );
+		$this->repo->acquire( $old_done->id );
+		$this->repo->transition( $this->repo->find( $old_done->id ), Job::COMPLETED );
+		$old_failed = $this->repo->create( 'export' );
+		$this->repo->acquire( $old_failed->id );
+		$this->repo->transition( $this->repo->find( $old_failed->id ), Job::FAILED, 'x' );
+		foreach ( array( $keep_running, $old_done, $old_failed ) as $j ) {
+			file_put_contents( $this->base . '/' . $this->repo->find( $j->id )->log_path, "log\n" );
+		}
+
+		$this->now += 31 * 86400;
+		$this->assertSame( 1, $this->repo->purge(), 'completed after 30 days' );
+		$this->assertNull( $this->repo->find( $old_done->id ) );
+		$this->assertFileDoesNotExist( $this->base . '/' . $old_done->log_path );
+		$this->assertNotNull( $this->repo->find( $old_failed->id ), 'failed kept for 90 days' );
+
+		$this->now += 60 * 86400;
+		$this->assertSame( 1, $this->repo->purge(), 'failed after 90 days' );
+		$this->assertNotNull( $this->repo->find( $keep_running->id ), 'running jobs and their logs are never purged' );
+		$this->assertFileExists( $this->base . '/' . $this->repo->find( $keep_running->id )->log_path );
+	}
+
+	public function test_purge_row_cap_keeps_the_newest(): void {
+		global $wpdb;
+		$table = Schema::jobs_table();
+		for ( $i = 0; $i < JobRepository::MAX_ROWS + 5; $i++ ) {
+			$wpdb->insert( $table, array( 'type' => 'x', 'status' => Job::COMPLETED, 'created_at' => $i, 'finished_at' => $this->now ), array( '%s', '%s', '%d', '%d' ) );
+		}
+		$this->assertSame( 5, $this->repo->purge() );
+		$this->assertSame( JobRepository::MAX_ROWS, (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$table}" ) );
+		$this->assertSame( 5, (int) $wpdb->get_var( "SELECT MIN(created_at) FROM {$table}" ), 'the oldest rows went first' );
+	}
+
+	public function test_maintenance_is_throttled(): void {
+		$job = $this->repo->create( 'export' );
+		$this->now += JobRepository::STALL_SECONDS + 1;
+		$this->repo->maintenance();
+		$this->assertSame( Job::FAILED, $this->repo->find( $job->id )->status );
+
+		$another = $this->repo->create( 'export' );
+		$this->now += JobRepository::STALL_SECONDS + 1;
+		$this->repo->maintenance();
+		$this->assertSame( Job::QUEUED, $this->repo->find( $another->id )->status, 'reaped at most once per throttle window' );
+	}
+
+	public function test_multisite_table_is_network_wide_and_records_the_site(): void {
+		if ( ! is_multisite() ) {
+			$this->markTestSkipped( 'Multisite only.' );
+		}
+		global $wpdb;
+		$subsite = self::factory()->blog->create();
+		switch_to_blog( $subsite );
+		try {
+			$this->assertSame( $wpdb->base_prefix . 'wpcheckpoint_jobs', Schema::jobs_table(), 'not the sub-site prefix' );
+			$job = $this->repo->create( 'export' );
+			$this->assertSame( $subsite, $job->site_id );
+		} finally {
+			restore_current_blog();
+		}
+		$this->assertSame( $job->id, $this->repo->find( $job->id )->id, 'visible from the main site' );
+	}
+}

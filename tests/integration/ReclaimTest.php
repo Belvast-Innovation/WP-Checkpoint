@@ -169,7 +169,7 @@ final class ReclaimTest extends WP_UnitTestCase {
 		$this->assertFalse( $actions->run_reclaim( true, 'ffffffffffff', false )['ok'], 'token must match' );
 		$this->assertFalse( $actions->run_reclaim( true, '', false )['ok'] );
 
-		file_put_contents( $base . '/tmp/job-7.lock', 'running' );
+		\WPCheckpoint\Jobs\LockFile::write( $base, 7, 'running-token', time() + 60 );
 		$result = $actions->run_reclaim( true, $this->token( $base ), false );
 		$this->assertFalse( $result['ok'] );
 		$this->assertStringContainsString( 'job', $result['message'] );
@@ -274,7 +274,7 @@ final class ReclaimTest extends WP_UnitTestCase {
 		$this->assertTrue( ( new ReclaimActions( $outside ) )->run_reclaim( true, $this->token( $base ), false )['ok'], 'manual path still works' );
 
 		// A job is running in the directory.
-		file_put_contents( $base . '/tmp/job-3.lock', 'running' );
+		\WPCheckpoint\Jobs\LockFile::write( $base, 3, 'running-token', time() + 60 );
 		$busy = $this->site( 'releases/20260919' );
 		$this->assertNotSame( $base, $busy->base() );
 		$this->assertTrue( $busy->state()['clone_detected'] );
