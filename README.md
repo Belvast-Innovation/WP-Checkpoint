@@ -59,6 +59,8 @@ The Tools tab lists what the plugin found on the host: PHP version and extension
 
 Backups, temporary files and logs live in a directory the plugin creates on first use: next to the WordPress directory when that is outside the document root, otherwise `wp-content/wp-checkpoint-{random}/` with `index.php` and `.htaccess` deny rules (the admin page warns when the server ignores them and shows the matching nginx rule). Define `WPCHECKPOINT_STORAGE_DIR` in `wp-config.php` to use a directory of your own; the plugin only ever deletes the sub-directories and files it created there.
 
+The directory is bound to the installation (a random ID in the options plus a hash of the WordPress directory), so a cloned site never writes into the original site's backups. Release-based deployments (Deployer, Capistrano, Trellis) change the WordPress directory on every release; the plugin then shows the previous directory, explains what it found and lets an administrator continue with it after confirming, optionally trusting the deployment root so later releases are taken over automatically.
+
 ## Security
 
 Please report vulnerabilities privately — see [SECURITY.md](SECURITY.md).
