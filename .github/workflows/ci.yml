@@ -153,7 +153,10 @@ jobs:
       # Check the distributable tree (built with .distignore), not the development checkout.
       - run: bash bin/build-dist.sh
 
+      # The action resolves "latest" through the WordPress/WordPress GitHub mirror, which lags behind
+      # wordpress.org on release days (missing tag); trunk always exists and Plugin Check only lints.
       - name: Run Plugin Check
         uses: WordPress/plugin-check-action@v1
         with:
           build-dir: build/wp-checkpoint
+          wp-version: trunk
