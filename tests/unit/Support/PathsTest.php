@@ -24,7 +24,14 @@ final class PathsTest extends TestCase {
 	}
 
 	private function remove( string $path ): void {
-		if ( is_link( $path ) || is_file( $path ) ) {
+		if ( is_link( $path ) ) {
+			// On Windows a symlink to a directory must be removed with rmdir().
+			if ( ! @unlink( $path ) ) {
+				rmdir( $path );
+			}
+			return;
+		}
+		if ( is_file( $path ) ) {
 			unlink( $path );
 			return;
 		}
@@ -42,7 +49,7 @@ final class PathsTest extends TestCase {
 
 	private function require_symlinks(): void {
 		$probe = $this->root . '/probe-link';
-		if ( ! @symlink( $this->root . '/outside', $probe ) ) {
+		if ( ! @symlink( $this->root . '/outside/secret.txt', $probe ) ) {
 			$this->markTestSkipped( 'Symbolic links cannot be created in this environment.' );
 		}
 		unlink( $probe );
