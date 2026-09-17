@@ -26,12 +26,12 @@ define( 'WPCHECKPOINT_URL', plugin_dir_url( __FILE__ ) );
  * Minimal PSR-4 autoloader. The plugin ships with zero runtime Composer dependencies.
  */
 spl_autoload_register(
-	static function ( $class ) {
+	static function ( $class_name ) {
 		$prefix = 'WPCheckpoint\\';
-		if ( 0 !== strpos( $class, $prefix ) ) {
+		if ( 0 !== strpos( $class_name, $prefix ) ) {
 			return;
 		}
-		$relative = substr( $class, strlen( $prefix ) );
+		$relative = substr( $class_name, strlen( $prefix ) );
 		$file     = WPCHECKPOINT_DIR . 'src/' . str_replace( '\\', '/', $relative ) . '.php';
 		if ( is_readable( $file ) ) {
 			require $file;
