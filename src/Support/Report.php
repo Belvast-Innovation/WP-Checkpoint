@@ -42,13 +42,21 @@ final class Report {
 	 * @param array<string, string> $header     Extra header lines, label => value.
 	 * @param string[]              $site_hosts Host names of the site (home and site URL); never included in the report.
 	 * @param string[]              $site_paths URL path prefixes of the site (and of every site in a sub-directory network).
+	 * @param array<string, mixed>  $options    "coarse_site_paths" (bool) masks every first path segment after the
+	 *                                          site host; "network_root" (string) is the network's own path prefix.
 	 * @return string
 	 */
-	public static function text( array $checks, Redactor $redactor, array $paths = array(), array $header = array(), array $site_hosts = array(), array $site_paths = array() ): string {
+	public static function text( array $checks, Redactor $redactor, array $paths = array(), array $header = array(), array $site_hosts = array(), array $site_paths = array(), array $options = array() ): string {
+		$coarse       = ! empty( $options['coarse_site_paths'] );
+		$network_root = isset( $options['network_root'] ) ? (string) $options['network_root'] : '';
+
 		$lines   = array( 'WP Checkpoint environment report' );
 		$lines[] = 'Generated: ' . gmdate( 'Y-m-d H:i:s' ) . ' UTC';
 		foreach ( $header as $label => $value ) {
 			$lines[] = $label . ': ' . $value;
+		}
+		if ( $coarse ) {
+			$lines[] = 'Site paths: coarse (large network) - every first path segment after the site host is shown as {site-path}; it may be an ordinary page rather than a site, so the directory structure cannot be inferred from it.';
 		}
 		$summary = Check::summarize( $checks );
 		$lines[] = sprintf( 'Summary: %d ok, %d warnings, %d errors, %d info', $summary[ Check::OK ], $summary[ Check::WARNING ], $summary[ Check::ERROR ], $summary[ Check::INFO ] );
@@ -78,7 +86,7 @@ final class Report {
 		if ( null === $text ) {
 			return self::failure_text();
 		}
-		$text = self::mask_hosts( $text, $site_hosts, $site_paths );
+		$text = self::mask_hosts( $text, $site_hosts, $site_paths, $coarse, $network_root );
 		if ( null === $text ) {
 			return self::failure_text();
 		}
@@ -115,12 +123,14 @@ final class Report {
 	 * and longest first, so "/client" never matches "/clienta". Paths of
 	 * external URLs are left alone.
 	 *
-	 * @param string   $text       Text.
-	 * @param string[] $site_hosts Site host names, with or without "www.".
-	 * @param string[] $site_paths Site path prefixes such as "/shop" or "/clienta/".
+	 * @param string   $text         Text.
+	 * @param string[] $site_hosts   Site host names, with or without "www.".
+	 * @param string[] $site_paths   Site path prefixes such as "/shop" or "/clienta/".
+	 * @param bool     $coarse       Also mask every unknown first path segment (large networks).
+	 * @param string   $network_root Network path prefix to keep in coarse mode ("" when the network is at "/").
 	 * @return string|null Null when a pattern could not be applied (fail closed).
 	 */
-	public static function mask_hosts( string $text, array $site_hosts, array $site_paths = array() ) {
+	public static function mask_hosts( string $text, array $site_hosts, array $site_paths = array(), bool $coarse = false, string $network_root = '' ) {
 		$hosts = array();
 		foreach ( $site_hosts as $host ) {
 			$host = strtolower( trim( (string) $host ) );
@@ -171,18 +181,32 @@ final class Report {
 			return null;
 		}
 
-		return self::mask_site_paths( $result, $site_paths );
+		return self::mask_site_paths( $result, $site_paths, $coarse, $network_root );
 	}
+
+	/**
+	 * Names WordPress refuses as sub-directory site paths, plus anything that
+	 * ends in ".php": in coarse mode these first segments are left alone.
+	 *
+	 * @var string[]
+	 */
+	const RESERVED_SITE_NAMES = array( 'page', 'comments', 'blog', 'files', 'feed', 'wp-admin', 'wp-content', 'wp-includes', 'wp-json', 'embed' );
 
 	/**
 	 * Replace site path prefixes after a {site-host} (with or without a
 	 * "www." / "{subdomain}." label and a port) by /{site-path}.
 	 *
-	 * @param string   $text       Text in which hosts are already masked.
-	 * @param string[] $site_paths Site path prefixes.
+	 * In coarse mode a first segment that matches no known prefix is masked
+	 * too (after the network root, when there is one), except WordPress
+	 * reserved names and *.php files, which can never be a site.
+	 *
+	 * @param string   $text         Text in which hosts are already masked.
+	 * @param string[] $site_paths   Site path prefixes.
+	 * @param bool     $coarse       Coarse mode.
+	 * @param string   $network_root Network path prefix ("" when the network is at "/").
 	 * @return string|null Null when the pattern could not be applied (fail closed).
 	 */
-	public static function mask_site_paths( string $text, array $site_paths ) {
+	public static function mask_site_paths( string $text, array $site_paths, bool $coarse = false, string $network_root = '' ) {
 		$prefixes = array();
 		foreach ( $site_paths as $path ) {
 			$path = '/' . trim( str_replace( '\\', '/', (string) $path ), '/' );
@@ -190,9 +214,11 @@ final class Report {
 				$prefixes[ $path ] = true;
 			}
 		}
-		if ( array() === $prefixes ) {
+		if ( array() === $prefixes && ! $coarse ) {
 			return $text;
 		}
+		$root     = '/' . trim( str_replace( '\\', '/', $network_root ), '/' );
+		$root     = '/' === $root ? '' : $root;
 		$prefixes = array_keys( $prefixes );
 		usort(
 			$prefixes,
@@ -203,7 +229,7 @@ final class Report {
 
 		$result = preg_replace_callback(
 			'#((?:www\.|\{subdomain\}\.)?\{site-host\}(?::\d+)?)(/[^\s"\'<>?\#]*)#u',
-			static function ( array $m ) use ( $prefixes ): string {
+			static function ( array $m ) use ( $prefixes, $coarse, $root ): string {
 				$path = $m[2];
 				foreach ( $prefixes as $prefix ) {
 					if ( $path === $prefix ) {
@@ -213,7 +239,25 @@ final class Report {
 						return $m[1] . '/{site-path}' . substr( $path, strlen( $prefix ) );
 					}
 				}
-				return $m[0];
+				if ( ! $coarse ) {
+					return $m[0];
+				}
+				// Coarse: /root/<first>/rest -> /root/{site-path}/rest.
+				$rest = $path;
+				if ( '' !== $root ) {
+					if ( $rest === $root || 0 !== strpos( $rest, $root . '/' ) ) {
+						return $m[0];
+					}
+					$rest = substr( $rest, strlen( $root ) );
+				}
+				if ( ! preg_match( '#^/([^/]+)(/.*)?$#u', $rest, $seg ) ) {
+					return $m[0];
+				}
+				$first = $seg[1];
+				if ( in_array( strtolower( $first ), self::RESERVED_SITE_NAMES, true ) || 1 === preg_match( '/\\.php$/i', $first ) ) {
+					return $m[0];
+				}
+				return $m[1] . $root . '/{site-path}' . ( isset( $seg[2] ) ? $seg[2] : '' );
 			},
 			$text
 		);

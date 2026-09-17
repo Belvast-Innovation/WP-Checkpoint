@@ -25,6 +25,19 @@ final class Environment {
 	const CACHE     = 'wpcheckpoint_environment';
 	const CACHE_TTL = 43200;
 
+	/**
+	 * Sub-directory networks with more sites than this are not enumerated for
+	 * the report: the path list would make masking expensive (and a PCRE
+	 * failure would withhold the whole report), so a coarse rule is used.
+	 * Same order of magnitude as UninstallSetting::SCAN_LIMIT.
+	 */
+	const SITE_PATH_LIMIT = 50;
+
+	/**
+	 * Sites fetched per page while enumerating a network.
+	 */
+	const SITE_BATCH_SIZE = 500;
+
 	const GROUP_WORDPRESS = 'wordpress';
 	const GROUP_PHP       = 'php';
 	const GROUP_LIMITS    = 'limits';
@@ -210,12 +223,21 @@ final class Environment {
 	}
 
 	/**
-	 * URL path prefixes that identify a site: the sub-directory this site is
-	 * installed in and, on a sub-directory network, every site's path.
+	 * URL path prefixes that identify a site for the report.
 	 *
-	 * @return string[]
+	 * "paths" holds the sub-directory this site is installed in and, on a
+	 * sub-directory network up to $limit sites, every site's path (collected
+	 * in pages of $batch_size). Larger sub-directory networks set "coarse":
+	 * the report then masks the first path segment after the site host
+	 * instead of matching known prefixes. "network_root" is the network's own
+	 * path when WordPress itself lives in a sub-directory ("" otherwise).
+	 *
+	 * @param int      $limit      Maximum number of sites to enumerate.
+	 * @param int      $batch_size Sites per page.
+	 * @param int|null $site_count Number of sites; null queries the network (tests inject it).
+	 * @return array{paths: string[], coarse: bool, network_root: string}
 	 */
-	public static function report_site_paths(): array {
+	public static function report_site_paths( int $limit = self::SITE_PATH_LIMIT, int $batch_size = self::SITE_BATCH_SIZE, $site_count = null ): array {
 		$paths = array();
 		foreach ( array( home_url(), site_url() ) as $url ) {
 			$path = wp_parse_url( $url, PHP_URL_PATH );
@@ -223,21 +245,70 @@ final class Environment {
 				$paths[] = '/' . trim( $path, '/' );
 			}
 		}
-		if ( is_multisite() ) {
-			$site_ids = get_sites(
-				array(
-					'number' => 1000,
-					'fields' => 'ids',
-				)
-			);
-			foreach ( $site_ids as $site_id ) {
-				$site = get_site( $site_id );
-				if ( $site && '' !== trim( (string) $site->path, '/' ) ) {
-					$paths[] = '/' . trim( (string) $site->path, '/' );
-				}
-			}
+
+		$result = array(
+			'paths'        => $paths,
+			'coarse'       => false,
+			'network_root' => '',
+		);
+		if ( ! is_multisite() ) {
+			$result['paths'] = array_values( array_unique( $paths ) );
+			return $result;
 		}
-		return array_values( array_unique( $paths ) );
+
+		$network = get_network();
+		if ( $network && '' !== trim( (string) $network->path, '/' ) ) {
+			$result['network_root'] = '/' . trim( (string) $network->path, '/' );
+		}
+		if ( null === $site_count ) {
+			$site_count = (int) get_sites( array( 'count' => true ) );
+		}
+		if ( self::use_coarse_site_paths( true, is_subdomain_install(), $site_count, $limit ) ) {
+			$result['coarse'] = true;
+			$result['paths']  = array_values( array_unique( $paths ) );
+			return $result;
+		}
+
+		if ( ! is_subdomain_install() ) {
+			$batch_size = max( 1, $batch_size );
+			$offset     = 0;
+			do {
+				$sites   = get_sites(
+					array(
+						'number'  => $batch_size,
+						'offset'  => $offset,
+						'orderby' => 'id',
+						'order'   => 'ASC',
+					)
+				);
+				$fetched = count( $sites );
+				foreach ( $sites as $site ) {
+					if ( '' !== trim( (string) $site->path, '/' ) ) {
+						$paths[] = '/' . trim( (string) $site->path, '/' );
+					}
+				}
+				$offset += $batch_size;
+			} while ( $fetched === $batch_size );
+		}
+
+		$result['paths'] = array_values( array_unique( $paths ) );
+		return $result;
+	}
+
+	/**
+	 * Whether the report must fall back to coarse site-path masking: only a
+	 * sub-directory network with more sites than the limit. Single sites have
+	 * no site paths; sub-domain networks distinguish sites by host, which the
+	 * host masking already covers.
+	 *
+	 * @param bool $multisite  is_multisite().
+	 * @param bool $subdomain  is_subdomain_install().
+	 * @param int  $site_count Number of sites.
+	 * @param int  $limit      Enumeration limit.
+	 * @return bool
+	 */
+	public static function use_coarse_site_paths( bool $multisite, bool $subdomain, int $site_count, int $limit = self::SITE_PATH_LIMIT ): bool {
+		return $multisite && ! $subdomain && $site_count > $limit;
 	}
 
 	/**

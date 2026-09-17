@@ -116,6 +116,56 @@ final class ReportTest extends TestCase {
 		$this->assertSame( 'https://{site-host}/clientab/x', Report::mask_hosts( 'https://example.com/clientab/x', $hosts, array( '/client', '/clienta' ) ) );
 	}
 
+	public function test_coarse_mode_masks_every_unknown_first_segment(): void {
+		$hosts = array( 'example.com' );
+		$cases = array(
+			'https://example.com/clienta/wp-json/x'      => 'https://{site-host}/{site-path}/wp-json/x',
+			'https://www.example.com/clientb'            => 'https://www.{site-host}/{site-path}',
+			'https://blog.example.com:8443/clientc/'     => 'https://{subdomain}.{site-host}:8443/{site-path}/',
+			'example.com/clientd/page'                   => '{site-host}/{site-path}/page',
+			'https://example.com/shop/wp-admin/'         => 'https://{site-host}/{site-path}/wp-admin/',
+			'https://example.com/wp-json/wp/v2/posts'    => 'https://{site-host}/wp-json/wp/v2/posts',
+			'https://example.com/wp-admin/admin.php'     => 'https://{site-host}/wp-admin/admin.php',
+			'https://example.com/wp-login.php?x=1'       => 'https://{site-host}/wp-login.php?x=1',
+			'https://example.com/WP-Content/uploads/a'   => 'https://{site-host}/WP-Content/uploads/a',
+			'https://example.com/'                       => 'https://{site-host}/',
+			'https://example.com'                        => 'https://{site-host}',
+			'https://other.net/clienta/x'                => 'https://{external-host}/clienta/x',
+		);
+		foreach ( $cases as $in => $expected ) {
+			$this->assertSame( $expected, Report::mask_hosts( $in, $hosts, array( '/shop' ), true ), $in );
+		}
+		$this->assertSame( 'https://{site-host}/clienta/x', Report::mask_hosts( 'https://example.com/clienta/x', $hosts, array( '/shop' ), false ), 'not coarse: unknown paths stay' );
+	}
+
+	public function test_coarse_mode_respects_a_network_root(): void {
+		$hosts = array( 'example.com' );
+		$cases = array(
+			'https://example.com/wp/clienta/feed/'    => 'https://{site-host}/wp/{site-path}/feed/',
+			'https://example.com/wp/clientb'          => 'https://{site-host}/wp/{site-path}',
+			'https://example.com/wp/'                 => 'https://{site-host}/wp/',
+			'https://example.com/wp'                  => 'https://{site-host}/wp',
+			'https://example.com/wp/wp-json/x'        => 'https://{site-host}/wp/wp-json/x',
+			'https://example.com/wpx/clienta'         => 'https://{site-host}/wpx/clienta',
+			'https://example.com/other/clienta'       => 'https://{site-host}/other/clienta',
+		);
+		foreach ( $cases as $in => $expected ) {
+			$this->assertSame( $expected, Report::mask_hosts( $in, $hosts, array(), true, '/wp/' ), $in );
+		}
+	}
+
+	public function test_coarse_mode_is_announced_in_the_header(): void {
+		$checks = array( new Check( 'x', 'loopback', 'Loopback', 'redirected', Check::WARNING, 'to https://example.com/clienta/x' ) );
+		$text   = Report::text( $checks, new Redactor(), array(), array(), array( 'example.com' ), array(), array( 'coarse_site_paths' => true ) );
+		$this->assertStringContainsString( 'Site paths: coarse (large network)', $text );
+		$this->assertStringContainsString( 'cannot be inferred', $text );
+		$this->assertStringContainsString( 'https://{site-host}/{site-path}/x', $text );
+
+		$text = Report::text( $checks, new Redactor(), array(), array(), array( 'example.com' ), array() );
+		$this->assertStringNotContainsString( 'Site paths: coarse', $text );
+		$this->assertStringContainsString( 'https://{site-host}/clienta/x', $text );
+	}
+
 	public function test_site_on_a_subdomain_treats_the_parent_domain_as_external(): void {
 		$text = Report::mask_hosts( 'https://shop.example.com/x and https://example.com/y and www.shop.example.com and SHOP.example.com', array( 'shop.example.com' ) );
 		$this->assertSame( 'https://{site-host}/x and https://{external-host}/y and www.{site-host} and {site-host}', $text );

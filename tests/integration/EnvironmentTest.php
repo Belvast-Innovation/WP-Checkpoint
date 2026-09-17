@@ -215,6 +215,50 @@ final class EnvironmentTest extends WP_UnitTestCase {
 		$this->assertStringContainsString( 'Plugin: ' . WPCHECKPOINT_VERSION, $report );
 	}
 
+	public function test_coarse_decision(): void {
+		$this->assertFalse( Environment::use_coarse_site_paths( false, false, 10000 ), 'single site' );
+		$this->assertFalse( Environment::use_coarse_site_paths( true, true, 10000 ), 'sub-domain network' );
+		$this->assertFalse( Environment::use_coarse_site_paths( true, false, Environment::SITE_PATH_LIMIT ), 'at the limit' );
+		$this->assertTrue( Environment::use_coarse_site_paths( true, false, Environment::SITE_PATH_LIMIT + 1 ) );
+		$this->assertSame( 50, Environment::SITE_PATH_LIMIT );
+	}
+
+	public function test_single_site_report_site_paths_shape(): void {
+		if ( is_multisite() ) {
+			$this->markTestSkipped( 'Single site only.' );
+		}
+		$result = Environment::report_site_paths();
+		$this->assertSame( array( 'paths' => array(), 'coarse' => false, 'network_root' => '' ), $result );
+	}
+
+	public function test_multisite_site_paths_are_collected_in_batches_or_coarse_above_the_limit(): void {
+		if ( ! is_multisite() ) {
+			$this->markTestSkipped( 'Multisite only.' );
+		}
+		$domain = get_network()->domain;
+		foreach ( array( 'alpha', 'beta', 'gamma', 'delta', 'epsilon' ) as $name ) {
+			self::factory()->blog->create( array( 'domain' => $domain, 'path' => '/' . $name . '/' ) );
+		}
+
+		$result = Environment::report_site_paths( 50, 2 );
+		$this->assertFalse( $result['coarse'] );
+		foreach ( array( '/alpha', '/beta', '/gamma', '/delta', '/epsilon' ) as $path ) {
+			$this->assertContains( $path, $result['paths'], 'collected across pages of 2' );
+		}
+		$this->assertSame( '', $result['network_root'], 'network at /' );
+
+		$coarse = Environment::report_site_paths( 50, 500, 51 );
+		$this->assertTrue( $coarse['coarse'] );
+		$this->assertNotContains( '/alpha', $coarse['paths'], 'no enumeration above the limit' );
+
+		$checks = array( new Check( 'x', 'loopback', 'Loopback', 'redirected', Check::WARNING, 'to https://' . $domain . '/zeta/wp-json/ and https://' . $domain . '/wp-json/' ) );
+		$report = Report::text( $checks, Plugin::instance()->redactor(), array(), array(), Environment::report_hosts(), $coarse['paths'], array( 'coarse_site_paths' => true, 'network_root' => $coarse['network_root'] ) );
+		$masked = '{site-host}' . ( false !== strpos( $domain, ':' ) ? substr( $domain, strpos( $domain, ':' ) ) : '' );
+		$this->assertStringNotContainsString( 'zeta', $report, 'even a site that was never enumerated is masked' );
+		$this->assertStringContainsString( 'https://' . $masked . '/{site-path}/wp-json/ and https://' . $masked . '/wp-json/', $report );
+		$this->assertStringContainsString( 'Site paths: coarse (large network)', $report );
+	}
+
 	public function test_single_site_in_a_subdirectory_masks_its_path(): void {
 		if ( is_multisite() ) {
 			$this->markTestSkipped( 'Single site only.' );
@@ -227,10 +271,10 @@ final class EnvironmentTest extends WP_UnitTestCase {
 			return 'http://example.org/shop/wp';
 		}, 20 );
 		$this->assertSame( 'http://example.org/shop', home_url() );
-		$this->assertSame( array( '/shop', '/shop/wp' ), Environment::report_site_paths() );
+		$this->assertSame( array( '/shop', '/shop/wp' ), Environment::report_site_paths()['paths'] );
 
 		$checks = array( new Check( 'x', 'loopback', 'Loopback', 'redirected', Check::WARNING, 'redirected to https://example.org/shop/wp/wp-json/ and https://example.org/shopping/' ) );
-		$report = Report::text( $checks, Plugin::instance()->redactor(), array(), array(), Environment::report_hosts(), Environment::report_site_paths() );
+		$report = Report::text( $checks, Plugin::instance()->redactor(), array(), array(), Environment::report_hosts(), Environment::report_site_paths()['paths'] );
 		$this->assertStringContainsString( 'https://{site-host}/{site-path}/wp-json/ and https://{site-host}/shopping/', $report );
 		$this->assertStringNotContainsString( '/shop/', $report );
 	}
@@ -246,7 +290,7 @@ final class EnvironmentTest extends WP_UnitTestCase {
 
 		switch_to_blog( $clienta );
 		try {
-			$paths = Environment::report_site_paths();
+			$paths = Environment::report_site_paths()['paths'];
 			$this->assertContains( '/clienta', $paths, 'current site path' );
 			$this->assertContains( '/client', $paths, 'every site of the network' );
 
