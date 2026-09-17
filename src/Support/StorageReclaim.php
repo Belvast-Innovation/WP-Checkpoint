@@ -118,8 +118,11 @@ final class StorageReclaim {
 			$problems[] = __( 'The original directory no longer exists.', 'wp-checkpoint' );
 			return $this->result( $problems, $facts );
 		}
-		if ( Deleter::is_reparse( $dir ) ) {
+		$reparse = Deleter::reparse_state( $dir );
+		if ( Deleter::REPARSE_LINK === $reparse ) {
 			$problems[] = __( 'The original directory is a symbolic link.', 'wp-checkpoint' );
+		} elseif ( Deleter::REPARSE_UNKNOWN === $reparse ) {
+			$problems[] = __( 'It could not be confirmed that the original directory is not a link (it is empty or holds only links).', 'wp-checkpoint' );
 		}
 		if ( Directories::SOURCE_CUSTOM !== $this->state['source'] && ! Directories::is_valid_token( substr( basename( $dir ), strlen( Directories::DIR_PREFIX ) ) ) ) {
 			$problems[] = __( 'The original directory does not have the expected name.', 'wp-checkpoint' );
