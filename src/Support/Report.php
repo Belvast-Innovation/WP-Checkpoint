@@ -8,8 +8,8 @@
 namespace WPCheckpoint\Support;
 
 /**
- * Renders checks as text and scrubs paths and secrets. text() is the only
- * rendering entry point; its last step is the Redactor.
+ * Renders checks as text and scrubs paths, host names and secrets. text()
+ * is the only rendering entry point; its last step is the Redactor.
  */
 final class Report {
 
@@ -18,11 +18,12 @@ final class Report {
 	 *
 	 * @param Check[]               $checks   Checks in display order.
 	 * @param Redactor              $redactor Redactor seeded with the installation secrets.
-	 * @param array<string, string> $paths    Placeholder => absolute path (e.g. "{abspath}" => ABSPATH).
-	 * @param array<string, string> $header   Extra header lines, label => value.
+	 * @param array<string, string> $paths      Placeholder => absolute path (e.g. "{abspath}" => ABSPATH).
+	 * @param array<string, string> $header     Extra header lines, label => value.
+	 * @param string[]              $site_hosts Host names of the site (home and site URL); never included in the report.
 	 * @return string
 	 */
-	public static function text( array $checks, Redactor $redactor, array $paths = array(), array $header = array() ): string {
+	public static function text( array $checks, Redactor $redactor, array $paths = array(), array $header = array(), array $site_hosts = array() ): string {
 		$lines   = array( 'WP Checkpoint environment report' );
 		$lines[] = 'Generated: ' . gmdate( 'Y-m-d H:i:s' ) . ' UTC';
 		foreach ( $header as $label => $value ) {
@@ -50,8 +51,67 @@ final class Report {
 
 		$text = implode( "\n", $lines ) . "\n";
 		$text = self::mask_paths( $text, $paths );
+		$text = self::mask_hosts( $text, $site_hosts );
 
 		return $redactor->redact( $text );
+	}
+
+	/**
+	 * Replace the site's own host names with {site-host} (keeping a "www."
+	 * or other sub-domain label, the scheme, the port and the path so http
+	 * vs https and www vs non-www differences stay visible) and the host of
+	 * every other URL with {external-host}.
+	 *
+	 * @param string   $text       Text.
+	 * @param string[] $site_hosts Site host names, with or without "www.".
+	 * @return string
+	 */
+	public static function mask_hosts( string $text, array $site_hosts ): string {
+		$hosts = array();
+		foreach ( $site_hosts as $host ) {
+			$host = strtolower( trim( (string) $host ) );
+			$host = (string) preg_replace( '/^www\./', '', $host );
+			if ( '' !== $host ) {
+				$hosts[ $host ] = true;
+			}
+		}
+		if ( array() !== $hosts ) {
+			$alternation = implode(
+				'|',
+				array_map(
+					static function ( string $h ): string {
+						return preg_quote( $h, '#' );
+					},
+					array_keys( $hosts )
+				)
+			);
+			$result      = preg_replace_callback(
+				'#(?<![\w.\-{])((?:[a-z0-9-]+\.)*?)(' . $alternation . ')(?![\w\-.]|\.[a-z])#i',
+				static function ( array $m ): string {
+					return strtolower( $m[1] ) . '{site-host}';
+				},
+				$text
+			);
+			if ( null !== $result ) {
+				$text = $result;
+			}
+		}
+
+		$result = preg_replace_callback(
+			'#\b([a-z][a-z0-9+.\-]*://)((?:[^/\s:@"\'<>]+(?::[^/\s@"\'<>]*)?@)?)([^/\s:"\'<>?\#]+)#i',
+			static function ( array $m ): string {
+				$host = $m[3];
+				if ( false !== strpos( $host, '{' ) ) {
+					return $m[0];
+				}
+				return $m[1] . $m[2] . '{external-host}';
+			},
+			$text
+		);
+		if ( null !== $result ) {
+			$text = $result;
+		}
+		return $text;
 	}
 
 	/**

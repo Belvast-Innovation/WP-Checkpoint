@@ -70,7 +70,7 @@ final class ToolsTab implements Tab {
 		$environment = new Environment( $directories );
 		$checks      = $environment->checks();
 		$summary     = Check::summarize( $checks );
-		$report      = Report::text( $checks, $plugin->redactor(), $environment->report_paths(), array( 'Plugin' => WPCHECKPOINT_VERSION ) );
+		$report      = Report::text( $checks, $plugin->redactor(), $environment->report_paths(), array( 'Plugin' => WPCHECKPOINT_VERSION ), Environment::report_hosts() );
 		$checked_at  = $environment->checked_at();
 		$state       = $directories->state();
 

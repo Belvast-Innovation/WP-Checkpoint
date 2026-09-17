@@ -200,9 +200,11 @@ final class EnvironmentTest extends WP_UnitTestCase {
 
 	public function test_report_contains_no_secrets_paths_or_site_url(): void {
 		$env    = new Environment( $this->dirs, array( 'loopback' => $this->echo_probe() ) );
-		$report = Report::text( $env->checks(), Plugin::instance()->redactor(), $env->report_paths(), array( 'Plugin' => WPCHECKPOINT_VERSION ) );
+		$report = Report::text( $env->checks(), Plugin::instance()->redactor(), $env->report_paths(), array( 'Plugin' => WPCHECKPOINT_VERSION ), Environment::report_hosts() );
 		$token  = (string) $this->dirs->state()['token'];
 
+		$this->assertSame( array( wp_parse_url( home_url(), PHP_URL_HOST ) ), Environment::report_hosts() );
+		$this->assertStringNotContainsStringIgnoringCase( (string) wp_parse_url( home_url(), PHP_URL_HOST ), $report );
 		$this->assertStringNotContainsString( DB_PASSWORD, $report );
 		$this->assertStringNotContainsString( DB_NAME, $report );
 		$this->assertStringNotContainsString( rtrim( ABSPATH, '/' ), $report );

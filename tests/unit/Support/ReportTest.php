@@ -66,6 +66,26 @@ final class ReportTest extends TestCase {
 		$this->assertStringContainsString( 'Summary: 0 ok, 0 warnings, 0 errors, 2 info', $text );
 	}
 
+	public function test_site_hosts_become_placeholders_and_other_hosts_become_external(): void {
+		$checks = array(
+			new Check( 'loopback.rest', 'loopback', 'Loopback', 'redirected (HTTP 301)', Check::WARNING, 'The request was redirected to https://www.example.com/wp-json/wp-checkpoint/v1/probe. Check the addresses.' ),
+			new Check( 'a', 'misc', 'Mixed case host', 'http://EXAMPLE.com:8080/x and Example.COM alone', Check::INFO ),
+			new Check( 'b', 'misc', 'External', 'proxied via https://cdn.other-host.net/edge and ftp://user:pw@files.other.org/x', Check::INFO ),
+			new Check( 'c', 'misc', 'Subdomain', 'https://blog.example.com/feed', Check::INFO ),
+			new Check( 'd', 'misc', 'Lookalike', 'https://notexample.com/ and https://example.com.evil.net/', Check::INFO ),
+		);
+		$text = Report::text( $checks, new Redactor(), array(), array(), array( 'example.com', 'www.example.com' ) );
+
+		$this->assertStringContainsString( 'redirected to https://www.{site-host}/wp-json/wp-checkpoint/v1/probe.', $text );
+		$this->assertStringContainsString( 'http://{site-host}:8080/x and {site-host} alone', $text );
+		$this->assertStringContainsString( 'https://{external-host}/edge', $text );
+		$this->assertStringContainsString( 'ftp://user:[redacted]@{external-host}/x', $text );
+		$this->assertStringContainsString( 'https://blog.{site-host}/feed', $text );
+		$this->assertStringContainsString( 'https://{external-host}/ and https://{external-host}/', $text );
+		$this->assertStringNotContainsStringIgnoringCase( 'example.com', $text );
+		$this->assertStringNotContainsString( 'other-host.net', $text );
+	}
+
 	public function test_redaction_failure_replaces_everything(): void {
 		$checks   = array( new Check( 'x', 'g', 'X', 'password=hunter2 ' . str_repeat( 'a=b&', 300 ), Check::INFO ) );
 		$previous = ini_get( 'pcre.backtrack_limit' );

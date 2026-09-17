@@ -187,6 +187,22 @@ final class Environment {
 	}
 
 	/**
+	 * Host names that identify the site; the report replaces them.
+	 *
+	 * @return string[]
+	 */
+	public static function report_hosts(): array {
+		$hosts = array();
+		foreach ( array( home_url(), site_url() ) as $url ) {
+			$host = wp_parse_url( $url, PHP_URL_HOST );
+			if ( is_string( $host ) && '' !== $host ) {
+				$hosts[] = $host;
+			}
+		}
+		return array_values( array_unique( $hosts ) );
+	}
+
+	/**
 	 * Cached probe results, refreshed when missing, expired or forced.
 	 *
 	 * @param bool $refresh Force a refresh.
