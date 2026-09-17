@@ -32,7 +32,7 @@ final class ReclaimTest extends WP_UnitTestCase {
 		parent::set_up();
 		Options::delete( Directories::OPTION );
 		$this->root = sys_get_temp_dir() . '/wpcheckpoint-reclaim-' . bin2hex( random_bytes( 4 ) );
-		foreach ( array( 'releases/20260917', 'releases/20260918', 'releases/20260919', 'copy/public_html', 'other/wp' ) as $dir ) {
+		foreach ( array( 'releases/20260917', 'releases/20260918', 'releases/20260919', 'copy/public_html', 'other/wp', 'sites/example.com', 'sites/staging.example.com', 'public_html/20260917', 'public_html/20260918', 'deploy/abc1234', 'deploy/def5678', 'deploy/hotfix' ) as $dir ) {
 			mkdir( $this->root . '/' . $dir . '/wp-includes', 0755, true );
 		}
 		$this->admin = self::factory()->user->create( array( 'role' => 'administrator' ) );
@@ -295,6 +295,53 @@ final class ReclaimTest extends WP_UnitTestCase {
 		$revoked = $this->site( 'releases/20260919' );
 		$this->assertNotSame( $base, $revoked->base() );
 		$this->assertTrue( $revoked->state()['clone_detected'] );
+	}
+
+	public function test_plain_sibling_is_a_clone_and_never_becomes_a_trusted_root(): void {
+		$dirs = $this->site( 'sites/example.com' );
+		$base = $dirs->base();
+		$this->assertNotSame( '', $base );
+
+		$staging = $this->site( 'sites/staging.example.com' );
+		$staging->base();
+		$verdict = $staging->reclaim()->classify();
+		$this->assertSame( CloneClassifier::CLONE, $verdict['verdict'] );
+		$this->assertSame( CloneClassifier::RECOMMEND_NEW, $verdict['recommendation'] );
+		$this->assertStringContainsString( 'looks like a copy', ( new Notices( $staging ) )->notices()['clone_detected']['message'] );
+
+		$result = ( new ReclaimActions( $staging ) )->run_reclaim( true, $this->token( $base ), true );
+		$this->assertTrue( $result['ok'], $result['message'] );
+		$this->assertSame( '', $staging->state()['trusted_deploy_root'], 'the trust checkbox is ignored for a non-deployment' );
+		$this->assertStringContainsString( 'not trusted', $result['message'] );
+	}
+
+	public function test_broad_deployment_root_is_rejected(): void {
+		$dirs = $this->site( 'public_html/20260917' );
+		$base = $dirs->base();
+		$next = $this->site( 'public_html/20260918' );
+		$next->base();
+		$this->assertSame( CloneClassifier::DEPLOYMENT, $next->reclaim()->classify()['verdict'], 'release-style names' );
+
+		$result = ( new ReclaimActions( $next ) )->run_reclaim( true, $this->token( $base ), true );
+		$this->assertTrue( $result['ok'], $result['message'] );
+		$this->assertSame( '', $next->state()['trusted_deploy_root'], 'public_html is a web root, not a releases folder' );
+		$this->assertStringContainsString( 'too broad', $result['message'] );
+	}
+
+	public function test_non_release_name_under_a_trusted_root_is_not_taken_over_automatically(): void {
+		$dirs = $this->site( 'deploy/abc1234' );
+		$base = $dirs->base();
+		$next = $this->site( 'deploy/def5678' );
+		$next->base();
+		$result = ( new ReclaimActions( $next ) )->run_reclaim( true, $this->token( $base ), true );
+		$this->assertTrue( $result['ok'], $result['message'] );
+		$this->assertSame( realpath( $this->root . '/deploy' ), $next->state()['trusted_deploy_root'] );
+
+		$hotfix = $this->site( 'deploy/hotfix' );
+		$this->assertNotSame( $base, $hotfix->base(), 'an arbitrary sibling name goes through the manual flow' );
+		$this->assertTrue( $hotfix->state()['clone_detected'] );
+		$this->assertSame( array(), $hotfix->state()['auto_reclaimed'] );
+		$this->assertSame( CloneClassifier::CLONE, $hotfix->reclaim()->classify()['verdict'] );
 	}
 
 	public function test_tools_tab_shows_the_confirmation_block_and_settings_show_the_trusted_root(): void {

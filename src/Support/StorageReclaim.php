@@ -174,15 +174,43 @@ final class StorageReclaim {
 				'trusted_root' => '',
 			);
 		}
-		$root = '';
+		$message = __( 'The original storage directory is in use again.', 'wp-checkpoint' );
+		$root    = '';
 		if ( $trust_root ) {
-			$root = $this->classify()['deploy_root'];
+			// Decided server-side: only a release layout may become a trusted root, and never a broad directory.
+			$verdict = $this->classify();
+			if ( CloneClassifier::DEPLOYMENT !== $verdict['verdict'] || '' === $verdict['deploy_root'] ) {
+				$message .= ' ' . __( 'The deployment root was not trusted because this change does not look like a release deployment.', 'wp-checkpoint' );
+			} elseif ( CloneClassifier::is_broad_deploy_root( $verdict['deploy_root'], self::home_directory() ) ) {
+				$message .= ' ' . __( 'The deployment root was not trusted because it is too broad (a shared web root, a home directory or a top-level directory).', 'wp-checkpoint' );
+			} else {
+				$root = $verdict['deploy_root'];
+			}
 		}
 		return array(
 			'ok'           => true,
-			'message'      => __( 'The original storage directory is in use again.', 'wp-checkpoint' ),
+			'message'      => $message,
 			'trusted_root' => $root,
 		);
+	}
+
+	/**
+	 * Home directory of the PHP process user, if it can be determined.
+	 *
+	 * @return string
+	 */
+	public static function home_directory(): string {
+		$home = getenv( 'HOME' );
+		if ( is_string( $home ) && '' !== $home ) {
+			return $home;
+		}
+		if ( function_exists( 'posix_getpwuid' ) && function_exists( 'posix_geteuid' ) ) {
+			$info = posix_getpwuid( posix_geteuid() );
+			if ( is_array( $info ) && '' !== $info['dir'] ) {
+				return $info['dir'];
+			}
+		}
+		return '';
 	}
 
 	/**
@@ -195,10 +223,11 @@ final class StorageReclaim {
 		if ( '' === $root || '' === $this->target() ) {
 			return false;
 		}
-		$previous_parent = CloneClassifier::parent( rtrim( Paths::normalize( (string) $this->state['previous_abspath'] ), '/' ) );
-		$current_parent  = CloneClassifier::parent( rtrim( Paths::normalize( (string) $this->context['abspath'] ), '/' ) );
-		$ci              = Paths::is_windows();
-		if ( '' === $current_parent || ! Paths::same( $root, $current_parent, $ci ) || ! Paths::same( $root, $previous_parent, $ci ) ) {
+		// Both releases must sit directly under the trusted root AND look like releases
+		// (release-style names, or a parent named "releases"); a sibling with an arbitrary
+		// name is a clone candidate and goes through the manual flow.
+		$verdict = $this->classify();
+		if ( CloneClassifier::DEPLOYMENT !== $verdict['verdict'] || '' === $verdict['deploy_root'] || ! Paths::same( $root, $verdict['deploy_root'], Paths::is_windows() ) ) {
 			return false;
 		}
 		if ( ! $this->prechecks()['ok'] ) {
