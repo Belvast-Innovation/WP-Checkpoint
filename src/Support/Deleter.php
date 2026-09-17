@@ -92,8 +92,11 @@ final class Deleter {
 	 * Whether a path is a symbolic link, junction or other reparse point.
 	 *
 	 * The is_link() check covers symbolic links. Windows junctions are not
-	 * reported by is_link(); readlink() may still resolve them. As a last
-	 * check, a child entry is resolved through the directory: realpath()
+	 * reported by is_link(), but PHP's Windows readlink() returns the final
+	 * path of any directory (it resolves junctions and symlinks), so a
+	 * directory whose final path is not its parent's final path plus its own
+	 * name is a reparse point. Elsewhere, a child entry is resolved through
+	 * the directory as a fallback: realpath()
 	 * resolves reparse points in intermediate path components on every
 	 * platform (PHP's Windows implementation strips a trailing "." before
 	 * resolving, so the entry must be a real child), and a result that is not
@@ -115,8 +118,15 @@ final class Deleter {
 		if ( ! is_dir( $path ) ) {
 			return false;
 		}
-		if ( Paths::is_windows() && false !== @readlink( $path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- readlink() warns on ordinary directories.
-			return true;
+		if ( Paths::is_windows() ) {
+			// phpcs:disable WordPress.PHP.NoSilencedErrors.Discouraged -- readlink() warns when it cannot resolve; handled below.
+			$final        = @readlink( $path );
+			$final_parent = @readlink( dirname( $path ) );
+			// phpcs:enable WordPress.PHP.NoSilencedErrors.Discouraged
+			if ( is_string( $final ) && '' !== $final && is_string( $final_parent ) && '' !== $final_parent ) {
+				$expected = rtrim( self::strip_windows_prefix( $final_parent ), '/\\' ) . DIRECTORY_SEPARATOR . basename( $path );
+				return ! Paths::same( $expected, self::strip_windows_prefix( $final ), true );
+			}
 		}
 
 		$parent = realpath( dirname( $path ) );
@@ -133,6 +143,22 @@ final class Deleter {
 		}
 		$expected = rtrim( $parent, '/\\' ) . DIRECTORY_SEPARATOR . basename( $path ) . DIRECTORY_SEPARATOR . $child;
 		return ! Paths::same( $expected, $resolved, Paths::is_windows() );
+	}
+
+	/**
+	 * Remove the \\?\ and \\?\UNC\ prefixes Windows may put on final paths.
+	 *
+	 * @param string $path Path from readlink().
+	 * @return string
+	 */
+	private static function strip_windows_prefix( string $path ): string {
+		if ( 0 === strpos( $path, '\\\\?\\UNC\\' ) ) {
+			return '\\\\' . substr( $path, 8 );
+		}
+		if ( 0 === strpos( $path, '\\\\?\\' ) ) {
+			return substr( $path, 4 );
+		}
+		return $path;
 	}
 
 	/**
