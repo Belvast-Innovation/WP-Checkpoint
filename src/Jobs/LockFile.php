@@ -10,8 +10,11 @@ namespace WPCheckpoint\Jobs;
 /**
  * The tmp/job-<id>.lock file tells observers that cannot read this database (the
  * clone-side directory take-over of T005, uninstall) that a job may be
- * working in the directory. The database lock stays authoritative for
- * mutual exclusion; the file mirrors it.
+ * working in the directory. It exists from the first acquire until the job
+ * reaches completed, failed or cancelled, and records the latest lease
+ * expiry; between two ticks the recorded lease may have passed, which
+ * observers treat as "recently active" for a grace period. The database
+ * lock stays authoritative for mutual exclusion; the file mirrors it.
  *
  * Contents: job id, SHA-256 of the lock token (never the token itself: the
  * directory may be readable over HTTP when protection could not be

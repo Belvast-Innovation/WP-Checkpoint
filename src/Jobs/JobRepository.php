@@ -9,6 +9,7 @@ namespace WPCheckpoint\Jobs;
 
 use WPCheckpoint\Support\Deleter;
 use WPCheckpoint\Support\Directories;
+use WPCheckpoint\Support\Paths;
 use WPCheckpoint\Support\Redactor;
 use WPCheckpoint\Support\Schema;
 
@@ -18,23 +19,27 @@ defined( 'ABSPATH' ) || exit;
  * All database access for the jobs table.
  *
  * Locking: one UPDATE with a "not locked or expired" condition is the
- * compare-and-set between drivers (browser polling, loopback, WP-CLI);
- * heartbeat and release are guarded by the token. The lock file in the
- * storage tmp/ directory mirrors the database lock for observers that
- * cannot read this database.
+ * compare-and-set between drivers (browser polling, loopback, WP-CLI).
+ * Everything a lock holder writes afterwards (heartbeat, release, cursor,
+ * leaving the running status) is guarded by its token, so a driver whose
+ * lease expired and was taken over cannot overwrite the new holder's work.
+ * The lock file in the storage tmp/ directory exists for the whole running
+ * phase of a job (first acquire until a terminal status) and mirrors the
+ * lease for observers that cannot read this database.
  *
  * Storage gate: a job is bound to the storage directory it was created for
  * (token + path). Ticks are refused while the directory is unusable or has
  * changed (clone detected); consecutive refusals back off 5 s, 15 s, 60 s,
  * 5 min. Once the storage situation is settled, jobs bound to another
- * directory are failed.
+ * directory are failed. Files (lock file, log) are only ever touched inside
+ * the current storage directory; another directory belongs to another
+ * installation or is abandoned.
  */
 final class JobRepository {
 
 	const LOCK_SECONDS      = 120;
 	const BACKOFF_SECONDS   = array( 5, 15, 60, 300 );
 	const STALL_SECONDS     = 86400;
-	const LOCK_FILE_GRACE   = 600;
 	const RETENTION_SECONDS = array(
 		Job::COMPLETED => 2592000, // 30 days
 		Job::CANCELLED => 2592000,
@@ -43,7 +48,7 @@ final class JobRepository {
 	const MAX_ROWS          = 1000;
 	const REAP_THROTTLE     = 600;
 	const PURGE_THROTTLE    = 86400;
-	const SECRET_MIN_LENGTH = 8;
+	const SECRET_MIN_LENGTH = 4;
 
 	/**
 	 * Storage directories.
@@ -259,12 +264,15 @@ final class JobRepository {
 	}
 
 	/**
-	 * Try to take the lock. Only queued and running jobs can be acquired;
-	 * a queued job becomes running.
+	 * Try to take the lock. Only queued and running jobs bound to the current
+	 * storage directory can be acquired; a queued job becomes running.
+	 *
+	 * The storage token is part of the compare-and-set, so a caller that
+	 * skipped gate() still cannot run a job bound to another directory.
 	 *
 	 * @param int $id    Job id.
 	 * @param int $lease Lock duration in seconds.
-	 * @return array{job: Job, token: string}|null Null when another driver holds the lock or the job is not runnable.
+	 * @return array{job: Job, token: string}|null Null when another driver holds the lock or the job is not runnable here.
 	 */
 	public function acquire( int $id, int $lease = self::LOCK_SECONDS ) {
 		global $wpdb;
@@ -272,13 +280,17 @@ final class JobRepository {
 		if ( null === $job || ! in_array( $job->status, array( Job::QUEUED, Job::RUNNING ), true ) ) {
 			return null;
 		}
-		$now   = $this->now();
-		$token = bin2hex( random_bytes( 16 ) );
-		$table = $wpdb->base_prefix . Schema::JOBS_TABLE;
+		if ( '' === $this->directories->base() ) {
+			return null;
+		}
+		$storage_token = (string) $this->directories->state()['token'];
+		$now           = $this->now();
+		$token         = bin2hex( random_bytes( 16 ) );
+		$table         = $wpdb->base_prefix . Schema::JOBS_TABLE;
 		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix; the WHERE clause is the compare-and-set.
 		$affected = $wpdb->query(
 			$wpdb->prepare(
-				"UPDATE {$table} SET attempts = IF(status = %s, attempts + 1, attempts), started_at = IF(started_at = 0, %d, started_at), status = %s, lock_token = %s, locked_until = %d, updated_at = %d WHERE id = %d AND status IN (%s, %s) AND (lock_token = '' OR locked_until < %d)",
+				"UPDATE {$table} SET attempts = IF(status = %s, attempts + 1, attempts), started_at = IF(started_at = 0, %d, started_at), status = %s, lock_token = %s, locked_until = %d, updated_at = %d WHERE id = %d AND status IN (%s, %s) AND storage_token = %s AND (lock_token = '' OR locked_until < %d)",
 				Job::QUEUED,
 				$now,
 				Job::RUNNING,
@@ -288,6 +300,7 @@ final class JobRepository {
 				$id,
 				Job::QUEUED,
 				Job::RUNNING,
+				$storage_token,
 				$now
 			)
 		);
@@ -299,7 +312,7 @@ final class JobRepository {
 		if ( null === $job ) {
 			return null;
 		}
-		LockFile::write( $job->storage_path, $job->id, $token, $job->locked_until );
+		$this->write_lock_file( $job, $token, $job->locked_until );
 		return array(
 			'job'   => $job,
 			'token' => $token,
@@ -320,16 +333,17 @@ final class JobRepository {
 		$table = $wpdb->base_prefix . Schema::JOBS_TABLE;
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix.
 		$affected = $wpdb->query( $wpdb->prepare( "UPDATE {$table} SET locked_until = %d, updated_at = %d WHERE id = %d AND lock_token = %s", $until, $this->now(), $job->id, $token ) );
-		if ( 1 !== (int) $affected ) {
+		if ( 1 !== (int) $affected && ! $this->holds_lock( $job->id, $token ) ) {
 			return false;
 		}
 		$job->locked_until = $until;
-		LockFile::write( $job->storage_path, $job->id, $token, $until );
+		$this->write_lock_file( $job, $token, $until );
 		return true;
 	}
 
 	/**
-	 * Give the lock back.
+	 * Give the database lock back between two ticks. The lock file stays: it
+	 * covers the whole running phase and is removed with the terminal status.
 	 *
 	 * @param Job    $job   Job.
 	 * @param string $token Lock token.
@@ -345,116 +359,85 @@ final class JobRepository {
 		}
 		$job->lock_token   = '';
 		$job->locked_until = 0;
-		if ( LockFile::is_owned_by( LockFile::path( $job->storage_path, $job->id ), $token ) ) {
-			LockFile::remove( $job->storage_path, $job->id );
-		}
 		return true;
 	}
 
 	/**
-	 * Save the position of a running job. Resets the back-off counter.
+	 * Save the position of a running job; only the lock holder may. Resets
+	 * the back-off counter.
 	 *
 	 * @param Job                  $job      Job.
+	 * @param string               $token    Lock token.
 	 * @param string               $step     Current step id.
 	 * @param array<string, mixed> $cursor   Cursor (identifiers and offsets only).
 	 * @param int                  $progress Percentage.
 	 * @param string               $message  Progress text.
 	 * @return void
+	 * @throws StaleJob When the lock is no longer held with this token.
 	 */
-	public function save_progress( Job $job, string $step, array $cursor, int $progress, string $message = '' ): void {
+	public function save_progress( Job $job, string $token, string $step, array $cursor, int $progress, string $message = '' ): void {
 		global $wpdb;
 		self::assert_cursor_has_no_secrets( $cursor );
-		$now                   = $this->now();
-		$job->step             = $step;
-		$job->cursor           = $cursor;
-		$job->progress         = max( 0, min( 100, $progress ) );
-		$job->progress_message = $message;
-		$job->progress_at      = $now;
-		$job->updated_at       = $now;
-		$job->blocked_count    = 0;
-		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin table.
-		$wpdb->update(
+		$now      = $this->now();
+		$progress = max( 0, min( 100, $progress ) );
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin table; the WHERE on lock_token is the fence.
+		$affected = $wpdb->update(
 			self::table(),
 			array(
 				'step'             => $step,
 				'cursor_json'      => wp_json_encode( $cursor ),
-				'progress'         => $job->progress,
+				'progress'         => $progress,
 				'progress_message' => $message,
 				'progress_at'      => $now,
 				'updated_at'       => $now,
 				'blocked_count'    => 0,
 			),
-			array( 'id' => $job->id ),
+			array(
+				'id'         => $job->id,
+				'lock_token' => $token,
+			),
 			array( '%s', '%s', '%d', '%s', '%d', '%d', '%d' ),
-			array( '%d' )
+			array( '%d', '%s' )
 		);
+		if ( 1 !== (int) $affected && ! $this->holds_lock( $job->id, $token ) ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+			throw new StaleJob( sprintf( 'Job %d is no longer locked by this driver.', $job->id ) );
+		}
+		$job->step             = $step;
+		$job->cursor           = $cursor;
+		$job->progress         = $progress;
+		$job->progress_message = $message;
+		$job->progress_at      = $now;
+		$job->updated_at       = $now;
+		$job->blocked_count    = 0;
 	}
 
 	/**
 	 * Change the status, guarded by the status the caller saw.
 	 *
-	 * @param Job    $job   Job (updated in place on success).
-	 * @param string $to    Target status.
-	 * @param string $error Error message for failed (redacted before storing).
+	 * Leaving "running" for completed, failed or paused is the lock holder's
+	 * decision and requires its token (the fence against a driver whose
+	 * lease was taken over). Every other move needs no token: cancelling is
+	 * an administrator's action on any status, queued and paused jobs are
+	 * not locked, and a retry starts from failed. The reaper and the storage
+	 * settlement use force_transition() instead.
+	 *
 	 * Job::transition() on a copy validates first and throws InvalidTransition
 	 * when the state machine forbids the move.
 	 *
+	 * @param Job    $job   Job (updated in place on success).
+	 * @param string $to    Target status.
+	 * @param string $error Error message for failed (redacted before storing).
+	 * @param string $token Lock token; required when leaving running for anything but cancelled.
 	 * @return Job
-	 * @throws StaleJob When the row no longer has the expected status.
+	 * @throws InvalidTransition When the state machine forbids the move or the token is missing. The write also throws StaleJob when the row no longer has the expected status (or the lock changed hands).
 	 */
-	public function transition( Job $job, string $to, string $error = '' ): Job {
-		global $wpdb;
-		$from = $job->status;
-		$copy = clone $job;
-		$copy->transition( $to ); // Validates.
-
-		$now  = $this->now();
-		$data = array(
-			'status'     => $to,
-			'updated_at' => $now,
-		);
-		if ( in_array( $to, array( Job::COMPLETED, Job::FAILED, Job::CANCELLED ), true ) ) {
-			$data['finished_at']  = $now;
-			$data['lock_token']   = '';
-			$data['locked_until'] = 0;
-		}
-		if ( Job::FAILED === $to ) {
-			$data['last_error'] = $this->redactor->redact( $error );
-		}
-		if ( Job::QUEUED === $to ) {
-			$data['finished_at'] = 0;
-		}
-		if ( Job::RUNNING === $to && 0 === $job->started_at ) {
-			$data['started_at'] = $now;
-		}
-		$formats = array_fill( 0, count( $data ), '%s' );
-		foreach ( array_keys( $data ) as $i => $key ) {
-			if ( in_array( $key, array( 'updated_at', 'finished_at', 'locked_until', 'started_at' ), true ) ) {
-				$formats[ $i ] = '%d';
-			}
-		}
-		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin table; the WHERE on status is the guard.
-		$affected = $wpdb->update(
-			self::table(),
-			$data,
-			array(
-				'id'     => $job->id,
-				'status' => $from,
-			),
-			$formats,
-			array( '%d', '%s' )
-		);
-		if ( 1 !== (int) $affected ) {
+	public function transition( Job $job, string $to, string $error = '', string $token = '' ): Job {
+		if ( '' === $token && Job::RUNNING === $job->status && Job::CANCELLED !== $to ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
-			throw new StaleJob( sprintf( 'Job %d is no longer %s.', $job->id, $from ) );
+			throw new InvalidTransition( sprintf( 'Job %d: leaving running for %s requires the lock token.', $job->id, $to ) );
 		}
-		foreach ( $data as $key => $value ) {
-			$job->$key = $value;
-		}
-		if ( in_array( $to, array( Job::COMPLETED, Job::FAILED, Job::CANCELLED ), true ) ) {
-			LockFile::remove( $job->storage_path, $job->id );
-		}
-		return $job;
+		return $this->write_transition( $job, $to, $error, $token );
 	}
 
 	/**
@@ -479,7 +462,7 @@ final class JobRepository {
 				continue;
 			}
 			try {
-				$this->transition( $job, Job::FAILED, __( 'The storage directory changed; the job cannot continue.', 'wp-checkpoint' ) );
+				$this->force_transition( $job, Job::FAILED, __( 'The storage directory changed; the job cannot continue.', 'wp-checkpoint' ) );
 				++$failed;
 			} catch ( StaleJob $e ) {
 				continue;
@@ -489,7 +472,7 @@ final class JobRepository {
 	}
 
 	/**
-	 * Housekeeping that must not wait for cron: stale lock files, stalled
+	 * Housekeeping that must not wait for cron: orphaned lock files, stalled
 	 * jobs, storage settlement.
 	 *
 	 * @return void
@@ -501,11 +484,13 @@ final class JobRepository {
 		if ( '' !== $base && is_dir( $base . DIRECTORY_SEPARATOR . 'tmp' ) ) {
 			$files = glob( $base . DIRECTORY_SEPARATOR . 'tmp' . DIRECTORY_SEPARATOR . LockFile::PREFIX . '*' . LockFile::SUFFIX );
 			foreach ( is_array( $files ) ? $files : array() as $file ) {
-				$id   = LockFile::job_id_from_path( $file );
-				$job  = $id > 0 ? $this->find( $id ) : null;
-				$dead = null === $job || ! in_array( $job->status, array( Job::QUEUED, Job::RUNNING, Job::PAUSED ), true );
-				if ( $dead || ( ! $job->is_locked( $now ) && LockFile::is_stale( $file, $now, self::LOCK_FILE_GRACE ) ) ) {
-					@unlink( $file ); // phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- plugin-owned stale file.
+				// The lock file lives as long as the job is queued, running or paused;
+				// only a file without such a job is an orphan (crash before the row was
+				// written, table recreated, foreign copy).
+				$id  = LockFile::job_id_from_path( $file );
+				$job = $id > 0 ? $this->find( $id ) : null;
+				if ( null === $job || ! in_array( $job->status, array( Job::QUEUED, Job::RUNNING, Job::PAUSED ), true ) ) {
+					@unlink( $file ); // phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- plugin-owned orphaned file.
 				}
 			}
 		}
@@ -515,8 +500,11 @@ final class JobRepository {
 			if ( $job->is_locked( $now ) || $last + self::STALL_SECONDS > $now ) {
 				continue;
 			}
+			$message = 0 === $job->started_at
+				? __( 'Queued for 24 hours without starting; the job was given up.', 'wp-checkpoint' )
+				: __( 'No progress for 24 hours; the job was given up.', 'wp-checkpoint' );
 			try {
-				$this->transition( $job, Job::FAILED, __( 'No progress for 24 hours; the job was given up.', 'wp-checkpoint' ) );
+				$this->force_transition( $job, Job::FAILED, $message );
 			} catch ( StaleJob $e ) {
 				continue;
 			}
@@ -587,30 +575,194 @@ final class JobRepository {
 	 * Refuse cursors that carry credentials: cursors hold identifiers and
 	 * positions only; credentials are read from the encrypted options.
 	 *
-	 * @param array<string, mixed> $cursor Cursor.
+	 * Every escaped form of a secret is checked (Redactor::forms()), because
+	 * the cursor is compared in its JSON encoding where slashes, quotes and
+	 * non-ASCII characters are escaped. DB_USER is left out: it is not a
+	 * credential and is often a plain word that legitimately occurs in a
+	 * cursor (a site or table name); Redactor still masks it in logs.
+	 *
+	 * @param array<string, mixed> $cursor  Cursor.
+	 * @param string[]|null        $secrets Secrets to check (tests); the installation's when null.
 	 * @return void
 	 * @throws \InvalidArgumentException When a known secret appears in it.
 	 */
-	public static function assert_cursor_has_no_secrets( array $cursor ): void {
+	public static function assert_cursor_has_no_secrets( array $cursor, $secrets = null ): void {
 		$json = wp_json_encode( $cursor );
 		if ( ! is_string( $json ) ) {
 			throw new \InvalidArgumentException( 'Cursor cannot be encoded.' );
 		}
-		foreach ( Redactor::installation_secrets() as $secret ) {
-			if ( strlen( $secret ) >= self::SECRET_MIN_LENGTH && false !== strpos( $json, $secret ) ) {
-				throw new \InvalidArgumentException( 'Cursor must not contain credentials.' );
+		$user = defined( 'DB_USER' ) && is_string( DB_USER ) ? DB_USER : '';
+		foreach ( is_array( $secrets ) ? $secrets : Redactor::installation_secrets() as $secret ) {
+			if ( ! is_string( $secret ) || strlen( $secret ) < self::SECRET_MIN_LENGTH || ( '' !== $user && $secret === $user ) ) {
+				continue;
+			}
+			foreach ( Redactor::forms( $secret ) as $form ) {
+				if ( strlen( $form ) >= self::SECRET_MIN_LENGTH && false !== strpos( $json, $form ) ) {
+					throw new \InvalidArgumentException( 'Cursor must not contain credentials.' );
+				}
 			}
 		}
 	}
 
 	/**
-	 * Delete the log and lock file of a job, confined to its storage directory.
+	 * Status change without a token, for the reaper (which only touches jobs
+	 * whose lock expired) and the storage settlement (whose jobs are bound to
+	 * another directory: a holder in another installation cannot pass the
+	 * gate here, and a holder sharing this database is meant to be stopped).
+	 *
+	 * @param Job    $job   Job.
+	 * @param string $to    Target status.
+	 * @param string $error Error message for failed.
+	 * @return Job
+	 */
+	private function force_transition( Job $job, string $to, string $error ): Job {
+		return $this->write_transition( $job, $to, $error, '' );
+	}
+
+	/**
+	 * The guarded UPDATE behind transition() and force_transition().
+	 *
+	 * @param Job    $job   Job (updated in place on success).
+	 * @param string $to    Target status.
+	 * @param string $error Error message for failed (redacted before storing).
+	 * @param string $token Lock token to add to the guard, or empty.
+	 * @return Job
+	 * @throws StaleJob When the guarded UPDATE changed no row.
+	 */
+	private function write_transition( Job $job, string $to, string $error, string $token ): Job {
+		global $wpdb;
+		$from = $job->status;
+		$copy = clone $job;
+		$copy->transition( $to ); // Validates.
+
+		$now  = $this->now();
+		$data = array(
+			'status'     => $to,
+			'updated_at' => $now,
+		);
+		if ( in_array( $to, array( Job::COMPLETED, Job::FAILED, Job::CANCELLED ), true ) ) {
+			$data['finished_at'] = $now;
+		}
+		if ( in_array( $to, array( Job::COMPLETED, Job::FAILED, Job::CANCELLED, Job::PAUSED ), true ) ) {
+			// Nobody works on the job any more; a paused job is acquired again after it resumes.
+			$data['lock_token']   = '';
+			$data['locked_until'] = 0;
+		}
+		if ( Job::FAILED === $to ) {
+			$data['last_error'] = $this->redactor->redact( $error );
+		}
+		if ( Job::QUEUED === $to ) {
+			$data['finished_at'] = 0;
+		}
+		if ( Job::RUNNING === $to && 0 === $job->started_at ) {
+			$data['started_at'] = $now;
+		}
+		$formats = array_fill( 0, count( $data ), '%s' );
+		foreach ( array_keys( $data ) as $i => $key ) {
+			if ( in_array( $key, array( 'updated_at', 'finished_at', 'locked_until', 'started_at' ), true ) ) {
+				$formats[ $i ] = '%d';
+			}
+		}
+		$where         = array(
+			'id'     => $job->id,
+			'status' => $from,
+		);
+		$where_formats = array( '%d', '%s' );
+		if ( '' !== $token ) {
+			$where['lock_token'] = $token;
+			$where_formats[]     = '%s';
+		}
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin table; the WHERE on status (and token) is the guard.
+		$affected = $wpdb->update( self::table(), $data, $where, $formats, $where_formats );
+		if ( 1 !== (int) $affected ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+			throw new StaleJob( sprintf( 'Job %d is no longer %s.', $job->id, $from ) );
+		}
+		foreach ( $data as $key => $value ) {
+			$job->$key = $value;
+		}
+		if ( in_array( $to, array( Job::COMPLETED, Job::FAILED, Job::CANCELLED ), true ) ) {
+			$this->remove_lock_file( $job );
+		}
+		return $job;
+	}
+
+	/**
+	 * Whether the row is currently locked with this token. Used after an
+	 * UPDATE that changed no row, because MySQL reports changed rows, not
+	 * matched rows: two heartbeats within the same second are still ours.
+	 *
+	 * @param int    $id    Job id.
+	 * @param string $token Lock token.
+	 * @return bool
+	 */
+	private function holds_lock( int $id, string $token ): bool {
+		global $wpdb;
+		if ( '' === $token ) {
+			return false;
+		}
+		$table = $wpdb->base_prefix . Schema::JOBS_TABLE;
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix.
+		return 1 === (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM {$table} WHERE id = %d AND lock_token = %s", $id, $token ) );
+	}
+
+	/**
+	 * Whether the job's files live in the current storage directory. Files in
+	 * any other directory are never touched: that directory belongs to
+	 * another installation (copied database) or was abandoned.
+	 *
+	 * @param Job $job Job.
+	 * @return bool
+	 */
+	private function owns_files_of( Job $job ): bool {
+		$base = $this->directories->base();
+		return '' !== $base && '' !== $job->storage_path && Paths::same( $job->storage_path, $base, Paths::is_windows() );
+	}
+
+	/**
+	 * Write or refresh the lock file, inside the current directory only.
+	 *
+	 * @param Job    $job   Job.
+	 * @param string $token Lock token.
+	 * @param int    $until Lock expiry.
+	 * @return void
+	 */
+	private function write_lock_file( Job $job, string $token, int $until ): void {
+		if ( ! $this->owns_files_of( $job ) ) {
+			$this->directories->log_event( sprintf( 'Job %d is bound to another storage directory; no lock file was written.', $job->id ) );
+			return;
+		}
+		if ( ! LockFile::write( $job->storage_path, $job->id, $token, $until ) ) {
+			$this->directories->log_event( sprintf( 'The lock file of job %d could not be written; directory take-over checks cannot see this job.', $job->id ) );
+		}
+	}
+
+	/**
+	 * Remove the lock file, inside the current directory only.
+	 *
+	 * @param Job $job Job.
+	 * @return void
+	 */
+	private function remove_lock_file( Job $job ): void {
+		if ( ! $this->owns_files_of( $job ) ) {
+			$this->directories->log_event( sprintf( 'Job %d is bound to another storage directory; its files were left alone.', $job->id ) );
+			return;
+		}
+		LockFile::remove( $job->storage_path, $job->id );
+	}
+
+	/**
+	 * Delete the log and lock file of a job, confined to the current storage directory.
 	 *
 	 * @param Job $job Job.
 	 * @return void
 	 */
 	private function delete_files_of( Job $job ): void {
-		if ( '' === $job->storage_path || ! is_dir( $job->storage_path ) ) {
+		if ( ! $this->owns_files_of( $job ) ) {
+			$this->directories->log_event( sprintf( 'Job %d is bound to another storage directory; its files were left alone.', $job->id ) );
+			return;
+		}
+		if ( ! is_dir( $job->storage_path ) ) {
 			return;
 		}
 		LockFile::remove( $job->storage_path, $job->id );

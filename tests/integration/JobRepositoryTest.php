@@ -16,6 +16,7 @@ use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Support\Options;
 use WPCheckpoint\Support\Schema;
 use WPCheckpoint\Support\StorageReclaim;
+use WPCheckpoint\Support\Uninstaller;
 
 final class JobRepositoryTest extends WP_UnitTestCase {
 
@@ -134,6 +135,22 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		$this->repo->create( 'export', 0, array( 'note' => 'db password is ' . DB_PASSWORD ) );
 	}
 
+	public function test_cursor_check_sees_every_escaped_form_of_a_secret(): void {
+		// Slash, double quote, backslash and non-ASCII are escaped by wp_json_encode().
+		$secrets = array( 'Ab/cd12345', 'x"y12345678', 'back\\slash1', 'pässwörd123' );
+		foreach ( $secrets as $secret ) {
+			try {
+				JobRepository::assert_cursor_has_no_secrets( array( 'note' => 'leak ' . $secret ), $secrets );
+				$this->fail( 'not caught: ' . $secret );
+			} catch ( \InvalidArgumentException $e ) {
+				$this->assertSame( 'Cursor must not contain credentials.', $e->getMessage() );
+			}
+		}
+		JobRepository::assert_cursor_has_no_secrets( array( 'table' => 'wp_posts', 'offset' => 500 ), $secrets );
+		JobRepository::assert_cursor_has_no_secrets( array( 'short' => 'abc' ), array( 'abc' ) );
+		$this->assertTrue( true, 'identifiers and secrets shorter than the minimum pass' );
+	}
+
 	public function test_lock_is_a_compare_and_set_between_drivers(): void {
 		$job = $this->repo->create( 'export' );
 
@@ -153,20 +170,37 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		$this->assertFalse( $this->repo->release( $first['job'], 'someone-else' ) );
 		$this->assertTrue( $this->repo->heartbeat( $first['job'], $first['token'], 200 ) );
 		$this->assertSame( $this->now + 200, $this->repo->find( $job->id )->locked_until );
+		$this->assertSame( $this->now + 200, LockFile::read( $lock )['locked_until'], 'the lock file follows the lease' );
 
 		$this->assertTrue( $this->repo->release( $first['job'], $first['token'] ) );
-		$this->assertFileDoesNotExist( $lock );
+		$this->assertFileExists( $lock, 'the lock file covers the whole running phase, not only the lease' );
 		$this->assertSame( Job::RUNNING, $this->repo->find( $job->id )->status, 'still in progress between ticks' );
 
 		$second = $this->repo->acquire( $job->id, 100 );
 		$this->assertNotNull( $second, 'released locks can be taken again' );
 		$this->assertSame( 1, $second['job']->attempts, 'attempts only counts starts from queued' );
+		$this->assertTrue( LockFile::is_owned_by( $lock, $second['token'] ) );
+
+		$this->repo->transition( $second['job'], Job::COMPLETED, '', $second['token'] );
+		$this->assertFileDoesNotExist( $lock, 'removed with the terminal status' );
 	}
 
-	public function test_expired_lock_can_be_taken_over_and_the_lock_file_is_replaced(): void {
+	public function test_repeated_writes_within_the_same_second_keep_the_lock(): void {
+		// MySQL reports changed rows, not matched rows; the fake clock never moves here.
+		$job  = $this->repo->create( 'export' );
+		$held = $this->repo->acquire( $job->id, 100 );
+		$this->assertTrue( $this->repo->heartbeat( $held['job'], $held['token'], 100 ) );
+		$this->assertTrue( $this->repo->heartbeat( $held['job'], $held['token'], 100 ), 'an identical heartbeat is still ours' );
+		$this->repo->save_progress( $held['job'], $held['token'], 'db', array( 'offset' => 1 ), 10 );
+		$this->repo->save_progress( $held['job'], $held['token'], 'db', array( 'offset' => 1 ), 10 );
+		$this->assertSame( array( 'offset' => 1 ), $this->repo->find( $job->id )->cursor );
+	}
+
+	public function test_expired_lock_can_be_taken_over_and_the_old_holder_is_fenced_off(): void {
 		$job   = $this->repo->create( 'export' );
 		$first = $this->repo->acquire( $job->id, 100 );
 		$this->assertNotNull( $first );
+		$this->repo->save_progress( $first['job'], $first['token'], 'db', array( 'offset' => 100 ), 10 );
 
 		$this->now += 101;
 		$second     = $this->repo->acquire( $job->id, 100 );
@@ -178,6 +212,58 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		$this->assertFalse( $this->repo->heartbeat( $first['job'], $first['token'] ), 'the old holder lost the lock' );
 		$this->assertFalse( $this->repo->release( $first['job'], $first['token'] ) );
 		$this->assertFileExists( $lock, 'the old holder cannot remove the new holder\'s lock file' );
+
+		$this->repo->save_progress( $second['job'], $second['token'], 'db', array( 'offset' => 200 ), 20 );
+		try {
+			$this->repo->save_progress( $first['job'], $first['token'], 'db', array( 'offset' => 100 ), 10 );
+			$this->fail( 'expected StaleJob' );
+		} catch ( StaleJob $e ) {
+			$this->assertSame( array( 'offset' => 200 ), $this->repo->find( $job->id )->cursor, 'the old holder cannot rewind the cursor' );
+		}
+		try {
+			$this->repo->transition( $first['job'], Job::COMPLETED, '', $first['token'] );
+			$this->fail( 'expected StaleJob' );
+		} catch ( StaleJob $e ) {
+			$this->assertSame( Job::RUNNING, $this->repo->find( $job->id )->status, 'the old holder cannot finish the job' );
+		}
+		try {
+			$this->repo->transition( $first['job'], Job::FAILED, 'boom', $first['token'] );
+			$this->fail( 'expected StaleJob' );
+		} catch ( StaleJob $e ) {
+			$this->assertSame( Job::RUNNING, $this->repo->find( $job->id )->status );
+		}
+		$this->assertFileExists( $lock );
+
+		$this->repo->transition( $second['job'], Job::COMPLETED, '', $second['token'] );
+		$this->assertSame( Job::COMPLETED, $this->repo->find( $job->id )->status );
+		$this->assertFileDoesNotExist( $lock );
+	}
+
+	public function test_leaving_running_needs_the_token_except_for_cancel(): void {
+		$job  = $this->repo->create( 'export' );
+		$held = $this->repo->acquire( $job->id );
+		foreach ( array( Job::COMPLETED, Job::FAILED, Job::PAUSED ) as $to ) {
+			try {
+				$this->repo->transition( $this->repo->find( $job->id ), $to );
+				$this->fail( 'expected InvalidTransition for ' . $to );
+			} catch ( InvalidTransition $e ) {
+				$this->assertStringContainsString( 'requires the lock token', $e->getMessage() );
+			}
+		}
+		$this->assertSame( Job::RUNNING, $this->repo->find( $job->id )->status );
+		$this->repo->transition( $held['job'], Job::PAUSED, '', $held['token'] );
+		$this->assertSame( Job::PAUSED, $this->repo->find( $job->id )->status );
+		$this->assertFileExists( LockFile::path( $this->base, $job->id ), 'paused is not terminal' );
+		$this->repo->transition( $this->repo->find( $job->id ), Job::RUNNING );
+		$this->assertSame( Job::RUNNING, $this->repo->find( $job->id )->status, 'paused to running needs no token; the lock is taken by acquire()' );
+
+		// An administrator cancels a running job without the lock; the holder notices at its next write.
+		$held = $this->repo->acquire( $job->id );
+		$this->assertNotNull( $held );
+		$this->repo->transition( $this->repo->find( $job->id ), Job::CANCELLED );
+		$this->assertFalse( $this->repo->heartbeat( $held['job'], $held['token'] ) );
+		$this->expectException( StaleJob::class );
+		$this->repo->save_progress( $held['job'], $held['token'], 'db', array(), 1 );
 	}
 
 	public function test_transitions_are_guarded_by_the_expected_status(): void {
@@ -185,14 +271,14 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		$this->assertSame( Job::CANCELLED, $this->repo->transition( $job, Job::CANCELLED )->status );
 		$this->assertSame( $this->now, $this->repo->find( $job->id )->finished_at );
 
-		$job = $this->repo->create( 'export' );
-		$this->repo->acquire( $job->id );
+		$job    = $this->repo->create( 'export' );
+		$held   = $this->repo->acquire( $job->id );
 		$loaded = $this->repo->find( $job->id );
 		$stale  = $this->repo->find( $job->id );
 		$this->repo->transition( $loaded, Job::CANCELLED );
 		$this->assertFileDoesNotExist( LockFile::path( $this->base, $job->id ), 'terminal states drop the lock file' );
 		try {
-			$this->repo->transition( $stale, Job::FAILED, 'boom' );
+			$this->repo->transition( $stale, Job::FAILED, 'boom', $held['token'] );
 			$this->fail( 'expected StaleJob' );
 		} catch ( StaleJob $e ) {
 			$this->assertSame( Job::CANCELLED, $this->repo->find( $job->id )->status );
@@ -203,8 +289,8 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 	}
 
 	public function test_concurrent_cancel_between_load_and_write_is_detected(): void {
-		$job = $this->repo->create( 'export' );
-		$this->repo->acquire( $job->id );
+		$job     = $this->repo->create( 'export' );
+		$held    = $this->repo->acquire( $job->id );
 		$running = $this->repo->find( $job->id );
 		$repo    = $this->repo;
 		$done    = false;
@@ -218,7 +304,7 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		} );
 		try {
 			$this->expectException( StaleJob::class );
-			$this->repo->transition( $running, Job::COMPLETED );
+			$this->repo->transition( $running, Job::COMPLETED, '', $held['token'] );
 		} finally {
 			remove_all_filters( 'query' );
 			$this->assertSame( Job::CANCELLED, $this->repo->find( $job->id )->status );
@@ -226,14 +312,15 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 	}
 
 	public function test_failed_jobs_can_be_retried_keeping_the_cursor(): void {
-		$job = $this->repo->create( 'export' );
-		$this->repo->acquire( $job->id );
-		$job = $this->repo->find( $job->id );
-		$this->repo->save_progress( $job, 'db', array( 'table' => 'wp_posts', 'offset' => 500 ), 40, 'half way' );
-		$this->repo->transition( $job, Job::FAILED, 'disk full at ' . DB_PASSWORD );
+		$job  = $this->repo->create( 'export' );
+		$held = $this->repo->acquire( $job->id );
+		$job  = $this->repo->find( $job->id );
+		$this->repo->save_progress( $job, $held['token'], 'db', array( 'table' => 'wp_posts', 'offset' => 500 ), 40, 'half way' );
+		$this->repo->transition( $job, Job::FAILED, 'disk full at ' . DB_PASSWORD, $held['token'] );
 		$stored = $this->repo->find( $job->id );
 		$this->assertStringNotContainsString( DB_PASSWORD, $stored->last_error, 'errors are redacted before storing' );
 		$this->assertSame( 40, $stored->progress );
+		$this->assertFileDoesNotExist( LockFile::path( $this->base, $job->id ), 'failed drops the lock file' );
 
 		$this->repo->transition( $stored, Job::QUEUED );
 		$again = $this->repo->find( $job->id );
@@ -243,6 +330,7 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		$this->assertSame( 0, $again->finished_at );
 		$second = $this->repo->acquire( $job->id );
 		$this->assertSame( 2, $second['job']->attempts );
+		$this->assertFileExists( LockFile::path( $this->base, $job->id ), 'written again on the retry' );
 	}
 
 	public function test_storage_gate_blocks_with_back_off_and_stalls_fail_after_a_day(): void {
@@ -258,22 +346,29 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		$this->assertFalse( $gate['allowed'] );
 		$this->assertSame( 'storage_unavailable', $gate['reason'] );
 		$this->assertSame( 5, $gate['retry_after'] );
+		$this->assertNull( $repo->acquire( $job->id ), 'no storage, no lock' );
 		foreach ( array( 15, 60, 300, 300, 300 ) as $expected ) {
 			$this->assertSame( $expected, $repo->record_blocked( $job ) );
 		}
 		$this->assertSame( 300, $repo->gate( $this->repo->find( $job->id ) )['retry_after'] );
 
 		// Progress resets the back-off.
-		$this->repo->save_progress( $this->repo->find( $job->id ), 's', array(), 1 );
+		$held = $this->repo->acquire( $job->id );
+		$this->repo->save_progress( $held['job'], $held['token'], 's', array(), 1 );
 		$this->assertSame( 0, $this->repo->find( $job->id )->blocked_count );
 		$this->assertSame( 5, $repo->gate( $this->repo->find( $job->id ) )['retry_after'], 'the sequence starts over' );
+		$this->repo->release( $held['job'], $held['token'] );
 
-		// No progress for 24 hours: given up.
+		// No progress for 24 hours: given up, with a message that tells whether it ever started.
+		$never = $this->repo->create( 'export' );
 		$this->now += JobRepository::STALL_SECONDS + 1;
 		$this->repo->reap();
 		$failed = $this->repo->find( $job->id );
 		$this->assertSame( Job::FAILED, $failed->status );
-		$this->assertStringContainsString( '24 hours', $failed->last_error );
+		$this->assertStringContainsString( 'No progress for 24 hours', $failed->last_error );
+		$this->assertFileDoesNotExist( LockFile::path( $this->base, $job->id ) );
+		$this->assertSame( Job::FAILED, $this->repo->find( $never->id )->status );
+		$this->assertStringContainsString( 'Queued for 24 hours without starting', $this->repo->find( $never->id )->last_error );
 	}
 
 	public function test_a_locked_job_is_never_treated_as_stalled(): void {
@@ -285,11 +380,24 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		$this->assertSame( Job::RUNNING, $this->repo->find( $job->id )->status );
 	}
 
-	public function test_jobs_of_a_replaced_directory_fail_when_the_clone_notice_is_dismissed(): void {
+	public function test_acquire_refuses_jobs_bound_to_another_directory(): void {
 		$old = $this->repo->create( 'export' );
-		$this->repo->acquire( $old->id );
-		$this->repo->release( $this->repo->find( $old->id ), $this->repo->find( $old->id )->lock_token ?: '' );
-		LockFile::write( $this->base, $old->id, 'x', $this->now + 100 );
+		$next = $this->site( 'releases/b' );
+		$next->base();
+		$this->assertTrue( $next->state()['clone_detected'] );
+		$repo = $this->repo_for( $next );
+		$this->assertFalse( $repo->gate( $old )['allowed'] );
+		$this->assertNull( $repo->acquire( $old->id ), 'the storage token is part of the compare-and-set' );
+		$this->assertSame( Job::QUEUED, $this->repo->find( $old->id )->status );
+		$this->assertFileDoesNotExist( LockFile::path( $next->base(), $old->id ) );
+		$this->assertFileDoesNotExist( LockFile::path( $this->base, $old->id ) );
+	}
+
+	public function test_jobs_of_a_replaced_directory_fail_when_the_clone_notice_is_dismissed(): void {
+		$old  = $this->repo->create( 'export' );
+		$held = $this->repo->acquire( $old->id );
+		$this->repo->release( $held['job'], $held['token'] );
+		$this->assertFileExists( LockFile::path( $this->base, $old->id ) );
 
 		$next = $this->site( 'releases/b' );
 		$next->base();
@@ -306,7 +414,8 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		$failed = $repo->find( $old->id );
 		$this->assertSame( Job::FAILED, $failed->status );
 		$this->assertStringContainsString( 'storage directory changed', $failed->last_error );
-		$this->assertFileDoesNotExist( LockFile::path( $this->base, $old->id ) );
+		$this->assertFileExists( LockFile::path( $this->base, $old->id ), 'files in another directory are never touched' );
+		$this->assertStringContainsString( 'Job ' . $old->id . ' is bound to another storage directory', (string) file_get_contents( $next->base() . '/logs/storage.log' ) );
 	}
 
 	public function test_jobs_created_during_the_clone_fail_when_the_original_directory_is_reclaimed(): void {
@@ -314,10 +423,9 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		$next->base();
 		$repo_new = $this->repo_for( $next );
 		$during   = $repo_new->create( 'export' );
-		$repo_new->acquire( $during->id );
-		$repo_new->release( $repo_new->find( $during->id ), $repo_new->find( $during->id )->lock_token ?: '' );
-		LockFile::write( $next->base(), $during->id, 'x', $this->now + 100 );
-		$this->assertTrue( StorageReclaim::is_busy( $next->base() ) );
+		$held     = $repo_new->acquire( $during->id );
+		$repo_new->release( $held['job'], $held['token'] );
+		$this->assertTrue( StorageReclaim::is_busy( $next->base() ), 'the lock file stays between ticks' );
 
 		$token  = ReclaimActions::expected_token( $this->base );
 		$result = ( new ReclaimActions( $next ) )->run_reclaim( true, $token, false );
@@ -326,33 +434,37 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		$failed = $repo_new->find( $during->id );
 		$this->assertSame( Job::FAILED, $failed->status );
 		$this->assertSame( $this->base, $next->base() );
-		$this->assertFileDoesNotExist( LockFile::path( $during->storage_path, $during->id ) );
+		$this->assertFileExists( LockFile::path( $during->storage_path, $during->id ), 'the abandoned directory is left alone' );
 	}
 
-	public function test_stale_lock_files_do_not_block_reclaim_and_are_reaped(): void {
+	public function test_orphaned_lock_files_are_reaped_and_live_ones_kept(): void {
 		$job = $this->repo->create( 'export' );
 		// is_busy() judges with the real clock; the repository below uses the fake one.
 		LockFile::write( $this->base, $job->id, 'crashed', time() - StorageReclaim::ACTIVITY_WINDOW - 1 );
-		$this->assertFalse( StorageReclaim::is_busy( $this->base ), 'an expired lock file is not a running job' );
+		$this->assertFalse( StorageReclaim::is_busy( $this->base ), 'a long expired lease is not a running job' );
 		LockFile::write( $this->base, $job->id, 'fresh', time() + 60 );
 		$this->assertTrue( StorageReclaim::is_busy( $this->base ) );
 
+		$done = $this->repo->create( 'export' );
+		$this->repo->transition( $done, Job::CANCELLED );
 		LockFile::write( $this->base, 424242, 'orphan', $this->now + 60 );
-		LockFile::write( $this->base, $job->id, 'crashed', $this->now - JobRepository::LOCK_FILE_GRACE - 1 );
+		LockFile::write( $this->base, $done->id, 'leftover', $this->now + 60 );
+		LockFile::write( $this->base, $job->id, 'crashed', $this->now - 100000 );
 		$this->repo->reap();
 		$this->assertFileDoesNotExist( LockFile::path( $this->base, 424242 ), 'no such job' );
-		$this->assertFileDoesNotExist( LockFile::path( $this->base, $job->id ), 'stale and not locked in the database' );
+		$this->assertFileDoesNotExist( LockFile::path( $this->base, $done->id ), 'terminal job' );
+		$this->assertFileExists( LockFile::path( $this->base, $job->id ), 'kept until the job leaves queued, running or paused' );
 	}
 
 	public function test_purge_respects_retention_and_the_row_cap_and_removes_logs(): void {
 		$keep_running = $this->repo->create( 'export' );
 		$this->repo->acquire( $keep_running->id );
 		$old_done = $this->repo->create( 'export' );
-		$this->repo->acquire( $old_done->id );
-		$this->repo->transition( $this->repo->find( $old_done->id ), Job::COMPLETED );
+		$held     = $this->repo->acquire( $old_done->id );
+		$this->repo->transition( $this->repo->find( $old_done->id ), Job::COMPLETED, '', $held['token'] );
 		$old_failed = $this->repo->create( 'export' );
-		$this->repo->acquire( $old_failed->id );
-		$this->repo->transition( $this->repo->find( $old_failed->id ), Job::FAILED, 'x' );
+		$held       = $this->repo->acquire( $old_failed->id );
+		$this->repo->transition( $this->repo->find( $old_failed->id ), Job::FAILED, 'x', $held['token'] );
 		foreach ( array( $keep_running, $old_done, $old_failed ) as $j ) {
 			file_put_contents( $this->base . '/' . $this->repo->find( $j->id )->log_path, "log\n" );
 		}
@@ -367,6 +479,17 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		$this->assertSame( 1, $this->repo->purge(), 'failed after 90 days' );
 		$this->assertNotNull( $this->repo->find( $keep_running->id ), 'running jobs and their logs are never purged' );
 		$this->assertFileExists( $this->base . '/' . $this->repo->find( $keep_running->id )->log_path );
+	}
+
+	public function test_purge_leaves_logs_in_another_directory_alone(): void {
+		global $wpdb;
+		$other = $this->root . '/elsewhere';
+		mkdir( $other . '/logs', 0755, true );
+		file_put_contents( $other . '/logs/job-9-deadbeef.log', "foreign\n" );
+		$wpdb->insert( Schema::jobs_table(), array( 'id' => 9, 'type' => 'x', 'status' => Job::COMPLETED, 'storage_path' => $other, 'log_path' => 'logs/job-9-deadbeef.log', 'created_at' => 1, 'finished_at' => 1 ), array( '%d', '%s', '%s', '%s', '%s', '%d', '%d' ) );
+		$this->assertSame( 1, $this->repo->purge() );
+		$this->assertNull( $this->repo->find( 9 ) );
+		$this->assertFileExists( $other . '/logs/job-9-deadbeef.log' );
 	}
 
 	public function test_purge_row_cap_keeps_the_newest(): void {
@@ -390,6 +513,26 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		$this->now += JobRepository::STALL_SECONDS + 1;
 		$this->repo->maintenance();
 		$this->assertSame( Job::QUEUED, $this->repo->find( $another->id )->status, 'reaped at most once per throttle window' );
+	}
+
+	public function test_uninstall_cancels_live_jobs_and_removes_their_lock_files(): void {
+		$running = $this->repo->create( 'export' );
+		$held    = $this->repo->acquire( $running->id );
+		$queued  = $this->repo->create( 'export' );
+		$done    = $this->repo->create( 'export' );
+		$this->repo->transition( $done, Job::CANCELLED );
+		$lock = LockFile::path( $this->base, $running->id );
+		$this->assertFileExists( $lock );
+
+		$this->assertFalse( Uninstaller::should_delete_data() );
+		Uninstaller::run();
+
+		$this->assertTrue( Schema::table_exists(), 'the table is kept without the opt-in' );
+		$this->assertSame( Job::CANCELLED, $this->repo->find( $running->id )->status );
+		$this->assertSame( Job::CANCELLED, $this->repo->find( $queued->id )->status );
+		$this->assertFileDoesNotExist( $lock );
+		$this->assertFalse( $this->repo->heartbeat( $held['job'], $held['token'] ), 'a driver still holding the lock is stopped' );
+		$this->assertSame( 0, Uninstaller::cancel_jobs(), 'nothing left to cancel' );
 	}
 
 	public function test_multisite_table_is_network_wide_and_records_the_site(): void {

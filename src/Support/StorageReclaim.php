@@ -293,7 +293,12 @@ final class StorageReclaim {
 	/**
 	 * Whether a job is (or was very recently) working in the directory.
 	 *
-	 * Job runners must hold tmp/job-<id>.lock while active (T010).
+	 * A job keeps tmp/job-<id>.lock from its first tick until it is completed,
+	 * failed or cancelled (T010); the file records the latest lease expiry.
+	 * A file whose lease expired more than ACTIVITY_WINDOW ago belongs to a
+	 * job that stopped ticking (crashed driver, closed browser): it no longer
+	 * blocks a take-over. The job engine removes the file with the terminal
+	 * status, or as an orphan when no such job exists.
 	 *
 	 * @param string $dir Directory.
 	 * @return bool
@@ -304,8 +309,6 @@ final class StorageReclaim {
 			return false;
 		}
 		foreach ( self::files( $tmp . '/' . self::JOB_LOCK_PATTERN ) as $lock ) {
-			// A lock file whose recorded expiry passed more than ACTIVITY_WINDOW ago is a leftover
-			// of a crashed process (the database lock expired with it); the reaper removes it.
 			if ( ! \WPCheckpoint\Jobs\LockFile::is_stale( $lock, time(), self::ACTIVITY_WINDOW ) ) {
 				return true;
 			}
