@@ -19,3 +19,6 @@ phpunit.xml.dist
 /CONTRIBUTING.md
 /SECURITY.md
 /README.md
+/build
+.gitkeep
+.phpunit.result.cache
