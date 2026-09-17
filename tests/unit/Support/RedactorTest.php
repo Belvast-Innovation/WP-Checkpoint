@@ -87,6 +87,22 @@ final class RedactorTest extends TestCase {
 		$this->assertFalse( method_exists( $r, 'clear_secrets' ) );
 	}
 
+	public function test_regex_failure_replaces_the_whole_line(): void {
+		$r        = new Redactor();
+		$line     = 'password=hunter2 ' . str_repeat( 'a=b&', 200 ) . 'user@example.com';
+		$previous = ini_get( 'pcre.backtrack_limit' );
+		ini_set( 'pcre.backtrack_limit', '1' );
+		try {
+			$out = $r->redact( $line );
+		} finally {
+			ini_set( 'pcre.backtrack_limit', (string) $previous );
+		}
+		$this->assertSame( Redactor::FAILED, $out );
+		$this->assertStringNotContainsString( 'hunter2', $out );
+
+		$this->assertStringContainsString( Redactor::MASK, $r->redact( $line ), 'works again once the limit is restored' );
+	}
+
 	public function test_longer_secret_wins_over_its_prefix(): void {
 		$r = new Redactor( array( 'abcd', 'abcdefgh' ) );
 		$this->assertSame( Redactor::MASK . ' and ' . Redactor::MASK, $r->redact( 'abcdefgh and abcd' ) );

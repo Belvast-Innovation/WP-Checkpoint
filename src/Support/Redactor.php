@@ -24,6 +24,14 @@ final class Redactor {
 	const MASK = '[redacted]';
 
 	/**
+	 * Replacement for a whole line when a pattern could not be applied.
+	 *
+	 * A regex failure (backtrack or recursion limit, invalid UTF-8) must never
+	 * let the original text through.
+	 */
+	const FAILED = '[redaction failed]';
+
+	/**
 	 * Shortest secret value that is replaced; shorter values would mask
 	 * ordinary text.
 	 */
@@ -140,9 +148,11 @@ final class Redactor {
 
 		foreach ( $patterns as $pattern => $replacement ) {
 			$result = preg_replace( $pattern, $replacement, $text );
-			if ( null !== $result ) {
-				$text = $result;
+			if ( null === $result ) {
+				// Fail closed: the line may still contain a secret.
+				return self::FAILED;
 			}
+			$text = $result;
 		}
 
 		return $text;
