@@ -8,6 +8,7 @@
 namespace WPCheckpoint;
 
 use WPCheckpoint\Admin\DownloadHandler;
+use WPCheckpoint\Admin\EnvironmentActions;
 use WPCheckpoint\Admin\Menu;
 use WPCheckpoint\Admin\Notices;
 use WPCheckpoint\Admin\Page;
@@ -18,6 +19,7 @@ use WPCheckpoint\Admin\Tabs\CheckpointsTab;
 use WPCheckpoint\Admin\Tabs\SettingsTab;
 use WPCheckpoint\Admin\Tabs\ToolsTab;
 use WPCheckpoint\Rest\Controller;
+use WPCheckpoint\Rest\ProbeController;
 use WPCheckpoint\Rest\StatusController;
 use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Support\Redactor;
@@ -101,6 +103,21 @@ final class Plugin {
 		( new Settings() )->register();
 		( new DownloadHandler( $this->directories() ) )->register();
 		( new Notices( $this->directories() ) )->register();
+		( new EnvironmentActions( $this->directories() ) )->register();
+		add_action( 'admin_enqueue_scripts', array( $this, 'enqueue_admin_assets' ) );
+	}
+
+	/**
+	 * Scripts for the plugin page only.
+	 *
+	 * @param string $hook_suffix Current admin page.
+	 * @return void
+	 */
+	public function enqueue_admin_assets( string $hook_suffix ): void {
+		if ( 'toplevel_page_' . Page::SLUG !== $hook_suffix ) {
+			return;
+		}
+		wp_enqueue_script( 'wpcheckpoint-environment', WPCHECKPOINT_URL . 'assets/admin/environment.js', array(), WPCHECKPOINT_VERSION, true );
 	}
 
 	/**
@@ -128,6 +145,11 @@ final class Plugin {
 					$secrets[] = constant( $constant );
 				}
 			}
+			// The random storage token protects the directory under wp-content; treat it as a secret.
+			$state = Directories::load_state();
+			if ( is_string( $state['token'] ) && '' !== $state['token'] ) {
+				$secrets[] = $state['token'];
+			}
 			$this->redactor = new Redactor( $secrets );
 		}
 		return $this->redactor;
@@ -142,7 +164,7 @@ final class Plugin {
 		$tabs = new Tabs();
 		$tabs->add( new BackupsTab() );
 		$tabs->add( new CheckpointsTab() );
-		$tabs->add( new ToolsTab() );
+		$tabs->add( new ToolsTab( $this->directories() ) );
 		$tabs->add( new SettingsTab() );
 
 		return new Page( $tabs );
@@ -156,6 +178,7 @@ final class Plugin {
 	public function rest_controllers(): array {
 		return array(
 			new StatusController(),
+			new ProbeController(),
 		);
 	}
 

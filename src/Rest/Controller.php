@@ -18,9 +18,11 @@ defined( 'ABSPATH' ) || exit;
  * must override register_routes(); the parent implementation only warns.
  *
  * Every route registered by a subclass must use permission_check(); it is
- * final so subclasses cannot weaken it. The integration suite asserts that
- * anonymous and non-admin requests are rejected on all routes in the
- * namespace and that no plugin route lives outside it.
+ * final so subclasses cannot weaken it. The single documented exception is
+ * the probe route, authenticated by a one-time challenge (see
+ * ProbeController). The integration suite asserts that anonymous and
+ * non-admin requests are rejected on all routes in the namespace (401, or
+ * 403 for the challenge route) and that no plugin route lives outside it.
  */
 abstract class Controller extends WP_REST_Controller {
 

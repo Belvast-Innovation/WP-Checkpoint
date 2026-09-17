@@ -113,9 +113,15 @@ final class Notices {
 		}
 		$dismissed = $this->dismissed();
 		$token     = (string) $this->directories->state()['token'];
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- read-only navigation state.
+		$on_tools = isset( $_GET['tab'] ) && 'tools' === sanitize_key( wp_unslash( $_GET['tab'] ) );
 
 		foreach ( $this->notices() as $id => $notice ) {
 			if ( $notice['dismissible'] && isset( $dismissed[ $id ] ) && $dismissed[ $id ] === $token ) {
+				continue;
+			}
+			// The Tools tab shows the same facts as rows with actions; avoid two copies of the server rule.
+			if ( $on_tools && in_array( $id, array( 'exposed', 'unverified', 'clone_detected' ), true ) ) {
 				continue;
 			}
 			?>

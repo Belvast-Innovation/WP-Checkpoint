@@ -24,13 +24,25 @@ final class RestPermissionsTest extends WP_UnitTestCase {
 	 *
 	 * "path" is the concrete URL with regex parameters filled in.
 	 * "params" are the request parameters (query for GET, body otherwise).
+	 * "auth" is "login" (default: Guard capability, anonymous 401) or
+	 * "challenge" (one-time value instead of a login: everyone gets 403
+	 * without it, including administrators; ProbeTest covers the 200 path).
 	 */
 	private const EXAMPLES = array(
 		'/wp-checkpoint/v1/status' => array(
 			'path'   => '/wp-checkpoint/v1/status',
 			'params' => array(),
 		),
+		'/wp-checkpoint/v1/probe'  => array(
+			'path'   => '/wp-checkpoint/v1/probe',
+			'params' => array(),
+			'auth'   => 'challenge',
+		),
 	);
+
+	private function auth( string $pattern ): string {
+		return isset( self::EXAMPLES[ $pattern ]['auth'] ) ? self::EXAMPLES[ $pattern ]['auth'] : 'login';
+	}
 
 	/** @var int */
 	private static $subscriber;
@@ -105,7 +117,8 @@ final class RestPermissionsTest extends WP_UnitTestCase {
 		wp_set_current_user( 0 );
 		foreach ( $this->route_methods() as $label => list( $pattern, $method ) ) {
 			$response = rest_get_server()->dispatch( $this->request( $pattern, $method ) );
-			$this->assertSame( 401, $response->get_status(), "{$label} must return 401 for anonymous users" );
+			$expected = 'challenge' === $this->auth( $pattern ) ? 403 : 401;
+			$this->assertSame( $expected, $response->get_status(), "{$label} must return {$expected} for anonymous users" );
 		}
 	}
 
@@ -121,10 +134,24 @@ final class RestPermissionsTest extends WP_UnitTestCase {
 		wp_set_current_user( self::$admin );
 		foreach ( $this->route_methods() as $label => list( $pattern, $method ) ) {
 			$response = rest_get_server()->dispatch( $this->request( $pattern, $method ) );
+			if ( 'challenge' === $this->auth( $pattern ) ) {
+				$this->assertSame( 403, $response->get_status(), "{$label} must reject even administrators without a challenge" );
+				continue;
+			}
 			$this->assertNotContains( $response->get_status(), array( 401, 403 ), "{$label} must not reject administrators" );
 			$this->assertNotSame( 400, $response->get_status(), "{$label} example request is invalid (400); fix EXAMPLES" );
 			$this->assertNotSame( 404, $response->get_status(), "{$label} example path does not match the route (404); fix EXAMPLES" );
 		}
+	}
+
+	public function test_only_documented_routes_use_challenge_auth(): void {
+		$challenge_routes = array();
+		foreach ( self::EXAMPLES as $pattern => $example ) {
+			if ( 'challenge' === $this->auth( $pattern ) ) {
+				$challenge_routes[] = $pattern;
+			}
+		}
+		$this->assertSame( array( '/wp-checkpoint/v1/probe' ), $challenge_routes, 'adding a challenge-authenticated route needs a review' );
 	}
 
 	public function test_plugin_routes_only_live_in_the_plugin_namespace(): void {

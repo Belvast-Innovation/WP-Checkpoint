@@ -51,6 +51,10 @@ The integration scripts pass `WPCHECKPOINT_TEST_LOOPBACK_HOST=http://tests-wordp
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 
+## Environment check
+
+The Tools tab lists what the plugin found on the host: PHP version and extensions, the memory and time limits of both the admin page and the task runtime (measured through a loopback request to the plugin's own REST route), database version and size, free disk space, the storage directory and its protection, and whether the site can reach itself. A plain-text report with paths replaced by placeholders and credentials removed can be copied into a support request; it does not contain the site address.
+
 ## Storage location
 
 Backups, temporary files and logs live in a directory the plugin creates on first use: next to the WordPress directory when that is outside the document root, otherwise `wp-content/wp-checkpoint-{random}/` with `index.php` and `.htaccess` deny rules (the admin page warns when the server ignores them and shows the matching nginx rule). Define `WPCHECKPOINT_STORAGE_DIR` in `wp-config.php` to use a directory of your own; the plugin only ever deletes the sub-directories and files it created there.
