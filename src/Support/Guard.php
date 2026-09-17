@@ -15,8 +15,10 @@ defined( 'ABSPATH' ) || exit;
 /**
  * Single place that decides who may call the plugin.
  *
- * All methods return a result instead of exiting, so handlers can be tested
- * and decide how to respond (JSON, wp_die, REST error).
+ * AJAX and admin-post handlers must call require_ajax() / require_admin_post()
+ * as their first statement; those stop the request on failure. The check_*
+ * methods only return the verdict and exist for the require_* wrappers, the
+ * REST controller base class and tests.
  */
 final class Guard {
 
@@ -75,22 +77,58 @@ final class Guard {
 	}
 
 	/**
-	 * Check an AJAX request: login, nonce, capability.
+	 * Guard an AJAX handler: login, nonce, capability. Stops the request with a
+	 * JSON error (401 or 403) on failure, returns normally on success.
 	 *
 	 * @param string $action Nonce action without the plugin prefix.
 	 * @param string $field  Request field carrying the nonce.
-	 * @return true|WP_Error
+	 * @return void
+	 */
+	public static function require_ajax( string $action, string $field = 'nonce' ): void {
+		$error = self::check_ajax( $action, $field );
+		if ( null !== $error ) {
+			self::send_ajax_error( $error );
+			// wp_send_json_error() ends the request through wp_die(); another plugin can
+			// swap the wp_die_ajax_handler for one that returns, so never fall through.
+			exit;
+		}
+	}
+
+	/**
+	 * Guard an admin-post handler: login, nonce, capability. Stops the request
+	 * with wp_die() (401 or 403) on failure, returns normally on success.
+	 *
+	 * @param string $action Nonce action without the plugin prefix.
+	 * @param string $field  Request field carrying the nonce.
+	 * @return void
+	 */
+	public static function require_admin_post( string $action, string $field = '_wpnonce' ): void {
+		$error = self::check_admin_post( $action, $field );
+		if ( null !== $error ) {
+			self::die_admin_post( $error );
+			// wp_die() can be replaced through the wp_die_handler filter with a handler
+			// that returns, so never fall through into the protected handler.
+			exit;
+		}
+	}
+
+	/**
+	 * Verdict for an AJAX request. Handlers must use require_ajax() instead.
+	 *
+	 * @param string $action Nonce action without the plugin prefix.
+	 * @param string $field  Request field carrying the nonce.
+	 * @return WP_Error|null Null when the request may proceed.
 	 */
 	public static function check_ajax( string $action, string $field = 'nonce' ) {
 		return self::check_request( $action, self::request_field( $field ) );
 	}
 
 	/**
-	 * Check an admin-post request: login, nonce, capability.
+	 * Verdict for an admin-post request. Handlers must use require_admin_post() instead.
 	 *
 	 * @param string $action Nonce action without the plugin prefix.
 	 * @param string $field  Request field carrying the nonce.
-	 * @return true|WP_Error
+	 * @return WP_Error|null Null when the request may proceed.
 	 */
 	public static function check_admin_post( string $action, string $field = '_wpnonce' ) {
 		return self::check_request( $action, self::request_field( $field ) );
@@ -101,7 +139,7 @@ final class Guard {
 	 *
 	 * @param string      $action Nonce action without the plugin prefix.
 	 * @param string|null $nonce  Nonce value from the request.
-	 * @return true|WP_Error
+	 * @return WP_Error|null Null when the request may proceed.
 	 */
 	public static function check_request( string $action, $nonce ) {
 		if ( ! is_user_logged_in() ) {
@@ -128,7 +166,7 @@ final class Guard {
 			);
 		}
 
-		return true;
+		return null;
 	}
 
 	/**
@@ -153,7 +191,7 @@ final class Guard {
 	/**
 	 * Respond to a failed AJAX check and stop.
 	 *
-	 * @param WP_Error $error Error returned by check_ajax().
+	 * @param WP_Error $error Failed verdict.
 	 * @return void
 	 */
 	public static function send_ajax_error( WP_Error $error ): void {
@@ -163,7 +201,7 @@ final class Guard {
 	/**
 	 * Respond to a failed admin-post check and stop.
 	 *
-	 * @param WP_Error $error Error returned by check_admin_post().
+	 * @param WP_Error $error Failed verdict.
 	 * @return void
 	 */
 	public static function die_admin_post( WP_Error $error ): void {

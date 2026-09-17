@@ -50,6 +50,11 @@ function wpcheckpoint_bootstrap_integration() {
 		putenv( 'WP_PHPUNIT__TESTS_CONFIG=' . $tests_dir . '/wp-tests-config.php' );
 	}
 
+	// The core test library reads the WP_TESTS_MULTISITE constant; allow enabling it from the environment.
+	if ( '1' === getenv( 'WP_TESTS_MULTISITE' ) && ! defined( 'WP_TESTS_MULTISITE' ) ) {
+		define( 'WP_TESTS_MULTISITE', true );
+	}
+
 	require_once $tests_dir . '/includes/functions.php';
 
 	tests_add_filter(

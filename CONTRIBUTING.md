@@ -43,6 +43,7 @@ composer lint             # WordPress Coding Standards + PHP compatibility (7.4+
 composer analyse          # PHPStan
 composer test:unit
 npm run test:integration
+npm run test:integration:multisite
 npm run check:plugin      # Plugin Check on the distributable tree (needs wp-env running)
 ```
 
@@ -50,7 +51,8 @@ Please make sure that:
 
 - [ ] Code runs on PHP 7.4 (no `match`, enums, readonly, named arguments, nullsafe operator, constructor promotion or union types)
 - [ ] All globals use the `wpcheckpoint_` / `WPCHECKPOINT_` prefix or the `WPCheckpoint\` namespace
-- [ ] Every new AJAX / REST / admin-post endpoint checks capabilities and a nonce through `WPCheckpoint\Support\Guard`; new REST routes get an example request in `tests/integration/RestPermissionsTest.php`
+- [ ] Every AJAX handler starts with `Guard::require_ajax( $action )` and every admin-post handler with `Guard::require_admin_post( $action )`; never call the `Guard::check_*` verdicts from handlers (a unit test enforces this)
+- [ ] REST controllers extend `WPCheckpoint\Rest\Controller` and use `permission_check`; new routes get an example request in `tests/integration/RestPermissionsTest.php`
 - [ ] All output is escaped and all user-facing strings are translatable (text domain `wp-checkpoint`)
 - [ ] New behaviour is covered by tests; changes to the archive format are called out in the pull request description
 - [ ] The pull request description explains *why*, not only *what*

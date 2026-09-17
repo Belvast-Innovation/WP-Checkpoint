@@ -3,7 +3,7 @@
  * Uninstall handler.
  *
  * Runs after the plugin has been deactivated and its main file is no longer
- * loaded, so constants and the autoloader are defined here independently.
+ * loaded, so the autoloader is defined here independently of the main file.
  * Backups are user data: they are only deleted when the user opted in on the
  * Settings tab (option wpcheckpoint_delete_data_on_uninstall).
  *
@@ -12,10 +12,6 @@
 
 defined( 'WP_UNINSTALL_PLUGIN' ) || exit;
 
-if ( ! defined( 'WPCHECKPOINT_DIR' ) ) {
-	define( 'WPCHECKPOINT_DIR', plugin_dir_path( __FILE__ ) );
-}
-
 spl_autoload_register(
 	static function ( $class_name ) {
 		$prefix = 'WPCheckpoint\\';
@@ -23,7 +19,7 @@ spl_autoload_register(
 			return;
 		}
 		$relative = substr( $class_name, strlen( $prefix ) );
-		$file     = WPCHECKPOINT_DIR . 'src/' . str_replace( '\\', '/', $relative ) . '.php';
+		$file     = __DIR__ . '/src/' . str_replace( '\\', '/', $relative ) . '.php';
 		if ( is_readable( $file ) ) {
 			require_once $file;
 		}

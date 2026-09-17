@@ -24,7 +24,14 @@ final class PathsTest extends TestCase {
 	}
 
 	private function remove( string $path ): void {
-		if ( is_link( $path ) || is_file( $path ) ) {
+		if ( is_link( $path ) ) {
+			// On Windows a symlink to a directory must be removed with rmdir().
+			if ( ! @unlink( $path ) ) {
+				rmdir( $path );
+			}
+			return;
+		}
+		if ( is_file( $path ) ) {
 			unlink( $path );
 			return;
 		}
@@ -38,6 +45,63 @@ final class PathsTest extends TestCase {
 
 	private function base(): string {
 		return $this->root . '/base';
+	}
+
+	private function require_symlinks(): void {
+		$probe = $this->root . '/probe-link';
+		if ( ! @symlink( $this->root . '/outside/secret.txt', $probe ) ) {
+			$this->markTestSkipped( 'Symbolic links cannot be created in this environment.' );
+		}
+		unlink( $probe );
+	}
+
+	public function test_trailing_separator_on_a_symlink_is_still_rejected(): void {
+		$this->require_symlinks();
+		symlink( $this->base() . '/sub', $this->base() . '/link-in' );
+		symlink( $this->root . '/outside', $this->base() . '/link-out' );
+
+		$this->assertFalse( Paths::is_inside( $this->base(), $this->base() . '/link-in/' ) );
+		$this->assertFalse( Paths::is_inside( $this->base(), $this->base() . '/link-in//' ) );
+		$this->assertFalse( Paths::is_inside( $this->base(), $this->base() . '/link-out/' ) );
+		$this->assertTrue( Paths::is_inside( $this->base(), $this->base() . '/sub/' ), 'trailing slash on a real directory is fine' );
+	}
+
+	public function test_only_separators_is_rejected(): void {
+		$this->assertFalse( Paths::is_inside( $this->base(), '/' ) );
+		$this->assertFalse( Paths::is_inside( $this->base(), '///' ) );
+	}
+
+	public function test_prefix_comparison_normalises_separators(): void {
+		$this->assertTrue( Paths::is_prefix( 'C:\\sites\\base', 'C:/sites/base/file.txt', false ) );
+		$this->assertTrue( Paths::is_prefix( '/srv/base/', '/srv/base//sub/file.txt', false ) );
+		$this->assertFalse( Paths::is_prefix( '/srv/base', '/srv/base', false ) );
+		$this->assertFalse( Paths::is_prefix( '/srv/base', '/srv/base/', false ) );
+		$this->assertFalse( Paths::is_prefix( '/srv/base', '/srv/base-evil/file.txt', false ) );
+	}
+
+	public function test_prefix_comparison_is_case_sensitive_unless_asked(): void {
+		$this->assertFalse( Paths::is_prefix( '/srv/base', '/srv/BASE/file.txt', false ) );
+		$this->assertTrue( Paths::is_prefix( '/srv/base', '/srv/BASE/file.txt', true ) );
+		$this->assertTrue( Paths::is_prefix( 'c:\\Sites\\Base', 'C:\\sites\\base\\file.txt', true ), 'drive letter and directory case are ignored on Windows' );
+		$this->assertFalse( Paths::is_prefix( 'c:\\sites\\base', 'D:\\sites\\base\\file.txt', true ), 'a different drive is never inside' );
+	}
+
+	public function test_case_differences_on_a_case_sensitive_filesystem_are_rejected(): void {
+		if ( Paths::is_windows() ) {
+			$this->markTestSkipped( 'Case-sensitive filesystem only.' );
+		}
+		$this->assertFalse( Paths::is_inside( $this->base(), $this->base() . '/FILE.txt' ) );
+	}
+
+	public function test_windows_case_and_drive_letter_are_ignored(): void {
+		if ( ! Paths::is_windows() ) {
+			$this->markTestSkipped( 'Windows only.' );
+		}
+		$upper = strtoupper( substr( $this->base(), 0, 1 ) ) . substr( $this->base(), 1 );
+		$lower = strtolower( substr( $this->base(), 0, 1 ) ) . substr( $this->base(), 1 );
+		$this->assertTrue( Paths::is_inside( $lower, $upper . '/FILE.TXT' ) );
+		$this->assertTrue( Paths::is_inside( $upper, $lower . '\\sub\\deep.txt' ) );
+		$this->assertFalse( Paths::is_inside( $upper, $this->root . '/OUTSIDE/secret.txt' ) );
 	}
 
 	public function test_file_inside_base_is_inside(): void {
@@ -69,6 +133,7 @@ final class PathsTest extends TestCase {
 	}
 
 	public function test_symlink_target_is_rejected_even_when_inside(): void {
+		$this->require_symlinks();
 		symlink( $this->base() . '/file.txt', $this->base() . '/link-inside' );
 		symlink( $this->root . '/outside/secret.txt', $this->base() . '/link-outside' );
 		$this->assertFalse( Paths::is_inside( $this->base(), $this->base() . '/link-inside' ) );
@@ -76,11 +141,19 @@ final class PathsTest extends TestCase {
 	}
 
 	public function test_path_through_symlinked_directory_pointing_outside_is_rejected(): void {
+		$this->require_symlinks();
 		symlink( $this->root . '/outside', $this->base() . '/linked-dir' );
 		$this->assertFalse( Paths::is_inside( $this->base(), $this->base() . '/linked-dir/secret.txt' ) );
 	}
 
 	public function test_symlinked_base_resolves_to_real_directory(): void {
+		if ( Paths::is_windows() ) {
+			// PHP's realpath() on Windows leaves a symlink alone when it is the final path
+			// component, so a symlinked base is not resolved there; is_inside() then rejects
+			// every target (fail-closed), which is acceptable but not what this test asserts.
+			$this->markTestSkipped( 'realpath() does not resolve a final-component symlink on Windows.' );
+		}
+		$this->require_symlinks();
 		symlink( $this->base(), $this->root . '/base-link' );
 		$this->assertTrue( Paths::is_inside( $this->root . '/base-link', $this->base() . '/file.txt' ) );
 		$this->assertFalse( Paths::is_inside( $this->root . '/base-link', $this->root . '/outside/secret.txt' ) );

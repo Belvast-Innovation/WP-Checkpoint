@@ -29,7 +29,11 @@ final class AdminPageTest extends WP_UnitTestCase {
 		global $menu, $admin_page_hooks;
 		$menu             = array();
 		$admin_page_hooks = array();
-		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		$admin = self::factory()->user->create( array( 'role' => 'administrator' ) );
+		if ( is_multisite() ) {
+			grant_super_admin( $admin );
+		}
+		wp_set_current_user( $admin );
 
 		$menu_registration = new Menu( Plugin::instance()->admin_page() );
 		$menu_registration->add_menu_page();

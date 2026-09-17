@@ -41,6 +41,21 @@ jobs:
       - run: composer analyse
       - run: composer test:unit
 
+  unit-windows:
+    name: Unit (Windows, PHP 8.3)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: none
+          tools: composer:v2
+
+      - run: composer install --no-interaction --no-progress --prefer-dist
+      - run: composer test:unit
+
   integration:
     name: Integration (wp-env, PHP ${{ matrix.php }})
     runs-on: ubuntu-latest
@@ -84,6 +99,46 @@ jobs:
       - run: npm ci
       - run: npx wp-env start
       - run: npm run test:integration
+
+      - name: Show wp-env logs on failure
+        if: failure()
+        run: npx wp-env logs tests --watch=false
+
+  integration-multisite:
+    name: Integration (wp-env, multisite)
+    runs-on: ubuntu-latest
+    needs: static
+    defaults:
+      run:
+        working-directory: wp-checkpoint
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: wp-checkpoint
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: none
+          tools: composer:v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: wp-checkpoint/package-lock.json
+
+      - name: Cache Composer packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.composer/cache
+          key: composer-${{ runner.os }}-8.3-${{ hashFiles('wp-checkpoint/composer.lock') }}
+          restore-keys: composer-${{ runner.os }}-8.3-
+
+      - run: composer install --no-interaction --no-progress --prefer-dist
+      - run: npm ci
+      - run: npx wp-env start
+      - run: npm run test:integration:multisite
 
       - name: Show wp-env logs on failure
         if: failure()
