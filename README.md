@@ -45,9 +45,15 @@ npm run check:plugin      # builds build/wp-checkpoint from .distignore and runs
 npx wp-env stop
 ```
 
+The integration scripts pass `WPCHECKPOINT_TEST_LOOPBACK_HOST=http://tests-wordpress` into the tests container so the storage-protection test can make a real HTTP request against the tests web server; without it that one test is skipped.
+
 `npx wp-env run cli wp ...` runs WP-CLI against the development site, `npx wp-env destroy` throws the containers away. Continuous integration runs the same commands on PHP 7.4, 8.1, 8.3 and 8.4 (integration tests on 8.3).
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
+
+## Storage location
+
+Backups, temporary files and logs live in a directory the plugin creates on first use: next to the WordPress directory when that is outside the document root, otherwise `wp-content/wp-checkpoint-{random}/` with `index.php` and `.htaccess` deny rules (the admin page warns when the server ignores them and shows the matching nginx rule). Define `WPCHECKPOINT_STORAGE_DIR` in `wp-config.php` to use a directory of your own; the plugin only ever deletes the sub-directories and files it created there.
 
 ## Security
 
