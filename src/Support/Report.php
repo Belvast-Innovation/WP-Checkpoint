@@ -52,9 +52,31 @@ final class Report {
 
 		$text = implode( "\n", $lines ) . "\n";
 		$text = self::mask_paths( $text, $paths );
+		if ( null === $text ) {
+			return self::failure_text();
+		}
 		$text = self::mask_hosts( $text, $site_hosts, $site_paths );
+		if ( null === $text ) {
+			return self::failure_text();
+		}
 
 		return $redactor->redact( $text );
+	}
+
+	/**
+	 * Text returned instead of a report when a masking pattern failed.
+	 *
+	 * A regex failure (backtrack or recursion limit, invalid UTF-8) would
+	 * otherwise let account names, host names and paths through, which the
+	 * Redactor does not cover. Nothing of the report is emitted then.
+	 *
+	 * @return string
+	 */
+	public static function failure_text(): string {
+		if ( function_exists( '__' ) ) {
+			return __( 'The report could not be generated safely. Please share a screenshot of the environment table instead.', 'wp-checkpoint' );
+		}
+		return 'The report could not be generated safely. Please share a screenshot of the environment table instead.';
 	}
 
 	/**
@@ -73,9 +95,9 @@ final class Report {
 	 * @param string   $text       Text.
 	 * @param string[] $site_hosts Site host names, with or without "www.".
 	 * @param string[] $site_paths Site path prefixes such as "/shop" or "/clienta/".
-	 * @return string
+	 * @return string|null Null when a pattern could not be applied (fail closed).
 	 */
-	public static function mask_hosts( string $text, array $site_hosts, array $site_paths = array() ): string {
+	public static function mask_hosts( string $text, array $site_hosts, array $site_paths = array() ) {
 		$hosts = array();
 		foreach ( $site_hosts as $host ) {
 			$host = strtolower( trim( (string) $host ) );
@@ -95,7 +117,7 @@ final class Report {
 				)
 			);
 			$result      = preg_replace_callback(
-				'#(?<![\w.\-{])((?:[a-z0-9-]+\.)*?)(' . $alternation . ')(?![\w\-.]|\.[a-z])#i',
+				'#(?<![\w.\-{])((?:[a-z0-9-]+\.)*?)(' . $alternation . ')(?![\w\-.]|\.[a-z])#iu',
 				static function ( array $m ): string {
 					$prefix = strtolower( $m[1] );
 					if ( '' === $prefix ) {
@@ -105,13 +127,14 @@ final class Report {
 				},
 				$text
 			);
-			if ( null !== $result ) {
-				$text = $result;
+			if ( null === $result ) {
+				return null;
 			}
+			$text = $result;
 		}
 
 		$result = preg_replace_callback(
-			'#\b([a-z][a-z0-9+.\-]*://)((?:[^/\s:@"\'<>]+(?::[^/\s@"\'<>]*)?@)?)([^/\s:"\'<>?\#]+)#i',
+			'#\b([a-z][a-z0-9+.\-]*://)((?:[^/\s:@"\'<>]+(?::[^/\s@"\'<>]*)?@)?)([^/\s:"\'<>?\#]+)#iu',
 			static function ( array $m ): string {
 				$host = $m[3];
 				if ( false !== strpos( $host, '{' ) ) {
@@ -121,11 +144,11 @@ final class Report {
 			},
 			$text
 		);
-		if ( null !== $result ) {
-			$text = $result;
+		if ( null === $result ) {
+			return null;
 		}
 
-		return self::mask_site_paths( $text, $site_paths );
+		return self::mask_site_paths( $result, $site_paths );
 	}
 
 	/**
@@ -134,9 +157,9 @@ final class Report {
 	 *
 	 * @param string   $text       Text in which hosts are already masked.
 	 * @param string[] $site_paths Site path prefixes.
-	 * @return string
+	 * @return string|null Null when the pattern could not be applied (fail closed).
 	 */
-	public static function mask_site_paths( string $text, array $site_paths ): string {
+	public static function mask_site_paths( string $text, array $site_paths ) {
 		$prefixes = array();
 		foreach ( $site_paths as $path ) {
 			$path = '/' . trim( str_replace( '\\', '/', (string) $path ), '/' );
@@ -156,7 +179,7 @@ final class Report {
 		);
 
 		$result = preg_replace_callback(
-			'#((?:www\.|\{subdomain\}\.)?\{site-host\}(?::\d+)?)(/[^\s"\'<>?\#]*)#',
+			'#((?:www\.|\{subdomain\}\.)?\{site-host\}(?::\d+)?)(/[^\s"\'<>?\#]*)#u',
 			static function ( array $m ) use ( $prefixes ): string {
 				$path = $m[2];
 				foreach ( $prefixes as $prefix ) {
@@ -171,7 +194,7 @@ final class Report {
 			},
 			$text
 		);
-		return null === $result ? $text : $result;
+		return $result;
 	}
 
 	/**
@@ -180,9 +203,9 @@ final class Report {
 	 *
 	 * @param string                $text  Text.
 	 * @param array<string, string> $paths Placeholder => absolute path.
-	 * @return string
+	 * @return string|null Null when a pattern could not be applied (fail closed).
 	 */
-	public static function mask_paths( string $text, array $paths ): string {
+	public static function mask_paths( string $text, array $paths ) {
 		$replacements = array();
 		foreach ( $paths as $placeholder => $path ) {
 			$path = rtrim( (string) $path, '/\\' );
@@ -206,23 +229,25 @@ final class Report {
 		foreach ( $replacements as $form => $placeholder ) {
 			// Whole path components only: "/tmp" must not match inside "/home/x/tmp"
 			// or right after an already inserted placeholder ("{abspath-parent}/tmp").
-			$pattern = '#(?<![\\w/\\\\.\\-}])' . preg_quote( $form, '#' ) . '(?=$|[/\\\\\\s:"\',;)])#m';
+			$pattern = '#(?<![\\w/\\\\.\\-}])' . preg_quote( $form, '#' ) . '(?=$|[/\\\\\\s:"\',;)])#mu';
 			$result  = preg_replace( $pattern, $placeholder, $text );
-			if ( null !== $result ) {
-				$text = $result;
+			if ( null === $result ) {
+				return null;
 			}
+			$text = $result;
 		}
 
 		$patterns = array(
-			'#((?:^|[^\w/\\\\])(?:/home|/Users|/var/www/vhosts|/srv/users|/usr/home|/export/home)/)[^/\s"\':;,)]+#' => '$1***',
-			'#((?:^|[^\w\\\\])[A-Za-z]:\\\\Users\\\\)[^\\\\\s"\':;,)]+#i' => '$1***',
-			'#((?:^|[^\w/])[A-Za-z]:/Users/)[^/\s"\':;,)]+#i' => '$1***',
+			'#((?:^|[^\w/\\\\])(?:/home|/Users|/var/www/vhosts|/srv/users|/usr/home|/export/home)/)[^/\s"\':;,)]+#u' => '$1***',
+			'#((?:^|[^\w\\\\])[A-Za-z]:\\\\Users\\\\)[^\\\\\s"\':;,)]+#iu' => '$1***',
+			'#((?:^|[^\w/])[A-Za-z]:/Users/)[^/\s"\':;,)]+#iu' => '$1***',
 		);
 		foreach ( $patterns as $pattern => $replacement ) {
 			$result = preg_replace( $pattern, $replacement, $text );
-			if ( null !== $result ) {
-				$text = $result;
+			if ( null === $result ) {
+				return null;
 			}
+			$text = $result;
 		}
 		return $text;
 	}

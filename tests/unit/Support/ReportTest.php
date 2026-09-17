@@ -121,15 +121,33 @@ final class ReportTest extends TestCase {
 		$this->assertSame( 'https://{site-host}/x and https://{external-host}/y and www.{site-host} and {site-host}', $text );
 	}
 
-	public function test_redaction_failure_replaces_everything(): void {
-		$checks   = array( new Check( 'x', 'g', 'X', 'password=hunter2 ' . str_repeat( 'a=b&', 300 ), Check::INFO ) );
-		$previous = ini_get( 'pcre.backtrack_limit' );
-		ini_set( 'pcre.backtrack_limit', '1' );
-		try {
-			$text = Report::text( $checks, new Redactor(), array() );
-		} finally {
-			ini_set( 'pcre.backtrack_limit', (string) $previous );
-		}
-		$this->assertSame( Redactor::FAILED, $text );
+	public function test_masking_failure_withholds_the_whole_report(): void {
+		// Every masking pattern runs in UTF-8 mode, so invalid UTF-8 makes preg_replace()
+		// return null deterministically (unlike pcre.backtrack_limit, which PCRE JIT ignores).
+		$bad    = "\xB1\x31";
+		$hosts  = array( 'example.com' );
+		$paths  = array( '{abspath}' => '/home/johndoe/public_html' );
+		$checks = array(
+			new Check( 'x', 'g', 'Path', '/home/johndoe/public_html/wp-content/uploads', Check::INFO ),
+			new Check( 'y', 'g', 'URL', 'https://www.example.com/shop/wp-json/ password=hunter2 ' . $bad, Check::INFO ),
+		);
+
+		$text = Report::text( $checks, new Redactor(), $paths, array(), $hosts, array( '/shop' ) );
+
+		$this->assertSame( Report::failure_text(), $text );
+		$this->assertStringNotContainsString( 'johndoe', $text );
+		$this->assertStringNotContainsString( 'example.com', $text );
+		$this->assertStringNotContainsString( '/shop', $text );
+		$this->assertStringNotContainsString( 'hunter2', $text );
+
+		$this->assertNull( Report::mask_paths( 'x /home/johndoe/y ' . $bad, $paths ), 'mask_paths fails closed' );
+		$this->assertNull( Report::mask_hosts( 'https://example.com/shop/x ' . $bad, $hosts, array( '/shop' ) ), 'mask_hosts fails closed' );
+		$this->assertNull( Report::mask_site_paths( '{site-host}/shop/x ' . $bad, array( '/shop' ) ), 'mask_site_paths fails closed' );
+
+		$checks[1] = new Check( 'y', 'g', 'URL', 'https://www.example.com/shop/wp-json/ password=hunter2', Check::INFO );
+		$text      = Report::text( $checks, new Redactor(), $paths, array(), $hosts, array( '/shop' ) );
+		$this->assertStringContainsString( 'https://www.{site-host}/{site-path}/wp-json/', $text, 'valid input still produces a report' );
+		$this->assertStringContainsString( '{abspath}/wp-content/uploads', $text );
+		$this->assertStringNotContainsString( 'johndoe', $text );
 	}
 }
