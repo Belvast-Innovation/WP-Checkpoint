@@ -38,6 +38,31 @@ final class RestPermissionsTest extends WP_UnitTestCase {
 			'params' => array(),
 			'auth'   => 'challenge',
 		),
+		'/wp-checkpoint/v1/jobs'   => array(
+			'path'   => '/wp-checkpoint/v1/jobs',
+			'params' => array(),
+		),
+		'/wp-checkpoint/v1/jobs/(?P<id>\\d+)' => array(
+			'path'   => '/wp-checkpoint/v1/jobs/1',
+			'params' => array(),
+		),
+		'/wp-checkpoint/v1/jobs/(?P<id>\\d+)/tick' => array(
+			'path'   => '/wp-checkpoint/v1/jobs/1/tick',
+			'params' => array(),
+		),
+		'/wp-checkpoint/v1/jobs/(?P<id>\\d+)/cancel' => array(
+			'path'   => '/wp-checkpoint/v1/jobs/1/cancel',
+			'params' => array(),
+		),
+		'/wp-checkpoint/v1/jobs/(?P<id>\\d+)/retry' => array(
+			'path'   => '/wp-checkpoint/v1/jobs/1/retry',
+			'params' => array(),
+		),
+		'/wp-checkpoint/v1/jobs/(?P<id>\\d+)/loopback' => array(
+			'path'   => '/wp-checkpoint/v1/jobs/1/loopback',
+			'params' => array(),
+			'auth'   => 'challenge',
+		),
 	);
 
 	private function auth( string $pattern ): string {
@@ -140,7 +165,11 @@ final class RestPermissionsTest extends WP_UnitTestCase {
 			}
 			$this->assertNotContains( $response->get_status(), array( 401, 403 ), "{$label} must not reject administrators" );
 			$this->assertNotSame( 400, $response->get_status(), "{$label} example request is invalid (400); fix EXAMPLES" );
-			$this->assertNotSame( 404, $response->get_status(), "{$label} example path does not match the route (404); fix EXAMPLES" );
+			if ( false === strpos( $pattern, '/jobs/' ) ) {
+				$this->assertNotSame( 404, $response->get_status(), "{$label} example path does not match the route (404); fix EXAMPLES" );
+			} else {
+				$this->assertSame( 'wpcheckpoint_job_not_found', $response->get_data()['code'] ?? $response->get_data(), "{$label} reached the handler (job 1 does not exist)" );
+			}
 		}
 	}
 
@@ -151,7 +180,7 @@ final class RestPermissionsTest extends WP_UnitTestCase {
 				$challenge_routes[] = $pattern;
 			}
 		}
-		$this->assertSame( array( '/wp-checkpoint/v1/probe' ), $challenge_routes, 'adding a challenge-authenticated route needs a review' );
+		$this->assertSame( array( '/wp-checkpoint/v1/probe', '/wp-checkpoint/v1/jobs/(?P<id>\\d+)/loopback' ), $challenge_routes, 'adding a challenge-authenticated route needs a review' );
 	}
 
 	public function test_plugin_routes_only_live_in_the_plugin_namespace(): void {
