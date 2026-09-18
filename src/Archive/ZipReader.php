@@ -28,7 +28,7 @@ final class ZipReader {
 
 	const TAIL_BYTES              = 65536 + 22 + 20 + 56;
 	const MAX_HEADER_BYTES        = 1048576;  // A central header with name, extra and comment beyond this is malformed.
-	const MAX_INFLATE_BYTES       = 67108864; // 64 MiB: the plugin deflates only entries up to 4 MiB.
+	const MAX_INFLATE_BYTES       = 8388608; // 8 MiB: the plugin deflates only entries up to 4 MiB. Inflating in one piece peaks at about 3 x this, which keeps a unit inside the 32 MB step increment (tested).
 	const MAX_EMPTY_DEFLATE_BYTES = 64; // A deflate stream of an empty entry is 2 bytes; leave room for odd encoders.
 	const MAX_ENTRIES             = 5000000;
 
@@ -252,9 +252,119 @@ final class ZipReader {
 	 * @param array<string, mixed> $entry      Entry.
 	 * @param string               $target_dir Directory.
 	 * @return string The written file's path.
+	 * @throws EnvironmentFailure When the target cannot be created or written.
 	 * @throws \RuntimeException When the entry is unsafe, unreadable or corrupt.
 	 */
 	public function extract( array $entry, string $target_dir ): string {
+		list( $target, $out ) = $this->open_target( $entry, $target_dir, true );
+		try {
+			$this->copy_entry( $entry, $out );
+		} catch ( \Throwable $e ) {
+			fclose( $out );
+			@unlink( $target ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- best effort after a failure.
+			throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged.
+		}
+		fclose( $out );
+		return $target;
+	}
+
+	/**
+	 * Extract one byte range of a stored entry, resumable across calls so
+	 * that a multi-gigabyte entry never has to fit one unit of work: offset
+	 * 0 creates the file with the same checks as extract(), a later offset
+	 * appends to a file whose size must equal it. The CRC of everything
+	 * written so far is returned and passed back in; the call that reaches
+	 * the end compares it with the entry's and removes the file on a
+	 * mismatch. A deflated entry has no addressable ranges: it must be
+	 * asked for whole (offset 0, length >= usize), which extracts it in one
+	 * piece as extract() does.
+	 *
+	 * @param array<string, mixed> $entry      Entry.
+	 * @param string               $target_dir Directory.
+	 * @param int                  $offset     Offset within the content.
+	 * @param int                  $length     Bytes to write (clamped to the end).
+	 * @param int                  $crc        CRC returned by the previous call (0 at offset 0).
+	 * @return array{path: string, crc: int, done: bool}
+	 * @throws EnvironmentFailure When the target cannot be created or written.
+	 * @throws \RuntimeException When the entry is unsafe, the range invalid, the data corrupt or the target file not the one being resumed.
+	 */
+	public function extract_piece( array $entry, string $target_dir, int $offset, int $length, int $crc ): array {
+		$usize = (int) $entry['usize'];
+		if ( ZipFormat::METHOD_STORE !== (int) $entry['method'] ) {
+			if ( 0 !== $offset || $length < $usize ) {
+				throw new \RuntimeException( 'Only stored entries can be extracted in pieces.' );
+			}
+			return array(
+				'path' => $this->extract( $entry, $target_dir ),
+				'crc'  => (int) $entry['crc'],
+				'done' => true,
+			);
+		}
+		if ( $offset < 0 || $length < 0 || $offset > $usize || (int) $entry['csize'] !== $usize ) {
+			throw new \RuntimeException( 'The range is outside the entry.' );
+		}
+		$length               = (int) min( $length, $usize - $offset );
+		list( $target, $out ) = $this->open_target( $entry, $target_dir, 0 === $offset );
+		try {
+			if ( $offset > 0 ) {
+				$stat = fstat( $out );
+				if ( ! is_array( $stat ) || (int) $stat['size'] !== $offset || 0 !== fseek( $out, $offset ) ) {
+					throw new \RuntimeException( 'The target file is not the one being resumed.' );
+				}
+			}
+			$handle = $this->handle();
+			try {
+				if ( 0 !== fseek( $handle, $this->data_offset( $handle, $entry ) + $offset ) ) {
+					throw new \RuntimeException( 'The entry could not be positioned.' );
+				}
+				$left = $length;
+				while ( $left > 0 ) {
+					$piece = fread( $handle, (int) min( 1048576, $left ) );
+					if ( false === $piece || '' === $piece ) {
+						throw new \RuntimeException( 'The entry is truncated.' );
+					}
+					if ( strlen( $piece ) !== fwrite( $out, $piece ) ) {
+						throw new EnvironmentFailure( 'The entry could not be written.' );
+					}
+					$crc   = Crc32::combine( $crc, Crc32::of( $piece ), strlen( $piece ) );
+					$left -= strlen( $piece );
+				}
+			} finally {
+				fclose( $handle );
+			}
+			$done = $offset + $length >= $usize;
+			if ( $done && Crc32::hex( $crc ) !== Crc32::hex( (int) $entry['crc'] ) ) {
+				throw new \RuntimeException( 'CRC mismatch: the entry is corrupt.' );
+			}
+		} catch ( \Throwable $e ) {
+			fclose( $out );
+			@unlink( $target ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- best effort after a failure.
+			throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged.
+		}
+		fclose( $out );
+		return array(
+			'path' => $target,
+			'crc'  => $crc,
+			'done' => $done,
+		);
+	}
+
+	/**
+	 * Resolve and open an entry's target file: the name must pass the
+	 * entry-path rule, the nearest existing ancestor and the parent must
+	 * resolve inside the directory (a planted symlink would otherwise lead
+	 * mkdir outside), and the file is created exclusively after removing
+	 * whatever sits there (never written through a link). Resuming opens
+	 * the existing regular file instead.
+	 *
+	 * @param array<string, mixed> $entry      Entry.
+	 * @param string               $target_dir Directory.
+	 * @param bool                 $create     Create anew (true) or reopen for resuming (false).
+	 * @return array{0: string, 1: resource} Path and handle.
+	 * @throws EnvironmentFailure When the directory or file cannot be created or opened.
+	 * @throws \RuntimeException When the entry is unsafe or the target resolves outside the directory.
+	 */
+	private function open_target( array $entry, string $target_dir, bool $create ): array {
 		if ( null !== $entry['problem'] ) {
 			throw new \RuntimeException( 'Refusing to extract an unsafe entry name: ' . $entry['problem'] );
 		}
@@ -265,7 +375,7 @@ final class ZipReader {
 		}
 		$real_root = realpath( $target_dir );
 		if ( false === $real_root || ! is_dir( $real_root ) ) {
-			throw new \RuntimeException( 'The target directory does not exist.' );
+			throw new EnvironmentFailure( 'The target directory does not exist.' );
 		}
 		if ( 'Windows' === PHP_OS_FAMILY ) {
 			self::assert_safe_on_windows( $entry['name'] );
@@ -283,33 +393,35 @@ final class ZipReader {
 		}
 		// Silenced: a PHP warning would put the full target path into the error log, bypassing the path masking.
 		if ( ! is_dir( $parent ) && ! @mkdir( $parent, 0755, true ) && ! is_dir( $parent ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
-			throw new \RuntimeException( 'The target directory could not be created.' );
+			throw new EnvironmentFailure( 'The target directory could not be created.' );
 		}
 		// After creating: the parent itself must resolve inside the root.
 		if ( ! Paths::is_same_or_inside( $real_root, $parent ) ) {
 			throw new \RuntimeException( 'Refusing to extract outside the target directory.' );
 		}
-		// Never write through whatever sits at the target (a symlink or a hard link would carry the bytes to
-		// its other name): remove it and create the file exclusively. A directory there is an error.
 		if ( is_dir( $target ) && ! is_link( $target ) ) {
 			throw new \RuntimeException( 'A directory is in the way of the entry.' );
 		}
+		if ( ! $create ) {
+			if ( is_link( $target ) || ! is_file( $target ) ) {
+				throw new \RuntimeException( 'The target file is not the one being resumed.' );
+			}
+			$out = @fopen( $target, 'r+b' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
+			if ( false === $out ) {
+				throw new EnvironmentFailure( 'The target file could not be opened.' );
+			}
+			return array( $target, $out );
+		}
+		// Never write through whatever sits at the target (a symlink or a hard link would carry the bytes to
+		// its other name): remove it and create the file exclusively.
 		if ( ( is_link( $target ) || file_exists( $target ) ) && ! @unlink( $target ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
-			throw new \RuntimeException( 'The target file could not be replaced.' );
+			throw new EnvironmentFailure( 'The target file could not be replaced.' );
 		}
 		$out = @fopen( $target, 'xb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
 		if ( false === $out ) {
-			throw new \RuntimeException( 'The target file could not be created.' );
+			throw new EnvironmentFailure( 'The target file could not be created.' );
 		}
-		try {
-			$this->copy_entry( $entry, $out );
-		} catch ( \Throwable $e ) {
-			fclose( $out );
-			@unlink( $target ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- best effort after a failure.
-			throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged.
-		}
-		fclose( $out );
-		return $target;
+		return array( $target, $out );
 	}
 
 	/**
@@ -325,7 +437,7 @@ final class ZipReader {
 			$entry,
 			static function ( string $piece ) use ( $out ): void {
 				if ( strlen( $piece ) !== fwrite( $out, $piece ) ) {
-					throw new \RuntimeException( 'The entry could not be written.' );
+					throw new EnvironmentFailure( 'The entry could not be written.' );
 				}
 			}
 		);

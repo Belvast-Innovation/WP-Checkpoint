@@ -3,6 +3,7 @@
 namespace WPCheckpoint\Tests\Unit\Archive;
 
 use WPCheckpoint\Archive\Crc32;
+use WPCheckpoint\Archive\EnvironmentFailure;
 use WPCheckpoint\Archive\ZipFormat;
 use WPCheckpoint\Archive\ZipReader;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
@@ -300,6 +301,120 @@ final class ZipReaderTest extends TestCase {
 			3,
 			$reader->central_directory_offset() - 1
 		);
+	}
+
+	public function test_stored_entries_extract_in_pieces_with_the_crc_carried_across_calls(): void {
+		$big  = str_repeat( 'p', 1048576 + 3 ) . str_repeat( 'q', 1048576 ) . 'end';
+		$path = $this->craft( array( 'dir/store.bin' => $big, 'small.txt' => 'tiny', 'def.bin' => $big ), array( 'def.bin' => array( 'method' => ZipFormat::METHOD_DEFLATE ) ) );
+		$out  = $this->dir . '/out';
+		$r    = ZipReader::open( $path );
+		$e    = $r->find( 'dir/store.bin' );
+		$crc  = 0;
+		$off  = 0;
+		do {
+			$piece = $r->extract_piece( $e, $out, $off, 1048576, $crc );
+			$crc   = $piece['crc'];
+			$off  += 1048576;
+		} while ( ! $piece['done'] );
+		$this->assertSame( $out . '/dir/store.bin', str_replace( DIRECTORY_SEPARATOR, '/', $piece['path'] ) );
+		$this->assertSame( $big, file_get_contents( $piece['path'] ) );
+		$this->assertSame( (int) $e['crc'], $crc );
+		// One call covering everything, and a small entry, work the same way.
+		$this->assertTrue( $r->extract_piece( $e, $out, 0, PHP_INT_MAX, 0 )['done'] );
+		$this->assertSame( 'tiny', file_get_contents( $r->extract_piece( $r->find( 'small.txt' ), $out, 0, 1048576, 0 )['path'] ) );
+		// A deflated entry only whole.
+		$this->assertSame( $big, file_get_contents( $r->extract_piece( $r->find( 'def.bin' ), $out, 0, PHP_INT_MAX, 0 )['path'] ) );
+		try {
+			$r->extract_piece( $r->find( 'def.bin' ), $out, 0, 10, 0 );
+			$this->fail();
+		} catch ( \RuntimeException $e2 ) {
+			$this->assertStringContainsString( 'in pieces', $e2->getMessage() );
+		}
+		// Resuming against a file that is not at the expected size is refused and the file removed.
+		$r->extract_piece( $e, $out, 0, 1048576, 0 );
+		file_put_contents( $out . '/dir/store.bin', 'x', FILE_APPEND );
+		try {
+			$r->extract_piece( $e, $out, 1048576, 1048576, 0 );
+			$this->fail();
+		} catch ( \RuntimeException $e2 ) {
+			$this->assertStringContainsString( 'not the one being resumed', $e2->getMessage() );
+		}
+		$this->assertFileDoesNotExist( $out . '/dir/store.bin' );
+		// A wrong running CRC is caught by the last piece.
+		$r->extract_piece( $e, $out, 0, 1048576, 0 );
+		try {
+			$r->extract_piece( $e, $out, 1048576, PHP_INT_MAX, 12345 );
+			$this->fail();
+		} catch ( \RuntimeException $e2 ) {
+			$this->assertStringContainsString( 'CRC mismatch', $e2->getMessage() );
+		}
+		$this->assertFileDoesNotExist( $out . '/dir/store.bin' );
+		// The environment, not the archive: a missing target directory is typed.
+		try {
+			$r->extract_piece( $e, $this->dir . '/nope', 0, 10, 0 );
+			$this->fail();
+		} catch ( EnvironmentFailure $e2 ) {
+			$this->assertStringContainsString( 'does not exist', $e2->getMessage() );
+		}
+		try {
+			$r->extract( $e, $this->dir . '/nope' );
+			$this->fail();
+		} catch ( EnvironmentFailure $e2 ) {
+			$this->assertStringContainsString( 'does not exist', $e2->getMessage() );
+		}
+	}
+
+	/**
+	 * The inflate limit is only a limit if the largest allowed entry fits
+	 * the baseline: one unit may add at most 32 MB, so the peak of
+	 * inflating MAX_INFLATE_BYTES in one piece is measured here. The
+	 * fixture is streamed to disk so the peak before the measurement stays
+	 * small.
+	 */
+	public function test_the_largest_deflated_entry_inflates_within_the_step_memory_budget(): void {
+		if ( ! function_exists( 'deflate_init' ) ) {
+			$this->markTestSkipped( 'zlib streaming is not available' );
+		}
+		$size = ZipReader::MAX_INFLATE_BYTES - 65536; // Incompressible data grows a little; both sizes must stay under the limit.
+		$path = $this->dir . '/max.zip';
+		$h    = fopen( $path, 'wb' );
+		$name = 'max.bin';
+		fwrite( $h, str_repeat( "\0", 30 + strlen( $name ) ) );
+		$crc   = 0;
+		$csize = 0;
+		$left  = $size;
+		$i     = 0;
+		$ctx   = deflate_init( ZLIB_ENCODING_RAW, array( 'level' => 6 ) );
+		while ( $left > 0 ) {
+			$piece = '';
+			while ( strlen( $piece ) < min( 1048576, $left ) ) {
+				$piece .= hash( 'sha256', (string) $i++, true );
+			}
+			$piece  = substr( $piece, 0, min( 1048576, $left ) );
+			$left  -= strlen( $piece );
+			$crc    = Crc32::combine( $crc, Crc32::of( $piece ), strlen( $piece ) );
+			$out    = deflate_add( $ctx, $piece, $left > 0 ? ZLIB_NO_FLUSH : ZLIB_FINISH );
+			$csize += strlen( $out );
+			fwrite( $h, $out );
+		}
+		$body = ftell( $h );
+		fseek( $h, 0 );
+		fwrite( $h, ZipFormat::local_header( $name, ZipFormat::METHOD_DEFLATE, 1758196800, $crc, $csize, $size, false ) );
+		fseek( $h, $body );
+		$central = ZipFormat::central_header( array( 'name' => $name, 'method' => ZipFormat::METHOD_DEFLATE, 'mtime' => 1758196800, 'crc' => $crc, 'csize' => $csize, 'usize' => $size, 'offset' => 0 ) );
+		fwrite( $h, $central . ZipFormat::end_of_central_directory( 1, strlen( $central ), $body ) );
+		fclose( $h );
+		unset( $piece, $out, $ctx, $central );
+		gc_collect_cycles();
+		$this->assertLessThan( ZipReader::MAX_INFLATE_BYTES, $csize );
+
+		$reader = ZipReader::open( $path );
+		$entry  = $reader->entries()[0];
+		$before = memory_get_peak_usage( true );
+		$hashes = $reader->hash_entry_chunks( $entry, 1048576 );
+		$delta  = memory_get_peak_usage( true ) - $before;
+		$this->assertCount( (int) ceil( $size / 1048576 ), $hashes );
+		$this->assertLessThanOrEqual( 32 * 1048576, $delta, sprintf( 'Inflating %d bytes peaked at %.1f MiB above the baseline.', $size, $delta / 1048576 ) );
 	}
 
 	public function test_not_a_zip(): void {
