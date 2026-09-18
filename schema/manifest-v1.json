@@ -161,7 +161,8 @@
       "type": "object",
       "required": [
         "algorithm",
-        "chunk_bytes"
+        "chunk_bytes",
+        "volume_chunk_bytes"
       ],
       "properties": {
         "algorithm": {
@@ -171,6 +172,11 @@
           "type": "integer",
           "minimum": 1048576,
           "maximum": 1073741824
+        },
+        "volume_chunk_bytes": {
+          "type": "integer",
+          "minimum": 1048576,
+          "maximum": 4294967296
         }
       }
     },
@@ -242,7 +248,7 @@
     },
     "volumes": {
       "type": "array",
-      "maxItems": 10000,
+      "maxItems": 2000,
       "items": {
         "allOf": [
           {

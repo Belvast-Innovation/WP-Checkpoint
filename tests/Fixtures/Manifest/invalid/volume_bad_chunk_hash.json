@@ -39,7 +39,8 @@
   ],
   "hashing": {
     "algorithm": "sha256",
-    "chunk_bytes": 16777216
+    "chunk_bytes": 16777216,
+    "volume_chunk_bytes": 268435456
   },
   "database": {
     "index": {
@@ -69,7 +70,7 @@
   "volumes": [
     {
       "path": "example-20260918-100000-a1b2.part001.wpcheckpoint.zip",
-      "bytes": 33554433,
+      "bytes": 536870913,
       "chunks": [
         "3bfc269594ef649228e9a74bab00f042efc91d5acc6fbee31a382e80d42388fe",
         "zz",

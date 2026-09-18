@@ -40,7 +40,7 @@
   "hashing": {
     "algorithm": "sha256",
     "chunk_bytes": 16777216,
-    "volume_chunk_bytes": 268435456
+    "volume_chunk_bytes": 50331649
   },
   "database": {
     "index": {
@@ -86,6 +86,6 @@
   ],
   "encryption": null,
   "warnings": [
-    1
+    "Views were not exported."
   ]
 }

@@ -68,8 +68,9 @@ final class ManifestTest extends TestCase {
 		$out      = $manifest->to_json();
 		$this->assertStringNotContainsString( 'x_pro_extension', $out, 'unknown keys are dropped on output' );
 		$this->assertSame( $out, Manifest::from_json( $out )->to_json(), 'stable' );
-		$this->assertStringStartsWith( "{\n    \"format\": \"wpcheckpoint-archive\",\n    \"format_version\": 1,\n    \"required_features\": [],", $out, 'canonical key order' );
-		$this->assertStringContainsString( '"home_url": "https://example.com"', $out, 'slashes unescaped' );
+		$this->assertStringStartsWith( '{"format":"wpcheckpoint-archive","format_version":1,"required_features":[],', $out, 'canonical key order, compact' );
+		$this->assertStringContainsString( '"home_url":"https://example.com"', $out, 'slashes unescaped' );
+		$this->assertStringEndsWith( "}\n", $out );
 		$this->assertSame( 16777216, $manifest->chunk_bytes() );
 		$this->assertSame( 'backup', $manifest->kind() );
 		$this->assertSame( 'manual', $manifest->trigger() );
@@ -95,6 +96,28 @@ final class ManifestTest extends TestCase {
 		$this->expectException( ManifestError::class );
 		$this->expectExceptionMessage( 'larger than the maximum' );
 		Manifest::from_json( str_repeat( ' ', Manifest::MAX_JSON_BYTES + 1 ) );
+	}
+
+	public function test_the_largest_legal_manifest_stays_under_the_size_limit(): void {
+		// Every list at its maximum with realistic entries: the size limits must not contradict each other.
+		$base = json_decode( (string) file_get_contents( self::FIXTURES . '/valid/base.json' ), true );
+		$base['database']['tables'] = array();
+		for ( $i = 0; $i < Manifest::MAX_TABLES; $i++ ) {
+			$base['database']['tables'][] = array( 'name' => str_pad( 'wp_' . $i . '_', Manifest::MAX_TABLE_NAME, 'x' ), 'rows' => Manifest::MAX_BYTES, 'bytes' => Manifest::MAX_BYTES, 'chunks' => Manifest::MAX_TABLE_CHUNKS, 'sha256' => hash( 'sha256', (string) $i ) );
+		}
+		$base['volumes'] = array();
+		$four            = array( hash( 'sha256', 'a' ), hash( 'sha256', 'b' ), hash( 'sha256', 'c' ), hash( 'sha256', 'd' ) );
+		for ( $i = 0; $i < Manifest::MAX_VOLUMES; $i++ ) {
+			$base['volumes'][] = array( 'path' => sprintf( 'site-20260918-100000-a1b2.part%04d.wpcheckpoint.zip', $i ), 'bytes' => 1073741824, 'chunks' => $four, 'sha256' => hash( 'sha256', implode( '', $four ) ) );
+		}
+		$base['warnings'] = array_fill( 0, Manifest::MAX_WARNINGS, str_repeat( 'w', 200 ) );
+		$json = (string) json_encode( $base );
+		$manifest = Manifest::from_json( $json );
+		$pretty   = $manifest->to_json();
+		$this->assertLessThanOrEqual( Manifest::MAX_JSON_BYTES, strlen( $pretty ), 'the canonical (compact) output of a maximal manifest fits the limit' );
+		$this->assertGreaterThan( Manifest::MAX_JSON_BYTES * 0.6, strlen( $pretty ), 'the limits are close to each other, so this test is worth keeping' );
+		$this->assertSame( $pretty, Manifest::from_json( $pretty )->to_json(), 'and reads back' );
+		$this->assertSame( 268435456, $manifest->volume_chunk_bytes() );
 	}
 
 	public function test_a_manifest_of_ten_thousand_tables_fits_the_limit_and_the_memory_of_a_shared_host(): void {

@@ -37,17 +37,19 @@ namespace WPCheckpoint\Archive;
  */
 final class Manifest {
 
-	const FORMAT         = 'wpcheckpoint-archive';
-	const VERSIONS       = array( 1 );
-	const KINDS          = array( 'backup', 'checkpoint' );
-	const TRIGGERS       = array( 'manual', 'scheduled', 'pre_update', 'pre_replace', 'pre_rollback', 'pre_restore' );
-	const ALGORITHM      = 'sha256';
-	const DEFAULT_CHUNK  = 16777216;
-	const MIN_CHUNK      = 1048576;
-	const MAX_CHUNK      = 1073741824;
-	const MAX_JSON_BYTES = 4194304;
-	const MAX_DEPTH      = 32;
-	const MAX_STRING     = 4096;
+	const FORMAT               = 'wpcheckpoint-archive';
+	const VERSIONS             = array( 1 );
+	const KINDS                = array( 'backup', 'checkpoint' );
+	const TRIGGERS             = array( 'manual', 'scheduled', 'pre_update', 'pre_replace', 'pre_rollback', 'pre_restore' );
+	const ALGORITHM            = 'sha256';
+	const DEFAULT_CHUNK        = 16777216;
+	const DEFAULT_VOLUME_CHUNK = 268435456;
+	const MAX_VOLUME_CHUNK     = 4294967296;
+	const MIN_CHUNK            = 1048576;
+	const MAX_CHUNK            = 1073741824;
+	const MAX_JSON_BYTES       = 4194304;
+	const MAX_DEPTH            = 32;
+	const MAX_STRING           = 4096;
 	/**
 	 * Largest count or byte size accepted: 2^53 - 1 (exact in JSON) on 64-bit
 	 * PHP, PHP_INT_MAX on 32-bit PHP where that literal would be a float.
@@ -57,7 +59,7 @@ final class Manifest {
 	const MAX_TABLE_CHUNKS   = 100000;
 	const DATABASE_INDEX     = 'database.index.jsonl';
 	const FILES_INDEX        = 'files.index.jsonl';
-	const MAX_VOLUMES        = 10000;
+	const MAX_VOLUMES        = 2000; // 2 TB of 1 GiB volumes; keeps a maximal manifest under MAX_JSON_BYTES (tested).
 	const MAX_VOLUME_CHUNKS  = 65536;
 	const MAX_WARNINGS       = 1000;
 	const MAX_EXCLUSIONS     = 10000;
@@ -179,10 +181,17 @@ final class Manifest {
 		if ( self::ALGORITHM !== self::string_field( $hashing, 'algorithm', 'hashing' ) ) {
 			throw new ManifestError( 'hashing.algorithm', 'Unsupported hash algorithm.' );
 		}
-		$chunk_bytes    = self::int_field( $hashing, 'chunk_bytes', 'hashing', self::MIN_CHUNK, self::MAX_CHUNK );
+		$chunk_bytes = self::int_field( $hashing, 'chunk_bytes', 'hashing', self::MIN_CHUNK, self::MAX_CHUNK );
+		// Volumes are hashed in coarser chunks: the manifest must not grow with the data (a 1 TB site
+		// has 1000 volumes), and a damaged volume is re-transferred whole, so fine location is useless.
+		$volume_chunk_bytes = self::int_field( $hashing, 'volume_chunk_bytes', 'hashing', $chunk_bytes, self::MAX_VOLUME_CHUNK );
+		if ( 0 !== $volume_chunk_bytes % $chunk_bytes ) {
+			throw new ManifestError( 'hashing.volume_chunk_bytes', 'Must be a multiple of chunk_bytes.' );
+		}
 		$out['hashing'] = array(
-			'algorithm'   => self::ALGORITHM,
-			'chunk_bytes' => $chunk_bytes,
+			'algorithm'          => self::ALGORITHM,
+			'chunk_bytes'        => $chunk_bytes,
+			'volume_chunk_bytes' => $volume_chunk_bytes,
 		);
 
 		$database        = self::object_field( $data, 'database', '' );
@@ -221,7 +230,7 @@ final class Manifest {
 		$out['volumes'] = array();
 		foreach ( self::list_field( $data, 'volumes', '', self::MAX_VOLUMES ) as $i => $volume ) {
 			$field = "volumes[{$i}]";
-			$entry = self::content_entry( self::object_item( $volume, $field ), $field, $chunk_bytes, $paths );
+			$entry = self::content_entry( self::object_item( $volume, $field ), $field, $volume_chunk_bytes, $paths );
 			if ( false !== strpos( $entry['path'], '/' ) ) {
 				throw new ManifestError( "{$field}.path", 'A volume path is a file name without directories.' );
 			}
@@ -241,13 +250,17 @@ final class Manifest {
 	}
 
 	/**
-	 * Canonical JSON (fixed key order, readable, slashes and unicode unescaped).
+	 * Canonical JSON: fixed key order, compact (no indentation), slashes and
+	 * unicode unescaped, one trailing newline. Compact on purpose: the largest
+	 * legal manifest is about 3.1 MB this way and 4.5 MB with four-space
+	 * indentation, which readers must refuse (MAX_JSON_BYTES). Use jq to
+	 * read one by eye.
 	 *
 	 * @return string
 	 */
 	public function to_json(): string {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.json_encode_json_encode -- pure PHP class, also used where WordPress is not loaded.
-		$json = json_encode( $this->data, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE );
+		$json = json_encode( $this->data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE );
 		return is_string( $json ) ? $json . "\n" : '';
 	}
 
@@ -276,6 +289,15 @@ final class Manifest {
 	 */
 	public function chunk_bytes(): int {
 		return (int) $this->data['hashing']['chunk_bytes'];
+	}
+
+	/**
+	 * Hash chunk size of volumes (a multiple of chunk_bytes).
+	 *
+	 * @return int
+	 */
+	public function volume_chunk_bytes(): int {
+		return (int) $this->data['hashing']['volume_chunk_bytes'];
 	}
 
 	/**
@@ -334,8 +356,9 @@ final class Manifest {
 
 	/**
 	 * A content entry (a volume or an index file): path, bytes, sha256 and,
-	 * exactly when bytes > chunk_bytes, the chunk hash list. Paths are unique
-	 * across the whole manifest.
+	 * exactly when bytes > the entry's chunk size, the chunk hash list
+	 * (chunk_bytes for index files, volume_chunk_bytes for volumes). Paths are
+	 * unique across the whole manifest.
 	 *
 	 * @param array<string, mixed> $entry       Decoded entry.
 	 * @param string               $field       Field path of the entry.
@@ -362,7 +385,7 @@ final class Manifest {
 		$expected       = $bytes > $chunk_bytes ? ChunkHasher::chunk_count( $bytes, $chunk_bytes ) : 0;
 		if ( $expected > 0 ) {
 			if ( ! array_key_exists( 'chunks', $entry ) ) {
-				throw new ManifestError( "{$field}.chunks", 'Content larger than chunk_bytes must carry its chunk hashes.' );
+				throw new ManifestError( "{$field}.chunks", 'Content larger than its chunk size must carry its chunk hashes.' );
 			}
 			$chunks = self::list_field( $entry, 'chunks', $field, self::MAX_VOLUME_CHUNKS );
 			if ( count( $chunks ) !== $expected ) {
@@ -373,7 +396,7 @@ final class Manifest {
 				$out['chunks'][] = self::hash_value( $hash, "{$field}.chunks[{$j}]" );
 			}
 		} elseif ( array_key_exists( 'chunks', $entry ) ) {
-			throw new ManifestError( "{$field}.chunks", 'Content of at most chunk_bytes has no chunk list.' );
+			throw new ManifestError( "{$field}.chunks", 'Content of at most its chunk size has no chunk list.' );
 		}
 		$out['sha256'] = self::hash_field( $entry, 'sha256', $field );
 		return $out;

@@ -39,7 +39,8 @@
   ],
   "hashing": {
     "algorithm": "sha256",
-    "chunk_bytes": 16777216
+    "chunk_bytes": 16777216,
+    "volume_chunk_bytes": 268435456
   },
   "database": {
     "index": {
@@ -69,22 +70,27 @@
   "volumes": [
     {
       "path": "a.part001.wpcheckpoint.zip",
-      "bytes": 16777215,
+      "bytes": 268435455,
       "sha256": "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb"
     },
     {
       "path": "a.part002.wpcheckpoint.zip",
-      "bytes": 16777216,
+      "bytes": 268435456,
       "sha256": "3e23e8160039594a33894f6564e1b1348bbd7a0088d42c4acb73eeaed59c009d"
     },
     {
       "path": "a.part003.wpcheckpoint.zip",
-      "bytes": 16777217,
+      "bytes": 268435457,
       "chunks": [
         "2e7d2c03a9507ae265ecf5b5356885a53393a2029d241394997265a1a25aefc6",
         "18ac3e7343f016890c510e93f935261169d9e3f565436429830faf0934f4f8e4"
       ],
       "sha256": "d3a0f1c792ccf7f1708d5422696263e35755a86917ea76ef9242bd4a8cf4891a"
+    },
+    {
+      "path": "a.part005.wpcheckpoint.zip",
+      "bytes": 33554433,
+      "sha256": "3f79bb7b435b05321651daefd374cdc681dc06faa65e374e38337b88ca046dea"
     },
     {
       "path": "a.part004.wpcheckpoint.zip",
