@@ -111,6 +111,18 @@ final class Packer {
 	}
 
 	/**
+	 * Largest volume this platform can write and hash: on 32-bit PHP file
+	 * offsets stop at 2 GiB, so a volume is sealed before an entry would
+	 * push it past this, even when every single entry fits. The export
+	 * pre-flight uses the same number to warn before it starts.
+	 *
+	 * @return int
+	 */
+	public static function max_volume_bytes(): int {
+		return PHP_INT_SIZE >= 8 ? 4398046511104 : 2147483647 - 1048576; // 4 TiB, or 2 GiB - 1 minus room for the central directory.
+	}
+
+	/**
 	 * Free space a caller should require before starting a volume.
 	 *
 	 * @param int $volume_bytes Volume size threshold.
@@ -126,7 +138,7 @@ final class Packer {
 	 * @param string               $dir     Directory for the volumes (the job's temporary directory).
 	 * @param string               $base    Base name of the archive, e.g. "example-20260918-100000-a1b2".
 	 * @param array<string, mixed> $state   State from a previous tick, or empty.
-	 * @param array<string, mixed> $options volume_bytes, volume_chunk_bytes, piece_bytes, deflate_max_bytes, zip64_threshold, disk_free (callable( string $dir ): int|false), can_deflate (bool).
+	 * @param array<string, mixed> $options volume_bytes, volume_chunk_bytes, piece_bytes, deflate_max_bytes, zip64_threshold, max_volume_bytes, disk_free (callable( string $dir ): int|false), can_deflate (bool).
 	 * @return Packer
 	 * @throws \RuntimeException When the state cannot be resumed.
 	 */
@@ -144,6 +156,7 @@ final class Packer {
 				'piece_bytes'        => self::PIECE_BYTES,
 				'deflate_max_bytes'  => self::DEFLATE_MAX_BYTES,
 				'zip64_threshold'    => self::ZIP64_THRESHOLD,
+				'max_volume_bytes'   => self::max_volume_bytes(),
 				'disk_free'          => 'disk_free_space',
 				'can_deflate'        => function_exists( 'gzdeflate' ),
 			),
@@ -181,6 +194,17 @@ final class Packer {
 	 */
 	public function has_open_entry(): bool {
 		return null !== $this->state['entry'];
+	}
+
+	/**
+	 * Whether a volume is open (a step checks this before seal_volume():
+	 * after a crash between the rename and its checkpoint, resume() finds
+	 * the volume already sealed).
+	 *
+	 * @return bool
+	 */
+	public function has_open_volume(): bool {
+		return null !== $this->state['volume'];
 	}
 
 	/**
@@ -366,8 +390,11 @@ final class Packer {
 		$this->handle = null;
 		$final        = $this->dir . DIRECTORY_SEPARATOR . $volume['name'];
 		if ( file_exists( $final ) ) {
+			// resume() would have adopted our own sealed volume; a file here now belongs to someone else.
 			throw new \RuntimeException( 'A volume with this name already exists.' );
 		}
+		// The commit point. A crash between this rename and the step's checkpoint leaves a cursor that
+		// still says "open"; resume() recognises the sealed file and carries on (see adopt_sealed_volume()).
 		if ( ! rename( $this->partial_path(), $final ) ) {
 			throw new \RuntimeException( 'The volume could not be renamed to its final name.' );
 		}
@@ -575,6 +602,9 @@ final class Packer {
 		}
 		$partial = $this->partial_path();
 		if ( ! is_file( $partial ) ) {
+			if ( $this->adopt_sealed_volume() ) {
+				return;
+			}
 			throw new \RuntimeException( 'The open volume is missing.' );
 		}
 		$actual = (int) filesize( $partial );
@@ -599,6 +629,45 @@ final class Packer {
 	}
 
 	/**
+	 * The volume the state calls open was sealed by a tick that died between
+	 * the rename and its checkpoint. Recognise it: the final file exists, is
+	 * a readable zip, and its central directory starts at the committed
+	 * byte count with the committed number of entries. Then record it as
+	 * sealed so the step replays from here. Sealing is idempotent this way,
+	 * as every step must be.
+	 *
+	 * @return bool True when the volume was adopted.
+	 */
+	private function adopt_sealed_volume(): bool {
+		$volume = $this->state['volume'];
+		if ( null !== $this->state['entry'] ) {
+			return false; // A volume is never sealed with an entry in progress.
+		}
+		$final = $this->dir . DIRECTORY_SEPARATOR . $volume['name'];
+		if ( ! is_file( $final ) ) {
+			return false;
+		}
+		try {
+			$reader = ZipReader::open( $final );
+		} catch ( \RuntimeException $e ) {
+			return false;
+		}
+		if ( $reader->count() !== (int) $volume['entries'] || $reader->central_directory_offset() !== (int) $volume['bytes'] ) {
+			return false;
+		}
+		@unlink( $this->records_path() ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- the unlink after the rename may not have happened.
+		$this->state['sealed'][] = array(
+			'index'  => (int) $volume['index'],
+			'path'   => $volume['name'],
+			'bytes'  => (int) filesize( $final ),
+			'chunks' => array(),
+			'hashed' => 0,
+		);
+		$this->state['volume']   = null;
+		return true;
+	}
+
+	/**
 	 * Open the volume if none is open, creating a new one.
 	 *
 	 * @param int $next_entry_bytes Size of the entry about to be added (free-space check).
@@ -608,6 +677,10 @@ final class Packer {
 	 */
 	private function ensure_volume_open( int $next_entry_bytes ): void {
 		if ( null !== $this->state['volume'] && $this->state['volume']['bytes'] >= $this->options['volume_bytes'] ) {
+			$this->seal_volume();
+		}
+		if ( null !== $this->state['volume'] && $this->state['volume']['entries'] > 0 && $this->state['volume']['bytes'] + $next_entry_bytes + 65536 > $this->options['max_volume_bytes'] ) {
+			// Every entry may fit the platform on its own while the volume would not: seal first.
 			$this->seal_volume();
 		}
 		if ( null === $this->state['volume'] ) {

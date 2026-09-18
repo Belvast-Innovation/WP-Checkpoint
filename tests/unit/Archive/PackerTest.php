@@ -256,6 +256,75 @@ final class PackerTest extends TestCase {
 		}
 	}
 
+	public function test_a_crash_between_the_seal_rename_and_the_checkpoint_is_replayed(): void {
+		$files = array(
+			array( $this->source( 'a.bin', 700000, 1 ), 'files/a.bin', 1758196800 ),
+			array( $this->source( 'b.bin', 700000, 2 ), 'files/b.bin', 1758196800 ),
+			array( $this->source( 'c.bin', 100000, 3 ), 'files/c.bin', 1758196800 ),
+		);
+		$reference = $this->pack( $files, $this->options() );
+		$expected  = array();
+		foreach ( $reference->sealed_paths() as $path ) {
+			$expected[ basename( $path ) ] = hash_file( 'sha256', $path );
+		}
+		$this->rm( $this->out );
+		mkdir( $this->out );
+
+		$packer = Packer::open( $this->out, 'site-20260918-100000-a1b2', array(), $this->options() );
+		foreach ( array_slice( $files, 0, 2 ) as list( $source, $entry, $mtime ) ) {
+			$packer->add_entry( $source, $entry, $mtime );
+			while ( $packer->write_piece() > 0 ) {
+				continue;
+			}
+		}
+		$before = $packer->state();       // The last checkpoint: volume 1 open with two entries.
+		$this->assertTrue( $packer->has_open_volume() );
+		$packer->seal_volume();           // rename() happened ...
+		$packer->close();                 // ... and the tick dies before the step writes its cursor.
+		unset( $packer );
+		$this->assertFileExists( $this->out . '/site-20260918-100000-a1b2.part001.wpcheckpoint.zip' );
+		$this->assertFileDoesNotExist( $this->out . '/site-20260918-100000-a1b2.part001.wpcheckpoint.zip.partial' );
+
+		$packer = Packer::open( $this->out, 'site-20260918-100000-a1b2', $before, $this->options() );
+		$this->assertFalse( $packer->has_open_volume(), 'the sealed volume was recognised from the stale cursor' );
+		$this->assertSame( array(), glob( $this->out . '/*.cdr' ) ?: array(), 'the record file was cleaned up' );
+		list( $source, $entry, $mtime ) = $files[2];
+		$packer->add_entry( $source, $entry, $mtime );
+		while ( $packer->write_piece() > 0 ) {
+			continue;
+		}
+		$packer->finish( array( 'files.index.jsonl' => $this->source( 'files.index.jsonl', 300 ) ), '{"embedded":true}', 1758196800 );
+		while ( $packer->hash_next_block() ) {
+			continue;
+		}
+		$actual = array();
+		foreach ( $packer->sealed_paths() as $path ) {
+			$actual[ basename( $path ) ] = hash_file( 'sha256', $path );
+		}
+		$this->assertSame( $expected, $actual, 'byte-for-byte identical to the uninterrupted run' );
+
+		// A genuinely foreign file under the next volume's name is still an error.
+		$packer = Packer::open( $this->out, 'other', array(), $this->options() );
+		file_put_contents( $this->out . '/other.part001.wpcheckpoint.zip', 'not ours' );
+		$this->expectException( \RuntimeException::class );
+		$packer->add_entry( $files[0][0], 'files/a.bin', 1758196800 );
+	}
+
+	public function test_the_platform_volume_bound_seals_before_an_entry_would_cross_it(): void {
+		$files = array();
+		for ( $i = 0; $i < 3; $i++ ) {
+			$files[] = array( $this->source( "f$i.bin", 400000, $i + 1 ), "files/f$i.bin", 1758196800 );
+		}
+		// Every entry fits on its own; two would exceed the (lowered) platform bound.
+		$packer = $this->pack( $files, $this->options( array( 'volume_bytes' => 10485760, 'max_volume_bytes' => 700000 ) ) );
+		$paths  = $packer->sealed_paths();
+		$this->assertCount( 3, $paths, 'one entry per volume although the seal threshold was never reached' );
+		foreach ( $paths as $path ) {
+			$this->assertLessThan( 700000, filesize( $path ) );
+		}
+		$this->assertSame( PHP_INT_SIZE >= 8 ? 4398046511104 : 2147483647 - 1048576, Packer::max_volume_bytes() );
+	}
+
 	public function test_lost_buffers_rewind_a_stored_entry(): void {
 		$source = $this->source( 'a.bin', 300000, 1 );
 		$packer = Packer::open( $this->out, 'site', array(), $this->options() );

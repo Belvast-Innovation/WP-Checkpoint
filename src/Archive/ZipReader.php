@@ -96,6 +96,15 @@ final class ZipReader {
 	}
 
 	/**
+	 * Where the central directory starts (the size of the entry data).
+	 *
+	 * @return int
+	 */
+	public function central_directory_offset(): int {
+		return $this->end['cd_offset'];
+	}
+
+	/**
 	 * Walk the central directory. Names that break the entry-path rule are
 	 * reported with "problem" set and must not be extracted.
 	 *
@@ -220,11 +229,22 @@ final class ZipReader {
 		}
 		$target = $target_dir . DIRECTORY_SEPARATOR . str_replace( '/', DIRECTORY_SEPARATOR, $entry['name'] );
 		$parent = dirname( $target );
+		// Before creating anything: the nearest existing ancestor must resolve inside the root, otherwise a
+		// symlink planted earlier (a/ -> elsewhere) would make mkdir build directories outside the target.
+		$existing = $parent;
+		while ( ! file_exists( $existing ) && $existing !== $target_dir && dirname( $existing ) !== $existing ) {
+			$existing = dirname( $existing );
+		}
+		if ( ! Paths::is_same_or_inside( $real_root, $existing ) ) {
+			throw new \RuntimeException( 'Refusing to extract outside the target directory.' );
+		}
 		if ( ! is_dir( $parent ) && ! mkdir( $parent, 0755, true ) && ! is_dir( $parent ) ) {
 			throw new \RuntimeException( 'The target directory could not be created.' );
 		}
-		// The parent must resolve inside the root (a symlink planted earlier could point elsewhere) and
-		// the target itself must not be a link.
+		// After creating: the parent itself must resolve inside the root, and the target must not be a link.
+		// Known and accepted: between this is_link() and the fopen() below another local process could swap
+		// the target for a link (a TOCTOU that needs a cooperating process on the same machine; extraction
+		// itself never creates links, and O_NOFOLLOW is not worth its complexity here).
 		if ( ! Paths::is_same_or_inside( $real_root, $parent ) || is_link( $target ) ) {
 			throw new \RuntimeException( 'Refusing to extract outside the target directory.' );
 		}

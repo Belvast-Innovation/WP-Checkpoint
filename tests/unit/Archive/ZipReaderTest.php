@@ -74,6 +74,23 @@ final class ZipReaderTest extends TestCase {
 		$reader->extract( $reader->entries()[0], $this->dir . '/out' );
 	}
 
+	public function test_no_directory_is_created_outside_the_target_through_a_symlinked_ancestor(): void {
+		if ( 'Windows' === PHP_OS_FAMILY ) {
+			$this->markTestSkipped( 'symlinks' );
+		}
+		mkdir( $this->dir . '/elsewhere' );
+		symlink( $this->dir . '/elsewhere', $this->dir . '/out/a' );
+		$path   = $this->craft( array( 'a/b/c/payload.txt' => 'x' ) );
+		$reader = ZipReader::open( $path );
+		try {
+			$reader->extract( $reader->entries()[0], $this->dir . '/out' );
+			$this->fail( 'extracted through a symlinked ancestor' );
+		} catch ( \RuntimeException $e ) {
+			$this->assertStringContainsString( 'outside the target directory', $e->getMessage() );
+		}
+		$this->assertDirectoryDoesNotExist( $this->dir . '/elsewhere/b', 'mkdir must not have followed the link' );
+	}
+
 	public function test_corrupt_data_is_detected_by_crc(): void {
 		$path = $this->craft( array( 'a.txt' => str_repeat( 'abc', 1000 ) ) );
 		$h    = fopen( $path, 'r+b' );
