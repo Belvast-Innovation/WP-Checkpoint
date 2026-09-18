@@ -1,0 +1,85 @@
+{
+  "format": "wpcheckpoint-archive",
+  "format_version": 1,
+  "required_features": [],
+  "kind": "backup",
+  "trigger": "manual",
+  "created_at": "2026-09-18T10:00:00Z",
+  "generator": {
+    "name": "wp-checkpoint",
+    "version": "0.1.0"
+  },
+  "site": {
+    "home_url": "https://example.com",
+    "site_url": "https://example.com",
+    "abspath": "/var/www/html/",
+    "content_dir": "/var/www/html/wp-content",
+    "table_prefix": "wp_",
+    "wp_version": "7.1",
+    "php_version": "8.3.10",
+    "db_server": "10.11.6-MariaDB",
+    "multisite": false,
+    "locale": "de_DE",
+    "charset": "utf8mb4",
+    "collate": "utf8mb4_unicode_520_ci"
+  },
+  "contents": {
+    "database": true,
+    "files": [
+      "plugins",
+      "themes",
+      "uploads",
+      "mu-plugins",
+      "other-content"
+    ]
+  },
+  "exclusions": [
+    "wp-content/cache",
+    "wp-content/wp-checkpoint-*"
+  ],
+  "hashing": {
+    "algorithm": "sha256",
+    "chunk_bytes": 16777216
+  },
+  "database": {
+    "tables": [
+      {
+        "name": "wp_posts",
+        "rows": 12045,
+        "chunks": [
+          {
+            "path": "database\\wp_posts.sql",
+            "bytes": 15932211,
+            "sha256": "d0f631ca1ddba8db3bcfcb9e057cdc98d0379f1bee00e75a545147a27dadd982"
+          }
+        ]
+      }
+    ]
+  },
+  "files": {
+    "count": 18234,
+    "bytes": 2143233211,
+    "index": "files.index.jsonl"
+  },
+  "volumes": [
+    {
+      "path": "example-20260918-100000-a1b2.part001.wpcheckpoint.zip",
+      "bytes": 33554433,
+      "chunks": [
+        "3bfc269594ef649228e9a74bab00f042efc91d5acc6fbee31a382e80d42388fe",
+        "fb04dcb6970e4c3d1873de51fd5a50d7bb46b3383113602665c350ec40b5f990",
+        "e0d2747b9ab7abb6eb65e0373fa1b428a28bd6d8a2380106dcc080f58005ee14"
+      ],
+      "sha256": "81a7ef8824e9fc64ca81b84cd95ea5094fbd31e6637304d0706d6d7f757f586e"
+    },
+    {
+      "path": "example-20260918-100000-a1b2.part002.wpcheckpoint.zip",
+      "bytes": 4096,
+      "sha256": "81db8ebbbbc69c6c6ad4a6aa92b76e0c08af547da236b9e2c9dbe1d8285a8130"
+    }
+  ],
+  "encryption": null,
+  "warnings": [
+    "Views were not exported."
+  ]
+}
