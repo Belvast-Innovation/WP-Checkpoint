@@ -1,0 +1,79 @@
+{
+  "format": "wpcheckpoint-archive",
+  "format_version": 1,
+  "required_features": [],
+  "kind": "backup",
+  "trigger": "manual",
+  "created_at": "2026-09-18T10:00:00Z",
+  "generator": {
+    "name": "wp-checkpoint",
+    "version": "0.1.0"
+  },
+  "site": {
+    "home_url": "https://example.com",
+    "site_url": "https://example.com",
+    "abspath": "/var/www/html/",
+    "content_dir": "/var/www/html/wp-content",
+    "table_prefix": "wp_",
+    "wp_version": "7.1",
+    "php_version": "8.3.10",
+    "db_server": "10.11.6-MariaDB",
+    "multisite": false,
+    "locale": "de_DE",
+    "charset": "utf8mb4",
+    "collate": "utf8mb4_unicode_520_ci"
+  },
+  "contents": {
+    "database": true,
+    "files": [
+      "plugins",
+      "themes",
+      "uploads",
+      "mu-plugins",
+      "other-content"
+    ]
+  },
+  "exclusions": [
+    "wp-content/cache",
+    "wp-content/wp-checkpoint-*"
+  ],
+  "hashing": {
+    "algorithm": "sha256",
+    "chunk_bytes": 16777216,
+    "volume_chunk_bytes": 268435456
+  },
+  "database": {
+    "index": {
+      "path": "database.index.jsonl",
+      "bytes": 84213,
+      "sha256": "71812174732445a278ec1170a49881779638e0544874aa0559bd280d9486e0b3"
+    },
+    "tables": [
+      {
+        "name": "wp_posts",
+        "rows": 12045,
+        "bytes": 31864422,
+        "chunks": 2,
+        "sha256": "a7e850497d2e33cb3465a56de6b29759bf85c550d47c11b1c4672fb2d1556a7a"
+      }
+    ]
+  },
+  "files": {
+    "count": 18234,
+    "bytes": 2143233211,
+    "index": {
+      "path": "files.index.jsonl",
+      "bytes": 1843201,
+      "sha256": "f11e0dade3b158e7bdeecbadbfcbd28ec9ff8dfcd051ec56ebb70edb5928ac6e"
+    }
+  },
+  "volumes": [
+    [
+      1
+    ]
+  ],
+  "encryption": null,
+  "warnings": [
+    "Views were not exported."
+  ]
+}

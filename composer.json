@@ -14,7 +14,8 @@
     "szepeviktor/phpstan-wordpress": "^2.0",
     "phpunit/phpunit": "^9.6",
     "yoast/phpunit-polyfills": "^2.0",
-    "wp-phpunit/wp-phpunit": "*"
+    "wp-phpunit/wp-phpunit": "*",
+    "justinrainbow/json-schema": "^6.12"
   },
   "autoload-dev": {
     "psr-4": {
