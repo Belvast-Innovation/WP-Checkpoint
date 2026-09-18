@@ -84,6 +84,21 @@ final class JobContextTest extends TestCase {
 		$this->assertSame( array( 0 => 'a' ), JobContext::strip_reserved( array( 0 => 'a' ) ), 'integer keys are kept' );
 	}
 
+	public function test_checkpoint_rhythm_is_two_seconds_or_sixteen_megabytes(): void {
+		$ctx = $this->context( array(), 60, 32 * 1048576, -1, static function (): void {} );
+		$this->assertFalse( $ctx->should_checkpoint( 0 ) );
+		$this->assertFalse( $ctx->should_checkpoint( JobContext::CHECKPOINT_BYTES - 1 ) );
+		$this->assertTrue( $ctx->should_checkpoint( JobContext::CHECKPOINT_BYTES ), 'bytes reached' );
+		$this->now += 1.9;
+		$this->assertFalse( $ctx->should_checkpoint( 0 ) );
+		$this->now += 0.1;
+		$this->assertTrue( $ctx->should_checkpoint( 0 ), 'two seconds since the tick started' );
+		$ctx->checkpoint( array( 'i' => 1 ), 10 );
+		$this->assertFalse( $ctx->should_checkpoint( 0 ), 'the clock restarts at a checkpoint' );
+		$this->now += 2.0;
+		$this->assertTrue( $ctx->should_checkpoint( 0 ) );
+	}
+
 	public function test_checkpoint_calls_back_without_reserved_keys(): void {
 		$seen = null;
 		$ctx  = $this->context( array(), 10, 32 * 1048576, -1, function ( array $cursor, int $percent, string $message ) use ( &$seen ): void {

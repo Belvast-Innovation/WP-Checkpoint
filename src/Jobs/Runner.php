@@ -25,8 +25,23 @@ defined( 'ABSPATH' ) || exit;
  */
 final class Runner {
 
-	const MAX_RETRIES        = 5;
-	const MAX_NO_PROGRESS    = 3;
+	/**
+	 * TransientFailure is retried this many times (back-off 5, 15, 60, 300 s).
+	 */
+	const MAX_RETRIES = 5;
+
+	/**
+	 * No-progress guard: a step that returns progress with an unchanged
+	 * cursor this many times in a row fails the job. A checkpoint with an
+	 * unchanged cursor does not count as progress either. It catches a unit
+	 * of work that cannot fit into one budget; a step that knows it cannot
+	 * proceed should throw instead of relying on it.
+	 */
+	const MAX_NO_PROGRESS = 3;
+
+	/**
+	 * StepResult::wait() is capped at this many seconds (the gate back-off maximum).
+	 */
 	const MAX_WAIT_SECONDS   = 300;
 	const BUSY_RETRY_SECONDS = 5;
 	const RESERVED_KEY       = JobContext::RESERVED_PREFIX;
@@ -345,7 +360,12 @@ final class Runner {
 	 * Run the cleanup of every step up to and including the current one,
 	 * after a job was cancelled. Best effort: each step's failure is logged.
 	 *
-	 * @param Job $job Cancelled (or failed) job.
+	 * Only for cancelled jobs. A failed job is never cleaned up: it keeps its
+	 * cursor and its temporary files for a retry. Nothing reclaims those
+	 * files yet (the purge only removes the lock file and the log); T013
+	 * adds the per-job work directory that the purge and the reaper remove.
+	 *
+	 * @param Job $job Cancelled job.
 	 * @return int Steps cleaned.
 	 */
 	public function cleanup( Job $job ): int {

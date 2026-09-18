@@ -31,6 +31,15 @@ final class JobContext {
 	const STOP_MEMORY = 'memory';
 
 	/**
+	 * Checkpoint rhythm: persist the cursor after this many seconds or this
+	 * many bytes since the last checkpoint, whichever comes first. Every step
+	 * uses these two numbers; 16 MiB is also the archive's hash chunk and
+	 * database chunk size, so a finished chunk is a natural checkpoint.
+	 */
+	const CHECKPOINT_SECONDS = 2.0;
+	const CHECKPOINT_BYTES   = 16777216;
+
+	/**
 	 * Job.
 	 *
 	 * @var Job
@@ -101,6 +110,13 @@ final class JobContext {
 	private $checkpoint;
 
 	/**
+	 * When the cursor was last persisted (tick start before the first checkpoint).
+	 *
+	 * @var float
+	 */
+	private $checkpointed_at;
+
+	/**
 	 * Constructor.
 	 *
 	 * @param Job                  $job             Job.
@@ -124,6 +140,7 @@ final class JobContext {
 		$this->memory_at_start = (int) call_user_func( $memory );
 		$this->memory_limit    = $memory_limit;
 		$this->checkpoint      = is_callable( $checkpoint ) ? $checkpoint : null;
+		$this->checkpointed_at = $started_at;
 	}
 
 	/**
@@ -163,7 +180,11 @@ final class JobContext {
 	}
 
 	/**
-	 * Storage directory the job is bound to.
+	 * Storage directory the job is bound to. Temporary files go to tmp/ and
+	 * results to backups/ below it, nowhere else. Take it from the context
+	 * on every run(); never keep it in the cursor or a property across
+	 * ticks, because the engine only touches files inside the current
+	 * storage directory and that directory can change between ticks.
 	 *
 	 * @return string
 	 */
@@ -228,8 +249,27 @@ final class JobContext {
 	}
 
 	/**
-	 * Persist the position in the middle of a step. Throws LockLost when the
-	 * lock is no longer held: the step must not catch it.
+	 * Whether it is time to persist the cursor: more than CHECKPOINT_SECONDS
+	 * since the last checkpoint (or the tick start), or at least
+	 * CHECKPOINT_BYTES processed since then. Steps call this inside a unit
+	 * of work and checkpoint() when it says so, instead of choosing their
+	 * own frequency: a tighter one turns the database into the bottleneck, a
+	 * looser one redoes too much after a dead tick.
+	 *
+	 * @param int $bytes_since_last Bytes processed since the last checkpoint.
+	 * @return bool
+	 */
+	public function should_checkpoint( int $bytes_since_last ): bool {
+		if ( $bytes_since_last >= self::CHECKPOINT_BYTES ) {
+			return true;
+		}
+		return (float) call_user_func( $this->clock ) - $this->checkpointed_at >= self::CHECKPOINT_SECONDS;
+	}
+
+	/**
+	 * Persist the position in the middle of a step, and reset the checkpoint
+	 * clock (see should_checkpoint()). Throws LockLost when the lock is no
+	 * longer held: the step must not catch it.
 	 *
 	 * @param array<string, mixed> $cursor  Cursor.
 	 * @param int                  $percent Progress within the step.
@@ -243,6 +283,7 @@ final class JobContext {
 		}
 		$this->cursor = self::strip_reserved( $cursor );
 		call_user_func( $this->checkpoint, $this->cursor, max( 0, min( 100, $percent ) ), $message );
+		$this->checkpointed_at = (float) call_user_func( $this->clock );
 	}
 
 	/**
