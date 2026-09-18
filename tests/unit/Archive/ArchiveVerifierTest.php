@@ -459,6 +459,8 @@ final class ArchiveVerifierTest extends TestCase {
 		$text = $result->to_text( self::identity() );
 		$this->assertSame( 'Archive could not be verified.', strtok( $text, "\n" ) );
 		$this->assertStringContainsString( 'repacked by another tool, not that data is damaged', $text );
+		$this->assertStringContainsString( 'Use the original files the plugin produced', $text );
+		$this->assertStringContainsString( 'manual restore', $text );
 		$this->assertStringNotContainsString( 'damaged.', strtok( $text, "\n" ) );
 		$this->assertSame( 1, $result->findings_total() );
 		$this->assertSame( Finding::UNSUPPORTED, self::findings( $result )[0]['kind'] );
@@ -603,6 +605,63 @@ final class ArchiveVerifierTest extends TestCase {
 		$this->assertNotNull( $finding );
 		$this->assertSame( Manifest::FILES_INDEX, $finding['entry'] );
 		$this->assertTrue( $result->restore_refused() );
+	}
+
+	public function test_a_volume_that_changes_during_the_run_is_inconclusive_not_damaged(): void {
+		// Grown after the volumes phase (a transfer still writing): the containers phase notices before hashing.
+		$builder  = $this->typical();
+		$verifier = ArchiveVerifier::open( $builder->manifest_path, $builder->work_dir(), ArchiveVerifier::DEPTH_FULL );
+		while ( $verifier->step() && ArchiveVerifier::PHASE_CONTAINERS !== $verifier->state()['phase'] ) {
+			continue;
+		}
+		file_put_contents( $builder->volumes[0], 'more', FILE_APPEND );
+		$result = $verifier->run();
+		$this->assertSame( VerificationResult::CHANGED, $result->outcome() );
+		$this->assertTrue( $result->restore_refused() );
+		$this->assertFalse( $result->is_complete_pass() );
+		$text = $result->to_text( self::identity() );
+		$this->assertSame( 'Archive changed while it was being verified.', strtok( $text, "\n" ) );
+		$this->assertStringContainsString( 'Verify again once writing has finished', $text );
+		$this->assertStringNotContainsString( 'damaged', $text );
+		$this->assertSame( 1, $result->findings_total() );
+		$finding = self::findings( $result )[0];
+		$this->assertSame( Finding::CHANGED, $finding['kind'] );
+		$this->assertSame( ArchiveVerifier::PHASE_CONTAINERS, $finding['phase'] );
+		$this->assertSame( 1, $finding['volume'] );
+		$this->assertSame( 0, $result->counts()['blocks_verified'], 'Not a single block was hashed against a moving file.' );
+		$this->assertSame( VerifyCommand::EXIT_CHANGED, VerifyCommand::exit_code( $result->outcome() ) );
+
+		// Changed in the middle of the contents walk: the unit boundary catches it, and earlier findings do not turn it into "damaged".
+		$builder  = $this->typical();
+		ArchiveBuilder::flip( $builder->volumes[0], ArchiveBuilder::locate( $builder->volumes[0], 'database/wp_posts.0001.sql' )['offset'] + 10 );
+		$verifier = ArchiveVerifier::open( $builder->manifest_path, $builder->work_dir(), ArchiveVerifier::DEPTH_FULL );
+		while ( $verifier->step() ) {
+			$state = $verifier->state();
+			if ( ArchiveVerifier::PHASE_CONTENTS === $state['phase'] && 1 === $state['volume'] ) {
+				file_put_contents( $builder->volumes[1], 'x', FILE_APPEND );
+				break;
+			}
+		}
+		$result = $verifier->run();
+		$this->assertSame( VerificationResult::CHANGED, $result->outcome() );
+		$this->assertNotNull( self::find( $result, array( 'kind' => Finding::CORRUPT, 'table' => 'wp_posts', 'chunk' => 1 ) ), 'What was found before the change is still listed.' );
+		$this->assertNotNull( self::find( $result, array( 'kind' => Finding::CHANGED, 'volume' => 2 ) ) );
+		$this->assertSame( ArchiveVerifier::PHASE_CONTENTS, $result->to_array( self::identity() )['stopped_at'] );
+
+		// A volume that appears after the volumes phase saw it missing is a change too, as is the index volume growing before extraction.
+		$builder = $this->typical();
+		$copy    = $builder->volumes[0] . '.bak';
+		rename( $builder->volumes[0], $copy );
+		$verifier = ArchiveVerifier::open( $builder->manifest_path, $builder->work_dir(), ArchiveVerifier::DEPTH_FULL );
+		while ( $verifier->step() && ArchiveVerifier::PHASE_INDEXES !== $verifier->state()['phase'] ) {
+			continue;
+		}
+		rename( $copy, $builder->volumes[0] );
+		file_put_contents( $builder->volumes[1], 'x', FILE_APPEND );
+		$result = $verifier->run();
+		$this->assertSame( VerificationResult::CHANGED, $result->outcome() );
+		$this->assertSame( ArchiveVerifier::PHASE_INDEXES, $result->to_array( self::identity() )['stopped_at'] );
+		$this->assertNotNull( self::find( $result, array( 'kind' => Finding::CHANGED, 'volume' => 2 ) ) );
 	}
 
 	public function test_open_refuses_bad_arguments(): void {

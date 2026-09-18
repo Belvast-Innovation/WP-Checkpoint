@@ -22,8 +22,10 @@ namespace WPCheckpoint\Archive;
  * findings, never the manifest itself. Any damage stops the phase that
  * needs the damaged part (a missing or corrupt sidecar index ends the run;
  * a missing volume other than the last one only ends that volume's
- * checks). The manifest is trusted for nothing beyond what it declares:
- * every entry is still bounded by the reader's own limits.
+ * checks). A volume whose size differs from what the volumes phase
+ * recorded ends the run as "changed" rather than damaged (see
+ * changed()). The manifest is trusted for nothing beyond what it
+ * declares: every entry is still bounded by the reader's own limits.
  */
 final class ArchiveVerifier {
 
@@ -148,6 +150,8 @@ final class ArchiveVerifier {
 				),
 				'entry_block'    => 0,
 				'gap'            => false,
+				'sizes'          => array(),
+				'changed'        => false,
 				'counts'         => array(),
 				'kinds'          => array(),
 				'findings'       => array(),
@@ -380,22 +384,54 @@ final class ArchiveVerifier {
 	}
 
 	/**
-	 * Whether a volume is on disk with the declared size. An unlisted volume
-	 * (the one given) counts as present.
+	 * A volume's size on disk right now, or null when it is not there.
 	 *
 	 * @param array<string, mixed> $volume Volume.
-	 * @return string 'present', 'missing' or 'size'.
+	 * @return int|null
 	 */
-	private function presence( array $volume ): string {
+	private function size_now( array $volume ): ?int {
 		clearstatcache();
 		$path = $this->volume_path( $volume );
 		if ( ! is_file( $path ) ) {
-			return 'missing';
+			return null;
 		}
-		if ( $volume['listed'] && filesize( $path ) !== $volume['bytes'] ) {
-			return 'size';
+		$size = filesize( $path );
+		return false === $size ? null : $size;
+	}
+
+	/**
+	 * The size the volumes phase recorded (null: missing then).
+	 *
+	 * @param int $i Volume position.
+	 * @return int|null
+	 */
+	private function size_then( int $i ): ?int {
+		return isset( $this->state['sizes'][ $i ] ) ? (int) $this->state['sizes'][ $i ] : null;
+	}
+
+	/**
+	 * A full verification of a large archive runs for hours; a volume that a
+	 * transfer or download is still writing would otherwise be read half
+	 * new and reported as damaged, and a user who reads "damaged" deletes a
+	 * backup that was fine. One stat per unit compares the volume with what
+	 * the volumes phase saw: any difference ends the run as "changed", a
+	 * separate outcome that asks for a re-run once writing has finished.
+	 * A volume swapped for one of the same size is not caught here; the
+	 * reader then fails closed on the stale central-directory position.
+	 *
+	 * @param int    $i     Volume position.
+	 * @param string $phase Phase to stop in.
+	 * @return bool True when the run was stopped.
+	 */
+	private function changed( int $i, string $phase ): bool {
+		$volume = $this->volumes()[ $i ];
+		if ( $this->size_now( $volume ) === $this->size_then( $i ) ) {
+			return false;
 		}
-		return 'present';
+		$this->add( new Finding( $phase, Finding::CHANGED, 'The volume changed while it was being verified.', array( 'volume' => $volume['ordinal'] ) ) );
+		$this->state['changed'] = true;
+		$this->stop( $phase );
+		return true;
 	}
 
 	/*
@@ -419,8 +455,10 @@ final class ArchiveVerifier {
 		$i       = (int) $this->state['volume'];
 		$volume  = $volumes[ $i ];
 		$is_last = count( $volumes ) - 1 === $i;
-		$state   = $this->presence( $volume );
-		if ( 'missing' === $state ) {
+		$size    = $this->size_now( $volume );
+
+		$this->state['sizes'][ $i ] = $size;
+		if ( null === $size ) {
 			$this->add( new Finding( self::PHASE_VOLUMES, Finding::MISSING, 'The volume is not in the archive directory.', array( 'volume' => $volume['ordinal'] ) ) );
 			if ( $is_last ) {
 				$this->stop( self::PHASE_VOLUMES );
@@ -428,7 +466,7 @@ final class ArchiveVerifier {
 			}
 		} else {
 			++$this->state['counts']['volumes_present'];
-			if ( 'size' === $state ) {
+			if ( $volume['listed'] && $size !== $volume['bytes'] ) {
 				$this->add( new Finding( self::PHASE_VOLUMES, Finding::CORRUPT, 'The volume size differs from the manifest.', array( 'volume' => $volume['ordinal'] ) ) );
 			}
 		}
@@ -478,6 +516,9 @@ final class ArchiveVerifier {
 		$volumes = $this->volumes();
 		$last    = $volumes[ count( $volumes ) - 1 ];
 		if ( 'extract' === $this->state['sub'] ) {
+			if ( $this->changed( count( $volumes ) - 1, self::PHASE_INDEXES ) ) {
+				return;
+			}
 			try {
 				$reader = ZipReader::open( $this->volume_path( $last ) );
 			} catch ( \RuntimeException $e ) {
@@ -919,7 +960,11 @@ final class ArchiveVerifier {
 			return;
 		}
 		$volume = $volumes[ $i ];
-		if ( ! $volume['listed'] || 'present' !== $this->presence( $volume ) ) {
+		if ( $this->changed( $i, self::PHASE_CONTAINERS ) ) {
+			return;
+		}
+		if ( ! $volume['listed'] || $this->size_then( $i ) !== $volume['bytes'] ) {
+			// Unlisted (the given volume) or already reported missing or mis-sized.
 			$this->next_container();
 			return;
 		}
@@ -1070,7 +1115,10 @@ final class ArchiveVerifier {
 			return;
 		}
 		$volume = $volumes[ $i ];
-		if ( 'missing' === $this->presence( $volume ) ) {
+		if ( $this->changed( $i, self::PHASE_CONTENTS ) ) {
+			return;
+		}
+		if ( null === $this->size_then( $i ) ) {
 			$this->state['gap'] = true;
 			$this->next_volume_contents();
 			return;

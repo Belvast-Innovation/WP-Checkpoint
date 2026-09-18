@@ -25,6 +25,7 @@ final class VerifyCommand {
 	const EXIT_INVALID            = 2;
 	const EXIT_UNSUPPORTED_LAYOUT = 3;
 	const EXIT_PASSED_PARTIAL     = 4;
+	const EXIT_CHANGED            = 5;
 
 	/**
 	 * Presenter (its clean() pipeline).
@@ -79,7 +80,7 @@ final class VerifyCommand {
 	 *
 	 * ## EXIT CODES
 	 *
-	 * 0 intact, 1 damaged, 2 manifest could not be read, 3 layout not supported by this verifier, 4 intact as far as checked (embedded copy or structure only).
+	 * 0 intact, 1 damaged, 2 manifest could not be read, 3 layout not supported by this verifier, 4 intact as far as checked (embedded copy or structure only), 5 archive changed during the run (verify again later).
 	 *
 	 * @param string[]             $args       Positional arguments.
 	 * @param array<string, mixed> $assoc_args Options.
@@ -127,6 +128,8 @@ final class VerifyCommand {
 				return self::EXIT_INVALID;
 			case VerificationResult::UNSUPPORTED_LAYOUT:
 				return self::EXIT_UNSUPPORTED_LAYOUT;
+			case VerificationResult::CHANGED:
+				return self::EXIT_CHANGED;
 			default:
 				return self::EXIT_FAILED;
 		}

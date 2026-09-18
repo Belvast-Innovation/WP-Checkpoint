@@ -11,7 +11,9 @@ namespace WPCheckpoint\Archive;
  * Kinds: missing (declared but absent), corrupt (present but wrong bytes),
  * malformed (structure the reader cannot accept), unverified (could not be
  * checked from this input), unsupported (the layout is not one this
- * verifier can check, which is not the same as damage). Locations name
+ * verifier can check, which is not the same as damage), changed (the
+ * archive was written to while it was being verified, so nothing read
+ * after that is conclusive). Locations name
  * volumes by ordinal, never by file name (the name carries the site slug).
  */
 final class Finding {
@@ -21,6 +23,7 @@ final class Finding {
 	const MALFORMED   = 'malformed';
 	const UNVERIFIED  = 'unverified';
 	const UNSUPPORTED = 'unsupported';
+	const CHANGED     = 'changed';
 
 	/**
 	 * Fields.

@@ -12,8 +12,9 @@ namespace WPCheckpoint\Archive;
  * (PASSED) exists only when every phase ran on a standalone manifest and
  * nothing was found. An embedded manifest copy or a structure-only run can
  * reach PASSED_PARTIAL at best, so is_complete_pass() cannot be true for
- * them. Text and array forms take the cleaning callable as a required
- * argument: no report leaves without it.
+ * them. CHANGED means the archive was written to during the run and the
+ * result is inconclusive. Text and array forms take the cleaning callable
+ * as a required argument: no report leaves without it.
  */
 final class VerificationResult {
 
@@ -22,6 +23,7 @@ final class VerificationResult {
 	const FAILED             = 'failed';
 	const INVALID            = 'invalid';
 	const UNSUPPORTED_LAYOUT = 'unsupported_layout';
+	const CHANGED            = 'changed';
 
 	const REASON_EMBEDDED  = 'embedded_manifest';
 	const REASON_STRUCTURE = 'structure_only';
@@ -89,6 +91,9 @@ final class VerificationResult {
 		$reasons = array();
 		if ( ! empty( $state['invalid'] ) ) {
 			$outcome = self::INVALID;
+		} elseif ( ! empty( $state['changed'] ) ) {
+			// Whatever was found before the change may describe bytes that no longer exist: inconclusive, not damaged.
+			$outcome = self::CHANGED;
 		} elseif ( $damage > 0 ) {
 			$outcome = self::FAILED;
 		} elseif ( (int) ( $kinds[ Finding::UNSUPPORTED ] ?? 0 ) > 0 ) {
@@ -127,7 +132,10 @@ final class VerificationResult {
 	 * Whether a restore from this archive must be refused. Damage of any
 	 * kind refuses (a damaged sidecar index has no "skip" option); a layout
 	 * this verifier cannot check refuses as well, because unverified is not
-	 * verified.
+	 * verified, and so does a run the archive changed under. Whether an
+	 * importer that looks entries up by name could accept an unsupported
+	 * layout is a T030 design question; until it is answered this stays the
+	 * safe default.
 	 *
 	 * @return bool
 	 */
@@ -217,6 +225,10 @@ final class VerificationResult {
 		if ( isset( $this->state['stopped_at'] ) ) {
 			$lines[] = 'Verification stopped in phase "' . (string) $this->state['stopped_at'] . '".';
 		}
+		$next = self::next_step( $this->outcome );
+		if ( '' !== $next ) {
+			$lines[] = $next;
+		}
 		$counts = $this->counts();
 		if ( array() !== $counts ) {
 			$parts = array();
@@ -236,6 +248,23 @@ final class VerificationResult {
 	}
 
 	/**
+	 * What the user should do next, for outcomes where that is not obvious.
+	 *
+	 * @param string $outcome Outcome.
+	 * @return string Empty when there is nothing to add.
+	 */
+	public static function next_step( string $outcome ): string {
+		switch ( $outcome ) {
+			case self::UNSUPPORTED_LAYOUT:
+				return 'Restore is refused because the contents could not be checked. Use the original files the plugin produced when it exported this archive; if those are gone, follow the manual restore steps in the documentation (extract every volume and import the SQL files).';
+			case self::CHANGED:
+				return 'Nothing read after the change is conclusive; the archive may still be being transferred or downloaded. Verify again once writing has finished.';
+			default:
+				return '';
+		}
+	}
+
+	/**
 	 * The fixed first line.
 	 *
 	 * @param string $outcome Outcome.
@@ -251,6 +280,8 @@ final class VerificationResult {
 				return 'Archive is damaged.';
 			case self::INVALID:
 				return 'Archive could not be read.';
+			case self::CHANGED:
+				return 'Archive changed while it was being verified.';
 			default:
 				return 'Archive could not be verified.';
 		}
