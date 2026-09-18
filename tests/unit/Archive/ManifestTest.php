@@ -94,6 +94,28 @@ final class ManifestTest extends TestCase {
 		Manifest::from_json( str_repeat( ' ', Manifest::MAX_JSON_BYTES + 1 ) );
 	}
 
+	public function test_integers_beyond_a_32_bit_platform_are_reported_as_a_platform_limit(): void {
+		$this->assertSame( Manifest::INTEGER, Manifest::classify_integer( 3221225472, 8 ) );
+		$this->assertSame( Manifest::INTEGER, Manifest::classify_integer( 7, 4 ) );
+		$this->assertSame( Manifest::NOT_AN_INTEGER, Manifest::classify_integer( 1.5, 4 ), 'a real fraction is never a platform limit' );
+		$this->assertSame( Manifest::NOT_AN_INTEGER, Manifest::classify_integer( 3221225472.0, 8 ), '64-bit: json_decode would have produced an int; a float here is a malformed manifest' );
+		$this->assertSame( Manifest::NOT_AN_INTEGER, Manifest::classify_integer( '3221225472', 4 ) );
+		$this->assertSame( Manifest::NOT_AN_INTEGER, Manifest::classify_integer( 2147483647.0, 4 ), 'fits 32-bit, so a float is malformed' );
+		$this->assertSame( Manifest::INTEGER_TOO_LARGE_FOR_PLATFORM, Manifest::classify_integer( 3221225472.0, 4 ), '32-bit: a 3 GB archive from a 64-bit site' );
+		$this->assertSame( Manifest::INTEGER_TOO_LARGE_FOR_PLATFORM, Manifest::classify_integer( -2147483649.0, 4 ) );
+		$this->assertIsInt( Manifest::MAX_BYTES );
+		$this->assertLessThanOrEqual( PHP_INT_MAX, Manifest::MAX_BYTES );
+		if ( PHP_INT_SIZE < 8 ) {
+			try {
+				Manifest::from_json( str_replace( '"bytes": 2143233211', '"bytes": 3221225472', (string) file_get_contents( self::FIXTURES . '/valid/base.json' ) ) );
+				$this->fail( 'expected ManifestError' );
+			} catch ( ManifestError $e ) {
+				$this->assertSame( 'files.bytes', $e->field() );
+				$this->assertStringContainsString( '32-bit PHP', $e->getMessage() );
+			}
+		}
+	}
+
 	public function test_size_limits_are_enforced_by_both_sides(): void {
 		$base = json_decode( (string) file_get_contents( self::FIXTURES . '/valid/base.json' ), true );
 

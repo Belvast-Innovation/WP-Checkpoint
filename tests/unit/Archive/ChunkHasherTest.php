@@ -85,7 +85,10 @@ final class ChunkHasherTest extends TestCase {
 	/**
 	 * A 1 GiB sparse file: memory does not grow with the file, and the chunks
 	 * cover it without gaps or overlaps (feeding every chunk into one running
-	 * hash reproduces the whole-file hash).
+	 * hash reproduces the whole-file hash). About 8 seconds; exclude locally
+	 * with `composer test:unit -- --exclude-group slow`, CI runs it.
+	 *
+	 * @group slow
 	 */
 	public function test_one_gigabyte_file_is_hashed_in_constant_memory_and_the_chunks_cover_it(): void {
 		if ( 'Windows' === PHP_OS_FAMILY ) {

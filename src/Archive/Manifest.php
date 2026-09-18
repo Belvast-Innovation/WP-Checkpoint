@@ -30,18 +30,22 @@ namespace WPCheckpoint\Archive;
  */
 final class Manifest {
 
-	const FORMAT             = 'wpcheckpoint-archive';
-	const VERSIONS           = array( 1 );
-	const KINDS              = array( 'backup', 'checkpoint' );
-	const TRIGGERS           = array( 'manual', 'scheduled', 'pre_update', 'pre_replace', 'pre_rollback', 'pre_restore' );
-	const ALGORITHM          = 'sha256';
-	const DEFAULT_CHUNK      = 16777216;
-	const MIN_CHUNK          = 1048576;
-	const MAX_CHUNK          = 1073741824;
-	const MAX_JSON_BYTES     = 16777216;
-	const MAX_DEPTH          = 32;
-	const MAX_STRING         = 4096;
-	const MAX_BYTES          = 9007199254740991; // 2^53 - 1
+	const FORMAT         = 'wpcheckpoint-archive';
+	const VERSIONS       = array( 1 );
+	const KINDS          = array( 'backup', 'checkpoint' );
+	const TRIGGERS       = array( 'manual', 'scheduled', 'pre_update', 'pre_replace', 'pre_rollback', 'pre_restore' );
+	const ALGORITHM      = 'sha256';
+	const DEFAULT_CHUNK  = 16777216;
+	const MIN_CHUNK      = 1048576;
+	const MAX_CHUNK      = 1073741824;
+	const MAX_JSON_BYTES = 16777216;
+	const MAX_DEPTH      = 32;
+	const MAX_STRING     = 4096;
+	/**
+	 * Largest count or byte size accepted: 2^53 - 1 (exact in JSON) on 64-bit
+	 * PHP, PHP_INT_MAX on 32-bit PHP where that literal would be a float.
+	 */
+	const MAX_BYTES          = PHP_INT_SIZE >= 8 ? 9007199254740991 : PHP_INT_MAX;
 	const MAX_TABLES         = 10000;
 	const MAX_TABLE_CHUNKS   = 100000;
 	const MAX_VOLUMES        = 10000;
@@ -51,6 +55,10 @@ final class Manifest {
 	const MAX_CONTENT_GROUPS = 100;
 	const MAX_FEATURES       = 100;
 	const MAX_TABLE_NAME     = 64;
+
+	const INTEGER                        = 'integer';
+	const INTEGER_TOO_LARGE_FOR_PLATFORM = 'too_large_for_platform';
+	const NOT_AN_INTEGER                 = 'not_an_integer';
 
 	/**
 	 * Validated data in canonical key order.
@@ -405,13 +413,38 @@ final class Manifest {
 		if ( ! array_key_exists( $key, $data ) ) {
 			throw new ManifestError( $field, 'Missing.' );
 		}
-		if ( ! is_int( $data[ $key ] ) ) {
+		$kind = self::classify_integer( $data[ $key ] );
+		if ( self::INTEGER_TOO_LARGE_FOR_PLATFORM === $kind ) {
+			throw new ManifestError( $field, 'This value is larger than the 32-bit PHP on this server can handle; a 64-bit PHP is needed for an archive of this size.' );
+		}
+		if ( self::INTEGER !== $kind ) {
 			throw new ManifestError( $field, 'Not an integer.' );
 		}
 		if ( $data[ $key ] < $min || $data[ $key ] > $max ) {
 			throw new ManifestError( $field, sprintf( 'Out of range (%d to %d).', $min, $max ) );
 		}
 		return $data[ $key ];
+	}
+
+	/**
+	 * What a decoded JSON number is on this platform. json_decode() turns an
+	 * integer above PHP_INT_MAX into a float, so on 32-bit PHP a legitimate
+	 * manifest from a 64-bit site (a 3 GB archive) arrives with float sizes;
+	 * that is a platform limit, not a malformed manifest, and is reported as
+	 * such.
+	 *
+	 * @param mixed $value    Decoded value.
+	 * @param int   $int_size PHP_INT_SIZE of the platform (tests inject 4).
+	 * @return string INTEGER, INTEGER_TOO_LARGE_FOR_PLATFORM or NOT_AN_INTEGER.
+	 */
+	public static function classify_integer( $value, int $int_size = PHP_INT_SIZE ): string {
+		if ( is_int( $value ) ) {
+			return self::INTEGER;
+		}
+		if ( is_float( $value ) && $int_size < 8 && floor( $value ) === $value && abs( $value ) > 2147483647.0 ) {
+			return self::INTEGER_TOO_LARGE_FOR_PLATFORM;
+		}
+		return self::NOT_AN_INTEGER;
 	}
 
 	/**
