@@ -84,7 +84,9 @@ final class RunLoop {
 	public function run( int $id, bool $wait ): int {
 		$busy = 0;
 		while ( true ) {
-			$result = $this->actions->tick( $id, microtime( true ) );
+			// This loop is the follow-up: no self-request and no cron event per tick. When it stops before the
+			// job is finished, one follow-up hands the job back to the other drivers.
+			$result = $this->actions->tick( $id, microtime( true ), false );
 			$this->report( $result );
 
 			switch ( $result->status ) {
@@ -95,6 +97,7 @@ final class RunLoop {
 					++$busy;
 					if ( $busy > self::MAX_BUSY ) {
 						$this->say( 'Another driver holds this job; giving up after ' . self::MAX_BUSY . ' attempts.' );
+						$this->actions->follow_up( $result );
 						return self::EXIT_BUSY;
 					}
 					call_user_func( $this->sleep, max( 1, $result->retry_after ) );
@@ -104,17 +107,26 @@ final class RunLoop {
 					$busy = 0;
 					if ( ! $wait ) {
 						$this->say( 'The job is waiting (' . $result->retry_after . ' s). Run again with --wait to keep going.' );
+						$this->actions->follow_up( $result );
 						return self::EXIT_WAITING;
 					}
 					call_user_func( $this->sleep, max( 1, $result->retry_after ) );
 					continue 2;
 				case TickResult::COMPLETED:
-					return self::EXIT_COMPLETED;
 				case TickResult::FAILED:
-					return self::EXIT_FAILED;
-				case TickResult::LOST:
-					return null !== $result->job && Job::CANCELLED === $result->job->status ? self::EXIT_CANCELLED : self::EXIT_LOST;
 				case TickResult::FINISHED:
+				case TickResult::LOST:
+					// Terminal for this driver: the follow-up clears the job's cron event and token.
+					$this->actions->follow_up( $result );
+					if ( TickResult::COMPLETED === $result->status ) {
+						return self::EXIT_COMPLETED;
+					}
+					if ( TickResult::FAILED === $result->status ) {
+						return self::EXIT_FAILED;
+					}
+					if ( TickResult::LOST === $result->status ) {
+						return null !== $result->job && Job::CANCELLED === $result->job->status ? self::EXIT_CANCELLED : self::EXIT_LOST;
+					}
 					return $this->exit_code_for( $result->job );
 				case TickResult::MISSING:
 				default:

@@ -21,9 +21,14 @@ final class RunLoopTest extends JobTestCase {
 	/** @var string[] */
 	private $lines = array();
 
+	/** @var int */
+	private $hops = 0;
+
 	private function loop(): RunLoop {
 		$plugin  = Plugin::instance();
-		$actions = new JobActions( $plugin->jobs(), $plugin->runner(), new Loopback( false ) );
+		$actions = new JobActions( $plugin->jobs(), $plugin->runner(), new Loopback( true, function (): void {
+			++$this->hops;
+		} ) );
 		return new RunLoop(
 			$actions,
 			$plugin->job_presenter(),
@@ -99,6 +104,52 @@ final class RunLoopTest extends JobTestCase {
 		$this->assertCount( RunLoop::MAX_BUSY, $this->slept, 'sleeps after each refused attempt, gives up on the next' );
 		$this->assertSame( 5, $this->slept[0] );
 		$this->assertStringContainsString( 'Another driver holds this job', $this->lines[ count( $this->lines ) - 1 ] );
+	}
+
+	public function test_the_loop_never_starts_a_chain_or_a_cron_event_and_follows_up_once_when_it_stops_early(): void {
+		$http = 0;
+		add_filter( 'pre_http_request', static function () use ( &$http ) {
+			++$http;
+			return new \WP_Error( 'blocked', 'no self-requests during the CLI loop' );
+		} );
+		$runner = new \WPCheckpoint\Jobs\Runner( Plugin::instance()->jobs(), Plugin::instance()->job_types(), Plugin::instance()->redactor(), array( 'budget' => new \WPCheckpoint\Jobs\Budget( 0, 32 * 1048576, false ), 'memory_limit' => -1 ) );
+		$actions = new JobActions( Plugin::instance()->jobs(), $runner, new Loopback( true, function (): void {
+			++$this->hops;
+		} ) );
+		$loop = new RunLoop( $actions, Plugin::instance()->job_presenter(), function ( int $s ): void {
+			$this->slept[] = $s;
+		}, function ( string $l ): void {
+			$this->lines[] = $l;
+		} );
+
+		// Many "more" results in a row: no hop, no cron event.
+		$this->register( 'long', array( $this->counting_step( 'c', 8 ) ) );
+		$job = Plugin::instance()->jobs()->create( 'long' );
+		$this->assertSame( RunLoop::EXIT_COMPLETED, $loop->run( $job->id, false ) );
+		$this->assertSame( 0, $this->hops, 'the loop is its own follow-up' );
+		$this->assertSame( 0, $http );
+		$this->assertFalse( wp_next_scheduled( Loopback::HOOK, array( $job->id ) ) );
+
+		// Leaving on a wait without --wait: exactly one follow-up (the cron event) so other drivers take over.
+		$this->register( 'patient', array( new ClosureStep( 'w', static function ( JobContext $ctx ): StepResult {
+			return StepResult::wait( 30, $ctx->cursor(), 'remote busy' );
+		} ) ) );
+		$job = Plugin::instance()->jobs()->create( 'patient' );
+		$this->assertSame( RunLoop::EXIT_WAITING, $loop->run( $job->id, false ) );
+		$this->assertNotFalse( wp_next_scheduled( Loopback::HOOK, array( $job->id ) ), 'handed back through the cron event' );
+		$this->assertSame( 0, $this->hops );
+		$this->assertCount( 1, array_filter( _get_cron_array(), static function ( array $hooks ): bool {
+			return isset( $hooks[ Loopback::HOOK ] );
+		} ), 'one event' );
+
+		// Giving up on busy: one follow-up as well.
+		$this->register( 'plain', array( $this->counting_step( 'p', 1 ) ) );
+		$job  = Plugin::instance()->jobs()->create( 'plain' );
+		$held = Plugin::instance()->jobs()->acquire( $job->id, 100000 );
+		$this->assertSame( RunLoop::EXIT_BUSY, $loop->run( $job->id, true ) );
+		$this->assertNotFalse( wp_next_scheduled( Loopback::HOOK, array( $job->id ) ) );
+		$this->assertSame( 0, $this->hops );
+		remove_all_filters( 'pre_http_request' );
 	}
 
 	public function test_transient_failures_are_waited_out(): void {

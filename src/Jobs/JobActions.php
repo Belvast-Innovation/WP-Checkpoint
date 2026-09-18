@@ -99,9 +99,12 @@ final class JobActions {
 	 *
 	 * @param int        $id         Job id.
 	 * @param float|null $started_at Budget start (see started_at()).
+	 * @param bool       $follow_up  Whether to arrange the next tick (self-request or cron event). A driver
+	 *                               that keeps ticking itself (the WP-CLI loop) passes false and calls
+	 *                               follow_up() once when it stops before the job is finished.
 	 * @return TickResult
 	 */
-	public function tick( int $id, $started_at = null ): TickResult {
+	public function tick( int $id, $started_at = null, bool $follow_up = true ): TickResult {
 		Schema::ensure();
 		$this->repository->maintenance();
 		$result = $this->runner->tick( $id, null === $started_at ? self::started_at() : (float) $started_at );
@@ -109,8 +112,21 @@ final class JobActions {
 			// The cancel happened while this driver held the lock: the step has stopped now, so clean up here.
 			$this->runner->cleanup( $result->job );
 		}
-		$this->loopback->after_tick( $result );
+		if ( $follow_up ) {
+			$this->follow_up( $result );
+		}
 		return $result;
+	}
+
+	/**
+	 * Arrange the next tick for a result: a self-request for "more", a cron
+	 * event for waits, nothing (and a clean-up of both) for the rest.
+	 *
+	 * @param TickResult $result Tick result.
+	 * @return void
+	 */
+	public function follow_up( TickResult $result ): void {
+		$this->loopback->after_tick( $result );
 	}
 
 	/**
@@ -120,7 +136,10 @@ final class JobActions {
 	 * fenced write refuses (see tick()).
 	 *
 	 * @param int $id Job id.
-	 * @return array{job: Job, cleaned: bool}|null Null when the job does not exist.
+	 * @return array{job: Job, cleaned: bool, reason: string}|null Null when the job does not exist. reason: "cleaned",
+	 *                                                            "holder" (a driver holds the lock and cleans up when it
+	 *                                                            stops) or "unavailable" (the storage directory cannot be
+	 *                                                            used from here; nothing will clean up).
 	 * @throws InvalidTransition When the job is already finished.
 	 * @throws StaleJob When the job changed meanwhile.
 	 */
@@ -132,7 +151,7 @@ final class JobActions {
 		Loopback::unschedule( $id );
 		Loopback::revoke_tokens( $id );
 
-		$held = in_array( $job->status, array( Job::QUEUED, Job::RUNNING ), true ) ? $this->repository->acquire( $id ) : null;
+		$held = in_array( $job->status, array( Job::QUEUED, Job::RUNNING ), true ) ? $this->repository->acquire_for_cancel( $id ) : null;
 		if ( null !== $held ) {
 			$job = $held['job'];
 			$this->repository->transition( $job, Job::CANCELLED );
@@ -140,10 +159,12 @@ final class JobActions {
 			return array(
 				'job'     => $job,
 				'cleaned' => true,
+				'reason'  => 'cleaned',
 			);
 		}
 
 		$was_paused = Job::PAUSED === $job->status;
+		$holder     = $job->is_locked( $this->repository->now() );
 		$this->repository->transition( $job, Job::CANCELLED );
 		if ( $was_paused ) {
 			// A paused job holds no lock, so nobody is writing.
@@ -152,6 +173,7 @@ final class JobActions {
 		return array(
 			'job'     => $job,
 			'cleaned' => $was_paused,
+			'reason'  => $was_paused ? 'cleaned' : ( $holder ? 'holder' : 'unavailable' ),
 		);
 	}
 
