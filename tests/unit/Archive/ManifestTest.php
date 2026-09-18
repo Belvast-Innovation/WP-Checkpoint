@@ -74,6 +74,9 @@ final class ManifestTest extends TestCase {
 		$this->assertSame( 'backup', $manifest->kind() );
 		$this->assertSame( 'manual', $manifest->trigger() );
 		$this->assertSame( 'wp_posts', $manifest->tables()[0]['name'] );
+		$this->assertSame( 2, $manifest->tables()[0]['chunks'], 'a table summary carries the chunk count, not the chunk list' );
+		$this->assertSame( 'database.index.jsonl', $manifest->database_index()['path'] );
+		$this->assertSame( 'files.index.jsonl', $manifest->files_index()['path'] );
 		$this->assertCount( 2, $manifest->volumes() );
 		$this->assertArrayNotHasKey( 'chunks', $manifest->volumes()[1] );
 		$this->assertSame( array( 'Views were not exported.' ), $manifest->warnings() );
@@ -92,6 +95,20 @@ final class ManifestTest extends TestCase {
 		$this->expectException( ManifestError::class );
 		$this->expectExceptionMessage( 'larger than the maximum' );
 		Manifest::from_json( str_repeat( ' ', Manifest::MAX_JSON_BYTES + 1 ) );
+	}
+
+	public function test_a_manifest_of_ten_thousand_tables_fits_the_limit_and_the_memory_of_a_shared_host(): void {
+		$base = json_decode( (string) file_get_contents( self::FIXTURES . '/valid/base.json' ), true );
+		$base['database']['tables'] = array();
+		for ( $i = 0; $i < Manifest::MAX_TABLES; $i++ ) {
+			$base['database']['tables'][] = array( 'name' => 'wp_' . $i . '_options', 'rows' => $i, 'bytes' => $i * 1000, 'chunks' => 12, 'sha256' => hash( 'sha256', (string) $i ) );
+		}
+		$json = (string) json_encode( $base );
+		$this->assertLessThan( 2 * 1048576, strlen( $json ), 'the manifest grows with the number of tables only' );
+		$before   = memory_get_usage( true );
+		$manifest = Manifest::from_json( $json );
+		$this->assertLessThan( 32 * 1048576, memory_get_usage( true ) - $before, 'decoding and validating stay within the step memory budget' );
+		$this->assertCount( Manifest::MAX_TABLES, $manifest->tables() );
 	}
 
 	public function test_integers_beyond_a_32_bit_platform_are_reported_as_a_platform_limit(): void {

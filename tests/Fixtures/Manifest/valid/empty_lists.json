@@ -36,12 +36,21 @@
     "chunk_bytes": 16777216
   },
   "database": {
+    "index": {
+      "path": "database.index.jsonl",
+      "bytes": 0,
+      "sha256": "71812174732445a278ec1170a49881779638e0544874aa0559bd280d9486e0b3"
+    },
     "tables": []
   },
   "files": {
     "count": 18234,
     "bytes": 2143233211,
-    "index": "files.index.jsonl"
+    "index": {
+      "path": "files.index.jsonl",
+      "bytes": 0,
+      "sha256": "f11e0dade3b158e7bdeecbadbfcbd28ec9ff8dfcd051ec56ebb70edb5928ac6e"
+    }
   },
   "volumes": [],
   "encryption": null,

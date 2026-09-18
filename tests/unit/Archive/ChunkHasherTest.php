@@ -82,6 +82,43 @@ final class ChunkHasherTest extends TestCase {
 		ChunkHasher::hash_chunks( $this->dir . '/missing', 16 );
 	}
 
+	public function test_only_regular_local_files_are_hashed(): void {
+		foreach ( array( 'data:text/plain,hello', 'php://memory', $this->dir, 'http://localhost/x' ) as $path ) {
+			try {
+				ChunkHasher::hash_chunks( $path, 2 );
+				$this->fail( 'accepted: ' . $path );
+			} catch ( \RuntimeException $e ) {
+				$this->assertTrue( true );
+			}
+		}
+		$this->assertFalse( ChunkHasher::verify_chunk( 'data:text/plain,hello', 0, 2, hash( 'sha256', 'he' ) ) );
+	}
+
+	public function test_chunk_count_is_exact_beyond_two_to_the_fifty_three(): void {
+		$this->assertSame( 8589934593, ChunkHasher::chunk_count( 8589934592 * 1048576 + 1, 1048576 ), 'float division would undercount here' );
+		$this->assertSame( 8589934592, ChunkHasher::chunk_count( 8589934592 * 1048576, 1048576 ) );
+	}
+
+	public function test_a_file_that_grows_while_it_is_hashed_is_rejected(): void {
+		$path = $this->file( 'growing', random_bytes( 20 ) );
+		ChunkHasher::set_after_size_hook( static function ( string $p ): void {
+			file_put_contents( $p, 'more', FILE_APPEND );
+		} );
+		try {
+			foreach ( array( array( 'content_hash', $path, 16 ), array( 'hash_chunks', $path, 16 ), array( 'content_hash', $this->file( 'growing-small', random_bytes( 5 ) ), 16 ) ) as list( $method, $file, $chunk ) ) {
+				try {
+					ChunkHasher::$method( $file, $chunk );
+					$this->fail( $method . ': a hash must not be produced for a file whose size changed' );
+				} catch ( \RuntimeException $e ) {
+					$this->assertStringContainsString( 'changed size', $e->getMessage(), $method );
+				}
+			}
+		} finally {
+			ChunkHasher::set_after_size_hook( null );
+		}
+		$this->assertSame( hash_file( 'sha256', $path ), ChunkHasher::content_hash( $path, 64 )['sha256'], 'stable files hash normally' );
+	}
+
 	/**
 	 * A 1 GiB sparse file: memory does not grow with the file, and the chunks
 	 * cover it without gaps or overlaps (feeding every chunk into one running

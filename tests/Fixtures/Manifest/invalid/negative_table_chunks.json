@@ -52,7 +52,7 @@
         "name": "wp_posts",
         "rows": 12045,
         "bytes": 31864422,
-        "chunks": 2,
+        "chunks": -1,
         "sha256": "a7e850497d2e33cb3465a56de6b29759bf85c550d47c11b1c4672fb2d1556a7a"
       }
     ]
@@ -68,7 +68,7 @@
   },
   "volumes": [
     {
-      "path": "parts/a.wpcheckpoint.zip",
+      "path": "example-20260918-100000-a1b2.part001.wpcheckpoint.zip",
       "bytes": 33554433,
       "chunks": [
         "3bfc269594ef649228e9a74bab00f042efc91d5acc6fbee31a382e80d42388fe",

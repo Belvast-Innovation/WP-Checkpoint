@@ -2,70 +2,219 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://wpcheckpoint.com/schema/manifest-v1.json",
   "title": "WP Checkpoint archive manifest, format version 1",
-  "description": "Specification text for manifest.json. The plugin validates by hand (src/Archive/Manifest.php); this schema is kept in agreement with it by shared test fixtures. Unknown keys are ignored by readers; required_features lists features a reader must understand or reject the manifest.",
+  "description": "Specification text for manifest.json. The plugin validates by hand (src/Archive/Manifest.php); this schema is kept in agreement with it by shared test fixtures. Unknown keys are ignored by readers; required_features lists features a reader must understand or reject the manifest. Per-chunk records live in the database.index.jsonl and files.index.jsonl sidecars described by the index entries.",
   "type": "object",
-  "required": ["format", "format_version", "required_features", "kind", "trigger", "created_at", "generator", "site", "contents", "exclusions", "hashing", "database", "files", "volumes", "warnings"],
+  "required": [
+    "format",
+    "format_version",
+    "required_features",
+    "kind",
+    "trigger",
+    "created_at",
+    "generator",
+    "site",
+    "contents",
+    "exclusions",
+    "hashing",
+    "database",
+    "files",
+    "volumes",
+    "warnings"
+  ],
   "properties": {
-    "format": { "const": "wpcheckpoint-archive" },
-    "format_version": { "type": "integer", "enum": [1] },
-    "required_features": {
-      "type": "array", "maxItems": 100,
-      "items": { "type": "string", "pattern": "^[a-z0-9_.-]{1,64}$" }
+    "format": {
+      "const": "wpcheckpoint-archive"
     },
-    "kind": { "type": "string", "enum": ["backup", "checkpoint"] },
-    "trigger": { "type": "string", "enum": ["manual", "scheduled", "pre_update", "pre_replace", "pre_rollback", "pre_restore"] },
-    "created_at": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,6})?(Z|[+-][0-9]{2}:[0-9]{2})$" },
+    "format_version": {
+      "type": "integer",
+      "enum": [
+        1
+      ]
+    },
+    "required_features": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9_.-]{1,64}$"
+      }
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "backup",
+        "checkpoint"
+      ]
+    },
+    "trigger": {
+      "type": "string",
+      "enum": [
+        "manual",
+        "scheduled",
+        "pre_update",
+        "pre_replace",
+        "pre_rollback",
+        "pre_restore"
+      ]
+    },
+    "created_at": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,6})?(Z|[+-][0-9]{2}:[0-9]{2})$"
+    },
     "generator": {
-      "type": "object", "required": ["name", "version"],
-      "properties": { "name": { "$ref": "#/definitions/text" }, "version": { "$ref": "#/definitions/text" } }
+      "type": "object",
+      "required": [
+        "name",
+        "version"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/definitions/text"
+        },
+        "version": {
+          "$ref": "#/definitions/text"
+        }
+      }
     },
     "site": {
       "type": "object",
-      "required": ["home_url", "site_url", "abspath", "content_dir", "table_prefix", "wp_version", "php_version", "db_server", "multisite", "locale", "charset", "collate"],
+      "required": [
+        "home_url",
+        "site_url",
+        "abspath",
+        "content_dir",
+        "table_prefix",
+        "wp_version",
+        "php_version",
+        "db_server",
+        "multisite",
+        "locale",
+        "charset",
+        "collate"
+      ],
       "properties": {
-        "home_url": { "$ref": "#/definitions/text" }, "site_url": { "$ref": "#/definitions/text" },
-        "abspath": { "$ref": "#/definitions/text" }, "content_dir": { "$ref": "#/definitions/text" },
-        "table_prefix": { "$ref": "#/definitions/text" }, "wp_version": { "$ref": "#/definitions/text" },
-        "php_version": { "$ref": "#/definitions/text" }, "db_server": { "$ref": "#/definitions/text" },
-        "multisite": { "type": "boolean" },
-        "locale": { "$ref": "#/definitions/text" }, "charset": { "$ref": "#/definitions/text" }, "collate": { "$ref": "#/definitions/text" }
+        "home_url": {
+          "$ref": "#/definitions/text"
+        },
+        "site_url": {
+          "$ref": "#/definitions/text"
+        },
+        "abspath": {
+          "$ref": "#/definitions/text"
+        },
+        "content_dir": {
+          "$ref": "#/definitions/text"
+        },
+        "table_prefix": {
+          "$ref": "#/definitions/text"
+        },
+        "wp_version": {
+          "$ref": "#/definitions/text"
+        },
+        "php_version": {
+          "$ref": "#/definitions/text"
+        },
+        "db_server": {
+          "$ref": "#/definitions/text"
+        },
+        "locale": {
+          "$ref": "#/definitions/text"
+        },
+        "charset": {
+          "$ref": "#/definitions/text"
+        },
+        "collate": {
+          "$ref": "#/definitions/text"
+        },
+        "multisite": {
+          "type": "boolean"
+        }
       }
     },
     "contents": {
-      "type": "object", "required": ["database", "files"],
+      "type": "object",
+      "required": [
+        "database",
+        "files"
+      ],
       "properties": {
-        "database": { "type": "boolean" },
-        "files": { "type": "array", "maxItems": 100, "items": { "$ref": "#/definitions/text" } }
+        "database": {
+          "type": "boolean"
+        },
+        "files": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/definitions/text"
+          }
+        }
       }
     },
-    "exclusions": { "type": "array", "maxItems": 10000, "items": { "$ref": "#/definitions/text" } },
+    "exclusions": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": {
+        "$ref": "#/definitions/text"
+      }
+    },
     "hashing": {
-      "type": "object", "required": ["algorithm", "chunk_bytes"],
+      "type": "object",
+      "required": [
+        "algorithm",
+        "chunk_bytes"
+      ],
       "properties": {
-        "algorithm": { "const": "sha256" },
-        "chunk_bytes": { "type": "integer", "minimum": 1048576, "maximum": 1073741824 }
+        "algorithm": {
+          "const": "sha256"
+        },
+        "chunk_bytes": {
+          "type": "integer",
+          "minimum": 1048576,
+          "maximum": 1073741824
+        }
       }
     },
     "database": {
-      "type": "object", "required": ["tables"],
+      "type": "object",
+      "required": [
+        "index",
+        "tables"
+      ],
       "properties": {
+        "index": {
+          "$ref": "#/definitions/content_entry"
+        },
         "tables": {
-          "type": "array", "maxItems": 10000,
+          "type": "array",
+          "maxItems": 10000,
           "items": {
-            "type": "object", "required": ["name", "rows", "chunks"],
+            "type": "object",
+            "required": [
+              "name",
+              "rows",
+              "bytes",
+              "chunks",
+              "sha256"
+            ],
             "properties": {
-              "name": { "type": "string", "minLength": 1, "maxLength": 64 },
-              "rows": { "$ref": "#/definitions/count" },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "rows": {
+                "$ref": "#/definitions/count"
+              },
+              "bytes": {
+                "$ref": "#/definitions/count"
+              },
               "chunks": {
-                "type": "array", "maxItems": 100000,
-                "items": {
-                  "type": "object", "required": ["path", "bytes", "sha256"],
-                  "properties": {
-                    "path": { "$ref": "#/definitions/relative_path" },
-                    "bytes": { "$ref": "#/definitions/count" },
-                    "sha256": { "$ref": "#/definitions/sha256" }
-                  }
-                }
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100000
+              },
+              "sha256": {
+                "$ref": "#/definitions/sha256"
               }
             }
           }
@@ -73,32 +222,98 @@
       }
     },
     "files": {
-      "type": "object", "required": ["count", "bytes", "index"],
+      "type": "object",
+      "required": [
+        "count",
+        "bytes",
+        "index"
+      ],
       "properties": {
-        "count": { "$ref": "#/definitions/count" },
-        "bytes": { "$ref": "#/definitions/count" },
-        "index": { "$ref": "#/definitions/relative_path" }
-      }
-    },
-    "volumes": {
-      "type": "array", "maxItems": 10000,
-      "items": {
-        "type": "object", "required": ["path", "bytes", "sha256"],
-        "properties": {
-          "path": { "$ref": "#/definitions/relative_path" },
-          "bytes": { "$ref": "#/definitions/count" },
-          "chunks": { "type": "array", "maxItems": 65536, "items": { "$ref": "#/definitions/sha256" } },
-          "sha256": { "$ref": "#/definitions/sha256" }
+        "count": {
+          "$ref": "#/definitions/count"
+        },
+        "bytes": {
+          "$ref": "#/definitions/count"
+        },
+        "index": {
+          "$ref": "#/definitions/content_entry"
         }
       }
     },
-    "encryption": { "type": "null" },
-    "warnings": { "type": "array", "maxItems": 1000, "items": { "$ref": "#/definitions/text" } }
+    "volumes": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": {
+        "allOf": [
+          {
+            "$ref": "#/definitions/content_entry"
+          },
+          {
+            "properties": {
+              "path": {
+                "pattern": "\\.wpcheckpoint\\.(zip|tar)$"
+              }
+            }
+          }
+        ]
+      }
+    },
+    "encryption": {
+      "type": "null"
+    },
+    "warnings": {
+      "type": "array",
+      "maxItems": 1000,
+      "items": {
+        "$ref": "#/definitions/text"
+      }
+    }
   },
   "definitions": {
-    "text": { "type": "string", "maxLength": 4096 },
-    "count": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
-    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-    "relative_path": { "type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[^/\\\\][^\\\\]*$" }
+    "text": {
+      "type": "string",
+      "maxLength": 4096
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "relative_path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^(?![A-Za-z][A-Za-z0-9+.-]*:)[^/\\\\\\x00-\\x1f\\x7f][^\\\\\\x00-\\x1f\\x7f]*$"
+    },
+    "content_entry": {
+      "type": "object",
+      "required": [
+        "path",
+        "bytes",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/definitions/relative_path"
+        },
+        "bytes": {
+          "$ref": "#/definitions/count"
+        },
+        "chunks": {
+          "type": "array",
+          "maxItems": 65536,
+          "items": {
+            "$ref": "#/definitions/sha256"
+          }
+        },
+        "sha256": {
+          "$ref": "#/definitions/sha256"
+        }
+      }
+    }
   }
 }

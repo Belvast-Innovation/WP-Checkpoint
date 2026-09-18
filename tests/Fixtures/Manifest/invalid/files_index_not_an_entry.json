@@ -60,15 +60,11 @@
   "files": {
     "count": 18234,
     "bytes": 2143233211,
-    "index": {
-      "path": "files.index.jsonl",
-      "bytes": 1843201,
-      "sha256": "f11e0dade3b158e7bdeecbadbfcbd28ec9ff8dfcd051ec56ebb70edb5928ac6e"
-    }
+    "index": "files.index.jsonl"
   },
   "volumes": [
     {
-      "path": "parts/a.wpcheckpoint.zip",
+      "path": "example-20260918-100000-a1b2.part001.wpcheckpoint.zip",
       "bytes": 33554433,
       "chunks": [
         "3bfc269594ef649228e9a74bab00f042efc91d5acc6fbee31a382e80d42388fe",

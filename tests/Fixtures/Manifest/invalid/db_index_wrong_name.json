@@ -43,7 +43,7 @@
   },
   "database": {
     "index": {
-      "path": "database.index.jsonl",
+      "path": "database/index.jsonl",
       "bytes": 84213,
       "sha256": "71812174732445a278ec1170a49881779638e0544874aa0559bd280d9486e0b3"
     },
@@ -68,7 +68,7 @@
   },
   "volumes": [
     {
-      "path": "parts/a.wpcheckpoint.zip",
+      "path": "example-20260918-100000-a1b2.part001.wpcheckpoint.zip",
       "bytes": 33554433,
       "chunks": [
         "3bfc269594ef649228e9a74bab00f042efc91d5acc6fbee31a382e80d42388fe",

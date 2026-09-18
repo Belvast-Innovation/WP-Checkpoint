@@ -39,37 +39,48 @@
   ],
   "hashing": {
     "algorithm": "sha256",
-    "chunk_bytes": 1048576
+    "chunk_bytes": 16777216
   },
   "database": {
+    "index": {
+      "path": "database.index.jsonl",
+      "bytes": 16777217,
+      "sha256": "71812174732445a278ec1170a49881779638e0544874aa0559bd280d9486e0b3"
+    },
     "tables": [
       {
         "name": "wp_posts",
         "rows": 12045,
-        "chunks": [
-          {
-            "path": "database/wp_posts.0001.sql",
-            "bytes": 1048576,
-            "sha256": "d0f631ca1ddba8db3bcfcb9e057cdc98d0379f1bee00e75a545147a27dadd982"
-          }
-        ]
+        "bytes": 31864422,
+        "chunks": 2,
+        "sha256": "a7e850497d2e33cb3465a56de6b29759bf85c550d47c11b1c4672fb2d1556a7a"
       }
     ]
   },
   "files": {
     "count": 18234,
     "bytes": 2143233211,
-    "index": "files.index.jsonl"
+    "index": {
+      "path": "files.index.jsonl",
+      "bytes": 1843201,
+      "sha256": "f11e0dade3b158e7bdeecbadbfcbd28ec9ff8dfcd051ec56ebb70edb5928ac6e"
+    }
   },
   "volumes": [
     {
-      "path": "v.zip",
-      "bytes": 1048577,
+      "path": "example-20260918-100000-a1b2.part001.wpcheckpoint.zip",
+      "bytes": 33554433,
       "chunks": [
-        "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
-        "d4735e3a265e16eee03f59718b9b5d03019c07d8b6c51f90da3a666eec13ab35"
+        "3bfc269594ef649228e9a74bab00f042efc91d5acc6fbee31a382e80d42388fe",
+        "fb04dcb6970e4c3d1873de51fd5a50d7bb46b3383113602665c350ec40b5f990",
+        "e0d2747b9ab7abb6eb65e0373fa1b428a28bd6d8a2380106dcc080f58005ee14"
       ],
-      "sha256": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881"
+      "sha256": "81a7ef8824e9fc64ca81b84cd95ea5094fbd31e6637304d0706d6d7f757f586e"
+    },
+    {
+      "path": "example-20260918-100000-a1b2.part002.wpcheckpoint.tar",
+      "bytes": 4096,
+      "sha256": "81db8ebbbbc69c6c6ad4a6aa92b76e0c08af547da236b9e2c9dbe1d8285a8130"
     }
   ],
   "encryption": null,

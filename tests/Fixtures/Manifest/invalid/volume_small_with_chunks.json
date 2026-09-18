@@ -42,24 +42,29 @@
     "chunk_bytes": 16777216
   },
   "database": {
+    "index": {
+      "path": "database.index.jsonl",
+      "bytes": 84213,
+      "sha256": "71812174732445a278ec1170a49881779638e0544874aa0559bd280d9486e0b3"
+    },
     "tables": [
       {
         "name": "wp_posts",
         "rows": 12045,
-        "chunks": [
-          {
-            "path": "database/wp_posts.0001.sql",
-            "bytes": 15932211,
-            "sha256": "d0f631ca1ddba8db3bcfcb9e057cdc98d0379f1bee00e75a545147a27dadd982"
-          }
-        ]
+        "bytes": 31864422,
+        "chunks": 2,
+        "sha256": "a7e850497d2e33cb3465a56de6b29759bf85c550d47c11b1c4672fb2d1556a7a"
       }
     ]
   },
   "files": {
     "count": 18234,
     "bytes": 2143233211,
-    "index": "files.index.jsonl"
+    "index": {
+      "path": "files.index.jsonl",
+      "bytes": 1843201,
+      "sha256": "f11e0dade3b158e7bdeecbadbfcbd28ec9ff8dfcd051ec56ebb70edb5928ac6e"
+    }
   },
   "volumes": [
     {
@@ -73,7 +78,7 @@
       "sha256": "81a7ef8824e9fc64ca81b84cd95ea5094fbd31e6637304d0706d6d7f757f586e"
     },
     {
-      "path": "example-20260918-100000-a1b2.part002.wpcheckpoint.zip",
+      "path": "example-20260918-100000-a1b2.part002.wpcheckpoint.tar",
       "bytes": 4096,
       "sha256": "81db8ebbbbc69c6c6ad4a6aa92b76e0c08af547da236b9e2c9dbe1d8285a8130",
       "chunks": [

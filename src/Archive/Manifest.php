@@ -7,7 +7,7 @@
 
 namespace WPCheckpoint\Archive;
 
-// phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- ManifestError messages carry field paths and are never printed as HTML; anything shown to a user goes through JobPresenter::clean() and esc_html().
+// phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- ManifestError messages carry field paths, never HTML. There is no caller yet; the tasks that show them to a user are responsible for routing them through JobPresenter::clean() and esc_html().
 
 /**
  * Reads and writes manifest.json of format version 1.
@@ -22,6 +22,13 @@ namespace WPCheckpoint\Archive;
  * ignored for forward compatibility within a format version). The schema
  * file schema/manifest-v1.json is the specification text and the test
  * fixtures keep both in agreement.
+ *
+ * The manifest holds one summary line per table; the per-chunk records
+ * live in the database.index.jsonl sidecar (described by an entry with its
+ * own hash), so the document grows with the number of tables only and a
+ * 4 MB limit is enough for any site while json_decode() stays within the
+ * memory of a shared host. The document is decoded once, as objects, so a
+ * JSON object and a JSON array stay distinguishable.
  *
  * A valid manifest proves nothing about the archive beyond its own
  * structure: checksums detect corruption, not tampering, and every path,
@@ -38,7 +45,7 @@ final class Manifest {
 	const DEFAULT_CHUNK  = 16777216;
 	const MIN_CHUNK      = 1048576;
 	const MAX_CHUNK      = 1073741824;
-	const MAX_JSON_BYTES = 16777216;
+	const MAX_JSON_BYTES = 4194304;
 	const MAX_DEPTH      = 32;
 	const MAX_STRING     = 4096;
 	/**
@@ -48,6 +55,8 @@ final class Manifest {
 	const MAX_BYTES          = PHP_INT_SIZE >= 8 ? 9007199254740991 : PHP_INT_MAX;
 	const MAX_TABLES         = 10000;
 	const MAX_TABLE_CHUNKS   = 100000;
+	const DATABASE_INDEX     = 'database.index.jsonl';
+	const FILES_INDEX        = 'files.index.jsonl';
 	const MAX_VOLUMES        = 10000;
 	const MAX_VOLUME_CHUNKS  = 65536;
 	const MAX_WARNINGS       = 1000;
@@ -68,7 +77,7 @@ final class Manifest {
 	private $data;
 
 	/**
-	 * Use from_json() or from_array().
+	 * Use from_json() or from_object().
 	 *
 	 * @param array<string, mixed> $data Validated data.
 	 */
@@ -96,26 +105,28 @@ final class Manifest {
 	 */
 	public static function from_json( string $json ): Manifest {
 		if ( strlen( $json ) > self::MAX_JSON_BYTES ) {
-			throw new ManifestError( '', 'The manifest is larger than the maximum of 16 MB.' );
+			throw new ManifestError( '', 'The manifest is larger than the maximum of 4 MB.' );
 		}
-		// Decoded as objects first: "[]" and "{}" both become an empty PHP array otherwise.
+		// Decoded once, as objects: a JSON object is a stdClass and a JSON array a PHP array, so
+		// the two stay distinguishable and no second tree is built.
 		$object = json_decode( $json, false, self::MAX_DEPTH );
-		if ( ! is_object( $object ) || JSON_ERROR_NONE !== json_last_error() ) {
+		if ( ! $object instanceof \stdClass || JSON_ERROR_NONE !== json_last_error() ) {
 			throw new ManifestError( '', 'The manifest is not a JSON object.' );
 		}
-		$decoded = json_decode( $json, true, self::MAX_DEPTH );
-		return self::from_array( is_array( $decoded ) ? $decoded : array() );
+		return self::from_object( $object );
 	}
 
 	/**
-	 * Validate decoded data.
+	 * Validate a decoded document.
 	 *
-	 * @param array<string, mixed> $data Decoded JSON object.
+	 * @param \stdClass $document Decoded JSON object (nested objects are stdClass, arrays are PHP arrays).
 	 * @return Manifest
 	 * @throws ManifestError When the data is not an acceptable manifest.
 	 */
-	public static function from_array( array $data ): Manifest {
-		$out = array();
+	public static function from_object( \stdClass $document ): Manifest {
+		$data  = (array) $document;
+		$out   = array();
+		$paths = array();
 
 		$out['format'] = self::string_field( $data, 'format', '' );
 		if ( self::FORMAT !== $out['format'] ) {
@@ -175,97 +186,48 @@ final class Manifest {
 		);
 
 		$database        = self::object_field( $data, 'database', '' );
-		$tables          = self::list_field( $database, 'tables', 'database', self::MAX_TABLES );
-		$out['database'] = array( 'tables' => array() );
+		$out['database'] = array(
+			'index'  => self::content_entry( self::object_field( $database, 'index', 'database' ), 'database.index', $chunk_bytes, $paths, self::DATABASE_INDEX ),
+			'tables' => array(),
+		);
 		$seen_tables     = array();
-		foreach ( $tables as $i => $table ) {
+		foreach ( self::list_field( $database, 'tables', 'database', self::MAX_TABLES ) as $i => $table ) {
 			$field = "database.tables[{$i}]";
-			if ( ! is_array( $table ) ) {
-				throw new ManifestError( $field, 'Not an object.' );
-			}
-			$name = self::string_field( $table, 'name', $field, self::MAX_TABLE_NAME );
+			$table = self::object_item( $table, $field );
+			$name  = self::string_field( $table, 'name', $field, self::MAX_TABLE_NAME );
 			if ( '' === $name || 1 === preg_match( '/[\x00-\x1F\x7F]/', $name ) ) {
 				throw new ManifestError( "{$field}.name", 'Invalid table name.' );
 			}
 			if ( isset( $seen_tables[ $name ] ) ) {
 				throw new ManifestError( "{$field}.name", 'Duplicate table.' );
 			}
-			$seen_tables[ $name ] = true;
-			$entry                = array(
+			$seen_tables[ $name ]        = true;
+			$out['database']['tables'][] = array(
 				'name'   => $name,
 				'rows'   => self::int_field( $table, 'rows', $field, 0, self::MAX_BYTES ),
-				'chunks' => array(),
+				'bytes'  => self::int_field( $table, 'bytes', $field, 0, self::MAX_BYTES ),
+				'chunks' => self::int_field( $table, 'chunks', $field, 0, self::MAX_TABLE_CHUNKS ),
+				'sha256' => self::hash_field( $table, 'sha256', $field ),
 			);
-			foreach ( self::list_field( $table, 'chunks', $field, self::MAX_TABLE_CHUNKS ) as $j => $chunk ) {
-				$cfield = "{$field}.chunks[{$j}]";
-				if ( ! is_array( $chunk ) ) {
-					throw new ManifestError( $cfield, 'Not an object.' );
-				}
-				$path = self::relative_path( $chunk, 'path', $cfield );
-				if ( 0 !== strpos( $path, 'database/' ) ) {
-					throw new ManifestError( "{$cfield}.path", 'Database chunks live under database/.' );
-				}
-				$bytes = self::int_field( $chunk, 'bytes', $cfield, 0, self::MAX_BYTES );
-				if ( $bytes > $chunk_bytes ) {
-					throw new ManifestError( "{$cfield}.bytes", 'A database chunk file is at most chunk_bytes.' );
-				}
-				if ( array_key_exists( 'chunks', $chunk ) ) {
-					throw new ManifestError( "{$cfield}.chunks", 'A database chunk file has no chunk list.' );
-				}
-				$entry['chunks'][] = array(
-					'path'   => $path,
-					'bytes'  => $bytes,
-					'sha256' => self::hash_field( $chunk, 'sha256', $cfield ),
-				);
-			}
-			$out['database']['tables'][] = $entry;
 		}
 
 		$files        = self::object_field( $data, 'files', '' );
-		$index        = self::relative_path( $files, 'index', 'files' );
 		$out['files'] = array(
 			'count' => self::int_field( $files, 'count', 'files', 0, self::MAX_BYTES ),
 			'bytes' => self::int_field( $files, 'bytes', 'files', 0, self::MAX_BYTES ),
-			'index' => $index,
+			'index' => self::content_entry( self::object_field( $files, 'index', 'files' ), 'files.index', $chunk_bytes, $paths, self::FILES_INDEX ),
 		);
 
 		$out['volumes'] = array();
-		$seen_volumes   = array();
 		foreach ( self::list_field( $data, 'volumes', '', self::MAX_VOLUMES ) as $i => $volume ) {
 			$field = "volumes[{$i}]";
-			if ( ! is_array( $volume ) ) {
-				throw new ManifestError( $field, 'Not an object.' );
-			}
-			$path = self::relative_path( $volume, 'path', $field );
-			if ( false !== strpos( $path, '/' ) ) {
+			$entry = self::content_entry( self::object_item( $volume, $field ), $field, $chunk_bytes, $paths );
+			if ( false !== strpos( $entry['path'], '/' ) ) {
 				throw new ManifestError( "{$field}.path", 'A volume path is a file name without directories.' );
 			}
-			if ( isset( $seen_volumes[ $path ] ) ) {
-				throw new ManifestError( "{$field}.path", 'Duplicate volume.' );
+			if ( 1 !== preg_match( '/\.wpcheckpoint\.(zip|tar)\z/', $entry['path'] ) ) {
+				throw new ManifestError( "{$field}.path", 'A volume is named *.wpcheckpoint.zip or *.wpcheckpoint.tar.' );
 			}
-			$seen_volumes[ $path ] = true;
-			$bytes                 = self::int_field( $volume, 'bytes', $field, 0, self::MAX_BYTES );
-			$entry                 = array(
-				'path'  => $path,
-				'bytes' => $bytes,
-			);
-			$expected_chunks       = $bytes > $chunk_bytes ? ChunkHasher::chunk_count( $bytes, $chunk_bytes ) : 0;
-			if ( $expected_chunks > 0 ) {
-				if ( ! array_key_exists( 'chunks', $volume ) ) {
-					throw new ManifestError( "{$field}.chunks", 'Content larger than chunk_bytes must carry its chunk hashes.' );
-				}
-				$chunks = self::list_field( $volume, 'chunks', $field, self::MAX_VOLUME_CHUNKS );
-				if ( count( $chunks ) !== $expected_chunks ) {
-					throw new ManifestError( "{$field}.chunks", sprintf( 'Expected %d chunk hashes for %d bytes, found %d.', $expected_chunks, $bytes, count( $chunks ) ) );
-				}
-				$entry['chunks'] = array();
-				foreach ( $chunks as $j => $hash ) {
-					$entry['chunks'][] = self::hash_value( $hash, "{$field}.chunks[{$j}]" );
-				}
-			} elseif ( array_key_exists( 'chunks', $volume ) ) {
-				throw new ManifestError( "{$field}.chunks", 'Content of at most chunk_bytes has no chunk list.' );
-			}
-			$entry['sha256']  = self::hash_field( $volume, 'sha256', $field );
 			$out['volumes'][] = $entry;
 		}
 
@@ -335,9 +297,9 @@ final class Manifest {
 	}
 
 	/**
-	 * Tables with their chunk files.
+	 * Table summaries (the per-chunk records are in the database index sidecar).
 	 *
-	 * @return array<int, array{name: string, rows: int, chunks: array<int, array{path: string, bytes: int, sha256: string}>}>
+	 * @return array<int, array{name: string, rows: int, bytes: int, chunks: int, sha256: string}>
 	 */
 	public function tables(): array {
 		return $this->data['database']['tables'];
@@ -350,6 +312,86 @@ final class Manifest {
 	 */
 	public function volumes(): array {
 		return $this->data['volumes'];
+	}
+
+	/**
+	 * The database index sidecar entry.
+	 *
+	 * @return array{path: string, bytes: int, chunks?: string[], sha256: string}
+	 */
+	public function database_index(): array {
+		return $this->data['database']['index'];
+	}
+
+	/**
+	 * The files index sidecar entry.
+	 *
+	 * @return array{path: string, bytes: int, chunks?: string[], sha256: string}
+	 */
+	public function files_index(): array {
+		return $this->data['files']['index'];
+	}
+
+	/**
+	 * A content entry (a volume or an index file): path, bytes, sha256 and,
+	 * exactly when bytes > chunk_bytes, the chunk hash list. Paths are unique
+	 * across the whole manifest.
+	 *
+	 * @param array<string, mixed> $entry       Decoded entry.
+	 * @param string               $field       Field path of the entry.
+	 * @param int                  $chunk_bytes Chunk size.
+	 * @param array<string, bool>  $paths       Paths seen so far (updated).
+	 * @param string|null          $fixed_name  When set, the path must be exactly this name.
+	 * @return array{path: string, bytes: int, chunks?: string[], sha256: string}
+	 * @throws ManifestError When the entry is invalid.
+	 */
+	private static function content_entry( array $entry, string $field, int $chunk_bytes, array &$paths, $fixed_name = null ): array {
+		$path = self::relative_path( $entry, 'path', $field );
+		if ( null !== $fixed_name && $path !== $fixed_name ) {
+			throw new ManifestError( "{$field}.path", sprintf( 'Expected "%s".', $fixed_name ) );
+		}
+		if ( isset( $paths[ $path ] ) ) {
+			throw new ManifestError( "{$field}.path", 'Duplicate path.' );
+		}
+		$paths[ $path ] = true;
+		$bytes          = self::int_field( $entry, 'bytes', $field, 0, self::MAX_BYTES );
+		$out            = array(
+			'path'  => $path,
+			'bytes' => $bytes,
+		);
+		$expected       = $bytes > $chunk_bytes ? ChunkHasher::chunk_count( $bytes, $chunk_bytes ) : 0;
+		if ( $expected > 0 ) {
+			if ( ! array_key_exists( 'chunks', $entry ) ) {
+				throw new ManifestError( "{$field}.chunks", 'Content larger than chunk_bytes must carry its chunk hashes.' );
+			}
+			$chunks = self::list_field( $entry, 'chunks', $field, self::MAX_VOLUME_CHUNKS );
+			if ( count( $chunks ) !== $expected ) {
+				throw new ManifestError( "{$field}.chunks", sprintf( 'Expected %d chunk hashes for %d bytes, found %d.', $expected, $bytes, count( $chunks ) ) );
+			}
+			$out['chunks'] = array();
+			foreach ( $chunks as $j => $hash ) {
+				$out['chunks'][] = self::hash_value( $hash, "{$field}.chunks[{$j}]" );
+			}
+		} elseif ( array_key_exists( 'chunks', $entry ) ) {
+			throw new ManifestError( "{$field}.chunks", 'Content of at most chunk_bytes has no chunk list.' );
+		}
+		$out['sha256'] = self::hash_field( $entry, 'sha256', $field );
+		return $out;
+	}
+
+	/**
+	 * A list item that must be a JSON object.
+	 *
+	 * @param mixed  $item  Decoded item.
+	 * @param string $field Field path of the item.
+	 * @return array<string, mixed>
+	 * @throws ManifestError When the item is not an object.
+	 */
+	private static function object_item( $item, string $field ): array {
+		if ( ! $item instanceof \stdClass ) {
+			throw new ManifestError( $field, 'Not an object.' );
+		}
+		return (array) $item;
 	}
 
 	/**
@@ -499,10 +541,10 @@ final class Manifest {
 		if ( ! array_key_exists( $key, $data ) ) {
 			throw new ManifestError( $field, 'Missing.' );
 		}
-		if ( ! is_array( $data[ $key ] ) || ( array() !== $data[ $key ] && array_keys( $data[ $key ] ) === range( 0, count( $data[ $key ] ) - 1 ) ) ) {
+		if ( ! $data[ $key ] instanceof \stdClass ) {
 			throw new ManifestError( $field, 'Not an object.' );
 		}
-		return $data[ $key ];
+		return (array) $data[ $key ];
 	}
 
 	/**
@@ -521,13 +563,14 @@ final class Manifest {
 			throw new ManifestError( $field, 'Missing.' );
 		}
 		$value = $data[ $key ];
-		if ( ! is_array( $value ) || ( array() !== $value && array_keys( $value ) !== range( 0, count( $value ) - 1 ) ) ) {
+		if ( ! is_array( $value ) ) {
+			// Decoded as objects, only a JSON array is a PHP array here; a JSON object is a stdClass.
 			throw new ManifestError( $field, 'Not a list.' );
 		}
 		if ( count( $value ) > $max ) {
 			throw new ManifestError( $field, sprintf( 'More than %d entries.', $max ) );
 		}
-		return $value;
+		return array_values( $value );
 	}
 
 	/**
@@ -597,10 +640,18 @@ final class Manifest {
 	private static function relative_path( array $data, string $key, string $prefix ): string {
 		$field = self::path( $prefix, $key );
 		$value = self::string_field( $data, $key, $prefix );
-		if ( '' === $value || false !== strpos( $value, '\\' ) || '/' === $value[0] || 1 === preg_match( '/\A[A-Za-z]:/', $value ) ) {
+		if ( '' === $value || false !== strpos( $value, '\\' ) || '/' === $value[0] ) {
 			throw new ManifestError( $field, 'Not a relative path with forward slashes.' );
 		}
-		foreach ( explode( '/', $value ) as $segment ) {
+		if ( 1 === preg_match( '/[\x00-\x1F\x7F]/', $value ) ) {
+			throw new ManifestError( $field, 'Path contains a control character.' );
+		}
+		$segments = explode( '/', $value );
+		// A first segment shaped like a scheme or a drive letter ("C:", "data:", "php:") is not a relative path.
+		if ( 1 === preg_match( '/\A[A-Za-z][A-Za-z0-9+.-]*:/', $segments[0] ) ) {
+			throw new ManifestError( $field, 'Not a relative path with forward slashes.' );
+		}
+		foreach ( $segments as $segment ) {
 			if ( '' === $segment || '.' === $segment || '..' === $segment ) {
 				throw new ManifestError( $field, 'Path contains an empty, "." or ".." segment.' );
 			}

@@ -36,7 +36,8 @@ final class ChunkHasher {
 		if ( $bytes <= 0 || $chunk_bytes <= 0 ) {
 			return 0;
 		}
-		return (int) ceil( $bytes / $chunk_bytes );
+		// Integer arithmetic: a float division loses precision above 2^53 and undercounts.
+		return intdiv( $bytes - 1, $chunk_bytes ) + 1;
 	}
 
 	/**
@@ -79,11 +80,13 @@ final class ChunkHasher {
 		}
 		$handle = self::open( $path );
 		try {
-			$size   = self::size( $handle );
+			$size = self::size( $handle );
+			self::after_size( $path );
 			$hashes = array();
 			for ( $start = 0; $start < $size; $start += $chunk_bytes ) {
 				$hashes[] = self::hash_range( $handle, $start, min( $chunk_bytes, $size - $start ) );
 			}
+			self::assert_unchanged( $handle, $size );
 			return $hashes;
 		} finally {
 			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- stream read.
@@ -125,25 +128,85 @@ final class ChunkHasher {
 	 * @throws \RuntimeException When the file cannot be read.
 	 */
 	public static function content_hash( string $path, int $chunk_bytes ): array {
+		if ( $chunk_bytes <= 0 ) {
+			throw new \RuntimeException( 'Invalid chunk size.' );
+		}
+		// One handle for the size and the bytes, and a second look at the size afterwards: a file that
+		// is still being written (a process whose lease expired but which is still alive) must not
+		// yield a manifest whose bytes and hash do not belong together.
 		$handle = self::open( $path );
 		try {
 			$size = self::size( $handle );
+			self::after_size( $path );
+			if ( $size <= $chunk_bytes ) {
+				$result = array(
+					'bytes'  => $size,
+					'sha256' => self::hash_range( $handle, 0, $size ),
+					'chunks' => null,
+				);
+			} else {
+				$chunks = array();
+				for ( $start = 0; $start < $size; $start += $chunk_bytes ) {
+					$chunks[] = self::hash_range( $handle, $start, min( $chunk_bytes, $size - $start ) );
+				}
+				$result = array(
+					'bytes'  => $size,
+					'sha256' => self::list_hash( $chunks ),
+					'chunks' => $chunks,
+				);
+			}
+			self::assert_unchanged( $handle, $size );
+			return $result;
 		} finally {
 			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- stream read.
 		}
-		if ( $size <= $chunk_bytes ) {
-			return array(
-				'bytes'  => $size,
-				'sha256' => self::hash_file( $path ),
-				'chunks' => null,
-			);
+	}
+
+	/**
+	 * Test seam: called right after a size was read, before the bytes are
+	 * hashed (a test appends to the file here to simulate a concurrent writer).
+	 *
+	 * @internal
+	 * @var callable|null
+	 */
+	private static $after_size_hook = null;
+
+	/**
+	 * Install or clear the test seam.
+	 *
+	 * @internal
+	 * @param callable|null $hook function( string $path ): void.
+	 * @return void
+	 */
+	public static function set_after_size_hook( $hook ): void {
+		self::$after_size_hook = is_callable( $hook ) ? $hook : null;
+	}
+
+	/**
+	 * Run the test seam.
+	 *
+	 * @param string $path File.
+	 * @return void
+	 */
+	private static function after_size( string $path ): void {
+		if ( null !== self::$after_size_hook ) {
+			call_user_func( self::$after_size_hook, $path );
 		}
-		$chunks = self::hash_chunks( $path, $chunk_bytes );
-		return array(
-			'bytes'  => $size,
-			'sha256' => self::list_hash( $chunks ),
-			'chunks' => $chunks,
-		);
+	}
+
+	/**
+	 * The file must still have the size that was hashed.
+	 *
+	 * @param resource $handle Handle.
+	 * @param int      $size   Size at the start.
+	 * @return void
+	 * @throws \RuntimeException When the file changed size meanwhile.
+	 */
+	private static function assert_unchanged( $handle, int $size ): void {
+		clearstatcache();
+		if ( self::size( $handle ) !== $size ) {
+			throw new \RuntimeException( 'The file changed size while it was being hashed.' );
+		}
 	}
 
 	/**
@@ -174,6 +237,15 @@ final class ChunkHasher {
 		$handle = '' === $path ? false : @fopen( $path, 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- stream read; failure is thrown.
 		if ( false === $handle ) {
 			throw new \RuntimeException( 'The file could not be opened for reading.' );
+		}
+		// Regular files on the local file system only: no stream wrappers (data:, php:, phar:), no
+		// directories, no FIFOs. Callers always join a directory to a validated relative path, so a
+		// wrapper prefix cannot reach here in practice; this is the second line of defence.
+		$meta  = stream_get_meta_data( $handle );
+		$stats = fstat( $handle );
+		if ( 'plainfile' !== $meta['wrapper_type'] || ! is_array( $stats ) || ! isset( $stats['mode'] ) || 0100000 !== ( $stats['mode'] & 0170000 ) ) {
+			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- see above.
+			throw new \RuntimeException( 'Not a regular file.' );
 		}
 		return $handle;
 	}

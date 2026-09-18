@@ -47,7 +47,11 @@
   "files": {
     "count": 18234,
     "bytes": 2143233211,
-    "index": "files.index.jsonl"
+    "index": {
+      "path": "files.index.jsonl",
+      "bytes": 1843201,
+      "sha256": "f11e0dade3b158e7bdeecbadbfcbd28ec9ff8dfcd051ec56ebb70edb5928ac6e"
+    }
   },
   "volumes": [
     {
@@ -61,7 +65,7 @@
       "sha256": "81a7ef8824e9fc64ca81b84cd95ea5094fbd31e6637304d0706d6d7f757f586e"
     },
     {
-      "path": "example-20260918-100000-a1b2.part002.wpcheckpoint.zip",
+      "path": "example-20260918-100000-a1b2.part002.wpcheckpoint.tar",
       "bytes": 4096,
       "sha256": "81db8ebbbbc69c6c6ad4a6aa92b76e0c08af547da236b9e2c9dbe1d8285a8130"
     }
