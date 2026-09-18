@@ -661,23 +661,11 @@ final class Manifest {
 	 * @throws ManifestError When the value could escape the archive.
 	 */
 	private static function relative_path( array $data, string $key, string $prefix ): string {
-		$field = self::path( $prefix, $key );
-		$value = self::string_field( $data, $key, $prefix );
-		if ( '' === $value || false !== strpos( $value, '\\' ) || '/' === $value[0] ) {
-			throw new ManifestError( $field, 'Not a relative path with forward slashes.' );
-		}
-		if ( 1 === preg_match( '/[\x00-\x1F\x7F]/', $value ) ) {
-			throw new ManifestError( $field, 'Path contains a control character.' );
-		}
-		$segments = explode( '/', $value );
-		// A first segment shaped like a scheme or a drive letter ("C:", "data:", "php:") is not a relative path.
-		if ( 1 === preg_match( '/\A[A-Za-z][A-Za-z0-9+.-]*:/', $segments[0] ) ) {
-			throw new ManifestError( $field, 'Not a relative path with forward slashes.' );
-		}
-		foreach ( $segments as $segment ) {
-			if ( '' === $segment || '.' === $segment || '..' === $segment ) {
-				throw new ManifestError( $field, 'Path contains an empty, "." or ".." segment.' );
-			}
+		$field   = self::path( $prefix, $key );
+		$value   = self::string_field( $data, $key, $prefix );
+		$problem = EntryPath::problem( $value );
+		if ( null !== $problem ) {
+			throw new ManifestError( $field, $problem );
 		}
 		return $value;
 	}
