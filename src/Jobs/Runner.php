@@ -361,8 +361,9 @@ final class Runner {
 	 * after a job was cancelled. Best effort: each step's failure is logged.
 	 *
 	 * Only for cancelled jobs. A failed job is never cleaned up: it keeps its
-	 * cursor and its temporary files for a retry, and the storage purge
-	 * reclaims them together with the job row.
+	 * cursor and its temporary files for a retry. Nothing reclaims those
+	 * files yet (the purge only removes the lock file and the log); T013
+	 * adds the per-job work directory that the purge and the reaper remove.
 	 *
 	 * @param Job $job Cancelled job.
 	 * @return int Steps cleaned.

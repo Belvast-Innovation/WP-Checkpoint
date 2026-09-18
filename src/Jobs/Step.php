@@ -54,8 +54,9 @@ interface Step {
 	 * job was cancelled. Called by the canceller that took the lock, or by
 	 * the holder that lost it, for every step up to the current one. It is
 	 * never called for a failed job: a failed job keeps its cursor and its
-	 * temporary files so that a retry can continue from them; the storage
-	 * purge reclaims them with the job row.
+	 * temporary files so that a retry can continue from them. Nothing
+	 * reclaims those files yet (the purge only removes the lock file and the
+	 * log); the per-job work directory of T013 will.
 	 *
 	 * Must tolerate everything: files that no longer exist, tables that were
 	 * never created, and deletions that fail. Never throw, never let a fatal
