@@ -11,8 +11,24 @@ namespace WPCheckpoint\Jobs;
  * A step does a bounded amount of work per run() call and reports where it
  * stopped through the cursor. It must be idempotent or replayable from the
  * cursor: a tick can die at any moment and the next one starts from the last
- * checkpoint. Between units of work (a batch of rows, one file) it calls
- * JobContext::should_stop() and returns StepResult::progress() when told to.
+ * checkpoint.
+ *
+ * Work happens in units (a batch of rows, one file, one 16 MiB chunk).
+ * Between units the step calls JobContext::should_stop() and returns
+ * StepResult::progress() when told to; the budget is only ever checked
+ * between units, nothing interrupts a unit from the outside. A unit must
+ * therefore fit into one budget on its own: a unit that does not will hit
+ * the budget on every tick and, once the cursor has stopped moving three
+ * times, fail the job. Inside a unit, JobContext::should_checkpoint() says
+ * when to persist the cursor (after 2 seconds or 16 MiB, whichever first).
+ *
+ * A step never calls the write methods of JobRepository (save_progress,
+ * transition, heartbeat, release): every write goes through
+ * JobContext::checkpoint() and the runner, which fence it with the lock
+ * token. Temporary files and results live under JobContext::storage_path()
+ * (tmp/ and backups/), and that path is taken from the context on every
+ * run, never cached across ticks: the storage directory can change between
+ * ticks and the engine only touches files inside the current one.
  */
 interface Step {
 
@@ -35,7 +51,17 @@ interface Step {
 
 	/**
 	 * Remove what the step left behind (temporary tables, files) after the
-	 * job was cancelled. Must not throw for things that do not exist.
+	 * job was cancelled. Called by the canceller that took the lock, or by
+	 * the holder that lost it, for every step up to the current one. It is
+	 * never called for a failed job: a failed job keeps its cursor and its
+	 * temporary files so that a retry can continue from them; the storage
+	 * purge reclaims them with the job row.
+	 *
+	 * Must tolerate everything: files that no longer exist, tables that were
+	 * never created, and deletions that fail. Never throw, never let a fatal
+	 * error escape. During the window in which a lease has expired but the
+	 * previous holder is still alive, two processes may be writing the same
+	 * files; the lock token fences database writes, not fwrite().
 	 *
 	 * @param JobContext $context Context without checkpointing.
 	 * @return void
