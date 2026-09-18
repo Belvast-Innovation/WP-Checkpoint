@@ -22,3 +22,4 @@ phpunit.xml.dist
 /build
 .gitkeep
 .phpunit.result.cache
+/schema
