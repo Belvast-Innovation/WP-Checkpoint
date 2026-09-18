@@ -310,6 +310,105 @@ final class PackerTest extends TestCase {
 		$packer->add_entry( $files[0][0], 'files/a.bin', 1758196800 );
 	}
 
+	public function test_a_crash_inside_finish_is_replayed_from_the_previous_checkpoint(): void {
+		$files = array(
+			array( $this->source( 'a.bin', 300000, 1 ), 'files/a.bin', 1758196800 ),
+			array( $this->source( 'b.txt', 3000, 2 ), 'files/b.txt', 1758196800 ),
+		);
+		$index     = $this->source( 'files.index.jsonl', 300 );
+		$reference = $this->pack( $files, $this->options() );
+		$expected  = hash_file( 'sha256', $reference->sealed_paths()[0] );
+		$this->rm( $this->out );
+		mkdir( $this->out );
+
+		$run = function ( array $state ): Packer {
+			$packer = Packer::open( $this->out, 'site-20260918-100000-a1b2', $state, $this->options() );
+			return $packer;
+		};
+		$packer = $run( array() );
+		foreach ( $files as list( $source, $entry, $mtime ) ) {
+			$packer->add_entry( $source, $entry, $mtime );
+			while ( $packer->write_piece() > 0 ) {
+				continue;
+			}
+		}
+		$before = $packer->state(); // The checkpoint before finish().
+
+		// Crash 1: the summaries were appended and the volume sealed, but not renamed to the single name and not checkpointed.
+		$packer->add_entry( $index, 'files.index.jsonl', 1758196800 );
+		while ( $packer->write_piece() > 0 ) {
+			continue;
+		}
+		$packer->add_string_entry( 'manifest.json', '{"embedded":true}', 1758196800 );
+		$packer->seal_volume();
+		$packer->close();
+		unset( $packer );
+		$packer = $run( $before );
+		$this->assertFalse( $packer->has_open_volume(), 'adopted although it holds two more entries than the cursor knows' );
+		$packer->finish( array( 'files.index.jsonl' => $index ), '{"embedded":true}', 1758196800 );
+		while ( $packer->hash_next_block() ) {
+			continue;
+		}
+		$this->assertStringEndsWith( 'site-20260918-100000-a1b2.wpcheckpoint.zip', $packer->sealed_paths()[0] );
+		$this->assertSame( $expected, hash_file( 'sha256', $packer->sealed_paths()[0] ), 'byte-identical' );
+		$this->assertCount( 1, glob( $this->out . '/*.zip' ) ?: array() );
+		$this->rm( $this->out );
+		mkdir( $this->out );
+
+		// Crash 2: finish() completed (single name applied) and the tick died before the checkpoint.
+		$packer = $run( array() );
+		foreach ( $files as list( $source, $entry, $mtime ) ) {
+			$packer->add_entry( $source, $entry, $mtime );
+			while ( $packer->write_piece() > 0 ) {
+				continue;
+			}
+		}
+		$before = $packer->state();
+		$packer->finish( array( 'files.index.jsonl' => $index ), '{"embedded":true}', 1758196800 );
+		$packer->close();
+		unset( $packer );
+		$packer = $run( $before );
+		$this->assertFalse( $packer->has_open_volume(), 'adopted under the single-volume name' );
+		$packer->finish( array( 'files.index.jsonl' => $index ), '{"embedded":true}', 1758196800 );
+		while ( $packer->hash_next_block() ) {
+			continue;
+		}
+		$this->assertSame( $expected, hash_file( 'sha256', $packer->sealed_paths()[0] ), 'byte-identical' );
+		$this->assertCount( 1, glob( $this->out . '/*' ) ?: array(), 'no stray files' );
+
+		// A sealed volume with a foreign extra entry is not adopted.
+		$this->rm( $this->out );
+		mkdir( $this->out );
+		$packer = $run( array() );
+		$packer->add_entry( $files[0][0], 'files/a.bin', 1758196800 );
+		while ( $packer->write_piece() > 0 ) {
+			continue;
+		}
+		$before = $packer->state();
+		$packer->add_entry( $files[1][0], 'files/not-a-summary.txt', 1758196800 );
+		while ( $packer->write_piece() > 0 ) {
+			continue;
+		}
+		$packer->seal_volume();
+		$packer->close();
+		$this->expectException( \RuntimeException::class );
+		$this->expectExceptionMessage( 'The open volume is missing.' );
+		$run( $before );
+	}
+
+	public function test_entry_names_must_be_utf8_and_volumes_are_sealed_at_the_entry_limit(): void {
+		$source = $this->source( 'a.bin', 10, 1 );
+		$packer = Packer::open( $this->out, 'site', array(), $this->options() );
+		try {
+			$packer->add_entry( $source, "files/latin1-\xE4.txt", 1758196800 );
+			$this->fail( 'a Latin-1 name was accepted' );
+		} catch ( \RuntimeException $e ) {
+			$this->assertStringContainsString( 'not valid UTF-8', $e->getMessage() );
+		}
+		$this->assertFalse( $packer->has_open_volume(), 'refused before anything was written' );
+		$this->assertLessThan( ZipReader::MAX_ENTRIES / 10, Packer::MAX_VOLUME_ENTRIES, 'the writer seals far below what the reader accepts' );
+	}
+
 	public function test_the_platform_volume_bound_seals_before_an_entry_would_cross_it(): void {
 		$files = array();
 		for ( $i = 0; $i < 3; $i++ ) {

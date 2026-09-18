@@ -255,17 +255,21 @@ final class ZipFormat {
 			if ( null === $z ) {
 				return null;
 			}
-			$p = 0;
-			if ( self::LIMIT_32 === $usize ) {
-				$usize = self::read_u64( $z, $p );
-				$p    += 8;
-			}
-			if ( self::LIMIT_32 === $csize ) {
-				$csize = self::read_u64( $z, $p );
-				$p    += 8;
-			}
-			if ( self::LIMIT_32 === $off ) {
-				$off = self::read_u64( $z, $p );
+			try {
+				$p = 0;
+				if ( self::LIMIT_32 === $usize ) {
+					$usize = self::read_u64( $z, $p );
+					$p    += 8;
+				}
+				if ( self::LIMIT_32 === $csize ) {
+					$csize = self::read_u64( $z, $p );
+					$p    += 8;
+				}
+				if ( self::LIMIT_32 === $off ) {
+					$off = self::read_u64( $z, $p );
+				}
+			} catch ( \RuntimeException $e ) {
+				return null;
 			}
 		}
 		return array(
@@ -323,6 +327,10 @@ final class ZipFormat {
 			}
 			return $lo;
 		}
+		if ( $hi < 0 || $hi > 0x7FFFFFFF ) {
+			// Bit 63 set: the value would come out negative and pass every "< limit" check.
+			throw new \RuntimeException( 'A value in this archive is out of range.' );
+		}
 		return ( $hi << 32 ) | ( $lo & 0xFFFFFFFF );
 	}
 
@@ -332,8 +340,12 @@ final class ZipFormat {
 	 * @param string $data Bytes.
 	 * @param int    $pos  Offset.
 	 * @return int
+	 * @throws \RuntimeException When the field is truncated or the value out of range.
 	 */
 	private static function read_u64( string $data, int $pos ): int {
+		if ( $pos < 0 || strlen( $data ) < $pos + 8 ) {
+			throw new \RuntimeException( 'A zip64 field is truncated.' );
+		}
 		$parts = unpack( 'Vlo/Vhi', substr( $data, $pos, 8 ) );
 		return self::from_u64( (int) $parts['lo'], (int) $parts['hi'] );
 	}
@@ -348,11 +360,15 @@ final class ZipFormat {
 		$pos    = 0;
 		$length = strlen( $extra );
 		while ( $pos + 4 <= $length ) {
-			$h = unpack( 'vid/vsize', substr( $extra, $pos, 4 ) );
-			if ( self::ZIP64_EXTRA_ID === (int) $h['id'] ) {
-				return substr( $extra, $pos + 4, (int) $h['size'] );
+			$h    = unpack( 'vid/vsize', substr( $extra, $pos, 4 ) );
+			$size = (int) $h['size'];
+			if ( $pos + 4 + $size > $length ) {
+				return null; // A field that claims more bytes than the extra area holds.
 			}
-			$pos += 4 + (int) $h['size'];
+			if ( self::ZIP64_EXTRA_ID === (int) $h['id'] ) {
+				return substr( $extra, $pos + 4, $size );
+			}
+			$pos += 4 + $size;
 		}
 		return null;
 	}

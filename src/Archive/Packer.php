@@ -35,6 +35,8 @@ namespace WPCheckpoint\Archive;
 final class Packer {
 
 	const VOLUME_BYTES        = 1073741824; // 1 GiB, the seal threshold.
+	const MAX_VOLUME_ENTRIES  = 100000;     // Sealed before this many entries: the central directory is written in one call (about 0.3 s per 100k here, several times slower on a shared host), and far below the reader's limit.
+	const SUMMARY_ENTRIES     = array( 'manifest.json', Manifest::DATABASE_INDEX, Manifest::FILES_INDEX );
 	const PIECE_BYTES         = 4194304;    // 4 MiB per write_piece().
 	const DEFLATE_MAX_BYTES   = 4194304;
 	const COMPRESSION_LEVEL   = 6;
@@ -225,6 +227,11 @@ final class Packer {
 		$problem = EntryPath::problem( $entry_path );
 		if ( null !== $problem ) {
 			throw new \RuntimeException( 'Invalid entry path: ' . $problem );
+		}
+		if ( 1 !== preg_match( '//u', $entry_path ) ) {
+			// Checked before any byte is written: the name is flagged UTF-8 in the archive and json_encode()
+			// would refuse it only after the header and the data were written, failing the whole export.
+			throw new \RuntimeException( 'Invalid entry path: not valid UTF-8.' );
 		}
 		$stats = @stat( $source ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- reported below.
 		if ( false === $stats || ! is_file( $source ) ) {
@@ -469,6 +476,12 @@ final class Packer {
 		if ( $this->state['finished'] ) {
 			return;
 		}
+		if ( null === $this->state['volume'] && array() !== $this->state['sealed'] && $this->last_volume_has_summaries() ) {
+			// A previous tick finished the archive and died before its checkpoint; resume() adopted the volume.
+			$this->rename_single_volume();
+			$this->state['finished'] = true;
+			return;
+		}
 		$total = strlen( $manifest );
 		foreach ( $files as $source ) {
 			$total += (int) filesize( $source );
@@ -485,16 +498,46 @@ final class Packer {
 		$this->ensure_volume_open( strlen( $manifest ) );
 		$this->add_string_entry( 'manifest.json', $manifest, $mtime );
 		$this->seal_volume();
-		if ( 1 === count( $this->state['sealed'] ) ) {
-			$single = $this->state['base'] . self::SINGLE_SUFFIX;
-			$from   = $this->dir . DIRECTORY_SEPARATOR . $this->state['sealed'][0]['path'];
-			$to     = $this->dir . DIRECTORY_SEPARATOR . $single;
-			if ( file_exists( $to ) || ! rename( $from, $to ) ) {
-				throw new \RuntimeException( 'The volume could not be renamed to its single-volume name.' );
-			}
-			$this->state['sealed'][0]['path'] = $single;
-		}
+		$this->rename_single_volume();
 		$this->state['finished'] = true;
+	}
+
+	/**
+	 * Whether the last sealed volume already ends with the embedded manifest.
+	 *
+	 * @return bool
+	 */
+	private function last_volume_has_summaries(): bool {
+		$last = $this->state['sealed'][ count( $this->state['sealed'] ) - 1 ];
+		try {
+			$reader = ZipReader::open( $this->dir . DIRECTORY_SEPARATOR . $last['path'] );
+		} catch ( \RuntimeException $e ) {
+			return false;
+		}
+		return null !== $reader->find( 'manifest.json' );
+	}
+
+	/**
+	 * A lone volume takes the single-volume name (idempotent: already done
+	 * when the sealed record carries that name).
+	 *
+	 * @return void
+	 * @throws \RuntimeException When the rename fails or the name is taken by another file.
+	 */
+	private function rename_single_volume(): void {
+		if ( 1 !== count( $this->state['sealed'] ) ) {
+			return;
+		}
+		$single = $this->state['base'] . self::SINGLE_SUFFIX;
+		if ( $this->state['sealed'][0]['path'] === $single ) {
+			return;
+		}
+		$from = $this->dir . DIRECTORY_SEPARATOR . $this->state['sealed'][0]['path'];
+		$to   = $this->dir . DIRECTORY_SEPARATOR . $single;
+		if ( file_exists( $to ) || ! rename( $from, $to ) ) {
+			throw new \RuntimeException( 'The volume could not be renamed to its single-volume name.' );
+		}
+		$this->state['sealed'][0]['path'] = $single;
 	}
 
 	/**
@@ -643,28 +686,55 @@ final class Packer {
 		if ( null !== $this->state['entry'] ) {
 			return false; // A volume is never sealed with an entry in progress.
 		}
-		$final = $this->dir . DIRECTORY_SEPARATOR . $volume['name'];
-		if ( ! is_file( $final ) ) {
-			return false;
+		// finish() seals the last volume after appending the summary entries and renames a lone volume to
+		// the single name; a crash before the step's checkpoint leaves either outcome on disk.
+		$candidates = array( $volume['name'] );
+		if ( 1 === (int) $volume['index'] && array() === $this->state['sealed'] ) {
+			$candidates[] = $this->state['base'] . self::SINGLE_SUFFIX;
 		}
-		try {
-			$reader = ZipReader::open( $final );
-		} catch ( \RuntimeException $e ) {
-			return false;
+		foreach ( $candidates as $name ) {
+			$final = $this->dir . DIRECTORY_SEPARATOR . $name;
+			if ( ! is_file( $final ) ) {
+				continue;
+			}
+			try {
+				$reader = ZipReader::open( $final );
+			} catch ( \RuntimeException $e ) {
+				return false;
+			}
+			$entries = (int) $volume['entries'];
+			$count   = $reader->count();
+			if ( $count < $entries || $count - $entries > count( self::SUMMARY_ENTRIES ) || $reader->central_directory_offset() < (int) $volume['bytes'] ) {
+				return false;
+			}
+			if ( $count === $entries && $reader->central_directory_offset() !== (int) $volume['bytes'] ) {
+				return false;
+			}
+			// Any entries beyond the committed count must be exactly the summary files, nothing else.
+			$extra = array();
+			$reader->each(
+				static function ( array $entry ) use ( $entries, &$extra ): bool {
+					if ( $entry['index'] >= $entries ) {
+						$extra[] = $entry['name'];
+					}
+					return true;
+				}
+			);
+			if ( count( $extra ) !== count( array_unique( $extra ) ) || array() !== array_diff( $extra, self::SUMMARY_ENTRIES ) ) {
+				return false;
+			}
+			@unlink( $this->records_path() ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- the unlink after the rename may not have happened.
+			$this->state['sealed'][] = array(
+				'index'  => (int) $volume['index'],
+				'path'   => $name,
+				'bytes'  => (int) filesize( $final ),
+				'chunks' => array(),
+				'hashed' => 0,
+			);
+			$this->state['volume']   = null;
+			return true;
 		}
-		if ( $reader->count() !== (int) $volume['entries'] || $reader->central_directory_offset() !== (int) $volume['bytes'] ) {
-			return false;
-		}
-		@unlink( $this->records_path() ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- the unlink after the rename may not have happened.
-		$this->state['sealed'][] = array(
-			'index'  => (int) $volume['index'],
-			'path'   => $volume['name'],
-			'bytes'  => (int) filesize( $final ),
-			'chunks' => array(),
-			'hashed' => 0,
-		);
-		$this->state['volume']   = null;
-		return true;
+		return false;
 	}
 
 	/**
@@ -681,6 +751,9 @@ final class Packer {
 		}
 		if ( null !== $this->state['volume'] && $this->state['volume']['entries'] > 0 && $this->state['volume']['bytes'] + $next_entry_bytes + 65536 > $this->options['max_volume_bytes'] ) {
 			// Every entry may fit the platform on its own while the volume would not: seal first.
+			$this->seal_volume();
+		}
+		if ( null !== $this->state['volume'] && $this->state['volume']['entries'] >= self::MAX_VOLUME_ENTRIES ) {
 			$this->seal_volume();
 		}
 		if ( null === $this->state['volume'] ) {
@@ -885,7 +958,10 @@ final class Packer {
 				++$seen;
 				$keep = (int) ftell( $handle );
 			}
-			ftruncate( $handle, $keep );
+			if ( ! ftruncate( $handle, $keep ) ) {
+				// Stale records would otherwise be written into the central directory, corrupting the volume silently.
+				throw new \RuntimeException( 'The central directory records could not be truncated.' );
+			}
 		} finally {
 			fclose( $handle );
 		}

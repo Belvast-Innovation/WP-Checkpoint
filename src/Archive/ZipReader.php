@@ -13,19 +13,31 @@ use WPCheckpoint\Support\Paths;
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- messages are internal (an entry-path verdict), never HTML; the caller presents them through JobPresenter::clean().
 
 /**
- * Lists entries from the central directory and extracts them in pieces.
- * Every entry name goes through EntryPath, and the target of an
- * extraction is checked with realpath to lie inside the target directory
- * (zip slip). Stored entries are copied in pieces so a large one can be
- * extracted across ticks; deflated entries are inflated in one go and
- * are therefore limited in size.
+ * Lists entries from the central directory and extracts them. Every entry
+ * name goes through EntryPath, and the target of an extraction is checked
+ * with realpath to lie inside the target directory (zip slip). Every
+ * number in the central directory is untrusted: no loop bound and no
+ * allocation follows a declared size alone.
+ *
+ * Extraction copies a whole entry in one call: there is no byte-offset
+ * resumable extraction yet, so a 2 GiB stored entry cannot be spread over
+ * several ticks (T030 needs an extract_piece() for that). Deflated entries
+ * are inflated in one go and limited to MAX_INFLATE_BYTES.
  */
 final class ZipReader {
 
-	const TAIL_BYTES        = 65536 + 22 + 20 + 56;
-	const PIECE_BYTES       = 4194304;
-	const MAX_INFLATE_BYTES = 67108864; // 64 MiB: the plugin deflates only entries up to 4 MiB.
-	const MAX_ENTRIES       = 5000000;
+	const TAIL_BYTES              = 65536 + 22 + 20 + 56;
+	const MAX_HEADER_BYTES        = 1048576;  // A central header with name, extra and comment beyond this is malformed.
+	const MAX_INFLATE_BYTES       = 67108864; // 64 MiB: the plugin deflates only entries up to 4 MiB.
+	const MAX_EMPTY_DEFLATE_BYTES = 64; // A deflate stream of an empty entry is 2 bytes; leave room for odd encoders.
+	const MAX_ENTRIES             = 5000000;
+
+	/**
+	 * Windows device names: a file of this name (any extension) is the device,
+	 * and fopen( 'COM1' ) blocks waiting for the port, so a restore would hang
+	 * with no hint that a file name is the cause.
+	 */
+	const WINDOWS_DEVICES = array( 'CON', 'PRN', 'AUX', 'NUL', 'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9', 'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9' );
 
 	/**
 	 * Volume path.
@@ -77,7 +89,7 @@ final class ZipReader {
 			}
 			$tail = stream_get_contents( $handle );
 			$end  = is_string( $tail ) ? ZipFormat::parse_end( $tail, $start ) : null;
-			if ( null === $end || $end['cd_offset'] + $end['cd_size'] > $size || $end['entries'] > self::MAX_ENTRIES ) {
+			if ( null === $end || $end['entries'] < 0 || $end['cd_size'] < 0 || $end['cd_offset'] < 0 || $end['cd_offset'] + $end['cd_size'] > $size || $end['entries'] > self::MAX_ENTRIES ) {
 				throw new \RuntimeException( 'Not a zip archive (no usable central directory).' );
 			}
 			return new self( $path, $end );
@@ -121,21 +133,28 @@ final class ZipReader {
 			$buffer = '';
 			$seen   = 0;
 			while ( $seen < $this->end['entries'] ) {
-				if ( strlen( $buffer ) < 65536 + 46 ) {
-					$more = fread( $handle, 65536 );
-					if ( is_string( $more ) && '' !== $more ) {
-						$buffer .= $more;
-					}
-				}
 				$parsed = ZipFormat::parse_central_header( $buffer );
+				while ( null === $parsed ) {
+					$buffered = strlen( $buffer );
+					if ( $buffered >= self::MAX_HEADER_BYTES || feof( $handle ) ) {
+						break;
+					}
+					$more = fread( $handle, 65536 );
+					if ( ! is_string( $more ) || '' === $more ) {
+						break;
+					}
+					$buffer .= $more;
+					$parsed  = ZipFormat::parse_central_header( $buffer );
+				}
 				if ( null === $parsed ) {
 					throw new \RuntimeException( 'The central directory is malformed.' );
 				}
 				$buffer = substr( $buffer, $parsed['length'] );
 				++$seen;
-				$entry            = $parsed;
-				$entry['index']   = $seen - 1;
-				$entry['problem'] = EntryPath::problem( $parsed['name'] );
+				$entry              = $parsed;
+				$entry['index']     = $seen - 1;
+				$entry['directory'] = '' !== $parsed['name'] && '/' === substr( $parsed['name'], -1 );
+				$entry['problem']   = $entry['directory'] ? 'Directory entry (nothing to extract; importers skip it).' : EntryPath::problem( $parsed['name'] );
 				unset( $entry['length'] );
 				if ( false === $callback( $entry ) ) {
 					return;
@@ -191,7 +210,7 @@ final class ZipReader {
 	 * @throws \RuntimeException When too large, unreadable or corrupt.
 	 */
 	public function read( array $entry, int $max_bytes = Manifest::MAX_JSON_BYTES ): string {
-		if ( $entry['usize'] > $max_bytes ) {
+		if ( $entry['usize'] > $max_bytes || $entry['csize'] > $max_bytes ) {
 			throw new \RuntimeException( 'The entry is larger than allowed.' );
 		}
 		$temp = fopen( 'php://temp/maxmemory:' . ( $max_bytes + 1 ), 'w+b' );
@@ -223,9 +242,16 @@ final class ZipReader {
 			throw new \RuntimeException( 'Refusing to extract an unsafe entry name: ' . $entry['problem'] );
 		}
 		$target_dir = rtrim( $target_dir, '/\\' );
-		$real_root  = realpath( $target_dir );
+		if ( '' === $target_dir ) {
+			// realpath( '' ) is the working directory; a caller that passes nothing gets an error, not the cwd.
+			throw new \RuntimeException( 'The target directory is empty.' );
+		}
+		$real_root = realpath( $target_dir );
 		if ( false === $real_root || ! is_dir( $real_root ) ) {
 			throw new \RuntimeException( 'The target directory does not exist.' );
+		}
+		if ( 'Windows' === PHP_OS_FAMILY ) {
+			self::assert_safe_on_windows( $entry['name'] );
 		}
 		$target = $target_dir . DIRECTORY_SEPARATOR . str_replace( '/', DIRECTORY_SEPARATOR, $entry['name'] );
 		$parent = dirname( $target );
@@ -238,17 +264,23 @@ final class ZipReader {
 		if ( ! Paths::is_same_or_inside( $real_root, $existing ) ) {
 			throw new \RuntimeException( 'Refusing to extract outside the target directory.' );
 		}
-		if ( ! is_dir( $parent ) && ! mkdir( $parent, 0755, true ) && ! is_dir( $parent ) ) {
+		// Silenced: a PHP warning would put the full target path into the error log, bypassing the path masking.
+		if ( ! is_dir( $parent ) && ! @mkdir( $parent, 0755, true ) && ! is_dir( $parent ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
 			throw new \RuntimeException( 'The target directory could not be created.' );
 		}
-		// After creating: the parent itself must resolve inside the root, and the target must not be a link.
-		// Known and accepted: between this is_link() and the fopen() below another local process could swap
-		// the target for a link (a TOCTOU that needs a cooperating process on the same machine; extraction
-		// itself never creates links, and O_NOFOLLOW is not worth its complexity here).
-		if ( ! Paths::is_same_or_inside( $real_root, $parent ) || is_link( $target ) ) {
+		// After creating: the parent itself must resolve inside the root.
+		if ( ! Paths::is_same_or_inside( $real_root, $parent ) ) {
 			throw new \RuntimeException( 'Refusing to extract outside the target directory.' );
 		}
-		$out = fopen( $target, 'wb' );
+		// Never write through whatever sits at the target (a symlink or a hard link would carry the bytes to
+		// its other name): remove it and create the file exclusively. A directory there is an error.
+		if ( is_dir( $target ) && ! is_link( $target ) ) {
+			throw new \RuntimeException( 'A directory is in the way of the entry.' );
+		}
+		if ( ( is_link( $target ) || file_exists( $target ) ) && ! @unlink( $target ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
+			throw new \RuntimeException( 'The target file could not be replaced.' );
+		}
+		$out = @fopen( $target, 'xb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
 		if ( false === $out ) {
 			throw new \RuntimeException( 'The target file could not be created.' );
 		}
@@ -285,30 +317,50 @@ final class ZipReader {
 			if ( 0 !== fseek( $handle, (int) $entry['offset'] + $len ) ) {
 				throw new \RuntimeException( 'The entry could not be positioned.' );
 			}
-			$crc = 0;
+			$crc   = 0;
+			$usize = (int) $entry['usize'];
+			$csize = (int) $entry['csize'];
+			if ( $usize < 0 || $csize < 0 ) {
+				throw new \RuntimeException( 'The entry sizes are malformed.' );
+			}
 			if ( ZipFormat::METHOD_STORE === (int) $entry['method'] ) {
-				$left = (int) $entry['csize'];
-				while ( $left > 0 ) {
-					$piece = fread( $handle, (int) min( 1048576, $left ) );
+				// Stored means "as is": the two sizes must agree before anything is read, and the loop is bounded
+				// by the uncompressed size with a running count, never by the compressed size alone.
+				if ( $csize !== $usize ) {
+					throw new \RuntimeException( 'A stored entry declares different sizes.' );
+				}
+				$written = 0;
+				while ( $written < $usize ) {
+					$piece = fread( $handle, (int) min( 1048576, $usize - $written ) );
 					if ( false === $piece || '' === $piece ) {
 						throw new \RuntimeException( 'The entry is truncated.' );
 					}
-					$crc   = Crc32::combine( $crc, Crc32::of( $piece ), strlen( $piece ) );
-					$left -= strlen( $piece );
+					$written += strlen( $piece );
+					if ( $written > $usize ) {
+						throw new \RuntimeException( 'The entry is longer than declared.' );
+					}
+					$crc = Crc32::combine( $crc, Crc32::of( $piece ), strlen( $piece ) );
 					if ( strlen( $piece ) !== fwrite( $out, $piece ) ) {
 						throw new \RuntimeException( 'The entry could not be written.' );
 					}
 				}
 			} elseif ( ZipFormat::METHOD_DEFLATE === (int) $entry['method'] ) {
-				if ( $entry['csize'] > self::MAX_INFLATE_BYTES || $entry['usize'] > self::MAX_INFLATE_BYTES ) {
+				if ( $csize > self::MAX_INFLATE_BYTES || $usize > self::MAX_INFLATE_BYTES ) {
 					throw new \RuntimeException( 'A deflated entry is too large to inflate in one piece.' );
 				}
-				$compressed = (int) $entry['csize'] > 0 ? fread( $handle, (int) $entry['csize'] ) : '';
-				if ( ! is_string( $compressed ) || strlen( $compressed ) !== (int) $entry['csize'] ) {
+				if ( 0 === $usize && $csize > self::MAX_EMPTY_DEFLATE_BYTES ) {
+					// An empty entry deflates to a few bytes; anything more with a declared size of zero is a lie.
+					throw new \RuntimeException( 'A deflated entry declares data but no size.' );
+				}
+				$compressed = $csize > 0 ? fread( $handle, $csize ) : '';
+				if ( ! is_string( $compressed ) || strlen( $compressed ) !== $csize ) {
 					throw new \RuntimeException( 'The entry is truncated.' );
 				}
-				$data = @gzinflate( $compressed, (int) $entry['usize'] ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- corrupt data is reported below.
-				if ( ! is_string( $data ) || strlen( $data ) !== (int) $entry['usize'] ) {
+				// gzinflate()'s max_length must never be 0: PHP reads 0 as "unlimited", and a 64 MiB deflate
+				// stream can expand to tens of gigabytes before any check after the call runs. A declared size
+				// of zero therefore inflates with a limit of one byte and must yield nothing.
+				$data = 0 === $csize ? '' : @gzinflate( $compressed, max( 1, $usize ) ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- corrupt data is reported below.
+				if ( ! is_string( $data ) || strlen( $data ) !== $usize ) {
 					throw new \RuntimeException( 'The entry could not be inflated.' );
 				}
 				$crc = Crc32::of( $data );
@@ -323,6 +375,28 @@ final class ZipReader {
 			}
 		} finally {
 			fclose( $handle );
+		}
+	}
+
+	/**
+	 * Refuse names that Win32 maps to something else than a plain file:
+	 * device names (CON, NUL, COM1 ... with any extension) and segments with
+	 * trailing dots or spaces, which the kernel strips so that two entries
+	 * land on one file. Only on Windows: on POSIX these are ordinary names.
+	 *
+	 * @param string $name Entry name.
+	 * @return void
+	 * @throws \RuntimeException When the name is unsafe on Windows.
+	 */
+	private static function assert_safe_on_windows( string $name ): void {
+		foreach ( explode( '/', $name ) as $segment ) {
+			$stem = strtoupper( (string) strtok( $segment, '.' ) );
+			if ( in_array( $stem, self::WINDOWS_DEVICES, true ) ) {
+				throw new \RuntimeException( 'Refusing to extract a Windows device name.' );
+			}
+			if ( '' !== $segment && ( '.' === substr( $segment, -1 ) || ' ' === substr( $segment, -1 ) ) ) {
+				throw new \RuntimeException( 'Refusing a name with a trailing dot or space on Windows.' );
+			}
 		}
 	}
 
