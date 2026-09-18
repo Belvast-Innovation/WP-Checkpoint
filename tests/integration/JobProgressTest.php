@@ -21,8 +21,8 @@ final class JobProgressTest extends JobTestCase {
 
 	public function test_block_is_escaped_masked_and_carries_the_data_attributes(): void {
 		$this->register( 'export', array( new ClosureStep( 'files', static function ( JobContext $ctx ): StepResult {
-			$ctx->logger()->info( 'reading ' . ABSPATH . 'wp-content/<b>x</b> ' . DB_PASSWORD );
-			throw new \RuntimeException( 'cannot read ' . ABSPATH . '<script>alert(1)</script>' );
+			$ctx->logger()->info( 'reading ' . ABSPATH . "wp-content/<b>x</b> \x1b[31mred\xC2\x9B[2J " . DB_PASSWORD );
+			throw new \RuntimeException( 'cannot read ' . ABSPATH . "<script>alert(1)</script>\u{202E}" );
 		} ) ) );
 		$job = Plugin::instance()->jobs()->create( 'export' );
 		$this->rest( 'POST', 'jobs/' . $job->id . '/tick' );
@@ -38,6 +38,10 @@ final class JobProgressTest extends JobTestCase {
 		$this->assertStringNotContainsString( '<script>alert', $html );
 		$this->assertStringNotContainsString( rtrim( ABSPATH, '/' ), $html );
 		$this->assertStringNotContainsString( DB_PASSWORD, $html );
+		$this->assertStringNotContainsString( "\x1b", $html, 'terminal escape neutralized by the presenter pipeline' );
+		$this->assertStringNotContainsString( "\xC2\x9B", $html, '8-bit CSI neutralized' );
+		$this->assertStringNotContainsString( "\u{202E}", $html, 'bidi override neutralized' );
+		$this->assertStringContainsString( "\u{FFFD}[31mred", $html );
 		$this->assertMatchesRegularExpression( '/<button type="button" class="button" data-action="cancel" hidden>/', $html, 'no cancel for a failed job' );
 		$this->assertMatchesRegularExpression( '/<button type="button" class="button" data-action="retry">/', $html, 'retry offered' );
 		$this->assertStringContainsString( '>Failed<', $html );

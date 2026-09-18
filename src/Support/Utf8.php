@@ -23,6 +23,51 @@ final class Utf8 {
 	const REPLACEMENT = "\xEF\xBF\xBD";
 
 	/**
+	 * Return valid UTF-8 with every terminal control and bidirectional
+	 * override replaced by U+FFFD: C0 controls except tab and newline,
+	 * DEL, C1 controls (U+0080-U+009F, which include the 8-bit CSI U+009B
+	 * that terminals in UTF-8 mode still honour), the bidi embeddings and
+	 * overrides U+202A-U+202E and the isolates U+2066-U+2069, which can
+	 * flip the displayed order of a whole line in a ticket or log. Byte
+	 * level like scrub(), so it cannot fail; the input must already be
+	 * valid UTF-8 (run scrub() first).
+	 *
+	 * @param string $text Valid UTF-8.
+	 * @return string
+	 */
+	public static function neutralize_controls( string $text ): string {
+		$length = strlen( $text );
+		$out    = '';
+		$i      = 0;
+		while ( $i < $length ) {
+			$byte = ord( $text[ $i ] );
+			if ( $byte < 0x80 ) {
+				$out .= ( $byte < 0x20 && 0x09 !== $byte && 0x0A !== $byte ) || 0x7F === $byte ? self::REPLACEMENT : $text[ $i ];
+				++$i;
+				continue;
+			}
+			if ( 0xC2 === $byte && $i + 1 < $length && ord( $text[ $i + 1 ] ) <= 0x9F ) {
+				// U+0080-U+009F (U+00A0-U+00BF share the lead byte and are ordinary characters).
+				$out .= self::REPLACEMENT;
+				$i   += 2;
+				continue;
+			}
+			if ( 0xE2 === $byte && $i + 2 < $length ) {
+				$second = ord( $text[ $i + 1 ] );
+				$third  = ord( $text[ $i + 2 ] );
+				if ( ( 0x80 === $second && $third >= 0xAA && $third <= 0xAE ) || ( 0x81 === $second && $third >= 0xA6 && $third <= 0xA9 ) ) {
+					$out .= self::REPLACEMENT;
+					$i   += 3;
+					continue;
+				}
+			}
+			$out .= $text[ $i ];
+			++$i;
+		}
+		return $out;
+	}
+
+	/**
 	 * Return $text with every invalid byte replaced by U+FFFD.
 	 *
 	 * @param string $text Bytes that should be UTF-8.
