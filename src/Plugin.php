@@ -16,6 +16,7 @@ use WPCheckpoint\Admin\Page;
 use WPCheckpoint\Admin\SettingsActions;
 use WPCheckpoint\Admin\JobProgress;
 use WPCheckpoint\Cli\JobCommand;
+use WPCheckpoint\Cli\VerifyCommand;
 use WPCheckpoint\Jobs\JobActions;
 use WPCheckpoint\Jobs\JobPresenter;
 use WPCheckpoint\Jobs\JobRepository;
@@ -146,6 +147,7 @@ final class Plugin {
 
 		if ( defined( 'WP_CLI' ) && WP_CLI ) {
 			\WP_CLI::add_command( 'wpcheckpoint job', new JobCommand( $this->job_actions(), $this->job_presenter() ) );
+			\WP_CLI::add_command( 'wpcheckpoint verify', new VerifyCommand( $this->job_presenter(), $this->directories() ) );
 		}
 
 		if ( is_admin() ) {

@@ -28,7 +28,7 @@ final class ZipReader {
 
 	const TAIL_BYTES              = 65536 + 22 + 20 + 56;
 	const MAX_HEADER_BYTES        = 1048576;  // A central header with name, extra and comment beyond this is malformed.
-	const MAX_INFLATE_BYTES       = 67108864; // 64 MiB: the plugin deflates only entries up to 4 MiB.
+	const MAX_INFLATE_BYTES       = 8388608; // 8 MiB: the plugin deflates only entries up to 4 MiB. Inflating in one piece peaks at about 3 x this, which keeps a unit inside the 32 MB step increment (tested).
 	const MAX_EMPTY_DEFLATE_BYTES = 64; // A deflate stream of an empty entry is 2 bytes; leave room for odd encoders.
 	const MAX_ENTRIES             = 5000000;
 
@@ -118,20 +118,34 @@ final class ZipReader {
 
 	/**
 	 * Walk the central directory. Names that break the entry-path rule are
-	 * reported with "problem" set and must not be extracted.
+	 * reported with "problem" set and must not be extracted. Every entry
+	 * carries "cd_offset", the file position of its central header, and
+	 * "cd_next", the position of the following one, so a caller can
+	 * continue from entry $from_index without re-reading the headers before
+	 * it (a verifier that handles one entry per tick).
 	 *
-	 * @param callable $callback function( array $entry ): bool — return false to stop.
+	 * @param callable $callback    function( array $entry ): bool — return false to stop.
+	 * @param int      $from_index  First entry to report (0-based).
+	 * @param int      $from_offset File position of that entry's central header, or -1 to walk from the start.
 	 * @return void
-	 * @throws \RuntimeException When the central directory is malformed.
+	 * @throws \RuntimeException When the central directory is malformed or the position does not match.
 	 */
-	public function each( callable $callback ): void {
+	public function each( callable $callback, int $from_index = 0, int $from_offset = -1 ): void {
 		$handle = $this->handle();
 		try {
-			if ( 0 !== fseek( $handle, $this->end['cd_offset'] ) ) {
+			$position = $this->end['cd_offset'];
+			$seen     = 0;
+			if ( $from_index > 0 ) {
+				if ( $from_offset < $this->end['cd_offset'] || $from_offset >= $this->end['cd_offset'] + $this->end['cd_size'] ) {
+					throw new \RuntimeException( 'The central directory position does not belong to this volume.' );
+				}
+				$position = $from_offset;
+				$seen     = $from_index;
+			}
+			if ( 0 !== fseek( $handle, $position ) ) {
 				throw new \RuntimeException( 'The central directory could not be positioned.' );
 			}
 			$buffer = '';
-			$seen   = 0;
 			while ( $seen < $this->end['entries'] ) {
 				$parsed = ZipFormat::parse_central_header( $buffer );
 				while ( null === $parsed ) {
@@ -153,6 +167,9 @@ final class ZipReader {
 				++$seen;
 				$entry              = $parsed;
 				$entry['index']     = $seen - 1;
+				$entry['cd_offset'] = $position;
+				$position          += $parsed['length'];
+				$entry['cd_next']   = $position;
 				$entry['directory'] = '' !== $parsed['name'] && '/' === substr( $parsed['name'], -1 );
 				$entry['problem']   = $entry['directory'] ? 'Directory entry (nothing to extract; importers skip it).' : EntryPath::problem( $parsed['name'] );
 				unset( $entry['length'] );
@@ -235,9 +252,119 @@ final class ZipReader {
 	 * @param array<string, mixed> $entry      Entry.
 	 * @param string               $target_dir Directory.
 	 * @return string The written file's path.
+	 * @throws EnvironmentFailure When the target cannot be created or written.
 	 * @throws \RuntimeException When the entry is unsafe, unreadable or corrupt.
 	 */
 	public function extract( array $entry, string $target_dir ): string {
+		list( $target, $out ) = $this->open_target( $entry, $target_dir, true );
+		try {
+			$this->copy_entry( $entry, $out );
+		} catch ( \Throwable $e ) {
+			fclose( $out );
+			@unlink( $target ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- best effort after a failure.
+			throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged.
+		}
+		fclose( $out );
+		return $target;
+	}
+
+	/**
+	 * Extract one byte range of a stored entry, resumable across calls so
+	 * that a multi-gigabyte entry never has to fit one unit of work: offset
+	 * 0 creates the file with the same checks as extract(), a later offset
+	 * appends to a file whose size must equal it. The CRC of everything
+	 * written so far is returned and passed back in; the call that reaches
+	 * the end compares it with the entry's and removes the file on a
+	 * mismatch. A deflated entry has no addressable ranges: it must be
+	 * asked for whole (offset 0, length >= usize), which extracts it in one
+	 * piece as extract() does.
+	 *
+	 * @param array<string, mixed> $entry      Entry.
+	 * @param string               $target_dir Directory.
+	 * @param int                  $offset     Offset within the content.
+	 * @param int                  $length     Bytes to write (clamped to the end).
+	 * @param int                  $crc        CRC returned by the previous call (0 at offset 0).
+	 * @return array{path: string, crc: int, done: bool}
+	 * @throws EnvironmentFailure When the target cannot be created or written.
+	 * @throws \RuntimeException When the entry is unsafe, the range invalid, the data corrupt or the target file not the one being resumed.
+	 */
+	public function extract_piece( array $entry, string $target_dir, int $offset, int $length, int $crc ): array {
+		$usize = (int) $entry['usize'];
+		if ( ZipFormat::METHOD_STORE !== (int) $entry['method'] ) {
+			if ( 0 !== $offset || $length < $usize ) {
+				throw new \RuntimeException( 'Only stored entries can be extracted in pieces.' );
+			}
+			return array(
+				'path' => $this->extract( $entry, $target_dir ),
+				'crc'  => (int) $entry['crc'],
+				'done' => true,
+			);
+		}
+		if ( $offset < 0 || $length < 0 || $offset > $usize || (int) $entry['csize'] !== $usize ) {
+			throw new \RuntimeException( 'The range is outside the entry.' );
+		}
+		$length               = (int) min( $length, $usize - $offset );
+		list( $target, $out ) = $this->open_target( $entry, $target_dir, 0 === $offset );
+		try {
+			if ( $offset > 0 ) {
+				$stat = fstat( $out );
+				if ( ! is_array( $stat ) || (int) $stat['size'] !== $offset || 0 !== fseek( $out, $offset ) ) {
+					throw new \RuntimeException( 'The target file is not the one being resumed.' );
+				}
+			}
+			$handle = $this->handle();
+			try {
+				if ( 0 !== fseek( $handle, $this->data_offset( $handle, $entry ) + $offset ) ) {
+					throw new \RuntimeException( 'The entry could not be positioned.' );
+				}
+				$left = $length;
+				while ( $left > 0 ) {
+					$piece = fread( $handle, (int) min( 1048576, $left ) );
+					if ( false === $piece || '' === $piece ) {
+						throw new \RuntimeException( 'The entry is truncated.' );
+					}
+					if ( strlen( $piece ) !== fwrite( $out, $piece ) ) {
+						throw new EnvironmentFailure( 'The entry could not be written.' );
+					}
+					$crc   = Crc32::combine( $crc, Crc32::of( $piece ), strlen( $piece ) );
+					$left -= strlen( $piece );
+				}
+			} finally {
+				fclose( $handle );
+			}
+			$done = $offset + $length >= $usize;
+			if ( $done && Crc32::hex( $crc ) !== Crc32::hex( (int) $entry['crc'] ) ) {
+				throw new \RuntimeException( 'CRC mismatch: the entry is corrupt.' );
+			}
+		} catch ( \Throwable $e ) {
+			fclose( $out );
+			@unlink( $target ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- best effort after a failure.
+			throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged.
+		}
+		fclose( $out );
+		return array(
+			'path' => $target,
+			'crc'  => $crc,
+			'done' => $done,
+		);
+	}
+
+	/**
+	 * Resolve and open an entry's target file: the name must pass the
+	 * entry-path rule, the nearest existing ancestor and the parent must
+	 * resolve inside the directory (a planted symlink would otherwise lead
+	 * mkdir outside), and the file is created exclusively after removing
+	 * whatever sits there (never written through a link). Resuming opens
+	 * the existing regular file instead.
+	 *
+	 * @param array<string, mixed> $entry      Entry.
+	 * @param string               $target_dir Directory.
+	 * @param bool                 $create     Create anew (true) or reopen for resuming (false).
+	 * @return array{0: string, 1: resource} Path and handle.
+	 * @throws EnvironmentFailure When the directory or file cannot be created or opened.
+	 * @throws \RuntimeException When the entry is unsafe or the target resolves outside the directory.
+	 */
+	private function open_target( array $entry, string $target_dir, bool $create ): array {
 		if ( null !== $entry['problem'] ) {
 			throw new \RuntimeException( 'Refusing to extract an unsafe entry name: ' . $entry['problem'] );
 		}
@@ -248,7 +375,7 @@ final class ZipReader {
 		}
 		$real_root = realpath( $target_dir );
 		if ( false === $real_root || ! is_dir( $real_root ) ) {
-			throw new \RuntimeException( 'The target directory does not exist.' );
+			throw new EnvironmentFailure( 'The target directory does not exist.' );
 		}
 		if ( 'Windows' === PHP_OS_FAMILY ) {
 			self::assert_safe_on_windows( $entry['name'] );
@@ -266,33 +393,35 @@ final class ZipReader {
 		}
 		// Silenced: a PHP warning would put the full target path into the error log, bypassing the path masking.
 		if ( ! is_dir( $parent ) && ! @mkdir( $parent, 0755, true ) && ! is_dir( $parent ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
-			throw new \RuntimeException( 'The target directory could not be created.' );
+			throw new EnvironmentFailure( 'The target directory could not be created.' );
 		}
 		// After creating: the parent itself must resolve inside the root.
 		if ( ! Paths::is_same_or_inside( $real_root, $parent ) ) {
 			throw new \RuntimeException( 'Refusing to extract outside the target directory.' );
 		}
-		// Never write through whatever sits at the target (a symlink or a hard link would carry the bytes to
-		// its other name): remove it and create the file exclusively. A directory there is an error.
 		if ( is_dir( $target ) && ! is_link( $target ) ) {
 			throw new \RuntimeException( 'A directory is in the way of the entry.' );
 		}
+		if ( ! $create ) {
+			if ( is_link( $target ) || ! is_file( $target ) ) {
+				throw new \RuntimeException( 'The target file is not the one being resumed.' );
+			}
+			$out = @fopen( $target, 'r+b' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
+			if ( false === $out ) {
+				throw new EnvironmentFailure( 'The target file could not be opened.' );
+			}
+			return array( $target, $out );
+		}
+		// Never write through whatever sits at the target (a symlink or a hard link would carry the bytes to
+		// its other name): remove it and create the file exclusively.
 		if ( ( is_link( $target ) || file_exists( $target ) ) && ! @unlink( $target ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
-			throw new \RuntimeException( 'The target file could not be replaced.' );
+			throw new EnvironmentFailure( 'The target file could not be replaced.' );
 		}
 		$out = @fopen( $target, 'xb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
 		if ( false === $out ) {
-			throw new \RuntimeException( 'The target file could not be created.' );
+			throw new EnvironmentFailure( 'The target file could not be created.' );
 		}
-		try {
-			$this->copy_entry( $entry, $out );
-		} catch ( \Throwable $e ) {
-			fclose( $out );
-			@unlink( $target ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- best effort after a failure.
-			throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged.
-		}
-		fclose( $out );
-		return $target;
+		return array( $target, $out );
 	}
 
 	/**
@@ -304,17 +433,155 @@ final class ZipReader {
 	 * @throws \RuntimeException When the data is corrupt or the method unsupported.
 	 */
 	private function copy_entry( array $entry, $out ): void {
+		$this->stream_entry(
+			$entry,
+			static function ( string $piece ) use ( $out ): void {
+				if ( strlen( $piece ) !== fwrite( $out, $piece ) ) {
+					throw new EnvironmentFailure( 'The entry could not be written.' );
+				}
+			}
+		);
+	}
+
+	/**
+	 * SHA-256 of an entry's content, streamed, with the CRC verified.
+	 *
+	 * @param array<string, mixed> $entry Entry.
+	 * @return string Lowercase hex.
+	 * @throws \RuntimeException When the data is corrupt or the method unsupported.
+	 */
+	public function hash_entry( array $entry ): string {
+		$context = hash_init( 'sha256' );
+		$this->stream_entry(
+			$entry,
+			static function ( string $piece ) use ( $context ): void {
+				hash_update( $context, $piece );
+			}
+		);
+		return hash_final( $context );
+	}
+
+	/**
+	 * Per-chunk SHA-256 of an entry's content (chunks of $chunk_bytes from
+	 * the start, the last one shorter), streamed, with the CRC verified.
+	 * One unit of work for the whole entry: meant for deflated entries,
+	 * which cannot be read in ranges and are bounded by MAX_INFLATE_BYTES;
+	 * a large stored entry is hashed range by range instead.
+	 *
+	 * @param array<string, mixed> $entry       Entry.
+	 * @param int                  $chunk_bytes Chunk size.
+	 * @return string[] Lowercase hex, empty for an empty entry.
+	 * @throws \RuntimeException When the data is corrupt or the method unsupported.
+	 */
+	public function hash_entry_chunks( array $entry, int $chunk_bytes ): array {
+		$hashes  = array();
+		$context = null;
+		$filled  = 0;
+		$this->stream_entry(
+			$entry,
+			static function ( string $piece ) use ( &$hashes, &$context, &$filled, $chunk_bytes ): void {
+				while ( '' !== $piece ) {
+					if ( null === $context ) {
+						$context = hash_init( 'sha256' );
+						$filled  = 0;
+					}
+					$take = substr( $piece, 0, $chunk_bytes - $filled );
+					hash_update( $context, $take );
+					$filled += strlen( $take );
+					$piece   = substr( $piece, strlen( $take ) );
+					if ( $filled === $chunk_bytes ) {
+						$hashes[] = hash_final( $context );
+						$context  = null;
+					}
+				}
+			}
+		);
+		if ( null !== $context ) {
+			$hashes[] = hash_final( $context );
+		}
+		return $hashes;
+	}
+
+	/**
+	 * SHA-256 of a byte range of a stored entry (one content chunk per call,
+	 * so a large entry is verified across ticks). Deflated entries have no
+	 * addressable ranges and are refused.
+	 *
+	 * @param array<string, mixed> $entry  Entry.
+	 * @param int                  $offset Offset within the content.
+	 * @param int                  $length Length.
+	 * @return string Lowercase hex.
+	 * @throws \RuntimeException When the entry is not stored, the range is outside the entry or the data is truncated.
+	 */
+	public function hash_entry_range( array $entry, int $offset, int $length ): string {
+		if ( ZipFormat::METHOD_STORE !== (int) $entry['method'] ) {
+			throw new \RuntimeException( 'Only stored entries can be hashed in ranges.' );
+		}
+		$usize = (int) $entry['usize'];
+		if ( $offset < 0 || $length < 0 || $offset + $length > $usize || (int) $entry['csize'] !== $usize ) {
+			throw new \RuntimeException( 'The range is outside the entry.' );
+		}
 		$handle = $this->handle();
 		try {
-			if ( 0 !== fseek( $handle, (int) $entry['offset'] ) ) {
+			$data_offset = $this->data_offset( $handle, $entry );
+			if ( 0 !== fseek( $handle, $data_offset + $offset ) ) {
 				throw new \RuntimeException( 'The entry could not be positioned.' );
 			}
-			$local = fread( $handle, 30 );
-			$len   = is_string( $local ) ? ZipFormat::local_header_length( $local ) : null;
-			if ( null === $len ) {
-				throw new \RuntimeException( 'The local header is malformed.' );
+			$context = hash_init( 'sha256' );
+			$left    = $length;
+			while ( $left > 0 ) {
+				$piece = fread( $handle, (int) min( 1048576, $left ) );
+				if ( false === $piece || '' === $piece ) {
+					throw new \RuntimeException( 'The entry is truncated.' );
+				}
+				hash_update( $context, $piece );
+				$left -= strlen( $piece );
 			}
-			if ( 0 !== fseek( $handle, (int) $entry['offset'] + $len ) ) {
+			return hash_final( $context );
+		} finally {
+			fclose( $handle );
+		}
+	}
+
+	/**
+	 * Where an entry's bytes start: after its local header, whose length is
+	 * read from the file (the central directory's name and extra lengths
+	 * may differ from the local ones).
+	 *
+	 * @param resource             $handle Open volume.
+	 * @param array<string, mixed> $entry  Entry.
+	 * @return int
+	 * @throws \RuntimeException When the local header is malformed.
+	 */
+	private function data_offset( $handle, array $entry ): int {
+		if ( 0 !== fseek( $handle, (int) $entry['offset'] ) ) {
+			throw new \RuntimeException( 'The entry could not be positioned.' );
+		}
+		$local = fread( $handle, 30 );
+		$len   = is_string( $local ) ? ZipFormat::local_header_length( $local ) : null;
+		if ( null === $len ) {
+			throw new \RuntimeException( 'The local header is malformed.' );
+		}
+		return (int) $entry['offset'] + $len;
+	}
+
+	/**
+	 * Feed an entry's content to a sink piece by piece, verifying the CRC.
+	 * Every number from the central directory is untrusted: a stored entry's
+	 * two sizes must agree and the loop counts what it read against the
+	 * uncompressed size; a deflated entry never reaches gzinflate() with a
+	 * limit of zero.
+	 *
+	 * @param array<string, mixed> $entry Entry.
+	 * @param callable             $sink  function( string $piece ): void.
+	 * @return void
+	 * @throws \RuntimeException When the data is corrupt or the method unsupported.
+	 */
+	private function stream_entry( array $entry, callable $sink ): void {
+		$handle = $this->handle();
+		try {
+			$data_offset = $this->data_offset( $handle, $entry );
+			if ( 0 !== fseek( $handle, $data_offset ) ) {
 				throw new \RuntimeException( 'The entry could not be positioned.' );
 			}
 			$crc   = 0;
@@ -329,20 +596,18 @@ final class ZipReader {
 				if ( $csize !== $usize ) {
 					throw new \RuntimeException( 'A stored entry declares different sizes.' );
 				}
-				$written = 0;
-				while ( $written < $usize ) {
-					$piece = fread( $handle, (int) min( 1048576, $usize - $written ) );
+				$read = 0;
+				while ( $read < $usize ) {
+					$piece = fread( $handle, (int) min( 1048576, $usize - $read ) );
 					if ( false === $piece || '' === $piece ) {
 						throw new \RuntimeException( 'The entry is truncated.' );
 					}
-					$written += strlen( $piece );
-					if ( $written > $usize ) {
+					$read += strlen( $piece );
+					if ( $read > $usize ) {
 						throw new \RuntimeException( 'The entry is longer than declared.' );
 					}
 					$crc = Crc32::combine( $crc, Crc32::of( $piece ), strlen( $piece ) );
-					if ( strlen( $piece ) !== fwrite( $out, $piece ) ) {
-						throw new \RuntimeException( 'The entry could not be written.' );
-					}
+					$sink( $piece );
 				}
 			} elseif ( ZipFormat::METHOD_DEFLATE === (int) $entry['method'] ) {
 				if ( $csize > self::MAX_INFLATE_BYTES || $usize > self::MAX_INFLATE_BYTES ) {
@@ -364,9 +629,7 @@ final class ZipReader {
 					throw new \RuntimeException( 'The entry could not be inflated.' );
 				}
 				$crc = Crc32::of( $data );
-				if ( strlen( $data ) !== fwrite( $out, $data ) ) {
-					throw new \RuntimeException( 'The entry could not be written.' );
-				}
+				$sink( $data );
 			} else {
 				throw new \RuntimeException( 'Unsupported compression method.' );
 			}

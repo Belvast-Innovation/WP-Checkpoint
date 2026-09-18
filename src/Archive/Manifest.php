@@ -240,6 +240,12 @@ final class Manifest {
 			$out['volumes'][] = $entry;
 		}
 
+		// The copy inside the last volume cannot describe that volume: readers never derive a full pass from it.
+		$out['embedded'] = false;
+		if ( array_key_exists( 'embedded', $data ) ) {
+			$out['embedded'] = self::bool_field( $data, 'embedded', '' );
+		}
+
 		if ( array_key_exists( 'encryption', $data ) && null !== $data['encryption'] ) {
 			throw new ManifestError( 'encryption', 'Encryption is not supported by this format version.' );
 		}
@@ -280,6 +286,17 @@ final class Manifest {
 	 */
 	public function format_version(): int {
 		return (int) $this->data['format_version'];
+	}
+
+	/**
+	 * Whether this is the copy embedded in the last volume (its volume list
+	 * leaves out the volume holding it; a verifier never reports a full pass
+	 * from it).
+	 *
+	 * @return bool
+	 */
+	public function embedded(): bool {
+		return (bool) $this->data['embedded'];
 	}
 
 	/**
@@ -352,6 +369,18 @@ final class Manifest {
 	 */
 	public function files_index(): array {
 		return $this->data['files']['index'];
+	}
+
+	/**
+	 * Declared file count and total bytes.
+	 *
+	 * @return array{count: int, bytes: int}
+	 */
+	public function files_summary(): array {
+		return array(
+			'count' => (int) $this->data['files']['count'],
+			'bytes' => (int) $this->data['files']['bytes'],
+		);
 	}
 
 	/**

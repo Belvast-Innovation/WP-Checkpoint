@@ -264,6 +264,9 @@
         ]
       }
     },
+    "embedded": {
+      "type": "boolean"
+    },
     "encryption": {
       "type": "null"
     },

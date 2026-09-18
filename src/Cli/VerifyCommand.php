@@ -1,0 +1,179 @@
+<?php
+/**
+ * The wp wpcheckpoint verify command.
+ *
+ * @package WPCheckpoint
+ */
+
+namespace WPCheckpoint\Cli;
+
+use WP_CLI;
+use WPCheckpoint\Archive\ArchiveVerifier;
+use WPCheckpoint\Archive\VerificationResult;
+use WPCheckpoint\Jobs\JobPresenter;
+use WPCheckpoint\Support\Directories;
+
+defined( 'ABSPATH' ) || exit;
+
+/**
+ * Verifies an archive from the command line. Only loaded under WP-CLI.
+ */
+final class VerifyCommand {
+
+	const EXIT_PASSED             = 0;
+	const EXIT_FAILED             = 1;
+	const EXIT_INVALID            = 2;
+	const EXIT_UNSUPPORTED_LAYOUT = 3;
+	const EXIT_PASSED_PARTIAL     = 4;
+	const EXIT_CHANGED            = 5;
+	const EXIT_UNREADABLE         = 6;
+
+	/**
+	 * Presenter (its clean() pipeline).
+	 *
+	 * @var JobPresenter
+	 */
+	private $presenter;
+
+	/**
+	 * Storage directories (the work directory lives under tmp/).
+	 *
+	 * @var Directories
+	 */
+	private $directories;
+
+	/**
+	 * Constructor.
+	 *
+	 * @param JobPresenter $presenter   Presenter.
+	 * @param Directories  $directories Directories.
+	 */
+	public function __construct( JobPresenter $presenter, Directories $directories ) {
+		$this->presenter   = $presenter;
+		$this->directories = $directories;
+	}
+
+	/**
+	 * Verify an archive against its manifest.
+	 *
+	 * ## OPTIONS
+	 *
+	 * <path>
+	 * : The standalone manifest (.manifest.json), or the last volume to verify from its embedded copy.
+	 *
+	 * [--depth=<depth>]
+	 * : structure checks the manifest, the volumes' presence and the sidecar indexes; full also hashes every volume and entry.
+	 * ---
+	 * default: full
+	 * options:
+	 *   - structure
+	 *   - full
+	 * ---
+	 *
+	 * [--format=<format>]
+	 * : text or json.
+	 * ---
+	 * default: text
+	 * options:
+	 *   - text
+	 *   - json
+	 * ---
+	 *
+	 * ## EXIT CODES
+	 *
+	 * 0 intact, 1 damaged, 2 manifest could not be read, 3 layout not supported by this verifier, 4 intact as far as checked (embedded copy or structure only), 5 archive changed during the run (verify again later), 6 this server could not read or write what the check needs.
+	 *
+	 * @param string[]             $args       Positional arguments.
+	 * @param array<string, mixed> $assoc_args Options.
+	 * @return void
+	 */
+	public function __invoke( array $args, array $assoc_args ): void {
+		$path = (string) $args[0];
+		if ( ! is_file( $path ) ) {
+			WP_CLI::error( 'No such file.' );
+		}
+		$depth    = (string) ( $assoc_args['depth'] ?? ArchiveVerifier::DEPTH_FULL );
+		$work_dir = $this->make_work_dir();
+		$error    = '';
+		try {
+			$verifier = ArchiveVerifier::open( $path, $work_dir, $depth );
+			$result   = $verifier->run();
+		} catch ( \InvalidArgumentException $e ) {
+			$error = $e->getMessage();
+		} catch ( \RuntimeException $e ) {
+			$error = $e->getMessage();
+		} finally {
+			// WP_CLI::error() exits, and exit skips finally blocks: clean up before reporting.
+			$this->remove_work_dir( $work_dir );
+		}
+		if ( '' !== $error || ! isset( $result ) ) {
+			WP_CLI::error( $this->presenter->clean( $error ) );
+		}
+		$clean = array( $this->presenter, 'clean' );
+		if ( 'json' === ( $assoc_args['format'] ?? 'text' ) ) {
+			WP_CLI::line( (string) wp_json_encode( $result->to_array( $clean ) ) );
+		} else {
+			WP_CLI::line( $result->to_text( $clean ) );
+		}
+		WP_CLI::halt( self::exit_code( $result->outcome() ) );
+	}
+
+	/**
+	 * Exit code for an outcome.
+	 *
+	 * @param string $outcome VerificationResult outcome.
+	 * @return int
+	 */
+	public static function exit_code( string $outcome ): int {
+		switch ( $outcome ) {
+			case VerificationResult::PASSED:
+				return self::EXIT_PASSED;
+			case VerificationResult::PASSED_PARTIAL:
+				return self::EXIT_PASSED_PARTIAL;
+			case VerificationResult::INVALID:
+				return self::EXIT_INVALID;
+			case VerificationResult::UNSUPPORTED_LAYOUT:
+				return self::EXIT_UNSUPPORTED_LAYOUT;
+			case VerificationResult::CHANGED:
+				return self::EXIT_CHANGED;
+			case VerificationResult::UNREADABLE:
+				return self::EXIT_UNREADABLE;
+			default:
+				return self::EXIT_FAILED;
+		}
+	}
+
+	/**
+	 * A private directory for the extracted indexes: under the storage tmp/
+	 * directory when there is one, else the system temporary directory.
+	 *
+	 * @return string
+	 */
+	private function make_work_dir(): string {
+		$base = $this->directories->tmp();
+		if ( '' === $base ) {
+			$base = sys_get_temp_dir();
+		}
+		$dir = $base . DIRECTORY_SEPARATOR . 'verify-' . bin2hex( random_bytes( 8 ) );
+		if ( ! @mkdir( $dir, 0700 ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- failure is reported below.
+			WP_CLI::error( 'The work directory could not be created.' );
+		}
+		return $dir;
+	}
+
+	/**
+	 * Remove the work directory and the extracted indexes.
+	 *
+	 * @param string $dir Directory.
+	 * @return void
+	 */
+	private function remove_work_dir( string $dir ): void {
+		$files = glob( $dir . DIRECTORY_SEPARATOR . '*' );
+		foreach ( is_array( $files ) ? $files : array() as $file ) {
+			if ( is_file( $file ) ) {
+				wp_delete_file( $file );
+			}
+		}
+		@rmdir( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_rmdir -- best effort cleanup.
+	}
+}

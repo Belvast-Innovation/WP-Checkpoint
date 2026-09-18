@@ -42,6 +42,23 @@ final class Utf8Test extends TestCase {
 		}
 	}
 
+	public function test_terminal_controls_and_bidi_overrides_are_neutralized(): void {
+		$r = Utf8::REPLACEMENT;
+		// C0 except tab and newline, DEL.
+		$this->assertSame( "a{$r}[31mb\tc\nd{$r}e{$r}", Utf8::neutralize_controls( "a\x1b[31mb\tc\nd\x7fe\r" ) );
+		// C1 (U+0085, U+009B) as UTF-8.
+		$this->assertSame( "x{$r}y{$r}[2Jz", Utf8::neutralize_controls( "x\xC2\x85y\xC2\x9B[2Jz" ) );
+		// Bidi overrides and isolates; neighbouring code points in the same blocks survive.
+		$this->assertSame( "{$r}{$r}{$r}{$r}{$r}{$r}{$r}{$r}{$r}", Utf8::neutralize_controls( "\u{202A}\u{202B}\u{202C}\u{202D}\u{202E}\u{2066}\u{2067}\u{2068}\u{2069}" ) );
+		$this->assertSame( "\u{2029}\u{202F}\u{2065}\u{206A}", Utf8::neutralize_controls( "\u{2029}\u{202F}\u{2065}\u{206A}" ) );
+		// Ordinary multibyte text, including U+00C2-lead sequences that are not C1, is untouched.
+		$this->assertSame( "Ünïcödé — 表 ‑ 🙂 ¡\u{00A0}¿", Utf8::neutralize_controls( "Ünïcödé — 表 ‑ 🙂 ¡\u{00A0}¿" ) );
+		$this->assertSame( '', Utf8::neutralize_controls( '' ) );
+		foreach ( array( "\x1b", "\xC2\x9B", "\u{202E}", "\x00", "\x7f" ) as $bad ) {
+			$this->assertStringNotContainsString( $bad, Utf8::neutralize_controls( Utf8::scrub( "start{$bad}end" ) ) );
+		}
+	}
+
 	public function test_scrub_deep_covers_keys_and_nested_values(): void {
 		$in  = array( "k\xFF" => array( 'v' => "x\xFE", 'n' => 5, 'ok' => 'fine' ) );
 		$out = Utf8::scrub_deep( $in );

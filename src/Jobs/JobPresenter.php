@@ -107,7 +107,13 @@ final class JobPresenter {
 	}
 
 	/**
-	 * The pipeline: scrub, redact, mask paths, mask hosts. Fails closed.
+	 * The pipeline: scrub, neutralize terminal controls, redact, mask
+	 * paths, mask hosts. Fails closed. Every text that leaves the engine
+	 * (progress messages, errors, log tails, verification findings) goes
+	 * through here, and untrusted input reaches it (archive entry names,
+	 * manifest strings), so the pipeline must cover what a terminal, a
+	 * log viewer or a ticket would interpret: escape sequences and
+	 * bidirectional overrides are replaced, not passed on.
 	 *
 	 * @param string                $text  Text.
 	 * @param array<string, string> $extra Extra placeholder => path (the job's storage directory).
@@ -117,7 +123,7 @@ final class JobPresenter {
 		if ( '' === $text ) {
 			return '';
 		}
-		$text   = $this->redactor->redact( Utf8::scrub( $text ) );
+		$text   = $this->redactor->redact( Utf8::neutralize_controls( Utf8::scrub( $text ) ) );
 		$masked = Report::mask_paths( $text, array_merge( $extra, $this->paths ) );
 		if ( ! is_string( $masked ) ) {
 			return Report::failure_text();
