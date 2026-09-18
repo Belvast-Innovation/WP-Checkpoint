@@ -1,0 +1,430 @@
+<?php
+
+namespace WPCheckpoint\Tests\Unit\Archive;
+
+use WPCheckpoint\Archive\ChunkHasher;
+use WPCheckpoint\Archive\InsufficientSpace;
+use WPCheckpoint\Archive\Packer;
+use WPCheckpoint\Archive\ZipFormat;
+use WPCheckpoint\Archive\ZipReader;
+use Yoast\PHPUnitPolyfills\TestCases\TestCase;
+
+final class PackerTest extends TestCase {
+
+	/** @var string */
+	private $root;
+
+	/** @var string */
+	private $src;
+
+	/** @var string */
+	private $out;
+
+	protected function set_up(): void {
+		$this->root = sys_get_temp_dir() . '/wpcheckpoint-packer-' . bin2hex( random_bytes( 4 ) );
+		$this->src  = $this->root . '/src';
+		$this->out  = $this->root . '/out';
+		mkdir( $this->src, 0700, true );
+		mkdir( $this->out, 0700, true );
+	}
+
+	protected function tear_down(): void {
+		$this->rm( $this->root );
+	}
+
+	private function rm( string $dir ): void {
+		foreach ( scandir( $dir ) ?: array() as $entry ) {
+			if ( '.' === $entry || '..' === $entry ) {
+				continue;
+			}
+			$path = $dir . '/' . $entry;
+			if ( is_dir( $path ) && ! is_link( $path ) ) {
+				$this->rm( $path );
+			} else {
+				unlink( $path );
+			}
+		}
+		rmdir( $dir );
+	}
+
+	/**
+	 * A deterministic source file.
+	 */
+	private function source( string $name, int $bytes, int $seed = 1 ): string {
+		$path = $this->src . '/' . $name;
+		if ( ! is_dir( dirname( $path ) ) ) {
+			mkdir( dirname( $path ), 0700, true );
+		}
+		$h    = fopen( $path, 'wb' );
+		$left = $bytes;
+		$i    = $seed;
+		while ( $left > 0 ) {
+			$piece = str_repeat( hash( 'sha256', (string) $i++, true ), 1024 ); // 32 KiB of pseudo-random, incompressible bytes.
+			$piece = substr( $piece, 0, $left );
+			fwrite( $h, $piece );
+			$left -= strlen( $piece );
+		}
+		fclose( $h );
+		return $path;
+	}
+
+	private function options( array $extra = array() ): array {
+		return array_merge(
+			array(
+				'volume_bytes'       => 1048576,   // 1 MiB threshold, so tests cross it cheaply.
+				'volume_chunk_bytes' => 262144,    // 256 KiB container chunks.
+				'deflate_max_bytes'  => 65536,
+				'disk_free'          => static function (): int {
+					return PHP_INT_MAX;
+				},
+			),
+			$extra
+		);
+	}
+
+	/**
+	 * Drive a packer through a list of [source, entry, mtime] with the given piece size.
+	 */
+	private function pack( array $files, array $options, int $piece = 4194304, $manifest = '{"embedded":true}' ): Packer {
+		$packer = Packer::open( $this->out, 'site-20260918-100000-a1b2', array(), $options );
+		foreach ( $files as list( $source, $entry, $mtime ) ) {
+			$packer->add_entry( $source, $entry, $mtime );
+			while ( $packer->write_piece( $piece ) > 0 ) {
+				continue;
+			}
+		}
+		$index = $this->source( 'files.index.jsonl', 300 );
+		$packer->finish( array( 'files.index.jsonl' => $index ), $manifest, 1758196800 );
+		while ( $packer->hash_next_block() ) {
+			continue;
+		}
+		$packer->close();
+		return $packer;
+	}
+
+	private function unzip_ok( string $path ): bool {
+		if ( 'Windows' === PHP_OS_FAMILY || ! is_executable( '/usr/bin/unzip' ) ) {
+			$this->markTestSkipped( 'unzip is not available' );
+		}
+		exec( '/usr/bin/unzip -t ' . escapeshellarg( $path ) . ' 2>&1', $lines, $code );
+		return 0 === $code;
+	}
+
+	public function test_a_single_volume_archive_is_a_valid_zip_that_other_tools_open(): void {
+		$files  = array(
+			array( $this->source( 'small.txt', 1000 ), 'files/wp-content/small.txt', 1758196800 ),
+			array( $this->source( 'empty.txt', 0 ), 'files/wp-content/empty.txt', 1758196800 ),
+			array( $this->source( 'big.bin', 200000 ), 'files/wp-content/uploads/2026/09/big.bin', 1600000000 ),
+			array( $this->source( 'umlaut.txt', 10 ), 'files/wp-content/uploads/Übergrößen 中文.txt', 1758196800 ),
+		);
+		$packer = $this->pack( $files, $this->options() );
+		$paths  = $packer->sealed_paths();
+		$this->assertCount( 1, $paths );
+		$this->assertStringEndsWith( 'site-20260918-100000-a1b2.wpcheckpoint.zip', $paths[0], 'a single volume takes the single name' );
+		$this->assertTrue( $this->unzip_ok( $paths[0] ), 'unzip -t accepts it' );
+		$this->assertSame( array(), glob( $this->out . '/*.partial' ) ?: array() );
+		$this->assertSame( array(), glob( $this->out . '/*.cdr' ) ?: array() );
+
+		$reader  = ZipReader::open( $paths[0] );
+		$entries = $reader->entries();
+		$this->assertSame( array( 'files/wp-content/small.txt', 'files/wp-content/empty.txt', 'files/wp-content/uploads/2026/09/big.bin', 'files/wp-content/uploads/Übergrößen 中文.txt', 'files.index.jsonl', 'manifest.json' ), array_column( $entries, 'name' ) );
+		$this->assertSame( ZipFormat::METHOD_DEFLATE, $entries[0]['method'], 'small entries are deflated' );
+		$this->assertSame( ZipFormat::METHOD_STORE, $entries[1]['method'], 'empty entries are stored' );
+		$this->assertSame( ZipFormat::METHOD_STORE, $entries[2]['method'], 'large entries are stored' );
+		foreach ( $entries as $entry ) {
+			$this->assertSame( ZipFormat::FLAG_UTF8, $entry['flags'] & ZipFormat::FLAG_UTF8, 'UTF-8 names are flagged' );
+			$this->assertNull( $entry['problem'] );
+		}
+		$this->assertSame( '{"embedded":true}', $reader->read( $reader->find( 'manifest.json' ) ) );
+
+		$extracted = $this->root . '/x';
+		mkdir( $extracted );
+		foreach ( $entries as $entry ) {
+			$reader->extract( $entry, $extracted );
+		}
+		foreach ( $files as list( $source, $entry ) ) {
+			$this->assertSame( hash_file( 'sha256', $source ), hash_file( 'sha256', $extracted . '/' . $entry ), $entry );
+		}
+
+		if ( class_exists( 'ZipArchive' ) ) {
+			$zip = new \ZipArchive();
+			$this->assertTrue( $zip->open( $paths[0] ) );
+			$this->assertSame( 6, $zip->numFiles );
+			$this->assertSame( hash_file( 'sha256', $files[2][0] ), hash( 'sha256', (string) $zip->getFromName( 'files/wp-content/uploads/2026/09/big.bin' ) ), 'ZipArchive reads a stored entry' );
+			$this->assertSame( hash_file( 'sha256', $files[0][0] ), hash( 'sha256', (string) $zip->getFromName( 'files/wp-content/small.txt' ) ), 'ZipArchive inflates a deflated entry' );
+			$zip->close();
+		}
+
+		$volumes = $packer->volume_entries();
+		$this->assertCount( 1, $volumes );
+		$expect = ChunkHasher::content_hash( $paths[0], 262144 );
+		$this->assertSame( $expect['sha256'], $volumes[0]['sha256'] );
+		$this->assertSame( $expect['chunks'], isset( $volumes[0]['chunks'] ) ? $volumes[0]['chunks'] : null, 'container chunks hashed after sealing match the format rule' );
+		$this->assertSame( array(), $packer->volume_entries( true ), 'the embedded copy leaves out the volume that holds it' );
+	}
+
+	public function test_volumes_are_sealed_between_entries_and_an_entry_never_spans_volumes(): void {
+		$files = array();
+		for ( $i = 0; $i < 5; $i++ ) {
+			$files[] = array( $this->source( "f$i.bin", 400000, $i + 1 ), "files/f$i.bin", 1758196800 );
+		}
+		$files[] = array( $this->source( 'huge.bin', 1500000, 9 ), 'files/huge.bin', 1758196800 ); // Larger than the volume threshold on its own.
+		$packer  = $this->pack( $files, $this->options() );
+		$paths   = $packer->sealed_paths();
+		$this->assertGreaterThanOrEqual( 3, count( $paths ) );
+		$this->assertStringEndsWith( '.part001.wpcheckpoint.zip', $paths[0] );
+		$names = array();
+		foreach ( $paths as $path ) {
+			$this->assertTrue( $this->unzip_ok( $path ), basename( $path ) );
+			$reader = ZipReader::open( $path );
+			foreach ( $reader->entries() as $entry ) {
+				$names[] = $entry['name'];
+			}
+		}
+		$this->assertSame( array( 'files/f0.bin', 'files/f1.bin', 'files/f2.bin', 'files/f3.bin', 'files/f4.bin', 'files/huge.bin', 'files.index.jsonl', 'manifest.json' ), $names, 'every entry exactly once, in order, whole' );
+		$huge = null;
+		foreach ( $paths as $path ) {
+			$found = ZipReader::open( $path )->find( 'files/huge.bin' );
+			if ( null !== $found ) {
+				$huge = filesize( $path );
+			}
+		}
+		$this->assertGreaterThan( 1048576, $huge, 'the volume holding the oversized entry exceeds the threshold' );
+		$entries = $packer->volume_entries();
+		$this->assertCount( count( $paths ), $entries );
+		$this->assertCount( count( $paths ) - 1, $packer->volume_entries( true ) );
+		foreach ( $entries as $i => $entry ) {
+			$this->assertSame( ChunkHasher::content_hash( $paths[ $i ], 262144 )['sha256'], $entry['sha256'], basename( $paths[ $i ] ) );
+		}
+	}
+
+	public function test_resuming_from_state_after_a_crash_yields_the_same_bytes(): void {
+		$files = array(
+			array( $this->source( 'a.bin', 300000, 1 ), 'files/a.bin', 1758196800 ),
+			array( $this->source( 'b.txt', 3000, 2 ), 'files/b.txt', 1758196800 ),
+			array( $this->source( 'c.bin', 700000, 3 ), 'files/c.bin', 1758196800 ),
+		);
+		$reference = $this->pack( $files, $this->options() );
+		$expected  = array();
+		foreach ( $reference->sealed_paths() as $path ) {
+			$expected[ basename( $path ) ] = hash_file( 'sha256', $path );
+		}
+		$this->rm( $this->out );
+		mkdir( $this->out );
+
+		// Crash after every piece: keep only the state, corrupt what a dying tick may leave behind, resume.
+		$state = array();
+		$index = $this->source( 'files.index.jsonl', 300 );
+		$step  = 0;
+		foreach ( $files as list( $source, $entry, $mtime ) ) {
+			$packer = Packer::open( $this->out, 'site-20260918-100000-a1b2', $state, $this->options() );
+			$packer->add_entry( $source, $entry, $mtime );
+			$state = $packer->state();
+			$packer->close();
+			do {
+				$packer = Packer::open( $this->out, 'site-20260918-100000-a1b2', $state, $this->options() );
+				$more   = $packer->write_piece( 100000 );
+				$state  = $packer->state();
+				$packer->close();
+				// The tick died after the checkpoint: garbage after the committed point, a torn record line.
+				foreach ( glob( $this->out . '/*.partial' ) ?: array() as $partial ) {
+					file_put_contents( $partial, str_repeat( 'X', 1 + ( $step % 7 ) ), FILE_APPEND );
+				}
+				foreach ( glob( $this->out . '/*.cdr' ) ?: array() as $cdr ) {
+					file_put_contents( $cdr, '{"torn":', FILE_APPEND );
+				}
+				++$step;
+			} while ( $more > 0 );
+		}
+		$packer = Packer::open( $this->out, 'site-20260918-100000-a1b2', $state, $this->options() );
+		$packer->finish( array( 'files.index.jsonl' => $index ), '{"embedded":true}', 1758196800 );
+		$state = $packer->state();
+		$packer->close();
+		$packer = Packer::open( $this->out, 'site-20260918-100000-a1b2', $state, $this->options() );
+		while ( $packer->hash_next_block() ) {
+			$state  = $packer->state();
+			$packer = Packer::open( $this->out, 'site-20260918-100000-a1b2', $state, $this->options() );
+		}
+		$this->assertGreaterThan( 10, $step, 'many ticks' );
+		$actual = array();
+		foreach ( $packer->sealed_paths() as $path ) {
+			$actual[ basename( $path ) ] = hash_file( 'sha256', $path );
+		}
+		$this->assertSame( $expected, $actual, 'byte-for-byte identical to the uninterrupted run' );
+		foreach ( $packer->sealed_paths() as $path ) {
+			$this->assertTrue( $this->unzip_ok( $path ) );
+		}
+	}
+
+	public function test_lost_buffers_rewind_a_stored_entry(): void {
+		$source = $this->source( 'a.bin', 300000, 1 );
+		$packer = Packer::open( $this->out, 'site', array(), $this->options() );
+		$packer->add_entry( $source, 'files/a.bin', 1758196800 );
+		$packer->write_piece( 100000 );
+		$packer->write_piece( 100000 );
+		$state = $packer->state();
+		$packer->close();
+		// The OS dropped the last 50000 bytes the tick believed it had written.
+		$partial = glob( $this->out . '/*.partial' )[0];
+		$h       = fopen( $partial, 'r+b' );
+		ftruncate( $h, filesize( $partial ) - 50000 );
+		fclose( $h );
+		$packer = Packer::open( $this->out, 'site', $state, $this->options() );
+		while ( $packer->write_piece( 100000 ) > 0 ) {
+			continue;
+		}
+		$packer->finish( array(), '{"embedded":true}', 1758196800 );
+		$path   = $packer->sealed_paths()[0];
+		$reader = ZipReader::open( $path );
+		$out    = $this->root . '/x';
+		mkdir( $out );
+		$reader->extract( $reader->find( 'files/a.bin' ), $out );
+		$this->assertSame( hash_file( 'sha256', $source ), hash_file( 'sha256', $out . '/files/a.bin' ), 'CRC was recomputed and the data is complete' );
+	}
+
+	public function test_zip64_records_are_written_when_the_threshold_says_so(): void {
+		$files  = array(
+			array( $this->source( 'a.bin', 300000, 1 ), 'files/a.bin', 1758196800 ),
+			array( $this->source( 'b.bin', 300000, 2 ), 'files/b.bin', 1758196800 ),
+		);
+		$packer = $this->pack( $files, $this->options( array( 'zip64_threshold' => 200000 ) ) );
+		$path   = $packer->sealed_paths()[0];
+		$this->assertTrue( $this->unzip_ok( $path ), 'unzip -t accepts the zip64 structures' );
+		$reader = ZipReader::open( $path );
+		$this->assertSame( 300000, $reader->find( 'files/b.bin' )['usize'], 'sizes come from the zip64 extra field' );
+		$out = $this->root . '/x';
+		mkdir( $out );
+		$reader->extract( $reader->find( 'files/b.bin' ), $out );
+		$this->assertSame( hash_file( 'sha256', $files[1][0] ), hash_file( 'sha256', $out . '/files/b.bin' ) );
+		if ( class_exists( 'ZipArchive' ) ) {
+			$zip = new \ZipArchive();
+			$this->assertTrue( $zip->open( $path ) );
+			$this->assertSame( 300000, $zip->statName( 'files/a.bin' )['size'] );
+			$zip->close();
+		}
+	}
+
+	public function test_summaries_that_do_not_fit_get_their_own_last_volume(): void {
+		$files  = array( array( $this->source( 'a.bin', 1000000, 1 ), 'files/a.bin', 1758196800 ) );
+		$packer = Packer::open( $this->out, 'site', array(), $this->options() );
+		foreach ( $files as list( $source, $entry, $mtime ) ) {
+			$packer->add_entry( $source, $entry, $mtime );
+			while ( $packer->write_piece() > 0 ) {
+				continue;
+			}
+		}
+		$index = $this->source( 'files.index.jsonl', 200000 );
+		$packer->finish( array( 'files.index.jsonl' => $index ), '{"embedded":true}', 1758196800 );
+		$paths = $packer->sealed_paths();
+		$this->assertCount( 2, $paths, 'the summaries did not fit next to the data: a volume of their own' );
+		$this->assertSame( array( 'files.index.jsonl', 'manifest.json' ), array_column( ZipReader::open( $paths[1] )->entries(), 'name' ) );
+	}
+
+	public function test_disk_space_and_entry_limits(): void {
+		$source = $this->source( 'a.bin', 300000, 1 );
+		$packer = Packer::open( $this->out, 'site', array(), $this->options( array( 'disk_free' => static function (): int {
+			return 1000;
+		} ) ) );
+		$caught = null;
+		try {
+			$packer->add_entry( $source, 'files/a.bin', 1758196800 );
+		} catch ( InsufficientSpace $e ) {
+			$caught = $e;
+		}
+		$this->assertInstanceOf( \WPCheckpoint\Jobs\TransientFailure::class, $caught, 'a full disk is a transient failure the runner retries with back-off' );
+
+		$packer = Packer::open( $this->out, 'site2', array(), $this->options( array( 'disk_free' => static function () {
+			return false; // Unknown: does not block.
+		} ) ) );
+		$packer->add_entry( $source, 'files/a.bin', 1758196800 );
+		$this->assertGreaterThan( 0, $packer->write_piece( 1000 ) );
+		$this->assertTrue( $packer->has_open_entry() );
+		$message = '';
+		try {
+			$packer->add_entry( $source, 'files/b.bin', 1758196800 );
+		} catch ( \RuntimeException $e ) {
+			$message = $e->getMessage();
+		}
+		$this->assertStringContainsString( 'in progress', $message, 'an entry is still open' );
+		$packer->abort_entry();
+		$this->assertFalse( $packer->has_open_entry() );
+		$message = '';
+		try {
+			$packer->add_entry( $source, '../evil', 1758196800 );
+		} catch ( \RuntimeException $e ) {
+			$message = $e->getMessage();
+		}
+		$this->assertStringContainsString( 'Invalid entry path', $message, 'entry paths are validated' );
+		$this->assertSame( PHP_INT_SIZE >= 8 ? 4398046511104 : 2147483647, Packer::max_entry_bytes() );
+		$this->assertSame( Packer::VOLUME_BYTES + Packer::SPACE_MARGIN_BYTES, Packer::required_free_bytes() );
+	}
+
+	/**
+	 * The acceptance case: 2 GiB of data packed within 128 MB of memory.
+	 * Sources are sparse (zeros) so only the archive costs disk; the stored
+	 * entries are copied byte for byte, so the archive is real.
+	 *
+	 * @group slow
+	 */
+	public function test_two_gigabytes_are_packed_within_128_megabytes_of_memory(): void {
+		if ( 'Windows' === PHP_OS_FAMILY ) {
+			$this->markTestSkipped( 'Sparse sources are not guaranteed on the Windows runner.' );
+		}
+		if ( -1 === (int) ini_get( 'memory_limit' ) || (int) ini_get( 'memory_limit' ) > 128 ) {
+			ini_set( 'memory_limit', '128M' );
+		}
+		$files = array();
+		foreach ( array( 700, 700, 748 ) as $i => $mb ) {
+			$path = $this->src . "/big$i.bin";
+			$h    = fopen( $path, 'wb' );
+			fwrite( $h, "start$i" );
+			ftruncate( $h, $mb * 1048576 );
+			fclose( $h );
+			$files[] = array( $path, "files/big$i.bin", 1758196800 );
+		}
+		$before = memory_get_usage( true );
+		$packer = Packer::open( $this->out, 'big', array(), array( 'disk_free' => static function () {
+			return false;
+		} ) );
+		foreach ( $files as list( $source, $entry, $mtime ) ) {
+			$packer->add_entry( $source, $entry, $mtime );
+			while ( $packer->write_piece() > 0 ) {
+				continue;
+			}
+		}
+		$packer->finish( array(), '{"embedded":true}', 1758196800 );
+		while ( $packer->hash_next_block() ) {
+			continue;
+		}
+		$packer->close();
+		$this->assertLessThan( 32 * 1048576, memory_get_peak_usage( true ) - $before, 'memory growth stays below the step budget' );
+		$paths = $packer->sealed_paths();
+		// 700 + 700 MB reach the 1 GiB threshold, so the first volume holds both (it exceeds the threshold
+		// by its last entry, an entry never spans volumes) and the second holds the rest.
+		$this->assertCount( 2, $paths );
+		$this->assertGreaterThan( 1073741824, filesize( $paths[0] ), 'the seal threshold is not a size guarantee' );
+		$total = 0;
+		foreach ( $paths as $path ) {
+			$total += filesize( $path );
+			$this->assertTrue( $this->unzip_ok( $path ), basename( $path ) );
+		}
+		$this->assertGreaterThan( 2 * 1073741824, $total );
+		$entries = $packer->volume_entries();
+		$this->assertCount( ChunkHasher::chunk_count( (int) filesize( $paths[0] ), 268435456 ), $entries[0]['chunks'], '256 MiB container chunks' );
+		$this->assertSame( ChunkHasher::content_hash( $paths[0], 268435456 )['sha256'], $entries[0]['sha256'] );
+	}
+
+	public function test_a_changed_source_is_refused(): void {
+		$source = $this->source( 'a.bin', 300000, 1 );
+		$packer = Packer::open( $this->out, 'site', array(), $this->options() );
+		$packer->add_entry( $source, 'files/a.bin', 1758196800 );
+		$packer->write_piece( 100000 );
+		$state = $packer->state();
+		$packer->close();
+		file_put_contents( $source, 'grown', FILE_APPEND );
+		$packer = Packer::open( $this->out, 'site', $state, $this->options() );
+		$this->expectException( \RuntimeException::class );
+		$this->expectExceptionMessage( 'changed while it was being archived' );
+		$packer->write_piece( 100000 );
+	}
+}
