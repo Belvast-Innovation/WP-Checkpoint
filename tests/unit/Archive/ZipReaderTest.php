@@ -198,6 +198,110 @@ final class ZipReaderTest extends TestCase {
 		$reader->read( $reader->entries()[0] );
 	}
 
+	public function test_entries_are_hashed_by_streaming_with_the_crc_checked(): void {
+		$big    = str_repeat( 'x', 1048576 + 5 ) . str_repeat( 'y', 1048576 ) . 'tail';
+		$path   = $this->craft(
+			array(
+				'store.bin' => $big,
+				'small.txt' => 'hello',
+				'empty.txt' => '',
+				'deflate.bin' => $big,
+			),
+			array( 'deflate.bin' => array( 'method' => ZipFormat::METHOD_DEFLATE ) )
+		);
+		$reader = ZipReader::open( $path );
+		$store  = $reader->find( 'store.bin' );
+		$this->assertSame( hash( 'sha256', $big ), $reader->hash_entry( $store ) );
+		$this->assertSame( hash( 'sha256', 'hello' ), $reader->hash_entry( $reader->find( 'small.txt' ) ) );
+		$this->assertSame( hash( 'sha256', '' ), $reader->hash_entry( $reader->find( 'empty.txt' ) ) );
+		$this->assertSame( hash( 'sha256', $big ), $reader->hash_entry( $reader->find( 'deflate.bin' ) ) );
+
+		$chunks = array( hash( 'sha256', substr( $big, 0, 1048576 ) ), hash( 'sha256', substr( $big, 1048576, 1048576 ) ), hash( 'sha256', substr( $big, 2097152 ) ) );
+		$this->assertSame( $chunks, $reader->hash_entry_chunks( $reader->find( 'deflate.bin' ), 1048576 ) );
+		$this->assertSame( $chunks, $reader->hash_entry_chunks( $store, 1048576 ) );
+		$this->assertSame( array(), $reader->hash_entry_chunks( $reader->find( 'empty.txt' ), 1048576 ) );
+
+		$this->assertSame( $chunks[1], $reader->hash_entry_range( $store, 1048576, 1048576 ) );
+		$this->assertSame( $chunks[2], $reader->hash_entry_range( $store, 2097152, 9 ) );
+		try {
+			$reader->hash_entry_range( $store, 2097152, 10 );
+			$this->fail( 'A range beyond the entry must be refused.' );
+		} catch ( \RuntimeException $e ) {
+			$this->assertStringContainsString( 'outside the entry', $e->getMessage() );
+		}
+		try {
+			$reader->hash_entry_range( $reader->find( 'deflate.bin' ), 0, 10 );
+			$this->fail( 'A deflated entry has no ranges.' );
+		} catch ( \RuntimeException $e ) {
+			$this->assertStringContainsString( 'stored entries', $e->getMessage() );
+		}
+
+		// A flipped byte in the middle of the stored entry: the range hash differs, the whole-entry hash fails on the CRC.
+		$h = fopen( $path, 'r+b' );
+		fseek( $h, 30 + 9 + 1048576 + 100 );
+		fwrite( $h, 'Q' );
+		fclose( $h );
+		$reader = ZipReader::open( $path );
+		$this->assertNotSame( $chunks[1], $reader->hash_entry_range( $reader->find( 'store.bin' ), 1048576, 1048576 ) );
+		$this->assertSame( $chunks[0], $reader->hash_entry_range( $reader->find( 'store.bin' ), 0, 1048576 ) );
+		$this->expectException( \RuntimeException::class );
+		$this->expectExceptionMessage( 'CRC mismatch' );
+		$reader->hash_entry( $reader->find( 'store.bin' ) );
+	}
+
+	public function test_the_walk_resumes_from_a_recorded_position(): void {
+		$entries = array();
+		for ( $i = 0; $i < 50; $i++ ) {
+			$entries[ "dir/file{$i}.txt" ] = str_repeat( (string) $i, $i );
+		}
+		$reader = ZipReader::open( $this->craft( $entries ) );
+		$all    = $reader->entries();
+		$this->assertCount( 50, $all );
+		$this->assertSame( $reader->central_directory_offset(), $all[0]['cd_offset'] );
+		$this->assertSame( $all[1]['cd_offset'], $all[0]['cd_next'] );
+
+		// Resume from every position: the rest of the walk is identical to the full one.
+		foreach ( array( 1, 7, 49 ) as $from ) {
+			$seen = array();
+			$reader->each(
+				static function ( array $entry ) use ( &$seen ): bool {
+					$seen[] = $entry;
+					return true;
+				},
+				$from,
+				$all[ $from ]['cd_offset']
+			);
+			$this->assertSame( array_slice( $all, $from ), $seen );
+		}
+		// Stopping and resuming one at a time yields the same sequence.
+		$seen  = array();
+		$index = 0;
+		$next  = -1;
+		while ( $index < 50 ) {
+			$reader->each(
+				static function ( array $entry ) use ( &$seen, &$index, &$next ): bool {
+					$seen[] = $entry['name'];
+					$index  = $entry['index'] + 1;
+					$next   = $entry['cd_next'];
+					return false;
+				},
+				$index,
+				$next
+			);
+		}
+		$this->assertSame( array_keys( $entries ), $seen );
+
+		$this->expectException( \RuntimeException::class );
+		$this->expectExceptionMessage( 'does not belong' );
+		$reader->each(
+			static function (): bool {
+				return true;
+			},
+			3,
+			$reader->central_directory_offset() - 1
+		);
+	}
+
 	public function test_not_a_zip(): void {
 		file_put_contents( $this->dir . '/x.zip', str_repeat( 'nope', 100 ) );
 		$this->expectException( \RuntimeException::class );
