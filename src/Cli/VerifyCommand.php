@@ -26,6 +26,7 @@ final class VerifyCommand {
 	const EXIT_UNSUPPORTED_LAYOUT = 3;
 	const EXIT_PASSED_PARTIAL     = 4;
 	const EXIT_CHANGED            = 5;
+	const EXIT_UNREADABLE         = 6;
 
 	/**
 	 * Presenter (its clean() pipeline).
@@ -80,7 +81,7 @@ final class VerifyCommand {
 	 *
 	 * ## EXIT CODES
 	 *
-	 * 0 intact, 1 damaged, 2 manifest could not be read, 3 layout not supported by this verifier, 4 intact as far as checked (embedded copy or structure only), 5 archive changed during the run (verify again later).
+	 * 0 intact, 1 damaged, 2 manifest could not be read, 3 layout not supported by this verifier, 4 intact as far as checked (embedded copy or structure only), 5 archive changed during the run (verify again later), 6 this server could not read or write what the check needs.
 	 *
 	 * @param string[]             $args       Positional arguments.
 	 * @param array<string, mixed> $assoc_args Options.
@@ -93,15 +94,20 @@ final class VerifyCommand {
 		}
 		$depth    = (string) ( $assoc_args['depth'] ?? ArchiveVerifier::DEPTH_FULL );
 		$work_dir = $this->make_work_dir();
+		$error    = '';
 		try {
 			$verifier = ArchiveVerifier::open( $path, $work_dir, $depth );
 			$result   = $verifier->run();
 		} catch ( \InvalidArgumentException $e ) {
-			WP_CLI::error( $this->presenter->clean( $e->getMessage() ) );
+			$error = $e->getMessage();
 		} catch ( \RuntimeException $e ) {
-			WP_CLI::error( $this->presenter->clean( $e->getMessage() ) );
+			$error = $e->getMessage();
 		} finally {
+			// WP_CLI::error() exits, and exit skips finally blocks: clean up before reporting.
 			$this->remove_work_dir( $work_dir );
+		}
+		if ( '' !== $error || ! isset( $result ) ) {
+			WP_CLI::error( $this->presenter->clean( $error ) );
 		}
 		$clean = array( $this->presenter, 'clean' );
 		if ( 'json' === ( $assoc_args['format'] ?? 'text' ) ) {
@@ -130,6 +136,8 @@ final class VerifyCommand {
 				return self::EXIT_UNSUPPORTED_LAYOUT;
 			case VerificationResult::CHANGED:
 				return self::EXIT_CHANGED;
+			case VerificationResult::UNREADABLE:
+				return self::EXIT_UNREADABLE;
 			default:
 				return self::EXIT_FAILED;
 		}

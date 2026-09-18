@@ -25,7 +25,16 @@ namespace WPCheckpoint\Archive;
  * checks). A volume whose size differs from what the volumes phase
  * recorded ends the run as "changed" rather than damaged (see
  * changed()). The manifest is trusted for nothing beyond what it
- * declares: every entry is still bounded by the reader's own limits.
+ * declares: every entry is still bounded by the reader's own limits, and
+ * the unit sizes are the verifier's own (MAX_CONTENT_CHUNK,
+ * MAX_CONTAINER_CHUNK, EXTRACT_PIECE, LINES_PER_UNIT), never the
+ * manifest's. The cursor, on the other hand, is trusted: it lives where
+ * only the job engine writes, and a forged one (an entry_block pointing
+ * at the last block) would skip checks rather than escape any bound;
+ * positions that do not fit the volume make the reader fail closed.
+ * Server-side failures (work directory gone, disk full, no permission)
+ * surface as EnvironmentFailure and end the run as "unreadable", never as
+ * damage.
  */
 final class ArchiveVerifier {
 
@@ -40,8 +49,13 @@ final class ArchiveVerifier {
 	const PHASE_CONTENTS    = 'contents';
 	const PHASE_DONE        = 'done';
 
-	const LINES_PER_UNIT      = 5000;
-	const ENTRIES_PER_UNIT    = 1000;
+	const LINES_PER_UNIT   = 5000;
+	const ENTRIES_PER_UNIT = 1000;
+	// The verifier's own bounds on one unit. A manifest may declare larger hash chunks, but one SHA-256 over a
+	// chunk cannot be split across ticks, so such archives are reported as unsupported instead.
+	const MAX_CONTENT_CHUNK   = 16777216;
+	const MAX_CONTAINER_CHUNK = 268435456;
+	const EXTRACT_PIECE       = 16777216;
 	const MAX_STORED_FINDINGS = 20;
 	const FILES_PREFIX        = 'files/';
 	const MANIFEST_ENTRY      = 'manifest.json';
@@ -152,6 +166,8 @@ final class ArchiveVerifier {
 				'gap'            => false,
 				'sizes'          => array(),
 				'changed'        => false,
+				'unreadable'     => false,
+				'crc'            => 0,
 				'counts'         => array(),
 				'kinds'          => array(),
 				'findings'       => array(),
@@ -212,28 +228,11 @@ final class ArchiveVerifier {
 	 */
 	public function step(): bool {
 		try {
-			switch ( $this->state['phase'] ) {
-				case self::PHASE_MANIFEST:
-					$this->step_manifest();
-					break;
-				case self::PHASE_VOLUMES:
-					$this->step_volumes();
-					break;
-				case self::PHASE_INDEXES:
-					$this->step_indexes();
-					break;
-				case self::PHASE_INDEX_LINES:
-					$this->step_index_lines();
-					break;
-				case self::PHASE_CONTAINERS:
-					$this->step_containers();
-					break;
-				case self::PHASE_CONTENTS:
-					$this->step_contents();
-					break;
-				default:
-					return false;
-			}
+			$this->dispatch();
+		} catch ( EnvironmentFailure $e ) {
+			$this->add( new Finding( (string) $this->state['phase'], Finding::ENVIRONMENT, 'This server could not read or write what the check needs: ' . $e->getMessage() ) );
+			$this->state['unreadable'] = true;
+			$this->stop( (string) $this->state['phase'] );
 		} finally {
 			foreach ( $this->handles as $handle ) {
 				fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- stream read of an extracted index.
@@ -241,6 +240,36 @@ final class ArchiveVerifier {
 			$this->handles = array();
 		}
 		return ! $this->finished();
+	}
+
+	/**
+	 * Run the current phase's unit.
+	 *
+	 * @return void
+	 */
+	private function dispatch(): void {
+		switch ( $this->state['phase'] ) {
+			case self::PHASE_MANIFEST:
+				$this->step_manifest();
+				break;
+			case self::PHASE_VOLUMES:
+				$this->step_volumes();
+				break;
+			case self::PHASE_INDEXES:
+				$this->step_indexes();
+				break;
+			case self::PHASE_INDEX_LINES:
+				$this->step_index_lines();
+				break;
+			case self::PHASE_CONTAINERS:
+				$this->step_containers();
+				break;
+			case self::PHASE_CONTENTS:
+				$this->step_contents();
+				break;
+			default:
+				return;
+		}
 	}
 
 	/*
@@ -269,6 +298,14 @@ final class ArchiveVerifier {
 		$chunks = 0;
 		foreach ( $manifest->tables() as $table ) {
 			$chunks += $table['chunks'];
+		}
+		if ( $manifest->chunk_bytes() > self::MAX_CONTENT_CHUNK || $manifest->volume_chunk_bytes() > self::MAX_CONTAINER_CHUNK ) {
+			// One SHA-256 over a chunk cannot be split across ticks (the hash state is not serialisable on the
+			// PHP floor and the cursor holds no hash state by design), so a chunk the unit bound cannot cover is
+			// not checkable here. Not damage: another reader with a bigger budget could verify it.
+			$this->add( new Finding( self::PHASE_MANIFEST, Finding::UNSUPPORTED, sprintf( 'The manifest declares hash chunks larger than this verifier checks in one step (content %d bytes, container %d bytes; at most %d and %d are supported).', $manifest->chunk_bytes(), $manifest->volume_chunk_bytes(), self::MAX_CONTENT_CHUNK, self::MAX_CONTAINER_CHUNK ) ) );
+			$this->stop( self::PHASE_MANIFEST );
+			return;
 		}
 		$this->state['embedded'] = $manifest->embedded();
 		$this->state['counts']   = array(
@@ -509,6 +546,7 @@ final class ArchiveVerifier {
 	 * else can be attributed.
 	 *
 	 * @return void
+	 * @throws EnvironmentFailure When the work directory cannot be written or is gone.
 	 */
 	private function step_indexes(): void {
 		$which   = (string) $this->state['index'];
@@ -526,7 +564,13 @@ final class ArchiveVerifier {
 				$this->stop( self::PHASE_INDEXES );
 				return;
 			}
-			$entry = $reader->find( $spec['path'] );
+			try {
+				$entry = $reader->find( $spec['path'] );
+			} catch ( \RuntimeException $e ) {
+				$this->add( new Finding( self::PHASE_INDEXES, Finding::CORRUPT, 'The central directory of the volume is malformed: ' . $e->getMessage(), array( 'volume' => $last['ordinal'] ) ) );
+				$this->stop( self::PHASE_INDEXES );
+				return;
+			}
 			if ( null === $entry ) {
 				$this->add(
 					new Finding(
@@ -557,8 +601,14 @@ final class ArchiveVerifier {
 				$this->stop( self::PHASE_INDEXES );
 				return;
 			}
+			// One EXTRACT_PIECE per unit (a files index of a million-file site is hundreds of MB); the running
+			// CRC lives in the cursor and the last piece checks it. A deflated index (small) comes in one piece.
+			$piece  = (int) $this->state['block'];
+			$offset = $piece * self::EXTRACT_PIECE;
 			try {
-				$reader->extract( $entry, $this->work_dir );
+				$result = $reader->extract_piece( $entry, $this->work_dir, $offset, self::EXTRACT_PIECE, 0 === $piece ? 0 : (int) $this->state['crc'] );
+			} catch ( EnvironmentFailure $e ) {
+				throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged; step() reports it as an environment problem.
 			} catch ( \RuntimeException $e ) {
 				$this->add(
 					new Finding(
@@ -574,12 +624,22 @@ final class ArchiveVerifier {
 				$this->stop( self::PHASE_INDEXES );
 				return;
 			}
+			if ( ! $result['done'] ) {
+				$this->state['block'] = $piece + 1;
+				$this->state['crc']   = $result['crc'];
+				return;
+			}
 			$this->state['sub']   = 'hash';
 			$this->state['block'] = 0;
+			$this->state['crc']   = 0;
 			return;
 		}
 		$file  = $this->index_file( $which );
 		$block = (int) $this->state['block'];
+		clearstatcache();
+		if ( ! is_file( $file ) ) {
+			throw new EnvironmentFailure( 'The extracted index is no longer in the work directory.' );
+		}
 		if ( isset( $spec['chunks'] ) ) {
 			$ok   = ChunkHasher::verify_chunk( $file, $block, $this->manifest()->chunk_bytes(), $spec['chunks'][ $block ] );
 			$more = $block + 1 < count( $spec['chunks'] );
@@ -644,13 +704,13 @@ final class ArchiveVerifier {
 	 *
 	 * @param string $which 'database' or 'files'.
 	 * @return resource
-	 * @throws \RuntimeException When the extracted index is gone (work directory lost).
+	 * @throws EnvironmentFailure When the extracted index is gone (work directory lost).
 	 */
 	private function index_handle( string $which ) {
 		if ( ! isset( $this->handles[ $which ] ) ) {
 			$handle = @fopen( $this->index_file( $which ), 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- stream read; failure is thrown.
 			if ( false === $handle ) {
-				throw new \RuntimeException( 'The extracted index is no longer in the work directory.' );
+				throw new EnvironmentFailure( 'The extracted index is no longer in the work directory.' );
 			}
 			$this->handles[ $which ] = $handle;
 		}
@@ -1133,27 +1193,39 @@ final class ArchiveVerifier {
 		}
 		$bytes   = 0;
 		$entries = 0;
-		$reader->each(
-			function ( array $entry ) use ( $volume, $reader, &$bytes, &$entries ): bool {
-				$next = array(
-					'index'     => (int) $entry['index'] + 1,
-					'cd_offset' => (int) $entry['cd_next'],
-				);
-				++$entries;
-				if ( $entry['directory'] || in_array( $entry['name'], Packer::SUMMARY_ENTRIES, true ) ) {
-					$this->state['entry'] = $next;
-					return $entries < self::ENTRIES_PER_UNIT;
-				}
-				$done = $this->verify_entry( $reader, $entry, $volume['ordinal'], $bytes );
-				if ( $done ) {
-					$this->state['entry']       = $next;
-					$this->state['entry_block'] = 0;
-				}
-				return $done && ! $this->finished() && $bytes < $this->manifest()->chunk_bytes() && $entries < self::ENTRIES_PER_UNIT;
-			},
-			(int) $this->state['entry']['index'],
-			(int) $this->state['entry']['cd_offset']
-		);
+		try {
+			$reader->each(
+				function ( array $entry ) use ( $volume, $reader, &$bytes, &$entries ): bool {
+					$next = array(
+						'index'     => (int) $entry['index'] + 1,
+						'cd_offset' => (int) $entry['cd_next'],
+					);
+					++$entries;
+					if ( $entry['directory'] || in_array( $entry['name'], Packer::SUMMARY_ENTRIES, true ) ) {
+						$this->state['entry'] = $next;
+						return $entries < self::ENTRIES_PER_UNIT;
+					}
+					// The unit bound is the verifier's: an entry that would push it past MAX_CONTENT_CHUNK waits
+					// for the next unit (a large stored entry is then taken one chunk at a time).
+					if ( $bytes > 0 && $bytes + (int) min( (int) $entry['usize'], self::MAX_CONTENT_CHUNK ) > self::MAX_CONTENT_CHUNK ) {
+						return false;
+					}
+					$done = $this->verify_entry( $reader, $entry, $volume['ordinal'], $bytes );
+					if ( $done ) {
+						$this->state['entry']       = $next;
+						$this->state['entry_block'] = 0;
+					}
+					return $done && ! $this->finished() && $bytes < self::MAX_CONTENT_CHUNK && $entries < self::ENTRIES_PER_UNIT;
+				},
+				(int) $this->state['entry']['index'],
+				(int) $this->state['entry']['cd_offset']
+			);
+		} catch ( \RuntimeException $e ) {
+			$this->add( new Finding( self::PHASE_CONTENTS, Finding::CORRUPT, 'The central directory of the volume is malformed: ' . $e->getMessage(), array( 'volume' => $volume['ordinal'] ) ) );
+			$this->state['gap'] = true;
+			$this->next_volume_contents();
+			return;
+		}
 		if ( $this->finished() ) {
 			return;
 		}
@@ -1222,7 +1294,8 @@ final class ArchiveVerifier {
 			// A volume before this one was missing: the lines up to this entry belong to it.
 			$peeked = $this->resync( $peeked, $entry['name'], $ordinal );
 			if ( null === $peeked ) {
-				return true;
+				// Stopped, or LINES_PER_UNIT lines skipped: the entry stays current and the next unit goes on.
+				return $this->finished();
 			}
 		}
 		$this->state['gap'] = false;
@@ -1334,15 +1407,21 @@ final class ArchiveVerifier {
 	/**
 	 * After a missing volume, skip index lines until the current entry's
 	 * line; every skipped line is missing content. Not finding it means the
-	 * layout is not one this verifier understands.
+	 * layout is not one this verifier understands. At most LINES_PER_UNIT
+	 * lines per call: the skipped lines advance the cursor, so a later unit
+	 * continues from where this one stopped.
 	 *
 	 * @param array{which: string, line: array<string, mixed>, name: string, end: int} $peeked  Current line.
 	 * @param string                                                                   $name    Entry name.
 	 * @param int                                                                      $ordinal Volume ordinal.
-	 * @return array{which: string, line: array<string, mixed>, name: string, end: int}|null The matching line, or null after stopping.
+	 * @return array{which: string, line: array<string, mixed>, name: string, end: int}|null The matching line, or null after stopping or when the unit is used up.
 	 */
 	private function resync( array $peeked, string $name, int $ordinal ): ?array {
+		$skipped = 0;
 		while ( $peeked['name'] !== $name ) {
+			if ( ++$skipped > self::LINES_PER_UNIT ) {
+				return null;
+			}
 			$this->add( new Finding( self::PHASE_CONTENTS, Finding::MISSING, 'The content declared in the index is in no present volume.', $this->line_where( $peeked ) ) );
 			++$this->state['counts']['entries_missing'];
 			$this->consume_line( $peeked );
@@ -1367,13 +1446,18 @@ final class ArchiveVerifier {
 	}
 
 	/**
-	 * After the last volume: any line left is content the archive does not hold.
+	 * After the last volume: any line left is content the archive does not
+	 * hold, LINES_PER_UNIT of them per unit.
 	 *
 	 * @return void
 	 */
 	private function finish_contents(): void {
 		$peeked = $this->peek_line();
+		$lines  = 0;
 		while ( null !== $peeked ) {
+			if ( ++$lines > self::LINES_PER_UNIT ) {
+				return; // Next unit continues from the cursor.
+			}
 			$this->add( new Finding( self::PHASE_CONTENTS, Finding::MISSING, 'The content declared in the index is in no present volume.', $this->line_where( $peeked ) ) );
 			++$this->state['counts']['entries_missing'];
 			$this->consume_line( $peeked );

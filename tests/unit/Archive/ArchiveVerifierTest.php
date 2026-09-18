@@ -52,9 +52,12 @@ final class ArchiveVerifierTest extends TestCase {
 	 */
 	private static function find( VerificationResult $result, array $match ): ?array {
 		foreach ( self::findings( $result ) as $finding ) {
-			if ( array_intersect_key( $finding, $match ) === $match ) {
-				return $finding;
+			foreach ( $match as $key => $value ) {
+				if ( ! array_key_exists( $key, $finding ) || $finding[ $key ] !== $value ) {
+					continue 2;
+				}
 			}
+			return $finding;
 		}
 		return null;
 	}
@@ -662,6 +665,117 @@ final class ArchiveVerifierTest extends TestCase {
 		$this->assertSame( VerificationResult::CHANGED, $result->outcome() );
 		$this->assertSame( ArchiveVerifier::PHASE_INDEXES, $result->to_array( self::identity() )['stopped_at'] );
 		$this->assertNotNull( self::find( $result, array( 'kind' => Finding::CHANGED, 'volume' => 2 ) ) );
+	}
+
+	public function test_chunks_larger_than_the_verifier_can_check_in_one_unit_are_unsupported_not_damage(): void {
+		// A consistent manifest with chunk sizes above the verifier's bounds: no volume needs a chunk list any more.
+		$builder  = $this->typical();
+		$manifest = json_decode( (string) file_get_contents( $builder->manifest_path ), true );
+		$manifest['hashing']['chunk_bytes']        = ArchiveVerifier::MAX_CONTENT_CHUNK * 2;
+		$manifest['hashing']['volume_chunk_bytes'] = ArchiveVerifier::MAX_CONTAINER_CHUNK * 2;
+		foreach ( $manifest['volumes'] as $i => $volume ) {
+			unset( $manifest['volumes'][ $i ]['chunks'] );
+			$manifest['volumes'][ $i ]['sha256'] = hash_file( 'sha256', $builder->dir . '/' . $volume['path'] );
+		}
+		file_put_contents( $builder->manifest_path, json_encode( $manifest ) );
+		$result = $this->verify( $builder, $builder->manifest_path );
+		$this->assertSame( VerificationResult::UNSUPPORTED_LAYOUT, $result->outcome() );
+		$this->assertSame( ArchiveVerifier::PHASE_MANIFEST, $result->to_array( self::identity() )['stopped_at'] );
+		$finding = self::findings( $result )[0];
+		$this->assertSame( Finding::UNSUPPORTED, $finding['kind'] );
+		$this->assertStringContainsString( 'larger than this verifier checks in one step', $finding['message'] );
+		$this->assertStringContainsString( (string) ( ArchiveVerifier::MAX_CONTAINER_CHUNK * 2 ), $finding['message'] );
+		$this->assertStringNotContainsString( 'damaged', $result->to_text( self::identity() ) );
+	}
+
+	public function test_a_malformed_central_directory_is_a_finding_and_the_other_volume_is_still_checked(): void {
+		$builder = $this->typical();
+		$volume  = $builder->volumes[0];
+		$reader  = \WPCheckpoint\Archive\ZipReader::open( $volume );
+		$second  = $reader->entries()[1];
+		ArchiveBuilder::flip( $volume, (int) $second['cd_offset'] ); // The signature of the second central header.
+
+		$result = $this->verify( $builder, $builder->manifest_path );
+		$this->assertSame( VerificationResult::FAILED, $result->outcome() );
+		$this->assertNull( $result->to_array( self::identity() )['stopped_at'], 'The run went on to the end.' );
+		$finding = self::find( $result, array( 'phase' => ArchiveVerifier::PHASE_CONTENTS, 'volume' => 1, 'kind' => Finding::CORRUPT ) );
+		$this->assertNotNull( $finding );
+		$this->assertStringContainsString( 'central directory', $finding['message'] );
+		$this->assertSame( 1, $result->counts()['files_verified'], 'The second volume was walked.' );
+		$this->assertGreaterThan( 0, $result->counts()['entries_missing'], 'The first volume\'s lines were skipped as missing.' );
+
+		// The same damage in the last volume ends the run at the indexes phase.
+		$builder = $this->typical();
+		$volume  = $builder->volumes[1];
+		$reader  = \WPCheckpoint\Archive\ZipReader::open( $volume );
+		ArchiveBuilder::flip( $volume, (int) $reader->entries()[1]['cd_offset'] );
+		$result = $this->verify( $builder, $builder->manifest_path, ArchiveVerifier::DEPTH_STRUCTURE );
+		$this->assertSame( VerificationResult::FAILED, $result->outcome() );
+		$this->assertSame( ArchiveVerifier::PHASE_INDEXES, $result->to_array( self::identity() )['stopped_at'] );
+		$this->assertStringContainsString( 'central directory', self::findings( $result )[0]['message'] );
+	}
+
+	public function test_server_side_failures_are_unreadable_not_damaged(): void {
+		// The work directory disappears between units.
+		$builder  = $this->typical();
+		$work     = $builder->work_dir();
+		$verifier = ArchiveVerifier::open( $builder->manifest_path, $work, ArchiveVerifier::DEPTH_FULL );
+		while ( $verifier->step() && ArchiveVerifier::PHASE_INDEX_LINES !== $verifier->state()['phase'] ) {
+			continue;
+		}
+		foreach ( glob( $work . '/*' ) ?: array() as $file ) {
+			unlink( $file );
+		}
+		rmdir( $work );
+		$result = $verifier->run();
+		$this->assertSame( VerificationResult::UNREADABLE, $result->outcome() );
+		$this->assertTrue( $result->restore_refused() );
+		$text = $result->to_text( self::identity() );
+		$this->assertSame( 'Archive could not be checked on this server.', strtok( $text, "\n" ) );
+		$this->assertStringContainsString( 'disk space', $text );
+		$this->assertStringNotContainsString( 'damaged', $text );
+		$this->assertSame( Finding::ENVIRONMENT, self::findings( $result )[0]['kind'] );
+		$this->assertSame( VerifyCommand::EXIT_UNREADABLE, VerifyCommand::exit_code( $result->outcome() ) );
+
+		// A work directory that cannot be written.
+		if ( 'Windows' === PHP_OS_FAMILY || 0 === (int) getmyuid() ) {
+			return; // Permissions do not bite root or Windows; the case above covers the outcome.
+		}
+		$builder = $this->typical();
+		$work    = $builder->work_dir();
+		chmod( $work, 0500 );
+		try {
+			$result = ArchiveVerifier::open( $builder->manifest_path, $work, ArchiveVerifier::DEPTH_STRUCTURE )->run();
+		} finally {
+			chmod( $work, 0700 );
+		}
+		$this->assertSame( VerificationResult::UNREADABLE, $result->outcome() );
+		$this->assertSame( ArchiveVerifier::PHASE_INDEXES, $result->to_array( self::identity() )['stopped_at'] );
+	}
+
+	public function test_leftover_index_lines_are_reported_a_bounded_batch_per_unit(): void {
+		$builder = new ArchiveBuilder( array( 'deflate_max_bytes' => 65536 ) );
+		$builder->table( 'wp_options', array( 'x' ) );
+		for ( $i = 0; $i < 6000; $i++ ) {
+			$builder->file( sprintf( 'wp-content/uploads/%03d/%s.txt', $i % 100, bin2hex( random_bytes( 8 ) ) ), (string) $i );
+		}
+		$builder->file( 'wp-content/uploads/last.bin', ArchiveBuilder::noise( 3200000, 30 ) ); // Seals the first volume; the second holds only the summaries.
+		$this->builders[] = $builder->build();
+		$this->assertCount( 2, $builder->volumes );
+		unlink( $builder->volumes[0] );
+
+		$verifier = ArchiveVerifier::open( $builder->manifest_path, $builder->work_dir(), ArchiveVerifier::DEPTH_FULL );
+		$units    = 0;
+		while ( $verifier->step() ) {
+			$state = $verifier->state();
+			if ( ArchiveVerifier::PHASE_CONTENTS === $state['phase'] && $state['volume'] >= 2 ) {
+				++$units;
+			}
+		}
+		$result = $verifier->result();
+		$this->assertSame( 6002, $result->counts()['entries_missing'] );
+		$this->assertGreaterThanOrEqual( 2, $units, 'Six thousand leftover lines take more than one unit of ' . ArchiveVerifier::LINES_PER_UNIT . '.' );
+		$this->assertSame( VerificationResult::FAILED, $result->outcome() );
 	}
 
 	public function test_open_refuses_bad_arguments(): void {

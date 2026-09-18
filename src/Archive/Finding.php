@@ -13,7 +13,8 @@ namespace WPCheckpoint\Archive;
  * checked from this input), unsupported (the layout is not one this
  * verifier can check, which is not the same as damage), changed (the
  * archive was written to while it was being verified, so nothing read
- * after that is conclusive). Locations name
+ * after that is conclusive), environment (this server could not read or
+ * write what the check needs; says nothing about the archive). Locations name
  * volumes by ordinal, never by file name (the name carries the site slug).
  */
 final class Finding {
@@ -24,6 +25,7 @@ final class Finding {
 	const UNVERIFIED  = 'unverified';
 	const UNSUPPORTED = 'unsupported';
 	const CHANGED     = 'changed';
+	const ENVIRONMENT = 'environment';
 
 	/**
 	 * Fields.
@@ -106,6 +108,8 @@ final class Finding {
 	 * @return string
 	 */
 	public function to_text( callable $clean ): string {
+		// kind and phase are fixed vocabulary from this class and the verifier; only a forged cursor could
+		// put other text there, and a forged cursor means database write access already (see ArchiveVerifier).
 		$f     = $this->to_array( $clean );
 		$where = array();
 		// A block belongs to the entry when there is one (its content chunk), otherwise to the volume (its container chunk).

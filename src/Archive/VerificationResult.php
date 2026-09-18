@@ -12,8 +12,9 @@ namespace WPCheckpoint\Archive;
  * (PASSED) exists only when every phase ran on a standalone manifest and
  * nothing was found. An embedded manifest copy or a structure-only run can
  * reach PASSED_PARTIAL at best, so is_complete_pass() cannot be true for
- * them. CHANGED means the archive was written to during the run and the
- * result is inconclusive. Text and array forms take the cleaning callable
+ * them. CHANGED means the archive was written to during the run and
+ * UNREADABLE that this server could not read or write what the check
+ * needs; both are inconclusive and say nothing about the archive. Text and array forms take the cleaning callable
  * as a required argument: no report leaves without it.
  */
 final class VerificationResult {
@@ -24,6 +25,7 @@ final class VerificationResult {
 	const INVALID            = 'invalid';
 	const UNSUPPORTED_LAYOUT = 'unsupported_layout';
 	const CHANGED            = 'changed';
+	const UNREADABLE         = 'unreadable';
 
 	const REASON_EMBEDDED  = 'embedded_manifest';
 	const REASON_STRUCTURE = 'structure_only';
@@ -91,6 +93,8 @@ final class VerificationResult {
 		$reasons = array();
 		if ( ! empty( $state['invalid'] ) ) {
 			$outcome = self::INVALID;
+		} elseif ( ! empty( $state['unreadable'] ) ) {
+			$outcome = self::UNREADABLE;
 		} elseif ( ! empty( $state['changed'] ) ) {
 			// Whatever was found before the change may describe bytes that no longer exist: inconclusive, not damaged.
 			$outcome = self::CHANGED;
@@ -222,6 +226,8 @@ final class VerificationResult {
 				? 'The manifest is the copy embedded in the last volume; that volume\'s own container hash was not checked. Verify from the standalone manifest for a full pass.'
 				: 'Only the structure was checked (manifest, volumes, sidecar indexes); volume containers and entry contents were not.';
 		}
+		// stopped_at and the count keys are fixed vocabulary set by the verifier, not text from the archive;
+		// only a forged cursor could carry anything else there, which needs database write access already.
 		if ( isset( $this->state['stopped_at'] ) ) {
 			$lines[] = 'Verification stopped in phase "' . (string) $this->state['stopped_at'] . '".';
 		}
@@ -259,6 +265,8 @@ final class VerificationResult {
 				return 'Restore is refused because the contents could not be checked. Use the original files the plugin produced when it exported this archive; if those are gone, follow the manual restore steps in the documentation (extract every volume and import the SQL files).';
 			case self::CHANGED:
 				return 'Nothing read after the change is conclusive; the archive may still be being transferred or downloaded. Verify again once writing has finished.';
+			case self::UNREADABLE:
+				return 'The archive itself was not judged. Check the free disk space and the permissions of the plugin\'s storage directory, then verify again.';
 			default:
 				return '';
 		}
@@ -282,6 +290,8 @@ final class VerificationResult {
 				return 'Archive could not be read.';
 			case self::CHANGED:
 				return 'Archive changed while it was being verified.';
+			case self::UNREADABLE:
+				return 'Archive could not be checked on this server.';
 			default:
 				return 'Archive could not be verified.';
 		}
