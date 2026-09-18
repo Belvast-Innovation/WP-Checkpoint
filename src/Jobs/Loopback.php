@@ -167,7 +167,7 @@ final class Loopback {
 	 * @return bool
 	 */
 	public static function consume_token( int $job_id, string $token ): bool {
-		if ( 1 !== preg_match( '/^[a-f0-9]{32}$/', $token ) ) {
+		if ( 1 !== preg_match( '/^[a-f0-9]{32}\\z/', $token ) ) {
 			return false;
 		}
 		$hash  = hash( 'sha256', $token );

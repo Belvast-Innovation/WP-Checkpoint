@@ -7,6 +7,7 @@
 
 namespace WPCheckpoint\Jobs;
 
+use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Support\Environment;
 use WPCheckpoint\Support\Paths;
 use WPCheckpoint\Support\Redactor;
@@ -40,6 +41,13 @@ final class JobPresenter {
 	private $types;
 
 	/**
+	 * Storage directories: logs are read from the current directory only.
+	 *
+	 * @var Directories
+	 */
+	private $directories;
+
+	/**
 	 * Placeholder => absolute path.
 	 *
 	 * @var array<string, string>
@@ -63,18 +71,20 @@ final class JobPresenter {
 	/**
 	 * Constructor.
 	 *
-	 * @param Redactor                                                        $redactor   Redactor.
-	 * @param JobTypes                                                        $types      Job types.
-	 * @param array<string, string>|null                                      $paths      Placeholder => path; null uses the installation's.
-	 * @param string[]|null                                                   $hosts      Site hosts; null uses the installation's.
-	 * @param array{paths: string[], coarse: bool, network_root: string}|null $site_paths Site paths; null uses the installation's.
+	 * @param Redactor                                                        $redactor    Redactor.
+	 * @param JobTypes                                                        $types       Job types.
+	 * @param Directories                                                     $directories Storage directories.
+	 * @param array<string, string>|null                                      $paths       Placeholder => path; null uses the installation's.
+	 * @param string[]|null                                                   $hosts       Site hosts; null uses the installation's.
+	 * @param array{paths: string[], coarse: bool, network_root: string}|null $site_paths  Site paths; null uses the installation's.
 	 */
-	public function __construct( Redactor $redactor, JobTypes $types, $paths = null, $hosts = null, $site_paths = null ) {
-		$this->redactor   = $redactor;
-		$this->types      = $types;
-		$this->paths      = is_array( $paths ) ? $paths : self::installation_paths();
-		$this->hosts      = is_array( $hosts ) ? $hosts : Environment::report_hosts();
-		$this->site_paths = is_array( $site_paths ) ? $site_paths : Environment::report_site_paths();
+	public function __construct( Redactor $redactor, JobTypes $types, Directories $directories, $paths = null, $hosts = null, $site_paths = null ) {
+		$this->redactor    = $redactor;
+		$this->types       = $types;
+		$this->directories = $directories;
+		$this->paths       = is_array( $paths ) ? $paths : self::installation_paths();
+		$this->hosts       = is_array( $hosts ) ? $hosts : Environment::report_hosts();
+		$this->site_paths  = is_array( $site_paths ) ? $site_paths : Environment::report_site_paths();
 	}
 
 	/**
@@ -149,14 +159,21 @@ final class JobPresenter {
 	}
 
 	/**
-	 * The cleaned tail of the job log: empty when there is no file yet, a
-	 * fixed text when the file could not be read.
+	 * The cleaned tail of the job log: empty when there is no file yet (or
+	 * the job's files live in another storage directory), a fixed text when
+	 * the file could not be read.
 	 *
 	 * @param Job $job Job.
 	 * @return string
 	 */
 	public function log_tail( Job $job ): string {
 		if ( '' === $job->storage_path || '' === $job->log_path || 0 !== strpos( $job->log_path, 'logs/' ) ) {
+			return '';
+		}
+		// Files in another directory belong to another installation (a copied database on a shared file
+		// system) or to an abandoned directory: the same rule as the lock file writer and the purge.
+		$base = $this->directories->base();
+		if ( '' === $base || ! Paths::same( $job->storage_path, $base, Paths::is_windows() ) ) {
 			return '';
 		}
 		// The same gate as the writer and the purge: only a file inside the job's logs/ directory is ever read.

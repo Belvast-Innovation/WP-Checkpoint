@@ -138,9 +138,78 @@ final class JobsControllerTest extends JobTestCase {
 				$data = $this->rest( 'GET', 'jobs/' . $job->id )->get_data();
 				$this->assertSame( '', $data['job']['log_tail'], $log_path );
 			}
+
+			// A job bound to another storage directory (a copied database on a shared file system): its log is not ours to read.
+			$other = dirname( $job->storage_path ) . '/wpcheckpoint-other-' . bin2hex( random_bytes( 3 ) );
+			mkdir( $other . '/logs', 0755, true );
+			file_put_contents( $other . '/logs/job-1-abcdef01.log', "the other site's log\n" );
+			$wpdb->update( \WPCheckpoint\Support\Schema::jobs_table(), array( 'storage_path' => $other, 'log_path' => 'logs/job-1-abcdef01.log' ), array( 'id' => $job->id ) );
+			$data = $this->rest( 'GET', 'jobs/' . $job->id )->get_data();
+			$this->assertSame( '', $data['job']['log_tail'], 'another directory' );
+			\WPCheckpoint\Support\Deleter::empty_directory( $other );
+			@rmdir( $other );
 		} finally {
 			unlink( $secret );
 		}
+	}
+
+	public function test_a_failed_cancel_write_releases_the_lock_and_leaves_the_job_tickable(): void {
+		$this->register( 'plain', array( $this->counting_step( 'p', 1 ) ) );
+		$job  = Plugin::instance()->jobs()->create( 'plain' );
+		$done = false;
+		add_filter( 'query', static function ( string $sql ) use ( &$done ): string {
+			// The status write of the cancel fails (database error simulated by a query that changes nothing).
+			if ( ! $done && false !== strpos( $sql, 'UPDATE' ) && false !== strpos( $sql, "'cancelled'" ) ) {
+				$done = true;
+				return 'SELECT 0 WHERE 1 = 0';
+			}
+			return $sql;
+		} );
+		try {
+			Plugin::instance()->job_actions()->cancel( $job->id );
+			$this->fail( 'expected StaleJob' );
+		} catch ( \WPCheckpoint\Jobs\StaleJob $e ) {
+			$this->assertTrue( $done );
+		} finally {
+			remove_all_filters( 'query' );
+		}
+		$stored = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertSame( Job::QUEUED, $stored->status );
+		$this->assertSame( '', $stored->lock_token, 'the lock taken for the cancel was released' );
+		$this->assertSame( 'completed', $this->rest( 'POST', 'jobs/' . $job->id . '/tick' )->get_data()['result'], 'still tickable' );
+	}
+
+	public function test_concurrent_cancels_clean_up_exactly_once(): void {
+		$cleaned = 0;
+		$this->register( 'slow', array( new ClosureStep( 's', static function (): StepResult {
+			return StepResult::progress( array( 'n' => 1 ), 10 );
+		}, function () use ( &$cleaned ): void {
+			++$cleaned;
+		} ) ) );
+		$job  = Plugin::instance()->jobs()->create( 'slow' );
+		$done = false;
+		$b    = null;
+		add_filter( 'query', function ( string $sql ) use ( &$done, &$b, $job ): string {
+			// A holds the cancel lock; before its status write runs, B cancels the same job (B sees a holder).
+			if ( ! $done && false !== strpos( $sql, 'UPDATE' ) && false !== strpos( $sql, "'cancelled'" ) ) {
+				$done = true;
+				$b    = Plugin::instance()->job_actions()->cancel( $job->id );
+			}
+			return $sql;
+		} );
+		try {
+			$a = Plugin::instance()->job_actions()->cancel( $job->id );
+		} finally {
+			remove_all_filters( 'query' );
+		}
+		$this->assertSame( 'holder', $b['reason'], 'B saw A holding the lock and left the cleanup to it' );
+		$this->assertFalse( $b['cleaned'] );
+		$this->assertSame( 'cleaned', $a['reason'], 'A, whose compare-and-set succeeded, cleaned up after its stale write' );
+		$this->assertTrue( $a['cleaned'] );
+		$this->assertSame( 1, $cleaned, 'exactly once' );
+		$stored = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertSame( Job::CANCELLED, $stored->status );
+		$this->assertSame( '', $stored->lock_token );
 	}
 
 	public function test_a_holder_that_loses_the_lock_to_a_cancel_cleans_up_in_the_same_request(): void {

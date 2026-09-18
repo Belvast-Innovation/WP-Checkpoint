@@ -279,7 +279,7 @@ final class Plugin {
 	 */
 	public function job_presenter(): JobPresenter {
 		if ( null === $this->presenter ) {
-			$this->presenter = new JobPresenter( $this->redactor(), $this->job_types() );
+			$this->presenter = new JobPresenter( $this->redactor(), $this->job_types(), $this->directories() );
 		}
 		return $this->presenter;
 	}

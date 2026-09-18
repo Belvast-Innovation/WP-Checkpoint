@@ -154,7 +154,28 @@ final class JobActions {
 		$held = in_array( $job->status, array( Job::QUEUED, Job::RUNNING ), true ) ? $this->repository->acquire_for_cancel( $id ) : null;
 		if ( null !== $held ) {
 			$job = $held['job'];
-			$this->repository->transition( $job, Job::CANCELLED );
+			try {
+				$this->repository->transition( $job, Job::CANCELLED );
+			} catch ( StaleJob $e ) {
+				// The row changed under our lock: a concurrent cancel cleared the lock and reported "the holder
+				// cleans up" (that holder is this request), or the write itself failed. Our compare-and-set
+				// succeeded, so nobody was writing; if the job is cancelled now, clean up here. This is only
+				// safe in this branch: without a successful compare-and-set a cancelled status says nothing
+				// about who may still be writing.
+				$current = $this->repository->find( $id );
+				if ( null !== $current && Job::CANCELLED === $current->status ) {
+					$this->runner->cleanup( $current );
+					return array(
+						'job'     => $current,
+						'cleaned' => true,
+						'reason'  => 'cleaned',
+					);
+				}
+				throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged.
+			} finally {
+				// Guarded by the token: a no-op when the transition already cleared the lock or someone else took it.
+				$this->repository->release( $job, $held['token'] );
+			}
 			$this->runner->cleanup( $job );
 			return array(
 				'job'     => $job,
