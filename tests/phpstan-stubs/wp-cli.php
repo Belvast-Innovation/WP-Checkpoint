@@ -1,7 +1,14 @@
 <?php
 /**
- * Minimal WP-CLI declarations for PHPStan (the plugin only uses these).
- * Never loaded at runtime.
+ * Minimal WP-CLI declarations for PHPStan. Never loaded at runtime.
+ *
+ * Why not php-stubs/wp-cli-stubs: its dependency constraint pulls
+ * php-stubs/wordpress-stubs down from the current major (7.x) to 6.9, which
+ * would make the static analysis run against an older WordPress API than
+ * the one the plugin targets. Once that package accepts wordpress-stubs 7.x,
+ * replace this file with the package. Until then this file declares only
+ * the members the plugin actually calls; do not let it grow into a general
+ * stub.
  *
  * @package WPCheckpoint
  */

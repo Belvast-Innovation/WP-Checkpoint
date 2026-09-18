@@ -5,8 +5,12 @@
  * tick by retry_after. With loopback the server chains its own requests;
  * the browser only polls the status every 2 seconds and acts as a watchdog:
  * when a job that should be moving (last tick result "more") has not
- * changed for 15 seconds, the browser ticks once to restart the chain. A
- * 403 (expired nonce, logged out) stops everything and asks for a reload.
+ * changed for 15 seconds, the browser ticks once to restart the chain. If
+ * the watchdog has to fire twice on one page the chain is considered broken
+ * (HTTP authentication or a firewall added after the probe) and the browser
+ * drives the job itself from then on, instead of pretending a chain that
+ * only moves one step per 15 seconds is alive. A 403 (expired nonce, logged
+ * out) stops everything and asks for a reload.
  */
 ( function () {
 	'use strict';
@@ -14,6 +18,7 @@
 	var config = window.wpcheckpointJobs || {};
 	var POLL_MS = 2000;
 	var WATCHDOG_MS = 15000;
+	var WATCHDOG_MAX_FIRES = 2;
 	var TERMINAL = [ 'completed', 'failed', 'cancelled' ];
 
 	function request( method, path, done ) {
@@ -92,6 +97,8 @@
 		this.lastResult = null;
 		this.lastSignature = '';
 		this.lastChange = Date.now();
+		this.loopback = !! config.loopback;
+		this.watchdogFires = 0;
 		this.bind();
 		if ( TERMINAL.indexOf( root.getAttribute( 'data-status' ) ) === -1 ) {
 			this.tick();
@@ -164,7 +171,7 @@
 			self.lastResult = data.result;
 			switch ( data.result ) {
 				case 'more':
-					if ( config.loopback ) {
+					if ( self.loopback ) {
 						self.later( function () { self.poll(); }, POLL_MS );
 					} else {
 						self.later( function () { self.tick(); }, 0 );
@@ -200,7 +207,11 @@
 				return;
 			}
 			if ( self.lastResult === 'more' && Date.now() - self.lastChange >= WATCHDOG_MS ) {
-				// The self-request chain went quiet: bring it back.
+				// The self-request chain went quiet: bring it back, or give up on it.
+				self.watchdogFires += 1;
+				if ( self.watchdogFires >= WATCHDOG_MAX_FIRES ) {
+					self.loopback = false;
+				}
 				self.lastChange = Date.now();
 				self.tick();
 				return;

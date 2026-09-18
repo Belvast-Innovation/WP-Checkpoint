@@ -8,6 +8,7 @@
 namespace WPCheckpoint\Jobs;
 
 use WPCheckpoint\Support\Environment;
+use WPCheckpoint\Support\Paths;
 use WPCheckpoint\Support\Redactor;
 use WPCheckpoint\Support\Report;
 use WPCheckpoint\Support\Utf8;
@@ -155,10 +156,15 @@ final class JobPresenter {
 	 * @return string
 	 */
 	public function log_tail( Job $job ): string {
-		if ( '' === $job->storage_path || '' === $job->log_path ) {
+		if ( '' === $job->storage_path || '' === $job->log_path || 0 !== strpos( $job->log_path, 'logs/' ) ) {
 			return '';
 		}
+		// The same gate as the writer and the purge: only a file inside the job's logs/ directory is ever read.
+		$logs = $job->storage_path . DIRECTORY_SEPARATOR . 'logs';
 		$path = $job->storage_path . DIRECTORY_SEPARATOR . str_replace( '/', DIRECTORY_SEPARATOR, $job->log_path );
+		if ( ! Paths::is_inside( $logs, $path ) ) {
+			return '';
+		}
 		$tail = LogTail::read( $path );
 		if ( ! $tail['exists'] ) {
 			return '';

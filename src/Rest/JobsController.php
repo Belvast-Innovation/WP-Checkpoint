@@ -207,9 +207,7 @@ final class JobsController extends Controller {
 			array(
 				'result'  => 'cancelled',
 				'cleaned' => $outcome['cleaned'],
-				'message' => $outcome['cleaned']
-					? __( 'The job was cancelled.', 'wp-checkpoint' )
-					: __( 'The job was cancelled; its temporary files are removed as soon as the current step stops.', 'wp-checkpoint' ),
+				'message' => self::cancel_message( $outcome['reason'] ),
 				'job'     => $this->presenter->present( $outcome['job'] ),
 			)
 		);
@@ -244,6 +242,22 @@ final class JobsController extends Controller {
 				'job'     => $this->presenter->present( $job ),
 			)
 		);
+	}
+
+	/**
+	 * Message for a cancel outcome.
+	 *
+	 * @param string $reason cleaned, holder or unavailable.
+	 * @return string
+	 */
+	public static function cancel_message( string $reason ): string {
+		switch ( $reason ) {
+			case 'holder':
+				return __( 'The job was cancelled; its temporary files are removed as soon as the current step stops.', 'wp-checkpoint' );
+			case 'unavailable':
+				return __( 'The job was cancelled. Its storage directory is not available from here, so its temporary files were not removed.', 'wp-checkpoint' );
+		}
+		return __( 'The job was cancelled.', 'wp-checkpoint' );
 	}
 
 	/**

@@ -99,13 +99,18 @@ final class JobsControllerTest extends JobTestCase {
 			++$cleaned;
 		} ) ) );
 
-		// Not locked: the cancel takes the lock and cleans up itself.
+		// Not locked: the cancel takes the lock and cleans up itself, without counting an attempt.
 		$job  = Plugin::instance()->jobs()->create( 'slow' );
 		$data = $this->rest( 'POST', 'jobs/' . $job->id . '/cancel' )->get_data();
 		$this->assertSame( 'cancelled', $data['result'] );
 		$this->assertTrue( $data['cleaned'] );
+		$this->assertSame( 'The job was cancelled.', $data['message'] );
 		$this->assertSame( 1, $cleaned );
-		$this->assertSame( Job::CANCELLED, Plugin::instance()->jobs()->find( $job->id )->status );
+		$stored = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertSame( Job::CANCELLED, $stored->status );
+		$this->assertSame( 0, $stored->attempts, 'never attempted' );
+		$this->assertSame( 0, $stored->started_at, 'never started' );
+		$this->assertSame( '', $stored->lock_token );
 		$this->assertFileDoesNotExist( LockFile::path( $job->storage_path, $job->id ) );
 
 		// Locked by another driver: the cancel cannot take the lock; the holder cleans up when its next write refuses.
@@ -118,6 +123,24 @@ final class JobsControllerTest extends JobTestCase {
 		$this->assertSame( 1, $cleaned, 'not cleaned while the holder may still be writing' );
 		$this->assertStringContainsString( 'current step stops', $data['message'] );
 		$this->assertFalse( Plugin::instance()->jobs()->heartbeat( $held['job'], $held['token'] ), 'the holder is fenced off' );
+	}
+
+	public function test_log_tail_only_reads_inside_the_logs_directory(): void {
+		global $wpdb;
+		$this->register( 'plain', array( $this->counting_step( 'p', 1 ) ) );
+		$job    = Plugin::instance()->jobs()->create( 'plain' );
+		$secret = dirname( dirname( $job->storage_path ) ) . '/wpcheckpoint-secret-' . bin2hex( random_bytes( 3 ) ) . '.txt';
+		file_put_contents( $secret, "top secret\n" );
+		file_put_contents( $job->storage_path . '/owner.txt', "owner\n" );
+		try {
+			foreach ( array( '../../' . basename( $secret ), 'logs/../../../' . basename( $secret ), 'logs/../owner.txt', '/etc/passwd', 'owner.txt' ) as $log_path ) {
+				$wpdb->update( \WPCheckpoint\Support\Schema::jobs_table(), array( 'log_path' => $log_path ), array( 'id' => $job->id ) );
+				$data = $this->rest( 'GET', 'jobs/' . $job->id )->get_data();
+				$this->assertSame( '', $data['job']['log_tail'], $log_path );
+			}
+		} finally {
+			unlink( $secret );
+		}
 	}
 
 	public function test_a_holder_that_loses_the_lock_to_a_cancel_cleans_up_in_the_same_request(): void {

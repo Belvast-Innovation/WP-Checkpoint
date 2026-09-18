@@ -167,7 +167,7 @@ final class JobCommand {
 		if ( null === $outcome ) {
 			WP_CLI::error( 'No such job.' );
 		}
-		WP_CLI::success( $outcome['cleaned'] ? 'Job cancelled.' : 'Job cancelled; its temporary files are removed as soon as the current step stops.' );
+		WP_CLI::success( \WPCheckpoint\Rest\JobsController::cancel_message( $outcome['reason'] ) );
 	}
 
 	/**

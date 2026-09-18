@@ -320,6 +320,57 @@ final class JobRepository {
 	}
 
 	/**
+	 * Take the lock in order to cancel: the same compare-and-set as acquire()
+	 * (nobody else is working on the job once it succeeds), but the job is
+	 * not started: attempts, started_at, the status and the lock file stay as
+	 * they are, so a job cancelled before its first step still reads
+	 * "never attempted".
+	 *
+	 * @param int $id Job id.
+	 * @return array{job: Job, token: string}|null Null when another driver holds the lock or the job is not cancellable here.
+	 */
+	public function acquire_for_cancel( int $id ) {
+		global $wpdb;
+		$job = $this->find( $id );
+		if ( null === $job || ! in_array( $job->status, array( Job::QUEUED, Job::RUNNING ), true ) ) {
+			return null;
+		}
+		if ( '' === $this->directories->base() ) {
+			return null;
+		}
+		$storage_token = (string) $this->directories->state()['token'];
+		$now           = $this->now();
+		$token         = bin2hex( random_bytes( 16 ) );
+		$table         = $wpdb->base_prefix . Schema::JOBS_TABLE;
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix; the WHERE clause is the compare-and-set.
+		$affected = $wpdb->query(
+			$wpdb->prepare(
+				"UPDATE {$table} SET lock_token = %s, locked_until = %d, updated_at = %d WHERE id = %d AND status IN (%s, %s) AND storage_token = %s AND (lock_token = '' OR locked_until < %d)",
+				$token,
+				$now + self::LOCK_SECONDS,
+				$now,
+				$id,
+				Job::QUEUED,
+				Job::RUNNING,
+				$storage_token,
+				$now
+			)
+		);
+		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		if ( 1 !== (int) $affected ) {
+			return null;
+		}
+		$job = $this->find( $id );
+		if ( null === $job ) {
+			return null;
+		}
+		return array(
+			'job'   => $job,
+			'token' => $token,
+		);
+	}
+
+	/**
 	 * Extend the lock.
 	 *
 	 * @param Job    $job   Job.
