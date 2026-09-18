@@ -14,16 +14,25 @@ use WPCheckpoint\Admin\Notices;
 use WPCheckpoint\Admin\ReclaimActions;
 use WPCheckpoint\Admin\Page;
 use WPCheckpoint\Admin\SettingsActions;
+use WPCheckpoint\Admin\JobProgress;
+use WPCheckpoint\Cli\JobCommand;
+use WPCheckpoint\Jobs\JobActions;
+use WPCheckpoint\Jobs\JobPresenter;
 use WPCheckpoint\Jobs\JobRepository;
 use WPCheckpoint\Jobs\JobTypes;
+use WPCheckpoint\Jobs\Loopback;
+use WPCheckpoint\Jobs\Runner;
 use WPCheckpoint\Admin\Tabs;
 use WPCheckpoint\Admin\Tabs\BackupsTab;
 use WPCheckpoint\Admin\Tabs\CheckpointsTab;
 use WPCheckpoint\Admin\Tabs\SettingsTab;
 use WPCheckpoint\Admin\Tabs\ToolsTab;
 use WPCheckpoint\Rest\Controller;
+use WPCheckpoint\Rest\JobsController;
+use WPCheckpoint\Rest\LoopbackController;
 use WPCheckpoint\Rest\ProbeController;
 use WPCheckpoint\Rest\StatusController;
+use WPCheckpoint\Support\Guard;
 use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Support\Redactor;
 use WPCheckpoint\Support\Schema;
@@ -74,6 +83,34 @@ final class Plugin {
 	private $jobs = null;
 
 	/**
+	 * Cached runner.
+	 *
+	 * @var Runner|null
+	 */
+	private $runner = null;
+
+	/**
+	 * Cached loopback.
+	 *
+	 * @var Loopback|null
+	 */
+	private $loopback = null;
+
+	/**
+	 * Cached actions.
+	 *
+	 * @var JobActions|null
+	 */
+	private $job_actions = null;
+
+	/**
+	 * Cached presenter.
+	 *
+	 * @var JobPresenter|null
+	 */
+	private $presenter = null;
+
+	/**
 	 * Job type registry.
 	 *
 	 * @var JobTypes|null
@@ -104,9 +141,31 @@ final class Plugin {
 		$this->booted = true;
 
 		add_action( 'rest_api_init', array( $this, 'register_rest_routes' ) );
+		// The delayed re-tick must work outside the admin (real cron runs in a front-end or CLI process).
+		add_action( Loopback::HOOK, array( $this, 'cron_tick' ) );
+
+		if ( defined( 'WP_CLI' ) && WP_CLI ) {
+			\WP_CLI::add_command( 'wpcheckpoint job', new JobCommand( $this->job_actions(), $this->job_presenter() ) );
+		}
 
 		if ( is_admin() ) {
 			$this->boot_admin();
+		}
+	}
+
+	/**
+	 * Cron callback: one tick with the budget counted from now under WP-CLI
+	 * ("wp cron event run" handles several events per process) and from the
+	 * request start otherwise.
+	 *
+	 * @param int $job_id Job id.
+	 * @return void
+	 */
+	public function cron_tick( $job_id ): void {
+		try {
+			$this->job_actions()->tick( (int) $job_id, JobActions::started_at() );
+		} catch ( \Throwable $e ) {
+			$this->directories()->log_event( sprintf( 'Cron tick of job %d failed: %s', (int) $job_id, get_class( $e ) ) );
 		}
 	}
 
@@ -139,6 +198,15 @@ final class Plugin {
 			return;
 		}
 		wp_enqueue_script( 'wpcheckpoint-environment', WPCHECKPOINT_URL . 'assets/admin/environment.js', array(), WPCHECKPOINT_VERSION, true );
+		wp_enqueue_script( 'wpcheckpoint-jobs', WPCHECKPOINT_URL . 'assets/admin/jobs.js', array(), WPCHECKPOINT_VERSION, true );
+		// Not wp_localize_script(): it casts every value to a string and the boolean would become "".
+		$config = array(
+			'root'     => esc_url_raw( rest_url() ),
+			'nonce'    => Guard::rest_nonce(),
+			'loopback' => $this->loopback()->enabled(),
+			'labels'   => JobProgress::script_labels(),
+		);
+		wp_add_inline_script( 'wpcheckpoint-jobs', 'window.wpcheckpointJobs = ' . wp_json_encode( $config ) . ';', 'before' );
 	}
 
 	/**
@@ -163,6 +231,57 @@ final class Plugin {
 		$this->directories = null;
 		$this->jobs        = null;
 		$this->redactor    = null; // The storage token is one of its secrets.
+		$this->runner      = null;
+		$this->job_actions = null;
+		$this->presenter   = null;
+	}
+
+	/**
+	 * Step runner.
+	 *
+	 * @return Runner
+	 */
+	public function runner(): Runner {
+		if ( null === $this->runner ) {
+			$this->runner = new Runner( $this->jobs(), $this->job_types(), $this->redactor() );
+		}
+		return $this->runner;
+	}
+
+	/**
+	 * Loopback / cron follow-up.
+	 *
+	 * @return Loopback
+	 */
+	public function loopback(): Loopback {
+		if ( null === $this->loopback ) {
+			$this->loopback = new Loopback();
+		}
+		return $this->loopback;
+	}
+
+	/**
+	 * Tick, cancel and retry shared by every driver.
+	 *
+	 * @return JobActions
+	 */
+	public function job_actions(): JobActions {
+		if ( null === $this->job_actions ) {
+			$this->job_actions = new JobActions( $this->jobs(), $this->runner(), $this->loopback() );
+		}
+		return $this->job_actions;
+	}
+
+	/**
+	 * Presenter for REST, WP-CLI and the admin page.
+	 *
+	 * @return JobPresenter
+	 */
+	public function job_presenter(): JobPresenter {
+		if ( null === $this->presenter ) {
+			$this->presenter = new JobPresenter( $this->redactor(), $this->job_types() );
+		}
+		return $this->presenter;
 	}
 
 	/**
@@ -242,6 +361,8 @@ final class Plugin {
 		return array(
 			new StatusController(),
 			new ProbeController(),
+			new JobsController( $this->job_actions(), $this->job_presenter() ),
+			new LoopbackController( $this->job_actions() ),
 		);
 	}
 

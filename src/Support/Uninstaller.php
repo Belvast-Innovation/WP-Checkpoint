@@ -188,7 +188,9 @@ final class Uninstaller {
 	 * @return void
 	 */
 	public static function clear_transient_state(): void {
-		// No scheduled events or transients exist yet; later tasks add them here.
+		\WPCheckpoint\Jobs\Loopback::unschedule_all();
+		delete_site_transient( 'wpcheckpoint_jobs_reaped' );
+		delete_site_transient( 'wpcheckpoint_jobs_purged' );
 	}
 
 	/**
