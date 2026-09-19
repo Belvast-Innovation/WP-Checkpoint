@@ -106,10 +106,11 @@ final class Packer {
 	/**
 	 * Largest entry this platform can write: PHP's file offsets are ints.
 	 *
+	 * @param int $int_size PHP_INT_SIZE of the platform (the environment check injects 4 in tests).
 	 * @return int
 	 */
-	public static function max_entry_bytes(): int {
-		return PHP_INT_SIZE >= 8 ? 4398046511104 : 2147483647; // 4 TiB, or 2 GiB - 1 on 32-bit PHP.
+	public static function max_entry_bytes( int $int_size = PHP_INT_SIZE ): int {
+		return $int_size >= 8 ? 4398046511104 : 2147483647; // 4 TiB, or 2 GiB - 1 on 32-bit PHP.
 	}
 
 	/**
@@ -118,10 +119,11 @@ final class Packer {
 	 * push it past this, even when every single entry fits. The export
 	 * pre-flight uses the same number to warn before it starts.
 	 *
+	 * @param int $int_size PHP_INT_SIZE of the platform (the environment check injects 4 in tests).
 	 * @return int
 	 */
-	public static function max_volume_bytes(): int {
-		return PHP_INT_SIZE >= 8 ? 4398046511104 : 2147483647 - 1048576; // 4 TiB, or 2 GiB - 1 minus room for the central directory.
+	public static function max_volume_bytes( int $int_size = PHP_INT_SIZE ): int {
+		return $int_size >= 8 ? 4398046511104 : 2147483647 - 1048576; // 4 TiB, or 2 GiB - 1 minus room for the central directory.
 	}
 
 	/**

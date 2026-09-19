@@ -200,6 +200,30 @@ final class EnvironmentTest extends WP_UnitTestCase {
 		$this->assertSame( 5, $seen[0][1]['timeout'] );
 	}
 
+	public function test_thirty_two_bit_php_is_a_warning_that_names_the_size_in_both_directions(): void {
+		$env   = new Environment( $this->dirs, array( 'loopback' => $this->echo_probe(), 'int_size' => static function (): int {
+			return 4;
+		} ) );
+		$check = $this->find( $env->checks(), 'limits.int_size' );
+		$this->assertSame( Check::WARNING, $check->status, 'the plugin still works; the operations that hit the bound refuse individually' );
+		$this->assertSame( '32-bit', $check->value );
+		$this->assertStringContainsString( 'files larger than 2 GB cannot be backed up', $check->message );
+		$this->assertStringContainsString( 'archives larger than 2 GB cannot be restored here', $check->message );
+		$this->assertStringContainsString( '64-bit PHP', $check->message );
+		$this->assertStringNotContainsString( 'PHP_INT_SIZE', $check->message );
+
+		$env   = new Environment( $this->dirs, array( 'loopback' => $this->echo_probe(), 'int_size' => static function (): int {
+			return 8;
+		} ) );
+		$check = $this->find( $env->checks(), 'limits.int_size' );
+		$this->assertSame( Check::OK, $check->status );
+		$this->assertSame( '64-bit', $check->value );
+		$this->assertSame( '', $check->message );
+		// The real platform of the test runner is 64-bit.
+		Environment::invalidate();
+		$this->assertSame( Check::OK, $this->find( ( new Environment( $this->dirs, array( 'loopback' => $this->echo_probe() ) ) )->checks(), 'limits.int_size' )->status );
+	}
+
 	public function test_report_contains_no_secrets_paths_or_site_url(): void {
 		$env    = new Environment( $this->dirs, array( 'loopback' => $this->echo_probe() ) );
 		$report = Report::text( $env->checks(), Plugin::instance()->redactor(), $env->report_paths(), array( 'Plugin' => WPCHECKPOINT_VERSION ), Environment::report_hosts() );

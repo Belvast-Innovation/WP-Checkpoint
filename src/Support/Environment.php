@@ -7,6 +7,7 @@
 
 namespace WPCheckpoint\Support;
 
+use WPCheckpoint\Archive\Packer;
 use WPCheckpoint\Rest\Controller;
 use WPCheckpoint\Rest\ProbeController;
 
@@ -81,6 +82,9 @@ final class Environment {
 			'extension_loaded' => 'extension_loaded',
 			'class_exists'     => 'class_exists',
 			'ini_get'          => 'ini_get',
+			'int_size'         => static function (): int {
+				return PHP_INT_SIZE;
+			},
 			'disk_free_space'  => static function ( string $dir ) {
 				if ( ! self::function_available( 'disk_free_space' ) ) {
 					return false;
@@ -616,7 +620,37 @@ final class Environment {
 			$checks[] = new Check( 'limits.task_time', self::GROUP_LIMITS, __( 'Max execution time (task runtime)', 'wp-checkpoint' ), __( 'unknown', 'wp-checkpoint' ), Check::INFO, $unknown );
 		}
 
+		$checks[] = $this->int_size_check();
 		return $checks;
+	}
+
+	/**
+	 * 32-bit PHP: file offsets stop at 2 GiB, so a single file above that
+	 * cannot be backed up and an archive above that cannot be restored on
+	 * this server (its manifest carries sizes the platform cannot hold). A
+	 * warning, not an error: the plugin works, and the operations that hit
+	 * the bound refuse individually with the same numbers. The numbers come
+	 * from the packer's platform bound, not from a second copy.
+	 *
+	 * @return Check
+	 */
+	private function int_size_check(): Check {
+		$int_size = (int) call_user_func( $this->probes['int_size'] );
+		$wide     = $int_size >= 8;
+		$limit    = size_format( Packer::max_entry_bytes( $int_size ), 0 );
+		return new Check(
+			'limits.int_size',
+			self::GROUP_LIMITS,
+			__( 'PHP integer size', 'wp-checkpoint' ),
+			$wide ? __( '64-bit', 'wp-checkpoint' ) : __( '32-bit', 'wp-checkpoint' ),
+			$wide ? Check::OK : Check::WARNING,
+			$wide ? '' : sprintf(
+				/* translators: %s: size such as "2 GB" */
+				__( 'This server runs 32-bit PHP: files larger than %1$s cannot be backed up, and archives larger than %1$s cannot be restored here. Ask your host for 64-bit PHP.', 'wp-checkpoint' ),
+				$limit
+			),
+			__( 'Backups of large files and restores of large archives.', 'wp-checkpoint' )
+		);
 	}
 
 	/**

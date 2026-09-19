@@ -5,6 +5,7 @@ namespace WPCheckpoint\Tests\Integration;
 use WP_Error;
 use WP_UnitTestCase;
 use WPCheckpoint\Support\Deleter;
+use WPCheckpoint\Jobs\TempTables;
 use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Support\Options;
 use WPCheckpoint\Support\OwnerMarker;
@@ -194,6 +195,48 @@ final class StorageTest extends WP_UnitTestCase {
 		$this->assertDirectoryDoesNotExist( $custom . '/backups' );
 		$this->assertFileDoesNotExist( $custom . '/' . OwnerMarker::FILENAME );
 		$this->assertFileDoesNotExist( $custom . '/.htaccess' );
+	}
+
+	public function test_custom_directory_gets_a_token_that_is_stable_and_changes_with_the_path(): void {
+		$custom = $this->fake_root . '/custom-storage';
+		mkdir( $custom );
+		$dirs = new Directories( $this->cli_context( array( 'custom_dir' => $custom ) ) );
+		$this->assertSame( $custom, $dirs->base(), $dirs->last_error() );
+		$token = (string) $dirs->state()['token'];
+		$this->assertTrue( Directories::is_valid_token( $token ), 'a custom directory carries an installation token like any other' );
+		$this->assertStringNotContainsString( $token, $custom, 'the token is not part of the directory name' );
+		$this->assertTrue( Directories::is_valid_token( Directories::load_state()['token'] ), 'persisted' );
+
+		$again = new Directories( $this->cli_context( array( 'custom_dir' => $custom ) ) );
+		$this->assertSame( $custom, $again->base() );
+		$this->assertSame( $token, $again->state()['token'], 'stable across requests' );
+		$this->assertSame( 'wcptmp' . substr( $token, 0, 6 ) . '_7_beef_posts', TempTables::name( $token, 7, 'beef', 'posts' ), 'temporary tables can be named on this installation' );
+
+		// A different custom path is a different directory choice: new token, as with a new default directory.
+		$other = $this->fake_root . '/custom-two';
+		mkdir( $other );
+		$moved = new Directories( $this->cli_context( array( 'custom_dir' => $other ) ) );
+		$this->assertSame( $other, $moved->base(), $moved->last_error() );
+		$this->assertNotSame( $token, $moved->state()['token'] );
+		$this->assertTrue( Directories::is_valid_token( $moved->state()['token'] ) );
+		$this->assertSame( $moved->state()['install_id'], $dirs->state()['install_id'], 'install_id is the installation, the token is the directory choice' );
+	}
+
+	public function test_a_custom_directory_installation_without_a_token_is_given_one_on_upgrade(): void {
+		global $wpdb;
+		$custom = $this->fake_root . '/custom-storage';
+		mkdir( $custom );
+		$dirs = new Directories( $this->cli_context( array( 'custom_dir' => $custom ) ) );
+		$this->assertSame( $custom, $dirs->base() );
+		// The state a release before this one left behind: the directory adopted, no token.
+		$state          = Directories::load_state();
+		$state['token'] = '';
+		Options::set( Directories::OPTION, $state );
+
+		$upgraded = new Directories( $this->cli_context( array( 'custom_dir' => $custom ) ) );
+		$this->assertSame( $custom, $upgraded->base(), $upgraded->last_error() );
+		$this->assertTrue( Directories::is_valid_token( $upgraded->state()['token'] ) );
+		$this->assertSame( $custom, $upgraded->state()['path'] );
 	}
 
 	public function test_custom_directory_owned_by_another_site_is_refused(): void {
