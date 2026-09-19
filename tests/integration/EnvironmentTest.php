@@ -203,7 +203,11 @@ final class EnvironmentTest extends WP_UnitTestCase {
 
 	public function test_a_missing_job_table_is_reported_without_a_failed_query(): void {
 		global $wpdb;
+		// The core test case rewrites DROP TABLE into DROP TEMPORARY TABLE, which leaves a real table standing.
+		remove_filter( 'query', array( $this, '_create_temporary_tables' ) );
+		remove_filter( 'query', array( $this, '_drop_temporary_tables' ) );
 		$wpdb->query( 'DROP TABLE IF EXISTS ' . Schema::jobs_table() );
+		$this->assertFalse( Schema::table_exists(), 'the real table is gone' );
 		$wpdb->last_error = '';
 		$env   = new Environment( $this->dirs, array( 'loopback' => $this->echo_probe() ) );
 		$check = $this->find( $env->checks( true ), 'database.jobs' );
