@@ -25,7 +25,13 @@ final class Deleter {
 	 * deleted or failed and reports "remaining": a tree of a hundred
 	 * thousand files is removed across several calls (the reaper runs
 	 * every few minutes), each of which fits one tick. Deletion is
-	 * idempotent, so a caller simply calls again later.
+	 * idempotent, so a caller simply calls again later. The limit is a
+	 * soft budget, not a security bound: it is checked before each entry,
+	 * the rmdir() on the way back up is not counted, so a deeply nested
+	 * chain can exceed it by its depth (bounded by the path length limit).
+	 * Each directory's listing is loaded at once (scandir), so a single
+	 * directory with millions of entries would exhaust memory; only this
+	 * plugin's own steps can create such a directory.
 	 *
 	 * @param string $base        Directory the plugin owns.
 	 * @param string $target      Entry to delete; must be inside $base.
@@ -240,6 +246,8 @@ final class Deleter {
 				return;
 			}
 			$path = $dir . DIRECTORY_SEPARATOR . $entry;
+			// Between this check and the unlink() below the entry could be swapped for a link (TOCTOU); that
+			// needs write access inside the plugin's directory, which is the web user already.
 			if ( self::is_reparse( $path ) ) {
 				self::remove_link( $path, $result );
 				continue;

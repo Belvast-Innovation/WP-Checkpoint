@@ -128,6 +128,8 @@ final class Residue {
 			$path  = $tmp . DIRECTORY_SEPARATOR . $name;
 			$mtime = (int) @filemtime( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a vanished entry is skipped below.
 			if ( 0 === $mtime ) {
+				// Gone meanwhile, or a dangling link (filemtime follows links): a dangling job-N link is never
+				// reclaimed, which leaks a directory entry and nothing more.
 				continue;
 			}
 			$id = self::work_dir_id( $name );

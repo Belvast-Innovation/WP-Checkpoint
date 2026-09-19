@@ -44,6 +44,8 @@ final class TempTables {
 	 * @throws \InvalidArgumentException When the token is not usable.
 	 */
 	public static function owner_prefix( string $token ): string {
+		// Six hex characters: two installations sharing a database collide with a chance of one in 16.7 million,
+		// and the cost of a collision is one dropping the other's temporary tables, never anything else.
 		if ( 1 !== preg_match( '/\A[0-9a-f]{' . self::TOKEN_LEN . ',}\z/', $token ) ) {
 			throw new \InvalidArgumentException( 'The storage token must be lowercase hex.' );
 		}
@@ -118,6 +120,8 @@ final class TempTables {
 	 * @return int
 	 */
 	public static function job_id_of( string $token, string $name ): int {
+		// Not anchored at the end on purpose: the tail is the table name. A name with characters outside
+		// is_safe_name() is still attributed here and then refused by the dropping side as a failure.
 		try {
 			$prefix = self::owner_prefix( $token );
 		} catch ( \InvalidArgumentException $e ) {

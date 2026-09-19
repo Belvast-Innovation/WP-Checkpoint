@@ -552,12 +552,14 @@ final class JobRepository {
 	 * Housekeeping that must not wait for cron: orphaned lock files, stalled
 	 * jobs, storage settlement, then the residue catalogue.
 	 *
-	 * The order matters: settle_storage() runs before reap_residue(). A
-	 * copied database carries rows that look queued or running while their
-	 * files belong to the original site; settling fails those rows first,
-	 * so the same pass already sees them as failed and, since their
-	 * storage token is not this directory's, treats their work directories
-	 * here as orphans instead of keeping them for another retention period.
+	 * The call to settle_storage() runs before reap_residue(): a copied database
+	 * carries rows that look queued or running while their files belong to
+	 * the original site. The orphan rule judges those work directories by
+	 * their storage token alone, so the order is not needed for that; it is
+	 * kept so the row is failed in the same pass in which its files go.
+	 *
+	 * A job lookup that fails (not "no row") aborts the deletions of the
+	 * pass, see find_for_reclaim().
 	 *
 	 * @return void
 	 */
@@ -571,8 +573,13 @@ final class JobRepository {
 				// The lock file lives as long as the job is queued, running or paused;
 				// only a file without such a job is an orphan (crash before the row was
 				// written, table recreated, foreign copy).
-				$id  = LockFile::job_id_from_path( $file );
-				$job = $id > 0 ? $this->find( $id ) : null;
+				$id = LockFile::job_id_from_path( $file );
+				try {
+					$job = $id > 0 ? $this->find_for_reclaim( $id ) : null;
+				} catch ( ReclaimUnsafe $e ) {
+					$this->directories->log_event( 'Reaping lock files: ' . $e->getMessage() );
+					break;
+				}
 				if ( null === $job || ! in_array( $job->status, array( Job::QUEUED, Job::RUNNING, Job::PAUSED ), true ) ) {
 					@unlink( $file ); // phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink,WordPress.PHP.NoSilencedErrors.Discouraged -- plugin-owned orphaned file.
 				}
@@ -617,6 +624,25 @@ final class JobRepository {
 		$token  = (string) $this->directories->state()['token'];
 		$budget = self::RECLAIM_MAX_ENTRIES;
 		$owners = array();
+		try {
+			$this->reap_entries( $base, $now, $token, $budget, $owners );
+		} catch ( ReclaimUnsafe $e ) {
+			$this->directories->log_event( 'Reaping residue: ' . $e->getMessage() );
+		}
+	}
+
+	/**
+	 * The body of reap_residue(): directories first, then tables.
+	 *
+	 * @param string               $base   Storage base.
+	 * @param int                  $now    Current time.
+	 * @param string               $token  Storage token.
+	 * @param int                  $budget Entries left for this pass.
+	 * @param array<int, Job|null> $owners Lookup cache.
+	 * @return void
+	 * @throws ReclaimUnsafe When a job lookup failed.
+	 */
+	private function reap_entries( string $base, int $now, string $token, int $budget, array $owners ): void {
 		foreach ( Residue::scan( $base ) as $entry ) {
 			if ( $budget <= 0 ) {
 				return;
@@ -653,7 +679,7 @@ final class JobRepository {
 	 */
 	private function is_work_orphan( int $id, string $token, array &$owners ): bool {
 		if ( ! array_key_exists( $id, $owners ) ) {
-			$owners[ $id ] = $this->find( $id );
+			$owners[ $id ] = $this->find_for_reclaim( $id );
 		}
 		$job = $owners[ $id ];
 		if ( null === $job ) {
@@ -666,6 +692,29 @@ final class JobRepository {
 			return true;
 		}
 		return Job::FAILED === $job->status && $job->work_expired_at > 0;
+	}
+
+	/**
+	 * A find() for a decision to delete something: "no such row" and "the
+	 * query failed" both come back as null from $wpdb, and only the first
+	 * makes an orphan. A failed query (connection lost, lock wait timeout,
+	 * server gone away: routine on shared hosts) throws ReclaimUnsafe, and
+	 * the caller skips every deletion of this pass rather than treating a
+	 * running job's three-hour export as leftovers. The table side already
+	 * fails closed (an empty listing drops nothing); this makes the
+	 * directory side fail the same way.
+	 *
+	 * @param int $id Job id.
+	 * @return Job|null
+	 * @throws ReclaimUnsafe When the lookup itself failed.
+	 */
+	private function find_for_reclaim( int $id ) {
+		global $wpdb;
+		$job = $this->find( $id );
+		if ( null === $job && '' !== (string) $wpdb->last_error ) {
+			throw new ReclaimUnsafe( 'The job lookup failed; nothing is reclaimed in this pass.' );
+		}
+		return $job;
 	}
 
 	/**
@@ -982,6 +1031,11 @@ final class JobRepository {
 			'status' => $from,
 		);
 		$where_formats = array( '%d', '%s' );
+		if ( Job::QUEUED === $to && Job::FAILED === $from ) {
+			// The in-memory can_retry() check races with expire_work(): the row is the authority.
+			$where['work_expired_at'] = 0;
+			$where_formats[]          = '%d';
+		}
 		if ( '' !== $token ) {
 			$where['lock_token'] = $token;
 			$where_formats[]     = '%s';

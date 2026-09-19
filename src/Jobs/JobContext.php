@@ -212,6 +212,8 @@ final class JobContext {
 			throw new TransientFailure( 'The job has no storage directory yet.' );
 		}
 		$dir = Residue::work_dir( $base, $this->job->id );
+		// is_dir() follows a link planted at this name (write access inside tmp/ is the web user already);
+		// the reclaim side treats such an entry as a link and never enters it.
 		// Silenced: a PHP warning would put the full path into the error log, bypassing the path masking.
 		if ( ! is_dir( $dir ) && ! @mkdir( $dir, 0700 ) && ! is_dir( $dir ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- see above.
 			throw new TransientFailure( 'The work directory could not be created.' );

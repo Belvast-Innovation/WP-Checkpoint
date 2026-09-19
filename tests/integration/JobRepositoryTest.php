@@ -714,6 +714,70 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		}
 	}
 
+	public function test_a_failing_job_lookup_reclaims_nothing_in_that_pass(): void {
+		global $wpdb;
+		$token = $this->dirs->state()['token'];
+		$tmp   = $this->base . '/tmp';
+		$job   = $this->repo->create( 'export' );
+		$this->repo->acquire( $job->id );
+		mkdir( Residue::work_dir( $this->base, $job->id ) );
+		touch( Residue::work_dir( $this->base, $job->id ) . '/site.part001.wpcheckpoint.zip.partial' );
+		$table = TempTables::name( $token, $job->id, 'beef', 'posts' );
+		$wpdb->query( "CREATE TABLE `{$table}` (id int)" );
+		mkdir( $tmp . '/job-424242' );
+		LockFile::write( $this->base, 424242, 'orphan', $this->now + 60 );
+
+		// The jobs table is unreachable for the duration of the pass: every lookup fails, none says "no row".
+		$jobs = Schema::jobs_table();
+		$wpdb->query( "RENAME TABLE {$jobs} TO {$jobs}_away" );
+		$suppressed = $wpdb->suppress_errors();
+		try {
+			$this->repo->reap();
+		} finally {
+			$wpdb->suppress_errors( $suppressed );
+			$wpdb->query( "RENAME TABLE {$jobs}_away TO {$jobs}" );
+		}
+		$this->assertDirectoryExists( Residue::work_dir( $this->base, $job->id ), 'a running job\'s work survives a database hiccup' );
+		$this->assertFileExists( Residue::work_dir( $this->base, $job->id ) . '/site.part001.wpcheckpoint.zip.partial' );
+		$this->assertTrue( $this->table_exists( $table ) );
+		$this->assertDirectoryExists( $tmp . '/job-424242', 'not even a real orphan is touched when lookups fail' );
+		$this->assertFileExists( LockFile::path( $this->base, 424242 ) );
+		$this->assertFileExists( LockFile::path( $this->base, $job->id ) );
+		$this->assertStringContainsString( 'lookup failed', (string) file_get_contents( $this->base . '/logs/storage.log' ) );
+
+		// With the table back, the same pass removes exactly the orphans.
+		$this->repo->reap();
+		$this->assertDirectoryDoesNotExist( $tmp . '/job-424242' );
+		$this->assertFileDoesNotExist( LockFile::path( $this->base, 424242 ) );
+		$this->assertDirectoryExists( Residue::work_dir( $this->base, $job->id ) );
+		$this->assertTrue( $this->table_exists( $table ) );
+	}
+
+	public function test_a_retry_that_raced_the_expiry_loses(): void {
+		global $wpdb;
+		list( $job, $dir ) = $this->failed_job_with_work();
+		$stale = $this->repo->find( $job->id );
+		$this->assertTrue( $stale->can_retry() );
+		// expire_work() marked the row after this object was read and is still deleting the files.
+		$wpdb->update( Schema::jobs_table(), array( 'work_expired_at' => $this->now ), array( 'id' => $job->id ), array( '%d' ), array( '%d' ) );
+		try {
+			$this->repo->transition( $stale, Job::QUEUED );
+			$this->fail( 'the row, not the object in memory, decides' );
+		} catch ( StaleJob $e ) {
+			$this->addToAssertionCount( 1 );
+		}
+		$this->assertSame( Job::FAILED, $this->repo->find( $job->id )->status );
+		$this->assertFalse( $this->repo->find( $job->id )->can_retry() );
+		// A fresh read gives the reason.
+		try {
+			$this->repo->transition( $this->repo->find( $job->id ), Job::QUEUED );
+			$this->fail();
+		} catch ( InvalidTransition $e ) {
+			$this->assertStringContainsString( 'retention', $e->getMessage() );
+		}
+		$this->assertDirectoryExists( $dir, 'the files are the expiry\'s to remove, not this test\'s concern' );
+	}
+
 	public function test_reclaim_is_bounded_and_finishes_over_several_passes(): void {
 		list( $job, $dir ) = $this->failed_job_with_work();
 		for ( $i = 0; $i < JobRepository::RECLAIM_MAX_ENTRIES + 10; $i++ ) {
