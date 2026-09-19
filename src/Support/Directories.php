@@ -397,6 +397,15 @@ final class Directories {
 	/**
 	 * Use the directory from WPCHECKPOINT_STORAGE_DIR.
 	 *
+	 * The storage token is the identity of the current directory choice
+	 * (job ownership, the storage gate, temporary table prefixes, notice
+	 * dismissals). A default directory derives it from its own name; a
+	 * custom directory has no such name, so one is generated here and kept
+	 * in the same state, and a new one is generated whenever the custom
+	 * path changes, exactly as choosing a new default directory would. It
+	 * is distinct from install_id (the owner marker): that one stays the
+	 * same across directory choices, the token does not.
+	 *
 	 * @return void
 	 */
 	private function resolve_custom(): void {
@@ -415,6 +424,10 @@ final class Directories {
 		}
 		if ( ! $this->prepare( $dir ) ) {
 			return;
+		}
+		if ( ! self::is_valid_token( $this->state['token'] ) || $dir !== $this->state['path'] ) {
+			$this->state['token'] = bin2hex( random_bytes( 6 ) );
+			$this->save_state();
 		}
 		$this->adopt( $dir, self::SOURCE_CUSTOM, false );
 	}
