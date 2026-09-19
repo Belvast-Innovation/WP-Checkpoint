@@ -21,14 +21,22 @@ final class Deleter {
 	/**
 	 * Delete a file or directory tree strictly inside $base.
 	 *
-	 * @param string $base   Directory the plugin owns.
-	 * @param string $target Entry to delete; must be inside $base.
-	 * @return array{deleted: int, failed: string[]}
+	 * With $max_entries > 0 the call stops after that many entries were
+	 * deleted or failed and reports "remaining": a tree of a hundred
+	 * thousand files is removed across several calls (the reaper runs
+	 * every few minutes), each of which fits one tick. Deletion is
+	 * idempotent, so a caller simply calls again later.
+	 *
+	 * @param string $base        Directory the plugin owns.
+	 * @param string $target      Entry to delete; must be inside $base.
+	 * @param int    $max_entries Stop after this many entries (0: no limit).
+	 * @return array{deleted: int, failed: string[], remaining: bool}
 	 */
-	public static function delete_tree( string $base, string $target ): array {
+	public static function delete_tree( string $base, string $target, int $max_entries = 0 ): array {
 		$result = array(
-			'deleted' => 0,
-			'failed'  => array(),
+			'deleted'   => 0,
+			'failed'    => array(),
+			'remaining' => false,
 		);
 
 		$target = rtrim( $target, '/\\' );
@@ -41,7 +49,7 @@ final class Deleter {
 			// A link may be removed only when the link itself sits inside base.
 			if ( ! Paths::is_inside( $base, dirname( $target ) ) && ! self::same_dir( $base, dirname( $target ) ) ) {
 				$result['failed'][] = $target;
-				return $result;
+					return $result;
 			}
 			self::remove_link( $target, $result );
 			return $result;
@@ -59,8 +67,10 @@ final class Deleter {
 		}
 
 		if ( is_dir( $real ) ) {
-			self::delete_children( $base, $real, $result );
-			self::remove_dir( $real, $result );
+			self::delete_children( $base, $real, $result, $max_entries );
+			if ( ! $result['remaining'] ) {
+				self::remove_dir( $real, $result );
+			}
 		} else {
 			self::remove_file( $real, $result );
 		}
@@ -76,8 +86,9 @@ final class Deleter {
 	 */
 	public static function empty_directory( string $base ): array {
 		$result = array(
-			'deleted' => 0,
-			'failed'  => array(),
+			'deleted'   => 0,
+			'failed'    => array(),
+			'remaining' => false,
 		);
 		$real   = realpath( rtrim( $base, '/\\' ) );
 		if ( false === $real || ! is_dir( $real ) || self::is_reparse( $base ) ) {
@@ -208,12 +219,13 @@ final class Deleter {
 	/**
 	 * Delete the children of a real directory.
 	 *
-	 * @param string                                $base   Owning base directory.
-	 * @param string                                $dir    Real directory path.
-	 * @param array{deleted: int, failed: string[]} $result Accumulator.
+	 * @param string                                                 $base   Owning base directory.
+	 * @param string                                                 $dir    Real directory path.
+	 * @param array{deleted: int, failed: string[], remaining: bool} $result Accumulator.
+	 * @param int                                                    $limit  Stop after this many entries (0: no limit).
 	 * @return void
 	 */
-	private static function delete_children( string $base, string $dir, array &$result ): void {
+	private static function delete_children( string $base, string $dir, array &$result, int $limit = 0 ): void {
 		$entries = @scandir( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- unreadable directories are reported as failures.
 		if ( false === $entries ) {
 			$result['failed'][] = $dir;
@@ -222,6 +234,10 @@ final class Deleter {
 		foreach ( $entries as $entry ) {
 			if ( '.' === $entry || '..' === $entry ) {
 				continue;
+			}
+			if ( $limit > 0 && $result['deleted'] + count( $result['failed'] ) >= $limit ) {
+				$result['remaining'] = true;
+				return;
 			}
 			$path = $dir . DIRECTORY_SEPARATOR . $entry;
 			if ( self::is_reparse( $path ) ) {
@@ -233,7 +249,10 @@ final class Deleter {
 				continue;
 			}
 			if ( is_dir( $path ) ) {
-				self::delete_children( $base, $path, $result );
+				self::delete_children( $base, $path, $result, $limit );
+				if ( $result['remaining'] ) {
+					return;
+				}
 				self::remove_dir( $path, $result );
 			} else {
 				self::remove_file( $path, $result );
@@ -244,8 +263,8 @@ final class Deleter {
 	/**
 	 * Remove a link without touching its target.
 	 *
-	 * @param string                                $path   Link path.
-	 * @param array{deleted: int, failed: string[]} $result Accumulator.
+	 * @param string                                                 $path   Link path.
+	 * @param array{deleted: int, failed: string[], remaining: bool} $result Accumulator.
 	 * @return void
 	 */
 	private static function remove_link( string $path, array &$result ): void {
@@ -260,8 +279,8 @@ final class Deleter {
 	/**
 	 * Remove a regular file.
 	 *
-	 * @param string                                $path   File path.
-	 * @param array{deleted: int, failed: string[]} $result Accumulator.
+	 * @param string                                                 $path   File path.
+	 * @param array{deleted: int, failed: string[], remaining: bool} $result Accumulator.
 	 * @return void
 	 */
 	private static function remove_file( string $path, array &$result ): void {
@@ -275,8 +294,8 @@ final class Deleter {
 	/**
 	 * Remove an (empty) directory.
 	 *
-	 * @param string                                $path   Directory path.
-	 * @param array{deleted: int, failed: string[]} $result Accumulator.
+	 * @param string                                                 $path   Directory path.
+	 * @param array{deleted: int, failed: string[], remaining: bool} $result Accumulator.
 	 * @return void
 	 */
 	private static function remove_dir( string $path, array &$result ): void {

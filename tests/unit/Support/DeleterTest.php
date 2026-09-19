@@ -73,6 +73,35 @@ final class DeleterTest extends TestCase {
 		$this->assertFileExists( $this->base() . '/top.txt' );
 	}
 
+	public function test_a_bounded_pass_stops_and_reports_the_rest_and_a_second_pass_finishes(): void {
+		$base = $this->base();
+		mkdir( $base . '/big/x/y', 0700, true );
+		for ( $i = 0; $i < 30; $i++ ) {
+			touch( $base . '/big/' . $i . '.txt' );
+			touch( $base . '/big/x/' . $i . '.txt' );
+		}
+		touch( $base . '/big/x/y/deep.txt' );
+		$first = Deleter::delete_tree( $base, $base . '/big', 25 );
+		$this->assertTrue( $first['remaining'] );
+		$this->assertSame( array(), $first['failed'] );
+		$this->assertSame( 25, $first['deleted'] );
+		$this->assertDirectoryExists( $base . '/big', 'the root stays while entries remain' );
+		$second = Deleter::delete_tree( $base, $base . '/big', 25 );
+		$this->assertTrue( $second['remaining'] );
+		$third = Deleter::delete_tree( $base, $base . '/big', 25 );
+		$this->assertFalse( $third['remaining'] );
+		$this->assertDirectoryDoesNotExist( $base . '/big' );
+		$this->assertSame( 61 + 3, $first['deleted'] + $second['deleted'] + $third['deleted'], 'sixty-one files and three directories' );
+		// A pass on something already gone is not an error worth stopping for: nothing remains.
+		$again = Deleter::delete_tree( $base, $base . '/big', 25 );
+		$this->assertFalse( $again['remaining'] );
+		// Without a limit everything goes in one call.
+		mkdir( $base . '/all/x', 0700, true );
+		touch( $base . '/all/x/f' );
+		$this->assertFalse( Deleter::delete_tree( $base, $base . '/all' )['remaining'] );
+		$this->assertDirectoryDoesNotExist( $base . '/all' );
+	}
+
 	public function test_refuses_targets_outside_and_the_base_itself(): void {
 		$this->assertNotEmpty( Deleter::delete_tree( $this->base(), $this->root . '/outside' )['failed'] );
 		$this->assertNotEmpty( Deleter::delete_tree( $this->base(), $this->base() )['failed'] );
