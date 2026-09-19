@@ -38,6 +38,35 @@ final class TempTablesTest extends TestCase {
 		$this->assertSame( 'wcptmpa1b2c3_1_beef_' . $fits, TempTables::name( self::TOKEN, 1, 'beef', $fits ) );
 	}
 
+	public function test_every_name_that_can_be_created_can_be_dropped(): void {
+		$cases = array(
+			'umlauts'            => 'wp_bestellungen_für_küche',
+			'chinese'            => 'wp_订单表',
+			'mixed'              => 'posts-2024.archive',
+			'cut in a multibyte' => str_repeat( 'a', 33 ) . 'ü' . str_repeat( 'b', 20 ),
+			'plain long'         => str_repeat( 'x', 80 ),
+			'plain short'        => 'posts',
+		);
+		$names = array();
+		foreach ( $cases as $label => $table ) {
+			$name = TempTables::name( self::TOKEN, 12, 'beef', $table );
+			$this->assertTrue( TempTables::is_safe_name( $name ), "{$label}: {$name}" );
+			$this->assertLessThanOrEqual( TempTables::MAX_NAME, strlen( $name ), $label );
+			$this->assertSame( 12, TempTables::job_id_of( self::TOKEN, $name ), $label );
+			$this->assertSame( $name, TempTables::name( self::TOKEN, 12, 'beef', $table ), "{$label}: deterministic" );
+			$names[ $label ] = $name;
+		}
+		$this->assertSame( count( $cases ), count( array_unique( $names ) ), 'no two originals map to one name' );
+		$this->assertSame( 'wcptmpa1b2c3_12_beef_posts', $names['plain short'], 'a plain name is kept as is' );
+		// Names that collapse to the same replacement stay apart through the hash of the original.
+		$this->assertNotSame( TempTables::name( self::TOKEN, 12, 'beef', 'posts_ä' ), TempTables::name( self::TOKEN, 12, 'beef', 'posts_ö' ) );
+		$this->assertStringStartsWith( 'wcptmpa1b2c3_12_beef_posts__', TempTables::name( self::TOKEN, 12, 'beef', 'posts_ä' ) );
+		// The rule the dropping side checks refuses exactly what the creating side never produces.
+		foreach ( array( 'wcptmpa1b2c3_12_beef_ü', 'a b', '', str_repeat( 'a', 65 ), 'x`y' ) as $bad ) {
+			$this->assertFalse( TempTables::is_safe_name( $bad ), $bad );
+		}
+	}
+
 	public function test_bad_inputs_are_refused(): void {
 		foreach ( array( array( 'xyz', 1, 'beef', 't' ), array( self::TOKEN, 0, 'beef', 't' ), array( self::TOKEN, 1, 'BEEF', 't' ), array( self::TOKEN, 1, 'bee', 't' ), array( self::TOKEN, 1, 'beef', '' ), array( self::TOKEN, 1, 'beef', "a\nb" ), array( self::TOKEN, 1, 'beef', 'a/b' ) ) as $args ) {
 			try {

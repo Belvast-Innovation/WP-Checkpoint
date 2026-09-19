@@ -632,11 +632,13 @@ final class JobRepository {
 			$budget -= $result['deleted'] + count( $result['failed'] );
 			$this->report_reclaim( $entry['kind'] . ' ' . ( $entry['id'] > 0 ? 'of job ' . $entry['id'] : basename( $entry['path'] ) ), $result );
 		}
-		foreach ( $this->temp_tables( $token ) as $name => $id ) {
-			if ( $this->is_work_orphan( $id, $token, $owners ) ) {
-				$this->drop_table( $name );
+		$this->drop_tables_of(
+			$token,
+			0,
+			function ( int $id ) use ( $token, &$owners ): bool {
+				return $this->is_work_orphan( $id, $token, $owners );
 			}
-		}
+		);
 	}
 
 	/**
@@ -681,17 +683,45 @@ final class JobRepository {
 			$this->directories->log_event( sprintf( 'Job %d is bound to another storage directory; its work files were left alone.', $job->id ) );
 			return false;
 		}
-		$token = (string) $this->directories->state()['token'];
-		foreach ( $this->temp_tables( $token, $job->id ) as $name => $id ) {
-			$this->drop_table( $name );
-		}
-		$dir = Residue::work_dir( $job->storage_path, $job->id );
+		$token  = (string) $this->directories->state()['token'];
+		$tables = $this->drop_tables_of( $token, $job->id );
+		$dir    = Residue::work_dir( $job->storage_path, $job->id );
 		if ( ! is_dir( $dir ) ) {
-			return true;
+			return $tables;
 		}
 		$result = Deleter::delete_tree( Residue::tmp( $job->storage_path ), $dir, self::RECLAIM_MAX_ENTRIES );
 		$this->report_reclaim( 'work directory of job ' . $job->id, $result );
-		return ! $result['remaining'] && array() === $result['failed'];
+		return $tables && ! $result['remaining'] && array() === $result['failed'];
+	}
+
+	/**
+	 * Drop the temporary tables of a job (or, with id 0, every orphaned one
+	 * the callback approves) and report what could not be dropped.
+	 *
+	 * @param string        $token   Storage token.
+	 * @param int           $job_id  Job id, or 0 for all tables.
+	 * @param callable|null $approve function( int $job_id ): bool, required with id 0.
+	 * @return bool True when every table that had to go is gone.
+	 */
+	private function drop_tables_of( string $token, int $job_id, $approve = null ): bool {
+		$failed = array();
+		foreach ( $this->temp_tables( $token, $job_id ) as $name => $id ) {
+			if ( 0 === $job_id && ( null === $approve || ! $approve( $id ) ) ) {
+				continue;
+			}
+			if ( ! $this->drop_table( $name ) ) {
+				$failed[] = $name;
+			}
+		}
+		$this->report_reclaim(
+			0 === $job_id ? 'orphaned temporary tables' : 'temporary tables of job ' . $job_id,
+			array(
+				'deleted'   => 0,
+				'failed'    => $failed,
+				'remaining' => false,
+			)
+		);
+		return array() === $failed;
 	}
 
 	/**
@@ -738,18 +768,22 @@ final class JobRepository {
 	}
 
 	/**
-	 * Drop one temporary table by a name that TempTables::job_id_of() accepted.
+	 * Drop one temporary table by a name that TempTables::job_id_of()
+	 * accepted. A name outside TempTables::is_safe_name() cannot be one this
+	 * plugin created (the creating side obeys the same rule); it is reported
+	 * as a failure rather than skipped, so a mismatch between the two sides
+	 * can never again leave a table behind unnoticed.
 	 *
 	 * @param string $name Table name.
-	 * @return void
+	 * @return bool Whether the table is gone.
 	 */
-	private function drop_table( string $name ): void {
+	private function drop_table( string $name ): bool {
 		global $wpdb;
-		if ( 1 !== preg_match( '/\A[A-Za-z0-9_]{1,64}\z/', $name ) ) {
-			return;
+		if ( ! TempTables::is_safe_name( $name ) ) {
+			return false;
 		}
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- a temporary table of this installation, name validated above.
-		$wpdb->query( "DROP TABLE IF EXISTS `{$name}`" );
+		return false !== $wpdb->query( "DROP TABLE IF EXISTS `{$name}`" );
 	}
 
 	/**

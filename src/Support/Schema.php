@@ -213,7 +213,7 @@ final class Schema {
 			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- table listing.
 			$names = $wpdb->get_col( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $prefix ) . '%' ) );
 			foreach ( is_array( $names ) ? $names : array() as $name ) {
-				if ( \WPCheckpoint\Jobs\TempTables::job_id_of( $token, (string) $name ) > 0 && 1 === preg_match( '/\A[A-Za-z0-9_]{1,64}\z/', (string) $name ) ) {
+				if ( \WPCheckpoint\Jobs\TempTables::job_id_of( $token, (string) $name ) > 0 && \WPCheckpoint\Jobs\TempTables::is_safe_name( (string) $name ) ) {
 					$wpdb->query( "DROP TABLE IF EXISTS `{$name}`" ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- this installation's temporary table, name validated; uninstall only.
 				}
 			}

@@ -697,6 +697,23 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		$this->assertFileExists( LockFile::path( $this->base, $running->id ) );
 	}
 
+	public function test_a_table_the_plugin_could_not_have_created_is_a_reported_failure_not_a_silent_skip(): void {
+		global $wpdb;
+		list( $job, $dir, $table ) = $this->failed_job_with_work();
+		// A name with the job's prefix but a character the naming rule never produces (someone hand-made it).
+		$odd = TempTables::job_prefix( $this->dirs->state()['token'], $job->id ) . 'beef_orders_ü';
+		$wpdb->query( "CREATE TABLE `{$odd}` (id int)" );
+		try {
+			$this->assertFalse( $this->repo->reclaim_work( $job ), 'a table left behind is not success' );
+			$this->assertFalse( $this->table_exists( $table ), 'the well-formed table went' );
+			$this->assertTrue( $this->table_exists( $odd ) );
+			$this->assertDirectoryDoesNotExist( $dir );
+			$this->assertStringContainsString( 'temporary tables of job ' . $job->id . ': 1 entries could not be deleted', (string) file_get_contents( $this->base . '/logs/storage.log' ) );
+		} finally {
+			$wpdb->query( "DROP TABLE IF EXISTS `{$odd}`" );
+		}
+	}
+
 	public function test_reclaim_is_bounded_and_finishes_over_several_passes(): void {
 		list( $job, $dir ) = $this->failed_job_with_work();
 		for ( $i = 0; $i < JobRepository::RECLAIM_MAX_ENTRIES + 10; $i++ ) {
