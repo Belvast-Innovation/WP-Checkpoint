@@ -743,7 +743,7 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		$this->assertDirectoryExists( $tmp . '/job-424242', 'not even a real orphan is touched when lookups fail' );
 		$this->assertFileExists( LockFile::path( $this->base, 424242 ) );
 		$this->assertFileExists( LockFile::path( $this->base, $job->id ) );
-		$this->assertStringContainsString( 'lookup failed', (string) file_get_contents( $this->base . '/logs/storage.log' ) );
+		$this->assertStringContainsString( 'nothing is reclaimed in this pass', (string) file_get_contents( $this->base . '/logs/storage.log' ) );
 
 		// With the table back, the same pass removes exactly the orphans.
 		$this->repo->reap();
