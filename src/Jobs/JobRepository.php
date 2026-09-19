@@ -34,6 +34,14 @@ defined( 'ABSPATH' ) || exit;
  * directory are failed. Files (lock file, log) are only ever touched inside
  * the current storage directory; another directory belongs to another
  * installation or is abandoned.
+ *
+ * The read methods (find, list_jobs, counts) check that the table exists
+ * before querying: a query against a missing table is not an exception in
+ * $wpdb but a line in the error log, and the reads are reached before
+ * Schema::ensure() ran (a REST poll on a fresh install, the environment
+ * page, storage settlement). One SHOW TABLES per read is the price; the
+ * writes only run after acquire() found the row. The reaper does not rely
+ * on that null: find_for_reclaim() treats a missing table as unsafe.
  */
 final class JobRepository {
 
@@ -175,6 +183,9 @@ final class JobRepository {
 	 */
 	public function find( int $id ) {
 		global $wpdb;
+		if ( ! Schema::table_exists() ) {
+			return null;
+		}
 		$table = $wpdb->base_prefix . Schema::JOBS_TABLE;
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix.
 		$row = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$table} WHERE id = %d", $id ), ARRAY_A );
@@ -190,6 +201,9 @@ final class JobRepository {
 	 */
 	public function list_jobs( array $statuses = array(), int $limit = 50 ): array {
 		global $wpdb;
+		if ( ! Schema::table_exists() ) {
+			return array();
+		}
 		$table    = $wpdb->base_prefix . Schema::JOBS_TABLE;
 		$statuses = array_values( array_intersect( $statuses, Job::statuses() ) );
 		$limit    = max( 1, min( 500, $limit ) );
@@ -213,6 +227,9 @@ final class JobRepository {
 		global $wpdb;
 		$table  = $wpdb->base_prefix . Schema::JOBS_TABLE;
 		$counts = array_fill_keys( Job::statuses(), 0 );
+		if ( ! Schema::table_exists() ) {
+			return $counts;
+		}
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix.
 		$rows = $wpdb->get_results( "SELECT status, COUNT(*) AS n FROM {$table} GROUP BY status", ARRAY_A );
 		foreach ( is_array( $rows ) ? $rows : array() as $row ) {
@@ -710,6 +727,11 @@ final class JobRepository {
 	 */
 	private function find_for_reclaim( int $id ) {
 		global $wpdb;
+		// find() answers null for a missing table too (see the class comment); for a deletion that is not
+		// "no such job" either: the table may be about to be recreated, or the database is unreachable.
+		if ( ! Schema::table_exists() ) {
+			throw new ReclaimUnsafe( 'The job table is not there; nothing is reclaimed in this pass.' );
+		}
 		$job = $this->find( $id );
 		if ( null === $job && '' !== (string) $wpdb->last_error ) {
 			throw new ReclaimUnsafe( 'The job lookup failed; nothing is reclaimed in this pass.' );

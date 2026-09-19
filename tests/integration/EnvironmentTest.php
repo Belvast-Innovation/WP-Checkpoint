@@ -12,6 +12,7 @@ use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Support\Environment;
 use WPCheckpoint\Support\Options;
 use WPCheckpoint\Support\Report;
+use WPCheckpoint\Support\Schema;
 
 final class EnvironmentTest extends WP_UnitTestCase {
 
@@ -198,6 +199,27 @@ final class EnvironmentTest extends WP_UnitTestCase {
 		$this->assertSame( 'POST', $seen[0][1]['method'] );
 		$this->assertSame( str_repeat( 'a', 32 ), $seen[0][1]['body']['challenge'] );
 		$this->assertSame( 5, $seen[0][1]['timeout'] );
+	}
+
+	public function test_a_missing_job_table_is_reported_without_a_failed_query(): void {
+		global $wpdb;
+		// The core test case rewrites DROP TABLE into DROP TEMPORARY TABLE, which leaves a real table standing.
+		remove_filter( 'query', array( $this, '_create_temporary_tables' ) );
+		remove_filter( 'query', array( $this, '_drop_temporary_tables' ) );
+		$wpdb->query( 'DROP TABLE IF EXISTS ' . Schema::jobs_table() );
+		$this->assertFalse( Schema::table_exists(), 'the real table is gone' );
+		$wpdb->last_error = '';
+		$env   = new Environment( $this->dirs, array( 'loopback' => $this->echo_probe() ) );
+		$check = $this->find( $env->checks( true ), 'database.jobs' );
+		$this->assertSame( Check::ERROR, $check->status );
+		$this->assertSame( 'missing', $check->value );
+		$this->assertSame( '', $wpdb->last_error, 'nothing queried the absent table; expected errors would hide real ones in the test log' );
+		$repo = new \WPCheckpoint\Jobs\JobRepository( $this->dirs );
+		$this->assertSame( array_fill_keys( \WPCheckpoint\Jobs\Job::statuses(), 0 ), $repo->counts() );
+		$this->assertNull( $repo->find( 1 ) );
+		$this->assertSame( array(), $repo->list_jobs() );
+		$this->assertSame( 0, $repo->settle_storage(), 'storage settlement before the table exists is a no-op, not an error' );
+		$this->assertSame( '', $wpdb->last_error );
 	}
 
 	public function test_thirty_two_bit_php_is_a_warning_that_names_the_size_in_both_directions(): void {
