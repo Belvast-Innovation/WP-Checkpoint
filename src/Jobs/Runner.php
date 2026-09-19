@@ -10,6 +10,7 @@ namespace WPCheckpoint\Jobs;
 use WPCheckpoint\Support\Environment;
 use WPCheckpoint\Support\Logger;
 use WPCheckpoint\Support\Redactor;
+use WPCheckpoint\Support\Thresholds;
 use WPCheckpoint\Support\Report;
 
 defined( 'ABSPATH' ) || exit;
@@ -181,7 +182,16 @@ final class Runner {
 		$token  = $held['token'];
 		$start  = is_numeric( $started_at ) ? (float) $started_at : $this->now();
 		$logger = $this->logger_for( $job );
-		$budget = $this->budget_for( (int) call_user_func( $this->memory ) );
+		try {
+			$budget = $this->budget_for( (int) call_user_func( $this->memory ) );
+		} catch ( BudgetExhausted $e ) {
+			// The real cause, once, instead of three empty ticks and "could not make progress".
+			try {
+				return $this->fail( $job, $token, $logger, $e->getMessage() );
+			} catch ( LockLost $lost ) {
+				return new TickResult( TickResult::LOST, 0, $this->repository->find( $job_id ), __( 'The job was cancelled or taken over by another process.', 'wp-checkpoint' ) );
+			}
+		}
 
 		try {
 			return $this->run_steps( $job, $token, $logger, $budget, $start );
@@ -375,8 +385,12 @@ final class Runner {
 		if ( null === $type ) {
 			return 0;
 		}
-		$logger  = $this->logger_for( $job );
-		$budget  = $this->budget_for( (int) call_user_func( $this->memory ) );
+		$logger = $this->logger_for( $job );
+		try {
+			$budget = $this->budget_for( (int) call_user_func( $this->memory ) );
+		} catch ( BudgetExhausted $e ) {
+			$budget = new Budget( Thresholds::BUDGET_MIN_SECONDS, 0, true ); // Cleanup does not need a budget to run.
+		}
 		$context = $this->context( $job, $job->cursor, $budget, $logger, $this->now(), null );
 		$cleaned = 0;
 		foreach ( $type->steps() as $step ) {
@@ -420,6 +434,7 @@ final class Runner {
 	 * @return Budget
 	 */
 	private function budget_for( int $memory_at_start ): Budget {
+		// May throw BudgetExhausted: the callers decide whether that fails the job (tick) or is ignored (cleanup).
 		if ( $this->budget instanceof Budget ) {
 			return $this->budget;
 		}
