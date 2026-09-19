@@ -25,10 +25,12 @@ namespace WPCheckpoint\Jobs;
  * A step never calls the write methods of JobRepository (save_progress,
  * transition, heartbeat, release): every write goes through
  * JobContext::checkpoint() and the runner, which fence it with the lock
- * token. Temporary files and results live under JobContext::storage_path()
- * (tmp/ and backups/), and that path is taken from the context on every
- * run, never cached across ticks: the storage directory can change between
- * ticks and the engine only touches files inside the current one.
+ * token. Temporary files live under JobContext::work_path() (the job's own
+ * directory, removed by the engine), finished results are handed to
+ * backups/ by the store step, and those paths are taken from the context
+ * on every run, never cached across ticks: the storage directory can
+ * change between ticks and the engine only touches files inside the
+ * current one.
  */
 interface Step {
 
@@ -50,13 +52,14 @@ interface Step {
 	public function run( JobContext $context ): StepResult;
 
 	/**
-	 * Remove what the step left behind (temporary tables, files) after the
-	 * job was cancelled. Called by the canceller that took the lock, or by
-	 * the holder that lost it, for every step up to the current one. It is
-	 * never called for a failed job: a failed job keeps its cursor and its
-	 * temporary files so that a retry can continue from them. Nothing
-	 * reclaims those files yet (the purge only removes the lock file and the
-	 * log); the per-job work directory of T013 will.
+	 * Remove what the engine does not know about (temporary tables, external
+	 * resources) after the job was cancelled. Files under work_path() need no
+	 * handling: the engine removes the whole work directory after the steps
+	 * ran, and reclaims it after retention for a failed job. A step that
+	 * creates nothing else leaves this empty. Called by the canceller that
+	 * took the lock, or by the holder that lost it, for every step up to the
+	 * current one. It is never called for a failed job: a failed job keeps
+	 * its cursor and its work files so that a retry can continue from them.
 	 *
 	 * Must tolerate everything: files that no longer exist, tables that were
 	 * never created, and deletions that fail. Never throw, never let a fatal
