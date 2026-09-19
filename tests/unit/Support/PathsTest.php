@@ -177,6 +177,26 @@ final class PathsTest extends TestCase {
 		$this->assertTrue( Paths::same( 'C:\\A\\B', 'c:/a/b/', true ) );
 	}
 
+	public function test_empty_and_separator_only_inputs_fail_closed_everywhere(): void {
+		$cwd = getcwd();
+		chdir( $this->root . '/base' );
+		try {
+			foreach ( array( '', '/', '//', '\\', '/\\/' ) as $bad ) {
+				$this->assertFalse( Paths::is_inside( $bad, $this->root . '/base/file.txt' ), "is_inside base [{$bad}]" );
+				$this->assertFalse( Paths::is_inside( $this->root . '/base', $bad ), "is_inside target [{$bad}]" );
+				$this->assertFalse( Paths::is_same_or_inside( $bad, $this->root . '/base' ), "is_same_or_inside base [{$bad}]" );
+				$this->assertFalse( Paths::is_same_or_inside( $this->root . '/base', $bad ), "is_same_or_inside target [{$bad}]" );
+				$this->assertFalse( Paths::same( $bad, $bad, false ), "same [{$bad}]" );
+				$this->assertFalse( Paths::same( $bad, $this->root . '/base', true ), "same one side [{$bad}]" );
+			}
+			// The working directory is the base here, and still nothing empty resolves to it.
+			$this->assertFalse( Paths::is_same_or_inside( '', $this->root . '/base' ) );
+			$this->assertTrue( Paths::is_same_or_inside( $this->root . '/base', $this->root . '/base/' ), 'a trailing separator on a real path is still fine' );
+		} finally {
+			chdir( (string) $cwd );
+		}
+	}
+
 	public function test_base_must_be_a_directory(): void {
 		$this->assertFalse( Paths::is_inside( $this->base() . '/file.txt', $this->base() . '/file.txt' ) );
 	}

@@ -360,10 +360,12 @@ final class Runner {
 	 * Run the cleanup of every step up to and including the current one,
 	 * after a job was cancelled. Best effort: each step's failure is logged.
 	 *
-	 * Only for cancelled jobs. A failed job is never cleaned up: it keeps its
-	 * cursor and its temporary files for a retry. Nothing reclaims those
-	 * files yet (the purge only removes the lock file and the log); T013
-	 * adds the per-job work directory that the purge and the reaper remove.
+	 * Only for cancelled jobs. A failed job is never cleaned up here: it
+	 * keeps its cursor and its work directory for a retry until the purge
+	 * reclaims them after JobRepository::WORK_RETENTION_SECONDS. After the
+	 * steps ran, the engine removes the whole work directory and the job's
+	 * temporary tables itself (JobRepository::reclaim_work()), whatever the
+	 * steps missed.
 	 *
 	 * @param Job $job Cancelled job.
 	 * @return int Steps cleaned.
@@ -397,6 +399,7 @@ final class Runner {
 				break;
 			}
 		}
+		$this->repository->reclaim_work( $job );
 		$logger->info( 'Cleanup finished', array( 'steps' => $cleaned ) );
 		return $cleaned;
 	}

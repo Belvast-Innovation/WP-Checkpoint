@@ -133,6 +133,15 @@ final class JobPresenter {
 	}
 
 	/**
+	 * Why a failed job can no longer be retried.
+	 *
+	 * @return string
+	 */
+	public static function retry_note(): string {
+		return __( 'The intermediate files of this job passed their retention period and were cleaned up. Start a new job instead.', 'wp-checkpoint' );
+	}
+
+	/**
 	 * A job as an array safe to send to the client. No storage_path, no cursor.
 	 *
 	 * @param Job  $job      Job.
@@ -157,6 +166,8 @@ final class JobPresenter {
 			'updated_at'  => $job->updated_at,
 			'finished_at' => $job->finished_at,
 			'last_error'  => $this->clean( $job->last_error, $extra ),
+			'retryable'   => $job->can_retry(),
+			'retry_note'  => Job::FAILED === $job->status && ! $job->can_retry() ? self::retry_note() : '',
 		);
 		if ( $with_log ) {
 			$data['log_tail'] = $this->log_tail( $job );

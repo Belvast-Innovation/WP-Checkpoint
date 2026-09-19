@@ -11,6 +11,7 @@ use WP_CLI;
 use WPCheckpoint\Archive\ArchiveVerifier;
 use WPCheckpoint\Archive\VerificationResult;
 use WPCheckpoint\Jobs\JobPresenter;
+use WPCheckpoint\Jobs\Residue;
 use WPCheckpoint\Support\Directories;
 
 defined( 'ABSPATH' ) || exit;
@@ -146,6 +147,8 @@ final class VerifyCommand {
 	/**
 	 * A private directory for the extracted indexes: under the storage tmp/
 	 * directory when there is one, else the system temporary directory.
+	 * Named by the residue catalogue, so a directory a killed process
+	 * leaves behind is reaped after Residue::VERIFY_TTL.
 	 *
 	 * @return string
 	 */
@@ -154,7 +157,7 @@ final class VerifyCommand {
 		if ( '' === $base ) {
 			$base = sys_get_temp_dir();
 		}
-		$dir = $base . DIRECTORY_SEPARATOR . 'verify-' . bin2hex( random_bytes( 8 ) );
+		$dir = Residue::new_verify_dir( $base );
 		if ( ! @mkdir( $dir, 0700 ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- failure is reported below.
 			WP_CLI::error( 'The work directory could not be created.' );
 		}

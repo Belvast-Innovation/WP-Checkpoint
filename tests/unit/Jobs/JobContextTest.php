@@ -5,6 +5,7 @@ namespace WPCheckpoint\Tests\Unit\Jobs;
 use WPCheckpoint\Jobs\Budget;
 use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\JobContext;
+use WPCheckpoint\Jobs\TransientFailure;
 use WPCheckpoint\Support\Logger;
 use WPCheckpoint\Support\Redactor;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
@@ -110,5 +111,34 @@ final class JobContextTest extends TestCase {
 
 		$this->expectException( \LogicException::class );
 		$this->context()->checkpoint( array(), 1 );
+	}
+
+	public function test_work_path_is_the_job_directory_under_tmp_created_on_first_use(): void {
+		$root = sys_get_temp_dir() . '/wpcheckpoint-ctx-' . bin2hex( random_bytes( 4 ) );
+		mkdir( $root . '/tmp', 0700, true );
+		try {
+			$context               = $this->context();
+			$context->job()->id    = 12;
+			$context->job()->storage_path = $root;
+			$expected              = $root . DIRECTORY_SEPARATOR . 'tmp' . DIRECTORY_SEPARATOR . 'job-12';
+			$this->assertDirectoryDoesNotExist( $expected );
+			$this->assertSame( $expected, $context->work_path() );
+			$this->assertDirectoryExists( $expected );
+			$this->assertSame( $expected, $context->work_path(), 'idempotent' );
+			$this->assertSame( $root, $context->storage_path() );
+
+			$context->job()->storage_path = $root . '/missing';
+			try {
+				$context->work_path();
+				$this->fail( 'a work directory that cannot be created is a transient failure' );
+			} catch ( TransientFailure $e ) {
+				$this->assertStringContainsString( 'could not be created', $e->getMessage() );
+			}
+			$context->job()->storage_path = '';
+			$this->expectException( TransientFailure::class );
+			$context->work_path();
+		} finally {
+			exec( 'rm -rf ' . escapeshellarg( $root ) );
+		}
 	}
 }

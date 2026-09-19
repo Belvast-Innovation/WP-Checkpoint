@@ -29,12 +29,9 @@ final class Paths {
 	 * @return bool
 	 */
 	public static function is_inside( string $base, string $target ): bool {
-		if ( '' === $base || '' === $target ) {
-			return false;
-		}
-
+		$base   = rtrim( $base, '/\\' );
 		$target = rtrim( $target, '/\\' );
-		if ( '' === $target || is_link( $target ) ) {
+		if ( '' === $base || '' === $target || is_link( $target ) ) {
 			return false;
 		}
 
@@ -57,16 +54,22 @@ final class Paths {
 	 * Used for "is this location under the document root" questions where the
 	 * root itself counts. Symlinks are resolved on both sides.
 	 *
+	 * An empty string, or one that is nothing but separators, is refused on
+	 * either side: realpath( '' ) is the working directory, so such an input
+	 * would answer a question about the wrong root.
+	 *
 	 * @param string $base   Directory.
 	 * @param string $target Path.
 	 * @return bool
 	 */
 	public static function is_same_or_inside( string $base, string $target ): bool {
+		$base   = rtrim( $base, '/\\' );
+		$target = rtrim( $target, '/\\' );
 		if ( '' === $base || '' === $target ) {
 			return false;
 		}
 		$real_base   = realpath( $base );
-		$real_target = realpath( rtrim( $target, '/\\' ) );
+		$real_target = realpath( $target );
 		if ( false === $real_base || false === $real_target ) {
 			return false;
 		}
@@ -75,7 +78,9 @@ final class Paths {
 	}
 
 	/**
-	 * Whether two resolved paths denote the same location.
+	 * Whether two resolved paths denote the same location. Two empty (or
+	 * separator-only) strings are not "the same location": a job whose
+	 * storage path was never set must not pass an ownership check.
 	 *
 	 * @param string $a                First path.
 	 * @param string $b                Second path.
@@ -85,6 +90,9 @@ final class Paths {
 	public static function same( string $a, string $b, bool $case_insensitive ): bool {
 		$a = rtrim( self::normalize( $a ), '/' );
 		$b = rtrim( self::normalize( $b ), '/' );
+		if ( '' === $a || '' === $b ) {
+			return false;
+		}
 		if ( $case_insensitive ) {
 			$a = strtolower( $a );
 			$b = strtolower( $b );

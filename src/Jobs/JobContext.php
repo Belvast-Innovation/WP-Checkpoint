@@ -180,16 +180,45 @@ final class JobContext {
 	}
 
 	/**
-	 * Storage directory the job is bound to. Temporary files go to tmp/ and
-	 * results to backups/ below it, nowhere else. Take it from the context
-	 * on every run(); never keep it in the cursor or a property across
-	 * ticks, because the engine only touches files inside the current
-	 * storage directory and that directory can change between ticks.
+	 * Storage directory the job is bound to. Temporary files go to
+	 * work_path() and finished results to backups/ below this directory
+	 * (the store step moves them there), nowhere else. Take it from the
+	 * context on every run(); never keep it in the cursor or a property
+	 * across ticks, because the engine only touches files inside the
+	 * current storage directory and that directory can change between
+	 * ticks.
 	 *
 	 * @return string
 	 */
 	public function storage_path(): string {
 		return $this->job->storage_path;
+	}
+
+	/**
+	 * The job's own work directory, tmp/job-<id>/ under storage_path(),
+	 * created on first use. Every temporary file a step writes (volumes
+	 * being packed, extracted indexes, staged files) goes below it, and
+	 * the engine removes the whole directory when the job is cancelled,
+	 * when a failed job's files pass their retention, and as an orphan.
+	 * Steps create their own subdirectories as they need them. Like
+	 * storage_path(), take it from the context on every run().
+	 *
+	 * @return string
+	 * @throws TransientFailure When the directory cannot be created (no space, no permission): retried with back-off.
+	 */
+	public function work_path(): string {
+		$base = $this->job->storage_path;
+		if ( '' === $base || $this->job->id <= 0 ) {
+			throw new TransientFailure( 'The job has no storage directory yet.' );
+		}
+		$dir = Residue::work_dir( $base, $this->job->id );
+		// is_dir() follows a link planted at this name (write access inside tmp/ is the web user already);
+		// the reclaim side treats such an entry as a link and never enters it.
+		// Silenced: a PHP warning would put the full path into the error log, bypassing the path masking.
+		if ( ! is_dir( $dir ) && ! @mkdir( $dir, 0700 ) && ! is_dir( $dir ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- see above.
+			throw new TransientFailure( 'The work directory could not be created.' );
+		}
+		return $dir;
 	}
 
 	/**

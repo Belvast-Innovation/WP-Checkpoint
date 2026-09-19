@@ -22,7 +22,7 @@ defined( 'ABSPATH' ) || exit;
 final class Schema {
 
 	const OPTION  = 'wpcheckpoint_db_version';
-	const CURRENT = 1;
+	const CURRENT = 2;
 
 	/**
 	 * Jobs table name without the prefix.
@@ -147,12 +147,17 @@ final class Schema {
 			case 1:
 				self::create_jobs_table();
 				return 1;
+			case 2:
+				// Adds work_expired_at (default 0); older code ignores the column, so min_compatible stays 1.
+				self::create_jobs_table();
+				return 1;
 		}
 		return self::MIN_COMPATIBLE;
 	}
 
 	/**
-	 * Version 1: the jobs table.
+	 * The jobs table in its current shape; dbDelta() creates it or adds the
+	 * columns that are missing (version 1 lacked work_expired_at).
 	 *
 	 * @return void
 	 */
@@ -176,6 +181,7 @@ final class Schema {
 			storage_path varchar(1024) NOT NULL DEFAULT '',
 			log_path varchar(255) NOT NULL DEFAULT '',
 			last_error text NULL,
+			work_expired_at bigint(20) unsigned NOT NULL DEFAULT 0,
 			owner_user bigint(20) unsigned NOT NULL DEFAULT 0,
 			created_at bigint(20) unsigned NOT NULL DEFAULT 0,
 			started_at bigint(20) unsigned NOT NULL DEFAULT 0,
@@ -200,6 +206,21 @@ final class Schema {
 	 */
 	public static function drop(): void {
 		global $wpdb;
+		$state = Directories::load_state();
+		$token = isset( $state['token'] ) && is_string( $state['token'] ) ? $state['token'] : '';
+		try {
+			$prefix = \WPCheckpoint\Jobs\TempTables::owner_prefix( $token );
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- table listing.
+			$names = $wpdb->get_col( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $prefix ) . '%' ) );
+			foreach ( is_array( $names ) ? $names : array() as $name ) {
+				if ( \WPCheckpoint\Jobs\TempTables::job_id_of( $token, (string) $name ) > 0 && \WPCheckpoint\Jobs\TempTables::is_safe_name( (string) $name ) ) {
+					$wpdb->query( "DROP TABLE IF EXISTS `{$name}`" ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- this installation's temporary table, name validated; uninstall only.
+				}
+			}
+		} catch ( \InvalidArgumentException $e ) {
+			// No usable token: no temporary tables can have been created.
+			unset( $e );
+		}
 		$table = $wpdb->base_prefix . self::JOBS_TABLE;
 		$wpdb->query( "DROP TABLE IF EXISTS {$table}" ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- table name from the prefix and a constant; uninstall only.
 		Options::delete( self::OPTION );
