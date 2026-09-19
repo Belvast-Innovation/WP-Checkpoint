@@ -8,6 +8,7 @@ use WPCheckpoint\Jobs\StepResult;
 use WPCheckpoint\Plugin;
 use WPCheckpoint\Support\Deleter;
 use WPCheckpoint\Support\Directories;
+use WPCheckpoint\Support\Environment;
 use WPCheckpoint\Support\Options;
 use WPCheckpoint\Support\Schema;
 
@@ -41,6 +42,20 @@ abstract class JobTestCase extends WP_UnitTestCase {
 		delete_site_transient( 'wpcheckpoint_environment' );
 		Plugin::instance()->reset_directories();
 		Plugin::instance()->directories()->base();
+		// A REST tick counts its time budget from the request start; in phpunit that is the process start,
+		// so a suite that has run longer than the budget would end every tick after one unit. Each test is
+		// its own "request". Likewise, with no probe cached the budget assumes a 64 MB memory limit, which a
+		// phpunit process exceeds on its own; a cached probe with real numbers keeps ticks deterministic.
+		$_SERVER['REQUEST_TIME_FLOAT'] = microtime( true );
+		set_site_transient(
+			Environment::CACHE,
+			array(
+				'checked_at' => time(),
+				'db'         => array( 'server_info' => '8.0.0', 'size' => 1024 ),
+				'loopback'   => array( 'outcome' => 'blocked', 'code' => 403, 'message' => '', 'runtime' => array( 'memory_bytes' => 268435456, 'max_execution_time' => 60 ) ),
+			),
+			60
+		);
 		Schema::ensure();
 		wp_set_current_user( self::$admin_id );
 		global $wp_rest_server;

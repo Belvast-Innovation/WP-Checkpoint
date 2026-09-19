@@ -428,6 +428,32 @@ final class RunnerTest extends WP_UnitTestCase {
 		$this->assertSame( TickResult::FAILED, $this->runner()->tick( $job->id )->status );
 	}
 
+	public function test_a_runtime_with_no_room_for_a_step_fails_the_job_with_the_real_cause(): void {
+		$this->register( 'plain', array( new ClosureStep( 'p', static function (): StepResult {
+			return StepResult::done();
+		} ) ) );
+		$job    = $this->repo->create( 'plain' );
+		$runner = $this->runner( 20, 32 * 1048576, array(
+			'budget' => static function ( int $usage ): Budget {
+				return Budget::compute( null, null, $usage, array( 'memory_bytes' => 64 * 1048576, 'max_execution_time' => 20 ) );
+			},
+		) );
+		$this->memory = 60 * 1048576; // A busy admin request; the fake fallback limit is the old fixed assumption.
+		$result       = $runner->tick( $job->id, $this->now );
+		$this->assertSame( TickResult::FAILED, $result->status );
+		$stored = $this->repo->find( $job->id );
+		$this->assertSame( Job::FAILED, $stored->status );
+		$this->assertStringContainsString( 'memory limit of this server (64 MB)', $stored->last_error );
+		$this->assertStringContainsString( 'raise memory_limit', $stored->last_error );
+		$this->assertSame( '', $stored->lock_token );
+		$this->assertStringContainsString( 'raise memory_limit', (string) file_get_contents( $this->base . '/' . $stored->log_path ) );
+
+		// Cleanup after a cancel does not need a budget and must not trip over the same limit.
+		$job = $this->repo->create( 'plain' );
+		$this->repo->transition( $job, Job::CANCELLED );
+		$this->assertSame( 1, $runner->cleanup( $this->repo->find( $job->id ) ) );
+	}
+
 	public function test_unknown_type_or_step_fails_the_job(): void {
 		$job    = $this->repo->create( 'nope' );
 		$result = $this->runner()->tick( $job->id );
