@@ -76,7 +76,9 @@
 		}
 		var active = [ 'queued', 'running', 'paused' ].indexOf( job.status ) !== -1;
 		setHidden( root.querySelector( '[data-action="cancel"]' ), ! active );
-		setHidden( root.querySelector( '[data-action="retry"]' ), job.status !== 'failed' );
+		setHidden( root.querySelector( '[data-action="retry"]' ), ! job.retryable );
+		setText( root, 'retry_note', job.retry_note || '' );
+		setHidden( root.querySelector( '[data-field="retry_note"]' ), ! job.retry_note );
 	}
 
 	function notice( root, text ) {

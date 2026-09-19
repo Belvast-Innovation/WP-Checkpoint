@@ -228,6 +228,10 @@ final class JobsController extends Controller {
 				$job = $this->actions->retry( $id );
 			}
 		} catch ( InvalidTransition $e ) {
+			$current = $this->actions->find( $id );
+			if ( null !== $current && Job::FAILED === $current->status && ! $current->can_retry() ) {
+				return $this->conflict( JobPresenter::retry_note() );
+			}
 			return $this->conflict( __( 'Only a failed job can be retried.', 'wp-checkpoint' ) );
 		} catch ( StaleJob $e ) {
 			return $this->conflict( __( 'The job changed meanwhile; reload and try again.', 'wp-checkpoint' ) );

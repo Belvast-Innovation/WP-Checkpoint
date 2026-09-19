@@ -73,4 +73,17 @@ final class JobTest extends TestCase {
 		$this->assertTrue( $job->is_locked( 1000 ) );
 		$this->assertFalse( $job->is_locked( 1100 ) );
 	}
+
+	public function test_only_a_failed_job_with_its_work_files_can_be_retried(): void {
+		$job         = new Job();
+		$job->status = Job::FAILED;
+		$this->assertTrue( $job->can_retry() );
+		$job->work_expired_at = 1700000000;
+		$this->assertFalse( $job->can_retry(), 'work files reclaimed after retention' );
+		$job->work_expired_at = 0;
+		foreach ( array( Job::QUEUED, Job::RUNNING, Job::PAUSED, Job::COMPLETED, Job::CANCELLED ) as $status ) {
+			$job->status = $status;
+			$this->assertFalse( $job->can_retry(), $status );
+		}
+	}
 }

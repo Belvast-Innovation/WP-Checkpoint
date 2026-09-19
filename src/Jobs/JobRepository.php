@@ -49,6 +49,15 @@ final class JobRepository {
 	const REAP_THROTTLE     = 600;
 	const PURGE_THROTTLE    = 86400;
 	const SECRET_MIN_LENGTH = 4;
+	/**
+	 * A failed job keeps its work files this long after failing so it can
+	 * be retried; the row itself stays for RETENTION_SECONDS[failed].
+	 */
+	const WORK_RETENTION_SECONDS = 604800;
+	/**
+	 * Entries one reclaim pass deletes at most (Deleter::delete_tree()).
+	 */
+	const RECLAIM_MAX_ENTRIES = 2000;
 
 	/**
 	 * Storage directories.
@@ -501,6 +510,10 @@ final class JobRepository {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
 			throw new InvalidTransition( sprintf( 'Job %d: leaving running for %s requires the lock token.', $job->id, $to ) );
 		}
+		if ( Job::QUEUED === $to && Job::FAILED === $job->status && ! $job->can_retry() ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+			throw new InvalidTransition( sprintf( 'Job %d: its work files passed their retention period and were reclaimed; it cannot be retried.', $job->id ) );
+		}
 		return $this->write_transition( $job, $to, $error, $token );
 	}
 
@@ -537,7 +550,14 @@ final class JobRepository {
 
 	/**
 	 * Housekeeping that must not wait for cron: orphaned lock files, stalled
-	 * jobs, storage settlement.
+	 * jobs, storage settlement, then the residue catalogue.
+	 *
+	 * The order matters: settle_storage() runs before reap_residue(). A
+	 * copied database carries rows that look queued or running while their
+	 * files belong to the original site; settling fails those rows first,
+	 * so the same pass already sees them as failed and, since their
+	 * storage token is not this directory's, treats their work directories
+	 * here as orphans instead of keeping them for another retention period.
 	 *
 	 * @return void
 	 */
@@ -545,8 +565,8 @@ final class JobRepository {
 		$now  = $this->now();
 		$base = $this->directories->base();
 
-		if ( '' !== $base && is_dir( $base . DIRECTORY_SEPARATOR . 'tmp' ) ) {
-			$files = glob( $base . DIRECTORY_SEPARATOR . 'tmp' . DIRECTORY_SEPARATOR . LockFile::PREFIX . '*' . LockFile::SUFFIX );
+		if ( '' !== $base && is_dir( Residue::tmp( $base ) ) ) {
+			$files = glob( Residue::tmp( $base ) . DIRECTORY_SEPARATOR . LockFile::PREFIX . '*' . LockFile::SUFFIX );
 			foreach ( is_array( $files ) ? $files : array() as $file ) {
 				// The lock file lives as long as the job is queued, running or paused;
 				// only a file without such a job is an orphan (crash before the row was
@@ -575,15 +595,175 @@ final class JobRepository {
 		}
 
 		$this->settle_storage();
+		$this->reap_residue();
+	}
+
+	/**
+	 * Remove orphaned work directories, temporary tables, verification
+	 * directories and stray files in the current storage directory, at
+	 * most RECLAIM_MAX_ENTRIES entries per pass (the rest next time). A job
+	 * that is bound to another storage directory never owned the work
+	 * directory of its id here; the files are an orphan of a copied
+	 * database.
+	 *
+	 * @return void
+	 */
+	public function reap_residue(): void {
+		$base = $this->directories->base();
+		if ( '' === $base ) {
+			return;
+		}
+		$now    = $this->now();
+		$token  = (string) $this->directories->state()['token'];
+		$budget = self::RECLAIM_MAX_ENTRIES;
+		$owners = array();
+		foreach ( Residue::scan( $base ) as $entry ) {
+			if ( $budget <= 0 ) {
+				return;
+			}
+			if ( Residue::WORK_DIR === $entry['kind'] ) {
+				if ( ! $this->is_work_orphan( $entry['id'], $token, $owners ) ) {
+					continue;
+				}
+			} elseif ( ! Residue::is_expired( $entry, $now ) ) {
+				continue;
+			}
+			$result  = Deleter::delete_tree( Residue::tmp( $base ), $entry['path'], $budget );
+			$budget -= $result['deleted'] + count( $result['failed'] );
+			$this->report_reclaim( $entry['kind'] . ' ' . ( $entry['id'] > 0 ? 'of job ' . $entry['id'] : basename( $entry['path'] ) ), $result );
+		}
+		foreach ( $this->temp_tables( $token ) as $name => $id ) {
+			if ( $this->is_work_orphan( $id, $token, $owners ) ) {
+				$this->drop_table( $name );
+			}
+		}
+	}
+
+	/**
+	 * Whether the work of a job id may be reclaimed: no such job, a
+	 * completed or cancelled one, a failed one past its work retention, or
+	 * one bound to another storage directory.
+	 *
+	 * @param int                  $id     Job id.
+	 * @param string               $token  Current storage token.
+	 * @param array<int, Job|null> $owners Lookup cache (updated).
+	 * @return bool
+	 */
+	private function is_work_orphan( int $id, string $token, array &$owners ): bool {
+		if ( ! array_key_exists( $id, $owners ) ) {
+			$owners[ $id ] = $this->find( $id );
+		}
+		$job = $owners[ $id ];
+		if ( null === $job ) {
+			return true;
+		}
+		if ( $job->storage_token !== $token ) {
+			return true;
+		}
+		if ( in_array( $job->status, array( Job::COMPLETED, Job::CANCELLED ), true ) ) {
+			return true;
+		}
+		return Job::FAILED === $job->status && $job->work_expired_at > 0;
+	}
+
+	/**
+	 * Reclaim the work directory and temporary tables of one job, inside
+	 * the current storage directory only. Called by the runner after a
+	 * cancelled job's steps ran their cleanup, and by the purge. Bounded:
+	 * returns false while entries remain, which the next reap pass picks
+	 * up as an orphan.
+	 *
+	 * @param Job $job Job.
+	 * @return bool True when nothing of the job's work is left.
+	 */
+	public function reclaim_work( Job $job ): bool {
+		if ( ! $this->owns_files_of( $job ) ) {
+			$this->directories->log_event( sprintf( 'Job %d is bound to another storage directory; its work files were left alone.', $job->id ) );
+			return false;
+		}
+		$token = (string) $this->directories->state()['token'];
+		foreach ( $this->temp_tables( $token, $job->id ) as $name => $id ) {
+			$this->drop_table( $name );
+		}
+		$dir = Residue::work_dir( $job->storage_path, $job->id );
+		if ( ! is_dir( $dir ) ) {
+			return true;
+		}
+		$result = Deleter::delete_tree( Residue::tmp( $job->storage_path ), $dir, self::RECLAIM_MAX_ENTRIES );
+		$this->report_reclaim( 'work directory of job ' . $job->id, $result );
+		return ! $result['remaining'] && array() === $result['failed'];
+	}
+
+	/**
+	 * Note failures and unfinished passes in the storage log (counts only,
+	 * no paths); the entries stay where they are and the next pass tries
+	 * again.
+	 *
+	 * @param string                                                 $what   Description.
+	 * @param array{deleted: int, failed: string[], remaining: bool} $result Deleter result.
+	 * @return void
+	 */
+	private function report_reclaim( string $what, array $result ): void {
+		if ( array() !== $result['failed'] ) {
+			$this->directories->log_event( sprintf( 'Reclaiming the %s: %d entries could not be deleted; they will be tried again.', $what, count( $result['failed'] ) ) );
+		} elseif ( $result['remaining'] ) {
+			$this->directories->log_event( sprintf( 'Reclaiming the %s: %d entries deleted, more remain for the next pass.', $what, $result['deleted'] ) );
+		}
+	}
+
+	/**
+	 * This installation's temporary tables (optionally one job's), as name => job id.
+	 *
+	 * @param string $token  Storage token.
+	 * @param int    $job_id Job id, or 0 for all.
+	 * @return array<string, int>
+	 */
+	private function temp_tables( string $token, int $job_id = 0 ): array {
+		global $wpdb;
+		try {
+			$prefix = $job_id > 0 ? TempTables::job_prefix( $token, $job_id ) : TempTables::owner_prefix( $token );
+		} catch ( \InvalidArgumentException $e ) {
+			return array();
+		}
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- table listing.
+		$names = $wpdb->get_col( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $prefix ) . '%' ) );
+		$out   = array();
+		foreach ( is_array( $names ) ? $names : array() as $name ) {
+			$id = TempTables::job_id_of( $token, (string) $name );
+			if ( $id > 0 && ( 0 === $job_id || $id === $job_id ) ) {
+				$out[ (string) $name ] = $id;
+			}
+		}
+		return $out;
+	}
+
+	/**
+	 * Drop one temporary table by a name that TempTables::job_id_of() accepted.
+	 *
+	 * @param string $name Table name.
+	 * @return void
+	 */
+	private function drop_table( string $name ): void {
+		global $wpdb;
+		if ( 1 !== preg_match( '/\A[A-Za-z0-9_]{1,64}\z/', $name ) ) {
+			return;
+		}
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- a temporary table of this installation, name validated above.
+		$wpdb->query( "DROP TABLE IF EXISTS `{$name}`" );
 	}
 
 	/**
 	 * Delete old finished jobs and their log files; keep the table bounded.
 	 * Running, queued and paused jobs and their logs are never touched.
+	 * Before that, failed jobs whose work files passed WORK_RETENTION_SECONDS
+	 * have those files reclaimed: the row is marked first (the job can no
+	 * longer be retried), then the files go, so a crash in between never
+	 * leaves a retryable job with half its files.
 	 *
 	 * @return int Rows deleted.
 	 */
 	public function purge(): int {
+		$this->expire_work();
 		global $wpdb;
 		$now     = $this->now();
 		$table   = $wpdb->base_prefix . Schema::JOBS_TABLE;
@@ -617,6 +797,42 @@ final class JobRepository {
 			$wpdb->delete( $table, array( 'id' => $job->id ), array( '%d' ) );
 		}
 		return count( $victims );
+	}
+
+	/**
+	 * Reclaim the work files of failed jobs older than WORK_RETENTION_SECONDS.
+	 *
+	 * @return int Jobs whose work was expired in this pass.
+	 */
+	public function expire_work(): int {
+		global $wpdb;
+		$now   = $this->now();
+		$table = $wpdb->base_prefix . Schema::JOBS_TABLE;
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix.
+		$rows  = $wpdb->get_results( $wpdb->prepare( "SELECT * FROM {$table} WHERE status = %s AND work_expired_at = 0 AND finished_at > 0 AND finished_at < %d LIMIT 100", Job::FAILED, $now - self::WORK_RETENTION_SECONDS ), ARRAY_A );
+		$count = 0;
+		foreach ( is_array( $rows ) ? $rows : array() as $row ) {
+			$job = self::hydrate( $row );
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin table; the WHERE keeps a concurrent retry from being undone.
+			$affected = $wpdb->update(
+				$table,
+				array( 'work_expired_at' => $now ),
+				array(
+					'id'              => $job->id,
+					'status'          => Job::FAILED,
+					'work_expired_at' => 0,
+				),
+				array( '%d' ),
+				array( '%d', '%s', '%d' )
+			);
+			if ( 1 !== (int) $affected ) {
+				continue;
+			}
+			$job->work_expired_at = $now;
+			$this->reclaim_work( $job );
+			++$count;
+		}
+		return $count;
 	}
 
 	/**
@@ -816,7 +1032,8 @@ final class JobRepository {
 	}
 
 	/**
-	 * Delete the log and lock file of a job, confined to the current storage directory.
+	 * Delete the log, lock file, work directory and temporary tables of a
+	 * job, confined to the current storage directory.
 	 *
 	 * @param Job $job Job.
 	 * @return void
@@ -829,6 +1046,7 @@ final class JobRepository {
 		if ( ! is_dir( $job->storage_path ) ) {
 			return;
 		}
+		$this->reclaim_work( $job );
 		LockFile::remove( $job->storage_path, $job->id );
 		if ( '' !== $job->log_path && 0 === strpos( $job->log_path, 'logs/' ) ) {
 			$file = $job->storage_path . DIRECTORY_SEPARATOR . str_replace( '/', DIRECTORY_SEPARATOR, $job->log_path );

@@ -27,6 +27,16 @@ final class Job {
 	const CANCELLED = 'cancelled';
 
 	/**
+	 * Whether the job may be queued again: failed, and its work files were
+	 * not reclaimed yet.
+	 *
+	 * @return bool
+	 */
+	public function can_retry(): bool {
+		return self::FAILED === $this->status && 0 === $this->work_expired_at;
+	}
+
+	/**
 	 * Allowed transitions: from => [to, ...].
 	 *
 	 * @var array<string, string[]>
@@ -137,6 +147,16 @@ final class Job {
 	 * @var string
 	 */
 	public $last_error = '';
+
+	/**
+	 * When a failed job's work files were reclaimed after their retention
+	 * period (0: still there, or never any). A failed job with this set
+	 * cannot be retried: the position in its cursor points at files that
+	 * no longer exist.
+	 *
+	 * @var int
+	 */
+	public $work_expired_at = 0;
 
 	/**
 	 * User who created the job.

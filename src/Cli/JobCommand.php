@@ -185,6 +185,10 @@ final class JobCommand {
 		try {
 			$job = $this->actions->retry( (int) $args[0] );
 		} catch ( InvalidTransition $e ) {
+			$current = $this->actions->find( (int) $args[0] );
+			if ( null !== $current && Job::FAILED === $current->status && ! $current->can_retry() ) {
+				WP_CLI::error( JobPresenter::retry_note() );
+			}
 			WP_CLI::error( 'Only a failed job can be retried.' );
 		} catch ( StaleJob $e ) {
 			WP_CLI::error( 'The job changed meanwhile; try again.' );

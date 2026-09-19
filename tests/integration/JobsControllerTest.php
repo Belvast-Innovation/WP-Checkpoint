@@ -3,6 +3,8 @@
 namespace WPCheckpoint\Tests\Integration;
 
 use WPCheckpoint\Jobs\Job;
+use WPCheckpoint\Jobs\TempTables;
+use WPCheckpoint\Jobs\Residue;
 use WPCheckpoint\Jobs\JobContext;
 use WPCheckpoint\Jobs\LockFile;
 use WPCheckpoint\Jobs\StepResult;
@@ -100,12 +102,18 @@ final class JobsControllerTest extends JobTestCase {
 		} ) ) );
 
 		// Not locked: the cancel takes the lock and cleans up itself, without counting an attempt.
-		$job  = Plugin::instance()->jobs()->create( 'slow' );
+		$job = Plugin::instance()->jobs()->create( 'slow' );
+		mkdir( Residue::work_dir( $job->storage_path, $job->id ), 0700, true );
+		touch( Residue::work_dir( $job->storage_path, $job->id ) . '/v.partial' );
+		$temp_table = TempTables::name( Plugin::instance()->directories()->state()['token'], $job->id, 'beef', 'posts' );
+		$GLOBALS['wpdb']->query( "CREATE TABLE `{$temp_table}` (id int)" );
 		$data = $this->rest( 'POST', 'jobs/' . $job->id . '/cancel' )->get_data();
 		$this->assertSame( 'cancelled', $data['result'] );
 		$this->assertTrue( $data['cleaned'] );
 		$this->assertSame( 'The job was cancelled.', $data['message'] );
 		$this->assertSame( 1, $cleaned );
+		$this->assertDirectoryDoesNotExist( Residue::work_dir( $job->storage_path, $job->id ), 'the engine removes the work directory after the steps cleaned up' );
+		$this->assertNull( $GLOBALS['wpdb']->get_var( $GLOBALS['wpdb']->prepare( 'SHOW TABLES LIKE %s', $temp_table ) ), 'and drops the temporary table' );
 		$stored = Plugin::instance()->jobs()->find( $job->id );
 		$this->assertSame( Job::CANCELLED, $stored->status );
 		$this->assertSame( 0, $stored->attempts, 'never attempted' );
@@ -248,6 +256,27 @@ final class JobsControllerTest extends JobTestCase {
 		$this->assertSame( 'queued', $data['result'] );
 		$this->assertSame( Job::QUEUED, $data['job']['status'] );
 		$this->assertSame( 'completed', $this->rest( 'POST', 'jobs/' . $job->id . '/tick' )->get_data()['result'] );
+	}
+
+	public function test_retry_is_refused_with_the_reason_once_the_work_files_passed_retention(): void {
+		$this->register( 'boom', array( new ClosureStep( 'b', static function (): StepResult {
+			throw new \RuntimeException( 'no' );
+		} ) ) );
+		$job = Plugin::instance()->jobs()->create( 'boom' );
+		$this->rest( 'POST', 'jobs/' . $job->id . '/tick' );
+		$this->assertSame( Job::FAILED, Plugin::instance()->jobs()->find( $job->id )->status );
+		$data = $this->rest( 'GET', 'jobs/' . $job->id )->get_data()['job'];
+		$this->assertTrue( $data['retryable'] );
+		$this->assertSame( '', $data['retry_note'] );
+
+		$GLOBALS['wpdb']->update( Schema::jobs_table(), array( 'work_expired_at' => time() ), array( 'id' => $job->id ) );
+		$data = $this->rest( 'GET', 'jobs/' . $job->id )->get_data()['job'];
+		$this->assertFalse( $data['retryable'] );
+		$this->assertStringContainsString( 'retention period', $data['retry_note'] );
+		$response = $this->rest( 'POST', 'jobs/' . $job->id . '/retry' );
+		$this->assertSame( 409, $response->get_status() );
+		$this->assertStringContainsString( 'retention period', $response->get_data()['message'] );
+		$this->assertSame( Job::FAILED, Plugin::instance()->jobs()->find( $job->id )->status );
 	}
 
 	public function test_subscribers_cannot_read_or_cancel_jobs(): void {

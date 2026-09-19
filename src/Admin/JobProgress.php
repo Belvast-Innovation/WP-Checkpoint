@@ -58,10 +58,11 @@ final class JobProgress {
 			</p>
 			<p class="wpcheckpoint-job-error" data-field="last_error"<?php echo '' === $data['last_error'] ? ' hidden' : ''; ?>><?php echo esc_html( $data['last_error'] ); ?></p>
 			<p class="wpcheckpoint-job-notice" data-field="notice" hidden></p>
+			<p class="wpcheckpoint-job-notice" data-field="retry_note"<?php echo '' === $data['retry_note'] ? ' hidden' : ''; ?>><?php echo esc_html( $data['retry_note'] ); ?></p>
 			<pre class="wpcheckpoint-job-log" data-field="log_tail"><?php echo esc_html( $data['log_tail'] ); ?></pre>
 			<p class="wpcheckpoint-job-actions">
 				<button type="button" class="button" data-action="cancel"<?php echo $active ? '' : ' hidden'; ?>><?php esc_html_e( 'Cancel', 'wp-checkpoint' ); ?></button>
-				<button type="button" class="button" data-action="retry"<?php echo Job::FAILED === $job->status ? '' : ' hidden'; ?>><?php esc_html_e( 'Retry', 'wp-checkpoint' ); ?></button>
+				<button type="button" class="button" data-action="retry"<?php echo $data['retryable'] ? '' : ' hidden'; ?>><?php esc_html_e( 'Retry', 'wp-checkpoint' ); ?></button>
 			</p>
 		</div>
 		<?php
