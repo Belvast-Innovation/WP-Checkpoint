@@ -156,6 +156,10 @@ final class FileScannerTest extends TestCase {
 		$this->put( 'c/readme.md' );
 		$this->put( "c/caf\u{00E9}.txt" );
 		$this->put( "c/cafe\u{0301}.txt" );
+		if ( count( scandir( $this->root . '/c' ) ) < 6 ) {
+			// NTFS folds case and APFS folds Unicode forms: the colliding siblings merged into one file here.
+			$this->markTestSkipped( 'the file system does not keep colliding names apart' );
+		}
 		$this->put( 'c/sub/readme.md', 'a different directory is not a collision' );
 		for ( $i = 0; $i < 1500; $i++ ) {
 			$this->put( sprintf( 'c/many/%04d', $i ) );
