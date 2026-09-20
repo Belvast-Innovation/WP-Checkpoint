@@ -153,16 +153,19 @@ final class Logger {
 
 	/**
 	 * JSON encode context without escaping slashes or unicode (so redaction
-	 * needles match) and with a safe fallback when encoding fails.
+	 * needles match). A context that cannot be encoded is replaced by its
+	 * key list, never by a partial encoding: a log line is the only
+	 * json_encode() output in this code base that does not throw on
+	 * failure, because throwing from a log call would fail the job.
 	 *
 	 * @param array<string, mixed> $context Extra data.
 	 * @return string
 	 */
 	public static function encode_context( array $context ): string {
-		// Invalid UTF-8 would make json_encode() drop values (partial output); scrub first so nothing is lost.
+		// Invalid UTF-8 would make json_encode() fail; scrub first so nothing is lost.
 		$context = Utf8::scrub_deep( $context );
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.json_encode_json_encode -- pure PHP class, also used where WordPress is not loaded.
-		$json = json_encode( $context, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR );
+		$json = json_encode( $context, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE );
 		if ( is_string( $json ) ) {
 			return str_replace( array( "\r", "\n" ), ' ', $json );
 		}

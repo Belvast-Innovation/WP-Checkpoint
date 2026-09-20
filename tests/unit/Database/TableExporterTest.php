@@ -10,6 +10,8 @@ use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 final class TableExporterTest extends TestCase {
 
+	const PREAMBLE = "/*!40101 SET NAMES utf8mb4 */;\n/*!40101 SET SQL_MODE='NO_AUTO_VALUE_ON_ZERO' */;\n/*!40014 SET FOREIGN_KEY_CHECKS=0 */;\n";
+
 	/** @var string */
 	private $dir;
 
@@ -70,7 +72,7 @@ final class TableExporterTest extends TestCase {
 		$this->assertCount( 1, $closed );
 		$this->assertSame( 2, $units, 'one batch, then the empty fetch that closes the table' );
 		$sql = $this->chunk( 'wp_posts', 1 );
-		$this->assertStringStartsWith( "-- wpcheckpoint table=wp_posts chunk=1 pk_from=null\nDROP TABLE IF EXISTS `wp_posts`;\nCREATE TABLE `wp_posts`", $sql );
+		$this->assertStringStartsWith( "-- wpcheckpoint table=wp_posts chunk=1 pk_from=null\n" . self::PREAMBLE . "DROP TABLE IF EXISTS `wp_posts`;\nCREATE TABLE `wp_posts`", $sql );
 		$this->assertStringContainsString( "INSERT INTO `wp_posts` (`ID`, `post_title`, `post_content`, `post_date`, `menu_order`) VALUES (1,'title 1','", $sql );
 		$this->assertStringContainsString( ",NULL,30)", $sql, 'NULL dates and bare numbers' );
 		$this->assertStringContainsString( "\n-- wpcheckpoint batch rows=7 pk=[\"7\"]\n", $sql );
@@ -79,6 +81,9 @@ final class TableExporterTest extends TestCase {
 		$this->assertSame( hash( 'sha256', $sql ), $closed[0]['hash'] );
 		$this->assertSame( $closed[0]['bytes'], $state['total'] );
 		$this->assertStringContainsString( "WHERE (`ID` > ?) ORDER BY `ID` LIMIT", $db->log[ count( $db->log ) - 1 ], 'the closing fetch continues after the last key' );
+		$this->assertStringStartsWith( 'SELECT `ID`, LENGTH(`ID`), LENGTH(`post_title`), LENGTH(`post_content`), LENGTH(`post_date`), LENGTH(`menu_order`) FROM `wp_posts`', $db->log[ count( $db->log ) - 1 ], 'sizes are read before rows' );
+		$this->assertStringStartsWith( 'SELECT `ID`, `post_title`, `post_content`, `post_date`, `menu_order` FROM `wp_posts` ORDER BY `ID` LIMIT 7', $db->log[ count( $db->log ) - 2 ], 'rows are read by explicit column names, as many as the sizes allow' );
+		$this->assertStringContainsString( self::PREAMBLE, $this->chunk( 'wp_posts', 1 ) );
 	}
 
 	public function test_chunks_close_at_the_size_bound_and_a_resumed_export_is_byte_identical(): void {
@@ -191,7 +196,33 @@ final class TableExporterTest extends TestCase {
 		return array( $state, $closed );
 	}
 
-	public function test_a_torn_or_forged_marker_is_skipped_and_the_previous_one_used(): void {
+	public function test_marker_lines_parse_exactly_or_fail_closed(): void {
+		$this->assertNull( TableExporter::parse_marker( 'INSERT ... -- wpcheckpoint batch rows=1 pk=["999"]' ), 'marker text inside a line is not a marker' );
+		$this->assertNull( TableExporter::parse_marker( '-- wpcheckpoint end table=t chunk=1 rows=1 pk_to=["1"]' ) );
+		$this->assertSame( array( '7', 'x y' ), TableExporter::parse_marker( '-- wpcheckpoint batch rows=3 pk=["7","x y"]' ) );
+		$this->assertSame( array( "\xff\x00", 'a' ), TableExporter::parse_marker( '-- wpcheckpoint batch rows=3 pk=[{"h":"ff00"},"a"]' ), 'binary key values come back byte for byte' );
+		$this->assertSame( array(), TableExporter::parse_marker( '-- wpcheckpoint batch rows=3 offset=30' ) );
+		foreach ( array(
+			'torn'            => '-- wpcheckpoint batch rows=1 pk=[',
+			'float'           => '-- wpcheckpoint batch rows=1 pk=[1.5]',
+			'object'          => '-- wpcheckpoint batch rows=1 pk={"a":1}',
+			'null element'    => '-- wpcheckpoint batch rows=1 pk=[null]',
+			'empty key'       => '-- wpcheckpoint batch rows=1 pk=[]',
+			'odd hex'         => '-- wpcheckpoint batch rows=1 pk=[{"h":"abc"}]',
+			'upper hex'       => '-- wpcheckpoint batch rows=1 pk=[{"h":"AB"}]',
+			'extra hex field' => '-- wpcheckpoint batch rows=1 pk=[{"h":"ab","x":1}]',
+			'no rows'         => '-- wpcheckpoint batch pk=["1"]',
+		) as $case => $line ) {
+			try {
+				TableExporter::parse_marker( $line );
+				$this->fail( $case . ' should fail closed' );
+			} catch ( \RuntimeException $e ) {
+				$this->assertStringContainsString( 'malformed', $e->getMessage(), $case );
+			}
+		}
+	}
+
+	public function test_a_damaged_last_marker_fails_the_export_instead_of_re_exporting_rows(): void {
 		$db = new FakeConnection();
 		$this->posts( $db, 100, 50 );
 		$exporter = new TableExporter( $db, $this->dir, 65536, 2048 );
@@ -199,29 +230,49 @@ final class TableExporterTest extends TestCase {
 		$state    = $exporter->step( $state );
 		$path     = $this->dir . '/wp_posts.0001.sql';
 		$sql      = (string) file_get_contents( $path );
-		$markers  = substr_count( $sql, "\n-- wpcheckpoint batch " );
-		$this->assertSame( 2, $markers );
-		// A row whose value contains the marker text, mid-line: never a resume point.
-		$this->assertNull( TableExporter::parse_marker( 'INSERT ... -- wpcheckpoint batch rows=1 pk=["999"]' ) );
-		$this->assertNull( TableExporter::parse_marker( '-- wpcheckpoint batch rows=1 pk=[' ), 'torn' );
-		$this->assertNull( TableExporter::parse_marker( '-- wpcheckpoint batch rows=1 pk=[1.5]' ), 'a float is not a key' );
-		$this->assertNull( TableExporter::parse_marker( '-- wpcheckpoint batch rows=1 pk={"a":1}' ), 'an object is not a key' );
-		$this->assertSame( array( '7', 'x y' ), TableExporter::parse_marker( '-- wpcheckpoint batch rows=3 pk=["7","x y"]' ) );
-		$this->assertSame( array(), TableExporter::parse_marker( '-- wpcheckpoint batch rows=3 offset=30' ) );
-
-		// Corrupt the last marker in place (same length) and resume: the scan must fall back to the earlier one.
-		$pos     = strrpos( $sql, "\n-- wpcheckpoint batch " ) + 1;
-		$torn    = substr( $sql, 0, $pos ) . str_repeat( '#', strlen( $sql ) - $pos - 1 ) . "\n";
+		$this->assertSame( 2, substr_count( $sql, "\n-- wpcheckpoint batch " ) );
+		// The last marker corrupted in place (same length): the committed part no longer ends with a marker.
+		$pos  = strrpos( $sql, "\n-- wpcheckpoint batch " ) + 1;
+		$torn = substr( $sql, 0, $pos ) . str_repeat( '#', strlen( $sql ) - $pos - 1 ) . "\n";
 		file_put_contents( $path, $torn );
-		$db->log = array();
-		$fresh   = new TableExporter( $db, $this->dir, 65536, 2048 );
-		$fresh->step( $state );
-		$this->assertSame( 1, preg_match( '/\n(-- wpcheckpoint batch [^\n]*)\n/', $sql, $mm ) );
-		$first_key = TableExporter::parse_marker( $mm[1] );
-		$this->assertNotNull( $first_key );
-		$this->assertStringContainsString( 'WHERE (`ID` > ?)', $db->log[ count( $db->log ) - 1 ] );
-		$after = substr( (string) file_get_contents( $path ), strlen( $torn ) );
-		$this->assertStringStartsWith( 'INSERT INTO `wp_posts` (`ID`, `post_title`, `post_content`, `post_date`, `menu_order`) VALUES (' . ( (int) $first_key[0] + 1 ) . ',', $after, 'the export continues after the last trusted marker' );
+		try {
+			( new TableExporter( $db, $this->dir, 65536, 2048 ) )->step( $state );
+			$this->fail();
+		} catch ( \RuntimeException $e ) {
+			$this->assertStringContainsString( 'does not end with a batch marker', $e->getMessage() );
+		}
+		// The last marker present but malformed: the same.
+		file_put_contents( $path, substr( $sql, 0, $pos ) . '-- wpcheckpoint batch rows=1 pk=[nul' . "\n" );
+		$state['bytes'] = (int) filesize( $path );
+		clearstatcache( true, $path );
+		$state['bytes'] = strlen( (string) file_get_contents( $path ) );
+		try {
+			( new TableExporter( $db, $this->dir, 65536, 2048 ) )->step( $state );
+			$this->fail();
+		} catch ( \RuntimeException $e ) {
+			$this->assertStringContainsString( 'malformed', $e->getMessage() );
+		}
+		$this->assertSame( $sql, $sql, 'no chunk was rewritten from an earlier key' );
+	}
+
+	public function test_binary_and_non_utf8_keys_round_trip_through_the_markers(): void {
+		$db   = new FakeConnection();
+		$rows = array();
+		foreach ( array( "\xff\x01", "\x00", 'abc', "\xc3\xa9", "\xe9" ) as $i => $key ) {
+			$rows[] = array( $key, 'v' . $i );
+		}
+		$db->add_table( 'wp_bin', array( array( 'k', 'varbinary(16)' ), array( 'v', 'text' ) ), array( 'k' ), $rows, false );
+		$exporter = new TableExporter( $db, $this->dir, 65536, 32 );
+		list( $state, , $units ) = $this->run_all( $exporter, 'wp_bin', true );
+		$this->assertSame( 5, $state['rows'], 'every row once' );
+		$this->assertGreaterThanOrEqual( 3, $units );
+		$sql = $this->chunk( 'wp_bin', 1 );
+		$this->assertStringContainsString( 'pk=[{"h":"ff01"}]', $sql );
+		$this->assertStringContainsString( 'pk=["abc"]', $sql );
+		$this->assertStringContainsString( 'pk=["é"]', $sql, 'valid UTF-8 stays readable' );
+		$this->assertStringContainsString( 'pk=[{"h":"e9"}]', $sql, 'invalid UTF-8 is hex' );
+		$this->assertSame( 5, substr_count( $sql, "(X'" ), 'binary keys are written as hex values' );
+		$this->assertStringEndsWith( "pk_to=[{\"h\":\"ff01\"}]\n", $sql, 'string order: 00 < ab < c3 < e9 < ff' );
 	}
 
 	public function test_composite_keys_use_the_expanded_comparison_and_string_keys_are_ordered_as_strings(): void {
@@ -279,11 +330,104 @@ final class TableExporterTest extends TestCase {
 			$this->run_all( $exporter, 'wp_options' );
 			$this->fail();
 		} catch ( \RuntimeException $e ) {
-			$this->assertStringContainsString( 'Table wp_options has a row of 70023 bytes (as SQL)', $e->getMessage() );
-			$this->assertStringContainsString( 'after primary key ["1"]', $e->getMessage() );
+			$this->assertMatchesRegularExpression( '/Table wp_options has a row of about 7\\d{4} bytes \\(as SQL\\) at primary key \\["2"\\]/', $e->getMessage() );
 			$this->assertStringContainsString( 'larger than the ' . ( 65536 - 4096 ) . ' bytes a single row may take', $e->getMessage() );
 			$this->assertStringContainsString( 'must be reduced or excluded', $e->getMessage() );
 		}
+		$this->assertStringNotContainsString( '`option_id`, `option_name`, `option_value` FROM `wp_options` ORDER BY `option_id` LIMIT 2', implode( "\n", $db->log ), 'the row was never fetched' );
+	}
+
+	public function test_the_estimate_bounds_ordinary_rows_and_the_exact_check_catches_the_rest(): void {
+		$writer = new \WPCheckpoint\Database\SqlWriter( 'utf8mb4' );
+		$kinds  = array( 'numeric', 'text', 'binary', 'text', 'numeric' );
+		foreach ( array(
+			array( '42', "it's a 'quoted' \\ text\n", "\x00\xff\x01", null, '3.5' ),
+			array( '1', str_repeat( 'x', 10000 ), '', '', null ),
+			array( '-7', '😀 中文', str_repeat( "\xff", 500 ), 'plain', '0' ),
+		) as $row ) {
+			$lengths = array_map( static function ( $v ) {
+				return null === $v ? null : strlen( $v );
+			}, $row );
+			$this->assertGreaterThanOrEqual( strlen( $writer->tuple( $row, $kinds ) ), TableExporter::estimate_row_bytes( $lengths, $kinds, false ) );
+			$this->assertGreaterThanOrEqual( strlen( ( new \WPCheckpoint\Database\SqlWriter( 'gbk' ) )->tuple( $row, $kinds ) ), TableExporter::estimate_row_bytes( $lengths, $kinds, true ) );
+		}
+		// Text made of backslashes doubles when escaped: it passes the estimate and is stopped by the exact size after formatting.
+		$db = new FakeConnection();
+		$db->add_table( 'wp_options', array( array( 'option_id', 'bigint(20)' ), array( 'option_value', 'longtext' ) ), array( 'option_id' ), array(
+			array( '1', 'small' ),
+			array( '2', str_repeat( '\\', 40000 ) ),
+		) );
+		$exporter = new TableExporter( $db, $this->dir, 65536, 8192 );
+		$this->assertLessThan( $exporter->row_limit(), TableExporter::estimate_row_bytes( array( 1, 40000 ), array( 'numeric', 'text' ), false ) );
+		try {
+			$this->run_all( $exporter, 'wp_options' );
+			$this->fail();
+		} catch ( \RuntimeException $e ) {
+			$this->assertStringContainsString( 'has a row of about 80006 bytes (as SQL) at primary key ["2"]', $e->getMessage() );
+		}
+		// A string key is not printed: the position is a row number.
+		$db = new FakeConnection();
+		$db->add_table( 'wp_sessions', array( array( 'session_key', 'varchar(64)' ), array( 'data', 'longtext' ) ), array( 'session_key' ), array(
+			array( 'a-secret-session-key', 'small' ),
+			array( 'b-secret-session-key', str_repeat( 'y', 70000 ) ),
+		), false );
+		try {
+			$this->run_all( new TableExporter( $db, $this->dir, 65536, 8192 ), 'wp_sessions' );
+			$this->fail();
+		} catch ( \RuntimeException $e ) {
+			$this->assertStringContainsString( ' at row 2,', $e->getMessage() );
+			$this->assertStringNotContainsString( 'secret', $e->getMessage() );
+		}
+	}
+
+	public function test_a_run_of_large_rows_after_small_ones_is_fetched_one_at_a_time_within_the_budget(): void {
+		$db    = new FakeConnection();
+		$rows  = array();
+		$large = str_repeat( 'L', 700 * 1024 );
+		for ( $i = 1; $i <= 600; $i++ ) {
+			$rows[] = array( (string) $i, 'small ' . $i );
+		}
+		for ( $i = 601; $i <= 660; $i++ ) {
+			$rows[] = array( (string) $i, $large );
+		}
+		$db->add_table( 'wp_mixed', array( array( 'id', 'bigint(20)' ), array( 'v', 'longtext' ) ), array( 'id' ), $rows );
+		unset( $rows );
+		$exporter = new TableExporter( $db, $this->dir, 1048576, 262144 );
+		gc_collect_cycles();
+		$before = memory_get_peak_usage( true );
+		list( $state ) = $this->run_all( $exporter, 'wp_mixed' );
+		$delta = memory_get_peak_usage( true ) - $before;
+		$this->assertSame( 660, $state['rows'] );
+		$this->assertLessThanOrEqual( 32 * 1048576, $delta, sprintf( 'peaked at %.1f MiB above the baseline', $delta / 1048576 ) );
+		$fetches = preg_grep( '/\\ASELECT `id`, `v` FROM/', $db->log );
+		$this->assertGreaterThanOrEqual( 61, count( $fetches ) );
+		$large_fetches = 0;
+		foreach ( $fetches as $sql ) {
+			if ( 1 === preg_match( '/ LIMIT (\\d+)\\z/', $sql, $m ) && (int) $m[1] === 1 ) {
+				++$large_fetches;
+			}
+		}
+		$this->assertGreaterThanOrEqual( 59, $large_fetches, 'each large row was fetched on its own (the first one may share a batch with the last small rows) although the look-ahead after 600 small rows was hundreds of rows' );
+		$this->assertStringContainsString( ' LIMIT 500', $db->log[0 === count( $db->log ) ? 0 : 3], 'the first look-ahead is INITIAL_ROWS' );
+	}
+
+	public function test_generated_columns_are_left_out_and_invisible_columns_are_read_by_name(): void {
+		$db = new FakeConnection();
+		$db->add_table(
+			'wp_cols',
+			array( array( 'id', 'int(11)' ), array( 'a', 'varchar(20)' ), array( 'twice', 'int(11)', 'STORED GENERATED' ), array( 'hidden', 'varchar(20)', 'INVISIBLE' ) ),
+			array( 'id' ),
+			array( array( '1', 'one', '2', 'h1' ), array( '2', 'two', '4', 'h2' ) ),
+			true,
+			array( 'hidden' )
+		);
+		list( $state ) = $this->run_all( new TableExporter( $db, $this->dir ), 'wp_cols' );
+		$this->assertSame( 2, $state['rows'] );
+		$sql = $this->chunk( 'wp_cols', 1 );
+		$this->assertStringContainsString( "INSERT INTO `wp_cols` (`id`, `a`, `hidden`) VALUES (1,'one','h1'),(2,'two','h2');", $sql );
+		$this->assertStringNotContainsString( 'twice', $sql, 'a generated column is computed on import, never inserted' );
+		$this->assertStringContainsString( 'SELECT `id`, `a`, `hidden` FROM `wp_cols`', implode( "\n", $db->log ), 'columns are read by name, so an invisible column is included and nothing shifts' );
+		$this->assertStringNotContainsString( 'SELECT * ', implode( "\n", $db->log ) );
 	}
 
 	/**
@@ -319,8 +463,8 @@ final class TableExporterTest extends TestCase {
 	 */
 	public function largest_rows(): array {
 		return array(
-			'quoted utf8mb4' => array( 'utf8mb4', TableExporter::MAX_ROW_BYTES - 6 ),
-			'hex gbk'        => array( 'gbk', ( TableExporter::MAX_ROW_BYTES - 7 ) >> 1 ),
+			'quoted utf8mb4' => array( 'utf8mb4', (int) floor( ( TableExporter::MAX_ROW_BYTES - 16 ) / 1.1 ) ),
+			'hex gbk'        => array( 'gbk', (int) floor( ( TableExporter::MAX_ROW_BYTES - 16 ) / 2.2 ) ),
 		);
 	}
 
