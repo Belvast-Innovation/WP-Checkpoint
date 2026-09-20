@@ -53,13 +53,21 @@ final class WpdbConnection implements Connection {
 	}
 
 	/**
-	 * Last error text.
+	 * Last error text, with the database name replaced: the server names
+	 * it in "table 'db.t' doesn't exist" and similar messages, and it is
+	 * often the hosting account name, which has no place in a job error
+	 * a user copies into a support request.
 	 *
 	 * @return string
 	 */
 	public function last_error(): string {
 		global $wpdb;
-		return (string) $wpdb->last_error;
+		$error = (string) $wpdb->last_error;
+		$name  = defined( 'DB_NAME' ) ? (string) DB_NAME : '';
+		if ( '' !== $name && '' !== $error ) {
+			$error = str_replace( $name, '[database]', $error );
+		}
+		return $error;
 	}
 
 	/**

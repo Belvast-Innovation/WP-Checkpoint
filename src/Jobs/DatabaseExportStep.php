@@ -167,17 +167,24 @@ final class DatabaseExportStep implements Step {
 		}
 		$tables  = array();
 		$skipped = array();
+		$seen    = array();
+		$notes   = $this->notes;
 		foreach ( $this->tables as $table ) {
 			$table = (string) $table;
-			if ( Utf8::scrub( $table ) !== $table || strlen( $table ) > Manifest::MAX_TABLE_NAME || ! EntryPath::is_valid( IndexLine::database_path( $table, 1 ) ) ) {
+			if ( ! self::storable_name( $table ) ) {
 				$skipped[] = Utf8::scrub( $table );
+				$notes[]   = sprintf( 'Table %s was skipped: its name cannot be stored in an archive path.', Utf8::scrub( $table ) );
 				continue;
 			}
-			$tables[] = $table;
-		}
-		$notes = $this->notes;
-		foreach ( $skipped as $name ) {
-			$notes[] = sprintf( 'Table %s was skipped: its name cannot be stored in an archive path.', $name );
+			// Chunk files and the archive may land on a case-insensitive file system: two names that differ only by case would overwrite each other.
+			$folded = strtolower( $table );
+			if ( isset( $seen[ $folded ] ) ) {
+				$skipped[] = $table;
+				$notes[]   = sprintf( 'Table %s was skipped: its name differs only by letter case from table %s, and both cannot be stored in one archive.', $table, $seen[ $folded ] );
+				continue;
+			}
+			$seen[ $folded ] = $table;
+			$tables[]        = $table;
 		}
 		$this->put(
 			$work . DIRECTORY_SEPARATOR . self::TABLES,
@@ -200,6 +207,26 @@ final class DatabaseExportStep implements Step {
 			'state'      => null,
 			'started_at' => gmdate( 'Y-m-d\TH:i:s\Z' ),
 		);
+	}
+
+	/**
+	 * Whether a table name can become database/<name>.<chunk>.sql: one
+	 * path segment (no slash of either kind), no whitespace (the chunk
+	 * header and end lines are space-separated), storable by the archive
+	 * rules (UTF-8, no control characters, at most MAX_TABLE_NAME bytes).
+	 *
+	 * @param string $table Table name.
+	 * @return bool
+	 */
+	public static function storable_name( string $table ): bool {
+		if ( '' === $table || Utf8::scrub( $table ) !== $table || strlen( $table ) > Manifest::MAX_TABLE_NAME ) {
+			return false;
+		}
+		if ( 1 === preg_match( '/[\s\/\\\\]/', $table ) ) {
+			return false;
+		}
+		$path = IndexLine::database_path( $table, 1 );
+		return EntryPath::is_valid( $path ) && basename( $path ) === $table . '.0001.sql';
 	}
 
 	/**

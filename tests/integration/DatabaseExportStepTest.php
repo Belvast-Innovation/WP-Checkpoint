@@ -73,7 +73,7 @@ final class DatabaseExportStepTest extends JobTestCase {
 	private function create_fixture_tables(): void {
 		global $wpdb;
 		$p = self::PREFIX;
-		$this->tables = array( $p . 'posts', $p . 'blob', $p . 'rel', $p . 'nokey', $p . 'types' );
+		$this->tables = array( $p . 'posts', $p . 'blob', $p . 'rel', $p . 'nokey', $p . 'types', $p . 'cols' );
 		foreach ( $this->tables as $table ) {
 			$wpdb->query( "DROP TABLE IF EXISTS `{$table}`" );
 		}
@@ -84,6 +84,18 @@ final class DatabaseExportStepTest extends JobTestCase {
 		$wpdb->query( "CREATE TABLE `{$p}nokey` (`k` varchar(40) DEFAULT NULL, `v` text) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4" );
 		$wpdb->query( "CREATE TABLE `{$p}types` (`id` int(11) NOT NULL, `price` decimal(10,2) DEFAULT NULL, `ratio` double DEFAULT NULL, `flag` tinyint(1) NOT NULL DEFAULT 0, `day` date DEFAULT NULL, `note` varchar(191) COLLATE utf8mb4_unicode_520_ci DEFAULT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4" );
 		$wpdb->query( "CREATE VIEW `{$p}view` AS SELECT `ID` FROM `{$p}posts`" );
+		$this->assertSame( '', $wpdb->last_error );
+		// A generated column (computed on import, never inserted) and an INVISIBLE column (left out by SELECT *,
+		// which would shift every value one column over). INVISIBLE needs MariaDB 10.3+ or MySQL 8.0.23+.
+		$wpdb->query( "CREATE TABLE `{$p}cols` (`id` int(11) NOT NULL, `a` varchar(20) DEFAULT NULL, `twice` int(11) AS (`id` * 2) STORED, `hidden` varchar(20) DEFAULT NULL INVISIBLE, `z` varchar(20) DEFAULT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4" );
+		if ( '' !== $wpdb->last_error ) {
+			if ( false !== getenv( 'CI' ) ) {
+				$this->fail( 'The CI database must support generated and INVISIBLE columns: ' . $wpdb->last_error );
+			}
+			$wpdb->query( "CREATE TABLE `{$p}cols` (`id` int(11) NOT NULL, `a` varchar(20) DEFAULT NULL, `twice` int(11) AS (`id` * 2) STORED, `hidden` varchar(20) DEFAULT NULL, `z` varchar(20) DEFAULT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4" );
+			$this->assertSame( '', $wpdb->last_error );
+		}
+		$wpdb->query( "INSERT INTO `{$p}cols` (`id`, `a`, `hidden`, `z`) VALUES (1, 'one', 'h1', 'z1'), (2, 'two', NULL, 'z2'), (3, NULL, 'h3', 'z3')" );
 		$this->assertSame( '', $wpdb->last_error );
 
 		$awkward = "😀 中文 'quote' \"dq\" back\\slash %s %d \x00nul \x1a sub \r\n line";
@@ -178,8 +190,8 @@ final class DatabaseExportStepTest extends JobTestCase {
 		$job = $this->repo->create( 'db-only' );
 
 		$result = $this->runner( 1 )->tick( $job->id, $this->now );
-		$this->assertSame( TickResult::MORE, $result->status );
 		$stored = $this->repo->find( $job->id );
+		$this->assertSame( TickResult::MORE, $result->status, (string) $stored->last_error );
 		$this->assertSame( Job::RUNNING, $stored->status );
 		$this->assertSame( array( 'index', 'done', 'state', 'started_at' ), array_values( preg_grep( '/^__runner/', array_keys( $stored->cursor ), PREG_GREP_INVERT ) ) );
 		$this->assertSame( array_keys( TableExporter::initial_state( 'x' ) ), array_keys( $stored->cursor['state'] ), 'the cursor holds the exporter state: positions only' );
@@ -286,7 +298,7 @@ final class DatabaseExportStepTest extends JobTestCase {
 		$this->tables[] = $table;
 		$wpdb->query( "DROP TABLE IF EXISTS `{$table}`" );
 		$wpdb->query( "CREATE TABLE `{$table}` (`option_id` bigint(20) NOT NULL, `option_value` longtext, PRIMARY KEY (`option_id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4" );
-		$bytes = TableExporter::MAX_ROW_BYTES - 6;
+		$bytes = (int) floor( ( TableExporter::MAX_ROW_BYTES - 16 ) / 1.1 );
 		$wpdb->query( "INSERT INTO `{$table}` VALUES (1, 'small'), (2, REPEAT('x', {$bytes})), (3, 'small')" );
 		$this->assertSame( '', $wpdb->last_error );
 		$dir = $this->dirs->base() . '/tmp/bigrow-' . bin2hex( random_bytes( 4 ) );
@@ -313,6 +325,9 @@ final class DatabaseExportStepTest extends JobTestCase {
 		global $wpdb;
 		$client = trim( (string) shell_exec( 'command -v mariadb || command -v mysql' ) );
 		if ( '' === $client ) {
+			if ( false !== getenv( 'CI' ) ) {
+				$this->fail( 'The round trip through the mysql client is the proof that the export restores; CI must not skip it.' );
+			}
 			$this->markTestSkipped( 'No mysql client in this environment.' );
 		}
 		$wpdb->query( 'DROP DATABASE IF EXISTS `' . self::SCRATCH . '`' );
@@ -345,12 +360,19 @@ final class DatabaseExportStepTest extends JobTestCase {
 			$order   = implode( ', ', array_map( static function ( string $c ): string {
 				return "`{$c}`";
 			}, $columns ) );
-			$source  = $wpdb->get_results( "SELECT * FROM `" . DB_NAME . "`.`{$table}` ORDER BY {$order}", ARRAY_N );
-			$copy    = $wpdb->get_results( 'SELECT * FROM `' . self::SCRATCH . "`.`{$table}` ORDER BY {$order}", ARRAY_N );
+			$source  = $wpdb->get_results( "SELECT {$order} FROM `" . DB_NAME . "`.`{$table}` ORDER BY {$order}", ARRAY_N );
+			$copy    = $wpdb->get_results( "SELECT {$order} FROM `" . self::SCRATCH . "`.`{$table}` ORDER BY {$order}", ARRAY_N );
 			$this->assertSame( '', $wpdb->last_error );
 			$this->assertNotEmpty( $source );
 			$this->assertSame( count( $source ), count( $copy ), $table );
 			$this->assertSame( $source, $copy, "every row of {$table} came back byte for byte" );
+			if ( self::PREFIX . 'cols' === $table ) {
+				$this->assertSame( array( 'id', 'a', 'twice', 'hidden', 'z' ), $columns );
+				$this->assertSame( array( '1', 'one', '2', 'h1', 'z1' ), $copy[0], 'the generated column was computed on import and the invisible column kept its value' );
+				$this->assertSame( array( '2', 'two', '4', null, 'z2' ), $copy[1] );
+				$chunk = (string) file_get_contents( $this->work( $job ) . '/' . DatabaseExportStep::DIR . '/' . basename( IndexLine::database_path( $table, 1 ) ) );
+				$this->assertStringContainsString( "INSERT INTO `{$table}` (`id`, `a`, `hidden`, `z`) VALUES (1,'one','h1','z1'),(2,'two',NULL,'z2'),(3,NULL,'h3','z3');", $chunk );
+			}
 			$this->assertSame(
 				$wpdb->get_row( "SHOW CREATE TABLE `" . DB_NAME . "`.`{$table}`", ARRAY_N )[1],
 				$wpdb->get_row( 'SHOW CREATE TABLE `' . self::SCRATCH . "`.`{$table}`", ARRAY_N )[1],
