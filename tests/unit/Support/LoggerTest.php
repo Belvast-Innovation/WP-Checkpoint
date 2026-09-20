@@ -52,12 +52,12 @@ final class LoggerTest extends TestCase {
 		$this->assertSame( 1, preg_match( '//u', $line ) );
 	}
 
-	public function test_unencodable_values_become_null_but_the_line_is_written(): void {
+	public function test_an_unencodable_context_is_replaced_by_its_key_list_and_the_line_is_written(): void {
 		$logger = new Logger( $this->dir . '/x.log', new Redactor() );
 		$logger->info( 'bad', array( 'blob' => fopen( 'php://memory', 'r' ), 'ok' => 1 ) );
 		$line = (string) file_get_contents( $logger->path() );
-		$this->assertStringContainsString( '"blob":null', $line, 'JSON_PARTIAL_OUTPUT_ON_ERROR replaces what cannot be encoded' );
-		$this->assertStringContainsString( '"ok":1', $line );
+		$this->assertStringContainsString( 'INFO bad {"_unencodable_keys":["blob","ok"]}', $line, 'no partial encoding: the whole context is replaced by fixed text' );
+		$this->assertStringNotContainsString( 'null', $line );
 	}
 
 	public function test_size_cap_writes_marker_and_stops(): void {

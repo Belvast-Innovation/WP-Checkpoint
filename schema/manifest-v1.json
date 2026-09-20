@@ -224,6 +224,26 @@
               }
             }
           }
+        },
+        "exported": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "required": [
+            "started_at",
+            "finished_at"
+          ],
+          "properties": {
+            "started_at": {
+              "type": "string",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?(Z|[+-]\\d{2}:\\d{2})$"
+            },
+            "finished_at": {
+              "type": "string",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?(Z|[+-]\\d{2}:\\d{2})$"
+            }
+          }
         }
       }
     },

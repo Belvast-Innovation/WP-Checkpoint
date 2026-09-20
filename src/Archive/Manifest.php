@@ -152,10 +152,7 @@ final class Manifest {
 
 		$out['kind']       = self::enum_field( $data, 'kind', '', self::KINDS );
 		$out['trigger']    = self::enum_field( $data, 'trigger', '', self::TRIGGERS );
-		$out['created_at'] = self::string_field( $data, 'created_at', '' );
-		if ( 1 !== preg_match( '/\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})\z/', $out['created_at'] ) ) {
-			throw new ManifestError( 'created_at', 'Not an ISO 8601 timestamp.' );
-		}
+		$out['created_at'] = self::timestamp_field( $data, 'created_at', '' );
 
 		$generator        = self::object_field( $data, 'generator', '' );
 		$out['generator'] = array(
@@ -196,10 +193,19 @@ final class Manifest {
 
 		$database        = self::object_field( $data, 'database', '' );
 		$out['database'] = array(
-			'index'  => self::content_entry( self::object_field( $database, 'index', 'database' ), 'database.index', $chunk_bytes, $paths, self::DATABASE_INDEX ),
-			'tables' => array(),
+			'index'    => self::content_entry( self::object_field( $database, 'index', 'database' ), 'database.index', $chunk_bytes, $paths, self::DATABASE_INDEX ),
+			'tables'   => array(),
+			'exported' => null,
 		);
-		$seen_tables     = array();
+		// The export is not a snapshot: batches run while the site keeps writing. The period says how long.
+		if ( array_key_exists( 'exported', $database ) && null !== $database['exported'] ) {
+			$exported                    = self::object_field( $database, 'exported', 'database' );
+			$out['database']['exported'] = array(
+				'started_at'  => self::timestamp_field( $exported, 'started_at', 'database.exported' ),
+				'finished_at' => self::timestamp_field( $exported, 'finished_at', 'database.exported' ),
+			);
+		}
+		$seen_tables = array();
 		foreach ( self::list_field( $database, 'tables', 'database', self::MAX_TABLES ) as $i => $table ) {
 			$field = "database.tables[{$i}]";
 			$table = self::object_item( $table, $field );
@@ -369,6 +375,32 @@ final class Manifest {
 	 */
 	public function files_index(): array {
 		return $this->data['files']['index'];
+	}
+
+	/**
+	 * When the database export ran, or null when the manifest does not say.
+	 *
+	 * @return array{started_at: string, finished_at: string}|null
+	 */
+	public function database_exported() {
+		return $this->data['database']['exported'];
+	}
+
+	/**
+	 * A required ISO 8601 timestamp.
+	 *
+	 * @param array<string, mixed> $data   Object.
+	 * @param string               $key    Key.
+	 * @param string               $prefix Parent path.
+	 * @return string
+	 * @throws ManifestError When missing or not a timestamp.
+	 */
+	private static function timestamp_field( array $data, string $key, string $prefix ): string {
+		$value = self::string_field( $data, $key, $prefix );
+		if ( 1 !== preg_match( '/\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})\z/', $value ) ) {
+			throw new ManifestError( self::path( $prefix, $key ), 'Not an ISO 8601 timestamp.' );
+		}
+		return $value;
 	}
 
 	/**

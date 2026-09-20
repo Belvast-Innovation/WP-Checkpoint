@@ -1,0 +1,1007 @@
+<?php
+/**
+ * Streams one table into SQL chunk files, one batch of rows per unit of work.
+ *
+ * @package WPCheckpoint
+ */
+
+namespace WPCheckpoint\Database;
+
+use WPCheckpoint\Archive\ChunkHasher;
+use WPCheckpoint\Archive\IndexLine;
+use WPCheckpoint\Jobs\TransientFailure;
+
+// phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- messages carry table names, numbers and the driver's error text; the runner stores them through the redactor and the presenter cleans them before display.
+
+/**
+ * Pure PHP over a Connection. A table becomes database/{t}.{c}.sql files
+ * of at most CHUNK_BYTES each; every chunk starts with a header comment
+ * and a session preamble (SET NAMES, SQL_MODE, FOREIGN_KEY_CHECKS), chunk
+ * 1 continues with DROP TABLE and the CREATE statement, every chunk ends
+ * with an end comment, and every batch of rows is followed by a marker
+ * comment carrying the last primary key of the batch. That marker is
+ * the only resume point: the cursor never holds a key value (keys are
+ * user data, and a key that happens to contain a site secret would trip
+ * the cursor check), only the table, the chunk number and the number of
+ * bytes of the current chunk that were committed at the last checkpoint.
+ *
+ * Resuming truncates the chunk to the committed length (a batch written
+ * after the last checkpoint is simply redone) and reads the marker the
+ * committed part ends with; a chunk with no marker yet starts after the
+ * key in its header. The committed length only ever advances after a
+ * whole batch and its marker are on disk, so the committed part of a
+ * chunk always ends right after a marker line and a torn write lies
+ * beyond it. Anything else (a last line that is not a marker while the
+ * chunk holds markers, a marker that does not parse) is damage to the
+ * work directory and fails the export rather than re-exporting rows.
+ *
+ * A batch is chosen by size before it is fetched: a first query reads
+ * the keys and the byte lengths of the rows ahead, estimate_row_bytes()
+ * turns them into an upper bound of what each row costs, and only as
+ * many rows as fit TARGET_BATCH_BYTES (at least one) are fetched, so a
+ * run of large rows after a run of small ones cannot be pulled into
+ * memory whole. A row whose estimate exceeds MAX_ROW_BYTES is refused
+ * before it is fetched, with the table, the position and the size; the
+ * exact size is checked again after formatting. INSERT statements are
+ * cut at about STATEMENT_BYTES (one row per statement when a row alone
+ * is larger), and a chunk closes when the next batch would push it past
+ * CHUNK_BYTES. Columns are listed explicitly (SELECT * would leave out
+ * INVISIBLE columns and shift every value one column over); generated
+ * columns are left out of both the SELECT and the INSERT. Tables with a
+ * primary key are read in key order with an expanded comparison that
+ * uses the index on every MySQL version; tables without one use
+ * LIMIT/OFFSET, which is unstable while the table changes, and say so
+ * in a warning.
+ *
+ * The export is not a snapshot: batches run across ticks and requests
+ * while the site keeps writing, so the files reflect the state of each
+ * table over the export period. The manifest records the period.
+ */
+final class TableExporter {
+
+	const CHUNK_BYTES        = 16777216;
+	const TARGET_BATCH_BYTES = 1048576;
+	const STATEMENT_BYTES    = 1048576;
+	const MIN_ROWS           = 50;
+	const MAX_ROWS           = 5000;
+	const INITIAL_ROWS       = 500;
+	const SCAN_WINDOW        = 65536;
+	const MAX_MARKER_BYTES   = 65536;
+
+	/**
+	 * The largest row, as SQL text, the exporter takes. Over $wpdb a row is
+	 * held about five times over while it is fetched (the driver's result
+	 * buffer, the packet, the field, the PHP string) and escaped, and one
+	 * unit may add at most 32 MB; both test levels measure the largest
+	 * legal row against that budget. Rows are not sliced (T033).
+	 */
+	const MAX_ROW_BYTES = 4194304;
+
+	/**
+	 * Small pieces of a batch are coalesced into writes of about this size; a value larger than this is written on its own.
+	 */
+	const WRITE_BYTES = 65536;
+
+	const HEADER = '-- wpcheckpoint table=';
+	const MARKER = '-- wpcheckpoint batch ';
+	const END    = '-- wpcheckpoint end ';
+
+	/**
+	 * MySQL error numbers worth a retry: the server went away, a lock timed out, a deadlock.
+	 */
+	const TRANSIENT_ERRNOS = array( 1040, 1053, 1205, 1213, 2002, 2003, 2006, 2013 );
+
+	/**
+	 * Database.
+	 *
+	 * @var Connection
+	 */
+	private $connection;
+
+	/**
+	 * Directory the chunk files go to (the "database" directory).
+	 *
+	 * @var string
+	 */
+	private $dir;
+
+	/**
+	 * Chunk size.
+	 *
+	 * @var int
+	 */
+	private $chunk_bytes;
+
+	/**
+	 * Batch target size.
+	 *
+	 * @var int
+	 */
+	private $target_batch;
+
+	/**
+	 * SQL formatting for this connection.
+	 *
+	 * @var SqlWriter
+	 */
+	private $writer;
+
+	/**
+	 * Connection charset for the SET NAMES preamble ('' when unknown or not a plain name).
+	 *
+	 * @var string
+	 */
+	private $charset;
+
+	/**
+	 * Table descriptions cached for this instance.
+	 *
+	 * @var array<string, array<string, mixed>>
+	 */
+	private $described = array();
+
+	/**
+	 * Constructor.
+	 *
+	 * @param Connection $connection   Database.
+	 * @param string     $dir          Existing directory for the chunk files.
+	 * @param int        $chunk_bytes  Chunk size (tests use smaller values).
+	 * @param int        $target_batch Batch target size; kept at or below a quarter of the chunk size so a batch always fits.
+	 */
+	public function __construct( Connection $connection, string $dir, int $chunk_bytes = self::CHUNK_BYTES, int $target_batch = self::TARGET_BATCH_BYTES ) {
+		$this->connection   = $connection;
+		$this->dir          = rtrim( $dir, '/\\' );
+		$this->chunk_bytes  = $chunk_bytes;
+		$this->target_batch = max( 1, min( $target_batch, intdiv( $chunk_bytes, 4 ) ) );
+		$this->writer       = new SqlWriter( $connection->charset() );
+		$charset            = strtolower( $connection->charset() );
+		$this->charset      = 1 === preg_match( '/\A[a-z0-9_]{1,32}\z/', $charset ) ? $charset : '';
+	}
+
+	/**
+	 * Whether strings are written as hex on this connection.
+	 *
+	 * @return bool
+	 */
+	public function hex_all(): bool {
+		return $this->writer->hex_all();
+	}
+
+	/**
+	 * The largest row (as SQL) this exporter accepts: MAX_ROW_BYTES, or less with a small chunk size.
+	 *
+	 * @return int
+	 */
+	public function row_limit(): int {
+		return min( self::MAX_ROW_BYTES, $this->chunk_bytes - 4096 );
+	}
+
+	/**
+	 * The state a table export starts from.
+	 *
+	 * @param string $table Table name.
+	 * @return array<string, mixed>
+	 */
+	public static function initial_state( string $table ): array {
+		return array(
+			'table'      => $table,
+			'chunk'      => 1,
+			'bytes'      => 0,
+			'rows'       => 0,
+			'chunks'     => 0,
+			'total'      => 0,
+			'batch_rows' => self::INITIAL_ROWS,
+			'done'       => false,
+			'closed'     => null,
+			'warnings'   => array(),
+		);
+	}
+
+	/**
+	 * One unit: a batch of rows (opening or closing a chunk as needed).
+	 * "closed" carries the chunk that was completed in this unit, if any,
+	 * for the caller to record; it is cleared at the start of the next.
+	 *
+	 * @param array<string, mixed> $state State.
+	 * @return array<string, mixed>
+	 * @throws TransientFailure When the database is temporarily unavailable.
+	 * @throws \RuntimeException When the table cannot be exported (a row larger than the limit, a broken query, a damaged work directory).
+	 */
+	public function step( array $state ): array {
+		$state['closed'] = null;
+		if ( ! empty( $state['done'] ) ) {
+			return $state;
+		}
+		$table = (string) $state['table'];
+		$desc  = $this->describe( $table );
+		$path  = $this->chunk_path( $table, (int) $state['chunk'] );
+
+		if ( 0 === (int) $state['bytes'] ) {
+			$key = 1 === (int) $state['chunk'] ? null : $this->previous_end_key( $table, (int) $state['chunk'] );
+			$this->write_new( $path, $this->header( $state, $desc, $key ) );
+			$state['bytes'] = (int) filesize( $path );
+			$this->note_mode( $state, $desc );
+			$handle = $this->open_at( $path, (int) $state['bytes'] );
+		} else {
+			$handle = $this->open_at( $path, (int) $state['bytes'] );
+			$key    = $this->resume_key( $handle, $table, (int) $state['chunk'], (int) $state['bytes'] );
+		}
+
+		try {
+			$rows = $this->fetch( $table, $desc, $key, (int) $state['rows'], (int) $state['batch_rows'] );
+			if ( array() === $rows ) {
+				$this->close_chunk( $handle, $path, $state, $desc, $key );
+				$state['done'] = true;
+				return $state;
+			}
+			list( $pieces, $length, $emitted, $last_key, $largest ) = $this->format_batch( $table, $desc, $rows, $key, (int) $state['rows'] );
+			$rows = array();
+			$end  = strlen( $this->end_line( $state, $desc, $last_key ) );
+			if ( $largest['bytes'] > $this->row_limit() ) {
+				// The estimate before the fetch let it through (text full of quotes or backslashes doubles when escaped): the exact size decides.
+				throw new \RuntimeException( $this->too_large( $table, $largest['bytes'], $desc, $largest['key'], $largest['index'] ) );
+			}
+			if ( $length + $end > $this->chunk_bytes - 4096 ) {
+				// Only reachable when the batch target is set close to the chunk size (tests): a batch of small rows does not fit either.
+				throw new \RuntimeException( sprintf( 'Table %s produced a batch of %d bytes, larger than the archive chunk size of %d bytes.', $table, $length, $this->chunk_bytes ) );
+			}
+			if ( (int) $state['bytes'] + $length + $end > $this->chunk_bytes ) {
+				// The chunk cannot take this batch: end it at the previous key and continue in a new one.
+				$this->close_chunk( $handle, $path, $state, $desc, $key );
+				fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- chunk file in the job's work directory.
+				$path = $this->chunk_path( $table, (int) $state['chunk'] );
+				$this->write_new( $path, $this->header( $state, $desc, $key ) );
+				$state['bytes'] = (int) filesize( $path );
+				$handle         = $this->open_at( $path, (int) $state['bytes'] );
+			}
+			foreach ( $pieces as $i => $piece ) {
+				$this->append( $handle, $piece );
+				unset( $pieces[ $i ] );
+			}
+			$state['bytes']     += $length;
+			$state['rows']      += $emitted;
+			$state['batch_rows'] = self::adapt( (int) $state['batch_rows'], $length, $emitted, $this->target_batch );
+		} finally {
+			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- see above.
+		}
+		return $state;
+	}
+
+	/**
+	 * Path of a chunk file.
+	 *
+	 * @param string $table Table.
+	 * @param int    $chunk Chunk number.
+	 * @return string
+	 */
+	public function chunk_path( string $table, int $chunk ): string {
+		return $this->dir . DIRECTORY_SEPARATOR . basename( IndexLine::database_path( $table, $chunk ) );
+	}
+
+	/**
+	 * Describe a table: CREATE statement, the exportable columns with
+	 * their kinds (generated columns are left out: they are computed on
+	 * import and cannot be inserted), primary key columns.
+	 *
+	 * @param string $table Table.
+	 * @return array{create: string, columns: string[], kinds: string[], pk: string[], pk_index: int[]}
+	 * @throws TransientFailure|\RuntimeException On query failure.
+	 */
+	public function describe( string $table ): array {
+		if ( isset( $this->described[ $table ] ) ) {
+			return $this->described[ $table ];
+		}
+		$id      = SqlWriter::identifier( $table );
+		$create  = $this->query( 'SHOW CREATE TABLE ' . $id );
+		$columns = $this->query( 'SHOW COLUMNS FROM ' . $id );
+		$indexes = $this->query( 'SHOW INDEX FROM ' . $id );
+		if ( array() === $create || ! isset( $create[0][1] ) || array() === $columns ) {
+			throw new \RuntimeException( sprintf( 'Table %s could not be described.', $table ) );
+		}
+		$names = array();
+		$kinds = array();
+		foreach ( $columns as $column ) {
+			$extra = isset( $column[5] ) ? strtoupper( (string) $column[5] ) : '';
+			if ( false !== strpos( $extra, 'GENERATED' ) ) {
+				continue;
+			}
+			$names[] = (string) $column[0];
+			$kinds[] = SqlWriter::kind( (string) $column[1] );
+		}
+		if ( array() === $names ) {
+			throw new \RuntimeException( sprintf( 'Table %s has no column that can be exported.', $table ) );
+		}
+		$primary = array();
+		foreach ( $indexes as $index ) {
+			if ( isset( $index[2], $index[3], $index[4] ) && 'PRIMARY' === (string) $index[2] ) {
+				$primary[ (int) $index[3] ] = (string) $index[4];
+			}
+		}
+		ksort( $primary );
+		$pk       = array_values( $primary );
+		$pk_index = array();
+		foreach ( $pk as $column ) {
+			$at = array_search( $column, $names, true );
+			if ( false === $at ) {
+				$pk       = array(); // A key on a column the listing lacks (or a generated one): treat as keyless rather than guess.
+				$pk_index = array();
+				break;
+			}
+			$pk_index[] = (int) $at;
+		}
+		$this->described[ $table ] = array(
+			'create'   => (string) $create[0][1],
+			'columns'  => $names,
+			'kinds'    => $kinds,
+			'pk'       => $pk,
+			'pk_index' => $pk_index,
+		);
+		return $this->described[ $table ];
+	}
+
+	/**
+	 * Run a query and classify a failure.
+	 *
+	 * @param string   $sql  SQL.
+	 * @param string[] $args Placeholder values.
+	 * @return array<int, array<int, string|null>>
+	 * @throws TransientFailure When the error is worth a retry.
+	 * @throws \RuntimeException Otherwise.
+	 */
+	private function query( string $sql, array $args = array() ): array {
+		$rows = $this->connection->rows( $sql, $args );
+		if ( null === $rows ) {
+			$errno = $this->connection->last_errno();
+			$text  = sprintf( 'Database query failed (%d): %s', $errno, $this->connection->last_error() );
+			if ( in_array( $errno, self::TRANSIENT_ERRNOS, true ) ) {
+				throw new TransientFailure( $text );
+			}
+			throw new \RuntimeException( $text );
+		}
+		return $rows;
+	}
+
+	/**
+	 * Fetch the next batch after a key (or offset), sized before it is
+	 * read: a first query returns the keys and the byte lengths of up to
+	 * $limit rows ahead, and only the rows whose estimates fit the batch
+	 * target (at least one) are fetched.
+	 *
+	 * @param string                                                                                   $table Table.
+	 * @param array{create: string, columns: string[], kinds: string[], pk: string[], pk_index: int[]} $desc  Description.
+	 * @param string[]|null                                                                            $key   Last key, null from the start.
+	 * @param int                                                                                      $rows  Rows exported so far (offset mode).
+	 * @param int                                                                                      $limit Rows to look ahead.
+	 * @return array<int, array<int, string|null>>
+	 * @throws \RuntimeException When a row ahead is larger than the limit.
+	 */
+	private function fetch( string $table, array $desc, $key, int $rows, int $limit ): array {
+		$from   = ' FROM ' . SqlWriter::identifier( $table );
+		$args   = array();
+		$where  = '';
+		$offset = '';
+		if ( array() === $desc['pk'] ) {
+			$offset = ' OFFSET ' . $rows;
+		} else {
+			if ( null !== $key ) {
+				list( $condition, $args ) = self::after_key( $desc['pk'], $key );
+				$where                    = ' WHERE ' . $condition;
+			}
+			$where .= ' ORDER BY ' . implode( ', ', array_map( array( SqlWriter::class, 'identifier' ), $desc['pk'] ) );
+		}
+		$lengths = array_map( array( SqlWriter::class, 'identifier' ), $desc['pk'] );
+		foreach ( $desc['columns'] as $column ) {
+			$lengths[] = 'LENGTH(' . SqlWriter::identifier( $column ) . ')';
+		}
+		$sizes = $this->query( 'SELECT ' . implode( ', ', $lengths ) . $from . $where . ' LIMIT ' . $limit . $offset, $args );
+		if ( array() === $sizes ) {
+			return array();
+		}
+		$count = 0;
+		$total = 0;
+		$keys  = count( $desc['pk'] );
+		foreach ( $sizes as $i => $size ) {
+			$estimate = self::estimate_row_bytes( array_slice( $size, $keys ), $desc['kinds'], $this->hex_all() );
+			if ( $estimate > $this->row_limit() ) {
+				$row_key = array() === $desc['pk'] ? null : array_map( 'strval', array_slice( $size, 0, $keys ) );
+				throw new \RuntimeException( $this->too_large( $table, $estimate, $desc, $row_key, $rows + $i ) );
+			}
+			++$count;
+			$total += $estimate;
+			if ( $total >= $this->target_batch ) {
+				break;
+			}
+		}
+		$columns = implode( ', ', array_map( array( SqlWriter::class, 'identifier' ), $desc['columns'] ) );
+		return $this->query( 'SELECT ' . $columns . $from . $where . ' LIMIT ' . $count . $offset, $args );
+	}
+
+	/**
+	 * An upper bound of the memory a row costs and of its size as SQL for
+	 * ordinary values, from the byte lengths LENGTH() reports. Binary
+	 * columns (and every string on a connection that writes hex) become
+	 * X'..', twice the bytes plus three; other values are quoted, with
+	 * room for escaping. Text made entirely of quotes or backslashes
+	 * doubles when escaped and can exceed this bound as SQL; the exact
+	 * size is checked after formatting, and memory stays bounded because
+	 * the raw bytes never exceed the estimate. The pre-flight (T032) must
+	 * use this same function so its verdict and the export's agree.
+	 *
+	 * @param array<int, string|int|null> $lengths LENGTH() per exportable column, null for NULL.
+	 * @param string[]                    $kinds   Column kinds in the same order.
+	 * @param bool                        $hex_all Whether every string is written as hex.
+	 * @return int
+	 */
+	public static function estimate_row_bytes( array $lengths, array $kinds, bool $hex_all ): int {
+		$bytes = 2; // Parentheses.
+		foreach ( array_values( $lengths ) as $i => $length ) {
+			if ( null === $length ) {
+				$bytes += 5; // NULL and a comma.
+				continue;
+			}
+			$length = (int) $length;
+			$kind   = isset( $kinds[ $i ] ) ? $kinds[ $i ] : 'text';
+			if ( 'binary' === $kind || ( $hex_all && 'numeric' !== $kind ) ) {
+				$bytes += (int) ceil( $length * 2.2 ) + 4;
+			} else {
+				$bytes += (int) ceil( $length * 1.1 ) + 4;
+			}
+		}
+		return $bytes;
+	}
+
+	/**
+	 * The expanded "greater than this tuple" condition: (a > ?) OR (a = ?
+	 * AND b > ?) OR (a = ? AND b = ? AND c > ?). A row-value comparison
+	 * (a, b) > (?, ?) is not range-optimised before MySQL 8.0.14 and
+	 * would scan the table on every batch.
+	 *
+	 * @param string[] $pk  Key columns.
+	 * @param string[] $key Values.
+	 * @return array{0: string, 1: string[]}
+	 */
+	public static function after_key( array $pk, array $key ): array {
+		$parts = array();
+		$args  = array();
+		$count = count( $pk );
+		for ( $i = 0; $i < $count; $i++ ) {
+			$terms = array();
+			for ( $j = 0; $j < $i; $j++ ) {
+				$terms[] = SqlWriter::identifier( $pk[ $j ] ) . ' = ?';
+				$args[]  = (string) $key[ $j ];
+			}
+			$terms[] = SqlWriter::identifier( $pk[ $i ] ) . ' > ?';
+			$args[]  = (string) $key[ $i ];
+			$parts[] = '(' . implode( ' AND ', $terms ) . ')';
+		}
+		return array( implode( ' OR ', $parts ), $args );
+	}
+
+	/**
+	 * Rows to statements plus the batch marker, as a list of pieces to be
+	 * written in order (one piece per large value, small texts gathered
+	 * into WRITE_BYTES pieces), so a large row is held once, not
+	 * concatenated into a copy. Emits rows until the target batch size is
+	 * reached; rows beyond that are left for the next batch (they are
+	 * fetched again). Rows are released as they are formatted.
+	 *
+	 * @param string                                                                                   $table Table.
+	 * @param array{create: string, columns: string[], kinds: string[], pk: string[], pk_index: int[]} $desc  Description.
+	 * @param array<int, array<int, string|null>>                                                      $rows  Fetched rows.
+	 * @param string[]|null                                                                            $key   Key before the batch.
+	 * @param int                                                                                      $done  Rows exported before the batch.
+	 * @return array{0: string[], 1: int, 2: int, 3: string[]|null, 4: array{bytes: int, key: string[]|null, index: int}} Pieces, their total length, rows emitted, last key, largest row (its size, its key, its position).
+	 */
+	private function format_batch( string $table, array $desc, array &$rows, $key, int $done ): array {
+		$head      = SqlWriter::insert_head( $table, $desc['columns'] );
+		$pieces    = array();
+		$buffer    = '';
+		$length    = 0;
+		$statement = 0; // Bytes of the open statement, 0 when none is open.
+		$emitted   = 0;
+		$last      = $key;
+		$largest   = array(
+			'bytes' => 0,
+			'key'   => null,
+			'index' => $done,
+		);
+		foreach ( $rows as $i => $row ) {
+			$row_key = null;
+			if ( array() !== $desc['pk_index'] ) {
+				$row_key = array();
+				foreach ( $desc['pk_index'] as $at ) {
+					$row_key[] = (string) $row[ $at ];
+				}
+			}
+			$values = $this->writer->values( $row, $desc['kinds'] );
+			unset( $rows[ $i ], $row );
+			$size = count( $values ) + 1; // Parentheses and commas.
+			foreach ( $values as $value ) {
+				$size += strlen( $value );
+			}
+			if ( $size > $largest['bytes'] ) {
+				$largest = array(
+					'bytes' => $size,
+					'key'   => $row_key,
+					'index' => $done + $emitted,
+				);
+			}
+			if ( $statement > 0 && $statement + $size + 3 > self::STATEMENT_BYTES ) {
+				self::add( $pieces, $buffer, ";\n" );
+				$length   += 2;
+				$statement = 0;
+			}
+			if ( 0 === $statement ) {
+				self::add( $pieces, $buffer, $head );
+				$length   += strlen( $head );
+				$statement = strlen( $head );
+			} else {
+				self::add( $pieces, $buffer, ',' );
+				++$length;
+				++$statement;
+			}
+			self::add( $pieces, $buffer, '(' );
+			foreach ( $values as $n => $value ) {
+				self::add( $pieces, $buffer, 0 === $n ? $value : ',' . $value );
+				unset( $values[ $n ], $value );
+			}
+			self::add( $pieces, $buffer, ')' );
+			$length    += $size;
+			$statement += $size;
+			++$emitted;
+			if ( null !== $row_key ) {
+				$last = $row_key;
+			}
+			if ( $length >= $this->target_batch ) {
+				break;
+			}
+		}
+		if ( $statement > 0 ) {
+			self::add( $pieces, $buffer, ";\n" );
+			$length += 2;
+		}
+		$marker = self::MARKER . 'rows=' . $emitted . ' ' . ( array() === $desc['pk'] ? 'offset=' . ( $done + $emitted ) : 'pk=' . self::encode_key( $last ) ) . "\n";
+		self::add( $pieces, $buffer, $marker );
+		$length += strlen( $marker );
+		if ( '' !== $buffer ) {
+			$pieces[] = $buffer;
+		}
+		return array( $pieces, $length, $emitted, $last, $largest );
+	}
+
+	/**
+	 * Queue text for writing: small texts are gathered into WRITE_BYTES
+	 * pieces, a large one becomes a piece of its own (never copied).
+	 *
+	 * @param string[] $pieces Pieces (updated).
+	 * @param string   $buffer Gathered small texts (updated).
+	 * @param string   $text   Text.
+	 * @return void
+	 */
+	private static function add( array &$pieces, string &$buffer, string $text ): void {
+		if ( strlen( $text ) >= self::WRITE_BYTES ) {
+			if ( '' !== $buffer ) {
+				$pieces[] = $buffer;
+				$buffer   = '';
+			}
+			$pieces[] = $text;
+			return;
+		}
+		$buffer .= $text;
+		if ( strlen( $buffer ) >= self::WRITE_BYTES ) {
+			$pieces[] = $buffer;
+			$buffer   = '';
+		}
+	}
+
+	/**
+	 * How many rows to look ahead next, from the last batch: aim at the target bytes, within bounds.
+	 *
+	 * @param int $current Current batch size.
+	 * @param int $bytes   Bytes of the last batch.
+	 * @param int $rows    Rows of the last batch.
+	 * @param int $target  Target bytes.
+	 * @return int
+	 */
+	public static function adapt( int $current, int $bytes, int $rows, int $target ): int {
+		if ( $rows <= 0 || $bytes <= 0 ) {
+			return $current;
+		}
+		$per_row = max( 1, (int) ( $bytes / $rows ) );
+		return max( self::MIN_ROWS, min( self::MAX_ROWS, (int) ( $target / $per_row ) ) );
+	}
+
+	/**
+	 * The header of a chunk: the comment line, the session preamble and,
+	 * for chunk 1, DROP and CREATE. The preamble is in every chunk because
+	 * a chunk can be imported on its own; the settings are session-wide
+	 * on the importing connection, like a mysqldump file's.
+	 *
+	 * @param array<string, mixed>                                                                     $state State.
+	 * @param array{create: string, columns: string[], kinds: string[], pk: string[], pk_index: int[]} $desc  Description.
+	 * @param string[]|null                                                                            $key   Key the chunk starts after.
+	 * @return string
+	 */
+	private function header( array $state, array $desc, $key ): string {
+		$table = (string) $state['table'];
+		$from  = array() === $desc['pk'] ? 'offset=' . (int) $state['rows'] : 'pk_from=' . self::encode_key( $key );
+		$text  = self::HEADER . $table . ' chunk=' . (int) $state['chunk'] . ' ' . $from . "\n";
+		if ( '' !== $this->charset ) {
+			$text .= '/*!40101 SET NAMES ' . $this->charset . " */;\n";
+		}
+		$text .= "/*!40101 SET SQL_MODE='NO_AUTO_VALUE_ON_ZERO' */;\n/*!40014 SET FOREIGN_KEY_CHECKS=0 */;\n";
+		if ( 1 === (int) $state['chunk'] ) {
+			$text .= 'DROP TABLE IF EXISTS ' . SqlWriter::identifier( $table ) . ";\n" . rtrim( $desc['create'], "; \n" ) . ";\n";
+		}
+		return $text;
+	}
+
+	/**
+	 * The last line of a chunk.
+	 *
+	 * @param array<string, mixed>                                                                     $state State.
+	 * @param array{create: string, columns: string[], kinds: string[], pk: string[], pk_index: int[]} $desc  Description.
+	 * @param string[]|null                                                                            $key   Last key in the chunk.
+	 * @return string
+	 */
+	private function end_line( array $state, array $desc, $key ): string {
+		$to = array() === $desc['pk'] ? 'offset=' . (int) $state['rows'] : 'pk_to=' . self::encode_key( $key );
+		return self::END . 'table=' . (string) $state['table'] . ' chunk=' . (int) $state['chunk'] . ' rows=' . (int) $state['rows'] . ' ' . $to . "\n";
+	}
+
+	/**
+	 * Write the end line, hash the chunk, and move the state to the next chunk.
+	 *
+	 * @param resource                                                                                 $handle Open chunk.
+	 * @param string                                                                                   $path   Chunk path.
+	 * @param array<string, mixed>                                                                     $state  State (updated).
+	 * @param array{create: string, columns: string[], kinds: string[], pk: string[], pk_index: int[]} $desc   Description.
+	 * @param string[]|null                                                                            $key    Last key.
+	 * @return void
+	 * @throws TransientFailure When the end line cannot be written.
+	 */
+	private function close_chunk( $handle, string $path, array &$state, array $desc, $key ): void {
+		$this->append( $handle, $this->end_line( $state, $desc, $key ) );
+		if ( ! fflush( $handle ) ) {
+			throw new TransientFailure( 'The chunk file could not be flushed.' );
+		}
+		clearstatcache( true, $path );
+		$size            = (int) filesize( $path );
+		$state['closed'] = array(
+			'chunk' => (int) $state['chunk'],
+			'bytes' => $size,
+			'hash'  => ChunkHasher::hash_file( $path ),
+		);
+		$state['total'] += $size;
+		++$state['chunks'];
+		++$state['chunk'];
+		$state['bytes'] = 0;
+	}
+
+	/**
+	 * Create (or recreate) a chunk file with its header.
+	 *
+	 * @param string $path Path.
+	 * @param string $text Header text.
+	 * @return void
+	 * @throws TransientFailure When the file cannot be written.
+	 */
+	private function write_new( string $path, string $text ): void {
+		// Silenced: a warning would put the full path into the error log, bypassing the path masking.
+		$handle = @fopen( $path, 'wb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- see above.
+		if ( false === $handle ) {
+			throw new TransientFailure( 'A chunk file could not be created.' );
+		}
+		try {
+			$this->append( $handle, $text );
+			if ( ! fflush( $handle ) ) {
+				throw new TransientFailure( 'The chunk file could not be flushed.' );
+			}
+		} finally {
+			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- see above.
+		}
+		clearstatcache( true, $path );
+	}
+
+	/**
+	 * Open a chunk positioned at exactly $length bytes, cutting a longer file
+	 * back (a batch written after the last checkpoint is redone).
+	 *
+	 * @param string $path   Path.
+	 * @param int    $length Committed length.
+	 * @return resource
+	 * @throws TransientFailure When the file cannot be opened or truncated.
+	 * @throws \RuntimeException When the file is shorter than the committed length.
+	 */
+	private function open_at( string $path, int $length ) {
+		$handle = @fopen( $path, 'c+b' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- see write_new().
+		if ( false === $handle ) {
+			throw new TransientFailure( 'A chunk file could not be opened.' );
+		}
+		$stat = fstat( $handle );
+		$size = is_array( $stat ) ? (int) $stat['size'] : 0;
+		if ( $size < $length ) {
+			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- see above.
+			throw new \RuntimeException( 'A chunk file is shorter than the last checkpoint recorded; the work directory was lost or changed.' );
+		}
+		if ( $size > $length && ! ftruncate( $handle, $length ) ) {
+			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- see above.
+			throw new TransientFailure( 'A chunk file could not be truncated.' );
+		}
+		if ( 0 !== fseek( $handle, $length ) ) {
+			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- see above.
+			throw new TransientFailure( 'A chunk file could not be positioned.' );
+		}
+		return $handle;
+	}
+
+	/**
+	 * Append text in one write.
+	 *
+	 * @param resource $handle Open file.
+	 * @param string   $text   Text.
+	 * @return void
+	 * @throws TransientFailure When the write is short.
+	 */
+	private function append( $handle, string $text ): void {
+		$written = fwrite( $handle, $text ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- chunk file in the job's work directory.
+		if ( false === $written || strlen( $text ) !== $written ) {
+			throw new TransientFailure( 'A chunk file could not be written.' );
+		}
+	}
+
+	/**
+	 * The key to continue after. The committed part of a chunk ends right
+	 * after a marker line (the committed length only advances once a batch
+	 * and its marker are on disk), so the last line is the marker; a chunk
+	 * with no marker at all has not had a batch yet and starts after the
+	 * key in its header. A last line that is not a marker while the chunk
+	 * holds one, or a marker that does not parse, is damage: the export
+	 * fails instead of re-exporting rows from an earlier point.
+	 *
+	 * @param resource $handle Open chunk.
+	 * @param string   $table  Table.
+	 * @param int      $chunk  Chunk number.
+	 * @param int      $length Committed length.
+	 * @return string[]|null Null at the start of the table.
+	 * @throws \RuntimeException When the committed part is not shaped as the writer left it.
+	 */
+	private function resume_key( $handle, string $table, int $chunk, int $length ) {
+		$tail_length = min( $length, self::MAX_MARKER_BYTES + 1 );
+		$tail        = false;
+		if ( $tail_length > 0 && 0 === fseek( $handle, $length - $tail_length ) ) {
+			$tail = fread( $handle, $tail_length ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- chunk file in the job's work directory.
+		}
+		if ( ! is_string( $tail ) || strlen( $tail ) !== $tail_length ) {
+			throw new \RuntimeException( 'A chunk file could not be read back; the work directory was lost or changed.' );
+		}
+		if ( "\n" === substr( $tail, -1 ) ) {
+			$body  = substr( $tail, 0, -1 );
+			$start = strrpos( $body, "\n" );
+			$line  = false === $start ? $body : substr( $body, $start + 1 );
+			// A line cut by the window start (no newline in the window and more file before it) is not a marker of legal length.
+			if ( ( false !== $start || $length === $tail_length ) && 0 === strpos( $line, self::MARKER ) ) {
+				fseek( $handle, $length );
+				return self::parse_marker( $line );
+			}
+		}
+		if ( $this->contains_marker( $handle, $length ) ) {
+			throw new \RuntimeException( sprintf( 'Chunk %d of table %s does not end with a batch marker at the recorded length; the work directory was changed or damaged.', $chunk, $table ) );
+		}
+		fseek( $handle, 0 );
+		$first = fgets( $handle, self::MAX_MARKER_BYTES );
+		fseek( $handle, $length );
+		if ( ! is_string( $first ) ) {
+			throw new \RuntimeException( 'A chunk file has no header; the work directory was lost or changed.' );
+		}
+		return $this->key_from_header( $table, $chunk, $first );
+	}
+
+	/**
+	 * Whether a marker line starts anywhere in the first $length bytes (a
+	 * windowed scan; the windows overlap by the marker prefix so a line
+	 * start on a boundary is not missed).
+	 *
+	 * @param resource $handle Open chunk.
+	 * @param int      $length Committed length.
+	 * @return bool
+	 */
+	private function contains_marker( $handle, int $length ): bool {
+		$needle  = "\n" . self::MARKER;
+		$overlap = '';
+		$offset  = 0;
+		while ( $offset < $length ) {
+			$size = min( self::SCAN_WINDOW, $length - $offset );
+			if ( 0 !== fseek( $handle, $offset ) ) {
+				return false;
+			}
+			$piece = fread( $handle, $size ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- see above.
+			if ( ! is_string( $piece ) || '' === $piece ) {
+				return false;
+			}
+			if ( false !== strpos( $overlap . $piece, $needle ) ) {
+				return true;
+			}
+			$overlap = substr( $piece, -strlen( $needle ) );
+			$offset += strlen( $piece );
+		}
+		return false;
+	}
+
+	/**
+	 * Parse a marker line. Null when the line is not a marker at all; a
+	 * line that starts like a marker but does not parse is damage.
+	 *
+	 * @param string $line Line without its newline.
+	 * @return string[]|null Key values; an empty array in offset mode.
+	 * @throws \RuntimeException When the marker is malformed.
+	 */
+	public static function parse_marker( string $line ) {
+		if ( 0 !== strpos( $line, self::MARKER ) ) {
+			return null;
+		}
+		if ( 1 !== preg_match( '/\A' . preg_quote( self::MARKER, '/' ) . 'rows=(\d+) (pk|offset)=(.+)\z/', $line, $m ) ) {
+			throw new \RuntimeException( 'A batch marker in a chunk file is malformed; the work directory was changed or damaged.' );
+		}
+		if ( 'offset' === $m[2] ) {
+			return array(); // Offset mode keeps its position in the state; the marker is for readers.
+		}
+		return self::decode_key( $m[3] );
+	}
+
+	/**
+	 * Key from a chunk header line.
+	 *
+	 * @param string $table Table.
+	 * @param int    $chunk Chunk number.
+	 * @param string $line  Header line.
+	 * @return string[]|null
+	 * @throws \RuntimeException When the line is not this chunk's header.
+	 */
+	private function key_from_header( string $table, int $chunk, string $line ) {
+		$prefix = preg_quote( self::HEADER . $table . ' chunk=' . $chunk . ' ', '/' );
+		if ( 1 !== preg_match( '/\A' . $prefix . '(pk_from|offset)=(.+?)\s*\z/', $line, $m ) ) {
+			throw new \RuntimeException( sprintf( 'Chunk %d of table %s has a malformed header; the work directory was lost or changed.', $chunk, $table ) );
+		}
+		return 'offset' === $m[1] ? array() : self::decode_key( $m[2] );
+	}
+
+	/**
+	 * The end line of the previous chunk gives the key the next chunk starts after.
+	 *
+	 * @param string $table Table.
+	 * @param int    $chunk Chunk about to start (> 1).
+	 * @return string[]|null
+	 * @throws \RuntimeException When the previous chunk cannot be read or does not end as written.
+	 */
+	private function previous_end_key( string $table, int $chunk ) {
+		$path   = $this->chunk_path( $table, $chunk - 1 );
+		$handle = @fopen( $path, 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- see write_new().
+		if ( false === $handle ) {
+			throw new \RuntimeException( 'The previous chunk file is missing; the work directory was lost or changed.' );
+		}
+		try {
+			$stat = fstat( $handle );
+			$size = is_array( $stat ) ? (int) $stat['size'] : 0;
+			fseek( $handle, max( 0, $size - self::MAX_MARKER_BYTES ) );
+			$tail = (string) stream_get_contents( $handle );
+		} finally {
+			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- see above.
+		}
+		$lines  = explode( "\n", rtrim( $tail, "\n" ) );
+		$last   = (string) end( $lines );
+		$prefix = preg_quote( self::END . 'table=' . $table . ' chunk=' . ( $chunk - 1 ) . ' ', '/' );
+		if ( 1 !== preg_match( '/\A' . $prefix . 'rows=\d+ (pk_to|offset)=(.+)\z/', $last, $m ) ) {
+			throw new \RuntimeException( sprintf( 'Chunk %d of table %s does not end with its end line; the work directory was lost or changed.', $chunk - 1, $table ) );
+		}
+		return 'offset' === $m[1] ? array() : self::decode_key( $m[2] );
+	}
+
+	/**
+	 * Key values as one-line JSON: a JSON string for valid UTF-8, otherwise
+	 * {"h": hex} so binary keys survive losslessly. Encoding never drops a
+	 * value silently: a key that cannot be written fails the export.
+	 *
+	 * @param string[]|null $key Key.
+	 * @return string
+	 * @throws \RuntimeException When the key cannot be encoded.
+	 */
+	public static function encode_key( $key ): string {
+		if ( null === $key ) {
+			return 'null';
+		}
+		$elements = array();
+		foreach ( $key as $value ) {
+			$value      = (string) $value;
+			$elements[] = 1 === preg_match( '//u', $value ) ? $value : array( 'h' => bin2hex( $value ) );
+		}
+		$json = json_encode( $elements, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE ); // phpcs:ignore WordPress.WP.AlternativeFunctions.json_encode_json_encode -- pure PHP class, also unit-tested without WordPress.
+		if ( ! is_string( $json ) || array() === $elements ) {
+			throw new \RuntimeException( 'A primary key value could not be recorded in the chunk file.' );
+		}
+		return $json;
+	}
+
+	/**
+	 * Key values from one-line JSON; null for "null". Anything malformed
+	 * is damage to the chunk file and fails the export.
+	 *
+	 * @param string $json JSON.
+	 * @return string[]|null
+	 * @throws \RuntimeException When the JSON is not a key as encode_key() writes it.
+	 */
+	public static function decode_key( string $json ) {
+		if ( 'null' === $json ) {
+			return null;
+		}
+		$decoded = json_decode( $json, true, 3 );
+		if ( ! is_array( $decoded ) || array() === $decoded || array_keys( $decoded ) !== range( 0, count( $decoded ) - 1 ) ) {
+			throw new \RuntimeException( 'A primary key in a chunk file is malformed; the work directory was changed or damaged.' );
+		}
+		$key = array();
+		foreach ( $decoded as $value ) {
+			if ( is_string( $value ) || is_int( $value ) ) {
+				$key[] = (string) $value;
+				continue;
+			}
+			if ( is_array( $value ) && array( 'h' ) === array_keys( $value ) && is_string( $value['h'] ) && 1 === preg_match( '/\A(?:[0-9a-f]{2})*\z/', $value['h'] ) ) {
+				$key[] = (string) hex2bin( $value['h'] );
+				continue;
+			}
+			throw new \RuntimeException( 'A primary key in a chunk file is malformed; the work directory was changed or damaged.' );
+		}
+		return $key;
+	}
+
+	/**
+	 * Record how the table is read, once.
+	 *
+	 * @param array<string, mixed>                                                                     $state State (updated).
+	 * @param array{create: string, columns: string[], kinds: string[], pk: string[], pk_index: int[]} $desc  Description.
+	 * @return void
+	 */
+	private function note_mode( array &$state, array $desc ): void {
+		if ( array() === $desc['pk'] && 1 === (int) $state['chunk'] ) {
+			$state['warnings'][] = sprintf( 'Table %s has no primary key and was read with LIMIT/OFFSET; rows added or removed while it was being exported may be missing or duplicated.', (string) $state['table'] );
+		}
+	}
+
+	/**
+	 * The "row too large" message: table, position, size, what to do.
+	 *
+	 * @param string                                                                                   $table Table.
+	 * @param int                                                                                      $bytes Size as SQL (estimated or exact).
+	 * @param array{create: string, columns: string[], kinds: string[], pk: string[], pk_index: int[]} $desc  Description.
+	 * @param string[]|null                                                                            $key   The row's key, if known.
+	 * @param int                                                                                      $index The row's position from the start of the table (0-based).
+	 * @return string
+	 */
+	private function too_large( string $table, int $bytes, array $desc, $key, int $index ): string {
+		return sprintf( 'Table %s has a row of about %d bytes (as SQL) at %s, larger than the %d bytes a single row may take in a backup; this row must be reduced or excluded before the table can be backed up.', $table, $bytes, $this->position_text( $desc, $key, $index ), $this->row_limit() );
+	}
+
+	/**
+	 * Human-readable position for an error message: the key when it is
+	 * numeric, else the row number (string keys are user data: session
+	 * keys, addresses, names).
+	 *
+	 * @param array{create: string, columns: string[], kinds: string[], pk: string[], pk_index: int[]} $desc  Description.
+	 * @param string[]|null                                                                            $key   The row's key.
+	 * @param int                                                                                      $index The row's position (0-based).
+	 * @return string
+	 */
+	private function position_text( array $desc, $key, int $index ): string {
+		if ( null !== $key && array() !== $desc['pk_index'] ) {
+			$numeric = true;
+			foreach ( $desc['pk_index'] as $at ) {
+				if ( 'numeric' !== $desc['kinds'][ $at ] ) {
+					$numeric = false;
+				}
+			}
+			if ( $numeric ) {
+				return 'primary key ' . self::encode_key( $key );
+			}
+		}
+		return 'row ' . ( $index + 1 );
+	}
+}
