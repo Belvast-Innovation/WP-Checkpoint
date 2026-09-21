@@ -279,6 +279,29 @@ final class JobsControllerTest extends JobTestCase {
 		$this->assertSame( Job::FAILED, Plugin::instance()->jobs()->find( $job->id )->status );
 	}
 
+	public function test_a_paused_job_shows_its_questions_and_a_tick_reports_paused(): void {
+		$this->register( 'asks', array( new ClosureStep( 'q', static function ( JobContext $ctx ): StepResult {
+			$answers = $ctx->options()['answers'] ?? array();
+			return empty( $answers['oversize'] )
+				? StepResult::ask( array(), array( array( 'id' => 'oversize', 'kind' => 'oversize', 'count' => 1, 'file' => 'review.json' ) ), 'a row is too large' )
+				: StepResult::done();
+		} ) ) );
+		$job  = Plugin::instance()->jobs()->create( 'asks' );
+		$data = $this->rest( 'POST', 'jobs/' . $job->id . '/tick' )->get_data();
+		$this->assertSame( 'paused', $data['result'] );
+		$this->assertSame( -1, $data['retry_after'] );
+		$this->assertSame( Job::PAUSED, $data['job']['status'] );
+		$this->assertSame( array( array( 'id' => 'oversize', 'kind' => 'oversize', 'count' => 1, 'file' => 'review.json' ) ), $data['job']['questions'] );
+		$this->assertArrayNotHasKey( 'options', $data['job'] );
+		$data = $this->rest( 'GET', 'jobs/' . $job->id )->get_data()['job'];
+		$this->assertSame( 'oversize', $data['questions'][0]['id'] );
+		$this->assertSame( 'paused', $this->rest( 'POST', 'jobs/' . $job->id . '/tick' )->get_data()['result'], 'ticking again does not resume it' );
+
+		Plugin::instance()->jobs()->answer( Plugin::instance()->jobs()->find( $job->id ), array( 'oversize' => 'exclude' ) );
+		$this->assertNull( $this->rest( 'GET', 'jobs/' . $job->id )->get_data()['job']['questions'] );
+		$this->assertSame( 'completed', $this->rest( 'POST', 'jobs/' . $job->id . '/tick' )->get_data()['result'] );
+	}
+
 	public function test_subscribers_cannot_read_or_cancel_jobs(): void {
 		$this->register( 'plain', array( $this->counting_step( 'p', 1 ) ) );
 		$job = Plugin::instance()->jobs()->create( 'plain' );

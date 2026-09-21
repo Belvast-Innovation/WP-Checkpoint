@@ -15,6 +15,7 @@ final class TickResult {
 
 	const MORE      = 'more';       // Budget spent, more work; tick again.
 	const WAITING   = 'waiting';    // A step or a transient failure asked for a pause.
+	const PAUSED    = 'paused';     // A step asked the user a question; nothing to do until it is answered.
 	const BLOCKED   = 'blocked';    // Storage gate refused; back off.
 	const BUSY      = 'busy';       // Another driver holds the lock.
 	const COMPLETED = 'completed';

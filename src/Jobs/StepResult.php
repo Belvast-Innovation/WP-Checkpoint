@@ -8,14 +8,16 @@
 namespace WPCheckpoint\Jobs;
 
 /**
- * Three outcomes: progress (cursor advanced, call again), done (next step),
- * wait (nothing can be done right now, try again after some seconds).
+ * Four outcomes: progress (cursor advanced, call again), done (next step),
+ * wait (nothing can be done right now, try again after some seconds), ask
+ * (a decision is needed; the job pauses until it is answered).
  */
 final class StepResult {
 
 	const PROGRESS = 'progress';
 	const DONE     = 'done';
 	const WAIT     = 'wait';
+	const ASK      = 'ask';
 
 	/**
 	 * One of the constants.
@@ -51,6 +53,13 @@ final class StepResult {
 	 * @var int
 	 */
 	public $seconds;
+
+	/**
+	 * Questions for the user (ask only).
+	 *
+	 * @var array<int, array<string, mixed>>
+	 */
+	public $questions = array();
 
 	/**
 	 * Constructor.
@@ -102,5 +111,33 @@ final class StepResult {
 	 */
 	public static function wait( int $seconds, array $cursor, string $message = '' ): StepResult {
 		return new self( self::WAIT, $cursor, 0, $message, max( 1, $seconds ) );
+	}
+
+	/**
+	 * A decision only the user can make. The cursor is stored, the
+	 * questions are recorded on the job and the job is paused; nobody ticks
+	 * it until the answers are stored (JobRepository::answer()), after
+	 * which the same step runs again and reads them from
+	 * JobContext::options()['answers']. The step must ask everything it
+	 * needs in one go, and must not ask when the options already carry a
+	 * policy or answers for it: an unattended driver never answers.
+	 *
+	 * A question is a pointer, not the details: an array with "id" (the
+	 * answer is keyed by it) and optionally "kind", "count", "bytes",
+	 * "file" (a file under the work directory holding the details: paths,
+	 * table and column names) and "choices" (the answers allowed); any
+	 * other field is refused (JobRepository::validate_questions()), so no
+	 * user data or row value ever lands in the job row or the client
+	 * payload, and the secret check runs on what is left.
+	 *
+	 * @param array<string, mixed>             $cursor    Cursor to keep.
+	 * @param array<int, array<string, mixed>> $questions Questions, each with at least an "id".
+	 * @param string                           $message   Progress text shown while paused.
+	 * @return StepResult
+	 */
+	public static function ask( array $cursor, array $questions, string $message = '' ): StepResult {
+		$result            = new self( self::ASK, $cursor, 0, $message, 0 );
+		$result->questions = array_values( $questions );
+		return $result;
 	}
 }

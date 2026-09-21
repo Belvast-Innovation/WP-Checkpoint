@@ -60,7 +60,8 @@ final class JobCommand {
 	 *
 	 * ## EXIT CODES
 	 *
-	 * 0 completed, 1 failed, 2 cancelled, 3 lock lost, 4 left waiting, 5 another driver holds the job.
+	 * 0 completed, 1 failed, 2 cancelled, 3 lock lost, 4 left waiting, 5 another driver holds the job,
+	 * 6 the job asks a question (see "job answer").
 	 *
 	 * @param string[]             $args       Positional arguments.
 	 * @param array<string, mixed> $assoc_args Options.
@@ -197,5 +198,44 @@ final class JobCommand {
 			WP_CLI::error( 'No such job.' );
 		}
 		WP_CLI::success( sprintf( 'Job %d is %s again.', $job->id, Job::QUEUED ) );
+	}
+
+	/**
+	 * Answer the questions of a paused job, then run it again.
+	 *
+	 * ## OPTIONS
+	 *
+	 * <id>
+	 * : Job id.
+	 *
+	 * <answers>
+	 * : A JSON object keyed by question id, e.g. '{"unreadable": "continue"}'.
+	 *
+	 * ## EXAMPLES
+	 *
+	 *     wp wpcheckpoint job answer 12 '{"unreadable": "continue", "large_dirs": "include"}'
+	 *     wp wpcheckpoint job run 12
+	 *
+	 * @param string[] $args Positional arguments.
+	 * @return void
+	 */
+	public function answer( array $args ): void {
+		$answers = json_decode( isset( $args[1] ) ? (string) $args[1] : '', true );
+		if ( ! is_array( $answers ) || array() === $answers ) {
+			WP_CLI::error( 'Answers must be a non-empty JSON object keyed by question id.' );
+		}
+		try {
+			$job = $this->actions->answer( (int) $args[0], $answers );
+		} catch ( InvalidTransition $e ) {
+			WP_CLI::error( 'This job is not waiting for an answer.' );
+		} catch ( \InvalidArgumentException $e ) {
+			WP_CLI::error( 'Answers must not contain credentials.' );
+		} catch ( StaleJob $e ) {
+			WP_CLI::error( 'The job changed meanwhile; try again.' );
+		}
+		if ( null === $job ) {
+			WP_CLI::error( 'No such job.' );
+		}
+		WP_CLI::success( sprintf( 'Job %d has its answers; run it again to continue.', $job->id ) );
 	}
 }

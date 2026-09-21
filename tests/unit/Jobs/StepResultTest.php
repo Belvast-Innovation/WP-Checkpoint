@@ -24,6 +24,13 @@ final class StepResultTest extends TestCase {
 		$this->assertSame( StepResult::WAIT, $r->kind );
 		$this->assertSame( 1, $r->seconds, 'at least one second' );
 		$this->assertSame( array( 'k' => 1 ), $r->cursor );
+
+		$r = StepResult::ask( array( 'k' => 2 ), array( 'a' => array( 'id' => 'unreadable', 'count' => 3 ) ), 'decide' );
+		$this->assertSame( StepResult::ASK, $r->kind );
+		$this->assertSame( array( 'k' => 2 ), $r->cursor );
+		$this->assertSame( array( array( 'id' => 'unreadable', 'count' => 3 ) ), $r->questions, 'questions are a list' );
+		$this->assertSame( 'decide', $r->message );
+		$this->assertSame( 0, $r->seconds );
 	}
 
 	public function test_overall_progress_mapping(): void {
