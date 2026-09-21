@@ -22,7 +22,7 @@ defined( 'ABSPATH' ) || exit;
 final class Schema {
 
 	const OPTION  = 'wpcheckpoint_db_version';
-	const CURRENT = 2;
+	const CURRENT = 3;
 
 	/**
 	 * Jobs table name without the prefix.
@@ -151,13 +151,18 @@ final class Schema {
 				// Adds work_expired_at (default 0); older code ignores the column, so min_compatible stays 1.
 				self::create_jobs_table();
 				return 1;
+			case 3:
+				// Adds options_json and questions_json (NULL); older code ignores both, so min_compatible stays 1.
+				self::create_jobs_table();
+				return 1;
 		}
 		return self::MIN_COMPATIBLE;
 	}
 
 	/**
 	 * The jobs table in its current shape; dbDelta() creates it or adds the
-	 * columns that are missing (version 1 lacked work_expired_at).
+	 * columns that are missing (version 1 lacked work_expired_at, version 2
+	 * lacked options_json and questions_json).
 	 *
 	 * @return void
 	 */
@@ -173,6 +178,8 @@ final class Schema {
 			status varchar(16) NOT NULL DEFAULT 'queued',
 			step varchar(64) NOT NULL DEFAULT '',
 			cursor_json longtext NULL,
+			options_json longtext NULL,
+			questions_json longtext NULL,
 			progress tinyint(3) unsigned NOT NULL DEFAULT 0,
 			progress_message varchar(191) NOT NULL DEFAULT '',
 			attempts int(10) unsigned NOT NULL DEFAULT 0,

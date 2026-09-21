@@ -162,6 +162,16 @@ final class JobContext {
 	}
 
 	/**
+	 * The settings the job was created with, plus the answers given while
+	 * it was paused (under "answers"). Read-only for steps.
+	 *
+	 * @return array<string, mixed>
+	 */
+	public function options(): array {
+		return $this->job->options;
+	}
+
+	/**
 	 * Budget of this tick.
 	 *
 	 * @return Budget

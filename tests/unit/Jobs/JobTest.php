@@ -12,7 +12,7 @@ final class JobTest extends TestCase {
 		$allowed = array(
 			'queued->running', 'queued->failed', 'queued->cancelled',
 			'running->completed', 'running->failed', 'running->paused', 'running->cancelled',
-			'paused->running', 'paused->cancelled',
+			'paused->running', 'paused->failed', 'paused->cancelled',
 			'failed->queued',
 		);
 		foreach ( Job::statuses() as $from ) {

@@ -27,6 +27,17 @@ final class Job {
 	const CANCELLED = 'cancelled';
 
 	/**
+	 * Whether the job is paused because a step asked for a decision. Such
+	 * a job is not ticked until JobRepository::answer() stored the answers;
+	 * a paused job without questions is resumed by the next tick.
+	 *
+	 * @return bool
+	 */
+	public function awaiting_answer(): bool {
+		return self::PAUSED === $this->status && array() !== $this->questions;
+	}
+
+	/**
 	 * Whether the job may be queued again: failed, and its work files were
 	 * not reclaimed yet.
 	 *
@@ -44,7 +55,7 @@ final class Job {
 	const TRANSITIONS = array(
 		self::QUEUED    => array( self::RUNNING, self::FAILED, self::CANCELLED ),
 		self::RUNNING   => array( self::COMPLETED, self::FAILED, self::PAUSED, self::CANCELLED ),
-		self::PAUSED    => array( self::RUNNING, self::CANCELLED ),
+		self::PAUSED    => array( self::RUNNING, self::FAILED, self::CANCELLED ), // failed: given up unanswered, or bound to a replaced storage directory.
 		self::FAILED    => array( self::QUEUED ),
 		self::COMPLETED => array(),
 		self::CANCELLED => array(),
@@ -91,6 +102,23 @@ final class Job {
 	 * @var array<string, mixed>
 	 */
 	public $cursor = array();
+
+	/**
+	 * Settings the job was created with (contents, exclusions, policy) plus
+	 * the answers given while it was paused: identifiers, flags and rules
+	 * only, never credentials or row values.
+	 *
+	 * @var array<string, mixed>
+	 */
+	public $options = array();
+
+	/**
+	 * Questions a step asked; non-empty only while the job is paused for an
+	 * answer (see awaiting_answer()).
+	 *
+	 * @var array<int, array<string, mixed>>
+	 */
+	public $questions = array();
 
 	/**
 	 * Percentage 0-100.

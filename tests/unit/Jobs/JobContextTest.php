@@ -85,6 +85,14 @@ final class JobContextTest extends TestCase {
 		$this->assertSame( array( 0 => 'a' ), JobContext::strip_reserved( array( 0 => 'a' ) ), 'integer keys are kept' );
 	}
 
+	public function test_options_come_from_the_job(): void {
+		$ctx = $this->context();
+		$this->assertSame( array(), $ctx->options() );
+		$ctx->job()->options = array( 'policy' => array( 'unreadable' => 'continue' ), 'answers' => array( 'oversize' => 'fail' ) );
+		$this->assertSame( 'continue', $ctx->options()['policy']['unreadable'] );
+		$this->assertSame( 'fail', $ctx->options()['answers']['oversize'] );
+	}
+
 	public function test_checkpoint_rhythm_is_two_seconds_or_sixteen_megabytes(): void {
 		$ctx = $this->context( array(), 60, 32 * 1048576, -1, static function (): void {} );
 		$this->assertFalse( $ctx->should_checkpoint( 0 ) );

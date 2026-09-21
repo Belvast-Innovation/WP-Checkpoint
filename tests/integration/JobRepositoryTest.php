@@ -798,10 +798,28 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		Options::set( Schema::OPTION, array( 'version' => 1, 'min_compatible' => 1 ) );
 		$result = Schema::ensure();
 		$this->assertSame( 'migrated', $result['action'] );
-		$this->assertSame( 2, $result['version'] );
+		$this->assertSame( Schema::CURRENT, $result['version'], 'every later migration runs too' );
 		$this->assertSame( 1, $result['min_compatible'], 'older code ignores the column' );
 		$this->assertContains( 'work_expired_at', $wpdb->get_col( "SHOW COLUMNS FROM {$table}" ) );
 		$job = $this->repo->create( 'export' );
 		$this->assertSame( 0, $this->repo->find( $job->id )->work_expired_at );
+	}
+
+	public function test_schema_version_three_adds_the_options_and_questions_columns_to_a_version_two_table(): void {
+		global $wpdb;
+		$table = Schema::jobs_table();
+		$wpdb->query( "ALTER TABLE {$table} DROP COLUMN options_json, DROP COLUMN questions_json" );
+		Options::set( Schema::OPTION, array( 'version' => 2, 'min_compatible' => 1 ) );
+		$result = Schema::ensure();
+		$this->assertSame( 'migrated', $result['action'] );
+		$this->assertSame( 3, $result['version'] );
+		$this->assertSame( 1, $result['min_compatible'], 'older code ignores both columns' );
+		$columns = $wpdb->get_col( "SHOW COLUMNS FROM {$table}" );
+		$this->assertContains( 'options_json', $columns );
+		$this->assertContains( 'questions_json', $columns );
+		$job = $this->repo->create( 'export', 0, array(), array( 'contents' => array( 'files' => array( 'uploads' ) ) ) );
+		$this->assertSame( array( 'contents' => array( 'files' => array( 'uploads' ) ) ), $this->repo->find( $job->id )->options );
+		$this->assertSame( array(), $this->repo->find( $job->id )->questions );
+		$this->assertFalse( $this->repo->find( $job->id )->awaiting_answer() );
 	}
 }
