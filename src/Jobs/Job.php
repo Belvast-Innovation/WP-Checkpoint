@@ -208,14 +208,28 @@ final class Job {
 	public $started_at = 0;
 
 	/**
-	 * Unix timestamp of the last write.
+	 * Unix timestamp of the last write to the row, whatever wrote it:
+	 * every save, transition, heartbeat, refused tick (record_blocked())
+	 * and answer. Read by the retention rule for unanswered jobs
+	 * (JobRepository::reap(): a paused job waiting for an answer is given
+	 * up WORK_RETENTION_SECONDS after this), which is why a refused tick
+	 * of such a job must not write it (gate() checks awaiting_answer()
+	 * first) and nothing else touches a waiting job's row. Not a progress
+	 * clock: see progress_at.
 	 *
 	 * @var int
 	 */
 	public $updated_at = 0;
 
 	/**
-	 * Unix timestamp of the last cursor or progress change.
+	 * Unix timestamp of the last real progress: a cursor that moved, a step
+	 * that finished (save_progress() with advanced = true), or a person's
+	 * answer (JobRepository::answer(): the decision is progress, a job
+	 * resumed days later starts with a fresh clock). Not moved by wait,
+	 * retries, zero-progress units, identical checkpoints, refused ticks
+	 * or asking a question. Read by the stall rule (JobRepository::reap():
+	 * an unlocked queued or running job is given up STALL_SECONDS after
+	 * this; paused jobs are not subject to it).
 	 *
 	 * @var int
 	 */

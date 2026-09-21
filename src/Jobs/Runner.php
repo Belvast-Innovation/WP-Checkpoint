@@ -189,6 +189,11 @@ final class Runner {
 		$token  = $held['token'];
 		$start  = is_numeric( $started_at ) ? (float) $started_at : $this->now();
 		$logger = $this->logger_for( $job );
+		if ( ! empty( $held['healed'] ) ) {
+			// Recorded, not hidden: the questions of a pause that never completed (or of a job failed while
+			// waiting and retried) were cleared; the step asks again if it still needs to.
+			$logger->warning( 'Stale questions cleared: the job was not paused when it carried them' );
+		}
 		try {
 			$budget = $this->budget_for( (int) call_user_func( $this->memory ) );
 		} catch ( BudgetExhausted $e ) {
@@ -361,6 +366,7 @@ final class Runner {
 				} catch ( StaleJob $e ) {
 					throw new LockLost( $e->getMessage(), 0, $e ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
 				} catch ( \InvalidArgumentException $e ) {
+					// Malformed questions: nothing was written (validation runs before the statement).
 					return $this->fail( $job, $token, $logger, sprintf( 'Step "%s": %s', $step_id, $this->describe( $e ) ) );
 				}
 				return new TickResult( TickResult::PAUSED, -1, $job, $result->message );

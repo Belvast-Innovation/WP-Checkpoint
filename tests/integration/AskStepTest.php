@@ -119,9 +119,11 @@ final class AskStepTest extends WP_UnitTestCase {
 					array( 'listed' => 3 ),
 					array(
 						array(
-							'id'    => 'unreadable',
-							'count' => 3,
-							'paths' => array( 'wp-content/uploads/a.jpg', 'wp-content/uploads/b.jpg', 'wp-content/uploads/c.jpg' ),
+							'id'      => 'unreadable',
+							'kind'    => 'unreadable',
+							'count'   => 3,
+							'file'    => 'review.json',
+							'choices' => array( 'continue', 'fail' ),
 						),
 					),
 					'3 files cannot be read; continue without them?'
@@ -142,7 +144,7 @@ final class AskStepTest extends WP_UnitTestCase {
 		$this->assertSame( array( 'contents' => array( 'database' => true ) ), $this->repo->find( $job->id )->options );
 
 		$result = $this->runner()->tick( $job->id, $this->now );
-		$this->assertSame( TickResult::PAUSED, $result->status );
+		$this->assertSame( TickResult::PAUSED, $result->status, (string) $this->repo->find( $job->id )->last_error );
 		$this->assertSame( -1, $result->retry_after, 'nothing to wait out' );
 		$stored = $this->repo->find( $job->id );
 		$this->assertSame( Job::PAUSED, $stored->status );
@@ -172,7 +174,7 @@ final class AskStepTest extends WP_UnitTestCase {
 		// Presented: the questions are there, options never are.
 		$data = $this->presenter()->present( $stored );
 		$this->assertSame( 'unreadable', $data['questions'][0]['id'] );
-		$this->assertSame( 'wp-content/uploads/b.jpg', $data['questions'][0]['paths'][1] );
+		$this->assertSame( 'review.json', $data['questions'][0]['file'], 'the details stay in the work directory; the question points at them' );
 		$this->assertArrayNotHasKey( 'options', $data );
 		$this->assertArrayNotHasKey( 'cursor', $data );
 
@@ -222,7 +224,21 @@ final class AskStepTest extends WP_UnitTestCase {
 		}
 		$this->runner()->tick( $job->id, $this->now );
 		$paused = $this->repo->find( $job->id );
-		$this->repo->answer( $paused, array( 'large_dirs' => 'include' ) );
+		foreach ( array(
+			'a question that was not asked' => array( 'large_dirs' => 'include' ),
+			'a choice that is not offered'  => array( 'unreadable' => 'maybe' ),
+			'a nested value'                => array( 'unreadable' => array( 'continue' ) ),
+			'an integer key'                => array( 0 => 'continue' ),
+			'nothing'                       => array(),
+		) as $case => $answers ) {
+			try {
+				$this->repo->answer( $paused, $answers );
+				$this->fail( $case );
+			} catch ( \InvalidArgumentException $e ) {
+				$this->assertTrue( $this->repo->find( $job->id )->awaiting_answer(), $case . ': the job still waits' );
+			}
+		}
+		$this->repo->answer( $paused, array( 'unreadable' => 'fail' ) );
 		// A second answer to the same pause: the job no longer waits.
 		try {
 			$this->repo->answer( $this->repo->find( $job->id ), array( 'unreadable' => 'continue' ) );
@@ -230,12 +246,148 @@ final class AskStepTest extends WP_UnitTestCase {
 		} catch ( InvalidTransition $e ) {
 			$this->assertTrue( true );
 		}
-		// The step asks again (its question is still open) and the new answer merges with the old one.
-		$this->assertSame( TickResult::PAUSED, $this->runner()->tick( $job->id, $this->now )->status );
-		$this->repo->answer( $this->repo->find( $job->id ), array( 'unreadable' => 'continue' ) );
-		$stored = $this->repo->find( $job->id );
-		$this->assertSame( array( 'large_dirs' => 'include', 'unreadable' => 'continue' ), $stored->options['answers'] );
 		$this->assertSame( TickResult::COMPLETED, $this->runner()->tick( $job->id, $this->now )->status );
+		$this->assertSame( array( 'fail' ), $seen );
+
+		// An answer given at creation (an earlier decision) counts as given.
+		$again = $this->repo->create( 'ask', 0, array(), array( 'answers' => array( 'unreadable' => 'continue', 'other' => 1 ) ) );
+		$this->assertSame( TickResult::COMPLETED, $this->runner()->tick( $again->id, $this->now )->status );
+	}
+
+	public function test_questions_must_be_pointers_with_ids_and_the_caps_are_reachable(): void {
+		$this->types->add( new FixtureJobType( 'leaky-shape', array( new ClosureStep( 'q', static function (): StepResult {
+			return StepResult::ask( array(), array( array( 'id' => 'unreadable', 'paths' => array( 'wp-content/uploads/a.jpg' ) ) ), 'no' );
+		} ) ) ) );
+		$job    = $this->repo->create( 'leaky-shape' );
+		$result = $this->runner()->tick( $job->id, $this->now );
+		$this->assertSame( TickResult::FAILED, $result->status, 'a question carrying details instead of pointing at a file is refused' );
+		$this->assertStringContainsString( 'details belong in a file', $this->repo->find( $job->id )->last_error );
+		$this->assertSame( array(), $this->repo->find( $job->id )->questions, 'nothing was written' );
+
+		foreach ( array(
+			'no id'          => array( array( 'kind' => 'x' ) ),
+			'bad id'         => array( array( 'id' => 'Has Spaces' ) ),
+			'duplicate id'   => array( array( 'id' => 'a' ), array( 'id' => 'a' ) ),
+			'negative count' => array( array( 'id' => 'a', 'count' => -1 ) ),
+			'file with path' => array( array( 'id' => 'a', 'file' => '../review.json' ) ),
+			'too many'       => array_fill( 0, JobRepository::MAX_QUESTIONS + 1, array( 'id' => 'a' ) ),
+			'empty choices'  => array( array( 'id' => 'a', 'choices' => array() ) ),
+			'not an array'   => array( 'a' ),
+		) as $case => $questions ) {
+			try {
+				JobRepository::validate_questions( $questions );
+				$this->fail( $case );
+			} catch ( \InvalidArgumentException $e ) {
+				$this->assertTrue( true );
+			}
+		}
+
+		// The largest legal payload: MAX_QUESTIONS questions with every field at its maximum fits the byte cap
+		// with room, so the cap is a backstop that the shape rules keep from being reached by accident.
+		$largest = array();
+		for ( $i = 0; $i < JobRepository::MAX_QUESTIONS; $i++ ) {
+			$largest[] = array(
+				'id'      => str_pad( (string) $i, 64, 'x', STR_PAD_LEFT ),
+				'kind'    => str_repeat( 'k', 64 ),
+				'count'   => PHP_INT_MAX,
+				'bytes'   => PHP_INT_MAX,
+				'file'    => str_repeat( 'f', 128 ),
+				'choices' => array_map( static function ( int $n ): string {
+					return str_pad( (string) $n, 32, 'c', STR_PAD_LEFT );
+				}, range( 1, JobRepository::MAX_CHOICES ) ),
+			);
+		}
+		$validated = JobRepository::validate_questions( $largest );
+		$size      = strlen( (string) wp_json_encode( $validated ) );
+		$this->assertGreaterThan( JobRepository::MAX_QUESTIONS_BYTES / 2, $size, 'the cap is within reach of the largest legal payload' );
+		$this->assertLessThanOrEqual( JobRepository::MAX_QUESTIONS_BYTES, $size );
+		$this->types->add( new FixtureJobType( 'largest', array( new ClosureStep( 'q', static function ( JobContext $ctx ) use ( $largest ): StepResult {
+			return empty( $ctx->options()['answers'] ) ? StepResult::ask( array(), $largest, 'big' ) : StepResult::done();
+		} ) ) ) );
+		$job = $this->repo->create( 'largest' );
+		$this->assertSame( TickResult::PAUSED, $this->runner()->tick( $job->id, $this->now )->status );
+		$this->assertCount( JobRepository::MAX_QUESTIONS, $this->repo->find( $job->id )->questions );
+		$this->assertCount( JobRepository::MAX_QUESTIONS, $this->presenter()->present( $this->repo->find( $job->id ) )['questions'] );
+		// And the answers cap: one answer to every question at the maximum length.
+		$answers = array();
+		foreach ( $largest as $question ) {
+			$answers[ $question['id'] ] = $question['choices'][0];
+		}
+		$this->assertLessThanOrEqual( JobRepository::MAX_ANSWERS_BYTES, strlen( (string) wp_json_encode( $answers ) ) );
+		$this->repo->answer( $this->repo->find( $job->id ), $answers );
+		$this->assertSame( TickResult::COMPLETED, $this->runner()->tick( $job->id, $this->now )->status );
+	}
+
+	public function test_a_running_row_left_with_questions_is_healed_on_acquire_and_the_healing_is_logged(): void {
+		global $wpdb;
+		$seen = array();
+		$runs = 0;
+		$this->types->add( new FixtureJobType( 'ask', array( $this->asking_step( $seen, $runs ) ) ) );
+		$job = $this->repo->create( 'ask' );
+		$this->assertSame( TickResult::PAUSED, $this->runner()->tick( $job->id, $this->now )->status );
+		// The 7-day rule fails the waiting job with its questions in place; a retry queues it again.
+		$this->now += JobRepository::WORK_RETENTION_SECONDS + 1;
+		$this->repo->reap();
+		$failed = $this->repo->find( $job->id );
+		$this->assertSame( Job::FAILED, $failed->status );
+		$this->assertNotSame( array(), $failed->questions, 'the failed row still carries the questions' );
+		$wpdb->update( Schema::jobs_table(), array( 'work_expired_at' => 0 ), array( 'id' => $job->id ) ); // As if the retry had won the window.
+		$this->repo->transition( $this->repo->find( $job->id ), Job::QUEUED );
+		$result = $this->runner()->tick( $job->id, $this->now );
+		$this->assertSame( TickResult::PAUSED, $result->status, 'the step ran again and asked again' );
+		$this->assertSame( 2, $runs );
+		$log = (string) file_get_contents( $this->base . '/' . $this->repo->find( $job->id )->log_path );
+		$this->assertStringContainsString( 'Stale questions cleared', $log );
+		$this->assertStringContainsString( 'stale questions cleared on acquire', (string) file_get_contents( $this->base . '/logs/storage.log' ) );
+
+		// A running row with questions and an expired lease (the shape a crash between two writes would leave).
+		$this->repo->answer( $this->repo->find( $job->id ), array( 'unreadable' => 'continue' ) );
+		$wpdb->update( Schema::jobs_table(), array( 'status' => Job::RUNNING, 'questions_json' => '[{"id":"unreadable"}]', 'lock_token' => 'dead', 'locked_until' => (int) $this->now - 10 ), array( 'id' => $job->id ) );
+		$this->assertSame( TickResult::COMPLETED, $this->runner()->tick( $job->id, $this->now )->status, 'acquired, healed, run to the end with the stored answer' );
+	}
+
+	public function test_a_late_answer_starts_a_fresh_stall_clock(): void {
+		$calls = 0;
+		$this->types->add( new FixtureJobType( 'late', array( new ClosureStep( 'q', static function ( JobContext $ctx ) use ( &$calls ): StepResult {
+			++$calls;
+			if ( empty( $ctx->options()['answers']['go'] ) ) {
+				return StepResult::ask( array(), array( array( 'id' => 'go', 'choices' => array( 'yes' ) ) ), 'go?' );
+			}
+			return $calls < 4 ? StepResult::wait( 30, array(), 'remote busy' ) : StepResult::done();
+		} ) ) ) );
+		$job = $this->repo->create( 'late' );
+		$this->assertSame( TickResult::PAUSED, $this->runner()->tick( $job->id, $this->now )->status );
+		$this->now += 2 * 86400;
+		$this->repo->answer( $this->repo->find( $job->id ), array( 'go' => 'yes' ) );
+		$this->assertSame( (int) $this->now, $this->repo->find( $job->id )->progress_at, 'the decision is progress' );
+		$this->assertSame( TickResult::WAITING, $this->runner()->tick( $job->id, $this->now )->status );
+		$this->repo->reap();
+		$this->assertSame( Job::RUNNING, $this->repo->find( $job->id )->status, 'a wait right after a late answer is not a stall' );
+	}
+
+	public function test_storage_refusals_do_not_refresh_the_clock_of_a_waiting_job(): void {
+		$seen = array();
+		$runs = 0;
+		$this->types->add( new FixtureJobType( 'ask', array( $this->asking_step( $seen, $runs ) ) ) );
+		$job = $this->repo->create( 'ask' );
+		$this->assertSame( TickResult::PAUSED, $this->runner()->tick( $job->id, $this->now )->status );
+		$updated = $this->repo->find( $job->id )->updated_at;
+		// Another storage directory: the gate would refuse for storage, but the answer check comes first.
+		mkdir( $this->root . '/elsewhere', 0755, true );
+		$other = new JobRepository( new Directories( array( 'is_web_request' => false, 'document_root' => '', 'custom_dir' => $this->root . '/elsewhere' ) ), null, function (): int {
+			return (int) floor( $this->now );
+		} );
+		$this->now += 3600;
+		$gate = $other->gate( $this->repo->find( $job->id ) );
+		$this->assertSame( 'awaiting_answer', $gate['reason'] );
+		$result = ( new Runner( $other, $this->types, new Redactor(), array( 'clock' => function (): float {
+			return $this->now;
+		}, 'memory' => static function (): int {
+			return 10 * 1048576;
+		}, 'budget' => new Budget( 20, 32 * 1048576, false ), 'memory_limit' => -1 ) ) )->tick( $job->id, $this->now );
+		$this->assertSame( TickResult::PAUSED, $result->status );
+		$this->assertSame( $updated, $this->repo->find( $job->id )->updated_at, 'the retention clock did not move' );
+		$this->assertSame( 0, $this->repo->find( $job->id )->blocked_count );
 	}
 
 	public function test_options_questions_and_answers_must_not_carry_a_secret(): void {
@@ -247,7 +399,7 @@ final class AskStepTest extends WP_UnitTestCase {
 		$seen = array();
 		$this->types->add( new FixtureJobType( 'ask', array( $this->asking_step( $seen, $runs ) ) ) );
 		$this->types->add( new FixtureJobType( 'leaky', array( new ClosureStep( 'leak', static function () use ( $secret ): StepResult {
-			return StepResult::ask( array(), array( array( 'id' => 'x', 'value' => $secret ) ), 'leak' );
+			return StepResult::ask( array(), array( array( 'id' => 'x', 'file' => $secret . '.json' ) ), 'leak' );
 		} ) ) ) );
 		try {
 			$this->repo->create( 'ask', 0, array(), array( 'exclude' => 'prefix-' . $secret ) );
@@ -258,8 +410,9 @@ final class AskStepTest extends WP_UnitTestCase {
 		$job    = $this->repo->create( 'leaky' );
 		$result = $this->runner()->tick( $job->id, $this->now );
 		$this->assertSame( TickResult::FAILED, $result->status, 'a question carrying a secret fails the job instead of being shown' );
-		$this->assertStringContainsString( 'credentials', $this->repo->find( $job->id )->last_error );
+		$this->assertMatchesRegularExpression( '/credentials|plain file name/', $this->repo->find( $job->id )->last_error, 'refused by the secret check, or earlier by the shape check when the password has characters a file name cannot' );
 		$this->assertStringNotContainsString( $secret, $this->repo->find( $job->id )->last_error );
+		$this->assertSame( array(), $this->repo->find( $job->id )->questions );
 
 		$job = $this->repo->create( 'ask' );
 		$this->runner()->tick( $job->id, $this->now );
