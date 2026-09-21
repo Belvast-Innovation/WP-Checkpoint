@@ -11,6 +11,7 @@ use WPCheckpoint\Archive\Manifest;
 use WPCheckpoint\Files\Exclusions;
 use WPCheckpoint\Files\FileScanner;
 use WPCheckpoint\Files\PathKey;
+use WPCheckpoint\Files\ScanRoots;
 
 /**
  * Drives FileScanner one unit at a time and appends the lines to
@@ -51,6 +52,14 @@ final class FileScanStep implements Step {
 	private $root_warnings;
 
 	/**
+	 * Whether roots and exclusions come from plan.json in the work
+	 * directory (the export job) instead of the constructor (tests).
+	 *
+	 * @var bool
+	 */
+	private $from_plan = false;
+
+	/**
 	 * Constructor. The job type resolves the roots (ScanRoots) and the
 	 * exclusions from the job's options.
 	 *
@@ -62,6 +71,19 @@ final class FileScanStep implements Step {
 		$this->roots         = $roots;
 		$this->exclusions    = $exclusions;
 		$this->root_warnings = $root_warnings;
+	}
+
+	/**
+	 * A step that takes its content groups and exclusion patterns from
+	 * plan.json (written by PreflightStep) on every tick, resolving the
+	 * roots against the job's storage directory.
+	 *
+	 * @return FileScanStep
+	 */
+	public static function from_plan(): FileScanStep {
+		$step            = new self( array(), new Exclusions( array(), array() ) );
+		$step->from_plan = true;
+		return $step;
 	}
 
 	/**
@@ -81,6 +103,14 @@ final class FileScanStep implements Step {
 	 * @throws TransientFailure When the index cannot be written (disk full, directory gone).
 	 */
 	public function run( JobContext $context ): StepResult {
+		if ( $this->from_plan ) {
+			$plan                = ExportPlan::read( $context->work_path(), ExportPlan::PLAN );
+			$groups              = isset( $plan['groups'] ) && is_array( $plan['groups'] ) ? array_map( 'strval', $plan['groups'] ) : array();
+			$resolved            = ScanRoots::resolve( $groups, $context->storage_path() );
+			$this->roots         = $resolved['roots'];
+			$this->root_warnings = $resolved['warnings'];
+			$this->exclusions    = new Exclusions( isset( $plan['exclusions'] ) && is_array( $plan['exclusions'] ) ? array_map( 'strval', $plan['exclusions'] ) : array() );
+		}
 		$cursor  = $context->cursor();
 		$state   = isset( $cursor['scan'] ) && is_array( $cursor['scan'] ) ? $cursor['scan'] : FileScanner::initial_state();
 		$length  = isset( $cursor['bytes'] ) ? (int) $cursor['bytes'] : 0;

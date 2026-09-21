@@ -83,6 +83,27 @@ final class FileScannerTest extends TestCase {
 		}
 	}
 
+	public function test_heavy_directories_are_summed_up_by_their_outermost_occurrence(): void {
+		$this->put( 'content/plugins/a/node_modules/x/big.js', str_repeat( 'x', 3000 ) );
+		$this->put( 'content/plugins/a/node_modules/x/node_modules/y/nested.js', str_repeat( 'y', 500 ) );
+		$this->put( 'content/plugins/a/index.php', 'x' );
+		$this->put( 'content/plugins/b/.git/objects/ab', str_repeat( 'g', 200 ) );
+		$this->put( 'content/plugins/b/vendor/lib.php', str_repeat( 'v', 700 ) );
+		$roots = array( array( 'group' => 'plugins', 'path' => $this->root . '/content/plugins', 'prefix' => 'wp-content/plugins' ) );
+		list( $lines, $state ) = $this->run_all( new FileScanner( $roots, new Exclusions( array(), array() ) ), true );
+		$this->assertSame(
+			array(
+				'wp-content/plugins/a/node_modules' => 3500,
+				'wp-content/plugins/b/.git'         => 200,
+			),
+			$state['lists']['heavy'],
+			'nested node_modules count towards the outer one; vendor is not a heavy directory'
+		);
+		$this->assertSame( 2, $state['counts']['heavy'] );
+		$this->assertCount( 5, $lines, 'nothing is excluded by the summing up' );
+		$this->assertContains( 'wp-content/plugins/a/node_modules/x/node_modules/y/nested.js', $this->paths( $lines ) );
+	}
+
 	public function test_a_resumed_scan_produces_exactly_the_same_lines_as_an_uninterrupted_one(): void {
 		for ( $i = 0; $i < 2500; $i++ ) {
 			$this->put( sprintf( 'u/%02d/f%04d.txt', $i % 7, $i ), (string) $i );
