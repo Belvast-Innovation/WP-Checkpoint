@@ -122,10 +122,13 @@ final class StepResult {
 	 * needs in one go, and must not ask when the options already carry a
 	 * policy or answers for it: an unattended driver never answers.
 	 *
-	 * Questions are shown to the user, so they hold what the user needs to
-	 * decide (kinds, counts, names) and nothing else: no credentials (the
-	 * secret check runs on them) and no row values; details belong in a
-	 * file under the work directory.
+	 * A question is a pointer, not the details: an array with "id" (the
+	 * answer is keyed by it) and optionally "kind", "count", "bytes",
+	 * "file" (a file under the work directory holding the details: paths,
+	 * table and column names) and "choices" (the answers allowed); any
+	 * other field is refused (JobRepository::validate_questions()), so no
+	 * user data or row value ever lands in the job row or the client
+	 * payload, and the secret check runs on what is left.
 	 *
 	 * @param array<string, mixed>             $cursor    Cursor to keep.
 	 * @param array<int, array<string, mixed>> $questions Questions, each with at least an "id".

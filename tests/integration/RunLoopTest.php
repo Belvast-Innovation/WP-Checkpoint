@@ -99,7 +99,7 @@ final class RunLoopTest extends JobTestCase {
 		$this->register( 'asks', array( new ClosureStep( 'q', static function ( JobContext $ctx ): StepResult {
 			$answers = $ctx->options()['answers'] ?? array();
 			if ( empty( $answers['unreadable'] ) ) {
-				return StepResult::ask( array(), array( array( 'id' => 'unreadable', 'count' => 2 ) ), 'two files cannot be read' );
+				return StepResult::ask( array(), array( array( 'id' => 'unreadable', 'count' => 2, 'choices' => array( 'continue', 'fail' ) ) ), 'two files cannot be read' );
 			}
 			return StepResult::done( 'went on with ' . $answers['unreadable'] );
 		} ) ) );
@@ -107,7 +107,7 @@ final class RunLoopTest extends JobTestCase {
 		$this->assertSame( RunLoop::EXIT_PAUSED, $this->loop()->run( $job->id, true ), 'even with --wait: nobody else will answer' );
 		$this->assertSame( array(), $this->slept );
 		$this->assertSame( 0, $this->hops );
-		$this->assertContains( 'question: {"id":"unreadable","count":2}', $this->lines );
+		$this->assertContains( 'question: {"id":"unreadable","count":2,"choices":["continue","fail"]}', $this->lines );
 		$this->assertStringContainsString( 'wp wpcheckpoint job answer ' . $job->id, $this->lines[ count( $this->lines ) - 1 ] );
 		$this->assertSame( RunLoop::EXIT_PAUSED, $this->loop()->run( $job->id, false ), 'still waiting on the next run' );
 

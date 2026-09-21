@@ -283,7 +283,7 @@ final class JobsControllerTest extends JobTestCase {
 		$this->register( 'asks', array( new ClosureStep( 'q', static function ( JobContext $ctx ): StepResult {
 			$answers = $ctx->options()['answers'] ?? array();
 			return empty( $answers['oversize'] )
-				? StepResult::ask( array(), array( array( 'id' => 'oversize', 'tables' => array( 'wp_options' ) ) ), 'a row is too large' )
+				? StepResult::ask( array(), array( array( 'id' => 'oversize', 'kind' => 'oversize', 'count' => 1, 'file' => 'review.json' ) ), 'a row is too large' )
 				: StepResult::done();
 		} ) ) );
 		$job  = Plugin::instance()->jobs()->create( 'asks' );
@@ -291,7 +291,7 @@ final class JobsControllerTest extends JobTestCase {
 		$this->assertSame( 'paused', $data['result'] );
 		$this->assertSame( -1, $data['retry_after'] );
 		$this->assertSame( Job::PAUSED, $data['job']['status'] );
-		$this->assertSame( array( array( 'id' => 'oversize', 'tables' => array( 'wp_options' ) ) ), $data['job']['questions'] );
+		$this->assertSame( array( array( 'id' => 'oversize', 'kind' => 'oversize', 'count' => 1, 'file' => 'review.json' ) ), $data['job']['questions'] );
 		$this->assertArrayNotHasKey( 'options', $data['job'] );
 		$data = $this->rest( 'GET', 'jobs/' . $job->id )->get_data()['job'];
 		$this->assertSame( 'oversize', $data['questions'][0]['id'] );
