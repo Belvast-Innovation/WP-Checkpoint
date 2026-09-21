@@ -142,7 +142,9 @@ final class JobPresenter {
 	}
 
 	/**
-	 * A job as an array safe to send to the client. No storage_path, no cursor.
+	 * A job as an array safe to send to the client. No storage_path, no
+	 * cursor, no options; the questions of a job that waits for an answer
+	 * are included (cleaned) so the client can ask them.
 	 *
 	 * @param Job  $job      Job.
 	 * @param bool $with_log Include the log tail.
@@ -168,11 +170,31 @@ final class JobPresenter {
 			'last_error'  => $this->clean( $job->last_error, $extra ),
 			'retryable'   => $job->can_retry(),
 			'retry_note'  => Job::FAILED === $job->status && ! $job->can_retry() ? self::retry_note() : '',
+			'questions'   => $job->awaiting_answer() ? $this->clean_deep( $job->questions, $extra ) : null,
 		);
 		if ( $with_log ) {
 			$data['log_tail'] = $this->log_tail( $job );
 		}
 		return $data;
+	}
+
+	/**
+	 * Apply clean() to every string in a structure (the questions a step
+	 * asked); keys are kept, other scalars pass through.
+	 *
+	 * @param mixed                 $value Structure.
+	 * @param array<string, string> $extra Extra path placeholders.
+	 * @return mixed
+	 */
+	private function clean_deep( $value, array $extra ) {
+		if ( is_array( $value ) ) {
+			$out = array();
+			foreach ( $value as $key => $item ) {
+				$out[ is_string( $key ) ? $this->clean( $key, $extra ) : $key ] = $this->clean_deep( $item, $extra );
+			}
+			return $out;
+		}
+		return is_string( $value ) ? $this->clean( $value, $extra ) : $value;
 	}
 
 	/**

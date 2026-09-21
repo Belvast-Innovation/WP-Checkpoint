@@ -125,10 +125,11 @@ final class JobRepository {
 	 * @param string               $type       Job type id.
 	 * @param int                  $owner_user Creating user.
 	 * @param array<string, mixed> $cursor     Initial cursor (identifiers only).
+	 * @param array<string, mixed> $options    Settings for the job type (identifiers, flags and rules; never credentials).
 	 * @return Job
 	 * @throws JobsUnavailable When jobs cannot be created right now.
 	 */
-	public function create( string $type, int $owner_user = 0, array $cursor = array() ): Job {
+	public function create( string $type, int $owner_user = 0, array $cursor = array(), array $options = array() ): Job {
 		global $wpdb;
 
 		if ( ! Schema::is_compatible() ) {
@@ -142,6 +143,7 @@ final class JobRepository {
 			throw new JobsUnavailable( esc_html__( 'Unknown job type.', 'wp-checkpoint' ) );
 		}
 		self::assert_cursor_has_no_secrets( $cursor );
+		self::assert_cursor_has_no_secrets( $options );
 
 		$state = $this->directories->state();
 		$now   = $this->now();
@@ -150,6 +152,7 @@ final class JobRepository {
 			'type'          => $type,
 			'status'        => Job::QUEUED,
 			'cursor_json'   => wp_json_encode( $cursor ),
+			'options_json'  => wp_json_encode( $options ),
 			'storage_token' => (string) $state['token'],
 			'storage_path'  => $base,
 			'owner_user'    => $owner_user,
@@ -158,7 +161,7 @@ final class JobRepository {
 			'progress_at'   => $now,
 		);
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin table.
-		$wpdb->insert( self::table(), $row, array( '%d', '%s', '%s', '%s', '%s', '%s', '%d', '%d', '%d', '%d' ) );
+		$wpdb->insert( self::table(), $row, array( '%d', '%s', '%s', '%s', '%s', '%s', '%s', '%d', '%d', '%d', '%d' ) );
 		$id = (int) $wpdb->insert_id;
 		if ( $id <= 0 ) {
 			throw new JobsUnavailable( esc_html__( 'The job could not be stored.', 'wp-checkpoint' ) );
@@ -262,6 +265,10 @@ final class JobRepository {
 				: __( 'The storage directory changed; this job cannot continue.', 'wp-checkpoint' );
 			return self::verdict( false, 'storage_changed', $message, $retry );
 		}
+		if ( $job->awaiting_answer() ) {
+			// Not a back-off: nothing will change until a person answers, and the runner does not count it as blocked.
+			return self::verdict( false, 'awaiting_answer', __( 'The job is waiting for your decision.', 'wp-checkpoint' ), -1 );
+		}
 		return self::verdict( true, '', '', 0 );
 	}
 
@@ -290,8 +297,11 @@ final class JobRepository {
 	}
 
 	/**
-	 * Try to take the lock. Only queued and running jobs bound to the current
-	 * storage directory can be acquired; a queued job becomes running.
+	 * Try to take the lock. Only queued, running and paused jobs bound to
+	 * the current storage directory can be acquired; a queued or paused job
+	 * becomes running. A paused job that still waits for an answer is
+	 * refused here as well as by gate(): the compare-and-set requires an
+	 * empty questions column.
 	 *
 	 * The storage token is part of the compare-and-set, so a caller that
 	 * skipped gate() still cannot run a job bound to another directory.
@@ -303,7 +313,7 @@ final class JobRepository {
 	public function acquire( int $id, int $lease = self::LOCK_SECONDS ) {
 		global $wpdb;
 		$job = $this->find( $id );
-		if ( null === $job || ! in_array( $job->status, array( Job::QUEUED, Job::RUNNING ), true ) ) {
+		if ( null === $job || ! in_array( $job->status, array( Job::QUEUED, Job::RUNNING, Job::PAUSED ), true ) || $job->awaiting_answer() ) {
 			return null;
 		}
 		if ( '' === $this->directories->base() ) {
@@ -316,7 +326,7 @@ final class JobRepository {
 		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix; the WHERE clause is the compare-and-set.
 		$affected = $wpdb->query(
 			$wpdb->prepare(
-				"UPDATE {$table} SET attempts = IF(status = %s, attempts + 1, attempts), started_at = IF(started_at = 0, %d, started_at), status = %s, lock_token = %s, locked_until = %d, updated_at = %d WHERE id = %d AND status IN (%s, %s) AND storage_token = %s AND (lock_token = '' OR locked_until < %d)",
+				"UPDATE {$table} SET attempts = IF(status = %s, attempts + 1, attempts), started_at = IF(started_at = 0, %d, started_at), status = %s, lock_token = %s, locked_until = %d, updated_at = %d WHERE id = %d AND status IN (%s, %s, %s) AND (questions_json IS NULL OR questions_json = '' OR questions_json = '[]') AND storage_token = %s AND (lock_token = '' OR locked_until < %d)",
 				Job::QUEUED,
 				$now,
 				Job::RUNNING,
@@ -326,6 +336,7 @@ final class JobRepository {
 				$id,
 				Job::QUEUED,
 				Job::RUNNING,
+				Job::PAUSED,
 				$storage_token,
 				$now
 			)
@@ -502,6 +513,102 @@ final class JobRepository {
 	}
 
 	/**
+	 * Record a step's questions and pause the job (fenced: the lock holder's
+	 * decision). The cursor was stored by save_progress() just before, with
+	 * advanced = false: asking is not progress, and a paused job is not
+	 * subject to the stall rule anyway (reap() only stalls queued and
+	 * running jobs; a job left unanswered is given up by the retention
+	 * rule instead, see reap()).
+	 *
+	 * @param Job                              $job       Job (updated in place).
+	 * @param string                           $token     Lock token.
+	 * @param array<int, array<string, mixed>> $questions Questions (non-empty).
+	 * @return Job
+	 * @throws \InvalidArgumentException When the questions are empty or carry a secret.
+	 * @throws StaleJob When the lock is no longer held with this token.
+	 */
+	public function pause_for_answer( Job $job, string $token, array $questions ): Job {
+		global $wpdb;
+		$questions = array_values( $questions );
+		if ( array() === $questions ) {
+			throw new \InvalidArgumentException( 'A step that asks must ask at least one question.' );
+		}
+		self::assert_cursor_has_no_secrets( $questions );
+		$json = wp_json_encode( $questions );
+		if ( ! is_string( $json ) ) {
+			throw new \InvalidArgumentException( 'Questions cannot be encoded.' );
+		}
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin table; the WHERE on lock_token is the fence.
+		$affected = $wpdb->update(
+			self::table(),
+			array(
+				'questions_json' => $json,
+				'updated_at'     => $this->now(),
+			),
+			array(
+				'id'         => $job->id,
+				'lock_token' => $token,
+			),
+			array( '%s', '%d' ),
+			array( '%d', '%s' )
+		);
+		if ( 1 !== (int) $affected && ! $this->holds_lock( $job->id, $token ) ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+			throw new StaleJob( sprintf( 'Job %d is no longer locked by this driver.', $job->id ) );
+		}
+		$job->questions = $questions;
+		return $this->transition( $job, Job::PAUSED, '', $token );
+	}
+
+	/**
+	 * Store the answers to a paused job's questions and clear them, so the
+	 * next tick resumes the job. Answers are merged into the options under
+	 * "answers" (later answers to the same key win); like the options they
+	 * hold identifiers, flags and rules, never credentials or row values.
+	 *
+	 * @param Job                  $job     Job (updated in place).
+	 * @param array<string, mixed> $answers Answers keyed by question id.
+	 * @return Job
+	 * @throws InvalidTransition When the job is not waiting for an answer.
+	 * @throws \InvalidArgumentException When an answer carries a secret.
+	 * @throws StaleJob When the job changed meanwhile.
+	 */
+	public function answer( Job $job, array $answers ): Job {
+		global $wpdb;
+		if ( ! $job->awaiting_answer() ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+			throw new InvalidTransition( sprintf( 'Job %d is not waiting for an answer.', $job->id ) );
+		}
+		self::assert_cursor_has_no_secrets( $answers );
+		$options            = $job->options;
+		$previous           = isset( $options['answers'] ) && is_array( $options['answers'] ) ? $options['answers'] : array();
+		$options['answers'] = array_merge( $previous, $answers );
+		$json               = wp_json_encode( $options );
+		if ( ! is_string( $json ) ) {
+			throw new \InvalidArgumentException( 'Answers cannot be encoded.' );
+		}
+		$now = $this->now();
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin table; the WHERE keeps a concurrent cancel or answer from being undone.
+		$affected = $wpdb->query(
+			$wpdb->prepare(
+				'UPDATE ' . self::table() . " SET options_json = %s, questions_json = NULL, updated_at = %d WHERE id = %d AND status = %s AND questions_json IS NOT NULL AND questions_json <> '' AND questions_json <> '[]'", // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- table name from the prefix and a constant.
+				$json,
+				$now,
+				$job->id,
+				Job::PAUSED
+			)
+		);
+		if ( 1 !== (int) $affected ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+			throw new StaleJob( sprintf( 'Job %d changed while it was being answered.', $job->id ) );
+		}
+		$job->options    = $options;
+		$job->questions  = array();
+		$job->updated_at = $now;
+		return $job;
+	}
+
+	/**
 	 * Change the status, guarded by the status the caller saw.
 	 *
 	 * Leaving "running" for completed, failed or paused is the lock holder's
@@ -618,8 +725,49 @@ final class JobRepository {
 			}
 		}
 
+		// A job nobody answered holds its work directory; after the retention period it is given up and
+		// its work reclaimed at once (the same rule as a failed job's files, on the same clock).
+		foreach ( $this->list_jobs( array( Job::PAUSED ), 500 ) as $job ) {
+			if ( ! $job->awaiting_answer() || $job->updated_at + self::WORK_RETENTION_SECONDS > $now ) {
+				continue;
+			}
+			try {
+				$this->force_transition( $job, Job::FAILED, __( 'No answer within 7 days; the job was given up.', 'wp-checkpoint' ) );
+			} catch ( StaleJob $e ) {
+				continue;
+			}
+			$this->expire_now( $job );
+		}
+
 		$this->settle_storage();
 		$this->reap_residue();
+	}
+
+	/**
+	 * Mark a failed job's work as expired and reclaim it now.
+	 *
+	 * @param Job $job Failed job.
+	 * @return void
+	 */
+	private function expire_now( Job $job ): void {
+		global $wpdb;
+		$now = $this->now();
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin table; the WHERE keeps a concurrent retry from being undone.
+		$affected = $wpdb->update(
+			self::table(),
+			array( 'work_expired_at' => $now ),
+			array(
+				'id'              => $job->id,
+				'status'          => Job::FAILED,
+				'work_expired_at' => 0,
+			),
+			array( '%d' ),
+			array( '%d', '%s', '%d' )
+		);
+		if ( 1 === (int) $affected ) {
+			$job->work_expired_at = $now;
+			$this->reclaim_work( $job );
+		}
 	}
 
 	/**
@@ -958,7 +1106,11 @@ final class JobRepository {
 
 	/**
 	 * Refuse cursors that carry credentials: cursors hold identifiers and
-	 * positions only; credentials are read from the encrypted options.
+	 * positions only; credentials are read from the encrypted options. The
+	 * same check guards the job options, the questions and the answers,
+	 * which is why none of them may hold row values (a primary key or an
+	 * option name can contain a piece of a secret; a rule such as a length
+	 * threshold cannot).
 	 *
 	 * Every escaped form of a secret is checked (Redactor::forms()), because
 	 * the cursor is compared in its JSON encoding where slashes, quotes and
@@ -966,8 +1118,8 @@ final class JobRepository {
 	 * credential and is often a plain word that legitimately occurs in a
 	 * cursor (a site or table name); Redactor still masks it in logs.
 	 *
-	 * @param array<string, mixed> $cursor  Cursor.
-	 * @param string[]|null        $secrets Secrets to check (tests); the installation's when null.
+	 * @param array<mixed>  $cursor  Cursor, options, questions or answers.
+	 * @param string[]|null $secrets Secrets to check (tests); the installation's when null.
 	 * @return void
 	 * @throws \InvalidArgumentException When a known secret appears in it.
 	 */
@@ -1193,9 +1345,10 @@ final class JobRepository {
 	private static function hydrate( array $row ): Job {
 		$job = new Job();
 		foreach ( $row as $key => $value ) {
-			if ( 'cursor_json' === $key ) {
-				$decoded     = is_string( $value ) ? json_decode( $value, true ) : null;
-				$job->cursor = is_array( $decoded ) ? $decoded : array();
+			if ( 'cursor_json' === $key || 'options_json' === $key || 'questions_json' === $key ) {
+				$decoded          = is_string( $value ) ? json_decode( $value, true ) : null;
+				$property         = substr( $key, 0, -5 );
+				$job->{$property} = is_array( $decoded ) ? ( 'questions' === $property ? array_values( $decoded ) : $decoded ) : array();
 				continue;
 			}
 			if ( ! property_exists( $job, $key ) ) {

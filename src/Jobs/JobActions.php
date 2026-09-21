@@ -199,6 +199,26 @@ final class JobActions {
 	}
 
 	/**
+	 * Store the answers to a paused job's questions. The job is not ticked
+	 * here: the caller ticks it (or hands it to the other drivers with a
+	 * follow-up of a "more" result) once the answers are in.
+	 *
+	 * @param int                  $id      Job id.
+	 * @param array<string, mixed> $answers Answers keyed by question id.
+	 * @return Job|null Null when the job does not exist.
+	 * @throws InvalidTransition When the job is not waiting for an answer.
+	 * @throws \InvalidArgumentException When an answer carries a secret.
+	 * @throws StaleJob When the job changed meanwhile.
+	 */
+	public function answer( int $id, array $answers ) {
+		$job = $this->repository->find( $id );
+		if ( null === $job ) {
+			return null;
+		}
+		return $this->repository->answer( $job, $answers );
+	}
+
+	/**
 	 * Queue a failed job again; the cursor is kept.
 	 *
 	 * @param int $id Job id.

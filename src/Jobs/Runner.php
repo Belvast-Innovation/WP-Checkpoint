@@ -155,12 +155,16 @@ final class Runner {
 		if ( null === $job ) {
 			return new TickResult( TickResult::MISSING, -1, null );
 		}
-		if ( ! in_array( $job->status, array( Job::QUEUED, Job::RUNNING ), true ) ) {
+		if ( ! in_array( $job->status, array( Job::QUEUED, Job::RUNNING, Job::PAUSED ), true ) ) {
 			return new TickResult( TickResult::FINISHED, -1, $job );
 		}
 
 		$gate = $this->repository->gate( $job );
 		if ( ! $gate['allowed'] ) {
+			if ( 'awaiting_answer' === $gate['reason'] ) {
+				// Nothing to wait out: the job resumes when the answers are stored.
+				return new TickResult( TickResult::PAUSED, -1, $job, $gate['message'] );
+			}
 			// The wait for this refusal comes from the gate (5, 15, 60, 300 s); record_blocked() prepares the next one.
 			$this->repository->record_blocked( $job );
 			return new TickResult( TickResult::BLOCKED, $gate['retry_after'], $job, $gate['message'] );
@@ -172,7 +176,10 @@ final class Runner {
 			if ( null === $job ) {
 				return new TickResult( TickResult::MISSING, -1, null );
 			}
-			if ( ! in_array( $job->status, array( Job::QUEUED, Job::RUNNING ), true ) ) {
+			if ( $job->awaiting_answer() ) {
+				return new TickResult( TickResult::PAUSED, -1, $job, __( 'The job is waiting for your decision.', 'wp-checkpoint' ) );
+			}
+			if ( ! in_array( $job->status, array( Job::QUEUED, Job::RUNNING, Job::PAUSED ), true ) ) {
 				return new TickResult( TickResult::FINISHED, -1, $job );
 			}
 			return new TickResult( TickResult::BUSY, self::BUSY_RETRY_SECONDS, $job, __( 'Another process is working on this job.', 'wp-checkpoint' ) );
@@ -336,6 +343,27 @@ final class Runner {
 				$this->persist( $job, $token, $step_id, $result->cursor, $state, $job->progress, $result->message, false );
 				$this->release( $job, $token );
 				return new TickResult( TickResult::WAITING, $seconds, $job, $result->message );
+			}
+
+			if ( StepResult::ASK === $result->kind ) {
+				// Not progress (the counters and the stall timestamp stay), not a wait: the job pauses until a
+				// person answers, and no driver follows up. The same step runs again after the answer.
+				$logger->info(
+					'Step asks for a decision',
+					array(
+						'step'      => $step_id,
+						'questions' => count( $result->questions ),
+					)
+				);
+				$this->persist( $job, $token, $step_id, $result->cursor, $state, $job->progress, $result->message, false );
+				try {
+					$this->repository->pause_for_answer( $job, $token, $result->questions );
+				} catch ( StaleJob $e ) {
+					throw new LockLost( $e->getMessage(), 0, $e ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+				} catch ( \InvalidArgumentException $e ) {
+					return $this->fail( $job, $token, $logger, sprintf( 'Step "%s": %s', $step_id, $this->describe( $e ) ) );
+				}
+				return new TickResult( TickResult::PAUSED, -1, $job, $result->message );
 			}
 
 			// Progress: compared with the cursor before run(), so checkpoints made during the run count.
