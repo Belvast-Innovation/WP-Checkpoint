@@ -95,6 +95,29 @@ final class RunLoopTest extends JobTestCase {
 		$this->assertSame( Job::RUNNING, Plugin::instance()->jobs()->find( $job->id )->status );
 	}
 
+	public function test_a_question_ends_the_loop_with_its_own_exit_code_and_the_answer_lets_it_finish(): void {
+		$this->register( 'asks', array( new ClosureStep( 'q', static function ( JobContext $ctx ): StepResult {
+			$answers = $ctx->options()['answers'] ?? array();
+			if ( empty( $answers['unreadable'] ) ) {
+				return StepResult::ask( array(), array( array( 'id' => 'unreadable', 'count' => 2 ) ), 'two files cannot be read' );
+			}
+			return StepResult::done( 'went on with ' . $answers['unreadable'] );
+		} ) ) );
+		$job = Plugin::instance()->jobs()->create( 'asks' );
+		$this->assertSame( RunLoop::EXIT_PAUSED, $this->loop()->run( $job->id, true ), 'even with --wait: nobody else will answer' );
+		$this->assertSame( array(), $this->slept );
+		$this->assertSame( 0, $this->hops );
+		$this->assertContains( 'question: {"id":"unreadable","count":2}', $this->lines );
+		$this->assertStringContainsString( 'wp wpcheckpoint job answer ' . $job->id, $this->lines[ count( $this->lines ) - 1 ] );
+		$this->assertSame( RunLoop::EXIT_PAUSED, $this->loop()->run( $job->id, false ), 'still waiting on the next run' );
+
+		$plugin  = Plugin::instance();
+		$actions = new JobActions( $plugin->jobs(), $plugin->runner(), new Loopback( false ) );
+		$this->assertSame( array(), $actions->answer( $job->id, array( 'unreadable' => 'continue' ) )->questions );
+		$this->assertSame( RunLoop::EXIT_COMPLETED, $this->loop()->run( $job->id, false ) );
+		$this->assertStringContainsString( 'went on with continue', $this->lines[ count( $this->lines ) - 1 ] );
+	}
+
 	public function test_busy_gives_up_after_the_limit(): void {
 		$this->register( 'plain', array( $this->counting_step( 'p', 1 ) ) );
 		$job  = Plugin::instance()->jobs()->create( 'plain' );

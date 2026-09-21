@@ -26,6 +26,7 @@ final class RunLoop {
 	const EXIT_LOST      = 3;
 	const EXIT_WAITING   = 4; // Left waiting / blocked without --wait, paused, or missing.
 	const EXIT_BUSY      = 5; // Another driver kept the lock.
+	const EXIT_PAUSED    = 6; // The job asks a question; answer it (wp wpcheckpoint job answer) and run again.
 
 	const MAX_BUSY = 60;
 
@@ -112,6 +113,11 @@ final class RunLoop {
 					}
 					call_user_func( $this->sleep, max( 1, $result->retry_after ) );
 					continue 2;
+				case TickResult::PAUSED:
+					// No driver follows up a question; the answer comes through "job answer", then "job run" again.
+					$this->actions->follow_up( $result );
+					$this->print_questions( $result->job );
+					return self::EXIT_PAUSED;
 				case TickResult::COMPLETED:
 				case TickResult::FAILED:
 				case TickResult::FINISHED:
@@ -156,6 +162,23 @@ final class RunLoop {
 			default:
 				return self::EXIT_WAITING;
 		}
+	}
+
+	/**
+	 * The questions a paused job asks, one line each, and how to answer.
+	 *
+	 * @param Job|null $job Job.
+	 * @return void
+	 */
+	private function print_questions( $job ): void {
+		if ( ! $job instanceof Job ) {
+			return;
+		}
+		$data = $this->presenter->present( $job, false );
+		foreach ( is_array( $data['questions'] ) ? $data['questions'] : array() as $question ) {
+			$this->say( 'question: ' . (string) wp_json_encode( $question, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE ) );
+		}
+		$this->say( 'The job is waiting for your decision. Answer with: wp wpcheckpoint job answer ' . $job->id . " '{\"<question id>\": \"<answer>\"}' and run it again." );
 	}
 
 	/**
