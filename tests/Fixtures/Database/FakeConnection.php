@@ -10,14 +10,20 @@ namespace WPCheckpoint\Tests\Fixtures\Database;
 use WPCheckpoint\Database\Connection;
 
 /**
- * Understands exactly the statements TableExporter issues: SHOW CREATE
- * TABLE, SHOW COLUMNS, SHOW INDEX, and SELECT <list> ... [WHERE
- * after-key] [ORDER BY pk] LIMIT n [OFFSET o], where the list is column
- * names and LENGTH(`col`) terms (or * for the invisible-column test).
- * The after-key condition is not parsed: the last k arguments of the
- * query are the key (the expanded form ends with the full key), and rows
- * are compared as tuples of strings, the way MySQL orders them for
- * string keys and numerically for numeric keys (the test declares which).
+ * Understands exactly the statements TableExporter, RowSizeCheck and
+ * PreflightStep issue: SHOW CREATE TABLE, SHOW COLUMNS, SHOW INDEX,
+ * SHOW FULL TABLES LIKE, the information_schema statistics query,
+ * SELECT MIN/MAX of a key, SELECT COUNT(*) ... WHERE <oversize predicate>
+ * (directly or over a window subquery), and SELECT <list> ... [WHERE [NOT
+ * <predicate>] [AND] [after-key]] [ORDER BY pk] LIMIT n [OFFSET o], where
+ * the list is column names and LENGTH(`col`) terms (or * for the
+ * invisible-column test). The after-key condition is not parsed: the last
+ * k arguments of the query are the key (the expanded form ends with the
+ * full key), and rows are compared as tuples of strings, the way MySQL
+ * orders them for string keys and numerically for numeric keys (the test
+ * declares which). The oversize predicate is evaluated from its CASE
+ * terms with PHP arithmetic (the real check against MySQL's arithmetic
+ * is the integration test).
  */
 final class FakeConnection implements Connection {
 
@@ -27,6 +33,13 @@ final class FakeConnection implements Connection {
 	 * @var array<string, array<string, mixed>>
 	 */
 	private $tables = array();
+
+	/**
+	 * Views (names) for SHOW FULL TABLES.
+	 *
+	 * @var string[]
+	 */
+	public $views = array();
 
 	/**
 	 * Queries issued.
@@ -99,49 +112,179 @@ final class FakeConnection implements Connection {
 			}
 			return $out;
 		}
-		if ( 1 === preg_match( '/\ASELECT (.+?) FROM `(.+?)`(?: WHERE .+?)?(?: ORDER BY .+?)? LIMIT (\d+)(?: OFFSET (\d+))?\z/', $sql, $m ) ) {
+		if ( 'SHOW FULL TABLES LIKE ?' === $sql ) {
+			$prefix = rtrim( (string) ( $args[0] ?? '' ), '%' );
+			$out    = array();
+			foreach ( array_keys( $this->tables ) as $name ) {
+				if ( 0 === strpos( $name, $prefix ) ) {
+					$out[] = array( $name, 'BASE TABLE' );
+				}
+			}
+			foreach ( $this->views as $name ) {
+				if ( 0 === strpos( $name, $prefix ) ) {
+					$out[] = array( $name, 'VIEW' );
+				}
+			}
+			return $out;
+		}
+		if ( 0 === strpos( $sql, 'SELECT TABLE_NAME, TABLE_ROWS, DATA_LENGTH, INDEX_LENGTH, AVG_ROW_LENGTH FROM information_schema.TABLES' ) ) {
+			$out = array();
+			foreach ( $args as $name ) {
+				if ( ! isset( $this->tables[ $name ] ) ) {
+					continue;
+				}
+				$bytes = 0;
+				foreach ( $this->tables[ $name ]['rows'] as $row ) {
+					foreach ( $row as $value ) {
+						$bytes += strlen( (string) $value );
+					}
+				}
+				$count = count( $this->tables[ $name ]['rows'] );
+				$out[] = array( $name, (string) $count, (string) $bytes, '0', (string) ( $count > 0 ? (int) ( $bytes / $count ) : 0 ) );
+			}
+			return $out;
+		}
+		if ( 1 === preg_match( '/\ASELECT MIN\(`(.+?)`\), MAX\(`\1`\) FROM `(.+?)`\z/', $sql, $m ) ) {
+			$t   = $this->table( $m[2] );
+			$at  = array_search( $m[1], array_column( $t['columns'], 0 ), true );
+			$all = array_map( static function ( array $row ) use ( $at ) {
+				return $row[ $at ];
+			}, $t['rows'] );
+			return array() === $all ? array( array( null, null ) ) : array( array( (string) min( $all ), (string) max( $all ) ) );
+		}
+		if ( 1 === preg_match( '/\ASELECT COUNT\(\*\) FROM \(SELECT (.+?) FROM `(.+?)`(?: WHERE `(.+?)` >= \?)?(?: ORDER BY .+?)? LIMIT (\d+)\) AS w WHERE (\(\(.+\) > \d+\))\z/', $sql, $m ) ) {
 			$t     = $this->table( $m[2] );
-			$limit = (int) $m[3];
-			$rows  = $t['rows'];
 			$names = array_column( $t['columns'], 0 );
-			if ( array() !== $t['pk'] ) {
+			$rows  = $this->ordered( $t, $names );
+			if ( '' !== $m[3] ) {
+				$at   = array_search( $m[3], $names, true );
+				$from = (float) $args[0];
+				$rows = array_values( array_filter( $rows, static function ( array $row ) use ( $at, $from ): bool {
+					return (float) $row[ $at ] >= $from;
+				} ) );
+			}
+			$rows  = array_slice( $rows, 0, (int) $m[4] );
+			$count = 0;
+			foreach ( $rows as $row ) {
+				if ( $this->oversized( $m[5], $names, $row ) ) {
+					++$count;
+				}
+			}
+			return array( array( (string) $count ) );
+		}
+		if ( 1 === preg_match( '/\ASELECT COUNT\(\*\) FROM `(.+?)` WHERE (\(\(.+\) > \d+\))\z/', $sql, $m ) ) {
+			$t     = $this->table( $m[1] );
+			$names = array_column( $t['columns'], 0 );
+			$count = 0;
+			foreach ( $t['rows'] as $row ) {
+				if ( $this->oversized( $m[2], $names, $row ) ) {
+					++$count;
+				}
+			}
+			return array( array( (string) $count ) );
+		}
+		if ( 1 === preg_match( '/\ASELECT (.+?) FROM `(.+?)`(?: WHERE (.+?))?(?: ORDER BY .+?)? LIMIT (\d+)(?: OFFSET (\d+))?\z/', $sql, $m ) ) {
+			$t     = $this->table( $m[2] );
+			$where = isset( $m[3] ) ? $m[3] : '';
+			$limit = (int) $m[4];
+			$names = array_column( $t['columns'], 0 );
+			$rows  = array() !== $t['pk'] ? $this->ordered( $t, $names ) : $t['rows'];
+			if ( 1 === preg_match( '/NOT (\(\(.+?\) > \d+\))/', $where, $pm ) ) {
+				$rows = array_values( array_filter( $rows, function ( array $row ) use ( $pm, $names ): bool {
+					return ! $this->oversized( $pm[1], $names, $row );
+				} ) );
+			}
+			if ( array() !== $t['pk'] && false !== strpos( $where, '> ?' ) ) {
 				$idx = array();
 				foreach ( $t['pk'] as $col ) {
 					$idx[] = (int) array_search( $col, $names, true );
 				}
-				$numeric = $t['numeric_pk'];
-				$key_of  = static function ( array $row ) use ( $idx ): array {
+				$after  = array_slice( $args, -count( $idx ) );
+				$key_of = static function ( array $row ) use ( $idx ): array {
 					$k = array();
 					foreach ( $idx as $i ) {
 						$k[] = (string) $row[ $i ];
 					}
 					return $k;
 				};
-				$cmp     = static function ( array $a, array $b ) use ( $numeric ): int {
-					foreach ( $a as $i => $v ) {
-						$c = $numeric ? ( (float) $v <=> (float) $b[ $i ] ) : strcmp( $v, $b[ $i ] );
-						if ( 0 !== $c ) {
-							return $c;
-						}
-					}
-					return 0;
-				};
-				usort( $rows, static function ( array $a, array $b ) use ( $key_of, $cmp ): int {
-					return $cmp( $key_of( $a ), $key_of( $b ) );
-				} );
-				if ( array() !== $args ) {
-					$after = array_slice( $args, -count( $idx ) );
-					$rows  = array_values( array_filter( $rows, static function ( array $row ) use ( $key_of, $cmp, $after ): bool {
-						return $cmp( $key_of( $row ), $after ) > 0;
-					} ) );
-				}
-				$rows = array_slice( $rows, 0, $limit );
-			} else {
-				$rows = array_slice( $rows, isset( $m[4] ) ? (int) $m[4] : 0, $limit );
+				$cmp    = $this->comparator( $t['numeric_pk'] );
+				$rows   = array_values( array_filter( $rows, static function ( array $row ) use ( $key_of, $cmp, $after ): bool {
+					return $cmp( $key_of( $row ), $after ) > 0;
+				} ) );
 			}
+			$rows = array() !== $t['pk'] ? array_slice( $rows, 0, $limit ) : array_slice( $rows, isset( $m[5] ) ? (int) $m[5] : 0, $limit );
 			return $this->project( $m[1], $names, $t['invisible'], $rows );
 		}
 		throw new \RuntimeException( 'FakeConnection does not understand: ' . $sql );
+	}
+
+	/**
+	 * Rows in primary-key order.
+	 *
+	 * @param array<string, mixed> $t     Table.
+	 * @param string[]             $names Column names.
+	 * @return array<int, array<int, string|null>>
+	 */
+	private function ordered( array $t, array $names ): array {
+		$rows = $t['rows'];
+		if ( array() === $t['pk'] ) {
+			return $rows;
+		}
+		$idx = array();
+		foreach ( $t['pk'] as $col ) {
+			$idx[] = (int) array_search( $col, $names, true );
+		}
+		$cmp = $this->comparator( $t['numeric_pk'] );
+		usort( $rows, static function ( array $a, array $b ) use ( $idx, $cmp ): int {
+			$ka = array();
+			$kb = array();
+			foreach ( $idx as $i ) {
+				$ka[] = (string) $a[ $i ];
+				$kb[] = (string) $b[ $i ];
+			}
+			return $cmp( $ka, $kb );
+		} );
+		return $rows;
+	}
+
+	/**
+	 * Tuple comparison, numeric or byte-wise.
+	 *
+	 * @param bool $numeric Numeric keys.
+	 * @return callable
+	 */
+	private function comparator( bool $numeric ): callable {
+		return static function ( array $a, array $b ) use ( $numeric ): int {
+			foreach ( $a as $i => $v ) {
+				$c = $numeric ? ( (float) $v <=> (float) $b[ $i ] ) : strcmp( $v, $b[ $i ] );
+				if ( 0 !== $c ) {
+					return $c;
+				}
+			}
+			return 0;
+		};
+	}
+
+	/**
+	 * Evaluate the exporter's oversize predicate for one row from its CASE terms.
+	 *
+	 * @param string                  $predicate Predicate SQL.
+	 * @param string[]                $names     Column names.
+	 * @param array<int, string|null> $row       Row.
+	 * @return bool
+	 */
+	private function oversized( string $predicate, array $names, array $row ): bool {
+		if ( 1 !== preg_match( '/\A\(\((\d+)(.*)\) > (\d+)\)\z/s', $predicate, $m ) ) {
+			throw new \RuntimeException( 'FakeConnection does not understand the predicate: ' . $predicate );
+		}
+		$bytes = (int) $m[1];
+		preg_match_all( '/CASE WHEN `(.+?)` IS NULL THEN (\d+) ELSE CEIL\(LENGTH\(`\1`\) \* (\d+) \/ (\d+)\) \+ (\d+) END/', $m[2], $terms, PREG_SET_ORDER );
+		foreach ( $terms as $term ) {
+			$at    = array_search( $term[1], $names, true );
+			$value = false === $at ? null : $row[ $at ];
+			$bytes += null === $value ? (int) $term[2] : intdiv( strlen( (string) $value ) * (int) $term[3] + (int) $term[4] - 1, (int) $term[4] ) + (int) $term[5];
+		}
+		return $bytes > (int) $m[3];
 	}
 
 	/**

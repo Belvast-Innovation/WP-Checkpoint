@@ -82,6 +82,25 @@ final class TableExporter {
 	 */
 	const WRITE_BYTES = 65536;
 
+	/**
+	 * The row size estimate, in one place for its PHP form
+	 * (estimate_row_bytes()) and its SQL form (oversize_predicate()): a
+	 * NULL costs ESTIMATE_NULL_BYTES, every other value its length times
+	 * the ratio of its kind (11/10 for quoted text, 22/10 for hex output,
+	 * which doubles the bytes), rounded up, plus ESTIMATE_COLUMN_BYTES for
+	 * quotes and comma, and a row ESTIMATE_ROW_BYTES for its parentheses.
+	 * The ratios are integers on both sides on purpose: MySQL multiplies
+	 * by a decimal literal exactly while PHP would use a double, and
+	 * CEIL(234560 * 1.1) is 258016 in one and 258017 in the other. The two
+	 * forms must agree row for row; a test compares the set of rows each
+	 * one calls oversized.
+	 */
+	const ESTIMATE_ROW_BYTES    = 2;
+	const ESTIMATE_NULL_BYTES   = 5;
+	const ESTIMATE_COLUMN_BYTES = 4;
+	const ESTIMATE_TEXT_RATIO   = array( 11, 10 );
+	const ESTIMATE_BINARY_RATIO = array( 22, 10 );
+
 	const HEADER = '-- wpcheckpoint table=';
 	const MARKER = '-- wpcheckpoint batch ';
 	const END    = '-- wpcheckpoint end ';
@@ -141,21 +160,32 @@ final class TableExporter {
 	private $described = array();
 
 	/**
+	 * Tables whose oversized rows are left out (the user's decision at the
+	 * pre-flight): rows that oversize_predicate() selects are skipped by
+	 * both queries of a batch, so the export never meets them.
+	 *
+	 * @var string[]
+	 */
+	private $exclude_oversize;
+
+	/**
 	 * Constructor.
 	 *
-	 * @param Connection $connection   Database.
-	 * @param string     $dir          Existing directory for the chunk files.
-	 * @param int        $chunk_bytes  Chunk size (tests use smaller values).
-	 * @param int        $target_batch Batch target size; kept at or below a quarter of the chunk size so a batch always fits.
+	 * @param Connection $connection       Database.
+	 * @param string     $dir              Existing directory for the chunk files.
+	 * @param int        $chunk_bytes      Chunk size (tests use smaller values).
+	 * @param int        $target_batch     Batch target size; kept at or below a quarter of the chunk size so a batch always fits.
+	 * @param string[]   $exclude_oversize Tables whose oversized rows are left out.
 	 */
-	public function __construct( Connection $connection, string $dir, int $chunk_bytes = self::CHUNK_BYTES, int $target_batch = self::TARGET_BATCH_BYTES ) {
-		$this->connection   = $connection;
-		$this->dir          = rtrim( $dir, '/\\' );
-		$this->chunk_bytes  = $chunk_bytes;
-		$this->target_batch = max( 1, min( $target_batch, intdiv( $chunk_bytes, 4 ) ) );
-		$this->writer       = new SqlWriter( $connection->charset() );
-		$charset            = strtolower( $connection->charset() );
-		$this->charset      = 1 === preg_match( '/\A[a-z0-9_]{1,32}\z/', $charset ) ? $charset : '';
+	public function __construct( Connection $connection, string $dir, int $chunk_bytes = self::CHUNK_BYTES, int $target_batch = self::TARGET_BATCH_BYTES, array $exclude_oversize = array() ) {
+		$this->connection       = $connection;
+		$this->dir              = rtrim( $dir, '/\\' );
+		$this->chunk_bytes      = $chunk_bytes;
+		$this->target_batch     = max( 1, min( $target_batch, intdiv( $chunk_bytes, 4 ) ) );
+		$this->exclude_oversize = array_values( array_map( 'strval', $exclude_oversize ) );
+		$this->writer           = new SqlWriter( $connection->charset() );
+		$charset                = strtolower( $connection->charset() );
+		$this->charset          = 1 === preg_match( '/\A[a-z0-9_]{1,32}\z/', $charset ) ? $charset : '';
 	}
 
 	/**
@@ -376,17 +406,22 @@ final class TableExporter {
 	 * @throws \RuntimeException When a row ahead is larger than the limit.
 	 */
 	private function fetch( string $table, array $desc, $key, int $rows, int $limit ): array {
-		$from   = ' FROM ' . SqlWriter::identifier( $table );
-		$args   = array();
-		$where  = '';
-		$offset = '';
+		$from       = ' FROM ' . SqlWriter::identifier( $table );
+		$args       = array();
+		$conditions = array();
+		$offset     = '';
+		if ( in_array( $table, $this->exclude_oversize, true ) ) {
+			// Built from the columns as they are now, so a table changed since the pre-flight still gets the right rows left out.
+			$conditions[] = 'NOT ' . $this->oversize_predicate( $desc );
+		}
 		if ( array() === $desc['pk'] ) {
 			$offset = ' OFFSET ' . $rows;
-		} else {
-			if ( null !== $key ) {
-				list( $condition, $args ) = self::after_key( $desc['pk'], $key );
-				$where                    = ' WHERE ' . $condition;
-			}
+		} elseif ( null !== $key ) {
+			list( $condition, $args ) = self::after_key( $desc['pk'], $key );
+			$conditions[]             = '(' . $condition . ')';
+		}
+		$where = array() === $conditions ? '' : ' WHERE ' . implode( ' AND ', $conditions );
+		if ( array() !== $desc['pk'] ) {
 			$where .= ' ORDER BY ' . implode( ', ', array_map( array( SqlWriter::class, 'identifier' ), $desc['pk'] ) );
 		}
 		$lengths = array_map( array( SqlWriter::class, 'identifier' ), $desc['pk'] );
@@ -433,21 +468,51 @@ final class TableExporter {
 	 * @return int
 	 */
 	public static function estimate_row_bytes( array $lengths, array $kinds, bool $hex_all ): int {
-		$bytes = 2; // Parentheses.
+		$bytes = self::ESTIMATE_ROW_BYTES;
 		foreach ( array_values( $lengths ) as $i => $length ) {
 			if ( null === $length ) {
-				$bytes += 5; // NULL and a comma.
+				$bytes += self::ESTIMATE_NULL_BYTES;
 				continue;
 			}
-			$length = (int) $length;
 			$kind   = isset( $kinds[ $i ] ) ? $kinds[ $i ] : 'text';
-			if ( 'binary' === $kind || ( $hex_all && 'numeric' !== $kind ) ) {
-				$bytes += (int) ceil( $length * 2.2 ) + 4;
-			} else {
-				$bytes += (int) ceil( $length * 1.1 ) + 4;
-			}
+			$ratio  = self::estimate_ratio( $kind, $hex_all );
+			$bytes += intdiv( (int) $length * $ratio[0] + $ratio[1] - 1, $ratio[1] ) + self::ESTIMATE_COLUMN_BYTES;
 		}
 		return $bytes;
+	}
+
+	/**
+	 * The ratio (numerator, denominator) a value's bytes are multiplied by
+	 * in the estimate, rounded up.
+	 *
+	 * @param string $kind    Column kind.
+	 * @param bool   $hex_all Whether every string is written as hex.
+	 * @return array{0: int, 1: int}
+	 */
+	public static function estimate_ratio( string $kind, bool $hex_all ): array {
+		return 'binary' === $kind || ( $hex_all && 'numeric' !== $kind ) ? self::ESTIMATE_BINARY_RATIO : self::ESTIMATE_TEXT_RATIO;
+	}
+
+	/**
+	 * The estimate (estimate_row_bytes()) as a SQL condition, true for the rows the
+	 * exporter would refuse: the same sum, term by term (CEIL(LENGTH * f) +
+	 * column bytes, NULL bytes for NULL, row bytes once), over the columns
+	 * the table has now, compared with row_limit(). Used with NOT to leave
+	 * oversized rows out, and by the pre-flight to count them: one
+	 * definition of "oversized" for the count, the exclusion and the check
+	 * after formatting.
+	 *
+	 * @param array{create: string, columns: string[], kinds: string[], pk: string[], pk_index: int[]} $desc Description from describe().
+	 * @return string A parenthesised condition without placeholders.
+	 */
+	public function oversize_predicate( array $desc ): string {
+		$terms = array( (string) self::ESTIMATE_ROW_BYTES );
+		foreach ( $desc['columns'] as $i => $column ) {
+			$id      = SqlWriter::identifier( $column );
+			$ratio   = self::estimate_ratio( isset( $desc['kinds'][ $i ] ) ? $desc['kinds'][ $i ] : 'text', $this->hex_all() );
+			$terms[] = sprintf( 'CASE WHEN %1$s IS NULL THEN %2$d ELSE CEIL(LENGTH(%1$s) * %3$d / %4$d) + %5$d END', $id, self::ESTIMATE_NULL_BYTES, $ratio[0], $ratio[1], self::ESTIMATE_COLUMN_BYTES );
+		}
+		return '((' . implode( ' + ', $terms ) . ') > ' . $this->row_limit() . ')';
 	}
 
 	/**
@@ -961,8 +1026,14 @@ final class TableExporter {
 	 * @return void
 	 */
 	private function note_mode( array &$state, array $desc ): void {
-		if ( array() === $desc['pk'] && 1 === (int) $state['chunk'] ) {
+		if ( 1 !== (int) $state['chunk'] ) {
+			return;
+		}
+		if ( array() === $desc['pk'] ) {
 			$state['warnings'][] = sprintf( 'Table %s has no primary key and was read with LIMIT/OFFSET; rows added or removed while it was being exported may be missing or duplicated.', (string) $state['table'] );
+		}
+		if ( in_array( (string) $state['table'], $this->exclude_oversize, true ) ) {
+			$state['warnings'][] = sprintf( 'Table %s: rows larger than the single-row limit of %d bytes (as SQL) were left out, as chosen at the pre-flight.', (string) $state['table'], $this->row_limit() );
 		}
 	}
 
