@@ -69,6 +69,14 @@ final class DatabaseExportStep implements Step {
 	private $chunk_bytes;
 
 	/**
+	 * Whether the tables come from plan.json and review.json in the work
+	 * directory (the export job) instead of the constructor (tests).
+	 *
+	 * @var bool
+	 */
+	private $from_plan = false;
+
+	/**
 	 * Constructor. The job type picks the tables from the job's options.
 	 *
 	 * @param Connection $connection  Database.
@@ -81,6 +89,21 @@ final class DatabaseExportStep implements Step {
 		$this->tables      = array_values( $tables );
 		$this->notes       = $notes;
 		$this->chunk_bytes = $chunk_bytes;
+	}
+
+	/**
+	 * A step that takes its tables, notes and the tables whose oversized
+	 * rows are left out from ExportPlan::effective() (plan.json plus the
+	 * review's decisions) when it freezes the list on its first tick.
+	 *
+	 * @param Connection $connection  Database.
+	 * @param int        $chunk_bytes Chunk size.
+	 * @return DatabaseExportStep
+	 */
+	public static function from_plan( Connection $connection, int $chunk_bytes = TableExporter::CHUNK_BYTES ): DatabaseExportStep {
+		$step            = new self( $connection, array(), array(), $chunk_bytes );
+		$step->from_plan = true;
+		return $step;
 	}
 
 	/**
@@ -106,12 +129,13 @@ final class DatabaseExportStep implements Step {
 		if ( ! isset( $cursor['index'] ) ) {
 			$cursor = $this->start( $work, $dir, $context );
 		}
-		$tables = $this->frozen_tables( $work );
+		$frozen = $this->frozen( $work );
+		$tables = $frozen['tables'];
 		$total  = count( $tables );
 		$since  = 0;
 		while ( (int) $cursor['index'] < $total ) {
 			$table    = $tables[ (int) $cursor['index'] ];
-			$exporter = new TableExporter( $this->connection, $dir, $this->chunk_bytes );
+			$exporter = new TableExporter( $this->connection, $dir, $this->chunk_bytes, TableExporter::TARGET_BATCH_BYTES, $frozen['exclude_oversize'] );
 			$state    = isset( $cursor['state'] ) && is_array( $cursor['state'] ) ? $cursor['state'] : TableExporter::initial_state( $table );
 			$before   = (int) $state['bytes'];
 			$state    = $exporter->step( $state );
@@ -165,11 +189,19 @@ final class DatabaseExportStep implements Step {
 		if ( ! is_dir( $dir ) && ! @mkdir( $dir, 0700 ) && ! is_dir( $dir ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- a warning would put the path into the error log.
 			throw new TransientFailure( 'The database chunk directory could not be created.' );
 		}
+		$wanted   = $this->tables;
+		$notes    = $this->notes;
+		$oversize = array();
+		if ( $this->from_plan ) {
+			$effective = ExportPlan::effective( ExportPlan::read( $work, ExportPlan::PLAN ), ExportPlan::read( $work, ExportPlan::REVIEW ) );
+			$wanted    = $effective['tables'];
+			$notes     = $effective['notes'];
+			$oversize  = $effective['exclude_oversize'];
+		}
 		$tables  = array();
 		$skipped = array();
 		$seen    = array();
-		$notes   = $this->notes;
-		foreach ( $this->tables as $table ) {
+		foreach ( $wanted as $table ) {
 			$table = (string) $table;
 			if ( ! self::storable_name( $table ) ) {
 				$skipped[] = Utf8::scrub( $table );
@@ -190,8 +222,9 @@ final class DatabaseExportStep implements Step {
 			$work . DIRECTORY_SEPARATOR . self::TABLES,
 			wp_json_encode(
 				array(
-					'tables' => $tables,
-					'notes'  => $notes,
+					'tables'           => $tables,
+					'notes'            => $notes,
+					'exclude_oversize' => array_values( array_intersect( $oversize, $tables ) ),
 				),
 				JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
 			)
@@ -230,19 +263,22 @@ final class DatabaseExportStep implements Step {
 	}
 
 	/**
-	 * The frozen table list.
+	 * The frozen table list and the tables whose oversized rows are left out.
 	 *
 	 * @param string $work Work directory.
-	 * @return string[]
+	 * @return array{tables: string[], exclude_oversize: string[]}
 	 * @throws \RuntimeException When the list is gone.
 	 */
-	private function frozen_tables( string $work ): array {
+	private function frozen( string $work ): array {
 		$json = @file_get_contents( $work . DIRECTORY_SEPARATOR . self::TABLES ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- small file in the job's own work directory.
 		$data = is_string( $json ) ? json_decode( $json, true ) : null;
 		if ( ! is_array( $data ) || ! isset( $data['tables'] ) || ! is_array( $data['tables'] ) ) {
 			throw new \RuntimeException( 'The frozen table list is missing; the work directory was lost or changed.' );
 		}
-		return array_map( 'strval', $data['tables'] );
+		return array(
+			'tables'           => array_map( 'strval', $data['tables'] ),
+			'exclude_oversize' => isset( $data['exclude_oversize'] ) && is_array( $data['exclude_oversize'] ) ? array_map( 'strval', $data['exclude_oversize'] ) : array(),
+		);
 	}
 
 	/**

@@ -80,7 +80,7 @@ final class TableExporterTest extends TestCase {
 		$this->assertSame( strlen( $sql ), $closed[0]['bytes'] );
 		$this->assertSame( hash( 'sha256', $sql ), $closed[0]['hash'] );
 		$this->assertSame( $closed[0]['bytes'], $state['total'] );
-		$this->assertStringContainsString( "WHERE (`ID` > ?) ORDER BY `ID` LIMIT", $db->log[ count( $db->log ) - 1 ], 'the closing fetch continues after the last key' );
+		$this->assertStringContainsString( "WHERE ((`ID` > ?)) ORDER BY `ID` LIMIT", $db->log[ count( $db->log ) - 1 ], 'the closing fetch continues after the last key' );
 		$this->assertStringStartsWith( 'SELECT `ID`, LENGTH(`ID`), LENGTH(`post_title`), LENGTH(`post_content`), LENGTH(`post_date`), LENGTH(`menu_order`) FROM `wp_posts`', $db->log[ count( $db->log ) - 1 ], 'sizes are read before rows' );
 		$this->assertStringStartsWith( 'SELECT `ID`, `post_title`, `post_content`, `post_date`, `menu_order` FROM `wp_posts` ORDER BY `ID` LIMIT 7', $db->log[ count( $db->log ) - 2 ], 'rows are read by explicit column names, as many as the sizes allow' );
 		$this->assertStringContainsString( self::PREAMBLE, $this->chunk( 'wp_posts', 1 ) );
@@ -287,7 +287,7 @@ final class TableExporterTest extends TestCase {
 		$exporter = new TableExporter( $db, $this->dir, 65536, 64 );
 		list( $state ) = $this->run_all( $exporter, 'wp_term_relationships' );
 		$this->assertSame( 10, $state['rows'] );
-		$this->assertStringContainsString( 'WHERE (`object_id` > ?) OR (`object_id` = ? AND `term_taxonomy_id` > ?) ORDER BY `object_id`, `term_taxonomy_id` LIMIT', $db->log[ count( $db->log ) - 1 ] );
+		$this->assertStringContainsString( 'WHERE ((`object_id` > ?) OR (`object_id` = ? AND `term_taxonomy_id` > ?)) ORDER BY `object_id`, `term_taxonomy_id` LIMIT', $db->log[ count( $db->log ) - 1 ] );
 		list( $where, $args ) = TableExporter::after_key( array( 'a', 'b', 'c' ), array( '1', '2', '3' ) );
 		$this->assertSame( '(`a` > ?) OR (`a` = ? AND `b` > ?) OR (`a` = ? AND `b` = ? AND `c` > ?)', $where );
 		$this->assertSame( array( '1', '1', '2', '1', '2', '3' ), $args );

@@ -45,6 +45,15 @@ final class FileScanner {
 	const MAX_LISTED   = 50;
 
 	/**
+	 * Directory names whose subtree is summed up (lists.heavy) so the
+	 * pre-flight can offer to leave them out: build and version-control
+	 * trees that are never needed to restore a site. Nested ones count
+	 * towards the outermost. Nothing is excluded by this list; the user
+	 * decides.
+	 */
+	const HEAVY_NAMES = array( 'node_modules', '.git', '.svn', '.hg' );
+
+	/**
 	 * Roots: group, path (absolute), prefix (archive path, no trailing slash), skip (absolute paths not to enter).
 	 *
 	 * @var array<int, array{group: string, path: string, prefix: string, skip: string[]}>
@@ -114,11 +123,13 @@ final class FileScanner {
 				'too_large'        => 0,
 				'over_volume'      => 0,
 				'invalid_patterns' => 0,
+				'heavy'            => 0,
 			),
 			'lists'    => array(
 				'unreadable'  => array(),
 				'too_large'   => array(),
 				'over_volume' => array(),
+				'heavy'       => array(),
 			),
 			'warnings' => array(),
 		);
@@ -186,7 +197,7 @@ final class FileScanner {
 				$frame['after']                                 = $name;
 				$state['stack'][ count( $state['stack'] ) - 1 ] = $frame;
 				$rel = '' === $frame['dir'] ? $name : $frame['dir'] . '/' . $name;
-				$sub = $this->enter( $state, $root, $rel, $abs . '/' . $name, $emit );
+				$sub = $this->enter( $state, $root, $rel, $abs . '/' . $name, $emit, isset( $frame['heavy'] ) ? (string) $frame['heavy'] : '' );
 				if ( null !== $sub ) {
 					$state['stack'][] = $sub;
 					$entered          = true;
@@ -212,9 +223,10 @@ final class FileScanner {
 	 * @param string                                                             $rel   Path relative to the root.
 	 * @param string                                                             $abs   Absolute path.
 	 * @param callable                                                           $emit  Line sink.
-	 * @return array{dir: string, after: string}|null
+	 * @param string                                                             $heavy The heavy directory this entry is under ('' when none).
+	 * @return array{dir: string, after: string, heavy?: string}|null
 	 */
-	private function enter( array &$state, array $root, string $rel, string $abs, callable $emit ) {
+	private function enter( array &$state, array $root, string $rel, string $abs, callable $emit, string $heavy = '' ) {
 		$p = $root['prefix'] . '/' . $rel;
 		if ( Utf8::scrub( $p ) !== $p || null !== EntryPath::problem( $p ) ) {
 			++$state['counts']['bad_names'];
@@ -230,10 +242,20 @@ final class FileScanner {
 			return null;
 		}
 		if ( is_dir( $abs ) ) {
-			return array(
+			$frame = array(
 				'dir'   => $rel,
 				'after' => '',
 			);
+			if ( '' !== $heavy ) {
+				$frame['heavy'] = $heavy;
+			} elseif ( in_array( basename( $rel ), self::HEAVY_NAMES, true ) ) {
+				++$state['counts']['heavy'];
+				if ( count( $state['lists']['heavy'] ) < self::MAX_LISTED ) {
+					$state['lists']['heavy'][ $p ] = 0;
+					$frame['heavy']                = $p;
+				}
+			}
+			return $frame;
 		}
 		$type = @filetype( $abs ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a vanished entry is handled below.
 		if ( 'file' !== $type ) {
@@ -266,6 +288,9 @@ final class FileScanner {
 		);
 		++$state['counts']['files'];
 		$state['counts']['bytes'] += $size;
+		if ( '' !== $heavy && isset( $state['lists']['heavy'][ $heavy ] ) ) {
+			$state['lists']['heavy'][ $heavy ] += $size;
+		}
 		return null;
 	}
 

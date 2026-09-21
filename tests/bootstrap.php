@@ -25,6 +25,21 @@ if ( ! defined( 'ABSPATH' ) ) {
 	define( 'ABSPATH', sys_get_temp_dir() . '/wp-checkpoint-abspath/' );
 }
 
+if ( ! function_exists( '__' ) ) {
+	/**
+	 * Translation stand-in for the unit suite: steps label their progress
+	 * with translatable strings and are otherwise pure PHP.
+	 *
+	 * @param string $text   Text.
+	 * @param string $domain Text domain (ignored).
+	 * @return string
+	 */
+	function __( string $text, string $domain = 'default' ): string { // phpcs:ignore WordPress.WP.I18n.NonSingularStringLiteralText,Universal.Files.SeparateFunctionsFromOO.Mixed -- test stand-in.
+		unset( $domain );
+		return $text;
+	}
+}
+
 /**
  * Load the WordPress core test library and the plugin.
  *
