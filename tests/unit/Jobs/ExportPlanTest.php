@@ -64,7 +64,7 @@ final class ExportPlanTest extends TestCase {
 			'decisions' => array(
 				'exclude_tables'   => array( 'wp_sessions' ),
 				'exclude_oversize' => array( 'wp_options', 'wp_posts', 'wp_not_in_plan' ),
-				'exclude_dirs'     => array( 'wp-content/uploads/node_modules', 'wp-content/cache' ),
+				'exclude_paths'    => array( 'wp-content/uploads/node_modules', 'wp-content/cache', 'wp-content/uploads/node_modules' ),
 				'notes'            => array( 'Directory wp-content/uploads/node_modules (120 MB) was left out of the backup, as chosen.' ),
 			),
 		);
@@ -73,12 +73,28 @@ final class ExportPlanTest extends TestCase {
 		$this->assertSame( $first, $second );
 		$this->assertSame( array( 'wp_options', 'wp_posts' ), $first['tables'] );
 		$this->assertSame( array( 'wp_options', 'wp_posts' ), $first['exclude_oversize'], 'only tables of the plan' );
-		$this->assertSame( array( 'wp-content/cache', 'wp-content/uploads/node_modules' ), $first['exclusions'] );
+		$this->assertSame( array( 'wp-content/cache' ), $first['exclusions'], 'patterns come from the plan only' );
+		$this->assertSame( array( 'wp-content/uploads/node_modules', 'wp-content/cache' ), $first['exclude_paths'], 'literal paths stay literal, deduplicated' );
 		$this->assertSame( array( 'uploads' ), $first['groups'] );
 		$this->assertCount( 2, $first['notes'] );
 		$this->assertSame( array( 'wp_options' => 3, 'wp_posts' => null ), $first['oversize_counts'] );
 		// Applying the review twice changes nothing: the decisions are not appended anywhere.
 		$this->assertSame( $first, ExportPlan::effective( $plan, $review ) );
+	}
+
+	public function test_a_directory_with_glob_characters_is_excluded_literally_and_its_siblings_are_not(): void {
+		$plan   = array( 'tables' => array(), 'groups' => array( 'uploads' ), 'exclusions' => array( 'wp-content/cache' ) );
+		$review = array( 'findings' => array(), 'decisions' => array( 'exclude_paths' => array( 'wp-content/uploads/[2024]/node_modules' ) ) );
+		$effective = ExportPlan::effective( $plan, $review );
+		$this->assertSame( array( 'wp-content/cache' ), $effective['exclusions'], 'the decided directory never becomes a pattern' );
+		$this->assertSame( array( 'wp-content/uploads/[2024]/node_modules' ), $effective['exclude_paths'] );
+		$this->assertTrue( ExportPlan::excluded_by_path( 'wp-content/uploads/[2024]/node_modules', $effective['exclude_paths'] ) );
+		$this->assertTrue( ExportPlan::excluded_by_path( 'wp-content/uploads/[2024]/node_modules/x/y.js', $effective['exclude_paths'] ) );
+		$this->assertFalse( ExportPlan::excluded_by_path( 'wp-content/uploads/2/node_modules/x.js', $effective['exclude_paths'] ), 'a sibling a glob would have matched' );
+		$this->assertFalse( ExportPlan::excluded_by_path( 'wp-content/uploads/0/node_modules/x.js', $effective['exclude_paths'] ) );
+		$this->assertFalse( ExportPlan::excluded_by_path( 'wp-content/uploads/[2024]/node_modules_extra/x.js', $effective['exclude_paths'] ), 'a prefix match needs the slash' );
+		$this->assertFalse( ExportPlan::excluded_by_path( 'wp-content/uploads/[2024]/node_module', $effective['exclude_paths'] ) );
+		$this->assertFalse( ( new \WPCheckpoint\Files\Exclusions( $effective['exclusions'], array() ) )->excludes( 'wp-content/uploads/2/node_modules/x.js' ), 'and the pattern list does not carry it either' );
 	}
 
 	public function test_a_review_without_decisions_is_not_usable(): void {

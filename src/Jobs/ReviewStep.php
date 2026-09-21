@@ -175,14 +175,14 @@ final class ReviewStep implements Step {
 	 * @param array<string, mixed>  $findings Findings.
 	 * @param array<string, string> $policy   Policy (each value ask|...).
 	 * @param array<string, mixed>  $answers  Answers given so far.
-	 * @return array{0: array{exclude_tables: string[], exclude_oversize: string[], exclude_dirs: string[], notes: string[]}, 1: array<int, array<string, mixed>>}
+	 * @return array{0: array{exclude_tables: string[], exclude_oversize: string[], exclude_paths: string[], notes: string[]}, 1: array<int, array<string, mixed>>}
 	 * @throws \RuntimeException When a decision is to stop.
 	 */
 	public static function decide( array $findings, array $policy, array $answers ): array {
 		$decisions = array(
 			'exclude_tables'   => array(),
 			'exclude_oversize' => array(),
-			'exclude_dirs'     => array(),
+			'exclude_paths'    => array(),
 			'notes'            => array(),
 		);
 		$questions = array();
@@ -236,8 +236,8 @@ final class ReviewStep implements Step {
 					);
 				}
 			} elseif ( 'exclude' === $choice ) {
-				$decisions['exclude_dirs'][] = $dir['p'];
-				$decisions['notes'][]        = sprintf( 'Directory %s (%d MB) was left out of the backup, as chosen.', $dir['p'], (int) ( $dir['bytes'] / 1048576 ) );
+				$decisions['exclude_paths'][] = $dir['p']; // A literal path, never a pattern: see ExportPlan::effective().
+				$decisions['notes'][]         = sprintf( 'Directory %s (%d MB) was left out of the backup, as chosen.', $dir['p'], (int) ( $dir['bytes'] / 1048576 ) );
 			}
 		}
 

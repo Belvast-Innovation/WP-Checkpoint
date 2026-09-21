@@ -98,13 +98,19 @@ final class ExportPlan {
 
 	/**
 	 * What the export acts on: the plan's tables less the ones the review
-	 * decided to leave out, the plan's exclusions plus the directories the
-	 * review decided to leave out, and the tables whose oversized rows are
-	 * left out. Pure: the same plan and review give the same result.
+	 * decided to leave out, the tables whose oversized rows are left out,
+	 * the plan's exclusion patterns, and, separately, the directories the
+	 * review decided to leave out as literal paths. The two kinds of
+	 * exclusion never mix: a pattern goes through the glob compiler, a
+	 * literal path is compared byte for byte (a file is left out when its
+	 * archive path equals the entry or starts with it followed by "/"),
+	 * so a directory named "[2024]" cannot turn into a pattern that also
+	 * matches "2" and "0". Pure: the same plan and review give the same
+	 * result.
 	 *
 	 * @param array<string, mixed> $plan   plan.json.
 	 * @param array<string, mixed> $review review.json (with decisions).
-	 * @return array{tables: string[], notes: string[], groups: string[], exclusions: string[], exclude_oversize: string[], oversize_counts: array<string, int|null>}
+	 * @return array{tables: string[], notes: string[], groups: string[], exclusions: string[], exclude_paths: string[], exclude_oversize: string[], oversize_counts: array<string, int|null>}
 	 * @throws \RuntimeException When the review holds no decisions (the review step did not finish).
 	 */
 	public static function effective( array $plan, array $review ): array {
@@ -116,7 +122,7 @@ final class ExportPlan {
 		$notes     = self::strings( $plan, 'notes' );
 		$excluded  = isset( $decisions['exclude_tables'] ) && is_array( $decisions['exclude_tables'] ) ? array_map( 'strval', $decisions['exclude_tables'] ) : array();
 		$oversize  = isset( $decisions['exclude_oversize'] ) && is_array( $decisions['exclude_oversize'] ) ? array_map( 'strval', $decisions['exclude_oversize'] ) : array();
-		$dirs      = isset( $decisions['exclude_dirs'] ) && is_array( $decisions['exclude_dirs'] ) ? array_map( 'strval', $decisions['exclude_dirs'] ) : array();
+		$paths     = isset( $decisions['exclude_paths'] ) && is_array( $decisions['exclude_paths'] ) ? array_map( 'strval', $decisions['exclude_paths'] ) : array();
 		$counts    = array();
 		foreach ( isset( $review['findings']['oversize'] ) && is_array( $review['findings']['oversize'] ) ? $review['findings']['oversize'] : array() as $finding ) {
 			if ( is_array( $finding ) && isset( $finding['table'] ) ) {
@@ -127,10 +133,28 @@ final class ExportPlan {
 			'tables'           => array_values( array_diff( $tables, $excluded ) ),
 			'notes'            => array_merge( $notes, self::strings( $decisions, 'notes' ) ),
 			'groups'           => self::strings( $plan, 'groups' ),
-			'exclusions'       => array_values( array_unique( array_merge( self::strings( $plan, 'exclusions' ), $dirs ) ) ),
+			'exclusions'       => self::strings( $plan, 'exclusions' ),
+			'exclude_paths'    => array_values( array_unique( $paths ) ),
 			'exclude_oversize' => array_values( array_intersect( $oversize, $tables ) ),
 			'oversize_counts'  => $counts,
 		);
+	}
+
+	/**
+	 * Whether an archive path is covered by one of the literal exclusions:
+	 * equal to an entry, or below it. No pattern is involved.
+	 *
+	 * @param string   $p     Archive path (files/<p> without the prefix).
+	 * @param string[] $paths Literal paths from effective()['exclude_paths'].
+	 * @return bool
+	 */
+	public static function excluded_by_path( string $p, array $paths ): bool {
+		foreach ( $paths as $path ) {
+			if ( $p === $path || 0 === strpos( $p, $path . '/' ) ) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**

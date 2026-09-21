@@ -270,7 +270,7 @@ final class ExportPreflightTest extends JobTestCase {
 		$this->assertSame( TickResult::COMPLETED, $result->status, (string) $this->repo->find( $job->id )->last_error );
 		$review = ExportPlan::read( $work, ExportPlan::REVIEW );
 		$this->assertSame( array( self::PREFIX . 'options' ), $review['decisions']['exclude_oversize'] );
-		$this->assertSame( array( 'wp-content/uploads/wpcptest-preflight/node_modules' ), $review['decisions']['exclude_dirs'] );
+		$this->assertSame( array( 'wp-content/uploads/wpcptest-preflight/node_modules' ), $review['decisions']['exclude_paths'] );
 		$this->assertTrue( $review['asked'] );
 		$frozen = json_decode( (string) file_get_contents( $work . '/' . DatabaseExportStep::TABLES ), true );
 		$this->assertSame( array( self::PREFIX . 'options' ), $frozen['exclude_oversize'] );
@@ -299,7 +299,7 @@ final class ExportPreflightTest extends JobTestCase {
 		$review = ExportPlan::read( $this->work( $this->repo->find( $job->id ) ), ExportPlan::REVIEW );
 		$this->assertFalse( $review['asked'] );
 		$this->assertSame( array( self::PREFIX . 'options' ), $review['decisions']['exclude_oversize'] );
-		$this->assertSame( array(), $review['decisions']['exclude_dirs'] );
+		$this->assertSame( array(), $review['decisions']['exclude_paths'] );
 
 		$job    = $this->repo->create( 'export-b', 0, array(), array( 'contents' => array( 'files' => array( 'uploads' ) ), 'policy' => array( 'unreadable' => 'continue', 'oversize' => 'fail', 'large_dirs' => 'include' ) ) );
 		$result = $this->drive( $job->id );

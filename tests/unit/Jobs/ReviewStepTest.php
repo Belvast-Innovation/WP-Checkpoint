@@ -83,7 +83,7 @@ final class ReviewStepTest extends TestCase {
 		$result = ( new ReviewStep() )->run( $this->context( array() ) );
 		$this->assertSame( StepResult::DONE, $result->kind );
 		$review = json_decode( $this->review(), true );
-		$this->assertSame( array( 'exclude_tables' => array(), 'exclude_oversize' => array(), 'exclude_dirs' => array(), 'notes' => array() ), $review['decisions'] );
+		$this->assertSame( array( 'exclude_tables' => array(), 'exclude_oversize' => array(), 'exclude_paths' => array(), 'notes' => array() ), $review['decisions'] );
 		$this->assertFalse( $review['asked'] );
 	}
 
@@ -142,7 +142,7 @@ final class ReviewStepTest extends TestCase {
 		$decided = $this->review();
 		$review  = json_decode( $decided, true );
 		$this->assertTrue( $review['asked'] );
-		$this->assertSame( array( 'wp-content/plugins/p11/node_modules', 'wp-content/plugins/p1/node_modules', 'wp-content/plugins/p0/node_modules' ), $review['decisions']['exclude_dirs'], 'the largest, and the two beyond the listed ten' );
+		$this->assertSame( array( 'wp-content/plugins/p11/node_modules', 'wp-content/plugins/p1/node_modules', 'wp-content/plugins/p0/node_modules' ), $review['decisions']['exclude_paths'], 'the largest, and the two beyond the listed ten' );
 		$this->assertSame( array( 'wp_options', 'wp_postmeta' ), $review['decisions']['exclude_oversize'] );
 		$this->assertSame( array(), $review['decisions']['exclude_tables'] );
 		$this->assertCount( 1 + 3 + 2, $review['decisions']['notes'] );
@@ -159,7 +159,7 @@ final class ReviewStepTest extends TestCase {
 		$this->assertSame( StepResult::DONE, $result->kind );
 		$review = json_decode( $this->review(), true );
 		$this->assertSame( array( 'wp_options' ), $review['decisions']['exclude_oversize'] );
-		$this->assertSame( array(), $review['decisions']['exclude_dirs'] );
+		$this->assertSame( array(), $review['decisions']['exclude_paths'] );
 		$this->assertFalse( $review['asked'] );
 
 		try {
