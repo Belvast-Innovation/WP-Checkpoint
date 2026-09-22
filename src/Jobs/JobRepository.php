@@ -120,6 +120,17 @@ final class JobRepository {
 	}
 
 	/**
+	 * One line in the storage log (storage.log): engine events that concern
+	 * no single job's log, or that must be found without one.
+	 *
+	 * @param string $message Message (no paths, no site data).
+	 * @return void
+	 */
+	public function log_event( string $message ): void {
+		$this->directories->log_event( $message );
+	}
+
+	/**
 	 * Current time on the database's clock: leases are written and judged
 	 * by every web server of a site against the one database, so a web
 	 * server whose clock drifts neither steals a live lease nor keeps a dead
@@ -135,8 +146,13 @@ final class JobRepository {
 		if ( null === $this->db_offset ) {
 			global $wpdb;
 			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- the database clock, no table.
-			$db              = $wpdb->get_var( 'SELECT UNIX_TIMESTAMP()' );
-			$this->db_offset = is_numeric( $db ) ? (int) $db - time() : 0;
+			$db = $wpdb->get_var( 'SELECT UNIX_TIMESTAMP()' );
+			if ( ! is_numeric( $db ) ) {
+				// Not cached: the next call asks again. Until then the local clock stands in, and the log says so.
+				$this->directories->log_event( 'The database clock could not be read; the web server clock is used for this call.' );
+				return time();
+			}
+			$this->db_offset = (int) $db - time();
 		}
 		return time() + $this->db_offset;
 	}

@@ -34,6 +34,9 @@ final class WorkContext {
 	/** @var array<string, mixed> */
 	public $options = array();
 
+	/** @var callable|null Lease callback given to the context (see JobContext), null for none. */
+	public $lease;
+
 	public function __construct( string $prefix = 'wpcheckpoint-step-', int $id = 7 ) {
 		$this->root = sys_get_temp_dir() . '/' . $prefix . bin2hex( random_bytes( 4 ) );
 		$this->id   = $id;
@@ -86,7 +89,8 @@ final class WorkContext {
 					'percent' => $percent,
 					'message' => $message,
 				);
-			}
+			},
+			$this->lease
 		);
 	}
 

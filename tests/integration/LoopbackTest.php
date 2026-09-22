@@ -142,6 +142,55 @@ final class LoopbackTest extends JobTestCase {
 		$this->assertNotFalse( has_action( Loopback::HOOK, array( Plugin::instance(), 'cron_tick' ) ), 'registered on boot, not only in the admin' );
 	}
 
+	/**
+	 * The three web entry points (REST tick, loopback hop, cron callback) keep running when the client goes
+	 * away and send the client nothing: PHP notices a gone client only when it writes, so a tick that never
+	 * writes cannot be killed that way, and a stray notice is captured instead of written.
+	 */
+	public function test_web_ticks_ignore_a_gone_client_and_send_it_nothing(): void {
+		$noisy = false;
+		$this->register(
+			'quiet',
+			array(
+				new ClosureStep(
+					'q',
+					static function ( JobContext $ctx ) use ( &$noisy ): StepResult {
+						if ( $noisy ) {
+							echo 'Notice: something printed during a tick'; // As display_errors would.
+						}
+						$n = isset( $ctx->cursor()['n'] ) ? (int) $ctx->cursor()['n'] : 0;
+						return $n >= 5 ? StepResult::done() : StepResult::progress( array( 'n' => $n + 1 ), 10 );
+					}
+				),
+			)
+		);
+		$this->expectOutputString( '', 'nothing a tick printed reached the client' );
+		$check = function ( string $entry ): void {
+			$this->assertSame( 1, ignore_user_abort(), "{$entry}: the request keeps running without its client" );
+			$this->assertSame( 0, JobActions::last_output_bytes(), "{$entry}: the tick printed nothing" );
+		};
+		ignore_user_abort( false );
+		$job = Plugin::instance()->jobs()->create( 'quiet' );
+		$this->rest( 'POST', 'jobs/' . $job->id . '/tick' );
+		$check( 'REST tick' );
+		ignore_user_abort( false );
+		$token = Loopback::issue_token( $job->id );
+		wp_set_current_user( 0 );
+		$this->assertSame( 200, rest_get_server()->dispatch( $this->hop_request( $job->id, $token ) )->get_status() );
+		$check( 'loopback hop' );
+		wp_set_current_user( self::$admin_id );
+		ignore_user_abort( false );
+		Plugin::instance()->cron_tick( $job->id );
+		$check( 'cron callback' );
+		// A tick that prints: captured and discarded, its size in the storage log.
+		$noisy = true;
+		$loud  = Plugin::instance()->jobs()->create( 'quiet' );
+		$this->rest( 'POST', 'jobs/' . $loud->id . '/tick' );
+		$this->assertGreaterThan( 0, JobActions::last_output_bytes() );
+		$log = (string) file_get_contents( Plugin::instance()->directories()->base() . '/logs/storage.log' );
+		$this->assertStringContainsString( 'nothing was sent to the client', $log );
+	}
+
 	private function hop_request( int $id, string $token ): \WP_REST_Request {
 		$request = new \WP_REST_Request( 'POST', '/wp-checkpoint/v1/jobs/' . $id . '/loopback' );
 		$request->set_body_params( array( 'token' => $token ) );

@@ -522,7 +522,9 @@ final class RunnerTest extends WP_UnitTestCase {
 		$failed = $this->repo->find( $job->id );
 		$this->assertSame( Job::FAILED, $failed->status );
 		$this->assertSame( 3, $calls, 'the third takeover fails before running the unit again' );
-		$this->assertStringContainsString( 'Stopped: step "work" (phase -) ran over the server\'s execution time limit at the same point 3 times in a row without finishing', $failed->last_error );
+		$this->assertStringContainsString( 'Stopped: step "work" (phase -) was interrupted at the same point 3 times in a row without finishing (ended by the server\'s time or memory limit, or a crash)', $failed->last_error );
+		$this->assertStringContainsString( 'the PHP error log shows why', $failed->last_error );
+		$this->assertStringNotContainsString( 'max_execution_time', $failed->last_error, 'no single setting is blamed' );
 		$this->assertStringNotContainsString( $this->base, $failed->last_error );
 		$log = (string) file_get_contents( $this->base . '/' . $failed->log_path );
 		$this->assertSame( 3, substr_count( $log, 'The previous run ended without finishing; continuing from the last checkpoint' ) );
@@ -632,6 +634,64 @@ final class RunnerTest extends WP_UnitTestCase {
 		} finally {
 			$wpdb->query( 'SET timestamp = DEFAULT' );
 		}
+	}
+
+	public function test_the_database_clock_is_asked_again_after_a_failed_read_and_the_failure_is_logged(): void {
+		global $wpdb;
+		$repo  = new JobRepository( $this->dirs );
+		$saved = $wpdb;
+		$wpdb  = new class() {
+			/**
+			 * The clock query fails.
+			 *
+			 * @return null
+			 */
+			public function get_var() {
+				return null;
+			}
+		};
+		try {
+			$this->assertEqualsWithDelta( time(), $repo->now(), 2, 'the web server clock stands in for this call' );
+		} finally {
+			$wpdb = $saved;
+		}
+		$log = (string) file_get_contents( $this->base . '/logs/storage.log' );
+		$this->assertStringContainsString( 'The database clock could not be read', $log );
+		// Not cached: the next call reads the database clock.
+		$wpdb->query( 'SET timestamp = 2000000000' );
+		try {
+			$this->assertEqualsWithDelta( 2000000000, $repo->now(), 2 );
+		} finally {
+			$wpdb->query( 'SET timestamp = DEFAULT' );
+		}
+	}
+
+	public function test_another_writer_on_the_work_directory_is_retried_and_logged_not_failed(): void {
+		$first = true;
+		$this->register(
+			'concurrent',
+			array(
+				new ClosureStep(
+					'work',
+					function ( JobContext $ctx ) use ( &$first ): StepResult {
+						if ( $first ) {
+							$first = false;
+							throw new \WPCheckpoint\Archive\ConcurrentWriter( 'Another process is writing the same work directory (test).' );
+						}
+						return StepResult::done( 'done' );
+					}
+				),
+			)
+		);
+		$job    = $this->repo->create( 'concurrent' );
+		$result = $this->runner()->tick( $job->id, $this->now );
+		$this->assertSame( TickResult::WAITING, $result->status, 'retried after the back-off, not failed' );
+		$stored = $this->repo->find( $job->id );
+		$this->assertSame( '', (string) $stored->last_error, 'not in last_error' );
+		$log = (string) file_get_contents( $this->base . '/' . $stored->log_path );
+		$this->assertStringContainsString( 'Another process wrote the same work directory; the volume is cut back to the last checkpoint and the step retried', $log );
+		$this->now += 10;
+		$this->assertSame( TickResult::COMPLETED, $this->runner()->tick( $job->id, $this->now )->status );
 	}
 
 	/**

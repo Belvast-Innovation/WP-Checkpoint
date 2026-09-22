@@ -165,7 +165,7 @@ final class Plugin {
 	 */
 	public function cron_tick( $job_id ): void {
 		try {
-			$this->job_actions()->tick( (int) $job_id, JobActions::started_at() );
+			$this->job_actions()->web_tick( (int) $job_id, JobActions::started_at() );
 		} catch ( \Throwable $e ) {
 			$this->directories()->log_event( sprintf( 'Cron tick of job %d failed: %s', (int) $job_id, get_class( $e ) ) );
 		}

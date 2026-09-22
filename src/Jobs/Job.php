@@ -188,11 +188,11 @@ final class Job {
 
 	/**
 	 * Takeovers in a row at the same position: how many times a driver took
-	 * the job over from a run that did not end (killed by the server) while
+	 * the job over from a run that ended without releasing the lock (killed
+	 * at the time limit, a fatal error at the memory limit, a crash) while
 	 * the job stood at the same step and cursor (takeover_mark). Reset to 1
 	 * when the position differs, to 0 on retry. The Runner fails the job at
-	 * Runner::MAX_TAKEOVERS: a unit there takes longer than the server lets
-	 * a request run, and no other counter sees a run that never returns.
+	 * Runner::MAX_TAKEOVERS: no other counter sees a run that never returns.
 	 *
 	 * @var int
 	 */

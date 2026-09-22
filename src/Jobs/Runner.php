@@ -7,6 +7,7 @@
 
 namespace WPCheckpoint\Jobs;
 
+use WPCheckpoint\Archive\ConcurrentWriter;
 use WPCheckpoint\Support\Environment;
 use WPCheckpoint\Support\Logger;
 use WPCheckpoint\Support\Redactor;
@@ -316,6 +317,11 @@ final class Runner {
 			} catch ( StaleJob $e ) {
 				throw new LockLost( $e->getMessage(), 0, $e ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
 			} catch ( TransientFailure $e ) {
+				if ( $e instanceof ConcurrentWriter ) {
+					// Kept in the job log only (never in last_error): the one trace of two processes on one work
+					// directory, and what to look for when a backup made around a takeover is questioned.
+					$logger->warning( 'Another process wrote the same work directory; the volume is cut back to the last checkpoint and the step retried', array( 'step' => $step_id ) );
+				}
 				$state['retries'] = (int) $state['retries'] + 1;
 				$message          = $this->describe( $e );
 				if ( $state['retries'] > self::MAX_RETRIES ) {
@@ -549,7 +555,10 @@ final class Runner {
 
 	/**
 	 * Why a job that was taken over MAX_TAKEOVERS times at the same position
-	 * fails: which step and phase, never a path or the site.
+	 * fails: which step and phase, never a path or the site. A takeover means
+	 * the run ended without releasing the lock: killed at the time limit, a
+	 * fatal error at the memory limit (the more common one at 128 MB), a
+	 * crash, a restarted worker. The message does not guess which.
 	 *
 	 * @param Job $job Job.
 	 * @return string
@@ -557,7 +566,7 @@ final class Runner {
 	private static function takeover_message( Job $job ): string {
 		$phase = isset( $job->cursor['phase'] ) && is_string( $job->cursor['phase'] ) && 1 === preg_match( '/\A[a-z_]{1,32}\z/', $job->cursor['phase'] ) ? $job->cursor['phase'] : '-';
 		return sprintf(
-			'Stopped: step "%1$s" (phase %2$s) ran over the server\'s execution time limit at the same point %3$d times in a row without finishing. A single unit of work there takes longer than this server allows; please report it with the job log.',
+			'Stopped: step "%1$s" (phase %2$s) was interrupted at the same point %3$d times in a row without finishing (ended by the server\'s time or memory limit, or a crash). The job log shows where it stopped; the PHP error log shows why. Please report it with both.',
 			'' === $job->step ? '-' : $job->step,
 			$phase,
 			$job->takeovers

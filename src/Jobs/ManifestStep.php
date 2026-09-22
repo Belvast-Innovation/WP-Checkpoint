@@ -646,6 +646,11 @@ final class ManifestStep implements Step {
 	/**
 	 * Write the standalone manifest whole (temporary file and rename).
 	 *
+	 * The rename is not preceded by a lease confirmation: the content is a
+	 * function of the cursor (the clock is fixed there before anything is
+	 * written) and the volumes, so a run that outlived its lease and renames
+	 * late puts the same bytes in the same place; the rename is idempotent.
+	 *
 	 * @param string $path Path.
 	 * @param string $json Manifest JSON.
 	 * @return void

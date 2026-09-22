@@ -922,6 +922,37 @@ final class PackerTest extends TestCase {
 		}
 	}
 
+	public function test_the_single_volume_rename_is_confirmed_right_before_it_happens(): void {
+		$calls   = 0;
+		$refuse  = false;
+		$options = $this->options(
+			array(
+				'confirm' => function () use ( &$calls, &$refuse ): void {
+					++$calls;
+					if ( $refuse && 3 === $calls ) {
+						throw new \RuntimeException( 'lease lost at the rename (test)' );
+					}
+				},
+			)
+		);
+		$packer  = Packer::open( $this->out, 'site', array(), $options );
+		$this->add( $packer, $this->source( 'a.bin', 1000, 1 ), 'files/a.bin', 1758196800 ); // Confirm 1: the volume file.
+		while ( $packer->write_piece() > 0 ) {
+			continue;
+		}
+		$packer->prepare_finish( 4096 );
+		$refuse = true;
+		try {
+			$packer->finish( array(), '{"embedded":true}', 1758196800 ); // Confirm 2: the seal; confirm 3: the single name.
+			$this->fail( 'the single-volume rename must stop at the confirmation' );
+		} catch ( \RuntimeException $e ) {
+			$this->assertSame( 'lease lost at the rename (test)', $e->getMessage() );
+		}
+		$this->assertSame( 3, $calls );
+		$this->assertFileExists( $this->out . '/site.part001.wpcheckpoint.zip', 'sealed under its volume name' );
+		$this->assertFileDoesNotExist( $this->out . '/site.wpcheckpoint.zip', 'not renamed to the single name' );
+	}
+
 	/**
 	 * Add an entry the way a step does: a volume open, sealed and reopened when it has no room.
 	 */

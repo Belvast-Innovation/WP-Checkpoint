@@ -968,6 +968,9 @@ final class Packer {
 		if ( file_exists( $this->dir . DIRECTORY_SEPARATOR . $name ) ) {
 			throw new \RuntimeException( 'A file of the new volume already exists.' );
 		}
+		// The lease is confirmed before the leftovers are removed: removing a file is as irreversible as
+		// creating one, and a run that lost its lease must not remove the new holder's volume.
+		$this->confirm();
 		foreach ( array( $this->partial_path(), $this->records_path() ) as $path ) {
 			// Left by a run that created this volume and died before its first checkpoint: nothing of it is
 			// committed, and no other writer uses this base name (it carries a random suffix).
@@ -976,7 +979,6 @@ final class Packer {
 			}
 		}
 		$this->check_space( $next_entry_bytes );
-		$this->confirm();
 		$handle = fopen( $this->partial_path(), 'w+b' );
 		if ( false === $handle ) {
 			throw new \RuntimeException( 'The volume file could not be created.' );
@@ -1171,7 +1173,7 @@ final class Packer {
 		}
 		$stat = fstat( $this->handle );
 		if ( is_array( $stat ) && (int) $stat['size'] !== (int) $this->high_water ) {
-			throw new ConcurrentWriter( 'Another process is writing the same work directory (a previous run outlived its lease); this run stops without touching the volume.' );
+			throw new ConcurrentWriter( 'Another process is writing the same work directory (a previous run outlived its lease); this run stops without touching the volume, and the retry cuts it back to the last checkpoint.' );
 		}
 	}
 

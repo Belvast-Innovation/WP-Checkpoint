@@ -40,6 +40,13 @@ final class JobActions {
 	private $loopback;
 
 	/**
+	 * Bytes the last web tick printed (see web_tick()).
+	 *
+	 * @var int
+	 */
+	private static $last_output_bytes = 0;
+
+	/**
 	 * Constructor.
 	 *
 	 * @param JobRepository $repository Repository.
@@ -92,6 +99,50 @@ final class JobActions {
 	 */
 	public function list_jobs( array $statuses = array(), int $limit = 50 ): array {
 		return $this->repository->list_jobs( $statuses, $limit );
+	}
+
+	/**
+	 * A tick driven by a web request (the REST tick route, the loopback hop,
+	 * a cron event): the request keeps running when the client goes away,
+	 * and nothing it prints reaches the client.
+	 *
+	 * PHP notices a client that went away only when it tries to send output,
+	 * and then ends the script: a tick killed like that holds its lock until
+	 * the lease expires and counts as a takeover (three at the same position
+	 * fail the job). ignore_user_abort( true ) keeps the request running;
+	 * the output buffer makes sure a tick never sends anything, so a stray
+	 * notice with display_errors on cannot be that write either. What was
+	 * captured is discarded and its size logged. Such a tick does not turn
+	 * into an orphan process: it is bounded by its time budget and its lease
+	 * like any other.
+	 *
+	 * @param int        $id         Job id.
+	 * @param float|null $started_at Budget start.
+	 * @return TickResult
+	 */
+	public function web_tick( int $id, $started_at = null ): TickResult {
+		if ( function_exists( 'ignore_user_abort' ) ) {
+			ignore_user_abort( true );
+		}
+		ob_start();
+		try {
+			return $this->tick( $id, $started_at );
+		} finally {
+			$output                  = ob_get_clean();
+			self::$last_output_bytes = is_string( $output ) ? strlen( $output ) : 0;
+			if ( self::$last_output_bytes > 0 ) {
+				$this->repository->log_event( sprintf( 'Job %d: the tick printed %d bytes; discarded, nothing was sent to the client.', $id, self::$last_output_bytes ) );
+			}
+		}
+	}
+
+	/**
+	 * Bytes the last web tick printed (and discarded); 0 on a clean tick. For tests.
+	 *
+	 * @return int
+	 */
+	public static function last_output_bytes(): int {
+		return self::$last_output_bytes;
 	}
 
 	/**

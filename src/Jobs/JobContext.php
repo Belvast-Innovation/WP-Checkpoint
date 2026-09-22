@@ -288,14 +288,19 @@ final class JobContext {
 	}
 
 	/**
-	 * Whether the step must return now (budget spent).
+	 * Whether the step must return now (budget spent). During a run it also
+	 * looks after the lease: when less than half of it is left (judged on
+	 * the repository's clock, no query) it is renewed with a
+	 * compare-and-set on the token, which throws LockLost when another
+	 * driver holds it now; with more than half left the lease is taken as
+	 * held without asking the database. Steps call this between units, so
+	 * a unit starts with at least half a lease ahead of it.
 	 *
 	 * @return bool
+	 * @throws LockLost When the renewal finds the lease taken; the step must not catch it.
 	 */
 	public function should_stop(): bool {
 		if ( null !== $this->lease ) {
-			// Steps call this between units, so every unit after the first starts with the lease confirmed:
-			// renewed when less than half is left, LockLost when another process holds it now.
 			call_user_func( $this->lease, false );
 		}
 		return '' !== $this->stop_reason();

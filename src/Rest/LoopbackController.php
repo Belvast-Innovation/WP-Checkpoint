@@ -95,7 +95,7 @@ final class LoopbackController extends Controller {
 	 */
 	public function hop( WP_REST_Request $request ) {
 		try {
-			$result = $this->actions->tick( (int) $request->get_param( 'id' ), JobActions::started_at() );
+			$result = $this->actions->web_tick( (int) $request->get_param( 'id' ), JobActions::started_at() );
 		} catch ( JobsUnavailable $e ) {
 			return new WP_Error( 'wpcheckpoint_jobs_unavailable', __( 'Jobs are unavailable right now.', 'wp-checkpoint' ), array( 'status' => 503 ) );
 		}
