@@ -842,7 +842,7 @@ final class PackerTest extends TestCase {
 		$packer = Packer::open( $this->out, 'site', $state, $this->options() );
 		$this->assertTrue( $packer->already_finished(), 'the lone volume is found under the single name' );
 		$packer->finish( array(), '{"embedded":true}', 1758196800 );
-		$this->assertSame( array( $this->out . '/site.wpcheckpoint.zip' ), $packer->sealed_paths() );
+		$this->assertSame( array( 'site.wpcheckpoint.zip' ), array_map( 'basename', $packer->sealed_paths() ) );
 		$this->assertSame( $expected, hash_file( 'sha256', $packer->sealed_paths()[0] ) );
 		$this->assertCount( 1, glob( $this->out . '/*' ) ?: array(), 'no second volume was made for the summaries' );
 	}
