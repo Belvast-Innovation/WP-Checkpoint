@@ -471,8 +471,10 @@ final class ArchiveVerifierTest extends TestCase {
 		$this->assertSame( 2, $result->counts()['volumes_verified'], 'Containers were fully checked before the walk stopped.' );
 		$this->assertSame( VerifyCommand::EXIT_UNSUPPORTED_LAYOUT, VerifyCommand::exit_code( $result->outcome() ) );
 
-		// Structure depth never reaches the walk: the import pre-check accepts such an archive.
-		$this->assertSame( VerificationResult::PASSED_PARTIAL, $this->verify( $builder, $builder->manifest_path, ArchiveVerifier::DEPTH_STRUCTURE )->outcome() );
+		// Structure depth walks the entries too (without hashing them) and reaches the same conclusion.
+		$structure = $this->verify( $builder, $builder->manifest_path, ArchiveVerifier::DEPTH_STRUCTURE );
+		$this->assertSame( VerificationResult::UNSUPPORTED_LAYOUT, $structure->outcome() );
+		$this->assertStringContainsString( 'repacked by another tool, not that data is damaged', $structure->to_text( self::identity() ) );
 	}
 
 	public function test_a_manifest_that_cannot_be_read_is_invalid(): void {
@@ -879,5 +881,114 @@ final class ArchiveVerifierTest extends TestCase {
 		$result = $this->verify( $torn, $torn->manifest_path, ArchiveVerifier::DEPTH_STRUCTURE );
 		$this->assertTrue( $result->restore_refused() );
 		$this->assertNotNull( self::find( $result, array( 'kind' => Finding::MALFORMED ) ), $result->to_text( self::identity() ) );
+	}
+
+	/**
+	 * Overwrite bytes of a volume in place.
+	 */
+	private static function poke( string $path, int $offset, string $bytes ): void {
+		$h = fopen( $path, 'r+b' );
+		fseek( $h, $offset );
+		fwrite( $h, $bytes );
+		fclose( $h );
+	}
+
+	/**
+	 * The first data entry of a volume (not a summary entry).
+	 */
+	private static function first_data_entry( string $volume ): array {
+		foreach ( \WPCheckpoint\Archive\ZipReader::open( $volume )->entries() as $entry ) {
+			if ( ! in_array( $entry['name'], \WPCheckpoint\Archive\Packer::SUMMARY_ENTRIES, true ) ) {
+				return $entry;
+			}
+		}
+		throw new \RuntimeException( 'no data entry' );
+	}
+
+	public function test_a_local_header_that_disagrees_with_the_central_directory_is_damage_at_both_depths(): void {
+		// What a run that outlived its lease leaves: the placeholder header (CRC and sizes zero) written over a
+		// header another run had already completed. The central directory and every length are unchanged.
+		$builder = $this->typical();
+		$entry   = self::first_data_entry( $builder->volumes[0] );
+		self::poke( $builder->volumes[0], (int) $entry['offset'] + 14, str_repeat( chr( 0 ), 12 ) );
+		foreach ( array( ArchiveVerifier::DEPTH_STRUCTURE, ArchiveVerifier::DEPTH_FULL ) as $depth ) {
+			$result  = $this->verify( $builder, $builder->manifest_path, $depth );
+			$finding = self::find( $result, array( 'phase' => ArchiveVerifier::PHASE_CONTENTS, 'kind' => Finding::CORRUPT, 'entry' => $entry['name'] ) );
+			$this->assertNotNull( $finding, $depth . ': ' . $result->to_text( self::identity() ) );
+			$this->assertSame( 'The local header of the entry disagrees with the central directory (crc, csize, usize).', $finding['message'] );
+			$this->assertSame( 1, $finding['volume'] );
+			$this->assertSame( VerificationResult::FAILED, $result->outcome(), $depth );
+			$this->assertTrue( $result->restore_refused() );
+		}
+		// A summary entry's header (the embedded manifest in the last volume) is checked too.
+		$builder = $this->typical();
+		$last    = end( $builder->volumes );
+		$summary = \WPCheckpoint\Archive\ZipReader::open( $last )->find( 'manifest.json' );
+		self::poke( $last, (int) $summary['offset'] + 14, str_repeat( chr( 0 ), 4 ) );
+		$result = $this->verify( $builder, $builder->manifest_path, ArchiveVerifier::DEPTH_STRUCTURE );
+		$this->assertNotNull( self::find( $result, array( 'kind' => Finding::CORRUPT, 'entry' => 'manifest.json' ) ), $result->to_text( self::identity() ) );
+	}
+
+	public function test_an_entry_with_data_descriptors_says_the_archive_was_written_or_repacked_by_another_tool(): void {
+		$builder = $this->typical();
+		$volume  = $builder->volumes[0];
+		$reader  = \WPCheckpoint\Archive\ZipReader::open( $volume );
+		$entries = array_values( array_filter( $reader->entries(), static function ( array $e ): bool {
+			return ! in_array( $e['name'], \WPCheckpoint\Archive\Packer::SUMMARY_ENTRIES, true );
+		} ) );
+		foreach ( array_slice( $entries, 0, 2 ) as $entry ) {
+			$flags = pack( 'v', \WPCheckpoint\Archive\ZipFormat::FLAG_UTF8 | \WPCheckpoint\Archive\ZipFormat::FLAG_DATA_DESCRIPTOR );
+			self::poke( $volume, (int) $entry['offset'] + 6, $flags );
+			self::poke( $volume, (int) $entry['cd_offset'] + 8, $flags );
+			self::poke( $volume, (int) $entry['offset'] + 14, str_repeat( chr( 0 ), 12 ) ); // Allowed with a data descriptor.
+		}
+		$result = $this->verify( $builder, $builder->manifest_path, ArchiveVerifier::DEPTH_STRUCTURE );
+		$this->assertSame( VerificationResult::UNSUPPORTED_LAYOUT, $result->outcome(), $result->to_text( self::identity() ) );
+		$this->assertSame( 1, $result->findings_total(), 'said once, however many entries carry it; the zeroed CRC and sizes are not damage then' );
+		$this->assertSame( ArchiveVerifier::FOREIGN_MESSAGE, self::findings( $result )[0]['message'] );
+		$this->assertStringContainsString( 'not written by WP Checkpoint, or it was repacked by another tool', $result->to_text( self::identity() ) );
+	}
+
+	public function test_a_local_header_that_cannot_be_read_is_a_finding_not_an_exception(): void {
+		$builder = $this->typical();
+		$entry   = self::first_data_entry( $builder->volumes[0] );
+		self::poke( $builder->volumes[0], (int) $entry['offset'], 'XXXX' ); // The signature.
+		$result  = $this->verify( $builder, $builder->manifest_path, ArchiveVerifier::DEPTH_STRUCTURE );
+		$finding = self::find( $result, array( 'kind' => Finding::CORRUPT, 'entry' => $entry['name'] ) );
+		$this->assertNotNull( $finding );
+		$this->assertStringContainsString( 'The local header of the entry cannot be read: The local header is malformed.', $finding['message'] );
+	}
+
+	public function test_the_entry_walk_reports_its_progress_and_says_early_when_it_will_be_slow(): void {
+		$builder = new ArchiveBuilder();
+		for ( $i = 0; $i < 1200; $i++ ) {
+			$builder->file( sprintf( 'wp-content/uploads/f%04d.txt', $i ), 'x' . $i );
+		}
+		$builder->table( 'wp_options', array( ArchiveBuilder::noise( 300 ) ) );
+		$builder->build();
+		$this->builders[] = $builder;
+		$verifier         = ArchiveVerifier::open( $builder->manifest_path, $builder->work_dir(), ArchiveVerifier::DEPTH_STRUCTURE );
+		$now              = 0.0;
+		$verifier->set_clock( static function () use ( &$now ): float {
+			$now += 50.0; // Two readings per unit: 50 seconds per unit of 1000 entries, 0.05 s per entry.
+			return $now;
+		} );
+		$this->assertSame( array( 'phase' => ArchiveVerifier::PHASE_MANIFEST, 'done' => 0, 'total' => 0, 'seconds_left' => null, 'slow' => false ), $verifier->progress() );
+		$seen = array();
+		while ( $verifier->step() ) {
+			$seen[] = $verifier->progress();
+		}
+		$walk = array_values( array_filter( $seen, static function ( array $p ): bool {
+			return ArchiveVerifier::PHASE_CONTENTS === $p['phase'] && $p['done'] > 0;
+		} ) );
+		$this->assertSame( 1201, $walk[0]['total'], 'every index line: 1200 files and one table chunk' );
+		$this->assertSame( 1000, $walk[0]['done'], 'one unit is 1000 entries' );
+		$this->assertSame( 11, $walk[0]['seconds_left'], '201 entries left at 0.05 s each, rounded up' );
+		$this->assertTrue( $walk[0]['slow'], '1201 entries at 0.05 s is over a minute: said after the first 1000' );
+		$last = $verifier->progress();
+		$this->assertSame( 1201, $last['done'] );
+		$this->assertSame( 0, $last['seconds_left'] );
+		$this->assertSame( VerificationResult::PASSED_PARTIAL, $verifier->result()->outcome() );
+		$this->assertSame( 1201, $verifier->result()->counts()['headers_checked'] );
 	}
 }

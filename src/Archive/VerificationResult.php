@@ -224,7 +224,7 @@ final class VerificationResult {
 		foreach ( $this->partial_reasons as $reason ) {
 			$lines[] = self::REASON_EMBEDDED === $reason
 				? 'The manifest is the copy embedded in the last volume; that volume\'s own container hash was not checked. Verify from the standalone manifest for a full pass.'
-				: 'Only the structure was checked (manifest, volumes, sidecar indexes); volume containers and entry contents were not.';
+				: 'Only the structure was checked (manifest, volumes, sidecar indexes, the order, names and sizes of the entries and their headers); volume containers and entry contents were not.';
 		}
 		// stopped_at and the count keys are fixed vocabulary set by the verifier, not text from the archive;
 		// only a forged cursor could carry anything else there, which needs database write access already.

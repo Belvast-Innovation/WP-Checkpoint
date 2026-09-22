@@ -544,6 +544,41 @@ final class ZipReader {
 	}
 
 	/**
+	 * An entry's local header, parsed (ZipFormat::parse_local_header()).
+	 * Reads 30 bytes, then the name and extra field the header declares:
+	 * at most 30 + 2 x 65535 bytes.
+	 *
+	 * @param array<string, mixed> $entry Entry from each() / entries().
+	 * @return array{name: string, flags: int, method: int, time: int, date: int, crc: int, csize: int, usize: int, length: int}
+	 * @throws \RuntimeException When the header cannot be read or is malformed.
+	 */
+	public function local_header( array $entry ): array {
+		$handle = $this->handle();
+		try {
+			if ( 0 !== fseek( $handle, (int) $entry['offset'] ) ) {
+				throw new \RuntimeException( 'The local header could not be positioned.' );
+			}
+			$fixed = fread( $handle, 30 );
+			if ( ! is_string( $fixed ) || 30 !== strlen( $fixed ) ) {
+				throw new \RuntimeException( 'The local header is truncated.' );
+			}
+			$sizes = unpack( 'vname/vextra', substr( $fixed, 26, 4 ) );
+			$rest  = (int) $sizes['name'] + (int) $sizes['extra'];
+			$tail  = $rest > 0 ? fread( $handle, $rest ) : '';
+			if ( ! is_string( $tail ) || strlen( $tail ) !== $rest ) {
+				throw new \RuntimeException( 'The local header is truncated.' );
+			}
+		} finally {
+			fclose( $handle );
+		}
+		$parsed = ZipFormat::parse_local_header( $fixed . $tail );
+		if ( null === $parsed ) {
+			throw new \RuntimeException( 'The local header is malformed.' );
+		}
+		return $parsed;
+	}
+
+	/**
 	 * Where an entry's bytes start: after its local header, whose length is
 	 * read from the file (the central directory's name and extra lengths
 	 * may differ from the local ones).

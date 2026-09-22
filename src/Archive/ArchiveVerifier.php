@@ -63,6 +63,15 @@ final class ArchiveVerifier {
 
 	const ORDER_MESSAGE = 'The order of entries in the archive does not match the index. This usually means the archive was repacked by another tool, not that data is damaged.';
 
+	const FOREIGN_MESSAGE = 'This archive was not written by WP Checkpoint, or it was repacked by another tool: its entries use data descriptors, which this plugin never writes.';
+
+	/**
+	 * A walk whose estimate, extrapolated from the first ESTIMATE_AFTER
+	 * entries, exceeds this many seconds is reported as slow (see progress()).
+	 */
+	const SLOW_SECONDS   = 60;
+	const ESTIMATE_AFTER = 1000;
+
 	/**
 	 * Manifest file or last volume.
 	 *
@@ -113,6 +122,13 @@ final class ArchiveVerifier {
 	private $handles = array();
 
 	/**
+	 * Clock for the walk's time estimate (microtime( true ); tests inject one).
+	 *
+	 * @var callable
+	 */
+	private $clock;
+
+	/**
 	 * Constructor: see open().
 	 *
 	 * @param string               $path     Path.
@@ -124,6 +140,54 @@ final class ArchiveVerifier {
 		$this->dir      = dirname( $path );
 		$this->work_dir = $work_dir;
 		$this->state    = $state;
+		$this->clock    = static function (): float {
+			return microtime( true );
+		};
+	}
+
+	/**
+	 * Replace the clock the walk's estimate is measured with (tests).
+	 *
+	 * @param callable $clock function(): float, seconds.
+	 * @return void
+	 */
+	public function set_clock( callable $clock ): void {
+		$this->clock = $clock;
+	}
+
+	/**
+	 * Where the run is, for a progress display: the phase, and in the entry
+	 * walk (every depth walks every volume's entries; structure depth
+	 * without hashing their data) entries done out of all entries the
+	 * index declares. Once ESTIMATE_AFTER entries were walked, the time
+	 * they took is extrapolated to the rest ("seconds_left"), and "slow"
+	 * says the whole walk is estimated above SLOW_SECONDS: on a cold disk
+	 * with large files every local header is a seek, and a display that
+	 * only says "checking" would look stuck.
+	 *
+	 * @return array{phase: string, done: int, total: int, seconds_left: int|null, slow: bool}
+	 */
+	public function progress(): array {
+		$counts  = (array) ( $this->state['counts'] ?? array() );
+		$total   = (int) ( $counts['chunks_declared'] ?? 0 ) + (int) ( $counts['files_declared'] ?? 0 );
+		$done    = (int) ( $counts['headers_checked'] ?? 0 );
+		$walk    = (array) ( $this->state['walk'] ?? array() );
+		$entries = (int) ( $walk['entries'] ?? 0 );
+		$seconds = (float) ( $walk['seconds'] ?? 0.0 );
+		$left    = null;
+		$slow    = false;
+		if ( $entries >= self::ESTIMATE_AFTER && $total > 0 ) {
+			$per  = $seconds / $entries;
+			$left = (int) ceil( max( 0, $total - $done ) * $per );
+			$slow = $per * $total > self::SLOW_SECONDS;
+		}
+		return array(
+			'phase'        => (string) $this->state['phase'],
+			'done'         => $done,
+			'total'        => $total,
+			'seconds_left' => $left,
+			'slow'         => $slow,
+		);
 	}
 
 	/**
@@ -227,8 +291,18 @@ final class ArchiveVerifier {
 	 * @throws \RuntimeException When the verifier itself cannot proceed (work directory lost, manifest changed meanwhile).
 	 */
 	public function step(): bool {
+		$walking = self::PHASE_CONTENTS === $this->state['phase'];
+		$before  = (int) ( $this->state['counts']['headers_checked'] ?? 0 );
+		$started = $walking ? (float) call_user_func( $this->clock ) : 0.0;
 		try {
 			$this->dispatch();
+			if ( $walking ) {
+				$walk                = (array) ( $this->state['walk'] ?? array() );
+				$this->state['walk'] = array(
+					'entries' => (int) ( $walk['entries'] ?? 0 ) + (int) ( $this->state['counts']['headers_checked'] ?? 0 ) - $before,
+					'seconds' => (float) ( $walk['seconds'] ?? 0.0 ) + max( 0.0, (float) call_user_func( $this->clock ) - $started ),
+				);
+			}
 		} catch ( EnvironmentFailure $e ) {
 			$this->add( new Finding( (string) $this->state['phase'], Finding::ENVIRONMENT, 'This server could not read or write what the check needs: ' . $e->getMessage() ) );
 			$this->state['unreadable'] = true;
@@ -322,6 +396,7 @@ final class ArchiveVerifier {
 			'files_verified'   => 0,
 			'files_size_only'  => 0,
 			'entries_missing'  => 0,
+			'headers_checked'  => 0,
 		);
 		$this->state['phase']    = self::PHASE_VOLUMES;
 		$this->state['volume']   = 0;
@@ -1030,7 +1105,9 @@ final class ArchiveVerifier {
 		}
 		$this->state['table'] = null;
 		if ( self::DEPTH_FULL !== $this->state['depth'] ) {
-			$this->state['phase'] = self::PHASE_DONE;
+			// Structure depth walks every volume's central directory too, in step with the index and with each
+			// local header compared to its central record, but hashes nothing (no containers, no data).
+			$this->start_contents();
 			return;
 		}
 		$this->state['phase']  = self::PHASE_CONTAINERS;
@@ -1251,6 +1328,18 @@ final class ArchiveVerifier {
 					);
 					++$entries;
 					if ( $entry['directory'] || in_array( $entry['name'], Packer::SUMMARY_ENTRIES, true ) ) {
+						if ( ! $entry['directory'] ) {
+							// The indexes and the embedded manifest have no index line, but their headers are ours too.
+							$this->check_local_header(
+								$reader,
+								$entry,
+								array(
+									'volume' => $volume['ordinal'],
+									'entry'  => (string) $entry['name'],
+								),
+								false
+							);
+						}
 						$this->state['entry'] = $next;
 						return $entries < self::ENTRIES_PER_UNIT;
 					}
@@ -1352,8 +1441,16 @@ final class ArchiveVerifier {
 		$where              = $this->line_where( $peeked, $ordinal );
 		$chunk_bytes        = $this->manifest()->chunk_bytes();
 		$usize              = (int) $entry['usize'];
+		if ( 0 === (int) $this->state['entry_block'] ) {
+			$this->check_local_header( $reader, $entry, $where );
+		}
 		if ( $usize !== $line['b'] ) {
 			$this->add( new Finding( self::PHASE_CONTENTS, Finding::CORRUPT, 'The entry size differs from the index.', $where ) );
+			$this->consume_line( $peeked );
+			return true;
+		}
+		if ( self::DEPTH_FULL !== $this->state['depth'] ) {
+			// Structure depth: order, name, size and headers are checked; the data is not read.
 			$this->consume_line( $peeked );
 			return true;
 		}
@@ -1418,6 +1515,40 @@ final class ArchiveVerifier {
 		++$this->state['counts']['files_verified'];
 		$this->consume_line( $peeked );
 		return true;
+	}
+
+	/**
+	 * The entry's local header against its central record: a difference is
+	 * a corrupt finding naming the fields (the copies a streaming reader and
+	 * a seeking reader trust would disagree); a header that cannot be read
+	 * is one too. An entry with data descriptors marks an archive another
+	 * tool wrote or repacked: reported once per run, as unsupported. Never
+	 * throws.
+	 *
+	 * @param ZipReader            $reader Open volume.
+	 * @param array<string, mixed> $entry  Central record.
+	 * @param array<string, mixed> $where  Location.
+	 * @param bool                 $count  Whether the entry counts toward progress (an index line's entry).
+	 * @return void
+	 */
+	private function check_local_header( ZipReader $reader, array $entry, array $where, bool $count = true ): void {
+		if ( $count ) {
+			++$this->state['counts']['headers_checked'];
+		}
+		try {
+			$local = $reader->local_header( $entry );
+		} catch ( \RuntimeException $e ) {
+			$this->add( new Finding( self::PHASE_CONTENTS, Finding::CORRUPT, 'The local header of the entry cannot be read: ' . $e->getMessage(), $where ) );
+			return;
+		}
+		$check = LocalHeaderCheck::compare( $entry, $local );
+		if ( $check['data_descriptor'] && empty( $this->state['foreign'] ) ) {
+			$this->state['foreign'] = true;
+			$this->add( new Finding( self::PHASE_CONTENTS, Finding::UNSUPPORTED, self::FOREIGN_MESSAGE, $where ) );
+		}
+		if ( array() !== $check['fields'] ) {
+			$this->add( new Finding( self::PHASE_CONTENTS, Finding::CORRUPT, 'The local header of the entry disagrees with the central directory (' . implode( ', ', $check['fields'] ) . ').', $where ) );
+		}
 	}
 
 	/**

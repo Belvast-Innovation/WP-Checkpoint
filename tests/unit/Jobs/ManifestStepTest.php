@@ -266,6 +266,39 @@ final class ManifestStepTest extends TestCase {
 		$this->assertStringContainsString( 'Self-check passed', $this->ctx->log() );
 	}
 
+	public function test_a_local_header_overwritten_before_the_self_check_fails_it_with_the_fields_named(): void {
+		// Run to the self-check, then overwrite a local header the way a run that outlived its lease would.
+		$this->ctx->tick = 5.0;
+		$cursor          = array();
+		for ( $i = 0; $i < 60; $i++ ) {
+			$result = $this->step()->run( $this->ctx->context( $cursor ) );
+			$cursor = StepResult::PROGRESS === $result->kind ? $result->cursor : $cursor;
+			if ( isset( $cursor['phase'] ) && 'verify' === $cursor['phase'] ) {
+				break;
+			}
+		}
+		$this->assertSame( 'verify', $cursor['phase'] );
+		$volumes = glob( $this->volumes() . '/*.wpcheckpoint.zip' ) ?: array();
+		sort( $volumes );
+		$entry = ZipReader::open( $volumes[0] )->entries()[0];
+		$h     = fopen( $volumes[0], 'r+b' );
+		fseek( $h, (int) $entry['offset'] + 14 );
+		fwrite( $h, str_repeat( chr( 0 ), 12 ) );
+		fclose( $h );
+		$cursor['verifier'] = array();
+		$this->ctx->tick    = 0.0;
+		try {
+			$this->drive( $this->step(), $cursor );
+			$this->fail( 'the self-check must refuse the archive' );
+		} catch ( \RuntimeException $e ) {
+			$this->assertStringStartsWith( ManifestStep::SELF_CHECK_PREFIX, $e->getMessage() );
+			$this->assertStringContainsString( 'The local header of the entry disagrees with the central directory (crc, csize, usize)', $e->getMessage() );
+			$this->assertStringNotContainsString( '.wpcheckpoint.zip', $e->getMessage() );
+		}
+		$messages = array_column( $this->ctx->checkpoints, 'message' );
+		$this->assertNotEmpty( preg_grep( '/^Checking the written archive: \d+ of \d+ entries$/', $messages ), 'the walk reports its progress' );
+	}
+
 	/**
 	 * @return array<string, string>
 	 */

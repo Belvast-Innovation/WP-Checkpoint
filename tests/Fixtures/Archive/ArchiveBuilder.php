@@ -81,7 +81,7 @@ final class ArchiveBuilder {
 	/**
 	 * Constructor.
 	 *
-	 * @param array<string, mixed> $options files_first (bool), database_lines (callable), files_lines (callable), manifest (callable), deflate_max_bytes (int).
+	 * @param array<string, mixed> $options files_first (bool), volume_bytes (int), database_lines (callable), files_lines (callable), manifest (callable), deflate_max_bytes (int).
 	 */
 	public function __construct( array $options = array() ) {
 		$this->root    = sys_get_temp_dir() . '/wpcheckpoint-verify-' . bin2hex( random_bytes( 4 ) );
@@ -244,7 +244,7 @@ final class ArchiveBuilder {
 		file_put_contents( $files_index, self::jsonl( $file_lines ) );
 
 		$options = array(
-			'volume_bytes'       => self::VOLUME_BYTES,
+			'volume_bytes'       => $this->options['volume_bytes'] ?? self::VOLUME_BYTES,
 			'volume_chunk_bytes' => self::CHUNK_BYTES,
 			'deflate_max_bytes'  => $this->options['deflate_max_bytes'] ?? self::DEFLATE_MAX,
 			'disk_free'          => static function (): int {
