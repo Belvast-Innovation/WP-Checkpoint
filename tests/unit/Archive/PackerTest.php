@@ -6,6 +6,7 @@ use WPCheckpoint\Archive\ChunkHasher;
 use WPCheckpoint\Archive\InsufficientSpace;
 use WPCheckpoint\Archive\IndexLine;
 use WPCheckpoint\Archive\Packer;
+use WPCheckpoint\Archive\SourceChanged;
 use WPCheckpoint\Archive\ZipFormat;
 use WPCheckpoint\Archive\ZipReader;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
@@ -425,7 +426,7 @@ final class PackerTest extends TestCase {
 		$this->assertSame( PHP_INT_SIZE >= 8 ? 4398046511104 : 2147483647 - 1048576, Packer::max_volume_bytes() );
 	}
 
-	public function test_lost_buffers_rewind_a_stored_entry(): void {
+	public function test_a_volume_shorter_than_its_committed_length_is_refused_not_padded(): void {
 		$source = $this->source( 'a.bin', 300000, 1 );
 		$packer = Packer::open( $this->out, 'site', array(), $this->options() );
 		$packer->add_entry( $source, 'files/a.bin', 1758196800 );
@@ -433,22 +434,56 @@ final class PackerTest extends TestCase {
 		$packer->write_piece( 100000 );
 		$state = $packer->state();
 		$packer->close();
-		// The OS dropped the last 50000 bytes the tick believed it had written.
+		// The file lost the last 50000 bytes the state says were committed (a changed work directory, or an OS
+		// that dropped acknowledged writes): nothing can say what those bytes were, so nothing is padded.
 		$partial = glob( $this->out . '/*.partial' )[0];
 		$h       = fopen( $partial, 'r+b' );
 		ftruncate( $h, filesize( $partial ) - 50000 );
 		fclose( $h );
-		$packer = Packer::open( $this->out, 'site', $state, $this->options() );
-		while ( $packer->write_piece( 100000 ) > 0 ) {
-			continue;
+		clearstatcache( true, $partial );
+		$before = filesize( $partial );
+		try {
+			Packer::open( $this->out, 'site', $state, $this->options() );
+			$this->fail();
+		} catch ( \RuntimeException $e ) {
+			$this->assertStringContainsString( 'shorter than its recorded committed length', $e->getMessage() );
 		}
-		$packer->finish( array(), '{"embedded":true}', 1758196800 );
-		$path   = $packer->sealed_paths()[0];
-		$reader = ZipReader::open( $path );
-		$out    = $this->root . '/x';
-		mkdir( $out );
-		$reader->extract( $reader->find( 'files/a.bin' ), $out );
-		$this->assertSame( hash_file( 'sha256', $source ), hash_file( 'sha256', $out . '/files/a.bin' ), 'CRC was recomputed and the data is complete' );
+		clearstatcache( true, $partial );
+		$this->assertSame( $before, filesize( $partial ), 'the volume was not lengthened' );
+	}
+
+	public function test_an_aborted_entry_leaves_its_bytes_until_the_next_open_cuts_them_and_a_shrunken_source_is_reported(): void {
+		$source = $this->source( 'a.bin', 300000, 1 );
+		$packer = Packer::open( $this->out, 'site', array(), $this->options() );
+		$packer->add_entry( $source, 'files/a.bin', 1758196800 );
+		$packer->write_piece( 100000 );
+		$partial = glob( $this->out . '/*.partial' )[0];
+		clearstatcache( true, $partial );
+		$long = filesize( $partial );
+		$packer->abort_entry();
+		$this->assertFalse( $packer->has_open_entry() );
+		$state = $packer->state();
+		$packer->close();
+		clearstatcache( true, $partial );
+		$this->assertSame( $long, filesize( $partial ), 'the file is not cut before the state is persisted' );
+		$this->assertLessThan( $long, $state['volume']['bytes'], 'the state points back at the entry header' );
+		$packer = Packer::open( $this->out, 'site', $state, $this->options() );
+		clearstatcache( true, $partial );
+		$this->assertSame( $state['volume']['bytes'], filesize( $partial ), 'resume cuts the volume back to the committed length' );
+		// The source shrinks under an open entry: a distinct exception, so the caller can start the entry over.
+		$packer->add_entry( $source, 'files/a.bin', 1758196800 );
+		$packer->write_piece( 100000 );
+		$h = fopen( $source, 'r+b' );
+		ftruncate( $h, 150000 );
+		fclose( $h );
+		try {
+			while ( $packer->write_piece( 100000 ) > 0 ) {
+				continue;
+			}
+			$this->fail();
+		} catch ( SourceChanged $e ) {
+			$this->assertStringContainsString( 'changed while it was being archived', $e->getMessage() );
+		}
 	}
 
 	public function test_zip64_records_are_written_when_the_threshold_says_so(): void {

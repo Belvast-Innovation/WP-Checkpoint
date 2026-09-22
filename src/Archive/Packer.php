@@ -303,12 +303,15 @@ final class Packer {
 	 * entry's last byte is written the local header is patched and the
 	 * entry is recorded; the next call returns 0.
 	 *
-	 * @param int|null $max_bytes Piece size; null for the configured one.
+	 * @param int|null      $max_bytes Piece size; null for the configured one.
+	 * @param callable|null $observer  Receives the source bytes of the piece as they are read, so a content
+	 *                                 hash can be fed from the same read; the caller keeps the hash context
+	 *                                 within one unit of work, it never survives a tick.
 	 * @return int Bytes of source consumed by this call (0 when the entry is complete or none is open).
-	 * @throws \RuntimeException When the source changed underneath.
+	 * @throws SourceChanged When the source no longer holds the bytes the entry declared.
 	 * @throws InsufficientSpace When the disk is full.
 	 */
-	public function write_piece( $max_bytes = null ): int {
+	public function write_piece( $max_bytes = null, $observer = null ): int {
 		if ( ! $this->has_open_entry() ) {
 			return 0;
 		}
@@ -322,7 +325,10 @@ final class Packer {
 			// Small entries only (deflate_max_bytes): read, deflate and write in one piece.
 			$size = (int) $this->state['entry']['size'];
 			$data = $this->read_source( 0, $size );
-			$out  = gzdeflate( $data, self::COMPRESSION_LEVEL );
+			if ( is_callable( $observer ) ) {
+				$observer( $data );
+			}
+			$out = gzdeflate( $data, self::COMPRESSION_LEVEL );
 			if ( ! is_string( $out ) ) {
 				throw new \RuntimeException( 'Compression failed.' );
 			}
@@ -336,6 +342,9 @@ final class Packer {
 		}
 		$length = (int) min( $max, $this->state['entry']['size'] - $this->state['entry']['offset'] );
 		$data   = $this->read_source( (int) $this->state['entry']['offset'], $length );
+		if ( is_callable( $observer ) ) {
+			$observer( $data );
+		}
 		$this->write_volume( $data );
 		$this->state['entry']['crc']      = Crc32::combine( (int) $this->state['entry']['crc'], Crc32::of( $data ), strlen( $data ) );
 		$this->state['entry']['offset']  += strlen( $data );
@@ -348,8 +357,11 @@ final class Packer {
 	}
 
 	/**
-	 * Drop the open entry: the volume is truncated back to the entry's
-	 * header offset (the step calls this when the source changed).
+	 * Drop the entry in progress from the state: the volume's committed
+	 * length goes back to the entry's header and the entry is gone. The
+	 * file is not touched (see inside); the caller persists the state and
+	 * the next open() cuts the volume back. The same or another entry can
+	 * then be added at the same place.
 	 *
 	 * @return void
 	 */
@@ -358,10 +370,13 @@ final class Packer {
 			return;
 		}
 		$this->close_source();
-		$offset = (int) $this->state['entry']['header_offset'];
-		$this->truncate_volume( $offset );
-		$this->state['volume']['bytes'] = $offset;
+		// The state moves back to the entry's header; the bytes after it stay on disk until the next
+		// open() resumes from this state and cuts the volume to the committed length. Cutting here
+		// would put the file behind the state: a crash between the cut and the checkpoint would leave
+		// a committed length longer than the file, which resume() refuses.
+		$this->state['volume']['bytes'] = (int) $this->state['entry']['header_offset'];
 		$this->state['entry']           = null;
+		$this->seek_volume( (int) $this->state['volume']['bytes'] );
 	}
 
 	/**
@@ -680,17 +695,10 @@ final class Packer {
 		// Committed bytes: the completed entries, plus the open entry's header and the pieces written so far.
 		$committed = null === $entry ? (int) $this->state['volume']['bytes'] : (int) $entry['data_offset'] + (int) $entry['written'];
 		if ( $actual < $committed ) {
-			// Buffers were lost (an OS crash): a stored entry can rewind, a deflated one starts over.
-			$lost = $committed - $actual;
-			if ( null === $entry || ZipFormat::METHOD_STORE !== $entry['method'] || (int) $entry['written'] < $lost ) {
-				throw new \RuntimeException( 'The volume lost committed data and cannot be resumed.' );
-			}
-			$this->state['entry']['written'] -= $lost;
-			$this->state['entry']['offset']  -= $lost;
-			$this->state['entry']['csize']    = $this->state['entry']['written'];
-			// The running CRC cannot be rewound: recompute it from the bytes that are there.
-			$this->state['entry']['crc'] = $this->crc_of_volume_range( (int) $entry['data_offset'], (int) $this->state['entry']['written'] );
-			$committed                   = $actual;
+			// A committed length is only ever recorded after the bytes are on disk, so a shorter file means the
+			// work directory was changed (or the OS dropped what it had acknowledged). Never pad it: the
+			// zeros would be archived as data.
+			throw new \RuntimeException( 'The volume is shorter than its recorded committed length; the work directory was changed or damaged.' );
 		}
 		$this->truncate_volume( $committed );
 		$this->truncate_records( (int) $this->state['volume']['entries'] );
@@ -993,30 +1001,6 @@ final class Packer {
 	}
 
 	/**
-	 * CRC of a byte range of the open volume (resume after lost buffers).
-	 *
-	 * @param int $offset Offset.
-	 * @param int $length Length.
-	 * @return int
-	 * @throws \RuntimeException When the operation fails (message says what).
-	 */
-	private function crc_of_volume_range( int $offset, int $length ): int {
-		$this->open_volume_handle();
-		$this->seek_volume( $offset );
-		$crc  = 0;
-		$left = $length;
-		while ( $left > 0 ) {
-			$data = fread( $this->handle, (int) min( 1048576, $left ) );
-			if ( false === $data || '' === $data ) {
-				throw new \RuntimeException( 'The volume could not be read back.' );
-			}
-			$crc   = Crc32::combine( $crc, Crc32::of( $data ), strlen( $data ) );
-			$left -= strlen( $data );
-		}
-		return $crc;
-	}
-
-	/**
 	 * Open the partial volume for read/write when not open.
 	 *
 	 * @return void
@@ -1049,7 +1033,7 @@ final class Packer {
 		$entry = $this->state['entry'];
 		clearstatcache( true, $entry['source'] );
 		if ( ! is_file( $entry['source'] ) || (int) filesize( $entry['source'] ) !== (int) $entry['size'] ) {
-			throw new \RuntimeException( 'The source file changed while it was being archived.' );
+			throw new SourceChanged( 'The source file changed while it was being archived.' );
 		}
 		$handle = fopen( $entry['source'], 'rb' );
 		if ( false === $handle ) {
@@ -1078,7 +1062,7 @@ final class Packer {
 		while ( $left > 0 ) {
 			$piece = fread( $this->source, (int) min( 1048576, $left ) );
 			if ( false === $piece || '' === $piece ) {
-				throw new \RuntimeException( 'The source file changed while it was being archived.' );
+				throw new SourceChanged( 'The source file changed while it was being archived.' );
 			}
 			$data .= $piece;
 			$left -= strlen( $piece );
