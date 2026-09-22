@@ -266,6 +266,9 @@ final class PackStepTest extends TestCase {
 	}
 
 	public function test_a_file_changed_between_two_chunks_of_one_tick_is_started_over_and_ends_up_consistent(): void {
+		if ( 'Windows' === PHP_OS_FAMILY ) {
+			$this->markTestSkipped( 'A file open for reading cannot be renamed over on Windows, and stat() reports no inode there: the inode swap is a POSIX scenario.' );
+		}
 		$p        = $this->file( 'live.bin', 3 * self::CHUNK, 5 );
 		$this->index( array( $p ) );
 		$abs      = $this->site . '/live.bin';
