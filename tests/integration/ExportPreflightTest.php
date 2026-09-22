@@ -2,6 +2,8 @@
 
 namespace WPCheckpoint\Tests\Integration;
 
+use WPCheckpoint\Archive\Packer;
+use WPCheckpoint\Archive\Manifest;
 use WPCheckpoint\Database\TableExporter;
 use WPCheckpoint\Database\WpdbConnection;
 use WPCheckpoint\Files\PathKey;
@@ -325,5 +327,36 @@ final class ExportPreflightTest extends JobTestCase {
 		$this->assertSame( array(), ExportPlan::read( $work, ExportPlan::PREFLIGHT )['findings']['oversize'] );
 		$this->assertSame( array(), json_decode( (string) file_get_contents( $work . '/files.index.jsonl' ), true ) ?? array(), 'no content groups: an empty scan' );
 		$this->assertSame( 3, ExportPlan::read( $work, DatabaseExportStep::SUMMARY )['tables'][0]['rows'] );
+	}
+
+	/**
+	 * The preflight runs with a 256 KiB database chunk while the scan uses the default content chunk:
+	 * the limit in the review message must be the one the scanner judged with, read from its summary.
+	 */
+	public function test_a_file_too_large_to_index_stops_the_review_with_the_threshold_the_scan_used(): void {
+		if ( PHP_INT_SIZE < 8 ) {
+			$this->markTestSkipped( 'The index limit is above the platform integer on 32-bit PHP.' );
+		}
+		$limit = Packer::max_file_bytes( Manifest::DEFAULT_CHUNK )['bytes'];
+		$huge  = $this->uploads . '/images/huge.iso';
+		$h     = fopen( $huge, 'wb' );
+		$ok    = 0 === fseek( $h, $limit + 1 ) && 1 === fwrite( $h, 'x' );
+		fclose( $h );
+		clearstatcache( true, $huge );
+		if ( ! $ok || filesize( $huge ) !== $limit + 2 ) {
+			unlink( $huge );
+			$this->markTestSkipped( 'A sparse file above the index limit cannot be created here.' );
+		}
+		$this->register_export( 'export-b' );
+		$job    = $this->repo->create( 'export-b', 0, array(), array( 'contents' => array( 'files' => array( 'uploads' ) ), 'policy' => array( 'unreadable' => 'continue', 'oversize' => 'exclude', 'large_dirs' => 'include' ) ) );
+		$result = $this->drive( $job->id );
+		$this->assertSame( TickResult::FAILED, $result->status );
+		$failed = $this->repo->find( $job->id );
+		$this->assertSame( ReviewStep::ID, $failed->step );
+		$scan = ExportPlan::read( $this->work( $failed ), FileScanStep::SUMMARY );
+		$this->assertSame( array( 'max_file_bytes' => $limit, 'max_file_limit' => 'index' ), $scan['limits'], 'the scanner recorded the threshold it used' );
+		$this->assertSame( array( 'wp-content/uploads/wpcptest-preflight/images/huge.iso' ), $scan['lists']['too_large'] );
+		$this->assertStringContainsString( sprintf( '1 files are larger than %d MB, the largest file the backup format can describe: wp-content/uploads/wpcptest-preflight/images/huge.iso.', intdiv( $limit, 1048576 ) ), $failed->last_error );
+		$this->assertArrayNotHasKey( 'max_file_bytes', ExportPlan::read( $this->work( $failed ), ExportPlan::PREFLIGHT )['checks'], 'the pre-flight does not compute a second copy of the limit' );
 	}
 }

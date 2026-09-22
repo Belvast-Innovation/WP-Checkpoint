@@ -58,9 +58,10 @@ final class ReviewStep implements Step {
 		$findings  = self::findings( $preflight, $scan );
 
 		if ( $findings['too_large']['count'] > 0 ) {
-			$limit = isset( $preflight['checks']['max_file_bytes'] ) ? (int) $preflight['checks']['max_file_bytes'] : ( isset( $preflight['checks']['max_entry_bytes'] ) ? (int) $preflight['checks']['max_entry_bytes'] : 0 );
+			// The threshold the scanner judged with, recorded by it: the message never computes its own.
+			$limit = isset( $scan['limits']['max_file_bytes'] ) ? (int) $scan['limits']['max_file_bytes'] : 0;
 			$bits  = isset( $preflight['checks']['int_size'] ) ? (int) $preflight['checks']['int_size'] * 8 : 0;
-			if ( 'index' === ( $preflight['checks']['max_file_limit'] ?? 'int_size' ) ) {
+			if ( 'index' === ( $scan['limits']['max_file_limit'] ?? 'int_size' ) ) {
 				throw new \RuntimeException( sprintf( '%d files are larger than %d MB, the largest file the backup format can describe: %s. Move them out of the site or exclude them.', $findings['too_large']['count'], (int) ( $limit / 1048576 ), implode( ', ', $findings['too_large']['listed'] ) ) );
 			}
 			throw new \RuntimeException( sprintf( '%d files are larger than %d MB, the largest file a backup made by this server\'s %d-bit PHP can hold: %s. Move them out of the site or exclude them, or run the backup on 64-bit PHP.', $findings['too_large']['count'], (int) ( $limit / 1048576 ), $bits, implode( ', ', $findings['too_large']['listed'] ) ) );

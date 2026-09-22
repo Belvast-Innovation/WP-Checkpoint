@@ -69,9 +69,9 @@ final class FileScanner {
 	private $exclusions;
 
 	/**
-	 * Largest file a backup can hold here (Packer::max_file_bytes()).
+	 * Largest file a backup can hold here and which limit applies (Packer::max_file_bytes()).
 	 *
-	 * @var int
+	 * @var array{bytes: int, limited_by: string}
 	 */
 	private $max_file;
 
@@ -99,7 +99,7 @@ final class FileScanner {
 			);
 		}
 		$this->exclusions = $exclusions;
-		$this->max_file   = (int) Packer::max_file_bytes( $chunk_bytes, $int_size )['bytes'];
+		$this->max_file   = Packer::max_file_bytes( $chunk_bytes, $int_size );
 	}
 
 	/**
@@ -134,6 +134,7 @@ final class FileScanner {
 				'heavy'       => array(),
 			),
 			'warnings' => array(),
+			'limits'   => array(),
 		);
 	}
 
@@ -145,6 +146,11 @@ final class FileScanner {
 	 * @return array<string, mixed>
 	 */
 	public function scan_unit( array $state, callable $emit ): array {
+		// The threshold this scanner judges with, for the summary: the review reads it from there, never recomputes it.
+		$state['limits'] = array(
+			'max_file_bytes' => $this->max_file['bytes'],
+			'max_file_limit' => $this->max_file['limited_by'],
+		);
 		if ( ! empty( $state['done'] ) ) {
 			return $state;
 		}
@@ -276,7 +282,7 @@ final class FileScanner {
 			return null;
 		}
 		$size = (int) $stat['size'];
-		if ( $size > $this->max_file ) {
+		if ( $size > $this->max_file['bytes'] ) {
 			$this->record( $state, 'too_large', $p );
 		} elseif ( $size > Packer::VOLUME_BYTES ) {
 			$this->record( $state, 'over_volume', $p );

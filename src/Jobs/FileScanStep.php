@@ -232,6 +232,7 @@ final class FileScanStep implements Step {
 		$summary = array(
 			'counts'                  => $state['counts'],
 			'lists'                   => $state['lists'],
+			'limits'                  => isset( $state['limits'] ) && is_array( $state['limits'] ) ? $state['limits'] : array(),
 			'warnings'                => array_merge( $this->root_warnings, $state['warnings'], PathKey::normalization_available() ? array() : array( self::normalization_warning() ) ),
 			'normalization_available' => PathKey::normalization_available(),
 			'exclusions'              => $this->exclusions->globs(),

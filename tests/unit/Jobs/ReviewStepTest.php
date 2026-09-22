@@ -61,9 +61,9 @@ final class ReviewStepTest extends TestCase {
 		);
 	}
 
-	private function inputs( array $oversize = array(), array $scan_lists = array(), array $scan_counts = array() ): void {
+	private function inputs( array $oversize = array(), array $scan_lists = array(), array $scan_counts = array(), int $int_size = 8, array $limits = array( 'max_file_bytes' => 261469110272, 'max_file_limit' => 'index' ) ): void {
 		ExportPlan::write( $this->work, ExportPlan::PREFLIGHT, array(
-			'checks'   => array( 'int_size' => 8, 'max_entry_bytes' => 4398046511103, 'max_file_bytes' => 261469110272, 'max_file_limit' => 'index' ),
+			'checks'   => array( 'int_size' => $int_size, 'max_entry_bytes' => 8 === $int_size ? 4398046511104 : 2147483647 ),
 			'findings' => array( 'oversize' => $oversize ),
 			'warnings' => array(),
 		) );
@@ -71,6 +71,7 @@ final class ReviewStepTest extends TestCase {
 		file_put_contents( $this->work . '/' . FileScanStep::SUMMARY, json_encode( array(
 			'counts' => array_merge( array( 'unreadable' => count( $lists['unreadable'] ), 'too_large' => count( $lists['too_large'] ), 'over_volume' => 0, 'heavy' => count( $lists['heavy'] ) ), $scan_counts ),
 			'lists'  => $lists,
+			'limits' => $limits,
 		) ) );
 	}
 
@@ -187,13 +188,9 @@ final class ReviewStepTest extends TestCase {
 		}
 	}
 
-	public function test_files_too_large_for_the_platform_stop_the_export_before_any_question(): void {
-		$this->inputs( array(), array( 'too_large' => array( 'wp-content/uploads/huge.iso' ) ) );
-		file_put_contents( $this->work . '/' . FileScanStep::SUMMARY, json_encode( array(
-			'counts' => array( 'too_large' => 1, 'unreadable' => 0 ),
-			'lists'  => array( 'too_large' => array( 'wp-content/uploads/huge.iso' ), 'unreadable' => array(), 'over_volume' => array(), 'heavy' => array() ),
-		) ) );
-		ExportPlan::write( $this->work, ExportPlan::PREFLIGHT, array( 'checks' => array( 'int_size' => 4, 'max_entry_bytes' => 2147483647 ), 'findings' => array( 'oversize' => array() ), 'warnings' => array() ) );
+	public function test_files_too_large_stop_the_export_before_any_question_and_name_the_threshold_the_scan_used(): void {
+		// 32-bit PHP: the container limit is the lower one; the scan recorded it, the message repeats it.
+		$this->inputs( array(), array( 'too_large' => array( 'wp-content/uploads/huge.iso' ) ), array(), 4, array( 'max_file_bytes' => 2147483647, 'max_file_limit' => 'int_size' ) );
 		try {
 			( new ReviewStep() )->run( $this->context( array( 'policy' => array( 'unreadable' => 'continue', 'oversize' => 'exclude', 'large_dirs' => 'include' ) ) ) );
 			$this->fail();
@@ -201,8 +198,8 @@ final class ReviewStepTest extends TestCase {
 			$this->assertSame( '1 files are larger than 2047 MB, the largest file a backup made by this server\'s 32-bit PHP can hold: wp-content/uploads/huge.iso. Move them out of the site or exclude them, or run the backup on 64-bit PHP.', $e->getMessage() );
 		}
 		$this->assertFileDoesNotExist( $this->work . '/' . ExportPlan::REVIEW );
-		// When the index line is the lower limit (64-bit PHP), the message names the format, not the platform.
-		ExportPlan::write( $this->work, ExportPlan::PREFLIGHT, array( 'checks' => array( 'int_size' => 8, 'max_entry_bytes' => 4398046511104, 'max_file_bytes' => 261469110272, 'max_file_limit' => 'index' ), 'findings' => array( 'oversize' => array() ), 'warnings' => array() ) );
+		// 64-bit PHP: the index line is the lower one; the message names the format, not the platform.
+		$this->inputs( array(), array( 'too_large' => array( 'wp-content/uploads/huge.iso' ) ), array(), 8, array( 'max_file_bytes' => 261469110272, 'max_file_limit' => 'index' ) );
 		try {
 			( new ReviewStep() )->run( $this->context( array( 'policy' => array( 'unreadable' => 'continue', 'oversize' => 'exclude', 'large_dirs' => 'include' ) ) ) );
 			$this->fail();

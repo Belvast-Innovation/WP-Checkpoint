@@ -205,9 +205,6 @@ final class PreflightStep implements Step {
 		$int_size                           = isset( $this->env['int_size'] ) ? (int) $this->env['int_size'] : PHP_INT_SIZE;
 		$state['checks']['int_size']        = $int_size;
 		$state['checks']['max_entry_bytes'] = Packer::max_entry_bytes( $int_size );
-		$limit                              = Packer::max_file_bytes( $this->chunk_bytes, $int_size );
-		$state['checks']['max_file_bytes']  = $limit['bytes'];
-		$state['checks']['max_file_limit']  = $limit['limited_by'];
 	}
 
 	/**
