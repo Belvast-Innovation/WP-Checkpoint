@@ -8,6 +8,7 @@
 namespace WPCheckpoint\Files;
 
 use WPCheckpoint\Archive\EntryPath;
+use WPCheckpoint\Archive\Manifest;
 use WPCheckpoint\Archive\Packer;
 use WPCheckpoint\Support\Utf8;
 
@@ -68,11 +69,11 @@ final class FileScanner {
 	private $exclusions;
 
 	/**
-	 * PHP_INT_SIZE of the platform (tests inject 4).
+	 * Largest file a backup can hold here (Packer::max_file_bytes()).
 	 *
 	 * @var int
 	 */
-	private $int_size;
+	private $max_file;
 
 	/**
 	 * Constructor.
@@ -80,8 +81,9 @@ final class FileScanner {
 	 * @param array<int, array{group: string, path: string, prefix: string, skip?: string[]}> $roots      Roots in scan order.
 	 * @param Exclusions                                                                      $exclusions Exclusions.
 	 * @param int                                                                             $int_size   PHP_INT_SIZE of the platform.
+	 * @param int                                                                             $chunk_bytes Content chunk size (bounds the largest indexable file).
 	 */
-	public function __construct( array $roots, Exclusions $exclusions, int $int_size = PHP_INT_SIZE ) {
+	public function __construct( array $roots, Exclusions $exclusions, int $int_size = PHP_INT_SIZE, int $chunk_bytes = Manifest::DEFAULT_CHUNK ) {
 		$this->roots = array();
 		foreach ( $roots as $root ) {
 			$this->roots[] = array(
@@ -97,7 +99,7 @@ final class FileScanner {
 			);
 		}
 		$this->exclusions = $exclusions;
-		$this->int_size   = $int_size;
+		$this->max_file   = (int) Packer::max_file_bytes( $chunk_bytes, $int_size )['bytes'];
 	}
 
 	/**
@@ -274,7 +276,7 @@ final class FileScanner {
 			return null;
 		}
 		$size = (int) $stat['size'];
-		if ( $size > Packer::max_entry_bytes( $this->int_size ) ) {
+		if ( $size > $this->max_file ) {
 			$this->record( $state, 'too_large', $p );
 		} elseif ( $size > Packer::VOLUME_BYTES ) {
 			$this->record( $state, 'over_volume', $p );

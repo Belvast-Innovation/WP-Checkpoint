@@ -22,8 +22,51 @@ namespace WPCheckpoint\Archive;
  */
 final class IndexLine {
 
-	const MAX_LINE_BYTES = 8192;
+	/**
+	 * Longest index line. It bounds the chunk list of one file and so the
+	 * largest file the format can index (max_indexable_bytes()); the
+	 * writer and the verifier read lines with the same constant. One line
+	 * of this size decodes well within a unit's memory budget (tested).
+	 */
+	const MAX_LINE_BYTES = 1048576;
 	const MAX_DEPTH      = 3;
+
+	/**
+	 * Bytes one chunk hash takes in a line: the quoted hex digest and a comma.
+	 */
+	const HASH_ITEM_BYTES = 67;
+
+	/**
+	 * Bytes of a files line without its chunk hashes: the longest path
+	 * (EntryPath::MAX_BYTES) plus exactly 128 bytes of keys, punctuation,
+	 * two 16-digit numbers and the list hash (the last hash has no comma,
+	 * which pays for the closing brackets).
+	 */
+	const LINE_OVERHEAD_BYTES = EntryPath::MAX_BYTES + 128;
+
+	/**
+	 * Chunk hashes one line can carry with the longest path.
+	 *
+	 * @return int
+	 */
+	public static function max_chunks(): int {
+		return intdiv( self::MAX_LINE_BYTES - self::LINE_OVERHEAD_BYTES, self::HASH_ITEM_BYTES );
+	}
+
+	/**
+	 * The largest file whose chunk list fits one line: max_chunks() chunks
+	 * of chunk_bytes. Larger files cannot be described by the format and
+	 * the scan lists them as too large before anything is packed.
+	 *
+	 * @param int $chunk_bytes Content chunk size.
+	 * @return int PHP_INT_MAX when the product does not fit the platform integer (32-bit PHP; the entry limit is lower there anyway).
+	 */
+	public static function max_indexable_bytes( int $chunk_bytes ): int {
+		if ( $chunk_bytes > intdiv( PHP_INT_MAX, self::max_chunks() ) ) {
+			return PHP_INT_MAX;
+		}
+		return self::max_chunks() * $chunk_bytes;
+	}
 
 	/**
 	 * Parse a database index line.

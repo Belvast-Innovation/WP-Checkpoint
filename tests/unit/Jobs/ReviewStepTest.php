@@ -63,7 +63,7 @@ final class ReviewStepTest extends TestCase {
 
 	private function inputs( array $oversize = array(), array $scan_lists = array(), array $scan_counts = array() ): void {
 		ExportPlan::write( $this->work, ExportPlan::PREFLIGHT, array(
-			'checks'   => array( 'int_size' => 8, 'max_entry_bytes' => 4398046511103 ),
+			'checks'   => array( 'int_size' => 8, 'max_entry_bytes' => 4398046511103, 'max_file_bytes' => 261469110272, 'max_file_limit' => 'index' ),
 			'findings' => array( 'oversize' => $oversize ),
 			'warnings' => array(),
 		) );
@@ -201,6 +201,14 @@ final class ReviewStepTest extends TestCase {
 			$this->assertSame( '1 files are larger than 2047 MB, the largest file a backup made by this server\'s 32-bit PHP can hold: wp-content/uploads/huge.iso. Move them out of the site or exclude them, or run the backup on 64-bit PHP.', $e->getMessage() );
 		}
 		$this->assertFileDoesNotExist( $this->work . '/' . ExportPlan::REVIEW );
+		// When the index line is the lower limit (64-bit PHP), the message names the format, not the platform.
+		ExportPlan::write( $this->work, ExportPlan::PREFLIGHT, array( 'checks' => array( 'int_size' => 8, 'max_entry_bytes' => 4398046511104, 'max_file_bytes' => 261469110272, 'max_file_limit' => 'index' ), 'findings' => array( 'oversize' => array() ), 'warnings' => array() ) );
+		try {
+			( new ReviewStep() )->run( $this->context( array( 'policy' => array( 'unreadable' => 'continue', 'oversize' => 'exclude', 'large_dirs' => 'include' ) ) ) );
+			$this->fail();
+		} catch ( \RuntimeException $e ) {
+			$this->assertSame( '1 files are larger than 249356 MB, the largest file the backup format can describe: wp-content/uploads/huge.iso. Move them out of the site or exclude them.', $e->getMessage() );
+		}
 	}
 
 	public function test_without_a_scan_summary_only_the_database_findings_are_reviewed(): void {

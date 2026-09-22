@@ -3,6 +3,7 @@
 namespace WPCheckpoint\Tests\Unit\Archive;
 
 use WPCheckpoint\Archive\ChunkHasher;
+use WPCheckpoint\Archive\EntryPath;
 use WPCheckpoint\Archive\IndexLine;
 use WPCheckpoint\Archive\IndexLineError;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
@@ -95,7 +96,7 @@ final class IndexLineTest extends TestCase {
 	public function rejected_database_lines(): array {
 		return array(
 			'empty'                 => array( '', '' ),
-			'over-long'             => array( $this->db( array( 't' => str_repeat( 'a', 9000 ) ) ), '' ),
+			'over-long'             => array( '{"t":"wp_posts","c":1,"x":"' . str_repeat( 'a', IndexLine::MAX_LINE_BYTES ) . '"}', '' ),
 			'not an object'         => array( '[1,2]', '' ),
 			'not json'              => array( '{"t":', '' ),
 			'scalar'                => array( '"x"', '' ),
@@ -169,5 +170,42 @@ final class IndexLineTest extends TestCase {
 			$this->assertSame( 'b', $e->key() );
 		}
 		$this->assertSame( 4294967296, IndexLine::files( $this->file( array( 'b' => 4294967296 ), array( 'h' ) ), self::CHUNK )['b'] );
+	}
+
+	/**
+	 * The line limit is reachable: the longest legal line (the longest path,
+	 * the most chunk hashes) decodes within a unit's memory budget, and one
+	 * more chunk does not fit. The largest indexable file follows from it.
+	 */
+	public function test_the_longest_legal_line_decodes_within_budget_and_one_more_chunk_does_not_fit(): void {
+		if ( PHP_INT_SIZE < 8 ) {
+			$this->markTestSkipped( 'The largest indexable file does not fit a 32-bit integer.' );
+		}
+		$chunks = IndexLine::max_chunks();
+		$this->assertSame( 15587, $chunks );
+		$this->assertSame( 15587 * 16777216, IndexLine::max_indexable_bytes( 16777216 ), 'about 244 GiB at the default chunk size' );
+		$path = str_repeat( 'a', EntryPath::MAX_BYTES );
+		$this->assertNull( EntryPath::problem( $path ) );
+		$build = static function ( int $count, string $path ): string {
+			$hc = array();
+			for ( $i = 0; $i < $count; $i++ ) {
+				$hc[] = hash( 'sha256', (string) $i );
+			}
+			return json_encode( array( 'p' => $path, 'b' => $count * 16777216, 'm' => 9007199254740991, 'h' => ChunkHasher::list_hash( $hc ), 'hc' => $hc ), JSON_UNESCAPED_SLASHES );
+		};
+		$line = $build( $chunks, $path );
+		$this->assertLessThanOrEqual( IndexLine::MAX_LINE_BYTES, strlen( $line ) );
+		$before = memory_get_peak_usage();
+		$parsed = IndexLine::files( $line, 16777216 );
+		$this->assertLessThan( 32 * 1048576, memory_get_peak_usage() - $before, 'one line decodes within the unit memory budget' );
+		$this->assertCount( $chunks, $parsed['hc'] );
+		$this->assertSame( 15587 * 16777216, $parsed['b'] );
+		try {
+			IndexLine::files( $build( $chunks + 1, $path ), 16777216 );
+			$this->fail( 'one more chunk must not fit' );
+		} catch ( IndexLineError $e ) {
+			$this->assertSame( '', $e->key() );
+			$this->assertStringContainsString( 'over-long', $e->getMessage() );
+		}
 	}
 }

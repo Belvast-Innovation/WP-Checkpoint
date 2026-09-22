@@ -4,6 +4,7 @@ namespace WPCheckpoint\Tests\Unit\Archive;
 
 use WPCheckpoint\Archive\ChunkHasher;
 use WPCheckpoint\Archive\InsufficientSpace;
+use WPCheckpoint\Archive\IndexLine;
 use WPCheckpoint\Archive\Packer;
 use WPCheckpoint\Archive\ZipFormat;
 use WPCheckpoint\Archive\ZipReader;
@@ -524,6 +525,9 @@ final class PackerTest extends TestCase {
 		}
 		$this->assertStringContainsString( 'Invalid entry path', $message, 'entry paths are validated' );
 		$this->assertSame( PHP_INT_SIZE >= 8 ? 4398046511104 : 2147483647, Packer::max_entry_bytes() );
+		$this->assertSame( array( 'bytes' => 2147483647, 'limited_by' => 'int_size' ), Packer::max_file_bytes( 16777216, 4 ), 'on 32-bit PHP the container limit is the lower one' );
+		$this->assertSame( array( 'bytes' => IndexLine::max_indexable_bytes( 16777216 ), 'limited_by' => 'index' ), Packer::max_file_bytes( 16777216, 8 ), 'on 64-bit PHP the index line is the lower one' );
+		$this->assertSame( 4398046511104, Packer::max_file_bytes( 1073741824, 8 )['bytes'], 'with 1 GiB chunks the container limit is the lower one again' );
 		$this->assertSame( Packer::VOLUME_BYTES + Packer::SPACE_MARGIN_BYTES, Packer::required_free_bytes() );
 	}
 
