@@ -758,26 +758,6 @@ final class Packer {
 	}
 
 	/**
-	 * Remove the open volume and its records (cancel). Sealed volumes stay.
-	 *
-	 * @return void
-	 */
-	public function discard_open_volume(): void {
-		$this->close_source();
-		if ( null !== $this->handle ) {
-			fclose( $this->handle );
-			$this->handle = null;
-		}
-		foreach ( array( $this->partial_path(), $this->records_path() ) as $path ) {
-			if ( is_file( $path ) ) {
-				@unlink( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- best effort.
-			}
-		}
-		$this->state['volume'] = null;
-		$this->state['entry']  = null;
-	}
-
-	/**
 	 * Close handles without changing state (end of a tick).
 	 *
 	 * @return void
