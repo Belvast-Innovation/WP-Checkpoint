@@ -295,6 +295,9 @@ final class ManifestStepTest extends TestCase {
 			$this->assertStringContainsString( 'The local header of the entry disagrees with the central directory (crc, csize, usize)', $e->getMessage() );
 			$this->assertStringNotContainsString( '.wpcheckpoint.zip', $e->getMessage() );
 		}
+		foreach ( array_column( $this->ctx->checkpoints, 'cursor' ) as $stored ) {
+			$this->assertArrayNotHasKey( 'walk', (array) ( $stored['verifier'] ?? array() ), 'no timing in the cursor' );
+		}
 		$messages = array_column( $this->ctx->checkpoints, 'message' );
 		$this->assertNotEmpty( preg_grep( '/^Checking the written archive: \d+ of \d+ entries$/', $messages ), 'the walk reports its progress' );
 	}

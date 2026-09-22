@@ -129,6 +129,20 @@ final class ArchiveVerifier {
 	private $clock;
 
 	/**
+	 * Entries walked and seconds spent by this instance, for the estimate.
+	 * Measurements, not position: they stay in memory and never enter
+	 * state(), which callers store (a stored cursor holds identifiers,
+	 * offsets, counts and hashes only). A caller that opens the verifier
+	 * again each run starts measuring again.
+	 *
+	 * @var array{entries: int, seconds: float}
+	 */
+	private $walk = array(
+		'entries' => 0,
+		'seconds' => 0.0,
+	);
+
+	/**
 	 * Constructor: see open().
 	 *
 	 * @param string               $path     Path.
@@ -159,11 +173,13 @@ final class ArchiveVerifier {
 	 * Where the run is, for a progress display: the phase, and in the entry
 	 * walk (every depth walks every volume's entries; structure depth
 	 * without hashing their data) entries done out of all entries the
-	 * index declares. Once ESTIMATE_AFTER entries were walked, the time
-	 * they took is extrapolated to the rest ("seconds_left"), and "slow"
-	 * says the whole walk is estimated above SLOW_SECONDS: on a cold disk
-	 * with large files every local header is a seek, and a display that
-	 * only says "checking" would look stuck.
+	 * index declares. Once this instance has walked ESTIMATE_AFTER entries
+	 * (one unit), the time they took is extrapolated to the rest
+	 * ("seconds_left"), and "slow" says the whole walk is estimated above
+	 * SLOW_SECONDS: on a cold disk with large files every local header is a
+	 * seek, and a display that only says "checking" would look stuck.
+	 * Before that, and in a new instance resumed from a stored state, there
+	 * is no estimate (null): the measurement is not part of the state.
 	 *
 	 * @return array{phase: string, done: int, total: int, seconds_left: int|null, slow: bool}
 	 */
@@ -171,9 +187,8 @@ final class ArchiveVerifier {
 		$counts  = (array) ( $this->state['counts'] ?? array() );
 		$total   = (int) ( $counts['chunks_declared'] ?? 0 ) + (int) ( $counts['files_declared'] ?? 0 );
 		$done    = (int) ( $counts['headers_checked'] ?? 0 );
-		$walk    = (array) ( $this->state['walk'] ?? array() );
-		$entries = (int) ( $walk['entries'] ?? 0 );
-		$seconds = (float) ( $walk['seconds'] ?? 0.0 );
+		$entries = $this->walk['entries'];
+		$seconds = $this->walk['seconds'];
 		$left    = null;
 		$slow    = false;
 		if ( $entries >= self::ESTIMATE_AFTER && $total > 0 ) {
@@ -297,11 +312,8 @@ final class ArchiveVerifier {
 		try {
 			$this->dispatch();
 			if ( $walking ) {
-				$walk                = (array) ( $this->state['walk'] ?? array() );
-				$this->state['walk'] = array(
-					'entries' => (int) ( $walk['entries'] ?? 0 ) + (int) ( $this->state['counts']['headers_checked'] ?? 0 ) - $before,
-					'seconds' => (float) ( $walk['seconds'] ?? 0.0 ) + max( 0.0, (float) call_user_func( $this->clock ) - $started ),
-				);
+				$this->walk['entries'] += (int) ( $this->state['counts']['headers_checked'] ?? 0 ) - $before;
+				$this->walk['seconds'] += max( 0.0, (float) call_user_func( $this->clock ) - $started );
 			}
 		} catch ( EnvironmentFailure $e ) {
 			$this->add( new Finding( (string) $this->state['phase'], Finding::ENVIRONMENT, 'This server could not read or write what the check needs: ' . $e->getMessage() ) );

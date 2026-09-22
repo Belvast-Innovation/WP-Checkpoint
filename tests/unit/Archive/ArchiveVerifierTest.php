@@ -974,9 +974,13 @@ final class ArchiveVerifierTest extends TestCase {
 			return $now;
 		} );
 		$this->assertSame( array( 'phase' => ArchiveVerifier::PHASE_MANIFEST, 'done' => 0, 'total' => 0, 'seconds_left' => null, 'slow' => false ), $verifier->progress() );
-		$seen = array();
+		$seen    = array();
+		$resumed = null;
 		while ( $verifier->step() ) {
 			$seen[] = $verifier->progress();
+			if ( null === $resumed && ArchiveVerifier::PHASE_CONTENTS === $verifier->progress()['phase'] && $verifier->progress()['done'] >= 1000 ) {
+				$resumed = $verifier->state();
+			}
 		}
 		$walk = array_values( array_filter( $seen, static function ( array $p ): bool {
 			return ArchiveVerifier::PHASE_CONTENTS === $p['phase'] && $p['done'] > 0;
@@ -990,5 +994,21 @@ final class ArchiveVerifierTest extends TestCase {
 		$this->assertSame( 0, $last['seconds_left'] );
 		$this->assertSame( VerificationResult::PASSED_PARTIAL, $verifier->result()->outcome() );
 		$this->assertSame( 1201, $verifier->result()->counts()['headers_checked'] );
+
+		// The measurement is not state: a stored cursor carries positions and counts, not seconds.
+		$this->assertNotNull( $resumed );
+		$this->assertArrayNotHasKey( 'walk', $resumed );
+		$this->assertStringNotContainsString( 'seconds', (string) json_encode( $resumed ) );
+		// A verifier resumed from a stored state has no estimate until it has measured a unit of its own.
+		$again = ArchiveVerifier::open( $builder->manifest_path, $builder->work_dir(), ArchiveVerifier::DEPTH_STRUCTURE, $resumed );
+		$again->set_clock( static function () use ( &$now ): float {
+			$now += 50.0;
+			return $now;
+		} );
+		$this->assertSame( 1000, $again->progress()['done'], 'the count is state and carries over' );
+		$this->assertNull( $again->progress()['seconds_left'] );
+		$this->assertFalse( $again->progress()['slow'] );
+		$again->step(); // The remaining 201 entries: fewer than a unit's worth of measurement.
+		$this->assertNull( $again->progress()['seconds_left'] );
 	}
 }
