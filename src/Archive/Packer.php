@@ -25,9 +25,10 @@ namespace WPCheckpoint\Archive;
  * volume. The step calls should_stop() between those calls and
  * should_checkpoint() to decide when to persist state().
  *
- * Volumes are sealed between entries once they reach the volume size; an
- * entry never spans volumes, so a volume may exceed the size by its last
- * entry. The open volume is "<name>.partial" with its central directory
+ * The caller seals volumes between entries once they reach the volume
+ * size (has_room() says when; the packer never seals or creates a volume
+ * on its own); an entry never spans volumes, so a volume may exceed the
+ * size by its last entry. The open volume is "<name>.partial" with its central directory
  * records in "<name>.cdr"; sealing renames it to its final name. Entries up
  * to DEFLATE_MAX_BYTES are deflated in one piece, larger ones are stored:
  * a deflate state cannot survive a tick, and media files do not compress.
@@ -236,8 +237,10 @@ final class Packer {
 	}
 
 	/**
-	 * Begin a file entry. Seals the open volume first when it reached the
-	 * volume size. Nothing of the file is copied yet.
+	 * Begin a file entry in the open volume, which must have room for it
+	 * (has_room()); otherwise SealRequired is thrown and the caller seals
+	 * and opens explicitly. Nothing is sealed or created here, and nothing
+	 * of the file is copied yet.
 	 *
 	 * @param string $source     Absolute path of the file to add.
 	 * @param string $entry_path Path inside the archive (forward slashes, relative).
