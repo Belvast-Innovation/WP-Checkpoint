@@ -69,6 +69,13 @@ final class DatabaseExportStep implements Step {
 	private $chunk_bytes;
 
 	/**
+	 * Clock for the export period (time() in production).
+	 *
+	 * @var callable
+	 */
+	private $now;
+
+	/**
 	 * Whether the tables come from plan.json and review.json in the work
 	 * directory (the export job) instead of the constructor (tests).
 	 *
@@ -79,16 +86,27 @@ final class DatabaseExportStep implements Step {
 	/**
 	 * Constructor. The job type picks the tables from the job's options.
 	 *
-	 * @param Connection $connection  Database.
-	 * @param string[]   $tables      Tables in export order.
-	 * @param string[]   $notes       Warnings to carry into the summary.
-	 * @param int        $chunk_bytes Chunk size.
+	 * @param Connection    $connection  Database.
+	 * @param string[]      $tables      Tables in export order.
+	 * @param string[]      $notes       Warnings to carry into the summary.
+	 * @param int           $chunk_bytes Chunk size.
+	 * @param callable|null $now      Clock (tests); time() when null.
 	 */
-	public function __construct( Connection $connection, array $tables, array $notes = array(), int $chunk_bytes = TableExporter::CHUNK_BYTES ) {
+	public function __construct( Connection $connection, array $tables, array $notes = array(), int $chunk_bytes = TableExporter::CHUNK_BYTES, $now = null ) {
 		$this->connection  = $connection;
 		$this->tables      = array_values( $tables );
 		$this->notes       = $notes;
 		$this->chunk_bytes = $chunk_bytes;
+		$this->now         = is_callable( $now ) ? $now : 'time';
+	}
+
+	/**
+	 * The export period's clock, as an ISO 8601 UTC timestamp.
+	 *
+	 * @return string
+	 */
+	private function stamp(): string {
+		return gmdate( 'Y-m-d\TH:i:s\Z', (int) call_user_func( $this->now ) );
 	}
 
 	/**
@@ -96,12 +114,13 @@ final class DatabaseExportStep implements Step {
 	 * rows are left out from ExportPlan::effective() (plan.json plus the
 	 * review's decisions) when it freezes the list on its first tick.
 	 *
-	 * @param Connection $connection  Database.
-	 * @param int        $chunk_bytes Chunk size.
+	 * @param Connection    $connection  Database.
+	 * @param int           $chunk_bytes Chunk size.
+	 * @param callable|null $now      Clock (tests); time() when null.
 	 * @return DatabaseExportStep
 	 */
-	public static function from_plan( Connection $connection, int $chunk_bytes = TableExporter::CHUNK_BYTES ): DatabaseExportStep {
-		$step            = new self( $connection, array(), array(), $chunk_bytes );
+	public static function from_plan( Connection $connection, int $chunk_bytes = TableExporter::CHUNK_BYTES, $now = null ): DatabaseExportStep {
+		$step            = new self( $connection, array(), array(), $chunk_bytes, $now );
 		$step->from_plan = true;
 		return $step;
 	}
@@ -238,7 +257,7 @@ final class DatabaseExportStep implements Step {
 			'index'      => 0,
 			'done'       => 0,
 			'state'      => null,
-			'started_at' => gmdate( 'Y-m-d\TH:i:s\Z' ),
+			'started_at' => $this->stamp(),
 		);
 	}
 
@@ -439,7 +458,7 @@ final class DatabaseExportStep implements Step {
 		$summary = array(
 			'exported' => array(
 				'started_at'  => (string) $cursor['started_at'],
-				'finished_at' => gmdate( 'Y-m-d\TH:i:s\Z' ),
+				'finished_at' => $this->stamp(),
 			),
 			'tables'   => $tables,
 			'warnings' => array_values( array_unique( $warnings ) ),

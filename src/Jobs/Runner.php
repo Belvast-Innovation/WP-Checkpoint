@@ -97,6 +97,13 @@ final class Runner {
 	private $lease;
 
 	/**
+	 * Called before every cursor write (tests only; see persist()).
+	 *
+	 * @var callable|null
+	 */
+	private $on_persist;
+
+	/**
 	 * The memory_limit of this process in bytes; <= 0 unlimited or unknown.
 	 *
 	 * @var int
@@ -135,7 +142,8 @@ final class Runner {
 		} else {
 			$this->memory_limit = (int) wp_convert_hr_to_bytes( (string) ini_get( 'memory_limit' ) );
 		}
-		$this->paths = isset( $options['paths'] ) && is_array( $options['paths'] ) ? $options['paths'] : array(
+		$this->on_persist = isset( $options['on_persist'] ) && is_callable( $options['on_persist'] ) ? $options['on_persist'] : null;
+		$this->paths      = isset( $options['paths'] ) && is_array( $options['paths'] ) ? $options['paths'] : array(
 			'{abspath}'    => rtrim( ABSPATH, '/\\' ),
 			'{wp-content}' => WP_CONTENT_DIR,
 		);
@@ -567,6 +575,11 @@ final class Runner {
 	private function persist( Job $job, string $token, string $step, array $cursor, array $state, int $percent, string $message, bool $advanced ): void {
 		$cursor                       = JobContext::strip_reserved( $cursor );
 		$cursor[ self::RESERVED_KEY ] = $state;
+		if ( null !== $this->on_persist ) {
+			// Test seam: a replay test throws LockLost here to simulate a process that died after the disk
+			// changed and before this cursor was written; nothing else is written after LockLost.
+			call_user_func( $this->on_persist, $job, $step, $cursor );
+		}
 		try {
 			$this->repository->save_progress( $job, $token, $step, $cursor, $percent, $message, $advanced );
 		} catch ( StaleJob $e ) {

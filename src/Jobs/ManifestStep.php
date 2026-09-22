@@ -103,6 +103,13 @@ final class ManifestStep implements Step {
 	private $clean;
 
 	/**
+	 * Clock for the manifest's created_at and the summary entries' mtime (time() in production).
+	 *
+	 * @var callable
+	 */
+	private $now;
+
+	/**
 	 * Constructor.
 	 *
 	 * @param array<string, mixed>                 $site           Site facts (Manifest's "site" keys).
@@ -110,8 +117,10 @@ final class ManifestStep implements Step {
 	 * @param array<string, mixed>                 $packer_options Packer options.
 	 * @param int                                  $chunk_bytes    Content chunk size.
 	 * @param callable|null                        $clean          Report cleaner; identity when null.
+	 * @param callable|null                        $now            Clock (tests); time() when null.
 	 */
-	public function __construct( array $site, array $generator, array $packer_options = array(), int $chunk_bytes = Manifest::DEFAULT_CHUNK, $clean = null ) {
+	public function __construct( array $site, array $generator, array $packer_options = array(), int $chunk_bytes = Manifest::DEFAULT_CHUNK, $clean = null, $now = null ) {
+		$this->now            = is_callable( $now ) ? $now : 'time';
 		$this->site           = $site;
 		$this->generator      = $generator;
 		$this->packer_options = PackStep::packer_options_for( $packer_options, $chunk_bytes );
@@ -174,7 +183,7 @@ final class ManifestStep implements Step {
 			$packer = Packer::open( $volumes, $base, $this->packer_state( $context ), $this->packer_options );
 			try {
 				if ( 0 === (int) $cursor['mtime'] ) {
-					$cursor['mtime'] = time();
+					throw new \RuntimeException( 'The manifest clock was not fixed before the last volume was decided (a phase ran out of order).' );
 				}
 				// A volume prepare_finish() sealed in a run that died before its checkpoint was adopted by resume()
 				// unhashed; the estimate below needs every sealed volume hashed. One block per unit.
@@ -224,6 +233,13 @@ final class ManifestStep implements Step {
 					// Sealed by a run that died before this checkpoint: nothing to assemble, the copy is in place.
 					$packer->finish( array(), '', (int) $cursor['mtime'] );
 				} else {
+					if ( ! $packer->has_open_volume() ) {
+						// No index entries were written (an archive without indexes is refused earlier, but the
+						// packer does not create volumes on its own): the summaries' volume, checkpointed first.
+						$packer->open_volume();
+						$cursor['packer'] = $packer->state();
+						$context->checkpoint( $cursor, 58, __( 'Last volume opened', 'wp-checkpoint' ) );
+					}
 					$packer->finish( array(), $this->assemble( $work, $plan, $packer, true, $cursor ), (int) $cursor['mtime'] );
 				}
 				$cursor['packer'] = $packer->state();
@@ -352,6 +368,9 @@ final class ManifestStep implements Step {
 				}
 			}
 		}
+		// Every value that reaches the manifest is fixed in a checkpoint before any byte that depends on it is
+		// written: the clock behind created_at and the summary entries' mtime is decided here, once.
+		$cursor['mtime'] = (int) call_user_func( $this->now );
 		$cursor['phase'] = 'prepare';
 		$context->checkpoint( $cursor, 28, __( 'Indexes hashed', 'wp-checkpoint' ) );
 		return null;
@@ -418,6 +437,13 @@ final class ManifestStep implements Step {
 			$since = 0;
 			while ( (int) $cursor['entry'] < $count ) {
 				$name = $names[ (int) $cursor['entry'] ];
+				if ( ! $packer->has_open_volume() ) {
+					// prepare_finish() sealed the data volume: the summaries get one of their own, created as a
+					// unit of its own and checkpointed before anything is written into it.
+					$packer->open_volume( (int) filesize( $entries[ $name ] ) );
+					$cursor['packer'] = $packer->state();
+					$context->checkpoint( $cursor, 45, __( 'Last volume opened', 'wp-checkpoint' ) );
+				}
 				if ( ! $packer->has_open_entry() ) {
 					$packer->add_entry( $entries[ $name ], $name, (int) $cursor['mtime'] );
 				}

@@ -243,9 +243,9 @@ final class Packer {
 	 * @param string $entry_path Path inside the archive (forward slashes, relative).
 	 * @param int    $mtime      Modification time to record.
 	 * @return void
-	 * @throws \RuntimeException When an entry is already open or the path is invalid.
+	 * @throws \RuntimeException When an entry is already open, no volume is open or the path is invalid.
 	 * @throws SourceGone When the file is missing or cannot be read.
-	 * @throws InsufficientSpace When the disk is full.
+	 * @throws SealRequired When the open volume cannot take the entry (seal it and open the next one first).
 	 */
 	public function add_entry( string $source, string $entry_path, int $mtime ): void {
 		if ( $this->has_open_entry() ) {
@@ -268,7 +268,7 @@ final class Packer {
 		if ( $size > self::max_entry_bytes() ) {
 			throw new \RuntimeException( 'The file is larger than this platform can archive.' );
 		}
-		$this->ensure_volume_open( $size );
+		$this->assert_room( $size );
 		$method = $this->options['can_deflate'] && $size <= $this->options['deflate_max_bytes'] && $size > 0 ? ZipFormat::METHOD_DEFLATE : ZipFormat::METHOD_STORE;
 		$this->begin_entry( $entry_path, $mtime, $method, $size, $source );
 	}
@@ -548,8 +548,8 @@ final class Packer {
 	 * @param string                $manifest Embedded manifest JSON.
 	 * @param int                   $mtime    Modification time for the entries.
 	 * @return void
-	 * @throws \RuntimeException When an entry is open, prepare_finish() did not run, or a file cannot be read.
-	 * @throws InsufficientSpace When the disk is full.
+	 * @throws \RuntimeException When an entry is open, prepare_finish() did not run, no volume is open, or a file cannot be read.
+	 * @throws SealRequired When the open volume cannot take the summaries (prepare_finish() made sure it can).
 	 */
 	public function finish( array $files, string $manifest, int $mtime ): void {
 		if ( $this->has_open_entry() ) {
@@ -574,7 +574,7 @@ final class Packer {
 				continue;
 			}
 		}
-		$this->ensure_volume_open( strlen( $manifest ) );
+		$this->assert_room( strlen( $manifest ) );
 		$this->add_string_entry( 'manifest.json', $manifest, $mtime );
 		$this->seal_volume();
 		$this->rename_single_volume();
@@ -649,9 +649,24 @@ final class Packer {
 	 * @return bool
 	 */
 	private function last_volume_has_summaries(): bool {
-		$last = $this->state['sealed'][ count( $this->state['sealed'] ) - 1 ];
+		$i    = count( $this->state['sealed'] ) - 1;
+		$last = $this->state['sealed'][ $i ];
+		$path = $this->dir . DIRECTORY_SEPARATOR . $last['path'];
+		if ( 0 === $i && ! is_file( $path ) && is_file( $this->dir . DIRECTORY_SEPARATOR . $this->state['base'] . self::SINGLE_SUFFIX ) ) {
+			// finish() renamed the lone volume to the single name and died before the checkpoint.
+			$path = $this->dir . DIRECTORY_SEPARATOR . $this->state['base'] . self::SINGLE_SUFFIX;
+			try {
+				if ( null !== ZipReader::open( $path )->find( 'manifest.json' ) ) {
+					$this->state['sealed'][0]['path'] = $this->state['base'] . self::SINGLE_SUFFIX;
+					return true;
+				}
+			} catch ( \RuntimeException $e ) {
+				return false;
+			}
+			return false;
+		}
 		try {
-			$reader = ZipReader::open( $this->dir . DIRECTORY_SEPARATOR . $last['path'] );
+			$reader = ZipReader::open( $path );
 		} catch ( \RuntimeException $e ) {
 			return false;
 		}
@@ -870,52 +885,92 @@ final class Packer {
 	}
 
 	/**
-	 * Open the volume if none is open, creating a new one.
+	 * Whether the open volume can take an entry of this size: it is open,
+	 * and either empty (an entry never spans volumes, so an empty volume
+	 * takes anything) or below the volume size, the platform bound and the
+	 * entry count. The caller seals and opens explicitly when it cannot.
+	 *
+	 * @param int $next_entry_bytes Size of the entry about to be added.
+	 * @return bool
+	 */
+	public function has_room( int $next_entry_bytes ): bool {
+		$volume = $this->state['volume'];
+		if ( null === $volume ) {
+			return false;
+		}
+		if ( 0 === (int) $volume['entries'] ) {
+			return true;
+		}
+		if ( (int) $volume['bytes'] >= (int) $this->options['volume_bytes'] ) {
+			return false;
+		}
+		if ( (int) $volume['bytes'] + $next_entry_bytes + 65536 > (int) $this->options['max_volume_bytes'] ) {
+			// Every entry may fit the platform on its own while the volume would not.
+			return false;
+		}
+		return (int) $volume['entries'] < self::MAX_VOLUME_ENTRIES;
+	}
+
+	/**
+	 * Create the next volume. Only the caller does this, as a unit it
+	 * checkpoints: the packer never creates a file as a side effect of
+	 * adding an entry. Leftovers of this volume from a run that died
+	 * before its first checkpoint are replaced; a final file under the
+	 * volume's name belongs to someone else and is refused.
 	 *
 	 * @param int $next_entry_bytes Size of the entry about to be added (free-space check).
 	 * @return void
 	 * @throws InsufficientSpace When the disk is full.
-	 * @throws \RuntimeException When the operation fails (message says what).
+	 * @throws \RuntimeException When a volume is open, or the operation fails (message says what).
 	 */
-	private function ensure_volume_open( int $next_entry_bytes ): void {
-		if ( null !== $this->state['volume'] && $this->state['volume']['bytes'] >= $this->options['volume_bytes'] ) {
-			$this->seal_volume();
+	public function open_volume( int $next_entry_bytes = 0 ): void {
+		if ( null !== $this->state['volume'] ) {
+			throw new \RuntimeException( 'A volume is already open.' );
 		}
-		if ( null !== $this->state['volume'] && $this->state['volume']['entries'] > 0 && $this->state['volume']['bytes'] + $next_entry_bytes + 65536 > $this->options['max_volume_bytes'] ) {
-			// Every entry may fit the platform on its own while the volume would not: seal first.
-			$this->seal_volume();
+		$index                 = count( $this->state['sealed'] ) + 1;
+		$name                  = sprintf( self::VOLUME_NAME_PATTERN, $this->state['base'], $index );
+		$this->state['volume'] = array(
+			'index'   => $index,
+			'name'    => $name,
+			'bytes'   => 0,
+			'entries' => 0,
+		);
+		if ( file_exists( $this->dir . DIRECTORY_SEPARATOR . $name ) ) {
+			throw new \RuntimeException( 'A file of the new volume already exists.' );
 		}
-		if ( null !== $this->state['volume'] && $this->state['volume']['entries'] >= self::MAX_VOLUME_ENTRIES ) {
-			$this->seal_volume();
+		foreach ( array( $this->partial_path(), $this->records_path() ) as $path ) {
+			// Left by a run that created this volume and died before its first checkpoint: nothing of it is
+			// committed, and no other writer uses this base name (it carries a random suffix).
+			if ( file_exists( $path ) && ! @unlink( $path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.unlink_unlink -- failure is thrown.
+				throw new \RuntimeException( 'A leftover file of the new volume could not be removed.' );
+			}
 		}
+		$this->check_space( $next_entry_bytes );
+		$handle = fopen( $this->partial_path(), 'w+b' );
+		if ( false === $handle ) {
+			throw new \RuntimeException( 'The volume file could not be created.' );
+		}
+		$this->handle = $handle;
+		if ( false === file_put_contents( $this->records_path(), '' ) ) {
+			throw new \RuntimeException( 'The record file could not be created.' );
+		}
+	}
+
+	/**
+	 * The open volume must exist and have room; nothing is sealed or
+	 * created here.
+	 *
+	 * @param int $next_entry_bytes Size of the entry about to be added.
+	 * @return void
+	 * @throws SealRequired When the open volume cannot take the entry.
+	 * @throws \RuntimeException When no volume is open.
+	 */
+	private function assert_room( int $next_entry_bytes ): void {
 		if ( null === $this->state['volume'] ) {
-			$index                 = count( $this->state['sealed'] ) + 1;
-			$name                  = sprintf( self::VOLUME_NAME_PATTERN, $this->state['base'], $index );
-			$this->state['volume'] = array(
-				'index'   => $index,
-				'name'    => $name,
-				'bytes'   => 0,
-				'entries' => 0,
-			);
-			if ( file_exists( $this->dir . DIRECTORY_SEPARATOR . $name ) ) {
-				throw new \RuntimeException( 'A file of the new volume already exists.' );
-			}
-			foreach ( array( $this->partial_path(), $this->records_path() ) as $path ) {
-				// Left by a run that created this volume and died before its first checkpoint: nothing of it is
-				// committed, and no other writer uses this base name (it carries a random suffix).
-				if ( file_exists( $path ) && ! @unlink( $path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.unlink_unlink -- failure is thrown.
-					throw new \RuntimeException( 'A leftover file of the new volume could not be removed.' );
-				}
-			}
-			$this->check_space( $next_entry_bytes );
-			$handle = fopen( $this->partial_path(), 'w+b' );
-			if ( false === $handle ) {
-				throw new \RuntimeException( 'The volume file could not be created.' );
-			}
-			$this->handle = $handle;
-			if ( false === file_put_contents( $this->records_path(), '' ) ) {
-				throw new \RuntimeException( 'The record file could not be created.' );
-			}
+			throw new \RuntimeException( 'No volume is open; open_volume() first.' );
+		}
+		if ( ! $this->has_room( $next_entry_bytes ) ) {
+			throw new SealRequired( 'The open volume cannot take this entry; seal it and open the next one.' );
 		}
 	}
 

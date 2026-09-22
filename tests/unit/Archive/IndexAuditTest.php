@@ -4,6 +4,7 @@ namespace WPCheckpoint\Tests\Unit\Archive;
 
 use WPCheckpoint\Archive\ChunkHasher;
 use WPCheckpoint\Archive\IndexAudit;
+use WPCheckpoint\Archive\Manifest;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 final class IndexAuditTest extends TestCase {
@@ -90,6 +91,33 @@ final class IndexAuditTest extends TestCase {
 			} catch ( \RuntimeException $e ) {
 				$this->assertStringContainsString( $message, $e->getMessage(), $case );
 			}
+		}
+	}
+
+	public function test_tables_with_no_chunks_have_no_lines_wherever_they_stand(): void {
+		$h1    = str_repeat( '11', 32 );
+		$h2    = str_repeat( '22', 32 );
+		$empty = static function ( string $name ): array {
+			return array( 'name' => $name, 'chunks' => 0, 'bytes' => 0, 'sha256' => hash( 'sha256', '' ) );
+		};
+		$full  = static function ( string $name, string $h ): array {
+			return array( 'name' => $name, 'chunks' => 1, 'bytes' => 5, 'sha256' => ChunkHasher::list_hash( array( $h ) ) );
+		};
+		$line  = static function ( string $name, string $h ): array {
+			return array( 't' => $name, 'c' => 1, 'p' => 'database/' . $name . '.0001.sql', 'b' => 5, 'h' => $h );
+		};
+		$lines = $this->lines( 'database.index.jsonl', array( $line( 'wp_a', $h1 ), $line( 'wp_c', $h2 ) ) );
+		$this->assertSame( 2, IndexAudit::database( $lines, array( $full( 'wp_a', $h1 ), $empty( 'wp_b' ), $full( 'wp_c', $h2 ) ), 1048576 ), 'in the middle' );
+		$this->assertSame( 2, IndexAudit::database( $lines, array( $full( 'wp_a', $h1 ), $full( 'wp_c', $h2 ), $empty( 'wp_d' ) ), 1048576 ), 'last' );
+		$this->assertSame( 2, IndexAudit::database( $lines, array( $empty( 'wp_0' ), $full( 'wp_a', $h1 ), $full( 'wp_c', $h2 ) ), 1048576 ), 'first' );
+		file_put_contents( $this->dir . '/empty.jsonl', '' );
+		$this->assertSame( 0, IndexAudit::database( $this->dir . '/empty.jsonl', array( $empty( 'wp_only' ) ), 1048576 ), 'the only table: no lines at all' );
+		$this->assertTrue( Manifest::is_empty_table( $empty( 'x' ) ), 'the same predicate the reader uses' );
+		try {
+			IndexAudit::database( $lines, array( $full( 'wp_a', $h1 ), array( 'name' => 'wp_b', 'chunks' => 0, 'bytes' => 9, 'sha256' => $h2 ), $full( 'wp_c', $h2 ) ), 1048576 );
+			$this->fail( 'no chunks but bytes must be refused' );
+		} catch ( \RuntimeException $e ) {
+			$this->assertStringContainsString( 'declares no chunks but bytes or a hash', $e->getMessage() );
 		}
 	}
 }

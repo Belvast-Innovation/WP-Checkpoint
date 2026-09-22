@@ -99,6 +99,13 @@ final class PackStep implements Step {
 	private $after_chunk;
 
 	/**
+	 * Cached export finishing time for database entries (per run).
+	 *
+	 * @var int|null
+	 */
+	private $database_mtime;
+
+	/**
 	 * Constructor.
 	 *
 	 * @param array<int, array<string, mixed>>|null $roots          Scan roots; null resolves them from the plan (WordPress).
@@ -268,7 +275,10 @@ final class PackStep implements Step {
 			if ( ! is_file( $source ) || (int) filesize( $source ) !== $data['b'] ) {
 				throw new \RuntimeException( sprintf( 'Database chunk %s is missing or not %d bytes; the work directory was lost or changed.', $data['p'], $data['b'] ) );
 			}
-			$packer->add_entry( $source, $data['p'], (int) filemtime( $source ) );
+			if ( $this->make_room( $context, $packer, $cursor, $data['b'] ) ) {
+				return 0;
+			}
+			$packer->add_entry( $source, $data['p'], $this->database_mtime( $work ) );
 			$hash = hash_init( 'sha256' );
 			while ( $packer->write_piece(
 				null,
@@ -322,11 +332,11 @@ final class PackStep implements Step {
 			$cursor['phase'] = 'blocks';
 			return 0;
 		}
-		$data             = IndexLine::files( $line['text'], $this->chunk_bytes );
-		$cursor['offset'] = $line['next'];
-		$p                = $data['p'];
+		$data = IndexLine::files( $line['text'], $this->chunk_bytes );
+		$p    = $data['p'];
 		if ( ExportPlan::excluded_by_path( $p, $active['exclude_paths'] ) || $exclusions->excludes( $p ) ) {
 			++$cursor['excluded'];
+			$cursor['offset'] = $line['next'];
 			return 0;
 		}
 		$root   = self::root_of( $roots, $p );
@@ -334,6 +344,7 @@ final class PackStep implements Step {
 		$stat   = null === $source ? false : self::fresh_stat( $source );
 		if ( false === $stat || ! is_readable( $source ) ) {
 			self::note( $cursor, 'skipped', $p );
+			$cursor['offset'] = $line['next'];
 			return 0;
 		}
 		if ( ! Paths::is_inside( (string) $root['path'], $source ) ) {
@@ -341,15 +352,50 @@ final class PackStep implements Step {
 			// content directory (another site's files on a shared host). Resolved paths only.
 			$context->logger()->warning( 'File left out: it resolves outside its content directory', array( 'p' => $p ) );
 			self::note( $cursor, 'outside', $p );
+			$cursor['offset'] = $line['next'];
 			return 0;
 		}
+		if ( $this->make_room( $context, $packer, $cursor, (int) $stat['size'] ) ) {
+			return 0; // The line is read again by the next unit.
+		}
 		try {
-			$this->open_entry( $packer, $source, $p, $stat, $cursor, 0 );
+			$this->open_entry( $packer, $source, $p, $stat, $cursor, 0, (int) $cursor['offset'] );
 		} catch ( SourceGone $e ) {
 			// Gone between the stat above and the packer's own look: the same outcome as gone before it.
 			self::note( $cursor, 'skipped', $p );
 		}
+		$cursor['offset'] = $line['next'];
 		return 0;
+	}
+
+	/**
+	 * Make the packer ready for an entry of this size, one irreversible
+	 * transition per unit, checkpointed on both sides: sealing the open
+	 * volume when it has no room (before the seal the cursor knows every
+	 * entry of the volume, so a crash after the rename is adopted by
+	 * Packer::resume(); after it the seal is recorded), and creating the
+	 * next volume when none is open. Neither happens as a side effect of
+	 * adding the entry, and neither is measured as chunk time.
+	 *
+	 * @param JobContext           $context Context.
+	 * @param Packer               $packer  Packer.
+	 * @param array<string, mixed> $cursor  Cursor.
+	 * @param int                  $size    Entry size.
+	 * @return bool True when a transition was made (the unit is spent; the caller returns).
+	 */
+	private function make_room( JobContext $context, Packer $packer, array $cursor, int $size ): bool {
+		if ( ! $packer->has_open_volume() ) {
+			$packer->open_volume( $size );
+			$context->checkpoint( $this->store( $cursor, $packer ), $this->percent( $cursor ), $this->message( $cursor ) );
+			return true;
+		}
+		if ( $packer->has_room( $size ) ) {
+			return false;
+		}
+		$context->checkpoint( $this->store( $cursor, $packer ), $this->percent( $cursor ), $this->message( $cursor ) );
+		$packer->seal_volume();
+		$context->checkpoint( $this->store( $cursor, $packer ), $this->percent( $cursor ), $this->message( $cursor ) );
+		return true;
 	}
 
 	/**
@@ -359,14 +405,16 @@ final class PackStep implements Step {
 	 * @param string               $source   Absolute path.
 	 * @param string               $p        Archive path.
 	 * @param array<string, mixed> $stat     stat() result.
-	 * @param array<string, mixed> $cursor   Cursor (updated).
-	 * @param int                  $restarts Restarts so far.
+	 * @param array<string, mixed> $cursor      Cursor (updated).
+	 * @param int                  $restarts    Restarts so far.
+	 * @param int                  $line_offset Offset of the file's index line (to begin it again when the volume has no room).
 	 * @return void
 	 */
-	private function open_entry( Packer $packer, string $source, string $p, array $stat, array &$cursor, int $restarts ): void {
+	private function open_entry( Packer $packer, string $source, string $p, array $stat, array &$cursor, int $restarts, int $line_offset ): void {
 		$packer->add_entry( $source, ArchiveVerifier::FILES_PREFIX . $p, (int) $stat['mtime'] );
 		$cursor['file']         = array(
 			'p'        => $p,
+			'line'     => $line_offset,
 			'size'     => (int) $stat['size'],
 			'mtime'    => (int) $stat['mtime'],
 			'ino'      => (int) $stat['ino'],
@@ -483,7 +531,11 @@ final class PackStep implements Step {
 			// It keeps changing without shrinking: finish it as declared now and say so.
 			$context->logger()->warning( 'File changed repeatedly; packed as it is now', array( 'p' => $p ) );
 			self::note( $cursor, 'changed', $p );
-			$this->open_entry( $packer, $source, $p, $stat, $cursor, $restarts );
+			if ( ! $packer->has_room( (int) $stat['size'] ) ) {
+				$cursor['offset'] = (int) $file['line']; // Begun again from its line: the volume is sealed first.
+				return 0;
+			}
+			$this->open_entry( $packer, $source, $p, $stat, $cursor, $restarts, (int) $file['line'] );
 			$cursor['file']['final'] = true;
 			return 0;
 		}
@@ -495,7 +547,13 @@ final class PackStep implements Step {
 				'restart' => $restarts,
 			)
 		);
-		$this->open_entry( $packer, $source, $p, $stat, $cursor, $restarts );
+		if ( ! $packer->has_room( (int) $stat['size'] ) ) {
+			// Grown past what the volume can take (the platform bound): begun again from its line, the volume
+			// sealed first by make_room(). The restart count starts over with it; a bound only 32-bit PHP reaches.
+			$cursor['offset'] = (int) $file['line'];
+			return 0;
+		}
+		$this->open_entry( $packer, $source, $p, $stat, $cursor, $restarts, (int) $file['line'] );
 		return 0;
 	}
 
@@ -658,6 +716,24 @@ final class PackStep implements Step {
 			'text' => rtrim( $line, "\r\n" ),
 			'next' => $offset + strlen( $line ),
 		);
+	}
+
+	/**
+	 * The modification time recorded for database chunk entries: the
+	 * export's finishing time from database.summary.json, the same on every
+	 * replay (a chunk file rewritten by a retried export would carry a new
+	 * mtime and change the archive's bytes).
+	 *
+	 * @param string $work Work directory.
+	 * @return int
+	 */
+	private function database_mtime( string $work ): int {
+		if ( null === $this->database_mtime ) {
+			$summary              = ExportPlan::exists( $work, DatabaseExportStep::SUMMARY ) ? ExportPlan::read( $work, DatabaseExportStep::SUMMARY ) : array();
+			$stamp                = isset( $summary['exported']['finished_at'] ) ? strtotime( (string) $summary['exported']['finished_at'] ) : false;
+			$this->database_mtime = false === $stamp ? 0 : $stamp;
+		}
+		return $this->database_mtime;
 	}
 
 	/**

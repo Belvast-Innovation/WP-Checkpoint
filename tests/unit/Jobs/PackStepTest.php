@@ -227,10 +227,16 @@ final class PackStepTest extends TestCase {
 		$this->set_up();
 		$this->index( array( $this->file( 'one.bin', 2 * self::CHUNK + 10, 3 ), $this->file( 'two.bin', 100, 4 ) ) );
 		$this->ctx->tick = 5.0;
-		$result          = $this->step()->run( $this->ctx->context( array() ) );
-		$result          = $this->step()->run( $this->ctx->context( $result->cursor ) );
-		$cursor          = $result->cursor;
-		$partial         = glob( $this->ctx->work() . '/' . PackStep::VOLUMES . '/*.partial' )[0];
+		$cursor          = array();
+		for ( $i = 0; $i < 10; $i++ ) { // One unit per tick: the phase switch, the volume, the file, then its first chunk.
+			$result = $this->step()->run( $this->ctx->context( $cursor ) );
+			$cursor = $result->cursor;
+			if ( isset( $cursor['file']['chunk'] ) && $cursor['file']['chunk'] >= 1 ) {
+				break;
+			}
+		}
+		$this->assertGreaterThanOrEqual( 1, $cursor['file']['chunk'], 'a chunk is committed' );
+		$partial = glob( $this->ctx->work() . '/' . PackStep::VOLUMES . '/*.partial' )[0];
 		$h               = fopen( $partial, 'r+b' );
 		ftruncate( $h, 10 );
 		fclose( $h );

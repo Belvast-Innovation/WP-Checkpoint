@@ -166,11 +166,13 @@ final class IndexAudit {
 				} catch ( IndexLineError $e ) {
 					throw new \RuntimeException( sprintf( 'Database index line %d is malformed (%s).', $state['n'], $e->getMessage() ) );
 				}
+				$state = self::skip_empty_tables( $tables, $state, $start );
 				if ( $state['table'] < count( $tables ) && $state['chunk'] >= (int) $tables[ $state['table'] ]['chunks'] ) {
 					self::close_table( $path, $tables[ $state['table'] ], (int) $state['table_offset'], (int) $state['n'], $chunk_bytes );
 					++$state['table'];
 					$state['chunk']        = 0;
 					$state['table_offset'] = $start;
+					$state                 = self::skip_empty_tables( $tables, $state, $start );
 				}
 				if ( $state['table'] >= count( $tables ) ) {
 					throw new \RuntimeException( sprintf( 'Database index line %d names table %s, which the export summary does not list.', $state['n'], $data['t'] ) );
@@ -193,9 +195,12 @@ final class IndexAudit {
 		} finally {
 			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- see above.
 		}
-		if ( $state['table'] < count( $tables ) ) {
+		$state = self::skip_empty_tables( $tables, $state, (int) $state['offset'] );
+		if ( $state['table'] < count( $tables ) && ( (int) $state['chunk'] > 0 || ! Manifest::is_empty_table( $tables[ $state['table'] ] ) ) ) {
 			self::close_table( $path, $tables[ $state['table'] ], (int) $state['table_offset'], (int) $state['n'], $chunk_bytes, (int) $state['chunk'] );
 			++$state['table'];
+			$state['chunk'] = 0;
+			$state          = self::skip_empty_tables( $tables, $state, (int) $state['offset'] );
 		}
 		if ( count( $tables ) !== (int) $state['table'] ) {
 			throw new \RuntimeException( sprintf( 'The database index ends after %d of %d tables of the export summary.', (int) $state['table'], count( $tables ) ) );
@@ -219,6 +224,29 @@ final class IndexAudit {
 			$state = self::database_step( $path, $tables, $state, $chunk_bytes );
 		}
 		return (int) $state['n'];
+	}
+
+	/**
+	 * Tables with no chunks have no lines: step over them, as the reader
+	 * does (Manifest::is_empty_table(), the one definition). Only when no
+	 * chunk of the current table has been read yet.
+	 *
+	 * @param array<int, array{name: string, chunks: int, sha256: string}> $tables Tables.
+	 * @param array<string, mixed>                                         $state  State.
+	 * @param int                                                          $offset Offset the next table would start at.
+	 * @return array<string, mixed>
+	 * @throws \RuntimeException When a table declares no chunks but bytes or a hash.
+	 */
+	private static function skip_empty_tables( array $tables, array $state, int $offset ): array {
+		$total = count( $tables );
+		while ( 0 === (int) $state['chunk'] && $state['table'] < $total && 0 === (int) $tables[ $state['table'] ]['chunks'] ) {
+			if ( ! Manifest::is_empty_table( $tables[ $state['table'] ] ) ) {
+				throw new \RuntimeException( sprintf( 'Table %s declares no chunks but bytes or a hash in the export summary.', (string) $tables[ $state['table'] ]['name'] ) );
+			}
+			++$state['table'];
+			$state['table_offset'] = $offset;
+		}
+		return $state;
 	}
 
 	/**

@@ -253,6 +253,12 @@ final class ArchiveBuilder {
 		);
 		$packer  = Packer::open( $this->dir, self::BASE, array(), $options );
 		foreach ( $entries as list( $path, $entry ) ) {
+			if ( ! $packer->has_open_volume() ) {
+				$packer->open_volume();
+			} elseif ( ! $packer->has_room( (int) filesize( $path ) ) ) {
+				$packer->seal_volume();
+				$packer->open_volume();
+			}
 			$packer->add_entry( $path, $entry, self::MTIME );
 			while ( $packer->write_piece() > 0 ) {
 				continue;
@@ -271,6 +277,9 @@ final class ArchiveBuilder {
 			'files_bytes'    => $files_bytes,
 		);
 		$embedded = $this->manifest_json( $manifest, $packer->volume_entries(), true );
+		if ( ! $packer->has_open_volume() ) {
+			$packer->open_volume();
+		}
 		$packer->finish(
 			array(
 				Manifest::DATABASE_INDEX => $db_index,

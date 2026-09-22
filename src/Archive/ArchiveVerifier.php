@@ -528,7 +528,7 @@ final class ArchiveVerifier {
 	 *
 	 * @param array<string, mixed> $volume The last volume.
 	 * @return void
-	 * @throws \RuntimeException Never leaves: a copy that cannot be read is a finding (caught inside).
+	 * @throws \RuntimeException Never leaves: a copy that cannot be read or is not a valid manifest is a finding (caught inside).
 	 */
 	private function check_embedded_copy( array $volume ): void {
 		try {
@@ -538,6 +538,19 @@ final class ArchiveVerifier {
 				throw new \RuntimeException( 'The last volume has no manifest.json entry.' );
 			}
 			$copy = Manifest::from_json( $reader->read( $entry ) );
+		} catch ( ManifestError $e ) {
+			$this->add(
+				new Finding(
+					self::PHASE_VOLUMES,
+					Finding::MALFORMED,
+					'The embedded manifest copy is not a valid manifest: ' . $e->getMessage(),
+					array(
+						'volume' => $volume['ordinal'],
+						'field'  => $e->field(),
+					)
+				)
+			);
+			return;
 		} catch ( \RuntimeException $e ) {
 			$this->add( new Finding( self::PHASE_VOLUMES, Finding::MALFORMED, 'The embedded manifest copy cannot be read: ' . $e->getMessage(), array( 'volume' => $volume['ordinal'] ) ) );
 			return;
@@ -914,7 +927,7 @@ final class ArchiveVerifier {
 		$tables = $this->manifest()->tables();
 		$total  = count( $tables );
 		while ( $pos < $total && 0 === $tables[ $pos ]['chunks'] ) {
-			if ( 0 !== $tables[ $pos ]['bytes'] || ! hash_equals( hash( 'sha256', '' ), $tables[ $pos ]['sha256'] ) ) {
+			if ( ! Manifest::is_empty_table( $tables[ $pos ] ) ) {
 				$this->fail_lines( 'A table with no chunks declares bytes or a hash.', array( 'table' => $tables[ $pos ]['name'] ) );
 				return $pos;
 			}

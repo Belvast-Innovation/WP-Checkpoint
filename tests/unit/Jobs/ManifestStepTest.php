@@ -194,11 +194,37 @@ final class ManifestStepTest extends TestCase {
 	 * checkpoint would have overwritten: the archive comes out byte for byte the same each time.
 	 */
 	public function test_a_crash_before_any_checkpoint_after_a_disk_change_is_replayed_to_the_same_archive(): void {
+		$reference = $this->replay_every_phase( $this->packer_options() );
+		$this->assertGreaterThanOrEqual( 2, count( $reference ), 'the fixture spans volumes' );
+	}
+
+	public function test_a_site_that_fits_one_volume_gets_the_single_name_and_replays_the_same_way(): void {
+		$reference = $this->replay_every_phase( array_merge( $this->packer_options(), array( 'volume_bytes' => 1073741824 ) ) );
+		$this->assertSame( array( self::BASE . '.wpcheckpoint.zip' ), array_keys( $reference ), 'one volume, under the single name' );
+		$manifest = Manifest::from_json( (string) file_get_contents( $this->volumes() . '/' . self::BASE . '.manifest.json' ) );
+		$this->assertCount( 1, $manifest->volumes() );
+		$reader = ZipReader::open( $this->volumes() . '/' . self::BASE . '.wpcheckpoint.zip' );
+		$copy   = Manifest::from_json( $reader->read( $reader->find( 'manifest.json' ) ) );
+		$this->assertTrue( $copy->embedded() );
+		$this->assertSame( array(), $copy->volumes(), 'the copy lists every volume but the one holding it: none' );
+		$this->assertStringContainsString( 'Self-check passed', $this->ctx->log() );
+	}
+
+	/**
+	 * Drive a step with the given packer options in small ticks, then replay from the first checkpoint of
+	 * every writing phase and assert the sealed volumes come out byte for byte the same each time.
+	 *
+	 * @return array<string, string> The reference volume hashes by name.
+	 */
+	private function replay_every_phase( array $packer_options ): array {
+		$make            = function () use ( $packer_options ): ManifestStep {
+			return new ManifestStep( $this->site_facts, array( 'name' => 'wp-checkpoint', 'version' => '0.1.0-test' ), $packer_options, self::CHUNK );
+		};
 		$this->ctx->tick = 5.0;
 		$cursor          = array();
 		$by_phase        = array();
 		for ( $i = 0; $i < 200; $i++ ) {
-			$result = $this->step()->run( $this->ctx->context( $cursor ) );
+			$result = $make()->run( $this->ctx->context( $cursor ) );
 			$cursor = StepResult::PROGRESS === $result->kind ? $result->cursor : $cursor;
 			foreach ( $this->ctx->checkpoints as $checkpoint ) {
 				$phase = $checkpoint['cursor']['phase'];
@@ -214,14 +240,15 @@ final class ManifestStepTest extends TestCase {
 		$this->assertSame( StepResult::DONE, $result->kind );
 		$this->assertSame( array( 'audit', 'hash', 'prepare', 'blocks_before', 'indexes', 'finish', 'blocks_after', 'standalone', 'verify' ), array_keys( $by_phase ), 'every phase was checkpointed at least once' );
 		$reference = $this->volume_hashes();
-		$this->assertGreaterThanOrEqual( 2, count( $reference ) );
+		$manifest  = hash_file( 'sha256', $this->volumes() . '/' . self::BASE . '.manifest.json' );
 		$this->ctx->tick = 0.0;
 		foreach ( array( 'prepare', 'blocks_before', 'indexes', 'finish', 'blocks_after', 'standalone' ) as $phase ) {
-			$this->drive( $this->step(), $by_phase[ $phase ] );
+			$this->drive( $make(), $by_phase[ $phase ] );
 			$this->assertSame( $reference, $this->volume_hashes(), "replayed from the first checkpoint of phase {$phase}: the sealed volumes are byte for byte the same" );
-			$this->assertFileExists( $this->volumes() . '/' . self::BASE . '.manifest.json' );
+			$this->assertSame( $manifest, hash_file( 'sha256', $this->volumes() . '/' . self::BASE . '.manifest.json' ), "replayed from {$phase}: the standalone manifest is the same too (its clock is fixed before anything is written)" );
 		}
 		$this->assertStringNotContainsString( 'Self-check failed', $this->ctx->log() );
+		return $reference;
 	}
 
 	public function test_the_summaries_get_a_volume_of_their_own_when_the_open_one_is_full_and_the_copy_lists_every_other_volume(): void {
