@@ -2,6 +2,7 @@
 
 namespace WPCheckpoint\Tests\Unit\Jobs;
 
+use WPCheckpoint\Archive\Manifest;
 use WPCheckpoint\Jobs\ExportPlan;
 use WPCheckpoint\Jobs\PackStep;
 use WPCheckpoint\Jobs\StepResult;
@@ -78,7 +79,8 @@ final class StoreStepTest extends TestCase {
 			$this->step()->run( $this->ctx->context() );
 			$this->fail();
 		} catch ( \RuntimeException $e ) {
-			$this->assertStringContainsString( 'already exists in the backups directory; nothing was overwritten', $e->getMessage() );
+			$this->assertSame( 'Volume 2 (file 2 of 3) already exists in the backups directory; nothing was overwritten.', $e->getMessage() );
+			$this->assertStringNotContainsString( self::BASE, $e->getMessage(), 'files are named by their place, never by the name that carries the site slug' );
 		}
 		$this->assertTrue( $this->in_work( $this->names[0] ), 'the first volume was not moved either' );
 		$this->assertSame( 'someone else', (string) file_get_contents( $this->ctx->backups() . '/' . $this->names[1] ) );
@@ -107,7 +109,7 @@ final class StoreStepTest extends TestCase {
 			$this->step()->run( $this->ctx->context( array( 'checked' => true, 'moved' => 1 ) ) );
 			$this->fail();
 		} catch ( \RuntimeException $e ) {
-			$this->assertStringContainsString( 'both in the work directory and in the backups directory; nothing was overwritten', $e->getMessage() );
+			$this->assertSame( 'Volume 2 (file 2 of 3) is both in the work directory and in the backups directory; nothing was overwritten.', $e->getMessage() );
 		}
 		$this->assertSame( 'other', (string) file_get_contents( $this->ctx->backups() . '/' . $this->names[1] ) );
 		$this->assertTrue( $this->in_work( $this->names[1] ) );
@@ -118,7 +120,7 @@ final class StoreStepTest extends TestCase {
 			$this->step()->run( $this->ctx->context( array( 'checked' => true, 'moved' => 1 ) ) );
 			$this->fail();
 		} catch ( \RuntimeException $e ) {
-			$this->assertStringContainsString( 'is missing; the work directory was lost or changed', $e->getMessage() );
+			$this->assertSame( 'Volume 2 (file 2 of 3) is missing; the work directory was lost or changed.', $e->getMessage() );
 		}
 		$this->assertTrue( $this->in_work( $this->names[2] ), 'the manifest stays until every volume is in place' );
 	}
@@ -136,7 +138,18 @@ final class StoreStepTest extends TestCase {
 			$failing->run( $this->ctx->context() );
 			$this->fail();
 		} catch ( TransientFailure $e ) {
-			$this->assertStringContainsString( 'could not be moved', $e->getMessage() );
+			$this->assertSame( 'Volume 1 (file 1 of 3) could not be moved into the backups directory.', $e->getMessage() );
 		}
+	}
+
+	public function test_a_manifest_larger_than_allowed_is_refused_before_it_is_read(): void {
+		$this->put( self::BASE . '.manifest.json', str_repeat( ' ', Manifest::MAX_JSON_BYTES + 1 ) );
+		try {
+			$this->step()->run( $this->ctx->context() );
+			$this->fail();
+		} catch ( \RuntimeException $e ) {
+			$this->assertStringContainsString( 'larger than allowed', $e->getMessage() );
+		}
+		$this->assertTrue( $this->in_work( $this->names[0] ) );
 	}
 }

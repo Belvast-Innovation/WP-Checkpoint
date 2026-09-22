@@ -258,12 +258,8 @@ final class ArchiveBuilder {
 				continue;
 			}
 		}
-		// The embedded copy lists every volume sealed before the one that holds it: predict finish()'s seal.
-		$summary_bytes = filesize( $db_index ) + filesize( $files_index ) + 4096;
-		$state         = $packer->state();
-		if ( $packer->has_open_volume() && $state['volume']['entries'] > 0 && $state['volume']['bytes'] + $summary_bytes > self::VOLUME_BYTES ) {
-			$packer->seal_volume();
-		}
+		// The embedded copy lists every volume sealed before the one that holds it: prepare_finish() decides the split.
+		$packer->prepare_finish( filesize( $db_index ) + filesize( $files_index ) + 4096 );
 		while ( $packer->hash_next_block() ) {
 			continue;
 		}

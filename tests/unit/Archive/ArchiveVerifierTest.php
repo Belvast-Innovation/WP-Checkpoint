@@ -801,4 +801,40 @@ final class ArchiveVerifierTest extends TestCase {
 		$this->expectException( \LogicException::class );
 		ArchiveVerifier::open( $builder->manifest_path, $builder->work_dir() )->result();
 	}
+
+	public function test_an_embedded_copy_that_leaves_a_volume_out_is_a_finding_at_structure_depth(): void {
+		$builder = $this->typical(
+			array(
+				'manifest' => static function ( array $manifest, bool $embedded ): array {
+					if ( $embedded ) {
+						array_pop( $manifest['volumes'] ); // The copy forgets the last data volume.
+					}
+					return $manifest;
+				},
+			)
+		);
+		$structure = $this->verify( $builder, $builder->manifest_path, ArchiveVerifier::DEPTH_STRUCTURE );
+		$finding   = self::find( $structure, array( 'phase' => ArchiveVerifier::PHASE_VOLUMES, 'kind' => Finding::MALFORMED ) );
+		$this->assertNotNull( $finding, $structure->to_text( self::identity() ) );
+		$this->assertStringContainsString( 'does not list the volumes before the last one', $finding['message'] );
+		$this->assertSame( 2, $finding['volume'] );
+		$this->assertTrue( $structure->restore_refused() );
+		$this->assertSame( VerificationResult::FAILED, $structure->outcome() );
+
+		// A copy with the right list but not marked as embedded is a finding too; the intact fixture has none.
+		$unmarked = $this->typical(
+			array(
+				'manifest' => static function ( array $manifest, bool $embedded ): array {
+					if ( $embedded ) {
+						unset( $manifest['embedded'] );
+					}
+					return $manifest;
+				},
+			)
+		);
+		$result   = $this->verify( $unmarked, $unmarked->manifest_path, ArchiveVerifier::DEPTH_STRUCTURE );
+		$this->assertNotNull( self::find( $result, array( 'kind' => Finding::MALFORMED ) ), $result->to_text( self::identity() ) );
+		$intact = $this->typical();
+		$this->assertSame( 0, $this->verify( $intact, $intact->manifest_path, ArchiveVerifier::DEPTH_STRUCTURE )->findings_total() );
+	}
 }

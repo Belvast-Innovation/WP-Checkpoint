@@ -15,6 +15,7 @@ use WPCheckpoint\Jobs\DatabaseExportStep;
 use WPCheckpoint\Jobs\ExportPlan;
 use WPCheckpoint\Jobs\FileScanStep;
 use WPCheckpoint\Jobs\Job;
+use WPCheckpoint\Jobs\JobPresenter;
 use WPCheckpoint\Jobs\JobRepository;
 use WPCheckpoint\Jobs\JobTypes;
 use WPCheckpoint\Jobs\ManifestStep;
@@ -68,6 +69,9 @@ final class ExportPipelineTest extends JobTestCase {
 
 	/** @var string[] */
 	private $tables = array();
+
+	/** @var string */
+	private $slug = 'Example.Test Site';
 
 	public function set_up(): void {
 		parent::set_up();
@@ -185,8 +189,8 @@ final class ExportPipelineTest extends JobTestCase {
 							'disk_free'     => static function () use ( $dirs ) {
 								return disk_free_space( $dirs->base() );
 							},
-							'slug'          => static function (): string {
-								return 'Example.Test Site';
+							'slug'          => function (): string {
+								return $this->slug;
 							},
 							'can_deflate'   => true,
 							'normalization' => PathKey::normalization_available(),
@@ -259,10 +263,11 @@ final class ExportPipelineTest extends JobTestCase {
 		global $wpdb;
 		$this->register_export( 'export-c' );
 		$job     = $this->repo->create( 'export-c', 0, array(), $this->options() );
-		$done    = array();
-		$sealed  = array();
-		$partial = null;
-		$result  = $this->drive( $job->id, function ( Job $stored ) use ( &$done, &$sealed, &$partial ): void {
+		$done          = array();
+		$sealed        = array();
+		$partial       = null;
+		$finish_cursor = null;
+		$result        = $this->drive( $job->id, function ( Job $stored ) use ( &$done, &$sealed, &$partial, &$finish_cursor ): void {
 			$cursor = $stored->cursor;
 			if ( PackStep::ID === $stored->step && ! isset( $done['torn'] ) && 'files' === ( $cursor['phase'] ?? '' ) && isset( $cursor['file']['chunk'] ) && $cursor['file']['chunk'] >= 1 ) {
 				// A tick that wrote a chunk line, an index line and volume bytes after the last checkpoint and died.
@@ -275,19 +280,28 @@ final class ExportPipelineTest extends JobTestCase {
 				file_put_contents( $partials[0], 'garbage past the committed length', FILE_APPEND );
 				$done['torn'] = $cursor['packed_bytes'];
 			}
+			if ( ManifestStep::ID === $stored->step && 'finish' === ( $cursor['phase'] ?? '' ) && null === $finish_cursor ) {
+				$finish_cursor = $cursor; // The checkpoint before finish(): the indexes appended, the volume still open.
+			}
 			if ( ManifestStep::ID === $stored->step && 'verify' === ( $cursor['phase'] ?? '' ) ) {
-				if ( ! isset( $done['finish'] ) ) {
-					// finish() sealed the last volume and the tick died before the checkpoint: the cursor still says "finish".
+				if ( ! isset( $done['prepare'] ) ) {
+					// prepare_finish() sealed (or kept) the volume and the tick died before the checkpoint: the cursor
+					// still says "prepare" and holds no packer state, so the pack step's state file is read again.
 					foreach ( glob( $this->volumes( $stored ) . '/*.wpcheckpoint.zip' ) ?: array() as $volume ) {
 						$sealed[ basename( $volume ) ] = hash_file( 'sha256', $volume );
 					}
 					$this->assertNotEmpty( $sealed );
 					$this->assertFileExists( $this->volumes( $stored ) . '/' . ExportPlan::read( $this->work( $stored ), ExportPlan::PLAN )['base'] . '.manifest.json' );
-					$this->rewind( $stored, array( 'phase' => 'finish' ) );
+					$this->rewind( $stored, array_diff_key( array_merge( $cursor, array( 'phase' => 'prepare' ) ), array( 'packer' => 1, 'verifier' => 1 ) ) );
+					$done['prepare'] = true;
+				} elseif ( ! isset( $done['finish'] ) ) {
+					// finish() sealed the last volume and the tick died before the checkpoint.
+					$this->assertNotNull( $finish_cursor, 'the finish phase was observed between ticks' );
+					$this->rewind( $stored, $finish_cursor );
 					$done['finish'] = true;
 				} elseif ( ! isset( $done['standalone'] ) ) {
 					// The standalone manifest was written and the tick died before its checkpoint.
-					$this->rewind( $stored, array( 'phase' => 'blocks', 'packer' => $cursor['packer'] ) );
+					$this->rewind( $stored, array_merge( $cursor, array( 'phase' => 'standalone' ) ) );
 					$done['standalone'] = true;
 				}
 			}
@@ -302,7 +316,7 @@ final class ExportPipelineTest extends JobTestCase {
 		} );
 		$stored = $this->repo->find( $job->id );
 		$this->assertSame( TickResult::COMPLETED, $result->status, (string) $stored->last_error );
-		$this->assertSame( array( 'torn', 'finish', 'standalone', 'store' ), array_keys( $done ), 'every boundary was hit' );
+		$this->assertSame( array( 'torn', 'prepare', 'finish', 'standalone', 'store' ), array_keys( $done ), 'every boundary was hit' );
 		$this->assertSame( '', $stored->last_error );
 		$log = $this->log( $stored );
 		$this->assertStringNotContainsString( 'Step made no progress', $log );
@@ -462,10 +476,44 @@ final class ExportPipelineTest extends JobTestCase {
 		$this->assertSame( TickResult::FAILED, $result->status );
 		$stored = $this->repo->find( $job->id );
 		$this->assertSame( StoreStep::ID, $stored->step );
-		$this->assertStringContainsString( 'already exists in the backups directory; nothing was overwritten', $stored->last_error );
+		$this->assertStringContainsString( 'The manifest (file 3 of 3) already exists in the backups directory; nothing was overwritten', $stored->last_error );
+		$this->assertStringNotContainsString( 'example-test-site', $stored->last_error, 'no backup name, no slug' );
 		$this->assertSame( 'someone else', (string) file_get_contents( (string) $planted ) );
 		$this->assertCount( 1, array_diff( scandir( $this->dirs->backups() ) ?: array(), array( '.', '..', 'index.php', '.htaccess' ) ), 'no volume was moved' );
 		$this->assertNotEmpty( glob( $this->volumes( $stored ) . '/*.wpcheckpoint.zip' ), 'the finished archive waits in the work directory' );
+	}
+
+	/**
+	 * Sentinel: a slug that cannot occur by accident must not reach any output a person could copy: the
+	 * job log, the cursors, the step summaries, the error text, the presenter's payload. The standalone
+	 * manifest's volume list is the one place it belongs (it names the files).
+	 */
+	public function test_the_site_slug_reaches_no_copyable_output(): void {
+		$this->slug = 'Zebra Quokka Site';
+		$this->register_export( 'export-c' );
+		file_put_contents( $this->dirs->backups() . '/placeholder.txt', '' ); // No collision: just a directory that is not empty.
+		$job     = $this->repo->create( 'export-c', 0, array(), $this->options() );
+		$cursors = '';
+		$result  = $this->drive( $job->id, function ( Job $stored ) use ( &$cursors ): void {
+			$cursors .= wp_json_encode( $stored->cursor ) . "\n";
+		} );
+		$stored = $this->repo->find( $job->id );
+		$this->assertSame( TickResult::COMPLETED, $result->status, (string) $stored->last_error );
+		$base = ExportPlan::read( $this->work( $stored ), ExportPlan::PLAN )['base'];
+		$this->assertStringStartsWith( 'zebra-quokka-site-', $base );
+		$this->assertStringNotContainsString( 'zebra-quokka', $this->log( $stored ), 'the job log' );
+		// The cursors do carry it: the packer state names the archive (its base) and the sealed volumes, and the
+		// entry in progress by its absolute source path. Cursors never leave the engine (the presenter has no
+		// field for them); the outputs below are what a person can copy.
+		$this->assertStringContainsString( 'zebra-quokka', $cursors, 'the packer state in the pack cursor names the archive' );
+		foreach ( array( ExportPlan::PREFLIGHT, ExportPlan::REVIEW, FileScanStep::SUMMARY, DatabaseExportStep::SUMMARY, PackStep::SUMMARY ) as $name ) {
+			$this->assertStringNotContainsString( 'zebra-quokka', (string) file_get_contents( $this->work( $stored ) . '/' . $name ), $name );
+		}
+		$this->assertSame( '', $stored->last_error );
+		// A failure that names a backup file by name would be masked by the presenter as a second line of defence.
+		$presenter = new JobPresenter( new Redactor( Redactor::installation_secrets() ), $this->types, $this->dirs );
+		$this->assertSame( 'File [backup].part002.wpcheckpoint.zip is missing.', $presenter->clean( sprintf( 'File %s.part002.wpcheckpoint.zip is missing.', $base ) ) );
+		$this->assertStringNotContainsString( 'zebra-quokka', wp_json_encode( $presenter->present( $stored ) ) );
 	}
 
 	/**

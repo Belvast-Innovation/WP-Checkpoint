@@ -348,19 +348,27 @@ final class PackStepTest extends TestCase {
 		$packed  = $this->packed();
 		$summary = $this->summary();
 		$this->assertSame( array( 'wp-content/uploads/grow.bin' ), array_column( $packed, 'p' ), 'the shrinking file is left out' );
-		$this->assertSame( array( 'count' => 1, 'listed' => array( 'wp-content/uploads/shrink.bin' ) ), $summary['skipped'] );
+		$this->assertSame( array( 'count' => 1, 'listed' => array( 'wp-content/uploads/shrink.bin' ) ), $summary['unstable'] );
+		$this->assertSame( array( 'count' => 0, 'listed' => array() ), $summary['skipped'], 'a file that kept changing is its own kind, not "missing"' );
 		$this->assertSame( array( 'count' => 1, 'listed' => array( 'wp-content/uploads/grow.bin' ) ), $summary['changed'] );
-		$this->assertCount( 1, preg_grep( '/shrink\.bin changed repeatedly while it was being packed and is not in the backup/', $summary['warnings'] ) );
-		$this->assertCount( 1, preg_grep( '/grow\.bin was modified while it was being packed; its content in the backup may be inconsistent/', $summary['warnings'] ) );
+		$this->assertContains( '1 files changed repeatedly while they were being packed and are not in the backup: wp-content/uploads/shrink.bin', $summary['warnings'] );
+		$this->assertContains( '1 files were modified while they were being packed; their content in the backup may be inconsistent: wp-content/uploads/grow.bin', $summary['warnings'] );
+		$this->assertStringContainsString( 'shrank; left out', $this->ctx->log() );
 		$this->assertSame( 2 * self::CHUNK + 40, $packed[0]['b'], 'finished as declared after the fourth stat' );
 	}
 
 	public function test_a_chunk_slower_than_the_whole_budget_fails_with_the_reason(): void {
 		$this->index( array( $this->file( 'slow.bin', 2 * self::CHUNK, 9 ) ) );
-		$this->ctx->tick = 25.0; // The unit's two clock readings put its cost at 25 seconds, more than the 20-second budget.
+		$this->ctx->tick = 25.0; // A unit's two clock readings put its cost at 25 seconds, more than the 20-second budget.
+		$cursor          = array();
 		try {
-			$this->step()->run( $this->ctx->context( array(), 20 ) );
-			$this->fail();
+			// The phase switch and the file's opening cost nothing and end their ticks on the budget; the first
+			// chunk is the first unit that moves bytes, and it is measured.
+			for ( $i = 0; $i < 5; $i++ ) {
+				$result = $this->step()->run( $this->ctx->context( $cursor, 20 ) );
+				$cursor = $result->cursor;
+			}
+			$this->fail( 'the slow chunk must fail the step' );
 		} catch ( \RuntimeException $e ) {
 			$this->assertStringContainsString( 'Disk throughput is too low', $e->getMessage() );
 			$this->assertStringContainsString( 'more than the 20-second time budget', $e->getMessage() );
@@ -413,5 +421,113 @@ final class PackStepTest extends TestCase {
 		$this->assertSame( self::CHUNK, PackStep::packer_options_for( array( 'deflate_max_bytes' => 4 * self::CHUNK ), self::CHUNK )['deflate_max_bytes'] );
 		$this->assertSame( 4096, PackStep::packer_options_for( array( 'deflate_max_bytes' => 4096 ), self::CHUNK )['deflate_max_bytes'], 'a lower cap stays' );
 		$this->assertSame( Packer::DEFLATE_MAX_BYTES, PackStep::packer_options_for( array(), Manifest::DEFAULT_CHUNK )['deflate_max_bytes'], 'the default cap is below the default chunk and stays' );
+	}
+
+	public function test_the_chunk_size_must_be_whole_pieces_or_smaller_than_one(): void {
+		$this->assertInstanceOf( PackStep::class, new PackStep( $this->roots(), $this->options(), 65536 ), 'smaller than a piece: read as one piece' );
+		$this->assertInstanceOf( PackStep::class, new PackStep( $this->roots(), $this->options(), 2 * Packer::PIECE_BYTES ) );
+		$this->expectException( \InvalidArgumentException::class );
+		new PackStep( $this->roots(), $this->options(), Packer::PIECE_BYTES + 1048576 );
+	}
+
+	public function test_a_file_deleted_between_two_ticks_while_its_entry_is_open_is_skipped_and_the_job_goes_on(): void {
+		$gone = $this->file( 'gone.bin', 3 * self::CHUNK, 11 );
+		$keep = $this->file( 'keep.bin', 1000, 12 );
+		$this->index( array( $gone, $keep ) );
+		$this->ctx->tick = 5.0; // One unit per tick: the entry stays open across ticks.
+		$cursor          = array();
+		$deleted         = false;
+		for ( $i = 0; $i < 60; $i++ ) {
+			$result = $this->step()->run( $this->ctx->context( $cursor ) );
+			if ( StepResult::DONE === $result->kind ) {
+				break;
+			}
+			$cursor = $result->cursor;
+			if ( ! $deleted && isset( $cursor['file']['p'] ) && 'wp-content/uploads/gone.bin' === $cursor['file']['p'] && $cursor['file']['chunk'] >= 1 ) {
+				unlink( $this->site . '/gone.bin' ); // Between the ticks: the next chunk finds it gone.
+				$deleted = true;
+			}
+		}
+		$this->assertTrue( $deleted );
+		$this->assertSame( StepResult::DONE, $result->kind );
+		$this->assertSame( array( 'wp-content/uploads/keep.bin' ), array_column( $this->packed(), 'p' ) );
+		$this->assertSame( array( 'count' => 1, 'listed' => array( 'wp-content/uploads/gone.bin' ) ), $this->summary()['skipped'] );
+		$this->assertStringContainsString( 'vanished', $this->ctx->log() );
+	}
+
+	public function test_a_directory_replaced_by_a_link_to_outside_the_root_after_the_scan_is_left_out(): void {
+		$inside  = $this->file( '2024/in.txt', 500, 13 );
+		$linked  = $this->file( 'media/a.txt', 500, 14 );
+		$linked2 = $this->file( 'media/b.txt', 500, 15 );
+		$this->index( array( $inside, $linked, $linked2 ) );
+		// After the scan, "media" becomes a link to a directory outside the uploads root holding files of the same names.
+		$outside = $this->ctx->root . '/elsewhere';
+		mkdir( $outside, 0700 );
+		file_put_contents( $outside . '/a.txt', 'secret a' );
+		file_put_contents( $outside . '/b.txt', 'secret b' );
+		unlink( $this->site . '/media/a.txt' );
+		unlink( $this->site . '/media/b.txt' );
+		rmdir( $this->site . '/media' );
+		if ( ! @symlink( $outside, $this->site . '/media' ) ) {
+			$this->markTestSkipped( 'Symbolic links cannot be created in this environment.' );
+		}
+		list( $result ) = $this->drive( $this->step() );
+		$this->assertSame( StepResult::DONE, $result->kind );
+		$this->assertSame( array( 'wp-content/uploads/2024/in.txt' ), array_column( $this->packed(), 'p' ) );
+		$summary = $this->summary();
+		$this->assertSame( array( 'count' => 2, 'listed' => array( 'wp-content/uploads/media/a.txt', 'wp-content/uploads/media/b.txt' ) ), $summary['outside'] );
+		$this->assertContains( '2 files resolve outside their content directory (through a link) and are not in the backup: wp-content/uploads/media/a.txt, wp-content/uploads/media/b.txt', $summary['warnings'] );
+		$this->assertStringContainsString( 'resolves outside its content directory', $this->ctx->log() );
+		$this->assertStringNotContainsString( 'secret', implode( '', array_map( 'file_get_contents', glob( $this->ctx->work() . '/volumes/*' ) ?: array() ) ) );
+	}
+
+	public function test_listed_paths_stop_at_the_cap_while_the_count_and_the_warning_go_on(): void {
+		$paths = array();
+		for ( $i = 0; $i < PackStep::MAX_LISTED + 10; $i++ ) {
+			$paths[] = sprintf( 'wp-content/uploads/missing-%03d.bin', $i );
+		}
+		$lines = array();
+		foreach ( $paths as $p ) {
+			$lines[] = json_encode( array( 'p' => $p, 'b' => 10, 'm' => 1 ), JSON_UNESCAPED_SLASHES );
+		}
+		file_put_contents( $this->ctx->work() . '/files.index.jsonl', implode( "\n", $lines ) . "\n" );
+		list( $result ) = $this->drive( $this->step() );
+		$this->assertSame( StepResult::DONE, $result->kind );
+		$summary = $this->summary();
+		$this->assertSame( PackStep::MAX_LISTED + 10, $summary['skipped']['count'] );
+		$this->assertCount( PackStep::MAX_LISTED, $summary['skipped']['listed'], 'the cap is reached with the maximal input' );
+		$this->assertSame( array_slice( $paths, 0, PackStep::MAX_LISTED ), $summary['skipped']['listed'] );
+		$this->assertCount( 1, $summary['warnings'] );
+		$this->assertStringEndsWith( ' and 10 more', $summary['warnings'][0] );
+		$this->assertStringContainsString( sprintf( '%d files listed by the scan were missing', PackStep::MAX_LISTED + 10 ), $summary['warnings'][0] );
+	}
+
+	public function test_more_changing_files_than_the_manifest_can_list_still_give_one_warning(): void {
+		// Over Manifest::MAX_WARNINGS files that keep changing: without aggregation the manifest would be refused
+		// at the very end. Tiny chunks keep the fixture small; every file is finished "as it is" after MAX_RESTARTS.
+		$count = Manifest::MAX_WARNINGS + 1;
+		$paths = array();
+		for ( $i = 0; $i < $count; $i++ ) {
+			$paths[] = $this->file( sprintf( 'c/f%04d.bin', $i ), 2 * 1024, $i + 1 );
+		}
+		$this->index( $paths );
+		$grown = array();
+		$step  = new PackStep( $this->roots(), $this->options(), 1024, function ( string $p, int $chunk ) use ( &$grown ): void {
+			if ( 0 !== $chunk || ( $grown[ $p ] ?? 0 ) > PackStep::MAX_RESTARTS ) {
+				return;
+			}
+			$grown[ $p ] = ( $grown[ $p ] ?? 0 ) + 1;
+			$abs         = $this->site . substr( $p, strlen( 'wp-content/uploads' ) );
+			file_put_contents( $abs, 'x', FILE_APPEND );
+			touch( $abs, time() + 100 * $grown[ $p ] );
+		} );
+		list( $result ) = $this->drive( $step, array(), 20, 20000 );
+		$this->assertSame( StepResult::DONE, $result->kind );
+		$summary = $this->summary();
+		$this->assertSame( $count, $summary['changed']['count'] );
+		$this->assertCount( PackStep::MAX_LISTED, $summary['changed']['listed'] );
+		$this->assertCount( 1, $summary['warnings'], 'one warning however many files changed' );
+		$this->assertLessThanOrEqual( Manifest::MAX_WARNINGS, count( $summary['warnings'] ) );
+		$this->assertCount( $count, array_filter( explode( "\n", (string) file_get_contents( $this->ctx->work() . '/' . PackStep::PACKED_INDEX ) ) ), 'every file was packed' );
 	}
 }

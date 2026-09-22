@@ -13,8 +13,10 @@ use WPCheckpoint\Archive\IndexLine;
 use WPCheckpoint\Archive\Manifest;
 use WPCheckpoint\Archive\Packer;
 use WPCheckpoint\Archive\SourceChanged;
+use WPCheckpoint\Archive\SourceGone;
 use WPCheckpoint\Files\Exclusions;
 use WPCheckpoint\Files\ScanRoots;
+use WPCheckpoint\Support\Paths;
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- messages carry archive paths and numbers; the runner stores them through the redactor and the presenter cleans them before display.
 
@@ -103,8 +105,14 @@ final class PackStep implements Step {
 	 * @param array<string, mixed>                  $packer_options Packer options.
 	 * @param int                                   $chunk_bytes    Content chunk size.
 	 * @param callable|null                         $after_chunk    Test seam, see $after_chunk.
+	 * @throws \InvalidArgumentException When the chunk size is not whole pieces.
 	 */
 	public function __construct( $roots = null, array $packer_options = array(), int $chunk_bytes = Manifest::DEFAULT_CHUNK, $after_chunk = null ) {
+		if ( $chunk_bytes <= 0 || ( $chunk_bytes > Packer::PIECE_BYTES && 0 !== $chunk_bytes % Packer::PIECE_BYTES ) ) {
+			// A chunk is read as whole pieces (or as one piece when it is smaller than a piece): any other size
+			// would hash piece boundaries while the manifest declares chunk boundaries.
+			throw new \InvalidArgumentException( sprintf( 'The content chunk size must be at most %d bytes or a multiple of it.', Packer::PIECE_BYTES ) );
+		}
 		$this->roots          = $roots;
 		$this->packer_options = self::packer_options_for( $packer_options, $chunk_bytes );
 		$this->chunk_bytes    = $chunk_bytes;
@@ -160,11 +168,12 @@ final class PackStep implements Step {
 		$packer = Packer::open( $volumes, $base, $cursor['packer'], $this->packer_options );
 		self::cut( $work . DIRECTORY_SEPARATOR . self::PACKED_INDEX, $cursor['packed_bytes'] );
 		self::cut( $work . DIRECTORY_SEPARATOR . self::CHUNKS, $cursor['chunks_bytes'] );
-		$roots  = null === $this->roots ? ScanRoots::resolve( $active['groups'], $context->storage_path() )['roots'] : $this->roots;
-		$since  = 0;
-		$last   = 0.0;
-		$first  = true;
-		$budget = $context->budget()->seconds;
+		$roots      = null === $this->roots ? ScanRoots::resolve( $active['groups'], $context->storage_path() )['roots'] : $this->roots;
+		$exclusions = new Exclusions( $active['exclusions'], array() );
+		$since      = 0;
+		$last       = 0.0;
+		$first      = true;
+		$budget     = $context->budget()->seconds;
 
 		try {
 			while ( 'done' !== $cursor['phase'] ) {
@@ -174,12 +183,17 @@ final class PackStep implements Step {
 					return StepResult::progress( $this->store( $cursor, $packer ), $this->percent( $cursor ), $this->message( $cursor ) );
 				}
 				$started = $context->elapsed();
-				$bytes   = $this->unit( $context, $work, $active, $roots, $packer, $cursor );
-				$last    = $context->elapsed() - $started;
+				$bytes   = $this->unit( $context, $work, $active, $roots, $exclusions, $packer, $cursor );
+				$cost    = $context->elapsed() - $started;
 				$first   = false;
 				$since  += $bytes;
-				if ( $last > $budget ) {
-					throw new \RuntimeException( sprintf( 'Disk throughput is too low for a backup here: one %d MB chunk took %d seconds, more than the %d-second time budget of a single run.', (int) ( $this->chunk_bytes / 1048576 ), (int) ceil( $last ), $budget ) );
+				if ( $bytes > 0 ) {
+					// Only a unit that moved bytes says what the next one will cost; a file boundary or a phase
+					// switch costs nothing and must not reset the measure. The slowest unit of this tick rules.
+					$last = max( $last, $cost );
+					if ( $cost > $budget ) {
+						throw new \RuntimeException( sprintf( 'Disk throughput is too low for a backup here: one %d MB chunk took %d seconds, more than the %d-second time budget of a single run.', (int) ( $this->chunk_bytes / 1048576 ), (int) ceil( $cost ), $budget ) );
+					}
 				}
 				if ( 'done' === $cursor['phase'] ) {
 					break;
@@ -233,13 +247,14 @@ final class PackStep implements Step {
 	 * @param JobContext                       $context Context.
 	 * @param string                           $work    Work directory.
 	 * @param array<string, mixed>             $active  Effective plan.
-	 * @param array<int, array<string, mixed>> $roots   Scan roots.
-	 * @param Packer                           $packer  Packer.
-	 * @param array<string, mixed>             $cursor  Cursor (updated).
+	 * @param array<int, array<string, mixed>> $roots      Scan roots.
+	 * @param Exclusions                       $exclusions Glob exclusions of the plan.
+	 * @param Packer                           $packer     Packer.
+	 * @param array<string, mixed>             $cursor     Cursor (updated).
 	 * @return int Bytes handled.
 	 * @throws \RuntimeException When a database chunk is missing or does not hash to its index line.
 	 */
-	private function unit( JobContext $context, string $work, array $active, array $roots, Packer $packer, array &$cursor ): int {
+	private function unit( JobContext $context, string $work, array $active, array $roots, Exclusions $exclusions, Packer $packer, array &$cursor ): int {
 		if ( 'database' === $cursor['phase'] ) {
 			$line = self::line_at( $work . DIRECTORY_SEPARATOR . Manifest::DATABASE_INDEX, $cursor['offset'] );
 			if ( null === $line ) {
@@ -273,7 +288,7 @@ final class PackStep implements Step {
 
 		if ( 'files' === $cursor['phase'] ) {
 			if ( null === $cursor['file'] ) {
-				return $this->begin_file( $work, $active, $roots, $packer, $cursor );
+				return $this->begin_file( $context, $work, $active, $roots, $exclusions, $packer, $cursor );
 			}
 			return $this->chunk( $context, $work, $roots, $packer, $cursor );
 		}
@@ -288,18 +303,20 @@ final class PackStep implements Step {
 	}
 
 	/**
-	 * Take the next plan line, skip what is excluded or gone, and open the
-	 * entry for the rest. Returns without a unit's worth of work when a
-	 * line was skipped; the caller loops.
+	 * Take the next plan line, skip what is excluded, gone, unreadable or
+	 * resolving outside its root, and open the entry for the rest. Returns
+	 * without a unit's worth of work when a line was skipped; the caller loops.
 	 *
-	 * @param string                           $work   Work directory.
-	 * @param array<string, mixed>             $active Effective plan.
-	 * @param array<int, array<string, mixed>> $roots  Scan roots.
-	 * @param Packer                           $packer Packer.
-	 * @param array<string, mixed>             $cursor Cursor (updated).
+	 * @param JobContext                       $context    Context (for the log).
+	 * @param string                           $work       Work directory.
+	 * @param array<string, mixed>             $active     Effective plan.
+	 * @param array<int, array<string, mixed>> $roots      Scan roots.
+	 * @param Exclusions                       $exclusions Glob exclusions of the plan.
+	 * @param Packer                           $packer     Packer.
+	 * @param array<string, mixed>             $cursor     Cursor (updated).
 	 * @return int
 	 */
-	private function begin_file( string $work, array $active, array $roots, Packer $packer, array &$cursor ): int {
+	private function begin_file( JobContext $context, string $work, array $active, array $roots, Exclusions $exclusions, Packer $packer, array &$cursor ): int {
 		$line = self::line_at( $work . DIRECTORY_SEPARATOR . Manifest::FILES_INDEX, $cursor['offset'] );
 		if ( null === $line ) {
 			$cursor['phase'] = 'blocks';
@@ -308,17 +325,30 @@ final class PackStep implements Step {
 		$data             = IndexLine::files( $line['text'], $this->chunk_bytes );
 		$cursor['offset'] = $line['next'];
 		$p                = $data['p'];
-		if ( ExportPlan::excluded_by_path( $p, $active['exclude_paths'] ) || ( new Exclusions( $active['exclusions'], array() ) )->excludes( $p ) ) {
+		if ( ExportPlan::excluded_by_path( $p, $active['exclude_paths'] ) || $exclusions->excludes( $p ) ) {
 			++$cursor['excluded'];
 			return 0;
 		}
-		$source = self::source_of( $roots, $p );
+		$root   = self::root_of( $roots, $p );
+		$source = null === $root ? null : self::source_of( $roots, $p );
 		$stat   = null === $source ? false : self::fresh_stat( $source );
 		if ( false === $stat || ! is_readable( $source ) ) {
 			self::note( $cursor, 'skipped', $p );
 			return 0;
 		}
-		$this->open_entry( $packer, $source, $p, $stat, $cursor, 0 );
+		if ( ! Paths::is_inside( (string) $root['path'], $source ) ) {
+			// The scan saw a directory; a link put in its place since would take the backup outside the
+			// content directory (another site's files on a shared host). Resolved paths only.
+			$context->logger()->warning( 'File left out: it resolves outside its content directory', array( 'p' => $p ) );
+			self::note( $cursor, 'outside', $p );
+			return 0;
+		}
+		try {
+			$this->open_entry( $packer, $source, $p, $stat, $cursor, 0 );
+		} catch ( SourceGone $e ) {
+			// Gone between the stat above and the packer's own look: the same outcome as gone before it.
+			self::note( $cursor, 'skipped', $p );
+		}
 		return 0;
 	}
 
@@ -387,6 +417,8 @@ final class PackStep implements Step {
 			}
 		} catch ( SourceChanged $e ) {
 			return $this->restart( $context, $packer, $source, self::fresh_stat( (string) $source ), $cursor, 'shrank during chunk ' . ( (int) $file['chunk'] + 1 ) );
+		} catch ( SourceGone $e ) {
+			return $this->restart( $context, $packer, $source, false, $cursor, 'vanished during chunk ' . ( (int) $file['chunk'] + 1 ) );
 		}
 		if ( null !== $this->after_chunk ) {
 			call_user_func( $this->after_chunk, (string) $file['p'], (int) $file['chunk'] );
@@ -396,13 +428,13 @@ final class PackStep implements Step {
 				$work . DIRECTORY_SEPARATOR . self::CHUNKS,
 				$cursor,
 				'chunks_bytes',
-				(string) json_encode( // phpcs:ignore WordPress.WP.AlternativeFunctions.json_encode_json_encode -- pure PHP class.
+				self::encode_line(
 					array(
 						'i' => (int) $file['chunk'],
 						'h' => hash_final( $hash ),
 					)
-				) . "\n"
-			); // phpcs:ignore WordPress.WP.AlternativeFunctions.json_encode_json_encode -- pure PHP class.
+				)
+			);
 			++$cursor['file']['chunk'];
 		}
 		if ( ! $packer->has_open_entry() ) {
@@ -436,17 +468,21 @@ final class PackStep implements Step {
 		}
 		$restarts = (int) $file['restarts'] + 1;
 		if ( $restarts > self::MAX_RESTARTS ) {
-			if ( ! empty( $file['final'] ) || (int) $stat['size'] < (int) $file['size'] ) {
+			if ( ! empty( $file['final'] ) ) {
+				// Already being finished as declared, and its size moved again: a stored entry cannot follow.
+				$context->logger()->warning( 'File changed again while it was being packed as it was; left out', array( 'p' => $p ) );
+				self::note( $cursor, 'unstable', $p );
+				return 0;
+			}
+			if ( (int) $stat['size'] < (int) $file['size'] ) {
 				// A stored entry declares its size up front; a file that keeps shrinking cannot be finished.
 				$context->logger()->warning( 'File changed repeatedly and shrank; left out', array( 'p' => $p ) );
-				self::note( $cursor, 'skipped', $p );
-				$cursor['warnings'][] = sprintf( 'File %s changed repeatedly while it was being packed and is not in the backup.', $p );
+				self::note( $cursor, 'unstable', $p );
 				return 0;
 			}
 			// It keeps changing without shrinking: finish it as declared now and say so.
 			$context->logger()->warning( 'File changed repeatedly; packed as it is now', array( 'p' => $p ) );
 			self::note( $cursor, 'changed', $p );
-			$cursor['warnings'][] = sprintf( 'File %s was modified while it was being packed; its content in the backup may be inconsistent.', $p );
 			$this->open_entry( $packer, $source, $p, $stat, $cursor, $restarts );
 			$cursor['file']['final'] = true;
 			return 0;
@@ -625,6 +661,26 @@ final class PackStep implements Step {
 	}
 
 	/**
+	 * The root an archive path belongs to (longest prefix wins).
+	 *
+	 * @param array<int, array<string, mixed>> $roots Roots.
+	 * @param string                           $p     Archive path.
+	 * @return array<string, mixed>|null
+	 */
+	private static function root_of( array $roots, string $p ) {
+		$best = null;
+		$len  = -1;
+		foreach ( $roots as $root ) {
+			$prefix = (string) $root['prefix'];
+			if ( ( $p === $prefix || 0 === strpos( $p, $prefix . '/' ) ) && strlen( $prefix ) > $len ) {
+				$best = $root;
+				$len  = strlen( $prefix );
+			}
+		}
+		return $best;
+	}
+
+	/**
 	 * The absolute path of an archive path under the roots (longest prefix wins).
 	 *
 	 * @param array<int, array<string, mixed>> $roots Roots.
@@ -657,6 +713,50 @@ final class PackStep implements Step {
 		}
 		$stat = @stat( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a vanished file is reported by the caller.
 		return is_array( $stat ) ? $stat : false;
+	}
+
+	/**
+	 * One warning per kind of left-out or doubtful file, however many
+	 * there are: the count, the first MAX_LISTED paths, and how many more.
+	 * The manifest caps its warnings (Manifest::MAX_WARNINGS); a busy site
+	 * must not fail at the very end for having too many.
+	 *
+	 * @param array<string, mixed> $cursor Final cursor.
+	 * @return string[]
+	 */
+	private static function warnings( array $cursor ): array {
+		$texts = array(
+			'skipped'  => '%d files listed by the scan were missing or unreadable when they were packed and are not in the backup: %s',
+			'unstable' => '%d files changed repeatedly while they were being packed and are not in the backup: %s',
+			'changed'  => '%d files were modified while they were being packed; their content in the backup may be inconsistent: %s',
+			'outside'  => '%d files resolve outside their content directory (through a link) and are not in the backup: %s',
+		);
+		$out   = array();
+		foreach ( $texts as $kind => $text ) {
+			$count = (int) $cursor[ $kind ]['count'];
+			if ( $count <= 0 ) {
+				continue;
+			}
+			$listed = (array) $cursor[ $kind ]['listed'];
+			$more   = $count - count( $listed );
+			$out[]  = sprintf( $text, $count, implode( ', ', $listed ) . ( $more > 0 ? sprintf( ' and %d more', $more ) : '' ) );
+		}
+		return $out;
+	}
+
+	/**
+	 * A JSONL line that will be read back: encoding failure is thrown, never a partial line.
+	 *
+	 * @param array<string, mixed> $data Line data.
+	 * @return string With its newline.
+	 * @throws \RuntimeException When it cannot be encoded.
+	 */
+	private static function encode_line( array $data ): string {
+		$json = json_encode( $data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE ); // phpcs:ignore WordPress.WP.AlternativeFunctions.json_encode_json_encode -- pure PHP class.
+		if ( ! is_string( $json ) ) {
+			throw new \RuntimeException( 'A work file line could not be encoded.' );
+		}
+		return $json . "\n";
 	}
 
 	/**
@@ -701,7 +801,14 @@ final class PackStep implements Step {
 					'count'  => 0,
 					'listed' => array(),
 				),
-				'warnings'     => array(),
+				'unstable'     => array(
+					'count'  => 0,
+					'listed' => array(),
+				),
+				'outside'      => array(
+					'count'  => 0,
+					'listed' => array(),
+				),
 				'restarted'    => false,
 			),
 			$cursor
@@ -772,14 +879,9 @@ final class PackStep implements Step {
 				'excluded' => (int) $cursor['excluded'],
 				'skipped'  => $cursor['skipped'],
 				'changed'  => $cursor['changed'],
-				'warnings' => array_values(
-					array_unique(
-						array_merge(
-							$cursor['skipped']['count'] > 0 ? array( sprintf( '%d files listed by the scan were missing or unreadable when they were packed and are not in the backup.', $cursor['skipped']['count'] ) ) : array(),
-							(array) $cursor['warnings']
-						)
-					)
-				),
+				'unstable' => $cursor['unstable'],
+				'outside'  => $cursor['outside'],
+				'warnings' => self::warnings( $cursor ),
 			)
 		);
 	}

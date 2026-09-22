@@ -78,17 +78,17 @@ final class StoreStep implements Step {
 		);
 		$names  = $this->names( $work, $base );
 
+		$total = count( $names );
 		if ( ! $cursor['checked'] ) {
-			foreach ( $names as $name ) {
+			foreach ( $names as $i => $name ) {
 				if ( file_exists( $this->backups . DIRECTORY_SEPARATOR . $name ) ) {
-					throw new \RuntimeException( sprintf( 'A backup named %s already exists in the backups directory; nothing was overwritten.', $name ) );
+					throw new \RuntimeException( sprintf( '%s already exists in the backups directory; nothing was overwritten.', self::label( $i, $total ) ) );
 				}
 			}
 			$cursor['checked'] = true;
 			$context->checkpoint( $cursor, 5, __( 'Storing the backup', 'wp-checkpoint' ) );
 		}
 
-		$total = count( $names );
 		while ( $cursor['moved'] < $total ) {
 			$name = $names[ $cursor['moved'] ];
 			$from = $work . DIRECTORY_SEPARATOR . PackStep::VOLUMES . DIRECTORY_SEPARATOR . $name;
@@ -98,13 +98,13 @@ final class StoreStep implements Step {
 			$in_work    = is_file( $from );
 			$in_backups = is_file( $to );
 			if ( $in_work && $in_backups ) {
-				throw new \RuntimeException( sprintf( 'File %s is both in the work directory and in the backups directory; nothing was overwritten.', $name ) );
+				throw new \RuntimeException( sprintf( '%s is both in the work directory and in the backups directory; nothing was overwritten.', self::label( $cursor['moved'], $total ) ) );
 			}
 			if ( ! $in_work && ! $in_backups ) {
-				throw new \RuntimeException( sprintf( 'File %s of the finished archive is missing; the work directory was lost or changed.', $name ) );
+				throw new \RuntimeException( sprintf( '%s is missing; the work directory was lost or changed.', self::label( $cursor['moved'], $total ) ) );
 			}
 			if ( $in_work && ! @rename( $from, $to ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.rename_rename -- a warning would put the path into the error log; failure is thrown.
-				throw new TransientFailure( sprintf( 'File %s could not be moved into the backups directory.', $name ) );
+				throw new TransientFailure( sprintf( '%s could not be moved into the backups directory.', self::label( $cursor['moved'], $total ) ) );
 			}
 			++$cursor['moved'];
 			$context->checkpoint( $cursor, (int) floor( 100 * $cursor['moved'] / $total ), sprintf( /* translators: 1: files moved, 2: files in total */ __( 'Stored %1$d of %2$d files', 'wp-checkpoint' ), $cursor['moved'], $total ) );
@@ -128,6 +128,18 @@ final class StoreStep implements Step {
 	}
 
 	/**
+	 * A file by its place, never by its name: the name carries the site's
+	 * slug, and this text reaches the job's error and log.
+	 *
+	 * @param int $i     Position (0-based).
+	 * @param int $total Files in total.
+	 * @return string
+	 */
+	private static function label( int $i, int $total ): string {
+		return $i + 1 === $total ? sprintf( 'The manifest (file %d of %d)', $i + 1, $total ) : sprintf( 'Volume %d (file %d of %d)', $i + 1, $i + 1, $total );
+	}
+
+	/**
 	 * The files to move, in order: the volumes as the manifest lists them,
 	 * then the standalone manifest.
 	 *
@@ -144,7 +156,12 @@ final class StoreStep implements Step {
 		if ( '' === $source ) {
 			throw new \RuntimeException( 'The manifest of the finished archive is missing; the work directory was lost or changed.' );
 		}
-		$json = @file_get_contents( $source ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- the job's own manifest, small by construction.
+		clearstatcache( true, $source );
+		$size = @filesize( $source ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- reported below.
+		if ( ! is_int( $size ) || $size > Manifest::MAX_JSON_BYTES ) {
+			throw new \RuntimeException( 'The manifest of the finished archive cannot be read or is larger than allowed.' );
+		}
+		$json = @file_get_contents( $source, false, null, 0, Manifest::MAX_JSON_BYTES ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- bounded by the size check above.
 		if ( ! is_string( $json ) ) {
 			throw new \RuntimeException( 'The manifest of the finished archive cannot be read.' );
 		}
