@@ -103,6 +103,9 @@ final class StoreStep implements Step {
 			if ( ! $in_work && ! $in_backups ) {
 				throw new \RuntimeException( sprintf( '%s is missing; the work directory was lost or changed.', self::label( $cursor['moved'], $total ) ) );
 			}
+			if ( $in_work ) {
+				$context->confirm_lease(); // Nothing between the lease check and the rename.
+			}
 			if ( $in_work && ! @rename( $from, $to ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.rename_rename -- a warning would put the path into the error log; failure is thrown.
 				throw new TransientFailure( sprintf( '%s could not be moved into the backups directory.', self::label( $cursor['moved'], $total ) ) );
 			}

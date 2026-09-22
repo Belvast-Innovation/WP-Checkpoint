@@ -41,6 +41,11 @@ final class Runner {
 	const MAX_NO_PROGRESS = 3;
 
 	/**
+	 * Takeovers at the same position before the job fails (see JobRepository::acquire()).
+	 */
+	const MAX_TAKEOVERS = 3;
+
+	/**
 	 * StepResult::wait() is capped at this many seconds (the gate back-off maximum).
 	 */
 	const MAX_WAIT_SECONDS   = 300;
@@ -197,6 +202,22 @@ final class Runner {
 		$token  = $held['token'];
 		$start  = is_numeric( $started_at ) ? (float) $started_at : $this->now();
 		$logger = $this->logger_for( $job );
+		if ( ! empty( $held['taken_over'] ) ) {
+			$logger->warning(
+				'The previous run ended without finishing; continuing from the last checkpoint',
+				array(
+					'step'      => $job->step,
+					'takeovers' => $job->takeovers,
+				)
+			);
+			if ( $job->takeovers >= self::MAX_TAKEOVERS ) {
+				try {
+					return $this->fail( $job, $token, $logger, self::takeover_message( $job ) );
+				} catch ( LockLost $lost ) {
+					return new TickResult( TickResult::LOST, 0, $this->repository->find( $job_id ), __( 'The job was cancelled or taken over by another process.', 'wp-checkpoint' ) );
+				}
+			}
+		}
 		if ( ! empty( $held['healed'] ) ) {
 			// Recorded, not hidden: the questions of a pause that never completed (or of a job failed while
 			// waiting and retried) were cleared; the step asks again if it still needs to.
@@ -284,7 +305,8 @@ final class Runner {
 					}
 					$this->persist( $job, $token, $step_id, $cursor, $state, self::overall( $index, $count, $percent ), $message, $advanced );
 					$this->maybe_heartbeat( $job, $token );
-				}
+				},
+				$token
 			);
 
 			try {
@@ -509,10 +531,37 @@ final class Runner {
 	 * @param Logger               $logger     Logger.
 	 * @param float                $started_at Tick start.
 	 * @param callable|null        $checkpoint Checkpoint callback.
+	 * @param string               $token      Lock token ('' outside a run: no lease checks).
 	 * @return JobContext
 	 */
-	private function context( Job $job, array $cursor, Budget $budget, Logger $logger, float $started_at, $checkpoint ): JobContext {
-		return new JobContext( $job, $cursor, $budget, $logger, $this->clock, $this->memory, $started_at, $this->memory_limit, $checkpoint );
+	private function context( Job $job, array $cursor, Budget $budget, Logger $logger, float $started_at, $checkpoint, string $token = '' ): JobContext {
+		$lease = '' === $token ? null : function ( bool $force ) use ( $job, $token ): void {
+			if ( $force ) {
+				if ( ! $this->repository->heartbeat( $job, $token, $this->lease ) ) {
+					throw new LockLost( sprintf( 'Job %d: the lock is no longer held.', $job->id ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+				}
+				return;
+			}
+			$this->maybe_heartbeat( $job, $token );
+		};
+		return new JobContext( $job, $cursor, $budget, $logger, $this->clock, $this->memory, $started_at, $this->memory_limit, $checkpoint, $lease );
+	}
+
+	/**
+	 * Why a job that was taken over MAX_TAKEOVERS times at the same position
+	 * fails: which step and phase, never a path or the site.
+	 *
+	 * @param Job $job Job.
+	 * @return string
+	 */
+	private static function takeover_message( Job $job ): string {
+		$phase = isset( $job->cursor['phase'] ) && is_string( $job->cursor['phase'] ) && 1 === preg_match( '/\A[a-z_]{1,32}\z/', $job->cursor['phase'] ) ? $job->cursor['phase'] : '-';
+		return sprintf(
+			'Stopped: step "%1$s" (phase %2$s) ran over the server\'s execution time limit at the same point %3$d times in a row without finishing. A single unit of work there takes longer than this server allows; please report it with the job log.',
+			'' === $job->step ? '-' : $job->step,
+			$phase,
+			$job->takeovers
+		);
 	}
 
 	/**
@@ -596,7 +645,8 @@ final class Runner {
 	 * @throws LockLost When the heartbeat refused.
 	 */
 	private function maybe_heartbeat( Job $job, string $token ): void {
-		if ( $job->locked_until - (int) floor( $this->now() ) >= (int) ( $this->lease / 2 ) ) {
+		// The repository's clock is the database's (JobRepository::now()): lease written and judged on one clock.
+		if ( $job->locked_until - $this->repository->now() >= (int) ( $this->lease / 2 ) ) {
 			return;
 		}
 		if ( ! $this->repository->heartbeat( $job, $token, $this->lease ) ) {

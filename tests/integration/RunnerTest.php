@@ -470,4 +470,175 @@ final class RunnerTest extends WP_UnitTestCase {
 		$this->assertSame( TickResult::FAILED, $this->runner()->tick( $job->id )->status );
 		$this->assertStringContainsString( 'Unknown step "zzz"', $this->repo->find( $job->id )->last_error );
 	}
+
+	/**
+	 * A step that checkpoints two bounded units (a, b) and then dies in a third (c) while $kill says so: the
+	 * death is a LockLost thrown from inside the unit, which makes the Runner return at once without a write
+	 * or a release, exactly what a request killed by the server leaves behind.
+	 */
+	private function killable_step( bool &$kill, int &$calls ): ClosureStep {
+		return new ClosureStep(
+			'work',
+			function ( JobContext $ctx ) use ( &$kill, &$calls ): StepResult {
+				$cursor = $ctx->cursor();
+				foreach ( array( 'a', 'b' ) as $unit ) {
+					if ( empty( $cursor[ $unit ] ) ) {
+						$cursor[ $unit ] = true;
+						$ctx->checkpoint( $cursor, 30 );
+					}
+				}
+				++$calls;
+				if ( $kill ) {
+					throw new \WPCheckpoint\Jobs\LockLost( 'killed by the server (simulated)' );
+				}
+				$cursor['c'] = ( $cursor['c'] ?? 0 ) + 1;
+				$this->now  += 30; // The unit takes longer than the 20-second budget: the run ends after it.
+				return $cursor['c'] >= 5 ? StepResult::done( 'done' ) : StepResult::progress( $cursor, 60, 'c' );
+			}
+		);
+	}
+
+	/**
+	 * The next driver after the killed run's lease expired.
+	 */
+	private function tick_after_expiry( int $id ): TickResult {
+		$this->now += JobRepository::LOCK_SECONDS + 1;
+		return $this->runner()->tick( $id, $this->now );
+	}
+
+	public function test_three_takeovers_at_the_same_position_fail_the_job_even_after_bounded_units_made_progress(): void {
+		$kill  = true;
+		$calls = 0;
+		$this->register( 'killed', array( $this->killable_step( $kill, $calls ) ) );
+		$job = $this->repo->create( 'killed' );
+		$this->assertSame( TickResult::LOST, $this->runner()->tick( $job->id, $this->now )->status, 'the first run checkpoints a and b, then dies in c' );
+		$this->assertSame( array( 'a' => true, 'b' => true ), JobContext::strip_reserved( $this->repo->find( $job->id )->cursor ) );
+		$this->assertSame( TickResult::LOST, $this->tick_after_expiry( $job->id )->status );
+		$this->assertSame( 1, $this->repo->find( $job->id )->takeovers );
+		$this->assertSame( TickResult::LOST, $this->tick_after_expiry( $job->id )->status );
+		$this->assertSame( 2, $this->repo->find( $job->id )->takeovers, 'the same position: counted, although the first run made progress' );
+		$result = $this->tick_after_expiry( $job->id );
+		$this->assertSame( TickResult::FAILED, $result->status );
+		$failed = $this->repo->find( $job->id );
+		$this->assertSame( Job::FAILED, $failed->status );
+		$this->assertSame( 3, $calls, 'the third takeover fails before running the unit again' );
+		$this->assertStringContainsString( 'Stopped: step "work" (phase -) ran over the server\'s execution time limit at the same point 3 times in a row without finishing', $failed->last_error );
+		$this->assertStringNotContainsString( $this->base, $failed->last_error );
+		$log = (string) file_get_contents( $this->base . '/' . $failed->log_path );
+		$this->assertSame( 3, substr_count( $log, 'The previous run ended without finishing; continuing from the last checkpoint' ) );
+		// A retry starts the count over.
+		$this->repo->transition( $failed, Job::QUEUED );
+		$this->assertSame( 0, $this->repo->find( $job->id )->takeovers );
+		$this->assertSame( '', $this->repo->find( $job->id )->takeover_mark );
+	}
+
+	public function test_a_takeover_at_another_position_starts_the_count_over_and_a_released_run_is_no_takeover(): void {
+		$kill  = true;
+		$calls = 0;
+		$this->register( 'killed', array( $this->killable_step( $kill, $calls ) ) );
+		$job = $this->repo->create( 'killed' );
+		$this->runner()->tick( $job->id, $this->now );
+		$this->tick_after_expiry( $job->id );
+		$this->assertSame( 1, $this->repo->find( $job->id )->takeovers );
+		// The second takeover finds the unit going through: the position moves (c = 1) and the run releases.
+		$kill = false;
+		$this->assertSame( TickResult::MORE, $this->tick_after_expiry( $job->id )->status );
+		$this->assertSame( 2, $this->repo->find( $job->id )->takeovers, 'taken over twice at the old position' );
+		// A released run is no takeover; this one dies at the new position.
+		$kill = true;
+		$this->assertSame( TickResult::LOST, $this->runner()->tick( $job->id, $this->now )->status );
+		$this->assertSame( 2, $this->repo->find( $job->id )->takeovers, 'a normal acquire counts nothing' );
+		// Taken over at the new position: the count starts over at 1, the job goes on.
+		$this->assertSame( TickResult::LOST, $this->tick_after_expiry( $job->id )->status );
+		$this->assertSame( 1, $this->repo->find( $job->id )->takeovers );
+		$this->assertSame( Job::RUNNING, $this->repo->find( $job->id )->status );
+	}
+
+	public function test_a_run_that_lost_its_lease_stops_before_the_next_unit_and_before_a_transition(): void {
+		$units  = array();
+		$marker = $this->root . '/renamed';
+		$this->register(
+			'lease',
+			array(
+				new ClosureStep(
+					'work',
+					function ( JobContext $ctx ) use ( &$units, $marker ): StepResult {
+						$units[] = 1;
+						$ctx->checkpoint( array( 'n' => 1 ), 10 );
+						// Another driver takes the lock over while this run is suspended past its lease.
+						$this->steal_lock( $ctx->job()->id );
+						$this->now += JobRepository::LOCK_SECONDS + 1;
+						if ( $ctx->should_stop() ) { // Throws: the lease is gone.
+							return StepResult::progress( array( 'n' => 1 ), 10 );
+						}
+						$units[] = 2;
+						return StepResult::done( 'done' );
+					}
+				),
+			)
+		);
+		$job = $this->repo->create( 'lease' );
+		$this->assertSame( TickResult::LOST, $this->runner()->tick( $job->id, $this->now )->status );
+		$this->assertSame( array( 1 ), $units, 'no unit after the lease was lost' );
+
+		$this->register(
+			'transition',
+			array(
+				new ClosureStep(
+					'work',
+					function ( JobContext $ctx ) use ( $marker ): StepResult {
+						$this->steal_lock( $ctx->job()->id );
+						$ctx->confirm_lease(); // Always asks the database, whatever the local clock says.
+						touch( $marker );
+						return StepResult::done( 'done' );
+					}
+				),
+			)
+		);
+		$job = $this->repo->create( 'transition' );
+		$this->assertSame( TickResult::LOST, $this->runner()->tick( $job->id, $this->now )->status );
+		$this->assertFileDoesNotExist( $marker, 'the transition did not happen' );
+	}
+
+	public function test_a_held_lease_is_renewed_between_units_on_the_database_clock(): void {
+		$renewed = 0;
+		$this->register(
+			'renew',
+			array(
+				new ClosureStep(
+					'work',
+					function ( JobContext $ctx ) use ( &$renewed ): StepResult {
+						$ctx->checkpoint( array( 'n' => 1 ), 10 );
+						$this->now += JobRepository::LOCK_SECONDS - 10; // Less than half of the lease left.
+						$ctx->should_stop();
+						$renewed = $this->repo->find( $ctx->job()->id )->locked_until;
+						return StepResult::done( 'done' );
+					}
+				),
+			)
+		);
+		$renewed = 0;
+		$job     = $this->repo->create( 'renew' );
+		$before  = (int) $this->now;
+		$this->assertSame( TickResult::COMPLETED, $this->runner()->tick( $job->id, $this->now )->status, 'renewed, not lost' );
+		$this->assertSame( $before + JobRepository::LOCK_SECONDS - 10 + JobRepository::LOCK_SECONDS, $renewed, 'the lease was renewed between the units, from the repository clock' );
+
+		// Without an injected clock the repository reads the database's clock (one query), not the web server's.
+		global $wpdb;
+		$repo = new JobRepository( $this->dirs );
+		$wpdb->query( 'SET timestamp = 2000000000' );
+		try {
+			$this->assertEqualsWithDelta( 2000000000, $repo->now(), 2, 'the database clock' );
+		} finally {
+			$wpdb->query( 'SET timestamp = DEFAULT' );
+		}
+	}
+
+	/**
+	 * Give the job's lock to another (imaginary) driver.
+	 */
+	private function steal_lock( int $id ): void {
+		global $wpdb;
+		$wpdb->update( Schema::jobs_table(), array( 'lock_token' => str_repeat( 'f', 32 ) ), array( 'id' => $id ) );
+	}
 }

@@ -146,6 +146,24 @@ final class PackStep implements Step {
 	}
 
 	/**
+	 * The packer options of this run: the lease is confirmed right before
+	 * each volume file is created or renamed (Packer's "confirm" option).
+	 *
+	 * @param JobContext $context Context.
+	 * @return array<string, mixed>
+	 */
+	private function packer_options_with( JobContext $context ): array {
+		return array_merge(
+			$this->packer_options,
+			array(
+				'confirm' => static function () use ( $context ): void {
+					$context->confirm_lease();
+				},
+			)
+		);
+	}
+
+	/**
 	 * Step id.
 	 *
 	 * @return string
@@ -173,7 +191,7 @@ final class PackStep implements Step {
 			throw new TransientFailure( 'The volumes directory could not be created.' );
 		}
 		$base   = isset( $plan['base'] ) ? (string) $plan['base'] : '';
-		$packer = Packer::open( $volumes, $base, $cursor['packer'], $this->packer_options );
+		$packer = Packer::open( $volumes, $base, $cursor['packer'], $this->packer_options_with( $context ) );
 		self::cut( $work . DIRECTORY_SEPARATOR . self::PACKED_INDEX, $cursor['packed_bytes'] );
 		self::cut( $work . DIRECTORY_SEPARATOR . self::CHUNKS, $cursor['chunks_bytes'] );
 		$roots      = null === $this->roots ? ScanRoots::resolve( $active['groups'], $context->storage_path() )['roots'] : $this->roots;

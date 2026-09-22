@@ -3,6 +3,7 @@
 namespace WPCheckpoint\Tests\Unit\Archive;
 
 use WPCheckpoint\Archive\ChunkHasher;
+use WPCheckpoint\Archive\ConcurrentWriter;
 use WPCheckpoint\Archive\InsufficientSpace;
 use WPCheckpoint\Archive\IndexLine;
 use WPCheckpoint\Archive\Packer;
@@ -845,6 +846,80 @@ final class PackerTest extends TestCase {
 		$this->assertSame( array( 'site.wpcheckpoint.zip' ), array_map( 'basename', $packer->sealed_paths() ) );
 		$this->assertSame( $expected, hash_file( 'sha256', $packer->sealed_paths()[0] ) );
 		$this->assertCount( 1, glob( $this->out . '/*' ) ?: array(), 'no second volume was made for the summaries' );
+	}
+
+	public function test_another_process_writing_the_same_volume_is_named_not_reported_as_damage(): void {
+		$packer = Packer::open( $this->out, 'site', array(), $this->options() );
+		$this->add( $packer, $this->source( 'a.bin', 100000, 1 ), 'files/a.bin', 1758196800 );
+		while ( $packer->write_piece() > 0 ) {
+			continue;
+		}
+		$state = $packer->state(); // The last checkpoint of the run that will outlive its lease.
+		$this->add( $packer, $this->source( 'b.bin', 300000, 2 ), 'files/b.bin', 1758196800 );
+		$packer->write_piece( 65536 );
+		// The new holder takes over from the checkpoint: cuts the volume back and writes on.
+		$next = Packer::open( $this->out, 'site', $state, $this->options() );
+		$this->add( $next, $this->source( 'b.bin', 300000, 2 ), 'files/b.bin', 1758196800 );
+		$next->write_piece( 65536 );
+		$next->write_piece( 65536 ); // Further than the old run got: the same bytes up to there, then more.
+		// The old run wakes up: the file is longer than it left it, so it stops. (Had the new holder got exactly as
+		// far, the old run's next write would put the same bytes at the same place, which is harmless.)
+		try {
+			$packer->write_piece( 65536 );
+			$this->fail( 'the old run must notice the file is not as it left it' );
+		} catch ( ConcurrentWriter $e ) {
+			$this->assertStringContainsString( 'Another process is writing the same work directory', $e->getMessage() );
+		}
+		// Had it written on, the new holder notices the longer file before its next write.
+		$h = fopen( $this->out . '/site.part001.wpcheckpoint.zip.partial', 'ab' );
+		fwrite( $h, str_repeat( 'x', 1000 ) );
+		fclose( $h );
+		try {
+			$next->write_piece( 65536 );
+			$this->fail( 'the new holder must notice bytes it did not write' );
+		} catch ( ConcurrentWriter $e ) {
+			$this->assertStringContainsString( 'this run stops without touching the volume', $e->getMessage() );
+		}
+	}
+
+	public function test_the_lease_is_confirmed_right_before_a_volume_file_is_created_or_renamed(): void {
+		$calls   = 0;
+		$refuse  = false;
+		$options = $this->options(
+			array(
+				'confirm' => function () use ( &$calls, &$refuse ): void {
+					++$calls;
+					if ( $refuse ) {
+						throw new \RuntimeException( 'lease lost (test)' );
+					}
+				},
+			)
+		);
+		$packer  = Packer::open( $this->out, 'site', array(), $options );
+		$packer->open_volume();
+		$this->assertSame( 1, $calls, 'before the volume file was created' );
+		$this->add( $packer, $this->source( 'a.bin', 1000, 1 ), 'files/a.bin', 1758196800 );
+		while ( $packer->write_piece() > 0 ) {
+			continue;
+		}
+		$refuse = true;
+		try {
+			$packer->seal_volume();
+			$this->fail( 'the seal must stop at the confirmation' );
+		} catch ( \RuntimeException $e ) {
+			$this->assertSame( 'lease lost (test)', $e->getMessage() );
+		}
+		$this->assertSame( 2, $calls );
+		$this->assertFileExists( $this->out . '/site.part001.wpcheckpoint.zip.partial', 'not renamed' );
+		$this->assertFileDoesNotExist( $this->out . '/site.part001.wpcheckpoint.zip' );
+		$packer->close();
+		$fresh = Packer::open( $this->out, 'other', array(), $options );
+		try {
+			$fresh->open_volume();
+			$this->fail( 'a new volume must stop at the confirmation' );
+		} catch ( \RuntimeException $e ) {
+			$this->assertFileDoesNotExist( $this->out . '/other.part001.wpcheckpoint.zip.partial', 'not created' );
+		}
 	}
 
 	/**

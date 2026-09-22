@@ -131,6 +131,24 @@ final class ManifestStep implements Step {
 	}
 
 	/**
+	 * The packer options of this run: the lease is confirmed right before
+	 * each volume file is created or renamed (Packer's "confirm" option).
+	 *
+	 * @param JobContext $context Context.
+	 * @return array<string, mixed>
+	 */
+	private function packer_options_with( JobContext $context ): array {
+		return array_merge(
+			$this->packer_options,
+			array(
+				'confirm' => static function () use ( $context ): void {
+					$context->confirm_lease();
+				},
+			)
+		);
+	}
+
+	/**
 	 * Step id.
 	 *
 	 * @return string
@@ -180,7 +198,7 @@ final class ManifestStep implements Step {
 			}
 		}
 		if ( 'prepare' === $cursor['phase'] ) {
-			$packer = Packer::open( $volumes, $base, $this->packer_state( $context ), $this->packer_options );
+			$packer = Packer::open( $volumes, $base, $this->packer_state( $context ), $this->packer_options_with( $context ) );
 			try {
 				if ( 0 === (int) $cursor['mtime'] ) {
 					throw new \RuntimeException( 'The manifest clock was not fixed before the last volume was decided (a phase ran out of order).' );
@@ -227,7 +245,7 @@ final class ManifestStep implements Step {
 			}
 		}
 		if ( 'finish' === $cursor['phase'] ) {
-			$packer = Packer::open( $volumes, $base, $cursor['packer'], $this->packer_options );
+			$packer = Packer::open( $volumes, $base, $cursor['packer'], $this->packer_options_with( $context ) );
 			try {
 				if ( $packer->already_finished() ) {
 					// Sealed by a run that died before this checkpoint: nothing to assemble, the copy is in place.
@@ -259,7 +277,7 @@ final class ManifestStep implements Step {
 			}
 		}
 		if ( 'standalone' === $cursor['phase'] ) {
-			$packer = Packer::open( $volumes, $base, $cursor['packer'], $this->packer_options );
+			$packer = Packer::open( $volumes, $base, $cursor['packer'], $this->packer_options_with( $context ) );
 			try {
 				$standalone = $this->assemble( $work, $plan, $packer, false, $cursor );
 			} finally {
@@ -389,7 +407,7 @@ final class ManifestStep implements Step {
 	 * @return StepResult|null Progress when the budget is spent, null when the phase is done.
 	 */
 	private function hash_blocks( JobContext $context, string $volumes, string $base, array &$cursor, string $next, int $percent ) {
-		$packer = Packer::open( $volumes, $base, $cursor['packer'], $this->packer_options );
+		$packer = Packer::open( $volumes, $base, $cursor['packer'], $this->packer_options_with( $context ) );
 		try {
 			$more = $packer->has_unhashed_blocks();
 			while ( $more ) {
@@ -429,7 +447,7 @@ final class ManifestStep implements Step {
 		);
 		$names   = array_keys( $entries );
 		$count   = count( $names );
-		$packer  = Packer::open( $volumes, $base, $cursor['packer'], $this->packer_options );
+		$packer  = Packer::open( $volumes, $base, $cursor['packer'], $this->packer_options_with( $context ) );
 		try {
 			if ( $packer->already_finished() ) {
 				$cursor['entry'] = $count;

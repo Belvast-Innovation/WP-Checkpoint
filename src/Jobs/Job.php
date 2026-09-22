@@ -187,6 +187,25 @@ final class Job {
 	public $work_expired_at = 0;
 
 	/**
+	 * Takeovers in a row at the same position: how many times a driver took
+	 * the job over from a run that did not end (killed by the server) while
+	 * the job stood at the same step and cursor (takeover_mark). Reset to 1
+	 * when the position differs, to 0 on retry. The Runner fails the job at
+	 * Runner::MAX_TAKEOVERS: a unit there takes longer than the server lets
+	 * a request run, and no other counter sees a run that never returns.
+	 *
+	 * @var int
+	 */
+	public $takeovers = 0;
+
+	/**
+	 * Position of the last takeover: MD5 of the step and the stored cursor.
+	 *
+	 * @var string
+	 */
+	public $takeover_mark = '';
+
+	/**
 	 * User who created the job.
 	 *
 	 * @var int

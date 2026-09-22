@@ -110,6 +110,13 @@ final class JobContext {
 	private $checkpoint;
 
 	/**
+	 * Lease check (Runner); null outside a run (cleanup, tests).
+	 *
+	 * @var callable|null
+	 */
+	private $lease;
+
+	/**
 	 * When the cursor was last persisted (tick start before the first checkpoint).
 	 *
 	 * @var float
@@ -128,8 +135,9 @@ final class JobContext {
 	 * @param float                $started_at      Start of the tick.
 	 * @param int                  $memory_limit    memory_limit in bytes; <= 0 unlimited or unknown.
 	 * @param callable|null        $checkpoint      function( array $cursor, int $percent, string $message ): void.
+	 * @param callable|null        $lease           function( bool $force ): void; throws LockLost when the lease is gone (see should_stop(), confirm_lease()).
 	 */
-	public function __construct( Job $job, array $cursor, Budget $budget, Logger $logger, callable $clock, callable $memory, float $started_at, int $memory_limit, $checkpoint = null ) {
+	public function __construct( Job $job, array $cursor, Budget $budget, Logger $logger, callable $clock, callable $memory, float $started_at, int $memory_limit, $checkpoint = null, $lease = null ) {
 		$this->job             = $job;
 		$this->cursor          = self::strip_reserved( $cursor );
 		$this->budget          = $budget;
@@ -141,6 +149,7 @@ final class JobContext {
 		$this->memory_limit    = $memory_limit;
 		$this->checkpoint      = is_callable( $checkpoint ) ? $checkpoint : null;
 		$this->checkpointed_at = $started_at;
+		$this->lease           = is_callable( $lease ) ? $lease : null;
 	}
 
 	/**
@@ -284,7 +293,26 @@ final class JobContext {
 	 * @return bool
 	 */
 	public function should_stop(): bool {
+		if ( null !== $this->lease ) {
+			// Steps call this between units, so every unit after the first starts with the lease confirmed:
+			// renewed when less than half is left, LockLost when another process holds it now.
+			call_user_func( $this->lease, false );
+		}
 		return '' !== $this->stop_reason();
+	}
+
+	/**
+	 * Confirm against the database that this run still holds the lease,
+	 * right before an irreversible transition (a rename, a new file). Throws
+	 * LockLost when it does not; the step must not catch it. Call it with
+	 * nothing between it and the transition: no computing, no logging.
+	 *
+	 * @return void
+	 */
+	public function confirm_lease(): void {
+		if ( null !== $this->lease ) {
+			call_user_func( $this->lease, true );
+		}
 	}
 
 	/**
