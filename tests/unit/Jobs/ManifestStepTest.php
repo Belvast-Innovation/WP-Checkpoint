@@ -293,6 +293,8 @@ final class ManifestStepTest extends TestCase {
 		} catch ( \RuntimeException $e ) {
 			$this->assertStringStartsWith( ManifestStep::SELF_CHECK_PREFIX, $e->getMessage() );
 			$this->assertStringContainsString( 'The local header of the entry disagrees with the central directory (crc, csize, usize)', $e->getMessage() );
+			$this->assertStringContainsString( VerificationResult::INCONSISTENT_ADVICE, $e->getMessage(), 'after the writer-defect prefix' );
+			$this->assertStringNotContainsString( 'Use the original volume files', $e->getMessage() );
 			$this->assertStringNotContainsString( '.wpcheckpoint.zip', $e->getMessage() );
 		}
 		foreach ( array_column( $this->ctx->checkpoints, 'cursor' ) as $stored ) {

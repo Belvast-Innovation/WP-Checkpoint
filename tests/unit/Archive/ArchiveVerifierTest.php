@@ -462,8 +462,7 @@ final class ArchiveVerifierTest extends TestCase {
 		$text = $result->to_text( self::identity() );
 		$this->assertSame( 'Archive could not be verified.', strtok( $text, "\n" ) );
 		$this->assertStringContainsString( 'repacked by another tool, not that data is damaged', $text );
-		$this->assertStringContainsString( 'Use the original files the plugin produced', $text );
-		$this->assertStringContainsString( 'manual restore', $text );
+		$this->assertStringContainsString( VerificationResult::REPACKED_ADVICE, $text );
 		$this->assertStringNotContainsString( 'damaged.', strtok( $text, "\n" ) );
 		$this->assertSame( 1, $result->findings_total() );
 		$this->assertSame( Finding::UNSUPPORTED, self::findings( $result )[0]['kind'] );
@@ -919,6 +918,9 @@ final class ArchiveVerifierTest extends TestCase {
 			$this->assertSame( 1, $finding['volume'] );
 			$this->assertSame( VerificationResult::FAILED, $result->outcome(), $depth );
 			$this->assertTrue( $result->restore_refused() );
+			$text = $result->to_text( self::identity() );
+			$this->assertStringContainsString( VerificationResult::INCONSISTENT_ADVICE, $text, 'a new backup, not a search for other files' );
+			$this->assertStringNotContainsString( 'Use the original volume files', $text );
 		}
 		// A summary entry's header (the embedded manifest in the last volume) is checked too.
 		$builder = $this->typical();
@@ -947,6 +949,8 @@ final class ArchiveVerifierTest extends TestCase {
 		$this->assertSame( 1, $result->findings_total(), 'said once, however many entries carry it; the zeroed CRC and sizes are not damage then' );
 		$this->assertSame( ArchiveVerifier::FOREIGN_MESSAGE, self::findings( $result )[0]['message'] );
 		$this->assertStringContainsString( 'not written by WP Checkpoint, or it was repacked by another tool', $result->to_text( self::identity() ) );
+		$this->assertStringContainsString( VerificationResult::REPACKED_ADVICE, $result->to_text( self::identity() ) );
+		$this->assertStringNotContainsString( VerificationResult::INCONSISTENT_ADVICE, $result->to_text( self::identity() ), 'zeros allowed by a data descriptor are not an inconsistency' );
 	}
 
 	public function test_a_local_header_that_cannot_be_read_is_a_finding_not_an_exception(): void {
@@ -1010,5 +1014,11 @@ final class ArchiveVerifierTest extends TestCase {
 		$this->assertFalse( $again->progress()['slow'] );
 		$again->step(); // The remaining 201 entries: fewer than a unit's worth of measurement.
 		$this->assertNull( $again->progress()['seconds_left'] );
+	}
+
+	public function test_the_two_advices_are_worded_for_what_the_user_can_do(): void {
+		$this->assertSame( 'Restore is refused because the contents could not be checked: the entries are not in the order this plugin writes them, or they were written by another tool. Your data is most likely fine. Use the original volume files the plugin produced, exactly as they are: do not repack them with another archive tool, and do not unzip them and zip them again. If those files are gone, follow the steps in the "Restoring a backup by hand" section of the documentation (extract every volume and import the SQL files).', VerificationResult::REPACKED_ADVICE );
+		$this->assertSame( 'The archive is inconsistent inside: an entry\'s header disagrees with the archive\'s directory. This can happen when writing was interrupted or when two processes wrote the same backup at once. Do not rely on this backup; make a new one.', VerificationResult::INCONSISTENT_ADVICE );
+		$this->assertSame( VerificationResult::REPACKED_ADVICE, VerificationResult::next_step( VerificationResult::UNSUPPORTED_LAYOUT ) );
 	}
 }

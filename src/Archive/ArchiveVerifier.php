@@ -1559,6 +1559,7 @@ final class ArchiveVerifier {
 			$this->add( new Finding( self::PHASE_CONTENTS, Finding::UNSUPPORTED, self::FOREIGN_MESSAGE, $where ) );
 		}
 		if ( array() !== $check['fields'] ) {
+			$this->state['inconsistent'] = true; // A fact for the advice (VerificationResult::INCONSISTENT_ADVICE), not a finding.
 			$this->add( new Finding( self::PHASE_CONTENTS, Finding::CORRUPT, 'The local header of the entry disagrees with the central directory (' . implode( ', ', $check['fields'] ) . ').', $where ) );
 		}
 	}
