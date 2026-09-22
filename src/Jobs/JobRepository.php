@@ -86,9 +86,16 @@ final class JobRepository {
 	private $directories;
 
 	/**
+	 * Database clock minus local clock, read once (see now()).
+	 *
+	 * @var int|null
+	 */
+	private $db_offset;
+
+	/**
 	 * Time source (tests inject one).
 	 *
-	 * @var callable
+	 * @var callable|null
 	 */
 	private $clock;
 
@@ -109,16 +116,45 @@ final class JobRepository {
 	public function __construct( Directories $directories, $redactor = null, $clock = null ) {
 		$this->directories = $directories;
 		$this->redactor    = $redactor instanceof Redactor ? $redactor : new Redactor( Redactor::installation_secrets() );
-		$this->clock       = is_callable( $clock ) ? $clock : 'time';
+		$this->clock       = is_callable( $clock ) ? $clock : null;
 	}
 
 	/**
-	 * Current time.
+	 * One line in the storage log (storage.log): engine events that concern
+	 * no single job's log, or that must be found without one.
+	 *
+	 * @param string $message Message (no paths, no site data).
+	 * @return void
+	 */
+	public function log_event( string $message ): void {
+		$this->directories->log_event( $message );
+	}
+
+	/**
+	 * Current time on the database's clock: leases are written and judged
+	 * by every web server of a site against the one database, so a web
+	 * server whose clock drifts neither steals a live lease nor keeps a dead
+	 * one. The offset to the local clock is read once per instance (one
+	 * query) and applied to time(). An injected clock (tests) is used as is.
 	 *
 	 * @return int
 	 */
 	public function now(): int {
-		return (int) call_user_func( $this->clock );
+		if ( null !== $this->clock ) {
+			return (int) call_user_func( $this->clock );
+		}
+		if ( null === $this->db_offset ) {
+			global $wpdb;
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- the database clock, no table.
+			$db = $wpdb->get_var( 'SELECT UNIX_TIMESTAMP()' );
+			if ( ! is_numeric( $db ) ) {
+				// Not cached: the next call asks again. Until then the local clock stands in, and the log says so.
+				$this->directories->log_event( 'The database clock could not be read; the web server clock is used for this call.' );
+				return time();
+			}
+			$this->db_offset = (int) $db - time();
+		}
+		return time() + $this->db_offset;
 	}
 
 	/**
@@ -325,12 +361,22 @@ final class JobRepository {
 	 * The caller logs it: how often it happens is the only measure of that
 	 * window.
 	 *
+	 * A takeover (the row still carries another run's token, expired: that
+	 * run never released, it was killed) is counted in the same statement:
+	 * takeovers + 1 when the job stands where the last takeover found it
+	 * (takeover_mark, MD5 of step and stored cursor), 1 when it moved.
+	 * Progress alone does not reset the count, the position does: a run that
+	 * checkpoints a few bounded units and then dies in an unbounded one comes
+	 * back to the same position and is counted. Both assignments come before
+	 * lock_token's, so they read the row's old token and mark whether the
+	 * server evaluates assignments left to right or all at once.
+	 *
 	 * The storage token is part of the compare-and-set, so a caller that
 	 * skipped gate() still cannot run a job bound to another directory.
 	 *
 	 * @param int $id    Job id.
 	 * @param int $lease Lock duration in seconds.
-	 * @return array{job: Job, token: string, healed: bool}|null Null when another driver holds the lock or the job is not runnable here.
+	 * @return array{job: Job, token: string, healed: bool, taken_over: bool}|null Null when another driver holds the lock or the job is not runnable here.
 	 */
 	public function acquire( int $id, int $lease = self::LOCK_SECONDS ) {
 		global $wpdb;
@@ -347,10 +393,12 @@ final class JobRepository {
 		$table            = $wpdb->base_prefix . Schema::JOBS_TABLE;
 		$before_questions = $job->questions;
 		$before_status    = $job->status;
+		$before_takeovers = $job->takeovers;
+		$before_mark      = $job->takeover_mark;
 		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix; the WHERE clause is the compare-and-set.
 		$affected = $wpdb->query(
 			$wpdb->prepare(
-				"UPDATE {$table} SET attempts = IF(status = %s, attempts + 1, attempts), started_at = IF(started_at = 0, %d, started_at), status = %s, lock_token = %s, locked_until = %d, updated_at = %d, questions_json = NULL WHERE id = %d AND status IN (%s, %s, %s) AND (status <> %s OR questions_json IS NULL OR questions_json = '' OR questions_json = '[]') AND storage_token = %s AND (lock_token = '' OR locked_until < %d)",
+				"UPDATE {$table} SET takeovers = IF(lock_token <> '', IF(takeover_mark = MD5(CONCAT(step, '|', COALESCE(cursor_json, ''))), takeovers + 1, 1), takeovers), takeover_mark = IF(lock_token <> '', MD5(CONCAT(step, '|', COALESCE(cursor_json, ''))), takeover_mark), attempts = IF(status = %s, attempts + 1, attempts), started_at = IF(started_at = 0, %d, started_at), status = %s, lock_token = %s, locked_until = %d, updated_at = %d, questions_json = NULL WHERE id = %d AND status IN (%s, %s, %s) AND (status <> %s OR questions_json IS NULL OR questions_json = '' OR questions_json = '[]') AND storage_token = %s AND (lock_token = '' OR locked_until < %d)",
 				Job::QUEUED,
 				$now,
 				Job::RUNNING,
@@ -376,13 +424,16 @@ final class JobRepository {
 		}
 		$this->write_lock_file( $job, $token, $job->locked_until );
 		$healed = array() !== $before_questions;
+		// A takeover changed the count or the mark (the row's own values, set in the statement above).
+		$taken_over = $job->takeovers !== $before_takeovers || $job->takeover_mark !== $before_mark;
 		if ( $healed ) {
 			$this->directories->log_event( sprintf( 'Job %d: stale questions cleared on acquire (the job was %s, not paused).', $id, $before_status ) );
 		}
 		return array(
-			'job'    => $job,
-			'token'  => $token,
-			'healed' => $healed,
+			'job'        => $job,
+			'token'      => $token,
+			'healed'     => $healed,
+			'taken_over' => $taken_over,
 		);
 	}
 
@@ -1353,14 +1404,16 @@ final class JobRepository {
 			$data['last_error'] = $this->redactor->redact( $error );
 		}
 		if ( Job::QUEUED === $to ) {
-			$data['finished_at'] = 0;
+			$data['finished_at']   = 0;
+			$data['takeovers']     = 0; // A retry starts its count over.
+			$data['takeover_mark'] = '';
 		}
 		if ( Job::RUNNING === $to && 0 === $job->started_at ) {
 			$data['started_at'] = $now;
 		}
 		$formats = array_fill( 0, count( $data ), '%s' );
 		foreach ( array_keys( $data ) as $i => $key ) {
-			if ( in_array( $key, array( 'updated_at', 'finished_at', 'locked_until', 'started_at' ), true ) ) {
+			if ( in_array( $key, array( 'updated_at', 'finished_at', 'locked_until', 'started_at', 'takeovers' ), true ) ) {
 				$formats[ $i ] = '%d';
 			}
 		}

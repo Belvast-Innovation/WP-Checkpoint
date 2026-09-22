@@ -87,6 +87,10 @@ final class ExportPlan {
 		}
 		$path = $work . DIRECTORY_SEPARATOR . $name;
 		$tmp  = $path . '.tmp';
+		// No lease confirmation before the rename: each file has one writer phase and its content follows
+		// from that phase's inputs, so a late rename by a run that outlived its lease writes the same content;
+		// the one exception, plan.json's base name (clock and random suffix), is checked against the packer's
+		// state by every later run (Packer::open(): "belongs to another archive"), a failure, not a wrong archive.
 		// Silenced: a warning would put the full path into the error log, bypassing the path masking.
 		$written = @file_put_contents( $tmp, $json, LOCK_EX ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- see above; failure is thrown.
 		if ( false === $written || strlen( $json ) !== $written || ! @rename( $tmp, $path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.rename_rename -- see above.

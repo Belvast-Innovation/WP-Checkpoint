@@ -19,7 +19,11 @@ namespace WPCheckpoint\Jobs;
  * between units, nothing interrupts a unit from the outside. A unit must
  * therefore fit into one budget on its own: a unit that does not will hit
  * the budget on every tick and, once the cursor has stopped moving three
- * times, fail the job. Inside a unit, JobContext::should_checkpoint() says
+ * times, fail the job. should_stop() also renews the lease when less than
+ * half is left and throws LockLost when another driver holds it; like the
+ * LockLost from checkpoint(), a step never catches it. Right before an
+ * irreversible transition (creating, renaming or removing a file) a step
+ * calls JobContext::confirm_lease(), which always asks the database. Inside a unit, JobContext::should_checkpoint() says
  * when to persist the cursor (after 2 seconds or 16 MiB, whichever first).
  *
  * A step never calls the write methods of JobRepository (save_progress,

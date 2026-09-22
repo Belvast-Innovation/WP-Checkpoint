@@ -4,6 +4,7 @@ namespace WPCheckpoint\Tests\Unit\Jobs;
 
 use WPCheckpoint\Archive\Manifest;
 use WPCheckpoint\Jobs\ExportPlan;
+use WPCheckpoint\Jobs\LockLost;
 use WPCheckpoint\Jobs\PackStep;
 use WPCheckpoint\Jobs\StepResult;
 use WPCheckpoint\Jobs\StoreStep;
@@ -151,5 +152,25 @@ final class StoreStepTest extends TestCase {
 			$this->assertStringContainsString( 'larger than allowed', $e->getMessage() );
 		}
 		$this->assertTrue( $this->in_work( $this->names[0] ) );
+	}
+
+	public function test_a_lost_lease_stops_the_move_before_the_rename(): void {
+		$asked           = 0;
+		$this->ctx->lease = static function ( bool $force ) use ( &$asked ): void {
+			if ( $force ) {
+				++$asked;
+				throw new LockLost( 'the lease is held by another driver (test)' );
+			}
+		};
+		try {
+			$this->step()->run( $this->ctx->context() );
+			$this->fail( 'the store must stop at the lease confirmation' );
+		} catch ( LockLost $e ) {
+			$this->assertSame( 1, $asked, 'asked once, right before the first rename' );
+		}
+		foreach ( $this->names as $name ) {
+			$this->assertTrue( $this->in_work( $name ), $name . ' was not moved' );
+			$this->assertFalse( $this->in_backups( $name ) );
+		}
 	}
 }

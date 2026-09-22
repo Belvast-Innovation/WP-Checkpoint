@@ -812,7 +812,7 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		Options::set( Schema::OPTION, array( 'version' => 2, 'min_compatible' => 1 ) );
 		$result = Schema::ensure();
 		$this->assertSame( 'migrated', $result['action'] );
-		$this->assertSame( 3, $result['version'] );
+		$this->assertSame( Schema::CURRENT, $result['version'], 'every later migration runs too' );
 		$this->assertSame( 1, $result['min_compatible'], 'older code ignores both columns' );
 		$columns = $wpdb->get_col( "SHOW COLUMNS FROM {$table}" );
 		$this->assertContains( 'options_json', $columns );
@@ -821,5 +821,28 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		$this->assertSame( array( 'contents' => array( 'files' => array( 'uploads' ) ) ), $this->repo->find( $job->id )->options );
 		$this->assertSame( array(), $this->repo->find( $job->id )->questions );
 		$this->assertFalse( $this->repo->find( $job->id )->awaiting_answer() );
+	}
+
+	public function test_schema_version_four_adds_the_takeover_columns_and_older_code_keeps_working(): void {
+		global $wpdb;
+		$table = Schema::jobs_table();
+		$wpdb->query( "ALTER TABLE {$table} DROP COLUMN takeovers, DROP COLUMN takeover_mark" );
+		Options::set( Schema::OPTION, array( 'version' => 3, 'min_compatible' => 1 ) );
+		$result = Schema::ensure();
+		$this->assertSame( 'migrated', $result['action'] );
+		$this->assertSame( 4, $result['version'] );
+		$this->assertSame( 1, $result['min_compatible'], 'older code ignores both columns' );
+		$columns = $wpdb->get_col( "SHOW COLUMNS FROM {$table}" );
+		$this->assertContains( 'takeovers', $columns );
+		$this->assertContains( 'takeover_mark', $columns );
+		$job = $this->repo->create( 'export' );
+		$this->assertSame( 0, $this->repo->find( $job->id )->takeovers );
+		$this->assertSame( '', $this->repo->find( $job->id )->takeover_mark );
+		// Code of version 3 writes rows without the new columns: the defaults hold, and this code reads them.
+		$wpdb->query( $wpdb->prepare( "INSERT INTO {$table} (type, status, cursor_json, created_at) VALUES (%s, %s, %s, %d)", 'export', Job::QUEUED, '[]', 1 ) );
+		$this->assertSame( '', $wpdb->last_error );
+		$old = $this->repo->find( (int) $wpdb->insert_id );
+		$this->assertSame( 0, $old->takeovers );
+		$this->assertSame( '', $old->takeover_mark );
 	}
 }

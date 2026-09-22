@@ -71,6 +71,13 @@ final class Packer {
 	private $state;
 
 	/**
+	 * Length of the open volume as this process left it (see assert_sole_writer()); null when no handle is open.
+	 *
+	 * @var int|null
+	 */
+	private $high_water;
+
+	/**
 	 * Handle of the open volume, when any.
 	 *
 	 * @var resource|null
@@ -166,7 +173,7 @@ final class Packer {
 	 * @param string               $dir     Directory for the volumes (the job's temporary directory).
 	 * @param string               $base    Base name of the archive, e.g. "example-20260918-100000-a1b2".
 	 * @param array<string, mixed> $state   State from a previous tick, or empty.
-	 * @param array<string, mixed> $options volume_bytes, volume_chunk_bytes, piece_bytes, deflate_max_bytes, zip64_threshold, max_volume_bytes, disk_free (callable( string $dir ): int|false), can_deflate (bool).
+	 * @param array<string, mixed> $options volume_bytes, volume_chunk_bytes, piece_bytes, deflate_max_bytes, zip64_threshold, max_volume_bytes, disk_free (callable( string $dir ): int|false), can_deflate (bool), confirm (callable, called right before each volume file is created or renamed; throws to stop the transition).
 	 * @return Packer
 	 * @throws \RuntimeException When the state cannot be resumed.
 	 */
@@ -450,6 +457,7 @@ final class Packer {
 		}
 		// The commit point. A crash between this rename and the step's checkpoint leaves a cursor that
 		// still says "open"; resume() recognises the sealed file and carries on (see adopt_sealed_volume()).
+		$this->confirm();
 		if ( ! rename( $this->partial_path(), $final ) ) {
 			throw new \RuntimeException( 'The volume could not be renamed to its final name.' );
 		}
@@ -693,7 +701,11 @@ final class Packer {
 		}
 		$from = $this->dir . DIRECTORY_SEPARATOR . $this->state['sealed'][0]['path'];
 		$to   = $this->dir . DIRECTORY_SEPARATOR . $single;
-		if ( file_exists( $to ) || ! rename( $from, $to ) ) {
+		if ( file_exists( $to ) ) {
+			throw new \RuntimeException( 'The volume could not be renamed to its single-volume name.' );
+		}
+		$this->confirm();
+		if ( ! rename( $from, $to ) ) {
 			throw new \RuntimeException( 'The volume could not be renamed to its single-volume name.' );
 		}
 		$this->state['sealed'][0]['path'] = $single;
@@ -771,6 +783,7 @@ final class Packer {
 	 * @return void
 	 */
 	public function close(): void {
+		$this->high_water = null;
 		$this->close_source();
 		if ( null !== $this->handle ) {
 			fflush( $this->handle );
@@ -888,6 +901,20 @@ final class Packer {
 	}
 
 	/**
+	 * The caller's lease check (option "confirm"), called immediately before
+	 * each irreversible transition (creating a volume file, renaming one)
+	 * with nothing in between: a run that lost its lease throws here and the
+	 * transition does not happen. No-op without the option (tests, tools).
+	 *
+	 * @return void
+	 */
+	private function confirm(): void {
+		if ( isset( $this->options['confirm'] ) && is_callable( $this->options['confirm'] ) ) {
+			call_user_func( $this->options['confirm'] );
+		}
+	}
+
+	/**
 	 * Whether the open volume can take an entry of this size: it is open,
 	 * and either empty (an entry never spans volumes, so an empty volume
 	 * takes anything) or below the volume size, the platform bound and the
@@ -941,6 +968,9 @@ final class Packer {
 		if ( file_exists( $this->dir . DIRECTORY_SEPARATOR . $name ) ) {
 			throw new \RuntimeException( 'A file of the new volume already exists.' );
 		}
+		// The lease is confirmed before the leftovers are removed: removing a file is as irreversible as
+		// creating one, and a run that lost its lease must not remove the new holder's volume.
+		$this->confirm();
 		foreach ( array( $this->partial_path(), $this->records_path() ) as $path ) {
 			// Left by a run that created this volume and died before its first checkpoint: nothing of it is
 			// committed, and no other writer uses this base name (it carries a random suffix).
@@ -953,7 +983,8 @@ final class Packer {
 		if ( false === $handle ) {
 			throw new \RuntimeException( 'The volume file could not be created.' );
 		}
-		$this->handle = $handle;
+		$this->handle     = $handle;
+		$this->high_water = 0;
 		if ( false === file_put_contents( $this->records_path(), '' ) ) {
 			throw new \RuntimeException( 'The record file could not be created.' );
 		}
@@ -1080,10 +1111,13 @@ final class Packer {
 	 */
 	private function write_volume( string $data ): void {
 		$this->open_volume_handle();
+		$this->assert_sole_writer();
 		$written = fwrite( $this->handle, $data );
 		if ( false === $written || strlen( $data ) !== $written ) {
 			throw new InsufficientSpace( 'The volume could not be written completely (disk full?).' );
 		}
+		$position                 = ftell( $this->handle );
+		$this->high_water         = max( (int) $this->high_water, false === $position ? 0 : $position );
 		$this->since_space_check += $written;
 		if ( $this->since_space_check >= self::SPACE_CHECK_BYTES ) {
 			$this->check_space( (int) $this->options['piece_bytes'] );
@@ -1113,10 +1147,34 @@ final class Packer {
 	 */
 	private function truncate_volume( int $bytes ): void {
 		$this->open_volume_handle();
+		$this->assert_sole_writer();
 		if ( ! ftruncate( $this->handle, $bytes ) ) {
 			throw new \RuntimeException( 'The volume could not be truncated.' );
 		}
+		$this->high_water = $bytes;
 		$this->seek_volume( $bytes );
+	}
+
+	/**
+	 * The open volume is as long as this process left it: its length at
+	 * open, extended only by this process's writes and cut only by its own
+	 * truncation. Any other length means another process writes the same
+	 * file (a run that outlived its lease while this one took over). That
+	 * process's writes beyond this one's are caught here; its overwrites of
+	 * bytes inside this one's range change no length and are not (a known
+	 * limit of a directory without a file-level fence).
+	 *
+	 * @return void
+	 * @throws ConcurrentWriter When the length is not what this process wrote.
+	 */
+	private function assert_sole_writer(): void {
+		if ( null === $this->high_water || null === $this->handle ) {
+			return;
+		}
+		$stat = fstat( $this->handle );
+		if ( is_array( $stat ) && (int) $stat['size'] !== (int) $this->high_water ) {
+			throw new ConcurrentWriter( 'Another process is writing the same work directory (a previous run outlived its lease); this run stops without touching the volume, and the retry cuts it back to the last checkpoint.' );
+		}
 	}
 
 	/**
@@ -1179,7 +1237,9 @@ final class Packer {
 		if ( false === $handle ) {
 			throw new \RuntimeException( 'The volume file could not be opened.' );
 		}
-		$this->handle = $handle;
+		$this->handle     = $handle;
+		$stat             = fstat( $handle );
+		$this->high_water = is_array( $stat ) ? (int) $stat['size'] : null;
 	}
 
 	/**

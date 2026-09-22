@@ -163,7 +163,7 @@ final class JobsController extends Controller {
 	 */
 	public function tick( WP_REST_Request $request ) {
 		try {
-			$result = $this->actions->tick( (int) $request->get_param( 'id' ), JobActions::started_at() );
+			$result = $this->actions->web_tick( (int) $request->get_param( 'id' ), JobActions::started_at() );
 		} catch ( JobsUnavailable $e ) {
 			return $this->unavailable( $e );
 		}
