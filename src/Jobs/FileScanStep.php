@@ -60,17 +60,26 @@ final class FileScanStep implements Step {
 	private $from_plan = false;
 
 	/**
+	 * Content chunk size: bounds the largest indexable file (IndexLine::max_indexable_bytes()).
+	 *
+	 * @var int
+	 */
+	private $chunk_bytes;
+
+	/**
 	 * Constructor. The job type resolves the roots (ScanRoots) and the
 	 * exclusions from the job's options.
 	 *
 	 * @param array<int, array{group: string, path: string, prefix: string, skip?: string[]}> $roots         Roots.
 	 * @param Exclusions                                                                      $exclusions    Exclusions.
 	 * @param string[]                                                                        $root_warnings Warnings from ScanRoots::resolve().
+	 * @param int                                                                             $chunk_bytes   Content chunk size (bounds the largest indexable file).
 	 */
-	public function __construct( array $roots, Exclusions $exclusions, array $root_warnings = array() ) {
+	public function __construct( array $roots, Exclusions $exclusions, array $root_warnings = array(), int $chunk_bytes = Manifest::DEFAULT_CHUNK ) {
 		$this->roots         = $roots;
 		$this->exclusions    = $exclusions;
 		$this->root_warnings = $root_warnings;
+		$this->chunk_bytes   = $chunk_bytes;
 	}
 
 	/**
@@ -79,9 +88,11 @@ final class FileScanStep implements Step {
 	 * roots against the job's storage directory.
 	 *
 	 * @return FileScanStep
+	 *
+	 * @param int $chunk_bytes Content chunk size (bounds the largest indexable file).
 	 */
-	public static function from_plan(): FileScanStep {
-		$step            = new self( array(), new Exclusions( array(), array() ) );
+	public static function from_plan( int $chunk_bytes = Manifest::DEFAULT_CHUNK ): FileScanStep {
+		$step            = new self( array(), new Exclusions( array(), array() ), array(), $chunk_bytes );
 		$step->from_plan = true;
 		return $step;
 	}
@@ -114,7 +125,7 @@ final class FileScanStep implements Step {
 		$cursor  = $context->cursor();
 		$state   = isset( $cursor['scan'] ) && is_array( $cursor['scan'] ) ? $cursor['scan'] : FileScanner::initial_state();
 		$length  = isset( $cursor['bytes'] ) ? (int) $cursor['bytes'] : 0;
-		$scanner = new FileScanner( $this->roots, $this->exclusions );
+		$scanner = new FileScanner( $this->roots, $this->exclusions, PHP_INT_SIZE, $this->chunk_bytes );
 		$path    = $context->work_path() . DIRECTORY_SEPARATOR . Manifest::FILES_INDEX;
 		$handle  = $this->open_index( $path, $length );
 		$since   = 0;
@@ -221,6 +232,7 @@ final class FileScanStep implements Step {
 		$summary = array(
 			'counts'                  => $state['counts'],
 			'lists'                   => $state['lists'],
+			'limits'                  => isset( $state['limits'] ) && is_array( $state['limits'] ) ? $state['limits'] : array(),
 			'warnings'                => array_merge( $this->root_warnings, $state['warnings'], PathKey::normalization_available() ? array() : array( self::normalization_warning() ) ),
 			'normalization_available' => PathKey::normalization_available(),
 			'exclusions'              => $this->exclusions->globs(),

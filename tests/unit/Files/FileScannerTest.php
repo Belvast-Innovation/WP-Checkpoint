@@ -3,6 +3,7 @@
 namespace WPCheckpoint\Tests\Unit\Files;
 
 use WPCheckpoint\Archive\IndexLine;
+use WPCheckpoint\Archive\Manifest;
 use WPCheckpoint\Archive\Packer;
 use WPCheckpoint\Files\Exclusions;
 use WPCheckpoint\Files\FileScanner;
@@ -214,6 +215,15 @@ final class FileScannerTest extends TestCase {
 		$this->assertSame( 0, $state['counts']['too_large'], 'on 64-bit PHP it merely exceeds the volume threshold' );
 		$this->assertSame( 1, $state['counts']['over_volume'] );
 		$this->assertGreaterThan( Packer::VOLUME_BYTES, $lines[0]['b'] );
+		// The index line bounds the largest file too: with the smallest chunk the limit is about 15 GiB, a sparse 16 GiB file is over it.
+		$h = fopen( $this->root . '/c/huge.bin', 'wb' );
+		fseek( $h, IndexLine::max_indexable_bytes( Manifest::MIN_CHUNK ) + 10 );
+		fwrite( $h, 'x' );
+		fclose( $h );
+		list( $lines, $state ) = $this->run_all( new FileScanner( array( array( 'group' => 'other-content', 'path' => $this->root . '/c', 'prefix' => 'wp-content' ) ), new Exclusions( array(), array() ), 8, Manifest::MIN_CHUNK ) );
+		$this->assertSame( array( 'wp-content/huge.bin' ), $state['lists']['too_large'], 'larger than one index line can describe: listed before anything is packed' );
+		list( $lines, $state ) = $this->run_all( new FileScanner( array( array( 'group' => 'other-content', 'path' => $this->root . '/c', 'prefix' => 'wp-content' ) ), new Exclusions( array(), array() ), 8, Manifest::DEFAULT_CHUNK ) );
+		$this->assertSame( 0, $state['counts']['too_large'], 'with the default chunk the same file is indexable' );
 	}
 
 	public function test_a_missing_root_is_a_warning_and_the_next_root_is_scanned(): void {

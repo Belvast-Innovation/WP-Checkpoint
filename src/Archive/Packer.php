@@ -114,6 +114,29 @@ final class Packer {
 	}
 
 	/**
+	 * Largest file a backup can hold here: the smaller of what the
+	 * container can address (max_entry_bytes()) and what one index line
+	 * can describe (IndexLine::max_indexable_bytes()). The scan lists
+	 * larger files as too large so that the export stops before packing
+	 * anything, never after.
+	 *
+	 * @param int $chunk_bytes Content chunk size.
+	 * @param int $int_size    PHP_INT_SIZE of the platform.
+	 * @return array{bytes: int, limited_by: string} The limit and which one applies ('int_size' or 'index').
+	 */
+	public static function max_file_bytes( int $chunk_bytes, int $int_size = PHP_INT_SIZE ): array {
+		$entry = self::max_entry_bytes( $int_size );
+		$index = IndexLine::max_indexable_bytes( $chunk_bytes );
+		return $index < $entry ? array(
+			'bytes'      => $index,
+			'limited_by' => 'index',
+		) : array(
+			'bytes'      => $entry,
+			'limited_by' => 'int_size',
+		);
+	}
+
+	/**
 	 * Largest volume this platform can write and hash: on 32-bit PHP file
 	 * offsets stop at 2 GiB, so a volume is sealed before an entry would
 	 * push it past this, even when every single entry fits. The export
