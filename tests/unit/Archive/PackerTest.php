@@ -6,6 +6,8 @@ use WPCheckpoint\Archive\ChunkHasher;
 use WPCheckpoint\Archive\InsufficientSpace;
 use WPCheckpoint\Archive\IndexLine;
 use WPCheckpoint\Archive\Packer;
+use WPCheckpoint\Archive\SourceChanged;
+use WPCheckpoint\Archive\SourceGone;
 use WPCheckpoint\Archive\ZipFormat;
 use WPCheckpoint\Archive\ZipReader;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
@@ -89,12 +91,14 @@ final class PackerTest extends TestCase {
 	private function pack( array $files, array $options, int $piece = 4194304, $manifest = '{"embedded":true}' ): Packer {
 		$packer = Packer::open( $this->out, 'site-20260918-100000-a1b2', array(), $options );
 		foreach ( $files as list( $source, $entry, $mtime ) ) {
-			$packer->add_entry( $source, $entry, $mtime );
+			$this->add( $packer, $source, $entry, $mtime );
 			while ( $packer->write_piece( $piece ) > 0 ) {
 				continue;
 			}
 		}
 		$index = $this->source( 'files.index.jsonl', 300 );
+		$packer->prepare_finish( 300 + strlen( (string) $manifest ) + 4096 );
+		$this->ready( $packer );
 		$packer->finish( array( 'files.index.jsonl' => $index ), $manifest, 1758196800 );
 		while ( $packer->hash_next_block() ) {
 			continue;
@@ -161,7 +165,6 @@ final class PackerTest extends TestCase {
 		$expect = ChunkHasher::content_hash( $paths[0], 262144 );
 		$this->assertSame( $expect['sha256'], $volumes[0]['sha256'] );
 		$this->assertSame( $expect['chunks'], isset( $volumes[0]['chunks'] ) ? $volumes[0]['chunks'] : null, 'container chunks hashed after sealing match the format rule' );
-		$this->assertSame( array(), $packer->volume_entries( true ), 'the embedded copy leaves out the volume that holds it' );
 	}
 
 	public function test_volumes_are_sealed_between_entries_and_an_entry_never_spans_volumes(): void {
@@ -193,7 +196,6 @@ final class PackerTest extends TestCase {
 		$this->assertGreaterThan( 1048576, $huge, 'the volume holding the oversized entry exceeds the threshold' );
 		$entries = $packer->volume_entries();
 		$this->assertCount( count( $paths ), $entries );
-		$this->assertCount( count( $paths ) - 1, $packer->volume_entries( true ) );
 		foreach ( $entries as $i => $entry ) {
 			$this->assertSame( ChunkHasher::content_hash( $paths[ $i ], 262144 )['sha256'], $entry['sha256'], basename( $paths[ $i ] ) );
 		}
@@ -219,7 +221,7 @@ final class PackerTest extends TestCase {
 		$step  = 0;
 		foreach ( $files as list( $source, $entry, $mtime ) ) {
 			$packer = Packer::open( $this->out, 'site-20260918-100000-a1b2', $state, $this->options() );
-			$packer->add_entry( $source, $entry, $mtime );
+			$this->add( $packer, $source, $entry, $mtime );
 			$state = $packer->state();
 			$packer->close();
 			do {
@@ -238,6 +240,8 @@ final class PackerTest extends TestCase {
 			} while ( $more > 0 );
 		}
 		$packer = Packer::open( $this->out, 'site-20260918-100000-a1b2', $state, $this->options() );
+		$packer->prepare_finish( 300 + 4096 );
+		$this->ready( $packer );
 		$packer->finish( array( 'files.index.jsonl' => $index ), '{"embedded":true}', 1758196800 );
 		$state = $packer->state();
 		$packer->close();
@@ -273,7 +277,7 @@ final class PackerTest extends TestCase {
 
 		$packer = Packer::open( $this->out, 'site-20260918-100000-a1b2', array(), $this->options() );
 		foreach ( array_slice( $files, 0, 2 ) as list( $source, $entry, $mtime ) ) {
-			$packer->add_entry( $source, $entry, $mtime );
+			$this->add( $packer, $source, $entry, $mtime );
 			while ( $packer->write_piece() > 0 ) {
 				continue;
 			}
@@ -290,10 +294,12 @@ final class PackerTest extends TestCase {
 		$this->assertFalse( $packer->has_open_volume(), 'the sealed volume was recognised from the stale cursor' );
 		$this->assertSame( array(), glob( $this->out . '/*.cdr' ) ?: array(), 'the record file was cleaned up' );
 		list( $source, $entry, $mtime ) = $files[2];
-		$packer->add_entry( $source, $entry, $mtime );
+		$this->add( $packer, $source, $entry, $mtime );
 		while ( $packer->write_piece() > 0 ) {
 			continue;
 		}
+		$packer->prepare_finish( 300 + 4096 );
+		$this->ready( $packer );
 		$packer->finish( array( 'files.index.jsonl' => $this->source( 'files.index.jsonl', 300 ) ), '{"embedded":true}', 1758196800 );
 		while ( $packer->hash_next_block() ) {
 			continue;
@@ -308,7 +314,7 @@ final class PackerTest extends TestCase {
 		$packer = Packer::open( $this->out, 'other', array(), $this->options() );
 		file_put_contents( $this->out . '/other.part001.wpcheckpoint.zip', 'not ours' );
 		$this->expectException( \RuntimeException::class );
-		$packer->add_entry( $files[0][0], 'files/a.bin', 1758196800 );
+		$this->add( $packer, $files[0][0], 'files/a.bin', 1758196800 );
 	}
 
 	public function test_a_crash_inside_finish_is_replayed_from_the_previous_checkpoint(): void {
@@ -328,15 +334,16 @@ final class PackerTest extends TestCase {
 		};
 		$packer = $run( array() );
 		foreach ( $files as list( $source, $entry, $mtime ) ) {
-			$packer->add_entry( $source, $entry, $mtime );
+			$this->add( $packer, $source, $entry, $mtime );
 			while ( $packer->write_piece() > 0 ) {
 				continue;
 			}
 		}
-		$before = $packer->state(); // The checkpoint before finish().
+		$packer->prepare_finish( 300 + 4096 );
+		$before = $packer->state(); // The checkpoint before finish(): prepared, the open volume keeps the summaries.
 
 		// Crash 1: the summaries were appended and the volume sealed, but not renamed to the single name and not checkpointed.
-		$packer->add_entry( $index, 'files.index.jsonl', 1758196800 );
+		$this->add( $packer, $index, 'files.index.jsonl', 1758196800 );
 		while ( $packer->write_piece() > 0 ) {
 			continue;
 		}
@@ -359,11 +366,12 @@ final class PackerTest extends TestCase {
 		// Crash 2: finish() completed (single name applied) and the tick died before the checkpoint.
 		$packer = $run( array() );
 		foreach ( $files as list( $source, $entry, $mtime ) ) {
-			$packer->add_entry( $source, $entry, $mtime );
+			$this->add( $packer, $source, $entry, $mtime );
 			while ( $packer->write_piece() > 0 ) {
 				continue;
 			}
 		}
+		$packer->prepare_finish( 300 + 4096 );
 		$before = $packer->state();
 		$packer->finish( array( 'files.index.jsonl' => $index ), '{"embedded":true}', 1758196800 );
 		$packer->close();
@@ -381,12 +389,12 @@ final class PackerTest extends TestCase {
 		$this->rm( $this->out );
 		mkdir( $this->out );
 		$packer = $run( array() );
-		$packer->add_entry( $files[0][0], 'files/a.bin', 1758196800 );
+		$this->add( $packer, $files[0][0], 'files/a.bin', 1758196800 );
 		while ( $packer->write_piece() > 0 ) {
 			continue;
 		}
 		$before = $packer->state();
-		$packer->add_entry( $files[1][0], 'files/not-a-summary.txt', 1758196800 );
+		$this->add( $packer, $files[1][0], 'files/not-a-summary.txt', 1758196800 );
 		while ( $packer->write_piece() > 0 ) {
 			continue;
 		}
@@ -400,13 +408,15 @@ final class PackerTest extends TestCase {
 	public function test_entry_names_must_be_utf8_and_volumes_are_sealed_at_the_entry_limit(): void {
 		$source = $this->source( 'a.bin', 10, 1 );
 		$packer = Packer::open( $this->out, 'site', array(), $this->options() );
+		$packer->open_volume();
 		try {
 			$packer->add_entry( $source, "files/latin1-\xE4.txt", 1758196800 );
 			$this->fail( 'a Latin-1 name was accepted' );
 		} catch ( \RuntimeException $e ) {
 			$this->assertStringContainsString( 'not valid UTF-8', $e->getMessage() );
 		}
-		$this->assertFalse( $packer->has_open_volume(), 'refused before anything was written' );
+		$this->assertFalse( $packer->has_open_entry(), 'refused before anything was written' );
+		$this->assertSame( 0, $packer->state()['volume']['bytes'] );
 		$this->assertLessThan( ZipReader::MAX_ENTRIES / 10, Packer::MAX_VOLUME_ENTRIES, 'the writer seals far below what the reader accepts' );
 	}
 
@@ -425,30 +435,64 @@ final class PackerTest extends TestCase {
 		$this->assertSame( PHP_INT_SIZE >= 8 ? 4398046511104 : 2147483647 - 1048576, Packer::max_volume_bytes() );
 	}
 
-	public function test_lost_buffers_rewind_a_stored_entry(): void {
+	public function test_a_volume_shorter_than_its_committed_length_is_refused_not_padded(): void {
 		$source = $this->source( 'a.bin', 300000, 1 );
 		$packer = Packer::open( $this->out, 'site', array(), $this->options() );
-		$packer->add_entry( $source, 'files/a.bin', 1758196800 );
+		$this->add( $packer, $source, 'files/a.bin', 1758196800 );
 		$packer->write_piece( 100000 );
 		$packer->write_piece( 100000 );
 		$state = $packer->state();
 		$packer->close();
-		// The OS dropped the last 50000 bytes the tick believed it had written.
+		// The file lost the last 50000 bytes the state says were committed (a changed work directory, or an OS
+		// that dropped acknowledged writes): nothing can say what those bytes were, so nothing is padded.
 		$partial = glob( $this->out . '/*.partial' )[0];
 		$h       = fopen( $partial, 'r+b' );
 		ftruncate( $h, filesize( $partial ) - 50000 );
 		fclose( $h );
-		$packer = Packer::open( $this->out, 'site', $state, $this->options() );
-		while ( $packer->write_piece( 100000 ) > 0 ) {
-			continue;
+		clearstatcache( true, $partial );
+		$before = filesize( $partial );
+		try {
+			Packer::open( $this->out, 'site', $state, $this->options() );
+			$this->fail();
+		} catch ( \RuntimeException $e ) {
+			$this->assertStringContainsString( 'shorter than its recorded committed length', $e->getMessage() );
 		}
-		$packer->finish( array(), '{"embedded":true}', 1758196800 );
-		$path   = $packer->sealed_paths()[0];
-		$reader = ZipReader::open( $path );
-		$out    = $this->root . '/x';
-		mkdir( $out );
-		$reader->extract( $reader->find( 'files/a.bin' ), $out );
-		$this->assertSame( hash_file( 'sha256', $source ), hash_file( 'sha256', $out . '/files/a.bin' ), 'CRC was recomputed and the data is complete' );
+		clearstatcache( true, $partial );
+		$this->assertSame( $before, filesize( $partial ), 'the volume was not lengthened' );
+	}
+
+	public function test_an_aborted_entry_leaves_its_bytes_until_the_next_open_cuts_them_and_a_shrunken_source_is_reported(): void {
+		$source = $this->source( 'a.bin', 300000, 1 );
+		$packer = Packer::open( $this->out, 'site', array(), $this->options() );
+		$this->add( $packer, $source, 'files/a.bin', 1758196800 );
+		$packer->write_piece( 100000 );
+		$partial = glob( $this->out . '/*.partial' )[0];
+		clearstatcache( true, $partial );
+		$long = filesize( $partial );
+		$packer->abort_entry();
+		$this->assertFalse( $packer->has_open_entry() );
+		$state = $packer->state();
+		$packer->close();
+		clearstatcache( true, $partial );
+		$this->assertSame( $long, filesize( $partial ), 'the file is not cut before the state is persisted' );
+		$this->assertLessThan( $long, $state['volume']['bytes'], 'the state points back at the entry header' );
+		$packer = Packer::open( $this->out, 'site', $state, $this->options() );
+		clearstatcache( true, $partial );
+		$this->assertSame( $state['volume']['bytes'], filesize( $partial ), 'resume cuts the volume back to the committed length' );
+		// The source shrinks under an open entry: a distinct exception, so the caller can start the entry over.
+		$this->add( $packer, $source, 'files/a.bin', 1758196800 );
+		$packer->write_piece( 100000 );
+		$h = fopen( $source, 'r+b' );
+		ftruncate( $h, 150000 );
+		fclose( $h );
+		try {
+			while ( $packer->write_piece( 100000 ) > 0 ) {
+				continue;
+			}
+			$this->fail();
+		} catch ( SourceChanged $e ) {
+			$this->assertStringContainsString( 'changed while it was being archived', $e->getMessage() );
+		}
 	}
 
 	public function test_zip64_records_are_written_when_the_threshold_says_so(): void {
@@ -477,12 +521,18 @@ final class PackerTest extends TestCase {
 		$files  = array( array( $this->source( 'a.bin', 1000000, 1 ), 'files/a.bin', 1758196800 ) );
 		$packer = Packer::open( $this->out, 'site', array(), $this->options() );
 		foreach ( $files as list( $source, $entry, $mtime ) ) {
-			$packer->add_entry( $source, $entry, $mtime );
+			$this->add( $packer, $source, $entry, $mtime );
 			while ( $packer->write_piece() > 0 ) {
 				continue;
 			}
 		}
 		$index = $this->source( 'files.index.jsonl', 200000 );
+		$this->assertTrue( $packer->prepare_finish( 200000 + 4096 ), 'the summaries do not fit next to the data: the data volume is sealed first' );
+		while ( $packer->hash_next_block() ) {
+			continue;
+		}
+		$this->assertCount( 1, $packer->volume_entries(), 'the embedded copy lists the data volume: every volume but the one holding it' );
+		$this->ready( $packer );
 		$packer->finish( array( 'files.index.jsonl' => $index ), '{"embedded":true}', 1758196800 );
 		$paths = $packer->sealed_paths();
 		$this->assertCount( 2, $paths, 'the summaries did not fit next to the data: a volume of their own' );
@@ -496,7 +546,7 @@ final class PackerTest extends TestCase {
 		} ) ) );
 		$caught = null;
 		try {
-			$packer->add_entry( $source, 'files/a.bin', 1758196800 );
+			$this->add( $packer, $source, 'files/a.bin', 1758196800 );
 		} catch ( InsufficientSpace $e ) {
 			$caught = $e;
 		}
@@ -505,12 +555,12 @@ final class PackerTest extends TestCase {
 		$packer = Packer::open( $this->out, 'site2', array(), $this->options( array( 'disk_free' => static function () {
 			return false; // Unknown: does not block.
 		} ) ) );
-		$packer->add_entry( $source, 'files/a.bin', 1758196800 );
+		$this->add( $packer, $source, 'files/a.bin', 1758196800 );
 		$this->assertGreaterThan( 0, $packer->write_piece( 1000 ) );
 		$this->assertTrue( $packer->has_open_entry() );
 		$message = '';
 		try {
-			$packer->add_entry( $source, 'files/b.bin', 1758196800 );
+			$this->add( $packer, $source, 'files/b.bin', 1758196800 );
 		} catch ( \RuntimeException $e ) {
 			$message = $e->getMessage();
 		}
@@ -519,7 +569,7 @@ final class PackerTest extends TestCase {
 		$this->assertFalse( $packer->has_open_entry() );
 		$message = '';
 		try {
-			$packer->add_entry( $source, '../evil', 1758196800 );
+			$this->add( $packer, $source, '../evil', 1758196800 );
 		} catch ( \RuntimeException $e ) {
 			$message = $e->getMessage();
 		}
@@ -559,11 +609,13 @@ final class PackerTest extends TestCase {
 			return false;
 		} ) );
 		foreach ( $files as list( $source, $entry, $mtime ) ) {
-			$packer->add_entry( $source, $entry, $mtime );
+			$this->add( $packer, $source, $entry, $mtime );
 			while ( $packer->write_piece() > 0 ) {
 				continue;
 			}
 		}
+		$packer->prepare_finish( 4096 );
+		$this->ready( $packer );
 		$packer->finish( array(), '{"embedded":true}', 1758196800 );
 		while ( $packer->hash_next_block() ) {
 			continue;
@@ -589,7 +641,7 @@ final class PackerTest extends TestCase {
 	public function test_a_changed_source_is_refused(): void {
 		$source = $this->source( 'a.bin', 300000, 1 );
 		$packer = Packer::open( $this->out, 'site', array(), $this->options() );
-		$packer->add_entry( $source, 'files/a.bin', 1758196800 );
+		$this->add( $packer, $source, 'files/a.bin', 1758196800 );
 		$packer->write_piece( 100000 );
 		$state = $packer->state();
 		$packer->close();
@@ -598,5 +650,222 @@ final class PackerTest extends TestCase {
 		$this->expectException( \RuntimeException::class );
 		$this->expectExceptionMessage( 'changed while it was being archived' );
 		$packer->write_piece( 100000 );
+	}
+
+	public function test_a_crash_between_the_prepare_seal_and_its_checkpoint_is_replayed(): void {
+		$files     = array( array( $this->source( 'a.bin', 1000000, 1 ), 'files/a.bin', 1758196800 ) );
+		$index     = $this->source( 'files.index.jsonl', 200000 );
+		$reference = $this->pack_two( $files, $index );
+		$this->rm( $this->out );
+		mkdir( $this->out );
+
+		$packer = Packer::open( $this->out, 'site-20260918-100000-a1b2', array(), $this->options() );
+		$this->add( $packer, $files[0][0], 'files/a.bin', 1758196800 );
+		while ( $packer->write_piece() > 0 ) {
+			continue;
+		}
+		$before = $packer->state(); // The last checkpoint: volume 1 open.
+		$this->assertTrue( $packer->prepare_finish( 200000 + 4096 ) ); // Sealed and renamed ...
+		$packer->close();                                                // ... and the tick died before the checkpoint.
+		unset( $packer );
+
+		$packer = Packer::open( $this->out, 'site-20260918-100000-a1b2', $before, $this->options() );
+		$this->assertFalse( $packer->has_open_volume(), 'the sealed data volume was adopted from the stale state' );
+		$this->assertFalse( $packer->prepare_finish( 200000 + 4096 ), 'nothing left to seal' );
+		while ( $packer->hash_next_block() ) {
+			continue;
+		}
+		$this->assertCount( 1, $packer->volume_entries() );
+		$this->ready( $packer );
+		$packer->finish( array( 'files.index.jsonl' => $index ), '{"embedded":true}', 1758196800 );
+		while ( $packer->hash_next_block() ) {
+			continue;
+		}
+		$this->assertSame( $reference, $this->hashes_of( $packer ), 'byte for byte the uninterrupted run' );
+	}
+
+	public function test_a_crash_after_finish_created_the_summary_volume_is_replayed_not_refused(): void {
+		$files     = array( array( $this->source( 'a.bin', 1000000, 1 ), 'files/a.bin', 1758196800 ) );
+		$index     = $this->source( 'files.index.jsonl', 200000 );
+		$reference = $this->pack_two( $files, $index );
+		$this->rm( $this->out );
+		mkdir( $this->out );
+
+		$packer = Packer::open( $this->out, 'site-20260918-100000-a1b2', array(), $this->options() );
+		$this->add( $packer, $files[0][0], 'files/a.bin', 1758196800 );
+		while ( $packer->write_piece() > 0 ) {
+			continue;
+		}
+		$this->assertTrue( $packer->prepare_finish( 200000 + 4096 ) );
+		$before = $packer->state(); // The checkpoint after prepare_finish(): no volume open, one sealed.
+		$this->ready( $packer );
+		$packer->finish( array( 'files.index.jsonl' => $index ), '{"embedded":true}', 1758196800 ); // Volume 2 created, sealed ...
+		$packer->close();                                                                              // ... and the tick died before the checkpoint.
+		unset( $packer );
+		$this->assertFileExists( $this->out . '/site-20260918-100000-a1b2.part002.wpcheckpoint.zip' );
+
+		$packer = Packer::open( $this->out, 'site-20260918-100000-a1b2', $before, $this->options() );
+		$packer->finish( array( 'files.index.jsonl' => $index ), '{"embedded":true}', 1758196800 );
+		while ( $packer->hash_next_block() ) {
+			continue;
+		}
+		$this->assertSame( $reference, $this->hashes_of( $packer ), 'the summary volume on disk was adopted, not refused as a foreign file' );
+		$this->assertCount( 2, glob( $this->out . '/*' ) ?: array(), 'no stray files' );
+
+		// A leftover .partial of the summary volume (created, no checkpoint) is replaced, not refused.
+		$this->rm( $this->out );
+		mkdir( $this->out );
+		$packer = Packer::open( $this->out, 'site-20260918-100000-a1b2', array(), $this->options() );
+		$this->add( $packer, $files[0][0], 'files/a.bin', 1758196800 );
+		while ( $packer->write_piece() > 0 ) {
+			continue;
+		}
+		$packer->prepare_finish( 200000 + 4096 );
+		$before = $packer->state();
+		$packer->close();
+		file_put_contents( $this->out . '/site-20260918-100000-a1b2.part002.wpcheckpoint.zip.partial', 'half a header' );
+		file_put_contents( $this->out . '/site-20260918-100000-a1b2.part002.wpcheckpoint.zip.cdr', '' );
+		$packer = Packer::open( $this->out, 'site-20260918-100000-a1b2', $before, $this->options() );
+		$this->ready( $packer );
+		$packer->finish( array( 'files.index.jsonl' => $index ), '{"embedded":true}', 1758196800 );
+		while ( $packer->hash_next_block() ) {
+			continue;
+		}
+		$this->assertSame( $reference, $this->hashes_of( $packer ) );
+	}
+
+	public function test_finish_without_prepare_is_refused(): void {
+		$packer = Packer::open( $this->out, 'site', array(), $this->options() );
+		$this->add( $packer, $this->source( 'a.bin', 1000, 1 ), 'files/a.bin', 1758196800 );
+		while ( $packer->write_piece() > 0 ) {
+			continue;
+		}
+		$this->expectException( \RuntimeException::class );
+		$this->expectExceptionMessage( 'prepare_finish()' );
+		$packer->finish( array(), '{"embedded":true}', 1758196800 );
+	}
+
+	public function test_a_missing_or_unreadable_source_is_reported_as_gone_not_as_changed(): void {
+		$packer = Packer::open( $this->out, 'site', array(), $this->options() );
+		try {
+			$this->add( $packer, $this->out . '/nope.bin', 'files/nope.bin', 1758196800 );
+			$this->fail( 'a missing source must be refused' );
+		} catch ( SourceGone $e ) {
+			$this->assertFalse( $packer->has_open_entry(), 'nothing was written' );
+		}
+		$source = $this->source( 'gone.bin', 300000, 4 );
+		$this->add( $packer, $source, 'files/gone.bin', 1758196800 );
+		$packer->write_piece( 65536 );
+		$state = $packer->state();
+		$packer->close(); // The tick ends with the entry open; the file is deleted before the next one.
+		unlink( $source );
+		$packer = Packer::open( $this->out, 'site', $state, $this->options() );
+		try {
+			$packer->write_piece( 65536 );
+			$this->fail( 'a source deleted mid-entry must be refused' );
+		} catch ( SourceGone $e ) {
+			$this->assertTrue( $packer->has_open_entry(), 'the entry is left for the caller to abort' );
+		}
+		$packer->abort_entry();
+		$this->assertFalse( $packer->has_open_entry() );
+	}
+
+	public function test_sealing_right_after_an_abort_cuts_the_aborted_bytes(): void {
+		$packer = Packer::open( $this->out, 'site', array(), $this->options() );
+		$this->add( $packer, $this->source( 'keep.bin', 100000, 1 ), 'files/keep.bin', 1758196800 );
+		while ( $packer->write_piece() > 0 ) {
+			continue;
+		}
+		$this->add( $packer, $this->source( 'drop.bin', 300000, 2 ), 'files/drop.bin', 1758196800 );
+		$packer->write_piece( 65536 );
+		$packer->abort_entry();
+		$sealed = $packer->seal_volume();
+		$packer->close();
+		$this->assertSame( $sealed['bytes'], filesize( $this->out . '/' . $sealed['path'] ), 'nothing after the end record' );
+		$this->assertSame( array( 'files/keep.bin' ), array_column( ZipReader::open( $this->out . '/' . $sealed['path'] )->entries(), 'name' ) );
+		$this->assertTrue( $this->unzip_ok( $this->out . '/' . $sealed['path'] ) );
+	}
+
+	/**
+	 * A reference two-volume archive (data, then summaries) as sha256 by volume name.
+	 *
+	 * @return array<string, string>
+	 */
+	private function pack_two( array $files, string $index ): array {
+		$packer = Packer::open( $this->out, 'site-20260918-100000-a1b2', array(), $this->options() );
+		foreach ( $files as list( $source, $entry, $mtime ) ) {
+			$this->add( $packer, $source, $entry, $mtime );
+			while ( $packer->write_piece() > 0 ) {
+				continue;
+			}
+		}
+		$this->assertTrue( $packer->prepare_finish( 200000 + 4096 ) );
+		$this->ready( $packer );
+		$packer->finish( array( 'files.index.jsonl' => $index ), '{"embedded":true}', 1758196800 );
+		while ( $packer->hash_next_block() ) {
+			continue;
+		}
+		$packer->close();
+		$this->assertCount( 2, $packer->sealed_paths() );
+		return $this->hashes_of( $packer );
+	}
+
+	/**
+	 * @return array<string, string>
+	 */
+	private function hashes_of( Packer $packer ): array {
+		$out = array();
+		foreach ( $packer->sealed_paths() as $path ) {
+			$out[ basename( $path ) ] = hash_file( 'sha256', $path );
+		}
+		return $out;
+	}
+
+	public function test_a_crash_after_the_single_volume_rename_with_no_volume_open_is_finished_not_duplicated(): void {
+		$packer = Packer::open( $this->out, 'site', array(), $this->options() );
+		$this->add( $packer, $this->source( 'a.bin', 1000, 1 ), 'files/a.bin', 1758196800 );
+		while ( $packer->write_piece() > 0 ) {
+			continue;
+		}
+		$packer->prepare_finish( 4096 );
+		$this->ready( $packer );
+		$packer->finish( array(), '{"embedded":true}', 1758196800 );
+		while ( $packer->hash_next_block() ) {
+			continue;
+		}
+		$expected = hash_file( 'sha256', $packer->sealed_paths()[0] );
+		// The state as if persisted right after the seal and before the single-volume rename was recorded.
+		$state                      = $packer->state();
+		$state['finished']          = false;
+		$state['sealed'][0]['path'] = 'site.part001.wpcheckpoint.zip';
+		$packer->close();
+		$packer = Packer::open( $this->out, 'site', $state, $this->options() );
+		$this->assertTrue( $packer->already_finished(), 'the lone volume is found under the single name' );
+		$packer->finish( array(), '{"embedded":true}', 1758196800 );
+		$this->assertSame( array( 'site.wpcheckpoint.zip' ), array_map( 'basename', $packer->sealed_paths() ) );
+		$this->assertSame( $expected, hash_file( 'sha256', $packer->sealed_paths()[0] ) );
+		$this->assertCount( 1, glob( $this->out . '/*' ) ?: array(), 'no second volume was made for the summaries' );
+	}
+
+	/**
+	 * Add an entry the way a step does: a volume open, sealed and reopened when it has no room.
+	 */
+	private function add( Packer $packer, string $source, string $entry, int $mtime ): void {
+		if ( ! $packer->has_open_volume() ) {
+			$packer->open_volume( is_file( $source ) ? (int) filesize( $source ) : 0 );
+		} elseif ( is_file( $source ) && ! $packer->has_room( (int) filesize( $source ) ) ) {
+			$packer->seal_volume();
+			$packer->open_volume( (int) filesize( $source ) );
+		}
+		$packer->add_entry( $source, $entry, $mtime );
+	}
+
+	/**
+	 * A volume for the summaries when prepare_finish() sealed the last data volume.
+	 */
+	private function ready( Packer $packer ): void {
+		if ( ! $packer->has_open_volume() ) {
+			$packer->open_volume();
+		}
 	}
 }

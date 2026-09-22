@@ -233,6 +233,7 @@ final class FileScanner {
 	 * @param callable                                                           $emit  Line sink.
 	 * @param string                                                             $heavy The heavy directory this entry is under ('' when none).
 	 * @return array{dir: string, after: string, heavy?: string}|null
+	 * @throws \RuntimeException When the byte total exceeds what the platform can count.
 	 */
 	private function enter( array &$state, array $root, string $rel, string $abs, callable $emit, string $heavy = '' ) {
 		$p = $root['prefix'] . '/' . $rel;
@@ -295,9 +296,14 @@ final class FileScanner {
 			)
 		);
 		++$state['counts']['files'];
+		if ( $size > PHP_INT_MAX - (int) $state['counts']['bytes'] ) {
+			// The manifest records the total as an integer; a total this platform cannot count would fail the
+			// export at the very end. Stop at the scan, with the reason (32-bit PHP counts to 2 GB).
+			throw new \RuntimeException( sprintf( 'The files to back up add up to more than this server\'s %d-bit PHP can count; run the backup on 64-bit PHP or exclude directories.', PHP_INT_SIZE * 8 ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- a number.
+		}
 		$state['counts']['bytes'] += $size;
 		if ( '' !== $heavy && isset( $state['lists']['heavy'][ $heavy ] ) ) {
-			$state['lists']['heavy'][ $heavy ] += $size;
+			$state['lists']['heavy'][ $heavy ] = min( PHP_INT_MAX - $size, (int) $state['lists']['heavy'][ $heavy ] ) + $size;
 		}
 		return null;
 	}

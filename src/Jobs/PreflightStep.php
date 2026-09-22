@@ -71,7 +71,7 @@ final class PreflightStep implements Step {
 	 *                                          'writable' (callable(): string[] of unwritable directory names),
 	 *                                          'disk_free' (callable(): int|false, bytes free in the storage directory),
 	 *                                          'slug' (callable(): string), 'can_deflate' (bool), 'normalization' (bool),
-	 *                                          'int_size' (int), 'now' (callable(): int).
+	 *                                          'int_size' (int), 'now' (callable(): int), 'random' (callable(): string, four hex digits; tests).
 	 * @param int                  $chunk_bytes Chunk size.
 	 */
 	public function __construct( Connection $connection, array $env, int $chunk_bytes = TableExporter::CHUNK_BYTES ) {
@@ -353,6 +353,7 @@ final class PreflightStep implements Step {
 			$slug = 'site';
 		}
 		$now = isset( $this->env['now'] ) ? (int) call_user_func( $this->env['now'] ) : time();
-		return $slug . '-' . gmdate( 'Ymd-His', $now ) . '-' . bin2hex( random_bytes( 2 ) );
+		$hex = isset( $this->env['random'] ) ? (string) call_user_func( $this->env['random'] ) : bin2hex( random_bytes( 2 ) );
+		return $slug . '-' . gmdate( 'Ymd-His', $now ) . '-' . $hex;
 	}
 }

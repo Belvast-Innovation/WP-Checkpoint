@@ -99,6 +99,19 @@ final class Manifest {
 	}
 
 	/**
+	 * Whether a table summary describes a table with no chunks (an empty
+	 * table): zero chunks, zero bytes and the list hash of nothing. The
+	 * verifier skips such tables in the index and the writer's audit
+	 * expects no lines for them; both use this one definition.
+	 *
+	 * @param array<string, mixed> $table Table summary ({name, rows, bytes, chunks, sha256}).
+	 * @return bool
+	 */
+	public static function is_empty_table( array $table ): bool {
+		return 0 === (int) ( $table['chunks'] ?? -1 ) && 0 === (int) ( $table['bytes'] ?? -1 ) && hash_equals( hash( 'sha256', '' ), (string) ( $table['sha256'] ?? '' ) );
+	}
+
+	/**
 	 * Parse and validate a manifest document.
 	 *
 	 * @param string $json JSON text.

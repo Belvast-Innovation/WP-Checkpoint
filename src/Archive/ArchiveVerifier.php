@@ -505,6 +505,8 @@ final class ArchiveVerifier {
 			++$this->state['counts']['volumes_present'];
 			if ( $volume['listed'] && $size !== $volume['bytes'] ) {
 				$this->add( new Finding( self::PHASE_VOLUMES, Finding::CORRUPT, 'The volume size differs from the manifest.', array( 'volume' => $volume['ordinal'] ) ) );
+			} elseif ( $is_last && ! $this->from_volume() ) {
+				$this->check_embedded_copy( $volume );
 			}
 		}
 		$this->state['volume'] = $i + 1;
@@ -513,6 +515,53 @@ final class ArchiveVerifier {
 			$this->state['index'] = 'database';
 			$this->state['sub']   = 'extract';
 			$this->state['block'] = 0;
+		}
+	}
+
+	/**
+	 * The embedded copy in the last volume must describe the same archive
+	 * as the manifest: marked embedded, listing exactly the volumes before
+	 * the one that holds it. A copy that leaves a volume out would make
+	 * that volume invisible to anyone restoring from the volumes alone,
+	 * which is what the copy exists for; the writer's self-check runs at
+	 * this depth, so a writer defect of that shape is caught here.
+	 *
+	 * @param array<string, mixed> $volume The last volume.
+	 * @return void
+	 * @throws \RuntimeException Never leaves: a copy that cannot be read or is not a valid manifest is a finding (caught inside).
+	 */
+	private function check_embedded_copy( array $volume ): void {
+		try {
+			$reader = ZipReader::open( $this->volume_path( $volume ) );
+			$entry  = $reader->find( self::MANIFEST_ENTRY );
+			if ( null === $entry || null !== $entry['problem'] ) {
+				throw new \RuntimeException( 'The last volume has no manifest.json entry.' );
+			}
+			$copy = Manifest::from_json( $reader->read( $entry ) );
+		} catch ( ManifestError $e ) {
+			$this->add(
+				new Finding(
+					self::PHASE_VOLUMES,
+					Finding::MALFORMED,
+					'The embedded manifest copy is not a valid manifest: ' . $e->getMessage(),
+					array(
+						'volume' => $volume['ordinal'],
+						'field'  => $e->field(),
+					)
+				)
+			);
+			return;
+		} catch ( \RuntimeException $e ) {
+			$this->add( new Finding( self::PHASE_VOLUMES, Finding::MALFORMED, 'The embedded manifest copy cannot be read: ' . $e->getMessage(), array( 'volume' => $volume['ordinal'] ) ) );
+			return;
+		}
+		if ( ! $copy->embedded() ) {
+			$this->add( new Finding( self::PHASE_VOLUMES, Finding::MALFORMED, 'The manifest copy inside the last volume is not marked as embedded.', array( 'volume' => $volume['ordinal'] ) ) );
+			return;
+		}
+		$expected = array_slice( $this->manifest()->volumes(), 0, -1 );
+		if ( json_encode( $expected ) !== json_encode( $copy->volumes() ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions.json_encode_json_encode -- pure PHP class; a comparison, not output.
+			$this->add( new Finding( self::PHASE_VOLUMES, Finding::MALFORMED, 'The embedded manifest copy does not list the volumes before the last one as the manifest does.', array( 'volume' => $volume['ordinal'] ) ) );
 		}
 	}
 
@@ -878,7 +927,7 @@ final class ArchiveVerifier {
 		$tables = $this->manifest()->tables();
 		$total  = count( $tables );
 		while ( $pos < $total && 0 === $tables[ $pos ]['chunks'] ) {
-			if ( 0 !== $tables[ $pos ]['bytes'] || ! hash_equals( hash( 'sha256', '' ), $tables[ $pos ]['sha256'] ) ) {
+			if ( ! Manifest::is_empty_table( $tables[ $pos ] ) ) {
 				$this->fail_lines( 'A table with no chunks declares bytes or a hash.', array( 'table' => $tables[ $pos ]['name'] ) );
 				return $pos;
 			}

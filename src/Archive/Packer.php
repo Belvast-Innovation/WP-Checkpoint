@@ -25,9 +25,10 @@ namespace WPCheckpoint\Archive;
  * volume. The step calls should_stop() between those calls and
  * should_checkpoint() to decide when to persist state().
  *
- * Volumes are sealed between entries once they reach the volume size; an
- * entry never spans volumes, so a volume may exceed the size by its last
- * entry. The open volume is "<name>.partial" with its central directory
+ * The caller seals volumes between entries once they reach the volume
+ * size (has_room() says when; the packer never seals or creates a volume
+ * on its own); an entry never spans volumes, so a volume may exceed the
+ * size by its last entry. The open volume is "<name>.partial" with its central directory
  * records in "<name>.cdr"; sealing renames it to its final name. Entries up
  * to DEFLATE_MAX_BYTES are deflated in one piece, larger ones are stored:
  * a deflate state cannot survive a tick, and media files do not compress.
@@ -195,6 +196,7 @@ final class Packer {
 				'volume'   => null,
 				'entry'    => null,
 				'sealed'   => array(),
+				'prepared' => false,
 				'finished' => false,
 			);
 		} elseif ( ! isset( $state['base'] ) || $state['base'] !== $base ) {
@@ -235,15 +237,18 @@ final class Packer {
 	}
 
 	/**
-	 * Begin a file entry. Seals the open volume first when it reached the
-	 * volume size. Nothing of the file is copied yet.
+	 * Begin a file entry in the open volume, which must have room for it
+	 * (has_room()); otherwise SealRequired is thrown and the caller seals
+	 * and opens explicitly. Nothing is sealed or created here, and nothing
+	 * of the file is copied yet.
 	 *
 	 * @param string $source     Absolute path of the file to add.
 	 * @param string $entry_path Path inside the archive (forward slashes, relative).
 	 * @param int    $mtime      Modification time to record.
 	 * @return void
-	 * @throws \RuntimeException When an entry is already open, the path is invalid or the file cannot be read.
-	 * @throws InsufficientSpace When the disk is full.
+	 * @throws \RuntimeException When an entry is already open, no volume is open or the path is invalid.
+	 * @throws SourceGone When the file is missing or cannot be read.
+	 * @throws SealRequired When the open volume cannot take the entry (seal it and open the next one first).
 	 */
 	public function add_entry( string $source, string $entry_path, int $mtime ): void {
 		if ( $this->has_open_entry() ) {
@@ -259,14 +264,14 @@ final class Packer {
 			throw new \RuntimeException( 'Invalid entry path: not valid UTF-8.' );
 		}
 		$stats = @stat( $source ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- reported below.
-		if ( false === $stats || ! is_file( $source ) ) {
-			throw new \RuntimeException( 'The source file cannot be read.' );
+		if ( false === $stats || ! is_file( $source ) || ! is_readable( $source ) ) {
+			throw new SourceGone( 'The source file is missing or cannot be read.' );
 		}
 		$size = (int) $stats['size'];
 		if ( $size > self::max_entry_bytes() ) {
 			throw new \RuntimeException( 'The file is larger than this platform can archive.' );
 		}
-		$this->ensure_volume_open( $size );
+		$this->assert_room( $size );
 		$method = $this->options['can_deflate'] && $size <= $this->options['deflate_max_bytes'] && $size > 0 ? ZipFormat::METHOD_DEFLATE : ZipFormat::METHOD_STORE;
 		$this->begin_entry( $entry_path, $mtime, $method, $size, $source );
 	}
@@ -303,12 +308,15 @@ final class Packer {
 	 * entry's last byte is written the local header is patched and the
 	 * entry is recorded; the next call returns 0.
 	 *
-	 * @param int|null $max_bytes Piece size; null for the configured one.
+	 * @param int|null      $max_bytes Piece size; null for the configured one.
+	 * @param callable|null $observer  Receives the source bytes of the piece as they are read, so a content
+	 *                                 hash can be fed from the same read; the caller keeps the hash context
+	 *                                 within one unit of work, it never survives a tick.
 	 * @return int Bytes of source consumed by this call (0 when the entry is complete or none is open).
-	 * @throws \RuntimeException When the source changed underneath.
+	 * @throws SourceChanged When the source no longer holds the bytes the entry declared.
 	 * @throws InsufficientSpace When the disk is full.
 	 */
-	public function write_piece( $max_bytes = null ): int {
+	public function write_piece( $max_bytes = null, $observer = null ): int {
 		if ( ! $this->has_open_entry() ) {
 			return 0;
 		}
@@ -322,7 +330,10 @@ final class Packer {
 			// Small entries only (deflate_max_bytes): read, deflate and write in one piece.
 			$size = (int) $this->state['entry']['size'];
 			$data = $this->read_source( 0, $size );
-			$out  = gzdeflate( $data, self::COMPRESSION_LEVEL );
+			if ( is_callable( $observer ) ) {
+				$observer( $data );
+			}
+			$out = gzdeflate( $data, self::COMPRESSION_LEVEL );
 			if ( ! is_string( $out ) ) {
 				throw new \RuntimeException( 'Compression failed.' );
 			}
@@ -336,6 +347,9 @@ final class Packer {
 		}
 		$length = (int) min( $max, $this->state['entry']['size'] - $this->state['entry']['offset'] );
 		$data   = $this->read_source( (int) $this->state['entry']['offset'], $length );
+		if ( is_callable( $observer ) ) {
+			$observer( $data );
+		}
 		$this->write_volume( $data );
 		$this->state['entry']['crc']      = Crc32::combine( (int) $this->state['entry']['crc'], Crc32::of( $data ), strlen( $data ) );
 		$this->state['entry']['offset']  += strlen( $data );
@@ -348,8 +362,11 @@ final class Packer {
 	}
 
 	/**
-	 * Drop the open entry: the volume is truncated back to the entry's
-	 * header offset (the step calls this when the source changed).
+	 * Drop the entry in progress from the state: the volume's committed
+	 * length goes back to the entry's header and the entry is gone. The
+	 * file is not touched (see inside); the caller persists the state and
+	 * the next open() cuts the volume back. The same or another entry can
+	 * then be added at the same place.
 	 *
 	 * @return void
 	 */
@@ -358,10 +375,13 @@ final class Packer {
 			return;
 		}
 		$this->close_source();
-		$offset = (int) $this->state['entry']['header_offset'];
-		$this->truncate_volume( $offset );
-		$this->state['volume']['bytes'] = $offset;
+		// The state moves back to the entry's header; the bytes after it stay on disk until the next
+		// open() resumes from this state and cuts the volume to the committed length. Cutting here
+		// would put the file behind the state: a crash between the cut and the checkpoint would leave
+		// a committed length longer than the file, which resume() refuses.
+		$this->state['volume']['bytes'] = (int) $this->state['entry']['header_offset'];
 		$this->state['entry']           = null;
+		$this->seek_volume( (int) $this->state['volume']['bytes'] );
 	}
 
 	/**
@@ -382,7 +402,10 @@ final class Packer {
 		$volume    = $this->state['volume'];
 		$cd_offset = (int) $volume['bytes'];
 		$cd_size   = 0;
-		$records   = fopen( $this->records_path(), 'rb' );
+		// An entry aborted in this same run left its bytes after the committed length (abort_entry() does not cut);
+		// the central directory must start exactly at the committed length, so cut here.
+		$this->truncate_volume( $cd_offset );
+		$records = fopen( $this->records_path(), 'rb' );
 		if ( false === $records ) {
 			throw new \RuntimeException( 'The central directory records cannot be read.' );
 		}
@@ -482,17 +505,54 @@ final class Packer {
 	}
 
 	/**
-	 * Add the summary files to the last volume and seal it. Files are
-	 * appended as entries; the manifest string is the embedded copy. When
-	 * the open volume already holds entries and the summaries would push it
-	 * over the volume size, it is sealed first and a new volume takes only
-	 * the summaries. A single-volume archive is renamed to the single name.
+	 * Decide where the summaries go, before the embedded manifest is
+	 * assembled: the open volume keeps them when it has room for
+	 * $summary_bytes (the index files, the manifest and their headers),
+	 * otherwise it is sealed here and finish() opens a new one. The
+	 * embedded copy then lists exactly the sealed volumes, which is every
+	 * volume but the one holding it. Sealing here is a checkpointed unit
+	 * of its own: a crash after the rename is adopted by resume() and a
+	 * second call finds nothing to seal.
 	 *
-	 * @param array<string, string> $files    Entry path => absolute source path (the index files).
+	 * @param int $summary_bytes Bytes the summaries will take, with their margin.
+	 * @return bool True when the open volume was sealed.
+	 * @throws \RuntimeException When an entry is open.
+	 */
+	public function prepare_finish( int $summary_bytes ): bool {
+		if ( $this->has_open_entry() ) {
+			throw new \RuntimeException( 'An entry is still in progress.' );
+		}
+		$this->state['prepared'] = true;
+		$volume                  = $this->state['volume'];
+		if ( null === $volume ) {
+			return false;
+		}
+		$sealed = (int) $volume['entries'] > 0 && (
+			(int) $volume['bytes'] + $summary_bytes > (int) $this->options['volume_bytes']
+			|| (int) $volume['bytes'] + $summary_bytes + 65536 > (int) $this->options['max_volume_bytes']
+			|| (int) $volume['entries'] + count( self::SUMMARY_ENTRIES ) > self::MAX_VOLUME_ENTRIES
+		);
+		if ( $sealed ) {
+			$this->seal_volume();
+		}
+		return $sealed;
+	}
+
+	/**
+	 * Append the summaries and seal the last volume: the index files given
+	 * here (the caller may have added them piece by piece already and pass
+	 * none), then the embedded manifest, into the volume prepare_finish()
+	 * left room in, or a new one. Idempotent across a crash before the
+	 * step's checkpoint: a last volume already ending with the manifest is
+	 * recognised, whether it was the open volume (adopted by resume()) or
+	 * a new one created here.
+	 *
+	 * @param array<string, string> $files    Entry path => source file, in order.
 	 * @param string                $manifest Embedded manifest JSON.
-	 * @param int                   $mtime    Modification time to record.
+	 * @param int                   $mtime    Modification time for the entries.
 	 * @return void
-	 * @throws \RuntimeException When the operation fails (message says what).
+	 * @throws \RuntimeException When an entry is open, prepare_finish() did not run, no volume is open, or a file cannot be read.
+	 * @throws SealRequired When the open volume cannot take the summaries (prepare_finish() made sure it can).
 	 */
 	public function finish( array $files, string $manifest, int $mtime ): void {
 		if ( $this->has_open_entry() ) {
@@ -501,18 +561,15 @@ final class Packer {
 		if ( $this->state['finished'] ) {
 			return;
 		}
-		if ( null === $this->state['volume'] && array() !== $this->state['sealed'] && $this->last_volume_has_summaries() ) {
-			// A previous tick finished the archive and died before its checkpoint; resume() adopted the volume.
+		if ( empty( $this->state['prepared'] ) ) {
+			throw new \RuntimeException( 'prepare_finish() decides the last volume before finish().' );
+		}
+		if ( $this->already_finished() ) {
+			// A previous run sealed the last volume and died before its checkpoint: the open volume with the
+			// summaries appended (adopted by resume()), or a new volume made for them (adopted here).
 			$this->rename_single_volume();
 			$this->state['finished'] = true;
 			return;
-		}
-		$total = strlen( $manifest );
-		foreach ( $files as $source ) {
-			$total += (int) filesize( $source );
-		}
-		if ( null !== $this->state['volume'] && $this->state['volume']['entries'] > 0 && $this->state['volume']['bytes'] + $total > $this->options['volume_bytes'] ) {
-			$this->seal_volume();
 		}
 		foreach ( $files as $entry_path => $source ) {
 			$this->add_entry( $source, (string) $entry_path, $mtime );
@@ -520,11 +577,73 @@ final class Packer {
 				continue;
 			}
 		}
-		$this->ensure_volume_open( strlen( $manifest ) );
+		$this->assert_room( strlen( $manifest ) );
 		$this->add_string_entry( 'manifest.json', $manifest, $mtime );
 		$this->seal_volume();
 		$this->rename_single_volume();
 		$this->state['finished'] = true;
+	}
+
+	/**
+	 * Whether the archive is already finished on disk although the state
+	 * does not say so: no volume open and the last sealed volume ends with
+	 * the embedded manifest, or a sealed volume after the last recorded
+	 * one holds nothing but summaries (adopted into the state here). A
+	 * step that appends the summaries itself asks this first so that a
+	 * replay does not append them a second time into a new volume.
+	 *
+	 * @return bool
+	 */
+	public function already_finished(): bool {
+		if ( $this->state['finished'] ) {
+			return true;
+		}
+		if ( null !== $this->state['volume'] ) {
+			return false;
+		}
+		if ( array() !== $this->state['sealed'] && $this->last_volume_has_summaries() ) {
+			return true;
+		}
+		return $this->adopt_summary_volume();
+	}
+
+	/**
+	 * A sealed volume after the last recorded one that holds nothing but
+	 * summary entries is this archive's last volume, written by a run that
+	 * died between its seal and the checkpoint. Record it as sealed.
+	 *
+	 * @return bool True when such a volume was adopted.
+	 */
+	private function adopt_summary_volume(): bool {
+		$index      = count( $this->state['sealed'] ) + 1;
+		$candidates = array( sprintf( self::VOLUME_NAME_PATTERN, $this->state['base'], $index ) );
+		if ( 1 === $index ) {
+			$candidates[] = $this->state['base'] . self::SINGLE_SUFFIX;
+		}
+		foreach ( $candidates as $name ) {
+			$final = $this->dir . DIRECTORY_SEPARATOR . $name;
+			if ( ! is_file( $final ) ) {
+				continue;
+			}
+			try {
+				$reader = ZipReader::open( $final );
+			} catch ( \RuntimeException $e ) {
+				return false;
+			}
+			$names = array_column( $reader->entries(), 'name' );
+			if ( array() === $names || count( $names ) !== count( array_unique( $names ) ) || array() !== array_diff( $names, self::SUMMARY_ENTRIES ) || ! in_array( 'manifest.json', $names, true ) ) {
+				return false;
+			}
+			$this->state['sealed'][] = array(
+				'index'  => $index,
+				'path'   => $name,
+				'bytes'  => (int) filesize( $final ),
+				'chunks' => array(),
+				'hashed' => 0,
+			);
+			return true;
+		}
+		return false;
 	}
 
 	/**
@@ -533,9 +652,24 @@ final class Packer {
 	 * @return bool
 	 */
 	private function last_volume_has_summaries(): bool {
-		$last = $this->state['sealed'][ count( $this->state['sealed'] ) - 1 ];
+		$i    = count( $this->state['sealed'] ) - 1;
+		$last = $this->state['sealed'][ $i ];
+		$path = $this->dir . DIRECTORY_SEPARATOR . $last['path'];
+		if ( 0 === $i && ! is_file( $path ) && is_file( $this->dir . DIRECTORY_SEPARATOR . $this->state['base'] . self::SINGLE_SUFFIX ) ) {
+			// finish() renamed the lone volume to the single name and died before the checkpoint.
+			$path = $this->dir . DIRECTORY_SEPARATOR . $this->state['base'] . self::SINGLE_SUFFIX;
+			try {
+				if ( null !== ZipReader::open( $path )->find( 'manifest.json' ) ) {
+					$this->state['sealed'][0]['path'] = $this->state['base'] . self::SINGLE_SUFFIX;
+					return true;
+				}
+			} catch ( \RuntimeException $e ) {
+				return false;
+			}
+			return false;
+		}
 		try {
-			$reader = ZipReader::open( $this->dir . DIRECTORY_SEPARATOR . $last['path'] );
+			$reader = ZipReader::open( $path );
 		} catch ( \RuntimeException $e ) {
 			return false;
 		}
@@ -567,20 +701,18 @@ final class Packer {
 
 	/**
 	 * Manifest entries of the sealed volumes (path, bytes, sha256 and the
-	 * chunk list above volume_chunk_bytes), in order.
+	 * chunk list above volume_chunk_bytes), in order. Called after
+	 * prepare_finish() and before finish() this is exactly what the
+	 * embedded copy lists: every volume but the one that will hold it,
+	 * which is still open (or not yet created) at that point.
 	 *
-	 * @param bool $embedded Leave out the last volume (the one holding the embedded manifest).
 	 * @return array<int, array{path: string, bytes: int, chunks?: string[], sha256: string}>
-	 * @throws \RuntimeException When a volume is not fully hashed yet.
+	 * @throws \RuntimeException When a sealed volume is not fully hashed yet.
 	 */
-	public function volume_entries( bool $embedded = false ): array {
+	public function volume_entries(): array {
 		$chunk = (int) $this->options['volume_chunk_bytes'];
 		$out   = array();
-		$list  = $this->state['sealed'];
-		if ( $embedded ) {
-			array_pop( $list );
-		}
-		foreach ( $list as $sealed ) {
+		foreach ( $this->state['sealed'] as $sealed ) {
 			$total = ChunkHasher::chunk_count( (int) $sealed['bytes'], $chunk );
 			if ( (int) $sealed['hashed'] < $total ) {
 				throw new \RuntimeException( 'A volume is not hashed yet.' );
@@ -680,17 +812,10 @@ final class Packer {
 		// Committed bytes: the completed entries, plus the open entry's header and the pieces written so far.
 		$committed = null === $entry ? (int) $this->state['volume']['bytes'] : (int) $entry['data_offset'] + (int) $entry['written'];
 		if ( $actual < $committed ) {
-			// Buffers were lost (an OS crash): a stored entry can rewind, a deflated one starts over.
-			$lost = $committed - $actual;
-			if ( null === $entry || ZipFormat::METHOD_STORE !== $entry['method'] || (int) $entry['written'] < $lost ) {
-				throw new \RuntimeException( 'The volume lost committed data and cannot be resumed.' );
-			}
-			$this->state['entry']['written'] -= $lost;
-			$this->state['entry']['offset']  -= $lost;
-			$this->state['entry']['csize']    = $this->state['entry']['written'];
-			// The running CRC cannot be rewound: recompute it from the bytes that are there.
-			$this->state['entry']['crc'] = $this->crc_of_volume_range( (int) $entry['data_offset'], (int) $this->state['entry']['written'] );
-			$committed                   = $actual;
+			// A committed length is only ever recorded after the bytes are on disk, so a shorter file means the
+			// work directory was changed (or the OS dropped what it had acknowledged). Never pad it: the
+			// zeros would be archived as data.
+			throw new \RuntimeException( 'The volume is shorter than its recorded committed length; the work directory was changed or damaged.' );
 		}
 		$this->truncate_volume( $committed );
 		$this->truncate_records( (int) $this->state['volume']['entries'] );
@@ -763,47 +888,92 @@ final class Packer {
 	}
 
 	/**
-	 * Open the volume if none is open, creating a new one.
+	 * Whether the open volume can take an entry of this size: it is open,
+	 * and either empty (an entry never spans volumes, so an empty volume
+	 * takes anything) or below the volume size, the platform bound and the
+	 * entry count. The caller seals and opens explicitly when it cannot.
+	 *
+	 * @param int $next_entry_bytes Size of the entry about to be added.
+	 * @return bool
+	 */
+	public function has_room( int $next_entry_bytes ): bool {
+		$volume = $this->state['volume'];
+		if ( null === $volume ) {
+			return false;
+		}
+		if ( 0 === (int) $volume['entries'] ) {
+			return true;
+		}
+		if ( (int) $volume['bytes'] >= (int) $this->options['volume_bytes'] ) {
+			return false;
+		}
+		if ( (int) $volume['bytes'] + $next_entry_bytes + 65536 > (int) $this->options['max_volume_bytes'] ) {
+			// Every entry may fit the platform on its own while the volume would not.
+			return false;
+		}
+		return (int) $volume['entries'] < self::MAX_VOLUME_ENTRIES;
+	}
+
+	/**
+	 * Create the next volume. Only the caller does this, as a unit it
+	 * checkpoints: the packer never creates a file as a side effect of
+	 * adding an entry. Leftovers of this volume from a run that died
+	 * before its first checkpoint are replaced; a final file under the
+	 * volume's name belongs to someone else and is refused.
 	 *
 	 * @param int $next_entry_bytes Size of the entry about to be added (free-space check).
 	 * @return void
 	 * @throws InsufficientSpace When the disk is full.
-	 * @throws \RuntimeException When the operation fails (message says what).
+	 * @throws \RuntimeException When a volume is open, or the operation fails (message says what).
 	 */
-	private function ensure_volume_open( int $next_entry_bytes ): void {
-		if ( null !== $this->state['volume'] && $this->state['volume']['bytes'] >= $this->options['volume_bytes'] ) {
-			$this->seal_volume();
+	public function open_volume( int $next_entry_bytes = 0 ): void {
+		if ( null !== $this->state['volume'] ) {
+			throw new \RuntimeException( 'A volume is already open.' );
 		}
-		if ( null !== $this->state['volume'] && $this->state['volume']['entries'] > 0 && $this->state['volume']['bytes'] + $next_entry_bytes + 65536 > $this->options['max_volume_bytes'] ) {
-			// Every entry may fit the platform on its own while the volume would not: seal first.
-			$this->seal_volume();
+		$index                 = count( $this->state['sealed'] ) + 1;
+		$name                  = sprintf( self::VOLUME_NAME_PATTERN, $this->state['base'], $index );
+		$this->state['volume'] = array(
+			'index'   => $index,
+			'name'    => $name,
+			'bytes'   => 0,
+			'entries' => 0,
+		);
+		if ( file_exists( $this->dir . DIRECTORY_SEPARATOR . $name ) ) {
+			throw new \RuntimeException( 'A file of the new volume already exists.' );
 		}
-		if ( null !== $this->state['volume'] && $this->state['volume']['entries'] >= self::MAX_VOLUME_ENTRIES ) {
-			$this->seal_volume();
+		foreach ( array( $this->partial_path(), $this->records_path() ) as $path ) {
+			// Left by a run that created this volume and died before its first checkpoint: nothing of it is
+			// committed, and no other writer uses this base name (it carries a random suffix).
+			if ( file_exists( $path ) && ! @unlink( $path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.unlink_unlink -- failure is thrown.
+				throw new \RuntimeException( 'A leftover file of the new volume could not be removed.' );
+			}
 		}
+		$this->check_space( $next_entry_bytes );
+		$handle = fopen( $this->partial_path(), 'w+b' );
+		if ( false === $handle ) {
+			throw new \RuntimeException( 'The volume file could not be created.' );
+		}
+		$this->handle = $handle;
+		if ( false === file_put_contents( $this->records_path(), '' ) ) {
+			throw new \RuntimeException( 'The record file could not be created.' );
+		}
+	}
+
+	/**
+	 * The open volume must exist and have room; nothing is sealed or
+	 * created here.
+	 *
+	 * @param int $next_entry_bytes Size of the entry about to be added.
+	 * @return void
+	 * @throws SealRequired When the open volume cannot take the entry.
+	 * @throws \RuntimeException When no volume is open.
+	 */
+	private function assert_room( int $next_entry_bytes ): void {
 		if ( null === $this->state['volume'] ) {
-			$index                 = count( $this->state['sealed'] ) + 1;
-			$name                  = sprintf( self::VOLUME_NAME_PATTERN, $this->state['base'], $index );
-			$this->state['volume'] = array(
-				'index'   => $index,
-				'name'    => $name,
-				'bytes'   => 0,
-				'entries' => 0,
-			);
-			foreach ( array( $this->partial_path(), $this->records_path(), $this->dir . DIRECTORY_SEPARATOR . $name ) as $path ) {
-				if ( file_exists( $path ) ) {
-					throw new \RuntimeException( 'A file of the new volume already exists.' );
-				}
-			}
-			$this->check_space( $next_entry_bytes );
-			$handle = fopen( $this->partial_path(), 'w+b' );
-			if ( false === $handle ) {
-				throw new \RuntimeException( 'The volume file could not be created.' );
-			}
-			$this->handle = $handle;
-			if ( false === file_put_contents( $this->records_path(), '' ) ) {
-				throw new \RuntimeException( 'The record file could not be created.' );
-			}
+			throw new \RuntimeException( 'No volume is open; open_volume() first.' );
+		}
+		if ( ! $this->has_room( $next_entry_bytes ) ) {
+			throw new SealRequired( 'The open volume cannot take this entry; seal it and open the next one.' );
 		}
 	}
 
@@ -993,30 +1163,6 @@ final class Packer {
 	}
 
 	/**
-	 * CRC of a byte range of the open volume (resume after lost buffers).
-	 *
-	 * @param int $offset Offset.
-	 * @param int $length Length.
-	 * @return int
-	 * @throws \RuntimeException When the operation fails (message says what).
-	 */
-	private function crc_of_volume_range( int $offset, int $length ): int {
-		$this->open_volume_handle();
-		$this->seek_volume( $offset );
-		$crc  = 0;
-		$left = $length;
-		while ( $left > 0 ) {
-			$data = fread( $this->handle, (int) min( 1048576, $left ) );
-			if ( false === $data || '' === $data ) {
-				throw new \RuntimeException( 'The volume could not be read back.' );
-			}
-			$crc   = Crc32::combine( $crc, Crc32::of( $data ), strlen( $data ) );
-			$left -= strlen( $data );
-		}
-		return $crc;
-	}
-
-	/**
 	 * Open the partial volume for read/write when not open.
 	 *
 	 * @return void
@@ -1048,12 +1194,15 @@ final class Packer {
 		}
 		$entry = $this->state['entry'];
 		clearstatcache( true, $entry['source'] );
-		if ( ! is_file( $entry['source'] ) || (int) filesize( $entry['source'] ) !== (int) $entry['size'] ) {
-			throw new \RuntimeException( 'The source file changed while it was being archived.' );
+		if ( ! is_file( $entry['source'] ) ) {
+			throw new SourceGone( 'The source file is missing or cannot be read.' );
 		}
-		$handle = fopen( $entry['source'], 'rb' );
+		if ( (int) filesize( $entry['source'] ) !== (int) $entry['size'] ) {
+			throw new SourceChanged( 'The source file changed while it was being archived.' );
+		}
+		$handle = @fopen( $entry['source'], 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- a warning would put the path into the error log; failure is thrown.
 		if ( false === $handle ) {
-			throw new \RuntimeException( 'The source file cannot be read.' );
+			throw new SourceGone( 'The source file is missing or cannot be read.' );
 		}
 		$this->source = $handle;
 	}
@@ -1078,7 +1227,7 @@ final class Packer {
 		while ( $left > 0 ) {
 			$piece = fread( $this->source, (int) min( 1048576, $left ) );
 			if ( false === $piece || '' === $piece ) {
-				throw new \RuntimeException( 'The source file changed while it was being archived.' );
+				throw new SourceChanged( 'The source file changed while it was being archived.' );
 			}
 			$data .= $piece;
 			$left -= strlen( $piece );

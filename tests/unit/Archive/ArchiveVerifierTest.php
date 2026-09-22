@@ -801,4 +801,83 @@ final class ArchiveVerifierTest extends TestCase {
 		$this->expectException( \LogicException::class );
 		ArchiveVerifier::open( $builder->manifest_path, $builder->work_dir() )->result();
 	}
+
+	public function test_an_embedded_copy_that_leaves_a_volume_out_is_a_finding_at_structure_depth(): void {
+		$builder = $this->typical(
+			array(
+				'manifest' => static function ( array $manifest, bool $embedded ): array {
+					if ( $embedded ) {
+						array_pop( $manifest['volumes'] ); // The copy forgets the last data volume.
+					}
+					return $manifest;
+				},
+			)
+		);
+		$structure = $this->verify( $builder, $builder->manifest_path, ArchiveVerifier::DEPTH_STRUCTURE );
+		$finding   = self::find( $structure, array( 'phase' => ArchiveVerifier::PHASE_VOLUMES, 'kind' => Finding::MALFORMED ) );
+		$this->assertNotNull( $finding, $structure->to_text( self::identity() ) );
+		$this->assertStringContainsString( 'does not list the volumes before the last one', $finding['message'] );
+		$this->assertSame( 2, $finding['volume'] );
+		$this->assertTrue( $structure->restore_refused() );
+		$this->assertSame( VerificationResult::FAILED, $structure->outcome() );
+
+		// A copy with the right list but not marked as embedded is a finding too; the intact fixture has none.
+		$unmarked = $this->typical(
+			array(
+				'manifest' => static function ( array $manifest, bool $embedded ): array {
+					if ( $embedded ) {
+						unset( $manifest['embedded'] );
+					}
+					return $manifest;
+				},
+			)
+		);
+		$result   = $this->verify( $unmarked, $unmarked->manifest_path, ArchiveVerifier::DEPTH_STRUCTURE );
+		$this->assertNotNull( self::find( $result, array( 'kind' => Finding::MALFORMED ) ), $result->to_text( self::identity() ) );
+		$intact = $this->typical();
+		$this->assertSame( 0, $this->verify( $intact, $intact->manifest_path, ArchiveVerifier::DEPTH_STRUCTURE )->findings_total() );
+	}
+
+	/**
+	 * Malformed input is a finding, never an exception out of run(): the second time an exception escaped
+	 * the verifier (a damaged central directory was the first), so the three shapes are pinned together.
+	 */
+	public function test_malformed_input_never_escapes_the_verifier_as_an_exception(): void {
+		// 1. A malformed embedded copy (not a valid manifest).
+		$copy = $this->typical(
+			array(
+				'manifest' => static function ( array $manifest, bool $embedded ): array {
+					if ( $embedded ) {
+						$manifest['format'] = 'bogus';
+					}
+					return $manifest;
+				},
+			)
+		);
+		$result = $this->verify( $copy, $copy->manifest_path, ArchiveVerifier::DEPTH_STRUCTURE );
+		$finding = self::find( $result, array( 'phase' => ArchiveVerifier::PHASE_VOLUMES, 'kind' => Finding::MALFORMED ) );
+		$this->assertNotNull( $finding, $result->to_text( self::identity() ) );
+		$this->assertStringContainsString( 'not a valid manifest', $finding['message'] );
+		$this->assertSame( 2, $finding['volume'] );
+		$this->assertTrue( $result->restore_refused() );
+		// 2. A malformed central directory.
+		$broken = $this->typical();
+		$reader = \WPCheckpoint\Archive\ZipReader::open( $broken->volumes[0] );
+		ArchiveBuilder::flip( $broken->volumes[0], (int) $reader->entries()[1]['cd_offset'] );
+		$result = $this->verify( $broken, $broken->manifest_path );
+		$this->assertSame( VerificationResult::FAILED, $result->outcome() );
+		$this->assertNotEmpty( preg_grep( '/central directory/', array_column( self::findings( $result ), 'message' ) ) );
+		// 3. A malformed index line.
+		$torn = $this->typical(
+			array(
+				'files_lines' => static function ( array $lines ): array {
+					$lines[0] = array( 'p' => $lines[0]['p'], 'b' => 'not a number', 'm' => 1 );
+					return $lines;
+				},
+			)
+		);
+		$result = $this->verify( $torn, $torn->manifest_path, ArchiveVerifier::DEPTH_STRUCTURE );
+		$this->assertTrue( $result->restore_refused() );
+		$this->assertNotNull( self::find( $result, array( 'kind' => Finding::MALFORMED ) ), $result->to_text( self::identity() ) );
+	}
 }

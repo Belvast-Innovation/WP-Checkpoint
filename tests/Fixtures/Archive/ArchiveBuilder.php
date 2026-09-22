@@ -253,17 +253,19 @@ final class ArchiveBuilder {
 		);
 		$packer  = Packer::open( $this->dir, self::BASE, array(), $options );
 		foreach ( $entries as list( $path, $entry ) ) {
+			if ( ! $packer->has_open_volume() ) {
+				$packer->open_volume();
+			} elseif ( ! $packer->has_room( (int) filesize( $path ) ) ) {
+				$packer->seal_volume();
+				$packer->open_volume();
+			}
 			$packer->add_entry( $path, $entry, self::MTIME );
 			while ( $packer->write_piece() > 0 ) {
 				continue;
 			}
 		}
-		// The embedded copy lists every volume sealed before the one that holds it: predict finish()'s seal.
-		$summary_bytes = filesize( $db_index ) + filesize( $files_index ) + 4096;
-		$state         = $packer->state();
-		if ( $packer->has_open_volume() && $state['volume']['entries'] > 0 && $state['volume']['bytes'] + $summary_bytes > self::VOLUME_BYTES ) {
-			$packer->seal_volume();
-		}
+		// The embedded copy lists every volume sealed before the one that holds it: prepare_finish() decides the split.
+		$packer->prepare_finish( filesize( $db_index ) + filesize( $files_index ) + 4096 );
 		while ( $packer->hash_next_block() ) {
 			continue;
 		}
@@ -275,6 +277,9 @@ final class ArchiveBuilder {
 			'files_bytes'    => $files_bytes,
 		);
 		$embedded = $this->manifest_json( $manifest, $packer->volume_entries(), true );
+		if ( ! $packer->has_open_volume() ) {
+			$packer->open_volume();
+		}
 		$packer->finish(
 			array(
 				Manifest::DATABASE_INDEX => $db_index,

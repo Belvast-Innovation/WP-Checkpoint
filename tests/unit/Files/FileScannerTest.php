@@ -270,4 +270,19 @@ final class FileScannerTest extends TestCase {
 		$this->assertLessThan( 32 * 1048576, memory_get_peak_usage( true ) - $before, 'the state and one listing at a time, never the whole tree' );
 		$this->assertLessThan( 4096, strlen( (string) json_encode( $state ) ), 'the cursor stays small' );
 	}
+
+	public function test_a_byte_total_the_platform_cannot_count_stops_the_scan_with_the_reason(): void {
+		$this->put( 'c/one.bin', str_repeat( 'x', 100 ) );
+		$scanner                  = new FileScanner( array( array( 'group' => 'other-content', 'path' => $this->root . '/c', 'prefix' => 'wp-content' ) ), new Exclusions( array(), array() ) );
+		$state                    = FileScanner::initial_state();
+		$state['counts']['bytes'] = PHP_INT_MAX - 10; // As if the files before this one had added up to the platform's limit.
+		try {
+			while ( empty( $state['done'] ) ) {
+				$state = $scanner->scan_unit( $state, static function ( array $line ): void {} );
+			}
+			$this->fail( 'the total must be refused at the scan, not at the manifest' );
+		} catch ( \RuntimeException $e ) {
+			$this->assertStringContainsString( sprintf( '%d-bit PHP can count', PHP_INT_SIZE * 8 ), $e->getMessage() );
+		}
+	}
 }
