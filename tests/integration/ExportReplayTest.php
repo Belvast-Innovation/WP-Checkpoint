@@ -9,6 +9,7 @@ use WPCheckpoint\Jobs\Budget;
 use WPCheckpoint\Jobs\DatabaseExportStep;
 use WPCheckpoint\Jobs\FileScanStep;
 use WPCheckpoint\Jobs\Job;
+use WPCheckpoint\Jobs\JobContext;
 use WPCheckpoint\Jobs\JobRepository;
 use WPCheckpoint\Jobs\JobTypes;
 use WPCheckpoint\Jobs\LockLost;
@@ -44,7 +45,14 @@ final class ExportReplayTest extends JobTestCase {
 
 	const PREFIX = 'wpcreplay_';
 	const CHUNK  = 1048576; // The reader's minimum content chunk.
-	const VOLUME = 2097152; // Small volumes: several seals, some in the middle of a tick.
+
+	const COVERAGE_LOST = 'The fixture no longer covers this path: its sizes (files, rows, volume and chunk sizes, clock) changed and the replay lost its coverage. Adjust the fixture so the path is exercised again.';
+
+	/** @var int Volume size of this run. */
+	private $volume = 2097152;
+
+	/** @var int Tick number of the run in progress (for the coverage checks). */
+	private $tick_no = 0;
 
 	/** @var float */
 	private $now;
@@ -166,7 +174,7 @@ final class ExportReplayTest extends JobTestCase {
 
 	private function packer_options(): array {
 		return array(
-			'volume_bytes'       => self::VOLUME,
+			'volume_bytes'       => $this->volume,
 			'volume_chunk_bytes' => self::CHUNK,
 		);
 	}
@@ -229,6 +237,7 @@ final class ExportReplayTest extends JobTestCase {
 	 */
 	private function drive( int $id ): TickResult {
 		for ( $i = 0; $i < 2000; $i++ ) {
+			++$this->tick_no;
 			$result = $this->runner()->tick( $id, $this->now );
 			if ( TickResult::MORE !== $result->status ) {
 				return $result;
@@ -283,15 +292,96 @@ final class ExportReplayTest extends JobTestCase {
 		return $out;
 	}
 
-	public function test_every_crash_between_a_disk_change_and_the_next_cursor_write_replays_to_the_same_archive(): void {
+	/**
+	 * Two shapes: small volumes (several seals, one of them in the middle of a tick with entries the
+	 * previous cursor write did not have), and one large volume (a site under the volume size: the lone
+	 * volume is renamed to the single name when the archive is finished).
+	 *
+	 * @return array<string, array{0: int, 1: string}>
+	 */
+	public function shapes(): array {
+		return array(
+			'several volumes' => array( 2097152, 'multi' ),
+			'one volume'      => array( 1073741824, 'single' ),
+		);
+	}
+
+	/**
+	 * What the reference run must have gone through for the replay to prove anything, from its cursor
+	 * writes: every step checkpointed (so every step's units are replayed), and per shape the path the
+	 * shape exists for. Returns what is missing.
+	 *
+	 * @param array<int, array{0: string, 1: array<string, mixed>, 2: int}> $cursors Step, cursor and tick of each write.
+	 * @param string                                                          $shape   'multi' or 'single'.
+	 * @return string[]
+	 */
+	private function missing_coverage( array $cursors, string $shape ): array {
+		$missing = array();
+		$steps   = array_values( array_unique( array_column( $cursors, 0 ) ) );
+		foreach ( array( PreflightStep::ID, FileScanStep::ID, ReviewStep::ID, DatabaseExportStep::ID, PackStep::ID, ManifestStep::ID, StoreStep::ID ) as $id ) {
+			if ( ! in_array( $id, $steps, true ) ) {
+				$missing[] = sprintf( 'no cursor write of step "%s"', $id );
+			}
+		}
+		$volume = static function ( array $write ) {
+			return $write[1]['packer']['volume'] ?? null;
+		};
+		$sealed = static function ( array $write ): array {
+			return isset( $write[1]['packer']['sealed'] ) && is_array( $write[1]['packer']['sealed'] ) ? $write[1]['packer']['sealed'] : array();
+		};
+		if ( 'multi' === $shape ) {
+			// A seal in the middle of a tick: write j is the checkpoint before the seal, write j+1 records it in the
+			// same tick, and write j-1 (the one before, possibly the end of the previous tick) knew fewer entries
+			// of that volume than write j: units of this tick added entries before the seal, so a crash between
+			// them and the seal leaves entries on disk that the stored cursor does not have.
+			$found = false;
+			for ( $j = 1; $j + 1 < count( $cursors ) && ! $found; $j++ ) {
+				list( $before, $at, $after ) = array( $cursors[ $j - 1 ], $cursors[ $j ], $cursors[ $j + 1 ] );
+				if ( PackStep::ID !== $before[0] || PackStep::ID !== $at[0] || PackStep::ID !== $after[0] ) {
+					continue;
+				}
+				if ( $at[2] !== $after[2] ) {
+					continue;
+				}
+				$open = $volume( $at );
+				$prev = $volume( $before );
+				if ( null === $open || null !== $volume( $after ) || count( $sealed( $after ) ) !== count( $sealed( $at ) ) + 1 ) {
+					continue;
+				}
+				$found = null !== $prev && (int) $prev['index'] === (int) $open['index'] && (int) $open['entries'] > (int) $prev['entries'];
+			}
+			if ( ! $found ) {
+				$missing[] = 'no seal in the middle of a tick with entries the previous cursor write did not have';
+			}
+		}
+		if ( 'single' === $shape ) {
+			// The finish that renames the lone volume: write j-1 says "finish", write j records the single name.
+			$found = false;
+			for ( $j = 1; $j < count( $cursors ) && ! $found; $j++ ) {
+				$names = array_column( $sealed( $cursors[ $j ] ), 'path' );
+				$found = ManifestStep::ID === $cursors[ $j ][0] && 'finish' === ( $cursors[ $j - 1 ][1]['phase'] ?? '' ) && 'blocks_after' === ( $cursors[ $j ][1]['phase'] ?? '' )
+					&& 1 === count( $names ) && 1 === preg_match( '/\A[a-z0-9-]+\.wpcheckpoint\.zip\z/', (string) $names[0] );
+			}
+			if ( ! $found ) {
+				$missing[] = 'no cursor write recording the single-volume rename after the finish phase';
+			}
+		}
+		return $missing;
+	}
+
+	/**
+	 * @dataProvider shapes
+	 */
+	public function test_every_crash_between_a_disk_change_and_the_next_cursor_write_replays_to_the_same_archive( int $volume, string $shape ): void {
+		$this->volume = $volume;
 		$this->register_export();
 		$job = $this->repo->create( 'export-replay', 0, array(), $this->options() );
 		$id  = $job->id;
 
 		// The uninterrupted run: count the cursor writes and remember every cursor.
 		$cursors          = array();
-		$this->on_persist = static function ( Job $job, string $step, array $cursor ) use ( &$cursors ): void {
-			$cursors[] = array( $step, $cursor );
+		$this->on_persist = function ( Job $job, string $step, array $cursor ) use ( &$cursors ): void {
+			$cursors[] = array( $step, $cursor, $this->tick_no );
 		};
 		$result           = $this->drive( $id );
 		$this->assertSame( TickResult::COMPLETED, $result->status, (string) $this->repo->find( $id )->last_error );
@@ -301,10 +391,17 @@ final class ExportReplayTest extends JobTestCase {
 		$this->assertCount( 1, $manifests );
 		$this->assertStringStartsWith( 'replay-site-20270115-080000-c0de', basename( $manifests[0] ), 'the injected clock and suffix name the archive' );
 		$manifest  = Manifest::from_json( (string) file_get_contents( $manifests[0] ) );
-		$this->assertGreaterThanOrEqual( 3, count( $manifest->volumes() ), 'the fixture seals several times' );
-		$writes = count( $cursors );
-		$this->assertGreaterThan( 20, $writes );
+		$writes    = count( $cursors );
 		$this->assertSame( array( 'wpcreplay_options', 'wpcreplay_posts' ), array_column( $manifest->tables(), 'name' ) );
+		if ( 'single' === $shape ) {
+			$this->assertCount( 1, $manifest->volumes(), self::COVERAGE_LOST );
+			$this->assertStringEndsWith( '-c0de.wpcheckpoint.zip', $manifest->volumes()[0]['path'], self::COVERAGE_LOST );
+		} else {
+			$this->assertGreaterThanOrEqual( 3, count( $manifest->volumes() ), self::COVERAGE_LOST );
+		}
+		// Every crash point below is replayed; these are the paths they must include.
+		$missing = $this->missing_coverage( $cursors, $shape );
+		$this->assertSame( array(), $missing, self::COVERAGE_LOST . "\nMissing:\n" . implode( "\n", $missing ) );
 
 		// A second uninterrupted run is byte for byte the same: the run is deterministic, so a difference
 		// below is a replay defect and not noise.
@@ -318,11 +415,13 @@ final class ExportReplayTest extends JobTestCase {
 		for ( $k = 0; $k < $writes; $k++ ) {
 			$this->reset_job( $id );
 			$count            = 0;
-			$this->on_persist = static function ( Job $job, string $step, array $cursor ) use ( &$count, $k ): void {
+			$last             = array();
+			$this->on_persist = static function ( Job $job, string $step, array $cursor ) use ( &$count, &$last, $k ): void {
 				++$count;
 				if ( $count === $k + 1 ) {
 					throw new LockLost( 'simulated crash before cursor write ' . $count );
 				}
+				$last = $cursor;
 			};
 			$crashed          = false;
 			for ( $i = 0; $i < 2000; $i++ ) {
@@ -341,6 +440,10 @@ final class ExportReplayTest extends JobTestCase {
 			$this->now += JobRepository::LOCK_SECONDS + 1;
 			$stored     = $this->repo->find( $id );
 			$this->assertSame( $k > 0 ? $cursors[ $k - 1 ][0] : '', $stored->step, "write {$k}: the stored step is the one of write {$k}" );
+			if ( $k > 0 ) {
+				// This run's own write k (the pre-flight cursor carries the live free disk space, so not the reference run's).
+				$this->assertSame( wp_json_encode( JobContext::strip_reserved( $last ) ), wp_json_encode( JobContext::strip_reserved( $stored->cursor ) ), "write {$k}: the stored cursor is write {$k}, the disk is ahead of it" );
+			}
 			$result = $this->drive( $id );
 			if ( TickResult::COMPLETED !== $result->status ) {
 				$failed[ $k ] = sprintf( 'after write %d (step %s): %s', $k, $k > 0 ? $cursors[ $k - 1 ][0] : '-', (string) $this->repo->find( $id )->last_error );

@@ -12,6 +12,7 @@ use WPCheckpoint\Archive\ChunkHasher;
 use WPCheckpoint\Archive\IndexLine;
 use WPCheckpoint\Archive\Manifest;
 use WPCheckpoint\Archive\Packer;
+use WPCheckpoint\Archive\SealRequired;
 use WPCheckpoint\Archive\SourceChanged;
 use WPCheckpoint\Archive\SourceGone;
 use WPCheckpoint\Files\Exclusions;
@@ -334,9 +335,13 @@ final class PackStep implements Step {
 		}
 		$data = IndexLine::files( $line['text'], $this->chunk_bytes );
 		$p    = $data['p'];
+		// A file sent back to its line by restart() (the volume had no room) keeps its restart count and its
+		// "finish as it is" decision: MAX_RESTARTS bounds the file, not each attempt at it.
+		$pending = isset( $cursor['pending'] ) && is_array( $cursor['pending'] ) && (int) $cursor['pending']['line'] === (int) $cursor['offset'] ? $cursor['pending'] : null;
 		if ( ExportPlan::excluded_by_path( $p, $active['exclude_paths'] ) || $exclusions->excludes( $p ) ) {
 			++$cursor['excluded'];
-			$cursor['offset'] = $line['next'];
+			$cursor['offset']  = $line['next'];
+			$cursor['pending'] = null;
 			return 0;
 		}
 		$root   = self::root_of( $roots, $p );
@@ -344,7 +349,8 @@ final class PackStep implements Step {
 		$stat   = null === $source ? false : self::fresh_stat( $source );
 		if ( false === $stat || ! is_readable( $source ) ) {
 			self::note( $cursor, 'skipped', $p );
-			$cursor['offset'] = $line['next'];
+			$cursor['offset']  = $line['next'];
+			$cursor['pending'] = null;
 			return 0;
 		}
 		if ( ! Paths::is_inside( (string) $root['path'], $source ) ) {
@@ -352,19 +358,28 @@ final class PackStep implements Step {
 			// content directory (another site's files on a shared host). Resolved paths only.
 			$context->logger()->warning( 'File left out: it resolves outside its content directory', array( 'p' => $p ) );
 			self::note( $cursor, 'outside', $p );
-			$cursor['offset'] = $line['next'];
+			$cursor['offset']  = $line['next'];
+			$cursor['pending'] = null;
 			return 0;
 		}
 		if ( $this->make_room( $context, $packer, $cursor, (int) $stat['size'] ) ) {
 			return 0; // The line is read again by the next unit.
 		}
 		try {
-			$this->open_entry( $packer, $source, $p, $stat, $cursor, 0, (int) $cursor['offset'] );
+			$this->open_entry( $packer, $source, $p, $stat, $cursor, null === $pending ? 0 : (int) $pending['restarts'], (int) $cursor['offset'] );
+			if ( null !== $pending && ! empty( $pending['final'] ) ) {
+				$cursor['file']['final'] = true;
+			}
 		} catch ( SourceGone $e ) {
 			// Gone between the stat above and the packer's own look: the same outcome as gone before it.
 			self::note( $cursor, 'skipped', $p );
+		} catch ( SealRequired $e ) {
+			// Grown between the stat above and the packer's own (the platform bound): nothing was written and
+			// the line is read again; make_room() seals first then. The counts carried so far stay.
+			return 0;
 		}
-		$cursor['offset'] = $line['next'];
+		$cursor['offset']  = $line['next'];
+		$cursor['pending'] = null;
 		return 0;
 	}
 
@@ -528,16 +543,10 @@ final class PackStep implements Step {
 				self::note( $cursor, 'unstable', $p );
 				return 0;
 			}
-			// It keeps changing without shrinking: finish it as declared now and say so.
+			// It keeps changing without shrinking: finish it as declared now and say so (counted as "changed"
+			// when its entry is complete, in finish_file(), so a file sent back to its line is counted once).
 			$context->logger()->warning( 'File changed repeatedly; packed as it is now', array( 'p' => $p ) );
-			self::note( $cursor, 'changed', $p );
-			if ( ! $packer->has_room( (int) $stat['size'] ) ) {
-				$cursor['offset'] = (int) $file['line']; // Begun again from its line: the volume is sealed first.
-				return 0;
-			}
-			$this->open_entry( $packer, $source, $p, $stat, $cursor, $restarts, (int) $file['line'] );
-			$cursor['file']['final'] = true;
-			return 0;
+			return $this->reopen( $packer, $source, $p, $stat, $cursor, $restarts, (int) $file['line'], true );
 		}
 		$context->logger()->info(
 			'File changed while it was being packed; starting it over',
@@ -547,13 +556,49 @@ final class PackStep implements Step {
 				'restart' => $restarts,
 			)
 		);
-		if ( ! $packer->has_room( (int) $stat['size'] ) ) {
-			// Grown past what the volume can take (the platform bound): begun again from its line, the volume
-			// sealed first by make_room(). The restart count starts over with it; a bound only 32-bit PHP reaches.
-			$cursor['offset'] = (int) $file['line'];
-			return 0;
+		return $this->reopen( $packer, $source, $p, $stat, $cursor, $restarts, (int) $file['line'], false );
+	}
+
+	/**
+	 * Begin a restarted file's entry again, or, when the open volume can no
+	 * longer take it (it grew past the platform bound, which only 32-bit
+	 * PHP reaches), send it back to its index line with its restart count
+	 * and its "finish as it is" decision in cursor['pending']: begin_file()
+	 * seals the volume first (make_room()) and carries both over, so
+	 * MAX_RESTARTS still bounds the file.
+	 *
+	 * @param Packer               $packer   Packer.
+	 * @param string               $source   Absolute path.
+	 * @param string               $p        Archive path.
+	 * @param array<string, mixed> $stat     Fresh stat.
+	 * @param array<string, mixed> $cursor   Cursor (updated).
+	 * @param int                  $restarts Restarts so far, this one included.
+	 * @param int                  $line     Offset of the file's index line.
+	 * @param bool                 $as_is    Finish as declared, without further stat checks.
+	 * @return int
+	 */
+	private function reopen( Packer $packer, string $source, string $p, array $stat, array &$cursor, int $restarts, int $line, bool $as_is ): int {
+		if ( $packer->has_room( (int) $stat['size'] ) ) {
+			try {
+				$this->open_entry( $packer, $source, $p, $stat, $cursor, $restarts, $line );
+				if ( $as_is ) {
+					$cursor['file']['final'] = true;
+				}
+				return 0;
+			} catch ( SealRequired $e ) {
+				// Grown again between the two stats: back to its line, like no room at all.
+				unset( $e );
+			} catch ( SourceGone $e ) {
+				self::note( $cursor, 'skipped', $p );
+				return 0;
+			}
 		}
-		$this->open_entry( $packer, $source, $p, $stat, $cursor, $restarts, (int) $file['line'] );
+		$cursor['offset']  = $line;
+		$cursor['pending'] = array(
+			'line'     => $line,
+			'restarts' => $restarts,
+			'final'    => $as_is,
+		);
 		return 0;
 	}
 
@@ -589,6 +634,9 @@ final class PackStep implements Step {
 		$cursor['chunks_bytes'] = 0;
 		++$cursor['files'];
 		$cursor['bytes'] += (int) $file['size'];
+		if ( ! empty( $file['final'] ) ) {
+			self::note( $cursor, 'changed', (string) $file['p'] );
+		}
 	}
 
 	/**
@@ -886,6 +934,7 @@ final class PackStep implements Step {
 					'listed' => array(),
 				),
 				'restarted'    => false,
+				'pending'      => null,
 			),
 			$cursor
 		);

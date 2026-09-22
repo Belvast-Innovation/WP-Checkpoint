@@ -536,4 +536,59 @@ final class PackStepTest extends TestCase {
 		$this->assertLessThanOrEqual( Manifest::MAX_WARNINGS, count( $summary['warnings'] ) );
 		$this->assertCount( $count, array_filter( explode( "\n", (string) file_get_contents( $this->ctx->work() . '/' . PackStep::PACKED_INDEX ) ) ), 'every file was packed' );
 	}
+
+	/**
+	 * 32-bit PHP: a volume stops at the platform bound (max_volume_bytes, injected here). A file that keeps
+	 * growing next to another one no longer fits after its first restart and goes back to its index line; the
+	 * volume is sealed and the file begun again in the next one. Its restart count travels with it, so
+	 * MAX_RESTARTS still ends the loop: without that, every return to the line would start the count over and
+	 * a file written to all the time could be restarted for ever.
+	 */
+	public function test_a_file_sent_back_to_its_line_by_the_volume_bound_keeps_its_restart_count(): void {
+		$first = $this->file( 'first.bin', 100000, 21 );
+		$live  = $this->file( 'live.bin', 3 * self::CHUNK, 22 );
+		$this->index( array( $first, $live ) );
+		$abs    = $this->site . '/live.bin';
+		$grown  = 0;
+		$bound  = 365000; // first.bin and its header, live.bin as scanned and the central directory allowance fit; 4 KB more do not.
+		$step   = $this->step(
+			function ( string $p, int $chunk ) use ( $abs, &$grown ): void {
+				if ( 'wp-content/uploads/live.bin' !== $p || 0 !== $chunk ) {
+					return;
+				}
+				// Written to all the time: every attempt finds it grown.
+				file_put_contents( $abs, str_repeat( 'g', 4000 ), FILE_APPEND );
+				touch( $abs, time() + 100 + ( ++$grown ) );
+				clearstatcache( true, $abs );
+			},
+			array( 'max_volume_bytes' => $bound, 'volume_bytes' => 10 * 1048576 )
+		);
+		list( $result ) = $this->drive( $step, array(), 20, 400 );
+		$this->assertSame( StepResult::DONE, $result->kind );
+		$log = $this->ctx->log();
+		$this->assertSame( PackStep::MAX_RESTARTS, substr_count( $log, 'starting it over' ), 'at most MAX_RESTARTS restarts for the file, across the return to its line' );
+		$this->assertSame( 1, substr_count( $log, 'packed as it is now' ), 'then it is finished as it is' );
+		$deferred = array_filter(
+			$this->ctx->checkpoints,
+			static function ( array $c ): bool {
+				return isset( $c['cursor']['pending']['restarts'] ) && 1 === $c['cursor']['pending']['restarts'];
+			}
+		);
+		$this->assertNotEmpty( $deferred, 'the file went back to its line carrying its first restart' );
+		$packed = $this->packed();
+		$this->assertSame( array( 'wp-content/uploads/first.bin', 'wp-content/uploads/live.bin' ), array_column( $packed, 'p' ), 'each file once' );
+		$summary = $this->summary();
+		$this->assertSame( array( 'count' => 1, 'listed' => array( 'wp-content/uploads/live.bin' ) ), $summary['changed'], 'counted once, when its entry was complete' );
+		$this->assertSame( 0, $summary['unstable']['count'] );
+		$this->assertCount( 1, glob( $this->ctx->work() . '/' . PackStep::VOLUMES . '/*.wpcheckpoint.zip' ) ?: array(), 'the first volume was sealed at the bound' );
+		$this->assertCount( 1, glob( $this->ctx->work() . '/' . PackStep::VOLUMES . '/*.partial' ) ?: array(), 'the file went on in the next one, left open for the manifest step' );
+		// The entry holds the file as it was when it was finished as declared: its first b bytes.
+		$copy = $this->ctx->root . '/live.prefix';
+		$in   = fopen( $abs, 'rb' );
+		$out  = fopen( $copy, 'wb' );
+		stream_copy_to_stream( $in, $out, $packed[1]['b'] );
+		fclose( $in );
+		fclose( $out );
+		$this->assertSame( ChunkHasher::hash_chunks( $copy, self::CHUNK ), $packed[1]['hc'] );
+	}
 }
