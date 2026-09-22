@@ -106,9 +106,27 @@ final class PackStep implements Step {
 	 */
 	public function __construct( $roots = null, array $packer_options = array(), int $chunk_bytes = Manifest::DEFAULT_CHUNK, $after_chunk = null ) {
 		$this->roots          = $roots;
-		$this->packer_options = $packer_options;
+		$this->packer_options = self::packer_options_for( $packer_options, $chunk_bytes );
 		$this->chunk_bytes    = $chunk_bytes;
 		$this->after_chunk    = is_callable( $after_chunk ) ? $after_chunk : null;
+	}
+
+	/**
+	 * The packer options with the deflate cap held to the content chunk:
+	 * the packer deflates an entry in one piece (Packer::write_piece()),
+	 * and one piece is one content chunk here, so an entry that is
+	 * deflated must fit a chunk or its chunk list could not be built.
+	 * Larger entries are stored and read piece by piece. ManifestStep
+	 * opens the packer with the same options.
+	 *
+	 * @param array<string, mixed> $options     Packer options.
+	 * @param int                  $chunk_bytes Content chunk size.
+	 * @return array<string, mixed>
+	 */
+	public static function packer_options_for( array $options, int $chunk_bytes ): array {
+		$cap                          = isset( $options['deflate_max_bytes'] ) ? (int) $options['deflate_max_bytes'] : (int) Packer::DEFLATE_MAX_BYTES;
+		$options['deflate_max_bytes'] = min( $cap, $chunk_bytes );
+		return $options;
 	}
 
 	/**

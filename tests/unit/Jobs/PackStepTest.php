@@ -4,6 +4,7 @@ namespace WPCheckpoint\Tests\Unit\Jobs;
 
 use WPCheckpoint\Archive\ChunkHasher;
 use WPCheckpoint\Archive\IndexLine;
+use WPCheckpoint\Archive\Manifest;
 use WPCheckpoint\Archive\Packer;
 use WPCheckpoint\Archive\ZipReader;
 use WPCheckpoint\Jobs\ExportPlan;
@@ -391,5 +392,23 @@ final class PackStepTest extends TestCase {
 		} catch ( \RuntimeException $e ) {
 			$this->assertStringContainsString( 'does not hash to what its index line records', $e->getMessage() );
 		}
+	}
+
+	public function test_a_deflate_cap_above_the_chunk_size_is_held_to_it_so_every_entry_has_one_hash_per_chunk(): void {
+		// Compressible content two and a half chunks long, with a deflate cap of four chunks: without the
+		// clamp the packer would deflate it in one piece and the index line would carry one hash for three chunks.
+		if ( ! is_dir( $this->site . '/2024' ) ) {
+			mkdir( $this->site . '/2024', 0700, true );
+		}
+		file_put_contents( $this->site . '/2024/text.log', str_repeat( "line of text\n", (int) ( 2.5 * self::CHUNK / 13 ) ) );
+		$this->index( array( 'wp-content/uploads/2024/text.log' ) );
+		list( $result ) = $this->drive( $this->step( null, array( 'deflate_max_bytes' => 4 * self::CHUNK ) ) );
+		$this->assertSame( StepResult::DONE, $result->kind );
+		$line = json_decode( trim( (string) file_get_contents( $this->ctx->work() . '/' . PackStep::PACKED_INDEX ) ), true );
+		$this->assertCount( 3, $line['hc'] );
+		$this->assertSame( ChunkHasher::list_hash( $line['hc'] ), $line['h'] );
+		$this->assertSame( self::CHUNK, PackStep::packer_options_for( array( 'deflate_max_bytes' => 4 * self::CHUNK ), self::CHUNK )['deflate_max_bytes'] );
+		$this->assertSame( 4096, PackStep::packer_options_for( array( 'deflate_max_bytes' => 4096 ), self::CHUNK )['deflate_max_bytes'], 'a lower cap stays' );
+		$this->assertSame( Packer::DEFLATE_MAX_BYTES, PackStep::packer_options_for( array(), Manifest::DEFAULT_CHUNK )['deflate_max_bytes'], 'the default cap is below the default chunk and stays' );
 	}
 }

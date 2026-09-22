@@ -93,7 +93,7 @@ final class ManifestStep implements Step {
 	public function __construct( array $site, array $generator, array $packer_options = array(), int $chunk_bytes = Manifest::DEFAULT_CHUNK, $clean = null ) {
 		$this->site           = $site;
 		$this->generator      = $generator;
-		$this->packer_options = $packer_options;
+		$this->packer_options = PackStep::packer_options_for( $packer_options, $chunk_bytes );
 		$this->chunk_bytes    = $chunk_bytes;
 		$this->clean          = is_callable( $clean ) ? $clean : static function ( string $text ): string {
 			return $text;
