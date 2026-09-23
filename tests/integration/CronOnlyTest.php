@@ -186,6 +186,48 @@ final class CronOnlyTest extends JobTestCase {
 		$this->assertSame( array(), $this->events( $job->id ) );
 	}
 
+	public function test_an_export_finishes_while_every_hop_writes_a_new_token_row(): void {
+		// With the chain on, each tick replaces the job's hop token: a new row in the options (or sitemeta) table per tick.
+		// One unit per tick used to chase that table's end forever; its bound, fixed when it starts, ends it.
+		$cache                        = get_site_transient( Environment::CACHE );
+		$cache['loopback']['outcome'] = 'reachable';
+		set_site_transient( Environment::CACHE, $cache, 60 );
+		add_filter(
+			'pre_http_request',
+			function ( $response, array $args, string $url ) {
+				if ( false !== strpos( $url, '/' . Loopback::ROUTE_SUFFIX ) ) {
+					++$this->refused;
+					return new \WP_Error( 'http_request_failed', 'Forbidden by a firewall added after the probe.' );
+				}
+				return $response;
+			},
+			10,
+			3
+		);
+		global $wpdb;
+		// Site transients live in the options table, or in sitemeta on multisite: the table that grows.
+		$probe_id = static function (): int {
+			global $wpdb;
+			if ( is_multisite() ) {
+				add_site_option( 'wpcheckpoint_test_probe', '1' );
+				$id = (int) $wpdb->get_var( "SELECT meta_id FROM {$wpdb->sitemeta} WHERE meta_key = 'wpcheckpoint_test_probe'" );
+				delete_site_option( 'wpcheckpoint_test_probe' );
+				return $id;
+			}
+			add_option( 'wpcheckpoint_test_probe', '1', '', 'no' );
+			$id = (int) $wpdb->get_var( "SELECT option_id FROM {$wpdb->options} WHERE option_name = 'wpcheckpoint_test_probe'" );
+			delete_option( 'wpcheckpoint_test_probe' );
+			return $id;
+		};
+		$before = $probe_id();
+		$job    = $this->start_export();
+		$this->run_cron_until_finished( array( $job->id ) );
+		$this->assertGreaterThan( 10, $this->refused, 'a token for every hop' );
+		// Token rows are deleted as they are replaced: the auto-increment shows how many were added meanwhile.
+		$this->assertGreaterThan( $before + 10, $probe_id(), 'the table holding the tokens grew while it was exported' );
+		$this->assert_backed_up( $job );
+	}
+
 	public function test_an_export_and_a_check_of_another_backup_both_finish_on_cron_alone(): void {
 		$backups = $this->copy_fixture_backup();
 		$export  = $this->start_export();

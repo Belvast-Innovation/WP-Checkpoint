@@ -292,6 +292,35 @@ final class DatabaseExportStepTest extends JobTestCase {
 	 * the real path also holds the driver's copy of the row, so it is
 	 * measured here too, against the same 32 MB budget.
 	 */
+	public function test_the_upper_bound_follows_the_servers_own_key_order_on_a_composite_string_key(): void {
+		global $wpdb;
+		$table          = self::PREFIX . 'bounded';
+		$this->tables[] = $table;
+		$wpdb->query( "DROP TABLE IF EXISTS `{$table}`" );
+		// A case-insensitive collation: 'B' sorts with 'b'. Only the server's comparison gets that right.
+		$wpdb->query( "CREATE TABLE `{$table}` (`g` varchar(10) COLLATE utf8mb4_unicode_ci NOT NULL, `n` int NOT NULL, `v` text, PRIMARY KEY (`g`, `n`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4" );
+		$wpdb->query( "INSERT INTO `{$table}` VALUES ('a',1,'old'),('a',2,'old'),('b',1,'old'),('b',3,'old'),('c',1,'old'),('c',3,'old')" );
+		$this->assertSame( '', $wpdb->last_error );
+		$dir = $this->dirs->base() . '/tmp/bounded-' . bin2hex( random_bytes( 4 ) );
+		mkdir( $dir, 0700, true );
+		$exporter = new TableExporter( new WpdbConnection(), $dir, self::CHUNK, 16 ); // A row or two per unit.
+		$state    = $exporter->step( TableExporter::initial_state( $table ) );
+		$this->assertLessThan( 4, $state['rows'], 'the table is not read in one unit' );
+		// Written while the table is exported: inside the bound ("B",2 sorts between "b",1 and "b",3; "c",2 before "c",3), and past it.
+		$wpdb->query( "INSERT INTO `{$table}` VALUES ('B',2,'new inside'),('c',2,'new inside'),('c',4,'new past'),('d',1,'new past')" );
+		$this->assertSame( '', $wpdb->last_error );
+		while ( empty( $state['done'] ) ) {
+			$state = $exporter->step( $state );
+		}
+		$sql = (string) file_get_contents( $dir . '/' . basename( IndexLine::database_path( $table, 1 ) ) );
+		Deleter::empty_directory( $dir );
+		@rmdir( $dir );
+		$this->assertStringContainsString( "\n-- wpcheckpoint bound pk_max=[\"c\",\"3\"]\n", $sql );
+		$this->assertSame( 2, substr_count( $sql, "'new inside'" ), 'string keys that sort inside the bound are read' );
+		$this->assertSame( 0, substr_count( $sql, "'new past'" ), 'keys past the bound are not' );
+		$this->assertSame( 8, $state['rows'] );
+	}
+
 	public function test_the_largest_row_is_exported_within_the_step_memory_budget_over_wpdb(): void {
 		global $wpdb;
 		$table = self::PREFIX . 'bigrow';
