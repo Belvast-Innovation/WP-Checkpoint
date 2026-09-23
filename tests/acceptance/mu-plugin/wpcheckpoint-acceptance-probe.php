@@ -147,15 +147,6 @@ function wpcheckpoint_acceptance_query( $query ) {
 	return $query;
 }
 
-// WordPress raises the limit for WP-Cron (wp_raise_memory_limit( 'cron' )); a host with a hard 128 MB limit would
-// not let it. Keep cron ticks at the shared-hosting baseline too.
-add_filter(
-	'cron_memory_limit',
-	static function () {
-		return '128M';
-	}
-);
-
 $wpcheckpoint_acceptance = array(
 	'start' => isset( $_SERVER['REQUEST_TIME_FLOAT'] ) ? (float) $_SERVER['REQUEST_TIME_FLOAT'] : microtime( true ),
 	'pid'   => getmypid(),

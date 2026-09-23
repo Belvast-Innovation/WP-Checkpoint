@@ -15,7 +15,7 @@ Tooling to back up a large generated site in the wp-env development environment 
 npx wp-env run cli --env-cwd=wp-content/plugins/wp-checkpoint wp eval-file tests/acceptance/generate.php 4600 500
 
 # 2. Limits and probe: the web container gets 1 CPU; web requests get memory_limit=128M and max_execution_time=30
-#    (a block in .htaccess); a mu-plugin records every request; an application password is created for the driver.
+#    (a block in .htaccess, and WP_MAX_MEMORY_LIMIT so that WP-Cron cannot raise it); a mu-plugin records every request; an application password is created for the driver.
 php tests/acceptance/acceptance.php setup --dir=$HOME/wpc-acceptance --cpus=1
 
 # 3. Runs: TTFB before, during and after; a REST tick loop; the work directory's size over time.

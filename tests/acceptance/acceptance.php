@@ -6,6 +6,7 @@
  *   php tests/acceptance/acceptance.php setup    --dir=DIR [--cpus=1]
  *   php tests/acceptance/acceptance.php run      --dir=DIR --name=NAME [--kills=standard|RULE[,RULE]] [--no-ttfb]
  *   php tests/acceptance/acceptance.php check    --dir=DIR --name=NAME
+ *   php tests/acceptance/acceptance.php kills    --dir=DIR --name=NAME   (recompute the per-kill section of check.json)
  *   php tests/acceptance/acceptance.php compare  --dir=DIR --name=NAME --with=NAME
  *   php tests/acceptance/acceptance.php teardown --dir=DIR
  *
@@ -233,6 +234,9 @@ function acc_setup( string $dir, int $cpus ): void {
 	file_put_contents( $root . '/.htaccess', ACC_MARK_BEGIN . "\nphp_value memory_limit 128M\nphp_value max_execution_time 30\n" . ACC_MARK_END . "\n" . ltrim( $htaccess ) );
 	acc_exec( array( 'docker', 'update', '--cpus', (string) $cpus, $env['web'] ) );
 	$env['cpus'] = $cpus;
+	// WP-Cron raises memory_limit to WP_MAX_MEMORY_LIMIT (wp_raise_memory_limit( 'cron' )), which a php_value cannot
+	// prevent and a host with a hard 128 MB limit would not allow. The cron_memory_limit filter only raises further.
+	acc_wp( $env, array( 'config', 'set', 'WP_MAX_MEMORY_LIMIT', '128M', '--type=constant' ) );
 	file_put_contents( $dir . '/env.json', json_encode( $env, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES ) );
 	chmod( $dir . '/env.json', 0600 );
 
@@ -244,7 +248,7 @@ function acc_setup( string $dir, int $cpus ): void {
 	if ( ! is_array( $last ) || '128M' !== $last['limit'] || 30 !== $last['max_seconds'] ) {
 		acc_fail( 'The probe did not see memory_limit=128M and max_execution_time=30 on a web request: ' . json_encode( $last ) );
 	}
-	acc_say( "Set up: {$env['site']}, web container limited to {$cpus} CPU, web requests at 128M / 30 s, probe installed." );
+	acc_say( "Set up: {$env['site']}, web container limited to {$cpus} CPU, web requests at 128M / 30 s (WP_MAX_MEMORY_LIMIT 128M), probe installed." );
 }
 
 function acc_teardown( string $dir ): void {
@@ -252,6 +256,7 @@ function acc_teardown( string $dir ): void {
 	$htaccess = (string) file_get_contents( $env['wp_root'] . '/.htaccess' );
 	file_put_contents( $env['wp_root'] . '/.htaccess', ltrim( (string) preg_replace( '/' . preg_quote( ACC_MARK_BEGIN, '/' ) . '.*?' . preg_quote( ACC_MARK_END, '/' ) . '\n?/s', '', $htaccess ) ) );
 	@unlink( $env['wp_root'] . '/wp-content/mu-plugins/wpcheckpoint-acceptance-probe.php' );
+	acc_wp( $env, array( 'config', 'delete', 'WP_MAX_MEMORY_LIMIT', '--type=constant' ), true );
 	acc_exec( array( 'docker', 'update', '--cpus', '0', $env['web'] ) );
 	list( $user ) = explode( ':', $env['auth'] );
 	foreach ( json_decode( acc_wp( $env, array( 'user', 'application-password', 'list', $user, '--format=json' ) ), true ) as $pw ) {
@@ -480,6 +485,106 @@ function acc_table_hashes( array $env, string $db, array $tables ): array {
 	return $out;
 }
 
+/**
+ * After each planned kill: the tick that took the job over, its duration and
+ * peak memory, the job's takeover count and mark, and concurrent-writer lines
+ * in the job log until the next kill. The takeover tick is the first tick after
+ * the kill that found the lease expired and changed the job (count, mark, step
+ * or position): a tick that arrives in the second the lease runs out is still
+ * refused (the database compares strictly) and changes nothing.
+ *
+ * @return array<int, array<string, mixed>>
+ */
+function acc_kill_report( string $out, array $run, array $ticks ): array {
+	$kills     = acc_lines( $out . '/kills.jsonl' );
+	$log_lines = explode( "\n", is_file( $out . '/job.log' ) ? (string) file_get_contents( $out . '/job.log' ) : '' );
+	$report    = array();
+	foreach ( $kills as $n => $kill ) {
+		$until   = isset( $kills[ $n + 1 ] ) ? (float) $kills[ $n + 1 ]['at'] : $run['finished'] + 1;
+		$resumed = null;
+		foreach ( $ticks as $t ) {
+			if ( $t['start'] <= $kill['at'] || $t['start'] >= $until || empty( $t['before']['lease_expired'] ) || ! isset( $t['after'] ) ) {
+				continue;
+			}
+			$b = $t['before'];
+			$a = $t['after'];
+			if ( $a['takeovers'] !== $b['takeovers'] || $a['takeover_mark'] !== $b['takeover_mark'] || $a['step'] !== $b['step'] || $a['unit'] !== $b['unit'] || 'completed' === $a['status'] ) {
+				$resumed = $t;
+				break;
+			}
+		}
+		$cut_by     = null === $resumed && isset( $kills[ $n + 1 ] ) ? $kills[ $n + 1 ]['rule'] : null;
+		$concurrent = 0;
+		$logged     = array();
+		foreach ( $log_lines as $line ) {
+			if ( 1 === preg_match( '/^\[([0-9T:-]+)Z\] \w+ (.*)$/', $line, $lm ) ) {
+				$at = strtotime( $lm[1] . 'Z' );
+				if ( $at >= floor( $kill['at'] ) && $at <= $until ) {
+					if ( false !== strpos( $line, 'Another process wrote the same work directory' ) ) {
+						++$concurrent;
+					}
+					if ( false !== strpos( $line, 'The previous run ended without finishing' ) ) {
+						$logged[] = $lm[2];
+					}
+				}
+			}
+		}
+		$cursor = json_decode( (string) $kill['cursor'], true );
+		$report[] = array(
+			'rule'              => $kill['rule'],
+			'event'             => $kill['event'],
+			'where'             => acc_kill_where( $kill, is_array( $cursor ) ? $cursor : null ),
+			'stack'             => array_slice( $kill['stack'], 0, 12 ),
+			'takeover_after_s'  => null === $resumed ? null : round( $resumed['start'] - $kill['at'], 1 ),
+			'takeover_tick_s'   => null === $resumed ? null : $resumed['seconds'],
+			'takeover_peak_mb'  => null === $resumed ? null : round( $resumed['peak_real'] / 1048576, 1 ),
+			'takeover_kind'     => null === $resumed ? null : $resumed['kind'],
+			'steps'             => null === $resumed ? null : array( $resumed['before']['step'], $resumed['after']['step'] ),
+			'takeovers'         => null === $resumed ? null : array( $resumed['before']['takeovers'], $resumed['after']['takeovers'] ),
+			'takeover_mark'     => null === $resumed ? null : $resumed['after']['takeover_mark'],
+			'log_takeover'      => $logged,
+			'concurrent_writer' => $concurrent,
+			'takeover_cut_by'   => $cut_by,
+		);
+	}
+	return $report;
+}
+
+/** Where a kill landed, from its cursor (may be cut at 2000 bytes in the log) or its stack. */
+function acc_kill_where( array $kill, ?array $cursor ): string {
+	if ( 'confirm' === $kill['event'] ) {
+		foreach ( $kill['stack'] as $frame ) {
+			if ( 1 === preg_match( '/^(Packer::seal_volume|Packer::open_volume|Packer::rename_single_volume|StoreStep::run|ManifestStep::\w+)$/', $frame ) ) {
+				return 'lease confirmation in ' . $frame . ', before the irreversible step';
+			}
+		}
+		return 'lease confirmation';
+	}
+	if ( null === $cursor ) {
+		return preg_match( '/"phase":"(\w+)"/', (string) $kill['cursor'], $m ) ? 'checkpoint in phase ' . $m[1] : 'checkpoint';
+	}
+	if ( isset( $cursor['state']['table'] ) ) {
+		return sprintf( 'checkpoint in table %s, chunk %d, %d rows', $cursor['state']['table'], $cursor['state']['chunk'], $cursor['state']['rows'] );
+	}
+	if ( isset( $cursor['file']['p'] ) ) {
+		return sprintf( 'checkpoint in %s, after chunk %d', basename( (string) $cursor['file']['p'] ), $cursor['file']['chunk'] );
+	}
+	return sprintf( 'checkpoint in phase %s%s', $cursor['phase'] ?? '-', isset( $cursor['offset'] ) ? ', index offset ' . $cursor['offset'] : '' );
+}
+
+function acc_kills_command( string $dir, string $name ): void {
+	$out      = $dir . '/' . $name;
+	$run      = json_decode( (string) file_get_contents( $out . '/run.json' ), true );
+	$requests = acc_lines( $out . '/requests.jsonl' );
+	$ticks    = array_values( array_filter( $requests, static function ( $r ) use ( $run ) { return in_array( $r['kind'], array( 'tick', 'loopback', 'cron' ), true ) && isset( $r['before']['job'] ) && (int) $run['job'] === (int) $r['before']['job']; } ) );
+	$check    = json_decode( (string) file_get_contents( $out . '/check.json' ), true );
+	$check['kills'] = acc_kill_report( $out, $run, $ticks );
+	file_put_contents( $out . '/check.json', json_encode( $check, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE ) );
+	foreach ( $check['kills'] as $k ) {
+		acc_say( json_encode( array_diff_key( $k, array( 'stack' => 1 ) ), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE ) );
+	}
+}
+
 function acc_check( string $dir, string $name ): void {
 	$env = acc_state( $dir );
 	$out = $dir . '/' . $name;
@@ -665,45 +770,7 @@ function acc_check( string $dir, string $name ): void {
 		'pass'            => $peak <= $archive_bytes * 1.05 + 64 * 1048576 && ! is_dir( $env['storage'] . '/tmp/job-' . $run['job'] ),
 	);
 
-	// After each kill: the tick that took the job over (the first one to find the dead run's lease expired).
-	$log_lines        = explode( "\n", $log );
-	$report['kills'] = array();
-	foreach ( $kills as $n => $kill ) {
-		$until    = isset( $kills[ $n + 1 ] ) ? (float) $kills[ $n + 1 ]['at'] : $run['finished'] + 1;
-		$resumed  = null;
-		foreach ( $ticks as $t ) {
-			if ( $t['start'] > $kill['at'] && $t['start'] < $until && ! empty( $t['before']['lease_expired'] ) ) {
-				$resumed = $t;
-				break;
-			}
-		}
-		// No takeover tick before the next kill: the next kill ended the takeover tick itself (kill during recovery).
-		$cut_by = null === $resumed && isset( $kills[ $n + 1 ] ) ? $kills[ $n + 1 ]['rule'] : null;
-		$concurrent = 0;
-		foreach ( $log_lines as $line ) {
-			if ( 1 === preg_match( '/^\[([0-9T:-]+)Z\]/', $line, $lm ) ) {
-				$at = strtotime( $lm[1] . 'Z' );
-				if ( $at >= floor( $kill['at'] ) && $at <= $until && false !== strpos( $line, 'Another process wrote the same work directory' ) ) {
-					++$concurrent;
-				}
-			}
-		}
-		$report['kills'][] = array(
-			'rule'              => $kill['rule'],
-			'event'             => $kill['event'],
-			'cursor_at_kill'    => json_decode( (string) $kill['cursor'], true ),
-			'stack'             => array_slice( $kill['stack'], 0, 8 ),
-			'resumed_after_s'   => null === $resumed ? null : round( $resumed['start'] - $kill['at'], 1 ),
-			'resumed_tick_s'    => null === $resumed ? null : $resumed['seconds'],
-			'resumed_peak_mb'   => null === $resumed ? null : round( $resumed['peak_real'] / 1048576, 1 ),
-			'takeovers_before'  => null === $resumed ? null : $resumed['before']['takeovers'],
-			'takeovers_after'   => null === $resumed ? null : ( $resumed['after']['takeovers'] ?? null ),
-			'takeover_mark'     => null === $resumed ? null : ( $resumed['after']['takeover_mark'] ?? null ),
-			'step_before_after' => null === $resumed ? null : array( $resumed['before']['step'], $resumed['after']['step'] ?? null ),
-			'concurrent_writer' => $concurrent,
-			'takeover_cut_by'   => $cut_by,
-		);
-	}
+	$report['kills'] = acc_kill_report( $out, $run, $ticks );
 
 	// Raw distributions for the record: every tick, every peak, every TTFB sample.
 	$ttfb_raw = static function ( string $file ): array {
@@ -830,6 +897,9 @@ switch ( $command ) {
 		break;
 	case 'check':
 		acc_check( (string) ( $opts['dir'] ?? '' ), (string) ( $opts['name'] ?? acc_fail( '--name is required' ) ) );
+		break;
+	case 'kills':
+		acc_kills_command( (string) ( $opts['dir'] ?? '' ), (string) ( $opts['name'] ?? acc_fail( '--name is required' ) ) );
 		break;
 	case 'compare':
 		acc_compare( (string) ( $opts['dir'] ?? '' ), (string) ( $opts['name'] ?? '' ), (string) ( $opts['with'] ?? acc_fail( '--with is required' ) ) );
