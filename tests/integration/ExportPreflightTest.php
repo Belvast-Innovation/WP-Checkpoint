@@ -533,9 +533,10 @@ final class ExportPreflightTest extends JobTestCase {
 			array(
 				'max_file_bytes' => $limit,
 				'max_file_limit' => 'index',
+				'volume_bytes'   => Packer::VOLUME_BYTES,
 			),
 			$scan['limits'],
-			'the scanner recorded the threshold it used'
+			'the scanner recorded the thresholds it used'
 		);
 		$this->assertSame( array( 'wp-content/uploads/wpcptest-preflight/images/huge.iso' ), $scan['lists']['too_large'] );
 		$this->assertStringContainsString( sprintf( '1 files are larger than %d MB, the largest file the backup format can describe: wp-content/uploads/wpcptest-preflight/images/huge.iso.', intdiv( $limit, 1048576 ) ), $failed->last_error );

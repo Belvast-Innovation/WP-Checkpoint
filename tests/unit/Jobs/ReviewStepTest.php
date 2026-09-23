@@ -173,6 +173,22 @@ final class ReviewStepTest extends TestCase {
 		);
 	}
 
+	public function test_files_larger_than_a_volume_are_a_note_with_the_size_the_scan_used(): void {
+		$this->inputs(
+			array(),
+			array( 'over_volume' => array( 'wp-content/uploads/video one.mp4', 'wp-content/uploads/b.iso', 'wp-content/uploads/c.bin', 'wp-content/uploads/d.bin' ) ),
+			array( 'over_volume' => 4 ),
+			8,
+			array( 'max_file_bytes' => 261469110272, 'max_file_limit' => 'index', 'volume_bytes' => 1073741824 )
+		);
+		$result = ( new ReviewStep() )->run( $this->context( array() ) );
+		$this->assertSame( StepResult::DONE, $result->kind, 'nothing to decide' );
+		$this->assertSame(
+			array( '4 files are larger than the volume size of 1024 MB (for example wp-content/uploads/video one.mp4, wp-content/uploads/b.iso, wp-content/uploads/c.bin). A volume never splits a file, so each of them is written into a volume at least that large; check that wherever the backup is stored or sent accepts files of that size.' ),
+			json_decode( $this->review(), true )['decisions']['notes']
+		);
+	}
+
 	public function test_another_installation_is_a_note_not_a_question(): void {
 		$this->inputs();
 		$preflight                        = ExportPlan::read( $this->work, ExportPlan::PREFLIGHT );
