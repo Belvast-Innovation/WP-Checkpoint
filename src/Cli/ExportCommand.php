@@ -109,23 +109,12 @@ final class ExportCommand {
 	 * @return void
 	 */
 	public function __invoke( array $args, array $assoc_args ): void {
-		unset( $args );
-		try {
-			$options = ExportOptions::normalize( self::options( $assoc_args ) );
-		} catch ( \InvalidArgumentException $e ) {
-			WP_CLI::error( $this->presenter->clean( $e->getMessage() ) ); // Exits.
-		}
-		$porcelain = ! empty( $assoc_args['porcelain'] );
-		try {
-			$job = $this->repository->create( ExportJob::ID, get_current_user_id(), array(), $options );
-		} catch ( JobsUnavailable $e ) {
-			WP_CLI::error( $this->presenter->clean( $e->getMessage() ) ); // Exits.
-		}
-		if ( ! $porcelain ) {
-			WP_CLI::line( sprintf( 'Backup job %d started.', $job->id ) );
-		}
-		$run = ExportRun::terminal( $this->actions, $this->presenter, $this->directories );
-		WP_CLI::halt( $run->run( $job->id, ! empty( $assoc_args['wait'] ), $porcelain ) );
+		Unexpected::guard(
+			function () use ( $args, $assoc_args ): void {
+				$this->invoke_body( $args, $assoc_args );
+			},
+			array( $this->presenter, 'clean' )
+		);
 	}
 
 	/**
@@ -166,5 +155,32 @@ final class ExportCommand {
 			$options['policy'] = ExportOptions::UNATTENDED;
 		}
 		return $options;
+	}
+
+	/**
+	 * The body of __invoke(), run through Unexpected::guard().
+	 *
+	 * @param string[]             $args       Positional arguments (see __invoke()).
+	 * @param array<string, mixed> $assoc_args Options (see __invoke()).
+	 * @return void
+	 */
+	private function invoke_body( array $args, array $assoc_args ): void {
+		unset( $args );
+		try {
+			$options = ExportOptions::normalize( self::options( $assoc_args ) );
+		} catch ( \InvalidArgumentException $e ) {
+			WP_CLI::error( $this->presenter->clean( $e->getMessage() ) ); // Exits.
+		}
+		$porcelain = ! empty( $assoc_args['porcelain'] );
+		try {
+			$job = $this->repository->create( ExportJob::ID, get_current_user_id(), array(), $options );
+		} catch ( JobsUnavailable $e ) {
+			WP_CLI::error( $this->presenter->clean( $e->getMessage() ) ); // Exits.
+		}
+		if ( ! $porcelain ) {
+			WP_CLI::line( sprintf( 'Backup job %d started.', $job->id ) );
+		}
+		$run = ExportRun::terminal( $this->actions, $this->presenter, $this->directories );
+		WP_CLI::halt( $run->run( $job->id, ! empty( $assoc_args['wait'] ), $porcelain ) );
 	}
 }

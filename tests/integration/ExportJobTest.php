@@ -285,6 +285,28 @@ final class ExportJobTest extends JobTestCase {
 		$this->assertSame( array( 'wp-content/uploads/wpcexport/node_modules' ), ExportPlan::read( $this->work( $id ), ExportPlan::REVIEW )['decisions']['exclude_paths'] );
 	}
 
+	public function test_a_job_cancelled_while_its_question_is_on_the_terminal_ends_with_a_clean_message(): void {
+		$this->add_heavy_directory();
+		$input = fopen( 'php://memory', 'r+b' );
+		fwrite( $input, "exclude\n" );
+		rewind( $input );
+		// Someone cancels the job (the admin page, another shell) while the prompt waits for the answer.
+		$this->on_out = static function ( string $line ): void {
+			if ( 0 === strpos( $line, 'Answer (' ) ) {
+				$paused = Plugin::instance()->jobs()->list_jobs( array( 'paused' ), 1 );
+				Plugin::instance()->job_actions()->cancel( (int) $paused[0]->id );
+			}
+		};
+		list( $code ) = $this->run_export( array(), $input );
+		$this->on_out = null;
+		fclose( $input );
+		$this->assertSame( RunLoop::EXIT_CANCELLED, $code );
+		$said = implode( "\n", $this->err );
+		$this->assertStringContainsString( 'The answer was not taken:', $said );
+		$this->assertStringNotContainsString( ABSPATH, $said );
+		$this->assertStringNotContainsString( 'Stack trace', $said );
+	}
+
 	public function test_on_a_terminal_the_question_is_asked_and_the_run_goes_on(): void {
 		$this->add_heavy_directory();
 		$input = fopen( 'php://memory', 'r+b' );

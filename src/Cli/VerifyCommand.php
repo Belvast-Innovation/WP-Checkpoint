@@ -94,34 +94,12 @@ final class VerifyCommand {
 	 * @return void
 	 */
 	public function __invoke( array $args, array $assoc_args ): void {
-		$path = (string) $args[0];
-		if ( ! is_file( $path ) ) {
-			WP_CLI::error( 'No such file.' );
-		}
-		$depth    = (string) ( $assoc_args['depth'] ?? ArchiveVerifier::DEPTH_FULL );
-		$work_dir = $this->make_work_dir();
-		$error    = '';
-		try {
-			$verifier = ArchiveVerifier::open( $path, $work_dir, $depth );
-			$result   = $this->run_with_progress( $verifier );
-		} catch ( \InvalidArgumentException $e ) {
-			$error = $e->getMessage();
-		} catch ( \RuntimeException $e ) {
-			$error = $e->getMessage();
-		} finally {
-			// WP_CLI::error() exits, and exit skips finally blocks: clean up before reporting.
-			$this->remove_work_dir( $work_dir );
-		}
-		if ( '' !== $error || ! isset( $result ) ) {
-			WP_CLI::error( $this->presenter->clean( $error ) );
-		}
-		$clean = array( $this->presenter, 'clean' );
-		if ( 'json' === ( $assoc_args['format'] ?? 'text' ) ) {
-			WP_CLI::line( (string) wp_json_encode( $result->to_array( $clean ) ) );
-		} else {
-			WP_CLI::line( $result->to_text( $clean ) );
-		}
-		WP_CLI::halt( self::exit_code( $result->outcome() ) );
+		Unexpected::guard(
+			function () use ( $args, $assoc_args ): void {
+				$this->invoke_body( $args, $assoc_args );
+			},
+			array( $this->presenter, 'clean' )
+		);
 	}
 
 	/**
@@ -214,5 +192,43 @@ final class VerifyCommand {
 			}
 		}
 		@rmdir( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_rmdir -- best effort cleanup.
+	}
+
+	/**
+	 * The body of __invoke(), run through Unexpected::guard().
+	 *
+	 * @param string[]             $args       Positional arguments (see __invoke()).
+	 * @param array<string, mixed> $assoc_args Options (see __invoke()).
+	 * @return void
+	 */
+	private function invoke_body( array $args, array $assoc_args ): void {
+		$path = (string) $args[0];
+		if ( ! is_file( $path ) ) {
+			WP_CLI::error( 'No such file.' );
+		}
+		$depth    = (string) ( $assoc_args['depth'] ?? ArchiveVerifier::DEPTH_FULL );
+		$work_dir = $this->make_work_dir();
+		$error    = '';
+		try {
+			$verifier = ArchiveVerifier::open( $path, $work_dir, $depth );
+			$result   = $this->run_with_progress( $verifier );
+		} catch ( \InvalidArgumentException $e ) {
+			$error = $e->getMessage();
+		} catch ( \RuntimeException $e ) {
+			$error = $e->getMessage();
+		} finally {
+			// WP_CLI::error() exits, and exit skips finally blocks: clean up before reporting.
+			$this->remove_work_dir( $work_dir );
+		}
+		if ( '' !== $error || ! isset( $result ) ) {
+			WP_CLI::error( $this->presenter->clean( $error ) );
+		}
+		$clean = array( $this->presenter, 'clean' );
+		if ( 'json' === ( $assoc_args['format'] ?? 'text' ) ) {
+			WP_CLI::line( (string) wp_json_encode( $result->to_array( $clean ) ) );
+		} else {
+			WP_CLI::line( $result->to_text( $clean ) );
+		}
+		WP_CLI::halt( self::exit_code( $result->outcome() ) );
 	}
 }

@@ -16,6 +16,7 @@ use WPCheckpoint\Jobs\PreflightStep;
 use WPCheckpoint\Jobs\Residue;
 use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Support\Paths;
+use WPCheckpoint\Support\HostFunctions;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -126,7 +127,7 @@ final class ExportRun {
 		$err   = static function ( string $line ): void {
 			fwrite( STDERR, $line . PHP_EOL ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite,WordPress.Security.EscapeOutput.OutputNotEscaped -- terminal output, already cleaned.
 		};
-		$input = function_exists( 'stream_isatty' ) && defined( 'STDIN' ) && stream_isatty( STDIN ) ? STDIN : null;
+		$input = defined( 'STDIN' ) && HostFunctions::stream_isatty( STDIN ) ? STDIN : null;
 		return new ExportRun( $actions, $presenter, $directories, $out, $err, $input );
 	}
 
@@ -158,13 +159,37 @@ final class ExportRun {
 				return RunLoop::EXIT_PAUSED;
 			}
 			if ( ! $this->ask( $job ) ) {
-				return RunLoop::EXIT_PAUSED;
+				return $this->exit_code_now( $id );
 			}
 		}
 		if ( RunLoop::EXIT_COMPLETED === $code ) {
 			return $this->report_backup( $id, $porcelain, $was_done );
 		}
 		return $code;
+	}
+
+	/**
+	 * Exit code for the job's state after an answer was not taken: it may
+	 * have been cancelled, failed or answered elsewhere in the meantime.
+	 *
+	 * @param int $id Job id.
+	 * @return int
+	 */
+	private function exit_code_now( int $id ): int {
+		$job = $this->actions->find( $id );
+		if ( ! $job instanceof Job ) {
+			return RunLoop::EXIT_WAITING;
+		}
+		switch ( $job->status ) {
+			case Job::CANCELLED:
+				return RunLoop::EXIT_CANCELLED;
+			case Job::FAILED:
+				return RunLoop::EXIT_FAILED;
+			case Job::PAUSED:
+				return RunLoop::EXIT_PAUSED;
+			default:
+				return RunLoop::EXIT_WAITING; // Answered elsewhere: run it again to continue.
+		}
 	}
 
 	/**
@@ -198,10 +223,11 @@ final class ExportRun {
 		try {
 			$this->actions->answer( $job->id, $answers );
 		} catch ( \RuntimeException $e ) {
-			$this->say( $this->err, $this->presenter->clean( $e->getMessage() ) );
+			$this->say( $this->err, 'The answer was not taken: ' . $this->presenter->clean( $e->getMessage() ) );
 			return false;
-		} catch ( \InvalidArgumentException $e ) {
-			$this->say( $this->err, $this->presenter->clean( $e->getMessage() ) );
+		} catch ( \LogicException $e ) {
+			// Invalid answers, and InvalidTransition: the job was answered, cancelled or failed elsewhere meanwhile.
+			$this->say( $this->err, 'The answer was not taken: ' . $this->presenter->clean( $e->getMessage() ) );
 			return false;
 		}
 		return true;
