@@ -27,6 +27,24 @@ final class VerificationResult {
 	const CHANGED            = 'changed';
 	const UNREADABLE         = 'unreadable';
 
+	/**
+	 * Advice when the layout is not this plugin's (entries reordered, data
+	 * descriptors): another tool repacked the archive; the data is most
+	 * likely fine and the original volumes are what to look for. The
+	 * documentation section named here is the one the manual restore steps
+	 * are published under.
+	 */
+	const REPACKED_ADVICE = 'Restore is refused because the contents could not be checked: the entries are not in the order this plugin writes them, or they were written by another tool. Your data is most likely fine. Use the original volume files the plugin produced, exactly as they are: do not repack them with another archive tool, and do not unzip them and zip them again. If those files are gone, follow the steps in the "Restoring a backup by hand" section of the documentation (extract every volume and import the SQL files).';
+
+	/**
+	 * Advice when a local header disagrees with the central directory: the
+	 * archive is inconsistent inside. Another tool may have caused it, but
+	 * so may an interrupted write or two processes writing at once (the
+	 * plugin's own writer): the files the user holds may be the originals,
+	 * so the advice is a new backup, not a search for other files.
+	 */
+	const INCONSISTENT_ADVICE = 'The archive is inconsistent inside: an entry\'s header disagrees with the archive\'s directory. This can happen when writing was interrupted or when two processes wrote the same backup at once. Do not rely on this backup; make a new one.';
+
 	const REASON_EMBEDDED  = 'embedded_manifest';
 	const REASON_STRUCTURE = 'structure_only';
 
@@ -224,7 +242,7 @@ final class VerificationResult {
 		foreach ( $this->partial_reasons as $reason ) {
 			$lines[] = self::REASON_EMBEDDED === $reason
 				? 'The manifest is the copy embedded in the last volume; that volume\'s own container hash was not checked. Verify from the standalone manifest for a full pass.'
-				: 'Only the structure was checked (manifest, volumes, sidecar indexes); volume containers and entry contents were not.';
+				: 'Only the structure was checked (manifest, volumes, sidecar indexes, the order, names and sizes of the entries and their headers); volume containers and entry contents were not.';
 		}
 		// stopped_at and the count keys are fixed vocabulary set by the verifier, not text from the archive;
 		// only a forged cursor could carry anything else there, which needs database write access already.
@@ -232,6 +250,9 @@ final class VerificationResult {
 			$lines[] = 'Verification stopped in phase "' . (string) $this->state['stopped_at'] . '".';
 		}
 		$next = self::next_step( $this->outcome );
+		if ( ! empty( $this->state['inconsistent'] ) ) {
+			$next = trim( self::INCONSISTENT_ADVICE . ' ' . $next );
+		}
 		if ( '' !== $next ) {
 			$lines[] = $next;
 		}
@@ -262,7 +283,7 @@ final class VerificationResult {
 	public static function next_step( string $outcome ): string {
 		switch ( $outcome ) {
 			case self::UNSUPPORTED_LAYOUT:
-				return 'Restore is refused because the contents could not be checked. Use the original files the plugin produced when it exported this archive; if those are gone, follow the manual restore steps in the documentation (extract every volume and import the SQL files).';
+				return self::REPACKED_ADVICE;
 			case self::CHANGED:
 				return 'Nothing read after the change is conclusive; the archive may still be being transferred or downloaded. Verify again once writing has finished.';
 			case self::UNREADABLE:

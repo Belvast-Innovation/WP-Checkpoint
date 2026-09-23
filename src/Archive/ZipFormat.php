@@ -25,7 +25,8 @@ final class ZipFormat {
 	const METHOD_STORE   = 0;
 	const METHOD_DEFLATE = 8;
 
-	const FLAG_UTF8 = 0x0800;
+	const FLAG_UTF8            = 0x0800;
+	const FLAG_DATA_DESCRIPTOR = 0x0008; // CRC and sizes follow the data; the local header may carry zeros. This plugin never sets it.
 
 	const VERSION_DEFAULT = 20;
 	const VERSION_ZIP64   = 45;
@@ -276,10 +277,67 @@ final class ZipFormat {
 			'name'   => $name,
 			'method' => (int) $h['method'],
 			'flags'  => (int) $h['flags'],
+			'time'   => (int) $h['time'],
+			'date'   => (int) $h['date'],
 			'crc'    => (int) $h['crc'],
 			'csize'  => $csize,
 			'usize'  => $usize,
 			'offset' => $off,
+			'length' => $length,
+		);
+	}
+
+	/**
+	 * Parse a local file header (signature checked). Sizes of 0xFFFFFFFF
+	 * are taken from the zip64 extra field, in the order the format gives
+	 * them (uncompressed, then compressed). $data must hold the whole
+	 * header: 30 bytes, the name and the extra field.
+	 *
+	 * @param string $data Header bytes.
+	 * @return array{name: string, flags: int, method: int, time: int, date: int, crc: int, csize: int, usize: int, length: int}|null Null when it is not a complete, well-formed local header.
+	 */
+	public static function parse_local_header( string $data ) {
+		if ( strlen( $data ) < 30 ) {
+			return null;
+		}
+		$h = unpack( 'Vsig/vneeded/vflags/vmethod/vtime/vdate/Vcrc/Vcsize/Vusize/vnamelen/vextralen', substr( $data, 0, 30 ) );
+		if ( self::SIG_LOCAL !== (int) $h['sig'] ) {
+			return null;
+		}
+		$length = 30 + $h['namelen'] + $h['extralen'];
+		if ( strlen( $data ) < $length ) {
+			return null;
+		}
+		$extra = substr( $data, 30 + $h['namelen'], $h['extralen'] );
+		$usize = (int) $h['usize'];
+		$csize = (int) $h['csize'];
+		if ( self::LIMIT_32 === $usize || self::LIMIT_32 === $csize ) {
+			$z = self::find_zip64_extra( $extra );
+			if ( null === $z ) {
+				return null;
+			}
+			try {
+				$p = 0;
+				if ( self::LIMIT_32 === $usize ) {
+					$usize = self::read_u64( $z, $p );
+					$p    += 8;
+				}
+				if ( self::LIMIT_32 === $csize ) {
+					$csize = self::read_u64( $z, $p );
+				}
+			} catch ( \RuntimeException $e ) {
+				return null;
+			}
+		}
+		return array(
+			'name'   => substr( $data, 30, $h['namelen'] ),
+			'flags'  => (int) $h['flags'],
+			'method' => (int) $h['method'],
+			'time'   => (int) $h['time'],
+			'date'   => (int) $h['date'],
+			'crc'    => (int) $h['crc'],
+			'csize'  => $csize,
+			'usize'  => $usize,
 			'length' => $length,
 		);
 	}

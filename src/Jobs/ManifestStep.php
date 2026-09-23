@@ -298,10 +298,18 @@ final class ManifestStep implements Step {
 			$verifier = ArchiveVerifier::open( $volumes . DIRECTORY_SEPARATOR . $base . '.manifest.json', $dir, ArchiveVerifier::DEPTH_STRUCTURE, is_array( $cursor['verifier'] ) ? $cursor['verifier'] : array() );
 			while ( $verifier->step() ) {
 				$cursor['verifier'] = $verifier->state();
-				if ( $context->should_stop() ) {
-					return StepResult::progress( $cursor, 85, __( 'Checking the written archive', 'wp-checkpoint' ) );
+				$progress           = $verifier->progress();
+				$message            = self::check_message( $progress );
+				if ( $progress['slow'] && empty( $cursor['slow_noted'] ) ) {
+					// Said once, as soon as the first entries give a measure: a long check that only says
+					// "checking" looks stuck.
+					$cursor['slow_noted'] = true;
+					$context->logger()->info( 'The self-check of the written archive will take a while on this disk', array( 'minutes_left' => (int) ceil( (int) $progress['seconds_left'] / 60 ) ) );
 				}
-				$context->checkpoint( $cursor, 85, __( 'Checking the written archive', 'wp-checkpoint' ) );
+				if ( $context->should_stop() ) {
+					return StepResult::progress( $cursor, 85, $message );
+				}
+				$context->checkpoint( $cursor, 85, $message );
 			}
 			$this->judge( $verifier->result(), $context );
 			$cursor['phase'] = 'done';
@@ -663,6 +671,25 @@ final class ManifestStep implements Step {
 			@unlink( $tmp ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.unlink_unlink -- best effort.
 			throw new TransientFailure( 'The manifest could not be written.' );
 		}
+	}
+
+	/**
+	 * The progress text of the self-check: entries walked out of all, and
+	 * the time left once it can be estimated.
+	 *
+	 * @param array{phase: string, done: int, total: int, seconds_left: int|null, slow: bool} $progress ArchiveVerifier::progress().
+	 * @return string
+	 */
+	private static function check_message( array $progress ): string {
+		if ( ArchiveVerifier::PHASE_CONTENTS !== $progress['phase'] || 0 === $progress['total'] ) {
+			return __( 'Checking the written archive', 'wp-checkpoint' );
+		}
+		if ( null !== $progress['seconds_left'] && $progress['slow'] ) {
+			/* translators: 1: entries checked, 2: entries in total, 3: minutes left */
+			return sprintf( __( 'Checking the written archive: %1$d of %2$d entries, about %3$d minutes left', 'wp-checkpoint' ), $progress['done'], $progress['total'], (int) ceil( $progress['seconds_left'] / 60 ) );
+		}
+		/* translators: 1: entries checked, 2: entries in total */
+		return sprintf( __( 'Checking the written archive: %1$d of %2$d entries', 'wp-checkpoint' ), $progress['done'], $progress['total'] );
 	}
 
 	/**

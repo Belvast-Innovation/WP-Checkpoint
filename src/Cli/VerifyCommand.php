@@ -30,6 +30,11 @@ final class VerifyCommand {
 	const EXIT_UNREADABLE         = 6;
 
 	/**
+	 * Seconds between two progress lines of the entry walk.
+	 */
+	const PROGRESS_SECONDS = 5;
+
+	/**
 	 * Presenter (its clean() pipeline).
 	 *
 	 * @var JobPresenter
@@ -98,7 +103,7 @@ final class VerifyCommand {
 		$error    = '';
 		try {
 			$verifier = ArchiveVerifier::open( $path, $work_dir, $depth );
-			$result   = $verifier->run();
+			$result   = $this->run_with_progress( $verifier );
 		} catch ( \InvalidArgumentException $e ) {
 			$error = $e->getMessage();
 		} catch ( \RuntimeException $e ) {
@@ -117,6 +122,37 @@ final class VerifyCommand {
 			WP_CLI::line( $result->to_text( $clean ) );
 		}
 		WP_CLI::halt( self::exit_code( $result->outcome() ) );
+	}
+
+	/**
+	 * Run the verifier unit by unit, reporting the entry walk on standard
+	 * error (standard output stays the result, JSON included): the count
+	 * when PROGRESS_SECONDS have passed since the last line (by time, not by
+	 * units: a slow disk is where a silent run looks stuck, a fast one would
+	 * flood the terminal), and once, as soon as the first entries give a
+	 * measure, how long a slow walk will take.
+	 *
+	 * @param ArchiveVerifier $verifier Verifier.
+	 * @return \WPCheckpoint\Archive\VerificationResult
+	 */
+	private function run_with_progress( ArchiveVerifier $verifier ): \WPCheckpoint\Archive\VerificationResult {
+		$last  = microtime( true );
+		$noted = false;
+		while ( $verifier->step() ) {
+			$progress = $verifier->progress();
+			if ( ArchiveVerifier::PHASE_CONTENTS !== $progress['phase'] || 0 === $progress['total'] ) {
+				continue;
+			}
+			if ( $progress['slow'] && ! $noted && null !== $progress['seconds_left'] ) {
+				$noted = true;
+				fwrite( STDERR, sprintf( "This check will take about %d more minutes on this disk (measured on the first %d entries).\n", (int) ceil( $progress['seconds_left'] / 60 ), $progress['done'] ) ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- progress on standard error; standard output carries the result.
+			}
+			if ( microtime( true ) - $last >= self::PROGRESS_SECONDS ) {
+				$last = microtime( true );
+				fwrite( STDERR, sprintf( "Checked %d of %d entries.\n", $progress['done'], $progress['total'] ) ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- see above.
+			}
+		}
+		return $verifier->result();
 	}
 
 	/**
