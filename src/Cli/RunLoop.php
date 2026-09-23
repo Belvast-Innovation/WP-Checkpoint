@@ -10,6 +10,7 @@ namespace WPCheckpoint\Cli;
 use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\JobActions;
 use WPCheckpoint\Jobs\JobPresenter;
+use WPCheckpoint\Jobs\Loopback;
 use WPCheckpoint\Jobs\TickResult;
 
 defined( 'ABSPATH' ) || exit;
@@ -92,6 +93,9 @@ final class RunLoop {
 	 * @return int Exit code (EXIT_* constants).
 	 */
 	public function run( int $id, bool $wait ): int {
+		// This process drives the job now: a cron event set when it was started or answered would take the job
+		// over between two of our ticks and start a chain under web limits. Handed back on a non-terminal exit.
+		Loopback::unschedule( $id );
 		$busy = 0;
 		while ( true ) {
 			// This loop is the follow-up: no self-request and no cron event per tick. When it stops before the

@@ -251,14 +251,15 @@ final class JobActions {
 	 * @return TickResult
 	 */
 	public function tick( int $id, $started_at = null, bool $follow_up = true ): TickResult {
+		if ( $follow_up ) {
+			// Before anything else: a request the server kills (in the tick, or in the reap before it) never
+			// reaches its follow-up, and if cron started it, that event is used up. Only makes sure one exists
+			// (a wait's later time stays); the result adjusts or clears it afterwards.
+			Loopback::schedule( $id, Loopback::FALLBACK_SECONDS, Loopback::KEEP );
+		}
 		Schema::ensure();
 		$this->repository->maintenance();
 		$this->sweep_events();
-		if ( $follow_up ) {
-			// Before the tick: a tick the server kills never reaches its follow-up, and if cron started it, that
-			// event is used up. The result adjusts or clears this event afterwards.
-			Loopback::schedule( $id, Loopback::FALLBACK_SECONDS );
-		}
 		$result = $this->runner->tick( $id, null === $started_at ? self::started_at() : (float) $started_at );
 		if ( TickResult::LOST === $result->status && null !== $result->job && Job::CANCELLED === $result->job->status ) {
 			// The cancel happened while this driver held the lock: the step has stopped now, so clean up here.
@@ -287,9 +288,10 @@ final class JobActions {
 		set_site_transient( self::SWEPT, 1, JobRepository::REAP_THROTTLE );
 		Loopback::sweep(
 			function ( int $id ): bool {
+				global $wpdb;
 				$job = $this->repository->find( $id );
 				if ( null === $job ) {
-					return false;
+					return '' !== (string) $wpdb->last_error; // A failed query proves nothing: keep the event.
 				}
 				// An answered job stays paused, with no questions, until its next tick takes it.
 				return in_array( $job->status, array( Job::QUEUED, Job::RUNNING ), true ) || ( Job::PAUSED === $job->status && ! $job->awaiting_answer() );
