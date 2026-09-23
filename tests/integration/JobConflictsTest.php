@@ -1,0 +1,52 @@
+<?php
+
+namespace WPCheckpoint\Tests\Integration;
+
+use WPCheckpoint\Jobs\Job;
+use WPCheckpoint\Jobs\JobsUnavailable;
+use WPCheckpoint\Plugin;
+use WPCheckpoint\Tests\Fixtures\Jobs\JobTestCase;
+
+/**
+ * JobActions::start() applies the concurrency rules after the insert, so
+ * that two requests racing each other cannot both start.
+ */
+final class JobConflictsTest extends JobTestCase {
+
+	public function test_a_second_export_is_refused_and_leaves_no_row(): void {
+		$actions = Plugin::instance()->job_actions();
+		$first   = $actions->start( 'export', self::$admin_id, array() );
+		try {
+			$actions->start( 'export', self::$admin_id, array() );
+			$this->fail( 'a second export must be refused' );
+		} catch ( JobsUnavailable $e ) {
+			$this->assertSame( sprintf( 'A backup is already being made (job %d).', $first->id ), $e->getMessage() );
+		}
+		$this->assertCount( 1, Plugin::instance()->jobs()->list_jobs(), 'the refused job was removed before it ran' );
+	}
+
+	public function test_of_two_racing_jobs_the_earlier_one_wins(): void {
+		// Both inserted before either checked: what two requests arriving together produce.
+		$repo    = Plugin::instance()->jobs();
+		$actions = Plugin::instance()->job_actions();
+		$a       = $repo->create( 'export', self::$admin_id );
+		$b       = $repo->create( 'export', self::$admin_id );
+		$this->assertSame( '', $actions->conflict_for( $a ), 'the earlier one sees nothing before it' );
+		$this->assertSame( sprintf( 'A backup is already being made (job %d).', $a->id ), $actions->conflict_for( $b ) );
+	}
+
+	public function test_nothing_starts_during_a_restore_and_a_started_job_is_not_discarded(): void {
+		$repo    = Plugin::instance()->jobs();
+		$restore = $repo->create( 'restore', self::$admin_id, array(), array( 'base' => 'site-20260923-120000-ab12' ) );
+		try {
+			Plugin::instance()->job_actions()->start( 'verify', self::$admin_id, array( 'base' => 'other-20260923-120000-cd34' ) );
+			$this->fail( 'nothing starts during a restore' );
+		} catch ( JobsUnavailable $e ) {
+			$this->assertStringStartsWith( sprintf( 'A restore is in progress (job %d)', $restore->id ), $e->getMessage() );
+		}
+		// A job a driver has taken is never deleted by discard_unstarted() (one statement, conditions on the row).
+		$this->assertNotFalse( $repo->acquire( $restore->id ) );
+		$this->assertFalse( $repo->discard_unstarted( $restore->id ) );
+		$this->assertInstanceOf( Job::class, $repo->find( $restore->id ) );
+	}
+}

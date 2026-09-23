@@ -82,6 +82,55 @@ final class JobActions {
 	}
 
 	/**
+	 * Why a stored job must not run next to the active jobs created before it
+	 * (lower id), or '' when it may.
+	 *
+	 * @param Job $job Job.
+	 * @return string
+	 */
+	public function conflict_for( Job $job ): string {
+		$before = array_values(
+			array_filter(
+				$this->repository->list_jobs( array( Job::QUEUED, Job::RUNNING, Job::PAUSED ), 500 ),
+				static function ( Job $other ) use ( $job ): bool {
+					return $other->id < $job->id;
+				}
+			)
+		);
+		return JobConflicts::conflict( $job->type, $job->options, $before );
+	}
+
+	/**
+	 * Create a job, unless it must not run next to the active ones
+	 * (JobConflicts). Checked after the insert against the active jobs with
+	 * a lower id, so two requests racing each other cannot both start: the
+	 * later one sees the earlier and removes itself before anything ran.
+	 *
+	 * @param string               $type       Job type.
+	 * @param int                  $owner_user Creating user.
+	 * @param array<string, mixed> $options    Options.
+	 * @return Job
+	 * @throws JobsUnavailable When jobs cannot be created now, or the job conflicts (the message says with what).
+	 */
+	public function start( string $type, int $owner_user, array $options ): Job {
+		$job    = $this->repository->create( $type, $owner_user, array(), $options );
+		$reason = $this->conflict_for( $job );
+		if ( '' === $reason ) {
+			return $job;
+		}
+		if ( ! $this->repository->discard_unstarted( $job->id ) ) {
+			try {
+				$this->cancel( $job->id ); // A driver picked it up in the meantime.
+			} catch ( \RuntimeException $e ) {
+				unset( $e ); // Finished or changed meanwhile: the conflict is reported all the same.
+			} catch ( \LogicException $e ) {
+				unset( $e );
+			}
+		}
+		throw new JobsUnavailable( esc_html( $reason ) );
+	}
+
+	/**
 	 * Load a job.
 	 *
 	 * @param int $id Job id.

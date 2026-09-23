@@ -229,6 +229,22 @@ final class JobRepository {
 	}
 
 	/**
+	 * Remove a job that has never started: still queued, never attempted,
+	 * no lock. One statement, so a driver that picked the job up meanwhile
+	 * makes it a no-op (the caller then cancels instead).
+	 *
+	 * @param int $id Job id.
+	 * @return bool Whether the row was removed.
+	 */
+	public function discard_unstarted( int $id ): bool {
+		global $wpdb;
+		$table = $wpdb->base_prefix . Schema::JOBS_TABLE;
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix.
+		$deleted = $wpdb->query( $wpdb->prepare( "DELETE FROM {$table} WHERE id = %d AND status = %s AND attempts = 0 AND lock_token = ''", $id, Job::QUEUED ) );
+		return 1 === $deleted;
+	}
+
+	/**
 	 * Load a job.
 	 *
 	 * @param int $id Job id.

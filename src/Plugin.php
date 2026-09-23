@@ -150,7 +150,7 @@ final class Plugin {
 		if ( defined( 'WP_CLI' ) && WP_CLI ) {
 			\WP_CLI::add_command( 'wpcheckpoint job', new JobCommand( $this->job_actions(), $this->job_presenter(), $this->directories() ) );
 			\WP_CLI::add_command( 'wpcheckpoint verify', new VerifyCommand( $this->job_presenter(), $this->directories() ) );
-			\WP_CLI::add_command( 'wpcheckpoint export', new ExportCommand( $this->jobs(), $this->job_actions(), $this->job_presenter(), $this->directories() ) );
+			\WP_CLI::add_command( 'wpcheckpoint export', new ExportCommand( $this->job_actions(), $this->job_presenter(), $this->directories() ) );
 		}
 
 		if ( is_admin() ) {

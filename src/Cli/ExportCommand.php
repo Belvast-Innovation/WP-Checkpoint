@@ -12,7 +12,6 @@ use WPCheckpoint\Jobs\ExportJob;
 use WPCheckpoint\Jobs\ExportOptions;
 use WPCheckpoint\Jobs\JobActions;
 use WPCheckpoint\Jobs\JobPresenter;
-use WPCheckpoint\Jobs\JobRepository;
 use WPCheckpoint\Jobs\JobsUnavailable;
 use WPCheckpoint\Support\Directories;
 
@@ -22,13 +21,6 @@ defined( 'ABSPATH' ) || exit;
  * Back up this site into the plugin's backups directory.
  */
 final class ExportCommand {
-
-	/**
-	 * Repository.
-	 *
-	 * @var JobRepository
-	 */
-	private $repository;
 
 	/**
 	 * Actions.
@@ -54,13 +46,11 @@ final class ExportCommand {
 	/**
 	 * Constructor.
 	 *
-	 * @param JobRepository $repository  Repository.
-	 * @param JobActions    $actions     Actions.
-	 * @param JobPresenter  $presenter   Presenter.
-	 * @param Directories   $directories Storage directories.
+	 * @param JobActions   $actions     Actions.
+	 * @param JobPresenter $presenter   Presenter.
+	 * @param Directories  $directories Storage directories.
 	 */
-	public function __construct( JobRepository $repository, JobActions $actions, JobPresenter $presenter, Directories $directories ) {
-		$this->repository  = $repository;
+	public function __construct( JobActions $actions, JobPresenter $presenter, Directories $directories ) {
 		$this->actions     = $actions;
 		$this->presenter   = $presenter;
 		$this->directories = $directories;
@@ -173,7 +163,7 @@ final class ExportCommand {
 		}
 		$porcelain = ! empty( $assoc_args['porcelain'] );
 		try {
-			$job = $this->repository->create( ExportJob::ID, get_current_user_id(), array(), $options );
+			$job = $this->actions->start( ExportJob::ID, get_current_user_id(), $options );
 		} catch ( JobsUnavailable $e ) {
 			WP_CLI::error( $this->presenter->clean( $e->getMessage() ) ); // Exits.
 		}
