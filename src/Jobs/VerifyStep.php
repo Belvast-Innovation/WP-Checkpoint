@@ -9,7 +9,10 @@ namespace WPCheckpoint\Jobs;
 
 use WPCheckpoint\Archive\ArchiveVerifier;
 use WPCheckpoint\Archive\ChunkHasher;
+use WPCheckpoint\Archive\Manifest;
+use WPCheckpoint\Archive\ManifestError;
 use WPCheckpoint\Archive\VerificationResult;
+use WPCheckpoint\Backups\BackupStore;
 use WPCheckpoint\Backups\VerifyRecord;
 
 defined( 'ABSPATH' ) || exit;
@@ -23,9 +26,17 @@ defined( 'ABSPATH' ) || exit;
  *    verifier finishes, the whole record, verified_at included, is fixed
  *    in the cursor, and every finding's text goes to the job log.
  * 2. record: the record's bytes come from the cursor only; written to the
- *    work directory, the lease confirmed, renamed into backups/ (one unit;
- *    a replay writes the same bytes, a crash before the rename leaves a
- *    file the work directory's reclaim removes).
+ *    work directory, the manifest checked to be still the one the record
+ *    is about (not deleted or replaced meanwhile), the lease confirmed,
+ *    renamed into backups/ (one unit; a replay writes the same bytes, a
+ *    crash before the rename leaves a file the work directory's reclaim
+ *    removes).
+ *
+ * The manifest is read whole only up to Manifest::MAX_JSON_BYTES (a larger
+ * file fails the job, it is no manifest this plugin writes), and a
+ * manifest that lists volumes not named after the backup fails it too:
+ * deleting a backup removes only its own files, so such a backup could
+ * lose volumes to another backup's delete.
  *
  * A unit's duration depends on the disk (up to 256 MiB of a volume at full
  * depth): the first unit of a tick always runs, then the tick ends when
@@ -107,8 +118,12 @@ final class VerifyStep implements Step {
 			$context->cursor()
 		);
 		$backups = (string) call_user_func( $this->backups );
+		if ( '' === $backups ) {
+			throw new TransientFailure( 'The backups directory is not available.' );
+		}
+		$manifest = $backups . DIRECTORY_SEPARATOR . $base . BackupStore::MANIFEST_SUFFIX;
 		if ( 'verify' === $cursor['phase'] ) {
-			$result = $this->verify( $context, $cursor, $backups . DIRECTORY_SEPARATOR . $base . '.manifest.json', $options['depth'] );
+			$result = $this->verify( $context, $cursor, $manifest, $options['depth'] );
 			if ( null !== $result ) {
 				return $result;
 			}
@@ -117,6 +132,9 @@ final class VerifyStep implements Step {
 		$temp = $work . DIRECTORY_SEPARATOR . self::RECORD_TEMP;
 		if ( false === @file_put_contents( $temp, VerifyRecord::to_json( (array) $cursor['record'] ) ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- a warning would put the path into the error log; failure is thrown.
 			throw new TransientFailure( 'The verification record could not be written.' );
+		}
+		if ( ! hash_equals( (string) $cursor['manifest_sha256'], self::manifest_hash( $manifest ) ) ) {
+			throw new \RuntimeException( 'The backup was deleted or its manifest replaced while it was being verified; nothing was recorded. Verify it again.' );
 		}
 		$context->confirm_lease(); // Nothing between the lease check and the rename.
 		if ( ! @rename( $temp, $backups . DIRECTORY_SEPARATOR . VerifyRecord::file_name( $base ) ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.rename_rename -- see above.
@@ -141,8 +159,13 @@ final class VerifyStep implements Step {
 			if ( ! is_file( $manifest ) ) {
 				throw new \RuntimeException( 'This backup has no manifest in the backups directory.' );
 			}
+			$hash = self::manifest_hash( $manifest );
+			if ( '' === $hash ) {
+				throw new \RuntimeException( sprintf( 'The manifest of this backup is larger than %d MB, more than any manifest this plugin writes; it cannot be checked.', (int) ( Manifest::MAX_JSON_BYTES / 1048576 ) ) );
+			}
+			self::assert_own_volumes( $manifest, (string) $context->options()['base'] );
 			// Fixed before the first unit: the record is about this manifest, whatever happens to it later.
-			$cursor['manifest_sha256'] = ChunkHasher::hash_file( $manifest );
+			$cursor['manifest_sha256'] = $hash;
 			$context->checkpoint( $cursor, 0, __( 'Verifying the backup', 'wp-checkpoint' ) );
 		}
 		$dir = $context->work_path() . DIRECTORY_SEPARATOR . self::VERIFY_DIR;
@@ -193,6 +216,52 @@ final class VerifyStep implements Step {
 		$cursor['verifier'] = array();
 		$context->checkpoint( $cursor, 95, __( 'Recording the result', 'wp-checkpoint' ) );
 		return null;
+	}
+
+	/**
+	 * SHA-256 of the manifest, '' when it is missing, unreadable or larger
+	 * than any manifest (bounded work).
+	 *
+	 * @param string $manifest Standalone manifest path.
+	 * @return string
+	 */
+	private static function manifest_hash( string $manifest ): string {
+		$size = is_file( $manifest ) ? (int) filesize( $manifest ) : 0;
+		if ( $size <= 0 || $size > Manifest::MAX_JSON_BYTES ) {
+			return '';
+		}
+		try {
+			return ChunkHasher::hash_file( $manifest );
+		} catch ( \RuntimeException $e ) {
+			return '';
+		}
+	}
+
+	/**
+	 * Fail when a readable manifest lists volumes that are not named after
+	 * the backup. An unreadable manifest is left to the verifier, which
+	 * reports it.
+	 *
+	 * @param string $manifest Standalone manifest path (at most MAX_JSON_BYTES).
+	 * @param string $base     Backup base name.
+	 * @return void
+	 * @throws \RuntimeException When a volume belongs to another name.
+	 */
+	private static function assert_own_volumes( string $manifest, string $base ): void {
+		$json = @file_get_contents( $manifest ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- bounded by manifest_hash(); a warning would put the path into the error log.
+		if ( ! is_string( $json ) ) {
+			return;
+		}
+		try {
+			$parsed = Manifest::from_json( $json );
+		} catch ( ManifestError $e ) {
+			return;
+		}
+		foreach ( $parsed->volumes() as $volume ) {
+			if ( ! BackupStore::is_own_file( $base, (string) $volume['path'] ) ) {
+				throw new \RuntimeException( sprintf( 'This manifest lists the volume %s, which is not named after this backup; only a backup\'s own files are kept together, so it is not checked.', (string) $volume['path'] ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- a file name from a validated manifest; job texts are cleaned on output.
+			}
+		}
 	}
 
 	/**

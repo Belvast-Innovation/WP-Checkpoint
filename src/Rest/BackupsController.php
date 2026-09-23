@@ -295,7 +295,7 @@ final class BackupsController extends Controller {
 	 */
 	private function clean_summary( array $item ): array {
 		$item['in_use'] = $this->presenter->clean( (string) $item['in_use'] );
-		foreach ( array( 'warnings', 'exclusions' ) as $key ) { // In details, warnings is the list; in a summary, a count.
+		foreach ( array( 'warnings', 'exclusions', 'contents', 'generator', 'site' ) as $key ) { // In details, warnings is the list; in a summary, a count.
 			if ( isset( $item[ $key ] ) && is_array( $item[ $key ] ) ) {
 				$item[ $key ] = $this->clean_texts( $item[ $key ] );
 			}

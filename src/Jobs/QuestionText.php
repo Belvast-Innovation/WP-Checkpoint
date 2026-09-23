@@ -50,11 +50,11 @@ final class QuestionText {
 		$out = array();
 		foreach ( $job->questions as $question ) {
 			$id     = (string) $question['id'];
-			$listed = 'unreadable' === $id && isset( $findings['unreadable']['listed'] ) ? array_slice( array_map( 'strval', (array) $findings['unreadable']['listed'] ), 0, self::MAX_LISTED ) : array();
+			$listed = 'unreadable' === $id && isset( $findings['unreadable']['listed'] ) ? array_slice( array_filter( (array) $findings['unreadable']['listed'], 'is_string' ), 0, self::MAX_LISTED ) : array();
 			$out[]  = array(
 				'id'      => $id,
 				'kind'    => (string) ( $question['kind'] ?? '' ),
-				'choices' => array_map( 'strval', (array) $question['choices'] ),
+				'choices' => array_map( 'strval', (array) ( $question['choices'] ?? array() ) ),
 				'text'    => (string) call_user_func( $clean, self::describe( $id, $question, $findings ) ),
 				'listed'  => array_map(
 					static function ( string $p ) use ( $clean ): string {
@@ -94,17 +94,17 @@ final class QuestionText {
 	public static function describe( string $id, array $question, array $findings ): string {
 		$count = (int) ( $question['count'] ?? 0 );
 		if ( 'unreadable' === $id ) {
-			$listed = isset( $findings['unreadable']['listed'] ) ? array_slice( (array) $findings['unreadable']['listed'], 0, self::MAX_LISTED ) : array();
+			$listed = isset( $findings['unreadable']['listed'] ) ? array_slice( array_filter( (array) $findings['unreadable']['listed'], 'is_string' ), 0, self::MAX_LISTED ) : array();
 			return sprintf( '%d files cannot be read and would not be in the backup%s. Continue without them, or stop?', $count, array() === $listed ? '' : ' (for example ' . implode( ', ', $listed ) . ')' );
 		}
-		if ( 1 === preg_match( '/\Alarge_dir_(\d+)\z/', $id, $m ) && isset( $findings['heavy'][ (int) $m[1] ] ) ) {
+		if ( 1 === preg_match( '/\Alarge_dir_(\d+)\z/', $id, $m ) && isset( $findings['heavy'][ (int) $m[1] ]['p'], $findings['heavy'][ (int) $m[1] ]['bytes'] ) && is_scalar( $findings['heavy'][ (int) $m[1] ]['p'] ) ) {
 			$dir = $findings['heavy'][ (int) $m[1] ];
 			return sprintf( 'Directory %s holds %d MB (development files, not usually needed to restore the site). Include it, or leave it out?', (string) $dir['p'], (int) ( (int) $dir['bytes'] / 1048576 ) );
 		}
 		if ( 'large_dirs_more' === $id ) {
 			return sprintf( '%d more large directories (listed in the job log). Include them, or leave them out?', $count );
 		}
-		if ( 1 === preg_match( '/\Aoversize_(\d+)\z/', $id, $m ) && isset( $findings['oversize'][ (int) $m[1] ] ) ) {
+		if ( 1 === preg_match( '/\Aoversize_(\d+)\z/', $id, $m ) && isset( $findings['oversize'][ (int) $m[1] ]['table'], $findings['oversize'][ (int) $m[1] ]['limit'] ) && is_scalar( $findings['oversize'][ (int) $m[1] ]['table'] ) && array_key_exists( 'count', $findings['oversize'][ (int) $m[1] ] ) ) {
 			$table = $findings['oversize'][ (int) $m[1] ];
 			$rows  = null === $table['count'] ? 'may have rows' : sprintf( 'has %d rows', (int) $table['count'] );
 			return sprintf( 'Table %s %s larger than the single-row limit of %d bytes. Leave those rows out, or stop?', (string) $table['table'], $rows, (int) $table['limit'] );

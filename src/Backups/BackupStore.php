@@ -28,8 +28,9 @@ defined( 'ABSPATH' ) || exit;
  * manifest last, so an interrupted delete leaves a listed, incomplete
  * backup that can be deleted again, never files the list cannot see.
  *
- * Text from the manifest (warnings, site facts) is returned as it is; the
- * REST layer cleans what it shows.
+ * Of the exported site, only facts that identify neither the site nor the
+ * server are returned. Other text from the manifest (warnings, exclusions,
+ * generator, contents) is returned as it is; the REST layer cleans it.
  */
 final class BackupStore {
 
@@ -134,7 +135,7 @@ final class BackupStore {
 		return array_merge(
 			$summary,
 			array(
-				'site'          => $manifest->site(),
+				'site'          => self::site_facts( $manifest->site() ),
 				'generator'     => $data['generator'] ?? array(),
 				'exported'      => $manifest->database_exported(),
 				'exclusions'    => $data['exclusions'] ?? array(),
@@ -143,7 +144,7 @@ final class BackupStore {
 				'manifest_file' => array(
 					'name'   => $base . self::MANIFEST_SUFFIX,
 					'bytes'  => (int) filesize( $file ),
-					'sha256' => self::hash_or_empty( $file ),
+					'sha256' => $this->manifest_hash( $base ),
 				),
 			)
 		);
@@ -182,6 +183,9 @@ final class BackupStore {
 			}
 			++$deleted;
 		}
+		// A check that started while the files were listed stores its record without a manifest (the verify
+		// step looks for the manifest first, which leaves a narrow window): with no manifest it is never listed.
+		@unlink( $this->dir . DIRECTORY_SEPARATOR . VerifyRecord::file_name( $base ) ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.unlink_unlink -- usually absent.
 		return $deleted;
 	}
 
@@ -281,7 +285,7 @@ final class BackupStore {
 				'record' => null,
 			);
 		}
-		$current = self::hash_or_empty( $this->dir . DIRECTORY_SEPARATOR . $base . self::MANIFEST_SUFFIX );
+		$current = $this->manifest_hash( $base );
 		return array(
 			'state'  => hash_equals( (string) $record['manifest_sha256'], $current ) ? 'current' : 'manifest_changed',
 			'record' => $record,
@@ -331,6 +335,30 @@ final class BackupStore {
 		}
 		closedir( $handle );
 		return $names;
+	}
+
+	/**
+	 * SHA-256 of a backup's standalone manifest; '' when it cannot be read or
+	 * is larger than any manifest (hashing is then not bounded).
+	 *
+	 * @param string $base Base name.
+	 * @return string
+	 */
+	private function manifest_hash( string $base ): string {
+		$file = $this->dir . DIRECTORY_SEPARATOR . $base . self::MANIFEST_SUFFIX;
+		$size = is_file( $file ) ? (int) filesize( $file ) : 0;
+		return $size > 0 && $size <= Manifest::MAX_JSON_BYTES ? self::hash_or_empty( $file ) : '';
+	}
+
+	/**
+	 * The facts about the exported site that identify neither the site nor
+	 * the server (no URL, path or database host).
+	 *
+	 * @param array<string, mixed> $site Manifest site object.
+	 * @return array<string, mixed>
+	 */
+	private static function site_facts( array $site ): array {
+		return array_intersect_key( $site, array_flip( array( 'table_prefix', 'wp_version', 'php_version', 'locale', 'charset', 'collate', 'multisite' ) ) );
 	}
 
 	/**

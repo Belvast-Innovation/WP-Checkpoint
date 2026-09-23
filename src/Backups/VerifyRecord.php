@@ -148,6 +148,16 @@ final class VerifyRecord {
 		if ( array() !== array_diff( array_keys( $data['findings_by_kind'] ), self::KINDS ) ) {
 			return null;
 		}
-		return $data;
+		// Only the validated fields, in their order: nothing else in the file reaches a response.
+		$record = array();
+		foreach ( array( 'format', 'version', 'base', 'manifest_sha256', 'verified_at', 'depth', 'outcome', 'complete', 'restore_refused', 'cause', 'findings_total' ) as $key ) {
+			$record[ $key ] = $data[ $key ] ?? null;
+		}
+		$record['findings_by_kind'] = array();
+		foreach ( self::KINDS as $kind ) {
+			$record['findings_by_kind'][ $kind ] = $data['findings_by_kind'][ $kind ];
+		}
+		$record['job'] = $data['job'];
+		return $record;
 	}
 }

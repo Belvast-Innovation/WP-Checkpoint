@@ -114,8 +114,15 @@ final class JobActions {
 	 * @throws JobConflict When the job must not run next to an active one (the message says which).
 	 */
 	public function start( string $type, int $owner_user, array $options ): Job {
-		$job    = $this->repository->create( $type, $owner_user, array(), $options );
-		$reason = $this->conflict_for( $job );
+		if ( ! $this->repository->lock_starts() ) {
+			throw new JobsUnavailable( 'Another job is being started right now; try again in a moment.' );
+		}
+		try {
+			$job    = $this->repository->create( $type, $owner_user, array(), $options );
+			$reason = $this->conflict_for( $job );
+		} finally {
+			$this->repository->unlock_starts();
+		}
 		if ( '' === $reason ) {
 			return $job;
 		}

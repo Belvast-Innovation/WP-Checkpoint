@@ -229,6 +229,46 @@ final class JobRepository {
 	}
 
 	/**
+	 * Serialise job starts (insert, then the conflict check) across
+	 * requests with a named database lock: with interleaved auto-increment
+	 * (innodb_autoinc_lock_mode = 2) two inserts can commit out of id order,
+	 * and each check could then miss the other. Returns false when another
+	 * request holds the lock beyond the timeout; true when the lock is held
+	 * or the database has no named locks (the id order check still applies).
+	 *
+	 * @param int $timeout Seconds to wait.
+	 * @return bool
+	 */
+	public function lock_starts( int $timeout = 5 ): bool {
+		global $wpdb;
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- a named lock, not data.
+		$got = $wpdb->get_var( $wpdb->prepare( 'SELECT GET_LOCK(%s, %d)', self::start_lock_name(), $timeout ) );
+		return null === $got || '1' === (string) $got;
+	}
+
+	/**
+	 * Release the lock taken by lock_starts().
+	 *
+	 * @return void
+	 */
+	public function unlock_starts(): void {
+		global $wpdb;
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- a named lock, not data.
+		$wpdb->query( $wpdb->prepare( 'SELECT RELEASE_LOCK(%s)', self::start_lock_name() ) );
+	}
+
+	/**
+	 * Name of the start lock: one per jobs table (installations sharing a
+	 * database server do not wait for each other). At most 64 characters.
+	 *
+	 * @return string
+	 */
+	private static function start_lock_name(): string {
+		global $wpdb;
+		return 'wpcheckpoint_start_' . substr( md5( ( defined( 'DB_NAME' ) ? (string) constant( 'DB_NAME' ) : '' ) . '.' . $wpdb->base_prefix . Schema::JOBS_TABLE ), 0, 16 );
+	}
+
+	/**
 	 * Remove a job that has never started: still queued, never attempted,
 	 * no lock. One statement, so a driver that picked the job up meanwhile
 	 * makes it a no-op (the caller then cancels instead).

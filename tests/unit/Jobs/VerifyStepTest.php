@@ -209,6 +209,80 @@ final class VerifyStepTest extends TestCase {
 		}
 	}
 
+	public function test_a_file_larger_than_any_manifest_is_not_read(): void {
+		$builder = $this->archive();
+		$handle  = fopen( $builder->manifest_path, 'r+' );
+		ftruncate( $handle, \WPCheckpoint\Archive\Manifest::MAX_JSON_BYTES + 1 );
+		fclose( $handle );
+		$this->expectException( \RuntimeException::class );
+		$this->expectExceptionMessage( 'The manifest of this backup is larger than 4 MB' );
+		$this->step()->run( $this->ctx->context() );
+	}
+
+	public function test_a_manifest_naming_volumes_of_another_backup_is_not_checked(): void {
+		$builder = $this->archive();
+		$other   = 'other-20260918-100000-a1b2';
+		$json    = str_replace( ArchiveBuilder::BASE . '.part002', $other . '.part002', (string) file_get_contents( $builder->manifest_path ) );
+		file_put_contents( $builder->manifest_path, $json );
+		rename( $builder->dir . '/' . ArchiveBuilder::BASE . '.part002.wpcheckpoint.zip', $builder->dir . '/' . $other . '.part002.wpcheckpoint.zip' );
+		try {
+			$this->step()->run( $this->ctx->context() );
+			$this->fail( 'a volume of another name must fail the check' );
+		} catch ( \RuntimeException $e ) {
+			$this->assertStringStartsWith( 'This manifest lists the volume ' . $other . '.part002.wpcheckpoint.zip, which is not named after this backup', $e->getMessage() );
+		}
+		$this->assertFileDoesNotExist( $this->record_path() );
+	}
+
+	/**
+	 * @return array<string, array{0: string}>
+	 */
+	public function manifest_changes(): array {
+		return array(
+			'deleted'  => array( 'deleted' ),
+			'replaced' => array( 'replaced' ),
+		);
+	}
+
+	/**
+	 * @dataProvider manifest_changes
+	 */
+	public function test_no_record_is_stored_for_a_manifest_deleted_or_replaced_during_the_check( string $change ): void {
+		$builder = $this->archive();
+		$this->run_to_done();
+		$record = null;
+		foreach ( $this->ctx->checkpoints as $checkpoint ) {
+			if ( 'record' === $checkpoint['cursor']['phase'] ) {
+				$record = $checkpoint['cursor'];
+			}
+		}
+		unlink( $this->record_path() );
+		if ( 'deleted' === $change ) {
+			unlink( $builder->manifest_path );
+		} else {
+			file_put_contents( $builder->manifest_path, "\n", FILE_APPEND );
+		}
+		try {
+			$this->step()->run( $this->ctx->context( $record ) );
+			$this->fail( 'the record must not be stored' );
+		} catch ( \RuntimeException $e ) {
+			$this->assertStringStartsWith( 'The backup was deleted or its manifest replaced while it was being verified', $e->getMessage() );
+		}
+		$this->assertFileDoesNotExist( $this->record_path() );
+	}
+
+	public function test_without_a_backups_directory_the_step_waits_to_be_retried(): void {
+		$this->archive();
+		$step = new VerifyStep(
+			static function (): string {
+				return '';
+			},
+			'strval'
+		);
+		$this->expectException( \WPCheckpoint\Jobs\TransientFailure::class );
+		$step->run( $this->ctx->context() );
+	}
+
 	public function test_invalid_options_are_refused(): void {
 		$this->archive();
 		$this->ctx->options = array(

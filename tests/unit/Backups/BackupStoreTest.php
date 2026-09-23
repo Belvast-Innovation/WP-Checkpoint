@@ -99,7 +99,7 @@ final class BackupStoreTest extends TestCase {
 	}
 
 	public function test_a_storage_path_with_glob_characters_still_lists_and_deletes(): void {
-		$odd = dirname( $this->dir ) . '/store[ab]*?';
+		$odd = dirname( $this->dir ) . '/store[ab]'; // A character class: glob() would look for storea or storeb.
 		mkdir( $odd );
 		copy( $this->builder->manifest_path, $odd . '/' . self::BASE . '.manifest.json' );
 		file_put_contents( $odd . '/' . self::BASE . '.verify.json', '{}' );
@@ -130,6 +130,30 @@ final class BackupStoreTest extends TestCase {
 		$this->assertSame( hash_file( 'sha256', $this->builder->volumes[ $last ] ), $details['volume_files'][ $last ]['sha256'] );
 		$this->assertSame( hash_file( 'sha256', $this->builder->manifest_path ), $details['manifest_file']['sha256'] );
 		$this->assertNull( $this->store()->details( self::OLDER, array() ) );
+	}
+
+	public function test_details_say_nothing_that_identifies_the_site_or_the_server(): void {
+		$details = $this->store()->details( self::BASE, array() );
+		$this->assertSame( array( 'charset', 'collate', 'locale', 'multisite', 'php_version', 'table_prefix', 'wp_version' ), self::sorted_keys( $details['site'] ) );
+		$json = (string) json_encode( $details );
+		$this->assertStringNotContainsString( 'example.com', $json );
+		$this->assertStringNotContainsString( '/var/www/html', $json );
+		$this->assertStringNotContainsString( 'MariaDB', $json );
+	}
+
+	private static function sorted_keys( array $data ): array {
+		$keys = array_keys( $data );
+		sort( $keys );
+		return $keys;
+	}
+
+	public function test_a_file_larger_than_any_manifest_is_not_valid_and_no_record_applies_to_it(): void {
+		$this->write_record( self::BASE, hash_file( 'sha256', $this->builder->manifest_path ) );
+		$handle = fopen( $this->builder->manifest_path, 'r+' );
+		ftruncate( $handle, \WPCheckpoint\Archive\Manifest::MAX_JSON_BYTES + 1 );
+		fclose( $handle );
+		$this->assertSame( 'manifest_changed', $this->store()->verification( self::BASE )['state'] );
+		$this->assertFalse( $this->store()->page( 1, 10, array() )['items'][0]['valid'] );
 	}
 
 	public function test_an_unreadable_manifest_is_listed_as_not_valid(): void {

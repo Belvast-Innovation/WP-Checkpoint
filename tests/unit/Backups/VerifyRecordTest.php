@@ -49,6 +49,13 @@ final class VerifyRecordTest extends TestCase {
 		$this->assertSame( $record, VerifyRecord::from_json( VerifyRecord::to_json( $record ), ArchiveBuilder::BASE ) );
 	}
 
+	public function test_only_the_validated_fields_are_read_back(): void {
+		$record          = $this->record();
+		$record['extra'] = '<script>/home/account/public_html</script>';
+		$read            = VerifyRecord::from_json( (string) json_encode( $record ), ArchiveBuilder::BASE );
+		$this->assertSame( $this->record(), $read );
+	}
+
 	public function test_a_record_for_another_backup_is_not_this_backups_record(): void {
 		$this->assertNull( VerifyRecord::from_json( VerifyRecord::to_json( $this->record() ), 'other-20260918-100000-a1b2' ) );
 	}

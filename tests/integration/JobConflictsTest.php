@@ -4,6 +4,7 @@ namespace WPCheckpoint\Tests\Integration;
 
 use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\JobConflict;
+use WPCheckpoint\Jobs\JobsUnavailable;
 use WPCheckpoint\Plugin;
 use WPCheckpoint\Tests\Fixtures\Jobs\JobTestCase;
 
@@ -23,6 +24,26 @@ final class JobConflictsTest extends JobTestCase {
 			$this->assertSame( sprintf( 'A backup is already being made (job %d).', $first->id ), $e->getMessage() );
 		}
 		$this->assertCount( 1, Plugin::instance()->jobs()->list_jobs(), 'the refused job was removed before it ran' );
+	}
+
+	public function test_starts_wait_for_each_other_and_give_up_with_a_reason(): void {
+		// Another request in the middle of a start: it holds the named lock on its own connection.
+		$other = new \wpdb( DB_USER, DB_PASSWORD, DB_NAME, DB_HOST );
+		$name  = 'wpcheckpoint_start_' . substr( md5( DB_NAME . '.' . $GLOBALS['wpdb']->base_prefix . 'wpcheckpoint_jobs' ), 0, 16 );
+		$this->assertSame( '1', (string) $other->get_var( $other->prepare( 'SELECT GET_LOCK(%s, 0)', $name ) ) );
+		try {
+			Plugin::instance()->job_actions()->start( 'export', self::$admin_id, array() );
+			$this->fail( 'a start must not run while another one holds the lock' );
+		} catch ( JobsUnavailable $e ) {
+			$this->assertSame( 'Another job is being started right now; try again in a moment.', $e->getMessage() );
+		} finally {
+			$other->query( $other->prepare( 'SELECT RELEASE_LOCK(%s)', $name ) );
+			$other->close();
+		}
+		$this->assertSame( array(), Plugin::instance()->jobs()->list_jobs(), 'nothing was inserted' );
+		$job = Plugin::instance()->job_actions()->start( 'export', self::$admin_id, array() );
+		$this->assertGreaterThan( 0, $job->id, 'once the lock is free, the start goes through' );
+		$this->assertSame( '0', (string) $GLOBALS['wpdb']->get_var( $GLOBALS['wpdb']->prepare( 'SELECT IS_USED_LOCK(%s) IS NOT NULL', $name ) ), 'the lock is released after the start' );
 	}
 
 	public function test_of_two_racing_jobs_the_earlier_one_wins(): void {
