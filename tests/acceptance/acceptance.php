@@ -565,12 +565,18 @@ function acc_check( string $dir, string $name ): void {
 		}
 	}
 	$in_archive = array();
+	$extracted_hashes = array();
 	$it         = new RecursiveIteratorIterator( new RecursiveDirectoryIterator( $x . '/files', FilesystemIterator::SKIP_DOTS ) );
 	foreach ( $it as $f ) {
 		if ( $f->isFile() ) {
-			$in_archive[] = substr( $f->getPathname(), strlen( $x . '/files/' ) );
+			$rel                      = substr( $f->getPathname(), strlen( $x . '/files/' ) );
+			$in_archive[]             = $rel;
+			$extracted_hashes[ $rel ] = hash_file( 'sha256', $f->getPathname() );
 		}
 	}
+	ksort( $extracted_hashes, SORT_STRING );
+	file_put_contents( $out . '/extracted.sha256.json', json_encode( $extracted_hashes, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE ) );
+	copy( $manifest_path, $out . '/manifest.json' );
 	foreach ( array_diff( $in_archive, array_keys( $source ) ) as $extra ) {
 		$mismatch[] = 'not in the source: ' . $extra;
 	}
@@ -592,7 +598,7 @@ function acc_check( string $dir, string $name ): void {
 			$tdiff[ $t ] = array( 'source' => $src[ $t ], 'restored' => $dst[ $t ] );
 		}
 	}
-	$volatile      = array( $GLOBALS['acc_prefix'] . 'options', $GLOBALS['acc_prefix'] . 'usermeta', $GLOBALS['acc_prefix'] . 'wpcheckpoint_jobs' );
+	$volatile      = array( $GLOBALS['acc_prefix'] . 'options', $GLOBALS['acc_prefix'] . 'usermeta' );
 	$report['vii'] = array(
 		'files_compared'  => $extracted,
 		'file_mismatches' => $mismatch,
@@ -631,41 +637,83 @@ function acc_check( string $dir, string $name ): void {
 }
 
 /**
- * Two runs of the same data, compared by content: the archive name, its
- * creation time and the database chunk boundaries may differ (a resumed
- * table starts a new batch), what the archive restores must not.
+ * The fields of the standalone manifest that may differ between two runs of
+ * the same data, each with its reason. Everything else must be equal,
+ * including fields added later: an allow list, not a deny list.
+ */
+const ACC_MAY_DIFFER = array(
+	'#^/created_at$#'                                   => 'clock',
+	'#^/database/exported/(started_at|finished_at)$#'   => 'clock',
+	'#^/database/index/(bytes|sha256)$#'                => 'database chunk boundaries',
+	'#^/database/tables/[^/]+/(bytes|chunks|sha256)$#'  => 'database chunk boundaries',
+	'#^/volumes(/.*)?$#'                                => 'base name, and the volume layout follows the chunk sizes',
+	'#^/database/tables/(wp_options|wp_usermeta)/rows$#' => 'written while the export runs',
+);
+
+/**
+ * A manifest as path => scalar; tables keyed by name, so an order change is a difference of every path.
+ *
+ * @return array<string, mixed>
+ */
+function acc_flatten( $value, string $path = '' ): array {
+	if ( ! is_array( $value ) ) {
+		return array( $path => $value );
+	}
+	if ( array() === $value ) {
+		return array( $path => array() );
+	}
+	$out = array();
+	foreach ( $value as $key => $item ) {
+		$name = '/database/tables' === $path && is_array( $item ) && isset( $item['name'] ) ? $item['name'] . '#' . $key : $key;
+		$out  = array_merge( $out, acc_flatten( $item, $path . '/' . $name ) );
+	}
+	return $out;
+}
+
+/**
+ * Two runs of the same data, compared by what they restore, not byte for
+ * byte: the extracted files by sha256 (independent of the plugin's reader),
+ * the files index, every non-volatile table after loading the chunks, and
+ * the standalone manifest outside ACC_MAY_DIFFER.
  */
 function acc_compare( string $dir, string $a, string $b ): void {
-	$load = static function ( string $name ) use ( $dir ): array {
-		$check = json_decode( (string) file_get_contents( $dir . '/' . $name . '/check.json' ), true );
-		$x     = $dir . '/' . $name . '/extract';
-		return array( 'check' => $check, 'files_index' => (string) file_get_contents( $x . '/files.index.jsonl' ), 'manifest' => json_decode( (string) file_get_contents( $x . '/manifest.json' ), true ) );
-	};
-	$ra   = $load( $a );
-	$rb   = $load( $b );
 	$diff = array();
-	if ( $ra['files_index'] !== $rb['files_index'] ) {
+	$ha   = json_decode( (string) file_get_contents( $dir . '/' . $a . '/extracted.sha256.json' ), true );
+	$hb   = json_decode( (string) file_get_contents( $dir . '/' . $b . '/extracted.sha256.json' ), true );
+	foreach ( array_unique( array_merge( array_keys( $ha ), array_keys( $hb ) ) ) as $p ) {
+		if ( ( $ha[ $p ] ?? null ) !== ( $hb[ $p ] ?? null ) ) {
+			$diff[] = 'extracted file differs: ' . $p;
+		}
+	}
+	if ( file_get_contents( $dir . '/' . $a . '/extract/files.index.jsonl' ) !== file_get_contents( $dir . '/' . $b . '/extract/files.index.jsonl' ) ) {
 		$diff[] = 'files.index.jsonl differs';
 	}
-	foreach ( $ra['check']['vii']['restored'] as $t => $h ) {
-		if ( in_array( $t, $ra['check']['vii']['volatile'], true ) ) {
-			continue;
-		}
-		if ( ( $rb['check']['vii']['restored'][ $t ] ?? null ) !== $h ) {
+	$ca = json_decode( (string) file_get_contents( $dir . '/' . $a . '/check.json' ), true );
+	$cb = json_decode( (string) file_get_contents( $dir . '/' . $b . '/check.json' ), true );
+	foreach ( $ca['vii']['restored'] as $t => $h ) {
+		if ( ! in_array( $t, $ca['vii']['volatile'], true ) && ( $cb['vii']['restored'][ $t ] ?? null ) !== $h ) {
 			$diff[] = 'table differs after restore: ' . $t;
 		}
 	}
-	$strip = static function ( array $m ): array {
-		unset( $m['created_at'], $m['volumes'], $m['indexes'], $m['database']['exported'] );
-		foreach ( $m['database']['tables'] as &$t ) {
-			unset( $t['sha256'], $t['chunks'], $t['bytes'] );
+	$ma      = acc_flatten( json_decode( (string) file_get_contents( $dir . '/' . $a . '/manifest.json' ), true ) );
+	$mb      = acc_flatten( json_decode( (string) file_get_contents( $dir . '/' . $b . '/manifest.json' ), true ) );
+	$allowed = array();
+	foreach ( array_unique( array_merge( array_keys( $ma ), array_keys( $mb ) ) ) as $path ) {
+		if ( array_key_exists( $path, $ma ) && array_key_exists( $path, $mb ) && $ma[ $path ] === $mb[ $path ] ) {
+			continue;
 		}
-		return $m;
-	};
-	if ( $strip( $ra['manifest'] ) !== $strip( $rb['manifest'] ) ) {
-		$diff[] = 'manifest differs outside created_at, volumes, indexes, export times and chunk-derived table fields';
+		$plain = (string) preg_replace( '~^/database/tables/([^/#]+)#\d+~', '/database/tables/$1', $path );
+		foreach ( ACC_MAY_DIFFER as $pattern => $reason ) {
+			if ( 1 === preg_match( $pattern, $plain ) ) {
+				$allowed[ $reason ][] = $plain;
+				continue 2;
+			}
+		}
+		$diff[] = 'manifest field differs: ' . $plain;
 	}
-	acc_say( array() === $diff ? "Runs {$a} and {$b} restore the same content." : "Runs {$a} and {$b} differ:\n  " . implode( "\n  ", $diff ) );
+	$report = array( 'identical_files' => count( $ha ), 'allowed_differences' => array_map( 'count', $allowed ), 'differences' => $diff );
+	file_put_contents( $dir . '/compare-' . $a . '-' . $b . '.json', json_encode( array_merge( $report, array( 'allowed_paths' => $allowed ) ), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES ) );
+	acc_say( array() === $diff ? "Runs {$a} and {$b} restore the same content: " . json_encode( $report ) : "Runs {$a} and {$b} differ:\n  " . implode( "\n  ", $diff ) );
 }
 
 // ---------------------------------------------------------------- main

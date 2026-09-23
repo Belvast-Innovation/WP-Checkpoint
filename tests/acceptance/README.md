@@ -43,13 +43,17 @@ php tests/acceptance/acceptance.php teardown --dir=$HOME/wpc-acceptance
 | iv | Median time to first byte of the front page before, during and after the export. The export may add less than 50 ms. When before and after differ by more than 20 ms or 25 %, the environment drifted: discard the numbers and repeat the run. |
 | v | `wp wpcheckpoint verify --depth=full` passes. |
 | vi | `unzip -t` passes on every volume. |
-| vii | Every volume is extracted. Every file matches its source by sha256, and nothing extra is present. The database chunks are loaded in index order into a scratch database with the `mariadb` client, and every table matches the source row by row. The options, user meta and jobs tables change while the export runs and are only reported. |
+| vii | Every volume is extracted. Every file matches its source by sha256, and nothing extra is present. The database chunks are loaded in index order into a scratch database with the `mariadb` client, and every table matches the source row by row. The options and user meta tables change while the export runs and are only reported. |
 | viii | The manifest's file count and bytes match an independent walk of `wp-content` that applies the same exclusions. |
 | ix | The work directory's peak size stays within the archive size plus a margin, and the next maintenance pass reclaims it. |
 
 `compare` compares two runs by what the backups restore, not byte for byte:
+- Every extracted file must have the same sha256 in both runs. This uses `unzip` and the host's hashing, not the plugin's reader.
 - `files.index.jsonl` must be identical.
 - Every table except the volatile ones must restore to the same rows.
-- The manifests must agree outside the creation time, the volume and index entries, the export times, and the chunk-derived table fields.
+- The standalone manifests must be equal except for the fields listed in `ACC_MAY_DIFFER`, each with its reason:
+  - the clock (`created_at` and the export times);
+  - the database chunk boundaries and what derives from them (table and index hashes, sizes and chunk counts, and the volume list, which also carries the base name);
+  - the row counts of the tables written during the export.
 
-Database chunk boundaries can differ between runs because a resumed table starts a new batch.
+Any other field, including one added later, must be equal. Chunk boundaries can differ because a resumed table starts a new batch.
