@@ -317,7 +317,8 @@ final class ArchiveVerifier {
 			}
 		} catch ( EnvironmentFailure $e ) {
 			$this->add( new Finding( (string) $this->state['phase'], Finding::ENVIRONMENT, 'This server could not read or write what the check needs: ' . $e->getMessage() ) );
-			$this->state['unreadable'] = true;
+			$this->state['unreadable']       = true;
+			$this->state['unreadable_cause'] = $e->cause();
 			$this->stop( (string) $this->state['phase'] );
 		} finally {
 			foreach ( $this->handles as $handle ) {
@@ -366,6 +367,7 @@ final class ArchiveVerifier {
 	 * Parse the manifest; a manifest that cannot be read ends the run as invalid.
 	 *
 	 * @return void
+	 * @throws EnvironmentFailure When this server cannot read what the check needs (step() reports it, never as damage).
 	 */
 	private function step_manifest(): void {
 		try {
@@ -375,6 +377,8 @@ final class ArchiveVerifier {
 			$this->state['invalid'] = true;
 			$this->stop( self::PHASE_MANIFEST );
 			return;
+		} catch ( EnvironmentFailure $e ) {
+			throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged: this server could not read what the check needs; step() reports it, never as damage.
 		} catch ( \RuntimeException $e ) {
 			$this->add( new Finding( self::PHASE_MANIFEST, Finding::MALFORMED, $e->getMessage() ) );
 			$this->state['invalid'] = true;
@@ -421,6 +425,7 @@ final class ArchiveVerifier {
 	 * @return Manifest
 	 * @throws ManifestError When the document is not acceptable.
 	 * @throws \RuntimeException When the file or entry cannot be read.
+	 * @throws EnvironmentFailure When this server cannot read what the check needs (step() reports it, never as damage).
 	 */
 	private function manifest(): Manifest {
 		if ( null !== $this->manifest ) {
@@ -447,7 +452,7 @@ final class ArchiveVerifier {
 			}
 			$json = file_get_contents( $this->path, false, null, 0, Manifest::MAX_JSON_BYTES ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- bounded to 4 MB by the size check above.
 			if ( ! is_string( $json ) ) {
-				throw new \RuntimeException( 'The manifest file could not be read.' );
+				throw new EnvironmentFailure( 'The manifest file is there, but this server cannot read it (file permissions or storage). The archive itself is not in question.', EnvironmentFailure::ACCESS ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- fixed text.
 			}
 			$manifest = Manifest::from_json( $json );
 			if ( $manifest->embedded() ) {
@@ -638,6 +643,8 @@ final class ArchiveVerifier {
 				)
 			);
 			return;
+		} catch ( EnvironmentFailure $e ) {
+			throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged: this server could not read what the check needs; step() reports it, never as damage.
 		} catch ( \RuntimeException $e ) {
 			$this->add( new Finding( self::PHASE_VOLUMES, Finding::MALFORMED, 'The embedded manifest copy cannot be read: ' . $e->getMessage(), array( 'volume' => $volume['ordinal'] ) ) );
 			return;
@@ -695,6 +702,8 @@ final class ArchiveVerifier {
 			}
 			try {
 				$reader = ZipReader::open( $this->volume_path( $last ) );
+			} catch ( EnvironmentFailure $e ) {
+				throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged: this server could not read what the check needs; step() reports it, never as damage.
 			} catch ( \RuntimeException $e ) {
 				$this->add( new Finding( self::PHASE_INDEXES, Finding::CORRUPT, 'The volume could not be opened as a zip archive: ' . $e->getMessage(), array( 'volume' => $last['ordinal'] ) ) );
 				$this->stop( self::PHASE_INDEXES );
@@ -702,6 +711,8 @@ final class ArchiveVerifier {
 			}
 			try {
 				$entry = $reader->find( $spec['path'] );
+			} catch ( EnvironmentFailure $e ) {
+				throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged: this server could not read what the check needs; step() reports it, never as damage.
 			} catch ( \RuntimeException $e ) {
 				$this->add( new Finding( self::PHASE_INDEXES, Finding::CORRUPT, 'The central directory of the volume is malformed: ' . $e->getMessage(), array( 'volume' => $last['ordinal'] ) ) );
 				$this->stop( self::PHASE_INDEXES );
@@ -817,15 +828,20 @@ final class ArchiveVerifier {
 	}
 
 	/**
-	 * Whole-file hash comparison that treats an unreadable file as a mismatch.
+	 * Whole-file hash comparison. A file this server cannot read at all
+	 * (EnvironmentFailure) is not a mismatch and is rethrown; any other read
+	 * failure counts as one.
 	 *
 	 * @param string $file     File.
 	 * @param string $expected Lowercase hex.
 	 * @return bool
+	 * @throws EnvironmentFailure When this server cannot read the file.
 	 */
 	private function hash_file_equals( string $file, string $expected ): bool {
 		try {
 			return hash_equals( $expected, ChunkHasher::hash_file( $file ) );
+		} catch ( EnvironmentFailure $e ) {
+			throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged: this server could not read what the check needs; step() reports it, never as damage.
 		} catch ( \RuntimeException $e ) {
 			return false;
 		}
@@ -860,11 +876,12 @@ final class ArchiveVerifier {
 	 * @param int    $offset Byte offset of the line start.
 	 * @return array{0: string, 1: int}|null Line without its newline and the offset after it; null at the end.
 	 * @throws \RuntimeException When the file cannot be positioned.
+	 * @throws EnvironmentFailure When this server cannot read what the check needs (step() reports it, never as damage).
 	 */
 	private function read_line( string $which, int $offset ): ?array {
 		$handle = $this->index_handle( $which );
 		if ( 0 !== fseek( $handle, $offset ) ) {
-			throw new \RuntimeException( 'The extracted index could not be positioned.' );
+			throw new EnvironmentFailure( 'The extracted index in the work directory could not be positioned.' );
 		}
 		$line = fgets( $handle, IndexLine::MAX_LINE_BYTES + 2 );
 		if ( false === $line ) {
@@ -1031,6 +1048,7 @@ final class ArchiveVerifier {
 	 * @param int $end   Offset after the last line.
 	 * @return string
 	 * @throws \RuntimeException When a line changed since it was accepted.
+	 * @throws EnvironmentFailure When this server cannot read what the check needs (step() reports it, never as damage).
 	 */
 	private function table_list_hash( int $start, int $end ): string {
 		$context = hash_init( 'sha256' );
@@ -1043,7 +1061,7 @@ final class ArchiveVerifier {
 			try {
 				$parsed = IndexLine::database( $read[0], $this->manifest()->chunk_bytes() );
 			} catch ( IndexLineError $e ) {
-				throw new \RuntimeException( 'The extracted index changed while it was being read.' );
+				throw new EnvironmentFailure( 'The extracted index in the work directory changed while it was being read.' );
 			}
 			hash_update( $context, $parsed['h'] );
 			$offset = $read[1];
@@ -1236,6 +1254,7 @@ final class ArchiveVerifier {
 	 *
 	 * @return array{which: string, line: array<string, mixed>, name: string, end: int}|null Null when both are exhausted.
 	 * @throws \RuntimeException When the extracted index is gone or changed.
+	 * @throws EnvironmentFailure When this server cannot read what the check needs (step() reports it, never as damage).
 	 */
 	private function peek_line(): ?array {
 		$chunk_bytes = $this->manifest()->chunk_bytes();
@@ -1254,7 +1273,7 @@ final class ArchiveVerifier {
 			try {
 				$parsed = 'database' === $which ? IndexLine::database( $read[0], $chunk_bytes ) : IndexLine::files( $read[0], $chunk_bytes );
 			} catch ( IndexLineError $e ) {
-				throw new \RuntimeException( 'The extracted index changed while it was being read.' );
+				throw new EnvironmentFailure( 'The extracted index in the work directory changed while it was being read.' );
 			}
 			return array(
 				'which' => $which,
@@ -1304,6 +1323,7 @@ final class ArchiveVerifier {
 	 * unit. After the last volume, lines left over are missing content.
 	 *
 	 * @return void
+	 * @throws EnvironmentFailure When this server cannot read what the check needs (step() reports it, never as damage).
 	 */
 	private function step_contents(): void {
 		$volumes = $this->volumes();
@@ -1323,6 +1343,8 @@ final class ArchiveVerifier {
 		}
 		try {
 			$reader = ZipReader::open( $this->volume_path( $volume ) );
+		} catch ( EnvironmentFailure $e ) {
+			throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged: this server could not read what the check needs; step() reports it, never as damage.
 		} catch ( \RuntimeException $e ) {
 			$this->add( new Finding( self::PHASE_CONTENTS, Finding::CORRUPT, 'The volume could not be opened as a zip archive: ' . $e->getMessage(), array( 'volume' => $volume['ordinal'] ) ) );
 			$this->state['gap'] = true;
@@ -1370,6 +1392,8 @@ final class ArchiveVerifier {
 				(int) $this->state['entry']['index'],
 				(int) $this->state['entry']['cd_offset']
 			);
+		} catch ( EnvironmentFailure $e ) {
+			throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged: this server could not read what the check needs; step() reports it, never as damage.
 		} catch ( \RuntimeException $e ) {
 			$this->add( new Finding( self::PHASE_CONTENTS, Finding::CORRUPT, 'The central directory of the volume is malformed: ' . $e->getMessage(), array( 'volume' => $volume['ordinal'] ) ) );
 			$this->state['gap'] = true;
@@ -1407,6 +1431,7 @@ final class ArchiveVerifier {
 	 * @param int                  $ordinal Volume ordinal.
 	 * @param int                  $bytes   Bytes handled in this unit (updated).
 	 * @return bool
+	 * @throws EnvironmentFailure When this server cannot read what the check needs (step() reports it, never as damage).
 	 */
 	private function verify_entry( ZipReader $reader, array $entry, int $ordinal, int &$bytes ): bool {
 		if ( null !== $entry['problem'] ) {
@@ -1490,6 +1515,8 @@ final class ArchiveVerifier {
 			// Deflated (at most the reader's inflate limit): one unit for the whole entry.
 			try {
 				$hashes = $reader->hash_entry_chunks( $entry, $chunk_bytes );
+			} catch ( EnvironmentFailure $e ) {
+				throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged: this server could not read what the check needs; step() reports it, never as damage.
 			} catch ( \RuntimeException $e ) {
 				$this->unreadable( $e, $where );
 				$this->consume_line( $peeked );
@@ -1510,6 +1537,8 @@ final class ArchiveVerifier {
 		$bytes         += $length - $usize;
 		try {
 			$hash = $reader->hash_entry_range( $entry, $block * $chunk_bytes, $length );
+		} catch ( EnvironmentFailure $e ) {
+			throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged: this server could not read what the check needs; step() reports it, never as damage.
 		} catch ( \RuntimeException $e ) {
 			$this->unreadable( $e, $where );
 			$this->consume_line( $peeked );
@@ -1542,6 +1571,7 @@ final class ArchiveVerifier {
 	 * @param array<string, mixed> $where  Location.
 	 * @param bool                 $count  Whether the entry counts toward progress (an index line's entry).
 	 * @return void
+	 * @throws EnvironmentFailure When this server cannot read what the check needs (step() reports it, never as damage).
 	 */
 	private function check_local_header( ZipReader $reader, array $entry, array $where, bool $count = true ): void {
 		if ( $count ) {
@@ -1549,6 +1579,8 @@ final class ArchiveVerifier {
 		}
 		try {
 			$local = $reader->local_header( $entry );
+		} catch ( EnvironmentFailure $e ) {
+			throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged: this server could not read what the check needs; step() reports it, never as damage.
 		} catch ( \RuntimeException $e ) {
 			$this->add( new Finding( self::PHASE_CONTENTS, Finding::CORRUPT, 'The local header of the entry cannot be read: ' . $e->getMessage(), $where ) );
 			return;
@@ -1572,12 +1604,15 @@ final class ArchiveVerifier {
 	 * @param string               $expected Lowercase hex.
 	 * @param array<string, mixed> $where    Location.
 	 * @return bool
+	 * @throws EnvironmentFailure When this server cannot read what the check needs (step() reports it, never as damage).
 	 */
 	private function entry_hash_equals( ZipReader $reader, array $entry, string $expected, array $where ): bool {
 		try {
 			if ( hash_equals( $expected, $reader->hash_entry( $entry ) ) ) {
 				return true;
 			}
+		} catch ( EnvironmentFailure $e ) {
+			throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged: this server could not read what the check needs; step() reports it, never as damage.
 		} catch ( \RuntimeException $e ) {
 			$this->unreadable( $e, $where );
 			return false;

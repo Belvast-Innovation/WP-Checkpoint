@@ -218,16 +218,17 @@ final class VerificationResult {
 			$findings[] = $finding->to_array( $clean );
 		}
 		return array(
-			'outcome'         => $this->outcome,
-			'complete'        => $this->is_complete_pass(),
-			'restore_refused' => $this->restore_refused(),
-			'depth'           => (string) ( $this->state['depth'] ?? '' ),
-			'embedded'        => ! empty( $this->state['embedded'] ),
-			'partial_reasons' => $this->partial_reasons,
-			'stopped_at'      => isset( $this->state['stopped_at'] ) ? (string) $this->state['stopped_at'] : null,
-			'counts'          => $this->counts(),
-			'findings'        => $findings,
-			'findings_total'  => $this->findings_total(),
+			'outcome'          => $this->outcome,
+			'complete'         => $this->is_complete_pass(),
+			'restore_refused'  => $this->restore_refused(),
+			'depth'            => (string) ( $this->state['depth'] ?? '' ),
+			'embedded'         => ! empty( $this->state['embedded'] ),
+			'partial_reasons'  => $this->partial_reasons,
+			'stopped_at'       => isset( $this->state['stopped_at'] ) ? (string) $this->state['stopped_at'] : null,
+			'unreadable_cause' => isset( $this->state['unreadable_cause'] ) ? (string) $this->state['unreadable_cause'] : null,
+			'counts'           => $this->counts(),
+			'findings'         => $findings,
+			'findings_total'   => $this->findings_total(),
 		);
 	}
 
@@ -249,7 +250,7 @@ final class VerificationResult {
 		if ( isset( $this->state['stopped_at'] ) ) {
 			$lines[] = 'Verification stopped in phase "' . (string) $this->state['stopped_at'] . '".';
 		}
-		$next = self::next_step( $this->outcome );
+		$next = self::next_step( $this->outcome, (string) ( $this->state['unreadable_cause'] ?? '' ) );
 		if ( ! empty( $this->state['inconsistent'] ) ) {
 			$next = trim( self::INCONSISTENT_ADVICE . ' ' . $next );
 		}
@@ -278,15 +279,22 @@ final class VerificationResult {
 	 * What the user should do next, for outcomes where that is not obvious.
 	 *
 	 * @param string $outcome Outcome.
+	 * @param string $cause   For UNREADABLE: EnvironmentFailure's cause ('' when unknown).
 	 * @return string Empty when there is nothing to add.
 	 */
-	public static function next_step( string $outcome ): string {
+	public static function next_step( string $outcome, string $cause = '' ): string {
 		switch ( $outcome ) {
 			case self::UNSUPPORTED_LAYOUT:
 				return self::REPACKED_ADVICE;
 			case self::CHANGED:
 				return 'Nothing read after the change is conclusive; the archive may still be being transferred or downloaded. Verify again once writing has finished.';
 			case self::UNREADABLE:
+				if ( EnvironmentFailure::ZLIB === $cause ) {
+					return 'The archive itself is not in question: its compressed entries need the zlib extension, and this server\'s PHP does not have it. Verify or restore the backup on a server whose PHP has the zlib extension (or ask your host to enable it).';
+				}
+				if ( EnvironmentFailure::ACCESS === $cause ) {
+					return 'The archive itself was not judged: this server cannot read one of its files. Check the permissions of the backup files and that their storage is healthy, then verify again.';
+				}
 				return 'The archive itself was not judged. Check the free disk space and the permissions of the plugin\'s storage directory, then verify again.';
 			default:
 				return '';
