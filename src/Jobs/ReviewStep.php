@@ -42,6 +42,22 @@ final class ReviewStep implements Step {
 	}
 
 	/**
+	 * Free space in the storage directory: function(): int|float|false.
+	 *
+	 * @var callable|null
+	 */
+	private $disk_free;
+
+	/**
+	 * Constructor.
+	 *
+	 * @param callable|null $disk_free Bytes free in the storage directory (false when unknown); null skips the check.
+	 */
+	public function __construct( $disk_free = null ) {
+		$this->disk_free = is_callable( $disk_free ) ? $disk_free : null;
+	}
+
+	/**
 	 * Decide or ask.
 	 *
 	 * @param JobContext $context Context.
@@ -80,6 +96,7 @@ final class ReviewStep implements Step {
 				)
 			);
 		}
+		$this->check_space( $preflight, $scan, $findings, $decisions );
 		ExportPlan::write(
 			$work,
 			ExportPlan::REVIEW,
@@ -93,6 +110,42 @@ final class ReviewStep implements Step {
 			$context->logger()->info( $note );
 		}
 		return StepResult::done( __( 'Review finished', 'wp-checkpoint' ) );
+	}
+
+	/**
+	 * The last point before anything large is written (the database export
+	 * comes next): the whole backup must fit, not only one volume. The files
+	 * are known from the scan; the database is an estimate from the table
+	 * statistics (ExportPlan::DATABASE_ESTIMATE). The pack step checks again
+	 * with the exported size, and the packer before every volume.
+	 *
+	 * @param array<string, mixed> $preflight preflight.json.
+	 * @param array<string, mixed> $scan      Scan summary.
+	 * @param array<string, mixed> $findings  Findings.
+	 * @param array<string, mixed> $decisions Decisions.
+	 * @return void
+	 * @throws \RuntimeException When the backup would not fit.
+	 */
+	private function check_space( array $preflight, array $scan, array $findings, array $decisions ): void {
+		if ( null === $this->disk_free ) {
+			return;
+		}
+		$free = call_user_func( $this->disk_free );
+		if ( ! is_int( $free ) && ! is_float( $free ) ) {
+			return; // Unknown: the preflight already warned, and the packer checks before every volume.
+		}
+		$files    = ExportPlan::planned_files(
+			$scan,
+			array(
+				'findings'  => $findings,
+				'decisions' => $decisions,
+			)
+		);
+		$database = (float) ( $preflight['checks']['db_bytes'] ?? 0 ) * ExportPlan::DATABASE_ESTIMATE[0] / ExportPlan::DATABASE_ESTIMATE[1];
+		$needed   = ExportPlan::required_bytes( $files['bytes'], $files['count'], $database, false );
+		if ( (float) $free < $needed ) {
+			throw new \RuntimeException( sprintf( 'Not enough free disk space for this backup: %1$d MB free in the storage directory, about %2$d MB needed. The whole archive stays there until it is complete, next to the exported database (%3$d MB of files, about %4$d MB of database). Free up space, or leave large directories or tables out. Failed backup jobs keep their work files for %5$d days so that they can be retried; they take space too until then.', (int) ( $free / 1048576 ), (int) ceil( $needed / 1048576 ), (int) ( $files['bytes'] / 1048576 ), (int) ceil( $database / 1048576 ), (int) ( JobRepository::WORK_RETENTION_SECONDS / 86400 ) ) );
+		}
 	}
 
 	/**
@@ -122,7 +175,7 @@ final class ReviewStep implements Step {
 	 *
 	 * @param array<string, mixed> $preflight preflight.json.
 	 * @param array<string, mixed> $scan      scan.summary.json (empty when no files were scanned).
-	 * @return array{unreadable: array{count: int, listed: string[]}, too_large: array{count: int, listed: string[]}, over_volume: array{count: int, listed: string[]}, heavy: array<int, array{p: string, bytes: int}>, oversize: array<int, array{table: string, exact: bool, count: int|null, limit: int}>}
+	 * @return array{unreadable: array{count: int, listed: string[]}, too_large: array{count: int, listed: string[]}, over_volume: array{count: int, listed: string[]}, heavy: array<int, array{p: string, bytes: int}>, oversize: array<int, array{table: string, exact: bool, count: int|null, limit: int}>, foreign: array<int, array{prefix: string, count: int, listed: string[], kept: int, kept_listed: string[]}>}
 	 */
 	public static function findings( array $preflight, array $scan ): array {
 		$lists  = isset( $scan['lists'] ) && is_array( $scan['lists'] ) ? $scan['lists'] : array();
@@ -163,12 +216,25 @@ final class ReviewStep implements Step {
 				);
 			}
 		}
+		$foreign = array();
+		foreach ( isset( $preflight['findings']['foreign'] ) && is_array( $preflight['findings']['foreign'] ) ? $preflight['findings']['foreign'] : array() as $group ) {
+			if ( is_array( $group ) && isset( $group['prefix'] ) ) {
+				$foreign[] = array(
+					'prefix'      => (string) $group['prefix'],
+					'count'       => (int) ( $group['count'] ?? 0 ),
+					'listed'      => isset( $group['listed'] ) && is_array( $group['listed'] ) ? array_values( array_map( 'strval', $group['listed'] ) ) : array(),
+					'kept'        => (int) ( $group['kept'] ?? 0 ),
+					'kept_listed' => isset( $group['kept_listed'] ) && is_array( $group['kept_listed'] ) ? array_values( array_map( 'strval', $group['kept_listed'] ) ) : array(),
+				);
+			}
+		}
 		return array(
 			'unreadable'  => $listed( 'unreadable' ),
 			'too_large'   => $listed( 'too_large' ),
 			'over_volume' => $listed( 'over_volume' ),
 			'heavy'       => $heavy,
 			'oversize'    => $oversize,
+			'foreign'     => $foreign,
 		);
 	}
 
@@ -200,6 +266,16 @@ final class ReviewStep implements Step {
 			}
 			return 'fail' === $value ? 'stop' : $value;
 		};
+
+		foreach ( isset( $findings['foreign'] ) ? $findings['foreign'] : array() as $group ) {
+			// Not a question: decided by rule and named, so that a misjudged table can be added back or left out.
+			if ( $group['count'] > 0 ) {
+				$decisions['notes'][] = sprintf( '%d tables with the prefix %s are the core tables of another WordPress installation in the same database and are not in the backup (for example %s). If they belong to this site, include them by name (wp wpcheckpoint export --include-table=...).', $group['count'], $group['prefix'], implode( ', ', array_slice( $group['listed'], 0, 3 ) ) );
+			}
+			if ( $group['kept'] > 0 ) {
+				$decisions['notes'][] = sprintf( '%d other tables with the prefix %s are in the backup although they may belong to that installation (for example %s). If they do, leave them out by name (wp wpcheckpoint export --exclude-table=...).', $group['kept'], $group['prefix'], implode( ', ', array_slice( $group['kept_listed'], 0, 3 ) ) );
+			}
+		}
 
 		if ( $findings['unreadable']['count'] > 0 ) {
 			$choice = $answer( 'unreadable', 'unreadable', array( 'continue', 'stop' ) );

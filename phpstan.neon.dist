@@ -12,3 +12,5 @@ parameters:
         - tests/phpstan-bootstrap.php
     scanFiles:
         - tests/phpstan-stubs/wp-cli.php
+rules:
+    - WPCheckpoint\Tests\PHPStan\HostFunctionsRule

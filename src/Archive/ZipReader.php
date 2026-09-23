@@ -8,6 +8,7 @@
 namespace WPCheckpoint\Archive;
 
 use WPCheckpoint\Support\Paths;
+use WPCheckpoint\Support\HostFunctions;
 
 // phpcs:disable WordPress.WP.AlternativeFunctions -- streamed reads of archive files; the WP filesystem API has no equivalent.
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- messages are internal (an entry-path verdict), never HTML; the caller presents them through JobPresenter::clean().
@@ -659,7 +660,10 @@ final class ZipReader {
 				// gzinflate()'s max_length must never be 0: PHP reads 0 as "unlimited", and a 64 MiB deflate
 				// stream can expand to tens of gigabytes before any check after the call runs. A declared size
 				// of zero therefore inflates with a limit of one byte and must yield nothing.
-				$data = 0 === $csize ? '' : @gzinflate( $compressed, max( 1, $usize ) ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- corrupt data is reported below.
+				if ( $csize > 0 && ! HostFunctions::can_deflate() ) {
+					throw new \RuntimeException( 'The entry is compressed, and this server\'s PHP has no zlib extension to read it.' );
+				}
+				$data = 0 === $csize ? '' : HostFunctions::gzinflate( $compressed, max( 1, $usize ) );
 				if ( ! is_string( $data ) || strlen( $data ) !== $usize ) {
 					throw new \RuntimeException( 'The entry could not be inflated.' );
 				}

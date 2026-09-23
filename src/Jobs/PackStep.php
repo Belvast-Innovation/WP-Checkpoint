@@ -18,6 +18,7 @@ use WPCheckpoint\Archive\SourceGone;
 use WPCheckpoint\Files\Exclusions;
 use WPCheckpoint\Files\ScanRoots;
 use WPCheckpoint\Support\Paths;
+use WPCheckpoint\Support\HostFunctions;
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- messages carry archive paths and numbers; the runner stores them through the redactor and the presenter cleans them before display.
 
@@ -190,7 +191,10 @@ final class PackStep implements Step {
 		if ( ! is_dir( $volumes ) && ! @mkdir( $volumes, 0700 ) && ! is_dir( $volumes ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- a warning would put the path into the error log.
 			throw new TransientFailure( 'The volumes directory could not be created.' );
 		}
-		$base   = isset( $plan['base'] ) ? (string) $plan['base'] : '';
+		$base = isset( $plan['base'] ) ? (string) $plan['base'] : '';
+		if ( array() === $cursor['packer'] ) {
+			$this->check_space( $work, $volumes, $review );
+		}
 		$packer = Packer::open( $volumes, $base, $cursor['packer'], $this->packer_options_with( $context ) );
 		self::cut( $work . DIRECTORY_SEPARATOR . self::PACKED_INDEX, $cursor['packed_bytes'] );
 		self::cut( $work . DIRECTORY_SEPARATOR . self::CHUNKS, $cursor['chunks_bytes'] );
@@ -782,6 +786,37 @@ final class PackStep implements Step {
 			'text' => rtrim( $line, "\r\n" ),
 			'next' => $offset + strlen( $line ),
 		);
+	}
+
+	/**
+	 * Before the first volume: the whole archive must fit, now with the
+	 * database's exported size instead of the review's estimate (the chunks
+	 * are on disk already; their copies in the volumes are not). Unknown free
+	 * space does not block; the packer still checks before every volume.
+	 *
+	 * @param string               $work    Work directory.
+	 * @param string               $volumes Volumes directory.
+	 * @param array<string, mixed> $review  review.json.
+	 * @return void
+	 * @throws \RuntimeException When the archive would not fit.
+	 */
+	private function check_space( string $work, string $volumes, array $review ): void {
+		$reader = isset( $this->packer_options['disk_free'] ) && is_callable( $this->packer_options['disk_free'] ) ? $this->packer_options['disk_free'] : array( HostFunctions::class, 'disk_free_space' );
+		$free   = call_user_func( $reader, $volumes );
+		if ( ! is_int( $free ) && ! is_float( $free ) ) {
+			return;
+		}
+		$scan     = ExportPlan::exists( $work, FileScanStep::SUMMARY ) ? ExportPlan::read( $work, FileScanStep::SUMMARY ) : array();
+		$summary  = ExportPlan::exists( $work, DatabaseExportStep::SUMMARY ) ? ExportPlan::read( $work, DatabaseExportStep::SUMMARY ) : array();
+		$database = 0.0;
+		foreach ( isset( $summary['tables'] ) && is_array( $summary['tables'] ) ? $summary['tables'] : array() as $table ) {
+			$database += (float) ( is_array( $table ) ? ( $table['bytes'] ?? 0 ) : 0 );
+		}
+		$files  = ExportPlan::planned_files( $scan, $review );
+		$needed = ExportPlan::required_bytes( $files['bytes'], $files['count'], $database, true );
+		if ( (float) $free < $needed ) {
+			throw new \RuntimeException( sprintf( 'Not enough free disk space to pack this backup: %1$d MB free in the storage directory, about %2$d MB needed for the archive (%3$d MB of files, %4$d MB of exported database). Free up space, or leave large directories or tables out. Failed backup jobs keep their work files for %5$d days so that they can be retried; they take space too until then.', (int) ( $free / 1048576 ), (int) ceil( $needed / 1048576 ), (int) ( $files['bytes'] / 1048576 ), (int) ceil( $database / 1048576 ), (int) ( JobRepository::WORK_RETENTION_SECONDS / 86400 ) ) );
+		}
 	}
 
 	/**

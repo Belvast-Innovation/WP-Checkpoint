@@ -15,11 +15,13 @@ use WPCheckpoint\Admin\ReclaimActions;
 use WPCheckpoint\Admin\Page;
 use WPCheckpoint\Admin\SettingsActions;
 use WPCheckpoint\Admin\JobProgress;
+use WPCheckpoint\Cli\ExportCommand;
 use WPCheckpoint\Cli\JobCommand;
 use WPCheckpoint\Cli\VerifyCommand;
 use WPCheckpoint\Jobs\JobActions;
 use WPCheckpoint\Jobs\JobPresenter;
 use WPCheckpoint\Jobs\JobRepository;
+use WPCheckpoint\Jobs\ExportJob;
 use WPCheckpoint\Jobs\JobTypes;
 use WPCheckpoint\Jobs\Loopback;
 use WPCheckpoint\Jobs\Runner;
@@ -146,8 +148,9 @@ final class Plugin {
 		add_action( Loopback::HOOK, array( $this, 'cron_tick' ) );
 
 		if ( defined( 'WP_CLI' ) && WP_CLI ) {
-			\WP_CLI::add_command( 'wpcheckpoint job', new JobCommand( $this->job_actions(), $this->job_presenter() ) );
+			\WP_CLI::add_command( 'wpcheckpoint job', new JobCommand( $this->job_actions(), $this->job_presenter(), $this->directories() ) );
 			\WP_CLI::add_command( 'wpcheckpoint verify', new VerifyCommand( $this->job_presenter(), $this->directories() ) );
+			\WP_CLI::add_command( 'wpcheckpoint export', new ExportCommand( $this->jobs(), $this->job_actions(), $this->job_presenter(), $this->directories() ) );
 		}
 
 		if ( is_admin() ) {
@@ -299,13 +302,25 @@ final class Plugin {
 	}
 
 	/**
-	 * Registered job types (built-in ones are added by later tasks).
+	 * Registered job types: the export job, and fixtures in tests.
 	 *
 	 * @return JobTypes
 	 */
 	public function job_types(): JobTypes {
 		if ( null === $this->job_types ) {
 			$this->job_types = new JobTypes();
+			$plugin          = $this;
+			$this->job_types->add(
+				new ExportJob(
+					static function () use ( $plugin ): Directories {
+						return $plugin->directories();
+					},
+					static function ( string $text ) use ( $plugin ): string {
+						// Fetched when a report is cleaned: the presenter itself needs the job types.
+						return $plugin->job_presenter()->clean( $text );
+					}
+				)
+			);
 		}
 		return $this->job_types;
 	}

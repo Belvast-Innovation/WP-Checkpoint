@@ -341,6 +341,12 @@ final class ManifestStep implements Step {
 	private function audit( JobContext $context, string $work, array &$cursor ) {
 		$summary = ExportPlan::read( $work, DatabaseExportStep::SUMMARY );
 		$tables  = isset( $summary['tables'] ) && is_array( $summary['tables'] ) ? $summary['tables'] : array();
+		$options = ExportOptions::normalize( array_diff_key( $context->options(), array( 'answers' => true ) ) );
+		if ( $options['contents']['database'] && array() === $tables ) {
+			// The manifest would say "no database" (contents.database follows the tables) and the backup would look
+			// complete: the last line of defence behind the listing and the pre-flight checks.
+			throw new \RuntimeException( 'The backup was to contain the database, but no table was exported. It is stopped rather than finished without the database. If the database is meant to be left out, back up the files only (wp wpcheckpoint export --files-only).' );
+		}
 		while ( empty( $cursor['audit']['database']['done'] ) || empty( $cursor['audit']['files']['done'] ) ) {
 			if ( empty( $cursor['audit']['database']['done'] ) ) {
 				$cursor['audit']['database'] = IndexAudit::database_step( $work . DIRECTORY_SEPARATOR . Manifest::DATABASE_INDEX, $tables, $cursor['audit']['database'], $this->chunk_bytes );

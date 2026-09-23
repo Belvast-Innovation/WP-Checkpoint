@@ -179,6 +179,9 @@ final class JobRepository {
 	public function create( string $type, int $owner_user = 0, array $cursor = array(), array $options = array() ): Job {
 		global $wpdb;
 
+		// The first write a request makes may be this one (a command run right after an update): the row
+		// needs every column of the current schema. No-op when the schema is current or newer.
+		Schema::ensure();
 		if ( ! Schema::is_compatible() ) {
 			throw new JobsUnavailable( esc_html__( 'The database structure was created by a newer version of WP Checkpoint. Please update the plugin.', 'wp-checkpoint' ) );
 		}

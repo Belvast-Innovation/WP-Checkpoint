@@ -12,6 +12,7 @@ use WPCheckpoint\Database\Connection;
 use WPCheckpoint\Database\RowSizeCheck;
 use WPCheckpoint\Database\SqlWriter;
 use WPCheckpoint\Database\TableExporter;
+use WPCheckpoint\Database\TableSelection;
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- messages carry table names and numbers; the runner stores them through the redactor and the presenter cleans them before display.
 
@@ -37,6 +38,18 @@ use WPCheckpoint\Database\TableExporter;
  * site's slug) come in as callables so the step is testable without it.
  */
 final class PreflightStep implements Step {
+
+	/**
+	 * Tables of a left-out group named in the findings (the rest are counted).
+	 */
+	const MAX_FOREIGN_LISTED = 20;
+
+	/**
+	 * The shape of every base name base_name() makes: slug of at most 40
+	 * characters, UTC date and time, four hex digits.
+	 */
+	const BASE_PATTERN = '/\A[a-z0-9][a-z0-9-]{0,39}-[0-9]{8}-[0-9]{6}-[0-9a-f]{4}\z/';
+
 
 	const ID = 'preflight';
 
@@ -71,7 +84,9 @@ final class PreflightStep implements Step {
 	 *                                          'writable' (callable(): string[] of unwritable directory names),
 	 *                                          'disk_free' (callable(): int|false, bytes free in the storage directory),
 	 *                                          'slug' (callable(): string), 'can_deflate' (bool), 'normalization' (bool),
-	 *                                          'int_size' (int), 'now' (callable(): int), 'random' (callable(): string, four hex digits; tests).
+	 *                                          'int_size' (int), 'now' (callable(): int), 'random' (callable(): string, four hex digits; tests),
+	 *                                          'multisite' (bool), 'core_tables' (callable(): string[], this installation's core tables),
+	 *                                          'own_tables' (string[], the plugin's own tables: never in a backup).
 	 * @param int                  $chunk_bytes Chunk size.
 	 */
 	public function __construct( Connection $connection, array $env, int $chunk_bytes = TableExporter::CHUNK_BYTES ) {
@@ -217,15 +232,46 @@ final class PreflightStep implements Step {
 	 * @throws \RuntimeException When there is not enough free disk space.
 	 */
 	private function tables( string $work, array $options, array &$state ): void {
-		$tables = array();
-		$notes  = array();
-		$stats  = array();
+		$tables  = array();
+		$notes   = array();
+		$stats   = array();
+		$foreign = array();
 		if ( $options['contents']['database'] ) {
 			$listing = call_user_func( $this->env['tables'], (string) $this->env['prefix'] );
-			$seen    = array();
+			$core    = isset( $this->env['core_tables'] ) ? (array) call_user_func( $this->env['core_tables'] ) : array();
+			$missing = self::missing_essentials( array_map( 'strval', (array) $listing['tables'] ), array_map( 'strval', $core ), (string) $this->env['prefix'] );
+			if ( array() !== $missing ) {
+				// A listing without this site's own posts or options is not this site's database (a failed or
+				// filtered query, a wrong prefix): a backup made from it would hold no database and look complete.
+				throw new \RuntimeException( sprintf( 'The database did not list this site\'s own tables (%s missing). The backup is stopped rather than made without the database; check the table prefix and the database connection, and try again.', implode( ', ', $missing ) ) );
+			}
+			// The plugin's own job table describes this installation's jobs and storage, not the site: a restore
+			// keeps the target's own.
+			$own    = isset( $this->env['own_tables'] ) ? array_map( 'strval', (array) $this->env['own_tables'] ) : array();
+			$all    = array_values( array_diff( array_map( 'strval', (array) $listing['tables'] ), $own ) );
+			$groups = TableSelection::foreign( $all, (string) $this->env['prefix'], ! empty( $this->env['multisite'] ), $core );
+			$left   = array_fill_keys( $own, true );
+			foreach ( $groups as $group_prefix => $group ) {
+				// Another installation's core tables stay out unless the user named them; the rest under its prefix stays in.
+				$out  = array_values( array_diff( $group['excluded'], $options['include_tables'] ) );
+				$kept = array_values( array_diff( $group['kept'], $options['exclude_tables'] ) );
+				if ( array() !== $out || array() !== $kept ) {
+					$foreign[] = array(
+						'prefix'      => (string) $group_prefix,
+						'count'       => count( $out ),
+						'listed'      => array_slice( $out, 0, self::MAX_FOREIGN_LISTED ),
+						'kept'        => count( $kept ),
+						'kept_listed' => array_slice( $kept, 0, self::MAX_FOREIGN_LISTED ),
+					);
+				}
+				foreach ( $out as $table ) {
+					$left[ $table ] = true;
+				}
+			}
+			$seen = array();
 			foreach ( (array) $listing['tables'] as $table ) {
 				$table = (string) $table;
-				if ( in_array( $table, $options['exclude_tables'], true ) ) {
+				if ( in_array( $table, $options['exclude_tables'], true ) || isset( $left[ $table ] ) ) {
 					continue;
 				}
 				if ( ! DatabaseExportStep::storable_name( $table ) ) {
@@ -245,17 +291,19 @@ final class PreflightStep implements Step {
 			}
 			$stats = $this->statistics( $tables );
 		}
-		$db_bytes = 0;
+		// The table data only: InnoDB's index pages never reach the exported SQL. Floats throughout: free space and
+		// sums of large sites do not fit a 32-bit integer (a cast there wraps to a negative number).
+		$db_bytes = 0.0;
 		foreach ( $stats as $row ) {
-			$db_bytes += (int) $row['data_bytes'] + (int) $row['index_bytes'];
+			$db_bytes += (float) $row['data_bytes'];
 		}
 		$free = call_user_func( $this->env['disk_free'] );
-		if ( is_numeric( $free ) ) {
-			$needed = Packer::required_free_bytes() + $db_bytes;
-			if ( (int) $free < $needed ) {
-				throw new \RuntimeException( sprintf( 'Not enough free disk space in the storage directory: %d MB free, at least %d MB needed for one volume and the database.', (int) ( (int) $free / 1048576 ), (int) ( $needed / 1048576 ) ) );
+		if ( is_int( $free ) || is_float( $free ) ) {
+			$needed = (float) Packer::required_free_bytes() + $db_bytes;
+			if ( (float) $free < $needed ) {
+				throw new \RuntimeException( sprintf( 'Not enough free disk space in the storage directory: %d MB free, at least %d MB needed for one volume and the database.', (int) floor( (float) $free / 1048576 ), (int) ceil( $needed / 1048576 ) ) );
 			}
-			$state['checks']['disk_free'] = (int) $free;
+			$state['checks']['disk_free'] = (float) $free;
 		} else {
 			$state['warnings'][] = 'The free disk space could not be measured; the export stops if the disk fills up.';
 		}
@@ -270,6 +318,7 @@ final class PreflightStep implements Step {
 				'groups'     => $options['contents']['files'],
 				'exclusions' => $options['exclusions'],
 				'stats'      => $stats,
+				'foreign'    => $foreign,
 			)
 		);
 	}
@@ -327,15 +376,39 @@ final class PreflightStep implements Step {
 	 * @return void
 	 */
 	private function finish( string $work, array $state ): void {
+		$plan = ExportPlan::read( $work, ExportPlan::PLAN );
 		ExportPlan::write(
 			$work,
 			ExportPlan::PREFLIGHT,
 			array(
 				'checks'   => $state['checks'],
-				'findings' => array( 'oversize' => array_values( $state['oversize'] ) ),
+				'findings' => array(
+					'oversize' => array_values( $state['oversize'] ),
+					'foreign'  => isset( $plan['foreign'] ) && is_array( $plan['foreign'] ) ? array_values( $plan['foreign'] ) : array(),
+				),
 				'warnings' => array_values( $state['warnings'] ),
 			)
 		);
+	}
+
+	/**
+	 * This installation's essential tables (its main site's posts and options,
+	 * from its core list; the base prefix when the core list is unknown) that
+	 * the listing does not contain. Not every core table: a cleanup plugin may
+	 * have dropped one such as links.
+	 *
+	 * @param string[] $listing Tables listed by the database.
+	 * @param string[] $core    Core tables.
+	 * @param string   $prefix  Base prefix.
+	 * @return string[]
+	 */
+	private static function missing_essentials( array $listing, array $core, string $prefix ): array {
+		$essential = array();
+		foreach ( array( 'posts', 'options' ) as $name ) {
+			$essential[] = in_array( $prefix . $name, $core, true ) || array() === $core ? $prefix . $name : '';
+		}
+		$essential = array_filter( $essential );
+		return array_values( array_diff( $essential, $listing ) );
 	}
 
 	/**

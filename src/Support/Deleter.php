@@ -154,8 +154,9 @@ final class Deleter {
 		if ( Paths::is_windows() ) {
 			// Checked before is_dir(): stat() reports a junction with mode 0, so
 			// is_dir() and is_file() are both false for it.
-			$final        = @readlink( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- readlink() warns when it cannot resolve; handled below.
-			$final_parent = @readlink( dirname( $path ) ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
+			// Unavailable readlink() (disabled by the host) gives false: no definite answer from this branch.
+			$final        = HostFunctions::readlink( $path );
+			$final_parent = HostFunctions::readlink( dirname( $path ) );
 			if ( is_string( $final ) && '' !== $final && is_string( $final_parent ) && '' !== $final_parent ) {
 				$expected = rtrim( self::strip_windows_prefix( $final_parent ), '/\\' ) . DIRECTORY_SEPARATOR . basename( $path );
 				return Paths::same( $expected, self::strip_windows_prefix( $final ), true ) ? self::REPARSE_PLAIN : self::REPARSE_LINK;

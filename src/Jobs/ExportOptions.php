@@ -58,7 +58,7 @@ final class ExportOptions {
 	 * @throws \InvalidArgumentException When a value is not allowed (the message names the key).
 	 */
 	public static function normalize( array $options ): array {
-		$known = array( 'contents', 'exclusions', 'exclude_tables', 'policy' );
+		$known = array( 'contents', 'exclusions', 'exclude_tables', 'include_tables', 'policy' );
 		foreach ( array_keys( $options ) as $key ) {
 			if ( ! in_array( $key, $known, true ) ) {
 				throw new \InvalidArgumentException( sprintf( 'Unknown export option "%s".', (string) $key ) );
@@ -110,18 +110,11 @@ final class ExportOptions {
 			throw new \InvalidArgumentException( sprintf( 'These exclusion patterns cannot be used: %s.', implode( ', ', $invalid ) ) );
 		}
 
-		$tables = isset( $options['exclude_tables'] ) ? $options['exclude_tables'] : array();
-		if ( ! is_array( $tables ) || count( $tables ) > self::MAX_TABLES ) {
-			throw new \InvalidArgumentException( sprintf( '"exclude_tables" must be a list of at most %d table names.', self::MAX_TABLES ) );
-		}
-		$names = array();
-		foreach ( $tables as $table ) {
-			if ( ! is_string( $table ) || ! DatabaseExportStep::storable_name( $table ) ) {
-				throw new \InvalidArgumentException( 'Every entry of "exclude_tables" must be a table name.' );
-			}
-			if ( ! in_array( $table, $names, true ) ) {
-				$names[] = $table;
-			}
+		$names   = self::table_names( $options, 'exclude_tables' );
+		$include = self::table_names( $options, 'include_tables' );
+		$both    = array_values( array_intersect( $names, $include ) );
+		if ( array() !== $both ) {
+			throw new \InvalidArgumentException( sprintf( 'These tables are both excluded and included: %s.', implode( ', ', $both ) ) );
 		}
 
 		$policy = isset( $options['policy'] ) ? $options['policy'] : array();
@@ -148,7 +141,33 @@ final class ExportOptions {
 			),
 			'exclusions'     => $globs,
 			'exclude_tables' => $names,
+			'include_tables' => $include,
 			'policy'         => $normalized_policy,
 		);
+	}
+
+	/**
+	 * A list of table names under an option key, deduplicated.
+	 *
+	 * @param array<string, mixed> $options Options.
+	 * @param string               $key     exclude_tables or include_tables.
+	 * @return string[]
+	 * @throws \InvalidArgumentException When it is not a list of table names.
+	 */
+	private static function table_names( array $options, string $key ): array {
+		$tables = isset( $options[ $key ] ) ? $options[ $key ] : array();
+		if ( ! is_array( $tables ) || count( $tables ) > self::MAX_TABLES ) {
+			throw new \InvalidArgumentException( sprintf( '"%s" must be a list of at most %d table names.', $key, self::MAX_TABLES ) );
+		}
+		$names = array();
+		foreach ( $tables as $table ) {
+			if ( ! is_string( $table ) || ! DatabaseExportStep::storable_name( $table ) ) {
+				throw new \InvalidArgumentException( sprintf( 'Every entry of "%s" must be a table name.', $key ) );
+			}
+			if ( ! in_array( $table, $names, true ) ) {
+				$names[] = $table;
+			}
+		}
+		return $names;
 	}
 }

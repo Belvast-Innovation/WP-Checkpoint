@@ -14,22 +14,50 @@ final class ExportOptionsTest extends TestCase {
 		$this->assertSame( ScanRoots::GROUPS, $options['contents']['files'] );
 		$this->assertSame( array(), $options['exclusions'] );
 		$this->assertSame( array(), $options['exclude_tables'] );
-		$this->assertSame( array( 'unreadable' => 'ask', 'oversize' => 'ask', 'large_dirs' => 'ask' ), $options['policy'] );
+		$this->assertSame( array(), $options['include_tables'] );
+		$this->assertSame(
+			array(
+				'unreadable' => 'ask',
+				'oversize'   => 'ask',
+				'large_dirs' => 'ask',
+			),
+			$options['policy']
+		);
+		$this->assertSame( array( 'wp_old_posts' ), ExportOptions::normalize( array( 'include_tables' => array( 'wp_old_posts', 'wp_old_posts' ) ) )['include_tables'] );
 	}
 
 	public function test_values_are_validated_and_normalised(): void {
-		$options = ExportOptions::normalize( array(
-			'contents'       => array( 'database' => false, 'files' => array( 'uploads', 'plugins', 'uploads' ) ),
-			'exclusions'     => array( ' wp-content/uploads/cache ', 'wp-content/uploads/*.log' ),
-			'exclude_tables' => array( 'wp_actionscheduler_logs', 'wp_actionscheduler_logs' ),
-			'policy'         => array( 'oversize' => 'exclude' ),
-		) );
+		$options = ExportOptions::normalize(
+			array(
+				'contents'       => array(
+					'database' => false,
+					'files'    => array( 'uploads', 'plugins', 'uploads' ),
+				),
+				'exclusions'     => array( ' wp-content/uploads/cache ', 'wp-content/uploads/*.log' ),
+				'exclude_tables' => array( 'wp_actionscheduler_logs', 'wp_actionscheduler_logs' ),
+				'policy'         => array( 'oversize' => 'exclude' ),
+			)
+		);
 		$this->assertFalse( $options['contents']['database'] );
 		$this->assertSame( array( 'uploads', 'plugins' ), $options['contents']['files'], 'deduplicated, order kept' );
 		$this->assertSame( array( 'wp-content/uploads/cache', 'wp-content/uploads/*.log' ), $options['exclusions'] );
 		$this->assertSame( array( 'wp_actionscheduler_logs' ), $options['exclude_tables'] );
-		$this->assertSame( array( 'unreadable' => 'ask', 'oversize' => 'exclude', 'large_dirs' => 'ask' ), $options['policy'] );
-		$this->assertSame( array( 'unreadable' => 'continue', 'oversize' => 'fail', 'large_dirs' => 'include' ), ExportOptions::UNATTENDED );
+		$this->assertSame(
+			array(
+				'unreadable' => 'ask',
+				'oversize'   => 'exclude',
+				'large_dirs' => 'ask',
+			),
+			$options['policy']
+		);
+		$this->assertSame(
+			array(
+				'unreadable' => 'continue',
+				'oversize'   => 'fail',
+				'large_dirs' => 'include',
+			),
+			ExportOptions::UNATTENDED
+		);
 		foreach ( ExportOptions::UNATTENDED as $key => $value ) {
 			$this->assertContains( $value, ExportOptions::POLICIES[ $key ], 'the unattended policy only uses allowed values' );
 		}
@@ -55,12 +83,28 @@ final class ExportOptionsTest extends TestCase {
 			'unknown key'         => array( array( 'exclusion' => array() ), 'Unknown export option "exclusion"' ),
 			'answers at creation' => array( array( 'answers' => array( 'unreadable' => 'continue' ) ), 'Unknown export option "answers"' ),
 			'unknown group'       => array( array( 'contents' => array( 'files' => array( 'media' ) ) ), 'Unknown content group "media"' ),
-			'nothing selected'    => array( array( 'contents' => array( 'database' => false, 'files' => array() ) ), 'Nothing to back up' ),
+			'nothing selected'    => array(
+				array(
+					'contents' => array(
+						'database' => false,
+						'files'    => array(),
+					),
+				),
+				'Nothing to back up',
+			),
 			'database not bool'   => array( array( 'contents' => array( 'database' => 'yes' ) ), '"contents.database"' ),
 			'unknown content key' => array( array( 'contents' => array( 'themes' => true ) ), 'Unknown key "themes"' ),
 			'empty exclusion'     => array( array( 'exclusions' => array( '  ' ) ), 'non-empty pattern' ),
 			'bad exclusion'       => array( array( 'exclusions' => array( "a\x01b" ) ), 'cannot be used' ),
 			'bad table name'      => array( array( 'exclude_tables' => array( 'wp posts' ) ), 'must be a table name' ),
+			'bad included table'  => array( array( 'include_tables' => array( 'wp posts' ) ), 'Every entry of "include_tables" must be a table name' ),
+			'in and out'          => array(
+				array(
+					'exclude_tables' => array( 'wp_a' ),
+					'include_tables' => array( 'wp_a' ),
+				),
+				'both excluded and included: wp_a',
+			),
 			'unknown policy'      => array( array( 'policy' => array( 'links' => 'follow' ) ), 'Unknown policy "links"' ),
 			'bad policy value'    => array( array( 'policy' => array( 'large_dirs' => 'exclude' ) ), 'Policy "large_dirs" must be one of: ask, include' ),
 			'policy not object'   => array( array( 'policy' => 'ask' ), '"policy" must be an object' ),
