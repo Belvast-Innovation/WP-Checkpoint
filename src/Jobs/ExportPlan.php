@@ -8,6 +8,7 @@
 namespace WPCheckpoint\Jobs;
 
 use WPCheckpoint\Archive\Manifest;
+use WPCheckpoint\Archive\Packer;
 
 /**
  * The three JSON files under the job's work directory, each written whole
@@ -159,6 +160,64 @@ final class ExportPlan {
 			}
 		}
 		return false;
+	}
+
+	/**
+	 * Per file: its zip local and central headers and its lines in the scan
+	 * index, the packed index and files.index.jsonl (paths up to a few
+	 * hundred bytes, written three times).
+	 */
+	const ENTRY_OVERHEAD_BYTES = 1024;
+
+	/**
+	 * What the table statistics (DATA_LENGTH) are multiplied by to estimate
+	 * the exported SQL before the export: they lag behind bulk writes, and
+	 * binary columns are written as hexadecimal. Numerator and denominator.
+	 */
+	const DATABASE_ESTIMATE = array( 3, 2 );
+
+	/**
+	 * Free space the storage directory needs for the rest of a backup. The
+	 * whole archive stays in the job's work directory until the store step
+	 * moves it (every volume, on the same disk), and so do the exported
+	 * database chunks, which are copied into the volumes and removed only
+	 * with the work directory: files, plus the database once in the volumes
+	 * and, while it is not exported yet, once more as chunks, plus a fixed
+	 * overhead per file and the packer's margin. Stored entries are never
+	 * larger than their source; deflated ones are smaller. Float: sums of
+	 * large sites do not fit a 32-bit integer.
+	 *
+	 * @param float $files_bytes      Bytes of the files to pack.
+	 * @param int   $files            Number of files.
+	 * @param float $database_bytes   Bytes of the database chunks (exported, or estimated).
+	 * @param bool  $database_written Whether the chunks are already on disk.
+	 * @return float
+	 */
+	public static function required_bytes( float $files_bytes, int $files, float $database_bytes, bool $database_written ): float {
+		return $files_bytes + $database_bytes + ( $database_written ? 0.0 : $database_bytes ) + (float) $files * self::ENTRY_OVERHEAD_BYTES + Packer::SPACE_MARGIN_BYTES;
+	}
+
+	/**
+	 * The files a backup will pack, as far as the scan and the review know:
+	 * the scan's totals less the directories the review left out (their
+	 * sizes are in its findings). The count is not reduced (an upper bound).
+	 *
+	 * @param array<string, mixed> $scan   Scan summary.
+	 * @param array<string, mixed> $review review.json (findings and decisions).
+	 * @return array{bytes: float, count: int}
+	 */
+	public static function planned_files( array $scan, array $review ): array {
+		$bytes = (float) ( $scan['counts']['bytes'] ?? 0 );
+		$left  = isset( $review['decisions']['exclude_paths'] ) && is_array( $review['decisions']['exclude_paths'] ) ? $review['decisions']['exclude_paths'] : array();
+		foreach ( isset( $review['findings']['heavy'] ) && is_array( $review['findings']['heavy'] ) ? $review['findings']['heavy'] : array() as $dir ) {
+			if ( is_array( $dir ) && in_array( $dir['p'] ?? null, $left, true ) ) {
+				$bytes -= (float) ( $dir['bytes'] ?? 0 );
+			}
+		}
+		return array(
+			'bytes' => max( 0.0, $bytes ),
+			'count' => (int) ( $scan['counts']['files'] ?? 0 ),
+		);
 	}
 
 	/**

@@ -42,6 +42,22 @@ final class ReviewStep implements Step {
 	}
 
 	/**
+	 * Free space in the storage directory: function(): int|float|false.
+	 *
+	 * @var callable|null
+	 */
+	private $disk_free;
+
+	/**
+	 * Constructor.
+	 *
+	 * @param callable|null $disk_free Bytes free in the storage directory (false when unknown); null skips the check.
+	 */
+	public function __construct( $disk_free = null ) {
+		$this->disk_free = is_callable( $disk_free ) ? $disk_free : null;
+	}
+
+	/**
 	 * Decide or ask.
 	 *
 	 * @param JobContext $context Context.
@@ -80,6 +96,7 @@ final class ReviewStep implements Step {
 				)
 			);
 		}
+		$this->check_space( $preflight, $scan, $findings, $decisions );
 		ExportPlan::write(
 			$work,
 			ExportPlan::REVIEW,
@@ -93,6 +110,42 @@ final class ReviewStep implements Step {
 			$context->logger()->info( $note );
 		}
 		return StepResult::done( __( 'Review finished', 'wp-checkpoint' ) );
+	}
+
+	/**
+	 * The last point before anything large is written (the database export
+	 * comes next): the whole backup must fit, not only one volume. The files
+	 * are known from the scan; the database is an estimate from the table
+	 * statistics (ExportPlan::DATABASE_ESTIMATE). The pack step checks again
+	 * with the exported size, and the packer before every volume.
+	 *
+	 * @param array<string, mixed> $preflight preflight.json.
+	 * @param array<string, mixed> $scan      Scan summary.
+	 * @param array<string, mixed> $findings  Findings.
+	 * @param array<string, mixed> $decisions Decisions.
+	 * @return void
+	 * @throws \RuntimeException When the backup would not fit.
+	 */
+	private function check_space( array $preflight, array $scan, array $findings, array $decisions ): void {
+		if ( null === $this->disk_free ) {
+			return;
+		}
+		$free = call_user_func( $this->disk_free );
+		if ( ! is_int( $free ) && ! is_float( $free ) ) {
+			return; // Unknown: the preflight already warned, and the packer checks before every volume.
+		}
+		$files    = ExportPlan::planned_files(
+			$scan,
+			array(
+				'findings'  => $findings,
+				'decisions' => $decisions,
+			)
+		);
+		$database = (float) ( $preflight['checks']['db_bytes'] ?? 0 ) * ExportPlan::DATABASE_ESTIMATE[0] / ExportPlan::DATABASE_ESTIMATE[1];
+		$needed   = ExportPlan::required_bytes( $files['bytes'], $files['count'], $database, false );
+		if ( (float) $free < $needed ) {
+			throw new \RuntimeException( sprintf( 'Not enough free disk space for this backup: %1$d MB free in the storage directory, about %2$d MB needed. The whole archive stays there until it is complete, next to the exported database (%3$d MB of files, about %4$d MB of database). Free up space, or leave large directories or tables out.', (int) ( $free / 1048576 ), (int) ceil( $needed / 1048576 ), (int) ( $files['bytes'] / 1048576 ), (int) ceil( $database / 1048576 ) ) );
+		}
 	}
 
 	/**

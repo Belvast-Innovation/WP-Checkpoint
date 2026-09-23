@@ -8,6 +8,8 @@ use WPCheckpoint\Archive\Manifest;
 use WPCheckpoint\Archive\Packer;
 use WPCheckpoint\Archive\ZipReader;
 use WPCheckpoint\Jobs\ExportPlan;
+use WPCheckpoint\Jobs\DatabaseExportStep;
+use WPCheckpoint\Jobs\FileScanStep;
 use WPCheckpoint\Jobs\PackStep;
 use WPCheckpoint\Jobs\StepResult;
 use WPCheckpoint\Tests\Fixtures\Jobs\WorkContext;
@@ -34,8 +36,29 @@ final class PackStepTest extends TestCase {
 		$this->ctx  = new WorkContext( 'wpcheckpoint-pack-' );
 		$this->site = $this->ctx->root . '/site/wp-content/uploads';
 		mkdir( $this->site, 0700, true );
-		ExportPlan::write( $this->ctx->work(), ExportPlan::PLAN, array( 'base' => self::BASE, 'tables' => array(), 'groups' => array( 'uploads' ), 'exclusions' => array( 'wp-content/uploads/cache' ) ) );
-		ExportPlan::write( $this->ctx->work(), ExportPlan::REVIEW, array( 'findings' => array(), 'decisions' => array( 'exclude_tables' => array(), 'exclude_oversize' => array(), 'exclude_paths' => array( 'wp-content/uploads/[2024]/node_modules' ), 'notes' => array() ) ) );
+		ExportPlan::write(
+			$this->ctx->work(),
+			ExportPlan::PLAN,
+			array(
+				'base'       => self::BASE,
+				'tables'     => array(),
+				'groups'     => array( 'uploads' ),
+				'exclusions' => array( 'wp-content/uploads/cache' ),
+			)
+		);
+		ExportPlan::write(
+			$this->ctx->work(),
+			ExportPlan::REVIEW,
+			array(
+				'findings'  => array(),
+				'decisions' => array(
+					'exclude_tables'   => array(),
+					'exclude_oversize' => array(),
+					'exclude_paths'    => array( 'wp-content/uploads/[2024]/node_modules' ),
+					'notes'            => array(),
+				),
+			)
+		);
 		file_put_contents( $this->ctx->work() . '/database.index.jsonl', '' );
 	}
 
@@ -75,19 +98,41 @@ final class PackStepTest extends TestCase {
 		$lines = array();
 		foreach ( $paths as $p ) {
 			$abs     = $this->site . substr( $p, strlen( 'wp-content/uploads' ) );
-			$lines[] = json_encode( array( 'p' => $p, 'b' => filesize( $abs ), 'm' => filemtime( $abs ) ), JSON_UNESCAPED_SLASHES );
+			$lines[] = json_encode(
+				array(
+					'p' => $p,
+					'b' => filesize( $abs ),
+					'm' => filemtime( $abs ),
+				),
+				JSON_UNESCAPED_SLASHES
+			);
 		}
 		file_put_contents( $this->ctx->work() . '/files.index.jsonl', implode( "\n", $lines ) . "\n" );
 	}
 
 	private function roots(): array {
-		return array( array( 'group' => 'uploads', 'path' => $this->site, 'prefix' => 'wp-content/uploads', 'skip' => array() ) );
+		return array(
+			array(
+				'group'  => 'uploads',
+				'path'   => $this->site,
+				'prefix' => 'wp-content/uploads',
+				'skip'   => array(),
+			),
+		);
 	}
 
 	private function options( array $extra = array() ): array {
-		return array_merge( array( 'volume_bytes' => 300000, 'volume_chunk_bytes' => self::CHUNK, 'deflate_max_bytes' => 4096, 'disk_free' => static function (): int {
-			return PHP_INT_MAX;
-		} ), $extra );
+		return array_merge(
+			array(
+				'volume_bytes'       => 300000,
+				'volume_chunk_bytes' => self::CHUNK,
+				'deflate_max_bytes'  => 4096,
+				'disk_free'          => static function (): int {
+					return PHP_INT_MAX;
+				},
+			),
+			$extra
+		);
 	}
 
 	private function step( $after_chunk = null, array $extra = array() ): PackStep {
@@ -117,9 +162,12 @@ final class PackStepTest extends TestCase {
 	 */
 	private function packed(): array {
 		$lines = array_values( array_filter( explode( "\n", (string) file_get_contents( $this->ctx->work() . '/' . PackStep::PACKED_INDEX ) ) ) );
-		return array_map( function ( string $line ): array {
-			return IndexLine::files( $line, self::CHUNK );
-		}, $lines );
+		return array_map(
+			function ( string $line ): array {
+				return IndexLine::files( $line, self::CHUNK );
+			},
+			$lines
+		);
 	}
 
 	private function summary(): array {
@@ -156,7 +204,7 @@ final class PackStepTest extends TestCase {
 		file_put_contents( $this->site . '/grew.txt', str_repeat( 'g', 900 ) );
 		// A 20-second budget on a clock that moves 3 seconds per reading: a chunk "takes" 6 seconds, so after
 		// two chunks the remaining 8 seconds are less than 1.5 times the last chunk and the tick ends.
-		$this->ctx->tick = 3.0;
+		$this->ctx->tick        = 3.0;
 		list( $result, $ticks ) = $this->drive( $this->step( null, array( 'volume_bytes' => 100000 ) ) );
 		$this->assertGreaterThan( 2, $ticks, 'the measured chunk cost ended ticks early' );
 		$packed = $this->packed();
@@ -170,7 +218,13 @@ final class PackStepTest extends TestCase {
 		$summary = $this->summary();
 		$this->assertSame( 4, $summary['files'] );
 		$this->assertSame( 2, $summary['excluded'] );
-		$this->assertSame( array( 'count' => 1, 'listed' => array( 'wp-content/uploads/gone.txt' ) ), $summary['skipped'] );
+		$this->assertSame(
+			array(
+				'count'  => 1,
+				'listed' => array( 'wp-content/uploads/gone.txt' ),
+			),
+			$summary['skipped']
+		);
 		$this->assertCount( 1, preg_grep( '/1 files listed by the scan were missing or unreadable/', $summary['warnings'] ) );
 		$this->assertFileExists( $this->ctx->work() . '/' . PackStep::STATE );
 		// The volumes hold exactly those entries, in order, and every sealed volume is hashed.
@@ -193,9 +247,15 @@ final class PackStepTest extends TestCase {
 		do {
 			$result = $ref_step->run( $reference->context( isset( $result ) ? $result->cursor : array() ) );
 		} while ( StepResult::DONE !== $result->kind );
-		$expected = array_column( array_map( function ( string $line ): array {
-			return IndexLine::files( $line, self::CHUNK );
-		}, array_values( array_filter( explode( "\n", (string) file_get_contents( $reference->work() . '/' . PackStep::PACKED_INDEX ) ) ) ) ), 'h' );
+		$expected = array_column(
+			array_map(
+				function ( string $line ): array {
+					return IndexLine::files( $line, self::CHUNK );
+				},
+				array_values( array_filter( explode( "\n", (string) file_get_contents( $reference->work() . '/' . PackStep::PACKED_INDEX ) ) ) )
+			),
+			'h'
+		);
 		$reference->remove();
 
 		// One unit per tick (the clock makes every chunk cost 10 of the 20 seconds); stop after the first chunk of one.bin.
@@ -217,7 +277,7 @@ final class PackStepTest extends TestCase {
 		$partial = glob( $this->ctx->work() . '/' . PackStep::VOLUMES . '/*.partial' )[0];
 		file_put_contents( $partial, str_repeat( 'Z', 5000 ), FILE_APPEND );
 		$this->ctx->tick = 0.0;
-		list( $result ) = $this->drive( $this->step(), $mid );
+		list( $result )  = $this->drive( $this->step(), $mid );
 		$this->assertSame( StepResult::DONE, $result->kind );
 		$this->assertSame( $expected, array_column( $this->packed(), 'h' ), 'the same hashes as an uninterrupted run: nothing duplicated, nothing lost' );
 		$this->assertStringNotContainsString( 'ghost', (string) file_get_contents( $this->ctx->work() . '/' . PackStep::PACKED_INDEX ) );
@@ -237,7 +297,7 @@ final class PackStepTest extends TestCase {
 		}
 		$this->assertGreaterThanOrEqual( 1, $cursor['file']['chunk'], 'a chunk is committed' );
 		$partial = glob( $this->ctx->work() . '/' . PackStep::VOLUMES . '/*.partial' )[0];
-		$h               = fopen( $partial, 'r+b' );
+		$h       = fopen( $partial, 'r+b' );
 		ftruncate( $h, 10 );
 		fclose( $h );
 		try {
@@ -275,20 +335,22 @@ final class PackStepTest extends TestCase {
 		if ( 'Windows' === PHP_OS_FAMILY ) {
 			$this->markTestSkipped( 'A file open for reading cannot be renamed over on Windows, and stat() reports no inode there: the inode swap is a POSIX scenario.' );
 		}
-		$p        = $this->file( 'live.bin', 3 * self::CHUNK, 5 );
+		$p = $this->file( 'live.bin', 3 * self::CHUNK, 5 );
 		$this->index( array( $p ) );
-		$abs      = $this->site . '/live.bin';
-		$changed  = false;
-		$step     = $this->step( function ( string $path, int $chunk ) use ( $abs, &$changed ): void {
-			if ( ! $changed && 1 === $chunk ) {
-				// Same size, same second, new content: only the inode differs (write a copy and rename it over).
-				$copy = $abs . '.new';
-				file_put_contents( $copy, str_repeat( 'N', 3 * self::CHUNK ) );
-				touch( $copy, filemtime( $abs ) );
-				rename( $copy, $abs );
-				$changed = true;
+		$abs            = $this->site . '/live.bin';
+		$changed        = false;
+		$step           = $this->step(
+			function ( string $path, int $chunk ) use ( $abs, &$changed ): void {
+				if ( ! $changed && 1 === $chunk ) {
+						// Same size, same second, new content: only the inode differs (write a copy and rename it over).
+						$copy = $abs . '.new';
+						file_put_contents( $copy, str_repeat( 'N', 3 * self::CHUNK ) );
+						touch( $copy, filemtime( $abs ) );
+						rename( $copy, $abs );
+						$changed = true;
+				}
 			}
-		} );
+		);
 		list( $result ) = $this->drive( $step );
 		$this->assertSame( StepResult::DONE, $result->kind );
 		$packed = $this->packed();
@@ -298,14 +360,17 @@ final class PackStepTest extends TestCase {
 		$this->assertSame( ChunkHasher::list_hash( $packed[0]['hc'] ), $packed[0]['h'] );
 		$this->assertStringContainsString( 'starting it over', $this->ctx->log() );
 		$this->assertSame( 0, $this->summary()['changed']['count'], 'a restart that succeeded is not a warning' );
-		$restarted = array_filter( $this->ctx->checkpoints, static function ( array $c ): bool {
-			return isset( $c['cursor']['file']['restarts'] ) && $c['cursor']['file']['restarts'] > 0;
-		} );
+		$restarted = array_filter(
+			$this->ctx->checkpoints,
+			static function ( array $c ): bool {
+				return isset( $c['cursor']['file']['restarts'] ) && $c['cursor']['file']['restarts'] > 0;
+			}
+		);
 		$this->assertNotEmpty( $restarted, 'the restart count is in the cursor: a restart is progress for the runner' );
 	}
 
 	public function test_a_file_that_shrinks_mid_chunk_is_started_over_from_the_packer_report(): void {
-		$p   = $this->file( 'shrink.bin', 3 * self::CHUNK, 6 );
+		$p = $this->file( 'shrink.bin', 3 * self::CHUNK, 6 );
 		$this->index( array( $p ) );
 		$abs = $this->site . '/shrink.bin';
 		$cut = false;
@@ -313,14 +378,16 @@ final class PackStepTest extends TestCase {
 		// caught by the stat before the next chunk, so cut it and keep mtime, size differs anyway: the stat
 		// path. To reach the packer's own short read, cut it *and* restore the recorded size/mtime/ino... not
 		// possible for size; so this test covers the stat path and the next one the packer path.
-		$step = $this->step( function ( string $path, int $chunk ) use ( $abs, &$cut ): void {
-			if ( ! $cut && 1 === $chunk ) {
-				$h = fopen( $abs, 'r+b' );
-				ftruncate( $h, self::CHUNK + 5 );
-				fclose( $h );
-				$cut = true;
+		$step           = $this->step(
+			function ( string $path, int $chunk ) use ( $abs, &$cut ): void {
+				if ( ! $cut && 1 === $chunk ) {
+						$h = fopen( $abs, 'r+b' );
+						ftruncate( $h, self::CHUNK + 5 );
+						fclose( $h );
+						$cut = true;
+				}
 			}
-		} );
+		);
 		list( $result ) = $this->drive( $step );
 		$this->assertSame( StepResult::DONE, $result->kind );
 		$packed = $this->packed();
@@ -332,35 +399,109 @@ final class PackStepTest extends TestCase {
 		$shrink = $this->file( 'shrink.bin', 2 * self::CHUNK, 7 );
 		$grow   = $this->file( 'grow.bin', 2 * self::CHUNK, 8 );
 		$this->index( array( $shrink, $grow ) );
-		$sizes = array( 'shrink.bin' => 2 * self::CHUNK, 'grow.bin' => 2 * self::CHUNK );
-		$step  = $this->step( function ( string $path, int $chunk ) use ( &$sizes ): void {
-			$name = basename( $path );
-			if ( 0 !== $chunk ) {
-				return;
+		$sizes          = array(
+			'shrink.bin' => 2 * self::CHUNK,
+			'grow.bin'   => 2 * self::CHUNK,
+		);
+		$step           = $this->step(
+			function ( string $path, int $chunk ) use ( &$sizes ): void {
+				$name = basename( $path );
+				if ( 0 !== $chunk ) {
+						return;
+				}
+				$abs = $this->site . '/' . $name;
+				if ( 'shrink.bin' === $name ) {
+					$sizes[ $name ] -= 10;
+				} else {
+					$sizes[ $name ] += 10;
+				}
+				$h = fopen( $abs, 'r+b' );
+				ftruncate( $h, $sizes[ $name ] );
+				fclose( $h );
+				touch( $abs, time() + 100 + $sizes[ $name ] );
 			}
-			$abs = $this->site . '/' . $name;
-			if ( 'shrink.bin' === $name ) {
-				$sizes[ $name ] -= 10;
-			} else {
-				$sizes[ $name ] += 10;
-			}
-			$h = fopen( $abs, 'r+b' );
-			ftruncate( $h, $sizes[ $name ] );
-			fclose( $h );
-			touch( $abs, time() + 100 + $sizes[ $name ] );
-		} );
+		);
 		list( $result ) = $this->drive( $step );
 		$this->assertSame( StepResult::DONE, $result->kind );
 		$packed  = $this->packed();
 		$summary = $this->summary();
 		$this->assertSame( array( 'wp-content/uploads/grow.bin' ), array_column( $packed, 'p' ), 'the shrinking file is left out' );
-		$this->assertSame( array( 'count' => 1, 'listed' => array( 'wp-content/uploads/shrink.bin' ) ), $summary['unstable'] );
-		$this->assertSame( array( 'count' => 0, 'listed' => array() ), $summary['skipped'], 'a file that kept changing is its own kind, not "missing"' );
-		$this->assertSame( array( 'count' => 1, 'listed' => array( 'wp-content/uploads/grow.bin' ) ), $summary['changed'] );
+		$this->assertSame(
+			array(
+				'count'  => 1,
+				'listed' => array( 'wp-content/uploads/shrink.bin' ),
+			),
+			$summary['unstable']
+		);
+		$this->assertSame(
+			array(
+				'count'  => 0,
+				'listed' => array(),
+			),
+			$summary['skipped'],
+			'a file that kept changing is its own kind, not "missing"'
+		);
+		$this->assertSame(
+			array(
+				'count'  => 1,
+				'listed' => array( 'wp-content/uploads/grow.bin' ),
+			),
+			$summary['changed']
+		);
 		$this->assertContains( '1 files changed repeatedly while they were being packed and are not in the backup: wp-content/uploads/shrink.bin', $summary['warnings'] );
 		$this->assertContains( '1 files were modified while they were being packed; their content in the backup may be inconsistent: wp-content/uploads/grow.bin', $summary['warnings'] );
 		$this->assertStringContainsString( 'shrank; left out', $this->ctx->log() );
 		$this->assertSame( 2 * self::CHUNK + 40, $packed[0]['b'], 'finished as declared after the fourth stat' );
+	}
+
+	public function test_packing_does_not_start_when_the_archive_would_not_fit(): void {
+		$this->index( array( $this->file( 'a.bin', 200000, 3 ) ) );
+		ExportPlan::write(
+			$this->ctx->work(),
+			FileScanStep::SUMMARY,
+			array(
+				'counts' => array(
+					'files' => 1,
+					'bytes' => 200000,
+				),
+			)
+		);
+		ExportPlan::write(
+			$this->ctx->work(),
+			DatabaseExportStep::SUMMARY,
+			array(
+				'tables' => array(
+					array(
+						'name'  => 'wp_posts',
+						'bytes' => 3 * 1048576,
+					),
+				),
+			)
+		);
+		// The chunks are on disk already: only their copies in the volumes still need room.
+		$needed = ExportPlan::required_bytes( 200000, 1, 3 * 1048576, true );
+		$short  = static function () use ( $needed ): float {
+			return $needed - 1;
+		};
+		try {
+			$this->step( null, array( 'disk_free' => $short ) )->run( $this->ctx->context( array(), 20 ) );
+			$this->fail( 'one byte short must stop before the first volume' );
+		} catch ( \RuntimeException $e ) {
+			$this->assertStringStartsWith( 'Not enough free disk space to pack this backup: ', $e->getMessage() );
+			$this->assertStringContainsString( '(0 MB of files, 3 MB of exported database)', $e->getMessage() );
+		}
+		$this->assertSame( array(), glob( $this->ctx->work() . '/' . PackStep::VOLUMES . '/*' ), 'no volume was started' );
+		list( $result ) = $this->drive(
+			$this->step(
+				null,
+				array(
+					'disk_free' => static function () use ( $needed ): float {
+						return $needed;
+					},
+				)
+			)
+		);
+		$this->assertSame( StepResult::DONE, $result->kind );
 	}
 
 	public function test_a_chunk_slower_than_the_whole_budget_fails_with_the_reason(): void {
@@ -386,7 +527,13 @@ final class PackStepTest extends TestCase {
 		mkdir( $chunk );
 		file_put_contents( $chunk . '/wp_posts.0001.sql', "-- wpcheckpoint table=wp_posts chunk=1 pk_from=null\nINSERT ...;\n-- wpcheckpoint end table=wp_posts chunk=1 rows=1 pk_to=[\"1\"]\n" );
 		$sql  = (string) file_get_contents( $chunk . '/wp_posts.0001.sql' );
-		$line = array( 't' => 'wp_posts', 'c' => 1, 'p' => 'database/wp_posts.0001.sql', 'b' => strlen( $sql ), 'h' => hash( 'sha256', $sql ) );
+		$line = array(
+			't' => 'wp_posts',
+			'c' => 1,
+			'p' => 'database/wp_posts.0001.sql',
+			'b' => strlen( $sql ),
+			'h' => hash( 'sha256', $sql ),
+		);
 		file_put_contents( $this->ctx->work() . '/database.index.jsonl', json_encode( $line, JSON_UNESCAPED_SLASHES ) . "\n" );
 		$this->index( array( $this->file( 'a.txt', 10 ) ) );
 		list( $result ) = $this->drive( $this->step( null, array( 'volume_bytes' => 100 ) ) );
@@ -457,7 +604,13 @@ final class PackStepTest extends TestCase {
 		$this->assertTrue( $deleted );
 		$this->assertSame( StepResult::DONE, $result->kind );
 		$this->assertSame( array( 'wp-content/uploads/keep.bin' ), array_column( $this->packed(), 'p' ) );
-		$this->assertSame( array( 'count' => 1, 'listed' => array( 'wp-content/uploads/gone.bin' ) ), $this->summary()['skipped'] );
+		$this->assertSame(
+			array(
+				'count'  => 1,
+				'listed' => array( 'wp-content/uploads/gone.bin' ),
+			),
+			$this->summary()['skipped']
+		);
 		$this->assertStringContainsString( 'vanished', $this->ctx->log() );
 	}
 
@@ -481,7 +634,13 @@ final class PackStepTest extends TestCase {
 		$this->assertSame( StepResult::DONE, $result->kind );
 		$this->assertSame( array( 'wp-content/uploads/2024/in.txt' ), array_column( $this->packed(), 'p' ) );
 		$summary = $this->summary();
-		$this->assertSame( array( 'count' => 2, 'listed' => array( 'wp-content/uploads/media/a.txt', 'wp-content/uploads/media/b.txt' ) ), $summary['outside'] );
+		$this->assertSame(
+			array(
+				'count'  => 2,
+				'listed' => array( 'wp-content/uploads/media/a.txt', 'wp-content/uploads/media/b.txt' ),
+			),
+			$summary['outside']
+		);
 		$this->assertContains( '2 files resolve outside their content directory (through a link) and are not in the backup: wp-content/uploads/media/a.txt, wp-content/uploads/media/b.txt', $summary['warnings'] );
 		$this->assertStringContainsString( 'resolves outside its content directory', $this->ctx->log() );
 		$this->assertStringNotContainsString( 'secret', implode( '', array_map( 'file_get_contents', glob( $this->ctx->work() . '/volumes/*' ) ?: array() ) ) );
@@ -494,7 +653,14 @@ final class PackStepTest extends TestCase {
 		}
 		$lines = array();
 		foreach ( $paths as $p ) {
-			$lines[] = json_encode( array( 'p' => $p, 'b' => 10, 'm' => 1 ), JSON_UNESCAPED_SLASHES );
+			$lines[] = json_encode(
+				array(
+					'p' => $p,
+					'b' => 10,
+					'm' => 1,
+				),
+				JSON_UNESCAPED_SLASHES
+			);
 		}
 		file_put_contents( $this->ctx->work() . '/files.index.jsonl', implode( "\n", $lines ) . "\n" );
 		list( $result ) = $this->drive( $this->step() );
@@ -517,16 +683,21 @@ final class PackStepTest extends TestCase {
 			$paths[] = $this->file( sprintf( 'c/f%04d.bin', $i ), 2 * 1024, $i + 1 );
 		}
 		$this->index( $paths );
-		$grown = array();
-		$step  = new PackStep( $this->roots(), $this->options(), 1024, function ( string $p, int $chunk ) use ( &$grown ): void {
-			if ( 0 !== $chunk || ( $grown[ $p ] ?? 0 ) > PackStep::MAX_RESTARTS ) {
-				return;
+		$grown          = array();
+		$step           = new PackStep(
+			$this->roots(),
+			$this->options(),
+			1024,
+			function ( string $p, int $chunk ) use ( &$grown ): void {
+				if ( 0 !== $chunk || ( $grown[ $p ] ?? 0 ) > PackStep::MAX_RESTARTS ) {
+					return;
+				}
+				$grown[ $p ] = ( $grown[ $p ] ?? 0 ) + 1;
+				$abs         = $this->site . substr( $p, strlen( 'wp-content/uploads' ) );
+				file_put_contents( $abs, 'x', FILE_APPEND );
+				touch( $abs, time() + 100 * $grown[ $p ] );
 			}
-			$grown[ $p ] = ( $grown[ $p ] ?? 0 ) + 1;
-			$abs         = $this->site . substr( $p, strlen( 'wp-content/uploads' ) );
-			file_put_contents( $abs, 'x', FILE_APPEND );
-			touch( $abs, time() + 100 * $grown[ $p ] );
-		} );
+		);
 		list( $result ) = $this->drive( $step, array(), 20, 20000 );
 		$this->assertSame( StepResult::DONE, $result->kind );
 		$summary = $this->summary();
@@ -548,10 +719,10 @@ final class PackStepTest extends TestCase {
 		$first = $this->file( 'first.bin', 100000, 21 );
 		$live  = $this->file( 'live.bin', 3 * self::CHUNK, 22 );
 		$this->index( array( $first, $live ) );
-		$abs    = $this->site . '/live.bin';
-		$grown  = 0;
-		$bound  = 365000; // first.bin and its header, live.bin as scanned and the central directory allowance fit; 4 KB more do not.
-		$step   = $this->step(
+		$abs            = $this->site . '/live.bin';
+		$grown          = 0;
+		$bound          = 365000; // first.bin and its header, live.bin as scanned and the central directory allowance fit; 4 KB more do not.
+		$step           = $this->step(
 			function ( string $p, int $chunk ) use ( $abs, &$grown ): void {
 				if ( 'wp-content/uploads/live.bin' !== $p || 0 !== $chunk ) {
 					return;
@@ -561,7 +732,10 @@ final class PackStepTest extends TestCase {
 				touch( $abs, time() + 100 + ( ++$grown ) );
 				clearstatcache( true, $abs );
 			},
-			array( 'max_volume_bytes' => $bound, 'volume_bytes' => 10 * 1048576 )
+			array(
+				'max_volume_bytes' => $bound,
+				'volume_bytes'     => 10 * 1048576,
+			)
 		);
 		list( $result ) = $this->drive( $step, array(), 20, 400 );
 		$this->assertSame( StepResult::DONE, $result->kind );
@@ -578,7 +752,14 @@ final class PackStepTest extends TestCase {
 		$packed = $this->packed();
 		$this->assertSame( array( 'wp-content/uploads/first.bin', 'wp-content/uploads/live.bin' ), array_column( $packed, 'p' ), 'each file once' );
 		$summary = $this->summary();
-		$this->assertSame( array( 'count' => 1, 'listed' => array( 'wp-content/uploads/live.bin' ) ), $summary['changed'], 'counted once, when its entry was complete' );
+		$this->assertSame(
+			array(
+				'count'  => 1,
+				'listed' => array( 'wp-content/uploads/live.bin' ),
+			),
+			$summary['changed'],
+			'counted once, when its entry was complete'
+		);
 		$this->assertSame( 0, $summary['unstable']['count'] );
 		$this->assertCount( 1, glob( $this->ctx->work() . '/' . PackStep::VOLUMES . '/*.wpcheckpoint.zip' ) ?: array(), 'the first volume was sealed at the bound' );
 		$this->assertCount( 1, glob( $this->ctx->work() . '/' . PackStep::VOLUMES . '/*.partial' ) ?: array(), 'the file went on in the next one, left open for the manifest step' );

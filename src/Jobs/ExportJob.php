@@ -124,7 +124,11 @@ final class ExportJob implements JobType {
 				)
 			),
 			FileScanStep::from_plan(),
-			new ReviewStep(),
+			new ReviewStep(
+				static function () use ( $directories ) {
+					return Environment::default_probes()['disk_free_space']( $directories->base() );
+				}
+			),
 			DatabaseExportStep::from_plan( $connection ),
 			new PackStep(),
 			new ManifestStep( self::site_facts(), self::generator(), array(), Manifest::DEFAULT_CHUNK, $this->clean ),

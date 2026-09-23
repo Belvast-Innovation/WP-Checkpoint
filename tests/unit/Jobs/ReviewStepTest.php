@@ -61,18 +61,49 @@ final class ReviewStepTest extends TestCase {
 		);
 	}
 
-	private function inputs( array $oversize = array(), array $scan_lists = array(), array $scan_counts = array(), int $int_size = 8, array $limits = array( 'max_file_bytes' => 261469110272, 'max_file_limit' => 'index' ) ): void {
-		ExportPlan::write( $this->work, ExportPlan::PREFLIGHT, array(
-			'checks'   => array( 'int_size' => $int_size, 'max_entry_bytes' => 8 === $int_size ? 4398046511104 : 2147483647 ),
-			'findings' => array( 'oversize' => $oversize ),
-			'warnings' => array(),
-		) );
-		$lists = array_merge( array( 'unreadable' => array(), 'too_large' => array(), 'over_volume' => array(), 'heavy' => array() ), $scan_lists );
-		file_put_contents( $this->work . '/' . FileScanStep::SUMMARY, json_encode( array(
-			'counts' => array_merge( array( 'unreadable' => count( $lists['unreadable'] ), 'too_large' => count( $lists['too_large'] ), 'over_volume' => 0, 'heavy' => count( $lists['heavy'] ) ), $scan_counts ),
-			'lists'  => $lists,
-			'limits' => $limits,
-		) ) );
+	private function inputs( array $oversize = array(), array $scan_lists = array(), array $scan_counts = array(), int $int_size = 8, array $limits = array(
+		'max_file_bytes' => 261469110272,
+		'max_file_limit' => 'index',
+	) ): void {
+		ExportPlan::write(
+			$this->work,
+			ExportPlan::PREFLIGHT,
+			array(
+				'checks'   => array(
+					'int_size'        => $int_size,
+					'max_entry_bytes' => 8 === $int_size ? 4398046511104 : 2147483647,
+				),
+				'findings' => array( 'oversize' => $oversize ),
+				'warnings' => array(),
+			)
+		);
+		$lists = array_merge(
+			array(
+				'unreadable'  => array(),
+				'too_large'   => array(),
+				'over_volume' => array(),
+				'heavy'       => array(),
+			),
+			$scan_lists
+		);
+		file_put_contents(
+			$this->work . '/' . FileScanStep::SUMMARY,
+			json_encode(
+				array(
+					'counts' => array_merge(
+						array(
+							'unreadable'  => count( $lists['unreadable'] ),
+							'too_large'   => count( $lists['too_large'] ),
+							'over_volume' => 0,
+							'heavy'       => count( $lists['heavy'] ),
+						),
+						$scan_counts
+					),
+					'lists'  => $lists,
+					'limits' => $limits,
+				)
+			)
+		);
 	}
 
 	private function review(): string {
@@ -84,16 +115,81 @@ final class ReviewStepTest extends TestCase {
 		$result = ( new ReviewStep() )->run( $this->context( array() ) );
 		$this->assertSame( StepResult::DONE, $result->kind );
 		$review = json_decode( $this->review(), true );
-		$this->assertSame( array( 'exclude_tables' => array(), 'exclude_oversize' => array(), 'exclude_paths' => array(), 'notes' => array() ), $review['decisions'] );
+		$this->assertSame(
+			array(
+				'exclude_tables'   => array(),
+				'exclude_oversize' => array(),
+				'exclude_paths'    => array(),
+				'notes'            => array(),
+			),
+			$review['decisions']
+		);
 		$this->assertFalse( $review['asked'] );
+	}
+
+	public function test_the_review_stops_when_the_whole_backup_would_not_fit(): void {
+		$this->inputs(
+			array(),
+			array(),
+			array(
+				'files' => 100,
+				'bytes' => 50 * 1048576,
+			)
+		);
+		$preflight                       = ExportPlan::read( $this->work, ExportPlan::PREFLIGHT );
+		$preflight['checks']['db_bytes'] = 20 * 1048576;
+		ExportPlan::write( $this->work, ExportPlan::PREFLIGHT, $preflight );
+		// 50 MB of files, the database estimated at 30 MB (1.5 x 20 MB), written twice before the export.
+		$needed = ExportPlan::required_bytes( 50 * 1048576, 100, 30 * 1048576, false );
+		try {
+			( new ReviewStep(
+				static function () use ( $needed ): float {
+					return $needed - 1;
+				}
+			) )->run( $this->context( array() ) );
+			$this->fail( 'one byte short must stop the backup' );
+		} catch ( \RuntimeException $e ) {
+			$this->assertStringStartsWith( 'Not enough free disk space for this backup: ', $e->getMessage() );
+			$this->assertStringContainsString( sprintf( 'about %d MB needed', (int) ceil( $needed / 1048576 ) ), $e->getMessage() );
+			$this->assertStringContainsString( '(50 MB of files, about 30 MB of database)', $e->getMessage() );
+			$this->assertFalse( is_file( $this->work . '/' . ExportPlan::REVIEW ), 'nothing decided: a retry after freeing space reviews again' );
+		}
+		$this->assertSame(
+			StepResult::DONE,
+			( new ReviewStep(
+				static function () use ( $needed ): float {
+					return $needed;
+				}
+			) )->run( $this->context( array() ) )->kind
+		);
+		$this->assertSame(
+			StepResult::DONE,
+			( new ReviewStep(
+				static function () {
+					return false; // Unknown: the packer checks before every volume.
+				}
+			) )->run( $this->context( array() ) )->kind
+		);
 	}
 
 	public function test_another_installation_is_a_note_not_a_question(): void {
 		$this->inputs();
 		$preflight                        = ExportPlan::read( $this->work, ExportPlan::PREFLIGHT );
 		$preflight['findings']['foreign'] = array(
-			array( 'prefix' => 'wp_old_', 'count' => 12, 'listed' => array( 'wp_old_commentmeta', 'wp_old_comments', 'wp_old_links', 'wp_old_options' ), 'kept' => 2, 'kept_listed' => array( 'wp_old_yoast', 'wp_old_zz' ) ),
-			array( 'prefix' => 'wp_n_', 'count' => 0, 'listed' => array(), 'kept' => 1, 'kept_listed' => array( 'wp_n_x' ) ), // Its core was named back.
+			array(
+				'prefix'      => 'wp_old_',
+				'count'       => 12,
+				'listed'      => array( 'wp_old_commentmeta', 'wp_old_comments', 'wp_old_links', 'wp_old_options' ),
+				'kept'        => 2,
+				'kept_listed' => array( 'wp_old_yoast', 'wp_old_zz' ),
+			),
+			array(
+				'prefix'      => 'wp_n_',
+				'count'       => 0,
+				'listed'      => array(),
+				'kept'        => 1,
+				'kept_listed' => array( 'wp_n_x' ),
+			), // Its core was named back.
 		);
 		ExportPlan::write( $this->work, ExportPlan::PREFLIGHT, $preflight );
 		$result = ( new ReviewStep() )->run( $this->context( array() ) );
@@ -118,23 +214,55 @@ final class ReviewStepTest extends TestCase {
 		$heavy['wp-content/plugins/small/node_modules'] = 10 * 1048576;
 		$this->inputs(
 			array(
-				array( 'table' => 'wp_options', 'exact' => true, 'count' => 3, 'limit' => 4194304 ),
-				array( 'table' => 'wp_postmeta', 'exact' => false, 'count' => null, 'limit' => 4194304 ),
+				array(
+					'table' => 'wp_options',
+					'exact' => true,
+					'count' => 3,
+					'limit' => 4194304,
+				),
+				array(
+					'table' => 'wp_postmeta',
+					'exact' => false,
+					'count' => null,
+					'limit' => 4194304,
+				),
 			),
-			array( 'unreadable' => array( 'wp-content/uploads/a.jpg', 'wp-content/uploads/b.jpg' ), 'heavy' => $heavy ),
+			array(
+				'unreadable' => array( 'wp-content/uploads/a.jpg', 'wp-content/uploads/b.jpg' ),
+				'heavy'      => $heavy,
+			),
 			array( 'unreadable' => 7 )
 		);
 		$result = ( new ReviewStep() )->run( $this->context( array() ) );
 		$this->assertSame( StepResult::ASK, $result->kind );
 		$ids = array_column( $result->questions, 'id' );
 		$this->assertSame( 'unreadable', $ids[0] );
-		$this->assertSame( array( 'id' => 'unreadable', 'kind' => 'unreadable', 'count' => 7, 'file' => 'review.json', 'choices' => array( 'continue', 'stop' ) ), $result->questions[0], 'the count is the scan count, the paths stay in the file' );
+		$this->assertSame(
+			array(
+				'id'      => 'unreadable',
+				'kind'    => 'unreadable',
+				'count'   => 7,
+				'file'    => 'review.json',
+				'choices' => array( 'continue', 'stop' ),
+			),
+			$result->questions[0],
+			'the count is the scan count, the paths stay in the file'
+		);
 		$this->assertSame( 10, count( preg_grep( '/\Alarge_dir_\d+\z/', $ids ) ), 'ten listed heavy directories' );
 		$this->assertContains( 'large_dirs_more', $ids );
 		$this->assertSame( 'oversize_0', $ids[ count( $ids ) - 2 ] );
 		$this->assertSame( 'oversize_1', $ids[ count( $ids ) - 1 ] );
 		$oversize = $result->questions[ count( $ids ) - 2 ];
-		$this->assertSame( array( 'id' => 'oversize_0', 'kind' => 'oversize', 'file' => 'review.json', 'choices' => array( 'exclude', 'stop' ), 'count' => 3 ), $oversize );
+		$this->assertSame(
+			array(
+				'id'      => 'oversize_0',
+				'kind'    => 'oversize',
+				'file'    => 'review.json',
+				'choices' => array( 'exclude', 'stop' ),
+				'count'   => 3,
+			),
+			$oversize
+		);
 		$this->assertSame( 'oversize_possible', $result->questions[ count( $ids ) - 1 ]['kind'] );
 		$this->assertArrayNotHasKey( 'count', $result->questions[ count( $ids ) - 1 ], 'a sampled table has no count' );
 		foreach ( $result->questions as $question ) {
@@ -156,7 +284,14 @@ final class ReviewStepTest extends TestCase {
 		$this->assertSame( $result->questions, $again->questions );
 
 		// Answered: decisions derived from the same inputs plus the answers; a second run writes an identical file.
-		$answers = array( 'unreadable' => 'continue', 'large_dir_0' => 'exclude', 'large_dir_1' => 'include', 'large_dirs_more' => 'exclude', 'oversize_0' => 'exclude', 'oversize_1' => 'exclude' );
+		$answers = array(
+			'unreadable'      => 'continue',
+			'large_dir_0'     => 'exclude',
+			'large_dir_1'     => 'include',
+			'large_dirs_more' => 'exclude',
+			'oversize_0'      => 'exclude',
+			'oversize_1'      => 'exclude',
+		);
 		for ( $i = 2; $i < 10; $i++ ) {
 			$answers[ 'large_dir_' . $i ] = 'include';
 		}
@@ -175,10 +310,30 @@ final class ReviewStepTest extends TestCase {
 
 	public function test_a_policy_decides_without_asking_and_fail_stops_with_the_reason(): void {
 		$this->inputs(
-			array( array( 'table' => 'wp_options', 'exact' => true, 'count' => 2, 'limit' => 4194304 ) ),
-			array( 'unreadable' => array( 'wp-content/uploads/a.jpg' ), 'heavy' => array( 'wp-content/plugins/x/node_modules' => 200 * 1048576 ) )
+			array(
+				array(
+					'table' => 'wp_options',
+					'exact' => true,
+					'count' => 2,
+					'limit' => 4194304,
+				),
+			),
+			array(
+				'unreadable' => array( 'wp-content/uploads/a.jpg' ),
+				'heavy'      => array( 'wp-content/plugins/x/node_modules' => 200 * 1048576 ),
+			)
 		);
-		$result = ( new ReviewStep() )->run( $this->context( array( 'policy' => array( 'unreadable' => 'continue', 'oversize' => 'exclude', 'large_dirs' => 'include' ) ) ) );
+		$result = ( new ReviewStep() )->run(
+			$this->context(
+				array(
+					'policy' => array(
+						'unreadable' => 'continue',
+						'oversize'   => 'exclude',
+						'large_dirs' => 'include',
+					),
+				)
+			)
+		);
 		$this->assertSame( StepResult::DONE, $result->kind );
 		$review = json_decode( $this->review(), true );
 		$this->assertSame( array( 'wp_options' ), $review['decisions']['exclude_oversize'] );
@@ -186,19 +341,48 @@ final class ReviewStepTest extends TestCase {
 		$this->assertFalse( $review['asked'] );
 
 		try {
-			( new ReviewStep() )->run( $this->context( array( 'policy' => array( 'unreadable' => 'continue', 'oversize' => 'fail', 'large_dirs' => 'include' ) ) ) );
+			( new ReviewStep() )->run(
+				$this->context(
+					array(
+						'policy' => array(
+							'unreadable' => 'continue',
+							'oversize'   => 'fail',
+							'large_dirs' => 'include',
+						),
+					)
+				)
+			);
 			$this->fail();
 		} catch ( \RuntimeException $e ) {
 			$this->assertStringContainsString( 'Stopped: table wp_options has rows larger than the single-row limit of 4194304 bytes (as SQL) (2 rows)', $e->getMessage() );
 		}
 		try {
-			( new ReviewStep() )->run( $this->context( array( 'policy' => array( 'unreadable' => 'fail', 'oversize' => 'exclude', 'large_dirs' => 'include' ) ) ) );
+			( new ReviewStep() )->run(
+				$this->context(
+					array(
+						'policy' => array(
+							'unreadable' => 'fail',
+							'oversize'   => 'exclude',
+							'large_dirs' => 'include',
+						),
+					)
+				)
+			);
 			$this->fail();
 		} catch ( \RuntimeException $e ) {
 			$this->assertStringContainsString( 'Stopped: 1 files cannot be read', $e->getMessage() );
 		}
 		// A partial policy asks only what it does not cover.
-		$result = ( new ReviewStep() )->run( $this->context( array( 'policy' => array( 'unreadable' => 'continue', 'oversize' => 'exclude' ) ) ) );
+		$result = ( new ReviewStep() )->run(
+			$this->context(
+				array(
+					'policy' => array(
+						'unreadable' => 'continue',
+						'oversize'   => 'exclude',
+					),
+				)
+			)
+		);
 		$this->assertSame( StepResult::ASK, $result->kind );
 		$this->assertSame( array( 'large_dir_0' ), array_column( $result->questions, 'id' ) );
 		// An answer of "stop" stops as well.
@@ -212,18 +396,56 @@ final class ReviewStepTest extends TestCase {
 
 	public function test_files_too_large_stop_the_export_before_any_question_and_name_the_threshold_the_scan_used(): void {
 		// 32-bit PHP: the container limit is the lower one; the scan recorded it, the message repeats it.
-		$this->inputs( array(), array( 'too_large' => array( 'wp-content/uploads/huge.iso' ) ), array(), 4, array( 'max_file_bytes' => 2147483647, 'max_file_limit' => 'int_size' ) );
+		$this->inputs(
+			array(),
+			array( 'too_large' => array( 'wp-content/uploads/huge.iso' ) ),
+			array(),
+			4,
+			array(
+				'max_file_bytes' => 2147483647,
+				'max_file_limit' => 'int_size',
+			)
+		);
 		try {
-			( new ReviewStep() )->run( $this->context( array( 'policy' => array( 'unreadable' => 'continue', 'oversize' => 'exclude', 'large_dirs' => 'include' ) ) ) );
+			( new ReviewStep() )->run(
+				$this->context(
+					array(
+						'policy' => array(
+							'unreadable' => 'continue',
+							'oversize'   => 'exclude',
+							'large_dirs' => 'include',
+						),
+					)
+				)
+			);
 			$this->fail();
 		} catch ( \RuntimeException $e ) {
 			$this->assertSame( '1 files are larger than 2047 MB, the largest file a backup made by this server\'s 32-bit PHP can hold: wp-content/uploads/huge.iso. Move them out of the site or exclude them, or run the backup on 64-bit PHP.', $e->getMessage() );
 		}
 		$this->assertFileDoesNotExist( $this->work . '/' . ExportPlan::REVIEW );
 		// 64-bit PHP: the index line is the lower one; the message names the format, not the platform.
-		$this->inputs( array(), array( 'too_large' => array( 'wp-content/uploads/huge.iso' ) ), array(), 8, array( 'max_file_bytes' => 261469110272, 'max_file_limit' => 'index' ) );
+		$this->inputs(
+			array(),
+			array( 'too_large' => array( 'wp-content/uploads/huge.iso' ) ),
+			array(),
+			8,
+			array(
+				'max_file_bytes' => 261469110272,
+				'max_file_limit' => 'index',
+			)
+		);
 		try {
-			( new ReviewStep() )->run( $this->context( array( 'policy' => array( 'unreadable' => 'continue', 'oversize' => 'exclude', 'large_dirs' => 'include' ) ) ) );
+			( new ReviewStep() )->run(
+				$this->context(
+					array(
+						'policy' => array(
+							'unreadable' => 'continue',
+							'oversize'   => 'exclude',
+							'large_dirs' => 'include',
+						),
+					)
+				)
+			);
 			$this->fail();
 		} catch ( \RuntimeException $e ) {
 			$this->assertSame( '1 files are larger than 249356 MB, the largest file the backup format can describe: wp-content/uploads/huge.iso. Move them out of the site or exclude them.', $e->getMessage() );
@@ -231,7 +453,15 @@ final class ReviewStepTest extends TestCase {
 	}
 
 	public function test_without_a_scan_summary_only_the_database_findings_are_reviewed(): void {
-		ExportPlan::write( $this->work, ExportPlan::PREFLIGHT, array( 'checks' => array(), 'findings' => array( 'oversize' => array() ), 'warnings' => array() ) );
+		ExportPlan::write(
+			$this->work,
+			ExportPlan::PREFLIGHT,
+			array(
+				'checks'   => array(),
+				'findings' => array( 'oversize' => array() ),
+				'warnings' => array(),
+			)
+		);
 		$result = ( new ReviewStep() )->run( $this->context( array( 'contents' => array( 'files' => array() ) ) ) );
 		$this->assertSame( StepResult::DONE, $result->kind );
 	}
