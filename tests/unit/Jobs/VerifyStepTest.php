@@ -222,9 +222,6 @@ final class VerifyStepTest extends TestCase {
 
 	public function test_a_file_larger_than_any_manifest_is_never_read(): void {
 		$builder = $this->archive();
-		$handle  = fopen( $builder->manifest_path, 'r+' );
-		ftruncate( $handle, \WPCheckpoint\Archive\Manifest::MAX_JSON_BYTES + 1 );
-		fclose( $handle );
 		CountingStream::register();
 		try {
 			$dir  = CountingStream::url( $builder->dir );
@@ -234,6 +231,17 @@ final class VerifyStepTest extends TestCase {
 				},
 				'strval'
 			);
+			try {
+				$step->run( $this->ctx->context() );
+			} catch ( \WPCheckpoint\Jobs\TransientFailure $e ) {
+				unset( $e ); // The record cannot be renamed from the real work directory into the wrapper: not what is tested here.
+			}
+			$this->assertGreaterThan( 0, CountingStream::bytes_read( $builder->manifest_path ), 'the observer sees reads of a manifest of normal size' );
+
+			$handle = fopen( $builder->manifest_path, 'r+' );
+			ftruncate( $handle, \WPCheckpoint\Archive\Manifest::MAX_JSON_BYTES + 1 );
+			fclose( $handle );
+			CountingStream::$read = array();
 			try {
 				$step->run( $this->ctx->context() );
 				$this->fail( 'an oversized manifest must fail the check' );

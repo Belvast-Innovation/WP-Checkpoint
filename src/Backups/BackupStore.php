@@ -375,6 +375,7 @@ final class BackupStore {
 	 */
 	private function manifest_hash( string $base ): string {
 		$file = $this->dir . DIRECTORY_SEPARATOR . $base . self::MANIFEST_SUFFIX;
+		clearstatcache( true, $file ); // The size decides whether it is read at all: never a cached one.
 		$size = is_file( $file ) ? (int) filesize( $file ) : 0;
 		return $size > 0 && $size <= Manifest::MAX_JSON_BYTES ? self::hash_or_empty( $file ) : '';
 	}

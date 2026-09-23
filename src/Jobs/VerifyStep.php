@@ -230,6 +230,7 @@ final class VerifyStep implements Step {
 	 * @return string
 	 */
 	private static function manifest_hash( string $manifest ): string {
+		clearstatcache( true, $manifest ); // The size decides whether it is read at all: never a cached one.
 		$size = is_file( $manifest ) ? (int) filesize( $manifest ) : 0;
 		if ( $size <= 0 || $size > Manifest::MAX_JSON_BYTES ) {
 			return '';

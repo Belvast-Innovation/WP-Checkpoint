@@ -52,7 +52,14 @@ final class CountingStream {
 	}
 
 	public static function bytes_read( string $path ): int {
-		return self::$read[ $path ] ?? 0;
+		return self::$read[ self::key( $path ) ] ?? 0;
+	}
+
+	/**
+	 * One key per file whichever separator built the path (Windows mixes them).
+	 */
+	private static function key( string $path ): string {
+		return str_replace( '\\', '/', $path );
 	}
 
 	private static function real( string $url ): string {
@@ -68,7 +75,8 @@ final class CountingStream {
 	public function stream_read( int $count ) {
 		$data = fread( $this->handle, $count );
 		if ( is_string( $data ) ) {
-			self::$read[ $this->path ] = ( self::$read[ $this->path ] ?? 0 ) + strlen( $data );
+			$key                = self::key( $this->path );
+			self::$read[ $key ] = ( self::$read[ $key ] ?? 0 ) + strlen( $data );
 		}
 		return $data;
 	}
