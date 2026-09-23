@@ -56,6 +56,36 @@ jobs:
       - run: composer install --no-interaction --no-progress --prefer-dist
       - run: composer test:unit
 
+  extractors:
+    # Other people's tools must read what the plugin writes (names, content, modes): only real readers can tell.
+    name: Extractors (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            tools: unzip-c-utf8 unzip-no-locale 7z bsdtar python
+          - os: macos-latest
+            tools: ditto unzip-c-utf8 unzip-no-locale bsdtar python
+          - os: windows-latest
+            tools: expand-archive bsdtar 7z python
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: none
+          tools: composer:v2
+
+      - name: Install extractors
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends unzip 7zip libarchive-tools
+
+      - run: composer install --no-interaction --no-progress --prefer-dist
+      - run: php tests/extractors/check.php ${{ matrix.tools }}
+
   integration:
     name: Integration (wp-env, PHP ${{ matrix.php }})
     runs-on: ubuntu-latest
