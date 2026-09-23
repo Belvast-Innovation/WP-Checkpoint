@@ -149,6 +149,23 @@ final class ReviewStep implements Step {
 	}
 
 	/**
+	 * The note for files larger than a volume: each goes into a volume of its
+	 * own at least that large, because a volume never splits a file.
+	 *
+	 * @param array{count: int, listed: string[], volume_bytes: int} $finding Finding.
+	 * @return string
+	 */
+	private static function over_volume_note( array $finding ): string {
+		$size = $finding['volume_bytes'] > 0 ? sprintf( 'the volume size of %d MB', (int) ( $finding['volume_bytes'] / 1048576 ) ) : 'the volume size';
+		return sprintf(
+			'%1$d files are larger than %2$s%3$s. A volume never splits a file, so each of them is written into a volume at least that large; check that wherever the backup is stored or sent accepts files of that size.',
+			$finding['count'],
+			$size,
+			array() === $finding['listed'] ? '' : ' (for example ' . implode( ', ', array_slice( $finding['listed'], 0, 3 ) ) . ')'
+		);
+	}
+
+	/**
 	 * Nothing to do: review.json lives in the work directory, which the
 	 * engine removes; no tables or external resources.
 	 *
@@ -175,7 +192,7 @@ final class ReviewStep implements Step {
 	 *
 	 * @param array<string, mixed> $preflight preflight.json.
 	 * @param array<string, mixed> $scan      scan.summary.json (empty when no files were scanned).
-	 * @return array{unreadable: array{count: int, listed: string[]}, too_large: array{count: int, listed: string[]}, over_volume: array{count: int, listed: string[]}, heavy: array<int, array{p: string, bytes: int}>, oversize: array<int, array{table: string, exact: bool, count: int|null, limit: int}>, foreign: array<int, array{prefix: string, count: int, listed: string[], kept: int, kept_listed: string[]}>}
+	 * @return array{unreadable: array{count: int, listed: string[]}, too_large: array{count: int, listed: string[]}, over_volume: array{count: int, listed: string[], volume_bytes: int}, heavy: array<int, array{p: string, bytes: int}>, oversize: array<int, array{table: string, exact: bool, count: int|null, limit: int}>, foreign: array<int, array{prefix: string, count: int, listed: string[], kept: int, kept_listed: string[]}>}
 	 */
 	public static function findings( array $preflight, array $scan ): array {
 		$lists  = isset( $scan['lists'] ) && is_array( $scan['lists'] ) ? $scan['lists'] : array();
@@ -231,7 +248,8 @@ final class ReviewStep implements Step {
 		return array(
 			'unreadable'  => $listed( 'unreadable' ),
 			'too_large'   => $listed( 'too_large' ),
-			'over_volume' => $listed( 'over_volume' ),
+			// The size the scanner judged with, from its summary: the note never uses a threshold of its own.
+			'over_volume' => $listed( 'over_volume' ) + array( 'volume_bytes' => (int) ( $scan['limits']['volume_bytes'] ?? 0 ) ),
 			'heavy'       => $heavy,
 			'oversize'    => $oversize,
 			'foreign'     => $foreign,
@@ -275,6 +293,11 @@ final class ReviewStep implements Step {
 			if ( $group['kept'] > 0 ) {
 				$decisions['notes'][] = sprintf( '%d other tables with the prefix %s are in the backup although they may belong to that installation (for example %s). If they do, leave them out by name (wp wpcheckpoint export --exclude-table=...).', $group['kept'], $group['prefix'], implode( ', ', array_slice( $group['kept_listed'], 0, 3 ) ) );
 			}
+		}
+
+		if ( isset( $findings['over_volume'] ) && $findings['over_volume']['count'] > 0 ) {
+			// Not a question: nothing to decide, but a volume that large can surprise whatever stores or moves it.
+			$decisions['notes'][] = self::over_volume_note( $findings['over_volume'] );
 		}
 
 		if ( $findings['unreadable']['count'] > 0 ) {

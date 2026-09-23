@@ -150,6 +150,7 @@ final class FileScanner {
 		$state['limits'] = array(
 			'max_file_bytes' => $this->max_file['bytes'],
 			'max_file_limit' => $this->max_file['limited_by'],
+			'volume_bytes'   => Packer::VOLUME_BYTES,
 		);
 		if ( ! empty( $state['done'] ) ) {
 			return $state;

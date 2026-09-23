@@ -215,6 +215,7 @@ final class FileScannerTest extends TestCase {
 		$this->assertSame( 0, $state['counts']['too_large'], 'on 64-bit PHP it merely exceeds the volume threshold' );
 		$this->assertSame( 1, $state['counts']['over_volume'] );
 		$this->assertGreaterThan( Packer::VOLUME_BYTES, $lines[0]['b'] );
+		$this->assertSame( Packer::VOLUME_BYTES, $state['limits']['volume_bytes'], 'the threshold it judged with, for the review to quote' );
 		// The index line bounds the largest file too: with the smallest chunk the limit is about 15 GiB, a sparse 16 GiB file is over it.
 		$h = fopen( $this->root . '/c/huge.bin', 'wb' );
 		fseek( $h, IndexLine::max_indexable_bytes( Manifest::MIN_CHUNK ) + 10 );
