@@ -144,6 +144,22 @@ final class ManifestStepTest extends TestCase {
 		$this->assertStringContainsString( 'Self-check passed', $this->ctx->log() );
 	}
 
+	public function test_a_backup_that_was_to_contain_the_database_is_not_finished_without_a_table(): void {
+		// The listing came back empty (or everything was filtered out): the manifest would say "no database" and
+		// look complete. The job asked for the database (the default), so the step stops before anything is sealed.
+		$summary           = ExportPlan::read( $this->ctx->work(), 'database.summary.json' );
+		$summary['tables'] = array();
+		ExportPlan::write( $this->ctx->work(), 'database.summary.json', $summary );
+		$this->ctx->options = array();
+		try {
+			$this->step()->run( $this->ctx->context() );
+			$this->fail( 'the step must stop' );
+		} catch ( \RuntimeException $e ) {
+			$this->assertSame( 'The backup was to contain the database, but no table was exported. It is stopped rather than finished without the database. If the database is meant to be left out, back up the files only (wp wpcheckpoint export --files-only).', $e->getMessage() );
+		}
+		$this->assertSame( array(), $this->ctx->checkpoints, 'not even the audit started' );
+	}
+
 	public function test_a_line_without_a_hash_stops_the_step_before_anything_is_sealed(): void {
 		file_put_contents( $this->ctx->work() . '/' . PackStep::PACKED_INDEX, json_encode( array( 'p' => 'wp-content/uploads/late.txt', 'b' => 1, 'm' => 1 ), JSON_UNESCAPED_SLASHES ) . "\n", FILE_APPEND );
 		try {

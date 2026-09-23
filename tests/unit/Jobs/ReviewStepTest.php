@@ -152,6 +152,7 @@ final class ReviewStepTest extends TestCase {
 			$this->assertStringStartsWith( 'Not enough free disk space for this backup: ', $e->getMessage() );
 			$this->assertStringContainsString( sprintf( 'about %d MB needed', (int) ceil( $needed / 1048576 ) ), $e->getMessage() );
 			$this->assertStringContainsString( '(50 MB of files, about 30 MB of database)', $e->getMessage() );
+			$this->assertStringContainsString( 'Failed backup jobs keep their work files for 7 days so that they can be retried; they take space too until then.', $e->getMessage() );
 			$this->assertFalse( is_file( $this->work . '/' . ExportPlan::REVIEW ), 'nothing decided: a retry after freeing space reviews again' );
 		}
 		$this->assertSame(

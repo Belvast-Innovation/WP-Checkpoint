@@ -489,6 +489,7 @@ final class PackStepTest extends TestCase {
 		} catch ( \RuntimeException $e ) {
 			$this->assertStringStartsWith( 'Not enough free disk space to pack this backup: ', $e->getMessage() );
 			$this->assertStringContainsString( '(0 MB of files, 3 MB of exported database)', $e->getMessage() );
+			$this->assertStringContainsString( 'keep their work files for 7 days', $e->getMessage() );
 		}
 		$this->assertSame( array(), glob( $this->ctx->work() . '/' . PackStep::VOLUMES . '/*' ), 'no volume was started' );
 		list( $result ) = $this->drive(

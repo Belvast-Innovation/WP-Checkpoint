@@ -239,6 +239,12 @@ final class PreflightStep implements Step {
 		if ( $options['contents']['database'] ) {
 			$listing = call_user_func( $this->env['tables'], (string) $this->env['prefix'] );
 			$core    = isset( $this->env['core_tables'] ) ? (array) call_user_func( $this->env['core_tables'] ) : array();
+			$missing = self::missing_essentials( array_map( 'strval', (array) $listing['tables'] ), array_map( 'strval', $core ), (string) $this->env['prefix'] );
+			if ( array() !== $missing ) {
+				// A listing without this site's own posts or options is not this site's database (a failed or
+				// filtered query, a wrong prefix): a backup made from it would hold no database and look complete.
+				throw new \RuntimeException( sprintf( 'The database did not list this site\'s own tables (%s missing). The backup is stopped rather than made without the database; check the table prefix and the database connection, and try again.', implode( ', ', $missing ) ) );
+			}
 			// The plugin's own job table describes this installation's jobs and storage, not the site: a restore
 			// keeps the target's own.
 			$own    = isset( $this->env['own_tables'] ) ? array_map( 'strval', (array) $this->env['own_tables'] ) : array();
@@ -285,17 +291,19 @@ final class PreflightStep implements Step {
 			}
 			$stats = $this->statistics( $tables );
 		}
-		$db_bytes = 0;
+		// The table data only: InnoDB's index pages never reach the exported SQL. Floats throughout: free space and
+		// sums of large sites do not fit a 32-bit integer (a cast there wraps to a negative number).
+		$db_bytes = 0.0;
 		foreach ( $stats as $row ) {
-			$db_bytes += (int) $row['data_bytes'] + (int) $row['index_bytes'];
+			$db_bytes += (float) $row['data_bytes'];
 		}
 		$free = call_user_func( $this->env['disk_free'] );
-		if ( is_numeric( $free ) ) {
-			$needed = Packer::required_free_bytes() + $db_bytes;
-			if ( (int) $free < $needed ) {
-				throw new \RuntimeException( sprintf( 'Not enough free disk space in the storage directory: %d MB free, at least %d MB needed for one volume and the database.', (int) ( (int) $free / 1048576 ), (int) ( $needed / 1048576 ) ) );
+		if ( is_int( $free ) || is_float( $free ) ) {
+			$needed = (float) Packer::required_free_bytes() + $db_bytes;
+			if ( (float) $free < $needed ) {
+				throw new \RuntimeException( sprintf( 'Not enough free disk space in the storage directory: %d MB free, at least %d MB needed for one volume and the database.', (int) floor( (float) $free / 1048576 ), (int) ceil( $needed / 1048576 ) ) );
 			}
-			$state['checks']['disk_free'] = (int) $free;
+			$state['checks']['disk_free'] = (float) $free;
 		} else {
 			$state['warnings'][] = 'The free disk space could not be measured; the export stops if the disk fills up.';
 		}
@@ -381,6 +389,26 @@ final class PreflightStep implements Step {
 				'warnings' => array_values( $state['warnings'] ),
 			)
 		);
+	}
+
+	/**
+	 * This installation's essential tables (its main site's posts and options,
+	 * from its core list; the base prefix when the core list is unknown) that
+	 * the listing does not contain. Not every core table: a cleanup plugin may
+	 * have dropped one such as links.
+	 *
+	 * @param string[] $listing Tables listed by the database.
+	 * @param string[] $core    Core tables.
+	 * @param string   $prefix  Base prefix.
+	 * @return string[]
+	 */
+	private static function missing_essentials( array $listing, array $core, string $prefix ): array {
+		$essential = array();
+		foreach ( array( 'posts', 'options' ) as $name ) {
+			$essential[] = in_array( $prefix . $name, $core, true ) || array() === $core ? $prefix . $name : '';
+		}
+		$essential = array_filter( $essential );
+		return array_values( array_diff( $essential, $listing ) );
 	}
 
 	/**

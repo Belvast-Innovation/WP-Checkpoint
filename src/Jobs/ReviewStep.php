@@ -144,7 +144,7 @@ final class ReviewStep implements Step {
 		$database = (float) ( $preflight['checks']['db_bytes'] ?? 0 ) * ExportPlan::DATABASE_ESTIMATE[0] / ExportPlan::DATABASE_ESTIMATE[1];
 		$needed   = ExportPlan::required_bytes( $files['bytes'], $files['count'], $database, false );
 		if ( (float) $free < $needed ) {
-			throw new \RuntimeException( sprintf( 'Not enough free disk space for this backup: %1$d MB free in the storage directory, about %2$d MB needed. The whole archive stays there until it is complete, next to the exported database (%3$d MB of files, about %4$d MB of database). Free up space, or leave large directories or tables out.', (int) ( $free / 1048576 ), (int) ceil( $needed / 1048576 ), (int) ( $files['bytes'] / 1048576 ), (int) ceil( $database / 1048576 ) ) );
+			throw new \RuntimeException( sprintf( 'Not enough free disk space for this backup: %1$d MB free in the storage directory, about %2$d MB needed. The whole archive stays there until it is complete, next to the exported database (%3$d MB of files, about %4$d MB of database). Free up space, or leave large directories or tables out. Failed backup jobs keep their work files for %5$d days so that they can be retried; they take space too until then.', (int) ( $free / 1048576 ), (int) ceil( $needed / 1048576 ), (int) ( $files['bytes'] / 1048576 ), (int) ceil( $database / 1048576 ), (int) ( JobRepository::WORK_RETENTION_SECONDS / 86400 ) ) );
 		}
 	}
 

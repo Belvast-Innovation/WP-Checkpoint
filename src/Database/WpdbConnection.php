@@ -7,6 +7,8 @@
 
 namespace WPCheckpoint\Database;
 
+use WPCheckpoint\Jobs\TransientFailure;
+
 defined( 'ABSPATH' ) || exit;
 
 /**
@@ -108,13 +110,18 @@ final class WpdbConnection implements Connection {
 	 *
 	 * @param string $prefix Table prefix.
 	 * @return array{tables: string[], views: string[]}
+	 * @throws TransientFailure When the list cannot be read: an empty list would be a backup without a database.
 	 */
 	public function tables_with_prefix( string $prefix ): array {
 		global $wpdb;
-		$rows   = $this->rows( 'SHOW FULL TABLES LIKE ?', array( $wpdb->esc_like( $prefix ) . '%' ) );
+		$rows = $this->rows( 'SHOW FULL TABLES LIKE ?', array( $wpdb->esc_like( $prefix ) . '%' ) );
+		if ( null === $rows ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- job error, cleaned by the presenter.
+			throw new TransientFailure( sprintf( 'The list of tables could not be read from the database: %s', $this->last_error() ) );
+		}
 		$tables = array();
 		$views  = array();
-		foreach ( is_array( $rows ) ? $rows : array() as $row ) {
+		foreach ( $rows as $row ) {
 			if ( 'VIEW' === strtoupper( (string) $row[1] ) ) {
 				$views[] = (string) $row[0];
 			} else {

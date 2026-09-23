@@ -57,11 +57,20 @@ final class ExportPreflightTest extends JobTestCase {
 
 	public function set_up(): void {
 		parent::set_up();
-		$this->dirs  = new Directories( array( 'is_web_request' => false, 'document_root' => '' ) );
+		$this->dirs  = new Directories(
+			array(
+				'is_web_request' => false,
+				'document_root'  => '',
+			)
+		);
 		$this->now   = 1_800_000_000.0;
-		$this->repo  = new JobRepository( $this->dirs, null, function (): int {
-			return (int) floor( $this->now );
-		} );
+		$this->repo  = new JobRepository(
+			$this->dirs,
+			null,
+			function (): int {
+				return (int) floor( $this->now );
+			}
+		);
 		$this->types = new JobTypes();
 		Schema::ensure();
 		$this->uploads = wp_upload_dir()['basedir'] . '/wpcptest-preflight';
@@ -137,7 +146,10 @@ final class ExportPreflightTest extends JobTestCase {
 		);
 	}
 
-	private function register_export( string $id ): void {
+	/**
+	 * @param array<string, mixed> $env Preflight environment entries replacing the defaults.
+	 */
+	private function register_export( string $id, array $env = array() ): void {
 		$connection = new WpdbConnection();
 		$dirs       = $this->dirs;
 		$this->types->add(
@@ -146,30 +158,33 @@ final class ExportPreflightTest extends JobTestCase {
 				array(
 					new PreflightStep(
 						$connection,
-						array(
-							'prefix'        => self::PREFIX,
-							'tables'        => array( $connection, 'tables_with_prefix' ),
-							'writable'      => static function () use ( $dirs ): array {
-								$bad = array();
-								foreach ( Directories::SUBDIRS as $sub ) {
-									if ( ! is_writable( $dirs->base() . '/' . $sub ) ) {
-										$bad[] = $sub;
+						array_replace(
+							array(
+								'prefix'        => self::PREFIX,
+								'tables'        => array( $connection, 'tables_with_prefix' ),
+								'writable'      => static function () use ( $dirs ): array {
+									$bad = array();
+									foreach ( Directories::SUBDIRS as $sub ) {
+										if ( ! is_writable( $dirs->base() . '/' . $sub ) ) {
+											$bad[] = $sub;
+										}
 									}
-								}
-								return $bad;
-							},
-							'disk_free'     => static function () use ( $dirs ) {
-								return disk_free_space( $dirs->base() );
-							},
-							'slug'          => static function (): string {
-								return 'Example.Test Site';
-							},
-							'can_deflate'   => true,
-							'normalization' => PathKey::normalization_available(),
-							'int_size'      => PHP_INT_SIZE,
-							'now'           => function (): int {
-								return (int) $this->now;
-							},
+									return $bad;
+								},
+								'disk_free'     => static function () use ( $dirs ) {
+									return disk_free_space( $dirs->base() );
+								},
+								'slug'          => static function (): string {
+									return 'Example.Test Site';
+								},
+								'can_deflate'   => true,
+								'normalization' => PathKey::normalization_available(),
+								'int_size'      => PHP_INT_SIZE,
+								'now'           => function (): int {
+									return (int) $this->now;
+								},
+							),
+							$env
 						),
 						self::CHUNK
 					),
@@ -209,9 +224,12 @@ final class ExportPreflightTest extends JobTestCase {
 		$rows = $wpdb->get_results( 'SELECT `option_id`, LENGTH(`option_id`), LENGTH(`option_name`), LENGTH(`option_value`), LENGTH(`blob_value`) FROM `' . self::PREFIX . 'options` ORDER BY `option_id`', ARRAY_N );
 		$ids  = array();
 		foreach ( $rows as $row ) {
-			$lengths = array_map( static function ( $v ) {
-				return null === $v ? null : (int) $v;
-			}, array_slice( $row, 1 ) );
+			$lengths = array_map(
+				static function ( $v ) {
+					return null === $v ? null : (int) $v;
+				},
+				array_slice( $row, 1 )
+			);
 			if ( TableExporter::estimate_row_bytes( $lengths, $desc['kinds'], $exporter->hex_all() ) > $exporter->row_limit() ) {
 				$ids[] = (string) $row[0];
 			}
@@ -263,7 +281,10 @@ final class ExportPreflightTest extends JobTestCase {
 		$this->assertSame( $before, (string) file_get_contents( $work . '/' . ExportPlan::REVIEW ) );
 
 		// Answer: leave the heavy directory and the oversized rows out.
-		$answers = array( 'large_dir_0' => 'exclude', 'oversize_0' => 'exclude' );
+		$answers = array(
+			'large_dir_0' => 'exclude',
+			'oversize_0'  => 'exclude',
+		);
 		if ( in_array( 'unreadable', $ids, true ) ) {
 			$answers['unreadable'] = 'continue';
 		}
@@ -295,7 +316,19 @@ final class ExportPreflightTest extends JobTestCase {
 
 	public function test_an_unattended_policy_never_asks_and_a_fail_policy_stops_with_the_table(): void {
 		$this->register_export( 'export-b' );
-		$job    = $this->repo->create( 'export-b', 0, array(), array( 'contents' => array( 'files' => array( 'uploads' ) ), 'policy' => array( 'unreadable' => 'continue', 'oversize' => 'exclude', 'large_dirs' => 'include' ) ) );
+		$job    = $this->repo->create(
+			'export-b',
+			0,
+			array(),
+			array(
+				'contents' => array( 'files' => array( 'uploads' ) ),
+				'policy'   => array(
+					'unreadable' => 'continue',
+					'oversize'   => 'exclude',
+					'large_dirs' => 'include',
+				),
+			)
+		);
 		$result = $this->drive( $job->id );
 		$this->assertSame( TickResult::COMPLETED, $result->status, (string) $this->repo->find( $job->id )->last_error );
 		$review = ExportPlan::read( $this->work( $this->repo->find( $job->id ) ), ExportPlan::REVIEW );
@@ -303,13 +336,130 @@ final class ExportPreflightTest extends JobTestCase {
 		$this->assertSame( array( self::PREFIX . 'options' ), $review['decisions']['exclude_oversize'] );
 		$this->assertSame( array(), $review['decisions']['exclude_paths'] );
 
-		$job    = $this->repo->create( 'export-b', 0, array(), array( 'contents' => array( 'files' => array( 'uploads' ) ), 'policy' => array( 'unreadable' => 'continue', 'oversize' => 'fail', 'large_dirs' => 'include' ) ) );
+		$job    = $this->repo->create(
+			'export-b',
+			0,
+			array(),
+			array(
+				'contents' => array( 'files' => array( 'uploads' ) ),
+				'policy'   => array(
+					'unreadable' => 'continue',
+					'oversize'   => 'fail',
+					'large_dirs' => 'include',
+				),
+			)
+		);
 		$result = $this->drive( $job->id );
 		$this->assertSame( TickResult::FAILED, $result->status );
 		$failed = $this->repo->find( $job->id );
 		$this->assertSame( ReviewStep::ID, $failed->step );
 		$this->assertStringContainsString( 'Stopped: table wpcptest_options has rows larger than the single-row limit', $failed->last_error );
 		$this->assertStringContainsString( '(4 rows)', $failed->last_error );
+	}
+
+	public function test_free_space_beyond_a_32_bit_integer_passes_and_the_database_is_counted_by_its_data(): void {
+		// A float from disk_free_space() cast to int wraps on 32-bit PHP (and beyond PHP_INT_MAX everywhere).
+		$this->register_export(
+			'export-b',
+			array(
+				'disk_free' => static function (): float {
+					return 1e19;
+				},
+			)
+		);
+		$job    = $this->repo->create(
+			'export-b',
+			0,
+			array(),
+			array(
+				'contents' => array( 'files' => array( 'uploads' ) ),
+				'policy'   => array(
+					'unreadable' => 'continue',
+					'oversize'   => 'exclude',
+					'large_dirs' => 'include',
+				),
+			)
+		);
+		$result = $this->drive( $job->id );
+		$this->assertSame( TickResult::COMPLETED, $result->status, (string) $this->repo->find( $job->id )->last_error );
+		$work      = $this->work( $this->repo->find( $job->id ) );
+		$preflight = ExportPlan::read( $work, ExportPlan::PREFLIGHT );
+		$data      = 0.0;
+		foreach ( ExportPlan::read( $work, ExportPlan::PLAN )['stats'] as $row ) {
+			$data += (float) $row['data_bytes'];
+		}
+		$this->assertEquals( $data, $preflight['checks']['db_bytes'], 'the table data only: index pages never reach the SQL' );
+		$this->assertEquals( 1e19, $preflight['checks']['disk_free'] );
+	}
+
+	public function test_a_table_listing_that_fails_is_retried_and_never_becomes_a_backup_without_the_database(): void {
+		$this->register_export( 'export-b' );
+		$break = static function ( $query ) {
+			return 0 === strpos( ltrim( (string) $query ), 'SHOW FULL TABLES' ) ? 'SHOW FULL TABLES FROM `wpcheckpoint_no_such_database`' : $query;
+		};
+		add_filter( 'query', $break );
+		$job    = $this->repo->create( 'export-b', 0, array(), array( 'contents' => array( 'files' => array( 'uploads' ) ), 'policy' => array( 'unreadable' => 'continue', 'oversize' => 'exclude', 'large_dirs' => 'include' ) ) );
+		$result = $this->drive( $job->id );
+		remove_filter( 'query', $break );
+		$this->assertSame( TickResult::WAITING, $result->status, 'a retryable failure, not a finished step' );
+		$stored = $this->repo->find( $job->id );
+		$this->assertSame( PreflightStep::ID, $stored->step );
+		// A retry carries its reason in the tick result and the job log; last_error is for a final failure.
+		$this->assertStringContainsString( 'The list of tables could not be read from the database', $result->message );
+		$this->assertStringNotContainsString( DB_NAME, $result->message );
+		$this->assertFalse( ExportPlan::exists( $this->work( $stored ), ExportPlan::PLAN ), 'no plan was written from the empty listing' );
+	}
+
+	public function test_a_listing_without_this_sites_own_tables_stops_the_backup(): void {
+		// A listing that lost the site's own tables (a filtered or failed query): never a backup without the database.
+		$connection = new WpdbConnection();
+		$this->register_export(
+			'export-b',
+			array(
+				'tables' => static function ( string $prefix ) use ( $connection ): array {
+					$listing           = $connection->tables_with_prefix( $prefix );
+					$listing['tables'] = array_values( array_diff( $listing['tables'], array( $prefix . 'posts' ) ) );
+					return $listing;
+				},
+			)
+		);
+		$job    = $this->repo->create(
+			'export-b',
+			0,
+			array(),
+			array(
+				'contents' => array( 'files' => array( 'uploads' ) ),
+				'policy'   => array(
+					'unreadable' => 'continue',
+					'oversize'   => 'exclude',
+					'large_dirs' => 'include',
+				),
+			)
+		);
+		$result = $this->drive( $job->id );
+		$this->assertSame( TickResult::FAILED, $result->status );
+		$failed = $this->repo->find( $job->id );
+		$this->assertSame( PreflightStep::ID, $failed->step );
+		$this->assertStringContainsString( "The database did not list this site's own tables (wpcptest_posts missing)", $failed->last_error );
+
+		// Files only: the listing is not consulted.
+		$job = $this->repo->create(
+			'export-b',
+			0,
+			array(),
+			array(
+				'contents' => array(
+					'database' => false,
+					'files'    => array( 'uploads' ),
+				),
+				'policy'   => array(
+					'unreadable' => 'continue',
+					'oversize'   => 'exclude',
+					'large_dirs' => 'include',
+				),
+			)
+		);
+		$this->assertSame( TickResult::COMPLETED, $this->drive( $job->id )->status, (string) $this->repo->find( $job->id )->last_error );
 	}
 
 	public function test_bad_options_and_a_database_only_export_are_handled_by_the_preflight(): void {
@@ -319,7 +469,20 @@ final class ExportPreflightTest extends JobTestCase {
 		$this->assertSame( TickResult::FAILED, $result->status );
 		$this->assertStringContainsString( 'Unknown content group "media"', $this->repo->find( $job->id )->last_error );
 
-		$job    = $this->repo->create( 'export-b', 0, array(), array( 'contents' => array( 'files' => array() ), 'exclude_tables' => array( self::PREFIX . 'options' ), 'policy' => array( 'unreadable' => 'continue', 'oversize' => 'fail', 'large_dirs' => 'include' ) ) );
+		$job    = $this->repo->create(
+			'export-b',
+			0,
+			array(),
+			array(
+				'contents'       => array( 'files' => array() ),
+				'exclude_tables' => array( self::PREFIX . 'options' ),
+				'policy'         => array(
+					'unreadable' => 'continue',
+					'oversize'   => 'fail',
+					'large_dirs' => 'include',
+				),
+			)
+		);
 		$result = $this->drive( $job->id );
 		$this->assertSame( TickResult::COMPLETED, $result->status, (string) $this->repo->find( $job->id )->last_error );
 		$work = $this->work( $this->repo->find( $job->id ) );
@@ -348,13 +511,32 @@ final class ExportPreflightTest extends JobTestCase {
 			$this->markTestSkipped( 'A sparse file above the index limit cannot be created here.' );
 		}
 		$this->register_export( 'export-b' );
-		$job    = $this->repo->create( 'export-b', 0, array(), array( 'contents' => array( 'files' => array( 'uploads' ) ), 'policy' => array( 'unreadable' => 'continue', 'oversize' => 'exclude', 'large_dirs' => 'include' ) ) );
+		$job    = $this->repo->create(
+			'export-b',
+			0,
+			array(),
+			array(
+				'contents' => array( 'files' => array( 'uploads' ) ),
+				'policy'   => array(
+					'unreadable' => 'continue',
+					'oversize'   => 'exclude',
+					'large_dirs' => 'include',
+				),
+			)
+		);
 		$result = $this->drive( $job->id );
 		$this->assertSame( TickResult::FAILED, $result->status );
 		$failed = $this->repo->find( $job->id );
 		$this->assertSame( ReviewStep::ID, $failed->step );
 		$scan = ExportPlan::read( $this->work( $failed ), FileScanStep::SUMMARY );
-		$this->assertSame( array( 'max_file_bytes' => $limit, 'max_file_limit' => 'index' ), $scan['limits'], 'the scanner recorded the threshold it used' );
+		$this->assertSame(
+			array(
+				'max_file_bytes' => $limit,
+				'max_file_limit' => 'index',
+			),
+			$scan['limits'],
+			'the scanner recorded the threshold it used'
+		);
 		$this->assertSame( array( 'wp-content/uploads/wpcptest-preflight/images/huge.iso' ), $scan['lists']['too_large'] );
 		$this->assertStringContainsString( sprintf( '1 files are larger than %d MB, the largest file the backup format can describe: wp-content/uploads/wpcptest-preflight/images/huge.iso.', intdiv( $limit, 1048576 ) ), $failed->last_error );
 		$this->assertArrayNotHasKey( 'max_file_bytes', ExportPlan::read( $this->work( $failed ), ExportPlan::PREFLIGHT )['checks'], 'the pre-flight does not compute a second copy of the limit' );
