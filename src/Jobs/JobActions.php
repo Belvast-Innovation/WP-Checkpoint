@@ -8,6 +8,7 @@
 namespace WPCheckpoint\Jobs;
 
 use WPCheckpoint\Support\Schema;
+use WPCheckpoint\Support\HostFunctions;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -121,9 +122,7 @@ final class JobActions {
 	 * @return TickResult
 	 */
 	public function web_tick( int $id, $started_at = null ): TickResult {
-		if ( function_exists( 'ignore_user_abort' ) ) {
-			ignore_user_abort( true );
-		}
+		HostFunctions::ignore_user_abort();
 		ob_start();
 		try {
 			return $this->tick( $id, $started_at );

@@ -207,13 +207,7 @@ final class StorageReclaim {
 		if ( is_string( $home ) && '' !== $home ) {
 			return $home;
 		}
-		if ( function_exists( 'posix_getpwuid' ) && function_exists( 'posix_geteuid' ) ) {
-			$info = posix_getpwuid( posix_geteuid() );
-			if ( is_array( $info ) && '' !== $info['dir'] ) {
-				return $info['dir'];
-			}
-		}
-		return '';
+		return HostFunctions::process_user_home();
 	}
 
 	/**

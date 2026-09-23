@@ -85,17 +85,12 @@ final class Environment {
 			'int_size'         => static function (): int {
 				return PHP_INT_SIZE;
 			},
+			// The one way this plugin reads free and total disk space (HostFunctions guards the calls).
 			'disk_free_space'  => static function ( string $dir ) {
-				if ( ! self::function_available( 'disk_free_space' ) ) {
-					return false;
-				}
-				return @disk_free_space( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- disabled or failing on many hosts; handled by the caller.
+				return HostFunctions::disk_free_space( $dir );
 			},
 			'disk_total_space' => static function ( string $dir ) {
-				if ( ! self::function_available( 'disk_total_space' ) ) {
-					return false;
-				}
-				return @disk_total_space( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
+				return HostFunctions::disk_total_space( $dir );
 			},
 			'db_server_info'   => static function (): string {
 				global $wpdb;
@@ -117,11 +112,7 @@ final class Environment {
 	 * @return bool
 	 */
 	public static function function_available( string $name ): bool {
-		if ( ! function_exists( $name ) ) {
-			return false;
-		}
-		$disabled = array_map( 'trim', explode( ',', (string) ini_get( 'disable_functions' ) ) );
-		return ! in_array( $name, $disabled, true );
+		return HostFunctions::available( $name );
 	}
 
 	/**
@@ -133,9 +124,8 @@ final class Environment {
 		$memory  = (string) ini_get( 'memory_limit' );
 		$seconds = (int) ini_get( 'max_execution_time' );
 		$extend  = false;
-		if ( self::function_available( 'set_time_limit' ) ) {
-			$extend = (bool) @set_time_limit( $seconds ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,Squiz.PHP.DiscouragedFunctions.Discouraged -- re-applies the current limit only to learn whether the call is allowed.
-		}
+		// Re-applies the current limit only to learn whether the call is allowed.
+		$extend = HostFunctions::set_time_limit( $seconds );
 		return array(
 			'memory_limit'       => $memory,
 			'memory_bytes'       => (int) wp_convert_hr_to_bytes( $memory ),
@@ -537,7 +527,7 @@ final class Environment {
 		}
 
 		$disabled = array_filter( array_map( 'trim', explode( ',', (string) call_user_func( $this->probes['ini_get'], 'disable_functions' ) ) ) );
-		$relevant = array_values( array_intersect( $disabled, array( 'set_time_limit', 'ini_set', 'disk_free_space', 'disk_total_space', 'proc_open', 'exec', 'shell_exec', 'popen', 'symlink', 'readlink' ) ) );
+		$relevant = array_values( array_intersect( $disabled, HostFunctions::REPORTED ) );
 		$checks[] = new Check(
 			'php.disabled_functions',
 			self::GROUP_PHP,

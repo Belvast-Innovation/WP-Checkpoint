@@ -18,6 +18,7 @@ use WPCheckpoint\Archive\SourceGone;
 use WPCheckpoint\Files\Exclusions;
 use WPCheckpoint\Files\ScanRoots;
 use WPCheckpoint\Support\Paths;
+use WPCheckpoint\Support\HostFunctions;
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- messages carry archive paths and numbers; the runner stores them through the redactor and the presenter cleans them before display.
 
@@ -800,8 +801,8 @@ final class PackStep implements Step {
 	 * @throws \RuntimeException When the archive would not fit.
 	 */
 	private function check_space( string $work, string $volumes, array $review ): void {
-		$reader = isset( $this->packer_options['disk_free'] ) && is_callable( $this->packer_options['disk_free'] ) ? $this->packer_options['disk_free'] : 'disk_free_space';
-		$free   = @call_user_func( $reader, $volumes ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- an unreadable value is handled below.
+		$reader = isset( $this->packer_options['disk_free'] ) && is_callable( $this->packer_options['disk_free'] ) ? $this->packer_options['disk_free'] : array( HostFunctions::class, 'disk_free_space' );
+		$free   = call_user_func( $reader, $volumes );
 		if ( ! is_int( $free ) && ! is_float( $free ) ) {
 			return;
 		}
@@ -814,7 +815,7 @@ final class PackStep implements Step {
 		$files  = ExportPlan::planned_files( $scan, $review );
 		$needed = ExportPlan::required_bytes( $files['bytes'], $files['count'], $database, true );
 		if ( (float) $free < $needed ) {
-			throw new \RuntimeException( sprintf( 'Not enough free disk space to pack this backup: %1$d MB free in the storage directory, about %2$d MB needed for the archive (%3$d MB of files, %4$d MB of exported database). Free up space, or leave large directories or tables out.', (int) ( $free / 1048576 ), (int) ceil( $needed / 1048576 ), (int) ( $files['bytes'] / 1048576 ), (int) ceil( $database / 1048576 ) ) );
+			throw new \RuntimeException( sprintf( 'Not enough free disk space to pack this backup: %1$d MB free in the storage directory, about %2$d MB needed for the archive (%3$d MB of files, %4$d MB of exported database). Free up space, or leave large directories or tables out. Failed backup jobs keep their work files for %5$d days so that they can be retried; they take space too until then.', (int) ( $free / 1048576 ), (int) ceil( $needed / 1048576 ), (int) ( $files['bytes'] / 1048576 ), (int) ceil( $database / 1048576 ), (int) ( JobRepository::WORK_RETENTION_SECONDS / 86400 ) ) );
 		}
 	}
 

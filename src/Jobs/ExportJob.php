@@ -13,6 +13,7 @@ use WPCheckpoint\Files\PathKey;
 use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Support\Environment;
 use WPCheckpoint\Support\Schema;
+use WPCheckpoint\Support\HostFunctions;
 
 /**
  * The seven steps in order (pre-flight, scan, review, database, pack,
@@ -111,7 +112,7 @@ final class ExportJob implements JobType {
 					'slug'          => static function (): string {
 						return self::slug_from_url( self::main_url( 'home' ), function_exists( 'idn_to_ascii' ) ? 'idn_to_ascii' : null );
 					},
-					'can_deflate'   => function_exists( 'gzdeflate' ),
+					'can_deflate'   => HostFunctions::can_deflate(),
 					'normalization' => PathKey::normalization_available(),
 					'int_size'      => PHP_INT_SIZE,
 					'multisite'     => is_multisite(),

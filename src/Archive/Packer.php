@@ -7,6 +7,8 @@
 
 namespace WPCheckpoint\Archive;
 
+use WPCheckpoint\Support\HostFunctions;
+
 // phpcs:disable WordPress.WP.AlternativeFunctions -- streamed writes to the plugin's own volume files; the WP filesystem API has no equivalent.
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- messages are internal (an entry-path verdict), never HTML; the caller presents them through JobPresenter::clean().
 
@@ -192,8 +194,8 @@ final class Packer {
 				'deflate_max_bytes'  => self::DEFLATE_MAX_BYTES,
 				'zip64_threshold'    => self::ZIP64_THRESHOLD,
 				'max_volume_bytes'   => self::max_volume_bytes(),
-				'disk_free'          => 'disk_free_space',
-				'can_deflate'        => function_exists( 'gzdeflate' ),
+				'disk_free'          => array( HostFunctions::class, 'disk_free_space' ),
+				'can_deflate'        => HostFunctions::can_deflate(),
 			),
 			$options
 		);
@@ -340,7 +342,7 @@ final class Packer {
 			if ( is_callable( $observer ) ) {
 				$observer( $data );
 			}
-			$out = gzdeflate( $data, self::COMPRESSION_LEVEL );
+			$out = HostFunctions::gzdeflate( $data, self::COMPRESSION_LEVEL );
 			if ( ! is_string( $out ) ) {
 				throw new \RuntimeException( 'Compression failed.' );
 			}

@@ -11,6 +11,7 @@ use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Support\FileStreamer;
 use WPCheckpoint\Support\Guard;
 use WPCheckpoint\Support\Paths;
+use WPCheckpoint\Support\HostFunctions;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -190,13 +191,9 @@ final class DownloadHandler {
 	 */
 	private function prepare_output(): void {
 		// Output compression corrupts Content-Length and Range responses; both calls may be disallowed by the host.
-		@ini_set( 'zlib.output_compression', '0' ); // phpcs:ignore WordPress.PHP.IniSet.Risky,WordPress.PHP.NoSilencedErrors.Discouraged,Squiz.PHP.DiscouragedFunctions.Discouraged
-		if ( function_exists( 'apache_setenv' ) ) {
-			@apache_setenv( 'no-gzip', '1' ); // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.runtime_configuration_apache_setenv,WordPress.PHP.NoSilencedErrors.Discouraged
-		}
-		if ( function_exists( 'set_time_limit' ) ) {
-			@set_time_limit( 0 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,Squiz.PHP.DiscouragedFunctions.Discouraged -- disabled on some hosts.
-		}
+		HostFunctions::ini_set( 'zlib.output_compression', '0' );
+		HostFunctions::apache_setenv( 'no-gzip', '1' );
+		HostFunctions::set_time_limit( 0 );
 		while ( ob_get_level() > 0 ) {
 			ob_end_clean();
 		}
