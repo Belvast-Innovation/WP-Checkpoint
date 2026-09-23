@@ -257,7 +257,8 @@ function acc_teardown( string $dir ): void {
 	file_put_contents( $env['wp_root'] . '/.htaccess', ltrim( (string) preg_replace( '/' . preg_quote( ACC_MARK_BEGIN, '/' ) . '.*?' . preg_quote( ACC_MARK_END, '/' ) . '\n?/s', '', $htaccess ) ) );
 	@unlink( $env['wp_root'] . '/wp-content/mu-plugins/wpcheckpoint-acceptance-probe.php' );
 	acc_wp( $env, array( 'config', 'delete', 'WP_MAX_MEMORY_LIMIT', '--type=constant' ), true );
-	acc_exec( array( 'docker', 'update', '--cpus', '0', $env['web'] ) );
+	// "--cpus 0" does not clear the limit; the host's CPU count is no limit in effect.
+	acc_exec( array( 'docker', 'update', '--cpus', (string) max( 1, (int) trim( acc_exec( array( 'nproc' ) ) ) ), $env['web'] ) );
 	list( $user ) = explode( ':', $env['auth'] );
 	foreach ( json_decode( acc_wp( $env, array( 'user', 'application-password', 'list', $user, '--format=json' ) ), true ) as $pw ) {
 		if ( 0 === strpos( $pw['name'], 'wpcheckpoint-acceptance-' ) ) {
