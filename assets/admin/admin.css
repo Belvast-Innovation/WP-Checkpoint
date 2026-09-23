@@ -1,0 +1,14 @@
+/* WP Checkpoint admin page: small additions to core admin styles. */
+.wpcheckpoint-wrap section { margin: 1.5em 0; }
+.wpcheckpoint-job { background: #fff; border: 1px solid #c3c4c7; padding: 8px 12px; margin: 0 0 12px; }
+.wpcheckpoint-job-bar { width: 100%; max-width: 480px; }
+.wpcheckpoint-job-log { max-height: 12em; overflow: auto; background: #f6f7f7; padding: 6px; white-space: pre-wrap; }
+.wpcheckpoint-job-error { color: #b32d2e; }
+.wpcheckpoint-job-notice { color: #50575e; }
+.wpcheckpoint-job-questions fieldset { margin: 0.5em 0; }
+.wpcheckpoint-badge { display: inline-block; padding: 0 6px; border-radius: 3px; background: #dcdcde; font-size: 12px; }
+.wpcheckpoint-badge-warning { background: #fcf0f1; color: #8a2424; }
+.wpcheckpoint-badge-busy { background: #f0f6fc; color: #0a4b78; }
+.wpcheckpoint-highlight td { background: #f0f6fc; }
+.wpcheckpoint-actions .button, .wpcheckpoint-actions .button-link-delete { margin: 2px 4px 2px 0; }
+.wpcheckpoint-form-status { margin-left: 8px; }

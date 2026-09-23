@@ -11,6 +11,13 @@
  * drives the job itself from then on, instead of pretending a chain that
  * only moves one step per 15 seconds is alive. A 403 (expired nonce, logged
  * out) stops everything and asks for a reload.
+ *
+ * A job waiting for a decision shows its questions (GET /questions) as a
+ * form; the answer is posted and the job ticked. A job that ends sends a
+ * "wpcheckpoint:job-finished" event from its block. A finished block can
+ * be dismissed; that is remembered in this browser only (a convenience,
+ * not state). window.wpcheckpointDriveJob( element ) drives a block added
+ * later (the size estimate).
  */
 ( function () {
 	'use strict';
@@ -21,11 +28,37 @@
 	var WATCHDOG_MAX_FIRES = 2;
 	var TERMINAL = [ 'completed', 'failed', 'cancelled' ];
 
-	function request( method, path, done ) {
+	var DISMISSED_KEY = 'wpcheckpoint-dismissed-jobs';
+
+	function dismissed() {
+		try {
+			var list = JSON.parse( window.localStorage.getItem( DISMISSED_KEY ) || '[]' );
+			return Array.isArray( list ) ? list : [];
+		} catch ( e ) {
+			return [];
+		}
+	}
+
+	function dismiss( id ) {
+		try {
+			var list = dismissed();
+			if ( list.indexOf( id ) === -1 ) {
+				list.push( id );
+			}
+			window.localStorage.setItem( DISMISSED_KEY, JSON.stringify( list.slice( -200 ) ) );
+		} catch ( e ) {
+			// No storage (private window, blocked): the block is hidden for this page view only.
+		}
+	}
+
+	function request( method, path, done, body ) {
 		var xhr = new XMLHttpRequest();
 		xhr.open( method, config.root + 'wp-checkpoint/v1/jobs/' + path, true );
 		xhr.setRequestHeader( 'X-WP-Nonce', config.nonce );
 		xhr.setRequestHeader( 'Accept', 'application/json' );
+		if ( body ) {
+			xhr.setRequestHeader( 'Content-Type', 'application/json' );
+		}
 		xhr.onreadystatechange = function () {
 			if ( xhr.readyState !== 4 ) {
 				return;
@@ -38,7 +71,7 @@
 			}
 			done( xhr.status, data );
 		};
-		xhr.send();
+		xhr.send( body ? JSON.stringify( body ) : null );
 	}
 
 	function setText( root, field, text ) {
@@ -79,6 +112,12 @@
 		setHidden( root.querySelector( '[data-action="retry"]' ), ! job.retryable );
 		setText( root, 'retry_note', job.retry_note || '' );
 		setHidden( root.querySelector( '[data-field="retry_note"]' ), ! job.retry_note );
+		setText( root, 'stalled', job.stalled_text || '' );
+		setHidden( root.querySelector( '[data-field="stalled"]' ), ! job.stalled_text );
+		setHidden( root.querySelector( '[data-action="dismiss"]' ), active );
+		if ( ! job.questions ) {
+			setHidden( root.querySelector( '[data-field="questions"]' ), true );
+		}
 	}
 
 	function notice( root, text ) {
@@ -114,10 +153,112 @@
 			if ( ! button ) {
 				return;
 			}
+			if ( button.getAttribute( 'data-action' ) === 'dismiss' ) {
+				dismiss( self.id );
+				setHidden( self.root, true );
+				return;
+			}
 			button.disabled = true;
 			self.action( button.getAttribute( 'data-action' ), function () {
 				button.disabled = false;
 			} );
+		} );
+	};
+
+	Driver.prototype.finished = function ( job ) {
+		if ( this.announced ) {
+			return;
+		}
+		this.announced = true;
+		var event;
+		try {
+			event = new CustomEvent( 'wpcheckpoint:job-finished', { bubbles: true, detail: job } );
+		} catch ( e ) {
+			event = document.createEvent( 'CustomEvent' );
+			event.initCustomEvent( 'wpcheckpoint:job-finished', true, false, job );
+		}
+		this.root.dispatchEvent( event );
+	};
+
+	Driver.prototype.questions = function () {
+		var self = this;
+		var box = this.root.querySelector( '[data-field="questions"]' );
+		if ( ! box || this.asking ) {
+			return;
+		}
+		this.asking = true;
+		request( 'GET', this.id + '/questions', function ( status, data ) {
+			if ( status !== 200 || ! data || ! data.questions || ! data.questions.length ) {
+				self.asking = false;
+				return;
+			}
+			box.textContent = '';
+			var form = document.createElement( 'form' );
+			var intro = document.createElement( 'p' );
+			intro.textContent = config.labels.questions;
+			form.appendChild( intro );
+			data.questions.forEach( function ( question, n ) {
+				var set = document.createElement( 'fieldset' );
+				var legend = document.createElement( 'legend' );
+				legend.textContent = question.text;
+				set.appendChild( legend );
+				if ( question.listed && question.listed.length ) {
+					var list = document.createElement( 'ul' );
+					question.listed.forEach( function ( item ) {
+						var li = document.createElement( 'li' );
+						li.textContent = item;
+						list.appendChild( li );
+					} );
+					set.appendChild( list );
+				}
+				question.choices.forEach( function ( choice ) {
+					var label = document.createElement( 'label' );
+					var input = document.createElement( 'input' );
+					input.type = 'radio';
+					input.name = 'q' + n;
+					input.value = choice;
+					input.required = true;
+					input.setAttribute( 'data-question', question.id );
+					label.appendChild( input );
+					label.appendChild( document.createTextNode( ' ' + ( config.labels[ 'choice_' + choice ] || choice ) ) );
+					set.appendChild( label );
+					set.appendChild( document.createElement( 'br' ) );
+				} );
+				form.appendChild( set );
+			} );
+			var submit = document.createElement( 'button' );
+			submit.type = 'submit';
+			submit.className = 'button button-primary';
+			submit.textContent = config.labels.answer;
+			form.appendChild( submit );
+			form.addEventListener( 'submit', function ( event ) {
+				event.preventDefault();
+				var answers = {};
+				form.querySelectorAll( 'input[data-question]:checked' ).forEach( function ( input ) {
+					answers[ input.getAttribute( 'data-question' ) ] = input.value;
+				} );
+				submit.disabled = true;
+				request( 'POST', self.id + '/answer', function ( code, reply ) {
+					if ( code !== 200 ) {
+						submit.disabled = false;
+						notice( self.root, ( reply && reply.message ) || config.labels.answer_failed );
+						return;
+					}
+					box.textContent = '';
+					setHidden( box, true );
+					self.asking = false;
+					self.stopped = false;
+					self.lastResult = null;
+					render( self.root, reply.job );
+					self.tick();
+				}, { answers: answers } );
+			} );
+			box.appendChild( form );
+			setHidden( box, false );
+			var first = form.querySelector( 'input' );
+			if ( first ) {
+				first.focus();
+			}
 		} );
 	};
 
@@ -157,6 +298,12 @@
 			this.lastChange = Date.now();
 		}
 		render( this.root, data.job );
+		if ( data.job.status === 'paused' && data.job.questions ) {
+			this.questions();
+		}
+		if ( TERMINAL.indexOf( data.job.status ) !== -1 ) {
+			this.finished( data.job );
+		}
 		onJob( data.job );
 		return true;
 	};
@@ -245,12 +392,22 @@
 		} );
 	};
 
+	window.wpcheckpointDriveJob = function ( element ) {
+		return config.root ? new Driver( element ) : null;
+	};
+
 	function init() {
 		if ( ! config.root ) {
 			return;
 		}
+		var hidden = dismissed();
 		var blocks = document.querySelectorAll( '[data-wpcheckpoint-job]' );
 		for ( var i = 0; i < blocks.length; i++ ) {
+			var terminal = TERMINAL.indexOf( blocks[ i ].getAttribute( 'data-status' ) ) !== -1;
+			if ( terminal && hidden.indexOf( blocks[ i ].getAttribute( 'data-wpcheckpoint-job' ) ) !== -1 ) {
+				setHidden( blocks[ i ], true );
+				continue;
+			}
 			new Driver( blocks[ i ] );
 		}
 	}
