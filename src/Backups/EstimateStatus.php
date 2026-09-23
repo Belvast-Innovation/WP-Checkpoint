@@ -58,7 +58,11 @@ final class EstimateStatus {
 	 */
 	public function __construct( JobActions $actions, $database_size = null, $now = null ) {
 		$this->actions       = $actions;
-		$this->database_size = is_callable( $database_size ) ? $database_size : array( Environment::class, 'query_database_size' );
+		$this->database_size = is_callable( $database_size ) ? $database_size : static function () {
+			// The environment report's cached figure (12 hours) when there is one: not a query per page load.
+			$cache = get_site_transient( Environment::CACHE );
+			return is_array( $cache ) && isset( $cache['db']['size'] ) && is_numeric( $cache['db']['size'] ) ? (int) $cache['db']['size'] : Environment::query_database_size();
+		};
 		$this->now           = is_callable( $now ) ? $now : 'time';
 	}
 
@@ -98,9 +102,10 @@ final class EstimateStatus {
 				return $out;
 			}
 		}
-		foreach ( $this->actions->list_jobs( array( Job::FAILED ), 50 ) as $job ) {
+		foreach ( $this->actions->list_jobs( array( Job::FAILED, Job::CANCELLED ), 50 ) as $job ) {
 			if ( EstimateJob::ID === $job->type && $now - $job->finished_at < Estimate::FAILED_BACKOFF_SECONDS ) {
-				return $out; // Failed lately: the database size is all there is, and no error to show.
+				// Failed or stopped ("Stop counting") lately: the database size is all there is, no error, no new scan.
+				return $out;
 			}
 		}
 		if ( ! $start ) {

@@ -15,6 +15,7 @@ use WPCheckpoint\Admin\ReclaimActions;
 use WPCheckpoint\Admin\Page;
 use WPCheckpoint\Admin\SettingsActions;
 use WPCheckpoint\Admin\JobProgress;
+use WPCheckpoint\Admin\LogDownload;
 use WPCheckpoint\Cli\ExportCommand;
 use WPCheckpoint\Cli\JobCommand;
 use WPCheckpoint\Cli\VerifyCommand;
@@ -202,6 +203,7 @@ final class Plugin {
 				return $this->job_actions()->active();
 			}
 		) )->register();
+		( new LogDownload( $this->job_actions(), $this->job_presenter() ) )->register();
 		( new Notices( $this->directories() ) )->register();
 		( new EnvironmentActions( $this->directories() ) )->register();
 		( new ReclaimActions( $this->directories() ) )->register();

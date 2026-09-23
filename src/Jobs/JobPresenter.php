@@ -249,14 +249,13 @@ final class JobPresenter {
 	}
 
 	/**
-	 * The cleaned tail of the job log: empty when there is no file yet (or
-	 * the job's files live in another storage directory), a fixed text when
-	 * the file could not be read.
+	 * The job's log file, or '' when it must not be read from here: the
+	 * same gate for the tail on screen and the download.
 	 *
 	 * @param Job $job Job.
 	 * @return string
 	 */
-	public function log_tail( Job $job ): string {
+	public function log_file( Job $job ): string {
 		if ( '' === $job->storage_path || '' === $job->log_path || 0 !== strpos( $job->log_path, 'logs/' ) ) {
 			return '';
 		}
@@ -269,7 +268,20 @@ final class JobPresenter {
 		// The same gate as the writer and the purge: only a file inside the job's logs/ directory is ever read.
 		$logs = $job->storage_path . DIRECTORY_SEPARATOR . 'logs';
 		$path = $job->storage_path . DIRECTORY_SEPARATOR . str_replace( '/', DIRECTORY_SEPARATOR, $job->log_path );
-		if ( ! Paths::is_inside( $logs, $path ) ) {
+		return Paths::is_inside( $logs, $path ) ? $path : '';
+	}
+
+	/**
+	 * The cleaned tail of the job log: empty when there is no file yet (or
+	 * the job's files live in another storage directory), a fixed text when
+	 * the file could not be read.
+	 *
+	 * @param Job $job Job.
+	 * @return string
+	 */
+	public function log_tail( Job $job ): string {
+		$path = $this->log_file( $job );
+		if ( '' === $path ) {
 			return '';
 		}
 		$tail = LogTail::read( $path );

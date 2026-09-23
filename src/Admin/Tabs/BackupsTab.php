@@ -45,6 +45,11 @@ final class BackupsTab implements Tab {
 	const RECENT_SECONDS = 86400;
 
 	/**
+	 * Site transient holding the tables of other installations for the create form (5 minutes).
+	 */
+	const FOREIGN_CACHE = 'wpcheckpoint_foreign_tables';
+
+	/**
 	 * URL slug.
 	 *
 	 * @return string
@@ -79,9 +84,12 @@ final class BackupsTab implements Tab {
 		$store  = new BackupStore( $dirs->backups() );
 		$active = $actions->active();
 		$base   = self::query_string( 'backup' );
-		if ( 1 === preg_match( PreflightStep::BASE_PATTERN, $base ) && $store->exists( $base ) ) {
-			$this->render_details( $store, $base, $active, $presenter );
-			return;
+		if ( 1 === preg_match( PreflightStep::BASE_PATTERN, $base ) ) {
+			$details = $store->details( $base, $active );
+			if ( null !== $details ) { // Gone (deleted meanwhile): the list instead.
+				$this->render_details( $details, $base, $active, $presenter );
+				return;
+			}
 		}
 		$highlight = $this->render_jobs( $actions, $presenter, $dirs, $store );
 		$page      = max( 1, (int) self::query_string( 'paged' ) );
@@ -224,11 +232,16 @@ final class BackupsTab implements Tab {
 	 * @return void
 	 */
 	private function render_create( array $active, bool $first, JobPresenter $presenter ): void {
-		$reason = JobConflicts::conflict( JobConflicts::EXPORT, array(), $active );
-		try {
-			$foreign = ExportJob::foreign_tables();
-		} catch ( \RuntimeException $e ) {
-			$foreign = array();
+		$reason  = JobConflicts::conflict( JobConflicts::EXPORT, array(), $active );
+		$foreign = get_site_transient( self::FOREIGN_CACHE );
+		if ( ! is_array( $foreign ) ) {
+			try {
+				$foreign = ExportJob::foreign_tables();
+			} catch ( \RuntimeException $e ) {
+				$foreign = array();
+			}
+			// Tables change rarely; the pre-flight judges again when a backup starts, this list is only an offer.
+			set_site_transient( self::FOREIGN_CACHE, $foreign, 300 );
 		}
 		?>
 		<section class="wpcheckpoint-create" aria-labelledby="wpcheckpoint-create-title">
@@ -259,7 +272,7 @@ final class BackupsTab implements Tab {
 							<legend><?php esc_html_e( 'Tables that look like another WordPress installation in this database are left out. Include them:', 'wp-checkpoint' ); ?></legend>
 							<?php foreach ( $foreign as $prefix => $tables ) : ?>
 								<label>
-									<input type="checkbox" name="include_group" value="<?php echo esc_attr( implode( ',', $tables ) ); ?>">
+									<input type="checkbox" name="include_group" value="<?php echo esc_attr( (string) wp_json_encode( array_values( $tables ) ) ); ?>">
 									<?php
 									/* translators: 1: number of tables, 2: table name prefix */
 									echo esc_html( sprintf( _n( '%1$d table with the prefix %2$s', '%1$d tables with the prefix %2$s', count( $tables ), 'wp-checkpoint' ), count( $tables ), $prefix ) );
@@ -441,14 +454,13 @@ final class BackupsTab implements Tab {
 	/**
 	 * S5: one backup.
 	 *
-	 * @param BackupStore  $store     Store.
-	 * @param string       $base      Base name.
-	 * @param Job[]        $active    Active jobs.
-	 * @param JobPresenter $presenter Presenter.
+	 * @param array<string, mixed> $details   BackupStore::details().
+	 * @param string               $base      Base name.
+	 * @param Job[]                $active    Active jobs.
+	 * @param JobPresenter         $presenter Presenter.
 	 * @return void
 	 */
-	private function render_details( BackupStore $store, string $base, array $active, JobPresenter $presenter ): void {
-		$details   = (array) $store->details( $base, $active );
+	private function render_details( array $details, string $base, array $active, JobPresenter $presenter ): void {
 		$restoring = JobConflicts::restoring( $base, $active );
 		$site      = isset( $details['site'] ) && is_array( $details['site'] ) ? $details['site'] : array();
 		$exported  = isset( $details['exported'] ) && is_array( $details['exported'] ) ? $details['exported'] : array();

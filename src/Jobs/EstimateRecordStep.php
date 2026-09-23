@@ -56,6 +56,8 @@ final class EstimateRecordStep implements Step {
 		if ( null === $counts || ! isset( $counts['files'], $counts['bytes'] ) ) {
 			throw new \RuntimeException( 'The scan summary has no counts.' );
 		}
+		// A cancelled estimate (an export or a restore started) records nothing: the lease is checked first.
+		$context->confirm_lease();
 		call_user_func( $this->record, (int) $counts['files'], (int) $counts['bytes'], $context->job()->id );
 		return StepResult::done( __( 'Size estimated', 'wp-checkpoint' ) );
 	}

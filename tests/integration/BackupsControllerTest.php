@@ -255,6 +255,15 @@ final class BackupsControllerTest extends JobTestCase {
 		$this->assertSame( 'running', $this->post( 'backups/estimate', array() )->get_data()['estimate']['state'], 'a day later it is tried again' );
 	}
 
+	public function test_stopping_the_count_is_not_undone_by_the_next_visit(): void {
+		$first = $this->post( 'backups/estimate', array() )->get_data()['estimate'];
+		$this->assertSame( 'running', $first['state'] );
+		$this->rest( 'POST', 'jobs/' . $first['job'] . '/cancel' ); // "Stop counting".
+		$again = $this->post( 'backups/estimate', array() )->get_data()['estimate'];
+		$this->assertSame( 'none', $again['state'], 'no new scan for a day' );
+		$this->assertCount( 1, Plugin::instance()->jobs()->list_jobs() );
+	}
+
 	public function test_starting_a_backup_cancels_the_estimate_silently_and_an_estimate_waits_for_the_backup(): void {
 		$estimate = $this->post( 'backups/estimate', array() )->get_data()['estimate'];
 		$this->assertSame( 'running', $estimate['state'] );

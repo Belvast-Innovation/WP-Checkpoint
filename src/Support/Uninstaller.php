@@ -194,6 +194,7 @@ final class Uninstaller {
 		delete_site_transient( 'wpcheckpoint_jobs_reaped' );
 		delete_site_transient( 'wpcheckpoint_jobs_purged' );
 		delete_site_transient( 'wpcheckpoint_jobs_swept' );
+		delete_site_transient( 'wpcheckpoint_foreign_tables' );
 		delete_site_transient( Environment::CACHE );
 	}
 

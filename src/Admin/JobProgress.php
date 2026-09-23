@@ -77,7 +77,7 @@ final class JobProgress {
 			<p class="wpcheckpoint-job-actions">
 				<button type="button" class="button" data-action="cancel"<?php echo $active ? '' : ' hidden'; ?>><?php esc_html_e( 'Cancel', 'wp-checkpoint' ); ?></button>
 				<button type="button" class="button" data-action="retry"<?php echo $data['retryable'] ? '' : ' hidden'; ?>><?php esc_html_e( 'Retry', 'wp-checkpoint' ); ?></button>
-				<a class="button-link" href="<?php echo esc_url( DownloadHandler::url( $job->log_path ) ); ?>"><?php esc_html_e( 'Download the log', 'wp-checkpoint' ); ?></a>
+				<a class="button-link" href="<?php echo esc_url( LogDownload::url( $job->id ) ); ?>"><?php esc_html_e( 'Download the log', 'wp-checkpoint' ); ?></a>
 				<button type="button" class="button-link" data-action="dismiss"<?php echo $active ? ' hidden' : ''; ?>><?php esc_html_e( 'Dismiss', 'wp-checkpoint' ); ?></button>
 			</p>
 		</div>

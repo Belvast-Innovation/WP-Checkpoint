@@ -43,6 +43,7 @@ abstract class JobTestCase extends WP_UnitTestCase {
 		delete_site_transient( 'wpcheckpoint_jobs_reaped' );
 		delete_site_transient( 'wpcheckpoint_jobs_purged' );
 		delete_site_transient( 'wpcheckpoint_jobs_swept' );
+		delete_site_transient( 'wpcheckpoint_foreign_tables' );
 		delete_site_transient( 'wpcheckpoint_environment' );
 		Plugin::instance()->reset_directories();
 		Plugin::instance()->directories()->base();

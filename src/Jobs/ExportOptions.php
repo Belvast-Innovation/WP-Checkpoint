@@ -164,10 +164,8 @@ final class ExportOptions {
 			if ( ! is_string( $table ) || ! DatabaseExportStep::storable_name( $table ) ) {
 				throw new \InvalidArgumentException( sprintf( 'Every entry of "%s" must be a table name.', $key ) );
 			}
-			if ( ! in_array( $table, $names, true ) ) {
-				$names[] = $table;
-			}
+			$names[ $table ] = true; // Keys: duplicates dropped in one pass, first order kept.
 		}
-		return $names;
+		return array_map( 'strval', array_keys( $names ) );
 	}
 }

@@ -79,7 +79,11 @@
 			var contents = form.querySelector( 'input[name="contents"]:checked' );
 			var include = [];
 			form.querySelectorAll( 'input[name="include_group"]:checked' ).forEach( function ( box ) {
-				include = include.concat( box.value.split( ',' ) );
+				try {
+					include = include.concat( JSON.parse( box.value ) ); // A list: table names may hold commas.
+				} catch ( e ) {
+					// Not ours: nothing included.
+				}
 			} );
 			button.disabled = true;
 			status( out, config.labels.starting );
