@@ -20,6 +20,11 @@ defined( 'ABSPATH' ) || exit;
 final class JobActions {
 
 	/**
+	 * Site transient throttling sweep_events().
+	 */
+	const SWEPT = 'wpcheckpoint_jobs_swept';
+
+	/**
 	 * Repository.
 	 *
 	 * @var JobRepository
@@ -147,6 +152,8 @@ final class JobActions {
 			$this->repository->unlock_starts();
 		}
 		if ( '' === $reason ) {
+			// Whoever started it (a page, WP-CLI) usually ticks it at once; if not, cron does.
+			Loopback::schedule( $job->id, Loopback::FALLBACK_SECONDS );
 			return $job;
 		}
 		if ( ! $this->repository->discard_unstarted( $job->id ) ) {
@@ -246,6 +253,12 @@ final class JobActions {
 	public function tick( int $id, $started_at = null, bool $follow_up = true ): TickResult {
 		Schema::ensure();
 		$this->repository->maintenance();
+		$this->sweep_events();
+		if ( $follow_up ) {
+			// Before the tick: a tick the server kills never reaches its follow-up, and if cron started it, that
+			// event is used up. The result adjusts or clears this event afterwards.
+			Loopback::schedule( $id, Loopback::FALLBACK_SECONDS );
+		}
 		$result = $this->runner->tick( $id, null === $started_at ? self::started_at() : (float) $started_at );
 		if ( TickResult::LOST === $result->status && null !== $result->job && Job::CANCELLED === $result->job->status ) {
 			// The cancel happened while this driver held the lock: the step has stopped now, so clean up here.
@@ -253,8 +266,35 @@ final class JobActions {
 		}
 		if ( $follow_up ) {
 			$this->follow_up( $result );
+			if ( TickResult::MISSING === $result->status ) {
+				Loopback::unschedule( $id ); // No job to follow up: take back the event set before the tick.
+			}
 		}
 		return $result;
+	}
+
+	/**
+	 * Remove cron events of jobs no driver should tick any more (throttled
+	 * like the reap): a job that ended without a follow-up, one that waits
+	 * for an answer, one that was purged.
+	 *
+	 * @return void
+	 */
+	private function sweep_events(): void {
+		if ( false !== get_site_transient( self::SWEPT ) ) {
+			return;
+		}
+		set_site_transient( self::SWEPT, 1, JobRepository::REAP_THROTTLE );
+		Loopback::sweep(
+			function ( int $id ): bool {
+				$job = $this->repository->find( $id );
+				if ( null === $job ) {
+					return false;
+				}
+				// An answered job stays paused, with no questions, until its next tick takes it.
+				return in_array( $job->status, array( Job::QUEUED, Job::RUNNING ), true ) || ( Job::PAUSED === $job->status && ! $job->awaiting_answer() );
+			}
+		);
 	}
 
 	/**
@@ -354,7 +394,9 @@ final class JobActions {
 		if ( null === $job ) {
 			return null;
 		}
-		return $this->repository->answer( $job, $answers );
+		$answered = $this->repository->answer( $job, $answers );
+		Loopback::schedule( $id, Loopback::FALLBACK_SECONDS ); // Answered and the page closed: the job still goes on.
+		return $answered;
 	}
 
 	/**
@@ -370,6 +412,8 @@ final class JobActions {
 		if ( null === $job ) {
 			return null;
 		}
-		return $this->repository->transition( $job, Job::QUEUED );
+		$queued = $this->repository->transition( $job, Job::QUEUED );
+		Loopback::schedule( $id, Loopback::FALLBACK_SECONDS );
+		return $queued;
 	}
 }

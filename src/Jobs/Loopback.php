@@ -24,10 +24,32 @@ defined( 'ABSPATH' ) || exit;
  *
  * A non-blocking request gives no error signal: a site that gained HTTP
  * authentication or a firewall rule after the probe breaks the chain
- * silently. The browser watchdog (assets/admin/jobs.js) re-ticks when a
- * running job stops changing, and a single cron event per job (deduplicated,
- * cleared on terminal states and cancel) re-ticks after waits. Neither is
- * relied on to be punctual.
+ * silently, and a site whose probe failed has no chain at all. So every
+ * tick that leaves work to do also schedules a fallback cron event
+ * (FALLBACK_SECONDS), whether or not a hop was sent: when the chain is
+ * alive the event finds the job locked or further along and only moves
+ * itself on; when it is not, the event is what ticks next, with no browser
+ * open. A web tick schedules it before it runs (JobActions::tick()): a tick
+ * that the server kills never reaches its follow-up, and when that tick was
+ * itself started by the cron event, the event is used up; without one set
+ * beforehand nothing would tick the job again. The same event is scheduled
+ * when a job is started, answered or queued again. There is at most one event per job (the hook's argument is
+ * the job id; an earlier time replaces a later one), it is cleared on
+ * terminal results and cancel, and a sweep during maintenance removes
+ * events of jobs that ended another way (reaped, purged, a WP-CLI run).
+ * WP-Cron runs on site traffic or a system cron; with neither, nothing
+ * ticks after the page is closed. The browser watchdog (assets/admin/jobs.js)
+ * re-ticks while the page is open. Neither is relied on to be punctual.
+ *
+ * FALLBACK_SECONDS = 60 (LoopbackIntervalTest holds the relations):
+ * WP-Cron starts at most one run per WP_CRON_LOCK_TIMEOUT (60 s), so a
+ * shorter delay would not run sooner; a live chain ticks at least three
+ * times in 60 s (units are at most BUDGET_MAX_SECONDS = 20 s), so the event
+ * rarely lands on a tick in progress, and when it does it gets "busy" and
+ * moves itself on by another interval; and it is shorter than the lease
+ * (120 s): an event that finds a killed tick's lease still held moves on
+ * by one interval, so the job is taken over at most one interval after
+ * that lease runs out.
  */
 final class Loopback {
 
@@ -36,6 +58,11 @@ final class Loopback {
 	const JOB_PREFIX   = 'wpcheckpoint_loopback_job_';
 	const TOKEN_TTL    = 120;
 	const ROUTE_SUFFIX = 'loopback';
+
+	/**
+	 * Seconds until the fallback cron event after a tick that left work to do.
+	 */
+	const FALLBACK_SECONDS = 60;
 
 	/**
 	 * Forced value, or null to detect.
@@ -96,13 +123,19 @@ final class Loopback {
 				if ( $this->enabled() ) {
 					$this->fire( $id );
 				}
+				// Also when a hop was sent: a hop that is refused or dropped says nothing.
+				self::schedule( $id, self::FALLBACK_SECONDS );
 				break;
 			case TickResult::WAITING:
 			case TickResult::BLOCKED:
+				// The tick said when (a wait, a transient failure's backoff, the gate's backoff): that
+				// time replaces the fallback scheduled before the tick, earlier or later.
+				self::schedule( $id, $result->retry_after > 0 ? $result->retry_after : self::FALLBACK_SECONDS, true );
+				break;
 			case TickResult::BUSY:
-				if ( $result->retry_after > 0 ) {
-					self::schedule( $id, $result->retry_after );
-				}
+				// A live lease holder drives the job and follows it up itself; if it died, nothing can
+				// run before its lease runs out. Retrying every few seconds would only spend cron runs.
+				self::schedule( $id, max( $result->retry_after, self::FALLBACK_SECONDS ) );
 				break;
 			default:
 				self::unschedule( $id );
@@ -196,17 +229,51 @@ final class Loopback {
 
 	/**
 	 * One delayed re-tick per job through WP-Cron (best effort, never relied
-	 * on to be punctual).
+	 * on to be punctual). A job has at most one event: by default the
+	 * earlier of the existing and the new time stays; with $replace the new
+	 * time wins (a tick's own result says when).
 	 *
-	 * @param int $job_id  Job id.
-	 * @param int $seconds Delay.
+	 * @param int  $job_id  Job id.
+	 * @param int  $seconds Delay.
+	 * @param bool $replace Whether the new time replaces an existing one.
 	 * @return void
 	 */
-	public static function schedule( int $job_id, int $seconds ): void {
-		if ( false !== wp_next_scheduled( self::HOOK, array( $job_id ) ) ) {
-			return;
+	public static function schedule( int $job_id, int $seconds, bool $replace = false ): void {
+		$when = time() + max( 1, $seconds );
+		$next = wp_next_scheduled( self::HOOK, array( $job_id ) );
+		if ( false !== $next && ( $replace ? $next === $when : $next <= $when ) ) {
+			return; // One event per job: unless the tick said when, the earlier one stays.
 		}
-		wp_schedule_single_event( time() + max( 1, $seconds ), self::HOOK, array( $job_id ) );
+		if ( false !== $next ) {
+			wp_unschedule_event( $next, self::HOOK, array( $job_id ) );
+		}
+		wp_schedule_single_event( $when, self::HOOK, array( $job_id ) );
+	}
+
+	/**
+	 * Remove the events of jobs that are no longer driven: finished,
+	 * waiting for an answer, or gone. Bounded by the number of events
+	 * (one per job at most).
+	 *
+	 * @param callable $is_driven function( int $job_id ): bool.
+	 * @return int Events removed.
+	 */
+	public static function sweep( callable $is_driven ): int {
+		$removed = 0;
+		$crons   = _get_cron_array();
+		foreach ( is_array( $crons ) ? $crons : array() as $timestamp => $hooks ) {
+			if ( ! isset( $hooks[ self::HOOK ] ) || ! is_array( $hooks[ self::HOOK ] ) ) {
+				continue;
+			}
+			foreach ( $hooks[ self::HOOK ] as $event ) {
+				$args = isset( $event['args'] ) && is_array( $event['args'] ) ? $event['args'] : array();
+				if ( ! isset( $args[0] ) || ! call_user_func( $is_driven, (int) $args[0] ) ) {
+					wp_unschedule_event( (int) $timestamp, self::HOOK, $args );
+					++$removed;
+				}
+			}
+		}
+		return $removed;
 	}
 
 	/**
