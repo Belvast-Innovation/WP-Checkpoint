@@ -278,7 +278,7 @@ final class Packer {
 		if ( $size > self::max_entry_bytes() ) {
 			throw new \RuntimeException( 'The file is larger than this platform can archive.' );
 		}
-		$this->assert_room( $size );
+		$this->assert_room( $size, ! empty( $this->state['prepared'] ) && in_array( $entry_path, self::SUMMARY_ENTRIES, true ) );
 		$method = $this->options['can_deflate'] && $size <= $this->options['deflate_max_bytes'] && $size > 0 ? ZipFormat::METHOD_DEFLATE : ZipFormat::METHOD_STORE;
 		$this->begin_entry( $entry_path, $mtime, $method, $size, $source );
 	}
@@ -585,7 +585,7 @@ final class Packer {
 				continue;
 			}
 		}
-		$this->assert_room( strlen( $manifest ) );
+		$this->assert_room( strlen( $manifest ), true );
 		$this->add_string_entry( 'manifest.json', $manifest, $mtime );
 		$this->seal_volume();
 		$this->rename_single_volume();
@@ -855,15 +855,23 @@ final class Packer {
 			}
 			// Any entries beyond the committed count must be exactly the summary files, nothing else.
 			$extra = array();
+			$first = null;
 			$reader->each(
-				static function ( array $entry ) use ( $entries, &$extra ): bool {
+				static function ( array $entry ) use ( $entries, &$extra, &$first ): bool {
 					if ( $entry['index'] >= $entries ) {
 						$extra[] = $entry['name'];
+						if ( $entry['index'] === $entries ) {
+							$first = (int) $entry['offset'];
+						}
 					}
 					return true;
 				}
 			);
 			if ( count( $extra ) !== count( array_unique( $extra ) ) || array() !== array_diff( $extra, self::SUMMARY_ENTRIES ) ) {
+				return false;
+			}
+			if ( array() !== $extra && $first !== (int) $volume['bytes'] ) {
+				// The summaries start exactly where the committed entries end, as exact as the case without them.
 				return false;
 			}
 			@unlink( $this->records_path() ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- the unlink after the rename may not have happened.
@@ -900,10 +908,19 @@ final class Packer {
 	 * takes anything) or below the volume size, the platform bound and the
 	 * entry count. The caller seals and opens explicitly when it cannot.
 	 *
-	 * @param int $next_entry_bytes Size of the entry about to be added.
+	 * Summary entries (the indexes and the embedded manifest, once
+	 * prepare_finish() ran) are not held to the volume size: the reader
+	 * expects all of them in the last volume, and the volume size is a
+	 * threshold a volume may pass by its last entries, not a limit. Their
+	 * total can exceed a whole volume (a large site's files index against
+	 * small volumes); sealing between them would split them. The platform
+	 * bound and the entry count still apply.
+	 *
+	 * @param int  $next_entry_bytes Size of the entry about to be added.
+	 * @param bool $summary          Whether the entry is a summary entry after prepare_finish().
 	 * @return bool
 	 */
-	public function has_room( int $next_entry_bytes ): bool {
+	public function has_room( int $next_entry_bytes, bool $summary = false ): bool {
 		$volume = $this->state['volume'];
 		if ( null === $volume ) {
 			return false;
@@ -911,7 +928,7 @@ final class Packer {
 		if ( 0 === (int) $volume['entries'] ) {
 			return true;
 		}
-		if ( (int) $volume['bytes'] >= (int) $this->options['volume_bytes'] ) {
+		if ( ! $summary && (int) $volume['bytes'] >= (int) $this->options['volume_bytes'] ) {
 			return false;
 		}
 		if ( (int) $volume['bytes'] + $next_entry_bytes + 65536 > (int) $this->options['max_volume_bytes'] ) {
@@ -974,18 +991,25 @@ final class Packer {
 	 * The open volume must exist and have room; nothing is sealed or
 	 * created here.
 	 *
-	 * @param int $next_entry_bytes Size of the entry about to be added.
+	 * @param int  $next_entry_bytes Size of the entry about to be added.
+	 * @param bool $summary          Whether it is a summary entry (see has_room()).
 	 * @return void
 	 * @throws SealRequired When the open volume cannot take the entry.
 	 * @throws \RuntimeException When no volume is open.
 	 */
-	private function assert_room( int $next_entry_bytes ): void {
+	private function assert_room( int $next_entry_bytes, bool $summary = false ): void {
 		if ( null === $this->state['volume'] ) {
 			throw new \RuntimeException( 'No volume is open; open_volume() first.' );
 		}
-		if ( ! $this->has_room( $next_entry_bytes ) ) {
-			throw new SealRequired( 'The open volume cannot take this entry; seal it and open the next one.' );
+		if ( $this->has_room( $next_entry_bytes, $summary ) ) {
+			return;
 		}
+		if ( $summary ) {
+			// Sealing would split the summaries across volumes, which the reader does not accept: nothing the
+			// caller can do but say why.
+			throw new \RuntimeException( 'The indexes of this backup are larger than one volume can hold on this server\'s PHP; they cannot be written.' );
+		}
+		throw new SealRequired( 'The open volume cannot take this entry; seal it and open the next one.' );
 	}
 
 	/**

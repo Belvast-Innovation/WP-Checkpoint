@@ -7,6 +7,7 @@ use WPCheckpoint\Archive\ConcurrentWriter;
 use WPCheckpoint\Archive\InsufficientSpace;
 use WPCheckpoint\Archive\IndexLine;
 use WPCheckpoint\Archive\Packer;
+use WPCheckpoint\Archive\SealRequired;
 use WPCheckpoint\Archive\SourceChanged;
 use WPCheckpoint\Archive\SourceGone;
 use WPCheckpoint\Archive\ZipFormat;
@@ -951,6 +952,76 @@ final class PackerTest extends TestCase {
 		$this->assertSame( 3, $calls );
 		$this->assertFileExists( $this->out . '/site.part001.wpcheckpoint.zip', 'sealed under its volume name' );
 		$this->assertFileDoesNotExist( $this->out . '/site.wpcheckpoint.zip', 'not renamed to the single name' );
+	}
+
+	public function test_summaries_larger_than_a_whole_volume_stay_together_in_the_last_volume(): void {
+		// The trigger is the summaries' total against the volume size, whatever the data volume held: here the
+		// data volume is sealed by prepare_finish() and the indexes alone are more than two volumes' worth.
+		$packer = Packer::open( $this->out, 'site', array(), $this->options() );
+		$this->add( $packer, $this->source( 'a.bin', 600000, 1 ), 'files/a.bin', 1758196800 );
+		while ( $packer->write_piece() > 0 ) {
+			continue;
+		}
+		$files    = $this->source( 'files.index.jsonl', 2500000, 2 );
+		$database = $this->source( 'database.index.jsonl', 900000, 3 );
+		$this->assertTrue( $packer->prepare_finish( 3400000 + 4096 ) );
+		$this->ready( $packer );
+		$packer->finish( array( 'database.index.jsonl' => $database, 'files.index.jsonl' => $files ), '{"embedded":true}', 1758196800 );
+		while ( $packer->hash_next_block() ) {
+			continue;
+		}
+		$packer->close();
+		$paths = $packer->sealed_paths();
+		$this->assertCount( 2, $paths, 'the summaries were not split' );
+		$this->assertSame( array( 'database.index.jsonl', 'files.index.jsonl', 'manifest.json' ), array_column( ZipReader::open( $paths[1] )->entries(), 'name' ) );
+		$this->assertGreaterThan( 1048576 * 3, filesize( $paths[1] ), 'the last volume passes the volume size by its summaries' );
+		$this->assertTrue( $this->unzip_ok( $paths[1] ) );
+	}
+
+	public function test_an_empty_open_volume_takes_summaries_larger_than_a_volume(): void {
+		// The narrow case first registered: the pack step opened a volume and every remaining file was skipped.
+		$packer = Packer::open( $this->out, 'site', array(), $this->options() );
+		$packer->open_volume();
+		$this->assertFalse( $packer->prepare_finish( 2500000 ), 'an empty volume is not sealed' );
+		$packer->finish( array( 'database.index.jsonl' => $this->source( 'database.index.jsonl', 1500000, 4 ), 'files.index.jsonl' => $this->source( 'files.index.jsonl', 1000000, 5 ) ), '{"embedded":true}', 1758196800 );
+		$packer->close();
+		$this->assertSame( array( 'database.index.jsonl', 'files.index.jsonl', 'manifest.json' ), array_column( ZipReader::open( $packer->sealed_paths()[0] )->entries(), 'name' ) );
+	}
+
+	public function test_summaries_past_the_platform_bound_fail_with_the_reason_not_a_seal_request(): void {
+		$packer = Packer::open( $this->out, 'site', array(), $this->options( array( 'max_volume_bytes' => 1000000 ) ) );
+		$packer->open_volume();
+		$packer->prepare_finish( 4096 );
+		try {
+			$packer->finish( array( 'database.index.jsonl' => $this->source( 'database.index.jsonl', 600000, 6 ), 'files.index.jsonl' => $this->source( 'files.index.jsonl', 600000, 7 ) ), '{"embedded":true}', 1758196800 );
+			$this->fail( 'the second index does not fit the platform bound' );
+		} catch ( SealRequired $e ) {
+			$this->fail( 'a seal would split the summaries: ' . $e->getMessage() );
+		} catch ( \RuntimeException $e ) {
+			$this->assertStringContainsString( 'The indexes of this backup are larger than one volume can hold on this server', $e->getMessage() );
+		}
+	}
+
+	public function test_a_sealed_volume_with_summaries_is_adopted_only_when_they_start_at_the_committed_length(): void {
+		$packer = Packer::open( $this->out, 'site-20260918-100000-a1b2', array(), $this->options() );
+		$this->add( $packer, $this->source( 'a.bin', 300000, 1 ), 'files/a.bin', 1758196800 );
+		while ( $packer->write_piece() > 0 ) {
+			continue;
+		}
+		$packer->prepare_finish( 300 + 4096 );
+		$before = $packer->state(); // The checkpoint before finish().
+		$packer->finish( array( 'files.index.jsonl' => $this->source( 'files.index.jsonl', 300 ) ), '{"embedded":true}', 1758196800 );
+		$packer->close();
+		// A state whose committed length is not where the summaries start: not ours to adopt.
+		$off                       = $before;
+		$off['volume']['bytes']   -= 10;
+		try {
+			Packer::open( $this->out, 'site-20260918-100000-a1b2', $off, $this->options() );
+			$this->fail( 'the summaries do not start at the committed length' );
+		} catch ( \RuntimeException $e ) {
+			$this->assertSame( 'The open volume is missing.', $e->getMessage() );
+		}
+		$this->assertFalse( Packer::open( $this->out, 'site-20260918-100000-a1b2', $before, $this->options() )->has_open_volume(), 'the exact state is adopted' );
 	}
 
 	/**
