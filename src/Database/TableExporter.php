@@ -53,9 +53,33 @@ use WPCheckpoint\Jobs\TransientFailure;
  * LIMIT/OFFSET, which is unstable while the table changes, and say so
  * in a warning.
  *
+ * Each table has an upper bound, fixed when its export starts: the largest
+ * primary key then (a keyless table: its row count then), written on the
+ * second line of every chunk of the table ("-- wpcheckpoint bound
+ * pk_max=..." or "rows_max=..."), never in the cursor (a key is user
+ * data). Rows past it are not read, so a table that grows while it is
+ * exported still ends: without the bound a table that gains a batch per
+ * tick (the options table gains a row with each loopback token) was read
+ * forever on a host that runs one unit per tick. The bound is decided
+ * before any byte of the table is written and is committed with the first
+ * chunk's header, so a resumed or replayed export reads it back instead
+ * of querying again; a header that was not committed is cut off with
+ * everything after it, and querying again is safe because nothing depends
+ * on it yet. A new chunk copies it from the chunk before. A chunk without
+ * the line (written before the bound existed, resumed after an update) is
+ * exported without a bound, as it was begun.
+ *
  * The export is not a snapshot: batches run across ticks and requests
- * while the site keeps writing, so the files reflect the state of each
- * table over the export period. The manifest records the period.
+ * while the site keeps writing. Each table holds the rows that were there
+ * when its export started, as each batch read them (rows changed or
+ * deleted during the export may appear either way); rows whose key sorts
+ * after the bound are left out, which for an auto-increment key means rows
+ * added later, but a new row whose (string) key sorts before the bound and
+ * after the rows already read is still read. A table emptied during its
+ * export ends early; one emptied and refilled (a cache rebuild) ends up
+ * with part of the old rows and part of the new. Tables start at different
+ * times and are not consistent with each other. The manifest records the
+ * period; a consistent snapshot needs writes locked (a restore point).
  */
 final class TableExporter {
 
@@ -102,6 +126,7 @@ final class TableExporter {
 	const ESTIMATE_BINARY_RATIO = array( 22, 10 );
 
 	const HEADER = '-- wpcheckpoint table=';
+	const BOUND  = '-- wpcheckpoint bound ';
 	const MARKER = '-- wpcheckpoint batch ';
 	const END    = '-- wpcheckpoint end ';
 
@@ -247,18 +272,25 @@ final class TableExporter {
 		$path  = $this->chunk_path( $table, (int) $state['chunk'] );
 
 		if ( 0 === (int) $state['bytes'] ) {
-			$key = 1 === (int) $state['chunk'] ? null : $this->previous_end_key( $table, (int) $state['chunk'] );
-			$this->write_new( $path, $this->header( $state, $desc, $key ) );
+			if ( 1 === (int) $state['chunk'] ) {
+				$key   = null;
+				$bound = $this->bound_now( $table, $desc ); // Before any byte of the table: nothing depends on an earlier query.
+			} else {
+				$key   = $this->previous_end_key( $table, (int) $state['chunk'] );
+				$bound = $this->bound_in( $this->chunk_path( $table, (int) $state['chunk'] - 1 ), $table, (int) $state['chunk'] - 1, $desc );
+			}
+			$this->write_new( $path, $this->header( $state, $desc, $key, $bound ) );
 			$state['bytes'] = (int) filesize( $path );
 			$this->note_mode( $state, $desc );
 			$handle = $this->open_at( $path, (int) $state['bytes'] );
 		} else {
+			$bound  = $this->bound_in( $path, $table, (int) $state['chunk'], $desc );
 			$handle = $this->open_at( $path, (int) $state['bytes'] );
 			$key    = $this->resume_key( $handle, $table, (int) $state['chunk'], (int) $state['bytes'] );
 		}
 
 		try {
-			$rows = $this->fetch( $table, $desc, $key, (int) $state['rows'], (int) $state['batch_rows'] );
+			$rows = $this->fetch( $table, $desc, $key, (int) $state['rows'], (int) $state['batch_rows'], $bound );
 			if ( array() === $rows ) {
 				$this->close_chunk( $handle, $path, $state, $desc, $key );
 				$state['done'] = true;
@@ -280,7 +312,7 @@ final class TableExporter {
 				$this->close_chunk( $handle, $path, $state, $desc, $key );
 				fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- chunk file in the job's work directory.
 				$path = $this->chunk_path( $table, (int) $state['chunk'] );
-				$this->write_new( $path, $this->header( $state, $desc, $key ) );
+				$this->write_new( $path, $this->header( $state, $desc, $key, $bound ) );
 				$state['bytes'] = (int) filesize( $path );
 				$handle         = $this->open_at( $path, (int) $state['bytes'] );
 			}
@@ -402,10 +434,20 @@ final class TableExporter {
 	 * @param string[]|null                                                                            $key   Last key, null from the start.
 	 * @param int                                                                                      $rows  Rows exported so far (offset mode).
 	 * @param int                                                                                      $limit Rows to look ahead.
+	 * @param array{mode: string, key?: string[]|null, rows?: int}                                     $bound The table's upper bound (bound_now(), or bound_in(): mode "none" for a chunk begun without one).
 	 * @return array<int, array<int, string|null>>
 	 * @throws \RuntimeException When a row ahead is larger than the limit.
 	 */
-	private function fetch( string $table, array $desc, $key, int $rows, int $limit ): array {
+	private function fetch( string $table, array $desc, $key, int $rows, int $limit, array $bound ): array {
+		if ( 'pk' === $bound['mode'] && null === ( $bound['key'] ?? null ) ) {
+			return array(); // Empty when its export started.
+		}
+		if ( 'rows' === $bound['mode'] ) {
+			$limit = min( $limit, (int) $bound['rows'] - $rows );
+			if ( $limit <= 0 ) {
+				return array();
+			}
+		}
 		$from       = ' FROM ' . SqlWriter::identifier( $table );
 		$args       = array();
 		$conditions = array();
@@ -419,6 +461,11 @@ final class TableExporter {
 		} elseif ( null !== $key ) {
 			list( $condition, $args ) = self::after_key( $desc['pk'], $key );
 			$conditions[]             = '(' . $condition . ')';
+		}
+		if ( 'pk' === $bound['mode'] && array() !== $desc['pk'] ) {
+			list( $condition, $upper ) = self::up_to_key( $desc['pk'], (array) $bound['key'] );
+			$conditions[]              = '(' . $condition . ')';
+			$args                      = array_merge( $args, $upper );
 		}
 		$where = array() === $conditions ? '' : ' WHERE ' . implode( ' AND ', $conditions );
 		if ( array() !== $desc['pk'] ) {
@@ -540,6 +587,121 @@ final class TableExporter {
 			$parts[] = '(' . implode( ' AND ', $terms ) . ')';
 		}
 		return array( implode( ' OR ', $parts ), $args );
+	}
+
+	/**
+	 * The expanded "at or before" comparison for the upper bound, in the
+	 * same range-friendly form as after_key(): (a < ?) OR (a = ? AND b < ?)
+	 * OR (a = ? AND b = ?).
+	 *
+	 * @param string[] $pk  Key columns.
+	 * @param string[] $key Values.
+	 * @return array{0: string, 1: string[]}
+	 */
+	public static function up_to_key( array $pk, array $key ): array {
+		$parts = array();
+		$args  = array();
+		$count = count( $pk );
+		for ( $i = 0; $i <= $count; $i++ ) {
+			$terms = array();
+			for ( $j = 0; $j < $i; $j++ ) {
+				$terms[] = SqlWriter::identifier( $pk[ $j ] ) . ' = ?';
+				$args[]  = (string) $key[ $j ];
+			}
+			if ( $i < $count ) {
+				$terms[] = SqlWriter::identifier( $pk[ $i ] ) . ' < ?';
+				$args[]  = (string) $key[ $i ];
+			}
+			$parts[] = '(' . implode( ' AND ', $terms ) . ')';
+		}
+		return array( implode( ' OR ', $parts ), $args );
+	}
+
+	/**
+	 * The table's upper bound as it is now: its largest primary key (null
+	 * when it is empty), or its row count when it has no key.
+	 *
+	 * @param string                                                                                   $table Table.
+	 * @param array{create: string, columns: string[], kinds: string[], pk: string[], pk_index: int[]} $desc  Description.
+	 * @return array{mode: string, key?: string[]|null, rows?: int}
+	 * @throws TransientFailure|\RuntimeException On query failure.
+	 */
+	private function bound_now( string $table, array $desc ): array {
+		if ( array() === $desc['pk'] ) {
+			// Counted as the rows are read: without the rows left out as oversized. A full scan on a keyless
+			// table, like the table's last OFFSET batches; WordPress's own tables all have a key.
+			$where = in_array( $table, $this->exclude_oversize, true ) ? ' WHERE NOT ' . $this->oversize_predicate( $desc ) : '';
+			$count = $this->query( 'SELECT COUNT(*) FROM ' . SqlWriter::identifier( $table ) . $where );
+			return array(
+				'mode' => 'rows',
+				'rows' => (int) ( $count[0][0] ?? 0 ),
+			);
+		}
+		$columns = array_map( array( SqlWriter::class, 'identifier' ), $desc['pk'] );
+		$last    = $this->query(
+			'SELECT ' . implode( ', ', $columns ) . ' FROM ' . SqlWriter::identifier( $table ) . ' ORDER BY ' . implode(
+				', ',
+				array_map(
+					static function ( string $column ): string {
+						return $column . ' DESC';
+					},
+					$columns
+				)
+			) . ' LIMIT 1'
+		);
+		return array(
+			'mode' => 'pk',
+			'key'  => array() === $last ? null : array_map( 'strval', $last[0] ),
+		);
+	}
+
+	/**
+	 * The bound a chunk carries on its second line; mode "none" for a chunk
+	 * written before bounds existed. A second line that starts like a bound
+	 * but does not parse is damage.
+	 *
+	 * @param string                                                                                   $path  Chunk path.
+	 * @param string                                                                                   $table Table.
+	 * @param int                                                                                      $chunk Chunk number.
+	 * @param array{create: string, columns: string[], kinds: string[], pk: string[], pk_index: int[]} $desc  Description.
+	 * @return array{mode: string, key?: string[]|null, rows?: int}
+	 * @throws \RuntimeException When the chunk cannot be read or its bound line is malformed.
+	 */
+	private function bound_in( string $path, string $table, int $chunk, array $desc ): array {
+		$handle = @fopen( $path, 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- see write_new().
+		if ( false === $handle ) {
+			throw new \RuntimeException( 'A chunk file is missing; the work directory was lost or changed.' );
+		}
+		try {
+			$first  = fgets( $handle, self::MAX_MARKER_BYTES );
+			$second = fgets( $handle, self::MAX_MARKER_BYTES );
+		} finally {
+			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- see above.
+		}
+		if ( ! is_string( $first ) || "\n" !== substr( $first, -1 ) || 0 !== strpos( $first, self::HEADER . $table . ' chunk=' . $chunk . ' ' ) ) {
+			throw new \RuntimeException( sprintf( 'Chunk %d of table %s has a malformed header; the work directory was lost or changed.', $chunk, $table ) );
+		}
+		if ( ! is_string( $second ) || 0 !== strpos( $second, self::BOUND ) ) {
+			return array( 'mode' => 'none' );
+		}
+		$line = rtrim( $second, "\n" );
+		if ( array() === $desc['pk'] && 1 === preg_match( '/\A' . preg_quote( self::BOUND, '/' ) . 'rows_max=(\d+)\z/', $line, $m ) ) {
+			return array(
+				'mode' => 'rows',
+				'rows' => (int) $m[1],
+			);
+		}
+		if ( array() !== $desc['pk'] && 1 === preg_match( '/\A' . preg_quote( self::BOUND, '/' ) . 'pk_max=(.+)\z/', $line, $m ) ) {
+			$key = self::decode_key( $m[1] );
+			if ( null !== $key && count( $key ) !== count( $desc['pk'] ) ) {
+				throw new \RuntimeException( sprintf( 'Chunk %d of table %s has a bound for another key; the table changed or the work directory was damaged.', $chunk, $table ) );
+			}
+			return array(
+				'mode' => 'pk',
+				'key'  => $key,
+			);
+		}
+		throw new \RuntimeException( sprintf( 'Chunk %d of table %s has a malformed bound line; the work directory was changed or damaged.', $chunk, $table ) );
 	}
 
 	/**
@@ -685,12 +847,18 @@ final class TableExporter {
 	 * @param array<string, mixed>                                                                     $state State.
 	 * @param array{create: string, columns: string[], kinds: string[], pk: string[], pk_index: int[]} $desc  Description.
 	 * @param string[]|null                                                                            $key   Key the chunk starts after.
+	 * @param array{mode: string, key?: string[]|null, rows?: int}                                     $bound The table's upper bound.
 	 * @return string
 	 */
-	private function header( array $state, array $desc, $key ): string {
+	private function header( array $state, array $desc, $key, array $bound ): string {
 		$table = (string) $state['table'];
 		$from  = array() === $desc['pk'] ? 'offset=' . (int) $state['rows'] : 'pk_from=' . self::encode_key( $key );
 		$text  = self::HEADER . $table . ' chunk=' . (int) $state['chunk'] . ' ' . $from . "\n";
+		if ( 'rows' === $bound['mode'] ) {
+			$text .= self::BOUND . 'rows_max=' . (int) $bound['rows'] . "\n";
+		} elseif ( 'pk' === $bound['mode'] ) {
+			$text .= self::BOUND . 'pk_max=' . self::encode_key( $bound['key'] ?? null ) . "\n";
+		}
 		if ( '' !== $this->charset ) {
 			$text .= '/*!40101 SET NAMES ' . $this->charset . " */;\n";
 		}
