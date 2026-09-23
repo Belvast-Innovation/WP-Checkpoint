@@ -85,6 +85,24 @@ final class FakeConnection implements Connection {
 		);
 	}
 
+	/**
+	 * The site writes while the export runs: add rows.
+	 *
+	 * @param array<int, array<int, string|null>> $rows Rows in column order.
+	 */
+	public function insert_rows( string $name, array $rows ): void {
+		$this->tables[ $name ]['rows'] = array_merge( $this->tables[ $name ]['rows'], $rows );
+	}
+
+	/**
+	 * The site empties a table (and maybe refills it) while the export runs.
+	 *
+	 * @param array<int, array<int, string|null>> $rows New rows in column order.
+	 */
+	public function replace_rows( string $name, array $rows ): void {
+		$this->tables[ $name ]['rows'] = $rows;
+	}
+
 	public function rows( string $sql, array $args = array() ) {
 		$this->log[]      = $sql;
 		$this->last_error = '';
@@ -183,6 +201,15 @@ final class FakeConnection implements Connection {
 			}
 			return array( array( (string) $count ) );
 		}
+		if ( 1 === preg_match( '/\ASELECT COUNT\(\*\) FROM `(.+?)`\z/', $sql, $m ) ) {
+			return array( array( (string) count( $this->table( $m[1] )['rows'] ) ) );
+		}
+		if ( 1 === preg_match( '/\ASELECT (.+?) FROM `(.+?)` ORDER BY (.+ DESC) LIMIT 1\z/', $sql, $m ) ) {
+			$t     = $this->table( $m[2] );
+			$names = array_column( $t['columns'], 0 );
+			$rows  = array_reverse( $this->ordered( $t, $names ) );
+			return $this->project( $m[1], $names, $t['invisible'], array_slice( $rows, 0, 1 ) );
+		}
 		if ( 1 === preg_match( '/\ASELECT (.+?) FROM `(.+?)`(?: WHERE (.+?))?(?: ORDER BY .+?)? LIMIT (\d+)(?: OFFSET (\d+))?\z/', $sql, $m ) ) {
 			$t     = $this->table( $m[2] );
 			$where = isset( $m[3] ) ? $m[3] : '';
@@ -194,12 +221,12 @@ final class FakeConnection implements Connection {
 					return ! $this->oversized( $pm[1], $names, $row );
 				} ) );
 			}
-			if ( array() !== $t['pk'] && false !== strpos( $where, '> ?' ) ) {
+			if ( array() !== $t['pk'] ) {
 				$idx = array();
 				foreach ( $t['pk'] as $col ) {
 					$idx[] = (int) array_search( $col, $names, true );
 				}
-				$after  = array_slice( $args, -count( $idx ) );
+				$n      = count( $idx );
 				$key_of = static function ( array $row ) use ( $idx ): array {
 					$k = array();
 					foreach ( $idx as $i ) {
@@ -207,9 +234,12 @@ final class FakeConnection implements Connection {
 					}
 					return $k;
 				};
-				$cmp    = $this->comparator( $t['numeric_pk'] );
-				$rows   = array_values( array_filter( $rows, static function ( array $row ) use ( $key_of, $cmp, $after ): bool {
-					return $cmp( $key_of( $row ), $after ) > 0;
+				$cmp = $this->comparator( $t['numeric_pk'] );
+				// Arguments: the lower bound's comparison (n(n+1)/2 values, the key last), then the upper bound's (its key last).
+				$lower = false !== strpos( $where, '> ?' ) ? array_slice( $args, intdiv( $n * ( $n + 1 ), 2 ) - $n, $n ) : null;
+				$upper = false !== strpos( $where, '< ?' ) ? array_slice( $args, -$n ) : null;
+				$rows  = array_values( array_filter( $rows, static function ( array $row ) use ( $key_of, $cmp, $lower, $upper ): bool {
+					return ( null === $lower || $cmp( $key_of( $row ), $lower ) > 0 ) && ( null === $upper || $cmp( $key_of( $row ), $upper ) <= 0 );
 				} ) );
 			}
 			$rows = array() !== $t['pk'] ? array_slice( $rows, 0, $limit ) : array_slice( $rows, isset( $m[5] ) ? (int) $m[5] : 0, $limit );

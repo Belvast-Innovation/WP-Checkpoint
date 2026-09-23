@@ -72,7 +72,7 @@ final class TableExporterTest extends TestCase {
 		$this->assertCount( 1, $closed );
 		$this->assertSame( 2, $units, 'one batch, then the empty fetch that closes the table' );
 		$sql = $this->chunk( 'wp_posts', 1 );
-		$this->assertStringStartsWith( "-- wpcheckpoint table=wp_posts chunk=1 pk_from=null\n" . self::PREAMBLE . "DROP TABLE IF EXISTS `wp_posts`;\nCREATE TABLE `wp_posts`", $sql );
+		$this->assertStringStartsWith( "-- wpcheckpoint table=wp_posts chunk=1 pk_from=null\n-- wpcheckpoint bound pk_max=[\"7\"]\n" . self::PREAMBLE . "DROP TABLE IF EXISTS `wp_posts`;\nCREATE TABLE `wp_posts`", $sql );
 		$this->assertStringContainsString( "INSERT INTO `wp_posts` (`ID`, `post_title`, `post_content`, `post_date`, `menu_order`) VALUES (1,'title 1','", $sql );
 		$this->assertStringContainsString( ",NULL,30)", $sql, 'NULL dates and bare numbers' );
 		$this->assertStringContainsString( "\n-- wpcheckpoint batch rows=7 pk=[\"7\"]\n", $sql );
@@ -80,9 +80,9 @@ final class TableExporterTest extends TestCase {
 		$this->assertSame( strlen( $sql ), $closed[0]['bytes'] );
 		$this->assertSame( hash( 'sha256', $sql ), $closed[0]['hash'] );
 		$this->assertSame( $closed[0]['bytes'], $state['total'] );
-		$this->assertStringContainsString( "WHERE ((`ID` > ?)) ORDER BY `ID` LIMIT", $db->log[ count( $db->log ) - 1 ], 'the closing fetch continues after the last key' );
+		$this->assertStringContainsString( "WHERE ((`ID` > ?)) AND ((`ID` < ?) OR (`ID` = ?)) ORDER BY `ID` LIMIT", $db->log[ count( $db->log ) - 1 ], 'the closing fetch continues after the last key' );
 		$this->assertStringStartsWith( 'SELECT `ID`, LENGTH(`ID`), LENGTH(`post_title`), LENGTH(`post_content`), LENGTH(`post_date`), LENGTH(`menu_order`) FROM `wp_posts`', $db->log[ count( $db->log ) - 1 ], 'sizes are read before rows' );
-		$this->assertStringStartsWith( 'SELECT `ID`, `post_title`, `post_content`, `post_date`, `menu_order` FROM `wp_posts` ORDER BY `ID` LIMIT 7', $db->log[ count( $db->log ) - 2 ], 'rows are read by explicit column names, as many as the sizes allow' );
+		$this->assertStringStartsWith( 'SELECT `ID`, `post_title`, `post_content`, `post_date`, `menu_order` FROM `wp_posts` WHERE ((`ID` < ?) OR (`ID` = ?)) ORDER BY `ID` LIMIT 7', $db->log[ count( $db->log ) - 2 ], 'rows are read by explicit column names, as many as the sizes allow' );
 		$this->assertStringContainsString( self::PREAMBLE, $this->chunk( 'wp_posts', 1 ) );
 	}
 
@@ -196,6 +196,182 @@ final class TableExporterTest extends TestCase {
 		return array( $state, $closed );
 	}
 
+	private function post_row( int $id, string $title = 'new' ): array {
+		return array( (string) $id, $title . ' ' . $id, 'body', '2026-09-20 10:00:00', '0' );
+	}
+
+	/**
+	 * Keys in the order a table's chunks hold them.
+	 *
+	 * @return string[]
+	 */
+	private function exported_titles( string $table, int $chunks ): array {
+		$sql = '';
+		for ( $c = 1; $c <= $chunks; $c++ ) {
+			$sql .= $this->chunk( $table, $c );
+		}
+		preg_match_all( "/\\(\\d+,'([^']*)'/", $sql, $m );
+		return $m[1];
+	}
+
+	public function test_rows_added_while_a_table_is_exported_are_left_out_and_the_table_ends(): void {
+		$db = new FakeConnection();
+		$this->posts( $db, 20 );
+		// Small batches, and a row added after every unit: without a bound the export would chase the table forever.
+		$exporter = new TableExporter( $db, $this->dir, 65536, 300 );
+		$state    = TableExporter::initial_state( 'wp_posts' );
+		$next     = 21;
+		for ( $units = 0; empty( $state['done'] ); $units++ ) {
+			$this->assertLessThan( 100, $units, 'the table ends although it grows by a row per unit' );
+			$state = $exporter->step( $state );
+			$db->insert_rows( 'wp_posts', array( $this->post_row( $next++ ) ) );
+		}
+		$this->assertSame( 20, $state['rows'], 'exactly the rows there when its export started' );
+		$this->assertStringContainsString( "\n-- wpcheckpoint bound pk_max=[\"20\"]\n", $this->chunk( 'wp_posts', 1 ) );
+		$this->assertStringNotContainsString( "'new ", $this->chunk( 'wp_posts', 1 ) );
+		$this->assertGreaterThan( 3, $units, 'several units, each followed by a new row' );
+	}
+
+	public function test_a_string_key_that_sorts_inside_the_bound_is_still_read(): void {
+		// Some plugin tables use string keys: a new row can sort before the bound and after what was read.
+		$db   = new FakeConnection();
+		$rows = array();
+		foreach ( array( 'b', 'd', 'f' ) as $k ) {
+			$rows[] = array( $k, 'old' );
+		}
+		$db->add_table( 'wp_sessions', array( array( 'k', 'varchar(20)' ), array( 'v', 'text' ) ), array( 'k' ), $rows, false );
+		$exporter = new TableExporter( $db, $this->dir, 65536, 16 ); // A batch or two per unit.
+		$state    = $exporter->step( TableExporter::initial_state( 'wp_sessions' ) );
+		$this->assertLessThan( 3, $state['rows'], 'the table is not read in one unit' );
+		$db->insert_rows( 'wp_sessions', array( array( 'e', 'new' ), array( 'z', 'new' ) ) );
+		list( $state ) = $this->run_all_from( $exporter, $state );
+		$sql = $this->chunk( 'wp_sessions', 1 );
+		$this->assertStringContainsString( "('e','new')", $sql, 'a new key before the bound "f" and after the position read' );
+		$this->assertStringNotContainsString( "('z','new')", $sql, 'a new key after the bound is not' );
+		$this->assertSame( 4, $state['rows'] );
+	}
+
+	public function test_a_table_emptied_during_its_export_ends_with_the_rows_read_before(): void {
+		$db = new FakeConnection();
+		$this->posts( $db, 30 );
+		$exporter = new TableExporter( $db, $this->dir, 65536, 300 );
+		$state    = $exporter->step( TableExporter::initial_state( 'wp_posts' ) );
+		$read     = (int) $state['rows'];
+		$this->assertGreaterThan( 0, $read );
+		$this->assertLessThan( 30, $read );
+		$db->replace_rows( 'wp_posts', array() );
+		list( $state ) = $this->run_all_from( $exporter, $state );
+		$this->assertSame( $read, $state['rows'], 'no failure, no re-export: the table ends where it was emptied' );
+	}
+
+	public function test_a_table_emptied_and_refilled_during_its_export_mixes_old_and_new_rows(): void {
+		// A cache rebuild: TRUNCATE resets the auto-increment and the table fills again from 1.
+		$db = new FakeConnection();
+		$this->posts( $db, 10 );
+		$exporter = new TableExporter( $db, $this->dir, 65536, 300 );
+		$state    = $exporter->step( TableExporter::initial_state( 'wp_posts' ) );
+		$read     = (int) $state['rows'];
+		$this->assertGreaterThan( 0, $read );
+		$this->assertLessThan( 10, $read );
+		$fresh = array();
+		for ( $i = 1; $i <= 20; $i++ ) {
+			$fresh[] = $this->post_row( $i, 'rebuilt' );
+		}
+		$db->replace_rows( 'wp_posts', $fresh );
+		list( $state ) = $this->run_all_from( $exporter, $state );
+		$titles = $this->exported_titles( 'wp_posts', (int) $state['chunks'] );
+		$this->assertSame( 10, count( $titles ), 'up to the bound, 10' );
+		$this->assertSame( 'title 1', $titles[0], 'the old rows read before the rebuild' );
+		$this->assertSame( 'rebuilt ' . ( $read + 1 ), $titles[ $read ], 'then rows of the rebuilt table' );
+		$this->assertSame( 'rebuilt 10', $titles[9] );
+	}
+
+	public function test_an_empty_table_stays_empty_whatever_is_added_during_the_export(): void {
+		$db = new FakeConnection();
+		$this->posts( $db, 0 );
+		$exporter = new TableExporter( $db, $this->dir );
+		$state    = $exporter->step( TableExporter::initial_state( 'wp_posts' ) );
+		$db->insert_rows( 'wp_posts', array( $this->post_row( 1 ) ) );
+		list( $state ) = $this->run_all_from( $exporter, $state );
+		$this->assertSame( 0, $state['rows'] );
+		$this->assertStringContainsString( "\n-- wpcheckpoint bound pk_max=null\n", $this->chunk( 'wp_posts', 1 ) );
+	}
+
+	public function test_a_keyless_table_is_bounded_by_its_row_count(): void {
+		$db   = new FakeConnection();
+		$rows = array();
+		for ( $i = 0; $i < 40; $i++ ) {
+			$rows[] = array( 'k' . $i, 'v' . $i );
+		}
+		$db->add_table( 'wp_nokey', array( array( 'k', 'varchar(10)' ), array( 'v', 'text' ) ), array(), $rows );
+		$exporter = new TableExporter( $db, $this->dir, 65536, 128 );
+		$state    = TableExporter::initial_state( 'wp_nokey' );
+		for ( $units = 0; empty( $state['done'] ); $units++ ) {
+			$this->assertLessThan( 100, $units );
+			$state = $exporter->step( $state );
+			$db->insert_rows( 'wp_nokey', array( array( 'added', 'during' ) ) );
+		}
+		$this->assertSame( 40, $state['rows'] );
+		$this->assertStringNotContainsString( "'added'", $this->chunk( 'wp_nokey', 1 ) );
+	}
+
+	public function test_a_resumed_or_replayed_export_uses_the_bound_it_started_with(): void {
+		$db = new FakeConnection();
+		$this->posts( $db, 400 );
+		$exporter = new TableExporter( $db, $this->dir, 8192, 1024 ); // Several chunks.
+		$state    = TableExporter::initial_state( 'wp_posts' );
+		$saved    = array();
+		while ( (int) $state['chunk'] < 3 ) {
+			$state   = $exporter->step( $state );
+			$saved[] = json_decode( (string) json_encode( $state ), true );
+			$this->assertLessThan( 200, count( $saved ) );
+		}
+		$db->insert_rows( 'wp_posts', array( $this->post_row( 401 ), $this->post_row( 402 ) ) );
+		// A fresh process resumes from saved cursors (in the first chunk, and after two chunks closed): the
+		// bound is read back from the chunk, not queried again.
+		foreach ( array( $saved[1], $saved[ count( $saved ) - 1 ] ) as $cursor ) {
+			list( $done ) = $this->run_all_from( new TableExporter( $db, $this->dir, 8192, 1024 ), $cursor );
+			$this->assertSame( 400, $done['rows'] );
+			for ( $c = 1; $c <= (int) $done['chunks']; $c++ ) {
+				$this->assertStringContainsString( "\n-- wpcheckpoint bound pk_max=[\"400\"]\n", $this->chunk( 'wp_posts', $c ), 'every chunk carries the bound: ' . $c );
+			}
+		}
+		// A first chunk whose header was never committed: nothing depends on the bound yet, so it is queried again.
+		list( $fresh ) = $this->run_all_from( $exporter, TableExporter::initial_state( 'wp_posts' ) );
+		$this->assertSame( 402, $fresh['rows'] );
+		$this->assertStringContainsString( "\n-- wpcheckpoint bound pk_max=[\"402\"]\n", $this->chunk( 'wp_posts', 1 ) );
+	}
+
+	public function test_a_chunk_begun_before_bounds_existed_goes_on_without_one(): void {
+		// An export running while the plugin was updated: its chunk has no bound line.
+		$db = new FakeConnection();
+		$this->posts( $db, 10 );
+		$exporter = new TableExporter( $db, $this->dir, 65536, 300 );
+		$state    = $exporter->step( TableExporter::initial_state( 'wp_posts' ) );
+		$path     = $exporter->chunk_path( 'wp_posts', 1 );
+		$old      = preg_replace( "/\\n-- wpcheckpoint bound [^\\n]*/", '', (string) file_get_contents( $path ), 1 );
+		file_put_contents( $path, $old );
+		$state['bytes'] = strlen( $old );
+		$db->insert_rows( 'wp_posts', array( $this->post_row( 11 ) ) );
+		list( $state ) = $this->run_all_from( $exporter, $state );
+		$this->assertSame( 11, $state['rows'], 'no bound: read to the end as it was begun, not failed' );
+		$this->assertStringNotContainsString( 'wpcheckpoint bound', $this->chunk( 'wp_posts', 1 ) );
+	}
+
+	public function test_a_malformed_bound_line_fails_the_export(): void {
+		$db = new FakeConnection();
+		$this->posts( $db, 10 );
+		$exporter = new TableExporter( $db, $this->dir, 65536, 300 );
+		$state    = $exporter->step( TableExporter::initial_state( 'wp_posts' ) );
+		$path     = $exporter->chunk_path( 'wp_posts', 1 );
+		$damaged  = str_replace( 'bound pk_max=["10"]', 'bound pk_max=["10"', (string) file_get_contents( $path ) );
+		file_put_contents( $path, $damaged );
+		$state['bytes'] = strlen( $damaged );
+		$this->expectException( \RuntimeException::class );
+		$this->expectExceptionMessageMatches( '/malformed|damaged/' );
+		$exporter->step( $state );
+	}
+
 	public function test_marker_lines_parse_exactly_or_fail_closed(): void {
 		$this->assertNull( TableExporter::parse_marker( 'INSERT ... -- wpcheckpoint batch rows=1 pk=["999"]' ), 'marker text inside a line is not a marker' );
 		$this->assertNull( TableExporter::parse_marker( '-- wpcheckpoint end table=t chunk=1 rows=1 pk_to=["1"]' ) );
@@ -287,7 +463,10 @@ final class TableExporterTest extends TestCase {
 		$exporter = new TableExporter( $db, $this->dir, 65536, 64 );
 		list( $state ) = $this->run_all( $exporter, 'wp_term_relationships' );
 		$this->assertSame( 10, $state['rows'] );
-		$this->assertStringContainsString( 'WHERE ((`object_id` > ?) OR (`object_id` = ? AND `term_taxonomy_id` > ?)) ORDER BY `object_id`, `term_taxonomy_id` LIMIT', $db->log[ count( $db->log ) - 1 ] );
+		$this->assertStringContainsString( 'WHERE ((`object_id` > ?) OR (`object_id` = ? AND `term_taxonomy_id` > ?)) AND ((`object_id` < ?) OR (`object_id` = ? AND `term_taxonomy_id` < ?) OR (`object_id` = ? AND `term_taxonomy_id` = ?)) ORDER BY `object_id`, `term_taxonomy_id` LIMIT', $db->log[ count( $db->log ) - 1 ] );
+		list( $where, $args ) = TableExporter::up_to_key( array( 'a', 'b' ), array( '1', '2' ) );
+		$this->assertSame( '(`a` < ?) OR (`a` = ? AND `b` < ?) OR (`a` = ? AND `b` = ?)', $where );
+		$this->assertSame( array( '1', '1', '2', '1', '2' ), $args );
 		list( $where, $args ) = TableExporter::after_key( array( 'a', 'b', 'c' ), array( '1', '2', '3' ) );
 		$this->assertSame( '(`a` > ?) OR (`a` = ? AND `b` > ?) OR (`a` = ? AND `b` = ? AND `c` > ?)', $where );
 		$this->assertSame( array( '1', '1', '2', '1', '2', '3' ), $args );
@@ -311,11 +490,11 @@ final class TableExporterTest extends TestCase {
 		$this->assertCount( 1, $state['warnings'] );
 		$this->assertStringContainsString( 'no primary key', $state['warnings'][0] );
 		$sql = $this->chunk( 'wp_nokey', 1 );
-		$this->assertStringStartsWith( "-- wpcheckpoint table=wp_nokey chunk=1 offset=0\n", $sql );
+		$this->assertStringStartsWith( "-- wpcheckpoint table=wp_nokey chunk=1 offset=0\n-- wpcheckpoint bound rows_max=120\n", $sql );
 		$this->assertStringContainsString( "-- wpcheckpoint batch rows=", $sql );
 		$this->assertStringEndsWith( "rows=120 offset=120\n", $sql );
-		$this->assertStringContainsString( 'LIMIT ', $db->log[ count( $db->log ) - 1 ] );
-		$this->assertStringContainsString( 'OFFSET 120', $db->log[ count( $db->log ) - 1 ] );
+		$this->assertStringContainsString( 'LIMIT 2 OFFSET 118', $db->log[ count( $db->log ) - 1 ], 'the last read asks for no more than the rows left under the bound' );
+		$this->assertSame( array(), preg_grep( '/OFFSET 120/', $db->log ), 'and none past it' );
 		$this->assertSame( 120, substr_count( $sql, "('k" ) );
 	}
 
@@ -408,7 +587,7 @@ final class TableExporterTest extends TestCase {
 			}
 		}
 		$this->assertGreaterThanOrEqual( 59, $large_fetches, 'each large row was fetched on its own (the first one may share a batch with the last small rows) although the look-ahead after 600 small rows was hundreds of rows' );
-		$this->assertStringContainsString( ' LIMIT 500', $db->log[0 === count( $db->log ) ? 0 : 3], 'the first look-ahead is INITIAL_ROWS' );
+		$this->assertStringContainsString( ' LIMIT 500', $db->log[4], 'the first look-ahead (after describe and the bound) is INITIAL_ROWS' );
 	}
 
 	public function test_generated_columns_are_left_out_and_invisible_columns_are_read_by_name(): void {
