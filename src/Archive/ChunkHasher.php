@@ -113,7 +113,7 @@ final class ChunkHasher {
 	public static function hash_file( string $path ): string {
 		$hash = @hash_file( self::ALGORITHM, $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- failure is thrown below.
 		if ( ! is_string( $hash ) ) {
-			throw new \RuntimeException( 'The file could not be read.' );
+			throw self::read_failure( $path ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message, no user data.
 		}
 		return $hash;
 	}
@@ -216,14 +216,32 @@ final class ChunkHasher {
 	 * @param int    $index       Chunk index.
 	 * @param int    $chunk_bytes Chunk size.
 	 * @param string $expected    Expected lowercase hex.
-	 * @return bool False on mismatch or when the chunk cannot be read.
+	 * @return bool False on mismatch or when the chunk cannot be read as the content it claims to be.
+	 * @throws EnvironmentFailure When this server cannot read the file at all.
 	 */
 	public static function verify_chunk( string $path, int $index, int $chunk_bytes, string $expected ): bool {
 		try {
 			return hash_equals( strtolower( $expected ), self::hash_chunk( $path, $index, $chunk_bytes ) );
+		} catch ( EnvironmentFailure $e ) {
+			throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged: this server could not read the file, which says nothing about its content.
 		} catch ( \RuntimeException $e ) {
 			return false;
 		}
+	}
+
+	/**
+	 * Why a file could not be read: a file that is there but cannot be read
+	 * is this server's problem (permissions, storage), not a content mismatch.
+	 *
+	 * @param string $path File.
+	 * @return \RuntimeException
+	 */
+	private static function read_failure( string $path ): \RuntimeException {
+		clearstatcache( true, $path );
+		if ( '' !== $path && is_file( $path ) ) {
+			return new EnvironmentFailure( 'The file is there, but this server cannot read it (file permissions or storage). The archive itself is not in question.', EnvironmentFailure::ACCESS );
+		}
+		return new \RuntimeException( 'The file could not be opened for reading.' );
 	}
 
 	/**
@@ -236,7 +254,7 @@ final class ChunkHasher {
 	private static function open( string $path ) {
 		$handle = '' === $path ? false : @fopen( $path, 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- stream read; failure is thrown.
 		if ( false === $handle ) {
-			throw new \RuntimeException( 'The file could not be opened for reading.' );
+			throw self::read_failure( $path ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message, no user data.
 		}
 		// Regular files on the local file system only: no stream wrappers (data:, php:, phar:), no
 		// directories, no FIFOs. Callers always join a directory to a validated relative path, so a

@@ -75,7 +75,7 @@ final class ZipReader {
 	public static function open( string $path ): ZipReader {
 		$handle = @fopen( $path, 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- thrown below.
 		if ( false === $handle ) {
-			throw new \RuntimeException( 'The volume cannot be opened.' );
+			throw self::open_failure( $path );
 		}
 		try {
 			$meta  = stream_get_meta_data( $handle );
@@ -86,7 +86,7 @@ final class ZipReader {
 			$size  = (int) $stats['size'];
 			$start = max( 0, $size - self::TAIL_BYTES );
 			if ( 0 !== fseek( $handle, $start ) ) {
-				throw new \RuntimeException( 'The volume could not be positioned.' );
+				throw new EnvironmentFailure( 'The volume could not be positioned for reading (a storage error on this server).', EnvironmentFailure::ACCESS );
 			}
 			$tail = stream_get_contents( $handle );
 			$end  = is_string( $tail ) ? ZipFormat::parse_end( $tail, $start ) : null;
@@ -144,7 +144,7 @@ final class ZipReader {
 				$seen     = $from_index;
 			}
 			if ( 0 !== fseek( $handle, $position ) ) {
-				throw new \RuntimeException( 'The central directory could not be positioned.' );
+				throw new EnvironmentFailure( 'The central directory could not be positioned for reading (a storage error on this server).', EnvironmentFailure::ACCESS );
 			}
 			$buffer = '';
 			while ( $seen < $this->end['entries'] ) {
@@ -316,7 +316,7 @@ final class ZipReader {
 			$handle = $this->handle();
 			try {
 				if ( 0 !== fseek( $handle, $this->data_offset( $handle, $entry ) + $offset ) ) {
-					throw new \RuntimeException( 'The entry could not be positioned.' );
+					throw new EnvironmentFailure( 'The entry could not be positioned for reading (a storage error on this server).', EnvironmentFailure::ACCESS );
 				}
 				$left = $length;
 				while ( $left > 0 ) {
@@ -526,7 +526,7 @@ final class ZipReader {
 		try {
 			$data_offset = $this->data_offset( $handle, $entry );
 			if ( 0 !== fseek( $handle, $data_offset + $offset ) ) {
-				throw new \RuntimeException( 'The entry could not be positioned.' );
+				throw new EnvironmentFailure( 'The entry could not be positioned for reading (a storage error on this server).', EnvironmentFailure::ACCESS );
 			}
 			$context = hash_init( 'sha256' );
 			$left    = $length;
@@ -557,7 +557,7 @@ final class ZipReader {
 		$handle = $this->handle();
 		try {
 			if ( 0 !== fseek( $handle, (int) $entry['offset'] ) ) {
-				throw new \RuntimeException( 'The local header could not be positioned.' );
+				throw new EnvironmentFailure( 'The local header could not be positioned for reading (a storage error on this server).', EnvironmentFailure::ACCESS );
 			}
 			$fixed = fread( $handle, 30 );
 			if ( ! is_string( $fixed ) || 30 !== strlen( $fixed ) ) {
@@ -591,7 +591,7 @@ final class ZipReader {
 	 */
 	private function data_offset( $handle, array $entry ): int {
 		if ( 0 !== fseek( $handle, (int) $entry['offset'] ) ) {
-			throw new \RuntimeException( 'The entry could not be positioned.' );
+			throw new EnvironmentFailure( 'The entry could not be positioned for reading (a storage error on this server).', EnvironmentFailure::ACCESS );
 		}
 		$local = fread( $handle, 30 );
 		$len   = is_string( $local ) ? ZipFormat::local_header_length( $local ) : null;
@@ -618,7 +618,7 @@ final class ZipReader {
 		try {
 			$data_offset = $this->data_offset( $handle, $entry );
 			if ( 0 !== fseek( $handle, $data_offset ) ) {
-				throw new \RuntimeException( 'The entry could not be positioned.' );
+				throw new EnvironmentFailure( 'The entry could not be positioned for reading (a storage error on this server).', EnvironmentFailure::ACCESS );
 			}
 			$crc   = 0;
 			$usize = (int) $entry['usize'];
@@ -661,7 +661,7 @@ final class ZipReader {
 				// stream can expand to tens of gigabytes before any check after the call runs. A declared size
 				// of zero therefore inflates with a limit of one byte and must yield nothing.
 				if ( $csize > 0 && ! HostFunctions::can_deflate() ) {
-					throw new \RuntimeException( 'The entry is compressed, and this server\'s PHP has no zlib extension to read it.' );
+					throw new EnvironmentFailure( 'The entry is compressed, and this server\'s PHP has no zlib extension to read it. The archive itself is not in question: verify or restore it on a server whose PHP has the zlib extension.', EnvironmentFailure::ZLIB );
 				}
 				$data = 0 === $csize ? '' : HostFunctions::gzinflate( $compressed, max( 1, $usize ) );
 				if ( ! is_string( $data ) || strlen( $data ) !== $usize ) {
@@ -709,10 +709,27 @@ final class ZipReader {
 	 * @throws \RuntimeException When the operation fails (message says what).
 	 */
 	private function handle() {
-		$handle = fopen( $this->path, 'rb' );
+		$handle = @fopen( $this->path, 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- thrown below.
 		if ( false === $handle ) {
-			throw new \RuntimeException( 'The volume cannot be opened.' );
+			throw self::open_failure( $this->path );
 		}
 		return $handle;
+	}
+
+	/**
+	 * Why a volume could not be opened: a file that is there but cannot be
+	 * opened is this server's problem (permissions, storage), never the
+	 * archive's; a file that is not there is left to the caller, which
+	 * reports it as missing.
+	 *
+	 * @param string $path Volume path.
+	 * @return \RuntimeException
+	 */
+	private static function open_failure( string $path ): \RuntimeException {
+		clearstatcache( true, $path );
+		if ( is_file( $path ) ) {
+			return new EnvironmentFailure( 'The volume is there, but this server cannot open it for reading (file permissions or storage). The archive itself is not in question.', EnvironmentFailure::ACCESS );
+		}
+		return new \RuntimeException( 'The volume cannot be opened.' );
 	}
 }
