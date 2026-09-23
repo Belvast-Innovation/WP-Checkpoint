@@ -13,6 +13,11 @@ namespace WPCheckpoint\Archive;
  * records, DOS timestamps. Only what the format needs: methods STORE and
  * DEFLATE, UTF-8 names (general purpose bit 11), no data descriptors (the
  * local header is patched when the entry ends), no comments, no encryption.
+ *
+ * Entries are made by host 3 (Unix) with Unix mode bits: a reader that sees
+ * host 0 (MS-DOS) may decode names from an OEM code page despite bit 11
+ * (Debian's and Ubuntu's unzip under a C.UTF-8 locale does), and a Unix
+ * host without mode bits would extract files with no permissions.
  */
 final class ZipFormat {
 
@@ -30,6 +35,12 @@ final class ZipFormat {
 
 	const VERSION_DEFAULT = 20;
 	const VERSION_ZIP64   = 45;
+
+	const HOST_UNIX = 3; // Upper byte of "version made by".
+
+	const MODE_FILE      = 0100644; // Regular file, rw-r--r--.
+	const MODE_DIRECTORY = 040755;  // Directory, rwxr-xr-x.
+	const DOS_DIRECTORY  = 0x10;    // MS-DOS directory attribute, low byte of the external attributes.
 
 	const ZIP64_EXTRA_ID = 0x0001;
 	const LIMIT_32       = 0xFFFFFFFF;
@@ -132,7 +143,7 @@ final class ZipFormat {
 		return pack(
 			'VvvvvvvVVVvvvvvVV',
 			self::SIG_CENTRAL,
-			$zip64 ? self::VERSION_ZIP64 : self::VERSION_DEFAULT, // Version made by (DOS attributes).
+			( self::HOST_UNIX << 8 ) | ( $zip64 ? self::VERSION_ZIP64 : self::VERSION_DEFAULT ), // Version made by.
 			$zip64 ? self::VERSION_ZIP64 : self::VERSION_DEFAULT,
 			self::FLAG_UTF8,
 			(int) $entry['method'],
@@ -146,9 +157,24 @@ final class ZipFormat {
 			0, // Comment length.
 			0, // Disk number start.
 			0, // Internal attributes.
-			0, // External attributes.
+			self::external_attributes( (string) $entry['name'] ),
 			$zip64 ? self::LIMIT_32 : (int) $entry['offset']
 		) . $entry['name'] . $extra;
+	}
+
+	/**
+	 * External attributes of an entry made by a Unix host: the mode in the
+	 * upper 16 bits; a directory entry (name ending in "/") also carries the
+	 * MS-DOS directory bit for readers that look only at the low byte.
+	 *
+	 * @param string $name Entry name.
+	 * @return int
+	 */
+	public static function external_attributes( string $name ): int {
+		if ( '' !== $name && '/' === substr( $name, -1 ) ) {
+			return ( self::MODE_DIRECTORY << 16 ) | self::DOS_DIRECTORY;
+		}
+		return self::MODE_FILE << 16;
 	}
 
 	/**
@@ -232,7 +258,7 @@ final class ZipFormat {
 	 * Parse one central directory header at the start of $data.
 	 *
 	 * @param string $data Bytes starting at a central header.
-	 * @return array{name: string, method: int, flags: int, crc: int, csize: int, usize: int, offset: int, length: int}|null Null when malformed; length is the header's total size.
+	 * @return array{name: string, method: int, flags: int, time: int, date: int, crc: int, csize: int, usize: int, offset: int, length: int, made_by: int, external: int}|null Null when malformed; length is the header's total size.
 	 */
 	public static function parse_central_header( string $data ) {
 		if ( strlen( $data ) < 46 ) {
@@ -274,16 +300,18 @@ final class ZipFormat {
 			}
 		}
 		return array(
-			'name'   => $name,
-			'method' => (int) $h['method'],
-			'flags'  => (int) $h['flags'],
-			'time'   => (int) $h['time'],
-			'date'   => (int) $h['date'],
-			'crc'    => (int) $h['crc'],
-			'csize'  => $csize,
-			'usize'  => $usize,
-			'offset' => $off,
-			'length' => $length,
+			'name'     => $name,
+			'method'   => (int) $h['method'],
+			'flags'    => (int) $h['flags'],
+			'time'     => (int) $h['time'],
+			'date'     => (int) $h['date'],
+			'crc'      => (int) $h['crc'],
+			'csize'    => $csize,
+			'usize'    => $usize,
+			'offset'   => $off,
+			'length'   => $length,
+			'made_by'  => (int) $h['made'],
+			'external' => (int) $h['external'],
 		);
 	}
 
