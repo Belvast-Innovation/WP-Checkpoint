@@ -304,6 +304,18 @@ final class ManifestStepTest extends TestCase {
 		$this->assertNotEmpty( preg_grep( '/^Checking the written archive: \d+ of \d+ entries$/', $messages ), 'the walk reports its progress' );
 	}
 
+	public function test_summaries_larger_than_a_volume_are_written_together_and_pass_the_self_check(): void {
+		// Volumes of 100 bytes against indexes of several hundred: after the data volume is sealed, the first
+		// index alone passes the volume size, and the second index and the manifest still go into that volume.
+		$step = new ManifestStep( $this->site_facts, array( 'name' => 'wp-checkpoint', 'version' => '0.1.0-test' ), array_merge( $this->packer_options(), array( 'volume_bytes' => 100 ) ), self::CHUNK );
+		$this->drive( $step );
+		$manifest = Manifest::from_json( (string) file_get_contents( $this->volumes() . '/' . self::BASE . '.manifest.json' ) );
+		$last     = $manifest->volumes()[ count( $manifest->volumes() ) - 1 ];
+		$this->assertSame( array( Manifest::DATABASE_INDEX, Manifest::FILES_INDEX, 'manifest.json' ), array_column( ZipReader::open( $this->volumes() . '/' . $last['path'] )->entries(), 'name' ) );
+		$this->assertGreaterThan( 100, $last['bytes'] );
+		$this->assertStringContainsString( 'Self-check passed', $this->ctx->log() );
+	}
+
 	/**
 	 * @return array<string, string>
 	 */
