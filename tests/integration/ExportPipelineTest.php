@@ -513,6 +513,11 @@ final class ExportPipelineTest extends JobTestCase {
 		// A failure that names a backup file by name would be masked by the presenter as a second line of defence.
 		$presenter = new JobPresenter( new Redactor( Redactor::installation_secrets() ), $this->types, $this->dirs );
 		$this->assertSame( 'File [backup].part002.wpcheckpoint.zip is missing.', $presenter->clean( sprintf( 'File %s.part002.wpcheckpoint.zip is missing.', $base ) ) );
+		foreach ( array( '%s', '%s.', '%s.wpcheckpoint.zip', '%s.wpcheckpoint.tar', '%s.part002.wpcheckpoint.zip.partial', '%s.wpcheckpoint.zip.cdr', '%s.manifest.json', '(%s)' ) as $form ) {
+			$this->assertStringNotContainsString( 'zebra-quokka', $presenter->clean( 'Name: ' . sprintf( $form, $base ) ), $form );
+		}
+		// A user's file that looks like a base name but has its own extension is named as it is.
+		$this->assertSame( 'Unreadable: wp-content/uploads/report-20260922-100000-cafe.pdf', $presenter->clean( 'Unreadable: wp-content/uploads/report-20260922-100000-cafe.pdf' ) );
 		$this->assertStringNotContainsString( 'zebra-quokka', wp_json_encode( $presenter->present( $stored ) ) );
 	}
 
