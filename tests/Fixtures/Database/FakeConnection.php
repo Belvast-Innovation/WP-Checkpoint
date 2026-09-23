@@ -201,8 +201,16 @@ final class FakeConnection implements Connection {
 			}
 			return array( array( (string) $count ) );
 		}
-		if ( 1 === preg_match( '/\ASELECT COUNT\(\*\) FROM `(.+?)`\z/', $sql, $m ) ) {
-			return array( array( (string) count( $this->table( $m[1] )['rows'] ) ) );
+		if ( 1 === preg_match( '/\ASELECT COUNT\(\*\) FROM `(.+?)`(?: WHERE NOT (\(\(.+\) > \d+\)))?\z/', $sql, $m ) ) {
+			$t     = $this->table( $m[1] );
+			$names = array_column( $t['columns'], 0 );
+			$count = 0;
+			foreach ( $t['rows'] as $row ) {
+				if ( ! isset( $m[2] ) || ! $this->oversized( $m[2], $names, $row ) ) {
+					++$count;
+				}
+			}
+			return array( array( (string) $count ) );
 		}
 		if ( 1 === preg_match( '/\ASELECT (.+?) FROM `(.+?)` ORDER BY (.+ DESC) LIMIT 1\z/', $sql, $m ) ) {
 			$t     = $this->table( $m[2] );

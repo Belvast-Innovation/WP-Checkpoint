@@ -434,7 +434,7 @@ final class TableExporter {
 	 * @param string[]|null                                                                            $key   Last key, null from the start.
 	 * @param int                                                                                      $rows  Rows exported so far (offset mode).
 	 * @param int                                                                                      $limit Rows to look ahead.
-	 * @param array{mode: string, key?: string[]|null, rows?: int}                                     $bound The table's upper bound (bound_now()).
+	 * @param array{mode: string, key?: string[]|null, rows?: int}                                     $bound The table's upper bound (bound_now(), or bound_in(): mode "none" for a chunk begun without one).
 	 * @return array<int, array<int, string|null>>
 	 * @throws \RuntimeException When a row ahead is larger than the limit.
 	 */
@@ -628,7 +628,10 @@ final class TableExporter {
 	 */
 	private function bound_now( string $table, array $desc ): array {
 		if ( array() === $desc['pk'] ) {
-			$count = $this->query( 'SELECT COUNT(*) FROM ' . SqlWriter::identifier( $table ) );
+			// Counted as the rows are read: without the rows left out as oversized. A full scan on a keyless
+			// table, like the table's last OFFSET batches; WordPress's own tables all have a key.
+			$where = in_array( $table, $this->exclude_oversize, true ) ? ' WHERE NOT ' . $this->oversize_predicate( $desc ) : '';
+			$count = $this->query( 'SELECT COUNT(*) FROM ' . SqlWriter::identifier( $table ) . $where );
 			return array(
 				'mode' => 'rows',
 				'rows' => (int) ( $count[0][0] ?? 0 ),
@@ -675,7 +678,7 @@ final class TableExporter {
 		} finally {
 			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- see above.
 		}
-		if ( ! is_string( $first ) || 0 !== strpos( $first, self::HEADER . $table . ' chunk=' . $chunk . ' ' ) ) {
+		if ( ! is_string( $first ) || "\n" !== substr( $first, -1 ) || 0 !== strpos( $first, self::HEADER . $table . ' chunk=' . $chunk . ' ' ) ) {
 			throw new \RuntimeException( sprintf( 'Chunk %d of table %s has a malformed header; the work directory was lost or changed.', $chunk, $table ) );
 		}
 		if ( ! is_string( $second ) || 0 !== strpos( $second, self::BOUND ) ) {

@@ -287,11 +287,6 @@ final class DatabaseExportStepTest extends JobTestCase {
 		$this->round_trip( $stored, $lines );
 	}
 
-	/**
-	 * The unit test measures the largest row over an in-memory connection;
-	 * the real path also holds the driver's copy of the row, so it is
-	 * measured here too, against the same 32 MB budget.
-	 */
 	public function test_the_upper_bound_follows_the_servers_own_key_order_on_a_composite_string_key(): void {
 		global $wpdb;
 		$table          = self::PREFIX . 'bounded';
@@ -321,6 +316,11 @@ final class DatabaseExportStepTest extends JobTestCase {
 		$this->assertSame( 8, $state['rows'] );
 	}
 
+	/**
+	 * The unit test measures the largest row over an in-memory connection;
+	 * the real path also holds the driver's copy of the row, so it is
+	 * measured here too, against the same 32 MB budget.
+	 */
 	public function test_the_largest_row_is_exported_within_the_step_memory_budget_over_wpdb(): void {
 		global $wpdb;
 		$table = self::PREFIX . 'bigrow';

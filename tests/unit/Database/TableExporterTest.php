@@ -286,15 +286,35 @@ final class TableExporterTest extends TestCase {
 		$this->assertSame( 'rebuilt 10', $titles[9] );
 	}
 
-	public function test_an_empty_table_stays_empty_whatever_is_added_during_the_export(): void {
+	public function test_an_empty_table_is_exported_with_a_null_bound_and_no_rows(): void {
+		// An empty table ends in its first unit, so nothing added later can reach it: only its header is tested.
 		$db = new FakeConnection();
 		$this->posts( $db, 0 );
-		$exporter = new TableExporter( $db, $this->dir );
-		$state    = $exporter->step( TableExporter::initial_state( 'wp_posts' ) );
-		$db->insert_rows( 'wp_posts', array( $this->post_row( 1 ) ) );
-		list( $state ) = $this->run_all_from( $exporter, $state );
+		list( $state ) = $this->run_all( new TableExporter( $db, $this->dir ), 'wp_posts' );
 		$this->assertSame( 0, $state['rows'] );
 		$this->assertStringContainsString( "\n-- wpcheckpoint bound pk_max=null\n", $this->chunk( 'wp_posts', 1 ) );
+	}
+
+	public function test_a_keyless_tables_bound_counts_only_the_rows_it_will_read(): void {
+		// Rows left out as oversized are not counted: otherwise rows added during the export could take their place.
+		$db   = new FakeConnection();
+		$rows = array();
+		for ( $i = 0; $i < 10; $i++ ) {
+			$rows[] = array( 'k' . $i, $i < 2 ? str_repeat( 'x', 3000 ) : 'small' );
+		}
+		$db->add_table( 'wp_nokey', array( array( 'k', 'varchar(10)' ), array( 'v', 'text' ) ), array(), $rows );
+		// A row limit of 1000 bytes: the two 3000-byte values are oversized.
+		$exporter = new TableExporter( $db, $this->dir, 5096, 128, array( 'wp_nokey' ) );
+		$this->assertLessThan( 3000, $exporter->row_limit() );
+		$state = TableExporter::initial_state( 'wp_nokey' );
+		for ( $units = 0; empty( $state['done'] ); $units++ ) {
+			$this->assertLessThan( 100, $units );
+			$state = $exporter->step( $state );
+			$db->insert_rows( 'wp_nokey', array( array( 'added', 'during' ) ) );
+		}
+		$this->assertStringContainsString( "\n-- wpcheckpoint bound rows_max=8\n", $this->chunk( 'wp_nokey', 1 ) );
+		$this->assertSame( 8, $state['rows'] );
+		$this->assertStringNotContainsString( "'added'", $this->chunk( 'wp_nokey', 1 ) );
 	}
 
 	public function test_a_keyless_table_is_bounded_by_its_row_count(): void {
@@ -359,17 +379,26 @@ final class TableExporterTest extends TestCase {
 	}
 
 	public function test_a_malformed_bound_line_fails_the_export(): void {
-		$db = new FakeConnection();
-		$this->posts( $db, 10 );
-		$exporter = new TableExporter( $db, $this->dir, 65536, 300 );
-		$state    = $exporter->step( TableExporter::initial_state( 'wp_posts' ) );
-		$path     = $exporter->chunk_path( 'wp_posts', 1 );
-		$damaged  = str_replace( 'bound pk_max=["10"]', 'bound pk_max=["10"', (string) file_get_contents( $path ) );
-		file_put_contents( $path, $damaged );
-		$state['bytes'] = strlen( $damaged );
-		$this->expectException( \RuntimeException::class );
-		$this->expectExceptionMessageMatches( '/malformed|damaged/' );
-		$exporter->step( $state );
+		foreach ( array(
+			'bound pk_max=["10"' => 'A primary key in a chunk file is malformed',
+			'bound pk_limit=10'  => 'Chunk 1 of table wp_posts has a malformed bound line',
+		) as $replacement => $message ) {
+			$db = new FakeConnection();
+			$this->posts( $db, 10 );
+			$exporter = new TableExporter( $db, $this->dir, 65536, 300 );
+			$state    = $exporter->step( TableExporter::initial_state( 'wp_posts' ) );
+			$path     = $exporter->chunk_path( 'wp_posts', 1 );
+			$damaged  = str_replace( 'bound pk_max=["10"]', $replacement, (string) file_get_contents( $path ) );
+			$this->assertNotSame( (string) file_get_contents( $path ), $damaged );
+			file_put_contents( $path, $damaged );
+			$state['bytes'] = strlen( $damaged );
+			try {
+				$exporter->step( $state );
+				$this->fail( 'a damaged bound must fail the export: ' . $replacement );
+			} catch ( \RuntimeException $e ) {
+				$this->assertStringStartsWith( $message, $e->getMessage() );
+			}
+		}
 	}
 
 	public function test_marker_lines_parse_exactly_or_fail_closed(): void {
