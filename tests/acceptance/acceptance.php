@@ -4,7 +4,7 @@
  * the way the admin page drives a job (REST ticks), under 128 MB / 30 s.
  *
  *   php tests/acceptance/acceptance.php setup    --dir=DIR [--cpus=1]
- *   php tests/acceptance/acceptance.php run      --dir=DIR --name=NAME [--kills=standard]
+ *   php tests/acceptance/acceptance.php run      --dir=DIR --name=NAME [--kills=standard|RULE[,RULE]] [--no-ttfb]
  *   php tests/acceptance/acceptance.php check    --dir=DIR --name=NAME
  *   php tests/acceptance/acceptance.php compare  --dir=DIR --name=NAME --with=NAME
  *   php tests/acceptance/acceptance.php teardown --dir=DIR
@@ -21,7 +21,7 @@ declare( strict_types=1 );
 
 const ACC_MARK_BEGIN = '# BEGIN wpcheckpoint-acceptance';
 const ACC_MARK_END   = '# END wpcheckpoint-acceptance';
-const ACC_EXCLUDE    = array( 'wp-content/plugins/wp-checkpoint', 'wp-content/wpcheckpoint-acceptance', 'wp-content/debug.log', 'wp-content/upgrade' );
+const ACC_EXCLUDE    = array( 'wp-content/plugins/wp-checkpoint', 'wp-content/wpcheckpoint-acceptance', 'wp-content/mu-plugins/wpcheckpoint-acceptance-probe.php', 'wp-content/debug.log', 'wp-content/upgrade' );
 const ACC_TICK_LIMIT = 20.0;  // Seconds: a tick above this is listed with its step and unit.
 const ACC_TICK_MAX   = 25.0;  // Seconds: no tick may take longer.
 const ACC_TTFB_LIMIT = 0.050; // Seconds: allowed median degradation during the export.
@@ -283,7 +283,7 @@ function acc_helper( string $kind, string $out, int $job ): void {
 	}
 }
 
-function acc_run( string $dir, string $name, string $kills ): void {
+function acc_run( string $dir, string $name, string $kills, bool $ttfb = true ): void {
 	$env = acc_state( $dir );
 	$out = $dir . '/' . $name;
 	if ( is_dir( $out ) ) {
@@ -299,8 +299,10 @@ function acc_run( string $dir, string $name, string $kills ): void {
 		acc_fail( 'Another job is queued, running or paused; finish or cancel it first.' );
 	}
 
-	acc_say( 'TTFB before the export (60 samples).' );
-	acc_ttfb_samples( $env, $out . '/ttfb-before.jsonl', 60, 1.0 );
+	if ( $ttfb ) {
+		acc_say( 'TTFB before the export (60 samples).' );
+		acc_ttfb_samples( $env, $out . '/ttfb-before.jsonl', 60, 1.0 );
+	}
 	acc_say( 'Idle tick baseline (10 requests for a job that does not exist).' );
 	$t0 = microtime( true );
 	for ( $i = 0; $i < 10; $i++ ) {
@@ -311,11 +313,22 @@ function acc_run( string $dir, string $name, string $kills ): void {
 	foreach ( array( 'kills.json', 'kills-state.json', 'kills.jsonl' ) as $file ) {
 		@unlink( $probe . '/' . $file );
 	}
+	$plan = array();
 	if ( 'standard' === $kills ) {
-		file_put_contents( $probe . '/kills.json', json_encode( ACC_KILLS, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES ) );
-		acc_say( count( ACC_KILLS ) . ' planned kills installed.' );
+		$plan = ACC_KILLS;
 	} elseif ( '' !== $kills ) {
-		acc_fail( 'Unknown kill plan: ' . $kills );
+		// Single rules by id: a run of its own, so the takeover tick after the kill finishes and can be measured.
+		foreach ( explode( ',', $kills ) as $id ) {
+			$found = array_values( array_filter( ACC_KILLS, static function ( $r ) use ( $id ) { return $r['id'] === $id; } ) );
+			if ( array() === $found ) {
+				acc_fail( 'Unknown kill rule: ' . $id );
+			}
+			$plan[] = $found[0];
+		}
+	}
+	if ( array() !== $plan ) {
+		file_put_contents( $probe . '/kills.json', json_encode( $plan, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES ) );
+		acc_say( count( $plan ) . ' planned kills installed.' );
 	}
 	$before  = glob( $env['storage'] . '/backups/*.manifest.json' ) ?: array();
 	$options = var_export( array( 'exclusions' => ACC_EXCLUDE ), true );
@@ -323,7 +336,7 @@ function acc_run( string $dir, string $name, string $kills ): void {
 	acc_say( "Job {$job} created; ticking." );
 
 	$helpers = array();
-	foreach ( array( 'ttfb', 'disk' ) as $kind ) {
+	foreach ( $ttfb ? array( 'ttfb', 'disk' ) : array( 'disk' ) as $kind ) {
 		$helpers[ $kind ] = proc_open( array( PHP_BINARY, __FILE__, 'helper', '--kind=' . $kind, '--out=' . $out, '--job=' . $job ), array( 1 => array( 'file', $out . '/helper-' . $kind . '.log', 'a' ), 2 => array( 'file', $out . '/helper-' . $kind . '.log', 'a' ) ), $pipes );
 	}
 	$started = microtime( true );
@@ -359,8 +372,11 @@ function acc_run( string $dir, string $name, string $kills ): void {
 	foreach ( $helpers as $proc ) {
 		proc_close( $proc );
 	}
-	acc_say( "Job ended: {$result}. TTFB after the export (60 samples)." );
-	acc_ttfb_samples( $env, $out . '/ttfb-after.jsonl', 60, 1.0 );
+	acc_say( "Job ended: {$result}." );
+	if ( $ttfb ) {
+		acc_say( 'TTFB after the export (60 samples).' );
+		acc_ttfb_samples( $env, $out . '/ttfb-after.jsonl', 60, 1.0 );
+	}
 
 	copy( $probe . '/requests.jsonl', $out . '/requests.jsonl' );
 	if ( is_file( $probe . '/kills.jsonl' ) ) {
@@ -381,7 +397,8 @@ function acc_run( string $dir, string $name, string $kills ): void {
 				'job'             => $job,
 				'base'            => $base,
 				'kills'           => $kills,
-				'planned_kills'   => 'standard' === $kills ? array_column( ACC_KILLS, 'id' ) : array(),
+				'planned_kills'   => array_column( $plan, 'id' ),
+				'ttfb'            => $ttfb,
 				'started'         => $started,
 				'finished'        => $finished,
 				'baseline_window' => $baseline_window,
@@ -496,8 +513,10 @@ function acc_check( string $dir, string $name ): void {
 
 	// (ii) and (iii) from the probe: every web tick of this job.
 	$requests = acc_lines( $out . '/requests.jsonl' );
-	$ticks    = array_values( array_filter( $requests, static function ( $r ) use ( $run ) { return in_array( $r['kind'], array( 'tick', 'loopback', 'cron' ), true ) && $r['start'] >= $run['started'] - 1 && $r['start'] <= $run['finished'] + 1; } ) );
-	$base     = array_values( array_filter( $requests, static function ( $r ) use ( $run ) { return 'tick' === $r['kind'] && $r['start'] >= $run['baseline_window'][0] - 1 && $r['start'] <= $run['baseline_window'][1] + 1; } ) );
+	// This job's ticks (the probe read the job's row before the tick), and the idle baseline: tick requests for a
+	// job that does not exist, in the baseline window.
+	$ticks    = array_values( array_filter( $requests, static function ( $r ) use ( $run ) { return in_array( $r['kind'], array( 'tick', 'loopback', 'cron' ), true ) && isset( $r['before']['job'] ) && (int) $run['job'] === (int) $r['before']['job']; } ) );
+	$base     = array_values( array_filter( $requests, static function ( $r ) use ( $run ) { return 'tick' === $r['kind'] && null === ( $r['before'] ?? null ) && $r['start'] >= $run['baseline_window'][0] - 1 && $r['start'] <= $run['baseline_window'][1] + 1; } ) );
 	$seconds  = array_map( static function ( $r ) { return (float) $r['seconds']; }, $ticks );
 	$over     = array();
 	foreach ( $ticks as $t ) {
@@ -541,6 +560,9 @@ function acc_check( string $dir, string $name ): void {
 		'drift'          => $drift,
 		'pass'           => ! $drift && ( $during - $before ) < ACC_TTFB_LIMIT,
 	);
+	if ( empty( $run['ttfb'] ) && array_key_exists( 'ttfb', $run ) ) {
+		$report['iv'] = array( 'skipped' => 'run without TTFB sampling (--no-ttfb)', 'pass' => true );
+	}
 
 	// (v) Full verification by the plugin.
 	$verify       = acc_wp( $env, array( 'wpcheckpoint', 'verify', '/var/www/html' . substr( $manifest_path, strlen( $env['wp_root'] ) ), '--depth=full', '--format=json' ), true );
@@ -650,11 +672,13 @@ function acc_check( string $dir, string $name ): void {
 		$until    = isset( $kills[ $n + 1 ] ) ? (float) $kills[ $n + 1 ]['at'] : $run['finished'] + 1;
 		$resumed  = null;
 		foreach ( $ticks as $t ) {
-			if ( $t['start'] > $kill['at'] && ! empty( $t['before']['lease_expired'] ) ) {
+			if ( $t['start'] > $kill['at'] && $t['start'] < $until && ! empty( $t['before']['lease_expired'] ) ) {
 				$resumed = $t;
 				break;
 			}
 		}
+		// No takeover tick before the next kill: the next kill ended the takeover tick itself (kill during recovery).
+		$cut_by = null === $resumed && isset( $kills[ $n + 1 ] ) ? $kills[ $n + 1 ]['rule'] : null;
 		$concurrent = 0;
 		foreach ( $log_lines as $line ) {
 			if ( 1 === preg_match( '/^\[([0-9T:-]+)Z\]/', $line, $lm ) ) {
@@ -677,6 +701,7 @@ function acc_check( string $dir, string $name ): void {
 			'takeover_mark'     => null === $resumed ? null : ( $resumed['after']['takeover_mark'] ?? null ),
 			'step_before_after' => null === $resumed ? null : array( $resumed['before']['step'], $resumed['after']['step'] ?? null ),
 			'concurrent_writer' => $concurrent,
+			'takeover_cut_by'   => $cut_by,
 		);
 	}
 
@@ -801,7 +826,7 @@ switch ( $command ) {
 		acc_setup( (string) ( $opts['dir'] ?? acc_fail( '--dir is required' ) ), (int) ( $opts['cpus'] ?? 1 ) );
 		break;
 	case 'run':
-		acc_run( (string) ( $opts['dir'] ?? '' ), (string) ( $opts['name'] ?? acc_fail( '--name is required' ) ), (string) ( $opts['kills'] ?? '' ) );
+		acc_run( (string) ( $opts['dir'] ?? '' ), (string) ( $opts['name'] ?? acc_fail( '--name is required' ) ), (string) ( $opts['kills'] ?? '' ), ! in_array( '--no-ttfb', $argv, true ) );
 		break;
 	case 'check':
 		acc_check( (string) ( $opts['dir'] ?? '' ), (string) ( $opts['name'] ?? acc_fail( '--name is required' ) ) );

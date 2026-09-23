@@ -25,6 +25,11 @@ php tests/acceptance/acceptance.php run --dir=$HOME/wpc-acceptance --name=first
 #    walks over the entries, and between two renames of the store step. After each kill the job is taken over
 #    when the lease expires.
 php tests/acceptance/acceptance.php run --dir=$HOME/wpc-acceptance --name=second --kills=standard
+#    The planned kills follow each other about one lease apart, so a takeover tick may itself be killed at the next
+#    point (a kill during recovery). To measure every takeover tick, run each rule on its own as well:
+for k in database-mid-table pack-between-chunks seal-before-rename seal-after-rename manifest-audit-walk manifest-verify-walk store-between-renames; do
+  php tests/acceptance/acceptance.php run --dir=$HOME/wpc-acceptance --name=kill-$k --kills=$k --no-ttfb
+done
 
 # 4. Checks per run, then the two runs against each other.
 php tests/acceptance/acceptance.php check --dir=$HOME/wpc-acceptance --name=first

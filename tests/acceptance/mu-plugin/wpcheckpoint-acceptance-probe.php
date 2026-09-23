@@ -101,7 +101,8 @@ function wpcheckpoint_acceptance_query( $query ) {
 	}
 	$in_stack = static function ( string $name ) use ( $stack ): bool {
 		foreach ( $stack as $entry ) {
-			if ( $entry === $name || substr( $entry, -strlen( '::' . $name ) ) === '::' . $name ) {
+			// A class ("PackStep"), a function ("seal_volume") or both ("Packer::seal_volume").
+			if ( $entry === $name || 0 === strpos( $entry, $name . '::' ) || substr( $entry, -strlen( '::' . $name ) ) === '::' . $name ) {
 				return true;
 			}
 		}
@@ -146,6 +147,15 @@ function wpcheckpoint_acceptance_query( $query ) {
 	return $query;
 }
 
+// WordPress raises the limit for WP-Cron (wp_raise_memory_limit( 'cron' )); a host with a hard 128 MB limit would
+// not let it. Keep cron ticks at the shared-hosting baseline too.
+add_filter(
+	'cron_memory_limit',
+	static function () {
+		return '128M';
+	}
+);
+
 $wpcheckpoint_acceptance = array(
 	'start' => isset( $_SERVER['REQUEST_TIME_FLOAT'] ) ? (float) $_SERVER['REQUEST_TIME_FLOAT'] : microtime( true ),
 	'pid'   => getmypid(),
@@ -164,7 +174,8 @@ if ( 1 === preg_match( '#/wp-checkpoint/v1/jobs/(\d+)/(tick|loopback)#', $wpchec
 
 if ( in_array( $wpcheckpoint_acceptance['kind'], array( 'tick', 'loopback', 'cron' ), true ) ) {
 	$wpcheckpoint_acceptance['before'] = wpcheckpoint_acceptance_position( $wpcheckpoint_acceptance['job'] );
-	if ( 'tick' === $wpcheckpoint_acceptance['kind'] && is_file( wpcheckpoint_acceptance_dir() . '/kills.json' ) ) {
+	// Every driver: REST ticks, and WP-Cron and loopback ticks, which take a job over just as well.
+	if ( is_file( wpcheckpoint_acceptance_dir() . '/kills.json' ) ) {
 		add_filter( 'query', 'wpcheckpoint_acceptance_query', PHP_INT_MAX );
 	}
 	$dir                               = wpcheckpoint_acceptance_dir() . '/inflight';
