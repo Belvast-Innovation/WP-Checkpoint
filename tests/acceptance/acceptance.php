@@ -6,7 +6,7 @@
  *   php tests/acceptance/acceptance.php setup    --dir=DIR [--cpus=1]
  *   php tests/acceptance/acceptance.php run      --dir=DIR --name=NAME [--kills=standard|RULE[,RULE]] [--no-ttfb]
  *   php tests/acceptance/acceptance.php check    --dir=DIR --name=NAME
- *   php tests/acceptance/acceptance.php kills    --dir=DIR --name=NAME   (recompute the per-kill section of check.json)
+ *   php tests/acceptance/acceptance.php recompute --dir=DIR --name=NAME  (recompute (ix) and the kills in check.json)
  *   php tests/acceptance/acceptance.php compare  --dir=DIR --name=NAME --with=NAME
  *   php tests/acceptance/acceptance.php teardown --dir=DIR
  *
@@ -487,6 +487,33 @@ function acc_table_hashes( array $env, string $db, array $tables ): array {
 }
 
 /**
+ * (ix): the work directory holds, at its peak, every volume (they wait for
+ * the store step), the exported database chunks (copied into the volumes and
+ * removed only with the work directory) and the indexes. The margin is for
+ * the scan's own files and the volume being written.
+ *
+ * @param array<string, mixed> $manifest Standalone manifest.
+ * @return array<string, mixed>
+ */
+function acc_ix_report( string $out, array $manifest, bool $reclaimed ): array {
+	$disk     = acc_lines( $out . '/disk.jsonl' );
+	$peak     = array() === $disk ? 0 : max( array_map( static function ( $r ) { return (int) $r['work']; }, $disk ) );
+	$archive  = array_sum( array_map( static function ( $v ) { return (int) $v['bytes']; }, $manifest['volumes'] ) );
+	$database = array_sum( array_map( static function ( $t ) { return (int) $t['bytes']; }, $manifest['database']['tables'] ) );
+	$indexes  = (int) $manifest['database']['index']['bytes'] + (int) $manifest['files']['index']['bytes'];
+	$limit    = $archive + $database + $indexes + 64 * 1048576;
+	return array(
+		'work_peak_mb'    => round( $peak / 1048576, 1 ),
+		'archive_mb'      => round( $archive / 1048576, 1 ),
+		'database_mb'     => round( $database / 1048576, 1 ),
+		'indexes_mb'      => round( $indexes / 1048576, 1 ),
+		'limit_mb'        => round( $limit / 1048576, 1 ),
+		'reclaimed_after' => $reclaimed,
+		'pass'            => $peak <= $limit && $reclaimed,
+	);
+}
+
+/**
  * After each planned kill: the tick that took the job over, its duration and
  * peak memory, the job's takeover count and mark, and concurrent-writer lines
  * in the job log until the next kill. The takeover tick is the first tick after
@@ -573,13 +600,16 @@ function acc_kill_where( array $kill, ?array $cursor ): string {
 	return sprintf( 'checkpoint in phase %s%s', $cursor['phase'] ?? '-', isset( $cursor['offset'] ) ? ', index offset ' . $cursor['offset'] : '' );
 }
 
-function acc_kills_command( string $dir, string $name ): void {
+/** Recompute (ix) and the per-kill section of check.json from a run's saved data (no extraction). */
+function acc_recompute_command( string $dir, string $name ): void {
 	$out      = $dir . '/' . $name;
 	$run      = json_decode( (string) file_get_contents( $out . '/run.json' ), true );
 	$requests = acc_lines( $out . '/requests.jsonl' );
 	$ticks    = array_values( array_filter( $requests, static function ( $r ) use ( $run ) { return in_array( $r['kind'], array( 'tick', 'loopback', 'cron' ), true ) && isset( $r['before']['job'] ) && (int) $run['job'] === (int) $r['before']['job']; } ) );
 	$check    = json_decode( (string) file_get_contents( $out . '/check.json' ), true );
 	$check['kills'] = acc_kill_report( $out, $run, $ticks );
+	$check['ix']    = acc_ix_report( $out, json_decode( (string) file_get_contents( $out . '/manifest.json' ), true ), (bool) $check['ix']['reclaimed_after'] );
+	acc_say( sprintf( '(ix) %s  %s', $check['ix']['pass'] ? 'PASS' : 'FAIL', json_encode( array_diff_key( $check['ix'], array( 'pass' => 1 ) ) ) ) );
 	file_put_contents( $out . '/check.json', json_encode( $check, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE ) );
 	foreach ( $check['kills'] as $k ) {
 		acc_say( json_encode( array_diff_key( $k, array( 'stack' => 1 ) ), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE ) );
@@ -759,17 +789,11 @@ function acc_check( string $dir, string $name ): void {
 	);
 	$report['viii']['pass'] = $report['viii']['manifest'] === $report['viii']['source'];
 
-	// (ix) Work directory: peak against the archive, reclaimed by the next maintenance.
-	$disk = acc_lines( $out . '/disk.jsonl' );
-	$peak = array() === $disk ? 0 : max( array_map( static function ( $r ) { return (int) $r['work']; }, $disk ) );
-	acc_eval( $env, 'delete_site_transient( "wpcheckpoint_jobs_reaped" ); \WPCheckpoint\Plugin::instance()->jobs()->maintenance();' );
+	// (ix) Work directory: peak against what it holds by design, reclaimed by the next maintenance.
+	acc_eval( $env, 'delete_site_transient( "wpcheckpoint_jobs_reaped" ); \\WPCheckpoint\\Plugin::instance()->jobs()->maintenance();' );
 	clearstatcache();
-	$report['ix'] = array(
-		'work_peak_mb'    => round( $peak / 1048576, 1 ),
-		'archive_mb'      => round( $archive_bytes / 1048576, 1 ),
-		'reclaimed_after' => ! is_dir( $env['storage'] . '/tmp/job-' . $run['job'] ),
-		'pass'            => $peak <= $archive_bytes * 1.05 + 64 * 1048576 && ! is_dir( $env['storage'] . '/tmp/job-' . $run['job'] ),
-	);
+	$report['ix'] = acc_ix_report( $out, $manifest, ! is_dir( $env['storage'] . '/tmp/job-' . $run['job'] ) );
+	$disk         = acc_lines( $out . '/disk.jsonl' );
 
 	$report['kills'] = acc_kill_report( $out, $run, $ticks );
 
@@ -899,8 +923,8 @@ switch ( $command ) {
 	case 'check':
 		acc_check( (string) ( $opts['dir'] ?? '' ), (string) ( $opts['name'] ?? acc_fail( '--name is required' ) ) );
 		break;
-	case 'kills':
-		acc_kills_command( (string) ( $opts['dir'] ?? '' ), (string) ( $opts['name'] ?? acc_fail( '--name is required' ) ) );
+	case 'recompute':
+		acc_recompute_command( (string) ( $opts['dir'] ?? '' ), (string) ( $opts['name'] ?? acc_fail( '--name is required' ) ) );
 		break;
 	case 'compare':
 		acc_compare( (string) ( $opts['dir'] ?? '' ), (string) ( $opts['name'] ?? '' ), (string) ( $opts['with'] ?? acc_fail( '--with is required' ) ) );

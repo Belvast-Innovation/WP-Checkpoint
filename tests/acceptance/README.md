@@ -40,6 +40,8 @@ php tests/acceptance/acceptance.php compare --dir=$HOME/wpc-acceptance --name=fi
 php tests/acceptance/acceptance.php teardown --dir=$HOME/wpc-acceptance
 ```
 
+`recompute` recalculates (ix) and the per-kill section of `check.json` from a run's saved data, without extracting the archive again.
+
 ## Planned kills
 
 `ACC_KILLS` in `acceptance.php` lists the kill points. The probe matches each rule against the tick's call stack when the job table is updated:
@@ -64,7 +66,7 @@ On its nth match the rule kills the process before the query runs. `check` then 
 | vi | `unzip -t` passes on every volume. |
 | vii | Every volume is extracted. Every file matches its source by sha256, and nothing extra is present. The database chunks are loaded in index order into a scratch database with the `mariadb` client, and every table matches the source row by row. The options and user meta tables change while the export runs and are only reported. |
 | viii | The manifest's file count and bytes match an independent walk of `wp-content` that applies the same exclusions. |
-| ix | The work directory's peak size stays within the archive size plus a margin, and the next maintenance pass reclaims it. |
+| ix | The work directory's peak size stays within what it holds by design (every volume waiting for the store step, the exported database chunks, which stay until the job completes, and the indexes) plus 64 MB. The next maintenance pass reclaims it. |
 
 `check` also writes `distributions.json`: every tick's duration, peak memory and steps, the idle baseline, every TTFB sample, and the work directory's size over time. Keep these as the baseline for budget or environment changes.
 
