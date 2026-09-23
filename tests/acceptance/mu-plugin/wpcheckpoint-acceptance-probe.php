@@ -8,13 +8,39 @@
 
 // phpcs:ignoreFile -- development tooling, not part of the plugin.
 
-if ( ! defined( 'ABSPATH' ) || 'cli' === PHP_SAPI ) {
+if ( ! defined( 'ABSPATH' ) ) {
 	return;
 }
 
 /**
+ * Whether the probe may run: web requests of a local or development site
+ * only. Copied onto a real site it does nothing: it logs every request,
+ * error messages with server paths included, and can kill its own process.
+ */
+function wpcheckpoint_acceptance_should_run( string $sapi, string $environment ): bool {
+	return 'cli' !== $sapi && in_array( $environment, array( 'local', 'development' ), true );
+}
+
+/**
+ * Create a directory the probe writes to, readable by its owner only and
+ * denied to the web server (index.php, .htaccess), in case it sits under a
+ * served directory.
+ */
+function wpcheckpoint_acceptance_prepare_dir( string $dir ): bool {
+	if ( ! is_dir( $dir ) && ! @mkdir( $dir, 0700, true ) && ! is_dir( $dir ) ) {
+		return false;
+	}
+	foreach ( array( 'index.php' => "<?php\n// Silence is golden.\n", '.htaccess' => "Require all denied\nDeny from all\n" ) as $name => $content ) {
+		if ( ! is_file( $dir . '/' . $name ) ) {
+			@file_put_contents( $dir . '/' . $name, $content );
+		}
+	}
+	return true;
+}
+
+/**
  * Where the probe writes: requests.jsonl (one line per request) and
- * inflight/<pid>.json while a tick runs (the kill step picks one of these).
+ * inflight/<pid>.json while a tick runs.
  */
 function wpcheckpoint_acceptance_dir(): string {
 	return WP_CONTENT_DIR . '/wpcheckpoint-acceptance';
@@ -147,6 +173,10 @@ function wpcheckpoint_acceptance_query( $query ) {
 	return $query;
 }
 
+if ( ! wpcheckpoint_acceptance_should_run( PHP_SAPI, function_exists( 'wp_get_environment_type' ) ? wp_get_environment_type() : 'production' ) ) {
+	return;
+}
+
 $wpcheckpoint_acceptance = array(
 	'start' => isset( $_SERVER['REQUEST_TIME_FLOAT'] ) ? (float) $_SERVER['REQUEST_TIME_FLOAT'] : microtime( true ),
 	'pid'   => getmypid(),
@@ -170,7 +200,7 @@ if ( in_array( $wpcheckpoint_acceptance['kind'], array( 'tick', 'loopback', 'cro
 		add_filter( 'query', 'wpcheckpoint_acceptance_query', PHP_INT_MAX );
 	}
 	$dir                               = wpcheckpoint_acceptance_dir() . '/inflight';
-	if ( is_dir( $dir ) || @mkdir( $dir, 0777, true ) ) {
+	if ( wpcheckpoint_acceptance_prepare_dir( wpcheckpoint_acceptance_dir() ) && wpcheckpoint_acceptance_prepare_dir( $dir ) ) {
 		@file_put_contents( $dir . '/' . $wpcheckpoint_acceptance['pid'] . '.json', json_encode( array( 'pid' => $wpcheckpoint_acceptance['pid'], 'start' => $wpcheckpoint_acceptance['start'], 'kind' => $wpcheckpoint_acceptance['kind'] ) ) );
 	}
 }
@@ -199,7 +229,7 @@ register_shutdown_function(
 			$line['fatal'] = substr( (string) $error['message'], 0, 300 );
 		}
 		$dir = wpcheckpoint_acceptance_dir();
-		if ( is_dir( $dir ) || @mkdir( $dir, 0777, true ) ) {
+		if ( wpcheckpoint_acceptance_prepare_dir( $dir ) ) {
 			@file_put_contents( $dir . '/requests.jsonl', json_encode( $line ) . "\n", FILE_APPEND | LOCK_EX );
 		}
 	}
