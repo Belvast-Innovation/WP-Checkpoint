@@ -59,18 +59,27 @@ final class RunLoop {
 	private $out;
 
 	/**
+	 * Whether a pause prints the questions (a caller that asks them itself turns this off).
+	 *
+	 * @var bool
+	 */
+	private $print_questions;
+
+	/**
 	 * Constructor.
 	 *
 	 * @param JobActions    $actions   Actions.
 	 * @param JobPresenter  $presenter Presenter.
 	 * @param callable|null $sleep     Sleep function (tests).
 	 * @param callable|null $out       Output function (tests).
+	 * @param bool          $print_questions Whether a pause prints the questions and the answer command.
 	 */
-	public function __construct( JobActions $actions, JobPresenter $presenter, $sleep = null, $out = null ) {
-		$this->actions   = $actions;
-		$this->presenter = $presenter;
-		$this->sleep     = is_callable( $sleep ) ? $sleep : 'sleep';
-		$this->out       = is_callable( $out ) ? $out : static function ( string $line ): void {
+	public function __construct( JobActions $actions, JobPresenter $presenter, $sleep = null, $out = null, bool $print_questions = true ) {
+		$this->print_questions = $print_questions;
+		$this->actions         = $actions;
+		$this->presenter       = $presenter;
+		$this->sleep           = is_callable( $sleep ) ? $sleep : 'sleep';
+		$this->out             = is_callable( $out ) ? $out : static function ( string $line ): void {
 			echo $line, PHP_EOL; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- terminal output, already redacted and masked.
 		};
 	}
@@ -116,7 +125,9 @@ final class RunLoop {
 				case TickResult::PAUSED:
 					// No driver follows up a question; the answer comes through "job answer", then "job run" again.
 					$this->actions->follow_up( $result );
-					$this->print_questions( $result->job );
+					if ( $this->print_questions ) {
+						$this->print_questions( $result->job );
+					}
 					return self::EXIT_PAUSED;
 				case TickResult::COMPLETED:
 				case TickResult::FAILED:

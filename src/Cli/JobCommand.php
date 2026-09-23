@@ -8,12 +8,14 @@
 namespace WPCheckpoint\Cli;
 
 use WP_CLI;
+use WPCheckpoint\Jobs\ExportJob;
 use WPCheckpoint\Jobs\InvalidTransition;
 use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\JobActions;
 use WPCheckpoint\Jobs\JobPresenter;
 use WPCheckpoint\Jobs\JobsUnavailable;
 use WPCheckpoint\Jobs\StaleJob;
+use WPCheckpoint\Support\Directories;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -37,14 +39,23 @@ final class JobCommand {
 	private $presenter;
 
 	/**
+	 * Storage directories.
+	 *
+	 * @var Directories
+	 */
+	private $directories;
+
+	/**
 	 * Constructor.
 	 *
-	 * @param JobActions   $actions   Actions.
-	 * @param JobPresenter $presenter Presenter.
+	 * @param JobActions   $actions     Actions.
+	 * @param JobPresenter $presenter   Presenter.
+	 * @param Directories  $directories Storage directories.
 	 */
-	public function __construct( JobActions $actions, JobPresenter $presenter ) {
-		$this->actions   = $actions;
-		$this->presenter = $presenter;
+	public function __construct( JobActions $actions, JobPresenter $presenter, Directories $directories ) {
+		$this->actions     = $actions;
+		$this->presenter   = $presenter;
+		$this->directories = $directories;
 	}
 
 	/**
@@ -63,14 +74,23 @@ final class JobCommand {
 	 * 0 completed, 1 failed, 2 cancelled, 3 lock lost, 4 left waiting, 5 another driver holds the job,
 	 * 6 the job asks a question (see "job answer").
 	 *
+	 * A backup is driven as "wp wpcheckpoint export" drives it: its questions
+	 * are asked on a terminal, and the backup's file name is printed at the end.
+	 *
 	 * @param string[]             $args       Positional arguments.
 	 * @param array<string, mixed> $assoc_args Options.
 	 * @return void
 	 */
 	public function run( array $args, array $assoc_args ): void {
-		$loop = new RunLoop( $this->actions, $this->presenter, 'sleep', array( 'WP_CLI', 'line' ) );
+		$id   = (int) $args[0];
+		$job  = $this->actions->find( $id );
+		$wait = ! empty( $assoc_args['wait'] );
 		try {
-			$code = $loop->run( (int) $args[0], ! empty( $assoc_args['wait'] ) );
+			if ( null !== $job && ExportJob::ID === $job->type ) {
+				$code = ExportRun::terminal( $this->actions, $this->presenter, $this->directories )->run( $id, $wait, false );
+			} else {
+				$code = ( new RunLoop( $this->actions, $this->presenter, 'sleep', array( 'WP_CLI', 'line' ) ) )->run( $id, $wait );
+			}
 		} catch ( JobsUnavailable $e ) {
 			WP_CLI::error( $this->presenter->clean( $e->getMessage() ) );
 		}
