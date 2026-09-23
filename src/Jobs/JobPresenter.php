@@ -27,6 +27,11 @@ defined( 'ABSPATH' ) || exit;
 final class JobPresenter {
 
 	/**
+	 * A job that stood still this long, with nothing waiting and nothing holding it, is reported as stalled.
+	 */
+	const STALL_SECONDS = 600;
+
+	/**
 	 * Redactor.
 	 *
 	 * @var Redactor
@@ -150,6 +155,41 @@ final class JobPresenter {
 	}
 
 	/**
+	 * What to say about a job that stood still, or '' for 0 minutes.
+	 *
+	 * @param int $minutes stalled_minutes().
+	 * @return string
+	 */
+	public static function stalled_text( int $minutes ): string {
+		if ( $minutes <= 0 ) {
+			return '';
+		}
+		/* translators: %d: minutes */
+		return sprintf( _n( 'This job has not moved for %d minute. It goes on while this page is open, and otherwise when someone visits the site. For jobs that run with nobody on the site, set up a system cron job for WordPress, or use WP-CLI.', 'This job has not moved for %d minutes. It goes on while this page is open, and otherwise when someone visits the site. For jobs that run with nobody on the site, set up a system cron job for WordPress, or use WP-CLI.', $minutes, 'wp-checkpoint' ), $minutes );
+	}
+
+	/**
+	 * Minutes a job has gone without moving although nothing waits for a
+	 * person and nothing holds it, or 0. Evidence, not a prediction: a
+	 * screen says the job needs a visit, a real cron or WP-CLI only once it
+	 * has actually stood still, never from a probe result that may be stale.
+	 * The threshold is above the longest wait (a step's wait or a backoff,
+	 * up to 300 s) plus the fallback cron interval and a lease.
+	 *
+	 * @param Job $job Job.
+	 * @param int $now Unix time.
+	 * @return int
+	 */
+	public static function stalled_minutes( Job $job, int $now ): int {
+		if ( ! in_array( $job->status, array( Job::QUEUED, Job::RUNNING ), true ) || $job->locked_until > $now ) {
+			return 0;
+		}
+		$since = max( $job->progress_at, $job->created_at, $job->updated_at > 0 && Job::QUEUED === $job->status ? $job->updated_at : 0 );
+		$idle  = $now - $since;
+		return $idle >= self::STALL_SECONDS ? intdiv( $idle, 60 ) : 0;
+	}
+
+	/**
 	 * A job as an array safe to send to the client. No storage_path, no
 	 * cursor, no options; the questions of a job that waits for an answer
 	 * are included (cleaned) so the client can ask them.
@@ -159,9 +199,9 @@ final class JobPresenter {
 	 * @return array<string, mixed>
 	 */
 	public function present( Job $job, bool $with_log = true ): array {
-		$extra = '' !== $job->storage_path ? array( '{storage}' => $job->storage_path ) : array();
-		$type  = $this->types->get( $job->type );
-		$data  = array(
+		$extra                = '' !== $job->storage_path ? array( '{storage}' => $job->storage_path ) : array();
+		$type                 = $this->types->get( $job->type );
+		$data                 = array(
 			'id'          => $job->id,
 			'type'        => $job->type,
 			'type_label'  => $this->clean( null !== $type ? $type->label() : $job->type, $extra ),
@@ -179,7 +219,10 @@ final class JobPresenter {
 			'retryable'   => $job->can_retry(),
 			'retry_note'  => Job::FAILED === $job->status && ! $job->can_retry() ? self::retry_note() : '',
 			'questions'   => $job->awaiting_answer() ? $this->clean_deep( $job->questions, $extra ) : null,
+			'progress_at' => $job->progress_at,
+			'stalled'     => self::stalled_minutes( $job, time() ),
 		);
+		$data['stalled_text'] = self::stalled_text( $data['stalled'] );
 		if ( $with_log ) {
 			$data['log_tail'] = $this->log_tail( $job );
 		}

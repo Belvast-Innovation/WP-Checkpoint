@@ -13,6 +13,9 @@ use WP_REST_Response;
 use WP_REST_Server;
 use WPCheckpoint\Admin\DownloadHandler;
 use WPCheckpoint\Backups\BackupStore;
+use WPCheckpoint\Backups\EstimateStatus;
+use WPCheckpoint\Jobs\ExportJob;
+use WPCheckpoint\Jobs\ExportOptions;
 use WPCheckpoint\Jobs\JobActions;
 use WPCheckpoint\Jobs\JobConflict;
 use WPCheckpoint\Jobs\JobConflicts;
@@ -24,8 +27,9 @@ use WPCheckpoint\Support\Directories;
 defined( 'ABSPATH' ) || exit;
 
 /**
- * GET /backups, GET /backups/{base}, DELETE /backups/{base},
- * POST /backups/{base}/verify.
+ * GET /backups, POST /backups (make one), GET /backups/{base},
+ * DELETE /backups/{base}, POST /backups/{base}/verify,
+ * POST /backups/estimate (the empty screen's size estimate).
  *
  * The base name in the route is matched by the same pattern the export
  * gives it, so it never carries a path. Text taken from a manifest
@@ -103,6 +107,47 @@ final class BackupsController extends Controller {
 						),
 					),
 				),
+				array(
+					'methods'             => WP_REST_Server::CREATABLE,
+					'callback'            => array( $this, 'create_item' ),
+					'permission_callback' => array( $this, 'permission_check' ),
+					'args'                => array(
+						'contents'       => array(
+							'type'    => 'string',
+							'enum'    => array( 'all', 'database', 'files' ),
+							'default' => 'all',
+						),
+						'exclusions'     => array(
+							'type'     => 'array',
+							'items'    => array( 'type' => 'string' ),
+							'maxItems' => ExportOptions::MAX_EXCLUSIONS,
+							'default'  => array(),
+						),
+						'exclude_tables' => array(
+							'type'     => 'array',
+							'items'    => array( 'type' => 'string' ),
+							'maxItems' => ExportOptions::MAX_TABLES,
+							'default'  => array(),
+						),
+						'include_tables' => array(
+							'type'     => 'array',
+							'items'    => array( 'type' => 'string' ),
+							'maxItems' => ExportOptions::MAX_TABLES,
+							'default'  => array(),
+						),
+					),
+				),
+			)
+		);
+		register_rest_route(
+			$this->namespace,
+			'/' . $this->rest_base . '/estimate',
+			array(
+				array(
+					'methods'             => WP_REST_Server::CREATABLE,
+					'callback'            => array( $this, 'estimate' ),
+					'permission_callback' => array( $this, 'permission_check' ),
+				),
 			)
 		);
 		register_rest_route(
@@ -163,6 +208,62 @@ final class BackupsController extends Controller {
 				'backups' => $items,
 			)
 		);
+	}
+
+	/**
+	 * POST /backups: make a backup. Questions a step has are asked (no
+	 * policy): the screen answers them; unattended callers use WP-CLI.
+	 *
+	 * @param WP_REST_Request $request Request.
+	 * @return WP_REST_Response|WP_Error
+	 */
+	public function create_item( $request ) {
+		$options = array(
+			'exclusions'     => (array) $request->get_param( 'exclusions' ),
+			'exclude_tables' => (array) $request->get_param( 'exclude_tables' ),
+			'include_tables' => (array) $request->get_param( 'include_tables' ),
+		);
+		switch ( (string) $request->get_param( 'contents' ) ) {
+			case 'database':
+				$options['contents'] = array( 'files' => array() );
+				break;
+			case 'files':
+				$options['contents'] = array( 'database' => false );
+				break;
+		}
+		try {
+			$options = ExportOptions::normalize( $options );
+		} catch ( \InvalidArgumentException $e ) {
+			return new WP_Error( 'wpcheckpoint_invalid_request', $this->presenter->clean( $e->getMessage() ), array( 'status' => 400 ) );
+		}
+		try {
+			$job = $this->actions->start( ExportJob::ID, get_current_user_id(), $options );
+		} catch ( JobConflict $e ) {
+			return $this->conflict( $this->presenter->clean( $e->getMessage() ) );
+		} catch ( JobsUnavailable $e ) {
+			return new WP_Error( 'wpcheckpoint_jobs_unavailable', $this->presenter->clean( $e->getMessage() ), array( 'status' => 503 ) );
+		}
+		$response = $this->respond(
+			array(
+				'result' => 'queued',
+				'job'    => $this->presenter->present( $job, false ),
+			)
+		);
+		$response->set_status( 201 );
+		return $response;
+	}
+
+	/**
+	 * POST /backups/estimate: the size estimate, starting its job when one
+	 * is due. Never an error for the estimate itself: a count that cannot
+	 * be made now leaves only the database size.
+	 *
+	 * @param WP_REST_Request $request Request.
+	 * @return WP_REST_Response
+	 */
+	public function estimate( WP_REST_Request $request ): WP_REST_Response {
+		unset( $request );
+		return $this->respond( array( 'estimate' => ( new EstimateStatus( $this->actions ) )->status( true, get_current_user_id() ) ) );
 	}
 
 	/**

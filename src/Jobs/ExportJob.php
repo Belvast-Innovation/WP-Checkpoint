@@ -7,7 +7,10 @@
 
 namespace WPCheckpoint\Jobs;
 
+use WPCheckpoint\Backups\BackupStore;
+use WPCheckpoint\Backups\Estimate;
 use WPCheckpoint\Archive\Manifest;
+use WPCheckpoint\Database\TableSelection;
 use WPCheckpoint\Database\WpdbConnection;
 use WPCheckpoint\Files\PathKey;
 use WPCheckpoint\Support\Directories;
@@ -133,8 +136,47 @@ final class ExportJob implements JobType {
 			DatabaseExportStep::from_plan( $connection ),
 			new PackStep(),
 			new ManifestStep( self::site_facts(), self::generator(), array(), Manifest::DEFAULT_CHUNK, $this->clean ),
-			new StoreStep( $directories->backups() ),
+			new StoreStep(
+				$directories->backups(),
+				static function ( JobContext $context, array $paths ): void {
+					// The measured rate for time estimates (Backups\Estimate): the bytes stored, the time since the
+					// first tick, the scope, and whether it waited for an answer (then it is no rate).
+					$bytes = 0;
+					foreach ( $paths as $path ) {
+						if ( BackupStore::MANIFEST_SUFFIX !== substr( $path, -strlen( BackupStore::MANIFEST_SUFFIX ) ) ) {
+							$bytes += (int) filesize( $path );
+						}
+					}
+					$job     = $context->job();
+					$options = $context->options();
+					Estimate::record_rate( $bytes, time() - (int) $job->started_at, Estimate::scope( $options ), ! empty( $options['answers'] ), time() );
+				}
+			),
 		);
+	}
+
+	/**
+	 * Tables in this database that look like another WordPress
+	 * installation's and are left out unless named (the screen offers to
+	 * include them), grouped by their prefix. The same judgement as the
+	 * export's pre-flight (TableSelection::foreign()).
+	 *
+	 * @return array<string, string[]> Foreign prefix => its tables that are left out.
+	 * @throws TransientFailure When the tables cannot be listed.
+	 */
+	public static function foreign_tables(): array {
+		global $wpdb;
+		$connection = new WpdbConnection();
+		$listing    = $connection->tables_with_prefix( Environment::table_prefix() );
+		$core       = array_values( $wpdb->tables( 'all', true, is_multisite() ? get_main_site_id() : 0 ) );
+		$tables     = array_values( array_diff( array_map( 'strval', (array) $listing['tables'] ), array( Schema::jobs_table() ) ) );
+		$out        = array();
+		foreach ( TableSelection::foreign( $tables, Environment::table_prefix(), is_multisite(), $core ) as $prefix => $group ) {
+			if ( array() !== $group['excluded'] ) {
+				$out[ (string) $prefix ] = $group['excluded'];
+			}
+		}
+		return $out;
 	}
 
 	/**

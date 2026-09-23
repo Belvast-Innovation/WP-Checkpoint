@@ -21,9 +21,16 @@ defined( 'ABSPATH' ) || exit;
  */
 final class JobConflicts {
 
-	const EXPORT  = 'export';
-	const VERIFY  = 'verify';
-	const RESTORE = 'restore';
+	const EXPORT   = 'export';
+	const VERIFY   = 'verify';
+	const RESTORE  = 'restore';
+	const ESTIMATE = 'estimate';
+
+	/**
+	 * Types that give way: an export or a restore that starts cancels them
+	 * (JobActions::start()), and they never hold anything up.
+	 */
+	const YIELDING = array( self::ESTIMATE );
 
 	/**
 	 * The backup a job reads, by base name ('' for none).
@@ -47,6 +54,13 @@ final class JobConflicts {
 	public static function conflict( string $type, array $options, array $active ): string {
 		$backup = self::backup_of( $type, $options );
 		foreach ( $active as $job ) {
+			if ( self::ESTIMATE === $type && in_array( $job->type, array( self::EXPORT, self::RESTORE, self::ESTIMATE ), true ) ) {
+				// An estimate only helps someone decide; there is nothing to decide while one of these runs.
+				return sprintf( 'Job %d is running; no estimate now.', $job->id );
+			}
+			if ( in_array( $job->type, self::YIELDING, true ) ) {
+				continue; // Cancelled by the start of an export or a restore, harmless next to anything else.
+			}
 			if ( self::RESTORE === $job->type ) {
 				return sprintf( 'A restore is in progress (job %d); nothing else can start until it has ended.', $job->id );
 			}

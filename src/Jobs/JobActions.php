@@ -146,6 +146,9 @@ final class JobActions {
 			throw new JobsUnavailable( 'Another job is being started right now; try again in a moment.' );
 		}
 		try {
+			if ( in_array( $type, array( JobConflicts::EXPORT, JobConflicts::RESTORE ), true ) ) {
+				$this->cancel_yielding();
+			}
 			$job    = $this->repository->create( $type, $owner_user, array(), $options );
 			$reason = $this->conflict_for( $job );
 		} finally {
@@ -176,6 +179,47 @@ final class JobActions {
 	 */
 	public function find( int $id ) {
 		return $this->repository->find( $id );
+	}
+
+	/**
+	 * Cancel the jobs that give way (an estimate) before an export or a
+	 * restore starts. Silently: the user started a backup, the estimate was
+	 * ours; a cancel that fails (it finished meanwhile) changes nothing.
+	 *
+	 * @return void
+	 */
+	private function cancel_yielding(): void {
+		foreach ( $this->active() as $job ) {
+			if ( ! in_array( $job->type, JobConflicts::YIELDING, true ) ) {
+				continue;
+			}
+			try {
+				$this->cancel( $job->id );
+			} catch ( \RuntimeException $e ) {
+				unset( $e );
+			} catch ( \LogicException $e ) {
+				unset( $e );
+			}
+		}
+	}
+
+	/**
+	 * The user's jobs, newest first: the jobs that give way (an estimate)
+	 * are the plugin's own and are left out.
+	 *
+	 * @param string[] $statuses Statuses (empty for all).
+	 * @param int      $limit    Maximum.
+	 * @return Job[]
+	 */
+	public function list_user_jobs( array $statuses = array(), int $limit = 50 ): array {
+		return array_values(
+			array_filter(
+				$this->repository->list_jobs( $statuses, $limit ),
+				static function ( Job $job ): bool {
+					return ! in_array( $job->type, JobConflicts::YIELDING, true );
+				}
+			)
+		);
 	}
 
 	/**

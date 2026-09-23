@@ -66,6 +66,10 @@ final class RestPermissionsTest extends WP_UnitTestCase {
 			'path'   => '/wp-checkpoint/v1/jobs/1/answer',
 			'params' => array( 'answers' => array( 'oversize' => 'exclude' ) ),
 		),
+		'/wp-checkpoint/v1/backups/estimate' => array(
+			'path'   => '/wp-checkpoint/v1/backups/estimate',
+			'params' => array(),
+		),
 		'/wp-checkpoint/v1/backups' => array(
 			'path'   => '/wp-checkpoint/v1/backups',
 			'params' => array(),
@@ -187,7 +191,7 @@ final class RestPermissionsTest extends WP_UnitTestCase {
 			$this->assertNotSame( 400, $response->get_status(), "{$label} example request is invalid (400); fix EXAMPLES" );
 			if ( false !== strpos( $pattern, '/jobs/' ) ) {
 				$this->assertSame( 'wpcheckpoint_job_not_found', $response->get_data()['code'] ?? $response->get_data(), "{$label} reached the handler (job 1 does not exist)" );
-			} elseif ( false !== strpos( $pattern, '/backups/' ) ) {
+			} elseif ( false !== strpos( $pattern, '/backups/(?P<base>' ) ) {
 				$this->assertSame( 'wpcheckpoint_backup_not_found', $response->get_data()['code'] ?? $response->get_data(), "{$label} reached the handler (the example backup does not exist)" );
 			} else {
 				$this->assertNotSame( 404, $response->get_status(), "{$label} example path does not match the route (404); fix EXAMPLES" );

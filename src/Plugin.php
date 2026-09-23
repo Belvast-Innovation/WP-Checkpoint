@@ -23,6 +23,8 @@ use WPCheckpoint\Jobs\JobPresenter;
 use WPCheckpoint\Jobs\JobRepository;
 use WPCheckpoint\Jobs\ExportJob;
 use WPCheckpoint\Jobs\VerifyJob;
+use WPCheckpoint\Jobs\EstimateJob;
+use WPCheckpoint\Backups\Estimate;
 use WPCheckpoint\Jobs\JobTypes;
 use WPCheckpoint\Jobs\Loopback;
 use WPCheckpoint\Jobs\Runner;
@@ -226,6 +228,28 @@ final class Plugin {
 			'labels'   => JobProgress::script_labels(),
 		);
 		wp_add_inline_script( 'wpcheckpoint-jobs', 'window.wpcheckpointJobs = ' . wp_json_encode( $config ) . ';', 'before' );
+		wp_enqueue_style( 'wpcheckpoint-admin', WPCHECKPOINT_URL . 'assets/admin/admin.css', array(), WPCHECKPOINT_VERSION );
+		wp_enqueue_script( 'wpcheckpoint-backups', WPCHECKPOINT_URL . 'assets/admin/backups.js', array( 'wpcheckpoint-jobs' ), WPCHECKPOINT_VERSION, true );
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- read-only navigation state.
+		$paged   = isset( $_GET['paged'] ) && is_string( $_GET['paged'] ) ? absint( $_GET['paged'] ) : 0;
+		$backups = array(
+			'url'    => esc_url_raw(
+				add_query_arg(
+					array(
+						'page' => Page::SLUG,
+						'tab'  => 'backups',
+					),
+					admin_url( 'admin.php' )
+				)
+			),
+			'paged'  => $paged,
+			'labels' => array(
+				'starting'       => __( 'Starting…', 'wp-checkpoint' ),
+				'failed'         => __( 'That did not work; reload the page and try again.', 'wp-checkpoint' ),
+				'confirm_delete' => __( 'Delete this backup? Its files are removed from the server and cannot be brought back.', 'wp-checkpoint' ),
+			),
+		);
+		wp_add_inline_script( 'wpcheckpoint-backups', 'window.wpcheckpointBackups = ' . wp_json_encode( $backups ) . ';', 'before' );
 	}
 
 	/**
@@ -332,6 +356,16 @@ final class Plugin {
 					static function ( string $text ) use ( $plugin ): string {
 						// Fetched when a report is cleaned: the presenter itself needs the job types.
 						return $plugin->job_presenter()->clean( $text );
+					}
+				)
+			);
+			$this->job_types->add(
+				new EstimateJob(
+					static function () use ( $plugin ): Directories {
+						return $plugin->directories();
+					},
+					static function ( int $files, int $bytes, int $job ): void {
+						Estimate::record( $files, $bytes, time(), $job );
 					}
 				)
 			);

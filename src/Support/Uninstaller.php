@@ -40,6 +40,8 @@ final class Uninstaller {
 		self::OPTION_VERSION,
 		self::OPTION_DELETE_DATA,
 		Directories::OPTION,
+		\WPCheckpoint\Backups\Estimate::OPTION,
+		\WPCheckpoint\Backups\Estimate::RATE_OPTION,
 	);
 
 	/**
