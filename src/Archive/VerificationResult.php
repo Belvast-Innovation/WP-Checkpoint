@@ -233,6 +233,30 @@ final class VerificationResult {
 	}
 
 	/**
+	 * Number of findings per kind (Finding::* constants), over all findings,
+	 * not only the stored ones.
+	 *
+	 * @return array<string, int>
+	 */
+	public function kinds(): array {
+		$out = array();
+		foreach ( (array) ( $this->state['kinds'] ?? array() ) as $kind => $count ) {
+			$out[ (string) $kind ] = (int) $count;
+		}
+		ksort( $out );
+		return $out;
+	}
+
+	/**
+	 * Why the server could not check (EnvironmentFailure::cause()), or '' when it could.
+	 *
+	 * @return string
+	 */
+	public function unreadable_cause(): string {
+		return (string) ( $this->state['unreadable_cause'] ?? '' );
+	}
+
+	/**
 	 * Plain-text report. The first line is one of four fixed sentences.
 	 *
 	 * @param callable $clean function( string ): string applied to every text.

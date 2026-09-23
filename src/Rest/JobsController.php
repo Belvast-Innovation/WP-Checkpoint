@@ -16,13 +16,16 @@ use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\JobActions;
 use WPCheckpoint\Jobs\JobPresenter;
 use WPCheckpoint\Jobs\JobsUnavailable;
+use WPCheckpoint\Jobs\QuestionText;
 use WPCheckpoint\Jobs\StaleJob;
 use WPCheckpoint\Jobs\TickResult;
+use WPCheckpoint\Support\Directories;
 
 defined( 'ABSPATH' ) || exit;
 
 /**
- * GET /jobs, GET /jobs/{id}, POST /jobs/{id}/tick, /cancel, /retry.
+ * GET /jobs, GET /jobs/{id}, POST /jobs/{id}/tick, /cancel, /retry,
+ * GET /jobs/{id}/questions, POST /jobs/{id}/answer.
  *
  * Responses carry "result" (what the tick did: more, waiting, busy, ...)
  * next to "job" (whose "status" is the job's own state). Everything comes
@@ -46,16 +49,25 @@ final class JobsController extends Controller {
 	private $presenter;
 
 	/**
+	 * Storage directories.
+	 *
+	 * @var Directories
+	 */
+	private $directories;
+
+	/**
 	 * Constructor.
 	 *
-	 * @param JobActions   $actions   Actions.
-	 * @param JobPresenter $presenter Presenter.
+	 * @param JobActions   $actions     Actions.
+	 * @param JobPresenter $presenter   Presenter.
+	 * @param Directories  $directories Storage directories.
 	 */
-	public function __construct( JobActions $actions, JobPresenter $presenter ) {
+	public function __construct( JobActions $actions, JobPresenter $presenter, Directories $directories ) {
 		parent::__construct();
-		$this->rest_base = 'jobs';
-		$this->actions   = $actions;
-		$this->presenter = $presenter;
+		$this->rest_base   = 'jobs';
+		$this->actions     = $actions;
+		$this->presenter   = $presenter;
+		$this->directories = $directories;
 	}
 
 	/**
@@ -107,6 +119,38 @@ final class JobsController extends Controller {
 					'callback'            => array( $this, 'get_item' ),
 					'permission_callback' => array( $this, 'permission_check' ),
 					'args'                => $id,
+				),
+			)
+		);
+		register_rest_route(
+			$this->namespace,
+			'/' . $this->rest_base . '/(?P<id>\\d+)/questions',
+			array(
+				array(
+					'methods'             => WP_REST_Server::READABLE,
+					'callback'            => array( $this, 'questions' ),
+					'permission_callback' => array( $this, 'permission_check' ),
+					'args'                => $id,
+				),
+			)
+		);
+		register_rest_route(
+			$this->namespace,
+			'/' . $this->rest_base . '/(?P<id>\\d+)/answer',
+			array(
+				array(
+					'methods'             => WP_REST_Server::CREATABLE,
+					'callback'            => array( $this, 'answer' ),
+					'permission_callback' => array( $this, 'permission_check' ),
+					'args'                => array_merge(
+						$id,
+						array(
+							'answers' => array(
+								'type'     => 'object',
+								'required' => true,
+							),
+						)
+					),
 				),
 			)
 		);
@@ -243,6 +287,57 @@ final class JobsController extends Controller {
 			array(
 				'result'  => 'queued',
 				'message' => __( 'The job was queued again.', 'wp-checkpoint' ),
+				'job'     => $this->presenter->present( $job ),
+			)
+		);
+	}
+
+	/**
+	 * GET /jobs/{id}/questions
+	 *
+	 * The open questions of a paused job, with their texts and the listed
+	 * items read from its work directory.
+	 *
+	 * @param WP_REST_Request $request Request.
+	 * @return WP_REST_Response|WP_Error
+	 */
+	public function questions( WP_REST_Request $request ) {
+		$job = $this->actions->find( (int) $request->get_param( 'id' ) );
+		if ( null === $job ) {
+			return $this->not_found();
+		}
+		return $this->respond(
+			array(
+				'questions' => QuestionText::for_job( $job, $this->directories, array( $this->presenter, 'clean' ) ),
+				'job'       => $this->presenter->present( $job, false ),
+			)
+		);
+	}
+
+	/**
+	 * POST /jobs/{id}/answer
+	 *
+	 * @param WP_REST_Request $request Request.
+	 * @return WP_REST_Response|WP_Error
+	 */
+	public function answer( WP_REST_Request $request ) {
+		$answers = $request->get_param( 'answers' );
+		try {
+			$job = $this->actions->answer( (int) $request->get_param( 'id' ), is_array( $answers ) ? $answers : array() );
+		} catch ( \InvalidArgumentException $e ) {
+			return new WP_Error( 'wpcheckpoint_invalid_answer', __( 'These answers do not fit the open questions; reload and answer again.', 'wp-checkpoint' ), array( 'status' => 400 ) );
+		} catch ( InvalidTransition $e ) {
+			return $this->conflict( __( 'This job is not waiting for an answer.', 'wp-checkpoint' ) );
+		} catch ( StaleJob $e ) {
+			return $this->conflict( __( 'The job changed meanwhile; reload and try again.', 'wp-checkpoint' ) );
+		}
+		if ( null === $job ) {
+			return $this->not_found();
+		}
+		return $this->respond(
+			array(
+				'result'  => 'answered',
+				'message' => __( 'The job continues with your answers.', 'wp-checkpoint' ),
 				'job'     => $this->presenter->present( $job ),
 			)
 		);

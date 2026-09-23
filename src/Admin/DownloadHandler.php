@@ -7,6 +7,8 @@
 
 namespace WPCheckpoint\Admin;
 
+use WPCheckpoint\Jobs\Job;
+use WPCheckpoint\Jobs\JobConflicts;
 use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Support\FileStreamer;
 use WPCheckpoint\Support\Guard;
@@ -20,7 +22,8 @@ defined( 'ABSPATH' ) || exit;
  *
  * The file parameter is relative to the storage base directory. After
  * realpath() the result must lie inside backups/ or logs/ and carry an
- * allowed extension; everything else is a 404.
+ * allowed extension; everything else is a 404. A file of a backup that is
+ * being restored is refused with a 409 until the restore has ended.
  */
 final class DownloadHandler {
 
@@ -42,12 +45,21 @@ final class DownloadHandler {
 	private $directories;
 
 	/**
+	 * Returns the queued, running and paused jobs.
+	 *
+	 * @var callable(): Job[]
+	 */
+	private $active;
+
+	/**
 	 * Constructor.
 	 *
 	 * @param Directories $directories Storage directories.
+	 * @param callable    $active      Returns the queued, running and paused jobs.
 	 */
-	public function __construct( Directories $directories ) {
+	public function __construct( Directories $directories, callable $active ) {
 		$this->directories = $directories;
+		$this->active      = $active;
 	}
 
 	/**
@@ -119,6 +131,13 @@ final class DownloadHandler {
 			fwrite( $out, 'Not found.' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- response body.
 			return 404;
 		}
+		$reason = $this->restoring( $real );
+		if ( '' !== $reason ) {
+			$header( 'Content-Type: text/plain; charset=utf-8', 409 );
+			$header( 'X-Content-Type-Options: nosniff', null );
+			fwrite( $out, $reason ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- response body, fixed text with a job number.
+			return 409;
+		}
 
 		$plan = FileStreamer::plan( (int) filesize( $real ), $range, FileStreamer::etag( $real ), $if_range );
 		FileStreamer::stream( $real, basename( $real ), $plan, $method, $header, $out );
@@ -165,6 +184,26 @@ final class DownloadHandler {
 			}
 		}
 		return '';
+	}
+
+	/**
+	 * Why a resolved file must not be sent now: it belongs to a backup that
+	 * is being restored. '' otherwise (logs, other backups).
+	 *
+	 * @param string $real Resolved real path.
+	 * @return string
+	 */
+	private function restoring( string $real ): string {
+		$backups = $this->directories->backups();
+		if ( '' === $backups || ! Paths::is_inside( $backups, $real ) ) {
+			return '';
+		}
+		$name = basename( $real );
+		$dot  = strpos( $name, '.' );
+		if ( false === $dot || 0 === $dot ) {
+			return '';
+		}
+		return JobConflicts::restoring( substr( $name, 0, $dot ), ( $this->active )() );
 	}
 
 	/**

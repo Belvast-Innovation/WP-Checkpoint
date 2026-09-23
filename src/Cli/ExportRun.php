@@ -13,9 +13,8 @@ use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\JobActions;
 use WPCheckpoint\Jobs\JobPresenter;
 use WPCheckpoint\Jobs\PreflightStep;
-use WPCheckpoint\Jobs\Residue;
+use WPCheckpoint\Jobs\QuestionText;
 use WPCheckpoint\Support\Directories;
-use WPCheckpoint\Support\Paths;
 use WPCheckpoint\Support\HostFunctions;
 
 defined( 'ABSPATH' ) || exit;
@@ -254,67 +253,22 @@ final class ExportRun {
 	}
 
 	/**
-	 * The paused job's questions with a line of text each, built from the
-	 * review's findings (archive paths relative to the site and table names;
-	 * no host, no server path), cleaned.
+	 * The paused job's questions with a line of text each (QuestionText),
+	 * prefixed with the question id for the answer command.
 	 *
 	 * @param Job $job Paused job.
 	 * @return array<int, array{id: string, choices: string[], text: string}>
 	 */
 	private function questions( Job $job ): array {
-		$findings = array();
-		$work     = $this->work_dir( $job );
-		if ( '' !== $work && ExportPlan::exists( $work, ExportPlan::REVIEW ) ) {
-			try {
-				$review   = ExportPlan::read( $work, ExportPlan::REVIEW );
-				$findings = isset( $review['findings'] ) && is_array( $review['findings'] ) ? $review['findings'] : array();
-			} catch ( \RuntimeException $e ) {
-				$findings = array(); // Gone or changed since: each question is still listed, with a generic line.
-			}
-		}
 		$out = array();
-		foreach ( $job->questions as $question ) {
-			$id      = (string) $question['id'];
-			$choices = array_map( 'strval', (array) $question['choices'] );
-			$out[]   = array(
-				'id'      => $id,
-				'choices' => $choices,
-				'text'    => $this->presenter->clean( sprintf( '[%s] %s', $id, self::describe( $id, $question, $findings ) ) ),
+		foreach ( QuestionText::for_job( $job, $this->directories, array( $this->presenter, 'clean' ) ) as $question ) {
+			$out[] = array(
+				'id'      => $question['id'],
+				'choices' => $question['choices'],
+				'text'    => '[' . $question['id'] . '] ' . $question['text'],
 			);
 		}
 		return $out;
-	}
-
-	/**
-	 * What a question is about, in a line.
-	 *
-	 * @param string               $id       Question id.
-	 * @param array<string, mixed> $question Question.
-	 * @param array<string, mixed> $findings Review findings.
-	 * @return string
-	 */
-	private static function describe( string $id, array $question, array $findings ): string {
-		$count = (int) ( $question['count'] ?? 0 );
-		if ( 'unreadable' === $id ) {
-			$listed = isset( $findings['unreadable']['listed'] ) ? array_slice( (array) $findings['unreadable']['listed'], 0, 5 ) : array();
-			return sprintf( '%d files cannot be read and would not be in the backup%s. Continue without them, or stop?', $count, array() === $listed ? '' : ' (for example ' . implode( ', ', $listed ) . ')' );
-		}
-		if ( 1 === preg_match( '/\Alarge_dir_(\d+)\z/', $id, $m ) && isset( $findings['heavy'][ (int) $m[1] ] ) ) {
-			$dir = $findings['heavy'][ (int) $m[1] ];
-			return sprintf( 'Directory %s holds %d MB (development files, not usually needed to restore the site). Include it, or leave it out?', (string) $dir['p'], (int) ( (int) $dir['bytes'] / 1048576 ) );
-		}
-		if ( 'large_dirs_more' === $id ) {
-			return sprintf( '%d more large directories (listed in the job log). Include them, or leave them out?', $count );
-		}
-		if ( 1 === preg_match( '/\Aoversize_(\d+)\z/', $id, $m ) && isset( $findings['oversize'][ (int) $m[1] ] ) ) {
-			$table = $findings['oversize'][ (int) $m[1] ];
-			$rows  = null === $table['count'] ? 'may have rows' : sprintf( 'has %d rows', (int) $table['count'] );
-			return sprintf( 'Table %s %s larger than the single-row limit of %d bytes. Leave those rows out, or stop?', (string) $table['table'], $rows, (int) $table['limit'] );
-		}
-		if ( 'oversize_more' === $id ) {
-			return sprintf( '%d more tables have rows larger than the single-row limit (listed in the job log). Leave those rows out, or stop?', $count );
-		}
-		return sprintf( 'A decision is needed (%s).', (string) ( $question['kind'] ?? $id ) );
 	}
 
 	/**
@@ -381,18 +335,13 @@ final class ExportRun {
 	}
 
 	/**
-	 * The job's work directory, or '' when the job's storage is not the
-	 * current storage directory (another directory choice or installation:
-	 * never read).
+	 * The job's work directory, or '' when it belongs to another storage directory.
 	 *
 	 * @param Job $job Job.
 	 * @return string
 	 */
 	private function work_dir( Job $job ): string {
-		if ( ! Paths::same( $job->storage_path, $this->directories->base(), Paths::is_windows() ) ) {
-			return '';
-		}
-		return Residue::work_dir( $job->storage_path, $job->id );
+		return QuestionText::work_dir( $job, $this->directories );
 	}
 
 	/**

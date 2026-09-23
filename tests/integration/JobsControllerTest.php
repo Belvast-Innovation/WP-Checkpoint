@@ -2,6 +2,7 @@
 
 namespace WPCheckpoint\Tests\Integration;
 
+use WPCheckpoint\Jobs\ExportPlan;
 use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\TempTables;
 use WPCheckpoint\Jobs\Residue;
@@ -300,6 +301,48 @@ final class JobsControllerTest extends JobTestCase {
 		Plugin::instance()->jobs()->answer( Plugin::instance()->jobs()->find( $job->id ), array( 'oversize' => 'exclude' ) );
 		$this->assertNull( $this->rest( 'GET', 'jobs/' . $job->id )->get_data()['job']['questions'] );
 		$this->assertSame( 'completed', $this->rest( 'POST', 'jobs/' . $job->id . '/tick' )->get_data()['result'] );
+	}
+
+	public function test_the_questions_are_given_in_words_and_answers_are_checked_against_them(): void {
+		$this->register( 'asks', array( new ClosureStep( 'q', static function ( JobContext $ctx ): StepResult {
+			$answers = $ctx->options()['answers'] ?? array();
+			return empty( $answers['unreadable'] )
+				? StepResult::ask( array(), array( array( 'id' => 'unreadable', 'kind' => 'unreadable', 'count' => 2, 'file' => ExportPlan::REVIEW, 'choices' => array( 'skip', 'stop' ) ) ), 'files cannot be read' )
+				: StepResult::done();
+		} ) ) );
+		$job = Plugin::instance()->jobs()->create( 'asks' );
+		$this->assertSame( 409, $this->rest( 'POST', 'jobs/' . $job->id . '/answer', array( 'answers' => array( 'unreadable' => 'skip' ) ) )->get_status(), 'a queued job is not waiting for an answer' );
+		$this->assertSame( 'paused', $this->rest( 'POST', 'jobs/' . $job->id . '/tick' )->get_data()['result'] );
+		$work = Residue::work_dir( Plugin::instance()->jobs()->find( $job->id )->storage_path, $job->id );
+		wp_mkdir_p( $work );
+		ExportPlan::write( $work, ExportPlan::REVIEW, array( 'findings' => array( 'unreadable' => array( 'listed' => array( ABSPATH . 'wp-content/private/a.txt', ABSPATH . 'wp-content/private/b.txt' ) ) ) ) );
+
+		$response = $this->rest( 'GET', 'jobs/' . $job->id . '/questions' );
+		$this->assertSame( 200, $response->get_status() );
+		$questions = $response->get_data()['questions'];
+		$this->assertCount( 1, $questions );
+		$this->assertSame( array( 'skip', 'stop' ), $questions[0]['choices'] );
+		$this->assertStringStartsWith( '2 files cannot be read', $questions[0]['text'] );
+		$this->assertCount( 2, $questions[0]['listed'] );
+		$json = (string) wp_json_encode( $response->get_data() );
+		$this->assertStringNotContainsString( rtrim( ABSPATH, '/' ), $json, 'listed paths are masked' );
+		$this->assertStringNotContainsString( $work, $json );
+		$this->assertStringEndsWith( '/private/a.txt', $questions[0]['listed'][0] );
+
+		foreach ( array( array( 'unreadable' => 'delete' ), array( 'other' => 'skip' ), array( 'unreadable' => array( 'skip' ) ) ) as $answers ) {
+			$bad = $this->rest( 'POST', 'jobs/' . $job->id . '/answer', array( 'answers' => $answers ) );
+			$this->assertSame( 400, $bad->get_status(), (string) wp_json_encode( $answers ) );
+		}
+		$this->assertSame( Job::PAUSED, Plugin::instance()->jobs()->find( $job->id )->status );
+
+		$answered = $this->rest( 'POST', 'jobs/' . $job->id . '/answer', array( 'answers' => array( 'unreadable' => 'skip' ) ) );
+		$this->assertSame( 200, $answered->get_status() );
+		$this->assertSame( 'answered', $answered->get_data()['result'] );
+		$this->assertSame( array(), $this->rest( 'GET', 'jobs/' . $job->id . '/questions' )->get_data()['questions'] );
+		$this->assertSame( 409, $this->rest( 'POST', 'jobs/' . $job->id . '/answer', array( 'answers' => array( 'unreadable' => 'skip' ) ) )->get_status(), 'answered once' );
+		$this->assertSame( 'completed', $this->rest( 'POST', 'jobs/' . $job->id . '/tick' )->get_data()['result'] );
+		$this->assertSame( 404, $this->rest( 'GET', 'jobs/999999/questions' )->get_status() );
+		$this->assertSame( 404, $this->rest( 'POST', 'jobs/999999/answer', array( 'answers' => array( 'unreadable' => 'skip' ) ) )->get_status() );
 	}
 
 	public function test_subscribers_cannot_read_or_cancel_jobs(): void {
