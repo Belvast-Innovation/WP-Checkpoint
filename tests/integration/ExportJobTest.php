@@ -10,9 +10,11 @@ use WPCheckpoint\Jobs\ExportJob;
 use WPCheckpoint\Jobs\ExportOptions;
 use WPCheckpoint\Jobs\ExportPlan;
 use WPCheckpoint\Jobs\Job;
+use WPCheckpoint\Jobs\PreflightStep;
 use WPCheckpoint\Jobs\Residue;
 use WPCheckpoint\Plugin;
 use WPCheckpoint\Support\Deleter;
+use WPCheckpoint\Support\Schema;
 use WPCheckpoint\Tests\Fixtures\Jobs\JobTestCase;
 
 /**
@@ -35,6 +37,9 @@ final class ExportJobTest extends JobTestCase {
 
 	/** @var string[] */
 	private $err = array();
+
+	/** @var callable|null Called with each output or error line (tests that act mid-run). */
+	private $on_out;
 
 	public function set_up(): void {
 		parent::set_up();
@@ -60,7 +65,7 @@ final class ExportJobTest extends JobTestCase {
 	private function add_neighbour(): void {
 		global $wpdb;
 		$prefix = $wpdb->base_prefix . 'old_';
-		foreach ( array( 'posts', 'options', 'users', 'extra' ) as $name ) {
+		foreach ( array( 'posts', 'postmeta', 'options', 'comments', 'terms', 'term_taxonomy', 'term_relationships', 'users', 'extra' ) as $name ) {
 			$table             = $prefix . $name;
 			$this->neighbour[] = $table;
 			$wpdb->query( "CREATE TABLE IF NOT EXISTS `{$table}` (`id` bigint(20) NOT NULL AUTO_INCREMENT, `v` text, PRIMARY KEY (`id`))" );
@@ -86,9 +91,15 @@ final class ExportJobTest extends JobTestCase {
 			$plugin->directories(),
 			function ( string $line ): void {
 				$this->out[] = $line;
+				if ( null !== $this->on_out ) {
+					call_user_func( $this->on_out, $line );
+				}
 			},
 			function ( string $line ): void {
 				$this->err[] = $line;
+				if ( null !== $this->on_out ) {
+					call_user_func( $this->on_out, $line );
+				}
 			},
 			$input,
 			static function (): void {}
@@ -133,47 +144,100 @@ final class ExportJobTest extends JobTestCase {
 		$this->assertSame( array( (string) ExportPlan::read( $this->work( $id ), ExportPlan::PLAN )['base'] ), $this->out );
 	}
 
-	public function test_a_backup_whose_work_directory_was_reclaimed_is_still_reported_as_written(): void {
-		list( $code, $id ) = $this->run_export( array( 'yes' => true ) );
-		$this->assertSame( RunLoop::EXIT_COMPLETED, $code );
-		// Reclaimed by another request's maintenance between the completion and the report.
+	private function reclaim( int $id ): void {
 		Deleter::empty_directory( $this->work( $id ) );
-		rmdir( $this->work( $id ) );
-		$this->out = array();
-		$this->err = array();
-		$this->assertSame( RunLoop::EXIT_COMPLETED, $this->driver()->run( $id, true, false ) );
-		$this->assertSame( array(), preg_grep( '/^Backup written/', $this->out ) );
+		@rmdir( $this->work( $id ) );
+	}
+
+	public function test_a_backup_whose_name_is_reclaimed_during_the_command_is_confirmed_by_its_completion(): void {
+		// Another request's maintenance reclaims the work directory right after the final tick, before the report.
+		$this->on_out = function ( string $line ): void {
+			if ( 0 === strpos( $line, 'completed' ) ) {
+				$this->reclaim( (int) Plugin::instance()->jobs()->list_jobs( array( 'completed' ), 1 )[0]->id );
+			}
+		};
+		list( $code ) = $this->run_export( array( 'yes' => true, 'porcelain' => true ) );
+		$this->on_out = null;
+		$this->assertSame( RunLoop::EXIT_COMPLETED, $code, 'the store step has just renamed the backup into place' );
+		$this->assertSame( array(), preg_grep( '/^[a-z0-9]/', $this->out ), 'porcelain prints no name it does not have' );
 		$said = preg_grep( '/^The backup was written to backups\/, but its file name could not be read: The file plan\.json of this job is missing/', $this->err );
 		$this->assertCount( 1, $said, implode( "\n", $this->err ) );
 		$this->assertStringNotContainsString( ABSPATH, implode( "\n", $this->err ) );
 	}
 
+	public function test_a_backup_that_cannot_be_confirmed_later_exits_with_7(): void {
+		list( $code, $id ) = $this->run_export( array( 'yes' => true ) );
+		$this->assertSame( RunLoop::EXIT_COMPLETED, $code );
+		$work = $this->work( $id );
+		$plan = ExportPlan::read( $work, ExportPlan::PLAN );
+		$this->assertMatchesRegularExpression( PreflightStep::BASE_PATTERN, (string) $plan['base'] );
+
+		// A name that is not a backup's: never printed, never used as a path.
+		ExportPlan::write( $work, ExportPlan::PLAN, array_merge( $plan, array( 'base' => '../../x' ) ) );
+		$this->out = array();
+		$this->err = array();
+		$this->assertSame( ExportRun::EXIT_UNCONFIRMED, $this->driver()->run( $id, true, true ) );
+		$this->assertSame( array(), $this->out );
+		$this->assertCount( 1, preg_grep( '/^The job completed earlier; its backup can no longer be identified: The file plan\.json of this job does not name a backup/', $this->err ), implode( "\n", $this->err ) );
+
+		// The manifest is gone from backups/.
+		ExportPlan::write( $work, ExportPlan::PLAN, $plan );
+		$manifest = Plugin::instance()->directories()->backups() . '/' . $plan['base'] . '.manifest.json';
+		rename( $manifest, $manifest . '.moved' );
+		$this->err = array();
+		$this->assertSame( ExportRun::EXIT_UNCONFIRMED, $this->driver()->run( $id, true, false ) );
+		$this->assertSame( array( 'The job completed, but its backup is no longer in backups/.' ), array_values( preg_grep( '/backups\//', $this->err ) ) );
+		rename( $manifest . '.moved', $manifest );
+
+		// The work directory was reclaimed since: nothing tells whether the backup is still there.
+		$this->reclaim( $id );
+		$this->out = array();
+		$this->err = array();
+		$this->assertSame( ExportRun::EXIT_UNCONFIRMED, $this->driver()->run( $id, true, true ) );
+		$this->assertSame( array(), $this->out );
+		$this->assertCount( 1, preg_grep( '/^The job completed earlier; its backup can no longer be identified: The file plan\.json of this job is missing/', $this->err ), implode( "\n", $this->err ) );
+	}
+
 	public function test_another_installation_in_the_same_database_is_left_out_and_can_be_named_back(): void {
 		global $wpdb;
 		$this->add_neighbour();
+		$old = $wpdb->base_prefix . 'old_';
 		list( $code, $id ) = $this->run_export( array( 'yes' => true ) );
 		$this->assertSame( RunLoop::EXIT_COMPLETED, $code, implode( "\n", $this->err ) );
 		$tables = ExportPlan::read( $this->work( $id ), ExportPlan::PLAN )['tables'];
-		foreach ( $this->neighbour as $table ) {
-			$this->assertNotContains( $table, $tables, $table . ' belongs to the neighbour' );
+		foreach ( array_diff( $this->neighbour, array( $old . 'extra' ) ) as $table ) {
+			$this->assertNotContains( $table, $tables, $table . ' is the neighbour\'s core' );
 		}
+		$this->assertContains( $old . 'extra', $tables, 'not certainly the neighbour\'s: stays in' );
 		$this->assertContains( $wpdb->posts, $tables, 'this site\'s own tables are there' );
-		$warning = preg_grep( '/4 tables with the prefix ' . preg_quote( $wpdb->base_prefix . 'old_', '/' ) . ' look like another WordPress installation in the same database and are not in the backup/', $this->out );
-		$this->assertCount( 1, $warning, 'the command lists the left-out group: ' . implode( "\n", $this->out ) );
-		$this->assertStringContainsString( '--include-table', (string) reset( $warning ) );
+		$this->assertNotContains( Schema::jobs_table(), $tables, 'the plugin\'s own job table is never in a backup' );
+		$left = preg_grep( '/^Warning: 8 tables with the prefix ' . preg_quote( $old, '/' ) . ' are the core tables of another WordPress installation in the same database and are not in the backup \(for example /', $this->out );
+		$this->assertCount( 1, $left, 'the command lists the left-out tables: ' . implode( "\n", $this->out ) );
+		$this->assertStringContainsString( '--include-table', (string) reset( $left ) );
+		$kept = preg_grep( '/^Warning: 1 other tables with the prefix ' . preg_quote( $old, '/' ) . ' are in the backup although they may belong to that installation \(for example ' . preg_quote( $old, '/' ) . 'extra\)/', $this->out );
+		$this->assertCount( 1, $kept, implode( "\n", $this->out ) );
 
-		// Named back: that table, and only that one.
+		// Porcelain: the name alone on standard output, the warnings on standard error.
+		list( $code, $id ) = $this->run_export( array( 'yes' => true, 'porcelain' => true ) );
+		$this->assertSame( RunLoop::EXIT_COMPLETED, $code );
+		$this->assertSame( array( (string) ExportPlan::read( $this->work( $id ), ExportPlan::PLAN )['base'] ), $this->out );
+		$this->assertCount( 2, preg_grep( '/^Warning: .* with the prefix ' . preg_quote( $old, '/' ) . '/', $this->err ), implode( "\n", $this->err ) );
+
+		// Named back and named out: exactly those.
 		list( $code, $id ) = $this->run_export(
 			array(
 				'yes'           => true,
-				'include-table' => $wpdb->base_prefix . 'old_extra',
+				'include-table' => $old . 'options',
+				'exclude-table' => $old . 'extra',
 			)
 		);
 		$this->assertSame( RunLoop::EXIT_COMPLETED, $code );
 		$tables = ExportPlan::read( $this->work( $id ), ExportPlan::PLAN )['tables'];
-		$this->assertContains( $wpdb->base_prefix . 'old_extra', $tables );
-		$this->assertNotContains( $wpdb->base_prefix . 'old_posts', $tables );
-		$this->assertCount( 1, preg_grep( '/3 tables with the prefix/', $this->out ) );
+		$this->assertContains( $old . 'options', $tables );
+		$this->assertNotContains( $old . 'posts', $tables );
+		$this->assertNotContains( $old . 'extra', $tables );
+		$this->assertCount( 1, preg_grep( '/7 tables with the prefix/', $this->out ) );
+		$this->assertCount( 0, preg_grep( '/other tables with the prefix/', $this->out ), 'the one kept table was left out by name' );
 	}
 
 	public function test_multisite_sub_sites_are_part_of_the_backup(): void {

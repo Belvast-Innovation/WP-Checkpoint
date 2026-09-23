@@ -72,7 +72,8 @@ final class JobCommand {
 	 * ## EXIT CODES
 	 *
 	 * 0 completed, 1 failed, 2 cancelled, 3 lock lost, 4 left waiting, 5 another driver holds the job,
-	 * 6 the job asks a question (see "job answer").
+	 * 6 the job asks a question (see "job answer"); for a backup, 7 it completed but the backup cannot be
+	 * confirmed (no longer in backups/, or not identifiable any more).
 	 *
 	 * A backup is driven as "wp wpcheckpoint export" drives it: its questions
 	 * are asked on a terminal, and the backup's file name is printed at the end.

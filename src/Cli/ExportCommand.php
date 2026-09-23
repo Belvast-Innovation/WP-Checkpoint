@@ -93,11 +93,11 @@ final class ExportCommand {
 	 * : Wait through retries instead of exiting.
 	 *
 	 * [--porcelain]
-	 * : Print only the backup's base name on success.
+	 * : Print only the backup's base name on success; warnings go to standard error.
 	 *
 	 * ## EXIT CODES
 	 *
-	 * 0 backup written, 1 failed, 2 cancelled, 3 taken over by another process, 4 waiting (run again, or use --wait), 5 another process is running it, 6 waiting for your decision (the answer command is printed).
+	 * 0 backup written, 1 failed, 2 cancelled, 3 taken over by another process, 4 waiting (run again, or use --wait), 5 another process is running it, 6 waiting for your decision (the answer command is printed), 7 the job completed but its backup cannot be confirmed (no longer in backups/, or not identifiable any more).
 	 *
 	 * ## EXAMPLES
 	 *

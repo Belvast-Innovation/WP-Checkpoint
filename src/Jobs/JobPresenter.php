@@ -136,7 +136,7 @@ final class JobPresenter {
 		// defence behind messages that refer to files by number. Fail-closed like the other masks. Masked
 		// bare or with the suffixes the plugin gives it (volume, single archive, manifest, and what follows
 		// those); a user's file that merely looks alike and goes on with another extension is left alone.
-		$masked = preg_replace( '/[a-z0-9][a-z0-9-]*-\d{8}-\d{6}-[0-9a-f]{4}(?![a-z0-9-])(?!\.(?!(?:part\d{3}\.)?wpcheckpoint\.|manifest\.json)[A-Za-z0-9])/', '[backup]', $masked );
+		$masked = preg_replace( '/[a-z0-9][a-z0-9-]*-\d{8}-\d{6}-[0-9a-f]{4}(?![a-z0-9-])(?!\.(?!(?:part\d{3,}\.)?wpcheckpoint\.|manifest\.json)[A-Za-z0-9])/', '[backup]', $masked );
 		return is_string( $masked ) ? $masked : Report::failure_text();
 	}
 
