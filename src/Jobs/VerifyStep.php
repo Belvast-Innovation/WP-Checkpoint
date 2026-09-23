@@ -122,6 +122,10 @@ final class VerifyStep implements Step {
 			throw new TransientFailure( 'The backups directory is not available.' );
 		}
 		$manifest = $backups . DIRECTORY_SEPARATOR . $base . BackupStore::MANIFEST_SUFFIX;
+		if ( '' === $cursor['manifest_sha256'] && is_file( $backups . DIRECTORY_SEPARATOR . $base . BackupStore::DELETING_SUFFIX ) ) {
+			// Missing volumes of a half-deleted backup are not damage: say what happened instead.
+			throw new \RuntimeException( 'This backup was only partly deleted; delete it again.' );
+		}
 		if ( 'verify' === $cursor['phase'] ) {
 			$result = $this->verify( $context, $cursor, $manifest, $options['depth'] );
 			if ( null !== $result ) {

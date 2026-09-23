@@ -191,13 +191,16 @@ final class BackupsController extends Controller {
 		if ( isset( $details['volume_files'] ) && is_array( $details['volume_files'] ) ) {
 			foreach ( $details['volume_files'] as $i => $volume ) {
 				$details['volume_files'][ $i ]['download'] = $links && $volume['present'] ? DownloadHandler::url( 'backups/' . $volume['name'] ) : '';
+				$details['volume_files'][ $i ]['check']    = null === $volume['sha256']
+					? __( 'Check the file size. For a full check, use Verify in the plugin, or check the file block by block as the help page "Checking downloaded volumes by hand" describes.', 'wp-checkpoint' )
+					: __( 'Check the file size and its SHA-256.', 'wp-checkpoint' );
 			}
 		}
 		if ( isset( $details['manifest_file'] ) && is_array( $details['manifest_file'] ) ) {
 			$details['manifest_file']['download'] = $links ? DownloadHandler::url( 'backups/' . $details['manifest_file']['name'] ) : '';
 		}
 		$details['downloads_note'] = '' === $restoring
-			? __( 'Download every file listed here and keep them together in one directory: the backup can only be restored with all of them. Check that each downloaded file has the size shown, and the SHA-256 where one is shown; large volumes are checked block by block when the backup is verified or uploaded.', 'wp-checkpoint' )
+			? __( 'Download every file listed here and keep them together in one directory: the backup can only be restored with all of them. Check each downloaded file as its line says.', 'wp-checkpoint' )
 			: $this->presenter->clean( $restoring );
 		return $this->respond( array( 'backup' => $details ) );
 	}
@@ -217,20 +220,26 @@ final class BackupsController extends Controller {
 		if ( ! $store->exists( $base ) ) {
 			return $this->not_found();
 		}
-		$active = $this->actions->active();
-		$reason = JobConflicts::backup_in_use( $base, $active );
-		if ( '' !== $reason ) {
-			return $this->conflict( $this->presenter->clean( $reason ) );
-		}
 		try {
-			$deleted = $store->delete( $base, $active );
+			// From the conflict check to the last unlink under the start lock: no job can start on the backup meanwhile.
+			$deleted = $this->actions->exclusive(
+				static function ( array $active ) use ( $store, $base ) {
+					$reason = JobConflicts::backup_in_use( $base, $active );
+					return '' === $reason ? $store->delete( $base, $active ) : $reason;
+				}
+			);
+		} catch ( JobsUnavailable $e ) {
+			return new WP_Error( 'wpcheckpoint_jobs_unavailable', $this->presenter->clean( $e->getMessage() ), array( 'status' => 503 ) );
 		} catch ( \RuntimeException $e ) {
 			return new WP_Error( 'wpcheckpoint_backup_delete_failed', $this->presenter->clean( $e->getMessage() ), array( 'status' => 500 ) );
+		}
+		if ( is_string( $deleted ) ) {
+			return $this->conflict( $this->presenter->clean( $deleted ) );
 		}
 		return $this->respond(
 			array(
 				'result'  => 'deleted',
-				'deleted' => $deleted,
+				'deleted' => (int) $deleted,
 			)
 		);
 	}
@@ -249,6 +258,9 @@ final class BackupsController extends Controller {
 		$base = (string) $request->get_param( 'base' );
 		if ( ! $store->exists( $base ) ) {
 			return $this->not_found();
+		}
+		if ( $store->delete_incomplete( $base ) ) {
+			return $this->conflict( __( 'This backup was only partly deleted; delete it again.', 'wp-checkpoint' ) );
 		}
 		try {
 			$options = VerifyJob::options(

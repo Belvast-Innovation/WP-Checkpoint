@@ -7,6 +7,7 @@ use WPCheckpoint\Backups\BackupStore;
 use WPCheckpoint\Backups\VerifyRecord;
 use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Tests\Fixtures\Archive\ArchiveBuilder;
+use WPCheckpoint\Tests\Fixtures\Support\CountingStream;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 /**
@@ -116,6 +117,7 @@ final class BackupStoreTest extends TestCase {
 		$this->assertSame( count( $this->builder->volumes ), $summary['volumes'] );
 		$this->assertSame( array_sum( array_map( 'filesize', $this->builder->volumes ) ), $summary['bytes'] );
 		$this->assertSame( '', $summary['in_use'] );
+		$this->assertFalse( $summary['delete_incomplete'] );
 		$this->assertSame( 'none', $summary['verification']['state'] );
 
 		$handle = fopen( $this->builder->volumes[0], 'r+' );
@@ -145,6 +147,63 @@ final class BackupStoreTest extends TestCase {
 		$keys = array_keys( $data );
 		sort( $keys );
 		return $keys;
+	}
+
+	public function test_a_file_larger_than_any_manifest_is_never_read(): void {
+		CountingStream::register();
+		try {
+			$store = new BackupStore( CountingStream::url( $this->dir ) );
+			$this->write_record( self::BASE, hash_file( 'sha256', $this->builder->manifest_path ) );
+			$store->page( 1, 10, array() );
+			$this->assertGreaterThan( 0, CountingStream::bytes_read( $this->builder->manifest_path ), 'the observer sees reads of a manifest of normal size' );
+
+			$handle = fopen( $this->builder->manifest_path, 'r+' );
+			ftruncate( $handle, \WPCheckpoint\Archive\Manifest::MAX_JSON_BYTES + 1 );
+			fclose( $handle );
+			CountingStream::$read = array();
+			$store->page( 1, 10, array() );
+			$store->details( self::BASE, array() );
+			$store->verification( self::BASE );
+			$this->assertSame( 0, CountingStream::bytes_read( $this->builder->manifest_path ), 'not one byte of it is read, let alone hashed' );
+		} finally {
+			CountingStream::unregister();
+		}
+	}
+
+	public function test_an_interrupted_delete_is_shown_and_can_be_finished(): void {
+		$failing = $this->builder->volumes[1];
+		$store   = new BackupStore(
+			$this->dir,
+			static function ( string $path ) use ( $failing ): bool {
+				return $path === $failing ? false : unlink( $path );
+			}
+		);
+		$this->write_record( self::BASE, hash_file( 'sha256', $this->builder->manifest_path ) );
+		try {
+			$store->delete( self::BASE, array() );
+			$this->fail( 'the delete must report the file it could not remove' );
+		} catch ( \RuntimeException $e ) {
+			$this->assertSame( 'A file of the backup could not be deleted (2 of 4 deleted); delete it again once the file can be removed.', $e->getMessage() );
+		}
+		$summary = $this->store()->page( 1, 10, array() )['items'][0];
+		$this->assertTrue( $summary['delete_incomplete'], 'the list says the delete did not finish' );
+		$this->assertFalse( $summary['complete'] );
+		$this->assertTrue( $this->store()->delete_incomplete( self::BASE ) );
+		$this->assertFileExists( $this->builder->manifest_path, 'the manifest goes last, so the backup stays listed' );
+		$this->assertFileDoesNotExist( $this->dir . '/' . VerifyRecord::file_name( self::BASE ), 'no record says anything about a half-deleted backup' );
+
+		$this->assertSame( 2, $this->store()->delete( self::BASE, array() ) );
+		$this->assertSame( array(), $this->names() );
+		$this->assertFalse( $this->store()->delete_incomplete( self::BASE ) );
+	}
+
+	public function test_a_delete_that_died_after_writing_its_marker_is_shown(): void {
+		$this->put( self::BASE . BackupStore::DELETING_SUFFIX, '' );
+		$summary = $this->store()->page( 1, 10, array() )['items'][0];
+		$this->assertTrue( $summary['delete_incomplete'] );
+		$this->assertTrue( BackupStore::is_own_file( self::BASE, self::BASE . '.deleting' ) );
+		$this->assertSame( 3, $this->store()->delete( self::BASE, array() ) );
+		$this->assertSame( array(), $this->names() );
 	}
 
 	public function test_a_file_larger_than_any_manifest_is_not_valid_and_no_record_applies_to_it(): void {

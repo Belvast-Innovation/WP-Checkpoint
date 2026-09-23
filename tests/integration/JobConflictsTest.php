@@ -46,6 +46,31 @@ final class JobConflictsTest extends JobTestCase {
 		$this->assertSame( '0', (string) $GLOBALS['wpdb']->get_var( $GLOBALS['wpdb']->prepare( 'SELECT IS_USED_LOCK(%s) IS NOT NULL', $name ) ), 'the lock is released after the start' );
 	}
 
+	public function test_exclusive_work_holds_the_start_lock_until_it_returns_or_throws(): void {
+		$name    = 'wpcheckpoint_start_' . substr( md5( DB_NAME . '.' . $GLOBALS['wpdb']->base_prefix . 'wpcheckpoint_jobs' ), 0, 16 );
+		$other   = new \wpdb( DB_USER, DB_PASSWORD, DB_NAME, DB_HOST );
+		$actions = Plugin::instance()->job_actions();
+		$seen    = $actions->exclusive(
+			static function ( array $active ) use ( $other, $name ): string {
+				return (string) $other->get_var( $other->prepare( 'SELECT GET_LOCK(%s, 0)', $name ) );
+			}
+		);
+		$this->assertSame( '0', $seen, 'no other request can take the lock during the work' );
+		try {
+			$actions->exclusive(
+				static function (): void {
+					throw new \RuntimeException( 'work failed' );
+				}
+			);
+			$this->fail( 'the work\'s exception is passed on' );
+		} catch ( \RuntimeException $e ) {
+			$this->assertSame( 'work failed', $e->getMessage() );
+		}
+		$this->assertSame( '1', (string) $other->get_var( $other->prepare( 'SELECT GET_LOCK(%s, 0)', $name ) ), 'released after the work, also when it threw' );
+		$other->query( $other->prepare( 'SELECT RELEASE_LOCK(%s)', $name ) );
+		$other->close();
+	}
+
 	public function test_of_two_racing_jobs_the_earlier_one_wins(): void {
 		// Both inserted before either checked: what two requests arriving together produce.
 		$repo    = Plugin::instance()->jobs();

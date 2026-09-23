@@ -24,9 +24,11 @@ defined( 'ABSPATH' ) || exit;
  * so only the manifests of one page are read. Deleting never follows the
  * manifest's list of volumes (an uploaded or edited manifest could name
  * another backup's files): it removes exactly the files named "{base}." plus
- * one of this plugin's suffixes, the record first, the volumes next, the
- * manifest last, so an interrupted delete leaves a listed, incomplete
- * backup that can be deleted again, never files the list cannot see.
+ * one of this plugin's suffixes. It first writes {base}.deleting, then
+ * removes the record, the volumes, the manifest and the marker last, so an
+ * interrupted delete leaves a listed backup that says it was partly
+ * deleted (never one that looks intact until a check finds volumes
+ * missing) and can be deleted again, never files the list cannot see.
  *
  * Of the exported site, only facts that identify neither the site nor the
  * server are returned. Other text from the manifest (warnings, exclusions,
@@ -35,6 +37,7 @@ defined( 'ABSPATH' ) || exit;
 final class BackupStore {
 
 	const MANIFEST_SUFFIX = '.manifest.json';
+	const DELETING_SUFFIX = '.deleting';
 	const MAX_PER_PAGE    = 50;
 
 	/**
@@ -45,12 +48,23 @@ final class BackupStore {
 	private $dir;
 
 	/**
+	 * Removes one file: function( string $path ): bool.
+	 *
+	 * @var callable
+	 */
+	private $unlink;
+
+	/**
 	 * Constructor.
 	 *
-	 * @param string $dir Backups directory.
+	 * @param string        $dir    Backups directory.
+	 * @param callable|null $unlink Removes one file (tests); unlink() by default.
 	 */
-	public function __construct( string $dir ) {
-		$this->dir = rtrim( $dir, '/\\' );
+	public function __construct( string $dir, $unlink = null ) {
+		$this->dir    = rtrim( $dir, '/\\' );
+		$this->unlink = is_callable( $unlink ) ? $unlink : static function ( string $path ): bool {
+			return @unlink( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.unlink_unlink -- a warning would put the path into the error log.
+		};
 	}
 
 	/**
@@ -176,17 +190,31 @@ final class BackupStore {
 				return 0 !== $by_order ? $by_order : strcmp( $a, $b );
 			}
 		);
+		$marker = $this->dir . DIRECTORY_SEPARATOR . $base . self::DELETING_SUFFIX;
+		if ( ! is_file( $marker ) && false === @file_put_contents( $marker, '' ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- a warning would put the path into the error log.
+			throw new \RuntimeException( 'The backup could not be deleted: the backups directory is not writable.' );
+		}
+		$files   = array_values( array_diff( $files, array( $base . self::DELETING_SUFFIX ) ) );
 		$deleted = 0;
 		foreach ( $files as $name ) {
-			if ( ! @unlink( $this->dir . DIRECTORY_SEPARATOR . $name ) && is_file( $this->dir . DIRECTORY_SEPARATOR . $name ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.unlink_unlink -- a warning would put the path into the error log.
+			$path = $this->dir . DIRECTORY_SEPARATOR . $name;
+			if ( ! call_user_func( $this->unlink, $path ) && is_file( $path ) ) {
 				throw new \RuntimeException( sprintf( 'A file of the backup could not be deleted (%d of %d deleted); delete it again once the file can be removed.', (int) $deleted, count( $files ) ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- numbers only.
 			}
 			++$deleted;
 		}
-		// A check that started while the files were listed stores its record without a manifest (the verify
-		// step looks for the manifest first, which leaves a narrow window): with no manifest it is never listed.
-		@unlink( $this->dir . DIRECTORY_SEPARATOR . VerifyRecord::file_name( $base ) ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.unlink_unlink -- usually absent.
+		call_user_func( $this->unlink, $marker ); // Left behind, it names no listed backup (the manifest is gone).
 		return $deleted;
+	}
+
+	/**
+	 * Whether a delete of this backup started and did not finish.
+	 *
+	 * @param string $base Base name.
+	 * @return bool
+	 */
+	public function delete_incomplete( string $base ): bool {
+		return 1 === preg_match( PreflightStep::BASE_PATTERN, $base ) && is_file( $this->dir . DIRECTORY_SEPARATOR . $base . self::DELETING_SUFFIX );
 	}
 
 	/**
@@ -212,7 +240,7 @@ final class BackupStore {
 			return false;
 		}
 		$rest = substr( $name, strlen( $base ) );
-		return 1 === preg_match( '/\A(\.manifest\.json|\.verify\.json|(\.part[0-9]{3,4})?\.wpcheckpoint\.(zip|tar))\z/', $rest );
+		return 1 === preg_match( '/\A(\.manifest\.json|\.verify\.json|\.deleting|(\.part[0-9]{3,4})?\.wpcheckpoint\.(zip|tar))\z/', $rest );
 	}
 
 	/**
@@ -224,18 +252,19 @@ final class BackupStore {
 	 */
 	private function summary( string $base, array $active ): array {
 		$out      = array(
-			'base'         => $base,
-			'in_use'       => JobConflicts::backup_in_use( $base, $active ),
-			'valid'        => false,
-			'created_at'   => '',
-			'bytes'        => 0,
-			'volumes'      => 0,
-			'complete'     => false,
-			'contents'     => array(),
-			'tables'       => 0,
-			'files'        => 0,
-			'warnings'     => 0,
-			'verification' => $this->verification( $base ),
+			'base'              => $base,
+			'in_use'            => JobConflicts::backup_in_use( $base, $active ),
+			'delete_incomplete' => $this->delete_incomplete( $base ),
+			'valid'             => false,
+			'created_at'        => '',
+			'bytes'             => 0,
+			'volumes'           => 0,
+			'complete'          => false,
+			'contents'          => array(),
+			'tables'            => 0,
+			'files'             => 0,
+			'warnings'          => 0,
+			'verification'      => $this->verification( $base ),
 		);
 		$manifest = $this->manifest( $base );
 		if ( ! $manifest instanceof Manifest ) {

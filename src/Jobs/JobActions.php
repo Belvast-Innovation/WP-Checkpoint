@@ -101,6 +101,29 @@ final class JobActions {
 	}
 
 	/**
+	 * Run work that must not interleave with a job start (deleting a
+	 * backup): under the start lock, with the active jobs read inside it,
+	 * so no job can be created between the conflict check the work makes
+	 * and its last change.
+	 *
+	 * @template T
+	 * @param callable(Job[]): T $work Gets the queued, running and paused jobs.
+	 * @return T
+	 * @throws JobsUnavailable When the lock is held elsewhere beyond the timeout.
+	 * @throws \RuntimeException What the work throws (after the lock is released).
+	 */
+	public function exclusive( callable $work ) {
+		if ( ! $this->repository->lock_starts() ) {
+			throw new JobsUnavailable( 'Another job is being started right now; try again in a moment.' );
+		}
+		try {
+			return $work( $this->active() );
+		} finally {
+			$this->repository->unlock_starts();
+		}
+	}
+
+	/**
 	 * Create a job, unless it must not run next to the active ones
 	 * (JobConflicts). Checked after the insert against the active jobs with
 	 * a lower id, so two requests racing each other cannot both start: the

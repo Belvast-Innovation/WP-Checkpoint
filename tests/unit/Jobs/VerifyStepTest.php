@@ -9,6 +9,7 @@ use WPCheckpoint\Jobs\StepResult;
 use WPCheckpoint\Jobs\VerifyStep;
 use WPCheckpoint\Tests\Fixtures\Archive\ArchiveBuilder;
 use WPCheckpoint\Tests\Fixtures\Jobs\WorkContext;
+use WPCheckpoint\Tests\Fixtures\Support\CountingStream;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 /**
@@ -217,6 +218,45 @@ final class VerifyStepTest extends TestCase {
 		$this->expectException( \RuntimeException::class );
 		$this->expectExceptionMessage( 'The manifest of this backup is larger than 4 MB' );
 		$this->step()->run( $this->ctx->context() );
+	}
+
+	public function test_a_file_larger_than_any_manifest_is_never_read(): void {
+		$builder = $this->archive();
+		$handle  = fopen( $builder->manifest_path, 'r+' );
+		ftruncate( $handle, \WPCheckpoint\Archive\Manifest::MAX_JSON_BYTES + 1 );
+		fclose( $handle );
+		CountingStream::register();
+		try {
+			$dir  = CountingStream::url( $builder->dir );
+			$step = new VerifyStep(
+				static function () use ( $dir ): string {
+					return $dir;
+				},
+				'strval'
+			);
+			try {
+				$step->run( $this->ctx->context() );
+				$this->fail( 'an oversized manifest must fail the check' );
+			} catch ( \RuntimeException $e ) {
+				$this->assertStringStartsWith( 'The manifest of this backup is larger than 4 MB', $e->getMessage() );
+			}
+			$this->assertSame( 0, CountingStream::bytes_read( $builder->manifest_path ), 'not one byte of it is read, let alone hashed' );
+		} finally {
+			CountingStream::unregister();
+		}
+	}
+
+	public function test_a_partly_deleted_backup_is_not_checked(): void {
+		$builder = $this->archive();
+		file_put_contents( $builder->dir . '/' . ArchiveBuilder::BASE . '.deleting', '' );
+		unlink( $builder->volumes[0] );
+		try {
+			$this->step()->run( $this->ctx->context() );
+			$this->fail( 'missing volumes of a half-deleted backup are not damage' );
+		} catch ( \RuntimeException $e ) {
+			$this->assertSame( 'This backup was only partly deleted; delete it again.', $e->getMessage() );
+		}
+		$this->assertFileDoesNotExist( $this->record_path() );
 	}
 
 	public function test_a_manifest_naming_volumes_of_another_backup_is_not_checked(): void {

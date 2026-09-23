@@ -81,15 +81,16 @@ final class BackupsControllerTest extends JobTestCase {
 			$this->assertSame( filesize( $this->builder->volumes[ $i ] ), $volume['bytes'] );
 			if ( filesize( $this->builder->volumes[ $i ] ) > ArchiveBuilder::CHUNK_BYTES ) {
 				$this->assertNull( $volume['sha256'], 'a block-hashed volume has no whole-file hash to compare' );
+				$this->assertStringStartsWith( 'Check the file size. For a full check, use Verify in the plugin, or check the file block by block', $volume['check'] );
 			} else {
 				$this->assertSame( hash_file( 'sha256', $this->builder->volumes[ $i ] ), $volume['sha256'] );
+				$this->assertSame( 'Check the file size and its SHA-256.', $volume['check'] );
 			}
 			$this->assertStringContainsString( 'file=backups/' . $volume['name'] . '&', $volume['download'] );
 			$this->assertStringContainsString( '_wpnonce=', $volume['download'] );
 		}
 		$this->assertStringContainsString( 'file=backups/' . self::BASE . '.manifest.json&', $backup['manifest_file']['download'] );
 		$this->assertStringContainsString( 'every file', $backup['downloads_note'] );
-		$this->assertStringContainsString( 'SHA-256', $backup['downloads_note'] );
 		$this->assertSame( hash_file( 'sha256', $this->builder->manifest_path ), $backup['manifest_file']['sha256'] );
 	}
 
@@ -151,6 +152,42 @@ final class BackupsControllerTest extends JobTestCase {
 		}
 		$this->assertSame( 404, $this->rest( 'POST', 'backups/' . self::BASE . '/verify' )->get_status() );
 		$this->assertSame( 0, $this->rest( 'GET', 'backups' )->get_data()['total'] );
+	}
+
+	private function start_lock_name(): string {
+		return 'wpcheckpoint_start_' . substr( md5( DB_NAME . '.' . $GLOBALS['wpdb']->base_prefix . 'wpcheckpoint_jobs' ), 0, 16 );
+	}
+
+	public function test_a_delete_waits_for_job_starts_and_touches_nothing_without_the_lock(): void {
+		// Another request is in the middle of starting a job (a restore, say): it holds the start lock.
+		$other = new \wpdb( DB_USER, DB_PASSWORD, DB_NAME, DB_HOST );
+		$this->assertSame( '1', (string) $other->get_var( $other->prepare( 'SELECT GET_LOCK(%s, 0)', $this->start_lock_name() ) ) );
+		try {
+			$response = $this->rest( 'DELETE', 'backups/' . self::BASE );
+			$this->assertSame( 503, $response->get_status() );
+			$this->assert_clean( $response );
+		} finally {
+			$other->query( $other->prepare( 'SELECT RELEASE_LOCK(%s)', $this->start_lock_name() ) );
+			$other->close();
+		}
+		foreach ( array_merge( $this->builder->volumes, array( $this->builder->manifest_path ) ) as $file ) {
+			$this->assertFileExists( $this->backups . '/' . basename( $file ) );
+		}
+		$this->assertSame( 200, $this->rest( 'DELETE', 'backups/' . self::BASE )->get_status(), 'once the start is done, the delete goes through' );
+	}
+
+	public function test_a_partly_deleted_backup_says_so_and_is_not_verified(): void {
+		file_put_contents( $this->backups . '/' . self::BASE . '.deleting', '' );
+		unlink( $this->backups . '/' . basename( $this->builder->volumes[0] ) );
+		$summary = $this->rest( 'GET', 'backups' )->get_data()['backups'][0];
+		$this->assertTrue( $summary['delete_incomplete'] );
+		$this->assertFalse( $summary['complete'] );
+		$verify = $this->rest( 'POST', 'backups/' . self::BASE . '/verify' );
+		$this->assertSame( 409, $verify->get_status() );
+		$this->assertSame( 'This backup was only partly deleted; delete it again.', $verify->get_data()['message'] );
+		$this->assertSame( array(), Plugin::instance()->jobs()->list_jobs() );
+		$this->assertSame( 200, $this->rest( 'DELETE', 'backups/' . self::BASE )->get_status() );
+		$this->assertSame( array(), array_values( preg_grep( '/\A' . preg_quote( self::BASE, '/' ) . '\./', (array) scandir( $this->backups ) ) ), 'nothing of the backup is left, the marker included' );
 	}
 
 	public function test_requests_outside_the_backup_names_are_refused_before_any_file_is_touched(): void {
