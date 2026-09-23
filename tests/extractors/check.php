@@ -70,6 +70,19 @@ foreach ( $entries as $name => $content ) {
 }
 file_put_contents( $crafted, $body . $central . ZipFormat::end_of_central_directory( count( $entries ), strlen( $central ), strlen( $body ) ) );
 
+// 3. The same packer archive as the writer made it before host 3: host 0 (MS-DOS), no attributes. Informational:
+// it shows which reader behaved differently before, so a change in a reader's result is attributed to the host.
+$legacy = $root . DIRECTORY_SEPARATOR . 'legacy.wpcheckpoint.zip';
+$bytes  = (string) file_get_contents( $volumes[0] );
+$end    = ZipFormat::parse_end( substr( $bytes, -66000 ), max( 0, strlen( $bytes ) - 66000 ) );
+for ( $at = (int) $end['cd_offset'], $n = 0; $n < (int) $end['entries']; $n++ ) {
+	$header = ZipFormat::parse_central_header( substr( $bytes, $at, 65536 + 46 ) );
+	$bytes  = substr_replace( $bytes, pack( 'v', $header['made_by'] & 0xFF ), $at + 4, 2 );
+	$bytes  = substr_replace( $bytes, pack( 'V', 0 ), $at + 38, 4 );
+	$at    += $header['length'];
+}
+file_put_contents( $legacy, $bytes );
+
 /**
  * The command for a tool, and its environment (null: inherited).
  *
@@ -114,12 +127,19 @@ function run_command( array $argv, ?array $env ): array {
 	return array( proc_close( $proc ), (string) $out );
 }
 
-/** @return string[] Problems with the entries under $dir/$sub, which must be exactly $expected (relative name => content). */
+/**
+ * Problems with the files under $dir, which must be exactly $expected (relative name => content). On macOS a
+ * name that equals an expected one after NFC normalization matches, with a note: the platform's own tools
+ * (libarchive) store decomposed names, and APFS finds a file under either form.
+ *
+ * @return array{0: string[], 1: string[]} Problems, notes.
+ */
 function compare_tree( string $dir, array $expected, bool $windows ): array {
+	$notes = array();
 	$problems = array();
 	$found    = array();
 	if ( ! is_dir( $dir ) ) {
-		return array( 'nothing extracted at ' . basename( $dir ) );
+		return array( array( 'nothing extracted at ' . basename( $dir ) ), $notes );
 	}
 	// CATCH_GET_CHILD: a directory that cannot be opened is reported by its mode below, not thrown.
 	$it = new RecursiveIteratorIterator( new RecursiveDirectoryIterator( $dir, FilesystemIterator::SKIP_DOTS ), RecursiveIteratorIterator::SELF_FIRST, RecursiveIteratorIterator::CATCH_GET_CHILD );
@@ -130,6 +150,13 @@ function compare_tree( string $dir, array $expected, bool $windows ): array {
 				$problems[] = sprintf( 'directory %s has mode %o: not traversable by its owner', $rel, $f->getPerms() & 07777 );
 			}
 			continue;
+		}
+		if ( ! isset( $expected[ $rel ] ) && 'Darwin' === PHP_OS_FAMILY && class_exists( 'Normalizer' ) ) {
+			$nfc = (string) Normalizer::normalize( $rel, Normalizer::FORM_C );
+			if ( $nfc !== $rel && isset( $expected[ $nfc ] ) ) {
+				$notes[] = 'stored decomposed (NFD), equal after NFC: ' . $nfc;
+				$rel     = $nfc;
+			}
 		}
 		$found[ $rel ] = true;
 		if ( ! isset( $expected[ $rel ] ) ) {
@@ -151,7 +178,7 @@ function compare_tree( string $dir, array $expected, bool $windows ): array {
 			$problems[] = 'missing: ' . $rel;
 		}
 	}
-	return $problems;
+	return array( $problems, $notes );
 }
 
 $expected_names = array();
@@ -160,7 +187,7 @@ foreach ( $names as $name ) {
 }
 $failed = false;
 foreach ( $tools as $tool ) {
-	foreach ( array( 'packer' => $volumes[0], 'directory entry' => $crafted ) as $label => $zip ) {
+	foreach ( array( 'packer' => $volumes[0], 'directory entry' => $crafted, 'legacy host 0' => $legacy ) as $label => $zip ) {
 		$dest = $root . DIRECTORY_SEPARATOR . $tool . '-' . str_replace( ' ', '-', $label );
 		mkdir( $dest, 0700 );
 		$command = tool_command( $tool, $zip, $dest, $windows );
@@ -169,18 +196,20 @@ foreach ( $tools as $tool ) {
 			exit( 2 );
 		}
 		list( $code, $output ) = run_command( $command[0], $command[1] );
+		$notes = array();
 		if ( 0 !== $code ) {
 			$problems = array( sprintf( 'exit code %d: %s', $code, trim( $output ) ) );
-		} elseif ( 'packer' === $label ) {
-			$problems = compare_tree( $dest . DIRECTORY_SEPARATOR . 'files' . DIRECTORY_SEPARATOR . 'wp-content' . DIRECTORY_SEPARATOR . 'uploads' . DIRECTORY_SEPARATOR . 'names', $expected_names, $windows );
+		} elseif ( 'directory entry' === $label ) {
+			list( $problems, $notes ) = compare_tree( $dest . DIRECTORY_SEPARATOR . 'files', array( 'empty-dir/x.txt' => "inside\n" ), $windows );
 		} else {
-			$problems = compare_tree( $dest . DIRECTORY_SEPARATOR . 'files', array( 'empty-dir/x.txt' => "inside\n" ), $windows );
+			list( $problems, $notes ) = compare_tree( $dest . DIRECTORY_SEPARATOR . 'files' . DIRECTORY_SEPARATOR . 'wp-content' . DIRECTORY_SEPARATOR . 'uploads' . DIRECTORY_SEPARATOR . 'names', $expected_names, $windows );
 		}
-		printf( "%-16s %-16s %s\n", $tool, $label, array() === $problems ? 'ok' : 'FAILED' );
-		foreach ( $problems as $problem ) {
-			printf( "    %s\n", $problem );
+		$informational = 'legacy host 0' === $label;
+		printf( "%-16s %-16s %s\n", $tool, $label, array() === $problems ? 'ok' : ( $informational ? 'differs (informational: the previous writer)' : 'FAILED' ) );
+		foreach ( array_merge( $problems, $notes ) as $line ) {
+			printf( "    %s\n", $line );
 		}
-		$failed = $failed || array() !== $problems;
+		$failed = $failed || ( ! $informational && array() !== $problems );
 	}
 }
 $builder->cleanup();
