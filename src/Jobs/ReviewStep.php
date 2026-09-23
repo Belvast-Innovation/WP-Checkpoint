@@ -163,12 +163,23 @@ final class ReviewStep implements Step {
 				);
 			}
 		}
+		$foreign = array();
+		foreach ( isset( $preflight['findings']['foreign'] ) && is_array( $preflight['findings']['foreign'] ) ? $preflight['findings']['foreign'] : array() as $group ) {
+			if ( is_array( $group ) && isset( $group['prefix'] ) ) {
+				$foreign[] = array(
+					'prefix' => (string) $group['prefix'],
+					'count'  => (int) ( $group['count'] ?? 0 ),
+					'listed' => isset( $group['listed'] ) && is_array( $group['listed'] ) ? array_values( array_map( 'strval', $group['listed'] ) ) : array(),
+				);
+			}
+		}
 		return array(
 			'unreadable'  => $listed( 'unreadable' ),
 			'too_large'   => $listed( 'too_large' ),
 			'over_volume' => $listed( 'over_volume' ),
 			'heavy'       => $heavy,
 			'oversize'    => $oversize,
+			'foreign'     => $foreign,
 		);
 	}
 
@@ -200,6 +211,11 @@ final class ReviewStep implements Step {
 			}
 			return 'fail' === $value ? 'stop' : $value;
 		};
+
+		foreach ( isset( $findings['foreign'] ) ? $findings['foreign'] : array() as $group ) {
+			// Not a question: left out by rule, listed so that a misjudged group can be added back.
+			$decisions['notes'][] = sprintf( '%d tables with the prefix %s look like another WordPress installation in the same database and are not in the backup. If they belong to this site, include them by name (wp wpcheckpoint export --include-table=...).', $group['count'], $group['prefix'] );
+		}
 
 		if ( $findings['unreadable']['count'] > 0 ) {
 			$choice = $answer( 'unreadable', 'unreadable', array( 'continue', 'stop' ) );

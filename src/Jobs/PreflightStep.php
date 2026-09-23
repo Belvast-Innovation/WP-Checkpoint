@@ -12,6 +12,7 @@ use WPCheckpoint\Database\Connection;
 use WPCheckpoint\Database\RowSizeCheck;
 use WPCheckpoint\Database\SqlWriter;
 use WPCheckpoint\Database\TableExporter;
+use WPCheckpoint\Database\TableSelection;
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- messages carry table names and numbers; the runner stores them through the redactor and the presenter cleans them before display.
 
@@ -37,6 +38,12 @@ use WPCheckpoint\Database\TableExporter;
  * site's slug) come in as callables so the step is testable without it.
  */
 final class PreflightStep implements Step {
+
+	/**
+	 * Tables of a left-out group named in the findings (the rest are counted).
+	 */
+	const MAX_FOREIGN_LISTED = 20;
+
 
 	const ID = 'preflight';
 
@@ -71,7 +78,8 @@ final class PreflightStep implements Step {
 	 *                                          'writable' (callable(): string[] of unwritable directory names),
 	 *                                          'disk_free' (callable(): int|false, bytes free in the storage directory),
 	 *                                          'slug' (callable(): string), 'can_deflate' (bool), 'normalization' (bool),
-	 *                                          'int_size' (int), 'now' (callable(): int), 'random' (callable(): string, four hex digits; tests).
+	 *                                          'int_size' (int), 'now' (callable(): int), 'random' (callable(): string, four hex digits; tests),
+	 *                                          'multisite' (bool), 'core_tables' (callable(): string[], this installation's core tables).
 	 * @param int                  $chunk_bytes Chunk size.
 	 */
 	public function __construct( Connection $connection, array $env, int $chunk_bytes = TableExporter::CHUNK_BYTES ) {
@@ -217,15 +225,32 @@ final class PreflightStep implements Step {
 	 * @throws \RuntimeException When there is not enough free disk space.
 	 */
 	private function tables( string $work, array $options, array &$state ): void {
-		$tables = array();
-		$notes  = array();
-		$stats  = array();
+		$tables  = array();
+		$notes   = array();
+		$stats   = array();
+		$foreign = array();
 		if ( $options['contents']['database'] ) {
 			$listing = call_user_func( $this->env['tables'], (string) $this->env['prefix'] );
-			$seen    = array();
+			$core    = isset( $this->env['core_tables'] ) ? (array) call_user_func( $this->env['core_tables'] ) : array();
+			$groups  = TableSelection::foreign( array_map( 'strval', (array) $listing['tables'] ), (string) $this->env['prefix'], ! empty( $this->env['multisite'] ), $core );
+			$left    = array();
+			foreach ( $groups as $group_prefix => $members ) {
+				// Another installation's tables stay out unless the user named them.
+				$out = array_values( array_diff( $members, $options['include_tables'] ) );
+				if ( array() !== $out ) {
+					$foreign[] = array(
+						'prefix' => (string) $group_prefix,
+						'count'  => count( $out ),
+						'listed' => array_slice( $out, 0, self::MAX_FOREIGN_LISTED ),
+					);
+					$left      = array_merge( $left, $out );
+				}
+			}
+			$left = array_fill_keys( $left, true );
+			$seen = array();
 			foreach ( (array) $listing['tables'] as $table ) {
 				$table = (string) $table;
-				if ( in_array( $table, $options['exclude_tables'], true ) ) {
+				if ( in_array( $table, $options['exclude_tables'], true ) || isset( $left[ $table ] ) ) {
 					continue;
 				}
 				if ( ! DatabaseExportStep::storable_name( $table ) ) {
@@ -270,6 +295,7 @@ final class PreflightStep implements Step {
 				'groups'     => $options['contents']['files'],
 				'exclusions' => $options['exclusions'],
 				'stats'      => $stats,
+				'foreign'    => $foreign,
 			)
 		);
 	}
@@ -327,12 +353,16 @@ final class PreflightStep implements Step {
 	 * @return void
 	 */
 	private function finish( string $work, array $state ): void {
+		$plan = ExportPlan::read( $work, ExportPlan::PLAN );
 		ExportPlan::write(
 			$work,
 			ExportPlan::PREFLIGHT,
 			array(
 				'checks'   => $state['checks'],
-				'findings' => array( 'oversize' => array_values( $state['oversize'] ) ),
+				'findings' => array(
+					'oversize' => array_values( $state['oversize'] ),
+					'foreign'  => isset( $plan['foreign'] ) && is_array( $plan['foreign'] ) ? array_values( $plan['foreign'] ) : array(),
+				),
 				'warnings' => array_values( $state['warnings'] ),
 			)
 		);

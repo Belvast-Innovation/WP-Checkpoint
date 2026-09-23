@@ -88,6 +88,18 @@ final class ReviewStepTest extends TestCase {
 		$this->assertFalse( $review['asked'] );
 	}
 
+	public function test_another_installation_is_a_note_not_a_question(): void {
+		$this->inputs();
+		$preflight                        = ExportPlan::read( $this->work, ExportPlan::PREFLIGHT );
+		$preflight['findings']['foreign'] = array( array( 'prefix' => 'wp_old_', 'count' => 4, 'listed' => array( 'wp_old_options', 'wp_old_posts', 'wp_old_users', 'wp_old_x' ) ) );
+		ExportPlan::write( $this->work, ExportPlan::PREFLIGHT, $preflight );
+		$result = ( new ReviewStep() )->run( $this->context( array() ) );
+		$this->assertSame( StepResult::DONE, $result->kind, 'left out by rule: nothing to ask, even without a policy' );
+		$review = json_decode( $this->review(), true );
+		$this->assertSame( array( '4 tables with the prefix wp_old_ look like another WordPress installation in the same database and are not in the backup. If they belong to this site, include them by name (wp wpcheckpoint export --include-table=...).' ), $review['decisions']['notes'] );
+		$this->assertSame( array(), $review['decisions']['exclude_tables'], 'the plan already left them out; the review only reports it' );
+	}
+
 	public function test_findings_become_pointer_questions_and_the_review_file_holds_the_details(): void {
 		$heavy = array();
 		for ( $i = 0; $i < 12; $i++ ) {
