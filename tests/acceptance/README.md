@@ -1,0 +1,55 @@
+# Large-site export acceptance
+
+Tooling to back up a large generated site in the wp-env development environment under shared-hosting limits, driven over REST the way the admin page drives a job, and to check the result. The tooling is for development only: the probe it installs logs job positions, and setup lowers the web container's CPU and PHP limits.
+
+## Requirements
+
+- A running `npx wp-env start` environment (Apache with mod_php).
+- On the host: PHP 8 CLI with `curl` and `mysqli`, `unzip`, and `docker`.
+- Free disk space of about three times the generated size: the source, the backup, and an extracted copy.
+
+## Steps
+
+```bash
+# 1. Data: about 4.6 GB of files and 500 MB of table data (sizes in MB).
+npx wp-env run cli --env-cwd=wp-content/plugins/wp-checkpoint wp eval-file tests/acceptance/generate.php 4600 500
+
+# 2. Limits and probe: the web container gets 1 CPU; web requests get memory_limit=128M and max_execution_time=30
+#    (a block in .htaccess); a mu-plugin records every request; an application password is created for the driver.
+php tests/acceptance/acceptance.php setup --dir=$HOME/wpc-acceptance --cpus=1
+
+# 3. Runs: TTFB before, during and after; a REST tick loop; the work directory's size over time.
+php tests/acceptance/acceptance.php run --dir=$HOME/wpc-acceptance --name=first
+#    The second run kills the web process of one tick (kill -9) once the job passes 50 %; the job is taken
+#    over when the lease expires and finishes.
+php tests/acceptance/acceptance.php run --dir=$HOME/wpc-acceptance --name=second --kill-at=50
+
+# 4. Checks per run, then the two runs against each other.
+php tests/acceptance/acceptance.php check --dir=$HOME/wpc-acceptance --name=first
+php tests/acceptance/acceptance.php check --dir=$HOME/wpc-acceptance --name=second
+php tests/acceptance/acceptance.php compare --dir=$HOME/wpc-acceptance --name=first --with=second
+
+# 5. Remove the probe, the limits and the application passwords.
+php tests/acceptance/acceptance.php teardown --dir=$HOME/wpc-acceptance
+```
+
+## What `check` reports
+
+| | Check |
+| --- | --- |
+| i | The job completed. Its log has no zero-progress step and no concurrent writer, and exactly as many takeovers as kills. |
+| ii | Duration of every web tick from the probe: p50, p99 and maximum. Each tick over 20 s is listed with the step and position before and after it. Passes when p99 ≤ 20 s and the maximum is ≤ 25 s. |
+| iii | Peak memory of each tick request. It must stay within 128 MB and within 32 MB (plus 8 MB margin) of an idle tick request. |
+| iv | Median time to first byte of the front page before, during and after the export. The export may add less than 50 ms. When before and after differ by more than 20 ms or 25 %, the environment drifted: discard the numbers and repeat the run. |
+| v | `wp wpcheckpoint verify --depth=full` passes. |
+| vi | `unzip -t` passes on every volume. |
+| vii | Every volume is extracted. Every file matches its source by sha256, and nothing extra is present. The database chunks are loaded in index order into a scratch database with the `mariadb` client, and every table matches the source row by row. The options, user meta and jobs tables change while the export runs and are only reported. |
+| viii | The manifest's file count and bytes match an independent walk of `wp-content` that applies the same exclusions. |
+| ix | The work directory's peak size stays within the archive size plus a margin, and the next maintenance pass reclaims it. |
+
+`compare` compares two runs by what the backups restore, not byte for byte:
+- `files.index.jsonl` must be identical.
+- Every table except the volatile ones must restore to the same rows.
+- The manifests must agree outside the creation time, the volume and index entries, the export times, and the chunk-derived table fields.
+
+Database chunk boundaries can differ between runs because a resumed table starts a new batch.
