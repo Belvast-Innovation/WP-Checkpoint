@@ -4,7 +4,7 @@
  * the way the admin page drives a job (REST ticks), under 128 MB / 30 s.
  *
  *   php tests/acceptance/acceptance.php setup    --dir=DIR [--cpus=1]
- *   php tests/acceptance/acceptance.php run      --dir=DIR --name=NAME [--kill-at=PERCENT]
+ *   php tests/acceptance/acceptance.php run      --dir=DIR --name=NAME [--kills=standard]
  *   php tests/acceptance/acceptance.php check    --dir=DIR --name=NAME
  *   php tests/acceptance/acceptance.php compare  --dir=DIR --name=NAME --with=NAME
  *   php tests/acceptance/acceptance.php teardown --dir=DIR
@@ -26,6 +26,21 @@ const ACC_TICK_LIMIT = 20.0;  // Seconds: a tick above this is listed with its s
 const ACC_TICK_MAX   = 25.0;  // Seconds: no tick may take longer.
 const ACC_TTFB_LIMIT = 0.050; // Seconds: allowed median degradation during the export.
 const ACC_DRIFT      = 0.020; // Seconds: before/after medians further apart than this (or 25 %) mean the environment drifted.
+
+/**
+ * The planned kills of --kills=standard, in the order the export reaches them: the windows between a
+ * checkpoint and the next irreversible step that the packer, manifest and store steps are built around.
+ * The probe (mu-plugin) fires each once, in the tick's own web process, before the matching query runs.
+ */
+const ACC_KILLS = array(
+	array( 'id' => 'database-mid-table', 'event' => 'checkpoint', 'step' => 'DatabaseExportStep', 'contains' => 'acc_events', 'nth' => 5 ),
+	array( 'id' => 'pack-between-chunks', 'event' => 'checkpoint', 'step' => 'PackStep', 'contains' => 'video one.mp4', 'nth' => 20 ),
+	array( 'id' => 'seal-before-rename', 'event' => 'confirm', 'step' => 'PackStep', 'in' => 'seal_volume', 'nth' => 1 ),
+	array( 'id' => 'seal-after-rename', 'event' => 'checkpoint', 'step' => 'PackStep', 'after_confirm_in' => 'seal_volume', 'nth' => 2 ),
+	array( 'id' => 'manifest-audit-walk', 'event' => 'checkpoint', 'step' => 'ManifestStep', 'contains' => '"phase":"audit"', 'nth' => 2 ),
+	array( 'id' => 'manifest-verify-walk', 'event' => 'checkpoint', 'step' => 'ManifestStep', 'contains' => '"phase":"verify"', 'nth' => 3 ),
+	array( 'id' => 'store-between-renames', 'event' => 'confirm', 'step' => 'StoreStep', 'nth' => 2 ),
+);
 
 // ---------------------------------------------------------------- helpers
 
@@ -248,10 +263,10 @@ function acc_teardown( string $dir ): void {
 }
 
 /**
- * Background helpers of a run: TTFB during the export, disk use of the work
- * directory and backups, and the kill of one tick's web process.
+ * Background helpers of a run: TTFB during the export and disk use of the
+ * work directory and backups.
  */
-function acc_helper( string $kind, string $out, int $job, int $kill_at ): void {
+function acc_helper( string $kind, string $out, int $job ): void {
 	$env  = acc_state( dirname( $out ) );
 	$stop = $out . '/stop';
 	while ( ! is_file( $stop ) ) {
@@ -264,27 +279,11 @@ function acc_helper( string $kind, string $out, int $job, int $kill_at ): void {
 			sleep( 3 );
 			continue;
 		}
-		if ( 'kill' === $kind ) {
-			$r   = acc_http( 'GET', $env['site'] . '/wp-json/wp-checkpoint/v1/jobs/' . $job, $env['auth'], 30.0 );
-			$row = json_decode( $r['body'], true );
-			if ( is_array( $row ) && isset( $row['progress'] ) && (int) $row['progress'] >= $kill_at ) {
-				foreach ( glob( $env['wp_root'] . '/wp-content/wpcheckpoint-acceptance/inflight/*.json' ) ?: array() as $file ) {
-					$tick = json_decode( (string) @file_get_contents( $file ), true );
-					if ( is_array( $tick ) && 'tick' === $tick['kind'] && microtime( true ) - (float) $tick['start'] >= 3.0 ) {
-						acc_exec( array( 'docker', 'exec', $env['web'], 'kill', '-9', (string) (int) $tick['pid'] ), true );
-						file_put_contents( $out . '/kill.json', json_encode( array( 'at' => microtime( true ), 'pid' => (int) $tick['pid'], 'tick_started' => (float) $tick['start'], 'progress' => (int) $row['progress'], 'step' => $row['step'] ?? '' ) ) );
-						return;
-					}
-				}
-			}
-			usleep( 500000 );
-			continue;
-		}
 		return;
 	}
 }
 
-function acc_run( string $dir, string $name, int $kill_at ): void {
+function acc_run( string $dir, string $name, string $kills ): void {
 	$env = acc_state( $dir );
 	$out = $dir . '/' . $name;
 	if ( is_dir( $out ) ) {
@@ -309,14 +308,23 @@ function acc_run( string $dir, string $name, int $kill_at ): void {
 	}
 	$baseline_window = array( $t0, microtime( true ) );
 
+	foreach ( array( 'kills.json', 'kills-state.json', 'kills.jsonl' ) as $file ) {
+		@unlink( $probe . '/' . $file );
+	}
+	if ( 'standard' === $kills ) {
+		file_put_contents( $probe . '/kills.json', json_encode( ACC_KILLS, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES ) );
+		acc_say( count( ACC_KILLS ) . ' planned kills installed.' );
+	} elseif ( '' !== $kills ) {
+		acc_fail( 'Unknown kill plan: ' . $kills );
+	}
 	$before  = glob( $env['storage'] . '/backups/*.manifest.json' ) ?: array();
 	$options = var_export( array( 'exclusions' => ACC_EXCLUDE ), true );
 	$job     = (int) acc_eval( $env, '$o = \WPCheckpoint\Jobs\ExportOptions::normalize( array_merge( ' . $options . ', array( "policy" => \WPCheckpoint\Jobs\ExportOptions::UNATTENDED ) ) ); echo \WPCheckpoint\Plugin::instance()->jobs()->create( "export", 1, array(), $o )->id;' );
 	acc_say( "Job {$job} created; ticking." );
 
 	$helpers = array();
-	foreach ( array_merge( array( 'ttfb', 'disk' ), $kill_at > 0 ? array( 'kill' ) : array() ) as $kind ) {
-		$helpers[ $kind ] = proc_open( array( PHP_BINARY, __FILE__, 'helper', '--kind=' . $kind, '--out=' . $out, '--job=' . $job, '--kill-at=' . $kill_at ), array( 1 => array( 'file', $out . '/helper-' . $kind . '.log', 'a' ), 2 => array( 'file', $out . '/helper-' . $kind . '.log', 'a' ) ), $pipes );
+	foreach ( array( 'ttfb', 'disk' ) as $kind ) {
+		$helpers[ $kind ] = proc_open( array( PHP_BINARY, __FILE__, 'helper', '--kind=' . $kind, '--out=' . $out, '--job=' . $job ), array( 1 => array( 'file', $out . '/helper-' . $kind . '.log', 'a' ), 2 => array( 'file', $out . '/helper-' . $kind . '.log', 'a' ) ), $pipes );
 	}
 	$started = microtime( true );
 	$result  = '';
@@ -355,6 +363,10 @@ function acc_run( string $dir, string $name, int $kill_at ): void {
 	acc_ttfb_samples( $env, $out . '/ttfb-after.jsonl', 60, 1.0 );
 
 	copy( $probe . '/requests.jsonl', $out . '/requests.jsonl' );
+	if ( is_file( $probe . '/kills.jsonl' ) ) {
+		copy( $probe . '/kills.jsonl', $out . '/kills.jsonl' );
+	}
+	@unlink( $probe . '/kills.json' );
 	$row    = json_decode( acc_eval( $env, '$j = \WPCheckpoint\Plugin::instance()->jobs()->find( ' . $job . ' ); echo wp_json_encode( array( "status" => $j->status, "last_error" => $j->last_error, "attempts" => $j->attempts, "takeovers" => $j->takeovers, "log_path" => $j->log_path, "storage_path" => $j->storage_path ) );' ), true );
 	$log    = acc_host( $env, $row['storage_path'] ) . '/' . $row['log_path'];
 	if ( is_file( $log ) ) {
@@ -368,7 +380,8 @@ function acc_run( string $dir, string $name, int $kill_at ): void {
 			array(
 				'job'             => $job,
 				'base'            => $base,
-				'kill_at'         => $kill_at,
+				'kills'           => $kills,
+				'planned_kills'   => 'standard' === $kills ? array_column( ACC_KILLS, 'id' ) : array(),
 				'started'         => $started,
 				'finished'        => $finished,
 				'baseline_window' => $baseline_window,
@@ -475,13 +488,14 @@ function acc_check( string $dir, string $name ): void {
 		'concurrent_writer' => substr_count( $log, 'Another process wrote the same work directory' ),
 		'budget'            => preg_match( '/"budget_seconds":(\d+),"budget_mb":(\d+)/', $log, $bm ) ? array( 'seconds' => (int) $bm[1], 'mb' => (int) $bm[2] ) : null,
 	);
-	$expected_takeovers = is_file( $out . '/kill.json' ) ? 1 : 0;
-	$report['i']['kill'] = $expected_takeovers ? json_decode( (string) file_get_contents( $out . '/kill.json' ), true ) : ( $run['kill_at'] > 0 ? 'no tick was in flight past the kill point: repeat the run' : null );
-	$report['i']['pass'] = ( 0 === $run['kill_at'] || 1 === $expected_takeovers ) && 'completed' === $run['job_row']['status'] && 0 === $report['i']['no_progress'] && $expected_takeovers === $report['i']['takeovers_logged'] && 0 === $report['i']['concurrent_writer'];
+	$kills              = acc_lines( $out . '/kills.jsonl' );
+	$expected_takeovers = count( $kills );
+	$report['i']['kills_fired']   = array_column( $kills, 'rule' );
+	$report['i']['kills_missed']  = array_values( array_diff( $run['planned_kills'], array_column( $kills, 'rule' ) ) );
+	$report['i']['pass'] = array() === $report['i']['kills_missed'] && 'completed' === $run['job_row']['status'] && 0 === $report['i']['no_progress'] && $expected_takeovers === $report['i']['takeovers_logged'] && 0 === $report['i']['concurrent_writer'];
 
 	// (ii) and (iii) from the probe: every web tick of this job.
 	$requests = acc_lines( $out . '/requests.jsonl' );
-	$killed   = is_file( $out . '/kill.json' ) ? json_decode( (string) file_get_contents( $out . '/kill.json' ), true ) : null;
 	$ticks    = array_values( array_filter( $requests, static function ( $r ) use ( $run ) { return in_array( $r['kind'], array( 'tick', 'loopback', 'cron' ), true ) && $r['start'] >= $run['started'] - 1 && $r['start'] <= $run['finished'] + 1; } ) );
 	$base     = array_values( array_filter( $requests, static function ( $r ) use ( $run ) { return 'tick' === $r['kind'] && $r['start'] >= $run['baseline_window'][0] - 1 && $r['start'] <= $run['baseline_window'][1] + 1; } ) );
 	$seconds  = array_map( static function ( $r ) { return (float) $r['seconds']; }, $ticks );
@@ -493,7 +507,7 @@ function acc_check( string $dir, string $name ): void {
 	}
 	$report['ii'] = array(
 		'ticks'   => count( $ticks ),
-		'killed'  => null !== $killed ? 'one tick (pid ' . $killed['pid'] . ') was killed and has no probe line' : null,
+		'killed'  => count( $kills ) . ' killed ticks have no probe line (the process died before its shutdown function)',
 		'p50'     => acc_quantile( $seconds, 0.50 ),
 		'p99'     => acc_quantile( $seconds, 0.99 ),
 		'max'     => array() === $seconds ? 0.0 : max( $seconds ),
@@ -629,6 +643,62 @@ function acc_check( string $dir, string $name ): void {
 		'pass'            => $peak <= $archive_bytes * 1.05 + 64 * 1048576 && ! is_dir( $env['storage'] . '/tmp/job-' . $run['job'] ),
 	);
 
+	// After each kill: the tick that took the job over (the first one to find the dead run's lease expired).
+	$log_lines        = explode( "\n", $log );
+	$report['kills'] = array();
+	foreach ( $kills as $n => $kill ) {
+		$until    = isset( $kills[ $n + 1 ] ) ? (float) $kills[ $n + 1 ]['at'] : $run['finished'] + 1;
+		$resumed  = null;
+		foreach ( $ticks as $t ) {
+			if ( $t['start'] > $kill['at'] && ! empty( $t['before']['lease_expired'] ) ) {
+				$resumed = $t;
+				break;
+			}
+		}
+		$concurrent = 0;
+		foreach ( $log_lines as $line ) {
+			if ( 1 === preg_match( '/^\[([0-9T:-]+)Z\]/', $line, $lm ) ) {
+				$at = strtotime( $lm[1] . 'Z' );
+				if ( $at >= floor( $kill['at'] ) && $at <= $until && false !== strpos( $line, 'Another process wrote the same work directory' ) ) {
+					++$concurrent;
+				}
+			}
+		}
+		$report['kills'][] = array(
+			'rule'              => $kill['rule'],
+			'event'             => $kill['event'],
+			'cursor_at_kill'    => json_decode( (string) $kill['cursor'], true ),
+			'stack'             => array_slice( $kill['stack'], 0, 8 ),
+			'resumed_after_s'   => null === $resumed ? null : round( $resumed['start'] - $kill['at'], 1 ),
+			'resumed_tick_s'    => null === $resumed ? null : $resumed['seconds'],
+			'resumed_peak_mb'   => null === $resumed ? null : round( $resumed['peak_real'] / 1048576, 1 ),
+			'takeovers_before'  => null === $resumed ? null : $resumed['before']['takeovers'],
+			'takeovers_after'   => null === $resumed ? null : ( $resumed['after']['takeovers'] ?? null ),
+			'takeover_mark'     => null === $resumed ? null : ( $resumed['after']['takeover_mark'] ?? null ),
+			'step_before_after' => null === $resumed ? null : array( $resumed['before']['step'], $resumed['after']['step'] ?? null ),
+			'concurrent_writer' => $concurrent,
+		);
+	}
+
+	// Raw distributions for the record: every tick, every peak, every TTFB sample.
+	$ttfb_raw = static function ( string $file ): array {
+		return array_map( static function ( $r ) { return round( (float) $r['ttfb'] * 1000, 2 ); }, acc_lines( $file ) );
+	};
+	file_put_contents(
+		$out . '/distributions.json',
+		json_encode(
+			array(
+				'tick_seconds'  => array_map( static function ( $t ) { return $t['seconds']; }, $ticks ),
+				'tick_peak_mb'  => array_map( static function ( $t ) { return round( $t['peak_real'] / 1048576, 1 ); }, $ticks ),
+				'tick_steps'    => array_map( static function ( $t ) { return ( $t['before']['step'] ?? '' ) . '>' . ( $t['after']['step'] ?? '' ); }, $ticks ),
+				'baseline_peak_mb' => array_map( static function ( $t ) { return round( $t['peak_real'] / 1048576, 1 ); }, $base ),
+				'ttfb_ms'       => array( 'before' => $ttfb_raw( $out . '/ttfb-before.jsonl' ), 'during' => $ttfb_raw( $out . '/ttfb-during.jsonl' ), 'after' => $ttfb_raw( $out . '/ttfb-after.jsonl' ) ),
+				'work_dir_mb'   => array_map( static function ( $r ) { return round( $r['work'] / 1048576, 1 ); }, $disk ),
+			),
+			JSON_UNESCAPED_SLASHES
+		)
+	);
+
 	$report['archive'] = array( 'volumes' => count( $volumes ), 'bytes' => $archive_bytes, 'tables' => count( $tables ), 'files' => (int) $manifest['files']['count'], 'seconds' => round( $run['finished'] - $run['started'] ) );
 	file_put_contents( $out . '/check.json', json_encode( $report, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE ) );
 	foreach ( array( 'i', 'ii', 'iii', 'iv', 'v', 'vi', 'vii', 'viii', 'ix' ) as $k ) {
@@ -731,7 +801,7 @@ switch ( $command ) {
 		acc_setup( (string) ( $opts['dir'] ?? acc_fail( '--dir is required' ) ), (int) ( $opts['cpus'] ?? 1 ) );
 		break;
 	case 'run':
-		acc_run( (string) ( $opts['dir'] ?? '' ), (string) ( $opts['name'] ?? acc_fail( '--name is required' ) ), (int) ( $opts['kill-at'] ?? 0 ) );
+		acc_run( (string) ( $opts['dir'] ?? '' ), (string) ( $opts['name'] ?? acc_fail( '--name is required' ) ), (string) ( $opts['kills'] ?? '' ) );
 		break;
 	case 'check':
 		acc_check( (string) ( $opts['dir'] ?? '' ), (string) ( $opts['name'] ?? acc_fail( '--name is required' ) ) );
@@ -743,7 +813,7 @@ switch ( $command ) {
 		acc_teardown( (string) ( $opts['dir'] ?? '' ) );
 		break;
 	case 'helper':
-		acc_helper( (string) $opts['kind'], (string) $opts['out'], (int) $opts['job'], (int) ( $opts['kill-at'] ?? 0 ) );
+		acc_helper( (string) $opts['kind'], (string) $opts['out'], (int) $opts['job'] );
 		break;
 	default:
 		fwrite( STDERR, "Usage: see the header of this file.\n" );

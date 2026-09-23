@@ -1,7 +1,7 @@
 <?php
 /**
  * Plugin Name: WP Checkpoint acceptance probe
- * Description: Records every web request's duration, peak memory and, for job ticks, the job's step and position before and after. For the acceptance run in a development environment only; never install it on a real site.
+ * Description: Records every web request's duration, peak memory and, for job ticks, the job's step and position before and after; kills a tick's own web process at planned points (kills.json). For the acceptance run in a development environment only; never install it on a real site.
  *
  * @package WPCheckpoint
  */
@@ -27,9 +27,10 @@ function wpcheckpoint_acceptance_dir(): string {
 function wpcheckpoint_acceptance_position( int $job_id ): ?array {
 	global $wpdb;
 	$table = $wpdb->base_prefix . 'wpcheckpoint_jobs';
+	$cols  = 'id, status, step, progress, cursor_json, takeovers, takeover_mark, lock_token, locked_until';
 	$row   = $job_id > 0
-		? $wpdb->get_row( $wpdb->prepare( "SELECT id, status, step, progress, cursor_json FROM {$table} WHERE id = %d", $job_id ), ARRAY_A )
-		: $wpdb->get_row( "SELECT id, status, step, progress, cursor_json FROM {$table} ORDER BY updated_at DESC, id DESC LIMIT 1", ARRAY_A );
+		? $wpdb->get_row( $wpdb->prepare( "SELECT {$cols} FROM {$table} WHERE id = %d", $job_id ), ARRAY_A )
+		: $wpdb->get_row( "SELECT {$cols} FROM {$table} ORDER BY updated_at DESC, id DESC LIMIT 1", ARRAY_A );
 	if ( ! is_array( $row ) ) {
 		return null;
 	}
@@ -52,7 +53,97 @@ function wpcheckpoint_acceptance_position( int $job_id ): ?array {
 		'step'     => (string) $row['step'],
 		'progress' => (int) $row['progress'],
 		'unit'     => $unit,
+		'takeovers'     => (int) $row['takeovers'],
+		'takeover_mark' => (string) $row['takeover_mark'],
+		// Held by someone whose lease has run out: this tick takes the job over.
+		'lease_expired' => '' !== (string) $row['lock_token'] && (int) $row['locked_until'] <= time(),
 	);
+}
+
+/**
+ * Planned kills: rules in kills.json, each fired once (state in kills-state.json). A rule matches a job-table
+ * UPDATE by its call stack: event "checkpoint" (JobContext::checkpoint) or "confirm" (JobContext::confirm_lease,
+ * the lease check right before an irreversible transition), the step class in the stack, optionally a function
+ * in the stack ("in"), text in the cursor being written ("contains"), and that a confirm inside a given function
+ * happened earlier in this request ("after_confirm_in"). It fires on its nth match, before the query runs: the
+ * process kills itself with SIGKILL, like a web server killing a worker.
+ *
+ * @param string $query SQL.
+ * @return string
+ */
+function wpcheckpoint_acceptance_query( $query ) {
+	static $confirms = array();
+	global $wpdb;
+	if ( 0 !== strpos( ltrim( (string) $query ), 'UPDATE' ) || false === strpos( (string) $query, $wpdb->base_prefix . 'wpcheckpoint_jobs' ) ) {
+		return $query;
+	}
+	$dir   = wpcheckpoint_acceptance_dir();
+	$rules = json_decode( (string) @file_get_contents( $dir . '/kills.json' ), true );
+	if ( ! is_array( $rules ) ) {
+		return $query;
+	}
+	$frames = debug_backtrace( DEBUG_BACKTRACE_PROVIDE_OBJECT, 40 );
+	$stack  = array();
+	$event  = '';
+	$cursor = null;
+	foreach ( $frames as $frame ) {
+		$class   = isset( $frame['class'] ) ? substr( (string) strrchr( '\\' . $frame['class'], '\\' ), 1 ) : '';
+		$stack[] = ( '' !== $class ? $class . '::' : '' ) . $frame['function'];
+		if ( 'JobContext' === $class && 'checkpoint' === $frame['function'] ) {
+			$event  = 'checkpoint';
+			$cursor = $frame['args'][0] ?? null;
+		} elseif ( 'JobContext' === $class && 'confirm_lease' === $frame['function'] && '' === $event ) {
+			$event = 'confirm';
+		}
+	}
+	if ( '' === $event ) {
+		return $query;
+	}
+	$in_stack = static function ( string $name ) use ( $stack ): bool {
+		foreach ( $stack as $entry ) {
+			if ( $entry === $name || substr( $entry, -strlen( '::' . $name ) ) === '::' . $name ) {
+				return true;
+			}
+		}
+		return false;
+	};
+	$json  = is_array( $cursor ) ? (string) json_encode( $cursor, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE ) : '';
+	$state = json_decode( (string) @file_get_contents( $dir . '/kills-state.json' ), true );
+	$state = is_array( $state ) ? $state : array();
+	foreach ( $rules as $rule ) {
+		$id = (string) $rule['id'];
+		if ( ! empty( $state[ $id ]['fired'] ) || $rule['event'] !== $event || ! $in_stack( (string) $rule['step'] ) ) {
+			continue;
+		}
+		if ( isset( $rule['in'] ) && ! $in_stack( (string) $rule['in'] ) ) {
+			continue;
+		}
+		if ( isset( $rule['contains'] ) && false === strpos( $json, (string) $rule['contains'] ) ) {
+			continue;
+		}
+		if ( isset( $rule['after_confirm_in'] ) && empty( $confirms[ (string) $rule['after_confirm_in'] ] ) ) {
+			continue;
+		}
+		$state[ $id ]['count'] = (int) ( $state[ $id ]['count'] ?? 0 ) + 1;
+		if ( $state[ $id ]['count'] < (int) ( $rule['nth'] ?? 1 ) ) {
+			continue;
+		}
+		$state[ $id ]['fired'] = microtime( true );
+		file_put_contents( $dir . '/kills-state.json', json_encode( $state ), LOCK_EX );
+		file_put_contents(
+			$dir . '/kills.jsonl',
+			json_encode( array( 'rule' => $id, 'at' => microtime( true ), 'pid' => getmypid(), 'event' => $event, 'cursor' => substr( $json, 0, 2000 ), 'stack' => array_slice( $stack, 0, 14 ) ), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE ) . "\n",
+			FILE_APPEND | LOCK_EX
+		);
+		posix_kill( getmypid(), 9 );
+	}
+	file_put_contents( $dir . '/kills-state.json', json_encode( $state ), LOCK_EX );
+	if ( 'confirm' === $event ) {
+		foreach ( $stack as $entry ) {
+			$confirms[ substr( (string) strrchr( '::' . $entry, ':' ), 1 ) ] = true;
+		}
+	}
+	return $query;
 }
 
 $wpcheckpoint_acceptance = array(
@@ -73,6 +164,9 @@ if ( 1 === preg_match( '#/wp-checkpoint/v1/jobs/(\d+)/(tick|loopback)#', $wpchec
 
 if ( in_array( $wpcheckpoint_acceptance['kind'], array( 'tick', 'loopback', 'cron' ), true ) ) {
 	$wpcheckpoint_acceptance['before'] = wpcheckpoint_acceptance_position( $wpcheckpoint_acceptance['job'] );
+	if ( 'tick' === $wpcheckpoint_acceptance['kind'] && is_file( wpcheckpoint_acceptance_dir() . '/kills.json' ) ) {
+		add_filter( 'query', 'wpcheckpoint_acceptance_query', PHP_INT_MAX );
+	}
 	$dir                               = wpcheckpoint_acceptance_dir() . '/inflight';
 	if ( is_dir( $dir ) || @mkdir( $dir, 0777, true ) ) {
 		@file_put_contents( $dir . '/' . $wpcheckpoint_acceptance['pid'] . '.json', json_encode( array( 'pid' => $wpcheckpoint_acceptance['pid'], 'start' => $wpcheckpoint_acceptance['start'], 'kind' => $wpcheckpoint_acceptance['kind'] ) ) );
