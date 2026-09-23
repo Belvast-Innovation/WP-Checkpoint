@@ -115,6 +115,20 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		$this->repo->create( 'export' );
 	}
 
+	public function test_create_brings_a_table_left_behind_by_an_older_version_up_to_date_first(): void {
+		global $wpdb;
+		// A version 2 table: what an update leaves until something calls Schema::ensure(). The first job a
+		// command creates may come before any tick, admin page or activation did.
+		foreach ( array( 'options_json', 'questions_json', 'takeovers', 'takeover_mark' ) as $column ) {
+			$wpdb->query( 'ALTER TABLE ' . Schema::jobs_table() . ' DROP COLUMN `' . $column . '`' );
+		}
+		$this->assertSame( '', $wpdb->last_error );
+		Options::set( Schema::OPTION, array( 'version' => 2, 'min_compatible' => 1 ) );
+		$job = $this->repo->create( 'export', 0, array(), array( 'policy' => array( 'unreadable' => 'continue' ) ) );
+		$this->assertSame( array( 'policy' => array( 'unreadable' => 'continue' ) ), $this->repo->find( $job->id )->options );
+		$this->assertSame( Schema::CURRENT, Schema::stored()['version'] );
+	}
+
 	public function test_create_and_find(): void {
 		$job = $this->repo->create( 'export', 42, array( 'table' => 'wp_posts', 'offset' => 0 ) );
 		$this->assertGreaterThan( 0, $job->id );
