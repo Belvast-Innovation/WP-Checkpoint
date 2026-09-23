@@ -4,6 +4,7 @@ namespace WPCheckpoint\Tests\Integration;
 
 use WP_UnitTestCase;
 use WPCheckpoint\Admin\DownloadHandler;
+use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Support\Deleter;
 use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Support\Guard;
@@ -19,6 +20,9 @@ final class DownloadTest extends WP_UnitTestCase {
 
 	/** @var string */
 	private $outside;
+
+	/** @var Job[] */
+	private $active = array();
 
 	public function set_up(): void {
 		parent::set_up();
@@ -48,7 +52,12 @@ final class DownloadTest extends WP_UnitTestCase {
 	}
 
 	private function handler(): DownloadHandler {
-		return new DownloadHandler( $this->dirs );
+		return new DownloadHandler(
+			$this->dirs,
+			function (): array {
+				return $this->active;
+			}
+		);
 	}
 
 	private function request( string $file, string $method = 'GET', $range = null, $if_range = null ): array {
@@ -98,6 +107,32 @@ final class DownloadTest extends WP_UnitTestCase {
 			'symlink to outside log'         => array( 'logs/link.log' ),
 			'empty'                          => array( '' ),
 		);
+	}
+
+	public function test_files_of_a_backup_being_restored_are_refused_until_it_has_ended(): void {
+		$base = 'site-20260923-120000-ab12';
+		foreach ( array( $base . '.part001.wpcheckpoint.zip', $base . '.manifest.json', 'other-20260923-120000-cd34.wpcheckpoint.zip' ) as $name ) {
+			file_put_contents( $this->base . '/backups/' . $name, 'data' );
+		}
+		$restore          = new Job();
+		$restore->id      = 42;
+		$restore->type    = 'restore';
+		$restore->status  = Job::RUNNING;
+		$restore->options = array( 'base' => $base );
+		$this->active     = array( $restore );
+		foreach ( array( $base . '.part001.wpcheckpoint.zip', $base . '.manifest.json' ) as $name ) {
+			list( $status, $headers, $body ) = $this->request( 'backups/' . $name );
+			$this->assertSame( 409, $status, $name );
+			$this->assertSame( 'This backup is being restored (job 42).', $body );
+			$this->assertContains( 'Content-Type: text/plain; charset=utf-8 [409]', $headers );
+		}
+		$this->assertSame( 200, $this->request( 'backups/other-20260923-120000-cd34.wpcheckpoint.zip' )[0], 'another backup is not held' );
+		$this->assertSame( 200, $this->request( 'logs/job-1-abcd.log' )[0], 'logs are not held' );
+
+		$verify       = clone $restore;
+		$verify->type = 'verify';
+		$this->active = array( $verify );
+		$this->assertSame( 200, $this->request( 'backups/' . $base . '.part001.wpcheckpoint.zip' )[0], 'a verify job only reads the backup' );
 	}
 
 	public function test_full_download(): void {

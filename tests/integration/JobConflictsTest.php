@@ -3,7 +3,7 @@
 namespace WPCheckpoint\Tests\Integration;
 
 use WPCheckpoint\Jobs\Job;
-use WPCheckpoint\Jobs\JobsUnavailable;
+use WPCheckpoint\Jobs\JobConflict;
 use WPCheckpoint\Plugin;
 use WPCheckpoint\Tests\Fixtures\Jobs\JobTestCase;
 
@@ -19,7 +19,7 @@ final class JobConflictsTest extends JobTestCase {
 		try {
 			$actions->start( 'export', self::$admin_id, array() );
 			$this->fail( 'a second export must be refused' );
-		} catch ( JobsUnavailable $e ) {
+		} catch ( JobConflict $e ) {
 			$this->assertSame( sprintf( 'A backup is already being made (job %d).', $first->id ), $e->getMessage() );
 		}
 		$this->assertCount( 1, Plugin::instance()->jobs()->list_jobs(), 'the refused job was removed before it ran' );
@@ -41,7 +41,7 @@ final class JobConflictsTest extends JobTestCase {
 		try {
 			Plugin::instance()->job_actions()->start( 'verify', self::$admin_id, array( 'base' => 'other-20260923-120000-cd34' ) );
 			$this->fail( 'nothing starts during a restore' );
-		} catch ( JobsUnavailable $e ) {
+		} catch ( JobConflict $e ) {
 			$this->assertStringStartsWith( sprintf( 'A restore is in progress (job %d)', $restore->id ), $e->getMessage() );
 		}
 		// A job a driver has taken is never deleted by discard_unstarted() (one statement, conditions on the row).

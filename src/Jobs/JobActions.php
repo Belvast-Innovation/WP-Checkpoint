@@ -91,7 +91,7 @@ final class JobActions {
 	public function conflict_for( Job $job ): string {
 		$before = array_values(
 			array_filter(
-				$this->repository->list_jobs( array( Job::QUEUED, Job::RUNNING, Job::PAUSED ), 500 ),
+				$this->active(),
 				static function ( Job $other ) use ( $job ): bool {
 					return $other->id < $job->id;
 				}
@@ -110,7 +110,8 @@ final class JobActions {
 	 * @param int                  $owner_user Creating user.
 	 * @param array<string, mixed> $options    Options.
 	 * @return Job
-	 * @throws JobsUnavailable When jobs cannot be created now, or the job conflicts (the message says with what).
+	 * @throws JobsUnavailable When jobs cannot be created now.
+	 * @throws JobConflict When the job must not run next to an active one (the message says which).
 	 */
 	public function start( string $type, int $owner_user, array $options ): Job {
 		$job    = $this->repository->create( $type, $owner_user, array(), $options );
@@ -127,7 +128,7 @@ final class JobActions {
 				unset( $e );
 			}
 		}
-		throw new JobsUnavailable( esc_html( $reason ) );
+		throw new JobConflict( esc_html( $reason ) );
 	}
 
 	/**
@@ -138,6 +139,15 @@ final class JobActions {
 	 */
 	public function find( int $id ) {
 		return $this->repository->find( $id );
+	}
+
+	/**
+	 * Queued, running and paused jobs: the ones JobConflicts weighs.
+	 *
+	 * @return Job[]
+	 */
+	public function active(): array {
+		return $this->repository->list_jobs( array( Job::QUEUED, Job::RUNNING, Job::PAUSED ), 500 );
 	}
 
 	/**

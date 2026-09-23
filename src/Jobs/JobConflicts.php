@@ -64,6 +64,22 @@ final class JobConflicts {
 	}
 
 	/**
+	 * Why a backup's files cannot be downloaded now (it is being restored), or '' when they can.
+	 *
+	 * @param string $base   Backup base name.
+	 * @param Job[]  $active Queued, running and paused jobs.
+	 * @return string
+	 */
+	public static function restoring( string $base, array $active ): string {
+		foreach ( $active as $job ) {
+			if ( self::RESTORE === $job->type && self::backup_of( $job->type, $job->options ) === $base ) {
+				return sprintf( 'This backup is being restored (job %d).', $job->id );
+			}
+		}
+		return '';
+	}
+
+	/**
 	 * Why a backup cannot be deleted (or downloaded, during a restore) now, or '' when it can.
 	 *
 	 * @param string $base   Backup base name.

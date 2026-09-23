@@ -12,6 +12,7 @@ use WPCheckpoint\Jobs\ExportJob;
 use WPCheckpoint\Jobs\ExportOptions;
 use WPCheckpoint\Jobs\JobActions;
 use WPCheckpoint\Jobs\JobPresenter;
+use WPCheckpoint\Jobs\JobConflict;
 use WPCheckpoint\Jobs\JobsUnavailable;
 use WPCheckpoint\Support\Directories;
 
@@ -165,6 +166,8 @@ final class ExportCommand {
 		try {
 			$job = $this->actions->start( ExportJob::ID, get_current_user_id(), $options );
 		} catch ( JobsUnavailable $e ) {
+			WP_CLI::error( $this->presenter->clean( $e->getMessage() ) ); // Exits.
+		} catch ( JobConflict $e ) {
 			WP_CLI::error( $this->presenter->clean( $e->getMessage() ) ); // Exits.
 		}
 		if ( ! $porcelain ) {

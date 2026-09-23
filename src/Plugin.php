@@ -22,6 +22,7 @@ use WPCheckpoint\Jobs\JobActions;
 use WPCheckpoint\Jobs\JobPresenter;
 use WPCheckpoint\Jobs\JobRepository;
 use WPCheckpoint\Jobs\ExportJob;
+use WPCheckpoint\Jobs\VerifyJob;
 use WPCheckpoint\Jobs\JobTypes;
 use WPCheckpoint\Jobs\Loopback;
 use WPCheckpoint\Jobs\Runner;
@@ -31,6 +32,7 @@ use WPCheckpoint\Admin\Tabs\CheckpointsTab;
 use WPCheckpoint\Admin\Tabs\SettingsTab;
 use WPCheckpoint\Admin\Tabs\ToolsTab;
 use WPCheckpoint\Rest\Controller;
+use WPCheckpoint\Rest\BackupsController;
 use WPCheckpoint\Rest\JobsController;
 use WPCheckpoint\Rest\LoopbackController;
 use WPCheckpoint\Rest\ProbeController;
@@ -185,7 +187,12 @@ final class Plugin {
 		( new Menu( $this->admin_page() ) )->register();
 		( new SettingsActions() )->register();
 		add_action( 'admin_init', array( $this, 'migrate_settings' ) );
-		( new DownloadHandler( $this->directories() ) )->register();
+		( new DownloadHandler(
+			$this->directories(),
+			function (): array {
+				return $this->job_actions()->active();
+			}
+		) )->register();
 		( new Notices( $this->directories() ) )->register();
 		( new EnvironmentActions( $this->directories() ) )->register();
 		( new ReclaimActions( $this->directories() ) )->register();
@@ -321,6 +328,16 @@ final class Plugin {
 					}
 				)
 			);
+			$this->job_types->add(
+				new VerifyJob(
+					static function () use ( $plugin ): Directories {
+						return $plugin->directories();
+					},
+					static function ( string $text ) use ( $plugin ): string {
+						return $plugin->job_presenter()->clean( $text );
+					}
+				)
+			);
 		}
 		return $this->job_types;
 	}
@@ -378,7 +395,8 @@ final class Plugin {
 		return array(
 			new StatusController(),
 			new ProbeController(),
-			new JobsController( $this->job_actions(), $this->job_presenter() ),
+			new JobsController( $this->job_actions(), $this->job_presenter(), $this->directories() ),
+			new BackupsController( $this->job_actions(), $this->job_presenter(), $this->directories() ),
 			new LoopbackController( $this->job_actions() ),
 		);
 	}

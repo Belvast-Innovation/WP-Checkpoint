@@ -58,6 +58,26 @@ final class RestPermissionsTest extends WP_UnitTestCase {
 			'path'   => '/wp-checkpoint/v1/jobs/1/retry',
 			'params' => array(),
 		),
+		'/wp-checkpoint/v1/jobs/(?P<id>\\d+)/questions' => array(
+			'path'   => '/wp-checkpoint/v1/jobs/1/questions',
+			'params' => array(),
+		),
+		'/wp-checkpoint/v1/jobs/(?P<id>\\d+)/answer' => array(
+			'path'   => '/wp-checkpoint/v1/jobs/1/answer',
+			'params' => array( 'answers' => array( 'oversize' => 'exclude' ) ),
+		),
+		'/wp-checkpoint/v1/backups' => array(
+			'path'   => '/wp-checkpoint/v1/backups',
+			'params' => array(),
+		),
+		'/wp-checkpoint/v1/backups/(?P<base>[a-z0-9][a-z0-9-]{0,39}-[0-9]{8}-[0-9]{6}-[0-9a-f]{4})' => array(
+			'path'   => '/wp-checkpoint/v1/backups/site-20260923-120000-ab12',
+			'params' => array(),
+		),
+		'/wp-checkpoint/v1/backups/(?P<base>[a-z0-9][a-z0-9-]{0,39}-[0-9]{8}-[0-9]{6}-[0-9a-f]{4})/verify' => array(
+			'path'   => '/wp-checkpoint/v1/backups/site-20260923-120000-ab12/verify',
+			'params' => array(),
+		),
 		'/wp-checkpoint/v1/jobs/(?P<id>\\d+)/loopback' => array(
 			'path'   => '/wp-checkpoint/v1/jobs/1/loopback',
 			'params' => array(),
@@ -165,10 +185,12 @@ final class RestPermissionsTest extends WP_UnitTestCase {
 			}
 			$this->assertNotContains( $response->get_status(), array( 401, 403 ), "{$label} must not reject administrators" );
 			$this->assertNotSame( 400, $response->get_status(), "{$label} example request is invalid (400); fix EXAMPLES" );
-			if ( false === strpos( $pattern, '/jobs/' ) ) {
-				$this->assertNotSame( 404, $response->get_status(), "{$label} example path does not match the route (404); fix EXAMPLES" );
-			} else {
+			if ( false !== strpos( $pattern, '/jobs/' ) ) {
 				$this->assertSame( 'wpcheckpoint_job_not_found', $response->get_data()['code'] ?? $response->get_data(), "{$label} reached the handler (job 1 does not exist)" );
+			} elseif ( false !== strpos( $pattern, '/backups/' ) ) {
+				$this->assertSame( 'wpcheckpoint_backup_not_found', $response->get_data()['code'] ?? $response->get_data(), "{$label} reached the handler (the example backup does not exist)" );
+			} else {
+				$this->assertNotSame( 404, $response->get_status(), "{$label} example path does not match the route (404); fix EXAMPLES" );
 			}
 		}
 	}
