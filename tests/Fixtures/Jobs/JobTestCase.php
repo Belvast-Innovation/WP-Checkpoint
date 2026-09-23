@@ -39,6 +39,7 @@ abstract class JobTestCase extends WP_UnitTestCase {
 		Options::delete( Directories::OPTION );
 		delete_site_transient( 'wpcheckpoint_jobs_reaped' );
 		delete_site_transient( 'wpcheckpoint_jobs_purged' );
+		delete_site_transient( 'wpcheckpoint_jobs_swept' );
 		delete_site_transient( 'wpcheckpoint_environment' );
 		Plugin::instance()->reset_directories();
 		Plugin::instance()->directories()->base();
@@ -57,6 +58,9 @@ abstract class JobTestCase extends WP_UnitTestCase {
 			60
 		);
 		Schema::ensure();
+		// The table's DDL commits the test transaction: cron events an earlier test scheduled for the same job
+		// ids (they restart at 1 with the table) would survive its rollback.
+		_set_cron_array( array() );
 		wp_set_current_user( self::$admin_id );
 		global $wp_rest_server;
 		$wp_rest_server = null;

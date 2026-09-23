@@ -191,6 +191,7 @@ final class Uninstaller {
 		\WPCheckpoint\Jobs\Loopback::unschedule_all();
 		delete_site_transient( 'wpcheckpoint_jobs_reaped' );
 		delete_site_transient( 'wpcheckpoint_jobs_purged' );
+		delete_site_transient( 'wpcheckpoint_jobs_swept' );
 		delete_site_transient( Environment::CACHE );
 	}
 

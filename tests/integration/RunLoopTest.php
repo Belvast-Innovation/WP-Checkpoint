@@ -175,6 +175,21 @@ final class RunLoopTest extends JobTestCase {
 		remove_all_filters( 'pre_http_request' );
 	}
 
+	public function test_the_loop_takes_back_the_event_a_start_set_so_cron_does_not_compete_with_it(): void {
+		$seen = array();
+		$this->register( 'watched', array( new ClosureStep( 'w', static function ( JobContext $ctx ) use ( &$seen ): StepResult {
+			$seen[] = wp_next_scheduled( Loopback::HOOK, array( $ctx->job()->id ) );
+			$n      = (int) ( $ctx->cursor()['n'] ?? 0 );
+			return $n >= 2 ? StepResult::done() : StepResult::progress( array( 'n' => $n + 1 ), 30 * ( $n + 1 ) );
+		} ) ) );
+		$job = Plugin::instance()->job_actions()->start( 'watched', self::$admin_id, array() );
+		$this->assertNotFalse( wp_next_scheduled( Loopback::HOOK, array( $job->id ) ), 'the start set the fallback event' );
+		$this->assertSame( RunLoop::EXIT_COMPLETED, $this->loop()->run( $job->id, false ) );
+		$this->assertNotSame( array(), $seen, 'the step ran' );
+		$this->assertSame( array( false ), array_values( array_unique( $seen, SORT_REGULAR ) ), 'while the loop drives the job, no cron event can take it over' );
+		$this->assertFalse( wp_next_scheduled( Loopback::HOOK, array( $job->id ) ) );
+	}
+
 	public function test_transient_failures_are_waited_out(): void {
 		$calls = 0;
 		$this->register( 'flaky', array( new ClosureStep( 'f', static function () use ( &$calls ): StepResult {

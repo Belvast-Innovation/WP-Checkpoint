@@ -104,7 +104,10 @@ final class LoopbackTest extends JobTestCase {
 		$this->assertGreaterThanOrEqual( $before + 30, $at );
 
 		$actions->tick( $job->id, microtime( true ) );
-		$this->assertSame( $at, wp_next_scheduled( Loopback::HOOK, array( $job->id ) ), 'not scheduled twice' );
+		$again = wp_next_scheduled( Loopback::HOOK, array( $job->id ) );
+		$this->assertGreaterThanOrEqual( $at, $again, 'a wait sets its own time again' );
+		$this->assertLessThanOrEqual( time() + 30, $again );
+		$this->assertCount( 1, $this->events( $job->id ), 'not scheduled twice' );
 		$this->assertCount( 1, array_filter( _get_cron_array(), static function ( array $hooks ): bool {
 			return isset( $hooks[ Loopback::HOOK ] );
 		} ) );
@@ -195,6 +198,246 @@ final class LoopbackTest extends JobTestCase {
 		$request = new \WP_REST_Request( 'POST', '/wp-checkpoint/v1/jobs/' . $id . '/loopback' );
 		$request->set_body_params( array( 'token' => $token ) );
 		return $request;
+	}
+
+	/**
+	 * Times of the cron events for a job.
+	 *
+	 * @return int[]
+	 */
+	private function events( int $id ): array {
+		$times = array();
+		foreach ( (array) _get_cron_array() as $timestamp => $hooks ) {
+			foreach ( (array) ( $hooks[ Loopback::HOOK ] ?? array() ) as $event ) {
+				if ( array( $id ) === $event['args'] ) {
+					$times[] = (int) $timestamp;
+				}
+			}
+		}
+		return $times;
+	}
+
+	/**
+	 * Actions whose runner has a zero-second budget: every tick does one unit and returns "more".
+	 */
+	private function one_unit_actions( bool $enabled ): JobActions {
+		$runner  = new \WPCheckpoint\Jobs\Runner( Plugin::instance()->jobs(), Plugin::instance()->job_types(), Plugin::instance()->redactor(), array( 'budget' => new \WPCheckpoint\Jobs\Budget( 0, 32 * 1048576, false ), 'memory_limit' => -1 ) );
+		$actions = $this->actions( $enabled );
+		$this->setRunner( $actions, $runner );
+		return $actions;
+	}
+
+	public function test_a_tick_that_leaves_work_schedules_one_fallback_event_with_or_without_a_hop(): void {
+		$this->register( 'long', array( $this->counting_step( 'l', 50 ) ) );
+		foreach ( array( false, true ) as $enabled ) {
+			$job     = Plugin::instance()->jobs()->create( 'long' );
+			$actions = $this->one_unit_actions( $enabled );
+			$sent    = count( $this->sent );
+			$before  = time();
+			for ( $i = 0; $i < 5; $i++ ) {
+				$this->assertSame( 'more', $actions->tick( $job->id, microtime( true ) )->status );
+				$events = $this->events( $job->id );
+				$this->assertCount( 1, $events, 'one event per job, however many ticks: ' . ( $enabled ? 'with' : 'without' ) . ' a chain' );
+				$this->assertGreaterThanOrEqual( $before + Loopback::FALLBACK_SECONDS, $events[0] );
+				$this->assertLessThanOrEqual( time() + Loopback::FALLBACK_SECONDS, $events[0] );
+			}
+			$this->assertSame( $enabled ? 5 : 0, count( $this->sent ) - $sent, 'the hop is sent only when the chain is enabled; the event either way' );
+		}
+	}
+
+	public function test_while_a_tick_runs_a_next_event_already_exists(): void {
+		// A tick the server kills never reaches its follow-up; if cron started it, that event is used up.
+		$seen = array();
+		$this->register( 'watched', array( new ClosureStep( 'w', static function ( JobContext $ctx ) use ( &$seen ): StepResult {
+			$seen[] = wp_next_scheduled( Loopback::HOOK, array( $ctx->job()->id ) );
+			return StepResult::done();
+		} ) ) );
+		$job = Plugin::instance()->jobs()->create( 'watched' );
+		$this->assertSame( array(), $this->events( $job->id ) );
+		Plugin::instance()->cron_tick( $job->id ); // What WP-Cron runs, after removing the event it came from.
+		$this->assertCount( 1, $seen, 'the step ran' );
+		$this->assertNotFalse( $seen[0], 'during the tick, the job had an event to come back to' );
+		$this->assertSame( Job::COMPLETED, Plugin::instance()->jobs()->find( $job->id )->status );
+		$this->assertSame( array(), $this->events( $job->id ), 'and it is gone once the job is finished' );
+	}
+
+	public function test_a_busy_job_is_retried_one_interval_later_not_every_few_seconds(): void {
+		$this->register( 'held', array( $this->counting_step( 'h', 5 ) ) );
+		$job = Plugin::instance()->jobs()->create( 'held' );
+		$this->assertNotFalse( Plugin::instance()->jobs()->acquire( $job->id ), 'another driver holds the lease' );
+		$before = time();
+		$result = $this->actions( false )->tick( $job->id, microtime( true ) );
+		$this->assertSame( 'busy', $result->status );
+		$events = $this->events( $job->id );
+		$this->assertCount( 1, $events );
+		$this->assertGreaterThanOrEqual( $before + Loopback::FALLBACK_SECONDS, $events[0] );
+	}
+
+	public function test_an_earlier_time_replaces_a_later_one_and_a_wait_sets_its_own(): void {
+		Loopback::schedule( 901, 300 );
+		Loopback::schedule( 901, Loopback::FALLBACK_SECONDS );
+		$this->assertCount( 1, $this->events( 901 ) );
+		$this->assertLessThanOrEqual( time() + Loopback::FALLBACK_SECONDS, $this->events( 901 )[0], 'the earlier time wins' );
+		Loopback::schedule( 901, 300 );
+		$this->assertLessThanOrEqual( time() + Loopback::FALLBACK_SECONDS, $this->events( 901 )[0], 'a later time does not push it back' );
+		Loopback::schedule( 901, 300, Loopback::REPLACE );
+		$this->assertCount( 1, $this->events( 901 ) );
+		$this->assertGreaterThanOrEqual( time() + 299, $this->events( 901 )[0], 'a tick\'s own time replaces it' );
+		Loopback::schedule( 901, Loopback::FALLBACK_SECONDS, Loopback::KEEP );
+		$this->assertGreaterThanOrEqual( time() + 299, $this->events( 901 )[0], 'keep only makes sure one exists' );
+		Loopback::unschedule( 901 );
+		Loopback::schedule( 901, Loopback::FALLBACK_SECONDS, Loopback::KEEP );
+		$this->assertCount( 1, $this->events( 901 ), 'and creates one when there is none' );
+		Loopback::unschedule( 901 );
+	}
+
+	public function test_a_busy_tick_does_not_cut_short_a_wait_but_work_to_do_does(): void {
+		$this->register( 'held', array( $this->counting_step( 'h', 50 ) ) );
+		$job = Plugin::instance()->jobs()->create( 'held' );
+		Loopback::schedule( $job->id, 300, Loopback::REPLACE ); // The holder has just set a wait.
+		$this->assertNotFalse( Plugin::instance()->jobs()->acquire( $job->id ) );
+		$this->assertSame( 'busy', $this->actions( false )->tick( $job->id, microtime( true ) )->status );
+		$this->assertGreaterThanOrEqual( time() + 299, $this->events( $job->id )[0], 'neither the pre-tick event nor the busy follow-up moved the wait' );
+
+		$other = Plugin::instance()->jobs()->create( 'held' );
+		Loopback::schedule( $other->id, 300, Loopback::REPLACE );
+		$this->assertSame( 'more', $this->one_unit_actions( false )->tick( $other->id, microtime( true ) )->status );
+		$this->assertLessThanOrEqual( time() + Loopback::FALLBACK_SECONDS, $this->events( $other->id )[0], 'a tick that left work to do brings the event forward' );
+	}
+
+	public function test_a_driver_that_lost_the_job_to_a_takeover_leaves_the_new_holders_event_and_token(): void {
+		$taken = function ( JobContext $ctx ): StepResult {
+			global $wpdb;
+			// Another driver took the job over after this tick's lease ran out: its lock, its event, its hop token.
+			$wpdb->update( \WPCheckpoint\Support\Schema::jobs_table(), array( 'lock_token' => str_repeat( 'b', 32 ), 'locked_until' => time() + 120 ), array( 'id' => $ctx->job()->id ) );
+			Loopback::schedule( $ctx->job()->id, Loopback::FALLBACK_SECONDS );
+			Loopback::issue_token( $ctx->job()->id );
+			$ctx->checkpoint( array( 'n' => 1 ), 10 ); // The fenced write fails: this driver has lost the job.
+			return StepResult::done();
+		};
+		$this->register( 'taken', array( new ClosureStep( 't', $taken ) ) );
+		$job    = Plugin::instance()->jobs()->create( 'taken' );
+		$result = $this->actions( false )->tick( $job->id, microtime( true ) );
+		$this->assertSame( 'lost', $result->status );
+		$this->assertSame( Job::RUNNING, $result->job->status, 'taken over, not cancelled' );
+		$this->assertCount( 1, $this->events( $job->id ), 'the new holder\'s event stays' );
+		$this->assertNotFalse( get_site_transient( Loopback::JOB_PREFIX . $job->id ), 'and so does its hop token' );
+
+		// Cancelled instead: then both go.
+		Plugin::instance()->job_actions()->cancel( $job->id );
+		$this->assertSame( array(), $this->events( $job->id ) );
+		$this->assertFalse( get_site_transient( Loopback::JOB_PREFIX . $job->id ) );
+	}
+
+	public function test_a_cron_callback_that_starts_late_in_its_request_hands_the_job_to_the_next_one(): void {
+		$this->register( 'plain', array( $this->counting_step( 'p', 3 ) ) );
+		$job = Plugin::instance()->jobs()->create( 'plain' );
+		// wp-cron.php ran other events first: the request is already 10 s old.
+		$_SERVER['REQUEST_TIME_FLOAT'] = microtime( true ) - 10;
+		Plugin::instance()->cron_tick( $job->id );
+		$this->assertSame( 0, Plugin::instance()->jobs()->find( $job->id )->attempts, 'not ticked' );
+		$this->assertCount( 1, $this->events( $job->id ), 'but set again for the next cron request' );
+		$this->assertLessThanOrEqual( time() + 1, $this->events( $job->id )[0] );
+
+		$_SERVER['REQUEST_TIME_FLOAT'] = microtime( true ); // A fresh request does tick it.
+		Plugin::instance()->cron_tick( $job->id );
+		$this->assertSame( 1, Plugin::instance()->jobs()->find( $job->id )->attempts, 'ticked' );
+	}
+
+	public function test_the_sweep_keeps_events_when_the_jobs_table_cannot_be_read(): void {
+		$this->register( 'plain', array( $this->counting_step( 'p', 1 ) ) );
+		$job  = Plugin::instance()->jobs()->create( 'plain' );
+		$gone = 999999;
+		Loopback::schedule( $job->id, Loopback::FALLBACK_SECONDS );
+		Loopback::schedule( $gone, Loopback::FALLBACK_SECONDS );
+		$actions = $this->actions( false );
+		$sweep   = new \ReflectionMethod( JobActions::class, 'sweep_events' );
+		$sweep->setAccessible( true );
+		$table = \WPCheckpoint\Support\Schema::jobs_table();
+		$break = static function ( string $sql ) use ( $table ): string {
+			return 0 === strpos( $sql, "SELECT * FROM {$table} WHERE id = " ) ? str_replace( $table, $table . '_unreadable', $sql ) : $sql;
+		};
+
+		add_filter( 'query', $break );
+		delete_site_transient( JobActions::SWEPT );
+		$sweep->invoke( $actions );
+		remove_filter( 'query', $break );
+		$this->assertCount( 1, $this->events( $job->id ), 'a failed read proves nothing: the live job keeps its event' );
+		$this->assertCount( 1, $this->events( $gone ), 'and so does every other, until the table can be read' );
+
+		delete_site_transient( JobActions::SWEPT );
+		$sweep->invoke( $actions );
+		$this->assertSame( array(), $this->events( $gone ), 'with the table readable, the same sweep removes the event of a job that is gone' );
+		$this->assertCount( 1, $this->events( $job->id ) );
+	}
+
+	public function test_each_job_has_its_own_event(): void {
+		$this->register( 'long', array( $this->counting_step( 'l', 50 ) ) );
+		$a       = Plugin::instance()->jobs()->create( 'long' );
+		$b       = Plugin::instance()->jobs()->create( 'long' );
+		$actions = $this->one_unit_actions( false );
+		$actions->tick( $a->id, microtime( true ) );
+		$actions->tick( $b->id, microtime( true ) );
+		$this->assertCount( 1, $this->events( $a->id ) );
+		$this->assertCount( 1, $this->events( $b->id ), 'the second job is not left out by the first one\'s event' );
+	}
+
+	public function test_starting_answering_and_retrying_hand_the_job_to_cron(): void {
+		$this->register( 'plain', array( $this->counting_step( 'p', 2 ) ) );
+		$started = Plugin::instance()->job_actions()->start( 'plain', self::$admin_id, array() );
+		$this->assertCount( 1, $this->events( $started->id ), 'started, and the page closed at once' );
+
+		$this->register( 'asks', array( new ClosureStep( 'q', static function ( JobContext $ctx ): StepResult {
+			return empty( $ctx->options()['answers']['x'] ) ? StepResult::ask( array(), array( array( 'id' => 'x', 'kind' => 'x', 'choices' => array( 'go' ) ) ), 'decide' ) : StepResult::done();
+		} ) ) );
+		$asked = Plugin::instance()->jobs()->create( 'asks' );
+		$this->assertSame( 'paused', $this->actions( false )->tick( $asked->id, microtime( true ) )->status );
+		$this->assertSame( array(), $this->events( $asked->id ), 'nothing ticks a job that waits for an answer' );
+		Plugin::instance()->job_actions()->answer( $asked->id, array( 'x' => 'go' ) );
+		$this->assertCount( 1, $this->events( $asked->id ), 'answered, and the page closed at once' );
+
+		$this->register( 'boom', array( new ClosureStep( 'b', static function (): StepResult {
+			throw new \RuntimeException( 'broken' );
+		} ) ) );
+		$failed = Plugin::instance()->jobs()->create( 'boom' );
+		$this->assertSame( 'failed', $this->actions( false )->tick( $failed->id, microtime( true ) )->status );
+		$this->assertSame( array(), $this->events( $failed->id ) );
+		Plugin::instance()->job_actions()->retry( $failed->id );
+		$this->assertCount( 1, $this->events( $failed->id ), 'queued again, and the page closed at once' );
+	}
+
+	public function test_the_sweep_removes_events_of_jobs_no_driver_ticks_and_keeps_the_others(): void {
+		$this->register( 'plain', array( $this->counting_step( 'p', 1 ) ) );
+		$this->register( 'asks', array( new ClosureStep( 'q', static function ( JobContext $ctx ): StepResult {
+			return empty( $ctx->options()['answers']['x'] ) ? StepResult::ask( array(), array( array( 'id' => 'x', 'kind' => 'x', 'choices' => array( 'go' ) ) ), 'decide' ) : StepResult::done();
+		} ) ) );
+		$repo     = Plugin::instance()->jobs();
+		$actions  = $this->actions( false );
+		$finished = $repo->create( 'plain' );
+		$this->assertSame( 'completed', $actions->tick( $finished->id, microtime( true ), false )->status, 'a WP-CLI run: no follow-up' );
+		$waiting = $repo->create( 'asks' );
+		$actions->tick( $waiting->id, microtime( true ), false );
+		$answered = $repo->create( 'asks' );
+		$actions->tick( $answered->id, microtime( true ), false );
+		$repo->answer( $repo->find( $answered->id ), array( 'x' => 'go' ) );
+		$queued = $repo->create( 'plain' );
+		$gone   = 999999;
+		foreach ( array( $finished->id, $waiting->id, $answered->id, $queued->id, $gone ) as $id ) {
+			Loopback::schedule( $id, Loopback::FALLBACK_SECONDS );
+			$this->assertCount( 1, $this->events( $id ), 'the event is there to be swept: ' . $id );
+		}
+		delete_site_transient( JobActions::SWEPT );
+		$actions->tick( 888888, microtime( true ) ); // Any followed-up tick runs the maintenance.
+		$this->assertSame( array(), $this->events( $finished->id ), 'finished without a follow-up' );
+		$this->assertSame( array(), $this->events( $waiting->id ), 'waiting for an answer' );
+		$this->assertSame( array(), $this->events( $gone ), 'purged' );
+		$this->assertCount( 1, $this->events( $answered->id ), 'answered, not yet taken by a tick: still driven' );
+		$this->assertCount( 1, $this->events( $queued->id ), 'queued: still driven' );
+		$this->assertSame( array(), $this->events( 888888 ), 'the tick of a missing job leaves nothing behind' );
+
+		Loopback::schedule( $finished->id, Loopback::FALLBACK_SECONDS );
+		$actions->tick( 888888, microtime( true ) );
+		$this->assertCount( 1, $this->events( $finished->id ), 'throttled like the reap' );
 	}
 
 	/**
