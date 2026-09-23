@@ -133,6 +133,21 @@ final class ExportJobTest extends JobTestCase {
 		$this->assertSame( array( (string) ExportPlan::read( $this->work( $id ), ExportPlan::PLAN )['base'] ), $this->out );
 	}
 
+	public function test_a_backup_whose_work_directory_was_reclaimed_is_still_reported_as_written(): void {
+		list( $code, $id ) = $this->run_export( array( 'yes' => true ) );
+		$this->assertSame( RunLoop::EXIT_COMPLETED, $code );
+		// Reclaimed by another request's maintenance between the completion and the report.
+		Deleter::empty_directory( $this->work( $id ) );
+		rmdir( $this->work( $id ) );
+		$this->out = array();
+		$this->err = array();
+		$this->assertSame( RunLoop::EXIT_COMPLETED, $this->driver()->run( $id, true, false ) );
+		$this->assertSame( array(), preg_grep( '/^Backup written/', $this->out ) );
+		$said = preg_grep( '/^The backup was written to backups\/, but its file name could not be read: The file plan\.json of this job is missing/', $this->err );
+		$this->assertCount( 1, $said, implode( "\n", $this->err ) );
+		$this->assertStringNotContainsString( ABSPATH, implode( "\n", $this->err ) );
+	}
+
 	public function test_another_installation_in_the_same_database_is_left_out_and_can_be_named_back(): void {
 		global $wpdb;
 		$this->add_neighbour();

@@ -295,14 +295,19 @@ final class ExportRun {
 		if ( ! $job instanceof Job ) {
 			return;
 		}
-		$work = $this->work_dir( $job );
-		if ( '' === $work || ! ExportPlan::exists( $work, ExportPlan::PLAN ) ) {
-			return;
+		$work  = $this->work_dir( $job );
+		$base  = '';
+		$error = 'The job belongs to another storage directory.';
+		if ( '' !== $work ) {
+			try {
+				$base = (string) ExportPlan::read( $work, ExportPlan::PLAN )['base'];
+			} catch ( \RuntimeException $e ) {
+				$error = $e->getMessage();
+			}
 		}
-		try {
-			$base = (string) ExportPlan::read( $work, ExportPlan::PLAN )['base'];
-		} catch ( \RuntimeException $e ) {
-			$this->say( $this->err, $this->presenter->clean( $e->getMessage() ) );
+		if ( '' === $base ) {
+			// A completed job's work directory is residue: another request's maintenance may have removed it already.
+			$this->say( $this->err, 'The backup was written to backups/, but its file name could not be read: ' . $this->presenter->clean( $error ) );
 			return;
 		}
 		if ( $porcelain ) {
