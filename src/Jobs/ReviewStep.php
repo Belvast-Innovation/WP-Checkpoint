@@ -122,7 +122,7 @@ final class ReviewStep implements Step {
 	 *
 	 * @param array<string, mixed> $preflight preflight.json.
 	 * @param array<string, mixed> $scan      scan.summary.json (empty when no files were scanned).
-	 * @return array{unreadable: array{count: int, listed: string[]}, too_large: array{count: int, listed: string[]}, over_volume: array{count: int, listed: string[]}, heavy: array<int, array{p: string, bytes: int}>, oversize: array<int, array{table: string, exact: bool, count: int|null, limit: int}>}
+	 * @return array{unreadable: array{count: int, listed: string[]}, too_large: array{count: int, listed: string[]}, over_volume: array{count: int, listed: string[]}, heavy: array<int, array{p: string, bytes: int}>, oversize: array<int, array{table: string, exact: bool, count: int|null, limit: int}>, foreign: array<int, array{prefix: string, count: int, listed: string[], kept: int, kept_listed: string[]}>}
 	 */
 	public static function findings( array $preflight, array $scan ): array {
 		$lists  = isset( $scan['lists'] ) && is_array( $scan['lists'] ) ? $scan['lists'] : array();
@@ -167,9 +167,11 @@ final class ReviewStep implements Step {
 		foreach ( isset( $preflight['findings']['foreign'] ) && is_array( $preflight['findings']['foreign'] ) ? $preflight['findings']['foreign'] : array() as $group ) {
 			if ( is_array( $group ) && isset( $group['prefix'] ) ) {
 				$foreign[] = array(
-					'prefix' => (string) $group['prefix'],
-					'count'  => (int) ( $group['count'] ?? 0 ),
-					'listed' => isset( $group['listed'] ) && is_array( $group['listed'] ) ? array_values( array_map( 'strval', $group['listed'] ) ) : array(),
+					'prefix'      => (string) $group['prefix'],
+					'count'       => (int) ( $group['count'] ?? 0 ),
+					'listed'      => isset( $group['listed'] ) && is_array( $group['listed'] ) ? array_values( array_map( 'strval', $group['listed'] ) ) : array(),
+					'kept'        => (int) ( $group['kept'] ?? 0 ),
+					'kept_listed' => isset( $group['kept_listed'] ) && is_array( $group['kept_listed'] ) ? array_values( array_map( 'strval', $group['kept_listed'] ) ) : array(),
 				);
 			}
 		}
@@ -213,8 +215,13 @@ final class ReviewStep implements Step {
 		};
 
 		foreach ( isset( $findings['foreign'] ) ? $findings['foreign'] : array() as $group ) {
-			// Not a question: left out by rule, listed so that a misjudged group can be added back.
-			$decisions['notes'][] = sprintf( '%d tables with the prefix %s look like another WordPress installation in the same database and are not in the backup. If they belong to this site, include them by name (wp wpcheckpoint export --include-table=...).', $group['count'], $group['prefix'] );
+			// Not a question: decided by rule and named, so that a misjudged table can be added back or left out.
+			if ( $group['count'] > 0 ) {
+				$decisions['notes'][] = sprintf( '%d tables with the prefix %s are the core tables of another WordPress installation in the same database and are not in the backup (for example %s). If they belong to this site, include them by name (wp wpcheckpoint export --include-table=...).', $group['count'], $group['prefix'], implode( ', ', array_slice( $group['listed'], 0, 3 ) ) );
+			}
+			if ( $group['kept'] > 0 ) {
+				$decisions['notes'][] = sprintf( '%d other tables with the prefix %s are in the backup although they may belong to that installation (for example %s). If they do, leave them out by name (wp wpcheckpoint export --exclude-table=...).', $group['kept'], $group['prefix'], implode( ', ', array_slice( $group['kept_listed'], 0, 3 ) ) );
+			}
 		}
 
 		if ( $findings['unreadable']['count'] > 0 ) {

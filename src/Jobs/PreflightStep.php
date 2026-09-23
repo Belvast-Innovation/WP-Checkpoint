@@ -44,6 +44,12 @@ final class PreflightStep implements Step {
 	 */
 	const MAX_FOREIGN_LISTED = 20;
 
+	/**
+	 * The shape of every base name base_name() makes: slug of at most 40
+	 * characters, UTC date and time, four hex digits.
+	 */
+	const BASE_PATTERN = '/\A[a-z0-9][a-z0-9-]{0,39}-[0-9]{8}-[0-9]{6}-[0-9a-f]{4}\z/';
+
 
 	const ID = 'preflight';
 
@@ -79,7 +85,8 @@ final class PreflightStep implements Step {
 	 *                                          'disk_free' (callable(): int|false, bytes free in the storage directory),
 	 *                                          'slug' (callable(): string), 'can_deflate' (bool), 'normalization' (bool),
 	 *                                          'int_size' (int), 'now' (callable(): int), 'random' (callable(): string, four hex digits; tests),
-	 *                                          'multisite' (bool), 'core_tables' (callable(): string[], this installation's core tables).
+	 *                                          'multisite' (bool), 'core_tables' (callable(): string[], this installation's core tables),
+	 *                                          'own_tables' (string[], the plugin's own tables: never in a backup).
 	 * @param int                  $chunk_bytes Chunk size.
 	 */
 	public function __construct( Connection $connection, array $env, int $chunk_bytes = TableExporter::CHUNK_BYTES ) {
@@ -232,21 +239,29 @@ final class PreflightStep implements Step {
 		if ( $options['contents']['database'] ) {
 			$listing = call_user_func( $this->env['tables'], (string) $this->env['prefix'] );
 			$core    = isset( $this->env['core_tables'] ) ? (array) call_user_func( $this->env['core_tables'] ) : array();
-			$groups  = TableSelection::foreign( array_map( 'strval', (array) $listing['tables'] ), (string) $this->env['prefix'], ! empty( $this->env['multisite'] ), $core );
-			$left    = array();
-			foreach ( $groups as $group_prefix => $members ) {
-				// Another installation's tables stay out unless the user named them.
-				$out = array_values( array_diff( $members, $options['include_tables'] ) );
-				if ( array() !== $out ) {
+			// The plugin's own job table describes this installation's jobs and storage, not the site: a restore
+			// keeps the target's own.
+			$own    = isset( $this->env['own_tables'] ) ? array_map( 'strval', (array) $this->env['own_tables'] ) : array();
+			$all    = array_values( array_diff( array_map( 'strval', (array) $listing['tables'] ), $own ) );
+			$groups = TableSelection::foreign( $all, (string) $this->env['prefix'], ! empty( $this->env['multisite'] ), $core );
+			$left   = array_fill_keys( $own, true );
+			foreach ( $groups as $group_prefix => $group ) {
+				// Another installation's core tables stay out unless the user named them; the rest under its prefix stays in.
+				$out  = array_values( array_diff( $group['excluded'], $options['include_tables'] ) );
+				$kept = array_values( array_diff( $group['kept'], $options['exclude_tables'] ) );
+				if ( array() !== $out || array() !== $kept ) {
 					$foreign[] = array(
-						'prefix' => (string) $group_prefix,
-						'count'  => count( $out ),
-						'listed' => array_slice( $out, 0, self::MAX_FOREIGN_LISTED ),
+						'prefix'      => (string) $group_prefix,
+						'count'       => count( $out ),
+						'listed'      => array_slice( $out, 0, self::MAX_FOREIGN_LISTED ),
+						'kept'        => count( $kept ),
+						'kept_listed' => array_slice( $kept, 0, self::MAX_FOREIGN_LISTED ),
 					);
-					$left      = array_merge( $left, $out );
+				}
+				foreach ( $out as $table ) {
+					$left[ $table ] = true;
 				}
 			}
-			$left = array_fill_keys( $left, true );
 			$seen = array();
 			foreach ( (array) $listing['tables'] as $table ) {
 				$table = (string) $table;

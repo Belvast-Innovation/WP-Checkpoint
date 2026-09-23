@@ -91,12 +91,22 @@ final class ReviewStepTest extends TestCase {
 	public function test_another_installation_is_a_note_not_a_question(): void {
 		$this->inputs();
 		$preflight                        = ExportPlan::read( $this->work, ExportPlan::PREFLIGHT );
-		$preflight['findings']['foreign'] = array( array( 'prefix' => 'wp_old_', 'count' => 4, 'listed' => array( 'wp_old_options', 'wp_old_posts', 'wp_old_users', 'wp_old_x' ) ) );
+		$preflight['findings']['foreign'] = array(
+			array( 'prefix' => 'wp_old_', 'count' => 12, 'listed' => array( 'wp_old_commentmeta', 'wp_old_comments', 'wp_old_links', 'wp_old_options' ), 'kept' => 2, 'kept_listed' => array( 'wp_old_yoast', 'wp_old_zz' ) ),
+			array( 'prefix' => 'wp_n_', 'count' => 0, 'listed' => array(), 'kept' => 1, 'kept_listed' => array( 'wp_n_x' ) ), // Its core was named back.
+		);
 		ExportPlan::write( $this->work, ExportPlan::PREFLIGHT, $preflight );
 		$result = ( new ReviewStep() )->run( $this->context( array() ) );
 		$this->assertSame( StepResult::DONE, $result->kind, 'left out by rule: nothing to ask, even without a policy' );
 		$review = json_decode( $this->review(), true );
-		$this->assertSame( array( '4 tables with the prefix wp_old_ look like another WordPress installation in the same database and are not in the backup. If they belong to this site, include them by name (wp wpcheckpoint export --include-table=...).' ), $review['decisions']['notes'] );
+		$this->assertSame(
+			array(
+				'12 tables with the prefix wp_old_ are the core tables of another WordPress installation in the same database and are not in the backup (for example wp_old_commentmeta, wp_old_comments, wp_old_links). If they belong to this site, include them by name (wp wpcheckpoint export --include-table=...).',
+				'2 other tables with the prefix wp_old_ are in the backup although they may belong to that installation (for example wp_old_yoast, wp_old_zz). If they do, leave them out by name (wp wpcheckpoint export --exclude-table=...).',
+				'1 other tables with the prefix wp_n_ are in the backup although they may belong to that installation (for example wp_n_x). If they do, leave them out by name (wp wpcheckpoint export --exclude-table=...).',
+			),
+			$review['decisions']['notes']
+		);
 		$this->assertSame( array(), $review['decisions']['exclude_tables'], 'the plan already left them out; the review only reports it' );
 	}
 

@@ -12,6 +12,7 @@ use WPCheckpoint\Database\WpdbConnection;
 use WPCheckpoint\Files\PathKey;
 use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Support\Environment;
+use WPCheckpoint\Support\Schema;
 
 /**
  * The seven steps in order (pre-flight, scan, review, database, pack,
@@ -115,8 +116,11 @@ final class ExportJob implements JobType {
 					'int_size'      => PHP_INT_SIZE,
 					'multisite'     => is_multisite(),
 					'core_tables'   => static function () use ( $wpdb ): array {
-						return array_values( $wpdb->tables( 'all', true ) );
+						// The main site's: a tick may run in a sub-site's context, where the blog tables would be that
+						// sub-site's. The sub-sites' own tables are protected by their naming rule (TableSelection).
+						return array_values( $wpdb->tables( 'all', true, is_multisite() ? get_main_site_id() : 0 ) );
 					},
+					'own_tables'    => array( Schema::jobs_table() ),
 				)
 			),
 			FileScanStep::from_plan(),
