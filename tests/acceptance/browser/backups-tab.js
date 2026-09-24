@@ -266,6 +266,7 @@ const phases = {
 			}
 		}, 60 );
 		return {
+			says_final: !! live && live.failure.includes( 'retrying would fail the same way' ),
 			live: live || null,
 			reloaded: reloaded ? await buttons( page, id ) : null,
 			create: reloaded ? await page.evaluate( () => ( {
@@ -278,7 +279,9 @@ const phases = {
 
 	async failed( page, id ) {
 		await page.goto( TAB );
-		return { block: await buttons( page, id ) };
+		const block = await buttons( page, id );
+		// The kind is read, not guessed: the temporary text, not the text for a failure of unknown cause.
+		return { block, says_temporary: !! block && block.failure.includes( 'a problem on the server that may pass' ) };
 	},
 
 	// A long tick (a large table, the browser driving): the block moves while the tick runs, the reads are not
