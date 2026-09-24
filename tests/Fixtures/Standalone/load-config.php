@@ -12,7 +12,8 @@
 
 // What an entry that runs without WordPress does first: no arguments in exception traces, ABSPATH at the stub.
 ini_set( 'zend.exception_ignore_args', '1' );
-define( 'ABSPATH', dirname( __DIR__, 3 ) . '/src/Standalone/stub/' );
+// WPC_OTHER_SPELLING=1: the same directory written another way (as "D:/a" and "D:\\a" on Windows).
+define( 'ABSPATH', dirname( __DIR__, 3 ) . ( '1' === getenv( 'WPC_OTHER_SPELLING' ) ? '/src/Standalone/../Standalone/stub/' : '/src/Standalone/stub/' ) );
 require dirname( __DIR__, 3 ) . '/vendor/autoload.php';
 
 use WPCheckpoint\Standalone\ConfigLoader;

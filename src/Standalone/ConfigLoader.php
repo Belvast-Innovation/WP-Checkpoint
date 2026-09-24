@@ -124,7 +124,7 @@ final class ConfigLoader {
 		if ( ! is_file( $stub . 'wp-settings.php' ) ) {
 			throw new Failure( Failure::STUB_MISSING );
 		}
-		if ( self::wordpress_loaded() || ( defined( 'ABSPATH' ) && rtrim( ABSPATH, '/\\' ) . '/' !== $stub ) ) {
+		if ( self::wordpress_loaded() || ( defined( 'ABSPATH' ) && ! self::same_directory( ABSPATH, $stub ) ) ) {
 			throw new Failure( Failure::LOADS_WORDPRESS ); // Running it now would start WordPress (or already has).
 		}
 		$code = @file_get_contents( $config ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- a small local file; a warning would print the path.
@@ -273,6 +273,21 @@ final class ConfigLoader {
 				http_response_code( (int) $before['status'] );
 			}
 		}
+	}
+
+	/**
+	 * Whether two paths name one directory (by their real paths: on Windows
+	 * "D:\\a\\stub" and "D:/a/stub" are the same, and a symbolic link is
+	 * its target).
+	 *
+	 * @param string $a Path.
+	 * @param string $b Path.
+	 * @return bool
+	 */
+	private static function same_directory( string $a, string $b ): bool {
+		$real_a = realpath( $a );
+		$real_b = realpath( $b );
+		return false !== $real_a && $real_a === $real_b;
 	}
 
 	/**

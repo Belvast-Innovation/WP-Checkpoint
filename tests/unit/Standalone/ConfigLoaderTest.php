@@ -243,6 +243,9 @@ PHP;
 		$this->assertStringNotContainsString( 'MARKER_PASSWORD', $data['trace'] );
 		$this->assertStringNotContainsString( $this->root, $data['trace'], 'nor the path of wp-config.php' );
 		// The control: in this PHP, a trace carries arguments unless told not to.
+		if ( '\\' === DIRECTORY_SEPARATOR ) {
+			return; // The one-line script below needs a POSIX shell's quoting.
+		}
 		$plain = shell_exec( escapeshellarg( PHP_BINARY ) . ' -d zend.exception_ignore_args=0 -r ' . escapeshellarg( 'function f( array $a ) { throw new Exception(); } try { f( array( "MARKER_PASSWORD" ) ); } catch ( Exception $e ) { echo var_export( $e->getTrace(), true ); }' ) );
 		$this->assertStringContainsString( 'MARKER_PASSWORD', (string) $plain );
 	}
@@ -250,6 +253,9 @@ PHP;
 	public function test_the_values_are_marked_sensitive_where_php_supports_it(): void {
 		if ( PHP_VERSION_ID < 80200 ) {
 			$this->markTestSkipped( '#[\SensitiveParameter] takes effect from PHP 8.2; entries switch trace arguments off on older ones.' );
+		}
+		if ( '\\' === DIRECTORY_SEPARATOR ) {
+			$this->markTestSkipped( 'The one-line script needs a POSIX shell\'s quoting.' );
 		}
 		$root   = dirname( __DIR__, 3 );
 		$script = 'define( "ABSPATH", ' . var_export( $root . '/src/Standalone/stub/', true ) . ' ); require ' . var_export( $root . '/vendor/autoload.php', true ) . ';'
@@ -292,5 +298,10 @@ PHP;
 	public function test_the_fixture_runner_refuses_the_web(): void {
 		$code = (string) file_get_contents( dirname( __DIR__, 2 ) . '/Fixtures/Standalone/load-config.php' );
 		$this->assertMatchesRegularExpression( '/\*\/\s*\n\s*\'cli\' === PHP_SAPI \|\| exit;/', $code, 'its first statement' );
+	}
+	public function test_abspath_written_another_way_is_still_the_stub(): void {
+		$this->files( array( 'site/wp-config.php' => self::config( self::DB . "\$table_prefix = 'wp_';" ) ) );
+		$this->assertSame( 'wp_', $this->load()['prefix'] ?? '', 'the control: the usual spelling' );
+		$this->assertSame( 'wp_', $this->load( 'site', array( 'WPC_OTHER_SPELLING' => '1' ) )['prefix'] ?? '', 'the same directory, another spelling (Windows separators)' );
 	}
 }
