@@ -208,6 +208,7 @@ jobs:
           exit 1
 
       - run: php tests/Fixtures/Restore/foreign-keys.php 127.0.0.1 33306 root password --check
+      - run: php tests/Fixtures/Restore/constraint-rules.php 127.0.0.1 33306 root password
 
   plugin-check:
     name: Plugin Check
