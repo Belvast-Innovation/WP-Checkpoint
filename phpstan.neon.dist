@@ -14,3 +14,4 @@ parameters:
         - tests/phpstan-stubs/wp-cli.php
 rules:
     - WPCheckpoint\Tests\PHPStan\HostFunctionsRule
+    - WPCheckpoint\Tests\PHPStan\NoUnserializeRule
