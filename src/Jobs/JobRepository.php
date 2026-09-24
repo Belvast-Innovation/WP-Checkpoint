@@ -893,7 +893,7 @@ final class JobRepository {
 	 * @param string $to    Target status.
 	 * @param string $error Error message for failed (redacted before storing).
 	 * @param string $token Lock token; required when leaving running for anything but cancelled.
-	 * @param string $failure Kind of failure for a failed job (Job::FAILURE_*, or '' when the cause does not say).
+	 * @param string $failure Kind of failure for a failed job (Job::stamp_failure(), or '' when the cause does not say).
 	 * @return Job
 	 * @throws InvalidTransition When the state machine forbids the move or the token is missing.
 	 * @throws StaleJob When the row no longer has the expected status (or the lock changed hands).
@@ -1468,7 +1468,7 @@ final class JobRepository {
 			$data['last_error'] = $this->redactor->redact( $error );
 			// Stamped with the failure it belongs to (Job::read_failure_kind()): code that does not know the column
 			// retries and fails the job again without touching it, and the old kind must not speak for the new failure.
-			$data['failure_kind'] = in_array( $failure, array( Job::FAILURE_TEMPORARY, Job::FAILURE_FINAL ), true ) ? $failure . ':' . $now : '';
+			$data['failure_kind'] = Job::stamp_failure( $failure, $now );
 		}
 		if ( Job::QUEUED === $to ) {
 			$data['failure_kind']  = '';
@@ -1515,7 +1515,9 @@ final class JobRepository {
 			}
 		}
 		// The object answers like a row read back: the kind, not the stamped column value.
-		$job->failure_kind = Job::read_failure_kind( (string) $job->failure_kind, (int) $job->finished_at );
+		$stored              = (string) $job->failure_kind;
+		$job->failure_kind   = Job::read_failure_kind( $stored, (int) $job->finished_at );
+		$job->failure_reason = Job::read_failure_reason( $stored, (int) $job->finished_at );
 		if ( in_array( $to, array( Job::COMPLETED, Job::FAILED, Job::CANCELLED ), true ) ) {
 			$this->remove_lock_file( $job );
 		}
@@ -1653,7 +1655,9 @@ final class JobRepository {
 				$job->$key = (string) $value;
 			}
 		}
-		$job->failure_kind = Job::read_failure_kind( $job->failure_kind, $job->finished_at );
+		$stored              = $job->failure_kind;
+		$job->failure_kind   = Job::read_failure_kind( $stored, $job->finished_at );
+		$job->failure_reason = Job::read_failure_reason( $stored, $job->finished_at );
 		return $job;
 	}
 }

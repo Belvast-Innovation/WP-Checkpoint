@@ -11,6 +11,7 @@ use WPCheckpoint\Jobs\JobTypes;
 use WPCheckpoint\Jobs\LockFile;
 use WPCheckpoint\Jobs\Runner;
 use WPCheckpoint\Jobs\StepResult;
+use WPCheckpoint\Jobs\TableChanged;
 use WPCheckpoint\Jobs\TickResult;
 use WPCheckpoint\Jobs\WorkLost;
 use WPCheckpoint\Jobs\TransientFailure;
@@ -258,8 +259,27 @@ final class RunnerTest extends WP_UnitTestCase {
 		$this->assertFalse( $result->job->retry_useful(), 'the tick answers with Retry hidden already' );
 		$stored = $this->repo->find( $job->id );
 		$this->assertSame( Job::FAILURE_FINAL, $stored->failure_kind, 'a retry resumes from the same lost files' );
+		$this->assertSame( '', $stored->failure_reason, 'lost work files need no reason' );
 		$this->assertFalse( $stored->retry_useful() );
 		$this->assertTrue( $stored->can_retry(), 'still accepted by the engine; the screen only stops offering it' );
+	}
+
+	public function test_a_table_changed_under_the_export_fails_the_job_for_good_with_its_reason(): void {
+		$this->register( 'rekeyed', array(
+			new ClosureStep( 'only', static function (): StepResult {
+				throw new TableChanged( 'The structure of table wp_x changed while it was being exported.' );
+			} ),
+		) );
+		$job    = $this->repo->create( 'rekeyed' );
+		$result = $this->runner()->tick( $job->id );
+		$this->assertSame( Job::FAILURE_FINAL, $result->job->failure_kind );
+		$this->assertSame( Job::REASON_TABLE_CHANGED, $result->job->failure_reason, 'the tick answers with the reason already' );
+		$stored = $this->repo->find( $job->id );
+		$this->assertSame( Job::FAILURE_FINAL, $stored->failure_kind );
+		$this->assertSame( Job::REASON_TABLE_CHANGED, $stored->failure_reason );
+		$this->assertFalse( $stored->retry_useful() );
+		$this->repo->transition( $stored, Job::QUEUED );
+		$this->assertSame( '', $this->repo->find( $job->id )->failure_reason, 'a retry clears it with the kind' );
 	}
 
 	public function test_other_exceptions_fail_the_job_with_a_masked_message_and_cleanup_runs(): void {

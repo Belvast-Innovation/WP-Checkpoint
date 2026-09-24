@@ -21,6 +21,7 @@ use WPCheckpoint\Support\Redactor;
 use WPCheckpoint\Support\Schema;
 use WPCheckpoint\Tests\Fixtures\Jobs\FixtureJobType;
 use WPCheckpoint\Tests\Fixtures\Jobs\JobTestCase;
+use WPCheckpoint\Jobs\TableChanged;
 
 /**
  * The export against a real database: awkward values, several chunks,
@@ -314,6 +315,35 @@ final class DatabaseExportStepTest extends JobTestCase {
 		$this->assertSame( 2, substr_count( $sql, "'new inside'" ), 'string keys that sort inside the bound are read' );
 		$this->assertSame( 0, substr_count( $sql, "'new past'" ), 'keys past the bound are not' );
 		$this->assertSame( 8, $state['rows'] );
+	}
+
+	public function test_a_table_whose_key_changes_during_its_export_stops_it_for_good(): void {
+		global $wpdb;
+		$table          = self::PREFIX . 'rekeyed';
+		$this->tables[] = $table;
+		$wpdb->query( "DROP TABLE IF EXISTS `{$table}`" );
+		$wpdb->query( "CREATE TABLE `{$table}` (`id` int NOT NULL, `n` int NOT NULL, `v` text, PRIMARY KEY (`id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4" );
+		$wpdb->query( "INSERT INTO `{$table}` VALUES (1,1,'a'),(2,1,'b'),(3,1,'c'),(4,1,'d'),(5,1,'e'),(6,1,'f')" );
+		$dir = $this->dirs->base() . '/tmp/rekeyed-' . bin2hex( random_bytes( 4 ) );
+		mkdir( $dir, 0700, true );
+		$exporter = new TableExporter( new WpdbConnection(), $dir, self::CHUNK, 16 ); // A row or two per unit.
+		// The control: before the change, the export goes on unit by unit.
+		$state = $exporter->step( $exporter->step( TableExporter::initial_state( $table ) ) );
+		$this->assertEmpty( $state['done'] );
+		$sql = (string) file_get_contents( $dir . '/' . basename( IndexLine::database_path( $table, 1 ) ) );
+		$this->assertStringContainsString( 'PRIMARY KEY (`id`)', $sql, 'the table definition is already written, with the old key' );
+		$wpdb->query( "ALTER TABLE `{$table}` DROP PRIMARY KEY, ADD PRIMARY KEY (`id`, `n`)" );
+		$this->assertSame( '', $wpdb->last_error );
+		try {
+			// The next tick: a new exporter that reads the table as it is now.
+			( new TableExporter( new WpdbConnection(), $dir, self::CHUNK, 16 ) )->step( $state );
+			$this->fail( 'the export went on with rows that no longer fit the written definition' );
+		} catch ( TableChanged $e ) {
+			$this->assertStringContainsString( 'changed while it was being exported', $e->getMessage() );
+		} finally {
+			Deleter::empty_directory( $dir );
+			@rmdir( $dir );
+		}
 	}
 
 	/**

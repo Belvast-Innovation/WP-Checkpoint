@@ -342,8 +342,8 @@ final class Runner {
 				$this->release( $job, $token );
 				return new TickResult( TickResult::WAITING, $wait, $job, $message );
 			} catch ( \Throwable $e ) {
-				// Only lost work files are known to fail the same way again; anything else may pass once its cause is fixed.
-				return $this->fail( $job, $token, $logger, sprintf( 'Step "%s": %s', $step_id, $this->describe( $e ) ), $e instanceof WorkLost ? Job::FAILURE_FINAL : '' );
+				// Lost work files, and a table changed under the export, are final; anything else may pass once its cause is fixed.
+				return $this->fail( $job, $token, $logger, sprintf( 'Step "%s": %s', $step_id, $this->describe( $e ) ), self::failure_of( $e ) );
 			}
 
 			if ( StepResult::DONE === $result->kind ) {
@@ -727,13 +727,29 @@ final class Runner {
 	 * @param Logger $logger  Logger.
 	 * @param string $message Error message (paths already masked).
 	 * @param string $failure Job::FAILURE_TEMPORARY (a passing problem), Job::FAILURE_FINAL (lost work
-	 *                        files: a retry fails the same way), or '' when the cause does not say.
+	 *                        files: a retry fails the same way; with a reason, see failure_of()), or ''
+	 *                        when the cause does not say.
 	 * @return TickResult
 	 */
 	private function fail( Job $job, string $token, Logger $logger, string $message, string $failure = '' ): TickResult {
 		$logger->error( 'Job failed', array( 'error' => $message ) );
 		$this->transition( $job, $token, Job::FAILED, $message, $failure );
 		return new TickResult( TickResult::FAILED, -1, $job, $this->redactor->redact( $message ) );
+	}
+
+	/**
+	 * The kind of failure an exception from a step means (Job::stamp_failure()):
+	 * final for lost work files and for a table that changed under the export,
+	 * no kind for anything else.
+	 *
+	 * @param \Throwable $e Exception.
+	 * @return string
+	 */
+	private static function failure_of( \Throwable $e ): string {
+		if ( $e instanceof TableChanged ) {
+			return Job::FAILURE_FINAL . ':' . Job::REASON_TABLE_CHANGED;
+		}
+		return $e instanceof WorkLost ? Job::FAILURE_FINAL : '';
 	}
 
 	/**

@@ -105,4 +105,20 @@ final class JobTest extends TestCase {
 			$this->assertSame( $offered, $job->retry_useful(), 'kind "' . $kind . '"' );
 		}
 	}
+	public function test_a_final_failure_can_carry_its_reason_and_only_a_known_one(): void {
+		$stored = Job::stamp_failure( Job::FAILURE_FINAL . ':' . Job::REASON_TABLE_CHANGED, 1790000000 );
+		$this->assertSame( 'final:1790000000:table_changed', $stored );
+		$this->assertSame( Job::FAILURE_FINAL, Job::read_failure_kind( $stored, 1790000000 ) );
+		$this->assertSame( Job::REASON_TABLE_CHANGED, Job::read_failure_reason( $stored, 1790000000 ) );
+		$this->assertSame( '', Job::read_failure_reason( $stored, 1790000099 ), 'stale with its kind' );
+		$this->assertSame( '', Job::read_failure_reason( Job::stamp_failure( Job::FAILURE_FINAL, 1790000000 ), 1790000000 ), 'no reason' );
+		foreach ( array( 'final:1790000000:something_newer', 'temporary:1790000000:table_changed', 'final:1790000000:table_changed:x' ) as $odd ) {
+			$this->assertSame( '', Job::read_failure_kind( $odd, 1790000000 ), $odd . ': not understood, so no kind and Retry offered' );
+			$this->assertSame( '', Job::read_failure_reason( $odd, 1790000000 ), $odd );
+		}
+		$this->assertSame( '', Job::stamp_failure( Job::FAILURE_FINAL . ':something_newer', 1790000000 ), 'only known reasons are written' );
+		$this->assertSame( '', Job::stamp_failure( Job::FAILURE_TEMPORARY . ':' . Job::REASON_TABLE_CHANGED, 1790000000 ) );
+		$this->assertSame( 'temporary:1790000000', Job::stamp_failure( Job::FAILURE_TEMPORARY, 1790000000 ) );
+		$this->assertLessThanOrEqual( 32, strlen( Job::stamp_failure( Job::FAILURE_FINAL . ':' . Job::REASON_TABLE_CHANGED, 9999999999 ) ), 'fits the column for any time of ten digits (until the year 2286)' );
+	}
 }

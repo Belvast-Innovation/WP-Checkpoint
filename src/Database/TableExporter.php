@@ -9,6 +9,7 @@ namespace WPCheckpoint\Database;
 
 use WPCheckpoint\Archive\ChunkHasher;
 use WPCheckpoint\Archive\IndexLine;
+use WPCheckpoint\Jobs\TableChanged;
 use WPCheckpoint\Jobs\TransientFailure;
 use WPCheckpoint\Jobs\WorkLost;
 
@@ -668,6 +669,7 @@ final class TableExporter {
 	 * @return array{mode: string, key?: string[]|null, rows?: int}
 	 * @throws \RuntimeException When the chunk cannot be read or its bound line is malformed.
 	 * @throws WorkLost When the work directory was lost, changed or damaged.
+	 * @throws TableChanged When the table's key is not the one the chunk was written for.
 	 */
 	private function bound_in( string $path, string $table, int $chunk, array $desc ): array {
 		$handle = @fopen( $path, 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- see write_new().
@@ -700,7 +702,8 @@ final class TableExporter {
 		if ( array() !== $desc['pk'] && 1 === preg_match( '/\A' . preg_quote( self::BOUND, '/' ) . 'pk_max=(.+)\z/', $line, $m ) ) {
 			$key = self::decode_key( $m[1] );
 			if ( null !== $key && count( $key ) !== count( $desc['pk'] ) ) {
-				throw new WorkLost( sprintf( 'Chunk %d of table %s has a bound for another key; the table changed or the work directory was damaged.', $chunk, $table ) );
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+				throw new TableChanged( sprintf( 'The structure of table %s changed while it was being exported: its key is not the one its chunk %d was written for.', $table, $chunk ) );
 			}
 			return array(
 				'mode' => 'pk',

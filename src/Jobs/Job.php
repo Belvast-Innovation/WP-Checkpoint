@@ -27,10 +27,21 @@ final class Job {
 	const CANCELLED = 'cancelled';
 
 	/**
-	 * Kinds of failure (failure_kind).
+	 * Kinds of failure (failure_kind). FAILURE_FINAL carries two meanings
+	 * for now: the job's work files are gone or not what it wrote (WorkLost),
+	 * and going on would give a wrong backup (TableChanged, recorded with the
+	 * reason REASON_TABLE_CHANGED so the screen can say which). Both hide
+	 * Retry for the same answer, a new job; a third meaning that needs a
+	 * different answer gets a kind of its own.
 	 */
 	const FAILURE_TEMPORARY = 'temporary';
 	const FAILURE_FINAL     = 'final';
+
+	/**
+	 * Why a final failure is final, when it is not lost work files: a table's
+	 * structure changed while it was exported.
+	 */
+	const REASON_TABLE_CHANGED = 'table_changed';
 
 	/**
 	 * Whether the job is paused because a step asked for a decision. Such
@@ -66,11 +77,63 @@ final class Job {
 	 * @return string FAILURE_TEMPORARY, FAILURE_FINAL or ''.
 	 */
 	public static function read_failure_kind( string $stored, int $finished_at ): string {
-		$parts = explode( ':', $stored );
-		if ( 2 !== count( $parts ) || ! in_array( $parts[0], array( self::FAILURE_TEMPORARY, self::FAILURE_FINAL ), true ) ) {
-			return '';
+		return self::parse_failure( $stored, $finished_at )[0];
+	}
+
+	/**
+	 * The reason stored with a final failure ("final:finished_at:reason"),
+	 * or '' (none, or not a kind this failure has: read_failure_kind()).
+	 *
+	 * @param string $stored      failure_kind column.
+	 * @param int    $finished_at finished_at column.
+	 * @return string REASON_TABLE_CHANGED or ''.
+	 */
+	public static function read_failure_reason( string $stored, int $finished_at ): string {
+		return self::parse_failure( $stored, $finished_at )[1];
+	}
+
+	/**
+	 * The column value for a failure at $now: $failure is FAILURE_TEMPORARY,
+	 * FAILURE_FINAL, or FAILURE_FINAL . ':' . a known reason; anything else
+	 * records no kind (''). The one writer of the format read_failure_kind()
+	 * and read_failure_reason() read.
+	 *
+	 * @param string $failure Kind, with a reason for a final one.
+	 * @param int    $now     finished_at of the failure.
+	 * @return string
+	 */
+	public static function stamp_failure( string $failure, int $now ): string {
+		$parts = explode( ':', $failure );
+		if ( 1 === count( $parts ) && in_array( $parts[0], array( self::FAILURE_TEMPORARY, self::FAILURE_FINAL ), true ) ) {
+			return $parts[0] . ':' . $now;
 		}
-		return ctype_digit( $parts[1] ) && $finished_at > 0 && (int) $parts[1] === $finished_at ? $parts[0] : '';
+		if ( 2 === count( $parts ) && self::FAILURE_FINAL === $parts[0] && self::REASON_TABLE_CHANGED === $parts[1] ) {
+			return $parts[0] . ':' . $now . ':' . $parts[1];
+		}
+		return '';
+	}
+
+	/**
+	 * Kind and reason of a stored failure, both '' unless the value is one
+	 * stamp_failure() writes and its time is this failure's.
+	 *
+	 * @param string $stored      failure_kind column.
+	 * @param int    $finished_at finished_at column.
+	 * @return array{0: string, 1: string}
+	 */
+	private static function parse_failure( string $stored, int $finished_at ): array {
+		$parts = explode( ':', $stored );
+		$count = count( $parts );
+		if ( ( 2 !== $count && 3 !== $count ) || ! in_array( $parts[0], array( self::FAILURE_TEMPORARY, self::FAILURE_FINAL ), true ) ) {
+			return array( '', '' );
+		}
+		if ( 3 === $count && ( self::FAILURE_FINAL !== $parts[0] || self::REASON_TABLE_CHANGED !== $parts[2] ) ) {
+			return array( '', '' ); // A reason this code does not know: no kind, Retry offered.
+		}
+		if ( ! ctype_digit( $parts[1] ) || $finished_at <= 0 || (int) $parts[1] !== $finished_at ) {
+			return array( '', '' );
+		}
+		return array( $parts[0], 3 === $count ? $parts[2] : '' );
 	}
 
 	/**
@@ -224,6 +287,14 @@ final class Job {
 	 * @var string
 	 */
 	public $failure_kind = '';
+
+	/**
+	 * Why a final failure is final when it is not lost work files
+	 * (REASON_TABLE_CHANGED), or ''. Read with failure_kind.
+	 *
+	 * @var string
+	 */
+	public $failure_reason = '';
 
 	/**
 	 * When a failed job's work files were reclaimed after their retention
