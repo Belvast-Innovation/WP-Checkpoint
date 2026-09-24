@@ -120,7 +120,7 @@ final class StoreStep implements Step {
 				throw new TransientFailure( sprintf( '%s could not be moved into the backups directory.', self::label( $cursor['moved'], $total ) ) );
 			}
 			++$cursor['moved'];
-			$context->checkpoint( $cursor, (int) floor( 100 * $cursor['moved'] / $total ), sprintf( /* translators: 1: files moved, 2: files in total */ __( 'Stored %1$d of %2$d files', 'wp-checkpoint' ), $cursor['moved'], $total ) );
+			$context->checkpoint( $cursor, (int) floor( 100 * $cursor['moved'] / $total ), sprintf( /* translators: 1: files moved, 2: files in total */ __( 'Stored %1$s of %2$s files', 'wp-checkpoint' ), number_format_i18n( (int) $cursor['moved'] ), number_format_i18n( (int) $total ) ) );
 			if ( $cursor['moved'] < $total && $context->should_stop() ) {
 				return StepResult::progress( $cursor, (int) floor( 100 * $cursor['moved'] / $total ), __( 'Storing the backup', 'wp-checkpoint' ) );
 			}

@@ -52,6 +52,17 @@ if ( ! function_exists( '__' ) ) {
 		unset( $domain );
 		return 1 === $number ? $single : $plural;
 	}
+
+	/**
+	 * Number formatting stand-in for the unit suite (English separators).
+	 *
+	 * @param float|int $number   Number.
+	 * @param int       $decimals Decimals.
+	 * @return string
+	 */
+	function number_format_i18n( $number, int $decimals = 0 ): string { // phpcs:ignore Universal.Files.SeparateFunctionsFromOO.Mixed -- test stand-in.
+		return number_format( (float) $number, $decimals );
+	}
 }
 
 /**

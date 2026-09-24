@@ -693,10 +693,10 @@ final class ManifestStep implements Step {
 		}
 		if ( null !== $progress['seconds_left'] && $progress['slow'] ) {
 			/* translators: 1: entries checked, 2: entries in total, 3: minutes left */
-			return sprintf( __( 'Checking the written archive: %1$d of %2$d entries, about %3$d minutes left', 'wp-checkpoint' ), $progress['done'], $progress['total'], (int) ceil( $progress['seconds_left'] / 60 ) );
+			return sprintf( __( 'Checking the written archive: %1$s of %2$s entries, about %3$s minutes left', 'wp-checkpoint' ), number_format_i18n( (int) $progress['done'] ), number_format_i18n( (int) $progress['total'] ), number_format_i18n( (int) ceil( $progress['seconds_left'] / 60 ) ) );
 		}
 		/* translators: 1: entries checked, 2: entries in total */
-		return sprintf( __( 'Checking the written archive: %1$d of %2$d entries', 'wp-checkpoint' ), $progress['done'], $progress['total'] );
+		return sprintf( __( 'Checking the written archive: %1$s of %2$s entries', 'wp-checkpoint' ), number_format_i18n( (int) $progress['done'] ), number_format_i18n( (int) $progress['total'] ) );
 	}
 
 	/**
