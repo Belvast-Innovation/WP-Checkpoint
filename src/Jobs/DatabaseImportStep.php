@@ -328,23 +328,30 @@ final class DatabaseImportStep implements Step {
 				if ( null === $statement ) {
 					break;
 				}
-				$started = $context->elapsed();
 				if ( Statement::SET === $statement->kind ) {
+					// Not a unit of work: it moves no recorded position (a resumed chunk runs the preamble again),
+					// so a tick must never end right after one, or it ends where it began and counts as no progress.
 					$this->run_set( $db, $statement );
-				} elseif ( Statement::DROP === $statement->kind || Statement::CREATE === $statement->kind ) {
+					continue;
+				}
+				$started = $context->elapsed();
+				if ( Statement::DROP === $statement->kind || Statement::CREATE === $statement->kind ) {
 					if ( null !== $state ) {
 						throw new Refused( sprintf( 'Table %s, chunk %d: the table is dropped or created again after its rows began.', $target->table, $chunk ) );
 					}
 					$db->run( $statement->sql );
-					if ( Statement::CREATE === $statement->kind ) {
-						$engine = $db->rows( 'SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?', array( $target->temporary ) );
-						$this->warn_shortened( $context, $target, $statement );
-						$ledger->created( $number, $statement->end, in_array( strtolower( (string) ( $engine[0][0] ?? '' ) ), self::TRANSACTIONAL, true ), self::constraints_json( $statement ) );
-						$this->crash( 'commit', $target->table, $chunk );
-						$state    = $ledger->get( $number );
-						$at_chunk = 1;
-						$at_pos   = $statement->end;
+					if ( Statement::DROP === $statement->kind ) {
+						// Not a unit either: until CREATE TABLE is recorded nothing is, and a replay runs DROP again.
+						// DROP and the CREATE after it form one unit, ended by the ledger's record of the CREATE.
+						continue;
 					}
+					$engine = $db->rows( 'SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?', array( $target->temporary ) );
+					$this->warn_shortened( $context, $target, $statement );
+					$ledger->created( $number, $statement->end, in_array( strtolower( (string) ( $engine[0][0] ?? '' ) ), self::TRANSACTIONAL, true ), self::constraints_json( $statement ) );
+					$this->crash( 'commit', $target->table, $chunk );
+					$state    = $ledger->get( $number );
+					$at_chunk = 1;
+					$at_pos   = $statement->end;
 				} else {
 					if ( null === $state ) {
 						throw new Refused( sprintf( 'Table %s, chunk %d: rows before the table is created.', $target->table, $chunk ) );
@@ -357,10 +364,7 @@ final class DatabaseImportStep implements Step {
 					$rows  += $statement->rows;
 					$bytes += strlen( $statement->sql );
 				}
-				if ( Statement::SET !== $statement->kind ) {
-					// A recorded position is never inside the preamble: a resumed chunk runs the preamble from its head.
-					$end = $statement->end;
-				}
+				$end = $statement->end; // Never inside the preamble, which a resumed chunk runs again from its head.
 				$this->crash( 'statement', $target->table, $chunk );
 				$cost    = $context->elapsed() - $started;
 				$first   = false;

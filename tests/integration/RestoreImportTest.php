@@ -244,9 +244,9 @@ final class RestoreImportTest extends RestoreTestCase {
 					return;
 				}
 				$seen[ $point ] = ( $seen[ $point ] ?? 0 ) + 1;
-				// The first INSERT of the table's second chunk (after its three preamble statements), run and not recorded;
-				// then the start-over it causes, while the position is still on the second chunk.
-				if ( ( 'statement' === $point && 4 === $seen[ $point ] ) || ( 'restart' === $point && 1 === $seen[ $point ] ) ) {
+				// The first INSERT of the table's second chunk, run and not recorded; then the start-over it causes,
+				// while the position is still on the second chunk.
+				if ( ( 'statement' === $point && 1 === $seen[ $point ] ) || ( 'restart' === $point && 1 === $seen[ $point ] ) ) {
 					throw new \RuntimeException( 'simulated: the run is killed here (' . $point . ')' );
 				}
 			}
@@ -258,6 +258,21 @@ final class RestoreImportTest extends RestoreTestCase {
 		$this->assertStringContainsString( '(restart)', (string) $job->last_error, 'the retry started the table over and was killed right after' );
 		Plugin::instance()->job_actions()->retry( $job->id );
 		$job = $this->run_restore( $job );
+		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
+		$names = $this->temporary_names( $job );
+		foreach ( $this->tables() as $table ) {
+			$this->assertSame( $this->backed_up[ $table ], $this->rows_of( $names[ $table ] ), $table );
+		}
+	}
+
+	/**
+	 * Ticks so short that each runs a statement or two: every chunk is resumed in its middle again and
+	 * again, and a tick that begins a chunk must get past its preamble (which records no position) before
+	 * it may stop, or it ends where it began and the job fails for making no progress.
+	 */
+	public function test_a_restore_of_one_statement_per_tick_finishes_row_for_row(): void {
+		$base = $this->backup( array_merge( self::site_tables(), $this->tables() ) );
+		$job  = $this->run_restore( $this->start_restore( $base ), true, 5000 );
 		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
 		$names = $this->temporary_names( $job );
 		foreach ( $this->tables() as $table ) {
