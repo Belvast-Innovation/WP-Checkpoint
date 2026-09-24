@@ -77,7 +77,7 @@ final class LogDownload {
 				'job'      => $job,
 				'_wpnonce' => Guard::nonce( self::NONCE_ACTION ),
 			),
-			admin_url( 'admin-post.php' )
+			Page::post_url()
 		);
 	}
 

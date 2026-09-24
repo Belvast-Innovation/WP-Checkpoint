@@ -64,7 +64,7 @@ final class ReclaimActions {
 				'tab'            => 'tools',
 				self::QUERY_FLAG => '1',
 			),
-			admin_url( 'admin.php' )
+			Page::base_url()
 		);
 	}
 
@@ -163,7 +163,7 @@ final class ReclaimActions {
 					'page' => Page::SLUG,
 					'tab'  => 'settings',
 				),
-				admin_url( 'admin.php' )
+				Page::base_url()
 			)
 		);
 		exit;
@@ -185,7 +185,7 @@ final class ReclaimActions {
 					'tab'                            => 'tools',
 					EnvironmentActions::RESULT_PARAM => $result,
 				),
-				admin_url( 'admin.php' )
+				Page::base_url()
 			)
 		);
 	}

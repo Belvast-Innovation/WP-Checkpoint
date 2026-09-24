@@ -51,7 +51,7 @@ final class SettingsActions {
 					'tab'                            => 'settings',
 					EnvironmentActions::RESULT_PARAM => self::RESULT,
 				),
-				admin_url( 'admin.php' )
+				Page::base_url()
 			)
 		);
 		exit;

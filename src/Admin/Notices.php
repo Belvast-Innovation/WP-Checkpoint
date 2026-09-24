@@ -49,7 +49,7 @@ final class Notices {
 	 * @return void
 	 */
 	public function register(): void {
-		add_action( 'admin_notices', array( $this, 'render' ) );
+		add_action( 'all_admin_notices', array( $this, 'render' ) ); // Fires in the network admin too, unlike admin_notices.
 		add_action( 'admin_post_' . self::DISMISS_ACTION, array( $this, 'dismiss' ) );
 	}
 
@@ -105,7 +105,7 @@ final class Notices {
 							'page' => Page::SLUG,
 							'tab'  => 'settings',
 						),
-						admin_url( 'admin.php' )
+						Page::base_url()
 					),
 					__( 'Open the Settings tab', 'wp-checkpoint' ),
 				),
@@ -151,7 +151,7 @@ final class Notices {
 	 */
 	public function render(): void {
 		$screen = function_exists( 'get_current_screen' ) ? get_current_screen() : null;
-		if ( ! $screen || 'toplevel_page_' . Page::SLUG !== $screen->id || ! Guard::current_user_can() ) {
+		if ( ! $screen || ! Page::is_screen( (string) $screen->id ) || ! Guard::current_user_can() ) {
 			return;
 		}
 		$dismissed = $this->dismissed();
@@ -198,7 +198,7 @@ final class Notices {
 		$id = isset( $_GET['notice'] ) ? sanitize_key( wp_unslash( $_GET['notice'] ) ) : '';
 		$this->record_dismissal( $id );
 
-		wp_safe_redirect( add_query_arg( 'page', Page::SLUG, admin_url( 'admin.php' ) ) );
+		wp_safe_redirect( add_query_arg( 'page', Page::SLUG, Page::base_url() ) );
 		exit;
 	}
 
@@ -250,7 +250,7 @@ final class Notices {
 				'notice'   => $id,
 				'_wpnonce' => Guard::nonce( self::NONCE_ACTION ),
 			),
-			admin_url( 'admin-post.php' )
+			Page::post_url()
 		);
 	}
 

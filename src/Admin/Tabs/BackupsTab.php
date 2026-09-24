@@ -7,6 +7,7 @@
 
 namespace WPCheckpoint\Admin\Tabs;
 
+use WPCheckpoint\Admin\Page;
 use WPCheckpoint\Admin\DownloadHandler;
 use WPCheckpoint\Admin\JobProgress;
 use WPCheckpoint\Admin\Tab;
@@ -138,7 +139,7 @@ final class BackupsTab implements Tab {
 				),
 				$args
 			),
-			admin_url( 'admin.php' )
+			Page::base_url()
 		);
 	}
 
