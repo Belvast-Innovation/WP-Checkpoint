@@ -3,7 +3,7 @@
  * What foreign-keys.php observes, per server group; see there.
  *
  * Measured 2026-09-24 on:
- * - mariadb-10-11: 10.11.19-MariaDB-ubu2204, 10.6.28-MariaDB-ubu2204, 11.4.13-MariaDB-ubu2404, 11.8.9-MariaDB-ubu2404
+ * - mariadb-10-11: 10.6.28-MariaDB-ubu2204, 10.11.19-MariaDB-ubu2204, 11.4.13-MariaDB-ubu2404, 11.8.9-MariaDB-ubu2404
  * - mariadb-12: 12.3.3-MariaDB-ubu2404
  * - mysql-5.7: 5.7.44
  * - mysql-8: 8.0.46, 8.4.11
@@ -110,6 +110,13 @@ return array(
 		'10_name_lengths.rename_generated_to_58_has'                       => '["rzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz_ibfk_"]',
 		'10_name_lengths.rename_generated_to_64'                           => 'ok',
 		'10_name_lengths.rename_generated_to_64_has'                       => '["rzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"]',
+		'11_check_constraints.live_shown'                                  => '["CONSTRAINT `CONSTRAINT_1` CHECK (`n` > 0)"]',
+		'11_check_constraints.create_with_live_name'                       => 'ok',
+		'11_check_constraints.create_generated_form'                       => 'ok',
+		'11_check_constraints.swap'                                        => 'ok',
+		'11_check_constraints.after_swap_new'                              => '["CONSTRAINT `wcptmp_doc_chk_1` CHECK"]',
+		'11_check_constraints.enforced'                                    => 'E4025',
+		'11_check_constraints.json_column_shown'                           => '["`j` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL CHECK (json_valid(`j`)),"]',
 	),
 	'mariadb-12' => array(
 		'1_child_references_original_name.create'                          => 'ok',
@@ -209,6 +216,13 @@ return array(
 		'10_name_lengths.rename_generated_to_58_has'                       => '["s_ibfk_1"]',
 		'10_name_lengths.rename_generated_to_64'                           => 'ok',
 		'10_name_lengths.rename_generated_to_64_has'                       => '["s_ibfk_1"]',
+		'11_check_constraints.live_shown'                                  => '["CONSTRAINT `CONSTRAINT_1` CHECK (`n` > 0)"]',
+		'11_check_constraints.create_with_live_name'                       => 'ok',
+		'11_check_constraints.create_generated_form'                       => 'ok',
+		'11_check_constraints.swap'                                        => 'ok',
+		'11_check_constraints.after_swap_new'                              => '["CONSTRAINT `wcptmp_doc_chk_1` CHECK"]',
+		'11_check_constraints.enforced'                                    => 'E4025',
+		'11_check_constraints.json_column_shown'                           => '["`j` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL CHECK (json_valid(`j`)),"]',
 	),
 	'mysql-5.7' => array(
 		'1_child_references_original_name.create'                          => 'ok',
@@ -308,6 +322,13 @@ return array(
 		'10_name_lengths.rename_generated_to_58_has'                       => '["rzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz_ibfk_"]',
 		'10_name_lengths.rename_generated_to_64'                           => 'ok',
 		'10_name_lengths.rename_generated_to_64_has'                       => '["rzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"]',
+		'11_check_constraints.live_shown'                                  => '[]',
+		'11_check_constraints.create_with_live_name'                       => 'ok',
+		'11_check_constraints.create_generated_form'                       => 'ok',
+		'11_check_constraints.swap'                                        => 'ok',
+		'11_check_constraints.after_swap_new'                              => '[]',
+		'11_check_constraints.enforced'                                    => 'ok',
+		'11_check_constraints.json_column_shown'                           => '[]',
 	),
 	'mysql-8' => array(
 		'1_child_references_original_name.create'                          => 'ok',
@@ -407,5 +428,12 @@ return array(
 		'10_name_lengths.rename_generated_to_58_has'                       => '["s_ibfk_1"]',
 		'10_name_lengths.rename_generated_to_64'                           => 'E1059',
 		'10_name_lengths.rename_generated_to_64_has'                       => '["s_ibfk_1"]',
+		'11_check_constraints.live_shown'                                  => '["CONSTRAINT `wp_doc_chk_1` CHECK ((`n` > 0))"]',
+		'11_check_constraints.create_with_live_name'                       => 'E3822',
+		'11_check_constraints.create_generated_form'                       => 'ok',
+		'11_check_constraints.swap'                                        => 'ok',
+		'11_check_constraints.after_swap_new'                              => '["CONSTRAINT `wp_doc_chk_1` CHECK"]',
+		'11_check_constraints.enforced'                                    => 'E3819',
+		'11_check_constraints.json_column_shown'                           => '[]',
 	),
 );

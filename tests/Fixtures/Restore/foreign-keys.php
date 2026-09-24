@@ -1,8 +1,9 @@
 <?php
 /**
- * What the database server does with foreign keys when tables are imported
- * under temporary names and swapped in with one RENAME TABLE, the way a
- * restore does (T042). The restore's rules for foreign keys rest on these
+ * What the database server does with foreign keys (and the names of CHECK
+ * constraints, which share their questions) when tables are imported under
+ * temporary names and swapped in with one RENAME TABLE, the way a restore
+ * does (T042). The restore's rules for foreign keys rest on these
  * observations, and servers change: CI runs this against every server it
  * supports and compares with foreign-keys.expected.php.
  *
@@ -343,6 +344,29 @@ foreach ( array( 57, 58, 64 ) as $n ) {
 	fk_run( 'DROP TABLE IF EXISTS s' );
 }
 $cases['10_name_lengths'] = $lengths;
+
+// 11: CHECK constraints: the same questions of names as foreign keys (MySQL 8.0.16+ enforces them; MariaDB writes json_valid checks itself).
+fk_reset();
+fk_run( 'CREATE TABLE wp_doc (id INT PRIMARY KEY, n INT, CHECK (n > 0)) ENGINE=InnoDB' );
+$shown = array();
+$row   = mysqli_fetch_row( mysqli_query( $db, 'SHOW CREATE TABLE wp_doc' ) );
+preg_match_all( '/^\s*(?:CONSTRAINT .*CHECK.*|.*CHECK \(.*)$/m', (string) ( $row[1] ?? '' ), $lines );
+$shown = array_map( 'trim', $lines[0] );
+$case  = array( 'live_shown' => $shown );
+preg_match( '/CONSTRAINT `([^`]+)` CHECK/', implode( "\n", $shown ), $check );
+$case['create_with_live_name']  = fk_run( 'CREATE TABLE wcptmp_doc (id INT PRIMARY KEY, n INT, CONSTRAINT `' . ( $check[1] ?? 'none' ) . '` CHECK (n > 0)) ENGINE=InnoDB' );
+fk_run( 'DROP TABLE IF EXISTS wcptmp_doc' );
+$case['create_generated_form']  = fk_run( 'CREATE TABLE wcptmp_doc (id INT PRIMARY KEY, n INT, CONSTRAINT `wcptmp_doc_chk_1` CHECK (n > 0)) ENGINE=InnoDB' );
+$case['swap']                   = fk_run( 'RENAME TABLE wp_doc TO wcpold_doc, wcptmp_doc TO wp_doc' );
+$row                            = mysqli_fetch_row( mysqli_query( $db, 'SHOW CREATE TABLE wp_doc' ) );
+preg_match_all( '/CONSTRAINT `[^`]+` CHECK/', (string) ( $row[1] ?? '' ), $names );
+$case['after_swap_new']         = $names[0];
+$case['enforced']               = fk_run( 'INSERT INTO wp_doc VALUES (1, -1)' );
+fk_run( 'CREATE TABLE json_doc (id INT PRIMARY KEY, j JSON) ENGINE=InnoDB' );
+$row                            = mysqli_fetch_row( mysqli_query( $db, 'SHOW CREATE TABLE json_doc' ) );
+preg_match_all( '/^.*CHECK.*$/m', (string) ( $row[1] ?? '' ), $lines );
+$case['json_column_shown']      = array_map( 'trim', $lines[0] );
+$cases['11_check_constraints']  = $case;
 
 fk_run( 'DROP DATABASE `' . $schema . '`' );
 
