@@ -190,10 +190,17 @@ final class RestPermissionsTest extends WP_UnitTestCase {
 		wp_set_current_user( self::$admin );
 		$this->assertNotContains( rest_get_server()->dispatch( $this->request( '/wp-checkpoint/v1/backups', 'GET' ) )->get_status(), array( 401, 403 ) );
 		wp_set_current_user( $site_admin );
+		$checked = 0;
 		foreach ( $this->route_methods() as $label => list( $pattern, $method ) ) {
+			if ( 'challenge' === $this->auth( $pattern ) ) {
+				continue; // Refused to everyone without the challenge: says nothing about the network capability.
+			}
 			$response = rest_get_server()->dispatch( $this->request( $pattern, $method ) );
 			$this->assertSame( 403, $response->get_status(), "{$label} must return 403 to a site administrator: a backup covers the network and a restore overwrites every site" );
+			$this->assertSame( 'rest_forbidden', $response->get_data()['code'] ?? '', "{$label}: refused by the capability check" );
+			++$checked;
 		}
+		$this->assertGreaterThan( 5, $checked );
 	}
 
 	public function test_administrator_requests_pass_permission_check(): void {

@@ -87,13 +87,16 @@ final class Page {
 
 	/**
 	 * The admin-post.php the page's forms and download links go to. Core has
-	 * no network admin-post.php; on multisite the main site's one runs the
-	 * handlers, whatever site the link was printed on.
+	 * no network admin-post.php; on multisite it is the one under the
+	 * network's own address, the host and path the network admin itself is
+	 * served from (network_admin_url() is built the same way), so the login
+	 * cookie reaches it whatever site the link was printed on, also where the
+	 * main site's address is mapped to another domain.
 	 *
 	 * @return string
 	 */
 	public static function post_url(): string {
-		return is_multisite() ? get_admin_url( get_main_site_id(), 'admin-post.php' ) : admin_url( 'admin-post.php' );
+		return is_multisite() ? network_site_url( 'wp-admin/admin-post.php', 'admin' ) : admin_url( 'admin-post.php' );
 	}
 
 	/**
