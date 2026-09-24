@@ -70,15 +70,39 @@ final class AtomicWriteTest extends TestCase {
 
 		list( $target, $alias ) = $this->linked( 'database.tables.json' );
 		self::put( $target, '{"tables":["new"]}' );
-		$this->assertSame( '{"tables":["new"]}', file_get_contents( $target ) );
-		$this->assertSame( 'old', file_get_contents( $alias ), 'the old file was never written: the target was replaced' );
-		$this->assertFileDoesNotExist( $target . '.tmp' );
+		$this->assert_replaced( $target, $alias, '{"tables":["new"]}' );
 	}
 
 	public function test_the_plan_files_are_replaced_by_rename(): void {
+		// The control, in this test too: a write in place is seen through the link.
+		list( $plain, $plain_alias ) = $this->linked( 'control.json' );
+		file_put_contents( $plain, 'new' );
+		$this->assertSame( 'new', file_get_contents( $plain_alias ), 'the link observes a write in place' );
+
 		list( $target, $alias ) = $this->linked( ExportPlan::PLAN );
 		ExportPlan::write( $this->dir, ExportPlan::PLAN, array( 'tables' => array( 'wp_posts' ) ) );
-		$this->assertSame( array( 'wp_posts' ), ExportPlan::read( $this->dir, ExportPlan::PLAN )['tables'] );
+		$this->assert_replaced( $target, $alias, '{"tables":["wp_posts"]}' );
+	}
+
+	/**
+	 * The target holds the new content in another file than before, the old
+	 * file kept its content, and no temporary file is left. A rename and an
+	 * unlink-and-recreate both pass the link check; the recreate would leave
+	 * the target missing for a moment, which only a rename avoids, so the
+	 * temporary file's absence is part of what says it was renamed.
+	 *
+	 * @param string $target  Target.
+	 * @param string $alias   Link to the old file.
+	 * @param string $content New content.
+	 * @return void
+	 */
+	private function assert_replaced( string $target, string $alias, string $content ): void {
+		clearstatcache();
+		$this->assertSame( $content, file_get_contents( $target ) );
 		$this->assertSame( 'old', file_get_contents( $alias ), 'the old file was never written: the target was replaced' );
+		if ( 0 !== fileinode( $alias ) ) {
+			$this->assertNotSame( fileinode( $alias ), fileinode( $target ), 'another file now has the name' );
+		}
+		$this->assertFileDoesNotExist( $target . '.tmp', 'the temporary file became the target' );
 	}
 }

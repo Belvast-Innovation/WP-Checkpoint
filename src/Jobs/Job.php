@@ -27,12 +27,14 @@ final class Job {
 	const CANCELLED = 'cancelled';
 
 	/**
-	 * Kinds of failure (failure_kind). FAILURE_FINAL carries two meanings
-	 * for now: the job's work files are gone or not what it wrote (WorkLost),
-	 * and going on would give a wrong backup (TableChanged, recorded with the
-	 * reason REASON_TABLE_CHANGED so the screen can say which). Both hide
-	 * Retry for the same answer, a new job; a third meaning that needs a
-	 * different answer gets a kind of its own.
+	 * Kinds of failure (failure_kind). FAILURE_FINAL carries three meanings
+	 * for now: the job's work files are gone or not what it wrote (WorkLost);
+	 * going on would give a wrong backup (TableChanged, recorded with the
+	 * reason REASON_TABLE_CHANGED so the screen can say which); and nobody
+	 * answered its question within 7 days (its work files are reclaimed at
+	 * once, so the screen says that instead). All hide Retry for the same
+	 * answer, a new job; a meaning that needs a different answer gets a kind
+	 * of its own.
 	 */
 	const FAILURE_TEMPORARY = 'temporary';
 	const FAILURE_FINAL     = 'final';

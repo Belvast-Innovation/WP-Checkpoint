@@ -1441,7 +1441,7 @@ final class JobRepository {
 	 * @param array<string, mixed> $extra         Columns to set in the same statement (a state change that spans
 	 *                                            several fields is one write, never two).
 	 * @param string[]             $extra_formats Their formats.
-	 * @param string               $failure Kind of failure for a failed job (Job::FAILURE_*, or '').
+	 * @param string               $failure Kind of failure for a failed job (Job::stamp_failure(), or '').
 	 * @return Job
 	 * @throws StaleJob When the guarded UPDATE changed no row.
 	 */
