@@ -141,6 +141,21 @@ final class RestoreImportTest extends RestoreTestCase {
 		$this->assertSame( array(), $this->job_tables( $job ), 'nothing was created' );
 	}
 
+	public function test_only_a_table_whose_constraint_name_had_to_be_shortened_is_warned_about(): void {
+		$long = str_repeat( 'k', 60 );
+		$this->create( $this->p . 'longfk', "(`id` int NOT NULL, `parent_id` bigint unsigned NULL, PRIMARY KEY (`id`), CONSTRAINT `{$long}` FOREIGN KEY (`parent_id`) REFERENCES `{$this->p}parent` (`id`)) ENGINE=InnoDB" );
+		$base = $this->backup( array_merge( self::site_tables(), array( $this->p . 'parent', $this->p . 'child', $this->p . 'longfk' ) ) );
+		$job  = $this->run_restore( $this->start_restore( $base ) );
+		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
+		$log      = (string) file_get_contents( $job->storage_path . '/' . $job->log_path );
+		$warnings = preg_grep( '/constraint name of this table was shortened/', explode( "\n", $log ) );
+		$this->assertCount( 1, $warnings, 'one table, one warning; the child\'s names fit' );
+		$warning = (string) reset( $warnings );
+		$this->assertStringContainsString( $this->p . 'longfk', $warning );
+		$this->assertStringContainsString( 'Do not update WooCommerce before confirming the restore', $warning );
+		$this->assertStringNotContainsString( $this->p . 'child', $warning );
+	}
+
 	/**
 	 * A run killed right after a statement (its record not written: an InnoDB batch is rolled back, a
 	 * MyISAM row stays) or right after a commit (the ledger ahead of the cursor), at every such point of
