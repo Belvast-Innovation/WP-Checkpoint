@@ -11,6 +11,7 @@ use WPCheckpoint\Archive\ChunkHasher;
 use WPCheckpoint\Archive\EnvironmentFailure;
 use WPCheckpoint\Archive\Manifest;
 use WPCheckpoint\Archive\ManifestError;
+use WPCheckpoint\Archive\ZipFormat;
 use WPCheckpoint\Archive\ZipReader;
 use WPCheckpoint\Database\WpdbConnection;
 use WPCheckpoint\Restore\ChunkReader;
@@ -83,6 +84,11 @@ final class RestorePreflightStep implements Step {
 	const PAGE = 1000;
 
 	/**
+	 * Largest chunk size a restore takes: what this plugin writes (a chunk is extracted and hashed in one unit).
+	 */
+	const MAX_CHUNK_BYTES = 16777216;
+
+	/**
 	 * Returns the backups directory: function(): string.
 	 *
 	 * @var callable
@@ -90,12 +96,21 @@ final class RestorePreflightStep implements Step {
 	private $backups;
 
 	/**
+	 * Head of a later chunk read (tests make it small).
+	 *
+	 * @var int
+	 */
+	private $head_bytes;
+
+	/**
 	 * Constructor.
 	 *
-	 * @param callable $backups function(): string.
+	 * @param callable $backups    function(): string.
+	 * @param int      $head_bytes Head of a later chunk read.
 	 */
-	public function __construct( callable $backups ) {
-		$this->backups = $backups;
+	public function __construct( callable $backups, int $head_bytes = self::HEAD_BYTES ) {
+		$this->backups    = $backups;
+		$this->head_bytes = max( 1, $head_bytes );
 	}
 
 	/**
@@ -151,6 +166,9 @@ final class RestorePreflightStep implements Step {
 		$manifest = self::manifest( $work );
 		$site     = $manifest->site();
 		$contents = $manifest->to_array()['contents'];
+		if ( $manifest->chunk_bytes() > self::MAX_CHUNK_BYTES ) {
+			throw new Refused( sprintf( 'This backup\'s chunks are up to %1$d MB; the restore extracts and checks a chunk in one step and takes chunks of at most %2$d MB.', (int) ( $manifest->chunk_bytes() / 1048576 ), (int) ( self::MAX_CHUNK_BYTES / 1048576 ) ) );
+		}
 		if ( empty( $contents['database'] ) ) {
 			throw new Refused( 'This backup holds no database; restoring files alone is not available yet.' );
 		}
@@ -304,7 +322,9 @@ final class RestorePreflightStep implements Step {
 		$reader = $chunk['reader'];
 		$entry  = $chunk['entry'];
 		try {
-			$piece = $reader->extract_piece( $entry, $heads, 0, $first ? self::FIRST_BYTES : self::HEAD_BYTES, 0 );
+			// A deflated entry has no addressable ranges and is read whole (the packer deflates only entries of at most 4 MiB).
+			$length = ZipFormat::METHOD_STORE === (int) $entry['method'] ? ( $first ? self::FIRST_BYTES : $this->head_bytes ) : (int) $entry['usize'];
+			$piece  = $reader->extract_piece( $entry, $heads, 0, $length, 0 );
 		} catch ( EnvironmentFailure $e ) {
 			throw $e;
 		} catch ( \RuntimeException $e ) {

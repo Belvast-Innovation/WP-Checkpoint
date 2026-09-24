@@ -48,7 +48,7 @@ final class CreateTableTest extends TestCase {
 	/**
 	 * @dataProvider servers
 	 */
-	public function test_what_each_server_writes_is_read(string $file ): void {
+	public function test_what_each_server_writes_is_read( string $file ): void {
 		$shown = json_decode( (string) file_get_contents( $file ), true );
 		$child = self::read( $shown['wp_child;x'], 'wp_child;x' );
 		$this->assertSame( array( 'id', 'parent_id', 'parent_code', 'qty', 'total', 'total2', 'meta', 'title', 'pt', 'created' ), $child->columns() );
@@ -119,7 +119,18 @@ final class CreateTableTest extends TestCase {
 		$create = self::read( 'CREATE TABLE `wp_a` (`id` int NOT NULL, `u` bigint, PRIMARY KEY (`id`), CONSTRAINT `fk_u` FOREIGN KEY (`u`) REFERENCES `wp_users` (`ID`), CONSTRAINT `fk_self` FOREIGN KEY (`id`) REFERENCES `wp_a` (`id`)) ENGINE=InnoDB', 'wp_a' );
 		$sql    = $create->rewrite( 'wcptmp_a', 'wp_a', 0, new ConstraintNames( '0000' ), self::map( array( 'wp_a' => 'wcptmp_a' ) ) )['sql'];
 		$this->assertStringContainsString( 'REFERENCES `wp_users` (`ID`)', $sql, 'not restored: the live table' );
-		$moved = $create->rewrite( 'wcptmp_a', 'b_a', 0, new ConstraintNames( '0000' ), self::map( array( 'wp_a' => 'wcptmp_a', 'wp_users' => 'b_users' ) ) )['sql'];
+		$moved = $create->rewrite(
+			'wcptmp_a',
+			'b_a',
+			0,
+			new ConstraintNames( '0000' ),
+			self::map(
+				array(
+					'wp_a'     => 'wcptmp_a',
+					'wp_users' => 'b_users',
+				)
+			)
+		)['sql'];
 		$this->assertStringContainsString( 'REFERENCES `b_users` (`ID`)', $moved, 'not restored, on a site with another prefix: its name here' );
 		$this->assertStringContainsString( 'REFERENCES `wcptmp_a` (`id`)', $sql, 'itself: the temporary name' );
 	}
@@ -130,24 +141,24 @@ final class CreateTableTest extends TestCase {
 	public function refused(): array {
 		$columns = '(`id` int NOT NULL, PRIMARY KEY (`id`))';
 		return array(
-			'another table'           => array( 'CREATE TABLE `wp_b` ' . $columns, 'names another table' ),
-			'temporary'               => array( 'CREATE TEMPORARY TABLE `wp_a` ' . $columns, 'not CREATE TABLE' ),
-			'if not exists'           => array( 'CREATE TABLE IF NOT EXISTS `wp_a` ' . $columns, 'names another table' ),
-			'a copy of a query'       => array( 'CREATE TABLE `wp_a` ' . $columns . ' SELECT * FROM `wp_users`', 'SELECT' ),
-			'a copy of a query (as)'  => array( 'CREATE TABLE `wp_a` ' . $columns . ' AS SELECT 1', 'AS' ),
-			'like'                    => array( 'CREATE TABLE `wp_a` LIKE `wp_users`', 'column list' ),
-			'federated'               => array( 'CREATE TABLE `wp_a` ' . $columns . ' ENGINE=FEDERATED CONNECTION=\'mysql://x@h/db/t\'', 'engine' ),
-			'connection alone'        => array( 'CREATE TABLE `wp_a` ' . $columns . ' CONNECTION=\'mysql://x@h/db/t\'', 'CONNECTION' ),
-			'merge'                   => array( 'CREATE TABLE `wp_a` ' . $columns . ' ENGINE=MRG_MyISAM', 'engine' ),
-			'connect engine'          => array( 'CREATE TABLE `wp_a` ' . $columns . ' ENGINE=CONNECT', 'engine' ),
-			'data directory'          => array( 'CREATE TABLE `wp_a` ' . $columns . ' ENGINE=InnoDB DATA DIRECTORY=\'/tmp\'', 'DIRECTORY' ),
-			'directory in a comment'  => array( 'CREATE TABLE `wp_a` ' . $columns . ' ENGINE=InnoDB /*!50100 PARTITION BY HASH (`id`) (PARTITION p0 DATA DIRECTORY = \'/tmp\') */', 'DIRECTORY' ),
-			'inline references'       => array( 'CREATE TABLE `wp_a` (`id` int NOT NULL REFERENCES `wp_users` (`ID`), PRIMARY KEY (`id`))', 'inline REFERENCES' ),
-			'another database'        => array( 'CREATE TABLE `wp_a` (`id` int NOT NULL, PRIMARY KEY (`id`), CONSTRAINT `f` FOREIGN KEY (`id`) REFERENCES `other`.`t` (`id`))', 'another database' ),
-			'an unnamed foreign key'  => array( 'CREATE TABLE `wp_a` (`id` int NOT NULL, PRIMARY KEY (`id`), FOREIGN KEY (`id`) REFERENCES `wp_b` (`id`))', 'without a name' ),
-			'system versioning items' => array( 'CREATE TABLE `wp_a` (`id` int NOT NULL, PERIOD FOR SYSTEM_TIME (`s`, `e`))', 'does not create (PERIOD)' ),
-			'two primary keys'        => array( 'CREATE TABLE `wp_a` (`id` int NOT NULL, PRIMARY KEY (`id`), PRIMARY KEY (`id`))', 'two primary keys' ),
-			'a column twice'          => array( 'CREATE TABLE `wp_a` (`id` int, `id` int)', 'twice' ),
+			'another table'                             => array( 'CREATE TABLE `wp_b` ' . $columns, 'names another table' ),
+			'temporary'                                 => array( 'CREATE TEMPORARY TABLE `wp_a` ' . $columns, 'not CREATE TABLE' ),
+			'if not exists'                             => array( 'CREATE TABLE IF NOT EXISTS `wp_a` ' . $columns, 'names another table' ),
+			'a copy of a query'                         => array( 'CREATE TABLE `wp_a` ' . $columns . ' SELECT * FROM `wp_users`', 'SELECT' ),
+			'a copy of a query (as)'                    => array( 'CREATE TABLE `wp_a` ' . $columns . ' AS SELECT 1', 'AS' ),
+			'like'                                      => array( 'CREATE TABLE `wp_a` LIKE `wp_users`', 'column list' ),
+			'federated'                                 => array( 'CREATE TABLE `wp_a` ' . $columns . ' ENGINE=FEDERATED CONNECTION=\'mysql://x@h/db/t\'', 'engine' ),
+			'connection alone'                          => array( 'CREATE TABLE `wp_a` ' . $columns . ' CONNECTION=\'mysql://x@h/db/t\'', 'CONNECTION' ),
+			'merge'                                     => array( 'CREATE TABLE `wp_a` ' . $columns . ' ENGINE=MRG_MyISAM', 'engine' ),
+			'connect engine'                            => array( 'CREATE TABLE `wp_a` ' . $columns . ' ENGINE=CONNECT', 'engine' ),
+			'data directory'                            => array( 'CREATE TABLE `wp_a` ' . $columns . ' ENGINE=InnoDB DATA DIRECTORY=\'/tmp\'', 'DIRECTORY' ),
+			'directory in a comment'                    => array( 'CREATE TABLE `wp_a` ' . $columns . ' ENGINE=InnoDB /*!50100 PARTITION BY HASH (`id`) (PARTITION p0 DATA DIRECTORY = \'/tmp\') */', 'DIRECTORY' ),
+			'inline references'                         => array( 'CREATE TABLE `wp_a` (`id` int NOT NULL REFERENCES `wp_users` (`ID`), PRIMARY KEY (`id`))', 'inline REFERENCES' ),
+			'another database'                          => array( 'CREATE TABLE `wp_a` (`id` int NOT NULL, PRIMARY KEY (`id`), CONSTRAINT `f` FOREIGN KEY (`id`) REFERENCES `other`.`t` (`id`))', 'another database' ),
+			'an unnamed foreign key'                    => array( 'CREATE TABLE `wp_a` (`id` int NOT NULL, PRIMARY KEY (`id`), FOREIGN KEY (`id`) REFERENCES `wp_b` (`id`))', 'without a name' ),
+			'system versioning items'                   => array( 'CREATE TABLE `wp_a` (`id` int NOT NULL, PERIOD FOR SYSTEM_TIME (`s`, `e`))', 'does not create (PERIOD)' ),
+			'two primary keys'                          => array( 'CREATE TABLE `wp_a` (`id` int NOT NULL, PRIMARY KEY (`id`), PRIMARY KEY (`id`))', 'two primary keys' ),
+			'a column twice'                            => array( 'CREATE TABLE `wp_a` (`id` int, `id` int)', 'twice' ),
 			'a semicolon hidden in a versioned comment' => array( 'CREATE TABLE `wp_a` ' . $columns . ' /*!50100 ; DROP TABLE `wp_users` */', 'semicolon inside a versioned comment' ),
 		);
 	}
@@ -164,7 +175,11 @@ final class CreateTableTest extends TestCase {
 	public function test_constraint_names(): void {
 		$names = new ConstraintNames( '1a2b' );
 		$this->assertSame(
-			array( 'name' => 'wcptmp_x_ibfk_3', 'intended' => 'wp2_x_ibfk_3', 'shortened' => false ),
+			array(
+				'name'      => 'wcptmp_x_ibfk_3',
+				'intended'  => 'wp2_x_ibfk_3',
+				'shortened' => false,
+			),
 			$names->choose( 'wp_x_ibfk_3', 'ibfk', 'wp_x', 'wcptmp_x', 'wp2_x', 0 ),
 			'the generated form of the backup\'s table: the temporary table\'s; meant to end as the final table\'s'
 		);

@@ -34,9 +34,17 @@ final class ChunkReaderTest extends TestCase {
 	}
 
 	private function target( $columns = null ): ImportTarget {
-		return new ImportTarget( 'wp_posts', 'wcptmpabcdef_7_1a2b_posts', 'wp_posts', 3, new ConstraintNames( '1a2b' ), static function ( string $table ): string {
-			return 'wp_posts' === $table ? 'wcptmpabcdef_7_1a2b_posts' : $table;
-		}, $columns );
+		return new ImportTarget(
+			'wp_posts',
+			'wcptmpabcdef_7_1a2b_posts',
+			'wp_posts',
+			3,
+			new ConstraintNames( '1a2b' ),
+			static function ( string $table ): string {
+				return 'wp_posts' === $table ? 'wcptmpabcdef_7_1a2b_posts' : $table;
+			},
+			$columns
+		);
 	}
 
 	/**
@@ -62,19 +70,19 @@ final class ChunkReaderTest extends TestCase {
 	 */
 	private static function chunk(): string {
 		$values = array(
-			"a;b",
+			'a;b',
 			"it's; fine",
-			"back\\slash",
-			"ends with a backslash \\",
+			'back\\slash',
+			'ends with a backslash \\',
 			"\\';DROP TABLE wp_users;--",
 			"quote '' doubled and ; after",
 			"line\nbreak;\r\n-- not a comment",
-			"/* not a comment; */",
-			"`backtick`; \"double\"",
+			'/* not a comment; */',
+			'`backtick`; "double"',
 			"\x00\x1a",
-			"ünïcödé; ✓",
+			'ünïcödé; ✓',
 		);
-		$rows = array();
+		$rows   = array();
 		foreach ( $values as $i => $value ) {
 			$rows[] = '(' . ( $i + 1 ) . ',' . SqlWriter::quote( $value ) . ',' . ( 0 === $i % 3 ? 'NULL' : ( 1 === $i % 3 ? SqlWriter::hex( $value ) : '-1.5e3' ) ) . ')';
 		}
@@ -137,7 +145,7 @@ final class ChunkReaderTest extends TestCase {
 	 * @return array<string, array{0: string, 1: string}>
 	 */
 	public function refused_statements(): array {
-		$head = "INSERT INTO `wp_posts` (`ID`, `post_title`) VALUES ";
+		$head = 'INSERT INTO `wp_posts` (`ID`, `post_title`) VALUES ';
 		return array(
 			'another kind'                  => array( "UPDATE `wp_posts` SET `post_title` = 'x';\n", 'does not run (UPDATE)' ),
 			'truncate'                      => array( "TRUNCATE TABLE `wp_users`;\n", 'does not run (TRUNCATE)' ),

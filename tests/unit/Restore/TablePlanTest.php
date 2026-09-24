@@ -92,6 +92,20 @@ final class TablePlanTest extends TestCase {
 		self::plan( array( 'wp_options', 'wp_Posts', 'wp_posts' ), 'wp_', 'wp_', array(), true );
 	}
 
+	public function test_two_tables_with_one_temporary_name_are_refused(): void {
+		// "wp_foo" without the prefix and "foo" (another installation's table, kept by name) both become "foo".
+		$this->assertCount( 2, self::plan( array( 'wp_options', 'wp_foo' ) )->tables(), 'the control: one of them' );
+		$this->expectException( Refused::class );
+		$this->expectExceptionMessage( 'would share a temporary name' );
+		self::plan( array( 'wp_options', 'wp_foo', 'foo' ) );
+	}
+
+	public function test_the_jobs_table_is_left_out_in_any_case_where_the_server_ignores_case(): void {
+		$this->assertSame( array( 'wp_WPCheckpoint_Jobs' ), array_keys( array_diff_key( array_flip( array_column( self::plan( array( 'wp_options', 'wp_WPCheckpoint_Jobs' ) )->tables(), 'table' ) ), array( 'wp_options' => 0 ) ) ), 'the control: a server that tells case apart keeps it' );
+		$plan = self::plan( array( 'wp_options', 'wp_WPCheckpoint_Jobs' ), 'wp_', 'wp_', array(), true );
+		$this->assertSame( array( 'wp_WPCheckpoint_Jobs' => 'jobs' ), $plan->skipped() );
+	}
+
 	public function test_the_options_table_and_on_a_network_the_sitemeta_table_are_required(): void {
 		$this->assertCount( 2, self::plan( array( 'wp_options', 'wp_sitemeta' ), 'wp_', 'wp_', array(), false, true )->tables() );
 		foreach ( array( array( array( 'wp_posts' ), false, 'wp_options' ), array( array( 'wp_options' ), true, 'wp_sitemeta' ) ) as list( $names, $multisite, $missing ) ) {

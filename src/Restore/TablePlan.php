@@ -88,13 +88,14 @@ final class TablePlan {
 		$plan->site_prefix   = $site_prefix;
 		$jobs                = $backup_prefix . Schema::JOBS_TABLE;
 		$finals              = array();
+		$temporaries         = array();
 		foreach ( $tables as $summary ) {
 			$name = (string) $summary['name'];
 			if ( in_array( $name, $excluded, true ) ) {
 				$plan->skipped[ $name ] = 'excluded';
 				continue;
 			}
-			if ( $name === $jobs ) {
+			if ( $name === $jobs || ( $fold_case && strtolower( $name ) === strtolower( $jobs ) ) ) {
 				$plan->skipped[ $name ] = 'jobs';
 				continue;
 			}
@@ -120,9 +121,15 @@ final class TablePlan {
 			}
 			$finals[ $key ] = $name;
 			$number         = count( $plan->tables );
-			$plan->tables[] = array(
+			$temporary      = TempTables::name( $token, $job_id, $random, self::strip( $name, $backup_prefix ) );
+			$temp_key       = $fold_case ? strtolower( $temporary ) : $temporary;
+			if ( isset( $temporaries[ $temp_key ] ) ) {
+				throw new Refused( sprintf( 'The tables %1$s and %2$s would share a temporary name during the restore. Leave one of them out of the restore.', $temporaries[ $temp_key ], $name ) );
+			}
+			$temporaries[ $temp_key ] = $name;
+			$plan->tables[]           = array(
 				'table'     => $name,
-				'temporary' => TempTables::name( $token, $job_id, $random, self::strip( $name, $backup_prefix ) ),
+				'temporary' => $temporary,
 				'final'     => $final,
 				'number'    => $number,
 				'chunks'    => (int) $summary['chunks'],
