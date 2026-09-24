@@ -44,10 +44,14 @@ defined( 'ABSPATH' ) || exit;
  * Anything else (another kind of statement, another table, a function call
  * or a subquery among the values, a comment inside a statement) is refused
  * before it runs, with the table, chunk and byte offset. Whatever the
- * reader decides, the executor sends one statement per call on a
- * connection that does not accept several, so a statement the server reads
- * differently from this grammar fails as a syntax error rather than
- * running something else.
+ * reader decides, the executor runs each through mysqli_query(), which
+ * sends the text as one statement (ImportSession), so a statement the
+ * server reads differently from this grammar fails as a syntax error
+ * rather than running something else.
+ *
+ * The preamble comes before every other statement of a chunk; a reader
+ * opened past the chunk's start refuses it (the importer runs a chunk's
+ * preamble again from the head when it resumes).
  *
  * A statement is read into memory whole (it is sent whole), so its size is
  * bounded by MAX_STATEMENT_BYTES: the exporter cuts INSERTs at about 1 MB,
@@ -125,6 +129,20 @@ final class ChunkReader {
 	private $read_bytes;
 
 	/**
+	 * Whether an INSERT is read only up to VALUES (the preflight's look at a chunk's head).
+	 *
+	 * @var bool
+	 */
+	private $heads_only;
+
+	/**
+	 * Whether a statement other than the preamble has been read (or the reader started past the head).
+	 *
+	 * @var bool
+	 */
+	private $past_preamble;
+
+	/**
 	 * Open a chunk file at an offset (0, or the end of a statement returned earlier).
 	 *
 	 * @param string       $path   Chunk file.
@@ -132,9 +150,10 @@ final class ChunkReader {
 	 * @param ImportTarget $target The table.
 	 * @param int          $chunk  Chunk number.
 	 * @param int          $read_bytes Bytes read at a time (tests use tiny reads to put every boundary everywhere).
+	 * @param bool         $heads_only Read each INSERT only up to VALUES and return it with no SQL (to be looked at, never run).
 	 * @throws EnvironmentFailure When the file cannot be opened or positioned.
 	 */
-	public function __construct( string $path, int $offset, ImportTarget $target, int $chunk, int $read_bytes = self::READ_BYTES ) {
+	public function __construct( string $path, int $offset, ImportTarget $target, int $chunk, int $read_bytes = self::READ_BYTES, bool $heads_only = false ) {
 		$handle = @fopen( $path, 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- reported below.
 		if ( false === $handle ) {
 			throw new EnvironmentFailure( 'A database chunk extracted for the restore cannot be opened.' );
@@ -148,7 +167,9 @@ final class ChunkReader {
 		$this->target = $target;
 		$this->chunk  = $chunk;
 
-		$this->read_bytes = max( 1, $read_bytes );
+		$this->read_bytes    = max( 1, $read_bytes );
+		$this->heads_only    = $heads_only;
+		$this->past_preamble = $offset > 0;
 	}
 
 	/**
@@ -193,8 +214,12 @@ final class ChunkReader {
 				$this->consume( $start );
 				$statement = $this->statement();
 				if ( $statement->end > self::MAX_STATEMENT_BYTES ) {
-					throw $this->refused( sprintf( 'A statement is larger than %d bytes, more than the restore reads at once.', self::MAX_STATEMENT_BYTES ) );
+					throw new Refused( sprintf( 'A statement is larger than %d bytes, more than the restore reads at once.', self::MAX_STATEMENT_BYTES ) );
 				}
+				if ( Statement::SET === $statement->kind && $this->past_preamble ) {
+					throw new Refused( 'The session preamble after other statements.' );
+				}
+				$this->past_preamble = $this->past_preamble || Statement::SET !== $statement->kind;
 				$this->consume( $statement->end );
 				$statement->end = $this->offset;
 				return $statement;
@@ -238,7 +263,7 @@ final class ChunkReader {
 		if ( 'CREATE' === $head ) {
 			$tokens = SqlLexer::tokens( $buffer, 0, $this->eof );
 			$create = CreateTable::read( $buffer, $tokens, $this->target->table );
-			$sql    = $create->rewrite( $this->target->temporary, $this->target->final_name, $this->target->number, $this->target->names, $this->target->restored );
+			$sql    = $create->rewrite( $this->target->temporary, $this->target->final_name, $this->target->number, $this->target->names, $this->target->reference );
 
 			$statement              = new Statement( Statement::CREATE, $sql['sql'], $tokens[ count( $tokens ) - 1 ][2] );
 			$statement->create      = $create;
@@ -344,7 +369,12 @@ final class ChunkReader {
 		if ( null !== $this->target->columns && $columns !== $this->target->columns ) {
 			throw new Refused( 'INSERT lists other columns than the table defines (' . implode( ', ', $columns ) . ').' );
 		}
-		$at   = $this->words( $buffer, SqlLexer::spaces( $buffer, $at ), array( 'VALUES' ) );
+		$at = $this->words( $buffer, SqlLexer::spaces( $buffer, $at ), array( 'VALUES' ) );
+		if ( $this->heads_only ) {
+			$statement          = new Statement( Statement::INSERT, '', $at );
+			$statement->columns = $columns;
+			return $statement;
+		}
 		$rows = 0;
 		$want = count( $columns );
 		while ( true ) {

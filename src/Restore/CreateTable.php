@@ -43,9 +43,9 @@ defined( 'ABSPATH' ) || exit;
  *
  * rewrite() replaces, by byte position, the table's name, the name of each
  * foreign key and CHECK constraint (ConstraintNames), and the referenced
- * table of each foreign key whose target is restored too (it references
- * that table's temporary name; a target outside the restore keeps its
- * name). Every other byte is kept.
+ * table of each foreign key: a target restored too is referenced by its
+ * temporary name (the server follows the rename at the swap), any other
+ * by the name it has on this site. Every other byte is kept.
  */
 final class CreateTable {
 
@@ -265,22 +265,23 @@ final class CreateTable {
 	/**
 	 * The statement for the temporary table.
 	 *
-	 * @param string                $temporary  The table's temporary name.
-	 * @param string                $final_name  The table's final name.
-	 * @param int                   $number     The table's position in the backup (0-based).
-	 * @param ConstraintNames       $names      Constraint names.
-	 * @param array<string, string> $restored   Temporary name of every table the restore creates, by its name in the backup.
+	 * @param string          $temporary  The table's temporary name.
+	 * @param string          $final_name  The table's final name.
+	 * @param int             $number     The table's position in the backup (0-based).
+	 * @param ConstraintNames $names      Constraint names.
+	 * @param callable        $reference  function( string $table ): string, the name to reference instead of a table named in the backup (TablePlan::reference()).
 	 * @return array{sql: string, constraints: array<int, array{kind: string, name: string, intended: string, shortened: bool}>}
 	 */
-	public function rewrite( string $temporary, string $final_name, int $number, ConstraintNames $names, array $restored ): array {
+	public function rewrite( string $temporary, string $final_name, int $number, ConstraintNames $names, callable $reference ): array {
 		$replace     = array( array( $this->table_span, $temporary ) );
 		$constraints = array();
 		foreach ( $this->foreign as $key ) {
 			$chosen        = $names->choose( $key['name'], 'ibfk', $this->table, $temporary, $final_name, $number );
 			$replace[]     = array( $key['name_span'], $chosen['name'] );
 			$constraints[] = array( 'kind' => 'foreign' ) + $chosen;
-			if ( isset( $restored[ $key['references'] ] ) ) {
-				$replace[] = array( $key['references_span'], $restored[ $key['references'] ] );
+			$target        = (string) call_user_func( $reference, $key['references'] );
+			if ( $target !== $key['references'] ) {
+				$replace[] = array( $key['references_span'], $target );
 			}
 		}
 		foreach ( $this->checks as $check ) {

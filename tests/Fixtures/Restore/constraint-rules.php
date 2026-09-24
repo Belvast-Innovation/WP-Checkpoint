@@ -108,7 +108,15 @@ foreach ( glob( __DIR__ . '/show-create/*.json' ) as $file ) {
 		foreach ( $temporary as $table => $temp ) {
 			$buffer  = cr_portable( $shown[ $table ] ) . ';';
 			$create  = CreateTable::read( $buffer, SqlLexer::tokens( $buffer, 0, true ), $table );
-			$rewrite = $create->rewrite( $temp, $table, $number++, $names, $temporary );
+			$rewrite = $create->rewrite(
+				$temp,
+				$table,
+				$number++,
+				$names,
+				static function ( string $name ) use ( $temporary ): string {
+					return $temporary[ $name ] ?? $name;
+				}
+			);
 			cr_run( $rewrite['sql'] );
 			foreach ( $rewrite['constraints'] as $constraint ) {
 				if ( 'foreign' === $constraint['kind'] ) {

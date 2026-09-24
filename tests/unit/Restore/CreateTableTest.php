@@ -18,6 +18,17 @@ final class CreateTableTest extends TestCase {
 	const TEMP_PARENT = 'wcptmpabcdef_7_1a2b_parent';
 	const TEMP_CHILD  = 'wcptmpabcdef_7_1a2b_child_x_1c2d3e4';
 
+	/**
+	 * A reference callback from a map (names not in it unchanged).
+	 *
+	 * @param array<string, string> $map Map.
+	 */
+	private static function map( array $map ): callable {
+		return static function ( string $table ) use ( $map ): string {
+			return $map[ $table ] ?? $table;
+		};
+	}
+
 	private static function read( string $sql, string $table ): CreateTable {
 		$buffer = $sql . ';';
 		return CreateTable::read( $buffer, SqlLexer::tokens( $buffer, 0, true ), $table );
@@ -75,9 +86,11 @@ final class CreateTableTest extends TestCase {
 			'wp_child;x',
 			2,
 			new ConstraintNames( '1a2b' ),
-			array(
-				'wp_parent'  => self::TEMP_PARENT,
-				'wp_child;x' => self::TEMP_CHILD,
+			self::map(
+				array(
+					'wp_parent'  => self::TEMP_PARENT,
+					'wp_child;x' => self::TEMP_CHILD,
+				)
 			)
 		);
 		$sql     = $rewrite['sql'];
@@ -104,8 +117,10 @@ final class CreateTableTest extends TestCase {
 
 	public function test_a_reference_to_a_table_outside_the_restore_keeps_its_name(): void {
 		$create = self::read( 'CREATE TABLE `wp_a` (`id` int NOT NULL, `u` bigint, PRIMARY KEY (`id`), CONSTRAINT `fk_u` FOREIGN KEY (`u`) REFERENCES `wp_users` (`ID`), CONSTRAINT `fk_self` FOREIGN KEY (`id`) REFERENCES `wp_a` (`id`)) ENGINE=InnoDB', 'wp_a' );
-		$sql    = $create->rewrite( 'wcptmp_a', 'wp_a', 0, new ConstraintNames( '0000' ), array( 'wp_a' => 'wcptmp_a' ) )['sql'];
+		$sql    = $create->rewrite( 'wcptmp_a', 'wp_a', 0, new ConstraintNames( '0000' ), self::map( array( 'wp_a' => 'wcptmp_a' ) ) )['sql'];
 		$this->assertStringContainsString( 'REFERENCES `wp_users` (`ID`)', $sql, 'not restored: the live table' );
+		$moved = $create->rewrite( 'wcptmp_a', 'b_a', 0, new ConstraintNames( '0000' ), self::map( array( 'wp_a' => 'wcptmp_a', 'wp_users' => 'b_users' ) ) )['sql'];
+		$this->assertStringContainsString( 'REFERENCES `b_users` (`ID`)', $moved, 'not restored, on a site with another prefix: its name here' );
 		$this->assertStringContainsString( 'REFERENCES `wcptmp_a` (`id`)', $sql, 'itself: the temporary name' );
 	}
 

@@ -34,7 +34,9 @@ final class ChunkReaderTest extends TestCase {
 	}
 
 	private function target( $columns = null ): ImportTarget {
-		return new ImportTarget( 'wp_posts', 'wcptmpabcdef_7_1a2b_posts', 'wp_posts', 3, new ConstraintNames( '1a2b' ), array( 'wp_posts' => 'wcptmpabcdef_7_1a2b_posts' ), $columns );
+		return new ImportTarget( 'wp_posts', 'wcptmpabcdef_7_1a2b_posts', 'wp_posts', 3, new ConstraintNames( '1a2b' ), static function ( string $table ): string {
+			return 'wp_posts' === $table ? 'wcptmpabcdef_7_1a2b_posts' : $table;
+		}, $columns );
 	}
 
 	/**
@@ -171,6 +173,23 @@ final class ChunkReaderTest extends TestCase {
 	 */
 	public function test_statements_outside_the_chunk_grammar_are_refused_before_they_run( string $sql, string $reason ): void {
 		$this->assert_refused( "/*!40014 SET FOREIGN_KEY_CHECKS=0 */;\n" . $sql, $reason );
+	}
+
+	public function test_the_preamble_only_at_the_head_and_heads_only_stops_at_values(): void {
+		$this->assert_refused( "DROP TABLE IF EXISTS `wp_posts`;\n/*!40014 SET FOREIGN_KEY_CHECKS=0 */;\n", 'preamble after other statements' );
+		$whole  = $this->read( self::chunk() );
+		$reader = new ChunkReader( $this->file( substr( self::chunk(), 0, $whole[4]->end + 80 ) ), 0, $this->target(), 1, ChunkReader::READ_BYTES, true );
+		$kinds  = array();
+		while ( null !== ( $statement = $reader->next() ) ) {
+			$kinds[] = $statement->kind;
+			if ( Statement::INSERT === $statement->kind ) {
+				$this->assertSame( array( 'ID', 'post_title', 'raw' ), $statement->columns );
+				$this->assertSame( '', $statement->sql, 'a head is never run' );
+				break;
+			}
+		}
+		$reader->close();
+		$this->assertSame( array( 'set', 'set', 'set', 'drop', 'create', 'insert' ), $kinds, 'the first INSERT\'s columns without its rows, from a cut-off chunk' );
 	}
 
 	public function test_the_refusal_names_the_table_chunk_and_offset(): void {
