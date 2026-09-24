@@ -22,7 +22,7 @@ defined( 'ABSPATH' ) || exit;
 final class Schema {
 
 	const OPTION  = 'wpcheckpoint_db_version';
-	const CURRENT = 5;
+	const CURRENT = 6;
 
 	/**
 	 * Jobs table name without the prefix.
@@ -163,6 +163,12 @@ final class Schema {
 				// Adds failure_kind (''); older code ignores it, so min_compatible stays 1.
 				self::create_jobs_table();
 				return 1;
+			case 6:
+				// Widens failure_kind to varchar(32): version 5 declared it varchar(16) before it was released,
+				// and a table migrated with that definition refuses a stamped kind (and with it the whole failing
+				// transition). dbDelta() changes the column type; a table created as version 5 is already wide.
+				self::create_jobs_table();
+				return 1;
 		}
 		return self::MIN_COMPATIBLE;
 	}
@@ -171,7 +177,7 @@ final class Schema {
 	 * The jobs table in its current shape; dbDelta() creates it or adds the
 	 * columns that are missing (version 1 lacked work_expired_at, version 2
 	 * lacked options_json and questions_json, version 3 lacked takeovers and
-	 * takeover_mark, version 4 lacked failure_kind).
+	 * takeover_mark, version 4 lacked failure_kind, version 5 declared it narrower).
 	 *
 	 * @return void
 	 */

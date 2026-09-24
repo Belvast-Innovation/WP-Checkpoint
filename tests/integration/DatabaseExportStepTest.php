@@ -21,6 +21,7 @@ use WPCheckpoint\Support\Redactor;
 use WPCheckpoint\Support\Schema;
 use WPCheckpoint\Tests\Fixtures\Jobs\FixtureJobType;
 use WPCheckpoint\Tests\Fixtures\Jobs\JobTestCase;
+use WPCheckpoint\Jobs\TableChanged;
 
 /**
  * The export against a real database: awkward values, several chunks,
@@ -314,6 +315,59 @@ final class DatabaseExportStepTest extends JobTestCase {
 		$this->assertSame( 2, substr_count( $sql, "'new inside'" ), 'string keys that sort inside the bound are read' );
 		$this->assertSame( 0, substr_count( $sql, "'new past'" ), 'keys past the bound are not' );
 		$this->assertSame( 8, $state['rows'] );
+	}
+
+	/**
+	 * Export a table a unit or two, with a row written in between (the
+	 * control: a change of data does not stop the export), change its
+	 * structure, and expect the next tick to stop the export for good.
+	 *
+	 * @param string $name       Table suffix.
+	 * @param string $columns    Column and key definitions.
+	 * @param string $alter      ALTER TABLE clause.
+	 * @param bool   $old_cursor Drop the fingerprint from the state, as an export begun before it existed.
+	 * @return string The TableChanged message.
+	 */
+	private function change_during_export( string $name, string $columns, string $alter, bool $old_cursor = false ): string {
+		global $wpdb;
+		$table          = self::PREFIX . $name;
+		$this->tables[] = $table;
+		$wpdb->query( "DROP TABLE IF EXISTS `{$table}`" );
+		$wpdb->query( "CREATE TABLE `{$table}` ({$columns}) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4" );
+		$wpdb->query( "INSERT INTO `{$table}` (`id`, `n`, `v`) VALUES (1,1,'a'),(2,1,'b'),(3,1,'c'),(4,1,'d'),(5,1,'e'),(6,1,'f')" );
+		$this->assertSame( '', $wpdb->last_error );
+		$dir = $this->dirs->base() . '/tmp/' . $name . '-' . bin2hex( random_bytes( 4 ) );
+		mkdir( $dir, 0700, true );
+		try {
+			// A new exporter per unit, as each tick builds one.
+			$state = ( new TableExporter( new WpdbConnection(), $dir, self::CHUNK, 16 ) )->step( TableExporter::initial_state( $table ) );
+			$wpdb->query( "INSERT INTO `{$table}` (`id`, `n`, `v`) VALUES (7,1,'g')" );
+			$state = ( new TableExporter( new WpdbConnection(), $dir, self::CHUNK, 16 ) )->step( $state );
+			$this->assertEmpty( $state['done'], 'the control: a new row does not stop the export' );
+			$this->assertMatchesRegularExpression( '/\\A[0-9a-f]{16}\\z/', (string) $state['shape'], 'the fingerprint is taken with the first chunk' );
+			if ( $old_cursor ) {
+				unset( $state['shape'] );
+			}
+			$wpdb->query( "ALTER TABLE `{$table}` {$alter}" );
+			$this->assertSame( '', $wpdb->last_error );
+			( new TableExporter( new WpdbConnection(), $dir, self::CHUNK, 16 ) )->step( $state );
+			$this->fail( 'the export went on with rows that no longer fit the written definition: ' . $alter );
+		} catch ( TableChanged $e ) {
+			return $e->getMessage();
+		} finally {
+			Deleter::empty_directory( $dir );
+			@rmdir( $dir );
+		}
+		return '';
+	}
+
+	public function test_a_table_whose_structure_changes_during_its_export_stops_it_for_good(): void {
+		$columns = '`id` int NOT NULL, `n` int NOT NULL, `v` varchar(10) NOT NULL, PRIMARY KEY (`id`)';
+		$this->assertStringContainsString( 'changed while it was being exported', $this->change_during_export( 'rekeyed', $columns, 'DROP PRIMARY KEY, ADD PRIMARY KEY (`id`, `n`)' ), 'a key of another length' );
+		$this->assertStringContainsString( 'changed while it was being exported', $this->change_during_export( 'swapkey', $columns, 'DROP PRIMARY KEY, ADD PRIMARY KEY (`v`)' ), 'the same length, another column' );
+		$this->assertStringContainsString( 'changed while it was being exported', $this->change_during_export( 'addcol', $columns, 'ADD COLUMN `w` int NULL' ), 'a column added, the key kept' );
+		$this->assertStringContainsString( 'changed while it was being exported', $this->change_during_export( 'widened', $columns, 'MODIFY `v` varchar(20) NOT NULL' ), 'a longer VARCHAR: newer rows may not fit the written one' );
+		$this->assertStringContainsString( 'primary key was added or removed', $this->change_during_export( 'unkeyed', $columns, 'DROP PRIMARY KEY', true ), 'begun before the fingerprint: the key lost is seen at the bound' );
 	}
 
 	/**

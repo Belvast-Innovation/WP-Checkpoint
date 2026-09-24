@@ -868,7 +868,7 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		Options::set( Schema::OPTION, array( 'version' => 4, 'min_compatible' => 1 ) );
 		$result = Schema::ensure();
 		$this->assertSame( 'migrated', $result['action'] );
-		$this->assertSame( 5, $result['version'] );
+		$this->assertSame( Schema::CURRENT, $result['version'], 'every later migration runs too' );
 		$this->assertSame( 1, $result['min_compatible'], 'older code ignores the column' );
 		$this->assertContains( 'failure_kind', $wpdb->get_col( "SHOW COLUMNS FROM {$table}" ) );
 		// A row failed by code of version 4 has no kind: retrying it is offered, as it was.
@@ -903,5 +903,33 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		$again = $this->repo->find( $job->id );
 		$this->assertSame( '', $again->failure_kind, 'it does not speak for the new failure' );
 		$this->assertTrue( $again->retry_useful(), 'the worst case is a Retry offered once too often, never a dead end' );
+	}
+	public function test_schema_version_six_widens_a_failure_kind_declared_narrower(): void {
+		global $wpdb;
+		$table     = Schema::jobs_table();
+		$this->now = 1800000000; // A real time: ten digits, as in production.
+		$job       = $this->repo->create( 'export' ); // Before the table is narrowed: create() runs the migrations.
+		// A table migrated with the first definition of version 5.
+		$wpdb->query( "UPDATE {$table} SET failure_kind = ''" ); // Longer stamps left by earlier tests would stop the change.
+		$wpdb->query( "ALTER TABLE {$table} MODIFY failure_kind varchar(16) NOT NULL DEFAULT ''" );
+		$this->assertStringContainsString( 'varchar(16)', (string) $wpdb->get_row( "SHOW COLUMNS FROM {$table} LIKE 'failure_kind'" )->Type );
+		Options::set( Schema::OPTION, array( 'version' => 5, 'min_compatible' => 1 ) );
+		// The control: there, a stamped kind is lost. wpdb refuses the whole failing transition when it knows the
+		// column's width (a fresh request); where it cached the wider one, the server cuts the value.
+		try {
+			$failed = $this->repo->transition( $job, Job::FAILED, 'The database went away.', '', Job::FAILURE_TEMPORARY );
+			$this->assertSame( '', $this->repo->find( $failed->id )->failure_kind, 'cut: the kind does not read back' );
+		} catch ( StaleJob $e ) {
+			$this->assertSame( Job::QUEUED, $this->repo->find( $job->id )->status, 'refused: the job cannot even fail' );
+		}
+		$result = Schema::ensure();
+		$this->assertSame( 'migrated', $result['action'] );
+		$this->assertSame( Schema::CURRENT, $result['version'] );
+		$this->assertSame( 1, $result['min_compatible'] );
+		$this->assertStringContainsString( 'varchar(32)', (string) $wpdb->get_row( "SHOW COLUMNS FROM {$table} LIKE 'failure_kind'" )->Type );
+		$again  = $this->repo->create( 'export' );
+		$failed = $this->repo->transition( $again, Job::FAILED, 'Step "database": TableChanged: The structure of table wp_x changed.', '', Job::FAILURE_FINAL . ':' . Job::REASON_TABLE_CHANGED );
+		$this->assertSame( Job::FAILURE_FINAL, $this->repo->find( $failed->id )->failure_kind );
+		$this->assertSame( Job::REASON_TABLE_CHANGED, $this->repo->find( $failed->id )->failure_reason, 'the longest value fits' );
 	}
 }

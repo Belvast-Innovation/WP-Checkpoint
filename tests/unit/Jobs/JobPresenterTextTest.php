@@ -58,6 +58,10 @@ final class JobPresenterTextTest extends TestCase {
 		$this->assertFalse( self::job( Job::FAILED, Job::FAILURE_FINAL )->retry_useful() );
 		$this->assertTrue( self::job( Job::FAILED )->retry_useful(), 'no kind (any other cause, or failed before kinds were recorded): offered' );
 		$this->assertSame( 'The backup could not be finished. Retry goes on where it stopped; if it fails the same way again, create a new backup.', JobPresenter::failure_text( self::job( Job::FAILED ) ) );
+		$changed                 = self::job( Job::FAILED, Job::FAILURE_FINAL );
+		$changed->failure_reason = Job::REASON_TABLE_CHANGED;
+		$this->assertSame( 'The backup was stopped because the structure of a table changed while it was being exported. Going on would give a backup whose table data does not match its table definition. Create a new backup.', JobPresenter::failure_text( $changed ) );
+		$this->assertFalse( $changed->retry_useful() );
 		$expired                  = self::job( Job::FAILED, Job::FAILURE_TEMPORARY );
 		$expired->work_expired_at = 1;
 		$this->assertFalse( $expired->retry_useful() );

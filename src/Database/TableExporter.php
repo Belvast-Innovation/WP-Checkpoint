@@ -9,6 +9,7 @@ namespace WPCheckpoint\Database;
 
 use WPCheckpoint\Archive\ChunkHasher;
 use WPCheckpoint\Archive\IndexLine;
+use WPCheckpoint\Jobs\TableChanged;
 use WPCheckpoint\Jobs\TransientFailure;
 use WPCheckpoint\Jobs\WorkLost;
 
@@ -186,6 +187,17 @@ final class TableExporter {
 	private $described = array();
 
 	/**
+	 * A short fingerprint per described table of what its rows are written
+	 * against: each exported column's name, full type and whether it takes
+	 * NULL, in order, and the primary key. Not the CREATE TABLE text, whose
+	 * AUTO_INCREMENT moves with every insert. An identifier, safe for the
+	 * cursor.
+	 *
+	 * @var array<string, string>
+	 */
+	private $shapes = array();
+
+	/**
 	 * Tables whose oversized rows are left out (the user's decision at the
 	 * pre-flight): rows that oversize_predicate() selects are skipped by
 	 * both queries of a batch, so the export never meets them.
@@ -250,6 +262,7 @@ final class TableExporter {
 			'done'       => false,
 			'closed'     => null,
 			'warnings'   => array(),
+			'shape'      => '', // The table's fingerprint, set with its first chunk ('' until then, and for an export begun before it existed).
 		);
 	}
 
@@ -262,6 +275,7 @@ final class TableExporter {
 	 * @return array<string, mixed>
 	 * @throws TransientFailure When the database is temporarily unavailable.
 	 * @throws \RuntimeException When the table cannot be exported (a row larger than the limit, a broken query, a damaged work directory).
+	 * @throws TableChanged When the table's columns or key changed since its first chunk was written.
 	 */
 	public function step( array $state ): array {
 		$state['closed'] = null;
@@ -271,6 +285,14 @@ final class TableExporter {
 		$table = (string) $state['table'];
 		$desc  = $this->describe( $table );
 		$path  = $this->chunk_path( $table, (int) $state['chunk'] );
+		$shape = $this->shapes[ $table ];
+		if ( 1 === (int) $state['chunk'] && 0 === (int) $state['bytes'] ) {
+			// Fixed with the definition this unit writes into the first chunk; a replay of this unit writes both again.
+			$state['shape'] = $shape;
+		} elseif ( ! empty( $state['shape'] ) && $state['shape'] !== $shape ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+			throw new TableChanged( sprintf( 'The structure of table %s changed while it was being exported: its columns or its primary key are not the ones its first chunk was written with.', $table ) );
+		}
 
 		if ( 0 === (int) $state['bytes'] ) {
 			if ( 1 === (int) $state['chunk'] ) {
@@ -363,6 +385,7 @@ final class TableExporter {
 		}
 		$names = array();
 		$kinds = array();
+		$shape = array();
 		foreach ( $columns as $column ) {
 			$extra = isset( $column[5] ) ? strtoupper( (string) $column[5] ) : '';
 			if ( false !== strpos( $extra, 'GENERATED' ) ) {
@@ -370,6 +393,7 @@ final class TableExporter {
 			}
 			$names[] = (string) $column[0];
 			$kinds[] = SqlWriter::kind( (string) $column[1] );
+			$shape[] = array( (string) $column[0], (string) $column[1], isset( $column[2] ) ? (string) $column[2] : '' ); // Name, full type, NULL allowed.
 		}
 		if ( array() === $names ) {
 			throw new \RuntimeException( sprintf( 'Table %s has no column that can be exported.', $table ) );
@@ -392,6 +416,8 @@ final class TableExporter {
 			}
 			$pk_index[] = (int) $at;
 		}
+		// phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.serialize_serialize -- a hash input, never unserialized.
+		$this->shapes[ $table ]    = substr( hash( 'sha256', serialize( array( $shape, $pk ) ) ), 0, 16 );
 		$this->described[ $table ] = array(
 			'create'   => (string) $create[0][1],
 			'columns'  => $names,
@@ -668,6 +694,7 @@ final class TableExporter {
 	 * @return array{mode: string, key?: string[]|null, rows?: int}
 	 * @throws \RuntimeException When the chunk cannot be read or its bound line is malformed.
 	 * @throws WorkLost When the work directory was lost, changed or damaged.
+	 * @throws TableChanged When the table's key is not the one the chunk was written for, or it gained or lost one.
 	 */
 	private function bound_in( string $path, string $table, int $chunk, array $desc ): array {
 		$handle = @fopen( $path, 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- see write_new().
@@ -700,12 +727,18 @@ final class TableExporter {
 		if ( array() !== $desc['pk'] && 1 === preg_match( '/\A' . preg_quote( self::BOUND, '/' ) . 'pk_max=(.+)\z/', $line, $m ) ) {
 			$key = self::decode_key( $m[1] );
 			if ( null !== $key && count( $key ) !== count( $desc['pk'] ) ) {
-				throw new WorkLost( sprintf( 'Chunk %d of table %s has a bound for another key; the table changed or the work directory was damaged.', $chunk, $table ) );
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+				throw new TableChanged( sprintf( 'The structure of table %s changed while it was being exported: its key is not the one its chunk %d was written for.', $table, $chunk ) );
 			}
 			return array(
 				'mode' => 'pk',
 				'key'  => $key,
 			);
+		}
+		if ( 1 === preg_match( '/\A' . preg_quote( self::BOUND, '/' ) . '(?:rows_max=\d+|pk_max=.+)\z/', $line ) ) {
+			// A well-formed bound of the other kind: the table gained or lost its primary key since the chunk was written.
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+			throw new TableChanged( sprintf( 'The structure of table %s changed while it was being exported: its primary key was added or removed after its chunk %d was written.', $table, $chunk ) );
 		}
 		throw new WorkLost( sprintf( 'Chunk %d of table %s has a malformed bound line; the work directory was changed or damaged.', $chunk, $table ) );
 	}
