@@ -286,9 +286,9 @@ final class FileScanStep implements Step {
 	private function message( array $state ): string {
 		return sprintf(
 			/* translators: 1: number of files, 2: number of directories */
-			__( 'Listed %1$d files in %2$d directories', 'wp-checkpoint' ),
-			(int) $state['counts']['files'],
-			(int) $state['counts']['directories']
+			__( 'Listed %1$s files in %2$s directories', 'wp-checkpoint' ),
+			number_format_i18n( (int) $state['counts']['files'] ),
+			number_format_i18n( (int) $state['counts']['directories'] )
 		);
 	}
 }

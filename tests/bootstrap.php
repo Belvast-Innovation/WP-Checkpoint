@@ -38,6 +38,31 @@ if ( ! function_exists( '__' ) ) {
 		unset( $domain );
 		return $text;
 	}
+
+	/**
+	 * Plural translation stand-in for the unit suite (English rule).
+	 *
+	 * @param string $single Singular.
+	 * @param string $plural Plural.
+	 * @param int    $number Number.
+	 * @param string $domain Text domain (ignored).
+	 * @return string
+	 */
+	function _n( string $single, string $plural, int $number, string $domain = 'default' ): string { // phpcs:ignore WordPress.WP.I18n.NonSingularStringLiteralSingle,WordPress.WP.I18n.NonSingularStringLiteralPlural,Universal.Files.SeparateFunctionsFromOO.Mixed -- test stand-in.
+		unset( $domain );
+		return 1 === $number ? $single : $plural;
+	}
+
+	/**
+	 * Number formatting stand-in for the unit suite (English separators).
+	 *
+	 * @param float|int $number   Number.
+	 * @param int       $decimals Decimals.
+	 * @return string
+	 */
+	function number_format_i18n( $number, int $decimals = 0 ): string { // phpcs:ignore Universal.Files.SeparateFunctionsFromOO.Mixed -- test stand-in.
+		return number_format( (float) $number, $decimals );
+	}
 }
 
 /**

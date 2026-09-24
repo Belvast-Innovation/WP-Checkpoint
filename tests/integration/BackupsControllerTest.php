@@ -190,6 +190,90 @@ final class BackupsControllerTest extends JobTestCase {
 		$this->assertSame( array(), array_values( preg_grep( '/\A' . preg_quote( self::BASE, '/' ) . '\./', (array) scandir( $this->backups ) ) ), 'nothing of the backup is left, the marker included' );
 	}
 
+	private function post( string $path, array $body ) {
+		$request = new \WP_REST_Request( 'POST', '/wp-checkpoint/v1/' . $path );
+		$request->set_header( 'Content-Type', 'application/json' );
+		$request->set_body( (string) wp_json_encode( $body ) );
+		return rest_get_server()->dispatch( $request );
+	}
+
+	public function test_a_backup_is_made_with_the_chosen_contents_and_asks_its_questions(): void {
+		$response = $this->post( 'backups', array( 'contents' => 'database', 'exclude_tables' => array( 'wp_links' ) ) );
+		$this->assertSame( 201, $response->get_status() );
+		$this->assert_clean( $response );
+		$job = Plugin::instance()->jobs()->find( $response->get_data()['job']['id'] );
+		$this->assertSame( 'export', $job->type );
+		$this->assertSame( array(), $job->options['contents']['files'], 'database only' );
+		$this->assertTrue( $job->options['contents']['database'] );
+		$this->assertSame( array( 'wp_links' ), $job->options['exclude_tables'] );
+		$this->assertSame( 'ask', $job->options['policy']['unreadable'], 'the screen answers questions: no policy' );
+
+		$again = $this->post( 'backups', array() );
+		$this->assertSame( 409, $again->get_status(), 'one export at a time' );
+		$this->assertSame( sprintf( 'A backup is already being made (job %d).', $job->id ), $again->get_data()['message'] );
+	}
+
+	public function test_a_backup_request_with_bad_options_is_refused_and_starts_nothing(): void {
+		$this->assertSame( 400, $this->post( 'backups', array( 'contents' => 'everything' ) )->get_status() );
+		$this->assertSame( 400, $this->post( 'backups', array( 'exclude_tables' => array( 'a' ), 'include_tables' => array( 'a' ) ) )->get_status() );
+		$this->assertSame( array(), Plugin::instance()->jobs()->list_jobs() );
+	}
+
+	public function test_the_estimate_starts_once_counts_the_files_and_is_then_used_for_a_week(): void {
+		foreach ( glob( $this->backups . '/*' ) as $file ) {
+			if ( is_file( $file ) && 'index.php' !== basename( $file ) ) {
+				unlink( $file );
+			}
+		}
+		$first = $this->post( 'backups/estimate', array() )->get_data()['estimate'];
+		$this->assertSame( 'running', $first['state'] );
+		$this->assertGreaterThan( 0, $first['job'] );
+		$this->assertGreaterThan( 0, $first['database_bytes'] );
+		$this->assertSame( $first['job'], $this->post( 'backups/estimate', array() )->get_data()['estimate']['job'], 'the same job, not a second one' );
+		$this->assertSame( array(), array_column( $this->rest( 'GET', 'jobs' )->get_data()['jobs'], 'id' ), 'the plugin\'s own job is not among the user\'s' );
+
+		for ( $i = 0; $i < 50 && 'completed' !== ( $tick = $this->rest( 'POST', 'jobs/' . $first['job'] . '/tick' )->get_data() )['result']; $i++ ) {
+			continue;
+		}
+		$this->assertSame( 'completed', $tick['result'] );
+		$ready = $this->post( 'backups/estimate', array() )->get_data()['estimate'];
+		$this->assertSame( 'ready', $ready['state'] );
+		$this->assertGreaterThan( 0, $ready['files'] );
+		$this->assertGreaterThan( 0, $ready['files_bytes'] );
+		$this->assertCount( 1, Plugin::instance()->jobs()->list_jobs(), 'a fresh count starts no job' );
+		$this->assertNull( $ready['seconds'], 'no export measured here yet: no time, rather than a guess' );
+	}
+
+	public function test_a_failed_estimate_is_not_retried_within_a_day_and_shows_no_error(): void {
+		global $wpdb;
+		$job = Plugin::instance()->jobs()->create( 'estimate', self::$admin_id );
+		$wpdb->update( \WPCheckpoint\Support\Schema::jobs_table(), array( 'status' => 'failed', 'finished_at' => time() - 3600, 'last_error' => 'boom' ), array( 'id' => $job->id ) );
+		$status = $this->post( 'backups/estimate', array() )->get_data()['estimate'];
+		$this->assertSame( 'none', $status['state'] );
+		$this->assertCount( 1, Plugin::instance()->jobs()->list_jobs(), 'not started again' );
+		$wpdb->update( \WPCheckpoint\Support\Schema::jobs_table(), array( 'finished_at' => time() - 90000 ), array( 'id' => $job->id ) );
+		$this->assertSame( 'running', $this->post( 'backups/estimate', array() )->get_data()['estimate']['state'], 'a day later it is tried again' );
+	}
+
+	public function test_stopping_the_count_is_not_undone_by_the_next_visit(): void {
+		$first = $this->post( 'backups/estimate', array() )->get_data()['estimate'];
+		$this->assertSame( 'running', $first['state'] );
+		$this->rest( 'POST', 'jobs/' . $first['job'] . '/cancel' ); // "Stop counting".
+		$again = $this->post( 'backups/estimate', array() )->get_data()['estimate'];
+		$this->assertSame( 'none', $again['state'], 'no new scan for a day' );
+		$this->assertCount( 1, Plugin::instance()->jobs()->list_jobs() );
+	}
+
+	public function test_starting_a_backup_cancels_the_estimate_silently_and_an_estimate_waits_for_the_backup(): void {
+		$estimate = $this->post( 'backups/estimate', array() )->get_data()['estimate'];
+		$this->assertSame( 'running', $estimate['state'] );
+		$made = $this->post( 'backups', array() );
+		$this->assertSame( 201, $made->get_status(), 'the estimate never holds a backup up' );
+		$this->assertSame( Job::CANCELLED, Plugin::instance()->jobs()->find( $estimate['job'] )->status );
+		$this->assertSame( array( $made->get_data()['job']['id'] ), array_column( $this->rest( 'GET', 'jobs' )->get_data()['jobs'], 'id' ), 'nothing about the estimate in the user\'s list' );
+		$this->assertSame( 'none', $this->post( 'backups/estimate', array() )->get_data()['estimate']['state'], 'no estimate while a backup is made' );
+	}
+
 	public function test_requests_outside_the_backup_names_are_refused_before_any_file_is_touched(): void {
 		$this->assertSame( 400, $this->per_page_status( 51 ) );
 		$this->assertSame( 400, $this->rest( 'POST', 'backups/' . self::BASE . '/verify', array( 'depth' => 'quick' ) )->get_status() );

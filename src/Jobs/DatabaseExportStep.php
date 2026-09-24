@@ -537,9 +537,9 @@ final class DatabaseExportStep implements Step {
 	private function message( array $cursor, int $total ): string {
 		return sprintf(
 			/* translators: 1: tables exported, 2: tables in total */
-			__( 'Exported %1$d of %2$d tables', 'wp-checkpoint' ),
-			(int) $cursor['index'],
-			$total
+			__( 'Exported %1$s of %2$s tables', 'wp-checkpoint' ),
+			number_format_i18n( (int) $cursor['index'] ),
+			number_format_i18n( $total )
 		);
 	}
 }

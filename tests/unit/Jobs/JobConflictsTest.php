@@ -30,6 +30,17 @@ final class JobConflictsTest extends TestCase {
 		$this->assertSame( '', JobConflicts::conflict( 'verify', array( 'base' => 'b-20260923-120000-ab12' ), $export ), 'read-only and unrelated' );
 	}
 
+	public function test_an_estimate_gives_way_and_waits(): void {
+		$estimate = array( self::job( 7, 'estimate' ) );
+		foreach ( array( array( 'export', array() ), array( 'restore', array( 'base' => 'b-20260923-120000-ab12' ) ), array( 'verify', array( 'base' => 'b-20260923-120000-ab12' ) ) ) as list( $type, $options ) ) {
+			$this->assertSame( '', JobConflicts::conflict( $type, $options, $estimate ), 'an estimate never holds up ' . $type );
+		}
+		foreach ( array( 'export', 'restore', 'estimate' ) as $running ) {
+			$this->assertSame( 'Job 8 is running; no estimate now.', JobConflicts::conflict( 'estimate', array(), array( self::job( 8, $running, 'restore' === $running ? 'b-20260923-120000-ab12' : '' ) ) ), $running );
+		}
+		$this->assertSame( '', JobConflicts::conflict( 'estimate', array(), array( self::job( 9, 'verify', 'b-20260923-120000-ab12' ) ) ), 'a check reads a backup, not the site' );
+	}
+
 	public function test_a_backup_being_verified_is_not_verified_again_restored_or_deleted(): void {
 		$verify = array( self::job( 5, 'verify', 'b-20260923-120000-ab12' ) );
 		$this->assertSame( 'This backup is being verified (job 5); wait until the check has ended.', JobConflicts::conflict( 'verify', array( 'base' => 'b-20260923-120000-ab12' ), $verify ) );

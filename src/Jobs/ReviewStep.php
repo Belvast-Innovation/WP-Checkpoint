@@ -91,7 +91,7 @@ final class ReviewStep implements Step {
 				$questions,
 				sprintf(
 					/* translators: %d: number of questions */
-					__( 'Waiting for your decision on %d questions', 'wp-checkpoint' ),
+					_n( 'Waiting for your decision on %d question', 'Waiting for your decision on %d questions', count( $questions ), 'wp-checkpoint' ),
 					count( $questions )
 				)
 			);

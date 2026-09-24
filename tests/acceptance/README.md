@@ -80,3 +80,24 @@ On its nth match the rule kills the process before the query runs. `check` then 
   - the row counts of the tables written during the export.
 
 Any other field, including one added later, must be equal. Chunk boundaries can differ because a resumed table starts a new batch.
+
+# Backups tab in a real browser
+
+`tests/acceptance/browser/run.sh` goes through the Backups tab in a headless Chromium on the wp-env development site. It covers:
+
+- the empty state and the size estimate;
+- a backup made by keyboard with options, whose question is answered on the page;
+- the details, a download and a check;
+- a backup left to cron alone after its page is closed;
+- a stalled job;
+- a delete.
+
+Each phase also runs axe (WCAG 2.1 A and AA) on the tab. It deletes every backup and job of the development site.
+
+```bash
+# Once: playwright (the version of the image) and axe-core in a directory outside the repository.
+mkdir -p ~/wpc-browser && (cd ~/wpc-browser && npm install playwright@1.63.0 axe-core@4)
+MODULES=~/wpc-browser tests/acceptance/browser/run.sh
+```
+
+The browser runs in `mcr.microsoft.com/playwright:v1.63.0-noble` with the host network, so it reaches the site at `http://localhost:9888`. Each phase prints one JSON line with what it saw.

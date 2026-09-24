@@ -179,7 +179,7 @@ final class JobsController extends Controller {
 	public function get_items( $request ) {
 		$statuses = $request->get_param( 'status' );
 		$jobs     = array();
-		foreach ( $this->actions->list_jobs( is_array( $statuses ) ? $statuses : array(), (int) $request->get_param( 'limit' ) ) as $job ) {
+		foreach ( $this->actions->list_user_jobs( is_array( $statuses ) ? $statuses : array(), (int) $request->get_param( 'limit' ) ) as $job ) {
 			$jobs[] = $this->presenter->present( $job, false );
 		}
 		return $this->respond( array( 'jobs' => $jobs ) );

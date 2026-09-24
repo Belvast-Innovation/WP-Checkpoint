@@ -1041,9 +1041,9 @@ final class PackStep implements Step {
 	private function message( array $cursor ): string {
 		return sprintf(
 			/* translators: 1: database chunks packed, 2: files packed */
-			__( 'Packed %1$d database chunks and %2$d files', 'wp-checkpoint' ),
-			(int) $cursor['entries'],
-			(int) $cursor['files']
+			__( 'Packed %1$s database chunks and %2$s files', 'wp-checkpoint' ),
+			number_format_i18n( (int) $cursor['entries'] ),
+			number_format_i18n( (int) $cursor['files'] )
 		);
 	}
 

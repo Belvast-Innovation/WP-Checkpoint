@@ -37,9 +37,14 @@ abstract class JobTestCase extends WP_UnitTestCase {
 		$wpdb->query( 'DROP TABLE IF EXISTS ' . Schema::jobs_table() );
 		Options::delete( Schema::OPTION );
 		Options::delete( Directories::OPTION );
+		// Kept across tests otherwise: the jobs table's DDL commits the test transaction.
+		Options::delete( \WPCheckpoint\Backups\Estimate::OPTION );
+		Options::delete( \WPCheckpoint\Backups\Estimate::RATE_OPTION );
+		Options::delete( \WPCheckpoint\Backups\ExportResults::OPTION );
 		delete_site_transient( 'wpcheckpoint_jobs_reaped' );
 		delete_site_transient( 'wpcheckpoint_jobs_purged' );
 		delete_site_transient( 'wpcheckpoint_jobs_swept' );
+		delete_site_transient( 'wpcheckpoint_foreign_tables' );
 		delete_site_transient( 'wpcheckpoint_environment' );
 		Plugin::instance()->reset_directories();
 		Plugin::instance()->directories()->base();

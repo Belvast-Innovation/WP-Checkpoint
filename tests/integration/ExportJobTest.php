@@ -3,6 +3,7 @@
 namespace WPCheckpoint\Tests\Integration;
 
 use WPCheckpoint\Archive\Manifest;
+use WPCheckpoint\Backups\Estimate;
 use WPCheckpoint\Cli\ExportCommand;
 use WPCheckpoint\Cli\ExportRun;
 use WPCheckpoint\Cli\RunLoop;
@@ -317,5 +318,27 @@ final class ExportJobTest extends JobTestCase {
 		$this->assertSame( RunLoop::EXIT_COMPLETED, $code, implode( "\n", array_merge( $this->out, $this->err ) ) );
 		$this->assertCount( 2, preg_grep( '/^Answer \(include \/ exclude\): $/', $this->out ), 'asked twice: the first answer was not a choice' );
 		$this->assertSame( array( 'wp-content/uploads/wpcexport/node_modules' ), ExportPlan::read( $this->work( $id ), ExportPlan::REVIEW )['decisions']['exclude_paths'] );
+		$options = Plugin::instance()->jobs()->find( $id )->options;
+		$this->assertNull( Estimate::seconds_for( 1048576, Estimate::scope( $options ) ), 'an export that waited for an answer is no rate' );
+	}
+
+	public function test_a_finished_export_gives_a_time_only_for_exports_of_the_same_scope(): void {
+		$this->assertNull( \WPCheckpoint\Support\Options::get( Estimate::RATE_OPTION, null ), 'nothing measured before' );
+		list( $code, $id ) = $this->run_export( array( 'yes' => true ) );
+		$this->assertSame( RunLoop::EXIT_COMPLETED, $code );
+		$options = Plugin::instance()->jobs()->find( $id )->options;
+		$rate    = \WPCheckpoint\Support\Options::get( Estimate::RATE_OPTION, null );
+		$this->assertGreaterThan( 0, $rate['bytes'], 'the bytes stored' );
+		$this->assertGreaterThanOrEqual( 0, $rate['seconds'] );
+		$this->assertFalse( $rate['waited'] );
+		if ( 0 === (int) $rate['seconds'] ) {
+			// A test export can finish within its first second: no rate to divide by, so no time either.
+			$this->assertNull( Estimate::seconds_for( 1048576, Estimate::scope( $options ) ) );
+			\WPCheckpoint\Support\Options::set( Estimate::RATE_OPTION, array_merge( $rate, array( 'seconds' => 10 ) ) );
+		}
+		$this->assertIsInt( Estimate::seconds_for( 1048576, Estimate::scope( $options ) ), 'the same scope: a time' );
+		$other = $options;
+		$other['contents']['files'] = array();
+		$this->assertNull( Estimate::seconds_for( 1048576, Estimate::scope( $other ) ), 'a database-only export says nothing about this one' );
 	}
 }

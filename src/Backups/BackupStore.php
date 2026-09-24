@@ -48,6 +48,13 @@ final class BackupStore {
 	private $dir;
 
 	/**
+	 * Manifest hashes by base name and file state, for this request.
+	 *
+	 * @var array<string, string>
+	 */
+	private $hashes = array();
+
+	/**
 	 * Removes one file: function( string $path ): bool.
 	 *
 	 * @var callable
@@ -374,6 +381,23 @@ final class BackupStore {
 	 * @return string
 	 */
 	private function manifest_hash( string $base ): string {
+		// Once per file state: a details page asks twice; a file that changed (size or time) is judged again.
+		$file = $this->dir . DIRECTORY_SEPARATOR . $base . self::MANIFEST_SUFFIX;
+		clearstatcache( true, $file );
+		$key = $base . '|' . ( is_file( $file ) ? (int) filesize( $file ) . '|' . (int) filemtime( $file ) : '-' );
+		if ( ! isset( $this->hashes[ $key ] ) ) {
+			$this->hashes[ $key ] = $this->hash_manifest( $base );
+		}
+		return $this->hashes[ $key ];
+	}
+
+	/**
+	 * SHA-256 of a backup's standalone manifest, read from the disk (see manifest_hash()).
+	 *
+	 * @param string $base Base name.
+	 * @return string
+	 */
+	private function hash_manifest( string $base ): string {
 		$file = $this->dir . DIRECTORY_SEPARATOR . $base . self::MANIFEST_SUFFIX;
 		clearstatcache( true, $file ); // The size decides whether it is read at all: never a cached one.
 		$size = is_file( $file ) ? (int) filesize( $file ) : 0;

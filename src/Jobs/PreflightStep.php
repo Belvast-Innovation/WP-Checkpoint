@@ -156,9 +156,9 @@ final class PreflightStep implements Step {
 				$percent = 20 + (int) floor( 75 * $state['table'] / max( 1, $total ) );
 				$message = sprintf(
 					/* translators: 1: tables checked, 2: tables in total */
-					__( 'Checked %1$d of %2$d tables for oversized rows', 'wp-checkpoint' ),
-					$state['table'],
-					$total
+					__( 'Checked %1$s of %2$s tables for oversized rows', 'wp-checkpoint' ),
+					number_format_i18n( (int) $state['table'] ),
+					number_format_i18n( (int) $total )
 				);
 				if ( $state['table'] < $total && $context->should_stop() ) {
 					return StepResult::progress( $this->cursor( $phase, $state ), $percent, $message );

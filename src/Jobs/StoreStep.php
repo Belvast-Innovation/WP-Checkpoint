@@ -40,12 +40,22 @@ final class StoreStep implements Step {
 	private $backups;
 
 	/**
+	 * Called once every file is in place: function( JobContext $context, string[] $paths ): void.
+	 *
+	 * @var callable|null
+	 */
+	private $on_stored;
+
+	/**
 	 * Constructor.
 	 *
-	 * @param string $backups Absolute backups directory.
+	 * @param string        $backups   Absolute backups directory.
+	 * @param callable|null $on_stored function( JobContext $context, string[] $paths ): void, called when the
+	 *                                 backup is stored (again on a replay: it must be idempotent).
 	 */
-	public function __construct( string $backups ) {
-		$this->backups = rtrim( $backups, '/\\' );
+	public function __construct( string $backups, $on_stored = null ) {
+		$this->backups   = rtrim( $backups, '/\\' );
+		$this->on_stored = is_callable( $on_stored ) ? $on_stored : null;
 	}
 
 	/**
@@ -113,12 +123,19 @@ final class StoreStep implements Step {
 				throw new TransientFailure( sprintf( '%s could not be moved into the backups directory.', self::label( $cursor['moved'], $total ) ) );
 			}
 			++$cursor['moved'];
-			$context->checkpoint( $cursor, (int) floor( 100 * $cursor['moved'] / $total ), sprintf( /* translators: 1: files moved, 2: files in total */ __( 'Stored %1$d of %2$d files', 'wp-checkpoint' ), $cursor['moved'], $total ) );
+			$context->checkpoint( $cursor, (int) floor( 100 * $cursor['moved'] / $total ), sprintf( /* translators: 1: files moved, 2: files in total */ __( 'Stored %1$s of %2$s files', 'wp-checkpoint' ), number_format_i18n( (int) $cursor['moved'] ), number_format_i18n( (int) $total ) ) );
 			if ( $cursor['moved'] < $total && $context->should_stop() ) {
 				return StepResult::progress( $cursor, (int) floor( 100 * $cursor['moved'] / $total ), __( 'Storing the backup', 'wp-checkpoint' ) );
 			}
 		}
 		$context->logger()->info( 'Backup stored', array( 'files' => $total ) );
+		if ( null !== $this->on_stored ) {
+			$paths = array();
+			foreach ( $names as $name ) {
+				$paths[] = $this->backups . DIRECTORY_SEPARATOR . $name;
+			}
+			call_user_func( $this->on_stored, $context, $paths );
+		}
 		return StepResult::done( __( 'Backup stored', 'wp-checkpoint' ) );
 	}
 

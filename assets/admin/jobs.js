@@ -11,6 +11,13 @@
  * drives the job itself from then on, instead of pretending a chain that
  * only moves one step per 15 seconds is alive. A 403 (expired nonce, logged
  * out) stops everything and asks for a reload.
+ *
+ * A job waiting for a decision shows its questions (GET /questions) as a
+ * form; the answer is posted and the job ticked. A job that ends sends a
+ * "wpcheckpoint:job-finished" event from its block. A finished block can
+ * be dismissed; that is remembered in this browser only (a convenience,
+ * not state). window.wpcheckpointDriveJob( element ) drives a block added
+ * later (the size estimate).
  */
 ( function () {
 	'use strict';
@@ -21,11 +28,37 @@
 	var WATCHDOG_MAX_FIRES = 2;
 	var TERMINAL = [ 'completed', 'failed', 'cancelled' ];
 
-	function request( method, path, done ) {
+	var DISMISSED_KEY = 'wpcheckpoint-dismissed-jobs';
+
+	function dismissed() {
+		try {
+			var list = JSON.parse( window.localStorage.getItem( DISMISSED_KEY ) || '[]' );
+			return Array.isArray( list ) ? list : [];
+		} catch ( e ) {
+			return [];
+		}
+	}
+
+	function dismiss( id ) {
+		try {
+			var list = dismissed();
+			if ( list.indexOf( id ) === -1 ) {
+				list.push( id );
+			}
+			window.localStorage.setItem( DISMISSED_KEY, JSON.stringify( list.slice( -200 ) ) );
+		} catch ( e ) {
+			// No storage (private window, blocked): the block is hidden for this page view only.
+		}
+	}
+
+	function request( method, path, done, body ) {
 		var xhr = new XMLHttpRequest();
 		xhr.open( method, config.root + 'wp-checkpoint/v1/jobs/' + path, true );
 		xhr.setRequestHeader( 'X-WP-Nonce', config.nonce );
 		xhr.setRequestHeader( 'Accept', 'application/json' );
+		if ( body ) {
+			xhr.setRequestHeader( 'Content-Type', 'application/json' );
+		}
 		xhr.onreadystatechange = function () {
 			if ( xhr.readyState !== 4 ) {
 				return;
@@ -38,7 +71,7 @@
 			}
 			done( xhr.status, data );
 		};
-		xhr.send();
+		xhr.send( body ? JSON.stringify( body ) : null );
 	}
 
 	function setText( root, field, text ) {
@@ -58,27 +91,45 @@
 		}
 	}
 
+	// The block's layout: the questions first while the job waits for a decision, what the failure means once it
+	// failed, the progress otherwise (JobProgress::state() on the server).
+	function state( job ) {
+		if ( job.awaiting ) {
+			return 'decision';
+		}
+		return job.status === 'failed' ? 'failed' : 'progress';
+	}
+
 	function render( root, job ) {
+		var layout = state( job );
 		var bar = root.querySelector( '[data-field="progress"]' );
 		if ( bar ) {
 			bar.value = job.progress;
 		}
 		root.setAttribute( 'data-status', job.status );
-		setText( root, 'progress_text', job.progress + '%' );
-		setText( root, 'status_label', config.labels[ job.status ] || job.status );
+		root.setAttribute( 'data-state', layout );
+		setText( root, 'status_text', job.status_text || config.labels[ job.status ] || job.status );
 		setText( root, 'type_label', job.type_label );
+		setText( root, 'progress_text', job.progress + '%' );
 		setText( root, 'step_label', job.step_label );
 		setText( root, 'message', job.message );
-		setText( root, 'last_error', job.last_error );
-		setHidden( root.querySelector( '[data-field="last_error"]' ), ! job.last_error );
+		setHidden( root.querySelector( '[data-field="progress_box"]' ), layout !== 'progress' );
+		setHidden( root.querySelector( '[data-field="failure"]' ), layout !== 'failed' );
+		setText( root, 'failure_text', job.failure_text || '' );
+		setText( root, 'error_detail', job.error_detail || '' );
+		setHidden( root.querySelector( '[data-field="error_detail_line"]' ), ! job.error_detail );
 		if ( typeof job.log_tail === 'string' ) {
 			setText( root, 'log_tail', job.log_tail );
 		}
 		var active = [ 'queued', 'running', 'paused' ].indexOf( job.status ) !== -1;
 		setHidden( root.querySelector( '[data-action="cancel"]' ), ! active );
-		setHidden( root.querySelector( '[data-action="retry"]' ), ! job.retryable );
-		setText( root, 'retry_note', job.retry_note || '' );
-		setHidden( root.querySelector( '[data-field="retry_note"]' ), ! job.retry_note );
+		setHidden( root.querySelector( '[data-action="retry"]' ), ! job.retry_useful );
+		setHidden( root.querySelector( '[data-action="dismiss"]' ), job.status !== 'failed' );
+		setText( root, 'stalled', job.stalled_text || '' );
+		setHidden( root.querySelector( '[data-field="stalled"]' ), ! job.stalled_text );
+		if ( layout !== 'decision' ) {
+			setHidden( root.querySelector( '[data-field="questions"]' ), true );
+		}
 	}
 
 	function notice( root, text ) {
@@ -114,10 +165,117 @@
 			if ( ! button ) {
 				return;
 			}
+			if ( button.getAttribute( 'data-action' ) === 'dismiss' ) {
+				dismiss( self.id );
+				setHidden( self.root, true );
+				return;
+			}
 			button.disabled = true;
 			self.action( button.getAttribute( 'data-action' ), function () {
 				button.disabled = false;
 			} );
+		} );
+	};
+
+	Driver.prototype.finished = function ( job ) {
+		if ( this.announced ) {
+			return;
+		}
+		this.announced = true;
+		var event;
+		try {
+			event = new CustomEvent( 'wpcheckpoint:job-finished', { bubbles: true, detail: job } );
+		} catch ( e ) {
+			event = document.createEvent( 'CustomEvent' );
+			event.initCustomEvent( 'wpcheckpoint:job-finished', true, false, job );
+		}
+		this.root.dispatchEvent( event );
+	};
+
+	Driver.prototype.questions = function () {
+		var self = this;
+		var box = this.root.querySelector( '[data-field="questions"]' );
+		if ( ! box || this.asking ) {
+			return;
+		}
+		this.asking = true;
+		request( 'GET', this.id + '/questions', function ( status, data ) {
+			if ( status !== 200 || ! data || ! data.questions || ! data.questions.length ) {
+				self.asking = false;
+				return;
+			}
+			box.textContent = '';
+			var form = document.createElement( 'form' );
+			var intro = document.createElement( 'p' );
+			intro.textContent = config.labels.questions;
+			form.appendChild( intro );
+			data.questions.forEach( function ( question, n ) {
+				var set = document.createElement( 'fieldset' );
+				var legend = document.createElement( 'legend' );
+				legend.textContent = question.text;
+				set.appendChild( legend );
+				if ( question.listed && question.listed.length ) {
+					var list = document.createElement( 'ul' );
+					question.listed.forEach( function ( item ) {
+						var li = document.createElement( 'li' );
+						li.textContent = item;
+						list.appendChild( li );
+					} );
+					set.appendChild( list );
+				}
+				question.choices.forEach( function ( choice ) {
+					var label = document.createElement( 'label' );
+					var input = document.createElement( 'input' );
+					input.type = 'radio';
+					input.name = 'q' + n;
+					input.value = choice;
+					input.required = true;
+					input.setAttribute( 'data-question', question.id );
+					label.appendChild( input );
+					label.appendChild( document.createTextNode( ' ' + ( config.labels[ 'choice_' + choice ] || choice ) ) );
+					set.appendChild( label );
+					set.appendChild( document.createElement( 'br' ) );
+				} );
+				form.appendChild( set );
+			} );
+			var submit = document.createElement( 'button' );
+			submit.type = 'submit';
+			submit.className = 'button button-primary';
+			submit.textContent = config.labels.answer;
+			form.appendChild( submit );
+			form.addEventListener( 'submit', function ( event ) {
+				event.preventDefault();
+				var answers = {};
+				form.querySelectorAll( 'input[data-question]:checked' ).forEach( function ( input ) {
+					answers[ input.getAttribute( 'data-question' ) ] = input.value;
+				} );
+				submit.disabled = true;
+				request( 'POST', self.id + '/answer', function ( code, reply ) {
+					if ( code !== 200 ) {
+						submit.disabled = false;
+						notice( self.root, ( reply && reply.message ) || config.labels.answer_failed );
+						return;
+					}
+					box.textContent = '';
+					setHidden( box, true );
+					self.asking = false;
+					self.stopped = false;
+					self.lastResult = null;
+					render( self.root, reply.job );
+					// The answer is taken: say so at once, before the next tick returns (up to a whole budget later).
+					self.root.setAttribute( 'data-state', 'progress' );
+					setHidden( self.root.querySelector( '[data-field="progress_box"]' ), false );
+					setText( self.root, 'status_text', config.labels.running );
+					setText( self.root, 'message', config.labels.continuing );
+					self.tick();
+				}, { answers: answers } );
+			} );
+			box.appendChild( form );
+			setHidden( box, false );
+			var first = form.querySelector( 'input' );
+			if ( first ) {
+				first.focus();
+			}
 		} );
 	};
 
@@ -157,13 +315,52 @@
 			this.lastChange = Date.now();
 		}
 		render( this.root, data.job );
+		if ( data.job.status === 'paused' && data.job.questions ) {
+			this.questions();
+		}
+		if ( TERMINAL.indexOf( data.job.status ) !== -1 ) {
+			this.finished( data.job );
+		}
 		onJob( data.job );
 		return true;
 	};
 
+	// While a tick runs, the job's progress is saved at every checkpoint: a read-only GET shows it. Only when the
+	// browser drives (no chain polls then), never overlapping, and not while the page is hidden.
+	// A read answered after its tick ended is dropped (the tick's own answer is newer), also when the next tick has
+	// already started: each watch has its own number.
+	Driver.prototype.watch = function () {
+		var self = this;
+		var round = ( this.round || 0 ) + 1;
+		this.round = round;
+		window.clearInterval( this.watcher );
+		this.watcher = window.setInterval( function () {
+			if ( self.reading || document.hidden ) {
+				return;
+			}
+			self.reading = true;
+			request( 'GET', self.id, function ( status, data ) {
+				self.reading = false;
+				if ( status === 200 && data && data.job && self.watcher && self.round === round ) {
+					render( self.root, data.job );
+				}
+			} );
+		}, POLL_MS );
+	};
+
+	Driver.prototype.unwatch = function () {
+		window.clearInterval( this.watcher );
+		this.watcher = null;
+		this.round = ( this.round || 0 ) + 1;
+	};
+
 	Driver.prototype.tick = function () {
 		var self = this;
+		if ( ! this.loopback ) {
+			this.watch();
+		}
 		request( 'POST', this.id + '/tick', function ( status, data ) {
+			self.unwatch();
 			if ( ! self.handle( status, data, function () {} ) ) {
 				if ( ! self.stopped ) {
 					self.later( function () { self.tick(); }, 5000 );
@@ -197,6 +394,16 @@
 
 	Driver.prototype.poll = function () {
 		var self = this;
+		if ( document.hidden ) {
+			// A hidden page does not poll; the server's chain goes on without it. Resume when it is shown.
+			document.addEventListener( 'visibilitychange', function resume() {
+				if ( ! document.hidden ) {
+					document.removeEventListener( 'visibilitychange', resume );
+					self.poll();
+				}
+			} );
+			return;
+		}
 		request( 'GET', this.id, function ( status, data ) {
 			if ( ! self.handle( status, data, function () {} ) ) {
 				if ( ! self.stopped ) {
@@ -245,12 +452,22 @@
 		} );
 	};
 
+	window.wpcheckpointDriveJob = function ( element ) {
+		return config.root ? new Driver( element ) : null;
+	};
+
 	function init() {
 		if ( ! config.root ) {
 			return;
 		}
+		var hidden = dismissed();
 		var blocks = document.querySelectorAll( '[data-wpcheckpoint-job]' );
 		for ( var i = 0; i < blocks.length; i++ ) {
+			var terminal = TERMINAL.indexOf( blocks[ i ].getAttribute( 'data-status' ) ) !== -1;
+			if ( terminal && hidden.indexOf( blocks[ i ].getAttribute( 'data-wpcheckpoint-job' ) ) !== -1 ) {
+				setHidden( blocks[ i ], true );
+				continue;
+			}
 			new Driver( blocks[ i ] );
 		}
 	}
