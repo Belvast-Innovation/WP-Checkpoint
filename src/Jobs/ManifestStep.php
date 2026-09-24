@@ -383,7 +383,7 @@ final class ManifestStep implements Step {
 				clearstatcache( true, $path );
 				$size = @filesize( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- reported below.
 				if ( ! is_int( $size ) ) {
-					throw new WorkLost( sprintf( 'The index %s is missing; the work directory was lost or changed.', basename( $path ) ) );
+					throw WorkLost::or_unreadable( $path, sprintf( 'The index %s is missing; the work directory was lost or changed.', basename( $path ) ), sprintf( 'The size of the index %s could not be read.', basename( $path ) ) );
 				}
 				$cursor['indexes'][ $which ] = array(
 					'bytes'  => $size,

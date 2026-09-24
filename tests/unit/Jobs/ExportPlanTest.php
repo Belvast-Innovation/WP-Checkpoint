@@ -4,6 +4,7 @@ namespace WPCheckpoint\Tests\Unit\Jobs;
 
 use WPCheckpoint\Archive\Packer;
 use WPCheckpoint\Jobs\ExportPlan;
+use WPCheckpoint\Jobs\WorkLost;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 final class ExportPlanTest extends TestCase {
@@ -43,16 +44,31 @@ final class ExportPlanTest extends TestCase {
 			$this->fail();
 		} catch ( \RuntimeException $e ) {
 			$this->assertStringContainsString( 'review.json', $e->getMessage() );
+			$this->assertInstanceOf( WorkLost::class, $e, 'not there: the work files are lost, a retry fails the same way' );
 		}
 		file_put_contents( $this->dir . '/review.json', '{"findings": ' );
 		try {
 			ExportPlan::read( $this->dir, ExportPlan::REVIEW );
 			$this->fail();
 		} catch ( \RuntimeException $e ) {
-			$this->assertStringContainsString( 'cannot be read', $e->getMessage() );
+			$this->assertStringContainsString( 'not what the job wrote', $e->getMessage() );
+			$this->assertInstanceOf( WorkLost::class, $e, 'damaged' );
 		}
 		file_put_contents( $this->dir . '/review.json', '[1, 2]' );
 		$this->assertSame( array( 1, 2 ), ExportPlan::read( $this->dir, ExportPlan::REVIEW ), 'a JSON array is an array; callers check the keys they need' );
+	}
+
+	public function test_a_file_too_large_to_read_is_not_taken_for_lost_work(): void {
+		$handle = fopen( $this->dir . '/review.json', 'wb' );
+		ftruncate( $handle, ExportPlan::MAX_BYTES + 1 );
+		fclose( $handle );
+		try {
+			ExportPlan::read( $this->dir, ExportPlan::REVIEW );
+			$this->fail();
+		} catch ( \RuntimeException $e ) {
+			$this->assertStringContainsString( 'too large', $e->getMessage() );
+			$this->assertNotInstanceOf( WorkLost::class, $e, 'the job wrote it; nothing says a retry fails the same way' );
+		}
 	}
 
 	public function test_the_whole_archive_and_the_exported_database_must_fit(): void {

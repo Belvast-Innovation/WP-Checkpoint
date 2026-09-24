@@ -54,6 +54,26 @@ final class Job {
 	}
 
 	/**
+	 * The kind of failure as stored ("kind:finished_at"), or '' unless it is
+	 * a known kind stamped with this failure's time. Anything else counts as
+	 * no kind, which offers Retry: an unknown value, and a kind left from an
+	 * earlier failure by code that does not know the column (it retries and
+	 * fails the job again without clearing it, and moves finished_at). The
+	 * worst a wrong reading can do is offer Retry once too often.
+	 *
+	 * @param string $stored      failure_kind column.
+	 * @param int    $finished_at finished_at column.
+	 * @return string FAILURE_TEMPORARY, FAILURE_FINAL or ''.
+	 */
+	public static function read_failure_kind( string $stored, int $finished_at ): string {
+		$parts = explode( ':', $stored );
+		if ( 2 !== count( $parts ) || ! in_array( $parts[0], array( self::FAILURE_TEMPORARY, self::FAILURE_FINAL ), true ) ) {
+			return '';
+		}
+		return ctype_digit( $parts[1] ) && $finished_at > 0 && (int) $parts[1] === $finished_at ? $parts[0] : '';
+	}
+
+	/**
 	 * Whether the job may be queued again: failed, and its work files were
 	 * not reclaimed yet.
 	 *
@@ -195,10 +215,11 @@ final class Job {
 	/**
 	 * What kind of failure ended the job: FAILURE_TEMPORARY (a problem of the
 	 * moment outlasted the runner's retries: a disk full, the database away),
-	 * FAILURE_FINAL (the storage directory changed, the job's work files were
-	 * lost or damaged (WorkLost), or its question went unanswered: a retry
-	 * cannot succeed), or '' (any other cause, a failure recorded before
-	 * kinds existed, or not failed).
+	 * FAILURE_FINAL (the job's work files were lost or damaged (WorkLost), or
+	 * its question went unanswered: a retry cannot succeed), or '' (any other
+	 * cause, the storage directory changing included, a failure recorded before
+	 * kinds existed, a kind that does not belong to this failure, or not
+	 * failed). Read from the row through read_failure_kind().
 	 *
 	 * @var string
 	 */

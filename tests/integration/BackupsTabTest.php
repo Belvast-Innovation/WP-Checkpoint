@@ -147,7 +147,9 @@ final class BackupsTabTest extends JobTestCase {
 	private function job_with_status( string $status, int $finished_ago = 0 ): Job {
 		global $wpdb;
 		$job = Plugin::instance()->jobs()->create( 'export', self::$admin_id );
-		$wpdb->update( Schema::jobs_table(), array( 'status' => $status, 'finished_at' => time() - $finished_ago, 'failure_kind' => Job::FAILED === $status ? Job::FAILURE_FINAL : '' ), array( 'id' => $job->id ) );
+		$finished = time() - $finished_ago;
+		// The kind is stored stamped with the failure's time (Job::read_failure_kind()).
+		$wpdb->update( Schema::jobs_table(), array( 'status' => $status, 'finished_at' => $finished, 'failure_kind' => Job::FAILED === $status ? Job::FAILURE_FINAL . ':' . $finished : '' ), array( 'id' => $job->id ) );
 		return Plugin::instance()->jobs()->find( $job->id );
 	}
 

@@ -253,7 +253,9 @@ final class RunnerTest extends WP_UnitTestCase {
 			} ),
 		) );
 		$job = $this->repo->create( 'lost' );
-		$this->assertSame( TickResult::FAILED, $this->runner()->tick( $job->id )->status );
+		$result = $this->runner()->tick( $job->id );
+		$this->assertSame( TickResult::FAILED, $result->status );
+		$this->assertFalse( $result->job->retry_useful(), 'the tick answers with Retry hidden already' );
 		$stored = $this->repo->find( $job->id );
 		$this->assertSame( Job::FAILURE_FINAL, $stored->failure_kind, 'a retry resumes from the same lost files' );
 		$this->assertFalse( $stored->retry_useful() );

@@ -41,19 +41,29 @@ final class ExportPlan {
 	 * @param string $name One of the constants.
 	 * @return array<string, mixed>
 	 * @throws WorkLost When the file is missing or not a JSON object (the work directory was lost or changed).
+	 * @throws \RuntimeException When it is there but cannot be read, or is too large.
 	 */
 	public static function read( string $work, string $name ): array {
 		$path = $work . DIRECTORY_SEPARATOR . $name;
 		$size = @filesize( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a missing file is reported below.
-		if ( false === $size || $size > self::MAX_BYTES ) {
+		if ( false === $size ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message with a file name.
-			throw new WorkLost( sprintf( 'The file %s of this job is missing or too large; the work directory was lost or changed.', $name ) );
+			throw WorkLost::or_unreadable( $path, sprintf( 'The file %s of this job is missing; the work directory was lost or changed.', $name ), sprintf( 'The size of the file %s of this job could not be read.', $name ) );
+		}
+		if ( $size > self::MAX_BYTES ) {
+			// Not a sign of damage: write() does not bound the size.
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message with a file name.
+			throw new \RuntimeException( sprintf( 'The file %s of this job is too large to read.', $name ) );
 		}
 		$json = @file_get_contents( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- small file in the job's own work directory, size checked above.
-		$data = is_string( $json ) ? json_decode( $json, true, 16 ) : null;
+		if ( ! is_string( $json ) ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message with a file name.
+			throw WorkLost::or_unreadable( $path, sprintf( 'The file %s of this job is missing; the work directory was lost or changed.', $name ), sprintf( 'The file %s of this job could not be read.', $name ) );
+		}
+		$data = json_decode( $json, true, 16 );
 		if ( ! is_array( $data ) ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message with a file name.
-			throw new WorkLost( sprintf( 'The file %s of this job cannot be read; the work directory was lost or changed.', $name ) );
+			throw new WorkLost( sprintf( 'The file %s of this job is not what the job wrote; the work directory was changed or damaged.', $name ) );
 		}
 		return $data;
 	}

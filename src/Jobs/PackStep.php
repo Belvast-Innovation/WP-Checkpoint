@@ -296,7 +296,11 @@ final class PackStep implements Step {
 			$data   = IndexLine::database( $line['text'], $this->chunk_bytes );
 			$source = $work . DIRECTORY_SEPARATOR . DatabaseExportStep::DIR . DIRECTORY_SEPARATOR . basename( $data['p'] );
 			clearstatcache( true, $source );
-			if ( ! is_file( $source ) || (int) filesize( $source ) !== $data['b'] ) {
+			$size = is_file( $source ) ? @filesize( $source ) : ( WorkLost::absent( $source ) ? -1 : false ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- reported below.
+			if ( false === $size ) {
+				throw new \RuntimeException( sprintf( 'Database chunk %s could not be looked at.', $data['p'] ) );
+			}
+			if ( $size !== $data['b'] ) {
 				throw new WorkLost( sprintf( 'Database chunk %s is missing or not %d bytes; the work directory was lost or changed.', $data['p'], $data['b'] ) );
 			}
 			if ( $this->make_room( $context, $packer, $cursor, $data['b'] ) ) {
@@ -736,7 +740,7 @@ final class PackStep implements Step {
 		}
 		$handle = @fopen( $path, 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- see above.
 		if ( false === $handle ) {
-			throw new WorkLost( 'The chunk hashes of the file in progress are missing; the work directory was lost or changed.' );
+			throw WorkLost::or_unreadable( $path, 'The chunk hashes of the file in progress are missing; the work directory was lost or changed.', 'The chunk hashes of the file in progress could not be opened.' );
 		}
 		$hashes = array();
 		try {
@@ -769,11 +773,11 @@ final class PackStep implements Step {
 	private static function line_at( string $path, int $offset ) {
 		$handle = @fopen( $path, 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- see above.
 		if ( false === $handle ) {
-			throw new WorkLost( sprintf( 'The index %s is missing; the work directory was lost or changed.', basename( $path ) ) );
+			throw WorkLost::or_unreadable( $path, sprintf( 'The index %s is missing; the work directory was lost or changed.', basename( $path ) ), sprintf( 'The index %s could not be opened.', basename( $path ) ) );
 		}
 		try {
 			if ( 0 !== fseek( $handle, $offset ) ) {
-				throw new WorkLost( 'An index could not be positioned; the work directory was changed.' );
+				throw new \RuntimeException( 'An index could not be positioned.' );
 			}
 			$line = fgets( $handle, IndexLine::MAX_LINE_BYTES + 2 );
 			while ( is_string( $line ) && '' === trim( $line ) ) {

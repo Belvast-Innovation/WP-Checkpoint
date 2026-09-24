@@ -68,7 +68,7 @@ job=$(phase to-question | sed -n 's/.*"job":"\([0-9]*\)".*/\1/p')
 wp eval "\$j = WPCheckpoint\Plugin::instance()->jobs()->find( $job ); \$w = WPCheckpoint\Jobs\Residue::work_dir( \$j->storage_path, \$j->id ); WPCheckpoint\Support\Deleter::delete_tree( dirname( \$w ), \$w, 100000 ); echo \"ok\n\";"
 phase fail-answer "$job"
 echo "== failed, temporary: the same block when the failure may pass"
-wp eval "global \$wpdb; \$wpdb->update( WPCheckpoint\Support\Schema::jobs_table(), array( 'failure_kind' => 'temporary', 'work_expired_at' => 0 ), array( 'id' => $job ) ); echo \"ok\n\";"
+wp eval "global \$wpdb; \$t = WPCheckpoint\Support\Schema::jobs_table(); \$wpdb->query( \$wpdb->prepare( \"UPDATE \$t SET failure_kind = CONCAT( 'temporary:', finished_at ), work_expired_at = 0 WHERE id = %d\", $job ) ); echo \"ok\n\";"
 phase failed "$job"
 wp wpcheckpoint job cancel "$job" >/dev/null || true
 wp eval "global \$wpdb; \$wpdb->delete( WPCheckpoint\Support\Schema::jobs_table(), array( 'id' => $job ) ); echo \"ok\n\";"

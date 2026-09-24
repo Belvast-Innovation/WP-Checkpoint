@@ -7,8 +7,8 @@
 
 namespace WPCheckpoint\Archive;
 
-use WPCheckpoint\Support\HostFunctions;
 use WPCheckpoint\Jobs\WorkLost;
+use WPCheckpoint\Support\HostFunctions;
 
 // phpcs:disable WordPress.WP.AlternativeFunctions -- streamed writes to the plugin's own volume files; the WP filesystem API has no equivalent.
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- messages are internal (an entry-path verdict), never HTML; the caller presents them through JobPresenter::clean().
@@ -803,8 +803,12 @@ final class Packer {
 			}
 			throw new \RuntimeException( 'The open volume is missing.' );
 		}
-		$actual = (int) filesize( $partial );
-		$entry  = $this->state['entry'];
+		clearstatcache( true, $partial );
+		$actual = @filesize( $partial ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a warning would put the path into the error log.
+		if ( false === $actual ) {
+			throw new \RuntimeException( 'The size of the open volume could not be read.' );
+		}
+		$entry = $this->state['entry'];
 		// Committed bytes: the completed entries, plus the open entry's header and the pieces written so far.
 		$committed = null === $entry ? (int) $this->state['volume']['bytes'] : (int) $entry['data_offset'] + (int) $entry['written'];
 		if ( $actual < $committed ) {
