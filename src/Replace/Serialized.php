@@ -12,24 +12,28 @@ defined( 'ABSPATH' ) || exit;
 /**
  * A strict reader of PHP's serialization format that never deserializes:
  * nothing is instantiated, and every byte it does not change is copied as
- * it was (floats, integers, references, class names, untouched strings). A
+ * it was (floats, integers, references, class names, untouched strings and
+ * the length written before each of them, leading zeros included). A
  * rewrite passes each string value (never an array key or a property name)
- * to a callback and writes the result back with its length recomputed in
- * bytes; the number of members of an array or object never changes, so the
- * slot numbers that references (R: and r:) point to stay right.
+ * to a callback; a string that comes back changed is written with its length
+ * recomputed in bytes. The number of members of an array or object never
+ * changes, so the slot numbers that references (R: and r:) point to stay
+ * right.
  *
- * Strict: every length must be the exact byte count, every member count the
- * actual count, and nesting is limited to MAX_DEPTH; rewrite() also wants
- * nothing after the value, rewrite_leading() reports where it ended. Anything else is not a serialization
- * here, whatever it looks like: looks_serialized() tells the two apart.
- * Custom-serialized objects (C:) and enums (E:) are copied without looking
- * inside. The S: form (escaped strings), which serialize() never writes, is
- * not read.
+ * Strict, following what unserialize() accepts: every length must be the
+ * exact byte count and fit in what remains of the input, every member count
+ * the actual count, floats follow PHP's grammar, a reference must point to
+ * an earlier value (r: to an object), and nesting is limited to MAX_DEPTH
+ * (deeper values raise TooDeep, which the caller can tell from damage).
+ * rewrite() also wants nothing after the value; rewrite_leading() reports
+ * where it ended. Custom-serialized objects (C:) and enums (E:) are copied
+ * without looking inside. The S: form (escaped strings), which serialize()
+ * never writes, is not read.
  */
 final class Serialized {
 
 	/**
-	 * Deepest nesting read, counting nested serializations inside strings.
+	 * Deepest nesting of arrays and objects read in one serialization.
 	 */
 	const MAX_DEPTH = 256;
 
@@ -61,7 +65,7 @@ final class Serialized {
 	private $out = '';
 
 	/**
-	 * Callback for each string value: function( string $value, int $depth ): string.
+	 * Callback for each string value: function( string $value ): string.
 	 *
 	 * @var callable
 	 */
@@ -76,10 +80,17 @@ final class Serialized {
 	private $opaque;
 
 	/**
+	 * Whether each value slot read so far holds an object (what r: may point to), in order from slot 1.
+	 *
+	 * @var bool[]
+	 */
+	private $slots = array();
+
+	/**
 	 * Constructor.
 	 *
 	 * @param string   $data   Input.
-	 * @param callable $value  function( string $value, int $depth ): string.
+	 * @param callable $value  function( string $value ): string.
 	 * @param callable $opaque function( string $part, string $bytes ): void.
 	 */
 	private function __construct( string $data, callable $value, callable $opaque ) {
@@ -93,13 +104,13 @@ final class Serialized {
 	 * null when the input is not one complete, valid serialized value.
 	 *
 	 * @param string   $data   Input, without surrounding whitespace.
-	 * @param callable $value  function( string $value, int $depth ): string, for each string value; $depth is the nesting of the value.
+	 * @param callable $value  function( string $value ): string, for each string value.
 	 * @param callable $opaque function( string $part, string $bytes ): void, for each part copied unchanged (PART_KEY: an array key or property name; PART_OPAQUE: a class name, a C: payload or an E: name).
-	 * @param int      $depth  Nesting of $data itself (a serialization inside a string of another).
 	 * @return string|null
+	 * @throws TooDeep When arrays and objects nest deeper than MAX_DEPTH.
 	 */
-	public static function rewrite( string $data, callable $value, callable $opaque, int $depth = 0 ) {
-		$read = self::rewrite_leading( $data, $value, $opaque, $depth );
+	public static function rewrite( string $data, callable $value, callable $opaque ) {
+		$read = self::rewrite_leading( $data, $value, $opaque );
 		return null !== $read && strlen( $data ) === $read[1] ? $read[0] : null;
 	}
 
@@ -113,13 +124,15 @@ final class Serialized {
 	 * @param string   $data   Input.
 	 * @param callable $value  As for rewrite().
 	 * @param callable $opaque As for rewrite().
-	 * @param int      $depth  As for rewrite().
 	 * @return array{0: string, 1: int}|null
+	 * @throws TooDeep When arrays and objects nest deeper than MAX_DEPTH.
 	 */
-	public static function rewrite_leading( string $data, callable $value, callable $opaque, int $depth = 0 ) {
+	public static function rewrite_leading( string $data, callable $value, callable $opaque ) {
 		$reader = new self( $data, $value, $opaque );
 		try {
-			$reader->item( $depth, false );
+			$reader->item( 0, false );
+		} catch ( TooDeep $e ) {
+			throw $e;
 		} catch ( NotSerialized $e ) {
 			return null;
 		}
@@ -175,10 +188,11 @@ final class Serialized {
 	 * @param bool $key   Whether it is a key.
 	 * @return void
 	 * @throws NotSerialized When the input does not follow the format.
+	 * @throws TooDeep When it nests deeper than MAX_DEPTH.
 	 */
 	private function item( int $depth, bool $key ): void {
 		if ( $depth > self::MAX_DEPTH ) {
-			throw new NotSerialized();
+			throw new TooDeep();
 		}
 		$type = $this->byte( $this->pos );
 		if ( $key && 'i' !== $type && 's' !== $type ) {
@@ -186,6 +200,7 @@ final class Serialized {
 		}
 		if ( 'N' === $type ) {
 			$this->copy_literal( 'N;' );
+			$this->slots[] = false;
 			return;
 		}
 		$this->copy_literal( $type . ':' );
@@ -197,91 +212,128 @@ final class Serialized {
 				}
 				$this->copy( 1 );
 				$this->copy_literal( ';' );
-				return;
+				break;
 			case 'i':
+				$this->copy_integer();
+				$this->copy_literal( ';' );
+				break;
+			case 'd':
+				$this->copy_float();
+				$this->copy_literal( ';' );
+				break;
+			case 's':
+				$this->string( $key );
+				break;
 			case 'R':
 			case 'r':
-				$this->copy_number( 'i' === $type );
-				$this->copy_literal( ';' );
-				return;
-			case 'd':
-				$end = strpos( $this->data, ';', $this->pos );
-				if ( false === $end || $end === $this->pos || strspn( $this->data, '0123456789.eE+-INFA', $this->pos, $end - $this->pos ) !== $end - $this->pos ) {
-					throw new NotSerialized();
-				}
-				$this->copy( $end - $this->pos + 1 );
-				return;
-			case 's':
-				$this->string( $depth, $key );
+				$this->reference( 'r' === $type );
 				return;
 			case 'a':
-				$this->members( $this->copy_number( false ), $depth );
+				$this->slots[] = false;
+				$this->members( $depth );
 				return;
 			case 'O':
+				$this->slots[] = true;
 				$this->quoted_name();
 				$this->copy_literal( ':' );
-				$this->members( $this->copy_number( false ), $depth );
+				$this->members( $depth );
 				return;
 			case 'C':
+				$this->slots[] = true;
 				$this->quoted_name();
 				$this->copy_literal( ':' );
-				$length = $this->copy_number( false );
+				$length = $this->copy_length();
 				$this->copy_literal( ':{' );
-				$this->ensure( $length + 1 );
 				call_user_func( $this->opaque, self::PART_OPAQUE, substr( $this->data, $this->pos, $length ) );
 				$this->copy( $length );
 				$this->copy_literal( '}' );
 				return;
 			case 'E':
+				$this->slots[] = true;
 				$this->quoted_name();
 				$this->copy_literal( ';' );
 				return;
+			default:
+				throw new NotSerialized();
 		}
-		throw new NotSerialized();
+		if ( ! $key ) {
+			$this->slots[] = false;
+		}
 	}
 
 	/**
-	 * A string's length, quotes and bytes; a value goes through the callback.
+	 * A string's length, quotes and bytes. A value goes through the callback
+	 * and keeps the length as written when it comes back unchanged.
 	 *
-	 * @param int  $depth Nesting.
-	 * @param bool $key   Whether it is a key.
+	 * @param bool $key Whether it is a key.
 	 * @return void
 	 * @throws NotSerialized When the length does not match.
 	 */
-	private function string( int $depth, bool $key ): void {
+	private function string( bool $key ): void {
 		$start  = $this->pos;
-		$length = $this->read_number();
+		$length = $this->read_length();
 		$this->expect( ':"' );
 		$this->ensure( $length + 2 );
 		if ( '";' !== substr( $this->data, $this->pos + $length, 2 ) ) {
 			throw new NotSerialized();
 		}
 		$bytes = substr( $this->data, $this->pos, $length );
+		$new   = $bytes;
 		if ( $key ) {
 			call_user_func( $this->opaque, self::PART_KEY, $bytes );
-			$this->out .= substr( $this->data, $start, $this->pos + $length + 2 - $start );
 		} else {
-			$new        = (string) call_user_func( $this->value, $bytes, $depth + 1 );
-			$this->out .= strlen( $new ) . ':"' . $new . '";';
+			$new = (string) call_user_func( $this->value, $bytes );
 		}
 		$this->pos += $length + 2;
+		if ( $new === $bytes ) {
+			$this->out .= substr( $this->data, $start, $this->pos - $start );
+			return;
+		}
+		$this->out .= strlen( $new ) . ':"' . $new . '";';
 	}
 
 	/**
-	 * The members of an array or object: "{", count pairs of key and value, "}".
+	 * The members of an array or object: count, "{", count pairs of key and value, "}".
 	 *
-	 * @param int $count Declared count.
 	 * @param int $depth Nesting of the container.
 	 * @return void
 	 * @throws NotSerialized When the count or the braces do not match.
+	 * @throws TooDeep When it nests deeper than MAX_DEPTH.
 	 */
-	private function members( int $count, int $depth ): void {
+	private function members( int $depth ): void {
+		// Each member takes at least six bytes ("i:0;N;"): a count that cannot fit is refused before looping.
+		$count = $this->copy_length( 6 );
 		$this->copy_literal( ':{' );
 		for ( $i = 0; $i < $count; $i++ ) {
 			$this->item( $depth + 1, true );
 			$this->item( $depth + 1, false );
 		}
 		$this->copy_literal( '}' );
+	}
+
+	/**
+	 * A reference: R: to any earlier value, r: to an earlier object. R: takes
+	 * no slot of its own, r: takes one (holding the object), as unserialize()
+	 * counts them.
+	 *
+	 * @param bool $to_object Whether it is r:.
+	 * @return void
+	 * @throws NotSerialized When it points nowhere.
+	 */
+	private function reference( bool $to_object ): void {
+		$digits = strspn( $this->data, '0123456789', $this->pos );
+		if ( 0 === $digits || $digits > strlen( (string) count( $this->slots ) ) ) {
+			throw new NotSerialized();
+		}
+		$id = (int) substr( $this->data, $this->pos, $digits );
+		if ( $id < 1 || $id > count( $this->slots ) || ( $to_object && ! $this->slots[ $id - 1 ] ) ) {
+			throw new NotSerialized();
+		}
+		$this->copy( $digits );
+		$this->copy_literal( ';' );
+		if ( $to_object ) {
+			$this->slots[] = true;
+		}
 	}
 
 	/**
@@ -292,7 +344,7 @@ final class Serialized {
 	 * @throws NotSerialized When the length does not match.
 	 */
 	private function quoted_name(): void {
-		$length = $this->copy_number( false );
+		$length = $this->copy_length();
 		$this->copy_literal( ':"' );
 		$this->ensure( $length + 1 );
 		call_user_func( $this->opaque, self::PART_OPAQUE, substr( $this->data, $this->pos, $length ) );
@@ -301,41 +353,93 @@ final class Serialized {
 	}
 
 	/**
-	 * Read a non-negative decimal (or, with $signed, an optionally signed one) and copy it.
+	 * An integer: an optional sign and digits, copied as written.
 	 *
-	 * @param bool $signed Whether a sign may lead.
-	 * @return int
-	 * @throws NotSerialized When there is no number.
+	 * @return void
+	 * @throws NotSerialized When there are no digits.
 	 */
-	private function copy_number( bool $signed ): int {
-		$start = $this->pos;
-		if ( $signed && ( '-' === $this->byte( $this->pos ) || '+' === $this->byte( $this->pos ) ) ) {
-			++$this->pos;
-		}
-		$digits = strspn( $this->data, '0123456789', $this->pos );
-		if ( 0 === $digits || $digits > 19 ) {
+	private function copy_integer(): void {
+		$sign   = strspn( $this->data, '+-', $this->pos, 1 );
+		$digits = strspn( $this->data, '0123456789', $this->pos + $sign );
+		if ( 0 === $digits ) {
 			throw new NotSerialized();
 		}
-		$this->pos += $digits;
-		$text       = substr( $this->data, $start, $this->pos - $start );
-		$this->out .= $text;
-		return (int) $text;
+		$this->copy( $sign + $digits );
 	}
 
 	/**
-	 * Read a non-negative decimal without copying it (a string's length, written anew).
+	 * A float as unserialize() reads it: NAN, INF or -INF, or an optionally
+	 * signed decimal with digits on at least one side of an optional point
+	 * and an optional exponent; copied as written.
 	 *
-	 * @return int
-	 * @throws NotSerialized When there is no number or it cannot be a length.
+	 * @return void
+	 * @throws NotSerialized When it is none of these.
 	 */
-	private function read_number(): int {
-		$digits = strspn( $this->data, '0123456789', $this->pos );
-		if ( 0 === $digits || $digits > 10 ) {
+	private function copy_float(): void {
+		foreach ( array( 'NAN', 'INF', '-INF' ) as $word ) {
+			if ( substr( $this->data, $this->pos, strlen( $word ) ) === $word && ';' === $this->byte( $this->pos + strlen( $word ) ) ) {
+				$this->copy( strlen( $word ) );
+				return;
+			}
+		}
+		$at     = $this->pos + strspn( $this->data, '+-', $this->pos, 1 );
+		$before = strspn( $this->data, '0123456789', $at );
+		$at    += $before;
+		$after  = 0;
+		if ( '.' === $this->byte( $at ) ) {
+			$after = strspn( $this->data, '0123456789', $at + 1 );
+			$at   += 1 + $after;
+		}
+		if ( 0 === $before + $after ) {
 			throw new NotSerialized();
 		}
-		$number     = (int) substr( $this->data, $this->pos, $digits );
+		if ( 'e' === $this->byte( $at ) || 'E' === $this->byte( $at ) ) {
+			$sign     = strspn( $this->data, '+-', $at + 1, 1 );
+			$exponent = strspn( $this->data, '0123456789', $at + 1 + $sign );
+			if ( 0 === $exponent ) {
+				throw new NotSerialized();
+			}
+			$at += 1 + $sign + $exponent;
+		}
+		$this->copy( $at - $this->pos );
+	}
+
+	/**
+	 * Read and copy a length or count that fits in what remains of the input
+	 * ($unit bytes per item at least), refused before any arithmetic on it.
+	 *
+	 * @param int $unit Least bytes each counted item takes.
+	 * @return int
+	 * @throws NotSerialized When there is no number or it cannot fit.
+	 */
+	private function copy_length( int $unit = 1 ): int {
+		$start      = $this->pos;
+		$value      = $this->read_length( $unit );
+		$this->out .= substr( $this->data, $start, $this->pos - $start );
+		return $value;
+	}
+
+	/**
+	 * Read a length or count that fits in what remains of the input, without
+	 * copying it. The digits are compared as text first, so no number too
+	 * large for the platform's integers is ever formed.
+	 *
+	 * @param int $unit Least bytes each counted item takes.
+	 * @return int
+	 * @throws NotSerialized When there is no number or it cannot fit.
+	 */
+	private function read_length( int $unit = 1 ): int {
+		$digits = strspn( $this->data, '0123456789', $this->pos );
+		if ( 0 === $digits ) {
+			throw new NotSerialized();
+		}
+		$text      = ltrim( substr( $this->data, $this->pos, $digits ), '0' );
+		$remaining = (string) intdiv( strlen( $this->data ) - $this->pos, $unit );
+		if ( strlen( $text ) > strlen( $remaining ) || ( strlen( $text ) === strlen( $remaining ) && strcmp( $text, $remaining ) > 0 ) ) {
+			throw new NotSerialized();
+		}
 		$this->pos += $digits;
-		return $number;
+		return (int) $text;
 	}
 
 	/**
@@ -378,14 +482,14 @@ final class Serialized {
 	}
 
 	/**
-	 * At least $length more bytes must follow.
+	 * At least $length more bytes must follow ($length comes from read_length(), so it cannot overflow).
 	 *
 	 * @param int $length Bytes.
 	 * @return void
 	 * @throws NotSerialized When there are fewer.
 	 */
 	private function ensure( int $length ): void {
-		if ( $length < 0 || $this->pos + $length > strlen( $this->data ) ) {
+		if ( $length < 0 || $length > strlen( $this->data ) - $this->pos ) {
 			throw new NotSerialized();
 		}
 	}

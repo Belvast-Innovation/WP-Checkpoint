@@ -21,7 +21,8 @@ final class RulesTest extends TestCase {
 	 */
 	private static function findings(): array {
 		$root   = dirname( __DIR__, 3 );
-		$config = tempnam( sys_get_temp_dir(), 'wpcheckpoint-phpstan-' ) . '.neon';
+		$base   = (string) tempnam( sys_get_temp_dir(), 'wpcheckpoint-phpstan-' );
+		$config = $base . '.neon';
 		file_put_contents(
 			$config,
 			"includes:\n    - " . $root . "/vendor/szepeviktor/phpstan-wordpress/extension.neon\n"
@@ -34,6 +35,7 @@ final class RulesTest extends TestCase {
 			. ' --autoload-file=' . escapeshellarg( $root . '/vendor/autoload.php' );
 		$output  = (string) shell_exec( $command . ' 2>/dev/null' );
 		unlink( $config );
+		unlink( $base );
 		$report = json_decode( $output, true );
 		self::assertIsArray( $report, 'PHPStan ran and reported: ' . substr( $output, 0, 500 ) );
 		$found = array();
@@ -63,15 +65,15 @@ final class RulesTest extends TestCase {
 			'wpcheckpoint.hostFunction'  => array(),
 		);
 		foreach ( (array) file( dirname( __DIR__, 2 ) . '/Fixtures/PHPStan/forbidden-calls.php' ) as $number => $line ) {
-			if ( false !== strpos( (string) $line, 'unserialize' ) && false === strpos( (string) $line, '*' ) ) {
+			if ( ( false !== strpos( (string) $line, 'unserialize' ) || false !== strpos( (string) $line, 'session_decode' ) ) && false === strpos( (string) $line, '*' ) ) {
 				$expected['wpcheckpoint.noUnserialize'][] = $number + 1;
 			} elseif ( false !== strpos( (string) $line, 'exec' ) && false === strpos( (string) $line, '*' ) ) {
 				$expected['wpcheckpoint.hostFunction'][] = $number + 1;
 			}
 		}
-		$this->assertCount( 3, $expected['wpcheckpoint.noUnserialize'], 'the fixture holds the forbidden calls' );
+		$this->assertCount( 6, $expected['wpcheckpoint.noUnserialize'], 'the fixture holds the forbidden calls' );
 		$this->assertCount( 2, $expected['wpcheckpoint.hostFunction'] );
-		$this->assertSame( $expected['wpcheckpoint.noUnserialize'], $by_rule['wpcheckpoint.noUnserialize'] ?? array(), 'unserialize(), maybe_unserialize() and a string callback' );
+		$this->assertSame( $expected['wpcheckpoint.noUnserialize'], $by_rule['wpcheckpoint.noUnserialize'] ?? array(), 'unserialize(), maybe_unserialize(), session_decode(), ->unserialize() and the names as strings' );
 		$this->assertSame( $expected['wpcheckpoint.hostFunction'], $by_rule['wpcheckpoint.hostFunction'] ?? array(), 'exec() and a string callback' );
 	}
 }

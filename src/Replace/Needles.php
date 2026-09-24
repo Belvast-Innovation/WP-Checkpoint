@@ -24,7 +24,13 @@ defined( 'ABSPATH' ) || exit;
  * starts with a letter or digit, the byte before it must not continue a
  * host name or a path segment, so `old.example` is not found inside
  * `old.example.au`, `old.example-staging.net` or `cold.example`, but is at
- * the end of a sentence (`old.example.`). Replacement
+ * the end of a sentence (`old.example.`); a percent-escape right after a
+ * match continues the segment unless it encodes a delimiter (`%2F`), and a
+ * path is not found in the middle of a longer one (`/home/u/var/www/old`).
+ * Known limit: a URL-encoded form written with mixed-case hexadecimal
+ * (`%3A%2f`) is not found; encoders write one case throughout. Bare host
+ * names (multisite `domain` columns) are not pairs of their own: the
+ * restore updates those columns itself. Replacement
  * runs once, left to right, the longest needle first where several start at
  * the same byte; replaced text is never searched again.
  *
@@ -36,6 +42,12 @@ final class Needles {
 	 * Bytes that continue a host name or a path segment.
 	 */
 	const CONTINUES = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-_~';
+
+	/**
+	 * Bytes that end a path segment or a URL part when they appear percent-encoded after a match (an encoded
+	 * space does not: "sub%20x" is the one segment "sub x").
+	 */
+	const DELIMITERS = "/?#&=;,:+@\"'<>[](){}";
 
 	/**
 	 * Needle and replacement pairs in every form, longest needle first.
@@ -63,6 +75,9 @@ final class Needles {
 				if ( ! self::writable( $text ) ) {
 					throw new \InvalidArgumentException( sprintf( 'Pair %d holds a double quote, a backslash or a control character, which cannot be replaced the same way in every encoding.', (int) $index ) );
 				}
+			}
+			if ( $pair[0] === $pair[1] ) {
+				continue; // Nothing to change: counting it as a replacement would call an unchanged value changed.
 			}
 			foreach ( self::encodings( $pair[0], $pair[1] ) as $form ) {
 				if ( isset( $seen[ 'k' . $form[0] ] ) ) {
@@ -104,7 +119,8 @@ final class Needles {
 			array( 'http://' . $from, $to_scheme . '//' . $to ),
 			array( '//' . $from, '//' . $to ),
 		);
-		if ( '' !== $from_path && $from_path !== $to_path ) {
+		// The root directory ("/") cannot be told apart from any other path: no pair for it.
+		if ( '' !== rtrim( $from_path, '/' ) && rtrim( $from_path, '/' ) !== rtrim( $to_path, '/' ) ) {
 			$pairs[] = array( rtrim( $from_path, '/' ), rtrim( $to_path, '/' ) );
 		}
 		return new self( $pairs );
@@ -252,12 +268,30 @@ final class Needles {
 			if ( $after < strlen( $text ) && ctype_alnum( $text[ $after ] ) ) {
 				return false;
 			}
+			// A percent-escape continues the segment ("/sub%20x" is the segment "sub x") unless it encodes a
+			// delimiter ("%2F", "%3F", "%26").
+			if ( $after === $end && self::escape_at( $text, $end ) && false === strpos( self::DELIMITERS, chr( (int) hexdec( substr( $text, $end + 1, 2 ) ) ) ) ) {
+				return false;
+			}
 		}
-		if ( $start > 0 && false !== strpos( self::CONTINUES, $needle[0] ) && false !== strpos( self::CONTINUES, $text[ $start - 1 ] ) ) {
-			// A percent-escape right before ("%2F" of an encoded slash) ends a segment too.
-			return $start >= 3 && '%' === $text[ $start - 3 ] && ctype_xdigit( $text[ $start - 2 ] . $text[ $start - 1 ] );
+		$first = $needle[0];
+		if ( $start > 0 && ( false !== strpos( self::CONTINUES, $first ) || '/' === $first ) && false !== strpos( self::CONTINUES, $text[ $start - 1 ] ) ) {
+			// A percent-escape right before ("%2F" of an encoded slash) ends a segment too. A path ("/var/www")
+			// right after a letter or digit is the middle of a longer path ("/home/u/var/www").
+			return '/' !== $first && self::escape_at( $text, $start - 3 );
 		}
 		return true;
+	}
+
+	/**
+	 * Whether a percent-escape ("%" and two hexadecimal digits) starts at a position.
+	 *
+	 * @param string $text Text.
+	 * @param int    $at   Position.
+	 * @return bool
+	 */
+	private static function escape_at( string $text, int $at ): bool {
+		return $at >= 0 && $at + 2 < strlen( $text ) && '%' === $text[ $at ] && ctype_xdigit( $text[ $at + 1 ] . $text[ $at + 2 ] );
 	}
 
 	/**

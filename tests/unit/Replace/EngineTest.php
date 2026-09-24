@@ -2,6 +2,7 @@
 
 namespace WPCheckpoint\Tests\Unit\Replace;
 
+use WPCheckpoint\Database\TableExporter;
 use WPCheckpoint\Replace\Engine;
 use WPCheckpoint\Replace\Needles;
 use WPCheckpoint\Replace\Result;
@@ -269,7 +270,11 @@ final class EngineTest extends TestCase {
 		$result  = self::engine()->value( $deepest );
 		$this->assertSame( Result::SERIALIZED, $result->kind(), 'reachable' );
 		$this->assertSame( 1, $result->replaced() );
-		$this->assertSame( Result::DAMAGED, self::engine()->value( $build( Serialized::MAX_DEPTH + 1 ) )->kind(), 'beyond the limit' );
+		$beyond = self::engine()->value( $build( Serialized::MAX_DEPTH + 1 ) );
+		$this->assertSame( Result::TOO_DEEP, $beyond->kind(), 'beyond the limit: left, and not called damaged (PHP reads deeper)' );
+		$this->assertSame( 1, $beyond->too_deep() );
+		$this->assertSame( 0, $beyond->damaged() );
+		$this->assertNotFalse( self::read( $build( Serialized::MAX_DEPTH + 1 ) ), 'PHP does read it' );
 	}
 
 	public function test_a_value_at_the_row_limit_is_replaced_within_the_step_budget(): void {
@@ -278,98 +283,213 @@ final class EngineTest extends TestCase {
 		$item  = 's:' . strlen( $piece ) . ':"' . $piece . '";';
 		$body  = '';
 		$count = 0;
-		while ( strlen( $body ) + strlen( $item ) + 32 < 4 * 1048576 - 32 ) {
+		while ( strlen( $body ) + strlen( $item ) + 32 < TableExporter::MAX_ROW_BYTES - 32 ) {
 			$body .= 'i:' . $count . ';' . $item;
 			++$count;
 		}
 		$data = 'a:' . $count . ':{' . $body . '}';
 		unset( $body );
-		$this->assertGreaterThan( 4 * 1048576 - 65536, strlen( $data ) );
-		$this->assertLessThanOrEqual( 4 * 1048576, strlen( $data ), 'at most the export row limit' );
-		if ( function_exists( 'memory_reset_peak_usage' ) ) {
-			memory_reset_peak_usage(); // PHP 8.2+: measure this value alone.
-		}
-		$before = memory_get_usage();
+		$this->assertGreaterThan( TableExporter::MAX_ROW_BYTES - 65536, strlen( $data ) );
+		$this->assertLessThanOrEqual( TableExporter::MAX_ROW_BYTES, strlen( $data ), 'at most the export row limit' );
+		$before = self::reset_peak();
 		$start  = microtime( true );
 		$result = self::engine()->value( $data );
-		$this->assertLessThan( 32 * 1048576, memory_get_peak_usage() - $before, 'well within the per-step memory budget' );
+		if ( null !== $before ) {
+			$this->assertLessThan( 32 * 1048576, memory_get_peak_usage() - $before, 'well within the per-step memory budget' );
+		}
 		$this->assertLessThan( 20, microtime( true ) - $start, 'within one step' );
 		$this->assertSame( Result::SERIALIZED, $result->kind() );
 		$this->assertSame( substr_count( $data, self::OLD ), $result->replaced() );
 	}
 
-	public function test_random_structures_stay_readable_with_the_same_shape(): void {
-		mt_srand( 20260924 );
-		for ( $round = 0; $round < 300; $round++ ) {
-			$value  = self::random_value( 0 );
-			$data   = serialize( $value );
+	/**
+	 * Reset the memory peak and return the usage to measure from; null
+	 * before PHP 8.2, where the peak cannot be reset (the assertion is then
+	 * left to the PHP 8 runs rather than measuring an earlier test's peak).
+	 *
+	 * @return int|null
+	 */
+	private static function reset_peak() {
+		if ( ! function_exists( 'memory_reset_peak_usage' ) ) {
+			return null;
+		}
+		memory_reset_peak_usage();
+		return memory_get_usage();
+	}
+
+	public function test_nested_damage_is_read_once_per_level(): void {
+		// Every level declares two members and holds one: each is damaged, and would be read again and again
+		// if a failed read were retried on its inner strings.
+		$value = 's:19:"' . self::OLD . '";';
+		for ( $i = 0; $i < 30; $i++ ) {
+			$value = 'a:2:{i:0;s:' . strlen( $value ) . ':"' . $value . '";}';
+		}
+		$start  = microtime( true );
+		$result = self::engine()->value( $value );
+		$this->assertLessThan( 1.0, microtime( true ) - $start, 'linear in the depth' );
+		$this->assertSame( Result::DAMAGED, $result->kind() );
+		$this->assertSame( $value, $result->value() );
+	}
+
+	public function test_lengths_too_large_to_fit_are_damage_not_an_error(): void {
+		foreach ( array(
+			'a:2:{i:0;s:19:"' . self::OLD . '";i:1;O:9223372036854775807:"x":0:{}}',
+			'a:2:{i:0;s:19:"' . self::OLD . '";i:1;C:1:"X":9223372036854775807:{}}',
+			'a:2:{i:0;s:19:"' . self::OLD . '";i:1;s:99999999999999999999:"x";}',
+			'a:9223372036854775807:{i:0;s:19:"' . self::OLD . '";}',
+		) as $data ) {
 			$result = self::engine()->value( $data );
-			$copy   = self::read( $result->value() );
-			$this->assertNotFalse( $copy, 'round ' . $round . ' is readable: ' . $result->value() );
-			$this->assertSame( self::shape( $value ), self::shape( $copy ), 'round ' . $round . ' keeps its shape' );
-			$this->assertSame( serialize( self::expected( $value ) ), $result->value(), 'round ' . $round . ' equals serializing the replaced structure' );
+			$this->assertSame( Result::DAMAGED, $result->kind(), $data );
+			$this->assertSame( $data, $result->value() );
+		}
+	}
+
+	public function test_serializations_inside_strings_are_followed_to_the_limit_within_the_memory_budget(): void {
+		// The innermost value is as large as a stored value may be; each level wraps it in another string.
+		$payload = str_repeat( 'see ' . self::OLD . '/a ', (int) floor( ( TableExporter::MAX_ROW_BYTES - 1024 ) / ( strlen( self::OLD ) + 8 ) ) );
+		$nest    = static function ( int $levels ) use ( $payload ): string {
+			$data = serialize( array( $payload ) );
+			for ( $i = 0; $i < $levels; $i++ ) {
+				$data = serialize( array( $data ) );
+			}
+			return $data;
+		};
+		$deepest = $nest( Engine::MAX_NESTED );
+		$this->assertLessThan( TableExporter::MAX_ROW_BYTES, strlen( $deepest ) );
+		$before = self::reset_peak();
+		$result = self::engine()->value( $deepest );
+		if ( null !== $before ) {
+			$this->assertLessThan( 32 * 1048576, memory_get_peak_usage() - $before, 'reachable within the per-step budget' );
+		}
+		$this->assertSame( Result::SERIALIZED, $result->kind() );
+		$this->assertSame( substr_count( $payload, self::OLD ), $result->replaced() );
+		unset( $result, $deepest );
+		$beyond = self::engine()->value( $nest( Engine::MAX_NESTED + 1 ) );
+		$this->assertSame( 1, $beyond->too_deep(), 'one level more: left and counted' );
+		$this->assertSame( 0, $beyond->replaced() );
+	}
+
+	public function test_unchanged_strings_keep_their_length_as_written(): void {
+		$data   = 'a:2:{i:0;s:05:"hello";i:1;s:19:"' . self::OLD . '";}';
+		$result = self::engine()->value( $data );
+		$this->assertSame( 'a:2:{i:0;s:05:"hello";i:1;s:19:"' . self::NEW . '";}', $result->value() );
+		$key = 'a:1:{s:019:"' . self::OLD . '";i:1;}';
+		$this->assertSame( $key, self::engine()->value( $key )->value(), 'a needle in a key only: not a byte changed' );
+		$this->assertFalse( self::engine()->value( $key )->changed() );
+	}
+
+	public function test_the_reader_accepts_what_php_accepts_and_nothing_else(): void {
+		$cases = array(
+			'd:-0;', 'd:.5;', 'd:5.;', 'd:1e5;', 'd:+1.5E-3;', 'd:-INF;', 'd:INF;', 'd:NAN;', 'd:0.1;', 'd:1.0E+25;',
+			'd:--;', 'd:NANI;', 'd:1-2;', 'd:E;', 'd:.;', 'd:INFINF;', 'd:-NAN;', 'd:1e;', 'd:;',
+			'i:+5;', 'i:-5;', 'i:;', 'i:5a;', 'b:2;', 'N;',
+			'R:1;', 'r:1;',
+			'a:2:{i:0;s:1:"x";i:1;R:2;}', 'a:2:{i:0;s:1:"x";i:1;R:3;}', 'a:1:{i:0;R:1;}',
+			'a:3:{i:0;s:1:"x";i:1;R:2;i:2;R:3;}',
+			'a:2:{i:0;s:1:"x";i:1;r:2;}', 'a:2:{i:0;a:0:{}i:1;r:2;}',
+			'a:3:{i:0;O:8:"stdClass":0:{}i:1;r:2;i:2;r:3;}',
+			'a:2:{i:0;O:8:"stdClass":1:{s:1:"a";s:1:"b";}i:1;r:3;}',
+			'a:2:{i:0;a:1:{i:0;s:1:"x";}i:1;R:3;}',
+			's:019:"https://old.example";', 's:2:"x";', 'a:1:{i:0;s:1:"x";', 'a:0:{}',
+		);
+		$both = array( 0, 0 );
+		foreach ( $cases as $data ) {
+			$php  = false !== @self::read( $data, true ) || 'b:0;' === $data; // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- rejected input warns.
+			$ours = null !== Serialized::rewrite(
+				$data,
+				static function ( string $s ): string {
+					return $s;
+				},
+				static function (): void {
+				}
+			);
+			$this->assertSame( $php, $ours, $data . ( $php ? ' is read by PHP' : ' is refused by PHP' ) );
+			++$both[ $php ? 0 : 1 ];
+		}
+		$this->assertGreaterThan( 10, $both[0], 'the control: many of the cases are valid' );
+		$this->assertGreaterThan( 10, $both[1], 'and many are not' );
+	}
+
+	public function test_random_structures_come_out_as_serializing_the_expected_structure(): void {
+		mt_srand( 20260924 );
+		for ( $round = 0; $round < 400; $round++ ) {
+			list( $value, $expected ) = self::random_pair( 0, 0 );
+			$result                   = self::engine()->value( serialize( $value ) );
+			$this->assertSame( serialize( $expected ), $result->value(), 'round ' . $round );
+			$this->assertTrue( 'b:0;' === $result->value() || false !== self::read( $result->value(), true ), 'round ' . $round . ' is readable' );
 		}
 	}
 
 	/**
-	 * A random nested value with addresses in it.
+	 * A random value and, built by hand without the engine or Needles, what
+	 * it must become: addresses on a boundary replaced (as written, JSON-
+	 * escaped, URL-encoded), others and keys left, nesting inside strings
+	 * within the engine's limit.
 	 *
-	 * @param int $depth Depth.
-	 * @return mixed
+	 * @param int $depth   Nesting of arrays and objects.
+	 * @param int $nesting Serializations inside strings above it.
+	 * @return array{0: mixed, 1: mixed}
 	 */
-	private static function random_value( int $depth ) {
-		$pick = mt_rand( 0, $depth > 3 ? 3 : 6 );
+	private static function random_pair( int $depth, int $nesting ): array {
+		$pick = mt_rand( 0, $depth > 3 ? 8 : 11 );
 		switch ( $pick ) {
 			case 0:
-				return mt_rand( -1000, 1000 );
+				$int = mt_rand( -1000, 1000 );
+				return array( $int, $int );
 			case 1:
-				return mt_rand( 0, 1 ) ? self::OLD . '/p' . mt_rand( 0, 9 ) : 'text ' . mt_rand( 0, 9 ) . ' ü';
+				$float = mt_rand( 0, 1 ) ? mt_rand( -100000, 100000 ) / 7 : ( mt_rand( 0, 1 ) ? INF : -0.0 );
+				return array( $float, $float );
 			case 2:
-				return mt_rand( 0, 1 ) ? 'see ' . self::OLD . '.' : self::OLD . '.au';
+				$bool = (bool) mt_rand( 0, 1 );
+				return array( $bool, $bool );
 			case 3:
-				return null;
+				return array( null, null );
 			case 4:
-				return serialize( self::random_value( $depth + 1 ) );
-			default:
-				$array = array();
-				$count = mt_rand( 0, 4 );
-				for ( $i = 0; $i < $count; $i++ ) {
-					$array[ mt_rand( 0, 1 ) ? 'k' . $i : $i ] = self::random_value( $depth + 1 );
+				$n = mt_rand( 0, 9 );
+				return array( self::OLD . '/p' . $n, self::NEW . '/p' . $n );
+			case 5:
+				return array( 'see ' . self::OLD . '. Or ü', 'see ' . self::NEW . '. Or ü' );
+			case 6:
+				return array( self::OLD . '.au and ' . self::OLD . '-x', self::OLD . '.au and ' . self::OLD . '-x' );
+			case 7:
+				$n = mt_rand( 0, 9 );
+				return array( wp_json_encode_for_test( array( 'u' => self::OLD . '/j' . $n ) ), wp_json_encode_for_test( array( 'u' => self::NEW . '/j' . $n ) ) );
+			case 8:
+				return array( 'to=' . rawurlencode( self::OLD . '/x' ), 'to=' . rawurlencode( self::NEW . '/x' ) );
+			case 9:
+				if ( $nesting >= Engine::MAX_NESTED ) {
+					return array( 'text', 'text' );
 				}
-				return $array;
+				list( $inner, $inner_expected ) = self::random_pair( $depth + 1, $nesting + 1 );
+				return array( serialize( $inner ), serialize( $inner_expected ) );
+			case 10:
+				$object   = new \stdClass();
+				$expected = new \stdClass();
+				$count    = mt_rand( 0, 3 );
+				for ( $i = 0; $i < $count; $i++ ) {
+					list( $object->{'p' . $i}, $expected->{'p' . $i} ) = self::random_pair( $depth + 1, $nesting );
+				}
+				return array( $object, $expected );
+			default:
+				$array    = array();
+				$expected = array();
+				$count    = mt_rand( 0, 4 );
+				for ( $i = 0; $i < $count; $i++ ) {
+					$key                                     = mt_rand( 0, 2 );
+					$key                                     = 0 === $key ? $i : ( 1 === $key ? 'k' . $i : self::OLD . '/k' . $i ); // A key keeps its address.
+					list( $array[ $key ], $expected[ $key ] ) = self::random_pair( $depth + 1, $nesting );
+				}
+				return array( $array, $expected );
 		}
 	}
+}
 
-	/**
-	 * What the engine should produce, computed on the structure.
-	 *
-	 * @param mixed $value Value.
-	 * @return mixed
-	 */
-	private static function expected( $value ) {
-		if ( is_array( $value ) ) {
-			return array_map( array( self::class, 'expected' ), $value );
-		}
-		if ( ! is_string( $value ) ) {
-			return $value;
-		}
-		$inner = @self::read( $value ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- most strings are not serializations.
-		if ( false !== $inner || 'b:0;' === $value ) {
-			return serialize( self::expected( $inner ) );
-		}
-		return ( new Needles( array( array( self::OLD, self::NEW ) ) ) )->replace( $value )[0];
-	}
-
-	/**
-	 * Types, keys and nesting, without the strings.
-	 *
-	 * @param mixed $value Value.
-	 * @return mixed
-	 */
-	private static function shape( $value ) {
-		if ( is_array( $value ) ) {
-			return array_map( array( self::class, 'shape' ), $value );
-		}
-		return gettype( $value );
-	}
+/**
+ * JSON as the block editor and page builders store it: slashes escaped.
+ *
+ * @param mixed $value Value.
+ * @return string
+ */
+function wp_json_encode_for_test( $value ): string {
+	return (string) json_encode( $value );
 }

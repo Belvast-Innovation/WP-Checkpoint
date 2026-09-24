@@ -47,6 +47,26 @@ final class NeedlesTest extends TestCase {
 		$this->assertSame( array( 'https://a.example/sub/x', 1 ), $growing->replace( 'https://a.example/x' ), 'the replacement contains the search: replaced once' );
 	}
 
+	public function test_percent_escapes_and_paths_respect_segments(): void {
+		$sub = Needles::for_move( 'https://old.example/sub', 'https://new.example' );
+		$this->assertSame( array( 'https://new.example/page', 1 ), $sub->replace( 'https://old.example/sub/page' ), 'the control: the segment itself' );
+		$this->assertSame( array( 'https://old.example/sub%20x', 0 ), $sub->replace( 'https://old.example/sub%20x' ), '"sub x" is another segment' );
+		$this->assertSame( array( 'https://new.example%2Fpage', 1 ), $sub->replace( 'https://old.example/sub%2Fpage' ), 'an encoded slash ends it' );
+		$path = Needles::for_move( 'https://a.example', 'https://b.example', '/var/www/old', '/srv/new' );
+		$this->assertSame( array( 'path=/srv/new/x', 1 ), $path->replace( 'path=/var/www/old/x' ), 'the control: a path on its own' );
+		$this->assertSame( array( '/home/u/var/www/old/x', 0 ), $path->replace( '/home/u/var/www/old/x' ), 'the middle of a longer path' );
+	}
+
+	public function test_nothing_is_counted_when_nothing_would_change(): void {
+		$same = Needles::for_move( 'https://a.example', 'https://b.example', '/var/www/old/', '/var/www/old' );
+		$this->assertSame( array( '/var/www/old/x', 0 ), $same->replace( '/var/www/old/x' ), 'the same directory: no pair' );
+		$root = Needles::for_move( 'https://a.example', 'https://b.example', '/', '/srv' );
+		$this->assertSame( array( '/etc/x', 0 ), $root->replace( '/etc/x' ), 'the root cannot be told apart from any path: no pair' );
+		$this->assertSame( array( 'https://b.example/', 1 ), $root->replace( 'https://a.example/' ), 'the addresses still are' );
+		$identity = new Needles( array( array( 'https://a.example', 'https://a.example' ) ) );
+		$this->assertSame( array( 'https://a.example', 0 ), $identity->replace( 'https://a.example' ) );
+	}
+
 	public function test_a_pair_that_cannot_be_written_in_every_form_is_refused(): void {
 		foreach ( array( array( 'https://old.example', 'https://new."example' ), array( 'a\\b', 'c' ), array( "a\nb", 'c' ), array( '', 'x' ) ) as $pair ) {
 			try {

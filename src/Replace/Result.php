@@ -13,8 +13,9 @@ defined( 'ABSPATH' ) || exit;
  * The new bytes, the kind of the value, and counts: replacements made,
  * damaged serializations left unchanged (WordPress cannot read them either:
  * the data was broken before, whatever it once held is already lost to the
- * plugin that wrote it), and array keys or opaque parts (C: payloads, E:
- * names, class names) that hold a search text and were left unchanged.
+ * plugin that wrote it), values too deep to read left unchanged, and array
+ * keys or opaque parts (C: payloads, E: names, class names) that hold a
+ * search text and were left unchanged.
  */
 final class Result {
 
@@ -24,6 +25,7 @@ final class Result {
 	const TEXT       = 'text';
 	const SERIALIZED = 'serialized';
 	const DAMAGED    = 'damaged';
+	const TOO_DEEP   = 'too_deep';
 
 	/**
 	 * New bytes.
@@ -42,16 +44,16 @@ final class Result {
 	/**
 	 * Counts.
 	 *
-	 * @var array{replaced: int, damaged: int, keys: int, opaque: int}
+	 * @var array{replaced: int, damaged: int, too_deep: int, keys: int, opaque: int}
 	 */
 	private $counts;
 
 	/**
 	 * Constructor.
 	 *
-	 * @param string                                                     $value  New bytes.
-	 * @param string                                                     $kind   Kind (the stored value's).
-	 * @param array{replaced: int, damaged: int, keys: int, opaque: int} $counts Counts.
+	 * @param string                                                                    $value  New bytes.
+	 * @param string                                                                    $kind   Kind (the stored value's).
+	 * @param array{replaced: int, damaged: int, too_deep: int, keys: int, opaque: int} $counts Counts.
 	 */
 	public function __construct( string $value, string $kind, array $counts ) {
 		$this->value  = $value;
@@ -69,7 +71,7 @@ final class Result {
 	}
 
 	/**
-	 * Kind of the stored value: TEXT, SERIALIZED or DAMAGED.
+	 * Kind of the stored value: TEXT, SERIALIZED, DAMAGED or TOO_DEEP.
 	 *
 	 * @return string
 	 */
@@ -93,6 +95,17 @@ final class Result {
 	 */
 	public function damaged(): int {
 		return $this->counts['damaged'];
+	}
+
+	/**
+	 * Values holding a search text left unchanged because they nest deeper
+	 * than the engine reads (Serialized::MAX_DEPTH, Engine::MAX_NESTED); not
+	 * damaged, WordPress may read them.
+	 *
+	 * @return int
+	 */
+	public function too_deep(): int {
+		return $this->counts['too_deep'];
 	}
 
 	/**

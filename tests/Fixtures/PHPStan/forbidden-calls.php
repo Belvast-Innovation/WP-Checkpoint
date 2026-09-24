@@ -19,4 +19,7 @@ function forbidden_calls(): void {
 	call_user_func( 'unserialize', 'a:0:{}' );
 	exec( 'true' );
 	call_user_func( 'shell_exec', 'true' );
+	$named = '\\unserialize';
+	session_decode( '' );
+	( new \ArrayObject() )->unserialize( 'a:0:{}' );
 }

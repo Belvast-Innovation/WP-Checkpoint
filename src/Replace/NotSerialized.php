@@ -12,5 +12,5 @@ defined( 'ABSPATH' ) || exit;
 /**
  * Internal to Serialized::rewrite(), which turns it into a null result.
  */
-final class NotSerialized extends \Exception {
+class NotSerialized extends \Exception {
 }
