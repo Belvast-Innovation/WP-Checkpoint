@@ -82,4 +82,41 @@ final class StandaloneConnectionTest extends WP_UnitTestCase {
 			$this->assertSame( false === $expected ? null : $expected, Connection::parse_host( $host ), $host );
 		}
 	}
+	public function test_an_unreachable_host_gives_up_within_the_timeout(): void {
+		$start = microtime( true );
+		try {
+			Connection::open( self::settings( array( 'host' => '10.255.255.1:3306' ) ), 2 );
+			$this->fail( 'connected to a host that does not answer' );
+		} catch ( Failure $e ) {
+			$this->assertContains( $e->reason(), array( Failure::UNREACHABLE, Failure::OTHER ) );
+		}
+		$this->assertLessThan( 6, microtime( true ) - $start, 'bounded by the connect timeout, not by PHP\'s socket timeout' );
+	}
+
+	public function test_mysqli_settings_and_error_handlers_are_left_as_they_were(): void {
+		$driver = new \mysqli_driver();
+		$before = $driver->report_mode;
+		mysqli_report( MYSQLI_REPORT_ERROR );
+		$seen = array();
+		set_error_handler( // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_set_error_handler -- observing what reaches another handler.
+			static function ( int $errno, string $message ) use ( &$seen ): bool {
+				$seen[] = $message;
+				return true;
+			}
+		);
+		try {
+			try {
+				Connection::open( self::settings( array( 'host' => 'marker-host.invalid' ) ), 2 );
+			} catch ( Failure $e ) {
+				$this->assertSame( Failure::UNREACHABLE, $e->reason() );
+			}
+			$this->assertSame( array(), $seen, 'no mysqli warning (it would name the host) reached another handler' );
+			$this->assertSame( MYSQLI_REPORT_ERROR, $driver->report_mode, 'the report mode is the caller\'s again' );
+			trigger_error( 'after', E_USER_WARNING ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_trigger_error -- the control.
+			$this->assertSame( array( 'after' ), $seen, 'the control: the caller\'s handler is active again and observes warnings' );
+		} finally {
+			restore_error_handler();
+			mysqli_report( $before );
+		}
+	}
 }

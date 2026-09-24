@@ -7,23 +7,43 @@
 
 namespace WPCheckpoint\Standalone;
 
-defined( 'ABSPATH' ) || defined( 'WPCHECKPOINT_STANDALONE' ) || exit;
+defined( 'ABSPATH' ) || exit;
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- messages are fixed text from Failure::MESSAGES, never HTML.
 // phpcs:disable WordPress.DB.RestrictedFunctions -- this runs where WordPress (and $wpdb) is not loaded; mysqli is the only way.
 
 /**
- * Connects the way wpdb does: DB_HOST split by wpdb::parse_db_host()'s
- * rules (socket, port, IPv6), no database named when connecting and the
- * database selected after, MYSQL_CLIENT_FLAGS passed on, the character set
- * set (utf8 when utf8mb4 is refused), mysqli's exceptions switched off so
- * that its messages (which name user@host) never travel. Every failure is a
- * Failure chosen by the MySQL error number.
+ * Connects the way wpdb does where it matters: DB_HOST split by
+ * wpdb::parse_db_host()'s rules (socket, port, IPv6), no database named
+ * when connecting, the character set set before the database is selected,
+ * MYSQL_CLIENT_FLAGS passed on. Differences from wpdb: a DB_HOST that cannot
+ * be split is a failure (wpdb goes on with it), utf8 is not upgraded to
+ * utf8mb4 (the checks here read ASCII identifiers), and a connection gives
+ * up after CONNECT_TIMEOUT seconds instead of PHP's socket timeout (a page
+ * waiting a minute on an unreachable host would be cut off by the web
+ * server with no reason given).
+ *
+ * Every mysqli call runs with mysqli's exceptions switched off and PHP's
+ * errors caught locally, both put back afterwards: mysqli's warnings name
+ * user@host and would otherwise reach an error handler installed by
+ * something else. Every failure is a Failure chosen by the MySQL error
+ * number.
  *
  * Read-only: whether a table or a row exists, which is how callers prove
- * the settings point to the right database before trusting them.
+ * the settings point to the right database before trusting them. Needs
+ * mysqli, not mysqlnd.
  */
 final class Connection {
+
+	/**
+	 * Seconds a connection attempt may take.
+	 */
+	const CONNECT_TIMEOUT = 10;
+
+	/**
+	 * Seconds a query may wait for an answer (mysqlnd only).
+	 */
+	const READ_TIMEOUT = 20;
 
 	/**
 	 * Connection.
@@ -54,10 +74,11 @@ final class Connection {
 	 * Connect.
 	 *
 	 * @param Credentials $credentials Settings.
+	 * @param int         $timeout     Seconds a connection attempt may take.
 	 * @return self
 	 * @throws Failure When the database cannot be used.
 	 */
-	public static function open( Credentials $credentials ): self {
+	public static function open( Credentials $credentials, int $timeout = self::CONNECT_TIMEOUT ): self {
 		if ( ! class_exists( 'mysqli' ) || ! function_exists( 'mysqli_init' ) ) {
 			throw new Failure( Failure::NO_MYSQLI );
 		}
@@ -69,23 +90,31 @@ final class Connection {
 		if ( $is_ipv6 && extension_loaded( 'mysqlnd' ) ) {
 			$host = '[' . $host . ']';
 		}
-		mysqli_report( MYSQLI_REPORT_OFF );
-		$mysqli = mysqli_init();
-		if ( ! $mysqli instanceof \mysqli ) {
-			throw new Failure( Failure::NO_MYSQLI );
-		}
-		// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a warning would print the host and user.
-		if ( ! @mysqli_real_connect( $mysqli, $host, $credentials->get( 'user' ), $credentials->get( 'password' ), '', $port, $socket, $credentials->flags() ) ) {
-			throw self::failure( mysqli_connect_errno() );
-		}
-		// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- as above, with the database name.
-		if ( ! @mysqli_select_db( $mysqli, $credentials->get( 'name' ) ) ) {
-			$errno = mysqli_errno( $mysqli );
-			mysqli_close( $mysqli );
-			throw self::failure( $errno );
-		}
-		self::charset( $mysqli, $credentials->get( 'charset' ), $credentials->get( 'collate' ) );
-		return new self( $mysqli, $credentials->get( 'prefix' ) );
+		return self::quietly(
+			static function () use ( $credentials, $host, $port, $socket, $timeout ): self {
+				$mysqli = mysqli_init();
+				if ( ! $mysqli instanceof \mysqli ) {
+					throw new Failure( Failure::NO_MYSQLI );
+				}
+				mysqli_options( $mysqli, MYSQLI_OPT_CONNECT_TIMEOUT, max( 1, $timeout ) );
+				if ( defined( 'MYSQLI_OPT_READ_TIMEOUT' ) ) {
+					mysqli_options( $mysqli, MYSQLI_OPT_READ_TIMEOUT, self::READ_TIMEOUT );
+				}
+				if ( ! mysqli_real_connect( $mysqli, $host, $credentials->get( 'user' ), $credentials->get( 'password' ), '', $port, $socket, $credentials->flags() ) ) {
+					throw self::failure( mysqli_connect_errno() );
+				}
+				try {
+					self::charset( $mysqli, $credentials->get( 'charset' ), $credentials->get( 'collate' ) );
+					if ( ! mysqli_select_db( $mysqli, $credentials->get( 'name' ) ) ) {
+						throw self::failure( mysqli_errno( $mysqli ) );
+					}
+				} catch ( Failure $e ) {
+					mysqli_close( $mysqli );
+					throw $e;
+				}
+				return new self( $mysqli, $credentials->get( 'prefix' ) );
+			}
+		);
 	}
 
 	/**
@@ -133,7 +162,7 @@ final class Connection {
 	 * @throws Failure When the database does not answer.
 	 */
 	public function table_exists( string $suffix ): bool {
-		return array() !== $this->select( 'SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? LIMIT 1', array( $this->prefix . $suffix ) );
+		return $this->any( 'SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? LIMIT 1', array( $this->prefix . $suffix ) );
 	}
 
 	/**
@@ -153,7 +182,7 @@ final class Connection {
 		if ( ! $this->table_exists( $suffix ) ) {
 			return false;
 		}
-		return array() !== $this->select( 'SELECT 1 FROM `' . $this->prefix . $suffix . '` WHERE `' . $column . '` = ? LIMIT 1', array( $value ) );
+		return $this->any( 'SELECT 1 FROM `' . $this->prefix . $suffix . '` WHERE `' . $column . '` = ? LIMIT 1', array( $value ) );
 	}
 
 	/**
@@ -162,34 +191,66 @@ final class Connection {
 	 * @return void
 	 */
 	public function close(): void {
-		mysqli_close( $this->mysqli );
+		self::quietly(
+			function (): bool {
+				return mysqli_close( $this->mysqli );
+			}
+		);
 	}
 
 	/**
-	 * Rows of a prepared query with string parameters.
+	 * Whether a prepared query with string parameters returns a row.
 	 *
 	 * @param string   $sql    SQL with ? placeholders.
 	 * @param string[] $params Values.
-	 * @return array<int, array<int, mixed>>
+	 * @return bool
 	 * @throws Failure When the database does not answer.
 	 */
-	private function select( string $sql, array $params ): array {
-		$statement = @mysqli_prepare( $this->mysqli, $sql ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- errors are reported by number only.
-		if ( false === $statement ) {
-			throw new Failure( Failure::QUERY );
+	private function any( string $sql, array $params ): bool {
+		return self::quietly(
+			function () use ( $sql, $params ): bool {
+				$statement = mysqli_prepare( $this->mysqli, $sql );
+				if ( false === $statement ) {
+					throw new Failure( Failure::QUERY );
+				}
+				try {
+					if ( array() !== $params ) {
+						mysqli_stmt_bind_param( $statement, str_repeat( 's', count( $params ) ), ...$params );
+					}
+					if ( ! mysqli_stmt_execute( $statement ) || ! mysqli_stmt_store_result( $statement ) ) {
+						throw new Failure( Failure::QUERY );
+					}
+					return mysqli_stmt_num_rows( $statement ) > 0;
+				} finally {
+					mysqli_stmt_close( $statement );
+				}
+			}
+		);
+	}
+
+	/**
+	 * Run mysqli calls with its exceptions off and PHP's errors kept here,
+	 * both as they were afterwards.
+	 *
+	 * @template T
+	 * @param callable(): T $work Work.
+	 * @return T
+	 */
+	private static function quietly( callable $work ) {
+		$driver = new \mysqli_driver();
+		$mode   = $driver->report_mode;
+		mysqli_report( MYSQLI_REPORT_OFF );
+		set_error_handler( // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_set_error_handler -- mysqli's warnings name user@host.
+			static function (): bool {
+				return true;
+			}
+		);
+		try {
+			return $work();
+		} finally {
+			restore_error_handler();
+			mysqli_report( $mode );
 		}
-		if ( array() !== $params ) {
-			$types = str_repeat( 's', count( $params ) );
-			mysqli_stmt_bind_param( $statement, $types, ...$params );
-		}
-		if ( ! @mysqli_stmt_execute( $statement ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- as above.
-			mysqli_stmt_close( $statement );
-			throw new Failure( Failure::QUERY );
-		}
-		$result = mysqli_stmt_get_result( $statement );
-		$rows   = false === $result ? array() : mysqli_fetch_all( $result, MYSQLI_NUM );
-		mysqli_stmt_close( $statement );
-		return $rows;
 	}
 
 	/**
@@ -208,14 +269,14 @@ final class Connection {
 		if ( ! self::identifier( $charset ) || ( '' !== $collate && ! self::identifier( $collate ) ) ) {
 			throw new Failure( Failure::CHARSET );
 		}
-		if ( ! @mysqli_set_charset( $mysqli, $charset ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- reported by category.
-			if ( 'utf8mb4' !== $charset || ! @mysqli_set_charset( $mysqli, 'utf8' ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- as above.
+		if ( ! mysqli_set_charset( $mysqli, $charset ) ) {
+			if ( 'utf8mb4' !== $charset || ! mysqli_set_charset( $mysqli, 'utf8' ) ) {
 				throw new Failure( Failure::CHARSET );
 			}
 			$charset = 'utf8';
 			$collate = '';
 		}
-		if ( '' !== $collate && ! @mysqli_query( $mysqli, 'SET NAMES ' . $charset . ' COLLATE ' . $collate ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.DB.RestrictedFunctions -- both names checked as identifiers above.
+		if ( '' !== $collate && ! mysqli_query( $mysqli, 'SET NAMES ' . $charset . ' COLLATE ' . $collate ) ) {
 			throw new Failure( Failure::CHARSET );
 		}
 	}
@@ -230,7 +291,7 @@ final class Connection {
 		if ( in_array( $errno, array( 2002, 2003, 2005, 2006, 2013 ), true ) ) {
 			return new Failure( Failure::UNREACHABLE );
 		}
-		if ( 1045 === $errno ) {
+		if ( in_array( $errno, array( 1045, 1698 ), true ) ) {
 			return new Failure( Failure::ACCESS_DENIED );
 		}
 		if ( in_array( $errno, array( 1044, 1049 ), true ) ) {

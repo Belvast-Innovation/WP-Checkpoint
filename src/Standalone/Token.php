@@ -7,7 +7,7 @@
 
 namespace WPCheckpoint\Standalone;
 
-defined( 'ABSPATH' ) || defined( 'WPCHECKPOINT_STANDALONE' ) || exit;
+defined( 'ABSPATH' ) || exit;
 
 /**
  * 256 random bits, written as 64 hexadecimal digits. The browser keeps the

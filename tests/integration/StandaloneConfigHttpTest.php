@@ -21,21 +21,27 @@ final class StandaloneConfigHttpTest extends WP_UnitTestCase {
 		$dir      = dirname( __DIR__ ) . '/Fixtures/Standalone/http';
 		$key      = bin2hex( random_bytes( 24 ) );
 		$base     = rtrim( $host, '/' ) . '/wp-content/plugins/wp-checkpoint/tests/Fixtures/Standalone/http/';
-		$get      = static function ( string $url ): array {
-			$response = wp_remote_get( $url, array( 'timeout' => 20 ) );
+		$get      = static function ( string $url, string $sent = '' ): array {
+			$response = wp_remote_get( $url, array( 'timeout' => 20, 'headers' => array( 'X-WPCheckpoint-Probe-Key' => $sent ) ) );
 			return is_wp_error( $response ) ? array( 0, $response->get_error_message() ) : array( (int) wp_remote_retrieve_response_code( $response ), (string) wp_remote_retrieve_body( $response ) );
 		};
 		// Without a key file, the probe refuses even the right-looking request.
-		list( $status, $body ) = $get( $base . 'config-probe.php?key=' . $key );
+		list( $status, $body ) = $get( $base . 'config-probe.php', $key );
 		$this->assertSame( 404, $status, $body );
 		$this->assertSame( '', $body );
 		file_put_contents( $dir . '/probe.key', $key );
 		try {
-			list( $status, $body ) = $get( $base . 'config-probe.php?key=wrong' . $key );
+			list( $status, $body ) = $get( $base . 'config-probe.php', 'wrong' . $key );
 			$this->assertSame( 404, $status, 'a wrong key' );
-			list( $status, $ours ) = $get( $base . 'config-probe.php?key=' . $key );
+			list( $status, $body ) = $get( $base . 'config-probe.php?key=' . $key );
+			$this->assertSame( 404, $status, 'the key in the query string (which access logs keep) does not count' );
+			touch( $dir . '/probe.key', time() - 3600 );
+			list( $status, $body ) = $get( $base . 'config-probe.php', $key );
+			$this->assertSame( 404, $status, 'a key file left behind for an hour' );
+			touch( $dir . '/probe.key' );
+			list( $status, $ours ) = $get( $base . 'config-probe.php', $key );
 			$this->assertSame( 200, $status, $ours );
-			list( $status, $theirs ) = $get( $base . 'wordpress-probe.php?key=' . $key );
+			list( $status, $theirs ) = $get( $base . 'wordpress-probe.php', $key );
 			$this->assertSame( 200, $status, $theirs );
 		} finally {
 			unlink( $dir . '/probe.key' );

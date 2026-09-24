@@ -9,8 +9,9 @@
 
 require __DIR__ . '/guard.php';
 
-define( 'WPCHECKPOINT_STANDALONE', true );
 $wpcheckpoint_plugin = dirname( __DIR__, 4 );
+ini_set( 'zend.exception_ignore_args', '1' );
+define( 'ABSPATH', $wpcheckpoint_plugin . '/src/Standalone/stub/' );
 require $wpcheckpoint_plugin . '/vendor/autoload.php';
 
 use WPCheckpoint\Standalone\ConfigLoader;

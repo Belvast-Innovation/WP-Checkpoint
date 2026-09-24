@@ -7,7 +7,7 @@
 
 namespace WPCheckpoint\Standalone;
 
-defined( 'ABSPATH' ) || defined( 'WPCHECKPOINT_STANDALONE' ) || exit;
+defined( 'ABSPATH' ) || exit;
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- messages are fixed text from Failure::MESSAGES, never HTML.
 

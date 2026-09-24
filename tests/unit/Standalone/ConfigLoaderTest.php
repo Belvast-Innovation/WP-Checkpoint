@@ -220,4 +220,77 @@ PHP;
 		$this->files( array( 'site/wp-config.php' => self::config( "define( 'DB_NAME', 'MARKER_NAME' );\ndefine( 'DB_USER', 'MARKER_USER' );\ndefine( 'DB_PASSWORD', 'MARKER_PASSWORD' );\ndefine( 'DB_HOST', 'MARKER_HOST' );\n\$table_prefix = 'MARKER_';" ) ) );
 		$this->assertSame( 'MARKER_PASSWORD', $this->load()['password'] );
 	}
+	public function test_what_wp_config_does_to_the_request_is_undone(): void {
+		$this->files( array( 'site/wp-config.php' => self::config( self::DB . "\$table_prefix = 'wp_';\nset_error_handler( function () { return true; } );\nset_exception_handler( function () {} );\nob_start();\necho 'site output';\nini_set( 'display_errors', '1' );" ) ) );
+		$data = $this->load( 'site', array( 'WPC_ISOLATION' => '1' ) );
+		$this->assertSame( 'wp_', $data['prefix'] );
+		$this->assertSame( 1, $data['after']['handler'], 'the caller\'s error handler is the one that sees the next warning' );
+		$this->assertTrue( $data['after']['level'], 'the buffer level is the caller\'s' );
+		$this->assertSame( 'caller output;', $data['after']['kept'], 'the caller\'s output is kept, the site\'s is not' );
+		$this->assertSame( '0', $data['after']['display'], 'the error display setting is back' );
+		// The same when wp-config.php removes the caller's buffer instead of adding one.
+		$this->files( array( 'site/wp-config.php' => self::config( self::DB . "\$table_prefix = 'wp_';\nob_end_clean();\nrestore_error_handler();" ) ) );
+		$data = $this->load( 'site', array( 'WPC_ISOLATION' => '1' ) );
+		$this->assertTrue( $data['after']['level'], 'a closed buffer is reopened: the level is back (its content is not)' );
+		$this->assertSame( 1, $data['after']['handler'], 'removing our handler did not let the caller\'s go' );
+	}
+
+	public function test_a_failure_trace_does_not_carry_the_password(): void {
+		$this->files( array( 'site/wp-config.php' => self::config( "define( 'DB_NAME', 'n' );\ndefine( 'DB_USER', 'u' );\ndefine( 'DB_PASSWORD', 'MARKER_PASSWORD' );\ndefine( 'DB_HOST', 'h' );\n\$table_prefix = 'bad-';" ) ) );
+		$data = $this->load();
+		$this->assertSame( 'bad_prefix', $data['failure'] );
+		$this->assertStringContainsString( 'from_values', $data['trace'], 'the trace is there' );
+		$this->assertStringNotContainsString( 'MARKER_PASSWORD', $data['trace'] );
+		$this->assertStringNotContainsString( $this->root, $data['trace'], 'nor the path of wp-config.php' );
+		// The control: in this PHP, a trace carries arguments unless told not to.
+		$plain = shell_exec( escapeshellarg( PHP_BINARY ) . ' -d zend.exception_ignore_args=0 -r ' . escapeshellarg( 'function f( array $a ) { throw new Exception(); } try { f( array( "MARKER_PASSWORD" ) ); } catch ( Exception $e ) { echo var_export( $e->getTrace(), true ); }' ) );
+		$this->assertStringContainsString( 'MARKER_PASSWORD', (string) $plain );
+	}
+
+	public function test_the_values_are_marked_sensitive_where_php_supports_it(): void {
+		if ( PHP_VERSION_ID < 80200 ) {
+			$this->markTestSkipped( '#[\SensitiveParameter] takes effect from PHP 8.2; entries switch trace arguments off on older ones.' );
+		}
+		$root   = dirname( __DIR__, 3 );
+		$script = 'define( "ABSPATH", ' . var_export( $root . '/src/Standalone/stub/', true ) . ' ); require ' . var_export( $root . '/vendor/autoload.php', true ) . ';'
+			. 'function plain( array $a ) { throw new Exception(); }'
+			. 'try { plain( array( "MARKER_PLAIN" ) ); } catch ( Exception $e ) { echo var_export( $e->getTrace(), true ); }'
+			. 'try { WPCheckpoint\Standalone\Credentials::from_values( array( "name" => "n", "user" => "u", "password" => "MARKER_PASSWORD", "host" => "h", "prefix" => "bad-" ) ); } catch ( Exception $e ) { echo var_export( $e->getTrace(), true ); }';
+		$out = (string) shell_exec( escapeshellarg( PHP_BINARY ) . ' -d zend.exception_ignore_args=0 -r ' . escapeshellarg( $script ) );
+		$this->assertStringContainsString( 'MARKER_PLAIN', $out, 'the control: arguments are in traces here' );
+		$this->assertStringContainsString( 'from_values', $out );
+		$this->assertStringNotContainsString( 'MARKER_PASSWORD', $out );
+	}
+
+	public function test_the_real_wp_settings_cannot_start_wordpress_under_the_stub(): void {
+		$marker = $this->root . '/started';
+		// The opening of WordPress's own wp-settings.php, loaded by a fixed path from a file wp-config.php includes.
+		$this->files(
+			array(
+				'real/wp-settings.php'   => "<?php\ndefine( 'WPINC', 'wp-includes' );\nrequire ABSPATH . WPINC . '/version.php';\ntouch( " . var_export( $marker, true ) . " );\n",
+				'site/wp-config.php'     => self::config( self::DB . "\$table_prefix = 'wp_';\nrequire __DIR__ . '/host-settings.php';" ),
+				'site/host-settings.php' => "<?php\nrequire_once '" . $this->root . "/real/wp-settings.php';\n",
+			)
+		);
+		$data = $this->load();
+		$this->assertContains( $data['failure'] ?? '', array( 'config_error', 'config_stopped' ), 'an Error on PHP 8, a fatal error that ends the request on PHP 7.4' );
+		$this->assertFileDoesNotExist( $marker, 'WordPress went no further than its first require' );
+	}
+
+	public function test_the_scan_accepts_what_wordpress_accepts(): void {
+		$this->files( array( 'site/wp-config.php' => "<?php\n" . self::DB . "\$table_prefix = 'slash_';\nrequire_once ABSPATH . '/wp-settings.php';\n" ) );
+		$this->assertSame( 'slash_', $this->load()['prefix'] ?? '', 'a slash before the file name' );
+		$this->files( array( 'site/wp-config.php' => "<?php\n" . self::DB . "\$table_prefix = 'tag_';\nrequire_once( ABSPATH . \"wp-settings.php\" ) ?>\n" ) );
+		$this->assertSame( 'tag_', $this->load()['prefix'] ?? '', 'a closing tag instead of a semicolon' );
+	}
+
+	public function test_a_prefix_set_two_ways_is_not_guessed(): void {
+		$this->files( array( 'site/wp-config.php' => self::config( self::DB . "\$table_prefix = 'local_';\n\$GLOBALS['table_prefix'] = 'global_';" ) ) );
+		$this->assertSame( 'bad_prefix', $this->load()['failure'] ?? '' );
+	}
+
+	public function test_the_fixture_runner_refuses_the_web(): void {
+		$code = (string) file_get_contents( dirname( __DIR__, 2 ) . '/Fixtures/Standalone/load-config.php' );
+		$this->assertMatchesRegularExpression( '/\*\/\s*\n\s*\'cli\' === PHP_SAPI \|\| exit;/', $code, 'its first statement' );
+	}
 }

@@ -7,7 +7,7 @@
 
 namespace WPCheckpoint\Standalone;
 
-defined( 'ABSPATH' ) || defined( 'WPCHECKPOINT_STANDALONE' ) || exit;
+defined( 'ABSPATH' ) || exit;
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- messages are fixed text from Failure::MESSAGES, never HTML.
 
@@ -17,7 +17,10 @@ defined( 'ABSPATH' ) || defined( 'WPCHECKPOINT_STANDALONE' ) || exit;
  * person running a restore when wp-config.php cannot be read on its own.
  * The values live in a private static store keyed by the object, not on the
  * object: var_dump(), print_r(), var_export(), json_encode() and an (array)
- * cast show none of them, and the object cannot be serialized.
+ * cast show none of them, and the object cannot be serialized. The array
+ * given to from_values() is marked #[\SensitiveParameter] (PHP 8.2+), and
+ * entries that run without WordPress switch off exception arguments
+ * (zend.exception_ignore_args), so a trace does not carry the password.
  */
 final class Credentials {
 
@@ -44,7 +47,10 @@ final class Credentials {
 	 * @return self
 	 * @throws Failure When a required value is missing or the prefix is not one WordPress allows.
 	 */
-	public static function from_values( array $values ): self {
+	public static function from_values(
+		#[\SensitiveParameter]
+		array $values
+	): self {
 		foreach ( array(
 			'name'     => 'DB_NAME',
 			'user'     => 'DB_USER',
@@ -115,7 +121,7 @@ final class Credentials {
 	 * @return string
 	 */
 	public function get( string $key ): string {
-		$values = self::$store[ spl_object_id( $this ) ];
+		$values = self::$store[ spl_object_id( $this ) ] ?? array();
 		return isset( $values[ $key ] ) && is_string( $values[ $key ] ) ? $values[ $key ] : '';
 	}
 
@@ -125,7 +131,7 @@ final class Credentials {
 	 * @return int
 	 */
 	public function flags(): int {
-		return self::$store[ spl_object_id( $this ) ]['flags'];
+		return self::$store[ spl_object_id( $this ) ]['flags'] ?? 0;
 	}
 
 	/**
