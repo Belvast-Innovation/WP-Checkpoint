@@ -327,8 +327,12 @@
 
 	// While a tick runs, the job's progress is saved at every checkpoint: a read-only GET shows it. Only when the
 	// browser drives (no chain polls then), never overlapping, and not while the page is hidden.
+	// A read answered after its tick ended is dropped (the tick's own answer is newer), also when the next tick has
+	// already started: each watch has its own number.
 	Driver.prototype.watch = function () {
 		var self = this;
+		var round = ( this.round || 0 ) + 1;
+		this.round = round;
 		window.clearInterval( this.watcher );
 		this.watcher = window.setInterval( function () {
 			if ( self.reading || document.hidden ) {
@@ -337,7 +341,7 @@
 			self.reading = true;
 			request( 'GET', self.id, function ( status, data ) {
 				self.reading = false;
-				if ( status === 200 && data && data.job && self.watcher ) {
+				if ( status === 200 && data && data.job && self.watcher && self.round === round ) {
 					render( self.root, data.job );
 				}
 			} );
@@ -347,6 +351,7 @@
 	Driver.prototype.unwatch = function () {
 		window.clearInterval( this.watcher );
 		this.watcher = null;
+		this.round = ( this.round || 0 ) + 1;
 	};
 
 	Driver.prototype.tick = function () {

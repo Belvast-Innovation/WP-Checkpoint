@@ -25,7 +25,18 @@ final class JobPresenterTextTest extends TestCase {
 		$this->assertSame( 'The file preflight.json of this job is missing.', JobPresenter::error_detail( 'Step "review": RuntimeException: The file preflight.json of this job is missing.' ) );
 		$this->assertSame( 'A chunk file could not be written.', JobPresenter::error_detail( 'Step "pack" failed 6 times: TransientFailure: A chunk file could not be written.' ) );
 		$this->assertSame( 'No progress for 24 hours; the job was given up.', JobPresenter::error_detail( 'No progress for 24 hours; the job was given up.' ), 'other texts are left as they are' );
-		$this->assertSame( 'x', JobPresenter::error_detail( 'Step "a": WPCheckpoint\\Jobs\\Oops: x' ), 'a namespaced class' );
+		$this->assertSame( 'Boom.', JobPresenter::error_detail( 'Step "a": WPCheckpoint\\Jobs\\Oops: Boom.' ), 'a namespaced class' );
+		$this->assertSame( 'Boom.', JobPresenter::error_detail( 'Step "a": Http2Error: Boom.' ), 'a class with digits' );
+		$this->assertSame( 'Could not make progress within the budget (3 attempts).', JobPresenter::error_detail( 'Step "pack" could not make progress within the budget (3 attempts).' ) );
+	}
+
+	public function test_the_detail_is_empty_when_the_pattern_fails(): void {
+		// The control: the same frame on valid text is taken off.
+		$this->assertSame( 'Kept.', JobPresenter::strip_frame( 'Step "a": RuntimeException: Kept.' ) );
+		// Invalid UTF-8 makes the pattern fail: nothing is shown, not the text with its frame.
+		$this->assertSame( '', JobPresenter::strip_frame( "Step \"a\": RuntimeException: Kept.\xC3\x28" ) );
+		// error_detail() scrubs first, so such text still has its detail.
+		$this->assertStringStartsWith( 'Kept.', JobPresenter::error_detail( "Step \"a\": RuntimeException: Kept.\xC3\x28" ) );
 	}
 
 	public function test_a_job_waiting_for_an_answer_needs_a_decision_it_is_not_paused(): void {
@@ -45,7 +56,8 @@ final class JobPresenterTextTest extends TestCase {
 		$this->assertStringContainsString( 'retrying would fail the same way. Create a new backup.', JobPresenter::failure_text( self::job( Job::FAILED, Job::FAILURE_FINAL ) ) );
 		$this->assertTrue( self::job( Job::FAILED, Job::FAILURE_TEMPORARY )->retry_useful() );
 		$this->assertFalse( self::job( Job::FAILED, Job::FAILURE_FINAL )->retry_useful() );
-		$this->assertTrue( self::job( Job::FAILED )->retry_useful(), 'failed before kinds were recorded: offered as before' );
+		$this->assertTrue( self::job( Job::FAILED )->retry_useful(), 'no kind (any other cause, or failed before kinds were recorded): offered' );
+		$this->assertSame( 'The backup could not be finished. Retry goes on where it stopped; if it fails the same way again, create a new backup.', JobPresenter::failure_text( self::job( Job::FAILED ) ) );
 		$expired                  = self::job( Job::FAILED, Job::FAILURE_TEMPORARY );
 		$expired->work_expired_at = 1;
 		$this->assertFalse( $expired->retry_useful() );

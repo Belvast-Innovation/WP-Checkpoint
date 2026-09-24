@@ -181,8 +181,10 @@ final class JobPresenter {
 
 	/**
 	 * What a failure means for the person looking at it, and what to do:
-	 * retry when the cause may pass, start over when retrying would fail the
-	 * same way. The technical detail (step, exception) stays in the log.
+	 * retry when the cause may pass, start over when retrying cannot succeed
+	 * (Job::FAILURE_FINAL), and otherwise retry once and start over if it
+	 * fails the same way. The technical detail (step, exception) stays in
+	 * the log.
 	 *
 	 * @param Job $job Failed job.
 	 * @return string
@@ -204,7 +206,9 @@ final class JobPresenter {
 				? __( 'The check could not be finished, and retrying would fail the same way. Start a new check.', 'wp-checkpoint' )
 				: __( 'The backup could not be finished, and retrying would fail the same way. Create a new backup.', 'wp-checkpoint' );
 		}
-		return $verify ? __( 'The check could not be finished.', 'wp-checkpoint' ) : __( 'The backup could not be finished.', 'wp-checkpoint' );
+		return $verify
+			? __( 'The check could not be finished. Retry goes on where it stopped; if it fails the same way again, start a new check.', 'wp-checkpoint' )
+			: __( 'The backup could not be finished. Retry goes on where it stopped; if it fails the same way again, create a new backup.', 'wp-checkpoint' );
 	}
 
 	/**
@@ -237,15 +241,26 @@ final class JobPresenter {
 
 	/**
 	 * The failure without the runner's frame: the step id and the exception
-	 * class (Runner's "Step "x": Class: …" and "Step "x" failed N times:
-	 * Class: …") belong in the log, not on the screen.
+	 * class (Runner's "Step "x": Class: …", "Step "x" failed N times:
+	 * Class: …" and "Step "x" could not make progress …") belong in the
+	 * log, not on the screen. Nothing when the pattern fails (fail-closed).
 	 *
 	 * @param string $error last_error.
 	 * @return string
 	 */
 	public static function error_detail( string $error ): string {
-		$detail = preg_replace( '/\AStep "[^"]*"(?: failed \d+ times)?: (?:[A-Za-z_\\\\]+: )?/', '', $error );
-		return is_string( $detail ) ? $detail : '';
+		return self::strip_frame( Utf8::scrub( $error ) );
+	}
+
+	/**
+	 * The frame taken off text already scrubbed; '' when the pattern fails.
+	 *
+	 * @param string $text Valid UTF-8.
+	 * @return string
+	 */
+	public static function strip_frame( string $text ): string {
+		$detail = preg_replace( '/\AStep "[^"]*"(?:(?: failed \d+ times)?: (?:[A-Za-z0-9_\\\\]+: )?| (?=could not ))/u', '', $text );
+		return is_string( $detail ) ? ucfirst( $detail ) : '';
 	}
 
 	/**
