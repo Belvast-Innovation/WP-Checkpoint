@@ -932,7 +932,8 @@ final class JobRepository {
 				continue;
 			}
 			try {
-				$this->force_transition( $job, Job::FAILED, __( 'The storage directory changed; the job cannot continue.', 'wp-checkpoint' ), Job::FAILURE_FINAL );
+				// No kind: the change can be undone (the setting reverted), and the work files are intact.
+				$this->force_transition( $job, Job::FAILED, __( 'The storage directory changed; the job cannot continue.', 'wp-checkpoint' ) );
 				++$failed;
 			} catch ( StaleJob $e ) {
 				continue;
@@ -1513,6 +1514,8 @@ final class JobRepository {
 				$job->$key = $value;
 			}
 		}
+		// The object answers like a row read back: the kind, not the stamped column value.
+		$job->failure_kind = Job::read_failure_kind( (string) $job->failure_kind, (int) $job->finished_at );
 		if ( in_array( $to, array( Job::COMPLETED, Job::FAILED, Job::CANCELLED ), true ) ) {
 			$this->remove_lock_file( $job );
 		}

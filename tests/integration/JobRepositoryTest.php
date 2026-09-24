@@ -430,6 +430,7 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		$failed = $repo->find( $old->id );
 		$this->assertSame( Job::FAILED, $failed->status );
 		$this->assertStringContainsString( 'storage directory changed', $failed->last_error );
+		$this->assertSame( '', $failed->failure_kind, 'the change can be undone and the work files are intact: Retry stays offered' );
 		$this->assertFileExists( LockFile::path( $this->base, $old->id ), 'files in another directory are never touched' );
 		$this->assertStringContainsString( 'Job ' . $old->id . ' is bound to another storage directory', (string) file_get_contents( $next->base() . '/logs/storage.log' ) );
 	}
@@ -877,6 +878,15 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		$this->assertSame( '', $old->failure_kind );
 		$this->assertTrue( $old->retry_useful() );
 	}
+
+	public function test_the_job_a_failing_transition_returns_reads_its_kind_like_a_row(): void {
+		$job    = $this->repo->create( 'export' );
+		$failed = $this->repo->transition( $job, Job::FAILED, 'The index is missing.', '', Job::FAILURE_FINAL );
+		$this->assertSame( Job::FAILURE_FINAL, $failed->failure_kind, 'the kind, not the stamped column value' );
+		$this->assertFalse( $failed->retry_useful(), 'the tick that fails a job answers as a reload would' );
+		$this->assertSame( $failed->failure_kind, $this->repo->find( $job->id )->failure_kind );
+	}
+
 	public function test_a_kind_left_by_a_downgrade_does_not_hide_retry_later(): void {
 		global $wpdb;
 		$table = Schema::jobs_table();

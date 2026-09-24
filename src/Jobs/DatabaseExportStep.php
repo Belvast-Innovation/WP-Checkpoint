@@ -497,7 +497,10 @@ final class DatabaseExportStep implements Step {
 	}
 
 	/**
-	 * Write (or append) a small file in the work directory.
+	 * Write (or append) a small file in the work directory. A replacement
+	 * goes through a temporary file and one rename, so a reader (another run
+	 * reading the table list while a run that outlived its lease writes it
+	 * again) sees the old content or the new, never a part.
 	 *
 	 * @param string $path   Path.
 	 * @param string $text   Text.
@@ -506,8 +509,9 @@ final class DatabaseExportStep implements Step {
 	 * @throws TransientFailure When the write fails.
 	 */
 	private function put( string $path, string $text, bool $append = false ): void {
-		$written = @file_put_contents( $path, $text, $append ? FILE_APPEND | LOCK_EX : LOCK_EX ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- small file in the job's own work directory; failure is thrown.
-		if ( false === $written || strlen( $text ) !== $written ) {
+		$target  = $append ? $path : $path . '.tmp';
+		$written = @file_put_contents( $target, $text, $append ? FILE_APPEND | LOCK_EX : LOCK_EX ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- small file in the job's own work directory; failure is thrown.
+		if ( false === $written || strlen( $text ) !== $written || ( ! $append && ! @rename( $target, $path ) ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.rename_rename -- a warning would put the path into the error log; failure is thrown.
 			throw new TransientFailure( 'A file in the work directory could not be written.' );
 		}
 	}

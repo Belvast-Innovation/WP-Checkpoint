@@ -438,7 +438,7 @@ final class ExportPipelineTest extends JobTestCase {
 		$this->assertSame( filesize( $big ), 41 * 65536 + 4 + 3000 );
 	}
 
-	public function test_a_volume_shorter_than_its_committed_length_fails_the_job_and_keeps_the_work_for_a_retry(): void {
+	public function test_a_volume_shorter_than_its_committed_length_fails_the_job_for_good_and_keeps_its_work(): void {
 		$this->register_export( 'export-c' );
 		$job    = $this->repo->create( 'export-c', 0, array(), $this->options() );
 		$cut    = false;
@@ -459,6 +459,8 @@ final class ExportPipelineTest extends JobTestCase {
 		$this->assertStringContainsString( 'shorter than its recorded committed length', $stored->last_error );
 		$this->assertStringNotContainsString( $this->dirs->base(), $stored->last_error );
 		$this->assertTrue( $stored->can_retry() );
+		$this->assertSame( Job::FAILURE_FINAL, $stored->failure_kind, 'a retry resumes from the same short volume' );
+		$this->assertFalse( $stored->retry_useful() );
 		$this->assertDirectoryExists( $this->work( $stored ), 'a failed job keeps its work directory' );
 		$this->assertSame( array(), array_diff( scandir( $this->dirs->backups() ) ?: array(), array( '.', '..', 'index.php', '.htaccess' ) ), 'nothing reached backups/' );
 	}

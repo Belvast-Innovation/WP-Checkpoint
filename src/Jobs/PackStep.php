@@ -296,9 +296,9 @@ final class PackStep implements Step {
 			$data   = IndexLine::database( $line['text'], $this->chunk_bytes );
 			$source = $work . DIRECTORY_SEPARATOR . DatabaseExportStep::DIR . DIRECTORY_SEPARATOR . basename( $data['p'] );
 			clearstatcache( true, $source );
-			$size = is_file( $source ) ? @filesize( $source ) : -1; // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- reported below.
+			$size = is_file( $source ) ? @filesize( $source ) : ( WorkLost::absent( $source ) ? -1 : false ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- reported below.
 			if ( false === $size ) {
-				throw new \RuntimeException( sprintf( 'The size of database chunk %s could not be read.', $data['p'] ) );
+				throw new \RuntimeException( sprintf( 'Database chunk %s could not be looked at.', $data['p'] ) );
 			}
 			if ( $size !== $data['b'] ) {
 				throw new WorkLost( sprintf( 'Database chunk %s is missing or not %d bytes; the work directory was lost or changed.', $data['p'], $data['b'] ) );
