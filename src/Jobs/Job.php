@@ -27,6 +27,12 @@ final class Job {
 	const CANCELLED = 'cancelled';
 
 	/**
+	 * Kinds of failure (failure_kind).
+	 */
+	const FAILURE_TEMPORARY = 'temporary';
+	const FAILURE_FINAL     = 'final';
+
+	/**
 	 * Whether the job is paused because a step asked for a decision. Such
 	 * a job is not ticked until JobRepository::answer() stored the answers;
 	 * a paused job without questions is resumed by the next tick.
@@ -35,6 +41,36 @@ final class Job {
 	 */
 	public function awaiting_answer(): bool {
 		return self::PAUSED === $this->status && array() !== $this->questions;
+	}
+
+	/**
+	 * Whether retrying is worth offering: the job failed, its work files are
+	 * still there, and the failure is not known to repeat (FAILURE_FINAL).
+	 *
+	 * @return bool
+	 */
+	public function retry_useful(): bool {
+		return self::FAILED === $this->status && $this->can_retry() && self::FAILURE_FINAL !== $this->failure_kind;
+	}
+
+	/**
+	 * The kind of failure as stored ("kind:finished_at"), or '' unless it is
+	 * a known kind stamped with this failure's time. Anything else counts as
+	 * no kind, which offers Retry: an unknown value, and a kind left from an
+	 * earlier failure by code that does not know the column (it retries and
+	 * fails the job again without clearing it, and moves finished_at). The
+	 * worst a wrong reading can do is offer Retry once too often.
+	 *
+	 * @param string $stored      failure_kind column.
+	 * @param int    $finished_at finished_at column.
+	 * @return string FAILURE_TEMPORARY, FAILURE_FINAL or ''.
+	 */
+	public static function read_failure_kind( string $stored, int $finished_at ): string {
+		$parts = explode( ':', $stored );
+		if ( 2 !== count( $parts ) || ! in_array( $parts[0], array( self::FAILURE_TEMPORARY, self::FAILURE_FINAL ), true ) ) {
+			return '';
+		}
+		return ctype_digit( $parts[1] ) && $finished_at > 0 && (int) $parts[1] === $finished_at ? $parts[0] : '';
 	}
 
 	/**
@@ -175,6 +211,19 @@ final class Job {
 	 * @var string
 	 */
 	public $last_error = '';
+
+	/**
+	 * What kind of failure ended the job: FAILURE_TEMPORARY (a problem of the
+	 * moment outlasted the runner's retries: a disk full, the database away),
+	 * FAILURE_FINAL (the job's work files were lost or damaged (WorkLost), or
+	 * its question went unanswered: a retry cannot succeed), or '' (any other
+	 * cause, the storage directory changing included, a failure recorded before
+	 * kinds existed, a kind that does not belong to this failure, or not
+	 * failed). Read from the row through read_failure_kind().
+	 *
+	 * @var string
+	 */
+	public $failure_kind = '';
 
 	/**
 	 * When a failed job's work files were reclaimed after their retention

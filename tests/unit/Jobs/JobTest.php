@@ -86,4 +86,23 @@ final class JobTest extends TestCase {
 			$this->assertFalse( $job->can_retry(), $status );
 		}
 	}
+	public function test_a_failure_kind_counts_only_for_the_failure_it_was_stamped_with(): void {
+		$this->assertSame( Job::FAILURE_FINAL, Job::read_failure_kind( 'final:1790000000', 1790000000 ) );
+		$this->assertSame( Job::FAILURE_TEMPORARY, Job::read_failure_kind( 'temporary:1790000000', 1790000000 ) );
+		$this->assertSame( '', Job::read_failure_kind( 'final:1790000000', 1790000099 ), 'left from an earlier failure: failed again by code that does not know the column' );
+		$this->assertSame( '', Job::read_failure_kind( 'final:1790000000', 0 ), 'retried by such code' );
+		$this->assertSame( '', Job::read_failure_kind( 'final', 1790000000 ), 'not stamped' );
+		$this->assertSame( '', Job::read_failure_kind( 'fatal:1790000000', 1790000000 ), 'a kind this code does not know' );
+		$this->assertSame( '', Job::read_failure_kind( 'final:17x', 17 ) );
+		$this->assertSame( '', Job::read_failure_kind( '', 1790000000 ) );
+	}
+
+	public function test_retry_is_hidden_only_for_a_final_failure(): void {
+		$job         = new Job();
+		$job->status = Job::FAILED;
+		foreach ( array( '' => true, Job::FAILURE_TEMPORARY => true, 'something-newer' => true, Job::FAILURE_FINAL => false ) as $kind => $offered ) {
+			$job->failure_kind = (string) $kind;
+			$this->assertSame( $offered, $job->retry_useful(), 'kind "' . $kind . '"' );
+		}
+	}
 }

@@ -287,12 +287,17 @@ final class DatabaseExportStep implements Step {
 	 * @param string $work Work directory.
 	 * @return array{tables: string[], exclude_oversize: string[]}
 	 * @throws \RuntimeException When the list is gone.
+	 * @throws WorkLost When the work directory was lost, changed or damaged.
 	 */
 	private function frozen( string $work ): array {
-		$json = @file_get_contents( $work . DIRECTORY_SEPARATOR . self::TABLES ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- small file in the job's own work directory.
-		$data = is_string( $json ) ? json_decode( $json, true ) : null;
+		$path = $work . DIRECTORY_SEPARATOR . self::TABLES;
+		$json = @file_get_contents( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- small file in the job's own work directory.
+		if ( ! is_string( $json ) ) {
+			throw WorkLost::or_unreadable( $path, 'The frozen table list is missing; the work directory was lost or changed.', 'The frozen table list could not be read.' );
+		}
+		$data = json_decode( $json, true );
 		if ( ! is_array( $data ) || ! isset( $data['tables'] ) || ! is_array( $data['tables'] ) ) {
-			throw new \RuntimeException( 'The frozen table list is missing; the work directory was lost or changed.' );
+			throw new WorkLost( 'The frozen table list is not what the job wrote; the work directory was changed or damaged.' );
 		}
 		return array(
 			'tables'           => array_map( 'strval', $data['tables'] ),
@@ -492,7 +497,10 @@ final class DatabaseExportStep implements Step {
 	}
 
 	/**
-	 * Write (or append) a small file in the work directory.
+	 * Write (or append) a small file in the work directory. A replacement
+	 * goes through a temporary file and one rename, so a reader (another run
+	 * reading the table list while a run that outlived its lease writes it
+	 * again) sees the old content or the new, never a part.
 	 *
 	 * @param string $path   Path.
 	 * @param string $text   Text.
@@ -501,8 +509,9 @@ final class DatabaseExportStep implements Step {
 	 * @throws TransientFailure When the write fails.
 	 */
 	private function put( string $path, string $text, bool $append = false ): void {
-		$written = @file_put_contents( $path, $text, $append ? FILE_APPEND | LOCK_EX : LOCK_EX ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- small file in the job's own work directory; failure is thrown.
-		if ( false === $written || strlen( $text ) !== $written ) {
+		$target  = $append ? $path : $path . '.tmp';
+		$written = @file_put_contents( $target, $text, $append ? FILE_APPEND | LOCK_EX : LOCK_EX ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- small file in the job's own work directory; failure is thrown.
+		if ( false === $written || strlen( $text ) !== $written || ( ! $append && ! @rename( $target, $path ) ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.rename_rename -- a warning would put the path into the error log; failure is thrown.
 			throw new TransientFailure( 'A file in the work directory could not be written.' );
 		}
 	}

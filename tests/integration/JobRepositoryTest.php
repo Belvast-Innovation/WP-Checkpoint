@@ -430,6 +430,7 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		$failed = $repo->find( $old->id );
 		$this->assertSame( Job::FAILED, $failed->status );
 		$this->assertStringContainsString( 'storage directory changed', $failed->last_error );
+		$this->assertSame( '', $failed->failure_kind, 'the change can be undone and the work files are intact: Retry stays offered' );
 		$this->assertFileExists( LockFile::path( $this->base, $old->id ), 'files in another directory are never touched' );
 		$this->assertStringContainsString( 'Job ' . $old->id . ' is bound to another storage directory', (string) file_get_contents( $next->base() . '/logs/storage.log' ) );
 	}
@@ -844,7 +845,7 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		Options::set( Schema::OPTION, array( 'version' => 3, 'min_compatible' => 1 ) );
 		$result = Schema::ensure();
 		$this->assertSame( 'migrated', $result['action'] );
-		$this->assertSame( 4, $result['version'] );
+		$this->assertSame( Schema::CURRENT, $result['version'] );
 		$this->assertSame( 1, $result['min_compatible'], 'older code ignores both columns' );
 		$columns = $wpdb->get_col( "SHOW COLUMNS FROM {$table}" );
 		$this->assertContains( 'takeovers', $columns );
@@ -858,5 +859,49 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		$old = $this->repo->find( (int) $wpdb->insert_id );
 		$this->assertSame( 0, $old->takeovers );
 		$this->assertSame( '', $old->takeover_mark );
+	}
+
+	public function test_schema_version_five_adds_the_failure_kind_and_older_code_keeps_working(): void {
+		global $wpdb;
+		$table = Schema::jobs_table();
+		$wpdb->query( "ALTER TABLE {$table} DROP COLUMN failure_kind" );
+		Options::set( Schema::OPTION, array( 'version' => 4, 'min_compatible' => 1 ) );
+		$result = Schema::ensure();
+		$this->assertSame( 'migrated', $result['action'] );
+		$this->assertSame( 5, $result['version'] );
+		$this->assertSame( 1, $result['min_compatible'], 'older code ignores the column' );
+		$this->assertContains( 'failure_kind', $wpdb->get_col( "SHOW COLUMNS FROM {$table}" ) );
+		// A row failed by code of version 4 has no kind: retrying it is offered, as it was.
+		$wpdb->query( $wpdb->prepare( "INSERT INTO {$table} (type, status, cursor_json, last_error, created_at, finished_at) VALUES (%s, %s, %s, %s, %d, %d)", 'export', Job::FAILED, '[]', 'boom', 1, 2 ) );
+		$this->assertSame( '', $wpdb->last_error );
+		$old = $this->repo->find( (int) $wpdb->insert_id );
+		$this->assertSame( '', $old->failure_kind );
+		$this->assertTrue( $old->retry_useful() );
+	}
+
+	public function test_the_job_a_failing_transition_returns_reads_its_kind_like_a_row(): void {
+		$job    = $this->repo->create( 'export' );
+		$failed = $this->repo->transition( $job, Job::FAILED, 'The index is missing.', '', Job::FAILURE_FINAL );
+		$this->assertSame( Job::FAILURE_FINAL, $failed->failure_kind, 'the kind, not the stamped column value' );
+		$this->assertFalse( $failed->retry_useful(), 'the tick that fails a job answers as a reload would' );
+		$this->assertSame( $failed->failure_kind, $this->repo->find( $job->id )->failure_kind );
+	}
+
+	public function test_a_kind_left_by_a_downgrade_does_not_hide_retry_later(): void {
+		global $wpdb;
+		$table = Schema::jobs_table();
+		$job   = $this->repo->create( 'export' );
+		$job   = $this->repo->transition( $job, Job::FAILED, 'The index is missing.', '', Job::FAILURE_FINAL );
+		// The control: as written, the kind is read and Retry is hidden.
+		$this->assertSame( Job::FAILURE_FINAL, $this->repo->find( $job->id )->failure_kind );
+		$this->assertFalse( $this->repo->find( $job->id )->retry_useful() );
+		// Code of version 4 retries it and it fails again: neither write touches the column, finished_at moves.
+		$wpdb->update( $table, array( 'status' => Job::QUEUED, 'finished_at' => 0 ), array( 'id' => $job->id ) );
+		$this->assertSame( '', $this->repo->find( $job->id )->failure_kind, 'retried' );
+		$wpdb->update( $table, array( 'status' => Job::FAILED, 'finished_at' => $job->finished_at + 30, 'last_error' => 'Step "database": RuntimeException: disk quota' ), array( 'id' => $job->id ) );
+		$this->assertStringStartsWith( 'final:', (string) $wpdb->get_var( $wpdb->prepare( "SELECT failure_kind FROM {$table} WHERE id = %d", $job->id ) ), 'the old kind is still in the row' );
+		$again = $this->repo->find( $job->id );
+		$this->assertSame( '', $again->failure_kind, 'it does not speak for the new failure' );
+		$this->assertTrue( $again->retry_useful(), 'the worst case is a Retry offered once too often, never a dead end' );
 	}
 }

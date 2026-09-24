@@ -7,6 +7,8 @@
 
 namespace WPCheckpoint\Archive;
 
+use WPCheckpoint\Jobs\WorkLost;
+
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- messages carry line numbers, table names and counts; the runner stores them through the redactor.
 
 /**
@@ -302,15 +304,16 @@ final class IndexAudit {
 	 * @param int    $offset  Byte offset.
 	 * @return resource
 	 * @throws \RuntimeException When the file is missing or cannot be positioned.
+	 * @throws WorkLost When the work directory was lost, changed or damaged.
 	 */
 	private static function open( string $path, string $missing, int $offset ) {
 		$handle = @fopen( $path, 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- the job's own index; a missing file is thrown below.
 		if ( false === $handle ) {
-			throw new \RuntimeException( $missing );
+			throw WorkLost::or_unreadable( $path, $missing, 'An index is there but could not be opened.' );
 		}
 		if ( 0 !== fseek( $handle, $offset ) ) {
 			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- see above.
-			throw new \RuntimeException( 'An index could not be positioned; the work directory was changed.' );
+			throw new \RuntimeException( 'An index could not be positioned.' );
 		}
 		return $handle;
 	}

@@ -893,11 +893,12 @@ final class JobRepository {
 	 * @param string $to    Target status.
 	 * @param string $error Error message for failed (redacted before storing).
 	 * @param string $token Lock token; required when leaving running for anything but cancelled.
+	 * @param string $failure Kind of failure for a failed job (Job::FAILURE_*, or '' when the cause does not say).
 	 * @return Job
 	 * @throws InvalidTransition When the state machine forbids the move or the token is missing.
 	 * @throws StaleJob When the row no longer has the expected status (or the lock changed hands).
 	 */
-	public function transition( Job $job, string $to, string $error = '', string $token = '' ): Job {
+	public function transition( Job $job, string $to, string $error = '', string $token = '', string $failure = '' ): Job {
 		if ( '' === $token && Job::RUNNING === $job->status && Job::CANCELLED !== $to ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
 			throw new InvalidTransition( sprintf( 'Job %d: leaving running for %s requires the lock token.', $job->id, $to ) );
@@ -906,7 +907,7 @@ final class JobRepository {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
 			throw new InvalidTransition( sprintf( 'Job %d: its work files passed their retention period and were reclaimed; it cannot be retried.', $job->id ) );
 		}
-		return $this->write_transition( $job, $to, $error, $token );
+		return $this->write_transition( $job, $to, $error, $token, array(), array(), $failure );
 	}
 
 	/**
@@ -931,6 +932,7 @@ final class JobRepository {
 				continue;
 			}
 			try {
+				// No kind: the change can be undone (the setting reverted), and the work files are intact.
 				$this->force_transition( $job, Job::FAILED, __( 'The storage directory changed; the job cannot continue.', 'wp-checkpoint' ) );
 				++$failed;
 			} catch ( StaleJob $e ) {
@@ -987,6 +989,7 @@ final class JobRepository {
 				? __( 'Queued for 24 hours without starting; the job was given up.', 'wp-checkpoint' )
 				: __( 'No progress for 24 hours; the job was given up.', 'wp-checkpoint' );
 			try {
+				// Nothing drove it (no visits, no cron): not a problem of the server; the message says what happened.
 				$this->force_transition( $job, Job::FAILED, $message );
 			} catch ( StaleJob $e ) {
 				continue;
@@ -1000,7 +1003,7 @@ final class JobRepository {
 				continue;
 			}
 			try {
-				$this->force_transition( $job, Job::FAILED, __( 'No answer within 7 days; the job was given up.', 'wp-checkpoint' ) );
+				$this->force_transition( $job, Job::FAILED, __( 'No answer within 7 days; the job was given up.', 'wp-checkpoint' ), Job::FAILURE_FINAL );
 			} catch ( StaleJob $e ) {
 				continue;
 			}
@@ -1421,10 +1424,11 @@ final class JobRepository {
 	 * @param Job    $job   Job.
 	 * @param string $to    Target status.
 	 * @param string $error Error message for failed.
+	 * @param string $failure Kind of failure for a failed job (Job::FAILURE_*).
 	 * @return Job
 	 */
-	private function force_transition( Job $job, string $to, string $error ): Job {
-		return $this->write_transition( $job, $to, $error, '' );
+	private function force_transition( Job $job, string $to, string $error, string $failure = '' ): Job {
+		return $this->write_transition( $job, $to, $error, '', array(), array(), $failure );
 	}
 
 	/**
@@ -1437,10 +1441,11 @@ final class JobRepository {
 	 * @param array<string, mixed> $extra         Columns to set in the same statement (a state change that spans
 	 *                                            several fields is one write, never two).
 	 * @param string[]             $extra_formats Their formats.
+	 * @param string               $failure Kind of failure for a failed job (Job::FAILURE_*, or '').
 	 * @return Job
 	 * @throws StaleJob When the guarded UPDATE changed no row.
 	 */
-	private function write_transition( Job $job, string $to, string $error, string $token, array $extra = array(), array $extra_formats = array() ): Job {
+	private function write_transition( Job $job, string $to, string $error, string $token, array $extra = array(), array $extra_formats = array(), string $failure = '' ): Job {
 		global $wpdb;
 		$from = $job->status;
 		$copy = clone $job;
@@ -1461,8 +1466,12 @@ final class JobRepository {
 		}
 		if ( Job::FAILED === $to ) {
 			$data['last_error'] = $this->redactor->redact( $error );
+			// Stamped with the failure it belongs to (Job::read_failure_kind()): code that does not know the column
+			// retries and fails the job again without touching it, and the old kind must not speak for the new failure.
+			$data['failure_kind'] = in_array( $failure, array( Job::FAILURE_TEMPORARY, Job::FAILURE_FINAL ), true ) ? $failure . ':' . $now : '';
 		}
 		if ( Job::QUEUED === $to ) {
+			$data['failure_kind']  = '';
 			$data['finished_at']   = 0;
 			$data['takeovers']     = 0; // A retry starts its count over.
 			$data['takeover_mark'] = '';
@@ -1505,6 +1514,8 @@ final class JobRepository {
 				$job->$key = $value;
 			}
 		}
+		// The object answers like a row read back: the kind, not the stamped column value.
+		$job->failure_kind = Job::read_failure_kind( (string) $job->failure_kind, (int) $job->finished_at );
 		if ( in_array( $to, array( Job::COMPLETED, Job::FAILED, Job::CANCELLED ), true ) ) {
 			$this->remove_lock_file( $job );
 		}
@@ -1642,6 +1653,7 @@ final class JobRepository {
 				$job->$key = (string) $value;
 			}
 		}
+		$job->failure_kind = Job::read_failure_kind( $job->failure_kind, $job->finished_at );
 		return $job;
 	}
 }

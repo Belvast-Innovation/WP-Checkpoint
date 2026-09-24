@@ -283,6 +283,7 @@ final class PackStep implements Step {
 	 * @param array<string, mixed>             $cursor     Cursor (updated).
 	 * @return int Bytes handled.
 	 * @throws \RuntimeException When a database chunk is missing or does not hash to its index line.
+	 * @throws WorkLost When the work directory was lost, changed or damaged.
 	 */
 	private function unit( JobContext $context, string $work, array $active, array $roots, Exclusions $exclusions, Packer $packer, array &$cursor ): int {
 		if ( 'database' === $cursor['phase'] ) {
@@ -295,8 +296,12 @@ final class PackStep implements Step {
 			$data   = IndexLine::database( $line['text'], $this->chunk_bytes );
 			$source = $work . DIRECTORY_SEPARATOR . DatabaseExportStep::DIR . DIRECTORY_SEPARATOR . basename( $data['p'] );
 			clearstatcache( true, $source );
-			if ( ! is_file( $source ) || (int) filesize( $source ) !== $data['b'] ) {
-				throw new \RuntimeException( sprintf( 'Database chunk %s is missing or not %d bytes; the work directory was lost or changed.', $data['p'], $data['b'] ) );
+			$size = is_file( $source ) ? @filesize( $source ) : ( WorkLost::absent( $source ) ? -1 : false ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- reported below.
+			if ( false === $size ) {
+				throw new \RuntimeException( sprintf( 'Database chunk %s could not be looked at.', $data['p'] ) );
+			}
+			if ( $size !== $data['b'] ) {
+				throw new WorkLost( sprintf( 'Database chunk %s is missing or not %d bytes; the work directory was lost or changed.', $data['p'], $data['b'] ) );
 			}
 			if ( $this->make_room( $context, $packer, $cursor, $data['b'] ) ) {
 				return 0;
@@ -312,7 +317,7 @@ final class PackStep implements Step {
 				continue;
 			}
 			if ( hash_final( $hash ) !== $data['h'] ) {
-				throw new \RuntimeException( sprintf( 'Database chunk %s does not hash to what its index line records; the work directory was lost or changed.', $data['p'] ) );
+				throw new WorkLost( sprintf( 'Database chunk %s does not hash to what its index line records; the work directory was lost or changed.', $data['p'] ) );
 			}
 			$cursor['offset'] = $line['next'];
 			++$cursor['entries'];
@@ -699,6 +704,7 @@ final class PackStep implements Step {
 	 * @return void
 	 * @throws TransientFailure When the file cannot be opened or cut.
 	 * @throws \RuntimeException When the file is shorter than recorded.
+	 * @throws WorkLost When the work directory was lost, changed or damaged.
 	 */
 	private static function cut( string $path, int $length ): void {
 		$handle = @fopen( $path, 'c+b' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- see above.
@@ -709,7 +715,7 @@ final class PackStep implements Step {
 			$stat = fstat( $handle );
 			$size = is_array( $stat ) ? (int) $stat['size'] : 0;
 			if ( $size < $length ) {
-				throw new \RuntimeException( sprintf( 'The work file %s is shorter than its recorded committed length; the work directory was changed or damaged.', basename( $path ) ) );
+				throw new WorkLost( sprintf( 'The work file %s is shorter than its recorded committed length; the work directory was changed or damaged.', basename( $path ) ) );
 			}
 			if ( $size > $length && ! ftruncate( $handle, $length ) ) {
 				throw new TransientFailure( 'A work file could not be cut back.' );
@@ -726,6 +732,7 @@ final class PackStep implements Step {
 	 * @param int    $length Committed length.
 	 * @return string[]
 	 * @throws \RuntimeException When the file is missing or malformed.
+	 * @throws WorkLost When the work directory was lost, changed or damaged.
 	 */
 	private static function read_chunks( string $path, int $length ): array {
 		if ( 0 === $length ) {
@@ -733,7 +740,7 @@ final class PackStep implements Step {
 		}
 		$handle = @fopen( $path, 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- see above.
 		if ( false === $handle ) {
-			throw new \RuntimeException( 'The chunk hashes of the file in progress are missing; the work directory was lost or changed.' );
+			throw WorkLost::or_unreadable( $path, 'The chunk hashes of the file in progress are missing; the work directory was lost or changed.', 'The chunk hashes of the file in progress could not be opened.' );
 		}
 		$hashes = array();
 		try {
@@ -743,7 +750,7 @@ final class PackStep implements Step {
 				$read += strlen( $line );
 				$data  = json_decode( rtrim( $line, "\n" ), true );
 				if ( ! is_array( $data ) || ! isset( $data['i'], $data['h'] ) || count( $hashes ) !== (int) $data['i'] || ! is_string( $data['h'] ) || 1 !== preg_match( '/\A[0-9a-f]{64}\z/', $data['h'] ) ) {
-					throw new \RuntimeException( 'The chunk hashes of the file in progress are malformed; the work directory was changed or damaged.' );
+					throw new WorkLost( 'The chunk hashes of the file in progress are malformed; the work directory was changed or damaged.' );
 				}
 				$hashes[] = $data['h'];
 				$line     = fgets( $handle );
@@ -761,15 +768,16 @@ final class PackStep implements Step {
 	 * @param int    $offset Offset.
 	 * @return array{text: string, next: int}|null Null at the end.
 	 * @throws \RuntimeException When the index cannot be read.
+	 * @throws WorkLost When the work directory was lost, changed or damaged.
 	 */
 	private static function line_at( string $path, int $offset ) {
 		$handle = @fopen( $path, 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- see above.
 		if ( false === $handle ) {
-			throw new \RuntimeException( sprintf( 'The index %s is missing; the work directory was lost or changed.', basename( $path ) ) );
+			throw WorkLost::or_unreadable( $path, sprintf( 'The index %s is missing; the work directory was lost or changed.', basename( $path ) ), sprintf( 'The index %s could not be opened.', basename( $path ) ) );
 		}
 		try {
 			if ( 0 !== fseek( $handle, $offset ) ) {
-				throw new \RuntimeException( 'An index could not be positioned; the work directory was changed.' );
+				throw new \RuntimeException( 'An index could not be positioned.' );
 			}
 			$line = fgets( $handle, IndexLine::MAX_LINE_BYTES + 2 );
 			while ( is_string( $line ) && '' === trim( $line ) ) {
