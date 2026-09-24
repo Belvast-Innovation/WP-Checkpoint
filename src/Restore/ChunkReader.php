@@ -45,9 +45,10 @@ defined( 'ABSPATH' ) || exit;
  * or a subquery among the values, a comment inside a statement) is refused
  * before it runs, with the table, chunk and byte offset. Whatever the
  * reader decides, the executor runs each through mysqli_query(), which
- * sends the text as one statement (ImportSession), so a statement the
- * server reads differently from this grammar fails as a syntax error
- * rather than running something else.
+ * sends the text as one statement (ImportSession): whatever the server
+ * makes of it, it is one statement, never a second one. What the reader
+ * and the server could read differently inside a statement (the character
+ * sets below) is refused.
  *
  * The preamble comes before every other statement of a chunk; a reader
  * opened past the chunk's start refuses it (the importer runs a chunk's

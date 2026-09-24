@@ -28,9 +28,11 @@ defined( 'ABSPATH' ) || exit;
  * list: the plugin has no single list of what it stores, and every name it
  * writes starts with one of these), and puts this plugin in the temporary
  * table's list of active plugins. It is a delete and an insert, so running
- * it again gives the same result. guard() checks that list right before
- * the swap and runs the swap only when this plugin is in it; the swap unit
- * calls carry(), then guard() with the RENAME, and nothing in between.
+ * it again gives the same result. guard() checks that list and runs the
+ * swap it is given only when this plugin is in it, right after the check.
+ * There is no swap yet: the swap unit (a later part of T042) is to call
+ * carry(), then guard() with the RENAME, and nothing in between. Today the
+ * import uses readable() only.
  *
  * Not carried: the user-level dismissed notices (the users table is
  * replaced and dismissals start over), the plugin's cron events inside the

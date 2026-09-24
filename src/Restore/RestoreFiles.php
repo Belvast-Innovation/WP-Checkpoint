@@ -20,8 +20,6 @@ defined( 'ABSPATH' ) || exit;
  * - INDEX: database.index.jsonl extracted from the last volume.
  * - DEFINITIONS: what each planned table's CREATE TABLE defines (one JSON
  *   line per table, appended by the preflight under a committed length).
- * - CONSTRAINTS: the names given to the imported tables' constraints and
- *   the names they are meant to end with (one JSON line per table).
  * - HEADS, CHUNKS: directories the preflight and the import extract chunks
  *   into, one at a time.
  */
@@ -31,7 +29,6 @@ final class RestoreFiles {
 	const PLAN        = 'restore-plan.json';
 	const INDEX       = 'restore-database.index.jsonl';
 	const DEFINITIONS = 'restore-definitions.jsonl';
-	const CONSTRAINTS = 'restore-constraints.jsonl';
 	const HEADS       = 'restore-heads';
 	const CHUNKS      = 'restore-chunks';
 

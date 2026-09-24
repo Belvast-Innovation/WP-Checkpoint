@@ -227,6 +227,69 @@ final class RestoreImportTest extends RestoreTestCase {
 	}
 
 	/**
+	 * A table without transactions is started over after a statement of its second chunk ran unrecorded;
+	 * a run that dies right after the start-over was recorded, while its position is still on the second
+	 * chunk, is followed by one that goes back to the first chunk all the same and finishes the table row
+	 * for row.
+	 */
+	public function test_a_run_killed_after_starting_a_table_over_is_followed_by_one_that_finishes_it(): void {
+		$base  = $this->backup( array_merge( self::site_tables(), $this->tables() ) );
+		$isam  = $this->p . 'isam';
+		$seen  = array();
+		$type  = 'restore_crash_restart';
+		$this->register_crashing(
+			$type,
+			static function ( string $point, string $table = '', int $chunk = 0 ) use ( $isam, &$seen ): void {
+				if ( $table !== $isam || ( 'statement' === $point && 2 !== $chunk ) ) {
+					return;
+				}
+				$seen[ $point ] = ( $seen[ $point ] ?? 0 ) + 1;
+				// The first INSERT of the table's second chunk (after its three preamble statements), run and not recorded;
+				// then the start-over it causes, while the position is still on the second chunk.
+				if ( ( 'statement' === $point && 4 === $seen[ $point ] ) || ( 'restart' === $point && 1 === $seen[ $point ] ) ) {
+					throw new \RuntimeException( 'simulated: the run is killed here (' . $point . ')' );
+				}
+			}
+		);
+		$job = $this->run_restore( Plugin::instance()->jobs()->create( $type, self::$admin_id, array(), array( 'base' => $base ) ) );
+		$this->assertStringContainsString( '(statement)', (string) $job->last_error );
+		Plugin::instance()->job_actions()->retry( $job->id );
+		$job = $this->run_restore( $job );
+		$this->assertStringContainsString( '(restart)', (string) $job->last_error, 'the retry started the table over and was killed right after' );
+		Plugin::instance()->job_actions()->retry( $job->id );
+		$job = $this->run_restore( $job );
+		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
+		$names = $this->temporary_names( $job );
+		foreach ( $this->tables() as $table ) {
+			$this->assertSame( $this->backed_up[ $table ], $this->rows_of( $names[ $table ] ), $table );
+		}
+	}
+
+	/**
+	 * The preflight reads the head of a later chunk; a deflated entry has no addressable ranges and is read
+	 * whole, whatever the head size (the packer deflates entries of up to 4 MiB; a head is 1 MiB).
+	 */
+	public function test_the_heads_of_deflated_chunks_larger_than_a_head_are_read(): void {
+		$base = $this->backup( array_merge( self::site_tables(), $this->tables() ) );
+		$real = Plugin::instance()->job_types()->get( 'restore' )->steps();
+		$this->register(
+			'restore_small_heads',
+			array(
+				$real[0],
+				new \WPCheckpoint\Jobs\RestorePreflightStep(
+					static function (): string {
+						return Plugin::instance()->directories()->backups();
+					},
+					4096
+				),
+				$real[2],
+			)
+		);
+		$job = $this->run_restore( Plugin::instance()->jobs()->create( 'restore_small_heads', self::$admin_id, array(), array( 'base' => $base ) ) );
+		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
+	}
+
+	/**
 	 * A job type with the restore's steps and a crash seam in the import.
 	 */
 	private function register_crashing( string $id, callable $crash ): void {

@@ -218,32 +218,53 @@ final class RestoreStateCarryTest extends RestoreTestCase {
 		}
 	}
 
-	public function test_a_run_that_lost_its_lease_cannot_move_the_ledger_and_its_rows_roll_back(): void {
+	/**
+	 * A run claims a table before it works on it; once a newer run has claimed it, the older run can record
+	 * nothing: not its CREATE TABLE, not a batch (whose rows roll back with it), not a restart.
+	 */
+	public function test_a_run_that_lost_its_claim_can_record_nothing_and_its_rows_roll_back(): void {
 		global $wpdb;
 		$this->db = ImportSession::open( Credentials::from_wordpress() );
 		$wpdb->query( 'COMMIT' );
-		$ledger_name = 'wcptmpabcdef_9_0000_';
+		$ledger_name     = 'wcptmpabcdef_9_0000_';
 		$this->created[] = $ledger_name;
 		$this->create( $wpdb->base_prefix . 'wpcr_rows', '(`id` int PRIMARY KEY) ENGINE=InnoDB' );
-		$ledger = new Ledger( $this->db, $ledger_name );
-		$ledger->created( 0, 100, true );
 		$other = ImportSession::open( Credentials::from_wordpress() );
 		try {
-			// The new holder moves the position on.
-			$other->begin();
-			( new Ledger( $other, $ledger_name ) )->advance( 0, 1, 100, 1, 200, 0 );
-			$other->commit();
-			// The old run's batch and its record from the position it read before.
+			$old = new Ledger( $this->db, $ledger_name, 'aaaa' );
+			$new = new Ledger( $other, $ledger_name, 'bbbb' );
+
+			// Table 0: the old run claims it and creates it; then the new run claims it.
+			$this->assertSame( 0, $old->claim( 0 )['chunk'] );
+			$old->created( 0, 100, true, '[]' );
+			$this->assertSame( 'bbbb', $new->claim( 0 )['holder'] );
 			$this->db->begin();
 			$this->db->run( 'INSERT INTO `' . $wpdb->base_prefix . 'wpcr_rows` VALUES (1)' );
 			try {
-				$ledger->advance( 0, 1, 100, 1, 150, 1 );
-				$this->fail( 'the outdated run stops' );
+				$old->advance( 0, 1, 100, 1, 150, 1 );
+				$this->fail( 'the old run stops' );
 			} catch ( LockLost $e ) {
 				$this->db->rollback();
 			}
 			$this->assertSame( '0', $this->db->rows( 'SELECT COUNT(*) FROM `' . $wpdb->base_prefix . 'wpcr_rows`' )[0][0], 'its rows are gone with the batch' );
-			$this->assertSame( 200, $ledger->get( 0 )['pos'], 'the new holder\'s position stands' );
+			$new->advance( 0, 1, 100, 1, 200, 0 );
+			$this->assertSame( 200, $new->get( 0 )['pos'], 'the control: the new holder records' );
+
+			// Table 1: claimed by the old run, not yet created, then claimed by the new one: the old CREATE is not recorded.
+			$old->claim( 1 );
+			$new->claim( 1 );
+			try {
+				$old->created( 1, 100, true, '[]' );
+				$this->fail( 'the old run stops' );
+			} catch ( LockLost $e ) {
+				$this->assertSame( 0, $new->get( 1 )['chunk'], 'still not created' );
+			}
+			try {
+				$old->restart( 0, 1, 200 );
+				$this->fail( 'the old run stops' );
+			} catch ( LockLost $e ) {
+				$this->assertSame( 200, $new->get( 0 )['pos'] );
+			}
 		} finally {
 			$other->close();
 		}

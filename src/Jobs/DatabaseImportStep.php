@@ -19,6 +19,7 @@ use WPCheckpoint\Restore\Ledger;
 use WPCheckpoint\Restore\Refused;
 use WPCheckpoint\Restore\RestoreFiles;
 use WPCheckpoint\Restore\StateCarry;
+use WPCheckpoint\Restore\StatementFailed;
 use WPCheckpoint\Restore\Statement;
 use WPCheckpoint\Restore\TablePlan;
 use WPCheckpoint\Standalone\Credentials;
@@ -72,6 +73,11 @@ final class DatabaseImportStep implements Step {
 	const MARGIN = 1.5;
 
 	/**
+	 * Times a table without transactions may be imported again from its first chunk before the job fails.
+	 */
+	const MAX_RESTARTS = 3;
+
+	/**
 	 * Engines with transactions (lowercase), as information_schema names them.
 	 */
 	const TRANSACTIONAL = array( 'innodb', 'tokudb', 'rocksdb' );
@@ -84,9 +90,9 @@ final class DatabaseImportStep implements Step {
 	private $connect;
 
 	/**
-	 * Test seam: function( string $point ): void, called at "statement" (a statement ran, its record not
-	 * yet) and "commit" (a record committed, the cursor not yet checkpointed); a test throws there to
-	 * stand for a run killed at that point.
+	 * Test seam: function( string $point, string $table, int $chunk ): void, called at "statement" (a statement ran, its record not
+	 * yet), "commit" (a record committed, the cursor not yet checkpointed) and "restart" (a table started
+	 * over, the cursor not yet moved back); a test throws there to stand for a run killed at that point.
 	 *
 	 * @var callable|null
 	 */
@@ -149,7 +155,8 @@ final class DatabaseImportStep implements Step {
 		$slowest  = 0.0;
 		$first    = true;
 		try {
-			$ledger = new Ledger( $db, TempTables::ledger( $context->job()->storage_token, $context->job()->id, $plan['random'] ) );
+			// Each tick is a run of its own: it claims each table it works on, and a run that claimed after it wins.
+			$ledger = new Ledger( $db, TempTables::ledger( $context->job()->storage_token, $context->job()->id, $plan['random'] ), bin2hex( random_bytes( 16 ) ) );
 			while ( true ) {
 				if ( null === $cursor['current'] ) {
 					$chunk = $walk->at( $cursor['walk'] );
@@ -160,6 +167,9 @@ final class DatabaseImportStep implements Step {
 					$table = $plan['plan']->find( $chunk['line']['t'] );
 					if ( null === $table ) {
 						$cursor['walk'] = $chunk['next']; // Left out of the restore.
+						if ( $context->should_stop() ) {
+							return StepResult::progress( $cursor, $this->percent( $cursor, $plan['plan'] ), __( 'Importing the database', 'wp-checkpoint' ) );
+						}
 						continue;
 					}
 					if ( 1 === $chunk['line']['c'] ) {
@@ -211,6 +221,7 @@ final class DatabaseImportStep implements Step {
 				}
 				@unlink( $file ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- the next chunk's extraction overwrites leftovers; the engine removes the directory.
 				if ( (int) $cursor['current']['c'] === $table['chunks'] ) {
+					$db->names( $site_set ); // Read the stored values in the site's own character set, not the chunk's.
 					$this->table_done( $db, $ledger, $table, (int) ( $rows_of[ $table['table'] ] ?? -1 ), $plan );
 				}
 				$cursor['current'] = null;
@@ -247,25 +258,37 @@ final class DatabaseImportStep implements Step {
 	 */
 	private function import_chunk( JobContext $context, ImportSession $db, Ledger $ledger, ImportTarget $target, string $file, int $chunk, array &$counted, float &$slowest, bool &$first, array &$cursor, TablePlan $plan, string $session_charset ): string {
 		$number = $target->number;
-		$state  = $ledger->get( $number );
-		if ( null === $state ) {
+		$state  = $ledger->claim( $number );
+		if ( 0 === $state['chunk'] ) {
 			if ( 1 !== $chunk ) {
 				throw new WorkLost( sprintf( 'The restore\'s ledger has no record of the table %s, whose chunk %d is next.', $target->table, $chunk ) );
 			}
-			$pos = 0;
+			$state = null; // Claimed, not created yet: the chunk runs from its start, DROP and CREATE TABLE included.
+			$pos   = 0;
 		} elseif ( $state['chunk'] === $chunk ) {
 			$pos = $state['pos'];
-		} elseif ( $state['chunk'] < $chunk ) {
+		} elseif ( $state['chunk'] === $chunk - 1 && ! self::at_start( $state ) ) {
 			$pos = 0;
+		} elseif ( ! $state['transactional'] && self::at_start( $state ) && $chunk > 1 ) {
+			// The table was started over (restart()) and the run died before the position went back to its first chunk.
+			return 'restart';
 		} else {
-			throw new WorkLost( sprintf( 'The restore\'s ledger is further on in the table %s than its position.', $target->table ) );
+			throw new WorkLost( sprintf( 'The restore\'s ledger and its position disagree about the table %s.', $target->table ) );
 		}
 		if ( null !== $state && ! $state['transactional'] && empty( $counted[ $number ] ) ) {
 			$count = $db->rows( 'SELECT COUNT(*) FROM ' . SqlWriter::identifier( $target->temporary ) );
 			if ( (int) ( $count[0][0] ?? -1 ) !== $state['rows'] ) {
+				if ( $state['restarts'] >= self::MAX_RESTARTS ) {
+					throw new \RuntimeException( sprintf( 'The table %1$s was imported again from its first chunk %2$d times and its row count still does not match what was inserted; its engine does not keep the rows it is given.', $target->table, $state['restarts'] ) );
+				}
 				// A statement ran and was not recorded: its rows cannot be told from the others. Empty the table, keep its definition.
-				$db->run( 'TRUNCATE TABLE ' . SqlWriter::identifier( $target->temporary ) );
+				try {
+					$db->run( 'TRUNCATE TABLE ' . SqlWriter::identifier( $target->temporary ) );
+				} catch ( StatementFailed $e ) {
+					throw new \RuntimeException( sprintf( 'The table %1$s must be emptied to be imported again after an interrupted run, and its engine does not allow that (%2$s). Start the restore again.', $target->table, $e->getMessage() ) );
+				}
 				$ledger->restart( $number, $state['chunk'], $state['pos'] );
+				$this->crash( 'restart', $target->table, $chunk );
 				$context->logger()->warning( 'A table without transactions is imported again from its first chunk: a run stopped between a statement and its record', array( 'table' => $target->table ) );
 				$counted[ $number ] = true;
 				return 'restart';
@@ -276,7 +299,7 @@ final class DatabaseImportStep implements Step {
 		$charset = $session_charset;
 		if ( $pos > 0 ) {
 			// The session's settings (the character set of the chunk's text) come from the preamble at the head.
-			$head = new ChunkReader( $file, 0, $target, $chunk );
+			$head = new ChunkReader( $file, 0, $target, $chunk, ChunkReader::READ_BYTES, false, $session_charset );
 			try {
 				for ( $statement = $head->next(); null !== $statement && Statement::SET === $statement->kind; $statement = $head->next() ) {
 					$this->run_set( $db, $statement );
@@ -315,12 +338,12 @@ final class DatabaseImportStep implements Step {
 					$db->run( $statement->sql );
 					if ( Statement::CREATE === $statement->kind ) {
 						$engine = $db->rows( 'SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?', array( $target->temporary ) );
-						$ledger->created( $number, $statement->end, in_array( strtolower( (string) ( $engine[0][0] ?? '' ) ), self::TRANSACTIONAL, true ) );
-						$this->crash( 'commit' );
+						$this->warn_shortened( $context, $target, $statement );
+						$ledger->created( $number, $statement->end, in_array( strtolower( (string) ( $engine[0][0] ?? '' ) ), self::TRANSACTIONAL, true ), self::constraints_json( $statement ) );
+						$this->crash( 'commit', $target->table, $chunk );
 						$state    = $ledger->get( $number );
 						$at_chunk = 1;
 						$at_pos   = $statement->end;
-						$this->record_constraints( $context, $target, $statement );
 					}
 				} else {
 					if ( null === $state ) {
@@ -338,7 +361,7 @@ final class DatabaseImportStep implements Step {
 					// A recorded position is never inside the preamble: a resumed chunk runs the preamble from its head.
 					$end = $statement->end;
 				}
-				$this->crash( 'statement' );
+				$this->crash( 'statement', $target->table, $chunk );
 				$cost    = $context->elapsed() - $started;
 				$first   = false;
 				$slowest = max( $slowest, $cost );
@@ -426,12 +449,14 @@ final class DatabaseImportStep implements Step {
 	/**
 	 * The test seam.
 	 *
-	 * @param string $point "statement" or "commit".
+	 * @param string $point "statement", "commit" or "restart".
+	 * @param string $table The table's name in the backup ('' where the caller does not know it).
+	 * @param int    $chunk The chunk (0 where the caller does not know it).
 	 * @return void
 	 */
-	private function crash( string $point ): void {
+	private function crash( string $point, string $table = '', int $chunk = 0 ): void {
 		if ( null !== $this->crash ) {
-			call_user_func( $this->crash, $point );
+			call_user_func( $this->crash, $point, $table, $chunk );
 		}
 	}
 
@@ -525,18 +550,14 @@ final class DatabaseImportStep implements Step {
 	}
 
 	/**
-	 * Note the names the table's constraints got (for the cleanup after the swap) and warn about shortened ones.
+	 * Warn about the constraints whose names had to be shortened (the name no longer holds the original whole).
 	 *
 	 * @param JobContext   $context   Context.
 	 * @param ImportTarget $target    The table.
 	 * @param Statement    $statement Its CREATE TABLE.
 	 * @return void
-	 * @throws TransientFailure When the note cannot be written.
 	 */
-	private function record_constraints( JobContext $context, ImportTarget $target, Statement $statement ): void {
-		if ( array() === $statement->constraints ) {
-			return;
-		}
+	private function warn_shortened( JobContext $context, ImportTarget $target, Statement $statement ): void {
 		foreach ( $statement->constraints as $constraint ) {
 			if ( $constraint['shortened'] ) {
 				$context->logger()->warning(
@@ -548,17 +569,31 @@ final class DatabaseImportStep implements Step {
 				);
 			}
 		}
-		$line = json_encode( // phpcs:ignore WordPress.WP.AlternativeFunctions.json_encode_json_encode -- read back; a failure is thrown.
-			array(
-				'n'           => $target->number,
-				'temporary'   => $target->temporary,
-				'constraints' => $statement->constraints,
-			),
-			JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
-		);
-		if ( ! is_string( $line ) || false === @file_put_contents( RestoreFiles::path( $context->work_path(), RestoreFiles::CONSTRAINTS ), $line . "\n", FILE_APPEND ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a warning would put the path into the error log.
-			throw new TransientFailure( 'A work file of the restore could not be written.' );
+	}
+
+	/**
+	 * The names a table's constraints were given and are meant to end with, as the ledger keeps them (for the cleanup after the swap).
+	 *
+	 * @param Statement $statement Its CREATE TABLE.
+	 * @return string
+	 * @throws \RuntimeException When they cannot be encoded (names that are not UTF-8).
+	 */
+	private static function constraints_json( Statement $statement ): string {
+		$json = json_encode( $statement->constraints, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE ); // phpcs:ignore WordPress.WP.AlternativeFunctions.json_encode_json_encode -- read back; a failure is thrown.
+		if ( ! is_string( $json ) ) {
+			throw new \RuntimeException( 'The constraint names of a table cannot be recorded (names that are not UTF-8).' );
 		}
+		return $json;
+	}
+
+	/**
+	 * Whether a record is at the start of the table's rows (nothing inserted yet).
+	 *
+	 * @param array{chunk: int, pos: int, rows: int, data_offset: int} $state Record.
+	 * @return bool
+	 */
+	private static function at_start( array $state ): bool {
+		return 1 === $state['chunk'] && $state['pos'] === $state['data_offset'] && 0 === $state['rows'];
 	}
 
 	/**
