@@ -371,6 +371,7 @@ final class ManifestStep implements Step {
 	 * @param array<string, mixed> $cursor  Cursor (updated).
 	 * @return StepResult|null Progress when the budget is spent, null when the phase is done.
 	 * @throws \RuntimeException When an index cannot be read.
+	 * @throws WorkLost When the work directory was lost, changed or damaged.
 	 */
 	private function hash_indexes( JobContext $context, string $work, array &$cursor ) {
 		$sources = array(
@@ -382,7 +383,7 @@ final class ManifestStep implements Step {
 				clearstatcache( true, $path );
 				$size = @filesize( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- reported below.
 				if ( ! is_int( $size ) ) {
-					throw new \RuntimeException( sprintf( 'The index %s is missing; the work directory was lost or changed.', basename( $path ) ) );
+					throw new WorkLost( sprintf( 'The index %s is missing; the work directory was lost or changed.', basename( $path ) ) );
 				}
 				$cursor['indexes'][ $which ] = array(
 					'bytes'  => $size,

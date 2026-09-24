@@ -893,7 +893,7 @@ final class JobRepository {
 	 * @param string $to    Target status.
 	 * @param string $error Error message for failed (redacted before storing).
 	 * @param string $token Lock token; required when leaving running for anything but cancelled.
-	 * @param string $failure Kind of failure for a failed job (Job::FAILURE_*; final when not given).
+	 * @param string $failure Kind of failure for a failed job (Job::FAILURE_*, or '' when the cause does not say).
 	 * @return Job
 	 * @throws InvalidTransition When the state machine forbids the move or the token is missing.
 	 * @throws StaleJob When the row no longer has the expected status (or the lock changed hands).
@@ -988,8 +988,8 @@ final class JobRepository {
 				? __( 'Queued for 24 hours without starting; the job was given up.', 'wp-checkpoint' )
 				: __( 'No progress for 24 hours; the job was given up.', 'wp-checkpoint' );
 			try {
-				// Nothing drove it (no visits, no cron): a retry continues where it stopped.
-				$this->force_transition( $job, Job::FAILED, $message, Job::FAILURE_TEMPORARY );
+				// Nothing drove it (no visits, no cron): not a problem of the server; the message says what happened.
+				$this->force_transition( $job, Job::FAILED, $message );
 			} catch ( StaleJob $e ) {
 				continue;
 			}
@@ -1440,7 +1440,7 @@ final class JobRepository {
 	 * @param array<string, mixed> $extra         Columns to set in the same statement (a state change that spans
 	 *                                            several fields is one write, never two).
 	 * @param string[]             $extra_formats Their formats.
-	 * @param string               $failure Kind of failure for a failed job (Job::FAILURE_*; final when not given).
+	 * @param string               $failure Kind of failure for a failed job (Job::FAILURE_*, or '').
 	 * @return Job
 	 * @throws StaleJob When the guarded UPDATE changed no row.
 	 */
@@ -1465,7 +1465,7 @@ final class JobRepository {
 		}
 		if ( Job::FAILED === $to ) {
 			$data['last_error']   = $this->redactor->redact( $error );
-			$data['failure_kind'] = in_array( $failure, array( Job::FAILURE_TEMPORARY, Job::FAILURE_FINAL ), true ) ? $failure : Job::FAILURE_FINAL;
+			$data['failure_kind'] = in_array( $failure, array( Job::FAILURE_TEMPORARY, Job::FAILURE_FINAL ), true ) ? $failure : '';
 		}
 		if ( Job::QUEUED === $to ) {
 			$data['failure_kind']  = '';

@@ -12,6 +12,7 @@ use WPCheckpoint\Jobs\LockFile;
 use WPCheckpoint\Jobs\Runner;
 use WPCheckpoint\Jobs\StepResult;
 use WPCheckpoint\Jobs\TickResult;
+use WPCheckpoint\Jobs\WorkLost;
 use WPCheckpoint\Jobs\TransientFailure;
 use WPCheckpoint\Support\Deleter;
 use WPCheckpoint\Support\Directories;
@@ -245,6 +246,20 @@ final class RunnerTest extends WP_UnitTestCase {
 		$this->assertSame( '', $this->repo->find( $job->id )->failure_kind, 'a retry clears it' );
 	}
 
+	public function test_lost_work_files_fail_the_job_for_good(): void {
+		$this->register( 'lost', array(
+			new ClosureStep( 'only', static function (): StepResult {
+				throw new WorkLost( 'The index is missing; the work directory was lost or changed.' );
+			} ),
+		) );
+		$job = $this->repo->create( 'lost' );
+		$this->assertSame( TickResult::FAILED, $this->runner()->tick( $job->id )->status );
+		$stored = $this->repo->find( $job->id );
+		$this->assertSame( Job::FAILURE_FINAL, $stored->failure_kind, 'a retry resumes from the same lost files' );
+		$this->assertFalse( $stored->retry_useful() );
+		$this->assertTrue( $stored->can_retry(), 'still accepted by the engine; the screen only stops offering it' );
+	}
+
 	public function test_other_exceptions_fail_the_job_with_a_masked_message_and_cleanup_runs(): void {
 		$cleaned = array();
 		$this->register( 'broken', array(
@@ -274,8 +289,8 @@ final class RunnerTest extends WP_UnitTestCase {
 		$this->assertStringContainsString( 'Step "second": RuntimeException: cannot write {abspath}/wp-content/x', $stored->last_error );
 		$this->assertStringNotContainsString( rtrim( ABSPATH, '/' ), $stored->last_error );
 		$this->assertStringNotContainsString( DB_PASSWORD, $stored->last_error );
-		$this->assertSame( Job::FAILURE_FINAL, $stored->failure_kind, 'anything else would fail the same way again' );
-		$this->assertFalse( $stored->retry_useful() );
+		$this->assertSame( '', $stored->failure_kind, 'the cause does not say whether it repeats: a retry is offered' );
+		$this->assertTrue( $stored->retry_useful() );
 		$this->assertStringNotContainsString( DB_PASSWORD, $result->message );
 		$this->assertFileDoesNotExist( LockFile::path( $this->base, $job->id ) );
 
@@ -406,7 +421,8 @@ final class RunnerTest extends WP_UnitTestCase {
 		$stored = $this->repo->find( $job->id );
 		$this->assertSame( Job::FAILED, $stored->status );
 		$this->assertStringContainsString( '24 hours', $stored->last_error );
-		$this->assertSame( Job::FAILURE_TEMPORARY, $stored->failure_kind, 'nothing drove it: a retry goes on where it stopped' );
+		$this->assertSame( '', $stored->failure_kind, 'nothing drove it: not a problem of the server, and nothing says it repeats' );
+		$this->assertTrue( $stored->retry_useful() );
 	}
 
 	public function test_steps_cannot_overwrite_the_runner_state_through_the_cursor(): void {

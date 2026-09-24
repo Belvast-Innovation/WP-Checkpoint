@@ -287,12 +287,13 @@ final class DatabaseExportStep implements Step {
 	 * @param string $work Work directory.
 	 * @return array{tables: string[], exclude_oversize: string[]}
 	 * @throws \RuntimeException When the list is gone.
+	 * @throws WorkLost When the work directory was lost, changed or damaged.
 	 */
 	private function frozen( string $work ): array {
 		$json = @file_get_contents( $work . DIRECTORY_SEPARATOR . self::TABLES ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- small file in the job's own work directory.
 		$data = is_string( $json ) ? json_decode( $json, true ) : null;
 		if ( ! is_array( $data ) || ! isset( $data['tables'] ) || ! is_array( $data['tables'] ) ) {
-			throw new \RuntimeException( 'The frozen table list is missing; the work directory was lost or changed.' );
+			throw new WorkLost( 'The frozen table list is missing; the work directory was lost or changed.' );
 		}
 		return array(
 			'tables'           => array_map( 'strval', $data['tables'] ),

@@ -45,8 +45,7 @@ final class Job {
 
 	/**
 	 * Whether retrying is worth offering: the job failed, its work files are
-	 * still there, and the failure was not one that repeats. A failure
-	 * recorded before kinds existed is offered, as it was.
+	 * still there, and the failure is not known to repeat (FAILURE_FINAL).
 	 *
 	 * @return bool
 	 */
@@ -194,10 +193,12 @@ final class Job {
 	public $last_error = '';
 
 	/**
-	 * What kind of failure ended the job: FAILURE_TEMPORARY (the server had
-	 * a passing problem: a retry continues where it stopped), FAILURE_FINAL
-	 * (a retry would fail the same way), or '' (failed before this was
-	 * recorded, or not failed).
+	 * What kind of failure ended the job: FAILURE_TEMPORARY (a problem of the
+	 * moment outlasted the runner's retries: a disk full, the database away),
+	 * FAILURE_FINAL (the storage directory changed, the job's work files were
+	 * lost or damaged (WorkLost), or its question went unanswered: a retry
+	 * cannot succeed), or '' (any other cause, a failure recorded before
+	 * kinds existed, or not failed).
 	 *
 	 * @var string
 	 */
