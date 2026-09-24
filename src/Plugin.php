@@ -241,7 +241,7 @@ final class Plugin {
 						'page' => Page::SLUG,
 						'tab'  => 'backups',
 					),
-					admin_url( 'admin.php' )
+					Page::base_url()
 				)
 			),
 			'paged'  => $paged,

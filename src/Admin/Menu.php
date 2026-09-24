@@ -46,6 +46,12 @@ final class Menu {
 	 * @return void
 	 */
 	public function register(): void {
+		// On multisite only in the network admin (Page::base_url()): no site's own dashboard shows the menu.
+		if ( is_multisite() ) {
+			add_action( 'network_admin_menu', array( $this, 'add_menu_page' ) );
+			add_filter( 'network_admin_plugin_action_links_' . plugin_basename( WPCHECKPOINT_FILE ), array( $this, 'action_links' ) );
+			return;
+		}
 		add_action( 'admin_menu', array( $this, 'add_menu_page' ) );
 		add_filter( 'plugin_action_links_' . plugin_basename( WPCHECKPOINT_FILE ), array( $this, 'action_links' ) );
 	}

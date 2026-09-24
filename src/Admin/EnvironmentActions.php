@@ -150,7 +150,7 @@ final class EnvironmentActions {
 					'tab'              => 'tools',
 					self::RESULT_PARAM => $result,
 				),
-				admin_url( 'admin.php' )
+				Page::base_url()
 			)
 		);
 	}

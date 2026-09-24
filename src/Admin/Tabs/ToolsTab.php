@@ -7,6 +7,7 @@
 
 namespace WPCheckpoint\Admin\Tabs;
 
+use WPCheckpoint\Admin\Page;
 use WPCheckpoint\Admin\EnvironmentActions;
 use WPCheckpoint\Admin\ReclaimActions;
 use WPCheckpoint\Admin\Tab;
@@ -232,7 +233,7 @@ final class ToolsTab implements Tab {
 			<?php if ( ! $checks['ok'] ) : ?>
 				<div class="notice notice-error inline"><p><?php echo esc_html( implode( ' ', $checks['problems'] ) ); ?></p></div>
 			<?php else : ?>
-				<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+				<form method="post" action="<?php echo esc_url( Page::post_url() ); ?>">
 					<input type="hidden" name="action" value="<?php echo esc_attr( ReclaimActions::ACTION_RECLAIM ); ?>" />
 					<input type="hidden" name="_wpnonce" value="<?php echo esc_attr( Guard::nonce( ReclaimActions::NONCE_RECLAIM ) ); ?>" />
 					<p><label><input type="checkbox" name="wpcheckpoint_confirm" value="1" /> <?php esc_html_e( 'I understand that the other copy of this site (if any) will lose access to these backups.', 'wp-checkpoint' ); ?></label></p>
@@ -250,7 +251,7 @@ final class ToolsTab implements Tab {
 									'page' => \WPCheckpoint\Admin\Page::SLUG,
 									'tab'  => 'tools',
 								),
-								admin_url( 'admin.php' )
+								Page::base_url()
 							)
 						);
 						?>
@@ -273,7 +274,7 @@ final class ToolsTab implements Tab {
 	 */
 	private function render_action_form( string $action, string $nonce, string $label, int $locked ): void {
 		?>
-		<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" class="wpcheckpoint-inline-form">
+		<form method="post" action="<?php echo esc_url( Page::post_url() ); ?>" class="wpcheckpoint-inline-form">
 			<input type="hidden" name="action" value="<?php echo esc_attr( $action ); ?>" />
 			<input type="hidden" name="_wpnonce" value="<?php echo esc_attr( Guard::nonce( $nonce ) ); ?>" />
 			<button type="submit" class="button"<?php disabled( $locked > 0 ); ?>>

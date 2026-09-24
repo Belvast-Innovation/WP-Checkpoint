@@ -179,6 +179,30 @@ final class RestPermissionsTest extends WP_UnitTestCase {
 		}
 	}
 
+	public function test_a_site_administrator_on_multisite_gets_403_on_every_route(): void {
+		if ( ! is_multisite() ) {
+			$this->markTestSkipped( 'Multisite only: on a single site the administrator is the one who manages it.' );
+		}
+		$site_admin = self::factory()->user->create( array( 'role' => 'administrator' ) );
+		$this->assertTrue( user_can( $site_admin, 'manage_options' ), 'an administrator of this site' );
+		$this->assertFalse( is_super_admin( $site_admin ), 'not of the network' );
+		// The control: the same request passes for a network administrator.
+		wp_set_current_user( self::$admin );
+		$this->assertNotContains( rest_get_server()->dispatch( $this->request( '/wp-checkpoint/v1/backups', 'GET' ) )->get_status(), array( 401, 403 ) );
+		wp_set_current_user( $site_admin );
+		$checked = 0;
+		foreach ( $this->route_methods() as $label => list( $pattern, $method ) ) {
+			if ( 'challenge' === $this->auth( $pattern ) ) {
+				continue; // Refused to everyone without the challenge: says nothing about the network capability.
+			}
+			$response = rest_get_server()->dispatch( $this->request( $pattern, $method ) );
+			$this->assertSame( 403, $response->get_status(), "{$label} must return 403 to a site administrator: a backup covers the network and a restore overwrites every site" );
+			$this->assertSame( 'rest_forbidden', $response->get_data()['code'] ?? '', "{$label}: refused by the capability check" );
+			++$checked;
+		}
+		$this->assertGreaterThan( 5, $checked );
+	}
+
 	public function test_administrator_requests_pass_permission_check(): void {
 		wp_set_current_user( self::$admin );
 		foreach ( $this->route_methods() as $label => list( $pattern, $method ) ) {

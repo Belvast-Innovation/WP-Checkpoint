@@ -7,6 +7,7 @@
 
 namespace WPCheckpoint\Admin\Tabs;
 
+use WPCheckpoint\Admin\Page;
 use WPCheckpoint\Admin\ReclaimActions;
 use WPCheckpoint\Admin\EnvironmentActions;
 use WPCheckpoint\Admin\SettingsActions;
@@ -68,7 +69,7 @@ final class SettingsTab implements Tab {
 		$checked = UninstallSetting::enabled();
 		$this->render_saved_notice();
 		?>
-		<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+		<form method="post" action="<?php echo esc_url( Page::post_url() ); ?>">
 			<input type="hidden" name="action" value="<?php echo esc_attr( SettingsActions::ACTION ); ?>" />
 			<input type="hidden" name="_wpnonce" value="<?php echo esc_attr( Guard::nonce( SettingsActions::NONCE_ACTION ) ); ?>" />
 			<table class="form-table" role="presentation">
@@ -120,7 +121,7 @@ final class SettingsTab implements Tab {
 		<p>
 			<?php /* translators: %s: directory */ echo esc_html( sprintf( __( 'When the WordPress directory changes to another folder under %s, the original storage directory is reused automatically.', 'wp-checkpoint' ), $root ) ); ?>
 		</p>
-		<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+		<form method="post" action="<?php echo esc_url( Page::post_url() ); ?>">
 			<input type="hidden" name="action" value="<?php echo esc_attr( ReclaimActions::ACTION_UNTRUST ); ?>" />
 			<input type="hidden" name="_wpnonce" value="<?php echo esc_attr( Guard::nonce( ReclaimActions::NONCE_UNTRUST ) ); ?>" />
 			<button type="submit" class="button"><?php esc_html_e( 'Stop trusting this deployment root', 'wp-checkpoint' ); ?></button>

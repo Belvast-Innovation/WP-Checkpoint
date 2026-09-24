@@ -74,6 +74,42 @@ final class Page {
 	}
 
 	/**
+	 * The admin.php the page lives under. On multisite the page is only in
+	 * the network admin: a backup covers every site and a restore overwrites
+	 * every site, so no single site's dashboard offers it (the REST routes and
+	 * the admin-post handlers require the network capability either way).
+	 *
+	 * @return string
+	 */
+	public static function base_url(): string {
+		return is_multisite() ? network_admin_url( 'admin.php' ) : admin_url( 'admin.php' );
+	}
+
+	/**
+	 * The admin-post.php the page's forms and download links go to. Core has
+	 * no network admin-post.php; on multisite it is the one under the
+	 * network's own address, the host and path the network admin itself is
+	 * served from (network_admin_url() is built the same way), so the login
+	 * cookie reaches it whatever site the link was printed on, also where the
+	 * main site's address is mapped to another domain.
+	 *
+	 * @return string
+	 */
+	public static function post_url(): string {
+		return is_multisite() ? network_site_url( 'wp-admin/admin-post.php', 'admin' ) : admin_url( 'admin-post.php' );
+	}
+
+	/**
+	 * Whether a screen id is the plugin page's (network admin adds "-network").
+	 *
+	 * @param string $screen_id Screen id.
+	 * @return bool
+	 */
+	public static function is_screen( string $screen_id ): bool {
+		return in_array( $screen_id, array( 'toplevel_page_' . self::SLUG, 'toplevel_page_' . self::SLUG . '-network' ), true );
+	}
+
+	/**
 	 * URL of a tab.
 	 *
 	 * @param string $slug Tab slug.
@@ -85,7 +121,7 @@ final class Page {
 				'page' => self::SLUG,
 				'tab'  => $slug,
 			),
-			admin_url( 'admin.php' )
+			self::base_url()
 		);
 	}
 
