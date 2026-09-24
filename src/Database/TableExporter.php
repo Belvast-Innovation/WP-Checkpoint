@@ -672,13 +672,17 @@ final class TableExporter {
 	private function bound_in( string $path, string $table, int $chunk, array $desc ): array {
 		$handle = @fopen( $path, 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- see write_new().
 		if ( false === $handle ) {
-			throw new WorkLost( 'A chunk file is missing; the work directory was lost or changed.' );
+			throw WorkLost::or_unreadable( $path, 'A chunk file is missing; the work directory was lost or changed.', 'A chunk file could not be opened.' );
 		}
 		try {
+			$stat   = fstat( $handle );
 			$first  = fgets( $handle, self::MAX_MARKER_BYTES );
 			$second = fgets( $handle, self::MAX_MARKER_BYTES );
 		} finally {
 			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- see above.
+		}
+		if ( false === $first && ( ! is_array( $stat ) || $stat['size'] > 0 ) ) {
+			throw new \RuntimeException( 'A chunk file could not be read.' ); // Bytes there, none read: a storage error, not damage.
 		}
 		if ( ! is_string( $first ) || "\n" !== substr( $first, -1 ) || 0 !== strpos( $first, self::HEADER . $table . ' chunk=' . $chunk . ' ' ) ) {
 			throw new WorkLost( sprintf( 'Chunk %d of table %s has a malformed header; the work directory was lost or changed.', $chunk, $table ) );
@@ -1010,7 +1014,7 @@ final class TableExporter {
 			$tail = fread( $handle, $tail_length ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- chunk file in the job's work directory.
 		}
 		if ( ! is_string( $tail ) || strlen( $tail ) !== $tail_length ) {
-			throw new WorkLost( 'A chunk file could not be read back; the work directory was lost or changed.' );
+			throw new \RuntimeException( 'A chunk file could not be read back.' ); // open_at() checked its length: a storage error.
 		}
 		if ( "\n" === substr( $tail, -1 ) ) {
 			$body  = substr( $tail, 0, -1 );
@@ -1029,7 +1033,7 @@ final class TableExporter {
 		$first = fgets( $handle, self::MAX_MARKER_BYTES );
 		fseek( $handle, $length );
 		if ( ! is_string( $first ) ) {
-			throw new WorkLost( 'A chunk file has no header; the work directory was lost or changed.' );
+			throw new \RuntimeException( 'The header of a chunk file could not be read.' ); // open_at() checked its length: a storage error.
 		}
 		return $this->key_from_header( $table, $chunk, $first );
 	}
@@ -1118,15 +1122,18 @@ final class TableExporter {
 		$path   = $this->chunk_path( $table, $chunk - 1 );
 		$handle = @fopen( $path, 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- see write_new().
 		if ( false === $handle ) {
-			throw new WorkLost( 'The previous chunk file is missing; the work directory was lost or changed.' );
+			throw WorkLost::or_unreadable( $path, 'The previous chunk file is missing; the work directory was lost or changed.', 'The previous chunk file could not be opened.' );
 		}
 		try {
 			$stat = fstat( $handle );
 			$size = is_array( $stat ) ? (int) $stat['size'] : 0;
 			fseek( $handle, max( 0, $size - self::MAX_MARKER_BYTES ) );
-			$tail = (string) stream_get_contents( $handle );
+			$tail = stream_get_contents( $handle );
 		} finally {
 			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- see above.
+		}
+		if ( false === $tail ) {
+			throw new \RuntimeException( 'The previous chunk file could not be read.' );
 		}
 		$lines  = explode( "\n", rtrim( $tail, "\n" ) );
 		$last   = (string) end( $lines );

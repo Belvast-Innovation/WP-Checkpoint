@@ -877,4 +877,21 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		$this->assertSame( '', $old->failure_kind );
 		$this->assertTrue( $old->retry_useful() );
 	}
+	public function test_a_kind_left_by_a_downgrade_does_not_hide_retry_later(): void {
+		global $wpdb;
+		$table = Schema::jobs_table();
+		$job   = $this->repo->create( 'export' );
+		$job   = $this->repo->transition( $job, Job::FAILED, 'The index is missing.', '', Job::FAILURE_FINAL );
+		// The control: as written, the kind is read and Retry is hidden.
+		$this->assertSame( Job::FAILURE_FINAL, $this->repo->find( $job->id )->failure_kind );
+		$this->assertFalse( $this->repo->find( $job->id )->retry_useful() );
+		// Code of version 4 retries it and it fails again: neither write touches the column, finished_at moves.
+		$wpdb->update( $table, array( 'status' => Job::QUEUED, 'finished_at' => 0 ), array( 'id' => $job->id ) );
+		$this->assertSame( '', $this->repo->find( $job->id )->failure_kind, 'retried' );
+		$wpdb->update( $table, array( 'status' => Job::FAILED, 'finished_at' => $job->finished_at + 30, 'last_error' => 'Step "database": RuntimeException: disk quota' ), array( 'id' => $job->id ) );
+		$this->assertStringStartsWith( 'final:', (string) $wpdb->get_var( $wpdb->prepare( "SELECT failure_kind FROM {$table} WHERE id = %d", $job->id ) ), 'the old kind is still in the row' );
+		$again = $this->repo->find( $job->id );
+		$this->assertSame( '', $again->failure_kind, 'it does not speak for the new failure' );
+		$this->assertTrue( $again->retry_useful(), 'the worst case is a Retry offered once too often, never a dead end' );
+	}
 }

@@ -1464,8 +1464,10 @@ final class JobRepository {
 			$data['locked_until'] = 0;
 		}
 		if ( Job::FAILED === $to ) {
-			$data['last_error']   = $this->redactor->redact( $error );
-			$data['failure_kind'] = in_array( $failure, array( Job::FAILURE_TEMPORARY, Job::FAILURE_FINAL ), true ) ? $failure : '';
+			$data['last_error'] = $this->redactor->redact( $error );
+			// Stamped with the failure it belongs to (Job::read_failure_kind()): code that does not know the column
+			// retries and fails the job again without touching it, and the old kind must not speak for the new failure.
+			$data['failure_kind'] = in_array( $failure, array( Job::FAILURE_TEMPORARY, Job::FAILURE_FINAL ), true ) ? $failure . ':' . $now : '';
 		}
 		if ( Job::QUEUED === $to ) {
 			$data['failure_kind']  = '';
@@ -1648,6 +1650,7 @@ final class JobRepository {
 				$job->$key = (string) $value;
 			}
 		}
+		$job->failure_kind = Job::read_failure_kind( $job->failure_kind, $job->finished_at );
 		return $job;
 	}
 }

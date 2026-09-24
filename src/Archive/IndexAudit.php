@@ -309,11 +309,11 @@ final class IndexAudit {
 	private static function open( string $path, string $missing, int $offset ) {
 		$handle = @fopen( $path, 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- the job's own index; a missing file is thrown below.
 		if ( false === $handle ) {
-			throw new WorkLost( $missing );
+			throw WorkLost::or_unreadable( $path, $missing, 'An index is there but could not be opened.' );
 		}
 		if ( 0 !== fseek( $handle, $offset ) ) {
 			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- see above.
-			throw new WorkLost( 'An index could not be positioned; the work directory was changed.' );
+			throw new \RuntimeException( 'An index could not be positioned.' );
 		}
 		return $handle;
 	}
