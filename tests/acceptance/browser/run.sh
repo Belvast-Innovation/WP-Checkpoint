@@ -63,7 +63,21 @@ wp eval "
 "
 phase stalled "$job"
 
+echo "== failed, final: the work directory is lost while the backup waits for its answer"
+job=$(phase to-question | sed -n 's/.*"job":"\([0-9]*\)".*/\1/p')
+wp eval "\$j = WPCheckpoint\Plugin::instance()->jobs()->find( $job ); \$w = WPCheckpoint\Jobs\Residue::work_dir( \$j->storage_path, \$j->id ); WPCheckpoint\Support\Deleter::delete_tree( dirname( \$w ), \$w, 100000 ); echo \"ok\n\";"
+phase fail-answer "$job"
+echo "== failed, temporary: the same block when the failure may pass"
+wp eval "global \$wpdb; \$wpdb->update( WPCheckpoint\Support\Schema::jobs_table(), array( 'failure_kind' => 'temporary', 'work_expired_at' => 0 ), array( 'id' => $job ) ); echo \"ok\n\";"
+phase failed "$job"
+wp wpcheckpoint job cancel "$job" >/dev/null || true
+wp eval "global \$wpdb; \$wpdb->delete( WPCheckpoint\Support\Schema::jobs_table(), array( 'id' => $job ) ); echo \"ok\n\";"
+
+echo "== polling: a database-only backup with the large generated tables, driven by the browser"
+phase polling
+
 echo "== delete"; phase delete
 
 echo "== teardown"
+wp eval 'foreach ( WPCheckpoint\Plugin::instance()->job_actions()->active() as $j ) { WPCheckpoint\Plugin::instance()->job_actions()->cancel( $j->id ); } echo "ok\n";' || true
 wp eval 'WPCheckpoint\Support\Deleter::delete_tree( wp_upload_dir()["basedir"], wp_upload_dir()["basedir"] . "/qa-heavy", 1000 ); echo "ok\n";' || true

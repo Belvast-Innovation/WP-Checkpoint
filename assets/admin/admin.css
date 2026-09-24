@@ -1,14 +1,28 @@
 /* WP Checkpoint admin page: small additions to core admin styles. */
+
+/* The hidden attribute must win over core's .button { display: inline-block }: without this, buttons the
+   page hides (Cancel on a finished job, Retry where it cannot help) are shown. */
+.wpcheckpoint-wrap [hidden] { display: none !important; }
+
 .wpcheckpoint-wrap section { margin: 1.5em 0; }
-.wpcheckpoint-job { background: #fff; border: 1px solid #c3c4c7; padding: 8px 12px; margin: 0 0 12px; }
+.wpcheckpoint-job { background: #fff; border: 1px solid #c3c4c7; border-left-width: 4px; padding: 8px 12px; margin: 0 0 12px; }
+.wpcheckpoint-job[data-state="decision"] { border-color: #2271b1; }
+.wpcheckpoint-job[data-state="failed"] { border-color: #d63638; }
+.wpcheckpoint-job-title .wpcheckpoint-job-status { margin-left: 6px; }
+.wpcheckpoint-job[data-state="decision"] .wpcheckpoint-job-status { color: #2271b1; font-weight: 600; }
+.wpcheckpoint-job[data-state="failed"] .wpcheckpoint-job-status { color: #d63638; font-weight: 600; }
 .wpcheckpoint-job-bar { width: 100%; max-width: 480px; }
 .wpcheckpoint-job-log { max-height: 12em; overflow: auto; background: #f6f7f7; padding: 6px; white-space: pre-wrap; }
-.wpcheckpoint-job-error { color: #b32d2e; }
 .wpcheckpoint-job-notice { color: #50575e; }
-.wpcheckpoint-job-questions fieldset { margin: 0.5em 0; }
+.wpcheckpoint-job-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.wpcheckpoint-job-questions { font-size: 14px; }
+.wpcheckpoint-job-questions legend { font-weight: 600; margin-bottom: 4px; }
+.wpcheckpoint-job-questions fieldset { margin: 0.5em 0 0.75em; }
+.wpcheckpoint-job-failure p:first-child { font-size: 14px; }
 .wpcheckpoint-badge { display: inline-block; padding: 0 6px; border-radius: 3px; background: #dcdcde; font-size: 12px; }
 .wpcheckpoint-badge-warning { background: #fcf0f1; color: #8a2424; }
 .wpcheckpoint-badge-busy { background: #f0f6fc; color: #0a4b78; }
 .wpcheckpoint-highlight td { background: #f0f6fc; }
 .wpcheckpoint-actions .button, .wpcheckpoint-actions .button-link-delete { margin: 2px 4px 2px 0; }
 .wpcheckpoint-form-status { margin-left: 8px; }
+.wpcheckpoint-inline-spinner { float: none; margin: 0 0 0 4px; vertical-align: middle; }

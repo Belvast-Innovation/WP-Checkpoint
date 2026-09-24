@@ -49,14 +49,14 @@ final class BackupsTabTest extends JobTestCase {
 		return (string) ob_get_clean();
 	}
 
-	private function add_backup( array $warnings = array() ): void {
+	private function add_backup( array $warnings = array(), string $finished = '2026-09-18T10:04:07Z' ): void {
 		$this->builder = ( new ArchiveBuilder(
 			array(
-				'manifest' => static function ( array $manifest, bool $embedded ) use ( $warnings ): array {
+				'manifest' => static function ( array $manifest, bool $embedded ) use ( $warnings, $finished ): array {
 					$manifest['warnings']             = $warnings;
 					$manifest['database']['exported'] = array(
-						'started_at'  => '2026-09-18T10:00:00Z',
-						'finished_at' => '2026-09-18T10:04:00Z',
+						'started_at'  => '2026-09-18T10:00:05Z',
+						'finished_at' => $finished,
 					);
 					return $manifest;
 				},
@@ -144,23 +144,84 @@ final class BackupsTabTest extends JobTestCase {
 		$this->assertStringNotContainsString( 'has not moved for', $this->html() );
 	}
 
-	public function test_a_finished_export_links_its_backup_and_the_list_highlights_it(): void {
+	private function job_with_status( string $status, int $finished_ago = 0 ): Job {
 		global $wpdb;
+		$job = Plugin::instance()->jobs()->create( 'export', self::$admin_id );
+		$wpdb->update( Schema::jobs_table(), array( 'status' => $status, 'finished_at' => time() - $finished_ago, 'failure_kind' => Job::FAILED === $status ? Job::FAILURE_FINAL : '' ), array( 'id' => $job->id ) );
+		return Plugin::instance()->jobs()->find( $job->id );
+	}
+
+	public function test_a_finished_export_is_not_among_the_jobs_and_the_list_highlights_its_backup(): void {
 		$this->add_backup();
-		$job  = Plugin::instance()->jobs()->create( 'export', self::$admin_id );
-		$work = Residue::work_dir( Plugin::instance()->jobs()->find( $job->id )->storage_path, $job->id );
-		wp_mkdir_p( $work );
-		ExportPlan::write( $work, ExportPlan::PLAN, array( 'base' => ArchiveBuilder::BASE ) );
-		$wpdb->update( Schema::jobs_table(), array( 'status' => Job::COMPLETED, 'finished_at' => time() ), array( 'id' => $job->id ) );
-		$html = $this->html( array( 'job' => (string) $job->id ) );
-		$this->assertStringContainsString( 'The backup is ready.', $html );
+		$done = $this->job_with_status( Job::COMPLETED );
+		\WPCheckpoint\Backups\ExportResults::record( $done->id, ArchiveBuilder::BASE );
+		$html = $this->html( array( 'job' => (string) $done->id ) );
+		$this->assertStringNotContainsString( 'data-wpcheckpoint-job="' . $done->id . '"', $html, 'its backup is in the list: that is where it belongs' );
 		$this->assertStringContainsString( 'class="wpcheckpoint-highlight"', $html );
 		$this->assertStringContainsString( '>New<', $html );
-		$this->assertStringNotContainsString( 'class="wpcheckpoint-highlight"', $this->html(), 'only the export just finished on this page is highlighted' );
+		$this->assertStringNotContainsString( 'class="wpcheckpoint-highlight"', $this->html(), 'only right after the export' );
 
+		// Stored before the results were kept: the job's plan names it while its work directory is there.
+		$older = $this->job_with_status( Job::COMPLETED );
+		$work  = Residue::work_dir( $older->storage_path, $older->id );
+		wp_mkdir_p( $work );
+		ExportPlan::write( $work, ExportPlan::PLAN, array( 'base' => ArchiveBuilder::BASE ) );
+		$this->assertStringContainsString( 'class="wpcheckpoint-highlight"', $this->html( array( 'job' => (string) $older->id ) ) );
+	}
+
+	public function test_only_unfinished_jobs_and_failures_within_a_week_are_shown(): void {
+		$this->add_backup();
+		$running   = $this->job_with_status( Job::RUNNING );
+		$failed    = $this->job_with_status( Job::FAILED, 3600 );
+		$old       = $this->job_with_status( Job::FAILED, 8 * 86400 );
+		$cancelled = $this->job_with_status( Job::CANCELLED );
+		$html      = $this->html();
+		$this->assertStringContainsString( 'data-wpcheckpoint-job="' . $running->id . '"', $html );
+		$this->assertStringContainsString( 'data-wpcheckpoint-job="' . $failed->id . '"', $html, 'a failure stays until it is dismissed' );
+		$this->assertStringNotContainsString( 'data-wpcheckpoint-job="' . $old->id . '"', $html, 'its work files are gone after a week' );
+		$this->assertStringNotContainsString( 'data-wpcheckpoint-job="' . $cancelled->id . '"', $html );
+	}
+
+	public function test_the_first_backup_screen_explains_first_and_steps_aside_while_it_is_made(): void {
+		$html = $this->html();
+		$this->assertLessThan( strpos( $html, 'Create your first backup' ), strpos( $html, 'No backups yet' ), 'what a backup is and holds, then the button' );
+		$this->assertLessThan( strpos( $html, 'Create your first backup' ), strpos( $html, 'Files: counting…' ) );
+		$this->assertStringContainsString( 'spinner is-active', $html );
+
+		$export = Plugin::instance()->jobs()->create( 'export', self::$admin_id );
+		$busy   = $this->html();
+		$this->assertStringContainsString( 'data-wpcheckpoint-job="' . $export->id . '"', $busy );
+		$this->assertStringNotContainsString( 'No backups yet', $busy, 'while the first backup is made, its block is the screen' );
+		$this->assertStringNotContainsString( 'data-wpcheckpoint-create', $busy );
+
+		$this->add_backup();
+		$list = $this->html();
+		$this->assertStringContainsString( 'A backup is being made. You can start another one when it has finished.', $list );
+		$this->assertStringNotContainsString( '(job ', $list, 'no job numbers on the screen' );
+	}
+
+	public function test_the_export_period_is_shown_to_the_second_and_as_one_time_when_it_took_under_one(): void {
+		$this->add_backup();
+		$between = $this->html( array( 'backup' => ArchiveBuilder::BASE ) );
+		$this->assertMatchesRegularExpression( '/between [^<]*10:00:05[^<]* and [^<]*10:04:07/', $between );
+		$this->builder->cleanup();
 		foreach ( glob( $this->backups . '/' . ArchiveBuilder::BASE . '.*' ) as $file ) {
 			unlink( $file );
 		}
-		$this->assertStringContainsString( 'The job completed, but its backup is no longer in the backups directory.', $this->html( array( 'job' => (string) $job->id ) ) );
+		$this->add_backup( array(), '2026-09-18T10:00:05Z' );
+		$at = $this->html( array( 'backup' => ArchiveBuilder::BASE ) );
+		$this->assertMatchesRegularExpression( '/when its export started, at [^<]*10:00:05/', $at );
+		$this->assertStringNotContainsString( 'between', $at );
+	}
+
+	public function test_the_results_keep_the_last_exports_only(): void {
+		for ( $job = 1; $job <= \WPCheckpoint\Backups\ExportResults::MAX + 5; $job++ ) {
+			\WPCheckpoint\Backups\ExportResults::record( $job, sprintf( 'site-20260924-%06d-ab12', $job ) );
+		}
+		$this->assertSame( '', \WPCheckpoint\Backups\ExportResults::base_of( 5 ), 'the oldest are dropped' );
+		$this->assertSame( 'site-20260924-000006-ab12', \WPCheckpoint\Backups\ExportResults::base_of( 6 ) );
+		$this->assertSame( 'site-20260924-000025-ab12', \WPCheckpoint\Backups\ExportResults::base_of( 25 ) );
+		\WPCheckpoint\Backups\ExportResults::record( 26, '../not-a-backup' );
+		$this->assertSame( '', \WPCheckpoint\Backups\ExportResults::base_of( 26 ) );
 	}
 }

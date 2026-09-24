@@ -43,8 +43,17 @@ final class JobProgressTest extends JobTestCase {
 		$this->assertStringNotContainsString( "\u{202E}", $html, 'bidi override neutralized' );
 		$this->assertStringContainsString( "\u{FFFD}[31mred", $html );
 		$this->assertMatchesRegularExpression( '/<button type="button" class="button" data-action="cancel" hidden>/', $html, 'no cancel for a failed job' );
-		$this->assertMatchesRegularExpression( '/<button type="button" class="button" data-action="retry">/', $html, 'retry offered' );
+		$this->assertMatchesRegularExpression( '/data-action="retry" hidden>/', $html, 'no retry where it would fail the same way' );
+		$this->assertStringContainsString( 'retrying would fail the same way. Create a new backup.', $html );
 		$this->assertStringContainsString( '>Failed<', $html );
+		$this->assertStringContainsString( 'data-state="failed"', $html );
+		// On the screen: what it means and what happened; the step and the exception class only in the log.
+		$failure = substr( $html, strpos( $html, 'data-field="failure"' ), strpos( $html, 'data-field="progress_box"' ) - strpos( $html, 'data-field="failure"' ) );
+		$this->assertStringContainsString( 'What happened:', $failure );
+		$this->assertStringContainsString( 'cannot read {abspath}/&lt;script&gt;', $failure );
+		$this->assertStringNotContainsString( 'RuntimeException', $failure );
+		$this->assertStringNotContainsString( 'Step &quot;files&quot;', $failure );
+		$this->assertStringContainsString( 'RuntimeException', substr( $html, strpos( $html, 'data-field="log_tail"' ) ), 'the log keeps the detail' );
 	}
 
 	public function test_active_job_offers_cancel_and_the_script_is_enqueued_on_the_plugin_page(): void {

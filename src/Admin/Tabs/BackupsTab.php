@@ -13,12 +13,14 @@ use WPCheckpoint\Admin\Tab;
 use WPCheckpoint\Archive\VerificationResult;
 use WPCheckpoint\Backups\BackupStore;
 use WPCheckpoint\Backups\EstimateStatus;
+use WPCheckpoint\Backups\ExportResults;
 use WPCheckpoint\Jobs\ExportJob;
 use WPCheckpoint\Jobs\ExportPlan;
 use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\JobActions;
 use WPCheckpoint\Jobs\JobConflicts;
 use WPCheckpoint\Jobs\JobPresenter;
+use WPCheckpoint\Jobs\JobRepository;
 use WPCheckpoint\Jobs\PreflightStep;
 use WPCheckpoint\Jobs\QuestionText;
 use WPCheckpoint\Plugin;
@@ -38,11 +40,6 @@ defined( 'ABSPATH' ) || exit;
 final class BackupsTab implements Tab {
 
 	const PER_PAGE = 20;
-
-	/**
-	 * Jobs that ended this recently are still shown.
-	 */
-	const RECENT_SECONDS = 86400;
 
 	/**
 	 * Site transient holding the tables of other installations for the create form (5 minutes).
@@ -91,19 +88,23 @@ final class BackupsTab implements Tab {
 				return;
 			}
 		}
-		$highlight = $this->render_jobs( $actions, $presenter, $dirs, $store );
-		$page      = max( 1, (int) self::query_string( 'paged' ) );
-		$list      = $store->page( $page, self::PER_PAGE, $active );
-		$pages     = max( 1, (int) ceil( $list['total'] / self::PER_PAGE ) );
+		$highlight = $this->highlight( $dirs, $store );
+		$this->render_jobs( $actions, $presenter );
+		$page  = max( 1, (int) self::query_string( 'paged' ) );
+		$list  = $store->page( $page, self::PER_PAGE, $active );
+		$pages = max( 1, (int) ceil( $list['total'] / self::PER_PAGE ) );
 		if ( $page > $pages ) {
 			$page = $pages;
 			$list = $store->page( $page, self::PER_PAGE, $active );
 		}
-		$this->render_create( $active, 0 === $list['total'], $presenter );
+		$busy = self::busy_reason( $active );
 		if ( 0 === $list['total'] ) {
-			$this->render_empty( $actions );
-			return;
+			if ( '' === $busy ) {
+				$this->render_empty( $actions );
+			}
+			return; // While the first backup is made, its block above is all there is to see.
 		}
+		$this->render_create( $busy, false );
 		$this->render_list( $list, $page, $pages, $highlight, $presenter );
 	}
 
@@ -142,97 +143,93 @@ final class BackupsTab implements Tab {
 	}
 
 	/**
-	 * S3: the jobs that run, wait or ended within a day (the plugin's own
-	 * estimate is not among them). Returns the backup a just-finished
-	 * export made (?job={id}), to highlight in the list.
+	 * S3: the jobs that are not finished, and the ones that failed within
+	 * the retention of their work files (until dismissed). A job that
+	 * completed is not shown here: its backup is in the list below, which
+	 * highlights it; the plugin's own estimate is never shown.
 	 *
 	 * @param JobActions   $actions   Actions.
 	 * @param JobPresenter $presenter Presenter.
-	 * @param Directories  $dirs      Directories.
-	 * @param BackupStore  $store     Store.
-	 * @return string
+	 * @return void
 	 */
-	private function render_jobs( JobActions $actions, JobPresenter $presenter, Directories $dirs, BackupStore $store ): string {
-		$now       = time();
-		$shown     = array();
-		$highlight = '';
-		foreach ( $actions->list_user_jobs( array(), 50 ) as $job ) {
-			$running = in_array( $job->status, array( Job::QUEUED, Job::RUNNING, Job::PAUSED ), true );
-			if ( $running || $now - $job->finished_at < self::RECENT_SECONDS ) {
+	private function render_jobs( JobActions $actions, JobPresenter $presenter ): void {
+		$now   = time();
+		$shown = array();
+		foreach ( $actions->list_user_jobs( array( Job::QUEUED, Job::RUNNING, Job::PAUSED, Job::FAILED ), 50 ) as $job ) {
+			if ( Job::FAILED !== $job->status || $now - $job->finished_at < JobRepository::WORK_RETENTION_SECONDS ) {
 				$shown[] = $job;
 			}
 		}
-		$finished = (int) self::query_string( 'job' );
 		if ( array() === $shown ) {
-			return '';
+			return;
 		}
 		$progress = new JobProgress( $presenter );
-		echo '<section class="wpcheckpoint-jobs" aria-labelledby="wpcheckpoint-jobs-title"><h2 id="wpcheckpoint-jobs-title">' . esc_html__( 'Running and recent', 'wp-checkpoint' ) . '</h2>';
+		echo '<section class="wpcheckpoint-jobs" aria-label="' . esc_attr__( 'Jobs', 'wp-checkpoint' ) . '">';
 		foreach ( $shown as $job ) {
-			$outcome = ExportJob::ID === $job->type && Job::COMPLETED === $job->status ? $this->export_outcome( $job, $dirs, $store ) : null;
-			if ( null !== $outcome && $job->id === $finished && $outcome['confirmed'] ) {
-				$highlight = $outcome['base'];
-			}
-			$progress->render( $job, $outcome );
+			$progress->render( $job );
 		}
 		echo '</section>';
-		return $highlight;
 	}
 
 	/**
-	 * What a completed export left: its backup, and whether that backup is
-	 * still in backups/ (the name comes from the job's work directory,
-	 * which maintenance removes some time after the job ends).
+	 * The backup an export just made (?job={id}), to highlight in the list;
+	 * '' when there is none or it is no longer there.
 	 *
-	 * @param Job         $job   Completed export.
 	 * @param Directories $dirs  Directories.
 	 * @param BackupStore $store Store.
-	 * @return array{base: string, confirmed: bool, text: string, url: string}
+	 * @return string
 	 */
-	private function export_outcome( Job $job, Directories $dirs, BackupStore $store ): array {
-		$work = QuestionText::work_dir( $job, $dirs );
-		$base = '';
-		if ( '' !== $work && ExportPlan::exists( $work, ExportPlan::PLAN ) ) {
-			try {
-				$base = (string) ( ExportPlan::read( $work, ExportPlan::PLAN )['base'] ?? '' );
-			} catch ( \RuntimeException $e ) {
-				$base = '';
+	private function highlight( Directories $dirs, BackupStore $store ): string {
+		$id = (int) self::query_string( 'job' );
+		if ( $id <= 0 ) {
+			return '';
+		}
+		$base = ExportResults::base_of( $id );
+		if ( '' === $base ) {
+			// Stored before the results were kept: the job's plan, while its work directory is still there.
+			$job  = Plugin::instance()->jobs()->find( $id );
+			$work = null === $job ? '' : QuestionText::work_dir( $job, $dirs );
+			if ( '' !== $work && ExportPlan::exists( $work, ExportPlan::PLAN ) ) {
+				try {
+					$base = (string) ( ExportPlan::read( $work, ExportPlan::PLAN )['base'] ?? '' );
+				} catch ( \RuntimeException $e ) {
+					$base = '';
+				}
 			}
 		}
-		if ( 1 !== preg_match( PreflightStep::BASE_PATTERN, $base ) ) {
-			return array(
-				'base'      => '',
-				'confirmed' => false,
-				'text'      => __( 'The job completed. Its backup can no longer be identified from the job; the list below shows the backups that are there.', 'wp-checkpoint' ),
-				'url'       => '',
-			);
-		}
-		if ( ! $store->exists( $base ) ) {
-			return array(
-				'base'      => $base,
-				'confirmed' => false,
-				'text'      => __( 'The job completed, but its backup is no longer in the backups directory.', 'wp-checkpoint' ),
-				'url'       => '',
-			);
-		}
-		return array(
-			'base'      => $base,
-			'confirmed' => true,
-			'text'      => __( 'The backup is ready.', 'wp-checkpoint' ),
-			'url'       => self::url( array( 'backup' => $base ) ),
-		);
+		return 1 === preg_match( PreflightStep::BASE_PATTERN, $base ) && $store->exists( $base ) ? $base : '';
 	}
 
 	/**
-	 * S2: make a backup. Disabled while a backup is being made or a restore runs.
+	 * Why no backup can be started now, in words, or ''.
 	 *
-	 * @param Job[]        $active    Active jobs.
-	 * @param bool         $first     Whether there is no backup yet.
-	 * @param JobPresenter $presenter Presenter.
+	 * @param Job[] $active Active jobs.
+	 * @return string
+	 */
+	private static function busy_reason( array $active ): string {
+		foreach ( $active as $job ) {
+			if ( JobConflicts::RESTORE === $job->type ) {
+				return __( 'A restore is running. Backups can be made again when it has finished.', 'wp-checkpoint' );
+			}
+		}
+		foreach ( $active as $job ) {
+			if ( JobConflicts::EXPORT === $job->type ) {
+				return __( 'A backup is being made. You can start another one when it has finished.', 'wp-checkpoint' );
+			}
+		}
+		return '';
+	}
+
+	/**
+	 * S2: make a backup. Disabled while a backup is being made or a restore
+	 * runs. Before the first backup it is part of the empty state (S1a),
+	 * under what a backup would hold.
+	 *
+	 * @param string $busy  Why no backup can start now, or ''.
+	 * @param bool   $first Whether there is no backup yet.
 	 * @return void
 	 */
-	private function render_create( array $active, bool $first, JobPresenter $presenter ): void {
-		$reason  = JobConflicts::conflict( JobConflicts::EXPORT, array(), $active );
+	private function render_create( string $busy, bool $first ): void {
 		$foreign = get_site_transient( self::FOREIGN_CACHE );
 		if ( ! is_array( $foreign ) ) {
 			try {
@@ -244,12 +241,14 @@ final class BackupsTab implements Tab {
 			set_site_transient( self::FOREIGN_CACHE, $foreign, 300 );
 		}
 		?>
-		<section class="wpcheckpoint-create" aria-labelledby="wpcheckpoint-create-title">
-			<h2 id="wpcheckpoint-create-title"><?php echo esc_html( $first ? __( 'Create your first backup', 'wp-checkpoint' ) : __( 'Create a backup', 'wp-checkpoint' ) ); ?></h2>
+		<section class="wpcheckpoint-create"<?php echo $first ? '' : ' aria-labelledby="wpcheckpoint-create-title"'; ?>>
+			<?php if ( ! $first ) : ?>
+				<h2 id="wpcheckpoint-create-title"><?php esc_html_e( 'Create a backup', 'wp-checkpoint' ); ?></h2>
+			<?php endif; ?>
 			<form id="wpcheckpoint-create-form" data-wpcheckpoint-create>
 				<p>
-					<button type="submit" class="button button-primary"<?php disabled( '' !== $reason ); ?>><?php esc_html_e( 'Create backup', 'wp-checkpoint' ); ?></button>
-					<span class="wpcheckpoint-form-status" data-field="form_status" role="status" aria-live="polite"><?php echo esc_html( '' === $reason ? '' : $presenter->clean( $reason ) ); ?></span>
+					<button type="submit" class="button button-primary"<?php disabled( '' !== $busy ); ?>><?php echo esc_html( $first ? __( 'Create your first backup', 'wp-checkpoint' ) : __( 'Create backup', 'wp-checkpoint' ) ); ?></button>
+					<span class="wpcheckpoint-form-status" data-field="form_status" role="status" aria-live="polite"><?php echo esc_html( $busy ); ?></span>
 				</p>
 				<details>
 					<summary><?php esc_html_e( 'Options', 'wp-checkpoint' ); ?></summary>
@@ -305,6 +304,7 @@ final class BackupsTab implements Tab {
 				<?php $this->render_estimate_lines( $status ); ?>
 				<button type="button" class="button-link" data-estimate-stop hidden><?php esc_html_e( 'Stop counting', 'wp-checkpoint' ); ?></button>
 			</div>
+			<?php $this->render_create( '', true ); ?>
 		</section>
 		<?php
 	}
@@ -327,6 +327,7 @@ final class BackupsTab implements Tab {
 			echo esc_html( sprintf( _n( 'Files: %1$s file, %2$s.', 'Files: %1$s files, %2$s.', (int) $status['files'], 'wp-checkpoint' ), number_format_i18n( (int) $status['files'] ), size_format( (int) $status['files_bytes'], 1 ) ) );
 		} elseif ( 'running' === $status['state'] || 'due' === $status['state'] ) {
 			esc_html_e( 'Files: counting…', 'wp-checkpoint' );
+			echo ' <span class="spinner is-active wpcheckpoint-inline-spinner" aria-hidden="true"></span>';
 		}
 		echo '</p><p data-field="time">';
 		if ( null !== $status['seconds'] ) {
@@ -474,8 +475,15 @@ final class BackupsTab implements Tab {
 		<?php if ( isset( $exported['started_at'], $exported['finished_at'] ) ) : ?>
 			<p>
 				<?php
-				/* translators: 1: start time, 2: end time */
-				echo esc_html( sprintf( __( 'Database: each table as it was when its export started, between %1$s and %2$s. Rows added to a table after that are not in it.', 'wp-checkpoint' ), self::local_time( (string) $exported['started_at'] ), self::local_time( (string) $exported['finished_at'] ) ) );
+				$from = self::local_time( (string) $exported['started_at'], true );
+				$to   = self::local_time( (string) $exported['finished_at'], true );
+				echo esc_html(
+					$from === $to
+						/* translators: %s: time */
+						? sprintf( __( 'Database: each table as it was when its export started, at %s. Rows added to a table after that are not in it.', 'wp-checkpoint' ), $from )
+						/* translators: 1: start time, 2: end time */
+						: sprintf( __( 'Database: each table as it was when its export started, between %1$s and %2$s. Rows added to a table after that are not in it.', 'wp-checkpoint' ), $from, $to )
+				);
 				?>
 			</p>
 		<?php endif; ?>
@@ -599,12 +607,22 @@ final class BackupsTab implements Tab {
 	/**
 	 * An ISO 8601 UTC time in the site's format and time zone.
 	 *
-	 * @param string $iso Time.
+	 * @param string $iso     Time.
+	 * @param bool   $seconds Whether to show the seconds.
 	 * @return string
 	 */
-	private static function local_time( string $iso ): string {
+	private static function local_time( string $iso, bool $seconds = false ): string {
 		$time = strtotime( $iso );
-		return false === $time ? $iso : (string) wp_date( get_option( 'date_format' ) . ' ' . get_option( 'time_format' ), $time );
+		if ( false === $time ) {
+			return $iso;
+		}
+		$format = (string) get_option( 'time_format' );
+		if ( $seconds && false === strpbrk( $format, 's' ) ) {
+			// The site's time format with seconds after the minutes (g:i a becomes g:i:s a).
+			$with   = preg_replace( '/i/', 'i:s', $format, 1 );
+			$format = is_string( $with ) && $with !== $format ? $with : $format . ':s';
+		}
+		return (string) wp_date( get_option( 'date_format' ) . ' ' . $format, $time );
 	}
 
 	/**

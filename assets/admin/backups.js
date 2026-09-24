@@ -3,8 +3,9 @@
  *
  * Making a backup, checking one and deleting one go to the REST routes and
  * then reload the tab, whose job block (assets/admin/jobs.js) takes over.
- * When an export ends, the tab reloads on page 1 with the new backup
- * highlighted (?job=id); a check that ends reloads the tab. Before the first
+ * When an export completes, the tab reloads on page 1 with the new backup
+ * highlighted (?job=id); an export that fails or is cancelled, and a check
+ * that ends, reload the tab as it is. Before the first
  * backup, the size estimate is started here (never by a page load) and its
  * job is driven like any other, hidden: it is the plugin's own, so it ends
  * silently, with the database size alone if it could not count the files.
@@ -142,10 +143,13 @@
 			if ( event.target.hasAttribute( 'data-wpcheckpoint-estimate-job' ) ) {
 				return; // Handled by the estimate.
 			}
+			// Whatever the outcome, the server renders the tab again: the new
+			// backup highlighted, the create form no longer held back, a
+			// failure's block (it stays until dismissed), a cancelled one gone.
 			if ( job.type === 'export' && job.status === 'completed' ) {
 				reload( { job: job.id } );
-			} else if ( job.type === 'verify' && job.status === 'completed' ) {
-				reload();
+			} else if ( job.type === 'export' || job.type === 'verify' ) {
+				reload( config.paged ? { paged: config.paged } : {} );
 			}
 		} );
 	}

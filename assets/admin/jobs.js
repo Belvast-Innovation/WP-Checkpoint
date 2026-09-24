@@ -91,31 +91,43 @@
 		}
 	}
 
+	// The block's layout: the questions first while the job waits for a decision, what the failure means once it
+	// failed, the progress otherwise (JobProgress::state() on the server).
+	function state( job ) {
+		if ( job.awaiting ) {
+			return 'decision';
+		}
+		return job.status === 'failed' ? 'failed' : 'progress';
+	}
+
 	function render( root, job ) {
+		var layout = state( job );
 		var bar = root.querySelector( '[data-field="progress"]' );
 		if ( bar ) {
 			bar.value = job.progress;
 		}
 		root.setAttribute( 'data-status', job.status );
-		setText( root, 'progress_text', job.progress + '%' );
-		setText( root, 'status_label', config.labels[ job.status ] || job.status );
+		root.setAttribute( 'data-state', layout );
+		setText( root, 'status_text', job.status_text || config.labels[ job.status ] || job.status );
 		setText( root, 'type_label', job.type_label );
+		setText( root, 'progress_text', job.progress + '%' );
 		setText( root, 'step_label', job.step_label );
 		setText( root, 'message', job.message );
-		setText( root, 'last_error', job.last_error );
-		setHidden( root.querySelector( '[data-field="last_error"]' ), ! job.last_error );
+		setHidden( root.querySelector( '[data-field="progress_box"]' ), layout !== 'progress' );
+		setHidden( root.querySelector( '[data-field="failure"]' ), layout !== 'failed' );
+		setText( root, 'failure_text', job.failure_text || '' );
+		setText( root, 'error_detail', job.error_detail || '' );
+		setHidden( root.querySelector( '[data-field="error_detail_line"]' ), ! job.error_detail );
 		if ( typeof job.log_tail === 'string' ) {
 			setText( root, 'log_tail', job.log_tail );
 		}
 		var active = [ 'queued', 'running', 'paused' ].indexOf( job.status ) !== -1;
 		setHidden( root.querySelector( '[data-action="cancel"]' ), ! active );
-		setHidden( root.querySelector( '[data-action="retry"]' ), ! job.retryable );
-		setText( root, 'retry_note', job.retry_note || '' );
-		setHidden( root.querySelector( '[data-field="retry_note"]' ), ! job.retry_note );
+		setHidden( root.querySelector( '[data-action="retry"]' ), ! job.retry_useful );
+		setHidden( root.querySelector( '[data-action="dismiss"]' ), job.status !== 'failed' );
 		setText( root, 'stalled', job.stalled_text || '' );
 		setHidden( root.querySelector( '[data-field="stalled"]' ), ! job.stalled_text );
-		setHidden( root.querySelector( '[data-action="dismiss"]' ), active );
-		if ( ! job.questions ) {
+		if ( layout !== 'decision' ) {
 			setHidden( root.querySelector( '[data-field="questions"]' ), true );
 		}
 	}
@@ -250,6 +262,11 @@
 					self.stopped = false;
 					self.lastResult = null;
 					render( self.root, reply.job );
+					// The answer is taken: say so at once, before the next tick returns (up to a whole budget later).
+					self.root.setAttribute( 'data-state', 'progress' );
+					setHidden( self.root.querySelector( '[data-field="progress_box"]' ), false );
+					setText( self.root, 'status_text', config.labels.running );
+					setText( self.root, 'message', config.labels.continuing );
 					self.tick();
 				}, { answers: answers } );
 			} );
@@ -308,9 +325,37 @@
 		return true;
 	};
 
+	// While a tick runs, the job's progress is saved at every checkpoint: a read-only GET shows it. Only when the
+	// browser drives (no chain polls then), never overlapping, and not while the page is hidden.
+	Driver.prototype.watch = function () {
+		var self = this;
+		window.clearInterval( this.watcher );
+		this.watcher = window.setInterval( function () {
+			if ( self.reading || document.hidden ) {
+				return;
+			}
+			self.reading = true;
+			request( 'GET', self.id, function ( status, data ) {
+				self.reading = false;
+				if ( status === 200 && data && data.job && self.watcher ) {
+					render( self.root, data.job );
+				}
+			} );
+		}, POLL_MS );
+	};
+
+	Driver.prototype.unwatch = function () {
+		window.clearInterval( this.watcher );
+		this.watcher = null;
+	};
+
 	Driver.prototype.tick = function () {
 		var self = this;
+		if ( ! this.loopback ) {
+			this.watch();
+		}
 		request( 'POST', this.id + '/tick', function ( status, data ) {
+			self.unwatch();
 			if ( ! self.handle( status, data, function () {} ) ) {
 				if ( ! self.stopped ) {
 					self.later( function () { self.tick(); }, 5000 );
@@ -344,6 +389,16 @@
 
 	Driver.prototype.poll = function () {
 		var self = this;
+		if ( document.hidden ) {
+			// A hidden page does not poll; the server's chain goes on without it. Resume when it is shown.
+			document.addEventListener( 'visibilitychange', function resume() {
+				if ( ! document.hidden ) {
+					document.removeEventListener( 'visibilitychange', resume );
+					self.poll();
+				}
+			} );
+			return;
+		}
 		request( 'GET', this.id, function ( status, data ) {
 			if ( ! self.handle( status, data, function () {} ) ) {
 				if ( ! self.stopped ) {

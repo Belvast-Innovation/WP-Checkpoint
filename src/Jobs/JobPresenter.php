@@ -155,6 +155,100 @@ final class JobPresenter {
 	}
 
 	/**
+	 * The job's state in words: a job that waits for an answer is not
+	 * "paused" to the person who has to give it.
+	 *
+	 * @param Job $job Job.
+	 * @return string
+	 */
+	public static function status_text( Job $job ): string {
+		switch ( $job->status ) {
+			case Job::QUEUED:
+				return __( 'Queued', 'wp-checkpoint' );
+			case Job::RUNNING:
+				return __( 'Running', 'wp-checkpoint' );
+			case Job::PAUSED:
+				return $job->awaiting_answer() ? __( 'Needs your decision', 'wp-checkpoint' ) : __( 'Continuing', 'wp-checkpoint' );
+			case Job::COMPLETED:
+				return __( 'Completed', 'wp-checkpoint' );
+			case Job::FAILED:
+				return __( 'Failed', 'wp-checkpoint' );
+			case Job::CANCELLED:
+				return __( 'Cancelled', 'wp-checkpoint' );
+		}
+		return $job->status;
+	}
+
+	/**
+	 * What a failure means for the person looking at it, and what to do:
+	 * retry when the cause may pass, start over when retrying would fail the
+	 * same way. The technical detail (step, exception) stays in the log.
+	 *
+	 * @param Job $job Failed job.
+	 * @return string
+	 */
+	public static function failure_text( Job $job ): string {
+		$verify = 'verify' === $job->type;
+		if ( ! $job->can_retry() ) {
+			return $verify
+				? __( 'The check could not be finished, and its work files have been removed, so it cannot go on. Start a new check.', 'wp-checkpoint' )
+				: __( 'The backup could not be finished, and its work files have been removed, so it cannot go on. Create a new backup.', 'wp-checkpoint' );
+		}
+		if ( Job::FAILURE_TEMPORARY === $job->failure_kind ) {
+			return $verify
+				? __( 'The check stopped because of a problem on the server that may pass, such as a full disk or the database being unavailable. Retry when it is solved: the check goes on where it stopped.', 'wp-checkpoint' )
+				: __( 'The backup stopped because of a problem on the server that may pass, such as a full disk or the database being unavailable. Retry when it is solved: the backup goes on where it stopped.', 'wp-checkpoint' );
+		}
+		if ( Job::FAILURE_FINAL === $job->failure_kind ) {
+			return $verify
+				? __( 'The check could not be finished, and retrying would fail the same way. Start a new check.', 'wp-checkpoint' )
+				: __( 'The backup could not be finished, and retrying would fail the same way. Create a new backup.', 'wp-checkpoint' );
+		}
+		return $verify ? __( 'The check could not be finished.', 'wp-checkpoint' ) : __( 'The backup could not be finished.', 'wp-checkpoint' );
+	}
+
+	/**
+	 * A step in words (the id when the step is not one of the plugin's own).
+	 *
+	 * @param string $step Step id.
+	 * @return string
+	 */
+	public static function step_label( string $step ): string {
+		switch ( $step ) {
+			case 'preflight':
+				return __( 'Checking the site', 'wp-checkpoint' );
+			case 'scan':
+				return __( 'Listing the files', 'wp-checkpoint' );
+			case 'review':
+				return __( 'Reviewing what to back up', 'wp-checkpoint' );
+			case 'database':
+				return __( 'Exporting the database', 'wp-checkpoint' );
+			case 'pack':
+				return __( 'Packing the archive', 'wp-checkpoint' );
+			case 'manifest':
+				return __( 'Writing and checking the archive', 'wp-checkpoint' );
+			case 'store':
+				return __( 'Storing the backup', 'wp-checkpoint' );
+			case 'verify':
+				return __( 'Checking the backup', 'wp-checkpoint' );
+		}
+		return $step;
+	}
+
+	/**
+	 * The failure without the runner's frame: the step id and the exception
+	 * class (Runner's "Step "x": Class: …" and "Step "x" failed N times:
+	 * Class: …") belong in the log, not on the screen.
+	 *
+	 * @param string $error last_error.
+	 * @return string
+	 */
+	public static function error_detail( string $error ): string {
+		$detail = preg_replace( '/\AStep "[^"]*"(?: failed \d+ times)?: (?:[A-Za-z_\\\\]+: )?/', '', $error );
+		return is_string( $detail ) ? $detail : '';
+	}
+
+	/**
 	 * What to say about a job that stood still, or '' for 0 minutes.
 	 *
 	 * @param int $minutes stalled_minutes().
@@ -202,25 +296,31 @@ final class JobPresenter {
 		$extra                = '' !== $job->storage_path ? array( '{storage}' => $job->storage_path ) : array();
 		$type                 = $this->types->get( $job->type );
 		$data                 = array(
-			'id'          => $job->id,
-			'type'        => $job->type,
-			'type_label'  => $this->clean( null !== $type ? $type->label() : $job->type, $extra ),
-			'status'      => $job->status,
-			'step'        => $job->step,
-			'step_label'  => $this->clean( $job->step, $extra ),
-			'progress'    => $job->progress,
-			'message'     => $this->clean( $job->progress_message, $extra ),
-			'attempts'    => $job->attempts,
-			'created_at'  => $job->created_at,
-			'started_at'  => $job->started_at,
-			'updated_at'  => $job->updated_at,
-			'finished_at' => $job->finished_at,
-			'last_error'  => $this->clean( $job->last_error, $extra ),
-			'retryable'   => $job->can_retry(),
-			'retry_note'  => Job::FAILED === $job->status && ! $job->can_retry() ? self::retry_note() : '',
-			'questions'   => $job->awaiting_answer() ? $this->clean_deep( $job->questions, $extra ) : null,
-			'progress_at' => $job->progress_at,
-			'stalled'     => self::stalled_minutes( $job, time() ),
+			'id'           => $job->id,
+			'type'         => $job->type,
+			'type_label'   => $this->clean( null !== $type ? $type->label() : $job->type, $extra ),
+			'status'       => $job->status,
+			'step'         => $job->step,
+			'step_label'   => $this->clean( self::step_label( $job->step ), $extra ),
+			'progress'     => $job->progress,
+			'message'      => '' === $job->progress_message && Job::QUEUED === $job->status ? __( 'Starting…', 'wp-checkpoint' ) : $this->clean( $job->progress_message, $extra ),
+			'status_text'  => self::status_text( $job ),
+			'awaiting'     => $job->awaiting_answer(),
+			'attempts'     => $job->attempts,
+			'created_at'   => $job->created_at,
+			'started_at'   => $job->started_at,
+			'updated_at'   => $job->updated_at,
+			'finished_at'  => $job->finished_at,
+			'last_error'   => $this->clean( $job->last_error, $extra ),
+			'retryable'    => $job->can_retry(),
+			'retry_useful' => $job->retry_useful(),
+			'failure_kind' => $job->failure_kind,
+			'error_detail' => $this->clean( self::error_detail( $job->last_error ), $extra ),
+			'failure_text' => Job::FAILED === $job->status ? self::failure_text( $job ) : '',
+			'retry_note'   => Job::FAILED === $job->status && ! $job->can_retry() ? self::retry_note() : '',
+			'questions'    => $job->awaiting_answer() ? $this->clean_deep( $job->questions, $extra ) : null,
+			'progress_at'  => $job->progress_at,
+			'stalled'      => self::stalled_minutes( $job, time() ),
 		);
 		$data['stalled_text'] = self::stalled_text( $data['stalled'] );
 		if ( $with_log ) {

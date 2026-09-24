@@ -40,6 +40,7 @@ abstract class JobTestCase extends WP_UnitTestCase {
 		// Kept across tests otherwise: the jobs table's DDL commits the test transaction.
 		Options::delete( \WPCheckpoint\Backups\Estimate::OPTION );
 		Options::delete( \WPCheckpoint\Backups\Estimate::RATE_OPTION );
+		Options::delete( \WPCheckpoint\Backups\ExportResults::OPTION );
 		delete_site_transient( 'wpcheckpoint_jobs_reaped' );
 		delete_site_transient( 'wpcheckpoint_jobs_purged' );
 		delete_site_transient( 'wpcheckpoint_jobs_swept' );

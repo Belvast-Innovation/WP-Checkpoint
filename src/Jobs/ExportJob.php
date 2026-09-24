@@ -9,6 +9,7 @@ namespace WPCheckpoint\Jobs;
 
 use WPCheckpoint\Backups\BackupStore;
 use WPCheckpoint\Backups\Estimate;
+use WPCheckpoint\Backups\ExportResults;
 use WPCheckpoint\Archive\Manifest;
 use WPCheckpoint\Database\TableSelection;
 use WPCheckpoint\Database\WpdbConnection;
@@ -150,6 +151,11 @@ final class ExportJob implements JobType {
 					$job     = $context->job();
 					$options = $context->options();
 					Estimate::record_rate( $bytes, time() - (int) $job->started_at, Estimate::scope( $options ), ! empty( $options['answers'] ), time() );
+					foreach ( $paths as $path ) {
+						if ( BackupStore::MANIFEST_SUFFIX === substr( $path, -strlen( BackupStore::MANIFEST_SUFFIX ) ) ) {
+							ExportResults::record( $job->id, substr( basename( $path ), 0, -strlen( BackupStore::MANIFEST_SUFFIX ) ) );
+						}
+					}
 				}
 			),
 		);
