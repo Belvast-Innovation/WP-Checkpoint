@@ -98,12 +98,12 @@ final class VerifierEnvironmentTest extends TestCase {
 	}
 
 	/**
-	 * Every catch of \RuntimeException (or wider) on the verifier's read paths must let EnvironmentFailure
-	 * through first: the next catch site added is where "damaged" would come back.
+	 * Every catch of \RuntimeException (or wider) on the read paths of the verifier and of the restore
+	 * must let EnvironmentFailure through first: the next catch site added is where "damaged" would come back.
 	 */
 	public function test_every_catch_of_a_read_error_passes_environment_failures_through(): void {
-		foreach ( array( 'ArchiveVerifier.php', 'ChunkHasher.php' ) as $file ) {
-			$groups = self::catch_groups( (string) file_get_contents( dirname( __DIR__, 3 ) . '/src/Archive/' . $file ) );
+		foreach ( array( 'Archive/ArchiveVerifier.php', 'Archive/ChunkHasher.php', 'Restore/ChunkWalk.php', 'Jobs/RestorePreflightStep.php', 'Jobs/DatabaseImportStep.php' ) as $file ) {
+			$groups = self::catch_groups( (string) file_get_contents( dirname( __DIR__, 3 ) . '/src/' . $file ) );
 			$this->assertNotEmpty( $groups, $file );
 			foreach ( $groups as $line => $types ) {
 				foreach ( $types as $i => $type ) {

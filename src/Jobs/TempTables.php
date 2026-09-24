@@ -101,6 +101,25 @@ final class TempTables {
 	}
 
 	/**
+	 * The name of a restore's ledger table: the job's prefix and the run's
+	 * random part with nothing after it. name() never gives this (it wants
+	 * a table name after the random part), so no restored table can take
+	 * it, and job_id_of() attributes it to the job like its other tables.
+	 *
+	 * @param string $token  Storage token.
+	 * @param int    $job_id Job id.
+	 * @param string $random The run's random part.
+	 * @return string
+	 * @throws \InvalidArgumentException When an argument is not usable.
+	 */
+	public static function ledger( string $token, int $job_id, string $random ): string {
+		if ( 1 !== preg_match( '/\A[0-9a-f]{' . self::RANDOM_LEN . '}\z/', $random ) ) {
+			throw new \InvalidArgumentException( 'The random part must be four lowercase hex characters.' );
+		}
+		return self::job_prefix( $token, $job_id ) . $random . '_';
+	}
+
+	/**
 	 * Whether a name is one this class could have produced and the
 	 * repository may drop: nothing but [A-Za-z0-9_], at most 64 bytes.
 	 *

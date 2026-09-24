@@ -23,6 +23,7 @@ use WPCheckpoint\Jobs\JobActions;
 use WPCheckpoint\Jobs\JobPresenter;
 use WPCheckpoint\Jobs\JobRepository;
 use WPCheckpoint\Jobs\ExportJob;
+use WPCheckpoint\Jobs\RestoreJob;
 use WPCheckpoint\Jobs\VerifyJob;
 use WPCheckpoint\Jobs\EstimateJob;
 use WPCheckpoint\Backups\Estimate;
@@ -373,6 +374,16 @@ final class Plugin {
 			);
 			$this->job_types->add(
 				new VerifyJob(
+					static function () use ( $plugin ): Directories {
+						return $plugin->directories();
+					},
+					static function ( string $text ) use ( $plugin ): string {
+						return $plugin->job_presenter()->clean( $text );
+					}
+				)
+			);
+			$this->job_types->add(
+				new RestoreJob(
 					static function () use ( $plugin ): Directories {
 						return $plugin->directories();
 					},
