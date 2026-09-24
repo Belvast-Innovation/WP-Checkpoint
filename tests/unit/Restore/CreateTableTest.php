@@ -151,6 +151,8 @@ final class CreateTableTest extends TestCase {
 			'connection alone'                          => array( 'CREATE TABLE `wp_a` ' . $columns . ' CONNECTION=\'mysql://x@h/db/t\'', 'CONNECTION' ),
 			'merge'                                     => array( 'CREATE TABLE `wp_a` ' . $columns . ' ENGINE=MRG_MyISAM', 'engine' ),
 			'connect engine'                            => array( 'CREATE TABLE `wp_a` ' . $columns . ' ENGINE=CONNECT', 'engine' ),
+			'archive engine'                            => array( 'CREATE TABLE `wp_a` ' . $columns . ' ENGINE=ARCHIVE', 'ARCHIVE engine: its rows cannot be removed' ),
+			'archive engine of a partition'             => array( 'CREATE TABLE `wp_a` ' . $columns . ' ENGINE=InnoDB /*!50100 PARTITION BY HASH (`id`) (PARTITION p0 ENGINE = ARCHIVE) */', 'Leave the table out of the restore' ),
 			'data directory'                            => array( 'CREATE TABLE `wp_a` ' . $columns . ' ENGINE=InnoDB DATA DIRECTORY=\'/tmp\'', 'DIRECTORY' ),
 			'directory in a comment'                    => array( 'CREATE TABLE `wp_a` ' . $columns . ' ENGINE=InnoDB /*!50100 PARTITION BY HASH (`id`) (PARTITION p0 DATA DIRECTORY = \'/tmp\') */', 'DIRECTORY' ),
 			'inline references'                         => array( 'CREATE TABLE `wp_a` (`id` int NOT NULL REFERENCES `wp_users` (`ID`), PRIMARY KEY (`id`))', 'inline REFERENCES' ),

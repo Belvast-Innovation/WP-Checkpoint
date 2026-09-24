@@ -56,8 +56,9 @@ abstract class RestoreTestCase extends JobTestCase {
 		$wpdb->query( 'SET FOREIGN_KEY_CHECKS=0' );
 		$wpdb->query( "DROP TABLE IF EXISTS `{$table}`" );
 		$wpdb->query( "CREATE TABLE `{$table}` {$definition}" );
+		$error = $wpdb->last_error; // Before the next statement clears it.
 		$wpdb->query( 'SET FOREIGN_KEY_CHECKS=1' );
-		$this->assertSame( '', $wpdb->last_error, $table );
+		$this->assertSame( '', $error, $table );
 		$this->created[] = $table;
 	}
 

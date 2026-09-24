@@ -100,6 +100,34 @@ final class RestorePreflightTest extends RestoreTestCase {
 		unset( $wpdb );
 	}
 
+	public function test_an_archive_table_is_refused_before_anything_is_created(): void {
+		global $wpdb;
+		// Servers need not have the ARCHIVE engine loaded: the table is made here with InnoDB and the backup says ARCHIVE.
+		$this->create( $this->p . 'log', '(`id` int NOT NULL AUTO_INCREMENT, `v` text, PRIMARY KEY (`id`)) ENGINE=InnoDB' );
+		$wpdb->query( "INSERT INTO `{$this->p}log` (`v`) VALUES ('a'), ('b')" );
+		$log  = $this->p . 'log';
+		$base = $this->backup(
+			array_merge( self::site_tables(), array( $this->p . 'parent', $log ) ),
+			static function ( string $table, array $chunks ) use ( $log ): array {
+				if ( $log === $table ) {
+					$chunks[0] = str_replace( ') ENGINE=InnoDB', ') ENGINE=ARCHIVE', $chunks[0] );
+				}
+				return $chunks;
+			}
+		);
+		$job  = $this->run_restore( $this->start_restore( $base ) );
+		$this->assertSame( Job::FAILED, $job->status );
+		$error = (string) $job->last_error;
+		$this->assertStringContainsString( 'Step "restore_preflight"', $error );
+		$this->assertStringContainsString( 'Table ' . $this->p . 'log', $error );
+		$this->assertStringContainsString( 'ARCHIVE engine', $error );
+		$this->assertStringContainsString( 'Leave the table out of the restore', $error );
+		$this->assertSame( array(), $this->job_tables( $job ), 'nothing was created' );
+
+		// The way out: without it the same backup goes through.
+		$this->assertSame( Job::COMPLETED, $this->run_restore( $this->start_restore( $base, array( 'exclude_tables' => array( $this->p . 'log' ) ) ) )->status );
+	}
+
 	public function test_a_backup_of_the_other_kind_of_site_is_refused(): void {
 		$base = $this->backup(
 			self::site_tables(),

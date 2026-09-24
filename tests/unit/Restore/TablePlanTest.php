@@ -36,20 +36,18 @@ final class TablePlanTest extends TestCase {
 	}
 
 	public function test_names_on_this_site_and_what_is_left_out(): void {
-		$plan = self::plan( array( 'wp_options', 'wp_posts', 'other_x', 'wp_wpcheckpoint_jobs', 'wcptmpabcdef_3_0000_posts', 'wp_skip' ), 'wp_', 'site2_', array( 'wp_skip' ) );
+		$plan = self::plan( array( 'wp_options', 'wp_posts', 'wp_wpcheckpoint_jobs', 'wcptmpabcdef_3_0000_posts', 'wp_skip' ), 'wp_', 'site2_', array( 'wp_skip' ) );
 		$this->assertSame(
 			array(
 				array( 'wp_options', 'site2_options', 0 ),
 				array( 'wp_posts', 'site2_posts', 1 ),
-				array( 'other_x', 'other_x', 2 ),
 			),
 			array_map(
 				static function ( array $t ): array {
 					return array( $t['table'], $t['final'], $t['number'] );
 				},
 				$plan->tables()
-			),
-			'another installation\'s table keeps its name'
+			)
 		);
 		$this->assertSame( 'wcptmpabcdef_7_1a2b_posts', $plan->find( 'wp_posts' )['temporary'] );
 		$this->assertSame(
@@ -80,24 +78,36 @@ final class TablePlanTest extends TestCase {
 		}
 	}
 
-	public function test_two_tables_with_one_final_name_are_refused(): void {
+	public function test_names_that_differ_in_case_only_clash_where_the_server_ignores_case(): void {
+		// With every table under the backup's prefix, two tables share a final name only when case does not count.
+		$this->assertCount( 3, self::plan( array( 'wp_options', 'wp_Posts', 'wp_posts' ), 'wp_', 'x_' )->tables(), 'the control: a server that tells them apart' );
 		$this->expectException( Refused::class );
-		$this->expectExceptionMessage( 'would both be named b_posts' );
-		self::plan( array( 'a_options', 'a_posts', 'b_posts' ), 'a_', 'b_' );
+		$this->expectExceptionMessage( 'The tables wp_Posts and wp_posts would both be named x_posts on this site' );
+		self::plan( array( 'wp_options', 'wp_Posts', 'wp_posts' ), 'wp_', 'x_', array(), true );
 	}
 
-	public function test_names_that_differ_in_case_only_clash_where_the_server_ignores_case(): void {
-		$this->assertCount( 3, self::plan( array( 'wp_options', 'wp_Posts', 'wp_posts' ) )->tables(), 'the control: a server that tells them apart' );
-		$this->expectException( Refused::class );
-		self::plan( array( 'wp_options', 'wp_Posts', 'wp_posts' ), 'wp_', 'wp_', array(), true );
+	public function test_a_table_of_another_installation_is_refused_with_its_ways_out(): void {
+		$this->assertCount( 1, self::plan( array( 'wp_options', 'other_x' ), 'wp_', 'wp_', array( 'other_x' ) )->tables(), 'the control: left out, the rest goes through' );
+		try {
+			self::plan( array( 'wp_options', 'other_x' ) );
+			$this->fail( 'refused' );
+		} catch ( Refused $e ) {
+			$message = $e->getMessage();
+			$this->assertStringContainsString( 'The table other_x of the backup does not carry the backup\'s table prefix (wp_)', $message );
+			$this->assertStringContainsString( 'this database may hold another site\'s table', $message, 'why' );
+			$this->assertStringContainsString( 'Leave the table out of the restore', $message );
+			$this->assertStringContainsString( 'restore it by hand from the backup\'s SQL', $message );
+		}
 	}
 
 	public function test_two_tables_with_one_temporary_name_are_refused(): void {
-		// "wp_foo" without the prefix and "foo" (another installation's table, kept by name) both become "foo".
-		$this->assertCount( 2, self::plan( array( 'wp_options', 'wp_foo' ) )->tables(), 'the control: one of them' );
+		// "wp_a-b" needs cleaning, so its temporary name ends in "a_b_" and a hash of "a-b"; a table can be named that.
+		$twin = 'wp_a_b_' . substr( hash( 'sha256', 'a-b' ), 0, 7 );
+		$this->assertCount( 2, self::plan( array( 'wp_options', 'wp_a-b' ) )->tables(), 'the control: one of them' );
+		$this->assertSame( self::plan( array( 'wp_options', 'wp_a-b' ) )->find( 'wp_a-b' )['temporary'], self::plan( array( 'wp_options', $twin ) )->find( $twin )['temporary'], 'the two names meet' );
 		$this->expectException( Refused::class );
 		$this->expectExceptionMessage( 'would share a temporary name' );
-		self::plan( array( 'wp_options', 'wp_foo', 'foo' ) );
+		self::plan( array( 'wp_options', 'wp_a-b', $twin ) );
 	}
 
 	public function test_the_jobs_table_is_left_out_in_any_case_where_the_server_ignores_case(): void {

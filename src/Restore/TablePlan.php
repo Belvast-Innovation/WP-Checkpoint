@@ -18,17 +18,23 @@ defined( 'ABSPATH' ) || exit;
  * Pure PHP. Each table of the backup gets three names: its name in the
  * backup, its temporary name while it is imported (TempTables::name(),
  * which always fits), and its final name on this site: this site's prefix
- * followed by what comes after the backup's prefix (a table without the
- * backup's prefix, one of another installation added to the backup, keeps
- * its name). The final name cannot be shortened (WordPress and plugins
- * find tables by their exact names), so one longer than 64 bytes refuses
- * the restore, as does a final name two tables would share (compared
- * without case where the server ignores it).
+ * followed by what comes after the backup's prefix. The final name cannot
+ * be shortened (WordPress and plugins find tables by their exact names),
+ * so one longer than 64 bytes refuses the restore, as does a final name
+ * two tables would share (compared without case where the server ignores
+ * it), or a temporary name two tables would share (a name can be chosen to
+ * equal another's shortened form).
+ *
+ * A table without the backup's prefix refuses the restore: it belongs to
+ * another installation (the user added it to the backup when it was made),
+ * and under its name on this database another WordPress may be running.
+ * The restore writes only tables of this site; such a table is left out,
+ * or restored by hand from the backup's SQL.
  *
  * Left out of the plan, and reported: tables the user excluded, this
  * plugin's jobs table (a backup written before it was left out of backups
- * may hold it; it is never restored, see ARCHIVE-FORMAT), and tables named
- * like this plugin's temporary or old tables.
+ * may hold it; it is never restored), and tables named like this plugin's
+ * temporary or old tables.
  *
  * The backup must hold the options table (and the network's sitemeta
  * table on multisite): this plugin's state is carried into them before the
@@ -102,6 +108,15 @@ final class TablePlan {
 			if ( 1 === preg_match( '/\A(?:wcptmp|wcpold)/', $name ) ) {
 				$plan->skipped[ $name ] = 'temporary';
 				continue;
+			}
+			if ( '' === $backup_prefix || 0 !== strpos( $name, $backup_prefix ) ) {
+				throw new Refused(
+					sprintf(
+						'The table %1$s of the backup does not carry the backup\'s table prefix (%2$s): it belongs to another installation and was added to the backup when it was made. Under that name this database may hold another site\'s table, and the restore writes only tables of this site. Leave the table out of the restore; if it is needed, restore it by hand from the backup\'s SQL.',
+						$name,
+						$backup_prefix
+					)
+				);
 			}
 			$final = $plan->final_name( $name );
 			if ( strlen( $final ) > self::MAX_NAME ) {

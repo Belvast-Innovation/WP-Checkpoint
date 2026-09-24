@@ -50,9 +50,16 @@ defined( 'ABSPATH' ) || exit;
 final class CreateTable {
 
 	/**
-	 * Engines a restored table may use (lowercase): none of them reads or writes outside the table itself.
+	 * Engines a restored table may use (lowercase): none of them reads or writes outside the table itself,
+	 * and each can be emptied (TRUNCATE) to be imported again after an interrupted run. ARCHIVE cannot
+	 * (ARCHIVE_ENGINE), so a restore of it would work or fail by chance: refused before anything starts.
 	 */
-	const ENGINES = array( 'innodb', 'myisam', 'aria', 'memory', 'heap', 'archive', 'csv', 'blackhole', 'rocksdb', 'tokudb' );
+	const ENGINES = array( 'innodb', 'myisam', 'aria', 'memory', 'heap', 'csv', 'blackhole', 'rocksdb', 'tokudb' );
+
+	/**
+	 * The ARCHIVE engine (lowercase), refused with its own reason.
+	 */
+	const ARCHIVE_ENGINE = 'archive';
 
 	/**
 	 * Words that never belong in the table options: they point the table at other tables, files or servers, or make it a copy of something.
@@ -499,6 +506,9 @@ final class CreateTable {
 			$value = $options[ $i + 1 ] ?? null;
 			if ( null !== $value && 'p' === $value[0] && '=' === $value[3] ) {
 				$value = $options[ $i + 2 ] ?? null;
+			}
+			if ( null !== $value && 'word' === $value[0] && self::ARCHIVE_ENGINE === strtolower( $value[3] ) ) {
+				throw new Refused( 'The table uses the ARCHIVE engine: its rows cannot be removed, so the restore could not import it again after an interrupted run and would work or fail by chance. Leave the table out of the restore.' );
 			}
 			if ( null === $value || 'word' !== $value[0] || ! in_array( strtolower( $value[3] ), self::ENGINES, true ) ) {
 				throw new Refused( 'CREATE TABLE names an engine the restore does not create tables with' . ( null !== $value ? ' (' . $value[3] . ')' : '' ) . '.' );
