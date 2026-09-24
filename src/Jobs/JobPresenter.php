@@ -201,6 +201,9 @@ final class JobPresenter {
 				? __( 'The check stopped because of a problem on the server that may pass, such as a full disk or the database being unavailable. Retry when it is solved: the check goes on where it stopped.', 'wp-checkpoint' )
 				: __( 'The backup stopped because of a problem on the server that may pass, such as a full disk or the database being unavailable. Retry when it is solved: the backup goes on where it stopped.', 'wp-checkpoint' );
 		}
+		if ( Job::FAILURE_FINAL === $job->failure_kind && Job::REASON_TABLE_CHANGED === $job->failure_reason ) {
+			return __( 'The backup was stopped because the structure of a table changed while it was being exported. Going on would give a backup whose table data does not match its table definition. Create a new backup.', 'wp-checkpoint' );
+		}
 		if ( Job::FAILURE_FINAL === $job->failure_kind ) {
 			return $verify
 				? __( 'The check could not be finished, and retrying would fail the same way. Start a new check.', 'wp-checkpoint' )
