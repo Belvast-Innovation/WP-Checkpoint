@@ -239,6 +239,10 @@ final class RunnerTest extends WP_UnitTestCase {
 		$this->assertSame( Job::FAILED, $stored->status );
 		$this->assertStringContainsString( 'failed 6 times', $stored->last_error );
 		$this->assertStringContainsString( 'TransientFailure: remote timed out', $stored->last_error );
+		$this->assertSame( Job::FAILURE_TEMPORARY, $stored->failure_kind, 'a problem of the moment: retrying may help' );
+		$this->assertTrue( $stored->retry_useful() );
+		$this->repo->transition( $stored, Job::QUEUED );
+		$this->assertSame( '', $this->repo->find( $job->id )->failure_kind, 'a retry clears it' );
 	}
 
 	public function test_other_exceptions_fail_the_job_with_a_masked_message_and_cleanup_runs(): void {
@@ -270,6 +274,8 @@ final class RunnerTest extends WP_UnitTestCase {
 		$this->assertStringContainsString( 'Step "second": RuntimeException: cannot write {abspath}/wp-content/x', $stored->last_error );
 		$this->assertStringNotContainsString( rtrim( ABSPATH, '/' ), $stored->last_error );
 		$this->assertStringNotContainsString( DB_PASSWORD, $stored->last_error );
+		$this->assertSame( Job::FAILURE_FINAL, $stored->failure_kind, 'anything else would fail the same way again' );
+		$this->assertFalse( $stored->retry_useful() );
 		$this->assertStringNotContainsString( DB_PASSWORD, $result->message );
 		$this->assertFileDoesNotExist( LockFile::path( $this->base, $job->id ) );
 
@@ -400,6 +406,7 @@ final class RunnerTest extends WP_UnitTestCase {
 		$stored = $this->repo->find( $job->id );
 		$this->assertSame( Job::FAILED, $stored->status );
 		$this->assertStringContainsString( '24 hours', $stored->last_error );
+		$this->assertSame( Job::FAILURE_TEMPORARY, $stored->failure_kind, 'nothing drove it: a retry goes on where it stopped' );
 	}
 
 	public function test_steps_cannot_overwrite_the_runner_state_through_the_cursor(): void {

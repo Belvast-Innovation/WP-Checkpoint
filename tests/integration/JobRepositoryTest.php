@@ -844,7 +844,7 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		Options::set( Schema::OPTION, array( 'version' => 3, 'min_compatible' => 1 ) );
 		$result = Schema::ensure();
 		$this->assertSame( 'migrated', $result['action'] );
-		$this->assertSame( 4, $result['version'] );
+		$this->assertSame( Schema::CURRENT, $result['version'] );
 		$this->assertSame( 1, $result['min_compatible'], 'older code ignores both columns' );
 		$columns = $wpdb->get_col( "SHOW COLUMNS FROM {$table}" );
 		$this->assertContains( 'takeovers', $columns );
@@ -858,5 +858,23 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		$old = $this->repo->find( (int) $wpdb->insert_id );
 		$this->assertSame( 0, $old->takeovers );
 		$this->assertSame( '', $old->takeover_mark );
+	}
+
+	public function test_schema_version_five_adds_the_failure_kind_and_older_code_keeps_working(): void {
+		global $wpdb;
+		$table = Schema::jobs_table();
+		$wpdb->query( "ALTER TABLE {$table} DROP COLUMN failure_kind" );
+		Options::set( Schema::OPTION, array( 'version' => 4, 'min_compatible' => 1 ) );
+		$result = Schema::ensure();
+		$this->assertSame( 'migrated', $result['action'] );
+		$this->assertSame( 5, $result['version'] );
+		$this->assertSame( 1, $result['min_compatible'], 'older code ignores the column' );
+		$this->assertContains( 'failure_kind', $wpdb->get_col( "SHOW COLUMNS FROM {$table}" ) );
+		// A row failed by code of version 4 has no kind: retrying it is offered, as it was.
+		$wpdb->query( $wpdb->prepare( "INSERT INTO {$table} (type, status, cursor_json, last_error, created_at, finished_at) VALUES (%s, %s, %s, %s, %d, %d)", 'export', Job::FAILED, '[]', 'boom', 1, 2 ) );
+		$this->assertSame( '', $wpdb->last_error );
+		$old = $this->repo->find( (int) $wpdb->insert_id );
+		$this->assertSame( '', $old->failure_kind );
+		$this->assertTrue( $old->retry_useful() );
 	}
 }

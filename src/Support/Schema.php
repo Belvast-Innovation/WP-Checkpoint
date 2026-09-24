@@ -22,7 +22,7 @@ defined( 'ABSPATH' ) || exit;
 final class Schema {
 
 	const OPTION  = 'wpcheckpoint_db_version';
-	const CURRENT = 4;
+	const CURRENT = 5;
 
 	/**
 	 * Jobs table name without the prefix.
@@ -159,6 +159,10 @@ final class Schema {
 				// Adds takeovers (0) and takeover_mark (''); older code ignores both, so min_compatible stays 1.
 				self::create_jobs_table();
 				return 1;
+			case 5:
+				// Adds failure_kind (''); older code ignores it, so min_compatible stays 1.
+				self::create_jobs_table();
+				return 1;
 		}
 		return self::MIN_COMPATIBLE;
 	}
@@ -167,7 +171,7 @@ final class Schema {
 	 * The jobs table in its current shape; dbDelta() creates it or adds the
 	 * columns that are missing (version 1 lacked work_expired_at, version 2
 	 * lacked options_json and questions_json, version 3 lacked takeovers and
-	 * takeover_mark).
+	 * takeover_mark, version 4 lacked failure_kind).
 	 *
 	 * @return void
 	 */
@@ -193,6 +197,7 @@ final class Schema {
 			storage_path varchar(1024) NOT NULL DEFAULT '',
 			log_path varchar(255) NOT NULL DEFAULT '',
 			last_error text NULL,
+			failure_kind varchar(16) NOT NULL DEFAULT '',
 			work_expired_at bigint(20) unsigned NOT NULL DEFAULT 0,
 			takeovers int(10) unsigned NOT NULL DEFAULT 0,
 			takeover_mark varchar(32) NOT NULL DEFAULT '',

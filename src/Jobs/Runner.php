@@ -325,7 +325,8 @@ final class Runner {
 				$state['retries'] = (int) $state['retries'] + 1;
 				$message          = $this->describe( $e );
 				if ( $state['retries'] > self::MAX_RETRIES ) {
-					return $this->fail( $job, $token, $logger, sprintf( 'Step "%s" failed %d times: %s', $step_id, $state['retries'], $message ) );
+					// A problem of the moment that outlasted the back-off (a full disk, the database away): retrying may help.
+					return $this->fail( $job, $token, $logger, sprintf( 'Step "%s" failed %d times: %s', $step_id, $state['retries'], $message ), Job::FAILURE_TEMPORARY );
 				}
 				$wait = JobRepository::BACKOFF_SECONDS[ min( $state['retries'] - 1, count( JobRepository::BACKOFF_SECONDS ) - 1 ) ];
 				$logger->warning(
@@ -666,16 +667,17 @@ final class Runner {
 	/**
 	 * Fenced status change.
 	 *
-	 * @param Job    $job   Job.
-	 * @param string $token Lock token.
-	 * @param string $to    Target status.
-	 * @param string $error Error message.
+	 * @param Job    $job     Job.
+	 * @param string $token   Lock token.
+	 * @param string $to      Target status.
+	 * @param string $error   Error message.
+	 * @param string $failure Kind of a failure (Job::FAILURE_*).
 	 * @return void
 	 * @throws LockLost When the write refused.
 	 */
-	private function transition( Job $job, string $token, string $to, string $error ): void {
+	private function transition( Job $job, string $token, string $to, string $error, string $failure = '' ): void {
 		try {
-			$this->repository->transition( $job, $to, $error, $token );
+			$this->repository->transition( $job, $to, $error, $token, $failure );
 		} catch ( StaleJob $e ) {
 			throw new LockLost( $e->getMessage(), 0, $e ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
 		}
@@ -723,11 +725,12 @@ final class Runner {
 	 * @param string $token   Lock token.
 	 * @param Logger $logger  Logger.
 	 * @param string $message Error message (paths already masked).
+	 * @param string $failure Job::FAILURE_TEMPORARY when a retry may succeed; final otherwise.
 	 * @return TickResult
 	 */
-	private function fail( Job $job, string $token, Logger $logger, string $message ): TickResult {
+	private function fail( Job $job, string $token, Logger $logger, string $message, string $failure = Job::FAILURE_FINAL ): TickResult {
 		$logger->error( 'Job failed', array( 'error' => $message ) );
-		$this->transition( $job, $token, Job::FAILED, $message );
+		$this->transition( $job, $token, Job::FAILED, $message, $failure );
 		return new TickResult( TickResult::FAILED, -1, $job, $this->redactor->redact( $message ) );
 	}
 

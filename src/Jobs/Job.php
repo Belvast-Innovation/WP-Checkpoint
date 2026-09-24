@@ -27,6 +27,12 @@ final class Job {
 	const CANCELLED = 'cancelled';
 
 	/**
+	 * Kinds of failure (failure_kind).
+	 */
+	const FAILURE_TEMPORARY = 'temporary';
+	const FAILURE_FINAL     = 'final';
+
+	/**
 	 * Whether the job is paused because a step asked for a decision. Such
 	 * a job is not ticked until JobRepository::answer() stored the answers;
 	 * a paused job without questions is resumed by the next tick.
@@ -35,6 +41,17 @@ final class Job {
 	 */
 	public function awaiting_answer(): bool {
 		return self::PAUSED === $this->status && array() !== $this->questions;
+	}
+
+	/**
+	 * Whether retrying is worth offering: the job failed, its work files are
+	 * still there, and the failure was not one that repeats. A failure
+	 * recorded before kinds existed is offered, as it was.
+	 *
+	 * @return bool
+	 */
+	public function retry_useful(): bool {
+		return self::FAILED === $this->status && $this->can_retry() && self::FAILURE_FINAL !== $this->failure_kind;
 	}
 
 	/**
@@ -175,6 +192,16 @@ final class Job {
 	 * @var string
 	 */
 	public $last_error = '';
+
+	/**
+	 * What kind of failure ended the job: FAILURE_TEMPORARY (the server had
+	 * a passing problem: a retry continues where it stopped), FAILURE_FINAL
+	 * (a retry would fail the same way), or '' (failed before this was
+	 * recorded, or not failed).
+	 *
+	 * @var string
+	 */
+	public $failure_kind = '';
 
 	/**
 	 * When a failed job's work files were reclaimed after their retention
