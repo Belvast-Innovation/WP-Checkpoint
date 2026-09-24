@@ -49,6 +49,13 @@ final class Statement {
 	public $columns = array();
 
 	/**
+	 * SET NAMES: the character set it names (lowercase); '' for any other statement.
+	 *
+	 * @var string
+	 */
+	public $charset = '';
+
+	/**
 	 * INSERT: number of rows.
 	 *
 	 * @var int

@@ -123,6 +123,28 @@ final class RestoreImportTest extends RestoreTestCase {
 		$this->assertSame( $before, $this->live_site() );
 	}
 
+	public function test_a_chunk_in_a_character_set_where_a_backslash_can_end_a_character_runs_nothing_but_hex_strings(): void {
+		global $wpdb;
+		// A later chunk switched to gbk, with a row that is one string to a byte-wise reader and a subquery to the server.
+		$base   = $this->backup(
+			array_merge( self::site_tables(), $this->tables() ),
+			function ( string $table, array $chunks ): array {
+				if ( $this->p . 'nokey' === $table ) {
+					$chunks[0] = str_replace( '/*!40101 SET NAMES utf8mb4 */;', '/*!40101 SET NAMES gbk */;', $chunks[0] );
+					$chunks[0] = str_replace( "-- wpcheckpoint end", "INSERT INTO `{$table}` (`a`, `b`) VALUES ('x\xbf\\', (SELECT 41+1)) #', 5);\n-- wpcheckpoint end", $chunks[0] );
+				}
+				return $chunks;
+			}
+		);
+		$before = $this->live_site();
+		$job    = $this->run_restore( $this->start_restore( $base ) );
+		$this->assertSame( Job::FAILED, $job->status );
+		$this->assertStringContainsString( 'A quoted string under the character set gbk', (string) $job->last_error );
+		$names = $this->temporary_names( $job );
+		$this->assertSame( '0', (string) $wpdb->get_var( 'SELECT COUNT(*) FROM `' . $names[ $this->p . 'nokey' ] . "` WHERE b = '42'" ), 'the subquery never ran' );
+		$this->assertSame( $before, $this->live_site() );
+	}
+
 	public function test_an_insert_whose_columns_differ_from_the_definition_is_refused_in_the_preflight(): void {
 		$base = $this->backup(
 			array_merge( self::site_tables(), $this->tables() ),

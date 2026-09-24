@@ -143,6 +143,13 @@ final class ChunkReader {
 	private $past_preamble;
 
 	/**
+	 * The session's character set as the statements are read ('' when unknown: the site's own).
+	 *
+	 * @var string
+	 */
+	private $charset;
+
+	/**
 	 * Open a chunk file at an offset (0, or the end of a statement returned earlier).
 	 *
 	 * @param string       $path   Chunk file.
@@ -151,9 +158,10 @@ final class ChunkReader {
 	 * @param int          $chunk  Chunk number.
 	 * @param int          $read_bytes Bytes read at a time (tests use tiny reads to put every boundary everywhere).
 	 * @param bool         $heads_only Read each INSERT only up to VALUES and return it with no SQL (to be looked at, never run).
+	 * @param string       $charset    The session's character set where the reader starts (a resumed chunk: the one its preamble set).
 	 * @throws EnvironmentFailure When the file cannot be opened or positioned.
 	 */
-	public function __construct( string $path, int $offset, ImportTarget $target, int $chunk, int $read_bytes = self::READ_BYTES, bool $heads_only = false ) {
+	public function __construct( string $path, int $offset, ImportTarget $target, int $chunk, int $read_bytes = self::READ_BYTES, bool $heads_only = false, string $charset = '' ) {
 		$handle = @fopen( $path, 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- reported below.
 		if ( false === $handle ) {
 			throw new EnvironmentFailure( 'A database chunk extracted for the restore cannot be opened.' );
@@ -170,6 +178,16 @@ final class ChunkReader {
 		$this->read_bytes    = max( 1, $read_bytes );
 		$this->heads_only    = $heads_only;
 		$this->past_preamble = $offset > 0;
+		$this->charset       = strtolower( $charset );
+	}
+
+	/**
+	 * The session's character set after the statements read so far ('' when none was set).
+	 *
+	 * @return string
+	 */
+	public function charset(): string {
+		return $this->charset;
 	}
 
 	/**
@@ -220,6 +238,10 @@ final class ChunkReader {
 					throw new Refused( 'The session preamble after other statements.' );
 				}
 				$this->past_preamble = $this->past_preamble || Statement::SET !== $statement->kind;
+				if ( Statement::SET === $statement->kind && 1 === preg_match( '/SET NAMES ([A-Za-z0-9_]+)/', $statement->sql, $names ) ) {
+					$this->charset      = strtolower( $names[1] );
+					$statement->charset = $this->charset;
+				}
 				$this->consume( $statement->end );
 				$statement->end = $this->offset;
 				return $statement;
@@ -262,6 +284,7 @@ final class ChunkReader {
 		}
 		if ( 'CREATE' === $head ) {
 			$tokens = SqlLexer::tokens( $buffer, 0, $this->eof );
+			$this->single_byte_view( $tokens );
 			$create = CreateTable::read( $buffer, $tokens, $this->target->table );
 			$sql    = $create->rewrite( $this->target->temporary, $this->target->final_name, $this->target->number, $this->target->names, $this->target->reference );
 
@@ -280,6 +303,7 @@ final class ChunkReader {
 				throw new Refused( 'DROP TABLE without a quoted table name.' );
 			}
 			list( $name, $at ) = SqlLexer::identifier( $buffer, $at );
+			$this->plain_name( $name );
 			if ( $name !== $this->target->table ) {
 				throw new Refused( 'DROP TABLE names another table.' );
 			}
@@ -339,6 +363,7 @@ final class ChunkReader {
 			throw new Refused( 'INSERT without a quoted table name.' );
 		}
 		list( $name, $at ) = SqlLexer::identifier( $buffer, $at );
+		$this->plain_name( $name );
 		if ( $name !== $this->target->table ) {
 			throw new Refused( 'INSERT into another table.' );
 		}
@@ -354,8 +379,9 @@ final class ChunkReader {
 				throw new Refused( 'INSERT with a column list that is not quoted names.' );
 			}
 			list( $column, $at ) = SqlLexer::identifier( $buffer, $at );
-			$columns[]           = $column;
-			$at                  = SqlLexer::spaces( $buffer, $at );
+			$this->plain_name( $column );
+			$columns[] = $column;
+			$at        = SqlLexer::spaces( $buffer, $at );
 			if ( ! isset( $buffer[ $at ] ) ) {
 				throw new NeedMoreBytes();
 			}
@@ -381,7 +407,7 @@ final class ChunkReader {
 			$at    = $this->expect( $buffer, SqlLexer::spaces( $buffer, $at ), '(', 'INSERT with something other than a row of values.' );
 			$count = 0;
 			while ( true ) {
-				$at = self::value( $buffer, SqlLexer::spaces( $buffer, $at ) );
+				$at = $this->value( $buffer, SqlLexer::spaces( $buffer, $at ) );
 				++$count;
 				$at = SqlLexer::spaces( $buffer, $at );
 				if ( ! isset( $buffer[ $at ] ) ) {
@@ -426,12 +452,15 @@ final class ChunkReader {
 	 * @throws NeedMoreBytes When the buffer ends first.
 	 * @throws Refused When there is no literal there.
 	 */
-	private static function value( string $buffer, int $at ): int {
+	private function value( string $buffer, int $at ): int {
 		if ( ! isset( $buffer[ $at ] ) ) {
 			throw new NeedMoreBytes();
 		}
 		$byte = $buffer[ $at ];
 		if ( '\'' === $byte ) {
+			if ( $this->multibyte_session() ) {
+				throw new Refused( sprintf( 'A quoted string under the character set %s, where the backup writes every string as hexadecimal.', $this->charset ) );
+			}
 			return SqlLexer::quoted( $buffer, $at );
 		}
 		if ( 'X' === $byte || 'x' === $byte ) {
@@ -467,6 +496,57 @@ final class ChunkReader {
 			throw new Refused( 'INSERT with something other than literal values.' );
 		}
 		return $at + $length;
+	}
+
+	/**
+	 * Whether the session's character set has multibyte characters whose
+	 * second byte can be a backslash or a backtick (gbk, big5, sjis and the
+	 * like): there the server may read a byte this reader takes for an
+	 * escape or a closing backtick as part of a character, and the two
+	 * would disagree about where a string or a name ends. The exporter
+	 * writes every string as hexadecimal under such a character set
+	 * (SqlWriter), so a statement read under one may hold no quoted string
+	 * in its rows, no backslash in any string, and no byte from 0x80 in a
+	 * name.
+	 *
+	 * @return bool
+	 */
+	private function multibyte_session(): bool {
+		return '' !== $this->charset && ! SqlWriter::backslash_safe( $this->charset );
+	}
+
+	/**
+	 * Refuse a name with a byte from 0x80 under such a character set.
+	 *
+	 * @param string $name Name.
+	 * @return void
+	 * @throws Refused When it has one.
+	 */
+	private function plain_name( string $name ): void {
+		if ( $this->multibyte_session() && 1 === preg_match( '/[\x80-\xFF]/', $name ) ) {
+			throw new Refused( sprintf( 'A name with a non-ASCII byte under the character set %s, which this reader and the server could read differently.', $this->charset ) );
+		}
+	}
+
+	/**
+	 * Refuse, under such a character set, a CREATE TABLE whose strings hold a backslash or whose names or words a byte from 0x80.
+	 *
+	 * @param array<int, array{0: string, 1: int, 2: int, 3: string}> $tokens Tokens.
+	 * @return void
+	 * @throws Refused When one does.
+	 */
+	private function single_byte_view( array $tokens ): void {
+		if ( ! $this->multibyte_session() ) {
+			return;
+		}
+		foreach ( $tokens as $token ) {
+			if ( 'str' === $token[0] && false !== strpos( $token[3], '\\' ) ) {
+				throw new Refused( sprintf( 'A backslash in a string under the character set %s, which this reader and the server could read differently.', $this->charset ) );
+			}
+			if ( 'id' === $token[0] || 'word' === $token[0] ) {
+				$this->plain_name( $token[3] );
+			}
+		}
 	}
 
 	/**

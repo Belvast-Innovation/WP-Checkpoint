@@ -33,9 +33,12 @@ defined( 'ABSPATH' ) || exit;
  *   (and MariaDB's "/*M!") is a versioned comment whose content the server
  *   executes, so its content is read as SQL here too.
  *
- * Every byte is ASCII-significant or not: the backup is written in UTF-8,
- * latin1 or as hex (SqlWriter), where no byte of a multibyte character is
- * a quote, a backslash or a semicolon.
+ * Bytes are read one by one, which agrees with the server in UTF-8 and
+ * latin1, where no byte of a multibyte character is a quote, a backslash,
+ * a backtick or a semicolon. In gbk, big5, sjis and the like a backslash or
+ * a backtick can be the second byte of a character; ChunkReader refuses
+ * under those character sets whatever the two readings could disagree on
+ * (the exporter writes every string there as hexadecimal).
  */
 final class SqlLexer {
 

@@ -105,6 +105,37 @@ final class ImportSession {
 	}
 
 	/**
+	 * Set the session's character set, on both sides: the server reads the
+	 * statements in it and mysqli_real_escape_string() escapes for it. A
+	 * SET NAMES sent as a statement would change only the server's side,
+	 * and rows() would then escape for one character set while the server
+	 * reads another.
+	 *
+	 * @param string $charset Character set (letters, digits, underscores).
+	 * @return void
+	 * @throws StatementFailed When the server does not know it.
+	 */
+	public function names( string $charset ): void {
+		$this->quietly(
+			function () use ( $charset ): bool {
+				if ( '' === $charset || strspn( $charset, 'abcdefghijklmnopqrstuvwxyz0123456789_' ) !== strlen( $charset ) || ! mysqli_set_charset( $this->mysqli, $charset ) ) {
+					throw new StatementFailed( sprintf( 'The database does not accept the character set %s.', $charset ), (int) mysqli_errno( $this->mysqli ) );
+				}
+				return true;
+			}
+		);
+	}
+
+	/**
+	 * The session's character set (as the client and the server have it).
+	 *
+	 * @return string
+	 */
+	public function charset(): string {
+		return strtolower( (string) mysqli_character_set_name( $this->mysqli ) );
+	}
+
+	/**
 	 * Rows of a query, each "?" replaced by a quoted, escaped string (mysqli
 	 * without mysqlnd has neither get_result() nor fetch_all(), so no
 	 * prepared statements here).

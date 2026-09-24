@@ -193,6 +193,31 @@ final class RestoreStateCarryTest extends RestoreTestCase {
 		$this->assertSame( '1', $this->db->rows( 'SELECT COUNT(*) FROM `' . $wpdb->base_prefix . 'wpcr_victim`' )[0][0] );
 	}
 
+	/**
+	 * A chunk's SET NAMES must reach both sides of the connection: sent as a statement it changes only
+	 * the server's, and a value escaped for the old character set is read by the server in the new one.
+	 */
+	public function test_the_character_set_a_chunk_sets_is_the_one_values_are_escaped_for(): void {
+		$value   = "\xbf' OR '1'='1";
+		$session = ImportSession::open( Credentials::from_wordpress() );
+		try {
+			// The control: SET NAMES as a statement. The escape before the quote becomes part of a gbk character, the quote ends the string.
+			$session->run( 'SET NAMES gbk' );
+			try {
+				$read = (string) $session->rows( 'SELECT HEX(?)', array( $value ) )[0][0];
+			} catch ( \WPCheckpoint\Restore\StatementFailed $e ) {
+				$read = 'error ' . $e->getCode(); // The quote ended the string and what followed was not SQL.
+			}
+			$this->assertNotSame( strtoupper( bin2hex( $value ) ), $read, 'the server did not read the value it was given' );
+
+			$session->names( 'gbk' );
+			$this->assertSame( 'gbk', $session->charset() );
+			$this->assertSame( strtoupper( bin2hex( $value ) ), (string) $session->rows( 'SELECT HEX(?)', array( $value ) )[0][0], 'the value, exactly' );
+		} finally {
+			$session->close();
+		}
+	}
+
 	public function test_a_run_that_lost_its_lease_cannot_move_the_ledger_and_its_rows_roll_back(): void {
 		global $wpdb;
 		$this->db = ImportSession::open( Credentials::from_wordpress() );

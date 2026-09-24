@@ -143,6 +143,7 @@ final class DatabaseImportStep implements Step {
 		$walk     = new ChunkWalk( RestoreFiles::path( $work, RestoreFiles::INDEX ), $plan['volumes'], $plan['chunk_bytes'] );
 		$names    = new ConstraintNames( $plan['random'] );
 		$db       = call_user_func( $this->connect );
+		$site_set = $db->charset(); // Each chunk starts from the site's own character set; its preamble may set another.
 		$counted  = array();
 		$columns  = array();
 		$slowest  = 0.0;
@@ -197,7 +198,7 @@ final class DatabaseImportStep implements Step {
 					array( $plan['plan'], 'reference' ),
 					$columns[ $table['number'] ]
 				);
-				$outcome = $this->import_chunk( $context, $db, $ledger, $target, $file, (int) $cursor['current']['c'], $counted, $slowest, $first, $cursor, $plan['plan'] );
+				$outcome = $this->import_chunk( $context, $db, $ledger, $target, $file, (int) $cursor['current']['c'], $counted, $slowest, $first, $cursor, $plan['plan'], $site_set );
 				if ( 'restart' === $outcome ) {
 					$cursor['current'] = null;
 					$cursor['walk']    = $cursor['table_start'];
@@ -237,13 +238,14 @@ final class DatabaseImportStep implements Step {
 	 * @param bool                 $first   Whether no statement ran yet in this tick (updated).
 	 * @param array<string, mixed> $cursor  Cursor (its chunk's pos follows the ledger, so a tick that moves the ledger moves the cursor).
 	 * @param TablePlan            $plan    Plan.
+	 * @param string               $session_charset The site's character set, the session's before the chunk's preamble.
 	 * @return string "done", "stopped" or "restart".
 	 * @throws Refused When a statement is not one the restore runs.
 	 * @throws WorkLost When the ledger and the position disagree.
 	 * @throws LockLost When another run moved the ledger.
 	 * @throws \RuntimeException When one statement takes longer than the whole time budget.
 	 */
-	private function import_chunk( JobContext $context, ImportSession $db, Ledger $ledger, ImportTarget $target, string $file, int $chunk, array &$counted, float &$slowest, bool &$first, array &$cursor, TablePlan $plan ): string {
+	private function import_chunk( JobContext $context, ImportSession $db, Ledger $ledger, ImportTarget $target, string $file, int $chunk, array &$counted, float &$slowest, bool &$first, array &$cursor, TablePlan $plan, string $session_charset ): string {
 		$number = $target->number;
 		$state  = $ledger->get( $number );
 		if ( null === $state ) {
@@ -270,18 +272,21 @@ final class DatabaseImportStep implements Step {
 			}
 			$counted[ $number ] = true;
 		}
+		$db->names( $session_charset );
+		$charset = $session_charset;
 		if ( $pos > 0 ) {
 			// The session's settings (the character set of the chunk's text) come from the preamble at the head.
 			$head = new ChunkReader( $file, 0, $target, $chunk );
 			try {
 				for ( $statement = $head->next(); null !== $statement && Statement::SET === $statement->kind; $statement = $head->next() ) {
-					$db->run( $statement->sql );
+					$this->run_set( $db, $statement );
 				}
+				$charset = $head->charset();
 			} finally {
 				$head->close();
 			}
 		}
-		$reader   = new ChunkReader( $file, $pos, $target, $chunk );
+		$reader   = new ChunkReader( $file, $pos, $target, $chunk, ChunkReader::READ_BYTES, false, $charset );
 		$at_chunk = null === $state ? 0 : $state['chunk'];
 		$at_pos   = null === $state ? 0 : $state['pos'];
 		$rows     = 0;
@@ -302,7 +307,7 @@ final class DatabaseImportStep implements Step {
 				}
 				$started = $context->elapsed();
 				if ( Statement::SET === $statement->kind ) {
-					$db->run( $statement->sql );
+					$this->run_set( $db, $statement );
 				} elseif ( Statement::DROP === $statement->kind || Statement::CREATE === $statement->kind ) {
 					if ( null !== $state ) {
 						throw new Refused( sprintf( 'Table %s, chunk %d: the table is dropped or created again after its rows began.', $target->table, $chunk ) );
@@ -368,6 +373,21 @@ final class DatabaseImportStep implements Step {
 			}
 			$reader->close();
 		}
+	}
+
+	/**
+	 * Run a preamble statement: SET NAMES through the connection (both of its sides), the others as they are.
+	 *
+	 * @param ImportSession $db        Connection.
+	 * @param Statement     $statement A SET statement.
+	 * @return void
+	 */
+	private function run_set( ImportSession $db, Statement $statement ): void {
+		if ( '' !== $statement->charset ) {
+			$db->names( $statement->charset );
+			return;
+		}
+		$db->run( $statement->sql );
 	}
 
 	/**

@@ -192,6 +192,39 @@ final class ChunkReaderTest extends TestCase {
 		$this->assertSame( array( 'set', 'set', 'set', 'drop', 'create', 'insert' ), $kinds, 'the first INSERT\'s columns without its rows, from a cut-off chunk' );
 	}
 
+	/**
+	 * In gbk, big5, sjis and the like, a backslash or a backtick can be the second byte of a character:
+	 * the server would read such a byte as part of the character where this reader sees an escape or the
+	 * end of a name, and the two would disagree about where a string ends (the server then runs as SQL what
+	 * the reader took for a string's content). Under those character sets the exporter writes every string
+	 * as hexadecimal; the reader accepts nothing else.
+	 */
+	public function test_under_a_character_set_whose_characters_can_hold_a_backslash_only_hex_strings_are_read(): void {
+		$head  = "/*!40101 SET NAMES gbk */;\n";
+		$rows  = SqlWriter::insert_head( 'wp_posts', array( 'ID', 'post_title' ) );
+		$bytes = "x\xbf";
+		$this->assertCount( 2, $this->read( $head . $rows . "(1,X'" . bin2hex( $bytes ) . "'),(2,NULL);\n" ), 'the control: what the exporter writes under gbk' );
+		$this->assertCount( 2, $this->read( "/*!40101 SET NAMES utf8mb4 */;\n" . $rows . "(1,'x\\\\ y');\n" ), 'and quoted strings where a backslash is only a backslash' );
+
+		// Read byte by byte, one string: 'x<BF>\', (SELECT 41+1)) #'. Read by the server in gbk: 'x<BF5C>', then a subquery.
+		$this->assert_refused( $head . $rows . "('x\xbf\\', (SELECT 41+1)) #', 5);\n", 'A quoted string under the character set gbk' );
+		$this->assert_refused( $head . "INSERT INTO `wp_posts` (`ID`, `post_ti\x81`) VALUES (1,2);\n", 'non-ASCII byte under the character set gbk' );
+		$this->assert_refused( $head . "CREATE TABLE `wp_posts` (`ID` int COMMENT 'a\\\\b', PRIMARY KEY (`ID`)) ENGINE=InnoDB;\n", 'A backslash in a string under the character set gbk' );
+		$this->assertStringStartsWith( 'CREATE TABLE', $this->read( $head . "CREATE TABLE `wp_posts` (`ID` int COMMENT '\xd6\xd0\xce\xc4', PRIMARY KEY (`ID`)) ENGINE=InnoDB;\n" )[1]->sql, 'the control: a gbk comment without a backslash' );
+
+		// A reader resumed past the preamble knows the character set from its caller.
+		$file   = $this->file( $rows . "('x');\n" );
+		$reader = new ChunkReader( $file, 0, $this->target(), 2, ChunkReader::READ_BYTES, false, 'gbk' );
+		try {
+			$reader->next();
+			$this->fail( 'refused' );
+		} catch ( Refused $e ) {
+			$this->assertStringContainsString( 'under the character set gbk', $e->getMessage() );
+		} finally {
+			$reader->close();
+		}
+	}
+
 	public function test_the_refusal_names_the_table_chunk_and_offset(): void {
 		try {
 			$this->read( "/*!40014 SET FOREIGN_KEY_CHECKS=0 */;\nUPDATE x;" );
