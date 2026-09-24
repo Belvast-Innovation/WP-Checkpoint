@@ -211,7 +211,7 @@ final class FileScanStep implements Step {
 		if ( $size < $length ) {
 			// The checkpoint claims more than the file holds: the work directory was tampered with or lost.
 			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- see above.
-			throw new \RuntimeException( 'The file index is shorter than the last checkpoint recorded.' );
+			throw new WorkLost( 'The file index is shorter than the last checkpoint recorded; the work directory was lost or changed.' );
 		}
 		if ( 0 !== fseek( $handle, $length ) ) {
 			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- see above.

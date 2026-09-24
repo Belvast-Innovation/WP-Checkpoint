@@ -40,20 +40,20 @@ final class ExportPlan {
 	 * @param string $work Work directory.
 	 * @param string $name One of the constants.
 	 * @return array<string, mixed>
-	 * @throws \RuntimeException When the file is missing or not a JSON object (the work directory was lost or changed).
+	 * @throws WorkLost When the file is missing or not a JSON object (the work directory was lost or changed).
 	 */
 	public static function read( string $work, string $name ): array {
 		$path = $work . DIRECTORY_SEPARATOR . $name;
 		$size = @filesize( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a missing file is reported below.
 		if ( false === $size || $size > self::MAX_BYTES ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message with a file name.
-			throw new \RuntimeException( sprintf( 'The file %s of this job is missing or too large; the work directory was lost or changed.', $name ) );
+			throw new WorkLost( sprintf( 'The file %s of this job is missing or too large; the work directory was lost or changed.', $name ) );
 		}
 		$json = @file_get_contents( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- small file in the job's own work directory, size checked above.
 		$data = is_string( $json ) ? json_decode( $json, true, 16 ) : null;
 		if ( ! is_array( $data ) ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message with a file name.
-			throw new \RuntimeException( sprintf( 'The file %s of this job cannot be read; the work directory was lost or changed.', $name ) );
+			throw new WorkLost( sprintf( 'The file %s of this job cannot be read; the work directory was lost or changed.', $name ) );
 		}
 		return $data;
 	}
@@ -117,10 +117,11 @@ final class ExportPlan {
 	 * @param array<string, mixed> $review review.json (with decisions).
 	 * @return array{tables: string[], notes: string[], groups: string[], exclusions: string[], exclude_paths: string[], exclude_oversize: string[], oversize_counts: array<string, int|null>}
 	 * @throws \RuntimeException When the review holds no decisions (the review step did not finish).
+	 * @throws WorkLost When the work directory was lost, changed or damaged.
 	 */
 	public static function effective( array $plan, array $review ): array {
 		if ( ! isset( $review['decisions'] ) || ! is_array( $review['decisions'] ) ) {
-			throw new \RuntimeException( 'The review of this job holds no decisions; the work directory was lost or changed.' );
+			throw new WorkLost( 'The review of this job holds no decisions; the work directory was lost or changed.' );
 		}
 		$decisions = $review['decisions'];
 		$tables    = self::strings( $plan, 'tables' );

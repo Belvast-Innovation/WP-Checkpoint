@@ -10,6 +10,7 @@ namespace WPCheckpoint\Database;
 use WPCheckpoint\Archive\ChunkHasher;
 use WPCheckpoint\Archive\IndexLine;
 use WPCheckpoint\Jobs\TransientFailure;
+use WPCheckpoint\Jobs\WorkLost;
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- messages carry table names, numbers and the driver's error text; the runner stores them through the redactor and the presenter cleans them before display.
 
@@ -666,11 +667,12 @@ final class TableExporter {
 	 * @param array{create: string, columns: string[], kinds: string[], pk: string[], pk_index: int[]} $desc  Description.
 	 * @return array{mode: string, key?: string[]|null, rows?: int}
 	 * @throws \RuntimeException When the chunk cannot be read or its bound line is malformed.
+	 * @throws WorkLost When the work directory was lost, changed or damaged.
 	 */
 	private function bound_in( string $path, string $table, int $chunk, array $desc ): array {
 		$handle = @fopen( $path, 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- see write_new().
 		if ( false === $handle ) {
-			throw new \RuntimeException( 'A chunk file is missing; the work directory was lost or changed.' );
+			throw new WorkLost( 'A chunk file is missing; the work directory was lost or changed.' );
 		}
 		try {
 			$first  = fgets( $handle, self::MAX_MARKER_BYTES );
@@ -679,7 +681,7 @@ final class TableExporter {
 			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- see above.
 		}
 		if ( ! is_string( $first ) || "\n" !== substr( $first, -1 ) || 0 !== strpos( $first, self::HEADER . $table . ' chunk=' . $chunk . ' ' ) ) {
-			throw new \RuntimeException( sprintf( 'Chunk %d of table %s has a malformed header; the work directory was lost or changed.', $chunk, $table ) );
+			throw new WorkLost( sprintf( 'Chunk %d of table %s has a malformed header; the work directory was lost or changed.', $chunk, $table ) );
 		}
 		if ( ! is_string( $second ) || 0 !== strpos( $second, self::BOUND ) ) {
 			return array( 'mode' => 'none' );
@@ -694,14 +696,14 @@ final class TableExporter {
 		if ( array() !== $desc['pk'] && 1 === preg_match( '/\A' . preg_quote( self::BOUND, '/' ) . 'pk_max=(.+)\z/', $line, $m ) ) {
 			$key = self::decode_key( $m[1] );
 			if ( null !== $key && count( $key ) !== count( $desc['pk'] ) ) {
-				throw new \RuntimeException( sprintf( 'Chunk %d of table %s has a bound for another key; the table changed or the work directory was damaged.', $chunk, $table ) );
+				throw new WorkLost( sprintf( 'Chunk %d of table %s has a bound for another key; the table changed or the work directory was damaged.', $chunk, $table ) );
 			}
 			return array(
 				'mode' => 'pk',
 				'key'  => $key,
 			);
 		}
-		throw new \RuntimeException( sprintf( 'Chunk %d of table %s has a malformed bound line; the work directory was changed or damaged.', $chunk, $table ) );
+		throw new WorkLost( sprintf( 'Chunk %d of table %s has a malformed bound line; the work directory was changed or damaged.', $chunk, $table ) );
 	}
 
 	/**
@@ -945,6 +947,7 @@ final class TableExporter {
 	 * @return resource
 	 * @throws TransientFailure When the file cannot be opened or truncated.
 	 * @throws \RuntimeException When the file is shorter than the committed length.
+	 * @throws WorkLost When the work directory was lost, changed or damaged.
 	 */
 	private function open_at( string $path, int $length ) {
 		$handle = @fopen( $path, 'c+b' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- see write_new().
@@ -955,7 +958,7 @@ final class TableExporter {
 		$size = is_array( $stat ) ? (int) $stat['size'] : 0;
 		if ( $size < $length ) {
 			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- see above.
-			throw new \RuntimeException( 'A chunk file is shorter than the last checkpoint recorded; the work directory was lost or changed.' );
+			throw new WorkLost( 'A chunk file is shorter than the last checkpoint recorded; the work directory was lost or changed.' );
 		}
 		if ( $size > $length && ! ftruncate( $handle, $length ) ) {
 			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- see above.
@@ -998,6 +1001,7 @@ final class TableExporter {
 	 * @param int      $length Committed length.
 	 * @return string[]|null Null at the start of the table.
 	 * @throws \RuntimeException When the committed part is not shaped as the writer left it.
+	 * @throws WorkLost When the work directory was lost, changed or damaged.
 	 */
 	private function resume_key( $handle, string $table, int $chunk, int $length ) {
 		$tail_length = min( $length, self::MAX_MARKER_BYTES + 1 );
@@ -1006,7 +1010,7 @@ final class TableExporter {
 			$tail = fread( $handle, $tail_length ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- chunk file in the job's work directory.
 		}
 		if ( ! is_string( $tail ) || strlen( $tail ) !== $tail_length ) {
-			throw new \RuntimeException( 'A chunk file could not be read back; the work directory was lost or changed.' );
+			throw new WorkLost( 'A chunk file could not be read back; the work directory was lost or changed.' );
 		}
 		if ( "\n" === substr( $tail, -1 ) ) {
 			$body  = substr( $tail, 0, -1 );
@@ -1019,13 +1023,13 @@ final class TableExporter {
 			}
 		}
 		if ( $this->contains_marker( $handle, $length ) ) {
-			throw new \RuntimeException( sprintf( 'Chunk %d of table %s does not end with a batch marker at the recorded length; the work directory was changed or damaged.', $chunk, $table ) );
+			throw new WorkLost( sprintf( 'Chunk %d of table %s does not end with a batch marker at the recorded length; the work directory was changed or damaged.', $chunk, $table ) );
 		}
 		fseek( $handle, 0 );
 		$first = fgets( $handle, self::MAX_MARKER_BYTES );
 		fseek( $handle, $length );
 		if ( ! is_string( $first ) ) {
-			throw new \RuntimeException( 'A chunk file has no header; the work directory was lost or changed.' );
+			throw new WorkLost( 'A chunk file has no header; the work directory was lost or changed.' );
 		}
 		return $this->key_from_header( $table, $chunk, $first );
 	}
@@ -1068,13 +1072,14 @@ final class TableExporter {
 	 * @param string $line Line without its newline.
 	 * @return string[]|null Key values; an empty array in offset mode.
 	 * @throws \RuntimeException When the marker is malformed.
+	 * @throws WorkLost When the work directory was lost, changed or damaged.
 	 */
 	public static function parse_marker( string $line ) {
 		if ( 0 !== strpos( $line, self::MARKER ) ) {
 			return null;
 		}
 		if ( 1 !== preg_match( '/\A' . preg_quote( self::MARKER, '/' ) . 'rows=(\d+) (pk|offset)=(.+)\z/', $line, $m ) ) {
-			throw new \RuntimeException( 'A batch marker in a chunk file is malformed; the work directory was changed or damaged.' );
+			throw new WorkLost( 'A batch marker in a chunk file is malformed; the work directory was changed or damaged.' );
 		}
 		if ( 'offset' === $m[2] ) {
 			return array(); // Offset mode keeps its position in the state; the marker is for readers.
@@ -1090,11 +1095,12 @@ final class TableExporter {
 	 * @param string $line  Header line.
 	 * @return string[]|null
 	 * @throws \RuntimeException When the line is not this chunk's header.
+	 * @throws WorkLost When the work directory was lost, changed or damaged.
 	 */
 	private function key_from_header( string $table, int $chunk, string $line ) {
 		$prefix = preg_quote( self::HEADER . $table . ' chunk=' . $chunk . ' ', '/' );
 		if ( 1 !== preg_match( '/\A' . $prefix . '(pk_from|offset)=(.+?)\s*\z/', $line, $m ) ) {
-			throw new \RuntimeException( sprintf( 'Chunk %d of table %s has a malformed header; the work directory was lost or changed.', $chunk, $table ) );
+			throw new WorkLost( sprintf( 'Chunk %d of table %s has a malformed header; the work directory was lost or changed.', $chunk, $table ) );
 		}
 		return 'offset' === $m[1] ? array() : self::decode_key( $m[2] );
 	}
@@ -1106,12 +1112,13 @@ final class TableExporter {
 	 * @param int    $chunk Chunk about to start (> 1).
 	 * @return string[]|null
 	 * @throws \RuntimeException When the previous chunk cannot be read or does not end as written.
+	 * @throws WorkLost When the work directory was lost, changed or damaged.
 	 */
 	private function previous_end_key( string $table, int $chunk ) {
 		$path   = $this->chunk_path( $table, $chunk - 1 );
 		$handle = @fopen( $path, 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- see write_new().
 		if ( false === $handle ) {
-			throw new \RuntimeException( 'The previous chunk file is missing; the work directory was lost or changed.' );
+			throw new WorkLost( 'The previous chunk file is missing; the work directory was lost or changed.' );
 		}
 		try {
 			$stat = fstat( $handle );
@@ -1125,7 +1132,7 @@ final class TableExporter {
 		$last   = (string) end( $lines );
 		$prefix = preg_quote( self::END . 'table=' . $table . ' chunk=' . ( $chunk - 1 ) . ' ', '/' );
 		if ( 1 !== preg_match( '/\A' . $prefix . 'rows=\d+ (pk_to|offset)=(.+)\z/', $last, $m ) ) {
-			throw new \RuntimeException( sprintf( 'Chunk %d of table %s does not end with its end line; the work directory was lost or changed.', $chunk - 1, $table ) );
+			throw new WorkLost( sprintf( 'Chunk %d of table %s does not end with its end line; the work directory was lost or changed.', $chunk - 1, $table ) );
 		}
 		return 'offset' === $m[1] ? array() : self::decode_key( $m[2] );
 	}
@@ -1162,6 +1169,7 @@ final class TableExporter {
 	 * @param string $json JSON.
 	 * @return string[]|null
 	 * @throws \RuntimeException When the JSON is not a key as encode_key() writes it.
+	 * @throws WorkLost When the work directory was lost, changed or damaged.
 	 */
 	public static function decode_key( string $json ) {
 		if ( 'null' === $json ) {
@@ -1169,7 +1177,7 @@ final class TableExporter {
 		}
 		$decoded = json_decode( $json, true, 3 );
 		if ( ! is_array( $decoded ) || array() === $decoded || array_keys( $decoded ) !== range( 0, count( $decoded ) - 1 ) ) {
-			throw new \RuntimeException( 'A primary key in a chunk file is malformed; the work directory was changed or damaged.' );
+			throw new WorkLost( 'A primary key in a chunk file is malformed; the work directory was changed or damaged.' );
 		}
 		$key = array();
 		foreach ( $decoded as $value ) {
@@ -1181,7 +1189,7 @@ final class TableExporter {
 				$key[] = (string) hex2bin( $value['h'] );
 				continue;
 			}
-			throw new \RuntimeException( 'A primary key in a chunk file is malformed; the work directory was changed or damaged.' );
+			throw new WorkLost( 'A primary key in a chunk file is malformed; the work directory was changed or damaged.' );
 		}
 		return $key;
 	}

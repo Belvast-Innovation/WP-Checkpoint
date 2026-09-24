@@ -111,7 +111,7 @@ final class StoreStep implements Step {
 				throw new \RuntimeException( sprintf( '%s is both in the work directory and in the backups directory; nothing was overwritten.', self::label( $cursor['moved'], $total ) ) );
 			}
 			if ( ! $in_work && ! $in_backups ) {
-				throw new \RuntimeException( sprintf( '%s is missing; the work directory was lost or changed.', self::label( $cursor['moved'], $total ) ) );
+				throw new WorkLost( sprintf( '%s is missing; the work directory was lost or changed.', self::label( $cursor['moved'], $total ) ) );
 			}
 			if ( $in_work ) {
 				$context->confirm_lease(); // Nothing between the lease check and the rename.
@@ -174,7 +174,7 @@ final class StoreStep implements Step {
 		$stored   = $this->backups . DIRECTORY_SEPARATOR . $manifest;
 		$source   = is_file( $path ) ? $path : ( is_file( $stored ) ? $stored : '' );
 		if ( '' === $source ) {
-			throw new \RuntimeException( 'The manifest of the finished archive is missing; the work directory was lost or changed.' );
+			throw new WorkLost( 'The manifest of the finished archive is missing; the work directory was lost or changed.' );
 		}
 		clearstatcache( true, $source );
 		$size = @filesize( $source ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- reported below.

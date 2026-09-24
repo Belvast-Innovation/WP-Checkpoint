@@ -8,6 +8,7 @@
 namespace WPCheckpoint\Archive;
 
 use WPCheckpoint\Support\HostFunctions;
+use WPCheckpoint\Jobs\WorkLost;
 
 // phpcs:disable WordPress.WP.AlternativeFunctions -- streamed writes to the plugin's own volume files; the WP filesystem API has no equivalent.
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- messages are internal (an entry-path verdict), never HTML; the caller presents them through JobPresenter::clean().
@@ -810,7 +811,7 @@ final class Packer {
 			// A committed length is only ever recorded after the bytes are on disk, so a shorter file means the
 			// work directory was changed (or the OS dropped what it had acknowledged). Never pad it: the
 			// zeros would be archived as data.
-			throw new \RuntimeException( 'The volume is shorter than its recorded committed length; the work directory was changed or damaged.' );
+			throw new WorkLost( 'The volume is shorter than its recorded committed length; the work directory was changed or damaged.' );
 		}
 		$this->truncate_volume( $committed );
 		$this->truncate_records( (int) $this->state['volume']['entries'] );
