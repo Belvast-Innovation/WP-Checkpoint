@@ -4,8 +4,8 @@ namespace WPCheckpoint\Tests\Unit\Archive;
 
 use WPCheckpoint\Archive\ChunkHasher;
 use WPCheckpoint\Archive\ConcurrentWriter;
-use WPCheckpoint\Archive\InsufficientSpace;
 use WPCheckpoint\Archive\IndexLine;
+use WPCheckpoint\Archive\InsufficientSpace;
 use WPCheckpoint\Archive\Packer;
 use WPCheckpoint\Archive\SealRequired;
 use WPCheckpoint\Archive\SourceChanged;
@@ -13,6 +13,7 @@ use WPCheckpoint\Archive\SourceGone;
 use WPCheckpoint\Archive\ZipFormat;
 use WPCheckpoint\Archive\ZipReader;
 use WPCheckpoint\Tests\Fixtures\Archive\ArchiveBuilder;
+use WPCheckpoint\Tests\Fixtures\MemoryBudget;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 final class PackerTest extends TestCase {
@@ -650,18 +651,16 @@ final class PackerTest extends TestCase {
 	}
 
 	/**
-	 * The acceptance case: 2 GiB of data packed within 128 MB of memory.
+	 * The acceptance case: 2 GiB of data packed within the step's 32 MB above what the process holds (well
+	 * inside a 128 MB host).
 	 * Sources are sparse (zeros) so only the archive costs disk; the stored
 	 * entries are copied byte for byte, so the archive is real.
 	 *
 	 * @group slow
 	 */
-	public function test_two_gigabytes_are_packed_within_128_megabytes_of_memory(): void {
+	public function test_two_gigabytes_are_packed_within_the_step_memory_budget(): void {
 		if ( 'Windows' === PHP_OS_FAMILY ) {
 			$this->markTestSkipped( 'Sparse sources are not guaranteed on the Windows runner.' );
-		}
-		if ( -1 === (int) ini_get( 'memory_limit' ) || (int) ini_get( 'memory_limit' ) > 128 ) {
-			ini_set( 'memory_limit', '128M' );
 		}
 		$files = array();
 		foreach ( array( 700, 700, 748 ) as $i => $mb ) {
@@ -672,24 +671,28 @@ final class PackerTest extends TestCase {
 			fclose( $h );
 			$files[] = array( $path, "files/big$i.bin", 1758196800 );
 		}
-		$before = memory_get_usage( true );
-		$packer = Packer::open( $this->out, 'big', array(), array( 'disk_free' => static function () {
-			return false;
-		} ) );
-		foreach ( $files as list( $source, $entry, $mtime ) ) {
-			$this->add( $packer, $source, $entry, $mtime );
-			while ( $packer->write_piece() > 0 ) {
-				continue;
+		$packer = MemoryBudget::within(
+			32 * 1048576,
+			function () use ( $files ): Packer {
+				$packer = Packer::open( $this->out, 'big', array(), array( 'disk_free' => static function () {
+					return false;
+				} ) );
+				foreach ( $files as list( $source, $entry, $mtime ) ) {
+					$this->add( $packer, $source, $entry, $mtime );
+					while ( $packer->write_piece() > 0 ) {
+						continue;
+					}
+				}
+				$packer->prepare_finish( 4096 );
+				$this->ready( $packer );
+				$packer->finish( array(), '{"embedded":true}', 1758196800 );
+				while ( $packer->hash_next_block() ) {
+					continue;
+				}
+				$packer->close();
+				return $packer;
 			}
-		}
-		$packer->prepare_finish( 4096 );
-		$this->ready( $packer );
-		$packer->finish( array(), '{"embedded":true}', 1758196800 );
-		while ( $packer->hash_next_block() ) {
-			continue;
-		}
-		$packer->close();
-		$this->assertLessThan( 32 * 1048576, memory_get_peak_usage( true ) - $before, 'memory growth stays below the step budget' );
+		);
 		$paths = $packer->sealed_paths();
 		// 700 + 700 MB reach the 1 GiB threshold, so the first volume holds both (it exceeds the threshold
 		// by its last entry, an entry never spans volumes) and the second holds the rest.

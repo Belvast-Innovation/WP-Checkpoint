@@ -3,6 +3,7 @@
 namespace WPCheckpoint\Tests\Unit\Jobs;
 
 use WPCheckpoint\Jobs\WorkLost;
+use WPCheckpoint\Tests\Fixtures\Permissions;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 /**
@@ -41,9 +42,7 @@ final class WorkLostTest extends TestCase {
 	}
 
 	public function test_nothing_is_known_to_be_gone_when_no_directory_can_be_listed(): void {
-		if ( '\\' === DIRECTORY_SEPARATOR || ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) ) {
-			$this->markTestSkipped( 'Needs a directory this user cannot list (POSIX permissions, not root).' );
-		}
+		Permissions::require_enforced();
 		$dir = sys_get_temp_dir() . '/wpcheckpoint-worklost-' . bin2hex( random_bytes( 4 ) );
 		mkdir( $dir . '/work', 0700, true );
 		touch( $dir . '/work/plan.json' );

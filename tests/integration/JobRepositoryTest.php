@@ -7,19 +7,20 @@ use WPCheckpoint\Admin\Notices;
 use WPCheckpoint\Admin\ReclaimActions;
 use WPCheckpoint\Jobs\InvalidTransition;
 use WPCheckpoint\Jobs\Job;
-use WPCheckpoint\Jobs\TempTableDropper;
-use WPCheckpoint\Jobs\TempTables;
-use WPCheckpoint\Jobs\Residue;
 use WPCheckpoint\Jobs\JobRepository;
 use WPCheckpoint\Jobs\JobsUnavailable;
 use WPCheckpoint\Jobs\LockFile;
+use WPCheckpoint\Jobs\Residue;
 use WPCheckpoint\Jobs\StaleJob;
+use WPCheckpoint\Jobs\TempTableDropper;
+use WPCheckpoint\Jobs\TempTables;
 use WPCheckpoint\Support\Deleter;
 use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Support\Options;
 use WPCheckpoint\Support\Schema;
 use WPCheckpoint\Support\StorageReclaim;
 use WPCheckpoint\Support\Uninstaller;
+use WPCheckpoint\Tests\Fixtures\Permissions;
 
 final class JobRepositoryTest extends WP_UnitTestCase {
 
@@ -641,6 +642,7 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 	}
 
 	public function test_a_retried_job_within_retention_finds_its_files_and_the_marker_is_written_before_the_files_go(): void {
+		Permissions::require_enforced(); // The work directory is made unwritable below.
 		list( $job, $dir, $table ) = $this->failed_job_with_work();
 		$queued = $this->repo->transition( $job, Job::QUEUED );
 		$this->assertSame( Job::QUEUED, $queued->status );
@@ -651,21 +653,19 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		$held = $this->repo->acquire( $job->id );
 		$this->repo->transition( $this->repo->find( $job->id ), Job::FAILED, 'again', $held['token'] );
 		$this->now += 8 * 86400;
-		if ( 'Windows' !== PHP_OS_FAMILY && 0 !== (int) getmyuid() ) {
-			chmod( $dir, 0500 );
-			try {
-				$this->repo->purge();
-			} finally {
-				chmod( $dir, 0700 );
-			}
-			$this->assertGreaterThan( 0, $this->repo->find( $job->id )->work_expired_at, 'marked although the files could not be removed' );
-			$this->assertFalse( $this->repo->find( $job->id )->can_retry() );
-			$this->assertDirectoryExists( $dir );
-			$this->assertStringContainsString( 'could not be deleted', (string) file_get_contents( $this->base . '/logs/storage.log' ) );
-			// Now deletable: the next reap treats it as an orphan and finishes the job.
-			$this->repo->reap();
-			$this->assertDirectoryDoesNotExist( $dir );
+		chmod( $dir, 0500 );
+		try {
+			$this->repo->purge();
+		} finally {
+			chmod( $dir, 0700 );
 		}
+		$this->assertGreaterThan( 0, $this->repo->find( $job->id )->work_expired_at, 'marked although the files could not be removed' );
+		$this->assertFalse( $this->repo->find( $job->id )->can_retry() );
+		$this->assertDirectoryExists( $dir );
+		$this->assertStringContainsString( 'could not be deleted', (string) file_get_contents( $this->base . '/logs/storage.log' ) );
+		// Now deletable: the next reap treats it as an orphan and finishes the job.
+		$this->repo->reap();
+		$this->assertDirectoryDoesNotExist( $dir );
 		$this->assertFalse( $this->table_exists( $table ) );
 	}
 

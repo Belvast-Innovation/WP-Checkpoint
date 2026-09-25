@@ -7,6 +7,7 @@ use WPCheckpoint\Replace\Engine;
 use WPCheckpoint\Replace\Needles;
 use WPCheckpoint\Replace\Result;
 use WPCheckpoint\Replace\Serialized;
+use WPCheckpoint\Tests\Fixtures\MemoryBudget;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 /**
@@ -291,30 +292,16 @@ final class EngineTest extends TestCase {
 		unset( $body );
 		$this->assertGreaterThan( TableExporter::MAX_ROW_BYTES - 65536, strlen( $data ) );
 		$this->assertLessThanOrEqual( TableExporter::MAX_ROW_BYTES, strlen( $data ), 'at most the export row limit' );
-		$before = self::reset_peak();
 		$start  = microtime( true );
-		$result = self::engine()->value( $data );
-		if ( null !== $before ) {
-			$this->assertLessThan( 32 * 1048576, memory_get_peak_usage() - $before, 'well within the per-step memory budget' );
-		}
+		$result = MemoryBudget::within(
+			32 * 1048576, // The per-step memory budget.
+			static function () use ( $data ): Result {
+				return self::engine()->value( $data );
+			}
+		);
 		$this->assertLessThan( 20, microtime( true ) - $start, 'within one step' );
 		$this->assertSame( Result::SERIALIZED, $result->kind() );
 		$this->assertSame( substr_count( $data, self::OLD ), $result->replaced() );
-	}
-
-	/**
-	 * Reset the memory peak and return the usage to measure from; null
-	 * before PHP 8.2, where the peak cannot be reset (the assertion is then
-	 * left to the PHP 8 runs rather than measuring an earlier test's peak).
-	 *
-	 * @return int|null
-	 */
-	private static function reset_peak() {
-		if ( ! function_exists( 'memory_reset_peak_usage' ) ) {
-			return null;
-		}
-		memory_reset_peak_usage();
-		return memory_get_usage();
 	}
 
 	public function test_nested_damage_is_read_once_per_level(): void {
@@ -356,11 +343,12 @@ final class EngineTest extends TestCase {
 		};
 		$deepest = $nest( Engine::MAX_NESTED );
 		$this->assertLessThan( TableExporter::MAX_ROW_BYTES, strlen( $deepest ) );
-		$before = self::reset_peak();
-		$result = self::engine()->value( $deepest );
-		if ( null !== $before ) {
-			$this->assertLessThan( 32 * 1048576, memory_get_peak_usage() - $before, 'reachable within the per-step budget' );
-		}
+		$result = MemoryBudget::within(
+			32 * 1048576, // Reachable within the per-step budget.
+			static function () use ( $deepest ): Result {
+				return self::engine()->value( $deepest );
+			}
+		);
 		$this->assertSame( Result::SERIALIZED, $result->kind() );
 		$this->assertSame( substr_count( $payload, self::OLD ), $result->replaced() );
 		unset( $result, $deepest );
