@@ -1222,7 +1222,7 @@ final class JobRepository {
 		);
 		foreach ( $result['kept'] as $table => $referrers ) {
 			// Dropping it would leave another table's key pointing at nothing: it stays until that key is gone.
-			$this->directories->log_event( sprintf( 'Reclaiming the %1$s: %2$s is kept; %3$s, outside them, has a foreign key to it.', $what, $table, implode( ', ', $referrers ) ) );
+			$this->directories->log_event( sprintf( 'Reclaiming the %1$s: %2$s is kept; a foreign key of %3$s, which stays, references it.', $what, $table, implode( ', ', $referrers ) ) );
 		}
 		return array() === $result['failed'] && array() === $result['kept'];
 	}

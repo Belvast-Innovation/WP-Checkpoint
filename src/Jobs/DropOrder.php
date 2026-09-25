@@ -18,17 +18,21 @@ defined( 'ABSPATH' ) || exit;
  * first, one at a time, with checks on; a key of a table to itself does
  * not count.
  *
- * What is left after that are cycles (a references b, b references a) and
- * the tables they reference. No order drops a cycle with checks on on
- * MariaDB or MySQL 5.7; with checks off, one statement drops it on every
- * server. The plan drops such a group in one statement with checks off,
- * and only when no table outside the set references a member (then no
- * key is left pointing at a dropped table).
+ * A cycle (a references b, b references a) never becomes free that way.
+ * No order drops it with checks on on MariaDB or MySQL 5.7; with checks
+ * off, one statement drops it on every server. The plan drops a cycle in
+ * one statement with checks off once no remaining table outside it
+ * references it, and only when no table outside the set references it at
+ * all (then no key is left pointing at a dropped table).
  *
  * A table that a table outside the set references is kept, and so is
  * every table a kept table references: dropping it would fail with checks
  * on, and with checks off would leave the other table's key pointing at
  * nothing. The caller reports them.
+ *
+ * The work is linear in the tables and keys (strongly connected groups by
+ * Tarjan's algorithm, then the groups in rounds), so a reclaim unit stays
+ * bounded whatever the keys look like.
  */
 final class DropOrder {
 
@@ -40,7 +44,7 @@ final class DropOrder {
 	private $steps = array();
 
 	/**
-	 * Tables kept: name => the tables outside the set that reference it (directly or through a kept table).
+	 * Tables kept: name => the tables that reference it and stay (outside the set, or kept themselves).
 	 *
 	 * @var array<string, string[]>
 	 */
@@ -63,9 +67,8 @@ final class DropOrder {
 		foreach ( $tables as $table ) {
 			$names[ $key( $table ) ] = $table;
 		}
-		// referenced => the tables that reference it.
-		$referrers = array();
-		$outside   = array();
+		$references = array(); // Child => parents, both in the set.
+		$outside    = array(); // Parent in the set => referencing tables that stay.
 		foreach ( $keys as $row ) {
 			$child  = $key( $row['table'] );
 			$parent = $key( $row['referenced'] );
@@ -73,65 +76,89 @@ final class DropOrder {
 				continue;
 			}
 			if ( isset( $names[ $child ] ) ) {
-				$referrers[ $parent ][ $child ] = true;
+				$references[ $child ][ $parent ] = true;
 			} else {
-				$outside[ $parent ][] = $row['table'];
+				$outside[ $parent ][ $row['table'] ] = true;
 			}
 		}
 
-		// Kept: referenced from outside, and whatever a kept table references (closure).
+		// Kept: referenced from outside, and whatever a kept table references.
 		$kept  = array();
 		$queue = array_keys( $outside );
-		while ( array() !== $queue ) {
-			$table = (string) array_shift( $queue );
+		for ( $i = 0; isset( $queue[ $i ] ); $i++ ) { // The queue grows while it is read.
+			$table = (string) $queue[ $i ];
 			if ( isset( $kept[ $table ] ) ) {
 				continue;
 			}
 			$kept[ $table ] = true;
-			foreach ( $referrers as $parent => $children ) {
-				if ( isset( $children[ $table ] ) && ! isset( $kept[ $parent ] ) ) {
-					$queue[]              = $parent;
-					$outside[ $parent ][] = $names[ $table ];
-				}
+			foreach ( array_keys( $references[ $table ] ?? array() ) as $parent ) {
+				$outside[ $parent ][ $names[ $table ] ] = true;
+				$queue[]                                = $parent;
 			}
 		}
 		foreach ( array_keys( $kept ) as $table ) {
-			$plan->kept[ $names[ $table ] ] = array_values( array_unique( $outside[ $table ] ?? array() ) );
+			$referrers = array_keys( $outside[ $table ] );
+			sort( $referrers, SORT_STRING );
+			$plan->kept[ $names[ $table ] ] = $referrers;
 		}
 		ksort( $plan->kept );
 
+		// The rest: strongly connected groups, dropped in rounds once no remaining group references them.
 		$left = array_diff_key( $names, $kept );
-		while ( array() !== $left ) {
-			// Tables no remaining table references: one statement each, checks on.
-			$free = array();
-			foreach ( array_keys( $left ) as $table ) {
-				if ( array() === array_intersect_key( $referrers[ $table ] ?? array(), $left ) ) {
-					$free[] = $table;
+		$adj  = array();
+		foreach ( array_keys( $left ) as $table ) {
+			$adj[ $table ] = array_keys( array_intersect_key( $references[ $table ] ?? array(), $left ) );
+		}
+		$groups   = self::components( array_keys( $left ), $adj );
+		$group_of = array();
+		foreach ( $groups as $g => $members ) {
+			foreach ( $members as $table ) {
+				$group_of[ $table ] = $g;
+			}
+		}
+		$referenced_by = array(); // Group => groups that reference it.
+		$parents_of    = array(); // Group => groups it references.
+		foreach ( $adj as $child => $parents ) {
+			foreach ( $parents as $parent ) {
+				$from = $group_of[ $child ];
+				$to   = $group_of[ $parent ];
+				if ( $from !== $to ) {
+					$referenced_by[ $to ][ $from ] = true;
+					$parents_of[ $from ][ $to ]    = true;
 				}
 			}
-			if ( array() !== $free ) {
-				sort( $free, SORT_STRING );
-				foreach ( $free as $table ) {
-					$plan->steps[] = array(
-						'tables'     => array( $left[ $table ] ),
-						'checks_off' => false,
-					);
-					unset( $left[ $table ] );
+		}
+		$ready = array();
+		foreach ( array_keys( $groups ) as $g ) {
+			if ( empty( $referenced_by[ $g ] ) ) {
+				$ready[] = $g;
+			}
+		}
+		while ( array() !== $ready ) {
+			$round = array();
+			foreach ( $ready as $g ) {
+				$members = array();
+				foreach ( $groups[ $g ] as $table ) {
+					$members[] = $left[ $table ];
 				}
-				continue;
+				sort( $members, SORT_STRING );
+				$round[ $members[0] ] = array( $g, $members );
 			}
-			// Only cycles left (and what they reference): a group no remaining table outside it references.
-			$group          = self::closed_group( $left, $referrers );
-			$names_of_group = array();
-			foreach ( $group as $table ) {
-				$names_of_group[] = $left[ $table ];
-				unset( $left[ $table ] );
+			ksort( $round, SORT_STRING );
+			$next = array();
+			foreach ( $round as list( $g, $members ) ) {
+				$plan->steps[] = array(
+					'tables'     => $members,
+					'checks_off' => count( $members ) > 1,
+				);
+				foreach ( array_keys( $parents_of[ $g ] ?? array() ) as $parent ) {
+					unset( $referenced_by[ $parent ][ $g ] );
+					if ( empty( $referenced_by[ $parent ] ) ) {
+						$next[] = $parent;
+					}
+				}
 			}
-			sort( $names_of_group, SORT_STRING );
-			$plan->steps[] = array(
-				'tables'     => $names_of_group,
-				'checks_off' => true,
-			);
+			$ready = $next;
 		}
 		return $plan;
 	}
@@ -146,7 +173,7 @@ final class DropOrder {
 	}
 
 	/**
-	 * Tables kept, name => the tables outside the set that reference it.
+	 * Tables kept, name => the tables that reference it and stay.
 	 *
 	 * @return array<string, string[]>
 	 */
@@ -155,76 +182,64 @@ final class DropOrder {
 	}
 
 	/**
-	 * A strongly connected group of the remaining tables that no remaining table outside it references (one
-	 * exists whenever every remaining table is referenced: the groups form a graph without cycles, and the
-	 * one no other group points at is such a group).
+	 * Strongly connected groups (Tarjan's algorithm, without recursion).
 	 *
-	 * @param array<string, string>              $left      Remaining tables (key => name).
-	 * @param array<string, array<string, bool>> $referrers Referenced => referencing tables.
-	 * @return string[] Keys of the group.
+	 * @param string[]                          $nodes Nodes.
+	 * @param array<string, array<int, string>> $adj   Node => nodes it points to.
+	 * @return array<int, string[]>
 	 */
-	private static function closed_group( array $left, array $referrers ): array {
-		// Edges child => parent among the remaining tables.
-		$references = array();
-		foreach ( $referrers as $parent => $children ) {
-			if ( ! isset( $left[ $parent ] ) ) {
+	private static function components( array $nodes, array $adj ): array {
+		$counter = 0;
+		$index   = array();
+		$low     = array();
+		$on      = array();
+		$stack   = array();
+		$out     = array();
+		foreach ( $nodes as $start ) {
+			if ( isset( $index[ $start ] ) ) {
 				continue;
 			}
-			foreach ( array_keys( $children ) as $child ) {
-				if ( isset( $left[ $child ] ) ) {
-					$references[ $child ][ $parent ] = true;
-				}
-			}
-		}
-		$tables = array_keys( $left );
-		sort( $tables, SORT_STRING );
-		foreach ( $tables as $table ) {
-			// The tables reachable from $table by following references, and those that reach it back.
-			$reach = self::reachable( $table, $references );
-			$group = array( $table );
-			foreach ( array_keys( $reach ) as $other ) {
-				if ( isset( self::reachable( $other, $references )[ $table ] ) ) {
-					$group[] = $other;
-				}
-			}
-			$group = array_values( array_unique( $group ) );
-			$in    = array_flip( $group );
-			$open  = false;
-			foreach ( $group as $member ) {
-				foreach ( array_keys( $referrers[ $member ] ?? array() ) as $child ) {
-					if ( isset( $left[ $child ] ) && ! isset( $in[ $child ] ) ) {
-						$open = true;
-						break 2;
+			$index[ $start ] = $counter;
+			$low[ $start ]   = $counter;
+			++$counter;
+			$stack[]      = $start;
+			$on[ $start ] = true;
+			$work         = array( array( $start, 0 ) );
+			while ( array() !== $work ) {
+				$top              = count( $work ) - 1;
+				list( $node, $i ) = $work[ $top ];
+				$next             = $adj[ $node ] ?? array();
+				if ( $i < count( $next ) ) {
+					$work[ $top ][1] = $i + 1;
+					$w               = $next[ $i ];
+					if ( ! isset( $index[ $w ] ) ) {
+						$index[ $w ] = $counter;
+						$low[ $w ]   = $counter;
+						++$counter;
+						$stack[]  = $w;
+						$on[ $w ] = true;
+						$work[]   = array( $w, 0 );
+					} elseif ( ! empty( $on[ $w ] ) ) {
+						$low[ $node ] = min( $low[ $node ], $index[ $w ] );
 					}
+					continue;
+				}
+				array_pop( $work );
+				if ( array() !== $work ) {
+					$up         = $work[ count( $work ) - 1 ][0];
+					$low[ $up ] = min( $low[ $up ], $low[ $node ] );
+				}
+				if ( $low[ $node ] === $index[ $node ] ) {
+					$group = array();
+					do {
+						$w        = (string) array_pop( $stack );
+						$on[ $w ] = false;
+						$group[]  = $w;
+					} while ( $w !== $node );
+					$out[] = $group;
 				}
 			}
-			if ( ! $open ) {
-				return $group;
-			}
 		}
-		return $tables; // Not reached: some group is always closed.
-	}
-
-	/**
-	 * Tables reachable from a table along its references (not including itself unless on a cycle).
-	 *
-	 * @param string                             $from       Start.
-	 * @param array<string, array<string, bool>> $references Child => parents.
-	 * @return array<string, bool>
-	 */
-	private static function reachable( string $from, array $references ): array {
-		$seen  = array();
-		$queue = array_keys( $references[ $from ] ?? array() );
-		while ( array() !== $queue ) {
-			$table = (string) array_shift( $queue );
-			if ( isset( $seen[ $table ] ) ) {
-				continue;
-			}
-			$seen[ $table ] = true;
-			foreach ( array_keys( $references[ $table ] ?? array() ) as $next ) {
-				$queue[] = $next;
-			}
-		}
-		return $seen;
+		return $out;
 	}
 }

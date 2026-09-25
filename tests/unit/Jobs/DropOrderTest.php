@@ -93,4 +93,84 @@ final class DropOrderTest extends TestCase {
 		$this->assertSame( array( 'z_child' ), self::steps( $apart ), 'the control: a server that tells case apart sees another table, outside the set' );
 		$this->assertSame( array( 'a_parent' => array( 'Z_CHILD' ) ), $apart->kept(), 'which keeps the parent' );
 	}
+
+	/**
+	 * Random sets of tables and keys (fixed seeds): every table is dropped once or kept; a table dropped with
+	 * checks on is referenced by no table still there; a group dropped with checks off only by its own members;
+	 * what a kept table references is kept.
+	 */
+	public function test_every_plan_on_random_keys_keeps_the_rules(): void {
+		for ( $seed = 1; $seed <= 400; $seed++ ) {
+			mt_srand( $seed );
+			$count  = mt_rand( 1, 12 );
+			$tables = array();
+			for ( $i = 0; $i < $count; $i++ ) {
+				$tables[] = 't' . $i;
+			}
+			$keys = array();
+			for ( $k = mt_rand( 0, 20 ); $k > 0; $k-- ) {
+				$child  = mt_rand( 0, 9 ) < 8 ? $tables[ mt_rand( 0, $count - 1 ) ] : 'outside' . mt_rand( 0, 2 );
+				$keys[] = array( $child, $tables[ mt_rand( 0, $count - 1 ) ] );
+			}
+			$plan = self::plan( $tables, $keys );
+			$seen = array();
+			foreach ( $plan->steps() as $step ) {
+				foreach ( $step['tables'] as $table ) {
+					$seen[] = $table;
+				}
+			}
+			$kept = array_keys( $plan->kept() );
+			$all  = array_merge( $seen, $kept );
+			sort( $all );
+			$this->assertSame( $tables === array() ? array() : self::sorted( $tables ), $all, "seed {$seed}: every table once" );
+
+			$there = array_flip( array_merge( $tables, array( 'outside0', 'outside1', 'outside2' ) ) );
+			foreach ( $plan->steps() as $step ) {
+				$group = array_flip( $step['tables'] );
+				foreach ( $keys as list( $child, $parent ) ) {
+					if ( isset( $group[ $parent ] ) && $child !== $parent && isset( $there[ $child ] ) ) {
+						$this->assertTrue( $step['checks_off'] && isset( $group[ $child ] ), "seed {$seed}: {$parent} dropped while {$child} references it" );
+					}
+				}
+				foreach ( $step['tables'] as $table ) {
+					unset( $there[ $table ] );
+				}
+			}
+			foreach ( $keys as list( $child, $parent ) ) {
+				if ( isset( $plan->kept()[ $child ] ) ) {
+					$this->assertArrayHasKey( $parent, $plan->kept(), "seed {$seed}: {$parent} is referenced by the kept {$child}" );
+				}
+			}
+		}
+	}
+
+	/**
+	 * A shape that made an earlier planner slow (a chain of cycles): planned well inside a step.
+	 */
+	public function test_a_chain_of_cycles_is_planned_quickly(): void {
+		$tables = array();
+		$keys   = array();
+		for ( $i = 0; $i < 2000; $i++ ) {
+			$tables[] = 'a' . $i;
+			$tables[] = 'b' . $i;
+			$keys[]   = array( 'a' . $i, 'b' . $i );
+			$keys[]   = array( 'b' . $i, 'a' . $i );
+			if ( $i > 0 ) {
+				$keys[] = array( 'a' . $i, 'a' . ( $i - 1 ) );
+			}
+		}
+		$started = microtime( true );
+		$plan    = self::plan( $tables, $keys );
+		$this->assertLessThan( 2.0, microtime( true ) - $started, '4000 tables' );
+		$this->assertCount( 2000, $plan->steps(), 'one statement per cycle' );
+		$this->assertSame( array( 'a1999', 'b1999' ), $plan->steps()[0]['tables'], 'the end of the chain first' );
+	}
+
+	/**
+	 * @return string[]
+	 */
+	private static function sorted( array $names ): array {
+		sort( $names );
+		return $names;
+	}
 }

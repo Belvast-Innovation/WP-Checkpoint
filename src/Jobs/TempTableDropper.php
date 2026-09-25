@@ -12,9 +12,14 @@ defined( 'ABSPATH' ) || exit;
 /**
  * The WordPress side of DropOrder: reads the foreign keys that point at
  * the tables (information_schema, the current database only as the
- * referenced side), plans, and runs the drops on $wpdb. A step with checks
- * off sets the session's foreign_key_checks to 0 for that one statement and
- * puts the previous value back whatever happens.
+ * referenced side), plans, and runs the drops on $wpdb.
+ *
+ * The session's foreign_key_checks is set to 1 for the whole run and put
+ * back as it was afterwards, whatever happens: "checks on" must not depend
+ * on what other code did with the connection in the same request. A step
+ * with checks off turns them off for its one statement, right after reading
+ * the keys again (a table outside the group that references a member since
+ * the plan was made holds the group back for this pass).
  *
  * When the keys cannot be read, nothing is dropped with checks off: every
  * table is dropped alone with checks on, and the server refuses what would
@@ -22,6 +27,12 @@ defined( 'ABSPATH' ) || exit;
  * pass.
  */
 final class TempTableDropper {
+
+	/**
+	 * How a referencing table in another database is named: its database's name (on shared hosts often the
+	 * account's) goes nowhere, and no table of the set can have this name.
+	 */
+	const ANOTHER_DATABASE = 'a table in another database';
 
 	/**
 	 * Drop tables.
@@ -48,25 +59,80 @@ final class TempTableDropper {
 		if ( array() === $safe ) {
 			return $out;
 		}
-		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- a server setting.
-		$fold = (int) $wpdb->get_var( 'SELECT @@lower_case_table_names' ) > 0;
-		$keys = self::keys( $like );
-		$plan = DropOrder::plan( $safe, null === $keys ? array() : $keys, $fold );
+		$before = self::checks();
+		self::set_checks( 1 );
+		try {
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- a server setting.
+			$fold = (int) $wpdb->get_var( 'SELECT @@lower_case_table_names' ) > 0;
+			$keys = self::keys( $like );
+			$plan = DropOrder::plan( $safe, null === $keys ? array() : $keys, $fold );
 
-		$out['kept'] = $plan->kept();
-		foreach ( $plan->steps() as $step ) {
-			if ( $step['checks_off'] && null === $keys ) {
-				$out['failed'] = array_merge( $out['failed'], $step['tables'] ); // Not reached: without keys every table is free.
-				continue;
+			$out['kept'] = $plan->kept();
+			foreach ( $plan->steps() as $step ) {
+				$ok = false;
+				if ( ! $step['checks_off'] ) {
+					$ok = self::run_drop( $step['tables'] );
+				} elseif ( null !== $keys ) { // Without keys every table is free: never reached then.
+					$fresh = self::keys( $like );
+					$ok    = null !== $fresh && ! self::referenced_from_outside( $step['tables'], $fresh, $fold ) && self::drop_with_checks_off( $step['tables'] );
+				}
+				if ( $ok ) {
+					$out['dropped'] = array_merge( $out['dropped'], $step['tables'] );
+				} else {
+					$out['failed'] = array_merge( $out['failed'], $step['tables'] );
+				}
 			}
-			$ok = $step['checks_off'] ? self::drop_with_checks_off( $step['tables'] ) : self::run_drop( $step['tables'] );
-			if ( $ok ) {
-				$out['dropped'] = array_merge( $out['dropped'], $step['tables'] );
-			} else {
-				$out['failed'] = array_merge( $out['failed'], $step['tables'] );
-			}
+		} finally {
+			self::set_checks( $before );
 		}
 		return $out;
+	}
+
+	/**
+	 * Whether a table outside a group references a member.
+	 *
+	 * @param string[]                                             $group Members.
+	 * @param array<int, array{table: string, referenced: string}> $keys  Keys.
+	 * @param bool                                                 $fold  Whether names compare without case.
+	 * @return bool
+	 */
+	private static function referenced_from_outside( array $group, array $keys, bool $fold ): bool {
+		$in = array();
+		foreach ( $group as $table ) {
+			$in[ $fold ? strtolower( $table ) : $table ] = true;
+		}
+		foreach ( $keys as $key ) {
+			$child  = $fold ? strtolower( $key['table'] ) : $key['table'];
+			$parent = $fold ? strtolower( $key['referenced'] ) : $key['referenced'];
+			if ( isset( $in[ $parent ] ) && ! isset( $in[ $child ] ) ) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * The session's foreign_key_checks: 0, or 1 (also when it cannot be read).
+	 *
+	 * @return int
+	 */
+	private static function checks(): int {
+		global $wpdb;
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- a session setting.
+		return '0' === (string) $wpdb->get_var( 'SELECT @@SESSION.foreign_key_checks' ) ? 0 : 1;
+	}
+
+	/**
+	 * Set the session's foreign_key_checks.
+	 *
+	 * @param int $value 0 or 1.
+	 * @return void
+	 */
+	private static function set_checks( int $value ): void {
+		global $wpdb;
+		$value = 0 === $value ? 0 : 1;
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- a session setting, 0 or 1.
+		$wpdb->query( "SET SESSION foreign_key_checks = {$value}" );
 	}
 
 	/**
@@ -80,7 +146,7 @@ final class TempTableDropper {
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- foreign keys of the current database.
 		$rows = $wpdb->get_results(
 			$wpdb->prepare(
-				'SELECT CONSTRAINT_SCHEMA, TABLE_NAME, REFERENCED_TABLE_NAME, CONSTRAINT_SCHEMA = DATABASE() FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE UNIQUE_CONSTRAINT_SCHEMA = DATABASE() AND REFERENCED_TABLE_NAME LIKE %s',
+				'SELECT TABLE_NAME, REFERENCED_TABLE_NAME, CONSTRAINT_SCHEMA = DATABASE() FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE UNIQUE_CONSTRAINT_SCHEMA = DATABASE() AND REFERENCED_TABLE_NAME LIKE %s',
 				$wpdb->esc_like( $like ) . '%'
 			),
 			ARRAY_N
@@ -92,15 +158,15 @@ final class TempTableDropper {
 		foreach ( $rows as $row ) {
 			$keys[] = array(
 				// A table of another database that references one of these is outside the set, whatever its name.
-				'table'      => '1' === (string) $row[3] ? (string) $row[1] : (string) $row[0] . '.' . (string) $row[1],
-				'referenced' => (string) $row[2],
+				'table'      => '1' === (string) $row[2] ? (string) $row[0] : self::ANOTHER_DATABASE,
+				'referenced' => (string) $row[1],
 			);
 		}
 		return $keys;
 	}
 
 	/**
-	 * DROP TABLE for tables, checks as they are.
+	 * DROP TABLE for tables, with the run's checks (on).
 	 *
 	 * @param string[] $tables Safe names.
 	 * @return bool
@@ -127,16 +193,11 @@ final class TempTableDropper {
 	 * @return bool
 	 */
 	private static function drop_with_checks_off( array $tables ): bool {
-		global $wpdb;
-		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- a session setting.
-		$before = '0' === (string) $wpdb->get_var( 'SELECT @@SESSION.foreign_key_checks' ) ? 0 : 1;
-		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- a session setting.
-		$wpdb->query( 'SET SESSION foreign_key_checks = 0' );
+		self::set_checks( 0 );
 		try {
 			return self::run_drop( $tables );
 		} finally {
-			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- a session setting, 0 or 1.
-			$wpdb->query( "SET SESSION foreign_key_checks = {$before}" );
+			self::set_checks( 1 ); // The run's own setting; drop() puts the session's back at its end.
 		}
 	}
 }

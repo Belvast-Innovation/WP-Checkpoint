@@ -588,6 +588,18 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		return array( $job, $dir, $table );
 	}
 
+	/**
+	 * Drop tables whatever keys tie them (test cleanup).
+	 */
+	private function force_drop( array $tables ): void {
+		global $wpdb;
+		$wpdb->query( 'SET SESSION foreign_key_checks = 0' );
+		foreach ( $tables as $table ) {
+			$wpdb->query( "DROP TABLE IF EXISTS `{$table}`" );
+		}
+		$wpdb->query( 'SET SESSION foreign_key_checks = 1' );
+	}
+
 	private function table_exists( string $name ): bool {
 		global $wpdb;
 		return $name === $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $name ) );
@@ -732,11 +744,16 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		$this->assertSame( '', $wpdb->last_error );
 		$this->assertSame( 4, (int) $wpdb->get_var( "SELECT COUNT(*) FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = DATABASE() AND TABLE_NAME LIKE 'wcptmp%'" ), 'the control: the keys are there' );
 
-		$this->assertTrue( $this->repo->reclaim_work( $job ), 'every table went' );
-		foreach ( array( $plain, $name( 'a_parent' ), $name( 'z_child' ), $name( 'c_one' ), $name( 'c_two' ), $name( 's_self' ) ) as $table ) {
-			$this->assertFalse( $this->table_exists( $table ), $table );
+		$all = array( $plain, $name( 'a_parent' ), $name( 'z_child' ), $name( 'c_one' ), $name( 'c_two' ), $name( 's_self' ) );
+		try {
+			$this->assertTrue( $this->repo->reclaim_work( $job ), 'every table went' );
+			foreach ( $all as $table ) {
+				$this->assertFalse( $this->table_exists( $table ), $table );
+			}
+			$this->assertSame( '1', (string) $wpdb->get_var( 'SELECT @@SESSION.foreign_key_checks' ), 'checks back on for the session' );
+		} finally {
+			$this->force_drop( $all );
 		}
-		$this->assertSame( '1', (string) $wpdb->get_var( 'SELECT @@SESSION.foreign_key_checks' ), 'checks back on for the session' );
 	}
 
 	/**
@@ -750,9 +767,13 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		$wpdb->query( "CREATE TABLE `{$parent}` (id INT PRIMARY KEY) ENGINE=InnoDB" );
 		$wpdb->query( "CREATE TABLE `{$child}` (id INT PRIMARY KEY, p INT, FOREIGN KEY (p) REFERENCES `{$parent}` (id)) ENGINE=InnoDB" );
 		$this->assertTrue( $this->table_exists( $parent ) && $this->table_exists( $child ), 'the control: created' );
-		$this->repo->reap();
-		$this->assertFalse( $this->table_exists( $child ) );
-		$this->assertFalse( $this->table_exists( $parent ), 'in the same pass' );
+		try {
+			$this->repo->reap();
+			$this->assertFalse( $this->table_exists( $child ) );
+			$this->assertFalse( $this->table_exists( $parent ), 'in the same pass' );
+		} finally {
+			$this->force_drop( array( $child, $parent ) );
+		}
 	}
 
 	/**
@@ -779,8 +800,8 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 			$this->assertFalse( $this->table_exists( $r ), 'the control: a child of p goes' );
 			$this->assertFalse( $this->table_exists( $plain ), 'the control: the rest goes' );
 			$log = (string) file_get_contents( $this->base . '/logs/storage.log' );
-			$this->assertStringContainsString( "temporary tables of job {$job->id}: {$p} is kept; {$outside}, outside them, has a foreign key to it.", $log );
-			$this->assertStringContainsString( "{$q} is kept; {$p}, outside them, has a foreign key to it.", $log );
+			$this->assertStringContainsString( "temporary tables of job {$job->id}: {$p} is kept; a foreign key of {$outside}, which stays, references it.", $log );
+			$this->assertStringContainsString( "{$q} is kept; a foreign key of {$p}, which stays, references it.", $log );
 		} finally {
 			$wpdb->query( "DROP TABLE IF EXISTS `{$outside}`, `{$r}`" );
 			$wpdb->query( "DROP TABLE IF EXISTS `{$p}`" );
@@ -799,9 +820,111 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		$wpdb->query( "CREATE TABLE `{$parent}` (id INT PRIMARY KEY) ENGINE=InnoDB" );
 		$wpdb->query( "CREATE TABLE `{$child}` (id INT PRIMARY KEY, p INT, FOREIGN KEY (p) REFERENCES `{$parent}` (id)) ENGINE=InnoDB" );
 		$this->assertTrue( $this->table_exists( $parent ), 'the control: created' );
-		Schema::drop();
-		$this->assertFalse( $this->table_exists( $child ) );
-		$this->assertFalse( $this->table_exists( $parent ) );
+		try {
+			Schema::drop();
+			$this->assertFalse( $this->table_exists( $child ) );
+			$this->assertFalse( $this->table_exists( $parent ) );
+		} finally {
+			$this->force_drop( array( $child, $parent ) );
+		}
+	}
+
+	/**
+	 * Checks on means on, whatever the session had: with checks turned off earlier in the request by other code
+	 * and the keys unreadable (so every table counts as free), a temporary table another table has a key to is
+	 * not dropped, and the session's setting is put back afterwards. The control: an unreferenced table goes.
+	 */
+	public function test_checks_are_on_for_the_drops_whatever_the_session_had(): void {
+		global $wpdb;
+		list( $job, , $plain ) = $this->failed_job_with_work();
+		$p                     = TempTables::name( $this->dirs->state()['token'], $job->id, 'beef', 'p' );
+		$outside               = $wpdb->base_prefix . 'wpcfk_outside';
+		$wpdb->query( "CREATE TABLE `{$p}` (id INT PRIMARY KEY) ENGINE=InnoDB" );
+		$wpdb->query( "CREATE TABLE `{$outside}` (id INT PRIMARY KEY, p INT, FOREIGN KEY (p) REFERENCES `{$p}` (id)) ENGINE=InnoDB" );
+		$break = static function ( string $query ): string {
+			return false !== strpos( $query, 'REFERENTIAL_CONSTRAINTS' ) ? 'SELECT * FROM wpcfk_no_such_table' : $query;
+		};
+		add_filter( 'query', $break );
+		$wpdb->query( 'SET SESSION foreign_key_checks = 0' );
+		$suppressed = $wpdb->suppress_errors();
+		try {
+			$this->assertFalse( $this->repo->reclaim_work( $job ) );
+			$this->assertSame( '0', (string) $wpdb->get_var( 'SELECT @@SESSION.foreign_key_checks' ), 'the session\'s setting is back' );
+			$wpdb->query( 'SET SESSION foreign_key_checks = 1' );
+			$this->assertFalse( $this->table_exists( $plain ), 'the control: an unreferenced table went' );
+			$this->assertTrue( $this->table_exists( $p ), 'the referenced one did not' );
+		} finally {
+			$wpdb->suppress_errors( $suppressed );
+			remove_filter( 'query', $break );
+			$this->force_drop( array( $outside, $p ) );
+		}
+	}
+
+	/**
+	 * A table of another database with a key to a temporary table: kept, and the log does not name that
+	 * database (on shared hosts its name holds the account's).
+	 */
+	public function test_a_key_from_another_database_keeps_the_table_and_the_log_names_no_database(): void {
+		global $wpdb;
+		list( $job, , $plain ) = $this->failed_job_with_work();
+		$p                     = TempTables::name( $this->dirs->state()['token'], $job->id, 'beef', 'p' );
+		$other                 = 'wpcfk_other_' . bin2hex( random_bytes( 3 ) );
+		$here                  = (string) $wpdb->get_var( 'SELECT DATABASE()' );
+		$wpdb->query( "CREATE TABLE `{$p}` (id INT PRIMARY KEY) ENGINE=InnoDB" );
+		$wpdb->query( "CREATE DATABASE `{$other}`" );
+		$wpdb->query( "CREATE TABLE `{$other}`.`t` (id INT PRIMARY KEY, p INT, FOREIGN KEY (p) REFERENCES `{$here}`.`{$p}` (id)) ENGINE=InnoDB" );
+		$this->assertSame( '', $wpdb->last_error, 'the control: the key across databases exists' );
+		try {
+			$this->assertFalse( $this->repo->reclaim_work( $job ) );
+			$this->assertTrue( $this->table_exists( $p ) );
+			$this->assertFalse( $this->table_exists( $plain ), 'the control: the rest went' );
+			$log = (string) file_get_contents( $this->base . '/logs/storage.log' );
+			$this->assertStringContainsString( "{$p} is kept; a foreign key of a table in another database, which stays, references it.", $log );
+			$this->assertStringNotContainsString( $other, $log );
+		} finally {
+			$wpdb->query( "DROP DATABASE IF EXISTS `{$other}`" );
+			$this->force_drop( array( $p ) );
+		}
+	}
+
+	/**
+	 * The keys are read again right before a cycle goes with checks off: a table outside it that has a key to
+	 * a member by then holds the cycle back for this pass (no key is left pointing at nothing).
+	 */
+	public function test_a_key_that_appears_before_a_cycle_goes_holds_it_back(): void {
+		global $wpdb;
+		list( $job ) = $this->failed_job_with_work();
+		$token       = $this->dirs->state()['token'];
+		$one         = TempTables::name( $token, $job->id, 'beef', 'c_one' );
+		$two         = TempTables::name( $token, $job->id, 'beef', 'c_two' );
+		$late        = $wpdb->base_prefix . 'wpcfk_late';
+		$wpdb->query( "CREATE TABLE `{$one}` (id INT PRIMARY KEY, two INT) ENGINE=InnoDB" );
+		$wpdb->query( "CREATE TABLE `{$two}` (id INT PRIMARY KEY, one INT, FOREIGN KEY (one) REFERENCES `{$one}` (id)) ENGINE=InnoDB" );
+		$wpdb->query( "ALTER TABLE `{$one}` ADD FOREIGN KEY (two) REFERENCES `{$two}` (id)" );
+		$reads = 0;
+		$add   = function ( string $query ) use ( &$reads, $late, $one ): string {
+			global $wpdb;
+			if ( false !== strpos( $query, 'REFERENTIAL_CONSTRAINTS' ) && 2 === ++$reads ) {
+				// Between the plan and the cycle's drop: another table gets a key to a member.
+				$wpdb->query( "CREATE TABLE `{$late}` (id INT PRIMARY KEY, one INT, FOREIGN KEY (one) REFERENCES `{$one}` (id)) ENGINE=InnoDB" );
+			}
+			return $query;
+		};
+		add_filter( 'query', $add );
+		try {
+			$this->assertFalse( $this->repo->reclaim_work( $job ) );
+			$this->assertSame( 2, $reads, 'the control: read once for the plan, once before the cycle' );
+			$this->assertTrue( $this->table_exists( $late ), 'the control: the late table was made' );
+			$this->assertTrue( $this->table_exists( $one ), 'held back' );
+			$this->assertTrue( $this->table_exists( $two ) );
+			remove_filter( 'query', $add );
+			$wpdb->query( "DROP TABLE `{$late}`" );
+			$this->assertTrue( $this->repo->reclaim_work( $job ), 'the next pass, without it, drops the cycle' );
+			$this->assertFalse( $this->table_exists( $one ) );
+		} finally {
+			remove_filter( 'query', $add );
+			$this->force_drop( array( $late, $two, $one ) );
+		}
 	}
 
 	public function test_a_table_the_plugin_could_not_have_created_is_a_reported_failure_not_a_silent_skip(): void {
