@@ -368,6 +368,62 @@ preg_match_all( '/^.*CHECK.*$/m', (string) ( $row[1] ?? '' ), $lines );
 $case['json_column_shown']      = array_map( 'trim', $lines[0] );
 $cases['11_check_constraints']  = $case;
 
+// 12: reclaiming a job's temporary tables with checks on: a cycle of keys, a key to itself, a key from a table
+// outside the set; what information_schema lists for them (the reclaim reads the keys there, for the current database).
+/**
+ * The keys of the current database as information_schema lists them: "table>referenced", sorted.
+ *
+ * @return string[]
+ */
+function fk_listed(): array {
+	global $db;
+	$out    = array();
+	$result = mysqli_query( $db, 'SELECT TABLE_NAME, REFERENCED_TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = DATABASE() AND UNIQUE_CONSTRAINT_SCHEMA = DATABASE() ORDER BY TABLE_NAME, REFERENCED_TABLE_NAME' );
+	while ( $result && ( $row = mysqli_fetch_row( $result ) ) ) {
+		$out[] = $row[0] . '>' . $row[1];
+	}
+	return $result ? $out : array( 'E' . mysqli_errno( $db ) );
+}
+
+/**
+ * Tables a and b, each with a key to the other; checks on.
+ *
+ * @return void
+ */
+function fk_cycle(): void {
+	fk_reset();
+	fk_run( 'CREATE TABLE a (id INT PRIMARY KEY, b_id INT) ENGINE=InnoDB' );
+	fk_run( 'CREATE TABLE b (id INT PRIMARY KEY, a_id INT, CONSTRAINT fk_b_a FOREIGN KEY (a_id) REFERENCES a (id)) ENGINE=InnoDB' );
+	fk_run( 'ALTER TABLE a ADD CONSTRAINT fk_a_b FOREIGN KEY (b_id) REFERENCES b (id)' );
+	fk_run( 'SET FOREIGN_KEY_CHECKS=1' );
+}
+$reclaim = array();
+fk_cycle();
+$reclaim['cycle_listed']                = fk_listed();
+$reclaim['cycle_one_statement_a_first'] = fk_run( 'DROP TABLE a, b' );
+fk_cycle();
+$reclaim['cycle_one_statement_b_first'] = fk_run( 'DROP TABLE b, a' );
+fk_cycle();
+$reclaim['cycle_each_alone'] = fk_run( 'DROP TABLE a' ) . ',' . fk_run( 'DROP TABLE b' );
+fk_cycle();
+fk_run( 'SET FOREIGN_KEY_CHECKS=0' );
+$reclaim['cycle_checks_off_one_statement'] = fk_run( 'DROP TABLE a, b' );
+fk_run( 'SET FOREIGN_KEY_CHECKS=1' );
+fk_reset();
+fk_run( 'CREATE TABLE s (id INT PRIMARY KEY, p INT, CONSTRAINT fk_s FOREIGN KEY (p) REFERENCES s (id)) ENGINE=InnoDB' );
+fk_run( 'SET FOREIGN_KEY_CHECKS=1' );
+fk_run( 'INSERT INTO s VALUES (1, NULL), (2, 1)' );
+$reclaim['self_reference_listed'] = fk_listed();
+$reclaim['self_reference']        = fk_run( 'DROP TABLE s' );
+fk_reset();
+fk_run( 'CREATE TABLE t (id INT PRIMARY KEY) ENGINE=InnoDB' );
+fk_run( 'CREATE TABLE ext (id INT PRIMARY KEY, t_id INT, CONSTRAINT fk_ext_t FOREIGN KEY (t_id) REFERENCES t (id)) ENGINE=InnoDB' );
+fk_run( 'SET FOREIGN_KEY_CHECKS=1' );
+$reclaim['outside_referencer_listed'] = fk_listed();
+$reclaim['outside_referencer']        = fk_run( 'DROP TABLE t' );
+$cases['12_reclaim_drops']            = $reclaim;
+fk_reset();
+
 fk_run( 'DROP DATABASE `' . $schema . '`' );
 
 /**

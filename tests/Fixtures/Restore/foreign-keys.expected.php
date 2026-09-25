@@ -2,7 +2,7 @@
 /**
  * What foreign-keys.php observes, per server group; see there.
  *
- * Measured 2026-09-24 on:
+ * Measured 2026-09-24 on (case 12 on 2026-09-25, same versions):
  * - mariadb-10-11: 10.6.28-MariaDB-ubu2204, 10.11.19-MariaDB-ubu2204, 11.4.13-MariaDB-ubu2404, 11.8.9-MariaDB-ubu2404
  * - mariadb-12: 12.3.3-MariaDB-ubu2404
  * - mysql-5.7: 5.7.44
@@ -117,6 +117,15 @@ return array(
 		'11_check_constraints.after_swap_new'                              => '["CONSTRAINT `wcptmp_doc_chk_1` CHECK"]',
 		'11_check_constraints.enforced'                                    => 'E4025',
 		'11_check_constraints.json_column_shown'                           => '["`j` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL CHECK (json_valid(`j`)),"]',
+		'12_reclaim_drops.cycle_listed'                                    => '["a>b","b>a"]',
+		'12_reclaim_drops.cycle_one_statement_a_first'                     => 'E1451',
+		'12_reclaim_drops.cycle_one_statement_b_first'                     => 'E1451',
+		'12_reclaim_drops.cycle_each_alone'                                => 'E1451,E1451',
+		'12_reclaim_drops.cycle_checks_off_one_statement'                  => 'ok',
+		'12_reclaim_drops.self_reference_listed'                           => '["s>s"]',
+		'12_reclaim_drops.self_reference'                                  => 'ok',
+		'12_reclaim_drops.outside_referencer_listed'                       => '["ext>t"]',
+		'12_reclaim_drops.outside_referencer'                              => 'E1451',
 	),
 	'mariadb-12' => array(
 		'1_child_references_original_name.create'                          => 'ok',
@@ -223,6 +232,15 @@ return array(
 		'11_check_constraints.after_swap_new'                              => '["CONSTRAINT `wcptmp_doc_chk_1` CHECK"]',
 		'11_check_constraints.enforced'                                    => 'E4025',
 		'11_check_constraints.json_column_shown'                           => '["`j` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL CHECK (json_valid(`j`)),"]',
+		'12_reclaim_drops.cycle_listed'                                    => '["a>b","b>a"]',
+		'12_reclaim_drops.cycle_one_statement_a_first'                     => 'E1451',
+		'12_reclaim_drops.cycle_one_statement_b_first'                     => 'E1451',
+		'12_reclaim_drops.cycle_each_alone'                                => 'E1451,E1451',
+		'12_reclaim_drops.cycle_checks_off_one_statement'                  => 'ok',
+		'12_reclaim_drops.self_reference_listed'                           => '["s>s"]',
+		'12_reclaim_drops.self_reference'                                  => 'ok',
+		'12_reclaim_drops.outside_referencer_listed'                       => '["ext>t"]',
+		'12_reclaim_drops.outside_referencer'                              => 'E1451',
 	),
 	'mysql-5.7' => array(
 		'1_child_references_original_name.create'                          => 'ok',
@@ -329,6 +347,15 @@ return array(
 		'11_check_constraints.after_swap_new'                              => '[]',
 		'11_check_constraints.enforced'                                    => 'ok',
 		'11_check_constraints.json_column_shown'                           => '[]',
+		'12_reclaim_drops.cycle_listed'                                    => '["a>b","b>a"]',
+		'12_reclaim_drops.cycle_one_statement_a_first'                     => 'E1217',
+		'12_reclaim_drops.cycle_one_statement_b_first'                     => 'E1217',
+		'12_reclaim_drops.cycle_each_alone'                                => 'E1217,E1217',
+		'12_reclaim_drops.cycle_checks_off_one_statement'                  => 'ok',
+		'12_reclaim_drops.self_reference_listed'                           => '["s>s"]',
+		'12_reclaim_drops.self_reference'                                  => 'ok',
+		'12_reclaim_drops.outside_referencer_listed'                       => '["ext>t"]',
+		'12_reclaim_drops.outside_referencer'                              => 'E1217',
 	),
 	'mysql-8' => array(
 		'1_child_references_original_name.create'                          => 'ok',
@@ -435,5 +462,14 @@ return array(
 		'11_check_constraints.after_swap_new'                              => '["CONSTRAINT `wp_doc_chk_1` CHECK"]',
 		'11_check_constraints.enforced'                                    => 'E3819',
 		'11_check_constraints.json_column_shown'                           => '[]',
+		'12_reclaim_drops.cycle_listed'                                    => '["a>b","b>a"]',
+		'12_reclaim_drops.cycle_one_statement_a_first'                     => 'ok',
+		'12_reclaim_drops.cycle_one_statement_b_first'                     => 'ok',
+		'12_reclaim_drops.cycle_each_alone'                                => 'E3730,E3730',
+		'12_reclaim_drops.cycle_checks_off_one_statement'                  => 'ok',
+		'12_reclaim_drops.self_reference_listed'                           => '["s>s"]',
+		'12_reclaim_drops.self_reference'                                  => 'ok',
+		'12_reclaim_drops.outside_referencer_listed'                       => '["ext>t"]',
+		'12_reclaim_drops.outside_referencer'                              => 'E3730',
 	),
 );
