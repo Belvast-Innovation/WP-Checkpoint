@@ -1197,24 +1197,37 @@ final class JobRepository {
 	 * @return bool True when every table that had to go is gone.
 	 */
 	private function drop_tables_of( string $token, int $job_id, $approve = null ): bool {
-		$failed = array();
+		$tables = array();
 		foreach ( $this->temp_tables( $token, $job_id ) as $name => $id ) {
 			if ( 0 === $job_id && ( null === $approve || ! $approve( $id ) ) ) {
 				continue;
 			}
-			if ( ! $this->drop_table( $name ) ) {
-				$failed[] = $name;
-			}
+			$tables[] = $name;
 		}
+		if ( array() === $tables ) {
+			return true;
+		}
+		// In an order their foreign keys allow (TempTableDropper), as many as one bounded call drops; a name outside
+		// TempTables::is_safe_name() is reported as failed rather than skipped, so a mismatch between the
+		// creating and the dropping side can never leave a table behind unnoticed.
+		$result = TempTableDropper::drop( $tables, TempTables::owner_prefix( $token ) );
+		$what   = 0 === $job_id ? 'orphaned temporary tables' : 'temporary tables of job ' . $job_id;
 		$this->report_reclaim(
-			0 === $job_id ? 'orphaned temporary tables' : 'temporary tables of job ' . $job_id,
+			$what,
 			array(
-				'deleted'   => 0,
-				'failed'    => $failed,
-				'remaining' => false,
+				'deleted'   => count( $result['dropped'] ),
+				'failed'    => $result['failed'],
+				'remaining' => array() !== $result['remaining'],
 			)
 		);
-		return array() === $failed;
+		if ( '' !== $result['stopped'] ) {
+			$this->directories->log_event( sprintf( 'Reclaiming the %1$s stopped: %2$s.', $what, $result['stopped'] ) );
+		}
+		foreach ( $result['kept'] as $table => $referrers ) {
+			// Dropping it would leave another table's key pointing at nothing: it stays until that key is gone.
+			$this->directories->log_event( sprintf( 'Reclaiming the %1$s: %2$s is kept; a foreign key of %3$s, which stays, references it.', $what, $table, implode( ', ', $referrers ) ) );
+		}
+		return array() === $result['failed'] && array() === $result['kept'] && array() === $result['remaining'];
 	}
 
 	/**
@@ -1258,25 +1271,6 @@ final class JobRepository {
 			}
 		}
 		return $out;
-	}
-
-	/**
-	 * Drop one temporary table by a name that TempTables::job_id_of()
-	 * accepted. A name outside TempTables::is_safe_name() cannot be one this
-	 * plugin created (the creating side obeys the same rule); it is reported
-	 * as a failure rather than skipped, so a mismatch between the two sides
-	 * can never again leave a table behind unnoticed.
-	 *
-	 * @param string $name Table name.
-	 * @return bool Whether the table is gone.
-	 */
-	private function drop_table( string $name ): bool {
-		global $wpdb;
-		if ( ! TempTables::is_safe_name( $name ) ) {
-			return false;
-		}
-		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- a temporary table of this installation, name validated above.
-		return false !== $wpdb->query( "DROP TABLE IF EXISTS `{$name}`" );
 	}
 
 	/**

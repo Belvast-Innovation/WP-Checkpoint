@@ -19,7 +19,7 @@ namespace WPCheckpoint\Jobs;
  * to fit the file system, and some Windows hosts fail earlier.
  *
  * The name only ever contains [A-Za-z0-9_]: the creating side obeys the
- * rule the dropping side checks (JobRepository::drop_table()), so a
+ * rule the dropping side checks (TempTableDropper::drop()), so a
  * table that can be created can always be reclaimed. MySQL allows
  * umlauts and CJK in table names and real sites have them; such
  * characters are replaced, and a short hash of the original name keeps
