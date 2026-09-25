@@ -29,7 +29,9 @@ defined( 'ABSPATH' ) || exit;
  * another installation (the user added it to the backup when it was made),
  * and under its name on this database another WordPress may be running.
  * The restore writes only tables of this site; such a table is left out,
- * or restored by hand from the backup's SQL.
+ * or restored by hand from the backup's SQL. A backup of a site without a
+ * table prefix cannot tell them apart: all its tables count as the site's
+ * and are named here with this site's prefix in front.
  *
  * Left out of the plan, and reported: tables the user excluded, this
  * plugin's jobs table (a backup written before it was left out of backups
@@ -109,7 +111,7 @@ final class TablePlan {
 				$plan->skipped[ $name ] = 'temporary';
 				continue;
 			}
-			if ( '' === $backup_prefix || 0 !== strpos( $name, $backup_prefix ) ) {
+			if ( ! self::has_prefix( $name, $backup_prefix ) ) {
 				throw new Refused(
 					sprintf(
 						'The table %1$s of the backup does not carry the backup\'s table prefix (%2$s): it belongs to another installation and was added to the backup when it was made. Under that name this database may hold another site\'s table, and the restore writes only tables of this site. Leave the table out of the restore; if it is needed, restore it by hand from the backup\'s SQL.',
@@ -245,7 +247,7 @@ final class TablePlan {
 	 * @return string
 	 */
 	public function final_name( string $name ): string {
-		if ( '' !== $this->backup_prefix && 0 === strpos( $name, $this->backup_prefix ) ) {
+		if ( self::has_prefix( $name, $this->backup_prefix ) ) {
 			return $this->site_prefix . substr( $name, strlen( $this->backup_prefix ) );
 		}
 		return $name;
@@ -261,5 +263,16 @@ final class TablePlan {
 	private static function strip( string $name, string $prefix ): string {
 		$stripped = '' !== $prefix && 0 === strpos( $name, $prefix ) ? substr( $name, strlen( $prefix ) ) : $name;
 		return '' === $stripped ? $name : $stripped;
+	}
+
+	/**
+	 * Whether a name carries a prefix; every name carries the empty one (a site without a table prefix).
+	 *
+	 * @param string $name   Name.
+	 * @param string $prefix Prefix.
+	 * @return bool
+	 */
+	private static function has_prefix( string $name, string $prefix ): bool {
+		return '' === $prefix || 0 === strpos( $name, $prefix );
 	}
 }

@@ -100,6 +100,23 @@ final class TablePlanTest extends TestCase {
 		}
 	}
 
+	/**
+	 * WordPress runs with an empty table prefix, and a backup of such a site has one: then every table is
+	 * this site's, named on this site with this site's prefix in front.
+	 */
+	public function test_with_an_empty_backup_prefix_every_table_is_this_sites(): void {
+		foreach ( array( 'wp_' => array( 'wp_options', 'wp_posts', 'wp_other_x' ), '' => array( 'options', 'posts', 'other_x' ) ) as $site => $finals ) {
+			$plan = self::plan( array( 'options', 'posts', 'other_x' ), '', $site );
+			$this->assertSame( $finals, array_column( $plan->tables(), 'final' ), 'site prefix "' . $site . '"' );
+			$this->assertSame( 'wcptmpabcdef_7_1a2b_posts', $plan->find( 'posts' )['temporary'] );
+			$this->assertSame( $site . 'users', $plan->reference( 'users' ), 'a table not restored: its name here' );
+		}
+		$this->assertSame( array( 'wpcheckpoint_jobs' => 'jobs' ), self::plan( array( 'options', 'wpcheckpoint_jobs' ), '' )->skipped(), 'the jobs table is still left out' );
+		$this->expectException( Refused::class );
+		$this->expectExceptionMessage( 'no table options' );
+		self::plan( array( 'posts' ), '' );
+	}
+
 	public function test_two_tables_with_one_temporary_name_are_refused(): void {
 		// "wp_a-b" needs cleaning, so its temporary name ends in "a_b_" and a hash of "a-b"; a table can be named that.
 		$twin = 'wp_a_b_' . substr( hash( 'sha256', 'a-b' ), 0, 7 );
