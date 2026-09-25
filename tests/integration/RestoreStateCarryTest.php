@@ -163,10 +163,16 @@ final class RestoreStateCarryTest extends RestoreTestCase {
 		// nothing this test sees); what keeps the import to one statement per call is that it only uses mysqli_query().
 		$raw = mysqli_init();
 		$this->assertTrue( mysqli_real_connect( $raw, DB_HOST, DB_USER, DB_PASSWORD, DB_NAME, null, null, Connection::MULTI_STATEMENTS ) );
-		mysqli_multi_query( $raw, 'SELECT 1; INSERT INTO `' . $wpdb->base_prefix . 'wpcr_victim` VALUES (1)' );
-		while ( mysqli_more_results( $raw ) && mysqli_next_result( $raw ) ) {
-			continue;
-		}
+		$this->assertTrue( mysqli_multi_query( $raw, 'SELECT 1; INSERT INTO `' . $wpdb->base_prefix . 'wpcr_victim` VALUES (1)' ) );
+		// Every result taken and freed before the next, and before the connection closes: a result left unread
+		// ends the loop early, and closing then may cut the batch off before the server ran the INSERT.
+		do {
+			$result = mysqli_store_result( $raw );
+			if ( $result instanceof \mysqli_result ) {
+				mysqli_free_result( $result );
+			}
+		} while ( mysqli_more_results( $raw ) && mysqli_next_result( $raw ) );
+		$this->assertSame( 0, mysqli_errno( $raw ), 'both statements ran' );
 		mysqli_close( $raw );
 		$this->assertSame( '1', $this->db->rows( 'SELECT COUNT(*) FROM `' . $wpdb->base_prefix . 'wpcr_victim`' )[0][0] );
 
