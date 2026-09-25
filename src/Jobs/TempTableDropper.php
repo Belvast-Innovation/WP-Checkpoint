@@ -20,13 +20,17 @@ defined( 'ABSPATH' ) || exit;
  * connection in the same request. It is read back right before every DROP,
  * because a reconnect can happen at any time and brings the server's
  * default; a value other than the one the drop needs (or none) stops the
- * call, and the rest waits for the next pass. A step with checks off turns
+ * call, and the rest waits for the next pass. What is left is the time of
+ * one statement: wpdb may reconnect between the read-back and the DROP and
+ * run the DROP again in the new session (MySQL has no per-statement
+ * setting to close it). A step with checks off turns
  * them off for its one statement, right after reading the keys again (a
  * table outside the group that references a member since the plan was made
  * holds the group back for this pass).
  *
- * One call runs at most MAX_STATEMENTS statements and spends at most
- * MAX_SECONDS seconds before its next statement; what is left is returned
+ * One call runs at most MAX_STATEMENTS statements and, after its first
+ * (which always runs, so every call makes progress), starts no statement
+ * once MAX_SECONDS have passed since it began; what is left is returned
  * as remaining for the next pass, so a reclaim unit stays bounded whatever
  * the number of tables. (One DROP of a large table can itself take longer
  * than that; the bound is checked between statements.)
@@ -104,7 +108,8 @@ final class TempTableDropper {
 			$out['kept'] = $plan->kept();
 			$run         = 0;
 			foreach ( $steps as $n => $step ) {
-				if ( $run >= $max_statements || (float) call_user_func( $clock ) - $started >= self::MAX_SECONDS ) {
+				// The first step always runs (reading the keys may itself take the time): every call makes progress.
+				if ( $run >= $max_statements || ( $run > 0 && (float) call_user_func( $clock ) - $started >= self::MAX_SECONDS ) ) {
 					$out['remaining'] = self::tables_from( $steps, $n );
 					break;
 				}

@@ -1207,7 +1207,7 @@ final class JobRepository {
 		if ( array() === $tables ) {
 			return true;
 		}
-		// In an order their foreign keys allow (TempTableDropper), all in one pass; a name outside
+		// In an order their foreign keys allow (TempTableDropper), as many as one bounded call drops; a name outside
 		// TempTables::is_safe_name() is reported as failed rather than skipped, so a mismatch between the
 		// creating and the dropping side can never leave a table behind unnoticed.
 		$result = TempTableDropper::drop( $tables, TempTables::owner_prefix( $token ) );

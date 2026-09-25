@@ -1069,7 +1069,7 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 				TempTables::owner_prefix( $token ),
 				TempTableDropper::MAX_STATEMENTS,
 				static function () use ( &$now ): float {
-					$now += TempTableDropper::MAX_SECONDS / 2 + 0.01; // Each look: more than half the time.
+					$now += TempTableDropper::MAX_SECONDS + 0.01; // Each look: the whole time (the first step runs anyway).
 					return $now;
 				}
 			);
@@ -1077,6 +1077,55 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 			$this->assertSame( array( $more[1] ), $result['remaining'] );
 		} finally {
 			$this->force_drop( array_merge( $tables, $more ?? array() ) );
+		}
+	}
+
+	/**
+	 * The first statement of a call always runs, even when reading the keys took all the time: every call makes
+	 * progress, and the next one goes on.
+	 */
+	public function test_the_first_drop_of_a_call_runs_even_when_the_time_is_already_up(): void {
+		global $wpdb;
+		$token  = $this->dirs->state()['token'];
+		$tables = array( TempTables::name( $token, 78, 'beef', 't1' ), TempTables::name( $token, 78, 'beef', 't2' ) );
+		foreach ( $tables as $table ) {
+			$wpdb->query( "CREATE TABLE `{$table}` (id INT) ENGINE=MyISAM" );
+		}
+		$now = 1000.0;
+		try {
+			$result = TempTableDropper::drop(
+				$tables,
+				TempTables::owner_prefix( $token ),
+				TempTableDropper::MAX_STATEMENTS,
+				static function () use ( &$now ): float {
+					$now += 100.0; // Every look: far past the time.
+					return $now;
+				}
+			);
+			$this->assertSame( array( $tables[0] ), $result['dropped'], 'the first ran' );
+			$this->assertSame( array( $tables[1] ), $result['remaining'], 'the second waits' );
+		} finally {
+			$this->force_drop( $tables );
+		}
+	}
+
+	/**
+	 * Uninstall runs as many bounded calls as it takes: more tables than one call drops all go.
+	 */
+	public function test_uninstall_drops_more_temporary_tables_than_one_call_takes(): void {
+		global $wpdb;
+		$token  = $this->dirs->state()['token'];
+		$tables = array();
+		for ( $i = 0; $i <= TempTableDropper::MAX_STATEMENTS; $i++ ) {
+			$tables[] = TempTables::name( $token, 79, 'beef', sprintf( 'u%03d', $i ) );
+			$wpdb->query( 'CREATE TABLE `' . end( $tables ) . '` (id INT) ENGINE=MyISAM' );
+		}
+		$this->assertCount( TempTableDropper::MAX_STATEMENTS + 1, array_filter( $tables, array( $this, 'table_exists' ) ), 'the control: created' );
+		try {
+			Schema::drop();
+			$this->assertSame( array(), array_values( array_filter( $tables, array( $this, 'table_exists' ) ) ) );
+		} finally {
+			$this->force_drop( $tables );
 		}
 	}
 
