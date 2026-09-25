@@ -35,7 +35,9 @@ final class Schema {
 	const MIN_COMPATIBLE = 1;
 
 	/**
-	 * Most seconds uninstall spends dropping temporary tables (one request; TempTableDropper bounds each call).
+	 * After this many seconds uninstall starts no further call to drop temporary tables. A call already
+	 * running finishes (TempTableDropper bounds it: its first statement, then at most MAX_SECONDS more before
+	 * each next one), so uninstall can spend somewhat longer than this.
 	 */
 	const UNINSTALL_DROP_SECONDS = 15.0;
 
@@ -249,8 +251,9 @@ final class Schema {
 				}
 			}
 			// In an order their foreign keys allow; a table another table still references stays (uninstall only).
-			// One call is bounded; uninstall runs calls until one drops nothing more or its own time is up. What is
-			// left then stays in the database: nothing reports it yet (uninstall has no later pass).
+			// One call is bounded; uninstall starts calls on what the last one left (its "remaining", not its
+			// "failed") until one drops nothing or UNINSTALL_DROP_SECONDS have passed. What is left then stays in
+			// the database; nothing reports it yet (uninstall has no later pass; a report is a T042 follow-up).
 			$started = microtime( true );
 			while ( array() !== $tables && microtime( true ) - $started < self::UNINSTALL_DROP_SECONDS ) {
 				$result = \WPCheckpoint\Jobs\TempTableDropper::drop( $tables, $prefix );
