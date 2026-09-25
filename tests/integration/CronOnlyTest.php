@@ -68,9 +68,11 @@ final class CronOnlyTest extends JobTestCase {
 
 	public function tear_down(): void {
 		// The actions are the plugin's own: later tests get their runner back, not the fast clock.
-		$property = new \ReflectionProperty( JobActions::class, 'runner' );
-		$property->setAccessible( true );
-		$property->setValue( Plugin::instance()->job_actions(), $this->runner );
+		if ( null !== $this->runner ) {
+			$property = new \ReflectionProperty( JobActions::class, 'runner' );
+			$property->setAccessible( true );
+			$property->setValue( Plugin::instance()->job_actions(), $this->runner );
+		}
 		Deleter::empty_directory( $this->uploads );
 		@rmdir( $this->uploads );
 		if ( null !== $this->builder ) {

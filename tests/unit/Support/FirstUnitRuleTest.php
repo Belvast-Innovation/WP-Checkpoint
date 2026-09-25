@@ -14,16 +14,33 @@ use Yoast\PHPUnitPolyfills\TestCases\TestCase;
  *
  * So every file in src/ that loops on a budget (asks should_stop() or
  * remaining_seconds(), or compares the time since it started with a
- * bound) must be listed here with the test that runs it with no time left
- * and sees it move on. A new such file without an entry fails, and so does
- * an entry whose file no longer loops on a budget or whose test is gone.
+ * bound; comments do not count) must be listed here with the test that runs
+ * it with no time left and sees it move on, and that test must name the
+ * file's class. A new such file without an entry fails, and so does an
+ * entry whose file no longer loops on a budget, whose test is gone or does
+ * not name the class.
+ *
+ * What this guards is a budget check put before the first unit. Coverage is
+ * per file, not per loop: a file with several loops is listed once, and its
+ * test reaches the loops its fixture reaches. A new loop in a listed file
+ * needs its own look.
+ *
+ * EXEMPT holds files that stop before a first unit on purpose, each with the
+ * reason; an entry there is a decision, not a gap.
  */
 final class FirstUnitRuleTest extends TestCase {
 
 	/**
 	 * What counts as looping on a budget.
 	 */
-	const BUDGET_LOOP = '/->should_stop\(|->remaining_seconds\(|\)\s*-\s*\$started\s*[<>]/';
+	const BUDGET_LOOP = '/->should_stop\(|->remaining_seconds\(|\)\s*-\s*\$started\s*[<>]|microtime\(\s*true\s*\)\s*-\s*(?:\$\w*start\w*|[\w:>-]*started_at\(\))\s*[<>]/';
+
+	/**
+	 * Files that stop before a first unit on purpose: file => why.
+	 */
+	const EXEMPT = array(
+		'src/Plugin.php' => 'cron_tick() hands a tick that starts late in a cron request to the next cron request (PR #35): its first unit could pass the server\'s time limit. Whether it may do so forever (a host whose every cron request starts late never ticks from cron) is an open decision.',
+	);
 
 	/**
 	 * File => the test (file and method) that runs it with no time left.
@@ -58,7 +75,7 @@ final class FirstUnitRuleTest extends TestCase {
 		$found = array();
 		$it    = new \RecursiveIteratorIterator( new \RecursiveDirectoryIterator( $root . '/src', \FilesystemIterator::SKIP_DOTS ) );
 		foreach ( $it as $file ) {
-			if ( 'php' === $file->getExtension() && 1 === preg_match( self::BUDGET_LOOP, (string) file_get_contents( $file->getPathname() ) ) ) {
+			if ( 'php' === $file->getExtension() && 1 === preg_match( self::BUDGET_LOOP, self::code( (string) file_get_contents( $file->getPathname() ) ) ) ) {
 				$found[] = str_replace( '\\', '/', substr( $file->getPathname(), strlen( $root ) + 1 ) );
 			}
 		}
@@ -66,14 +83,31 @@ final class FirstUnitRuleTest extends TestCase {
 		return $found;
 	}
 
+	/**
+	 * PHP source without its comments.
+	 */
+	private static function code( string $source ): string {
+		$out = '';
+		foreach ( token_get_all( $source ) as $token ) {
+			if ( is_array( $token ) && in_array( $token[0], array( T_COMMENT, T_DOC_COMMENT ), true ) ) {
+				continue;
+			}
+			$out .= is_array( $token ) ? $token[1] : $token;
+		}
+		return $out;
+	}
+
 	public function test_every_budget_loop_has_a_test_that_runs_it_with_no_time_left(): void {
-		$found = self::budget_loops();
+		$found = array_values( array_diff( self::budget_loops(), array_keys( self::EXEMPT ) ) );
 		$this->assertSame( array(), array_values( array_diff( $found, array_keys( self::COVERED ) ) ), 'loops on a budget without a no-time-left test: add one and list it in COVERED' );
 		$this->assertSame( array(), array_values( array_diff( array_keys( self::COVERED ), $found ) ), 'listed in COVERED but no longer loops on a budget: take it off' );
+		$this->assertSame( array(), array_values( array_diff( array_keys( self::EXEMPT ), self::budget_loops() ) ), 'listed in EXEMPT but no longer stops early: take it off' );
 		foreach ( self::COVERED as $source => $test ) {
 			list( $file, $method ) = explode( '::', $test );
 			$this->assertFileExists( self::root() . '/' . $file, $source );
-			$this->assertMatchesRegularExpression( '/function ' . preg_quote( $method, '/' ) . '\(/', (string) file_get_contents( self::root() . '/' . $file ), "{$source}: the test {$test} is gone" );
+			$text = (string) file_get_contents( self::root() . '/' . $file );
+			$this->assertMatchesRegularExpression( '/function ' . preg_quote( $method, '/' ) . '\(/', $text, "{$source}: the test {$test} is gone" );
+			$this->assertStringContainsString( basename( $source, '.php' ), $text, "{$source}: {$file} does not name the class it is listed for" );
 		}
 	}
 
@@ -86,9 +120,12 @@ final class FirstUnitRuleTest extends TestCase {
 		) as $code ) {
 			$this->assertSame( 1, preg_match( self::BUDGET_LOOP, $code ), $code );
 		}
+		$this->assertSame( 1, preg_match( self::BUDGET_LOOP, 'if ( microtime( true ) - JobActions::started_at() >= self::LATE ) {' ), 'a start from elsewhere' );
+		$this->assertSame( 0, preg_match( self::BUDGET_LOOP, 'if ( microtime( true ) - $last >= self::PROGRESS_SECONDS ) {' ), 'a throttle is no budget' );
 		foreach ( array(
 			'public function should_stop(): bool {',
 			'$this->walk[\'seconds\'] += max( 0.0, (float) call_user_func( $this->clock ) - $started );',
+			self::code( "<?php\n// if ( \$context->should_stop() ) {\n/** ->remaining_seconds( */\n\$a = 1;" ),
 		) as $code ) {
 			$this->assertSame( 0, preg_match( self::BUDGET_LOOP, $code ), $code );
 		}
