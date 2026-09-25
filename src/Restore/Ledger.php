@@ -40,9 +40,12 @@ defined( 'ABSPATH' ) || exit;
  * What the ledger cannot stop is a statement such a run sends before it
  * writes here: a DROP, a TRUNCATE, an INSERT into a table without
  * transactions. The import step confirms the job's lease right before each
- * claim, DROP and TRUNCATE, which leaves only the time of one statement,
- * and counts the rows of a table without transactions against the ledger's
- * at its end.
+ * claim, DROP and TRUNCATE, which leaves only the time of one statement, and
+ * again right after each claim (a run whose lease ran out between its check
+ * and its claim stops before it acts on the table). At a table's end it
+ * counts the rows of a table without transactions against the ledger's, and
+ * looks for one row in a table with transactions that recorded rows (a late
+ * DROP is not in a transaction).
  *
  * A table without transactions (MyISAM, Aria, MEMORY...) keeps its rows
  * whatever happens after them. Its position moves after each statement and

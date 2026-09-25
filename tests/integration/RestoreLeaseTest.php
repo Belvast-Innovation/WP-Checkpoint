@@ -379,30 +379,45 @@ final class RestoreLeaseTest extends RestoreTestCase {
 
 	/**
 	 * A run that lost the job and then its claim on a table stops as a run that lost the job: no retry is logged
-	 * for it (the positive control is in the test of a refused batch, where the run still holds the job).
+	 * for it. The control, in the same log: a run that still holds the job and loses a claim is retried, and
+	 * that is logged.
 	 */
 	public function test_a_run_that_lost_the_job_and_a_table_logs_no_retry(): void {
-		$big     = $this->p . 'big';
-		$claimed = false;
-		$job     = $this->start(
+		$big   = $this->p . 'big';
+		$phase = 'holder';
+		$job   = $this->start(
 			$this->backup( $this->tables() ),
-			function ( string $point, string $table = '', int $chunk = 0 ) use ( $big, &$claimed ): void {
+			function ( string $point, string $table = '', int $chunk = 0 ) use ( $big, &$phase ): void {
 				global $wpdb;
-				if ( $claimed || 'statement' !== $point || $table !== $big || $chunk < 2 ) {
+				if ( 'statement' !== $point || $table !== $big || $chunk < 2 || ! in_array( $phase, array( 'holder', 'lost' ), true ) ) {
 					return;
 				}
-				$this->take_over();
+				if ( 'lost' === $phase ) {
+					$this->take_over();
+				}
 				$job    = Plugin::instance()->jobs()->find( $this->job_id );
 				$random = RestorePreflightStep::load_plan( Residue::work_dir( $job->storage_path, $job->id ) )['random'];
 				$wpdb->query( 'COMMIT' );
 				$wpdb->query( $wpdb->prepare( 'UPDATE `' . TempTables::ledger( $job->storage_token, $job->id, $random ) . '` SET holder = %s WHERE n = %d', str_repeat( 'e', 32 ), $this->number( $big ) ) );
-				$claimed = 1 === (int) $wpdb->rows_affected;
+				$this->assertSame( 1, (int) $wpdb->rows_affected );
 				$wpdb->query( 'COMMIT' );
+				$phase = 'holder' === $phase ? 'retried' : 'done';
 			}
 		);
+		$log = static function () use ( $job ): string {
+			$now = Plugin::instance()->jobs()->find( $job->id );
+			return (string) file_get_contents( $now->storage_path . '/' . $now->log_path );
+		};
+		for ( $i = 0; $i < 200 && 'holder' === $phase; $i++ ) {
+			$result = Plugin::instance()->runner()->tick( $job->id, microtime( true ) );
+		}
+		$GLOBALS['wpdb']->query( 'COMMIT' );
+		$this->assertSame( TickResult::WAITING, $result->status );
+		$this->assertSame( 1, substr_count( $log(), 'will retry' ), 'the control: the holder\'s lost claim is retried, and logged' );
+
+		$phase = 'lost';
 		$this->assertSame( 'lost', $this->tick_until_lost_or_done( $job ) );
-		$this->assertTrue( $claimed, 'the control: the job and the table were taken mid-batch' );
-		$now = Plugin::instance()->jobs()->find( $job->id );
-		$this->assertStringNotContainsString( 'will retry', (string) file_get_contents( $now->storage_path . '/' . $now->log_path ) );
+		$this->assertSame( 'done', $phase, 'the control: the job and the table were taken mid-batch' );
+		$this->assertSame( 1, substr_count( $log(), 'will retry' ), 'no retry logged for a run that lost the job' );
 	}
 }

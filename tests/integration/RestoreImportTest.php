@@ -274,8 +274,8 @@ final class RestoreImportTest extends RestoreTestCase {
 			}
 			$this->assertSame( array( 1, 0 ), $this->restarts( $job, $isam ), $stop . ': started over once, and no longer marked' );
 			$log = (string) file_get_contents( $job->storage_path . '/' . $job->log_path );
-			$this->assertStringContainsString( 'imported again from its first chunk: its row count does not match the ledger', $log, $stop . ': the control, the start-over is logged' );
-			$resumed = 'was being imported again from its first chunk when a run stopped; this run goes on with it';
+			$this->assertStringContainsString( 'does not match the ledger; the table is to be imported again from its first chunk', $log, $stop . ': the control, the start-over is logged' );
+			$resumed = 'is marked to be imported again from its first chunk; this run goes on with it';
 			if ( 'restarted' === $stop ) {
 				$this->assertStringNotContainsString( $resumed, $log, 'the mark was gone: nothing to go on with' );
 			} else {
@@ -306,22 +306,36 @@ final class RestoreImportTest extends RestoreTestCase {
 		$this->assertSame( 5000, $next( $job ), 'the control: imported in one pass, the counter is the definition\'s' );
 		$this->drop_job_tables( $job );
 
-		$done = false;
-		$this->register_crashing(
-			'restore_crash_counter',
-			static function ( string $point, string $table = '', int $chunk = 0 ) use ( $isam, &$done ): void {
-				if ( ! $done && 'statement' === $point && $table === $isam && 2 === $chunk ) {
-					$done = true;
-					throw new \RuntimeException( 'simulated: the run is killed here (statement)' );
+		// Started over; then started over and stopped between the TRUNCATE and setting the counter back, where the
+		// next run finds the table empty already and must set it back all the same.
+		foreach ( array( 'none', 'truncated' ) as $stop ) {
+			$seen = array();
+			$type = 'restore_crash_counter_' . $stop;
+			$this->register_crashing(
+				$type,
+				static function ( string $point, string $table = '', int $chunk = 0 ) use ( $isam, $stop, &$seen ): void {
+					if ( $table !== $isam || ( 'statement' === $point && 2 !== $chunk ) ) {
+						return;
+					}
+					$seen[ $point ] = ( $seen[ $point ] ?? 0 ) + 1;
+					if ( ( 'statement' === $point || $stop === $point ) && 1 === $seen[ $point ] ) {
+						throw new \RuntimeException( 'simulated: the run is killed here (' . $point . ')' );
+					}
 				}
+			);
+			$job = $this->run_restore( Plugin::instance()->jobs()->create( $type, self::$admin_id, array(), array( 'base' => $base ) ) );
+			Plugin::instance()->job_actions()->retry( $job->id );
+			$job = $this->run_restore( $job );
+			if ( 'truncated' === $stop ) {
+				$this->assertStringContainsString( '(truncated)', (string) $job->last_error, 'the control: stopped there' );
+				Plugin::instance()->job_actions()->retry( $job->id );
+				$job = $this->run_restore( $job );
 			}
-		);
-		$job = $this->run_restore( Plugin::instance()->jobs()->create( 'restore_crash_counter', self::$admin_id, array(), array( 'base' => $base ) ) );
-		Plugin::instance()->job_actions()->retry( $job->id );
-		$job = $this->run_restore( $job );
-		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
-		$this->assertSame( array( 1, 0 ), $this->restarts( $job, $isam ), 'the control: the table was started over' );
-		$this->assertSame( 5000, $next( $job ), 'the counter after starting over' );
+			$this->assertSame( Job::COMPLETED, $job->status, $stop . ': ' . (string) $job->last_error );
+			$this->assertSame( array( 1, 0 ), $this->restarts( $job, $isam ), $stop . ': the control, the table was started over once' );
+			$this->assertSame( 5000, $next( $job ), $stop . ': the counter after starting over' );
+			$this->drop_job_tables( $job );
+		}
 	}
 
 	/**

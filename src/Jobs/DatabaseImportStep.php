@@ -95,7 +95,7 @@ final class DatabaseImportStep implements Step {
 	 * Test seam: function( string $point, string $table, int $chunk ): void, called at "statement" (a statement ran, its record not
 	 * yet), "commit" (a record committed, the cursor not yet checkpointed), "claiming" (about to claim a
 	 * table), "claimed" (a table claimed, nothing run on it yet), and the steps of starting a table over:
-	 * "marked", "emptied", "reset", "rewound" (the cursor back on the table's first chunk) and
+	 * "marked", "truncated" (emptied, its AUTO_INCREMENT not set back yet), "emptied", "reset", "rewound" (the cursor back on the table's first chunk) and
 	 * "restarted" (the mark removed); a test throws there to stand for a run stopped at that point, or
 	 * changes the world there (the job taken over by another driver) to see what the run does next.
 	 *
@@ -104,8 +104,8 @@ final class DatabaseImportStep implements Step {
 	private $crash;
 
 	/**
-	 * Tables this run marked to be started over (number => true), so that only a mark left by a stopped run is
-	 * logged as one.
+	 * Tables this run marked to be started over (number => true): a mark this run found and did not set is logged
+	 * (left by an earlier run, stopped or at the end of its time).
 	 *
 	 * @var array<int, bool>
 	 */
@@ -296,7 +296,7 @@ final class DatabaseImportStep implements Step {
 		if ( $state['restarting'] ) {
 			// Before any other check: a table being started over is in one of the states starting over passes through.
 			if ( empty( $this->marked[ $number ] ) ) {
-				$context->logger()->warning( 'A table without transactions was being imported again from its first chunk when a run stopped; this run goes on with it', array( 'table' => $target->table ) );
+				$context->logger()->warning( 'A table without transactions is marked to be imported again from its first chunk; this run goes on with it', array( 'table' => $target->table ) );
 			}
 			$state = $this->start_over( $context, $db, $ledger, $target, $chunk, $auto_increment );
 			if ( null === $state ) {
@@ -324,7 +324,7 @@ final class DatabaseImportStep implements Step {
 					throw new \RuntimeException( sprintf( 'The table %1$s was imported again from its first chunk %2$d times, each time because its row count did not match the rows the restore had recorded: a run stopped between a statement and its record, a statement failed partway and kept some of its rows (see the log for the database\'s errors), or rows were written by another run of this restore that outlived its lease or by another process. Start the restore again; if this happens again, the host stops the import\'s runs too early or something else writes to the table.', $target->table, $state['restarts'] ) );
 				}
 				// A statement ran and was not recorded: its rows cannot be told from the others. Import the table again.
-				$context->logger()->warning( 'A table without transactions is imported again from its first chunk: its row count does not match the ledger', array( 'table' => $target->table ) );
+				$context->logger()->warning( 'The row count of a table without transactions does not match the ledger; the table is to be imported again from its first chunk', array( 'table' => $target->table ) );
 				$ledger->mark_restarting( $number );
 				$this->marked[ $number ] = true;
 				$this->crash( 'marked', $target->table, $chunk );
@@ -469,6 +469,7 @@ final class DatabaseImportStep implements Step {
 			try {
 				$context->confirm_lease(); // Nothing between the check and the statement that removes the rows.
 				$db->run( 'TRUNCATE TABLE ' . SqlWriter::identifier( $target->temporary ) );
+				$this->crash( 'truncated', $target->table, $chunk );
 			} catch ( StatementFailed $e ) {
 				throw new \RuntimeException( sprintf( 'The table %1$s must be emptied to be imported again after an interrupted run, and the database did not empty it (%2$s). Start the restore again.', $target->table, $e->getMessage() ) );
 			}
