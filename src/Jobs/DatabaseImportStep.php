@@ -104,6 +104,14 @@ final class DatabaseImportStep implements Step {
 	private $crash;
 
 	/**
+	 * Tables this run marked to be started over (number => true), so that only a mark left by a stopped run is
+	 * logged as one.
+	 *
+	 * @var array<int, bool>
+	 */
+	private $marked = array();
+
+	/**
 	 * Constructor.
 	 *
 	 * @param callable|null $connect function(): ImportSession (tests); the site's own settings by default.
@@ -137,13 +145,15 @@ final class DatabaseImportStep implements Step {
 	 * @return StepResult
 	 * @throws Refused When a chunk is not what the restore runs, or does not agree with the manifest.
 	 * @throws TransientFailure When the database or the work directory is not available now.
+	 * @throws ClaimLost When another run claimed a table (retried after the back-off).
+	 * @throws WorkLost When the position and the plan or the ledger disagree.
 	 */
 	public function run( JobContext $context ): StepResult {
-		$work     = $context->work_path();
-		$plan     = RestorePreflightStep::load_plan( $work );
-		$manifest = RestorePreflightStep::manifest( $work );
-		$rows_of  = array_column( $manifest->tables(), 'rows', 'name' );
-		$cursor   = array_merge(
+		$work         = $context->work_path();
+		$plan         = RestorePreflightStep::load_plan( $work );
+		$manifest     = RestorePreflightStep::manifest( $work );
+		$rows_of      = array_column( $manifest->tables(), 'rows', 'name' );
+		$cursor       = array_merge(
 			array(
 				'walk'        => ChunkWalk::start(),
 				'current'     => null,
@@ -151,14 +161,15 @@ final class DatabaseImportStep implements Step {
 			),
 			$context->cursor()
 		);
-		$walk     = new ChunkWalk( RestoreFiles::path( $work, RestoreFiles::INDEX ), $plan['volumes'], $plan['chunk_bytes'] );
-		$names    = new ConstraintNames( $plan['random'] );
-		$db       = call_user_func( $this->connect );
-		$site_set = $db->charset(); // Each chunk starts from the site's own character set; its preamble may set another.
-		$counted  = array();
-		$columns  = array();
-		$slowest  = 0.0;
-		$first    = true;
+		$walk         = new ChunkWalk( RestoreFiles::path( $work, RestoreFiles::INDEX ), $plan['volumes'], $plan['chunk_bytes'] );
+		$names        = new ConstraintNames( $plan['random'] );
+		$db           = call_user_func( $this->connect );
+		$site_set     = $db->charset(); // Each chunk starts from the site's own character set; its preamble may set another.
+		$counted      = array();
+		$defined      = array();
+		$this->marked = array();
+		$slowest      = 0.0;
+		$first        = true;
 		try {
 			// Each tick is a run of its own: it claims each table it works on, and a run that claimed after it wins.
 			$ledger = new Ledger( $db, TempTables::ledger( $context->job()->storage_token, $context->job()->id, $plan['random'] ), bin2hex( random_bytes( 16 ) ) );
@@ -201,8 +212,8 @@ final class DatabaseImportStep implements Step {
 						return StepResult::progress( $cursor, $this->percent( $cursor, $plan['plan'] ), __( 'Importing the database', 'wp-checkpoint' ) );
 					}
 				}
-				if ( ! isset( $columns[ $table['number'] ] ) ) {
-					$columns = array( $table['number'] => RestorePreflightStep::definition( RestoreFiles::path( $work, RestoreFiles::DEFINITIONS ), $table['number'] )['columns'] );
+				if ( ! isset( $defined[ $table['number'] ] ) ) {
+					$defined = array( $table['number'] => RestorePreflightStep::definition( RestoreFiles::path( $work, RestoreFiles::DEFINITIONS ), $table['number'] ) );
 				}
 				$target  = new ImportTarget(
 					$table['table'],
@@ -211,14 +222,17 @@ final class DatabaseImportStep implements Step {
 					$table['number'],
 					$names,
 					array( $plan['plan'], 'reference' ),
-					$columns[ $table['number'] ]
+					$defined[ $table['number'] ]['columns']
 				);
-				$outcome = $this->import_chunk( $context, $db, $ledger, $target, $file, (int) $cursor['current']['c'], $counted, $slowest, $first, $cursor, $plan['plan'], $site_set );
+				$outcome = $this->import_chunk( $context, $db, $ledger, $target, $file, (int) $cursor['current']['c'], $counted, $slowest, $first, $cursor, $plan['plan'], $site_set, (string) ( $defined[ $table['number'] ]['auto_increment'] ?? '' ) );
 				if ( 'restart' === $outcome ) {
 					$cursor['current'] = null;
 					$cursor['walk']    = $cursor['table_start'];
 					$context->checkpoint( $cursor, $this->percent( $cursor, $plan['plan'] ), __( 'Importing the database', 'wp-checkpoint' ) );
 					$this->crash( 'rewound', $table['table'] );
+					if ( $context->should_stop() ) {
+						return StepResult::progress( $cursor, $this->percent( $cursor, $plan['plan'] ), __( 'Importing the database', 'wp-checkpoint' ) );
+					}
 					continue;
 				}
 				if ( 'stopped' === $outcome ) {
@@ -236,6 +250,11 @@ final class DatabaseImportStep implements Step {
 					return StepResult::progress( $cursor, $this->percent( $cursor, $plan['plan'] ), __( 'Importing the database', 'wp-checkpoint' ) );
 				}
 			}
+		} catch ( ClaimLost $e ) {
+			// A run that no longer holds the job stops as such (LockLost), not as one that is retried: the Runner
+			// would log a retry that never comes. Only the job's holder waits the back-off and takes the table back.
+			$context->confirm_lease();
+			throw $e;
 		} finally {
 			$db->close();
 		}
@@ -256,22 +275,30 @@ final class DatabaseImportStep implements Step {
 	 * @param array<string, mixed> $cursor  Cursor (its chunk's pos follows the ledger, so a tick that moves the ledger moves the cursor).
 	 * @param TablePlan            $plan    Plan.
 	 * @param string               $session_charset The site's character set, the session's before the chunk's preamble.
+	 * @param string               $auto_increment  The AUTO_INCREMENT value of the table's CREATE TABLE ('' when it has none).
 	 * @return string "done", "stopped" or "restart".
 	 * @throws Refused When a statement is not one the restore runs.
 	 * @throws WorkLost When the ledger and the position disagree.
 	 * @throws ClaimLost When another run claimed the table (retried after the back-off).
 	 * @throws \RuntimeException When one statement takes longer than the whole time budget.
 	 */
-	private function import_chunk( JobContext $context, ImportSession $db, Ledger $ledger, ImportTarget $target, string $file, int $chunk, array &$counted, float &$slowest, bool &$first, array &$cursor, TablePlan $plan, string $session_charset ): string {
+	private function import_chunk( JobContext $context, ImportSession $db, Ledger $ledger, ImportTarget $target, string $file, int $chunk, array &$counted, float &$slowest, bool &$first, array &$cursor, TablePlan $plan, string $session_charset, string $auto_increment ): string {
 		$number = $target->number;
 		// The claim decides who may change this table from now on: only while this run still holds the job.
 		$this->crash( 'claiming', $target->table, $chunk );
 		$context->confirm_lease();
 		$state = $ledger->claim( $number );
 		$this->crash( 'claimed', $target->table, $chunk );
+		// And after it: a run whose lease ran out between the check and the claim may have taken the table from
+		// the run that holds the job now. That run's next write on the table fails and it takes the table back;
+		// this one stops here, before it acts on a record that is no longer its to act on.
+		$context->confirm_lease();
 		if ( $state['restarting'] ) {
 			// Before any other check: a table being started over is in one of the states starting over passes through.
-			$state = $this->start_over( $context, $db, $ledger, $target, $chunk );
+			if ( empty( $this->marked[ $number ] ) ) {
+				$context->logger()->warning( 'A table without transactions was being imported again from its first chunk when a run stopped; this run goes on with it', array( 'table' => $target->table ) );
+			}
+			$state = $this->start_over( $context, $db, $ledger, $target, $chunk, $auto_increment );
 			if ( null === $state ) {
 				return 'restart';
 			}
@@ -294,13 +321,14 @@ final class DatabaseImportStep implements Step {
 			$count = $db->rows( 'SELECT COUNT(*) FROM ' . SqlWriter::identifier( $target->temporary ) );
 			if ( (int) ( $count[0][0] ?? -1 ) !== $state['rows'] ) {
 				if ( $state['restarts'] >= self::MAX_RESTARTS ) {
-					throw new \RuntimeException( sprintf( 'The table %1$s was imported again from its first chunk %2$d times, each time because its row count did not match the rows the restore had recorded: a run stopped between a statement and its record, or rows were written outside the import. Start the restore again; if this happens again, the host stops the import\'s runs too early or another process writes to the table.', $target->table, $state['restarts'] ) );
+					throw new \RuntimeException( sprintf( 'The table %1$s was imported again from its first chunk %2$d times, each time because its row count did not match the rows the restore had recorded: a run stopped between a statement and its record, a statement failed partway and kept some of its rows (see the log for the database\'s errors), or rows were written by another run of this restore that outlived its lease or by another process. Start the restore again; if this happens again, the host stops the import\'s runs too early or something else writes to the table.', $target->table, $state['restarts'] ) );
 				}
 				// A statement ran and was not recorded: its rows cannot be told from the others. Import the table again.
-				$ledger->mark_restarting( $number );
-				$this->crash( 'marked', $target->table, $chunk );
 				$context->logger()->warning( 'A table without transactions is imported again from its first chunk: its row count does not match the ledger', array( 'table' => $target->table ) );
-				$state = $this->start_over( $context, $db, $ledger, $target, $chunk );
+				$ledger->mark_restarting( $number );
+				$this->marked[ $number ] = true;
+				$this->crash( 'marked', $target->table, $chunk );
+				$state = $this->start_over( $context, $db, $ledger, $target, $chunk, $auto_increment );
 				if ( null === $state ) {
 					return 'restart';
 				}
@@ -333,7 +361,7 @@ final class DatabaseImportStep implements Step {
 		try {
 			while ( true ) {
 				if ( ! $first && $context->remaining_seconds() < $slowest * self::MARGIN ) {
-					$this->flush( $db, $ledger, $number, $chunk, $at_chunk, $at_pos, $end, $rows, $open, null !== $state );
+					$this->flush( $db, $ledger, $target->table, $number, $chunk, $at_chunk, $at_pos, $end, $rows, $open, null !== $state );
 					$cursor['current']['pos'] = $end;
 					return 'stopped';
 				}
@@ -392,21 +420,21 @@ final class DatabaseImportStep implements Step {
 				}
 				if ( null !== $state && ! $state['transactional'] ) {
 					// No transaction to put the record in: record each statement as soon as it ran.
-					$this->flush( $db, $ledger, $number, $chunk, $at_chunk, $at_pos, $end, $rows, $open, true );
+					$this->flush( $db, $ledger, $target->table, $number, $chunk, $at_chunk, $at_pos, $end, $rows, $open, true );
 				}
 				if ( $context->should_checkpoint( $bytes ) ) {
-					$this->flush( $db, $ledger, $number, $chunk, $at_chunk, $at_pos, $end, $rows, $open, null !== $state );
+					$this->flush( $db, $ledger, $target->table, $number, $chunk, $at_chunk, $at_pos, $end, $rows, $open, null !== $state );
 					$bytes                    = 0;
 					$cursor['current']['pos'] = $end;
 					$context->checkpoint( $cursor, $this->percent( $cursor, $plan ), __( 'Importing the database', 'wp-checkpoint' ) );
 				}
 				if ( $context->should_stop() ) {
-					$this->flush( $db, $ledger, $number, $chunk, $at_chunk, $at_pos, $end, $rows, $open, null !== $state );
+					$this->flush( $db, $ledger, $target->table, $number, $chunk, $at_chunk, $at_pos, $end, $rows, $open, null !== $state );
 					$cursor['current']['pos'] = $end;
 					return 'stopped';
 				}
 			}
-			$this->flush( $db, $ledger, $number, $chunk, $at_chunk, $at_pos, $end, $rows, $open, null !== $state );
+			$this->flush( $db, $ledger, $target->table, $number, $chunk, $at_chunk, $at_pos, $end, $rows, $open, null !== $state );
 			$cursor['current']['pos'] = $end;
 			if ( null === $state ) {
 				throw new Refused( sprintf( 'Table %s, chunk %d: the chunk does not create the table.', $target->table, $chunk ) );
@@ -430,11 +458,12 @@ final class DatabaseImportStep implements Step {
 	 * @param Ledger        $ledger  Ledger.
 	 * @param ImportTarget  $target  The table.
 	 * @param int           $chunk   The chunk the job's position is on.
+	 * @param string        $auto_increment The AUTO_INCREMENT value of the table's CREATE TABLE ('' when it has none).
 	 * @return array{chunk: int, pos: int, rows: int, data_offset: int, transactional: bool, restarts: int, holder: string, constraints: string, restarting: bool}|null The record to go on from, or null: the position must go back to the table's first chunk.
 	 * @throws \RuntimeException When the table cannot be emptied.
 	 * @throws WorkLost When the ledger lost the table's record.
 	 */
-	private function start_over( JobContext $context, ImportSession $db, Ledger $ledger, ImportTarget $target, int $chunk ) {
+	private function start_over( JobContext $context, ImportSession $db, Ledger $ledger, ImportTarget $target, int $chunk, string $auto_increment ) {
 		$count = $db->rows( 'SELECT COUNT(*) FROM ' . SqlWriter::identifier( $target->temporary ) );
 		if ( '0' !== (string) ( $count[0][0] ?? '' ) ) {
 			try {
@@ -443,6 +472,12 @@ final class DatabaseImportStep implements Step {
 			} catch ( StatementFailed $e ) {
 				throw new \RuntimeException( sprintf( 'The table %1$s must be emptied to be imported again after an interrupted run, and the database did not empty it (%2$s). Start the restore again.', $target->table, $e->getMessage() ) );
 			}
+		}
+		if ( 1 === preg_match( '/\A[1-9][0-9]{0,19}\z/', $auto_increment ) ) {
+			// TRUNCATE sets the counter back to its start on every server; the CREATE TABLE's value is the one the
+			// table had (rows deleted at its end on the original site keep their numbers unused). Also when the table
+			// was found empty: a run may have stopped between the TRUNCATE and this.
+			$db->run( 'ALTER TABLE ' . SqlWriter::identifier( $target->temporary ) . ' AUTO_INCREMENT = ' . $auto_increment );
 		}
 		$this->crash( 'emptied', $target->table, $chunk );
 		$ledger->reset( $target->number );
@@ -479,6 +514,7 @@ final class DatabaseImportStep implements Step {
 	 *
 	 * @param ImportSession $db       Connection.
 	 * @param Ledger        $ledger   Ledger.
+	 * @param string        $table    The table's name in the backup (for the test seam).
 	 * @param int           $number   Table number.
 	 * @param int           $chunk    Chunk number.
 	 * @param int           $at_chunk Ledger chunk read before (updated).
@@ -489,7 +525,7 @@ final class DatabaseImportStep implements Step {
 	 * @param bool          $recorded Whether the ledger knows the table (before its CREATE nothing is recorded).
 	 * @return void
 	 */
-	private function flush( ImportSession $db, Ledger $ledger, int $number, int $chunk, int &$at_chunk, int &$at_pos, int $end, int &$rows, bool &$open, bool $recorded ): void {
+	private function flush( ImportSession $db, Ledger $ledger, string $table, int $number, int $chunk, int &$at_chunk, int &$at_pos, int $end, int &$rows, bool &$open, bool $recorded ): void {
 		if ( $recorded && ( $at_chunk !== $chunk || $at_pos !== $end ) ) {
 			if ( ! $open ) {
 				$db->begin();
@@ -503,7 +539,7 @@ final class DatabaseImportStep implements Step {
 		if ( $open ) {
 			$db->commit();
 			$open = false;
-			$this->crash( 'commit' );
+			$this->crash( 'commit', $table, $chunk );
 		}
 	}
 
@@ -570,7 +606,7 @@ final class DatabaseImportStep implements Step {
 	 * @param array{plan: TablePlan, random: string, chunk_bytes: int, volumes: string[], multisite: bool} $plan   Plan.
 	 * @return void
 	 * @throws Refused When they do not agree.
-	 * @throws \RuntimeException When a table without transactions holds other rows than the ledger recorded.
+	 * @throws \RuntimeException When a table without transactions holds other rows than the ledger recorded, or one with transactions none.
 	 */
 	private function table_done( ImportSession $db, Ledger $ledger, array $table, int $rows, array $plan ): void {
 		$state = $ledger->get( $table['number'] );
@@ -580,12 +616,18 @@ final class DatabaseImportStep implements Step {
 		if ( ! $state['transactional'] ) {
 			// Both counts, not one of them: rows in the table the ledger did not record mean a second writer was at work
 			// on it, where only one may ever be. A table with transactions needs no count (its rows and their record
-			// commit together, under the holder's claim) and would pay a full scan for it.
+			// commit together, under the holder's claim) and would pay a full scan for it; it is probed below.
 			$count = $db->rows( 'SELECT COUNT(*) FROM ' . SqlWriter::identifier( $table['temporary'] ) );
 			$held  = (int) ( $count[0][0] ?? -1 );
 			if ( $held !== $state['rows'] ) {
-				throw new \RuntimeException( sprintf( 'The table %1$s holds %2$d rows where the restore inserted %3$d: rows were added or removed outside the import while it ran. Start the restore again.', $table['table'], $held, $state['rows'] ) );
+				throw new \RuntimeException( sprintf( 'The table %1$s holds %2$d rows where the restore inserted %3$d: rows were added or removed by another run of this restore that outlived its lease, or by another process, while it ran. Start the restore again.', $table['table'], $held, $state['rows'] ) );
 			}
+		} elseif ( $state['rows'] > 0 && array() === $db->rows( 'SELECT 1 FROM ' . SqlWriter::identifier( $table['temporary'] ) . ' LIMIT 1' ) ) {
+			// Its rows commit with their record, but DROP and CREATE TABLE are not in a transaction: a run that outlived
+			// its lease can still drop the table after its last lease check and create it again, empty. One row is
+			// enough to tell, where a count would scan the whole table. A table emptied and partly filled again is
+			// not caught here, and there is no check between here and the swap yet: the swap's part of T042 adds it.
+			throw new \RuntimeException( sprintf( 'The table %1$s is empty where the restore inserted %2$d rows: it was dropped or emptied by another run of this restore that outlived its lease, or by another process, while it ran. Start the restore again.', $table['table'], $state['rows'] ) );
 		}
 		$prefix = (string) $plan['plan']->to_array()['backup_prefix'];
 		if ( $prefix . 'options' === $table['table'] ) {

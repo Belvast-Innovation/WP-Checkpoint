@@ -18,8 +18,9 @@ defined( 'ABSPATH' ) || exit;
  * its open batch is rolled back. Being a TransientFailure, the job is
  * retried after the back-off with the lease released, and the retry claims
  * the table back and goes on from its record, while the other run stops at
- * its next lease check. A run that no longer holds the job stops at the
- * Runner's fenced write instead, as it would with LockLost.
+ * its next lease check. The import step confirms the job's lease before
+ * it lets ClaimLost out, so a run that no longer holds the job stops with
+ * LockLost instead, and no retry is logged for it.
  */
 final class ClaimLost extends TransientFailure {
 }

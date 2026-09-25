@@ -128,7 +128,7 @@ final class Ledger {
 		$state = $this->get( $number );
 		if ( null === $state ) {
 			try {
-				$this->db->rows(
+				$this->db->write(
 					'INSERT INTO ' . SqlWriter::identifier( $this->name ) . ' (n, chunk, pos, row_count, data_offset, transactional, holder) VALUES (?, 0, 0, 0, 0, 1, ?)',
 					array( (string) $number, $this->token )
 				);
@@ -139,14 +139,9 @@ final class Ledger {
 				throw new ClaimLost( 'Another run of this restore claimed the table first.' );
 			}
 		} elseif ( $state['holder'] !== $this->token ) {
-			$changed = $this->db->run(
-				sprintf(
-					"UPDATE %s SET holder = '%s' WHERE n = %d AND holder = '%s'",
-					SqlWriter::identifier( $this->name ),
-					self::token_text( $this->token ),
-					$number,
-					self::token_text( $state['holder'] )
-				)
+			$changed = $this->db->write(
+				'UPDATE ' . SqlWriter::identifier( $this->name ) . ' SET holder = ? WHERE n = ? AND holder = ?',
+				array( $this->token, (string) $number, $state['holder'] )
 			);
 			if ( 1 !== $changed ) {
 				throw new ClaimLost( 'Another run of this restore claimed the table first.' );
@@ -170,7 +165,7 @@ final class Ledger {
 	 * @throws ClaimLost When this run is no longer the table's holder.
 	 */
 	public function created( int $number, int $offset, bool $transactional, string $constraints ): void {
-		$this->db->rows(
+		$this->db->write(
 			'UPDATE ' . SqlWriter::identifier( $this->name ) . ' SET chunk = 1, pos = ?, data_offset = ?, transactional = ?, constraint_names = ? WHERE n = ? AND chunk = 0 AND holder = ?',
 			array( (string) $offset, (string) $offset, $transactional ? '1' : '0', $constraints, (string) $number, $this->token )
 		);
@@ -193,18 +188,9 @@ final class Ledger {
 	 * @throws ClaimLost When the position is not the one read before, or this run is no longer the holder.
 	 */
 	public function advance( int $number, int $chunk, int $pos, int $to_chunk, int $to_pos, int $rows ): void {
-		$changed = $this->db->run(
-			sprintf(
-				"UPDATE %s SET chunk = %d, pos = %d, row_count = row_count + %d WHERE n = %d AND chunk = %d AND pos = %d AND holder = '%s'",
-				SqlWriter::identifier( $this->name ),
-				$to_chunk,
-				$to_pos,
-				$rows,
-				$number,
-				$chunk,
-				$pos,
-				self::token_text( $this->token )
-			)
+		$changed = $this->db->write(
+			'UPDATE ' . SqlWriter::identifier( $this->name ) . ' SET chunk = ?, pos = ?, row_count = row_count + ? WHERE n = ? AND chunk = ? AND pos = ? AND holder = ?',
+			array( (string) $to_chunk, (string) $to_pos, (string) $rows, (string) $number, (string) $chunk, (string) $pos, $this->token )
 		);
 		if ( 1 !== $changed ) {
 			throw new ClaimLost( 'Another run of this restore moved the import on; this one stops.' );
@@ -221,13 +207,9 @@ final class Ledger {
 	 * @throws ClaimLost When this run is no longer the table's holder.
 	 */
 	public function mark_restarting( int $number ): void {
-		$this->db->run(
-			sprintf(
-				"UPDATE %s SET restarting = 1, restarts = restarts + 1 WHERE n = %d AND restarting = 0 AND holder = '%s'",
-				SqlWriter::identifier( $this->name ),
-				$number,
-				self::token_text( $this->token )
-			)
+		$this->db->write(
+			'UPDATE ' . SqlWriter::identifier( $this->name ) . ' SET restarting = 1, restarts = restarts + 1 WHERE n = ? AND restarting = 0 AND holder = ?',
+			array( (string) $number, $this->token )
 		);
 		$now = $this->get( $number );
 		if ( null === $now || ! $now['restarting'] || $now['holder'] !== $this->token ) {
@@ -245,13 +227,9 @@ final class Ledger {
 	 * @throws ClaimLost When the table is not marked, or this run is no longer its holder.
 	 */
 	public function reset( int $number ): void {
-		$this->db->run(
-			sprintf(
-				"UPDATE %s SET chunk = 1, pos = data_offset, row_count = 0 WHERE n = %d AND restarting = 1 AND holder = '%s'",
-				SqlWriter::identifier( $this->name ),
-				$number,
-				self::token_text( $this->token )
-			)
+		$this->db->write(
+			'UPDATE ' . SqlWriter::identifier( $this->name ) . ' SET chunk = 1, pos = data_offset, row_count = 0 WHERE n = ? AND restarting = 1 AND holder = ?',
+			array( (string) $number, $this->token )
 		);
 		$now = $this->get( $number );
 		if ( null === $now || ! $now['restarting'] || 1 !== $now['chunk'] || $now['data_offset'] !== $now['pos'] || 0 !== $now['rows'] || $now['holder'] !== $this->token ) {
@@ -268,27 +246,13 @@ final class Ledger {
 	 * @throws ClaimLost When the table is not reset, or this run is no longer its holder.
 	 */
 	public function restarted( int $number ): void {
-		$this->db->run(
-			sprintf(
-				"UPDATE %s SET restarting = 0 WHERE n = %d AND restarting = 1 AND chunk = 1 AND pos = data_offset AND row_count = 0 AND holder = '%s'",
-				SqlWriter::identifier( $this->name ),
-				$number,
-				self::token_text( $this->token )
-			)
+		$this->db->write(
+			'UPDATE ' . SqlWriter::identifier( $this->name ) . ' SET restarting = 0 WHERE n = ? AND restarting = 1 AND chunk = 1 AND pos = data_offset AND row_count = 0 AND holder = ?',
+			array( (string) $number, $this->token )
 		);
 		$now = $this->get( $number );
 		if ( null === $now || $now['restarting'] || $now['holder'] !== $this->token ) {
 			throw new ClaimLost( 'Another run of this restore claimed the table; this one stops.' );
 		}
-	}
-
-	/**
-	 * A lease token for SQL text: hex only, or nothing.
-	 *
-	 * @param string $token Token.
-	 * @return string
-	 */
-	private static function token_text( string $token ): string {
-		return 1 === preg_match( '/\A[0-9a-zA-Z]{0,64}\z/', $token ) ? $token : '';
 	}
 }

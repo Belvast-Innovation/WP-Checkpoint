@@ -219,6 +219,22 @@ final class RestoreStateCarryTest extends RestoreTestCase {
 	}
 
 	/**
+	 * write() binds its values like rows() and says how many rows the statement changed.
+	 */
+	public function test_a_write_binds_its_values_and_counts_the_rows_it_changed(): void {
+		global $wpdb;
+		$this->db = ImportSession::open( Credentials::from_wordpress() );
+		$wpdb->query( 'COMMIT' );
+		$table = $wpdb->base_prefix . 'wpcr_written';
+		$this->create( $table, '(`id` int PRIMARY KEY, `v` varchar(64))' );
+		$value = "it's \\ a \"test\"; --";
+		$this->assertSame( 1, $this->db->write( 'INSERT INTO `' . $table . '` (`id`, `v`) VALUES (?, ?)', array( '1', $value ) ) );
+		$this->assertSame( $value, $this->db->rows( 'SELECT `v` FROM `' . $table . '` WHERE `id` = ?', array( '1' ) )[0][0], 'the value, exactly' );
+		$this->assertSame( 1, $this->db->write( 'UPDATE `' . $table . '` SET `v` = ? WHERE `id` = ?', array( 'x', '1' ) ) );
+		$this->assertSame( 0, $this->db->write( 'UPDATE `' . $table . '` SET `v` = ? WHERE `id` = ?', array( 'x', '2' ) ), 'no row, none changed' );
+	}
+
+	/**
 	 * A run claims a table before it works on it; once a newer run has claimed it, the older run can record
 	 * nothing: not its CREATE TABLE, not a batch (whose rows roll back with it), not a step of starting
 	 * the table over.
@@ -273,9 +289,22 @@ final class RestoreStateCarryTest extends RestoreTestCase {
 			$new->mark_restarting( 0 );
 			$new->mark_restarting( 0 );
 			$this->assertSame( array( true, 1, 200 ), array( $new->get( 0 )['restarting'], $new->get( 0 )['restarts'], $new->get( 0 )['pos'] ), 'marked once, nothing moved yet' );
+			// Every step's statement carries the holder: on a table another run marked, this run moves nothing.
+			try {
+				$old->reset( 0 );
+				$this->fail( 'the old run stops' );
+			} catch ( ClaimLost $e ) {
+				$this->assertSame( 200, $new->get( 0 )['pos'], 'not reset by the old run' );
+			}
 			$new->reset( 0 );
 			$new->reset( 0 );
 			$this->assertSame( array( true, 1, 100, 0 ), array( $new->get( 0 )['restarting'], $new->get( 0 )['chunk'], $new->get( 0 )['pos'], $new->get( 0 )['rows'] ), 'back at the start of its rows, still marked' );
+			try {
+				$old->restarted( 0 );
+				$this->fail( 'the old run stops' );
+			} catch ( ClaimLost $e ) {
+				$this->assertTrue( $new->get( 0 )['restarting'], 'the mark is not removed by the old run' );
+			}
 			$new->restarted( 0 );
 			$this->assertSame( array( false, 1 ), array( $new->get( 0 )['restarting'], $new->get( 0 )['restarts'] ) );
 		} finally {

@@ -2,14 +2,14 @@
 
 namespace WPCheckpoint\Tests\Integration;
 
-use WPCheckpoint\Archive\ArchiveVerifier;
 use WPCheckpoint\Archive\IndexLine;
+use WPCheckpoint\Archive\Limits;
 use WPCheckpoint\Archive\ZipFormat;
-use WPCheckpoint\Archive\ZipReader;
 use WPCheckpoint\Database\SqlWriter;
 use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\RestorePreflightStep;
 use WPCheckpoint\Jobs\TempTables;
+use WPCheckpoint\Tests\Fixtures\MemoryBudget;
 use WPCheckpoint\Tests\Fixtures\Restore\RestoreTestCase;
 
 /**
@@ -151,40 +151,43 @@ final class RestorePreflightTest extends RestoreTestCase {
 
 	/**
 	 * The largest chunks a restore takes are restored within the step budget: a stored chunk of
-	 * ArchiveVerifier::MAX_CONTENT_CHUNK (its head read in a range) and a compressed one of
-	 * ZipReader::MAX_INFLATE_BYTES (read whole). One byte more is refused before anything is created: a
-	 * compressed chunk by the preflight, with its size; a larger chunk size by the check before it.
+	 * Limits::CONTENT_CHUNK_BYTES (its head read in a range) and a compressed one of
+	 * Limits::INFLATE_BYTES (read whole). One byte more is refused by the check before the preflight, with
+	 * the reason in the job's log, and nothing is created.
+	 *
+	 * The budget holds on every PHP version and in any order of tests (MemoryBudget).
 	 */
 	public function test_chunks_of_the_largest_sizes_are_restored_within_the_budget_and_larger_ones_are_refused(): void {
 		global $wpdb;
 		$wide = $this->p . 'wide';
 		$this->create( $wide, '(`id` int NOT NULL, `v` varchar(1000) NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4' );
 		$wpdb->query( "INSERT INTO `{$wide}` VALUES (1, 'a')" );
-		$max = ArchiveVerifier::MAX_CONTENT_CHUNK;
+		$max = Limits::CONTENT_CHUNK_BYTES;
 		foreach ( array(
 			'stored'     => array( $max, 1048576, ZipFormat::METHOD_STORE ),
-			'compressed' => array( ZipReader::MAX_INFLATE_BYTES, 2 * $max, ZipFormat::METHOD_DEFLATE ),
+			'compressed' => array( Limits::INFLATE_BYTES, 2 * $max, ZipFormat::METHOD_DEFLATE ),
 		) as $label => list( $bytes, $deflate_max, $method ) ) {
 			list( $base, $rows ) = $this->wide_backup( $wide, $bytes, $deflate_max );
 			$this->assertSame( $method, $this->entry_method( $base, IndexLine::database_path( $wide, 2 ) ), $label );
-			if ( function_exists( 'memory_reset_peak_usage' ) ) {
-				memory_reset_peak_usage();
-				$before = memory_get_usage();
-			} else {
-				$before = memory_get_peak_usage();
-			}
-			$job = $this->run_restore( $this->start_restore( $base ) );
+			$job = $this->start_restore( $base );
+			$job = MemoryBudget::within(
+				40 * 1048576, // A step's 32 MB and the engine's 8 MB reserve (Budget).
+				function () use ( $job ): Job {
+					return $this->run_restore( $job );
+				}
+			);
 			$this->assertSame( Job::COMPLETED, $job->status, $label . ': ' . (string) $job->last_error );
-			$this->assertLessThan( 32 * 1048576, memory_get_peak_usage() - $before, $label . ': within the 32 MB step budget' );
 			$names = array_column( RestorePreflightStep::load_plan( $this->work( $job ) )['plan']->tables(), 'temporary', 'table' );
 			$this->assertSame( (string) $rows, (string) $wpdb->get_var( "SELECT COUNT(*) FROM `{$names[ $wide ]}`" ), $label );
+			$this->assertContains( $names[ $wide ], $this->job_tables( $job ), $label . ': the control, the job\'s tables are found' );
 		}
 
-		list( $base ) = $this->wide_backup( $wide, ZipReader::MAX_INFLATE_BYTES + 1, 2 * $max );
+		list( $base ) = $this->wide_backup( $wide, Limits::INFLATE_BYTES + 1, 2 * $max );
 		$this->assertSame( ZipFormat::METHOD_DEFLATE, $this->entry_method( $base, IndexLine::database_path( $wide, 2 ) ) );
 		$job = $this->run_restore( $this->start_restore( $base ) );
 		$this->assertSame( Job::FAILED, $job->status );
-		$this->assertStringContainsString( 'The database chunk ' . IndexLine::database_path( $wide, 2 ) . ' is stored compressed and is 8388609 bytes large; the restore decompresses a compressed chunk in one piece and takes at most 8388608 bytes (8 MiB).', (string) $job->last_error );
+		$this->assertStringContainsString( 'This backup cannot be restored', (string) $job->last_error );
+		$this->assertStringContainsString( 'The entry is stored compressed and is 8388609 bytes large; this plugin decompresses a compressed entry in one piece and reads at most 8388608 bytes (8 MiB)', (string) file_get_contents( $job->storage_path . '/' . $job->log_path ), 'the reason, in the job\'s log' );
 		$this->assertSame( array(), $this->job_tables( $job ), 'nothing was created' );
 
 		$base = $this->backup( self::site_tables(), null, null, array( 'chunk_bytes' => $max + 1 ) );
@@ -227,8 +230,8 @@ final class RestorePreflightTest extends RestoreTestCase {
 			},
 			null,
 			array(
-				'chunk_bytes'       => ArchiveVerifier::MAX_CONTENT_CHUNK,
-				'volume_bytes'      => 4 * ArchiveVerifier::MAX_CONTENT_CHUNK,
+				'chunk_bytes'       => Limits::CONTENT_CHUNK_BYTES,
+				'volume_bytes'      => 4 * Limits::CONTENT_CHUNK_BYTES,
 				'deflate_max_bytes' => $deflate_max,
 				'rows'              => array( $wide => &$rows ),
 			)

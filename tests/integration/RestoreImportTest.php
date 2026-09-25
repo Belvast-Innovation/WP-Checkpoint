@@ -273,8 +273,97 @@ final class RestoreImportTest extends RestoreTestCase {
 				$this->assertSame( $this->backed_up[ $table ], $this->rows_of( $names[ $table ] ), $stop . ': ' . $table );
 			}
 			$this->assertSame( array( 1, 0 ), $this->restarts( $job, $isam ), $stop . ': started over once, and no longer marked' );
+			$log = (string) file_get_contents( $job->storage_path . '/' . $job->log_path );
+			$this->assertStringContainsString( 'imported again from its first chunk: its row count does not match the ledger', $log, $stop . ': the control, the start-over is logged' );
+			$resumed = 'was being imported again from its first chunk when a run stopped; this run goes on with it';
+			if ( 'restarted' === $stop ) {
+				$this->assertStringNotContainsString( $resumed, $log, 'the mark was gone: nothing to go on with' );
+			} else {
+				$this->assertStringContainsString( $resumed, $log, $stop . ': going on with it is logged' );
+			}
 			$this->drop_job_tables( $job );
 		}
+	}
+
+	/**
+	 * Starting a table over empties it, and TRUNCATE sets its AUTO_INCREMENT counter back to its start on every
+	 * supported server; the table gets its CREATE TABLE's value again (rows deleted at the end of the table on the
+	 * original site keep their numbers unused).
+	 */
+	public function test_a_table_started_over_keeps_the_auto_increment_of_its_definition(): void {
+		global $wpdb;
+		$isam = $this->p . 'isam';
+		$wpdb->query( "ALTER TABLE `{$isam}` AUTO_INCREMENT = 5000" );
+		$base = $this->backup( array_merge( self::site_tables(), $this->tables() ) );
+		$next = function ( Job $job ) use ( $isam ): int {
+			global $wpdb;
+			$temporary = $this->temporary_names( $job )[ $isam ];
+			$wpdb->query( "INSERT INTO `{$temporary}` (`v`) VALUES ('next')" );
+			return (int) $wpdb->get_var( "SELECT MAX(`id`) FROM `{$temporary}`" );
+		};
+		$job = $this->run_restore( $this->start_restore( $base ) );
+		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
+		$this->assertSame( 5000, $next( $job ), 'the control: imported in one pass, the counter is the definition\'s' );
+		$this->drop_job_tables( $job );
+
+		$done = false;
+		$this->register_crashing(
+			'restore_crash_counter',
+			static function ( string $point, string $table = '', int $chunk = 0 ) use ( $isam, &$done ): void {
+				if ( ! $done && 'statement' === $point && $table === $isam && 2 === $chunk ) {
+					$done = true;
+					throw new \RuntimeException( 'simulated: the run is killed here (statement)' );
+				}
+			}
+		);
+		$job = $this->run_restore( Plugin::instance()->jobs()->create( 'restore_crash_counter', self::$admin_id, array(), array( 'base' => $base ) ) );
+		Plugin::instance()->job_actions()->retry( $job->id );
+		$job = $this->run_restore( $job );
+		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
+		$this->assertSame( array( 1, 0 ), $this->restarts( $job, $isam ), 'the control: the table was started over' );
+		$this->assertSame( 5000, $next( $job ), 'the counter after starting over' );
+	}
+
+	/**
+	 * Going back to a table's first chunk is followed by a look at the budget: a tick whose time is up ends there,
+	 * before it extracts the chunk (up to 16 MiB, at the disk's speed).
+	 */
+	public function test_a_tick_whose_time_is_up_ends_where_a_table_goes_back_to_its_first_chunk(): void {
+		$base   = $this->backup( array_merge( self::site_tables(), $this->tables() ) );
+		$isam   = $this->p . 'isam';
+		$killed = false;
+		$seen   = array();
+		$this->register_crashing(
+			'restore_rewind_budget',
+			function ( string $point, string $table = '', int $chunk = 0 ) use ( $isam, &$killed, &$seen ): void {
+				if ( $table !== $isam ) {
+					return;
+				}
+				$seen[] = $point;
+				if ( ! $killed && 'statement' === $point && 2 === $chunk ) {
+					$killed = true;
+					throw new \RuntimeException( 'simulated: the run is killed here (statement)' );
+				}
+				if ( 'rewound' === $point ) {
+					$this->now += 1000; // The time is up.
+				}
+			}
+		);
+		$job = $this->run_restore( Plugin::instance()->jobs()->create( 'restore_rewind_budget', self::$admin_id, array(), array( 'base' => $base ) ) );
+		Plugin::instance()->job_actions()->retry( $job->id );
+		$runner = $this->small_runner();
+		for ( $i = 0; $i < 5000 && ! in_array( 'rewound', $seen, true ); $i++ ) {
+			$seen = array();
+			$runner->tick( $job->id, microtime( true ) );
+		}
+		$this->assertContains( 'rewound', $seen, 'the control: a tick went back to the first chunk' );
+		$this->assertSame( 'rewound', end( $seen ), 'nothing after it in that tick' );
+		$GLOBALS['wpdb']->query( 'COMMIT' );
+		$stored = Plugin::instance()->jobs()->find( $job->id )->cursor;
+		$this->assertArrayHasKey( 'current', $stored );
+		$this->assertNull( $stored['current'], 'the position stops before the first chunk is taken up' );
+		$job = $this->run_restore( $job, true, 5000 );
+		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
 	}
 
 	/**
@@ -302,7 +391,7 @@ final class RestoreImportTest extends RestoreTestCase {
 		$this->assertSame( DatabaseImportStep::MAX_RESTARTS + 1, $retries, 'the retry after the last start-over fails' );
 		$this->assertSame( Job::FAILED, $job->status );
 		$this->assertStringContainsString( 'was imported again from its first chunk ' . DatabaseImportStep::MAX_RESTARTS . ' times, each time because its row count did not match the rows the restore had recorded', (string) $job->last_error );
-		$this->assertStringContainsString( 'a run stopped between a statement and its record, or rows were written outside the import', (string) $job->last_error );
+		$this->assertStringContainsString( 'a run stopped between a statement and its record, a statement failed partway and kept some of its rows (see the log for the database\'s errors), or rows were written by another run of this restore that outlived its lease or by another process', (string) $job->last_error );
 		$this->assertSame( array( DatabaseImportStep::MAX_RESTARTS, 0 ), $this->restarts( $job, $isam ) );
 	}
 

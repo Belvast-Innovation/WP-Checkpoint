@@ -128,6 +128,13 @@ final class CreateTable {
 	private $engine = '';
 
 	/**
+	 * The AUTO_INCREMENT table option's value as written (digits), or '' when there is none.
+	 *
+	 * @var string
+	 */
+	private $auto_increment = '';
+
+	/**
 	 * Read a CREATE TABLE statement.
 	 *
 	 * @param string                                                  $buffer Buffer holding the statement.
@@ -267,6 +274,15 @@ final class CreateTable {
 	 */
 	public function engine(): string {
 		return $this->engine;
+	}
+
+	/**
+	 * The AUTO_INCREMENT table option's value (digits), or '' when there is none.
+	 *
+	 * @return string
+	 */
+	public function auto_increment(): string {
+		return $this->auto_increment;
 	}
 
 	/**
@@ -499,6 +515,17 @@ final class CreateTable {
 			$word = strtoupper( $token[3] );
 			if ( in_array( $word, self::REFUSED_OPTIONS, true ) ) {
 				throw new Refused( 'CREATE TABLE has the table option ' . $word . ', which the restore does not run.' );
+			}
+			if ( 'AUTO_INCREMENT' === $word ) {
+				$value = $options[ $i + 1 ] ?? null;
+				if ( null !== $value && 'p' === $value[0] && '=' === $value[3] ) {
+					$value = $options[ $i + 2 ] ?? null;
+				}
+				if ( null === $value || 'word' !== $value[0] || 1 !== preg_match( '/\A[0-9]{1,20}\z/', $value[3] ) ) {
+					throw new Refused( 'CREATE TABLE has an AUTO_INCREMENT option without a number.' );
+				}
+				$this->auto_increment = $value[3];
+				continue;
 			}
 			if ( 'ENGINE' !== $word && 'TYPE' !== $word ) {
 				continue;

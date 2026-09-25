@@ -148,17 +148,10 @@ final class ImportSession {
 	 * @throws StatementFailed When the server refuses it.
 	 */
 	public function rows( string $sql, array $params = array() ): array {
-		$parts = explode( '?', $sql );
-		if ( count( $parts ) !== count( $params ) + 1 ) {
-			throw new \InvalidArgumentException( 'Placeholder count does not match the arguments.' );
-		}
+		$parts = self::placeholders( $sql, $params );
 		return $this->quietly(
 			function () use ( $parts, $params ): array {
-				$query = array_shift( $parts );
-				foreach ( array_values( $params ) as $i => $value ) {
-					$query .= "'" . mysqli_real_escape_string( $this->mysqli, (string) $value ) . "'" . $parts[ $i ];
-				}
-				$result = mysqli_query( $this->mysqli, $query );
+				$result = mysqli_query( $this->mysqli, $this->bind( $parts, $params ) );
 				if ( false === $result ) {
 					throw $this->error();
 				}
@@ -174,6 +167,59 @@ final class ImportSession {
 				return $rows;
 			}
 		);
+	}
+
+	/**
+	 * Run one statement that changes rows, with values in place of "?" (as rows()).
+	 *
+	 * @param string   $sql    SQL with ? placeholders (none elsewhere in the text).
+	 * @param string[] $params Values.
+	 * @return int Affected rows.
+	 * @throws \InvalidArgumentException When the placeholder count does not match.
+	 * @throws TransientFailure When the server may accept it later.
+	 * @throws StatementFailed When the server refuses it.
+	 */
+	public function write( string $sql, array $params ): int {
+		$parts = self::placeholders( $sql, $params );
+		return $this->quietly(
+			function () use ( $parts, $params ): int {
+				if ( false === mysqli_query( $this->mysqli, $this->bind( $parts, $params ) ) ) {
+					throw $this->error();
+				}
+				return (int) mysqli_affected_rows( $this->mysqli );
+			}
+		);
+	}
+
+	/**
+	 * The text around the placeholders.
+	 *
+	 * @param string   $sql    SQL with ? placeholders.
+	 * @param string[] $params Values.
+	 * @return string[]
+	 * @throws \InvalidArgumentException When the placeholder count does not match.
+	 */
+	private static function placeholders( string $sql, array $params ): array {
+		$parts = explode( '?', $sql );
+		if ( count( $parts ) !== count( $params ) + 1 ) {
+			throw new \InvalidArgumentException( 'Placeholder count does not match the arguments.' );
+		}
+		return $parts;
+	}
+
+	/**
+	 * The statement with each value quoted and escaped for the connection's character set.
+	 *
+	 * @param string[] $parts  placeholders().
+	 * @param string[] $params Values.
+	 * @return string
+	 */
+	private function bind( array $parts, array $params ): string {
+		$query = array_shift( $parts );
+		foreach ( array_values( $params ) as $i => $value ) {
+			$query .= "'" . mysqli_real_escape_string( $this->mysqli, (string) $value ) . "'" . $parts[ $i ];
+		}
+		return $query;
 	}
 
 	/**

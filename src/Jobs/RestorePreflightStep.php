@@ -161,7 +161,7 @@ final class RestorePreflightStep implements Step {
 		$manifest = self::manifest( $work );
 		$site     = $manifest->site();
 		$contents = $manifest->to_array()['contents'];
-		// A chunk is at most chunk_bytes long, and chunk_bytes at most ArchiveVerifier::MAX_CONTENT_CHUNK: the check
+		// A chunk is at most chunk_bytes long, and chunk_bytes at most Limits::CONTENT_CHUNK_BYTES: the check
 		// before this step refuses a backup with larger hash chunks as unsupported. So each chunk is extracted and
 		// hashed in one unit.
 		if ( empty( $contents['database'] ) ) {
@@ -317,12 +317,9 @@ final class RestorePreflightStep implements Step {
 		$reader = $chunk['reader'];
 		$entry  = $chunk['entry'];
 		$stored = ZipFormat::METHOD_STORE === (int) $entry['method'];
-		if ( ! $stored && max( (int) $entry['usize'], (int) $entry['csize'] ) > ZipReader::MAX_INFLATE_BYTES ) {
-			// Refused here, before any table is created, rather than when the import comes to the chunk.
-			throw new Refused( sprintf( 'The database chunk %1$s is stored compressed and is %2$d bytes large; the restore decompresses a compressed chunk in one piece and takes at most %3$d bytes (%4$d MiB).', $line['p'], max( (int) $entry['usize'], (int) $entry['csize'] ), ZipReader::MAX_INFLATE_BYTES, intdiv( ZipReader::MAX_INFLATE_BYTES, 1048576 ) ) );
-		}
 		try {
-			// A deflated entry has no addressable ranges and is read whole (at most ZipReader::MAX_INFLATE_BYTES, checked above).
+			// A deflated entry has no addressable ranges and is read whole: at most Limits::INFLATE_BYTES, the check before
+			// this step refuses a backup with a larger one as unsupported.
 			$length = $stored ? ( $first ? self::FIRST_BYTES : $this->head_bytes ) : (int) $entry['usize'];
 			$piece  = $reader->extract_piece( $entry, $heads, 0, $length, 0 );
 		} catch ( EnvironmentFailure $e ) {
@@ -365,12 +362,14 @@ final class RestorePreflightStep implements Step {
 				throw new Refused( sprintf( 'The first chunk of the table %s does not create it.', $table['table'] ) );
 			}
 			$definition = array(
-				'n'       => $table['number'],
-				'table'   => $table['table'],
-				'columns' => $create->stored_columns(),
-				'primary' => $create->primary_key(),
-				'foreign' => $create->foreign_keys(),
-				'engine'  => $create->engine(),
+				'n'              => $table['number'],
+				'table'          => $table['table'],
+				'columns'        => $create->stored_columns(),
+				'primary'        => $create->primary_key(),
+				'foreign'        => $create->foreign_keys(),
+				'engine'         => $create->engine(),
+				// TRUNCATE sets the counter back; a table started over gets this value again.
+				'auto_increment' => $create->auto_increment(),
 			);
 			$json       = json_encode( $definition, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE ); // phpcs:ignore WordPress.WP.AlternativeFunctions.json_encode_json_encode -- read back; a failure is thrown.
 			if ( ! is_string( $json ) ) {
@@ -516,7 +515,7 @@ final class RestorePreflightStep implements Step {
 	 *
 	 * @param string $definitions File.
 	 * @param int    $number      The table's number.
-	 * @return array{n: int, table: string, columns: string[], primary: string[], foreign: array<int, array<string, mixed>>, engine: string}
+	 * @return array{n: int, table: string, columns: string[], primary: string[], foreign: array<int, array<string, mixed>>, engine: string, auto_increment?: string}
 	 * @throws WorkLost When it is not there.
 	 */
 	public static function definition( string $definitions, int $number ): array {

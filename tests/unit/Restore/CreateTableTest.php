@@ -135,6 +135,13 @@ final class CreateTableTest extends TestCase {
 		$this->assertStringContainsString( 'REFERENCES `wcptmp_a` (`id`)', $sql, 'itself: the temporary name' );
 	}
 
+	public function test_the_auto_increment_option_is_read_as_its_digits(): void {
+		$columns = '(`id` bigint unsigned NOT NULL AUTO_INCREMENT, PRIMARY KEY (`id`))';
+		$this->assertSame( '5000', self::read( 'CREATE TABLE `wp_a` ' . $columns . ' ENGINE=MyISAM AUTO_INCREMENT=5000 DEFAULT CHARSET=utf8mb4', 'wp_a' )->auto_increment() );
+		$this->assertSame( '18446744073709551615', self::read( 'CREATE TABLE `wp_a` ' . $columns . ' auto_increment = 18446744073709551615', 'wp_a' )->auto_increment(), 'any case, spaces, beyond PHP_INT_MAX' );
+		$this->assertSame( '', self::read( 'CREATE TABLE `wp_a` ' . $columns . ' ENGINE=MyISAM', 'wp_a' )->auto_increment(), 'the column attribute is not the table option' );
+	}
+
 	/**
 	 * @return array<string, array{0: string, 1: string}>
 	 */
@@ -162,6 +169,7 @@ final class CreateTableTest extends TestCase {
 			'two primary keys'                          => array( 'CREATE TABLE `wp_a` (`id` int NOT NULL, PRIMARY KEY (`id`), PRIMARY KEY (`id`))', 'two primary keys' ),
 			'a column twice'                            => array( 'CREATE TABLE `wp_a` (`id` int, `id` int)', 'twice' ),
 			'a semicolon hidden in a versioned comment' => array( 'CREATE TABLE `wp_a` ' . $columns . ' /*!50100 ; DROP TABLE `wp_users` */', 'semicolon inside a versioned comment' ),
+			'an auto_increment that is not a number'    => array( 'CREATE TABLE `wp_a` ' . $columns . ' ENGINE=MyISAM AUTO_INCREMENT=DEFAULT', 'AUTO_INCREMENT option without a number' ),
 		);
 	}
 

@@ -106,9 +106,9 @@ final class RestoreLeaseTest extends RestoreTestCase {
 	}
 
 	/**
-	 * The ledger's rows: table number => [chunk, rows, holder].
+	 * The ledger's rows: table number => [chunk, rows, holder, restarting].
 	 *
-	 * @return array<int, array{0: int, 1: int, 2: string}>
+	 * @return array<int, array{0: int, 1: int, 2: string, 3: int}>
 	 */
 	private function ledger(): array {
 		global $wpdb;
@@ -116,8 +116,9 @@ final class RestoreLeaseTest extends RestoreTestCase {
 		$random = RestorePreflightStep::load_plan( Residue::work_dir( $job->storage_path, $job->id ) )['random'];
 		$name   = TempTables::ledger( $job->storage_token, $job->id, $random );
 		$out    = array();
-		foreach ( (array) $wpdb->get_results( "SELECT n, chunk, row_count, holder FROM `{$name}`", ARRAY_N ) as $row ) {
-			$out[ (int) $row[0] ] = array( (int) $row[1], (int) $row[2], (string) $row[3] );
+		$wpdb->query( 'COMMIT' ); // The test's snapshot may predate the ledger.
+		foreach ( (array) $wpdb->get_results( "SELECT n, chunk, row_count, holder, restarting FROM `{$name}`", ARRAY_N ) as $row ) {
+			$out[ (int) $row[0] ] = array( (int) $row[1], (int) $row[2], (string) $row[3], (int) $row[4] );
 		}
 		return $out;
 	}
@@ -224,7 +225,7 @@ final class RestoreLeaseTest extends RestoreTestCase {
 		$this->assertTrue( $added, 'the control: the row was added during the import' );
 		$this->assertSame( Job::FAILED, $job->status );
 		$this->assertStringContainsString( "The table {$isam} holds", (string) $job->last_error );
-		$this->assertStringContainsString( 'rows were added or removed outside the import while it ran', (string) $job->last_error );
+		$this->assertStringContainsString( 'rows were added or removed by another run of this restore that outlived its lease, or by another process, while it ran', (string) $job->last_error );
 	}
 
 	public function test_rows_a_table_without_transactions_lost_against_the_ledger_fail_it_at_its_end(): void {
@@ -292,11 +293,116 @@ final class RestoreLeaseTest extends RestoreTestCase {
 		$this->assertSame( $recorded, $held, 'the refused batch left no row behind' );
 		$now = Plugin::instance()->jobs()->find( $job->id );
 		$this->assertFalse( $now->is_locked( time() ), 'the job is released' );
+		$this->assertStringContainsString( 'Step failed; will retry', (string) file_get_contents( $now->storage_path . '/' . $now->log_path ), 'the retry is in the log' );
 
 		$this->assertSame( TickResult::COMPLETED, $this->tick_until_lost_or_done( $job ), 'the next run takes the table back and finishes' );
 		$now = Plugin::instance()->jobs()->find( $job->id );
 		$this->assertSame( Job::COMPLETED, $now->status, (string) $now->last_error );
 		$this->assertSame( 0, (int) $now->takeovers, 'no takeover' );
 		$this->assertSame( (int) $wpdb->get_var( "SELECT COUNT(*) FROM `{$big}`" ), (int) $wpdb->get_var( 'SELECT COUNT(*) FROM `' . $this->temporary( $big ) . '`' ) );
+	}
+
+	/**
+	 * A run whose lease runs out between its lease check and its claim can still take a table from the run that
+	 * holds the job now. It checks its lease again right after the claim and stops there: it does not go on with
+	 * a start-over that run left marked (removing the mark on the first chunk, importing rows).
+	 */
+	public function test_a_run_that_lost_the_job_while_it_claimed_a_table_does_nothing_with_it(): void {
+		$isam  = $this->p . 'isam';
+		$phase = 'unrecorded';
+		$job   = $this->start(
+			$this->backup( $this->tables() ),
+			function ( string $point, string $table = '', int $chunk = 0 ) use ( $isam, &$phase ): void {
+				if ( $table !== $isam ) {
+					return;
+				}
+				if ( 'unrecorded' === $phase && 'statement' === $point && 2 === $chunk ) {
+					$phase = 'rewind';
+					throw new \RuntimeException( 'simulated: killed after a statement, before its record' );
+				}
+				if ( 'rewind' === $phase && 'rewound' === $point ) {
+					$phase = 'claim';
+					throw new \RuntimeException( 'simulated: killed with the table marked, the position back on its first chunk' );
+				}
+				if ( 'claim' === $phase && 'claimed' === $point && 1 === $chunk ) {
+					$phase = 'done';
+					$this->take_over();
+				}
+			}
+		);
+		$this->assertNotSame( 'lost', $this->tick_until_lost_or_done( $job ) );
+		Plugin::instance()->job_actions()->retry( $job->id );
+		$this->assertNotSame( 'lost', $this->tick_until_lost_or_done( $job ) );
+		$this->assertSame( 'claim', $phase );
+		$this->assertSame( array( 1, 0, 1 ), array( $this->ledger()[ $this->number( $isam ) ][0], $this->ledger()[ $this->number( $isam ) ][1], $this->ledger()[ $this->number( $isam ) ][3] ), 'the control: marked and reset, nothing imported' );
+		Plugin::instance()->job_actions()->retry( $job->id );
+		$this->assertSame( 'lost', $this->tick_until_lost_or_done( $job ) );
+		$this->assertSame( 'done', $phase, 'the control: the job was taken over right after the claim' );
+		$row = $this->ledger()[ $this->number( $isam ) ];
+		$this->assertSame( array( 1, 0, 1 ), array( $row[0], $row[1], $row[3] ), 'still marked, nothing imported' );
+		$this->assertSame( '0', (string) $GLOBALS['wpdb']->get_var( 'SELECT COUNT(*) FROM `' . $this->temporary( $isam ) . '`' ) );
+	}
+
+	/**
+	 * A table with transactions dropped or emptied during the import (a run that outlived its lease runs its DROP,
+	 * which no transaction covers): the ledger still agrees with the manifest, but the table is empty at its end.
+	 */
+	public function test_a_table_with_transactions_found_empty_at_its_end_fails_it(): void {
+		global $wpdb;
+		$big     = $this->p . 'big';
+		$emptied = 0;
+		$job     = $this->start(
+			$this->backup( $this->tables() ),
+			function ( string $point, string $table = '', int $chunk = 0 ) use ( $big, &$emptied ): void {
+				global $wpdb;
+				if ( 'commit' !== $point || $table !== $big ) {
+					return;
+				}
+				$job  = Plugin::instance()->jobs()->find( $this->job_id );
+				$plan = RestorePreflightStep::load_plan( Residue::work_dir( $job->storage_path, $job->id ) )['plan']->find( $big );
+				if ( $chunk !== $plan['chunks'] ) {
+					return;
+				}
+				$wpdb->query( 'COMMIT' );
+				$wpdb->query( 'TRUNCATE TABLE `' . $plan['temporary'] . '`' );
+				++$emptied;
+			}
+		);
+		$this->tick_until_lost_or_done( $job );
+		$job = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertGreaterThan( 0, $emptied, 'the control: the table was emptied during its last chunk' );
+		$this->assertGreaterThan( 0, $this->ledger()[ $this->number( $big ) ][1], 'the ledger recorded rows' );
+		$this->assertSame( Job::FAILED, $job->status );
+		$this->assertStringContainsString( 'is empty where the restore inserted', (string) $job->last_error );
+		$this->assertStringContainsString( 'another run of this restore that outlived its lease, or by another process', (string) $job->last_error );
+	}
+
+	/**
+	 * A run that lost the job and then its claim on a table stops as a run that lost the job: no retry is logged
+	 * for it (the positive control is in the test of a refused batch, where the run still holds the job).
+	 */
+	public function test_a_run_that_lost_the_job_and_a_table_logs_no_retry(): void {
+		$big     = $this->p . 'big';
+		$claimed = false;
+		$job     = $this->start(
+			$this->backup( $this->tables() ),
+			function ( string $point, string $table = '', int $chunk = 0 ) use ( $big, &$claimed ): void {
+				global $wpdb;
+				if ( $claimed || 'statement' !== $point || $table !== $big || $chunk < 2 ) {
+					return;
+				}
+				$this->take_over();
+				$job    = Plugin::instance()->jobs()->find( $this->job_id );
+				$random = RestorePreflightStep::load_plan( Residue::work_dir( $job->storage_path, $job->id ) )['random'];
+				$wpdb->query( 'COMMIT' );
+				$wpdb->query( $wpdb->prepare( 'UPDATE `' . TempTables::ledger( $job->storage_token, $job->id, $random ) . '` SET holder = %s WHERE n = %d', str_repeat( 'e', 32 ), $this->number( $big ) ) );
+				$claimed = 1 === (int) $wpdb->rows_affected;
+				$wpdb->query( 'COMMIT' );
+			}
+		);
+		$this->assertSame( 'lost', $this->tick_until_lost_or_done( $job ) );
+		$this->assertTrue( $claimed, 'the control: the job and the table were taken mid-batch' );
+		$now = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertStringNotContainsString( 'will retry', (string) file_get_contents( $now->storage_path . '/' . $now->log_path ) );
 	}
 }
