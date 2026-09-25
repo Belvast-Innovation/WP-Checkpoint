@@ -12,13 +12,22 @@ use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 final class MemoryBudgetTest extends TestCase {
 
 	private function run_in_a_process( int $bound, int $allocate ): string {
-		$code = sprintf(
-			'require %s; echo WPCheckpoint\Tests\Fixtures\MemoryBudget::within( %d, static function () { $s = str_repeat( "x", %d ); return strlen( $s ); } ), "\n";',
-			var_export( dirname( __DIR__, 3 ) . '/vendor/autoload.php', true ),
-			$bound,
-			$allocate
+		// A script file, not "php -r": Windows' command line would take the quotes out of the code.
+		$script = tempnam( sys_get_temp_dir(), 'wpc-memory-' );
+		file_put_contents(
+			$script,
+			sprintf(
+				'<?php require %s; echo WPCheckpoint\Tests\Fixtures\MemoryBudget::within( %d, static function () { $s = str_repeat( "x", %d ); return strlen( $s ); } ), "\n";',
+				var_export( dirname( __DIR__, 3 ) . '/vendor/autoload.php', true ),
+				$bound,
+				$allocate
+			)
 		);
-		return (string) shell_exec( escapeshellarg( PHP_BINARY ) . ' -d memory_limit=-1 -d display_errors=1 -r ' . escapeshellarg( $code ) . ' 2>&1' );
+		try {
+			return (string) shell_exec( escapeshellarg( PHP_BINARY ) . ' -d memory_limit=-1 -d display_errors=1 ' . escapeshellarg( $script ) . ' 2>&1' );
+		} finally {
+			unlink( $script );
+		}
 	}
 
 	public function test_a_call_beyond_the_bound_is_stopped_and_one_within_it_runs(): void {

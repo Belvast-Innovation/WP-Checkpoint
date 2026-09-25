@@ -747,6 +747,22 @@ final class ArchiveVerifier {
 				$this->stop( self::PHASE_INDEXES );
 				return;
 			}
+			if ( ZipFormat::METHOD_STORE !== (int) $entry['method'] && max( (int) $entry['usize'], (int) $entry['csize'] ) > Limits::INFLATE_BYTES ) {
+				// Known from the central directory: not damage, a size this plugin does not read (as for content entries).
+				$this->add(
+					new Finding(
+						self::PHASE_INDEXES,
+						Finding::UNSUPPORTED,
+						sprintf( 'The sidecar index is stored compressed and is %1$d bytes large; this plugin decompresses a compressed entry in one piece and reads at most %2$d bytes (%3$d MiB).', max( (int) $entry['usize'], (int) $entry['csize'] ), Limits::INFLATE_BYTES, intdiv( Limits::INFLATE_BYTES, 1048576 ) ),
+						array(
+							'volume' => $last['ordinal'],
+							'entry'  => $spec['path'],
+						)
+					)
+				);
+				$this->stop( self::PHASE_INDEXES );
+				return;
+			}
 			// One EXTRACT_PIECE per unit (a files index of a million-file site is hundreds of MB); the running
 			// CRC lives in the cursor and the last piece checks it. A deflated index (small) comes in one piece.
 			$piece  = (int) $this->state['block'];

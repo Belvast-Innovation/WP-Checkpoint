@@ -696,6 +696,35 @@ final class ArchiveVerifierTest extends TestCase {
 		}
 	}
 
+	/**
+	 * The same for a sidecar index: the verifier stops at it, as unsupported, not as damage.
+	 */
+	public function test_a_compressed_sidecar_index_larger_than_the_inflate_limit_is_unsupported_not_damage(): void {
+		$builder          = ( new ArchiveBuilder(
+			array(
+				'deflate_max_bytes' => 2 * Limits::INFLATE_BYTES,
+				'files_lines'       => static function ( array $lines ): array {
+					for ( $i = 0; $i < 9; $i++ ) {
+						$lines[] = str_repeat( 'z', 1048576 ); // Past the limit; never parsed.
+					}
+					return $lines;
+				},
+			)
+		) )->typical()->build();
+		$this->builders[] = $builder;
+		$index            = ArchiveBuilder::locate( $builder->volumes[ count( $builder->volumes ) - 1 ], Manifest::FILES_INDEX );
+		$this->assertSame( ZipFormat::METHOD_DEFLATE, $index['method'], 'the control: compressed' );
+		$this->assertGreaterThan( Limits::INFLATE_BYTES, $index['usize'] );
+		foreach ( array( ArchiveVerifier::DEPTH_FULL, ArchiveVerifier::DEPTH_STRUCTURE ) as $depth ) {
+			$result = $this->verify( $builder, $builder->manifest_path, $depth );
+			$this->assertSame( VerificationResult::UNSUPPORTED_LAYOUT, $result->outcome(), $depth . ': ' . $result->to_text( self::identity() ) );
+			$finding = self::find( $result, array( 'kind' => Finding::UNSUPPORTED ) );
+			$this->assertNotNull( $finding, $depth );
+			$this->assertStringContainsString( 'The sidecar index is stored compressed and is ' . $index['usize'] . ' bytes large', $finding['message'] );
+			$this->assertNull( self::find( $result, array( 'kind' => Finding::CORRUPT ) ), $depth . ': not damage' );
+		}
+	}
+
 	public function test_chunks_larger_than_the_verifier_can_check_in_one_unit_are_unsupported_not_damage(): void {
 		// A consistent manifest with chunk sizes above the verifier's bounds: no volume needs a chunk list any more.
 		$builder  = $this->typical();
