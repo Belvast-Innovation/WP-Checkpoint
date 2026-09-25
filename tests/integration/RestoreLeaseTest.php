@@ -173,15 +173,15 @@ final class RestoreLeaseTest extends RestoreTestCase {
 		global $wpdb;
 		$isam    = $this->p . 'isam';
 		$phase   = 'first';
-		$commits = 0;
+		$statements = 0;
 		$job     = $this->start(
 			$this->backup( $this->tables() ),
-			function ( string $point, string $table = '' ) use ( $isam, &$phase, &$commits ): void {
+			function ( string $point, string $table = '' ) use ( $isam, &$phase, &$statements ): void {
 				if ( $table !== $isam ) {
 					return;
 				}
 				// The table's first statement is its CREATE, the second its first INSERT: stop after that ran, before its record.
-				if ( 'first' === $phase && 'statement' === $point && 2 === ++$commits ) {
+				if ( 'first' === $phase && 'statement' === $point && 2 === ++$statements ) {
 					$phase = 'stopped';
 					throw new \RuntimeException( 'simulated: the run stops between a statement and its record' );
 				}
@@ -224,5 +224,62 @@ final class RestoreLeaseTest extends RestoreTestCase {
 		$this->assertSame( Job::FAILED, $job->status );
 		$this->assertStringContainsString( "The table {$isam} holds", (string) $job->last_error );
 		$this->assertStringContainsString( 'rows were added or removed outside the import while it ran', (string) $job->last_error );
+	}
+
+	public function test_rows_a_table_without_transactions_lost_against_the_ledger_fail_it_at_its_end(): void {
+		$isam    = $this->p . 'isam';
+		$removed = false;
+		$job     = $this->start(
+			$this->backup( $this->tables() ),
+			function ( string $point, string $table = '', int $chunk = 0 ) use ( $isam, &$removed ): void {
+				global $wpdb;
+				if ( $removed || 'statement' !== $point || $table !== $isam || $chunk < 2 ) {
+					return;
+				}
+				// A recorded row gone, after this tick counted the table.
+				$wpdb->query( 'DELETE FROM `' . $this->temporary( $isam ) . '` ORDER BY `id` LIMIT 1' );
+				$removed = 1 === (int) $wpdb->rows_affected;
+			}
+		);
+		$this->tick_until_lost_or_done( $job );
+		$job = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertTrue( $removed, 'the control: a row was removed during the import' );
+		$this->assertSame( Job::FAILED, $job->status );
+		$this->assertStringContainsString( "The table {$isam} holds", (string) $job->last_error );
+	}
+
+	/**
+	 * A table with transactions: a batch's rows and the ledger's record of them are committed together, and when
+	 * the record is refused (another run claimed the table while the batch ran), the batch's rows are rolled back
+	 * with it. Nothing the ledger does not record stays in the table, which is why such a table needs no count.
+	 */
+	public function test_a_batch_whose_record_is_refused_leaves_no_row_behind(): void {
+		global $wpdb;
+		$big     = $this->p . 'big';
+		$claimed = false;
+		$job     = $this->start(
+			$this->backup( $this->tables() ),
+			function ( string $point, string $table = '', int $chunk = 0 ) use ( $big, &$claimed ): void {
+				global $wpdb;
+				if ( $claimed || 'statement' !== $point || $table !== $big || $chunk < 2 ) {
+					return;
+				}
+				// A batch has run and is not committed yet; another run claims the table now.
+				$job    = Plugin::instance()->jobs()->find( $this->job_id );
+				$random = RestorePreflightStep::load_plan( Residue::work_dir( $job->storage_path, $job->id ) )['random'];
+				$ledger = TempTables::ledger( $job->storage_token, $job->id, $random );
+				$wpdb->query( 'COMMIT' ); // The test's snapshot predates the ledger.
+				$wpdb->query( $wpdb->prepare( "UPDATE `{$ledger}` SET holder = %s WHERE n = %d", str_repeat( 'e', 32 ), $this->number( $big ) ) );
+				$claimed = 1 === (int) $wpdb->rows_affected;
+				$wpdb->query( 'COMMIT' ); // The other run's claim is committed, as a real one is.
+			}
+		);
+		$result = $this->tick_until_lost_or_done( $job );
+		$this->assertSame( 'lost', $result, 'the run stopped when its record was refused: ' . Plugin::instance()->jobs()->find( $job->id )->last_error );
+		$this->assertTrue( $claimed, 'the control: the table was claimed by another run mid-batch' );
+		$recorded = $this->ledger()[ $this->number( $big ) ][1];
+		$held     = (int) $wpdb->get_var( 'SELECT COUNT(*) FROM `' . $this->temporary( $big ) . '`' );
+		$this->assertGreaterThan( 0, $recorded, 'the control: earlier batches were recorded' );
+		$this->assertSame( $recorded, $held, 'the refused batch left no row behind' );
 	}
 }
