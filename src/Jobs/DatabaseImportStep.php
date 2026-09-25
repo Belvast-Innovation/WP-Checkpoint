@@ -91,8 +91,10 @@ final class DatabaseImportStep implements Step {
 
 	/**
 	 * Test seam: function( string $point, string $table, int $chunk ): void, called at "statement" (a statement ran, its record not
-	 * yet), "commit" (a record committed, the cursor not yet checkpointed) and "restart" (a table started
-	 * over, the cursor not yet moved back); a test throws there to stand for a run killed at that point.
+	 * yet), "commit" (a record committed, the cursor not yet checkpointed), "restart" (a table started
+	 * over, the cursor not yet moved back), "claiming" (about to claim a table) and "claimed" (a table
+	 * claimed, nothing run on it yet); a test throws there to stand for a run stopped at that point, or
+	 * changes the world there (the job taken over by another driver) to see what the run does next.
 	 *
 	 * @var callable|null
 	 */
@@ -258,7 +260,11 @@ final class DatabaseImportStep implements Step {
 	 */
 	private function import_chunk( JobContext $context, ImportSession $db, Ledger $ledger, ImportTarget $target, string $file, int $chunk, array &$counted, float &$slowest, bool &$first, array &$cursor, TablePlan $plan, string $session_charset ): string {
 		$number = $target->number;
-		$state  = $ledger->claim( $number );
+		// The claim decides who may change this table from now on: only while this run still holds the job.
+		$this->crash( 'claiming', $target->table, $chunk );
+		$context->confirm_lease();
+		$state = $ledger->claim( $number );
+		$this->crash( 'claimed', $target->table, $chunk );
 		if ( 0 === $state['chunk'] ) {
 			if ( 1 !== $chunk ) {
 				throw new WorkLost( sprintf( 'The restore\'s ledger has no record of the table %s, whose chunk %d is next.', $target->table, $chunk ) );
@@ -283,6 +289,7 @@ final class DatabaseImportStep implements Step {
 				}
 				// A statement ran and was not recorded: its rows cannot be told from the others. Empty the table, keep its definition.
 				try {
+					$context->confirm_lease(); // Nothing between the check and the statement that removes the rows.
 					$db->run( 'TRUNCATE TABLE ' . SqlWriter::identifier( $target->temporary ) );
 				} catch ( StatementFailed $e ) {
 					throw new \RuntimeException( sprintf( 'The table %1$s must be emptied to be imported again after an interrupted run, and its engine does not allow that (%2$s). Start the restore again.', $target->table, $e->getMessage() ) );
@@ -338,6 +345,9 @@ final class DatabaseImportStep implements Step {
 				if ( Statement::DROP === $statement->kind || Statement::CREATE === $statement->kind ) {
 					if ( null !== $state ) {
 						throw new Refused( sprintf( 'Table %s, chunk %d: the table is dropped or created again after its rows began.', $target->table, $chunk ) );
+					}
+					if ( Statement::DROP === $statement->kind ) {
+						$context->confirm_lease(); // Nothing between the check and the statement that removes the table.
 					}
 					$db->run( $statement->sql );
 					if ( Statement::DROP === $statement->kind ) {
@@ -453,7 +463,7 @@ final class DatabaseImportStep implements Step {
 	/**
 	 * The test seam.
 	 *
-	 * @param string $point "statement", "commit" or "restart".
+	 * @param string $point "statement", "commit", "restart", "claiming" or "claimed".
 	 * @param string $table The table's name in the backup ('' where the caller does not know it).
 	 * @param int    $chunk The chunk (0 where the caller does not know it).
 	 * @return void
@@ -513,11 +523,22 @@ final class DatabaseImportStep implements Step {
 	 * @param array{plan: TablePlan, random: string, chunk_bytes: int, volumes: string[], multisite: bool} $plan   Plan.
 	 * @return void
 	 * @throws Refused When they do not agree.
+	 * @throws \RuntimeException When a table without transactions holds other rows than the ledger recorded.
 	 */
 	private function table_done( ImportSession $db, Ledger $ledger, array $table, int $rows, array $plan ): void {
 		$state = $ledger->get( $table['number'] );
 		if ( null === $state || $state['rows'] !== $rows ) {
 			throw new Refused( sprintf( 'The chunks of the table %1$s hold %2$d rows, and its manifest says %3$d; the backup does not agree with itself.', $table['table'], null === $state ? 0 : $state['rows'], $rows ) );
+		}
+		if ( ! $state['transactional'] ) {
+			// Both counts, not one of them: rows in the table the ledger did not record mean a second writer was at work
+			// on it, where only one may ever be. A table with transactions needs no count (its rows and their record
+			// commit together, under the holder's claim) and would pay a full scan for it.
+			$count = $db->rows( 'SELECT COUNT(*) FROM ' . SqlWriter::identifier( $table['temporary'] ) );
+			$held  = (int) ( $count[0][0] ?? -1 );
+			if ( $held !== $state['rows'] ) {
+				throw new \RuntimeException( sprintf( 'The table %1$s holds %2$d rows where the restore inserted %3$d: rows were added or removed outside the import while it ran. Start the restore again.', $table['table'], $held, $state['rows'] ) );
+			}
 		}
 		$prefix = (string) $plan['plan']->to_array()['backup_prefix'];
 		if ( $prefix . 'options' === $table['table'] ) {
