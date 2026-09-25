@@ -4,6 +4,7 @@ namespace WPCheckpoint\Tests\Unit\Archive;
 
 use WPCheckpoint\Archive\Crc32;
 use WPCheckpoint\Archive\EnvironmentFailure;
+use WPCheckpoint\Archive\Limits;
 use WPCheckpoint\Archive\ZipFormat;
 use WPCheckpoint\Archive\ZipReader;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
@@ -367,7 +368,7 @@ final class ZipReaderTest extends TestCase {
 	/**
 	 * The inflate limit is only a limit if the largest allowed entry fits
 	 * the baseline: one unit may add at most 32 MB, so the peak of
-	 * inflating MAX_INFLATE_BYTES in one piece is measured here. The
+	 * inflating Limits::INFLATE_BYTES in one piece is measured here. The
 	 * fixture is streamed to disk so the peak before the measurement stays
 	 * small.
 	 */
@@ -375,7 +376,7 @@ final class ZipReaderTest extends TestCase {
 		if ( ! function_exists( 'deflate_init' ) ) {
 			$this->markTestSkipped( 'zlib streaming is not available' );
 		}
-		$size = ZipReader::MAX_INFLATE_BYTES - 65536; // Incompressible data grows a little; both sizes must stay under the limit.
+		$size = Limits::INFLATE_BYTES - 65536; // Incompressible data grows a little; both sizes must stay under the limit.
 		$path = $this->dir . '/max.zip';
 		$h    = fopen( $path, 'wb' );
 		$name = 'max.bin';
@@ -406,7 +407,7 @@ final class ZipReaderTest extends TestCase {
 		fclose( $h );
 		unset( $piece, $out, $ctx, $central );
 		gc_collect_cycles();
-		$this->assertLessThan( ZipReader::MAX_INFLATE_BYTES, $csize );
+		$this->assertLessThan( Limits::INFLATE_BYTES, $csize );
 
 		$reader = ZipReader::open( $path );
 		$entry  = $reader->entries()[0];

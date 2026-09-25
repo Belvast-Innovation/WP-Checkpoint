@@ -4,6 +4,7 @@ namespace WPCheckpoint\Tests\Unit\Jobs;
 
 use WPCheckpoint\Archive\ChunkHasher;
 use WPCheckpoint\Archive\IndexLine;
+use WPCheckpoint\Archive\Limits;
 use WPCheckpoint\Archive\Manifest;
 use WPCheckpoint\Archive\Packer;
 use WPCheckpoint\Archive\ZipReader;
@@ -575,6 +576,7 @@ final class PackStepTest extends TestCase {
 		$this->assertSame( self::CHUNK, PackStep::packer_options_for( array( 'deflate_max_bytes' => 4 * self::CHUNK ), self::CHUNK )['deflate_max_bytes'] );
 		$this->assertSame( 4096, PackStep::packer_options_for( array( 'deflate_max_bytes' => 4096 ), self::CHUNK )['deflate_max_bytes'], 'a lower cap stays' );
 		$this->assertSame( Packer::DEFLATE_MAX_BYTES, PackStep::packer_options_for( array(), Manifest::DEFAULT_CHUNK )['deflate_max_bytes'], 'the default cap is below the default chunk and stays' );
+		$this->assertSame( Limits::INFLATE_BYTES, PackStep::packer_options_for( array( 'deflate_max_bytes' => 4 * Limits::INFLATE_BYTES ), 4 * Limits::INFLATE_BYTES )['deflate_max_bytes'], 'never more than a reader inflates, whatever the chunk' );
 	}
 
 	public function test_the_chunk_size_must_be_whole_pieces_or_smaller_than_one(): void {

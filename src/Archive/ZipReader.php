@@ -23,13 +23,12 @@ use WPCheckpoint\Support\HostFunctions;
  * Extraction copies a whole entry in one call: there is no byte-offset
  * resumable extraction yet, so a 2 GiB stored entry cannot be spread over
  * several ticks (T030 needs an extract_piece() for that). Deflated entries
- * are inflated in one go and limited to MAX_INFLATE_BYTES.
+ * are inflated in one go and limited to Limits::INFLATE_BYTES.
  */
 final class ZipReader {
 
 	const TAIL_BYTES              = 65536 + 22 + 20 + 56;
 	const MAX_HEADER_BYTES        = 1048576;  // A central header with name, extra and comment beyond this is malformed.
-	const MAX_INFLATE_BYTES       = 8388608; // 8 MiB: the plugin deflates only entries up to 4 MiB. Inflating in one piece peaks at about 3 x this, which keeps a unit inside the 32 MB step increment (tested).
 	const MAX_EMPTY_DEFLATE_BYTES = 64; // A deflate stream of an empty entry is 2 bytes; leave room for odd encoders.
 	const MAX_ENTRIES             = 5000000;
 
@@ -466,7 +465,7 @@ final class ZipReader {
 	 * Per-chunk SHA-256 of an entry's content (chunks of $chunk_bytes from
 	 * the start, the last one shorter), streamed, with the CRC verified.
 	 * One unit of work for the whole entry: meant for deflated entries,
-	 * which cannot be read in ranges and are bounded by MAX_INFLATE_BYTES;
+	 * which cannot be read in ranges and are bounded by Limits::INFLATE_BYTES;
 	 * a large stored entry is hashed range by range instead.
 	 *
 	 * @param array<string, mixed> $entry       Entry.
@@ -646,7 +645,7 @@ final class ZipReader {
 					$sink( $piece );
 				}
 			} elseif ( ZipFormat::METHOD_DEFLATE === (int) $entry['method'] ) {
-				if ( $csize > self::MAX_INFLATE_BYTES || $usize > self::MAX_INFLATE_BYTES ) {
+				if ( $csize > Limits::INFLATE_BYTES || $usize > Limits::INFLATE_BYTES ) {
 					throw new \RuntimeException( 'A deflated entry is too large to inflate in one piece.' );
 				}
 				if ( 0 === $usize && $csize > self::MAX_EMPTY_DEFLATE_BYTES ) {
