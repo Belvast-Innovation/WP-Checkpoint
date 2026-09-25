@@ -236,12 +236,15 @@ final class Schema {
 		try {
 			$prefix = \WPCheckpoint\Jobs\TempTables::owner_prefix( $token );
 			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- table listing.
-			$names = $wpdb->get_col( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $prefix ) . '%' ) );
+			$names  = $wpdb->get_col( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $prefix ) . '%' ) );
+			$tables = array();
 			foreach ( is_array( $names ) ? $names : array() as $name ) {
-				if ( \WPCheckpoint\Jobs\TempTables::job_id_of( $token, (string) $name ) > 0 && \WPCheckpoint\Jobs\TempTables::is_safe_name( (string) $name ) ) {
-					$wpdb->query( "DROP TABLE IF EXISTS `{$name}`" ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- this installation's temporary table, name validated; uninstall only.
+				if ( \WPCheckpoint\Jobs\TempTables::job_id_of( $token, (string) $name ) > 0 ) {
+					$tables[] = (string) $name;
 				}
 			}
+			// In an order their foreign keys allow; a table another table still references stays (uninstall only).
+			\WPCheckpoint\Jobs\TempTableDropper::drop( $tables, $prefix );
 		} catch ( \InvalidArgumentException $e ) {
 			// No usable token: no temporary tables can have been created.
 			unset( $e );

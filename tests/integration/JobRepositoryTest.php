@@ -712,6 +712,98 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		$this->assertFileExists( LockFile::path( $this->base, $running->id ) );
 	}
 
+	/**
+	 * Temporary tables of a job with foreign keys among them: a parent whose name sorts before its child's, a
+	 * cycle, a key of a table to itself. One pass drops them all, and the session's checks are as they were.
+	 */
+	public function test_temporary_tables_with_foreign_keys_among_them_go_in_one_pass(): void {
+		global $wpdb;
+		list( $job, , $plain ) = $this->failed_job_with_work();
+		$token                 = $this->dirs->state()['token'];
+		$name                  = static function ( string $table ) use ( $token, $job ): string {
+			return TempTables::name( $token, $job->id, 'beef', $table );
+		};
+		$wpdb->query( 'CREATE TABLE `' . $name( 'a_parent' ) . '` (id INT PRIMARY KEY) ENGINE=InnoDB' );
+		$wpdb->query( 'CREATE TABLE `' . $name( 'z_child' ) . '` (id INT PRIMARY KEY, p INT, FOREIGN KEY (p) REFERENCES `' . $name( 'a_parent' ) . '` (id)) ENGINE=InnoDB' );
+		$wpdb->query( 'CREATE TABLE `' . $name( 'c_one' ) . '` (id INT PRIMARY KEY, two INT) ENGINE=InnoDB' );
+		$wpdb->query( 'CREATE TABLE `' . $name( 'c_two' ) . '` (id INT PRIMARY KEY, one INT, FOREIGN KEY (one) REFERENCES `' . $name( 'c_one' ) . '` (id)) ENGINE=InnoDB' );
+		$wpdb->query( 'ALTER TABLE `' . $name( 'c_one' ) . '` ADD FOREIGN KEY (two) REFERENCES `' . $name( 'c_two' ) . '` (id)' );
+		$wpdb->query( 'CREATE TABLE `' . $name( 's_self' ) . '` (id INT PRIMARY KEY, up INT, FOREIGN KEY (up) REFERENCES `' . $name( 's_self' ) . '` (id)) ENGINE=InnoDB' );
+		$this->assertSame( '', $wpdb->last_error );
+		$this->assertSame( 4, (int) $wpdb->get_var( "SELECT COUNT(*) FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = DATABASE() AND TABLE_NAME LIKE 'wcptmp%'" ), 'the control: the keys are there' );
+
+		$this->assertTrue( $this->repo->reclaim_work( $job ), 'every table went' );
+		foreach ( array( $plain, $name( 'a_parent' ), $name( 'z_child' ), $name( 'c_one' ), $name( 'c_two' ), $name( 's_self' ) ) as $table ) {
+			$this->assertFalse( $this->table_exists( $table ), $table );
+		}
+		$this->assertSame( '1', (string) $wpdb->get_var( 'SELECT @@SESSION.foreign_key_checks' ), 'checks back on for the session' );
+	}
+
+	/**
+	 * The same for the orphans a reap finds (a job that no longer exists).
+	 */
+	public function test_orphaned_temporary_tables_with_foreign_keys_go_in_one_pass(): void {
+		global $wpdb;
+		$token  = $this->dirs->state()['token'];
+		$parent = TempTables::name( $token, 424242, 'beef', 'a_parent' );
+		$child  = TempTables::name( $token, 424242, 'beef', 'z_child' );
+		$wpdb->query( "CREATE TABLE `{$parent}` (id INT PRIMARY KEY) ENGINE=InnoDB" );
+		$wpdb->query( "CREATE TABLE `{$child}` (id INT PRIMARY KEY, p INT, FOREIGN KEY (p) REFERENCES `{$parent}` (id)) ENGINE=InnoDB" );
+		$this->assertTrue( $this->table_exists( $parent ) && $this->table_exists( $child ), 'the control: created' );
+		$this->repo->reap();
+		$this->assertFalse( $this->table_exists( $child ) );
+		$this->assertFalse( $this->table_exists( $parent ), 'in the same pass' );
+	}
+
+	/**
+	 * A temporary table a table outside the job has a key to stays (dropping it would leave that key pointing
+	 * at nothing), with what it references; the storage log names the table and the one that references it.
+	 * The job's other tables go.
+	 */
+	public function test_a_temporary_table_another_table_has_a_key_to_is_kept_and_named(): void {
+		global $wpdb;
+		list( $job, , $plain ) = $this->failed_job_with_work();
+		$token                 = $this->dirs->state()['token'];
+		$p                     = TempTables::name( $token, $job->id, 'beef', 'p' );
+		$q                     = TempTables::name( $token, $job->id, 'beef', 'q' );
+		$r                     = TempTables::name( $token, $job->id, 'beef', 'r' );
+		$outside               = $wpdb->base_prefix . 'wpcfk_outside';
+		$wpdb->query( "CREATE TABLE `{$q}` (id INT PRIMARY KEY) ENGINE=InnoDB" );
+		$wpdb->query( "CREATE TABLE `{$p}` (id INT PRIMARY KEY, q INT, FOREIGN KEY (q) REFERENCES `{$q}` (id)) ENGINE=InnoDB" );
+		$wpdb->query( "CREATE TABLE `{$r}` (id INT PRIMARY KEY, p INT, FOREIGN KEY (p) REFERENCES `{$p}` (id)) ENGINE=InnoDB" );
+		$wpdb->query( "CREATE TABLE `{$outside}` (id INT PRIMARY KEY, p INT, FOREIGN KEY (p) REFERENCES `{$p}` (id)) ENGINE=InnoDB" );
+		try {
+			$this->assertFalse( $this->repo->reclaim_work( $job ), 'a table left behind is not success' );
+			$this->assertTrue( $this->table_exists( $p ) );
+			$this->assertTrue( $this->table_exists( $q ), 'p references it' );
+			$this->assertFalse( $this->table_exists( $r ), 'the control: a child of p goes' );
+			$this->assertFalse( $this->table_exists( $plain ), 'the control: the rest goes' );
+			$log = (string) file_get_contents( $this->base . '/logs/storage.log' );
+			$this->assertStringContainsString( "temporary tables of job {$job->id}: {$p} is kept; {$outside}, outside them, has a foreign key to it.", $log );
+			$this->assertStringContainsString( "{$q} is kept; {$p}, outside them, has a foreign key to it.", $log );
+		} finally {
+			$wpdb->query( "DROP TABLE IF EXISTS `{$outside}`, `{$r}`" );
+			$wpdb->query( "DROP TABLE IF EXISTS `{$p}`" );
+			$wpdb->query( "DROP TABLE IF EXISTS `{$q}`" );
+		}
+	}
+
+	/**
+	 * Uninstall drops the temporary tables the same way.
+	 */
+	public function test_uninstall_drops_temporary_tables_with_foreign_keys_among_them(): void {
+		global $wpdb;
+		$token  = $this->dirs->state()['token'];
+		$parent = TempTables::name( $token, 5, 'beef', 'a_parent' );
+		$child  = TempTables::name( $token, 5, 'beef', 'z_child' );
+		$wpdb->query( "CREATE TABLE `{$parent}` (id INT PRIMARY KEY) ENGINE=InnoDB" );
+		$wpdb->query( "CREATE TABLE `{$child}` (id INT PRIMARY KEY, p INT, FOREIGN KEY (p) REFERENCES `{$parent}` (id)) ENGINE=InnoDB" );
+		$this->assertTrue( $this->table_exists( $parent ), 'the control: created' );
+		Schema::drop();
+		$this->assertFalse( $this->table_exists( $child ) );
+		$this->assertFalse( $this->table_exists( $parent ) );
+	}
+
 	public function test_a_table_the_plugin_could_not_have_created_is_a_reported_failure_not_a_silent_skip(): void {
 		global $wpdb;
 		list( $job, $dir, $table ) = $this->failed_job_with_work();
