@@ -23,17 +23,10 @@ final class MemoryMeasurementUsageTest extends TestCase {
 	);
 
 	/**
-	 * Still to be moved to MemoryBudget (a separate change). An entry that no longer uses the function fails
-	 * the test, so the list only shrinks.
+	 * Files still to be moved to MemoryBudget: none left. An entry that no longer uses the function fails the
+	 * test, so the list could only shrink; a new file needs MemoryBudget, not an entry here.
 	 */
-	const PENDING = array(
-		'tests/integration/DatabaseExportStepTest.php',
-		'tests/unit/Archive/IndexLineTest.php',
-		'tests/unit/Archive/PackerTest.php',
-		'tests/unit/Database/TableExporterTest.php',
-		'tests/unit/Files/FileScannerTest.php',
-		'tests/unit/Replace/EngineTest.php',
-	);
+	const PENDING = array();
 
 	/**
 	 * Every PHP file under tests/.

@@ -6,6 +6,7 @@ use WPCheckpoint\Archive\ChunkHasher;
 use WPCheckpoint\Archive\EntryPath;
 use WPCheckpoint\Archive\IndexLine;
 use WPCheckpoint\Archive\IndexLineError;
+use WPCheckpoint\Tests\Fixtures\MemoryBudget;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 final class IndexLineTest extends TestCase {
@@ -195,9 +196,12 @@ final class IndexLineTest extends TestCase {
 		};
 		$line = $build( $chunks, $path );
 		$this->assertLessThanOrEqual( IndexLine::MAX_LINE_BYTES, strlen( $line ) );
-		$before = memory_get_peak_usage();
-		$parsed = IndexLine::files( $line, 16777216 );
-		$this->assertLessThan( 32 * 1048576, memory_get_peak_usage() - $before, 'one line decodes within the unit memory budget' );
+		$parsed = MemoryBudget::within(
+			32 * 1048576, // One line decodes within the unit memory budget.
+			static function () use ( $line ): array {
+				return IndexLine::files( $line, 16777216 );
+			}
+		);
 		$this->assertCount( $chunks, $parsed['hc'] );
 		$this->assertSame( 15587 * 16777216, $parsed['b'] );
 		try {

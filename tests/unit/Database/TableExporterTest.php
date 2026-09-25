@@ -6,6 +6,7 @@ use WPCheckpoint\Archive\IndexLine;
 use WPCheckpoint\Database\TableExporter;
 use WPCheckpoint\Jobs\TransientFailure;
 use WPCheckpoint\Tests\Fixtures\Database\FakeConnection;
+use WPCheckpoint\Tests\Fixtures\MemoryBudget;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 final class TableExporterTest extends TestCase {
@@ -601,12 +602,13 @@ final class TableExporterTest extends TestCase {
 		$db->add_table( 'wp_mixed', array( array( 'id', 'bigint(20)' ), array( 'v', 'longtext' ) ), array( 'id' ), $rows );
 		unset( $rows );
 		$exporter = new TableExporter( $db, $this->dir, 1048576, 262144 );
-		gc_collect_cycles();
-		$before = memory_get_peak_usage( true );
-		list( $state ) = $this->run_all( $exporter, 'wp_mixed' );
-		$delta = memory_get_peak_usage( true ) - $before;
+		list( $state ) = MemoryBudget::within(
+			32 * 1048576,
+			function () use ( $exporter ): array {
+				return $this->run_all( $exporter, 'wp_mixed' );
+			}
+		);
 		$this->assertSame( 660, $state['rows'] );
-		$this->assertLessThanOrEqual( 32 * 1048576, $delta, sprintf( 'peaked at %.1f MiB above the baseline', $delta / 1048576 ) );
 		$fetches = preg_grep( '/\\ASELECT `id`, `v` FROM/', $db->log );
 		$this->assertGreaterThanOrEqual( 61, count( $fetches ) );
 		$large_fetches = 0;
@@ -654,13 +656,13 @@ final class TableExporterTest extends TestCase {
 			array( '3', 'small' ),
 		) );
 		$exporter = new TableExporter( $db, $this->dir );
-		gc_collect_cycles();
-		$before = memory_get_peak_usage( true );
-		$this->assertGreaterThanOrEqual( memory_get_usage( true ), $before );
-		list( $state ) = $this->run_all( $exporter, 'wp_options' );
-		$delta = memory_get_peak_usage( true ) - $before;
+		list( $state ) = MemoryBudget::within(
+			32 * 1048576,
+			function () use ( $exporter ): array {
+				return $this->run_all( $exporter, 'wp_options' );
+			}
+		);
 		$this->assertSame( 3, $state['rows'] );
-		$this->assertLessThanOrEqual( 32 * 1048576, $delta, sprintf( 'Exporting a %d-byte row peaked at %.1f MiB above the baseline.', $value_bytes, $delta / 1048576 ) );
 		$expected = 'gbk' === $charset ? "(2,X'" . str_repeat( '78', $value_bytes ) . "')" : "(2,'" . str_repeat( 'x', $value_bytes ) . "')";
 		$this->assertLessThanOrEqual( TableExporter::MAX_ROW_BYTES, strlen( $expected ) );
 		$this->assertStringContainsString( $expected, $this->chunk( 'wp_options', 1 ) );

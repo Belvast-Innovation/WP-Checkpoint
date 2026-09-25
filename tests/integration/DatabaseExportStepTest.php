@@ -14,6 +14,7 @@ use WPCheckpoint\Jobs\JobRepository;
 use WPCheckpoint\Jobs\JobTypes;
 use WPCheckpoint\Jobs\Residue;
 use WPCheckpoint\Jobs\Runner;
+use WPCheckpoint\Jobs\TableChanged;
 use WPCheckpoint\Jobs\TickResult;
 use WPCheckpoint\Support\Deleter;
 use WPCheckpoint\Support\Directories;
@@ -21,7 +22,7 @@ use WPCheckpoint\Support\Redactor;
 use WPCheckpoint\Support\Schema;
 use WPCheckpoint\Tests\Fixtures\Jobs\FixtureJobType;
 use WPCheckpoint\Tests\Fixtures\Jobs\JobTestCase;
-use WPCheckpoint\Jobs\TableChanged;
+use WPCheckpoint\Tests\Fixtures\MemoryBudget;
 
 /**
  * The export against a real database: awkward values, several chunks,
@@ -388,14 +389,15 @@ final class DatabaseExportStepTest extends JobTestCase {
 		mkdir( $dir, 0700, true );
 		$exporter = new TableExporter( new WpdbConnection(), $dir );
 		$state    = TableExporter::initial_state( $table );
-		gc_collect_cycles();
-		$before = memory_get_peak_usage( true );
-		while ( empty( $state['done'] ) ) {
-			$state = $exporter->step( $state );
-		}
-		$delta = memory_get_peak_usage( true ) - $before;
+		MemoryBudget::within(
+			32 * 1048576, // Exporting the largest row over wpdb.
+			static function () use ( $exporter, &$state ): void {
+				while ( empty( $state['done'] ) ) {
+					$state = $exporter->step( $state );
+				}
+			}
+		);
 		$this->assertSame( 3, $state['rows'] );
-		$this->assertLessThanOrEqual( 32 * 1048576, $delta, sprintf( 'Exporting a %d-byte row over wpdb peaked at %.1f MiB above the baseline.', $bytes, $delta / 1048576 ) );
 		$this->assertStringContainsString( "(2,'" . str_repeat( 'x', $bytes ) . "')", (string) file_get_contents( $dir . '/' . basename( IndexLine::database_path( $table, 1 ) ) ) );
 		Deleter::empty_directory( $dir );
 		@rmdir( $dir );
