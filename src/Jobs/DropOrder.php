@@ -30,9 +30,9 @@ defined( 'ABSPATH' ) || exit;
  * on, and with checks off would leave the other table's key pointing at
  * nothing. The caller reports them.
  *
- * The work is linear in the tables and keys (strongly connected groups by
- * Tarjan's algorithm, then the groups in rounds), so a reclaim unit stays
- * bounded whatever the keys look like.
+ * Planning takes time linear in the tables and keys, apart from sorting
+ * names (strongly connected groups by Tarjan's algorithm, then the groups
+ * in rounds). How many drops one call runs is TempTableDropper's bound.
  */
 final class DropOrder {
 

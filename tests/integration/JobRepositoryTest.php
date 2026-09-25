@@ -7,6 +7,7 @@ use WPCheckpoint\Admin\Notices;
 use WPCheckpoint\Admin\ReclaimActions;
 use WPCheckpoint\Jobs\InvalidTransition;
 use WPCheckpoint\Jobs\Job;
+use WPCheckpoint\Jobs\TempTableDropper;
 use WPCheckpoint\Jobs\TempTables;
 use WPCheckpoint\Jobs\Residue;
 use WPCheckpoint\Jobs\JobRepository;
@@ -893,7 +894,7 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 	 */
 	public function test_a_key_that_appears_before_a_cycle_goes_holds_it_back(): void {
 		global $wpdb;
-		list( $job ) = $this->failed_job_with_work();
+		list( $job, , $plain ) = $this->failed_job_with_work();
 		$token       = $this->dirs->state()['token'];
 		$one         = TempTables::name( $token, $job->id, 'beef', 'c_one' );
 		$two         = TempTables::name( $token, $job->id, 'beef', 'c_two' );
@@ -923,7 +924,159 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 			$this->assertFalse( $this->table_exists( $one ) );
 		} finally {
 			remove_filter( 'query', $add );
-			$this->force_drop( array( $late, $two, $one ) );
+			$this->force_drop( array( $late, $two, $one, $plain ) );
+		}
+	}
+
+	/**
+	 * After a cycle goes with checks off, checks are on again for the next drop: a parent of the cycle that a
+	 * table outside gets a key to in the meantime is refused by the server (not dropped, not stopped), and the
+	 * session's own setting (0 here) is back at the end.
+	 */
+	public function test_checks_are_on_again_after_a_cycle_goes(): void {
+		global $wpdb;
+		list( $job, , $plain ) = $this->failed_job_with_work();
+		$token       = $this->dirs->state()['token'];
+		$one         = TempTables::name( $token, $job->id, 'beef', 'c_one' );
+		$two         = TempTables::name( $token, $job->id, 'beef', 'c_two' );
+		$parent      = TempTables::name( $token, $job->id, 'beef', 'p' );
+		$late        = $wpdb->base_prefix . 'wpcfk_late';
+		$wpdb->query( "CREATE TABLE `{$parent}` (id INT PRIMARY KEY) ENGINE=InnoDB" );
+		$wpdb->query( "CREATE TABLE `{$one}` (id INT PRIMARY KEY, two INT, p INT, FOREIGN KEY (p) REFERENCES `{$parent}` (id)) ENGINE=InnoDB" );
+		$wpdb->query( "CREATE TABLE `{$two}` (id INT PRIMARY KEY, one INT, FOREIGN KEY (one) REFERENCES `{$one}` (id)) ENGINE=InnoDB" );
+		$wpdb->query( "ALTER TABLE `{$one}` ADD FOREIGN KEY (two) REFERENCES `{$two}` (id)" );
+		$reads = 0;
+		$add   = function ( string $query ) use ( &$reads, $late, $parent ): string {
+			global $wpdb;
+			if ( false !== strpos( $query, 'REFERENTIAL_CONSTRAINTS' ) && 2 === ++$reads ) {
+				// After the plan, before the cycle: a table outside gets a key to the cycle's parent.
+				$wpdb->query( "CREATE TABLE `{$late}` (id INT PRIMARY KEY, p INT, FOREIGN KEY (p) REFERENCES `{$parent}` (id)) ENGINE=InnoDB" );
+			}
+			return $query;
+		};
+		add_filter( 'query', $add );
+		$wpdb->query( 'SET SESSION foreign_key_checks = 0' );
+		try {
+			$this->assertFalse( $this->repo->reclaim_work( $job ) );
+			$this->assertSame( '0', (string) $wpdb->get_var( 'SELECT @@SESSION.foreign_key_checks' ), 'the session\'s own setting is back' );
+			$wpdb->query( 'SET SESSION foreign_key_checks = 1' );
+			$this->assertFalse( $this->table_exists( $one ), 'the control: the cycle went' );
+			$this->assertFalse( $this->table_exists( $two ) );
+			$this->assertTrue( $this->table_exists( $parent ), 'refused with checks on' );
+			$log = (string) file_get_contents( $this->base . '/logs/storage.log' );
+			$this->assertStringContainsString( 'temporary tables of job ' . $job->id . ': 1 entries could not be deleted', $log, 'refused by the server' );
+			$this->assertStringNotContainsString( TempTableDropper::CHECKS_CHANGED, $log, 'not stopped: checks were on' );
+		} finally {
+			remove_filter( 'query', $add );
+			$this->force_drop( array( $late, $two, $one, $parent, $plain ) );
+		}
+	}
+
+	/**
+	 * The session's setting is read back right before every drop: when it is not on (a reconnect brings the
+	 * server's default), the call stops there, says why, and leaves the rest for the next pass.
+	 */
+	public function test_a_drop_waits_when_checks_are_not_on_right_before_it(): void {
+		global $wpdb;
+		list( $job, , $plain ) = $this->failed_job_with_work();
+		$token                 = $this->dirs->state()['token'];
+		$b                     = TempTables::name( $token, $job->id, 'beef', 't_b' );
+		$c                     = TempTables::name( $token, $job->id, 'beef', 't_c' );
+		$wpdb->query( "CREATE TABLE `{$b}` (id INT) ENGINE=InnoDB" );
+		$wpdb->query( "CREATE TABLE `{$c}` (id INT) ENGINE=InnoDB" );
+		$reads = 0;
+		$lie   = static function ( string $query ) use ( &$reads ): string {
+			// Reads: the session's value before the run, then one right before each drop. The third says "off".
+			if ( 'SELECT @@SESSION.foreign_key_checks' === $query && 3 === ++$reads ) {
+				return 'SELECT 0';
+			}
+			return $query;
+		};
+		add_filter( 'query', $lie );
+		try {
+			$this->assertFalse( $this->repo->reclaim_work( $job ) );
+			$this->assertSame( 3, $reads, 'the control: read before each drop' );
+			$this->assertFalse( $this->table_exists( $plain ), 'the control: the drop before went (names in order: posts, t_b, t_c)' );
+			$this->assertTrue( $this->table_exists( $b ), 'waits' );
+			$this->assertTrue( $this->table_exists( $c ) );
+			$this->assertStringContainsString( 'temporary tables of job ' . $job->id . ' stopped: ' . TempTableDropper::CHECKS_CHANGED, (string) file_get_contents( $this->base . '/logs/storage.log' ) );
+			remove_filter( 'query', $lie );
+			$this->assertTrue( $this->repo->reclaim_work( $job ), 'the next pass finishes' );
+			$this->assertFalse( $this->table_exists( $b ) );
+			$this->assertFalse( $this->table_exists( $c ) );
+		} finally {
+			remove_filter( 'query', $lie );
+			$this->force_drop( array( $b, $c, $plain ) );
+		}
+	}
+
+	/**
+	 * One call runs at most MAX_STATEMENTS drops: one table more takes a second pass (the largest input the
+	 * bound lets through in one call, and one past it).
+	 */
+	public function test_more_tables_than_one_call_drops_take_more_passes(): void {
+		global $wpdb;
+		list( $job, , $plain ) = $this->failed_job_with_work();
+		$token                 = $this->dirs->state()['token'];
+		$tables                = array( $plain );
+		for ( $i = 1; $i <= TempTableDropper::MAX_STATEMENTS; $i++ ) {
+			$tables[] = TempTables::name( $token, $job->id, 'beef', sprintf( 'n%03d', $i ) );
+			$wpdb->query( 'CREATE TABLE `' . end( $tables ) . '` (id INT) ENGINE=MyISAM' );
+		}
+		try {
+			$this->assertFalse( $this->repo->reclaim_work( $job ), 'one table is left' );
+			$left = array_values( array_filter( $tables, array( $this, 'table_exists' ) ) );
+			$this->assertCount( 1, $left );
+			$this->assertStringContainsString( TempTableDropper::MAX_STATEMENTS . ' entries deleted, more remain for the next pass', (string) file_get_contents( $this->base . '/logs/storage.log' ) );
+			$this->assertTrue( $this->repo->reclaim_work( $job ), 'the next pass' );
+			$this->assertFalse( $this->table_exists( $left[0] ) );
+		} finally {
+			$this->force_drop( $tables );
+		}
+	}
+
+	/**
+	 * The count and the time bounds, with fewer statements and a clock that runs out: each call stops where
+	 * its bound says, and calls on what remains drop everything.
+	 */
+	public function test_a_call_stops_at_its_statement_and_time_bounds(): void {
+		global $wpdb;
+		$token  = $this->dirs->state()['token'];
+		$tables = array();
+		for ( $i = 1; $i <= 7; $i++ ) {
+			$tables[] = TempTables::name( $token, 77, 'beef', 't' . $i );
+			$wpdb->query( 'CREATE TABLE `' . end( $tables ) . '` (id INT) ENGINE=MyISAM' );
+		}
+		try {
+			$passes = 0;
+			$left   = $tables;
+			while ( array() !== $left && $passes < 10 ) {
+				++$passes;
+				$result = TempTableDropper::drop( $left, TempTables::owner_prefix( $token ), 3 );
+				$this->assertLessThanOrEqual( 3, count( $result['dropped'] ) );
+				$left = $result['remaining'];
+			}
+			$this->assertSame( 3, $passes, '3 + 3 + 1' );
+			$this->assertSame( array(), array_values( array_filter( $tables, array( $this, 'table_exists' ) ) ) );
+
+			$more = array( TempTables::name( $token, 77, 'beef', 'u1' ), TempTables::name( $token, 77, 'beef', 'u2' ) );
+			foreach ( $more as $table ) {
+				$wpdb->query( "CREATE TABLE `{$table}` (id INT) ENGINE=MyISAM" );
+			}
+			$now    = 1000.0;
+			$result = TempTableDropper::drop(
+				$more,
+				TempTables::owner_prefix( $token ),
+				TempTableDropper::MAX_STATEMENTS,
+				static function () use ( &$now ): float {
+					$now += TempTableDropper::MAX_SECONDS / 2 + 0.01; // Each look: more than half the time.
+					return $now;
+				}
+			);
+			$this->assertSame( array( $more[0] ), $result['dropped'], 'one statement, then the time is up' );
+			$this->assertSame( array( $more[1] ), $result['remaining'] );
+		} finally {
+			$this->force_drop( array_merge( $tables, $more ?? array() ) );
 		}
 	}
 

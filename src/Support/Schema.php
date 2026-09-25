@@ -244,7 +244,14 @@ final class Schema {
 				}
 			}
 			// In an order their foreign keys allow; a table another table still references stays (uninstall only).
-			\WPCheckpoint\Jobs\TempTableDropper::drop( $tables, $prefix );
+			// One call is bounded; uninstall runs calls until one drops nothing more.
+			for ( $pass = 0; $pass < 50 && array() !== $tables; $pass++ ) {
+				$result = \WPCheckpoint\Jobs\TempTableDropper::drop( $tables, $prefix );
+				if ( array() === $result['dropped'] ) {
+					break;
+				}
+				$tables = $result['remaining'];
+			}
 		} catch ( \InvalidArgumentException $e ) {
 			// No usable token: no temporary tables can have been created.
 			unset( $e );

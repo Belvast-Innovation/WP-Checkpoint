@@ -15,11 +15,21 @@ defined( 'ABSPATH' ) || exit;
  * referenced side), plans, and runs the drops on $wpdb.
  *
  * The session's foreign_key_checks is set to 1 for the whole run and put
- * back as it was afterwards, whatever happens: "checks on" must not depend
- * on what other code did with the connection in the same request. A step
- * with checks off turns them off for its one statement, right after reading
- * the keys again (a table outside the group that references a member since
- * the plan was made holds the group back for this pass).
+ * back afterwards (to 0 only when it read 0 before; to 1 when it could not
+ * be read): "checks on" must not depend on what other code did with the
+ * connection in the same request. It is read back right before every DROP,
+ * because a reconnect can happen at any time and brings the server's
+ * default; a value other than the one the drop needs (or none) stops the
+ * call, and the rest waits for the next pass. A step with checks off turns
+ * them off for its one statement, right after reading the keys again (a
+ * table outside the group that references a member since the plan was made
+ * holds the group back for this pass).
+ *
+ * One call runs at most MAX_STATEMENTS statements and spends at most
+ * MAX_SECONDS seconds before its next statement; what is left is returned
+ * as remaining for the next pass, so a reclaim unit stays bounded whatever
+ * the number of tables. (One DROP of a large table can itself take longer
+ * than that; the bound is checked between statements.)
  *
  * When the keys cannot be read, nothing is dropped with checks off: every
  * table is dropped alone with checks on, and the server refuses what would
@@ -35,20 +45,42 @@ final class TempTableDropper {
 	const ANOTHER_DATABASE = 'a table in another database';
 
 	/**
-	 * Drop tables.
-	 *
-	 * @param string[] $tables Names TempTables::is_safe_name() accepts (others are reported as failed).
-	 * @param string   $like   The prefix every one of them has (TempTables::owner_prefix()), to find the keys that point at them.
-	 * @return array{dropped: string[], failed: string[], kept: array<string, string[]>}
+	 * Most DROP statements one call runs; the rest waits for the next pass.
 	 */
-	public static function drop( array $tables, string $like ): array {
+	const MAX_STATEMENTS = 100;
+
+	/**
+	 * Most seconds one call spends before it leaves the rest to the next pass.
+	 */
+	const MAX_SECONDS = 5.0;
+
+	/**
+	 * Why a call stopped early when foreign_key_checks was not what the next drop needs.
+	 */
+	const CHECKS_CHANGED = 'foreign_key_checks was not as expected right before a drop (a reconnect, or other code on the connection); the rest waits for the next pass';
+
+	/**
+	 * Drop tables, at most MAX_STATEMENTS statements and MAX_SECONDS seconds in one call.
+	 *
+	 * @param string[]      $tables         Names TempTables::is_safe_name() accepts (others are reported as failed).
+	 * @param string        $like           The prefix every one of them has (TempTables::owner_prefix()), to find the keys that point at them.
+	 * @param int           $max_statements Most statements (tests use fewer).
+	 * @param callable|null $clock          function(): float, seconds (tests); microtime by default.
+	 * @return array{dropped: string[], failed: string[], kept: array<string, string[]>, remaining: string[], stopped: string}
+	 */
+	public static function drop( array $tables, string $like, int $max_statements = self::MAX_STATEMENTS, $clock = null ): array {
 		global $wpdb;
-		$out  = array(
-			'dropped' => array(),
-			'failed'  => array(),
-			'kept'    => array(),
+		$clock = is_callable( $clock ) ? $clock : static function (): float {
+			return microtime( true );
+		};
+		$out   = array(
+			'dropped'   => array(),
+			'failed'    => array(),
+			'kept'      => array(),
+			'remaining' => array(),
+			'stopped'   => '',
 		);
-		$safe = array();
+		$safe  = array();
 		foreach ( $tables as $table ) {
 			if ( TempTables::is_safe_name( $table ) ) {
 				$safe[] = $table;
@@ -59,22 +91,48 @@ final class TempTableDropper {
 		if ( array() === $safe ) {
 			return $out;
 		}
-		$before = self::checks();
+		$started = (float) call_user_func( $clock );
+		$before  = self::checks();
 		self::set_checks( 1 );
 		try {
 			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- a server setting.
-			$fold = (int) $wpdb->get_var( 'SELECT @@lower_case_table_names' ) > 0;
-			$keys = self::keys( $like );
-			$plan = DropOrder::plan( $safe, null === $keys ? array() : $keys, $fold );
+			$fold  = (int) $wpdb->get_var( 'SELECT @@lower_case_table_names' ) > 0;
+			$keys  = self::keys( $like );
+			$plan  = DropOrder::plan( $safe, null === $keys ? array() : $keys, $fold );
+			$steps = $plan->steps();
 
 			$out['kept'] = $plan->kept();
-			foreach ( $plan->steps() as $step ) {
+			$run         = 0;
+			foreach ( $steps as $n => $step ) {
+				if ( $run >= $max_statements || (float) call_user_func( $clock ) - $started >= self::MAX_SECONDS ) {
+					$out['remaining'] = self::tables_from( $steps, $n );
+					break;
+				}
+				++$run;
 				$ok = false;
 				if ( ! $step['checks_off'] ) {
+					// Read back right before the statement: a reconnect can happen at any time and brings the server's default.
+					if ( ! self::checks_are( 1 ) ) {
+						$out['stopped']   = self::CHECKS_CHANGED;
+						$out['remaining'] = self::tables_from( $steps, $n );
+						break;
+					}
 					$ok = self::run_drop( $step['tables'] );
 				} elseif ( null !== $keys ) { // Without keys every table is free: never reached then.
 					$fresh = self::keys( $like );
-					$ok    = null !== $fresh && ! self::referenced_from_outside( $step['tables'], $fresh, $fold ) && self::drop_with_checks_off( $step['tables'] );
+					if ( null !== $fresh && ! self::referenced_from_outside( $step['tables'], $fresh, $fold ) ) {
+						self::set_checks( 0 );
+						try {
+							if ( ! self::checks_are( 0 ) ) {
+								$out['stopped']   = self::CHECKS_CHANGED;
+								$out['remaining'] = self::tables_from( $steps, $n );
+								break;
+							}
+							$ok = self::run_drop( $step['tables'] );
+						} finally {
+							self::set_checks( 1 ); // The run's own setting; the session's is put back at the end.
+						}
+					}
 				}
 				if ( $ok ) {
 					$out['dropped'] = array_merge( $out['dropped'], $step['tables'] );
@@ -86,6 +144,33 @@ final class TempTableDropper {
 			self::set_checks( $before );
 		}
 		return $out;
+	}
+
+	/**
+	 * The tables of the steps from $n on.
+	 *
+	 * @param array<int, array{tables: string[], checks_off: bool}> $steps Steps.
+	 * @param int                                                   $n     First step.
+	 * @return string[]
+	 */
+	private static function tables_from( array $steps, int $n ): array {
+		$out = array();
+		foreach ( array_slice( $steps, $n ) as $step ) {
+			$out = array_merge( $out, $step['tables'] );
+		}
+		return $out;
+	}
+
+	/**
+	 * Whether the session's foreign_key_checks reads back as $value (not when it cannot be read).
+	 *
+	 * @param int $value 0 or 1.
+	 * @return bool
+	 */
+	private static function checks_are( int $value ): bool {
+		global $wpdb;
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- a session setting.
+		return (string) $value === (string) $wpdb->get_var( 'SELECT @@SESSION.foreign_key_checks' );
 	}
 
 	/**
@@ -184,20 +269,5 @@ final class TempTableDropper {
 		);
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- this installation's temporary tables, names validated by TempTables::is_safe_name().
 		return false !== $wpdb->query( "DROP TABLE IF EXISTS {$list}" );
-	}
-
-	/**
-	 * DROP TABLE for a group only its own members reference, with the session's checks off for that statement.
-	 *
-	 * @param string[] $tables Safe names.
-	 * @return bool
-	 */
-	private static function drop_with_checks_off( array $tables ): bool {
-		self::set_checks( 0 );
-		try {
-			return self::run_drop( $tables );
-		} finally {
-			self::set_checks( 1 ); // The run's own setting; drop() puts the session's back at its end.
-		}
 	}
 }

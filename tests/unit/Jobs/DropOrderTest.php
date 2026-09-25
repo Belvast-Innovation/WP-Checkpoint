@@ -100,7 +100,7 @@ final class DropOrderTest extends TestCase {
 	 * what a kept table references is kept.
 	 */
 	public function test_every_plan_on_random_keys_keeps_the_rules(): void {
-		for ( $seed = 1; $seed <= 400; $seed++ ) {
+		for ( $seed = 1; $seed <= 2000; $seed++ ) {
 			mt_srand( $seed );
 			$count  = mt_rand( 1, 12 );
 			$tables = array();
@@ -141,7 +141,76 @@ final class DropOrderTest extends TestCase {
 					$this->assertArrayHasKey( $parent, $plan->kept(), "seed {$seed}: {$parent} is referenced by the kept {$child}" );
 				}
 			}
+
+			// Not too much either: kept is exactly what a table outside references, and what that references.
+			$references = array();
+			foreach ( $keys as list( $child, $parent ) ) {
+				if ( $child !== $parent ) {
+					$references[ $child ][ $parent ] = true;
+				}
+			}
+			$should_keep = array();
+			foreach ( $keys as list( $child, $parent ) ) {
+				if ( 0 === strpos( $child, 'outside' ) ) {
+					$should_keep[ $parent ] = true;
+					foreach ( array_keys( self::reach( $parent, $references ) ) as $reached ) {
+						$should_keep[ $reached ] = true;
+					}
+				}
+			}
+			ksort( $should_keep );
+			$this->assertSame( array_keys( $should_keep ), self::sorted( array_keys( $plan->kept() ) ), "seed {$seed}: kept exactly" );
+			// A group with checks off is one cycle (every member reaches every other); a table alone is on none.
+			foreach ( $plan->steps() as $step ) {
+				foreach ( $step['tables'] as $a ) {
+					$reach = self::reach( $a, $references );
+					if ( $step['checks_off'] ) {
+						foreach ( $step['tables'] as $b ) {
+							$this->assertTrue( $a === $b || isset( $reach[ $b ] ), "seed {$seed}: {$a} and {$b} are one cycle" );
+						}
+					} else {
+						$this->assertArrayNotHasKey( $a, $reach, "seed {$seed}: {$a} alone is on no cycle" );
+					}
+				}
+			}
+			// The same plan whatever order the tables and keys come in.
+			$shuffled_tables = $tables;
+			$shuffled_keys   = $keys;
+			shuffle( $shuffled_tables );
+			shuffle( $shuffled_keys );
+			$again = self::plan( $shuffled_tables, $shuffled_keys );
+			$this->assertSame( $plan->steps(), $again->steps(), "seed {$seed}: steps in any input order" );
+			$this->assertSame( self::sorted_kept( $plan->kept() ), self::sorted_kept( $again->kept() ), "seed {$seed}: kept in any input order" );
 		}
+	}
+
+	/**
+	 * Tables reachable from a table along references (itself only through a cycle).
+	 *
+	 * @return array<string, bool>
+	 */
+	private static function reach( string $from, array $references ): array {
+		$seen  = array();
+		$queue = array_keys( $references[ $from ] ?? array() );
+		for ( $i = 0; isset( $queue[ $i ] ); $i++ ) {
+			if ( isset( $seen[ $queue[ $i ] ] ) ) {
+				continue;
+			}
+			$seen[ $queue[ $i ] ] = true;
+			foreach ( array_keys( $references[ $queue[ $i ] ] ?? array() ) as $next ) {
+				$queue[] = $next;
+			}
+		}
+		return $seen;
+	}
+
+	private static function sorted_kept( array $kept ): array {
+		foreach ( $kept as $table => $referrers ) {
+			sort( $referrers );
+			$kept[ $table ] = $referrers;
+		}
+		ksort( $kept );
+		return $kept;
 	}
 
 	/**

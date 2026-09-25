@@ -1215,16 +1215,19 @@ final class JobRepository {
 		$this->report_reclaim(
 			$what,
 			array(
-				'deleted'   => 0,
+				'deleted'   => count( $result['dropped'] ),
 				'failed'    => $result['failed'],
-				'remaining' => false,
+				'remaining' => array() !== $result['remaining'],
 			)
 		);
+		if ( '' !== $result['stopped'] ) {
+			$this->directories->log_event( sprintf( 'Reclaiming the %1$s stopped: %2$s.', $what, $result['stopped'] ) );
+		}
 		foreach ( $result['kept'] as $table => $referrers ) {
 			// Dropping it would leave another table's key pointing at nothing: it stays until that key is gone.
 			$this->directories->log_event( sprintf( 'Reclaiming the %1$s: %2$s is kept; a foreign key of %3$s, which stays, references it.', $what, $table, implode( ', ', $referrers ) ) );
 		}
-		return array() === $result['failed'] && array() === $result['kept'];
+		return array() === $result['failed'] && array() === $result['kept'] && array() === $result['remaining'];
 	}
 
 	/**
