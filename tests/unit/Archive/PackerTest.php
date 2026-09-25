@@ -188,7 +188,8 @@ final class PackerTest extends TestCase {
 		$this->assertSame( 40000, $entries['files/random.bin']['csize'] );
 		$this->assertSame( ZipFormat::METHOD_DEFLATE, $entries['files/text.txt']['method'], 'the control: shrank, deflated' );
 		$this->assertLessThan( 40000, $entries['files/text.txt']['csize'] );
-		$this->assertSame( ZipFormat::METHOD_STORE, ArchiveBuilder::locate( $path, 'files/random.bin' )['method'], 'the local header agrees' );
+		$this->assertSame( ZipFormat::METHOD_STORE, $reader->local_header( $entries['files/random.bin'] )['method'], 'the local header agrees' );
+		$this->assertSame( ZipFormat::METHOD_DEFLATE, $reader->local_header( $entries['files/text.txt'] )['method'], 'the control: the local header of a deflated entry says so' );
 		$this->assertSame( (string) file_get_contents( $random ), $reader->read( $entries['files/random.bin'] ) );
 		$this->assertTrue( $this->unzip_ok( $path ), 'unzip -t accepts it' );
 
@@ -197,6 +198,41 @@ final class PackerTest extends TestCase {
 		$kept = ZipReader::open( $this->pack( $files, $this->options( array( 'keep_deflated' => true ) ) )->sealed_paths()[0] )->find( 'files/random.bin' );
 		$this->assertSame( ZipFormat::METHOD_DEFLATE, $kept['method'] );
 		$this->assertGreaterThan( 40000, $kept['csize'], 'kept deflated, larger than its content' );
+	}
+
+	/**
+	 * A run that stored an entry (it did not shrink) and stopped before its checkpoint is replayed from the state
+	 * in which the entry was still to be deflated; the replay decides otherwise (here: keep_deflated). Both headers
+	 * must name the method the replay wrote, or the entry reads as damaged.
+	 */
+	public function test_a_replay_that_decides_otherwise_leaves_both_headers_with_one_method(): void {
+		$random = $this->src . '/random.bin';
+		file_put_contents( $random, random_bytes( 40000 ) );
+		$packer = Packer::open( $this->out, 'site-20260918-100000-a1b2', array(), $this->options() );
+		$this->add( $packer, $random, 'files/random.bin', 1758196800 );
+		$saved = $packer->state();
+		while ( $packer->write_piece() > 0 ) {
+			continue;
+		}
+		$packer->close(); // Stopped before the checkpoint: the entry was stored, the state says "to be deflated".
+
+		$packer = Packer::open( $this->out, 'site-20260918-100000-a1b2', $saved, $this->options( array( 'keep_deflated' => true ) ) );
+		while ( $packer->write_piece() > 0 ) {
+			continue;
+		}
+		$index = $this->source( 'files.index.jsonl', 300 );
+		$packer->prepare_finish( 300 + 17 + 4096 );
+		$this->ready( $packer );
+		$packer->finish( array( 'files.index.jsonl' => $index ), '{"embedded":true}', 1758196800 );
+		while ( $packer->hash_next_block() ) {
+			continue;
+		}
+		$packer->close();
+		$reader = ZipReader::open( $packer->sealed_paths()[0] );
+		$entry  = $reader->find( 'files/random.bin' );
+		$this->assertSame( ZipFormat::METHOD_DEFLATE, $entry['method'], 'the control: the replay deflated it' );
+		$this->assertSame( $entry['method'], $reader->local_header( $entry )['method'], 'the local header says the same' );
+		$this->assertSame( (string) file_get_contents( $random ), $reader->read( $entry ) );
 	}
 
 	public function test_volumes_are_sealed_between_entries_and_an_entry_never_spans_volumes(): void {

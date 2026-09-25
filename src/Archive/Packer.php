@@ -36,7 +36,8 @@ use WPCheckpoint\Support\HostFunctions;
  * to DEFLATE_MAX_BYTES are deflated in one piece, larger ones are stored:
  * a deflate state cannot survive a tick, and media files do not compress.
  * An entry whose deflated form is not smaller than its content is stored
- * as well (the local header's method is patched with its sizes).
+ * as well (end_entry() writes the method into the local header with the
+ * sizes and CRC, so a replay that decides otherwise overwrites it).
  */
 final class Packer {
 
@@ -358,9 +359,7 @@ final class Packer {
 			}
 			$this->write_volume( $out );
 			if ( $stored ) {
-				$this->state['entry']['method'] = ZipFormat::METHOD_STORE;
-				$this->seek_volume( (int) $this->state['entry']['header_offset'] + ZipFormat::patch_offsets( strlen( (string) $this->state['entry']['name'] ), (bool) $this->state['entry']['zip64'] )['method'] );
-				$this->write_volume( pack( 'v', ZipFormat::METHOD_STORE ) );
+				$this->state['entry']['method'] = ZipFormat::METHOD_STORE; // end_entry() writes it into the local header.
 			}
 			$this->state['entry']['crc']     = Crc32::of( $data );
 			$this->state['entry']['csize']   = strlen( $out );
@@ -1076,6 +1075,10 @@ final class Packer {
 		$entry = $this->state['entry'];
 		$this->close_source();
 		$patch = ZipFormat::patch_offsets( strlen( $entry['name'] ), (bool) $entry['zip64'] );
+		// The method too, every time: the header was written before the data, and a replay of the entry may decide
+		// otherwise than a run that stopped after patching it (stored, or deflated after all).
+		$this->seek_volume( $entry['header_offset'] + $patch['method'] );
+		$this->write_volume( pack( 'v', (int) $entry['method'] ) );
 		$this->seek_volume( $entry['header_offset'] + $patch['crc'] );
 		$this->write_volume( Crc32::pack( (int) $entry['crc'] ) );
 		if ( $entry['zip64'] ) {
