@@ -81,7 +81,7 @@ final class ArchiveBuilder {
 	/**
 	 * Constructor.
 	 *
-	 * @param array<string, mixed> $options files_first (bool), volume_bytes (int), database_lines (callable), files_lines (callable), manifest (callable), deflate_max_bytes (int), chunk_bytes (int, the hash chunk size; CHUNK_BYTES by default).
+	 * @param array<string, mixed> $options files_first (bool), volume_bytes (int), database_lines (callable), files_lines (callable), manifest (callable), deflate_max_bytes (int), keep_deflated (bool), chunk_bytes (int, the hash chunk size; CHUNK_BYTES by default).
 	 */
 	public function __construct( array $options = array() ) {
 		$this->root    = sys_get_temp_dir() . '/wpcheckpoint-verify-' . bin2hex( random_bytes( 4 ) );
@@ -247,6 +247,7 @@ final class ArchiveBuilder {
 			'volume_bytes'       => $this->options['volume_bytes'] ?? self::VOLUME_BYTES,
 			'volume_chunk_bytes' => $this->chunk_bytes(),
 			'deflate_max_bytes'  => $this->options['deflate_max_bytes'] ?? self::DEFLATE_MAX,
+			'keep_deflated'      => ! empty( $this->options['keep_deflated'] ),
 			'disk_free'          => static function (): int {
 				return PHP_INT_MAX;
 			},

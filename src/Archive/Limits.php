@@ -7,8 +7,6 @@
 
 namespace WPCheckpoint\Archive;
 
-defined( 'ABSPATH' ) || exit;
-
 /**
  * Each limit is defined here once, and each side takes it from here: the
  * export writes nothing larger (Manifest::DEFAULT_CHUNK, the deflate cap in

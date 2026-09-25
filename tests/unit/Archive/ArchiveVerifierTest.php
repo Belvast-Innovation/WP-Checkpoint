@@ -8,6 +8,7 @@ use WPCheckpoint\Archive\Limits;
 use WPCheckpoint\Archive\Manifest;
 use WPCheckpoint\Archive\VerificationResult;
 use WPCheckpoint\Archive\ZipFormat;
+use WPCheckpoint\Archive\ZipReader;
 use WPCheckpoint\Cli\VerifyCommand;
 use WPCheckpoint\Tests\Fixtures\Archive\ArchiveBuilder;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
@@ -693,6 +694,34 @@ final class ArchiveVerifierTest extends TestCase {
 				$this->assertStringContainsString( 'is stored compressed and is 8388609 bytes large; this plugin decompresses a compressed entry in one piece and reads at most 8388608 bytes (8 MiB)', $finding['message'] );
 				$this->assertNull( self::find( $result, array( 'kind' => Finding::CORRUPT ) ), $depth . ': not damage' );
 			}
+		}
+	}
+
+	/**
+	 * The limit holds for either size: content within it whose deflated form is larger (another tool kept it
+	 * deflated; this plugin stores such an entry) is unsupported too.
+	 */
+	public function test_a_compressed_entry_whose_compressed_size_passes_the_inflate_limit_is_unsupported(): void {
+		$builder          = ( new ArchiveBuilder(
+			array(
+				'deflate_max_bytes' => 2 * Limits::INFLATE_BYTES,
+				'keep_deflated'     => true,
+			)
+		) )->typical()->file( 'wp-content/uploads/random.bin', random_bytes( Limits::INFLATE_BYTES - 512 ) )->build();
+		$this->builders[] = $builder;
+		$entry            = null;
+		foreach ( $builder->volumes as $volume ) {
+			$entry = ZipReader::open( $volume )->find( ArchiveVerifier::FILES_PREFIX . 'wp-content/uploads/random.bin' ) ?? $entry;
+		}
+		$this->assertIsArray( $entry );
+		$this->assertSame( ZipFormat::METHOD_DEFLATE, $entry['method'] );
+		$this->assertLessThanOrEqual( Limits::INFLATE_BYTES, $entry['usize'], 'the control: the content is within the limit' );
+		$this->assertGreaterThan( Limits::INFLATE_BYTES, $entry['csize'], 'the control: its deflated form is not' );
+		foreach ( array( ArchiveVerifier::DEPTH_FULL, ArchiveVerifier::DEPTH_STRUCTURE ) as $depth ) {
+			$result  = $this->verify( $builder, $builder->manifest_path, $depth );
+			$finding = self::find( $result, array( 'kind' => Finding::UNSUPPORTED ) );
+			$this->assertSame( VerificationResult::UNSUPPORTED_LAYOUT, $result->outcome(), $depth );
+			$this->assertStringContainsString( 'is stored compressed and is ' . $entry['csize'] . ' bytes large', (string) ( $finding['message'] ?? '' ), $depth );
 		}
 	}
 

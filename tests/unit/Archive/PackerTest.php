@@ -12,6 +12,7 @@ use WPCheckpoint\Archive\SourceChanged;
 use WPCheckpoint\Archive\SourceGone;
 use WPCheckpoint\Archive\ZipFormat;
 use WPCheckpoint\Archive\ZipReader;
+use WPCheckpoint\Tests\Fixtures\Archive\ArchiveBuilder;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 final class PackerTest extends TestCase {
@@ -167,6 +168,35 @@ final class PackerTest extends TestCase {
 		$expect = ChunkHasher::content_hash( $paths[0], 262144 );
 		$this->assertSame( $expect['sha256'], $volumes[0]['sha256'] );
 		$this->assertSame( $expect['chunks'], isset( $volumes[0]['chunks'] ) ? $volumes[0]['chunks'] : null, 'container chunks hashed after sealing match the format rule' );
+	}
+
+	/**
+	 * An entry whose deflated form is not smaller than its content is stored: its method, sizes and CRC say so in
+	 * both headers, and it reads back unchanged. keep_deflated (tests only) keeps it deflated, larger than it is.
+	 */
+	public function test_an_entry_that_does_not_shrink_is_stored(): void {
+		$random = $this->src . '/random.bin';
+		file_put_contents( $random, random_bytes( 40000 ) );
+		$files = array(
+			array( $random, 'files/random.bin', 1758196800 ),
+			array( $this->source( 'text.txt', 40000 ), 'files/text.txt', 1758196800 ),
+		);
+		$path    = $this->pack( $files, $this->options() )->sealed_paths()[0];
+		$reader  = ZipReader::open( $path );
+		$entries = array_column( $reader->entries(), null, 'name' );
+		$this->assertSame( ZipFormat::METHOD_STORE, $entries['files/random.bin']['method'], 'did not shrink: stored' );
+		$this->assertSame( 40000, $entries['files/random.bin']['csize'] );
+		$this->assertSame( ZipFormat::METHOD_DEFLATE, $entries['files/text.txt']['method'], 'the control: shrank, deflated' );
+		$this->assertLessThan( 40000, $entries['files/text.txt']['csize'] );
+		$this->assertSame( ZipFormat::METHOD_STORE, ArchiveBuilder::locate( $path, 'files/random.bin' )['method'], 'the local header agrees' );
+		$this->assertSame( (string) file_get_contents( $random ), $reader->read( $entries['files/random.bin'] ) );
+		$this->assertTrue( $this->unzip_ok( $path ), 'unzip -t accepts it' );
+
+		$this->rm( $this->out );
+		mkdir( $this->out );
+		$kept = ZipReader::open( $this->pack( $files, $this->options( array( 'keep_deflated' => true ) ) )->sealed_paths()[0] )->find( 'files/random.bin' );
+		$this->assertSame( ZipFormat::METHOD_DEFLATE, $kept['method'] );
+		$this->assertGreaterThan( 40000, $kept['csize'], 'kept deflated, larger than its content' );
 	}
 
 	public function test_volumes_are_sealed_between_entries_and_an_entry_never_spans_volumes(): void {

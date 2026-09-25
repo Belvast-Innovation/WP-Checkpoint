@@ -99,18 +99,19 @@ final class ZipFormat {
 	}
 
 	/**
-	 * Where CRC, sizes and (for zip64) the extra field sit inside a local
-	 * header, so the writer can patch them when the entry ends.
+	 * Where the method, CRC, sizes and (for zip64) the extra field sit inside
+	 * a local header, so the writer can patch them when the entry ends.
 	 *
 	 * @param int  $name_len Name length.
 	 * @param bool $zip64    Whether the extra field was reserved.
-	 * @return array{crc: int, sizes: int, extra: int|null}
+	 * @return array{method: int, crc: int, sizes: int, extra: int|null}
 	 */
 	public static function patch_offsets( int $name_len, bool $zip64 ): array {
 		return array(
-			'crc'   => 14,
-			'sizes' => 18,
-			'extra' => $zip64 ? 30 + $name_len + 4 : null, // After the extra header id and size.
+			'method' => 8,
+			'crc'    => 14,
+			'sizes'  => 18,
+			'extra'  => $zip64 ? 30 + $name_len + 4 : null, // After the extra header id and size.
 		);
 	}
 
