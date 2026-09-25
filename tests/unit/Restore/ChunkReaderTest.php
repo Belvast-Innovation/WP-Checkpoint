@@ -8,6 +8,7 @@ use WPCheckpoint\Restore\ConstraintNames;
 use WPCheckpoint\Restore\ImportTarget;
 use WPCheckpoint\Restore\Refused;
 use WPCheckpoint\Restore\Statement;
+use WPCheckpoint\Tests\Fixtures\MemoryBudget;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 /**
@@ -268,18 +269,16 @@ final class ChunkReaderTest extends TestCase {
 		fclose( $handle );
 		$this->assertSame( ChunkReader::MAX_STATEMENT_BYTES + 1, filesize( $path ) );
 
-		if ( function_exists( 'memory_reset_peak_usage' ) ) {
-			memory_reset_peak_usage();
-			$before = memory_get_usage();
-		} else {
-			$before = memory_get_peak_usage();
-		}
-		$reader    = new ChunkReader( $path, 0, $this->target(), 1 );
-		$statement = $reader->next();
-		$reader->close();
-		$this->assertSame( 1, $statement->rows, 'the largest statement is read' );
-		$this->assertLessThan( 32 * 1048576, memory_get_peak_usage() - $before, 'within the 32 MB step budget' );
-		unset( $statement );
+		$rows = MemoryBudget::within(
+			32 * 1048576, // The step budget.
+			function () use ( $path ): int {
+				$reader    = new ChunkReader( $path, 0, $this->target(), 1 );
+				$statement = $reader->next();
+				$reader->close();
+				return $statement->rows;
+			}
+		);
+		$this->assertSame( 1, $rows, 'the largest statement is read' );
 
 		$this->assert_refused( $head . "(1,'" . str_repeat( 'a', $room + 1 ) . "');\n", 'larger than' );
 	}

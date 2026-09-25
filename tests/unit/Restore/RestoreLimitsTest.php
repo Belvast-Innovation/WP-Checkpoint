@@ -4,6 +4,7 @@ namespace WPCheckpoint\Tests\Unit\Restore;
 
 use WPCheckpoint\Jobs\RestoreJob;
 use WPCheckpoint\Restore\PluginList;
+use WPCheckpoint\Tests\Fixtures\MemoryBudget;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 /**
@@ -17,15 +18,18 @@ final class RestoreLimitsTest extends TestCase {
 		for ( $i = 0; $i < RestoreJob::MAX_EXCLUDED; $i++ ) {
 			$names[] = sprintf( 'wp_%061d', $i ); // 64 bytes each, the longest table name.
 		}
-		$before  = memory_get_peak_usage();
-		$options = RestoreJob::options(
-			array(
-				'base'           => 'example-20260918-100000-a1b2',
-				'exclude_tables' => $names,
-			)
+		$options = MemoryBudget::within(
+			32 * 1048576,
+			static function () use ( $names ): array {
+				return RestoreJob::options(
+					array(
+						'base'           => 'example-20260918-100000-a1b2',
+						'exclude_tables' => $names,
+					)
+				);
+			}
 		);
 		$this->assertCount( RestoreJob::MAX_EXCLUDED, $options['exclude_tables'] );
-		$this->assertLessThan( 32 * 1048576, memory_get_peak_usage() - $before );
 		$names[] = 'wp_one_more';
 		$this->expectException( \InvalidArgumentException::class );
 		RestoreJob::options(
@@ -43,10 +47,13 @@ final class RestoreLimitsTest extends TestCase {
 		}
 		$stored = PluginList::write( $list );
 		unset( $list );
-		$before = memory_get_peak_usage();
-		$read   = PluginList::read( $stored );
+		$read = MemoryBudget::within(
+			32 * 1048576,
+			static function () use ( $stored ) {
+				return PluginList::read( $stored );
+			}
+		);
 		$this->assertCount( PluginList::MAX_ENTRIES, (array) $read );
-		$this->assertLessThan( 32 * 1048576, memory_get_peak_usage() - $before );
 		$this->assertNull( PluginList::read( 'a:' . ( PluginList::MAX_ENTRIES + 1 ) . ':{' ), 'one more is not read' );
 	}
 }

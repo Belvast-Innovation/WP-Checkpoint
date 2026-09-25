@@ -5,6 +5,7 @@ namespace WPCheckpoint\Tests\Unit\Archive;
 use WPCheckpoint\Archive\ArchiveVerifier;
 use WPCheckpoint\Archive\Packer;
 use WPCheckpoint\Archive\VerificationResult;
+use WPCheckpoint\Tests\Fixtures\MemoryBudget;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 /**
@@ -32,21 +33,22 @@ final class LayoutWalkLimitTest extends TestCase {
 		$this->assertIsArray( $built, (string) $out );
 		$this->root = dirname( (string) $built['work'], 2 );
 		$verifier   = ArchiveVerifier::open( (string) $built['manifest'], (string) $built['work'], ArchiveVerifier::DEPTH_STRUCTURE );
-		$base     = memory_get_usage();
-		$peak     = 0;
-		$units    = 0;
-		while ( $verifier->step() ) {
-			$peak = max( $peak, memory_get_peak_usage() - $base );
-			++$units;
-			$this->assertLessThan( 5000, $units );
-		}
+		$units      = 0;
+		MemoryBudget::within(
+			32 * 1048576, // A unit stays inside the step memory increase, the whole walk too.
+			function () use ( $verifier, &$units ): void {
+				while ( $verifier->step() ) {
+					++$units;
+					$this->assertLessThan( 5000, $units );
+				}
+			}
+		);
 		$result = $verifier->result();
 		$this->assertSame( VerificationResult::PASSED_PARTIAL, $result->outcome(), $result->to_text( static function ( string $t ): string {
 			return $t;
 		} ) );
 		$this->assertSame( $files + 1, $result->counts()['headers_checked'], 'every entry\'s local header was read' );
 		$this->assertGreaterThanOrEqual( (int) ceil( ( $files + 1 ) / ArchiveVerifier::ENTRIES_PER_UNIT ), $units, 'at most ENTRIES_PER_UNIT entries per unit' );
-		$this->assertLessThan( 32 * 1048576, $peak, 'a unit stays inside the step memory increase' );
 	}
 
 	/**
