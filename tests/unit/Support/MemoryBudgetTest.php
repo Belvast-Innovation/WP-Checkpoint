@@ -35,6 +35,21 @@ final class MemoryBudgetTest extends TestCase {
 		$this->assertStringContainsString( 'Allowed memory size', $this->run_in_a_process( 8 * 1048576, 16 * 1048576 ), 'beyond: stopped' );
 	}
 
+	public function test_a_stricter_limit_around_the_test_stays(): void {
+		$limit = ini_get( 'memory_limit' );
+		$outer = (string) ( memory_get_usage( true ) + 64 * 1048576 );
+		ini_set( 'memory_limit', $outer );
+		try {
+			$inside = MemoryBudget::within( 512 * 1048576, static function () {
+				return ini_get( 'memory_limit' );
+			} );
+			$this->assertSame( $outer, $inside, 'not raised to the larger bound' );
+			$this->assertSame( $outer, ini_get( 'memory_limit' ), 'and put back' );
+		} finally {
+			ini_set( 'memory_limit', $limit );
+		}
+	}
+
 	public function test_the_limit_is_put_back(): void {
 		$limit = ini_get( 'memory_limit' );
 		$this->assertSame( 3, MemoryBudget::within( 32 * 1048576, static function (): int {

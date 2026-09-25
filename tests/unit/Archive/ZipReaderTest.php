@@ -7,6 +7,7 @@ use WPCheckpoint\Archive\EnvironmentFailure;
 use WPCheckpoint\Archive\Limits;
 use WPCheckpoint\Archive\ZipFormat;
 use WPCheckpoint\Archive\ZipReader;
+use WPCheckpoint\Tests\Fixtures\MemoryBudget;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 final class ZipReaderTest extends TestCase {
@@ -367,10 +368,10 @@ final class ZipReaderTest extends TestCase {
 
 	/**
 	 * The inflate limit is only a limit if the largest allowed entry fits
-	 * the baseline: one unit may add at most 32 MB, so the peak of
-	 * inflating Limits::INFLATE_BYTES in one piece is measured here. The
-	 * fixture is streamed to disk so the peak before the measurement stays
-	 * small.
+	 * the baseline: one unit may add at most 32 MB, and inflating
+	 * Limits::INFLATE_BYTES in one piece (to hash it, as the verifier does,
+	 * and to extract it, as a restore does) runs within that bound
+	 * (MemoryBudget). The fixture is streamed to disk.
 	 */
 	public function test_the_largest_deflated_entry_inflates_within_the_step_memory_budget(): void {
 		if ( ! function_exists( 'deflate_init' ) ) {
@@ -411,11 +412,21 @@ final class ZipReaderTest extends TestCase {
 
 		$reader = ZipReader::open( $path );
 		$entry  = $reader->entries()[0];
-		$before = memory_get_peak_usage( true );
-		$hashes = $reader->hash_entry_chunks( $entry, 1048576 );
-		$delta  = memory_get_peak_usage( true ) - $before;
+		$hashes = MemoryBudget::within(
+			32 * 1048576,
+			static function () use ( $reader, $entry ): array {
+				return $reader->hash_entry_chunks( $entry, 1048576 );
+			}
+		);
 		$this->assertCount( (int) ceil( $size / 1048576 ), $hashes );
-		$this->assertLessThanOrEqual( 32 * 1048576, $delta, sprintf( 'Inflating %d bytes peaked at %.1f MiB above the baseline.', $size, $delta / 1048576 ) );
+		mkdir( $this->dir . '/largest' );
+		$extracted = MemoryBudget::within(
+			32 * 1048576,
+			function () use ( $reader, $entry ): string {
+				return $reader->extract( $entry, $this->dir . '/largest' );
+			}
+		);
+		$this->assertSame( $size, filesize( $extracted ), 'extracted whole' );
 	}
 
 	public function test_not_a_zip(): void {
