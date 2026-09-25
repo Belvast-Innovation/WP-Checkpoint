@@ -7,6 +7,7 @@ use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\Residue;
 use WPCheckpoint\Jobs\RestorePreflightStep;
 use WPCheckpoint\Jobs\TempTables;
+use WPCheckpoint\Jobs\TickResult;
 use WPCheckpoint\Plugin;
 use WPCheckpoint\Support\Schema;
 use WPCheckpoint\Tests\Fixtures\Restore\RestoreTestCase;
@@ -252,6 +253,10 @@ final class RestoreLeaseTest extends RestoreTestCase {
 	 * A table with transactions: a batch's rows and the ledger's record of them are committed together, and when
 	 * the record is refused (another run claimed the table while the batch ran), the batch's rows are rolled back
 	 * with it. Nothing the ledger does not record stays in the table, which is why such a table needs no count.
+	 *
+	 * The run still holds the job: it waits the back-off with the job released, not taken over (a lost lease
+	 * would keep the job locked until it runs out and count a takeover), and the next run claims the table back
+	 * and finishes it.
 	 */
 	public function test_a_batch_whose_record_is_refused_leaves_no_row_behind(): void {
 		global $wpdb;
@@ -274,12 +279,24 @@ final class RestoreLeaseTest extends RestoreTestCase {
 				$wpdb->query( 'COMMIT' ); // The other run's claim is committed, as a real one is.
 			}
 		);
-		$result = $this->tick_until_lost_or_done( $job );
-		$this->assertSame( 'lost', $result, 'the run stopped when its record was refused: ' . Plugin::instance()->jobs()->find( $job->id )->last_error );
+		for ( $i = 0; $i < 200 && ! $claimed; $i++ ) {
+			$result = Plugin::instance()->runner()->tick( $job->id, microtime( true ) );
+		}
+		$wpdb->query( 'COMMIT' );
 		$this->assertTrue( $claimed, 'the control: the table was claimed by another run mid-batch' );
+		$this->assertSame( TickResult::WAITING, $result->status, 'the run stopped when its record was refused, to be retried: ' . $result->message );
+		$this->assertStringContainsString( 'Another run of this restore', $result->message );
 		$recorded = $this->ledger()[ $this->number( $big ) ][1];
 		$held     = (int) $wpdb->get_var( 'SELECT COUNT(*) FROM `' . $this->temporary( $big ) . '`' );
 		$this->assertGreaterThan( 0, $recorded, 'the control: earlier batches were recorded' );
 		$this->assertSame( $recorded, $held, 'the refused batch left no row behind' );
+		$now = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertFalse( $now->is_locked( time() ), 'the job is released' );
+
+		$this->assertSame( TickResult::COMPLETED, $this->tick_until_lost_or_done( $job ), 'the next run takes the table back and finishes' );
+		$now = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertSame( Job::COMPLETED, $now->status, (string) $now->last_error );
+		$this->assertSame( 0, (int) $now->takeovers, 'no takeover' );
+		$this->assertSame( (int) $wpdb->get_var( "SELECT COUNT(*) FROM `{$big}`" ), (int) $wpdb->get_var( 'SELECT COUNT(*) FROM `' . $this->temporary( $big ) . '`' ) );
 	}
 }

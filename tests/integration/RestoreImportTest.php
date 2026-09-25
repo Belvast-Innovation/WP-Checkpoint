@@ -2,8 +2,12 @@
 
 namespace WPCheckpoint\Tests\Integration;
 
+use WPCheckpoint\Archive\IndexLine;
+use WPCheckpoint\Archive\ZipFormat;
 use WPCheckpoint\Database\SqlWriter;
+use WPCheckpoint\Jobs\DatabaseImportStep;
 use WPCheckpoint\Jobs\Job;
+use WPCheckpoint\Jobs\RestorePreflightStep;
 use WPCheckpoint\Jobs\TempTables;
 use WPCheckpoint\Plugin;
 use WPCheckpoint\Tests\Fixtures\Restore\RestoreTestCase;
@@ -53,6 +57,11 @@ final class RestoreImportTest extends RestoreTestCase {
 		foreach ( $this->tables() as $table ) {
 			$this->backed_up[ $table ] = $this->rows_of( $table );
 		}
+	}
+
+	public function tear_down(): void {
+		$this->backed_up = array();
+		parent::tear_down();
 	}
 
 	/**
@@ -227,42 +236,165 @@ final class RestoreImportTest extends RestoreTestCase {
 	}
 
 	/**
-	 * A table without transactions is started over after a statement of its second chunk ran unrecorded;
-	 * a run that dies right after the start-over was recorded, while its position is still on the second
-	 * chunk, is followed by one that goes back to the first chunk all the same and finishes the table row
-	 * for row.
+	 * A table without transactions is started over after a statement of its second chunk ran unrecorded.
+	 * Starting over passes through five states (marked; emptied; position reset; job's position back on the
+	 * first chunk; mark removed); a run killed after any of them is followed by one that finishes the table
+	 * row for row, and the start-over is counted once.
 	 */
-	public function test_a_run_killed_after_starting_a_table_over_is_followed_by_one_that_finishes_it(): void {
-		$base  = $this->backup( array_merge( self::site_tables(), $this->tables() ) );
-		$isam  = $this->p . 'isam';
-		$seen  = array();
-		$type  = 'restore_crash_restart';
+	public function test_a_run_killed_in_any_state_of_starting_a_table_over_is_followed_by_one_that_finishes_it(): void {
+		$base = $this->backup( array_merge( self::site_tables(), $this->tables() ) );
+		$isam = $this->p . 'isam';
+		foreach ( array( 'marked', 'emptied', 'reset', 'rewound', 'restarted' ) as $stop ) {
+			$seen = array();
+			$type = 'restore_crash_' . $stop;
+			$this->register_crashing(
+				$type,
+				static function ( string $point, string $table = '', int $chunk = 0 ) use ( $isam, $stop, &$seen ): void {
+					if ( $table !== $isam || ( 'statement' === $point && 2 !== $chunk ) ) {
+						return;
+					}
+					$seen[ $point ] = ( $seen[ $point ] ?? 0 ) + 1;
+					// The first INSERT of the table's second chunk, run and not recorded; then the start-over it causes.
+					if ( ( 'statement' === $point || $stop === $point ) && 1 === $seen[ $point ] ) {
+						throw new \RuntimeException( 'simulated: the run is killed here (' . $point . ')' );
+					}
+				}
+			);
+			$job = $this->run_restore( Plugin::instance()->jobs()->create( $type, self::$admin_id, array(), array( 'base' => $base ) ) );
+			$this->assertStringContainsString( '(statement)', (string) $job->last_error, $stop );
+			Plugin::instance()->job_actions()->retry( $job->id );
+			$job = $this->run_restore( $job );
+			$this->assertStringContainsString( '(' . $stop . ')', (string) $job->last_error, 'the retry started the table over and was killed after: ' . $stop );
+			Plugin::instance()->job_actions()->retry( $job->id );
+			$job = $this->run_restore( $job );
+			$this->assertSame( Job::COMPLETED, $job->status, $stop . ': ' . (string) $job->last_error );
+			$names = $this->temporary_names( $job );
+			foreach ( $this->tables() as $table ) {
+				$this->assertSame( $this->backed_up[ $table ], $this->rows_of( $names[ $table ] ), $stop . ': ' . $table );
+			}
+			$this->assertSame( array( 1, 0 ), $this->restarts( $job, $isam ), $stop . ': started over once, and no longer marked' );
+			$this->drop_job_tables( $job );
+		}
+	}
+
+	/**
+	 * A table without transactions whose count keeps disagreeing with the ledger is started over at most
+	 * MAX_RESTARTS times; the next run fails it, saying what the count showed and what can cause it.
+	 */
+	public function test_a_table_started_over_the_most_times_fails_the_restore_with_the_reason(): void {
+		$base = $this->backup( array_merge( self::site_tables(), $this->tables() ) );
+		$isam = $this->p . 'isam';
+		$type = 'restore_crash_always';
 		$this->register_crashing(
 			$type,
-			static function ( string $point, string $table = '', int $chunk = 0 ) use ( $isam, &$seen ): void {
-				if ( $table !== $isam || ( 'statement' === $point && 2 !== $chunk ) ) {
-					return;
-				}
-				$seen[ $point ] = ( $seen[ $point ] ?? 0 ) + 1;
-				// The first INSERT of the table's second chunk, run and not recorded; then the start-over it causes,
-				// while the position is still on the second chunk.
-				if ( ( 'statement' === $point && 1 === $seen[ $point ] ) || ( 'restart' === $point && 1 === $seen[ $point ] ) ) {
-					throw new \RuntimeException( 'simulated: the run is killed here (' . $point . ')' );
+			static function ( string $point, string $table = '', int $chunk = 0 ) use ( $isam ): void {
+				if ( 'statement' === $point && $table === $isam && 2 === $chunk ) {
+					throw new \RuntimeException( 'simulated: the run is killed here (statement)' );
 				}
 			}
 		);
 		$job = $this->run_restore( Plugin::instance()->jobs()->create( $type, self::$admin_id, array(), array( 'base' => $base ) ) );
-		$this->assertStringContainsString( '(statement)', (string) $job->last_error );
-		Plugin::instance()->job_actions()->retry( $job->id );
-		$job = $this->run_restore( $job );
-		$this->assertStringContainsString( '(restart)', (string) $job->last_error, 'the retry started the table over and was killed right after' );
-		Plugin::instance()->job_actions()->retry( $job->id );
-		$job = $this->run_restore( $job );
+		for ( $retries = 0; $retries < 10 && false !== strpos( (string) $job->last_error, 'simulated' ); $retries++ ) {
+			$this->assertSame( array( $retries, 0 ), $this->restarts( $job, $isam ), 'each retry started the table over once' );
+			Plugin::instance()->job_actions()->retry( $job->id );
+			$job = $this->run_restore( $job );
+		}
+		$this->assertSame( DatabaseImportStep::MAX_RESTARTS + 1, $retries, 'the retry after the last start-over fails' );
+		$this->assertSame( Job::FAILED, $job->status );
+		$this->assertStringContainsString( 'was imported again from its first chunk ' . DatabaseImportStep::MAX_RESTARTS . ' times, each time because its row count did not match the rows the restore had recorded', (string) $job->last_error );
+		$this->assertStringContainsString( 'a run stopped between a statement and its record, or rows were written outside the import', (string) $job->last_error );
+		$this->assertSame( array( DatabaseImportStep::MAX_RESTARTS, 0 ), $this->restarts( $job, $isam ) );
+	}
+
+	/**
+	 * A table that must be emptied to be started over and that the server does not empty fails the restore
+	 * with the server's reason. (A view in the temporary table's place: counted like a table, never truncated.)
+	 */
+	public function test_a_table_the_database_does_not_empty_fails_the_restore_with_the_servers_reason(): void {
+		global $wpdb;
+		$base = $this->backup( array_merge( self::site_tables(), $this->tables() ) );
+		$isam = $this->p . 'isam';
+		$type = 'restore_crash_view';
+		$view = '';
+		$seen = array();
+		$this->register_crashing(
+			$type,
+			function ( string $point, string $table = '', int $chunk = 0 ) use ( $isam, $type, &$view, &$seen ): void {
+				if ( $table !== $isam || ( 'statement' === $point && 2 !== $chunk ) ) {
+					return;
+				}
+				$seen[ $point ] = ( $seen[ $point ] ?? 0 ) + 1;
+				if ( 'statement' === $point && 1 === $seen[ $point ] ) {
+					throw new \RuntimeException( 'simulated: the run is killed here (statement)' );
+				}
+				if ( 'marked' === $point ) {
+					global $wpdb;
+					$job  = Plugin::instance()->jobs()->find( (int) $wpdb->get_var( $wpdb->prepare( 'SELECT id FROM ' . \WPCheckpoint\Support\Schema::jobs_table() . ' WHERE type = %s', $type ) ) );
+					$view = $this->temporary_names( $job )[ $isam ];
+					$wpdb->query( 'COMMIT' );
+					$wpdb->query( "DROP TABLE `{$view}`" );
+					$wpdb->query( "CREATE VIEW `{$view}` AS SELECT 1 AS `id`" );
+				}
+			}
+		);
+		try {
+			$job = $this->run_restore( Plugin::instance()->jobs()->create( $type, self::$admin_id, array(), array( 'base' => $base ) ) );
+			$this->assertStringContainsString( '(statement)', (string) $job->last_error );
+			Plugin::instance()->job_actions()->retry( $job->id );
+			$job = $this->run_restore( $job );
+			$this->assertNotSame( '', $view, 'the table was replaced' );
+			$this->assertSame( Job::FAILED, $job->status );
+			$this->assertStringContainsString( 'must be emptied to be imported again after an interrupted run, and the database did not empty it (The database refused a statement', (string) $job->last_error );
+		} finally {
+			if ( '' !== $view ) {
+				$wpdb->query( "DROP VIEW IF EXISTS `{$view}`" );
+			}
+		}
+	}
+
+	/**
+	 * A first chunk may hold nothing but the table's definition, its rows beginning in the second (the format
+	 * allows it; this plugin's exporter writes rows into the first chunk). The ledger then stands at the start
+	 * of the rows when the second chunk comes, and that is no interrupted start-over: the table is imported
+	 * row for row, in one pass. With transactions:
+	 */
+	public function test_a_table_with_transactions_whose_rows_begin_in_its_second_chunk_is_imported(): void {
+		$this->assert_imported_with_rows_from_the_second_chunk( $this->p . 'big' );
+	}
+
+	/**
+	 * The same without transactions (the ticks are capped: a start-over taken for this layout loops).
+	 */
+	public function test_a_table_without_transactions_whose_rows_begin_in_its_second_chunk_is_imported(): void {
+		$this->assert_imported_with_rows_from_the_second_chunk( $this->p . 'isam' );
+	}
+
+	private function assert_imported_with_rows_from_the_second_chunk( string $split ): void {
+		$base = $this->backup(
+			array_merge( self::site_tables(), $this->tables() ),
+			function ( string $table, array $chunks ) use ( $split ): array {
+				if ( $split !== $table ) {
+					return $chunks;
+				}
+				// Split the first chunk after its CREATE TABLE: its rows go to a new second chunk, with the preamble.
+				$first = $chunks[0];
+				$rows  = strpos( $first, "\nINSERT INTO " );
+				$drop  = strpos( $first, 'DROP TABLE' );
+				$this->assertNotFalse( $rows, $table );
+				$this->assertNotFalse( $drop, $table );
+				return array_merge( array( substr( $first, 0, $rows + 1 ), substr( $first, 0, $drop ) . substr( $first, $rows + 1 ) ), array_slice( $chunks, 1 ) );
+			}
+		);
+		// Short ticks, so a loop ends at the cap in seconds; a pass that works takes about a thousand.
+		$job = $this->run_restore( $this->start_restore( $base ), true, 3000 );
 		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
 		$names = $this->temporary_names( $job );
 		foreach ( $this->tables() as $table ) {
 			$this->assertSame( $this->backed_up[ $table ], $this->rows_of( $names[ $table ] ), $table );
 		}
+		$this->assertSame( array( 0, 0 ), $this->restarts( $job, $split ), 'never started over' );
+		$log = (string) file_get_contents( $job->storage_path . '/' . $job->log_path );
+		$this->assertStringNotContainsString( 'imported again from its first chunk', $log );
 	}
 
 	/**
@@ -286,6 +418,8 @@ final class RestoreImportTest extends RestoreTestCase {
 	 */
 	public function test_the_heads_of_deflated_chunks_larger_than_a_head_are_read(): void {
 		$base = $this->backup( array_merge( self::site_tables(), $this->tables() ) );
+		$this->assertSame( ZipFormat::METHOD_DEFLATE, $this->entry_method( $base, IndexLine::database_path( $this->p . 'big', 2 ) ), 'a later chunk, deflated' );
+		$this->assertGreaterThan( 4096, (int) $this->entry( $base, IndexLine::database_path( $this->p . 'big', 2 ) )['usize'], 'larger than the head read' );
 		$real = Plugin::instance()->job_types()->get( 'restore' )->steps();
 		$this->register(
 			'restore_small_heads',
@@ -302,6 +436,21 @@ final class RestoreImportTest extends RestoreTestCase {
 		);
 		$job = $this->run_restore( Plugin::instance()->jobs()->create( 'restore_small_heads', self::$admin_id, array(), array( 'base' => $base ) ) );
 		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
+	}
+
+	/**
+	 * A table's start-overs and mark in the job's ledger: [restarts, restarting].
+	 *
+	 * @return array{0: int, 1: int}
+	 */
+	private function restarts( Job $job, string $table ): array {
+		global $wpdb;
+		$plan   = RestorePreflightStep::load_plan( $this->work( Plugin::instance()->jobs()->find( $job->id ) ) );
+		$ledger = TempTables::ledger( $job->storage_token, $job->id, $plan['random'] );
+		$wpdb->query( 'COMMIT' ); // The test's snapshot may predate the ledger.
+		$row = $wpdb->get_row( $wpdb->prepare( "SELECT restarts, restarting FROM `{$ledger}` WHERE n = %d", $plan['plan']->find( $table )['number'] ), ARRAY_N );
+		$this->assertIsArray( $row, 'the ledger has the table' );
+		return array( (int) $row[0], (int) $row[1] );
 	}
 
 	/**

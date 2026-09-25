@@ -8,7 +8,6 @@
 namespace WPCheckpoint\Restore;
 
 use WPCheckpoint\Database\SqlWriter;
-use WPCheckpoint\Jobs\LockLost;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -35,14 +34,27 @@ defined( 'ABSPATH' ) || exit;
  * temporary tables) cannot record anything after a newer run claimed the
  * table, not its CREATE TABLE (created() moves chunk 0 to 1 under its own
  * token only), not a batch (the batch's transaction is rolled back), not a
- * restart. It stops with LockLost.
+ * step of starting over. It stops with ClaimLost, and so does the run that
+ * lost the table in the other order (see ClaimLost).
+ *
+ * What the ledger cannot stop is a statement such a run sends before it
+ * writes here: a DROP, a TRUNCATE, an INSERT into a table without
+ * transactions. The import step confirms the job's lease right before each
+ * claim, DROP and TRUNCATE, which leaves only the time of one statement,
+ * and counts the rows of a table without transactions against the ledger's
+ * at its end.
  *
  * A table without transactions (MyISAM, Aria, MEMORY...) keeps its rows
  * whatever happens after them. Its position moves after each statement and
  * records the rows inserted; a run that finds the table's row count
  * different from the ledger's knows a statement ran without being recorded,
- * empties the table (TRUNCATE, keeping the definition) and imports its rows
- * again from the first chunk (restart()).
+ * and imports the table's rows again from the first chunk. Starting over
+ * takes several writes, so it is marked first (mark_restarting()): the
+ * caller empties the table (TRUNCATE, keeping the definition), reset()
+ * moves the position back, the job's position goes back to the table's
+ * first chunk, and restarted() removes the mark there. A run that reads
+ * the mark does all of it again from the start, whichever step a stopped
+ * run had reached; each of them can be repeated.
  */
 final class Ledger {
 
@@ -78,17 +90,17 @@ final class Ledger {
 		$this->db    = $db;
 		$this->name  = $name;
 		$this->token = $token;
-		$db->run( 'CREATE TABLE IF NOT EXISTS ' . SqlWriter::identifier( $name ) . " (n INT UNSIGNED NOT NULL PRIMARY KEY, chunk INT UNSIGNED NOT NULL, pos BIGINT UNSIGNED NOT NULL, row_count BIGINT UNSIGNED NOT NULL, data_offset BIGINT UNSIGNED NOT NULL, transactional TINYINT NOT NULL, restarts INT UNSIGNED NOT NULL DEFAULT 0, holder VARCHAR(64) NOT NULL DEFAULT '', constraint_names MEDIUMTEXT NULL) ENGINE=InnoDB" );
+		$db->run( 'CREATE TABLE IF NOT EXISTS ' . SqlWriter::identifier( $name ) . " (n INT UNSIGNED NOT NULL PRIMARY KEY, chunk INT UNSIGNED NOT NULL, pos BIGINT UNSIGNED NOT NULL, row_count BIGINT UNSIGNED NOT NULL, data_offset BIGINT UNSIGNED NOT NULL, transactional TINYINT NOT NULL, restarts INT UNSIGNED NOT NULL DEFAULT 0, restarting TINYINT NOT NULL DEFAULT 0, holder VARCHAR(64) NOT NULL DEFAULT '', constraint_names MEDIUMTEXT NULL) ENGINE=InnoDB" );
 	}
 
 	/**
 	 * A table's record, or null before any run claimed it.
 	 *
 	 * @param int $number The table's number.
-	 * @return array{chunk: int, pos: int, rows: int, data_offset: int, transactional: bool, restarts: int, holder: string, constraints: string}|null
+	 * @return array{chunk: int, pos: int, rows: int, data_offset: int, transactional: bool, restarts: int, holder: string, constraints: string, restarting: bool}|null
 	 */
 	public function get( int $number ) {
-		$rows = $this->db->rows( 'SELECT chunk, pos, row_count, data_offset, transactional, restarts, holder, constraint_names FROM ' . SqlWriter::identifier( $this->name ) . ' WHERE n = ?', array( (string) $number ) );
+		$rows = $this->db->rows( 'SELECT chunk, pos, row_count, data_offset, transactional, restarts, holder, constraint_names, restarting FROM ' . SqlWriter::identifier( $this->name ) . ' WHERE n = ?', array( (string) $number ) );
 		if ( array() === $rows ) {
 			return null;
 		}
@@ -101,6 +113,7 @@ final class Ledger {
 			'restarts'      => (int) $rows[0][5],
 			'holder'        => (string) $rows[0][6],
 			'constraints'   => (string) $rows[0][7],
+			'restarting'    => '1' === (string) $rows[0][8],
 		);
 	}
 
@@ -108,8 +121,8 @@ final class Ledger {
 	 * Make this run the table's holder; its record as it is then.
 	 *
 	 * @param int $number The table's number.
-	 * @return array{chunk: int, pos: int, rows: int, data_offset: int, transactional: bool, restarts: int, holder: string, constraints: string}
-	 * @throws LockLost When another run claimed it in the meantime.
+	 * @return array{chunk: int, pos: int, rows: int, data_offset: int, transactional: bool, restarts: int, holder: string, constraints: string, restarting: bool}
+	 * @throws ClaimLost When another run claimed it in the meantime.
 	 */
 	public function claim( int $number ): array {
 		$state = $this->get( $number );
@@ -123,7 +136,7 @@ final class Ledger {
 				if ( 1062 !== $e->getCode() ) {
 					throw $e;
 				}
-				throw new LockLost( 'Another run of this restore claimed the table first.' );
+				throw new ClaimLost( 'Another run of this restore claimed the table first.' );
 			}
 		} elseif ( $state['holder'] !== $this->token ) {
 			$changed = $this->db->run(
@@ -136,12 +149,12 @@ final class Ledger {
 				)
 			);
 			if ( 1 !== $changed ) {
-				throw new LockLost( 'Another run of this restore claimed the table first.' );
+				throw new ClaimLost( 'Another run of this restore claimed the table first.' );
 			}
 		}
 		$claimed = $this->get( $number );
 		if ( null === $claimed || $claimed['holder'] !== $this->token ) {
-			throw new LockLost( 'Another run of this restore claimed the table first.' );
+			throw new ClaimLost( 'Another run of this restore claimed the table first.' );
 		}
 		return $claimed;
 	}
@@ -154,7 +167,7 @@ final class Ledger {
 	 * @param bool   $transactional Whether its engine has transactions.
 	 * @param string $constraints   The names its constraints were given (JSON).
 	 * @return void
-	 * @throws LockLost When this run is no longer the table's holder.
+	 * @throws ClaimLost When this run is no longer the table's holder.
 	 */
 	public function created( int $number, int $offset, bool $transactional, string $constraints ): void {
 		$this->db->rows(
@@ -163,7 +176,7 @@ final class Ledger {
 		);
 		$now = $this->get( $number );
 		if ( null === $now || 1 !== $now['chunk'] || $offset !== $now['pos'] || $now['holder'] !== $this->token ) {
-			throw new LockLost( 'Another run of this restore claimed the table; this one stops.' );
+			throw new ClaimLost( 'Another run of this restore claimed the table; this one stops.' );
 		}
 	}
 
@@ -177,7 +190,7 @@ final class Ledger {
 	 * @param int $to_pos   New offset.
 	 * @param int $rows     Rows inserted since.
 	 * @return void
-	 * @throws LockLost When the position is not the one read before, or this run is no longer the holder.
+	 * @throws ClaimLost When the position is not the one read before, or this run is no longer the holder.
 	 */
 	public function advance( int $number, int $chunk, int $pos, int $to_chunk, int $to_pos, int $rows ): void {
 		$changed = $this->db->run(
@@ -194,32 +207,78 @@ final class Ledger {
 			)
 		);
 		if ( 1 !== $changed ) {
-			throw new LockLost( 'Another run of this restore moved the import on; this one stops.' );
+			throw new ClaimLost( 'Another run of this restore moved the import on; this one stops.' );
 		}
 	}
 
 	/**
-	 * Start a table without transactions over: its rows from the first chunk again.
+	 * Start a table without transactions over, first step: mark it as being
+	 * imported again (and count the time). Nothing is removed yet. Marking a
+	 * table already marked changes nothing, not the count either.
 	 *
 	 * @param int $number The table's number.
-	 * @param int $chunk  Chunk read before.
-	 * @param int $pos    Offset read before.
 	 * @return void
-	 * @throws LockLost When the position is not the one read before, or this run is no longer the holder.
+	 * @throws ClaimLost When this run is no longer the table's holder.
 	 */
-	public function restart( int $number, int $chunk, int $pos ): void {
-		$changed = $this->db->run(
+	public function mark_restarting( int $number ): void {
+		$this->db->run(
 			sprintf(
-				"UPDATE %s SET chunk = 1, pos = data_offset, row_count = 0, restarts = restarts + 1 WHERE n = %d AND chunk = %d AND pos = %d AND holder = '%s'",
+				"UPDATE %s SET restarting = 1, restarts = restarts + 1 WHERE n = %d AND restarting = 0 AND holder = '%s'",
 				SqlWriter::identifier( $this->name ),
 				$number,
-				$chunk,
-				$pos,
 				self::token_text( $this->token )
 			)
 		);
-		if ( 1 !== $changed ) {
-			throw new LockLost( 'Another run of this restore moved the import on; this one stops.' );
+		$now = $this->get( $number );
+		if ( null === $now || ! $now['restarting'] || $now['holder'] !== $this->token ) {
+			throw new ClaimLost( 'Another run of this restore claimed the table; this one stops.' );
+		}
+	}
+
+	/**
+	 * A marked table, emptied: its position back at the start of its rows in
+	 * the first chunk, no rows inserted. The mark stays. The same again
+	 * changes nothing.
+	 *
+	 * @param int $number The table's number.
+	 * @return void
+	 * @throws ClaimLost When the table is not marked, or this run is no longer its holder.
+	 */
+	public function reset( int $number ): void {
+		$this->db->run(
+			sprintf(
+				"UPDATE %s SET chunk = 1, pos = data_offset, row_count = 0 WHERE n = %d AND restarting = 1 AND holder = '%s'",
+				SqlWriter::identifier( $this->name ),
+				$number,
+				self::token_text( $this->token )
+			)
+		);
+		$now = $this->get( $number );
+		if ( null === $now || ! $now['restarting'] || 1 !== $now['chunk'] || $now['data_offset'] !== $now['pos'] || 0 !== $now['rows'] || $now['holder'] !== $this->token ) {
+			throw new ClaimLost( 'Another run of this restore claimed the table; this one stops.' );
+		}
+	}
+
+	/**
+	 * The last step of starting over: the job's position is on the table's
+	 * first chunk again (the caller's chunk is the evidence), so the mark goes.
+	 *
+	 * @param int $number The table's number.
+	 * @return void
+	 * @throws ClaimLost When the table is not reset, or this run is no longer its holder.
+	 */
+	public function restarted( int $number ): void {
+		$this->db->run(
+			sprintf(
+				"UPDATE %s SET restarting = 0 WHERE n = %d AND restarting = 1 AND chunk = 1 AND pos = data_offset AND row_count = 0 AND holder = '%s'",
+				SqlWriter::identifier( $this->name ),
+				$number,
+				self::token_text( $this->token )
+			)
+		);
+		$now = $this->get( $number );
+		if ( null === $now || $now['restarting'] || $now['holder'] !== $this->token ) {
+			throw new ClaimLost( 'Another run of this restore claimed the table; this one stops.' );
 		}
 	}
 

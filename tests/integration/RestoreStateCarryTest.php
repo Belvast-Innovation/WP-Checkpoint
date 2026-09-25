@@ -4,12 +4,12 @@ namespace WPCheckpoint\Tests\Integration;
 
 use WPCheckpoint\Database\SqlWriter;
 use WPCheckpoint\Jobs\Job;
+use WPCheckpoint\Restore\ClaimLost;
 use WPCheckpoint\Restore\ImportSession;
 use WPCheckpoint\Restore\Ledger;
 use WPCheckpoint\Restore\PluginList;
 use WPCheckpoint\Restore\Refused;
 use WPCheckpoint\Restore\StateCarry;
-use WPCheckpoint\Jobs\LockLost;
 use WPCheckpoint\Standalone\Credentials;
 use WPCheckpoint\Standalone\Connection;
 use WPCheckpoint\Tests\Fixtures\Restore\RestoreTestCase;
@@ -220,7 +220,8 @@ final class RestoreStateCarryTest extends RestoreTestCase {
 
 	/**
 	 * A run claims a table before it works on it; once a newer run has claimed it, the older run can record
-	 * nothing: not its CREATE TABLE, not a batch (whose rows roll back with it), not a restart.
+	 * nothing: not its CREATE TABLE, not a batch (whose rows roll back with it), not a step of starting
+	 * the table over.
 	 */
 	public function test_a_run_that_lost_its_claim_can_record_nothing_and_its_rows_roll_back(): void {
 		global $wpdb;
@@ -243,7 +244,7 @@ final class RestoreStateCarryTest extends RestoreTestCase {
 			try {
 				$old->advance( 0, 1, 100, 1, 150, 1 );
 				$this->fail( 'the old run stops' );
-			} catch ( LockLost $e ) {
+			} catch ( ClaimLost $e ) {
 				$this->db->rollback();
 			}
 			$this->assertSame( '0', $this->db->rows( 'SELECT COUNT(*) FROM `' . $wpdb->base_prefix . 'wpcr_rows`' )[0][0], 'its rows are gone with the batch' );
@@ -256,15 +257,27 @@ final class RestoreStateCarryTest extends RestoreTestCase {
 			try {
 				$old->created( 1, 100, true, '[]' );
 				$this->fail( 'the old run stops' );
-			} catch ( LockLost $e ) {
+			} catch ( ClaimLost $e ) {
 				$this->assertSame( 0, $new->get( 1 )['chunk'], 'still not created' );
 			}
-			try {
-				$old->restart( 0, 1, 200 );
-				$this->fail( 'the old run stops' );
-			} catch ( LockLost $e ) {
-				$this->assertSame( 200, $new->get( 0 )['pos'] );
+			foreach ( array( 'mark_restarting', 'reset', 'restarted' ) as $step ) {
+				try {
+					$old->$step( 0 );
+					$this->fail( 'the old run stops: ' . $step );
+				} catch ( ClaimLost $e ) {
+					$this->assertSame( array( 200, false, 0 ), array( $new->get( 0 )['pos'], $new->get( 0 )['restarting'], $new->get( 0 )['restarts'] ), $step );
+				}
 			}
+
+			// Starting over, by the holder: each step can be repeated, and marking again counts nothing.
+			$new->mark_restarting( 0 );
+			$new->mark_restarting( 0 );
+			$this->assertSame( array( true, 1, 200 ), array( $new->get( 0 )['restarting'], $new->get( 0 )['restarts'], $new->get( 0 )['pos'] ), 'marked once, nothing moved yet' );
+			$new->reset( 0 );
+			$new->reset( 0 );
+			$this->assertSame( array( true, 1, 100, 0 ), array( $new->get( 0 )['restarting'], $new->get( 0 )['chunk'], $new->get( 0 )['pos'], $new->get( 0 )['rows'] ), 'back at the start of its rows, still marked' );
+			$new->restarted( 0 );
+			$this->assertSame( array( false, 1 ), array( $new->get( 0 )['restarting'], $new->get( 0 )['restarts'] ) );
 		} finally {
 			$other->close();
 		}
