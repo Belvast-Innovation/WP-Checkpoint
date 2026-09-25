@@ -2,6 +2,7 @@
 
 namespace WPCheckpoint\Tests\Fixtures\Restore;
 
+use WPCheckpoint\Archive\ZipReader;
 use WPCheckpoint\Database\TableExporter;
 use WPCheckpoint\Database\WpdbConnection;
 use WPCheckpoint\Jobs\Budget;
@@ -45,6 +46,8 @@ abstract class RestoreTestCase extends JobTestCase {
 		foreach ( $this->builders as $builder ) {
 			$builder->cleanup();
 		}
+		// PHPUnit keeps every test object to the end of the suite: what they hold adds up in one process.
+		$this->builders = array();
 		parent::tear_down();
 	}
 
@@ -90,13 +93,16 @@ abstract class RestoreTestCase extends JobTestCase {
 	 * @param string[]      $tables  Tables in order.
 	 * @param callable|null $edit    function( string $table, string[] $chunks ): string[].
 	 * @param callable|null $site    function( array $site ): array, the manifest's site.
+	 * @param array         $options ArchiveBuilder options, and rows: table => row count where edited chunks change it.
 	 * @return string The backup's base name.
 	 */
-	protected function backup( array $tables, $edit = null, $site = null ): string {
+	protected function backup( array $tables, $edit = null, $site = null, array $options = array() ): string {
 		global $wpdb;
 		$rows    = array();
+		$counts  = $options['rows'] ?? array();
+		unset( $options['rows'] );
 		$builder = new ArchiveBuilder(
-			array(
+			$options + array(
 				'manifest' => static function ( array $manifest ) use ( &$rows, $site, $wpdb ): array {
 					foreach ( $manifest['database']['tables'] as $i => $table ) {
 						$manifest['database']['tables'][ $i ]['rows'] = $rows[ $table['name'] ];
@@ -116,7 +122,7 @@ abstract class RestoreTestCase extends JobTestCase {
 			if ( null !== $edit ) {
 				$chunks = $edit( $table, $chunks );
 			}
-			$rows[ $table ] = $count;
+			$rows[ $table ] = $counts[ $table ] ?? $count;
 			$builder->table( $table, $chunks );
 		}
 		$builder->build();
@@ -125,6 +131,31 @@ abstract class RestoreTestCase extends JobTestCase {
 			copy( $file, $backups . '/' . basename( $file ) );
 		}
 		return ArchiveBuilder::BASE;
+	}
+
+	/**
+	 * The zip method (ZipFormat::METHOD_*) of an entry of a backup in the backups directory.
+	 */
+	protected function entry_method( string $base, string $entry ): int {
+		return (int) $this->entry( $base, $entry )['method'];
+	}
+
+	/**
+	 * An entry of a backup in the backups directory, as its central directory has it.
+	 *
+	 * @return array<string, mixed>
+	 */
+	protected function entry( string $base, string $entry ): array {
+		foreach ( (array) glob( Plugin::instance()->directories()->backups() . '/' . $base . '*' ) as $volume ) {
+			if ( '.manifest.json' === substr( (string) $volume, -14 ) ) {
+				continue;
+			}
+			$found = ZipReader::open( (string) $volume )->find( $entry );
+			if ( null !== $found ) {
+				return $found;
+			}
+		}
+		$this->fail( 'no entry ' . $entry );
 	}
 
 	/**

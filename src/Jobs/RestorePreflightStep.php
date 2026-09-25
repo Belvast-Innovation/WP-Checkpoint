@@ -84,11 +84,6 @@ final class RestorePreflightStep implements Step {
 	const PAGE = 1000;
 
 	/**
-	 * Largest chunk size a restore takes: what this plugin writes (a chunk is extracted and hashed in one unit).
-	 */
-	const MAX_CHUNK_BYTES = 16777216;
-
-	/**
 	 * Returns the backups directory: function(): string.
 	 *
 	 * @var callable
@@ -166,9 +161,9 @@ final class RestorePreflightStep implements Step {
 		$manifest = self::manifest( $work );
 		$site     = $manifest->site();
 		$contents = $manifest->to_array()['contents'];
-		if ( $manifest->chunk_bytes() > self::MAX_CHUNK_BYTES ) {
-			throw new Refused( sprintf( 'This backup\'s chunks are up to %1$d MB; the restore extracts and checks a chunk in one step and takes chunks of at most %2$d MB.', (int) ( $manifest->chunk_bytes() / 1048576 ), (int) ( self::MAX_CHUNK_BYTES / 1048576 ) ) );
-		}
+		// A chunk is at most chunk_bytes long, and chunk_bytes at most ArchiveVerifier::MAX_CONTENT_CHUNK: the check
+		// before this step refuses a backup with larger hash chunks as unsupported. So each chunk is extracted and
+		// hashed in one unit.
 		if ( empty( $contents['database'] ) ) {
 			throw new Refused( 'This backup holds no database; restoring files alone is not available yet.' );
 		}
@@ -321,9 +316,14 @@ final class RestorePreflightStep implements Step {
 		$known  = $first ? null : self::definition( $definitions, $table['number'] );
 		$reader = $chunk['reader'];
 		$entry  = $chunk['entry'];
+		$stored = ZipFormat::METHOD_STORE === (int) $entry['method'];
+		if ( ! $stored && max( (int) $entry['usize'], (int) $entry['csize'] ) > ZipReader::MAX_INFLATE_BYTES ) {
+			// Refused here, before any table is created, rather than when the import comes to the chunk.
+			throw new Refused( sprintf( 'The database chunk %1$s is stored compressed and is %2$d bytes large; the restore decompresses a compressed chunk in one piece and takes at most %3$d bytes (%4$d MiB).', $line['p'], max( (int) $entry['usize'], (int) $entry['csize'] ), ZipReader::MAX_INFLATE_BYTES, intdiv( ZipReader::MAX_INFLATE_BYTES, 1048576 ) ) );
+		}
 		try {
-			// A deflated entry has no addressable ranges and is read whole (the packer deflates only entries of at most 4 MiB).
-			$length = ZipFormat::METHOD_STORE === (int) $entry['method'] ? ( $first ? self::FIRST_BYTES : $this->head_bytes ) : (int) $entry['usize'];
+			// A deflated entry has no addressable ranges and is read whole (at most ZipReader::MAX_INFLATE_BYTES, checked above).
+			$length = $stored ? ( $first ? self::FIRST_BYTES : $this->head_bytes ) : (int) $entry['usize'];
 			$piece  = $reader->extract_piece( $entry, $heads, 0, $length, 0 );
 		} catch ( EnvironmentFailure $e ) {
 			throw $e;

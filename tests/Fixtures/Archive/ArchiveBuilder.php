@@ -81,7 +81,7 @@ final class ArchiveBuilder {
 	/**
 	 * Constructor.
 	 *
-	 * @param array<string, mixed> $options files_first (bool), volume_bytes (int), database_lines (callable), files_lines (callable), manifest (callable), deflate_max_bytes (int).
+	 * @param array<string, mixed> $options files_first (bool), volume_bytes (int), database_lines (callable), files_lines (callable), manifest (callable), deflate_max_bytes (int), chunk_bytes (int, the hash chunk size; CHUNK_BYTES by default).
 	 */
 	public function __construct( array $options = array() ) {
 		$this->root    = sys_get_temp_dir() . '/wpcheckpoint-verify-' . bin2hex( random_bytes( 4 ) );
@@ -219,7 +219,7 @@ final class ArchiveBuilder {
 				'm' => self::MTIME,
 			);
 			if ( $hashed ) {
-				$hash      = ChunkHasher::content_hash( $path, self::CHUNK_BYTES );
+				$hash      = ChunkHasher::content_hash( $path, $this->chunk_bytes() );
 				$line['h'] = $hash['sha256'];
 				if ( isset( $hash['chunks'] ) ) {
 					$line['hc'] = $hash['chunks'];
@@ -245,7 +245,7 @@ final class ArchiveBuilder {
 
 		$options = array(
 			'volume_bytes'       => $this->options['volume_bytes'] ?? self::VOLUME_BYTES,
-			'volume_chunk_bytes' => self::CHUNK_BYTES,
+			'volume_chunk_bytes' => $this->chunk_bytes(),
 			'deflate_max_bytes'  => $this->options['deflate_max_bytes'] ?? self::DEFLATE_MAX,
 			'disk_free'          => static function (): int {
 				return PHP_INT_MAX;
@@ -271,8 +271,8 @@ final class ArchiveBuilder {
 		}
 		$manifest = array(
 			'tables'         => $tables,
-			'database_index' => self::content_entry( Manifest::DATABASE_INDEX, $db_index ),
-			'files_index'    => self::content_entry( Manifest::FILES_INDEX, $files_index ),
+			'database_index' => $this->content_entry( Manifest::DATABASE_INDEX, $db_index ),
+			'files_index'    => $this->content_entry( Manifest::FILES_INDEX, $files_index ),
 			'files_count'    => $files_count,
 			'files_bytes'    => $files_bytes,
 		);
@@ -299,6 +299,15 @@ final class ArchiveBuilder {
 	}
 
 	/**
+	 * The hash chunk size (and the volumes' container block size).
+	 *
+	 * @return int
+	 */
+	private function chunk_bytes(): int {
+		return (int) ( $this->options['chunk_bytes'] ?? self::CHUNK_BYTES );
+	}
+
+	/**
 	 * Lines to JSONL.
 	 *
 	 * @param array<int, array<string, mixed>> $lines Lines.
@@ -319,8 +328,8 @@ final class ArchiveBuilder {
 	 * @param string $path File.
 	 * @return array<string, mixed>
 	 */
-	private static function content_entry( string $name, string $path ): array {
-		$hash  = ChunkHasher::content_hash( $path, self::CHUNK_BYTES );
+	private function content_entry( string $name, string $path ): array {
+		$hash  = ChunkHasher::content_hash( $path, $this->chunk_bytes() );
 		$entry = array(
 			'path'  => $name,
 			'bytes' => filesize( $path ),
@@ -342,8 +351,8 @@ final class ArchiveBuilder {
 	 */
 	private function manifest_json( array $summary, array $volumes, bool $embedded ): string {
 		$base                                  = json_decode( (string) file_get_contents( __DIR__ . '/../Manifest/valid/base.json' ), true );
-		$base['hashing']['chunk_bytes']        = self::CHUNK_BYTES;
-		$base['hashing']['volume_chunk_bytes'] = self::CHUNK_BYTES;
+		$base['hashing']['chunk_bytes']        = $this->chunk_bytes();
+		$base['hashing']['volume_chunk_bytes'] = $this->chunk_bytes();
 		$base['database']                      = array(
 			'index'  => $summary['database_index'],
 			'tables' => $summary['tables'],
@@ -411,6 +420,8 @@ final class ArchiveBuilder {
 	 */
 	public function cleanup(): void {
 		self::rm( $this->root );
+		$this->tables = array();
+		$this->files  = array();
 	}
 
 	/**

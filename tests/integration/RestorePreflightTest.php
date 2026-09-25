@@ -2,7 +2,13 @@
 
 namespace WPCheckpoint\Tests\Integration;
 
+use WPCheckpoint\Archive\ArchiveVerifier;
+use WPCheckpoint\Archive\IndexLine;
+use WPCheckpoint\Archive\ZipFormat;
+use WPCheckpoint\Archive\ZipReader;
+use WPCheckpoint\Database\SqlWriter;
 use WPCheckpoint\Jobs\Job;
+use WPCheckpoint\Jobs\RestorePreflightStep;
 use WPCheckpoint\Jobs\TempTables;
 use WPCheckpoint\Tests\Fixtures\Restore\RestoreTestCase;
 
@@ -141,5 +147,92 @@ final class RestorePreflightTest extends RestoreTestCase {
 		$this->assertSame( Job::FAILED, $job->status );
 		$this->assertStringContainsString( is_multisite() ? 'of a single site and this site is a multisite network' : 'of a multisite network and this site is a single site', (string) $job->last_error );
 		$this->assertSame( array(), $this->job_tables( $job ) );
+	}
+
+	/**
+	 * The largest chunks a restore takes are restored within the step budget: a stored chunk of
+	 * ArchiveVerifier::MAX_CONTENT_CHUNK (its head read in a range) and a compressed one of
+	 * ZipReader::MAX_INFLATE_BYTES (read whole). One byte more is refused before anything is created: a
+	 * compressed chunk by the preflight, with its size; a larger chunk size by the check before it.
+	 */
+	public function test_chunks_of_the_largest_sizes_are_restored_within_the_budget_and_larger_ones_are_refused(): void {
+		global $wpdb;
+		$wide = $this->p . 'wide';
+		$this->create( $wide, '(`id` int NOT NULL, `v` varchar(1000) NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4' );
+		$wpdb->query( "INSERT INTO `{$wide}` VALUES (1, 'a')" );
+		$max = ArchiveVerifier::MAX_CONTENT_CHUNK;
+		foreach ( array(
+			'stored'     => array( $max, 1048576, ZipFormat::METHOD_STORE ),
+			'compressed' => array( ZipReader::MAX_INFLATE_BYTES, 2 * $max, ZipFormat::METHOD_DEFLATE ),
+		) as $label => list( $bytes, $deflate_max, $method ) ) {
+			list( $base, $rows ) = $this->wide_backup( $wide, $bytes, $deflate_max );
+			$this->assertSame( $method, $this->entry_method( $base, IndexLine::database_path( $wide, 2 ) ), $label );
+			if ( function_exists( 'memory_reset_peak_usage' ) ) {
+				memory_reset_peak_usage();
+				$before = memory_get_usage();
+			} else {
+				$before = memory_get_peak_usage();
+			}
+			$job = $this->run_restore( $this->start_restore( $base ) );
+			$this->assertSame( Job::COMPLETED, $job->status, $label . ': ' . (string) $job->last_error );
+			$this->assertLessThan( 32 * 1048576, memory_get_peak_usage() - $before, $label . ': within the 32 MB step budget' );
+			$names = array_column( RestorePreflightStep::load_plan( $this->work( $job ) )['plan']->tables(), 'temporary', 'table' );
+			$this->assertSame( (string) $rows, (string) $wpdb->get_var( "SELECT COUNT(*) FROM `{$names[ $wide ]}`" ), $label );
+		}
+
+		list( $base ) = $this->wide_backup( $wide, ZipReader::MAX_INFLATE_BYTES + 1, 2 * $max );
+		$this->assertSame( ZipFormat::METHOD_DEFLATE, $this->entry_method( $base, IndexLine::database_path( $wide, 2 ) ) );
+		$job = $this->run_restore( $this->start_restore( $base ) );
+		$this->assertSame( Job::FAILED, $job->status );
+		$this->assertStringContainsString( 'The database chunk ' . IndexLine::database_path( $wide, 2 ) . ' is stored compressed and is 8388609 bytes large; the restore decompresses a compressed chunk in one piece and takes at most 8388608 bytes (8 MiB).', (string) $job->last_error );
+		$this->assertSame( array(), $this->job_tables( $job ), 'nothing was created' );
+
+		$base = $this->backup( self::site_tables(), null, null, array( 'chunk_bytes' => $max + 1 ) );
+		$job  = $this->run_restore( $this->start_restore( $base ) );
+		$this->assertSame( Job::FAILED, $job->status );
+		$this->assertStringContainsString( 'This backup cannot be restored', (string) $job->last_error );
+		$this->assertStringContainsString( 'The manifest declares hash chunks larger than this verifier checks in one step (content 16777217 bytes', (string) file_get_contents( $job->storage_path . '/' . $job->log_path ), 'the reason, in the job\'s log' );
+		$this->assertSame( array(), $this->job_tables( $job ), 'nothing was created' );
+	}
+
+	/**
+	 * A backup of the site's tables and $wide, whose second chunk is exactly $bytes long: the first chunk's
+	 * header and preamble, INSERTs of about 1 KB rows, a comment to fill up.
+	 *
+	 * @return array{0: string, 1: int} The backup's base name and the table's row count.
+	 */
+	private function wide_backup( string $wide, int $bytes, int $deflate_max ): array {
+		$rows   = 1;
+		$base   = $this->backup(
+			array_merge( self::site_tables(), array( $wide ) ),
+			static function ( string $table, array $chunks ) use ( $wide, $bytes, &$rows ): array {
+				if ( $wide !== $table ) {
+					return $chunks;
+				}
+				$text = substr( $chunks[0], 0, (int) strpos( $chunks[0], 'DROP TABLE' ) );
+				$head = SqlWriter::insert_head( $wide, array( 'id', 'v' ) );
+				$row  = "'" . str_repeat( 'b', 990 ) . "')";
+				foreach ( array( 1000, 1 ) as $per ) {
+					$size = strlen( $head ) + $per * ( strlen( $row ) + 10 ) + 2;
+					while ( strlen( $text ) + $size + 2048 <= $bytes ) {
+						$values = array();
+						for ( $i = 0; $i < $per; $i++ ) {
+							$values[] = '(' . ( ++$rows ) . ',' . $row;
+						}
+						$text .= $head . implode( ',', $values ) . ";\n";
+					}
+				}
+				$text .= '-- ' . str_repeat( 'p', $bytes - strlen( $text ) - 4 ) . "\n";
+				return array( $chunks[0], $text );
+			},
+			null,
+			array(
+				'chunk_bytes'       => ArchiveVerifier::MAX_CONTENT_CHUNK,
+				'volume_bytes'      => 4 * ArchiveVerifier::MAX_CONTENT_CHUNK,
+				'deflate_max_bytes' => $deflate_max,
+				'rows'              => array( $wide => &$rows ),
+			)
+		);
+		return array( $base, $rows );
 	}
 }
