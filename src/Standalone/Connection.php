@@ -46,6 +46,11 @@ final class Connection {
 	const READ_TIMEOUT = 20;
 
 	/**
+	 * MYSQLI_CLIENT_MULTI_STATEMENTS (65536), never passed on.
+	 */
+	const MULTI_STATEMENTS = 65536;
+
+	/**
 	 * Connection.
 	 *
 	 * @var \mysqli
@@ -79,6 +84,24 @@ final class Connection {
 	 * @throws Failure When the database cannot be used.
 	 */
 	public static function open( Credentials $credentials, int $timeout = self::CONNECT_TIMEOUT ): self {
+		return new self( self::connect( $credentials, $timeout ), $credentials->get( 'prefix' ) );
+	}
+
+	/**
+	 * A mysqli connection made as open() makes it, for callers that run
+	 * their own statements (the restore's import). Such callers rely on one
+	 * call running one statement at most: they only use mysqli_query(), and
+	 * PHP's mysqli_real_connect() itself drops MYSQLI_CLIENT_MULTI_STATEMENTS
+	 * from the flags (several statements per call only through
+	 * mysqli_multi_query()). The flag is removed from MYSQL_CLIENT_FLAGS here
+	 * as well, so the rule does not rest on that alone.
+	 *
+	 * @param Credentials $credentials Settings.
+	 * @param int         $timeout     Seconds a connection attempt may take.
+	 * @return \mysqli
+	 * @throws Failure When the database cannot be used.
+	 */
+	public static function connect( Credentials $credentials, int $timeout = self::CONNECT_TIMEOUT ): \mysqli {
 		if ( ! class_exists( 'mysqli' ) || ! function_exists( 'mysqli_init' ) ) {
 			throw new Failure( Failure::NO_MYSQLI );
 		}
@@ -90,8 +113,9 @@ final class Connection {
 		if ( $is_ipv6 && extension_loaded( 'mysqlnd' ) ) {
 			$host = '[' . $host . ']';
 		}
+		$flags = $credentials->flags() & ~self::MULTI_STATEMENTS;
 		return self::quietly(
-			static function () use ( $credentials, $host, $port, $socket, $timeout ): self {
+			static function () use ( $credentials, $host, $port, $socket, $timeout, $flags ): \mysqli {
 				$mysqli = mysqli_init();
 				if ( ! $mysqli instanceof \mysqli ) {
 					throw new Failure( Failure::NO_MYSQLI );
@@ -100,7 +124,7 @@ final class Connection {
 				if ( defined( 'MYSQLI_OPT_READ_TIMEOUT' ) ) {
 					mysqli_options( $mysqli, MYSQLI_OPT_READ_TIMEOUT, self::READ_TIMEOUT );
 				}
-				if ( ! mysqli_real_connect( $mysqli, $host, $credentials->get( 'user' ), $credentials->get( 'password' ), '', $port, $socket, $credentials->flags() ) ) {
+				if ( ! mysqli_real_connect( $mysqli, $host, $credentials->get( 'user' ), $credentials->get( 'password' ), '', $port, $socket, $flags ) ) {
 					throw self::failure( mysqli_connect_errno() );
 				}
 				try {
@@ -112,7 +136,7 @@ final class Connection {
 					mysqli_close( $mysqli );
 					throw $e;
 				}
-				return new self( $mysqli, $credentials->get( 'prefix' ) );
+				return $mysqli;
 			}
 		);
 	}

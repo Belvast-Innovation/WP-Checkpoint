@@ -26,7 +26,7 @@ namespace WPCheckpoint\Archive;
  * recorded ends the run as "changed" rather than damaged (see
  * changed()). The manifest is trusted for nothing beyond what it
  * declares: every entry is still bounded by the reader's own limits, and
- * the unit sizes are the verifier's own (MAX_CONTENT_CHUNK,
+ * the unit sizes are the verifier's own (Limits::CONTENT_CHUNK_BYTES,
  * MAX_CONTAINER_CHUNK, EXTRACT_PIECE, LINES_PER_UNIT), never the
  * manifest's. The cursor, on the other hand, is trusted: it lives where
  * only the job engine writes, and a forged one (an entry_block pointing
@@ -51,9 +51,8 @@ final class ArchiveVerifier {
 
 	const LINES_PER_UNIT   = 5000;
 	const ENTRIES_PER_UNIT = 1000;
-	// The verifier's own bounds on one unit. A manifest may declare larger hash chunks, but one SHA-256 over a
-	// chunk cannot be split across ticks, so such archives are reported as unsupported instead.
-	const MAX_CONTENT_CHUNK   = 16777216;
+	// The verifier's own bounds on one unit. A manifest may declare larger hash chunks than Limits::CONTENT_CHUNK_BYTES,
+	// but one SHA-256 over a chunk cannot be split across ticks, so such archives are reported as unsupported instead.
 	const MAX_CONTAINER_CHUNK = 268435456;
 	const EXTRACT_PIECE       = 16777216;
 	const MAX_STORED_FINDINGS = 20;
@@ -389,11 +388,11 @@ final class ArchiveVerifier {
 		foreach ( $manifest->tables() as $table ) {
 			$chunks += $table['chunks'];
 		}
-		if ( $manifest->chunk_bytes() > self::MAX_CONTENT_CHUNK || $manifest->volume_chunk_bytes() > self::MAX_CONTAINER_CHUNK ) {
+		if ( $manifest->chunk_bytes() > Limits::CONTENT_CHUNK_BYTES || $manifest->volume_chunk_bytes() > self::MAX_CONTAINER_CHUNK ) {
 			// One SHA-256 over a chunk cannot be split across ticks (the hash state is not serialisable on the
 			// PHP floor and the cursor holds no hash state by design), so a chunk the unit bound cannot cover is
 			// not checkable here. Not damage: another reader with a bigger budget could verify it.
-			$this->add( new Finding( self::PHASE_MANIFEST, Finding::UNSUPPORTED, sprintf( 'The manifest declares hash chunks larger than this verifier checks in one step (content %d bytes, container %d bytes; at most %d and %d are supported).', $manifest->chunk_bytes(), $manifest->volume_chunk_bytes(), self::MAX_CONTENT_CHUNK, self::MAX_CONTAINER_CHUNK ) ) );
+			$this->add( new Finding( self::PHASE_MANIFEST, Finding::UNSUPPORTED, sprintf( 'The manifest declares hash chunks larger than this verifier checks in one step (content %d bytes, container %d bytes; at most %d and %d are supported).', $manifest->chunk_bytes(), $manifest->volume_chunk_bytes(), Limits::CONTENT_CHUNK_BYTES, self::MAX_CONTAINER_CHUNK ) ) );
 			$this->stop( self::PHASE_MANIFEST );
 			return;
 		}
@@ -739,6 +738,22 @@ final class ArchiveVerifier {
 						self::PHASE_INDEXES,
 						Finding::CORRUPT,
 						'The sidecar index size differs from the manifest.',
+						array(
+							'volume' => $last['ordinal'],
+							'entry'  => $spec['path'],
+						)
+					)
+				);
+				$this->stop( self::PHASE_INDEXES );
+				return;
+			}
+			if ( ZipFormat::METHOD_STORE !== (int) $entry['method'] && max( (int) $entry['usize'], (int) $entry['csize'] ) > Limits::INFLATE_BYTES ) {
+				// Known from the central directory: not damage, a size this plugin does not read (as for content entries).
+				$this->add(
+					new Finding(
+						self::PHASE_INDEXES,
+						Finding::UNSUPPORTED,
+						sprintf( 'The sidecar index is stored compressed and is %1$d bytes large; this plugin decompresses a compressed entry in one piece and reads at most %2$d bytes (%3$d MiB).', max( (int) $entry['usize'], (int) $entry['csize'] ), Limits::INFLATE_BYTES, intdiv( Limits::INFLATE_BYTES, 1048576 ) ),
 						array(
 							'volume' => $last['ordinal'],
 							'entry'  => $spec['path'],
@@ -1377,9 +1392,9 @@ final class ArchiveVerifier {
 						$this->state['entry'] = $next;
 						return $entries < self::ENTRIES_PER_UNIT;
 					}
-					// The unit bound is the verifier's: an entry that would push it past MAX_CONTENT_CHUNK waits
+					// The unit bound is the verifier's: an entry that would push it past Limits::CONTENT_CHUNK_BYTES waits
 					// for the next unit (a large stored entry is then taken one chunk at a time).
-					if ( $bytes > 0 && $bytes + (int) min( (int) $entry['usize'], self::MAX_CONTENT_CHUNK ) > self::MAX_CONTENT_CHUNK ) {
+					if ( $bytes > 0 && $bytes + (int) min( (int) $entry['usize'], Limits::CONTENT_CHUNK_BYTES ) > Limits::CONTENT_CHUNK_BYTES ) {
 						return false;
 					}
 					$done = $this->verify_entry( $reader, $entry, $volume['ordinal'], $bytes );
@@ -1387,7 +1402,7 @@ final class ArchiveVerifier {
 						$this->state['entry']       = $next;
 						$this->state['entry_block'] = 0;
 					}
-					return $done && ! $this->finished() && $bytes < self::MAX_CONTENT_CHUNK && $entries < self::ENTRIES_PER_UNIT;
+					return $done && ! $this->finished() && $bytes < Limits::CONTENT_CHUNK_BYTES && $entries < self::ENTRIES_PER_UNIT;
 				},
 				(int) $this->state['entry']['index'],
 				(int) $this->state['entry']['cd_offset']
@@ -1483,6 +1498,12 @@ final class ArchiveVerifier {
 		}
 		if ( $usize !== $line['b'] ) {
 			$this->add( new Finding( self::PHASE_CONTENTS, Finding::CORRUPT, 'The entry size differs from the index.', $where ) );
+			$this->consume_line( $peeked );
+			return true;
+		}
+		if ( ZipFormat::METHOD_STORE !== (int) $entry['method'] && max( $usize, (int) $entry['csize'] ) > Limits::INFLATE_BYTES ) {
+			// Known from the central directory at any depth: not damage, a size this plugin does not read.
+			$this->add( new Finding( self::PHASE_CONTENTS, Finding::UNSUPPORTED, sprintf( 'The entry is stored compressed and is %1$d bytes large; this plugin decompresses a compressed entry in one piece and reads at most %2$d bytes (%3$d MiB).', max( $usize, (int) $entry['csize'] ), Limits::INFLATE_BYTES, intdiv( Limits::INFLATE_BYTES, 1048576 ) ), $where ) );
 			$this->consume_line( $peeked );
 			return true;
 		}

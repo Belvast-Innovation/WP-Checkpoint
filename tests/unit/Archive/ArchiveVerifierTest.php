@@ -4,8 +4,11 @@ namespace WPCheckpoint\Tests\Unit\Archive;
 
 use WPCheckpoint\Archive\ArchiveVerifier;
 use WPCheckpoint\Archive\Finding;
+use WPCheckpoint\Archive\Limits;
 use WPCheckpoint\Archive\Manifest;
 use WPCheckpoint\Archive\VerificationResult;
+use WPCheckpoint\Archive\ZipFormat;
+use WPCheckpoint\Archive\ZipReader;
 use WPCheckpoint\Cli\VerifyCommand;
 use WPCheckpoint\Tests\Fixtures\Archive\ArchiveBuilder;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
@@ -668,11 +671,94 @@ final class ArchiveVerifierTest extends TestCase {
 		$this->assertNotNull( self::find( $result, array( 'kind' => Finding::CHANGED, 'volume' => 2 ) ) );
 	}
 
+	/**
+	 * A compressed entry larger than Limits::INFLATE_BYTES (another tool may write one; this plugin's export does
+	 * not) is unsupported, not damage, at either depth: its sizes are in the central directory. One of exactly
+	 * the limit passes.
+	 */
+	public function test_a_compressed_entry_larger_than_the_inflate_limit_is_unsupported_not_damage_at_both_depths(): void {
+		foreach ( array( Limits::INFLATE_BYTES => true, Limits::INFLATE_BYTES + 1 => false ) as $bytes => $passes ) {
+			$builder          = ( new ArchiveBuilder( array( 'deflate_max_bytes' => 2 * Limits::INFLATE_BYTES ) ) )->typical()->file( 'wp-content/uploads/large.txt', str_repeat( 'z', $bytes ) )->build();
+			$this->builders[] = $builder;
+			$this->assertSame( ZipFormat::METHOD_DEFLATE, ArchiveBuilder::locate( $builder->volumes[ count( $builder->volumes ) - 1 ], ArchiveVerifier::FILES_PREFIX . 'wp-content/uploads/large.txt' )['method'], $bytes . ': compressed' );
+			foreach ( array( ArchiveVerifier::DEPTH_FULL, ArchiveVerifier::DEPTH_STRUCTURE ) as $depth ) {
+				$result = $this->verify( $builder, $builder->manifest_path, $depth );
+				$text   = $result->to_text( self::identity() );
+				if ( $passes ) {
+					$this->assertFalse( $result->restore_refused(), $depth . ': ' . $text );
+					continue;
+				}
+				$this->assertSame( VerificationResult::UNSUPPORTED_LAYOUT, $result->outcome(), $depth . ': ' . $text );
+				$finding = self::find( $result, array( 'kind' => Finding::UNSUPPORTED ) );
+				$this->assertNotNull( $finding, $depth );
+				$this->assertStringContainsString( 'is stored compressed and is 8388609 bytes large; this plugin decompresses a compressed entry in one piece and reads at most 8388608 bytes (8 MiB)', $finding['message'] );
+				$this->assertNull( self::find( $result, array( 'kind' => Finding::CORRUPT ) ), $depth . ': not damage' );
+			}
+		}
+	}
+
+	/**
+	 * The limit holds for either size: content within it whose deflated form is larger (another tool kept it
+	 * deflated; this plugin stores such an entry) is unsupported too.
+	 */
+	public function test_a_compressed_entry_whose_compressed_size_passes_the_inflate_limit_is_unsupported(): void {
+		$builder          = ( new ArchiveBuilder(
+			array(
+				'deflate_max_bytes' => 2 * Limits::INFLATE_BYTES,
+				'keep_deflated'     => true,
+			)
+		) )->typical()->file( 'wp-content/uploads/random.bin', random_bytes( Limits::INFLATE_BYTES - 512 ) )->build();
+		$this->builders[] = $builder;
+		$entry            = null;
+		foreach ( $builder->volumes as $volume ) {
+			$entry = ZipReader::open( $volume )->find( ArchiveVerifier::FILES_PREFIX . 'wp-content/uploads/random.bin' ) ?? $entry;
+		}
+		$this->assertIsArray( $entry );
+		$this->assertSame( ZipFormat::METHOD_DEFLATE, $entry['method'] );
+		$this->assertLessThanOrEqual( Limits::INFLATE_BYTES, $entry['usize'], 'the control: the content is within the limit' );
+		$this->assertGreaterThan( Limits::INFLATE_BYTES, $entry['csize'], 'the control: its deflated form is not' );
+		foreach ( array( ArchiveVerifier::DEPTH_FULL, ArchiveVerifier::DEPTH_STRUCTURE ) as $depth ) {
+			$result  = $this->verify( $builder, $builder->manifest_path, $depth );
+			$finding = self::find( $result, array( 'kind' => Finding::UNSUPPORTED ) );
+			$this->assertSame( VerificationResult::UNSUPPORTED_LAYOUT, $result->outcome(), $depth );
+			$this->assertStringContainsString( 'is stored compressed and is ' . $entry['csize'] . ' bytes large', (string) ( $finding['message'] ?? '' ), $depth );
+		}
+	}
+
+	/**
+	 * The same for a sidecar index: the verifier stops at it, as unsupported, not as damage.
+	 */
+	public function test_a_compressed_sidecar_index_larger_than_the_inflate_limit_is_unsupported_not_damage(): void {
+		$builder          = ( new ArchiveBuilder(
+			array(
+				'deflate_max_bytes' => 2 * Limits::INFLATE_BYTES,
+				'files_lines'       => static function ( array $lines ): array {
+					for ( $i = 0; $i < 9; $i++ ) {
+						$lines[] = str_repeat( 'z', 1048576 ); // Past the limit; never parsed.
+					}
+					return $lines;
+				},
+			)
+		) )->typical()->build();
+		$this->builders[] = $builder;
+		$index            = ArchiveBuilder::locate( $builder->volumes[ count( $builder->volumes ) - 1 ], Manifest::FILES_INDEX );
+		$this->assertSame( ZipFormat::METHOD_DEFLATE, $index['method'], 'the control: compressed' );
+		$this->assertGreaterThan( Limits::INFLATE_BYTES, $index['usize'] );
+		foreach ( array( ArchiveVerifier::DEPTH_FULL, ArchiveVerifier::DEPTH_STRUCTURE ) as $depth ) {
+			$result = $this->verify( $builder, $builder->manifest_path, $depth );
+			$this->assertSame( VerificationResult::UNSUPPORTED_LAYOUT, $result->outcome(), $depth . ': ' . $result->to_text( self::identity() ) );
+			$finding = self::find( $result, array( 'kind' => Finding::UNSUPPORTED ) );
+			$this->assertNotNull( $finding, $depth );
+			$this->assertStringContainsString( 'The sidecar index is stored compressed and is ' . $index['usize'] . ' bytes large', $finding['message'] );
+			$this->assertNull( self::find( $result, array( 'kind' => Finding::CORRUPT ) ), $depth . ': not damage' );
+		}
+	}
+
 	public function test_chunks_larger_than_the_verifier_can_check_in_one_unit_are_unsupported_not_damage(): void {
 		// A consistent manifest with chunk sizes above the verifier's bounds: no volume needs a chunk list any more.
 		$builder  = $this->typical();
 		$manifest = json_decode( (string) file_get_contents( $builder->manifest_path ), true );
-		$manifest['hashing']['chunk_bytes']        = ArchiveVerifier::MAX_CONTENT_CHUNK * 2;
+		$manifest['hashing']['chunk_bytes']        = Limits::CONTENT_CHUNK_BYTES * 2;
 		$manifest['hashing']['volume_chunk_bytes'] = ArchiveVerifier::MAX_CONTAINER_CHUNK * 2;
 		foreach ( $manifest['volumes'] as $i => $volume ) {
 			unset( $manifest['volumes'][ $i ]['chunks'] );

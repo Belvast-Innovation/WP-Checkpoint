@@ -10,6 +10,7 @@ namespace WPCheckpoint\Jobs;
 use WPCheckpoint\Archive\ArchiveVerifier;
 use WPCheckpoint\Archive\ChunkHasher;
 use WPCheckpoint\Archive\IndexLine;
+use WPCheckpoint\Archive\Limits;
 use WPCheckpoint\Archive\Manifest;
 use WPCheckpoint\Archive\Packer;
 use WPCheckpoint\Archive\SealRequired;
@@ -132,7 +133,8 @@ final class PackStep implements Step {
 	 * The packer options with the deflate cap held to the content chunk:
 	 * the packer deflates an entry in one piece (Packer::write_piece()),
 	 * and one piece is one content chunk here, so an entry that is
-	 * deflated must fit a chunk or its chunk list could not be built.
+	 * deflated must fit a chunk or its chunk list could not be built, and
+	 * never more than a reader inflates (Limits::INFLATE_BYTES).
 	 * Larger entries are stored and read piece by piece. ManifestStep
 	 * opens the packer with the same options.
 	 *
@@ -142,7 +144,7 @@ final class PackStep implements Step {
 	 */
 	public static function packer_options_for( array $options, int $chunk_bytes ): array {
 		$cap                          = isset( $options['deflate_max_bytes'] ) ? (int) $options['deflate_max_bytes'] : (int) Packer::DEFLATE_MAX_BYTES;
-		$options['deflate_max_bytes'] = min( $cap, $chunk_bytes );
+		$options['deflate_max_bytes'] = min( $cap, $chunk_bytes, Limits::INFLATE_BYTES );
 		return $options;
 	}
 

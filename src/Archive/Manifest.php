@@ -42,7 +42,7 @@ final class Manifest {
 	const KINDS                = array( 'backup', 'checkpoint' );
 	const TRIGGERS             = array( 'manual', 'scheduled', 'pre_update', 'pre_replace', 'pre_rollback', 'pre_restore' );
 	const ALGORITHM            = 'sha256';
-	const DEFAULT_CHUNK        = 16777216;
+	const DEFAULT_CHUNK        = Limits::CONTENT_CHUNK_BYTES;
 	const DEFAULT_VOLUME_CHUNK = 268435456;
 	const MAX_VOLUME_CHUNK     = 4294967296;
 	const MIN_CHUNK            = 1048576;

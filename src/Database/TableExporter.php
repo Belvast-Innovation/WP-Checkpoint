@@ -9,6 +9,7 @@ namespace WPCheckpoint\Database;
 
 use WPCheckpoint\Archive\ChunkHasher;
 use WPCheckpoint\Archive\IndexLine;
+use WPCheckpoint\Archive\Limits;
 use WPCheckpoint\Jobs\TableChanged;
 use WPCheckpoint\Jobs\TransientFailure;
 use WPCheckpoint\Jobs\WorkLost;
@@ -85,7 +86,7 @@ use WPCheckpoint\Jobs\WorkLost;
  */
 final class TableExporter {
 
-	const CHUNK_BYTES        = 16777216;
+	const CHUNK_BYTES        = Limits::CONTENT_CHUNK_BYTES; // A chunk is at most the manifest's chunk_bytes (IndexLine::database()), and the export's is this.
 	const TARGET_BATCH_BYTES = 1048576;
 	const STATEMENT_BYTES    = 1048576;
 	const MIN_ROWS           = 50;

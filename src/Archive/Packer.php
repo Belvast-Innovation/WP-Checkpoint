@@ -35,6 +35,9 @@ use WPCheckpoint\Support\HostFunctions;
  * records in "<name>.cdr"; sealing renames it to its final name. Entries up
  * to DEFLATE_MAX_BYTES are deflated in one piece, larger ones are stored:
  * a deflate state cannot survive a tick, and media files do not compress.
+ * An entry whose deflated form is not smaller than its content is stored
+ * as well (end_entry() writes the method into the local header with the
+ * sizes and CRC, so a replay that decides otherwise overwrites it).
  */
 final class Packer {
 
@@ -176,7 +179,7 @@ final class Packer {
 	 * @param string               $dir     Directory for the volumes (the job's temporary directory).
 	 * @param string               $base    Base name of the archive, e.g. "example-20260918-100000-a1b2".
 	 * @param array<string, mixed> $state   State from a previous tick, or empty.
-	 * @param array<string, mixed> $options volume_bytes, volume_chunk_bytes, piece_bytes, deflate_max_bytes, zip64_threshold, max_volume_bytes, disk_free (callable( string $dir ): int|false), can_deflate (bool), confirm (callable, called right before each volume file is created or renamed; throws to stop the transition).
+	 * @param array<string, mixed> $options volume_bytes, volume_chunk_bytes, piece_bytes, deflate_max_bytes, zip64_threshold, max_volume_bytes, disk_free (callable( string $dir ): int|false), can_deflate (bool), keep_deflated (bool, tests: keep a deflated entry that did not shrink, as another tool may write it), confirm (callable, called right before each volume file is created or renamed; throws to stop the transition).
 	 * @return Packer
 	 * @throws \RuntimeException When the state cannot be resumed.
 	 */
@@ -197,6 +200,7 @@ final class Packer {
 				'max_volume_bytes'   => self::max_volume_bytes(),
 				'disk_free'          => array( HostFunctions::class, 'disk_free_space' ),
 				'can_deflate'        => HostFunctions::can_deflate(),
+				'keep_deflated'      => false,
 			),
 			$options
 		);
@@ -347,7 +351,16 @@ final class Packer {
 			if ( ! is_string( $out ) ) {
 				throw new \RuntimeException( 'Compression failed.' );
 			}
+			$stored = strlen( $out ) >= $size && ! $this->options['keep_deflated'];
+			if ( $stored ) {
+				// Data that does not shrink (already compressed media) is stored: a deflate stream is a little larger than
+				// such data, and could pass the size a reader inflates in one piece (Limits::INFLATE_BYTES).
+				$out = $data;
+			}
 			$this->write_volume( $out );
+			if ( $stored ) {
+				$this->state['entry']['method'] = ZipFormat::METHOD_STORE; // end_entry() writes it into the local header.
+			}
 			$this->state['entry']['crc']     = Crc32::of( $data );
 			$this->state['entry']['csize']   = strlen( $out );
 			$this->state['entry']['offset']  = $size;
@@ -1062,6 +1075,10 @@ final class Packer {
 		$entry = $this->state['entry'];
 		$this->close_source();
 		$patch = ZipFormat::patch_offsets( strlen( $entry['name'] ), (bool) $entry['zip64'] );
+		// The method too, every time: the header was written before the data, and a replay of the entry may decide
+		// otherwise than a run that stopped after patching it (stored, or deflated after all).
+		$this->seek_volume( $entry['header_offset'] + $patch['method'] );
+		$this->write_volume( pack( 'v', (int) $entry['method'] ) );
 		$this->seek_volume( $entry['header_offset'] + $patch['crc'] );
 		$this->write_volume( Crc32::pack( (int) $entry['crc'] ) );
 		if ( $entry['zip64'] ) {
