@@ -201,6 +201,18 @@ final class ChunkReaderTest extends TestCase {
 	}
 
 	/**
+	 * The preamble and DROP record no position and a tick's first statements run without a budget check, so
+	 * how many of them a chunk may hold is bounded here: the three preamble statements, one DROP.
+	 */
+	public function test_at_most_the_three_preamble_statements_and_one_drop(): void {
+		$set  = "/*!40014 SET FOREIGN_KEY_CHECKS=0 */;\n";
+		$drop = "DROP TABLE IF EXISTS `wp_posts`;\n";
+		$this->assertCount( 4, $this->read( str_repeat( $set, 3 ) . $drop ), 'the control: three and one' );
+		$this->assert_refused( str_repeat( $set, 4 ), 'more than 3 session preamble statements' );
+		$this->assert_refused( $drop . $drop, 'drops the table more than once' );
+	}
+
+	/**
 	 * In gbk, big5, sjis and the like, a backslash or a backtick can be the second byte of a character:
 	 * the server would read such a byte as part of the character where this reader sees an escape or the
 	 * end of a name, and the two would disagree about where a string ends (the server then runs as SQL what

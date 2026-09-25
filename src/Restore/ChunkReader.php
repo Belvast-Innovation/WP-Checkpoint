@@ -52,7 +52,9 @@ defined( 'ABSPATH' ) || exit;
  *
  * The preamble comes before every other statement of a chunk; a reader
  * opened past the chunk's start refuses it (the importer runs a chunk's
- * preamble again from the head when it resumes).
+ * preamble again from the head when it resumes). A chunk holds at most
+ * three preamble statements and one DROP: neither records a position, and
+ * the first statements of a tick run before any budget check.
  *
  * A statement is read into memory whole (it is sent whole), so its size is
  * bounded by MAX_STATEMENT_BYTES: the exporter cuts INSERTs at about 1 MB,
@@ -142,6 +144,17 @@ final class ChunkReader {
 	 * @var bool
 	 */
 	private $past_preamble;
+
+	/**
+	 * Preamble statements and DROPs read so far: neither records a position and the first statements of a
+	 * tick run without a budget check, so a chunk may hold no more of them than the exporter writes.
+	 *
+	 * @var array{set: int, drop: int}
+	 */
+	private $seen = array(
+		'set'  => 0,
+		'drop' => 0,
+	);
 
 	/**
 	 * The session's character set as the statements are read ('' when unknown: the site's own).
@@ -239,6 +252,12 @@ final class ChunkReader {
 					throw new Refused( 'The session preamble after other statements.' );
 				}
 				$this->past_preamble = $this->past_preamble || Statement::SET !== $statement->kind;
+				if ( Statement::SET === $statement->kind && ++$this->seen['set'] > count( self::PREAMBLE ) ) {
+					throw new Refused( sprintf( 'The chunk holds more than %d session preamble statements.', count( self::PREAMBLE ) ) );
+				}
+				if ( Statement::DROP === $statement->kind && ++$this->seen['drop'] > 1 ) {
+					throw new Refused( 'The chunk drops the table more than once.' );
+				}
 				if ( Statement::SET === $statement->kind && 1 === preg_match( '/SET NAMES ([A-Za-z0-9_]+)/', $statement->sql, $names ) ) {
 					$this->charset      = strtolower( $names[1] );
 					$statement->charset = $this->charset;
