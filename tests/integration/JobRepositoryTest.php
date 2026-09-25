@@ -1129,6 +1129,32 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		}
 	}
 
+	/**
+	 * Uninstall runs one bounded call even when its time is already up (the first unit always runs), and
+	 * starts no further one then: more tables than one call takes leave the rest.
+	 */
+	public function test_uninstall_runs_one_call_even_when_its_time_is_already_up(): void {
+		global $wpdb;
+		$token  = $this->dirs->state()['token'];
+		$tables = array();
+		for ( $i = 0; $i <= TempTableDropper::MAX_STATEMENTS; $i++ ) {
+			$tables[] = TempTables::name( $token, 80, 'beef', sprintf( 'v%03d', $i ) );
+			$wpdb->query( 'CREATE TABLE `' . end( $tables ) . '` (id INT) ENGINE=MyISAM' );
+		}
+		$now = 1000.0;
+		try {
+			Schema::drop(
+				static function () use ( &$now ): float {
+					$now += 3600.0; // Every look: the time is long gone.
+					return $now;
+				}
+			);
+			$this->assertCount( 1, array_filter( $tables, array( $this, 'table_exists' ) ), 'one call ran (MAX_STATEMENTS drops), no second one' );
+		} finally {
+			$this->force_drop( $tables );
+		}
+	}
+
 	public function test_a_table_the_plugin_could_not_have_created_is_a_reported_failure_not_a_silent_skip(): void {
 		global $wpdb;
 		list( $job, $dir, $table ) = $this->failed_job_with_work();
