@@ -41,6 +41,9 @@ final class CronOnlyTest extends JobTestCase {
 	/** @var ArchiveBuilder|null */
 	private $builder;
 
+	/** @var Runner|null The plugin's runner, put back after the test. */
+	private $runner;
+
 	/** @var int Loopback hops the "firewall" refused. */
 	private $refused = 0;
 
@@ -59,10 +62,15 @@ final class CronOnlyTest extends JobTestCase {
 		$runner   = new Runner( Plugin::instance()->jobs(), Plugin::instance()->job_types(), Plugin::instance()->redactor(), array( 'budget' => new Budget( 20, 32 * 1048576, false ), 'memory_limit' => -1, 'clock' => $clock ) );
 		$property = new \ReflectionProperty( JobActions::class, 'runner' );
 		$property->setAccessible( true );
+		$this->runner = $property->getValue( Plugin::instance()->job_actions() );
 		$property->setValue( Plugin::instance()->job_actions(), $runner );
 	}
 
 	public function tear_down(): void {
+		// The actions are the plugin's own: later tests get their runner back, not the fast clock.
+		$property = new \ReflectionProperty( JobActions::class, 'runner' );
+		$property->setAccessible( true );
+		$property->setValue( Plugin::instance()->job_actions(), $this->runner );
 		Deleter::empty_directory( $this->uploads );
 		@rmdir( $this->uploads );
 		if ( null !== $this->builder ) {

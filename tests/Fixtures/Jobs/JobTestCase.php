@@ -22,6 +22,9 @@ abstract class JobTestCase extends WP_UnitTestCase {
 	/** @var int */
 	protected static $admin_id;
 
+	/** @var array<string, \WPCheckpoint\Jobs\JobType|null> Types register() replaced, put back in tear_down(). */
+	private $replaced = array();
+
 	public static function wpSetUpBeforeClass( $factory ): void {
 		self::$admin_id = $factory->user->create( array( 'role' => 'administrator' ) );
 		if ( is_multisite() ) {
@@ -74,6 +77,14 @@ abstract class JobTestCase extends WP_UnitTestCase {
 
 	public function tear_down(): void {
 		global $wpdb;
+		// A fixture registered under a real type's id (export, restore) must not outlive the test: later tests
+		// would run the fixture instead of the job.
+		foreach ( $this->replaced as $type ) {
+			if ( null !== $type ) {
+				Plugin::instance()->job_types()->add( $type );
+			}
+		}
+		$this->replaced = array();
 		$wpdb->query( 'DROP TABLE IF EXISTS ' . Schema::jobs_table() );
 		foreach ( glob( WP_CONTENT_DIR . '/wp-checkpoint-*' ) ?: array() as $dir ) {
 			Deleter::empty_directory( $dir );
@@ -91,6 +102,9 @@ abstract class JobTestCase extends WP_UnitTestCase {
 	 * Register a fixture type on the plugin's registry.
 	 */
 	protected function register( string $id, array $steps ): void {
+		if ( ! array_key_exists( $id, $this->replaced ) ) {
+			$this->replaced[ $id ] = Plugin::instance()->job_types()->get( $id );
+		}
 		Plugin::instance()->job_types()->add( new FixtureJobType( $id, $steps ) );
 	}
 
