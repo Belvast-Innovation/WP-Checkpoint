@@ -11,6 +11,7 @@ use WPCheckpoint\Archive\ZipFormat;
 use WPCheckpoint\Archive\ZipReader;
 use WPCheckpoint\Cli\VerifyCommand;
 use WPCheckpoint\Tests\Fixtures\Archive\ArchiveBuilder;
+use WPCheckpoint\Tests\Fixtures\Permissions;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 final class ArchiveVerifierTest extends TestCase {
@@ -803,6 +804,7 @@ final class ArchiveVerifierTest extends TestCase {
 	}
 
 	public function test_server_side_failures_are_unreadable_not_damaged(): void {
+		Permissions::require_enforced();
 		// The work directory disappears between units.
 		$builder  = $this->typical();
 		$work     = $builder->work_dir();
@@ -825,9 +827,6 @@ final class ArchiveVerifierTest extends TestCase {
 		$this->assertSame( VerifyCommand::EXIT_UNREADABLE, VerifyCommand::exit_code( $result->outcome() ) );
 
 		// A work directory that cannot be written.
-		if ( 'Windows' === PHP_OS_FAMILY || 0 === (int) getmyuid() ) {
-			return; // Permissions do not bite root or Windows; the case above covers the outcome.
-		}
 		$builder = $this->typical();
 		$work    = $builder->work_dir();
 		chmod( $work, 0500 );

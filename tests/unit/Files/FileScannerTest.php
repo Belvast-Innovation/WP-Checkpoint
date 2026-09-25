@@ -7,6 +7,8 @@ use WPCheckpoint\Archive\Manifest;
 use WPCheckpoint\Archive\Packer;
 use WPCheckpoint\Files\Exclusions;
 use WPCheckpoint\Files\FileScanner;
+use WPCheckpoint\Tests\Fixtures\MemoryBudget;
+use WPCheckpoint\Tests\Fixtures\Permissions;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 final class FileScannerTest extends TestCase {
@@ -157,9 +159,7 @@ final class FileScannerTest extends TestCase {
 	}
 
 	public function test_unreadable_entries_are_listed_for_the_preflight_and_the_scan_goes_on(): void {
-		if ( 'Windows' === PHP_OS_FAMILY || 0 === (int) getmyuid() ) {
-			$this->markTestSkipped( 'permission bits do not bite root or Windows' );
-		}
+		Permissions::require_enforced();
 		$this->put( 'c/a.txt' );
 		$this->put( 'c/locked/inside.txt' );
 		$this->put( 'c/secret.txt' );
@@ -253,22 +253,24 @@ final class FileScannerTest extends TestCase {
 				touch( $this->root . '/big/' . $d . '/' . $f );
 			}
 		}
-		gc_collect_cycles();
-		$before  = memory_get_peak_usage( true );
 		$scanner = new FileScanner( array( array( 'group' => 'uploads', 'path' => $this->root . '/big', 'prefix' => 'wp-content/uploads' ) ), new Exclusions() );
 		$state   = FileScanner::initial_state();
 		$count   = 0;
 		$units   = 0;
-		while ( empty( $state['done'] ) ) {
-			$state = $scanner->scan_unit( $state, static function () use ( &$count ): void {
-				++$count;
-			} );
-			++$units;
-		}
+		MemoryBudget::within(
+			32 * 1048576, // The state and one listing at a time, never the whole tree.
+			static function () use ( $scanner, &$state, &$count, &$units ): void {
+				while ( empty( $state['done'] ) ) {
+					$state = $scanner->scan_unit( $state, static function () use ( &$count ): void {
+						++$count;
+					} );
+					++$units;
+				}
+			}
+		);
 		$this->assertSame( 100000, $count );
 		$this->assertSame( 100000, $state['counts']['files'] );
 		$this->assertGreaterThanOrEqual( 100, $units );
-		$this->assertLessThan( 32 * 1048576, memory_get_peak_usage( true ) - $before, 'the state and one listing at a time, never the whole tree' );
 		$this->assertLessThan( 4096, strlen( (string) json_encode( $state ) ), 'the cursor stays small' );
 	}
 

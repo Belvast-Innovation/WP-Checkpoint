@@ -6,6 +6,7 @@ use WPCheckpoint\Archive\ArchiveVerifier;
 use WPCheckpoint\Archive\EnvironmentFailure;
 use WPCheckpoint\Archive\VerificationResult;
 use WPCheckpoint\Tests\Fixtures\Archive\ArchiveBuilder;
+use WPCheckpoint\Tests\Fixtures\Permissions;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 /**
@@ -74,15 +75,10 @@ final class VerifierEnvironmentTest extends TestCase {
 	}
 
 	public function test_a_volume_this_server_may_not_open_is_its_problem_not_the_archives(): void {
-		if ( '\\' === DIRECTORY_SEPARATOR ) {
-			$this->markTestSkipped( 'File modes do not block reading on Windows.' );
-		}
+		Permissions::require_enforced();
 		$builder = $this->build();
 		$volume  = glob( dirname( $builder->manifest_path ) . '/*.wpcheckpoint.zip' )[0];
 		chmod( $volume, 0000 );
-		if ( is_readable( $volume ) ) {
-			$this->markTestSkipped( 'Running as a user that reads any file (root).' );
-		}
 		foreach ( array( ArchiveVerifier::DEPTH_STRUCTURE, ArchiveVerifier::DEPTH_FULL ) as $depth ) {
 			$dir = $builder->work_dir() . '-' . $depth;
 			mkdir( $dir, 0700, true );
