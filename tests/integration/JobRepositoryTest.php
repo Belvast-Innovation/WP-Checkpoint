@@ -1375,4 +1375,35 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		$this->assertSame( Job::FAILURE_FINAL, $this->repo->find( $failed->id )->failure_kind );
 		$this->assertSame( Job::REASON_TABLE_CHANGED, $this->repo->find( $failed->id )->failure_reason, 'the longest value fits' );
 	}
+
+	public function test_schema_version_seven_adds_the_cron_deferrals_with_a_default_for_rows_written_without_it(): void {
+		global $wpdb;
+		$table = Schema::jobs_table();
+		$wpdb->query( "ALTER TABLE {$table} DROP COLUMN cron_deferrals" );
+		Options::set( Schema::OPTION, array( 'version' => 6, 'min_compatible' => 1 ) );
+		$result = Schema::ensure();
+		$this->assertSame( 'migrated', $result['action'] );
+		$this->assertSame( Schema::CURRENT, $result['version'] );
+		$this->assertSame( 1, $result['min_compatible'], 'older code ignores the column' );
+		$this->assertContains( 'cron_deferrals', $wpdb->get_col( "SHOW COLUMNS FROM {$table}" ) );
+		// Rows written without the column (as code of version 6 writes them): the default holds, and this code counts from it.
+		$wpdb->query( $wpdb->prepare( "INSERT INTO {$table} (type, status, cursor_json, created_at) VALUES (%s, %s, %s, %d)", 'export', Job::QUEUED, '[]', 1 ) );
+		$this->assertSame( '', $wpdb->last_error );
+		$old = (int) $wpdb->insert_id;
+		$this->assertSame( 0, $this->repo->find( $old )->cron_deferrals );
+		$this->assertTrue( $this->repo->count_cron_deferral( $old, 3 ) );
+		$this->assertSame( 1, $this->repo->find( $old )->cron_deferrals );
+	}
+
+	public function test_cron_deferrals_are_counted_up_to_the_limit_for_active_jobs_only(): void {
+		$job = $this->repo->create( 'export' );
+		$this->assertTrue( $this->repo->count_cron_deferral( $job->id, 2 ) );
+		$this->assertTrue( $this->repo->count_cron_deferral( $job->id, 2 ) );
+		$this->assertFalse( $this->repo->count_cron_deferral( $job->id, 2 ), 'at the limit: not counted, the tick runs' );
+		$this->assertSame( 2, $this->repo->find( $job->id )->cron_deferrals );
+		$this->assertFalse( $this->repo->count_cron_deferral( 987654, 2 ), 'no such job' );
+		$done = $this->repo->transition( $this->repo->create( 'export' ), Job::CANCELLED );
+		$this->assertFalse( $this->repo->count_cron_deferral( $done->id, 2 ), 'an ended job' );
+		$this->assertSame( 0, $this->repo->find( $done->id )->cron_deferrals );
+	}
 }

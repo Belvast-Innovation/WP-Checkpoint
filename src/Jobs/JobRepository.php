@@ -405,6 +405,34 @@ final class JobRepository {
 	}
 
 	/**
+	 * Count a cron request that started too late to tick the job, in one
+	 * statement that counts only while fewer than $limit are counted and
+	 * the job is queued, running or paused. Only a tick that makes progress
+	 * sets the count back to 0 (save_progress()), and so do a retry and an
+	 * answer.
+	 *
+	 * @param int $id    Job id.
+	 * @param int $limit Deferrals in a row after which the tick runs.
+	 * @return bool True when this request was counted (the tick is put off); false when $limit were counted
+	 *              already, the job is not active or the write failed (the tick runs).
+	 */
+	public function count_cron_deferral( int $id, int $limit ): bool {
+		global $wpdb;
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin table; one statement counts and checks the limit.
+		$affected = $wpdb->query(
+			$wpdb->prepare(
+				'UPDATE ' . self::table() . ' SET cron_deferrals = cron_deferrals + 1 WHERE id = %d AND cron_deferrals < %d AND status IN (%s, %s, %s)', // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- table name from the prefix and a constant.
+				$id,
+				$limit,
+				Job::QUEUED,
+				Job::RUNNING,
+				Job::PAUSED
+			)
+		);
+		return 1 === $affected;
+	}
+
+	/**
 	 * Try to take the lock. Only queued, running and paused jobs bound to
 	 * the current storage directory can be acquired; a queued or paused job
 	 * becomes running (resuming a paused job is not a restart: attempts
@@ -594,8 +622,9 @@ final class JobRepository {
 	 * Save the position of a running job; only the lock holder may.
 	 *
 	 * Only real progress ($advanced) moves progress_at and resets the gate
-	 * back-off: a wait or a retried failure keeps the stall timestamp, so a
-	 * job that only ever waits is still given up after 24 hours by reap().
+	 * back-off and the late cron count, in the same statement: a wait or a
+	 * retried failure keeps the stall timestamp, so a job that only ever
+	 * waits is still given up after 24 hours by reap().
 	 *
 	 * @param Job                  $job      Job.
 	 * @param string               $token    Lock token.
@@ -621,10 +650,12 @@ final class JobRepository {
 		);
 		$formats  = array( '%s', '%s', '%d', '%s', '%d' );
 		if ( $advanced ) {
-			$data['progress_at']   = $now;
-			$data['blocked_count'] = 0;
-			$formats[]             = '%d';
-			$formats[]             = '%d';
+			$data['progress_at']    = $now;
+			$data['blocked_count']  = 0;
+			$data['cron_deferrals'] = 0;
+			$formats[]              = '%d';
+			$formats[]              = '%d';
+			$formats[]              = '%d';
 		}
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin table; the WHERE on lock_token is the fence.
 		$affected = $wpdb->update(
@@ -647,8 +678,9 @@ final class JobRepository {
 		$job->progress_message = $message;
 		$job->updated_at       = $now;
 		if ( $advanced ) {
-			$job->progress_at   = $now;
-			$job->blocked_count = 0;
+			$job->progress_at    = $now;
+			$job->blocked_count  = 0;
+			$job->cron_deferrals = 0;
 		}
 	}
 
@@ -784,7 +816,7 @@ final class JobRepository {
 	 *
 	 * The decision is progress: progress_at moves to now (a job resumed
 	 * days later must not be stalled by its first non-advancing tick) and
-	 * the storage back-off starts over.
+	 * the storage back-off and the late cron count start over.
 	 *
 	 * @param Job                  $job     Job (updated in place).
 	 * @param array<string, mixed> $answers Answers keyed by question id.
@@ -811,7 +843,7 @@ final class JobRepository {
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin table; the WHERE keeps a concurrent cancel or answer from being undone.
 		$affected = $wpdb->query(
 			$wpdb->prepare(
-				'UPDATE ' . self::table() . " SET options_json = %s, questions_json = NULL, updated_at = %d, progress_at = %d, blocked_count = 0 WHERE id = %d AND status = %s AND questions_json IS NOT NULL AND questions_json <> '' AND questions_json <> '[]'", // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- table name from the prefix and a constant.
+				'UPDATE ' . self::table() . " SET options_json = %s, questions_json = NULL, updated_at = %d, progress_at = %d, blocked_count = 0, cron_deferrals = 0 WHERE id = %d AND status = %s AND questions_json IS NOT NULL AND questions_json <> '' AND questions_json <> '[]'", // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- table name from the prefix and a constant.
 				$json,
 				$now,
 				$now,
@@ -823,11 +855,12 @@ final class JobRepository {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
 			throw new StaleJob( sprintf( 'Job %d changed while it was being answered.', $job->id ) );
 		}
-		$job->options       = $options;
-		$job->questions     = array();
-		$job->updated_at    = $now;
-		$job->progress_at   = $now;
-		$job->blocked_count = 0;
+		$job->options        = $options;
+		$job->questions      = array();
+		$job->updated_at     = $now;
+		$job->progress_at    = $now;
+		$job->blocked_count  = 0;
+		$job->cron_deferrals = 0;
 		return $job;
 	}
 
@@ -1465,17 +1498,18 @@ final class JobRepository {
 			$data['failure_kind'] = Job::stamp_failure( $failure, $now );
 		}
 		if ( Job::QUEUED === $to ) {
-			$data['failure_kind']  = '';
-			$data['finished_at']   = 0;
-			$data['takeovers']     = 0; // A retry starts its count over.
-			$data['takeover_mark'] = '';
+			$data['failure_kind']   = '';
+			$data['finished_at']    = 0;
+			$data['takeovers']      = 0; // A retry starts its counts over.
+			$data['takeover_mark']  = '';
+			$data['cron_deferrals'] = 0;
 		}
 		if ( Job::RUNNING === $to && 0 === $job->started_at ) {
 			$data['started_at'] = $now;
 		}
 		$formats = array_fill( 0, count( $data ), '%s' );
 		foreach ( array_keys( $data ) as $i => $key ) {
-			if ( in_array( $key, array( 'updated_at', 'finished_at', 'locked_until', 'started_at', 'takeovers' ), true ) ) {
+			if ( in_array( $key, array( 'updated_at', 'finished_at', 'locked_until', 'started_at', 'takeovers', 'cron_deferrals' ), true ) ) {
 				$formats[ $i ] = '%d';
 			}
 		}
@@ -1545,7 +1579,7 @@ final class JobRepository {
 	 * @param Job $job Job.
 	 * @return bool
 	 */
-	private function owns_files_of( Job $job ): bool {
+	public function owns_files_of( Job $job ): bool {
 		$base = $this->directories->base();
 		return '' !== $base && '' !== $job->storage_path && Paths::same( $job->storage_path, $base, Paths::is_windows() );
 	}

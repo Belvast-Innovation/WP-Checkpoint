@@ -9,6 +9,7 @@ namespace WPCheckpoint\Jobs;
 
 use WPCheckpoint\Support\Schema;
 use WPCheckpoint\Support\HostFunctions;
+use WPCheckpoint\Support\Logger;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -23,6 +24,18 @@ final class JobActions {
 	 * Site transient throttling sweep_events().
 	 */
 	const SWEPT = 'wpcheckpoint_jobs_swept';
+
+	/**
+	 * Cron requests in a row that may put a job's tick off for starting too
+	 * late (see cron_tick()); the next one ticks it anyway.
+	 */
+	const MAX_CRON_DEFERRALS = 3;
+
+	/**
+	 * A budget start that leaves no time: the tick runs its first unit (the
+	 * first unit of a tick always runs) and stops.
+	 */
+	const NO_TIME_LEFT = 0.0;
 
 	/**
 	 * Repository.
@@ -262,10 +275,28 @@ final class JobActions {
 	 * @return TickResult
 	 */
 	public function web_tick( int $id, $started_at = null ): TickResult {
+		return $this->captured(
+			$id,
+			function () use ( $id, $started_at ): TickResult {
+				return $this->tick( $id, $started_at );
+			}
+		);
+	}
+
+	/**
+	 * Run $work for a web entry point: the request keeps running without its client, and what it prints is
+	 * captured, discarded and its size logged (see web_tick()).
+	 *
+	 * @template T
+	 * @param int           $id   Job id (for the log line).
+	 * @param callable(): T $work The work.
+	 * @return T
+	 */
+	private function captured( int $id, callable $work ) {
 		HostFunctions::ignore_user_abort();
 		ob_start();
 		try {
-			return $this->tick( $id, $started_at );
+			return $work();
 		} finally {
 			$output                  = ob_get_clean();
 			self::$last_output_bytes = is_string( $output ) ? strlen( $output ) : 0;
@@ -273,6 +304,87 @@ final class JobActions {
 				$this->repository->log_event( sprintf( 'Job %d: the tick printed %d bytes; discarded, nothing was sent to the client.', $id, self::$last_output_bytes ) );
 			}
 		}
+	}
+
+	/**
+	 * The tick of a cron event. wp-cron.php runs every due event in one
+	 * request, and a tick's budget counts from the request start. A tick
+	 * that starts LATE_CRON_SECONDS or more into its request would still run
+	 * its first unit and could pass the server's time limit (then counted
+	 * as a takeover), so it is put off to the next cron request, but at
+	 * most MAX_CRON_DEFERRALS times in a row: on a host where every cron
+	 * request starts that late, the job would otherwise never move on from
+	 * cron. The next late request ticks it with no time left, so it runs
+	 * its first unit only. The count is kept on the job row and set back to
+	 * 0 by any tick that makes progress (and by a retry or an answer); after
+	 * such a tick that makes none, every late request ticks it that way
+	 * until one does. Each deferral and each such tick is logged. Like
+	 * web_tick(), nothing is sent to the client.
+	 *
+	 * @param int   $id         Job id.
+	 * @param float $started_at When the cron request started (see started_at()).
+	 * @return TickResult|null Null when the tick was put off.
+	 */
+	public function cron_tick( int $id, float $started_at ): ?TickResult {
+		return $this->captured(
+			$id,
+			function () use ( $id, $started_at ): ?TickResult {
+				if ( microtime( true ) - $started_at < Loopback::LATE_CRON_SECONDS ) {
+					return $this->tick( $id, $started_at );
+				}
+				return $this->late_cron_tick( $id, round( microtime( true ) - $started_at, 1 ), $started_at );
+			}
+		);
+	}
+
+	/**
+	 * A cron tick that starts late in its request: put off, or run with no time left (see cron_tick()).
+	 *
+	 * @param int   $id         Job id.
+	 * @param float $late       Seconds into the request.
+	 * @param float $started_at When the cron request started.
+	 * @return TickResult|null Null when the tick was put off.
+	 */
+	private function late_cron_tick( int $id, float $late, float $started_at ): ?TickResult {
+		Schema::ensure(); // The count is written before the tick, which would otherwise be what migrates.
+		$job = $this->repository->find( $id );
+		if ( null === $job || ! in_array( $job->status, array( Job::QUEUED, Job::RUNNING, Job::PAUSED ), true ) || $job->awaiting_answer() ) {
+			// Nothing of it runs (the tick only reports the job and settles its event): no reason to wait.
+			return $this->tick( $id, $started_at );
+		}
+		// The next cron request is asked for before the deferral is counted: a request that dies in between
+		// leaves an event and a lower count, never a count without an event (WP-Cron removed the one that ran).
+		Loopback::schedule( $id, 1, Loopback::EARLIER );
+		if ( $this->repository->count_cron_deferral( $id, self::MAX_CRON_DEFERRALS ) ) {
+			$counted = $this->repository->find( $id );
+			$this->runner->note(
+				$job,
+				Logger::INFO,
+				'Tick put off to the next cron request: this one started too late',
+				array(
+					'late_seconds' => $late,
+					'deferrals'    => null !== $counted ? $counted->cron_deferrals : $job->cron_deferrals + 1,
+					'limit'        => self::MAX_CRON_DEFERRALS,
+				)
+			);
+			return null;
+		}
+		// The tick runs after all: its event is the one it would have had (the tick adjusts it as usual), not the
+		// one just set for the next cron request.
+		Loopback::schedule( $id, Loopback::FALLBACK_SECONDS, Loopback::REPLACE );
+		$job = $this->repository->find( $id );
+		if ( null === $job || ! in_array( $job->status, array( Job::QUEUED, Job::RUNNING, Job::PAUSED ), true ) ) {
+			return $this->tick( $id, $started_at ); // It ended meanwhile.
+		}
+		$this->runner->note(
+			$job,
+			Logger::WARNING,
+			$job->cron_deferrals >= self::MAX_CRON_DEFERRALS
+				? sprintf( 'Cron requests start too slowly: the tick was put off in %d cron requests in a row, so this one runs the first unit only', $job->cron_deferrals )
+				: 'This cron request started too late, and the deferral could not be recorded: it runs the first unit only',
+			array( 'late_seconds' => $late )
+		);
+		return $this->tick( $id, self::NO_TIME_LEFT );
 	}
 
 	/**

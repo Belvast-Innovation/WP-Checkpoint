@@ -167,21 +167,15 @@ final class Plugin {
 	/**
 	 * Cron callback: one tick with the budget counted from now under WP-CLI
 	 * ("wp cron event run" handles several events per process) and from the
-	 * request start otherwise.
+	 * request start otherwise; a tick that starts late in its request may be
+	 * put off (JobActions::cron_tick()).
 	 *
 	 * @param int $job_id Job id.
 	 * @return void
 	 */
 	public function cron_tick( $job_id ): void {
-		// wp-cron.php runs every due event in one request, and a tick's budget counts from the request start.
-		// A tick that starts late would still run its first unit and could pass the server's time limit (then
-		// counted as a takeover): hand it to the next cron request instead.
-		if ( microtime( true ) - JobActions::started_at() >= Loopback::LATE_CRON_SECONDS ) {
-			Loopback::schedule( (int) $job_id, 1, Loopback::EARLIER );
-			return;
-		}
 		try {
-			$this->job_actions()->web_tick( (int) $job_id, JobActions::started_at() );
+			$this->job_actions()->cron_tick( (int) $job_id, JobActions::started_at() );
 		} catch ( \Throwable $e ) {
 			$this->directories()->log_event( sprintf( 'Cron tick of job %d failed: %s', (int) $job_id, get_class( $e ) ) );
 		}
