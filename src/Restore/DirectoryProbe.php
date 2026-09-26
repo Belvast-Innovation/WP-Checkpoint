@@ -51,9 +51,11 @@ final class DirectoryProbe {
 	const BARE     = 'b';
 
 	/**
-	 * A name the Win32 namespace refuses.
+	 * A name the Win32 namespace refuses, and a plain one written when it is refused: the refusal counts only
+	 * when a name without "<" can still be created (not a full disk or an exhausted quota).
 	 */
-	const WIN32 = 'c<d';
+	const WIN32   = 'c<d';
+	const CONTROL = 'c_d';
 
 	/**
 	 * Probe a directory.
@@ -61,7 +63,8 @@ final class DirectoryProbe {
 	 * @param string   $where   Staging parent (exists).
 	 * @param string   $name    Probe directory name.
 	 * @param callable $confirm function(): void, throws to stop.
-	 * @return array{dev: int, names: TargetNames}
+	 * @return array{dev: int, names: TargetNames, left: bool} left: the directory stayed behind because
+	 *                                                         something else put an entry in it (the reaper removes it).
 	 * @throws CannotStage When the directory cannot be used for staging.
 	 */
 	public static function run( string $where, string $name, callable $confirm ): array {
@@ -85,10 +88,15 @@ final class DirectoryProbe {
 				$flags[ $flag ] = file_exists( $dir . '/' . $variant );
 			}
 			$handle = @fopen( $dir . '/' . self::WIN32, 'xb' );
-			if ( false !== $handle ) {
-				fclose( $handle );
+			$win32  = false === $handle;
+			if ( $win32 ) {
+				$handle = @fopen( $dir . '/' . self::CONTROL, 'xb' );
+				if ( false === $handle ) {
+					throw new CannotStage( sprintf( 'Files cannot be created in a new directory in %s, where the restore stages its files (the disk or the account\'s quota may be full). Free some space, or make that directory writable by the web server, then try again.', $where ) );
+				}
 			}
-			$names = new TargetNames( $flags['fold_ascii'], $flags['fold_unicode'], $flags['normalize'], file_exists( $dir . '/' . self::BARE ), false === $handle );
+			fclose( $handle );
+			$names = new TargetNames( $flags['fold_ascii'], $flags['fold_unicode'], $flags['normalize'], file_exists( $dir . '/' . self::BARE ), $win32 );
 			$stat  = @stat( $dir );
 			if ( false === $stat ) {
 				throw new CannotStage( sprintf( 'A new directory in %s cannot be examined, so whether it is on the same disk as the directories the restore replaces cannot be told.', $where ) );
@@ -101,14 +109,34 @@ final class DirectoryProbe {
 		} finally {
 			self::remove( $renamed ? $dir . '-r' : $dir );
 		}
-		clearstatcache();
-		if ( file_exists( $dir . '-r' ) ) {
-			throw new CannotStage( sprintf( 'A directory the restore created in %s cannot be removed again. The restore removes what it replaced once it is done, so it cannot run here. Check the permissions of that directory, then try again.', $where ) );
-		}
 		return array(
 			'dev'   => (int) $stat['dev'],
 			'names' => $names,
+			'left'  => self::left_behind( $dir . '-r', $where ),
 		);
+	}
+
+	/**
+	 * After the removal: whether the probe directory stayed behind with only entries something else put there
+	 * (a desktop's .DS_Store, a scanner's sidecar), which the reaper removes later. The probe's own files
+	 * still there mean this directory does not let the restore remove what it wrote.
+	 *
+	 * @param string $dir   The renamed probe directory.
+	 * @param string $where Staging parent (for the message).
+	 * @return bool
+	 * @throws CannotStage When the probe's own files cannot be removed.
+	 */
+	private static function left_behind( string $dir, string $where ): bool {
+		clearstatcache();
+		if ( ! file_exists( $dir ) ) {
+			return false;
+		}
+		$entries = @scandir( $dir );
+		$own     = array( self::NAME, self::TRAILING, self::BARE, self::WIN32, self::CONTROL );
+		if ( ! is_array( $entries ) || array() !== array_intersect( $entries, $own ) || array() === array_diff( $entries, array( '.', '..' ) ) ) {
+			throw new CannotStage( sprintf( 'A directory the restore created in %s cannot be removed again. The restore removes what it replaced once it is done, so it cannot run here. Check the permissions of that directory, then try again.', $where ) );
+		}
+		return true;
 	}
 
 	/**
@@ -123,7 +151,7 @@ final class DirectoryProbe {
 		if ( is_link( $dir ) || ! is_dir( $dir ) ) {
 			return;
 		}
-		foreach ( array( self::NAME, self::TRAILING, self::BARE, self::WIN32 ) as $file ) {
+		foreach ( array( self::NAME, self::TRAILING, self::BARE, self::WIN32, self::CONTROL ) as $file ) {
 			@unlink( $dir . '/' . $file );
 		}
 		@rmdir( $dir );

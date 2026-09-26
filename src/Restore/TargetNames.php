@@ -28,7 +28,8 @@ defined( 'ABSPATH' ) || exit;
  * A file system that refuses "<" in a name (the Win32 namespace: NTFS,
  * FAT, SMB shares served by Windows) also refuses the characters
  * < > : " | ? * and the device names CON, PRN, AUX, NUL, COM1-9, LPT1-9
- * (with or without an extension); unstorable() finds such a segment.
+ * (with anything after a first dot; newer Windows allows some of these,
+ * refusing them is the safe side); unstorable() finds such a segment.
  */
 final class TargetNames {
 
@@ -120,7 +121,8 @@ final class TargetNames {
 			return null;
 		}
 		foreach ( explode( '/', $path ) as $segment ) {
-			if ( false !== strpbrk( $segment, '<>:"|?*' ) || 1 === preg_match( '/\A(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.[^.]*)?\z/i', rtrim( $segment, '. ' ) ) ) {
+			// Win32 reserves a device name whatever follows its first dot; "¹²³" count as digits there.
+			if ( false !== strpbrk( $segment, '<>:"|?*' ) || 1 === preg_match( '/\A(?:CON|PRN|AUX|NUL|(?:COM|LPT)(?:[1-9]|\xC2[\xB9\xB2\xB3]))(?:\..*)?\z/is', rtrim( $segment, '. ' ) ) ) {
 				return $segment;
 			}
 		}

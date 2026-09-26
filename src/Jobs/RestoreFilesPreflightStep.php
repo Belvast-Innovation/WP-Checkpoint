@@ -282,6 +282,9 @@ final class RestoreFilesPreflightStep implements Step {
 		if ( ! $names instanceof TargetNames ) {
 			throw new \LogicException( 'The names part must return TargetNames.' );
 		}
+		if ( $probed['left'] ) {
+			$context->logger()->info( 'A probe directory stayed behind because something else put an entry in it; it is removed later', array( 'directory' => $parent ) );
+		}
 		if ( $names->approximate() ) {
 			$context->logger()->warning( 'The file system of a staging directory treats Unicode forms of a name as one name, and this server has no intl extension to tell them apart: two paths of the backup that differ only in their Unicode form would not be noticed before one overwrites the other', array( 'directory' => $parent ) );
 		}
@@ -618,7 +621,7 @@ final class RestoreFilesPreflightStep implements Step {
 						array(
 							'id'      => 'free_space',
 							'kind'    => 'free_space_unknown',
-							'bytes'   => (int) min( (float) PHP_INT_MAX, max( $check['unknown'] ) ),
+							'bytes'   => max( $check['unknown'] ) >= (float) PHP_INT_MAX ? PHP_INT_MAX : (int) max( $check['unknown'] ),
 							'choices' => array( 'continue', 'stop' ),
 						),
 					),

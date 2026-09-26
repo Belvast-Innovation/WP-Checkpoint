@@ -58,11 +58,11 @@ final class TargetNamesTest extends TestCase {
 
 	public function test_names_the_win32_namespace_cannot_store_are_found_only_there(): void {
 		$win32 = new TargetNames( true, true, false, true, true );
-		foreach ( array( 'a/b<c', 'a:b', 'x/"q"', 'p|q', 'what?', 'star*', 'CON', 'con.txt', 'x/Nul', 'COM1.log', 'lpt9', 'aux. ' ) as $path ) {
+		foreach ( array( 'a/b<c', 'a:b', 'x/"q"', 'p|q', 'what?', 'star*', 'CON', 'con.txt', 'x/Nul', 'COM1.log', 'lpt9', 'aux. ', 'NUL.tar.gz', 'x/con.min.js', "COM\xC2\xB9", "lpt\xC2\xB3.txt" ) as $path ) {
 			$this->assertNotNull( $win32->unstorable( $path ), $path );
 		}
 		$this->assertSame( 'COM1.log', $win32->unstorable( 'uploads/COM1.log/x' ), 'the segment is named' );
-		foreach ( array( 'a/b', 'console', 'CON1', 'com10', 'nul-file', 'LPT0', 'x/CONFIG.txt' ) as $path ) {
+		foreach ( array( 'a/b', 'console', 'CON1', 'com10', 'nul-file', 'LPT0', 'x/CONFIG.txt', 'CONSOLE.tar.gz', 'COM0.x', "COM\xC2\xB4" ) as $path ) {
 			$this->assertNull( $win32->unstorable( $path ), $path );
 		}
 		$this->assertNull( ( new TargetNames( false, false, false, false, false ) )->unstorable( 'a<b/CON' ), 'another file system stores them' );

@@ -54,6 +54,7 @@ final class DirectoryProbeTest extends TestCase {
 			}
 		);
 		$this->assertSame( 2, $confirmed, 'before creating, before renaming' );
+		$this->assertFalse( $result['left'] );
 		$this->assertSame( array(), $this->left(), 'nothing left' );
 		$this->assertSame( (int) stat( $this->dir )['dev'], $result['dev'] );
 		$flags = $result['names']->to_array();
@@ -166,5 +167,33 @@ final class DirectoryProbeTest extends TestCase {
 			unlink( $target . '/' . $file );
 		}
 		rmdir( $target );
+	}
+
+	public function test_a_probe_directory_kept_only_by_someone_elses_entry_is_left_to_the_reaper(): void {
+		$left = new \ReflectionMethod( DirectoryProbe::class, 'left_behind' );
+		$left->setAccessible( true );
+		$dir = $this->dir . '/' . $this->name . '-r';
+		$this->assertFalse( $left->invoke( null, $dir, $this->dir ), 'removed: nothing left' );
+
+		mkdir( $dir );
+		file_put_contents( $dir . '/.DS_Store', 'x' );
+		$this->assertTrue( $left->invoke( null, $dir, $this->dir ), 'only another program\'s entry: left, not refused' );
+
+		file_put_contents( $dir . '/' . DirectoryProbe::BARE, 'x' );
+		try {
+			$left->invoke( null, $dir, $this->dir );
+			$this->fail( 'accepted' );
+		} catch ( CannotStage $e ) {
+			$this->assertStringContainsString( 'cannot be removed again', $e->getMessage(), 'its own file is still there' );
+		}
+		unlink( $dir . '/' . DirectoryProbe::BARE );
+		unlink( $dir . '/.DS_Store' );
+		try {
+			$left->invoke( null, $dir, $this->dir );
+			$this->fail( 'accepted' );
+		} catch ( CannotStage $e ) {
+			$this->assertStringContainsString( 'cannot be removed again', $e->getMessage(), 'empty and still there: it could not be removed' );
+		}
+		rmdir( $dir );
 	}
 }
