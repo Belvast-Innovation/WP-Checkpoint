@@ -132,8 +132,11 @@ final class Page {
 	 */
 	public function render(): void {
 		Plugin::instance()->directories()->base();
-		\WPCheckpoint\Support\Schema::ensure();
-		Plugin::instance()->jobs()->maintenance();
+		$schema = \WPCheckpoint\Support\Schema::ensure( true ); // Also adds columns lost since the version was recorded.
+		if ( ! in_array( $schema['action'], array( 'pending', 'failed' ), true ) ) {
+			// Housekeeping writes rows as this code knows them: not on a table that is behind.
+			Plugin::instance()->jobs()->maintenance();
+		}
 		$tabs   = $this->tabs();
 		$active = $tabs->resolve( $this->requested_tab() );
 		?>

@@ -469,7 +469,7 @@ final class Plugin {
 		update_option( Uninstaller::OPTION_VERSION, WPCHECKPOINT_VERSION, false );
 		// Activation from the admin is a proper web request: the best moment to choose the storage location.
 		self::instance()->directories()->base();
-		Schema::ensure();
+		Schema::ensure( true );
 	}
 
 	/**

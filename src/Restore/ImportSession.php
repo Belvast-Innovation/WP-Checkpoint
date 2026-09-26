@@ -35,7 +35,7 @@ defined( 'ABSPATH' ) || exit;
  * other raises StatementFailed with the server's text, the database name
  * masked (it is often the hosting account's name).
  */
-final class ImportSession {
+final class ImportSession implements Queries {
 
 	/**
 	 * Error numbers after which the same statement may succeed later.

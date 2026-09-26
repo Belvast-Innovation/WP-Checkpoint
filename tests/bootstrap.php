@@ -101,6 +101,9 @@ function wpcheckpoint_bootstrap_integration() {
 		'muplugins_loaded',
 		static function () {
 			require dirname( __DIR__ ) . '/wp-checkpoint.php';
+			// phpunit is neither an admin request, cron nor WP-CLI: without this, no test could create the job
+			// table. Tests of the other requests say so (SchemaColumnsTest).
+			\WPCheckpoint\Support\Schema::set_upgrade_context( true );
 		}
 	);
 

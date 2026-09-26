@@ -8,11 +8,13 @@
 namespace WPCheckpoint\Jobs;
 
 use WPCheckpoint\Archive\ConcurrentWriter;
+use WPCheckpoint\Restore\LedgerOutdated;
 use WPCheckpoint\Support\Environment;
 use WPCheckpoint\Support\Logger;
 use WPCheckpoint\Support\Redactor;
 use WPCheckpoint\Support\Thresholds;
 use WPCheckpoint\Support\Report;
+use WPCheckpoint\Support\Schema;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -162,15 +164,23 @@ final class Runner {
 	 * @param float|null $started_at When the budget started: the web driver passes the request start
 	 *                               (bootstrap time counts), a CLI loop passes the current time before
 	 *                               each tick; null means now.
+	 * @param string[]   $schema     What Schema::ensure() found the job table lacks (its problems), when the
+	 *                               driver's migration failed; the job's own row may show more.
 	 * @return TickResult
 	 */
-	public function tick( int $job_id, $started_at = null ): TickResult {
+	public function tick( int $job_id, $started_at = null, array $schema = array() ): TickResult {
 		$job = $this->repository->find( $job_id );
 		if ( null === $job ) {
 			return new TickResult( TickResult::MISSING, -1, null );
 		}
 		if ( ! in_array( $job->status, array( Job::QUEUED, Job::RUNNING, Job::PAUSED ), true ) ) {
 			return new TickResult( TickResult::FINISHED, -1, $job );
+		}
+		$problems = array_values( array_unique( array_merge( $schema, $job->missing_columns ) ) );
+		if ( array() !== $problems ) {
+			// The table lacks columns this code writes and reads, or holds them narrower: a later write would
+			// fail, or a default would stand in for a value. Failed with the reason, before anything else.
+			return $this->fail_for_missing_columns( $job, $problems );
 		}
 
 		$gate = $this->repository->gate( $job );
@@ -526,7 +536,7 @@ final class Runner {
 	 * and without the context.
 	 *
 	 * @param Job                  $job     Job.
-	 * @param string               $level   Logger::INFO or Logger::WARNING.
+	 * @param string               $level   Logger::INFO, Logger::WARNING or Logger::ERROR.
 	 * @param string               $message Message (no paths, no site data).
 	 * @param array<string, mixed> $context Context (numbers and identifiers).
 	 * @return void
@@ -758,9 +768,39 @@ final class Runner {
 	}
 
 	/**
+	 * Fail a job the table cannot hold (JobRepository::fail_for_missing_columns()).
+	 *
+	 * @param Job      $job      Job, as read.
+	 * @param string[] $problems What the table lacks (Schema::column_problems()).
+	 * @return TickResult
+	 */
+	private function fail_for_missing_columns( Job $job, array $problems ): TickResult {
+		$message  = Schema::problem_message( $problems );
+		$unusable = array_map( array( Schema::class, 'problem_column' ), $problems );
+		$outcome  = $this->repository->fail_for_missing_columns( $job, $message, $unusable );
+		if ( JobRepository::FAIL_ERROR === $outcome ) {
+			// Not even the failure could be written: say why, and try again later (the columns may come back).
+			return new TickResult( TickResult::BLOCKED, JobRepository::BACKOFF_SECONDS[ count( JobRepository::BACKOFF_SECONDS ) - 1 ], $job, $this->redactor->redact( $message ) );
+		}
+		if ( JobRepository::FAIL_HELD === $outcome ) {
+			// A live run holds it (its own next tick fails it), or it ended meanwhile.
+			$now = $this->repository->find( $job->id );
+			if ( null === $now ) {
+				return new TickResult( TickResult::MISSING, -1, null );
+			}
+			if ( ! in_array( $now->status, array( Job::QUEUED, Job::RUNNING, Job::PAUSED ), true ) ) {
+				return new TickResult( TickResult::FINISHED, -1, $now );
+			}
+			return new TickResult( TickResult::BUSY, self::BUSY_RETRY_SECONDS, $now, __( 'Another process is working on this job.', 'wp-checkpoint' ) );
+		}
+		$this->note( $job, Logger::ERROR, 'Job failed', array( 'error' => $message ) );
+		return new TickResult( TickResult::FAILED, -1, $job, $this->redactor->redact( $message ) );
+	}
+
+	/**
 	 * The kind of failure an exception from a step means (Job::stamp_failure()):
-	 * final for lost work files and for a table that changed under the export,
-	 * no kind for anything else.
+	 * final for lost work files, a table that changed under the export and a
+	 * restore ledger of an older version, no kind for anything else.
 	 *
 	 * @param \Throwable $e Exception.
 	 * @return string
@@ -769,7 +809,7 @@ final class Runner {
 		if ( $e instanceof TableChanged ) {
 			return Job::FAILURE_FINAL . ':' . Job::REASON_TABLE_CHANGED;
 		}
-		return $e instanceof WorkLost ? Job::FAILURE_FINAL : '';
+		return $e instanceof WorkLost || $e instanceof LedgerOutdated ? Job::FAILURE_FINAL : '';
 	}
 
 	/**
