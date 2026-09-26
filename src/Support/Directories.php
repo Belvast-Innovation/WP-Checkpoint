@@ -655,15 +655,6 @@ final class Directories {
 	}
 
 	/**
-	 * Whether a restore job is unfinished: true, false, or null when that cannot be read.
-	 *
-	 * @return bool|null
-	 */
-	private function restore_unfinished() {
-		return $this->unfinished( \WPCheckpoint\Jobs\RestoreJob::ID );
-	}
-
-	/**
 	 * The directory and token of each unfinished restore, or null when that cannot be read (JobRepository, or
 	 * the answer a test gives in the context: key "restores", a callable; internal, for tests only).
 	 *
