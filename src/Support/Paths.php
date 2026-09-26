@@ -192,7 +192,7 @@ final class Paths {
 		if ( '' === $parent ) {
 			return '/';
 		}
-		return 1 === preg_match( '#^[A-Za-z]:$#', $parent ) ? $parent . '/' : $parent;
+		return $parent;
 	}
 
 	/**
