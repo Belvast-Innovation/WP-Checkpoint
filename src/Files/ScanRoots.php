@@ -106,6 +106,21 @@ final class ScanRoots {
 	}
 
 	/**
+	 * Each content group's live directory on this site (other-content: the content directory itself), as
+	 * WordPress reports them, normalised.
+	 *
+	 * @return array<string, string>
+	 */
+	public static function site_directories(): array {
+		$dirs = self::wordpress_directories();
+		$out  = array();
+		foreach ( self::GROUPS as $group ) {
+			$out[ $group ] = rtrim( $dirs[ $group ], '/' );
+		}
+		return $out;
+	}
+
+	/**
 	 * The site's directories as WordPress reports them.
 	 *
 	 * @return array<string, string>

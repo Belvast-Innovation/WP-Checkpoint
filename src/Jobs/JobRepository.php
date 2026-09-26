@@ -7,6 +7,7 @@
 
 namespace WPCheckpoint\Jobs;
 
+use WPCheckpoint\Files\ScanRoots;
 use WPCheckpoint\Support\Deleter;
 use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Support\Paths;
@@ -1357,6 +1358,18 @@ final class JobRepository {
 			$budget -= $result['deleted'] + count( $result['failed'] );
 			$this->report_reclaim( $entry['kind'] . ' ' . ( $entry['id'] > 0 ? 'of job ' . $entry['id'] : basename( $entry['path'] ) ), $result );
 		}
+		// A restore's staging roots and probes, next to the site's directories: the same rule as work_dir.
+		foreach ( Residue::scan_site( Residue::site_dirs( ScanRoots::site_directories() ), $token ) as $entry ) {
+			if ( $budget <= 0 ) {
+				return;
+			}
+			if ( ! $this->is_work_orphan( $entry['id'], $token, $owners ) ) {
+				continue;
+			}
+			$result  = Deleter::delete_tree( $entry['parent'], $entry['path'], $budget );
+			$budget -= $result['deleted'] + count( $result['failed'] );
+			$this->report_reclaim( $entry['kind'] . ' of job ' . $entry['id'], $result );
+		}
 		$this->drop_tables_of(
 			$token,
 			0,
@@ -1423,7 +1436,8 @@ final class JobRepository {
 
 	/**
 	 * Reclaim the work directory and temporary tables of one job, inside
-	 * the current storage directory only. Called by the runner after a
+	 * the current storage directory only, and a restore's staging roots and
+	 * probes next to the site's directories. Called by the runner after a
 	 * cancelled job's steps ran their cleanup, and by the purge. Bounded:
 	 * returns false while entries remain, which the next reap pass picks
 	 * up as an orphan.
@@ -1439,13 +1453,28 @@ final class JobRepository {
 		}
 		$token  = (string) $this->directories->state()['token'];
 		$tables = $this->drop_tables_of( $token, $job->id );
-		$dir    = Residue::work_dir( $base, $job->id );
-		if ( ! is_dir( $dir ) ) {
-			return $tables;
+		$done   = $tables;
+		$budget = self::RECLAIM_MAX_ENTRIES;
+		// The restore's staging roots and probes next to the site's directories go with its work.
+		foreach ( Residue::scan_site( Residue::site_dirs( ScanRoots::site_directories() ), $token ) as $entry ) {
+			if ( $entry['id'] !== $job->id ) {
+				continue;
+			}
+			if ( $budget <= 0 ) {
+				return false;
+			}
+			$result  = Deleter::delete_tree( $entry['parent'], $entry['path'], $budget );
+			$budget -= $result['deleted'] + count( $result['failed'] );
+			$this->report_reclaim( $entry['kind'] . ' of job ' . $job->id, $result );
+			$done = $done && ! $result['remaining'] && array() === $result['failed'];
 		}
-		$result = Deleter::delete_tree( Residue::tmp( $base ), $dir, self::RECLAIM_MAX_ENTRIES );
+		$dir = Residue::work_dir( $base, $job->id );
+		if ( ! is_dir( $dir ) ) {
+			return $done;
+		}
+		$result = Deleter::delete_tree( Residue::tmp( $base ), $dir, max( 1, $budget ) );
 		$this->report_reclaim( 'work directory of job ' . $job->id, $result );
-		return $tables && ! $result['remaining'] && array() === $result['failed'];
+		return $done && ! $result['remaining'] && array() === $result['failed'];
 	}
 
 	/**
