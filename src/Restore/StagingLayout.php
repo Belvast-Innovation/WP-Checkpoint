@@ -7,6 +7,8 @@
 
 namespace WPCheckpoint\Restore;
 
+use WPCheckpoint\Files\PathKey;
+
 defined( 'ABSPATH' ) || exit;
 
 /**
@@ -15,11 +17,13 @@ defined( 'ABSPATH' ) || exit;
  * the four group directories goes to that group's directory on this site
  * (each where this site keeps it), any other entry of the content
  * directory is other-content. A path belongs to no group (it is not
- * restored; the caller reports it) when it is outside "wp-content/", when
- * its entry of the content directory is a file named like a group
- * directory or like this plugin's own ("wp-checkpoint-*"), or when that
- * entry is, contains or lies inside one of this site's group directories
- * (uploads kept in the content directory under another name).
+ * restored; the caller reports it) when it is outside "wp-content/", or
+ * when its entry of the content directory is a file named like a group
+ * directory, an entry named like this plugin's own ("wp-checkpoint-*",
+ * without case), a name another name reaches on some file system, or an
+ * entry on, above or inside one of this site's group directories or a
+ * reserved directory (uploads kept in the content directory under another
+ * name, the storage directory).
  *
  * Each group is staged in the parent directory of its live directory
  * (other-content in the content directory itself, where its entries live),
@@ -70,15 +74,26 @@ final class StagingLayout {
 	private $random;
 
 	/**
+	 * Directories an entry of other-content must not land on, above or in (the storage directory).
+	 *
+	 * @var string[]
+	 */
+	private $reserved = array();
+
+	/**
 	 * Constructor.
 	 *
-	 * @param array<string, string> $groups Every group => this site's live directory (other-content: the content directory).
-	 * @param string                $token  Storage token (12 lowercase hex).
-	 * @param int                   $job_id Job id.
-	 * @param string                $random 32 lowercase hex (new_random()).
+	 * The directories are compared as given: the caller passes them resolved (realpath()), so that two
+	 * spellings of one directory are one.
+	 *
+	 * @param array<string, string> $groups   Every group => this site's live directory (other-content: the content directory).
+	 * @param string                $token    Storage token (12 lowercase hex).
+	 * @param int                   $job_id   Job id.
+	 * @param string                $random   32 lowercase hex (new_random()).
+	 * @param string[]              $reserved Directories other-content must not land on, above or in (the storage directory).
 	 * @throws \InvalidArgumentException When a part is not of its shape.
 	 */
-	public function __construct( array $groups, string $token, int $job_id, string $random ) {
+	public function __construct( array $groups, string $token, int $job_id, string $random, array $reserved = array() ) {
 		foreach ( self::GROUPS as $group ) {
 			if ( ! isset( $groups[ $group ] ) || '' === rtrim( (string) $groups[ $group ], '/' ) ) {
 				throw new \InvalidArgumentException( 'Every content group needs its directory.' );
@@ -91,6 +106,12 @@ final class StagingLayout {
 		$this->token  = $token;
 		$this->job_id = $job_id;
 		$this->random = $random;
+		foreach ( $reserved as $dir ) {
+			$dir = rtrim( str_replace( '\\', '/', (string) $dir ), '/' );
+			if ( '' !== $dir ) {
+				$this->reserved[] = $dir;
+			}
+		}
 	}
 
 	/**
@@ -104,14 +125,15 @@ final class StagingLayout {
 
 	/**
 	 * Where a backup path goes: its group, the path inside the group, the live target and the staged file.
-	 * Null for a path outside "wp-content/" or with no name inside its group (it belongs to no group).
+	 * Null when it belongs to no group (see the class description; other_content_entry()), or has no name
+	 * inside its group.
 	 *
 	 * @param string $path Backup path (the files index's "p", already validated as an entry path).
 	 * @return array{group: string, relative: string, target: string, staged: string}|null
 	 */
 	public function map( string $path ) {
 		$parts = explode( '/', $path );
-		if ( count( $parts ) < 2 || self::CONTENT !== $parts[0] ) {
+		if ( count( $parts ) < 2 || self::CONTENT !== $parts[0] || '' === $parts[ count( $parts ) - 1 ] ) {
 			return null;
 		}
 		$named = in_array( $parts[1], array( 'plugins', 'themes', 'uploads', 'mu-plugins' ), true );
@@ -119,26 +141,11 @@ final class StagingLayout {
 			$group    = $parts[1];
 			$relative = implode( '/', array_slice( $parts, 2 ) );
 		} else {
-			if ( $named || 0 === strpos( $parts[1], 'wp-checkpoint-' ) ) {
-				// A file named like a group directory, or like this plugin's own directories: not an entry of
-				// other-content (its target would be one of those).
+			if ( $named || ! $this->other_content_entry( $parts[1] ) ) {
 				return null;
 			}
 			$group    = self::OTHER;
 			$relative = implode( '/', array_slice( $parts, 1 ) );
-			// An entry of other-content on, above or inside one of this site's group directories (its uploads
-			// kept in the content directory under another name): swapping it would swap that group.
-			// Compared without case: on a file system that folds it, the two are one directory.
-			$top = strtolower( $this->groups[ self::OTHER ] . '/' . $parts[1] );
-			foreach ( array( 'plugins', 'themes', 'uploads', 'mu-plugins' ) as $group_name ) {
-				$live = strtolower( $this->groups[ $group_name ] );
-				if ( $live === $top || 0 === strpos( $live . '/', $top . '/' ) || 0 === strpos( $top . '/', $live . '/' ) ) {
-					return null;
-				}
-			}
-		}
-		if ( '' === $relative || '' === $parts[ count( $parts ) - 1 ] ) {
-			return null;
 		}
 		return array(
 			'group'    => $group,
@@ -146,6 +153,43 @@ final class StagingLayout {
 			'target'   => $this->groups[ $group ] . '/' . $relative,
 			'staged'   => $this->stage_dir( $group ) . '/' . $relative,
 		);
+	}
+
+	/**
+	 * Whether a name may be an entry of other-content: not one another name reaches on some file system (a
+	 * trailing dot or space, which Windows drops; ":" of an NTFS stream; "~" of an 8.3 short name), not named
+	 * like this plugin's own directories (without case), and not on, above or inside one of this site's group
+	 * directories or a reserved directory (compared as PathKey does: without case, in one Unicode form).
+	 *
+	 * @param string $name The entry's name in the content directory.
+	 * @return bool
+	 */
+	private function other_content_entry( string $name ): bool {
+		if ( 1 === preg_match( '/[.\x20]\z|[:~]/', $name ) || 0 === strpos( strtolower( $name ), 'wp-checkpoint-' ) ) {
+			return false;
+		}
+		$top = self::key( $this->groups[ self::OTHER ] . '/' . $name );
+		$off = $this->reserved;
+		foreach ( array( 'plugins', 'themes', 'uploads', 'mu-plugins' ) as $group ) {
+			$off[] = $this->groups[ $group ];
+		}
+		foreach ( $off as $dir ) {
+			$live = self::key( $dir );
+			if ( $live === $top || 0 === strpos( $live . '/', $top . '/' ) || 0 === strpos( $top . '/', $live . '/' ) ) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	/**
+	 * The key under which two paths name one directory on a file system that folds case or Unicode forms.
+	 *
+	 * @param string $path Path.
+	 * @return string
+	 */
+	private static function key( string $path ): string {
+		return function_exists( 'mb_check_encoding' ) && mb_check_encoding( $path, 'UTF-8' ) ? PathKey::of( $path ) : strtolower( $path );
 	}
 
 	/**
@@ -229,14 +273,14 @@ final class StagingLayout {
 	 * @return array{kind: string, token: string, job_id: int}|null
 	 */
 	public static function parse( string $name ) {
-		if ( 1 === preg_match( '/\A' . preg_quote( self::STAGE_PREFIX, '/' ) . '([a-f0-9]{12})-([1-9][0-9]{0,18})-[a-f0-9]{32}\z/', $name, $m ) ) {
+		if ( 1 === preg_match( '/\A' . preg_quote( self::STAGE_PREFIX, '/' ) . '([a-f0-9]{12})-([1-9][0-9]{0,17})-[a-f0-9]{32}\z/', $name, $m ) ) {
 			return array(
 				'kind'   => 'stage',
 				'token'  => $m[1],
 				'job_id' => (int) $m[2],
 			);
 		}
-		if ( 1 === preg_match( '/\A' . preg_quote( self::PROBE_PREFIX, '/' ) . '([a-f0-9]{12})-([1-9][0-9]{0,18})-[a-f0-9]{16}(-r|\.php)?(\.[a-f0-9]{16}\.tmp)?\z/', $name, $m ) ) {
+		if ( 1 === preg_match( '/\A' . preg_quote( self::PROBE_PREFIX, '/' ) . '([a-f0-9]{12})-([1-9][0-9]{0,17})-[a-f0-9]{16}(-r|\.php)?(\.[a-f0-9]{16}\.tmp)?\z/', $name, $m ) ) {
 			return array(
 				'kind'   => 'probe',
 				'token'  => $m[1],

@@ -179,6 +179,8 @@ final class StorageTest extends WP_UnitTestCase {
 		$this->assertTrue( $state['clone_detected'] );
 		$this->assertSame( $old, $state['previous_path'] );
 		$this->assertNotSame( basename( $old ), basename( $new ), 'a new token was chosen' );
+		$this->assertNotContains( substr( basename( $old ), strlen( Directories::DIR_PREFIX ) ), Directories::own_tokens(), 'the original\'s token is not the clone\'s own: its staging is never reaped here' );
+		$this->assertContains( substr( basename( $new ), strlen( Directories::DIR_PREFIX ) ), Directories::own_tokens(), 'the control: the clone\'s new token is' );
 
 		// Uninstall on the clone must refuse to delete the original.
 		update_option( Uninstaller::OPTION_DELETE_DATA, true );
@@ -248,6 +250,7 @@ final class StorageTest extends WP_UnitTestCase {
 		$this->assertSame( $other, $moved->base(), $moved->last_error() );
 		$this->assertNotSame( $token, $moved->state()['token'] );
 		$this->assertTrue( Directories::is_valid_token( $moved->state()['token'] ) );
+		$this->assertSame( array( $moved->state()['token'], $token ), Directories::own_tokens(), 'the earlier token is still this installation\'s: it may name staging next to the site' );
 		$this->assertSame( $moved->state()['install_id'], $dirs->state()['install_id'], 'install_id is the installation, the token is the directory choice' );
 	}
 

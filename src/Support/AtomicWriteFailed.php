@@ -11,9 +11,10 @@ defined( 'ABSPATH' ) || exit;
 
 /**
  * AtomicFile::write() did not leave the file in place: it could not be
- * created, written, moved into place or read back as written. Nothing of
- * the attempt is left (the temporary file and a wrong final file are
- * removed). The message names the stage, never a path.
+ * created, written, moved into place, read back, or it read back
+ * otherwise than written. The temporary file, and a final file that read
+ * back otherwise, are removed (attempted: a removal can fail too). The
+ * message names the stage, never a path.
  */
 final class AtomicWriteFailed extends \RuntimeException {
 }

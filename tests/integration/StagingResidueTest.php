@@ -8,14 +8,19 @@ use WPCheckpoint\Jobs\Residue;
 use WPCheckpoint\Plugin;
 use WPCheckpoint\Restore\StagingLayout;
 use WPCheckpoint\Support\Deleter;
+use WPCheckpoint\Support\Directories;
+use WPCheckpoint\Support\Options;
+use WPCheckpoint\Support\Schema;
+use WPCheckpoint\Support\Uninstaller;
 use WPCheckpoint\Tests\Fixtures\Jobs\JobTestCase;
 
 /**
  * A restore's staging roots and probes live next to the site's
  * directories, not under the storage directory: they are registered
  * residue all the same. The reaper removes an ended job's, keeps a running
- * one's and never touches another installation's; a cancelled job's go
- * with its work.
+ * one's (a probe only while a run holds the job) and never touches another
+ * installation's; a cancelled job's go with its work, wherever its storage
+ * directory is now; uninstall removes this installation's.
  */
 final class StagingResidueTest extends JobTestCase {
 
@@ -39,6 +44,31 @@ final class StagingResidueTest extends JobTestCase {
 	 */
 	private function layout( int $job_id, string $token = '' ): StagingLayout {
 		return new StagingLayout( ScanRoots::site_directories(), '' === $token ? (string) Plugin::instance()->directories()->state()['token'] : $token, $job_id, StagingLayout::new_random() );
+	}
+
+	/**
+	 * The staging roots of a layout, then its probes (top level, as leave() made them).
+	 *
+	 * @return array{0: string[], 1: string[]}
+	 */
+	private static function split( array $made ): array {
+		$roots  = array_values( array_filter( $made, static function ( $path ) { return 0 === strpos( basename( $path ), StagingLayout::STAGE_PREFIX ); } ) );
+		$probes = array_values( array_diff( $made, $roots ) );
+		return array( $roots, $probes );
+	}
+
+	private static function set( int $id, array $row ): void {
+		global $wpdb;
+		$wpdb->update( Schema::jobs_table(), $row, array( 'id' => $id ) );
+	}
+
+	/**
+	 * This installation's tokens now, plus an earlier one it used.
+	 */
+	private static function past_token( string $token ): void {
+		$state                = Directories::load_state();
+		$state['past_tokens'] = array( $token );
+		Options::set( Directories::OPTION, $state );
 	}
 
 	/**
@@ -75,9 +105,10 @@ final class StagingResidueTest extends JobTestCase {
 		$running = $this->job_of( 'plain' );
 		$ended   = $this->job_of( 'plain' );
 		Plugin::instance()->jobs()->transition( Plugin::instance()->jobs()->find( $ended ), Job::CANCELLED );
+		$this->assertNotNull( Plugin::instance()->jobs()->acquire( $running ), 'a unit of the running job is under way' );
 		$kept = $this->leave( $this->layout( $running ) );
 		$gone = $this->leave( $this->layout( $ended ) );
-		$found = Residue::scan_site( Residue::site_dirs( ScanRoots::site_directories() ), (string) Plugin::instance()->directories()->state()['token'] );
+		$found = Residue::scan_site( Residue::site_dirs( ScanRoots::site_directories() ), array( (string) Plugin::instance()->directories()->state()['token'] ) );
 		$this->assertCount( 6, $found, 'the control: the scan finds both jobs\' roots and probes' );
 
 		$this->reap();
@@ -86,6 +117,48 @@ final class StagingResidueTest extends JobTestCase {
 		}
 		foreach ( $kept as $path ) {
 			$this->assertFileExists( $path, 'a running job\'s: kept' );
+		}
+	}
+
+	public function test_a_probe_goes_once_no_run_holds_its_job_and_the_staging_root_stays(): void {
+		$this->register( 'plain', array( $this->counting_step( 'p', 5 ) ) );
+		$id                      = $this->job_of( 'plain' );
+		list( $roots, $probes ) = self::split( $this->leave( $this->layout( $id ) ) );
+		$this->assertCount( 2, $probes );
+		$this->assertFalse( Plugin::instance()->jobs()->find( $id )->is_locked( time() ), 'between two units' );
+
+		$this->reap();
+		foreach ( $probes as $path ) {
+			$this->assertFileDoesNotExist( $path, 'a probe lives within one unit: none is under way' );
+		}
+		foreach ( $roots as $path ) {
+			$this->assertFileExists( $path, 'the staging lives as long as the restore' );
+		}
+	}
+
+	public function test_an_earlier_tokens_staging_is_this_installations(): void {
+		$this->register( 'plain', array( $this->counting_step( 'p', 5 ) ) );
+		$running = $this->job_of( 'plain' );
+		$ended   = $this->job_of( 'plain' );
+		Plugin::instance()->jobs()->transition( Plugin::instance()->jobs()->find( $ended ), Job::CANCELLED );
+		// Both jobs were started under an earlier storage directory; the running one still uses it.
+		self::set( $running, array( 'storage_token' => 'aaaaaaaaaaaa' ) );
+		self::set( $ended, array( 'storage_token' => 'aaaaaaaaaaaa' ) );
+		self::past_token( 'aaaaaaaaaaaa' );
+		list( $kept )   = self::split( $this->leave( $this->layout( $running, 'aaaaaaaaaaaa' ) ) );
+		$gone           = $this->leave( $this->layout( $ended, 'aaaaaaaaaaaa' ) );
+		list( $stale )  = self::split( $this->leave( $this->layout( $running ) ) ); // The running job, under a token it does not hold.
+		$theirs         = $this->leave( $this->layout( $ended, 'ffffffffffff' ) );
+
+		$this->reap();
+		foreach ( $kept as $path ) {
+			$this->assertFileExists( $path, 'the restore\'s, under the token it was started with: kept' );
+		}
+		foreach ( array_merge( $gone, $stale ) as $path ) {
+			$this->assertFileDoesNotExist( $path, 'an ended job\'s, and a name the job does not hold: reaped' );
+		}
+		foreach ( $theirs as $path ) {
+			$this->assertFileExists( $path, 'a token that was never ours: untouched' );
 		}
 	}
 
@@ -119,5 +192,66 @@ final class StagingResidueTest extends JobTestCase {
 			$this->assertFileExists( $path, 'another job\'s: kept' );
 		}
 		$this->assertSame( Job::RUNNING, Plugin::instance()->jobs()->find( $other )->status );
+	}
+
+	public function test_a_jobs_staging_goes_with_its_work_after_its_storage_directory_changed(): void {
+		$this->register( 'plain', array( $this->counting_step( 'p', 5 ) ) );
+		$id = $this->job_of( 'plain' );
+		self::set( $id, array( 'storage_token' => 'aaaaaaaaaaaa', 'storage_path' => WP_CONTENT_DIR . '/wp-checkpoint-aaaaaaaaaaaa' ) );
+		$made = $this->leave( $this->layout( $id, 'aaaaaaaaaaaa' ) );
+		$job  = Plugin::instance()->jobs()->find( $id );
+
+		$this->assertFalse( Plugin::instance()->jobs()->reclaim_work( $job ), 'its work files, in the other directory, are left alone' );
+		foreach ( $made as $path ) {
+			$this->assertFileDoesNotExist( $path, 'its staging, next to the site: reclaimed all the same' );
+		}
+	}
+
+	public function test_reclaim_is_bounded_and_finishes_over_several_calls(): void {
+		$this->register( 'plain', array( $this->counting_step( 'p', 5 ) ) );
+		$id   = $this->job_of( 'plain' );
+		$made = $this->leave( $this->layout( $id ) );
+		$job  = Plugin::instance()->jobs()->find( $id );
+
+		$this->assertFalse( Plugin::instance()->jobs()->reclaim_work( $job, 3 ), 'three entries do not reach the end' );
+		$this->assertNotEmpty( array_filter( $made, 'file_exists' ), 'something is left for the next call' );
+		$calls = 1;
+		while ( ! Plugin::instance()->jobs()->reclaim_work( $job, 3 ) ) {
+			$this->assertLessThan( 40, ++$calls, 'each call advances' );
+		}
+		$this->assertSame( array(), array_values( array_filter( $made, 'file_exists' ) ) );
+	}
+
+	public function test_uninstall_removes_this_installations_staging_under_every_token_it_used(): void {
+		$this->register( 'plain', array( $this->counting_step( 'p', 5 ) ) );
+		$id = $this->job_of( 'plain' );
+		self::past_token( 'aaaaaaaaaaaa' );
+		$ours   = array_merge( $this->leave( $this->layout( $id ) ), $this->leave( $this->layout( $id, 'aaaaaaaaaaaa' ) ) );
+		$theirs = $this->leave( $this->layout( $id, 'ffffffffffff' ) );
+		update_option( Uninstaller::OPTION_DELETE_DATA, false );
+
+		Uninstaller::run();
+		$this->assertSame( Job::CANCELLED, Plugin::instance()->jobs()->find( $id )->status );
+		foreach ( $ours as $path ) {
+			$this->assertFileDoesNotExist( $path, 'a restore\'s working copy: removed even when data is kept' );
+		}
+		foreach ( $theirs as $path ) {
+			$this->assertFileExists( $path, 'another installation\'s: untouched' );
+		}
+	}
+
+	public function test_on_a_network_uploads_is_the_main_sites_from_any_site(): void {
+		if ( ! is_multisite() ) {
+			$this->markTestSkipped( 'Multisite only.' );
+		}
+		$main = ScanRoots::site_directories()['uploads'];
+		$blog = self::factory()->blog->create();
+		switch_to_blog( $blog );
+		try {
+			$this->assertStringContainsString( '/sites/' . $blog, str_replace( '\\', '/', wp_upload_dir( null, false )['basedir'] ), 'the control: a site\'s own upload directory is inside the main site\'s' );
+			$this->assertSame( $main, ScanRoots::site_directories()['uploads'] );
+		} finally {
+			restore_current_blog();
+		}
 	}
 }

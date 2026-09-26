@@ -8,7 +8,9 @@
 namespace WPCheckpoint\Support;
 
 use WPCheckpoint\Jobs\Job;
+use WPCheckpoint\Files\ScanRoots;
 use WPCheckpoint\Jobs\LockFile;
+use WPCheckpoint\Jobs\Residue;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -69,6 +71,7 @@ final class Uninstaller {
 	public static function run(): void {
 		self::clear_transient_state();
 		self::cancel_jobs();
+		self::delete_site_residue();
 
 		if ( ! self::should_delete_data() ) {
 			return;
@@ -110,6 +113,26 @@ final class Uninstaller {
 			}
 		}
 		return max( 0, (int) $affected );
+	}
+
+	/**
+	 * Delete this installation's staging roots and probes next to the site's directories (under any of its
+	 * tokens), whatever the user chose: they are a cancelled restore's working copies, not user data, and
+	 * nothing reaps them once the plugin is gone. Runs after cancel_jobs(), so no run holds them any more.
+	 *
+	 * @return array{deleted: int, failed: string[]}
+	 */
+	public static function delete_site_residue(): array {
+		$result = array(
+			'deleted' => 0,
+			'failed'  => array(),
+		);
+		foreach ( Residue::scan_site( Residue::site_dirs( ScanRoots::site_directories() ), Directories::own_tokens() ) as $entry ) {
+			$part               = Deleter::delete_tree( $entry['parent'], $entry['path'] );
+			$result['deleted'] += $part['deleted'];
+			$result['failed']   = array_merge( $result['failed'], $part['failed'] );
+		}
+		return $result;
 	}
 
 	/**

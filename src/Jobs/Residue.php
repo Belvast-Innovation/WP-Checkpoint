@@ -8,6 +8,7 @@
 namespace WPCheckpoint\Jobs;
 
 use WPCheckpoint\Restore\StagingLayout;
+use WPCheckpoint\Support\Directories;
 
 /**
  * Every kind of temporary thing the plugin creates on disk is listed in
@@ -44,11 +45,15 @@ use WPCheckpoint\Restore\StagingLayout;
  * - probe: a directory or file the restore's preflight creates in a site
  *   directory to see what it can do there, and removes in the same unit
  *   (StagingLayout::probe_name()); left only by a process that died in
- *   between. Same rule as work_dir.
+ *   between. An orphan as soon as no live run holds its job (a probe in
+ *   mu-plugins would otherwise stay loaded on every request for days):
+ *   the work_dir rule, or a job without a live lease.
  *
- * Only entries whose name carries this installation's storage token are
- * ever listed (scan_site()); another installation's, on a copied site
- * sharing the directories, are never touched.
+ * Only entries whose name carries one of this installation's storage
+ * tokens are ever listed (scan_site(), Directories::own_tokens()); another
+ * installation's, on a copied site sharing the directories, are never
+ * touched. Uninstall removes them whatever the data setting (they are
+ * never the user's data).
  */
 final class Residue {
 
@@ -78,6 +83,7 @@ final class Residue {
 		'src/Support/Directories.php',
 		'src/Support/StorageReclaim.php',
 		'src/Restore/StagingLayout.php',
+		'src/Support/AtomicFile.php',
 	);
 
 	/**
@@ -198,23 +204,24 @@ final class Residue {
 
 	/**
 	 * The staging roots and probes this installation left in the site directories: entries whose name
-	 * (StagingLayout::parse()) carries $token. Another installation's (a copied site sharing the directories)
-	 * are never listed.
+	 * (StagingLayout::parse()) carries one of $tokens (Directories::own_tokens(), or one job's). Another
+	 * installation's (a copied site sharing the directories) are never listed.
 	 *
-	 * @param string[] $dirs  Site directories (site_dirs()).
-	 * @param string   $token Storage token of this installation.
-	 * @return array<int, array{kind: string, path: string, id: int, mtime: int, parent: string}>
+	 * @param string[] $dirs   Site directories (site_dirs()).
+	 * @param string[] $tokens Storage tokens of this installation.
+	 * @return array<int, array{kind: string, path: string, id: int, mtime: int, parent: string, token: string}>
 	 */
-	public static function scan_site( array $dirs, string $token ): array {
-		$out = array();
-		if ( '' === $token ) {
+	public static function scan_site( array $dirs, array $tokens ): array {
+		$out    = array();
+		$tokens = array_values( array_filter( $tokens, array( Directories::class, 'is_valid_token' ) ) );
+		if ( array() === $tokens ) {
 			return $out;
 		}
 		foreach ( array_unique( $dirs ) as $dir ) {
 			$entries = @scandir( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- an unreadable directory is simply nothing to reap.
 			foreach ( is_array( $entries ) ? $entries : array() as $name ) {
 				$parsed = StagingLayout::parse( (string) $name );
-				if ( null === $parsed || $parsed['token'] !== $token ) {
+				if ( null === $parsed || ! in_array( $parsed['token'], $tokens, true ) ) {
 					continue;
 				}
 				$path = $dir . DIRECTORY_SEPARATOR . $name;
@@ -224,6 +231,7 @@ final class Residue {
 				}
 				$entry           = self::entry( 'stage' === $parsed['kind'] ? self::STAGE_DIR : self::PROBE, $path, $parsed['job_id'], (int) $stat['mtime'] );
 				$entry['parent'] = $dir;
+				$entry['token']  = $parsed['token'];
 				$out[]           = $entry;
 			}
 		}

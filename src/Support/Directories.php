@@ -23,6 +23,11 @@ final class Directories {
 	const OPTION     = 'wpcheckpoint_storage';
 	const DIR_PREFIX = 'wp-checkpoint-';
 
+	/**
+	 * Past storage tokens kept (own_tokens()).
+	 */
+	const PAST_TOKENS = 10;
+
 	const SOURCE_OUTSIDE = 'outside';
 	const SOURCE_CONTENT = 'content';
 	const SOURCE_CUSTOM  = 'custom';
@@ -112,6 +117,7 @@ final class Directories {
 				'previous_abspath'    => '',
 				'trusted_deploy_root' => '',
 				'auto_reclaimed'      => array(),
+				'past_tokens'         => array(),
 			),
 			is_array( $stored ) ? $stored : array()
 		);
@@ -744,6 +750,27 @@ final class Directories {
 	 * @return void
 	 */
 	private function save_state(): void {
+		// A token this installation used before (its custom directory moved, a restore's token taken back) still
+		// names its staging roots and probes next to the site (Residue::scan_site()): it is kept, a few of them.
+		// Not after a clone was detected: the previous token is then the original installation's.
+		$saved = self::load_state()['token'];
+		if ( self::is_valid_token( $saved ) && $saved !== $this->state['token'] && empty( $this->state['clone_detected'] ) ) {
+			$past = array_values( array_diff( (array) $this->state['past_tokens'], array( $saved, (string) $this->state['token'] ) ) );
+			array_unshift( $past, $saved );
+			$this->state['past_tokens'] = array_slice( $past, 0, self::PAST_TOKENS );
+		}
 		Options::set( self::OPTION, $this->state );
+	}
+
+	/**
+	 * This installation's storage tokens, the current one first: the ones its staging roots and probes may carry.
+	 *
+	 * @param array<string, mixed>|null $state Stored state (load_state()), or null to load it.
+	 * @return string[]
+	 */
+	public static function own_tokens( $state = null ): array {
+		$state  = is_array( $state ) ? $state : self::load_state();
+		$tokens = array_merge( array( (string) $state['token'] ), (array) $state['past_tokens'] );
+		return array_values( array_unique( array_filter( array_map( 'strval', $tokens ), array( __CLASS__, 'is_valid_token' ) ) ) );
 	}
 }

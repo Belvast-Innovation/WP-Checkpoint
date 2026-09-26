@@ -1358,12 +1358,13 @@ final class JobRepository {
 			$budget -= $result['deleted'] + count( $result['failed'] );
 			$this->report_reclaim( $entry['kind'] . ' ' . ( $entry['id'] > 0 ? 'of job ' . $entry['id'] : basename( $entry['path'] ) ), $result );
 		}
-		// A restore's staging roots and probes, next to the site's directories: the same rule as work_dir.
-		foreach ( Residue::scan_site( Residue::site_dirs( ScanRoots::site_directories() ), $token ) as $entry ) {
+		// A restore's staging roots and probes next to the site's directories, under any of this installation's
+		// tokens: the same rule as work_dir, a probe also once no live run holds its job.
+		foreach ( Residue::scan_site( Residue::site_dirs( ScanRoots::site_directories() ), array_merge( array( $token ), Directories::own_tokens() ) ) as $entry ) {
 			if ( $budget <= 0 ) {
 				return;
 			}
-			if ( ! $this->is_work_orphan( $entry['id'], $token, $owners ) ) {
+			if ( ! $this->is_site_orphan( $entry, $owners ) ) {
 				continue;
 			}
 			$result  = Deleter::delete_tree( $entry['parent'], $entry['path'], $budget );
@@ -1377,6 +1378,28 @@ final class JobRepository {
 				return $this->is_work_orphan( $id, $token, $owners );
 			}
 		);
+	}
+
+	/**
+	 * Whether a staging root or probe (Residue::scan_site()) may be reclaimed: its job's work may (judged
+	 * under the entry's own token: a restore started under an earlier storage directory keeps its staging), or, for a probe, no run
+	 * holds the job now (a probe lives within one unit, which runs under the lock). The lock is read afresh,
+	 * after the listing: a cached row may predate the unit that created a listed probe.
+	 *
+	 * @param array{kind: string, path: string, id: int, mtime: int, parent: string, token: string} $entry  Entry.
+	 * @param array<int, Job|null>                                                                  $owners Lookup cache (updated).
+	 * @return bool
+	 * @throws ReclaimUnsafe When a job lookup failed.
+	 */
+	private function is_site_orphan( array $entry, array &$owners ): bool {
+		if ( $this->is_work_orphan( $entry['id'], $entry['token'], $owners ) ) {
+			return true;
+		}
+		if ( Residue::PROBE !== $entry['kind'] ) {
+			return false;
+		}
+		$job = $this->find_for_reclaim( $entry['id'] );
+		return null === $job || ! $job->is_locked( time() );
 	}
 
 	/**
@@ -1442,21 +1465,15 @@ final class JobRepository {
 	 * returns false while entries remain, which the next reap pass picks
 	 * up as an orphan.
 	 *
-	 * @param Job $job Job.
+	 * @param Job $job    Job.
+	 * @param int $budget Entries this call may delete (tests make it small).
 	 * @return bool True when nothing of the job's work is left.
 	 */
-	public function reclaim_work( Job $job ): bool {
-		$base = $this->files_base( $job );
-		if ( '' === $base ) {
-			$this->directories->log_event( sprintf( 'Job %d is bound to another storage directory; its work files were left alone.', $job->id ) );
-			return false;
-		}
-		$token  = (string) $this->directories->state()['token'];
-		$tables = $this->drop_tables_of( $token, $job->id );
-		$done   = $tables;
-		$budget = self::RECLAIM_MAX_ENTRIES;
-		// The restore's staging roots and probes next to the site's directories go with its work.
-		foreach ( Residue::scan_site( Residue::site_dirs( ScanRoots::site_directories() ), $token ) as $entry ) {
+	public function reclaim_work( Job $job, int $budget = self::RECLAIM_MAX_ENTRIES ): bool {
+		// The restore's staging roots and probes next to the site's directories go with its work, under the job's
+		// own token: they are not in the storage directory, so a changed storage directory does not keep them.
+		$done = true;
+		foreach ( Residue::scan_site( Residue::site_dirs( ScanRoots::site_directories() ), array( $job->storage_token ) ) as $entry ) {
 			if ( $entry['id'] !== $job->id ) {
 				continue;
 			}
@@ -1468,11 +1485,21 @@ final class JobRepository {
 			$this->report_reclaim( $entry['kind'] . ' of job ' . $job->id, $result );
 			$done = $done && ! $result['remaining'] && array() === $result['failed'];
 		}
+		$base = $this->files_base( $job );
+		if ( '' === $base ) {
+			$this->directories->log_event( sprintf( 'Job %d is bound to another storage directory; its work files were left alone.', $job->id ) );
+			return false;
+		}
+		$token = (string) $this->directories->state()['token'];
+		$done  = $this->drop_tables_of( $token, $job->id ) && $done;
+		if ( $budget <= 0 ) {
+			return false;
+		}
 		$dir = Residue::work_dir( $base, $job->id );
 		if ( ! is_dir( $dir ) ) {
 			return $done;
 		}
-		$result = Deleter::delete_tree( Residue::tmp( $base ), $dir, max( 1, $budget ) );
+		$result = Deleter::delete_tree( Residue::tmp( $base ), $dir, $budget );
 		$this->report_reclaim( 'work directory of job ' . $job->id, $result );
 		return $done && ! $result['remaining'] && array() === $result['failed'];
 	}

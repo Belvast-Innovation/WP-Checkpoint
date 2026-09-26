@@ -90,6 +90,37 @@ final class StagingLayoutTest extends TestCase {
 		$this->assertSame( '/srv/wp/wp-content/files/2026/a.jpg', $layout->map( 'wp-content/uploads/2026/a.jpg' )['target'], 'the uploads group goes to this site\'s directory' );
 	}
 
+	public function test_a_name_another_name_reaches_on_some_file_system_is_not_other_content(): void {
+		$layout = new StagingLayout(
+			array(
+				'plugins'       => '/srv/wp/wp-content/plugins',
+				'themes'        => '/srv/wp/wp-content/themes',
+				'uploads'       => '/srv/wp/wp-content/uploads',
+				'mu-plugins'    => '/srv/wp/wp-content/mu-plugins',
+				'other-content' => '/srv/wp/wp-content',
+			),
+			self::TOKEN,
+			7,
+			self::RANDOM,
+			array( '/srv/wp/wp-content/backups-store\\' )
+		);
+		foreach ( array(
+			'wp-content/plugins./a.php'                     => 'a trailing dot: Windows opens plugins',
+			'wp-content/plugins /a.php'                     => 'a trailing space: the same',
+			'wp-content/uploads::$DATA/a'                   => 'an NTFS stream of uploads',
+			'wp-content/PLUGIN~1/a.php'                     => 'an 8.3 short name',
+			'wp-content/WP-CHECKPOINT-stage-x/a.txt'        => 'this plugin\'s prefix, in capitals',
+			'wp-content/backups-store/a.zip'                => 'the reserved (storage) directory',
+			'wp-content/Backups-Store/a.zip'                => 'the same without case',
+			'wp-content/mu-plugins/'                        => 'no name inside the group',
+		) as $path => $why ) {
+			$this->assertNull( $layout->map( $path ), $why );
+		}
+		foreach ( array( 'wp-content/languages/a.mo', 'wp-content/backups-store-old/a.zip', 'wp-content/.htaccess', 'wp-content/cache.d/a' ) as $path ) {
+			$this->assertSame( 'other-content', $layout->map( $path )['group'], 'the control: ' . $path );
+		}
+	}
+
 	public function test_each_parent_holds_one_staging_root(): void {
 		$layout = new StagingLayout(
 			array(
@@ -141,6 +172,8 @@ final class StagingLayoutTest extends TestCase {
 			'wp-checkpoint-stage-' . self::TOKEN . '-7-' . substr( self::RANDOM, 0, 31 ),
 			'wp-checkpoint-stage-' . self::TOKEN . '-0-' . self::RANDOM,
 			'wp-checkpoint-probe-' . self::TOKEN . '-7-0123456789abcdef.txt',
+			'wp-checkpoint-stage-' . self::TOKEN . '-1234567890123456789-' . self::RANDOM, // More digits than any id.
+			'WP-CHECKPOINT-STAGE-' . self::TOKEN . '-7-' . self::RANDOM,
 			'plugins',
 		) as $name ) {
 			$this->assertNull( StagingLayout::parse( $name ), $name );
@@ -152,6 +185,7 @@ final class StagingLayoutTest extends TestCase {
 			array( 'token', 7, self::RANDOM ),
 			array( self::TOKEN, 0, self::RANDOM ),
 			array( self::TOKEN, 7, 'short' ),
+			array( self::TOKEN, 7, strtoupper( self::RANDOM ) ),
 		) as list( $token, $id, $random ) ) {
 			try {
 				new StagingLayout( array_fill_keys( StagingLayout::GROUPS, '/srv' ), $token, $id, $random );

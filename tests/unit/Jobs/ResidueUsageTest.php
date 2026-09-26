@@ -48,6 +48,7 @@ final class ResidueUsageTest extends TestCase {
 			"'wp-checkpoint-probe-" => 'a probe name',
 			'STAGE_PREFIX' => 'a staging root name',
 			'PROBE_PREFIX' => 'a probe name',
+
 		);
 		foreach ( $this->source_files() as $relative => $path ) {
 			$source = (string) file_get_contents( $path );
@@ -77,5 +78,8 @@ final class ResidueUsageTest extends TestCase {
 		$this->assertArrayHasKey( 'src/Jobs/JobContext.php', $files );
 		$this->assertStringContainsString( 'Residue::work_dir(', (string) file_get_contents( $files['src/Jobs/JobContext.php'] ), 'the work path comes from the catalogue' );
 		$this->assertStringContainsString( 'Residue::new_verify_dir(', (string) file_get_contents( $files['src/Cli/VerifyCommand.php'] ) );
+		// The control for the newer needles: the file that builds those names is found by them. (AtomicFile writes only
+		// names StagingLayout::parse() knows, temporary ones included: checked when it writes, AtomicFileTest.)
+		$this->assertStringContainsString( 'STAGE_PREFIX', (string) file_get_contents( $files['src/Restore/StagingLayout.php'] ) );
 	}
 }

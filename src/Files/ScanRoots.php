@@ -107,13 +107,22 @@ final class ScanRoots {
 
 	/**
 	 * Each content group's live directory on this site (other-content: the content directory itself), as
-	 * WordPress reports them, normalised.
+	 * WordPress reports them, normalised. On a multisite network, uploads is the main site's upload directory
+	 * whichever site the request runs for: another site's ("uploads/sites/N") is inside it.
 	 *
 	 * @return array<string, string>
 	 */
 	public static function site_directories(): array {
 		$dirs = self::wordpress_directories();
-		$out  = array();
+		if ( function_exists( 'is_multisite' ) && is_multisite() && ! is_main_site() ) {
+			switch_to_blog( get_main_site_id() );
+			$uploads = wp_upload_dir( null, false );
+			restore_current_blog();
+			if ( isset( $uploads['basedir'] ) ) {
+				$dirs['uploads'] = Paths::normalize( (string) $uploads['basedir'] );
+			}
+		}
+		$out = array();
 		foreach ( self::GROUPS as $group ) {
 			$out[ $group ] = rtrim( $dirs[ $group ], '/' );
 		}
