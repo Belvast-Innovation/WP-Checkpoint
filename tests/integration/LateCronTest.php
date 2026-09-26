@@ -302,26 +302,22 @@ final class LateCronTest extends JobTestCase {
 	}
 
 	public function test_a_deferral_that_cannot_be_recorded_runs_the_first_unit_and_says_why(): void {
-		global $wpdb;
 		$this->register( 'plain', array( $this->counting_step( 'p', 5 ) ) );
 		$id   = Plugin::instance()->jobs()->create( 'plain' )->id;
 		$hits = 0;
 		$this->on_count(
 			static function ( string $query ): string {
+				// Something printed on the way, as display_errors would print a notice (wpdb prints its own error
+				// only on a single site, so it cannot be the control here): nothing of it reaches the client.
+				echo 'Notice: printed while counting';
 				return str_replace( 'cron_deferrals = cron_deferrals + 1', 'no_such_column = 1', $query );
 			},
 			$hits
 		);
-		// wpdb prints the failed statement (as with WP_DEBUG_DISPLAY on): nothing of it reaches the client.
 		$this->expectOutputString( '' );
-		$shown = $wpdb->show_errors( true );
-		try {
-			$this->late_cron( $id );
-		} finally {
-			$wpdb->show_errors( $shown );
-		}
+		$this->late_cron( $id );
 		$this->assertSame( 1, $hits, 'the control: the count was tried' );
-		$this->assertGreaterThan( 0, JobActions::last_output_bytes(), 'the control: the error was printed, and captured' );
+		$this->assertGreaterThan( 0, JobActions::last_output_bytes(), 'the control: the notice was printed, and captured' );
 		$this->assertSame( 1, self::units( $this->job( $id ) ), 'the first unit only' );
 		$this->assertCount( 1, $this->log_lines( $this->job( $id ), 'started too late, and the deferral could not be recorded: it runs the first unit only' ) );
 	}
