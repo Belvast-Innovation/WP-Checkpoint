@@ -252,10 +252,10 @@ final class Job {
 	/**
 	 * Cron requests in a row that started too late to reach the Runner for
 	 * this job and put its tick off (JobActions::cron_tick()): whether the
-	 * job moves is not what it counts. Back to 0 whenever a driver hands the
-	 * job to the Runner (JobActions::tick(): an on-time cron request, a
-	 * forced one, a page's tick, WP-CLI; whatever that tick then does), on
-	 * retry and on an answer.
+	 * job moves is not what it counts. Back to 0 whenever the job reaches
+	 * the Runner (Runner::tick(): from an on-time cron request, a forced
+	 * one, a page's tick, WP-CLI; whatever that tick then does), on retry
+	 * and on an answer. Not counted while a live run holds the job.
 	 *
 	 * @var int
 	 */

@@ -341,8 +341,8 @@ final class JobActions {
 	 * its first unit only, when it can still hold one: with its time limit
 	 * known (max_execution_time) and less than CRON_UNIT_SECONDS of it left,
 	 * counted from the request start, the request puts the tick off again,
-	 * and at CRON_DEFERRAL_LIMIT deferrals without progress in between the
-	 * job fails with the reason. A timeout outside PHP (PHP-FPM's, a reverse
+	 * and at CRON_DEFERRAL_LIMIT deferrals without a hand-off to the Runner
+	 * in between the job fails with the reason. A timeout outside PHP (PHP-FPM's, a reverse
 	 * proxy's) cannot be seen from here, so the floor applies only where
 	 * PHP's own limit is set; without one, the tick runs its first unit as
 	 * described. The count (Job::$cron_deferrals) is of cron requests in a
@@ -440,8 +440,8 @@ final class JobActions {
 	/**
 	 * A late cron request after MAX_CRON_DEFERRALS deferrals that has too little time left for a unit: put off
 	 * again, counted on (the event for the next cron request is set); at CRON_DEFERRAL_LIMIT the job fails
-	 * (JobRepository::fail_for_late_cron(): not while a live run holds it, which handed it to the Runner and so starts the count
-	 * over, nor while it waits for an answer).
+	 * (JobRepository::fail_for_late_cron(): not while a live run holds it, nor while it waits for an answer; a
+	 * late request is not counted while a live run holds it either).
 	 *
 	 * @param Job   $job        Job, as read before counting.
 	 * @param float $late       Seconds into the request.
@@ -461,6 +461,11 @@ final class JobActions {
 			'deferrals'    => $now->cron_deferrals,
 			'limit'        => self::CRON_DEFERRAL_LIMIT,
 		);
+		if ( ! $counted && $now->is_locked( $this->repository->now() ) ) {
+			// Being run: not a job late requests keep from running (count_cron_deferral() leaves it).
+			$this->runner->note( $job, Logger::INFO, 'Tick put off: a live run holds the job, so this late request is not counted', $context );
+			return null;
+		}
 		if ( $now->cron_deferrals < self::CRON_DEFERRAL_LIMIT ) {
 			$this->runner->note(
 				$job,
@@ -479,15 +484,19 @@ final class JobActions {
 			self::CRON_DEFERRAL_LIMIT - self::MAX_CRON_DEFERRALS,
 			self::CRON_UNIT_SECONDS
 		);
-		$failed = $this->repository->fail_for_late_cron( $now, $message, self::CRON_DEFERRAL_LIMIT );
-		if ( null === $failed ) {
-			// A live run holds it, it was answered, retried or moved on meanwhile: its own state decides next time.
+		$outcome = $this->repository->fail_for_late_cron( $now, $message, self::CRON_DEFERRAL_LIMIT );
+		if ( JobRepository::FAIL_HELD === $outcome ) {
+			// A live run holds it, it was answered, retried or handed to the Runner meanwhile: its state decides.
 			$this->runner->note( $job, Logger::WARNING, 'Tick put off: the limit of deferrals is reached, but the job was not failed (a live run holds it, or it changed meanwhile)', $context );
+			return null;
+		}
+		if ( JobRepository::FAIL_ERROR === $outcome ) {
+			$this->runner->note( $job, Logger::WARNING, 'Tick put off: the limit of deferrals is reached, but the failure could not be written', $context );
 			return null;
 		}
 		Loopback::unschedule( $job->id );
 		$this->runner->note( $job, Logger::ERROR, 'Job failed', array_merge( array( 'error' => $message ), $context ) );
-		return new TickResult( TickResult::FAILED, -1, $failed, $message );
+		return new TickResult( TickResult::FAILED, -1, $now, $message );
 	}
 
 	/**
@@ -532,10 +541,7 @@ final class JobActions {
 			// A table the migration could not bring up to date (read in this request: a column missing, or
 			// narrower than needed) fails the job with the reason.
 			$problems = 'failed' === $schema['action'] ? (array) $schema['problems'] : array();
-			// The job reaches the Runner: whatever this tick does (runs, waits, is refused by the gate), it is no
-			// longer one that late cron requests keep from running (Job::$cron_deferrals).
-			$this->repository->reset_cron_deferrals( $id );
-			$result = $this->runner->tick( $id, null === $started_at ? self::started_at() : (float) $started_at, $problems );
+			$result   = $this->runner->tick( $id, null === $started_at ? self::started_at() : (float) $started_at, $problems );
 		}
 		if ( TickResult::LOST === $result->status && null !== $result->job && Job::CANCELLED === $result->job->status ) {
 			// The cancel happened while this driver held the lock: the step has stopped now, so clean up here.

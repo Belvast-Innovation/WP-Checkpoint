@@ -414,8 +414,9 @@ final class JobRepository {
 	/**
 	 * Count a cron request that started too late to hand the job to the
 	 * Runner, in one statement that counts only while fewer than $limit are
-	 * counted and the job is queued, running or paused (not waiting for an
-	 * answer). A driver that hands the job to the Runner sets the count back
+	 * counted, the job is queued, running or paused (not waiting for an
+	 * answer) and no live run holds it (a job being run is not one late
+	 * requests keep from running). Reaching the Runner sets the count back
 	 * to 0 (reset_cron_deferrals()), and so do a retry and an answer.
 	 *
 	 * @param int $id    Job id.
@@ -428,22 +429,22 @@ final class JobRepository {
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin table; one statement counts and checks the limit.
 		$affected = $wpdb->query(
 			$wpdb->prepare(
-				'UPDATE ' . self::table() . " SET cron_deferrals = cron_deferrals + 1 WHERE id = %d AND cron_deferrals < %d AND status IN (%s, %s, %s) AND (status <> %s OR questions_json IS NULL OR questions_json = '' OR questions_json = '[]')", // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- table name from the prefix and a constant.
+				'UPDATE ' . self::table() . " SET cron_deferrals = cron_deferrals + 1 WHERE id = %d AND cron_deferrals < %d AND status IN (%s, %s, %s) AND (status <> %s OR questions_json IS NULL OR questions_json = '' OR questions_json = '[]') AND (lock_token = '' OR locked_until < %d)", // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- table name from the prefix and a constant.
 				$id,
 				$limit,
 				Job::QUEUED,
 				Job::RUNNING,
 				Job::PAUSED,
-				Job::PAUSED
+				Job::PAUSED,
+				$this->now()
 			)
 		);
 		return 1 === $affected;
 	}
 
 	/**
-	 * Set the late cron count back to 0: a driver hands the job to the Runner
-	 * (JobActions::tick()), whatever the tick then does. One statement, and
-	 * only a write when there is a count.
+	 * Set the late cron count back to 0: the job reached the Runner
+	 * (Runner::tick()), whatever the tick then does. One statement.
 	 *
 	 * @param int $id Job id.
 	 * @return void
@@ -462,12 +463,13 @@ final class JobRepository {
 	 * questions, and no live run holds it (a running job between ticks has
 	 * no lock). Its lock file goes with it, as with any ended job.
 	 *
-	 * @param Job    $job     Job (updated from the row when failed).
+	 * @param Job    $job     Job (updated in place when failed).
 	 * @param string $message Why.
 	 * @param int    $limit   The count that fails it.
-	 * @return Job|null The failed job, or null when it was not failed.
+	 * @return string FAIL_DONE when it was failed, FAIL_HELD when the fence refused (a live run, the count set
+	 *                back, a question, ended), FAIL_ERROR when the statement itself failed.
 	 */
-	public function fail_for_late_cron( Job $job, string $message, int $limit ) {
+	public function fail_for_late_cron( Job $job, string $message, int $limit ): string {
 		global $wpdb;
 		$now = $this->now();
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin table; the WHERE is the fence.
@@ -488,11 +490,23 @@ final class JobRepository {
 				$now
 			)
 		);
+		if ( false === $affected ) {
+			return self::FAIL_ERROR;
+		}
 		if ( 1 !== $affected ) {
-			return null;
+			return self::FAIL_HELD;
 		}
 		$this->remove_lock_file( $job );
-		return $this->find( $job->id ); // Read back: one parser for the stamped kind.
+		$read = $this->find( $job->id ); // Read back: one parser for the stamped kind.
+		foreach ( get_object_vars( null !== $read ? $read : $job ) as $key => $value ) {
+			$job->$key = $value;
+		}
+		if ( null === $read ) {
+			$job->status     = Job::FAILED;
+			$job->last_error = $this->redactor->redact( $message );
+			$job->lock_token = '';
+		}
+		return self::FAIL_DONE;
 	}
 
 	/**

@@ -1416,28 +1416,35 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		// At the limit, running between ticks (no lock): failed, and read back like any row.
 		$job = $this->repo->create( 'export' );
 		$set( $job->id, array( 'status' => Job::RUNNING, 'cron_deferrals' => 10 ) );
-		$failed = $this->repo->fail_for_late_cron( $this->repo->find( $job->id ), 'Too late.', 10 );
-		$this->assertNotNull( $failed );
-		$this->assertSame( Job::FAILED, $failed->status );
+		$failed = $this->repo->find( $job->id );
+		$this->assertSame( JobRepository::FAIL_DONE, $this->repo->fail_for_late_cron( $failed, 'Too late.', 10 ) );
+		$this->assertSame( Job::FAILED, $failed->status, 'updated in place, as read back' );
 		$this->assertSame( Job::FAILURE_TEMPORARY, $failed->failure_kind );
 		$this->assertSame( 'Too late.', $failed->last_error );
 		// Below the limit (progress set it back meanwhile): not failed.
 		$below = $this->repo->create( 'export' );
 		$set( $below->id, array( 'status' => Job::RUNNING, 'cron_deferrals' => 9 ) );
-		$this->assertNull( $this->repo->fail_for_late_cron( $this->repo->find( $below->id ), 'Too late.', 10 ) );
+		$this->assertSame( JobRepository::FAIL_HELD, $this->repo->fail_for_late_cron( $this->repo->find( $below->id ), 'Too late.', 10 ) );
 		// A live run holds it: not failed.
 		$held = $this->repo->create( 'export' );
 		$set( $held->id, array( 'status' => Job::RUNNING, 'cron_deferrals' => 10, 'lock_token' => 'live', 'locked_until' => $this->repo->now() + 600 ) );
-		$this->assertNull( $this->repo->fail_for_late_cron( $this->repo->find( $held->id ), 'Too late.', 10 ) );
+		$this->assertSame( JobRepository::FAIL_HELD, $this->repo->fail_for_late_cron( $this->repo->find( $held->id ), 'Too late.', 10 ) );
 		// Waiting for an answer: not failed.
 		$asks = $this->repo->create( 'export' );
 		$set( $asks->id, array( 'status' => Job::PAUSED, 'cron_deferrals' => 10, 'questions_json' => '[{"id":"x","kind":"x"}]' ) );
-		$this->assertNull( $this->repo->fail_for_late_cron( $this->repo->find( $asks->id ), 'Too late.', 10 ) );
+		$this->assertSame( JobRepository::FAIL_HELD, $this->repo->fail_for_late_cron( $this->repo->find( $asks->id ), 'Too late.', 10 ) );
 		foreach ( array( $below, $held, $asks ) as $kept ) {
 			$this->assertNotSame( Job::FAILED, $this->repo->find( $kept->id )->status );
 		}
-		// Nor counted while it waits for an answer.
+		// Nor counted while it waits for an answer, nor while a live run holds it.
 		$set( $asks->id, array( 'cron_deferrals' => 0 ) );
 		$this->assertFalse( $this->repo->count_cron_deferral( $asks->id, 10 ) );
+		$set( $held->id, array( 'cron_deferrals' => 0 ) );
+		$this->assertFalse( $this->repo->count_cron_deferral( $held->id, 10 ) );
+		// The control: the same rows are counted once the question is gone and the lease has run out.
+		$set( $asks->id, array( 'questions_json' => null ) );
+		$this->assertTrue( $this->repo->count_cron_deferral( $asks->id, 10 ) );
+		$set( $held->id, array( 'locked_until' => $this->repo->now() - 1 ) );
+		$this->assertTrue( $this->repo->count_cron_deferral( $held->id, 10 ) );
 	}
 }

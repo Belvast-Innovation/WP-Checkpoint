@@ -245,6 +245,7 @@ final class LateCronTest extends JobTestCase {
 				$this->late_cron( $id, 26.5 );
 			}
 			$this->assertSame( Job::FAILED, $this->job( $id )->status, "{$what}: the control" );
+			$this->assertStringContainsString( 'start too late to run this job', $this->job( $id )->last_error, "{$what}: for this reason" );
 		}
 	}
 
@@ -334,20 +335,26 @@ final class LateCronTest extends JobTestCase {
 			)
 		);
 		// Never run: its first tick asks, and the deferrals must come before the question.
-		$id = $this->job_of( 'asks', false );
+		$id    = $this->job_of( 'asks', false );
+		$tries = 0;
+		$this->on_count(
+			static function ( string $query ): string {
+				return $query;
+			},
+			$tries
+		);
 		$this->late_cron( $id );
 		$this->late_cron( $id );
 		$this->assertSame( 2, $this->job( $id )->cron_deferrals );
+		$this->assertSame( 2, $tries, 'the control: each late request tried to count' );
 		$this->assertCount( 2, $this->log_lines( $this->job( $id ), 'Tick put off' ), 'the control: deferrals are seen in the log' );
-		// The question comes in a tick whose request the test controls (an on-time tick would start the count over).
-		Plugin::instance()->runner()->tick( $id, microtime( true ) );
+		Plugin::instance()->job_actions()->tick( $id, microtime( true ) );
 		$this->assertTrue( $this->job( $id )->awaiting_answer() );
-		$this->assertSame( 2, $this->job( $id )->cron_deferrals );
 
 		$this->late_cron( $id );
-		// Not counted: the request hands it to the Runner (which says it waits), and that starts the count over.
-		$this->assertSame( 0, $this->job( $id )->cron_deferrals, 'waiting for an answer: not counted' );
+		$this->assertSame( 2, $tries, 'waiting for an answer: not even tried' );
 		$this->assertCount( 2, $this->log_lines( $this->job( $id ), 'Tick put off' ), 'nor logged' );
+		$this->assertCount( 0, $this->log_lines( $this->job( $id ), 'could not be recorded' ) );
 		$this->assertSame( array(), $this->events( $id ), 'nor set again' );
 
 		global $wpdb;
@@ -368,12 +375,13 @@ final class LateCronTest extends JobTestCase {
 				),
 			)
 		);
+		global $wpdb;
 		$id = $this->job_of( 'flaky', false ); // Never run: its first tick fails it.
-		$this->late_cron( $id );
-		$this->late_cron( $id );
-		Plugin::instance()->runner()->tick( $id, microtime( true ) ); // The Runner alone: no driver's reset.
+		Plugin::instance()->job_actions()->tick( $id, microtime( true ) );
 		$this->assertSame( Job::FAILED, $this->job( $id )->status );
-		$this->assertSame( 2, $this->job( $id )->cron_deferrals, 'the control: a failure keeps the count' );
+		// A count left over (from late requests before the failure).
+		$wpdb->update( \WPCheckpoint\Support\Schema::jobs_table(), array( 'cron_deferrals' => 2 ), array( 'id' => $id ) );
+		$this->assertSame( 2, $this->job( $id )->cron_deferrals, 'the control: the count is there' );
 		Plugin::instance()->job_actions()->retry( $id );
 		$this->assertSame( Job::QUEUED, $this->job( $id )->status );
 		$this->assertSame( 0, $this->job( $id )->cron_deferrals, 'the retry starts it over' );
@@ -433,9 +441,9 @@ final class LateCronTest extends JobTestCase {
 	public function test_a_request_with_too_little_time_left_for_a_unit_puts_it_off_until_the_job_fails_with_the_reason(): void {
 		$id = $this->plain();
 		$this->time_limit( 30 );
-		// Every cron request starts 26.5 s into a 30 s limit: about 3.5 s left, less than one unit.
+		// Every cron request starts 26 s into a 30 s limit: about 4 s left, less than one unit.
 		for ( $i = 1; $i < JobActions::CRON_DEFERRAL_LIMIT; $i++ ) {
-			$this->late_cron( $id, 26.5 );
+			$this->late_cron( $id, 26 );
 			$job = $this->job( $id );
 			$this->assertSame( 1, $this->ticks( $job ), "request {$i}: not ticked" );
 			$this->assertSame( $i, $job->cron_deferrals, "request {$i}: counted, the first three included" );
@@ -443,9 +451,10 @@ final class LateCronTest extends JobTestCase {
 		}
 		$lines = $this->log_lines( $this->job( $id ), 'less time left of its time limit than one unit needs' );
 		$this->assertCount( JobActions::CRON_DEFERRAL_LIMIT - 1 - JobActions::MAX_CRON_DEFERRALS, $lines );
-		$this->assertMatchesRegularExpression( '/"left_seconds":3(\.\d)?[,}]/', $lines[0] );
+		$this->assertMatchesRegularExpression( '/"left_seconds":[34](\.\d)?[,}]/', $lines[0] );
+		$this->assertFileExists( $this->job( $id )->storage_path . '/tmp/job-' . $id . '.lock', 'the control: the running job holds its lock file' );
 
-		$this->late_cron( $id, 26.5 );
+		$this->late_cron( $id, 26 );
 		$job = $this->job( $id );
 		$this->assertSame( Job::FAILED, $job->status, 'the tenth fails the job, a running one too' );
 		$this->assertSame( 1, $this->ticks( $job ), 'nothing ran' );
@@ -468,10 +477,10 @@ final class LateCronTest extends JobTestCase {
 		}
 		$this->assertSame( 1, $this->ticks( $this->job( $short ) ), 'put off' );
 		$this->assertSame( JobActions::MAX_CRON_DEFERRALS + 1, $this->job( $short )->cron_deferrals );
-		// About 6.2 s left: the first unit runs, as before.
+		// About 7.5 s left: the first unit runs, as before.
 		$room = $this->plain();
 		for ( $i = 0; $i <= JobActions::MAX_CRON_DEFERRALS; $i++ ) {
-			$this->late_cron( $room, 23.8 );
+			$this->late_cron( $room, 22.5 );
 		}
 		$this->assertSame( 2, self::units( $this->job( $room ) ), 'the first unit ran' );
 		$this->assertSame( 0, $this->job( $room )->cron_deferrals );
@@ -510,9 +519,9 @@ final class LateCronTest extends JobTestCase {
 		}
 		$wpdb->update( \WPCheckpoint\Support\Schema::jobs_table(), array( 'lock_token' => 'live', 'locked_until' => time() + 600 ), array( 'id' => $id ) );
 		$this->late_cron( $id, 26.5 );
-		$this->assertSame( JobActions::CRON_DEFERRAL_LIMIT, $this->job( $id )->cron_deferrals );
+		$this->assertSame( JobActions::CRON_DEFERRAL_LIMIT - 1, $this->job( $id )->cron_deferrals, 'not counted while a live run holds it' );
 		$this->assertSame( Job::RUNNING, $this->job( $id )->status, 'a live run drives it' );
-		$this->assertCount( 1, $this->log_lines( $this->job( $id ), 'the limit of deferrals is reached, but the job was not failed' ) );
+		$this->assertCount( 1, $this->log_lines( $this->job( $id ), 'a live run holds the job, so this late request is not counted' ) );
 		// The control: without the live lease, the next such request fails it.
 		$wpdb->update( \WPCheckpoint\Support\Schema::jobs_table(), array( 'lock_token' => '', 'locked_until' => 0 ), array( 'id' => $id ) );
 		$this->late_cron( $id, 26.5 );
@@ -543,5 +552,35 @@ final class LateCronTest extends JobTestCase {
 		$this->assertSame( JobActions::MAX_CRON_DEFERRALS, $this->job( $id )->cron_deferrals );
 		$this->assertSame( 1, $this->ticks( $this->job( $id ) ), 'not ticked' );
 		$this->assertCount( 1, $this->log_lines( $this->job( $id ), 'and the deferral could not be recorded' ) );
+	}
+
+	public function test_a_failure_at_the_limit_that_cannot_be_written_is_logged_and_waits(): void {
+		$id = $this->plain();
+		$this->time_limit( 30 );
+		for ( $i = 1; $i < JobActions::CRON_DEFERRAL_LIMIT; $i++ ) {
+			$this->late_cron( $id, 26 );
+		}
+		$hits = 0;
+		add_filter(
+			'query',
+			static function ( $query ) use ( &$hits ) {
+				if ( false !== strpos( (string) $query, 'AND cron_deferrals >= ' . JobActions::CRON_DEFERRAL_LIMIT ) ) {
+					++$hits;
+					return 'UPDATE wpcheckpoint_no_such_table SET x = 1';
+				}
+				return $query;
+			}
+		);
+		global $wpdb;
+		$quiet = $wpdb->suppress_errors( true );
+		try {
+			$this->late_cron( $id, 26 );
+		} finally {
+			$wpdb->suppress_errors( $quiet );
+		}
+		$this->assertSame( 1, $hits, 'the control: the failure was tried' );
+		$this->assertSame( Job::RUNNING, $this->job( $id )->status );
+		$this->assertCount( 1, $this->log_lines( $this->job( $id ), 'the failure could not be written' ) );
+		$this->assertCount( 0, $this->log_lines( $this->job( $id ), 'a live run holds it, or it changed meanwhile' ), 'not reported as a refusal' );
 	}
 }
