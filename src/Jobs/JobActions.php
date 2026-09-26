@@ -32,6 +32,20 @@ final class JobActions {
 	const MAX_CRON_DEFERRALS = 3;
 
 	/**
+	 * How long the first unit of a tick is taken to need when a late cron
+	 * request forces one: with less time than this left before the request's
+	 * time limit, it is put off again instead (see cron_tick()).
+	 */
+	const CRON_UNIT_SECONDS = 5;
+
+	/**
+	 * Deferrals in a row (the first MAX_CRON_DEFERRALS included: one count)
+	 * after which the job fails: the cron requests of this host start too
+	 * late to ever run a unit.
+	 */
+	const CRON_DEFERRAL_LIMIT = 10;
+
+	/**
 	 * A budget start that leaves no time: the tick runs its first unit (the
 	 * first unit of a tick always runs) and stops.
 	 */
@@ -64,6 +78,13 @@ final class JobActions {
 	 * @var int
 	 */
 	private static $last_output_bytes = 0;
+
+	/**
+	 * The limits of this process: function(): array{memory_bytes: int, max_execution_time: int} (tests replace it).
+	 *
+	 * @var callable
+	 */
+	private $runtime = array( Budget::class, 'current_runtime' );
 
 	/**
 	 * Constructor.
@@ -315,11 +336,18 @@ final class JobActions {
 	 * most MAX_CRON_DEFERRALS times in a row: on a host where every cron
 	 * request starts that late, the job would otherwise never move on from
 	 * cron. The next late request ticks it with no time left, so it runs
-	 * its first unit only. The count is kept on the job row and set back to
-	 * 0 by any tick that makes progress (and by a retry or an answer); after
-	 * such a tick that makes none, every late request ticks it that way
-	 * until one does. Each deferral and each such tick is logged. Like
-	 * web_tick(), nothing is sent to the client.
+	 * its first unit only, when it can still hold one: with its time limit
+	 * known (max_execution_time) and less than CRON_UNIT_SECONDS left
+	 * before it, the request puts the tick off again, and at
+	 * CRON_DEFERRAL_LIMIT deferrals in a row the job fails with the reason.
+	 * A timeout outside PHP (PHP-FPM's, a reverse proxy's) cannot be seen
+	 * from here, so the floor applies only where PHP's own limit is set;
+	 * without one, the tick runs its first unit as described. The count is
+	 * kept on the job row and set back to 0 by any tick that makes progress
+	 * (and by a retry or an answer); after such a tick that makes none,
+	 * every late request ticks it that way until one does. Each deferral and
+	 * each such tick is logged. Like web_tick(), nothing is sent to the
+	 * client.
 	 *
 	 * @param int   $id         Job id.
 	 * @param float $started_at When the cron request started (see started_at()).
@@ -374,6 +402,16 @@ final class JobActions {
 			);
 			return null;
 		}
+		// Put off MAX_CRON_DEFERRALS times: this request runs the first unit, if it can still hold one. Its time
+		// left is its own limit less what it has used (from the request start). A limit of 0 (none, or WP-CLI)
+		// says nothing about a timeout outside PHP either: the unit runs, as it always did.
+		$limit = (int) ( call_user_func( $this->runtime )['max_execution_time'] ?? 0 );
+		if ( $limit > 0 ) {
+			$left = $limit - ( microtime( true ) - $started_at );
+			if ( $left < self::CRON_UNIT_SECONDS ) {
+				return $this->no_room_for_a_unit( $job, $late, $left );
+			}
+		}
 		// The tick runs after all: its event is the one it would have had (the tick adjusts it as usual), not the
 		// one just set for the next cron request.
 		Loopback::schedule( $id, Loopback::FALLBACK_SECONDS, Loopback::REPLACE );
@@ -390,6 +428,60 @@ final class JobActions {
 			array( 'late_seconds' => $late )
 		);
 		return $this->tick( $id, self::NO_TIME_LEFT );
+	}
+
+	/**
+	 * A late cron request after MAX_CRON_DEFERRALS deferrals that has too little time left for a unit: put off
+	 * again, counted on (the event for the next cron request is set); at CRON_DEFERRAL_LIMIT the job fails,
+	 * unless a live run holds it (whose progress starts the count over).
+	 *
+	 * @param Job   $job  Job, as read before counting.
+	 * @param float $late Seconds into the request.
+	 * @param float $left Seconds left before the request's time limit.
+	 * @return TickResult|null Null when the tick was put off.
+	 */
+	private function no_room_for_a_unit( Job $job, float $late, float $left ): ?TickResult {
+		$counted = $this->repository->count_cron_deferral( $job->id, self::CRON_DEFERRAL_LIMIT );
+		$now     = $this->repository->find( $job->id );
+		if ( null === $now || ! in_array( $now->status, array( Job::QUEUED, Job::RUNNING, Job::PAUSED ), true ) ) {
+			return null; // It ended meanwhile; its event settles on the next request.
+		}
+		$context = array(
+			'late_seconds' => $late,
+			'left_seconds' => round( max( 0.0, $left ), 1 ),
+			'deferrals'    => $now->cron_deferrals,
+			'limit'        => self::CRON_DEFERRAL_LIMIT,
+		);
+		if ( $now->cron_deferrals < self::CRON_DEFERRAL_LIMIT ) {
+			$this->runner->note(
+				$job,
+				Logger::WARNING,
+				$counted
+					? 'Tick put off again: this cron request has less time left before its time limit than one unit needs'
+					: 'Tick put off again: this cron request has too little time left for one unit, and the deferral could not be recorded',
+				$context
+			);
+			return null;
+		}
+		if ( $now->is_locked( $this->repository->now() ) ) {
+			return null; // A live run drives it; its progress starts the count over.
+		}
+		$message = sprintf(
+			/* translators: 1: number of cron requests, 2: seconds. */
+			__( 'The cron requests of this site start too late to run any part of this job: %1$d in a row began with less than %2$d seconds left before their time limit. Drive jobs with a system cron job or with WP-CLI (wp wpcheckpoint job run), then retry.', 'wp-checkpoint' ),
+			$now->cron_deferrals,
+			self::CRON_UNIT_SECONDS
+		);
+		try {
+			$failed = $this->repository->transition( $now, Job::FAILED, $message, '', Job::FAILURE_TEMPORARY );
+		} catch ( StaleJob $e ) {
+			return null; // Changed meanwhile: the next request looks again.
+		} catch ( InvalidTransition $e ) {
+			return null;
+		}
+		Loopback::unschedule( $job->id );
+		$this->runner->note( $job, Logger::ERROR, 'Job failed', array_merge( array( 'error' => $message ), $context ) );
+		return new TickResult( TickResult::FAILED, -1, $failed, $message );
 	}
 
 	/**

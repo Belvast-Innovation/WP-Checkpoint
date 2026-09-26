@@ -27,12 +27,28 @@ final class LateCronTest extends JobTestCase {
 	 * One cron request that runs the job's event 10 s after the request started. Like WP-Cron, the event is
 	 * removed before its callback runs, so an event afterwards is one the callback set.
 	 */
-	private function late_cron( int $id ): void {
+	private function late_cron( int $id, float $late = self::LATE ): void {
 		foreach ( $this->events( $id ) as $time ) {
 			wp_unschedule_event( $time, Loopback::HOOK, array( $id ) );
 		}
-		$_SERVER['REQUEST_TIME_FLOAT'] = microtime( true ) - self::LATE;
+		$_SERVER['REQUEST_TIME_FLOAT'] = microtime( true ) - $late;
 		Plugin::instance()->cron_tick( $id );
+	}
+
+	/**
+	 * The cron requests' time limit as PHP reports it (max_execution_time; 0: none).
+	 */
+	private function time_limit( int $seconds ): void {
+		$this->replace_internal(
+			Plugin::instance()->job_actions(),
+			'runtime',
+			static function () use ( $seconds ): array {
+				return array(
+					'memory_bytes'       => 268435456,
+					'max_execution_time' => $seconds,
+				);
+			}
+		);
 	}
 
 	/**
@@ -353,5 +369,87 @@ final class LateCronTest extends JobTestCase {
 		$this->assertContains( 'cron_deferrals', $wpdb->get_col( "SHOW COLUMNS FROM {$table}" ) );
 		$this->assertSame( 1, $this->job( $id )->cron_deferrals, 'counted: the first of three' );
 		$this->assertSame( 0, $this->job( $id )->attempts, 'not ticked' );
+	}
+
+	public function test_a_request_with_too_little_time_left_for_a_unit_puts_it_off_until_the_job_fails_with_the_reason(): void {
+		$this->register( 'plain', array( $this->counting_step( 'p', 5 ) ) );
+		$id = Plugin::instance()->jobs()->create( 'plain' )->id;
+		$this->time_limit( 30 );
+		// Every cron request starts 27 s into a 30 s limit: 3 s left, less than one unit.
+		for ( $i = 1; $i < JobActions::CRON_DEFERRAL_LIMIT; $i++ ) {
+			$this->late_cron( $id, 27 );
+			$job = $this->job( $id );
+			$this->assertSame( 0, $job->attempts, "request {$i}: not ticked" );
+			$this->assertSame( $i, $job->cron_deferrals, "request {$i}: counted, the first three included" );
+			$this->assertCount( 1, $this->events( $id ), "request {$i}: the next cron request is due" );
+		}
+		$this->assertCount( JobActions::CRON_DEFERRAL_LIMIT - 1 - JobActions::MAX_CRON_DEFERRALS, $this->log_lines( $this->job( $id ), 'has less time left before its time limit than one unit needs' ) );
+		$this->assertStringContainsString( '"left_seconds":3', $this->log_lines( $this->job( $id ), 'than one unit needs' )[0] );
+
+		$this->late_cron( $id, 27 );
+		$job = $this->job( $id );
+		$this->assertSame( Job::FAILED, $job->status, 'the tenth fails the job' );
+		$this->assertSame( 0, $job->attempts, 'nothing ran' );
+		$this->assertStringContainsString( 'start too late to run any part of this job: 10 in a row began with less than 5 seconds left', $job->last_error );
+		$this->assertStringContainsString( 'system cron job or with WP-CLI', $job->last_error );
+		$this->assertSame( Job::FAILURE_TEMPORARY, $job->failure_kind, 'retry is offered (once jobs are driven otherwise)' );
+		$this->assertSame( array(), $this->events( $id ) );
+		$this->assertCount( 1, $this->log_lines( $job, 'ERROR Job failed' ) );
+	}
+
+	public function test_a_request_with_time_left_for_a_unit_runs_it_as_before(): void {
+		$this->register( 'plain', array( $this->counting_step( 'p', 5 ) ) );
+		$id = Plugin::instance()->jobs()->create( 'plain' )->id;
+		$this->time_limit( 60 );
+		for ( $i = 0; $i < JobActions::MAX_CRON_DEFERRALS; $i++ ) {
+			$this->late_cron( $id, 27 );
+		}
+		$this->late_cron( $id, 27 ); // 33 s left.
+		$this->assertSame( 1, self::units( $this->job( $id ) ), 'the first unit ran' );
+		$this->assertSame( 0, $this->job( $id )->cron_deferrals );
+	}
+
+	public function test_without_a_time_limit_the_first_unit_runs_as_before(): void {
+		$this->register( 'plain', array( $this->counting_step( 'p', 5 ) ) );
+		$id = Plugin::instance()->jobs()->create( 'plain' )->id;
+		$this->time_limit( 0 ); // None set (or one outside PHP, which PHP cannot see).
+		for ( $i = 0; $i < JobActions::MAX_CRON_DEFERRALS; $i++ ) {
+			$this->late_cron( $id, 27 );
+		}
+		$this->late_cron( $id, 27 );
+		$this->assertSame( 1, self::units( $this->job( $id ) ), 'the first unit ran' );
+	}
+
+	public function test_progress_in_between_starts_the_count_toward_the_limit_over(): void {
+		$this->register( 'plain', array( $this->counting_step( 'p', 5 ) ) );
+		$id = Plugin::instance()->jobs()->create( 'plain' )->id;
+		$this->time_limit( 30 );
+		for ( $i = 0; $i < JobActions::CRON_DEFERRAL_LIMIT - 1; $i++ ) {
+			$this->late_cron( $id, 27 );
+		}
+		$this->assertSame( JobActions::CRON_DEFERRAL_LIMIT - 1, $this->job( $id )->cron_deferrals );
+		Plugin::instance()->job_actions()->tick( $id, JobActions::NO_TIME_LEFT ); // A page open on it.
+		$this->assertSame( 0, $this->job( $id )->cron_deferrals );
+		$this->late_cron( $id, 27 );
+		$this->assertSame( Job::RUNNING, $this->job( $id )->status, 'the first of ten again, not the tenth' );
+		$this->assertSame( 1, $this->job( $id )->cron_deferrals );
+	}
+
+	public function test_a_job_a_live_run_holds_is_not_failed_at_the_limit(): void {
+		global $wpdb;
+		$this->register( 'plain', array( $this->counting_step( 'p', 5 ) ) );
+		$id = Plugin::instance()->jobs()->create( 'plain' )->id;
+		$this->time_limit( 30 );
+		for ( $i = 0; $i < JobActions::CRON_DEFERRAL_LIMIT - 1; $i++ ) {
+			$this->late_cron( $id, 27 );
+		}
+		$wpdb->update( \WPCheckpoint\Support\Schema::jobs_table(), array( 'lock_token' => 'live', 'locked_until' => time() + 600 ), array( 'id' => $id ) );
+		$this->late_cron( $id, 27 );
+		$this->assertSame( JobActions::CRON_DEFERRAL_LIMIT, $this->job( $id )->cron_deferrals );
+		$this->assertNotSame( Job::FAILED, $this->job( $id )->status, 'a live run drives it' );
+		// The control: without the live lease, the next such request fails it.
+		$wpdb->update( \WPCheckpoint\Support\Schema::jobs_table(), array( 'lock_token' => '', 'locked_until' => 0 ), array( 'id' => $id ) );
+		$this->late_cron( $id, 27 );
+		$this->assertSame( Job::FAILED, $this->job( $id )->status );
 	}
 }
