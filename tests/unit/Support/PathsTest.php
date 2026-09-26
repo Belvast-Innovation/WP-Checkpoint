@@ -247,6 +247,9 @@ final class PathsTest extends TestCase {
 
 	public function test_positively_gone_climbs_only_through_what_is_not_there(): void {
 		$this->assertTrue( Paths::positively_gone( $this->root . '/no-such/deeper/x' ), 'a whole missing tree: the nearest ancestor that exists lists without it' );
+		$this->assertFalse( Paths::positively_gone( $this->root . '/base/nothing/../sub' ), 'a ".." path is there once resolved: the lexical climb is no evidence' );
+		$this->assertFalse( Paths::positively_gone( $this->root . '/base/nothing/../gone' ), 'nor for a path that is not there either' );
+		$this->assertFalse( Paths::positively_gone( $this->root . '/base/./nothing' ) );
 		// Ancestors that could not be listed, up to a root that is there: no evidence.
 		$listings = array(
 			'/a/b' => null,
@@ -267,7 +270,15 @@ final class PathsTest extends TestCase {
 		// A network share that is not reachable: its server is not a directory, nothing above it is evidence.
 		$this->assertFalse( Paths::positively_gone( '//server-that-is-not-there/share/x' ) );
 		$this->assertFalse( Paths::positively_gone( '//server-that-is-not-there/share' ) );
-		if ( ! Paths::is_windows() ) {
+		if ( Paths::is_windows() ) {
+			// The climb ends at the drive's root, whose listing (seeded here) answers.
+			$drive = strtoupper( substr( (string) realpath( $this->root ), 0, 1 ) ) . ':/';
+			$top   = 'no-such-top-' . bin2hex( random_bytes( 4 ) );
+			$seen  = array( $drive => array( '.', '..', 'windows' ) );
+			$this->assertTrue( Paths::positively_gone( $drive . $top . '/x', $seen ) );
+			$seen = array( $drive => array( '.', '..', strtolower( $top ) ) );
+			$this->assertFalse( Paths::positively_gone( $drive . $top . '/x', $seen ), 'the control: the root listed with it' );
+		} else {
 			$this->assertFalse( Paths::positively_gone( 'C:/nope/x' ), 'a drive letter is not absolute here' );
 		}
 	}

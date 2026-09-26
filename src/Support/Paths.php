@@ -130,6 +130,7 @@ final class Paths {
 	 * finds nothing under that name (lstat(), which matches case and
 	 * Unicode forms the way the file system does), and the nearest ancestor
 	 * that exists can be listed and has no entry for the next segment down,
+	 * in a path without "." or ".." segments (the climb is lexical),
 	 * not even one that differs only in case. Only ancestors that do not
 	 * exist are climbed past: one that exists but cannot be listed
 	 * (permissions, open_basedir) is no evidence, and neither is reaching
@@ -144,11 +145,12 @@ final class Paths {
 	 * @return bool
 	 */
 	public static function positively_gone( string $path, array &$listings = array() ): bool {
-		$path     = self::normalize( $path );
-		$path     = in_array( $path, array( '/', '//' ), true ) ? $path : rtrim( $path, '/' );
+		$path     = rtrim( self::normalize( $path ), '/' );
 		$drive    = self::is_windows() && 1 === preg_match( '#^[A-Za-z]:/#', $path );
 		$absolute = '' !== $path && ( '/' === $path[0] || $drive );
-		if ( ! $absolute || false !== @lstat( $path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a warning would put the path into the error log.
+		// The climb is lexical: through a "." or ".." segment it would list a directory the path does not lie in.
+		$dots = 1 === preg_match( '#(^|/)\.{1,2}(/|$)#', $path );
+		if ( ! $absolute || $dots || false !== @lstat( $path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a warning would put the path into the error log.
 			return false;
 		}
 		$child  = $path;

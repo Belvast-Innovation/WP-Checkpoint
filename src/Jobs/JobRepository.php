@@ -1182,8 +1182,8 @@ final class JobRepository {
 					continue;
 				}
 				try {
-					// Final: this storage directory is not the job's, and the job's is not there; a retry from here
-					// could not continue it.
+					// Final: this storage directory is not the job's, and the job's is positively not at its path; a
+					// retry from here could not continue it.
 					$this->force_transition( $job, Job::FAILED, __( 'The storage directory of this job is no longer at the path it was started in; the job cannot continue from this storage directory.', 'wp-checkpoint' ), Job::FAILURE_FINAL );
 					++$failed;
 				} catch ( StaleJob $e ) {

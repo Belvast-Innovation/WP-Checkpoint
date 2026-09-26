@@ -681,7 +681,7 @@ final class Directories {
 		foreach ( $restores as $restore ) {
 			// The same location, or a restore whose directory this request cannot resolve either: that could be
 			// $dir spelled another way, and nothing shows it is not.
-			if ( Paths::same_location( $restore['path'], $dir ) || false === @realpath( $restore['path'] ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a warning would put the path into the error log.
+			if ( Paths::same_location( $restore['path'], $dir ) || ( false === @realpath( $restore['path'] ) && ! Paths::positively_gone( $restore['path'] ) ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a warning would put the path into the error log.
 				return true;
 			}
 		}

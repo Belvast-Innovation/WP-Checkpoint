@@ -275,6 +275,12 @@ final class RestoreStorageTest extends JobTestCase {
 			$this->assertSame( '', ( new Directories() )->base(), 'another spelling nothing can resolve: held' );
 			self::set( $id, array( 'storage_path' => $stored ) );
 
+			// A restore whose own directory is positively gone does not hold it.
+			self::set( $id, array( 'storage_path' => $base . '-gone-restore' ) );
+			$this->assertNotSame( '', ( new Directories() )->base(), 'its restore is gone: another directory is chosen' );
+			$remember( $stored );
+			self::set( $id, array( 'storage_path' => $stored ) );
+
 			// Nor is it when the restores cannot be read.
 			$this->assertSame( '', ( new Directories( array( 'restores' => '__return_null' ) ) )->base(), 'unknown: held' );
 
