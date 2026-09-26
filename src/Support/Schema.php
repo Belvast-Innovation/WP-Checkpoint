@@ -234,9 +234,13 @@ final class Schema {
 	/**
 	 * Drop the tables (uninstall with data deletion).
 	 *
+	 * @param callable|null $clock function(): float, seconds (tests); microtime by default.
 	 * @return void
 	 */
-	public static function drop(): void {
+	public static function drop( $clock = null ): void {
+		$clock = is_callable( $clock ) ? $clock : static function (): float {
+			return microtime( true );
+		};
 		global $wpdb;
 		$state = Directories::load_state();
 		$token = isset( $state['token'] ) && is_string( $state['token'] ) ? $state['token'] : '';
@@ -251,16 +255,20 @@ final class Schema {
 				}
 			}
 			// In an order their foreign keys allow; a table another table still references stays (uninstall only).
-			// One call is bounded; uninstall starts calls on what the last one left (its "remaining", not its
-			// "failed") until one drops nothing or UNINSTALL_DROP_SECONDS have passed. What is left then stays in
-			// the database; nothing reports it yet (uninstall has no later pass; a report is a T042 follow-up).
-			$started = microtime( true );
-			while ( array() !== $tables && microtime( true ) - $started < self::UNINSTALL_DROP_SECONDS ) {
+			// One call is bounded; uninstall runs one call whatever the time, then more on what the last one left
+			// (its "remaining", not its "failed") until one drops nothing or UNINSTALL_DROP_SECONDS have passed.
+			// What is left then stays in the database; nothing reports it yet (uninstall has no later pass; a
+			// report is a T042 follow-up).
+			$started = (float) call_user_func( $clock );
+			while ( array() !== $tables ) {
 				$result = \WPCheckpoint\Jobs\TempTableDropper::drop( $tables, $prefix );
 				if ( array() === $result['dropped'] ) {
 					break;
 				}
 				$tables = $result['remaining'];
+				if ( (float) call_user_func( $clock ) - $started >= self::UNINSTALL_DROP_SECONDS ) {
+					break;
+				}
 			}
 		} catch ( \InvalidArgumentException $e ) {
 			// No usable token: no temporary tables can have been created.
