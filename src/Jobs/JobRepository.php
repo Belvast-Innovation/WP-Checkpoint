@@ -1359,8 +1359,9 @@ final class JobRepository {
 			$this->report_reclaim( $entry['kind'] . ' ' . ( $entry['id'] > 0 ? 'of job ' . $entry['id'] : basename( $entry['path'] ) ), $result );
 		}
 		// A restore's staging roots and probes next to the site's directories, under any of this installation's
-		// tokens: the same rule as work_dir, a probe also once no live run holds its job.
-		foreach ( Residue::scan_site( Residue::site_dirs( ScanRoots::site_directories() ), array_merge( array( $token ), Directories::own_tokens() ) ) as $entry ) {
+		// tokens (none while a clone is detected): the same rule as work_dir, a probe also once no live run holds
+		// its job.
+		foreach ( Residue::scan_site( Residue::site_dirs( ScanRoots::site_directories() ), Directories::own_tokens() ) as $entry ) {
 			if ( $budget <= 0 ) {
 				return;
 			}
@@ -1399,7 +1400,7 @@ final class JobRepository {
 			return false;
 		}
 		$job = $this->find_for_reclaim( $entry['id'] );
-		return null === $job || ! $job->is_locked( time() );
+		return null === $job || ! $job->is_locked( $this->now() );
 	}
 
 	/**
@@ -1471,9 +1472,15 @@ final class JobRepository {
 	 */
 	public function reclaim_work( Job $job, int $budget = self::RECLAIM_MAX_ENTRIES ): bool {
 		// The restore's staging roots and probes next to the site's directories go with its work, under the job's
-		// own token: they are not in the storage directory, so a changed storage directory does not keep them.
+		// own token: they are not in the storage directory, so a changed storage directory does not keep them. Only
+		// a token this installation holds (Directories::own_tokens()): a row of a copied database carries the
+		// original's, and the directories may be shared.
 		$done = true;
-		foreach ( Residue::scan_site( Residue::site_dirs( ScanRoots::site_directories() ), array( $job->storage_token ) ) as $entry ) {
+		if ( ! in_array( $job->storage_token, Directories::own_tokens(), true ) ) {
+			$this->directories->log_event( sprintf( 'Job %d carries a storage token this installation does not hold; its staging next to the site was left alone.', $job->id ) );
+			$done = false;
+		}
+		foreach ( $done ? Residue::scan_site( Residue::site_dirs( ScanRoots::site_directories() ), array( $job->storage_token ) ) : array() as $entry ) {
 			if ( $entry['id'] !== $job->id ) {
 				continue;
 			}

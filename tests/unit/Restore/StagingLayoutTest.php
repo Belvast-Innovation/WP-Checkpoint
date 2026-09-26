@@ -167,6 +167,14 @@ final class StagingLayoutTest extends TestCase {
 			);
 		}
 		$this->assertNotSame( $layout->probe_name(), $layout->probe_name(), 'a new probe name each time' );
+		try {
+			$layout->probe_name( '.tmp' );
+			$this->fail( 'a suffix parse() does not know' );
+		} catch ( \InvalidArgumentException $e ) {
+			$this->assertSame( 'Not a probe suffix.', $e->getMessage() );
+		}
+		$largest = new StagingLayout( array_fill_keys( StagingLayout::GROUPS, '/srv/x' ), self::TOKEN, 999999999999999999, self::RANDOM );
+		$this->assertSame( 999999999999999999, StagingLayout::parse( $largest->root_name() )['job_id'], 'the largest id reads back' );
 		foreach ( array(
 			'wp-checkpoint-' . self::TOKEN,
 			'wp-checkpoint-stage-' . self::TOKEN . '-7-' . substr( self::RANDOM, 0, 31 ),
@@ -186,6 +194,7 @@ final class StagingLayoutTest extends TestCase {
 			array( self::TOKEN, 0, self::RANDOM ),
 			array( self::TOKEN, 7, 'short' ),
 			array( self::TOKEN, 7, strtoupper( self::RANDOM ) ),
+			array( self::TOKEN, PHP_INT_MAX, self::RANDOM ), // 19 digits: parse() would not read the name back.
 		) as list( $token, $id, $random ) ) {
 			try {
 				new StagingLayout( array_fill_keys( StagingLayout::GROUPS, '/srv' ), $token, $id, $random );

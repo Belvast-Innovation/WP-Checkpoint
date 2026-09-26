@@ -100,7 +100,8 @@ final class StagingLayout {
 			}
 			$this->groups[ $group ] = rtrim( str_replace( '\\', '/', (string) $groups[ $group ] ), '/' );
 		}
-		if ( 1 !== preg_match( '/\A[a-f0-9]{12}\z/', $token ) || $job_id <= 0 || 1 !== preg_match( self::RANDOM_PATTERN, $random ) ) {
+		// Job ids of up to 18 digits: what parse() reads back from a name.
+		if ( 1 !== preg_match( '/\A[a-f0-9]{12}\z/', $token ) || $job_id <= 0 || $job_id > 999999999999999999 || 1 !== preg_match( self::RANDOM_PATTERN, $random ) ) {
 			throw new \InvalidArgumentException( 'Not a staging identity.' );
 		}
 		$this->token  = $token;
@@ -258,10 +259,15 @@ final class StagingLayout {
 	/**
 	 * A new probe name for this restore (not created): a directory, or a file with $suffix.
 	 *
-	 * @param string $suffix Suffix (".php", ".tmp", "" for a directory).
+	 * @param string $suffix Suffix: "" for a directory, "-r" for its renamed form, ".php" for the loader probe
+	 *                       (the ones parse() recognises).
+	 * @throws \InvalidArgumentException When parse() would not recognise the name.
 	 * @return string
 	 */
 	public function probe_name( string $suffix = '' ): string {
+		if ( ! in_array( $suffix, array( '', '-r', '.php' ), true ) ) {
+			throw new \InvalidArgumentException( 'Not a probe suffix.' );
+		}
 		return self::PROBE_PREFIX . $this->token . '-' . $this->job_id . '-' . bin2hex( random_bytes( 8 ) ) . $suffix;
 	}
 

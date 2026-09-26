@@ -119,7 +119,7 @@ final class AtomicFileTest extends TestCase {
 		$this->assertSame( 'the one before', file_get_contents( $this->dir . '/' . self::NAME ), 'the final file untouched' );
 	}
 
-	public function test_a_file_that_does_not_read_back_as_written_is_removed_after_confirming(): void {
+	public function test_a_file_that_does_not_read_back_as_written_is_removed_even_when_the_lease_is_gone(): void {
 		$dir       = $this->dir;
 		$confirmed = 0;
 		try {
@@ -129,7 +129,9 @@ final class AtomicFileTest extends TestCase {
 				'<?php // x',
 				array(
 					'confirm' => static function () use ( &$confirmed ): void {
-						++$confirmed;
+						if ( ++$confirmed > 1 ) {
+							throw new \RuntimeException( 'Lease lost.' ); // Only the first confirmation, before the rename, succeeds.
+						}
 					},
 					'at'      => static function ( string $stage ) use ( $dir ): void {
 						if ( 'renamed' === $stage ) {
@@ -142,8 +144,8 @@ final class AtomicFileTest extends TestCase {
 		} catch ( AtomicWriteFailed $e ) {
 			$this->assertSame( 'The file did not read back as written.', $e->getMessage() );
 		}
-		$this->assertSame( 2, $confirmed, 'before the rename, and before removing it' );
-		$this->assertSame( array(), $this->names() );
+		$this->assertSame( 1, $confirmed, 'before the rename only: removing a file of unknown contents asks no one' );
+		$this->assertSame( array(), $this->names(), 'nothing of unknown contents is left where it may be loaded' );
 	}
 
 	public function test_a_file_that_cannot_be_moved_into_place_leaves_no_temporary_file(): void {
@@ -169,7 +171,9 @@ final class AtomicFileTest extends TestCase {
 	}
 
 	public function test_only_names_of_the_catalogue_and_small_contents_are_written(): void {
-		foreach ( array( '', 'probe.php', 'a/' . self::NAME, "a\0b" ) as $name ) {
+		// The last two are registered names whose temporary name is not: a process dying before the rename would
+		// leave a file the reaper never recognises.
+		foreach ( array( '', 'probe.php', 'a/' . self::NAME, "a\0b", 'wp-checkpoint-stage-a1b2c3d4e5f6-7-' . str_repeat( 'ab', 16 ), self::NAME . '.0123456789abcdef.tmp' ) as $name ) {
 			try {
 				AtomicFile::write( $this->dir, $name, 'x' );
 				$this->fail( 'written: ' . $name );

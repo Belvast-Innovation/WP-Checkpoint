@@ -48,7 +48,6 @@ final class ResidueUsageTest extends TestCase {
 			"'wp-checkpoint-probe-" => 'a probe name',
 			'STAGE_PREFIX' => 'a staging root name',
 			'PROBE_PREFIX' => 'a probe name',
-
 		);
 		foreach ( $this->source_files() as $relative => $path ) {
 			$source = (string) file_get_contents( $path );

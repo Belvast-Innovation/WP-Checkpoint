@@ -44,10 +44,11 @@ final class AtomicFile {
 	 * Write $contents to $dir/$name.
 	 *
 	 * @param string               $dir      Directory (exists).
-	 * @param string               $name     File name (no separator; a name StagingLayout::parse() recognises).
+	 * @param string               $name     File name (no separator; a name StagingLayout::parse() recognises, as
+	 *                                       its temporary name must be too).
 	 * @param string               $contents Contents (at most MAX_BYTES).
-	 * @param array<string, mixed> $options  "confirm": function(): void, called right before the rename and before
-	 *                                       removing a final file that did not read back (throws to stop);
+	 * @param array<string, mixed> $options  "confirm": function(): void, called right before the rename (throws to
+	 *                                       stop; the temporary file is removed);
 	 *                                       "at" (tests): function( string $stage ): void at "written" (before the
 	 *                                       rename) and "renamed" (before the read-back), where throwing stands in
 	 *                                       for a process that dies there.
@@ -56,7 +57,9 @@ final class AtomicFile {
 	 * @throws AtomicWriteFailed When the file could not be put in place as written.
 	 */
 	public static function write( string $dir, string $name, string $contents, array $options = array() ): string {
-		if ( '' === $name || false !== strpbrk( $name, "/\\\0" ) || null === StagingLayout::parse( $name ) ) {
+		$suffix = '.' . bin2hex( random_bytes( 8 ) ) . '.tmp';
+		// The temporary name must be one the reaper recognises too, or a process dying before the rename leaves it forever.
+		if ( '' === $name || false !== strpbrk( $name, "/\\\0" ) || null === StagingLayout::parse( $name ) || null === StagingLayout::parse( $name . $suffix ) ) {
 			throw new \InvalidArgumentException( 'Not a file name this plugin writes.' );
 		}
 		if ( strlen( $contents ) > self::MAX_BYTES ) {
@@ -65,7 +68,7 @@ final class AtomicFile {
 		$confirm = isset( $options['confirm'] ) && is_callable( $options['confirm'] ) ? $options['confirm'] : null;
 		$at      = isset( $options['at'] ) && is_callable( $options['at'] ) ? $options['at'] : null;
 		$final   = rtrim( $dir, '/\\' ) . DIRECTORY_SEPARATOR . $name;
-		$temp    = $final . '.' . bin2hex( random_bytes( 8 ) ) . '.tmp';
+		$temp    = $final . $suffix;
 		// Silenced: a warning would put the path into the error log; the exception says what failed.
 		$handle = @fopen( $temp, 'xb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
 		if ( false === $handle ) {
@@ -102,9 +105,8 @@ final class AtomicFile {
 			throw new AtomicWriteFailed( 'The file could not be read back.' );
 		}
 		if ( $back !== $contents ) {
-			if ( null !== $confirm ) {
-				call_user_func( $confirm );
-			}
+			// Removed without asking the lease first: the name is random and this call's alone, and a file of unknown
+			// contents must not stay where it may be loaded (a loader probe in mu-plugins).
 			@unlink( $final ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
 			throw new AtomicWriteFailed( 'The file did not read back as written.' );
 		}

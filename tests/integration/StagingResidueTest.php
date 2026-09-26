@@ -197,6 +197,7 @@ final class StagingResidueTest extends JobTestCase {
 	public function test_a_jobs_staging_goes_with_its_work_after_its_storage_directory_changed(): void {
 		$this->register( 'plain', array( $this->counting_step( 'p', 5 ) ) );
 		$id = $this->job_of( 'plain' );
+		self::past_token( 'aaaaaaaaaaaa' ); // The token it was started with is this installation's earlier one.
 		self::set( $id, array( 'storage_token' => 'aaaaaaaaaaaa', 'storage_path' => WP_CONTENT_DIR . '/wp-checkpoint-aaaaaaaaaaaa' ) );
 		$made = $this->leave( $this->layout( $id, 'aaaaaaaaaaaa' ) );
 		$job  = Plugin::instance()->jobs()->find( $id );
@@ -204,6 +205,61 @@ final class StagingResidueTest extends JobTestCase {
 		$this->assertFalse( Plugin::instance()->jobs()->reclaim_work( $job ), 'its work files, in the other directory, are left alone' );
 		foreach ( $made as $path ) {
 			$this->assertFileDoesNotExist( $path, 'its staging, next to the site: reclaimed all the same' );
+		}
+	}
+
+	public function test_a_row_under_a_token_that_was_never_ours_reclaims_no_staging(): void {
+		$this->register( 'plain', array( $this->counting_step( 'p', 5 ) ) );
+		$id = $this->job_of( 'plain' );
+		// A row of a copied database: the original's token, and the original's staging in shared directories.
+		self::set( $id, array( 'storage_token' => 'ffffffffffff' ) );
+		$theirs = $this->leave( $this->layout( $id, 'ffffffffffff' ) );
+		$this->assertCount( 3, Residue::scan_site( Residue::site_dirs( ScanRoots::site_directories() ), array( 'ffffffffffff' ) ), 'the control: listed under that token' );
+
+		$this->assertFalse( Plugin::instance()->jobs()->reclaim_work( Plugin::instance()->jobs()->find( $id ) ) );
+		foreach ( $theirs as $path ) {
+			$this->assertFileExists( $path, 'another installation\'s: untouched' );
+		}
+	}
+
+	public function test_nothing_is_claimed_while_a_clone_is_unresolved(): void {
+		$this->register( 'plain', array( $this->counting_step( 'p', 5 ) ) );
+		$ended = $this->job_of( 'plain' );
+		Plugin::instance()->jobs()->transition( Plugin::instance()->jobs()->find( $ended ), Job::CANCELLED );
+		$made   = $this->leave( $this->layout( $ended ) );
+		$state  = Directories::load_state();
+		$copied = array_merge( $state, array( 'clone_detected' => true ) );
+		Options::set( Directories::OPTION, $copied );
+
+		$this->reap();
+		$this->assertFalse( Plugin::instance()->jobs()->reclaim_work( Plugin::instance()->jobs()->find( $ended ) ) );
+		$this->assertSame( 0, Uninstaller::delete_site_residue()['deleted'] );
+		foreach ( $made as $path ) {
+			$this->assertFileExists( $path, 'the tokens may be the original\'s: kept' );
+		}
+
+		Options::set( Directories::OPTION, $state );
+		$this->reap();
+		foreach ( $made as $path ) {
+			$this->assertFileDoesNotExist( $path, 'the control: once resolved, reaped' );
+		}
+	}
+
+	public function test_uninstall_on_a_copy_that_never_resolved_its_storage_removes_no_staging(): void {
+		$this->register( 'plain', array( $this->counting_step( 'p', 5 ) ) );
+		$id    = $this->job_of( 'plain' );
+		$made  = $this->leave( $this->layout( $id ) );
+		$state = Directories::load_state();
+		// The copied options name the original's directory, whose marker is not this installation's.
+		Options::set( Directories::OPTION, array_merge( $state, array( 'install_id' => 'copy-' . $state['install_id'] ) ) );
+		$this->assertSame( 0, Uninstaller::delete_site_residue()['deleted'] );
+		foreach ( $made as $path ) {
+			$this->assertFileExists( $path );
+		}
+		Options::set( Directories::OPTION, $state );
+		$this->assertGreaterThan( 0, Uninstaller::delete_site_residue()['deleted'], 'the control: this installation\'s own state' );
+		foreach ( $made as $path ) {
+			$this->assertFileDoesNotExist( $path );
 		}
 	}
 

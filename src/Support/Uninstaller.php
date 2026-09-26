@@ -120,6 +120,12 @@ final class Uninstaller {
 	 * tokens), whatever the user chose: they are a cancelled restore's working copies, not user data, and
 	 * nothing reaps them once the plugin is gone. Runs after cancel_jobs(), so no run holds them any more.
 	 *
+	 * Only when the stored state is demonstrably this installation's (no clone detected, and the storage
+	 * directory's owner marker names this installation at this ABSPATH): a copied site that never resolved its
+	 * storage carries the original's tokens, and the directories may be shared. Otherwise nothing is removed.
+	 * Not bounded, as delete_storage() is not: an uninstall that runs out of time is run again, and what was
+	 * removed stays removed.
+	 *
 	 * @return array{deleted: int, failed: string[]}
 	 */
 	public static function delete_site_residue(): array {
@@ -127,7 +133,11 @@ final class Uninstaller {
 			'deleted' => 0,
 			'failed'  => array(),
 		);
-		foreach ( Residue::scan_site( Residue::site_dirs( ScanRoots::site_directories() ), Directories::own_tokens() ) as $entry ) {
+		$state  = Directories::load_state();
+		if ( ! empty( $state['clone_detected'] ) || '' === self::owned_storage( $state ) ) {
+			return $result;
+		}
+		foreach ( Residue::scan_site( Residue::site_dirs( ScanRoots::site_directories() ), Directories::own_tokens( $state ) ) as $entry ) {
 			$part               = Deleter::delete_tree( $entry['parent'], $entry['path'] );
 			$result['deleted'] += $part['deleted'];
 			$result['failed']   = array_merge( $result['failed'], $part['failed'] );
@@ -150,17 +160,8 @@ final class Uninstaller {
 			'failed'  => array(),
 		);
 		$state = Directories::load_state();
-		$path  = is_string( $state['path'] ) ? rtrim( $state['path'], '/\\' ) : '';
-		if ( '' === $path || ! is_dir( $path ) || Deleter::is_reparse( $path ) ) {
-			return $none;
-		}
-
-		$marker = $path . DIRECTORY_SEPARATOR . OwnerMarker::FILENAME;
-		if ( ! is_file( $marker ) ) {
-			return $none;
-		}
-		$contents = file_get_contents( $marker ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- tiny local file.
-		if ( ! is_string( $contents ) || ! OwnerMarker::matches( $contents, (string) $state['install_id'], ABSPATH ) ) {
+		$path  = self::owned_storage( $state );
+		if ( '' === $path ) {
 			return $none;
 		}
 
@@ -195,6 +196,26 @@ final class Uninstaller {
 			}
 		}
 		return $result;
+	}
+
+	/**
+	 * The stored storage directory, when it demonstrably belongs to this installation: a real directory (not a
+	 * link) whose owner marker names this installation at this ABSPATH. '' otherwise.
+	 *
+	 * @param array<string, mixed> $state Stored state (Directories::load_state()).
+	 * @return string
+	 */
+	private static function owned_storage( array $state ): string {
+		$path = is_string( $state['path'] ) ? rtrim( $state['path'], '/\\' ) : '';
+		if ( '' === $path || ! is_dir( $path ) || Deleter::is_reparse( $path ) ) {
+			return '';
+		}
+		$marker = $path . DIRECTORY_SEPARATOR . OwnerMarker::FILENAME;
+		if ( ! is_file( $marker ) ) {
+			return '';
+		}
+		$contents = file_get_contents( $marker ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- tiny local file.
+		return is_string( $contents ) && OwnerMarker::matches( $contents, (string) $state['install_id'], ABSPATH ) ? $path : '';
 	}
 
 	/**
