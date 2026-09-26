@@ -214,10 +214,18 @@ final class Schema {
 	/**
 	 * Why jobs wait while an upgrade is due and this request may not try it (ensure()'s "pending").
 	 *
+	 * @param string[]|null $last What the last failed attempt found the table lacked (ensure()'s "last_problems").
 	 * @return string
 	 */
-	public static function pending_message(): string {
-		return __( 'WP Checkpoint has to update its database table first. That happens on the next visit to the WP Checkpoint page, the next cron run or the next WP-CLI command; the job continues after it.', 'wp-checkpoint' );
+	public static function pending_message( $last = null ): string {
+		if ( is_array( $last ) && array() !== $last ) {
+			return sprintf(
+				/* translators: %s: column names of the plugin's job table, some with the width they have and need. */
+				__( 'WP Checkpoint has to update its database table first; the last attempt did not complete (%s). It is tried again from the WP Checkpoint page, by cron or by WP-CLI, at most every ten minutes; jobs continue once it has worked.', 'wp-checkpoint' ),
+				implode( ', ', $last )
+			);
+		}
+		return __( 'WP Checkpoint has to update its database table first. That happens on the next visit to the WP Checkpoint page, the next cron run or the next WP-CLI command; jobs continue once it has.', 'wp-checkpoint' );
 	}
 
 	/**
@@ -242,16 +250,19 @@ final class Schema {
 	 * "failed" when that did not work).
 	 *
 	 * Only an admin request, cron and WP-CLI try (may_upgrade()); any other
-	 * request (REST: a tick, a loopback hop; a page of the site) only reads
-	 * the stored version and the last failure: "pending" when an upgrade is
-	 * due, "failed" with the last attempt's problems when one failed. After
-	 * a failed attempt, the next one waits RETRY_SECONDS ("failed" with the
-	 * same problems meanwhile): a refused statement is not sent again on
-	 * every request.
+	 * request (REST: a tick, a loopback hop, a retry or an answer from the
+	 * page; a page of the site) only reads the stored version: "pending"
+	 * when an upgrade is due (with "last_problems" when an attempt failed:
+	 * a record of what the table was then, not evidence of what it is now).
+	 * After a failed attempt the next waits RETRY_SECONDS: in the wait,
+	 * nothing is sent, but the table is read again, "failed" with what it
+	 * lacks now, "pending" when it cannot be read, and on as usual when it
+	 * lacks nothing any more.
 	 *
 	 * @param bool $verify Whether to read the columns back when the version is current (creating a job, the
-	 *                     plugin's page, activation, retry and answer; not every tick).
-	 * @return array{action: string, version: int, min_compatible: int, problems?: string[]|null} action: none|created|migrated|repaired|pending|newer|incompatible|failed.
+	 *                     plugin's page, activation, retry and answer; not every tick). Only where the request
+	 *                     may upgrade: the page, activation, WP-CLI.
+	 * @return array{action: string, version: int, min_compatible: int, problems?: string[]|null, last_problems?: string[]} action: none|created|migrated|repaired|pending|newer|incompatible|failed; problems with failed (read from the table in this call; null when it could not be read).
 	 */
 	public static function ensure( bool $verify = false ): array {
 		$stored = self::stored();
@@ -263,6 +274,8 @@ final class Schema {
 			);
 			if ( 'failed' === $action ) {
 				$out['problems'] = $problems;
+			} elseif ( 'pending' === $action && is_array( $problems ) && array() !== $problems ) {
+				$out['last_problems'] = $problems;
 			}
 			return $out;
 		};
@@ -281,16 +294,29 @@ final class Schema {
 			if ( $current ) {
 				return $result( 'none' );
 			}
-			return null === $last ? $result( 'pending' ) : $result( 'failed', $last['problems'] );
+			// The record of a failed attempt says what the table was then, not now (it may have been fixed by
+			// hand since): jobs wait for a request that may look, rather than fail on it.
+			return $result( 'pending', null === $last ? null : $last['problems'] );
 		}
 		if ( null !== $last && time() < $last['after'] ) {
-			return $result( 'failed', $last['problems'] );
+			// Nothing is sent to the database in the wait, but the table is read again: its cause may be gone.
+			$now = self::verified();
+			if ( null === $now ) {
+				return $result( 'pending', $last['problems'] );
+			}
+			if ( array() !== $now ) {
+				return $result( 'failed', $now );
+			}
+			// Nothing missing any more: go on as if there had been no failure.
 		}
 
 		if ( $current ) {
 			$problems = self::column_problems();
 			if ( null === $problems || array() === $problems ) {
-				// Nothing missing; unreadable columns are no evidence that something is.
+				// Nothing missing; unreadable columns are no evidence that something is (nor that it was fixed).
+				if ( array() === $problems ) {
+					Options::delete( self::RETRY_OPTION );
+				}
 				return $result( 'none' );
 			}
 			// Lost after the version was recorded (removed by hand, a table brought from elsewhere): the table
@@ -320,6 +346,9 @@ final class Schema {
 			self::record_failure( $problems );
 			return $result( 'failed', $problems );
 		}
+		// The record first: a request that dies between the two writes leaves the version behind and no record,
+		// and the next attempt migrates again (every migration can be repeated).
+		Options::delete( self::RETRY_OPTION );
 		Options::set(
 			self::OPTION,
 			array(
@@ -327,7 +356,6 @@ final class Schema {
 				'min_compatible' => $min,
 			)
 		);
-		Options::delete( self::RETRY_OPTION );
 		return array(
 			'action'         => 0 === $from ? 'created' : 'migrated',
 			'version'        => self::CURRENT,
@@ -369,10 +397,16 @@ final class Schema {
 		}
 		$problems = null;
 		if ( isset( $stored['problems'] ) && is_array( $stored['problems'] ) ) {
-			$problems = array_values( array_map( 'strval', $stored['problems'] ) );
+			$problems = array();
+			foreach ( $stored['problems'] as $problem ) {
+				if ( is_string( $problem ) ) {
+					$problems[] = $problem;
+				}
+			}
 		}
 		return array(
-			'after'    => $stored['after'],
+			// A time further out than one wait (a clock that jumped, a damaged value) has run out.
+			'after'    => $stored['after'] > time() + self::RETRY_SECONDS ? 0 : $stored['after'],
 			'problems' => $problems,
 		);
 	}

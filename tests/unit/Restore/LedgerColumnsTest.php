@@ -72,7 +72,7 @@ final class LedgerColumnsTest extends TestCase {
 		new Ledger( self::session( array_values( array_diff( array_keys( Ledger::COLUMNS ), array( 'restarting' ) ) ), $sent ), 'wcptmpabcdef_1_0000_', 'aaaa' );
 	}
 
-	public function test_no_column_list_is_no_evidence_and_may_pass(): void {
+	public function test_no_column_list_is_no_evidence_and_is_tried_again(): void {
 		$sent = array();
 		try {
 			new Ledger( self::session( array(), $sent ), 'wcptmpabcdef_1_0000_', 'aaaa' );

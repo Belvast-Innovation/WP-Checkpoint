@@ -346,7 +346,12 @@ final class JobActions {
 	 * @return TickResult|null Null when the tick was put off.
 	 */
 	private function late_cron_tick( int $id, float $late, float $started_at ): ?TickResult {
-		Schema::ensure(); // The count is written before the tick, which would otherwise be what migrates.
+		// The count is written before the tick, which would otherwise be what migrates; a table that is behind
+		// has no count to write, and the tick says why.
+		$schema = Schema::ensure();
+		if ( ! in_array( $schema['action'], array( 'none', 'created', 'migrated', 'repaired' ), true ) ) {
+			return $this->tick( $id, $started_at );
+		}
 		$job = $this->repository->find( $id );
 		if ( null === $job || ! in_array( $job->status, array( Job::QUEUED, Job::RUNNING, Job::PAUSED ), true ) || $job->awaiting_answer() ) {
 			// Nothing of it runs (the tick only reports the job and settles its event): no reason to wait.
@@ -414,18 +419,22 @@ final class JobActions {
 			Loopback::schedule( $id, Loopback::FALLBACK_SECONDS, Loopback::KEEP );
 		}
 		$schema = Schema::ensure();
-		$this->repository->maintenance();
-		$this->sweep_events();
-		// A table the migration could not bring up to date (a column missing, or narrower than needed) fails the
-		// job with the reason; columns that could not be read are no evidence of either.
-		$problems = 'failed' === $schema['action'] && is_array( $schema['problems'] ?? null ) ? $schema['problems'] : array();
-		if ( 'pending' === $schema['action'] ) {
-			// This request may not upgrade (Schema::ensure()), and the job's row lacks what this code needs: the
-			// job waits for the admin, cron or WP-CLI to do it (the follow-up sets a cron event).
-			$job    = $this->repository->find( $id );
-			$result = null === $job ? new TickResult( TickResult::MISSING, -1, null ) : new TickResult( TickResult::BLOCKED, Loopback::FALLBACK_SECONDS, $job, Schema::pending_message() );
+		$behind = in_array( $schema['action'], array( 'pending', 'failed' ), true );
+		if ( ! $behind ) {
+			// Housekeeping writes rows as this code knows them: not on a table that is behind.
+			$this->repository->maintenance();
+			$this->sweep_events();
+		}
+		if ( 'pending' === $schema['action'] || ( 'failed' === $schema['action'] && ! is_array( $schema['problems'] ?? null ) ) ) {
+			// An upgrade is due and this request may not try it, or the table could not be read: nothing says
+			// what it lacks now. The job waits for the admin, cron or WP-CLI (the follow-up sets a cron event).
+			$message = 'pending' === $schema['action'] ? Schema::pending_message( $schema['last_problems'] ?? null ) : Schema::problem_message( null );
+			$result  = $this->held( $id, $message );
 		} else {
-			$result = $this->runner->tick( $id, null === $started_at ? self::started_at() : (float) $started_at, $problems );
+			// A table the migration could not bring up to date (read in this request: a column missing, or
+			// narrower than needed) fails the job with the reason.
+			$problems = 'failed' === $schema['action'] ? (array) $schema['problems'] : array();
+			$result   = $this->runner->tick( $id, null === $started_at ? self::started_at() : (float) $started_at, $problems );
 		}
 		if ( TickResult::LOST === $result->status && null !== $result->job && Job::CANCELLED === $result->job->status ) {
 			// The cancel happened while this driver held the lock: the step has stopped now, so clean up here.
@@ -438,6 +447,28 @@ final class JobActions {
 			}
 		}
 		return $result;
+	}
+
+	/**
+	 * The result of a tick that waits for the job table: for a job that can still run, blocked with $message; for
+	 * one that ended or waits for an answer, what the Runner would say (and no cron event for it).
+	 *
+	 * @param int    $id      Job id.
+	 * @param string $message Why it waits.
+	 * @return TickResult
+	 */
+	private function held( int $id, string $message ): TickResult {
+		$job = $this->repository->find( $id );
+		if ( null === $job ) {
+			return new TickResult( TickResult::MISSING, -1, null );
+		}
+		if ( ! in_array( $job->status, array( Job::QUEUED, Job::RUNNING, Job::PAUSED ), true ) ) {
+			return new TickResult( TickResult::FINISHED, -1, $job );
+		}
+		if ( $job->awaiting_answer() ) {
+			return new TickResult( TickResult::PAUSED, -1, $job, __( 'The job is waiting for your decision.', 'wp-checkpoint' ) );
+		}
+		return new TickResult( TickResult::BLOCKED, Loopback::FALLBACK_SECONDS, $job, $message );
 	}
 
 	/**
@@ -577,12 +608,14 @@ final class JobActions {
 	 * @throws JobsUnavailable When the row lacks columns.
 	 */
 	private function usable( int $id ) {
-		$schema = Schema::ensure( true ); // Adds columns lost since the version was recorded.
-		if ( 'failed' === $schema['action'] && is_array( $schema['problems'] ?? null ) ) {
-			throw new JobsUnavailable( esc_html( Schema::problem_message( $schema['problems'] ) ) );
+		// Where the request may upgrade (WP-CLI), columns lost since the version was recorded are added again; a
+		// REST request (the page's Retry and answers) only reads, and the job's row is the check.
+		$schema = Schema::ensure( true );
+		if ( 'failed' === $schema['action'] ) {
+			throw new JobsUnavailable( esc_html( Schema::problem_message( $schema['problems'] ?? null ) ) );
 		}
 		if ( 'pending' === $schema['action'] ) {
-			throw new JobsUnavailable( esc_html( Schema::pending_message() ) );
+			throw new JobsUnavailable( esc_html( Schema::pending_message( $schema['last_problems'] ?? null ) ) );
 		}
 		$job = $this->repository->find( $id );
 		if ( null !== $job && array() !== $job->missing_columns ) {
