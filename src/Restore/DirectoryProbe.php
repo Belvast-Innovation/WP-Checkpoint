@@ -91,7 +91,7 @@ final class DirectoryProbe {
 			$win32  = false === $handle;
 			if ( $win32 ) {
 				$handle = @fopen( $dir . '/' . self::CONTROL, 'xb' );
-				if ( false === $handle ) {
+				if ( true ) { // Mutation A: a refused "<" is taken for a full disk.
 					throw new CannotStage( sprintf( 'Files cannot be created in a new directory in %s, where the restore stages its files (the disk or the account\'s quota may be full). Free some space, or make that directory writable by the web server, then try again.', $where ) );
 				}
 			}
