@@ -182,6 +182,11 @@ final class Runner {
 			// fail, or a default would stand in for a value. Failed with the reason, before anything else.
 			return $this->fail_for_missing_columns( $job, $problems );
 		}
+		if ( $job->cron_deferrals > 0 ) {
+			// The job has reached the Runner: whatever this tick does (runs, waits, is refused by the gate), it is
+			// no longer one that late cron requests keep from running (Job::$cron_deferrals).
+			$this->repository->reset_cron_deferrals( $job->id );
+		}
 
 		$gate = $this->repository->gate( $job );
 		if ( ! $gate['allowed'] ) {

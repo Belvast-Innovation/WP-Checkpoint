@@ -179,8 +179,7 @@ final class SchemaColumnsTest extends JobTestCase {
 	 */
 	private function running_job(): int {
 		$this->register( 'plain', array( $this->counting_step( 'p', 5 ) ) );
-		$id = Plugin::instance()->jobs()->create( 'plain' )->id;
-		Plugin::instance()->job_actions()->tick( $id, JobActions::NO_TIME_LEFT );
+		$id = $this->job_of( 'plain' );
 		$this->assertSame( 1, (int) JobContext::strip_reserved( Plugin::instance()->jobs()->find( $id )->cursor )['n'], 'the control: it moves on' );
 		return $id;
 	}
@@ -192,8 +191,19 @@ final class SchemaColumnsTest extends JobTestCase {
 		self::drop_column( 'cron_deferrals' );
 		$this->assertSame( array( 'cron_deferrals' ), Plugin::instance()->jobs()->find( $id )->missing_columns );
 
+		global $EZSQL_ERROR, $wpdb;
+		// The control: a statement on the missing column is seen as a database error.
+		$errors = count( (array) $EZSQL_ERROR );
+		$quiet  = $wpdb->suppress_errors( true );
+		$wpdb->query( 'UPDATE ' . Schema::jobs_table() . ' SET cron_deferrals = 0 WHERE id = 0' );
+		$wpdb->suppress_errors( $quiet );
+		$this->assertSame( $errors + 1, count( (array) $EZSQL_ERROR ), 'the control: a failed statement is seen' );
+		$wpdb->update( Schema::jobs_table(), array( 'progress' => 1 ), array( 'id' => $id ) ); // Any row value; the tick reads it.
+		$errors = count( (array) $EZSQL_ERROR );
+
 		$result = Plugin::instance()->job_actions()->tick( $id, JobActions::NO_TIME_LEFT );
 		$job    = Plugin::instance()->jobs()->find( $id );
+		$this->assertSame( $errors, count( (array) $EZSQL_ERROR ), 'no statement on the missing column' );
 		$this->assertSame( 'failed', $result->status );
 		$this->assertSame( Job::FAILED, $job->status, 'failed, not left running without progress' );
 		$this->assertSame( 1, (int) JobContext::strip_reserved( $job->cursor )['n'], 'nothing ran' );

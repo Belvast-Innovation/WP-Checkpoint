@@ -109,6 +109,28 @@ abstract class JobTestCase extends WP_UnitTestCase {
 	}
 
 	/**
+	 * A job of a registered type as the drivers usually find one: it has run one tick (running, its first unit
+	 * done, no lock between ticks). Pass $ran = false for a job that never ran (queued), and say why in the
+	 * test: a job that never ran hides what differs for one that did (the lock between ticks, the attempts).
+	 *
+	 * @param string               $type    Job type.
+	 * @param bool                 $ran     Whether it has run one tick.
+	 * @param array<string, mixed> $options Options.
+	 * @return int Job id.
+	 */
+	protected function job_of( string $type, bool $ran = true, array $options = array() ): int {
+		$id = Plugin::instance()->jobs()->create( $type, self::$admin_id, array(), $options )->id;
+		if ( $ran ) {
+			// No follow-up: no event or hop that the test did not ask for.
+			Plugin::instance()->job_actions()->tick( $id, \WPCheckpoint\Jobs\JobActions::NO_TIME_LEFT, false );
+			$job = Plugin::instance()->jobs()->find( $id );
+			$this->assertSame( \WPCheckpoint\Jobs\Job::RUNNING, $job->status, 'the fixture job ended or stopped in its first tick; pass $ran = false' );
+			$this->assertSame( '', $job->lock_token );
+		}
+		return $id;
+	}
+
+	/**
 	 * Replace a private property of one of the plugin's objects (its runner inside the job actions, say) for
 	 * this test only: tear_down() puts the value from before back.
 	 *
