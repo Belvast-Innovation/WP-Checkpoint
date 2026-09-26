@@ -621,7 +621,7 @@ final class RestoreFilesPreflightStep implements Step {
 						array(
 							'id'      => 'free_space',
 							'kind'    => 'free_space_unknown',
-							'bytes'   => max( $check['unknown'] ) >= (float) PHP_INT_MAX ? PHP_INT_MAX : (int) max( $check['unknown'] ),
+							'bytes'   => self::question_bytes( max( $check['unknown'] ) ),
 							'choices' => array( 'continue', 'stop' ),
 						),
 					),
@@ -663,6 +663,17 @@ final class RestoreFilesPreflightStep implements Step {
 		}
 		$free = HostFunctions::disk_free_space( $dir );
 		return false === $free ? null : $free;
+	}
+
+	/**
+	 * A byte count for a question (an integer, JobRepository::validate_questions()): capped at PHP_INT_MAX, never
+	 * cast past it ((float) PHP_INT_MAX is 2^63 on 64-bit PHP, which an integer cast turns negative).
+	 *
+	 * @param float $bytes Bytes.
+	 * @return int
+	 */
+	public static function question_bytes( float $bytes ): int {
+		return $bytes >= (float) PHP_INT_MAX ? PHP_INT_MAX : (int) max( 0.0, $bytes );
 	}
 
 	/**

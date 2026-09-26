@@ -553,4 +553,36 @@ final class RestoreFilesPreflightTest extends RestoreTestCase {
 		$this->assertSame( Job::FAILED, $now->status );
 		$this->assertStringContainsString( 'The backup holds wp-content/uploads/D/x.txt and wp-content/uploads/d, which the file system of this site treats as one name', (string) $now->last_error );
 	}
+
+	public function test_a_question_on_more_staged_bytes_than_an_integer_holds_carries_the_largest_integer(): void {
+		// No real backup stages that much (a manifest total is at most 2^53 bytes): the cursor the space phase
+		// reads is given more, as 32-bit PHP meets it past 2 GiB.
+		$base    = $this->with_files( array( 'wp-content/uploads/a.txt' => 'a' ) );
+		$unknown = $this->type(
+			array(
+				'plugin_dir' => $this->plugin_dir( 0 ),
+				'free'       => static function () {
+					return null;
+				},
+			)
+		);
+		$job    = $this->job_for( $unknown, $base );
+		$runner = new Runner( Plugin::instance()->jobs(), Plugin::instance()->job_types(), new Redactor( Redactor::installation_secrets() ), array( 'budget' => new Budget( 20, 32 * 1048576, false ) ) );
+		for ( $i = 0; $i < 5000; $i++ ) {
+			$now = Plugin::instance()->jobs()->find( $job->id );
+			if ( RestoreFilesPreflightStep::ID === $now->step && 'space' === ( $now->cursor['phase'] ?? '' ) ) {
+				break;
+			}
+			$this->assertContains( $now->status, array( Job::QUEUED, Job::RUNNING ), (string) $now->last_error );
+			$runner->tick( $job->id, microtime( true ) - 3600 );
+		}
+		$this->assertSame( 'space', $now->cursor['phase'] ?? '', 'the control: stopped before the space phase' );
+		$cursor          = $now->cursor;
+		$cursor['bytes'] = array_fill( 0, count( (array) $cursor['bytes'] ), 2.0 ** 64 );
+		self::set( $job->id, array( 'cursor_json' => wp_json_encode( $cursor ) ) );
+		$runner->tick( $job->id, microtime( true ) );
+		$job = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertSame( Job::PAUSED, $job->status, (string) $job->last_error );
+		$this->assertSame( PHP_INT_MAX, $job->questions[0]['bytes'], 'capped, not wrapped to a negative count' );
+	}
 }
