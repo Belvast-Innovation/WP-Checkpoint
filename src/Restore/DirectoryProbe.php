@@ -90,7 +90,7 @@ final class DirectoryProbe {
 			foreach ( self::VARIANTS as $flag => $variant ) {
 				$flags[ $flag ] = file_exists( $dir . '/' . $variant );
 			}
-			$names = new TargetNames( $flags['fold_ascii'], $flags['fold_unicode'], $flags['normalize'], $trailing && file_exists( $dir . '/' . self::BARE ), $win32, ! $trailing );
+			$names = new TargetNames( $flags['fold_ascii'], $flags['fold_unicode'], $flags['normalize'], $trailing && file_exists( $dir . '/' . self::BARE ), false === getenv( 'WPC_NEVER_SET' ) ? false : $win32, ! $trailing ); // Mutation B: the Win32 rules are never recorded.
 			$stat  = @stat( $dir );
 			if ( false === $stat ) {
 				throw new CannotStage( sprintf( 'A new directory in %s cannot be examined, so whether it is on the same disk as the directories the restore replaces cannot be told.', $where ) );
