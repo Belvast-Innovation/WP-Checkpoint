@@ -432,19 +432,56 @@ final class JobRepository {
 	public static function has_unfinished( $type = null ) {
 		global $wpdb;
 		$where = null === $type ? '' : $wpdb->prepare( ' AND type = %s', (string) $type );
-		$quiet = $wpdb->suppress_errors( true );
-		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin table; read on the rare requests that would move the storage directory.
-		$count = $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM ' . self::table() . ' WHERE status IN (%s, %s, %s)', Job::QUEUED, Job::RUNNING, Job::PAUSED ) . $where ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- table name from the prefix and a constant; $where prepared above.
-		if ( null !== $count && is_numeric( $count ) ) {
-			$wpdb->suppress_errors( $quiet );
-			return (int) $count > 0;
+		$rows  = self::read_rows( $wpdb->prepare( 'SELECT id FROM ' . self::table() . ' WHERE status IN (%s, %s, %s)', Job::QUEUED, Job::RUNNING, Job::PAUSED ) . $where . ' LIMIT 1' ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- table name from the prefix and a constant; $where prepared above.
+		if ( null !== $rows ) {
+			return array() !== $rows;
 		}
-		// The count failed: only the server's answer that there is no such table is an answer (no job without it).
-		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- schema check; wpdb clears last_error at the start of each query.
-		$found = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( self::table() ) ) );
-		$read  = '' === $wpdb->last_error;
+		// The read failed: only the server's answer that there is no such table is an answer (no job without it).
+		$tables = self::read_rows( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( self::table() ) ) );
+		return array() === $tables ? false : null;
+	}
+
+	/**
+	 * The storage directory and token of each unfinished restore, or null when the jobs table could not be
+	 * read (only the server's answer that there is no such table means none).
+	 *
+	 * @return array<int, array{path: string, token: string}>|null
+	 */
+	public static function unfinished_restores() {
+		global $wpdb;
+		$rows = self::read_rows( $wpdb->prepare( 'SELECT storage_path, storage_token FROM ' . self::table() . ' WHERE type = %s AND status IN (%s, %s, %s)', RestoreJob::ID, Job::QUEUED, Job::RUNNING, Job::PAUSED ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- table name from the prefix and a constant.
+		if ( null === $rows ) {
+			$tables = self::read_rows( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( self::table() ) ) );
+			return array() === $tables ? array() : null;
+		}
+		$restores = array();
+		foreach ( $rows as $row ) {
+			$restores[] = array(
+				'path'  => (string) ( $row[0] ?? '' ),
+				'token' => (string) ( $row[1] ?? '' ),
+			);
+		}
+		return $restores;
+	}
+
+	/**
+	 * Rows of one statement as lists of values, or null when it failed: wpdb::get_results() gives an empty
+	 * list for a failed statement too, wpdb::query() tells them apart (false).
+	 *
+	 * @param string $sql Statement.
+	 * @return array<int, array<int, mixed>>|null
+	 */
+	private static function read_rows( string $sql ) {
+		global $wpdb;
+		$quiet = $wpdb->suppress_errors( true );
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- prepared by the callers; plugin table or a schema check.
+		$count = $wpdb->query( $sql );
+		$rows  = array();
+		foreach ( false === $count ? array() : (array) $wpdb->last_result as $row ) {
+			$rows[] = array_values( (array) $row );
+		}
 		$wpdb->suppress_errors( $quiet );
-		return $read && null === $found ? false : null;
+		return false === $count ? null : $rows;
 	}
 
 	/**
@@ -1134,12 +1171,23 @@ final class JobRepository {
 		if ( ! empty( $state['clone_detected'] ) ) {
 			return 0;
 		}
-		$token  = (string) $state['token'];
-		$failed = 0;
+		$token    = (string) $state['token'];
+		$failed   = 0;
+		$listings = array();
 		foreach ( $this->list_jobs( array( Job::QUEUED, Job::RUNNING, Job::PAUSED ), 500 ) as $job ) {
-			// The same token at another location: failed only when that location is positively gone (its
-			// parent lists and holds no such entry); otherwise the gate refuses it and says why.
-			if ( $job->storage_token === $token && ( '' === $job->storage_path || Paths::same_location( $job->storage_path, $base ) || ! self::positively_gone( $job->storage_path ) ) ) {
+			if ( $job->storage_token === $token ) {
+				// The same token at another location: failed only when that location is positively gone (its
+				// parent lists and holds no such entry); otherwise the gate refuses it and says why.
+				if ( '' === $job->storage_path || Paths::same_location( $job->storage_path, $base ) || ! Paths::positively_gone( $job->storage_path, $listings ) ) {
+					continue;
+				}
+				try {
+					// Final: the directory with its work files is not there.
+					$this->force_transition( $job, Job::FAILED, __( 'The storage directory of this job no longer exists, and its work files with it; the job cannot continue.', 'wp-checkpoint' ), Job::FAILURE_FINAL );
+					++$failed;
+				} catch ( StaleJob $e ) {
+					continue;
+				}
 				continue;
 			}
 			try {
@@ -1760,19 +1808,6 @@ final class JobRepository {
 	 */
 	public function owns_files_of( Job $job ): bool {
 		return '' !== $this->files_base( $job );
-	}
-
-	/**
-	 * Whether a path is positively gone: its parent directory can be listed and holds no entry of its name.
-	 * A parent that cannot be listed (permissions, open_basedir, a storage error) is no evidence.
-	 *
-	 * @param string $path Path.
-	 * @return bool
-	 */
-	private static function positively_gone( string $path ): bool {
-		$path    = rtrim( $path, '/\\' );
-		$entries = @scandir( dirname( $path ) ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a warning would put the path into the error log.
-		return is_array( $entries ) && ! in_array( basename( $path ), $entries, true );
 	}
 
 	/**

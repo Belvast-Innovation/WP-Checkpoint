@@ -126,6 +126,31 @@ final class Paths {
 	}
 
 	/**
+	 * Whether a path is positively gone: it is absolute, its parent directory
+	 * can be listed, and no entry there has its name, not even one that
+	 * differs only in case (a case-insensitive file system would find it).
+	 * A parent that cannot be listed (permissions, open_basedir, a storage
+	 * error, a file) or a relative path is no evidence: false.
+	 *
+	 * @param string                                 $path     Path.
+	 * @param array<string, array<int, string>|null> $listings Listings by parent (null: not listable), reused across calls.
+	 * @return bool
+	 */
+	public static function positively_gone( string $path, array &$listings = array() ): bool {
+		$path = rtrim( self::normalize( $path ), '/' );
+		if ( '' === $path || ( '/' !== $path[0] && 1 !== preg_match( '#^[A-Za-z]:/#', $path ) ) ) {
+			return false;
+		}
+		$parent = dirname( $path );
+		if ( ! array_key_exists( $parent, $listings ) ) {
+			$entries             = @scandir( $parent ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a warning would put the path into the error log.
+			$listings[ $parent ] = is_array( $entries ) ? array_map( 'strtolower', $entries ) : null;
+		}
+		$listed = $listings[ $parent ];
+		return null !== $listed && ! in_array( strtolower( basename( $path ) ), $listed, true );
+	}
+
+	/**
 	 * Whether $target lies strictly below $base, comparing normalised paths.
 	 *
 	 * Separated from is_inside() so the comparison rules (separator

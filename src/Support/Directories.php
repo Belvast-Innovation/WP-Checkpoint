@@ -350,6 +350,11 @@ final class Directories {
 				}
 				$this->state['token']        = '';
 				$this->state['verification'] = array();
+			} elseif ( ! Paths::positively_gone( $existing ) && false !== $this->restore_unfinished() ) {
+				// Not reachable from this request (open_basedir, permissions), yet not shown to be gone: a restore
+				// may keep its files there. No other directory is chosen meanwhile.
+				$this->error = __( 'The storage directory cannot be reached from this request, and a restore may be keeping its files there, so no other directory is chosen. Jobs continue from a request that can reach it.', 'wp-checkpoint' );
+				return;
 			}
 		}
 
@@ -423,17 +428,39 @@ final class Directories {
 			return;
 		}
 		$moved = '' !== (string) $this->state['path'] && ! Paths::same_location( $dir, (string) $this->state['path'] );
-		if ( $moved && self::is_valid_token( $this->state['token'] ) && false !== $this->restore_unfinished() ) {
-			// A restore keeps its files in the directory it was started with: another directory here (the constant
-			// set differently for WP-CLI and for the web server) must not become the choice. Nothing is created,
-			// re-tokened or saved, so the directory it was started with is still the choice when it comes back.
-			$this->error = __( 'A restore is in progress in the storage directory it was started with, and WPCHECKPOINT_STORAGE_DIR names another one in this request (for example, it is set differently for WP-CLI and for the web server). Jobs continue only from a request that uses the same directory.', 'wp-checkpoint' );
-			return;
+		$token = '';
+		if ( $moved ) {
+			// A restore keeps its files in the directory it was started with (its row's storage_path): another
+			// directory here (the constant set differently for WP-CLI and for the web server) must not become
+			// the choice while that directory is there. Nothing is created, re-tokened or saved.
+			$restores = $this->restores();
+			if ( null === $restores ) {
+				$this->error = __( 'Whether a restore is in progress cannot be read from the database, so this request does not switch to the storage directory WPCHECKPOINT_STORAGE_DIR names. Try again once the database answers.', 'wp-checkpoint' );
+				return;
+			}
+			$listings = array();
+			foreach ( $restores as $restore ) {
+				if ( Paths::same_location( $dir, $restore['path'] ) ) {
+					$token = $restore['token']; // Its own directory: taken back with its own token.
+					break;
+				}
+			}
+			if ( '' === $token ) {
+				foreach ( $restores as $restore ) {
+					if ( ! Paths::positively_gone( $restore['path'], $listings ) ) {
+						$this->error = __( 'A restore is in progress in another storage directory than the one WPCHECKPOINT_STORAGE_DIR names in this request (for example, the constant is set differently for WP-CLI and for the web server). Set it to the directory the restore was started with, or wait until the restore has ended.', 'wp-checkpoint' );
+						return;
+					}
+				}
+			}
 		}
 		if ( ! $this->prepare( $dir ) ) {
 			return;
 		}
-		if ( ! self::is_valid_token( $this->state['token'] ) || $moved ) {
+		if ( self::is_valid_token( $token ) ) {
+			$this->state['token'] = $token;
+			$this->save_state();
+		} elseif ( ! self::is_valid_token( $this->state['token'] ) || $moved ) {
 			$this->state['token'] = bin2hex( random_bytes( 6 ) );
 			$this->save_state();
 		}
@@ -571,7 +598,10 @@ final class Directories {
 		$this->base  = $dir;
 		$this->error = '';
 		$abspath     = rtrim( Paths::normalize( (string) $this->context['abspath'] ), '/' ) . '/';
-		$changed     = $dir !== $this->state['path'] || $source !== $this->state['source'] || $provisional !== (bool) $this->state['provisional'] || $abspath !== $this->state['abspath'];
+		if ( '' !== (string) $this->state['path'] && $dir !== $this->state['path'] && Paths::same_location( $dir, (string) $this->state['path'] ) ) {
+			$dir = (string) $this->state['path']; // The same directory spelled another way: the stored spelling stays.
+		}
+		$changed = $dir !== $this->state['path'] || $source !== $this->state['source'] || $provisional !== (bool) $this->state['provisional'] || $abspath !== $this->state['abspath'];
 		if ( $changed ) {
 			if ( $dir !== $this->state['path'] ) {
 				$this->state['verification'] = array();
@@ -630,6 +660,19 @@ final class Directories {
 	 */
 	private function restore_unfinished() {
 		return $this->unfinished( \WPCheckpoint\Jobs\RestoreJob::ID );
+	}
+
+	/**
+	 * The directory and token of each unfinished restore, or null when that cannot be read (JobRepository, or
+	 * the answer a test gives in the context: key "restores", a callable; internal, for tests only).
+	 *
+	 * @return array<int, array{path: string, token: string}>|null
+	 */
+	private function restores() {
+		if ( isset( $this->context['restores'] ) && is_callable( $this->context['restores'] ) ) {
+			return call_user_func( $this->context['restores'] );
+		}
+		return \WPCheckpoint\Jobs\JobRepository::unfinished_restores();
 	}
 
 	/**
