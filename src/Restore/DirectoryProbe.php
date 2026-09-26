@@ -51,6 +51,11 @@ final class DirectoryProbe {
 	const BARE     = 'b';
 
 	/**
+	 * A name the Win32 namespace refuses.
+	 */
+	const WIN32 = 'c<d';
+
+	/**
 	 * Probe a directory.
 	 *
 	 * @param string   $where   Staging parent (exists).
@@ -79,7 +84,11 @@ final class DirectoryProbe {
 			foreach ( self::VARIANTS as $flag => $variant ) {
 				$flags[ $flag ] = file_exists( $dir . '/' . $variant );
 			}
-			$names = new TargetNames( $flags['fold_ascii'], $flags['fold_unicode'], $flags['normalize'], file_exists( $dir . '/' . self::BARE ) );
+			$handle = @fopen( $dir . '/' . self::WIN32, 'xb' );
+			if ( false !== $handle ) {
+				fclose( $handle );
+			}
+			$names = new TargetNames( $flags['fold_ascii'], $flags['fold_unicode'], $flags['normalize'], file_exists( $dir . '/' . self::BARE ), false === $handle );
 			$stat  = @stat( $dir );
 			if ( false === $stat ) {
 				throw new CannotStage( sprintf( 'A new directory in %s cannot be examined, so whether it is on the same disk as the directories the restore replaces cannot be told.', $where ) );
@@ -103,17 +112,19 @@ final class DirectoryProbe {
 	}
 
 	/**
-	 * Remove the probe directory and what is in it (best effort).
+	 * Remove the probe directory and the files the probe made in it (best effort): only when it is still a
+	 * directory and not a link to one, and only those names.
 	 *
 	 * @param string $dir Probe directory.
 	 * @return void
 	 */
 	private static function remove( string $dir ): void {
-		$entries = @scandir( $dir );
-		foreach ( is_array( $entries ) ? $entries : array() as $entry ) {
-			if ( '.' !== $entry && '..' !== $entry ) {
-				@unlink( $dir . '/' . $entry );
-			}
+		clearstatcache( true, $dir );
+		if ( is_link( $dir ) || ! is_dir( $dir ) ) {
+			return;
+		}
+		foreach ( array( self::NAME, self::TRAILING, self::BARE, self::WIN32 ) as $file ) {
+			@unlink( $dir . '/' . $file );
 		}
 		@rmdir( $dir );
 	}

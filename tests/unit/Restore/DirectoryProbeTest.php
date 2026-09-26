@@ -63,6 +63,7 @@ final class DirectoryProbeTest extends TestCase {
 			$this->assertTrue( $flags['fold_unicode'] );
 			$this->assertFalse( $flags['normalize'] );
 			$this->assertTrue( $flags['trim_trailing'] );
+			$this->assertTrue( $flags['win32'] );
 		} elseif ( 'Linux' === PHP_OS_FAMILY ) {
 			$this->assertSame(
 				array(
@@ -70,6 +71,7 @@ final class DirectoryProbeTest extends TestCase {
 					'fold_unicode'  => false,
 					'normalize'     => false,
 					'trim_trailing' => false,
+					'win32'         => false,
 				),
 				$flags,
 				'ext4, tmpfs, overlay: nothing folds'
@@ -130,5 +132,39 @@ final class DirectoryProbeTest extends TestCase {
 			$this->assertStringContainsString( 'A directory cannot be created in ' . $this->dir, $e->getMessage() );
 			$this->assertStringContainsString( 'writable by the web server', $e->getMessage() );
 		}
+	}
+
+	/**
+	 * @requires OS Linux|Darwin
+	 */
+	public function test_cleaning_up_never_follows_a_link_put_in_place_of_the_probe(): void {
+		$target = $this->dir . '/elsewhere';
+		mkdir( $target );
+		foreach ( array( DirectoryProbe::NAME, DirectoryProbe::BARE, 'keep.txt' ) as $file ) {
+			file_put_contents( $target . '/' . $file, 'x' );
+		}
+		symlink( $target, $this->dir . '/' . $this->name );
+		$remove = new \ReflectionMethod( DirectoryProbe::class, 'remove' );
+		$remove->setAccessible( true );
+		$remove->invoke( null, $this->dir . '/' . $this->name );
+		$left = array_values( array_diff( scandir( $target ), array( '.', '..' ) ) );
+		$want = array( DirectoryProbe::NAME, DirectoryProbe::BARE, 'keep.txt' );
+		sort( $left );
+		sort( $want );
+		$this->assertSame( $want, $left, 'what the link points to is untouched' );
+
+		// The control: the same names in a real probe directory are removed, and only those.
+		$real = $this->dir . '/' . $this->name . '-r';
+		mkdir( $real );
+		foreach ( array( DirectoryProbe::NAME, DirectoryProbe::BARE ) as $file ) {
+			file_put_contents( $real . '/' . $file, 'x' );
+		}
+		$remove->invoke( null, $real );
+		$this->assertDirectoryDoesNotExist( $real );
+		unlink( $this->dir . '/' . $this->name );
+		foreach ( array( DirectoryProbe::NAME, DirectoryProbe::BARE, 'keep.txt' ) as $file ) {
+			unlink( $target . '/' . $file );
+		}
+		rmdir( $target );
 	}
 }

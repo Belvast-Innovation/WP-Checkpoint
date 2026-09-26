@@ -7,7 +7,10 @@ use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\Residue;
 use WPCheckpoint\Jobs\RestoreFilesPreflightStep;
 use WPCheckpoint\Jobs\TempTables;
+use WPCheckpoint\Jobs\Budget;
+use WPCheckpoint\Jobs\Runner;
 use WPCheckpoint\Plugin;
+use WPCheckpoint\Support\Redactor;
 use WPCheckpoint\Restore\NameClashes;
 use WPCheckpoint\Restore\RestoreFiles;
 use WPCheckpoint\Restore\StagingLayout;
@@ -304,6 +307,7 @@ final class RestoreFilesPreflightTest extends RestoreTestCase {
 			'at the top of its disk'           => array( 'uploads' => '/wpc-uploads-at-the-root' ),
 			'are one inside the other'         => array( 'uploads' => $site['plugins'] ),
 			'is inside another directory of'   => array( 'uploads' => $site['other-content'] . '/site/uploads' ),
+			'is the content directory'         => array( 'plugins' => $site['other-content'] ),
 		);
 		foreach ( $cases as $why => $dirs ) {
 			$type = $this->type(
@@ -385,6 +389,8 @@ final class RestoreFilesPreflightTest extends RestoreTestCase {
 			$files[ 'outside-' . $i . '.txt' ]                                 = (string) $i;
 		}
 		$base  = $this->with_files( $files );
+		$clean = $this->run_restore( $this->job_for( $this->type( array( 'page_lines' => 4 ) ), $base ) );
+		$this->assertSame( Job::COMPLETED, $clean->status, (string) $clean->last_error );
 		$died  = 0;
 		$crash = $this->type(
 			array(
@@ -399,11 +405,28 @@ final class RestoreFilesPreflightTest extends RestoreTestCase {
 		$job = $this->run_restore( $this->job_for( $crash, $base ) );
 		$this->assertSame( Job::FAILED, $job->status );
 		$this->assertStringContainsString( 'simulated', (string) $job->last_error, 'the control: killed after its bytes were written' );
+		// A write the death tore: half a record at the end of every bucket. Whole records a dead unit wrote are
+		// the same bytes its replay writes; a torn one would shift every record after it.
+		$torn = 0;
+		foreach ( (array) glob( RestoreFiles::path( $this->work( $job ), RestoreFiles::KEYS ) . '/*' ) as $bucket ) {
+			file_put_contents( (string) $bucket, '0123456789abc', FILE_APPEND );
+			++$torn;
+		}
+		$this->assertGreaterThan( 0, $torn, 'the control: the dead unit wrote buckets' );
 		Plugin::instance()->job_actions()->retry( $job->id );
 		$job = $this->run_restore( $job );
 		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
 		$lines = array_filter( explode( "\n", (string) file_get_contents( RestoreFiles::path( $this->work( $job ), RestoreFiles::UNMAPPED ) ) ) );
 		$this->assertCount( 9, $lines, 'each unmapped path once: the dead unit\'s bytes were cut back' );
+		$sizes = static function ( Job $job ): array {
+			$out = array();
+			foreach ( (array) glob( RestoreFiles::path( Residue::work_dir( $job->storage_path, $job->id ), RestoreFiles::KEYS ) . '/*' ) as $bucket ) {
+				$out[ basename( (string) $bucket ) ] = filesize( (string) $bucket );
+			}
+			return $out;
+		};
+		$this->assertNotSame( array(), array_filter( $sizes( $clean ) ), 'the control: the clean run wrote keys' );
+		$this->assertSame( $sizes( $clean ), $sizes( $job ), 'every name key once, as in a run that did not die' );
 	}
 
 	public function test_a_work_file_cut_shorter_than_committed_fails_the_restore_and_is_not_padded(): void {
@@ -474,5 +497,60 @@ final class RestoreFilesPreflightTest extends RestoreTestCase {
 		$staging = RestoreFilesPreflightStep::staging( $this->work( $job ) );
 		$this->assertSame( rtrim( str_replace( '\\', '/', (string) realpath( $real ) ), '/' ), $staging['groups']['uploads'], 'the directory the swap renames' );
 		$this->assertContains( dirname( $staging['groups']['uploads'] ), $staging['parents'], 'probed and staged next to it, not next to the link' );
+	}
+
+	public function test_a_name_this_file_system_cannot_store_stops_the_restore_and_is_named(): void {
+		$base  = $this->with_files( array( 'wp-content/uploads/a:b.txt' => 'x' ) );
+		$win32 = $this->type(
+			array(
+				'names' => static function ( string $parent, TargetNames $probed ): TargetNames {
+					unset( $parent, $probed );
+					return new TargetNames( true, true, false, true, true );
+				},
+			)
+		);
+		$job = $this->run_restore( $this->job_for( $win32, $base ) );
+		$this->assertSame( Job::FAILED, $job->status );
+		$this->assertStringContainsString( 'The backup holds wp-content/uploads/a:b.txt, and the file system of this site cannot store the name a:b.txt', (string) $job->last_error );
+		$this->assertSame( Job::COMPLETED, $this->run_restore( $this->start_restore( $base ) )->status, 'the control: this file system stores it' );
+	}
+
+	public function test_a_clash_is_found_when_every_line_is_read_in_a_tick_of_its_own(): void {
+		// The directory "D" is written by its first file only; the file "d" comes after. With no time left each
+		// tick reads one line, so the line before each is read back from its offset when the next tick resumes.
+		$base    = $this->with_files(
+			array(
+				'wp-content/uploads/a.txt'   => 'a',
+				'wp-content/uploads/D/x.txt' => 'x',
+				'wp-content/uploads/D/y.txt' => 'y',
+				'wp-content/uploads/d'       => 'file',
+			)
+		);
+		$folding = $this->type(
+			array(
+				'page_lines' => 1,
+				'names'      => static function ( string $parent, TargetNames $probed ): TargetNames {
+					unset( $parent, $probed );
+					return new TargetNames( true, true, false, false );
+				},
+			)
+		);
+		$job    = $this->job_for( $folding, $base );
+		$runner = new Runner( Plugin::instance()->jobs(), Plugin::instance()->job_types(), new Redactor( Redactor::installation_secrets() ), array( 'budget' => new Budget( 20, 32 * 1048576, false ) ) );
+		$ticks  = 0;
+		for ( $i = 0; $i < 5000; $i++ ) {
+			$now = Plugin::instance()->jobs()->find( $job->id );
+			if ( ! in_array( $now->status, array( Job::QUEUED, Job::RUNNING ), true ) ) {
+				break;
+			}
+			if ( RestoreFilesPreflightStep::ID === $now->step && 'index' === ( $now->cursor['phase'] ?? '' ) ) {
+				++$ticks;
+			}
+			$runner->tick( $job->id, microtime( true ) - 3600 );
+		}
+		$GLOBALS['wpdb']->query( 'COMMIT' );
+		$this->assertGreaterThanOrEqual( 4, $ticks, 'the control: the index was read across ticks' );
+		$this->assertSame( Job::FAILED, $now->status );
+		$this->assertStringContainsString( 'The backup holds wp-content/uploads/D/x.txt and wp-content/uploads/d, which the file system of this site treats as one name', (string) $now->last_error );
 	}
 }

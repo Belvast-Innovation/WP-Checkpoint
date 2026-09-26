@@ -20,7 +20,15 @@ defined( 'ABSPATH' ) || exit;
  *
  * Without the intl extension NFC and NFD cannot be told apart here: on a
  * file system that normalises, such pairs go unnoticed (approximate()
- * says so, and the preflight logs it).
+ * says so, and the preflight logs it). Unicode case is folded as
+ * mb_strtolower() folds it, which is close to but not the same as NTFS's
+ * and APFS's tables (final sigma, sharp s, the Kelvin sign): a few pairs
+ * are missed or refused wrongly.
+ *
+ * A file system that refuses "<" in a name (the Win32 namespace: NTFS,
+ * FAT, SMB shares served by Windows) also refuses the characters
+ * < > : " | ? * and the device names CON, PRN, AUX, NUL, COM1-9, LPT1-9
+ * (with or without an extension); unstorable() finds such a segment.
  */
 final class TargetNames {
 
@@ -53,24 +61,33 @@ final class TargetNames {
 	private $trim_trailing;
 
 	/**
+	 * "c<d" cannot be created: the Win32 namespace.
+	 *
+	 * @var bool
+	 */
+	private $win32;
+
+	/**
 	 * Constructor.
 	 *
 	 * @param bool $fold_ascii    ASCII case folds.
 	 * @param bool $fold_unicode  Other letters' case folds.
 	 * @param bool $normalize     Unicode forms are one name.
 	 * @param bool $trim_trailing Trailing dots and spaces of a segment are dropped.
+	 * @param bool $win32         Names follow the Win32 rules ("<" refused).
 	 */
-	public function __construct( bool $fold_ascii, bool $fold_unicode, bool $normalize, bool $trim_trailing ) {
+	public function __construct( bool $fold_ascii, bool $fold_unicode, bool $normalize, bool $trim_trailing, bool $win32 = false ) {
 		$this->fold_ascii    = $fold_ascii;
 		$this->fold_unicode  = $fold_unicode;
 		$this->normalize     = $normalize;
 		$this->trim_trailing = $trim_trailing;
+		$this->win32         = $win32;
 	}
 
 	/**
 	 * The behaviour as a list of flags (for a cursor).
 	 *
-	 * @return array{fold_ascii: bool, fold_unicode: bool, normalize: bool, trim_trailing: bool}
+	 * @return array{fold_ascii: bool, fold_unicode: bool, normalize: bool, trim_trailing: bool, win32: bool}
 	 */
 	public function to_array(): array {
 		return array(
@@ -78,6 +95,7 @@ final class TargetNames {
 			'fold_unicode'  => $this->fold_unicode,
 			'normalize'     => $this->normalize,
 			'trim_trailing' => $this->trim_trailing,
+			'win32'         => $this->win32,
 		);
 	}
 
@@ -88,7 +106,25 @@ final class TargetNames {
 	 * @return TargetNames
 	 */
 	public static function from_array( array $flags ): TargetNames {
-		return new self( ! empty( $flags['fold_ascii'] ), ! empty( $flags['fold_unicode'] ), ! empty( $flags['normalize'] ), ! empty( $flags['trim_trailing'] ) );
+		return new self( ! empty( $flags['fold_ascii'] ), ! empty( $flags['fold_unicode'] ), ! empty( $flags['normalize'] ), ! empty( $flags['trim_trailing'] ), ! empty( $flags['win32'] ) );
+	}
+
+	/**
+	 * The first segment of a relative path this file system cannot store, or null.
+	 *
+	 * @param string $path Relative path, "/"-separated.
+	 * @return string|null
+	 */
+	public function unstorable( string $path ) {
+		if ( ! $this->win32 ) {
+			return null;
+		}
+		foreach ( explode( '/', $path ) as $segment ) {
+			if ( false !== strpbrk( $segment, '<>:"|?*' ) || 1 === preg_match( '/\A(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.[^.]*)?\z/i', rtrim( $segment, '. ' ) ) ) {
+				return $segment;
+			}
+		}
+		return null;
 	}
 
 	/**

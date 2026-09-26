@@ -64,6 +64,12 @@ defined( 'ABSPATH' ) || exit;
  * The probes create and remove their own entries within one unit; a unit
  * that dies in between is replayed with new names, and what it left is a
  * probe the reaper removes.
+ *
+ * Known limits: a file system is identified by stat()'s device number, which
+ * on Windows is the drive letter's, so a volume mounted into an NTFS folder
+ * counts as its drive (the swap's rename would then fail on it, before
+ * anything live is changed); TargetNames folds case as mb_strtolower() does,
+ * which differs from NTFS and APFS in a few letters (see there).
  */
 final class RestoreFilesPreflightStep implements Step {
 
@@ -131,11 +137,12 @@ final class RestoreFilesPreflightStep implements Step {
 	public function run( JobContext $context ): StepResult {
 		$cursor = array_merge( array( 'phase' => 'layout' ), $context->cursor() );
 		$work   = $context->work_path();
+		$first  = true;
 		if ( 'layout' === $cursor['phase'] ) {
 			$cursor = $this->layout( $context );
 			$context->checkpoint( $cursor, 62, __( 'Checking where the files go', 'wp-checkpoint' ) );
+			$first = false; // The layout was this tick's first unit.
 		}
-		$first   = 'layout' !== (string) ( $context->cursor()['phase'] ?? 'layout' ); // The layout was this tick's first unit.
 		$staging = self::staging( $work );
 		$layout  = self::layout_of( $staging, $context->job() );
 		while ( 'probe' === $cursor['phase'] ) {
@@ -160,7 +167,7 @@ final class RestoreFilesPreflightStep implements Step {
 					'lengths'  => array_fill( 0, NameClashes::BUCKETS, 0 ),
 					'unmapped' => 0,
 					'count'    => 0,
-					'bytes'    => array_fill( 0, count( $staging['parents'] ), 0 ),
+					'bytes'    => array_fill( 0, count( $staging['parents'] ), 0.0 ),
 				)
 			);
 			$context->checkpoint( $cursor, 65, __( 'Reading the backup\'s files', 'wp-checkpoint' ) );
@@ -213,6 +220,9 @@ final class RestoreFilesPreflightStep implements Step {
 			}
 			if ( StagingLayout::OTHER === $group ) {
 				continue;
+			}
+			if ( self::within( $live, $content ) ) {
+				throw new CannotStage( sprintf( 'The directory %1$s is the content directory %2$s or holds it. The restore replaces %1$s whole, which would replace everything else in %2$s with it. Give it a directory of its own, then try again.', $live, $content ) );
 			}
 			if ( self::within( $content, $parent ) && ! self::within( $parent, $content ) ) {
 				throw new CannotStage( sprintf( 'The directory %1$s is inside another directory of %2$s. The restore replaces the entries of %2$s one by one and could not keep that directory apart from the one around it. Move it directly into %2$s (or outside it), then try again.', $live, $content ) );
@@ -382,10 +392,15 @@ final class RestoreFilesPreflightStep implements Step {
 						++$cursor['count'];
 						continue;
 					}
+					$bad = $names[ $index ]->unstorable( $map['relative'] );
+					if ( null !== $bad ) {
+						throw new CannotStage( sprintf( 'The backup holds %1$s, and the file system of this site cannot store the name %2$s (it does not allow the characters < > : " | ? * in names, nor names like CON, NUL, COM1 or LPT1). Restore onto a server whose file system allows it, or rename it on the original site and make a new backup.', $line['p'], $bad ) );
+					}
 					if ( strlen( $map['staged'] ) > StagingLayout::MAX_PATH_BYTES ) {
 						throw new CannotStage( sprintf( 'The path %1$s of the backup would be %2$d bytes long where the restore stages it, more than the %3$d bytes this server allows in one path. Restore onto a site whose directories are at a shorter path.', $line['p'], strlen( $map['staged'] ), StagingLayout::MAX_PATH_BYTES ) );
 					}
-					$cursor['bytes'][ $index ] = (int) $cursor['bytes'][ $index ] + (int) $line['b'];
+					// Floats: the sum passes PHP_INT_MAX on 32-bit PHP (StagingSpace).
+					$cursor['bytes'][ $index ] = (float) $cursor['bytes'][ $index ] + (float) $line['b'];
 					if ( StagingLayout::OTHER === $map['group'] ) {
 						$top = explode( '/', $map['relative'] )[0];
 						if ( $top !== $prev['top'] ) {
@@ -572,7 +587,7 @@ final class RestoreFilesPreflightStep implements Step {
 		$where  = array();
 		foreach ( (array) $staging['parents'] as $i => $parent ) {
 			$fs            = (string) $cursor['fs'][ $i ]['dev'];
-			$staged[ $fs ] = ( $staged[ $fs ] ?? 0 ) + (int) $cursor['bytes'][ $i ];
+			$staged[ $fs ] = ( $staged[ $fs ] ?? 0.0 ) + (float) $cursor['bytes'][ $i ];
 			$where[ $fs ]  = $where[ $fs ] ?? (string) $parent;
 		}
 		if ( in_array( 'plugins', (array) $staging['staged'], true ) ) {
@@ -588,7 +603,7 @@ final class RestoreFilesPreflightStep implements Step {
 		}
 		$check = StagingSpace::check( $staged, $free );
 		foreach ( $check['short'] as $fs => $short ) {
-			throw new CannotStage( sprintf( 'There is not enough free space on the disk of %1$s: the restore stages %2$d MB of files there and needs %3$d MB free with a margin, and %4$d MB are free. Free some space (or remove older backups), then try again.', $where[ $fs ], (int) ceil( $staged[ $fs ] / 1048576 ), (int) ceil( $short['need'] / 1048576 ), (int) floor( $short['free'] / 1048576 ) ) );
+			throw new CannotStage( sprintf( 'There is not enough free space on the disk of %1$s: the restore stages %2$s MB of files there and needs %3$s MB free with a margin, and %4$s MB are free. Free some space (or remove older backups), then try again.', $where[ $fs ], self::mb( ceil( $staged[ $fs ] / 1048576 ) ), self::mb( ceil( $short['need'] / 1048576 ) ), self::mb( floor( $short['free'] / 1048576 ) ) ) );
 		}
 		if ( array() !== $check['unknown'] ) {
 			$answers = isset( $context->options()['answers'] ) && is_array( $context->options()['answers'] ) ? $context->options()['answers'] : array();
@@ -603,7 +618,7 @@ final class RestoreFilesPreflightStep implements Step {
 						array(
 							'id'      => 'free_space',
 							'kind'    => 'free_space_unknown',
-							'bytes'   => (int) max( $check['unknown'] ),
+							'bytes'   => (int) min( (float) PHP_INT_MAX, max( $check['unknown'] ) ),
 							'choices' => array( 'continue', 'stop' ),
 						),
 					),
@@ -636,26 +651,36 @@ final class RestoreFilesPreflightStep implements Step {
 	 * Free bytes on the file system of a directory, or null when this server does not say.
 	 *
 	 * @param string $dir Directory.
-	 * @return int|null
+	 * @return float|null
 	 */
 	private function free( string $dir ) {
 		if ( isset( $this->parts['free'] ) ) {
 			$free = call_user_func( $this->parts['free'], $dir );
-			return null === $free ? null : (int) $free;
+			return null === $free ? null : (float) $free;
 		}
 		$free = HostFunctions::disk_free_space( $dir );
-		return false === $free ? null : (int) $free;
+		return false === $free ? null : $free;
+	}
+
+	/**
+	 * Whole megabytes for a message, without an integer cast that overflows on 32-bit PHP.
+	 *
+	 * @param float $mb Megabytes, whole.
+	 * @return string
+	 */
+	private static function mb( float $mb ): string {
+		return number_format( $mb, 0, '.', '' );
 	}
 
 	/**
 	 * Bytes of this plugin's files (the copy the restore stages into plugins).
 	 *
-	 * @return int
+	 * @return float
 	 * @throws CannotStage When the plugin directory holds more than MAX_PLUGIN_ENTRIES entries.
 	 */
-	private function plugin_bytes(): int {
+	private function plugin_bytes(): float {
 		$root  = rtrim( (string) ( $this->parts['plugin_dir'] ?? WPCHECKPOINT_DIR ), '/\\' );
-		$bytes = 0;
+		$bytes = 0.0;
 		$seen  = 0;
 		$dirs  = array( $root );
 		while ( array() !== $dirs ) {
@@ -675,7 +700,7 @@ final class RestoreFilesPreflightStep implements Step {
 				if ( is_dir( $path ) ) {
 					$dirs[] = $path;
 				} else {
-					$bytes += (int) @filesize( $path );
+					$bytes += (float) @filesize( $path );
 				}
 			}
 		}
@@ -903,7 +928,7 @@ final class RestoreFilesPreflightStep implements Step {
 	 * @param string $dir Directory.
 	 * @return bool
 	 */
-	private static function is_root( string $dir ): bool {
+	public static function is_root( string $dir ): bool {
 		$dir = rtrim( str_replace( '\\', '/', $dir ), '/' );
 		return '' === $dir || 1 === preg_match( '#\A[A-Za-z]:\z#', $dir ) || 1 === preg_match( '#\A//[^/]+/[^/]+\z#', $dir );
 	}
@@ -931,7 +956,7 @@ final class RestoreFilesPreflightStep implements Step {
 	 * @param string $path Path.
 	 * @return bool
 	 */
-	private static function within( string $dir, string $path ): bool {
+	public static function within( string $dir, string $path ): bool {
 		$dir  = strtolower( rtrim( str_replace( '\\', '/', $dir ), '/' ) );
 		$path = strtolower( rtrim( str_replace( '\\', '/', $path ), '/' ) );
 		return $dir === $path || 0 === strpos( $path . '/', $dir . '/' );

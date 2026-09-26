@@ -15,6 +15,9 @@ defined( 'ABSPATH' ) || exit;
  * it (the backup's files for the groups staged there, and the copy of this
  * plugin for the plugins' file system), plus a margin for what the byte
  * counts leave out: directory entries, block rounding, other writers.
+ *
+ * Bytes are floats: a site's files add up past PHP_INT_MAX on 32-bit PHP
+ * (2 GiB), and a float is exact far beyond any disk (2^53 bytes).
  */
 final class StagingSpace {
 
@@ -31,20 +34,19 @@ final class StagingSpace {
 	/**
 	 * The free bytes a file system needs for $bytes staged on it.
 	 *
-	 * @param int $bytes Bytes staged on it.
-	 * @return int
+	 * @param float $bytes Bytes staged on it.
+	 * @return float
 	 */
-	public static function required( int $bytes ): int {
-		$margin = intdiv( $bytes * self::MARGIN_PERCENT + 99, 100 );
-		return $bytes + max( $margin, self::MARGIN_MIN_BYTES );
+	public static function required( float $bytes ): float {
+		return $bytes + max( ceil( $bytes * self::MARGIN_PERCENT / 100 ), (float) self::MARGIN_MIN_BYTES );
 	}
 
 	/**
 	 * The file systems that are short: for each, what it needs and what it has.
 	 *
-	 * @param array<string, int>      $staged Bytes staged, by file system.
-	 * @param array<string, int|null> $free   Free bytes, by file system (null: unknown).
-	 * @return array{short: array<string, array{need: int, free: int}>, unknown: array<string, int>} Unknown: what each would need.
+	 * @param array<string, float>      $staged Bytes staged, by file system.
+	 * @param array<string, float|null> $free   Free bytes, by file system (null: unknown).
+	 * @return array{short: array<string, array{need: float, free: float}>, unknown: array<string, float>} Unknown: what each would need.
 	 */
 	public static function check( array $staged, array $free ): array {
 		$out = array(
