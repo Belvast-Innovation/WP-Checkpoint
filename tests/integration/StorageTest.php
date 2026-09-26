@@ -122,6 +122,35 @@ final class StorageTest extends WP_UnitTestCase {
 		$this->assertFalse( $web->state()['provisional'] );
 	}
 
+	public function test_provisional_choice_is_not_migrated_while_a_job_is_unfinished(): void {
+		global $wpdb;
+		$cli = new Directories( $this->cli_context( array( 'abspath' => $this->fake_root . '/htdocs/wp/' ) ) );
+		$old = $cli->base();
+		$web = array( 'abspath' => $this->fake_root . '/htdocs/wp/', 'document_root' => $this->fake_root . '/htdocs/wp', 'is_web_request' => true );
+
+		// Read from the jobs table: an unfinished job there (an export started from WP-CLI, whose files are not
+		// written yet) keeps the directory where it is.
+		\WPCheckpoint\Support\Schema::ensure();
+		$wpdb->insert( \WPCheckpoint\Support\Schema::jobs_table(), array( 'type' => 'export', 'status' => 'queued', 'created_at' => 1 ) );
+		$id = (int) $wpdb->insert_id;
+		$this->assertTrue( \WPCheckpoint\Jobs\JobRepository::has_unfinished() );
+		$dirs = new Directories( $web );
+		$this->assertSame( $old, $dirs->base(), 'not moved while a job is unfinished' );
+		$this->assertTrue( $dirs->state()['provisional'], 'the choice waits for the job to end' );
+		$this->assertDirectoryExists( $old );
+
+		// Nor when that cannot be read.
+		$unknown = new Directories( array_merge( $web, array( 'unfinished' => '__return_null' ) ) );
+		$this->assertSame( $old, $unknown->base() );
+
+		// The control: once the job has ended, the same request moves it.
+		$wpdb->update( \WPCheckpoint\Support\Schema::jobs_table(), array( 'status' => 'completed' ), array( 'id' => $id ) );
+		$this->assertFalse( \WPCheckpoint\Jobs\JobRepository::has_unfinished() );
+		$moved = new Directories( $web );
+		$this->assertNotSame( $old, $moved->base() );
+		$this->assertFalse( $moved->state()['provisional'] );
+	}
+
 	public function test_provisional_choice_is_kept_once_user_files_exist(): void {
 		$cli = new Directories( $this->cli_context( array( 'abspath' => $this->fake_root . '/htdocs/wp/' ) ) );
 		$old = $cli->base();
@@ -237,6 +266,7 @@ final class StorageTest extends WP_UnitTestCase {
 		$this->assertSame( $custom, $upgraded->base(), $upgraded->last_error() );
 		$this->assertTrue( Directories::is_valid_token( $upgraded->state()['token'] ) );
 		$this->assertSame( $custom, $upgraded->state()['path'] );
+		$this->assertSame( $upgraded->state()['token'], Directories::load_state()['token'], 'the new token is saved, not made again on every request' );
 	}
 
 	public function test_custom_directory_owned_by_another_site_is_refused(): void {

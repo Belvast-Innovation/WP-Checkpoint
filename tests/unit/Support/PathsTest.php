@@ -200,4 +200,89 @@ final class PathsTest extends TestCase {
 	public function test_base_must_be_a_directory(): void {
 		$this->assertFalse( Paths::is_inside( $this->base() . '/file.txt', $this->base() . '/file.txt' ) );
 	}
+
+	public function test_same_location_compares_resolved_paths_not_spellings(): void {
+		$base = $this->root . '/base';
+		$this->assertTrue( Paths::same_location( $base, $base . '/' ), 'the same as written' );
+		$this->assertTrue( Paths::same_location( $base, $this->root . '/base/sub/..' ), 'another spelling of the same directory' );
+		$this->assertTrue( Paths::same_location( $base, $this->root . '/outside/../base' ) );
+		$this->assertFalse( Paths::same_location( $base, $this->root . '/outside' ), 'the control: another directory' );
+		// A path that cannot be resolved is compared as written only.
+		$this->assertTrue( Paths::same_location( $this->root . '/gone', $this->root . '/gone/' ) );
+		$this->assertFalse( Paths::same_location( $this->root . '/gone', $this->root . '/base/../gone' ), 'no evidence that they are the same' );
+		$this->assertFalse( Paths::same_location( '', '' ) );
+	}
+
+	public function test_same_location_follows_a_link_to_the_directory(): void {
+		$link = $this->root . '/link-to-base';
+		if ( ! @symlink( $this->root . '/base', $link ) ) {
+			$this->markTestSkipped( 'Symbolic links cannot be created here.' );
+		}
+		$this->assertFalse( Paths::same( $this->root . '/base', $link, Paths::is_windows() ), 'the control: the spellings differ' );
+		$target = realpath( $this->root . '/base' );
+		$via    = realpath( $link );
+		if ( false === $via || false === $target || ! Paths::same( $via, $target, Paths::is_windows() ) ) {
+			// realpath() does not resolve this link to its target here (seen on Windows): nothing shows that the
+			// two are the same, and the answer is no, the direction in which callers wait instead of acting.
+			$this->assertFalse( Paths::same_location( $this->root . '/base', $link ) );
+			return;
+		}
+		$this->assertTrue( Paths::same_location( $this->root . '/base', $link ) );
+	}
+
+	public function test_positively_gone_only_on_a_listing_without_it(): void {
+		$this->assertTrue( Paths::positively_gone( $this->root . '/base/nothing-here' ), 'listed, not there' );
+		$this->assertFalse( Paths::positively_gone( $this->root . '/base/sub' ), 'the control: there' );
+		$this->assertFalse( Paths::positively_gone( $this->root . '/base/SUB' ), 'there but for case: a case-insensitive file system would find it' );
+		$this->assertFalse( Paths::positively_gone( $this->root . '/base/file.txt/x' ), 'a parent that is a file cannot be listed' );
+		$this->assertTrue( Paths::positively_gone( $this->root . '/no-such-parent/x' ), 'the nearest ancestor that lists lacks the next segment' );
+		$this->assertFalse( Paths::positively_gone( $this->root . '/base/sub/../sub' ), 'found by the file system itself' );
+		$this->assertFalse( Paths::positively_gone( 'relative/path' ), 'relative: no evidence' );
+		$this->assertFalse( Paths::positively_gone( '' ) );
+		$listings = array();
+		$this->assertTrue( Paths::positively_gone( $this->root . '/base/a', $listings ) );
+		touch( $this->root . '/base/a' );
+		$this->assertFalse( Paths::positively_gone( $this->root . '/base/a', $listings ), 'a listing kept from before never makes a path that is there gone' );
+	}
+
+	public function test_positively_gone_climbs_only_through_what_is_not_there(): void {
+		$this->assertTrue( Paths::positively_gone( $this->root . '/no-such/deeper/x' ), 'a whole missing tree: the nearest ancestor that exists lists without it' );
+		$this->assertFalse( Paths::positively_gone( $this->root . '/base/nothing/../sub' ), 'a ".." path is there once resolved: the lexical climb is no evidence' );
+		$this->assertFalse( Paths::positively_gone( $this->root . '/base/nothing/../gone' ), 'nor for a path that is not there either' );
+		$this->assertFalse( Paths::positively_gone( $this->root . '/base/./nothing' ) );
+		$this->assertFalse( Paths::positively_gone( $this->root . "/base/nothing\0x" ), 'a NUL byte: no answer from the file system' );
+		// Ancestors that could not be listed, up to a root that is there: no evidence.
+		$listings = array(
+			'/a/b' => null,
+			'/a'   => null,
+			'/'    => null,
+		);
+		$this->assertFalse( Paths::positively_gone( '/a/b/c', $listings ) );
+		// An ancestor that is there but cannot be listed (an automount's view: its parent's listing does not show
+		// it) stops the climb: nothing above it is evidence.
+		// Seeded listings are looked up by the normalised path (forward slashes on Windows too).
+		$root = Paths::normalize( $this->root );
+		$view = array(
+			$root . '/base/sub' => null,
+			$root . '/base'     => array( '.', '..', 'file.txt' ),
+		);
+		$this->assertFalse( Paths::positively_gone( $this->root . '/base/sub/missing', $view ) );
+		// The control: an ancestor that is not there is climbed past, and the listing above it answers.
+		$view = array( $root . '/base' => array( '.', '..', 'file.txt' ) );
+		$this->assertTrue( Paths::positively_gone( $this->root . '/base/nothing/missing', $view ) );
+		// A network share that is not reachable: its server is not a directory, nothing above it is evidence.
+		$this->assertFalse( Paths::positively_gone( '//server-that-is-not-there/share/x' ) );
+		$this->assertFalse( Paths::positively_gone( '//server-that-is-not-there/share' ) );
+		if ( Paths::is_windows() ) {
+			// The climb ends at the drive's root, whose listing (seeded here) answers.
+			$drive = strtoupper( substr( (string) realpath( $this->root ), 0, 1 ) ) . ':/';
+			$top   = 'no-such-top-' . bin2hex( random_bytes( 4 ) );
+			$seen  = array( $drive => array( '.', '..', 'windows' ) );
+			$this->assertTrue( Paths::positively_gone( $drive . $top . '/x', $seen ) );
+			$seen = array( $drive => array( '.', '..', strtolower( $top ) ) );
+			$this->assertFalse( Paths::positively_gone( $drive . $top . '/x', $seen ), 'the control: the root listed with it' );
+		} else {
+			$this->assertFalse( Paths::positively_gone( 'C:/nope/x' ), 'a drive letter is not absolute here' );
+		}
+	}
 }

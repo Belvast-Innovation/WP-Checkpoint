@@ -101,6 +101,101 @@ final class Paths {
 	}
 
 	/**
+	 * Whether two paths name the same directory or file: the same as
+	 * written, or the same once resolved (realpath(): links, "..", a second
+	 * spelling). A path that cannot be resolved (it does not exist, or
+	 * open_basedir hides it) is compared as written only, so the answer is
+	 * "no" unless the spellings match: callers that refuse on "no" wait
+	 * rather than act on a path they cannot see.
+	 *
+	 * @param string $a First path.
+	 * @param string $b Second path.
+	 * @return bool
+	 */
+	public static function same_location( string $a, string $b ): bool {
+		$windows = self::is_windows();
+		if ( self::same( $a, $b, $windows ) ) {
+			return true;
+		}
+		if ( '' === $a || '' === $b ) {
+			return false;
+		}
+		$ra = @realpath( $a ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a warning would put the path into the error log.
+		$rb = @realpath( $b ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
+		return false !== $ra && false !== $rb && self::same( $ra, $rb, $windows );
+	}
+
+	/**
+	 * Whether a path is positively gone: it is absolute, the file system
+	 * finds nothing under that name (lstat(), which matches case and
+	 * Unicode forms the way the file system does), and the nearest ancestor
+	 * that exists can be listed and has no entry for the next segment down,
+	 * not even one that differs only in case. A path with "." or ".."
+	 * segments is never gone (the climb is lexical), nor one with a NUL byte. Only ancestors that do not
+	 * exist are climbed past: one that exists but cannot be listed
+	 * (permissions, open_basedir) is no evidence, and neither is reaching
+	 * the root of a network share (\\server\share, or //server/share) or
+	 * of the file system without a listing, nor a relative path: false.
+	 * What a listing cannot show is not covered: a mount that is not
+	 * mounted right now (an automount, another mount namespace) looks
+	 * like a directory without that entry.
+	 *
+	 * @param string                                 $path     Path.
+	 * @param array<string, array<int, string>|null> $listings Listings by directory (null: not listable), reused across calls.
+	 * @return bool
+	 */
+	public static function positively_gone( string $path, array &$listings = array() ): bool {
+		$path     = rtrim( self::normalize( $path ), '/' );
+		$drive    = self::is_windows() && 1 === preg_match( '#^[A-Za-z]:/#', $path );
+		$absolute = '' !== $path && ( '/' === $path[0] || $drive );
+		// The climb is lexical: through a "." or ".." segment it would list a directory the path does not lie in.
+		$dots = 1 === preg_match( '#(^|/)\.{1,2}(/|$)#', $path );
+		if ( ! $absolute || $dots || false !== strpos( $path, "\0" ) || false !== @lstat( $path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a warning would put the path into the error log.
+			return false;
+		}
+		$child  = $path;
+		$parent = self::parent_of( $child );
+		while ( null !== $parent ) {
+			if ( ! array_key_exists( $parent, $listings ) ) {
+				$entries             = @scandir( $parent ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
+				$listings[ $parent ] = is_array( $entries ) ? array_map( 'strtolower', $entries ) : null;
+			}
+			$listed = $listings[ $parent ];
+			if ( null !== $listed ) {
+				return ! in_array( strtolower( basename( $child ) ), $listed, true );
+			}
+			if ( false !== @lstat( $parent ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
+				return false; // There but not listable: nothing above it says anything about $path.
+			}
+			$child  = $parent;
+			$parent = self::parent_of( $child );
+		}
+		return false;
+	}
+
+	/**
+	 * The parent of a normalised absolute path, or null above which nothing is climbed: the root of the file
+	 * system ("/", "C:/") and the root of a network share ("//server/share": its server is not a directory).
+	 *
+	 * @param string $path Normalised absolute path, without a trailing separator (except a root).
+	 * @return string|null
+	 */
+	private static function parent_of( string $path ) {
+		if ( '/' === $path || 1 === preg_match( '#^[A-Za-z]:/?$#', $path ) || 1 === preg_match( '#^//[^/]+(/[^/]+)?$#', $path ) ) {
+			return null;
+		}
+		$slash = strrpos( $path, '/' );
+		if ( false === $slash ) {
+			return null;
+		}
+		$parent = substr( $path, 0, $slash );
+		if ( '' === $parent ) {
+			return '/';
+		}
+		return 1 === preg_match( '#^[A-Za-z]:$#', $parent ) ? $parent . '/' : $parent;
+	}
+
+	/**
 	 * Whether $target lies strictly below $base, comparing normalised paths.
 	 *
 	 * Separated from is_inside() so the comparison rules (separator

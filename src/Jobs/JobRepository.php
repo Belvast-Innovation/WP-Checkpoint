@@ -378,10 +378,18 @@ final class JobRepository {
 			return self::verdict( false, 'storage_unavailable', $this->directories->last_error(), $retry );
 		}
 		$state = $this->directories->state();
-		if ( (string) $state['token'] !== $job->storage_token ) {
-			$message = ! empty( $state['clone_detected'] )
-				? __( 'The storage directory changed: resolve the clone notice (continue with the original directory or keep the new one) before this job can continue.', 'wp-checkpoint' )
-				: __( 'The storage directory changed; this job cannot continue.', 'wp-checkpoint' );
+		// The job's files are where it was started (its row's storage_path), and no driver resolves them again:
+		// a request that resolves another directory (another token, or the same token at another path) does not
+		// run the job at all.
+		$moved = '' !== $job->storage_path && ! Paths::same_location( $job->storage_path, $base );
+		if ( (string) $state['token'] !== $job->storage_token || $moved ) {
+			if ( ! empty( $state['clone_detected'] ) ) {
+				$message = __( 'The storage directory changed: resolve the clone notice (continue with the original directory or keep the new one) before this job can continue.', 'wp-checkpoint' );
+			} elseif ( RestoreJob::ID === $job->type ) {
+				$message = __( 'This restore keeps its files in the storage directory it was started with, and this request uses another one (for example, WPCHECKPOINT_STORAGE_DIR is set differently for WP-CLI and for the web server). The restore continues only from a request that uses the same directory.', 'wp-checkpoint' );
+			} else {
+				$message = __( 'The storage directory changed; this job cannot continue.', 'wp-checkpoint' );
+			}
 			return self::verdict( false, 'storage_changed', $message, $retry );
 		}
 		return self::verdict( true, '', '', 0 );
@@ -409,6 +417,71 @@ final class JobRepository {
 			array( '%d' )
 		);
 		return self::BACKOFF_SECONDS[ min( $job->blocked_count, count( self::BACKOFF_SECONDS ) - 1 ) ];
+	}
+
+	/**
+	 * Whether a job (of $type, or of any type) is queued, running or paused:
+	 * true, false, or null when the jobs table could not be read (no
+	 * evidence either way). Only the server's answer that the table does not
+	 * exist (SHOW TABLES answering without it) is false without a count: no
+	 * job exists without it.
+	 *
+	 * @param string|null $type Job type, or null for any.
+	 * @return bool|null
+	 */
+	public static function has_unfinished( $type = null ) {
+		global $wpdb;
+		$where = null === $type ? '' : $wpdb->prepare( ' AND type = %s', (string) $type );
+		$rows  = self::read_rows( $wpdb->prepare( 'SELECT id FROM ' . self::table() . ' WHERE status IN (%s, %s, %s)', Job::QUEUED, Job::RUNNING, Job::PAUSED ) . $where . ' LIMIT 1' ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- table name from the prefix and a constant; $where prepared above.
+		if ( null !== $rows ) {
+			return array() !== $rows;
+		}
+		// The read failed: only the server's answer that there is no such table is an answer (no job without it).
+		$tables = self::read_rows( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( self::table() ) ) );
+		return array() === $tables ? false : null;
+	}
+
+	/**
+	 * The storage directory and token of each unfinished restore, or null when the jobs table could not be
+	 * read (only the server's answer that there is no such table means none).
+	 *
+	 * @return array<int, array{path: string, token: string}>|null
+	 */
+	public static function unfinished_restores() {
+		global $wpdb;
+		$rows = self::read_rows( $wpdb->prepare( 'SELECT storage_path, storage_token FROM ' . self::table() . ' WHERE type = %s AND status IN (%s, %s, %s)', RestoreJob::ID, Job::QUEUED, Job::RUNNING, Job::PAUSED ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- table name from the prefix and a constant.
+		if ( null === $rows ) {
+			$tables = self::read_rows( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( self::table() ) ) );
+			return array() === $tables ? array() : null;
+		}
+		$restores = array();
+		foreach ( $rows as $row ) {
+			$restores[] = array(
+				'path'  => (string) ( $row[0] ?? '' ),
+				'token' => (string) ( $row[1] ?? '' ),
+			);
+		}
+		return $restores;
+	}
+
+	/**
+	 * Rows of one statement as lists of values, or null when it failed: wpdb::get_results() gives an empty
+	 * list for a failed statement too, wpdb::query() tells them apart (false).
+	 *
+	 * @param string $sql Statement.
+	 * @return array<int, array<int, mixed>>|null
+	 */
+	private static function read_rows( string $sql ) {
+		global $wpdb;
+		$quiet = $wpdb->suppress_errors( true );
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- prepared by the callers; plugin table or a schema check.
+		$count = $wpdb->query( $sql );
+		$rows  = array();
+		foreach ( false === $count ? array() : (array) $wpdb->last_result as $row ) {
+			$rows[] = array_values( (array) $row );
+		}
+		$wpdb->suppress_errors( $quiet );
+		return false === $count ? null : $rows;
 	}
 
 	/**
@@ -1098,10 +1171,24 @@ final class JobRepository {
 		if ( ! empty( $state['clone_detected'] ) ) {
 			return 0;
 		}
-		$token  = (string) $state['token'];
-		$failed = 0;
+		$token    = (string) $state['token'];
+		$failed   = 0;
+		$listings = array();
 		foreach ( $this->list_jobs( array( Job::QUEUED, Job::RUNNING, Job::PAUSED ), 500 ) as $job ) {
 			if ( $job->storage_token === $token ) {
+				// The same token at another location: failed only when that location is positively gone
+				// (Paths::positively_gone()); otherwise the gate refuses it and says why.
+				if ( '' === $job->storage_path || Paths::same_location( $job->storage_path, $base ) || ! Paths::positively_gone( $job->storage_path, $listings ) ) {
+					continue;
+				}
+				try {
+					// Final: this storage directory is not the job's, and the job's is positively not at its path; a
+					// retry from here could not continue it.
+					$this->force_transition( $job, Job::FAILED, __( 'The storage directory of this job is no longer at the path it was started in; the job cannot continue from this storage directory.', 'wp-checkpoint' ), Job::FAILURE_FINAL );
+					++$failed;
+				} catch ( StaleJob $e ) {
+					continue;
+				}
 				continue;
 			}
 			try {
@@ -1345,17 +1432,18 @@ final class JobRepository {
 	 * @return bool True when nothing of the job's work is left.
 	 */
 	public function reclaim_work( Job $job ): bool {
-		if ( ! $this->owns_files_of( $job ) ) {
+		$base = $this->files_base( $job );
+		if ( '' === $base ) {
 			$this->directories->log_event( sprintf( 'Job %d is bound to another storage directory; its work files were left alone.', $job->id ) );
 			return false;
 		}
 		$token  = (string) $this->directories->state()['token'];
 		$tables = $this->drop_tables_of( $token, $job->id );
-		$dir    = Residue::work_dir( $job->storage_path, $job->id );
+		$dir    = Residue::work_dir( $base, $job->id );
 		if ( ! is_dir( $dir ) ) {
 			return $tables;
 		}
-		$result = Deleter::delete_tree( Residue::tmp( $job->storage_path ), $dir, self::RECLAIM_MAX_ENTRIES );
+		$result = Deleter::delete_tree( Residue::tmp( $base ), $dir, self::RECLAIM_MAX_ENTRIES );
 		$this->report_reclaim( 'work directory of job ' . $job->id, $result );
 		return $tables && ! $result['remaining'] && array() === $result['failed'];
 	}
@@ -1720,8 +1808,24 @@ final class JobRepository {
 	 * @return bool
 	 */
 	public function owns_files_of( Job $job ): bool {
+		return '' !== $this->files_base( $job );
+	}
+
+	/**
+	 * The directory to work in for a job's files: the current storage
+	 * directory when the job's row names the same location, '' otherwise.
+	 * The lock file, reclaiming and deleting are then done under the current
+	 * directory, not under the row's spelling of it (which the check
+	 * resolved, but a link could be changed after). A tick's own work files
+	 * and log (JobContext, the Runner's logger) use the row's spelling, which
+	 * the gate has just found to be this location.
+	 *
+	 * @param Job $job Job.
+	 * @return string
+	 */
+	public function files_base( Job $job ): string {
 		$base = $this->directories->base();
-		return '' !== $base && '' !== $job->storage_path && Paths::same( $job->storage_path, $base, Paths::is_windows() );
+		return '' !== $base && '' !== $job->storage_path && Paths::same_location( $job->storage_path, $base ) ? $base : '';
 	}
 
 	/**
@@ -1733,11 +1837,12 @@ final class JobRepository {
 	 * @return void
 	 */
 	private function write_lock_file( Job $job, string $token, int $until ): void {
-		if ( ! $this->owns_files_of( $job ) ) {
+		$base = $this->files_base( $job );
+		if ( '' === $base ) {
 			$this->directories->log_event( sprintf( 'Job %d is bound to another storage directory; no lock file was written.', $job->id ) );
 			return;
 		}
-		if ( ! LockFile::write( $job->storage_path, $job->id, $token, $until ) ) {
+		if ( ! LockFile::write( $base, $job->id, $token, $until ) ) {
 			$this->directories->log_event( sprintf( 'The lock file of job %d could not be written; directory take-over checks cannot see this job.', $job->id ) );
 		}
 	}
@@ -1749,11 +1854,12 @@ final class JobRepository {
 	 * @return void
 	 */
 	private function remove_lock_file( Job $job ): void {
-		if ( ! $this->owns_files_of( $job ) ) {
+		$base = $this->files_base( $job );
+		if ( '' === $base ) {
 			$this->directories->log_event( sprintf( 'Job %d is bound to another storage directory; its files were left alone.', $job->id ) );
 			return;
 		}
-		LockFile::remove( $job->storage_path, $job->id );
+		LockFile::remove( $base, $job->id );
 	}
 
 	/**
@@ -1764,19 +1870,20 @@ final class JobRepository {
 	 * @return void
 	 */
 	private function delete_files_of( Job $job ): void {
-		if ( ! $this->owns_files_of( $job ) ) {
+		$base = $this->files_base( $job );
+		if ( '' === $base ) {
 			$this->directories->log_event( sprintf( 'Job %d is bound to another storage directory; its files were left alone.', $job->id ) );
 			return;
 		}
-		if ( ! is_dir( $job->storage_path ) ) {
+		if ( ! is_dir( $base ) ) {
 			return;
 		}
 		$this->reclaim_work( $job );
-		LockFile::remove( $job->storage_path, $job->id );
+		LockFile::remove( $base, $job->id );
 		if ( '' !== $job->log_path && 0 === strpos( $job->log_path, 'logs/' ) ) {
-			$file = $job->storage_path . DIRECTORY_SEPARATOR . str_replace( '/', DIRECTORY_SEPARATOR, $job->log_path );
+			$file = $base . DIRECTORY_SEPARATOR . str_replace( '/', DIRECTORY_SEPARATOR, $job->log_path );
 			if ( is_file( $file ) ) {
-				Deleter::delete_tree( $job->storage_path . DIRECTORY_SEPARATOR . 'logs', $file );
+				Deleter::delete_tree( $base . DIRECTORY_SEPARATOR . 'logs', $file );
 			}
 		}
 	}

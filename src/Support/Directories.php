@@ -350,6 +350,11 @@ final class Directories {
 				}
 				$this->state['token']        = '';
 				$this->state['verification'] = array();
+			} elseif ( $this->restore_keeps( $existing ) && ! Paths::positively_gone( $existing ) ) {
+				// Not reachable from this request (open_basedir, permissions), yet not shown to be gone, and a
+				// restore keeps its files there (or that cannot be read): no other directory is chosen meanwhile.
+				$this->error = __( 'The storage directory cannot be reached from this request, and a restore may be keeping its files there, so no other directory is chosen. Jobs continue from a request that can reach it.', 'wp-checkpoint' );
+				return;
 			}
 		}
 
@@ -422,14 +427,44 @@ final class Directories {
 			$this->error = __( 'WPCHECKPOINT_STORAGE_DIR belongs to another installation.', 'wp-checkpoint' );
 			return;
 		}
+		$moved = '' !== (string) $this->state['path'] && ! Paths::same_location( $dir, (string) $this->state['path'] );
+		$token = '';
+		if ( $moved ) {
+			// A restore keeps its files in the directory it was started with (its row's storage_path): another
+			// directory here (the constant set differently for WP-CLI and for the web server) must not become
+			// the choice while that directory is there. Nothing is created, re-tokened or saved.
+			$restores = $this->restores();
+			if ( null === $restores ) {
+				$this->error = __( 'Whether a restore is in progress cannot be read from the database, so this request does not switch to the storage directory WPCHECKPOINT_STORAGE_DIR names. Try again once the database answers.', 'wp-checkpoint' );
+				return;
+			}
+			$listings = array();
+			foreach ( $restores as $restore ) {
+				if ( Paths::same_location( $dir, $restore['path'] ) ) {
+					$token = $restore['token']; // Its own directory: taken back with its own token.
+					break;
+				}
+			}
+			if ( '' === $token ) {
+				foreach ( $restores as $restore ) {
+					if ( ! Paths::positively_gone( $restore['path'], $listings ) ) {
+						$this->error = __( 'A restore is in progress in a storage directory that this request cannot confirm to be the one WPCHECKPOINT_STORAGE_DIR names (for example, the constant is set differently for WP-CLI and for the web server). Set it to the directory the restore was started with, or wait until the restore has ended.', 'wp-checkpoint' );
+						return;
+					}
+				}
+			}
+		}
 		if ( ! $this->prepare( $dir ) ) {
 			return;
 		}
-		if ( ! self::is_valid_token( $this->state['token'] ) || $dir !== $this->state['path'] ) {
+		$before = (string) $this->state['token'];
+		if ( self::is_valid_token( $token ) ) {
+			$this->state['token'] = $token;
+		} elseif ( ! self::is_valid_token( $this->state['token'] ) || $moved ) {
 			$this->state['token'] = bin2hex( random_bytes( 6 ) );
-			$this->save_state();
 		}
-		$this->adopt( $dir, self::SOURCE_CUSTOM, false );
+		// The token and the path are saved together (one write): never a restore's token on another path.
+		$this->adopt( $dir, self::SOURCE_CUSTOM, false, $before !== $this->state['token'] );
 	}
 
 	/**
@@ -557,13 +592,17 @@ final class Directories {
 	 * @param string $dir         Base directory.
 	 * @param string $source      Source constant.
 	 * @param bool   $provisional Chosen without a proper web request.
+	 * @param bool   $save        Whether the state changed before (the token), so it is saved with the path.
 	 * @return void
 	 */
-	private function adopt( string $dir, string $source, bool $provisional ): void {
+	private function adopt( string $dir, string $source, bool $provisional, bool $save = false ): void {
 		$this->base  = $dir;
 		$this->error = '';
 		$abspath     = rtrim( Paths::normalize( (string) $this->context['abspath'] ), '/' ) . '/';
-		$changed     = $dir !== $this->state['path'] || $source !== $this->state['source'] || $provisional !== (bool) $this->state['provisional'] || $abspath !== $this->state['abspath'];
+		if ( '' !== (string) $this->state['path'] && $dir !== $this->state['path'] && Paths::same_location( $dir, (string) $this->state['path'] ) ) {
+			$dir = (string) $this->state['path']; // The same directory spelled another way: the stored spelling stays.
+		}
+		$changed = $save || $dir !== $this->state['path'] || $source !== $this->state['source'] || $provisional !== (bool) $this->state['provisional'] || $abspath !== $this->state['abspath'];
 		if ( $changed ) {
 			if ( $dir !== $this->state['path'] ) {
 				$this->state['verification'] = array();
@@ -578,7 +617,8 @@ final class Directories {
 
 	/**
 	 * Re-evaluate a provisional (CLI/cron) choice during a proper web request:
-	 * move to the outside candidate while the directory holds no user files.
+	 * move to the outside candidate while the directory holds no user files
+	 * and no job is unfinished.
 	 *
 	 * @return void
 	 */
@@ -587,6 +627,12 @@ final class Directories {
 			return;
 		}
 		if ( ! $this->context['is_web_request'] || '' === $this->context['document_root'] ) {
+			return;
+		}
+		if ( false !== $this->jobs_unfinished() ) {
+			// A job keeps its files here until it ends (a restore above all), and every driver goes on using this
+			// directory: the choice stays provisional and is made once no job is left (also when the jobs table
+			// cannot be read).
 			return;
 		}
 
@@ -606,6 +652,65 @@ final class Directories {
 		Deleter::empty_directory( $current );
 		@rmdir( $current ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_rmdir -- best effort cleanup of the empty provisional directory.
 		$this->adopt( $outside, self::SOURCE_OUTSIDE, false );
+	}
+
+	/**
+	 * The directory and token of each unfinished restore, or null when that cannot be read (JobRepository, or
+	 * the answer a test gives in the context: key "restores", a callable; internal, for tests only).
+	 *
+	 * @return array<int, array{path: string, token: string}>|null
+	 */
+	private function restores() {
+		if ( isset( $this->context['restores'] ) && is_callable( $this->context['restores'] ) ) {
+			return call_user_func( $this->context['restores'] );
+		}
+		return \WPCheckpoint\Jobs\JobRepository::unfinished_restores();
+	}
+
+	/**
+	 * Whether an unfinished restore keeps its files in $dir, or that cannot be read.
+	 *
+	 * @param string $dir Directory.
+	 * @return bool
+	 */
+	private function restore_keeps( string $dir ): bool {
+		$restores = $this->restores();
+		if ( null === $restores ) {
+			return true;
+		}
+		foreach ( $restores as $restore ) {
+			// The same location, or a restore whose directory this request cannot resolve either (or that names
+			// none, or a relative one): that could be $dir spelled another way, and nothing shows it is not.
+			$path     = $restore['path'];
+			$relative = '' === $path || ( '/' !== Paths::normalize( $path )[0] && 1 !== preg_match( '#^[A-Za-z]:/#', Paths::normalize( $path ) ) );
+			if ( $relative || Paths::same_location( $path, $dir ) || ( false === @realpath( $path ) && ! Paths::positively_gone( $path ) ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a warning would put the path into the error log.
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Whether any job is unfinished: true, false, or null when that cannot be read.
+	 *
+	 * @return bool|null
+	 */
+	private function jobs_unfinished() {
+		return $this->unfinished( null );
+	}
+
+	/**
+	 * JobRepository::has_unfinished(), or the answer a test gives in the context (key "unfinished":
+	 * function( ?string $type ): ?bool; internal, for tests only).
+	 *
+	 * @param string|null $type Job type, or null for any.
+	 * @return bool|null
+	 */
+	private function unfinished( $type ) {
+		if ( isset( $this->context['unfinished'] ) && is_callable( $this->context['unfinished'] ) ) {
+			return call_user_func( $this->context['unfinished'], $type );
+		}
+		return \WPCheckpoint\Jobs\JobRepository::has_unfinished( $type );
 	}
 
 	/**
