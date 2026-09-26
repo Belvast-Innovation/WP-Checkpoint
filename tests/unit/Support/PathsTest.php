@@ -259,13 +259,15 @@ final class PathsTest extends TestCase {
 		$this->assertFalse( Paths::positively_gone( '/a/b/c', $listings ) );
 		// An ancestor that is there but cannot be listed (an automount's view: its parent's listing does not show
 		// it) stops the climb: nothing above it is evidence.
+		// Seeded listings are looked up by the normalised path (forward slashes on Windows too).
+		$root = Paths::normalize( $this->root );
 		$view = array(
-			$this->root . '/base/sub' => null,
-			$this->root . '/base'     => array( '.', '..', 'file.txt' ),
+			$root . '/base/sub' => null,
+			$root . '/base'     => array( '.', '..', 'file.txt' ),
 		);
 		$this->assertFalse( Paths::positively_gone( $this->root . '/base/sub/missing', $view ) );
 		// The control: an ancestor that is not there is climbed past, and the listing above it answers.
-		$view = array( $this->root . '/base' => array( '.', '..', 'file.txt' ) );
+		$view = array( $root . '/base' => array( '.', '..', 'file.txt' ) );
 		$this->assertTrue( Paths::positively_gone( $this->root . '/base/nothing/missing', $view ) );
 		// A network share that is not reachable: its server is not a directory, nothing above it is evidence.
 		$this->assertFalse( Paths::positively_gone( '//server-that-is-not-there/share/x' ) );
