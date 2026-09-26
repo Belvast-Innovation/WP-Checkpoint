@@ -201,7 +201,9 @@ final class DirectoryProbeTest extends TestCase {
 	}
 
 	/**
-	 * A create function that refuses the names ending as given, and creates the others.
+	 * A create function standing in for a file system that refuses the names ending as given: the two names
+	 * that decide a rule ("b.", "c<d") are accepted without being created (this machine's own file system may
+	 * refuse them: Windows does), the others are created.
 	 *
 	 * @param string[] $refused Name endings refused.
 	 */
@@ -210,6 +212,11 @@ final class DirectoryProbeTest extends TestCase {
 			foreach ( $refused as $end ) {
 				if ( substr( $path, -strlen( $end ) ) === $end ) {
 					return false;
+				}
+			}
+			foreach ( array( DirectoryProbe::TRAILING, DirectoryProbe::WIN32 ) as $name ) {
+				if ( substr( $path, -strlen( '/' . $name ) ) === '/' . $name ) {
+					return true;
 				}
 			}
 			return DirectoryProbe::create( $path );
