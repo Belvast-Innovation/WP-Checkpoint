@@ -93,17 +93,22 @@ abstract class RestoreTestCase extends JobTestCase {
 	 * @param string[]      $tables  Tables in order.
 	 * @param callable|null $edit    function( string $table, string[] $chunks ): string[].
 	 * @param callable|null $site    function( array $site ): array, the manifest's site.
-	 * @param array         $options ArchiveBuilder options, and rows: table => row count where edited chunks change it.
+	 * @param array         $options ArchiveBuilder options; rows: table => row count where edited chunks change it; files: path => content; groups: the manifest's content groups.
 	 * @return string The backup's base name.
 	 */
 	protected function backup( array $tables, $edit = null, $site = null, array $options = array() ): string {
 		global $wpdb;
 		$rows    = array();
 		$counts  = $options['rows'] ?? array();
-		unset( $options['rows'] );
+		$files   = $options['files'] ?? array();
+		$groups  = $options['groups'] ?? null;
+		unset( $options['rows'], $options['files'], $options['groups'] );
 		$builder = new ArchiveBuilder(
 			$options + array(
-				'manifest' => static function ( array $manifest ) use ( &$rows, $site, $wpdb ): array {
+				'manifest' => static function ( array $manifest ) use ( &$rows, $site, $wpdb, $groups ): array {
+					if ( null !== $groups ) {
+						$manifest['contents']['files'] = $groups;
+					}
 					foreach ( $manifest['database']['tables'] as $i => $table ) {
 						$manifest['database']['tables'][ $i ]['rows'] = $rows[ $table['name'] ];
 					}
@@ -117,6 +122,9 @@ abstract class RestoreTestCase extends JobTestCase {
 			)
 		);
 		$this->builders[] = $builder;
+		foreach ( $files as $path => $content ) {
+			$builder->file( (string) $path, (string) $content );
+		}
 		foreach ( $tables as $table ) {
 			list( $chunks, $count ) = $this->export_table( $table );
 			if ( null !== $edit ) {
@@ -166,6 +174,23 @@ abstract class RestoreTestCase extends JobTestCase {
 	protected static function site_tables(): array {
 		global $wpdb;
 		return is_multisite() ? array( $wpdb->base_prefix . 'options', $wpdb->base_prefix . 'sitemeta' ) : array( $wpdb->base_prefix . 'options' );
+	}
+
+	/**
+	 * The restore's steps with the one of the same id replaced (by id: a step added in between moves the others).
+	 *
+	 * @param \WPCheckpoint\Jobs\Step $step Replacement.
+	 * @return \WPCheckpoint\Jobs\Step[]
+	 */
+	protected static function restore_steps_with( \WPCheckpoint\Jobs\Step $step ): array {
+		$steps = Plugin::instance()->job_types()->get( RestoreJob::ID )->steps();
+		foreach ( $steps as $i => $existing ) {
+			if ( $existing->id() === $step->id() ) {
+				$steps[ $i ] = $step;
+				return $steps;
+			}
+		}
+		throw new \LogicException( 'The restore has no step ' . $step->id() );
 	}
 
 	/**

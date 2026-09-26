@@ -148,6 +148,18 @@ final class RestoreVerifyStep implements Step {
 	}
 
 	/**
+	 * Where the check left a sidecar index it extracted from the last volume and checked against the manifest's
+	 * hash, chunk by chunk (ArchiveVerifier's work directory).
+	 *
+	 * @param string              $work Job work directory.
+	 * @param array{path: string} $spec The index's manifest entry (Manifest::files_index()).
+	 * @return string
+	 */
+	public static function index_path( string $work, array $spec ): string {
+		return $work . DIRECTORY_SEPARATOR . self::VERIFY_DIR . DIRECTORY_SEPARATOR . $spec['path'];
+	}
+
+	/**
 	 * Copy the manifest into the work directory; its hash.
 	 *
 	 * @param string $source Manifest.

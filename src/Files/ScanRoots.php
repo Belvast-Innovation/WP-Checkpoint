@@ -107,8 +107,10 @@ final class ScanRoots {
 
 	/**
 	 * Each content group's live directory on this site (other-content: the content directory itself), as
-	 * WordPress reports them, normalised. On a multisite network, uploads is the main site's upload directory
-	 * whichever site the request runs for: another site's ("uploads/sites/N") is inside it.
+	 * WordPress reports them, resolved and normalised: a directory reached through a link is named by where
+	 * it is (the swap renames that directory, and staging goes next to it), a missing one by its resolved
+	 * parent and its name. On a multisite network, uploads is the main site's upload directory whichever site
+	 * the request runs for: another site's ("uploads/sites/N") is inside it.
 	 *
 	 * @return array<string, string>
 	 */
@@ -124,9 +126,25 @@ final class ScanRoots {
 		}
 		$out = array();
 		foreach ( self::GROUPS as $group ) {
-			$out[ $group ] = rtrim( $dirs[ $group ], '/' );
+			$out[ $group ] = self::resolved( rtrim( $dirs[ $group ], '/' ) );
 		}
 		return $out;
+	}
+
+	/**
+	 * A directory where it is: realpath(), or its parent's with its name when it does not exist; as given when
+	 * neither resolves.
+	 *
+	 * @param string $dir Directory.
+	 * @return string
+	 */
+	public static function resolved( string $dir ): string {
+		$real = realpath( $dir );
+		if ( false === $real ) {
+			$parent = realpath( dirname( $dir ) );
+			$real   = false === $parent ? false : rtrim( $parent, '/\\' ) . '/' . basename( $dir );
+		}
+		return false === $real ? $dir : rtrim( Paths::normalize( $real ), '/' );
 	}
 
 	/**

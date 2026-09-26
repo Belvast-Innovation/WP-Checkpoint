@@ -17,6 +17,7 @@ use WPCheckpoint\Jobs\PackStep;
 use WPCheckpoint\Jobs\PreflightStep;
 use WPCheckpoint\Jobs\Residue;
 use WPCheckpoint\Jobs\RestoreJob;
+use WPCheckpoint\Jobs\RestoreFilesPreflightStep;
 use WPCheckpoint\Jobs\RestorePreflightStep;
 use WPCheckpoint\Jobs\RestoreVerifyStep;
 use WPCheckpoint\Jobs\Runner;
@@ -138,7 +139,7 @@ final class NoBudgetLeftTest extends JobTestCase {
 			list( $job, $ticks, $ran ) = $this->run_with_no_time_left( $job );
 			$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
 			$this->assertGreaterThan( 10, $ticks, 'the control: the restore crossed many ticks' );
-			foreach ( array( RestoreVerifyStep::ID, RestorePreflightStep::ID, DatabaseImportStep::ID ) as $step ) {
+			foreach ( array( RestoreVerifyStep::ID, RestorePreflightStep::ID, RestoreFilesPreflightStep::ID, DatabaseImportStep::ID ) as $step ) {
 				$this->assertContains( $step, $ran, 'a tick with no time left started in ' . $step );
 			}
 		} finally {

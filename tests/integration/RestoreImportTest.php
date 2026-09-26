@@ -523,18 +523,15 @@ final class RestoreImportTest extends RestoreTestCase {
 		$base = $this->backup( array_merge( self::site_tables(), $this->tables() ) );
 		$this->assertSame( ZipFormat::METHOD_DEFLATE, $this->entry_method( $base, IndexLine::database_path( $this->p . 'big', 2 ) ), 'a later chunk, deflated' );
 		$this->assertGreaterThan( 4096, (int) $this->entry( $base, IndexLine::database_path( $this->p . 'big', 2 ) )['usize'], 'larger than the head read' );
-		$real = Plugin::instance()->job_types()->get( 'restore' )->steps();
 		$this->register(
 			'restore_small_heads',
-			array(
-				$real[0],
+			self::restore_steps_with(
 				new \WPCheckpoint\Jobs\RestorePreflightStep(
 					static function (): string {
 						return Plugin::instance()->directories()->backups();
 					},
 					4096
-				),
-				$real[2],
+				)
 			)
 		);
 		$job = $this->run_restore( Plugin::instance()->jobs()->create( 'restore_small_heads', self::$admin_id, array(), array( 'base' => $base ) ) );
@@ -560,10 +557,7 @@ final class RestoreImportTest extends RestoreTestCase {
 	 * A job type with the restore's steps and a crash seam in the import.
 	 */
 	private function register_crashing( string $id, callable $crash ): void {
-		$real  = Plugin::instance()->job_types()->get( 'restore' );
-		$steps = $real->steps();
-		$steps[2] = new \WPCheckpoint\Jobs\DatabaseImportStep( null, $crash );
-		$this->register( $id, $steps );
+		$this->register( $id, self::restore_steps_with( new \WPCheckpoint\Jobs\DatabaseImportStep( null, $crash ) ) );
 	}
 
 	/**

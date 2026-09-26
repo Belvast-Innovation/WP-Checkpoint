@@ -23,10 +23,14 @@ defined( 'ABSPATH' ) || exit;
  * 2. RestorePreflightStep: the table plan (temporary and final names),
  *    every table's definition and every chunk's columns, the foreign keys
  *    that would cross the swap.
- * 3. DatabaseImportStep: every chunk, statement by statement, into the
+ * 3. RestoreFilesPreflightStep: where the files are staged, and whether
+ *    this site can take them (probes of the staging directories and the
+ *    must-use plugins directory, every path of the files index, name
+ *    clashes on this file system, free space). Nothing is staged yet.
+ * 4. DatabaseImportStep: every chunk, statement by statement, into the
  *    temporary tables.
  *
- * The files, the swap and what follows are later parts of T042; no user
+ * Staging the files, the swap and what follows are later parts of T042; no user
  * interface starts this job yet (only tests and, later, the restore
  * wizard). Options: {base, exclude_tables}; the backups directory comes
  * from the current storage directories, never from the options.
@@ -89,7 +93,7 @@ final class RestoreJob implements JobType {
 	 * @return string[]
 	 */
 	public function step_ids(): array {
-		return array( RestoreVerifyStep::ID, RestorePreflightStep::ID, DatabaseImportStep::ID );
+		return array( RestoreVerifyStep::ID, RestorePreflightStep::ID, RestoreFilesPreflightStep::ID, DatabaseImportStep::ID );
 	}
 
 	/**
@@ -106,6 +110,7 @@ final class RestoreJob implements JobType {
 		return array(
 			new RestoreVerifyStep( $backups, $this->clean ),
 			new RestorePreflightStep( $backups ),
+			new RestoreFilesPreflightStep(),
 			new DatabaseImportStep(),
 		);
 	}
