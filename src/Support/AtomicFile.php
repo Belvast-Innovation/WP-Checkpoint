@@ -85,9 +85,13 @@ final class AtomicFile {
 		$flushed = @fflush( $handle ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
 		$synced  = null === $sync || false !== call_user_func( $sync, $handle );
 		$closed  = @fclose( $handle ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
-		if ( strlen( $contents ) !== $written || ! $flushed || ! $synced || ! $closed ) {
+		if ( strlen( $contents ) !== $written || ! $flushed || ! $closed ) {
 			@unlink( $temp ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
 			throw new AtomicWriteFailed( 'The file could not be written in full.' );
+		}
+		if ( ! $synced ) {
+			@unlink( $temp ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
+			throw new AtomicWriteFailed( 'The file could not be synced to disk.' );
 		}
 		if ( null !== $at ) {
 			call_user_func( $at, 'written' );

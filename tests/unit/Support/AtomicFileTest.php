@@ -228,7 +228,7 @@ final class AtomicFileTest extends TestCase {
 			);
 			$this->fail( 'written' );
 		} catch ( AtomicWriteFailed $e ) {
-			$this->assertSame( 'The file could not be written in full.', $e->getMessage() );
+			$this->assertSame( 'The file could not be synced to disk.', $e->getMessage() );
 		}
 		$this->assertSame( array( self::NAME ), $this->names(), 'a failed sync leaves no temporary file, and the file written before stays' );
 	}
@@ -252,7 +252,7 @@ final class AtomicFileTest extends TestCase {
 			AtomicFile::write( $dir, self::NAME, 'x' );
 			$this->fail( 'fsync() was not called' );
 		} catch ( AtomicWriteFailed $e ) {
-			$this->assertSame( 'The file could not be written in full.', $e->getMessage() );
+			$this->assertSame( 'The file could not be synced to disk.', $e->getMessage() );
 		}
 		$this->assertSame( array(), MemoryStream::$files, 'nothing left' );
 		$this->assertTrue( call_user_func( AtomicFile::sync(), fopen( $this->dir . '/plain', 'wb' ) ), 'a plain file syncs' );

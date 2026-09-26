@@ -44,5 +44,6 @@ final class RestoreFilesPreflightPathsTest extends TestCase {
 		$this->assertSame( 104857600, RestoreFilesPreflightStep::question_bytes( 104857600.0 ), 'the control: a count in range as it is' );
 		$this->assertSame( 9007199254740992, RestoreFilesPreflightStep::question_bytes( 2.0 ** 53 ) );
 		$this->assertSame( 0, RestoreFilesPreflightStep::question_bytes( 0.0 ) );
+		$this->assertSame( 0, RestoreFilesPreflightStep::question_bytes( -1.0 ), 'never negative (a question refuses that)' );
 	}
 }

@@ -199,4 +199,55 @@ final class DirectoryProbeTest extends TestCase {
 		}
 		rmdir( $dir );
 	}
+
+	/**
+	 * A create function that refuses the names ending as given, and creates the others.
+	 *
+	 * @param string[] $refused Name endings refused.
+	 */
+	private static function refusing( array $refused ): callable {
+		return static function ( string $path ) use ( $refused ): bool {
+			foreach ( $refused as $end ) {
+				if ( substr( $path, -strlen( $end ) ) === $end ) {
+					return false;
+				}
+			}
+			return DirectoryProbe::create( $path );
+		};
+	}
+
+	private static function noop(): callable {
+		return static function (): void {
+		};
+	}
+
+	public function test_a_refused_name_counts_only_while_a_plain_one_can_still_be_created(): void {
+		// A trailing dot refused, as PHP on Windows does: such segments cannot be written, and nothing is trimmed.
+		$flags = DirectoryProbe::run( $this->dir, $this->name, self::noop(), self::refusing( array( DirectoryProbe::TRAILING ) ) )['names']->to_array();
+		$this->assertTrue( $flags['refuse_trailing'] );
+		$this->assertFalse( $flags['trim_trailing'] );
+		$this->assertFalse( $flags['win32'] );
+		$this->assertSame( array(), $this->left() );
+
+		// "<" refused: the Win32 rules.
+		$flags = DirectoryProbe::run( $this->dir, $this->name, self::noop(), self::refusing( array( DirectoryProbe::WIN32 ) ) )['names']->to_array();
+		$this->assertTrue( $flags['win32'] );
+		$this->assertFalse( $flags['refuse_trailing'] );
+
+		// Either refused and the plain name too: a full disk or quota, said so, and not taken for a naming rule.
+		foreach ( array( DirectoryProbe::TRAILING, DirectoryProbe::WIN32 ) as $refused ) {
+			try {
+				DirectoryProbe::run( $this->dir, $this->name, self::noop(), self::refusing( array( $refused, DirectoryProbe::CONTROL ) ) );
+				$this->fail( 'ran: ' . $refused );
+			} catch ( CannotStage $e ) {
+				$this->assertStringContainsString( 'the disk or the account\'s quota may be full', $e->getMessage(), $refused );
+			}
+			$this->assertSame( array(), $this->left(), $refused . ': nothing left' );
+		}
+
+		// The control: nothing refused, nothing concluded.
+		$flags = DirectoryProbe::run( $this->dir, $this->name, self::noop(), self::refusing( array() ) )['names']->to_array();
+		$this->assertFalse( $flags['win32'] );
+		$this->assertFalse( $flags['refuse_trailing'] );
+	}
 }

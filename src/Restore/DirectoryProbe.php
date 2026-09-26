@@ -15,11 +15,13 @@ defined( 'ABSPATH' ) || exit;
 
 /**
  * No WordPress. In a staging parent, one probe directory (named by
- * StagingLayout::probe_name()) is created, two files are written in it, the
- * directory is renamed and everything is removed again: what staging and
- * the swap will do there. The files answer how the file system compares
- * names (TargetNames): whether "Aé", "aÉ" and "ae" + combining acute reach
- * the file "aé", and whether "b" reaches "b.". The directory's device
+ * StagingLayout::probe_name()) is created, a few files are written in it,
+ * the directory is renamed and everything is removed again: what staging
+ * and the swap will do there. The files answer how the file system
+ * compares names (TargetNames): whether "Aé", "aÉ" and "ae" + combining
+ * acute reach the file "aé", and whether "b" reaches "b."; and which names
+ * cannot be written: "b." and "c<d", each counted only while the plain
+ * "c_d" can still be created (otherwise the disk or a quota is full). The directory's device
  * number is the file system's identity for the same-disk and free-space
  * checks.
  *
@@ -60,29 +62,32 @@ final class DirectoryProbe {
 	/**
 	 * Probe a directory.
 	 *
-	 * @param string   $where   Staging parent (exists).
-	 * @param string   $name    Probe directory name.
-	 * @param callable $confirm function(): void, throws to stop.
+	 * @param string        $where   Staging parent (exists).
+	 * @param string        $name    Probe directory name.
+	 * @param callable      $confirm function(): void, throws to stop.
+	 * @param callable|null $create (tests) function( string $path ): bool in place of creating a probe file,
+	 *                              to stand in for a file system that refuses some names.
 	 * @return array{dev: int, names: TargetNames, left: bool} left: the directory stayed behind because
 	 *                                                         something else put an entry in it (the reaper removes it).
 	 * @throws CannotStage When the directory cannot be used for staging.
 	 */
-	public static function run( string $where, string $name, callable $confirm ): array {
-		$dir = rtrim( $where, '/\\' ) . '/' . $name;
+	public static function run( string $where, string $name, callable $confirm, $create = null ): array {
+		$create = null === $create ? array( self::class, 'create' ) : $create;
+		$dir    = rtrim( $where, '/\\' ) . '/' . $name;
 		call_user_func( $confirm );
 		if ( ! @mkdir( $dir, 0700 ) ) {
 			throw new CannotStage( sprintf( 'A directory cannot be created in %s, where the restore stages its files. Make that directory writable by the web server (and by WP-CLI, if the restore runs there), then try again.', $where ) );
 		}
 		$renamed = false;
 		try {
-			if ( ! self::create( $dir . '/' . self::NAME ) ) {
+			if ( ! call_user_func( $create, $dir . '/' . self::NAME ) ) {
 				throw new CannotStage( sprintf( 'Files cannot be created in a new directory in %s, where the restore stages its files. Make that directory writable by the web server (and by WP-CLI, if the restore runs there), then try again.', $where ) );
 			}
 			// Names that may be refused: a trailing dot (PHP on Windows refuses a path ending in a dot or a space)
 			// and "<" (the Win32 rules). A refusal counts only when a plain name can still be created.
-			$trailing = self::create( $dir . '/' . self::TRAILING );
-			$win32    = ! self::create( $dir . '/' . self::WIN32 );
-			if ( ( ! $trailing || $win32 ) && ! self::create( $dir . '/' . self::CONTROL ) ) {
+			$trailing = (bool) call_user_func( $create, $dir . '/' . self::TRAILING );
+			$win32    = ! call_user_func( $create, $dir . '/' . self::WIN32 );
+			if ( ( ! $trailing || $win32 ) && ! call_user_func( $create, $dir . '/' . self::CONTROL ) ) {
 				throw new CannotStage( sprintf( 'Files cannot be created in a new directory in %s, where the restore stages its files (the disk or the account\'s quota may be full). Free some space, or make that directory writable by the web server, then try again.', $where ) );
 			}
 			clearstatcache();
@@ -116,7 +121,7 @@ final class DirectoryProbe {
 	 * @param string $path Path.
 	 * @return bool
 	 */
-	private static function create( string $path ): bool {
+	public static function create( string $path ): bool {
 		$handle = @fopen( $path, 'xb' );
 		if ( false === $handle ) {
 			return false;

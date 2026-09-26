@@ -29,9 +29,10 @@ defined( 'ABSPATH' ) || exit;
  * FAT, SMB shares served by Windows) also refuses the characters
  * < > : " | ? * and the device names CON, PRN, AUX, NUL, COM1-9, LPT1-9
  * (with anything after a first dot; newer Windows allows some of these,
- * refusing them is the safe side); unstorable() finds such a segment. PHP
- * on Windows also refuses to create a path ending in a dot or a space
- * (the probe's "b." fails there): such a segment is unstorable too.
+ * refusing them is the safe side); unstorable() finds such a segment.
+ * Where "b." cannot be created (PHP on Windows refuses some paths ending
+ * in a dot or a space, and Windows trims the rest), every segment ending
+ * in a dot or a space is refused, conservatively.
  */
 final class TargetNames {
 
@@ -71,8 +72,8 @@ final class TargetNames {
 	private $win32;
 
 	/**
-	 * "b." cannot be created: a segment ending in a dot or a space cannot be written here (PHP on Windows refuses
-	 * such a path rather than letting Windows drop the ending).
+	 * "b." cannot be created: a segment ending in a dot or a space is refused here, conservatively (PHP on Windows
+	 * refuses some such paths, and Windows trims the ending of the rest).
 	 *
 	 * @var bool
 	 */
