@@ -27,7 +27,8 @@ final class JobActions {
 
 	/**
 	 * Cron requests in a row that may put a job's tick off for starting too
-	 * late (see cron_tick()); the next one ticks it anyway.
+	 * late (see cron_tick()); the next one ticks it, when it has time left for
+	 * a unit.
 	 */
 	const MAX_CRON_DEFERRALS = 3;
 
@@ -39,7 +40,7 @@ final class JobActions {
 	const CRON_UNIT_SECONDS = 5;
 
 	/**
-	 * Deferrals in a row (the first MAX_CRON_DEFERRALS included: one count)
+	 * Deferrals without progress in between (the first MAX_CRON_DEFERRALS included: one count)
 	 * after which the job fails: the cron requests of this host start too
 	 * late to ever run a unit.
 	 */
@@ -337,12 +338,13 @@ final class JobActions {
 	 * request starts that late, the job would otherwise never move on from
 	 * cron. The next late request ticks it with no time left, so it runs
 	 * its first unit only, when it can still hold one: with its time limit
-	 * known (max_execution_time) and less than CRON_UNIT_SECONDS left
-	 * before it, the request puts the tick off again, and at
-	 * CRON_DEFERRAL_LIMIT deferrals in a row the job fails with the reason.
-	 * A timeout outside PHP (PHP-FPM's, a reverse proxy's) cannot be seen
-	 * from here, so the floor applies only where PHP's own limit is set;
-	 * without one, the tick runs its first unit as described. The count is
+	 * known (max_execution_time) and less than CRON_UNIT_SECONDS of it left,
+	 * counted from the request start, the request puts the tick off again,
+	 * and at CRON_DEFERRAL_LIMIT deferrals without progress in between the
+	 * job fails with the reason. A timeout outside PHP (PHP-FPM's, a reverse
+	 * proxy's) cannot be seen from here, so the floor applies only where
+	 * PHP's own limit is set; without one, the tick runs its first unit as
+	 * described. The count is
 	 * kept on the job row and set back to 0 by any tick that makes progress
 	 * (and by a retry or an answer); after such a tick that makes none,
 	 * every late request ticks it that way until one does. Each deferral and
@@ -403,13 +405,16 @@ final class JobActions {
 			return null;
 		}
 		// Put off MAX_CRON_DEFERRALS times: this request runs the first unit, if it can still hold one. Its time
-		// left is its own limit less what it has used (from the request start). A limit of 0 (none, or WP-CLI)
-		// says nothing about a timeout outside PHP either: the unit runs, as it always did.
+		// left is taken as its own limit less the time since the request started. That is a lower bound: on all
+		// but Windows, PHP counts only the time the script itself runs against max_execution_time (not waiting
+		// for the database or the network), and set_time_limit() in an earlier cron callback starts the count
+		// over. A timeout outside PHP (PHP-FPM's, a reverse proxy's) cannot be seen at all; with no limit of
+		// PHP's own (0, as under WP-CLI) the unit runs, as it always did.
 		$limit = (int) ( call_user_func( $this->runtime )['max_execution_time'] ?? 0 );
 		if ( $limit > 0 ) {
 			$left = $limit - ( microtime( true ) - $started_at );
 			if ( $left < self::CRON_UNIT_SECONDS ) {
-				return $this->no_room_for_a_unit( $job, $late, $left );
+				return $this->no_room_for_a_unit( $job, $late, $left, $started_at );
 			}
 		}
 		// The tick runs after all: its event is the one it would have had (the tick adjusts it as usual), not the
@@ -432,19 +437,21 @@ final class JobActions {
 
 	/**
 	 * A late cron request after MAX_CRON_DEFERRALS deferrals that has too little time left for a unit: put off
-	 * again, counted on (the event for the next cron request is set); at CRON_DEFERRAL_LIMIT the job fails,
-	 * unless a live run holds it (whose progress starts the count over).
+	 * again, counted on (the event for the next cron request is set); at CRON_DEFERRAL_LIMIT the job fails
+	 * (JobRepository::fail_for_late_cron(): not while a live run holds it, whose progress starts the count
+	 * over, nor while it waits for an answer).
 	 *
-	 * @param Job   $job  Job, as read before counting.
-	 * @param float $late Seconds into the request.
-	 * @param float $left Seconds left before the request's time limit.
+	 * @param Job   $job        Job, as read before counting.
+	 * @param float $late       Seconds into the request.
+	 * @param float $left       Seconds left of the request's time limit, counted from the request start.
+	 * @param float $started_at When the cron request started.
 	 * @return TickResult|null Null when the tick was put off.
 	 */
-	private function no_room_for_a_unit( Job $job, float $late, float $left ): ?TickResult {
+	private function no_room_for_a_unit( Job $job, float $late, float $left, float $started_at ): ?TickResult {
 		$counted = $this->repository->count_cron_deferral( $job->id, self::CRON_DEFERRAL_LIMIT );
 		$now     = $this->repository->find( $job->id );
-		if ( null === $now || ! in_array( $now->status, array( Job::QUEUED, Job::RUNNING, Job::PAUSED ), true ) ) {
-			return null; // It ended meanwhile; its event settles on the next request.
+		if ( null === $now || ! in_array( $now->status, array( Job::QUEUED, Job::RUNNING, Job::PAUSED ), true ) || $now->awaiting_answer() ) {
+			return $this->tick( $job->id, $started_at ); // Ended, or waits for an answer, meanwhile: the tick settles its event.
 		}
 		$context = array(
 			'late_seconds' => $late,
@@ -457,26 +464,23 @@ final class JobActions {
 				$job,
 				Logger::WARNING,
 				$counted
-					? 'Tick put off again: this cron request has less time left before its time limit than one unit needs'
+					? 'Tick put off again: this cron request has less time left of its time limit than one unit needs (counted from the request start)'
 					: 'Tick put off again: this cron request has too little time left for one unit, and the deferral could not be recorded',
 				$context
 			);
 			return null;
 		}
-		if ( $now->is_locked( $this->repository->now() ) ) {
-			return null; // A live run drives it; its progress starts the count over.
-		}
 		$message = sprintf(
-			/* translators: 1: number of cron requests, 2: seconds. */
-			__( 'The cron requests of this site start too late to run any part of this job: %1$d in a row began with less than %2$d seconds left before their time limit. Drive jobs with a system cron job or with WP-CLI (wp wpcheckpoint job run), then retry.', 'wp-checkpoint' ),
+			/* translators: 1: number of deferrals, 2: how many of them for too little time left, 3: seconds. */
+			__( 'The cron requests of this site start too late to run this job: it was put off %1$d times without progress in between, the last %2$d because less than %3$d seconds of the request\'s time limit were left (counted from the start of the request). Run cron with WP-CLI from a system cron job (wp cron event run --due-now), or run the job with WP-CLI (wp wpcheckpoint job run), then retry.', 'wp-checkpoint' ),
 			$now->cron_deferrals,
+			self::CRON_DEFERRAL_LIMIT - self::MAX_CRON_DEFERRALS,
 			self::CRON_UNIT_SECONDS
 		);
-		try {
-			$failed = $this->repository->transition( $now, Job::FAILED, $message, '', Job::FAILURE_TEMPORARY );
-		} catch ( StaleJob $e ) {
-			return null; // Changed meanwhile: the next request looks again.
-		} catch ( InvalidTransition $e ) {
+		$failed = $this->repository->fail_for_late_cron( $now, $message, self::CRON_DEFERRAL_LIMIT );
+		if ( null === $failed ) {
+			// A live run holds it, it was answered, retried or moved on meanwhile: its own state decides next time.
+			$this->runner->note( $job, Logger::WARNING, 'Tick put off: the limit of deferrals is reached, but the job was not failed (a live run holds it, or it changed meanwhile)', $context );
 			return null;
 		}
 		Loopback::unschedule( $job->id );

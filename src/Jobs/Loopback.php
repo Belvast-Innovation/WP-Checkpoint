@@ -68,8 +68,8 @@ final class Loopback {
 
 	/**
 	 * A cron callback that starts this long after its request began (other
-	 * events ran first) puts its tick off to the next cron request, up to
-	 * JobActions::MAX_CRON_DEFERRALS times in a row (JobActions::cron_tick()).
+	 * events ran first) puts its tick off to the next cron request
+	 * (JobActions::cron_tick() says how often, and what then).
 	 * The smallest time budget a tick is ever given.
 	 */
 	const LATE_CRON_SECONDS = Thresholds::BUDGET_MIN_SECONDS;
