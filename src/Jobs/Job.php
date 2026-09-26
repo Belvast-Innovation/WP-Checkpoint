@@ -250,6 +250,15 @@ final class Job {
 	public $blocked_count = 0;
 
 	/**
+	 * Cron requests in a row that started too late to tick the job and put
+	 * the tick off (JobActions::cron_tick()). Back to 0 when a tick makes
+	 * progress (JobRepository::save_progress()), on retry and on an answer.
+	 *
+	 * @var int
+	 */
+	public $cron_deferrals = 0;
+
+	/**
 	 * Token of the storage directory the job was created for.
 	 *
 	 * @var string

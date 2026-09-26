@@ -22,8 +22,11 @@ abstract class JobTestCase extends WP_UnitTestCase {
 	/** @var int */
 	protected static $admin_id;
 
-	/** @var array<string, \WPCheckpoint\Jobs\JobType|null> Types register() replaced, put back in tear_down(). */
-	private $replaced = array();
+	/** @var array<string, \WPCheckpoint\Jobs\JobType>|null The plugin's registered job types before the test, put back in tear_down(). */
+	private $types;
+
+	/** @var array<int, array{0: object, 1: string, 2: mixed}> Private properties replace_internal() set, with their values before. */
+	private $internals = array();
 
 	public static function wpSetUpBeforeClass( $factory ): void {
 		self::$admin_id = $factory->user->create( array( 'role' => 'administrator' ) );
@@ -35,6 +38,9 @@ abstract class JobTestCase extends WP_UnitTestCase {
 	public function set_up(): void {
 		parent::set_up();
 		global $wpdb;
+		// Whatever the test registers (a fixture under a real type's id such as export, or a new id) is gone
+		// afterwards: later tests would run the fixture instead of the job.
+		$this->types = self::registered_types();
 		remove_filter( 'query', array( $this, '_create_temporary_tables' ) );
 		remove_filter( 'query', array( $this, '_drop_temporary_tables' ) );
 		$wpdb->query( 'DROP TABLE IF EXISTS ' . Schema::jobs_table() );
@@ -77,14 +83,7 @@ abstract class JobTestCase extends WP_UnitTestCase {
 
 	public function tear_down(): void {
 		global $wpdb;
-		// A fixture registered under a real type's id (export, restore) must not outlive the test: later tests
-		// would run the fixture instead of the job.
-		foreach ( $this->replaced as $type ) {
-			if ( null !== $type ) {
-				Plugin::instance()->job_types()->add( $type );
-			}
-		}
-		$this->replaced = array();
+		$this->restore_plugin();
 		$wpdb->query( 'DROP TABLE IF EXISTS ' . Schema::jobs_table() );
 		foreach ( glob( WP_CONTENT_DIR . '/wp-checkpoint-*' ) ?: array() as $dir ) {
 			Deleter::empty_directory( $dir );
@@ -99,13 +98,56 @@ abstract class JobTestCase extends WP_UnitTestCase {
 	}
 
 	/**
-	 * Register a fixture type on the plugin's registry.
+	 * Register a fixture type on the plugin's registry, for this test only.
 	 */
 	protected function register( string $id, array $steps ): void {
-		if ( ! array_key_exists( $id, $this->replaced ) ) {
-			$this->replaced[ $id ] = Plugin::instance()->job_types()->get( $id );
-		}
 		Plugin::instance()->job_types()->add( new FixtureJobType( $id, $steps ) );
+	}
+
+	/**
+	 * Replace a private property of one of the plugin's objects (its runner inside the job actions, say) for
+	 * this test only: tear_down() puts the value from before back.
+	 *
+	 * @param object $owner    The object.
+	 * @param string $property Property name.
+	 * @param mixed  $value    Value for this test.
+	 */
+	protected function replace_internal( $owner, string $property, $value ): void {
+		$reflection = new \ReflectionProperty( get_class( $owner ), $property );
+		$reflection->setAccessible( true );
+		$this->internals[] = array( $owner, $property, $reflection->getValue( $owner ) );
+		$reflection->setValue( $owner, $value );
+	}
+
+	/**
+	 * Put back what register() and replace_internal() changed (tear_down() does; a test may call it earlier).
+	 */
+	protected function restore_plugin(): void {
+		// In reverse order, so a property replaced twice ends with its value from before the test.
+		foreach ( array_reverse( $this->internals ) as list( $owner, $property, $value ) ) {
+			$reflection = new \ReflectionProperty( get_class( $owner ), $property );
+			$reflection->setAccessible( true );
+			$reflection->setValue( $owner, $value );
+		}
+		$this->internals = array();
+		if ( null !== $this->types ) {
+			self::registered_types( $this->types );
+		}
+	}
+
+	/**
+	 * The plugin's registered job types; with $types, set them to that first.
+	 *
+	 * @param array<string, \WPCheckpoint\Jobs\JobType>|null $types Types to set.
+	 * @return array<string, \WPCheckpoint\Jobs\JobType>
+	 */
+	private static function registered_types( $types = null ): array {
+		$reflection = new \ReflectionProperty( \WPCheckpoint\Jobs\JobTypes::class, 'builtin' );
+		$reflection->setAccessible( true );
+		if ( null !== $types ) {
+			$reflection->setValue( Plugin::instance()->job_types(), $types );
+		}
+		return $reflection->getValue( Plugin::instance()->job_types() );
 	}
 
 	/**

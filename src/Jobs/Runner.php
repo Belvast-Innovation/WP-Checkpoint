@@ -520,6 +520,26 @@ final class Runner {
 	}
 
 	/**
+	 * One line about a job from outside a tick (a driver's decision about
+	 * its tick): in the job's log when the job's files are in the current
+	 * storage directory, otherwise in the storage log, with the job's id
+	 * and without the context.
+	 *
+	 * @param Job                  $job     Job.
+	 * @param string               $level   Logger::INFO or Logger::WARNING.
+	 * @param string               $message Message (no paths, no site data).
+	 * @param array<string, mixed> $context Context (numbers and identifiers).
+	 * @return void
+	 */
+	public function note( Job $job, string $level, string $message, array $context = array() ): void {
+		if ( $this->repository->owns_files_of( $job ) ) {
+			$this->logger_for( $job )->log( $level, $message, $context );
+			return;
+		}
+		$this->repository->log_event( sprintf( 'Job %d: %s', $job->id, $message ) );
+	}
+
+	/**
 	 * Logger writing to the job's log file inside the storage directory.
 	 *
 	 * @param Job $job Job.

@@ -38,14 +38,13 @@ final class FirstUnitRuleTest extends TestCase {
 	/**
 	 * Files that stop before a first unit on purpose: file => why.
 	 */
-	const EXEMPT = array(
-		'src/Plugin.php' => 'cron_tick() hands a tick that starts late in a cron request to the next cron request (PR #35): its first unit could pass the server\'s time limit. Whether it may do so forever (a host whose every cron request starts late never ticks from cron) is an open decision.',
-	);
+	const EXEMPT = array();
 
 	/**
 	 * File => the test (file and method) that runs it with no time left.
 	 */
 	const COVERED = array(
+		'src/Jobs/JobActions.php'           => 'tests/integration/LateCronTest.php::test_a_job_whose_cron_requests_all_start_late_moves_on_every_fourth_one',
 		'src/Jobs/Runner.php'               => 'tests/integration/NoBudgetLeftTest.php::test_an_export_moves_on_in_every_tick_with_no_time_left',
 		'src/Jobs/PreflightStep.php'        => 'tests/integration/NoBudgetLeftTest.php::test_an_export_moves_on_in_every_tick_with_no_time_left',
 		'src/Jobs/FileScanStep.php'         => 'tests/integration/NoBudgetLeftTest.php::test_an_export_moves_on_in_every_tick_with_no_time_left',

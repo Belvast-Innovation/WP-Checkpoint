@@ -22,7 +22,7 @@ defined( 'ABSPATH' ) || exit;
 final class Schema {
 
 	const OPTION  = 'wpcheckpoint_db_version';
-	const CURRENT = 6;
+	const CURRENT = 7;
 
 	/**
 	 * Jobs table name without the prefix.
@@ -176,6 +176,10 @@ final class Schema {
 				// transition). dbDelta() changes the column type; a table created as version 5 is already wide.
 				self::create_jobs_table();
 				return 1;
+			case 7:
+				// Adds cron_deferrals (0); older code ignores it, so min_compatible stays 1.
+				self::create_jobs_table();
+				return 1;
 		}
 		return self::MIN_COMPATIBLE;
 	}
@@ -184,7 +188,8 @@ final class Schema {
 	 * The jobs table in its current shape; dbDelta() creates it or adds the
 	 * columns that are missing (version 1 lacked work_expired_at, version 2
 	 * lacked options_json and questions_json, version 3 lacked takeovers and
-	 * takeover_mark, version 4 lacked failure_kind, version 5 declared it narrower).
+	 * takeover_mark, version 4 lacked failure_kind, version 5 declared it narrower,
+	 * version 6 lacked cron_deferrals).
 	 *
 	 * @return void
 	 */
@@ -206,6 +211,7 @@ final class Schema {
 			progress_message varchar(191) NOT NULL DEFAULT '',
 			attempts int(10) unsigned NOT NULL DEFAULT 0,
 			blocked_count int(10) unsigned NOT NULL DEFAULT 0,
+			cron_deferrals int(10) unsigned NOT NULL DEFAULT 0,
 			storage_token varchar(32) NOT NULL DEFAULT '',
 			storage_path varchar(1024) NOT NULL DEFAULT '',
 			log_path varchar(255) NOT NULL DEFAULT '',
