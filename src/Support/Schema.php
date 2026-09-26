@@ -206,7 +206,7 @@ final class Schema {
 		}
 		return sprintf(
 			/* translators: %s: column names of the plugin's job table, some with the width they have and need. */
-			__( 'The job table lacks columns this version of WP Checkpoint needs, or has them narrower (%s). Opening the WP Checkpoint page adds them; if they stay missing, the database refused to change the table (for example, its user lacks the ALTER privilege).', 'wp-checkpoint' ),
+			__( 'The job table lacks columns this version of WP Checkpoint needs, or has them narrower (%s). Opening the WP Checkpoint page adds them (after a failed attempt, at most every ten minutes); if they stay missing, the database refused to change the table (for example, its user lacks the ALTER privilege).', 'wp-checkpoint' ),
 			implode( ', ', $problems )
 		);
 	}
@@ -251,7 +251,8 @@ final class Schema {
 	 *
 	 * Only an admin request, cron and WP-CLI try (may_upgrade()); any other
 	 * request (REST: a tick, a loopback hop, a retry or an answer from the
-	 * page; a page of the site) only reads the stored version: "pending"
+	 * page; a page of the site) reads only the stored version and whether
+	 * the table exists, and sends no statement that changes it: "pending"
 	 * when an upgrade is due (with "last_problems" when an attempt failed:
 	 * a record of what the table was then, not evidence of what it is now).
 	 * After a failed attempt the next waits RETRY_SECONDS: in the wait,
@@ -299,10 +300,11 @@ final class Schema {
 			return $result( 'pending', null === $last ? null : $last['problems'] );
 		}
 		if ( null !== $last && time() < $last['after'] ) {
-			// Nothing is sent to the database in the wait, but the table is read again: its cause may be gone.
+			// No attempt in the wait, but the table is read again: its cause may be gone (then on as usual).
 			$now = self::verified();
 			if ( null === $now ) {
-				return $result( 'pending', $last['problems'] );
+				// No answer: as outside the wait, no evidence either way.
+				return $current ? $result( 'none' ) : $result( 'pending', $last['problems'] );
 			}
 			if ( array() !== $now ) {
 				return $result( 'failed', $now );
@@ -405,8 +407,9 @@ final class Schema {
 			}
 		}
 		return array(
-			// A time further out than one wait (a clock that jumped, a damaged value) has run out.
-			'after'    => $stored['after'] > time() + self::RETRY_SECONDS ? 0 : $stored['after'],
+			// A time further out than one wait (a clock that jumped, a damaged value) has run out; a minute of
+			// difference between the clocks of two web servers has not.
+			'after'    => $stored['after'] > time() + self::RETRY_SECONDS + 60 ? 0 : $stored['after'],
 			'problems' => $problems,
 		);
 	}

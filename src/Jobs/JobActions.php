@@ -349,7 +349,7 @@ final class JobActions {
 		// The count is written before the tick, which would otherwise be what migrates; a table that is behind
 		// has no count to write, and the tick says why.
 		$schema = Schema::ensure();
-		if ( ! in_array( $schema['action'], array( 'none', 'created', 'migrated', 'repaired' ), true ) ) {
+		if ( in_array( $schema['action'], array( 'pending', 'failed' ), true ) ) {
 			return $this->tick( $id, $started_at );
 		}
 		$job = $this->repository->find( $id );

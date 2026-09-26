@@ -180,8 +180,8 @@ final class JobRepository {
 		global $wpdb;
 
 		// The first write a request makes may be this one (a command run right after an update): the row
-		// needs every column of the current schema. Where the request may upgrade (WP-CLI), the columns are read
-		// back and lost ones added again; elsewhere only the stored version is read.
+		// needs every column of the current schema. Where the request may upgrade (the admin, cron, WP-CLI), the
+		// columns are read back and lost ones added again; elsewhere only the stored version is read.
 		$schema = Schema::ensure( true );
 		if ( 'failed' === $schema['action'] ) {
 			throw new JobsUnavailable( esc_html( Schema::problem_message( $schema['problems'] ?? null ) ) );

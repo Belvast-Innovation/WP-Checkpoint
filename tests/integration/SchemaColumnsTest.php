@@ -429,11 +429,14 @@ final class SchemaColumnsTest extends JobTestCase {
 		$this->assertSame( 0, $changes, 'no ALTER from a request that may not upgrade' );
 		$this->assertSame( Job::QUEUED, Plugin::instance()->jobs()->find( $id )->status );
 
-		// Within the ten minutes, a request that may upgrade sends nothing either: it reads the table again.
+		// Within the ten minutes, a request that may upgrade sends nothing either: it reads the table again, and
+		// reports what it lacks now (another column went meanwhile), not what the record says.
+		self::drop_column( 'takeover_mark' );
+		$changes = 0;
 		Schema::set_upgrade_context( true );
 		$again = Schema::ensure();
 		$this->assertSame( 'failed', $again['action'] );
-		$this->assertSame( array( 'cron_deferrals' ), $again['problems'], 'what the table lacks now' );
+		$this->assertSame( array( 'cron_deferrals', 'takeover_mark' ), $again['problems'], 'what the table lacks now' );
 		$this->assertSame( 0, $changes, 'no ALTER within the wait' );
 		// After them, it does, and waits again.
 		self::ten_minutes_later();
@@ -583,6 +586,12 @@ final class SchemaColumnsTest extends JobTestCase {
 		$this->refuse( '/^ALTER TABLE \S+ ADD COLUMN `?cron_deferrals`? /i', $hits );
 		$this->assertSame( 'failed', $this->as_admin( true )['action'] );
 		$this->assertNotNull( Options::get( Schema::RETRY_OPTION, null ), 'the control: the failed repair is recorded' );
+		$changes = 0;
+		$this->count_changes( $changes );
+		$in_wait = $this->as_admin( true );
+		$this->assertSame( 'failed', $in_wait['action'], 'in the wait, still missing' );
+		$this->assertSame( array( 'cron_deferrals' ), $in_wait['problems'] );
+		$this->assertSame( 0, $changes, 'and no repair sent in the wait' );
 		remove_all_filters( 'query' );
 		$wpdb->query( 'ALTER TABLE ' . Schema::jobs_table() . ' ADD COLUMN cron_deferrals int(10) unsigned NOT NULL DEFAULT 0' );
 		$this->assertSame( 'none', $this->as_admin( true )['action'], 'read again in the wait: nothing missing' );
@@ -645,6 +654,79 @@ final class SchemaColumnsTest extends JobTestCase {
 		$this->assertSame( 6, Schema::stored()['version'] );
 		$this->assertNull( Options::get( Schema::RETRY_OPTION, null ), 'no record of a failure that did not happen' );
 		$this->assertSame( 'migrated', Schema::ensure()['action'], 'the next attempt migrates again, at once' );
+	}
+
+	public function test_columns_that_cannot_be_read_in_the_wait_are_no_evidence(): void {
+		self::drop_column( 'cron_deferrals' );
+		Options::set( Schema::OPTION, array( 'version' => 6, 'min_compatible' => 1 ) );
+		Options::set( Schema::RETRY_OPTION, array( 'after' => time() + 300, 'problems' => array( 'cron_deferrals' ) ) );
+		$hits    = 0;
+		$changes = 0;
+		$this->count_changes( $changes );
+		$this->refuse( '/^SHOW COLUMNS FROM /i', $hits );
+		$result = Schema::ensure();
+		$this->assertSame( 1, $hits, 'the control: the columns were asked for' );
+		$this->assertSame( 'pending', $result['action'], 'behind, and nothing known now: wait' );
+		$this->assertSame( 0, $changes );
+		// With the version current, no answer lets the work go on, as it does outside the wait.
+		Options::set( Schema::OPTION, array( 'version' => Schema::CURRENT, 'min_compatible' => 1 ) );
+		$this->assertSame( 'none', Schema::ensure( true )['action'] );
+	}
+
+	public function test_a_retry_from_wp_cli_adds_a_lost_column_and_goes_through(): void {
+		global $wpdb;
+		$id = $this->running_job();
+		self::drop_column( 'cron_deferrals' );
+		Plugin::instance()->job_actions()->tick( $id, JobActions::NO_TIME_LEFT );
+		$this->assertSame( Job::FAILED, Plugin::instance()->jobs()->find( $id )->status );
+		Schema::set_upgrade_context( true ); // As WP-CLI is.
+		$job = Plugin::instance()->job_actions()->retry( $id );
+		$this->assertSame( Job::QUEUED, $job->status );
+		$this->assertContains( 'cron_deferrals', $wpdb->get_col( 'SHOW COLUMNS FROM ' . Schema::jobs_table() ) );
+	}
+
+	public function test_a_late_cron_request_under_a_newer_schema_is_still_put_off(): void {
+		$id = $this->running_job();
+		// A downgraded plugin: the stored schema is newer and still usable (the table has every column).
+		Options::set( Schema::OPTION, array( 'version' => Schema::CURRENT + 1, 'min_compatible' => 1 ) );
+		$this->assertSame( 'newer', Schema::ensure()['action'] );
+		$_SERVER['REQUEST_TIME_FLOAT'] = microtime( true ) - 10;
+		Plugin::instance()->cron_tick( $id );
+		$job = Plugin::instance()->jobs()->find( $id );
+		$this->assertSame( 1, $job->cron_deferrals, 'counted and put off' );
+		$this->assertSame( 1, (int) JobContext::strip_reserved( $job->cursor )['n'], 'not ticked' );
+	}
+
+	public function test_the_plugin_page_does_no_housekeeping_on_a_table_that_is_behind(): void {
+		global $wpdb;
+		$this->register( 'plain', array( $this->counting_step( 'p', 5 ) ) );
+		$stale = Plugin::instance()->jobs()->create( 'plain' )->id;
+		$wpdb->update( Schema::jobs_table(), array( 'created_at' => time() - 3 * 86400, 'progress_at' => time() - 3 * 86400 ), array( 'id' => $stale ) );
+		self::drop_column( 'cron_deferrals' );
+		Options::set( Schema::OPTION, array( 'version' => 6, 'min_compatible' => 1 ) );
+		$hits = 0;
+		$this->refuse( '/^ALTER TABLE \S+ ADD COLUMN `?cron_deferrals`? /i', $hits );
+		$page = Plugin::instance()->admin_page();
+		$render = function () use ( $page ): void {
+			delete_site_transient( 'wpcheckpoint_jobs_reaped' );
+			set_current_screen( 'dashboard' );
+			Schema::set_upgrade_context( null );
+			ob_start();
+			try {
+				$page->render();
+			} finally {
+				ob_end_clean();
+				set_current_screen( 'front' );
+			}
+		};
+		$render();
+		$this->assertGreaterThan( 0, $hits, 'the control: the page tried the upgrade' );
+		$this->assertSame( Job::QUEUED, Plugin::instance()->jobs()->find( $stale )->status, 'no housekeeping while behind' );
+		// The control: once the upgrade works, the page's housekeeping gives the job up.
+		remove_all_filters( 'query' );
+		self::ten_minutes_later();
+		$render();
+		$this->assertSame( Job::FAILED, Plugin::instance()->jobs()->find( $stale )->status );
 	}
 
 	/**
