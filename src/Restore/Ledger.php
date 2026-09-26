@@ -81,7 +81,7 @@ final class Ledger {
 	/**
 	 * Connection.
 	 *
-	 * @var ImportSession
+	 * @var Queries
 	 */
 	private $db;
 
@@ -104,13 +104,13 @@ final class Ledger {
 	 * one that was there has every column of COLUMNS (CREATE TABLE IF NOT
 	 * EXISTS leaves a table of an older version as it is).
 	 *
-	 * @param ImportSession $db    Connection.
-	 * @param string        $name  Table name (TempTables::ledger()).
-	 * @param string        $token This run's lease token.
+	 * @param Queries $db    Connection (an ImportSession).
+	 * @param string  $name  Table name (TempTables::ledger()).
+	 * @param string  $token This run's lease token.
 	 * @throws LedgerOutdated When the table lacks columns: the restore was started by an older version.
 	 * @throws TransientFailure When its columns could not be read.
 	 */
-	public function __construct( ImportSession $db, string $name, string $token ) {
+	public function __construct( Queries $db, string $name, string $token ) {
 		$this->db    = $db;
 		$this->name  = $name;
 		$this->token = $token;

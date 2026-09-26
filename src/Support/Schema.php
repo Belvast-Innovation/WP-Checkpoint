@@ -66,6 +66,23 @@ final class Schema {
 	);
 
 	/**
+	 * The last failed upgrade attempt (Schema::ensure()): when the next may start, and its problems.
+	 */
+	const RETRY_OPTION = 'wpcheckpoint_db_upgrade_retry';
+
+	/**
+	 * Seconds after a failed upgrade attempt before the next.
+	 */
+	const RETRY_SECONDS = 600;
+
+	/**
+	 * Tests: whether this request may upgrade, or null to detect (may_upgrade()).
+	 *
+	 * @var bool|null
+	 */
+	private static $may_upgrade = null;
+
+	/**
 	 * The problem ensure() reports when the table is not there after creating it.
 	 */
 	const NO_TABLE = '(the table itself)';
@@ -195,6 +212,15 @@ final class Schema {
 	}
 
 	/**
+	 * Why jobs wait while an upgrade is due and this request may not try it (ensure()'s "pending").
+	 *
+	 * @return string
+	 */
+	public static function pending_message(): string {
+		return __( 'WP Checkpoint has to update its database table first. That happens on the next visit to the WP Checkpoint page, the next cron run or the next WP-CLI command; the job continues after it.', 'wp-checkpoint' );
+	}
+
+	/**
 	 * The column a problem of column_problems() is about.
 	 *
 	 * @param string $problem Problem.
@@ -211,46 +237,72 @@ final class Schema {
 	 * is behind (with $verify, it also reads the columns back). Never
 	 * downgrades. The new version is recorded only after the table's columns
 	 * were read back and match COLUMNS; otherwise the stored version stays
-	 * (the next call migrates again) and the result is "failed" with the
-	 * problems. With $verify and the version current, columns lost since are
-	 * added again ("repaired", or "failed" when that did not work).
+	 * and the result is "failed" with the problems. With $verify and the
+	 * version current, columns lost since are added again ("repaired", or
+	 * "failed" when that did not work).
+	 *
+	 * Only an admin request, cron and WP-CLI try (may_upgrade()); any other
+	 * request (REST: a tick, a loopback hop; a page of the site) only reads
+	 * the stored version and the last failure: "pending" when an upgrade is
+	 * due, "failed" with the last attempt's problems when one failed. After
+	 * a failed attempt, the next one waits RETRY_SECONDS ("failed" with the
+	 * same problems meanwhile): a refused statement is not sent again on
+	 * every request.
 	 *
 	 * @param bool $verify Whether to read the columns back when the version is current (creating a job, the
 	 *                     plugin's page, activation, retry and answer; not every tick).
-	 * @return array{action: string, version: int, min_compatible: int, problems?: string[]|null} action: none|created|migrated|repaired|newer|incompatible|failed.
+	 * @return array{action: string, version: int, min_compatible: int, problems?: string[]|null} action: none|created|migrated|repaired|pending|newer|incompatible|failed.
 	 */
 	public static function ensure( bool $verify = false ): array {
 		$stored = self::stored();
-
-		if ( $stored['version'] > self::CURRENT ) {
-			return array(
-				'action'         => self::is_compatible() ? 'newer' : 'incompatible',
+		$result = static function ( string $action, $problems = array() ) use ( $stored ): array {
+			$out = array(
+				'action'         => $action,
 				'version'        => $stored['version'],
 				'min_compatible' => $stored['min_compatible'],
 			);
+			if ( 'failed' === $action ) {
+				$out['problems'] = $problems;
+			}
+			return $out;
+		};
+
+		if ( $stored['version'] > self::CURRENT ) {
+			return $result( self::is_compatible() ? 'newer' : 'incompatible' );
 		}
 
-		$exists = self::table_exists();
-		if ( $exists && self::CURRENT === $stored['version'] ) {
-			$problems = $verify ? self::column_problems() : array();
+		$exists  = self::table_exists();
+		$current = $exists && self::CURRENT === $stored['version'];
+		if ( $current && ! $verify ) {
+			return $result( 'none' );
+		}
+		$last = self::last_failure();
+		if ( ! self::may_upgrade() ) {
+			if ( $current ) {
+				return $result( 'none' );
+			}
+			return null === $last ? $result( 'pending' ) : $result( 'failed', $last['problems'] );
+		}
+		if ( null !== $last && time() < $last['after'] ) {
+			return $result( 'failed', $last['problems'] );
+		}
+
+		if ( $current ) {
+			$problems = self::column_problems();
 			if ( null === $problems || array() === $problems ) {
-				// Not asked to look, or nothing missing; unreadable columns are no evidence that something is.
-				return array(
-					'action'         => 'none',
-					'version'        => $stored['version'],
-					'min_compatible' => $stored['min_compatible'],
-				);
+				// Nothing missing; unreadable columns are no evidence that something is.
+				return $result( 'none' );
 			}
 			// Lost after the version was recorded (removed by hand, a table brought from elsewhere): the table
 			// in its current shape again. The version stays as it is either way.
 			self::quietly( array( __CLASS__, 'create_jobs_table' ) );
 			$problems = self::verified();
-			return array(
-				'action'         => array() === $problems ? 'repaired' : 'failed',
-				'version'        => $stored['version'],
-				'min_compatible' => $stored['min_compatible'],
-				'problems'       => $problems,
-			);
+			if ( array() !== $problems ) {
+				self::record_failure( $problems );
+				return $result( 'failed', $problems );
+			}
+			Options::delete( self::RETRY_OPTION );
+			return $result( 'repaired' );
 		}
 
 		$from = $exists ? $stored['version'] : 0;
@@ -265,12 +317,8 @@ final class Schema {
 		// dbDelta() reports nothing when a statement fails (no ALTER privilege, a full disk): the table is the evidence.
 		$problems = self::verified();
 		if ( null === $problems || array() !== $problems ) {
-			return array(
-				'action'         => 'failed',
-				'version'        => $stored['version'],
-				'min_compatible' => $stored['min_compatible'],
-				'problems'       => $problems,
-			);
+			self::record_failure( $problems );
+			return $result( 'failed', $problems );
 		}
 		Options::set(
 			self::OPTION,
@@ -279,10 +327,69 @@ final class Schema {
 				'min_compatible' => $min,
 			)
 		);
+		Options::delete( self::RETRY_OPTION );
 		return array(
 			'action'         => 0 === $from ? 'created' : 'migrated',
 			'version'        => self::CURRENT,
 			'min_compatible' => $min,
+		);
+	}
+
+	/**
+	 * Whether this request may try an upgrade: an admin request, cron or WP-CLI.
+	 *
+	 * @return bool
+	 */
+	private static function may_upgrade(): bool {
+		if ( null !== self::$may_upgrade ) {
+			return self::$may_upgrade;
+		}
+		return is_admin() || wp_doing_cron() || ( defined( 'WP_CLI' ) && WP_CLI );
+	}
+
+	/**
+	 * Tests: whether this request counts as one that may upgrade (true, false), or null to detect.
+	 *
+	 * @param bool|null $may Value.
+	 * @return void
+	 */
+	public static function set_upgrade_context( $may ): void {
+		self::$may_upgrade = is_bool( $may ) ? $may : null;
+	}
+
+	/**
+	 * The last failed attempt: when the next may start, and its problems. Null when none is recorded.
+	 *
+	 * @return array{after: int, problems: string[]|null}|null
+	 */
+	private static function last_failure() {
+		$stored = Options::get( self::RETRY_OPTION, null );
+		if ( ! is_array( $stored ) || ! isset( $stored['after'] ) || ! is_int( $stored['after'] ) ) {
+			return null;
+		}
+		$problems = null;
+		if ( isset( $stored['problems'] ) && is_array( $stored['problems'] ) ) {
+			$problems = array_values( array_map( 'strval', $stored['problems'] ) );
+		}
+		return array(
+			'after'    => $stored['after'],
+			'problems' => $problems,
+		);
+	}
+
+	/**
+	 * Record a failed attempt; the next waits RETRY_SECONDS.
+	 *
+	 * @param string[]|null $problems What the table lacks.
+	 * @return void
+	 */
+	private static function record_failure( $problems ): void {
+		Options::set(
+			self::RETRY_OPTION,
+			array(
+				'after'    => time() + self::RETRY_SECONDS,
+				'problems' => $problems,
+			)
 		);
 	}
 
@@ -428,5 +535,6 @@ final class Schema {
 		$table = $wpdb->base_prefix . self::JOBS_TABLE;
 		$wpdb->query( "DROP TABLE IF EXISTS {$table}" ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- table name from the prefix and a constant; uninstall only.
 		Options::delete( self::OPTION );
+		Options::delete( self::RETRY_OPTION );
 	}
 }

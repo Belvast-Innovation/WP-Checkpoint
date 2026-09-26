@@ -185,6 +185,9 @@ final class JobRepository {
 		if ( 'failed' === $schema['action'] ) {
 			throw new JobsUnavailable( esc_html( Schema::problem_message( $schema['problems'] ?? null ) ) );
 		}
+		if ( 'pending' === $schema['action'] ) {
+			throw new JobsUnavailable( esc_html( Schema::pending_message() ) );
+		}
 		if ( ! Schema::is_compatible() ) {
 			throw new JobsUnavailable( esc_html__( 'The database structure was created by a newer version of WP Checkpoint. Please update the plugin.', 'wp-checkpoint' ) );
 		}

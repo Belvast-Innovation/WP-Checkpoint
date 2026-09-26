@@ -419,7 +419,14 @@ final class JobActions {
 		// A table the migration could not bring up to date (a column missing, or narrower than needed) fails the
 		// job with the reason; columns that could not be read are no evidence of either.
 		$problems = 'failed' === $schema['action'] && is_array( $schema['problems'] ?? null ) ? $schema['problems'] : array();
-		$result   = $this->runner->tick( $id, null === $started_at ? self::started_at() : (float) $started_at, $problems );
+		if ( 'pending' === $schema['action'] ) {
+			// This request may not upgrade (Schema::ensure()), and the job's row lacks what this code needs: the
+			// job waits for the admin, cron or WP-CLI to do it (the follow-up sets a cron event).
+			$job    = $this->repository->find( $id );
+			$result = null === $job ? new TickResult( TickResult::MISSING, -1, null ) : new TickResult( TickResult::BLOCKED, Loopback::FALLBACK_SECONDS, $job, Schema::pending_message() );
+		} else {
+			$result = $this->runner->tick( $id, null === $started_at ? self::started_at() : (float) $started_at, $problems );
+		}
 		if ( TickResult::LOST === $result->status && null !== $result->job && Job::CANCELLED === $result->job->status ) {
 			// The cancel happened while this driver held the lock: the step has stopped now, so clean up here.
 			$this->runner->cleanup( $result->job );
@@ -573,6 +580,9 @@ final class JobActions {
 		$schema = Schema::ensure( true ); // Adds columns lost since the version was recorded.
 		if ( 'failed' === $schema['action'] && is_array( $schema['problems'] ?? null ) ) {
 			throw new JobsUnavailable( esc_html( Schema::problem_message( $schema['problems'] ) ) );
+		}
+		if ( 'pending' === $schema['action'] ) {
+			throw new JobsUnavailable( esc_html( Schema::pending_message() ) );
 		}
 		$job = $this->repository->find( $id );
 		if ( null !== $job && array() !== $job->missing_columns ) {

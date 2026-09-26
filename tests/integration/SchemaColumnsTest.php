@@ -56,6 +56,34 @@ final class SchemaColumnsTest extends JobTestCase {
 		}
 	}
 
+	/**
+	 * The wait after a failed attempt is over.
+	 */
+	private static function ten_minutes_later(): void {
+		$last = Options::get( Schema::RETRY_OPTION, null );
+		if ( ! is_array( $last ) || ! isset( $last['after'] ) ) {
+			throw new \RuntimeException( 'no failed attempt is recorded' );
+		}
+		$last['after'] = time() - 1;
+		Options::set( Schema::RETRY_OPTION, $last );
+	}
+
+	/**
+	 * Count the statements that change the job table's structure (ALTER TABLE, CREATE TABLE).
+	 */
+	private function count_changes( int &$changes ): void {
+		add_filter(
+			'query',
+			static function ( $query ) use ( &$changes ) {
+				if ( 1 === preg_match( '/^\s*(ALTER|CREATE) TABLE \S*wpcheckpoint_jobs\b/i', (string) $query ) ) {
+					++$changes;
+				}
+				return $query;
+			},
+			5 // Before refuse(): the statement as sent.
+		);
+	}
+
 	private static function drop_column( string $column ): void {
 		global $wpdb;
 		$wpdb->query( 'ALTER TABLE ' . Schema::jobs_table() . ' DROP COLUMN ' . $column );
@@ -110,10 +138,13 @@ final class SchemaColumnsTest extends JobTestCase {
 			$wpdb->suppress_errors( $quiet );
 		}
 
-		// The next call tries again; with the privilege back, it adds the column and records the version.
+		// The next attempt, ten minutes later; with the privilege back, it adds the column and records the version.
 		remove_all_filters( 'query' );
+		self::ten_minutes_later();
+		$this->assertNotNull( Options::get( Schema::RETRY_OPTION, null ), 'the control: the failure is recorded' );
 		$this->assertSame( 'migrated', Schema::ensure()['action'] );
 		$this->assertSame( Schema::CURRENT, Schema::stored()['version'] );
+		$this->assertNull( Options::get( Schema::RETRY_OPTION, null ), 'and cleared by the attempt that worked' );
 		$this->assertSame( Check::OK, $this->database_check()->status );
 	}
 
@@ -220,8 +251,10 @@ final class SchemaColumnsTest extends JobTestCase {
 			$this->assertStringContainsString( '(cron_deferrals)', $e->getMessage() );
 		}
 
-		// Once the database lets it: the retry adds the column back and goes through, with the version as it was.
+		// Once the database lets it (and ten minutes later): the retry adds the column back and goes through,
+		// with the version as it was.
 		remove_all_filters( 'query' );
+		self::ten_minutes_later();
 		$this->assertSame( 200, $this->rest( 'POST', 'jobs/' . $id . '/retry' )->get_status() );
 		$this->assertSame( Job::QUEUED, Plugin::instance()->jobs()->find( $id )->status );
 		$this->assertContains( 'cron_deferrals', $wpdb->get_col( 'SHOW COLUMNS FROM ' . Schema::jobs_table() ) );
@@ -304,6 +337,7 @@ final class SchemaColumnsTest extends JobTestCase {
 		$this->assertStringContainsString( 'CREATE privilege', Schema::problem_message( $result['problems'] ) );
 		$this->assertSame( 0, Schema::stored()['version'] );
 		remove_all_filters( 'query' );
+		self::ten_minutes_later();
 		$this->assertSame( 'created', Schema::ensure()['action'] );
 	}
 
@@ -355,5 +389,78 @@ final class SchemaColumnsTest extends JobTestCase {
 		$this->assertSame( Job::FAILED, $job->status );
 		$this->assertSame( Job::FAILURE_FINAL, $job->failure_kind, 'a retry reads the same ledger: no Retry' );
 		$this->assertFalse( $job->retry_useful() );
+	}
+
+	public function test_after_a_failed_upgrade_only_admin_cron_and_cli_try_again_and_not_within_ten_minutes(): void {
+		$this->register( 'plain', array( $this->counting_step( 'p', 5 ) ) );
+		$id = Plugin::instance()->jobs()->create( 'plain' )->id;
+		self::drop_column( 'cron_deferrals' );
+		Options::set( Schema::OPTION, array( 'version' => 6, 'min_compatible' => 1 ) );
+		$changes = 0;
+		$hits    = 0;
+		$this->count_changes( $changes );
+		$this->refuse( '/^ALTER TABLE \S+ ADD COLUMN `?cron_deferrals`? /i', $hits );
+
+		// The control: a request that may upgrade (here detected as cron, as wp-cron.php is) sends the ALTER.
+		Schema::set_upgrade_context( null );
+		add_filter( 'wp_doing_cron', '__return_true' );
+		$this->assertSame( 'failed', Schema::ensure()['action'] );
+		$this->assertGreaterThan( 0, $changes, 'the control: the cron request tried' );
+		remove_filter( 'wp_doing_cron', '__return_true' );
+
+		// A request that is neither admin, cron nor WP-CLI (phpunit detected as such, like a REST request) only reads.
+		$changes = 0;
+		$this->assertSame( 'failed', Schema::ensure()['action'], 'the last attempt\'s problems' );
+		$this->assertSame( array( 'cron_deferrals' ), Schema::ensure( true )['problems'] );
+		$tick = $this->rest( 'POST', 'jobs/' . $id . '/tick' );
+		$this->assertSame( 200, $tick->get_status() );
+		$this->assertSame( 0, $changes, 'no ALTER from a request that may not upgrade' );
+		$this->assertSame( Job::FAILED, Plugin::instance()->jobs()->find( $id )->status, 'the tick failed the job with the reason' );
+
+		// Within the ten minutes, a request that may upgrade does not try either.
+		Schema::set_upgrade_context( true );
+		$this->assertSame( 'failed', Schema::ensure()['action'] );
+		$this->assertSame( 0, $changes, 'no ALTER within the wait' );
+		// After them, it does.
+		self::ten_minutes_later();
+		Schema::ensure();
+		$this->assertGreaterThan( 0, $changes, 'tried again after the wait' );
+		$this->assertLessThanOrEqual( time() + Schema::RETRY_SECONDS, Options::get( Schema::RETRY_OPTION )['after'] );
+		$this->assertGreaterThan( time() + Schema::RETRY_SECONDS - 60, Options::get( Schema::RETRY_OPTION )['after'], 'and waits again' );
+	}
+
+	public function test_a_due_upgrade_holds_jobs_until_a_request_that_may_upgrade_does_it(): void {
+		$id = $this->running_job();
+		// An update of the plugin brought a new version; nothing has upgraded the table yet.
+		self::drop_column( 'cron_deferrals' );
+		Options::set( Schema::OPTION, array( 'version' => 6, 'min_compatible' => 1 ) );
+		$changes = 0;
+		$this->count_changes( $changes );
+
+		Schema::set_upgrade_context( null ); // phpunit: neither admin, cron nor WP-CLI.
+		$this->assertSame( 'pending', Schema::ensure()['action'] );
+		$result = Plugin::instance()->job_actions()->tick( $id, JobActions::NO_TIME_LEFT );
+		$this->assertSame( 0, $changes, 'no ALTER' );
+		$this->assertSame( 'blocked', $result->status );
+		$this->assertStringContainsString( 'has to update its database table first', $result->message );
+		$this->assertSame( Job::RUNNING, Plugin::instance()->jobs()->find( $id )->status, 'waiting, not failed: nothing has tried yet' );
+		try {
+			Plugin::instance()->jobs()->create( 'plain' );
+			$this->fail( 'a job was created before the upgrade' );
+		} catch ( JobsUnavailable $e ) {
+			$this->assertStringContainsString( 'has to update its database table first', $e->getMessage() );
+		}
+
+		// The admin (the plugin's page) upgrades; then the job goes on.
+		set_current_screen( 'dashboard' );
+		try {
+			$this->assertTrue( is_admin() );
+			$this->assertSame( 'migrated', Schema::ensure( true )['action'] );
+		} finally {
+			set_current_screen( 'front' );
+		}
+		$this->assertGreaterThan( 0, $changes );
+		Plugin::instance()->job_actions()->tick( $id, JobActions::NO_TIME_LEFT );
+		$this->assertSame( 2, (int) JobContext::strip_reserved( Plugin::instance()->jobs()->find( $id )->cursor )['n'] );
 	}
 }
