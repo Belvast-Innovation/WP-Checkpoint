@@ -422,10 +422,18 @@ final class Directories {
 			$this->error = __( 'WPCHECKPOINT_STORAGE_DIR belongs to another installation.', 'wp-checkpoint' );
 			return;
 		}
+		$moved = '' !== (string) $this->state['path'] && ! Paths::same_location( $dir, (string) $this->state['path'] );
+		if ( $moved && self::is_valid_token( $this->state['token'] ) && false !== $this->restore_unfinished() ) {
+			// A restore keeps its files in the directory it was started with: another directory here (the constant
+			// set differently for WP-CLI and for the web server) must not become the choice. Nothing is created,
+			// re-tokened or saved, so the directory it was started with is still the choice when it comes back.
+			$this->error = __( 'A restore is in progress in the storage directory it was started with, and WPCHECKPOINT_STORAGE_DIR names another one in this request (for example, it is set differently for WP-CLI and for the web server). Jobs continue only from a request that uses the same directory.', 'wp-checkpoint' );
+			return;
+		}
 		if ( ! $this->prepare( $dir ) ) {
 			return;
 		}
-		if ( ! self::is_valid_token( $this->state['token'] ) || $dir !== $this->state['path'] ) {
+		if ( ! self::is_valid_token( $this->state['token'] ) || $moved ) {
 			$this->state['token'] = bin2hex( random_bytes( 6 ) );
 			$this->save_state();
 		}
@@ -578,7 +586,8 @@ final class Directories {
 
 	/**
 	 * Re-evaluate a provisional (CLI/cron) choice during a proper web request:
-	 * move to the outside candidate while the directory holds no user files.
+	 * move to the outside candidate while the directory holds no user files
+	 * and no job is unfinished.
 	 *
 	 * @return void
 	 */
@@ -587,6 +596,12 @@ final class Directories {
 			return;
 		}
 		if ( ! $this->context['is_web_request'] || '' === $this->context['document_root'] ) {
+			return;
+		}
+		if ( false !== $this->jobs_unfinished() ) {
+			// A job keeps its files here until it ends (a restore above all), and every driver goes on using this
+			// directory: the choice stays provisional and is made once no job is left (also when the jobs table
+			// cannot be read).
 			return;
 		}
 
@@ -606,6 +621,38 @@ final class Directories {
 		Deleter::empty_directory( $current );
 		@rmdir( $current ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_rmdir -- best effort cleanup of the empty provisional directory.
 		$this->adopt( $outside, self::SOURCE_OUTSIDE, false );
+	}
+
+	/**
+	 * Whether a restore job is unfinished: true, false, or null when that cannot be read.
+	 *
+	 * @return bool|null
+	 */
+	private function restore_unfinished() {
+		return $this->unfinished( \WPCheckpoint\Jobs\RestoreJob::ID );
+	}
+
+	/**
+	 * Whether any job is unfinished: true, false, or null when that cannot be read.
+	 *
+	 * @return bool|null
+	 */
+	private function jobs_unfinished() {
+		return $this->unfinished( null );
+	}
+
+	/**
+	 * JobRepository::has_unfinished(), or the answer a test gives in the context (key "unfinished":
+	 * function( ?string $type ): ?bool; internal, for tests only).
+	 *
+	 * @param string|null $type Job type, or null for any.
+	 * @return bool|null
+	 */
+	private function unfinished( $type ) {
+		if ( isset( $this->context['unfinished'] ) && is_callable( $this->context['unfinished'] ) ) {
+			return call_user_func( $this->context['unfinished'], $type );
+		}
+		return \WPCheckpoint\Jobs\JobRepository::has_unfinished( $type );
 	}
 
 	/**

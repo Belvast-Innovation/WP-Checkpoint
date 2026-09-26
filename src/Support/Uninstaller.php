@@ -105,7 +105,7 @@ final class Uninstaller {
 		$affected = $wpdb->query( $wpdb->prepare( "UPDATE {$table} SET status = %s, finished_at = %d, updated_at = %d, lock_token = '', locked_until = 0 WHERE status IN (%s, %s, %s)", Job::CANCELLED, $now, $now, $live[0], $live[1], $live[2] ) );
 		foreach ( is_array( $rows ) ? $rows : array() as $row ) {
 			// Only the current directory's files: another directory is another installation's.
-			if ( '' !== $path && Paths::same( (string) $row['storage_path'], $path, Paths::is_windows() ) ) {
+			if ( '' !== $path && Paths::same_location( (string) $row['storage_path'], $path ) ) {
 				LockFile::remove( $path, (int) $row['id'] );
 			}
 		}

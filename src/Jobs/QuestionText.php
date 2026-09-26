@@ -77,10 +77,11 @@ final class QuestionText {
 	 * @return string
 	 */
 	public static function work_dir( Job $job, Directories $directories ): string {
-		if ( ! Paths::same( $job->storage_path, $directories->base(), Paths::is_windows() ) ) {
+		$base = $directories->base();
+		if ( '' === $base || ! Paths::same_location( $job->storage_path, $base ) ) {
 			return '';
 		}
-		return Residue::work_dir( $job->storage_path, $job->id );
+		return Residue::work_dir( $base, $job->id );
 	}
 
 	/**

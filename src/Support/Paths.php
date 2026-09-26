@@ -101,6 +101,31 @@ final class Paths {
 	}
 
 	/**
+	 * Whether two paths name the same directory or file: the same as
+	 * written, or the same once resolved (realpath(): links, "..", a second
+	 * spelling). A path that cannot be resolved (it does not exist, or
+	 * open_basedir hides it) is compared as written only, so the answer is
+	 * "no" unless the spellings match: callers that refuse on "no" wait
+	 * rather than act on a path they cannot see.
+	 *
+	 * @param string $a First path.
+	 * @param string $b Second path.
+	 * @return bool
+	 */
+	public static function same_location( string $a, string $b ): bool {
+		$windows = self::is_windows();
+		if ( self::same( $a, $b, $windows ) ) {
+			return true;
+		}
+		if ( '' === $a || '' === $b ) {
+			return false;
+		}
+		$ra = @realpath( $a ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a warning would put the path into the error log.
+		$rb = @realpath( $b ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
+		return false !== $ra && false !== $rb && self::same( $ra, $rb, $windows );
+	}
+
+	/**
 	 * Whether $target lies strictly below $base, comparing normalised paths.
 	 *
 	 * Separated from is_inside() so the comparison rules (separator
