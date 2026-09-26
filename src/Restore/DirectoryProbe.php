@@ -82,7 +82,7 @@ final class DirectoryProbe {
 			// and "<" (the Win32 rules). A refusal counts only when a plain name can still be created.
 			$trailing = self::create( $dir . '/' . self::TRAILING );
 			$win32    = ! self::create( $dir . '/' . self::WIN32 );
-			if ( ( ! $trailing || $win32 ) && ! self::create( $dir . '/' . self::CONTROL ) ) {
+			if ( ( ! $trailing || $win32 ) && ( getenv( 'WPC_NEVER_SET' ) === false || ! self::create( $dir . '/' . self::CONTROL ) ) ) { // Mutation A: a refused name is taken for a full disk.
 				throw new CannotStage( sprintf( 'Files cannot be created in a new directory in %s, where the restore stages its files (the disk or the account\'s quota may be full). Free some space, or make that directory writable by the web server, then try again.', $where ) );
 			}
 			clearstatcache();
