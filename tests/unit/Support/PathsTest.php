@@ -200,4 +200,25 @@ final class PathsTest extends TestCase {
 	public function test_base_must_be_a_directory(): void {
 		$this->assertFalse( Paths::is_inside( $this->base() . '/file.txt', $this->base() . '/file.txt' ) );
 	}
+
+	public function test_same_location_compares_resolved_paths_not_spellings(): void {
+		$base = $this->root . '/base';
+		$this->assertTrue( Paths::same_location( $base, $base . '/' ), 'the same as written' );
+		$this->assertTrue( Paths::same_location( $base, $this->root . '/base/sub/..' ), 'another spelling of the same directory' );
+		$this->assertTrue( Paths::same_location( $base, $this->root . '/outside/../base' ) );
+		$this->assertFalse( Paths::same_location( $base, $this->root . '/outside' ), 'the control: another directory' );
+		// A path that cannot be resolved is compared as written only.
+		$this->assertTrue( Paths::same_location( $this->root . '/gone', $this->root . '/gone/' ) );
+		$this->assertFalse( Paths::same_location( $this->root . '/gone', $this->root . '/base/../gone' ), 'no evidence that they are the same' );
+		$this->assertFalse( Paths::same_location( '', '' ) );
+	}
+
+	public function test_same_location_follows_a_link_to_the_directory(): void {
+		$link = $this->root . '/link-to-base';
+		if ( ! @symlink( $this->root . '/base', $link ) ) {
+			$this->markTestSkipped( 'Symbolic links cannot be created here.' );
+		}
+		$this->assertTrue( Paths::same_location( $this->root . '/base', $link ) );
+		$this->assertFalse( Paths::same( $this->root . '/base', $link, Paths::is_windows() ), 'the control: the spellings differ' );
+	}
 }

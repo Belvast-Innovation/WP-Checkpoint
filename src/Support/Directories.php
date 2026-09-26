@@ -578,7 +578,8 @@ final class Directories {
 
 	/**
 	 * Re-evaluate a provisional (CLI/cron) choice during a proper web request:
-	 * move to the outside candidate while the directory holds no user files.
+	 * move to the outside candidate while the directory holds no user files
+	 * and no restore is unfinished.
 	 *
 	 * @return void
 	 */
@@ -587,6 +588,11 @@ final class Directories {
 			return;
 		}
 		if ( ! $this->context['is_web_request'] || '' === $this->context['document_root'] ) {
+			return;
+		}
+		if ( false !== $this->restore_unfinished() ) {
+			// A restore keeps its files here until it ends, and every driver goes on using this directory: the
+			// choice stays provisional and is made after the restore (also when the jobs table cannot be read).
 			return;
 		}
 
@@ -606,6 +612,18 @@ final class Directories {
 		Deleter::empty_directory( $current );
 		@rmdir( $current ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_rmdir -- best effort cleanup of the empty provisional directory.
 		$this->adopt( $outside, self::SOURCE_OUTSIDE, false );
+	}
+
+	/**
+	 * Whether a restore job is unfinished: true, false, or null when that cannot be read.
+	 *
+	 * @return bool|null
+	 */
+	private function restore_unfinished() {
+		if ( isset( $this->context['restore_unfinished'] ) && is_callable( $this->context['restore_unfinished'] ) ) {
+			return call_user_func( $this->context['restore_unfinished'] ); // Tests.
+		}
+		return \WPCheckpoint\Jobs\JobRepository::has_unfinished( \WPCheckpoint\Jobs\RestoreJob::ID );
 	}
 
 	/**

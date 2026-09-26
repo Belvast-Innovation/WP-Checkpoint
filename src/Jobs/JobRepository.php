@@ -378,10 +378,18 @@ final class JobRepository {
 			return self::verdict( false, 'storage_unavailable', $this->directories->last_error(), $retry );
 		}
 		$state = $this->directories->state();
-		if ( (string) $state['token'] !== $job->storage_token ) {
-			$message = ! empty( $state['clone_detected'] )
-				? __( 'The storage directory changed: resolve the clone notice (continue with the original directory or keep the new one) before this job can continue.', 'wp-checkpoint' )
-				: __( 'The storage directory changed; this job cannot continue.', 'wp-checkpoint' );
+		// The job's files are where it was started (its row's storage_path), and no driver resolves them again:
+		// a request that resolves another directory (another token, or the same token at another path) does not
+		// run the job at all.
+		$moved = '' !== $job->storage_path && ! Paths::same_location( $job->storage_path, $base );
+		if ( (string) $state['token'] !== $job->storage_token || $moved ) {
+			if ( ! empty( $state['clone_detected'] ) ) {
+				$message = __( 'The storage directory changed: resolve the clone notice (continue with the original directory or keep the new one) before this job can continue.', 'wp-checkpoint' );
+			} elseif ( RestoreJob::ID === $job->type ) {
+				$message = __( 'This restore keeps its files in the storage directory it was started with, and this request uses another one (for example, WPCHECKPOINT_STORAGE_DIR is set differently for WP-CLI and for the web server). The restore continues only from a request that uses the same directory.', 'wp-checkpoint' );
+			} else {
+				$message = __( 'The storage directory changed; this job cannot continue.', 'wp-checkpoint' );
+			}
 			return self::verdict( false, 'storage_changed', $message, $retry );
 		}
 		return self::verdict( true, '', '', 0 );
@@ -409,6 +417,27 @@ final class JobRepository {
 			array( '%d' )
 		);
 		return self::BACKOFF_SECONDS[ min( $job->blocked_count, count( self::BACKOFF_SECONDS ) - 1 ) ];
+	}
+
+	/**
+	 * Whether a job of $type is queued, running or paused: true, false, or
+	 * null when the jobs table could not be read (no evidence either way).
+	 * No table at all is false: no job can exist without it.
+	 *
+	 * @param string $type Job type.
+	 * @return bool|null
+	 */
+	public static function has_unfinished( string $type ) {
+		global $wpdb;
+		if ( ! Schema::table_exists() ) {
+			return false;
+		}
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin table; read on the rare requests that would move the storage directory.
+		$count = $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM ' . self::table() . ' WHERE type = %s AND status IN (%s, %s, %s)', $type, Job::QUEUED, Job::RUNNING, Job::PAUSED ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- table name from the prefix and a constant.
+		if ( null === $count || ! is_numeric( $count ) ) {
+			return null;
+		}
+		return (int) $count > 0;
 	}
 
 	/**
@@ -1721,7 +1750,7 @@ final class JobRepository {
 	 */
 	public function owns_files_of( Job $job ): bool {
 		$base = $this->directories->base();
-		return '' !== $base && '' !== $job->storage_path && Paths::same( $job->storage_path, $base, Paths::is_windows() );
+		return '' !== $base && '' !== $job->storage_path && Paths::same_location( $job->storage_path, $base );
 	}
 
 	/**

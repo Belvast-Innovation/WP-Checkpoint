@@ -380,7 +380,7 @@ final class JobPresenter {
 		// Files in another directory belong to another installation (a copied database on a shared file
 		// system) or to an abandoned directory: the same rule as the lock file writer and the purge.
 		$base = $this->directories->base();
-		if ( '' === $base || ! Paths::same( $job->storage_path, $base, Paths::is_windows() ) ) {
+		if ( '' === $base || ! Paths::same_location( $job->storage_path, $base ) ) {
 			return '';
 		}
 		// The same gate as the writer and the purge: only a file inside the job's logs/ directory is ever read.
