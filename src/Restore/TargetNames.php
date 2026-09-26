@@ -29,7 +29,9 @@ defined( 'ABSPATH' ) || exit;
  * FAT, SMB shares served by Windows) also refuses the characters
  * < > : " | ? * and the device names CON, PRN, AUX, NUL, COM1-9, LPT1-9
  * (with anything after a first dot; newer Windows allows some of these,
- * refusing them is the safe side); unstorable() finds such a segment.
+ * refusing them is the safe side); unstorable() finds such a segment. PHP
+ * on Windows also refuses to create a path ending in a dot or a space
+ * (the probe's "b." fails there): such a segment is unstorable too.
  */
 final class TargetNames {
 
@@ -69,6 +71,14 @@ final class TargetNames {
 	private $win32;
 
 	/**
+	 * "b." cannot be created: a segment ending in a dot or a space cannot be written here (PHP on Windows refuses
+	 * such a path rather than letting Windows drop the ending).
+	 *
+	 * @var bool
+	 */
+	private $refuse_trailing;
+
+	/**
 	 * Constructor.
 	 *
 	 * @param bool $fold_ascii    ASCII case folds.
@@ -76,27 +86,30 @@ final class TargetNames {
 	 * @param bool $normalize     Unicode forms are one name.
 	 * @param bool $trim_trailing Trailing dots and spaces of a segment are dropped.
 	 * @param bool $win32         Names follow the Win32 rules ("<" refused).
+	 * @param bool $refuse_trailing A segment ending in a dot or a space cannot be written.
 	 */
-	public function __construct( bool $fold_ascii, bool $fold_unicode, bool $normalize, bool $trim_trailing, bool $win32 = false ) {
-		$this->fold_ascii    = $fold_ascii;
-		$this->fold_unicode  = $fold_unicode;
-		$this->normalize     = $normalize;
-		$this->trim_trailing = $trim_trailing;
-		$this->win32         = $win32;
+	public function __construct( bool $fold_ascii, bool $fold_unicode, bool $normalize, bool $trim_trailing, bool $win32 = false, bool $refuse_trailing = false ) {
+		$this->fold_ascii      = $fold_ascii;
+		$this->fold_unicode    = $fold_unicode;
+		$this->normalize       = $normalize;
+		$this->trim_trailing   = $trim_trailing;
+		$this->win32           = $win32;
+		$this->refuse_trailing = $refuse_trailing;
 	}
 
 	/**
 	 * The behaviour as a list of flags (for a cursor).
 	 *
-	 * @return array{fold_ascii: bool, fold_unicode: bool, normalize: bool, trim_trailing: bool, win32: bool}
+	 * @return array{fold_ascii: bool, fold_unicode: bool, normalize: bool, trim_trailing: bool, win32: bool, refuse_trailing: bool}
 	 */
 	public function to_array(): array {
 		return array(
-			'fold_ascii'    => $this->fold_ascii,
-			'fold_unicode'  => $this->fold_unicode,
-			'normalize'     => $this->normalize,
-			'trim_trailing' => $this->trim_trailing,
-			'win32'         => $this->win32,
+			'fold_ascii'      => $this->fold_ascii,
+			'fold_unicode'    => $this->fold_unicode,
+			'normalize'       => $this->normalize,
+			'trim_trailing'   => $this->trim_trailing,
+			'win32'           => $this->win32,
+			'refuse_trailing' => $this->refuse_trailing,
 		);
 	}
 
@@ -107,7 +120,7 @@ final class TargetNames {
 	 * @return TargetNames
 	 */
 	public static function from_array( array $flags ): TargetNames {
-		return new self( ! empty( $flags['fold_ascii'] ), ! empty( $flags['fold_unicode'] ), ! empty( $flags['normalize'] ), ! empty( $flags['trim_trailing'] ), ! empty( $flags['win32'] ) );
+		return new self( ! empty( $flags['fold_ascii'] ), ! empty( $flags['fold_unicode'] ), ! empty( $flags['normalize'] ), ! empty( $flags['trim_trailing'] ), ! empty( $flags['win32'] ), ! empty( $flags['refuse_trailing'] ) );
 	}
 
 	/**
@@ -117,10 +130,13 @@ final class TargetNames {
 	 * @return string|null
 	 */
 	public function unstorable( string $path ) {
-		if ( ! $this->win32 ) {
-			return null;
-		}
 		foreach ( explode( '/', $path ) as $segment ) {
+			if ( $this->refuse_trailing && '' !== $segment && false !== strpos( '. ', substr( $segment, -1 ) ) ) {
+				return $segment;
+			}
+			if ( ! $this->win32 ) {
+				continue;
+			}
 			// Win32 reserves a device name whatever follows its first dot; "¹²³" count as digits there.
 			if ( false !== strpbrk( $segment, '<>:"|?*' ) || 1 === preg_match( '/\A(?:CON|PRN|AUX|NUL|(?:COM|LPT)(?:[1-9]|\xC2[\xB9\xB2\xB3]))(?:\..*)?\z/is', rtrim( $segment, '. ' ) ) ) {
 				return $segment;

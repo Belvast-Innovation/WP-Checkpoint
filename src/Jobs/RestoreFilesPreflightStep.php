@@ -397,7 +397,7 @@ final class RestoreFilesPreflightStep implements Step {
 					}
 					$bad = $names[ $index ]->unstorable( $map['relative'] );
 					if ( null !== $bad ) {
-						throw new CannotStage( sprintf( 'The backup holds %1$s, and the file system of this site cannot store the name %2$s (it does not allow the characters < > : " | ? * in names, nor names like CON, NUL, COM1 or LPT1). Restore onto a server whose file system allows it, or rename it on the original site and make a new backup.', $line['p'], $bad ) );
+						throw new CannotStage( sprintf( 'The backup holds %1$s, and the file system of this site cannot store the name %2$s (a name ending in a dot or a space, the characters < > : " | ? *, or a name like CON, NUL, COM1 or LPT1, depending on the server). Restore onto a server whose file system allows it, or rename it on the original site and make a new backup.', $line['p'], $bad ) );
 					}
 					if ( strlen( $map['staged'] ) > StagingLayout::MAX_PATH_BYTES ) {
 						throw new CannotStage( sprintf( 'The path %1$s of the backup would be %2$d bytes long where the restore stages it, more than the %3$d bytes this server allows in one path. Restore onto a site whose directories are at a shorter path.', $line['p'], strlen( $map['staged'] ), StagingLayout::MAX_PATH_BYTES ) );

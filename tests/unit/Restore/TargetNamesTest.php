@@ -68,4 +68,18 @@ final class TargetNamesTest extends TestCase {
 		$this->assertNull( ( new TargetNames( false, false, false, false, false ) )->unstorable( 'a<b/CON' ), 'another file system stores them' );
 		$this->assertEquals( $win32, TargetNames::from_array( $win32->to_array() ) );
 	}
+
+	public function test_a_file_system_that_refuses_a_trailing_dot_cannot_store_such_a_segment(): void {
+		$refusing = new TargetNames( true, true, false, false, true, true );
+		foreach ( array( 'a.', 'x/b /c', 'dir./f', 'x/..../y' ) as $path ) {
+			$this->assertNotNull( $refusing->unstorable( $path ), $path );
+		}
+		$this->assertSame( 'b ', $refusing->unstorable( 'x/b /c' ), 'the segment is named' );
+		foreach ( array( 'a.b', '.htaccess', 'x/.well-known/y' ) as $path ) {
+			$this->assertNull( $refusing->unstorable( $path ), $path );
+		}
+		$this->assertNull( ( new TargetNames( false, false, false, false, false, false ) )->unstorable( 'a./b ' ), 'the control: a file system that stores them' );
+		$this->assertNull( ( new TargetNames( false, false, false, true, false, false ) )->unstorable( 'a./b ' ), 'one that drops the ending stores them (under another key)' );
+		$this->assertEquals( $refusing, TargetNames::from_array( $refusing->to_array() ) );
+	}
 }

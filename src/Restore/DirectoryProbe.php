@@ -75,28 +75,22 @@ final class DirectoryProbe {
 		}
 		$renamed = false;
 		try {
-			foreach ( array( self::NAME, self::TRAILING ) as $file ) {
-				$handle = @fopen( $dir . '/' . $file, 'xb' );
-				if ( false === $handle ) {
-					throw new CannotStage( sprintf( 'Files cannot be created in a new directory in %s, where the restore stages its files. Make that directory writable by the web server (and by WP-CLI, if the restore runs there), then try again.', $where ) );
-				}
-				fclose( $handle );
+			if ( ! self::create( $dir . '/' . self::NAME ) ) {
+				throw new CannotStage( sprintf( 'Files cannot be created in a new directory in %s, where the restore stages its files. Make that directory writable by the web server (and by WP-CLI, if the restore runs there), then try again.', $where ) );
+			}
+			// Names that may be refused: a trailing dot (PHP on Windows refuses a path ending in a dot or a space)
+			// and "<" (the Win32 rules). A refusal counts only when a plain name can still be created.
+			$trailing = self::create( $dir . '/' . self::TRAILING );
+			$win32    = ! self::create( $dir . '/' . self::WIN32 );
+			if ( ( ! $trailing || $win32 ) && ! self::create( $dir . '/' . self::CONTROL ) ) {
+				throw new CannotStage( sprintf( 'Files cannot be created in a new directory in %s, where the restore stages its files (the disk or the account\'s quota may be full). Free some space, or make that directory writable by the web server, then try again.', $where ) );
 			}
 			clearstatcache();
 			$flags = array();
 			foreach ( self::VARIANTS as $flag => $variant ) {
 				$flags[ $flag ] = file_exists( $dir . '/' . $variant );
 			}
-			$handle = @fopen( $dir . '/' . self::WIN32, 'xb' );
-			$win32  = false === $handle;
-			if ( $win32 ) {
-				$handle = @fopen( $dir . '/' . self::CONTROL, 'xb' );
-				if ( false === $handle ) {
-					throw new CannotStage( sprintf( 'Files cannot be created in a new directory in %s, where the restore stages its files (the disk or the account\'s quota may be full). Free some space, or make that directory writable by the web server, then try again.', $where ) );
-				}
-			}
-			fclose( $handle );
-			$names = new TargetNames( $flags['fold_ascii'], $flags['fold_unicode'], $flags['normalize'], file_exists( $dir . '/' . self::BARE ), $win32 );
+			$names = new TargetNames( $flags['fold_ascii'], $flags['fold_unicode'], $flags['normalize'], $trailing && file_exists( $dir . '/' . self::BARE ), $win32, ! $trailing );
 			$stat  = @stat( $dir );
 			if ( false === $stat ) {
 				throw new CannotStage( sprintf( 'A new directory in %s cannot be examined, so whether it is on the same disk as the directories the restore replaces cannot be told.', $where ) );
@@ -114,6 +108,21 @@ final class DirectoryProbe {
 			'names' => $names,
 			'left'  => self::left_behind( $dir . '-r', $where ),
 		);
+	}
+
+	/**
+	 * Create an empty file that must not exist yet.
+	 *
+	 * @param string $path Path.
+	 * @return bool
+	 */
+	private static function create( string $path ): bool {
+		$handle = @fopen( $path, 'xb' );
+		if ( false === $handle ) {
+			return false;
+		}
+		fclose( $handle );
+		return true;
 	}
 
 	/**

@@ -59,12 +59,14 @@ final class DirectoryProbeTest extends TestCase {
 		$this->assertSame( (int) stat( $this->dir )['dev'], $result['dev'] );
 		$flags = $result['names']->to_array();
 		if ( '\\' === DIRECTORY_SEPARATOR ) {
-			// NTFS: case folds (Unicode too), forms stay apart, trailing dots are dropped.
+			// NTFS through PHP: case folds (Unicode too), forms stay apart, "<" is refused, and PHP refuses a path
+			// ending in a dot (Windows would drop it): such names cannot be written at all.
 			$this->assertTrue( $flags['fold_ascii'] );
 			$this->assertTrue( $flags['fold_unicode'] );
 			$this->assertFalse( $flags['normalize'] );
-			$this->assertTrue( $flags['trim_trailing'] );
+			$this->assertFalse( $flags['trim_trailing'] );
 			$this->assertTrue( $flags['win32'] );
+			$this->assertTrue( $flags['refuse_trailing'] );
 		} elseif ( 'Linux' === PHP_OS_FAMILY ) {
 			$this->assertSame(
 				array(
@@ -73,6 +75,7 @@ final class DirectoryProbeTest extends TestCase {
 					'normalize'     => false,
 					'trim_trailing' => false,
 					'win32'         => false,
+					'refuse_trailing' => false,
 				),
 				$flags,
 				'ext4, tmpfs, overlay: nothing folds'
