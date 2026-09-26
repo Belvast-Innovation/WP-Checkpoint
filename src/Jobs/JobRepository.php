@@ -181,7 +181,10 @@ final class JobRepository {
 
 		// The first write a request makes may be this one (a command run right after an update): the row
 		// needs every column of the current schema. No-op when the schema is current or newer.
-		Schema::ensure();
+		$schema = Schema::ensure( true );
+		if ( 'failed' === $schema['action'] ) {
+			throw new JobsUnavailable( esc_html( Schema::problem_message( $schema['problems'] ?? null ) ) );
+		}
 		if ( ! Schema::is_compatible() ) {
 			throw new JobsUnavailable( esc_html__( 'The database structure was created by a newer version of WP Checkpoint. Please update the plugin.', 'wp-checkpoint' ) );
 		}
@@ -430,6 +433,72 @@ final class JobRepository {
 			)
 		);
 		return 1 === $affected;
+	}
+
+	/**
+	 * Outcomes of fail_for_missing_columns().
+	 */
+	const FAIL_DONE  = 'failed';
+	const FAIL_HELD  = 'held';
+	const FAIL_ERROR = 'error';
+
+	/**
+	 * Fail a job the table cannot hold as this code writes it (columns
+	 * missing, or narrower than needed), in one statement that writes only
+	 * columns of the first schema version (status, error, times, lock) and
+	 * the failure kind when it is usable: the other writes of a failure need
+	 * columns the table may not have. Only a job no live run holds; its lock
+	 * file goes with it, as with any ended job.
+	 *
+	 * @param Job      $job      Job, as read (updated in place).
+	 * @param string   $message  Why.
+	 * @param string[] $unusable The columns missing or too narrow.
+	 * @return string FAIL_DONE when it was failed, FAIL_HELD when a live run holds it (or it ended meanwhile),
+	 *                FAIL_ERROR when the statement itself failed.
+	 */
+	public function fail_for_missing_columns( Job $job, string $message, array $unusable ): string {
+		global $wpdb;
+		$now     = $this->now();
+		$data    = array(
+			'status'       => Job::FAILED,
+			'last_error'   => $this->redactor->redact( $message ),
+			'finished_at'  => $now,
+			'updated_at'   => $now,
+			'lock_token'   => '',
+			'locked_until' => 0,
+		);
+		$formats = array( '%s', '%s', '%d', '%d', '%s', '%d' );
+		if ( ! in_array( 'failure_kind', $unusable, true ) ) {
+			// Temporary: a retry works once the columns are there.
+			$data['failure_kind'] = Job::stamp_failure( Job::FAILURE_TEMPORARY, $now );
+			$formats[]            = '%s';
+		}
+		$sets = array();
+		foreach ( array_keys( $data ) as $i => $column ) {
+			$sets[] = $column . ' = ' . $formats[ $i ];
+		}
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin table; the WHERE keeps a live run's job and an ended job as they are.
+		$affected = $wpdb->query(
+			$wpdb->prepare( // phpcs:ignore WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber -- one value per placeholder: the SET list is built from the same array.
+				'UPDATE ' . self::table() . ' SET ' . implode( ', ', $sets ) . " WHERE id = %d AND status IN (%s, %s, %s) AND (lock_token = '' OR locked_until < %d)", // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- table name from the prefix and a constant; column names from a fixed list.
+				array_merge( array_values( $data ), array( $job->id, Job::QUEUED, Job::RUNNING, Job::PAUSED, $now ) )
+			)
+		);
+		if ( false === $affected ) {
+			return self::FAIL_ERROR;
+		}
+		if ( 1 !== $affected ) {
+			return self::FAIL_HELD;
+		}
+		$this->remove_lock_file( $job );
+		foreach ( $data as $key => $value ) {
+			$job->$key = $value;
+		}
+		// The object answers like a row read back (the same parsing as hydrate()).
+		$stored              = isset( $data['failure_kind'] ) ? (string) $data['failure_kind'] : '';
+		$job->failure_kind   = Job::read_failure_kind( $stored, $now );
+		$job->failure_reason = Job::read_failure_reason( $stored, $now );
+		return self::FAIL_DONE;
 	}
 
 	/**
@@ -1666,7 +1735,8 @@ final class JobRepository {
 	 * @return Job
 	 */
 	private static function hydrate( array $row ): Job {
-		$job = new Job();
+		$job                  = new Job();
+		$job->missing_columns = array_values( array_diff( array_keys( Schema::COLUMNS ), array_keys( $row ) ) );
 		foreach ( $row as $key => $value ) {
 			if ( 'cursor_json' === $key || 'options_json' === $key || 'questions_json' === $key ) {
 				$decoded          = is_string( $value ) ? json_decode( $value, true ) : null;

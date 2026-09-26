@@ -8,6 +8,7 @@
 namespace WPCheckpoint\Restore;
 
 use WPCheckpoint\Database\SqlWriter;
+use WPCheckpoint\Jobs\TransientFailure;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -62,6 +63,22 @@ defined( 'ABSPATH' ) || exit;
 final class Ledger {
 
 	/**
+	 * The ledger's columns: name => definition. The table is created from this list, and checked against it.
+	 */
+	const COLUMNS = array(
+		'n'                => 'INT UNSIGNED NOT NULL PRIMARY KEY',
+		'chunk'            => 'INT UNSIGNED NOT NULL',
+		'pos'              => 'BIGINT UNSIGNED NOT NULL',
+		'row_count'        => 'BIGINT UNSIGNED NOT NULL',
+		'data_offset'      => 'BIGINT UNSIGNED NOT NULL',
+		'transactional'    => 'TINYINT NOT NULL',
+		'restarts'         => 'INT UNSIGNED NOT NULL DEFAULT 0',
+		'restarting'       => 'TINYINT NOT NULL DEFAULT 0',
+		'holder'           => "VARCHAR(64) NOT NULL DEFAULT ''",
+		'constraint_names' => 'MEDIUMTEXT NULL',
+	);
+
+	/**
 	 * Connection.
 	 *
 	 * @var ImportSession
@@ -83,17 +100,38 @@ final class Ledger {
 	private $token;
 
 	/**
-	 * Constructor: creates the table when it is not there.
+	 * Constructor: creates the table when it is not there, and checks that
+	 * one that was there has every column of COLUMNS (CREATE TABLE IF NOT
+	 * EXISTS leaves a table of an older version as it is).
 	 *
 	 * @param ImportSession $db    Connection.
 	 * @param string        $name  Table name (TempTables::ledger()).
 	 * @param string        $token This run's lease token.
+	 * @throws LedgerOutdated When the table lacks columns: the restore was started by an older version.
+	 * @throws TransientFailure When its columns could not be read.
 	 */
 	public function __construct( ImportSession $db, string $name, string $token ) {
 		$this->db    = $db;
 		$this->name  = $name;
 		$this->token = $token;
-		$db->run( 'CREATE TABLE IF NOT EXISTS ' . SqlWriter::identifier( $name ) . " (n INT UNSIGNED NOT NULL PRIMARY KEY, chunk INT UNSIGNED NOT NULL, pos BIGINT UNSIGNED NOT NULL, row_count BIGINT UNSIGNED NOT NULL, data_offset BIGINT UNSIGNED NOT NULL, transactional TINYINT NOT NULL, restarts INT UNSIGNED NOT NULL DEFAULT 0, restarting TINYINT NOT NULL DEFAULT 0, holder VARCHAR(64) NOT NULL DEFAULT '', constraint_names MEDIUMTEXT NULL) ENGINE=InnoDB" );
+		$columns     = array();
+		foreach ( self::COLUMNS as $column => $definition ) {
+			$columns[] = $column . ' ' . $definition;
+		}
+		$db->run( 'CREATE TABLE IF NOT EXISTS ' . SqlWriter::identifier( $name ) . ' (' . implode( ', ', $columns ) . ') ENGINE=InnoDB' );
+		$have = array();
+		foreach ( $db->rows( 'SHOW COLUMNS FROM ' . SqlWriter::identifier( $name ) ) as $row ) {
+			$have[] = (string) $row[0];
+		}
+		if ( array() === $have ) {
+			// No answer is no evidence that anything is missing.
+			throw new TransientFailure( 'The columns of the restore ledger could not be read.' );
+		}
+		$missing = array_values( array_diff( array_keys( self::COLUMNS ), $have ) );
+		if ( array() !== $missing ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- column names from a fixed list.
+			throw new LedgerOutdated( sprintf( 'This restore was started by an older version of WP Checkpoint: its progress record lacks columns this version needs (%s). Start the restore again.', implode( ', ', $missing ) ) );
+		}
 	}
 
 	/**

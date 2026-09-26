@@ -132,7 +132,7 @@ final class Page {
 	 */
 	public function render(): void {
 		Plugin::instance()->directories()->base();
-		\WPCheckpoint\Support\Schema::ensure();
+		\WPCheckpoint\Support\Schema::ensure( true ); // Also adds columns lost since the version was recorded.
 		Plugin::instance()->jobs()->maintenance();
 		$tabs   = $this->tabs();
 		$active = $tabs->resolve( $this->requested_tab() );

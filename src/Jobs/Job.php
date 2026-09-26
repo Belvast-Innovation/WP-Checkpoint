@@ -308,6 +308,16 @@ final class Job {
 	public $failure_reason = '';
 
 	/**
+	 * Columns of Schema::COLUMNS that the row read from the table did not
+	 * have (the table was not migrated, or a column was removed); not a
+	 * column itself. The Runner fails such a job instead of reading the
+	 * defaults of its properties as values.
+	 *
+	 * @var string[]
+	 */
+	public $missing_columns = array();
+
+	/**
 	 * When a failed job's work files were reclaimed after their retention
 	 * period (0: still there, or never any). A failed job with this set
 	 * cannot be retried: the position in its cursor points at files that

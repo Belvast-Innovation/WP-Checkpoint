@@ -312,6 +312,8 @@ final class JobCommand {
 	private function retry_body( array $args ): void {
 		try {
 			$job = $this->actions->retry( (int) $args[0] );
+		} catch ( JobsUnavailable $e ) {
+			WP_CLI::error( $this->presenter->clean( $e->getMessage() ) );
 		} catch ( InvalidTransition $e ) {
 			$current = $this->actions->find( (int) $args[0] );
 			if ( null !== $current && Job::FAILED === $current->status && ! $current->can_retry() ) {
@@ -340,6 +342,8 @@ final class JobCommand {
 		}
 		try {
 			$job = $this->actions->answer( (int) $args[0], $answers );
+		} catch ( JobsUnavailable $e ) {
+			WP_CLI::error( $this->presenter->clean( $e->getMessage() ) );
 		} catch ( InvalidTransition $e ) {
 			WP_CLI::error( 'This job is not waiting for an answer.' );
 		} catch ( \InvalidArgumentException $e ) {

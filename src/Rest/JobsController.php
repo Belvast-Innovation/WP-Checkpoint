@@ -271,6 +271,8 @@ final class JobsController extends Controller {
 			} catch ( StaleJob $e ) {
 				$job = $this->actions->retry( $id );
 			}
+		} catch ( JobsUnavailable $e ) {
+			return $this->unavailable( $e );
 		} catch ( InvalidTransition $e ) {
 			$current = $this->actions->find( $id );
 			if ( null !== $current && Job::FAILED === $current->status && ! $current->can_retry() ) {
@@ -326,6 +328,8 @@ final class JobsController extends Controller {
 			$job = $this->actions->answer( (int) $request->get_param( 'id' ), is_array( $answers ) ? $answers : array() );
 		} catch ( \InvalidArgumentException $e ) {
 			return new WP_Error( 'wpcheckpoint_invalid_answer', __( 'These answers do not fit the open questions; reload and answer again.', 'wp-checkpoint' ), array( 'status' => 400 ) );
+		} catch ( JobsUnavailable $e ) {
+			return $this->unavailable( $e );
 		} catch ( InvalidTransition $e ) {
 			return $this->conflict( __( 'This job is not waiting for an answer.', 'wp-checkpoint' ) );
 		} catch ( StaleJob $e ) {

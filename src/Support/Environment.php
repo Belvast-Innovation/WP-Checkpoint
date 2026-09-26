@@ -650,11 +650,12 @@ final class Environment {
 	 * @return Check[]
 	 */
 	private function database_checks( array $db ): array {
-		$info   = Thresholds::database( (string) $db['server_info'] );
-		$size   = isset( $db['size'] ) ? $db['size'] : null;
-		$schema = Schema::stored();
-		$exists = Schema::table_exists();
-		$counts = array();
+		$info     = Thresholds::database( (string) $db['server_info'] );
+		$size     = isset( $db['size'] ) ? $db['size'] : null;
+		$schema   = Schema::stored();
+		$exists   = Schema::table_exists();
+		$problems = $exists ? Schema::column_problems() : null; // Null (not read) is no evidence of a problem.
+		$counts   = array();
 		if ( $exists ) {
 			// Only with the table there: $wpdb does not throw on a missing table, it writes the error to the log.
 			try {
@@ -667,6 +668,8 @@ final class Environment {
 			$jobs = new Check( 'database.jobs', self::GROUP_DATABASE, __( 'Job table', 'wp-checkpoint' ), __( 'missing', 'wp-checkpoint' ), Check::ERROR, __( 'The table will be created when the plugin page is opened; if this persists, the database user lacks CREATE TABLE.', 'wp-checkpoint' ), __( 'No job can run without it.', 'wp-checkpoint' ) );
 		} elseif ( ! Schema::is_compatible() ) {
 			$jobs = new Check( 'database.jobs', self::GROUP_DATABASE, __( 'Job table', 'wp-checkpoint' ), sprintf( 'schema v%d (requires plugin schema %d)', $schema['version'], $schema['min_compatible'] ), Check::ERROR, __( 'The database structure was created by a newer version of WP Checkpoint and this version cannot use it. Please update the plugin.', 'wp-checkpoint' ), __( 'Jobs cannot be created or continued.', 'wp-checkpoint' ) );
+		} elseif ( null !== $problems && array() !== $problems ) {
+			$jobs = new Check( 'database.jobs', self::GROUP_DATABASE, __( 'Job table', 'wp-checkpoint' ), sprintf( 'schema v%d, columns missing or too narrow', $schema['version'] ), Check::ERROR, Schema::problem_message( $problems ), __( 'Jobs cannot be created or continued.', 'wp-checkpoint' ) );
 		} else {
 			$summary = array();
 			foreach ( $counts as $status => $n ) {

@@ -413,10 +413,13 @@ final class JobActions {
 			// (a wait's later time stays); the result adjusts or clears it afterwards.
 			Loopback::schedule( $id, Loopback::FALLBACK_SECONDS, Loopback::KEEP );
 		}
-		Schema::ensure();
+		$schema = Schema::ensure();
 		$this->repository->maintenance();
 		$this->sweep_events();
-		$result = $this->runner->tick( $id, null === $started_at ? self::started_at() : (float) $started_at );
+		// A table the migration could not bring up to date (a column missing, or narrower than needed) fails the
+		// job with the reason; columns that could not be read are no evidence of either.
+		$problems = 'failed' === $schema['action'] && is_array( $schema['problems'] ?? null ) ? $schema['problems'] : array();
+		$result   = $this->runner->tick( $id, null === $started_at ? self::started_at() : (float) $started_at, $problems );
 		if ( TickResult::LOST === $result->status && null !== $result->job && Job::CANCELLED === $result->job->status ) {
 			// The cancel happened while this driver held the lock: the step has stopped now, so clean up here.
 			$this->runner->cleanup( $result->job );
@@ -546,9 +549,10 @@ final class JobActions {
 	 * @throws InvalidTransition When the job is not waiting for an answer.
 	 * @throws \InvalidArgumentException When an answer carries a secret.
 	 * @throws StaleJob When the job changed meanwhile.
+	 * @throws JobsUnavailable When the job table lacks columns the answer writes.
 	 */
 	public function answer( int $id, array $answers ) {
-		$job = $this->repository->find( $id );
+		$job = $this->usable( $id );
 		if ( null === $job ) {
 			return null;
 		}
@@ -558,15 +562,36 @@ final class JobActions {
 	}
 
 	/**
+	 * A job to change from outside a tick (answer, retry), after the schema had its chance to be brought up to
+	 * date; refused while its row lacks columns those writes need.
+	 *
+	 * @param int $id Job id.
+	 * @return Job|null Null when the job does not exist.
+	 * @throws JobsUnavailable When the row lacks columns.
+	 */
+	private function usable( int $id ) {
+		$schema = Schema::ensure( true ); // Adds columns lost since the version was recorded.
+		if ( 'failed' === $schema['action'] && is_array( $schema['problems'] ?? null ) ) {
+			throw new JobsUnavailable( esc_html( Schema::problem_message( $schema['problems'] ) ) );
+		}
+		$job = $this->repository->find( $id );
+		if ( null !== $job && array() !== $job->missing_columns ) {
+			throw new JobsUnavailable( esc_html( Schema::problem_message( $job->missing_columns ) ) );
+		}
+		return $job;
+	}
+
+	/**
 	 * Queue a failed job again; the cursor is kept.
 	 *
 	 * @param int $id Job id.
 	 * @return Job|null Null when the job does not exist.
 	 * @throws InvalidTransition When the job is not failed.
 	 * @throws StaleJob When the job changed meanwhile.
+	 * @throws JobsUnavailable When the job table lacks columns the retry writes.
 	 */
 	public function retry( int $id ) {
-		$job = $this->repository->find( $id );
+		$job = $this->usable( $id );
 		if ( null === $job ) {
 			return null;
 		}
