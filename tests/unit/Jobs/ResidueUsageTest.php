@@ -44,6 +44,10 @@ final class ResidueUsageTest extends TestCase {
 			"'verify-'"  => 'a verification directory name',
 			"'.partial'" => 'a packer partial file suffix',
 			"'.cdr'"     => 'a packer record file suffix',
+			"'wp-checkpoint-stage-" => 'a staging root name',
+			"'wp-checkpoint-probe-" => 'a probe name',
+			'STAGE_PREFIX' => 'a staging root name',
+			'PROBE_PREFIX' => 'a probe name',
 		);
 		foreach ( $this->source_files() as $relative => $path ) {
 			$source = (string) file_get_contents( $path );
@@ -69,9 +73,12 @@ final class ResidueUsageTest extends TestCase {
 		foreach ( Residue::SOURCES as $relative ) {
 			$this->assertArrayHasKey( $relative, $files, "Residue::SOURCES names a file that does not exist: {$relative}" );
 		}
-		$this->assertSame( array( Residue::WORK_DIR, Residue::TEMP_TABLE, Residue::VERIFY_DIR, Residue::STRAY ), Residue::KINDS );
+		$this->assertSame( array( Residue::WORK_DIR, Residue::TEMP_TABLE, Residue::VERIFY_DIR, Residue::STRAY, Residue::STAGE_DIR, Residue::PROBE ), Residue::KINDS );
 		$this->assertArrayHasKey( 'src/Jobs/JobContext.php', $files );
 		$this->assertStringContainsString( 'Residue::work_dir(', (string) file_get_contents( $files['src/Jobs/JobContext.php'] ), 'the work path comes from the catalogue' );
 		$this->assertStringContainsString( 'Residue::new_verify_dir(', (string) file_get_contents( $files['src/Cli/VerifyCommand.php'] ) );
+		// The control for the newer needles: the file that builds those names is found by them. (AtomicFile writes only
+		// names StagingLayout::parse() knows, temporary ones included: checked when it writes, AtomicFileTest.)
+		$this->assertStringContainsString( 'STAGE_PREFIX', (string) file_get_contents( $files['src/Restore/StagingLayout.php'] ) );
 	}
 }

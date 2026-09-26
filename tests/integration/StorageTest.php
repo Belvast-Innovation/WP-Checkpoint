@@ -165,6 +165,10 @@ final class StorageTest extends WP_UnitTestCase {
 	public function test_clone_with_same_options_never_writes_into_the_original_directory(): void {
 		$original = new Directories( $this->cli_context( array( 'abspath' => '/srv/original/' ) ) );
 		$old      = $original->base();
+		$copied                = Directories::load_state();
+		$copied['past_tokens'] = array( 'aaaaaaaaaaaa' ); // The original's history, copied with the options.
+		Options::set( Directories::OPTION, $copied );
+		$this->assertContains( 'aaaaaaaaaaaa', Directories::own_tokens(), 'the control: the original\'s own' );
 		file_put_contents( $old . '/backups/precious.wpcheckpoint.zip', 'keep' );
 		$snapshot = $this->snapshot( $old );
 
@@ -179,6 +183,11 @@ final class StorageTest extends WP_UnitTestCase {
 		$this->assertTrue( $state['clone_detected'] );
 		$this->assertSame( $old, $state['previous_path'] );
 		$this->assertNotSame( basename( $old ), basename( $new ), 'a new token was chosen' );
+		$this->assertSame( array(), $state['past_tokens'], 'the original\'s history is dropped' );
+		$this->assertSame( array(), Directories::own_tokens(), 'nothing is claimed while the clone is unresolved: no staging is reaped here' );
+		$clone->acknowledge_clone();
+		$this->assertSame( array( substr( basename( $new ), strlen( Directories::DIR_PREFIX ) ) ), Directories::own_tokens(), 'once resolved: the clone\'s new token only' );
+		$state = $clone->state();
 
 		// Uninstall on the clone must refuse to delete the original.
 		update_option( Uninstaller::OPTION_DELETE_DATA, true );
@@ -248,6 +257,7 @@ final class StorageTest extends WP_UnitTestCase {
 		$this->assertSame( $other, $moved->base(), $moved->last_error() );
 		$this->assertNotSame( $token, $moved->state()['token'] );
 		$this->assertTrue( Directories::is_valid_token( $moved->state()['token'] ) );
+		$this->assertSame( array( $moved->state()['token'], $token ), Directories::own_tokens(), 'the earlier token is still this installation\'s: it may name staging next to the site' );
 		$this->assertSame( $moved->state()['install_id'], $dirs->state()['install_id'], 'install_id is the installation, the token is the directory choice' );
 	}
 

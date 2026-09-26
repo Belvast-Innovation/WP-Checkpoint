@@ -7,10 +7,13 @@
 
 namespace WPCheckpoint\Jobs;
 
+use WPCheckpoint\Restore\StagingLayout;
+use WPCheckpoint\Support\Directories;
+
 /**
  * Every kind of temporary thing the plugin creates on disk is listed in
  * KINDS with the rule that decides when it is an orphan, and the reaper
- * and the purge enumerate through scan() only. A test (ResidueUsageTest)
+ * and the purge enumerate through scan() and scan_site() only. A test (ResidueUsageTest)
  * refuses any source file that builds a tmp/ path or a temporary table
  * name outside the files named in SOURCES, so a new kind of leftover
  * cannot appear without being registered here.
@@ -36,6 +39,24 @@ namespace WPCheckpoint\Jobs;
  *   the usage test and lands on a registered rule. Orphan after
  *   STRAY_TTL: without an owner, deleting early would leave nothing to
  *   investigate, and they take little space.
+ * - stage_dir: a restore's staging root, next to the site's directories
+ *   rather than under tmp/ (StagingLayout: in the parent of a group's
+ *   directory, so the swap is a rename there). Same rule as work_dir.
+ * - probe: a directory or file the restore's preflight creates in a site
+ *   directory to see what it can do there, and removes in the same unit
+ *   (StagingLayout::probe_name()); left only by a process that died in
+ *   between. An orphan as soon as no live run holds its job (a probe in
+ *   mu-plugins would otherwise stay loaded on every request for days):
+ *   the work_dir rule, or a job without a live lease.
+ *
+ * Only entries whose name carries one of this installation's storage
+ * tokens are ever listed (scan_site(), Directories::own_tokens()); another
+ * installation's, on a copied site sharing the directories, are never
+ * touched. So nothing is listed while a clone is unresolved, and an
+ * entry under a token no longer kept (more than Directories::PAST_TOKENS changes, or
+ * dropped when a clone was detected) is never reclaimed: the safe
+ * direction. Uninstall removes them whatever the data setting (they are
+ * never the user's data), when the stored state is this installation's.
  */
 final class Residue {
 
@@ -43,8 +64,10 @@ final class Residue {
 	const TEMP_TABLE = 'temp_table';
 	const VERIFY_DIR = 'verify_dir';
 	const STRAY      = 'stray';
+	const STAGE_DIR  = 'stage_dir';
+	const PROBE      = 'probe';
 
-	const KINDS = array( self::WORK_DIR, self::TEMP_TABLE, self::VERIFY_DIR, self::STRAY );
+	const KINDS = array( self::WORK_DIR, self::TEMP_TABLE, self::VERIFY_DIR, self::STRAY, self::STAGE_DIR, self::PROBE );
 
 	const TMP            = 'tmp';
 	const WORK_PREFIX    = 'job-';
@@ -62,6 +85,8 @@ final class Residue {
 		'src/Jobs/TempTables.php',
 		'src/Support/Directories.php',
 		'src/Support/StorageReclaim.php',
+		'src/Restore/StagingLayout.php',
+		'src/Support/AtomicFile.php',
 	);
 
 	/**
@@ -154,6 +179,65 @@ final class Residue {
 				return array( $a['kind'], $a['mtime'] ) <=> array( $b['kind'], $b['mtime'] );
 			}
 		);
+		return $out;
+	}
+
+	/**
+	 * The site directories where a restore stages and probes (StagingLayout): the parent of each group's live
+	 * directory, the content directory itself (other-content's entries), and the mu-plugins directory (the
+	 * loader probe).
+	 *
+	 * @param array<string, string> $groups Group => live directory, as ScanRoots::site_directories() gives them.
+	 * @return string[]
+	 */
+	public static function site_dirs( array $groups ): array {
+		$dirs = array();
+		foreach ( $groups as $group => $dir ) {
+			$dir = rtrim( str_replace( '\\', '/', (string) $dir ), '/' );
+			if ( '' === $dir ) {
+				continue;
+			}
+			$dirs[ StagingLayout::OTHER === $group ? $dir : dirname( $dir ) ] = true;
+			if ( 'mu-plugins' === $group ) {
+				$dirs[ $dir ] = true;
+			}
+		}
+		return array_keys( $dirs );
+	}
+
+	/**
+	 * The staging roots and probes this installation left in the site directories: entries whose name
+	 * (StagingLayout::parse()) carries one of $tokens (Directories::own_tokens(), or one job's). Another
+	 * installation's (a copied site sharing the directories) are never listed.
+	 *
+	 * @param string[] $dirs   Site directories (site_dirs()).
+	 * @param string[] $tokens Storage tokens of this installation.
+	 * @return array<int, array{kind: string, path: string, id: int, mtime: int, parent: string, token: string}>
+	 */
+	public static function scan_site( array $dirs, array $tokens ): array {
+		$out    = array();
+		$tokens = array_values( array_filter( $tokens, array( Directories::class, 'is_valid_token' ) ) );
+		if ( array() === $tokens ) {
+			return $out;
+		}
+		foreach ( array_unique( $dirs ) as $dir ) {
+			$entries = @scandir( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- an unreadable directory is simply nothing to reap.
+			foreach ( is_array( $entries ) ? $entries : array() as $name ) {
+				$parsed = StagingLayout::parse( (string) $name );
+				if ( null === $parsed || ! in_array( $parsed['token'], $tokens, true ) ) {
+					continue;
+				}
+				$path = $dir . DIRECTORY_SEPARATOR . $name;
+				$stat = @lstat( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- gone meanwhile: skipped.
+				if ( false === $stat ) {
+					continue;
+				}
+				$entry           = self::entry( 'stage' === $parsed['kind'] ? self::STAGE_DIR : self::PROBE, $path, $parsed['job_id'], (int) $stat['mtime'] );
+				$entry['parent'] = $dir;
+				$entry['token']  = $parsed['token'];
+				$out[]           = $entry;
+			}
+		}
 		return $out;
 	}
 

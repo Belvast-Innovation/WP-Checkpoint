@@ -23,6 +23,11 @@ final class Directories {
 	const OPTION     = 'wpcheckpoint_storage';
 	const DIR_PREFIX = 'wp-checkpoint-';
 
+	/**
+	 * Past storage tokens kept (own_tokens()).
+	 */
+	const PAST_TOKENS = 10;
+
 	const SOURCE_OUTSIDE = 'outside';
 	const SOURCE_CONTENT = 'content';
 	const SOURCE_CUSTOM  = 'custom';
@@ -112,6 +117,7 @@ final class Directories {
 				'previous_abspath'    => '',
 				'trusted_deploy_root' => '',
 				'auto_reclaimed'      => array(),
+				'past_tokens'         => array(),
 			),
 			is_array( $stored ) ? $stored : array()
 		);
@@ -349,6 +355,7 @@ final class Directories {
 					return;
 				}
 				$this->state['token']        = '';
+				$this->state['past_tokens']  = array(); // The original installation's (own_tokens()).
 				$this->state['verification'] = array();
 			} elseif ( $this->restore_keeps( $existing ) && ! Paths::positively_gone( $existing ) ) {
 				// Not reachable from this request (open_basedir, permissions), yet not shown to be gone, and a
@@ -423,6 +430,7 @@ final class Directories {
 		if ( is_file( $marker ) && ! $this->owns( $dir ) ) {
 			$this->state['clone_detected'] = true;
 			$this->state['previous_path']  = $dir;
+			$this->state['past_tokens']    = array(); // The original installation's (own_tokens()).
 			$this->save_state();
 			$this->error = __( 'WPCHECKPOINT_STORAGE_DIR belongs to another installation.', 'wp-checkpoint' );
 			return;
@@ -744,6 +752,33 @@ final class Directories {
 	 * @return void
 	 */
 	private function save_state(): void {
+		// A token this installation used before (its custom directory moved, a restore's token taken back) still
+		// names its staging roots and probes next to the site (Residue::scan_site()): it is kept, a few of them.
+		// Not after a clone was detected: the previous token is then the original installation's.
+		$saved = self::load_state()['token'];
+		if ( self::is_valid_token( $saved ) && $saved !== $this->state['token'] && empty( $this->state['clone_detected'] ) ) {
+			$past = array_values( array_diff( (array) $this->state['past_tokens'], array( $saved, (string) $this->state['token'] ) ) );
+			array_unshift( $past, $saved );
+			$this->state['past_tokens'] = array_slice( $past, 0, self::PAST_TOKENS );
+		}
 		Options::set( self::OPTION, $this->state );
+	}
+
+	/**
+	 * This installation's storage tokens, the current one first: the ones its staging roots and probes may carry.
+	 * None while a clone is detected: the tokens in the copied state may be the original installation's (a custom
+	 * directory keeps the original's current token while refusing it), so nothing is claimed until the notice is
+	 * resolved; the earlier ones are dropped when the clone is detected.
+	 *
+	 * @param array<string, mixed>|null $state Stored state (load_state()), or null to load it.
+	 * @return string[]
+	 */
+	public static function own_tokens( $state = null ): array {
+		$state = is_array( $state ) ? $state : self::load_state();
+		if ( ! empty( $state['clone_detected'] ) ) {
+			return array();
+		}
+		$tokens = array_merge( array( (string) $state['token'] ), (array) $state['past_tokens'] );
+		return array_values( array_unique( array_filter( array_map( 'strval', $tokens ), array( __CLASS__, 'is_valid_token' ) ) ) );
 	}
 }
