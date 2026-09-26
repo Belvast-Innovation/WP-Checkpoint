@@ -250,6 +250,7 @@ final class PathsTest extends TestCase {
 		$this->assertFalse( Paths::positively_gone( $this->root . '/base/nothing/../sub' ), 'a ".." path is there once resolved: the lexical climb is no evidence' );
 		$this->assertFalse( Paths::positively_gone( $this->root . '/base/nothing/../gone' ), 'nor for a path that is not there either' );
 		$this->assertFalse( Paths::positively_gone( $this->root . '/base/./nothing' ) );
+		$this->assertFalse( Paths::positively_gone( $this->root . "/base/nothing\0x" ), 'a NUL byte: no answer from the file system' );
 		// Ancestors that could not be listed, up to a root that is there: no evidence.
 		$listings = array(
 			'/a/b' => null,

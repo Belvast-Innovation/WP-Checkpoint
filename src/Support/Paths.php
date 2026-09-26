@@ -130,8 +130,8 @@ final class Paths {
 	 * finds nothing under that name (lstat(), which matches case and
 	 * Unicode forms the way the file system does), and the nearest ancestor
 	 * that exists can be listed and has no entry for the next segment down,
-	 * in a path without "." or ".." segments (the climb is lexical),
-	 * not even one that differs only in case. Only ancestors that do not
+	 * not even one that differs only in case. A path with "." or ".."
+	 * segments is never gone (the climb is lexical), nor one with a NUL byte. Only ancestors that do not
 	 * exist are climbed past: one that exists but cannot be listed
 	 * (permissions, open_basedir) is no evidence, and neither is reaching
 	 * the root of a network share (\\server\share, or //server/share) or
@@ -150,7 +150,7 @@ final class Paths {
 		$absolute = '' !== $path && ( '/' === $path[0] || $drive );
 		// The climb is lexical: through a "." or ".." segment it would list a directory the path does not lie in.
 		$dots = 1 === preg_match( '#(^|/)\.{1,2}(/|$)#', $path );
-		if ( ! $absolute || $dots || false !== @lstat( $path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a warning would put the path into the error log.
+		if ( ! $absolute || $dots || false !== strpos( $path, "\0" ) || false !== @lstat( $path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a warning would put the path into the error log.
 			return false;
 		}
 		$child  = $path;

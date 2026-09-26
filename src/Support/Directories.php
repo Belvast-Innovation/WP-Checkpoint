@@ -350,7 +350,7 @@ final class Directories {
 				}
 				$this->state['token']        = '';
 				$this->state['verification'] = array();
-			} elseif ( ! Paths::positively_gone( $existing ) && $this->restore_keeps( $existing ) ) {
+			} elseif ( $this->restore_keeps( $existing ) && ! Paths::positively_gone( $existing ) ) {
 				// Not reachable from this request (open_basedir, permissions), yet not shown to be gone, and a
 				// restore keeps its files there (or that cannot be read): no other directory is chosen meanwhile.
 				$this->error = __( 'The storage directory cannot be reached from this request, and a restore may be keeping its files there, so no other directory is chosen. Jobs continue from a request that can reach it.', 'wp-checkpoint' );
@@ -679,9 +679,11 @@ final class Directories {
 			return true;
 		}
 		foreach ( $restores as $restore ) {
-			// The same location, or a restore whose directory this request cannot resolve either: that could be
-			// $dir spelled another way, and nothing shows it is not.
-			if ( Paths::same_location( $restore['path'], $dir ) || ( false === @realpath( $restore['path'] ) && ! Paths::positively_gone( $restore['path'] ) ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a warning would put the path into the error log.
+			// The same location, or a restore whose directory this request cannot resolve either (or that names
+			// none, or a relative one): that could be $dir spelled another way, and nothing shows it is not.
+			$path     = $restore['path'];
+			$relative = '' === $path || ( '/' !== Paths::normalize( $path )[0] && 1 !== preg_match( '#^[A-Za-z]:/#', Paths::normalize( $path ) ) );
+			if ( $relative || Paths::same_location( $path, $dir ) || ( false === @realpath( $path ) && ! Paths::positively_gone( $path ) ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a warning would put the path into the error log.
 				return true;
 			}
 		}

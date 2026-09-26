@@ -281,6 +281,11 @@ final class RestoreStorageTest extends JobTestCase {
 			$remember( $stored );
 			self::set( $id, array( 'storage_path' => $stored ) );
 
+			// Nor when the restore names no directory at all (an empty row): nothing shows it is another one.
+			self::set( $id, array( 'storage_path' => '' ) );
+			$this->assertSame( '', ( new Directories() )->base(), 'empty: held' );
+			self::set( $id, array( 'storage_path' => $stored ) );
+
 			// Nor is it when the restores cannot be read.
 			$this->assertSame( '', ( new Directories( array( 'restores' => '__return_null' ) ) )->base(), 'unknown: held' );
 
