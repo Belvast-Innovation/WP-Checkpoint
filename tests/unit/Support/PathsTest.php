@@ -244,4 +244,31 @@ final class PathsTest extends TestCase {
 		touch( $this->root . '/base/a' );
 		$this->assertFalse( Paths::positively_gone( $this->root . '/base/a', $listings ), 'a listing kept from before never makes a path that is there gone' );
 	}
+
+	public function test_positively_gone_climbs_only_through_what_is_not_there(): void {
+		$this->assertTrue( Paths::positively_gone( $this->root . '/no-such/deeper/x' ), 'a whole missing tree: the nearest ancestor that exists lists without it' );
+		// Ancestors that could not be listed, up to a root that is there: no evidence.
+		$listings = array(
+			'/a/b' => null,
+			'/a'   => null,
+			'/'    => null,
+		);
+		$this->assertFalse( Paths::positively_gone( '/a/b/c', $listings ) );
+		// An ancestor that is there but cannot be listed (an automount's view: its parent's listing does not show
+		// it) stops the climb: nothing above it is evidence.
+		$view = array(
+			$this->root . '/base/sub' => null,
+			$this->root . '/base'     => array( '.', '..', 'file.txt' ),
+		);
+		$this->assertFalse( Paths::positively_gone( $this->root . '/base/sub/missing', $view ) );
+		// The control: an ancestor that is not there is climbed past, and the listing above it answers.
+		$view = array( $this->root . '/base' => array( '.', '..', 'file.txt' ) );
+		$this->assertTrue( Paths::positively_gone( $this->root . '/base/nothing/missing', $view ) );
+		// A network share that is not reachable: its server is not a directory, nothing above it is evidence.
+		$this->assertFalse( Paths::positively_gone( '//server-that-is-not-there/share/x' ) );
+		$this->assertFalse( Paths::positively_gone( '//server-that-is-not-there/share' ) );
+		if ( ! Paths::is_windows() ) {
+			$this->assertFalse( Paths::positively_gone( 'C:/nope/x' ), 'a drive letter is not absolute here' );
+		}
+	}
 }

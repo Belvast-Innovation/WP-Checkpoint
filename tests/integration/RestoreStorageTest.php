@@ -177,8 +177,8 @@ final class RestoreStorageTest extends JobTestCase {
 		}
 		$gone = Plugin::instance()->jobs()->find( $gone );
 		$this->assertSame( Job::FAILED, $gone->status, 'its parent lists and holds no such directory' );
-		$this->assertSame( '', $gone->failure_kind, 'Retry stays: a directory moved back lets it continue' );
-		$this->assertStringContainsString( 'is no longer at the path it was started in', $gone->last_error );
+		$this->assertSame( Job::FAILURE_FINAL, $gone->failure_kind, 'a retry from this directory could not continue it' );
+		$this->assertStringContainsString( 'is no longer at the path it was started in; the job cannot continue from this storage directory', $gone->last_error );
 		$this->assertSame( Job::RUNNING, Plugin::instance()->jobs()->find( $other )->status, 'there, but not this one: the gate refuses it' );
 		$this->assertSame( Job::RUNNING, Plugin::instance()->jobs()->find( $blind )->status, 'a parent that cannot be listed is no evidence' );
 	}
@@ -269,6 +269,11 @@ final class RestoreStorageTest extends JobTestCase {
 			$this->assertSame( '', $dirs->base(), 'no other directory chosen' );
 			$this->assertStringContainsString( 'cannot be reached from this request', $dirs->last_error() );
 			$this->assertSame( $stored, Directories::load_state()['path'] );
+
+			// Nor when the restore names it another way that this request cannot resolve either.
+			self::set( $id, array( 'storage_path' => $base . '-file/./x' ) );
+			$this->assertSame( '', ( new Directories() )->base(), 'another spelling nothing can resolve: held' );
+			self::set( $id, array( 'storage_path' => $stored ) );
 
 			// Nor is it when the restores cannot be read.
 			$this->assertSame( '', ( new Directories( array( 'restores' => '__return_null' ) ) )->base(), 'unknown: held' );

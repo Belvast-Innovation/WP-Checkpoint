@@ -129,26 +129,31 @@ final class Paths {
 	 * Whether a path is positively gone: it is absolute, the file system
 	 * finds nothing under that name (lstat(), which matches case and
 	 * Unicode forms the way the file system does), and the nearest ancestor
-	 * that can be listed has no entry for the next segment down, not even
-	 * one that differs only in case. Ancestors that cannot be listed (not
-	 * there, permissions, open_basedir) are climbed past; reaching the root
-	 * without a listing, or a relative path, is no evidence: false.
+	 * that exists can be listed and has no entry for the next segment down,
+	 * not even one that differs only in case. Only ancestors that do not
+	 * exist are climbed past: one that exists but cannot be listed
+	 * (permissions, open_basedir) is no evidence, and neither is reaching
+	 * the root of a network share (\\server\share, or //server/share) or
+	 * of the file system without a listing, nor a relative path: false.
+	 * What a listing cannot show is not covered: a mount that is not
+	 * mounted right now (an automount, another mount namespace) looks
+	 * like a directory without that entry.
 	 *
 	 * @param string                                 $path     Path.
 	 * @param array<string, array<int, string>|null> $listings Listings by directory (null: not listable), reused across calls.
 	 * @return bool
 	 */
 	public static function positively_gone( string $path, array &$listings = array() ): bool {
-		$path = rtrim( self::normalize( $path ), '/' );
-		if ( '' === $path || ( '/' !== $path[0] && 1 !== preg_match( '#^[A-Za-z]:/#', $path ) ) ) {
-			return false;
-		}
-		if ( false !== @lstat( $path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a warning would put the path into the error log.
+		$path     = self::normalize( $path );
+		$path     = in_array( $path, array( '/', '//' ), true ) ? $path : rtrim( $path, '/' );
+		$drive    = self::is_windows() && 1 === preg_match( '#^[A-Za-z]:/#', $path );
+		$absolute = '' !== $path && ( '/' === $path[0] || $drive );
+		if ( ! $absolute || false !== @lstat( $path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a warning would put the path into the error log.
 			return false;
 		}
 		$child  = $path;
-		$parent = dirname( $path );
-		while ( $parent !== $child ) {
+		$parent = self::parent_of( $child );
+		while ( null !== $parent ) {
 			if ( ! array_key_exists( $parent, $listings ) ) {
 				$entries             = @scandir( $parent ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
 				$listings[ $parent ] = is_array( $entries ) ? array_map( 'strtolower', $entries ) : null;
@@ -157,10 +162,35 @@ final class Paths {
 			if ( null !== $listed ) {
 				return ! in_array( strtolower( basename( $child ) ), $listed, true );
 			}
+			if ( false !== @lstat( $parent ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
+				return false; // There but not listable: nothing above it says anything about $path.
+			}
 			$child  = $parent;
-			$parent = dirname( $parent );
+			$parent = self::parent_of( $child );
 		}
 		return false;
+	}
+
+	/**
+	 * The parent of a normalised absolute path, or null above which nothing is climbed: the root of the file
+	 * system ("/", "C:/") and the root of a network share ("//server/share": its server is not a directory).
+	 *
+	 * @param string $path Normalised absolute path, without a trailing separator (except a root).
+	 * @return string|null
+	 */
+	private static function parent_of( string $path ) {
+		if ( '/' === $path || 1 === preg_match( '#^[A-Za-z]:/?$#', $path ) || 1 === preg_match( '#^//[^/]+(/[^/]+)?$#', $path ) ) {
+			return null;
+		}
+		$slash = strrpos( $path, '/' );
+		if ( false === $slash ) {
+			return null;
+		}
+		$parent = substr( $path, 0, $slash );
+		if ( '' === $parent ) {
+			return '/';
+		}
+		return 1 === preg_match( '#^[A-Za-z]:$#', $parent ) ? $parent . '/' : $parent;
 	}
 
 	/**

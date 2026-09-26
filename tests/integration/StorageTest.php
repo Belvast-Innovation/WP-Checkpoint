@@ -266,6 +266,7 @@ final class StorageTest extends WP_UnitTestCase {
 		$this->assertSame( $custom, $upgraded->base(), $upgraded->last_error() );
 		$this->assertTrue( Directories::is_valid_token( $upgraded->state()['token'] ) );
 		$this->assertSame( $custom, $upgraded->state()['path'] );
+		$this->assertSame( $upgraded->state()['token'], Directories::load_state()['token'], 'the new token is saved, not made again on every request' );
 	}
 
 	public function test_custom_directory_owned_by_another_site_is_refused(): void {

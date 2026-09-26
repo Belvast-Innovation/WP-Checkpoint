@@ -1176,14 +1176,15 @@ final class JobRepository {
 		$listings = array();
 		foreach ( $this->list_jobs( array( Job::QUEUED, Job::RUNNING, Job::PAUSED ), 500 ) as $job ) {
 			if ( $job->storage_token === $token ) {
-				// The same token at another location: failed only when that location is positively gone (its
-				// parent lists and holds no such entry); otherwise the gate refuses it and says why.
+				// The same token at another location: failed only when that location is positively gone
+				// (Paths::positively_gone()); otherwise the gate refuses it and says why.
 				if ( '' === $job->storage_path || Paths::same_location( $job->storage_path, $base ) || ! Paths::positively_gone( $job->storage_path, $listings ) ) {
 					continue;
 				}
 				try {
-					// No kind: if the directory was moved, moving it back lets a retry continue.
-					$this->force_transition( $job, Job::FAILED, __( 'The storage directory of this job is no longer at the path it was started in, so the job cannot continue. If the directory was moved, moving it back lets a retry continue.', 'wp-checkpoint' ) );
+					// Final: this storage directory is not the job's, and the job's is not there; a retry from here
+					// could not continue it.
+					$this->force_transition( $job, Job::FAILED, __( 'The storage directory of this job is no longer at the path it was started in; the job cannot continue from this storage directory.', 'wp-checkpoint' ), Job::FAILURE_FINAL );
 					++$failed;
 				} catch ( StaleJob $e ) {
 					continue;

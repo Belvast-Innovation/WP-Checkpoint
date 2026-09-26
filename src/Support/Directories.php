@@ -679,7 +679,9 @@ final class Directories {
 			return true;
 		}
 		foreach ( $restores as $restore ) {
-			if ( Paths::same( $restore['path'], $dir, Paths::is_windows() ) || Paths::same_location( $restore['path'], $dir ) ) {
+			// The same location, or a restore whose directory this request cannot resolve either: that could be
+			// $dir spelled another way, and nothing shows it is not.
+			if ( Paths::same_location( $restore['path'], $dir ) || false === @realpath( $restore['path'] ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a warning would put the path into the error log.
 				return true;
 			}
 		}
