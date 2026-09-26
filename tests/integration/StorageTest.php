@@ -122,29 +122,30 @@ final class StorageTest extends WP_UnitTestCase {
 		$this->assertFalse( $web->state()['provisional'] );
 	}
 
-	public function test_provisional_choice_is_not_migrated_while_a_restore_is_unfinished(): void {
+	public function test_provisional_choice_is_not_migrated_while_a_job_is_unfinished(): void {
 		global $wpdb;
 		$cli = new Directories( $this->cli_context( array( 'abspath' => $this->fake_root . '/htdocs/wp/' ) ) );
 		$old = $cli->base();
 		$web = array( 'abspath' => $this->fake_root . '/htdocs/wp/', 'document_root' => $this->fake_root . '/htdocs/wp', 'is_web_request' => true );
 
-		// Read from the jobs table: an unfinished restore there keeps the directory where it is.
+		// Read from the jobs table: an unfinished job there (an export started from WP-CLI, whose files are not
+		// written yet) keeps the directory where it is.
 		\WPCheckpoint\Support\Schema::ensure();
-		$wpdb->insert( \WPCheckpoint\Support\Schema::jobs_table(), array( 'type' => 'restore', 'status' => 'running', 'created_at' => 1 ) );
+		$wpdb->insert( \WPCheckpoint\Support\Schema::jobs_table(), array( 'type' => 'export', 'status' => 'queued', 'created_at' => 1 ) );
 		$id = (int) $wpdb->insert_id;
-		$this->assertTrue( \WPCheckpoint\Jobs\JobRepository::has_unfinished( 'restore' ) );
+		$this->assertTrue( \WPCheckpoint\Jobs\JobRepository::has_unfinished() );
 		$dirs = new Directories( $web );
-		$this->assertSame( $old, $dirs->base(), 'not moved during a restore' );
-		$this->assertTrue( $dirs->state()['provisional'], 'the choice waits for the restore to end' );
+		$this->assertSame( $old, $dirs->base(), 'not moved while a job is unfinished' );
+		$this->assertTrue( $dirs->state()['provisional'], 'the choice waits for the job to end' );
 		$this->assertDirectoryExists( $old );
 
 		// Nor when that cannot be read.
-		$unknown = new Directories( array_merge( $web, array( 'restore_unfinished' => '__return_null' ) ) );
+		$unknown = new Directories( array_merge( $web, array( 'unfinished' => '__return_null' ) ) );
 		$this->assertSame( $old, $unknown->base() );
 
-		// The control: once the restore has ended, the same request moves it.
+		// The control: once the job has ended, the same request moves it.
 		$wpdb->update( \WPCheckpoint\Support\Schema::jobs_table(), array( 'status' => 'completed' ), array( 'id' => $id ) );
-		$this->assertFalse( \WPCheckpoint\Jobs\JobRepository::has_unfinished( 'restore' ) );
+		$this->assertFalse( \WPCheckpoint\Jobs\JobRepository::has_unfinished() );
 		$moved = new Directories( $web );
 		$this->assertNotSame( $old, $moved->base() );
 		$this->assertFalse( $moved->state()['provisional'] );

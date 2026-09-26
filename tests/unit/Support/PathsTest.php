@@ -218,7 +218,15 @@ final class PathsTest extends TestCase {
 		if ( ! @symlink( $this->root . '/base', $link ) ) {
 			$this->markTestSkipped( 'Symbolic links cannot be created here.' );
 		}
-		$this->assertTrue( Paths::same_location( $this->root . '/base', $link ) );
 		$this->assertFalse( Paths::same( $this->root . '/base', $link, Paths::is_windows() ), 'the control: the spellings differ' );
+		$target = realpath( $this->root . '/base' );
+		$via    = realpath( $link );
+		if ( false === $via || false === $target || ! Paths::same( $via, $target, Paths::is_windows() ) ) {
+			// realpath() does not resolve this link to its target here (seen on Windows): nothing shows that the
+			// two are the same, and the answer is no, the direction in which callers wait instead of acting.
+			$this->assertFalse( Paths::same_location( $this->root . '/base', $link ) );
+			return;
+		}
+		$this->assertTrue( Paths::same_location( $this->root . '/base', $link ) );
 	}
 }
