@@ -1182,8 +1182,8 @@ final class JobRepository {
 					continue;
 				}
 				try {
-					// Final: the directory with its work files is not there.
-					$this->force_transition( $job, Job::FAILED, __( 'The storage directory of this job no longer exists, and its work files with it; the job cannot continue.', 'wp-checkpoint' ), Job::FAILURE_FINAL );
+					// No kind: if the directory was moved, moving it back lets a retry continue.
+					$this->force_transition( $job, Job::FAILED, __( 'The storage directory of this job is no longer at the path it was started in, so the job cannot continue. If the directory was moved, moving it back lets a retry continue.', 'wp-checkpoint' ) );
 					++$failed;
 				} catch ( StaleJob $e ) {
 					continue;
@@ -1813,9 +1813,11 @@ final class JobRepository {
 	/**
 	 * The directory to work in for a job's files: the current storage
 	 * directory when the job's row names the same location, '' otherwise.
-	 * Its files are then reached under the current directory, not under the
-	 * row's spelling of it (which the check resolved, but a link could be
-	 * changed after).
+	 * The lock file, reclaiming and deleting are then done under the current
+	 * directory, not under the row's spelling of it (which the check
+	 * resolved, but a link could be changed after). A tick's own work files
+	 * and log (JobContext, the Runner's logger) use the row's spelling, which
+	 * the gate has just found to be this location.
 	 *
 	 * @param Job $job Job.
 	 * @return string

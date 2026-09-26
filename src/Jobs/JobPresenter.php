@@ -383,8 +383,8 @@ final class JobPresenter {
 		if ( '' === $base || ! Paths::same_location( $job->storage_path, $base ) ) {
 			return '';
 		}
-		// The same gate as the writer and the purge: only a file inside the job's logs/ directory is ever read,
-		// reached under the current directory (the row's spelling of it was only resolved for the check).
+		// Only a file inside the job's logs/ directory is ever read, reached under the current directory (the
+		// row's spelling of it was only resolved for the check).
 		$logs = $base . DIRECTORY_SEPARATOR . 'logs';
 		$path = $base . DIRECTORY_SEPARATOR . str_replace( '/', DIRECTORY_SEPARATOR, $job->log_path );
 		return Paths::is_inside( $logs, $path ) ? $path : '';

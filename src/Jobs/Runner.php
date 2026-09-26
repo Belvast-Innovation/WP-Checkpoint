@@ -214,14 +214,8 @@ final class Runner {
 			return new TickResult( TickResult::BUSY, self::BUSY_RETRY_SECONDS, $job, __( 'Another process is working on this job.', 'wp-checkpoint' ) );
 		}
 
-		$job   = $held['job'];
-		$token = $held['token'];
-		// The gate found the row's location to be this request's directory: from here on (the log, the work
-		// directory) the job's files are reached under that directory, not under the row's spelling of it.
-		$files = $this->repository->files_base( $job );
-		if ( '' !== $files ) {
-			$job->storage_path = $files;
-		}
+		$job    = $held['job'];
+		$token  = $held['token'];
 		$start  = is_numeric( $started_at ) ? (float) $started_at : $this->now();
 		$logger = $this->logger_for( $job );
 		if ( ! empty( $held['taken_over'] ) ) {

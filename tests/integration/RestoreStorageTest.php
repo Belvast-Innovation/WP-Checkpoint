@@ -135,7 +135,7 @@ final class RestoreStorageTest extends JobTestCase {
 		delete_site_transient( 'wpcheckpoint_jobs_reaped' ); // Housekeeping runs in this tick.
 		$result = Plugin::instance()->job_actions()->tick( $id, JobActions::NO_TIME_LEFT );
 		$this->assertSame( 'blocked', $result->status );
-		$this->assertStringContainsString( 'A restore is in progress in another storage directory than the one WPCHECKPOINT_STORAGE_DIR names', $result->message );
+		$this->assertStringContainsString( 'A restore is in progress in a storage directory that this request cannot confirm to be the one WPCHECKPOINT_STORAGE_DIR names', $result->message );
 		$this->assertStringContainsString( 'Set it to the directory the restore was started with', $result->message );
 		$this->assertSame( Job::RUNNING, Plugin::instance()->jobs()->find( $id )->status, 'not failed by housekeeping' );
 		$this->assertSame( $token, Directories::load_state()['token'], 'not re-tokened' );
@@ -177,8 +177,8 @@ final class RestoreStorageTest extends JobTestCase {
 		}
 		$gone = Plugin::instance()->jobs()->find( $gone );
 		$this->assertSame( Job::FAILED, $gone->status, 'its parent lists and holds no such directory' );
-		$this->assertSame( Job::FAILURE_FINAL, $gone->failure_kind );
-		$this->assertStringContainsString( 'no longer exists', $gone->last_error );
+		$this->assertSame( '', $gone->failure_kind, 'Retry stays: a directory moved back lets it continue' );
+		$this->assertStringContainsString( 'is no longer at the path it was started in', $gone->last_error );
 		$this->assertSame( Job::RUNNING, Plugin::instance()->jobs()->find( $other )->status, 'there, but not this one: the gate refuses it' );
 		$this->assertSame( Job::RUNNING, Plugin::instance()->jobs()->find( $blind )->status, 'a parent that cannot be listed is no evidence' );
 	}
@@ -210,7 +210,9 @@ final class RestoreStorageTest extends JobTestCase {
 		$this->custom_storage_at( $b );
 		$this->assertSame( $b, Plugin::instance()->directories()->base(), 'the plugin goes on in the new directory' );
 		Plugin::instance()->jobs()->settle_storage();
-		$this->assertSame( Job::FAILED, Plugin::instance()->jobs()->find( $id )->status, 'the restore whose directory is gone ends' );
+		$job = Plugin::instance()->jobs()->find( $id );
+		$this->assertSame( Job::FAILED, $job->status, 'the restore whose directory is gone ends' );
+		$this->assertSame( 'The storage directory changed; the job cannot continue.', $job->last_error, 'the new directory has its own token' );
 	}
 
 	public function test_a_request_that_cannot_read_the_restores_does_not_switch(): void {
@@ -229,23 +231,59 @@ final class RestoreStorageTest extends JobTestCase {
 		$this->assertStringNotContainsString( 'A restore is in progress', $dirs->last_error(), 'not claimed' );
 		$this->assertDirectoryDoesNotExist( $b );
 		$this->assertSame( $a, Directories::load_state()['path'] );
+		// The control: where the restores are read and one is in another directory that is there, it is claimed.
+		$known = new Directories(
+			array(
+				'custom_dir' => $b,
+				'restores'   => static function () use ( $a ): array {
+					return array(
+						array(
+							'path'  => $a,
+							'token' => 'cccccccccccc',
+						),
+					);
+				},
+			)
+		);
+		$this->assertSame( '', $known->base() );
+		$this->assertStringContainsString( 'A restore is in progress', $known->last_error() );
 	}
 
 	public function test_an_unreachable_directory_is_not_replaced_while_a_restore_may_use_it(): void {
 		$this->register( RestoreJob::ID, array( $this->counting_step( 'r', 5 ) ) );
 		$id   = $this->job_of( RestoreJob::ID );
 		$base = Plugin::instance()->directories()->base();
-		// The stored directory is not reachable from this request, and nothing shows it gone (its parent is a file).
+		// The stored directory is the restore's, it is not reachable from this request, and nothing shows it
+		// gone (its parent is a file).
 		file_put_contents( $base . '-file', 'not a directory' );
-		$state         = Directories::load_state();
-		$state['path'] = $base . '-file/x';
-		\WPCheckpoint\Support\Options::set( Directories::OPTION, $state );
+		$stored = $base . '-file/x';
+		self::set( $id, array( 'storage_path' => $stored ) );
+		$remember = function ( string $path ): void {
+			$state         = Directories::load_state();
+			$state['path'] = $path;
+			\WPCheckpoint\Support\Options::set( Directories::OPTION, $state );
+		};
+		$remember( $stored );
 		try {
 			$dirs = new Directories();
 			$this->assertSame( '', $dirs->base(), 'no other directory chosen' );
 			$this->assertStringContainsString( 'cannot be reached from this request', $dirs->last_error() );
-			$this->assertSame( $base . '-file/x', Directories::load_state()['path'] );
-			// The control: with the restore ended, the request chooses a directory.
+			$this->assertSame( $stored, Directories::load_state()['path'] );
+
+			// Nor is it when the restores cannot be read.
+			$this->assertSame( '', ( new Directories( array( 'restores' => '__return_null' ) ) )->base(), 'unknown: held' );
+
+			// A restore elsewhere does not hold an unreachable directory that is not its own.
+			self::set( $id, array( 'storage_path' => $base ) );
+			$this->assertNotSame( '', ( new Directories() )->base(), 'another directory is chosen' );
+
+			// Nor does a restore's own directory that is positively gone (its parent lists without it).
+			$remember( $base . '-gone-dir' );
+			self::set( $id, array( 'storage_path' => $base . '-gone-dir' ) );
+			$this->assertNotSame( '', ( new Directories() )->base(), 'gone: another directory is chosen' );
+
+			// The control: with the restore ended, the unreachable directory does not hold either.
+			$remember( $stored );
 			Plugin::instance()->jobs()->transition( Plugin::instance()->jobs()->find( $id ), Job::CANCELLED );
 			$after = new Directories();
 			$this->assertNotSame( '', $after->base(), $after->last_error() );
@@ -261,13 +299,20 @@ final class RestoreStorageTest extends JobTestCase {
 		$this->assertTrue( \WPCheckpoint\Jobs\JobRepository::has_unfinished() );
 		$this->assertFalse( \WPCheckpoint\Jobs\JobRepository::has_unfinished( RestoreJob::ID ) );
 		// A read that fails is no answer, and so is a failed look for the table.
-		$broken = static function ( $query ) {
-			return false !== strpos( (string) $query, Schema::jobs_table() ) ? 'SELECT no_such_column FROM wpcheckpoint_no_such_table' : $query;
+		$hits   = 0;
+		$broken = static function ( $query ) use ( &$hits ) {
+			// Also the look for the table: its LIKE pattern escapes the underscores of the name.
+			if ( false !== strpos( (string) $query, 'wpcheckpoint' ) ) {
+				++$hits;
+				return 'SELECT no_such_column FROM no_such_table_here';
+			}
+			return $query;
 		};
 		add_filter( 'query', $broken );
 		$this->assertNull( \WPCheckpoint\Jobs\JobRepository::has_unfinished() );
 		$this->assertNull( \WPCheckpoint\Jobs\JobRepository::unfinished_restores() );
 		remove_filter( 'query', $broken );
+		$this->assertSame( 4, $hits, 'the control: the read and the look for the table failed, twice each' );
 		$this->assertSame( array(), \WPCheckpoint\Jobs\JobRepository::unfinished_restores(), 'the control: read, none' );
 		// No table at all: no job.
 		$wpdb->query( 'DROP TABLE ' . Schema::jobs_table() );

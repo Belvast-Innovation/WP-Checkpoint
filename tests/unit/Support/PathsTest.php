@@ -235,13 +235,13 @@ final class PathsTest extends TestCase {
 		$this->assertFalse( Paths::positively_gone( $this->root . '/base/sub' ), 'the control: there' );
 		$this->assertFalse( Paths::positively_gone( $this->root . '/base/SUB' ), 'there but for case: a case-insensitive file system would find it' );
 		$this->assertFalse( Paths::positively_gone( $this->root . '/base/file.txt/x' ), 'a parent that is a file cannot be listed' );
-		$this->assertFalse( Paths::positively_gone( $this->root . '/no-such-parent/x' ), 'nor one that is not there' );
+		$this->assertTrue( Paths::positively_gone( $this->root . '/no-such-parent/x' ), 'the nearest ancestor that lists lacks the next segment' );
+		$this->assertFalse( Paths::positively_gone( $this->root . '/base/sub/../sub' ), 'found by the file system itself' );
 		$this->assertFalse( Paths::positively_gone( 'relative/path' ), 'relative: no evidence' );
 		$this->assertFalse( Paths::positively_gone( '' ) );
 		$listings = array();
 		$this->assertTrue( Paths::positively_gone( $this->root . '/base/a', $listings ) );
 		touch( $this->root . '/base/a' );
-		$this->assertTrue( Paths::positively_gone( $this->root . '/base/a', $listings ), 'the listing is reused within one pass' );
-		$this->assertFalse( Paths::positively_gone( $this->root . '/base/a' ), 'a new pass lists again' );
+		$this->assertFalse( Paths::positively_gone( $this->root . '/base/a', $listings ), 'a listing kept from before never makes a path that is there gone' );
 	}
 }
