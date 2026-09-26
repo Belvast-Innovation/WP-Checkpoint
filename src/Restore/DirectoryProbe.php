@@ -96,7 +96,7 @@ final class DirectoryProbe {
 				}
 			}
 			fclose( $handle );
-			$names = new TargetNames( $flags['fold_ascii'], $flags['fold_unicode'], $flags['normalize'], file_exists( $dir . '/' . self::BARE ), $win32 );
+			$names = new TargetNames( $flags['fold_ascii'], $flags['fold_unicode'], $flags['normalize'], file_exists( $dir . '/' . self::BARE ), false ); // Mutation B: the Win32 rules are never recorded.
 			$stat  = @stat( $dir );
 			if ( false === $stat ) {
 				throw new CannotStage( sprintf( 'A new directory in %s cannot be examined, so whether it is on the same disk as the directories the restore replaces cannot be told.', $where ) );
