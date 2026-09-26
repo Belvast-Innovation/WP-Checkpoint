@@ -146,7 +146,7 @@ final class Paths {
 	 */
 	public static function positively_gone( string $path, array &$listings = array() ): bool {
 		$path     = rtrim( self::normalize( $path ), '/' );
-		$drive    = self::is_windows() && 1 === preg_match( '#^[A-Za-z]:/#', $path );
+		$drive    = false;
 		$absolute = '' !== $path && ( '/' === $path[0] || $drive );
 		// The climb is lexical: through a "." or ".." segment it would list a directory the path does not lie in.
 		$dots = 1 === preg_match( '#(^|/)\.{1,2}(/|$)#', $path );
