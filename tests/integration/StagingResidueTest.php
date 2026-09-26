@@ -63,12 +63,13 @@ final class StagingResidueTest extends JobTestCase {
 	}
 
 	/**
-	 * This installation's tokens now, plus an earlier one it used.
+	 * This installation's tokens now, plus an earlier one it used: stored, and in this request's resolved state.
 	 */
-	private static function past_token( string $token ): void {
-		$state                = Directories::load_state();
+	private function past_token( string $token ): void {
+		$state                = Plugin::instance()->directories()->state();
 		$state['past_tokens'] = array( $token );
 		Options::set( Directories::OPTION, $state );
+		$this->replace_internal( Plugin::instance()->directories(), 'state', $state );
 	}
 
 	/**
@@ -144,7 +145,7 @@ final class StagingResidueTest extends JobTestCase {
 		// Both jobs were started under an earlier storage directory; the running one still uses it.
 		self::set( $running, array( 'storage_token' => 'aaaaaaaaaaaa' ) );
 		self::set( $ended, array( 'storage_token' => 'aaaaaaaaaaaa' ) );
-		self::past_token( 'aaaaaaaaaaaa' );
+		$this->past_token( 'aaaaaaaaaaaa' );
 		list( $kept )   = self::split( $this->leave( $this->layout( $running, 'aaaaaaaaaaaa' ) ) );
 		$gone           = $this->leave( $this->layout( $ended, 'aaaaaaaaaaaa' ) );
 		list( $stale )  = self::split( $this->leave( $this->layout( $running ) ) ); // The running job, under a token it does not hold.
@@ -197,7 +198,7 @@ final class StagingResidueTest extends JobTestCase {
 	public function test_a_jobs_staging_goes_with_its_work_after_its_storage_directory_changed(): void {
 		$this->register( 'plain', array( $this->counting_step( 'p', 5 ) ) );
 		$id = $this->job_of( 'plain' );
-		self::past_token( 'aaaaaaaaaaaa' ); // The token it was started with is this installation's earlier one.
+		$this->past_token( 'aaaaaaaaaaaa' ); // The token it was started with is this installation's earlier one.
 		self::set( $id, array( 'storage_token' => 'aaaaaaaaaaaa', 'storage_path' => WP_CONTENT_DIR . '/wp-checkpoint-aaaaaaaaaaaa' ) );
 		$made = $this->leave( $this->layout( $id, 'aaaaaaaaaaaa' ) );
 		$job  = Plugin::instance()->jobs()->find( $id );
@@ -226,19 +227,23 @@ final class StagingResidueTest extends JobTestCase {
 		$this->register( 'plain', array( $this->counting_step( 'p', 5 ) ) );
 		$ended = $this->job_of( 'plain' );
 		Plugin::instance()->jobs()->transition( Plugin::instance()->jobs()->find( $ended ), Job::CANCELLED );
-		$made   = $this->leave( $this->layout( $ended ) );
-		$state  = Directories::load_state();
-		$copied = array_merge( $state, array( 'clone_detected' => true ) );
-		Options::set( Directories::OPTION, $copied );
-
+		$made  = $this->leave( $this->layout( $ended ) );
+		$state = Plugin::instance()->directories()->state();
+		$clone = array_merge( $state, array( 'clone_detected' => true ) );
+		// This request resolved a clone; the stored state already says otherwise (the notice was acknowledged
+		// meanwhile, and the next resolve sets it again): the resolved state decides.
+		$this->replace_internal( Plugin::instance()->directories(), 'state', $clone );
 		$this->reap();
 		$this->assertFalse( Plugin::instance()->jobs()->reclaim_work( Plugin::instance()->jobs()->find( $ended ) ) );
+		// Uninstall resolves nothing: it reads the stored state.
+		Options::set( Directories::OPTION, $clone );
 		$this->assertSame( 0, Uninstaller::delete_site_residue()['deleted'] );
 		foreach ( $made as $path ) {
 			$this->assertFileExists( $path, 'the tokens may be the original\'s: kept' );
 		}
 
 		Options::set( Directories::OPTION, $state );
+		$this->replace_internal( Plugin::instance()->directories(), 'state', $state );
 		$this->reap();
 		foreach ( $made as $path ) {
 			$this->assertFileDoesNotExist( $path, 'the control: once resolved, reaped' );
@@ -281,7 +286,7 @@ final class StagingResidueTest extends JobTestCase {
 	public function test_uninstall_removes_this_installations_staging_under_every_token_it_used(): void {
 		$this->register( 'plain', array( $this->counting_step( 'p', 5 ) ) );
 		$id = $this->job_of( 'plain' );
-		self::past_token( 'aaaaaaaaaaaa' );
+		$this->past_token( 'aaaaaaaaaaaa' );
 		$ours   = array_merge( $this->leave( $this->layout( $id ) ), $this->leave( $this->layout( $id, 'aaaaaaaaaaaa' ) ) );
 		$theirs = $this->leave( $this->layout( $id, 'ffffffffffff' ) );
 		update_option( Uninstaller::OPTION_DELETE_DATA, false );

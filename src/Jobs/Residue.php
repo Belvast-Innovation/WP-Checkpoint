@@ -52,8 +52,11 @@ use WPCheckpoint\Support\Directories;
  * Only entries whose name carries one of this installation's storage
  * tokens are ever listed (scan_site(), Directories::own_tokens()); another
  * installation's, on a copied site sharing the directories, are never
- * touched. Uninstall removes them whatever the data setting (they are
- * never the user's data).
+ * touched. So nothing is listed while a clone is unresolved, and an
+ * entry under a token no longer kept (more than Directories::PAST_TOKENS changes, or
+ * dropped when a clone was detected) is never reclaimed: the safe
+ * direction. Uninstall removes them whatever the data setting (they are
+ * never the user's data), when the stored state is this installation's.
  */
 final class Residue {
 

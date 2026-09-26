@@ -1361,7 +1361,7 @@ final class JobRepository {
 		// A restore's staging roots and probes next to the site's directories, under any of this installation's
 		// tokens (none while a clone is detected): the same rule as work_dir, a probe also once no live run holds
 		// its job.
-		foreach ( Residue::scan_site( Residue::site_dirs( ScanRoots::site_directories() ), Directories::own_tokens() ) as $entry ) {
+		foreach ( Residue::scan_site( Residue::site_dirs( ScanRoots::site_directories() ), Directories::own_tokens( $this->directories->state() ) ) as $entry ) {
 			if ( $budget <= 0 ) {
 				return;
 			}
@@ -1473,10 +1473,11 @@ final class JobRepository {
 	public function reclaim_work( Job $job, int $budget = self::RECLAIM_MAX_ENTRIES ): bool {
 		// The restore's staging roots and probes next to the site's directories go with its work, under the job's
 		// own token: they are not in the storage directory, so a changed storage directory does not keep them. Only
-		// a token this installation holds (Directories::own_tokens()): a row of a copied database carries the
-		// original's, and the directories may be shared.
+		// a token this installation holds (Directories::own_tokens(), of this request's resolved state: the stored
+		// one may say "no clone" between an acknowledged notice and the next resolve): a row of a copied database
+		// carries the original's, and the directories may be shared.
 		$done = true;
-		if ( ! in_array( $job->storage_token, Directories::own_tokens(), true ) ) {
+		if ( ! in_array( $job->storage_token, Directories::own_tokens( $this->directories->state() ), true ) ) {
 			$this->directories->log_event( sprintf( 'Job %d carries a storage token this installation does not hold; its staging next to the site was left alone.', $job->id ) );
 			$done = false;
 		}
