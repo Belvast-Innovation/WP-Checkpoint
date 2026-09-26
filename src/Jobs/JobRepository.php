@@ -412,11 +412,11 @@ final class JobRepository {
 	}
 
 	/**
-	 * Count a cron request that started too late to tick the job, in one
-	 * statement that counts only while fewer than $limit are counted and
-	 * the job is queued, running or paused (not waiting for an answer). Only
-	 * a tick that makes progress sets the count back to 0 (save_progress()),
-	 * and so do a retry and an answer.
+	 * Count a cron request that started too late to hand the job to the
+	 * Runner, in one statement that counts only while fewer than $limit are
+	 * counted and the job is queued, running or paused (not waiting for an
+	 * answer). A driver that hands the job to the Runner sets the count back
+	 * to 0 (reset_cron_deferrals()), and so do a retry and an answer.
 	 *
 	 * @param int $id    Job id.
 	 * @param int $limit The count this call does not go beyond (see JobActions::cron_tick()).
@@ -441,9 +441,24 @@ final class JobRepository {
 	}
 
 	/**
+	 * Set the late cron count back to 0: a driver hands the job to the Runner
+	 * (JobActions::tick()), whatever the tick then does. One statement, and
+	 * only a write when there is a count.
+	 *
+	 * @param int $id Job id.
+	 * @return void
+	 */
+	public function reset_cron_deferrals( int $id ): void {
+		global $wpdb;
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin table.
+		$wpdb->query( $wpdb->prepare( 'UPDATE ' . self::table() . ' SET cron_deferrals = 0 WHERE id = %d AND cron_deferrals <> 0', $id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- table name from the prefix and a constant.
+	}
+
+	/**
 	 * Fail a job whose late cron requests reached $limit deferrals, in one
-	 * statement: only while the count is still there (no progress, retry or
-	 * answer set it back), the job is queued, running or paused without
+	 * statement: only while the count is still there (no driver handed the
+	 * job to the Runner, and no retry or answer set it back meanwhile), the
+	 * job is queued, running or paused without
 	 * questions, and no live run holds it (a running job between ticks has
 	 * no lock). Its lock file goes with it, as with any ended job.
 	 *
@@ -736,9 +751,9 @@ final class JobRepository {
 	 * Save the position of a running job; only the lock holder may.
 	 *
 	 * Only real progress ($advanced) moves progress_at and resets the gate
-	 * back-off and the late cron count, in the same statement: a wait or a
-	 * retried failure keeps the stall timestamp, so a job that only ever
-	 * waits is still given up after 24 hours by reap().
+	 * back-off, in the same statement: a wait or a retried failure keeps the
+	 * stall timestamp, so a job that only ever waits is still given up after
+	 * 24 hours by reap().
 	 *
 	 * @param Job                  $job      Job.
 	 * @param string               $token    Lock token.
@@ -764,12 +779,10 @@ final class JobRepository {
 		);
 		$formats  = array( '%s', '%s', '%d', '%s', '%d' );
 		if ( $advanced ) {
-			$data['progress_at']    = $now;
-			$data['blocked_count']  = 0;
-			$data['cron_deferrals'] = 0;
-			$formats[]              = '%d';
-			$formats[]              = '%d';
-			$formats[]              = '%d';
+			$data['progress_at']   = $now;
+			$data['blocked_count'] = 0;
+			$formats[]             = '%d';
+			$formats[]             = '%d';
 		}
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin table; the WHERE on lock_token is the fence.
 		$affected = $wpdb->update(
@@ -792,9 +805,8 @@ final class JobRepository {
 		$job->progress_message = $message;
 		$job->updated_at       = $now;
 		if ( $advanced ) {
-			$job->progress_at    = $now;
-			$job->blocked_count  = 0;
-			$job->cron_deferrals = 0;
+			$job->progress_at   = $now;
+			$job->blocked_count = 0;
 		}
 	}
 

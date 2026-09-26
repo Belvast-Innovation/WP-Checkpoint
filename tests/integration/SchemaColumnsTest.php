@@ -179,8 +179,7 @@ final class SchemaColumnsTest extends JobTestCase {
 	 */
 	private function running_job(): int {
 		$this->register( 'plain', array( $this->counting_step( 'p', 5 ) ) );
-		$id = Plugin::instance()->jobs()->create( 'plain' )->id;
-		Plugin::instance()->job_actions()->tick( $id, JobActions::NO_TIME_LEFT );
+		$id = $this->job_of( 'plain' );
 		$this->assertSame( 1, (int) JobContext::strip_reserved( Plugin::instance()->jobs()->find( $id )->cursor )['n'], 'the control: it moves on' );
 		return $id;
 	}
