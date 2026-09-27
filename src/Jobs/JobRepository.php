@@ -13,6 +13,7 @@ use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Support\Paths;
 use WPCheckpoint\Support\Redactor;
 use WPCheckpoint\Support\Schema;
+use WPCheckpoint\Support\StoredNames;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -1687,12 +1688,12 @@ final class JobRepository {
 	 * @return void
 	 */
 	public function maintenance(): void {
-		if ( false === get_site_transient( 'wpcheckpoint_jobs_reaped' ) ) {
-			set_site_transient( 'wpcheckpoint_jobs_reaped', 1, self::REAP_THROTTLE );
+		if ( false === get_site_transient( StoredNames::JOBS_REAPED ) ) {
+			set_site_transient( StoredNames::JOBS_REAPED, 1, self::REAP_THROTTLE );
 			$this->reap();
 		}
-		if ( false === get_site_transient( 'wpcheckpoint_jobs_purged' ) ) {
-			set_site_transient( 'wpcheckpoint_jobs_purged', 1, self::PURGE_THROTTLE );
+		if ( false === get_site_transient( StoredNames::JOBS_PURGED ) ) {
+			set_site_transient( StoredNames::JOBS_PURGED, 1, self::PURGE_THROTTLE );
 			$this->purge();
 		}
 	}

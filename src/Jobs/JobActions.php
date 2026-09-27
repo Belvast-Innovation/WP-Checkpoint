@@ -10,6 +10,7 @@ namespace WPCheckpoint\Jobs;
 use WPCheckpoint\Support\Schema;
 use WPCheckpoint\Support\HostFunctions;
 use WPCheckpoint\Support\Logger;
+use WPCheckpoint\Support\StoredNames;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -23,7 +24,7 @@ final class JobActions {
 	/**
 	 * Site transient throttling sweep_events().
 	 */
-	const SWEPT = 'wpcheckpoint_jobs_swept';
+	const SWEPT = StoredNames::JOBS_SWEPT;
 
 	/**
 	 * Cron requests in a row that may put a job's tick off for starting too

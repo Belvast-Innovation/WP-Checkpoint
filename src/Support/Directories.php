@@ -20,7 +20,7 @@ defined( 'ABSPATH' ) || exit;
  */
 final class Directories {
 
-	const OPTION     = 'wpcheckpoint_storage';
+	const OPTION     = StoredNames::STORAGE;
 	const DIR_PREFIX = 'wp-checkpoint-';
 
 	/**

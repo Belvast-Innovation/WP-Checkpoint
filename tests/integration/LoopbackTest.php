@@ -11,6 +11,7 @@ use WPCheckpoint\Plugin;
 use WPCheckpoint\Support\Environment;
 use WPCheckpoint\Tests\Fixtures\Jobs\ClosureStep;
 use WPCheckpoint\Tests\Fixtures\Jobs\JobTestCase;
+use WPCheckpoint\Support\StoredNames;
 
 final class LoopbackTest extends JobTestCase {
 
@@ -321,12 +322,12 @@ final class LoopbackTest extends JobTestCase {
 		$this->assertSame( 'lost', $result->status );
 		$this->assertSame( Job::RUNNING, $result->job->status, 'taken over, not cancelled' );
 		$this->assertCount( 1, $this->events( $job->id ), 'the new holder\'s event stays' );
-		$this->assertNotFalse( get_site_transient( Loopback::JOB_PREFIX . $job->id ), 'and so does its hop token' );
+		$this->assertNotFalse( get_site_transient( StoredNames::loopback_job( (int) $job->id ) ), 'and so does its hop token' );
 
 		// Cancelled instead: then both go.
 		Plugin::instance()->job_actions()->cancel( $job->id );
 		$this->assertSame( array(), $this->events( $job->id ) );
-		$this->assertFalse( get_site_transient( Loopback::JOB_PREFIX . $job->id ) );
+		$this->assertFalse( get_site_transient( StoredNames::loopback_job( (int) $job->id ) ) );
 	}
 
 	public function test_a_cron_callback_that_starts_late_in_its_request_hands_the_job_to_the_next_one(): void {

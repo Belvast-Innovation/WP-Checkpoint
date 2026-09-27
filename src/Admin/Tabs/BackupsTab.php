@@ -26,6 +26,7 @@ use WPCheckpoint\Jobs\PreflightStep;
 use WPCheckpoint\Jobs\QuestionText;
 use WPCheckpoint\Plugin;
 use WPCheckpoint\Support\Directories;
+use WPCheckpoint\Support\StoredNames;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -45,7 +46,7 @@ final class BackupsTab implements Tab {
 	/**
 	 * Site transient holding the tables of other installations for the create form (5 minutes).
 	 */
-	const FOREIGN_CACHE = 'wpcheckpoint_foreign_tables';
+	const FOREIGN_CACHE = StoredNames::FOREIGN_TABLES;
 
 	/**
 	 * URL slug.

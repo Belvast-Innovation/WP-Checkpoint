@@ -84,9 +84,9 @@ defined( 'ABSPATH' ) || exit;
  * under 1.5 times the slowest unit so far, and a unit slower than the whole
  * budget ends the job with the reason.
  *
- * None of these names is one StateCarry writes before the swap (its names
- * start with "wpcheckpoint_" and its transients'), unless a table prefix
- * itself starts with "wpcheckpoint_": the swap's part of T042 handles that.
+ * None of these names is one StateCarry writes before the swap: it carries
+ * only the exact names of Support\StoredNames, none of which ends in
+ * "user_roles" (StoredNamesTest), whatever the table prefixes.
  */
 final class PrefixRewriteStep implements Step {
 

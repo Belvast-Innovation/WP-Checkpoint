@@ -8,6 +8,7 @@
 namespace WPCheckpoint\Restore;
 
 use WPCheckpoint\Database\SqlWriter;
+use WPCheckpoint\Support\StoredNames;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -24,10 +25,16 @@ defined( 'ABSPATH' ) || exit;
  * undo the restore but the standalone endpoint.
  *
  * The method carry() replaces, in the temporary options table (and sitemeta), every
- * row named by one of PREFIXES with the live table's rows (a prefix, not a
- * list: the plugin has no single list of what it stores, and every name it
- * writes starts with one of these), and puts this plugin in the temporary
- * table's list of active plugins. It is a delete and an insert, so running
+ * row stored under one of the plugin's exact names (Support\StoredNames:
+ * the name itself and a transient's value and expiry) with the live
+ * table's rows, and puts this plugin in the temporary table's list of
+ * active plugins. Exact names, not "everything that starts with
+ * wpcheckpoint_": a row of the backup's own named like that (a table prefix
+ * "wpcheckpoint_" makes "wpcheckpoint_user_roles") stays the backup's. The
+ * names are matched by the columns' collation, as WordPress reads them
+ * (get_option() ends in an SQL equality). The plugin's names built at run
+ * time are not carried: they are short-lived and the running plugin issues
+ * new ones (StoredNames). It is a delete and an insert, so running
  * it again gives the same result. guard() checks that list and runs the
  * swap it is given only when this plugin is in it, right after the check.
  * There is no swap yet: the swap unit (a later part of T042) is to call
@@ -40,11 +47,6 @@ defined( 'ABSPATH' ) || exit;
  * of a network's other sites.
  */
 final class StateCarry {
-
-	/**
-	 * Every name the plugin writes starts with one of these (options, transients, site options, site transients).
-	 */
-	const PREFIXES = array( 'wpcheckpoint_', '_transient_wpcheckpoint_', '_transient_timeout_wpcheckpoint_', '_site_transient_wpcheckpoint_', '_site_transient_timeout_wpcheckpoint_' );
 
 	/**
 	 * Connection.
@@ -94,14 +96,16 @@ final class StateCarry {
 	public function carry( string $live_options, string $temp_options, $live_meta = null, $temp_meta = null ): void {
 		$this->db->begin();
 		try {
-			$like = self::like_clause( 'option_name' );
-			$this->db->rows( 'DELETE FROM ' . SqlWriter::identifier( $temp_options ) . ' WHERE ' . $like['sql'], $like['args'] );
-			$this->db->rows( 'INSERT INTO ' . SqlWriter::identifier( $temp_options ) . ' (option_name, option_value, autoload) SELECT option_name, option_value, autoload FROM ' . SqlWriter::identifier( $live_options ) . ' WHERE ' . $like['sql'], $like['args'] );
+			$names = StoredNames::stored_forms( false );
+			$in    = self::marks( $names );
+			$this->db->rows( 'DELETE FROM ' . SqlWriter::identifier( $temp_options ) . ' WHERE option_name IN (' . $in . ')', $names );
+			$this->db->rows( 'INSERT INTO ' . SqlWriter::identifier( $temp_options ) . ' (option_name, option_value, autoload) SELECT option_name, option_value, autoload FROM ' . SqlWriter::identifier( $live_options ) . ' WHERE option_name IN (' . $in . ')', $names );
 			if ( null !== $live_meta && null !== $temp_meta ) {
-				$like = self::like_clause( 'meta_key' );
-				$args = array_merge( array( (string) $this->network ), $like['args'] );
-				$this->db->rows( 'DELETE FROM ' . SqlWriter::identifier( $temp_meta ) . ' WHERE site_id = ? AND (' . $like['sql'] . ')', $args );
-				$this->db->rows( 'INSERT INTO ' . SqlWriter::identifier( $temp_meta ) . ' (site_id, meta_key, meta_value) SELECT site_id, meta_key, meta_value FROM ' . SqlWriter::identifier( $live_meta ) . ' WHERE site_id = ? AND (' . $like['sql'] . ')', $args );
+				$names = StoredNames::stored_forms( true );
+				$in    = self::marks( $names );
+				$args  = array_merge( array( (string) $this->network ), $names );
+				$this->db->rows( 'DELETE FROM ' . SqlWriter::identifier( $temp_meta ) . ' WHERE site_id = ? AND meta_key IN (' . $in . ')', $args );
+				$this->db->rows( 'INSERT INTO ' . SqlWriter::identifier( $temp_meta ) . ' (site_id, meta_key, meta_value) SELECT site_id, meta_key, meta_value FROM ' . SqlWriter::identifier( $live_meta ) . ' WHERE site_id = ? AND meta_key IN (' . $in . ')', $args );
 				$this->activate_network( $temp_meta );
 			} else {
 				$this->activate( $temp_options );
@@ -214,21 +218,12 @@ final class StateCarry {
 	}
 
 	/**
-	 * "(column LIKE ? OR ...)" over PREFIXES, their wildcards escaped.
+	 * "?, ?, ..." for a list.
 	 *
-	 * @param string $column Column.
-	 * @return array{sql: string, args: string[]}
+	 * @param string[] $values Values.
+	 * @return string
 	 */
-	private static function like_clause( string $column ): array {
-		$parts = array();
-		$args  = array();
-		foreach ( self::PREFIXES as $prefix ) {
-			$parts[] = $column . ' LIKE ?';
-			$args[]  = addcslashes( $prefix, '\\%_' ) . '%';
-		}
-		return array(
-			'sql'  => implode( ' OR ', $parts ),
-			'args' => $args,
-		);
+	private static function marks( array $values ): string {
+		return implode( ', ', array_fill( 0, count( $values ), '?' ) );
 	}
 }

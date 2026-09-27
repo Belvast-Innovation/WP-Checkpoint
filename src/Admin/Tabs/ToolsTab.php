@@ -19,6 +19,7 @@ use WPCheckpoint\Support\Environment;
 use WPCheckpoint\Support\Guard;
 use WPCheckpoint\Support\Protection;
 use WPCheckpoint\Support\Report;
+use WPCheckpoint\Support\StoredNames;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -163,7 +164,7 @@ final class ToolsTab implements Tab {
 	private function render_result_notice(): void {
 		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- display-only flag set by our own redirect.
 		$result   = isset( $_GET[ EnvironmentActions::RESULT_PARAM ] ) ? sanitize_key( wp_unslash( $_GET[ EnvironmentActions::RESULT_PARAM ] ) ) : '';
-		$detail   = get_site_transient( 'wpcheckpoint_reclaim_message_' . get_current_user_id() );
+		$detail   = get_site_transient( StoredNames::reclaim_message( get_current_user_id() ) );
 		$detail   = is_string( $detail ) ? $detail : '';
 		$messages = array(
 			'rechecked'      => array( 'success', __( 'Environment re-checked.', 'wp-checkpoint' ) ),
@@ -176,7 +177,7 @@ final class ToolsTab implements Tab {
 			return;
 		}
 		if ( in_array( $result, array( 'reclaimed', 'reclaim_failed' ), true ) ) {
-			delete_site_transient( 'wpcheckpoint_reclaim_message_' . get_current_user_id() );
+			delete_site_transient( StoredNames::reclaim_message( get_current_user_id() ) );
 		}
 		list( $type, $text ) = $messages[ $result ];
 		echo '<div class="notice notice-' . esc_attr( $type ) . ' inline"><p>' . esc_html( $text ) . '</p></div>';
