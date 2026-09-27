@@ -41,4 +41,13 @@ function stored_names( string $hash, int $job ): void {
 	foreach ( array( StoredNames::ESTIMATE, 'wpcheckpoint_unlisted' ) as $each ) {
 		Options::delete( $each ); // reported
 	}
+	update_option( StoredNames::probe( $hash ) . 'x', 1 ); // reported
+	delete_site_transient( StoredNames::is_sha256( $hash ) ? 'wpcheckpoint_storage' : 'x' ); // reported
+	set_site_transient( StoredNames::is_sha256( $hash ), 1 ); // reported
+	call_user_func( 'update_option', 'wpcheckpoint_unlisted', 1 ); // reported
+	array_map( 'delete_option', array( 'wpcheckpoint_unlisted' ) ); // reported
+	global $wpdb;
+	$wpdb->insert( $wpdb->options, array( 'option_name' => 'wpcheckpoint_unlisted' ) ); // reported
+	$wpdb->query( "DELETE FROM {$wpdb->sitemeta}" ); // reported
+	$wpdb->query( "DELETE FROM {$wpdb->posts}" );
 }

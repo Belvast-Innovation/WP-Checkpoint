@@ -88,4 +88,30 @@ final class StoredNamesTest extends TestCase {
 		$this->assertSame( 4, $refused );
 		$this->assertFalse( StoredNames::is_sha256( str_repeat( 'g', 64 ) ) );
 	}
+
+	public function test_a_built_name_is_known_in_every_form_and_only_with_a_suffix_of_its_form(): void {
+		$hash = hash( 'sha256', 'x' );
+		foreach ( array( '', '_transient_', '_transient_timeout_', '_site_transient_', '_site_transient_timeout_' ) as $form ) {
+			$this->assertTrue( StoredNames::is_built( $form . StoredNames::loopback_token( $hash ) ), $form );
+			$this->assertTrue( StoredNames::is_built( $form . StoredNames::loopback_job( 3 ) ), $form );
+			$this->assertTrue( StoredNames::is_built( $form . StoredNames::reclaim_message( 0 ) ), $form );
+			$this->assertTrue( StoredNames::is_built( $form . StoredNames::probe( $hash ) ), $form );
+		}
+		$this->assertTrue( StoredNames::is_built( strtoupper( StoredNames::loopback_job( 3 ) ) ), 'as the collation reads it' );
+		foreach (
+			array(
+				'wpcheckpoint_loopback_' . substr( $hash, 1 ),
+				'wpcheckpoint_loopback_job_',
+				'wpcheckpoint_loopback_job_1x',
+				'wpcheckpoint_probe_' . $hash . '0',
+				'wpcheckpoint_reclaim_message_-1',
+				'_transient_wpcheckpoint_user_roles',
+				'wpcheckpoint_user_roles',
+				StoredNames::STORAGE,
+				'x_' . StoredNames::loopback_job( 3 ),
+			) as $name
+		) {
+			$this->assertFalse( StoredNames::is_built( $name ), $name );
+		}
+	}
 }

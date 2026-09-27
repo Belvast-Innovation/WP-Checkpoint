@@ -449,4 +449,22 @@ final class LoopbackTest extends JobTestCase {
 		$property->setAccessible( true );
 		$property->setValue( $actions, $runner );
 	}
+
+	public function test_a_job_pointer_that_is_not_a_hash_is_forgotten_without_touching_anything_else(): void {
+		$hash  = hash( 'sha256', 'a token' );
+		$other = StoredNames::loopback_token( $hash );
+		set_site_transient( $other, 5, 60 );
+		set_site_transient( StoredNames::loopback_job( 4 ), $hash, 60 );
+		Loopback::revoke_tokens( 4 );
+		$this->assertFalse( get_site_transient( $other ), 'the control: a pointer that is a hash takes its token with it' );
+		$this->assertFalse( get_site_transient( StoredNames::loopback_job( 4 ) ) );
+
+		$kept = StoredNames::loopback_token( hash( 'sha256', 'another token' ) );
+		set_site_transient( $kept, 6, 60 );
+		set_site_transient( StoredNames::loopback_job( 5 ), 'not a hash (from a restored table)', 60 );
+		Loopback::revoke_tokens( 5 );
+		$this->assertFalse( get_site_transient( StoredNames::loopback_job( 5 ) ), 'the pointer is gone' );
+		$this->assertSame( 6, (int) get_site_transient( $kept ), 'and nothing else' );
+		delete_site_transient( $kept );
+	}
 }

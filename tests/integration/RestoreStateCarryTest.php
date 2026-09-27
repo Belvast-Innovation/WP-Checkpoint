@@ -52,7 +52,9 @@ final class RestoreStateCarryTest extends RestoreTestCase {
 		update_site_option( 'wpcheckpoint_carry_marker', 'backup' );
 		update_option( 'wpcheckpoint_user_roles', 'backup' ); // A backup made with the table prefix "wpcheckpoint_".
 		set_site_transient( StoredNames::reclaim_message( 7 ), 'backup', 3600 );
+		set_site_transient( StoredNames::loopback_job( 99 ), 'only in the backup', 3600 );
 		$base = $this->backup( self::site_tables() );
+		delete_site_transient( StoredNames::loopback_job( 99 ) );
 		Options::set( StoredNames::ESTIMATE, 'live' );
 		Options::delete( StoredNames::EXPORT_RATE );
 		set_site_transient( StoredNames::FOREIGN_TABLES, 'live', 3600 );
@@ -79,6 +81,7 @@ final class RestoreStateCarryTest extends RestoreTestCase {
 		}
 		delete_site_transient( StoredNames::FOREIGN_TABLES );
 		delete_site_transient( StoredNames::reclaim_message( 7 ) );
+		delete_site_transient( StoredNames::loopback_job( 99 ) );
 		delete_site_option( 'wpcheckpoint_carry_marker' );
 		delete_option( 'wpcheckpoint_user_roles' );
 		parent::tear_down();
@@ -99,6 +102,18 @@ final class RestoreStateCarryTest extends RestoreTestCase {
 		$names = array() === $names ? StoredNames::stored_forms( $meta ) : $names;
 		$rows  = $this->db->rows( 'SELECT ' . ( $meta ? 'meta_key, meta_value' : 'option_name, option_value' ) . ' FROM ' . SqlWriter::identifier( $table ) . ' WHERE ' . ( $meta ? 'meta_key' : 'option_name' ) . ' IN (' . implode( ', ', array_fill( 0, count( $names ), '?' ) ) . ') ORDER BY 1', $names );
 		return array_column( $rows, 1, 0 );
+	}
+
+	/**
+	 * Rows of a table whose names contain "wpcheckpoint", selected without the registry: name => value.
+	 *
+	 * @return array<string, string>
+	 */
+	private function rows_like_ours( string $table ): array {
+		$meta   = false !== strpos( $table, 'sitemeta' );
+		$column = $meta ? 'meta_key' : 'option_name';
+		$rows   = $this->db->rows( 'SELECT ' . $column . ', ' . ( $meta ? 'meta_value' : 'option_value' ) . ' FROM ' . SqlWriter::identifier( $table ) . ' WHERE ' . $column . " LIKE '%wpcheckpoint%' ORDER BY 1" );
+		return array_diff_key( array_column( $rows, 1, 0 ), array_flip( array( 'wpcheckpoint_carry_marker', 'wpcheckpoint_user_roles' ) ) );
 	}
 
 	/**
@@ -136,12 +151,13 @@ final class RestoreStateCarryTest extends RestoreTestCase {
 		global $wpdb;
 		$this->imported();
 		$state   = is_multisite() ? (string) $this->temporary[1] : $this->temporary[0];
-		$others  = array( 'wpcheckpoint_carry_marker', '_site_transient_' . StoredNames::reclaim_message( 7 ) );
+		$others  = array( 'wpcheckpoint_carry_marker' );
 		$before  = $this->rows_of_names( $state );
 		$foreign = $this->rows_of_names( $state, $others ) + $this->rows_of_names( $this->temporary[0], array( 'wpcheckpoint_user_roles' ) );
 		$this->assertStringContainsString( 'backup', $before[ StoredNames::ESTIMATE ], 'the control: the imported table holds the backup\'s values' );
 		$this->assertArrayHasKey( StoredNames::EXPORT_RATE, $before );
-		$this->assertCount( 3, $foreign, 'and rows named like the plugin\'s that are not in the registry' );
+		$this->assertCount( 2, $foreign, 'and rows named like the plugin\'s that are not in the registry' );
+		$this->assertArrayHasKey( '_site_transient_' . StoredNames::loopback_job( 99 ), $this->rows_like_ours( $state ), 'and a built name only the backup has' );
 		foreach ( $foreign as $value ) {
 			$this->assertStringContainsString( 'backup', $value );
 		}
@@ -153,7 +169,20 @@ final class RestoreStateCarryTest extends RestoreTestCase {
 		$after = $this->rows_of_names( $state );
 		$this->assertStringContainsString( 'live', $after[ StoredNames::ESTIMATE ] );
 		$this->assertArrayNotHasKey( StoredNames::EXPORT_RATE, $after, 'a name only the backup has is gone' );
-		$this->assertArrayHasKey( '_site_transient_' . StoredNames::FOREIGN_TABLES, $after, 'a transient is carried with its value' );
+		$this->assertStringContainsString( 'live', $after[ '_site_transient_' . StoredNames::FOREIGN_TABLES ], 'a transient is carried with its value' );
+		$built = $this->rows_like_ours( $state );
+		$this->assertStringContainsString( 'live', $built[ '_site_transient_' . StoredNames::reclaim_message( 7 ) ], 'a built name is carried' );
+		$this->assertArrayNotHasKey( '_site_transient_' . StoredNames::loopback_job( 99 ), $built, 'a built name only the backup has is gone' );
+		// Selected by what WordPress wrote, not by the registry: every such live row is registered and carried.
+		foreach ( $this->tables() as $pair ) {
+			$live = $this->rows_like_ours( $pair[0] );
+			foreach ( array_keys( $live ) as $name ) {
+				$this->assertTrue( in_array( $name, StoredNames::stored_forms( false !== strpos( $pair[0], 'sitemeta' ) ), true ) || StoredNames::is_built( $name ), 'registered: ' . $name );
+			}
+			$this->assertSame( $live, $this->rows_like_ours( $pair[1] ), 'carried as it is: ' . $pair[1] );
+		}
+		$state_live = $this->rows_like_ours( is_multisite() ? $wpdb->base_prefix . 'sitemeta' : $wpdb->base_prefix . 'options' );
+		$this->assertNotEmpty( preg_grep( '/_timeout_/', array_keys( $state_live ) ), 'the control: the live rows include a transient\'s expiry' );
 		$this->assertSame( $foreign, $this->rows_of_names( $state, $others ) + $this->rows_of_names( $this->temporary[0], array( 'wpcheckpoint_user_roles' ) ), 'the rows outside the registry are the backup\'s' );
 		$this->assertTrue( $this->is_active( $this->active() ) );
 

@@ -93,15 +93,15 @@ final class RulesTest extends TestCase {
 		$expected = array();
 		$calls    = 0;
 		foreach ( (array) file( dirname( __DIR__, 2 ) . '/Fixtures/PHPStan/stored-names.php' ) as $number => $line ) {
-			if ( 1 === preg_match( '/\b(get|update|add|delete|set)_\w+\(|Options::/', (string) $line ) && false === strpos( (string) $line, '*' ) ) {
-				++$calls;
+			if ( 1 === preg_match( '/\b(get|update|add|delete|set)_\w+\(|Options::/', (string) $line ) && false === strpos( (string) $line, '*' ) && false === strpos( (string) $line, '// reported' ) ) {
+				++$calls; // A call to let pass.
 			}
 			if ( false !== strpos( (string) $line, '// reported' ) ) {
 				$expected[] = array( 'wpcheckpoint.storedName', $number + 1 );
 			}
 		}
-		$this->assertCount( 9, $expected, 'the fixture holds the calls to report' );
-		$this->assertGreaterThan( count( $expected ) + 5, $calls, 'and calls to let pass' );
+		$this->assertCount( 16, $expected, 'the fixture holds the calls to report' );
+		$this->assertGreaterThanOrEqual( 9, $calls, 'and calls to let pass' );
 		$this->assertSame( $expected, $found, 'every name outside the registry, and nothing else' );
 	}
 }

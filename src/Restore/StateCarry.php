@@ -28,13 +28,15 @@ defined( 'ABSPATH' ) || exit;
  * row stored under one of the plugin's exact names (Support\StoredNames:
  * the name itself and a transient's value and expiry) with the live
  * table's rows, and puts this plugin in the temporary table's list of
- * active plugins. Exact names, not "everything that starts with
- * wpcheckpoint_": a row of the backup's own named like that (a table prefix
- * "wpcheckpoint_" makes "wpcheckpoint_user_roles") stays the backup's. The
- * names are matched by the columns' collation, as WordPress reads them
- * (get_option() ends in an SQL equality). The plugin's names built at run
- * time are not carried: they are short-lived and the running plugin issues
- * new ones (StoredNames). It is a delete and an insert, so running
+ * active plugins; and does the same with the names the plugin builds at run
+ * time (a loopback token, a probe challenge: StoredNames::is_built(), rows
+ * found by their prefixes and kept only when what follows is of the right
+ * form), so that another job's token or a pending probe outlives the swap.
+ * The plugin's names, not "everything that starts with wpcheckpoint_": a
+ * row of the backup's own named like that (a table prefix "wpcheckpoint_"
+ * makes "wpcheckpoint_user_roles") stays the backup's. The names are
+ * matched by the columns' collation, as WordPress reads them (get_option()
+ * ends in an SQL equality). It is a delete and an insert, so running
  * it again gives the same result. guard() checks that list and runs the
  * swap it is given only when this plugin is in it, right after the check.
  * There is no swap yet: the swap unit (a later part of T042) is to call
@@ -47,6 +49,11 @@ defined( 'ABSPATH' ) || exit;
  * of a network's other sites.
  */
 final class StateCarry {
+
+	/**
+	 * Names per statement when carrying built names.
+	 */
+	const CHUNK = 200;
 
 	/**
 	 * Connection.
@@ -100,12 +107,14 @@ final class StateCarry {
 			$in    = self::marks( $names );
 			$this->db->rows( 'DELETE FROM ' . SqlWriter::identifier( $temp_options ) . ' WHERE option_name IN (' . $in . ')', $names );
 			$this->db->rows( 'INSERT INTO ' . SqlWriter::identifier( $temp_options ) . ' (option_name, option_value, autoload) SELECT option_name, option_value, autoload FROM ' . SqlWriter::identifier( $live_options ) . ' WHERE option_name IN (' . $in . ')', $names );
+			$this->carry_built( $live_options, $temp_options, 'option_name', array(), '(option_name, option_value, autoload) SELECT option_name, option_value, autoload' );
 			if ( null !== $live_meta && null !== $temp_meta ) {
 				$names = StoredNames::stored_forms( true );
 				$in    = self::marks( $names );
 				$args  = array_merge( array( (string) $this->network ), $names );
 				$this->db->rows( 'DELETE FROM ' . SqlWriter::identifier( $temp_meta ) . ' WHERE site_id = ? AND meta_key IN (' . $in . ')', $args );
 				$this->db->rows( 'INSERT INTO ' . SqlWriter::identifier( $temp_meta ) . ' (site_id, meta_key, meta_value) SELECT site_id, meta_key, meta_value FROM ' . SqlWriter::identifier( $live_meta ) . ' WHERE site_id = ? AND meta_key IN (' . $in . ')', $args );
+				$this->carry_built( $live_meta, $temp_meta, 'meta_key', array( (string) $this->network ), '(site_id, meta_key, meta_value) SELECT site_id, meta_key, meta_value' );
 				$this->activate_network( $temp_meta );
 			} else {
 				$this->activate( $temp_options );
@@ -215,6 +224,60 @@ final class StateCarry {
 	private function network_list( string $temp_meta ) {
 		$rows = $this->db->rows( 'SELECT meta_value FROM ' . SqlWriter::identifier( $temp_meta ) . " WHERE site_id = ? AND meta_key = 'active_sitewide_plugins'", array( (string) $this->network ) );
 		return array() === $rows ? null : PluginList::read( (string) $rows[0][0] );
+	}
+
+	/**
+	 * Replace the temporary table's rows under built names with the live table's.
+	 *
+	 * @param string   $live    Live table.
+	 * @param string   $temp    Temporary table.
+	 * @param string   $column  Name column.
+	 * @param string[] $site    The network's id (sitemeta), or nothing (options).
+	 * @param string   $columns Columns inserted and their SELECT list.
+	 * @return void
+	 */
+	private function carry_built( string $live, string $temp, string $column, array $site, string $columns ): void {
+		$where = null === ( $site[0] ?? null ) ? '' : 'site_id = ? AND ';
+		foreach ( array_chunk( $this->built_in( $temp, $column, $where, $site ), self::CHUNK ) as $names ) {
+			$this->db->rows( 'DELETE FROM ' . SqlWriter::identifier( $temp ) . ' WHERE ' . $where . $column . ' IN (' . self::marks( $names ) . ')', array_merge( $site, $names ) );
+		}
+		foreach ( array_chunk( $this->built_in( $live, $column, $where, $site ), self::CHUNK ) as $names ) {
+			$this->db->rows( 'INSERT INTO ' . SqlWriter::identifier( $temp ) . ' ' . $columns . ' FROM ' . SqlWriter::identifier( $live ) . ' WHERE ' . $where . $column . ' IN (' . self::marks( $names ) . ')', array_merge( $site, $names ) );
+		}
+	}
+
+	/**
+	 * The names in a table that are built names (StoredNames::is_built()), found by their prefixes in every form.
+	 *
+	 * @param string   $table  Table.
+	 * @param string   $column Name column.
+	 * @param string   $where  "site_id = ? AND " or nothing.
+	 * @param string[] $site   Its value.
+	 * @return string[]
+	 */
+	private function built_in( string $table, string $column, string $where, array $site ): array {
+		$likes = array();
+		$args  = $site;
+		foreach ( array_merge( array( '' ), StoredNames::TRANSIENT_FORMS ) as $form ) {
+			foreach ( array_keys( StoredNames::BUILT ) as $prefix ) {
+				$likes[] = $column . " LIKE ? ESCAPE '!'";
+				$args[]  = strtr(
+					$form . $prefix,
+					array(
+						'!' => '!!',
+						'%' => '!%',
+						'_' => '!_',
+					)
+				) . '%';
+			}
+		}
+		$names = array();
+		foreach ( $this->db->rows( 'SELECT ' . $column . ' FROM ' . SqlWriter::identifier( $table ) . ' WHERE ' . $where . '(' . implode( ' OR ', $likes ) . ')', $args ) as $row ) {
+			if ( StoredNames::is_built( (string) $row[0] ) ) {
+				$names[] = (string) $row[0];
+			}
+		}
+		return $names;
 	}
 
 	/**

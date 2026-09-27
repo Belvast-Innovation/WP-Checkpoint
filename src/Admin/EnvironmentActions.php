@@ -127,7 +127,6 @@ final class EnvironmentActions {
 		return true;
 	}
 
-
 	/**
 	 * Back to the Tools tab with a result flag.
 	 *

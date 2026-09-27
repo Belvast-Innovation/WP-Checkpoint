@@ -18,12 +18,11 @@ defined( 'ABSPATH' ) || exit;
  * EXACT, or comes from one of the builders here.
  *
  * A restore carries the running plugin's rows over the backup's by these
- * exact names (Restore\StateCarry), so that nothing else that starts with
- * "wpcheckpoint_" is touched: a row of the backup's own named like that (a
- * table prefix "wpcheckpoint_" makes "wpcheckpoint_user_roles") stays the
- * backup's. The names built at run time are not carried: they are
- * short-lived (a one-time loopback token and its job's pointer, a probe
- * challenge, a 60-second message) and the running plugin issues new ones.
+ * names (Restore\StateCarry): the exact ones, and the built ones by their
+ * prefix and the form of what follows (is_built()), so that nothing else
+ * that starts with "wpcheckpoint_" is touched: a row of the backup's own
+ * named like that (a table prefix "wpcheckpoint_" makes
+ * "wpcheckpoint_user_roles") stays the backup's.
  */
 final class StoredNames {
 
@@ -82,9 +81,14 @@ final class StoredNames {
 	);
 
 	/**
-	 * Where WordPress keeps a transient's value and its expiry, in front of the name.
+	 * The methods that build a name (the PHPStan rule accepts a name from these only).
 	 */
-	const TRANSIENT_FORMS = array( '_transient_', '_transient_timeout_', '_site_transient_', '_site_transient_timeout_' );
+	const BUILDERS = array( 'loopback_token', 'loopback_job', 'reclaim_message', 'probe', 'environment_lock' );
+
+	/**
+	 * Where WordPress keeps a transient's value and its expiry, in front of the name (longest first).
+	 */
+	const TRANSIENT_FORMS = array( '_site_transient_timeout_', '_site_transient_', '_transient_timeout_', '_transient_' );
 
 	/**
 	 * The site transient of a loopback token, by the token's SHA-256.
@@ -174,6 +178,47 @@ final class StoredNames {
 	}
 
 	/**
+	 * Whether a row name is a built name in one of the forms it is stored under (the name itself, or a transient's
+	 * value or expiry). Case is ignored in the form and the prefix, as the columns' collation does when WordPress
+	 * reads the row; the suffix must be of the prefix's form.
+	 *
+	 * @param string $stored Row name.
+	 * @return bool
+	 */
+	public static function is_built( string $stored ): bool {
+		foreach ( self::TRANSIENT_FORMS as $form ) {
+			if ( 0 === strncasecmp( $stored, $form, strlen( $form ) ) ) {
+				$stored = (string) substr( $stored, strlen( $form ) );
+				break;
+			}
+		}
+		$prefixes = array_keys( self::BUILT );
+		usort(
+			$prefixes,
+			static function ( string $a, string $b ): int {
+				return strlen( $b ) - strlen( $a ); // "…_loopback_job_" before "…_loopback_".
+			}
+		);
+		foreach ( $prefixes as $prefix ) {
+			if ( 0 === strncasecmp( $stored, $prefix, strlen( $prefix ) ) ) {
+				$suffix = strtolower( (string) substr( $stored, strlen( $prefix ) ) );
+				return 'sha256' === self::BUILT[ $prefix ] ? self::is_sha256( $suffix ) : self::is_id( $suffix );
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Whether a string is an id as the builders write it (1 to 20 decimal digits).
+	 *
+	 * @param string $value Value.
+	 * @return bool
+	 */
+	private static function is_id( string $value ): bool {
+		return '' !== $value && strlen( $value ) <= 20 && strspn( $value, '0123456789' ) === strlen( $value );
+	}
+
+	/**
 	 * A name built from a prefix of BUILT and a suffix of its form.
 	 *
 	 * @param string $prefix Prefix.
@@ -183,7 +228,7 @@ final class StoredNames {
 	 */
 	private static function built( string $prefix, string $suffix ): string {
 		$form = self::BUILT[ $prefix ];
-		$ok   = 'sha256' === $form ? self::is_sha256( $suffix ) : ( '' !== $suffix && strlen( $suffix ) <= 20 && strspn( $suffix, '0123456789' ) === strlen( $suffix ) );
+		$ok   = 'sha256' === $form ? self::is_sha256( $suffix ) : self::is_id( $suffix );
 		if ( ! $ok ) {
 			throw new \InvalidArgumentException( 'A stored name built from a value of the wrong form.' );
 		}

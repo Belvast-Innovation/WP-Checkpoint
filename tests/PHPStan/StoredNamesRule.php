@@ -25,9 +25,15 @@ use PHPStan\Rules\RuleErrorBuilder;
  * a name written anywhere else would be left out, and the restored site
  * would keep the backup's value of it. Reads of names that do not start
  * with "wpcheckpoint_" are WordPress's own options (date_format) and pass.
- * The registry is read through PHPStan's reflection: the plugin's classes
- * exit when loaded outside WordPress. Support\Options itself passes its
- * parameter on; its callers are the ones checked.
+ * A name from StoredNames is a constant or the result of one of its
+ * BUILDERS, no other method. Also reported: one of these functions' names
+ * as a string (a callback: call_user_func( 'update_option', ... ) is out of
+ * reach of the first check), and $wpdb->options or $wpdb->sitemeta (rows
+ * written past the API). The registry is read through PHPStan's
+ * reflection: the plugin's classes exit when loaded outside WordPress.
+ * Support\Options itself passes its parameter on; its callers are the
+ * ones checked. The rule checks that a name is registered, not the table
+ * it lands in: a subsite's option is not carried by a restore either way.
  *
  * @implements Rule<Node>
  */
@@ -87,6 +93,13 @@ final class StoredNamesRule implements Rule {
 	 */
 	private $exact = null;
 
+	/**
+	 * StoredNames::BUILDERS, once read.
+	 *
+	 * @var array<string, true>|null
+	 */
+	private $builders = null;
+
 	public function __construct( ReflectionProvider $reflection ) {
 		$this->reflection = $reflection;
 	}
@@ -99,6 +112,12 @@ final class StoredNamesRule implements Rule {
 	 * @return list<IdentifierRuleError>
 	 */
 	public function processNode( Node $node, Scope $scope ): array {
+		if ( $node instanceof Node\Scalar\String_ && isset( self::FUNCTIONS[ strtolower( ltrim( $node->value, '\\' ) ) ] ) ) {
+			return array( self::error( sprintf( '\'%s\' as a name: a callback of the options or transients API is out of reach of this rule; call it directly.', $node->value ) ) );
+		}
+		if ( $node instanceof Node\Expr\PropertyFetch && $node->var instanceof Node\Expr\Variable && 'wpdb' === $node->var->name && $node->name instanceof Node\Identifier && in_array( $node->name->toString(), array( 'options', 'sitemeta' ), true ) ) {
+			return array( self::error( sprintf( '$wpdb->%s: write options and site options through the API, with a name from StoredNames.', $node->name->toString() ) ) );
+		}
 		$call = self::call_of( $node, $scope );
 		if ( null === $call ) {
 			return array();
@@ -114,7 +133,7 @@ final class StoredNamesRule implements Rule {
 			return array();
 		}
 		$name = $args[ $position ]->value;
-		if ( $name instanceof StaticCall && $name->class instanceof Name && self::REGISTRY === $scope->resolveName( $name->class ) ) {
+		if ( $name instanceof StaticCall && $name->class instanceof Name && self::REGISTRY === $scope->resolveName( $name->class ) && $name->name instanceof Node\Identifier && isset( $this->builders()[ strtolower( $name->name->toString() ) ] ) ) {
 			return array();
 		}
 		$strings = $scope->getType( $name )->getConstantStrings();
@@ -177,6 +196,28 @@ final class StoredNamesRule implements Rule {
 			}
 		}
 		return $this->exact;
+	}
+
+	/**
+	 * StoredNames::BUILDERS as a set.
+	 *
+	 * @return array<string, true>
+	 */
+	private function builders(): array {
+		if ( null === $this->builders ) {
+			$this->builders = array();
+			if ( $this->reflection->hasClass( self::REGISTRY ) ) {
+				$type = $this->reflection->getClass( self::REGISTRY )->getConstant( 'BUILDERS' )->getValueType();
+				foreach ( $type->getConstantArrays() as $array ) {
+					foreach ( $array->getValueTypes() as $value ) {
+						foreach ( $value->getConstantStrings() as $string ) {
+							$this->builders[ strtolower( $string->getValue() ) ] = true;
+						}
+					}
+				}
+			}
+		}
+		return $this->builders;
 	}
 
 	private static function error( string $message ): IdentifierRuleError {
