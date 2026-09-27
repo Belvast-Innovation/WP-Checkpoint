@@ -55,6 +55,7 @@ final class FirstUnitRuleTest extends TestCase {
 		'src/Jobs/VerifyStep.php'           => 'tests/integration/NoBudgetLeftTest.php::test_a_verify_moves_on_in_every_tick_with_no_time_left',
 		'src/Jobs/RestoreVerifyStep.php'    => 'tests/integration/NoBudgetLeftTest.php::test_a_restore_moves_on_in_every_tick_with_no_time_left',
 		'src/Jobs/RestorePreflightStep.php' => 'tests/integration/NoBudgetLeftTest.php::test_a_restore_moves_on_in_every_tick_with_no_time_left',
+		'src/Jobs/RestoreFilesPreflightStep.php' => 'tests/integration/NoBudgetLeftTest.php::test_a_restore_moves_on_in_every_tick_with_no_time_left',
 		'src/Jobs/DatabaseImportStep.php'   => 'tests/integration/NoBudgetLeftTest.php::test_a_restore_moves_on_in_every_tick_with_no_time_left',
 		'src/Jobs/TempTableDropper.php'     => 'tests/integration/JobRepositoryTest.php::test_the_first_drop_of_a_call_runs_even_when_the_time_is_already_up',
 		'src/Support/Schema.php'            => 'tests/integration/JobRepositoryTest.php::test_uninstall_runs_one_call_even_when_its_time_is_already_up',

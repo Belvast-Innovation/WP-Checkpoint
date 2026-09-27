@@ -1,0 +1,85 @@
+<?php
+
+namespace WPCheckpoint\Tests\Unit\Restore;
+
+use WPCheckpoint\Restore\TargetNames;
+use Yoast\PHPUnitPolyfills\TestCases\TestCase;
+
+/**
+ * Two paths share a key only in the ways the probe saw the file system fold them.
+ */
+final class TargetNamesTest extends TestCase {
+
+	const NFC = "caf\xC3\xA9";
+	const NFD = "cafe\xCC\x81";
+
+	public function test_a_file_system_that_folds_nothing_keeps_every_name_apart(): void {
+		$names = new TargetNames( false, false, false, false );
+		$this->assertNotSame( $names->key( 'a/Foo.txt' ), $names->key( 'a/foo.txt' ) );
+		$this->assertNotSame( $names->key( self::NFC ), $names->key( self::NFD ) );
+		$this->assertNotSame( $names->key( 'a./b' ), $names->key( 'a/b' ) );
+		$this->assertSame( 'a/Foo.txt', $names->key( 'a/Foo.txt' ), 'the path itself' );
+	}
+
+	public function test_each_behaviour_folds_what_it_names_and_nothing_else(): void {
+		$ascii = new TargetNames( true, false, false, false );
+		$this->assertSame( $ascii->key( 'A/Foo.TXT' ), $ascii->key( 'a/foo.txt' ) );
+		$this->assertNotSame( $ascii->key( "\xC3\x89t\xC3\xA9" ), $ascii->key( "\xC3\xA9t\xC3\xA9" ), 'ASCII only: "É" stays' );
+
+		$unicode = new TargetNames( true, true, false, false );
+		$this->assertSame( $unicode->key( "\xC3\x89t\xC3\xA9" ), $unicode->key( "\xC3\xA9t\xC3\xA9" ) );
+
+		$trailing = new TargetNames( false, false, false, true );
+		$this->assertSame( $trailing->key( 'a. /b.' ), $trailing->key( 'a/b' ) );
+		$this->assertNotSame( $trailing->key( 'a/B' ), $trailing->key( 'a/b' ) );
+	}
+
+	public function test_normalising_file_systems_join_nfc_and_nfd_when_intl_is_there(): void {
+		$names = new TargetNames( false, false, true, false );
+		if ( ! class_exists( '\Normalizer' ) ) {
+			$this->assertTrue( $names->approximate(), 'said so when it cannot tell' );
+			return;
+		}
+		$this->assertFalse( $names->approximate() );
+		$this->assertSame( $names->key( 'x/' . self::NFC ), $names->key( 'x/' . self::NFD ) );
+		$this->assertFalse( ( new TargetNames( true, true, false, true ) )->approximate(), 'nothing to normalise: exact' );
+	}
+
+	public function test_a_name_that_is_not_utf8_is_folded_as_ascii_only(): void {
+		$names = new TargetNames( true, true, true, false );
+		$this->assertSame( "a\xFF", $names->key( "A\xFF" ) );
+	}
+
+	public function test_the_flags_round_trip(): void {
+		$names = new TargetNames( true, false, true, false );
+		$this->assertEquals( $names, TargetNames::from_array( $names->to_array() ) );
+		$this->assertEquals( new TargetNames( false, false, false, false ), TargetNames::from_array( array() ) );
+	}
+
+	public function test_names_the_win32_namespace_cannot_store_are_found_only_there(): void {
+		$win32 = new TargetNames( true, true, false, true, true );
+		foreach ( array( 'a/b<c', 'a:b', 'x/"q"', 'p|q', 'what?', 'star*', 'CON', 'con.txt', 'x/Nul', 'COM1.log', 'lpt9', 'aux. ', 'NUL.tar.gz', 'x/con.min.js', "COM\xC2\xB9", "lpt\xC2\xB3.txt" ) as $path ) {
+			$this->assertNotNull( $win32->unstorable( $path ), $path );
+		}
+		$this->assertSame( 'COM1.log', $win32->unstorable( 'uploads/COM1.log/x' ), 'the segment is named' );
+		foreach ( array( 'a/b', 'console', 'CON1', 'com10', 'nul-file', 'LPT0', 'x/CONFIG.txt', 'CONSOLE.tar.gz', 'COM0.x', "COM\xC2\xB4" ) as $path ) {
+			$this->assertNull( $win32->unstorable( $path ), $path );
+		}
+		$this->assertNull( ( new TargetNames( false, false, false, false, false ) )->unstorable( 'a<b/CON' ), 'another file system stores them' );
+		$this->assertEquals( $win32, TargetNames::from_array( $win32->to_array() ) );
+	}
+
+	public function test_a_file_system_that_refuses_a_trailing_dot_cannot_store_such_a_segment(): void {
+		$refusing = new TargetNames( true, true, false, false, true, true );
+		foreach ( array( 'a.', 'x/b /c', 'dir./f', 'x/..../y' ) as $path ) {
+			$this->assertNotNull( $refusing->unstorable( $path ), $path );
+		}
+		$this->assertSame( 'b ', $refusing->unstorable( 'x/b /c' ), 'the segment is named' );
+		foreach ( array( 'a.b', '.htaccess', 'x/.well-known/y' ) as $path ) {
+			$this->assertNull( $refusing->unstorable( $path ), $path );
+		}
+		$this->assertNull( ( new TargetNames( false, false, false, false, false, false ) )->unstorable( 'a./b ' ), 'the control: a file system that stores them' );
+		$this->assertNull( ( new TargetNames( false, false, false, true, false, false ) )->unstorable( 'a./b ' ), 'one that drops the ending stores them (under another key)' );
+		$this->assertEquals( $refusing, TargetNames::from_array( $refusing->to_array() ) );
+	}
+}

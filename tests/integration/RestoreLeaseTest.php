@@ -59,9 +59,7 @@ final class RestoreLeaseTest extends RestoreTestCase {
 	 */
 	private function start( string $base, callable $seam ): Job {
 		$type  = 'restore_lease_' . bin2hex( random_bytes( 3 ) );
-		$steps = Plugin::instance()->job_types()->get( 'restore' )->steps();
-
-		$steps[2] = new DatabaseImportStep( null, $seam );
+		$steps = self::restore_steps_with( new DatabaseImportStep( null, $seam ) );
 		$this->register( $type, $steps );
 		$job          = Plugin::instance()->jobs()->create( $type, self::$admin_id, array(), array( 'base' => $base ) );
 		$this->job_id = $job->id;

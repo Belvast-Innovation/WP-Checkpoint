@@ -22,6 +22,13 @@ defined( 'ABSPATH' ) || exit;
  *   line per table, appended by the preflight under a committed length).
  * - HEADS, CHUNKS: directories the preflight and the import extract chunks
  *   into, one at a time.
+ * - STAGING: where the files are staged (the site's directories as the
+ *   files preflight resolved them, the groups staged, the random part of
+ *   the staging roots' names), fixed once.
+ * - KEYS: a directory of name-key buckets (NameClashes), appended under
+ *   committed lengths.
+ * - UNMAPPED: the backup's paths that belong to no content group and are
+ *   not restored (one JSON line each, appended under a committed length).
  */
 final class RestoreFiles {
 
@@ -31,6 +38,9 @@ final class RestoreFiles {
 	const DEFINITIONS = 'restore-definitions.jsonl';
 	const HEADS       = 'restore-heads';
 	const CHUNKS      = 'restore-chunks';
+	const STAGING     = 'restore-staging.json';
+	const KEYS        = 'restore-keys';
+	const UNMAPPED    = 'restore-unmapped.jsonl';
 
 	/**
 	 * A file or directory of the work directory.

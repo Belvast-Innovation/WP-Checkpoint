@@ -5,6 +5,7 @@ namespace WPCheckpoint\Tests\Unit\Support;
 use WPCheckpoint\Restore\StagingLayout;
 use WPCheckpoint\Support\AtomicFile;
 use WPCheckpoint\Support\AtomicWriteFailed;
+use WPCheckpoint\Tests\Fixtures\Support\MemoryStream;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 /**
@@ -190,5 +191,71 @@ final class AtomicFileTest extends TestCase {
 		$this->assertSame( array(), $this->names() );
 		AtomicFile::write( $this->dir, self::NAME, str_repeat( 'x', AtomicFile::MAX_BYTES ) );
 		$this->assertSame( AtomicFile::MAX_BYTES, filesize( $this->dir . '/' . self::NAME ), 'the control: the largest is written' );
+	}
+
+	public function test_the_temporary_file_is_synced_before_the_rename(): void {
+		$synced = array();
+		$dir    = $this->dir;
+		AtomicFile::write(
+			$this->dir,
+			self::NAME,
+			'x',
+			array(
+				'sync' => static function ( $handle ) use ( &$synced, $dir ): bool {
+					$synced[] = array(
+						basename( (string) stream_get_meta_data( $handle )['uri'] ),
+						file_exists( $dir . '/' . self::NAME ),
+					);
+					return true;
+				},
+			)
+		);
+		$this->assertCount( 1, $synced, 'once' );
+		$this->assertStringStartsWith( self::NAME . '.', $synced[0][0], 'the temporary file' );
+		$this->assertStringEndsWith( '.tmp', $synced[0][0] );
+		$this->assertFalse( $synced[0][1], 'before the final name exists' );
+
+		try {
+			AtomicFile::write(
+				$this->dir,
+				self::NAME,
+				'y',
+				array(
+					'sync' => static function (): bool {
+						return false;
+					},
+				)
+			);
+			$this->fail( 'written' );
+		} catch ( AtomicWriteFailed $e ) {
+			$this->assertSame( 'The file could not be synced to disk.', $e->getMessage() );
+		}
+		$this->assertSame( array( self::NAME ), $this->names(), 'a failed sync leaves no temporary file, and the file written before stays' );
+	}
+
+	public function test_fsync_is_called_where_php_has_it_and_its_absence_is_the_known_limit(): void {
+		$this->assertSame( function_exists( 'fsync' ), null !== AtomicFile::sync(), 'the default is fsync() exactly where it exists' );
+		MemoryStream::register();
+		$dir = MemoryStream::SCHEME . '://dir';
+		// The control: with no sync, the in-memory file system takes the whole write.
+		AtomicFile::write( $dir, self::NAME, 'x', array( 'sync' => null ) );
+		$this->assertSame( 'x', MemoryStream::$files[ $dir . DIRECTORY_SEPARATOR . self::NAME ] ?? null );
+		MemoryStream::$files = array();
+		if ( ! function_exists( 'fsync' ) ) {
+			// PHP 7.4 and 8.0: nothing to call; the write goes through unsynced (the documented limit).
+			AtomicFile::write( $dir, self::NAME, 'x' );
+			$this->assertSame( 'x', MemoryStream::$files[ $dir . DIRECTORY_SEPARATOR . self::NAME ] ?? null );
+			return;
+		}
+		// PHP 8.1 and later: the default calls fsync(), which cannot sync this stream, so the write stops there.
+		try {
+			AtomicFile::write( $dir, self::NAME, 'x' );
+			$this->fail( 'fsync() was not called' );
+		} catch ( AtomicWriteFailed $e ) {
+			$this->assertSame( 'The file could not be synced to disk.', $e->getMessage() );
+		}
+		$this->assertSame( array(), MemoryStream::$files, 'nothing left' );
+		$this->assertTrue( call_user_func( AtomicFile::sync(), fopen( $this->dir . '/plain', 'wb' ) ), 'a plain file syncs' );
+		unlink( $this->dir . '/plain' );
 	}
 }

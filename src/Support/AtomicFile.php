@@ -22,16 +22,21 @@ defined( 'ABSPATH' ) || exit;
  *
  * What a process that dies can leave: before the rename, only the
  * temporary file (the final name is untouched); after it, the whole final
- * file. Never a partial file under the final name. It is not a promise
- * against a crash of the machine itself (no fsync). Only names the residue
+ * file. Never a partial file under the final name. Against a crash of the
+ * machine itself (power loss) the temporary file is synced to disk before
+ * the rename where PHP can (fsync(), PHP 8.1 and later). Known limit: on
+ * PHP 7.4 and 8.0 there is no fsync(), and a power loss right after the
+ * rename may leave the final name with incomplete contents (the file
+ * system may commit the rename before the data). Only names the residue
  * catalogue recognises are written (StagingLayout::parse(), which also
  * knows their temporary names), so whatever is left is reclaimed.
  *
- * The rename and the removal of a final file that does not read back as
- * written cannot be undone: the "confirm" option (a job's lease check) is
- * called right before each, as for any irreversible step. A read-back that
- * fails (the file could not be opened) leaves the file: no evidence that
- * it is wrong.
+ * The rename cannot be undone: the "confirm" option (a job's lease check)
+ * is called right before it, as for any irreversible step. A final file
+ * that does not read back as written is removed without asking (its name
+ * is this call's alone, and a file of unknown contents must not stay
+ * where it may be loaded). A read-back that fails (the file could not be
+ * opened) leaves the file: no evidence that it is wrong.
  */
 final class AtomicFile {
 
@@ -51,7 +56,8 @@ final class AtomicFile {
 	 *                                       stop; the temporary file is removed);
 	 *                                       "at" (tests): function( string $stage ): void at "written" (before the
 	 *                                       rename) and "renamed" (before the read-back), where throwing stands in
-	 *                                       for a process that dies there.
+	 *                                       for a process that dies there; "sync" (tests): function( resource ):
+	 *                                       bool in place of sync() (null: none).
 	 * @return string The final path.
 	 * @throws \InvalidArgumentException When the name is not a registered file name or the contents are too large.
 	 * @throws AtomicWriteFailed When the file could not be put in place as written.
@@ -74,12 +80,18 @@ final class AtomicFile {
 		if ( false === $handle ) {
 			throw new AtomicWriteFailed( 'The file could not be created.' );
 		}
+		$sync    = array_key_exists( 'sync', $options ) ? $options['sync'] : self::sync();
 		$written = @fwrite( $handle, $contents ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
 		$flushed = @fflush( $handle ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
+		$synced  = null === $sync || false !== call_user_func( $sync, $handle );
 		$closed  = @fclose( $handle ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
 		if ( strlen( $contents ) !== $written || ! $flushed || ! $closed ) {
 			@unlink( $temp ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
 			throw new AtomicWriteFailed( 'The file could not be written in full.' );
+		}
+		if ( ! $synced ) {
+			@unlink( $temp ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
+			throw new AtomicWriteFailed( 'The file could not be synced to disk.' );
 		}
 		if ( null !== $at ) {
 			call_user_func( $at, 'written' );
@@ -111,5 +123,20 @@ final class AtomicFile {
 			throw new AtomicWriteFailed( 'The file did not read back as written.' );
 		}
 		return $final;
+	}
+
+	/**
+	 * What syncs a file's contents to disk before the rename: fsync() where PHP has it (8.1 and later, and not
+	 * disabled by the host), otherwise null (see the class description's known limit).
+	 *
+	 * @return callable|null
+	 */
+	public static function sync() {
+		if ( ! function_exists( 'fsync' ) ) {
+			return null;
+		}
+		return static function ( $handle ): bool {
+			return @fsync( $handle ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a warning would put the path into the error log; failure is reported.
+		};
 	}
 }

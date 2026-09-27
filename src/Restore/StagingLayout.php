@@ -46,6 +46,12 @@ final class StagingLayout {
 	const RANDOM_PATTERN = '/\A[a-f0-9]{32}\z/';
 
 	/**
+	 * Longest staged path: what PHP passes to the file system in one call. The staged path is longer than the
+	 * live one by the staging root's name, so a path that fits live may not fit staged.
+	 */
+	const MAX_PATH_BYTES = PHP_MAXPATHLEN - 1;
+
+	/**
 	 * Group => this site's live directory (normalised, absolute, no trailing separator).
 	 *
 	 * @var array<string, string>

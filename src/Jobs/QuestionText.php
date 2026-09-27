@@ -110,6 +110,9 @@ final class QuestionText {
 			$rows  = null === $table['count'] ? 'may have rows' : sprintf( 'has %d rows', (int) $table['count'] );
 			return sprintf( 'Table %s %s larger than the single-row limit of %d bytes. Leave those rows out, or stop?', (string) $table['table'], $rows, (int) $table['limit'] );
 		}
+		if ( 'free_space' === $id ) {
+			return sprintf( 'This server does not say how much disk space is free, so whether the restore\'s staged files (%d MB with a margin) fit cannot be confirmed. Continue anyway, or stop?', (int) ceil( (int) ( $question['bytes'] ?? 0 ) / 1048576 ) );
+		}
 		if ( 'oversize_more' === $id ) {
 			return sprintf( '%d more tables have rows larger than the single-row limit (listed in the job log). Leave those rows out, or stop?', $count );
 		}
