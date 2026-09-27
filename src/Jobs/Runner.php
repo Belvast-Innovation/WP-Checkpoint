@@ -358,9 +358,9 @@ final class Runner {
 				$this->persist( $job, $token, $step_id, $context->cursor(), $state, $job->progress, $job->progress_message, false );
 				$this->release( $job, $token );
 				return new TickResult( TickResult::WAITING, $wait, $job, $message );
-			} catch ( StoppedByAnswer $e ) {
-				// The answer that stopped it goes with the failure: a retry asks the question again.
-				return $this->fail( $job, $token, $logger, sprintf( 'Step "%s": %s', $step_id, $this->describe( $e ) ), '', '', $e->question() );
+			} catch ( Stopped $e ) {
+				// The answers that stopped it go with the failure: a retry asks those questions again.
+				return $this->fail( $job, $token, $logger, sprintf( 'Step "%s": %s', $step_id, $this->describe( $e ) ), '', '', $e->questions() );
 			} catch ( RetryFrom $e ) {
 				$from = array_search( $e->step(), $ids, true );
 				if ( false === $from || $from > $index ) {
@@ -717,17 +717,17 @@ final class Runner {
 	/**
 	 * Fenced status change.
 	 *
-	 * @param Job    $job     Job.
-	 * @param string $token   Lock token.
-	 * @param string $to      Target status.
-	 * @param string $error   Error message.
-	 * @param string $failure Kind of a failure (Job::FAILURE_*).
-	 * @param string $retry_from Id of the step a retry of a failed job starts at ('' for none).
-	 * @param string $forget     Id of a question whose answer a failure removes ('' for none).
+	 * @param Job      $job     Job.
+	 * @param string   $token   Lock token.
+	 * @param string   $to      Target status.
+	 * @param string   $error   Error message.
+	 * @param string   $failure Kind of a failure (Job::FAILURE_*).
+	 * @param string   $retry_from Id of the step a retry of a failed job starts at ('' for none).
+	 * @param string[] $forget   Ids of questions whose answers a failure removes.
 	 * @return void
 	 * @throws LockLost When the write refused.
 	 */
-	private function transition( Job $job, string $token, string $to, string $error, string $failure = '', string $retry_from = '', string $forget = '' ): void {
+	private function transition( Job $job, string $token, string $to, string $error, string $failure = '', string $retry_from = '', array $forget = array() ): void {
 		try {
 			$this->repository->transition( $job, $to, $error, $token, $failure, $retry_from, $forget );
 		} catch ( StaleJob $e ) {
@@ -773,18 +773,18 @@ final class Runner {
 	/**
 	 * Fail the job (fenced).
 	 *
-	 * @param Job    $job     Job.
-	 * @param string $token   Lock token.
-	 * @param Logger $logger  Logger.
-	 * @param string $message Error message (paths already masked).
-	 * @param string $failure Job::FAILURE_TEMPORARY (a passing problem), Job::FAILURE_FINAL (lost work
-	 *                        files: a retry fails the same way; with a reason, see failure_of()), or ''
-	 *                        when the cause does not say.
-	 * @param string $retry_from Id of the step a retry starts at (RetryFrom), '' to continue the failing one.
-	 * @param string $forget     Id of a question whose answer stopped the job (StoppedByAnswer), removed in the same write.
+	 * @param Job      $job     Job.
+	 * @param string   $token   Lock token.
+	 * @param Logger   $logger  Logger.
+	 * @param string   $message Error message (paths already masked).
+	 * @param string   $failure Job::FAILURE_TEMPORARY (a passing problem), Job::FAILURE_FINAL (lost work
+	 *                          files: a retry fails the same way; with a reason, see failure_of()), or ''
+	 *                          when the cause does not say.
+	 * @param string   $retry_from Id of the step a retry starts at (RetryFrom), '' to continue the failing one.
+	 * @param string[] $forget   Ids of questions whose answers stopped the job (Stopped), removed in the same write.
 	 * @return TickResult
 	 */
-	private function fail( Job $job, string $token, Logger $logger, string $message, string $failure = '', string $retry_from = '', string $forget = '' ): TickResult {
+	private function fail( Job $job, string $token, Logger $logger, string $message, string $failure = '', string $retry_from = '', array $forget = array() ): TickResult {
 		$logger->error( 'Job failed', array( 'error' => $message ) );
 		$this->transition( $job, $token, Job::FAILED, $message, $failure, $retry_from, $forget );
 		return new TickResult( TickResult::FAILED, -1, $job, $this->redactor->redact( $message ) );

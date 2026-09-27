@@ -1143,22 +1143,22 @@ final class JobRepository {
 	 * Job::transition() on a copy validates first and throws InvalidTransition
 	 * when the state machine forbids the move.
 	 *
-	 * @param Job    $job   Job (updated in place on success).
-	 * @param string $to    Target status.
-	 * @param string $error Error message for failed (redacted before storing).
-	 * @param string $token Lock token; required when leaving running for anything but cancelled.
-	 * @param string $failure Kind of failure for a failed job (Job::stamp_failure(), or '' when the cause does not say).
-	 * @param string $retry_from For a failed job: the step a retry starts at (RetryFrom), recorded in the cursor in
-	 *                           the same write; a retry (to queued) then sets that step and an empty cursor in its
-	 *                           own single write.
-	 * @param string $forget     For a failed job: the id of a question whose answer stopped it (StoppedByAnswer), removed
-	 *                           from the options in the same write, so a retry asks it again.
+	 * @param Job      $job   Job (updated in place on success).
+	 * @param string   $to    Target status.
+	 * @param string   $error Error message for failed (redacted before storing).
+	 * @param string   $token Lock token; required when leaving running for anything but cancelled.
+	 * @param string   $failure Kind of failure for a failed job (Job::stamp_failure(), or '' when the cause does not say).
+	 * @param string   $retry_from For a failed job: the step a retry starts at (RetryFrom), recorded in the cursor in
+	 *                             the same write; a retry (to queued) then sets that step and an empty cursor in its
+	 *                             own single write.
+	 * @param string[] $forget   For a failed job: ids of questions whose answers stopped it (Stopped), removed from the
+	 *                           options in the same write, so a retry asks them again.
 	 * @return Job
 	 * @throws InvalidTransition When the state machine forbids the move or the token is missing.
 	 * @throws StaleJob When the row no longer has the expected status (or the lock changed hands).
 	 * @throws \RuntimeException When the cursor with the step to retry from, or the options, cannot be encoded.
 	 */
-	public function transition( Job $job, string $to, string $error = '', string $token = '', string $failure = '', string $retry_from = '', string $forget = '' ): Job {
+	public function transition( Job $job, string $to, string $error = '', string $token = '', string $failure = '', string $retry_from = '', array $forget = array() ): Job {
 		if ( '' === $token && Job::RUNNING === $job->status && Job::CANCELLED !== $to ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
 			throw new InvalidTransition( sprintf( 'Job %d: leaving running for %s requires the lock token.', $job->id, $to ) );
@@ -1167,7 +1167,9 @@ final class JobRepository {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
 			throw new InvalidTransition( sprintf( 'Job %d: its work files passed their retention period and were reclaimed; it cannot be retried.', $job->id ) );
 		}
-		if ( '' === $retry_from && '' === $forget ) {
+		$answers = isset( $job->options['answers'] ) && is_array( $job->options['answers'] ) ? $job->options['answers'] : array();
+		$forget  = array_values( array_intersect( array_map( 'strval', $forget ), array_map( 'strval', array_keys( $answers ) ) ) );
+		if ( '' === $retry_from && array() === $forget ) {
 			return $this->write_transition( $job, $to, $error, $token, array(), array(), $failure );
 		}
 		if ( Job::FAILED !== $to ) {
@@ -1187,9 +1189,11 @@ final class JobRepository {
 			}
 			$extra['cursor_json'] = $json;
 		}
-		if ( '' !== $forget && isset( $job->options['answers'] ) && is_array( $job->options['answers'] ) && array_key_exists( $forget, $job->options['answers'] ) ) {
+		if ( array() !== $forget ) {
 			$options = $job->options;
-			unset( $options['answers'][ $forget ] );
+			foreach ( $forget as $question ) {
+				unset( $options['answers'][ $question ] );
+			}
 			if ( array() === $options['answers'] ) {
 				unset( $options['answers'] );
 			}

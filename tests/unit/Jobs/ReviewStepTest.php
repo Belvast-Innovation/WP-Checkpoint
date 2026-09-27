@@ -9,7 +9,7 @@ use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\JobContext;
 use WPCheckpoint\Jobs\ReviewStep;
 use WPCheckpoint\Jobs\StepResult;
-use WPCheckpoint\Jobs\StoppedByAnswer;
+use WPCheckpoint\Jobs\Stopped;
 use WPCheckpoint\Support\Logger;
 use WPCheckpoint\Support\Redactor;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
@@ -326,7 +326,7 @@ final class ReviewStepTest extends TestCase {
 		$this->assertSame( $decided, $this->review(), 'running twice writes the same bytes: nothing is appended' );
 	}
 
-	public function test_a_stop_answer_names_its_question_so_the_failure_can_forget_it(): void {
+	public function test_every_stop_is_named_at_once_so_the_failure_can_forget_them_all(): void {
 		$this->inputs(
 			array(
 				array(
@@ -346,16 +346,20 @@ final class ReviewStepTest extends TestCase {
 					'unreadable' => 'continue',
 					'oversize_0' => 'stop',
 				),
+				array(
+					'unreadable' => 'stop',
+					'oversize_0' => 'stop',
+				),
 			) as $answers
 		) {
 			try {
 				( new ReviewStep() )->run( $this->context( array( 'answers' => $answers ) ) );
 				$this->fail( 'stopped' );
-			} catch ( StoppedByAnswer $e ) {
-				$stopped[] = $e->question();
+			} catch ( Stopped $e ) {
+				$stopped[] = $e->questions();
 			}
 		}
-		$this->assertSame( array( 'unreadable', 'oversize_0' ), $stopped );
+		$this->assertSame( array( array( 'unreadable' ), array( 'oversize_0' ), array( 'unreadable', 'oversize_0' ) ), $stopped );
 	}
 
 	public function test_a_policy_decides_without_asking_and_fail_stops_with_the_reason(): void {
@@ -404,7 +408,7 @@ final class ReviewStepTest extends TestCase {
 			);
 			$this->fail();
 		} catch ( \RuntimeException $e ) {
-			$this->assertStringContainsString( 'Stopped: table wp_options has rows larger than the single-row limit of 4194304 bytes (as SQL) (2 rows)', $e->getMessage() );
+			$this->assertStringContainsString( 'table wp_options has rows larger than the single-row limit of 4194304 bytes (as SQL) (2 rows)', $e->getMessage() );
 		}
 		try {
 			( new ReviewStep() )->run(
@@ -420,7 +424,7 @@ final class ReviewStepTest extends TestCase {
 			);
 			$this->fail();
 		} catch ( \RuntimeException $e ) {
-			$this->assertStringContainsString( 'Stopped: 1 files cannot be read', $e->getMessage() );
+			$this->assertStringContainsString( '1 files cannot be read', $e->getMessage() );
 		}
 		// A partial policy asks only what it does not cover.
 		$result = ( new ReviewStep() )->run(

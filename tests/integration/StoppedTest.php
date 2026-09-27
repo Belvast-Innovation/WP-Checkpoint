@@ -5,7 +5,7 @@ namespace WPCheckpoint\Tests\Integration;
 use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\JobContext;
 use WPCheckpoint\Jobs\StepResult;
-use WPCheckpoint\Jobs\StoppedByAnswer;
+use WPCheckpoint\Jobs\Stopped;
 use WPCheckpoint\Plugin;
 use WPCheckpoint\Tests\Fixtures\Jobs\ClosureStep;
 use WPCheckpoint\Tests\Fixtures\Jobs\JobTestCase;
@@ -14,10 +14,10 @@ use WPCheckpoint\Tests\Fixtures\Jobs\JobTestCase;
  * An answer that stops the job goes with the failure: a retry asks that
  * question again, and the answers that let the job go on stay.
  */
-final class StoppedByAnswerTest extends JobTestCase {
+final class StoppedTest extends JobTestCase {
 
 	/**
-	 * A job whose one step asks "big" (exclude / stop) and "odd" (continue / stop), and stops on a "stop".
+	 * A job whose one step asks "big" (exclude / stop) and "odd" (continue / stop), and stops naming every "stop".
 	 */
 	private function job(): int {
 		$this->register(
@@ -28,6 +28,7 @@ final class StoppedByAnswerTest extends JobTestCase {
 					static function ( JobContext $ctx ): StepResult {
 						$answers   = (array) ( $ctx->options()['answers'] ?? array() );
 						$questions = array();
+						$stops     = array();
 						foreach ( array( 'big' => array( 'exclude', 'stop' ), 'odd' => array( 'continue', 'stop' ) ) as $id => $choices ) {
 							if ( ! isset( $answers[ $id ] ) ) {
 								$questions[] = array(
@@ -37,8 +38,11 @@ final class StoppedByAnswerTest extends JobTestCase {
 									'choices' => $choices,
 								);
 							} elseif ( 'stop' === $answers[ $id ] ) {
-								throw new StoppedByAnswer( 'Stopped at ' . $id . '.', $id );
+								$stops[] = $id;
 							}
+						}
+						if ( array() !== $stops ) {
+							throw new Stopped( 'Stopped at ' . implode( ', ', $stops ) . '.', $stops );
 						}
 						return array() === $questions ? StepResult::done( 'reviewed' ) : StepResult::ask( array(), $questions, 'asking' );
 					}
@@ -114,6 +118,23 @@ final class StoppedByAnswerTest extends JobTestCase {
 		$this->assertSame( array( 'odd' => 'continue' ), $job->options['answers'] );
 		Plugin::instance()->job_actions()->retry( $id );
 		$this->assert_asks( $this->drive( $id ), array( 'big' ) );
+	}
+
+	public function test_two_stops_are_both_asked_again_by_one_retry(): void {
+		$id = $this->job();
+		$this->drive( $id );
+		Plugin::instance()->job_actions()->answer(
+			$id,
+			array(
+				'big' => 'stop',
+				'odd' => 'stop',
+			)
+		);
+		$job = $this->drive( $id );
+		$this->assertSame( Job::FAILED, $job->status );
+		$this->assertArrayNotHasKey( 'answers', $job->options, 'both answers went with the failure' );
+		Plugin::instance()->job_actions()->retry( $id );
+		$this->assert_asks( $this->drive( $id ), array( 'big', 'odd' ) );
 	}
 
 	public function test_any_other_failure_keeps_every_answer(): void {
