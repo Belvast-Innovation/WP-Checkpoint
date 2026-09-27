@@ -716,4 +716,50 @@ final class RestoreStagingTest extends RestoreTestCase {
 			exec( 'rm -rf ' . escapeshellarg( $outside ) );
 		}
 	}
+
+	/**
+	 * @requires OS Linux|Darwin
+	 */
+	public function test_a_replay_replaces_links_planted_at_the_roots_protection_files(): void {
+		$base    = $this->with( array( 'wp-content/uploads/a.txt' => 'a' ) );
+		$outside = sys_get_temp_dir() . '/wpc-protect-' . bin2hex( random_bytes( 3 ) );
+		mkdir( $outside );
+		file_put_contents( $outside . '/index.php', 'original index' );
+		file_put_contents( $outside . '/.htaccess', 'original htaccess' );
+		$hit  = 0;
+		$type = $this->type_with(
+			new FileStagingStep(
+				$this->staging_parts(
+					array(
+						'at' => static function ( string $point ) use ( &$hit ): void {
+							if ( 'roots' === $point && 1 === ++$hit ) {
+								throw new \RuntimeException( 'simulated: the run is killed here' );
+							}
+						},
+					)
+				)
+			)
+		);
+		try {
+			$job = $this->run_restore( $this->job_of_type( $type, $base ) );
+			$this->assertSame( Job::FAILED, $job->status );
+			$roots = glob( WP_CONTENT_DIR . '/wp-checkpoint-stage-*' );
+			$this->assertCount( 1, $roots, 'the control: the root was made before the death' );
+			foreach ( array( 'index.php', '.htaccess' ) as $name ) {
+				symlink( $outside . '/' . $name, $roots[0] . '/' . $name );
+			}
+			Plugin::instance()->job_actions()->retry( $job->id );
+			$job = $this->run_restore( $job );
+			$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
+			$this->assertSame( \WPCheckpoint\Support\Protection::htaccess(), file_get_contents( $roots[0] . '/.htaccess' ) );
+			$this->assertSame( \WPCheckpoint\Support\Protection::INDEX_PHP, file_get_contents( $roots[0] . '/index.php' ) );
+			foreach ( array( 'index.php', '.htaccess' ) as $name ) {
+				$this->assertFalse( is_link( $roots[0] . '/' . $name ), $name . ': the link was replaced by a file' );
+			}
+			$this->assertSame( 'original index', file_get_contents( $outside . '/index.php' ), 'what the links pointed to is untouched' );
+			$this->assertSame( 'original htaccess', file_get_contents( $outside . '/.htaccess' ) );
+		} finally {
+			exec( 'rm -rf ' . escapeshellarg( $outside ) );
+		}
+	}
 }

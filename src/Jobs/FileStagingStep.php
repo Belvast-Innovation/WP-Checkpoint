@@ -22,6 +22,8 @@ use WPCheckpoint\Restore\StagedWriter;
 use WPCheckpoint\Restore\StageModes;
 use WPCheckpoint\Restore\StagingChanged;
 use WPCheckpoint\Restore\StagingLayout;
+use WPCheckpoint\Support\AtomicFile;
+use WPCheckpoint\Support\AtomicWriteFailed;
 use WPCheckpoint\Support\HostFunctions;
 use WPCheckpoint\Support\Protection;
 
@@ -221,8 +223,16 @@ final class FileStagingStep implements Step {
 				$this->at( 'roots' );
 			}
 			StagedWriter::assert_directory( $root );
-			if ( ! Protection::write( $root ) ) {
-				throw new EnvironmentFailure( sprintf( 'The staging directory in %s cannot be protected from web access.', dirname( $root ) ) );
+			// Written anew and renamed into place: an entry already there, a link included, is replaced, not written through.
+			foreach ( array(
+				'index.php' => Protection::INDEX_PHP,
+				'.htaccess' => Protection::htaccess(),
+			) as $name => $contents ) {
+				try {
+					AtomicFile::write( $root, $name, $contents, array( 'confirm' => array( $context, 'confirm_lease' ) ) );
+				} catch ( AtomicWriteFailed $e ) {
+					throw new EnvironmentFailure( sprintf( 'The staging directory in %s cannot be protected from web access.', dirname( $root ) ) );
+				}
 			}
 			StagedWriter::directories( $root, (string) $group, $dir_mode );
 		}

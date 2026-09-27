@@ -258,4 +258,40 @@ final class AtomicFileTest extends TestCase {
 		$this->assertTrue( call_user_func( AtomicFile::sync(), fopen( $this->dir . '/plain', 'wb' ) ), 'a plain file syncs' );
 		unlink( $this->dir . '/plain' );
 	}
+
+	/**
+	 * @requires OS Linux|Darwin
+	 */
+	public function test_a_staging_roots_protection_files_are_written_there_only_and_replace_a_link(): void {
+		$root = $this->dir . '/wp-checkpoint-stage-a1b2c3d4e5f6-7-' . str_repeat( 'ab', 16 );
+		mkdir( $root );
+		$outside = $this->dir . '/outside.txt';
+		file_put_contents( $outside, 'keep' );
+		symlink( $outside, $root . '/.htaccess' );
+		AtomicFile::write( $root, '.htaccess', 'Require all denied' );
+		$this->assertFalse( is_link( $root . '/.htaccess' ), 'the link itself was replaced' );
+		$this->assertSame( 'Require all denied', file_get_contents( $root . '/.htaccess' ) );
+		$this->assertSame( 'keep', file_get_contents( $outside ), 'what it pointed to is untouched' );
+		AtomicFile::write( $root, 'index.php', '<?php' );
+		$this->assertSame( '<?php', file_get_contents( $root . '/index.php' ), 'the control: index.php too' );
+		foreach ( array( $this->dir, $this->dir . '/wp-checkpoint-probe-a1b2c3d4e5f6-7-0123456789abcdef' ) as $elsewhere ) {
+			if ( ! is_dir( $elsewhere ) ) {
+				mkdir( $elsewhere );
+			}
+			try {
+				AtomicFile::write( $elsewhere, '.htaccess', 'x' );
+				$this->fail( 'written in ' . basename( $elsewhere ) );
+			} catch ( \InvalidArgumentException $e ) {
+				$this->assertSame( 'Not a file name this plugin writes.', $e->getMessage() );
+			}
+		}
+		try {
+			AtomicFile::write( $root, 'other.php', 'x' );
+			$this->fail( 'another name in a root' );
+		} catch ( \InvalidArgumentException $e ) {
+			$this->assertSame( 'Not a file name this plugin writes.', $e->getMessage() );
+		}
+		exec( 'rm -rf ' . escapeshellarg( $root ) . ' ' . escapeshellarg( $this->dir . '/wp-checkpoint-probe-a1b2c3d4e5f6-7-0123456789abcdef' ) );
+		unlink( $outside );
+	}
 }
