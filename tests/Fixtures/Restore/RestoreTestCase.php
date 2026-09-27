@@ -5,13 +5,16 @@ namespace WPCheckpoint\Tests\Fixtures\Restore;
 use WPCheckpoint\Archive\ZipReader;
 use WPCheckpoint\Database\TableExporter;
 use WPCheckpoint\Database\WpdbConnection;
+use WPCheckpoint\Jobs\FileStagingStep;
 use WPCheckpoint\Jobs\Budget;
 use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\Residue;
 use WPCheckpoint\Jobs\RestoreJob;
 use WPCheckpoint\Jobs\RestorePreflightStep;
 use WPCheckpoint\Jobs\Runner;
+use WPCheckpoint\Files\ScanRoots;
 use WPCheckpoint\Plugin;
+use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Support\Deleter;
 use WPCheckpoint\Support\Redactor;
 use WPCheckpoint\Tests\Fixtures\Archive\ArchiveBuilder;
@@ -33,6 +36,34 @@ abstract class RestoreTestCase extends JobTestCase {
 	/** @var float */
 	protected $now = 1_800_000_000.0;
 
+	/** @var string The stand-in for the running copy of this plugin (PluginCopy). */
+	protected $plugin_copy = '';
+
+	public function set_up(): void {
+		parent::set_up();
+		// The restore as it is, with a small stand-in for the running plugin copy it stages.
+		$this->plugin_copy = PluginCopy::make();
+		$steps             = Plugin::instance()->job_types()->get( RestoreJob::ID )->steps();
+		foreach ( $steps as $i => $step ) {
+			if ( FileStagingStep::ID === $step->id() ) {
+				$steps[ $i ] = new FileStagingStep( $this->staging_parts() );
+			}
+		}
+		$this->register( RestoreJob::ID, $steps );
+	}
+
+	/**
+	 * The parts every test's staging step has (a test may add its own).
+	 *
+	 * @return array<string, mixed>
+	 */
+	protected function staging_parts( array $more = array() ): array {
+		return $more + array(
+			'plugin_dir'  => $this->plugin_copy,
+			'plugin_main' => $this->plugin_copy . '/wp-checkpoint.php',
+		);
+	}
+
 	public function tear_down(): void {
 		global $wpdb;
 		$wpdb->query( 'SET FOREIGN_KEY_CHECKS=0' );
@@ -48,6 +79,11 @@ abstract class RestoreTestCase extends JobTestCase {
 		}
 		// PHPUnit keeps every test object to the end of the suite: what they hold adds up in one process.
 		$this->builders = array();
+		PluginCopy::remove( $this->plugin_copy );
+		// The staging a completed restore leaves for the swap (and a failed one for its retry): not left behind a test.
+		foreach ( Residue::scan_site( Residue::site_dirs( ScanRoots::site_directories() ), Directories::own_tokens() ) as $entry ) {
+			Deleter::delete_tree( $entry['parent'], $entry['path'] );
+		}
 		parent::tear_down();
 	}
 

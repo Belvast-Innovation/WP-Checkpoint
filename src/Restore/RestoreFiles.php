@@ -29,6 +29,14 @@ defined( 'ABSPATH' ) || exit;
  *   committed lengths.
  * - UNMAPPED: the backup's paths that belong to no content group and are
  *   not restored (one JSON line each, appended under a committed length).
+ * - SOURCES: what the check checked (each volume's size and modification
+ *   time, the depth), to judge a later hash mismatch by.
+ * - STAGE_PLAN: which of the backup's plugin directories are this plugin
+ *   (skipped), and which only carry its name (left out).
+ * - REPORT: what staging did not write, and why (one JSON line each,
+ *   appended under a committed length).
+ * - PLUGIN_LIST: the running plugin's files to copy into the staged
+ *   plugins, one JSON line each.
  */
 final class RestoreFiles {
 
@@ -41,6 +49,10 @@ final class RestoreFiles {
 	const STAGING     = 'restore-staging.json';
 	const KEYS        = 'restore-keys';
 	const UNMAPPED    = 'restore-unmapped.jsonl';
+	const SOURCES     = 'restore-sources.json';
+	const STAGE_PLAN  = 'restore-stage-plan.json';
+	const REPORT      = 'restore-stage-report.jsonl';
+	const PLUGIN_LIST = 'restore-plugin-files.jsonl';
 
 	/**
 	 * A file or directory of the work directory.

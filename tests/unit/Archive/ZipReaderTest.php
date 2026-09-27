@@ -7,6 +7,7 @@ use WPCheckpoint\Archive\EnvironmentFailure;
 use WPCheckpoint\Archive\Limits;
 use WPCheckpoint\Archive\ZipFormat;
 use WPCheckpoint\Archive\ZipReader;
+use WPCheckpoint\Tests\Fixtures\Archive\EntryMode;
 use WPCheckpoint\Tests\Fixtures\MemoryBudget;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
@@ -433,5 +434,68 @@ final class ZipReaderTest extends TestCase {
 		file_put_contents( $this->dir . '/x.zip', str_repeat( 'nope', 100 ) );
 		$this->expectException( \RuntimeException::class );
 		ZipReader::open( $this->dir . '/x.zip' );
+	}
+
+	public function test_special_files_are_known_only_by_a_unix_creators_mode(): void {
+		$this->assertSame( 'symbolic link', ZipFormat::special_type( 3 << 8, 0120777 << 16 ) );
+		$this->assertSame( 'FIFO', ZipFormat::special_type( 3 << 8, 0010644 << 16 ) );
+		$this->assertSame( 'character device', ZipFormat::special_type( 3 << 8, 0020644 << 16 ) );
+		$this->assertSame( 'block device', ZipFormat::special_type( 3 << 8, 0060644 << 16 ) );
+		$this->assertSame( 'socket', ZipFormat::special_type( 3 << 8, 0140755 << 16 ) );
+		$this->assertSame( '', ZipFormat::special_type( 3 << 8, ZipFormat::MODE_FILE << 16 ), 'a regular file' );
+		$this->assertSame( '', ZipFormat::special_type( 3 << 8, ZipFormat::external_attributes( 'd/' ) ), 'a directory' );
+		$this->assertSame( '', ZipFormat::special_type( 0, 0120777 << 16 ), 'an MS-DOS creator\'s attributes mean something else' );
+		$this->assertSame( '', ZipFormat::special_type( 10 << 8, 0120777 << 16 ), 'nor do another host\'s' );
+	}
+
+	public function test_a_link_or_special_entry_is_never_extracted_as_a_file(): void {
+		$path = $this->craft( array( 'link' => '/etc/passwd', 'fifo' => '', 'plain.txt' => 'x' ) );
+		EntryMode::set( $path, 'link', 0120777 );
+		EntryMode::set( $path, 'fifo', 0010644 );
+		$r = ZipReader::open( $path );
+		foreach ( array( 'link' => 'symbolic link', 'fifo' => 'FIFO' ) as $name => $type ) {
+			foreach ( array( 'extract', 'extract_piece' ) as $method ) {
+				try {
+					'extract' === $method ? $r->extract( $r->find( $name ), $this->dir . '/out' ) : $r->extract_piece( $r->find( $name ), $this->dir . '/out', 0, 100, 0 );
+					$this->fail( $method . ' wrote ' . $name );
+				} catch ( \RuntimeException $e ) {
+					$this->assertSame( 'Refusing to extract an entry that is a ' . $type . '.', $e->getMessage() );
+				}
+			}
+		}
+		$this->assertSame( array( '.', '..' ), scandir( $this->dir . '/out' ), 'nothing written' );
+		$this->assertSame( 'x', file_get_contents( $r->extract( $r->find( 'plain.txt' ), $this->dir . '/out' ) ), 'the control: a regular entry is' );
+		EntryMode::set( $path, 'link', 0120777, 0 );
+		$this->assertFileExists( ZipReader::open( $path )->extract( ZipReader::open( $path )->find( 'link' ), $this->dir . '/out' ), 'an MS-DOS creator: a regular file' );
+	}
+
+	public function test_a_range_is_fed_as_read_with_the_crc_carried_and_checked_at_the_end(): void {
+		$big  = str_repeat( 'r', 1048576 + 7 ) . 'end';
+		$path = $this->craft( array( 'store.bin' => $big, 'def.bin' => $big ), array( 'def.bin' => array( 'method' => ZipFormat::METHOD_DEFLATE ) ) );
+		$r    = ZipReader::open( $path );
+		$e    = $r->find( 'store.bin' );
+		$got  = '';
+		$sink = static function ( string $piece ) use ( &$got ): void {
+			$got .= $piece;
+		};
+		$crc = $r->stream_range( $e, 0, 1048576, 0, $sink );
+		$crc = $r->stream_range( $e, 1048576, PHP_INT_MAX, $crc, $sink );
+		$this->assertSame( $big, $got );
+		$this->assertSame( (int) $e['crc'], $crc );
+		$got = '';
+		$this->assertSame( (int) $r->find( 'def.bin' )['crc'], $r->stream_range( $r->find( 'def.bin' ), 0, PHP_INT_MAX, 0, $sink ) );
+		$this->assertSame( $big, $got, 'a deflated entry whole' );
+		try {
+			$r->stream_range( $r->find( 'def.bin' ), 0, 10, 0, $sink );
+			$this->fail( 'a deflated range' );
+		} catch ( \RuntimeException $e2 ) {
+			$this->assertSame( 'Only stored entries can be read in pieces.', $e2->getMessage() );
+		}
+		try {
+			$r->stream_range( $e, 1048576, PHP_INT_MAX, 12345, $sink ); // A wrong running CRC.
+			$this->fail( 'accepted' );
+		} catch ( \RuntimeException $e3 ) {
+			$this->assertSame( 'CRC mismatch: the entry is corrupt.', $e3->getMessage() );
+		}
 	}
 }

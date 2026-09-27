@@ -58,14 +58,23 @@ final class RestoreVerifyStep implements Step {
 	private $clean;
 
 	/**
+	 * How deep the check goes (ArchiveVerifier::DEPTH_*): the structure by default; full reads every byte.
+	 *
+	 * @var string
+	 */
+	private $depth;
+
+	/**
 	 * Constructor.
 	 *
 	 * @param callable $backups function(): string.
 	 * @param callable $clean   Text cleaner.
+	 * @param string   $depth   ArchiveVerifier::DEPTH_STRUCTURE (the restore's) or DEPTH_FULL.
 	 */
-	public function __construct( callable $backups, callable $clean ) {
+	public function __construct( callable $backups, callable $clean, string $depth = ArchiveVerifier::DEPTH_STRUCTURE ) {
 		$this->backups = $backups;
 		$this->clean   = $clean;
+		$this->depth   = $depth;
 	}
 
 	/**
@@ -111,7 +120,7 @@ final class RestoreVerifyStep implements Step {
 			throw new TransientFailure( 'The check\'s work directory could not be created.' );
 		}
 		// The verifier reads the volumes next to the manifest it is given: the original's directory.
-		$verifier = ArchiveVerifier::open( $source, $dir, ArchiveVerifier::DEPTH_STRUCTURE, is_array( $cursor['verifier'] ) ? $cursor['verifier'] : array() );
+		$verifier = ArchiveVerifier::open( $source, $dir, $this->depth, is_array( $cursor['verifier'] ) ? $cursor['verifier'] : array() );
 		$budget   = (float) $context->budget()->seconds;
 		$first    = true;
 		$slowest  = 0.0;
@@ -144,7 +153,43 @@ final class RestoreVerifyStep implements Step {
 		if ( $result->restore_refused() ) {
 			throw new \RuntimeException( 'This backup cannot be restored: ' . strtok( $report, "\n" ) );
 		}
+		self::record_sources( $context->work_path(), $backups, $this->depth );
 		return StepResult::done( __( 'The backup can be restored', 'wp-checkpoint' ) );
+	}
+
+	/**
+	 * Record what was checked (RestoreFiles::SOURCES): each volume's size and modification time, in the
+	 * manifest's order, and how deep the check went. A later read that does not match its hash is judged
+	 * against it: the file changed since, it was read differently this time, or it was never read in full.
+	 *
+	 * @param string $work    Work directory.
+	 * @param string $backups Backups directory.
+	 * @param string $depth   Depth of the check.
+	 * @return void
+	 * @throws TransientFailure When a volume cannot be examined or the record cannot be written.
+	 */
+	private static function record_sources( string $work, string $backups, string $depth ): void {
+		$volumes = array();
+		foreach ( RestorePreflightStep::manifest( $work )->volumes() as $volume ) {
+			$path = $backups . DIRECTORY_SEPARATOR . (string) $volume['path'];
+			clearstatcache( true, $path );
+			$stat = @stat( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a warning would put the path into the error log.
+			if ( false === $stat ) {
+				throw new TransientFailure( 'A volume of the backup cannot be examined.' );
+			}
+			$volumes[] = array(
+				'size'  => (int) $stat['size'],
+				'mtime' => (int) $stat['mtime'],
+			);
+		}
+		ExportPlan::write(
+			$work,
+			RestoreFiles::SOURCES,
+			array(
+				'depth'   => $depth,
+				'volumes' => $volumes,
+			)
+		);
 	}
 
 	/**
