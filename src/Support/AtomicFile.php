@@ -46,11 +46,16 @@ final class AtomicFile {
 	const MAX_BYTES = 1048576;
 
 	/**
+	 * Files written into a staging root (its protection from web access).
+	 */
+	const ROOT_FILES = array( 'index.php', '.htaccess' );
+
+	/**
 	 * Write $contents to $dir/$name.
 	 *
 	 * @param string               $dir      Directory (exists).
 	 * @param string               $name     File name (no separator; a name StagingLayout::parse() recognises, as
-	 *                                       its temporary name must be too).
+	 *                                       its temporary name must be too, or one of ROOT_FILES in a staging root).
 	 * @param string               $contents Contents (at most MAX_BYTES).
 	 * @param array<string, mixed> $options  "confirm": function(): void, called right before the rename (throws to
 	 *                                       stop; the temporary file is removed);
@@ -64,8 +69,11 @@ final class AtomicFile {
 	 */
 	public static function write( string $dir, string $name, string $contents, array $options = array() ): string {
 		$suffix = '.' . bin2hex( random_bytes( 8 ) ) . '.tmp';
-		// The temporary name must be one the reaper recognises too, or a process dying before the rename leaves it forever.
-		if ( '' === $name || false !== strpbrk( $name, "/\\\0" ) || null === StagingLayout::parse( $name ) || null === StagingLayout::parse( $name . $suffix ) ) {
+		// The temporary name must be one the reaper recognises too, or a process dying before the rename leaves it forever:
+		// a probe's name, or a protection file of a staging root (the root is reclaimed whole, whatever is in it).
+		$registered = null !== StagingLayout::parse( $name ) && null !== StagingLayout::parse( $name . $suffix );
+		$protection = in_array( $name, self::ROOT_FILES, true ) && 'stage' === ( StagingLayout::parse( basename( rtrim( $dir, '/\\' ) ) )['kind'] ?? '' );
+		if ( '' === $name || false !== strpbrk( $name, "/\\\0" ) || ! ( $registered || $protection ) ) {
 			throw new \InvalidArgumentException( 'Not a file name this plugin writes.' );
 		}
 		if ( strlen( $contents ) > self::MAX_BYTES ) {

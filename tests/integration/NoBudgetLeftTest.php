@@ -10,6 +10,7 @@ use WPCheckpoint\Jobs\ExportJob;
 use WPCheckpoint\Jobs\ExportOptions;
 use WPCheckpoint\Jobs\ExportPlan;
 use WPCheckpoint\Jobs\FileScanStep;
+use WPCheckpoint\Jobs\FileStagingStep;
 use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\JobContext;
 use WPCheckpoint\Jobs\ManifestStep;
@@ -29,6 +30,7 @@ use WPCheckpoint\Plugin;
 use WPCheckpoint\Support\Deleter;
 use WPCheckpoint\Support\Redactor;
 use WPCheckpoint\Tests\Fixtures\Jobs\JobTestCase;
+use WPCheckpoint\Tests\Fixtures\Restore\PluginCopy;
 
 /**
  * The first unit of a tick always runs: every tick below starts with its
@@ -133,17 +135,32 @@ final class NoBudgetLeftTest extends JobTestCase {
 	}
 
 	public function test_a_restore_moves_on_in_every_tick_with_no_time_left(): void {
-		$base = $this->export();
-		$job  = Plugin::instance()->jobs()->create( RestoreJob::ID, self::$admin_id, array(), array( 'base' => $base ) );
+		$base  = $this->export();
+		$copy  = PluginCopy::make();
+		$steps = Plugin::instance()->job_types()->get( RestoreJob::ID )->steps();
+		foreach ( $steps as $i => $step ) {
+			if ( FileStagingStep::ID === $step->id() ) {
+				// A small stand-in for the running plugin copy (a development checkout is hundreds of megabytes).
+				$steps[ $i ] = new FileStagingStep(
+					array(
+						'plugin_dir'  => $copy,
+						'plugin_main' => $copy . '/wp-checkpoint.php',
+					)
+				);
+			}
+		}
+		$this->register( RestoreJob::ID, $steps );
+		$job = Plugin::instance()->jobs()->create( RestoreJob::ID, self::$admin_id, array(), array( 'base' => $base ) );
 		try {
 			list( $job, $ticks, $ran ) = $this->run_with_no_time_left( $job );
 			$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
 			$this->assertGreaterThan( 10, $ticks, 'the control: the restore crossed many ticks' );
-			foreach ( array( RestoreVerifyStep::ID, RestorePreflightStep::ID, RestoreFilesPreflightStep::ID, DatabaseImportStep::ID ) as $step ) {
+			foreach ( array( RestoreVerifyStep::ID, RestorePreflightStep::ID, RestoreFilesPreflightStep::ID, DatabaseImportStep::ID, FileStagingStep::ID ) as $step ) {
 				$this->assertContains( $step, $ran, 'a tick with no time left started in ' . $step );
 			}
 		} finally {
 			Plugin::instance()->jobs()->reclaim_work( Plugin::instance()->jobs()->find( $job->id ) );
+			PluginCopy::remove( $copy );
 		}
 	}
 }

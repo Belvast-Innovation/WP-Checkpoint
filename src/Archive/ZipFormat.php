@@ -42,6 +42,19 @@ final class ZipFormat {
 	const MODE_DIRECTORY = 040755;  // Directory, rwxr-xr-x.
 	const DOS_DIRECTORY  = 0x10;    // MS-DOS directory attribute, low byte of the external attributes.
 
+	/**
+	 * File types in a Unix mode (upper 16 bits of the external attributes when the host is Unix): what is not a
+	 * regular file or a directory, by name.
+	 */
+	const S_IFMT  = 0170000;
+	const SPECIAL = array(
+		0120000 => 'symbolic link',
+		0010000 => 'FIFO',
+		0020000 => 'character device',
+		0060000 => 'block device',
+		0140000 => 'socket',
+	);
+
 	const ZIP64_EXTRA_ID = 0x0001;
 	const LIMIT_32       = 0xFFFFFFFF;
 	const LIMIT_16       = 0xFFFF;
@@ -176,6 +189,23 @@ final class ZipFormat {
 			return ( self::MODE_DIRECTORY << 16 ) | self::DOS_DIRECTORY;
 		}
 		return self::MODE_FILE << 16;
+	}
+
+	/**
+	 * What kind of special file an entry is, when its creator is a Unix host and the file type in its mode is
+	 * a symbolic link, a FIFO, a device or a socket; '' for anything else (a regular file or a directory, or an
+	 * entry whose creator's attributes mean something else: those are taken as regular files).
+	 *
+	 * @param int $made_by  "Version made by" (the host in its upper byte).
+	 * @param int $external External attributes.
+	 * @return string
+	 */
+	public static function special_type( int $made_by, int $external ): string {
+		if ( self::HOST_UNIX !== ( ( $made_by >> 8 ) & 0xFF ) ) {
+			return '';
+		}
+		$type = ( ( $external >> 16 ) & 0xFFFF ) & self::S_IFMT;
+		return self::SPECIAL[ $type ] ?? '';
 	}
 
 	/**

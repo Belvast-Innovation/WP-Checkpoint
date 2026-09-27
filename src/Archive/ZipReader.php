@@ -368,6 +368,11 @@ final class ZipReader {
 		if ( null !== $entry['problem'] ) {
 			throw new \RuntimeException( 'Refusing to extract an unsafe entry name: ' . $entry['problem'] );
 		}
+		// A symbolic link (its content is the target) or another special file is never written as a regular file.
+		$special = ZipFormat::special_type( (int) ( $entry['made_by'] ?? 0 ), (int) ( $entry['external'] ?? 0 ) );
+		if ( '' !== $special ) {
+			throw new \RuntimeException( 'Refusing to extract an entry that is a ' . $special . '.' );
+		}
 		$target_dir = rtrim( $target_dir, '/\\' );
 		if ( '' === $target_dir ) {
 			// realpath( '' ) is the working directory; a caller that passes nothing gets an error, not the cwd.
@@ -541,6 +546,61 @@ final class ZipReader {
 		} finally {
 			fclose( $handle );
 		}
+	}
+
+	/**
+	 * Feed a byte range of an entry to a sink, as it is read from the archive, resumable across calls: a
+	 * stored entry by any range (the CRC of everything fed so far is returned and passed back in, and the call
+	 * that reaches the end compares it with the entry's), a deflated entry only whole (offset 0, a length of
+	 * at least its size), CRC checked. Nothing is written anywhere by this.
+	 *
+	 * @param array<string, mixed> $entry  Entry.
+	 * @param int                  $offset Offset within the content.
+	 * @param int                  $length Bytes (clamped to the end).
+	 * @param int                  $crc    CRC returned by the previous call (0 at offset 0).
+	 * @param callable             $sink   function( string $piece ): void.
+	 * @return int The CRC of the content up to the end of this range.
+	 * @throws EnvironmentFailure When the volume cannot be read.
+	 * @throws \RuntimeException When the entry name is unsafe, the range invalid or the data corrupt.
+	 */
+	public function stream_range( array $entry, int $offset, int $length, int $crc, callable $sink ): int {
+		if ( null !== $entry['problem'] ) {
+			throw new \RuntimeException( 'Refusing to read an unsafe entry name: ' . $entry['problem'] );
+		}
+		$usize = (int) $entry['usize'];
+		if ( ZipFormat::METHOD_STORE !== (int) $entry['method'] ) {
+			if ( 0 !== $offset || $length < $usize ) {
+				throw new \RuntimeException( 'Only stored entries can be read in pieces.' );
+			}
+			$this->stream_entry( $entry, $sink );
+			return (int) $entry['crc'];
+		}
+		if ( $offset < 0 || $length < 0 || $offset > $usize || (int) $entry['csize'] !== $usize ) {
+			throw new \RuntimeException( 'The range is outside the entry.' );
+		}
+		$length = (int) min( $length, $usize - $offset );
+		$handle = $this->handle();
+		try {
+			if ( 0 !== fseek( $handle, $this->data_offset( $handle, $entry ) + $offset ) ) {
+				throw new EnvironmentFailure( 'The entry could not be positioned for reading (a storage error on this server).', EnvironmentFailure::ACCESS );
+			}
+			$left = $length;
+			while ( $left > 0 ) {
+				$piece = fread( $handle, (int) min( 1048576, $left ) );
+				if ( false === $piece || '' === $piece ) {
+					throw new \RuntimeException( 'The entry is truncated.' );
+				}
+				$crc   = Crc32::combine( $crc, Crc32::of( $piece ), strlen( $piece ) );
+				$left -= strlen( $piece );
+				$sink( $piece );
+			}
+		} finally {
+			fclose( $handle );
+		}
+		if ( $offset + $length >= $usize && Crc32::hex( $crc ) !== Crc32::hex( (int) $entry['crc'] ) ) {
+			throw new \RuntimeException( 'CRC mismatch: the entry is corrupt.' );
+		}
+		return $crc;
 	}
 
 	/**

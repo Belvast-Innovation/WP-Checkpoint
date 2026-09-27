@@ -68,12 +68,19 @@ final class RestoreFilesPreflightTest extends RestoreTestCase {
 	}
 
 	/**
-	 * What the probes might have left next to the site.
+	 * What the probes might have left next to the site (a completed restore leaves its staging roots, for the swap).
 	 *
 	 * @return array<int, array<string, mixed>>
 	 */
 	private static function left_next_to_the_site(): array {
-		return Residue::scan_site( Residue::site_dirs( ScanRoots::site_directories() ), Directories::own_tokens() );
+		return array_values(
+			array_filter(
+				Residue::scan_site( Residue::site_dirs( ScanRoots::site_directories() ), Directories::own_tokens() ),
+				static function ( array $entry ): bool {
+					return Residue::PROBE === $entry['kind'];
+				}
+			)
+		);
 	}
 
 	private function dir( string $path ): string {
