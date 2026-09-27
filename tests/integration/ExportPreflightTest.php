@@ -237,6 +237,33 @@ final class ExportPreflightTest extends JobTestCase {
 		return $ids;
 	}
 
+	public function test_a_stop_at_the_review_is_asked_again_on_retry_and_the_exclusions_stay(): void {
+		$this->register_export( 'export-stop' );
+		$job = $this->repo->create( 'export-stop', 0, array(), array( 'contents' => array( 'files' => array( 'uploads' ) ) ) );
+		$this->assertSame( TickResult::PAUSED, $this->drive( $job->id )->status, (string) $this->repo->find( $job->id )->last_error );
+		$paused = $this->repo->find( $job->id );
+		$ids    = array_column( $paused->questions, 'id' );
+		$this->assertContains( 'oversize_0', $ids );
+		$answers = array(
+			'large_dir_0' => 'exclude',
+			'oversize_0'  => 'stop',
+		);
+		if ( in_array( 'unreadable', $ids, true ) ) {
+			$answers['unreadable'] = 'continue';
+		}
+		$this->repo->answer( $paused, $answers );
+		$this->drive( $job->id );
+		$failed = $this->repo->find( $job->id );
+		$this->assertSame( Job::FAILED, $failed->status );
+		$this->assertStringContainsString( 'rows larger than the single-row limit', (string) $failed->last_error );
+		unset( $answers['oversize_0'] );
+		$this->assertSame( $answers, $failed->options['answers'], 'the stop went with the failure; the exclusion stays' );
+
+		$this->repo->transition( $failed, Job::QUEUED );
+		$this->assertSame( TickResult::PAUSED, $this->drive( $job->id )->status );
+		$this->assertSame( array( 'oversize_0' ), array_column( $this->repo->find( $job->id )->questions, 'id' ), 'only the stopped question is asked again' );
+	}
+
 	public function test_the_review_asks_the_answers_take_effect_and_mariadb_agrees_with_the_estimate(): void {
 		global $wpdb;
 		$this->register_export( 'export-b' );
@@ -353,7 +380,7 @@ final class ExportPreflightTest extends JobTestCase {
 		$this->assertSame( TickResult::FAILED, $result->status );
 		$failed = $this->repo->find( $job->id );
 		$this->assertSame( ReviewStep::ID, $failed->step );
-		$this->assertStringContainsString( 'Stopped: table wpcptest_options has rows larger than the single-row limit', $failed->last_error );
+		$this->assertStringContainsString( 'The backup was stopped as chosen: table wpcptest_options has rows larger than the single-row limit', $failed->last_error );
 		$this->assertStringContainsString( '(4 rows)', $failed->last_error );
 	}
 

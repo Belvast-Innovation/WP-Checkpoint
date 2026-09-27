@@ -583,7 +583,8 @@ final class RestoreFilesPreflightStep implements Step {
 	 * @param array<string, mixed> $cursor  Cursor.
 	 * @param array<string, mixed> $staging Staging file.
 	 * @return StepResult
-	 * @throws CannotStage When a file system is too full, or the user chose to stop.
+	 * @throws CannotStage When a file system is too full.
+	 * @throws Stopped When the user chose to stop.
 	 */
 	private function space( JobContext $context, array $cursor, array $staging ): StepResult {
 		$staged = array();
@@ -612,7 +613,7 @@ final class RestoreFilesPreflightStep implements Step {
 			$answers = isset( $context->options()['answers'] ) && is_array( $context->options()['answers'] ) ? $context->options()['answers'] : array();
 			$answer  = $answers['free_space'] ?? null;
 			if ( 'stop' === $answer ) {
-				throw new CannotStage( 'The restore was stopped because the free space for its staged files could not be confirmed.' );
+				throw new Stopped( 'The restore was stopped because the free space for its staged files could not be confirmed.', array( 'free_space' ) );
 			}
 			if ( 'continue' !== $answer ) {
 				return StepResult::ask(

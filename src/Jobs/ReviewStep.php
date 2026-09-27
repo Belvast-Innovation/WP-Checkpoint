@@ -27,6 +27,11 @@ namespace WPCheckpoint\Jobs;
  */
 final class ReviewStep implements Step {
 
+	/**
+	 * Reasons named in the message when several questions were decided "stop".
+	 */
+	const STOPS_LISTED = 3;
+
 	const ID = 'review';
 
 	const HEAVY_MIN_BYTES = 52428800;
@@ -264,7 +269,8 @@ final class ReviewStep implements Step {
 	 * @param array<string, string> $policy   Policy (each value ask|...).
 	 * @param array<string, mixed>  $answers  Answers given so far.
 	 * @return array{0: array{exclude_tables: string[], exclude_oversize: string[], exclude_paths: string[], notes: string[]}, 1: array<int, array<string, mixed>>}
-	 * @throws \RuntimeException When a decision is to stop.
+	 * @throws Stopped When a decision is to stop: every question decided "stop" is named at once (their answers
+	 *                 are forgotten, so one retry asks them all again).
 	 */
 	public static function decide( array $findings, array $policy, array $answers ): array {
 		$decisions = array(
@@ -274,6 +280,7 @@ final class ReviewStep implements Step {
 			'notes'            => array(),
 		);
 		$questions = array();
+		$stops     = array(); // Question id => why, for every question decided "stop".
 		$answer    = static function ( string $id, string $policy_key, array $choices ) use ( $policy, $answers ) {
 			if ( isset( $answers[ $id ] ) && is_string( $answers[ $id ] ) && in_array( $answers[ $id ], $choices, true ) ) {
 				return $answers[ $id ];
@@ -311,7 +318,7 @@ final class ReviewStep implements Step {
 					'choices' => array( 'continue', 'stop' ),
 				);
 			} elseif ( 'stop' === $choice ) {
-				throw new \RuntimeException( sprintf( 'Stopped: %d files cannot be read and the backup would not contain them (for example %s).', $findings['unreadable']['count'], implode( ', ', array_slice( $findings['unreadable']['listed'], 0, 3 ) ) ) );
+				$stops['unreadable'] = sprintf( '%d files cannot be read and the backup would not contain them (for example %s).', $findings['unreadable']['count'], implode( ', ', array_slice( $findings['unreadable']['listed'], 0, 3 ) ) );
 			} else {
 				$decisions['notes'][] = sprintf( '%d files could not be read and are not in the backup (see the scan summary).', $findings['unreadable']['count'] );
 			}
@@ -369,11 +376,21 @@ final class ReviewStep implements Step {
 					);
 				}
 			} elseif ( 'stop' === $choice ) {
-				throw new \RuntimeException( sprintf( 'Stopped: table %s has rows larger than the single-row limit of %d bytes (as SQL)%s. Reduce them, or choose to leave them out.', $finding['table'], $finding['limit'], null !== $finding['count'] ? sprintf( ' (%d rows)', $finding['count'] ) : ' (found by sampling)' ) );
+				$stops[ $id ] = $stops[ $id ] ?? sprintf( 'table %s has rows larger than the single-row limit of %d bytes (as SQL)%s. Reduce them, or choose to leave them out.', $finding['table'], $finding['limit'], null !== $finding['count'] ? sprintf( ' (%d rows)', $finding['count'] ) : ' (found by sampling)' );
 			} else {
 				$decisions['exclude_oversize'][] = $finding['table'];
 				$decisions['notes'][]            = sprintf( 'Table %s: rows larger than the single-row limit are left out, as chosen%s.', $finding['table'], null !== $finding['count'] ? sprintf( ' (%d rows at the pre-flight)', $finding['count'] ) : '' );
 			}
+		}
+		if ( array() !== $stops ) {
+			// Every reason, up to three (the screen shows this text without the exception's name, so it says "stopped").
+			$reasons = array_values( $stops );
+			$text    = 'The backup was stopped as chosen: ' . implode( ' ', array_slice( $reasons, 0, self::STOPS_LISTED ) );
+			$more    = count( $reasons ) - self::STOPS_LISTED;
+			if ( $more > 0 ) {
+				$text .= 1 === $more ? ' One more question was decided the same way.' : sprintf( ' %d more questions were decided the same way.', $more );
+			}
+			throw new Stopped( $text, array_keys( $stops ) );
 		}
 		return array( $decisions, $questions );
 	}
