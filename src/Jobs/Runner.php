@@ -9,6 +9,7 @@ namespace WPCheckpoint\Jobs;
 
 use WPCheckpoint\Archive\ConcurrentWriter;
 use WPCheckpoint\Restore\LedgerOutdated;
+use WPCheckpoint\Restore\PlatformUnsupported;
 use WPCheckpoint\Support\Environment;
 use WPCheckpoint\Support\Logger;
 use WPCheckpoint\Support\Redactor;
@@ -804,8 +805,9 @@ final class Runner {
 
 	/**
 	 * The kind of failure an exception from a step means (Job::stamp_failure()):
-	 * final for lost work files, a table that changed under the export and a
-	 * restore ledger of an older version, no kind for anything else.
+	 * final for lost work files, a table that changed under the export, a
+	 * restore ledger of an older version and a restore on a server this
+	 * version does not restore on, no kind for anything else.
 	 *
 	 * @param \Throwable $e Exception.
 	 * @return string
@@ -814,7 +816,7 @@ final class Runner {
 		if ( $e instanceof TableChanged ) {
 			return Job::FAILURE_FINAL . ':' . Job::REASON_TABLE_CHANGED;
 		}
-		return $e instanceof WorkLost || $e instanceof LedgerOutdated ? Job::FAILURE_FINAL : '';
+		return $e instanceof WorkLost || $e instanceof LedgerOutdated || $e instanceof PlatformUnsupported ? Job::FAILURE_FINAL : '';
 	}
 
 	/**

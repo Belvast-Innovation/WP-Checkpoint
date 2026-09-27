@@ -16,6 +16,8 @@ defined( 'ABSPATH' ) || exit;
  * Restores a backup of the backups directory. The steps so far prepare
  * the database next to the live one and change nothing the site uses:
  *
+ * 0. RestorePlatformStep: a Windows server is refused before anything is
+ *    read or written (not supported in this version).
  * 1. RestoreVerifyStep: the backup's structure (manifest, volumes, index
  *    lines, the layout) at the "structure" depth; a result that refuses a
  *    restore ends the job. The manifest it checked is copied into the work
@@ -93,7 +95,7 @@ final class RestoreJob implements JobType {
 	 * @return string[]
 	 */
 	public function step_ids(): array {
-		return array( RestoreVerifyStep::ID, RestorePreflightStep::ID, RestoreFilesPreflightStep::ID, DatabaseImportStep::ID );
+		return array( RestorePlatformStep::ID, RestoreVerifyStep::ID, RestorePreflightStep::ID, RestoreFilesPreflightStep::ID, DatabaseImportStep::ID );
 	}
 
 	/**
@@ -108,6 +110,7 @@ final class RestoreJob implements JobType {
 			return $dirs instanceof Directories ? $dirs->backups() : '';
 		};
 		return array(
+			new RestorePlatformStep(),
 			new RestoreVerifyStep( $backups, $this->clean ),
 			new RestorePreflightStep( $backups ),
 			new RestoreFilesPreflightStep(),
