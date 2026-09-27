@@ -267,6 +267,9 @@ final class FileStagingStep implements Step {
 			if ( self::fold( $dir ) === self::fold( $running ) && ! in_array( $dir, (array) $cursor['names'], true ) ) {
 				// The running copy's name, as spelt in the backup (a file system that folds case puts both in one place).
 				$cursor['names'][] = $dir;
+				if ( count( $cursor['names'] ) > self::MAX_SELF ) {
+					throw new CannotStage( sprintf( 'The backup holds more than %d plugin directories named like WP Checkpoint\'s; it is not a backup this plugin wrote.', self::MAX_SELF ) );
+				}
 			}
 			if ( isset( $cursor['self'][ $dir ] ) || 1 !== preg_match( '#\A[^/]+/[^/]+\.php\z#i', $map['relative'] ) || '' !== self::special( $chunk['entry'] ) ) {
 				continue;
@@ -331,7 +334,7 @@ final class FileStagingStep implements Step {
 				array(
 					'kind' => 'plugin_name_taken',
 					'p'    => StagingLayout::CONTENT . '/plugins/' . $dir,
-					'why'  => 'This directory has the name of the running WP Checkpoint\'s directory, where the running copy is staged, but it is not WP Checkpoint: it is left out.',
+					'why'  => 'This directory has the name of the running WP Checkpoint\'s directory (compared without case, as many file systems compare names), where the running copy is staged, but it is not WP Checkpoint: it is left out.',
 				)
 			) . "\n";
 		}
@@ -679,6 +682,7 @@ final class FileStagingStep implements Step {
 		$where       = $layout->parent( 'plugins' );
 		$running     = $this->running_name();
 		$source      = $this->plugin_dir();
+		$source_real = realpath( $source );
 		$chunk_bytes = (int) $plan['chunk_bytes'];
 		$slowest     = 0.0;
 		$budget      = (float) $context->budget()->seconds;
@@ -711,7 +715,11 @@ final class FileStagingStep implements Step {
 				$looked = @lstat( $from );
 				$in     = false === $looked || 0100000 !== ( (int) $looked['mode'] & 0170000 ) ? false : @fopen( $from, 'rb' );
 				$opened = false === $in ? false : fstat( $in );
-				if ( false === $in || ! is_array( $opened ) || (int) $opened['dev'] !== (int) $looked['dev'] || (int) $opened['ino'] !== (int) $looked['ino'] || 0 !== fseek( $in, $done ) ) {
+				// Still under the plugin's directory (a directory of the list swapped for a link is not followed), and
+				// still the size it was listed with (a file changed since would be copied cut short).
+				$real   = false === $in ? false : realpath( dirname( $from ) );
+				$inside = false !== $real && false !== $source_real && ( $real === $source_real || 0 === strpos( $real . '/', rtrim( $source_real, '/' ) . '/' ) );
+				if ( false === $in || ! $inside || ! is_array( $opened ) || (int) $opened['dev'] !== (int) $looked['dev'] || (int) $opened['ino'] !== (int) $looked['ino'] || (int) $opened['size'] !== $size || 0 !== fseek( $in, $done ) ) {
 					if ( false !== $in ) {
 						fclose( $in );
 					}

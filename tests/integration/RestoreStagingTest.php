@@ -635,4 +635,85 @@ final class RestoreStagingTest extends RestoreTestCase {
 			exec( 'rm -rf ' . escapeshellarg( $outside ) );
 		}
 	}
+
+	public function test_the_spellings_of_this_plugins_name_are_bounded(): void {
+		// Spellings of the running copy's name that a case-folding file system takes as one: at most MAX_SELF.
+		$spellings = function ( int $count ): array {
+			$out = array();
+			for ( $mask = 0; count( $out ) < $count; $mask++ ) {
+				$name = '';
+				foreach ( str_split( 'wp-checkpoint' ) as $n => $char ) {
+					$name .= ( $mask >> $n ) & 1 ? strtoupper( $char ) : $char;
+				}
+				$out[ $name ] = true;
+			}
+			return array_keys( $out );
+		};
+		foreach ( array( FileStagingStep::MAX_SELF => Job::COMPLETED, FileStagingStep::MAX_SELF + 1 => Job::FAILED ) as $count => $status ) {
+			$files = array();
+			foreach ( $spellings( $count ) as $name ) {
+				if ( 'wp-checkpoint' !== $name ) {
+					$files[ 'wp-content/plugins/' . $name . '/x.txt' ] = 'x';
+				}
+			}
+			$files['wp-content/plugins/wp-checkpoint/x.txt'] = 'x';
+			$job = $this->run_restore( $this->start_restore( $this->with( $files ) ) );
+			$this->assertSame( $status, $job->status, $count . ': ' . $job->last_error );
+			if ( Job::FAILED === $status ) {
+				$this->assertStringContainsString( sprintf( 'more than %d plugin directories named like WP Checkpoint', FileStagingStep::MAX_SELF ), (string) $job->last_error );
+			} else {
+				$this->assertCount( FileStagingStep::MAX_SELF, $this->report( $job ), 'each spelling reported' );
+			}
+		}
+	}
+
+	/**
+	 * @requires OS Linux|Darwin
+	 */
+	public function test_a_plugin_file_that_changed_after_it_was_listed_is_refused(): void {
+		$base    = $this->with( array( 'wp-content/plugins/demo/demo.php' => "<?php\n" ) );
+		$copy    = $this->plugin_copy;
+		$outside = sys_get_temp_dir() . '/wpc-src-' . bin2hex( random_bytes( 3 ) );
+		mkdir( $outside );
+		file_put_contents( $outside . '/Thing.php', "<?php\n// A class file of the stand-in.\n" ); // The same bytes, elsewhere.
+		$changes = array(
+			'grew'          => static function () use ( $copy ): void {
+				file_put_contents( $copy . '/readme.txt', 'more', FILE_APPEND );
+			},
+			'dir to a link' => static function () use ( $copy, $outside ): void {
+				rename( $copy . '/src', $copy . '/src-moved' );
+				symlink( $outside, $copy . '/src' );
+			},
+		);
+		try {
+			foreach ( $changes as $what => $change ) {
+				$type = $this->type_with(
+					new FileStagingStep(
+						$this->staging_parts(
+							array(
+								'at' => static function ( string $point ) use ( $change ): void {
+									if ( 'plugin_list' === $point ) {
+										$change();
+									}
+								},
+							)
+						)
+					)
+				);
+				$job = $this->run_restore( $this->job_of_type( $type, $base ) );
+				$this->assertSame( Job::FAILED, $job->status, $what );
+				$this->assertStringContainsString( 'cannot be read as it was listed', (string) $job->last_error, $what );
+				// Put the stand-in back for the next change.
+				if ( is_link( $copy . '/src' ) ) {
+					unlink( $copy . '/src' );
+					rename( $copy . '/src-moved', $copy . '/src' );
+				}
+				file_put_contents( $copy . '/readme.txt', "=== WP Checkpoint (test stand-in) ===\n" );
+			}
+			// The control: nothing changed, the copy goes through.
+			$this->assertSame( Job::COMPLETED, $this->run_restore( $this->start_restore( $base ) )->status );
+		} finally {
+			exec( 'rm -rf ' . escapeshellarg( $outside ) );
+		}
+	}
 }
