@@ -14,6 +14,7 @@ use WPCheckpoint\Support\Paths;
 use WPCheckpoint\Support\Redactor;
 use WPCheckpoint\Support\Schema;
 use WPCheckpoint\Support\StoredNames;
+use WPCheckpoint\Restore\SwapPlan;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -1556,6 +1557,7 @@ final class JobRepository {
 		}
 		$token = (string) $this->directories->state()['token'];
 		$done  = $this->drop_tables_of( $token, $job->id ) && $done;
+		$done  = $this->delete_plan_of( $job->id ) && $done;
 		if ( $budget <= 0 ) {
 			return false;
 		}
@@ -1695,10 +1697,27 @@ final class JobRepository {
 
 		foreach ( $victims as $job ) {
 			$this->delete_files_of( $job );
+			$this->delete_plan_of( $job->id );
 			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin table.
 			$wpdb->delete( $table, array( 'id' => $job->id ), array( '%d' ) );
 		}
 		return count( $victims );
+	}
+
+	/**
+	 * Remove a job's rows of the swap plan (Restore\SwapPlan), a bounded number per call.
+	 *
+	 * @param int $job_id Job id.
+	 * @return bool True when none are left (or the table is not there).
+	 */
+	private function delete_plan_of( int $job_id ): bool {
+		global $wpdb;
+		$table = $wpdb->base_prefix . SwapPlan::TABLE;
+		$quiet = $wpdb->suppress_errors( true );
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix.
+		$deleted = $wpdb->query( $wpdb->prepare( "DELETE FROM {$table} WHERE job_id = %d LIMIT %d", $job_id, SwapPlan::DELETE_ROWS ) );
+		$wpdb->suppress_errors( $quiet );
+		return false === $deleted || (int) $deleted < SwapPlan::DELETE_ROWS;
 	}
 
 	/**

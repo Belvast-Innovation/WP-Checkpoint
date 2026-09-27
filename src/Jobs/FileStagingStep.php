@@ -389,6 +389,10 @@ final class FileStagingStep implements Step {
 		$slowest     = 0.0;
 		$budget      = (float) $context->budget()->seconds;
 		$since       = 0;
+		if ( $context->taken_over() ) {
+			// The run that lost the job may still write the units after this position: the final check hashes them again.
+			self::suspect( $work, $cursor );
+		}
 		while ( true ) {
 			if ( ! $first && ( $context->should_stop() || $context->remaining_seconds() < $slowest * self::MARGIN ) ) {
 				return StepResult::progress( $cursor, 80, __( 'Staging the files', 'wp-checkpoint' ) );
@@ -404,14 +408,13 @@ final class FileStagingStep implements Step {
 				$context->checkpoint( $cursor, 90, __( 'Staging this plugin', 'wp-checkpoint' ) );
 				return null;
 			}
-			$line = $chunk['line'];
-			$map  = $layout->map( (string) $line['p'] );
-			$top  = null === $map ? '' : explode( '/', $map['relative'] )[0];
-			if ( null === $map || ! in_array( $map['group'], (array) $staging['staged'], true ) || ( 'plugins' === $map['group'] && ( in_array( $top, $skip, true ) || self::fold( $top ) === $running ) ) ) {
+			$line   = $chunk['line'];
+			$target = self::target( (string) $line['p'], $chunk['entry'], $layout, (array) $staging['staged'], $skip, $running );
+			if ( null === $target ) {
 				$cursor['at'] = $chunk['next']; // Not restored (listed by the files preflight), or this plugin's place.
 				continue;
 			}
-			$special = self::special( $chunk['entry'] );
+			$special = $target['special'];
 			if ( '' !== $special ) {
 				$text = self::json(
 					array(
@@ -428,7 +431,7 @@ final class FileStagingStep implements Step {
 				continue;
 			}
 			$started = $context->elapsed();
-			$written = $this->write_unit( $context, $cursor, $chunk, $layout, $map['group'], $map['group'] . '/' . $map['relative'], $chunk_bytes, $dir_mode, $file_mode );
+			$written = $this->write_unit( $context, $cursor, $chunk, $layout, $target['group'], $target['relative'], $chunk_bytes, $dir_mode, $file_mode );
 			$cost    = $context->elapsed() - $started;
 			$slowest = max( $slowest, $cost );
 			if ( $cost > $budget ) {
@@ -845,6 +848,83 @@ final class FileStagingStep implements Step {
 	}
 
 	/**
+	 * Where an entry of the files index is staged: its group and its path under the staging root ("{group}/…"),
+	 * with the kind of a special entry that is reported, not created ('' for a file); null when it is not
+	 * staged (no group, a group not staged, a backup's copy of this plugin or its name taken by the running
+	 * copy). The one answer to "is this staged, and where", for staging and for the final check.
+	 *
+	 * @param string               $p       The backup path.
+	 * @param array<string, mixed> $entry   Its central directory entry.
+	 * @param StagingLayout        $layout  Layout.
+	 * @param string[]             $staged  Groups staged.
+	 * @param string[]             $skip    The backup's plugin directories that are this plugin.
+	 * @param string               $running The running plugin's directory name, folded (fold()).
+	 * @return array{group: string, relative: string, special: string}|null
+	 */
+	public static function target( string $p, array $entry, StagingLayout $layout, array $staged, array $skip, string $running ) {
+		$map = $layout->map( $p );
+		if ( null === $map || ! in_array( $map['group'], $staged, true ) ) {
+			return null;
+		}
+		$top = explode( '/', $map['relative'] )[0];
+		if ( 'plugins' === $map['group'] && ( in_array( $top, $skip, true ) || self::fold( $top ) === $running ) ) {
+			return null;
+		}
+		return array(
+			'group'    => $map['group'],
+			'relative' => $map['group'] . '/' . $map['relative'],
+			'special'  => self::special( $entry ),
+		);
+	}
+
+	/**
+	 * Record where the files phase stands when it continues after a takeover (RestoreFiles::SUSPECTS): the
+	 * position of the file it is at and how much of it is committed. Written whole and atomically; recording
+	 * a position again adds nothing.
+	 *
+	 * @param string               $work   Work directory.
+	 * @param array<string, mixed> $cursor Cursor of the files phase.
+	 * @return void
+	 * @throws TransientFailure When the record cannot be written.
+	 */
+	private static function suspect( string $work, array $cursor ): void {
+		$list  = self::suspects( $work );
+		$point = array(
+			'at'   => $cursor['at'],
+			'done' => (int) $cursor['done'],
+		);
+		if ( in_array( $point, $list, true ) ) {
+			return;
+		}
+		$list[] = $point;
+		ExportPlan::write( $work, RestoreFiles::SUSPECTS, array( 'points' => $list ) );
+	}
+
+	/**
+	 * The positions recorded by suspect().
+	 *
+	 * @param string $work Work directory.
+	 * @return array<int, array{at: mixed, done: int}>
+	 * @throws WorkLost When the record is there but not one this code wrote.
+	 */
+	public static function suspects( string $work ): array {
+		$path = RestoreFiles::path( $work, RestoreFiles::SUSPECTS );
+		clearstatcache( true, $path );
+		if ( ! is_file( $path ) ) {
+			return array();
+		}
+		try {
+			$list = ExportPlan::read( $work, RestoreFiles::SUSPECTS )['points'] ?? null;
+		} catch ( \RuntimeException $e ) {
+			$list = null;
+		}
+		if ( ! is_array( $list ) ) {
+			throw new WorkLost( 'The record of where staging continued after an interruption is damaged.' );
+		}
+		return array_values( $list );
+	}
+
+	/**
 	 * What kind of special file an entry is ('' for a regular file).
 	 *
 	 * @param array<string, mixed> $entry Entry.
@@ -861,7 +941,7 @@ final class FileStagingStep implements Step {
 	 * @return int
 	 * @throws WorkLost When the index is gone.
 	 */
-	private static function database_chunks( string $work ): int {
+	public static function database_chunks( string $work ): int {
 		$handle = @fopen( RestoreFiles::path( $work, RestoreFiles::INDEX ), 'rb' );
 		if ( false === $handle ) {
 			throw new WorkLost( 'The database index of the restore is gone from the work directory.' );
@@ -897,7 +977,7 @@ final class FileStagingStep implements Step {
 	 * @param string $name Name.
 	 * @return string
 	 */
-	private static function fold( string $name ): string {
+	public static function fold( string $name ): string {
 		return function_exists( 'mb_check_encoding' ) && mb_check_encoding( $name, 'UTF-8' ) ? PathKey::of( $name ) : strtolower( $name );
 	}
 

@@ -9,6 +9,7 @@ use WPCheckpoint\Jobs\RestoreFilesPreflightStep;
 use WPCheckpoint\Jobs\TempTables;
 use WPCheckpoint\Jobs\Budget;
 use WPCheckpoint\Jobs\Runner;
+use WPCheckpoint\Jobs\SwapCheckStep;
 use WPCheckpoint\Plugin;
 use WPCheckpoint\Support\Redactor;
 use WPCheckpoint\Restore\NameClashes;
@@ -46,8 +47,17 @@ final class RestoreFilesPreflightTest extends RestoreTestCase {
 	 * A restore type whose files preflight has these parts.
 	 */
 	private function type( array $parts ): string {
-		$type = 'restore_files_' . bin2hex( random_bytes( 3 ) );
-		$this->register( $type, self::restore_steps_with( new RestoreFilesPreflightStep( $parts ) ) );
+		$type  = 'restore_files_' . bin2hex( random_bytes( 3 ) );
+		$steps = self::restore_steps_with( new RestoreFilesPreflightStep( $parts ) );
+		if ( isset( $parts['directories'] ) ) {
+			// The final check sees the same site directories the preflight was given.
+			foreach ( $steps as $i => $step ) {
+				if ( SwapCheckStep::ID === $step->id() ) {
+					$steps[ $i ] = new SwapCheckStep( null, $this->check_parts( array( 'site_dirs' => $parts['directories'] ) ) );
+				}
+			}
+		}
+		$this->register( $type, $steps );
 		return $type;
 	}
 

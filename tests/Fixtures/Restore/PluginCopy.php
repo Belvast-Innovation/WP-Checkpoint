@@ -9,6 +9,11 @@ namespace WPCheckpoint\Tests\Fixtures\Restore;
 final class PluginCopy {
 
 	/**
+	 * The version its main file declares.
+	 */
+	const VERSION = '9.9.9-test';
+
+	/**
 	 * Make one: "{temp}/wpc-plugin-{random}/wp-checkpoint" with a main file, a class file and a readme.
 	 *
 	 * @return string The plugin directory.

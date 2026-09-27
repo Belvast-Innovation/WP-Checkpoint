@@ -26,6 +26,7 @@ use WPCheckpoint\Jobs\StoreStep;
 use WPCheckpoint\Jobs\TickResult;
 use WPCheckpoint\Jobs\VerifyJob;
 use WPCheckpoint\Jobs\VerifyStep;
+use WPCheckpoint\Jobs\SwapCheckStep;
 use WPCheckpoint\Plugin;
 use WPCheckpoint\Support\Deleter;
 use WPCheckpoint\Support\Redactor;
@@ -148,6 +149,16 @@ final class NoBudgetLeftTest extends JobTestCase {
 					)
 				);
 			}
+			if ( SwapCheckStep::ID === $step->id() ) {
+				$steps[ $i ] = new SwapCheckStep(
+					null,
+					array(
+						'plugin_dir'  => $copy,
+						'plugin_main' => $copy . '/wp-checkpoint.php',
+						'version'     => PluginCopy::VERSION,
+					)
+				);
+			}
 		}
 		$this->register( RestoreJob::ID, $steps );
 		$job = Plugin::instance()->jobs()->create( RestoreJob::ID, self::$admin_id, array(), array( 'base' => $base ) );
@@ -155,7 +166,7 @@ final class NoBudgetLeftTest extends JobTestCase {
 			list( $job, $ticks, $ran ) = $this->run_with_no_time_left( $job );
 			$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
 			$this->assertGreaterThan( 10, $ticks, 'the control: the restore crossed many ticks' );
-			foreach ( array( RestoreVerifyStep::ID, RestorePreflightStep::ID, RestoreFilesPreflightStep::ID, DatabaseImportStep::ID, FileStagingStep::ID ) as $step ) {
+			foreach ( array( RestoreVerifyStep::ID, RestorePreflightStep::ID, RestoreFilesPreflightStep::ID, DatabaseImportStep::ID, FileStagingStep::ID, SwapCheckStep::ID ) as $step ) {
 				$this->assertContains( $step, $ran, 'a tick with no time left started in ' . $step );
 			}
 		} finally {

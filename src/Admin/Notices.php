@@ -7,6 +7,7 @@
 
 namespace WPCheckpoint\Admin;
 
+use WPCheckpoint\Support\AutoUpdateHold;
 use WPCheckpoint\Support\CloneClassifier;
 use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Support\Guard;
@@ -87,6 +88,23 @@ final class Notices {
 				'dismissible' => true,
 				'link'        => $reclaim->marker_install_id_matches( (string) $state['previous_path'] ) ? array( ReclaimActions::confirmation_url(), __( 'This is the same site: review and continue with the original directory', 'wp-checkpoint' ) ) : array(),
 				'dismiss'     => __( 'Keep the new directory', 'wp-checkpoint' ),
+			);
+		}
+
+		$held = AutoUpdateHold::state();
+		if ( 'restore' === $held ) {
+			$notices['auto_update_restore'] = array(
+				'type'        => 'info',
+				'message'     => __( 'WP Checkpoint does not update itself automatically while a restore is in progress; automatic updates resume when the restore ends.', 'wp-checkpoint' ),
+				'extra'       => '',
+				'dismissible' => true,
+			);
+		} elseif ( 'unchecked' === $held ) {
+			$notices['auto_update_unchecked'] = array(
+				'type'        => 'warning',
+				'message'     => __( 'WP Checkpoint was not updated automatically: its job table could not be read, so a restore in progress could not be ruled out. It is updated at the next check that can read the table, or update it by hand.', 'wp-checkpoint' ),
+				'extra'       => '',
+				'dismissible' => true,
 			);
 		}
 

@@ -39,6 +39,16 @@ defined( 'ABSPATH' ) || exit;
  *   plugins, one JSON line each.
  * - PREFIX_REPORT: what the table prefix rewrite reported, copied and
  *   removed (PrefixRewriteStep), rewritten whole after each unit.
+ * - SUSPECTS: where staging stood each time it continued after a takeover
+ *   (the run that lost the job may have written on from there), rewritten
+ *   whole; the final check hashes the files from there again.
+ * - SWAP_CHECK_TREE: the directories the final check still has to count
+ *   in the staged tree (one JSON line each, appended under a committed
+ *   length).
+ * - SWAP_LIVE: the site's tables as the final check listed them (a JSON
+ *   string per line, appended under a committed length).
+ * - SWAP_PLAN: which attempt of the swap plan the final check wrote, and
+ *   how many entries it has, written whole once the plan is complete.
  */
 final class RestoreFiles {
 
@@ -57,6 +67,11 @@ final class RestoreFiles {
 	const PLUGIN_LIST = 'restore-plugin-files.jsonl';
 
 	const PREFIX_REPORT = 'restore-prefix-report.json';
+
+	const SUSPECTS        = 'restore-stage-suspects.json';
+	const SWAP_CHECK_TREE = 'restore-swap-check-tree.jsonl';
+	const SWAP_PLAN       = 'restore-swap-plan.json';
+	const SWAP_LIVE       = 'restore-swap-live.jsonl';
 
 	/**
 	 * A file or directory of the work directory.
