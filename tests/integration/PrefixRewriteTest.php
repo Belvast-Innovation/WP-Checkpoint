@@ -33,12 +33,13 @@ final class PrefixRewriteTest extends RestoreTestCase {
 	 * Tables of a site with prefix $p, as a backup of it would hold them; the backup's name.
 	 *
 	 * @param string                               $p        The backup's prefix.
-	 * @param array<int, array{0: int, 1: string, 2: string}> $usermeta Rows: user, key, value.
+	 * @param array<int, array<int, int|string>> $usermeta Rows: user, key, value, and a primary key of its own.
 	 * @param array<string, string>                $options  The main site's options: name => value.
 	 * @param array<int, array<string, string>|null> $sites  Other sites of a network: id => their options (null: no options table).
 	 * @param string                               $engine   usermeta's storage engine.
+	 * @param string                               $charset  usermeta's character set ('' as this site's).
 	 */
-	private function backup_with_prefix( string $p, array $usermeta, array $options, array $sites = array(), string $engine = 'InnoDB' ): string {
+	private function backup_with_prefix( string $p, array $usermeta, array $options, array $sites = array(), string $engine = 'InnoDB', string $charset = '' ): string {
 		global $wpdb;
 		$q = self::q();
 		$this->create( $p . 'options', "LIKE `{$q}options`" );
@@ -48,8 +49,14 @@ final class PrefixRewriteTest extends RestoreTestCase {
 		}
 		$this->create( $p . 'usermeta', "LIKE `{$q}usermeta`" );
 		$wpdb->query( "ALTER TABLE `{$p}usermeta` ENGINE={$engine}" );
+		if ( '' !== $charset ) {
+			$wpdb->query( "ALTER TABLE `{$p}usermeta` CONVERT TO CHARACTER SET {$charset}" );
+		}
 		foreach ( $usermeta as $row ) {
 			$wpdb->insert( $p . 'usermeta', array( 'user_id' => $row[0], 'meta_key' => $row[1], 'meta_value' => $row[2] ) );
+			if ( isset( $row[3] ) ) { // A key of its own (0: an update, as an insert of 0 takes the next one).
+				$this->assertSame( 1, (int) $wpdb->update( $p . 'usermeta', array( 'umeta_id' => $row[3] ), array( 'umeta_id' => $wpdb->insert_id ) ) );
+			}
 		}
 		$tables = array( $p . 'options', $p . 'usermeta' );
 		if ( is_multisite() ) {
@@ -287,6 +294,125 @@ final class PrefixRewriteTest extends RestoreTestCase {
 		$this->assertSame( array( 'rows' => 1, 'copied' => 1 ), $keys[ $fits ] );
 	}
 
+	/**
+	 * A row at key 0 (a table that lost its AUTO_INCREMENT), each kind: its key, what user 1's keys become,
+	 * whether it is the table's only row, and what the report counts.
+	 *
+	 * and the backup's prefix.
+	 *
+	 * @return array<string, array{0: string, 1: array<int, string>, 2: bool, 3: array<int, mixed>, 4?: string}>
+	 */
+	public function rows_at_zero(): array {
+		return array(
+			'renamed'                => array( 'wpx_capabilities', array( '{Q}capabilities' ), false, array() ),
+			'renamed, no prefix'     => array( 'capabilities', array( '{Q}capabilities' ), false, array(), '' ),
+			'renamed, second group'  => array( 'wpx_6_capabilities', array( '{Q}6_capabilities' ), false, array() ),
+			'cleared, the only row'  => array( '{Q}capabilities', array(), true, array( 'cleared', 'keys', array( 'capabilities' => 1 ) ) ),
+			'copied, the only row'   => array( 'wpx_myplugin_pref', array( 'wpx_myplugin_pref', '{Q}myplugin_pref' ), true, array( 'copy', 'keys', array( 'wpx_myplugin_pref' => array( 'rows' => 1, 'copied' => 1 ) ) ) ),
+		);
+	}
+
+	/**
+	 * @dataProvider rows_at_zero
+	 *
+	 * @param string[]          $becomes Keys of user 1 after the restore.
+	 * @param array<int, mixed> $counted Report section, part, and what it holds.
+	 */
+	public function test_a_row_at_key_zero_is_rewritten_too( string $key, array $becomes, bool $alone, array $counted, string $p = 'wpx_' ): void {
+		global $wpdb;
+		if ( false !== strpos( $key, '_6_' ) && ! is_multisite() ) {
+			$this->markTestSkipped( 'A network\'s sites only.' );
+		}
+		$q    = self::q();
+		$rows = array( array( 1, str_replace( '{Q}', $q, $key ), 'zero', 0 ) );
+		if ( ! $alone ) {
+			$rows[] = array( 2, $p . 'capabilities', 'other' );
+		}
+		// With groups of one site, the first group is the main site and site 5, the second site 6.
+		$base = $this->backup_with_prefix( $p, $rows, array(), array( 5 => array(), 6 => array() ) );
+		$job  = $this->run_restore( Plugin::instance()->jobs()->create( $this->type_with( self::SMALL ), self::$admin_id, array(), array( 'base' => $base ) ) );
+		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
+		$temp = $this->temporary_names( $job )[ $p . 'usermeta' ];
+		if ( array() !== $becomes ) {
+			$this->assertSame( '0', (string) $wpdb->get_var( "SELECT MIN(umeta_id) FROM `{$temp}`" ), 'the control: the row is at key 0 in the restored table' );
+		}
+		$keys = array_column(
+			array_filter(
+				$this->restored( $job, $p . 'usermeta' ),
+				static function ( array $row ): bool {
+					return 1 === $row[0];
+				}
+			),
+			1
+		);
+		sort( $keys );
+		$want = str_replace( '{Q}', $q, $becomes );
+		sort( $want );
+		$this->assertSame( $want, $keys );
+		if ( array() !== $counted ) {
+			$this->assertSame( $counted[2], $this->report( $job )[ $counted[0] ][ $counted[1] ] );
+		}
+	}
+
+	public function test_a_copy_the_backup_already_has_is_found_in_a_table_of_another_character_set(): void {
+		global $wpdb;
+		$q   = self::q();
+		$job = $this->run_restore(
+			$this->start_restore(
+				$this->backup_with_prefix(
+					'wpx_',
+					array(
+						array( 1, "wpx_caf\u{e9}", 'mine' ),
+						array( 1, "{$q}caf\u{e9}", 'already there' ),
+					),
+					array(),
+					array(),
+					'InnoDB',
+					'latin1'
+				)
+			)
+		);
+		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
+		$temp = $this->temporary_names( $job )['wpx_usermeta'];
+		$this->assertSame( 'latin1', $wpdb->get_var( $wpdb->prepare( 'SELECT CHARACTER_SET_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND COLUMN_NAME = %s', $temp, 'meta_key' ) ), 'the control: the restored column is latin1' );
+		$meta = $this->restored( $job, 'wpx_usermeta' );
+		sort( $meta );
+		$want = array( array( 1, "wpx_caf\u{e9}", 'mine' ), array( 1, "{$q}caf\u{e9}", 'already there' ) );
+		sort( $want );
+		$this->assertSame( $want, $meta, 'no second row under the name' );
+		$this->assertSame( array( 'rows' => 1, 'existing' => 1 ), $this->report( $job )['copy']['keys']["wpx_caf\u{e9}"] );
+	}
+
+	public function test_a_backup_prefix_that_starts_with_this_sites_gets_no_copy_named_like_its_own_rows(): void {
+		$q   = self::q();
+		$p   = $q . 'a'; // A copy of "{P}a2_capabilities" would be "{Q}a2_capabilities", that is "{P}2_capabilities".
+		$job = $this->run_restore(
+			$this->start_restore(
+				$this->backup_with_prefix(
+					$p,
+					array(
+						array( 1, $p . 'capabilities', 'admin' ),
+						array( 1, $p . 'a2_capabilities', 'odd' ),
+						array( 1, $p . 'myplugin_pref', 'mine' ),
+					),
+					array()
+				)
+			)
+		);
+		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
+		$meta = $this->restored( $job, $p . 'usermeta' );
+		sort( $meta );
+		$want = array(
+			array( 1, $p . 'a2_capabilities', 'odd' ),
+			array( 1, $p . 'myplugin_pref', 'mine' ),
+			array( 1, $q . 'capabilities', 'admin' ),
+			array( 1, $q . 'myplugin_pref', 'mine' ),
+		);
+		sort( $want );
+		$this->assertSame( $want, $meta, 'the control: another key was copied' );
+		$this->assertSame( array( 'rows' => 1, 'reported' => 1 ), $this->report( $job )['copy']['keys'][ $p . 'a2_capabilities' ] );
+	}
+
 	public function test_a_site_prefix_that_starts_with_the_backups_gets_no_copies(): void {
 		$q = self::q();
 		$p = substr( $q, 0, -2 ); // "wptests_" and "wptest": a copy of "{P}s_x" would be named "{Q}x", a name of the backed-up site too.
@@ -472,7 +598,7 @@ final class PrefixRewriteTest extends RestoreTestCase {
 		$this->assertSame( Job::RUNNING, Plugin::instance()->jobs()->find( $job->id )->status, 'it stopped to be retried, not failed' );
 		if ( 'copied' === $point ) {
 			$copy = $this->report( $job )['copy'];
-			$this->assertSame( array( 0, array() ), array( $copy['upto'], $copy['keys'] ), 'the report was not written by the run whose claim was taken' );
+			$this->assertSame( array( -1, array() ), array( $copy['upto'], $copy['keys'] ), 'the report was not written by the run whose claim was taken' );
 			$this->assertContains( array( 1, self::q() . 'myplugin_pref', 'mine' ), $this->restored( $job, 'wpx_usermeta' ), 'the control: the copy before the claim was taken ran' );
 			$this->assertRetriedToTheEnd( $job, $base );
 			return;
@@ -485,7 +611,7 @@ final class PrefixRewriteTest extends RestoreTestCase {
 		$this->assertRetriedToTheEnd( $job, $base );
 	}
 
-	public function test_only_names_equal_byte_for_byte_are_renamed_cleared_or_copied(): void {
+	public function test_usermeta_keys_are_matched_byte_for_byte_and_option_names_by_the_collation(): void {
 		$q   = self::q();
 		$uq  = strtoupper( $q );
 		$job = $this->run_restore(
@@ -527,14 +653,15 @@ final class PrefixRewriteTest extends RestoreTestCase {
 		usort( $want, $sort );
 		usort( $meta, $sort );
 		$this->assertSame( $want, $meta, 'the control: the one row equal byte for byte was renamed' );
+		// get_option( 'wpx_user_roles' ) read "WPX_user_roles" on the backed-up site; the unique index holds one of them.
 		$options = $this->restored( $job, 'wpx_options' );
-		$this->assertSame( 'upper case', $options['WPX_user_roles'] );
-		$this->assertSame( 'upper case, this site', $options[ $uq . 'user_roles' ] );
-		$this->assertArrayNotHasKey( $q . 'user_roles', $options );
+		$this->assertSame( 'upper case', $options[ $q . 'user_roles' ] );
+		$this->assertArrayNotHasKey( 'WPX_user_roles', $options );
+		$this->assertArrayNotHasKey( $uq . 'user_roles', $options );
 		$report = $this->report( $job );
-		$this->assertSame( 0, $report['options']['tables'], 'an upper case option name does not start with the prefix' );
+		$this->assertSame( array( 'WPX_plugin_setting' ), $report['options']['first'][ $q . 'options' ] );
 		$this->assertSame( array( 'wpx_myplugin_pref' => array( 'rows' => 1, 'copied' => 1 ) ), $report['copy']['keys'], 'an upper case name is not the copy\'s' );
-		$this->assertSame( array(), $report['cleared']['keys'] );
+		$this->assertSame( array( 'user_roles' => 1 ), $report['cleared']['keys'], 'the control: the option was cleared, the usermeta rows were not' );
 	}
 
 	public function test_units_of_a_row_and_groups_of_a_site_end_as_the_default_ones_with_the_report_bounded(): void {
@@ -599,7 +726,7 @@ final class PrefixRewriteTest extends RestoreTestCase {
 		}
 		$GLOBALS['wpdb']->query( 'COMMIT' );
 		$this->assertSame( Job::FAILED, $job->status );
-		$this->assertStringContainsString( 'one statement took 60 seconds, more than the 20-second time budget', (string) $job->last_error );
+		$this->assertStringContainsString( 'one unit of work took 60 seconds, more than the 20-second time budget', (string) $job->last_error );
 	}
 
 	public function test_a_rewrite_moves_on_in_every_tick_with_no_time_left(): void {

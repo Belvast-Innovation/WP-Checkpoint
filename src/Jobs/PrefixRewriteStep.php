@@ -25,12 +25,15 @@ defined( 'ABSPATH' ) || exit;
  * Runs after the database import, before the files are staged, on the
  * temporary tables only, and only when the backup's prefix P is not this
  * site's Q. PrefixKeys names the rows; each site of a network by the ids in
- * the backup's blogs table (the main site, blog 1, without an id). Keys are
- * matched byte for byte (BINARY), not by the columns' collation: WordPress
- * finds a user's meta by the exact key, so a "WPX_capabilities" or a
- * "wpx_capabilities " was never read on the backed-up site and is not
- * renamed into one that would be read here. Phases, a site group (the main
- * site and up to "group" ids) at a time where sites matter:
+ * the backup's blogs table (the main site, blog 1, without an id). usermeta
+ * keys are matched byte for byte (BINARY), not by the column's collation:
+ * WordPress finds a user's meta by the exact key (its meta cache), so a
+ * "WPX_capabilities" or a "wpx_capabilities " was never read on the
+ * backed-up site and is not renamed into one that would be read here.
+ * Option names are matched by the column's collation, as WordPress reads
+ * them (get_option() ends in an SQL equality) and as the unique index on
+ * the name holds them: one row per name under the collation. Phases, a site
+ * group (the main site and up to "group" ids) at a time where sites matter:
  *
  * 1. options_report (P not empty): per site's options table, the options
  *    whose names start with P, the roles aside, are counted and the first
@@ -43,7 +46,8 @@ defined( 'ABSPATH' ) || exit;
  *    by its literal name); one whose name would not fit the column is
  *    skipped and reported; when Q starts with P, a copy's name is itself a
  *    name of the backup's own site, so nothing is copied and the keys are
- *    reported only. Rows are taken in primary key order, a range and a
+ *    reported only, as is a copy whose name itself starts with P (when P
+ *    starts with Q). Rows are taken in primary key order, a range and a
  *    number of rows at most per unit, up to the highest key at the plan
  *    (copies get higher keys and are never taken again); a row's existing
  *    copy above that key is how a replay knows it is done (so two rows of
@@ -59,7 +63,8 @@ defined( 'ABSPATH' ) || exit;
  * other rows named after the prefix cannot be told from the rest.
  *
  * Each usermeta statement covers a primary key range ("range" ids) of the
- * table as it was when the phase began, so the rows it can touch are
+ * table as it was when the phase began, the first from below 0 (a table
+ * that lost its AUTO_INCREMENT holds rows at 0), so the rows it can touch are
  * bounded and the same whatever the order of a replay; each moves rows out
  * of what it matches, so running it again changes nothing, and a statement
  * cut short on a table without transactions goes on at the next run. Each
@@ -96,6 +101,11 @@ final class PrefixRewriteStep implements Step {
 	 * The longest usermeta key.
 	 */
 	const MAX_KEY_BYTES = 255;
+
+	/**
+	 * Rows of one user whose key equals a copy's name under the collation, looked at for the exact name.
+	 */
+	const VARIANTS = 100;
 
 	/**
 	 * Sizes: "range" usermeta ids per statement, "copy_range" ids and "copy_rows" rows per copy unit, "group"
@@ -223,7 +233,7 @@ final class PrefixRewriteStep implements Step {
 				$cost    = $context->elapsed() - $started;
 				$slowest = max( $slowest, $cost );
 				if ( $cost > $budget ) {
-					throw new \RuntimeException( sprintf( 'Renaming the rows named after the table prefix is too slow on this database: one statement took %1$d seconds, more than the %2$d-second time budget of a single run.', (int) ceil( $cost ), (int) $budget ) );
+					throw new \RuntimeException( sprintf( 'Renaming the rows named after the table prefix is too slow on this database: one unit of work took %1$d seconds, more than the %2$d-second time budget of a single run.', (int) ceil( $cost ), (int) $budget ) );
 				}
 				// A phase ends in a checkpoint of its own: a replay never goes back into an earlier phase (the clearing
 				// run again after the last phase had begun would remove renamed rows).
@@ -273,12 +283,12 @@ final class PrefixRewriteStep implements Step {
 					'first' => array(),
 				),
 				'copy'       => array(
-					'upto' => 0,
+					'upto' => -1,
 					'keys' => array(),
 					'more' => 0,
 				),
 				'cleared'    => array(
-					'mark' => array( 0, 0, 0 ),
+					'mark' => array( -1, -1, -1 ),
 					'keys' => array(),
 				),
 			),
@@ -287,7 +297,7 @@ final class PrefixRewriteStep implements Step {
 		return array(
 			'phase' => '' === $from ? 'a' : 'options_report',
 			'after' => 0,
-			'from'  => 0,
+			'from'  => -1,
 			'top'   => null,
 			'max'   => $max,
 			'copy'  => $copy,
@@ -334,7 +344,7 @@ final class PrefixRewriteStep implements Step {
 		$this->confirm_holder( $context, $run );
 		$this->at( $phase . '_options' );
 		$cursor['after'] = $last;
-		$cursor['from']  = 0;
+		$cursor['from']  = -1;
 		return $cursor;
 	}
 
@@ -411,11 +421,11 @@ final class PrefixRewriteStep implements Step {
 			}
 			list( $old, $middle, $new ) = $run['keys']->roles( $site );
 			if ( 'a' === $phase ) {
-				$db->write( 'UPDATE `' . $table . '` SET option_name = ? WHERE option_name = ? AND BINARY option_name = ?' . $this->holding(), array_merge( array( $middle, $old, $old ), $claim ) );
+				$db->write( 'UPDATE `' . $table . '` SET option_name = ? WHERE option_name = ?' . $this->holding(), array_merge( array( $middle, $old ), $claim ) );
 			} elseif ( 'b' === $phase ) {
-				$db->write( 'UPDATE `' . $table . '` SET option_name = ? WHERE option_name = ? AND BINARY option_name = ?' . $this->holding(), array_merge( array( $new, $middle, $middle ), $claim ) );
+				$db->write( 'UPDATE `' . $table . '` SET option_name = ? WHERE option_name = ?' . $this->holding(), array_merge( array( $new, $middle ), $claim ) );
 			} else {
-				$has = $db->rows( 'SELECT COUNT(*) FROM `' . $table . '` WHERE option_name = ? AND BINARY option_name = ?', array( $new, $new ) );
+				$has = $db->rows( 'SELECT COUNT(*) FROM `' . $table . '` WHERE option_name = ?', array( $new ) );
 				if ( (int) ( $has[0][0] ?? 0 ) > 0 ) {
 					$counts[ $new ] = (int) $has[0][0];
 				}
@@ -429,7 +439,7 @@ final class PrefixRewriteStep implements Step {
 			$table = self::options_table( $run['plan'], $site );
 			if ( null !== $table ) {
 				$new = $run['keys']->roles( $site )[2];
-				$db->write( 'DELETE FROM `' . $table . '` WHERE option_name = ? AND BINARY option_name = ?' . $this->holding(), array_merge( array( $new, $new ), $claim ) );
+				$db->write( 'DELETE FROM `' . $table . '` WHERE option_name = ?' . $this->holding(), array_merge( array( $new ), $claim ) );
 			}
 		}
 	}
@@ -468,15 +478,23 @@ final class PrefixRewriteStep implements Step {
 				continue;
 			}
 			$copy = $keys->copy_of( $key );
-			if ( empty( $cursor['copy'] ) ) {
+			if ( empty( $cursor['copy'] ) || 0 === strncmp( $copy, $from, strlen( $from ) ) ) {
+				// When P starts with Q, a copy's name may be a name of the backup's own site ("wp_aa2_x" → "wp_a2_x").
 				$outcome = 'reported';
 			} elseif ( strlen( $copy ) > self::MAX_KEY_BYTES ) {
 				$outcome = 'too_long';
 			} else {
-				$existing = $db->rows( 'SELECT umeta_id FROM `' . $table . '` WHERE user_id = ? AND meta_key = ? AND BINARY meta_key = ? ORDER BY umeta_id LIMIT 1', array( (string) $row[1], $copy, $copy ) );
-				if ( array() !== $existing ) {
+				$existing = null;
+				// Compared here, not by BINARY: the column's bytes are in its own charset, the name in the connection's.
+				foreach ( $db->rows( 'SELECT umeta_id, meta_key FROM `' . $table . '` WHERE user_id = ? AND meta_key = ? ORDER BY umeta_id LIMIT ' . self::VARIANTS, array( (string) $row[1], $copy ) ) as $found ) {
+					if ( (string) $found[1] === $copy ) {
+						$existing = (int) $found[0];
+						break;
+					}
+				}
+				if ( null !== $existing ) {
 					// A row under that name from the backup is kept, and reported; one above the plan's highest key is this copy, from before a replay.
-					$outcome = (int) $existing[0][0] <= $max ? 'existing' : 'copied';
+					$outcome = $existing <= $max ? 'existing' : 'copied';
 				} else {
 					$db->write( 'INSERT INTO `' . $table . '` (user_id, meta_key, meta_value) SELECT s.user_id, ?, s.meta_value FROM `' . $table . '` s WHERE s.umeta_id = ?' . $this->holding(), array( $copy, (string) $row[0], (string) self::CLAIM, $run['token'] ) );
 					$outcome = 'copied';
@@ -576,15 +594,15 @@ final class PrefixRewriteStep implements Step {
 				continue;
 			}
 			$roles = $run['keys']->roles( $site )[0];
-			$where = ' WHERE option_name LIKE ? ESCAPE \'!\' AND BINARY option_name LIKE BINARY ? ESCAPE \'!\' AND BINARY option_name <> BINARY ?';
-			$count = (int) ( $db->rows( 'SELECT COUNT(*) FROM `' . $table . '`' . $where, array( $like, $like, $roles ) )[0][0] ?? 0 );
+			$where = ' WHERE option_name LIKE ? ESCAPE \'!\' AND option_name <> ?';
+			$count = (int) ( $db->rows( 'SELECT COUNT(*) FROM `' . $table . '`' . $where, array( $like, $roles ) )[0][0] ?? 0 );
 			if ( 0 === $count ) {
 				continue;
 			}
 			++$report['options']['tables'];
 			$report['options']['names'] += $count;
 			if ( count( $report['options']['first'] ) < $this->sizes['listed'] ) {
-				$first = $db->rows( 'SELECT option_name FROM `' . $table . '`' . $where . ' ORDER BY BINARY option_name LIMIT ' . $this->sizes['listed'], array( $like, $like, $roles ) );
+				$first = $db->rows( 'SELECT option_name FROM `' . $table . '`' . $where . ' ORDER BY option_name LIMIT ' . $this->sizes['listed'], array( $like, $roles ) );
 				$report['options']['first'][ $plan->final_name( $name ) ] = array_map( 'strval', array_column( $first, 0 ) );
 			}
 		}
@@ -640,10 +658,11 @@ final class PrefixRewriteStep implements Step {
 	private function next_phase( array $cursor ): array {
 		$order = array( 'options_report', 'copy', 'a', 'clear', 'b', 'done' );
 		$at    = array_search( $cursor['phase'], $order, true );
+		$next  = $order[ false === $at ? count( $order ) - 1 : $at + 1 ];
 		return array(
-			'phase' => $order[ false === $at ? count( $order ) - 1 : $at + 1 ],
-			'after' => 0,
-			'from'  => 0,
+			'phase' => $next,
+			'after' => 'copy' === $next ? -1 : 0, // The copy phase's position is a usermeta key, from before 0; the others' a site id.
+			'from'  => -1,
 			'top'   => null,
 			'max'   => $cursor['max'],
 			'copy'  => $cursor['copy'],
@@ -783,7 +802,7 @@ final class PrefixRewriteStep implements Step {
 		}
 		if ( array() !== $report['copy']['keys'] ) {
 			$context->logger()->info(
-				empty( $report['copies'] ) ? 'User settings named after the backup\'s table prefix were left as they are: this site\'s prefix starts with the backup\'s, so a copy under it would be a name of the backed-up site too' : 'User settings named after the backup\'s table prefix were copied under this site\'s (kept under the old name too; a name a user already had was left alone)',
+				empty( $report['copies'] ) ? 'User settings named after the backup\'s table prefix were left as they are: this site\'s prefix starts with the backup\'s, so a copy under it would be a name of the backed-up site too' : 'User settings named after the backup\'s table prefix were copied under this site\'s (kept under the old name too; a name a user already had, too long, or that would be a name of the backed-up site was left alone)',
 				array(
 					'keys'      => array_slice( $report['copy']['keys'], 0, $this->sizes['listed'], true ),
 					'more_rows' => $report['copy']['more'],
