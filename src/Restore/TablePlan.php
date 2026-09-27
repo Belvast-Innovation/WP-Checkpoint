@@ -194,6 +194,24 @@ final class TablePlan {
 	}
 
 	/**
+	 * The backup's table prefix.
+	 *
+	 * @return string
+	 */
+	public function backup_prefix(): string {
+		return $this->backup_prefix;
+	}
+
+	/**
+	 * This site's table prefix.
+	 *
+	 * @return string
+	 */
+	public function site_prefix(): string {
+		return $this->site_prefix;
+	}
+
+	/**
 	 * Tables to create, in the backup's order.
 	 *
 	 * @return array<int, array{table: string, temporary: string, final: string, number: int, chunks: int}>

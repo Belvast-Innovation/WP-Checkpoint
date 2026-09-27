@@ -37,6 +37,8 @@ defined( 'ABSPATH' ) || exit;
  *   appended under a committed length).
  * - PLUGIN_LIST: the running plugin's files to copy into the staged
  *   plugins, one JSON line each.
+ * - PREFIX_REPORT: what the table prefix rewrite reported, copied and
+ *   removed (PrefixRewriteStep), rewritten whole after each unit.
  */
 final class RestoreFiles {
 
@@ -53,6 +55,8 @@ final class RestoreFiles {
 	const STAGE_PLAN  = 'restore-stage-plan.json';
 	const REPORT      = 'restore-stage-report.jsonl';
 	const PLUGIN_LIST = 'restore-plugin-files.jsonl';
+
+	const PREFIX_REPORT = 'restore-prefix-report.json';
 
 	/**
 	 * A file or directory of the work directory.
