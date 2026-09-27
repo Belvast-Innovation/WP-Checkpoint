@@ -22,9 +22,15 @@ defined( 'ABSPATH' ) || exit;
  * The step names the step explicitly: the Runner does not infer it. The
  * name must be the failing step's id or one before it in the job type,
  * or the job fails without it (a retry then continues the failing step,
- * as after any failure). The step that throws must leave nothing behind
- * that the steps from the named one on would not redo: they run again
- * from their start and their cleanup is not called in between.
+ * as after any failure). The retry also forgets the answers given so far
+ * (they were about what the steps found then); the job's other options
+ * stay. The step that throws must leave nothing behind that the steps
+ * from the named one on would not redo: they run again from their start,
+ * find their own earlier outputs (their cleanup is not called in between)
+ * and must take them as they would after any interruption. A cancel after
+ * the retry cleans up through the named step only; what the later steps
+ * left in the work directory and as temporary tables is reclaimed by the
+ * engine, and anything else they hold must be released before the throw.
  */
 class RetryFrom extends \RuntimeException {
 

@@ -25,7 +25,7 @@ final class RetryFromTest extends JobTestCase {
 	 * A job of three steps: a (one unit), b (two units), c (two units; the first time, it fails with $fail at its
 	 * second unit, so its cursor is not empty when it fails).
 	 */
-	private function job_failing_with( callable $fail ): int {
+	private function job_failing_with( callable $fail, array $options = array() ): int {
 		$this->runs    = array(
 			'a' => 0,
 			'b' => 0,
@@ -62,7 +62,7 @@ final class RetryFromTest extends JobTestCase {
 				),
 			)
 		);
-		return $this->job_of( 'retry_from_fixture', false );
+		return $this->job_of( 'retry_from_fixture', false, $options );
 	}
 
 	private function run_job( int $id ): Job {
@@ -236,5 +236,70 @@ final class RetryFromTest extends JobTestCase {
 		$failing = array_values( preg_grep( "/status` = 'failed'|status = 'failed'/", $updates ) );
 		$this->assertCount( 1, $failing, 'the control: the failing tick\'s write that marks the job failed' );
 		$this->assertStringContainsString( JobRepository::RETRY_FROM_KEY, $failing[0], 'and the step to retry from is in it' );
+	}
+
+	/**
+	 * @return array<string, array{0: bool}>
+	 */
+	public function failures(): array {
+		return array(
+			'a retry from a named step'   => array( true ),
+			'a retry after other failures' => array( false ),
+		);
+	}
+
+	/**
+	 * @dataProvider failures
+	 */
+	public function test_a_restart_forgets_the_answers_given_so_far_and_keeps_the_other_options( bool $restart ): void {
+		$id = $this->job_failing_with(
+			static function () use ( $restart ): void {
+				throw $restart ? new RetryFrom( 'Retry from b.', 'b' ) : new \RuntimeException( 'An ordinary failure.' );
+			},
+			array(
+				'policy'  => 'continue',
+				'answers' => array( 'free_space' => 'continue' ),
+			)
+		);
+		$this->run_job( $id );
+		$this->assertSame( array( 'free_space' => 'continue' ), Plugin::instance()->jobs()->find( $id )->options['answers'], 'the control: answered before the failure' );
+		Plugin::instance()->job_actions()->retry( $id );
+		$options = Plugin::instance()->jobs()->find( $id )->options;
+		$this->assertSame( 'continue', $options['policy'] );
+		if ( $restart ) {
+			$this->assertArrayNotHasKey( 'answers', $options, 'the answers were about what the steps found then' );
+		} else {
+			$this->assertSame( array( 'free_space' => 'continue' ), $options['answers'], 'a retry that continues keeps them' );
+		}
+	}
+
+	public function test_a_retry_decided_from_an_older_failure_changes_nothing(): void {
+		global $wpdb;
+		$id    = $this->job_failing_with(
+			static function (): void {
+				throw new RetryFrom( 'Retry from b.', 'b' );
+			}
+		);
+		$stale = $this->run_job( $id );
+		$this->assertSame( 'b', $stale->cursor[ JobRepository::RETRY_FROM_KEY ] );
+		// Meanwhile another retry ran the job and it failed again, at c, with an ordinary failure.
+		$wpdb->update(
+			$wpdb->base_prefix . Schema::JOBS_TABLE,
+			array(
+				'cursor_json' => wp_json_encode( array( 'n' => 1 ) ),
+				'finished_at' => $stale->finished_at + 5,
+			),
+			array( 'id' => $id )
+		);
+		try {
+			Plugin::instance()->jobs()->transition( $stale, Job::QUEUED );
+			$this->fail( 'refused' );
+		} catch ( \WPCheckpoint\Jobs\StaleJob $e ) {
+			$this->assertStringContainsString( 'no longer failed', $e->getMessage() );
+		}
+		$row = Plugin::instance()->jobs()->find( $id );
+		$this->assertSame( array( Job::FAILED, 'c', array( 'n' => 1 ) ), array( $row->status, $row->step, $row->cursor ), 'the newer failure is as it was' );
+		Plugin::instance()->jobs()->transition( $row, Job::QUEUED );
+		$this->assertSame( array( 'c', array( 'n' => 1 ) ), array( Plugin::instance()->jobs()->find( $id )->step, Plugin::instance()->jobs()->find( $id )->cursor ), 'the control: a retry from the row as it is continues at c' );
 	}
 }

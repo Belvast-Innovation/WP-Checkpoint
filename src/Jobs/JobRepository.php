@@ -1790,6 +1790,7 @@ final class JobRepository {
 	 * @param string               $failure Kind of failure for a failed job (Job::stamp_failure(), or '').
 	 * @return Job
 	 * @throws StaleJob When the guarded UPDATE changed no row.
+	 * @throws \RuntimeException When the options of a restarted retry cannot be encoded.
 	 */
 	private function write_transition( Job $job, string $to, string $error, string $token, array $extra = array(), array $extra_formats = array(), string $failure = '' ): Job {
 		global $wpdb;
@@ -1825,10 +1826,19 @@ final class JobRepository {
 			$data['cron_deferrals'] = 0;
 			$named                  = Job::FAILED === $from && isset( $job->cursor[ self::RETRY_FROM_KEY ] ) ? $job->cursor[ self::RETRY_FROM_KEY ] : null;
 			if ( is_string( $named ) && '' !== $named ) {
-				// The failed step named where a retry starts (RetryFrom): that step, from its start, in this same write.
-				$restart             = $named;
-				$data['step']        = $named;
-				$data['cursor_json'] = '[]';
+				// The failed step named where a retry starts (RetryFrom): that step, from its start, in this same write;
+				// without the answers given so far, which were about what the steps found then (a step never asks
+				// again once it has an answer).
+				$options = $job->options;
+				unset( $options['answers'] );
+				$json = wp_json_encode( $options );
+				if ( false === $json ) {
+					throw new \RuntimeException( sprintf( 'Job %d: its options cannot be written.', $job->id ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+				}
+				$restart              = $options;
+				$data['step']         = $named;
+				$data['cursor_json']  = '[]';
+				$data['options_json'] = $json;
 			}
 		}
 		if ( Job::RUNNING === $to && 0 === $job->started_at ) {
@@ -1850,8 +1860,12 @@ final class JobRepository {
 		);
 		$where_formats = array( '%d', '%s' );
 		if ( Job::QUEUED === $to && Job::FAILED === $from ) {
-			// The in-memory can_retry() check races with expire_work(): the row is the authority.
+			// The in-memory can_retry() check races with expire_work(): the row is the authority. And the step a retry
+			// starts at comes from the job as read: the row must still be that failure (not another retry's, run and
+			// failed again meanwhile; a failure within the same second is not told apart).
 			$where['work_expired_at'] = 0;
+			$where['finished_at']     = (int) $job->finished_at;
+			$where_formats[]          = '%d';
 			$where_formats[]          = '%d';
 		}
 		if ( '' !== $token ) {
@@ -1870,7 +1884,8 @@ final class JobRepository {
 			}
 		}
 		if ( null !== $restart ) {
-			$job->cursor = array();
+			$job->cursor  = array();
+			$job->options = $restart;
 		}
 		// The object answers like a row read back: the kind, not the stamped column value.
 		$stored              = (string) $job->failure_kind;
