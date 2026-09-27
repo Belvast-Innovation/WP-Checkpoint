@@ -47,6 +47,12 @@ defined( 'ABSPATH' ) || exit;
  */
 final class JobRepository {
 
+	/**
+	 * Reserved cursor key of a failed job: the step a retry starts at (RetryFrom). Runner-reserved (the prefix), so
+	 * a step never sees it, and the next checkpoint of any step drops it.
+	 */
+	const RETRY_FROM_KEY = JobContext::RESERVED_PREFIX . '_retry_from';
+
 	const LOCK_SECONDS      = 120;
 	const BACKOFF_SECONDS   = array( 5, 15, 60, 300 );
 	const STALL_SECONDS     = 86400;
@@ -1142,11 +1148,15 @@ final class JobRepository {
 	 * @param string $error Error message for failed (redacted before storing).
 	 * @param string $token Lock token; required when leaving running for anything but cancelled.
 	 * @param string $failure Kind of failure for a failed job (Job::stamp_failure(), or '' when the cause does not say).
+	 * @param string $retry_from For a failed job: the step a retry starts at (RetryFrom), recorded in the cursor in
+	 *                           the same write; a retry (to queued) then sets that step and an empty cursor in its
+	 *                           own single write.
 	 * @return Job
 	 * @throws InvalidTransition When the state machine forbids the move or the token is missing.
 	 * @throws StaleJob When the row no longer has the expected status (or the lock changed hands).
+	 * @throws \RuntimeException When the cursor with the step to retry from cannot be encoded.
 	 */
-	public function transition( Job $job, string $to, string $error = '', string $token = '', string $failure = '' ): Job {
+	public function transition( Job $job, string $to, string $error = '', string $token = '', string $failure = '', string $retry_from = '' ): Job {
 		if ( '' === $token && Job::RUNNING === $job->status && Job::CANCELLED !== $to ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
 			throw new InvalidTransition( sprintf( 'Job %d: leaving running for %s requires the lock token.', $job->id, $to ) );
@@ -1155,7 +1165,23 @@ final class JobRepository {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
 			throw new InvalidTransition( sprintf( 'Job %d: its work files passed their retention period and were reclaimed; it cannot be retried.', $job->id ) );
 		}
-		return $this->write_transition( $job, $to, $error, $token, array(), array(), $failure );
+		if ( '' === $retry_from ) {
+			return $this->write_transition( $job, $to, $error, $token, array(), array(), $failure );
+		}
+		if ( Job::FAILED !== $to ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+			throw new InvalidTransition( sprintf( 'Job %d: only a failure names a step to retry from.', $job->id ) );
+		}
+		$cursor                         = $job->cursor;
+		$cursor[ self::RETRY_FROM_KEY ] = $retry_from;
+		self::assert_cursor_has_no_secrets( $cursor );
+		$json = wp_json_encode( $cursor );
+		if ( false === $json ) {
+			throw new \RuntimeException( sprintf( 'Job %d: its cursor cannot be written.', $job->id ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+		}
+		$job         = $this->write_transition( $job, $to, $error, $token, array( 'cursor_json' => $json ), array( '%s' ), $failure );
+		$job->cursor = $cursor;
+		return $job;
 	}
 
 	/**
@@ -1764,6 +1790,7 @@ final class JobRepository {
 	 * @param string               $failure Kind of failure for a failed job (Job::stamp_failure(), or '').
 	 * @return Job
 	 * @throws StaleJob When the guarded UPDATE changed no row.
+	 * @throws \RuntimeException When the options of a restarted retry cannot be encoded.
 	 */
 	private function write_transition( Job $job, string $to, string $error, string $token, array $extra = array(), array $extra_formats = array(), string $failure = '' ): Job {
 		global $wpdb;
@@ -1790,12 +1817,29 @@ final class JobRepository {
 			// retries and fails the job again without touching it, and the old kind must not speak for the new failure.
 			$data['failure_kind'] = Job::stamp_failure( $failure, $now );
 		}
+		$restart = null;
 		if ( Job::QUEUED === $to ) {
 			$data['failure_kind']   = '';
 			$data['finished_at']    = 0;
 			$data['takeovers']      = 0; // A retry starts its counts over.
 			$data['takeover_mark']  = '';
 			$data['cron_deferrals'] = 0;
+			$named                  = Job::FAILED === $from && isset( $job->cursor[ self::RETRY_FROM_KEY ] ) ? $job->cursor[ self::RETRY_FROM_KEY ] : null;
+			if ( is_string( $named ) && '' !== $named ) {
+				// The failed step named where a retry starts (RetryFrom): that step, from its start, in this same write;
+				// without the answers given so far, which were about what the steps found then (a step never asks
+				// again once it has an answer).
+				$options = $job->options;
+				unset( $options['answers'] );
+				$json = wp_json_encode( $options );
+				if ( false === $json ) {
+					throw new \RuntimeException( sprintf( 'Job %d: its options cannot be written.', $job->id ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+				}
+				$restart              = $options;
+				$data['step']         = $named;
+				$data['cursor_json']  = '[]';
+				$data['options_json'] = $json;
+			}
 		}
 		if ( Job::RUNNING === $to && 0 === $job->started_at ) {
 			$data['started_at'] = $now;
@@ -1816,8 +1860,12 @@ final class JobRepository {
 		);
 		$where_formats = array( '%d', '%s' );
 		if ( Job::QUEUED === $to && Job::FAILED === $from ) {
-			// The in-memory can_retry() check races with expire_work(): the row is the authority.
+			// The in-memory can_retry() check races with expire_work(): the row is the authority. And the step a retry
+			// starts at comes from the job as read: the row must still be that failure (not another retry's, run and
+			// failed again meanwhile; a failure within the same second is not told apart).
 			$where['work_expired_at'] = 0;
+			$where['finished_at']     = (int) $job->finished_at;
+			$where_formats[]          = '%d';
 			$where_formats[]          = '%d';
 		}
 		if ( '' !== $token ) {
@@ -1834,6 +1882,10 @@ final class JobRepository {
 			if ( property_exists( $job, $key ) ) {
 				$job->$key = $value;
 			}
+		}
+		if ( null !== $restart ) {
+			$job->cursor  = array();
+			$job->options = $restart;
 		}
 		// The object answers like a row read back: the kind, not the stamped column value.
 		$stored              = (string) $job->failure_kind;
