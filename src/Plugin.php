@@ -41,7 +41,6 @@ use WPCheckpoint\Rest\JobsController;
 use WPCheckpoint\Rest\LoopbackController;
 use WPCheckpoint\Rest\ProbeController;
 use WPCheckpoint\Rest\StatusController;
-use WPCheckpoint\Support\AutoUpdateHold;
 use WPCheckpoint\Support\Guard;
 use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Support\Redactor;
@@ -154,7 +153,7 @@ final class Plugin {
 		// The delayed re-tick must work outside the admin (real cron runs in a front-end or CLI process).
 		add_action( Loopback::HOOK, array( $this, 'cron_tick' ) );
 		// Automatic updates run in cron and admin requests: held while a restore is unfinished.
-		AutoUpdateHold::register();
+		Support\AutoUpdateHold::register();
 
 		if ( defined( 'WP_CLI' ) && WP_CLI ) {
 			\WP_CLI::add_command( 'wpcheckpoint job', new JobCommand( $this->job_actions(), $this->job_presenter(), $this->directories() ) );
