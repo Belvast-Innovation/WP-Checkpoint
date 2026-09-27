@@ -9,7 +9,9 @@ namespace WPCheckpoint\Jobs;
 
 use WPCheckpoint\Archive\ArchiveVerifier;
 use WPCheckpoint\Archive\EnvironmentFailure;
+use WPCheckpoint\Archive\EntryPath;
 use WPCheckpoint\Archive\ZipFormat;
+use WPCheckpoint\Files\PathKey;
 use WPCheckpoint\Restore\BackupUnusable;
 use WPCheckpoint\Restore\CannotStage;
 use WPCheckpoint\Restore\ChunkHashes;
@@ -36,23 +38,29 @@ defined( 'ABSPATH' ) || exit;
  *
  * 1. roots: each staging root is created (the job's lease confirmed right
  *    before), protected from web access (index.php, .htaccess; on nginx the
- *    128-bit random name is the protection) and given one directory per
- *    group staged in it.
+ *    128-bit random name is the protection, which is why no message names
+ *    it; a backup's own .htaccess staged below the root can loosen the
+ *    root's on Apache where overrides are allowed) and given one directory
+ *    per group staged in it.
  * 2. identify: the files index in lockstep with the volumes (ChunkWalk), a
- *    page per unit, reading only the heads of the top-level PHP files of
- *    the backup's plugin directories: a directory is this plugin
+ *    page per unit (index lines, index bytes and the bytes the heads cost
+ *    together bound it), reading only the heads of the top-level PHP files
+ *    of the backup's plugin directories: a directory is this plugin
  *    (PluginIdentity) by its header or its constant, whatever its name. A
- *    directory named like the running plugin's that is not this plugin is
- *    left out too (the running copy goes there). Both are reported.
+ *    directory named like the running plugin's (compared as a file system
+ *    that folds case would) that is not this plugin is left out too (the
+ *    running copy goes there). Both are reported.
  * 3. files: the files in lockstep again, one unit per file or per content
  *    chunk of a larger stored file (every unit, that is every file or
  *    chunk, is bounded by the manifest's chunk size, or by the size a
  *    deflated entry is read in one piece). The bytes are hashed as they are
  *    read from the backup, not read back: each chunk against its hash in
  *    the index, a file of one chunk against its hash; a mismatch removes
- *    the staged file and ends the restore with its cause (the backup file
- *    changed since the check, it read differently from how the full check
- *    read it, or it is damaged). A symbolic link, FIFO, device or socket
+ *    the staged file and ends the restore with its cause, judged after the
+ *    range is read once more (the backup file changed since the check; it
+ *    read differently from the full check or from the second read, which
+ *    is this server's storage; or it read wrong twice and was never read in
+ *    full: damaged). A symbolic link, FIFO, device or socket
  *    entry (by its Unix mode, when the creator is Unix) is reported, never
  *    created. Every directory level is checked before a write
  *    (StagedWriter); files and directories get this site's modes
@@ -67,10 +75,12 @@ defined( 'ABSPATH' ) || exit;
  * the engine's checkpoint (fenced on the job's lease). A staged file is cut
  * back to its committed length when it is resumed, and the report file
  * too. The lease is confirmed before each staging root is created and
- * renewed between units; a run that lost it can write at most one more
- * unit before its next checkpoint fails, and cannot move the cursor (the
- * replay rewrites that unit): the swap's final check before it starts is
- * where a staged tree is checked as a whole.
+ * before a staged file is removed, and renewed between units; a run that
+ * lost it writes on until its next checkpoint (the engine's pace: at most
+ * 2 seconds or 16 MB of units) fails, and cannot move the cursor (the
+ * holder rewrites those units from its own position). Nothing checks a
+ * staged tree as a whole yet: that is the swap's final check, a later part
+ * of T042.
  */
 final class FileStagingStep implements Step {
 
@@ -217,12 +227,12 @@ final class FileStagingStep implements Step {
 			StagedWriter::directories( $root, (string) $group, $dir_mode );
 		}
 		return array(
-			'phase'   => 'identify',
-			'start'   => $walk->files_start( self::database_chunks( $context->work_path() ) ),
-			'at'      => null,
-			'self'    => array(),
-			'running' => false,
-			'report'  => 0,
+			'phase'  => 'identify',
+			'start'  => $walk->files_start( self::database_chunks( $context->work_path() ) ),
+			'at'     => null,
+			'self'   => array(),
+			'names'  => array(),
+			'report' => 0,
 		);
 	}
 
@@ -254,12 +264,15 @@ final class FileStagingStep implements Step {
 				continue;
 			}
 			$dir = explode( '/', $map['relative'] )[0];
-			if ( $dir === $running ) {
-				$cursor['running'] = true;
+			if ( self::fold( $dir ) === self::fold( $running ) && ! in_array( $dir, (array) $cursor['names'], true ) ) {
+				// The running copy's name, as spelt in the backup (a file system that folds case puts both in one place).
+				$cursor['names'][] = $dir;
 			}
 			if ( isset( $cursor['self'][ $dir ] ) || 1 !== preg_match( '#\A[^/]+/[^/]+\.php\z#i', $map['relative'] ) || '' !== self::special( $chunk['entry'] ) ) {
 				continue;
 			}
+			// The bytes a head costs count toward the unit: a deflated entry is inflated whole to read it.
+			$read += ZipFormat::METHOD_STORE === (int) $chunk['entry']['method'] ? (int) min( PluginIdentity::HEAD_BYTES, (int) $chunk['entry']['usize'] ) : (int) $chunk['entry']['usize'];
 			$head  = $this->head( $chunk['reader'], $chunk['entry'] );
 			$basis = $identity->basis( $head );
 			if ( '' === $basis ) {
@@ -285,7 +298,14 @@ final class FileStagingStep implements Step {
 	private function identified( JobContext $context, array $cursor, string $running ): array {
 		$work  = $context->work_path();
 		$self  = (array) $cursor['self'];
-		$taken = ! empty( $cursor['running'] ) && ! isset( $self[ $running ] );
+		$taken = array_values(
+			array_filter(
+				(array) $cursor['names'],
+				static function ( $dir ) use ( $self ): bool {
+					return ! isset( $self[ $dir ] );
+				}
+			)
+		);
 		ExportPlan::write(
 			$work,
 			RestoreFiles::STAGE_PLAN,
@@ -306,11 +326,11 @@ final class FileStagingStep implements Step {
 				)
 			) . "\n";
 		}
-		if ( $taken ) {
+		foreach ( $taken as $dir ) {
 			$lines .= self::json(
 				array(
 					'kind' => 'plugin_name_taken',
-					'p'    => StagingLayout::CONTENT . '/plugins/' . $running,
+					'p'    => StagingLayout::CONTENT . '/plugins/' . $dir,
 					'why'  => 'This directory has the name of the running WP Checkpoint\'s directory, where the running copy is staged, but it is not WP Checkpoint: it is left out.',
 				)
 			) . "\n";
@@ -350,7 +370,7 @@ final class FileStagingStep implements Step {
 		$chunk_bytes = (int) $plan['chunk_bytes'];
 		$stage_plan  = ExportPlan::read( $work, RestoreFiles::STAGE_PLAN );
 		$skip        = array_keys( (array) ( $stage_plan['self'] ?? array() ) );
-		$skip[]      = (string) ( $stage_plan['running'] ?? '' );
+		$running     = self::fold( (string) ( $stage_plan['running'] ?? '' ) );
 		$dir_mode    = StageModes::dir();
 		$file_mode   = StageModes::file();
 		$slowest     = 0.0;
@@ -373,7 +393,8 @@ final class FileStagingStep implements Step {
 			}
 			$line = $chunk['line'];
 			$map  = $layout->map( (string) $line['p'] );
-			if ( null === $map || ! in_array( $map['group'], (array) $staging['staged'], true ) || ( 'plugins' === $map['group'] && in_array( explode( '/', $map['relative'] )[0], $skip, true ) ) ) {
+			$top  = null === $map ? '' : explode( '/', $map['relative'] )[0];
+			if ( null === $map || ! in_array( $map['group'], (array) $staging['staged'], true ) || ( 'plugins' === $map['group'] && ( in_array( $top, $skip, true ) || self::fold( $top ) === $running ) ) ) {
 				$cursor['at'] = $chunk['next']; // Not restored (listed by the files preflight), or this plugin's place.
 				continue;
 			}
@@ -394,7 +415,7 @@ final class FileStagingStep implements Step {
 				continue;
 			}
 			$started = $context->elapsed();
-			$written = $this->write_unit( $context, $cursor, $chunk, $layout->stage_dir( $map['group'] ), $map['relative'], $chunk_bytes, $dir_mode, $file_mode );
+			$written = $this->write_unit( $context, $cursor, $chunk, $layout, $map['group'], $map['group'] . '/' . $map['relative'], $chunk_bytes, $dir_mode, $file_mode );
 			$cost    = $context->elapsed() - $started;
 			$slowest = max( $slowest, $cost );
 			if ( $cost > $budget ) {
@@ -415,8 +436,9 @@ final class FileStagingStep implements Step {
 	 * @param JobContext           $context     Context.
 	 * @param array<string, mixed> $cursor      Cursor (updated).
 	 * @param array<string, mixed> $chunk       The walk's entry.
-	 * @param string               $root        The group's staging directory.
-	 * @param string               $relative    Path under it.
+	 * @param StagingLayout        $layout      Layout.
+	 * @param string               $group       The file's group.
+	 * @param string               $relative    Path under the staging root ("{group}/…").
 	 * @param int                  $chunk_bytes The manifest's chunk size.
 	 * @param int                  $dir_mode    Directory mode.
 	 * @param int                  $file_mode   File mode.
@@ -425,7 +447,9 @@ final class FileStagingStep implements Step {
 	 * @throws EnvironmentFailure When the backup cannot be read or the file cannot be written.
 	 * @throws StagingChanged When the staging directory was changed.
 	 */
-	private function write_unit( JobContext $context, array &$cursor, array $chunk, string $root, string $relative, int $chunk_bytes, int $dir_mode, int $file_mode ): int {
+	private function write_unit( JobContext $context, array &$cursor, array $chunk, StagingLayout $layout, string $group, string $relative, int $chunk_bytes, int $dir_mode, int $file_mode ): int {
+		$root   = $layout->root( $group ); // Checked itself on every write, and every level under it.
+		$where  = $layout->parent( $group );
 		$line   = $chunk['line'];
 		$entry  = $chunk['entry'];
 		$size   = (int) $line['b'];
@@ -455,13 +479,13 @@ final class FileStagingStep implements Step {
 				$done,
 				$length,
 				(int) $cursor['crc'],
-				function ( string $piece ) use ( $handle, $hashes, $filter, $path ): void {
+				function ( string $piece ) use ( $handle, $hashes, $filter, $where ): void {
 					if ( null !== $filter ) {
 						$piece = (string) call_user_func( $filter, $piece );
 					}
 					$hashes->update( $piece );
 					if ( strlen( $piece ) !== $this->write( $handle, $piece ) ) {
-						throw $this->write_failure( $path, strlen( $piece ) );
+						throw $this->write_failure( $where, strlen( $piece ) );
 					}
 				}
 			);
@@ -475,7 +499,7 @@ final class FileStagingStep implements Step {
 		}
 		if ( ! @fflush( $handle ) ) {
 			fclose( $handle );
-			throw $this->write_failure( $path, 0 );
+			throw $this->write_failure( $where, 0 );
 		}
 		fclose( $handle );
 		$this->at( 'piece' );
@@ -483,8 +507,10 @@ final class FileStagingStep implements Step {
 			$failure = $hashes->mismatch( $line );
 		}
 		if ( null !== $failure ) {
+			$again = $this->reread( $chunk, $done, $length, (int) $cursor['crc'], $chunk_bytes, $size );
+			$context->confirm_lease(); // Removing a staged file: a run that lost the job must not remove the holder's.
 			@unlink( $path );
-			throw $this->unreadable( $context, (int) $chunk['next']['volume'], (string) $line['p'], $failure );
+			throw $this->unreadable( $context, (int) $chunk['next']['volume'], (string) $line['p'], $failure, null === $again );
 		}
 		if ( $done + $length < $size ) {
 			$cursor['done'] = $done + $length;
@@ -493,7 +519,7 @@ final class FileStagingStep implements Step {
 		}
 		$this->at( 'complete' );
 		if ( ! @touch( $path, (int) $line['m'] ) ) {
-			throw new EnvironmentFailure( sprintf( 'The modification time of a staged file under %s cannot be set.', $root ) );
+			throw new EnvironmentFailure( sprintf( 'The modification time of the staged file %s cannot be set.', $relative ) );
 		}
 		$this->at( 'touched' );
 		$cursor['at']   = $chunk['next'];
@@ -511,10 +537,11 @@ final class FileStagingStep implements Step {
 	 * @param int        $volume  Volume number (0-based).
 	 * @param string     $path    The backup path.
 	 * @param string     $detail  What did not match.
+	 * @param bool       $settled Whether reading the same range again gave the right bytes (the first read was wrong).
 	 * @return \RuntimeException
 	 * @throws WorkLost When the record of the check is gone.
 	 */
-	private function unreadable( JobContext $context, int $volume, string $path, string $detail ): \RuntimeException {
+	private function unreadable( JobContext $context, int $volume, string $path, string $detail, bool $settled ): \RuntimeException {
 		$work    = $context->work_path();
 		$sources = ExportPlan::read( $work, RestoreFiles::SOURCES );
 		$plan    = RestorePreflightStep::load_plan( $work );
@@ -528,10 +555,48 @@ final class FileStagingStep implements Step {
 		if ( false === $now || (int) $now['size'] !== (int) $checked['size'] || (int) $now['mtime'] !== (int) $checked['mtime'] ) {
 			return new BackupUnusable( sprintf( 'The backup file %1$s was changed while it was being restored (it is not the file the restore checked), so %2$s cannot be restored from it. Start the restore again, and leave the backup alone while it runs.', basename( $file ), $path ) );
 		}
+		// Read right the second time, or right before (the full check): not the backup, the reading of it.
+		if ( $settled ) {
+			return new EnvironmentFailure( sprintf( 'The backup file %1$s could not be read the same way twice: %2$s read wrong once (%3$s) and right when it was read again. This points at the storage of this server; try again, and have the disk checked if it happens again.', basename( $file ), $path, $detail ), EnvironmentFailure::ACCESS );
+		}
 		if ( ArchiveVerifier::DEPTH_FULL === ( $sources['depth'] ?? '' ) ) {
 			return new EnvironmentFailure( sprintf( 'The backup file %1$s could not be read the same way twice: the restore checked every byte of it, and now %2$s reads differently (%3$s). This points at the storage of this server; try again, and have the disk checked if it happens again.', basename( $file ), $path, $detail ), EnvironmentFailure::ACCESS );
 		}
 		return new BackupUnusable( sprintf( 'The backup is damaged: %1$s in %2$s does not match its recorded contents (%3$s). Restore from another backup.', $path, basename( $file ), $detail ) );
+	}
+
+	/**
+	 * Read a unit's range of the backup again, only to compare: what does not match this time, or null when it
+	 * does (the first read was wrong, not the backup).
+	 *
+	 * @param array<string, mixed> $chunk       The walk's entry.
+	 * @param int                  $done        Start of the range.
+	 * @param int                  $length      Its length.
+	 * @param int                  $crc         CRC before it.
+	 * @param int                  $chunk_bytes Chunk size.
+	 * @param int                  $size        The file's size.
+	 * @return string|null
+	 * @throws EnvironmentFailure When the volume cannot be read.
+	 */
+	private function reread( array $chunk, int $done, int $length, int $crc, int $chunk_bytes, int $size ) {
+		$hashes = new ChunkHashes( $done, $chunk_bytes, $size );
+		$filter = $this->parts['read'] ?? null;
+		try {
+			$chunk['reader']->stream_range(
+				$chunk['entry'],
+				$done,
+				$length,
+				$crc,
+				static function ( string $piece ) use ( $hashes, $filter ): void {
+					$hashes->update( null === $filter ? $piece : (string) call_user_func( $filter, $piece ) );
+				}
+			);
+		} catch ( EnvironmentFailure $e ) {
+			throw $e;
+		} catch ( \RuntimeException $e ) {
+			return $e->getMessage();
+		}
+		return $hashes->mismatch( $chunk['line'] );
 	}
 
 	/**
@@ -610,13 +675,17 @@ final class FileStagingStep implements Step {
 		if ( false === $list ) {
 			throw new WorkLost( 'The list of this plugin\'s files is gone from the work directory.' );
 		}
-		$root        = $layout->stage_dir( 'plugins' );
+		$root        = $layout->root( 'plugins' ); // Checked itself on every write, and every level under it.
+		$where       = $layout->parent( 'plugins' );
 		$running     = $this->running_name();
 		$source      = $this->plugin_dir();
 		$chunk_bytes = (int) $plan['chunk_bytes'];
+		$slowest     = 0.0;
+		$budget      = (float) $context->budget()->seconds;
+		$since       = 0;
 		try {
 			while ( true ) {
-				if ( ! $first && $context->should_stop() ) {
+				if ( ! $first && ( $context->should_stop() || $context->remaining_seconds() < $slowest * self::MARGIN ) ) {
 					return StepResult::progress( $cursor, 92, __( 'Staging this plugin', 'wp-checkpoint' ) );
 				}
 				$first = false;
@@ -628,17 +697,25 @@ final class FileStagingStep implements Step {
 					return null;
 				}
 				$item = json_decode( $text, true );
-				if ( ! is_array( $item ) || ! isset( $item['r'], $item['b'] ) || ! is_string( $item['r'] ) ) {
+				if ( ! is_array( $item ) || ! isset( $item['r'], $item['b'] ) || ! is_string( $item['r'] ) || null !== EntryPath::problem( $item['r'] ) ) {
 					throw new WorkLost( 'The list of this plugin\'s files is damaged.' );
 				}
-				$from   = $source . '/' . $item['r'];
-				$size   = (int) $item['b'];
-				$done   = (int) $cursor['done'];
-				$length = (int) min( $chunk_bytes, $size - $done );
-				$target = $running . '/' . $item['r'];
-				$in     = @fopen( $from, 'rb' );
-				if ( false === $in || 0 !== fseek( $in, $done ) ) {
-					throw new EnvironmentFailure( sprintf( 'A file of the running WP Checkpoint cannot be read (%s).', $item['r'] ) );
+				$started = $context->elapsed();
+				$from    = $source . '/' . $item['r'];
+				$size    = (int) $item['b'];
+				$done    = (int) $cursor['done'];
+				$length  = (int) min( $chunk_bytes, $size - $done );
+				$target  = 'plugins/' . $running . '/' . $item['r'];
+				// The file as it was listed: a regular file (a link put there since is not followed), and the one opened.
+				clearstatcache( true, $from );
+				$looked = @lstat( $from );
+				$in     = false === $looked || 0100000 !== ( (int) $looked['mode'] & 0170000 ) ? false : @fopen( $from, 'rb' );
+				$opened = false === $in ? false : fstat( $in );
+				if ( false === $in || ! is_array( $opened ) || (int) $opened['dev'] !== (int) $looked['dev'] || (int) $opened['ino'] !== (int) $looked['ino'] || 0 !== fseek( $in, $done ) ) {
+					if ( false !== $in ) {
+						fclose( $in );
+					}
+					throw new EnvironmentFailure( sprintf( 'A file of the running WP Checkpoint cannot be read as it was listed (%s); the plugin\'s directory changed during the restore.', $item['r'] ) );
 				}
 				$out = StagedWriter::open( $root, $target, $done, StageModes::dir(), StageModes::file() );
 				try {
@@ -648,7 +725,7 @@ final class FileStagingStep implements Step {
 							throw new EnvironmentFailure( sprintf( 'A file of the running WP Checkpoint changed while it was copied (%s).', $item['r'] ) );
 						}
 						if ( strlen( $piece ) !== $this->write( $out, $piece ) ) {
-							throw $this->write_failure( $root . '/' . $target, strlen( $piece ) );
+							throw $this->write_failure( $where, strlen( $piece ) );
 						}
 						$left -= strlen( $piece );
 					}
@@ -659,14 +736,23 @@ final class FileStagingStep implements Step {
 				$this->at( 'plugin_piece' );
 				if ( $done + $length < $size ) {
 					$cursor['done'] = $done + $length;
-					continue;
+				} else {
+					if ( ! @touch( $root . '/' . $target, (int) $looked['mtime'] ) ) {
+						throw new EnvironmentFailure( sprintf( 'The modification time of the staged file %s cannot be set.', $target ) );
+					}
+					$cursor['line'] = (int) $cursor['line'] + strlen( $text );
+					$cursor['done'] = 0;
 				}
-				$mtime = @filemtime( $from );
-				if ( false === $mtime || ! @touch( $root . '/' . $target, $mtime ) ) {
-					throw new EnvironmentFailure( sprintf( 'The modification time of a staged file under %s cannot be set.', $root ) );
+				$cost    = $context->elapsed() - $started;
+				$slowest = max( $slowest, $cost );
+				if ( $cost > $budget ) {
+					throw new EnvironmentFailure( sprintf( 'Writing the staged files is too slow on this server: one piece of %1$d MB took %2$d seconds, more than the %3$d-second time budget of a single run.', (int) ceil( $length / 1048576 ), (int) ceil( $cost ), (int) $budget ) );
 				}
-				$cursor['line'] = (int) $cursor['line'] + strlen( $text );
-				$cursor['done'] = 0;
+				$since += $length;
+				if ( $context->should_checkpoint( $since ) ) {
+					$context->checkpoint( $cursor, 92, __( 'Staging this plugin', 'wp-checkpoint' ) );
+					$since = 0;
+				}
 			}
 		} finally {
 			fclose( $list );
@@ -774,16 +860,27 @@ final class FileStagingStep implements Step {
 	/**
 	 * A write that failed: the disk is full when too little is free for the piece, an unwritable file otherwise.
 	 *
-	 * @param string $path  The staged file.
+	 * @param string $where The directory the staging root is in (named in the message; the root's name is not).
 	 * @param int    $bytes Bytes that were to be written.
 	 * @return EnvironmentFailure
 	 */
-	private function write_failure( string $path, int $bytes ): EnvironmentFailure {
-		$free = isset( $this->parts['free'] ) ? call_user_func( $this->parts['free'], dirname( $path ) ) : HostFunctions::disk_free_space( dirname( $path ) );
+	private function write_failure( string $where, int $bytes ): EnvironmentFailure {
+		$free = isset( $this->parts['free'] ) ? call_user_func( $this->parts['free'], $where ) : HostFunctions::disk_free_space( $where );
 		if ( false !== $free && $free < max( 1048576, $bytes ) ) {
-			return new EnvironmentFailure( sprintf( 'The disk of %s is full: the restore could not write its staged files there. Free some space (the preflight checked that enough was free; something else has used it since), then try again.', dirname( $path ) ), EnvironmentFailure::ACCESS );
+			return new EnvironmentFailure( sprintf( 'The disk of %s is full: the restore could not write its staged files there. Free some space (the preflight checked that enough was free; something else has used it since), then try again.', $where ), EnvironmentFailure::ACCESS );
 		}
-		return new EnvironmentFailure( sprintf( 'A staged file under %s could not be written.', dirname( $path ) ), EnvironmentFailure::ACCESS );
+		return new EnvironmentFailure( sprintf( 'A staged file in %s could not be written.', $where ), EnvironmentFailure::ACCESS );
+	}
+
+	/**
+	 * A directory name as a file system that folds case and Unicode forms compares it (the safe side: two
+	 * names that may be one are taken as one).
+	 *
+	 * @param string $name Name.
+	 * @return string
+	 */
+	private static function fold( string $name ): string {
+		return function_exists( 'mb_check_encoding' ) && mb_check_encoding( $name, 'UTF-8' ) ? PathKey::of( $name ) : strtolower( $name );
 	}
 
 	/**

@@ -3,6 +3,7 @@
 namespace WPCheckpoint\Tests\Integration;
 
 use WPCheckpoint\Archive\ArchiveVerifier;
+use WPCheckpoint\Jobs\Budget;
 use WPCheckpoint\Jobs\FileStagingStep;
 use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\Residue;
@@ -10,7 +11,9 @@ use WPCheckpoint\Jobs\RestoreFilesPreflightStep;
 use WPCheckpoint\Jobs\RestoreJob;
 use WPCheckpoint\Jobs\RestoreVerifyStep;
 use WPCheckpoint\Jobs\Step;
+use WPCheckpoint\Jobs\Runner;
 use WPCheckpoint\Plugin;
+use WPCheckpoint\Support\Redactor;
 use WPCheckpoint\Restore\RestoreFiles;
 use WPCheckpoint\Restore\StageModes;
 use WPCheckpoint\Tests\Fixtures\Archive\ArchiveBuilder;
@@ -453,5 +456,183 @@ final class RestoreStagingTest extends RestoreTestCase {
 			$this->assertCount( 2, $this->report( $job ), $point . ': the report once' );
 		}
 	}
-}
 
+	public function test_reading_the_plugins_heads_counts_toward_a_unit(): void {
+		// Three plugins whose main files are large and deflate well: each head read inflates the whole entry.
+		$files = array();
+		foreach ( array( 'one', 'two', 'three' ) as $name ) {
+			$files[ 'wp-content/plugins/' . $name . '/' . $name . '.php' ] = "<?php\n/* Plugin Name: " . $name . " */\n" . str_repeat( '// padding padding padding' . "\n", 30000 );
+		}
+		$job    = $this->start_restore( $this->with( $files ) );
+		$runner = new Runner( Plugin::instance()->jobs(), Plugin::instance()->job_types(), new Redactor( Redactor::installation_secrets() ), array( 'budget' => new Budget( 20, 32 * 1048576, false ) ) );
+		$phases = array();
+		for ( $i = 0; $i < 5000; $i++ ) {
+			$now = Plugin::instance()->jobs()->find( $job->id );
+			if ( FileStagingStep::ID === $now->step ) {
+				$phases[] = (string) ( $now->cursor['phase'] ?? '' );
+			}
+			if ( ! in_array( $now->status, array( Job::QUEUED, Job::RUNNING ), true ) ) {
+				break;
+			}
+			$runner->tick( $job->id, microtime( true ) - 3600 ); // No time left: one unit per tick.
+		}
+		$GLOBALS['wpdb']->query( 'COMMIT' );
+		$this->assertSame( Job::COMPLETED, $now->status, (string) $now->last_error );
+		$this->assertGreaterThanOrEqual( 2, count( array_keys( $phases, 'identify', true ) ), 'the heads took more than one unit: a page is bounded by what it reads, not by the index alone' );
+	}
+
+	public function test_a_directory_named_like_this_plugin_in_another_case_is_left_out(): void {
+		$files = array(
+			'wp-content/plugins/WP-Checkpoint/other.php' => "<?php\n/* Plugin Name: Something Else */\n",
+			'wp-content/plugins/demo/demo.php'          => "<?php\n",
+		);
+		$job = $this->run_restore( $this->start_restore( $this->with( $files ) ) );
+		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
+		$this->assertArrayNotHasKey( 'WP-Checkpoint/other.php', $this->tree( $job )['plugins'], 'a file system that folds case would put it into the running copy' );
+		$this->assertArrayHasKey( 'wp-checkpoint/wp-checkpoint.php', $this->tree( $job )['plugins'], 'the control: the running copy' );
+		$this->assertSame( array( array( 'plugin_name_taken', 'wp-content/plugins/WP-Checkpoint' ) ), array_map( static function ( array $item ): array { return array( $item['kind'], $item['p'] ); }, $this->report( $job ) ) );
+	}
+
+	/**
+	 * @requires OS Linux|Darwin
+	 */
+	public function test_links_in_the_running_plugin_are_never_followed(): void {
+		$outside = sys_get_temp_dir() . '/wpc-outside-' . bin2hex( random_bytes( 3 ) );
+		mkdir( $outside . '/dir', 0700, true );
+		file_put_contents( $outside . '/secret.txt', 'secret' );
+		file_put_contents( $outside . '/dir/inside.txt', 'inside' );
+		symlink( $outside . '/secret.txt', $this->plugin_copy . '/linked.txt' );
+		symlink( $outside . '/dir', $this->plugin_copy . '/linked-dir' );
+		try {
+			$base = $this->with( array( 'wp-content/plugins/demo/demo.php' => "<?php\n" ) );
+			$job  = $this->run_restore( $this->start_restore( $base ) );
+			$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
+			$staged = array_keys( $this->tree( $job )['plugins'] );
+			$this->assertNotContains( 'wp-checkpoint/linked.txt', $staged );
+			$this->assertNotContains( 'wp-checkpoint/linked-dir/', $staged );
+			$this->assertContains( 'wp-checkpoint/readme.txt', $staged, 'the control: the plugin\'s own files are copied' );
+
+			// A file of the list replaced by a link once the list was made: refused, not followed.
+			$copy = $this->plugin_copy;
+			$type = $this->type_with(
+				new FileStagingStep(
+					$this->staging_parts(
+						array(
+							'at' => static function ( string $point ) use ( $copy, $outside ): void {
+								if ( 'plugin_list' === $point ) {
+									unlink( $copy . '/readme.txt' );
+									symlink( $outside . '/secret.txt', $copy . '/readme.txt' );
+								}
+							},
+						)
+					)
+				)
+			);
+			$job = $this->run_restore( $this->job_of_type( $type, $base ) );
+			$this->assertSame( Job::FAILED, $job->status );
+			$this->assertStringContainsString( 'cannot be read as it was listed (readme.txt)', (string) $job->last_error );
+			$this->assertNotContains( 'wp-checkpoint/readme.txt', array_keys( $this->tree( $job )['plugins'] ), 'what the link points to was not copied' );
+		} finally {
+			@unlink( $this->plugin_copy . '/linked.txt' );
+			@unlink( $this->plugin_copy . '/linked-dir' );
+			@unlink( $this->plugin_copy . '/readme.txt' );
+			file_put_contents( $this->plugin_copy . '/readme.txt', "=== WP Checkpoint (test stand-in) ===\n" );
+			exec( 'rm -rf ' . escapeshellarg( $outside ) );
+		}
+	}
+
+	public function test_a_range_that_reads_wrong_once_and_right_again_is_the_servers_storage(): void {
+		$base  = $this->with( self::files() );
+		$reads = 0;
+		$type  = $this->type_with(
+			new FileStagingStep(
+				$this->staging_parts(
+					array(
+						'read' => static function ( string $piece ) use ( &$reads ): string {
+							if ( 1 === ++$reads && '' !== $piece ) {
+								$piece[0] = chr( ord( $piece[0] ) ^ 1 ); // The first read only.
+							}
+							return $piece;
+						},
+					)
+				)
+			)
+		);
+		$job = $this->run_restore( $this->job_of_type( $type, $base ) );
+		$this->assertSame( Job::FAILED, $job->status );
+		$this->assertStringContainsString( 'read wrong once', (string) $job->last_error );
+		$this->assertStringContainsString( 'and right when it was read again', (string) $job->last_error );
+		$this->assertNotSame( Job::FAILURE_FINAL, $job->failure_kind, 'not called damaged: the backup may well be intact' );
+	}
+
+	public function test_a_staging_interrupted_in_the_middle_of_a_file_resumes_it_to_the_same_tree(): void {
+		$base  = $this->with( self::files() );
+		$clean = $this->run_restore( $this->start_restore( $base ), true );
+		$want  = $this->tree( $clean );
+		foreach ( array( 'piece' => 3, 'plugin_piece' => 2 ) as $point => $at_hit ) {
+			$hit  = 0;
+			$type = $this->type_with(
+				new FileStagingStep(
+					$this->staging_parts(
+						array(
+							'at' => static function ( string $at ) use ( $point, $at_hit, &$hit ): void {
+								if ( $at === $point && $at_hit === ++$hit ) {
+									throw new \RuntimeException( 'simulated: the run is killed here' );
+								}
+							},
+						)
+					)
+				)
+			);
+			// Short ticks: each commits its units, so the death comes after a committed part of the file.
+			$job = $this->run_restore( $this->job_of_type( $type, $base ), true );
+			$this->assertSame( Job::FAILED, $job->status, $point );
+			$this->assertSame( $at_hit, $hit, 'the control: at ' . $point );
+			Plugin::instance()->job_actions()->retry( $job->id );
+			$job = $this->run_restore( $job, true );
+			$this->assertSame( Job::COMPLETED, $job->status, $point . ': ' . $job->last_error );
+			$this->assertSame( $want, $this->tree( $job ), $point );
+		}
+	}
+
+	/**
+	 * @requires OS Linux|Darwin
+	 */
+	public function test_a_staging_root_replaced_by_a_link_after_it_was_made_is_never_written_through(): void {
+		$base    = $this->with( array( 'wp-content/uploads/a.txt' => 'a' ) );
+		$outside = sys_get_temp_dir() . '/wpc-elsewhere-' . bin2hex( random_bytes( 3 ) );
+		$roots   = array();
+		$type    = $this->type_with(
+			new FileStagingStep(
+				$this->staging_parts(
+					array(
+						'at' => function ( string $point ) use ( $outside, &$roots ): void {
+							if ( 'identified' !== $point ) {
+								return;
+							}
+							// Every root moved aside, a link to a copy of its tree in its place.
+							foreach ( glob( WP_CONTENT_DIR . '/wp-checkpoint-stage-*' ) as $root ) {
+								exec( 'cp -a ' . escapeshellarg( $root ) . ' ' . escapeshellarg( $outside ) );
+								exec( 'rm -rf ' . escapeshellarg( $root ) );
+								symlink( $outside, $root );
+								$roots[] = $root;
+							}
+						},
+					)
+				)
+			)
+		);
+		try {
+			$job = $this->run_restore( $this->job_of_type( $type, $base ) );
+			$this->assertNotSame( array(), $roots, 'the control: a root was replaced' );
+			$this->assertSame( Job::FAILED, $job->status );
+			$this->assertStringContainsString( '(the staging directory) is not a directory (or is a link to one)', (string) $job->last_error );
+			$this->assertFileDoesNotExist( $outside . '/uploads/a.txt', 'nothing written where the link points' );
+		} finally {
+			foreach ( $roots as $root ) {
+				@unlink( $root );
+			}
+			exec( 'rm -rf ' . escapeshellarg( $outside ) );
+		}
+	}
+}

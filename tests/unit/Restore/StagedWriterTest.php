@@ -139,4 +139,31 @@ final class StagedWriterTest extends TestCase {
 		$this->assertIsResource( $handle );
 		fclose( $handle );
 	}
+
+	public function test_a_file_with_another_name_too_is_not_resumed_and_messages_do_not_name_the_root(): void {
+		file_put_contents( $this->outside . '/wp-config.php', 'secret' );
+		link( $this->outside . '/wp-config.php', $this->root . '/f' ); // A hard link: the same file under two names.
+		try {
+			$this->open( 'f', 0 );
+			$this->fail( 'opened' );
+		} catch ( StagingChanged $e ) {
+			$this->assertStringContainsString( 'is not a regular file of its own', $e->getMessage() );
+			$this->assertStringNotContainsString( $this->root, $e->getMessage(), 'the root\'s random name is its protection' );
+			$this->assertStringContainsString( ' f ', $e->getMessage(), 'the control: the path under the root is named' );
+		}
+		$this->assertSame( 'secret', file_get_contents( $this->outside . '/wp-config.php' ), 'not cut back' );
+		unlink( $this->root . '/f' );
+		file_put_contents( $this->root . '/f', 'own' );
+		fclose( $this->open( 'f', 3 ) ); // The control: a file of its own.
+
+		foreach ( array( '../escape', 'a/../../escape', '', 'a//b', '/abs' ) as $bad ) {
+			try {
+				$this->open( $bad, 0 );
+				$this->fail( 'opened ' . $bad );
+			} catch ( StagingChanged $e ) {
+				$this->assertSame( 'A staged path is not a path under the staging directory.', $e->getMessage(), $bad );
+			}
+		}
+		$this->assertFileDoesNotExist( dirname( $this->root ) . '/escape' );
+	}
 }
