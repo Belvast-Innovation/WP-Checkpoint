@@ -129,7 +129,7 @@ final class SwapCheckStep implements Step {
 	/**
 	 * Injected parts (tests): "at" function( string $point ): void (a crash seam), "plugin_dir", "plugin_main",
 	 * "version" (the running version), "site_dirs" function(): array (group => directory), "sizes", "window" (bytes
-	 * hashed again after a takeover position, in place of SUSPECT_WINDOW_BYTES).
+	 * hashed again after a takeover position, in place of SUSPECT_WINDOW_BYTES; or a function returning them).
 	 *
 	 * @var array<string, mixed>
 	 */
@@ -383,15 +383,18 @@ final class SwapCheckStep implements Step {
 			return array(
 				'cursor'    => $cursor,
 				'unbounded' => true,
-				'what'      => 'counting the table ' . $table['table'] . ', which has no key',
+				'what'      => 'counting the table ' . $table['table'] . ', which has no key to count it by in parts',
 			);
 		}
-		$columns = implode( ', ', array_map( array( SqlWriter::class, 'identifier' ), $key ) );
+		// Key values travel as text the cursor keeps exactly (hex for strings and bytes, digits for numbers) and are
+		// compared back in the column's own terms: a key in bytes or a character set the connection cannot hold
+		// would otherwise come back changed from the cursor, and a range would be counted twice or never end.
+		$columns = implode( ', ', array_column( $key, 'name' ) );
 		$tuple   = '(' . $columns . ')';
-		$marks   = '(' . implode( ', ', array_fill( 0, count( $key ), '?' ) ) . ')';
+		$marks   = '(' . implode( ', ', array_column( $key, 'compare' ) ) . ')';
 		$after   = is_array( $cursor['key'] ) ? array_map( 'strval', $cursor['key'] ) : null;
 		$where   = null === $after ? '' : ' WHERE ' . $tuple . ' > ' . $marks;
-		$bound   = $db->rows( 'SELECT ' . $columns . ' FROM ' . $name . $where . ' ORDER BY ' . $columns . ' LIMIT 1 OFFSET ' . ( $this->sizes['rows'] - 1 ), null === $after ? array() : $after );
+		$bound   = $db->rows( 'SELECT ' . implode( ', ', array_column( $key, 'select' ) ) . ' FROM ' . $name . $where . ' ORDER BY ' . $columns . ' LIMIT 1 OFFSET ' . ( $this->sizes['rows'] - 1 ), null === $after ? array() : $after );
 		if ( array() === $bound ) {
 			$last = (int) ( $db->rows( 'SELECT COUNT(*) FROM ' . $name . ( '' === $where ? ' WHERE 1 = 1' : $where ) . $only, null === $after ? array() : $after )[0][0] ?? -1 );
 			$this->counted( $table, (int) $cursor['sum'] + $last, $run );
@@ -436,6 +439,7 @@ final class SwapCheckStep implements Step {
 	 *
 	 * @param string $work Work directory.
 	 * @return array{removed: array<string, int>, above: array<string, int>}
+	 * @throws WorkLost When the report is one an older version wrote, without the counts.
 	 */
 	private static function rewrite( string $work ): array {
 		$path = RestoreFiles::path( $work, RestoreFiles::PREFIX_REPORT );
@@ -446,7 +450,13 @@ final class SwapCheckStep implements Step {
 				'above'   => array(),
 			);
 		}
-		$rows = (array) ( ExportPlan::read( $work, RestoreFiles::PREFIX_REPORT )['rows'] ?? array() );
+		$report = ExportPlan::read( $work, RestoreFiles::PREFIX_REPORT );
+		if ( ! isset( $report['rows'] ) || ! is_array( $report['rows'] ) ) {
+			// Written by an older version, which did not record what it removed: the counts cannot be told right, and
+			// running the rewrite again would remove the rows it renamed.
+			throw new WorkLost( 'The table prefix of this restore was rewritten by an older version of WP Checkpoint, which did not record what it changed, so the tables cannot be checked. Start the restore again.' );
+		}
+		$rows = $report['rows'];
 		return array(
 			'removed' => array_map( 'intval', (array) ( $rows['removed'] ?? array() ) ),
 			'above'   => array_map( 'intval', (array) ( $rows['above'] ?? array() ) ),
@@ -454,12 +464,18 @@ final class SwapCheckStep implements Step {
 	}
 
 	/**
-	 * The columns of a table's primary key, or of its first unique key whose columns are all NOT NULL; none
-	 * when it has neither.
+	 * The key a table is counted by in ranges: its primary key, or else its first unique key whose columns are
+	 * all NOT NULL (whole columns, not prefixes), each column with how its values are read ("select") and a
+	 * value read so is compared back ("compare", with one "?"): integers and decimals as digits; dates and times
+	 * as their text; character strings as the hex of their bytes, converted back in the column's character set
+	 * and collation; binary strings as hex. None when there is no such key, or it has a column of another type
+	 * (floating point, which does not come back exactly as text; ENUM and SET, which sort in another order than
+	 * they compare; anything else), or a name with "?" (the connection's placeholder): the table is then counted
+	 * in one statement.
 	 *
 	 * @param Queries $db    Connection.
 	 * @param string  $table Table.
-	 * @return string[]
+	 * @return array<int, array{name: string, select: string, compare: string}>
 	 */
 	private static function key_columns( Queries $db, string $table ): array {
 		$keys  = array();
@@ -474,17 +490,62 @@ final class SwapCheckStep implements Step {
 				$nulls[ (string) $row[2] ] = true;
 			}
 		}
+		$chosen = array();
 		if ( isset( $keys['PRIMARY'] ) ) {
-			ksort( $keys['PRIMARY'] );
-			return array_values( $keys['PRIMARY'] );
-		}
-		foreach ( $keys as $name => $columns ) {
-			if ( ! isset( $nulls[ $name ] ) ) {
-				ksort( $columns );
-				return array_values( $columns );
+			$chosen = $keys['PRIMARY'];
+		} else {
+			foreach ( $keys as $name => $columns ) {
+				if ( ! isset( $nulls[ $name ] ) ) {
+					$chosen = $columns;
+					break;
+				}
 			}
 		}
-		return array();
+		if ( array() === $chosen ) {
+			return array();
+		}
+		ksort( $chosen );
+		$types = array();
+		foreach ( $db->rows( 'SHOW FULL COLUMNS FROM ' . SqlWriter::identifier( $table ) ) as $row ) {
+			// Field, Type, Collation, ...
+			$types[ (string) $row[0] ] = array( strtolower( (string) $row[1] ), null === $row[2] ? '' : (string) $row[2] );
+		}
+		$out = array();
+		foreach ( $chosen as $column ) {
+			if ( false !== strpos( $column, '?' ) || ! isset( $types[ $column ] ) ) {
+				return array();
+			}
+			list( $type, $collation ) = $types[ $column ];
+			$name                     = SqlWriter::identifier( $column );
+			if ( 1 === preg_match( '/\A(tinyint|smallint|mediumint|int|integer|bigint|decimal|numeric)\b/', $type ) ) {
+				$out[] = array(
+					'name'    => $name,
+					'select'  => $name,
+					'compare' => '?',
+				);
+			} elseif ( 1 === preg_match( '/\A(date|datetime|timestamp|time)\b/', $type ) ) {
+				$out[] = array(
+					'name'    => $name,
+					'select'  => $name,
+					'compare' => '?',
+				);
+			} elseif ( 1 === preg_match( '/\A(char|varchar)\b/', $type ) && 1 === preg_match( '/\A([a-z0-9]+)_[a-z0-9_]+\z/', strtolower( $collation ), $charset ) ) {
+				$out[] = array(
+					'name'    => $name,
+					'select'  => 'HEX(' . $name . ')',
+					'compare' => 'CONVERT(UNHEX(?) USING ' . $charset[1] . ') COLLATE ' . strtolower( $collation ),
+				);
+			} elseif ( 1 === preg_match( '/\A(binary|varbinary)\b/', $type ) ) {
+				$out[] = array(
+					'name'    => $name,
+					'select'  => 'HEX(' . $name . ')',
+					'compare' => 'UNHEX(?)',
+				);
+			} else {
+				return array();
+			}
+		}
+		return $out;
 	}
 
 	/**
@@ -605,6 +666,10 @@ final class SwapCheckStep implements Step {
 					continue;
 				}
 				$stat = @lstat( $path . '/' . $entry );
+				if ( false !== $stat && 0100000 !== ( $stat['mode'] & 0170000 ) && 0040000 !== ( $stat['mode'] & 0170000 ) ) {
+					// Staging writes regular files and directories only: a link or anything else was put there later.
+					throw new WorkLost( sprintf( 'The staged files hold %s, which the restore did not write (a link or a special file): the staged files were changed. Start the restore again.', $group . '/' . ( '' === $dir ? '' : $dir . '/' ) . $entry ) );
+				}
 				if ( false !== $stat && 0040000 === ( $stat['mode'] & 0170000 ) ) {
 					$more .= wp_json_encode(
 						array(
@@ -652,30 +717,47 @@ final class SwapCheckStep implements Step {
 				$cursor['done']  = (int) $suspects[ (int) $cursor['s'] ]['done'];
 				$cursor['bytes'] = 0;
 			}
-			if ( (int) $cursor['bytes'] >= (int) ( $this->parts['window'] ?? self::SUSPECT_WINDOW_BYTES ) ) {
+			$window = $this->parts['window'] ?? self::SUSPECT_WINDOW_BYTES;
+			if ( (int) $cursor['bytes'] >= (int) ( is_callable( $window ) ? call_user_func( $window ) : $window ) ) {
 				$cursor['s']  = (int) $cursor['s'] + 1;
 				$cursor['at'] = null;
 				continue;
 			}
-			$walk  = $this->walk( $work, $run );
-			$chunk = $walk->at( $cursor['at'] );
-			if ( null === $chunk ) {
+			$walk    = $this->walk( $work, $run );
+			$plan    = ExportPlan::read( $work, RestoreFiles::STAGE_PLAN );
+			$skip    = array_keys( (array) ( $plan['self'] ?? array() ) );
+			$fold    = FileStagingStep::fold( (string) ( $plan['running'] ?? '' ) );
+			$chunk   = null;
+			$target  = null;
+			$skipped = 0;
+			while ( true ) {
+				$chunk = $walk->at( $cursor['at'] );
+				if ( null === $chunk ) {
+					break;
+				}
+				$target = FileStagingStep::target( (string) $chunk['line']['p'], $chunk['entry'], $run['layout'], (array) $run['staging']['staged'], $skip, $fold );
+				if ( null !== $target && '' === $target['special'] ) {
+					break;
+				}
+				// Not written by staging, so not counted by its pace either: not in the window.
+				$cursor['at']   = $chunk['next'];
+				$cursor['done'] = 0;
+				if ( ++$skipped >= $this->sizes['lines'] ) {
+					return $cursor;
+				}
+			}
+			if ( null === $chunk || null === $target ) {
 				$cursor['s']  = (int) $cursor['s'] + 1;
 				$cursor['at'] = null;
 				continue;
 			}
-			$plan   = ExportPlan::read( $work, RestoreFiles::STAGE_PLAN );
-			$target = FileStagingStep::target( (string) $chunk['line']['p'], $chunk['entry'], $run['layout'], (array) $run['staging']['staged'], array_keys( (array) ( $plan['self'] ?? array() ) ), FileStagingStep::fold( (string) ( $plan['running'] ?? '' ) ) );
-			$line   = $chunk['line'];
-			$size   = (int) $line['b'];
-			if ( null === $target || '' !== $target['special'] || null === $line['h'] || (int) $cursor['done'] >= $size ) {
-				// Not staged, not a file, no hash to compare, or done: the next file.
+			$line = $chunk['line'];
+			$size = (int) $line['b'];
+			if ( null === $line['h'] || (int) $cursor['done'] >= $size ) {
+				// Written, but nothing to hash it against (no hash in the index, or empty): its bytes count as the pace counted them.
 				$cursor['bytes'] = (int) $cursor['bytes'] + max( 0, $size - (int) $cursor['done'] );
 				$cursor['at']    = $chunk['next'];
 				$cursor['done']  = 0;
-				if ( 0 === $size ) {
-					$cursor['bytes'] = (int) $cursor['bytes'] + 1; // An empty file moves the window on too.
-				}
 				return $cursor;
 			}
 			$chunk_bytes = (int) $run['loaded']['chunk_bytes'];
@@ -737,7 +819,10 @@ final class SwapCheckStep implements Step {
 		$staged  = $run['layout']->stage_dir( 'plugins' ) . '/' . basename( $source );
 		$running = (string) ( $this->parts['version'] ?? WPCHECKPOINT_VERSION );
 		if ( empty( $cursor['version'] ) ) {
-			$main    = $staged . '/' . basename( (string) ( $this->parts['plugin_main'] ?? WPCHECKPOINT_FILE ) );
+			$main = $staged . '/' . basename( (string) ( $this->parts['plugin_main'] ?? WPCHECKPOINT_FILE ) );
+			if ( ! self::readable( $main, 'The staged copy of WP Checkpoint was changed (its main file is gone): start the restore again.' ) ) {
+				throw new TransientFailure( 'The staged copy of WP Checkpoint cannot be read.' );
+			}
 			$header  = function_exists( 'get_file_data' ) ? get_file_data( $main, array( 'Version' => 'Version' ) ) : array();
 			$version = (string) ( $header['Version'] ?? '' );
 			if ( $version !== $running ) {
@@ -756,8 +841,16 @@ final class SwapCheckStep implements Step {
 			$have   = @hash_file( 'sha256', $copy );
 			$want   = @hash_file( 'sha256', $live );
 			$bytes += (int) $item['b'];
-			if ( false === $want ) {
-				throw new WorkLost( sprintf( 'WP Checkpoint was updated while the restore ran (its file %s is gone): the swap would put an older copy in place. Start the restore again.', $item['r'] ) );
+			// Only what was read decides: a file that is gone (its directory lists without it) is evidence, one that
+			// cannot be read is not.
+			if ( false === $want && ! self::readable( $live, sprintf( 'WP Checkpoint was updated while the restore ran (its file %s is gone): the swap would put an older copy in place. Start the restore again.', $item['r'] ) ) ) {
+				throw new TransientFailure( sprintf( 'A file of WP Checkpoint (%s) cannot be read.', $item['r'] ) );
+			}
+			if ( false === $have && ! self::readable( $copy, sprintf( 'The staged copy of WP Checkpoint was changed (its file %s is gone): start the restore again.', $item['r'] ) ) ) {
+				throw new TransientFailure( sprintf( 'A file of the staged copy of WP Checkpoint (%s) cannot be read.', $item['r'] ) );
+			}
+			if ( false === $want || false === $have ) {
+				throw new TransientFailure( sprintf( 'A file of WP Checkpoint (%s) cannot be read.', $item['r'] ) );
 			}
 			if ( $have !== $want ) {
 				$updated = (int) @filesize( $live ) !== (int) $item['b'] || (int) @filemtime( $live ) !== (int) @filemtime( $copy );
@@ -769,7 +862,7 @@ final class SwapCheckStep implements Step {
 			}
 			$cursor['line'] = (int) $cursor['line'] + 1;
 		}
-		if ( (int) $cursor['line'] < count( $lines ) ) {
+		if ( (int) $cursor['line'] < $total ) {
 			return $cursor;
 		}
 		$listed = array_column( $lines, 'r' );
@@ -790,7 +883,7 @@ final class SwapCheckStep implements Step {
 	 * @param array<string, mixed> $cursor  Cursor.
 	 * @param array<string, mixed> $run     This run.
 	 * @return array<string, mixed>
-	 * @throws \RuntimeException When a directory of the site is no longer where the layout has it.
+	 * @throws RetryFrom When a directory of the site is no longer where the layout has it (a retry checks all again).
 	 */
 	private function live( JobContext $context, array $cursor, array $run ): array {
 		$file = RestoreFiles::path( $context->work_path(), RestoreFiles::SWAP_LIVE );
@@ -799,7 +892,8 @@ final class SwapCheckStep implements Step {
 			foreach ( (array) $run['staging']['staged'] as $group ) {
 				$was = (string) ( $run['staging']['groups'][ $group ] ?? '' );
 				if ( ! isset( $now[ $group ] ) || ! Paths::same_location( (string) $now[ $group ], $was ) ) {
-					throw new \RuntimeException( sprintf( 'The %1$s directory of the site moved since the restore staged its files (it was %2$s, it is %3$s now): the swap would put the files in the wrong place. Put it back, or start the restore again.', $group, $was, (string) ( $now[ $group ] ?? '?' ) ) );
+					// A retry checks everything again from the start: the site may have changed more than this.
+					throw new RetryFrom( sprintf( 'The %1$s directory of the site moved since the restore staged its files (it was %2$s, it is %3$s now): the swap would put the files in the wrong place. Put it back and retry, or start the restore again.', $group, $was, (string) ( $now[ $group ] ?? '?' ) ), self::ID );
 				}
 			}
 			self::append( $file, 0, '' );
@@ -834,24 +928,37 @@ final class SwapCheckStep implements Step {
 	 * @param array<string, mixed> $cursor  Cursor.
 	 * @param array<string, mixed> $run     This run.
 	 * @return array<string, mixed>
-	 * @throws \RuntimeException When there is one.
+	 * @throws RetryFrom When there is one (a retry checks all again).
 	 */
 	private function fk( JobContext $context, array $cursor, array $run ): array {
-		$entries = $this->table_entries( $context, $run );
-		$moved   = array();
-		$ours    = array();
+		$entries  = $this->table_entries( $context, $run );
+		$moved    = array();
+		$swapped  = array();
+		$incoming = array();
 		foreach ( $entries as $entry ) {
-			$ours[ $entry['live'] ] = true;
+			$swapped[ $entry['live'] ] = true;
 			if ( $entry['had_live'] ) {
 				$moved[ $entry['live'] ] = true;
 			}
+			if ( SwapPlan::TABLE_OF === $entry['kind'] ) {
+				$incoming[ $entry['stage'] ] = true;
+			}
 		}
-		$page = $run['db']->rows( 'SELECT CONSTRAINT_NAME, TABLE_NAME, REFERENCED_TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = DATABASE() AND UNIQUE_CONSTRAINT_SCHEMA = DATABASE() ORDER BY TABLE_NAME, CONSTRAINT_NAME LIMIT ' . $this->sizes['tables'] . ' OFFSET ' . (int) $cursor['offset'] );
+		// Every constraint that references a table of this database, from any database, in a fixed order.
+		$page = $run['db']->rows( 'SELECT CONSTRAINT_SCHEMA = DATABASE(), CONSTRAINT_NAME, TABLE_NAME, REFERENCED_TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE UNIQUE_CONSTRAINT_SCHEMA = DATABASE() ORDER BY BINARY CONSTRAINT_SCHEMA, BINARY TABLE_NAME, BINARY CONSTRAINT_NAME LIMIT ' . $this->sizes['tables'] . ' OFFSET ' . (int) $cursor['offset'] );
 		foreach ( $page as $row ) {
-			$from = (string) $row[1];
-			$to   = (string) $row[2];
-			if ( isset( $moved[ $to ] ) && ! isset( $ours[ $from ] ) && ! self::ours( $from ) && count( $cursor['found'] ) < 10 ) {
-				$cursor['found'][] = sprintf( '%1$s (%2$s → %3$s)', (string) $row[0], $from, $to );
+			$here = '1' === (string) $row[0];
+			$from = (string) $row[2];
+			$to   = (string) $row[3];
+			if ( ! isset( $moved[ $to ] ) || count( $cursor['found'] ) >= 10 ) {
+				continue;
+			}
+			// A table of another database, or one this restore brings in (its references to what it brings too were
+			// renamed on import), stays pointing at the name the old table goes to; a table moved away as well goes
+			// with it; the plugin's own and other temporary tables are never swapped.
+			$left = ! $here || isset( $incoming[ $from ] ) || ( ! isset( $swapped[ $from ] ) && ! self::ours( $from ) );
+			if ( $left ) {
+				$cursor['found'][] = sprintf( '%1$s (%2$s → %3$s)', (string) $row[1], $here ? $from : 'a table in another database', $to );
 			}
 		}
 		if ( count( $page ) === $this->sizes['tables'] ) {
@@ -859,7 +966,7 @@ final class SwapCheckStep implements Step {
 			return $cursor;
 		}
 		if ( array() !== $cursor['found'] ) {
-			throw new \RuntimeException( sprintf( 'Tables the restore does not replace have foreign keys to tables it replaces: after the swap they would point at the old site\'s tables, keep them from being removed, and hold the restored data to the old. Either include those tables in the restore, or remove their foreign keys, then retry. %s', implode( '; ', $cursor['found'] ) ) );
+			throw new RetryFrom( sprintf( 'Tables the restore does not replace have foreign keys to tables it replaces: after the swap they would point at the old site\'s tables, keep them from being removed, and hold the restored data to the old. Either include those tables in the restore, or remove their foreign keys, then retry. %s', implode( '; ', $cursor['found'] ) ), self::ID );
 		}
 		return array(
 			'phase'   => 'plan',
@@ -882,6 +989,7 @@ final class SwapCheckStep implements Step {
 		$job     = $context->job()->id;
 		$attempt = (int) $cursor['attempt'];
 		$swap    = $run['swap'];
+		$context->confirm_lease(); // A run that lost the job writes no more of the plan.
 		if ( 'old' === $cursor['part'] ) {
 			if ( $swap->delete_others( $job, $attempt ) < SwapPlan::DELETE_ROWS ) {
 				$cursor['part'] = 'entries';
@@ -1143,11 +1251,12 @@ final class SwapCheckStep implements Step {
 
 	/**
 	 * The files under a directory (not links), as relative paths in sorted order; null when there are more than
-	 * $limit entries or a directory cannot be read.
+	 * $limit entries (not the plugin as staged).
 	 *
 	 * @param string $root  Directory.
 	 * @param int    $limit Most entries.
 	 * @return string[]|null
+	 * @throws TransientFailure When a directory cannot be read.
 	 */
 	private static function files_under( string $root, int $limit ): ?array {
 		$out  = array();
@@ -1157,7 +1266,7 @@ final class SwapCheckStep implements Step {
 			$dir     = (string) array_shift( $dirs );
 			$entries = @scandir( '' === $dir ? $root : $root . '/' . $dir );
 			if ( ! is_array( $entries ) ) {
-				return null;
+				throw new TransientFailure( 'A directory of WP Checkpoint cannot be listed.' );
 			}
 			foreach ( $entries as $entry ) {
 				if ( '.' === $entry || '..' === $entry ) {
@@ -1200,6 +1309,26 @@ final class SwapCheckStep implements Step {
 	 */
 	private function plugin_dir(): string {
 		return rtrim( (string) ( $this->parts['plugin_dir'] ?? WPCHECKPOINT_DIR ), '/\\' );
+	}
+
+	/**
+	 * Whether a file is there to read: true when it is; false when it is there but could not be read (or whether
+	 * it is there cannot be told), for the caller to retry; and when its directory lists without it, the job
+	 * ends with $gone (that is evidence).
+	 *
+	 * @param string $path Path.
+	 * @param string $gone Why the job ends when it is gone.
+	 * @return bool
+	 * @throws WorkLost When it is gone.
+	 */
+	private static function readable( string $path, string $gone ): bool {
+		if ( null === self::lstat( $path ) ) {
+			if ( Paths::positively_gone( $path ) ) {
+				throw new WorkLost( $gone );
+			}
+			return false;
+		}
+		return is_readable( $path );
 	}
 
 	/**

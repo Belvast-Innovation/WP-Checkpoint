@@ -451,6 +451,23 @@ final class JobRepository {
 	}
 
 	/**
+	 * Whether a restore is in progress: queued, running or paused, or failed and still retryable (its work kept):
+	 * true, false, or null when the jobs table could not be read (only the server's answer that there is no such
+	 * table means none).
+	 *
+	 * @return bool|null
+	 */
+	public static function restore_in_progress() {
+		global $wpdb;
+		$rows = self::read_rows( $wpdb->prepare( 'SELECT id FROM ' . self::table() . ' WHERE type = %s AND ( status IN (%s, %s, %s) OR ( status = %s AND work_expired_at = 0 ) ) LIMIT 1', RestoreJob::ID, Job::QUEUED, Job::RUNNING, Job::PAUSED, Job::FAILED ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- table name from the prefix and a constant.
+		if ( null !== $rows ) {
+			return array() !== $rows;
+		}
+		$tables = self::read_rows( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( self::table() ) ) );
+		return array() === $tables ? false : null;
+	}
+
+	/**
 	 * The storage directory and token of each unfinished restore, or null when the jobs table could not be
 	 * read (only the server's answer that there is no such table means none).
 	 *
@@ -1697,7 +1714,13 @@ final class JobRepository {
 
 		foreach ( $victims as $job ) {
 			$this->delete_files_of( $job );
-			$this->delete_plan_of( $job->id );
+			$left = true;
+			for ( $pass = 0; $pass < 20 && $left; $pass++ ) {
+				$left = ! $this->delete_plan_of( $job->id );
+			}
+			if ( $left ) {
+				continue; // Its row stays until its plan is gone: a plan without its job would never be removed.
+			}
 			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin table.
 			$wpdb->delete( $table, array( 'id' => $job->id ), array( '%d' ) );
 		}

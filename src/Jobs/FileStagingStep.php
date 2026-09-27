@@ -534,8 +534,11 @@ final class FileStagingStep implements Step {
 			return $length;
 		}
 		$this->at( 'complete' );
-		if ( ! @touch( $path, (int) $line['m'] ) ) {
-			throw new EnvironmentFailure( sprintf( 'The modification time of the staged file %s cannot be set.', $relative ) );
+		$touched = @touch( $path, (int) $line['m'] );
+		clearstatcache( true, $path );
+		if ( ! $touched || (int) @filemtime( $path ) !== (int) $line['m'] ) {
+			// Read back: a file system that keeps coarser times would have the final check take the file for a changed one.
+			throw new EnvironmentFailure( sprintf( 'The modification time of the staged file %s cannot be set to the second on this file system.', $relative ) );
 		}
 		$this->at( 'touched' );
 		$cursor['at']   = $chunk['next'];

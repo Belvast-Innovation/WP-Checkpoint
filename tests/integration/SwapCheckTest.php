@@ -241,6 +241,7 @@ final class SwapCheckTest extends RestoreTestCase {
 			'a file too many'  => array( 'extra', 'hold 3 entries where the restore staged 2' ),
 			'a file missing'   => array( 'missing', 'it is missing' ),
 			'a link now'       => array( 'link', 'it is not a regular file' ),
+			'a link too many'  => array( 'extra_link', 'which the restore did not write (a link or a special file)' ),
 		);
 	}
 
@@ -261,6 +262,9 @@ final class SwapCheckTest extends RestoreTestCase {
 						break;
 					case 'extra':
 						file_put_contents( dirname( $path ) . '/c.txt', 'c' );
+						break;
+					case 'extra_link':
+						symlink( $path, dirname( $path ) . '/c.txt' );
 						break;
 					case 'missing':
 						unlink( $path );
@@ -284,6 +288,8 @@ final class SwapCheckTest extends RestoreTestCase {
 				$time = filemtime( $path );
 				file_put_contents( $path, 'zzzz' );
 				touch( $path, $time );
+				clearstatcache( true, $path );
+				$this->assertSame( array( 'zzzz', $time ), array( file_get_contents( $path ), filemtime( $path ) ), 'the control: other bytes, the same size and time' );
 			}
 		);
 		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
@@ -293,7 +299,7 @@ final class SwapCheckTest extends RestoreTestCase {
 	 * A restore whose staging is taken over once (killed after writing a piece, its lease run out): the suspect
 	 * position is recorded. Then $tamper( $job, $path_at_the_position ) and the final check with $parts.
 	 */
-	private function taken_over( callable $tamper, array $parts = array() ): Job {
+	private function taken_over( callable $tamper, array $parts = array(), array $files = array() ): Job {
 		global $wpdb;
 		$killed = false;
 		$type   = 'swap_check_takeover_' . bin2hex( random_bytes( 3 ) );
@@ -332,7 +338,8 @@ final class SwapCheckTest extends RestoreTestCase {
 			}
 		}
 		$this->register( $type, $steps );
-		$job    = Plugin::instance()->jobs()->create( $type, self::$admin_id, array(), array( 'base' => $this->base() ) );
+		$base   = array() === $files ? $this->base() : $this->backup( self::site_tables(), null, null, array( 'files' => $files ) );
+		$job    = Plugin::instance()->jobs()->create( $type, self::$admin_id, array(), array( 'base' => $base ) );
 		$runner = Plugin::instance()->runner();
 		for ( $i = 0; $i < 200 && ! $killed; $i++ ) {
 			$runner->tick( $job->id, microtime( true ) );
@@ -781,5 +788,182 @@ final class SwapCheckTest extends RestoreTestCase {
 		$this->assertGreaterThan( 0, $stale, 'the control: records were held by the stale run' );
 		$ledger = TempTables::ledger( $job->storage_token, $job->id, RestorePreflightStep::load_plan( $this->work( $job ) )['random'] );
 		$this->assertSame( '0', (string) $wpdb->get_var( "SELECT COUNT(*) FROM `{$ledger}` WHERE holder = 'a-stale-run'" ), 'the check holds every record' );
+	}
+
+	/**
+	 * @return array<string, array{0: string, 1: array<int, string>}>
+	 */
+	public function odd_keys(): array {
+		return array(
+			'bytes that are not UTF-8'      => array( 'varbinary(4)', array( "\x10\x00", "\xE9\x01", "\xE9\x02", "\xFF\x01", "\xFF\xFE", "\x7F" ) ),
+			'characters outside the BMP'    => array( 'varchar(8) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin', array( 'a', "\u{1F600}", "\u{1F601}", 'b', 'é', 'z' ) ),
+		);
+	}
+
+	/**
+	 * @dataProvider odd_keys
+	 *
+	 * @param string[] $keys Keys.
+	 */
+	public function test_a_table_keyed_by_bytes_or_characters_the_cursor_cannot_hold_is_counted_across_ticks( string $type, array $keys ): void {
+		global $wpdb;
+		$table = $wpdb->base_prefix . 'wpc_oddkey';
+		$this->create( $table, "(k {$type} NOT NULL PRIMARY KEY, v int) ENGINE=InnoDB" );
+		foreach ( $keys as $i => $key ) {
+			$wpdb->query( $wpdb->prepare( "INSERT INTO `{$table}` (k, v) VALUES (UNHEX(%s), %d)", bin2hex( $key ), $i ) );
+		}
+		$this->assertSame( count( $keys ), (int) $wpdb->get_var( "SELECT COUNT(*) FROM `{$table}`" ), 'the control: every key is there' );
+		$type_id = $this->type( array( 'sizes' => array( 'rows' => 2 ) ) );
+		$job     = $this->run_restore( Plugin::instance()->jobs()->create( $type_id, self::$admin_id, array(), array( 'base' => $this->base( array( $table ) ) ) ), true, 3000 );
+		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
+	}
+
+	public function test_the_window_after_a_takeover_counts_only_what_staging_wrote(): void {
+		// After the position: this plugin's copy in the backup (not staged, large), then a staged file changed with
+		// its time put back. A window just long enough for the staged files up to it must reach it.
+		$window = PHP_INT_MAX;
+		// In path order and in this order alike: a staged file, this plugin's copy, then the staged files after it.
+		$files  = array(
+			'wp-content/plugins/demo/demo.php'                   => "<?php\n/* Plugin Name: Demo */\n",
+			'wp-content/plugins/wp-checkpoint/wp-checkpoint.php' => (string) file_get_contents( $this->plugin_copy . '/wp-checkpoint.php' ),
+			'wp-content/plugins/wp-checkpoint/zz-large.bin'      => str_repeat( 'L', 50000 ),
+			'wp-content/uploads/2026/09/a.txt'                   => 'aaaa',
+			'wp-content/uploads/2026/09/b.txt'                   => 'bbbbbbbb',
+		);
+		$parts  = array(
+			'window' => static function () use ( &$window ): int {
+				return $window;
+			},
+		);
+		$target = null;
+		$job    = $this->taken_over(
+			function ( Job $job, string $path ) use ( &$window, &$target ): void {
+				$work   = $this->work( $job );
+				$loaded = RestorePreflightStep::load_plan( $work );
+				$layout = RestoreFilesPreflightStep::layout_of( RestoreFilesPreflightStep::staging( $work ), $job );
+				$plan   = json_decode( (string) file_get_contents( RestoreFiles::path( $work, RestoreFiles::STAGE_PLAN ) ), true );
+				$walk   = new ChunkWalk( RestoreVerifyStep::index_path( $work, RestorePreflightStep::manifest( $work )->files_index() ), $loaded['volumes'], $loaded['chunk_bytes'], ChunkWalk::FILES );
+				$at     = FileStagingStep::suspects( $work )[0]['at'];
+				$bytes  = 0;
+				$seen   = false;
+				for ( $chunk = $walk->at( $at ); null !== $chunk; $chunk = $walk->at( $chunk['next'] ) ) {
+					$hit = FileStagingStep::target( (string) $chunk['line']['p'], $chunk['entry'], $layout, (array) RestoreFilesPreflightStep::staging( $work )['staged'], array_keys( (array) $plan['self'] ), FileStagingStep::fold( (string) $plan['running'] ) );
+					if ( null === $hit ) {
+						$seen = $seen || false !== strpos( (string) $chunk['line']['p'], 'zz-large.bin' );
+						continue;
+					}
+					$bytes += (int) $chunk['line']['b'];
+					if ( $seen && 0 < (int) $chunk['line']['b'] ) {
+						$target = $layout->root( $hit['group'] ) . '/' . $hit['relative'];
+						break;
+					}
+				}
+				$this->assertNotNull( $target, 'the control: a staged file follows the large one the staging skipped' );
+				$window = $bytes;
+				$this->assertLessThan( 50000, $window, 'the control: the window is shorter than the large file the staging skipped' );
+				self::same_size( $target );
+			},
+			$parts,
+			$files
+		);
+		$this->assertFinal( $job, 'although its size and modification time are' );
+	}
+
+	public function test_a_retry_after_a_refused_swap_checks_everything_again(): void {
+		global $wpdb;
+		$q      = $wpdb->base_prefix;
+		$claims = 0;
+		$type   = $this->type(
+			array(
+				'at' => function ( string $point ) use ( &$claims, $q ): void {
+					if ( 'claim' === $point && 1 === ++$claims ) {
+						global $wpdb;
+						$wpdb->query( 'COMMIT' );
+						$this->create( 'wpc_fk_child', "(id int NOT NULL PRIMARY KEY, option_id bigint(20) unsigned, CONSTRAINT wpc_fk_out FOREIGN KEY (option_id) REFERENCES `{$q}options` (option_id)) ENGINE=InnoDB" );
+					}
+				},
+			)
+		);
+		$job = $this->run_restore( Plugin::instance()->jobs()->create( $type, self::$admin_id, array(), array( 'base' => $this->base() ) ) );
+		$this->assertSame( Job::FAILED, $job->status );
+		$this->assertStringContainsString( 'wpc_fk_out', (string) $job->last_error );
+		$wpdb->query( 'DROP TABLE wpc_fk_child' );
+		Plugin::instance()->job_actions()->retry( $job->id );
+		$this->assertSame( SwapCheckStep::ID, Plugin::instance()->jobs()->find( $job->id )->step );
+		$this->assertSame( array(), Plugin::instance()->jobs()->find( $job->id )->cursor, 'from its start' );
+		$job = $this->run_restore( $job );
+		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
+		$this->assertSame( 2, $claims, 'the retry took the ledger and checked everything again' );
+	}
+
+	public function test_a_file_of_this_plugin_that_cannot_be_read_is_retried_not_taken_for_a_change(): void {
+		$job    = $this->tampered(
+			$this->base(),
+			function (): void {
+				// There, but not readable as a file.
+				unlink( $this->plugin_copy . '/readme.txt' );
+				mkdir( $this->plugin_copy . '/readme.txt' );
+			}
+		);
+		$this->assertNotSame( Job::FAILURE_FINAL, $job->failure_kind, (string) $job->last_error );
+		$this->assertStringContainsString( 'cannot be read', (string) $job->last_error . ' ' . (string) $job->progress_message . ' ' . (string) file_get_contents( $job->storage_path . '/' . $job->log_path ) );
+		rmdir( $this->plugin_copy . '/readme.txt' );
+	}
+
+	public function test_a_rewrite_record_from_an_older_version_ends_the_restore_with_the_reason(): void {
+		$job = $this->tampered(
+			$this->base(),
+			function ( Job $job ): void {
+				\WPCheckpoint\Jobs\ExportPlan::write( $this->work( $job ), RestoreFiles::PREFIX_REPORT, array( 'identified' => true ) );
+			}
+		);
+		$this->assertFinal( $job, 'rewritten by an older version of WP Checkpoint' );
+	}
+
+	public function test_a_restored_table_referencing_a_live_one_the_swap_moves_away_refuses_the_swap(): void {
+		global $wpdb;
+		$q = $wpdb->base_prefix;
+		$this->create( $q . 'wpc_parent', '(id int NOT NULL PRIMARY KEY) ENGINE=InnoDB' );
+		$wpdb->insert( $q . 'wpc_parent', array( 'id' => 1 ) );
+		$this->create( $q . 'wpc_child', "(id int NOT NULL PRIMARY KEY, parent int, CONSTRAINT wpc_child_parent FOREIGN KEY (parent) REFERENCES `{$q}wpc_parent` (id)) ENGINE=InnoDB" );
+		$base = $this->base( array( $q . 'wpc_child' ) ); // The parent stays out of the backup.
+		$wpdb->query( 'SET FOREIGN_KEY_CHECKS=0' );
+		$wpdb->query( "DROP TABLE `{$q}wpc_child`, `{$q}wpc_parent`" ); // Not there when the restore starts: its preflight lets it pass.
+		$wpdb->query( 'SET FOREIGN_KEY_CHECKS=1' );
+		$job = $this->tampered(
+			$base,
+			function () use ( $q ): void {
+				// Made after the preflight: a live table the swap moves away, which the restored table references.
+				$this->create( $q . 'wpc_parent', '(id int NOT NULL PRIMARY KEY) ENGINE=InnoDB' );
+			}
+		);
+		$this->assertSame( Job::FAILED, $job->status );
+		$this->assertStringContainsString( '→ ' . $q . 'wpc_parent)', (string) $job->last_error );
+	}
+
+	public function test_a_failed_restore_that_can_be_retried_holds_automatic_updates(): void {
+		global $wpdb;
+		$job = $this->run_restore( $this->start_restore( 'no-such-backup' ) );
+		$this->assertSame( Job::FAILED, $job->status, 'the control: a restore that failed' );
+		$this->assertTrue( JobRepository::restore_in_progress() );
+		$wpdb->update( JobRepository::table(), array( 'work_expired_at' => 1 ), array( 'id' => $job->id ) );
+		$this->assertFalse( JobRepository::restore_in_progress(), 'no longer retryable: nothing held' );
+	}
+
+	public function test_an_import_run_that_lost_the_ledger_can_record_no_more_rows(): void {
+		$job = $this->run_restore( $this->start_restore( $this->base() ) );
+		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
+		$ledger = new \WPCheckpoint\Restore\Ledger( $this->session(), TempTables::ledger( $job->storage_token, $job->id, RestorePreflightStep::load_plan( $this->work( $job ) )['random'] ), 'an-import-run' );
+		$state  = $ledger->get( 0 );
+		$this->assertNotNull( $state );
+		$this->expectException( \WPCheckpoint\Restore\ClaimLost::class );
+		$ledger->advance( 0, $state['chunk'], $state['pos'], $state['chunk'], $state['pos'] + 1, 1 );
+	}
+
+	private function session(): ImportSession {
+		if ( null === $this->db ) {
+			$this->db = ImportSession::open( Credentials::from_wordpress() );
+		}
+		return $this->db;
 	}
 }

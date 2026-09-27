@@ -8,7 +8,6 @@
 namespace WPCheckpoint\Support;
 
 use WPCheckpoint\Jobs\JobRepository;
-use WPCheckpoint\Jobs\RestoreJob;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -16,7 +15,8 @@ defined( 'ABSPATH' ) || exit;
  * A restore stages the running copy of this plugin and swaps it in; an
  * update in between would be replaced by the older copy (the final check
  * then refuses the swap: the restore has to start again). So WordPress's
- * automatic update of this plugin is held while a restore is unfinished
+ * automatic update of this plugin is held while a restore is in progress
+ * (a failed one that can still be retried included)
  * (auto_update_plugin), and when the jobs table cannot be read too: no
  * answer is no evidence that nothing is in progress. That case is logged
  * and recorded (the time), so the plugin's page can say why the plugin was
@@ -30,7 +30,7 @@ final class AutoUpdateHold {
 	const OPTION = StoredNames::AUTO_UPDATE_UNCHECKED;
 
 	/**
-	 * Tests: function(): bool|null in place of JobRepository::has_unfinished( RestoreJob::ID ).
+	 * Tests: function(): bool|null in place of JobRepository::restore_in_progress().
 	 *
 	 * @var callable|null
 	 */
@@ -93,11 +93,12 @@ final class AutoUpdateHold {
 	}
 
 	/**
-	 * Whether a restore is unfinished: true, false, or null when the jobs table could not be read.
+	 * Whether a restore is in progress (a failed one that can be retried included): true, false, or null when the
+	 * jobs table could not be read.
 	 *
 	 * @return bool|null
 	 */
 	private static function unfinished() {
-		return null === self::$unfinished ? JobRepository::has_unfinished( RestoreJob::ID ) : call_user_func( self::$unfinished );
+		return null === self::$unfinished ? JobRepository::restore_in_progress() : call_user_func( self::$unfinished );
 	}
 }
