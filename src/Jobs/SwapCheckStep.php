@@ -186,6 +186,9 @@ final class SwapCheckStep implements Step {
 		$db     = call_user_func( $this->connect );
 		$first  = true;
 		try {
+			// TIMESTAMP keys in UTC: in a time zone with daylight saving time, an hour repeats in local time and a key
+			// read as text would convert back to an earlier instant.
+			$db->run( "SET SESSION time_zone = '+00:00'" );
 			$run           = array(
 				'db'      => $db,
 				'plan'    => $loaded['plan'],
@@ -1322,11 +1325,15 @@ final class SwapCheckStep implements Step {
 	 * @throws WorkLost When it is gone.
 	 */
 	private static function readable( string $path, string $gone ): bool {
-		if ( null === self::lstat( $path ) ) {
+		$stat = self::lstat( $path );
+		if ( null === $stat ) {
 			if ( Paths::positively_gone( $path ) ) {
 				throw new WorkLost( $gone );
 			}
 			return false;
+		}
+		if ( 0100000 !== ( $stat['mode'] & 0170000 ) ) {
+			throw new WorkLost( $gone ); // Not a file any more (a directory, a link): that is evidence too.
 		}
 		return is_readable( $path );
 	}

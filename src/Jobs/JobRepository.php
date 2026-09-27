@@ -1740,7 +1740,11 @@ final class JobRepository {
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix.
 		$deleted = $wpdb->query( $wpdb->prepare( "DELETE FROM {$table} WHERE job_id = %d LIMIT %d", $job_id, SwapPlan::DELETE_ROWS ) );
 		$wpdb->suppress_errors( $quiet );
-		return false === $deleted || (int) $deleted < SwapPlan::DELETE_ROWS;
+		if ( false === $deleted ) {
+			// None left only when the server answers that there is no such table: a failed delete leaves them.
+			return array() === self::read_rows( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $table ) ) );
+		}
+		return (int) $deleted < SwapPlan::DELETE_ROWS;
 	}
 
 	/**

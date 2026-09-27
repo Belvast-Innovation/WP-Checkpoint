@@ -776,6 +776,11 @@ final class SwapCheckTest extends RestoreTestCase {
 						$wpdb->query( 'COMMIT' );
 						$stale = (int) $wpdb->query( "UPDATE `{$ledger}` SET holder = 'a-stale-run'" );
 						$wpdb->query( 'COMMIT' );
+						// The control: the stale run can still move its records now (and back).
+						$old   = new \WPCheckpoint\Restore\Ledger( $this->session(), $ledger, 'a-stale-run' );
+						$state = $old->get( 0 );
+						$old->advance( 0, $state['chunk'], $state['pos'], $state['chunk'], $state['pos'] + 1, 0 );
+						$old->advance( 0, $state['chunk'], $state['pos'] + 1, $state['chunk'], $state['pos'], 0 );
 						return \WPCheckpoint\Jobs\StepResult::done( 'held by a stale run' );
 					}
 				),
@@ -788,6 +793,14 @@ final class SwapCheckTest extends RestoreTestCase {
 		$this->assertGreaterThan( 0, $stale, 'the control: records were held by the stale run' );
 		$ledger = TempTables::ledger( $job->storage_token, $job->id, RestorePreflightStep::load_plan( $this->work( $job ) )['random'] );
 		$this->assertSame( '0', (string) $wpdb->get_var( "SELECT COUNT(*) FROM `{$ledger}` WHERE holder = 'a-stale-run'" ), 'the check holds every record' );
+		$old   = new \WPCheckpoint\Restore\Ledger( $this->session(), $ledger, 'a-stale-run' );
+		$state = $old->get( 0 );
+		try {
+			$old->advance( 0, $state['chunk'], $state['pos'], $state['chunk'], $state['pos'] + 1, 1 );
+			$this->fail( 'the stale run recorded rows after the check took the ledger' );
+		} catch ( \WPCheckpoint\Restore\ClaimLost $e ) {
+			$this->assertStringContainsString( 'this one stops', $e->getMessage() );
+		}
 	}
 
 	/**
@@ -797,6 +810,8 @@ final class SwapCheckTest extends RestoreTestCase {
 		return array(
 			'bytes that are not UTF-8'      => array( 'varbinary(4)', array( "\x10\x00", "\xE9\x01", "\xE9\x02", "\xFF\x01", "\xFF\xFE", "\x7F" ) ),
 			'characters outside the BMP'    => array( 'varchar(8) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin', array( 'a', "\u{1F600}", "\u{1F601}", 'b', 'é', 'z' ) ),
+			'latin1, case-insensitive'      => array( 'varchar(8) CHARACTER SET latin1 COLLATE latin1_swedish_ci', array( 'A', "b\xE9", "C\xFF", 'd ', 'e', "\xE0z" ) ),
+			'utf8mb3, case-insensitive'     => array( 'varchar(8) CHARACTER SET utf8 COLLATE utf8_general_ci', array( 'A', 'bé', 'Ç', 'd ', 'e', 'ñz' ) ),
 		);
 	}
 
@@ -815,6 +830,19 @@ final class SwapCheckTest extends RestoreTestCase {
 		$this->assertSame( count( $keys ), (int) $wpdb->get_var( "SELECT COUNT(*) FROM `{$table}`" ), 'the control: every key is there' );
 		$type_id = $this->type( array( 'sizes' => array( 'rows' => 2 ) ) );
 		$job     = $this->run_restore( Plugin::instance()->jobs()->create( $type_id, self::$admin_id, array(), array( 'base' => $this->base( array( $table ) ) ) ), true, 3000 );
+		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
+	}
+
+	public function test_a_table_keyed_by_times_or_by_two_columns_is_counted_across_ticks(): void {
+		global $wpdb;
+		$table = $wpdb->base_prefix . 'wpc_oddkey2';
+		$this->create( $table, '(t datetime(6) NOT NULL, n int NOT NULL, s varchar(8) CHARACTER SET utf8 COLLATE utf8_general_ci NOT NULL, PRIMARY KEY (t, n, s)) ENGINE=InnoDB' );
+		foreach ( array( '2026-01-01 00:00:00.000001', '2026-01-01 00:00:00.000002', '2026-10-25 02:30:00.5', '2026-10-25 02:30:00.5', '0000-00-00 00:00:00' ) as $i => $time ) {
+			$wpdb->query( $wpdb->prepare( "INSERT INTO `{$table}` (t, n, s) VALUES (%s, %d, %s)", $time, $i % 2, 0 === $i % 2 ? 'a' : 'Á' ) );
+		}
+		$this->assertSame( 5, (int) $wpdb->get_var( "SELECT COUNT(*) FROM `{$table}`" ), 'the control: every row is there' );
+		$type = $this->type( array( 'sizes' => array( 'rows' => 2 ) ) );
+		$job  = $this->run_restore( Plugin::instance()->jobs()->create( $type, self::$admin_id, array(), array( 'base' => $this->base( array( $table ) ) ) ), true, 3000 );
 		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
 	}
 
@@ -896,18 +924,16 @@ final class SwapCheckTest extends RestoreTestCase {
 		$this->assertSame( 2, $claims, 'the retry took the ledger and checked everything again' );
 	}
 
-	public function test_a_file_of_this_plugin_that_cannot_be_read_is_retried_not_taken_for_a_change(): void {
-		$job    = $this->tampered(
+	public function test_a_file_of_this_plugin_that_is_a_directory_now_is_a_change(): void {
+		$job = $this->tampered(
 			$this->base(),
 			function (): void {
-				// There, but not readable as a file.
 				unlink( $this->plugin_copy . '/readme.txt' );
 				mkdir( $this->plugin_copy . '/readme.txt' );
 			}
 		);
-		$this->assertNotSame( Job::FAILURE_FINAL, $job->failure_kind, (string) $job->last_error );
-		$this->assertStringContainsString( 'cannot be read', (string) $job->last_error . ' ' . (string) $job->progress_message . ' ' . (string) file_get_contents( $job->storage_path . '/' . $job->log_path ) );
 		rmdir( $this->plugin_copy . '/readme.txt' );
+		$this->assertFinal( $job, 'WP Checkpoint was updated while the restore ran (its file readme.txt is gone)' );
 	}
 
 	public function test_a_rewrite_record_from_an_older_version_ends_the_restore_with_the_reason(): void {
@@ -948,16 +974,6 @@ final class SwapCheckTest extends RestoreTestCase {
 		$this->assertTrue( JobRepository::restore_in_progress() );
 		$wpdb->update( JobRepository::table(), array( 'work_expired_at' => 1 ), array( 'id' => $job->id ) );
 		$this->assertFalse( JobRepository::restore_in_progress(), 'no longer retryable: nothing held' );
-	}
-
-	public function test_an_import_run_that_lost_the_ledger_can_record_no_more_rows(): void {
-		$job = $this->run_restore( $this->start_restore( $this->base() ) );
-		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
-		$ledger = new \WPCheckpoint\Restore\Ledger( $this->session(), TempTables::ledger( $job->storage_token, $job->id, RestorePreflightStep::load_plan( $this->work( $job ) )['random'] ), 'an-import-run' );
-		$state  = $ledger->get( 0 );
-		$this->assertNotNull( $state );
-		$this->expectException( \WPCheckpoint\Restore\ClaimLost::class );
-		$ledger->advance( 0, $state['chunk'], $state['pos'], $state['chunk'], $state['pos'] + 1, 1 );
 	}
 
 	private function session(): ImportSession {
