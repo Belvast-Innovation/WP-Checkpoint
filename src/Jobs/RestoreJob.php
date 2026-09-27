@@ -31,7 +31,10 @@ defined( 'ABSPATH' ) || exit;
  *    clashes on this file system, free space). Nothing is staged yet.
  * 4. DatabaseImportStep: every chunk, statement by statement, into the
  *    temporary tables.
- * 5. FileStagingStep: the backup's files, and the running copy of this
+ * 5. PrefixRewriteStep: when the backup's table prefix is not this site's,
+ *    the rows WordPress names after the prefix (roles, user capabilities
+ *    and settings) renamed in the temporary tables.
+ * 6. FileStagingStep: the backup's files, and the running copy of this
  *    plugin, written under the staging roots next to the site.
  *
  * The swap and what follows are later parts of T042; no user
@@ -97,7 +100,7 @@ final class RestoreJob implements JobType {
 	 * @return string[]
 	 */
 	public function step_ids(): array {
-		return array( RestorePlatformStep::ID, RestoreVerifyStep::ID, RestorePreflightStep::ID, RestoreFilesPreflightStep::ID, DatabaseImportStep::ID, FileStagingStep::ID );
+		return array( RestorePlatformStep::ID, RestoreVerifyStep::ID, RestorePreflightStep::ID, RestoreFilesPreflightStep::ID, DatabaseImportStep::ID, PrefixRewriteStep::ID, FileStagingStep::ID );
 	}
 
 	/**
@@ -117,6 +120,7 @@ final class RestoreJob implements JobType {
 			new RestorePreflightStep( $backups ),
 			new RestoreFilesPreflightStep(),
 			new DatabaseImportStep(),
+			new PrefixRewriteStep(),
 			new FileStagingStep(),
 		);
 	}
