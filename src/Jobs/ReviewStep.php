@@ -264,7 +264,7 @@ final class ReviewStep implements Step {
 	 * @param array<string, string> $policy   Policy (each value ask|...).
 	 * @param array<string, mixed>  $answers  Answers given so far.
 	 * @return array{0: array{exclude_tables: string[], exclude_oversize: string[], exclude_paths: string[], notes: string[]}, 1: array<int, array<string, mixed>>}
-	 * @throws \RuntimeException When a decision is to stop.
+	 * @throws StoppedByAnswer When a decision is to stop (the answer is forgotten, so a retry asks again).
 	 */
 	public static function decide( array $findings, array $policy, array $answers ): array {
 		$decisions = array(
@@ -311,7 +311,7 @@ final class ReviewStep implements Step {
 					'choices' => array( 'continue', 'stop' ),
 				);
 			} elseif ( 'stop' === $choice ) {
-				throw new \RuntimeException( sprintf( 'Stopped: %d files cannot be read and the backup would not contain them (for example %s).', $findings['unreadable']['count'], implode( ', ', array_slice( $findings['unreadable']['listed'], 0, 3 ) ) ) );
+				throw new StoppedByAnswer( sprintf( 'Stopped: %d files cannot be read and the backup would not contain them (for example %s).', $findings['unreadable']['count'], implode( ', ', array_slice( $findings['unreadable']['listed'], 0, 3 ) ) ), 'unreadable' );
 			} else {
 				$decisions['notes'][] = sprintf( '%d files could not be read and are not in the backup (see the scan summary).', $findings['unreadable']['count'] );
 			}
@@ -369,7 +369,7 @@ final class ReviewStep implements Step {
 					);
 				}
 			} elseif ( 'stop' === $choice ) {
-				throw new \RuntimeException( sprintf( 'Stopped: table %s has rows larger than the single-row limit of %d bytes (as SQL)%s. Reduce them, or choose to leave them out.', $finding['table'], $finding['limit'], null !== $finding['count'] ? sprintf( ' (%d rows)', $finding['count'] ) : ' (found by sampling)' ) );
+				throw new StoppedByAnswer( sprintf( 'Stopped: table %s has rows larger than the single-row limit of %d bytes (as SQL)%s. Reduce them, or choose to leave them out.', $finding['table'], $finding['limit'], null !== $finding['count'] ? sprintf( ' (%d rows)', $finding['count'] ) : ' (found by sampling)' ), $id );
 			} else {
 				$decisions['exclude_oversize'][] = $finding['table'];
 				$decisions['notes'][]            = sprintf( 'Table %s: rows larger than the single-row limit are left out, as chosen%s.', $finding['table'], null !== $finding['count'] ? sprintf( ' (%d rows at the pre-flight)', $finding['count'] ) : '' );

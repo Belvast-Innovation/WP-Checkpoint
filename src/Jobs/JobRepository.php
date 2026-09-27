@@ -1151,12 +1151,14 @@ final class JobRepository {
 	 * @param string $retry_from For a failed job: the step a retry starts at (RetryFrom), recorded in the cursor in
 	 *                           the same write; a retry (to queued) then sets that step and an empty cursor in its
 	 *                           own single write.
+	 * @param string $forget     For a failed job: the id of a question whose answer stopped it (StoppedByAnswer), removed
+	 *                           from the options in the same write, so a retry asks it again.
 	 * @return Job
 	 * @throws InvalidTransition When the state machine forbids the move or the token is missing.
 	 * @throws StaleJob When the row no longer has the expected status (or the lock changed hands).
-	 * @throws \RuntimeException When the cursor with the step to retry from cannot be encoded.
+	 * @throws \RuntimeException When the cursor with the step to retry from, or the options, cannot be encoded.
 	 */
-	public function transition( Job $job, string $to, string $error = '', string $token = '', string $failure = '', string $retry_from = '' ): Job {
+	public function transition( Job $job, string $to, string $error = '', string $token = '', string $failure = '', string $retry_from = '', string $forget = '' ): Job {
 		if ( '' === $token && Job::RUNNING === $job->status && Job::CANCELLED !== $to ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
 			throw new InvalidTransition( sprintf( 'Job %d: leaving running for %s requires the lock token.', $job->id, $to ) );
@@ -1165,22 +1167,45 @@ final class JobRepository {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
 			throw new InvalidTransition( sprintf( 'Job %d: its work files passed their retention period and were reclaimed; it cannot be retried.', $job->id ) );
 		}
-		if ( '' === $retry_from ) {
+		if ( '' === $retry_from && '' === $forget ) {
 			return $this->write_transition( $job, $to, $error, $token, array(), array(), $failure );
 		}
 		if ( Job::FAILED !== $to ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
-			throw new InvalidTransition( sprintf( 'Job %d: only a failure names a step to retry from.', $job->id ) );
+			throw new InvalidTransition( sprintf( 'Job %d: only a failure names a step to retry from or an answer to forget.', $job->id ) );
 		}
-		$cursor                         = $job->cursor;
-		$cursor[ self::RETRY_FROM_KEY ] = $retry_from;
-		self::assert_cursor_has_no_secrets( $cursor );
-		$json = wp_json_encode( $cursor );
-		if ( false === $json ) {
-			throw new \RuntimeException( sprintf( 'Job %d: its cursor cannot be written.', $job->id ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+		$extra   = array();
+		$cursor  = null;
+		$options = null;
+		if ( '' !== $retry_from ) {
+			$cursor                         = $job->cursor;
+			$cursor[ self::RETRY_FROM_KEY ] = $retry_from;
+			self::assert_cursor_has_no_secrets( $cursor );
+			$json = wp_json_encode( $cursor );
+			if ( false === $json ) {
+				throw new \RuntimeException( sprintf( 'Job %d: its cursor cannot be written.', $job->id ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+			}
+			$extra['cursor_json'] = $json;
 		}
-		$job         = $this->write_transition( $job, $to, $error, $token, array( 'cursor_json' => $json ), array( '%s' ), $failure );
-		$job->cursor = $cursor;
+		if ( '' !== $forget && isset( $job->options['answers'] ) && is_array( $job->options['answers'] ) && array_key_exists( $forget, $job->options['answers'] ) ) {
+			$options = $job->options;
+			unset( $options['answers'][ $forget ] );
+			if ( array() === $options['answers'] ) {
+				unset( $options['answers'] );
+			}
+			$json = wp_json_encode( $options );
+			if ( false === $json ) {
+				throw new \RuntimeException( sprintf( 'Job %d: its options cannot be written.', $job->id ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+			}
+			$extra['options_json'] = $json;
+		}
+		$job = $this->write_transition( $job, $to, $error, $token, $extra, array_fill( 0, count( $extra ), '%s' ), $failure );
+		if ( null !== $cursor ) {
+			$job->cursor = $cursor;
+		}
+		if ( null !== $options ) {
+			$job->options = $options;
+		}
 		return $job;
 	}
 

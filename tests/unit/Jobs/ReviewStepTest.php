@@ -9,6 +9,7 @@ use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\JobContext;
 use WPCheckpoint\Jobs\ReviewStep;
 use WPCheckpoint\Jobs\StepResult;
+use WPCheckpoint\Jobs\StoppedByAnswer;
 use WPCheckpoint\Support\Logger;
 use WPCheckpoint\Support\Redactor;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
@@ -323,6 +324,38 @@ final class ReviewStepTest extends TestCase {
 		$this->assertCount( 1 + 3 + 2, $review['decisions']['notes'] );
 		( new ReviewStep() )->run( $this->context( array( 'answers' => $answers ) ) );
 		$this->assertSame( $decided, $this->review(), 'running twice writes the same bytes: nothing is appended' );
+	}
+
+	public function test_a_stop_answer_names_its_question_so_the_failure_can_forget_it(): void {
+		$this->inputs(
+			array(
+				array(
+					'table' => 'wp_options',
+					'exact' => true,
+					'count' => 2,
+					'limit' => 4194304,
+				),
+			),
+			array( 'unreadable' => array( 'wp-content/uploads/a.jpg' ) )
+		);
+		$stopped = array();
+		foreach (
+			array(
+				array( 'unreadable' => 'stop' ),
+				array(
+					'unreadable' => 'continue',
+					'oversize_0' => 'stop',
+				),
+			) as $answers
+		) {
+			try {
+				( new ReviewStep() )->run( $this->context( array( 'answers' => $answers ) ) );
+				$this->fail( 'stopped' );
+			} catch ( StoppedByAnswer $e ) {
+				$stopped[] = $e->question();
+			}
+		}
+		$this->assertSame( array( 'unreadable', 'oversize_0' ), $stopped );
 	}
 
 	public function test_a_policy_decides_without_asking_and_fail_stops_with_the_reason(): void {

@@ -249,6 +249,13 @@ final class RestoreFilesPreflightTest extends RestoreTestCase {
 		$job = $this->run_restore( $job );
 		$this->assertSame( Job::FAILED, $job->status );
 		$this->assertStringContainsString( 'The restore was stopped because the free space for its staged files could not be confirmed.', (string) $job->last_error );
+		$this->assertArrayNotHasKey( 'free_space', (array) ( $job->options['answers'] ?? array() ), 'the answer went with the failure' );
+
+		// A retry asks again, rather than stopping for the same reason.
+		Plugin::instance()->job_actions()->retry( $job->id );
+		$job = $this->run_restore( $job );
+		$this->assertSame( Job::PAUSED, $job->status, (string) $job->last_error );
+		$this->assertSame( array( 'free_space' ), array_column( $job->questions, 'id' ) );
 	}
 
 	public function test_a_storage_directory_the_swap_would_move_stops_the_restore_as_named_and_as_resolved(): void {
