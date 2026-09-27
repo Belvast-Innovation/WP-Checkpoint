@@ -47,7 +47,8 @@ defined( 'ABSPATH' ) || exit;
  *    skipped and reported; when Q starts with P, a copy's name is itself a
  *    name of the backup's own site, so nothing is copied and the keys are
  *    reported only, as is a copy whose name itself starts with P (when P
- *    starts with Q). Rows are taken in primary key order, a range and a
+ *    starts with Q); and when usermeta does not number its rows (no
+ *    AUTO_INCREMENT), a copy would have no key of its own: reported only. Rows are taken in primary key order, a range and a
  *    number of rows at most per unit, up to the highest key at the plan
  *    (copies get higher keys and are never taken again); a row's existing
  *    copy above that key is how a replay knows it is done (so two rows of
@@ -265,13 +266,19 @@ final class PrefixRewriteStep implements Step {
 		$from = $run['plan']->backup_prefix();
 		$to   = $run['plan']->site_prefix();
 		$max  = isset( $run['tables']['usermeta'] ) ? self::top( $run['db'], $run['tables']['usermeta'] ) : 0;
-		// When this site's prefix starts with the backup's, a copy's name is a name of the backup's own site too.
-		$copy = '' !== $from && 0 !== strncmp( $to, $from, strlen( $from ) );
+		$why  = '';
+		if ( 0 === strncmp( $to, $from, strlen( $from ) ) ) {
+			$why = 'prefix'; // This site's prefix starts with the backup's: a copy's name is a name of the backup's own site too.
+		} elseif ( isset( $run['tables']['usermeta'] ) && ! self::numbered( $run['db'], $run['tables']['usermeta'] ) ) {
+			$why = 'numbering'; // A copy would take key 0, or the key of a row at 0.
+		}
+		$copy = '' !== $from && '' === $why;
 		$this->write_report(
 			$context,
 			array(
 				'identified' => '' !== $from,
 				'copies'     => $copy,
+				'no_copies'  => '' === $from ? '' : $why,
 				'options'    => array(
 					'mark'   => 0,
 					'tables' => 0,
@@ -330,7 +337,7 @@ final class PrefixRewriteStep implements Step {
 			return $cursor;
 		}
 		if ( null === $cursor['top'] ) {
-			$cursor['top'] = isset( $tables['usermeta'] ) ? self::top( $db, $tables['usermeta'] ) : 0;
+			$cursor['top'] = isset( $tables['usermeta'] ) ? self::top( $db, $tables['usermeta'] ) : -1; // No table: no range.
 		}
 		if ( (int) $cursor['from'] < (int) $cursor['top'] ) {
 			$to = (int) min( (int) $cursor['top'], (int) $cursor['from'] + $this->sizes['range'] );
@@ -484,14 +491,10 @@ final class PrefixRewriteStep implements Step {
 			} elseif ( strlen( $copy ) > self::MAX_KEY_BYTES ) {
 				$outcome = 'too_long';
 			} else {
-				$existing = null;
-				// Compared here, not by BINARY: the column's bytes are in its own charset, the name in the connection's.
-				foreach ( $db->rows( 'SELECT umeta_id, meta_key FROM `' . $table . '` WHERE user_id = ? AND meta_key = ? ORDER BY umeta_id LIMIT ' . self::VARIANTS, array( (string) $row[1], $copy ) ) as $found ) {
-					if ( (string) $found[1] === $copy ) {
-						$existing = (int) $found[0];
-						break;
-					}
-				}
+				// The backup's own rows first, then this run's copies (above the plan's highest key): a copy made
+				// before a replay is found however many rows of the user share its name under the collation.
+				$existing = $this->exact( $db, $table, (string) $row[1], $copy, '<=', $max );
+				$existing = null === $existing ? $this->exact( $db, $table, (string) $row[1], $copy, '>', $max ) : $existing;
 				if ( null !== $existing ) {
 					// A row under that name from the backup is kept, and reported; one above the plan's highest key is this copy, from before a replay.
 					$outcome = $existing <= $max ? 'existing' : 'copied';
@@ -507,6 +510,41 @@ final class PrefixRewriteStep implements Step {
 		$this->at( 'copy' );
 		$cursor['after'] = $upto;
 		return $cursor;
+	}
+
+	/**
+	 * The first key of a user's row under exactly this name, on one side of the plan's highest key.
+	 *
+	 * Compared here, not by BINARY: the column's bytes are in its own character set, the name in the connection's.
+	 *
+	 * @param Queries $db    Connection.
+	 * @param string  $table usermeta.
+	 * @param string  $user  User id.
+	 * @param string  $name  Name.
+	 * @param string  $side  '<=' or '>'.
+	 * @param int     $max   The plan's highest key.
+	 * @return int|null
+	 */
+	private function exact( Queries $db, string $table, string $user, string $name, string $side, int $max ) {
+		$side = '>' === $side ? '>' : '<=';
+		foreach ( $db->rows( 'SELECT umeta_id, meta_key FROM `' . $table . '` WHERE user_id = ? AND meta_key = ? AND umeta_id ' . $side . ' ? ORDER BY umeta_id LIMIT ' . self::VARIANTS, array( $user, $name, (string) $max ) ) as $found ) {
+			if ( (string) $found[1] === $name ) {
+				return (int) $found[0];
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * Whether usermeta numbers its rows itself (AUTO_INCREMENT), which a copy needs for a key of its own.
+	 *
+	 * @param Queries $db    Connection.
+	 * @param string  $table usermeta.
+	 * @return bool
+	 */
+	private static function numbered( Queries $db, string $table ): bool {
+		$extra = $db->rows( 'SELECT EXTRA FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?', array( $table, 'umeta_id' ) );
+		return false !== stripos( (string) ( $extra[0][0] ?? '' ), 'auto_increment' );
 	}
 
 	/**
@@ -802,7 +840,7 @@ final class PrefixRewriteStep implements Step {
 		}
 		if ( array() !== $report['copy']['keys'] ) {
 			$context->logger()->info(
-				empty( $report['copies'] ) ? 'User settings named after the backup\'s table prefix were left as they are: this site\'s prefix starts with the backup\'s, so a copy under it would be a name of the backed-up site too' : 'User settings named after the backup\'s table prefix were copied under this site\'s (kept under the old name too; a name a user already had, too long, or that would be a name of the backed-up site was left alone)',
+				empty( $report['copies'] ) ? ( 'numbering' === $report['no_copies'] ? 'User settings named after the backup\'s table prefix were left as they are: the backup\'s usermeta table does not number its rows (no AUTO_INCREMENT), so a copy would have no key of its own' : 'User settings named after the backup\'s table prefix were left as they are: this site\'s prefix starts with the backup\'s, so a copy under it would be a name of the backed-up site too' ) : 'User settings named after the backup\'s table prefix were copied under this site\'s (kept under the old name too; a name a user already had, too long, or that would be a name of the backed-up site was left alone)',
 				array(
 					'keys'      => array_slice( $report['copy']['keys'], 0, $this->sizes['listed'], true ),
 					'more_rows' => $report['copy']['more'],

@@ -38,8 +38,9 @@ final class PrefixRewriteTest extends RestoreTestCase {
 	 * @param array<int, array<string, string>|null> $sites  Other sites of a network: id => their options (null: no options table).
 	 * @param string                               $engine   usermeta's storage engine.
 	 * @param string                               $charset  usermeta's character set ('' as this site's).
+	 * @param string                               $alter    An ALTER TABLE of usermeta after its rows ('' none).
 	 */
-	private function backup_with_prefix( string $p, array $usermeta, array $options, array $sites = array(), string $engine = 'InnoDB', string $charset = '' ): string {
+	private function backup_with_prefix( string $p, array $usermeta, array $options, array $sites = array(), string $engine = 'InnoDB', string $charset = '', string $alter = '' ): string {
 		global $wpdb;
 		$q = self::q();
 		$this->create( $p . 'options', "LIKE `{$q}options`" );
@@ -57,6 +58,10 @@ final class PrefixRewriteTest extends RestoreTestCase {
 			if ( isset( $row[3] ) ) { // A key of its own (0: an update, as an insert of 0 takes the next one).
 				$this->assertSame( 1, (int) $wpdb->update( $p . 'usermeta', array( 'umeta_id' => $row[3] ), array( 'umeta_id' => $wpdb->insert_id ) ) );
 			}
+		}
+		if ( '' !== $alter ) {
+			$wpdb->query( "ALTER TABLE `{$p}usermeta` {$alter}" );
+			$this->assertSame( '', $wpdb->last_error );
 		}
 		$tables = array( $p . 'options', $p . 'usermeta' );
 		if ( is_multisite() ) {
@@ -352,6 +357,51 @@ final class PrefixRewriteTest extends RestoreTestCase {
 		if ( array() !== $counted ) {
 			$this->assertSame( $counted[2], $this->report( $job )[ $counted[0] ][ $counted[1] ] );
 		}
+	}
+
+	public function test_a_restore_without_usermeta_renames_the_roles(): void {
+		$q   = self::q();
+		$job = $this->run_restore(
+			$this->start_restore(
+				$this->backup_with_prefix( 'wpx_', array( array( 1, 'wpx_capabilities', 'admin' ) ), array( 'wpx_user_roles' => 'roles' ) ),
+				array( 'exclude_tables' => array( 'wpx_usermeta' ) )
+			)
+		);
+		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
+		$this->assertArrayNotHasKey( 'wpx_usermeta', $this->temporary_names( $job ), 'the control: usermeta is not restored' );
+		$this->assertSame( 'roles', $this->restored( $job, 'wpx_options' )[ $q . 'user_roles' ] );
+	}
+
+	public function test_a_usermeta_table_that_does_not_number_its_rows_gets_no_copies(): void {
+		global $wpdb;
+		$q   = self::q();
+		$job = $this->run_restore(
+			$this->start_restore(
+				$this->backup_with_prefix(
+					'wpx_',
+					array(
+						array( 1, 'wpx_capabilities', 'admin', 0 ),
+						array( 1, 'wpx_myplugin_pref', 'mine' ),
+					),
+					array(),
+					array(),
+					'InnoDB',
+					'',
+					'MODIFY umeta_id bigint(20) unsigned NOT NULL'
+				)
+			)
+		);
+		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
+		$this->assertStringNotContainsStringIgnoringCase( 'auto_increment', (string) $wpdb->get_var( $wpdb->prepare( 'SELECT EXTRA FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND COLUMN_NAME = %s', $this->temporary_names( $job )['wpx_usermeta'], 'umeta_id' ) ), 'the control: the restored table does not number its rows' );
+		$meta = $this->restored( $job, 'wpx_usermeta' );
+		sort( $meta );
+		$want = array( array( 1, 'wpx_myplugin_pref', 'mine' ), array( 1, $q . 'capabilities', 'admin' ) );
+		sort( $want );
+		$this->assertSame( $want, $meta, 'renamed, not copied' );
+		$report = $this->report( $job );
+		$this->assertSame( array( false, 'numbering' ), array( $report['copies'], $report['no_copies'] ) );
+		$this->assertSame( array( 'rows' => 1, 'reported' => 1 ), $report['copy']['keys']['wpx_myplugin_pref'] );
+		$this->assertStringContainsString( 'does not number its rows', (string) file_get_contents( $job->storage_path . '/' . $job->log_path ) );
 	}
 
 	public function test_a_copy_the_backup_already_has_is_found_in_a_table_of_another_character_set(): void {
