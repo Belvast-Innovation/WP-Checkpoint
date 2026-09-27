@@ -338,7 +338,8 @@ final class ReviewStepTest extends TestCase {
 			),
 			array( 'unreadable' => array( 'wp-content/uploads/a.jpg' ) )
 		);
-		$stopped = array();
+		$stopped  = array();
+		$messages = array();
 		foreach (
 			array(
 				array( 'unreadable' => 'stop' ),
@@ -356,10 +357,42 @@ final class ReviewStepTest extends TestCase {
 				( new ReviewStep() )->run( $this->context( array( 'answers' => $answers ) ) );
 				$this->fail( 'stopped' );
 			} catch ( Stopped $e ) {
-				$stopped[] = $e->questions();
+				$stopped[]  = $e->questions();
+				$messages[] = $e->getMessage();
 			}
 		}
 		$this->assertSame( array( array( 'unreadable' ), array( 'oversize_0' ), array( 'unreadable', 'oversize_0' ) ), $stopped );
+		$this->assertStringStartsWith( 'The backup was stopped as chosen: 1 files cannot be read', $messages[0] );
+		$this->assertStringContainsString( 'cannot be read and the backup would not contain them (for example wp-content/uploads/a.jpg). table wp_options has rows larger', $messages[2], 'both reasons' );
+		$this->assertStringNotContainsString( 'more question', $messages[2] );
+	}
+
+	public function test_more_stops_than_listed_are_counted_in_the_message(): void {
+		$tails = array();
+		foreach ( array( 3, 4 ) as $tables ) {
+			$oversize = array();
+			$answers  = array( 'unreadable' => 'stop' );
+			for ( $i = 0; $i < $tables; $i++ ) {
+				$oversize[]                  = array(
+					'table' => 'wp_t' . $i,
+					'exact' => true,
+					'count' => 1,
+					'limit' => 4194304,
+				);
+				$answers[ 'oversize_' . $i ] = 'stop';
+			}
+			$this->inputs( $oversize, array( 'unreadable' => array( 'wp-content/uploads/a.jpg' ) ) );
+			try {
+				( new ReviewStep() )->run( $this->context( array( 'answers' => $answers ) ) );
+				$this->fail( 'stopped' );
+			} catch ( Stopped $e ) {
+				$this->assertCount( $tables + 1, $e->questions() );
+				$this->assertStringContainsString( 'table wp_t1 has rows', $e->getMessage(), 'the first three reasons are named' );
+				$this->assertStringNotContainsString( 'table wp_t2 has rows', $e->getMessage() );
+				$tails[] = substr( $e->getMessage(), (int) strrpos( $e->getMessage(), '.', -2 ) + 2 );
+			}
+		}
+		$this->assertSame( array( 'One more question was decided the same way.', '2 more questions were decided the same way.' ), $tails );
 	}
 
 	public function test_a_policy_decides_without_asking_and_fail_stops_with_the_reason(): void {

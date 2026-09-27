@@ -380,7 +380,7 @@ final class ExportPreflightTest extends JobTestCase {
 		$this->assertSame( TickResult::FAILED, $result->status );
 		$failed = $this->repo->find( $job->id );
 		$this->assertSame( ReviewStep::ID, $failed->step );
-		$this->assertStringContainsString( 'Stopped: table wpcptest_options has rows larger than the single-row limit', $failed->last_error );
+		$this->assertStringContainsString( 'The backup was stopped as chosen: table wpcptest_options has rows larger than the single-row limit', $failed->last_error );
 		$this->assertStringContainsString( '(4 rows)', $failed->last_error );
 	}
 

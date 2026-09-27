@@ -27,6 +27,11 @@ namespace WPCheckpoint\Jobs;
  */
 final class ReviewStep implements Step {
 
+	/**
+	 * Reasons named in the message when several questions were decided "stop".
+	 */
+	const STOPS_LISTED = 3;
+
 	const ID = 'review';
 
 	const HEAVY_MIN_BYTES = 52428800;
@@ -378,8 +383,14 @@ final class ReviewStep implements Step {
 			}
 		}
 		if ( array() !== $stops ) {
-			$first = (string) reset( $stops );
-			throw new Stopped( count( $stops ) > 1 ? sprintf( '%1$s And %2$d more questions were answered to stop.', $first, count( $stops ) - 1 ) : $first, array_keys( $stops ) );
+			// Every reason, up to three (the screen shows this text without the exception's name, so it says "stopped").
+			$reasons = array_values( $stops );
+			$text    = 'The backup was stopped as chosen: ' . implode( ' ', array_slice( $reasons, 0, self::STOPS_LISTED ) );
+			$more    = count( $reasons ) - self::STOPS_LISTED;
+			if ( $more > 0 ) {
+				$text .= 1 === $more ? ' One more question was decided the same way.' : sprintf( ' %d more questions were decided the same way.', $more );
+			}
+			throw new Stopped( $text, array_keys( $stops ) );
 		}
 		return array( $decisions, $questions );
 	}
