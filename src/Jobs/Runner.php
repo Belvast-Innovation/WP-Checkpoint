@@ -358,6 +358,15 @@ final class Runner {
 				$this->persist( $job, $token, $step_id, $context->cursor(), $state, $job->progress, $job->progress_message, false );
 				$this->release( $job, $token );
 				return new TickResult( TickResult::WAITING, $wait, $job, $message );
+			} catch ( RetryFrom $e ) {
+				$from = array_search( $e->step(), $ids, true );
+				if ( false === $from || $from > $index ) {
+					// Not a step of this job at or before this one: failed as any other failure, the retry continues here.
+					$logger->error( 'The step named a step to retry from that is not this one or one before it', array( 'retry_from' => $e->step() ) );
+					return $this->fail( $job, $token, $logger, sprintf( 'Step "%s": %s', $step_id, $this->describe( $e ) ) );
+				}
+				$logger->info( 'A retry starts at an earlier step', array( 'retry_from' => $e->step() ) );
+				return $this->fail( $job, $token, $logger, sprintf( 'Step "%s": %s', $step_id, $this->describe( $e ) ), '', $e->step() );
 			} catch ( \Throwable $e ) {
 				// Lost work files, and a table changed under the export, are final; anything else may pass once its cause is fixed.
 				return $this->fail( $job, $token, $logger, sprintf( 'Step "%s": %s', $step_id, $this->describe( $e ) ), self::failure_of( $e ) );
@@ -710,12 +719,13 @@ final class Runner {
 	 * @param string $to      Target status.
 	 * @param string $error   Error message.
 	 * @param string $failure Kind of a failure (Job::FAILURE_*).
+	 * @param string $retry_from Id of the step a retry of a failed job starts at ('' for none).
 	 * @return void
 	 * @throws LockLost When the write refused.
 	 */
-	private function transition( Job $job, string $token, string $to, string $error, string $failure = '' ): void {
+	private function transition( Job $job, string $token, string $to, string $error, string $failure = '', string $retry_from = '' ): void {
 		try {
-			$this->repository->transition( $job, $to, $error, $token, $failure );
+			$this->repository->transition( $job, $to, $error, $token, $failure, $retry_from );
 		} catch ( StaleJob $e ) {
 			throw new LockLost( $e->getMessage(), 0, $e ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
 		}
@@ -766,11 +776,12 @@ final class Runner {
 	 * @param string $failure Job::FAILURE_TEMPORARY (a passing problem), Job::FAILURE_FINAL (lost work
 	 *                        files: a retry fails the same way; with a reason, see failure_of()), or ''
 	 *                        when the cause does not say.
+	 * @param string $retry_from Id of the step a retry starts at (RetryFrom), '' to continue the failing one.
 	 * @return TickResult
 	 */
-	private function fail( Job $job, string $token, Logger $logger, string $message, string $failure = '' ): TickResult {
+	private function fail( Job $job, string $token, Logger $logger, string $message, string $failure = '', string $retry_from = '' ): TickResult {
 		$logger->error( 'Job failed', array( 'error' => $message ) );
-		$this->transition( $job, $token, Job::FAILED, $message, $failure );
+		$this->transition( $job, $token, Job::FAILED, $message, $failure, $retry_from );
 		return new TickResult( TickResult::FAILED, -1, $job, $this->redactor->redact( $message ) );
 	}
 
