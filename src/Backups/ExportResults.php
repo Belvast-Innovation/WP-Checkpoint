@@ -9,6 +9,7 @@ namespace WPCheckpoint\Backups;
 
 use WPCheckpoint\Jobs\PreflightStep;
 use WPCheckpoint\Support\Options;
+use WPCheckpoint\Support\StoredNames;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -22,7 +23,7 @@ defined( 'ABSPATH' ) || exit;
  */
 final class ExportResults {
 
-	const OPTION = 'wpcheckpoint_export_results';
+	const OPTION = StoredNames::EXPORT_RESULTS;
 	const MAX    = 20;
 
 	/**

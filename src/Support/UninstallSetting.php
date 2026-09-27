@@ -19,7 +19,7 @@ defined( 'ABSPATH' ) || exit;
 final class UninstallSetting {
 
 	const OPTION      = Uninstaller::OPTION_DELETE_DATA;
-	const NOTICE_FLAG = 'wpcheckpoint_uninstall_setting_notice';
+	const NOTICE_FLAG = StoredNames::UNINSTALL_NOTICE;
 
 	/**
 	 * Notice flag values: a site-level "on" was found, or the network was too

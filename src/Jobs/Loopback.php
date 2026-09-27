@@ -10,6 +10,7 @@ namespace WPCheckpoint\Jobs;
 
 use WPCheckpoint\Rest\Controller;
 use WPCheckpoint\Support\Environment;
+use WPCheckpoint\Support\StoredNames;
 use WPCheckpoint\Support\Thresholds;
 
 defined( 'ABSPATH' ) || exit;
@@ -56,8 +57,6 @@ defined( 'ABSPATH' ) || exit;
 final class Loopback {
 
 	const HOOK         = 'wpcheckpoint_job_tick';
-	const TOKEN_PREFIX = 'wpcheckpoint_loopback_';
-	const JOB_PREFIX   = 'wpcheckpoint_loopback_job_';
 	const TOKEN_TTL    = 120;
 	const ROUTE_SUFFIX = 'loopback';
 
@@ -216,8 +215,8 @@ final class Loopback {
 		self::revoke_tokens( $job_id );
 		$token = bin2hex( random_bytes( 16 ) );
 		$hash  = hash( 'sha256', $token );
-		set_site_transient( self::TOKEN_PREFIX . $hash, $job_id, self::TOKEN_TTL );
-		set_site_transient( self::JOB_PREFIX . $job_id, $hash, self::TOKEN_TTL );
+		set_site_transient( StoredNames::loopback_token( $hash ), $job_id, self::TOKEN_TTL );
+		set_site_transient( StoredNames::loopback_job( $job_id ), $hash, self::TOKEN_TTL );
 		return $token;
 	}
 
@@ -233,12 +232,12 @@ final class Loopback {
 			return false;
 		}
 		$hash  = hash( 'sha256', $token );
-		$found = get_site_transient( self::TOKEN_PREFIX . $hash );
-		delete_site_transient( self::TOKEN_PREFIX . $hash );
+		$found = get_site_transient( StoredNames::loopback_token( $hash ) );
+		delete_site_transient( StoredNames::loopback_token( $hash ) );
 		if ( false === $found || (int) $found !== $job_id ) {
 			return false;
 		}
-		delete_site_transient( self::JOB_PREFIX . $job_id );
+		delete_site_transient( StoredNames::loopback_job( $job_id ) );
 		return true;
 	}
 
@@ -249,11 +248,11 @@ final class Loopback {
 	 * @return void
 	 */
 	public static function revoke_tokens( int $job_id ): void {
-		$hash = get_site_transient( self::JOB_PREFIX . $job_id );
-		if ( is_string( $hash ) && '' !== $hash ) {
-			delete_site_transient( self::TOKEN_PREFIX . $hash );
+		$hash = get_site_transient( StoredNames::loopback_job( $job_id ) );
+		if ( is_string( $hash ) && StoredNames::is_sha256( $hash ) ) {
+			delete_site_transient( StoredNames::loopback_token( $hash ) );
 		}
-		delete_site_transient( self::JOB_PREFIX . $job_id );
+		delete_site_transient( StoredNames::loopback_job( $job_id ) );
 	}
 
 	/**

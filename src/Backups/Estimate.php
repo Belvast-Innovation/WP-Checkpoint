@@ -8,6 +8,7 @@
 namespace WPCheckpoint\Backups;
 
 use WPCheckpoint\Support\Options;
+use WPCheckpoint\Support\StoredNames;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -27,8 +28,8 @@ defined( 'ABSPATH' ) || exit;
  */
 final class Estimate {
 
-	const OPTION        = 'wpcheckpoint_estimate';
-	const RATE_OPTION   = 'wpcheckpoint_export_rate';
+	const OPTION        = StoredNames::ESTIMATE;
+	const RATE_OPTION   = StoredNames::EXPORT_RATE;
 	const VALID_SECONDS = 604800;
 
 	/**

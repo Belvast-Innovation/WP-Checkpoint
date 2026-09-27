@@ -26,9 +26,10 @@ defined( 'ABSPATH' ) || exit;
  * site's "wp_2_capabilities" is site 2's old name): old to intermediate,
  * then intermediate to new, each step moving rows out of what it matches.
  *
- * None of these is a name this plugin's own state uses (StateCarry::PREFIXES:
- * "wpcheckpoint_…" and its transients), so carrying the state before the
- * swap never meets them.
+ * None of these is a name this plugin's own state is stored under
+ * (StateCarry carries the exact names of Support\StoredNames, none of which
+ * ends in "user_roles"; StoredNamesTest), so carrying the state before the
+ * swap never meets them, whatever the table prefixes.
  */
 final class PrefixKeys {
 

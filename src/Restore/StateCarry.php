@@ -8,6 +8,7 @@
 namespace WPCheckpoint\Restore;
 
 use WPCheckpoint\Database\SqlWriter;
+use WPCheckpoint\Support\StoredNames;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -24,10 +25,18 @@ defined( 'ABSPATH' ) || exit;
  * undo the restore but the standalone endpoint.
  *
  * The method carry() replaces, in the temporary options table (and sitemeta), every
- * row named by one of PREFIXES with the live table's rows (a prefix, not a
- * list: the plugin has no single list of what it stores, and every name it
- * writes starts with one of these), and puts this plugin in the temporary
- * table's list of active plugins. It is a delete and an insert, so running
+ * row stored under one of the plugin's exact names (Support\StoredNames:
+ * the name itself and a transient's value and expiry) with the live
+ * table's rows, and puts this plugin in the temporary table's list of
+ * active plugins; and does the same with the names the plugin builds at run
+ * time (a loopback token, a probe challenge: StoredNames::is_built(), rows
+ * found by their prefixes and kept only when what follows is of the right
+ * form), so that another job's token or a pending probe outlives the swap.
+ * The plugin's names, not "everything that starts with wpcheckpoint_": a
+ * row of the backup's own named like that (a table prefix "wpcheckpoint_"
+ * makes "wpcheckpoint_user_roles") stays the backup's. The names are
+ * matched by the columns' collation, as WordPress reads them (get_option()
+ * ends in an SQL equality). It is a delete and an insert, so running
  * it again gives the same result. guard() checks that list and runs the
  * swap it is given only when this plugin is in it, right after the check.
  * There is no swap yet: the swap unit (a later part of T042) is to call
@@ -42,9 +51,9 @@ defined( 'ABSPATH' ) || exit;
 final class StateCarry {
 
 	/**
-	 * Every name the plugin writes starts with one of these (options, transients, site options, site transients).
+	 * Names per statement when carrying built names.
 	 */
-	const PREFIXES = array( 'wpcheckpoint_', '_transient_wpcheckpoint_', '_transient_timeout_wpcheckpoint_', '_site_transient_wpcheckpoint_', '_site_transient_timeout_wpcheckpoint_' );
+	const CHUNK = 200;
 
 	/**
 	 * Connection.
@@ -94,14 +103,18 @@ final class StateCarry {
 	public function carry( string $live_options, string $temp_options, $live_meta = null, $temp_meta = null ): void {
 		$this->db->begin();
 		try {
-			$like = self::like_clause( 'option_name' );
-			$this->db->rows( 'DELETE FROM ' . SqlWriter::identifier( $temp_options ) . ' WHERE ' . $like['sql'], $like['args'] );
-			$this->db->rows( 'INSERT INTO ' . SqlWriter::identifier( $temp_options ) . ' (option_name, option_value, autoload) SELECT option_name, option_value, autoload FROM ' . SqlWriter::identifier( $live_options ) . ' WHERE ' . $like['sql'], $like['args'] );
+			$names = StoredNames::stored_forms( false );
+			$in    = self::marks( $names );
+			$this->db->rows( 'DELETE FROM ' . SqlWriter::identifier( $temp_options ) . ' WHERE option_name IN (' . $in . ')', $names );
+			$this->db->rows( 'INSERT INTO ' . SqlWriter::identifier( $temp_options ) . ' (option_name, option_value, autoload) SELECT option_name, option_value, autoload FROM ' . SqlWriter::identifier( $live_options ) . ' WHERE option_name IN (' . $in . ')', $names );
+			$this->carry_built( $live_options, $temp_options, 'option_name', array(), '(option_name, option_value, autoload) SELECT option_name, option_value, autoload' );
 			if ( null !== $live_meta && null !== $temp_meta ) {
-				$like = self::like_clause( 'meta_key' );
-				$args = array_merge( array( (string) $this->network ), $like['args'] );
-				$this->db->rows( 'DELETE FROM ' . SqlWriter::identifier( $temp_meta ) . ' WHERE site_id = ? AND (' . $like['sql'] . ')', $args );
-				$this->db->rows( 'INSERT INTO ' . SqlWriter::identifier( $temp_meta ) . ' (site_id, meta_key, meta_value) SELECT site_id, meta_key, meta_value FROM ' . SqlWriter::identifier( $live_meta ) . ' WHERE site_id = ? AND (' . $like['sql'] . ')', $args );
+				$names = StoredNames::stored_forms( true );
+				$in    = self::marks( $names );
+				$args  = array_merge( array( (string) $this->network ), $names );
+				$this->db->rows( 'DELETE FROM ' . SqlWriter::identifier( $temp_meta ) . ' WHERE site_id = ? AND meta_key IN (' . $in . ')', $args );
+				$this->db->rows( 'INSERT INTO ' . SqlWriter::identifier( $temp_meta ) . ' (site_id, meta_key, meta_value) SELECT site_id, meta_key, meta_value FROM ' . SqlWriter::identifier( $live_meta ) . ' WHERE site_id = ? AND meta_key IN (' . $in . ')', $args );
+				$this->carry_built( $live_meta, $temp_meta, 'meta_key', array( (string) $this->network ), '(site_id, meta_key, meta_value) SELECT site_id, meta_key, meta_value' );
 				$this->activate_network( $temp_meta );
 			} else {
 				$this->activate( $temp_options );
@@ -214,21 +227,66 @@ final class StateCarry {
 	}
 
 	/**
-	 * "(column LIKE ? OR ...)" over PREFIXES, their wildcards escaped.
+	 * Replace the temporary table's rows under built names with the live table's.
 	 *
-	 * @param string $column Column.
-	 * @return array{sql: string, args: string[]}
+	 * @param string   $live    Live table.
+	 * @param string   $temp    Temporary table.
+	 * @param string   $column  Name column.
+	 * @param string[] $site    The network's id (sitemeta), or nothing (options).
+	 * @param string   $columns Columns inserted and their SELECT list.
+	 * @return void
 	 */
-	private static function like_clause( string $column ): array {
-		$parts = array();
-		$args  = array();
-		foreach ( self::PREFIXES as $prefix ) {
-			$parts[] = $column . ' LIKE ?';
-			$args[]  = addcslashes( $prefix, '\\%_' ) . '%';
+	private function carry_built( string $live, string $temp, string $column, array $site, string $columns ): void {
+		$where = null === ( $site[0] ?? null ) ? '' : 'site_id = ? AND ';
+		foreach ( array_chunk( $this->built_in( $temp, $column, $where, $site ), self::CHUNK ) as $names ) {
+			$this->db->rows( 'DELETE FROM ' . SqlWriter::identifier( $temp ) . ' WHERE ' . $where . $column . ' IN (' . self::marks( $names ) . ')', array_merge( $site, $names ) );
 		}
-		return array(
-			'sql'  => implode( ' OR ', $parts ),
-			'args' => $args,
-		);
+		foreach ( array_chunk( $this->built_in( $live, $column, $where, $site ), self::CHUNK ) as $names ) {
+			$this->db->rows( 'INSERT INTO ' . SqlWriter::identifier( $temp ) . ' ' . $columns . ' FROM ' . SqlWriter::identifier( $live ) . ' WHERE ' . $where . $column . ' IN (' . self::marks( $names ) . ')', array_merge( $site, $names ) );
+		}
+	}
+
+	/**
+	 * The names in a table that are built names (StoredNames::is_built()), found by their prefixes in every form.
+	 *
+	 * @param string   $table  Table.
+	 * @param string   $column Name column.
+	 * @param string   $where  "site_id = ? AND " or nothing.
+	 * @param string[] $site   Its value.
+	 * @return string[]
+	 */
+	private function built_in( string $table, string $column, string $where, array $site ): array {
+		$likes = array();
+		$args  = $site;
+		foreach ( array_merge( array( '' ), StoredNames::TRANSIENT_FORMS ) as $form ) {
+			foreach ( array_keys( StoredNames::BUILT ) as $prefix ) {
+				$likes[] = $column . " LIKE ? ESCAPE '!'";
+				$args[]  = strtr(
+					$form . $prefix,
+					array(
+						'!' => '!!',
+						'%' => '!%',
+						'_' => '!_',
+					)
+				) . '%';
+			}
+		}
+		$names = array();
+		foreach ( $this->db->rows( 'SELECT ' . $column . ' FROM ' . SqlWriter::identifier( $table ) . ' WHERE ' . $where . '(' . implode( ' OR ', $likes ) . ')', $args ) as $row ) {
+			if ( StoredNames::is_built( (string) $row[0] ) ) {
+				$names[] = (string) $row[0];
+			}
+		}
+		return $names;
+	}
+
+	/**
+	 * "?, ?, ..." for a list.
+	 *
+	 * @param string[] $values Values.
+	 * @return string
+	 */
+	private static function marks( array $values ): string {
+		return implode( ', ', array_fill( 0, count( $values ), '?' ) );
 	}
 }

@@ -12,6 +12,7 @@ use WP_REST_Request;
 use WP_REST_Response;
 use WP_REST_Server;
 use WPCheckpoint\Support\Environment;
+use WPCheckpoint\Support\StoredNames;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -27,9 +28,8 @@ defined( 'ABSPATH' ) || exit;
  */
 final class ProbeController extends Controller {
 
-	const ROUTE            = 'probe';
-	const CHALLENGE_TTL    = 120;
-	const TRANSIENT_PREFIX = 'wpcheckpoint_probe_';
+	const ROUTE         = 'probe';
+	const CHALLENGE_TTL = 120;
 
 	/**
 	 * Set the route base.
@@ -72,7 +72,7 @@ final class ProbeController extends Controller {
 	 */
 	public static function issue_challenge(): string {
 		$challenge = bin2hex( random_bytes( 16 ) );
-		set_site_transient( self::transient_key( $challenge ), 1, self::CHALLENGE_TTL );
+		set_site_transient( StoredNames::probe( hash( 'sha256', $challenge ) ), 1, self::CHALLENGE_TTL );
 		return $challenge;
 	}
 
@@ -83,7 +83,7 @@ final class ProbeController extends Controller {
 	 * @return void
 	 */
 	public static function revoke_challenge( string $challenge ): void {
-		delete_site_transient( self::transient_key( $challenge ) );
+		delete_site_transient( StoredNames::probe( hash( 'sha256', $challenge ) ) );
 	}
 
 	/**
@@ -97,11 +97,11 @@ final class ProbeController extends Controller {
 		if ( '' === $challenge ) {
 			return $this->forbidden();
 		}
-		$key = self::transient_key( $challenge );
-		if ( 1 !== (int) get_site_transient( $key ) ) {
+		$hash = hash( 'sha256', $challenge );
+		if ( 1 !== (int) get_site_transient( StoredNames::probe( $hash ) ) ) {
 			return $this->forbidden();
 		}
-		delete_site_transient( $key );
+		delete_site_transient( StoredNames::probe( $hash ) );
 		return true;
 	}
 
@@ -147,15 +147,5 @@ final class ProbeController extends Controller {
 	 */
 	private function forbidden(): WP_Error {
 		return new WP_Error( 'rest_forbidden', __( 'Sorry, you are not allowed to do that.', 'wp-checkpoint' ), array( 'status' => 403 ) );
-	}
-
-	/**
-	 * Transient name for a challenge (hashed so the value is not stored).
-	 *
-	 * @param string $challenge Challenge value.
-	 * @return string
-	 */
-	private static function transient_key( string $challenge ): string {
-		return self::TRANSIENT_PREFIX . hash( 'sha256', $challenge );
 	}
 }

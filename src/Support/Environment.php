@@ -23,7 +23,7 @@ defined( 'ABSPATH' ) || exit;
  */
 final class Environment {
 
-	const CACHE     = 'wpcheckpoint_environment';
+	const CACHE     = StoredNames::ENVIRONMENT;
 	const CACHE_TTL = 43200;
 
 	/**

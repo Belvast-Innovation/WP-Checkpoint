@@ -26,12 +26,12 @@ final class Uninstaller {
 	/**
 	 * Option holding the user's choice (boolean, default false).
 	 */
-	const OPTION_DELETE_DATA = 'wpcheckpoint_delete_data_on_uninstall';
+	const OPTION_DELETE_DATA = StoredNames::DELETE_DATA;
 
 	/**
 	 * Option holding the installed plugin version.
 	 */
-	const OPTION_VERSION = 'wpcheckpoint_version';
+	const OPTION_VERSION = StoredNames::VERSION;
 
 	/**
 	 * Every option the plugin owns. Keep in sync when adding options.
@@ -236,10 +236,10 @@ final class Uninstaller {
 	 */
 	public static function clear_transient_state(): void {
 		\WPCheckpoint\Jobs\Loopback::unschedule_all();
-		delete_site_transient( 'wpcheckpoint_jobs_reaped' );
-		delete_site_transient( 'wpcheckpoint_jobs_purged' );
-		delete_site_transient( 'wpcheckpoint_jobs_swept' );
-		delete_site_transient( 'wpcheckpoint_foreign_tables' );
+		delete_site_transient( StoredNames::JOBS_REAPED );
+		delete_site_transient( StoredNames::JOBS_PURGED );
+		delete_site_transient( StoredNames::JOBS_SWEPT );
+		delete_site_transient( StoredNames::FOREIGN_TABLES );
 		delete_site_transient( Environment::CACHE );
 	}
 

@@ -10,6 +10,7 @@ namespace WPCheckpoint\Admin;
 use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Support\Environment;
 use WPCheckpoint\Support\Guard;
+use WPCheckpoint\Support\StoredNames;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -108,7 +109,7 @@ final class EnvironmentActions {
 	 * @return int
 	 */
 	public static function seconds_locked( string $which ): int {
-		$until = (int) get_site_transient( self::lock_key( $which ) );
+		$until = (int) get_site_transient( StoredNames::environment_lock( $which ) );
 		return max( 0, $until - time() );
 	}
 
@@ -122,18 +123,8 @@ final class EnvironmentActions {
 		if ( self::seconds_locked( $which ) > 0 ) {
 			return false;
 		}
-		set_site_transient( self::lock_key( $which ), time() + self::LOCK_SECONDS, self::LOCK_SECONDS );
+		set_site_transient( StoredNames::environment_lock( $which ), time() + self::LOCK_SECONDS, self::LOCK_SECONDS );
 		return true;
-	}
-
-	/**
-	 * Lock transient name.
-	 *
-	 * @param string $which recheck|verify.
-	 * @return string
-	 */
-	private static function lock_key( string $which ): string {
-		return 'wpcheckpoint_lock_' . sanitize_key( $which );
 	}
 
 	/**

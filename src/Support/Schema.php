@@ -21,7 +21,7 @@ defined( 'ABSPATH' ) || exit;
  */
 final class Schema {
 
-	const OPTION  = 'wpcheckpoint_db_version';
+	const OPTION  = StoredNames::DB_VERSION;
 	const CURRENT = 7;
 
 	/**
@@ -68,7 +68,7 @@ final class Schema {
 	/**
 	 * The last failed upgrade attempt (Schema::ensure()): when the next may start, and its problems.
 	 */
-	const RETRY_OPTION = 'wpcheckpoint_db_upgrade_retry';
+	const RETRY_OPTION = StoredNames::DB_UPGRADE_RETRY;
 
 	/**
 	 * Seconds after a failed upgrade attempt before the next.
