@@ -321,9 +321,12 @@ final class DeleterGuardTest extends TestCase {
 		$this->made( 'elsewhere' );
 		Deleter::replace_protected( array( $this->sandbox . '/site/abspath' ) );
 		chdir( $this->sandbox . '/site' ); // Where a relative path would lead.
-		foreach ( array( 'elsewhere', '.', '..', '../elsewhere', ' ', $this->sandbox . '/none/../elsewhere', $this->sandbox . '/elsewhere/../new', $this->sandbox . '/new/.' ) as $dir ) {
+		foreach ( array( 'elsewhere', '.', '..', '../elsewhere', ' ', $this->sandbox . '/none/../new', $this->sandbox . '/elsewhere/../new', $this->sandbox . '/new/.' ) as $dir ) {
 			$this->assertSame( Deleter::NOT_A_FULL_PATH, Deleter::storage_refusal( $dir ), "'{$dir}'" );
 		}
+		// A missing directory before '..': POSIX resolves each segment on disk (nothing there, refused); Windows applies
+		// '..' to the text first, so the path is the existing directory, and the file system names it the same way.
+		$this->assertSame( '\\' === DIRECTORY_SEPARATOR ? '' : Deleter::NOT_A_FULL_PATH, Deleter::storage_refusal( $this->sandbox . '/none/../elsewhere' ) );
 		// An existing directory spelled with . or .. is checked where it leads.
 		$this->assertStringContainsString( 'a protected directory (1) or holds it', Deleter::storage_refusal( $this->sandbox . '/site/abspath/..' ) );
 		$this->assertStringContainsString( 'a protected directory (1) or holds it', Deleter::storage_refusal( $this->sandbox . '/elsewhere/../site/./abspath' ) );
