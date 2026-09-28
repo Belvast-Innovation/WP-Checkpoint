@@ -21,9 +21,10 @@ defined( 'ABSPATH' ) || exit;
  * other plugin it returns WordPress's answer unchanged, and themes and
  * WordPress itself have filters of their own it does not touch. For this
  * plugin it returns false only while a restore is in progress (queued,
- * running or paused, or failed with its work files still kept, up to
- * JobRepository::WORK_RETENTION_SECONDS: a final failure too, whose files
- * are kept all the same), or when
+ * running or paused, or failed with its work not yet marked expired, a
+ * final failure too: JobRepository::expire_work() marks it once
+ * WORK_RETENTION_SECONDS have passed, at the next maintenance, which runs
+ * when a job ticks or the plugin's page is opened), or when
  * the jobs table cannot be read (no answer is no evidence that nothing is
  * in progress; that case is logged and recorded, the time, so the plugin's
  * page can say why the plugin was not updated). Otherwise it returns
