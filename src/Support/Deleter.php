@@ -230,7 +230,7 @@ final class Deleter {
 	 * @return bool
 	 */
 	private static function is_absolute( string $path ): bool {
-		return '/' === $path[0] || '\\' === $path[0] || 1 === preg_match( '#\A[A-Za-z]:[\\/]#', $path );
+		return '/' === $path[0] || '\\' === $path[0] || 1 === preg_match( '#\A[A-Za-z]:[\\\\/]#', $path );
 	}
 
 	/**
@@ -240,7 +240,7 @@ final class Deleter {
 	 * @return bool
 	 */
 	private static function is_filesystem_root( string $real ): bool {
-		return '' === rtrim( $real, '/\\' ) || 1 === preg_match( '#\A[A-Za-z]:[\\/]?\z#', $real ) || dirname( $real ) === $real;
+		return '' === rtrim( $real, '/\\' ) || 1 === preg_match( '#\A[A-Za-z]:[\\\\/]?\z#', $real ) || dirname( $real ) === $real;
 	}
 
 	/**

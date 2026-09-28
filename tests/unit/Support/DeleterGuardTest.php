@@ -118,6 +118,10 @@ final class DeleterGuardTest extends TestCase {
 			$this->assertRefused( $path, $keep, 'the path is relative' );
 		}
 		chdir( $this->cwd );
+		// A Windows path is absolute on any platform (asked through refusal() only; on Linux it does not resolve).
+		foreach ( array( 'C:\\Users\\x\\AppData\\Local\\Temp', 'c:/x', '\\\\server\\share\\x' ) as $windows ) {
+			$this->assertStringNotContainsString( 'relative', Deleter::refusal( $windows ), $windows );
+		}
 		Deleter::delete_tree( $this->sandbox, $this->sandbox . '/rel' );
 		$this->assertFileDoesNotExist( $keep, 'the control: the same directory, named absolutely, is deleted' );
 	}
@@ -126,6 +130,9 @@ final class DeleterGuardTest extends TestCase {
 		// Asked through refusal() only: nothing here ever tries to delete it.
 		$this->assertStringContainsString( 'root of the file system', Deleter::refusal( '/' ) );
 		$this->assertStringContainsString( 'root of the file system', Deleter::refusal( '//' ) );
+		if ( '\\' === DIRECTORY_SEPARATOR ) {
+			$this->assertStringContainsString( 'root of the file system', Deleter::refusal( 'C:\\' ) );
+		}
 		$this->assertSame( '', Deleter::refusal( $this->sandbox ), 'the control: a directory in the registered temporary directory may be deleted' );
 	}
 
