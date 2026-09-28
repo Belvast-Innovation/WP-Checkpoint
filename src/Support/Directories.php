@@ -440,7 +440,7 @@ final class Directories {
 			// Nothing in it could ever be deleted (reclaim, purge, uninstall): refused before anything is written there.
 			// The constant as set, before any trimming (a drive root keeps its separator).
 			$this->error = Deleter::NOT_A_FULL_PATH === $refused
-				? __( 'WPCHECKPOINT_STORAGE_DIR must be an absolute path without . or .. segments. Set it to the full path of a directory of its own.', 'wp-checkpoint' )
+				? __( 'WPCHECKPOINT_STORAGE_DIR must be an absolute path, without . or .. segments unless the directory exists. Set it to the full path of a directory of its own.', 'wp-checkpoint' )
 				: __( 'WPCHECKPOINT_STORAGE_DIR names the root of the file system, a WordPress directory or a directory that holds one. Set it to a directory of its own, for example a new directory next to the WordPress directory. Backups already stored there stay in its backups sub-directory; move them to the new directory by hand.', 'wp-checkpoint' );
 			return;
 		}

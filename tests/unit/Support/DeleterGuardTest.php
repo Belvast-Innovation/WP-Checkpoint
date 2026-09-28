@@ -319,10 +319,16 @@ final class DeleterGuardTest extends TestCase {
 	public function test_a_storage_directory_must_be_a_full_path(): void {
 		$this->made( 'site/abspath' );
 		$this->made( 'elsewhere' );
+		Deleter::replace_protected( array( $this->sandbox . '/site/abspath' ) );
 		chdir( $this->sandbox . '/site' ); // Where a relative path would lead.
-		foreach ( array( 'elsewhere', '.', '..', '../elsewhere', ' ', $this->sandbox . '/site/../elsewhere', $this->sandbox . '/elsewhere/.', $this->sandbox . '/none/../elsewhere' ) as $dir ) {
+		foreach ( array( 'elsewhere', '.', '..', '../elsewhere', ' ', $this->sandbox . '/none/../elsewhere', $this->sandbox . '/elsewhere/../new', $this->sandbox . '/new/.' ) as $dir ) {
 			$this->assertSame( Deleter::NOT_A_FULL_PATH, Deleter::storage_refusal( $dir ), "'{$dir}'" );
 		}
+		// An existing directory spelled with . or .. is checked where it leads.
+		$this->assertStringContainsString( 'a protected directory (1) or holds it', Deleter::storage_refusal( $this->sandbox . '/site/abspath/..' ) );
+		$this->assertStringContainsString( 'a protected directory (1) or holds it', Deleter::storage_refusal( $this->sandbox . '/elsewhere/../site/./abspath' ) );
+		$this->assertSame( '', Deleter::storage_refusal( $this->sandbox . '/site/../elsewhere' ), 'the control: an existing directory beside it, spelled another way' );
+		$this->assertSame( '', Deleter::storage_refusal( $this->sandbox . '/elsewhere/.' ), 'the control: the same, with a . segment' );
 		$this->assertSame( '', Deleter::storage_refusal( $this->sandbox . '/elsewhere' ), 'the control: the same directory, named in full' );
 		$this->assertSame( '', Deleter::storage_refusal( $this->sandbox . '/elsewhere/' ), 'the control: with a trailing separator' );
 		$this->assertSame( '', Deleter::storage_refusal( $this->sandbox . '/..x' ), 'the control: a name that starts with dots' );

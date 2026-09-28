@@ -37,7 +37,7 @@ use WPCheckpoint\Restore\StagingLayout;
 final class Deleter {
 
 	/**
-	 * What storage_refusal() says of a path that is not absolute, or has . or .. segments.
+	 * What storage_refusal() says of a path that is not absolute, or has . or .. segments and leads nowhere yet.
 	 */
 	public const NOT_A_FULL_PATH = 'the path is relative or has . or .. segments';
 
@@ -103,9 +103,10 @@ final class Deleter {
 	 * Why a directory cannot be a storage directory, or '' when it can: it is the root of the file system, a WordPress
 	 * directory or one that holds it. Nothing could be deleted in such a directory (storage_allows()), so its jobs'
 	 * files would never be reclaimed. Both the path as named and where it leads count (a link to such a directory is
-	 * one too). A path that does not resolve (its parent does not exist yet) holds nothing. A relative path, or one
-	 * with . or .. segments, is refused too: what it names depends on the working directory, which differs between
-	 * requests, and every path built on it would be refused as relative.
+	 * one too). A path that does not resolve (its parent does not exist yet) holds nothing. A relative path is
+	 * refused: what it names depends on the working directory, which differs between requests, and every path built
+	 * on it would be refused as relative. So is a path with . or .. segments that does not lead to an existing
+	 * directory: where those segments end up is not known yet (an existing one is checked where it leads).
 	 *
 	 * @param string $dir Directory.
 	 * @return string
@@ -114,13 +115,15 @@ final class Deleter {
 		if ( '' === trim( $dir ) || ! self::absolute_on( $dir, Paths::is_windows() ) ) {
 			return self::NOT_A_FULL_PATH;
 		}
-		foreach ( explode( '/', str_replace( '\\', '/', $dir ) ) as $segment ) {
-			if ( '.' === $segment || '..' === $segment ) {
-				return self::NOT_A_FULL_PATH;
+		$leads = @realpath( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- open_basedir warnings would name the path.
+		if ( false === $leads ) {
+			foreach ( explode( '/', str_replace( '\\', '/', $dir ) ) as $segment ) {
+				if ( '.' === $segment || '..' === $segment ) {
+					return self::NOT_A_FULL_PATH;
+				}
 			}
 		}
 		$paths = array( self::resolve( $dir ) );
-		$leads = @realpath( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- open_basedir warnings would name the path.
 		if ( false !== $leads ) {
 			$paths[] = '' === rtrim( $leads, '/\\' ) ? DIRECTORY_SEPARATOR : rtrim( $leads, '/\\' );
 		}
