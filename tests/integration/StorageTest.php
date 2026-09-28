@@ -10,6 +10,7 @@ use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Support\Options;
 use WPCheckpoint\Support\OwnerMarker;
 use WPCheckpoint\Support\Protection;
+use WPCheckpoint\Support\StorageLocation;
 use WPCheckpoint\Support\Uninstaller;
 
 final class StorageTest extends WP_UnitTestCase {
@@ -224,12 +225,11 @@ final class StorageTest extends WP_UnitTestCase {
 
 	public function test_custom_directory_keeps_the_directory_itself_on_uninstall(): void {
 		$custom = $this->fake_root . '/custom-storage';
-		mkdir( $custom );
-		file_put_contents( $custom . '/user-file.txt', 'mine' );
-		$dirs = new Directories( $this->cli_context( array( 'custom_dir' => $custom ) ) );
+		$dirs   = new Directories( $this->cli_context( array( 'custom_dir' => $custom ) ) );
 		$this->assertSame( $custom, $dirs->base(), $dirs->last_error() );
 		$this->assertSame( Directories::SOURCE_CUSTOM, $dirs->state()['source'] );
 		file_put_contents( $custom . '/backups/b.wpcheckpoint.zip', 'x' );
+		file_put_contents( $custom . '/user-file.txt', 'mine' ); // Put there by the user later.
 
 		$result = Uninstaller::delete_storage();
 
@@ -321,6 +321,206 @@ final class StorageTest extends WP_UnitTestCase {
 		$this->assertTrue( Directories::is_valid_token( $upgraded->state()['token'] ) );
 		$this->assertSame( $custom, $upgraded->state()['path'] );
 		$this->assertSame( $upgraded->state()['token'], Directories::load_state()['token'], 'the new token is saved, not made again on every request' );
+	}
+
+	/**
+	 * Stand-ins for WordPress's directories in the sandbox (Directories::wordpress_dirs() for the real ones): a
+	 * failing rule writes into the sandbox only.
+	 *
+	 * @return array{within: array<string, string>, itself: array<string, string>}
+	 */
+	private function stand_ins(): array {
+		$site = $this->fake_root . '/htdocs/wp';
+		return array(
+			'within' => array(
+				$site . '/wp-admin'            => 'the wp-admin directory',
+				$site . '/wp-content/uploads' => 'the uploads directory',
+				$site . '/wp-content/plugins' => 'the plugins directory',
+			),
+			'itself' => array( $site . '/wp-content' => 'the content directory (wp-content)' ),
+		);
+	}
+
+	/**
+	 * A directory's files and their contents.
+	 *
+	 * @return array<string, string>
+	 */
+	private static function files_of( string $dir ): array {
+		$out = array();
+		foreach ( array_diff( (array) scandir( $dir ), array( '.', '..' ) ) as $entry ) {
+			$out[ (string) $entry ] = is_file( $dir . '/' . $entry ) ? (string) file_get_contents( $dir . '/' . $entry ) : '(directory)';
+		}
+		return $out;
+	}
+
+	private function custom( string $dir ): Directories {
+		return new Directories( $this->cli_context( array( 'custom_dir' => $dir, 'wordpress_dirs' => $this->stand_ins() ) ) );
+	}
+
+	public function test_a_wordpress_directory_is_refused_and_its_files_stay_as_they_were(): void {
+		$site = $this->fake_root . '/htdocs/wp';
+		mkdir( $site . '/wp-admin' );
+		file_put_contents( $site . '/wp-admin/index.php', "<?php // The dashboard.\n" );
+		file_put_contents( $site . '/wp-admin/.htaccess', "# The site's own rules.\n" );
+		mkdir( $site . '/wp-content/uploads', 0755, true );
+		file_put_contents( $site . '/wp-content/uploads/index.php', "<?php // Silence is golden.\n" );
+		file_put_contents( $site . '/wp-content/uploads/.htaccess', "# Media rules.\n" );
+		foreach ( array(
+			$site . '/wp-admin'                        => 'names the wp-admin directory',
+			$site . '/wp-content/uploads'             => 'names the uploads directory',
+			$site . '/wp-content/uploads/2026/store'  => 'names the uploads directory',
+			$site . '/wp-content'                      => 'names the content directory (wp-content)',
+		) as $custom => $message ) {
+			$before = array( self::files_of( $site . '/wp-admin' ), self::files_of( $site . '/wp-content/uploads' ), self::files_of( $site . '/wp-content' ) );
+			$dirs   = $this->custom( $custom );
+			$this->assertSame( '', $dirs->base(), $custom );
+			$this->assertStringContainsString( 'WPCHECKPOINT_STORAGE_DIR ' . $message, $dirs->last_error() );
+			$this->assertSame( $before, array( self::files_of( $site . '/wp-admin' ), self::files_of( $site . '/wp-content/uploads' ), self::files_of( $site . '/wp-content' ) ), 'nothing written, nothing changed' );
+		}
+		$this->assertSame( "<?php // The dashboard.\n", file_get_contents( $site . '/wp-admin/index.php' ) );
+		$this->assertSame( "# Media rules.\n", file_get_contents( $site . '/wp-content/uploads/.htaccess' ) );
+		$this->assertDirectoryDoesNotExist( $site . '/wp-content/uploads/2026' );
+
+		// The control: a directory of wp-content that is none of them.
+		$dirs = $this->custom( $site . '/wp-content/wpc-store' );
+		$this->assertSame( $site . '/wp-content/wpc-store', $dirs->base(), $dirs->last_error() );
+	}
+
+	public function test_the_empty_uploads_of_a_new_site_is_refused(): void {
+		$uploads = $this->fake_root . '/htdocs/wp/wp-content/uploads';
+		mkdir( $uploads, 0755, true );
+		$dirs = $this->custom( $uploads );
+		$this->assertSame( '', $dirs->base() );
+		$this->assertStringContainsString( 'names the uploads directory', $dirs->last_error() );
+		$this->assertSame( array( '.', '..' ), scandir( $uploads ), 'still empty' );
+	}
+
+	public function test_an_empty_directory_of_wp_content_is_taken_and_marked(): void {
+		$store = $this->fake_root . '/htdocs/wp/wp-content/wpc-store';
+		mkdir( $store, 0755, true );
+		$this->assertSame( array( '.', '..' ), scandir( $store ) );
+		$dirs = $this->custom( $store );
+		$this->assertSame( $store, $dirs->base(), $dirs->last_error() );
+		$this->assertFileExists( $store . '/' . OwnerMarker::FILENAME );
+		$this->assertDirectoryExists( $store . '/backups' );
+
+		// Used again, with what is in it now.
+		file_put_contents( $store . '/backups/b.wpcheckpoint.zip', 'x' );
+		$again = $this->custom( $store );
+		$this->assertSame( $store, $again->base(), 'a directory with this installation\'s marker: ' . $again->last_error() );
+		$this->assertFileExists( $store . '/backups/b.wpcheckpoint.zip' );
+	}
+
+	public function test_a_directory_that_holds_other_files_is_refused_before_anything_is_written(): void {
+		$other = $this->fake_root . '/other';
+		mkdir( $other );
+		file_put_contents( $other . '/.keep', '' ); // A hidden file is enough.
+		$dirs = $this->custom( $other );
+		$this->assertSame( '', $dirs->base() );
+		$this->assertStringContainsString( 'already holds files and was not created by WP Checkpoint', $dirs->last_error() );
+		$this->assertSame( array( '.', '..', '.keep' ), scandir( $other ), 'nothing written' );
+
+		unlink( $other . '/.keep' );
+		$dirs = $this->custom( $other );
+		$this->assertSame( $other, $dirs->base(), 'the control: the same directory, empty: ' . $dirs->last_error() );
+	}
+
+	public function test_a_directory_left_by_a_request_that_died_is_taken_up(): void {
+		$first = $this->custom( $this->fake_root . '/first' );
+		$this->assertNotSame( '', $first->base(), $first->last_error() );
+		$marker = OwnerMarker::build( (string) Directories::load_state()['install_id'], ABSPATH );
+
+		// Died after creating the directory, before the marker: an empty directory.
+		mkdir( $this->fake_root . '/died-empty' );
+		$dirs = $this->custom( $this->fake_root . '/died-empty' );
+		$this->assertSame( $this->fake_root . '/died-empty', $dirs->base(), $dirs->last_error() );
+		$this->assertSame( $marker, file_get_contents( $this->fake_root . '/died-empty/' . OwnerMarker::FILENAME ) );
+
+		// Died while writing the marker: nothing but the start of this installation's.
+		foreach ( array( 'died-in-marker-0' => '', 'died-in-marker-half' => substr( $marker, 0, 20 ) ) as $name => $start ) {
+			mkdir( $this->fake_root . '/' . $name );
+			file_put_contents( $this->fake_root . '/' . $name . '/' . OwnerMarker::FILENAME, $start );
+			$dirs = $this->custom( $this->fake_root . '/' . $name );
+			$this->assertSame( $this->fake_root . '/' . $name, $dirs->base(), $name . ': ' . $dirs->last_error() );
+			$this->assertSame( $marker, file_get_contents( $this->fake_root . '/' . $name . '/' . OwnerMarker::FILENAME ), $name );
+			$this->assertFalse( $dirs->state()['clone_detected'], $name );
+		}
+
+		// Died right after the marker (before the probe, the sub-directories and the protection files): the marker is
+		// the first thing written, so the directory already reads as this installation's.
+		$dies = $this->cli_context(
+			array(
+				'custom_dir'     => $this->fake_root . '/died-after-marker',
+				'wordpress_dirs' => $this->stand_ins(),
+				'after_marker'   => function (): void {
+					throw new \RuntimeException( 'The request died here.' );
+				},
+			)
+		);
+		try {
+			( new Directories( $dies ) )->base();
+			$this->fail( 'the request did not die' );
+		} catch ( \RuntimeException $e ) {
+			$this->assertSame( 'The request died here.', $e->getMessage() );
+		}
+		$this->assertSame( array( OwnerMarker::FILENAME => $marker ), self::files_of( $this->fake_root . '/died-after-marker' ), 'nothing but the marker' );
+		$dirs = $this->custom( $this->fake_root . '/died-after-marker' );
+		$this->assertSame( $this->fake_root . '/died-after-marker', $dirs->base(), $dirs->last_error() );
+		$this->assertDirectoryExists( $this->fake_root . '/died-after-marker/backups' );
+
+		// The control: the start of another installation's marker is not taken up.
+		mkdir( $this->fake_root . '/foreign-start' );
+		file_put_contents( $this->fake_root . '/foreign-start/' . OwnerMarker::FILENAME, substr( OwnerMarker::build( 'other-install', '/srv/other/' ), 0, 10 ) );
+		$dirs = $this->custom( $this->fake_root . '/foreign-start' );
+		$this->assertSame( '', $dirs->base() );
+		$this->assertSame( array( '.', '..', OwnerMarker::FILENAME ), scandir( $this->fake_root . '/foreign-start' ), 'nothing written' );
+	}
+
+	public function test_the_real_wordpress_directories_cannot_be_the_storage_directory(): void {
+		// Asked only (StorageLocation writes nothing); what a refusal does is shown above with stand-ins.
+		$wordpress = Directories::wordpress_dirs();
+		foreach ( array(
+			ABSPATH . 'wp-admin'                      => 'the wp-admin directory',
+			ABSPATH . 'wp-includes'                   => 'the wp-includes directory',
+			wp_upload_dir( null, false )['basedir']   => 'the uploads directory',
+			WP_PLUGIN_DIR                             => 'the plugins directory',
+			WPMU_PLUGIN_DIR                           => 'the must-use plugins directory',
+			get_theme_root()                          => 'a themes directory',
+			WP_LANG_DIR                               => 'the languages directory',
+			WP_CONTENT_DIR . '/upgrade'               => 'the upgrade directory',
+			WP_CONTENT_DIR . '/upgrade-temp-backup'   => 'the directory WordPress keeps backups in during updates',
+			WP_CONTENT_DIR                            => 'the content directory (wp-content)',
+			ABSPATH                                   => 'the content directory (wp-content)',
+		) as $dir => $label ) {
+			$this->assertSame( $label, StorageLocation::refusal( (string) $dir, $wordpress['within'], $wordpress['itself'] ), (string) $dir );
+		}
+		if ( function_exists( 'wp_get_font_dir' ) ) {
+			// Fonts in wp-content rather than in the uploads (where WordPress puts them when it can).
+			$moved = static function ( array $dir ): array {
+				$dir['path']    = WP_CONTENT_DIR . '/fonts';
+				$dir['basedir'] = WP_CONTENT_DIR . '/fonts';
+				return $dir;
+			};
+			add_filter( 'font_dir', $moved );
+			$fonts = Directories::wordpress_dirs();
+			remove_filter( 'font_dir', $moved );
+			$this->assertSame( 'the fonts directory', StorageLocation::refusal( WP_CONTENT_DIR . '/fonts', $fonts['within'], $fonts['itself'] ) );
+			$this->assertSame( '', StorageLocation::refusal( WP_CONTENT_DIR . '/fonts', $wordpress['within'], $wordpress['itself'] ), 'the control: not a WordPress directory while the fonts are elsewhere' );
+		}
+		if ( is_multisite() ) {
+			$this->assertSame( 'the uploads directory', StorageLocation::refusal( WP_CONTENT_DIR . '/blogs.dir', $wordpress['within'], $wordpress['itself'] ) );
+			// From a site of the network other than the main one: the main site's uploads too.
+			$main = wp_upload_dir( null, false )['basedir'];
+			switch_to_blog( self::factory()->blog->create() );
+			$this->assertNotSame( $main, wp_upload_dir( null, false )['basedir'], 'this site has uploads of its own' );
+			$network = Directories::wordpress_dirs();
+			restore_current_blog();
+			// A directory in the main site's uploads beside the sites' (the main uploads itself holds this site's anyway).
+			$this->assertSame( 'the uploads directory', StorageLocation::refusal( $main . '/wpc-store', $network['within'], $network['itself'] ) );
+		}
+		$this->assertSame( '', StorageLocation::refusal( WP_CONTENT_DIR . '/wpc-storage-' . bin2hex( random_bytes( 3 ) ), $wordpress['within'], $wordpress['itself'] ), 'the control: a new directory in wp-content' );
+		$this->assertSame( '', StorageLocation::refusal( dirname( ABSPATH ) . '/wpc-storage', $wordpress['within'], $wordpress['itself'] ), 'the control: next to the WordPress directory' );
 	}
 
 	public function test_custom_directory_owned_by_another_site_is_refused(): void {
