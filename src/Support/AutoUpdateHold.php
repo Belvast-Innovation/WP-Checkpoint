@@ -12,15 +12,21 @@ use WPCheckpoint\Jobs\JobRepository;
 defined( 'ABSPATH' ) || exit;
 
 /**
- * A restore stages the running copy of this plugin and swaps it in; an
- * update in between would be replaced by the older copy (the final check
- * then refuses the swap: the restore has to start again). So WordPress's
- * automatic update of this plugin is held while a restore is in progress
- * (a failed one that can still be retried included)
- * (auto_update_plugin), and when the jobs table cannot be read too: no
- * answer is no evidence that nothing is in progress. That case is logged
- * and recorded (the time), so the plugin's page can say why the plugin was
- * not updated. A manual update is not held; the final check catches it.
+ * A restore stages the running copy of this plugin and swaps it in: the
+ * plugin must not become another version partway through a restore (an
+ * update in between would be replaced by the older copy; the final check
+ * then refuses the swap, and the restore has to start again).
+ *
+ * The filter (auto_update_plugin) answers for this plugin only: for any
+ * other plugin it returns WordPress's answer unchanged, and themes and
+ * WordPress itself have filters of their own it does not touch. For this
+ * plugin it returns false only while a restore is in progress (queued,
+ * running, paused, or failed and still retryable: its work kept), or when
+ * the jobs table cannot be read (no answer is no evidence that nothing is
+ * in progress; that case is logged and recorded, the time, so the plugin's
+ * page can say why the plugin was not updated). Otherwise it returns
+ * WordPress's answer unchanged. A manual update is not held; the final
+ * check catches it.
  */
 final class AutoUpdateHold {
 
@@ -46,7 +52,8 @@ final class AutoUpdateHold {
 	}
 
 	/**
-	 * Hold this plugin's automatic update while a restore is unfinished, or cannot be told not to be.
+	 * Hold this plugin's automatic update while a restore is unfinished, or cannot be told not to be: false then,
+	 * and for anything else (another plugin, or no restore in progress) the answer it was given.
 	 *
 	 * @param bool|null $update Whether to update, as decided so far.
 	 * @param mixed     $item   The update offer (an object with the plugin's file).

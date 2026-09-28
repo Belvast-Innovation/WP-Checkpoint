@@ -261,7 +261,7 @@ final class Runner {
 		}
 
 		try {
-			return $this->run_steps( $job, $token, $logger, $budget, $start, ! empty( $held['taken_over'] ) );
+			return $this->run_steps( $job, $token, $logger, $budget, $start );
 		} catch ( LockLost $e ) {
 			$logger->warning( 'Lock lost; stopping without further writes', array( 'error' => $this->describe( $e ) ) );
 			return new TickResult( TickResult::LOST, 0, $this->repository->find( $job_id ), __( 'The job was cancelled or taken over by another process.', 'wp-checkpoint' ) );
@@ -276,11 +276,10 @@ final class Runner {
 	 * @param Logger $logger Job log.
 	 * @param Budget $budget Budget.
 	 * @param float  $start  When the budget started.
-	 * @param bool   $taken_over Whether this tick took the job over from a run that ended without releasing it.
 	 * @return TickResult
 	 * @throws LockLost When a fenced write refused; nothing is written afterwards.
 	 */
-	private function run_steps( Job $job, string $token, Logger $logger, Budget $budget, float $start, bool $taken_over = false ): TickResult {
+	private function run_steps( Job $job, string $token, Logger $logger, Budget $budget, float $start ): TickResult {
 		$type = $this->types->get( $job->type );
 		if ( null === $type ) {
 			return $this->fail( $job, $token, $logger, sprintf( 'Unknown job type "%s".', $job->type ) );
@@ -318,7 +317,7 @@ final class Runner {
 			$state  = $this->state_of( $job->cursor );
 			$before = wp_json_encode( JobContext::strip_reserved( $job->cursor ) );
 
-			$context    = $this->context(
+			$context = $this->context(
 				$job,
 				$job->cursor,
 				$budget,
@@ -333,10 +332,8 @@ final class Runner {
 					$this->persist( $job, $token, $step_id, $cursor, $state, self::overall( $index, $count, $percent ), $message, $advanced );
 					$this->maybe_heartbeat( $job, $token );
 				},
-				$token,
-				$taken_over
+				$token
 			);
-			$taken_over = false; // The step the previous run was in, only: a step this tick moves on to starts fresh.
 
 			try {
 				$result = $step->run( $context );
@@ -600,10 +597,9 @@ final class Runner {
 	 * @param float                $started_at Tick start.
 	 * @param callable|null        $checkpoint Checkpoint callback.
 	 * @param string               $token      Lock token ('' outside a run: no lease checks).
-	 * @param bool                 $taken_over Whether the step continues where a run that ended without releasing the job left it.
 	 * @return JobContext
 	 */
-	private function context( Job $job, array $cursor, Budget $budget, Logger $logger, float $started_at, $checkpoint, string $token = '', bool $taken_over = false ): JobContext {
+	private function context( Job $job, array $cursor, Budget $budget, Logger $logger, float $started_at, $checkpoint, string $token = '' ): JobContext {
 		$lease = '' === $token ? null : function ( bool $force ) use ( $job, $token ): void {
 			if ( $force ) {
 				if ( ! $this->repository->heartbeat( $job, $token, $this->lease ) ) {
@@ -624,10 +620,7 @@ final class Runner {
 			$this->memory_limit,
 			$checkpoint,
 			$lease,
-			array(
-				'taken_over' => $taken_over,
-				'cli'        => $this->cli,
-			)
+			array( 'cli' => $this->cli )
 		);
 	}
 

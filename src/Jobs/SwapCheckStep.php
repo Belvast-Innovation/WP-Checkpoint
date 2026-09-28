@@ -19,11 +19,11 @@ use WPCheckpoint\Restore\Queries;
 use WPCheckpoint\Restore\RestoreFiles;
 use WPCheckpoint\Restore\StagingLayout;
 use WPCheckpoint\Restore\SwapPlan;
+use WPCheckpoint\Restore\TableMoves;
 use WPCheckpoint\Restore\TablePlan;
 use WPCheckpoint\Standalone\Credentials;
 use WPCheckpoint\Standalone\Failure;
 use WPCheckpoint\Support\Paths;
-use WPCheckpoint\Support\Schema;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -101,6 +101,11 @@ final class SwapCheckStep implements Step {
 	const SUSPECT_WINDOW_BYTES = JobContext::CHECKPOINT_BYTES + Limits::CONTENT_CHUNK_BYTES;
 
 	/**
+	 * Tables left where they are named in the log.
+	 */
+	const LISTED = 10;
+
+	/**
 	 * The drop-ins the swap leaves in place: the live one stays, the backup's stays in the staging root.
 	 */
 	const DROP_INS = array( 'advanced-cache.php', 'db.php', 'object-cache.php', 'fatal-error-handler.php', 'sunrise.php', 'maintenance.php', 'db-error.php' );
@@ -129,7 +134,9 @@ final class SwapCheckStep implements Step {
 	/**
 	 * Injected parts (tests): "at" function( string $point ): void (a crash seam), "plugin_dir", "plugin_main",
 	 * "version" (the running version), "site_dirs" function(): array (group => directory), "sizes", "window" (bytes
-	 * hashed again after a takeover position, in place of SUSPECT_WINDOW_BYTES; or a function returning them).
+	 * hashed again after a takeover position, in place of SUSPECT_WINDOW_BYTES; or a function returning them),
+	 * "opendir" function( string $dir ): resource|false and "scandir" function( string $dir ): array|false (in
+	 * place of opendir() and scandir() on the staged directories).
 	 *
 	 * @var array<string, mixed>
 	 */
@@ -657,8 +664,8 @@ final class SwapCheckStep implements Step {
 		$group = (string) $item['value']['g'];
 		$dir   = (string) $item['value']['d'];
 		$path  = $layout->stage_dir( $group ) . ( '' === $dir ? '' : '/' . $dir );
-		$list  = @opendir( $path );
-		if ( false === $list ) {
+		$list  = isset( $this->parts['opendir'] ) ? call_user_func( $this->parts['opendir'], $path ) : @opendir( $path );
+		if ( ! is_resource( $list ) ) {
 			throw new TransientFailure( sprintf( 'The staged directory %s cannot be read.', $group . ( '' === $dir ? '' : '/' . $dir ) ) );
 		}
 		$count = 0;
@@ -1025,6 +1032,20 @@ final class SwapCheckStep implements Step {
 		}
 		$swap->complete( $job, $attempt, count( $entries ) );
 		$this->at( 'plan_complete' );
+		$finals = array();
+		foreach ( $run['plan']->tables() as $table ) {
+			$finals[] = (string) $table['final'];
+		}
+		$left = self::moves( $run, array_keys( $this->live_tables( $context->work_path() ) ), $finals )['report'];
+		if ( array() !== $left ) {
+			$context->logger()->warning(
+				'Tables left where they are: this site has no table prefix, so only WordPress\'s own tables are known to be its own; the others stay in the database next to the restored site',
+				array(
+					'count'  => count( $left ),
+					'tables' => implode( ', ', array_slice( $left, 0, self::LISTED ) ),
+				)
+			);
+		}
 		ExportPlan::write(
 			$context->work_path(),
 			RestoreFiles::SWAP_PLAN,
@@ -1061,7 +1082,7 @@ final class SwapCheckStep implements Step {
 		}
 		if ( in_array( StagingLayout::OTHER, (array) $run['staging']['staged'], true ) ) {
 			$stage = $layout->stage_dir( StagingLayout::OTHER );
-			$names = @scandir( $stage );
+			$names = isset( $this->parts['scandir'] ) ? call_user_func( $this->parts['scandir'], $stage ) : @scandir( $stage );
 			if ( ! is_array( $names ) ) {
 				throw new TransientFailure( 'The staged other content cannot be listed.' );
 			}
@@ -1102,7 +1123,7 @@ final class SwapCheckStep implements Step {
 
 	/**
 	 * The plan's table entries: each table of the plan (TABLE), then each live table the backup does not have
-	 * that is this site's (MOVE), from the live tables listed into the work file.
+	 * that is this site's (MOVE, Restore\TableMoves), from the live tables listed into the work file.
 	 *
 	 * @param JobContext           $context Context.
 	 * @param array<string, mixed> $run     This run.
@@ -1116,8 +1137,8 @@ final class SwapCheckStep implements Step {
 		$out   = array();
 		$final = array();
 		foreach ( $plan->tables() as $table ) {
-			$final[ $table['final'] ] = true;
-			$out[]                    = array(
+			$final[] = (string) $table['final'];
+			$out[]   = array(
 				'kind'     => SwapPlan::TABLE_OF,
 				'live'     => (string) $table['final'],
 				'stage'    => (string) $table['temporary'],
@@ -1125,19 +1146,7 @@ final class SwapCheckStep implements Step {
 				'had_live' => isset( $live[ $table['final'] ] ),
 			);
 		}
-		$kept = array();
-		foreach ( array_keys( $plan->skipped() ) as $name ) {
-			$kept[ $plan->final_name( (string) $name ) ] = true; // Left out of the restore: the live one stays.
-		}
-		$core = '' === $site ? self::core_tables() : array();
-		foreach ( array_keys( $live ) as $name ) {
-			$name = (string) $name;
-			if ( isset( $final[ $name ] ) || isset( $kept[ $name ] ) || self::ours( $name ) ) {
-				continue;
-			}
-			if ( '' === $site ? ! isset( $core[ $name ] ) : 0 !== strncmp( $name, $site, strlen( $site ) ) ) {
-				continue; // Not known to be this site's: left where it is.
-			}
+		foreach ( self::moves( $run, array_keys( $live ), $final )['move'] as $name ) {
 			$out[] = array(
 				'kind'     => SwapPlan::MOVE,
 				'live'     => $name,
@@ -1147,6 +1156,24 @@ final class SwapCheckStep implements Step {
 			);
 		}
 		return $out;
+	}
+
+	/**
+	 * The live tables the backup does not have that the swap moves away, and those it leaves and reports.
+	 *
+	 * @param array<string, mixed> $run   This run.
+	 * @param string[]             $live  The live tables.
+	 * @param string[]             $finals The final names of the backup's tables.
+	 * @return array{move: string[], report: string[]}
+	 */
+	private static function moves( array $run, array $live, array $finals ): array {
+		$plan = $run['plan'];
+		$site = $plan->site_prefix();
+		$kept = array();
+		foreach ( array_keys( $plan->skipped() ) as $name ) {
+			$kept[] = $plan->final_name( (string) $name ); // Left out of the restore: the live one stays.
+		}
+		return TableMoves::select( $site, self::base_prefix(), $live, $finals, $kept, '' === $site ? self::core_tables() : array() );
 	}
 
 	/**
@@ -1177,15 +1204,13 @@ final class SwapCheckStep implements Step {
 	}
 
 	/**
-	 * Whether a table is one the swap never moves: the plugin's own (jobs, swap plan) and its temporary and old
-	 * tables.
+	 * Whether a table is one the swap never moves (Restore\TableMoves::never()).
 	 *
 	 * @param string $name Table name.
 	 * @return bool
 	 */
 	private static function ours( string $name ): bool {
-		$base = self::base_prefix();
-		return $base . Schema::JOBS_TABLE === $name || $base . SwapPlan::TABLE === $name || 0 === strncmp( $name, TempTables::PREFIX, strlen( TempTables::PREFIX ) ) || 0 === strncmp( $name, TempTables::OLD_PREFIX, strlen( TempTables::OLD_PREFIX ) );
+		return TableMoves::never( $name, self::base_prefix() );
 	}
 
 	/**
@@ -1199,17 +1224,13 @@ final class SwapCheckStep implements Step {
 	}
 
 	/**
-	 * WordPress's own table names for this site with an empty prefix: name => true.
+	 * WordPress's own table names for this site, read without a prefix (for an empty one).
 	 *
-	 * @return array<string, bool>
+	 * @return string[]
 	 */
 	private static function core_tables(): array {
 		global $wpdb;
-		$out = array();
-		foreach ( $wpdb->tables( 'all', false ) as $name ) {
-			$out[ (string) $name ] = true;
-		}
-		return $out;
+		return array_values( array_map( 'strval', $wpdb->tables( 'all', false ) ) );
 	}
 
 	/**

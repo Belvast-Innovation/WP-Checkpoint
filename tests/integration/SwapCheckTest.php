@@ -168,6 +168,17 @@ final class SwapCheckTest extends RestoreTestCase {
 		} ) );
 		$this->assertSame( array_column( $this->temporary_names_list( $job ), 'final' ), array_column( $tables, 1 ) );
 		$this->assertContains( array( SwapPlan::MOVE, $q . 'wpc_extra', '', TempTables::old( $job->storage_token, $job->id, RestorePreflightStep::load_plan( $this->work( $job ) )['random'], 'wpc_extra' ), true ), $entries );
+		$names = array_column(
+			array_filter(
+				$entries,
+				static function ( array $e ): bool {
+					return SwapPlan::DIR !== $e[0];
+				}
+			),
+			1
+		);
+		$this->assertContains( $q . 'posts', $names, 'the control: a table of the backup that is live is in the plan' );
+		$this->assertSame( array_values( array_unique( $names ) ), array_values( $names ), 'a live table is in the plan once: a table of the backup is replaced by its own entry, not moved as well' );
 		foreach ( $entries as $entry ) {
 			$this->assertNotSame( $q . 'wpcheckpoint_jobs', $entry[1], 'the jobs table is never in the plan' );
 			$this->assertNotSame( $q . SwapPlan::TABLE, $entry[1] );
@@ -293,25 +304,136 @@ final class SwapCheckTest extends RestoreTestCase {
 			}
 		);
 		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
+		$this->assertSame( array(), FileStagingStep::suspects( $this->work( $job ) ), 'no takeover, no position recorded' );
+	}
+
+	/**
+	 * A restore whose staging is killed once at a crash seam and taken over (its lease run out), run to its end.
+	 */
+	private function killed_at( string $seam ): Job {
+		global $wpdb;
+		$killed = false;
+		$type   = 'swap_check_killed_' . bin2hex( random_bytes( 3 ) );
+		$this->register(
+			$type,
+			self::restore_steps_with(
+				new FileStagingStep(
+					$this->staging_parts(
+						array(
+							'at' => static function ( string $point ) use ( &$killed, $seam ): void {
+								if ( $seam === $point && ! $killed ) {
+									$killed = true;
+									throw new \WPCheckpoint\Jobs\LockLost( 'killed by the server (simulated)' );
+								}
+							},
+						)
+					)
+				)
+			)
+		);
+		$job    = Plugin::instance()->jobs()->create( $type, self::$admin_id, array(), array( 'base' => $this->base() ) );
+		$runner = Plugin::instance()->runner();
+		for ( $i = 0; $i < 200 && ! $killed; $i++ ) {
+			$runner->tick( $job->id, microtime( true ) );
+		}
+		$this->assertTrue( $killed, 'the control: the staging run was killed at ' . $seam );
+		$wpdb->query( $wpdb->prepare( 'UPDATE ' . JobRepository::table() . ' SET locked_until = 1 WHERE id = %d', $job->id ) );
+		$ran = $this->run_restore( $job );
+		$this->assertSame( Job::COMPLETED, $ran->status, (string) $ran->last_error );
+		return $ran;
+	}
+
+	public function test_a_takeover_records_where_the_files_start_in_the_identify_phase_and_nothing_before_it(): void {
+		// Killed in the roots phase: no file is written before its checkpoint, nothing to record.
+		$roots = $this->killed_at( 'roots' );
+		$this->assertSame( 1, $roots->takeovers, 'the control: the job was taken over' );
+		$this->assertSame( array(), FileStagingStep::suspects( $this->work( $roots ) ) );
+
+		// Killed at the end of the identify phase: a run goes on into the files phase without a checkpoint.
+		$identify = $this->killed_at( 'identified' );
+		$this->assertSame( 1, $identify->takeovers, 'the control: the job was taken over' );
+		$work     = $this->work( $identify );
+		$loaded   = RestorePreflightStep::load_plan( $work );
+		$walk     = new ChunkWalk( RestoreVerifyStep::index_path( $work, RestorePreflightStep::manifest( $work )->files_index() ), $loaded['volumes'], $loaded['chunk_bytes'], ChunkWalk::FILES );
+		$this->assertSame(
+			array(
+				array(
+					'at'   => $walk->files_start( FileStagingStep::database_chunks( $work ) ),
+					'done' => 0,
+				),
+			),
+			FileStagingStep::suspects( $work )
+		);
+	}
+
+	public function test_two_takeovers_at_different_positions_are_both_recorded(): void {
+		global $wpdb;
+		$pieces = 0;
+		$kills  = 0;
+		$type   = 'swap_check_twice_' . bin2hex( random_bytes( 3 ) );
+		$this->register(
+			$type,
+			self::restore_steps_with(
+				new FileStagingStep(
+					$this->staging_parts(
+						array(
+							'at' => static function ( string $point ) use ( &$pieces, &$kills ): void {
+								if ( 'piece' === $point && in_array( ++$pieces, array( 1, 3 ), true ) ) {
+									++$kills;
+									throw new \WPCheckpoint\Jobs\LockLost( 'killed by the server (simulated)' );
+								}
+							},
+						)
+					)
+				)
+			)
+		);
+		$job    = Plugin::instance()->jobs()->create( $type, self::$admin_id, array(), array( 'base' => $this->base() ) );
+		$runner = $this->small_runner(); // A tick of a unit or two: the job moves on between the kills.
+		$marks  = array();
+		for ( $i = 0; $i < 500 && $kills < 2; $i++ ) {
+			$before = $kills;
+			$runner->tick( $job->id, $this->now );
+			if ( $kills > $before ) {
+				$wpdb->query( $wpdb->prepare( 'UPDATE ' . JobRepository::table() . ' SET locked_until = 1 WHERE id = %d', $job->id ) );
+				$runner->tick( $job->id, $this->now ); // Takes the job over.
+				$row     = Plugin::instance()->jobs()->find( $job->id );
+				$marks[] = array( $row->takeovers, $row->takeover_mark );
+			}
+		}
+		$this->assertSame( 2, $kills, 'the control: the staging run was killed twice' );
+		$this->assertSame( 1, $marks[1][0], 'the control: the second takeover found the job moved on, so its count starts over' );
+		$this->assertNotSame( $marks[0][1], $marks[1][1], 'the control: at another position' );
+		$ran = $this->run_restore( $job );
+		$this->assertSame( Job::COMPLETED, $ran->status, (string) $ran->last_error );
+		$points = FileStagingStep::suspects( $this->work( $ran ) );
+		$this->assertCount( 2, $points );
+		$this->assertNotSame( $points[0], $points[1] );
 	}
 
 	/**
 	 * A restore whose staging is taken over once (killed after writing a piece, its lease run out): the suspect
-	 * position is recorded. Then $tamper( $job, $path_at_the_position ) and the final check with $parts.
+	 * position is recorded. Then $tamper( $job, $path_at_the_position ) and the final check with $parts. With
+	 * $fail_first, the tick that takes the job over fails at the start of the step, before it records anything.
 	 */
-	private function taken_over( callable $tamper, array $parts = array(), array $files = array() ): Job {
+	private function taken_over( callable $tamper, array $parts = array(), array $files = array(), bool $fail_first = false ): Job {
 		global $wpdb;
 		$killed = false;
+		$failed = ! $fail_first;
 		$type   = 'swap_check_takeover_' . bin2hex( random_bytes( 3 ) );
 		$job    = null;
 		$steps  = self::restore_steps_with(
 			new FileStagingStep(
 				$this->staging_parts(
 					array(
-						'at' => static function ( string $point ) use ( &$killed ): void {
+						'at' => static function ( string $point ) use ( &$killed, &$failed ): void {
 							if ( 'piece' === $point && ! $killed ) {
 								$killed = true;
 								throw new \WPCheckpoint\Jobs\LockLost( 'killed by the server (simulated)' );
+							}
+							if ( 'start' === $point && $killed && ! $failed ) {
+								$failed = true;
+								throw new \WPCheckpoint\Jobs\TransientFailure( 'the database went away (simulated)' );
 							}
 						},
 					)
@@ -346,6 +468,12 @@ final class SwapCheckTest extends RestoreTestCase {
 		}
 		$this->assertTrue( $killed, 'the control: the staging run was killed' );
 		$wpdb->query( $wpdb->prepare( 'UPDATE ' . JobRepository::table() . ' SET locked_until = 1 WHERE id = %d', $job->id ) ); // Its lease ran out.
+		if ( $fail_first ) {
+			$runner->tick( $job->id, microtime( true ) );
+			$this->assertTrue( $failed, 'the control: the tick that took the job over failed' );
+			$this->assertSame( 1, Plugin::instance()->jobs()->find( $job->id )->takeovers, 'the control: that tick was a takeover' );
+			$this->assertSame( array(), FileStagingStep::suspects( $this->work( $job ) ), 'the control: it recorded nothing' );
+		}
 		$ran = $this->run_restore( $job );
 		$this->assertCount( 1, FileStagingStep::suspects( $this->work( $job ) ), 'the control: the takeover was recorded' );
 		$this->assertTrue( $done, 'the control: the check ran' );
@@ -379,6 +507,18 @@ final class SwapCheckTest extends RestoreTestCase {
 			static function ( Job $job, string $path ): void {
 				self::same_size( $path );
 			}
+		);
+		$this->assertFinal( $job, 'although its size and modification time are' );
+	}
+
+	public function test_a_takeover_is_recorded_by_the_next_tick_when_the_tick_that_took_the_job_over_failed_first(): void {
+		$job = $this->taken_over(
+			static function ( Job $job, string $path ): void {
+				self::same_size( $path );
+			},
+			array(),
+			array(),
+			true
 		);
 		$this->assertFinal( $job, 'although its size and modification time are' );
 	}
@@ -831,6 +971,118 @@ final class SwapCheckTest extends RestoreTestCase {
 		$type_id = $this->type( array( 'sizes' => array( 'rows' => 2 ) ) );
 		$job     = $this->run_restore( Plugin::instance()->jobs()->create( $type_id, self::$admin_id, array(), array( 'base' => $this->base( array( $table ) ) ) ), true, 3000 );
 		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
+	}
+
+	public function test_on_a_latin1_connection_a_raw_key_kept_in_the_cursor_counts_twice_and_the_check_does_not(): void {
+		global $wpdb;
+		$table = $wpdb->base_prefix . 'wpc_latin1key';
+		$this->create( $table, '(k varchar(8) CHARACTER SET latin1 COLLATE latin1_swedish_ci NOT NULL PRIMARY KEY, v int) ENGINE=InnoDB' );
+		$keys  = array( 'A', "b\xE9", "c\xE9", 'd' );
+		$latin = ImportSession::open( Credentials::from_wordpress() );
+		$latin->run( 'SET NAMES latin1' );
+		foreach ( $keys as $i => $key ) {
+			$latin->write( 'INSERT INTO `' . $table . '` (k, v) VALUES (UNHEX(?), ?)', array( bin2hex( $key ), (string) $i ) );
+		}
+		$this->assertSame( array( '4' ), array_map( 'strval', $latin->rows( 'SELECT COUNT(*) FROM `' . $table . '`' )[0] ), 'the control: every key is there' );
+
+		// Counted a row at a time, the key read as it is and compared back as the cursor gives it.
+		$count = static function ( callable $keep ) use ( $latin, $table ): int {
+			$after = null;
+			$sum   = 0;
+			for ( $n = 0; $n < 20; $n++ ) {
+				$bound = $latin->rows( 'SELECT k FROM `' . $table . '`' . ( null === $after ? '' : ' WHERE k > ?' ) . ' ORDER BY k LIMIT 1', null === $after ? array() : array( $after ) );
+				if ( array() === $bound ) {
+					break;
+				}
+				++$sum;
+				$after = $keep( (string) $bound[0][0] );
+			}
+			return $sum;
+		};
+		$this->assertSame(
+			count( $keys ),
+			$count(
+				static function ( string $key ): string {
+					return $key;
+				}
+			),
+			'the control: kept in memory, the raw key counts each row once'
+		);
+		$this->assertNotSame(
+			count( $keys ),
+			$count(
+				static function ( string $key ): string {
+					return (string) json_decode( (string) wp_json_encode( array( 'key' => $key ) ), true )['key'];
+				}
+			),
+			'kept in the cursor, the raw key comes back changed and a row is counted again'
+		);
+
+		// The check itself, on a connection like that one, a row per range: every range carried by the cursor.
+		$type = 'swap_check_latin1_' . bin2hex( random_bytes( 3 ) );
+		$this->register(
+			$type,
+			self::restore_steps_with(
+				new SwapCheckStep(
+					static function (): ImportSession {
+						$session = ImportSession::open( Credentials::from_wordpress() );
+						$session->run( 'SET NAMES latin1' );
+						return $session;
+					},
+					$this->check_parts( array( 'sizes' => array( 'rows' => 1 ) ) )
+				)
+			)
+		);
+		$job = $this->run_restore( Plugin::instance()->jobs()->create( $type, self::$admin_id, array(), array( 'base' => $this->base( array( $table ) ) ) ), true, 3000 );
+		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
+	}
+
+	/**
+	 * @return array<string, array{0: string}>
+	 */
+	public function listings(): array {
+		return array(
+			'a staged directory (counting what is there)' => array( 'opendir' ),
+			'the staged other content (the plan)'         => array( 'scandir' ),
+		);
+	}
+
+	/**
+	 * @dataProvider listings
+	 */
+	public function test_a_staged_directory_that_cannot_be_listed_is_retried_and_never_ends_the_restore_for_good( string $which ): void {
+		$fails  = 0;
+		$failed = 0;
+		$calls  = 0;
+		$lister = static function ( string $dir ) use ( $which, &$fails, &$failed, &$calls ) {
+			++$calls;
+			if ( $failed < $fails ) {
+				++$failed;
+				return false;
+			}
+			return 'opendir' === $which ? @opendir( $dir ) : @scandir( $dir );
+		};
+		$type   = $this->type( array( $which => $lister ) );
+
+		// The control: the lister is the one the check lists with, and listing that works lets the restore through.
+		$job = $this->run_restore( Plugin::instance()->jobs()->create( $type, self::$admin_id, array(), array( 'base' => $this->base() ) ) );
+		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
+		$this->assertGreaterThan( 0, $calls, 'the control: the check listed through it' );
+
+		// Once it cannot list: retried, and the restore goes on.
+		$fails = 1;
+		$job   = $this->run_restore( Plugin::instance()->jobs()->create( $type, self::$admin_id, array(), array( 'base' => $this->base() ) ) );
+		$this->assertSame( 1, $failed, 'the control: a listing failed' );
+		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
+
+		// Never: the restore fails as one a retry can mend, not for good.
+		$fails  = PHP_INT_MAX;
+		$failed = 0;
+		$job    = $this->run_restore( Plugin::instance()->jobs()->create( $type, self::$admin_id, array(), array( 'base' => $this->base() ) ) );
+		$this->assertSame( Job::FAILED, $job->status );
+		$this->assertSame( Job::FAILURE_TEMPORARY, $job->failure_kind, (string) $job->last_error );
+		$this->assertStringContainsString( 'cannot be', (string) $job->last_error );
+		$this->assertGreaterThan( 1, $failed );
 	}
 
 	public function test_a_table_keyed_by_times_or_by_two_columns_is_counted_across_ticks(): void {

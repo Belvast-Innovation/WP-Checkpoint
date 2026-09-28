@@ -111,7 +111,7 @@ final class FileStagingStep implements Step {
 
 	/**
 	 * Injected parts (tests): "plugin_dir" string (the running copy), "plugin_main" string (its main file),
-	 * "at" function( string $point ): void (a crash seam: roots, identified, dir, piece, complete, touched,
+	 * "at" function( string $point ): void (a crash seam: start, roots, identified, dir, piece, complete, touched,
 	 * report, plugin_list, plugin_piece), "read" function( string $piece ): string (what reading the backup yields),
 	 * "write" function( resource $handle, string $bytes ): int|false (in place of fwrite()), "free"
 	 * function( string $dir ): float|false (in place of disk_free_space()).
@@ -156,9 +156,11 @@ final class FileStagingStep implements Step {
 		$walk    = new ChunkWalk( RestoreVerifyStep::index_path( $work, RestorePreflightStep::manifest( $work )->files_index() ), $plan['volumes'], $plan['chunk_bytes'], ChunkWalk::FILES );
 		$cursor  = array_merge( array( 'phase' => 'roots' ), $context->cursor() );
 		$first   = true;
+		$this->at( 'start' );
+		$cursor = self::after_takeover( $work, $cursor, self::takeover( $context->job() ) );
 		try {
 			if ( 'roots' === $cursor['phase'] ) {
-				$cursor = $this->roots( $context, $staging, $layout, $walk );
+				$cursor = array( 'recorded' => $cursor['recorded'] ) + $this->roots( $context, $staging, $layout, $walk );
 				$context->checkpoint( $cursor, 72, __( 'Staging the files', 'wp-checkpoint' ) );
 				$first = false;
 			}
@@ -355,11 +357,12 @@ final class FileStagingStep implements Step {
 		}
 		$this->at( 'identified' );
 		return array(
-			'phase'  => 'files',
-			'at'     => $cursor['start'],
-			'done'   => 0,
-			'crc'    => 0,
-			'report' => $report,
+			'phase'    => 'files',
+			'at'       => $cursor['start'],
+			'done'     => 0,
+			'crc'      => 0,
+			'report'   => $report,
+			'recorded' => $cursor['recorded'],
 		);
 	}
 
@@ -389,10 +392,6 @@ final class FileStagingStep implements Step {
 		$slowest     = 0.0;
 		$budget      = (float) $context->budget()->seconds;
 		$since       = 0;
-		if ( $context->taken_over() ) {
-			// The run that lost the job may still write the units after this position: the final check hashes them again.
-			self::suspect( $work, $cursor );
-		}
 		while ( true ) {
 			if ( ! $first && ( $context->should_stop() || $context->remaining_seconds() < $slowest * self::MARGIN ) ) {
 				return StepResult::progress( $cursor, 80, __( 'Staging the files', 'wp-checkpoint' ) );
@@ -402,8 +401,9 @@ final class FileStagingStep implements Step {
 			if ( null === $chunk ) {
 				// The running copy goes where plugins are staged; without them the live plugins, it included, stay.
 				$cursor = array(
-					'phase'  => in_array( 'plugins', (array) $staging['staged'], true ) ? 'plugin_list' : 'end',
-					'report' => $cursor['report'],
+					'phase'    => in_array( 'plugins', (array) $staging['staged'], true ) ? 'plugin_list' : 'end',
+					'report'   => $cursor['report'],
+					'recorded' => $cursor['recorded'],
 				);
 				$context->checkpoint( $cursor, 90, __( 'Staging this plugin', 'wp-checkpoint' ) );
 				return null;
@@ -669,10 +669,11 @@ final class FileStagingStep implements Step {
 		}
 		$this->at( 'plugin_list' );
 		return array(
-			'phase'  => 'plugin',
-			'line'   => 0,
-			'done'   => 0,
-			'report' => $cursor['report'],
+			'phase'    => 'plugin',
+			'line'     => 0,
+			'done'     => 0,
+			'report'   => $cursor['report'],
+			'recorded' => $cursor['recorded'],
 		);
 	}
 
@@ -881,20 +882,63 @@ final class FileStagingStep implements Step {
 	}
 
 	/**
-	 * Record where the files phase stands when it continues after a takeover (RestoreFiles::SUSPECTS): the
-	 * position of the file it is at and how much of it is committed. Written whole and atomically; recording
-	 * a position again adds nothing.
+	 * Which takeover of the job the row holds: its count and mark (JobRepository::acquire() changes one or the
+	 * other at every takeover; a retry sets them back to 0 and '', and starts the step over).
 	 *
-	 * @param string               $work   Work directory.
-	 * @param array<string, mixed> $cursor Cursor of the files phase.
+	 * @param Job $job Job.
+	 * @return string
+	 */
+	private static function takeover( Job $job ): string {
+		return (int) $job->takeovers . ':' . (string) $job->takeover_mark;
+	}
+
+	/**
+	 * At the start of every tick, before anything else: when the job was taken over since the cursor last
+	 * recorded one (its "recorded" against the row's takeover), the position a run that lost the job may have
+	 * written past is recorded, then the takeover is. Not a signal of the tick that took the job over: a tick
+	 * that fails before this leaves the row's takeover as it was, and the next one records it.
+	 *
+	 * The files phase records where it stands; the identify phase records where the files phase starts (a run
+	 * moves on into the files phase without a checkpoint in between); the others record nothing (roots writes
+	 * no file before its checkpoint, and the running plugin's copy is compared whole by the final check).
+	 *
+	 * @param string               $work     Work directory.
+	 * @param array<string, mixed> $cursor   Cursor.
+	 * @param string               $takeover The row's takeover (takeover()).
+	 * @return array<string, mixed> The cursor, with "recorded".
+	 * @throws TransientFailure When the record cannot be written.
+	 */
+	private static function after_takeover( string $work, array $cursor, string $takeover ): array {
+		if ( ( $cursor['recorded'] ?? '0:' ) === $takeover ) {
+			$cursor['recorded'] = $takeover;
+			return $cursor;
+		}
+		if ( 'files' === $cursor['phase'] ) {
+			// The run that lost the job may still write the units after this position: the final check hashes them again.
+			self::suspect( $work, $cursor['at'], (int) $cursor['done'] );
+		} elseif ( 'identify' === $cursor['phase'] ) {
+			self::suspect( $work, $cursor['start'], 0 );
+		}
+		$cursor['recorded'] = $takeover;
+		return $cursor;
+	}
+
+	/**
+	 * Record a position a run that lost the job may have written past (RestoreFiles::SUSPECTS): the position
+	 * of a file of the files walk and how much of it is committed. Written whole and atomically; recording a
+	 * position again adds nothing.
+	 *
+	 * @param string $work Work directory.
+	 * @param mixed  $at   Position in the files walk.
+	 * @param int    $done Bytes of the file committed.
 	 * @return void
 	 * @throws TransientFailure When the record cannot be written.
 	 */
-	private static function suspect( string $work, array $cursor ): void {
+	private static function suspect( string $work, $at, int $done ): void {
 		$list  = self::suspects( $work );
 		$point = array(
-			'at'   => $cursor['at'],
-			'done' => (int) $cursor['done'],
+			'at'   => $at,
+			'done' => $done,
 		);
 		if ( in_array( $point, $list, true ) ) {
 			return;

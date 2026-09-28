@@ -551,7 +551,7 @@ final class RunnerTest extends WP_UnitTestCase {
 		return $this->runner()->tick( $id, $this->now );
 	}
 
-	public function test_a_step_knows_it_continues_after_a_takeover_and_whether_the_run_is_cli(): void {
+	public function test_a_step_knows_whether_the_run_is_cli(): void {
 		$seen = array();
 		$kill = true;
 		$this->register(
@@ -560,7 +560,7 @@ final class RunnerTest extends WP_UnitTestCase {
 				new ClosureStep(
 					'work',
 					static function ( JobContext $ctx ) use ( &$seen, &$kill ): StepResult {
-						$seen[] = array( 'work', $ctx->taken_over(), $ctx->is_cli() );
+						$seen[] = array( 'work', $ctx->is_cli() );
 						if ( $kill ) {
 							throw new \WPCheckpoint\Jobs\LockLost( 'killed by the server (simulated)' );
 						}
@@ -571,7 +571,7 @@ final class RunnerTest extends WP_UnitTestCase {
 				new ClosureStep(
 					'next',
 					static function ( JobContext $ctx ) use ( &$seen ): StepResult {
-						$seen[] = array( 'next', $ctx->taken_over(), $ctx->is_cli() );
+						$seen[] = array( 'next', $ctx->is_cli() );
 						return StepResult::done( 'next done' );
 					}
 				),
@@ -584,13 +584,13 @@ final class RunnerTest extends WP_UnitTestCase {
 		$this->runner( 20, 32 * 1048576, array( 'cli' => true ) )->tick( $job->id, $this->now );
 		$this->assertSame(
 			array(
-				array( 'work', false, false ),
-				array( 'work', true, true ),
-				array( 'work', false, true ),
-				array( 'next', false, true ),
+				array( 'work', false ),
+				array( 'work', true ),
+				array( 'work', true ),
+				array( 'next', true ),
 			),
 			$seen,
-			'the taken-over step knows it on its first call only, a step moved on to never; the cli option reaches the step'
+			'the cli option reaches every step of a run, and a run without it is not cli'
 		);
 	}
 

@@ -14,6 +14,12 @@ Backup, migration and safe updates. Restores are always free, every change can b
 
 (T103: write final description, FAQ, privacy notes and the "free forever" feature list.)
 
+== Frequently Asked Questions ==
+
+= Does WP Checkpoint change how plugins are updated automatically? =
+
+Only its own automatic update, and only while a restore is in progress. WP Checkpoint uses the `auto_update_plugin` filter for itself alone: while a restore is queued, running, paused, or failed and can still be retried, it answers "do not update"; at any other time it passes WordPress's decision through unchanged. A restore puts the running copy of WP Checkpoint into the restored site, and an update in the middle would leave the plugin a different version partway through the restore. If WP Checkpoint cannot read its own job table, it cannot rule out a restore in progress, so it holds the update then too, and says so on its admin page. Other plugins, themes and WordPress itself are never affected, and a manual update is not blocked.
+
 == Changelog ==
 
 = 0.1.0 =
