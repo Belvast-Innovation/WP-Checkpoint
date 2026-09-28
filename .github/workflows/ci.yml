@@ -54,7 +54,15 @@ jobs:
           tools: composer:v2
 
       - run: composer install --no-interaction --no-progress --prefer-dist
-      - run: composer test:unit
+      - run: composer test:unit -- --log-junit build/junit-unit-windows.xml
+
+      # Each test's time on Windows, where the suite is slowest: what the split of this job is based on.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: junit-unit-windows
+          path: build/junit-unit-windows.xml
+          if-no-files-found: ignore
 
   extractors:
     # Other people's tools must read what the plugin writes (names, content, modes): only real readers can tell.
