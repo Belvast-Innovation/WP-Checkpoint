@@ -149,15 +149,14 @@ final class FileStagingStep implements Step {
 	 * @throws CannotStage When the backup holds this plugin too many times.
 	 */
 	public function run( JobContext $context ): StepResult {
-		$work    = $context->work_path();
+		$work = $context->work_path();
+		$this->at( 'start' );
+		$cursor  = self::after_takeover( $work, array_merge( array( 'phase' => 'roots' ), $context->cursor() ), self::takeover( $context->job() ) );
 		$plan    = RestorePreflightStep::load_plan( $work );
 		$staging = RestoreFilesPreflightStep::staging( $work );
 		$layout  = RestoreFilesPreflightStep::layout_of( $staging, $context->job() );
 		$walk    = new ChunkWalk( RestoreVerifyStep::index_path( $work, RestorePreflightStep::manifest( $work )->files_index() ), $plan['volumes'], $plan['chunk_bytes'], ChunkWalk::FILES );
-		$cursor  = array_merge( array( 'phase' => 'roots' ), $context->cursor() );
 		$first   = true;
-		$this->at( 'start' );
-		$cursor = self::after_takeover( $work, $cursor, self::takeover( $context->job() ) );
 		try {
 			if ( 'roots' === $cursor['phase'] ) {
 				$cursor = array( 'recorded' => $cursor['recorded'] ) + $this->roots( $context, $staging, $layout, $walk );
@@ -882,25 +881,32 @@ final class FileStagingStep implements Step {
 	}
 
 	/**
-	 * Which takeover of the job the row holds: its count and mark (JobRepository::acquire() changes one or the
-	 * other at every takeover; a retry sets them back to 0 and '', and starts the step over).
+	 * Which run of the job, and which takeover of it, the row holds: its attempts (one more at every start from
+	 * the queue: the first, and every retry), and its takeover count and mark (JobRepository::acquire() changes one
+	 * or the other at every takeover). A retry sets the takeover back to 0 and '' but keeps this step's cursor, so
+	 * the attempts are what tells a retry apart: its first tick records where it stands, whether or not the failed
+	 * run had recorded a takeover it went through.
 	 *
 	 * @param Job $job Job.
 	 * @return string
 	 */
 	private static function takeover( Job $job ): string {
-		return (int) $job->takeovers . ':' . (string) $job->takeover_mark;
+		return (int) $job->attempts . ':' . (int) $job->takeovers . ':' . (string) $job->takeover_mark;
 	}
 
 	/**
-	 * At the start of every tick, before anything else: when the job was taken over since the cursor last
-	 * recorded one (its "recorded" against the row's takeover), the position a run that lost the job may have
-	 * written past is recorded, then the takeover is. Not a signal of the tick that took the job over: a tick
-	 * that fails before this leaves the row's takeover as it was, and the next one records it.
+	 * At the start of every tick, before anything else: when the row shows a run or a takeover the cursor has not
+	 * recorded (its "recorded" against takeover()), the position a run that lost the job may have written past is
+	 * recorded, then the row's value is. Not a signal of the tick that took the job over: a tick that fails before
+	 * this leaves the row as it was, and the next one records it; a retry after such a failure changes the
+	 * attempts, and its first tick records it. A cursor without "recorded" (a new step, or one an older version
+	 * wrote) records too.
 	 *
 	 * The files phase records where it stands; the identify phase records where the files phase starts (a run
-	 * moves on into the files phase without a checkpoint in between); the others record nothing (roots writes
-	 * no file before its checkpoint, and the running plugin's copy is compared whole by the final check).
+	 * moves on into the files phase without a checkpoint in between); the others record nothing: a run that lost
+	 * the job cannot pass the roots phase's checkpoint (fenced) into a phase that writes staged content, and what
+	 * roots writes the next run writes again (the protection files are replaced whole); the running plugin's copy
+	 * is compared whole by the final check.
 	 *
 	 * @param string               $work     Work directory.
 	 * @param array<string, mixed> $cursor   Cursor.
@@ -909,7 +915,7 @@ final class FileStagingStep implements Step {
 	 * @throws TransientFailure When the record cannot be written.
 	 */
 	private static function after_takeover( string $work, array $cursor, string $takeover ): array {
-		if ( ( $cursor['recorded'] ?? '0:' ) === $takeover ) {
+		if ( ( $cursor['recorded'] ?? '' ) === $takeover ) {
 			$cursor['recorded'] = $takeover;
 			return $cursor;
 		}

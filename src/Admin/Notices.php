@@ -95,7 +95,7 @@ final class Notices {
 		if ( 'restore' === $held ) {
 			$notices['auto_update_restore'] = array(
 				'type'        => 'info',
-				'message'     => __( 'WP Checkpoint does not update itself automatically while a restore is in progress; automatic updates resume when the restore ends.', 'wp-checkpoint' ),
+				'message'     => __( 'WP Checkpoint does not update itself automatically while a restore is in progress, or has failed and its work files are kept (up to 7 days, for a retry); automatic updates resume when the restore completes or is cancelled, or those files are removed.', 'wp-checkpoint' ),
 				'extra'       => '',
 				'dismissible' => true,
 			);

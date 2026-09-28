@@ -414,25 +414,29 @@ final class SwapCheckTest extends RestoreTestCase {
 	/**
 	 * A restore whose staging is taken over once (killed after writing a piece, its lease run out): the suspect
 	 * position is recorded. Then $tamper( $job, $path_at_the_position ) and the final check with $parts. With
-	 * $fail_first, the tick that takes the job over fails at the start of the step, before it records anything.
+	 * $fail "transient" or "final", the tick that takes the job over fails at the start of the step, before it
+	 * records anything: to be retried by the Runner, or failing the job, which is then retried by hand.
 	 */
-	private function taken_over( callable $tamper, array $parts = array(), array $files = array(), bool $fail_first = false ): Job {
+	private function taken_over( callable $tamper, array $parts = array(), array $files = array(), string $fail = '' ): Job {
 		global $wpdb;
 		$killed = false;
-		$failed = ! $fail_first;
+		$failed = '' === $fail;
 		$type   = 'swap_check_takeover_' . bin2hex( random_bytes( 3 ) );
 		$job    = null;
 		$steps  = self::restore_steps_with(
 			new FileStagingStep(
 				$this->staging_parts(
 					array(
-						'at' => static function ( string $point ) use ( &$killed, &$failed ): void {
+						'at' => static function ( string $point ) use ( &$killed, &$failed, $fail ): void {
 							if ( 'piece' === $point && ! $killed ) {
 								$killed = true;
 								throw new \WPCheckpoint\Jobs\LockLost( 'killed by the server (simulated)' );
 							}
 							if ( 'start' === $point && $killed && ! $failed ) {
 								$failed = true;
+								if ( 'final' === $fail ) {
+									throw new \RuntimeException( 'the restore\'s plan could not be read (simulated)' );
+								}
 								throw new \WPCheckpoint\Jobs\TransientFailure( 'the database went away (simulated)' );
 							}
 						},
@@ -468,11 +472,18 @@ final class SwapCheckTest extends RestoreTestCase {
 		}
 		$this->assertTrue( $killed, 'the control: the staging run was killed' );
 		$wpdb->query( $wpdb->prepare( 'UPDATE ' . JobRepository::table() . ' SET locked_until = 1 WHERE id = %d', $job->id ) ); // Its lease ran out.
-		if ( $fail_first ) {
+		if ( '' !== $fail ) {
 			$runner->tick( $job->id, microtime( true ) );
 			$this->assertTrue( $failed, 'the control: the tick that took the job over failed' );
-			$this->assertSame( 1, Plugin::instance()->jobs()->find( $job->id )->takeovers, 'the control: that tick was a takeover' );
 			$this->assertSame( array(), FileStagingStep::suspects( $this->work( $job ) ), 'the control: it recorded nothing' );
+			$now = Plugin::instance()->jobs()->find( $job->id );
+			if ( 'final' === $fail ) {
+				$this->assertSame( Job::FAILED, $now->status, 'the control: the job failed' );
+				Plugin::instance()->job_actions()->retry( $job->id );
+				$this->assertSame( 0, Plugin::instance()->jobs()->find( $job->id )->takeovers, 'the control: the retry set the takeover count back' );
+			} else {
+				$this->assertSame( 1, $now->takeovers, 'the control: that tick was a takeover' );
+			}
 		}
 		$ran = $this->run_restore( $job );
 		$this->assertCount( 1, FileStagingStep::suspects( $this->work( $job ) ), 'the control: the takeover was recorded' );
@@ -518,7 +529,19 @@ final class SwapCheckTest extends RestoreTestCase {
 			},
 			array(),
 			array(),
-			true
+			'transient'
+		);
+		$this->assertFinal( $job, 'although its size and modification time are' );
+	}
+
+	public function test_a_takeover_is_recorded_after_a_retry_when_the_tick_that_took_the_job_over_failed_the_job(): void {
+		$job = $this->taken_over(
+			static function ( Job $job, string $path ): void {
+				self::same_size( $path );
+			},
+			array(),
+			array(),
+			'final'
 		);
 		$this->assertFinal( $job, 'although its size and modification time are' );
 	}

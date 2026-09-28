@@ -451,7 +451,7 @@ final class JobRepository {
 	}
 
 	/**
-	 * Whether a restore is in progress: queued, running or paused, or failed and still retryable (its work kept):
+	 * Whether a restore is in progress: queued, running or paused, or failed with its work kept (a final failure too):
 	 * true, false, or null when the jobs table could not be read (only the server's answer that there is no such
 	 * table means none).
 	 *

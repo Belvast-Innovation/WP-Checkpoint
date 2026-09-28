@@ -21,7 +21,9 @@ defined( 'ABSPATH' ) || exit;
  * other plugin it returns WordPress's answer unchanged, and themes and
  * WordPress itself have filters of their own it does not touch. For this
  * plugin it returns false only while a restore is in progress (queued,
- * running, paused, or failed and still retryable: its work kept), or when
+ * running or paused, or failed with its work files still kept, up to
+ * JobRepository::WORK_RETENTION_SECONDS: a final failure too, whose files
+ * are kept all the same), or when
  * the jobs table cannot be read (no answer is no evidence that nothing is
  * in progress; that case is logged and recorded, the time, so the plugin's
  * page can say why the plugin was not updated). Otherwise it returns
@@ -100,7 +102,7 @@ final class AutoUpdateHold {
 	}
 
 	/**
-	 * Whether a restore is in progress (a failed one that can be retried included): true, false, or null when the
+	 * Whether a restore is in progress (a failed one whose work files are kept included): true, false, or null when the
 	 * jobs table could not be read.
 	 *
 	 * @return bool|null
