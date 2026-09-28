@@ -37,12 +37,18 @@ final class StorageTest extends WP_UnitTestCase {
 			$this->cleanup[] = $state['previous_path'];
 		}
 		foreach ( array_unique( $this->cleanup ) as $dir ) {
+			if ( '' === (string) $dir || '' !== Deleter::refusal( (string) $dir ) ) {
+				continue; // Not set, or not one the plugin may delete (what the test made elsewhere it removes itself).
+			}
 			if ( is_dir( $dir ) ) {
 				Deleter::empty_directory( $dir );
 				@rmdir( $dir );
 			}
 		}
 		foreach ( glob( WP_CONTENT_DIR . '/wp-checkpoint-*' ) ?: array() as $dir ) {
+			if ( '' === (string) $dir || '' !== Deleter::refusal( (string) $dir ) ) {
+				continue; // Not set, or not one the plugin may delete (what the test made elsewhere it removes itself).
+			}
 			Deleter::empty_directory( $dir );
 			@rmdir( $dir );
 		}

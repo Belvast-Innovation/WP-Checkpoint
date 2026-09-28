@@ -7,16 +7,267 @@
 
 namespace WPCheckpoint\Support;
 
+use WPCheckpoint\Restore\StagingLayout;
+
 // phpcs:disable WordPress.WP.AlternativeFunctions -- pure PHP deleter also used from uninstall.php; WP_Filesystem is unavailable there and would follow links.
 
 /**
  * Deletes trees the plugin owns without ever following a link.
  *
- * Every path is checked with Paths::is_inside() against the base before it is
- * touched, symbolic links and junctions are removed as links (their targets
- * are never entered), and failures are collected instead of thrown.
+ * Before anything is touched, every entry point asks refusal() about the
+ * path it deletes (delete_tree()'s target, empty_directory()'s directory)
+ * and throws DeletionRefused, deleting nothing, when it is: empty (PHP
+ * resolves '' to the working directory), relative, the root of the file
+ * system, ABSPATH, the content directory, the plugins directory or this
+ * plugin's own directory, or any directory that holds one of these; or
+ * when it lies outside every directory the plugin may delete in. Those
+ * are: a storage directory of this plugin (it carries the owner marker,
+ * OwnerMarker::FILENAME), a staging root or probe of a restore (a name
+ * StagingLayout::parse() recognises), and a directory registered with
+ * allow() (the tests register their temporary directories).
+ *
+ * Past that check, every path is checked with Paths::is_inside() against
+ * the base before it is touched, symbolic links and junctions are removed
+ * as links (their targets are never entered), and failures are collected
+ * instead of thrown.
  */
 final class Deleter {
+
+	/**
+	 * Directories registered with allow(): resolved paths.
+	 *
+	 * @var string[]
+	 */
+	private static $roots = array();
+
+	/**
+	 * Directories treated like ABSPATH besides the WordPress ones (tests): resolved paths.
+	 *
+	 * @var string[]
+	 */
+	private static $protected = array();
+
+	/**
+	 * Register a directory the plugin may delete in (and the directory itself).
+	 *
+	 * @param string $root Directory.
+	 * @return void
+	 * @throws DeletionRefused When it is not one that may be registered (empty, relative, the root of the file system,
+	 *                         or a WordPress directory or one that holds it).
+	 */
+	public static function allow( string $root ): void {
+		$why = self::basic_refusal( $root );
+		if ( '' !== $why ) {
+			throw new DeletionRefused( sprintf( '%1$s cannot be registered as a directory to delete in: %2$s.', $root, $why ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+		}
+		$real = self::resolve( $root );
+		if ( ! in_array( $real, self::$roots, true ) ) {
+			self::$roots[] = $real;
+		}
+	}
+
+	/**
+	 * Why a path must not be deleted, or '' when it may.
+	 *
+	 * @param string $path Path.
+	 * @return string
+	 */
+	public static function refusal( string $path ): string {
+		$why = self::basic_refusal( $path );
+		if ( '' !== $why ) {
+			return $why;
+		}
+		$real = self::resolve( $path );
+		foreach ( self::$roots as $root ) {
+			if ( self::within( $root, $real ) ) {
+				return '';
+			}
+		}
+		if ( self::in_owned_root( $real ) ) {
+			return '';
+		}
+		return 'it is outside every directory the plugin may delete in (its storage directory, a staging root of a restore, a registered directory)';
+	}
+
+	/**
+	 * Tests: replace the registered directories, returning the ones before.
+	 *
+	 * @param string[] $roots Resolved directories.
+	 * @return string[]
+	 */
+	public static function replace_roots( array $roots ): array {
+		$before      = self::$roots;
+		self::$roots = array_values( array_map( 'strval', $roots ) );
+		return $before;
+	}
+
+	/**
+	 * Tests: replace the directories treated like ABSPATH, returning the ones before.
+	 *
+	 * @param string[] $dirs Directories.
+	 * @return string[]
+	 */
+	public static function replace_protected( array $dirs ): array {
+		$before          = self::$protected;
+		self::$protected = array_values( array_map( 'strval', $dirs ) );
+		return $before;
+	}
+
+	/**
+	 * The refusals that hold whatever is registered: empty, relative, unresolvable, the root of the file system, a
+	 * protected directory or one that holds it.
+	 *
+	 * @param string $path Path.
+	 * @return string '' when none applies.
+	 */
+	private static function basic_refusal( string $path ): string {
+		if ( '' === trim( $path ) ) {
+			return 'the path is empty (it would mean the working directory)';
+		}
+		if ( ! self::is_absolute( $path ) ) {
+			return 'the path is relative';
+		}
+		$real = self::resolve( $path );
+		if ( '' === $real ) {
+			return 'the path cannot be resolved';
+		}
+		if ( self::is_filesystem_root( $real ) ) {
+			return 'it is the root of the file system';
+		}
+		foreach ( self::protected_dirs() as $label => $dir ) {
+			if ( self::within( $real, $dir ) ) {
+				return sprintf( 'it is %s or holds it', $label );
+			}
+		}
+		return '';
+	}
+
+	/**
+	 * The directories never deleted, nor anything that holds them: label => resolved path.
+	 *
+	 * @return array<string, string>
+	 */
+	private static function protected_dirs(): array {
+		$out = array();
+		foreach ( array(
+			'ABSPATH'          => 'the WordPress directory (ABSPATH)',
+			'WP_CONTENT_DIR'   => 'the content directory',
+			'WP_PLUGIN_DIR'    => 'the plugins directory',
+			'WPCHECKPOINT_DIR' => 'the directory of WP Checkpoint',
+		) as $constant => $label ) {
+			if ( defined( $constant ) ) {
+				$dir = self::resolve( (string) constant( $constant ) );
+				if ( '' !== $dir ) {
+					$out[ $label ] = $dir;
+				}
+			}
+		}
+		foreach ( self::$protected as $i => $dir ) {
+			$resolved = self::resolve( $dir );
+			if ( '' !== $resolved ) {
+				$out[ 'a protected directory (' . ( $i + 1 ) . ')' ] = $resolved;
+			}
+		}
+		return $out;
+	}
+
+	/**
+	 * Whether a resolved path is in a directory of this plugin's: a storage directory (the owner marker) or a staging
+	 * root or probe of a restore (its name), the path itself or one of the directories above it.
+	 *
+	 * @param string $real Resolved path.
+	 * @return bool
+	 */
+	private static function in_owned_root( string $real ): bool {
+		$dir = $real;
+		while ( true ) {
+			if ( null !== StagingLayout::parse( basename( $dir ) ) ) {
+				return true;
+			}
+			if ( is_dir( $dir ) && ! is_link( $dir ) && is_file( $dir . DIRECTORY_SEPARATOR . OwnerMarker::FILENAME ) ) {
+				return true;
+			}
+			$parent = dirname( $dir );
+			if ( $parent === $dir || self::is_filesystem_root( $parent ) ) {
+				return false;
+			}
+			$dir = $parent;
+		}
+	}
+
+	/**
+	 * The path resolved: the real path of an existing entry that is not a link, otherwise its parent's real path and
+	 * its name (a link is deleted as itself). '' when neither resolves.
+	 *
+	 * @param string $path Path.
+	 * @return string
+	 */
+	private static function resolve( string $path ): string {
+		$trimmed = rtrim( $path, '/\\' );
+		if ( '' === $trimmed ) {
+			$real = realpath( $path );
+			return false === $real ? '' : $real;
+		}
+		$name = basename( $trimmed );
+		if ( '.' === $name || '..' === $name || ! is_link( $trimmed ) ) {
+			$real = realpath( $trimmed );
+			if ( false !== $real ) {
+				$real = rtrim( $real, '/\\' );
+				return '' === $real ? DIRECTORY_SEPARATOR : $real;
+			}
+			if ( '.' === $name || '..' === $name ) {
+				return '';
+			}
+		}
+		$parent = realpath( dirname( $trimmed ) );
+		return false === $parent ? '' : rtrim( $parent, '/\\' ) . DIRECTORY_SEPARATOR . $name;
+	}
+
+	/**
+	 * Whether a path is absolute (POSIX, a Windows drive, or a UNC path).
+	 *
+	 * @param string $path Path.
+	 * @return bool
+	 */
+	private static function is_absolute( string $path ): bool {
+		return '/' === $path[0] || '\\' === $path[0] || 1 === preg_match( '#\A[A-Za-z]:[\\/]#', $path );
+	}
+
+	/**
+	 * Whether a resolved path is the root of a file system.
+	 *
+	 * @param string $real Resolved path.
+	 * @return bool
+	 */
+	private static function is_filesystem_root( string $real ): bool {
+		return '' === rtrim( $real, '/\\' ) || 1 === preg_match( '#\A[A-Za-z]:[\\/]?\z#', $real ) || dirname( $real ) === $real;
+	}
+
+	/**
+	 * Whether a resolved path is a directory or inside it.
+	 *
+	 * @param string $outer Resolved directory.
+	 * @param string $inner Resolved path.
+	 * @return bool
+	 */
+	private static function within( string $outer, string $inner ): bool {
+		$windows = Paths::is_windows();
+		return Paths::same( $outer, $inner, $windows ) || Paths::is_prefix( $outer, $inner, $windows );
+	}
+
+	/**
+	 * Refuse, deleting nothing, a path refusal() does not allow.
+	 *
+	 * @param string $path Path.
+	 * @return void
+	 * @throws DeletionRefused When it is refused.
+	 */
+	private static function guard( string $path ): void {
+		$why = self::refusal( $path );
+		if ( '' !== $why ) {
+			throw new DeletionRefused( sprintf( 'Nothing was deleted: %1$s is not deleted because %2$s.', $path, $why ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+		}
+	}
 
 	/**
 	 * Delete a file or directory tree strictly inside $base.
@@ -37,8 +288,10 @@ final class Deleter {
 	 * @param string $target      Entry to delete; must be inside $base.
 	 * @param int    $max_entries Stop after this many entries (0: no limit).
 	 * @return array{deleted: int, failed: string[], remaining: bool}
+	 * @throws DeletionRefused When the target is not one the plugin may delete (refusal()); nothing is deleted.
 	 */
 	public static function delete_tree( string $base, string $target, int $max_entries = 0 ): array {
+		self::guard( $target );
 		$result = array(
 			'deleted'   => 0,
 			'failed'    => array(),
@@ -89,8 +342,10 @@ final class Deleter {
 	 *
 	 * @param string $base Directory the plugin owns.
 	 * @return array{deleted: int, failed: string[]}
+	 * @throws DeletionRefused When the directory is not one the plugin may empty (refusal()); nothing is deleted.
 	 */
 	public static function empty_directory( string $base ): array {
+		self::guard( $base );
 		$result = array(
 			'deleted'   => 0,
 			'failed'    => array(),

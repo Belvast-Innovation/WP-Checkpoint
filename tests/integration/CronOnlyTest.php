@@ -46,6 +46,7 @@ final class CronOnlyTest extends JobTestCase {
 	public function set_up(): void {
 		parent::set_up();
 		$this->uploads = wp_upload_dir()['basedir'] . '/wpccron';
+		\WPCheckpoint\Support\Deleter::allow( $this->uploads ); // Made by this test under the site's own directories: registered to be deleted.
 		wp_mkdir_p( $this->uploads );
 		file_put_contents( $this->uploads . '/a.txt', str_repeat( 'cron only ', 300 ) );
 		file_put_contents( $this->uploads . '/b.bin', random_bytes( 5000 ) );

@@ -94,7 +94,9 @@ abstract class RestoreTestCase extends JobTestCase {
 		}
 		// PHPUnit keeps every test object to the end of the suite: what they hold adds up in one process.
 		$this->builders = array();
-		PluginCopy::remove( $this->plugin_copy );
+		if ( '' !== $this->plugin_copy ) { // Not set when set_up() stopped early.
+			PluginCopy::remove( $this->plugin_copy );
+		}
 		// The staging a completed restore leaves for the swap (and a failed one for its retry): not left behind a test.
 		foreach ( Residue::scan_site( Residue::site_dirs( ScanRoots::site_directories() ), Directories::own_tokens() ) as $entry ) {
 			Deleter::delete_tree( $entry['parent'], $entry['path'] );

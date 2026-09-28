@@ -139,7 +139,7 @@ final class Uninstaller {
 			return $result;
 		}
 		foreach ( Residue::scan_site( Residue::site_dirs( ScanRoots::site_directories() ), Directories::own_tokens( $state ) ) as $entry ) {
-			$part               = Deleter::delete_tree( $entry['parent'], $entry['path'] );
+			$part               = self::delete_tree( $entry['parent'], $entry['path'] );
 			$result['deleted'] += $part['deleted'];
 			$result['failed']   = array_merge( $result['failed'], $part['failed'] );
 		}
@@ -170,14 +170,14 @@ final class Uninstaller {
 			$result = $none;
 			foreach ( Directories::SUBDIRS as $sub ) {
 				if ( is_dir( $path . DIRECTORY_SEPARATOR . $sub ) ) {
-					$part               = Deleter::delete_tree( $path, $path . DIRECTORY_SEPARATOR . $sub );
+					$part               = self::delete_tree( $path, $path . DIRECTORY_SEPARATOR . $sub );
 					$result['deleted'] += $part['deleted'];
 					$result['failed']   = array_merge( $result['failed'], $part['failed'] );
 				}
 			}
 			foreach ( array( 'index.php', '.htaccess', OwnerMarker::FILENAME ) as $file ) {
 				if ( is_file( $path . DIRECTORY_SEPARATOR . $file ) ) {
-					$part               = Deleter::delete_tree( $path, $path . DIRECTORY_SEPARATOR . $file );
+					$part               = self::delete_tree( $path, $path . DIRECTORY_SEPARATOR . $file );
 					$result['deleted'] += $part['deleted'];
 					$result['failed']   = array_merge( $result['failed'], $part['failed'] );
 				}
@@ -188,7 +188,15 @@ final class Uninstaller {
 		if ( basename( $path ) !== Directories::DIR_PREFIX . $state['token'] ) {
 			return $none;
 		}
-		$result = Deleter::empty_directory( $path );
+		try {
+			$result = Deleter::empty_directory( $path );
+		} catch ( DeletionRefused $e ) {
+			error_log( 'WP Checkpoint: ' . $e->getMessage() ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- uninstall has no screen to say it on.
+			$result = array(
+				'deleted' => 0,
+				'failed'  => array( $path ),
+			);
+		}
 		if ( array() === $result['failed'] ) {
 			if ( @rmdir( $path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_rmdir -- failure is reported below.
 				++$result['deleted'];
@@ -197,6 +205,26 @@ final class Uninstaller {
 			}
 		}
 		return $result;
+	}
+
+	/**
+	 * Deleter::delete_tree(), with a refused path logged and counted as a failure (nothing was deleted).
+	 *
+	 * @param string $base   Base.
+	 * @param string $target Target.
+	 * @return array{deleted: int, failed: string[], remaining: bool}
+	 */
+	private static function delete_tree( string $base, string $target ): array {
+		try {
+			return Deleter::delete_tree( $base, $target );
+		} catch ( DeletionRefused $e ) {
+			error_log( 'WP Checkpoint: ' . $e->getMessage() ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- uninstall has no screen to say it on.
+			return array(
+				'deleted'   => 0,
+				'failed'    => array( $target ),
+				'remaining' => false,
+			);
+		}
 	}
 
 	/**

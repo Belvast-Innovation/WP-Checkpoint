@@ -270,7 +270,7 @@ final class Directories {
 		$this->save_state();
 
 		if ( '' !== $abandoned && $abandoned !== $dir && is_dir( $abandoned ) && $this->holds_only_plugin_files( $abandoned ) ) {
-			Deleter::empty_directory( $abandoned );
+			$this->empty_directory( $abandoned );
 			@rmdir( $abandoned ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_rmdir -- best effort cleanup of the empty replacement directory.
 		}
 	}
@@ -389,6 +389,20 @@ final class Directories {
 		$this->finish_reclaim();
 		$this->log_event( sprintf( 'Storage directory %s reclaimed automatically after a deployment: ABSPATH changed from %s to %s.', $dir, $from, (string) $this->context['abspath'] ) );
 		return true;
+	}
+
+	/**
+	 * Deleter::empty_directory(), with a refused path logged: nothing was deleted, and resolving the storage goes on.
+	 *
+	 * @param string $dir Directory.
+	 * @return void
+	 */
+	private function empty_directory( string $dir ): void {
+		try {
+			Deleter::empty_directory( $dir );
+		} catch ( DeletionRefused $e ) {
+			$this->log_event( $e->getMessage() );
+		}
 	}
 
 	/**
@@ -657,7 +671,7 @@ final class Directories {
 			return;
 		}
 
-		Deleter::empty_directory( $current );
+		$this->empty_directory( $current );
 		@rmdir( $current ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_rmdir -- best effort cleanup of the empty provisional directory.
 		$this->adopt( $outside, self::SOURCE_OUTSIDE, false );
 	}

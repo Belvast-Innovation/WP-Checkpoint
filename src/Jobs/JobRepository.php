@@ -9,6 +9,7 @@ namespace WPCheckpoint\Jobs;
 
 use WPCheckpoint\Files\ScanRoots;
 use WPCheckpoint\Support\Deleter;
+use WPCheckpoint\Support\DeletionRefused;
 use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Support\Paths;
 use WPCheckpoint\Support\Redactor;
@@ -1428,7 +1429,7 @@ final class JobRepository {
 			} elseif ( ! Residue::is_expired( $entry, $now ) ) {
 				continue;
 			}
-			$result  = Deleter::delete_tree( Residue::tmp( $base ), $entry['path'], $budget );
+			$result  = $this->delete_tree( Residue::tmp( $base ), $entry['path'], $budget );
 			$budget -= $result['deleted'] + count( $result['failed'] );
 			$this->report_reclaim( $entry['kind'] . ' ' . ( $entry['id'] > 0 ? 'of job ' . $entry['id'] : basename( $entry['path'] ) ), $result );
 		}
@@ -1442,7 +1443,7 @@ final class JobRepository {
 			if ( ! $this->is_site_orphan( $entry, $owners ) ) {
 				continue;
 			}
-			$result  = Deleter::delete_tree( $entry['parent'], $entry['path'], $budget );
+			$result  = $this->delete_tree( $entry['parent'], $entry['path'], $budget );
 			$budget -= $result['deleted'] + count( $result['failed'] );
 			$this->report_reclaim( $entry['kind'] . ' of job ' . $entry['id'], $result );
 		}
@@ -1562,7 +1563,7 @@ final class JobRepository {
 			if ( $budget <= 0 ) {
 				return false;
 			}
-			$result  = Deleter::delete_tree( $entry['parent'], $entry['path'], $budget );
+			$result  = $this->delete_tree( $entry['parent'], $entry['path'], $budget );
 			$budget -= $result['deleted'] + count( $result['failed'] );
 			$this->report_reclaim( $entry['kind'] . ' of job ' . $job->id, $result );
 			$done = $done && ! $result['remaining'] && array() === $result['failed'];
@@ -1582,7 +1583,7 @@ final class JobRepository {
 		if ( ! is_dir( $dir ) ) {
 			return $done;
 		}
-		$result = Deleter::delete_tree( Residue::tmp( $base ), $dir, $budget );
+		$result = $this->delete_tree( Residue::tmp( $base ), $dir, $budget );
 		$this->report_reclaim( 'work directory of job ' . $job->id, $result );
 		return $done && ! $result['remaining'] && array() === $result['failed'];
 	}
@@ -2075,8 +2076,30 @@ final class JobRepository {
 		if ( '' !== $job->log_path && 0 === strpos( $job->log_path, 'logs/' ) ) {
 			$file = $base . DIRECTORY_SEPARATOR . str_replace( '/', DIRECTORY_SEPARATOR, $job->log_path );
 			if ( is_file( $file ) ) {
-				Deleter::delete_tree( $base . DIRECTORY_SEPARATOR . 'logs', $file );
+				$this->delete_tree( $base . DIRECTORY_SEPARATOR . 'logs', $file );
 			}
+		}
+	}
+
+	/**
+	 * Deleter::delete_tree(), with a refused path logged and counted as a failure: nothing was deleted, and the
+	 * housekeeping that asked goes on (its failures are logged, never thrown).
+	 *
+	 * @param string $base   Base.
+	 * @param string $target Target.
+	 * @param int    $budget Most entries (0: no limit).
+	 * @return array{deleted: int, failed: string[], remaining: bool}
+	 */
+	private function delete_tree( string $base, string $target, int $budget = 0 ): array {
+		try {
+			return Deleter::delete_tree( $base, $target, $budget );
+		} catch ( DeletionRefused $e ) {
+			$this->directories->log_event( $e->getMessage() );
+			return array(
+				'deleted'   => 0,
+				'failed'    => array( $target ),
+				'remaining' => false,
+			);
 		}
 	}
 

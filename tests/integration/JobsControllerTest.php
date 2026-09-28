@@ -151,6 +151,7 @@ final class JobsControllerTest extends JobTestCase {
 			// A job bound to another storage directory (a copied database on a shared file system): its log is not ours to read.
 			$other = dirname( $job->storage_path ) . '/wpcheckpoint-other-' . bin2hex( random_bytes( 3 ) );
 			mkdir( $other . '/logs', 0755, true );
+			\WPCheckpoint\Support\Deleter::allow( $other ); // Made by this test next to the storage directory: registered to be deleted.
 			file_put_contents( $other . '/logs/job-1-abcdef01.log', "the other site's log\n" );
 			$wpdb->update( \WPCheckpoint\Support\Schema::jobs_table(), array( 'storage_path' => $other, 'log_path' => 'logs/job-1-abcdef01.log' ), array( 'id' => $job->id ) );
 			$data = $this->rest( 'GET', 'jobs/' . $job->id )->get_data();
