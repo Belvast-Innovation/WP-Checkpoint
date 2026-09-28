@@ -241,6 +241,27 @@ final class StorageTest extends WP_UnitTestCase {
 		$this->assertFileDoesNotExist( $custom . '/.htaccess' );
 	}
 
+	public function test_a_custom_directory_that_is_or_holds_a_wordpress_directory_is_refused_before_anything_is_written(): void {
+		// A stand-in for ABSPATH (the real directories are asked about in DeleterProtectionTest, without writing).
+		$site   = $this->fake_root . '/htdocs/wp';
+		$before = Deleter::replace_protected( array( $site ) );
+		try {
+			foreach ( array( $site, $this->fake_root . '/htdocs' ) as $custom ) {
+				$dirs = new Directories( $this->cli_context( array( 'custom_dir' => $custom ) ) );
+				$this->assertSame( '', $dirs->base(), $custom );
+				$this->assertStringContainsString( 'WPCHECKPOINT_STORAGE_DIR names the root of the file system, a WordPress directory', $dirs->last_error() );
+				$this->assertSame( array( '.', '..' ), scandir( $site ), 'nothing was written there' );
+				$this->assertSame( array( '.', '..', 'wp' ), scandir( $this->fake_root . '/htdocs' ), 'nothing was written there' );
+			}
+			$custom = $this->fake_root . '/custom-storage';
+			$dirs   = new Directories( $this->cli_context( array( 'custom_dir' => $custom ) ) );
+			$this->assertSame( $custom, $dirs->base(), 'the control: a directory beside it: ' . $dirs->last_error() );
+			$this->assertFileExists( $custom . '/' . OwnerMarker::FILENAME );
+		} finally {
+			Deleter::replace_protected( $before );
+		}
+	}
+
 	public function test_custom_directory_gets_a_token_that_is_stable_and_changes_with_the_path(): void {
 		$custom = $this->fake_root . '/custom-storage';
 		mkdir( $custom );

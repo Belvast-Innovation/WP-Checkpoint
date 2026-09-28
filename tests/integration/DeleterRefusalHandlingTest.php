@@ -59,16 +59,25 @@ final class DeleterRefusalHandlingTest extends WP_UnitTestCase {
 		return $file;
 	}
 
+	/**
+	 * A relative path of its own (storage.log outlives the test: an earlier run's line must not pass for this one's).
+	 */
+	private static function relative( string $name ): string {
+		return $name . '-' . bin2hex( random_bytes( 4 ) );
+	}
+
 	private function storage_log(): string {
 		return (string) @file_get_contents( Plugin::instance()->directories()->base() . '/logs/storage.log' );
 	}
 
 	public function test_reclaim_and_purge_log_a_refusal_and_count_it_as_a_failure(): void {
 		$delete = self::method( get_class( Plugin::instance()->jobs() ), 'delete_tree' );
-		$result = $delete->invoke( Plugin::instance()->jobs(), 'relative', 'relative/target', 0 );
-		$this->assertSame( array( 'relative/target' ), $result['failed'] );
+		$target = self::relative( 'relative' ) . '/target';
+		$this->assertStringNotContainsString( $target, $this->storage_log() );
+		$result = $delete->invoke( Plugin::instance()->jobs(), dirname( $target ), $target, 0 );
+		$this->assertSame( array( $target ), $result['failed'] );
 		$this->assertSame( 0, $result['deleted'] );
-		$this->assertStringContainsString( 'Nothing was deleted: relative/target', $this->storage_log() );
+		$this->assertStringContainsString( 'Nothing was deleted: ' . $target, $this->storage_log() );
 
 		$file = $this->file();
 		$this->assertSame( 1, $delete->invoke( Plugin::instance()->jobs(), $this->sandbox, $file, 0 )['deleted'], 'the control: a path it may delete' );
@@ -77,8 +86,10 @@ final class DeleterRefusalHandlingTest extends WP_UnitTestCase {
 
 	public function test_switching_the_storage_directory_logs_a_refusal_and_goes_on(): void {
 		$empty = self::method( get_class( Plugin::instance()->directories() ), 'empty_directory' );
-		$empty->invoke( Plugin::instance()->directories(), 'relative-storage' );
-		$this->assertStringContainsString( 'Nothing was deleted: relative-storage', $this->storage_log() );
+		$dir   = self::relative( 'relative-storage' );
+		$this->assertStringNotContainsString( $dir, $this->storage_log() );
+		$empty->invoke( Plugin::instance()->directories(), $dir );
+		$this->assertStringContainsString( 'Nothing was deleted: ' . $dir, $this->storage_log() );
 
 		$file = $this->file();
 		$empty->invoke( Plugin::instance()->directories(), $this->sandbox );
@@ -87,14 +98,16 @@ final class DeleterRefusalHandlingTest extends WP_UnitTestCase {
 
 	public function test_uninstalling_logs_a_refusal_and_counts_it_as_a_failure(): void {
 		$tree   = self::method( Uninstaller::class, 'delete_tree' );
-		$result = $tree->invoke( null, 'relative', 'relative/target' );
-		$this->assertSame( array( 'relative/target' ), $result['failed'] );
+		$target = self::relative( 'relative' ) . '/target';
+		$result = $tree->invoke( null, dirname( $target ), $target );
+		$this->assertSame( array( $target ), $result['failed'] );
 		$empty  = self::method( Uninstaller::class, 'empty_directory' );
-		$result = $empty->invoke( null, 'relative-storage' );
-		$this->assertSame( array( 'relative-storage' ), $result['failed'] );
+		$dir    = self::relative( 'relative-storage' );
+		$result = $empty->invoke( null, $dir );
+		$this->assertSame( array( $dir ), $result['failed'] );
 		$log = (string) file_get_contents( $this->php_log );
-		$this->assertStringContainsString( 'Nothing was deleted: relative/target', $log );
-		$this->assertStringContainsString( 'Nothing was deleted: relative-storage', $log );
+		$this->assertStringContainsString( 'Nothing was deleted: ' . $target, $log );
+		$this->assertStringContainsString( 'Nothing was deleted: ' . $dir, $log );
 
 		$file = $this->file();
 		$this->assertSame( 1, $tree->invoke( null, $this->sandbox, $file )['deleted'], 'the control: a path it may delete' );

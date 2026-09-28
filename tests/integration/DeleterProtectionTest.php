@@ -32,6 +32,7 @@ final class DeleterProtectionTest extends WP_UnitTestCase {
 		$path = 0 === strpos( $which, 'dirname:' ) ? dirname( (string) constant( substr( $which, 8 ) ) ) : (string) constant( $which );
 		$this->assertStringContainsString( $because, Deleter::refusal( $path ) );
 		$this->assertStringContainsString( $because, Deleter::refusal( rtrim( $path, '/' ) . '/' ), 'with a trailing separator' );
+		$this->assertStringContainsString( $because, Deleter::storage_refusal( $path ), 'nor can it be a storage directory' );
 	}
 
 	public function test_the_root_and_the_site_s_other_directories_are_refused_and_the_storage_directory_is_not(): void {
@@ -41,5 +42,7 @@ final class DeleterProtectionTest extends WP_UnitTestCase {
 		$storage = Plugin::instance()->directories()->base();
 		$this->assertNotSame( '', $storage );
 		$this->assertSame( '', Deleter::refusal( $storage . '/tmp' ), 'the control: inside the storage directory (its owner marker)' );
+		$this->assertSame( '', Deleter::storage_refusal( $storage ), 'the control: the storage directory can be one' );
+		$this->assertSame( '', Deleter::storage_refusal( WP_CONTENT_DIR . '/wpc-storage' ), 'the control: a new directory in wp-content can be one' );
 	}
 }

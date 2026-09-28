@@ -152,6 +152,9 @@ final class Uninstaller {
 	 *
 	 * A custom directory (WPCHECKPOINT_STORAGE_DIR) is emptied of the plugin's
 	 * own sub-directories and files; the directory itself is left alone.
+	 * What the Deleter refuses (a custom directory that is a WordPress
+	 * directory or holds one, which Directories no longer takes) is counted
+	 * as failed and left in place.
 	 *
 	 * @return array{deleted: int, failed: string[]}
 	 */

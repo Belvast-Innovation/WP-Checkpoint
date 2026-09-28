@@ -440,6 +440,11 @@ final class Directories {
 			$this->error = __( 'WPCHECKPOINT_STORAGE_DIR is empty.', 'wp-checkpoint' );
 			return;
 		}
+		if ( '' !== Deleter::storage_refusal( $dir ) ) {
+			// Nothing in it could ever be deleted (reclaim, purge, uninstall): refused before anything is written there.
+			$this->error = __( 'WPCHECKPOINT_STORAGE_DIR names the root of the file system, a WordPress directory or a directory that holds one. Set it to a directory of its own, for example a new directory next to the WordPress directory.', 'wp-checkpoint' );
+			return;
+		}
 		$marker = $dir . DIRECTORY_SEPARATOR . OwnerMarker::FILENAME;
 		if ( is_file( $marker ) && ! $this->owns( $dir ) ) {
 			$this->state['clone_detected'] = true;

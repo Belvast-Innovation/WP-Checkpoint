@@ -26,7 +26,7 @@ final class DeleterGuardTest extends TestCase {
 	/** @var string[] */
 	private $protected_before;
 
-	/** @var string[] */
+	/** @var array<string, bool> */
 	private $roots_before;
 
 	protected function set_up(): void {
@@ -209,6 +209,16 @@ final class DeleterGuardTest extends TestCase {
 		$this->assertRefused( dirname( $site ), $site, 'outside every directory' );
 		Deleter::replace_protected( array() );
 
+		// A storage directory under the plugin's own name that holds a directory that must never be deleted: nothing
+		// beside that directory either.
+		$beside = $this->made( 'wp-checkpoint-b1b2c3d4e5f6/other' );
+		$this->made( 'wp-checkpoint-b1b2c3d4e5f6/abspath' );
+		file_put_contents( $this->sandbox . '/wp-checkpoint-b1b2c3d4e5f6/' . OwnerMarker::FILENAME, 'marker' );
+		Deleter::replace_protected( array( $this->sandbox . '/wp-checkpoint-b1b2c3d4e5f6/abspath' ) );
+		$this->assertRefused( dirname( $beside ), $beside, 'outside every directory' );
+		Deleter::replace_protected( array() );
+		$this->assertSame( '', Deleter::refusal( dirname( $beside ) ), 'the control: the same directory, nothing protected in it' );
+
 		// A probe of a restore (its name).
 		$probe = $this->made( 'wp-checkpoint-probe-a1b2c3d4e5f6-7-' . str_repeat( 'cd', 8 ) );
 		Deleter::delete_tree( $this->sandbox, dirname( $probe ) );
@@ -253,6 +263,57 @@ final class DeleterGuardTest extends TestCase {
 			Deleter::replace_roots( $before ),
 			'the control: plain directories are registered, resolved'
 		);
+	}
+
+	public function test_registering_a_directory_again_only_narrows_it(): void {
+		$before = Deleter::replace_roots( array() );
+		Deleter::allow( $this->sandbox . '/shared', false );
+		Deleter::allow( $this->sandbox . '/shared' );
+		Deleter::allow( $this->sandbox . '/own' );
+		Deleter::allow( $this->sandbox . '/own', false );
+		Deleter::allow( $this->sandbox . '/wide' );
+		Deleter::allow( $this->sandbox . '/wide' );
+		$this->assertSame(
+			array(
+				$this->sandbox . DIRECTORY_SEPARATOR . 'shared' => false,
+				$this->sandbox . DIRECTORY_SEPARATOR . 'own'    => false,
+				$this->sandbox . DIRECTORY_SEPARATOR . 'wide'   => true,
+			),
+			Deleter::replace_roots( $before ),
+			'the control: a directory registered twice as a whole stays whole'
+		);
+	}
+
+	public function test_a_link_to_a_protected_directory_protects_where_it_leads(): void {
+		if ( '\\' === DIRECTORY_SEPARATOR ) {
+			$this->markTestSkipped( 'Symbolic links need privileges on Windows.' );
+		}
+		$keep = $this->made( 'real/abspath' );
+		symlink( dirname( $keep ), $this->sandbox . '/link' );
+		Deleter::replace_roots( array( $this->sandbox => true ) );
+		Deleter::replace_protected( array( $this->sandbox . '/link' ) );
+		$this->assertStringContainsString( 'a protected directory (1), where it leads or holds it', Deleter::refusal( dirname( $keep ) ) );
+		$this->assertStringContainsString( 'a protected directory (1), where it leads or holds it', Deleter::refusal( $this->sandbox . '/real' ) );
+		$this->assertStringContainsString( 'a protected directory (1) or holds it', Deleter::refusal( $this->sandbox . '/link' ), 'the link itself' );
+		Deleter::replace_protected( array() );
+		$this->assertSame( '', Deleter::refusal( dirname( $keep ) ), 'the control: registered, once nothing is protected' );
+	}
+
+	public function test_a_directory_that_is_or_holds_a_protected_one_cannot_be_a_storage_directory(): void {
+		$this->made( 'site/abspath' );
+		$this->made( 'elsewhere' );
+		Deleter::replace_protected( array( $this->sandbox . '/site/abspath' ) );
+		$this->assertStringContainsString( 'a protected directory (1) or holds it', Deleter::storage_refusal( $this->sandbox . '/site/abspath' ) );
+		$this->assertStringContainsString( 'a protected directory (1) or holds it', Deleter::storage_refusal( $this->sandbox . '/site' ) );
+		$this->assertStringContainsString( 'a protected directory (1) or holds it', Deleter::storage_refusal( $this->sandbox . '/site/' ), 'with a trailing separator' );
+		if ( '\\' !== DIRECTORY_SEPARATOR ) { // Symbolic links need privileges on Windows.
+			symlink( $this->sandbox . '/site', $this->sandbox . '/to-site' );
+			$this->assertStringContainsString( 'a protected directory (1) or holds it', Deleter::storage_refusal( $this->sandbox . '/to-site' ), 'a link to it' );
+		}
+		$this->assertStringContainsString( 'root of the file system', Deleter::storage_refusal( '/' ) );
+		$this->assertSame( '', Deleter::storage_refusal( $this->sandbox . '/elsewhere' ), 'the control: a directory beside it' );
+		$this->assertSame( '', Deleter::storage_refusal( $this->sandbox . '/site/abspath-storage' ), 'the control: a new directory beside it' );
+		$this->assertSame( '', Deleter::storage_refusal( $this->sandbox . '/none/new' ), 'the control: a path whose parent does not exist yet' );
 	}
 
 	public function test_a_directory_registered_for_what_is_inside_it_is_never_deleted_itself(): void {

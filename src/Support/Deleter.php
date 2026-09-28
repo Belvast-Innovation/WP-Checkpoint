@@ -22,9 +22,12 @@ use WPCheckpoint\Restore\StagingLayout;
  * plugin's own directory, or any directory that holds one of these; or
  * when it lies outside every directory the plugin may delete in. Those
  * are: a storage directory of this plugin (it carries the owner marker,
- * OwnerMarker::FILENAME), a staging root or probe of a restore (a name
- * StagingLayout::parse() recognises), and a directory registered with
- * allow() (the tests register their temporary directories).
+ * OwnerMarker::FILENAME; what it opens is in storage_allows(): all of it
+ * only when it has the plugin's own name, otherwise its sub-directories
+ * and its own files, and nothing when it is itself refused), a staging
+ * root or probe of a restore (a name StagingLayout::parse() recognises),
+ * and a directory registered with allow() (the tests register their
+ * sandboxes, and the temporary directory for what is inside it only).
  *
  * Past that check, every path is checked with Paths::is_inside() against
  * the base before it is touched, symbolic links and junctions are removed
@@ -53,7 +56,8 @@ final class Deleter {
 	 *
 	 * @param string $root   Directory.
 	 * @param bool   $itself Whether the directory itself may be deleted or emptied too, not only what is inside it (a
-	 *                       shared directory, such as the temporary directory, is registered without).
+	 *                       shared directory, such as the temporary directory, is registered without). A directory
+	 *                       registered again keeps the narrower of the two.
 	 * @return void
 	 * @throws DeletionRefused When it is not one that may be registered (empty, relative, the root of the file system,
 	 *                         or a WordPress directory or one that holds it).
@@ -63,7 +67,8 @@ final class Deleter {
 		if ( '' !== $why ) {
 			throw new DeletionRefused( sprintf( '%1$s cannot be registered as a directory to delete in: %2$s.', $root, $why ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
 		}
-		self::$roots[ self::resolve( $root ) ] = $itself;
+		$resolved                 = self::resolve( $root );
+		self::$roots[ $resolved ] = isset( self::$roots[ $resolved ] ) ? self::$roots[ $resolved ] && $itself : $itself; // Registering again only narrows.
 	}
 
 	/**
@@ -87,6 +92,30 @@ final class Deleter {
 			return '';
 		}
 		return 'it is outside every directory the plugin may delete in (its storage directory, a staging root of a restore, a registered directory)';
+	}
+
+	/**
+	 * Why a directory cannot be a storage directory, or '' when it can: it is the root of the file system, a WordPress
+	 * directory or one that holds it. Nothing could be deleted in such a directory (storage_allows()), so its jobs'
+	 * files would never be reclaimed. Both the path as named and where it leads count (a link to such a directory is
+	 * one too). A path that does not resolve (its parent does not exist yet) holds nothing.
+	 *
+	 * @param string $dir Directory.
+	 * @return string
+	 */
+	public static function storage_refusal( string $dir ): string {
+		$paths = array( self::resolve( $dir ) );
+		$leads = @realpath( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- open_basedir warnings would name the path.
+		if ( false !== $leads ) {
+			$paths[] = '' === rtrim( $leads, '/\\' ) ? DIRECTORY_SEPARATOR : rtrim( $leads, '/\\' );
+		}
+		foreach ( $paths as $real ) {
+			$why = '' === $real ? '' : self::holding_refusal( $real );
+			if ( '' !== $why ) {
+				return $why;
+			}
+		}
+		return '';
 	}
 
 	/**
@@ -131,6 +160,17 @@ final class Deleter {
 		if ( '' === $real ) {
 			return 'the path cannot be resolved';
 		}
+		return self::holding_refusal( $real );
+	}
+
+	/**
+	 * Why a resolved path must never be deleted whatever holds it: the root of the file system, a protected directory
+	 * or one that holds it. '' when neither.
+	 *
+	 * @param string $real Resolved path.
+	 * @return string
+	 */
+	private static function holding_refusal( string $real ): string {
 		if ( self::is_filesystem_root( $real ) ) {
 			return 'it is the root of the file system';
 		}
@@ -148,7 +188,7 @@ final class Deleter {
 	 * @return array<string, string>
 	 */
 	private static function protected_dirs(): array {
-		$out = array();
+		$named = array();
 		foreach ( array(
 			'ABSPATH'          => 'the WordPress directory (ABSPATH)',
 			'WP_CONTENT_DIR'   => 'the content directory',
@@ -156,21 +196,22 @@ final class Deleter {
 			'WPCHECKPOINT_DIR' => 'the directory of WP Checkpoint',
 		) as $constant => $label ) {
 			if ( defined( $constant ) ) {
-				// Both the path as named and where it leads (a directory reached through a link is protected at both).
-				$dir = self::resolve( (string) constant( $constant ) );
-				if ( '' !== $dir ) {
-					$out[ $label ] = $dir;
-				}
-				$real = @realpath( (string) constant( $constant ) ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- open_basedir warnings would name the path.
-				if ( false !== $real && rtrim( $real, '/\\' ) !== $dir ) {
-					$out[ $label . ', where it leads' ] = rtrim( $real, '/\\' );
-				}
+				$named[ $label ] = (string) constant( $constant );
 			}
 		}
 		foreach ( self::$protected as $i => $dir ) {
+			$named[ 'a protected directory (' . ( $i + 1 ) . ')' ] = $dir;
+		}
+		$out = array();
+		foreach ( $named as $label => $dir ) {
+			// Both the path as named and where it leads (a directory reached through a link is protected at both).
 			$resolved = self::resolve( $dir );
 			if ( '' !== $resolved ) {
-				$out[ 'a protected directory (' . ( $i + 1 ) . ')' ] = $resolved;
+				$out[ $label ] = $resolved;
+			}
+			$real = @realpath( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- open_basedir warnings would name the path.
+			if ( false !== $real && rtrim( $real, '/\\' ) !== $resolved ) {
+				$out[ $label . ', where it leads' ] = rtrim( $real, '/\\' );
 			}
 		}
 		return $out;
