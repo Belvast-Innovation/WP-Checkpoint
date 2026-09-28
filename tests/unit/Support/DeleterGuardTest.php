@@ -316,6 +316,18 @@ final class DeleterGuardTest extends TestCase {
 		$this->assertSame( '', Deleter::storage_refusal( $this->sandbox . '/none/new' ), 'the control: a path whose parent does not exist yet' );
 	}
 
+	public function test_a_storage_directory_must_be_a_full_path(): void {
+		$this->made( 'site/abspath' );
+		$this->made( 'elsewhere' );
+		chdir( $this->sandbox . '/site' ); // Where a relative path would lead.
+		foreach ( array( 'elsewhere', '.', '..', '../elsewhere', ' ', $this->sandbox . '/site/../elsewhere', $this->sandbox . '/elsewhere/.', $this->sandbox . '/none/../elsewhere' ) as $dir ) {
+			$this->assertSame( Deleter::NOT_A_FULL_PATH, Deleter::storage_refusal( $dir ), "'{$dir}'" );
+		}
+		$this->assertSame( '', Deleter::storage_refusal( $this->sandbox . '/elsewhere' ), 'the control: the same directory, named in full' );
+		$this->assertSame( '', Deleter::storage_refusal( $this->sandbox . '/elsewhere/' ), 'the control: with a trailing separator' );
+		$this->assertSame( '', Deleter::storage_refusal( $this->sandbox . '/..x' ), 'the control: a name that starts with dots' );
+	}
+
 	public function test_a_directory_registered_for_what_is_inside_it_is_never_deleted_itself(): void {
 		$keep = $this->made( 'shared/in' );
 		Deleter::replace_roots( array() );

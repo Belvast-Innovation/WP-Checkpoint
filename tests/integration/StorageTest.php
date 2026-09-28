@@ -262,6 +262,23 @@ final class StorageTest extends WP_UnitTestCase {
 		}
 	}
 
+	public function test_a_custom_directory_named_by_a_relative_path_is_refused_before_anything_is_written(): void {
+		$cwd = (string) getcwd();
+		chdir( $this->fake_root ); // Where the relative paths would lead: anything written lands in the sandbox.
+		try {
+			foreach ( array( 'relative-storage', './relative-storage', $this->fake_root . '/htdocs/../relative-storage' ) as $custom ) {
+				$dirs = new Directories( $this->cli_context( array( 'custom_dir' => $custom ) ) );
+				$this->assertSame( '', $dirs->base(), $custom );
+				$this->assertStringContainsString( 'WPCHECKPOINT_STORAGE_DIR must be an absolute path', $dirs->last_error() );
+				$this->assertSame( array( '.', '..', 'htdocs' ), scandir( $this->fake_root ), 'nothing was written' );
+			}
+			$dirs = new Directories( $this->cli_context( array( 'custom_dir' => $this->fake_root . '/relative-storage' ) ) );
+			$this->assertSame( $this->fake_root . '/relative-storage', $dirs->base(), 'the control: the same directory, named in full: ' . $dirs->last_error() );
+		} finally {
+			chdir( $cwd );
+		}
+	}
+
 	public function test_custom_directory_gets_a_token_that_is_stable_and_changes_with_the_path(): void {
 		$custom = $this->fake_root . '/custom-storage';
 		mkdir( $custom );
