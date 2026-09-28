@@ -501,8 +501,8 @@ final class Directories {
 		if ( '' !== $label ) {
 			// What the plugin writes there (index.php, .htaccess denying access) would change what WordPress serves.
 			$this->error = in_array( $label, $wordpress['itself'], true )
-				? sprintf( /* translators: %s: which directory, e.g. "the content directory (wp-content)" */ __( 'WPCHECKPOINT_STORAGE_DIR names %s or a directory that holds it. The files WP Checkpoint writes into its storage directory would change what WordPress serves from there. Set it to a new directory of its own, for example next to the WordPress directory or inside wp-content.', 'wp-checkpoint' ), $label )
-				: sprintf( /* translators: %s: which directory, e.g. "the uploads directory" */ __( 'WPCHECKPOINT_STORAGE_DIR names %s, a directory inside it or one that holds it. The files WP Checkpoint writes into its storage directory would change what WordPress serves from there. Set it to a new directory of its own, for example next to the WordPress directory or inside wp-content.', 'wp-checkpoint' ), $label );
+				? sprintf( /* translators: %s: which directory, e.g. "the content directory (wp-content)" */ __( 'WPCHECKPOINT_STORAGE_DIR names %s or a directory that holds it. The files WP Checkpoint writes into its storage directory would change what WordPress serves from there. Set it to a new directory of its own, for example next to the WordPress directory or inside wp-content. If it was the storage directory before, its backups stay in its backups sub-directory; move them to the new one by hand.', 'wp-checkpoint' ), $label )
+				: sprintf( /* translators: %s: which directory, e.g. "the uploads directory" */ __( 'WPCHECKPOINT_STORAGE_DIR names %s, a directory inside it or one that holds it. The files WP Checkpoint writes into its storage directory would change what WordPress serves from there. Set it to a new directory of its own, for example next to the WordPress directory or inside wp-content. If it was the storage directory before, its backups stay in its backups sub-directory; move them to the new one by hand.', 'wp-checkpoint' ), $label );
 			return;
 		}
 		$dir = rtrim( $this->context['custom_dir'], '/\\' );
@@ -697,7 +697,7 @@ final class Directories {
 		if ( in_array( OwnerMarker::FILENAME, $entries, true ) ) {
 			return __( 'The directory belongs to another installation.', 'wp-checkpoint' );
 		}
-		return sprintf( /* translators: %s: directory path */ __( '%s already holds files and was not created by WP Checkpoint, so nothing is written there. Use a directory that does not exist yet (WP Checkpoint creates it) or an empty one.', 'wp-checkpoint' ), $dir );
+		return sprintf( /* translators: %s: directory path */ __( '%s already holds files and does not carry WP Checkpoint\'s owner marker, so nothing is written there. Use a directory that does not exist yet (WP Checkpoint creates it) or an empty one.', 'wp-checkpoint' ), $dir );
 	}
 
 	/**
@@ -714,8 +714,7 @@ final class Directories {
 			return false;
 		}
 		$contents = @file_get_contents( $dir . DIRECTORY_SEPARATOR . OwnerMarker::FILENAME ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- as above; a tiny local file.
-		$expected = OwnerMarker::build( (string) $this->state['install_id'], $this->context['abspath'] );
-		return is_string( $contents ) && strlen( $contents ) < strlen( $expected ) && 0 === strpos( $expected, $contents );
+		return is_string( $contents ) && OwnerMarker::is_unfinished( $contents, (string) $this->state['install_id'], $this->context['abspath'] );
 	}
 
 	/**
@@ -727,6 +726,9 @@ final class Directories {
 	 */
 	private function mark( string $dir ): bool {
 		$marker = $dir . DIRECTORY_SEPARATOR . OwnerMarker::FILENAME;
+		if ( $this->owns( $dir ) ) {
+			return true; // The usual case: a directory prepared before.
+		}
 		if ( $this->marker_unfinished( $dir ) ) {
 			wp_delete_file( $marker );
 		}
@@ -735,14 +737,18 @@ final class Directories {
 		}
 		clearstatcache( true, $marker );
 		if ( $this->owns( $dir ) ) {
-			return true; // There already, or written meanwhile by another request of this installation.
+			return true; // Written meanwhile by another request of this installation.
 		}
-		$this->error = is_file( $marker ) ? __( 'The directory belongs to another installation.', 'wp-checkpoint' ) : __( 'Cannot write the owner marker.', 'wp-checkpoint' );
+		// create() removes a marker it could not write in full: one still there was written by someone else.
+		$this->error = is_file( $marker ) && ! $this->marker_unfinished( $dir ) ? __( 'The directory belongs to another installation.', 'wp-checkpoint' ) : __( 'Cannot write the owner marker.', 'wp-checkpoint' );
 		return false;
 	}
 
 	/**
-	 * Whether the owner marker in $dir belongs to this installation.
+	 * Whether the owner marker in $dir belongs to this installation. It reads the file system on every call (another
+	 * request may have written the marker meanwhile).
+	 *
+	 * @phpstan-impure
 	 *
 	 * @param string $dir Base directory.
 	 * @return bool

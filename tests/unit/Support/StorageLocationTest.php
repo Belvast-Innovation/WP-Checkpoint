@@ -105,6 +105,33 @@ final class StorageLocationTest extends TestCase {
 		$this->assertSame( '', $this->refusal( 'to-cache' ), 'the control: a link to a directory that may be used' );
 	}
 
+	public function test_a_wordpress_directory_that_is_no_local_path_is_compared_as_written(): void {
+		chdir( $this->sandbox ); // Where a relative path would lead.
+		try {
+			$within = array(
+				's3://bucket/uploads'  => 'uploads (stream)',
+				'wp/wp-content/themes' => 'themes (relative)',
+			);
+			$this->assertSame( '', StorageLocation::refusal( $this->sandbox . '/wp/wp-content/themes', $within, array() ), 'not resolved against the working directory' );
+			$this->assertSame( 'uploads (stream)', StorageLocation::refusal( 's3://bucket/uploads/x', $within, array() ), 'the control: compared as written' );
+			$this->assertSame( 'themes', StorageLocation::refusal( $this->sandbox . '/wp/wp-content/themes', $this->within, array() ), 'the control: the same directory, named in full' );
+		} finally {
+			chdir( dirname( __DIR__, 3 ) );
+		}
+	}
+
+	public function test_an_unfinished_marker_is_the_start_of_this_installations(): void {
+		$full = OwnerMarker::build( 'install-a', '/srv/site/' );
+		$this->assertTrue( OwnerMarker::is_unfinished( '', 'install-a', '/srv/site/' ), 'empty (the request died before writing)' );
+		$this->assertTrue( OwnerMarker::is_unfinished( substr( $full, 0, 1 ), 'install-a', '/srv/site/' ) );
+		$this->assertTrue( OwnerMarker::is_unfinished( substr( $full, 0, -1 ), 'install-a', '/srv/site/' ) );
+		$this->assertFalse( OwnerMarker::is_unfinished( $full, 'install-a', '/srv/site/' ), 'finished: matches() answers' );
+		$this->assertTrue( OwnerMarker::matches( $full, 'install-a', '/srv/site/' ), 'the control: the finished one is this installation\'s' );
+		$this->assertFalse( OwnerMarker::is_unfinished( substr( OwnerMarker::build( 'install-b', '/srv/site/' ), 0, 12 ), 'install-a', '/srv/site/' ), 'another installation\'s' );
+		$this->assertFalse( OwnerMarker::is_unfinished( substr( $full, 0, 12 ) . 'x', 'install-a', '/srv/site/' ), 'not a start' );
+		$this->assertFalse( OwnerMarker::is_unfinished( '', '', '/srv/site/' ), 'no installation ID yet' );
+	}
+
 	public function test_an_owner_marker_is_created_only_where_none_is(): void {
 		$marker = $this->sandbox . '/' . OwnerMarker::FILENAME;
 		$this->assertTrue( OwnerMarker::create( $marker, "first\n" ), 'the control: created' );

@@ -418,7 +418,7 @@ final class StorageTest extends WP_UnitTestCase {
 		file_put_contents( $other . '/.keep', '' ); // A hidden file is enough.
 		$dirs = $this->custom( $other );
 		$this->assertSame( '', $dirs->base() );
-		$this->assertStringContainsString( 'already holds files and was not created by WP Checkpoint', $dirs->last_error() );
+		$this->assertStringContainsString( 'already holds files and does not carry WP Checkpoint\'s owner marker', $dirs->last_error() );
 		$this->assertSame( array( '.', '..', '.keep' ), scandir( $other ), 'nothing written' );
 
 		unlink( $other . '/.keep' );

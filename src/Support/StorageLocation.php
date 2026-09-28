@@ -19,8 +19,9 @@ namespace WPCheckpoint\Support;
  *
  * Paths are compared as written and where they lead (realpath(); for a directory that does not exist yet, its
  * nearest existing ancestor's real path and the rest as written), so a link or a second spelling does not get
- * around the rule. The caller refuses relative paths and paths with . or .. segments first
- * (Deleter::storage_refusal()).
+ * around the rule. The caller refuses relative paths, and paths with . or .. segments that lead nowhere yet, first
+ * (Deleter::storage_refusal()). A path that is not a local absolute one (a stream URL, a relative path) is compared
+ * as written only: it is never resolved against the working directory.
  */
 final class StorageLocation {
 
@@ -58,16 +59,19 @@ final class StorageLocation {
 	 */
 	private static function forms( string $path ): array {
 		$forms = array( rtrim( Paths::normalize( $path ), '/' ) );
-		$tail  = '';
-		$at    = rtrim( $path, '/\\' );
-		for ( $i = 0; $i < 64 && '' !== $at; $i++ ) {
+		if ( false !== strpos( $path, '://' ) || ! Deleter::absolute_on( $path, Paths::is_windows() ) ) {
+			return $forms;
+		}
+		$tail = '';
+		$at   = rtrim( $path, '/\\' );
+		while ( '' !== $at ) {
 			$real = @realpath( $at ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- open_basedir warnings would name the path.
 			if ( false !== $real ) {
 				$forms[] = rtrim( Paths::normalize( $real ), '/' ) . $tail;
 				break;
 			}
 			$up = dirname( $at );
-			if ( $up === $at ) {
+			if ( $up === $at || '.' === $up ) {
 				break;
 			}
 			$tail = '/' . basename( $at ) . $tail;
