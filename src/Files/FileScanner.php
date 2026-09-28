@@ -10,6 +10,8 @@ namespace WPCheckpoint\Files;
 use WPCheckpoint\Archive\EntryPath;
 use WPCheckpoint\Archive\Manifest;
 use WPCheckpoint\Archive\Packer;
+use WPCheckpoint\Support\Deleter;
+use WPCheckpoint\Support\Paths;
 use WPCheckpoint\Support\Utf8;
 
 /**
@@ -168,7 +170,7 @@ final class FileScanner {
 					return $state;
 				}
 				$root = $this->roots[ (int) $state['root'] ];
-				if ( ! is_dir( $root['path'] ) || is_link( $root['path'] ) ) {
+				if ( ! is_dir( $root['path'] ) || self::is_any_link( $root['path'] ) ) {
 					$this->warn( $state, 'unreadable', 'A content directory is missing or is a link and was not scanned: ' . $root['prefix'] );
 					++$state['root'];
 					continue;
@@ -225,6 +227,21 @@ final class FileScanner {
 	}
 
 	/**
+	 * Whether an entry is a link of any kind, and so neither listed nor entered: a symbolic link, or on Windows a
+	 * junction, which is_link() does not report and stat() reports with mode 0 (neither a directory nor a file). A
+	 * regular file is never a junction and is not asked about further, so the cost stays with directories.
+	 *
+	 * @param string $path Path.
+	 * @return bool
+	 */
+	private static function is_any_link( string $path ): bool {
+		if ( is_link( $path ) ) {
+			return true;
+		}
+		return Paths::is_windows() && ! is_file( $path ) && Deleter::is_reparse( $path );
+	}
+
+	/**
 	 * Handle one entry. Returns a new stack frame when it is a directory to enter.
 	 *
 	 * @param array<string, mixed>                                               $state State (updated).
@@ -243,7 +260,7 @@ final class FileScanner {
 			$this->warn( $state, 'bad_names', 'A file or directory was skipped because its name cannot be stored in an archive: ' . $root['prefix'] . '/' . Utf8::scrub( $rel ) );
 			return null;
 		}
-		if ( is_link( $abs ) ) {
+		if ( self::is_any_link( $abs ) ) {
 			++$state['counts']['links'];
 			return null;
 		}
