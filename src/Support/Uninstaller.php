@@ -100,21 +100,38 @@ final class Uninstaller {
 	 */
 	public static function jobs_holding_the_site() {
 		global $wpdb;
-		if ( ! Schema::table_exists() ) {
+		$table = $wpdb->base_prefix . Schema::JOBS_TABLE;
+		// Each answer read with its error: a query that failed answers like "nothing" in wpdb, and nothing is not
+		// evidence that no job holds the site.
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix.
+		$there = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $table ) ) );
+		if ( self::failed() ) {
+			return null;
+		}
+		if ( $table !== $there ) {
 			return 0;
 		}
-		$table = $wpdb->base_prefix . Schema::JOBS_TABLE;
-		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix.
 		$column = $wpdb->get_results( "SHOW COLUMNS FROM {$table} LIKE 'site_state'", ARRAY_A );
-		if ( ! is_array( $column ) ) {
+		if ( self::failed() || ! is_array( $column ) ) {
 			return null;
 		}
 		if ( array() === $column ) {
 			return 0;
 		}
-		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix.
 		$count = $wpdb->get_var( "SELECT COUNT(*) FROM {$table} WHERE site_state <> 0" );
-		return null === $count ? null : (int) $count;
+		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		return self::failed() || null === $count ? null : (int) $count;
+	}
+
+	/**
+	 * Whether the last query failed (wpdb sets its error at every query, and returns "nothing" for a failure).
+	 *
+	 * @phpstan-impure
+	 * @return bool
+	 */
+	private static function failed(): bool {
+		global $wpdb;
+		return '' !== (string) $wpdb->last_error;
 	}
 
 	/**

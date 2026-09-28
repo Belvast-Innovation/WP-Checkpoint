@@ -192,20 +192,18 @@ final class Runner {
 			// fail, or a default would stand in for a value. Failed with the reason, before anything else.
 			return $this->fail_for_missing_columns( $job, $problems );
 		}
+		if ( ! $this->cli && ! $job->awaiting_answer() && $this->at_cli_only_step( $job ) ) {
+			// Before anything writes the row (the gate, the lock, the cron count): nothing is counted, no driver follows up.
+			// A job waiting for an answer says so first: the answer is given anywhere, the step then runs in WP-CLI.
+			return new TickResult( TickResult::CLI, -1, $job, self::cli_message( $job ) );
+		}
 		if ( $job->cron_deferrals > 0 ) {
 			// The job has reached the Runner: whatever this tick does (runs, waits, is refused by the gate), it is
 			// no longer one that late cron requests keep from running (Job::$cron_deferrals).
 			$this->repository->reset_cron_deferrals( $job->id );
 		}
 
-		if ( ! $this->cli && $this->at_cli_only_step( $job ) ) {
-			// Before the gate and the lock: the row is not written, nothing is counted, no driver follows up.
-			return new TickResult( TickResult::CLI, -1, $job, self::cli_message( $job ) );
-		}
-
-		// A job that holds the site changed is rolled back or finished from wherever this request resolves the
-		// storage directory: that goes by the job row and the site itself, never by the storage directory.
-		$gate = Job::SITE_UNTOUCHED === $job->site_state ? $this->repository->gate( $job ) : array( 'allowed' => true );
+		$gate = $this->repository->gate( $job );
 		if ( ! $gate['allowed'] ) {
 			if ( 'awaiting_answer' === $gate['reason'] ) {
 				// Nothing to wait out: the job resumes when the answers are stored.
@@ -349,6 +347,7 @@ final class Runner {
 
 			try {
 				$result = $step->run( $context );
+				$held   = self::site_state_of( $step, $result->cursor ); // Checked here: a value out of range fails the job.
 			} catch ( LockLost $e ) {
 				throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged.
 			} catch ( StaleJob $e ) {
@@ -379,6 +378,10 @@ final class Runner {
 				$this->release( $job, $token );
 				return new TickResult( TickResult::WAITING, $wait, $job, $message );
 			} catch ( Cancelled $e ) {
+				if ( Job::SITE_UNTOUCHED !== $job->site_state || 0 === $job->cancel_requested ) {
+					// Not a step's end of a requested cancel with the site back as it was: failed, the lock with it.
+					return $this->fail( $job, $token, $logger, sprintf( 'Step "%s" ended the job as cancelled while %s.', $step_id, 0 === $job->cancel_requested ? 'no cancel was requested' : 'it still holds the site changed' ) );
+				}
 				// The step undid what it did to the site after a cancel was requested: cancelled as with the lock.
 				$logger->info( 'The job is cancelled as requested', array( 'step' => $step_id ) );
 				$this->transition( $job, $token, Job::CANCELLED, '' );
@@ -388,6 +391,12 @@ final class Runner {
 				// The answers that stopped it go with the failure: a retry asks those questions again.
 				return $this->fail( $job, $token, $logger, sprintf( 'Step "%s": %s', $step_id, $this->describe( $e ) ), '', '', $e->questions() );
 			} catch ( RetryFrom $e ) {
+				if ( Job::SITE_UNTOUCHED !== $job->site_state ) {
+					// A retry from an earlier step would drop the cursor that knows how to put the site back: failed as
+					// any other failure, the retry continues this step.
+					$logger->error( 'A step named a step to retry from while the job holds the site changed', array( 'retry_from' => $e->step() ) );
+					return $this->fail( $job, $token, $logger, sprintf( 'Step "%s": %s', $step_id, $this->describe( $e ) ) );
+				}
 				$from = array_search( $e->step(), $ids, true );
 				if ( false === $from || $from > $index ) {
 					// Not a step of this job at or before this one: failed as any other failure, the retry continues here.
@@ -405,6 +414,10 @@ final class Runner {
 				$logger->info( 'Step done', array( 'step' => $step_id ) );
 				$state = $this->reset( $state );
 				if ( $index + 1 >= $count ) {
+					if ( Job::SITE_CHANGING === $job->site_state ) {
+						// Never completed while the site is half changed: a completed job is not run again.
+						return $this->fail( $job, $token, $logger, sprintf( 'Step "%s" ended while the site is still being changed.', $step_id ) );
+					}
 					$this->persist( $job, $token, $step_id, array(), $state, 100, $result->message, true );
 					$this->transition( $job, $token, Job::COMPLETED, '' );
 					$logger->info( 'Job completed' );
@@ -438,7 +451,7 @@ final class Runner {
 						'reason'  => $result->message,
 					)
 				);
-				$this->persist( $job, $token, $step_id, $result->cursor, $state, $job->progress, $result->message, false, self::site_state_of( $step, $result->cursor ) );
+				$this->persist( $job, $token, $step_id, $result->cursor, $state, $job->progress, $result->message, false, $held );
 				$this->release( $job, $token );
 				return new TickResult( TickResult::WAITING, $seconds, $job, $result->message );
 			}
@@ -453,7 +466,7 @@ final class Runner {
 						'questions' => count( $result->questions ),
 					)
 				);
-				$this->persist( $job, $token, $step_id, $result->cursor, $state, $job->progress, $result->message, false, self::site_state_of( $step, $result->cursor ) );
+				$this->persist( $job, $token, $step_id, $result->cursor, $state, $job->progress, $result->message, false, $held );
 				try {
 					$this->repository->pause_for_answer( $job, $token, $result->questions );
 				} catch ( StaleJob $e ) {
@@ -480,12 +493,12 @@ final class Runner {
 						'attempt' => $state['no_progress'],
 					)
 				);
-				$this->persist( $job, $token, $step_id, $result->cursor, $state, $percent, $result->message, false, self::site_state_of( $step, $result->cursor ) );
+				$this->persist( $job, $token, $step_id, $result->cursor, $state, $percent, $result->message, false, $held );
 				$this->release( $job, $token );
 				return new TickResult( TickResult::MORE, 0, $job, $result->message );
 			}
 			$state = $this->reset( $state );
-			$this->persist( $job, $token, $step_id, $result->cursor, $state, $percent, $result->message, true, self::site_state_of( $step, $result->cursor ) );
+			$this->persist( $job, $token, $step_id, $result->cursor, $state, $percent, $result->message, true, $held );
 			$this->maybe_heartbeat( $job, $token );
 			if ( $context->should_stop() ) {
 				return $this->pause( $job, $token, $logger, $context->stop_reason() );
@@ -602,8 +615,24 @@ final class Runner {
 	 */
 	private function logger_for( Job $job ): Logger {
 		$relative = '' !== $job->log_path ? $job->log_path : 'logs/job-' . $job->id . '.log';
-		// A job that holds the site changed may run with its storage directory gone: its log then goes to PHP's.
-		return new Logger( $job->storage_path . DIRECTORY_SEPARATOR . str_replace( '/', DIRECTORY_SEPARATOR, $relative ), $this->redactor, Logger::DEFAULT_MAX_BYTES, Job::SITE_UNTOUCHED !== $job->site_state );
+		// A job that holds the site changed may run with its storage directory gone: its log then goes to PHP's, with
+		// the same masks as any text that leaves the engine (PHP's log may be readable from the web).
+		return new Logger( $job->storage_path . DIRECTORY_SEPARATOR . str_replace( '/', DIRECTORY_SEPARATOR, $relative ), $this->redactor, Logger::DEFAULT_MAX_BYTES, Job::SITE_UNTOUCHED !== $job->site_state ? array( self::class, 'to_php_log' ) : null );
+	}
+
+	/**
+	 * A job's log line in PHP's error log, its paths and hosts masked (fixed text when a mask fails).
+	 *
+	 * @param string $line Line (redacted).
+	 * @return void
+	 */
+	public static function to_php_log( string $line ): void {
+		$masked = Report::mask_paths( $line, JobPresenter::installation_paths() );
+		if ( is_string( $masked ) ) {
+			$site   = Environment::report_site_paths();
+			$masked = Report::mask_hosts( $masked, Environment::report_hosts(), $site['paths'], $site['coarse'], $site['network_root'] );
+		}
+		error_log( 'WP Checkpoint: ' . ( is_string( $masked ) ? $masked : Report::failure_text() ) ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- the job's own log cannot be written.
 	}
 
 	/**
@@ -647,13 +676,17 @@ final class Runner {
 	 * @param Step                 $step   Step.
 	 * @param array<string, mixed> $cursor Cursor.
 	 * @return int|null
+	 * @throws \UnexpectedValueException When the step gives a value that is not one of Job::SITE_*.
 	 */
 	private static function site_state_of( Step $step, array $cursor ) {
 		if ( ! $step instanceof HoldsSite ) {
 			return null;
 		}
 		$state = $step::site_state( JobContext::strip_reserved( $cursor ) );
-		return null === $state ? null : (int) $state;
+		if ( null !== $state && ! in_array( $state, array( Job::SITE_UNTOUCHED, Job::SITE_CHANGING, Job::SITE_SWAPPED ), true ) ) {
+			throw new \UnexpectedValueException( sprintf( 'Step "%s" gave a site state that is none of the known ones.', $step->id() ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message; the presenter cleans it.
+		}
+		return $state;
 	}
 
 	/**

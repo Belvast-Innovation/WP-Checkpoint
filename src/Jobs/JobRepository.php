@@ -382,6 +382,15 @@ final class JobRepository {
 		if ( ! Schema::is_compatible() ) {
 			return self::verdict( false, 'schema', __( 'The database structure was created by a newer version of WP Checkpoint. Please update the plugin.', 'wp-checkpoint' ), $retry );
 		}
+		if ( Job::SITE_UNTOUCHED !== $job->site_state ) {
+			// A job that holds the site changed goes on (to put it back, or to finish) from whatever storage directory
+			// this request resolves, or none: it needs the job row and the site, not its files. Only this
+			// installation's: a token it holds (none while a clone is unresolved), never a copied database's row.
+			if ( in_array( $job->storage_token, Directories::own_tokens( $this->directories->state() ), true ) ) {
+				return self::verdict( true, '', '', 0 );
+			}
+			return self::verdict( false, 'storage_changed', __( 'This job belongs to another installation of WP Checkpoint (its storage token is not this site\'s); it is not run here.', 'wp-checkpoint' ), $retry );
+		}
 		$base = $this->directories->base();
 		if ( '' === $base ) {
 			return self::verdict( false, 'storage_unavailable', $this->directories->last_error(), $retry );
@@ -653,7 +662,7 @@ final class JobRepository {
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin table; the WHERE keeps a live run's job and an ended job as they are.
 		$affected = $wpdb->query(
 			$wpdb->prepare( // phpcs:ignore WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber -- one value per placeholder: the SET list is built from the same array.
-				'UPDATE ' . self::table() . ' SET ' . implode( ', ', $sets ) . " WHERE id = %d AND status IN (%s, %s, %s) AND (lock_token = '' OR locked_until < %d)", // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- table name from the prefix and a constant; column names from a fixed list.
+				'UPDATE ' . self::table() . ' SET ' . implode( ', ', $sets ) . " WHERE id = %d AND status IN (%s, %s, %s) AND (lock_token = '' OR locked_until < %d)" . ( in_array( 'site_state', $unusable, true ) ? '' : ' AND site_state = 0' ), // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- table name from the prefix and a constant; column names from a fixed list. A table without site_state holds no job that changed the site.
 				array_merge( array_values( $data ), array( $job->id, Job::QUEUED, Job::RUNNING, Job::PAUSED, $now ) )
 			)
 		);
@@ -713,10 +722,14 @@ final class JobRepository {
 		if ( null === $job || ! in_array( $job->status, array( Job::QUEUED, Job::RUNNING, Job::PAUSED ), true ) || $job->awaiting_answer() ) {
 			return null;
 		}
-		if ( '' === $this->directories->base() ) {
-			return null;
+		$holds = Job::SITE_UNTOUCHED !== $job->site_state;
+		if ( ! $holds && '' === $this->directories->base() ) {
+			return null; // A job that holds the site changed needs no storage directory (gate()).
 		}
-		$storage_token    = (string) $this->directories->state()['token'];
+		$state            = $this->directories->state();
+		$storage_token    = (string) $state['token'];
+		$own              = Directories::own_tokens( $state );
+		$own_sql          = array() === $own ? "''" : implode( ', ', array_map( array( $wpdb, 'prepare' ), array_fill( 0, count( $own ), '%s' ), $own ) );
 		$now              = $this->now();
 		$token            = bin2hex( random_bytes( 16 ) );
 		$table            = $wpdb->base_prefix . Schema::JOBS_TABLE;
@@ -727,7 +740,7 @@ final class JobRepository {
 		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix; the WHERE clause is the compare-and-set.
 		$affected = $wpdb->query(
 			$wpdb->prepare(
-				"UPDATE {$table} SET takeovers = IF(lock_token <> '', IF(takeover_mark = MD5(CONCAT(step, '|', COALESCE(cursor_json, ''))), takeovers + 1, 1), takeovers), takeover_mark = IF(lock_token <> '', MD5(CONCAT(step, '|', COALESCE(cursor_json, ''))), takeover_mark), attempts = IF(status = %s, attempts + 1, attempts), started_at = IF(started_at = 0, %d, started_at), status = %s, lock_token = %s, locked_until = %d, updated_at = %d, questions_json = NULL WHERE id = %d AND status IN (%s, %s, %s) AND (status <> %s OR questions_json IS NULL OR questions_json = '' OR questions_json = '[]') AND (storage_token = %s OR site_state <> 0) AND (lock_token = '' OR locked_until < %d)",
+				"UPDATE {$table} SET takeovers = IF(lock_token <> '', IF(takeover_mark = MD5(CONCAT(step, '|', COALESCE(cursor_json, ''))), takeovers + 1, 1), takeovers), takeover_mark = IF(lock_token <> '', MD5(CONCAT(step, '|', COALESCE(cursor_json, ''))), takeover_mark), attempts = IF(status = %s, attempts + 1, attempts), started_at = IF(started_at = 0, %d, started_at), status = %s, lock_token = %s, locked_until = %d, updated_at = %d, questions_json = NULL WHERE id = %d AND status IN (%s, %s, %s) AND (status <> %s OR questions_json IS NULL OR questions_json = '' OR questions_json = '[]') AND (storage_token = %s OR (site_state <> 0 AND storage_token IN ({$own_sql}))) AND (lock_token = '' OR locked_until < %d)",
 				Job::QUEUED,
 				$now,
 				Job::RUNNING,
@@ -925,6 +938,12 @@ final class JobRepository {
 		if ( null !== $site_state ) {
 			$data['site_state'] = (int) $site_state;
 			$formats[]          = '%d';
+			if ( Job::SITE_SWAPPED === (int) $site_state ) {
+				// The swap is complete: a cancel requested while it was under way can no longer act, and must not act
+				// on whatever changes the site later (an undo).
+				$data['cancel_requested'] = 0;
+				$formats[]                = '%d';
+			}
 		}
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin table; the WHERE on lock_token is the fence.
 		$affected = $wpdb->update(
@@ -937,6 +956,12 @@ final class JobRepository {
 			$formats,
 			array( '%d', '%s' )
 		);
+		if ( false === $affected ) {
+			// Refused (a lock wait, the server gone): nothing of this cursor is stored, and a step that goes on would
+			// change what the row does not say (a site state above all). Stopped as a lost lock: no further writes.
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+			throw new StaleJob( sprintf( 'Job %d: its progress could not be written.', $job->id ) );
+		}
 		if ( 1 !== (int) $affected && ! $this->holds_lock( $job->id, $token ) ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
 			throw new StaleJob( sprintf( 'Job %d is no longer locked by this driver.', $job->id ) );
@@ -952,6 +977,9 @@ final class JobRepository {
 		}
 		if ( null !== $site_state ) {
 			$job->site_state = (int) $site_state;
+			if ( Job::SITE_SWAPPED === $job->site_state ) {
+				$job->cancel_requested = 0;
+			}
 		}
 	}
 
@@ -1953,7 +1981,12 @@ final class JobRepository {
 			$data['takeovers']      = 0; // A retry starts its counts over.
 			$data['takeover_mark']  = '';
 			$data['cron_deferrals'] = 0;
-			$named                  = Job::FAILED === $from && isset( $job->cursor[ self::RETRY_FROM_KEY ] ) ? $job->cursor[ self::RETRY_FROM_KEY ] : null;
+			if ( Job::SITE_UNTOUCHED === $job->site_state ) {
+				// A cancel requested of a failure that holds the site changed is kept: the retry puts it back, then
+				// cancels. Of any other, it was for a run that is over.
+				$data['cancel_requested'] = 0;
+			}
+			$named = Job::FAILED === $from && isset( $job->cursor[ self::RETRY_FROM_KEY ] ) ? $job->cursor[ self::RETRY_FROM_KEY ] : null;
 			if ( is_string( $named ) && '' !== $named ) {
 				// The failed step named where a retry starts (RetryFrom): that step, from its start, in this same write;
 				// without the answers given so far, which were about what the steps found then (a step never asks
@@ -1975,7 +2008,7 @@ final class JobRepository {
 		}
 		$formats = array_fill( 0, count( $data ), '%s' );
 		foreach ( array_keys( $data ) as $i => $key ) {
-			if ( in_array( $key, array( 'updated_at', 'finished_at', 'locked_until', 'started_at', 'takeovers', 'cron_deferrals' ), true ) ) {
+			if ( in_array( $key, array( 'updated_at', 'finished_at', 'locked_until', 'started_at', 'takeovers', 'cron_deferrals', 'cancel_requested' ), true ) ) {
 				$formats[ $i ] = '%d';
 			}
 		}

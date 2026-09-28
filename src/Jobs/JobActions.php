@@ -625,10 +625,11 @@ final class JobActions {
 	 * @return array{job: Job, cleaned: bool, reason: string}|null Null when the job does not exist. reason: "cleaned",
 	 *                                                            "holder" (a driver holds the lock and cleans up when it
 	 *                                                            stops), "unavailable" (the storage directory cannot be
-	 *                                                            used from here; nothing will clean up) or "requested"
+	 *                                                            used from here; nothing will clean up), "requested"
 	 *                                                            (a restore's swap is under way: it is rolled back, then
-	 *                                                            the job is cancelled).
-	 * @throws InvalidTransition When the job is already finished, or a restore's swap is complete.
+	 *                                                            the job is cancelled) or "swapped" (refused: the restored
+	 *                                                            site is in place; the job is not cancelled).
+	 * @throws InvalidTransition When the job is already finished.
 	 * @throws StaleJob When the job changed meanwhile.
 	 */
 	public function cancel( int $id ) {
@@ -646,7 +647,12 @@ final class JobActions {
 			);
 		}
 		if ( Job::SITE_SWAPPED === $job->site_state ) {
-			throw new InvalidTransition( sprintf( 'Job %d: the restored site is in place; cancelling the job cannot change it back.', $job->id ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message; the presenter cleans it.
+			// Refused: a cancel cannot change the restored site back.
+			return array(
+				'job'     => $job,
+				'cleaned' => false,
+				'reason'  => 'swapped',
+			);
 		}
 		Loopback::unschedule( $id );
 		Loopback::revoke_tokens( $id );

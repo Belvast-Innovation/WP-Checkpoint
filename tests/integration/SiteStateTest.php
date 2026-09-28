@@ -52,6 +52,9 @@ final class SiteStateTest extends WP_UnitTestCase {
 	/** @var JobTypes */
 	private $types;
 
+	/** @var mixed The plugin's version option before the test (the DROP TABLE of the jobs table commits what a test wrote). */
+	private $version;
+
 	public function set_up(): void {
 		parent::set_up();
 		global $wpdb;
@@ -66,12 +69,16 @@ final class SiteStateTest extends WP_UnitTestCase {
 		$this->dirs  = $this->site( 'releases/a' );
 		$this->now   = 1_800_000_000.0;
 		$this->repo  = $this->repo_for( $this->dirs );
-		$this->types = new JobTypes();
+		$this->types   = new JobTypes();
+		$this->version = get_option( Uninstaller::OPTION_VERSION );
 		Schema::ensure();
 	}
 
 	public function tear_down(): void {
 		global $wpdb;
+		// The DROP TABLE below commits what the test wrote: the settings the uninstall tests changed are put back.
+		UninstallSetting::save( false );
+		false === $this->version ? delete_option( Uninstaller::OPTION_VERSION ) : update_option( Uninstaller::OPTION_VERSION, $this->version );
 		$wpdb->query( 'DROP TABLE IF EXISTS ' . Schema::jobs_table() );
 		Deleter::empty_directory( $this->root );
 		@rmdir( $this->root );
@@ -169,7 +176,8 @@ final class SiteStateTest extends WP_UnitTestCase {
 				),
 			)
 		);
-		$job    = $this->repo->create( 'cli' );
+		$job = $this->repo->create( 'cli' );
+		$this->set( $job->id, array( 'cron_deferrals' => 3 ) ); // Written back to 0 by any tick that reaches the Runner's gate.
 		$before = $this->row( $job->id );
 		$this->now += 5;
 		$result = $this->runner( false )->tick( $job->id, $this->now );
@@ -184,9 +192,15 @@ final class SiteStateTest extends WP_UnitTestCase {
 		( new Loopback( false ) )->after_tick( $result );
 		$this->assertFalse( wp_next_scheduled( Loopback::HOOK, array( $job->id ) ), 'no driver is scheduled' );
 
+		// A question the step asked is answered anywhere: a tick from another driver says the job waits for it.
+		$this->set( $job->id, array( 'status' => Job::PAUSED, 'questions_json' => wp_json_encode( array( array( 'id' => 'keep', 'kind' => 'choice', 'choices' => array( 'keep', 'undo' ) ) ) ) ) );
+		$this->assertSame( TickResult::PAUSED, $this->runner( false )->tick( $job->id, $this->now )->status );
+		$this->set( $job->id, array( 'status' => Job::RUNNING, 'questions_json' => null ) );
+
 		$done = $this->runner( true )->tick( $job->id, $this->now );
 		$this->assertSame( TickResult::COMPLETED, $done->status, 'WP-CLI runs it' );
 		$this->assertSame( 1, $ran );
+		$this->assertSame( 0, $this->repo->find( $job->id )->cron_deferrals, 'the control: a tick that reaches the gate writes the count back' );
 	}
 
 	public function test_a_tick_from_another_driver_stops_where_the_next_step_runs_in_wp_cli_only(): void {
@@ -291,7 +305,14 @@ final class SiteStateTest extends WP_UnitTestCase {
 		$this->assertSame( Job::SITE_UNTOUCHED, $this->repo->find( $plain->id )->site_state );
 	}
 
-	public function test_a_job_that_holds_the_site_goes_on_from_another_storage_directory_and_one_that_does_not_is_refused(): void {
+	/**
+	 * This installation's storage in a custom directory (WPCHECKPOINT_STORAGE_DIR) of the stand-in site.
+	 */
+	private function custom( string $name ): Directories {
+		return new Directories( array( 'is_web_request' => false, 'document_root' => '', 'abspath' => $this->root . '/releases/a/', 'custom_dir' => $this->root . '/' . $name ) );
+	}
+
+	public function test_a_job_that_holds_the_site_goes_on_after_the_storage_directory_moved_and_one_that_does_not_is_refused(): void {
 		$ran = 0;
 		$this->register(
 			'hold2',
@@ -305,18 +326,170 @@ final class SiteStateTest extends WP_UnitTestCase {
 				),
 			)
 		);
-		$held  = $this->repo->create( 'hold2' );
-		$plain = $this->repo->create( 'hold2' );
+		mkdir( $this->root . '/store-a' );
+		mkdir( $this->root . '/store-b' );
+		$first = $this->repo_for( $this->custom( 'store-a' ) );
+		$held  = $first->create( 'hold2' );
+		$plain = $first->create( 'hold2' );
 		$this->set( $held->id, array( 'site_state' => Job::SITE_CHANGING, 'status' => Job::RUNNING ) );
 		$this->set( $plain->id, array( 'status' => Job::RUNNING ) );
-		$other = $this->repo_for( $this->site( 'releases/b' ) );
-		$this->assertNotSame( $held->storage_token, (string) $this->site( 'releases/b' )->state()['token'], 'the control: another storage directory' );
+		// The directory is moved (the constant set to another place): a new token, the old one kept as this installation's.
+		$moved = $this->custom( 'store-b' );
+		$this->assertNotSame( $held->storage_token, (string) $moved->state()['token'], 'the control: another token' );
+		$this->assertContains( $held->storage_token, Directories::own_tokens( $moved->state() ), 'the control: the old token is still this installation\'s' );
+		$other = $this->repo_for( $moved );
 
 		$this->assertSame( TickResult::BLOCKED, $this->runner( true, $other )->tick( $plain->id, $this->now )->status, 'the control: a job that holds nothing is refused' );
 		$this->assertSame( 0, $ran );
 		$result = $this->runner( true, $other )->tick( $held->id, $this->now );
 		$this->assertSame( TickResult::MORE, $result->status, (string) $result->message );
 		$this->assertGreaterThan( 0, $ran, 'the job that holds the site ran' );
+	}
+
+	public function test_a_copied_database_s_job_that_holds_the_site_is_not_run_by_the_copy(): void {
+		$ran = 0;
+		$this->register(
+			'hold3',
+			array(
+				new CliHoldingStep(
+					'swap',
+					static function () use ( &$ran ): StepResult {
+						++$ran;
+						return StepResult::progress( array( 'site' => Job::SITE_CHANGING ), 50 );
+					}
+				),
+			)
+		);
+		$held = $this->repo->create( 'hold3' );
+		$this->set( $held->id, array( 'site_state' => Job::SITE_CHANGING, 'status' => Job::RUNNING ) );
+		// Another ABSPATH with the same stored state: a copy of the site (the clone notice is pending).
+		$copy = $this->site( 'releases/b' );
+		$copy->base();
+		$this->assertTrue( $copy->state()['clone_detected'], 'the control: the copy is detected' );
+		$repo = $this->repo_for( $copy );
+		$this->assertFalse( $repo->gate( $held )['allowed'] );
+		$this->assertNull( $repo->acquire( $held->id ), 'the storage token is part of the compare-and-set' );
+		$this->assertSame( TickResult::BLOCKED, $this->runner( true, $repo )->tick( $held->id, $this->now )->status );
+		$this->assertSame( 0, $ran );
+		$this->assertSame( TickResult::MORE, $this->runner( true )->tick( $held->id, $this->now )->status, 'the control: the original runs it' );
+		$this->assertGreaterThan( 0, $ran );
+	}
+
+	public function test_a_job_that_holds_the_site_is_not_run_by_code_older_than_the_table(): void {
+		$ran = 0;
+		$this->register(
+			'hold4',
+			array(
+				new CliHoldingStep(
+					'swap',
+					static function () use ( &$ran ): StepResult {
+						++$ran;
+						return StepResult::progress( array( 'site' => Job::SITE_CHANGING ), 50 );
+					}
+				),
+			)
+		);
+		$held   = $this->repo->create( 'hold4' );
+		$stored = Options::get( Schema::OPTION );
+		$this->set( $held->id, array( 'site_state' => Job::SITE_CHANGING, 'status' => Job::RUNNING ) );
+		Options::set( Schema::OPTION, array_merge( (array) $stored, array( 'min_compatible' => Schema::CURRENT + 1 ) ) );
+		try {
+			$result = $this->runner( true )->tick( $held->id, $this->now );
+		} finally {
+			Options::set( Schema::OPTION, $stored );
+		}
+		$this->assertSame( TickResult::BLOCKED, $result->status );
+		$this->assertStringContainsString( 'newer version', (string) $result->message );
+		$this->assertSame( 0, $ran );
+		$this->assertSame( TickResult::MORE, $this->runner( true )->tick( $held->id, $this->now )->status, 'the control: runs with the schema compatible' );
+	}
+
+	public function test_a_checkpoint_the_database_refuses_stops_the_run_before_it_goes_on(): void {
+		global $wpdb;
+		$after = 0;
+		$this->register(
+			'hold5',
+			array(
+				new CliHoldingStep(
+					'swap',
+					static function ( JobContext $ctx ) use ( &$after ): StepResult {
+						$ctx->checkpoint( array( 'site' => Job::SITE_CHANGING ), 10 );
+						++$after; // What the step would change once the row says so.
+						return StepResult::progress( array( 'site' => Job::SITE_SWAPPED ), 50 );
+					}
+				),
+			)
+		);
+		$refuse = true;
+		$filter = static function ( string $sql ) use ( &$refuse ): string {
+			if ( $refuse && 0 === strpos( $sql, 'UPDATE' ) && false !== strpos( $sql, '`site_state` =' ) ) {
+				return 'SELECT * FROM a_table_that_is_not_there_' . bin2hex( random_bytes( 3 ) );
+			}
+			return $sql;
+		};
+		$job = $this->repo->create( 'hold5' );
+		add_filter( 'query', $filter );
+		$quiet = $wpdb->suppress_errors( true );
+		try {
+			$result = $this->runner( true )->tick( $job->id, $this->now );
+		} finally {
+			$wpdb->suppress_errors( $quiet );
+			remove_filter( 'query', $filter );
+		}
+		$this->assertSame( TickResult::LOST, $result->status );
+		$this->assertSame( 0, $after, 'the step did not go on' );
+		$this->assertSame( Job::SITE_UNTOUCHED, $this->repo->find( $job->id )->site_state );
+
+		$this->set( $job->id, array( 'locked_until' => 1 ) );
+		$refuse = false;
+		$this->runner( true )->tick( $job->id, $this->now );
+		$this->assertGreaterThan( 0, $after, 'the control: with the write stored it goes on' );
+		$this->assertSame( Job::SITE_SWAPPED, $this->repo->find( $job->id )->site_state );
+	}
+
+	public function test_the_engine_refuses_what_would_leave_the_site_changed_behind(): void {
+		$cases = array(
+			'retry from an earlier step'   => static function (): StepResult {
+				throw new \WPCheckpoint\Jobs\RetryFrom( 'from the start', 'first' );
+			},
+			'cancelled while changing'     => static function (): StepResult {
+				throw new Cancelled( 'cancelled' );
+			},
+			'done while changing'          => static function (): StepResult {
+				return StepResult::done( 'done' );
+			},
+			'a site state out of range'    => static function (): StepResult {
+				return StepResult::progress( array( 'site' => 7 ), 50 );
+			},
+		);
+		foreach ( $cases as $label => $end ) {
+			$type = 'refuse_' . md5( $label );
+			$this->register(
+				$type,
+				array(
+					new ClosureStep( 'first', static function (): StepResult {
+						return StepResult::done( 'first' );
+					} ),
+					new CliHoldingStep( 'swap', $end ),
+				)
+			);
+			$job = $this->repo->create( $type );
+			$this->set( $job->id, array( 'step' => 'swap', 'status' => Job::RUNNING, 'site_state' => Job::SITE_CHANGING ) );
+			$this->runner( true )->tick( $job->id, $this->now );
+			$after = $this->repo->find( $job->id );
+			$this->assertSame( Job::FAILED, $after->status, $label );
+			$this->assertSame( Job::SITE_CHANGING, $after->site_state, $label );
+			$this->assertSame( '', $after->lock_token, $label . ': the lock is given back' );
+			$this->assertArrayNotHasKey( JobRepository::RETRY_FROM_KEY, $after->cursor, $label . ': a retry continues this step' );
+		}
+		// The control: with the site as it was, a retry from an earlier step is recorded.
+		$this->register( 'refuse_control', array( new ClosureStep( 'first', static function (): StepResult {
+			return StepResult::done( 'first' );
+		} ), new CliHoldingStep( 'swap', $cases['retry from an earlier step'] ) ) );
+		$job = $this->repo->create( 'refuse_control' );
+		$this->set( $job->id, array( 'step' => 'swap', 'status' => Job::RUNNING ) );
+		$this->runner( true )->tick( $job->id, $this->now );
+		$this->assertSame( 'first', $this->repo->find( $job->id )->cursor[ JobRepository::RETRY_FROM_KEY ] ?? null );
 	}
 
 	public function test_time_and_storage_rules_leave_a_job_that_holds_the_site_alone(): void {
@@ -377,12 +550,8 @@ final class SiteStateTest extends WP_UnitTestCase {
 		$this->assertTrue( $this->work_left( $changing ) );
 
 		$swapped = $this->job( array( 'status' => Job::RUNNING, 'site_state' => Job::SITE_SWAPPED ) );
-		try {
-			$actions->cancel( $swapped->id );
-			$this->fail( 'a swapped job was cancelled' );
-		} catch ( InvalidTransition $e ) {
-			$this->assertStringContainsString( 'cannot change it back', $e->getMessage() );
-		}
+		$this->assertSame( 'swapped', $actions->cancel( $swapped->id )['reason'] );
+		$this->assertStringContainsString( 'cannot change it back', \WPCheckpoint\Rest\JobsController::cancel_message( 'swapped' ) );
 		$this->assertSame( Job::RUNNING, $this->repo->find( $swapped->id )->status );
 
 		$plain = $this->job( array( 'status' => Job::RUNNING ) );
@@ -469,13 +638,15 @@ final class SiteStateTest extends WP_UnitTestCase {
 		ini_set( 'error_log', $sink );
 		try {
 			( new Logger( $this->root . '/missing/dir/job.log', $redac ) )->info( 'dropped line' );
-			( new Logger( $this->root . '/missing/dir/job.log', $redac, Logger::DEFAULT_MAX_BYTES, true ) )->info( 'kept line' );
-			( new Logger( $this->root . '/job.log', $redac, Logger::DEFAULT_MAX_BYTES, true ) )->info( 'file line' );
+			( new Logger( $this->root . '/missing/dir/job.log', $redac, Logger::DEFAULT_MAX_BYTES, array( Runner::class, 'to_php_log' ) ) )->info( 'kept line', array( 'at' => ABSPATH . 'wp-content/x' ) );
+			( new Logger( $this->root . '/job.log', $redac, Logger::DEFAULT_MAX_BYTES, array( Runner::class, 'to_php_log' ) ) )->info( 'file line' );
 		} finally {
 			ini_set( 'error_log', (string) $was );
 		}
 		$php = (string) @file_get_contents( $sink );
 		$this->assertStringContainsString( 'kept line', $php );
+		$this->assertStringContainsString( '{wp-content}/x', $php, 'the paths in it are masked' );
+		$this->assertStringNotContainsString( rtrim( ABSPATH, '/' ), $php );
 		$this->assertStringNotContainsString( 'dropped line', $php, 'without the fallback a line is dropped, as before' );
 		$this->assertStringNotContainsString( 'file line', $php, 'a writable file takes the line' );
 		$this->assertStringContainsString( 'file line', (string) file_get_contents( $this->root . '/job.log' ), 'the control: the file was written' );
@@ -510,4 +681,67 @@ final class SiteStateTest extends WP_UnitTestCase {
 		$this->assertFalse( Schema::table_exists(), 'the control: without it the data goes as the user chose' );
 		$this->assertFalse( get_option( Uninstaller::OPTION_VERSION ) );
 	}
+
+	public function test_uninstalling_keeps_everything_when_whether_a_job_holds_the_site_cannot_be_read(): void {
+		global $wpdb;
+		UninstallSetting::save( true );
+		update_option( Uninstaller::OPTION_VERSION, '1.2.3' );
+		$this->job( array( 'status' => Job::RUNNING ) );
+		$filter = static function ( string $sql ): string {
+			return false !== strpos( $sql, "LIKE 'site_state'" ) ? 'SELECT * FROM a_table_that_is_not_there' : $sql;
+		};
+		$was   = ini_get( 'error_log' );
+		$quiet = $wpdb->suppress_errors( true );
+		ini_set( 'error_log', $this->root . '/php-error.log' );
+		add_filter( 'query', $filter );
+		try {
+			$this->assertNull( Uninstaller::jobs_holding_the_site() );
+			Uninstaller::run();
+		} finally {
+			remove_filter( 'query', $filter );
+			ini_set( 'error_log', (string) $was );
+			$wpdb->suppress_errors( $quiet );
+		}
+		$this->assertTrue( Schema::table_exists(), 'the jobs table stays' );
+		$this->assertSame( '1.2.3', get_option( Uninstaller::OPTION_VERSION ) );
+		$this->assertStringContainsString( 'could not tell', (string) file_get_contents( $this->root . '/php-error.log' ) );
+		$this->assertSame( 0, Uninstaller::jobs_holding_the_site(), 'the control: readable, it holds none' );
+	}
+
+	public function test_a_cancel_request_ends_with_the_swap_and_with_a_retry_of_a_job_that_holds_nothing(): void {
+		$this->register(
+			'swaps',
+			array(
+				new CliHoldingStep(
+					'swap',
+					static function ( JobContext $ctx ): StepResult {
+						$ctx->checkpoint( array( 'site' => Job::SITE_SWAPPED ), 90 );
+						return StepResult::done( 'swapped' );
+					}
+				),
+			)
+		);
+		$job = $this->repo->create( 'swaps' );
+		$this->set( $job->id, array( 'status' => Job::RUNNING, 'site_state' => Job::SITE_CHANGING, 'cancel_requested' => 5 ) );
+		$this->runner( true )->tick( $job->id, $this->now );
+		$after = $this->repo->find( $job->id );
+		$this->assertSame( Job::COMPLETED, $after->status );
+		$this->assertSame( 0, $after->cancel_requested, 'a request the swap outran does not act on what changes the site later' );
+
+		$held  = $this->job( array( 'status' => Job::FAILED, 'site_state' => Job::SITE_CHANGING, 'cancel_requested' => 5, 'finished_at' => (int) $this->now ) );
+		$plain = $this->job( array( 'status' => Job::FAILED, 'cancel_requested' => 5, 'finished_at' => (int) $this->now ) );
+		$this->repo->transition( $held, Job::QUEUED );
+		$this->repo->transition( $plain, Job::QUEUED );
+		$this->assertSame( 5, $this->repo->find( $held->id )->cancel_requested, 'kept: the retry puts the site back, then cancels' );
+		$this->assertSame( 0, $this->repo->find( $plain->id )->cancel_requested );
+	}
+
+	public function test_a_table_without_columns_this_code_needs_never_fails_a_job_that_holds_the_site(): void {
+		$held  = $this->job( array( 'status' => Job::RUNNING, 'site_state' => Job::SITE_CHANGING ) );
+		$plain = $this->job( array( 'status' => Job::RUNNING ) );
+		$this->assertSame( JobRepository::FAIL_DONE, $this->repo->fail_for_missing_columns( $plain, 'columns missing', array( 'x' ) ), 'the control' );
+		$this->assertSame( JobRepository::FAIL_HELD, $this->repo->fail_for_missing_columns( $held, 'columns missing', array( 'x' ) ) );
+		$this->assertSame( Job::RUNNING, $this->repo->find( $held->id )->status );
+	}
 }
+

@@ -13,7 +13,11 @@ defined( 'ABSPATH' ) || exit;
  * A step whose cursor tells what it has done to the site (Job::$site_state).
  * The Runner writes the value in the statement that writes the cursor, on
  * every checkpoint and every result the step returns: the row never shows a
- * cursor of one state and a site_state of another.
+ * cursor of one state and a site_state of another. What the engine cannot
+ * enforce is the step's part: it checkpoints a cursor of SITE_CHANGING
+ * before it changes anything, and confirms its lease right before each
+ * change it cannot take back, so that every rule that leaves such a job
+ * alone already sees it (a checkpoint the database refuses stops the run).
  */
 interface HoldsSite {
 

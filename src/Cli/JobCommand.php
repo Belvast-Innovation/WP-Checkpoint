@@ -300,6 +300,9 @@ final class JobCommand {
 		if ( null === $outcome ) {
 			WP_CLI::error( 'No such job.' );
 		}
+		if ( 'swapped' === $outcome['reason'] ) {
+			WP_CLI::error( \WPCheckpoint\Rest\JobsController::cancel_message( 'swapped' ) );
+		}
 		WP_CLI::success( \WPCheckpoint\Rest\JobsController::cancel_message( $outcome['reason'] ) );
 	}
 

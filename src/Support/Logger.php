@@ -52,25 +52,25 @@ final class Logger {
 	private $truncated = false;
 
 	/**
-	 * Whether a line the file cannot take goes to PHP's error log instead of being dropped.
+	 * Where a line the file cannot take goes instead of being dropped: function( string $line ): void, or null.
 	 *
-	 * @var bool
+	 * @var callable|null
 	 */
 	private $fallback;
 
 	/**
 	 * Constructor.
 	 *
-	 * @param string   $path      Absolute path of the log file (created on first write).
-	 * @param Redactor $redactor  Redactor.
-	 * @param int      $max_bytes Size cap.
-	 * @param bool     $fallback  Whether a line the file cannot take goes to PHP's error log (error_log()).
+	 * @param string        $path      Absolute path of the log file (created on first write).
+	 * @param Redactor      $redactor  Redactor.
+	 * @param int           $max_bytes Size cap.
+	 * @param callable|null $fallback Where a line the file cannot take goes (function( string $line ): void), redacted.
 	 */
-	public function __construct( string $path, Redactor $redactor, int $max_bytes = self::DEFAULT_MAX_BYTES, bool $fallback = false ) {
+	public function __construct( string $path, Redactor $redactor, int $max_bytes = self::DEFAULT_MAX_BYTES, $fallback = null ) {
 		$this->path      = $path;
 		$this->redactor  = $redactor;
 		$this->max_bytes = $max_bytes;
-		$this->fallback  = $fallback;
+		$this->fallback  = is_callable( $fallback ) ? $fallback : null;
 	}
 
 	/**
@@ -206,8 +206,8 @@ final class Logger {
 
 		$handle = @fopen( $this->path, 'ab' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen,WordPress.PHP.NoSilencedErrors.Discouraged -- append-only log stream; a failure is handled below.
 		if ( false === $handle ) {
-			if ( $this->fallback ) {
-				error_log( 'WP Checkpoint: ' . rtrim( $line, "\n" ) ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- the job's own log cannot be written.
+			if ( null !== $this->fallback ) {
+				call_user_func( $this->fallback, rtrim( $line, "\n" ) );
 			}
 			return;
 		}
