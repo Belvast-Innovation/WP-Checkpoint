@@ -161,6 +161,69 @@ jobs:
         if: failure()
         run: npx wp-env logs tests --watch=false
 
+  manual-restore:
+    # The manual restore steps for users without the plugin, run as written on a real archive (several volumes, one
+    # hashed in blocks, files larger than a content chunk), and the result compared with the original site.
+    name: Manual restore (documented steps)
+    runs-on: ubuntu-latest
+    needs: static
+    defaults:
+      run:
+        working-directory: wp-checkpoint
+    services:
+      db:
+        # The same server as the wp-env test site, so the collations in the backup are known to it.
+        image: mariadb:lts
+        env:
+          MARIADB_ROOT_PASSWORD: password
+        ports:
+          - 33306:3306
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: wp-checkpoint
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: none
+          tools: composer:v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: wp-checkpoint/package-lock.json
+
+      - name: Cache Composer packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.composer/cache
+          key: composer-${{ runner.os }}-8.3-${{ hashFiles('wp-checkpoint/composer.lock') }}
+          restore-keys: composer-${{ runner.os }}-8.3-
+
+      - run: composer install --no-interaction --no-progress --prefer-dist
+      - run: npm ci
+      - run: npx wp-env start
+
+      - name: Build the archive and the original's fingerprint
+        run: npx wp-env run tests-cli --env-cwd=wp-content/plugins/wp-checkpoint wp eval-file tests/acceptance/manual-restore/build.php
+
+      - name: Wait for the target database
+        run: |
+          for i in $(seq 1 60); do
+            php -r 'mysqli_report(MYSQLI_REPORT_OFF); exit(@mysqli_connect("127.0.0.1", "root", "password", "", 33306) ? 0 : 1);' && exit 0
+            sleep 2
+          done
+          exit 1
+
+      - name: Restore by hand and compare
+        run: bash tests/acceptance/manual-restore/restore.sh build/manual-restore 127.0.0.1 33306 root password
+
+      - name: Show wp-env logs on failure
+        if: failure()
+        run: npx wp-env logs tests --watch=false
+
   integration-multisite:
     name: Integration (wp-env, multisite)
     runs-on: ubuntu-latest
