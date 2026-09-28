@@ -170,7 +170,7 @@ final class FileScanner {
 					return $state;
 				}
 				$root = $this->roots[ (int) $state['root'] ];
-				if ( ! is_dir( $root['path'] ) || self::is_any_link( $root['path'] ) ) {
+				if ( ! is_dir( $root['path'] ) || is_link( $root['path'] ) ) {
 					$this->warn( $state, 'unreadable', 'A content directory is missing or is a link and was not scanned: ' . $root['prefix'] );
 					++$state['root'];
 					continue;
@@ -227,9 +227,13 @@ final class FileScanner {
 	}
 
 	/**
-	 * Whether an entry is a link of any kind, and so neither listed nor entered: a symbolic link, or on Windows a
-	 * junction, which is_link() does not report and stat() reports with mode 0 (neither a directory nor a file). A
-	 * regular file is never a junction and is not asked about further, so the cost stays with directories.
+	 * Whether an entry below a content root is a link of any kind, and so neither listed nor entered: a symbolic link,
+	 * or on Windows a directory junction, which is_link() does not report; right after is_link(), is_dir() and
+	 * is_file() are both false for a junction too (observed on the Windows CI runner), so without this it was counted
+	 * as a special file and stayed out only because is_dir() was false. A regular file is not asked about further, so
+	 * the added cost stays with directories. When the Deleter's check has no definite answer (no readlink(), an empty
+	 * directory, or one holding only links), the entry counts as not a link and is entered: an empty directory lists
+	 * nothing, and PackStep packs only what Paths::is_inside() places under the root.
 	 *
 	 * @param string $path Path.
 	 * @return bool

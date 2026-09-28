@@ -177,6 +177,25 @@ final class FileScannerTest extends TestCase {
 		}
 	}
 
+	public function test_a_content_root_that_is_a_junction_is_scanned_through_it(): void {
+		// A root is not an entry: a junction as the uploads directory (moved to another drive) is scanned as before,
+		// only a junction below a root is left out. On POSIX a symbolic link as a root is refused; which is right for
+		// both is an open question, and this pins the current answer on Windows.
+		$this->put( 'elsewhere/photo.jpg' );
+		Junction::make( $this->root . '/elsewhere', $this->root . '/uploads' );
+		try {
+			$scanner = new FileScanner(
+				array( array( 'group' => 'uploads', 'path' => $this->root . '/uploads', 'prefix' => 'wp-content/uploads', 'skip' => array() ) ),
+				new Exclusions( array(), array() )
+			);
+			list( $lines, $state ) = $this->run_all( $scanner );
+			$this->assertSame( array( 'wp-content/uploads/photo.jpg' ), $this->paths( $lines ) );
+			$this->assertSame( array(), $state['warnings'] );
+		} finally {
+			Junction::remove( $this->root . '/uploads' );
+		}
+	}
+
 	public function test_unreadable_entries_are_listed_for_the_preflight_and_the_scan_goes_on(): void {
 		Permissions::require_enforced();
 		$this->put( 'c/a.txt' );
