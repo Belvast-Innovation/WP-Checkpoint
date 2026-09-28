@@ -1,0 +1,118 @@
+<?php
+
+namespace WPCheckpoint\Tests\Integration;
+
+use WP_UnitTestCase;
+use WPCheckpoint\Plugin;
+use WPCheckpoint\Support\Uninstaller;
+
+/**
+ * The housekeeping that deletes (reclaim and purge, storage switching, uninstall) goes on when the Deleter refuses a
+ * path: the refusal is logged and counted as a failure, nothing is deleted, nothing is thrown. Each helper is also
+ * shown deleting a path in the temporary directory (its control). The paths refused here are relative ones: nothing
+ * could be deleted even if the guard failed (the working directory is not written to).
+ */
+final class DeleterRefusalHandlingTest extends WP_UnitTestCase {
+
+	/** @var string */
+	private $sandbox = '';
+
+	/** @var string */
+	private $php_log = '';
+
+	/** @var string|false */
+	private $was;
+
+	public function set_up(): void {
+		parent::set_up();
+		$this->sandbox = sys_get_temp_dir() . '/wpc-refusal-' . bin2hex( random_bytes( 4 ) );
+		mkdir( $this->sandbox );
+		$this->php_log = $this->sandbox . '.log';
+		$this->was     = ini_get( 'error_log' );
+		ini_set( 'error_log', $this->php_log );
+	}
+
+	public function tear_down(): void {
+		ini_set( 'error_log', (string) $this->was );
+		@unlink( $this->php_log );
+		if ( '' !== $this->sandbox && is_dir( $this->sandbox ) ) {
+			foreach ( (array) glob( $this->sandbox . '/*' ) as $file ) {
+				@unlink( (string) $file );
+			}
+			@rmdir( $this->sandbox );
+		}
+		parent::tear_down();
+	}
+
+	/**
+	 * A private method made callable.
+	 */
+	private static function method( string $class, string $name ): \ReflectionMethod {
+		$method = new \ReflectionMethod( $class, $name );
+		$method->setAccessible( true );
+		return $method;
+	}
+
+	private function file(): string {
+		$file = $this->sandbox . '/f-' . bin2hex( random_bytes( 3 ) ) . '.txt';
+		file_put_contents( $file, 'x' );
+		return $file;
+	}
+
+	/**
+	 * A relative path of its own (storage.log outlives the test: an earlier run's line must not pass for this one's).
+	 */
+	private static function relative( string $name ): string {
+		return $name . '-' . bin2hex( random_bytes( 4 ) );
+	}
+
+	private function storage_log(): string {
+		return (string) @file_get_contents( Plugin::instance()->directories()->base() . '/logs/storage.log' );
+	}
+
+	public function test_reclaim_and_purge_log_a_refusal_and_count_it_as_a_failure(): void {
+		$delete = self::method( get_class( Plugin::instance()->jobs() ), 'delete_tree' );
+		$target = self::relative( 'relative' ) . '/target';
+		$this->assertStringNotContainsString( $target, $this->storage_log() );
+		$result = $delete->invoke( Plugin::instance()->jobs(), dirname( $target ), $target, 0 );
+		$this->assertSame( array( $target ), $result['failed'] );
+		$this->assertSame( 0, $result['deleted'] );
+		$this->assertStringContainsString( 'Nothing was deleted: ' . $target, $this->storage_log() );
+
+		$file = $this->file();
+		$this->assertSame( 1, $delete->invoke( Plugin::instance()->jobs(), $this->sandbox, $file, 0 )['deleted'], 'the control: a path it may delete' );
+		$this->assertFileDoesNotExist( $file );
+	}
+
+	public function test_switching_the_storage_directory_logs_a_refusal_and_goes_on(): void {
+		$empty = self::method( get_class( Plugin::instance()->directories() ), 'empty_directory' );
+		$dir   = self::relative( 'relative-storage' );
+		$this->assertStringNotContainsString( $dir, $this->storage_log() );
+		$empty->invoke( Plugin::instance()->directories(), $dir );
+		$this->assertStringContainsString( 'Nothing was deleted: ' . $dir, $this->storage_log() );
+
+		$file = $this->file();
+		$empty->invoke( Plugin::instance()->directories(), $this->sandbox );
+		$this->assertFileDoesNotExist( $file, 'the control: a directory it may empty' );
+	}
+
+	public function test_uninstalling_logs_a_refusal_and_counts_it_as_a_failure(): void {
+		$tree   = self::method( Uninstaller::class, 'delete_tree' );
+		$target = self::relative( 'relative' ) . '/target';
+		$result = $tree->invoke( null, dirname( $target ), $target );
+		$this->assertSame( array( $target ), $result['failed'] );
+		$empty  = self::method( Uninstaller::class, 'empty_directory' );
+		$dir    = self::relative( 'relative-storage' );
+		$result = $empty->invoke( null, $dir );
+		$this->assertSame( array( $dir ), $result['failed'] );
+		$log = (string) file_get_contents( $this->php_log );
+		$this->assertStringContainsString( 'Nothing was deleted: ' . $target, $log );
+		$this->assertStringContainsString( 'Nothing was deleted: ' . $dir, $log );
+
+		$file = $this->file();
+		$this->assertSame( 1, $tree->invoke( null, $this->sandbox, $file )['deleted'], 'the control: a path it may delete' );
+		$file = $this->file();
+		$this->assertSame( 1, $empty->invoke( null, $this->sandbox )['deleted'], 'the control: a directory it may empty' );
+		$this->assertFileDoesNotExist( $file );
+	}
+}

@@ -106,7 +106,12 @@ final class DeleterTest extends TestCase {
 		$this->assertNotEmpty( Deleter::delete_tree( $this->base(), $this->root . '/outside' )['failed'] );
 		$this->assertNotEmpty( Deleter::delete_tree( $this->base(), $this->base() )['failed'] );
 		$this->assertNotEmpty( Deleter::delete_tree( $this->base(), $this->base() . '/a/../../outside/secret.txt' )['failed'] );
-		$this->assertNotEmpty( Deleter::delete_tree( $this->base(), '' )['failed'] );
+		try {
+			Deleter::delete_tree( $this->base(), '' );
+			$this->fail( 'an empty target was not refused' );
+		} catch ( \WPCheckpoint\Support\DeletionRefused $e ) {
+			$this->assertStringContainsString( 'the path is empty', $e->getMessage() ); // DeleterGuardTest has the rest.
+		}
 		$this->assert_outside_untouched();
 		$this->assertDirectoryExists( $this->base() . '/a/b' );
 	}

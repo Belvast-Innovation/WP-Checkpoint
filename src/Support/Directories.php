@@ -270,7 +270,7 @@ final class Directories {
 		$this->save_state();
 
 		if ( '' !== $abandoned && $abandoned !== $dir && is_dir( $abandoned ) && $this->holds_only_plugin_files( $abandoned ) ) {
-			Deleter::empty_directory( $abandoned );
+			$this->empty_directory( $abandoned );
 			@rmdir( $abandoned ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_rmdir -- best effort cleanup of the empty replacement directory.
 		}
 	}
@@ -392,6 +392,20 @@ final class Directories {
 	}
 
 	/**
+	 * Deleter::empty_directory(), with a refused path logged: nothing was deleted, and resolving the storage goes on.
+	 *
+	 * @param string $dir Directory.
+	 * @return void
+	 */
+	private function empty_directory( string $dir ): void {
+		try {
+			Deleter::empty_directory( $dir );
+		} catch ( DeletionRefused $e ) {
+			$this->log_event( $e->getMessage() );
+		}
+	}
+
+	/**
 	 * Append a line to logs/storage.log in the base directory.
 	 *
 	 * @param string $message Message.
@@ -421,6 +435,15 @@ final class Directories {
 	 * @return void
 	 */
 	private function resolve_custom(): void {
+		$refused = Deleter::storage_refusal( $this->context['custom_dir'] );
+		if ( '' !== $refused ) {
+			// Nothing in it could ever be deleted (reclaim, purge, uninstall): refused before anything is written there.
+			// The constant as set, before any trimming (a drive root keeps its separator).
+			$this->error = Deleter::NOT_A_FULL_PATH === $refused
+				? __( 'WPCHECKPOINT_STORAGE_DIR must be an absolute path, without . or .. segments unless the directory exists. Set it to the full path of a directory of its own.', 'wp-checkpoint' )
+				: __( 'WPCHECKPOINT_STORAGE_DIR names the root of the file system, a WordPress directory or a directory that holds one. Set it to a directory of its own, for example a new directory next to the WordPress directory. Backups already stored there stay in its backups sub-directory; move them to the new directory by hand.', 'wp-checkpoint' );
+			return;
+		}
 		$dir = rtrim( $this->context['custom_dir'], '/\\' );
 		if ( '' === $dir ) {
 			$this->error = __( 'WPCHECKPOINT_STORAGE_DIR is empty.', 'wp-checkpoint' );
@@ -657,7 +680,7 @@ final class Directories {
 			return;
 		}
 
-		Deleter::empty_directory( $current );
+		$this->empty_directory( $current );
 		@rmdir( $current ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_rmdir -- best effort cleanup of the empty provisional directory.
 		$this->adopt( $outside, self::SOURCE_OUTSIDE, false );
 	}

@@ -84,6 +84,8 @@ final class ExportPipelineTest extends JobTestCase {
 		Schema::ensure();
 		$this->uploads = wp_upload_dir()['basedir'] . '/wpcpipe-uploads';
 		$this->scratch = WP_CONTENT_DIR . '/wp-checkpoint-pipeline-scratch';
+		\WPCheckpoint\Support\Deleter::allow( $this->uploads ); // Made by this test under the site's own directories: registered to be deleted.
+		\WPCheckpoint\Support\Deleter::allow( $this->scratch );
 		mkdir( $this->uploads . '/images', 0755, true );
 		mkdir( $this->uploads . '/docs', 0755, true );
 		mkdir( $this->scratch . '/verify', 0755, true );

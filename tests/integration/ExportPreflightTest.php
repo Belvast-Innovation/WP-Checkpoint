@@ -74,6 +74,7 @@ final class ExportPreflightTest extends JobTestCase {
 		$this->types = new JobTypes();
 		Schema::ensure();
 		$this->uploads = wp_upload_dir()['basedir'] . '/wpcptest-preflight';
+		\WPCheckpoint\Support\Deleter::allow( $this->uploads ); // Made by this test under the site's own directories: registered to be deleted.
 		mkdir( $this->uploads . '/node_modules/pkg', 0755, true );
 		mkdir( $this->uploads . '/images', 0755, true );
 		file_put_contents( $this->uploads . '/images/a.jpg', 'jpeg' );

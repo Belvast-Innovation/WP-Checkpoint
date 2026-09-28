@@ -22,8 +22,18 @@ if ( 'integration' === $wpcheckpoint_suite ) {
 }
 
 if ( ! defined( 'ABSPATH' ) ) {
-	define( 'ABSPATH', sys_get_temp_dir() . '/wp-checkpoint-abspath/' );
+	// Inside the repository, never under the temporary directory: the Deleter refuses ABSPATH and every directory that
+	// holds it, so the repository itself can never be deleted by a unit test, and the temporary directory the tests
+	// work in can be registered.
+	define( 'ABSPATH', dirname( __DIR__ ) . '/build/unit-abspath/' );
+	if ( ! is_dir( ABSPATH ) ) {
+		mkdir( ABSPATH, 0755, true );
+	}
 }
+
+// The tests delete what they make under the temporary directory: the one directory registered for them, for what is
+// inside it only (it is shared: the directory itself is never deleted nor emptied).
+\WPCheckpoint\Support\Deleter::allow( sys_get_temp_dir(), false );
 
 if ( ! function_exists( '__' ) ) {
 	/**
@@ -108,4 +118,11 @@ function wpcheckpoint_bootstrap_integration() {
 	);
 
 	require $tests_dir . '/includes/bootstrap.php';
+
+	// The tests delete what they make under the temporary directory: the one directory registered for them (a test
+	// that works under the site's own directories registers what it made there).
+	\WPCheckpoint\Support\Deleter::allow( sys_get_temp_dir(), false );
+	if ( function_exists( 'get_temp_dir' ) && rtrim( get_temp_dir(), '/' ) !== rtrim( sys_get_temp_dir(), '/' ) ) {
+		\WPCheckpoint\Support\Deleter::allow( get_temp_dir(), false );
+	}
 }

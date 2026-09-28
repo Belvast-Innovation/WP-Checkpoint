@@ -51,6 +51,7 @@ final class NoBudgetLeftTest extends JobTestCase {
 	public function set_up(): void {
 		parent::set_up();
 		$this->uploads = wp_upload_dir()['basedir'] . '/wpcnobudget';
+		\WPCheckpoint\Support\Deleter::allow( $this->uploads ); // Made by this test under the site's own directories: registered to be deleted.
 		wp_mkdir_p( $this->uploads );
 		file_put_contents( $this->uploads . '/a.txt', str_repeat( 'no budget ', 300 ) );
 		// More than one piece and one hash chunk: stored, packed and hashed over several units.

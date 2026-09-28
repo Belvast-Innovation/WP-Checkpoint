@@ -37,12 +37,18 @@ final class StorageTest extends WP_UnitTestCase {
 			$this->cleanup[] = $state['previous_path'];
 		}
 		foreach ( array_unique( $this->cleanup ) as $dir ) {
+			if ( '' === (string) $dir || '' !== Deleter::refusal( (string) $dir ) ) {
+				continue; // Not set, or not one the plugin may delete (what the test made elsewhere it removes itself).
+			}
 			if ( is_dir( $dir ) ) {
 				Deleter::empty_directory( $dir );
 				@rmdir( $dir );
 			}
 		}
 		foreach ( glob( WP_CONTENT_DIR . '/wp-checkpoint-*' ) ?: array() as $dir ) {
+			if ( '' === (string) $dir || '' !== Deleter::refusal( (string) $dir ) ) {
+				continue; // Not set, or not one the plugin may delete (what the test made elsewhere it removes itself).
+			}
 			Deleter::empty_directory( $dir );
 			@rmdir( $dir );
 		}
@@ -233,6 +239,44 @@ final class StorageTest extends WP_UnitTestCase {
 		$this->assertDirectoryDoesNotExist( $custom . '/backups' );
 		$this->assertFileDoesNotExist( $custom . '/' . OwnerMarker::FILENAME );
 		$this->assertFileDoesNotExist( $custom . '/.htaccess' );
+	}
+
+	public function test_a_custom_directory_that_is_or_holds_a_wordpress_directory_is_refused_before_anything_is_written(): void {
+		// A stand-in for ABSPATH (the real directories are asked about in DeleterProtectionTest, without writing).
+		$site   = $this->fake_root . '/htdocs/wp';
+		$before = Deleter::replace_protected( array( $site ) );
+		try {
+			foreach ( array( $site, $this->fake_root . '/htdocs' ) as $custom ) {
+				$dirs = new Directories( $this->cli_context( array( 'custom_dir' => $custom ) ) );
+				$this->assertSame( '', $dirs->base(), $custom );
+				$this->assertStringContainsString( 'WPCHECKPOINT_STORAGE_DIR names the root of the file system, a WordPress directory', $dirs->last_error() );
+				$this->assertSame( array( '.', '..' ), scandir( $site ), 'nothing was written there' );
+				$this->assertSame( array( '.', '..', 'wp' ), scandir( $this->fake_root . '/htdocs' ), 'nothing was written there' );
+			}
+			$custom = $this->fake_root . '/custom-storage';
+			$dirs   = new Directories( $this->cli_context( array( 'custom_dir' => $custom ) ) );
+			$this->assertSame( $custom, $dirs->base(), 'the control: a directory beside it: ' . $dirs->last_error() );
+			$this->assertFileExists( $custom . '/' . OwnerMarker::FILENAME );
+		} finally {
+			Deleter::replace_protected( $before );
+		}
+	}
+
+	public function test_a_custom_directory_named_by_a_relative_path_is_refused_before_anything_is_written(): void {
+		$cwd = (string) getcwd();
+		chdir( $this->fake_root ); // Where the relative paths would lead: anything written lands in the sandbox.
+		try {
+			foreach ( array( 'relative-storage', './relative-storage', $this->fake_root . '/htdocs/../relative-storage' ) as $custom ) {
+				$dirs = new Directories( $this->cli_context( array( 'custom_dir' => $custom ) ) );
+				$this->assertSame( '', $dirs->base(), $custom );
+				$this->assertStringContainsString( 'WPCHECKPOINT_STORAGE_DIR must be an absolute path', $dirs->last_error() );
+				$this->assertSame( array( '.', '..', 'htdocs' ), scandir( $this->fake_root ), 'nothing was written' );
+			}
+			$dirs = new Directories( $this->cli_context( array( 'custom_dir' => $this->fake_root . '/relative-storage' ) ) );
+			$this->assertSame( $this->fake_root . '/relative-storage', $dirs->base(), 'the control: the same directory, named in full: ' . $dirs->last_error() );
+		} finally {
+			chdir( $cwd );
+		}
 	}
 
 	public function test_custom_directory_gets_a_token_that_is_stable_and_changes_with_the_path(): void {
