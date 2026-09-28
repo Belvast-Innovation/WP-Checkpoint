@@ -33,7 +33,9 @@ final class DeleterGuardTest extends TestCase {
 		parent::set_up();
 		$this->sandbox = sys_get_temp_dir() . '/wpc-deleter-guard-' . bin2hex( random_bytes( 4 ) );
 		mkdir( $this->sandbox, 0755, true );
-		$this->sandbox          = (string) realpath( $this->sandbox );
+		$this->sandbox = (string) realpath( $this->sandbox );
+		$this->assertNotSame( '', $this->sandbox, 'the sandbox was made' );
+		$this->assertDirectoryExists( $this->sandbox );
 		$this->cwd              = (string) getcwd();
 		$this->protected_before = Deleter::replace_protected( array() );
 		$this->roots_before     = Deleter::replace_roots( array() );
@@ -44,7 +46,9 @@ final class DeleterGuardTest extends TestCase {
 		chdir( $this->cwd );
 		Deleter::replace_protected( $this->protected_before );
 		Deleter::replace_roots( $this->roots_before );
-		self::remove( $this->sandbox );
+		if ( '' !== $this->sandbox ) {
+			self::remove( $this->sandbox );
+		}
 		parent::tear_down();
 	}
 
@@ -118,10 +122,14 @@ final class DeleterGuardTest extends TestCase {
 			$this->assertRefused( $path, $keep, 'the path is relative' );
 		}
 		chdir( $this->cwd );
-		// A Windows path is absolute on any platform (asked through refusal() only; on Linux it does not resolve).
+		// What is absolute on which platform, decided the same way on every platform (so a Linux run checks Windows).
 		foreach ( array( 'C:\\Users\\x\\AppData\\Local\\Temp', 'c:/x', '\\\\server\\share\\x' ) as $windows ) {
-			$this->assertStringNotContainsString( 'relative', Deleter::refusal( $windows ), $windows );
+			$this->assertTrue( Deleter::absolute_on( $windows, true ), $windows . ' on Windows' );
+			$this->assertFalse( Deleter::absolute_on( $windows, false ), $windows . ' on POSIX: backslashes are ordinary characters' );
 		}
+		$this->assertTrue( Deleter::absolute_on( '/x', false ) );
+		$this->assertTrue( Deleter::absolute_on( '/x', true ) );
+		$this->assertFalse( Deleter::absolute_on( 'C:x', true ), 'relative to the current directory of drive C:' );
 		Deleter::delete_tree( $this->sandbox, $this->sandbox . '/rel' );
 		$this->assertFileDoesNotExist( $keep, 'the control: the same directory, named absolutely, is deleted' );
 	}
@@ -177,11 +185,34 @@ final class DeleterGuardTest extends TestCase {
 		Deleter::replace_roots( array() ); // Not even the temporary directory.
 		$this->assertRefused( $this->sandbox . '/outside', $keep, 'outside every directory' );
 
-		// A storage directory of the plugin (its owner marker).
-		$storage = $this->made( 'store' );
+		// A storage directory of the plugin under a name of its own (a custom one): its sub-directories and its own files.
+		$storage = $this->made( 'store/tmp/job-1' );
+		$loose   = $this->made( 'store' );
 		file_put_contents( $this->sandbox . '/store/' . OwnerMarker::FILENAME, 'marker' );
-		Deleter::delete_tree( $this->sandbox, $storage );
-		$this->assertFileDoesNotExist( $storage, 'the control: in a storage directory' );
+		$this->assertRefused( $loose, $loose, 'outside every directory' );
+		$this->assertRefused( $this->sandbox . '/store', $loose, 'outside every directory' );
+		Deleter::delete_tree( $this->sandbox, dirname( $storage ) );
+		$this->assertFileDoesNotExist( $storage, 'the control: in a sub-directory of a storage directory' );
+		Deleter::delete_tree( $this->sandbox, $this->sandbox . '/store/' . OwnerMarker::FILENAME );
+		$this->assertFileDoesNotExist( $this->sandbox . '/store/' . OwnerMarker::FILENAME, 'the control: its own file' );
+
+		// A storage directory under the plugin's own name: the whole of it.
+		$named = $this->made( 'wp-checkpoint-a1b2c3d4e5f6' );
+		file_put_contents( dirname( $named ) . '/' . OwnerMarker::FILENAME, 'marker' );
+		Deleter::empty_directory( dirname( $named ) );
+		$this->assertFileDoesNotExist( $named, 'the control: a storage directory of its own name' );
+
+		// A marker in a directory that must never be deleted opens nothing.
+		$site = $this->made( 'site/abspath/wp-content/tmp' );
+		file_put_contents( $this->sandbox . '/site/abspath/wp-content/' . OwnerMarker::FILENAME, 'marker' );
+		Deleter::replace_protected( array( $this->sandbox . '/site/abspath/wp-content' ) );
+		$this->assertRefused( dirname( $site ), $site, 'outside every directory' );
+		Deleter::replace_protected( array() );
+
+		// A probe of a restore (its name).
+		$probe = $this->made( 'wp-checkpoint-probe-a1b2c3d4e5f6-7-' . str_repeat( 'cd', 8 ) );
+		Deleter::delete_tree( $this->sandbox, dirname( $probe ) );
+		$this->assertFileDoesNotExist( $probe, 'the control: a probe' );
 
 		// A staging root of a restore (its name).
 		$staged = $this->made( 'wp-checkpoint-stage-a1b2c3d4e5f6-7-' . str_repeat( 'ab', 16 ) . '/plugins' );
@@ -213,6 +244,47 @@ final class DeleterGuardTest extends TestCase {
 		}
 		$before = Deleter::replace_roots( array() );
 		Deleter::allow( $this->sandbox . '/elsewhere' );
-		$this->assertSame( array( $this->sandbox . DIRECTORY_SEPARATOR . 'elsewhere' ), Deleter::replace_roots( $before ), 'the control: a plain directory is registered, resolved' );
+		Deleter::allow( $this->sandbox . '/shared', false );
+		$this->assertSame(
+			array(
+				$this->sandbox . DIRECTORY_SEPARATOR . 'elsewhere' => true,
+				$this->sandbox . DIRECTORY_SEPARATOR . 'shared'    => false,
+			),
+			Deleter::replace_roots( $before ),
+			'the control: plain directories are registered, resolved'
+		);
+	}
+
+	public function test_a_directory_registered_for_what_is_inside_it_is_never_deleted_itself(): void {
+		$keep = $this->made( 'shared/in' );
+		Deleter::replace_roots( array() );
+		Deleter::allow( $this->sandbox . '/shared', false );
+		$this->assertRefused( $this->sandbox . '/shared', $keep, 'outside every directory' );
+		Deleter::delete_tree( $this->sandbox, dirname( $keep ) );
+		$this->assertFileDoesNotExist( $keep, 'the control: what is inside it is deleted' );
+		// The temporary directory, as the bootstrap registers it.
+		Deleter::replace_roots( $this->roots_before );
+		$this->assertStringContainsString( 'outside every directory', Deleter::refusal( sys_get_temp_dir() ) );
+		$this->assertSame( '', Deleter::refusal( $this->sandbox ), 'the control: inside it' );
+	}
+
+	public function test_a_link_is_deleted_as_itself_and_what_it_points_at_stays(): void {
+		if ( '\\' === DIRECTORY_SEPARATOR ) {
+			$this->markTestSkipped( 'Symbolic links need privileges on Windows; junctions are covered by DeleterTest.' );
+		}
+		$keep = $this->made( 'site/abspath' );
+		Deleter::replace_protected( array( dirname( $keep ) ) );
+		mkdir( $this->sandbox . '/work' );
+		symlink( dirname( $keep ), $this->sandbox . '/work/link' );
+		Deleter::delete_tree( $this->sandbox, $this->sandbox . '/work/link' );
+		$this->assertFalse( is_link( $this->sandbox . '/work/link' ), 'the link is gone' );
+		$this->assertFileExists( $keep, 'what it pointed at, a protected directory, is untouched' );
+		symlink( dirname( $keep ), $this->sandbox . '/work/link2' );
+		try {
+			Deleter::empty_directory( $this->sandbox . '/work/link2' );
+		} catch ( DeletionRefused $e ) {
+			unset( $e ); // Refused, or failed as a link below: either way nothing goes.
+		}
+		$this->assertFileExists( $keep, 'emptying through a link empties nothing' );
 	}
 }

@@ -34,9 +34,10 @@ use WPCheckpoint\Restore\StagingLayout;
 final class Deleter {
 
 	/**
-	 * Directories registered with allow(): resolved paths.
+	 * Directories registered with allow(): resolved path => whether the directory itself may go too (not only what is
+	 * inside it).
 	 *
-	 * @var string[]
+	 * @var array<string, bool>
 	 */
 	private static $roots = array();
 
@@ -48,22 +49,21 @@ final class Deleter {
 	private static $protected = array();
 
 	/**
-	 * Register a directory the plugin may delete in (and the directory itself).
+	 * Register a directory the plugin may delete in.
 	 *
-	 * @param string $root Directory.
+	 * @param string $root   Directory.
+	 * @param bool   $itself Whether the directory itself may be deleted or emptied too, not only what is inside it (a
+	 *                       shared directory, such as the temporary directory, is registered without).
 	 * @return void
 	 * @throws DeletionRefused When it is not one that may be registered (empty, relative, the root of the file system,
 	 *                         or a WordPress directory or one that holds it).
 	 */
-	public static function allow( string $root ): void {
+	public static function allow( string $root, bool $itself = true ): void {
 		$why = self::basic_refusal( $root );
 		if ( '' !== $why ) {
 			throw new DeletionRefused( sprintf( '%1$s cannot be registered as a directory to delete in: %2$s.', $root, $why ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
 		}
-		$real = self::resolve( $root );
-		if ( ! in_array( $real, self::$roots, true ) ) {
-			self::$roots[] = $real;
-		}
+		self::$roots[ self::resolve( $root ) ] = $itself;
 	}
 
 	/**
@@ -78,8 +78,8 @@ final class Deleter {
 			return $why;
 		}
 		$real = self::resolve( $path );
-		foreach ( self::$roots as $root ) {
-			if ( self::within( $root, $real ) ) {
+		foreach ( self::$roots as $root => $itself ) {
+			if ( $itself ? self::within( (string) $root, $real ) : Paths::is_prefix( (string) $root, $real, Paths::is_windows() ) ) {
 				return '';
 			}
 		}
@@ -92,12 +92,12 @@ final class Deleter {
 	/**
 	 * Tests: replace the registered directories, returning the ones before.
 	 *
-	 * @param string[] $roots Resolved directories.
-	 * @return string[]
+	 * @param array<string, bool> $roots Resolved directory => whether the directory itself may go too.
+	 * @return array<string, bool>
 	 */
 	public static function replace_roots( array $roots ): array {
 		$before      = self::$roots;
-		self::$roots = array_values( array_map( 'strval', $roots ) );
+		self::$roots = array_map( 'boolval', $roots );
 		return $before;
 	}
 
@@ -156,9 +156,14 @@ final class Deleter {
 			'WPCHECKPOINT_DIR' => 'the directory of WP Checkpoint',
 		) as $constant => $label ) {
 			if ( defined( $constant ) ) {
+				// Both the path as named and where it leads (a directory reached through a link is protected at both).
 				$dir = self::resolve( (string) constant( $constant ) );
 				if ( '' !== $dir ) {
 					$out[ $label ] = $dir;
+				}
+				$real = @realpath( (string) constant( $constant ) ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- open_basedir warnings would name the path.
+				if ( false !== $real && rtrim( $real, '/\\' ) !== $dir ) {
+					$out[ $label . ', where it leads' ] = rtrim( $real, '/\\' );
 				}
 			}
 		}
@@ -172,8 +177,9 @@ final class Deleter {
 	}
 
 	/**
-	 * Whether a resolved path is in a directory of this plugin's: a storage directory (the owner marker) or a staging
-	 * root or probe of a restore (its name), the path itself or one of the directories above it.
+	 * Whether a resolved path is in a directory of this plugin's: a staging root or probe of a restore (its name, the
+	 * path itself or a directory above it), or a storage directory (the nearest directory above it, or the path itself,
+	 * that carries the owner marker; see storage_allows()).
 	 *
 	 * @param string $real Resolved path.
 	 * @return bool
@@ -184,8 +190,9 @@ final class Deleter {
 			if ( null !== StagingLayout::parse( basename( $dir ) ) ) {
 				return true;
 			}
-			if ( is_dir( $dir ) && ! is_link( $dir ) && is_file( $dir . DIRECTORY_SEPARATOR . OwnerMarker::FILENAME ) ) {
-				return true;
+			// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- open_basedir warnings would name the path.
+			if ( @is_dir( $dir ) && ! @is_link( $dir ) && @is_file( $dir . DIRECTORY_SEPARATOR . OwnerMarker::FILENAME ) ) {
+				return self::storage_allows( $dir, $real );
 			}
 			$parent = dirname( $dir );
 			if ( $parent === $dir || self::is_filesystem_root( $parent ) ) {
@@ -193,6 +200,34 @@ final class Deleter {
 			}
 			$dir = $parent;
 		}
+	}
+
+	/**
+	 * What a storage directory lets be deleted: its own sub-directories (Directories::SUBDIRS) and what is in them,
+	 * and its own files (index.php, .htaccess, the marker). The whole directory only when it has the plugin's own name
+	 * (Directories::DIR_PREFIX and a token): a custom one (WPCHECKPOINT_STORAGE_DIR) may be a directory that holds
+	 * other things. Never a storage directory that is itself refused (a WordPress directory, one that holds it).
+	 *
+	 * @param string $storage Directory with the owner marker.
+	 * @param string $real    Resolved path.
+	 * @return bool
+	 */
+	private static function storage_allows( string $storage, string $real ): bool {
+		if ( '' !== self::basic_refusal( $storage ) ) {
+			return false;
+		}
+		$name = basename( $storage );
+		if ( 0 === strpos( $name, Directories::DIR_PREFIX ) && Directories::is_valid_token( substr( $name, strlen( Directories::DIR_PREFIX ) ) ) ) {
+			return true;
+		}
+		if ( $real === $storage ) {
+			return false;
+		}
+		$first = explode( '/', str_replace( '\\', '/', substr( $real, strlen( rtrim( $storage, '/\\' ) ) + 1 ) ) )[0];
+		if ( in_array( $first, Directories::SUBDIRS, true ) ) {
+			return true;
+		}
+		return $real === $storage . DIRECTORY_SEPARATOR . $first && in_array( $first, array( 'index.php', '.htaccess', OwnerMarker::FILENAME ), true );
 	}
 
 	/**
@@ -205,12 +240,12 @@ final class Deleter {
 	private static function resolve( string $path ): string {
 		$trimmed = rtrim( $path, '/\\' );
 		if ( '' === $trimmed ) {
-			$real = realpath( $path );
+			$real = @realpath( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- open_basedir warnings would name the path.
 			return false === $real ? '' : $real;
 		}
 		$name = basename( $trimmed );
-		if ( '.' === $name || '..' === $name || ! is_link( $trimmed ) ) {
-			$real = realpath( $trimmed );
+		if ( '.' === $name || '..' === $name || ! @is_link( $trimmed ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- open_basedir warnings would name the path.
+			$real = @realpath( $trimmed ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- open_basedir warnings would name the path.
 			if ( false !== $real ) {
 				$real = rtrim( $real, '/\\' );
 				return '' === $real ? DIRECTORY_SEPARATOR : $real;
@@ -219,18 +254,36 @@ final class Deleter {
 				return '';
 			}
 		}
-		$parent = realpath( dirname( $trimmed ) );
+		$parent = @realpath( dirname( $trimmed ) ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- open_basedir warnings would name the path.
 		return false === $parent ? '' : rtrim( $parent, '/\\' ) . DIRECTORY_SEPARATOR . $name;
 	}
 
 	/**
-	 * Whether a path is absolute (POSIX, a Windows drive, or a UNC path).
+	 * Whether a path is absolute on this platform.
 	 *
 	 * @param string $path Path.
 	 * @return bool
 	 */
 	private static function is_absolute( string $path ): bool {
-		return '/' === $path[0] || '\\' === $path[0] || 1 === preg_match( '#\A[A-Za-z]:[\\\\/]#', $path );
+		return self::absolute_on( $path, Paths::is_windows() );
+	}
+
+	/**
+	 * Whether a path is absolute on a platform: POSIX, "/…"; Windows also a drive ("C:\…", "C:/…") or a UNC path
+	 * ("\\server\share"). On POSIX a backslash is an ordinary character, so those forms are relative there.
+	 *
+	 * @param string $path    Path (not empty).
+	 * @param bool   $windows Whether the platform is Windows.
+	 * @return bool
+	 */
+	public static function absolute_on( string $path, bool $windows ): bool {
+		if ( '' === $path ) {
+			return false;
+		}
+		if ( '/' === $path[0] ) {
+			return true;
+		}
+		return $windows && ( '\\' === $path[0] || 1 === preg_match( '#\A[A-Za-z]:[\\\\/]#', $path ) );
 	}
 
 	/**

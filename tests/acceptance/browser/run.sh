@@ -80,4 +80,4 @@ echo "== delete"; phase delete
 
 echo "== teardown"
 wp eval 'foreach ( WPCheckpoint\Plugin::instance()->job_actions()->active() as $j ) { WPCheckpoint\Plugin::instance()->job_actions()->cancel( $j->id ); } echo "ok\n";' || true
-wp eval 'WPCheckpoint\Support\Deleter::delete_tree( wp_upload_dir()["basedir"], wp_upload_dir()["basedir"] . "/qa-heavy", 1000 ); echo "ok\n";' || true
+wp eval '$d = wp_upload_dir()["basedir"] . "/qa-heavy"; WPCheckpoint\Support\Deleter::allow( $d ); WPCheckpoint\Support\Deleter::delete_tree( dirname( $d ), $d, 1000 ); echo "ok\n";' || true
