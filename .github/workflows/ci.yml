@@ -41,9 +41,16 @@ jobs:
       - run: composer analyse
       - run: composer test:unit
 
-  unit-windows:
-    name: Unit (Windows, PHP 8.3)
+  unit-windows-part:
+    # The Windows run is the slowest in CI; its parts run side by side (phpunit.xml.dist, unit-windows-*).
+    name: Unit (Windows, PHP 8.3, part ${{ matrix.part }})
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [1, 2, 3]
+    env:
+      WPCHECKPOINT_TEST_SUITE: unit
     steps:
       - uses: actions/checkout@v4
 
@@ -54,15 +61,27 @@ jobs:
           tools: composer:v2
 
       - run: composer install --no-interaction --no-progress --prefer-dist
-      - run: composer test:unit -- --log-junit build/junit-unit-windows.xml
+      - run: php vendor/bin/phpunit --testsuite unit-windows-${{ matrix.part }} --log-junit build/junit-unit-windows-${{ matrix.part }}.xml
 
-      # Each test's time on Windows, where the suite is slowest: what the split of this job is based on.
+      # Each test's time on Windows: what the split into parts is based on.
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: junit-unit-windows
-          path: build/junit-unit-windows.xml
+          name: junit-unit-windows-${{ matrix.part }}
+          path: build/junit-unit-windows-${{ matrix.part }}.xml
           if-no-files-found: ignore
+
+  unit-windows:
+    # The check the main branch requires: passes only when every part passed.
+    name: Unit (Windows, PHP 8.3)
+    runs-on: ubuntu-latest
+    needs: unit-windows-part
+    if: always()
+    steps:
+      - name: Every part passed
+        env:
+          RESULT: ${{ needs.unit-windows-part.result }}
+        run: test "$RESULT" = success
 
   extractors:
     # Other people's tools must read what the plugin writes (names, content, modes): only real readers can tell.
