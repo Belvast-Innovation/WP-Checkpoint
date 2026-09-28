@@ -213,6 +213,6 @@ final class DeleterGuardTest extends TestCase {
 		}
 		$before = Deleter::replace_roots( array() );
 		Deleter::allow( $this->sandbox . '/elsewhere' );
-		$this->assertSame( array( $this->sandbox . '/elsewhere' ), Deleter::replace_roots( $before ), 'the control: a plain directory is registered, resolved' );
+		$this->assertSame( array( $this->sandbox . DIRECTORY_SEPARATOR . 'elsewhere' ), Deleter::replace_roots( $before ), 'the control: a plain directory is registered, resolved' );
 	}
 }
