@@ -5,6 +5,7 @@ namespace WPCheckpoint\Tests\Unit\Support;
 use WPCheckpoint\Support\Deleter;
 use WPCheckpoint\Support\DeletionRefused;
 use WPCheckpoint\Support\OwnerMarker;
+use WPCheckpoint\Tests\Fixtures\ExpectedPath;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 /**
@@ -257,8 +258,8 @@ final class DeleterGuardTest extends TestCase {
 		Deleter::allow( $this->sandbox . '/shared', false );
 		$this->assertSame(
 			array(
-				$this->sandbox . DIRECTORY_SEPARATOR . 'elsewhere' => true,
-				$this->sandbox . DIRECTORY_SEPARATOR . 'shared'    => false,
+				ExpectedPath::native( $this->sandbox, 'elsewhere' ) => true,
+				ExpectedPath::native( $this->sandbox, 'shared' )    => false,
 			),
 			Deleter::replace_roots( $before ),
 			'the control: plain directories are registered, resolved'
@@ -275,9 +276,9 @@ final class DeleterGuardTest extends TestCase {
 		Deleter::allow( $this->sandbox . '/wide' );
 		$this->assertSame(
 			array(
-				$this->sandbox . DIRECTORY_SEPARATOR . 'shared' => false,
-				$this->sandbox . DIRECTORY_SEPARATOR . 'own'    => false,
-				$this->sandbox . DIRECTORY_SEPARATOR . 'wide'   => true,
+				ExpectedPath::native( $this->sandbox, 'shared' ) => false,
+				ExpectedPath::native( $this->sandbox, 'own' )    => false,
+				ExpectedPath::native( $this->sandbox, 'wide' )   => true,
 			),
 			Deleter::replace_roots( $before ),
 			'the control: a directory registered twice as a whole stays whole'

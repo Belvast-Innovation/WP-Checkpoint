@@ -9,6 +9,7 @@ use WPCheckpoint\Archive\ZipFormat;
 use WPCheckpoint\Archive\ZipReader;
 use WPCheckpoint\Tests\Fixtures\Archive\EntryMode;
 use WPCheckpoint\Tests\Fixtures\MemoryBudget;
+use WPCheckpoint\Tests\Fixtures\ExpectedPath;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 final class ZipReaderTest extends TestCase {
@@ -319,7 +320,7 @@ final class ZipReaderTest extends TestCase {
 			$crc   = $piece['crc'];
 			$off  += 1048576;
 		} while ( ! $piece['done'] );
-		$this->assertSame( str_replace( '\\', '/', $out ) . '/dir/store.bin', str_replace( '\\', '/', $piece['path'] ) );
+		$this->assertSame( ExpectedPath::slashed( $out, 'dir/store.bin' ), str_replace( '\\', '/', $piece['path'] ) );
 		$this->assertSame( $big, file_get_contents( $piece['path'] ) );
 		$this->assertSame( (int) $e['crc'], $crc );
 		// One call covering everything, and a small entry, work the same way.
