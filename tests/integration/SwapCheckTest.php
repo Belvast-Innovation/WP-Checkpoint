@@ -889,7 +889,7 @@ final class SwapCheckTest extends RestoreTestCase {
 		global $wpdb;
 		$plan = $wpdb->base_prefix . SwapPlan::TABLE;
 		$this->assertSame( $plan, $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $plan ) ), 'created by the migration' );
-		$this->assertSame( 8, \WPCheckpoint\Support\Schema::CURRENT );
+		$this->assertGreaterThanOrEqual( 8, \WPCheckpoint\Support\Schema::CURRENT, 'the plan table came with version 8' );
 		$this->assertStringContainsString( 'CREATE TABLE IF NOT EXISTS', SwapPlan::create_sql( $plan ) );
 		$this->assertSame( PluginCopy::VERSION, $this->check_parts()['version'] );
 	}

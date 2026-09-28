@@ -385,6 +385,11 @@
 				case 'lost':
 					self.later( function () { self.poll(); }, POLL_MS );
 					break;
+				case 'cli':
+					// The job goes on in WP-CLI only; the message says how.
+					notice( self.root, data.message || '' );
+					self.stopped = true;
+					break;
 				default:
 					// completed, failed, finished: nothing more to drive.
 					self.stopped = true;

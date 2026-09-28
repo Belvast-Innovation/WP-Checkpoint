@@ -559,8 +559,8 @@ final class JobRepository {
 	 * statement: only while the count is still there (no driver handed the
 	 * job to the Runner, and no retry or answer set it back meanwhile), the
 	 * job is queued, running or paused without
-	 * questions, and no live run holds it (a running job between ticks has
-	 * no lock). Its lock file goes with it, as with any ended job.
+	 * questions, it does not hold the site changed (Job::$site_state), and
+	 * no live run holds it (a running job between ticks has no lock). Its lock file goes with it, as with any ended job.
 	 *
 	 * @param Job    $job     Job (updated in place when failed).
 	 * @param string $message Why.
@@ -574,7 +574,7 @@ final class JobRepository {
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin table; the WHERE is the fence.
 		$affected = $wpdb->query(
 			$wpdb->prepare(
-				'UPDATE ' . self::table() . " SET status = %s, last_error = %s, failure_kind = %s, finished_at = %d, updated_at = %d, lock_token = '', locked_until = 0 WHERE id = %d AND cron_deferrals >= %d AND status IN (%s, %s, %s) AND (status <> %s OR questions_json IS NULL OR questions_json = '' OR questions_json = '[]') AND (lock_token = '' OR locked_until < %d)", // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- table name from the prefix and a constant.
+				'UPDATE ' . self::table() . " SET status = %s, last_error = %s, failure_kind = %s, finished_at = %d, updated_at = %d, lock_token = '', locked_until = 0 WHERE id = %d AND cron_deferrals >= %d AND site_state = 0 AND status IN (%s, %s, %s) AND (status <> %s OR questions_json IS NULL OR questions_json = '' OR questions_json = '[]') AND (lock_token = '' OR locked_until < %d)", // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- table name from the prefix and a constant.
 				Job::FAILED,
 				$this->redactor->redact( $message ),
 				Job::stamp_failure( Job::FAILURE_TEMPORARY, $now ),
@@ -727,7 +727,7 @@ final class JobRepository {
 		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix; the WHERE clause is the compare-and-set.
 		$affected = $wpdb->query(
 			$wpdb->prepare(
-				"UPDATE {$table} SET takeovers = IF(lock_token <> '', IF(takeover_mark = MD5(CONCAT(step, '|', COALESCE(cursor_json, ''))), takeovers + 1, 1), takeovers), takeover_mark = IF(lock_token <> '', MD5(CONCAT(step, '|', COALESCE(cursor_json, ''))), takeover_mark), attempts = IF(status = %s, attempts + 1, attempts), started_at = IF(started_at = 0, %d, started_at), status = %s, lock_token = %s, locked_until = %d, updated_at = %d, questions_json = NULL WHERE id = %d AND status IN (%s, %s, %s) AND (status <> %s OR questions_json IS NULL OR questions_json = '' OR questions_json = '[]') AND storage_token = %s AND (lock_token = '' OR locked_until < %d)",
+				"UPDATE {$table} SET takeovers = IF(lock_token <> '', IF(takeover_mark = MD5(CONCAT(step, '|', COALESCE(cursor_json, ''))), takeovers + 1, 1), takeovers), takeover_mark = IF(lock_token <> '', MD5(CONCAT(step, '|', COALESCE(cursor_json, ''))), takeover_mark), attempts = IF(status = %s, attempts + 1, attempts), started_at = IF(started_at = 0, %d, started_at), status = %s, lock_token = %s, locked_until = %d, updated_at = %d, questions_json = NULL WHERE id = %d AND status IN (%s, %s, %s) AND (status <> %s OR questions_json IS NULL OR questions_json = '' OR questions_json = '[]') AND (storage_token = %s OR site_state <> 0) AND (lock_token = '' OR locked_until < %d)",
 				Job::QUEUED,
 				$now,
 				Job::RUNNING,
@@ -767,6 +767,29 @@ final class JobRepository {
 	}
 
 	/**
+	 * Record a cancel request of a job whose swap is under way (Job::SITE_CHANGING): the job's own step rolls the
+	 * site back and then cancels it (Cancelled). One statement, only while the row still holds the site changing;
+	 * the status is not touched and no lock is taken. A request already recorded stays as it was.
+	 *
+	 * @param Job $job Job (updated in place).
+	 * @return void
+	 * @throws StaleJob When the row no longer holds the site changing.
+	 */
+	public function request_cancel( Job $job ): void {
+		global $wpdb;
+		$now = $this->now();
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin table.
+		$wpdb->query( $wpdb->prepare( 'UPDATE ' . self::table() . ' SET cancel_requested = %d, updated_at = %d WHERE id = %d AND site_state = %d AND cancel_requested = 0', $now, $now, $job->id, Job::SITE_CHANGING ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- table name from the prefix and a constant.
+		$row = $this->find( $job->id );
+		if ( null === $row || Job::SITE_CHANGING !== $row->site_state || 0 === $row->cancel_requested ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+			throw new StaleJob( sprintf( 'Job %d no longer holds the site changing.', $job->id ) );
+		}
+		$job->site_state       = $row->site_state;
+		$job->cancel_requested = $row->cancel_requested;
+	}
+
+	/**
 	 * Take the lock in order to cancel: the same compare-and-set as acquire()
 	 * (nobody else is working on the job once it succeeds), but the job is
 	 * not started: attempts, started_at, the status and the lock file stay as
@@ -792,7 +815,7 @@ final class JobRepository {
 		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix; the WHERE clause is the compare-and-set.
 		$affected = $wpdb->query(
 			$wpdb->prepare(
-				"UPDATE {$table} SET lock_token = %s, locked_until = %d, updated_at = %d WHERE id = %d AND status IN (%s, %s) AND storage_token = %s AND (lock_token = '' OR locked_until < %d)",
+				"UPDATE {$table} SET lock_token = %s, locked_until = %d, updated_at = %d WHERE id = %d AND status IN (%s, %s) AND site_state = 0 AND storage_token = %s AND (lock_token = '' OR locked_until < %d)",
 				$token,
 				$now + self::LOCK_SECONDS,
 				$now,
@@ -866,19 +889,21 @@ final class JobRepository {
 	 * Only real progress ($advanced) moves progress_at and resets the gate
 	 * back-off, in the same statement: a wait or a retried failure keeps the
 	 * stall timestamp, so a job that only ever waits is still given up after
-	 * 24 hours by reap().
+	 * 24 hours by reap(). The site state, when given, goes in the same
+	 * statement as the cursor it belongs to (HoldsSite).
 	 *
-	 * @param Job                  $job      Job.
-	 * @param string               $token    Lock token.
-	 * @param string               $step     Current step id.
-	 * @param array<string, mixed> $cursor   Cursor (identifiers and offsets only).
-	 * @param int                  $progress Percentage.
-	 * @param string               $message  Progress text.
-	 * @param bool                 $advanced Whether the cursor really moved.
+	 * @param Job                  $job        Job.
+	 * @param string               $token      Lock token.
+	 * @param string               $step       Current step id.
+	 * @param array<string, mixed> $cursor     Cursor (identifiers and offsets only).
+	 * @param int                  $progress   Percentage.
+	 * @param string               $message    Progress text.
+	 * @param bool                 $advanced   Whether the cursor really moved.
+	 * @param int|null             $site_state Job::SITE_* for this cursor, or null to leave the stored one.
 	 * @return void
 	 * @throws StaleJob When the lock is no longer held with this token.
 	 */
-	public function save_progress( Job $job, string $token, string $step, array $cursor, int $progress, string $message = '', bool $advanced = true ): void {
+	public function save_progress( Job $job, string $token, string $step, array $cursor, int $progress, string $message = '', bool $advanced = true, $site_state = null ): void {
 		global $wpdb;
 		self::assert_cursor_has_no_secrets( $cursor );
 		$now      = $this->now();
@@ -896,6 +921,10 @@ final class JobRepository {
 			$data['blocked_count'] = 0;
 			$formats[]             = '%d';
 			$formats[]             = '%d';
+		}
+		if ( null !== $site_state ) {
+			$data['site_state'] = (int) $site_state;
+			$formats[]          = '%d';
 		}
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin table; the WHERE on lock_token is the fence.
 		$affected = $wpdb->update(
@@ -920,6 +949,9 @@ final class JobRepository {
 		if ( $advanced ) {
 			$job->progress_at   = $now;
 			$job->blocked_count = 0;
+		}
+		if ( null !== $site_state ) {
+			$job->site_state = (int) $site_state;
 		}
 	}
 
@@ -1250,6 +1282,9 @@ final class JobRepository {
 		$failed   = 0;
 		$listings = array();
 		foreach ( $this->list_jobs( array( Job::QUEUED, Job::RUNNING, Job::PAUSED ), 500 ) as $job ) {
+			if ( Job::SITE_UNTOUCHED !== $job->site_state ) {
+				continue; // Rolled back or finished from wherever the storage directory is: it needs none of its files.
+			}
 			if ( $job->storage_token === $token ) {
 				// The same token at another location: failed only when that location is positively gone
 				// (Paths::positively_gone()); otherwise the gate refuses it and says why.
@@ -1317,7 +1352,8 @@ final class JobRepository {
 
 		foreach ( $this->list_jobs( array( Job::QUEUED, Job::RUNNING ), 500 ) as $job ) {
 			$last = max( $job->progress_at, $job->created_at );
-			if ( $job->is_locked( $now ) || $last + self::STALL_SECONDS > $now ) {
+			// A job that holds the site changed is ended by WP-CLI only (its rollback), never by time.
+			if ( Job::SITE_UNTOUCHED !== $job->site_state || $job->is_locked( $now ) || $last + self::STALL_SECONDS > $now ) {
 				continue;
 			}
 			$message = 0 === $job->started_at
@@ -1480,7 +1516,9 @@ final class JobRepository {
 	/**
 	 * Whether the work of a job id may be reclaimed: no such job, a
 	 * completed or cancelled one, a failed one past its work retention, or
-	 * one bound to another storage directory.
+	 * one bound to another storage directory; never one that holds the site
+	 * changed (Job::$site_state), whatever its status or storage directory:
+	 * its staging roots hold the site as it was.
 	 *
 	 * @param int                  $id     Job id.
 	 * @param string               $token  Current storage token.
@@ -1494,6 +1532,9 @@ final class JobRepository {
 		$job = $owners[ $id ];
 		if ( null === $job ) {
 			return true;
+		}
+		if ( Job::SITE_UNTOUCHED !== $job->site_state ) {
+			return false;
 		}
 		if ( $job->storage_token !== $token ) {
 			return true;
@@ -1545,6 +1586,11 @@ final class JobRepository {
 	 * @return bool True when nothing of the job's work is left.
 	 */
 	public function reclaim_work( Job $job, int $budget = self::RECLAIM_MAX_ENTRIES ): bool {
+		if ( Job::SITE_UNTOUCHED !== $job->site_state ) {
+			// Its staging roots hold the site as it was (or the restore's copy, while the swap is under way).
+			$this->directories->log_event( sprintf( 'Job %d holds the site changed; its work was left alone.', $job->id ) );
+			return false;
+		}
 		// The restore's staging roots and probes next to the site's directories go with its work, under the job's
 		// own token: they are not in the storage directory, so a changed storage directory does not keep them. Only
 		// a token this installation holds (Directories::own_tokens(), of this request's resolved state: the stored
@@ -1692,7 +1738,7 @@ final class JobRepository {
 
 		foreach ( self::RETENTION_SECONDS as $status => $seconds ) {
 			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix.
-			$rows = $wpdb->get_results( $wpdb->prepare( "SELECT * FROM {$table} WHERE status = %s AND finished_at > 0 AND finished_at < %d", $status, $now - $seconds ), ARRAY_A );
+			$rows = $wpdb->get_results( $wpdb->prepare( "SELECT * FROM {$table} WHERE status = %s AND site_state = 0 AND finished_at > 0 AND finished_at < %d", $status, $now - $seconds ), ARRAY_A );
 			foreach ( is_array( $rows ) ? $rows : array() as $row ) {
 				$victims[ (int) $row['id'] ] = self::hydrate( $row );
 			}
@@ -1703,7 +1749,7 @@ final class JobRepository {
 		$over  = $total - count( $victims ) - self::MAX_ROWS;
 		if ( $over > 0 ) {
 			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix.
-			$rows = $wpdb->get_results( $wpdb->prepare( "SELECT * FROM {$table} WHERE status IN (%s, %s, %s) ORDER BY created_at ASC, id ASC LIMIT %d", Job::COMPLETED, Job::CANCELLED, Job::FAILED, $over + count( $victims ) ), ARRAY_A );
+			$rows = $wpdb->get_results( $wpdb->prepare( "SELECT * FROM {$table} WHERE status IN (%s, %s, %s) AND site_state = 0 ORDER BY created_at ASC, id ASC LIMIT %d", Job::COMPLETED, Job::CANCELLED, Job::FAILED, $over + count( $victims ) ), ARRAY_A );
 			foreach ( is_array( $rows ) ? $rows : array() as $row ) {
 				if ( count( $victims ) >= $total - self::MAX_ROWS ) {
 					break;
@@ -1722,7 +1768,14 @@ final class JobRepository {
 				continue; // Its row stays until its plan is gone: a plan without its job would never be removed.
 			}
 			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin table.
-			$wpdb->delete( $table, array( 'id' => $job->id ), array( '%d' ) );
+			$wpdb->delete(
+				$table,
+				array(
+					'id'         => $job->id,
+					'site_state' => Job::SITE_UNTOUCHED,
+				),
+				array( '%d', '%d' )
+			);
 		}
 		return count( $victims );
 	}
@@ -1757,7 +1810,7 @@ final class JobRepository {
 		$now   = $this->now();
 		$table = $wpdb->base_prefix . Schema::JOBS_TABLE;
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix.
-		$rows  = $wpdb->get_results( $wpdb->prepare( "SELECT * FROM {$table} WHERE status = %s AND work_expired_at = 0 AND finished_at > 0 AND finished_at < %d LIMIT 100", Job::FAILED, $now - self::WORK_RETENTION_SECONDS ), ARRAY_A );
+		$rows  = $wpdb->get_results( $wpdb->prepare( "SELECT * FROM {$table} WHERE status = %s AND work_expired_at = 0 AND site_state = 0 AND finished_at > 0 AND finished_at < %d LIMIT 100", Job::FAILED, $now - self::WORK_RETENTION_SECONDS ), ARRAY_A );
 		$count = 0;
 		foreach ( is_array( $rows ) ? $rows : array() as $row ) {
 			$job = self::hydrate( $row );
@@ -1769,9 +1822,10 @@ final class JobRepository {
 					'id'              => $job->id,
 					'status'          => Job::FAILED,
 					'work_expired_at' => 0,
+					'site_state'      => Job::SITE_UNTOUCHED,
 				),
 				array( '%d' ),
-				array( '%d', '%s', '%d' )
+				array( '%d', '%s', '%d', '%d' )
 			);
 			if ( 1 !== (int) $affected ) {
 				continue;
@@ -1946,6 +2000,13 @@ final class JobRepository {
 		if ( '' !== $token ) {
 			$where['lock_token'] = $token;
 			$where_formats[]     = '%s';
+		}
+		if ( Job::CANCELLED === $to || ( '' === $token && Job::FAILED === $to ) ) {
+			// A job that holds the site changed is cancelled only by its own step once the site is back
+			// (Cancelled), and failed only by the run that holds it: never from outside, and never by a cancel
+			// that took an expired lock. The row is the authority: the run may have written the state just now.
+			$where['site_state'] = Job::SITE_UNTOUCHED;
+			$where_formats[]     = '%d';
 		}
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin table; the WHERE on status (and token) is the guard.
 		$affected = $wpdb->update( self::table(), $data, $where, $formats, $where_formats );

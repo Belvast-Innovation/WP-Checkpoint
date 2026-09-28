@@ -359,6 +359,8 @@ final class JobsController extends Controller {
 				return __( 'The job was cancelled; its temporary files are removed as soon as the current step stops.', 'wp-checkpoint' );
 			case 'unavailable':
 				return __( 'The job was cancelled. Its storage directory is not available from here, so its temporary files were not removed.', 'wp-checkpoint' );
+			case 'requested':
+				return __( 'The restore is changing the site: it puts the site back as it was, then the job is cancelled. That happens in WP-CLI (wp wpcheckpoint job run).', 'wp-checkpoint' );
 		}
 		return __( 'The job was cancelled.', 'wp-checkpoint' );
 	}

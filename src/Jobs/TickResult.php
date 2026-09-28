@@ -23,6 +23,7 @@ final class TickResult {
 	const LOST      = 'lost';       // Lock lost mid-tick (cancelled or taken over); reload the job.
 	const FINISHED  = 'finished';   // The job was already in a state that cannot be ticked.
 	const MISSING   = 'missing';
+	const CLI       = 'cli';        // The job stands at a step only WP-CLI runs (CliOnly); no other driver goes on.
 
 	/**
 	 * One of the constants.

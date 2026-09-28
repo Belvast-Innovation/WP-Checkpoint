@@ -624,15 +624,29 @@ final class JobActions {
 	 * @param int $id Job id.
 	 * @return array{job: Job, cleaned: bool, reason: string}|null Null when the job does not exist. reason: "cleaned",
 	 *                                                            "holder" (a driver holds the lock and cleans up when it
-	 *                                                            stops) or "unavailable" (the storage directory cannot be
-	 *                                                            used from here; nothing will clean up).
-	 * @throws InvalidTransition When the job is already finished.
+	 *                                                            stops), "unavailable" (the storage directory cannot be
+	 *                                                            used from here; nothing will clean up) or "requested"
+	 *                                                            (a restore's swap is under way: it is rolled back, then
+	 *                                                            the job is cancelled).
+	 * @throws InvalidTransition When the job is already finished, or a restore's swap is complete.
 	 * @throws StaleJob When the job changed meanwhile.
 	 */
 	public function cancel( int $id ) {
 		$job = $this->repository->find( $id );
 		if ( null === $job ) {
 			return null;
+		}
+		if ( Job::SITE_CHANGING === $job->site_state ) {
+			// Its step rolls the site back first (in WP-CLI), then cancels it; nothing is taken from it here.
+			$this->repository->request_cancel( $job );
+			return array(
+				'job'     => $job,
+				'cleaned' => false,
+				'reason'  => 'requested',
+			);
+		}
+		if ( Job::SITE_SWAPPED === $job->site_state ) {
+			throw new InvalidTransition( sprintf( 'Job %d: the restored site is in place; cancelling the job cannot change it back.', $job->id ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message; the presenter cleans it.
 		}
 		Loopback::unschedule( $id );
 		Loopback::revoke_tokens( $id );

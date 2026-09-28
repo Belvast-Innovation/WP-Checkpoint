@@ -52,16 +52,25 @@ final class Logger {
 	private $truncated = false;
 
 	/**
+	 * Whether a line the file cannot take goes to PHP's error log instead of being dropped.
+	 *
+	 * @var bool
+	 */
+	private $fallback;
+
+	/**
 	 * Constructor.
 	 *
 	 * @param string   $path      Absolute path of the log file (created on first write).
 	 * @param Redactor $redactor  Redactor.
 	 * @param int      $max_bytes Size cap.
+	 * @param bool     $fallback  Whether a line the file cannot take goes to PHP's error log (error_log()).
 	 */
-	public function __construct( string $path, Redactor $redactor, int $max_bytes = self::DEFAULT_MAX_BYTES ) {
+	public function __construct( string $path, Redactor $redactor, int $max_bytes = self::DEFAULT_MAX_BYTES, bool $fallback = false ) {
 		$this->path      = $path;
 		$this->redactor  = $redactor;
 		$this->max_bytes = $max_bytes;
+		$this->fallback  = $fallback;
 	}
 
 	/**
@@ -195,8 +204,11 @@ final class Logger {
 			$line            = '[' . gmdate( 'Y-m-d\TH:i:s\Z' ) . '] WARNING Log size limit reached; further entries are dropped.' . "\n";
 		}
 
-		$handle = fopen( $this->path, 'ab' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- append-only log stream.
+		$handle = @fopen( $this->path, 'ab' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen,WordPress.PHP.NoSilencedErrors.Discouraged -- append-only log stream; a failure is handled below.
 		if ( false === $handle ) {
+			if ( $this->fallback ) {
+				error_log( 'WP Checkpoint: ' . rtrim( $line, "\n" ) ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- the job's own log cannot be written.
+			}
 			return;
 		}
 		fwrite( $handle, $line ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- see above.

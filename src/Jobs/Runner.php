@@ -198,7 +198,14 @@ final class Runner {
 			$this->repository->reset_cron_deferrals( $job->id );
 		}
 
-		$gate = $this->repository->gate( $job );
+		if ( ! $this->cli && $this->at_cli_only_step( $job ) ) {
+			// Before the gate and the lock: the row is not written, nothing is counted, no driver follows up.
+			return new TickResult( TickResult::CLI, -1, $job, self::cli_message( $job ) );
+		}
+
+		// A job that holds the site changed is rolled back or finished from wherever this request resolves the
+		// storage directory: that goes by the job row and the site itself, never by the storage directory.
+		$gate = Job::SITE_UNTOUCHED === $job->site_state ? $this->repository->gate( $job ) : array( 'allowed' => true );
 		if ( ! $gate['allowed'] ) {
 			if ( 'awaiting_answer' === $gate['reason'] ) {
 				// Nothing to wait out: the job resumes when the answers are stored.
@@ -311,7 +318,12 @@ final class Runner {
 			if ( ! isset( $steps[ $step_id ] ) ) {
 				return $this->fail( $job, $token, $logger, sprintf( 'Unknown step "%s".', $step_id ) );
 			}
-			$step   = $steps[ $step_id ];
+			$step = $steps[ $step_id ];
+			if ( ! $this->cli && $step instanceof CliOnly ) {
+				// Moved on to it in this tick: the step before it is recorded as done.
+				$this->release( $job, $token );
+				return new TickResult( TickResult::CLI, -1, $job, self::cli_message( $job ) );
+			}
 			$index  = (int) array_search( $step_id, $ids, true );
 			$count  = count( $ids );
 			$state  = $this->state_of( $job->cursor );
@@ -323,13 +335,13 @@ final class Runner {
 				$budget,
 				$logger,
 				$start,
-				function ( array $cursor, int $percent, string $message ) use ( &$job, $token, $step_id, $index, $count, &$state ) {
+				function ( array $cursor, int $percent, string $message ) use ( &$job, $token, $step_id, $step, $index, $count, &$state ) {
 					// A checkpoint is progress only when the cursor moved; an identical one keeps the counters and the stall timestamp.
 					$advanced = wp_json_encode( JobContext::strip_reserved( $job->cursor ) ) !== wp_json_encode( JobContext::strip_reserved( $cursor ) );
 					if ( $advanced ) {
 						$state = $this->reset( $state );
 					}
-					$this->persist( $job, $token, $step_id, $cursor, $state, self::overall( $index, $count, $percent ), $message, $advanced );
+					$this->persist( $job, $token, $step_id, $cursor, $state, self::overall( $index, $count, $percent ), $message, $advanced, self::site_state_of( $step, $cursor ) );
 					$this->maybe_heartbeat( $job, $token );
 				},
 				$token
@@ -366,6 +378,12 @@ final class Runner {
 				$this->persist( $job, $token, $step_id, $context->cursor(), $state, $job->progress, $job->progress_message, false );
 				$this->release( $job, $token );
 				return new TickResult( TickResult::WAITING, $wait, $job, $message );
+			} catch ( Cancelled $e ) {
+				// The step undid what it did to the site after a cancel was requested: cancelled as with the lock.
+				$logger->info( 'The job is cancelled as requested', array( 'step' => $step_id ) );
+				$this->transition( $job, $token, Job::CANCELLED, '' );
+				$this->cleanup( $job );
+				return new TickResult( TickResult::FINISHED, -1, $job, $this->redactor->redact( $e->getMessage() ) );
 			} catch ( Stopped $e ) {
 				// The answers that stopped it go with the failure: a retry asks those questions again.
 				return $this->fail( $job, $token, $logger, sprintf( 'Step "%s": %s', $step_id, $this->describe( $e ) ), '', '', $e->questions() );
@@ -420,7 +438,7 @@ final class Runner {
 						'reason'  => $result->message,
 					)
 				);
-				$this->persist( $job, $token, $step_id, $result->cursor, $state, $job->progress, $result->message, false );
+				$this->persist( $job, $token, $step_id, $result->cursor, $state, $job->progress, $result->message, false, self::site_state_of( $step, $result->cursor ) );
 				$this->release( $job, $token );
 				return new TickResult( TickResult::WAITING, $seconds, $job, $result->message );
 			}
@@ -435,7 +453,7 @@ final class Runner {
 						'questions' => count( $result->questions ),
 					)
 				);
-				$this->persist( $job, $token, $step_id, $result->cursor, $state, $job->progress, $result->message, false );
+				$this->persist( $job, $token, $step_id, $result->cursor, $state, $job->progress, $result->message, false, self::site_state_of( $step, $result->cursor ) );
 				try {
 					$this->repository->pause_for_answer( $job, $token, $result->questions );
 				} catch ( StaleJob $e ) {
@@ -462,12 +480,12 @@ final class Runner {
 						'attempt' => $state['no_progress'],
 					)
 				);
-				$this->persist( $job, $token, $step_id, $result->cursor, $state, $percent, $result->message, false );
+				$this->persist( $job, $token, $step_id, $result->cursor, $state, $percent, $result->message, false, self::site_state_of( $step, $result->cursor ) );
 				$this->release( $job, $token );
 				return new TickResult( TickResult::MORE, 0, $job, $result->message );
 			}
 			$state = $this->reset( $state );
-			$this->persist( $job, $token, $step_id, $result->cursor, $state, $percent, $result->message, true );
+			$this->persist( $job, $token, $step_id, $result->cursor, $state, $percent, $result->message, true, self::site_state_of( $step, $result->cursor ) );
 			$this->maybe_heartbeat( $job, $token );
 			if ( $context->should_stop() ) {
 				return $this->pause( $job, $token, $logger, $context->stop_reason() );
@@ -584,7 +602,58 @@ final class Runner {
 	 */
 	private function logger_for( Job $job ): Logger {
 		$relative = '' !== $job->log_path ? $job->log_path : 'logs/job-' . $job->id . '.log';
-		return new Logger( $job->storage_path . DIRECTORY_SEPARATOR . str_replace( '/', DIRECTORY_SEPARATOR, $relative ), $this->redactor );
+		// A job that holds the site changed may run with its storage directory gone: its log then goes to PHP's.
+		return new Logger( $job->storage_path . DIRECTORY_SEPARATOR . str_replace( '/', DIRECTORY_SEPARATOR, $relative ), $this->redactor, Logger::DEFAULT_MAX_BYTES, Job::SITE_UNTOUCHED !== $job->site_state );
+	}
+
+	/**
+	 * Whether the job stands at a step only WP-CLI runs.
+	 *
+	 * @param Job $job Job.
+	 * @return bool
+	 */
+	private function at_cli_only_step( Job $job ): bool {
+		$type = $this->types->get( $job->type );
+		if ( null === $type ) {
+			return false;
+		}
+		$first = null;
+		foreach ( $type->steps() as $step ) {
+			if ( ! $step instanceof Step ) {
+				continue;
+			}
+			$first = $first ?? $step;
+			if ( $step->id() === $job->step ) {
+				return $step instanceof CliOnly;
+			}
+		}
+		return '' === $job->step && $first instanceof CliOnly;
+	}
+
+	/**
+	 * What a driver other than WP-CLI says about a job at a step only WP-CLI runs.
+	 *
+	 * @param Job $job Job.
+	 * @return string
+	 */
+	private static function cli_message( Job $job ): string {
+		/* translators: %d: job id */
+		return sprintf( __( 'This part of the job runs in WP-CLI only. Continue it with: wp wpcheckpoint job run %d', 'wp-checkpoint' ), $job->id );
+	}
+
+	/**
+	 * The site state a step's cursor stands for (HoldsSite), or null for a step that does not change the site.
+	 *
+	 * @param Step                 $step   Step.
+	 * @param array<string, mixed> $cursor Cursor.
+	 * @return int|null
+	 */
+	private static function site_state_of( Step $step, array $cursor ) {
+		if ( ! $step instanceof HoldsSite ) {
+			return null;
+		}
+		$state = $step::site_state( JobContext::strip_reserved( $cursor ) );
+		return null === $state ? null : (int) $state;
 	}
 
 	/**
@@ -698,10 +767,11 @@ final class Runner {
 	 * @param int                                   $percent  Overall progress.
 	 * @param string                                $message  Progress text.
 	 * @param bool                                  $advanced Whether real progress was made (drives the stall timestamp).
+	 * @param int|null                              $site_state Job::SITE_* the cursor stands for (HoldsSite), or null to leave it.
 	 * @return void
 	 * @throws LockLost When the write refused.
 	 */
-	private function persist( Job $job, string $token, string $step, array $cursor, array $state, int $percent, string $message, bool $advanced ): void {
+	private function persist( Job $job, string $token, string $step, array $cursor, array $state, int $percent, string $message, bool $advanced, $site_state = null ): void {
 		$cursor                       = JobContext::strip_reserved( $cursor );
 		$cursor[ self::RESERVED_KEY ] = $state;
 		if ( null !== $this->on_persist ) {
@@ -710,7 +780,7 @@ final class Runner {
 			call_user_func( $this->on_persist, $job, $step, $cursor );
 		}
 		try {
-			$this->repository->save_progress( $job, $token, $step, $cursor, $percent, $message, $advanced );
+			$this->repository->save_progress( $job, $token, $step, $cursor, $percent, $message, $advanced, $site_state );
 		} catch ( StaleJob $e ) {
 			throw new LockLost( $e->getMessage(), 0, $e ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
 		}
