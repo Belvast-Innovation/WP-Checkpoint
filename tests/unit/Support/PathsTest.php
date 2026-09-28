@@ -3,6 +3,7 @@
 namespace WPCheckpoint\Tests\Unit\Support;
 
 use WPCheckpoint\Support\Paths;
+use WPCheckpoint\Tests\Fixtures\Junction;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 final class PathsTest extends TestCase {
@@ -144,6 +145,17 @@ final class PathsTest extends TestCase {
 		$this->require_symlinks();
 		symlink( $this->root . '/outside', $this->base() . '/linked-dir' );
 		$this->assertFalse( Paths::is_inside( $this->base(), $this->base() . '/linked-dir/secret.txt' ) );
+	}
+
+	public function test_a_path_through_a_junction_pointing_outside_is_rejected(): void {
+		Junction::make( $this->root . '/outside', $this->base() . '/junction-dir' );
+		try {
+			$this->assertFileExists( $this->base() . '/junction-dir/secret.txt', 'the control: the junction leads outside' );
+			$this->assertTrue( Paths::is_inside( $this->base(), $this->base() . '/sub/deep.txt' ), 'the control: a plain path inside' );
+			$this->assertFalse( Paths::is_inside( $this->base(), $this->base() . '/junction-dir/secret.txt' ) );
+		} finally {
+			Junction::remove( $this->base() . '/junction-dir' );
+		}
 	}
 
 	public function test_symlinked_base_resolves_to_real_directory(): void {

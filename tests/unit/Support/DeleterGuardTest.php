@@ -5,6 +5,8 @@ namespace WPCheckpoint\Tests\Unit\Support;
 use WPCheckpoint\Support\Deleter;
 use WPCheckpoint\Support\DeletionRefused;
 use WPCheckpoint\Support\OwnerMarker;
+use WPCheckpoint\Tests\Fixtures\ExpectedPath;
+use WPCheckpoint\Tests\Fixtures\Junction;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 /**
@@ -257,8 +259,8 @@ final class DeleterGuardTest extends TestCase {
 		Deleter::allow( $this->sandbox . '/shared', false );
 		$this->assertSame(
 			array(
-				$this->sandbox . DIRECTORY_SEPARATOR . 'elsewhere' => true,
-				$this->sandbox . DIRECTORY_SEPARATOR . 'shared'    => false,
+				ExpectedPath::native( $this->sandbox, 'elsewhere' ) => true,
+				ExpectedPath::native( $this->sandbox, 'shared' )    => false,
 			),
 			Deleter::replace_roots( $before ),
 			'the control: plain directories are registered, resolved'
@@ -275,9 +277,9 @@ final class DeleterGuardTest extends TestCase {
 		Deleter::allow( $this->sandbox . '/wide' );
 		$this->assertSame(
 			array(
-				$this->sandbox . DIRECTORY_SEPARATOR . 'shared' => false,
-				$this->sandbox . DIRECTORY_SEPARATOR . 'own'    => false,
-				$this->sandbox . DIRECTORY_SEPARATOR . 'wide'   => true,
+				ExpectedPath::native( $this->sandbox, 'shared' ) => false,
+				ExpectedPath::native( $this->sandbox, 'own' )    => false,
+				ExpectedPath::native( $this->sandbox, 'wide' )   => true,
 			),
 			Deleter::replace_roots( $before ),
 			'the control: a directory registered twice as a whole stays whole'
@@ -297,6 +299,21 @@ final class DeleterGuardTest extends TestCase {
 		$this->assertStringContainsString( 'a protected directory (1) or holds it', Deleter::refusal( $this->sandbox . '/link' ), 'the link itself' );
 		Deleter::replace_protected( array() );
 		$this->assertSame( '', Deleter::refusal( dirname( $keep ) ), 'the control: registered, once nothing is protected' );
+	}
+
+	public function test_a_junction_to_a_protected_directory_protects_where_it_leads(): void {
+		$keep = $this->made( 'real/abspath' );
+		Junction::make( dirname( $keep ), $this->sandbox . '/junction' );
+		try {
+			Deleter::replace_roots( array( $this->sandbox => true ) );
+			Deleter::replace_protected( array( $this->sandbox . '/junction' ) );
+			$this->assertStringContainsString( 'a protected directory (1)', Deleter::refusal( dirname( $keep ) ), 'where the junction leads' );
+			$this->assertStringContainsString( 'a protected directory (1)', Deleter::refusal( $this->sandbox . '/real' ), 'what holds it' );
+			Deleter::replace_protected( array() );
+			$this->assertSame( '', Deleter::refusal( dirname( $keep ) ), 'the control: registered, once nothing is protected' );
+		} finally {
+			Junction::remove( $this->sandbox . '/junction' );
+		}
 	}
 
 	public function test_a_directory_that_is_or_holds_a_protected_one_cannot_be_a_storage_directory(): void {

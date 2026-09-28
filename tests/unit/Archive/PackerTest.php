@@ -112,7 +112,16 @@ final class PackerTest extends TestCase {
 	}
 
 	private function unzip_ok( string $path ): bool {
-		if ( 'Windows' === PHP_OS_FAMILY || ! is_executable( '/usr/bin/unzip' ) ) {
+		if ( 'Windows' === PHP_OS_FAMILY ) {
+			// Windows has no unzip; its own tar (bsdtar, in System32) reads zip archives and fails on a broken one.
+			$tar = getenv( 'SystemRoot' ) . '\\System32\\tar.exe';
+			if ( ! is_file( $tar ) ) {
+				$this->markTestSkipped( 'Neither unzip nor the system tar is available.' );
+			}
+			exec( '"' . $tar . '" -tf ' . escapeshellarg( $path ) . ' 2>&1', $lines, $code );
+			return 0 === $code;
+		}
+		if ( ! is_executable( '/usr/bin/unzip' ) ) {
 			$this->markTestSkipped( 'unzip is not available' );
 		}
 		exec( '/usr/bin/unzip -t ' . escapeshellarg( $path ) . ' 2>&1', $lines, $code );

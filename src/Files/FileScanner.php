@@ -10,6 +10,8 @@ namespace WPCheckpoint\Files;
 use WPCheckpoint\Archive\EntryPath;
 use WPCheckpoint\Archive\Manifest;
 use WPCheckpoint\Archive\Packer;
+use WPCheckpoint\Support\Deleter;
+use WPCheckpoint\Support\Paths;
 use WPCheckpoint\Support\Utf8;
 
 /**
@@ -225,6 +227,25 @@ final class FileScanner {
 	}
 
 	/**
+	 * Whether an entry below a content root is a link of any kind, and so neither listed nor entered: a symbolic link,
+	 * or on Windows a directory junction, which is_link() does not report; right after is_link(), is_dir() and
+	 * is_file() are both false for a junction too (observed on the Windows CI runner), so without this it was counted
+	 * as a special file and stayed out only because is_dir() was false. A regular file is not asked about further, so
+	 * the added cost stays with directories. When the Deleter's check has no definite answer (no readlink(), an empty
+	 * directory, or one holding only links), the entry counts as not a link and is entered: an empty directory lists
+	 * nothing, and PackStep packs only what Paths::is_inside() places under the root.
+	 *
+	 * @param string $path Path.
+	 * @return bool
+	 */
+	private static function is_any_link( string $path ): bool {
+		if ( is_link( $path ) ) {
+			return true;
+		}
+		return Paths::is_windows() && ! is_file( $path ) && Deleter::is_reparse( $path );
+	}
+
+	/**
 	 * Handle one entry. Returns a new stack frame when it is a directory to enter.
 	 *
 	 * @param array<string, mixed>                                               $state State (updated).
@@ -243,7 +264,7 @@ final class FileScanner {
 			$this->warn( $state, 'bad_names', 'A file or directory was skipped because its name cannot be stored in an archive: ' . $root['prefix'] . '/' . Utf8::scrub( $rel ) );
 			return null;
 		}
-		if ( is_link( $abs ) ) {
+		if ( self::is_any_link( $abs ) ) {
 			++$state['counts']['links'];
 			return null;
 		}

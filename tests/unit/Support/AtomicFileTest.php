@@ -6,6 +6,7 @@ use WPCheckpoint\Restore\StagingLayout;
 use WPCheckpoint\Support\AtomicFile;
 use WPCheckpoint\Support\AtomicWriteFailed;
 use WPCheckpoint\Tests\Fixtures\Support\MemoryStream;
+use WPCheckpoint\Tests\Fixtures\ExpectedPath;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 /**
@@ -64,7 +65,7 @@ final class AtomicFileTest extends TestCase {
 				},
 			)
 		);
-		$this->assertSame( $this->dir . DIRECTORY_SEPARATOR . self::NAME, $path );
+		$this->assertSame( ExpectedPath::native( $this->dir, self::NAME ), $path );
 		$this->assertSame( "<?php\n// Nothing.\n", file_get_contents( $path ) );
 		$this->assertSame( array( self::NAME ), $this->names() );
 		$this->assertSame( 1, $confirmed, 'confirmed once, before the rename' );
