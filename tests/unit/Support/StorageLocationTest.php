@@ -4,6 +4,7 @@ namespace WPCheckpoint\Tests\Unit\Support;
 
 use WPCheckpoint\Support\OwnerMarker;
 use WPCheckpoint\Support\StorageLocation;
+use WPCheckpoint\Tests\Fixtures\Junction;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 /**
@@ -130,6 +131,19 @@ final class StorageLocationTest extends TestCase {
 		$this->assertFalse( OwnerMarker::is_unfinished( substr( OwnerMarker::build( 'install-b', '/srv/site/' ), 0, 12 ), 'install-a', '/srv/site/' ), 'another installation\'s' );
 		$this->assertFalse( OwnerMarker::is_unfinished( substr( $full, 0, 12 ) . 'x', 'install-a', '/srv/site/' ), 'not a start' );
 		$this->assertFalse( OwnerMarker::is_unfinished( '', '', '/srv/site/' ), 'no installation ID yet' );
+	}
+
+	public function test_a_junction_does_not_get_around_it(): void {
+		Junction::make( $this->sandbox . '/wp/wp-content/uploads', $this->sandbox . '/to-uploads' );
+		try {
+			Junction::make( $this->sandbox . '/wp/wp-content/cache', $this->sandbox . '/to-cache' );
+			$this->assertSame( 'uploads', $this->refusal( 'to-uploads' ), 'a junction to it' );
+			$this->assertSame( 'uploads', $this->refusal( 'to-uploads/new/store' ), 'a new directory under a junction to it' );
+			$this->assertSame( '', $this->refusal( 'to-cache' ), 'the control: a junction to a directory that may be used' );
+		} finally {
+			Junction::remove( $this->sandbox . '/to-uploads' );
+			Junction::remove( $this->sandbox . '/to-cache' );
+		}
 	}
 
 	public function test_an_owner_marker_is_created_only_where_none_is(): void {

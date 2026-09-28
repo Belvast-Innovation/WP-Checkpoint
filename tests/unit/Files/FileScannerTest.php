@@ -9,6 +9,7 @@ use WPCheckpoint\Files\Exclusions;
 use WPCheckpoint\Files\FileScanner;
 use WPCheckpoint\Tests\Fixtures\MemoryBudget;
 use WPCheckpoint\Tests\Fixtures\Permissions;
+use WPCheckpoint\Tests\Fixtures\Junction;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 final class FileScannerTest extends TestCase {
@@ -155,6 +156,24 @@ final class FileScannerTest extends TestCase {
 		foreach ( $state['warnings'] as $warning ) {
 			$this->assertStringNotContainsString( $this->root, $warning, 'warnings carry relative paths only' );
 			$this->assertSame( $warning, \WPCheckpoint\Support\Utf8::scrub( $warning ), 'warnings are valid UTF-8 even for invalid names' );
+		}
+	}
+
+	public function test_a_junction_is_counted_as_a_link_and_not_followed(): void {
+		$this->put( 'c/keep.txt' );
+		$this->put( 'outside/secret.txt' );
+		Junction::make( $this->root . '/outside', $this->root . '/c/junction-dir' );
+		try {
+			$this->assertFileExists( $this->root . '/c/junction-dir/secret.txt', 'the control: the junction leads outside' );
+			$scanner = new FileScanner(
+				array( array( 'group' => 'other-content', 'path' => $this->root . '/c', 'prefix' => 'wp-content', 'skip' => array() ) ),
+				new Exclusions( array(), array() )
+			);
+			list( $lines, $state ) = $this->run_all( $scanner );
+			$this->assertSame( array( 'wp-content/keep.txt' ), $this->paths( $lines ), 'nothing behind the junction is listed' );
+			$this->assertSame( 1, $state['counts']['links'], 'the junction is counted as a link' );
+		} finally {
+			Junction::remove( $this->root . '/c/junction-dir' );
 		}
 	}
 

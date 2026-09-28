@@ -6,6 +6,7 @@ use WPCheckpoint\Support\Deleter;
 use WPCheckpoint\Support\DeletionRefused;
 use WPCheckpoint\Support\OwnerMarker;
 use WPCheckpoint\Tests\Fixtures\ExpectedPath;
+use WPCheckpoint\Tests\Fixtures\Junction;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 /**
@@ -298,6 +299,21 @@ final class DeleterGuardTest extends TestCase {
 		$this->assertStringContainsString( 'a protected directory (1) or holds it', Deleter::refusal( $this->sandbox . '/link' ), 'the link itself' );
 		Deleter::replace_protected( array() );
 		$this->assertSame( '', Deleter::refusal( dirname( $keep ) ), 'the control: registered, once nothing is protected' );
+	}
+
+	public function test_a_junction_to_a_protected_directory_protects_where_it_leads(): void {
+		$keep = $this->made( 'real/abspath' );
+		Junction::make( dirname( $keep ), $this->sandbox . '/junction' );
+		try {
+			Deleter::replace_roots( array( $this->sandbox => true ) );
+			Deleter::replace_protected( array( $this->sandbox . '/junction' ) );
+			$this->assertStringContainsString( 'a protected directory (1)', Deleter::refusal( dirname( $keep ) ), 'where the junction leads' );
+			$this->assertStringContainsString( 'a protected directory (1)', Deleter::refusal( $this->sandbox . '/real' ), 'what holds it' );
+			Deleter::replace_protected( array() );
+			$this->assertSame( '', Deleter::refusal( dirname( $keep ) ), 'the control: registered, once nothing is protected' );
+		} finally {
+			Junction::remove( $this->sandbox . '/junction' );
+		}
 	}
 
 	public function test_a_directory_that_is_or_holds_a_protected_one_cannot_be_a_storage_directory(): void {
