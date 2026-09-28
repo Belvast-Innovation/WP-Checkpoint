@@ -7,6 +7,8 @@
 
 namespace WPCheckpoint\Support;
 
+use WPCheckpoint\Restore\SwapPlan;
+
 defined( 'ABSPATH' ) || exit;
 
 /**
@@ -22,7 +24,7 @@ defined( 'ABSPATH' ) || exit;
 final class Schema {
 
 	const OPTION  = StoredNames::DB_VERSION;
-	const CURRENT = 7;
+	const CURRENT = 8;
 
 	/**
 	 * Jobs table name without the prefix.
@@ -494,8 +496,24 @@ final class Schema {
 				// Adds cron_deferrals (0); older code ignores it, so min_compatible stays 1.
 				self::create_jobs_table();
 				return 1;
+			case 8:
+				// A table of its own for the restore's swap plan; older code does not know it, so min_compatible stays 1.
+				// Its columns are read back where it is used (Restore\SwapPlan), not here: the jobs table is what every
+				// job needs, and a restore-only table that cannot be made must stop the restore, not every job.
+				self::create_swap_plan_table();
+				return 1;
 		}
 		return self::MIN_COMPATIBLE;
+	}
+
+	/**
+	 * The restore's swap plan table, when it is not there (Restore\SwapPlan::create_sql()).
+	 *
+	 * @return void
+	 */
+	private static function create_swap_plan_table(): void {
+		global $wpdb;
+		$wpdb->query( SwapPlan::create_sql( $wpdb->base_prefix . SwapPlan::TABLE ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.NotPrepared -- table name from the prefix and a constant.
 	}
 
 	/**
@@ -571,6 +589,8 @@ final class Schema {
 		}
 		$table = $wpdb->base_prefix . self::JOBS_TABLE;
 		$wpdb->query( "DROP TABLE IF EXISTS {$table}" ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- table name from the prefix and a constant; uninstall only.
+		$plan = $wpdb->base_prefix . SwapPlan::TABLE;
+		$wpdb->query( "DROP TABLE IF EXISTS {$plan}" ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- table name from the prefix and a constant; uninstall only.
 		Options::delete( self::OPTION );
 		Options::delete( self::RETRY_OPTION );
 	}

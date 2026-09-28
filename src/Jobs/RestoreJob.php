@@ -36,6 +36,10 @@ defined( 'ABSPATH' ) || exit;
  *    and settings) renamed in the temporary tables.
  * 6. FileStagingStep: the backup's files, and the running copy of this
  *    plugin, written under the staging roots next to the site.
+ * 7. SwapCheckStep: the final check before the swap (the temporary tables
+ *    and the staged files are what the restore wrote, this plugin was not
+ *    updated meanwhile, the site's directories did not move, no table left
+ *    in place references one the swap moves away) and the swap's plan.
  *
  * The swap and what follows are later parts of T042; no user
  * interface starts this job yet (only tests and, later, the restore
@@ -100,7 +104,7 @@ final class RestoreJob implements JobType {
 	 * @return string[]
 	 */
 	public function step_ids(): array {
-		return array( RestorePlatformStep::ID, RestoreVerifyStep::ID, RestorePreflightStep::ID, RestoreFilesPreflightStep::ID, DatabaseImportStep::ID, PrefixRewriteStep::ID, FileStagingStep::ID );
+		return array( RestorePlatformStep::ID, RestoreVerifyStep::ID, RestorePreflightStep::ID, RestoreFilesPreflightStep::ID, DatabaseImportStep::ID, PrefixRewriteStep::ID, FileStagingStep::ID, SwapCheckStep::ID );
 	}
 
 	/**
@@ -122,6 +126,7 @@ final class RestoreJob implements JobType {
 			new DatabaseImportStep(),
 			new PrefixRewriteStep(),
 			new FileStagingStep(),
+			new SwapCheckStep(),
 		);
 	}
 

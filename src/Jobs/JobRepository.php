@@ -14,6 +14,7 @@ use WPCheckpoint\Support\Paths;
 use WPCheckpoint\Support\Redactor;
 use WPCheckpoint\Support\Schema;
 use WPCheckpoint\Support\StoredNames;
+use WPCheckpoint\Restore\SwapPlan;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -445,6 +446,23 @@ final class JobRepository {
 			return array() !== $rows;
 		}
 		// The read failed: only the server's answer that there is no such table is an answer (no job without it).
+		$tables = self::read_rows( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( self::table() ) ) );
+		return array() === $tables ? false : null;
+	}
+
+	/**
+	 * Whether a restore is in progress: queued, running or paused, or failed with its work kept (a final failure too):
+	 * true, false, or null when the jobs table could not be read (only the server's answer that there is no such
+	 * table means none).
+	 *
+	 * @return bool|null
+	 */
+	public static function restore_in_progress() {
+		global $wpdb;
+		$rows = self::read_rows( $wpdb->prepare( 'SELECT id FROM ' . self::table() . ' WHERE type = %s AND ( status IN (%s, %s, %s) OR ( status = %s AND work_expired_at = 0 ) ) LIMIT 1', RestoreJob::ID, Job::QUEUED, Job::RUNNING, Job::PAUSED, Job::FAILED ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- table name from the prefix and a constant.
+		if ( null !== $rows ) {
+			return array() !== $rows;
+		}
 		$tables = self::read_rows( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( self::table() ) ) );
 		return array() === $tables ? false : null;
 	}
@@ -1556,6 +1574,7 @@ final class JobRepository {
 		}
 		$token = (string) $this->directories->state()['token'];
 		$done  = $this->drop_tables_of( $token, $job->id ) && $done;
+		$done  = $this->delete_plan_of( $job->id ) && $done;
 		if ( $budget <= 0 ) {
 			return false;
 		}
@@ -1695,10 +1714,37 @@ final class JobRepository {
 
 		foreach ( $victims as $job ) {
 			$this->delete_files_of( $job );
+			$left = true;
+			for ( $pass = 0; $pass < 20 && $left; $pass++ ) {
+				$left = ! $this->delete_plan_of( $job->id );
+			}
+			if ( $left ) {
+				continue; // Its row stays until its plan is gone: a plan without its job would never be removed.
+			}
 			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin table.
 			$wpdb->delete( $table, array( 'id' => $job->id ), array( '%d' ) );
 		}
 		return count( $victims );
+	}
+
+	/**
+	 * Remove a job's rows of the swap plan (Restore\SwapPlan), a bounded number per call.
+	 *
+	 * @param int $job_id Job id.
+	 * @return bool True when none are left (or the table is not there).
+	 */
+	private function delete_plan_of( int $job_id ): bool {
+		global $wpdb;
+		$table = $wpdb->base_prefix . SwapPlan::TABLE;
+		$quiet = $wpdb->suppress_errors( true );
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix.
+		$deleted = $wpdb->query( $wpdb->prepare( "DELETE FROM {$table} WHERE job_id = %d LIMIT %d", $job_id, SwapPlan::DELETE_ROWS ) );
+		$wpdb->suppress_errors( $quiet );
+		if ( false === $deleted ) {
+			// None left only when the server answers that there is no such table: a failed delete leaves them.
+			return array() === self::read_rows( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $table ) ) );
+		}
+		return (int) $deleted < SwapPlan::DELETE_ROWS;
 	}
 
 	/**

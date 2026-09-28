@@ -298,6 +298,12 @@ final class PrefixRewriteStep implements Step {
 					'mark' => array( -1, -1, -1 ),
 					'keys' => array(),
 				),
+				// For the final check's counts: rows removed per temporary table (under the cleared mark), and the
+				// highest usermeta key at the plan, above which only this step's copies are.
+				'rows'       => array(
+					'removed' => array(),
+					'above'   => isset( $run['tables']['usermeta'] ) ? array( $run['tables']['usermeta'] => $max ) : array(),
+				),
 			),
 			$run
 		);
@@ -380,7 +386,7 @@ final class PrefixRewriteStep implements Step {
 			foreach ( $db->rows( 'SELECT meta_key, COUNT(*) FROM `' . $table . '`' . $where . ' GROUP BY BINARY meta_key', array_merge( $range, $targets, $targets ) ) as $row ) {
 				$counts[ (string) $row[0] ] = (int) $row[1];
 			}
-			$this->record_cleared( $context, $counts, array( $after, 0, $to ), $run );
+			$this->record_cleared( $context, $counts, array( $after, 0, $to ), $run, array( $table => array_sum( $counts ) ) );
 			$this->at( 'cleared' );
 			$db->write( 'DELETE FROM `' . $table . '`' . $where . $this->holding(), array_merge( $range, $targets, $targets, $claim ) );
 			return;
@@ -421,6 +427,7 @@ final class PrefixRewriteStep implements Step {
 		$db     = $run['db'];
 		$claim  = array( (string) self::CLAIM, $run['token'] );
 		$counts = array();
+		$tables = array();
 		foreach ( $sites as $site ) {
 			$table = self::options_table( $run['plan'], $site );
 			if ( null === $table ) {
@@ -434,14 +441,15 @@ final class PrefixRewriteStep implements Step {
 			} else {
 				$has = $db->rows( 'SELECT COUNT(*) FROM `' . $table . '` WHERE option_name = ?', array( $new ) );
 				if ( (int) ( $has[0][0] ?? 0 ) > 0 ) {
-					$counts[ $new ] = (int) $has[0][0];
+					$counts[ $new ]   = (int) $has[0][0];
+					$tables[ $table ] = (int) $has[0][0];
 				}
 			}
 		}
 		if ( 'clear' !== $phase ) {
 			return;
 		}
-		$this->record_cleared( $context, $counts, array( $after, 1, 0 ), $run );
+		$this->record_cleared( $context, $counts, array( $after, 1, 0 ), $run, $tables );
 		foreach ( $sites as $site ) {
 			$table = self::options_table( $run['plan'], $site );
 			if ( null !== $table ) {
@@ -585,9 +593,10 @@ final class PrefixRewriteStep implements Step {
 	 * @param array<string, int>   $counts  New name => rows about to be removed.
 	 * @param int[]                $mark    The unit: [group mark, part (0 users, 1 options), range end].
 	 * @param array<string, mixed> $run     This run.
+	 * @param array<string, int>   $tables  Temporary table => rows about to be removed from it.
 	 * @return void
 	 */
-	private function record_cleared( JobContext $context, array $counts, array $mark, array $run ): void {
+	private function record_cleared( JobContext $context, array $counts, array $mark, array $run, array $tables ): void {
 		$report = ExportPlan::read( $context->work_path(), RestoreFiles::PREFIX_REPORT );
 		if ( array_map( 'intval', (array) $report['cleared']['mark'] ) >= $mark ) {
 			return; // A replayed unit: counted already.
@@ -598,6 +607,9 @@ final class PrefixRewriteStep implements Step {
 			$key                               = preg_replace( '/\A' . preg_quote( $to, '/' ) . '(?:[1-9][0-9]*_)?/', '', $name );
 			$key                               = null === $key ? $name : $key;
 			$report['cleared']['keys'][ $key ] = ( $report['cleared']['keys'][ $key ] ?? 0 ) + $rows;
+		}
+		foreach ( $tables as $table => $rows ) {
+			$report['rows']['removed'][ $table ] = ( $report['rows']['removed'][ $table ] ?? 0 ) + $rows;
 		}
 		$report['cleared']['mark'] = $mark;
 		$this->write_report( $context, $report, $run );

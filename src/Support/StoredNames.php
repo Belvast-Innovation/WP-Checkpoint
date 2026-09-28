@@ -43,6 +43,8 @@ final class StoredNames {
 	const LOCK_RECHECK     = 'wpcheckpoint_lock_recheck';
 	const LOCK_VERIFY      = 'wpcheckpoint_lock_verify';
 
+	const AUTO_UPDATE_UNCHECKED = 'wpcheckpoint_auto_update_unchecked';
+
 	/**
 	 * Every exact name, whatever it is stored as (option, site option, transient, site transient).
 	 */
@@ -63,6 +65,7 @@ final class StoredNames {
 		self::JOBS_SWEPT,
 		self::LOCK_RECHECK,
 		self::LOCK_VERIFY,
+		self::AUTO_UPDATE_UNCHECKED,
 	);
 
 	const LOOPBACK_TOKEN  = 'wpcheckpoint_loopback_';

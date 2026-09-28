@@ -6,6 +6,7 @@ use WPCheckpoint\Archive\ZipReader;
 use WPCheckpoint\Database\TableExporter;
 use WPCheckpoint\Database\WpdbConnection;
 use WPCheckpoint\Jobs\FileStagingStep;
+use WPCheckpoint\Jobs\SwapCheckStep;
 use WPCheckpoint\Jobs\Budget;
 use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\Residue;
@@ -48,6 +49,9 @@ abstract class RestoreTestCase extends JobTestCase {
 			if ( FileStagingStep::ID === $step->id() ) {
 				$steps[ $i ] = new FileStagingStep( $this->staging_parts() );
 			}
+			if ( SwapCheckStep::ID === $step->id() ) {
+				$steps[ $i ] = new SwapCheckStep( null, $this->check_parts() );
+			}
 		}
 		$this->register( RestoreJob::ID, $steps );
 	}
@@ -64,8 +68,19 @@ abstract class RestoreTestCase extends JobTestCase {
 		);
 	}
 
+	/**
+	 * The parts every test's final check has: the same stand-in for the running plugin, and its version.
+	 *
+	 * @return array<string, mixed>
+	 */
+	protected function check_parts( array $more = array() ): array {
+		return $more + $this->staging_parts() + array( 'version' => PluginCopy::VERSION );
+	}
+
 	public function tear_down(): void {
 		global $wpdb;
+		// Job ids start over with every test: plan rows of an earlier test's job would be this one's.
+		$wpdb->query( 'DELETE FROM `' . $wpdb->base_prefix . 'wpcheckpoint_swap_plan`' );
 		$wpdb->query( 'SET FOREIGN_KEY_CHECKS=0' );
 		foreach ( $this->created as $table ) {
 			$wpdb->query( "DROP TABLE IF EXISTS `{$table}`" );
@@ -313,8 +328,8 @@ abstract class RestoreTestCase extends JobTestCase {
 		global $wpdb;
 		$out = array();
 		foreach ( (array) $wpdb->get_col( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $wpdb->base_prefix ) . '%' ) ) as $table ) {
-			if ( $table === $wpdb->base_prefix . 'wpcheckpoint_jobs' ) {
-				continue; // The restore's own row changes.
+			if ( in_array( $table, array( $wpdb->base_prefix . 'wpcheckpoint_jobs', $wpdb->base_prefix . 'wpcheckpoint_swap_plan' ), true ) ) {
+				continue; // The restore's own row and plan change.
 			}
 			$rows = $this->rows_of( $table );
 			if ( in_array( $table, array( $wpdb->base_prefix . 'options', $wpdb->base_prefix . 'sitemeta' ), true ) ) {

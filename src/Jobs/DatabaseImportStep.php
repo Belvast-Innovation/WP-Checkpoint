@@ -627,7 +627,7 @@ final class DatabaseImportStep implements Step {
 			// Its rows commit with their record, but DROP and CREATE TABLE are not in a transaction: a run that outlived
 			// its lease can still drop the table after its last lease check and create it again, empty. One row is
 			// enough to tell, where a count would scan the whole table. A table emptied and partly filled again is
-			// not caught here, and there is no check between here and the swap yet: the swap's part of T042 adds it.
+			// not caught here: the final check before the swap counts it (SwapCheckStep).
 			throw new \RuntimeException( sprintf( 'The table %1$s is empty where the restore inserted %2$d rows: it was dropped or emptied by another run of this restore that outlived its lease, or by another process, while it ran. Start the restore again.', $table['table'], $state['rows'] ) );
 		}
 		$prefix = (string) $plan['plan']->to_array()['backup_prefix'];

@@ -45,6 +45,7 @@ final class Uninstaller {
 		\WPCheckpoint\Backups\Estimate::OPTION,
 		\WPCheckpoint\Backups\Estimate::RATE_OPTION,
 		\WPCheckpoint\Backups\ExportResults::OPTION,
+		AutoUpdateHold::OPTION,
 	);
 
 	/**

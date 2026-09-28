@@ -551,6 +551,49 @@ final class RunnerTest extends WP_UnitTestCase {
 		return $this->runner()->tick( $id, $this->now );
 	}
 
+	public function test_a_step_knows_whether_the_run_is_cli(): void {
+		$seen = array();
+		$kill = true;
+		$this->register(
+			'facts',
+			array(
+				new ClosureStep(
+					'work',
+					static function ( JobContext $ctx ) use ( &$seen, &$kill ): StepResult {
+						$seen[] = array( 'work', $ctx->is_cli() );
+						if ( $kill ) {
+							throw new \WPCheckpoint\Jobs\LockLost( 'killed by the server (simulated)' );
+						}
+						$n = (int) ( $ctx->cursor()['n'] ?? 0 ) + 1;
+						return $n >= 2 ? StepResult::done( 'work done' ) : StepResult::progress( array( 'n' => $n ), 50, 'work' );
+					}
+				),
+				new ClosureStep(
+					'next',
+					static function ( JobContext $ctx ) use ( &$seen ): StepResult {
+						$seen[] = array( 'next', $ctx->is_cli() );
+						return StepResult::done( 'next done' );
+					}
+				),
+			)
+		);
+		$job = $this->repo->create( 'facts' );
+		$this->assertSame( TickResult::LOST, $this->runner()->tick( $job->id, $this->now )->status, 'the first run dies without releasing the job' );
+		$kill = false;
+		$this->now += JobRepository::LOCK_SECONDS + 1;
+		$this->runner( 20, 32 * 1048576, array( 'cli' => true ) )->tick( $job->id, $this->now );
+		$this->assertSame(
+			array(
+				array( 'work', false ),
+				array( 'work', true ),
+				array( 'work', true ),
+				array( 'next', true ),
+			),
+			$seen,
+			'the cli option reaches every step of a run, and a run without it is not cli'
+		);
+	}
+
 	public function test_three_takeovers_at_the_same_position_fail_the_job_even_after_bounded_units_made_progress(): void {
 		$kill  = true;
 		$calls = 0;

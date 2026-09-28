@@ -159,6 +159,16 @@ final class Ledger {
 	}
 
 	/**
+	 * Make this run the holder of every table's record at once (the final check before the swap): a run of the
+	 * import that outlived its lease finds its next batch refused, and the batch rolls back with its record.
+	 *
+	 * @return int Records taken.
+	 */
+	public function take_all(): int {
+		return $this->db->write( 'UPDATE ' . SqlWriter::identifier( $this->name ) . ' SET holder = ? WHERE holder <> ?', array( $this->token, $this->token ) );
+	}
+
+	/**
 	 * Make this run the table's holder; its record as it is then.
 	 *
 	 * @param int $number The table's number.

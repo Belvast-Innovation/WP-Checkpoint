@@ -107,6 +107,13 @@ final class Runner {
 	private $lease;
 
 	/**
+	 * Whether this process is WP-CLI (JobContext::is_cli()).
+	 *
+	 * @var bool
+	 */
+	private $cli;
+
+	/**
 	 * Called before every cursor write (tests only; see persist()).
 	 *
 	 * @var callable|null
@@ -133,9 +140,10 @@ final class Runner {
 	 * @param JobRepository        $repository Repository.
 	 * @param JobTypes             $types      Job types.
 	 * @param Redactor             $redactor   Redactor.
-	 * @param array<string, mixed> $options    clock (callable: float), memory (callable: int), budget (Budget|callable), lease (int), memory_limit (int bytes), paths (placeholder => path).
+	 * @param array<string, mixed> $options    clock (callable: float), memory (callable: int), budget (Budget|callable), lease (int), memory_limit (int bytes), paths (placeholder => path), cli (bool: whether this process is WP-CLI; by default whether WP_CLI is defined and true).
 	 */
 	public function __construct( JobRepository $repository, JobTypes $types, Redactor $redactor, array $options = array() ) {
+		$this->cli        = isset( $options['cli'] ) ? (bool) $options['cli'] : ( defined( 'WP_CLI' ) && constant( 'WP_CLI' ) );
 		$this->repository = $repository;
 		$this->types      = $types;
 		$this->redactor   = $redactor;
@@ -601,7 +609,19 @@ final class Runner {
 			}
 			$this->maybe_heartbeat( $job, $token );
 		};
-		return new JobContext( $job, $cursor, $budget, $logger, $this->clock, $this->memory, $started_at, $this->memory_limit, $checkpoint, $lease );
+		return new JobContext(
+			$job,
+			$cursor,
+			$budget,
+			$logger,
+			$this->clock,
+			$this->memory,
+			$started_at,
+			$this->memory_limit,
+			$checkpoint,
+			$lease,
+			array( 'cli' => $this->cli )
+		);
 	}
 
 	/**

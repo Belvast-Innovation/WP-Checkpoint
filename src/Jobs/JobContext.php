@@ -124,6 +124,13 @@ final class JobContext {
 	private $checkpointed_at;
 
 	/**
+	 * See is_cli().
+	 *
+	 * @var bool
+	 */
+	private $cli = false;
+
+	/**
 	 * Constructor.
 	 *
 	 * @param Job                  $job             Job.
@@ -136,8 +143,9 @@ final class JobContext {
 	 * @param int                  $memory_limit    memory_limit in bytes; <= 0 unlimited or unknown.
 	 * @param callable|null        $checkpoint      function( array $cursor, int $percent, string $message ): void.
 	 * @param callable|null        $lease           function( bool $force ): void; throws LockLost when the lease is gone (see should_stop(), confirm_lease()).
+	 * @param array<string, bool>  $facts           What the Runner knows about this run: cli (see is_cli()).
 	 */
-	public function __construct( Job $job, array $cursor, Budget $budget, Logger $logger, callable $clock, callable $memory, float $started_at, int $memory_limit, $checkpoint = null, $lease = null ) {
+	public function __construct( Job $job, array $cursor, Budget $budget, Logger $logger, callable $clock, callable $memory, float $started_at, int $memory_limit, $checkpoint = null, $lease = null, array $facts = array() ) {
 		$this->job             = $job;
 		$this->cursor          = self::strip_reserved( $cursor );
 		$this->budget          = $budget;
@@ -150,6 +158,16 @@ final class JobContext {
 		$this->checkpoint      = is_callable( $checkpoint ) ? $checkpoint : null;
 		$this->checkpointed_at = $started_at;
 		$this->lease           = is_callable( $lease ) ? $lease : null;
+		$this->cli             = ! empty( $facts['cli'] );
+	}
+
+	/**
+	 * Whether this run is a WP-CLI process: no web server's time limit ends it.
+	 *
+	 * @return bool
+	 */
+	public function is_cli(): bool {
+		return $this->cli;
 	}
 
 	/**

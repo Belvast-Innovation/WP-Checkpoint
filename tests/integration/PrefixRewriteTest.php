@@ -187,7 +187,10 @@ final class PrefixRewriteTest extends RestoreTestCase {
 	 * @return array<int, mixed>
 	 */
 	private function outcome( Job $job ): array {
-		return array( $this->restored( $job, 'wpx_usermeta' ), $this->restored( $job, 'wpx_options' ), $this->report( $job ) );
+		$report = $this->report( $job );
+		// The counts for the final check are by temporary table, whose names carry the job's id: the numbers only.
+		$report['rows'] = array( array_values( $report['rows']['removed'] ), array_values( $report['rows']['above'] ) );
+		return array( $this->restored( $job, 'wpx_usermeta' ), $this->restored( $job, 'wpx_options' ), $report );
 	}
 
 	public function test_the_rows_named_after_the_prefix_are_renamed_copied_cleared_and_reported(): void {

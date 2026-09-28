@@ -28,7 +28,12 @@ namespace WPCheckpoint\Jobs;
  */
 final class TempTables {
 
-	const PREFIX     = 'wcptmp';
+	const PREFIX = 'wcptmp';
+
+	/**
+	 * Prefix of the tables the swap moves the live ones to (old()).
+	 */
+	const OLD_PREFIX = 'wcpold';
 	const TOKEN_LEN  = 6;
 	const RANDOM_LEN = 4;
 	const MAX_NAME   = 60;
@@ -81,11 +86,43 @@ final class TempTables {
 		if ( 1 !== preg_match( '/\A[0-9a-f]{' . self::RANDOM_LEN . '}\z/', $random ) ) {
 			throw new \InvalidArgumentException( 'The random part must be four lowercase hex characters.' );
 		}
+		return self::shaped( self::job_prefix( $token, $job_id ) . $random . '_', $table );
+	}
+
+	/**
+	 * The name a live table is moved to by the swap (the old site's table, kept until the restore is confirmed
+	 * or undone): the shape of name() under OLD_PREFIX, so the reaper of temporary tables, which lists
+	 * PREFIX only, never takes it.
+	 *
+	 * @param string $token  Storage token.
+	 * @param int    $job_id Job id.
+	 * @param string $random The run's random part.
+	 * @param string $table  Original table name without the site prefix.
+	 * @return string At most MAX_NAME bytes of [A-Za-z0-9_].
+	 * @throws \InvalidArgumentException When an argument is not usable.
+	 */
+	public static function old( string $token, int $job_id, string $random, string $table ): string {
+		if ( 1 !== preg_match( '/\A[0-9a-f]{' . self::RANDOM_LEN . '}\z/', $random ) ) {
+			throw new \InvalidArgumentException( 'The random part must be four lowercase hex characters.' );
+		}
+		$prefix = self::job_prefix( $token, $job_id );
+		return self::shaped( self::OLD_PREFIX . substr( $prefix, strlen( self::PREFIX ) ) . $random . '_', $table );
+	}
+
+	/**
+	 * A prefix and a table name, at most MAX_NAME bytes: cut and given a short hash of the original when it had
+	 * other characters than [A-Za-z0-9_] or was too long.
+	 *
+	 * @param string $prefix Prefix.
+	 * @param string $table  Table name without the site prefix.
+	 * @return string
+	 * @throws \InvalidArgumentException When the table name is not usable or leaves no room.
+	 */
+	private static function shaped( string $prefix, string $table ): string {
 		if ( '' === $table || 1 === preg_match( '/[\x00-\x1F\x7F\/\\\\]/', $table ) ) {
 			throw new \InvalidArgumentException( 'Not a table name.' );
 		}
-		$prefix = self::job_prefix( $token, $job_id ) . $random . '_';
-		$safe   = preg_replace( self::SAFE_CHARS, '_', $table );
+		$safe = preg_replace( self::SAFE_CHARS, '_', $table );
 		if ( ! is_string( $safe ) ) {
 			throw new \InvalidArgumentException( 'Not a table name.' );
 		}

@@ -152,6 +152,8 @@ final class Plugin {
 		add_action( 'rest_api_init', array( $this, 'register_rest_routes' ) );
 		// The delayed re-tick must work outside the admin (real cron runs in a front-end or CLI process).
 		add_action( Loopback::HOOK, array( $this, 'cron_tick' ) );
+		// Automatic updates run in cron and admin requests: held while a restore is unfinished.
+		Support\AutoUpdateHold::register();
 
 		if ( defined( 'WP_CLI' ) && WP_CLI ) {
 			\WP_CLI::add_command( 'wpcheckpoint job', new JobCommand( $this->job_actions(), $this->job_presenter(), $this->directories() ) );
