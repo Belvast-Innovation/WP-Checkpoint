@@ -739,7 +739,7 @@ final class Directories {
 		if ( $this->owns( $dir ) ) {
 			return true; // Written meanwhile by another request of this installation.
 		}
-		// create() removes a marker it could not write in full: one still there was written by someone else.
+		// A marker still there that is not the start of this installation's was written by someone else.
 		$this->error = is_file( $marker ) && ! $this->marker_unfinished( $dir ) ? __( 'The directory belongs to another installation.', 'wp-checkpoint' ) : __( 'Cannot write the owner marker.', 'wp-checkpoint' );
 		return false;
 	}

@@ -82,7 +82,8 @@ final class OwnerMarker {
 	/**
 	 * Write a marker only if none is there yet (exclusive creation: of two requests preparing the same directory,
 	 * one writes it and the other finds it). A marker this call created but could not write in full (a full disk) is
-	 * removed again.
+	 * left as it is: it holds the start of these contents, which is_unfinished() recognises next time. Removing it
+	 * could remove another request's finished marker that replaced it meanwhile.
 	 *
 	 * @param string $path     Marker path.
 	 * @param string $contents Marker contents (build()).
@@ -95,11 +96,7 @@ final class OwnerMarker {
 		}
 		$written = fwrite( $handle, $contents ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- plugin-owned file.
 		$closed  = fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- plugin-owned file.
-		if ( strlen( $contents ) === $written && $closed ) {
-			return true;
-		}
-		@unlink( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.unlink_unlink -- the file this call created; if it stays, is_unfinished() takes it up next time.
-		return false;
+		return strlen( $contents ) === $written && $closed;
 	}
 
 	/**
