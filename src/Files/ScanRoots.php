@@ -31,153 +31,110 @@ final class ScanRoots {
 	 * @param string[]              $groups      Content groups (subset of GROUPS).
 	 * @param string                $storage_dir The plugin's storage directory, never scanned.
 	 * @param array<string, string> $overrides   Group => absolute directory (tests); defaults come from WordPress.
-	 * @return array{roots: array<int, array{group: string, path: string, prefix: string, skip: string[], collide: string[], hold: string[], same: string[], also_skip: string[]}>, warnings: string[]}
+	 * @return array{roots: array<int, array{group: string, path: string, prefix: string, skip: string[], also_skip: string[], collide: string[], hold: string[], refuse: string}>, warnings: string[]}
 	 */
 	public static function resolve( array $groups, string $storage_dir = '', array $overrides = array() ): array {
 		$dirs     = array_merge( self::wordpress_directories(), $overrides );
-		$roots    = array();
 		$warnings = array();
 		$chosen   = array();
+		$others   = array();
 		foreach ( self::GROUPS as $group ) {
+			$path = rtrim( Paths::normalize( (string) $dirs[ $group ] ), '/' );
 			if ( ! in_array( $group, $groups, true ) ) {
+				if ( 'other-content' !== $group && '' !== $path ) {
+					$others[] = $path; // Not chosen: no root backs it up (skipped wherever it lies).
+				}
 				continue;
 			}
-			$path = rtrim( Paths::normalize( (string) $dirs[ $group ] ), '/' );
 			if ( '' === $path || ! is_dir( $path ) ) {
 				$warnings[] = 'The directory of the "' . $group . '" group does not exist and was not backed up.';
 				continue;
 			}
 			$chosen[ $group ] = $path;
 		}
-		// A group inside another chosen group, or in the same directory as an earlier one, is covered by that
-		// group (with its prefix), by real path, but only where neither directory is a link: a group reached
-		// through a link stays a root of its own (merged away, its files would come back under the other group's
-		// path and its own directory would be missing), and nothing is merged into one (its target, not its place,
-		// would decide). A group in the content directory itself is covered by the content directory; the content
-		// directory is never merged into a group. Covered by a group that is covered in turn means covered by the
-		// last one. So no two roots share a prefix.
-		$plain = array();
-		foreach ( $chosen as $group => $path ) {
-			$plain[ $group ] = Links::PLAIN === Links::state( $path );
-		}
-		$order  = array_flip( array_keys( $chosen ) );
-		$parent = array();
-		foreach ( $chosen as $group => $path ) {
-			if ( 'other-content' === $group || ! $plain[ $group ] ) {
-				continue;
-			}
-			foreach ( $chosen as $other => $other_path ) {
-				if ( $group === $other || ! $plain[ $other ] ) {
-					continue;
-				}
-				$same   = Links::key( $other_path ) === Links::key( $path );
-				$inside = 'other-content' !== $other && Paths::is_prefix( Links::key( $other_path ), Links::key( $path ), false );
-				if ( $inside || ( $same && ( 'other-content' === $other || $order[ $other ] < $order[ $group ] ) ) ) {
-					$parent[ $group ] = $other;
-					break;
-				}
-			}
-		}
-		$final = array();
-		$most  = count( self::GROUPS );
-		foreach ( array_keys( $chosen ) as $group ) {
-			$last = $group;
-			for ( $hops = 0; isset( $parent[ $last ] ) && $hops < $most; $hops++ ) {
-				$last = $parent[ $last ];
-			}
-			$final[ $group ] = $last;
-			if ( $last !== $group ) {
-				$warnings[] = 'The "' . $group . '" directory lies inside the "' . $last . '" directory and is backed up as part of it.';
-			}
-		}
 		$storage = '' === $storage_dir ? array() : array( rtrim( Paths::normalize( $storage_dir ), '/' ) );
+		$content = rtrim( Paths::normalize( (string) $dirs['content'] ), '/' );
 		$abspath = (string) $dirs['abspath'];
-		foreach ( $chosen as $group => $path ) {
-			if ( $final[ $group ] !== $group ) {
-				continue;
-			}
-			$root = array(
-				'group'   => $group,
-				'path'    => $path,
-				'prefix'  => self::prefix( $group, $path, $dirs['abspath'], $dirs['content'] ),
-				'skip'    => $storage,
-				'collide' => array(),
-				'hold'    => array(),
-				'same'    => array(),
-			);
-			if ( 'other-content' !== $group ) {
-				// A group that is a link must not lead to the directory of a group that is not a link (both would be
-				// backed up in full), nor to the content directory or above it. A group directory inside its target
-				// is skipped by it instead (below): that group backs it up under its own path.
-				foreach ( $chosen as $other => $other_path ) {
-					if ( $group !== $other && 'other-content' !== $other && $plain[ $other ] ) {
-						$root['same'][] = $other_path;
-					}
-				}
-				$root['hold'][] = rtrim( Paths::normalize( (string) $dirs['content'] ), '/' );
-			}
-			$roots[ $group ] = $root;
-		}
-		// The judgement the scan will make of each root (a root the scan refuses adds nothing below).
-		$targets = array();
+
+		// 1. The scan's judgement of each group directory (Links::root_verdict()): a link must not lead to or above
+		// the WordPress directory or the content directory, to the root of the file system, or into the storage.
+		// A refused group stays a root (the scan reports it) but adds nothing below: its place is not skipped by
+		// any other root, and it takes no directory from another group.
+		$real    = array();
 		$refused = array();
-		foreach ( $roots as $group => $root ) {
-			$verdict = Links::root_verdict( $root['path'], $abspath, $root['skip'], null, $root['hold'], $root['same'] );
+		foreach ( $chosen as $group => $path ) {
+			$real[ $group ] = Links::key( $path );
+			$verdict        = Links::root_verdict( $path, $abspath, $storage, null, 'other-content' === $group ? array() : array( $content ) );
 			if ( '' !== $verdict['refusal'] ) {
 				$refused[ $group ] = true;
-			} elseif ( $verdict['link'] ) {
-				$targets[ $group ] = rtrim( Paths::normalize( (string) realpath( $root['path'] ) ), '/' );
 			}
 		}
-		if ( isset( $roots['other-content'] ) ) {
-			$content = $roots['other-content'];
-			// The content directory skips the directories of the other groups: those not chosen, and those backed up
-			// as roots of their own (a group covered by the content directory is backed up as part of it).
-			foreach ( self::GROUPS as $inner ) {
-				if ( 'other-content' !== $inner && isset( $dirs[ $inner ] ) && ( ! isset( $final[ $inner ] ) || 'other-content' !== $final[ $inner ] ) ) {
-					$content['skip'][] = rtrim( Paths::normalize( (string) $dirs[ $inner ] ), '/' );
+
+		// 2. One directory, one root: a group whose directory is the same as another's (by real path) is backed
+		// up as part of that one, the content directory first, then the earlier group. Nothing is left out.
+		$keepers = array_merge( isset( $chosen['other-content'] ) ? array( 'other-content' ) : array(), array_diff( array_keys( $chosen ), array( 'other-content' ) ) );
+		$kept    = array();
+		foreach ( $keepers as $group ) {
+			if ( ! isset( $refused[ $group ] ) ) {
+				foreach ( $kept as $other => $unused ) {
+					if ( ! isset( $refused[ $other ] ) && $real[ $other ] === $real[ $group ] ) {
+						$warnings[] = 'The "' . $group . '" directory is the same directory as the "' . $other . '" directory and is backed up as part of it.';
+						continue 2;
+					}
 				}
 			}
-			// Where another root's archive path lies in the content directory while that group is elsewhere (a
-			// group outside both ABSPATH and the content directory is shown as "wp-content/<group>"), a directory
-			// of that name here would give the same archive paths. WordPress does not use it for the group any
-			// more, but old content may still point into it: it is left out and listed with the unreadable entries
-			// (the pre-flight asks), with a warning when it exists.
-			$fold = static function ( string $text ): string {
-				return Paths::is_windows() ? strtolower( $text ) : $text;
-			};
-			foreach ( $roots as $other => $root ) {
-				if ( 'other-content' === $other || isset( $refused[ $other ] ) || 0 !== strpos( $fold( $root['prefix'] ), $fold( $content['prefix'] . '/' ) ) ) {
+			$kept[ $group ] = self::prefix( $group, $chosen[ $group ], $abspath, $content );
+		}
+
+		// 3. Roots in scan order. Each skips the plugin's storage, the groups not chosen, and the directories of
+		// the other roots (those roots back them up under their own paths), all by real path. Where another
+		// root's archive path lies below this root's while that root is elsewhere (a group outside both the
+		// WordPress and the content directory is shown as "wp-content/<group>"), the directory of that name here
+		// would give the same archive paths: it is left out and listed with the unreadable entries ('collide'),
+		// with a warning when it exists. Two different directories with one archive path: the later is refused.
+		$fold  = static function ( string $text ): string {
+			return Paths::is_windows() ? strtolower( $text ) : $text;
+		};
+		$roots = array();
+		$taken = array();
+		foreach ( $chosen as $group => $path ) {
+			if ( ! isset( $kept[ $group ] ) ) {
+				continue;
+			}
+			$prefix = $kept[ $group ];
+			$root   = array(
+				'group'     => $group,
+				'path'      => $path,
+				'prefix'    => $prefix,
+				'skip'      => $storage,
+				'also_skip' => $others,
+				'collide'   => array(),
+				'hold'      => 'other-content' === $group ? array() : array( $content ),
+				'refuse'    => '',
+			);
+			if ( isset( $taken[ $fold( $prefix ) ] ) ) {
+				$root['refuse'] = 'another content group is backed up under the same path';
+			}
+			$taken[ $fold( $prefix ) ] = true;
+			foreach ( $kept as $other => $other_prefix ) {
+				if ( $other === $group ) {
 					continue;
 				}
-				$there = $content['path'] . '/' . substr( $root['prefix'], strlen( $content['prefix'] ) + 1 );
-				if ( Links::key( $there ) !== Links::key( $root['path'] ) ) {
-					$content['collide'][] = $there;
-					if ( file_exists( $there ) ) {
-						$warnings[] = 'The directory ' . $root['prefix'] . ' in the content directory was not backed up: the "' . $other . '" group, backed up under that path, is in another place on this site.';
+				if ( ! isset( $refused[ $other ] ) ) {
+					$root['also_skip'][] = $chosen[ $other ];
+				}
+				if ( 0 === strpos( $fold( $other_prefix ), $fold( $prefix . '/' ) ) ) {
+					$there = $path . '/' . substr( $other_prefix, strlen( $prefix ) + 1 );
+					if ( Links::key( $there ) !== $real[ $other ] ) {
+						$root['collide'][] = $there;
+						if ( file_exists( $there ) ) {
+							$warnings[] = 'The directory ' . $other_prefix . ' in the "' . $group . '" directory was not backed up: the "' . $other . '" group, backed up under that path, is in another place on this site.';
+						}
 					}
 				}
 			}
-			$roots['other-content'] = $content;
+			$roots[] = $root;
 		}
-		// A root that is a link the scan follows is backed up under its own prefix: where it leads is skipped by
-		// every other root (compared by real path, 'also_skip'), so a target inside another group is not backed up
-		// twice; and the link root skips the directories of groups that are not links and lie inside its target.
-		// Kept apart from 'skip', which is what a root must not lead into (Links::root_verdict()): two links, one
-		// leading inside the other's target, are each scanned and each skip the other's target. Two links to one
-		// directory are both scanned in full, each under its own path (a root never skips itself).
-		foreach ( $roots as $group => $root ) {
-			$also = array_values( array_diff_key( $targets, array( $group => true ) ) );
-			if ( isset( $targets[ $group ] ) ) {
-				foreach ( $chosen as $other => $other_path ) {
-					if ( $other !== $group && 'other-content' !== $other && $plain[ $other ] && Paths::is_prefix( Links::key( $targets[ $group ] ), Links::key( $other_path ), false ) ) {
-						$also[] = $other_path;
-					}
-				}
-			}
-			$roots[ $group ]['also_skip'] = $also;
-		}
-		$roots = array_values( $roots );
 		return array(
 			'roots'    => $roots,
 			'warnings' => $warnings,

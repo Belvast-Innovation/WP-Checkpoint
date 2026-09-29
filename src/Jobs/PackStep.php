@@ -386,8 +386,29 @@ final class PackStep implements Step {
 			$cursor['pending'] = null;
 			return 0;
 		}
-		$root   = self::root_of( $roots, $p );
-		$source = null === $root ? null : self::source_of( $roots, $p );
+		// Only the root the scan listed the line under takes it: the longest of the scan's prefixes that holds it.
+		// The roots are resolved again every tick; where that root is gone, the line would fall to another one.
+		$candidates = $roots;
+		if ( null !== $this->scanned_prefixes ) {
+			$scanned    = self::scanned_prefix( $this->scanned_prefixes, $p );
+			$candidates = '' === $scanned ? $roots : array_values(
+				array_filter(
+					$roots,
+					static function ( array $root ) use ( $scanned ): bool {
+						return (string) $root['prefix'] === $scanned;
+					}
+				)
+			);
+			if ( array() === $candidates ) {
+				$context->logger()->warning( 'File left out: its content directory changed after the scan', array( 'p' => $p ) );
+				self::note( $cursor, 'outside', $p );
+				$cursor['offset']  = $line['next'];
+				$cursor['pending'] = null;
+				return 0;
+			}
+		}
+		$root   = self::root_of( $candidates, $p );
+		$source = null === $root ? null : self::source_of( $candidates, $p );
 		$stat   = null === $source ? false : self::fresh_stat( $source );
 		if ( false === $stat || ! is_readable( $source ) ) {
 			self::note( $cursor, 'skipped', $p );
@@ -395,9 +416,8 @@ final class PackStep implements Step {
 			$cursor['pending'] = null;
 			return 0;
 		}
-		// The root itself is judged again (judged()): by the scan's rule, and by whether it still leads where it led
-		// then; and the line must still belong to the root the scan listed it under.
-		$changed = ! empty( $root['refused'] ) || ( null !== $this->scanned_prefixes && ! self::same_root( $this->scanned_prefixes, (string) $root['prefix'], $p ) );
+		// The root itself is judged again (judged()): by the scan's rule, and by whether it still leads where it led.
+		$changed = ! empty( $root['refused'] );
 		if ( $changed || ! Paths::is_inside( (string) $root['path'], $source ) ) {
 			// The scan saw a directory; a link put in its place since would take the backup outside the
 			// content directory (another site's files on a shared host). Resolved paths only.
@@ -876,33 +896,33 @@ final class PackStep implements Step {
 	private static function judged( array $roots, $ids ): array {
 		foreach ( $roots as $i => $root ) {
 			$path                   = rtrim( (string) $root['path'], '/\\' );
-			$verdict                = Links::root_verdict( $path, defined( 'ABSPATH' ) ? (string) ABSPATH : '', isset( $root['skip'] ) ? (array) $root['skip'] : array(), null, isset( $root['hold'] ) ? (array) $root['hold'] : array(), isset( $root['same'] ) ? (array) $root['same'] : array() );
+			$verdict                = Links::root_verdict( $path, defined( 'ABSPATH' ) ? (string) ABSPATH : '', isset( $root['skip'] ) ? (array) $root['skip'] : array(), null, isset( $root['hold'] ) ? (array) $root['hold'] : array() );
 			$moved                  = null !== $ids && isset( $ids[ (string) $root['prefix'] ] ) && Links::fingerprint( $path ) !== (string) $ids[ (string) $root['prefix'] ];
-			$roots[ $i ]['refused'] = '' !== $verdict['refusal'] || $moved;
+			$roots[ $i ]['refused'] = '' !== $verdict['refusal'] || $moved || ( isset( $root['refuse'] ) && '' !== (string) $root['refuse'] );
 		}
 		return $roots;
 	}
 
 	/**
-	 * Whether the root that takes an archive path now is the one the scan listed it under. The scan lists a path
-	 * only under the root with the longest prefix that holds it: a shorter root skips the directories of the
-	 * longer ones, and the directory of their archive path where a group is elsewhere (ScanRoots::resolve()), and
-	 * does not enter a group directory that is a link. So the longest of the scan's prefixes is that root.
+	 * The prefix of the root the scan listed an archive path under: the longest of the scan's prefixes that holds
+	 * it ('' when none does). ScanRoots::resolve() makes that root the only one that lists it: every root skips the
+	 * directories of the others and, where another root's path lies below its own but that root is elsewhere, the
+	 * directory of that name; two roots with one prefix are not both scanned; and no root enters a link below it.
 	 *
 	 * @param string[] $scanned The scan's root prefixes.
-	 * @param string   $prefix  The prefix of the root that takes the path now.
 	 * @param string   $p       Archive path.
-	 * @return bool
+	 * @return string
 	 */
-	private static function same_root( array $scanned, string $prefix, string $p ): bool {
+	private static function scanned_prefix( array $scanned, string $p ): string {
 		$best = '';
 		foreach ( $scanned as $candidate ) {
 			if ( ( $p === $candidate || 0 === strpos( $p, $candidate . '/' ) ) && strlen( $candidate ) > strlen( $best ) ) {
 				$best = $candidate;
 			}
 		}
-		return '' === $best || $best === $prefix;
+		return $best;
 	}
+
 
 	/**
 	 * The root an archive path belongs to (longest prefix wins).

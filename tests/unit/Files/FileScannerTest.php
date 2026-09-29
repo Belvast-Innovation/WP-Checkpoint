@@ -388,7 +388,7 @@ final class FileScannerTest extends TestCase {
 		);
 		list( $lines, $state ) = $this->run_all( $scanner );
 		$this->assertSame( array(), $lines );
-		$this->assertSame( array( 'The "uploads" content directory is a link and was not scanned: it leads into a directory that is not backed up as part of this group (the plugin\'s storage directory or another content group) (wp-content/uploads).' ), $state['warnings'] );
+		$this->assertSame( array( 'The "uploads" content directory is a link and was not scanned: it leads into the plugin\'s storage directory (wp-content/uploads).' ), $state['warnings'] );
 	}
 
 	public function test_what_happened_to_a_root_is_reported_however_many_warnings_came_before(): void {
