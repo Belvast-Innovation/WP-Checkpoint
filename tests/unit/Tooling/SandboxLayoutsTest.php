@@ -333,9 +333,11 @@ final class SandboxLayoutsTest extends TestCase {
 			$this->markTestSkipped( 'Not on Windows: "\\" is a separator there.' );
 		}
 		$short = false;
+		$links = false;
 		for ( $seed = 1; $seed <= 1000; $seed++ ) {
 			$layout = $this->build( $seed );
 			$short  = $short || array() !== $layout['short'];
+			$links  = $links || array() !== preg_grep( '/\Alink:/', $layout['nodes'] );
 			$this->assertSame( array(), $this->violations( $layout ), 'the control: seed ' . $seed . ' is clean with every rule' );
 			$found = $this->violations( $layout, $rules );
 			chdir( $this->cwd );
@@ -350,6 +352,9 @@ final class SandboxLayoutsTest extends TestCase {
 		}
 		if ( $windows && ! $short ) {
 			$this->markTestSkipped( 'This volume makes no 8.3 names.' );
+		}
+		if ( ! $links && array() !== array_intersect( $rules, array( 'parent', 'resolve' ) ) ) {
+			$this->markTestSkipped( 'No link could be made on this host.' );
 		}
 		$this->fail( 'No layout breaks ' . $breaks . ' with ' . implode( ', ', $rules ) . ' withdrawn' );
 	}

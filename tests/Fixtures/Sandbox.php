@@ -62,7 +62,7 @@ final class Sandbox {
 	 * generated layouts catch what each rule is there for. "listed" judges an entry by the name given; "parent" by
 	 * the path as written; "inside" lets through what is inside a protected directory; "resolve" judges an entry
 	 * that is there also by where it leads (as before the rules: a link to a protected directory refused);
-	 * "backslash" takes "\\" for a separator everywhere (as before: on POSIX it is part of a name).
+	 * "backslash" takes the name after the last "\\" everywhere (as before: on POSIX it is part of a name).
 	 *
 	 * @param string   $path      Path.
 	 * @param string[] $withdrawn Rules withdrawn.
@@ -74,9 +74,8 @@ final class Sandbox {
 		}
 		// The very string remove() acts on: judged and removed are one entry.
 		$path    = self::trimmed( $path );
-		if ( in_array( 'backslash', $withdrawn, true ) ) {
-			$path = str_replace( '\\', '/', $path );
-		}
+		// Its name: after the last separator ("backslash" withdrawn: after the last "\\" too, as before).
+		$base = basename( in_array( 'backslash', $withdrawn, true ) ? str_replace( '\\', '/', $path ) : $path );
 		$slashed = self::slashed( $path );
 		if ( 1 !== preg_match( '#\A(?:/|[A-Za-z]:/|//)#', $slashed ) ) {
 			return 'relative path';
@@ -107,13 +106,13 @@ final class Sandbox {
 			if ( false === $parent ) {
 				return 'its directory cannot be resolved';
 			}
-			$name = in_array( 'listed', $withdrawn, true ) ? basename( $path ) : self::listed_name( $parent, basename( $path ) );
+			$name = in_array( 'listed', $withdrawn, true ) ? $base : self::listed_name( $parent, $base );
 			if ( null === $name ) {
 				return 'not named as its directory lists it (a short name or another alias)';
 			}
 			$location = self::slashed( $parent ) . '/' . $name;
 		} elseif ( false !== $parent ) {
-			$location = self::slashed( $parent ) . '/' . basename( $path );
+			$location = self::slashed( $parent ) . '/' . $base;
 		}
 		if ( false !== $parent && ! self::strictly_inside( $real, $location ) ) {
 			return 'outside the temporary directory, through a link';
@@ -228,6 +227,9 @@ final class Sandbox {
 	 * @return string
 	 */
 	private static function trimmed( string $path ): string {
+		if ( 'Windows' === PHP_OS_FAMILY && 1 === preg_match( '#\A[A-Za-z]:[/\\\\]+\z#', $path ) ) {
+			return substr( $path, 0, 3 ); // A drive's root: without its separator, "C:" would be a relative path.
+		}
 		$trimmed = rtrim( $path, 'Windows' === PHP_OS_FAMILY ? '/\\' : '/' );
 		return '' === $trimmed ? substr( $path, 0, 1 ) : $trimmed;
 	}
