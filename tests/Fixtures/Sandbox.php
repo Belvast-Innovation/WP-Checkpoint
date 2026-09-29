@@ -243,6 +243,9 @@ final class Sandbox {
 	private static function slashed( string $path ): string {
 		if ( 'Windows' === PHP_OS_FAMILY ) {
 			$path = str_replace( '\\', '/', $path );
+			if ( 1 === preg_match( '#\A[A-Za-z]:/+\z#', $path ) ) {
+				return substr( $path, 0, 3 ); // A drive's root keeps its separator, as in trimmed().
+			}
 		}
 		return strlen( $path ) > 1 ? rtrim( $path, '/' ) : $path;
 	}
