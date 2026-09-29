@@ -56,31 +56,47 @@ final class ScanRoots {
 		$content = rtrim( Paths::normalize( (string) $dirs['content'] ), '/' );
 		$abspath = (string) $dirs['abspath'];
 
-		// 1. The scan's judgement of each group directory (Links::root_verdict()): a link must not lead to or above
-		// the WordPress directory or the content directory, to the root of the file system, or into the storage.
+		// 1. The scan's judgement of each group directory (Links::root_verdict()): neither a group directory nor
+		// where a link leads may be or hold the WordPress directory or (for a group) the content directory, be the
+		// root of the file system, or lie in the storage.
 		// A refused group stays a root (the scan reports it) but adds nothing below: its place is not skipped by
 		// any other root, and it takes no directory from another group.
 		$real    = array();
 		$refused = array();
+		$links   = array();
 		foreach ( $chosen as $group => $path ) {
 			$real[ $group ] = Links::key( $path );
 			$verdict        = Links::root_verdict( $path, $abspath, $storage, null, 'other-content' === $group ? array() : array( $content ) );
 			if ( '' !== $verdict['refusal'] ) {
 				$refused[ $group ] = true;
 			}
+			if ( $verdict['link'] ) {
+				$links[ $group ] = true;
+			}
 		}
 
 		// 2. One directory, one root: a group whose directory is the same as another's (by real path) is backed
-		// up as part of that one, the content directory first, then the earlier group. Nothing is left out.
-		$keepers = array_merge( isset( $chosen['other-content'] ) ? array( 'other-content' ) : array(), array_diff( array_keys( $chosen ), array( 'other-content' ) ) );
-		$kept    = array();
+		// up as part of that one: the content directory first, then a group whose directory is not a link (it is
+		// where the files are), then the earlier group. Nothing is left out.
+		$keepers = array_keys( $chosen );
+		usort(
+			$keepers,
+			static function ( string $a, string $b ) use ( $links, $chosen ): int {
+				$rank  = static function ( string $group ) use ( $links ): int {
+					return 'other-content' === $group ? 0 : ( isset( $links[ $group ] ) ? 2 : 1 );
+				};
+				$order = array_flip( array_keys( $chosen ) );
+				return array( $rank( $a ), $order[ $a ] ) <=> array( $rank( $b ), $order[ $b ] );
+			}
+		);
+		$kept = array();
 		foreach ( $keepers as $group ) {
-			if ( ! isset( $refused[ $group ] ) ) {
-				foreach ( $kept as $other => $unused ) {
-					if ( ! isset( $refused[ $other ] ) && $real[ $other ] === $real[ $group ] ) {
-						$warnings[] = 'The "' . $group . '" directory is the same directory as the "' . $other . '" directory and is backed up as part of it.';
-						continue 2;
-					}
+			// Also for a group that would be refused on its own (a group set to the content directory, which the
+			// content directory's root backs up): its files are backed up, so nothing needs asking about.
+			foreach ( $kept as $other => $unused ) {
+				if ( ! isset( $refused[ $other ] ) && $real[ $other ] === $real[ $group ] ) {
+					$warnings[] = 'The "' . $group . '" directory is the same directory as the "' . $other . '" directory and is backed up as part of it.';
+					continue 2;
 				}
 			}
 			$kept[ $group ] = self::prefix( $group, $chosen[ $group ], $abspath, $content );
@@ -112,10 +128,13 @@ final class ScanRoots {
 				'hold'      => 'other-content' === $group ? array() : array( $content ),
 				'refuse'    => '',
 			);
-			if ( isset( $taken[ $fold( $prefix ) ] ) ) {
+			// A refused root takes no archive path: it backs nothing up.
+			if ( isset( $taken[ $fold( $prefix ) ] ) && ! isset( $refused[ $group ] ) ) {
 				$root['refuse'] = 'another content group is backed up under the same path';
 			}
-			$taken[ $fold( $prefix ) ] = true;
+			if ( ! isset( $refused[ $group ] ) ) {
+				$taken[ $fold( $prefix ) ] = true;
+			}
 			foreach ( $kept as $other => $other_prefix ) {
 				if ( $other === $group ) {
 					continue;

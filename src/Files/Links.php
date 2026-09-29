@@ -114,12 +114,17 @@ final class Links {
 				'refusal' => self::UNDECIDED,
 			);
 		}
-		if ( self::LINK !== $link ) {
+		$is_link = self::LINK === $link;
+		if ( ! $is_link && ( ! is_dir( $path ) || '' === rtrim( $abspath, '/\\' ) ) ) {
+			// A missing directory is the caller's to report; without the WordPress directory to compare with (unit
+			// tests), a directory that is not a link is scanned as it always was.
 			return array(
 				'link'    => false,
 				'refusal' => '',
 			);
 		}
+		// The same limits for a directory that is not a link as for where a link leads: a group directory set to
+		// the WordPress directory, above it, or the root of the file system would back up the whole site or more.
 		$refusal = self::root_refusal( $path, $abspath );
 		if ( '' === $refusal ) {
 			$target = (string) realpath( $path );
@@ -139,7 +144,7 @@ final class Links {
 			}
 		}
 		return array(
-			'link'    => true,
+			'link'    => $is_link,
 			'refusal' => $refusal,
 		);
 	}
@@ -173,20 +178,22 @@ final class Links {
 	 * What a refusal means, for the scan's warning.
 	 *
 	 * @param string $refusal One of the refusal constants.
+	 * @param bool   $link    Whether the root is a link (where it leads) or a directory (what it is).
 	 * @return string
 	 */
-	public static function refusal_text( string $refusal ): string {
+	public static function refusal_text( string $refusal, bool $link = true ): string {
+		$verb = $link ? 'it leads to' : 'it is';
 		switch ( $refusal ) {
 			case self::NOT_A_DIRECTORY:
 				return 'it does not lead to a directory';
 			case self::FILESYSTEM_ROOT:
-				return 'it leads to the root of the file system';
+				return $verb . ' the root of the file system';
 			case self::HOLDS_SITE:
-				return 'it leads to the WordPress directory or a directory that holds it';
+				return $verb . ' the WordPress directory or a directory that holds it';
 			case self::INTO_SKIPPED:
-				return 'it leads into the plugin\'s storage directory';
+				return $link ? 'it leads into the plugin\'s storage directory' : 'it lies in the plugin\'s storage directory';
 			case self::HOLDS_GROUP:
-				return 'it leads to the content directory or a directory that holds it';
+				return $verb . ' the content directory or a directory that holds it';
 			case self::UNDECIDED:
 				return 'it could not be determined whether it is a link';
 			default:

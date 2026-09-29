@@ -321,7 +321,7 @@ final class FileScanner {
 			return false;
 		}
 		if ( '' !== $verdict['refusal'] ) {
-			$this->warn( $state, 'unreadable', sprintf( 'The "%1$s" content directory is a link and was not scanned: %2$s (%3$s).', $root['group'], Links::refusal_text( $verdict['refusal'] ), $root['prefix'] ), true );
+			$this->warn( $state, 'unreadable', sprintf( $verdict['link'] ? 'The "%1$s" content directory is a link and was not scanned: %2$s (%3$s).' : 'The "%1$s" content directory was not scanned: %2$s (%3$s).', $root['group'], Links::refusal_text( $verdict['refusal'], $verdict['link'] ), $root['prefix'] ), true );
 			return false;
 		}
 		if ( ! $verdict['link'] && ! is_dir( $root['path'] ) ) {
