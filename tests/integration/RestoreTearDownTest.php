@@ -13,6 +13,9 @@ final class RestoreTearDownTest extends RestoreTestCase {
 	const NEIGHBOUR = 'wcptmpabcdef_1_beef_teardown_neighbour';
 	const OWN       = array( 'wcptmpabcdef_2_beef_teardown_own', 'wcpoldabcdef_2_beef_teardown_own' );
 
+	/** @var bool Whether the test that makes the tables ran (in this process, before the one that looks). */
+	private static $made = false;
+
 	public static function set_up_before_class(): void {
 		parent::set_up_before_class();
 		self::query( 'CREATE TABLE `' . self::NEIGHBOUR . '` ( id int )' );
@@ -42,6 +45,7 @@ final class RestoreTearDownTest extends RestoreTestCase {
 			$this->assertTrue( self::exists( $table ), 'the control: ' . $table . ' is there' );
 		}
 		$this->assertTrue( self::exists( self::NEIGHBOUR ) );
+		self::$made = true;
 	}
 
 	/**
@@ -49,6 +53,7 @@ final class RestoreTearDownTest extends RestoreTestCase {
 	 * too) must not skip the neighbour's assertion here.
 	 */
 	public function test_its_tear_down_dropped_them_and_left_the_one_that_was_there_before(): void {
+		$this->assertTrue( self::$made, 'the control: the tables were made (run the class whole, in declaration order)' );
 		foreach ( self::OWN as $table ) {
 			$this->assertFalse( self::exists( $table ), $table );
 		}

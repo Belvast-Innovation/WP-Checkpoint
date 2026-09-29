@@ -5,38 +5,74 @@
 #
 #   sh bin/test-integration.sh [phpunit arguments]
 #
-# Arguments go to PHPUnit; a relative --log-junit path is taken relative to the plugin's directory, as before. Used
-# by `composer test:integration`, npm run test:integration and CI. Anything the suite leaves in its working directory
-# is kept there and fails the run: a test wrote to a relative path. (WPCHECKPOINT_TEST_PHPUNIT names another PHPUnit,
-# for this script's own test.)
-PLUGIN=$(cd "$(dirname "$0")/.." && pwd)
+# The run gets a directory of its own, "{TMPDIR}/wpcheckpoint-it.XXXXXX": "cwd" is its working directory and "tmp"
+# its temporary directory (TMPDIR), so two runs in one container never see each other's temporary entries (the
+# leftover check, tests/Fixtures/Leftovers.php, looks at this one only). Arguments go to PHPUnit; the paths in them
+# (a test file or directory, and the values of --log-*, --testdox-*, --coverage-* and --cache-result-file) are taken
+# relative to the plugin's directory, as before. The configuration is phpunit.xml when there is one, else
+# phpunit.xml.dist. Anything the suite leaves in its working directory is kept there and fails the run: a test wrote
+# to a relative path. Used by `composer test:integration`, npm run test:integration and CI.
+# (WPCHECKPOINT_TEST_PHPUNIT names another PHPUnit, for this script's own test.)
+PLUGIN=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 PHPUNIT=${WPCHECKPOINT_TEST_PHPUNIT:-$PLUGIN/vendor/bin/phpunit}
+CONFIG=$PLUGIN/phpunit.xml
+[ -f "$CONFIG" ] || CONFIG=$PLUGIN/phpunit.xml.dist
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/wpcheckpoint-it.XXXXXX") || exit 1
+mkdir "$WORK/cwd" "$WORK/tmp" || exit 1
+
+# A path relative to the plugin's directory, made absolute.
+absolute() {
+	case "$1" in
+		/*) printf '%s' "$1" ;;
+		*) printf '%s' "$PLUGIN/$1" ;;
+	esac
+}
 
 ARGS=""
-NEXT=""
+NEXT="" # What the argument before asked of this one: "path" (make it absolute) or "value" (leave it).
 for arg in "$@"; do
-	if [ -n "$NEXT" ]; then
-		case "$arg" in /*) ;; *) arg="$PLUGIN/$arg" ;; esac
+	if [ "$NEXT" = path ]; then
+		arg=$(absolute "$arg")
 		NEXT=""
+	elif [ "$NEXT" = value ]; then
+		NEXT=""
+	else
+		case "$arg" in
+			--log-*=* | --testdox-html=* | --testdox-text=* | --testdox-xml=* | --coverage-*=* | --cache-result-file=*)
+				arg="${arg%%=*}=$(absolute "${arg#*=}")"
+				;;
+			--log-* | --testdox-html | --testdox-text | --testdox-xml | --cache-result-file | --coverage-clover | --coverage-cobertura | --coverage-crap4j | --coverage-html | --coverage-php | --coverage-xml | --coverage-filter)
+				NEXT=path
+				;;
+			--filter | --group | --exclude-group | --testsuite | --covers | --uses | --include-path | -d | --printer | --test-suffix | --order-by | --random-order-seed | --columns | --loader | --repeat | --extensions | --testdox-group | --testdox-exclude-group | --whitelist)
+				NEXT=value
+				;;
+			-*) ;;
+			*)
+				# A test file or directory, named as from the plugin's directory.
+				if [ -e "$PLUGIN/$arg" ]; then
+					arg=$(absolute "$arg")
+				fi
+				;;
+		esac
 	fi
-	case "$arg" in
-		--log-junit) NEXT=1 ;;
-		--log-junit=*)
-			value=${arg#--log-junit=}
-			case "$value" in /*) ;; *) arg="--log-junit=$PLUGIN/$value" ;; esac
-			;;
-	esac
 	ARGS="$ARGS '$(printf '%s' "$arg" | sed "s/'/'\\\\''/g")'"
 done
 
-cd "$WORK" || exit 1
+cd "$WORK/cwd" || exit 1
 eval "set -- $ARGS"
-WPCHECKPOINT_TEST_SUITE=integration php "$PHPUNIT" -c "$PLUGIN/phpunit.xml.dist" --testsuite integration "$@"
+TMPDIR="$WORK/tmp" WPCHECKPOINT_TEST_RUN_TMP="$WORK/tmp" WPCHECKPOINT_TEST_SUITE=integration php "$PHPUNIT" -c "$CONFIG" --testsuite integration "$@"
 STATUS=$?
 cd / || exit 1
-if ! rmdir "$WORK" 2>/dev/null; then
-	echo "The suite left files in its working directory, $WORK (kept to be looked at): a test wrote to a relative path." >&2
+# The run's temporary directory goes (what the suite's own leftovers were, the leftover check has already failed
+# and named); its working directory only when nothing was left in it.
+case "$WORK" in
+	*/wpcheckpoint-it.*) rm -rf -- "$WORK/tmp" ;;
+esac
+if ! rmdir "$WORK/cwd" 2>/dev/null; then
+	echo "The suite left files in its working directory, $WORK/cwd (kept to be looked at): a test wrote to a relative path." >&2
 	[ "$STATUS" -eq 0 ] && STATUS=1
+elif ! rmdir "$WORK" 2>/dev/null; then
+	echo "The run's temporary directory, $WORK/tmp, could not be removed entirely." >&2
 fi
 exit $STATUS

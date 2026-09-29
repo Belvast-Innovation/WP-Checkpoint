@@ -163,6 +163,12 @@ final class TestDeletionUsageTest extends TestCase {
 				}
 				$after  = $tokens[ $i + 1 ] ?? null;
 				$method = is_array( $before ) && in_array( $before[0], array( T_OBJECT_OPERATOR, T_DOUBLE_COLON, T_FUNCTION ), true );
+				// "use function unlink as remove;" imports it under another name: that counts.
+				$import = is_array( $before ) && T_FUNCTION === $before[0] && is_array( $tokens[ $i - 2 ] ?? null ) && T_USE === $tokens[ $i - 2 ][0];
+				if ( $import ) {
+					$found[] = 'use function ' . $token[1];
+					continue;
+				}
 				if ( defined( 'T_NULLSAFE_OBJECT_OPERATOR' ) && is_array( $before ) && T_NULLSAFE_OBJECT_OPERATOR === $before[0] ) {
 					$method = true;
 				}
@@ -175,7 +181,7 @@ final class TestDeletionUsageTest extends TestCase {
 				$text = trim( $token[1], '\'"' );
 				if ( in_array( strtolower( ltrim( $text, '\\' ) ), array( 'unlink', 'rmdir' ), true ) ) {
 					$found[] = "'" . $text . "' as a callback";
-				} elseif ( 1 === preg_match( '#(?:\A|[\s;&|(\'"])(?:rm\s+-[A-Za-z]*[rRf]|rmdir\s+/s|rd\s+/s|del\s+/[fsq])#i', $text ) ) {
+				} elseif ( 1 === preg_match( '#(?:\A|[\s;&|(\'"])(?:rm\s+-[A-Za-z]*[rRf]|rm\s+--(?:recursive|force)|rmdir\s+/s|rd\s+/s|del\s+/[fsq])|(?:\A|\s)-delete\b#i', $text ) ) {
 					$found[] = 'shell: ' . $text;
 				}
 			}
@@ -213,8 +219,11 @@ exec( 'cmd /c rmdir /s /q ' . $dir );
 exec( 'cmd /c rd /S ' . $dir );
 exec( 'del /f ' . $file );
 exec( 'rm -f x' );
+exec( 'rm --recursive ' . $dir );
+exec( "find {$dir} -type f -delete" );
+use function unlink as remove_file;
 PHP;
-		$this->assertCount( 12, self::deletions( $code ), implode( ' | ', self::deletions( $code ) ) );
+		$this->assertCount( 15, self::deletions( $code ), implode( ' | ', self::deletions( $code ) ) );
 		$code = <<<'PHP'
 <?php
 // unlink( $a ) in a comment
@@ -229,6 +238,8 @@ $s = 'the file was unlinked';
 $t = 'form -rf';
 $u = 'arm -r';
 $v = 'rm is not run';
+$w = 'find the file, then delete it';
+use function Sandbox\\remove;
 PHP;
 		$this->assertSame( array(), self::deletions( $code ) );
 		$files = self::test_files();

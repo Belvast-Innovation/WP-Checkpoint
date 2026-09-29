@@ -70,8 +70,15 @@ final class SandboxTest extends TestCase {
 		$cwd = (string) getcwd();
 		chdir( $dir . '/in' );
 		try {
-			$this->assertSame( 'holds the plugin, the site or the working directory', Sandbox::refusal( $dir ) );
-			$this->assertSame( 'holds the plugin, the site or the working directory', Sandbox::refusal( $dir . '/in' ) );
+			$why = 'the plugin, the site or the working directory, or holding or inside one';
+			$this->assertSame( $why, Sandbox::refusal( $dir ), 'holding it' );
+			$this->assertSame( $why, Sandbox::refusal( $dir . '/in' ), 'it' );
+			$this->assertSame( $why, Sandbox::refusal( $dir . '/in/x' ), 'inside it' );
+			if ( is_dir( $dir . '/IN' ) ) {
+				$this->assertSame( $why, Sandbox::refusal( $dir . '/IN' ), 'another letter case, where the file system folds it (Windows, macOS)' );
+			} else {
+				$this->assertSame( '', Sandbox::refusal( $dir . '/IN' ), 'another directory, where the file system tells the letter case apart' );
+			}
 		} finally {
 			chdir( $cwd );
 		}

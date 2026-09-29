@@ -5,6 +5,7 @@ namespace WPCheckpoint\Tests\Unit\Tooling;
 use PHPUnit\Framework\TestResult;
 use PHPUnit\Framework\TestSuite;
 use WPCheckpoint\Tests\Fixtures\Leftovers;
+use WPCheckpoint\Tests\Fixtures\LeftoversStandIn;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 /**
@@ -45,16 +46,17 @@ final class LeftoversTest extends TestCase {
 	}
 
 	public function test_a_test_that_leaves_something_fails_by_name_and_it_is_removed(): void {
-		$result    = new TestResult();
-		$listener  = $this->listener();
-		$root      = new TestSuite( 'root' );
-		$class     = new TestSuite( 'SomeTest' );
-		$this->there = array( 'table:wcptmpabcdef_3_beef_posts', 'temp:/tmp/wpc-plugin-00000000' );
+		$result      = new TestResult();
+		$listener    = $this->listener();
+		$root        = new TestSuite( 'root' );
+		$class       = new TestSuite( 'SomeTest' );
+		$earlier     = array( 'table:wcptmpabcdef_3_beef_posts', 'temp:/tmp/wpc-plugin-00000000' );
+		$this->there = $earlier;
 
 		$listener->startTestSuite( $root );
-		$this->assertSame( array(), $this->there, 'an earlier run\'s leftovers are removed first' );
 		$this->assertCount( 1, $this->notices );
-		$this->assertStringContainsString( 'wcptmpabcdef_3_beef_posts', $this->notices[0], 'and reported' );
+		$this->assertStringContainsString( 'wcptmpabcdef_3_beef_posts', $this->notices[0], 'an earlier run\'s leftovers are reported' );
+		$this->assertSame( $earlier, $this->there, 'and left alone: not this run\'s' );
 		$this->assertSame( 0, $result->failureCount(), 'they fail nothing' );
 		$listener->startTestSuite( $class );
 
@@ -73,7 +75,8 @@ final class LeftoversTest extends TestCase {
 		$this->assertSame( $leaky, $failure->failedTest() );
 		$this->assertStringContainsString( 'wcpoldabcdef_4_beef_options', $failure->exceptionMessage() );
 		$this->assertStringContainsString( 'wp-checkpoint-stage-x', $failure->exceptionMessage() );
-		$this->assertSame( array(), $this->there, 'removed, so the next test starts clean' );
+		$this->assertStringNotContainsString( 'wcptmpabcdef_3_beef_posts', $failure->exceptionMessage(), 'not what was there before' );
+		$this->assertSame( $earlier, $this->there, 'what it left is removed, so the next test starts clean; nothing else' );
 
 		$next = self::probe( $result, 'test_next' );
 		$listener->startTest( $next );
@@ -82,31 +85,52 @@ final class LeftoversTest extends TestCase {
 
 		$listener->endTestSuite( $class );
 		$listener->endTestSuite( $root );
-		$this->assertSame( 1, $result->failureCount(), 'nothing left at the end' );
+		$this->assertSame( 1, $result->failureCount(), 'nothing new left at the end' );
 	}
 
 	public function test_a_class_that_leaves_something_fails_as_a_class_and_so_does_the_run(): void {
 		$result   = new TestResult();
 		$listener = $this->listener();
-		$root     = new TestSuite( 'root' );
-		$class    = new TestSuite( 'ClassLevelTest' );
+		$seen     = new LeftoversRecorder();
+		$result->addListener( $listener ); // As in a run: the stand-in's start and end reach it too.
+		$result->addListener( $seen );
+		$root  = new TestSuite( 'root' );
+		$class = new TestSuite( 'ClassLevelTest' );
 		$listener->startTestSuite( $root );
 		$listener->startTestSuite( $class );
 		$this->there[] = 'table:wcptmpabcdef_9_beef_made_before_class'; // set_up_before_class().
 		$test          = self::probe( $result, 'test_one' );
-		$listener->startTest( $test );
-		$listener->endTest( $test, 0.1 );
+		$result->startTest( $test );
+		$result->endTest( $test, 0.1 );
 		$this->assertSame( 0, $result->failureCount(), 'not the test\'s' );
 		$listener->endTestSuite( $class );
 		$this->assertSame( 1, $result->failureCount() );
-		$this->assertSame( $class, $result->failures()[0]->failedTest() );
+		$stand_in = $result->failures()[0]->failedTest();
+		$this->assertInstanceOf( LeftoversStandIn::class, $stand_in );
+		$this->assertSame( 'leftovers of ClassLevelTest', $stand_in->getName() );
 		$this->assertStringContainsString( 'made_before_class', $result->failures()[0]->exceptionMessage() );
+		$this->assertSame( array( 'start leftovers of ClassLevelTest', 'failure leftovers of ClassLevelTest', 'end leftovers of ClassLevelTest' ), array_slice( $seen->events, -3 ), 'started, failed and ended like a test, so every log records it' );
 
 		$this->there[] = 'temp:/tmp/wpcheckpoint-verify-00000000'; // Outside any class.
 		$listener->endTestSuite( $root );
 		$this->assertSame( 2, $result->failureCount(), 'the run ends with none' );
-		$this->assertSame( $root, $result->failures()[1]->failedTest() );
+		$this->assertSame( 'leftovers of root', $result->failures()[1]->failedTest()->getName() );
 		$this->assertSame( array(), $this->there );
+		$this->assertSame( 0.1, $result->time(), 'the stand-ins and failures add no time' );
+	}
+
+	public function test_the_temporary_directory_is_looked_at_only_when_it_is_the_runs_own(): void {
+		$before = getenv( 'WPCHECKPOINT_TEST_RUN_TMP' );
+		try {
+			putenv( 'WPCHECKPOINT_TEST_RUN_TMP=' . sys_get_temp_dir() );
+			$this->assertSame( realpath( sys_get_temp_dir() ), Leftovers::run_temp_dir(), 'the control: the run\'s own' );
+			putenv( 'WPCHECKPOINT_TEST_RUN_TMP=' . dirname( __DIR__, 3 ) );
+			$this->assertSame( '', Leftovers::run_temp_dir(), 'named, but not the temporary directory in use' );
+			putenv( 'WPCHECKPOINT_TEST_RUN_TMP' );
+			$this->assertSame( '', Leftovers::run_temp_dir(), 'shared' );
+		} finally {
+			putenv( false === $before ? 'WPCHECKPOINT_TEST_RUN_TMP' : 'WPCHECKPOINT_TEST_RUN_TMP=' . $before );
+		}
 	}
 
 	public function test_outside_the_integration_suite_it_looks_at_nothing(): void {
@@ -129,5 +153,27 @@ final class LeftoversProbe extends \PHPUnit\Framework\TestCase {
 
 	public function test_nothing(): void {
 		$this->assertTrue( true );
+	}
+}
+
+/**
+ * Records what a result tells its listeners.
+ */
+final class LeftoversRecorder implements \PHPUnit\Framework\TestListener {
+	use \PHPUnit\Framework\TestListenerDefaultImplementation;
+
+	/** @var string[] */
+	public $events = array();
+
+	public function startTest( \PHPUnit\Framework\Test $test ): void {
+		$this->events[] = 'start ' . ( $test instanceof \PHPUnit\Framework\TestCase ? $test->getName() : '' );
+	}
+
+	public function addFailure( \PHPUnit\Framework\Test $test, \PHPUnit\Framework\AssertionFailedError $e, float $time ): void {
+		$this->events[] = 'failure ' . ( $test instanceof \PHPUnit\Framework\TestCase ? $test->getName() : '' );
+	}
+
+	public function endTest( \PHPUnit\Framework\Test $test, float $time ): void {
+		$this->events[] = 'end ' . ( $test instanceof \PHPUnit\Framework\TestCase ? $test->getName() : '' );
 	}
 }

@@ -32,8 +32,9 @@ final class Sandbox {
 
 	/**
 	 * Why a path may not be removed, or '' when it may: it must be absolute, without "." or ".." segments, strictly
-	 * under the temporary directory both as written and as its parent resolves, and neither the plugin's directory,
-	 * ABSPATH, the working directory, nor any directory holding one of them.
+	 * under the temporary directory both as written and as its parent resolves (a parent that cannot be resolved is
+	 * refused when the entry is there), and neither the plugin's directory, ABSPATH, the working directory, a directory
+	 * holding one of them, nor anything inside one (compared as written and, unless it is a link, as it resolves).
 	 *
 	 * @param string $path Path.
 	 * @return string
@@ -63,21 +64,34 @@ final class Sandbox {
 			return 'outside the temporary directory';
 		}
 		$parent = realpath( dirname( $path ) );
-		if ( false !== $parent ) {
+		if ( false === $parent ) {
+			if ( file_exists( $path ) || is_link( $path ) ) {
+				return 'its directory cannot be resolved';
+			}
+		} else {
 			// Where it is, through any link on the way (not the entry itself: a link is removed, not followed).
 			$target = self::slashed( $parent ) . '/' . basename( $target );
 			if ( ! self::strictly_inside( $real, $target ) ) {
 				return 'outside the temporary directory, through a link';
 			}
 		}
+		// The entry itself as the file system names it (a short 8.3 name, another letter case), unless it is a link.
+		$resolved = is_link( $path ) ? false : realpath( $path );
+		$compared = array_unique( false === $resolved ? array( $target ) : array( $target, self::slashed( $resolved ) ) );
 		$protected = array( dirname( __DIR__, 2 ), (string) getcwd() );
 		if ( defined( 'ABSPATH' ) ) {
 			$protected[] = (string) ABSPATH;
 		}
 		foreach ( $protected as $keep ) {
 			$keep = '' === $keep ? false : realpath( $keep );
-			if ( false !== $keep && ( self::strictly_inside( $target, self::slashed( $keep ) ) || self::same( $target, self::slashed( $keep ) ) ) ) {
-				return 'holds the plugin, the site or the working directory';
+			if ( false === $keep ) {
+				continue;
+			}
+			$keep = self::slashed( $keep );
+			foreach ( $compared as $one ) {
+				if ( self::same( $one, $keep ) || self::strictly_inside( $one, $keep ) || self::strictly_inside( $keep, $one ) ) {
+					return 'the plugin, the site or the working directory, or holding or inside one';
+				}
 			}
 		}
 		return '';

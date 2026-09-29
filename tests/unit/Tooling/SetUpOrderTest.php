@@ -6,8 +6,10 @@ use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 /**
  * A test's set_up() (and set_up_before_class()) calls its parent first, before anything that could skip, return or
- * throw: PHPUnit runs tear_down() after a set_up() that stopped, and a tear_down() written for a finished set_up()
- * then meets properties that were never set (an empty path: the working directory, once the repository).
+ * throw, so the parent's set-up and tear-down always run as a pair. This does not keep tear_down() from meeting
+ * properties that were never set: PHPUnit runs tear_down() after a set_up() that stopped wherever it stopped, the
+ * parent's call included. What does is a tear_down() that checks each path it was given ('' !== ...) and deletes
+ * only through Sandbox or the Deleter, which refuse an empty path (TestDeletionUsageTest).
  */
 final class SetUpOrderTest extends TestCase {
 

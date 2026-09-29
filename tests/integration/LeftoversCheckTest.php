@@ -12,6 +12,12 @@ use WPCheckpoint\Tests\Fixtures\Sandbox;
  */
 final class LeftoversCheckTest extends WP_UnitTestCase {
 
+	public function test_the_registered_check_watches_this_test_in_the_runs_own_temporary_directory(): void {
+		$this->assertSame( self::class . '::' . __FUNCTION__, Leftovers::watching(), 'the listener in phpunit.xml.dist is on, and watching this test' );
+		$this->assertNotSame( '', Leftovers::run_temp_dir(), 'the run has a temporary directory of its own (bin/test-integration.sh), so its entries are looked at' );
+		$this->assertSame( Leftovers::run_temp_dir(), realpath( sys_get_temp_dir() ) );
+	}
+
 	public function test_it_sees_and_removes_a_real_table_and_a_real_temporary_entry(): void {
 		global $wpdb;
 		$table = 'wcptmpabcdef_1_beef_leftover_check';
@@ -24,9 +30,9 @@ final class LeftoversCheckTest extends WP_UnitTestCase {
 		$items = Leftovers::listing();
 		$this->assertContains( 'table:' . $table, $items );
 		$this->assertContains( 'table:' . $other, $items );
-		$this->assertContains( 'temp:' . rtrim( sys_get_temp_dir(), '/' ) . '/' . basename( $dir ), $items );
+		$this->assertContains( 'temp:' . Leftovers::run_temp_dir() . '/' . basename( $dir ), $items );
 
-		Leftovers::removal( array( 'table:' . $table, 'table:' . $other, 'temp:' . rtrim( sys_get_temp_dir(), '/' ) . '/' . basename( $dir ) ) );
+		Leftovers::removal( array( 'table:' . $table, 'table:' . $other, 'temp:' . Leftovers::run_temp_dir() . '/' . basename( $dir ) ) );
 		$items = Leftovers::listing();
 		$this->assertNotContains( 'table:' . $table, $items );
 		$this->assertNotContains( 'table:' . $other, $items );

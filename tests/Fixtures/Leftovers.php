@@ -12,9 +12,15 @@ use PHPUnit\Framework\TestSuite;
 
 /**
  * What the integration tests leave behind: the restore's tables ("wcptmp", "wcpold") in the database, and this
- * plugin's and its tests' entries in the temporary directory. A test that leaves one fails, named, and what it left is
- * removed so the next test starts clean; a test class that leaves one in its class-level set-up fails as a class; and
- * the suite ends with none. Leftovers of an earlier run are reported and removed when the suite starts.
+ * plugin's and its tests' entries in the run's own temporary directory. A test that leaves one fails, named, and what
+ * it left is removed so the next test starts clean; a test class that leaves one in its class-level set-up fails as a
+ * class; and the run fails when any is left at its end. What an earlier run left is reported when the run starts and
+ * left alone: it is not this run's.
+ *
+ * The temporary directory is looked at only when it is the run's own (bin/test-integration.sh gives each run one and
+ * names it in WPCHECKPOINT_TEST_RUN_TMP): in a directory other runs share, their entries would be blamed on this
+ * run's tests and removed under them. Failures of a class or of the run are reported through a stand-in test named
+ * after them, so every result printer and log records them like a test's.
  *
  * Registered in phpunit.xml.dist; does nothing in the unit suite.
  */
@@ -26,6 +32,14 @@ final class Leftovers implements TestListener {
 
 	/** The temporary directory's entries looked for, by their start. */
 	const TEMP_PREFIXES = array( 'wpc-', 'wpcheckpoint-', 'wp-checkpoint-' );
+
+	/**
+	 * The test the registered listener is watching now ("Class::method"), '' when none: the control that the check
+	 * runs at all (LeftoversCheckTest).
+	 *
+	 * @var string
+	 */
+	private static $watching = '';
 
 	/**
 	 * Lists what is there: function(): string[] (tables as "table:{name}", entries as "temp:{path}"); null while
@@ -58,13 +72,13 @@ final class Leftovers implements TestListener {
 	/** @var string[]|null What was there when the running test started. */
 	private $before = null;
 
-	/** @var TestResult|null The run's result, for failures of a class or of the suite. */
+	/** @var TestResult|null The run's result, for failures of a class or of the run. */
 	private $result = null;
 
 	/**
 	 * Constructor.
 	 *
-	 * @param callable|null $lister  function(): string[]; the database and the temporary directory when null.
+	 * @param callable|null $lister  function(): string[]; the database and the run's temporary directory when null.
 	 * @param callable|null $remover function( string[] ): void; drops and removes when null.
 	 * @param callable|null $notice  function( string ): void; standard error when null.
 	 */
@@ -73,6 +87,15 @@ final class Leftovers implements TestListener {
 		$this->remover = $remover;
 		$this->notice  = $notice;
 		$this->given   = null !== $lister;
+	}
+
+	/**
+	 * The test the registered listener is watching now, '' when none.
+	 *
+	 * @return string
+	 */
+	public static function watching(): string {
+		return self::$watching;
 	}
 
 	/**
@@ -107,7 +130,25 @@ final class Leftovers implements TestListener {
 	}
 
 	/**
-	 * The start of a suite: the outermost one reports and removes what an earlier run left.
+	 * Report a failure of a class or of the run through a stand-in test named after it.
+	 *
+	 * @param string $name What failed.
+	 * @param string $text Why.
+	 * @return void
+	 */
+	private function fail_as( string $name, string $text ): void {
+		if ( null === $this->result ) {
+			return;
+		}
+		// Its start and end reach this listener too, and find nothing new: what is left is removed after.
+		$stand_in = new LeftoversStandIn( $name );
+		$this->result->startTest( $stand_in );
+		$this->result->addFailure( $stand_in, new AssertionFailedError( $text ), 0.0 );
+		$this->result->endTest( $stand_in, 0.0 );
+	}
+
+	/**
+	 * The start of a suite: the outermost one reports what an earlier run left (and leaves it: not this run's).
 	 *
 	 * @param TestSuite $suite Suite.
 	 * @return void
@@ -118,14 +159,12 @@ final class Leftovers implements TestListener {
 			return;
 		}
 		if ( array() === $this->suites && array() !== $now ) {
-			$text = "\nLeft by an earlier run, removed before this one:\n  " . implode( "\n  ", $now ) . "\n";
+			$text = "\nLeft by an earlier run (not removed; a failure only if this run leaves more):\n  " . implode( "\n  ", $now ) . "\n";
 			if ( null !== $this->notice ) {
 				call_user_func( $this->notice, $text );
 			} else {
 				fwrite( STDERR, $text );
 			}
-			$this->remove( $now );
-			$now = (array) $this->now();
 		}
 		$this->suites[] = $now;
 	}
@@ -144,8 +183,8 @@ final class Leftovers implements TestListener {
 		}
 		$start = (array) array_pop( $this->suites );
 		$left  = array_values( array_diff( $now, $start ) );
-		if ( array() !== $left && null !== $this->result ) {
-			$this->result->addFailure( $suite, new AssertionFailedError( sprintf( '%s left behind (removed now):' . "\n  %s", $suite->getName(), implode( "\n  ", $left ) ) ), 0.0 );
+		if ( array() !== $left ) {
+			$this->fail_as( 'leftovers of ' . $suite->getName(), sprintf( "%s left behind (removed now):\n  %s", $suite->getName(), implode( "\n  ", $left ) ) );
 			$this->remove( $left );
 		}
 	}
@@ -161,6 +200,9 @@ final class Leftovers implements TestListener {
 			$this->result = $test->getTestResultObject();
 		}
 		$this->before = $this->now();
+		if ( null !== $this->before && ! $this->given && $test instanceof TestCase ) {
+			self::$watching = get_class( $test ) . '::' . $test->getName( false );
+		}
 	}
 
 	/**
@@ -171,6 +213,9 @@ final class Leftovers implements TestListener {
 	 * @return void
 	 */
 	public function endTest( Test $test, float $time ): void {
+		if ( ! $this->given ) {
+			self::$watching = '';
+		}
 		$before       = $this->before;
 		$this->before = null;
 		$now          = $this->now();
@@ -182,7 +227,8 @@ final class Leftovers implements TestListener {
 			return;
 		}
 		if ( null !== $this->result ) {
-			$this->result->addFailure( $test, new AssertionFailedError( "The test left behind (removed now):\n  " . implode( "\n  ", $left ) ), $time );
+			// No time of its own: the test's was counted when it ended.
+			$this->result->addFailure( $test, new AssertionFailedError( "The test left behind (removed now):\n  " . implode( "\n  ", $left ) ), 0.0 );
 		}
 		$this->remove( $left );
 	}
@@ -202,7 +248,22 @@ final class Leftovers implements TestListener {
 	}
 
 	/**
-	 * The restore's tables in the database and the entries in the temporary directories.
+	 * The run's own temporary directory: sys_get_temp_dir() when it is the one bin/test-integration.sh made for this
+	 * run, else '' (a directory other runs share is not looked at).
+	 *
+	 * @return string
+	 */
+	public static function run_temp_dir(): string {
+		$own = (string) getenv( 'WPCHECKPOINT_TEST_RUN_TMP' );
+		$dir = realpath( sys_get_temp_dir() );
+		if ( '' === $own || false === $dir || realpath( $own ) !== $dir ) {
+			return '';
+		}
+		return $dir;
+	}
+
+	/**
+	 * The restore's tables in the database and the entries in the run's own temporary directory.
 	 *
 	 * @return string[]
 	 */
@@ -211,16 +272,9 @@ final class Leftovers implements TestListener {
 		foreach ( self::tables() as $table ) {
 			$items[] = 'table:' . $table;
 		}
-		$dirs = array( rtrim( sys_get_temp_dir(), '/\\' ) );
-		if ( function_exists( 'get_temp_dir' ) ) {
-			$dirs[] = rtrim( get_temp_dir(), '/\\' );
-		}
-		$cwd = realpath( (string) getcwd() ); // The run's own (bin/test-integration.sh), not a leftover.
-		foreach ( array_unique( $dirs ) as $dir ) {
+		$dir = self::run_temp_dir();
+		if ( '' !== $dir ) {
 			foreach ( (array) scandir( $dir ) as $entry ) {
-				if ( false !== $cwd && realpath( $dir . '/' . $entry ) === $cwd ) {
-					continue;
-				}
 				foreach ( self::TEMP_PREFIXES as $prefix ) {
 					if ( 0 === strpos( (string) $entry, $prefix ) ) {
 						$items[] = 'temp:' . $dir . '/' . $entry;

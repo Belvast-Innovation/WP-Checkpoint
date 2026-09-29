@@ -26,7 +26,8 @@ final class IntegrationScriptTest extends TestCase {
 		file_put_contents(
 			$this->sandbox . '/phpunit',
 			'<?php' . "\n"
-			. 'file_put_contents( getenv( "FAKE_RECORD" ), json_encode( array( "cwd" => getcwd(), "argv" => array_slice( $argv, 1 ), "suite" => getenv( "WPCHECKPOINT_TEST_SUITE" ) ) ) );' . "\n"
+			. 'if ( getenv( "FAKE_TEMP" ) ) { mkdir( getenv( "TMPDIR" ) . "/wpc-left-in-temp" ); file_put_contents( getenv( "TMPDIR" ) . "/wpc-left-in-temp/x", "x" ); }' . "\n"
+			. 'file_put_contents( getenv( "FAKE_RECORD" ), json_encode( array( "cwd" => getcwd(), "argv" => array_slice( $argv, 1 ), "suite" => getenv( "WPCHECKPOINT_TEST_SUITE" ), "tmpdir" => getenv( "TMPDIR" ), "run_tmp" => getenv( "WPCHECKPOINT_TEST_RUN_TMP" ), "left_in_temp" => is_file( getenv( "TMPDIR" ) . "/wpc-left-in-temp/x" ) ) ) );' . "\n"
 			. 'if ( getenv( "FAKE_LEAVE" ) ) { file_put_contents( "left.txt", "x" ); }' . "\n"
 			. 'exit( (int) getenv( "FAKE_EXIT" ) );' . "\n"
 		);
@@ -46,8 +47,8 @@ final class IntegrationScriptTest extends TestCase {
 	 * @param array<string,string> $extra Environment.
 	 * @return array{code: int, stderr: string, call: array<string, mixed>}
 	 */
-	private function run_script( array $args, array $extra = array() ): array {
-		$script = dirname( __DIR__, 3 ) . '/bin/test-integration.sh';
+	private function run_script( array $args, array $extra = array(), bool $relative = false ): array {
+		$script = $relative ? 'bin/test-integration.sh' : dirname( __DIR__, 3 ) . '/bin/test-integration.sh';
 		$env    = array_merge(
 			array(
 				'PATH'                      => (string) getenv( 'PATH' ),
@@ -59,7 +60,7 @@ final class IntegrationScriptTest extends TestCase {
 			$extra
 		);
 		$pipes   = array();
-		$process = proc_open( array_merge( array( 'sh', $script ), $args ), array( 1 => array( 'pipe', 'w' ), 2 => array( 'pipe', 'w' ) ), $pipes, $this->sandbox, $env );
+		$process = proc_open( array_merge( array( 'sh', $script ), $args ), array( 1 => array( 'pipe', 'w' ), 2 => array( 'pipe', 'w' ) ), $pipes, $relative ? dirname( __DIR__, 3 ) : $this->sandbox, $env );
 		$this->assertIsResource( $process );
 		stream_get_contents( $pipes[1] );
 		$stderr = (string) stream_get_contents( $pipes[2] );
@@ -88,18 +89,38 @@ final class IntegrationScriptTest extends TestCase {
 
 	public function test_the_suite_runs_from_a_directory_of_its_own_with_the_configuration_in_full(): void {
 		$plugin = (string) realpath( dirname( __DIR__, 3 ) );
-		$run    = $this->run_script( array( '--log-junit', 'build/junit-integration.xml', '--filter', "a b'c \"d\"", '--log-junit=build/second.xml', '--log-junit=/abs/third.xml' ) );
+		$run    = $this->run_script( array( '--log-junit', 'build/junit-integration.xml', '--filter', "a b'c \"d\"", '--log-junit=build/second.xml', '--log-junit=/abs/third.xml', '--testdox-text=build/dox.txt', '--group', 'tests', 'tests/integration', 'no/such/path' ) );
 		$this->assertSame( 0, $run['code'], $run['stderr'] );
 		$cwd = (string) $run['call']['cwd']; // Gone by now: not resolved.
-		$this->assertSame( ExpectedPath::slashed( $this->sandbox, 'tmp' ), dirname( $cwd ), 'a directory made in the temporary directory' );
-		$this->assertStringStartsWith( 'wpcheckpoint-it.', basename( $cwd ) );
+		$this->assertSame( 'cwd', basename( $cwd ), 'a working directory made for the run' );
+		$this->assertSame( ExpectedPath::slashed( $this->sandbox, 'tmp' ), dirname( $cwd, 2 ), 'in the temporary directory' );
+		$this->assertStringStartsWith( 'wpcheckpoint-it.', basename( dirname( $cwd ) ) );
+		$this->assertSame( ExpectedPath::slashed( dirname( $cwd ), 'tmp' ), $run['call']['tmpdir'], 'and a temporary directory of its own' );
+		$this->assertSame( $run['call']['tmpdir'], $run['call']['run_tmp'], 'named for the leftover check' );
 		$this->assertSame( 'integration', $run['call']['suite'] );
 		$this->assertSame(
-			array( '-c', ExpectedPath::slashed( $plugin, 'phpunit.xml.dist' ), '--testsuite', 'integration', '--log-junit', ExpectedPath::slashed( $plugin, 'build/junit-integration.xml' ), '--filter', "a b'c \"d\"", '--log-junit=' . ExpectedPath::slashed( $plugin, 'build/second.xml' ), '--log-junit=/abs/third.xml' ),
+			array( '-c', ExpectedPath::slashed( $plugin, 'phpunit.xml.dist' ), '--testsuite', 'integration', '--log-junit', ExpectedPath::slashed( $plugin, 'build/junit-integration.xml' ), '--filter', "a b'c \"d\"", '--log-junit=' . ExpectedPath::slashed( $plugin, 'build/second.xml' ), '--log-junit=/abs/third.xml', '--testdox-text=' . ExpectedPath::slashed( $plugin, 'build/dox.txt' ), '--group', 'tests', ExpectedPath::slashed( $plugin, 'tests/integration' ), 'no/such/path' ),
 			$run['call']['argv'],
-			'the configuration in full, a relative junit path in the plugin\'s directory, the rest as given'
+			'the configuration in full; output paths and an existing test path from the plugin\'s directory; option values (a group named like a directory) and the rest as given'
 		);
 		$this->assertSame( array(), $this->work_dirs(), 'the empty directory is removed after the run' );
+	}
+
+	public function test_the_runs_temporary_directory_goes_with_it_and_fails_nothing(): void {
+		$run = $this->run_script( array(), array( 'FAKE_TEMP' => '1' ) );
+		$this->assertSame( 0, $run['code'], 'the leftover check, not the script, judges what tests leave there: ' . $run['stderr'] );
+		$this->assertTrue( $run['call']['left_in_temp'], 'the control: the suite left an entry in its temporary directory' );
+		$this->assertSame( array(), $this->work_dirs(), 'removed, with what was in its temporary directory' );
+	}
+
+	public function test_the_plugins_directory_is_found_whatever_cdpath_says(): void {
+		// Called as the npm scripts do, by a relative path from the plugin's directory, with a CDPATH under which
+		// "bin/.." would be another directory. (Nothing is written from here: the run goes to its own directory.)
+		mkdir( $this->sandbox . '/bin' );
+		$run = $this->run_script( array(), array( 'CDPATH' => $this->sandbox ), true );
+		$this->assertSame( 0, $run['code'], $run['stderr'] );
+		$this->assertSame( ExpectedPath::slashed( (string) realpath( dirname( __DIR__, 3 ) ), 'phpunit.xml.dist' ), $run['call']['argv'][1] );
+		$this->assertSame( ExpectedPath::slashed( $this->sandbox, 'tmp' ), dirname( (string) $run['call']['cwd'], 2 ) );
 	}
 
 	public function test_the_suites_status_is_the_scripts(): void {
@@ -114,7 +135,7 @@ final class IntegrationScriptTest extends TestCase {
 		$this->assertStringContainsString( 'left files in its working directory', $run['stderr'] );
 		$dirs = $this->work_dirs();
 		$this->assertCount( 1, $dirs, 'kept to be looked at' );
-		$this->assertFileExists( $this->sandbox . '/tmp/' . $dirs[0] . '/left.txt' );
+		$this->assertFileExists( $this->sandbox . '/tmp/' . $dirs[0] . '/cwd/left.txt' );
 
 		$run = $this->run_script( array(), array( 'FAKE_LEAVE' => '1', 'FAKE_EXIT' => '2' ) );
 		$this->assertSame( 2, $run['code'], 'a failing suite keeps its own status' );
