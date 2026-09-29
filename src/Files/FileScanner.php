@@ -59,9 +59,11 @@ final class FileScanner {
 	const HEAVY_NAMES = array( 'node_modules', '.git', '.svn', '.hg' );
 
 	/**
-	 * Roots: group, path (absolute), prefix (archive path, no trailing slash), skip (absolute paths not to enter).
+	 * Roots: group, path (absolute), prefix (archive path, no trailing slash), skip (absolute paths not to enter,
+	 * nor to lead into), also (absolute paths not to enter only), hold (what a root that is a link must not lead to
+	 * or above: Links::root_verdict()).
 	 *
-	 * @var array<int, array{group: string, path: string, prefix: string, skip: string[], also: string[]}>
+	 * @var array<int, array{group: string, path: string, prefix: string, skip: string[], also: string[], hold: string[]}>
 	 */
 	private $roots;
 
@@ -101,7 +103,8 @@ final class FileScanner {
 	private $link_state;
 
 	/**
-	 * Per root: the skipped directories as comparison keys (Links::key()), as written and as real paths.
+	 * Per root: the skipped directories ('skip' and 'also') as comparison keys (Links::key(): the real path, or
+	 * the spelling when it does not resolve).
 	 *
 	 * @var array<int, array<string, bool>>
 	 */
@@ -117,13 +120,13 @@ final class FileScanner {
 	/**
 	 * Constructor.
 	 *
-	 * @param array<int, array{group: string, path: string, prefix: string, skip?: string[], also_skip?: string[]}> $roots Roots in scan order ('also_skip': skipped, never a reason to refuse the root).
-	 * @param Exclusions                                                                                            $exclusions Exclusions.
-	 * @param int                                                                                                   $int_size   PHP_INT_SIZE of the platform.
-	 * @param int                                                                                                   $chunk_bytes Content chunk size (bounds the largest indexable file).
-	 * @param array{abspath?: string, mask?: callable, link_state?: callable}                                       $options    'abspath': the WordPress directory ('' refuses every root that is a link);
-	 *                                                                                                                          'mask': function( string $path ): string for the target of a followed root (without it the
-	 *                                                                                                                          target is not shown); 'link_state': the link test (Links::state()).
+	 * @param array<int, array{group: string, path: string, prefix: string, skip?: string[], also_skip?: string[], hold?: string[]}> $roots Roots in scan order (ScanRoots::resolve()).
+	 * @param Exclusions                                                                                                             $exclusions Exclusions.
+	 * @param int                                                                                                                    $int_size   PHP_INT_SIZE of the platform.
+	 * @param int                                                                                                                    $chunk_bytes Content chunk size (bounds the largest indexable file).
+	 * @param array{abspath?: string, mask?: callable, link_state?: callable}                                                        $options    'abspath': the WordPress directory ('' refuses every root that is a link);
+	 *                                                                                                                                           'mask': function( string $path ): string for the target of a followed root (without it the
+	 *                                                                                                                                           target is not shown); 'link_state': the link test (Links::state()).
 	 */
 	public function __construct( array $roots, Exclusions $exclusions, int $int_size = PHP_INT_SIZE, int $chunk_bytes = Manifest::DEFAULT_CHUNK, array $options = array() ) {
 		$this->roots = array();
@@ -140,6 +143,7 @@ final class FileScanner {
 				),
 				// Only skipped, never a reason to refuse the root (ScanRoots: where other roots that are links lead).
 				'also'   => isset( $root['also_skip'] ) ? array_map( 'strval', (array) $root['also_skip'] ) : array(),
+				'hold'   => isset( $root['hold'] ) ? array_map( 'strval', (array) $root['hold'] ) : array(),
 			);
 		}
 		foreach ( $this->roots as $i => $root ) {
@@ -286,12 +290,12 @@ final class FileScanner {
 	 * pre-flight asks before backing up without it). A root that is a link is followed when Links::root_refusal()
 	 * allows it, and the report says so and where it leads (masked).
 	 *
-	 * @param array<string, mixed>                                               $state State (updated).
-	 * @param array{group: string, path: string, prefix: string, skip: string[]} $root  Root.
+	 * @param array<string, mixed>                                                                               $state State (updated).
+	 * @param array{group: string, path: string, prefix: string, skip: string[], also: string[], hold: string[]} $root  Root.
 	 * @return bool
 	 */
 	private function root_usable( array &$state, array $root ): bool {
-		$verdict = Links::root_verdict( $root['path'], $this->abspath, $root['skip'], $this->link_state );
+		$verdict = Links::root_verdict( $root['path'], $this->abspath, $root['skip'], $this->link_state, $root['hold'] );
 		if ( Links::UNDECIDED === $verdict['refusal'] ) {
 			$this->warn( $state, 'unreadable', sprintf( 'The "%1$s" content directory was not scanned: it could not be determined whether it is a link (%2$s).', $root['group'], $root['prefix'] ), true );
 			return false;
@@ -317,10 +321,10 @@ final class FileScanner {
 	 * Whether an entry is one of the directories its root skips, by spelling or by real path. Links below a root
 	 * are never followed, so the root's real path and the entry's relative path are the entry's real path.
 	 *
-	 * @param array<string, mixed>                                               $state State.
-	 * @param array{group: string, path: string, prefix: string, skip: string[]} $root  Root.
-	 * @param string                                                             $rel   Path relative to the root.
-	 * @param string                                                             $abs   Absolute path as listed.
+	 * @param array<string, mixed>                                                                               $state State.
+	 * @param array{group: string, path: string, prefix: string, skip: string[], also: string[], hold: string[]} $root  Root.
+	 * @param string                                                                                             $rel   Path relative to the root.
+	 * @param string                                                                                             $abs   Absolute path as listed.
 	 * @return bool
 	 */
 	private function skipped( array $state, array $root, string $rel, string $abs ): bool {
@@ -341,12 +345,12 @@ final class FileScanner {
 	/**
 	 * Handle one entry. Returns a new stack frame when it is a directory to enter.
 	 *
-	 * @param array<string, mixed>                                               $state State (updated).
-	 * @param array{group: string, path: string, prefix: string, skip: string[]} $root  Root.
-	 * @param string                                                             $rel   Path relative to the root.
-	 * @param string                                                             $abs   Absolute path.
-	 * @param callable                                                           $emit  Line sink.
-	 * @param string                                                             $heavy The heavy directory this entry is under ('' when none).
+	 * @param array<string, mixed>                                                                               $state State (updated).
+	 * @param array{group: string, path: string, prefix: string, skip: string[], also: string[], hold: string[]} $root  Root.
+	 * @param string                                                                                             $rel   Path relative to the root.
+	 * @param string                                                                                             $abs   Absolute path.
+	 * @param callable                                                                                           $emit  Line sink.
+	 * @param string                                                                                             $heavy The heavy directory this entry is under ('' when none).
 	 * @return array{dir: string, after: string, heavy?: string}|null
 	 * @throws \RuntimeException When the byte total exceeds what the platform can count.
 	 */
@@ -479,8 +483,8 @@ final class FileScanner {
 	/**
 	 * Archive path of a directory relative to a root.
 	 *
-	 * @param array{group: string, path: string, prefix: string, skip: string[]} $root Root.
-	 * @param string                                                             $rel  Relative directory ('' for the root).
+	 * @param array{group: string, path: string, prefix: string, skip: string[], also: string[], hold: string[]} $root Root.
+	 * @param string                                                                                             $rel  Relative directory ('' for the root).
 	 * @return string
 	 */
 	private function archive_path( array $root, string $rel ): string {

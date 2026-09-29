@@ -748,6 +748,7 @@ final class PackStepTest extends TestCase {
 		$this->assertSame( StepResult::DONE, $result->kind );
 		$this->assertSame( array(), $this->packed() );
 		$this->assertSame( array( 'count' => 1, 'listed' => array( $photo ) ), $this->summary()['outside'] );
+		$this->assertStringContainsString( 'File left out: its content directory changed after the scan', $this->ctx->log() );
 	}
 
 	public function test_without_the_scan_record_of_the_roots_lines_are_packed_as_before(): void {

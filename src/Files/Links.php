@@ -41,6 +41,7 @@ final class Links {
 	const HOLDS_SITE      = 'holds_site';
 	const SITE_UNKNOWN    = 'site_unknown';
 	const INTO_SKIPPED    = 'into_skipped';
+	const HOLDS_GROUP     = 'holds_group';
 	const UNDECIDED       = 'undecided';
 
 	/**
@@ -93,16 +94,19 @@ final class Links {
 	/**
 	 * The one judgement of a content root, for the scan and the pack step alike: whether it is a link, and why it
 	 * is not scanned ('' when it is). Beyond root_refusal(): a root that cannot be told apart from a link is not
-	 * scanned (UNDECIDED), and a link that leads into one of the directories the root skips (the plugin's storage
-	 * directory, the other content groups) is refused (INTO_SKIPPED), compared by real path.
+	 * scanned (UNDECIDED), a link that leads into one of the directories the root skips (the plugin's storage
+	 * directory, the other content groups) is refused (INTO_SKIPPED), and so is one that leads to or above a
+	 * directory in $hold (HOLDS_GROUP), compared by real path.
 	 *
 	 * @param string        $path    The root.
 	 * @param string        $abspath The WordPress directory (ABSPATH); '' when unknown.
 	 * @param string[]      $skip    Directories the root skips.
 	 * @param callable|null $state   Link test (state()); tests inject.
+	 * @param string[]      $hold    Directories the link must not lead to or above (HOLDS_GROUP): the other content
+	 *                               groups that are not links, and the content directory (ScanRoots).
 	 * @return array{link: bool, refusal: string}
 	 */
-	public static function root_verdict( string $path, string $abspath, array $skip = array(), $state = null ): array {
+	public static function root_verdict( string $path, string $abspath, array $skip = array(), $state = null, array $hold = array() ): array {
 		$link = (string) call_user_func( null === $state ? array( self::class, 'state' ) : $state, $path );
 		if ( self::UNKNOWN === $link ) {
 			return array(
@@ -122,6 +126,14 @@ final class Links {
 			foreach ( $skip as $dir ) {
 				if ( Paths::is_same_or_inside( (string) $dir, $target ) ) {
 					$refusal = self::INTO_SKIPPED;
+					break;
+				}
+			}
+		}
+		if ( '' === $refusal ) {
+			foreach ( $hold as $dir ) {
+				if ( Paths::is_same_or_inside( (string) realpath( $path ), (string) $dir ) ) {
+					$refusal = self::HOLDS_GROUP;
 					break;
 				}
 			}
@@ -173,6 +185,8 @@ final class Links {
 				return 'it leads to the WordPress directory or a directory that holds it';
 			case self::INTO_SKIPPED:
 				return 'it leads into a directory that is not backed up as part of this group (the plugin\'s storage directory or another content group)';
+			case self::HOLDS_GROUP:
+				return 'it leads to another content group or the content directory, or to a directory that holds one';
 			case self::UNDECIDED:
 				return 'it could not be determined whether it is a link';
 			default:

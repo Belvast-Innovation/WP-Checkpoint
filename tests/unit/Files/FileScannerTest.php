@@ -412,6 +412,7 @@ final class FileScannerTest extends TestCase {
 		$site = $this->root . '/site';
 		mkdir( $site );
 		$this->put( 'shared/a.txt' );
+		$this->put( 'shared/inner/c.txt' );
 		$this->put( 'store/b.txt' );
 		symlink( $this->root . '/shared', $this->root . '/uploads' );
 		symlink( $this->root . '/store', $this->root . '/into-store' );
@@ -422,6 +423,9 @@ final class FileScannerTest extends TestCase {
 		$this->assertSame( array( 'link' => false, 'refusal' => '' ), Links::root_verdict( $this->root . '/shared', $site ), 'the control: a plain directory' );
 		$this->assertSame( array( 'link' => true, 'refusal' => '' ), Links::root_verdict( $this->root . '/uploads', $site, array( $this->root . '/store' ) ) );
 		$this->assertSame( array( 'link' => true, 'refusal' => Links::INTO_SKIPPED ), Links::root_verdict( $this->root . '/into-store', $site, array( $this->root . '/store' ) ) );
+		$this->assertSame( array( 'link' => true, 'refusal' => Links::HOLDS_GROUP ), Links::root_verdict( $this->root . '/uploads', $site, array(), null, array( $this->root . '/shared' ) ), 'leads to a group directory' );
+		$this->assertSame( array( 'link' => true, 'refusal' => Links::HOLDS_GROUP ), Links::root_verdict( $this->root . '/uploads', $site, array(), null, array( $this->root . '/shared/inner' ) ), 'leads above one' );
+		$this->assertSame( array( 'link' => true, 'refusal' => '' ), Links::root_verdict( $this->root . '/uploads', $site, array(), null, array( $this->root . '/store' ) ), 'the control: a group elsewhere' );
 		$this->assertSame( array( 'link' => true, 'refusal' => Links::HOLDS_SITE ), Links::root_verdict( $this->root . '/uploads', $this->root . '/shared' ), 'the refusals of root_refusal() carry through' );
 
 		// Where a root leads, as a hash: the same through either spelling, different once the link is re-pointed.

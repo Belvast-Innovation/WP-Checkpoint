@@ -395,11 +395,13 @@ final class PackStep implements Step {
 			$cursor['pending'] = null;
 			return 0;
 		}
-		if ( ! empty( $root['refused'] ) || ( null !== $this->scanned_prefixes && ! self::same_root( $this->scanned_prefixes, (string) $root['prefix'], $p ) ) || ! Paths::is_inside( (string) $root['path'], $source ) ) {
+		// The root itself is judged again (judged()): by the scan's rule, and by whether it still leads where it led
+		// then; and the line must still belong to the root the scan listed it under.
+		$changed = ! empty( $root['refused'] ) || ( null !== $this->scanned_prefixes && ! self::same_root( $this->scanned_prefixes, (string) $root['prefix'], $p ) );
+		if ( $changed || ! Paths::is_inside( (string) $root['path'], $source ) ) {
 			// The scan saw a directory; a link put in its place since would take the backup outside the
-			// content directory (another site's files on a shared host). Resolved paths only. The root itself is
-			// judged again (judged()): by the scan's rule, and by whether it still leads where it led then.
-			$context->logger()->warning( 'File left out: it resolves outside its content directory', array( 'p' => $p ) );
+			// content directory (another site's files on a shared host). Resolved paths only.
+			$context->logger()->warning( $changed ? 'File left out: its content directory changed after the scan' : 'File left out: it resolves outside its content directory', array( 'p' => $p ) );
 			self::note( $cursor, 'outside', $p );
 			$cursor['offset']  = $line['next'];
 			$cursor['pending'] = null;
@@ -874,7 +876,7 @@ final class PackStep implements Step {
 	private static function judged( array $roots, $ids ): array {
 		foreach ( $roots as $i => $root ) {
 			$path                   = rtrim( (string) $root['path'], '/\\' );
-			$verdict                = Links::root_verdict( $path, defined( 'ABSPATH' ) ? (string) ABSPATH : '', isset( $root['skip'] ) ? (array) $root['skip'] : array() );
+			$verdict                = Links::root_verdict( $path, defined( 'ABSPATH' ) ? (string) ABSPATH : '', isset( $root['skip'] ) ? (array) $root['skip'] : array(), null, isset( $root['hold'] ) ? (array) $root['hold'] : array() );
 			$moved                  = null !== $ids && isset( $ids[ (string) $root['prefix'] ] ) && Links::fingerprint( $path ) !== (string) $ids[ (string) $root['prefix'] ];
 			$roots[ $i ]['refused'] = '' !== $verdict['refusal'] || $moved;
 		}
@@ -882,8 +884,10 @@ final class PackStep implements Step {
 	}
 
 	/**
-	 * Whether the root that takes an archive path now is the one the scan listed it under: the longest of the
-	 * scan's prefixes that holds the path.
+	 * Whether the root that takes an archive path now is the one the scan listed it under. The scan lists a path
+	 * only under the root with the longest prefix that holds it: a shorter root skips the directories of the
+	 * longer ones, and the directory of their archive path where a group is elsewhere (ScanRoots::resolve()), and
+	 * does not enter a group directory that is a link. So the longest of the scan's prefixes is that root.
 	 *
 	 * @param string[] $scanned The scan's root prefixes.
 	 * @param string   $prefix  The prefix of the root that takes the path now.
