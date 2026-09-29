@@ -128,7 +128,7 @@ final class ExportJob implements JobType {
 					'own_tables'    => array( Schema::jobs_table() ),
 				)
 			),
-			FileScanStep::from_plan(),
+			FileScanStep::from_plan( Manifest::DEFAULT_CHUNK, $this->clean ),
 			new ReviewStep(
 				static function () use ( $directories ) {
 					return Environment::default_probes()['disk_free_space']( $directories->base() );

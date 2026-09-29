@@ -6,6 +6,7 @@ use WP_Error;
 use WP_UnitTestCase;
 use WPCheckpoint\Admin\EnvironmentActions;
 use WPCheckpoint\Plugin;
+use WPCheckpoint\Support\Bytes;
 use WPCheckpoint\Support\Check;
 use WPCheckpoint\Support\Deleter;
 use WPCheckpoint\Support\Directories;
@@ -73,11 +74,26 @@ final class EnvironmentTest extends WP_UnitTestCase {
 		$this->fail( "check {$id} missing" );
 	}
 
-	public function test_missing_zip_archive_is_a_warning_that_announces_tar(): void {
-		$env    = new Environment( $this->dirs, array( 'class_exists' => '__return_false', 'loopback' => $this->echo_probe() ) );
+	public function test_missing_zip_archive_is_only_information_and_no_check_mentions_tar(): void {
+		// The plugin writes and reads zip itself; there is no tar format.
+		$env    = new Environment(
+			$this->dirs,
+			array(
+				'class_exists'     => '__return_false',
+				'extension_loaded' => static function ( string $ext ): bool {
+					return 'zlib' !== $ext;
+				},
+				'loopback'         => $this->echo_probe(),
+			)
+		);
 		$check  = $this->find( $env->checks(), 'php.zip' );
-		$this->assertSame( Check::WARNING, $check->status );
-		$this->assertStringContainsString( 'tar', $check->message );
+		$this->assertSame( Check::INFO, $check->status );
+		$this->assertStringContainsString( 'writes and reads zip archives itself', $check->message );
+		$zlib = $this->find( $env->checks(), 'php.zlib' );
+		$this->assertStringContainsString( 'without compression', $zlib->message, 'the control: the zlib check has its message here' );
+		foreach ( $env->checks() as $each ) {
+			$this->assertDoesNotMatchRegularExpression( '/\btar\b/i', $each->message . ' ' . $each->value, $each->id );
+		}
 
 		$env   = new Environment( $this->dirs, array( 'class_exists' => '__return_true', 'loopback' => $this->echo_probe() ) );
 		$this->assertSame( Check::OK, $this->find( $env->checks( true ), 'php.zip' )->status );
@@ -244,6 +260,32 @@ final class EnvironmentTest extends WP_UnitTestCase {
 		// The real platform of the test runner is 64-bit.
 		Environment::invalidate();
 		$this->assertSame( Check::OK, $this->find( ( new Environment( $this->dirs, array( 'loopback' => $this->echo_probe() ) ) )->checks(), 'limits.int_size' )->status );
+	}
+
+	public function test_free_disk_space_beyond_an_integer_is_shown_as_it_is(): void {
+		// Free space is a float where it exceeds the platform's integer (every size above 2 GB on 32-bit PHP); an
+		// (int) cast wraps it. 3e19 bytes stands for that here: it exceeds even a 64-bit integer.
+		$env   = new Environment(
+			$this->dirs,
+			array(
+				'loopback'         => $this->echo_probe(),
+				'disk_free_space'  => static function (): float {
+					return 3.0e19;
+				},
+				'disk_total_space' => static function (): float {
+					return 4.0e19;
+				},
+			)
+		);
+		$check = $this->find( $env->checks(), 'storage.disk' );
+		$this->assertSame( '26.0 EB (75% free)', $check->value );
+
+		$this->assertSame( '0.0 B', Bytes::text( 0 ), 'as size_format() shows zero with one decimal' );
+		$this->assertSame( '1.5 KB', Bytes::text( 1536 ) );
+		$this->assertSame( '1.5 KB', Bytes::text( '1536' ) );
+		$this->assertSame( '26.0 EB', Bytes::text( 3.0e19 ) );
+		$this->assertSame( '', Bytes::text( -1 ) );
+		$this->assertSame( '', Bytes::text( 'many' ) );
 	}
 
 	public function test_report_contains_no_secrets_paths_or_site_url(): void {

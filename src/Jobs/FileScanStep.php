@@ -67,6 +67,13 @@ final class FileScanStep implements Step {
 	private $chunk_bytes;
 
 	/**
+	 * Shows where a content root that is a link leads (JobPresenter::clean() in production); null: not shown.
+	 *
+	 * @var callable|null
+	 */
+	private $clean;
+
+	/**
 	 * Constructor. The job type resolves the roots (ScanRoots) and the
 	 * exclusions from the job's options.
 	 *
@@ -74,12 +81,14 @@ final class FileScanStep implements Step {
 	 * @param Exclusions                                                                      $exclusions    Exclusions.
 	 * @param string[]                                                                        $root_warnings Warnings from ScanRoots::resolve().
 	 * @param int                                                                             $chunk_bytes   Content chunk size (bounds the largest indexable file).
+	 * @param callable|null                                                                   $clean         Text cleaner for where a root that is a link leads; null: not shown.
 	 */
-	public function __construct( array $roots, Exclusions $exclusions, array $root_warnings = array(), int $chunk_bytes = Manifest::DEFAULT_CHUNK ) {
+	public function __construct( array $roots, Exclusions $exclusions, array $root_warnings = array(), int $chunk_bytes = Manifest::DEFAULT_CHUNK, $clean = null ) {
 		$this->roots         = $roots;
 		$this->exclusions    = $exclusions;
 		$this->root_warnings = $root_warnings;
 		$this->chunk_bytes   = $chunk_bytes;
+		$this->clean         = is_callable( $clean ) ? $clean : null;
 	}
 
 	/**
@@ -89,10 +98,11 @@ final class FileScanStep implements Step {
 	 *
 	 * @return FileScanStep
 	 *
-	 * @param int $chunk_bytes Content chunk size (bounds the largest indexable file).
+	 * @param int           $chunk_bytes Content chunk size (bounds the largest indexable file).
+	 * @param callable|null $clean       Text cleaner for where a root that is a link leads; null: not shown.
 	 */
-	public static function from_plan( int $chunk_bytes = Manifest::DEFAULT_CHUNK ): FileScanStep {
-		$step            = new self( array(), new Exclusions( array(), array() ), array(), $chunk_bytes );
+	public static function from_plan( int $chunk_bytes = Manifest::DEFAULT_CHUNK, $clean = null ): FileScanStep {
+		$step            = new self( array(), new Exclusions( array(), array() ), array(), $chunk_bytes, $clean );
 		$step->from_plan = true;
 		return $step;
 	}
@@ -125,7 +135,11 @@ final class FileScanStep implements Step {
 		$cursor  = $context->cursor();
 		$state   = isset( $cursor['scan'] ) && is_array( $cursor['scan'] ) ? $cursor['scan'] : FileScanner::initial_state();
 		$length  = isset( $cursor['bytes'] ) ? (int) $cursor['bytes'] : 0;
-		$scanner = new FileScanner( $this->roots, $this->exclusions, PHP_INT_SIZE, $this->chunk_bytes );
+		$options = array( 'abspath' => defined( 'ABSPATH' ) ? (string) ABSPATH : '' );
+		if ( null !== $this->clean ) {
+			$options['mask'] = $this->clean;
+		}
+		$scanner = new FileScanner( $this->roots, $this->exclusions, PHP_INT_SIZE, $this->chunk_bytes, $options );
 		$path    = $context->work_path() . DIRECTORY_SEPARATOR . Manifest::FILES_INDEX;
 		$handle  = $this->open_index( $path, $length );
 		$since   = 0;
@@ -235,6 +249,7 @@ final class FileScanStep implements Step {
 			'limits'                  => isset( $state['limits'] ) && is_array( $state['limits'] ) ? $state['limits'] : array(),
 			'warnings'                => array_merge( $this->root_warnings, $state['warnings'], PathKey::normalization_available() ? array() : array( self::normalization_warning() ) ),
 			'normalization_available' => PathKey::normalization_available(),
+			'root_ids'                => isset( $state['root_ids'] ) && is_array( $state['root_ids'] ) ? $state['root_ids'] : array(),
 			'exclusions'              => $this->exclusions->globs(),
 		);
 		$json    = wp_json_encode( $summary, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE );

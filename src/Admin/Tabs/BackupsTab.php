@@ -25,6 +25,7 @@ use WPCheckpoint\Jobs\JobRepository;
 use WPCheckpoint\Jobs\PreflightStep;
 use WPCheckpoint\Jobs\QuestionText;
 use WPCheckpoint\Plugin;
+use WPCheckpoint\Support\Bytes;
 use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Support\StoredNames;
 
@@ -321,12 +322,12 @@ final class BackupsTab implements Tab {
 		echo '<p data-field="database">';
 		if ( null !== $status['database_bytes'] ) {
 			/* translators: %s: size such as 12 MB */
-			echo esc_html( sprintf( __( 'Database: about %s.', 'wp-checkpoint' ), size_format( (int) $status['database_bytes'], 1 ) ) );
+			echo esc_html( sprintf( __( 'Database: about %s.', 'wp-checkpoint' ), Bytes::text( $status['database_bytes'] ) ) );
 		}
 		echo '</p><p data-field="files">';
 		if ( 'ready' === $status['state'] ) {
 			/* translators: 1: number of files, 2: size such as 1.2 GB */
-			echo esc_html( sprintf( _n( 'Files: %1$s file, %2$s.', 'Files: %1$s files, %2$s.', (int) $status['files'], 'wp-checkpoint' ), number_format_i18n( (int) $status['files'] ), size_format( (int) $status['files_bytes'], 1 ) ) );
+			echo esc_html( sprintf( _n( 'Files: %1$s file, %2$s.', 'Files: %1$s files, %2$s.', (int) $status['files'], 'wp-checkpoint' ), number_format_i18n( (int) $status['files'] ), Bytes::text( $status['files_bytes'] ) ) );
 		} elseif ( 'running' === $status['state'] || 'due' === $status['state'] ) {
 			esc_html_e( 'Files: counting…', 'wp-checkpoint' );
 			echo ' <span class="spinner is-active wpcheckpoint-inline-spinner" aria-hidden="true"></span>';
@@ -378,7 +379,7 @@ final class BackupsTab implements Tab {
 							</td>
 							<td>
 								<?php
-								echo esc_html( $item['valid'] ? size_format( (int) $item['bytes'], 1 ) : '—' );
+								echo esc_html( $item['valid'] ? Bytes::text( $item['bytes'] ) : '—' );
 								if ( $item['valid'] && (int) $item['volumes'] > 1 ) {
 									/* translators: %d: number of files */
 									echo '<br><span class="description">' . esc_html( sprintf( _n( '%d file', '%d files', (int) $item['volumes'], 'wp-checkpoint' ), (int) $item['volumes'] ) ) . '</span>';

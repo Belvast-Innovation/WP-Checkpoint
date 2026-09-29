@@ -31,49 +31,128 @@ final class ScanRoots {
 	 * @param string[]              $groups      Content groups (subset of GROUPS).
 	 * @param string                $storage_dir The plugin's storage directory, never scanned.
 	 * @param array<string, string> $overrides   Group => absolute directory (tests); defaults come from WordPress.
-	 * @return array{roots: array<int, array{group: string, path: string, prefix: string, skip: string[]}>, warnings: string[]}
+	 * @return array{roots: array<int, array{group: string, path: string, prefix: string, skip: string[], also_skip: string[], collide: string[], hold: string[], refuse: string}>, warnings: string[]}
 	 */
 	public static function resolve( array $groups, string $storage_dir = '', array $overrides = array() ): array {
 		$dirs     = array_merge( self::wordpress_directories(), $overrides );
-		$roots    = array();
 		$warnings = array();
 		$chosen   = array();
+		$others   = array();
 		foreach ( self::GROUPS as $group ) {
+			$path = rtrim( Paths::normalize( (string) $dirs[ $group ] ), '/' );
 			if ( ! in_array( $group, $groups, true ) ) {
+				if ( 'other-content' !== $group && '' !== $path ) {
+					$others[] = $path; // Not chosen: no root backs it up (skipped wherever it lies).
+				}
 				continue;
 			}
-			$path = rtrim( Paths::normalize( (string) $dirs[ $group ] ), '/' );
 			if ( '' === $path || ! is_dir( $path ) ) {
 				$warnings[] = 'The directory of the "' . $group . '" group does not exist and was not backed up.';
 				continue;
 			}
 			$chosen[ $group ] = $path;
 		}
-		// A group inside another chosen group is covered by the outer one (with the outer prefix).
+		$storage = '' === $storage_dir ? array() : array( rtrim( Paths::normalize( $storage_dir ), '/' ) );
+		$content = rtrim( Paths::normalize( (string) $dirs['content'] ), '/' );
+		$abspath = (string) $dirs['abspath'];
+
+		// 1. The scan's judgement of each group directory (Links::root_verdict()): neither a group directory nor
+		// where a link leads may be or hold the WordPress directory or (for a group) the content directory, be the
+		// root of the file system, or lie in the storage.
+		// A refused group stays a root (the scan reports it) but adds nothing below: its place is not skipped by
+		// any other root, and it takes no directory from another group.
+		$real    = array();
+		$refused = array();
+		$links   = array();
 		foreach ( $chosen as $group => $path ) {
-			foreach ( $chosen as $other => $other_path ) {
-				if ( $group !== $other && 'other-content' !== $other && Paths::is_inside( $other_path, $path ) ) {
-					$warnings[] = 'The "' . $group . '" directory lies inside the "' . $other . '" directory and is backed up as part of it.';
+			$real[ $group ] = Links::key( $path );
+			$verdict        = Links::root_verdict( $path, $abspath, $storage, null, 'other-content' === $group ? array() : array( $content ) );
+			if ( '' !== $verdict['refusal'] ) {
+				$refused[ $group ] = true;
+			}
+			if ( $verdict['link'] ) {
+				$links[ $group ] = true;
+			}
+		}
+
+		// 2. One directory, one root: a group whose directory is the same as another's (by real path) is backed
+		// up as part of that one: the content directory first, then a group whose directory is not a link (it is
+		// where the files are), then the earlier group. Nothing is left out.
+		$keepers = array_keys( $chosen );
+		usort(
+			$keepers,
+			static function ( string $a, string $b ) use ( $links, $chosen ): int {
+				$rank  = static function ( string $group ) use ( $links ): int {
+					return 'other-content' === $group ? 0 : ( isset( $links[ $group ] ) ? 2 : 1 );
+				};
+				$order = array_flip( array_keys( $chosen ) );
+				return array( $rank( $a ), $order[ $a ] ) <=> array( $rank( $b ), $order[ $b ] );
+			}
+		);
+		$kept = array();
+		foreach ( $keepers as $group ) {
+			// Also for a group that would be refused on its own (a group set to the content directory, which the
+			// content directory's root backs up): its files are backed up, so nothing needs asking about.
+			foreach ( $kept as $other => $unused ) {
+				if ( ! isset( $refused[ $other ] ) && $real[ $other ] === $real[ $group ] ) {
+					$warnings[] = 'The "' . $group . '" directory is the same directory as the "' . $other . '" directory and is backed up as part of it.';
 					continue 2;
 				}
 			}
-			$skip = array();
-			if ( 'other-content' === $group ) {
-				foreach ( self::GROUPS as $inner ) {
-					if ( 'other-content' !== $inner && isset( $dirs[ $inner ] ) ) {
-						$skip[] = rtrim( Paths::normalize( (string) $dirs[ $inner ] ), '/' );
+			$kept[ $group ] = self::prefix( $group, $chosen[ $group ], $abspath, $content );
+		}
+
+		// 3. Roots in scan order. Each skips the plugin's storage, the groups not chosen, and the directories of
+		// the other roots (those roots back them up under their own paths), all by real path. Where another
+		// root's archive path lies below this root's while that root is elsewhere (a group outside both the
+		// WordPress and the content directory is shown as "wp-content/<group>"), the directory of that name here
+		// would give the same archive paths: it is left out and listed with the unreadable entries ('collide'),
+		// with a warning when it exists. Two different directories with one archive path: the later is refused.
+		$fold  = static function ( string $text ): string {
+			return Paths::is_windows() ? strtolower( $text ) : $text;
+		};
+		$roots = array();
+		$taken = array();
+		foreach ( $chosen as $group => $path ) {
+			if ( ! isset( $kept[ $group ] ) ) {
+				continue;
+			}
+			$prefix = $kept[ $group ];
+			$root   = array(
+				'group'     => $group,
+				'path'      => $path,
+				'prefix'    => $prefix,
+				'skip'      => $storage,
+				'also_skip' => $others,
+				'collide'   => array(),
+				'hold'      => 'other-content' === $group ? array() : array( $content ),
+				'refuse'    => '',
+			);
+			// A refused root takes no archive path: it backs nothing up.
+			if ( isset( $taken[ $fold( $prefix ) ] ) && ! isset( $refused[ $group ] ) ) {
+				$root['refuse'] = 'another content group is backed up under the same path';
+			}
+			if ( ! isset( $refused[ $group ] ) ) {
+				$taken[ $fold( $prefix ) ] = true;
+			}
+			foreach ( $kept as $other => $other_prefix ) {
+				if ( $other === $group ) {
+					continue;
+				}
+				if ( ! isset( $refused[ $other ] ) ) {
+					$root['also_skip'][] = $chosen[ $other ];
+				}
+				if ( 0 === strpos( $fold( $other_prefix ), $fold( $prefix . '/' ) ) ) {
+					$there = $path . '/' . substr( $other_prefix, strlen( $prefix ) + 1 );
+					if ( Links::key( $there ) !== $real[ $other ] ) {
+						$root['collide'][] = $there;
+						if ( file_exists( $there ) ) {
+							$warnings[] = 'The directory ' . $other_prefix . ' in the "' . $group . '" directory was not backed up: the "' . $other . '" group, backed up under that path, is in another place on this site.';
+						}
 					}
 				}
 			}
-			if ( '' !== $storage_dir ) {
-				$skip[] = rtrim( Paths::normalize( $storage_dir ), '/' );
-			}
-			$roots[] = array(
-				'group'  => $group,
-				'path'   => $path,
-				'prefix' => self::prefix( $group, $path, $dirs['abspath'], $dirs['content'] ),
-				'skip'   => $skip,
-			);
+			$roots[] = $root;
 		}
 		return array(
 			'roots'    => $roots,
