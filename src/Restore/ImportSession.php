@@ -304,21 +304,24 @@ final class ImportSession implements Queries {
 		}
 		// The server's text may hold values of the rows: never kept, in the log, the screen or the REST answer
 		// alike. Only the error number and, where the text names it, the key or the column: the schema, not the data.
-		return new StatementFailed( sprintf( 'The database refused a statement (%d%s); its text is not recorded, as it may hold values of the rows', $errno, self::schema_part( $text ) ), $errno );
+		return new StatementFailed( sprintf( 'The database refused a statement (%d%s); its text is not recorded, as it may hold values of the rows', $errno, self::schema_part( $errno, $text ) ), $errno );
 	}
 
 	/**
-	 * The key or the column a row-data error names, as ", key k" or ", column c" (nothing when the text names
-	 * neither in the expected form: an identifier at the end of the text, never a value).
+	 * The key or the column a refusal names, as ", key k" or ", column c": the key only for a duplicate entry
+	 * (1062, 1586, 1859), the column only for a value it could not convert (1366), each in the form the server
+	 * writes it (an identifier at the end of its own text, never a value); nothing otherwise, so no other text
+	 * (a trigger's SIGNAL message) can pass a value off as a name.
 	 *
-	 * @param string $text The server's text.
+	 * @param int    $errno The error number.
+	 * @param string $text  The server's text.
 	 * @return string
 	 */
-	private static function schema_part( string $text ): string {
-		if ( 1 === preg_match( "/ for key '([A-Za-z0-9_\$.]{1,192})'\z/", $text, $m ) ) {
+	private static function schema_part( int $errno, string $text ): string {
+		if ( in_array( $errno, array( 1062, 1586, 1859 ), true ) && 1 === preg_match( "/ for key '([A-Za-z0-9_\$.]{1,192})'\z/", $text, $m ) ) {
 			return ', key ' . $m[1];
 		}
-		if ( 1 === preg_match( "/ for column [`']?([A-Za-z0-9_\$.]{1,192})[`']? at row [0-9]+\z/", $text, $m ) ) {
+		if ( 1366 === $errno && 1 === preg_match( "/ for column [`']?([A-Za-z0-9_\$.]{1,192})[`']? at row [0-9]+\z/", $text, $m ) ) {
 			return ', column ' . $m[1];
 		}
 		return '';
