@@ -212,7 +212,7 @@ final class PackStep implements Step {
 		self::cut( $work . DIRECTORY_SEPARATOR . self::CHUNKS, $cursor['chunks_bytes'] );
 		$scanned                = ExportPlan::exists( $work, FileScanStep::SUMMARY ) ? ExportPlan::read( $work, FileScanStep::SUMMARY ) : array();
 		$root_ids               = isset( $scanned['root_ids'] ) && is_array( $scanned['root_ids'] ) ? array_map( 'strval', $scanned['root_ids'] ) : null;
-		$roots                  = self::judged( null === $this->roots ? ScanRoots::resolve( $active['groups'], $context->storage_path() )['roots'] : $this->roots, $root_ids );
+		$roots                  = self::judged( null === $this->roots ? ScanRoots::resolve( $active['groups'], $context->storage_path() )['roots'] : $this->roots, $root_ids, defined( 'ABSPATH' ) ? (string) ABSPATH : '' );
 		$this->scanned_prefixes = null === $root_ids ? null : array_map( 'strval', array_keys( $root_ids ) );
 		$exclusions             = new Exclusions( $active['exclusions'], array() );
 		$since                  = 0;
@@ -879,12 +879,13 @@ final class PackStep implements Step {
 	 * @param array<int, array<string, mixed>> $roots Roots.
 	 * @param array<string, string>|null       $ids   Prefix => Links::fingerprint() at the scan; null when the scan
 	 *                                                summary predates them (no comparison then).
+	 * @param string                           $abspath The WordPress directory.
 	 * @return array<int, array<string, mixed>>
 	 */
-	private static function judged( array $roots, $ids ): array {
+	private static function judged( array $roots, $ids, string $abspath ): array {
 		foreach ( $roots as $i => $root ) {
 			$path                   = rtrim( (string) $root['path'], '/\\' );
-			$verdict                = Links::root_verdict( $path, defined( 'ABSPATH' ) ? (string) ABSPATH : '', isset( $root['skip'] ) ? (array) $root['skip'] : array(), null, isset( $root['hold'] ) ? (array) $root['hold'] : array() );
+			$verdict                = Links::root_verdict( $path, $abspath, isset( $root['skip'] ) ? (array) $root['skip'] : array(), null, isset( $root['hold'] ) ? (array) $root['hold'] : array() );
 			$moved                  = null !== $ids && isset( $ids[ (string) $root['prefix'] ] ) && Links::fingerprint( $path ) !== (string) $ids[ (string) $root['prefix'] ];
 			$roots[ $i ]['refused'] = '' !== $verdict['refusal'] || $moved || ( isset( $root['refuse'] ) && '' !== (string) $root['refuse'] );
 		}

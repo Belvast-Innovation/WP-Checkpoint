@@ -34,7 +34,19 @@ final class ScanRoots {
 	 * @return array{roots: array<int, array{group: string, path: string, prefix: string, skip: string[], also_skip: string[], collide: string[], hold: string[], refuse: string}>, warnings: string[]}
 	 */
 	public static function resolve( array $groups, string $storage_dir = '', array $overrides = array() ): array {
-		$dirs     = array_merge( self::wordpress_directories(), $overrides );
+		return self::resolve_dirs( array_merge( self::wordpress_directories(), $overrides ), $groups, $storage_dir );
+	}
+
+	/**
+	 * The roots of resolve() with every directory given (abspath, content and each of GROUPS), not asked of
+	 * WordPress: the generated layouts of the tests call it without WordPress.
+	 *
+	 * @param array<string, string> $dirs        Directories.
+	 * @param string[]              $groups      Content groups (subset of GROUPS).
+	 * @param string                $storage_dir The plugin's storage directory, never scanned.
+	 * @return array{roots: array<int, array{group: string, path: string, prefix: string, skip: string[], also_skip: string[], collide: string[], hold: string[], refuse: string}>, warnings: string[]}
+	 */
+	public static function resolve_dirs( array $dirs, array $groups, string $storage_dir = '' ): array {
 		$warnings = array();
 		$chosen   = array();
 		$others   = array();

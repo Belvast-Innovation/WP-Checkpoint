@@ -1,0 +1,48 @@
+name: Scan layouts (full size)
+
+# The content-root rules over many more generated layouts than the unit suite runs on every change (500). Started
+# by hand; a failure names the seed of the layout, which the unit test reproduces with WPCHECKPOINT_LAYOUTS_SEED.
+
+on:
+  workflow_dispatch:
+    inputs:
+      layouts:
+        description: Number of layouts
+        required: true
+        default: '20000'
+      seed:
+        description: First seed
+        required: true
+        default: '1'
+
+permissions:
+  contents: read
+
+jobs:
+  layouts:
+    name: Scan layouts (${{ inputs.layouts }} from seed ${{ inputs.seed }})
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: none
+          tools: composer:v2
+
+      - run: composer install --no-interaction --no-progress --prefer-dist
+
+      - name: Run the layouts
+        env:
+          WPCHECKPOINT_TEST_SUITE: unit
+          WPCHECKPOINT_LAYOUTS: ${{ inputs.layouts }}
+          WPCHECKPOINT_LAYOUTS_SEED: ${{ inputs.seed }}
+        run: php vendor/bin/phpunit --testsuite unit --filter ScanLayoutsTest --log-junit build/junit-layouts.xml
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: junit-layouts
+          path: build/junit-layouts.xml
+          if-no-files-found: ignore
