@@ -38,6 +38,17 @@ defined( 'ABSPATH' ) || exit;
 final class ImportSession implements Queries {
 
 	/**
+	 * Errors whose text holds a value of the row (MySQL and MariaDB): the value is never recorded (error()).
+	 * 1062, 1586: Duplicate entry '<value>' for key '<key>'. 1557, 1761, 1762: a foreign key would lead to a
+	 * duplicate entry '<value>'. 1366: Incorrect <type> value: '<value>' for column. 1292: Truncated incorrect
+	 * <type> value: '<value>'. 1367: Illegal <type> '<value>' value found during parsing. 1411: Incorrect <type>
+	 * value: '<value>' for function. 1300: Invalid <charset> character string: '<value>'. 1525: Incorrect <type>
+	 * value: '<value>'. 1644: a trigger's SIGNAL text, anything at all.
+	 */
+	const ROW_DATA_ERRNOS = array( 1062, 1586, 1557, 1761, 1762, 1366, 1292, 1367, 1411, 1300, 1525, 1644 );
+
+
+	/**
 	 * Error numbers after which the same statement may succeed later.
 	 */
 	const TRANSIENT_ERRNOS = array( 1040, 1053, 1205, 1213, 2002, 2003, 2006, 2013 );
@@ -280,7 +291,30 @@ final class ImportSession implements Queries {
 		if ( in_array( $errno, self::TRANSIENT_ERRNOS, true ) ) {
 			return new TransientFailure( sprintf( 'The database is busy or the connection was lost (%d): %s', $errno, $text ) );
 		}
+		if ( in_array( $errno, self::ROW_DATA_ERRNOS, true ) ) {
+			// The server's text holds a value of the row (a duplicate entry, a value it could not convert): never
+			// kept, in the log, the screen or the REST answer alike. Only the error number and, where the text
+			// names it, the key or the column: the schema, not the data.
+			return new StatementFailed( sprintf( 'The database refused a statement (%d%s); the value it named is not recorded', $errno, self::schema_part( $text ) ), $errno );
+		}
 		return new StatementFailed( sprintf( 'The database refused a statement (%d): %s', $errno, $text ), $errno );
+	}
+
+	/**
+	 * The key or the column a row-data error names, as ", key k" or ", column c" (nothing when the text names
+	 * neither in the expected form: an identifier at the end of the text, never a value).
+	 *
+	 * @param string $text The server's text.
+	 * @return string
+	 */
+	private static function schema_part( string $text ): string {
+		if ( 1 === preg_match( "/ for key '([A-Za-z0-9_\$.]{1,192})'\z/", $text, $m ) ) {
+			return ', key ' . $m[1];
+		}
+		if ( 1 === preg_match( "/ for column [`']?([A-Za-z0-9_\$.]{1,192})[`']? at row [0-9]+\z/", $text, $m ) ) {
+			return ', column ' . $m[1];
+		}
+		return '';
 	}
 
 	/**
