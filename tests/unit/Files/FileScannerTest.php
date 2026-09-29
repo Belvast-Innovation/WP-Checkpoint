@@ -351,6 +351,41 @@ final class FileScannerTest extends TestCase {
 		$this->assertContains( 'A directory that resolves to another place than where it is listed was left out: wp-content/uploads/away', $state['warnings'] );
 	}
 
+	public function test_a_directory_judged_a_link_is_kept_a_link_unless_the_answer_came_only_from_its_entries(): void {
+		// Windows answers "link" for a volume mount point through readlink(), which realpath() does not resolve (it
+		// looks in place); only an answer from probing the entries may be corrected by where the directory resolves.
+		$this->put( 'uploads/a.jpg' );
+		$this->put( 'uploads/mount/m.jpg' );
+		mkdir( $this->root . '/site' );
+		$root = $this->root;
+		$link = static function ( string $path ) use ( $root ): string {
+			return $root . '/uploads/mount' === $path ? Links::LINK : Links::state( $path );
+		};
+		foreach ( array( 'readlink said so' => false, 'only the entries said so' => true ) as $case => $probed ) {
+			$scanner               = new FileScanner(
+				array( array( 'group' => 'uploads', 'path' => $this->root . '/uploads', 'prefix' => 'wp-content/uploads' ) ),
+				new Exclusions( array(), array() ),
+				PHP_INT_SIZE,
+				Manifest::DEFAULT_CHUNK,
+				array(
+					'abspath'    => $this->root . '/site',
+					'link_state' => $link,
+					'probed'     => static function () use ( $probed ): bool {
+						return $probed;
+					},
+				)
+			);
+			list( $lines, $state ) = $this->run_all( $scanner );
+			if ( $probed ) {
+				$this->assertSame( array( 'wp-content/uploads/a.jpg', 'wp-content/uploads/mount/m.jpg' ), $this->paths( $lines ), $case . ': in place, so a plain directory' );
+				$this->assertSame( 0, $state['counts']['links'], $case );
+			} else {
+				$this->assertSame( array( 'wp-content/uploads/a.jpg' ), $this->paths( $lines ), $case . ': stays a link' );
+				$this->assertSame( 1, $state['counts']['links'], $case );
+			}
+		}
+	}
+
 	public function test_an_undecidable_directory_that_does_not_resolve_at_all_is_asked_about_not_taken_for_a_link(): void {
 		$this->require_symlinks();
 		$this->put( 'uploads/a.jpg' );

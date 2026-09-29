@@ -8,6 +8,7 @@
 namespace WPCheckpoint\Files;
 
 use WPCheckpoint\Support\Deleter;
+use WPCheckpoint\Support\HostFunctions;
 use WPCheckpoint\Support\Paths;
 
 /**
@@ -65,6 +66,17 @@ final class Links {
 		}
 		clearstatcache( true, $path );
 		return Deleter::reparse_state( $path );
+	}
+
+	/**
+	 * Whether a "link" answer of state() for a path can only have come from probing the directory's entries
+	 * (Deleter::reparse_state() on Windows when readlink() has no answer): neither is_link() nor readlink() says so.
+	 *
+	 * @param string $path Path.
+	 * @return bool
+	 */
+	public static function only_probed( string $path ): bool {
+		return ! is_link( $path ) && ( ! HostFunctions::available( 'readlink' ) || false === HostFunctions::readlink( $path ) );
 	}
 
 	/**

@@ -113,6 +113,13 @@ final class FileScanner {
 	private $link_state;
 
 	/**
+	 * Whether a "link" answer can only have come from probing a directory's entries (Links::only_probed(); tests inject).
+	 *
+	 * @var callable
+	 */
+	private $probed;
+
+	/**
 	 * Per root: the skipped directories ('skip' and 'also' as SKIP, 'collide' as COLLIDE) by comparison key
 	 * (Links::key(): the real path, or
 	 * the spelling when it does not resolve).
@@ -135,9 +142,10 @@ final class FileScanner {
 	 * @param Exclusions                                                                                                                                                  $exclusions Exclusions.
 	 * @param int                                                                                                                                                         $int_size   PHP_INT_SIZE of the platform.
 	 * @param int                                                                                                                                                         $chunk_bytes Content chunk size (bounds the largest indexable file).
-	 * @param array{abspath?: string, mask?: callable, link_state?: callable}                                                                                             $options    'abspath': the WordPress directory ('' refuses every root that is a link);
-	 *                                                                                                                                                                                'mask': function( string $path ): string for the target of a followed root (without it the
-	 *                                                                                                                                                                                target is not shown); 'link_state': the link test (Links::state()).
+	 * @param array{abspath?: string, mask?: callable, link_state?: callable, probed?: callable}                                                                          $options    'abspath': the WordPress directory ('' refuses every root that is a link);
+	 *                                                                                                                                                             'mask': function( string $path ): string for the target of a followed root (without it the
+	 *                                                                                                                                                             target is not shown); 'link_state': the link test (Links::state()); 'probed': whether a link
+	 *                                                                                                                                                             answer can only have come from probing the entries (Links::only_probed()).
 	 */
 	public function __construct( array $roots, Exclusions $exclusions, int $int_size = PHP_INT_SIZE, int $chunk_bytes = Manifest::DEFAULT_CHUNK, array $options = array() ) {
 		$this->roots = array();
@@ -178,6 +186,7 @@ final class FileScanner {
 			return '(not shown)';
 		};
 		$this->link_state = isset( $options['link_state'] ) && is_callable( $options['link_state'] ) ? $options['link_state'] : array( Links::class, 'state' );
+		$this->probed     = isset( $options['probed'] ) && is_callable( $options['probed'] ) ? $options['probed'] : array( Links::class, 'only_probed' );
 	}
 
 	/**
@@ -427,10 +436,12 @@ final class FileScanner {
 		// is_dir() and is_file() are both false for a junction too, observed on the Windows CI runner: without this
 		// it was counted as a special file and stayed out only because is_dir() was false).
 		$link = (string) call_user_func( $this->link_state, $abs );
-		if ( Links::LINK === $link && ! is_link( $abs ) && $this->in_place( $state, $root, $rel, $abs ) ) {
+		if ( Links::LINK === $link && (bool) call_user_func( $this->probed, $abs ) && $this->in_place( $state, $root, $rel, $abs ) ) {
 			// Judged a link only through what is inside it (Windows without readlink(): a junction as its first entry
-			// makes a plain directory look redirected), yet it resolves exactly where it is listed, which a link
-			// never does: a plain directory, not to be left out with everything in it.
+			// makes a plain directory look redirected), yet it resolves exactly where it is listed, which such a link
+			// never does: a plain directory, not to be left out with everything in it. Only then: where is_link() or
+			// readlink() said so, it stays a link (realpath() does not resolve a volume mount point, which would
+			// look in place).
 			$link = Links::PLAIN;
 		}
 		if ( Links::LINK === $link ) {

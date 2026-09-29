@@ -522,6 +522,10 @@ final class Layouts {
 			array(
 				'abspath'    => (string) $layout['abspath'],
 				'link_state' => $state,
+				// Without readlink(), a link answer for a junction (not reported by is_link()) comes from probing.
+				'probed'     => static function ( string $path ) use ( $layout ): bool {
+					return $layout['readlink'] ? Links::only_probed( $path ) : ! ( is_link( $path ) && 0 !== strpos( basename( $path ), self::JUNCTION ) );
+				},
 			)
 		);
 		$lines = array();
