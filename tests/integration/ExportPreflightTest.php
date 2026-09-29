@@ -5,6 +5,7 @@ namespace WPCheckpoint\Tests\Integration;
 use WPCheckpoint\Archive\Packer;
 use WPCheckpoint\Archive\Manifest;
 use WPCheckpoint\Database\TableExporter;
+use WPCheckpoint\Database\OwnTables;
 use WPCheckpoint\Database\WpdbConnection;
 use WPCheckpoint\Files\PathKey;
 use WPCheckpoint\Jobs\Budget;
@@ -18,6 +19,7 @@ use WPCheckpoint\Jobs\PreflightStep;
 use WPCheckpoint\Jobs\Residue;
 use WPCheckpoint\Jobs\ReviewStep;
 use WPCheckpoint\Jobs\Runner;
+use WPCheckpoint\Jobs\TempTables;
 use WPCheckpoint\Jobs\TickResult;
 use WPCheckpoint\Support\Deleter;
 use WPCheckpoint\Support\Directories;
@@ -152,48 +154,50 @@ final class ExportPreflightTest extends JobTestCase {
 	 */
 	private function register_export( string $id, array $env = array() ): void {
 		$connection = new WpdbConnection();
-		$dirs       = $this->dirs;
 		$this->types->add(
 			new FixtureJobType(
 				$id,
 				array(
-					new PreflightStep(
-						$connection,
-						array_replace(
-							array(
-								'prefix'        => self::PREFIX,
-								'tables'        => array( $connection, 'tables_with_prefix' ),
-								'writable'      => static function () use ( $dirs ): array {
-									$bad = array();
-									foreach ( Directories::SUBDIRS as $sub ) {
-										if ( ! is_writable( $dirs->base() . '/' . $sub ) ) {
-											$bad[] = $sub;
-										}
-									}
-									return $bad;
-								},
-								'disk_free'     => static function () use ( $dirs ) {
-									return disk_free_space( $dirs->base() );
-								},
-								'slug'          => static function (): string {
-									return 'Example.Test Site';
-								},
-								'can_deflate'   => true,
-								'normalization' => PathKey::normalization_available(),
-								'int_size'      => PHP_INT_SIZE,
-								'now'           => function (): int {
-									return (int) $this->now;
-								},
-							),
-							$env
-						),
-						self::CHUNK
-					),
+					new PreflightStep( $connection, array_replace( $this->env( $connection ), $env ), self::CHUNK ),
 					FileScanStep::from_plan(),
 					new ReviewStep(),
 					DatabaseExportStep::from_plan( $connection, self::CHUNK ),
 				)
 			)
+		);
+	}
+
+	/**
+	 * The pre-flight's environment in these tests.
+	 *
+	 * @return array<string, mixed>
+	 */
+	private function env( WpdbConnection $connection ): array {
+		$dirs = $this->dirs;
+		return array(
+			'prefix'        => self::PREFIX,
+			'tables'        => array( $connection, 'tables_with_prefix' ),
+			'writable'      => static function () use ( $dirs ): array {
+				$bad = array();
+				foreach ( Directories::SUBDIRS as $sub ) {
+					if ( ! is_writable( $dirs->base() . '/' . $sub ) ) {
+						$bad[] = $sub;
+					}
+				}
+				return $bad;
+			},
+			'disk_free'     => static function () use ( $dirs ) {
+				return disk_free_space( $dirs->base() );
+			},
+			'slug'          => static function (): string {
+				return 'Example.Test Site';
+			},
+			'can_deflate'   => true,
+			'normalization' => PathKey::normalization_available(),
+			'int_size'      => PHP_INT_SIZE,
+			'now'           => function (): int {
+				return (int) $this->now;
+			},
 		);
 	}
 
@@ -488,6 +492,67 @@ final class ExportPreflightTest extends JobTestCase {
 			)
 		);
 		$this->assertSame( TickResult::COMPLETED, $this->drive( $job->id )->status, (string) $this->repo->find( $job->id )->last_error );
+	}
+
+	public function test_the_plugins_own_tables_are_left_out_by_name_and_a_site_with_a_prefix_like_them_keeps_every_table(): void {
+		global $wpdb;
+		$connection = new WpdbConnection();
+		// Names this plugin makes (any installation's: another token), in each of their forms.
+		$generated = array(
+			TempTables::name( 'abcdef12', 7, '1a2b', 'posts' ),
+			TempTables::name( 'abcdef12', 7, '1a2b', str_repeat( 'long_name_', 6 ) ),
+			TempTables::ledger( 'abcdef12', 7, '1a2b' ),
+			TempTables::old( '0123456789', 7, '1a2b', 'options' ),
+		);
+		$this->assertStringEndsWith( '_' . substr( hash( 'sha256', str_repeat( 'long_name_', 6 ) ), 0, 7 ), $generated[1], 'the control: the cut form with its hash is among them' );
+		foreach ( array( 'wcp_', 'w', 'wc' ) as $prefix ) {
+			// The site's own tables, some of them spelled much like the plugin's names but not in their form.
+			$site = array( $prefix . 'options', $prefix . 'posts', $prefix . 'wc_orders', $prefix . 'cptmp_notes', $prefix . 'ptmpabcdef12_notes' );
+			$mine = OwnTables::names( $prefix );
+			foreach ( array_merge( $site, $mine, $generated ) as $table ) {
+				$this->tables[] = $table;
+				$wpdb->query( "DROP TABLE IF EXISTS `{$table}`" );
+				$wpdb->query( "CREATE TABLE `{$table}` (`id` int NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB" );
+			}
+			$this->assertSame( '', $wpdb->last_error );
+			$id = 'export-own-' . rtrim( $prefix, '_' );
+			$this->types->add(
+				new FixtureJobType(
+					$id,
+					array(
+						new PreflightStep(
+							$connection,
+							array_replace(
+								$this->env( $connection ),
+								array(
+									'prefix' => $prefix,
+									'own'    => static function ( string $table ) use ( $prefix ): bool {
+										return OwnTables::is_own( $table, $prefix );
+									},
+								)
+							),
+							self::CHUNK
+						),
+					)
+				)
+			);
+			$job = $this->repo->create( $id, 0, array(), array( 'contents' => array( 'files' => array() ) ) );
+			$this->assertSame( TickResult::COMPLETED, $this->drive( $job->id )->status, (string) $this->repo->find( $job->id )->last_error );
+			$planned = array_map( 'strval', (array) ExportPlan::read( $this->work( $this->repo->find( $job->id ) ), ExportPlan::PLAN )['tables'] );
+			foreach ( $site as $table ) {
+				$this->assertContains( $table, $planned, $prefix . ': the site\'s table stays in the backup' );
+			}
+			foreach ( array_merge( $mine, $generated ) as $table ) {
+				if ( 0 === strpos( $table, $prefix ) ) {
+					$this->assertNotContains( $table, $planned, $prefix . ': the plugin\'s own table is left out' );
+				}
+			}
+			$listed = $connection->tables_with_prefix( $prefix )['tables'];
+			$this->assertNotSame( array(), array_intersect( $mine, $listed ), 'the control: the listing of ' . $prefix . ' holds the plugin\'s tables by name' );
+			if ( 'wcp_' !== $prefix ) {
+				$this->assertSame( $generated, array_values( array_intersect( $generated, $listed ) ), 'the control: the listing of ' . $prefix . ' holds every generated name' );
+			}
+		}
 	}
 
 	public function test_bad_options_and_a_database_only_export_are_handled_by_the_preflight(): void {

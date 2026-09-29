@@ -86,7 +86,7 @@ final class PreflightStep implements Step {
 	 *                                          'slug' (callable(): string), 'can_deflate' (bool), 'normalization' (bool),
 	 *                                          'int_size' (int), 'now' (callable(): int), 'random' (callable(): string, four hex digits; tests),
 	 *                                          'multisite' (bool), 'core_tables' (callable(): string[], this installation's core tables),
-	 *                                          'own_tables' (string[], the plugin's own tables: never in a backup).
+	 *                                          'own' (callable(string $table): bool, the plugin's own run tables, Database\OwnTables: never in a backup).
 	 * @param int                  $chunk_bytes Chunk size.
 	 */
 	public function __construct( Connection $connection, array $env, int $chunk_bytes = TableExporter::CHUNK_BYTES ) {
@@ -245,9 +245,12 @@ final class PreflightStep implements Step {
 				// filtered query, a wrong prefix): a backup made from it would hold no database and look complete.
 				throw new \RuntimeException( sprintf( 'The database did not list this site\'s own tables (%s missing). The backup is stopped rather than made without the database; check the table prefix and the database connection, and try again.', implode( ', ', $missing ) ) );
 			}
-			// The plugin's own job table describes this installation's jobs and storage, not the site: a restore
-			// keeps the target's own.
-			$own    = isset( $this->env['own_tables'] ) ? array_map( 'strval', (array) $this->env['own_tables'] ) : array();
+			// The plugin's own run tables (Database\OwnTables) describe this installation's jobs, not the site: never
+			// in a backup, and a restore keeps the target's own.
+			$is_own = isset( $this->env['own'] ) && is_callable( $this->env['own'] ) ? $this->env['own'] : static function (): bool {
+				return false;
+			};
+			$own    = array_values( array_filter( array_map( 'strval', (array) $listing['tables'] ), $is_own ) );
 			$all    = array_values( array_diff( array_map( 'strval', (array) $listing['tables'] ), $own ) );
 			$groups = TableSelection::foreign( $all, (string) $this->env['prefix'], ! empty( $this->env['multisite'] ), $core );
 			$left   = array_fill_keys( $own, true );
