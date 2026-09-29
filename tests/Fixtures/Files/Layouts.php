@@ -52,7 +52,16 @@ final class Layouts {
 		'in-storage',
 		'link-below',
 		'refused-at-next',
+		'junction-first',
+		'junction-broken',
 	);
+
+	/**
+	 * Names of the links that stand for Windows junctions in the layouts without readlink(): is_link() does not
+	 * report a junction there, so the simulated test for links (as Deleter::reparse_state() works then) does not
+	 * either. They sort first, where Deleter::first_plain_child() looks.
+	 */
+	const JUNCTION = '0jn-';
 
 	/**
 	 * Sandbox root of this run.
@@ -197,6 +206,26 @@ final class Layouts {
 					$dir = $storage . '/' . $group;
 					self::files( $dir );
 					break;
+				case 'junction-first':
+					// A plain directory, and one below it, whose first entry is a working junction: judged a link
+					// through it, though they are where they are listed.
+					self::files( $place . '/deep' );
+					symlink( $base . '/outside', $place . '/' . self::JUNCTION . 'out' );
+					symlink( $base . '/outside', $place . '/deep/' . self::JUNCTION . 'out' );
+					$dir = $place;
+					break;
+				case 'junction-broken':
+					// A plain directory, and one below it, whose first entry is a broken junction: nothing to probe
+					// through, so undecidable, though they hold files. And a junction to such a directory outside
+					// the root: undecidable as well, and it resolves elsewhere.
+					self::files( $place . '/deep' );
+					symlink( $base . '/nowhere', $place . '/' . self::JUNCTION . 'gone' );
+					symlink( $base . '/nowhere', $place . '/deep/' . self::JUNCTION . 'gone' );
+					self::files( $base . '/undecided-' . $group );
+					symlink( $base . '/nowhere', $base . '/undecided-' . $group . '/' . self::JUNCTION . 'gone' );
+					symlink( $base . '/undecided-' . $group, $place . '/' . self::JUNCTION . 'away' );
+					$dir = $place;
+					break;
 				case 'link-below':
 					self::files( $place );
 					symlink( $base . '/outside', $place . '/away' );
@@ -219,6 +248,8 @@ final class Layouts {
 			}
 		}
 		clearstatcache( true );
+		$readlink = 0 !== mt_rand( 0, 3 );
+		mt_srand(); // The generator is global: later tests get random numbers again.
 		return array(
 			'base'     => $base,
 			'abspath'  => $abspath,
@@ -227,7 +258,7 @@ final class Layouts {
 			'dirs'     => $dirs,
 			'kinds'    => $kinds,
 			'mode'     => $mode,
-			'readlink' => 0 !== mt_rand( 0, 3 ),
+			'readlink' => $readlink,
 		);
 	}
 
@@ -250,6 +281,7 @@ final class Layouts {
 			}
 			$sets[] = array() === $set ? array( $all[ mt_rand( 0, 4 ) ] ) : $set;
 		}
+		mt_srand();
 		return $sets;
 	}
 
@@ -258,15 +290,15 @@ final class Layouts {
 	 *
 	 * @param array<string, mixed> $layout From build().
 	 * @param string[]             $chosen Chosen groups.
-	 * @param callable|null        $tamper function( array $roots ): array, applied to the resolved roots (the checks of
-	 *                                     the checker itself inject known violations this way).
+	 * @param callable|null        $tamper function( array $roots, array $layout ): array, applied to the resolved roots
+	 *                                     (the checks of the checker itself inject known violations this way).
 	 * @param callable|null        $pick   function( array $roots, array $root_ids, string $p ): ?string, the pack step's
 	 *                                     source for a line; the real one (PackStep) when null.
 	 * @return string[] Violations, each "I<n>: text".
 	 */
 	public static function check( array $layout, array $chosen, $tamper = null, $pick = null ): array {
 		$resolved = ScanRoots::resolve_dirs( $layout['dirs'], $chosen, (string) $layout['storage'] );
-		$roots    = null === $tamper ? $resolved['roots'] : $tamper( $resolved['roots'] );
+		$roots    = null === $tamper ? $resolved['roots'] : $tamper( $resolved['roots'], $layout );
 		list( $lines, $state ) = self::scan( $roots, $layout );
 		$out = array();
 
@@ -329,11 +361,21 @@ final class Layouts {
 		}
 
 		// I2: every file a chosen group holds is listed, or its absence is a finding the pre-flight asks about.
+		// A group reported as not scanned explains the absence of the files it owns, and of nothing else: a refused
+		// root that leads over other groups (the content directory, the WordPress directory) excuses none of theirs.
 		$reported = array();
 		foreach ( $roots as $root ) {
 			foreach ( (array) $state['warnings'] as $warning ) {
 				if ( false !== strpos( $warning, 'not scanned' ) && false !== strpos( $warning, '"' . $root['group'] . '"' ) && false !== strpos( $warning, '(' . $root['prefix'] . ').' ) ) {
-					$reported[] = (string) realpath( (string) $root['path'] );
+					$reported[ $root['group'] ] = true;
+				}
+			}
+		}
+		// Groups with the same real directory own the same files: reported for one, reported for all.
+		foreach ( $groups as $group => $g ) {
+			foreach ( $groups as $other => $o ) {
+				if ( isset( $reported[ $other ] ) && $o['real'] === $g['real'] ) {
+					$reported[ $group ] = true;
 				}
 			}
 		}
@@ -352,8 +394,8 @@ final class Layouts {
 				if ( isset( $real[ $file ] ) || ( '' !== $storage && 0 === strpos( $file, $storage . '/' ) ) || ! $owner( $file )['chosen'] ) {
 					continue;
 				}
-				$explained = false;
-				foreach ( array_merge( $reported, $collided ) as $held ) {
+				$explained = isset( $reported[ $owner( $file )['group'] ] );
+				foreach ( $collided as $held ) {
 					if ( '' !== $held && 0 === strpos( $file, $held . '/' ) ) {
 						$explained = true;
 					}
@@ -470,21 +512,7 @@ final class Layouts {
 			if ( $layout['readlink'] ) {
 				return Links::state( $path );
 			}
-			// As on Windows without readlink(): a directory is told apart only through a child that is not a link.
-			if ( ! is_dir( $path ) ) {
-				return is_link( $path ) ? Links::LINK : Links::PLAIN;
-			}
-			$plain = false;
-			foreach ( (array) scandir( $path ) as $name ) {
-				if ( '.' !== $name && '..' !== $name && ! is_link( $path . '/' . $name ) ) {
-					$plain = true;
-					break;
-				}
-			}
-			if ( ! $plain ) {
-				return Links::UNKNOWN;
-			}
-			return is_link( $path ) ? Links::LINK : Links::PLAIN;
+			return self::without_readlink( $path );
 		};
 		$scanner = new FileScanner(
 			$roots,
@@ -510,6 +538,46 @@ final class Layouts {
 			);
 		}
 		return array( $lines, $scan );
+	}
+
+	/**
+	 * The test for links as Deleter::reparse_state() answers on Windows without readlink(): is_link() (which does
+	 * not report a junction), else a directory is told apart only through its first entry that is_link() does not
+	 * report: resolved through the directory, where it should be (plain) or elsewhere (a link); no such entry, or
+	 * one that does not resolve: unknown.
+	 *
+	 * @param string $path Path.
+	 * @return string
+	 */
+	private static function without_readlink( string $path ): string {
+		$is_link = static function ( string $p ): bool {
+			return is_link( $p ) && 0 !== strpos( basename( $p ), self::JUNCTION );
+		};
+		if ( $is_link( $path ) ) {
+			return Links::LINK;
+		}
+		if ( ! is_dir( $path ) ) {
+			return Links::PLAIN;
+		}
+		$parent = realpath( dirname( $path ) );
+		if ( false === $parent ) {
+			return Links::UNKNOWN;
+		}
+		$child = '';
+		foreach ( (array) scandir( $path ) as $name ) {
+			if ( '.' !== $name && '..' !== $name && ! $is_link( $path . '/' . $name ) ) {
+				$child = (string) $name;
+				break;
+			}
+		}
+		if ( '' === $child ) {
+			return Links::UNKNOWN;
+		}
+		$resolved = realpath( $path . '/' . $child );
+		if ( false === $resolved ) {
+			return Links::UNKNOWN;
+		}
+		return $parent . '/' . basename( $path ) . '/' . $child === $resolved ? Links::PLAIN : Links::LINK;
 	}
 
 	/**

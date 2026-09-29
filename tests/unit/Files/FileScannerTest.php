@@ -351,6 +351,26 @@ final class FileScannerTest extends TestCase {
 		$this->assertContains( 'A directory that resolves to another place than where it is listed was left out: wp-content/uploads/away', $state['warnings'] );
 	}
 
+	public function test_an_undecidable_directory_that_does_not_resolve_at_all_is_asked_about_not_taken_for_a_link(): void {
+		$this->require_symlinks();
+		$this->put( 'uploads/a.jpg' );
+		mkdir( $this->root . '/site' );
+		symlink( $this->root . '/nowhere', $this->root . '/uploads/gone' );
+		// The control: the real test for links sees the broken link and counts it.
+		list( , $state ) = $this->run_all( $this->link_scanner( $this->root . '/uploads' ) );
+		$this->assertSame( 1, $state['counts']['links'] );
+		$this->assertSame( array(), $state['lists']['unreadable'] );
+
+		$root    = $this->root;
+		$unknown = static function ( string $path ) use ( $root ): string {
+			return $root . '/uploads/gone' === $path ? Links::UNKNOWN : Links::state( $path );
+		};
+		list( $lines, $state ) = $this->run_all( $this->link_scanner( $this->root . '/uploads', $unknown ) );
+		$this->assertSame( array( 'wp-content/uploads/a.jpg' ), $this->paths( $lines ) );
+		$this->assertSame( 0, $state['counts']['links'], 'no evidence of a link' );
+		$this->assertSame( array( 'wp-content/uploads/gone' ), $state['lists']['unreadable'], 'the pre-flight asks' );
+	}
+
 	public function test_a_content_directory_behind_a_link_skips_the_storage_and_the_other_groups_by_real_path(): void {
 		$this->require_symlinks();
 		// wp-content is a link to where the content really is; the plugins directory and the plugin's storage are

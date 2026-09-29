@@ -2,6 +2,7 @@
 
 namespace WPCheckpoint\Tests\Unit\Files;
 
+use WPCheckpoint\Files\Links;
 use WPCheckpoint\Tests\Fixtures\Files\Layouts;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
@@ -9,8 +10,8 @@ use Yoast\PHPUnitPolyfills\TestCases\TestCase;
  * The content-root rules over generated site layouts (Tests\Fixtures\Files\Layouts): the invariants hold for
  * every layout, and the check itself catches known violations injected into the roots or the pack step.
  *
- * Size: WPCHECKPOINT_LAYOUTS layouts from seed WPCHECKPOINT_LAYOUTS_SEED (default 500 from 1, about a minute);
- * the full run is a manual workflow. A failure names the seed: build( seed ) reproduces the layout.
+ * Size: WPCHECKPOINT_LAYOUTS layouts from seed WPCHECKPOINT_LAYOUTS_SEED (default 500 from 1, a few seconds);
+ * the full run is a manual workflow (layouts.yml). A failure names the seed: build( seed ) reproduces the layout.
  */
 final class ScanLayoutsTest extends TestCase {
 
@@ -113,6 +114,29 @@ final class ScanLayoutsTest extends TestCase {
 				'I2: not listed and nothing asked',
 				static function ( array $roots ): array {
 					array_shift( $roots );
+					return $roots;
+				},
+				null,
+			),
+			'a scanned root left out where a refused root holds its files' => array(
+				'I2: not listed and nothing asked',
+				static function ( array $roots, array $layout ): array {
+					// A refused root that leads over other groups (the content or the WordPress directory) must not
+					// excuse the files of a root that is simply missing.
+					foreach ( $roots as $i => $root ) {
+						$real = (string) realpath( (string) $root['path'] );
+						foreach ( $roots as $holder ) {
+							if ( $holder['group'] === $root['group'] || '' === $real ) {
+								continue;
+							}
+							$refused = '' !== (string) ( $holder['refuse'] ?? '' ) || '' !== Links::root_verdict( (string) $holder['path'], (string) $layout['abspath'], (array) $holder['skip'], null, (array) ( $holder['hold'] ?? array() ) )['refusal'];
+							$held    = (string) realpath( (string) $holder['path'] );
+							if ( $refused && '' !== $held && 0 === strpos( $real . '/', $held . '/' ) ) {
+								unset( $roots[ $i ] );
+								return array_values( $roots );
+							}
+						}
+					}
 					return $roots;
 				},
 				null,

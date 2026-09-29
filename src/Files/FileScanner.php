@@ -427,8 +427,21 @@ final class FileScanner {
 		// is_dir() and is_file() are both false for a junction too, observed on the Windows CI runner: without this
 		// it was counted as a special file and stayed out only because is_dir() was false).
 		$link = (string) call_user_func( $this->link_state, $abs );
+		if ( Links::LINK === $link && ! is_link( $abs ) && $this->in_place( $state, $root, $rel, $abs ) ) {
+			// Judged a link only through what is inside it (Windows without readlink(): a junction as its first entry
+			// makes a plain directory look redirected), yet it resolves exactly where it is listed, which a link
+			// never does: a plain directory, not to be left out with everything in it.
+			$link = Links::PLAIN;
+		}
 		if ( Links::LINK === $link ) {
 			++$state['counts']['links'];
+			return null;
+		}
+		if ( Links::UNKNOWN === $link && false === realpath( $abs ) ) {
+			// Not resolvable at all (gone since the listing, or the host refuses): no evidence of a link, so the
+			// pre-flight asks, as for anything unreadable.
+			$this->undecided( $state );
+			$this->record( $state, 'unreadable', $p );
 			return null;
 		}
 		if ( Links::UNKNOWN === $link ) {

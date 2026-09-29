@@ -22,6 +22,7 @@ jobs:
   layouts:
     name: Scan layouts (${{ inputs.layouts }} from seed ${{ inputs.seed }})
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
