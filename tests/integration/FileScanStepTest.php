@@ -149,6 +149,42 @@ final class FileScanStepTest extends JobTestCase {
 		$this->assertStringNotContainsString( $this->site, $log );
 	}
 
+	public function test_a_content_root_that_is_a_link_is_followed_and_its_target_reaches_the_summary_only_masked(): void {
+		// A deployment layout: uploads is a link to a shared directory beside the site.
+		$shared = $this->root . '/shared/uploads';
+		mkdir( $shared, 0755, true );
+		file_put_contents( $shared . '/photo.jpg', 'photo' );
+		$link = $this->root . '/linked-uploads';
+		$this->assertTrue( symlink( $shared, $link ) );
+		$this->assertStringContainsString( $this->root, (string) realpath( $link ), 'the control: where it leads names the server path' );
+		$step = new FileScanStep(
+			array( array( 'group' => 'uploads', 'path' => $link, 'prefix' => 'wp-content/uploads' ) ),
+			new Exclusions(),
+			array(),
+			\WPCheckpoint\Archive\Manifest::DEFAULT_CHUNK,
+			static function ( string $text ): string {
+				return \WPCheckpoint\Plugin::instance()->job_presenter()->clean( $text );
+			}
+		);
+		$this->types->add( new FixtureJobType( 'scan-link', array( $step ) ) );
+		$job = $this->repo->create( 'scan-link' );
+		for ( $i = 0; $i < 20 && TickResult::MORE === $this->runner( 20 )->tick( $job->id, $this->now )->status; $i++ ) {
+			$this->now += 1.0;
+		}
+		$this->assertSame( Job::COMPLETED, $this->repo->find( $job->id )->status );
+		$this->assertSame( array( '{"p":"wp-content/uploads/photo.jpg"' ), array_map( static function ( string $line ): string {
+			return substr( $line, 0, strpos( $line, ',' ) );
+		}, $this->index_lines( $job ) ), 'the files behind the link are listed under the canonical prefix' );
+		$summary = json_decode( (string) file_get_contents( Residue::work_dir( $job->storage_path, $job->id ) . '/' . FileScanStep::SUMMARY ), true );
+		$warning = implode( "\n", $summary['warnings'] );
+		$this->assertStringContainsString( 'The "uploads" content directory is a link; the directory it leads to was backed up (wp-content/uploads -> {tmp}/', $warning, 'the report says so, with the target masked' );
+		$this->assertStringEndsWith( '/shared/uploads).', $warning );
+		$this->assertStringNotContainsString( $this->root, $warning );
+		$log = (string) file_get_contents( $this->dirs->base() . '/' . $this->repo->find( $job->id )->log_path );
+		$this->assertStringContainsString( 'content directory is a link', $log, 'the control: the job log has the warning' );
+		$this->assertStringNotContainsString( $this->root, $log );
+	}
+
 	public function test_a_cancelled_scan_leaves_no_work_directory(): void {
 		$this->types->add( new FixtureJobType( 'scan-cancel', array( $this->step() ) ) );
 		$job = $this->repo->create( 'scan-cancel' );

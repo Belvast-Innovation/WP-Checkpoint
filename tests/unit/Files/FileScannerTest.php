@@ -7,6 +7,7 @@ use WPCheckpoint\Archive\Manifest;
 use WPCheckpoint\Archive\Packer;
 use WPCheckpoint\Files\Exclusions;
 use WPCheckpoint\Files\FileScanner;
+use WPCheckpoint\Files\Links;
 use WPCheckpoint\Tests\Fixtures\MemoryBudget;
 use WPCheckpoint\Tests\Fixtures\Permissions;
 use WPCheckpoint\Tests\Fixtures\Junction;
@@ -177,23 +178,181 @@ final class FileScannerTest extends TestCase {
 		}
 	}
 
-	public function test_a_content_root_that_is_a_junction_is_scanned_through_it(): void {
-		// A root is not an entry: a junction as the uploads directory (moved to another drive) is scanned as before,
-		// only a junction below a root is left out. On POSIX a symbolic link as a root is refused; which is right for
-		// both is an open question, and this pins the current answer on Windows.
+	public function test_a_content_root_that_is_a_junction_is_followed_and_reported(): void {
+		// The Windows version of the symbolic link test below: a junction as the uploads directory (moved to another
+		// drive) is scanned through; the report says so. A junction below a root stays a link that is not entered.
 		$this->put( 'elsewhere/photo.jpg' );
+		$this->put( 'outside/secret.txt' );
+		mkdir( $this->root . '/site' );
 		Junction::make( $this->root . '/elsewhere', $this->root . '/uploads' );
+		Junction::make( $this->root . '/outside', $this->root . '/elsewhere/inner' );
 		try {
-			$scanner = new FileScanner(
-				array( array( 'group' => 'uploads', 'path' => $this->root . '/uploads', 'prefix' => 'wp-content/uploads', 'skip' => array() ) ),
-				new Exclusions( array(), array() )
-			);
-			list( $lines, $state ) = $this->run_all( $scanner );
+			list( $lines, $state ) = $this->run_all( $this->link_scanner( $this->root . '/uploads' ) );
 			$this->assertSame( array( 'wp-content/uploads/photo.jpg' ), $this->paths( $lines ) );
-			$this->assertSame( array(), $state['warnings'] );
+			$this->assertSame( 1, $state['counts']['links'], 'the junction inside the root is not entered' );
+			$this->assertSame( 0, $state['counts']['unreadable'] );
+			$this->assertSame( array( 'The "uploads" content directory is a link; the directory it leads to was backed up (wp-content/uploads -> {root}/elsewhere).' ), str_replace( '\\', '/', $state['warnings'] ) );
+		} finally {
+			Junction::remove( $this->root . '/elsewhere/inner' );
+			Junction::remove( $this->root . '/uploads' );
+		}
+	}
+
+	public function test_a_content_root_junction_to_the_site_is_refused(): void {
+		$this->put( 'site/wp-config.php' );
+		Junction::make( $this->root . '/site', $this->root . '/uploads' );
+		try {
+			$this->assertFileExists( $this->root . '/uploads/wp-config.php', 'the control: the junction leads to the site' );
+			list( $lines, $state ) = $this->run_all( $this->link_scanner( $this->root . '/uploads' ) );
+			$this->assertSame( array(), $lines );
+			$this->assertSame( 1, $state['counts']['unreadable'] );
+			$this->assertSame( array( 'The "uploads" content directory is a link and was not scanned: it leads to the WordPress directory or a directory that holds it (wp-content/uploads).' ), $state['warnings'] );
 		} finally {
 			Junction::remove( $this->root . '/uploads' );
 		}
+	}
+
+	/**
+	 * A scanner over one uploads root, with the WordPress directory at {root}/site and the target shown relative to
+	 * the sandbox (as the presenter masks it).
+	 *
+	 * @param string                    $path       The root.
+	 * @param callable|null             $link_state Link test to inject.
+	 * @param array<int, array<string, mixed>> $more More roots after it.
+	 */
+	private function link_scanner( string $path, $link_state = null, array $more = array() ): FileScanner {
+		$root    = $this->root;
+		$options = array(
+			'abspath' => $this->root . '/site',
+			'mask'    => static function ( string $target ) use ( $root ): string {
+				return str_replace( array( realpath( $root ), $root ), '{root}', $target );
+			},
+		);
+		if ( null !== $link_state ) {
+			$options['link_state'] = $link_state;
+		}
+		return new FileScanner(
+			array_merge( array( array( 'group' => 'uploads', 'path' => $path, 'prefix' => 'wp-content/uploads' ) ), $more ),
+			new Exclusions( array(), array() ),
+			PHP_INT_SIZE,
+			Manifest::DEFAULT_CHUNK,
+			$options
+		);
+	}
+
+	private function require_symlinks(): void {
+		if ( 'Windows' === PHP_OS_FAMILY ) {
+			$this->markTestSkipped( 'symlinks need privileges on Windows; the junction versions of these tests run there' );
+		}
+	}
+
+	public function test_a_content_root_that_is_a_symbolic_link_is_followed_only_at_the_root_and_reported(): void {
+		$this->require_symlinks();
+		$this->put( 'shared/uploads/2026/photo.jpg' );
+		$this->put( 'outside/secret.txt' );
+		mkdir( $this->root . '/site' );
+		symlink( $this->root . '/outside', $this->root . '/shared/uploads/inner' );
+		symlink( $this->root . '/shared/uploads', $this->root . '/uploads' );
+		list( $lines, $state ) = $this->run_all( $this->link_scanner( $this->root . '/uploads' ) );
+		$this->assertSame( array( 'wp-content/uploads/2026/photo.jpg' ), $this->paths( $lines ), 'under the canonical prefix, nothing behind the inner link' );
+		$this->assertSame( 1, $state['counts']['links'], 'the link inside the root is counted and not entered' );
+		$this->assertSame( 0, $state['counts']['unreadable'], 'a followed root is not a finding the pre-flight asks about' );
+		$this->assertSame( array( 'The "uploads" content directory is a link; the directory it leads to was backed up (wp-content/uploads -> {root}/shared/uploads).' ), $state['warnings'] );
+
+		// Where it leads is shown only through the mask: without one it is not shown at all.
+		$plain                 = new FileScanner( array( array( 'group' => 'uploads', 'path' => $this->root . '/uploads', 'prefix' => 'wp-content/uploads' ) ), new Exclusions( array(), array() ), PHP_INT_SIZE, Manifest::DEFAULT_CHUNK, array( 'abspath' => $this->root . '/site' ) );
+		list( $again, $state ) = $this->run_all( $plain );
+		$this->assertSame( $this->paths( $lines ), $this->paths( $again ) );
+		$this->assertStringContainsString( '(not shown)', $state['warnings'][0] );
+		$this->assertStringNotContainsString( $this->root, $state['warnings'][0] );
+	}
+
+	public function test_a_content_root_link_to_a_file_to_the_site_or_above_it_is_refused_with_the_reason(): void {
+		$this->require_symlinks();
+		$this->put( 'site/wp-config.php' );
+		$this->put( 'file.txt' );
+		$this->put( 'themes/t/style.css' );
+		symlink( $this->root . '/file.txt', $this->root . '/to-file' );
+		symlink( $this->root . '/site', $this->root . '/to-site' );
+		symlink( $this->root, $this->root . '/to-parent' );
+		$scanner = $this->link_scanner(
+			$this->root . '/to-file',
+			null,
+			array(
+				array( 'group' => 'plugins', 'path' => $this->root . '/to-site', 'prefix' => 'wp-content/plugins' ),
+				array( 'group' => 'mu-plugins', 'path' => $this->root . '/to-parent', 'prefix' => 'wp-content/mu-plugins' ),
+				array( 'group' => 'themes', 'path' => $this->root . '/themes', 'prefix' => 'wp-content/themes' ),
+			)
+		);
+		list( $lines, $state ) = $this->run_all( $scanner );
+		$this->assertSame( array( 'wp-content/themes/t/style.css' ), $this->paths( $lines ), 'the control: a plain root after them is scanned' );
+		$this->assertSame( 3, $state['counts']['unreadable'], 'each refused root is a finding the pre-flight asks about' );
+		$this->assertSame(
+			array(
+				'The "uploads" content directory is a link and was not scanned: it does not lead to a directory (wp-content/uploads).',
+				'The "plugins" content directory is a link and was not scanned: it leads to the WordPress directory or a directory that holds it (wp-content/plugins).',
+				'The "mu-plugins" content directory is a link and was not scanned: it leads to the WordPress directory or a directory that holds it (wp-content/mu-plugins).',
+			),
+			$state['warnings']
+		);
+	}
+
+	public function test_a_content_root_link_is_refused_when_the_site_directory_is_unknown(): void {
+		$this->require_symlinks();
+		$this->put( 'shared/uploads/photo.jpg' );
+		symlink( $this->root . '/shared/uploads', $this->root . '/uploads' );
+		foreach ( array( '', $this->root . '/no-such-site' ) as $abspath ) {
+			$scanner               = new FileScanner( array( array( 'group' => 'uploads', 'path' => $this->root . '/uploads', 'prefix' => 'wp-content/uploads' ) ), new Exclusions( array(), array() ), PHP_INT_SIZE, Manifest::DEFAULT_CHUNK, array( 'abspath' => $abspath ) );
+			list( $lines, $state ) = $this->run_all( $scanner );
+			$this->assertSame( array(), $lines, $abspath );
+			$this->assertStringContainsString( 'the WordPress directory could not be located', $state['warnings'][0] );
+		}
+	}
+
+	public function test_a_root_or_directory_that_cannot_be_told_apart_from_a_link_is_not_entered_and_is_reported(): void {
+		$this->put( 'uploads/2026/a.jpg' );
+		$this->put( 'uploads/2026/b.jpg' );
+		$this->put( 'uploads/undecided-one/x.jpg' );
+		$this->put( 'uploads/undecided-two/y.jpg' );
+		$this->put( 'themes/t/style.css' );
+		mkdir( $this->root . '/site' );
+		$themes = array( array( 'group' => 'themes', 'path' => $this->root . '/themes', 'prefix' => 'wp-content/themes' ) );
+
+		// The control: with the real link test, everything is a plain directory and listed.
+		list( $lines ) = $this->run_all( $this->link_scanner( $this->root . '/uploads', null, $themes ) );
+		$this->assertSame( array( 'wp-content/uploads/2026/a.jpg', 'wp-content/uploads/2026/b.jpg', 'wp-content/uploads/undecided-one/x.jpg', 'wp-content/uploads/undecided-two/y.jpg', 'wp-content/themes/t/style.css' ), $this->paths( $lines ) );
+
+		$root  = $this->root;
+		$state = static function ( string $path ) use ( $root ): string {
+			return in_array( basename( $path ), array( 'undecided-one', 'undecided-two' ), true ) || $root . '/themes' === $path ? Links::UNKNOWN : Links::state( $path );
+		};
+		list( $lines, $state ) = $this->run_all( $this->link_scanner( $this->root . '/uploads', $state, $themes ) );
+		$this->assertSame( array( 'wp-content/uploads/2026/a.jpg', 'wp-content/uploads/2026/b.jpg' ), $this->paths( $lines ), 'neither the undecided directories nor the undecided root are entered' );
+		$this->assertSame( 2, $state['counts']['undecided'] );
+		$this->assertSame( 3, $state['counts']['unreadable'], 'the pre-flight asks about them like unreadable entries' );
+		$this->assertSame( array( 'wp-content/uploads/undecided-one', 'wp-content/uploads/undecided-two' ), $state['lists']['unreadable'] );
+		$this->assertSame(
+			array(
+				'Some directories were not scanned because it could not be determined whether they are links (for example when this server does not let PHP resolve links); they are listed with the unreadable files, the first is wp-content/uploads/undecided-one.',
+				'The "themes" content directory was not scanned: it could not be determined whether it is a link (wp-content/themes).',
+			),
+			$state['warnings'],
+			'one warning for the directories however many, one for the root'
+		);
+		$this->assertSame( 0, $state['counts']['links'] );
+	}
+
+	public function test_a_link_to_the_root_of_the_file_system_or_to_nothing_is_never_followed(): void {
+		$site = $this->root . '/site';
+		mkdir( $site );
+		$fs_root = 'Windows' === PHP_OS_FAMILY ? substr( (string) realpath( sys_get_temp_dir() ), 0, 3 ) : '/';
+		$this->assertSame( Links::FILESYSTEM_ROOT, Links::root_refusal( $fs_root, $site ) );
+		$this->assertSame( Links::NOT_A_DIRECTORY, Links::root_refusal( $this->root . '/missing', $site ) );
+		$this->put( 'elsewhere/a.txt' );
+		$this->assertSame( '', Links::root_refusal( $this->root . '/elsewhere', $site ), 'the control: a directory beside the site may be followed' );
+		$this->assertSame( Links::HOLDS_SITE, Links::root_refusal( $site, $site ) );
+		$this->assertSame( Links::HOLDS_SITE, Links::root_refusal( $this->root, $site ) );
+		$this->assertSame( Links::SITE_UNKNOWN, Links::root_refusal( $this->root . '/elsewhere', '' ) );
 	}
 
 	public function test_unreadable_entries_are_listed_for_the_preflight_and_the_scan_goes_on(): void {

@@ -17,6 +17,7 @@ use WPCheckpoint\Archive\SealRequired;
 use WPCheckpoint\Archive\SourceChanged;
 use WPCheckpoint\Archive\SourceGone;
 use WPCheckpoint\Files\Exclusions;
+use WPCheckpoint\Files\Links;
 use WPCheckpoint\Files\ScanRoots;
 use WPCheckpoint\Support\Paths;
 use WPCheckpoint\Support\HostFunctions;
@@ -200,7 +201,7 @@ final class PackStep implements Step {
 		$packer = Packer::open( $volumes, $base, $cursor['packer'], $this->packer_options_with( $context ) );
 		self::cut( $work . DIRECTORY_SEPARATOR . self::PACKED_INDEX, $cursor['packed_bytes'] );
 		self::cut( $work . DIRECTORY_SEPARATOR . self::CHUNKS, $cursor['chunks_bytes'] );
-		$roots      = null === $this->roots ? ScanRoots::resolve( $active['groups'], $context->storage_path() )['roots'] : $this->roots;
+		$roots      = self::judged( null === $this->roots ? ScanRoots::resolve( $active['groups'], $context->storage_path() )['roots'] : $this->roots );
 		$exclusions = new Exclusions( $active['exclusions'], array() );
 		$since      = 0;
 		$last       = 0.0;
@@ -382,9 +383,10 @@ final class PackStep implements Step {
 			$cursor['pending'] = null;
 			return 0;
 		}
-		if ( ! Paths::is_inside( (string) $root['path'], $source ) ) {
+		if ( ! empty( $root['refused'] ) || ! Paths::is_inside( (string) $root['path'], $source ) ) {
 			// The scan saw a directory; a link put in its place since would take the backup outside the
-			// content directory (another site's files on a shared host). Resolved paths only.
+			// content directory (another site's files on a shared host). Resolved paths only. A root that is a
+			// link is judged again here by the scan's rule (it may have been pointed elsewhere since).
 			$context->logger()->warning( 'File left out: it resolves outside its content directory', array( 'p' => $p ) );
 			self::note( $cursor, 'outside', $p );
 			$cursor['offset']  = $line['next'];
@@ -845,6 +847,22 @@ final class PackStep implements Step {
 			$this->database_mtime = false === $stamp ? 0 : $stamp;
 		}
 		return $this->database_mtime;
+	}
+
+	/**
+	 * The roots, each marked 'refused' when the scan's rule for a root that is a link (Files\Links) does not let
+	 * it be followed now: judged once per tick, where the scan judged once per root.
+	 *
+	 * @param array<int, array<string, mixed>> $roots Roots.
+	 * @return array<int, array<string, mixed>>
+	 */
+	private static function judged( array $roots ): array {
+		foreach ( $roots as $i => $root ) {
+			$path                   = rtrim( (string) $root['path'], '/\\' );
+			$state                  = Links::state( $path );
+			$roots[ $i ]['refused'] = Links::UNKNOWN === $state || ( Links::LINK === $state && '' !== Links::root_refusal( $path, defined( 'ABSPATH' ) ? (string) ABSPATH : '' ) );
+		}
+		return $roots;
 	}
 
 	/**

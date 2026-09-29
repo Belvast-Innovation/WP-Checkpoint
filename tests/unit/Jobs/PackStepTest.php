@@ -649,6 +649,52 @@ final class PackStepTest extends TestCase {
 		$this->assertStringNotContainsString( 'secret', implode( '', array_map( 'file_get_contents', glob( $this->ctx->work() . '/volumes/*' ) ?: array() ) ) );
 	}
 
+	public function test_a_content_root_that_is_a_link_is_packed_through_it_until_it_leads_somewhere_the_scan_refuses(): void {
+		if ( 'Windows' === PHP_OS_FAMILY ) {
+			$this->markTestSkipped( 'symlinks need privileges on Windows' );
+		}
+		// The uploads root is a link to a shared directory (a deployment tool's layout): packed through it.
+		$shared = $this->ctx->root . '/shared/uploads';
+		mkdir( dirname( $shared ), 0700 );
+		rename( $this->site, $shared );
+		symlink( $shared, $this->site );
+		$photo = $this->file( '2026/photo.txt', 500, 21 );
+		$this->index( array( $photo ) );
+		list( $result ) = $this->drive( $this->step() );
+		$this->assertSame( StepResult::DONE, $result->kind );
+		$this->assertSame( array( $photo ), array_column( $this->packed(), 'p' ), 'the control: a root that is a link is packed' );
+		$this->assertSame( 0, $this->summary()['outside']['count'] );
+	}
+
+	public function test_a_content_root_link_pointed_at_the_root_of_the_file_system_after_the_scan_is_left_out(): void {
+		if ( 'Windows' === PHP_OS_FAMILY ) {
+			$this->markTestSkipped( 'symlinks need privileges on Windows' );
+		}
+		// The scan listed a path; before packing, the uploads root became a link to "/", where a file of that path
+		// exists (this test file): everything under "/" is inside the root's real path, so only the scan's rule for
+		// a root that is a link, applied again, keeps it out.
+		$here = (string) realpath( __FILE__ );
+		$p    = 'wp-content/uploads' . $here;
+		rmdir( $this->site );
+		symlink( '/', $this->site );
+		try {
+			$this->assertFileExists( $this->site . $here, 'the control: the listed path exists through the link' );
+			file_put_contents( $this->ctx->work() . '/files.index.jsonl', json_encode( array( 'p' => $p, 'b' => filesize( $here ), 'm' => filemtime( $here ) ), JSON_UNESCAPED_SLASHES ) . "\n" );
+			list( $result ) = $this->drive( $this->step() );
+			$this->assertSame( StepResult::DONE, $result->kind );
+			$this->assertSame( array(), $this->packed() );
+			$this->assertSame(
+				array(
+					'count'  => 1,
+					'listed' => array( $p ),
+				),
+				$this->summary()['outside']
+			);
+		} finally {
+			unlink( $this->site ); // The link only, before anything removes the sandbox.
+		}
+	}
+
 	public function test_listed_paths_stop_at_the_cap_while_the_count_and_the_warning_go_on(): void {
 		$paths = array();
 		for ( $i = 0; $i < PackStep::MAX_LISTED + 10; $i++ ) {

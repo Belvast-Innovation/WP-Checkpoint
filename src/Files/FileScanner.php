@@ -10,8 +10,6 @@ namespace WPCheckpoint\Files;
 use WPCheckpoint\Archive\EntryPath;
 use WPCheckpoint\Archive\Manifest;
 use WPCheckpoint\Archive\Packer;
-use WPCheckpoint\Support\Deleter;
-use WPCheckpoint\Support\Paths;
 use WPCheckpoint\Support\Utf8;
 
 /**
@@ -25,10 +23,14 @@ use WPCheckpoint\Support\Utf8;
  * way (see sorted_names()).
  *
  * The walk is iterative with an explicit stack, so a deeply nested tree
- * costs stack entries, not call frames. Links are never followed and are
- * counted as skipped; special files (fifo, socket, device) are skipped;
- * an unreadable file or directory is recorded (the pre-flight asks the
- * user to confirm before backing up without it) and the walk goes on.
+ * costs stack entries, not call frames. A content root that is a link is
+ * followed within the limits of Links::root_refusal() and reported; links
+ * below a root are never followed and are counted as skipped; a directory
+ * that cannot be told apart from a link (Links::state() "unknown") is not
+ * entered and is recorded as unreadable; special files (fifo, socket,
+ * device) are skipped; an unreadable file or directory is recorded (the
+ * pre-flight asks the user to confirm before backing up without it) and
+ * the walk goes on.
  * Directories are not listed in the index: the archive holds files, and
  * an empty directory is not part of a backup.
  *
@@ -78,14 +80,38 @@ final class FileScanner {
 	private $max_file;
 
 	/**
+	 * The WordPress directory (ABSPATH): a root that is a link must not lead to it or above it.
+	 *
+	 * @var string
+	 */
+	private $abspath;
+
+	/**
+	 * Shows where a root that is a link leads, for the warning (JobPresenter::clean() in production).
+	 *
+	 * @var callable
+	 */
+	private $mask;
+
+	/**
+	 * Link test: function( string $path ): string, one of the Links constants (Links::state(); tests inject).
+	 *
+	 * @var callable
+	 */
+	private $link_state;
+
+	/**
 	 * Constructor.
 	 *
 	 * @param array<int, array{group: string, path: string, prefix: string, skip?: string[]}> $roots      Roots in scan order.
 	 * @param Exclusions                                                                      $exclusions Exclusions.
 	 * @param int                                                                             $int_size   PHP_INT_SIZE of the platform.
 	 * @param int                                                                             $chunk_bytes Content chunk size (bounds the largest indexable file).
+	 * @param array{abspath?: string, mask?: callable, link_state?: callable}                 $options    'abspath': the WordPress directory ('' refuses every root that is a link);
+	 *                                                                                                    'mask': function( string $path ): string for the target of a followed root (without it the
+	 *                                                                                                    target is not shown); 'link_state': the link test (Links::state()).
 	 */
-	public function __construct( array $roots, Exclusions $exclusions, int $int_size = PHP_INT_SIZE, int $chunk_bytes = Manifest::DEFAULT_CHUNK ) {
+	public function __construct( array $roots, Exclusions $exclusions, int $int_size = PHP_INT_SIZE, int $chunk_bytes = Manifest::DEFAULT_CHUNK, array $options = array() ) {
 		$this->roots = array();
 		foreach ( $roots as $root ) {
 			$this->roots[] = array(
@@ -102,6 +128,11 @@ final class FileScanner {
 		}
 		$this->exclusions = $exclusions;
 		$this->max_file   = Packer::max_file_bytes( $chunk_bytes, $int_size );
+		$this->abspath    = isset( $options['abspath'] ) ? (string) $options['abspath'] : '';
+		$this->mask       = isset( $options['mask'] ) && is_callable( $options['mask'] ) ? $options['mask'] : static function (): string {
+			return '(not shown)';
+		};
+		$this->link_state = isset( $options['link_state'] ) && is_callable( $options['link_state'] ) ? $options['link_state'] : array( Links::class, 'state' );
 	}
 
 	/**
@@ -128,6 +159,7 @@ final class FileScanner {
 				'over_volume'      => 0,
 				'invalid_patterns' => 0,
 				'heavy'            => 0,
+				'undecided'        => 0,
 			),
 			'lists'    => array(
 				'unreadable'  => array(),
@@ -170,8 +202,7 @@ final class FileScanner {
 					return $state;
 				}
 				$root = $this->roots[ (int) $state['root'] ];
-				if ( ! is_dir( $root['path'] ) || is_link( $root['path'] ) ) {
-					$this->warn( $state, 'unreadable', 'A content directory is missing or is a link and was not scanned: ' . $root['prefix'] );
+				if ( ! $this->root_usable( $state, $root ) ) {
 					++$state['root'];
 					continue;
 				}
@@ -227,22 +258,35 @@ final class FileScanner {
 	}
 
 	/**
-	 * Whether an entry below a content root is a link of any kind, and so neither listed nor entered: a symbolic link,
-	 * or on Windows a directory junction, which is_link() does not report; right after is_link(), is_dir() and
-	 * is_file() are both false for a junction too (observed on the Windows CI runner), so without this it was counted
-	 * as a special file and stayed out only because is_dir() was false. A regular file is not asked about further, so
-	 * the added cost stays with directories. When the Deleter's check has no definite answer (no readlink(), an empty
-	 * directory, or one holding only links), the entry counts as not a link and is entered: an empty directory lists
-	 * nothing, and PackStep packs only what Paths::is_inside() places under the root.
+	 * Whether a content root is scanned; a root that is not is reported (and counted as unreadable, so the
+	 * pre-flight asks before backing up without it). A root that is a link is followed when Links::root_refusal()
+	 * allows it, and the report says so and where it leads (masked).
 	 *
-	 * @param string $path Path.
+	 * @param array<string, mixed>                                               $state State (updated).
+	 * @param array{group: string, path: string, prefix: string, skip: string[]} $root  Root.
 	 * @return bool
 	 */
-	private static function is_any_link( string $path ): bool {
-		if ( is_link( $path ) ) {
+	private function root_usable( array &$state, array $root ): bool {
+		$link = (string) call_user_func( $this->link_state, $root['path'] );
+		if ( Links::UNKNOWN === $link ) {
+			$this->warn( $state, 'unreadable', sprintf( 'The "%1$s" content directory was not scanned: it could not be determined whether it is a link (%2$s).', $root['group'], $root['prefix'] ) );
+			return false;
+		}
+		if ( Links::LINK === $link ) {
+			$refusal = Links::root_refusal( $root['path'], $this->abspath );
+			if ( '' !== $refusal ) {
+				$this->warn( $state, 'unreadable', sprintf( 'The "%1$s" content directory is a link and was not scanned: %2$s (%3$s).', $root['group'], Links::refusal_text( $refusal ), $root['prefix'] ) );
+				return false;
+			}
+			$target = realpath( $root['path'] );
+			$this->warn( $state, 'links', sprintf( 'The "%1$s" content directory is a link; the directory it leads to was backed up (%2$s -> %3$s).', $root['group'], $root['prefix'], (string) call_user_func( $this->mask, false === $target ? '' : $target ) ) );
 			return true;
 		}
-		return Paths::is_windows() && ! is_file( $path ) && Deleter::is_reparse( $path );
+		if ( ! is_dir( $root['path'] ) ) {
+			$this->warn( $state, 'unreadable', 'A content directory is missing and was not scanned: ' . $root['prefix'] );
+			return false;
+		}
+		return true;
 	}
 
 	/**
@@ -264,8 +308,23 @@ final class FileScanner {
 			$this->warn( $state, 'bad_names', 'A file or directory was skipped because its name cannot be stored in an archive: ' . $root['prefix'] . '/' . Utf8::scrub( $rel ) );
 			return null;
 		}
-		if ( self::is_any_link( $abs ) ) {
+		// A symbolic link, or on Windows a directory junction, which is_link() does not report (right after is_link(),
+		// is_dir() and is_file() are both false for a junction too, observed on the Windows CI runner: without this
+		// it was counted as a special file and stayed out only because is_dir() was false).
+		$link = (string) call_user_func( $this->link_state, $abs );
+		if ( Links::LINK === $link ) {
 			++$state['counts']['links'];
+			return null;
+		}
+		if ( Links::UNKNOWN === $link ) {
+			// Entering could follow a link out of the content directory; leaving it out silently would lose files.
+			// Listed with the unreadable entries (the pre-flight asks before backing up without them); one warning
+			// says why, however many there are.
+			$this->record( $state, 'unreadable', $p );
+			$state['counts']['undecided'] = ( isset( $state['counts']['undecided'] ) ? (int) $state['counts']['undecided'] : 0 ) + 1;
+			if ( 1 === $state['counts']['undecided'] ) {
+				$this->warn( $state, 'undecided', 'Some directories were not scanned because it could not be determined whether they are links (for example when this server does not let PHP resolve links); they are listed with the unreadable files, the first is ' . $p . '.' );
+			}
 			return null;
 		}
 		if ( in_array( $abs, $root['skip'], true ) || $this->exclusions->excludes( $p ) ) {
