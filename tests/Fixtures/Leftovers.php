@@ -15,7 +15,7 @@ use PHPUnit\Framework\TestSuite;
  * plugin's and its tests' entries in the run's own temporary directory. A test that leaves one fails, named, and what
  * it left is removed so the next test starts clean; a test class that leaves one in its class-level set-up fails as a
  * class; and the run fails when any is left at its end. What an earlier run left is reported when the run starts; its
- * tables are removed (the database is this run's alone), anything else is left alone.
+ * tables are removed (the tests database is taken to be this run's while it runs), anything else is left alone.
  *
  * The temporary directory is looked at only when it is the run's own (bin/test-integration.sh gives each run one and
  * names it in WPCHECKPOINT_TEST_RUN_TMP): in a directory other runs share, their entries would be blamed on this
@@ -159,8 +159,10 @@ final class Leftovers implements TestListener {
 			return;
 		}
 		if ( array() === $this->suites && array() !== $now ) {
-			// The tables go: the core test library reinstalls this database for every run, so no other run is using
-			// them (a killed run's). Temporary entries stay: another run's directory is never this run's to empty.
+			// The tables go: they carry no site's prefix, and the tests database is taken to be this run's while it
+			// runs (a second run would collide on the core library's reinstall of its tables anyway; the site that
+			// shares the database, tests-wordpress, is not restoring meanwhile). Temporary entries stay: another run's
+			// directory is never this run's to empty.
 			$tables = array_values(
 				array_filter(
 					$now,

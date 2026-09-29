@@ -32,15 +32,42 @@ final class Sandbox {
 	}
 
 	/**
-	 * Why a path may not be removed, or '' when it may: it must be absolute, without "." or ".." segments, strictly
-	 * under the temporary directory both as written and as its parent resolves (a parent that cannot be resolved is
-	 * refused when the entry is there), and neither the plugin's directory, ABSPATH, the working directory, a directory
-	 * holding one of them, nor anything inside one (compared as written and, unless it is a link, as it resolves).
+	 * Why a path may not be removed, or '' when it may.
+	 *
+	 * What is removed is decided by where the entry is, never by what it leads to: its location is its directory's
+	 * real path and its name as that directory lists it. Nothing about the entry itself is resolved, so a link (a
+	 * junction on Windows too) is judged as the link. The rules, which together guarantee that nothing outside the
+	 * temporary directory and nothing protected is ever removed (SandboxLayoutsTest checks them on generated
+	 * layouts):
+	 *
+	 * - The path is absolute, without "." or ".." segments, and strictly under the temporary directory as written.
+	 * - An entry that is there is named as its directory lists it: exactly, or in another letter case where only one
+	 *   listed name matches (a file system that folds case). Any other name for it (a Windows 8.3 short name, say)
+	 *   is refused, as is an entry whose directory cannot be resolved or listed.
+	 * - Its location is strictly under the temporary directory's real path (not reached through a link out of it).
+	 * - Its location is not the plugin's directory, ABSPATH or the working directory, holds none of them and is
+	 *   inside none of them (compared without regard to letter case: the safe direction).
+	 *
+	 * A path that is not there has nothing to remove; it is judged as written.
 	 *
 	 * @param string $path Path.
 	 * @return string
 	 */
 	public static function refusal( string $path ): string {
+		return self::judged( $path );
+	}
+
+	/**
+	 * refusal() with some of its rules withdrawn: for SandboxLayoutsTest's reverse checks only, which show that the
+	 * generated layouts catch what each rule is there for. "listed" judges an entry by the name given; "parent" by
+	 * the path as written; "inside" lets through what is inside a protected directory; "resolve" judges an entry
+	 * that is there also by where it leads (as before the rules: a link to a protected directory refused).
+	 *
+	 * @param string   $path      Path.
+	 * @param string[] $withdrawn Rules withdrawn.
+	 * @return string
+	 */
+	public static function judged( string $path, array $withdrawn = array() ): string {
 		if ( '' === $path ) {
 			return 'empty path';
 		}
@@ -52,7 +79,7 @@ final class Sandbox {
 			return 'dot segment';
 		}
 		$temp = self::slashed( (string) sys_get_temp_dir() );
-		$real = realpath( sys_get_temp_dir() );
+		$real = Paths::real( sys_get_temp_dir() );
 		if ( false === $real ) {
 			return 'no temporary directory';
 		}
@@ -60,44 +87,81 @@ final class Sandbox {
 		if ( 1 === preg_match( '#\A(?:/|[A-Za-z]:/?|//[^/]+/[^/]+/?)\z#', $real ) ) {
 			return 'the temporary directory is a filesystem root';
 		}
-		$target = self::slashed( $slashed );
-		if ( ! self::strictly_inside( $temp, $target ) && ! self::strictly_inside( $real, $target ) ) {
+		$location = self::slashed( $slashed );
+		if ( ! self::strictly_inside( $temp, $location ) && ! self::strictly_inside( $real, $location ) ) {
 			return 'outside the temporary directory';
 		}
-		$parent = realpath( dirname( $path ) );
-		if ( false === $parent ) {
-			// Defensive: no way to reach this on the platforms the tests run on is known (not tested).
-			if ( file_exists( $path ) || is_link( $path ) ) {
+		$there  = file_exists( $path ) || is_link( $path );
+		$parent = Paths::real( dirname( $path ) );
+		if ( in_array( 'parent', $withdrawn, true ) ) {
+			$parent = false;
+			$there  = false;
+		}
+		if ( $there ) {
+			if ( false === $parent ) {
 				return 'its directory cannot be resolved';
 			}
-		} else {
-			// Where it is, through any link on the way (not the entry itself: a link is removed, not followed).
-			$target = self::slashed( $parent ) . '/' . basename( $target );
-			if ( ! self::strictly_inside( $real, $target ) ) {
-				return 'outside the temporary directory, through a link';
+			$name = in_array( 'listed', $withdrawn, true ) ? basename( $location ) : self::listed_name( $parent, basename( $location ) );
+			if ( null === $name ) {
+				return 'not named as its directory lists it (a short name or another alias)';
 			}
+			$location = self::slashed( $parent ) . '/' . $name;
+		} elseif ( false !== $parent ) {
+			$location = self::slashed( $parent ) . '/' . basename( $location );
 		}
-		// The entry itself as the file system names it (a short 8.3 name, another letter case), unless it is a link
-		// (a junction on Windows too, which is_link() does not report): a link is removed, not what it leads to.
-		$resolved = Links::LINK === Links::state( rtrim( $path, '/\\' ) ) ? false : Paths::real( $path );
-		$compared = array_unique( false === $resolved ? array( $target ) : array( $target, self::slashed( $resolved ) ) );
+		if ( false !== $parent && ! self::strictly_inside( $real, $location ) ) {
+			return 'outside the temporary directory, through a link';
+		}
 		$protected = array( dirname( __DIR__, 2 ), (string) getcwd() );
 		if ( defined( 'ABSPATH' ) ) {
 			$protected[] = (string) ABSPATH;
 		}
+		$judged = array( $location );
+		if ( $there && in_array( 'resolve', $withdrawn, true ) && false !== Paths::real( $path ) ) {
+			$judged[] = self::slashed( (string) Paths::real( $path ) );
+		}
 		foreach ( $protected as $keep ) {
-			$keep = '' === $keep ? false : realpath( $keep );
+			$keep = '' === $keep ? false : Paths::real( $keep );
 			if ( false === $keep ) {
 				continue;
 			}
-			$keep = self::slashed( $keep );
-			foreach ( $compared as $one ) {
-				if ( self::same( $one, $keep ) || self::strictly_inside( $one, $keep ) || self::strictly_inside( $keep, $one ) ) {
+			$keep = strtolower( self::slashed( $keep ) );
+			foreach ( $judged as $one ) {
+				$at     = strtolower( $one );
+				$inside = ! in_array( 'inside', $withdrawn, true ) && 0 === strpos( $at, rtrim( $keep, '/' ) . '/' );
+				if ( $at === $keep || 0 === strpos( $keep, rtrim( $at, '/' ) . '/' ) || $inside ) {
 					return 'the plugin, the site or the working directory, or holding or inside one';
 				}
 			}
 		}
 		return '';
+	}
+
+	/**
+	 * The name a directory lists an entry under: $name itself, or the one listed name that matches it without regard
+	 * to letter case; null when the directory lists neither (or cannot be listed).
+	 *
+	 * @param string $dir  Directory (real path).
+	 * @param string $name Name as given.
+	 * @return string|null
+	 */
+	private static function listed_name( string $dir, string $name ): ?string {
+		$entries = @scandir( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- an unlistable directory refuses.
+		if ( false === $entries ) {
+			return null;
+		}
+		if ( in_array( $name, $entries, true ) ) {
+			return $name;
+		}
+		$folded = array_values(
+			array_filter(
+				$entries,
+				static function ( $entry ) use ( $name ): bool {
+					return 0 === strcasecmp( (string) $entry, $name );
+				}
+			)
+		);
+		return 1 === count( $folded ) ? (string) $folded[0] : null;
 	}
 
 	/**

@@ -74,11 +74,7 @@ final class SandboxTest extends TestCase {
 			$this->assertSame( $why, Sandbox::refusal( $dir ), 'holding it' );
 			$this->assertSame( $why, Sandbox::refusal( $dir . '/in' ), 'it' );
 			$this->assertSame( $why, Sandbox::refusal( $dir . '/in/x' ), 'inside it' );
-			if ( is_dir( $dir . '/IN' ) ) {
-				$this->assertSame( $why, Sandbox::refusal( $dir . '/IN' ), 'another letter case, where the file system folds it (Windows, macOS)' );
-			} else {
-				$this->assertSame( '', Sandbox::refusal( $dir . '/IN' ), 'another directory, where the file system tells the letter case apart' );
-			}
+			$this->assertSame( $why, Sandbox::refusal( $dir . '/IN' ), 'another letter case: the same directory where the file system folds case, and refused anyway where it does not (the safe direction)' );
 		} finally {
 			chdir( $cwd );
 		}

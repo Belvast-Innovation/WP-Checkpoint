@@ -7,13 +7,17 @@
 #
 # The run gets a directory of its own, "{TMPDIR}/wpcheckpoint-it.XXXXXX": "cwd" is its working directory and "tmp"
 # its temporary directory (TMPDIR), so two runs in one container never see each other's temporary entries (the
-# leftover check, tests/Fixtures/Leftovers.php, looks at this one only). Arguments go to PHPUnit; the paths in them
-# (a test file or directory, and the values of the options that name a file or directory: --log-*, --testdox-html,
-# -text and -xml, --coverage-*, --cache-result-file, --bootstrap, --include-path, --list-tests-xml,
-# --dump-xdebug-filter, --whitelist) are taken relative to the plugin's directory, as before. The configuration is phpunit.xml when there is one, else
-# phpunit.xml.dist. Anything the suite leaves in its working directory is kept there and fails the run: a test wrote
-# to a relative path. Used by `composer test:integration`, npm run test:integration and CI.
-# (WPCHECKPOINT_TEST_PHPUNIT names another PHPUnit, for this script's own test.)
+# leftover check, tests/Fixtures/Leftovers.php, looks at this one only).
+#
+# Arguments go to PHPUnit. The paths in them are taken relative to the plugin's directory, as before: a test file or
+# directory, and the values of the options that name one (--log-*, --testdox-html, --testdox-text, --testdox-xml,
+# --coverage-*, --cache-result-file, --bootstrap, --prepend, --list-tests-xml, --dump-xdebug-filter, --whitelist).
+# --include-path, a list, is passed as given: name its directories in full. The configuration is phpunit.xml when
+# there is one, else phpunit.xml.dist; a -c of your own is not supported.
+#
+# Anything the suite leaves in its working directory is kept there and fails the run: a test wrote to a relative
+# path. Used by `composer test:integration`, npm run test:integration and CI. (WPCHECKPOINT_TEST_PHPUNIT names
+# another PHPUnit, for this script's own test.)
 PLUGIN=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 PHPUNIT=${WPCHECKPOINT_TEST_PHPUNIT:-$PLUGIN/vendor/bin/phpunit}
 CONFIG=$PLUGIN/phpunit.xml
@@ -39,13 +43,13 @@ for arg in "$@"; do
 		NEXT=""
 	else
 		case "$arg" in
-			--log-*=* | --testdox-html=* | --testdox-text=* | --testdox-xml=* | --coverage-*=* | --cache-result-file=* | --bootstrap=* | --include-path=* | --list-tests-xml=* | --dump-xdebug-filter=* | --whitelist=*)
+			--log-*=* | --testdox-html=* | --testdox-text=* | --testdox-xml=* | --coverage-*=* | --cache-result-file=* | --bootstrap=* | --list-tests-xml=* | --dump-xdebug-filter=* | --whitelist=* | --prepend=*)
 				arg="${arg%%=*}=$(absolute "${arg#*=}")"
 				;;
-			--log-* | --testdox-html | --testdox-text | --testdox-xml | --cache-result-file | --coverage-clover | --coverage-cobertura | --coverage-crap4j | --coverage-html | --coverage-php | --coverage-xml | --coverage-filter | --coverage-cache | --bootstrap | --include-path | --list-tests-xml | --dump-xdebug-filter | --whitelist)
+			--log-* | --testdox-html | --testdox-text | --testdox-xml | --cache-result-file | --coverage-clover | --coverage-cobertura | --coverage-crap4j | --coverage-html | --coverage-php | --coverage-xml | --coverage-filter | --coverage-cache | --bootstrap | --list-tests-xml | --dump-xdebug-filter | --whitelist | --prepend)
 				NEXT=path
 				;;
-			--filter | --group | --exclude-group | --testsuite | --covers | --uses | -d | --printer | --test-suffix | --order-by | --random-order-seed | --columns | --loader | --repeat | --extensions | --testdox-group | --testdox-exclude-group)
+			--filter | --group | --exclude-group | --testsuite | --covers | --uses | -d | --printer | --test-suffix | --order-by | --random-order-seed | --columns | --loader | --repeat | --extensions | --testdox-group | --testdox-exclude-group | --include-path | --default-time-limit | --atleast-version | -c | --configuration)
 				NEXT=value
 				;;
 			-*) ;;

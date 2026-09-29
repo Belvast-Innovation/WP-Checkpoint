@@ -223,7 +223,7 @@ exec( 'rm -f x' );
 exec( 'rm --recursive ' . $dir );
 exec( "find {$dir} -type f -delete" );
 use function unlink as remove_file;
-use function \\rmdir as remove_dir;
+use function \rmdir as remove_dir;
 PHP;
 		$this->assertCount( 16, self::deletions( $code ), implode( ' | ', self::deletions( $code ) ) );
 		$code = <<<'PHP'
