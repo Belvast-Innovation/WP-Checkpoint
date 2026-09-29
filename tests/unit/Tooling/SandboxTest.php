@@ -81,7 +81,7 @@ final class SandboxTest extends TestCase {
 		$this->assertSame( '', Sandbox::refusal( $dir ), 'the control: once the working directory is elsewhere' );
 	}
 
-	public function test_a_short_name_is_compared_as_it_resolves(): void {
+	public function test_a_short_name_is_refused_and_one_on_the_way_is_resolved(): void {
 		if ( 'Windows' !== PHP_OS_FAMILY ) {
 			$this->markTestSkipped( 'Windows only: 8.3 short names.' );
 		}
@@ -93,14 +93,45 @@ final class SandboxTest extends TestCase {
 		if ( false === strpos( $short, '~' ) ) {
 			$this->markTestSkipped( 'This volume makes no 8.3 names (' . $short . ').' );
 		}
-		$cwd = (string) getcwd();
+		$alias = 'not named as its directory lists it (a short name or another alias)';
+		$cwd   = (string) getcwd();
 		chdir( $dir . '/a-long-directory-name/in' );
 		try {
-			$this->assertSame( 'the plugin, the site or the working directory, or holding or inside one', Sandbox::refusal( $dir . '/' . $short ), $short . ' holds the working directory' );
+			$this->assertSame( $alias, Sandbox::refusal( $dir . '/' . $short ), $short . ', which holds the working directory' );
+			$this->assertSame( 'the plugin, the site or the working directory, or holding or inside one', Sandbox::refusal( $dir . '/a-long-directory-name' ), 'the control: by its listed name' );
 		} finally {
 			chdir( $cwd );
 		}
-		$this->assertSame( '', Sandbox::refusal( $dir . '/' . $short ), 'the control: once the working directory is elsewhere' );
+		$this->assertSame( $alias, Sandbox::refusal( $dir . '/' . $short ), 'a short name for an entry, wherever the working directory is' );
+		$this->assertSame( '', Sandbox::refusal( $dir . '/a-long-directory-name' ), 'the control: its listed name' );
+		$this->assertSame( '', Sandbox::refusal( $dir . '/' . $short . '/in' ), 'a short name on the way is resolved with the directory' );
+	}
+
+	public function test_a_backslash_is_part_of_a_name_where_it_is_no_separator(): void {
+		if ( 'Windows' === PHP_OS_FAMILY ) {
+			$this->markTestSkipped( 'On Windows "\\" is a separator.' );
+		}
+		$dir = $this->sandbox();
+		mkdir( $dir . '/b' );
+		mkdir( $dir . '/a\\b' );
+		file_put_contents( $dir . '/a\\b/keep.txt', 'keep' );
+		$cwd = (string) getcwd();
+		chdir( $dir . '/a\\b' );
+		try {
+			$this->assertSame( 'the plugin, the site or the working directory, or holding or inside one', Sandbox::refusal( $dir . '/a\\b' ), 'the directory "a\\b" itself, not "b" in "a"' );
+			$this->assertSame( '', Sandbox::refusal( $dir . '/b' ), 'the control: its neighbour "b"' );
+			try {
+				Sandbox::remove( $dir . '/a\\b' );
+				$this->fail( 'removed' );
+			} catch ( \LogicException $e ) {
+				$this->assertStringContainsString( 'Nothing was deleted', $e->getMessage() );
+			}
+		} finally {
+			chdir( $cwd );
+		}
+		$this->assertFileExists( $dir . '/a\\b/keep.txt' );
+		$this->assertTrue( Sandbox::remove( $dir . '/a\\b' ), 'once the working directory is elsewhere' );
+		$this->assertDirectoryExists( $dir . '/b', 'and only it' );
 	}
 
 	public function test_a_refused_path_throws_and_nothing_is_touched(): void {

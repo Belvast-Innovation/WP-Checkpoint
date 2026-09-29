@@ -61,7 +61,8 @@ final class Sandbox {
 	 * refusal() with some of its rules withdrawn: for SandboxLayoutsTest's reverse checks only, which show that the
 	 * generated layouts catch what each rule is there for. "listed" judges an entry by the name given; "parent" by
 	 * the path as written; "inside" lets through what is inside a protected directory; "resolve" judges an entry
-	 * that is there also by where it leads (as before the rules: a link to a protected directory refused).
+	 * that is there also by where it leads (as before the rules: a link to a protected directory refused);
+	 * "backslash" takes "\\" for a separator everywhere (as before: on POSIX it is part of a name).
 	 *
 	 * @param string   $path      Path.
 	 * @param string[] $withdrawn Rules withdrawn.
@@ -71,7 +72,12 @@ final class Sandbox {
 		if ( '' === $path ) {
 			return 'empty path';
 		}
-		$slashed = str_replace( '\\', '/', $path );
+		// The very string remove() acts on: judged and removed are one entry.
+		$path    = self::trimmed( $path );
+		if ( in_array( 'backslash', $withdrawn, true ) ) {
+			$path = str_replace( '\\', '/', $path );
+		}
+		$slashed = self::slashed( $path );
 		if ( 1 !== preg_match( '#\A(?:/|[A-Za-z]:/|//)#', $slashed ) ) {
 			return 'relative path';
 		}
@@ -101,13 +107,13 @@ final class Sandbox {
 			if ( false === $parent ) {
 				return 'its directory cannot be resolved';
 			}
-			$name = in_array( 'listed', $withdrawn, true ) ? basename( $location ) : self::listed_name( $parent, basename( $location ) );
+			$name = in_array( 'listed', $withdrawn, true ) ? basename( $path ) : self::listed_name( $parent, basename( $path ) );
 			if ( null === $name ) {
 				return 'not named as its directory lists it (a short name or another alias)';
 			}
 			$location = self::slashed( $parent ) . '/' . $name;
 		} elseif ( false !== $parent ) {
-			$location = self::slashed( $parent ) . '/' . basename( $location );
+			$location = self::slashed( $parent ) . '/' . basename( $path );
 		}
 		if ( false !== $parent && ! self::strictly_inside( $real, $location ) ) {
 			return 'outside the temporary directory, through a link';
@@ -172,11 +178,12 @@ final class Sandbox {
 	 * @throws \LogicException When the path is refused (refusal()); nothing is touched.
 	 */
 	public static function remove( string $path ): bool {
-		$why = self::refusal( $path );
+		$path = self::trimmed( $path );
+		$why  = self::refusal( $path );
 		if ( '' !== $why ) {
 			throw new \LogicException( sprintf( 'Sandbox::remove( %s ) refused: %s. Nothing was deleted.', var_export( $path, true ), $why ) );
 		}
-		self::remove_entry( rtrim( $path, '/\\' ) );
+		self::remove_entry( $path );
 		clearstatcache();
 		return ! file_exists( $path ) && ! is_link( $path );
 	}
@@ -215,13 +222,26 @@ final class Sandbox {
 	}
 
 	/**
-	 * A path with "/" separators and no trailing one.
+	 * A path without trailing separators ("\\" is one on Windows only: elsewhere it is part of a name); a root stays.
+	 *
+	 * @param string $path Path.
+	 * @return string
+	 */
+	private static function trimmed( string $path ): string {
+		$trimmed = rtrim( $path, 'Windows' === PHP_OS_FAMILY ? '/\\' : '/' );
+		return '' === $trimmed ? substr( $path, 0, 1 ) : $trimmed;
+	}
+
+	/**
+	 * A path with "/" separators (converting "\\" on Windows only) and no trailing one.
 	 *
 	 * @param string $path Path.
 	 * @return string
 	 */
 	private static function slashed( string $path ): string {
-		$path = str_replace( '\\', '/', $path );
+		if ( 'Windows' === PHP_OS_FAMILY ) {
+			$path = str_replace( '\\', '/', $path );
+		}
 		return strlen( $path ) > 1 ? rtrim( $path, '/' ) : $path;
 	}
 

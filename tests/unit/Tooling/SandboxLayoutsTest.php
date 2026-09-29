@@ -2,6 +2,7 @@
 
 namespace WPCheckpoint\Tests\Unit\Tooling;
 
+use PHPUnit\Framework\SkippedTestError;
 use WPCheckpoint\Tests\Fixtures\Junction;
 use WPCheckpoint\Tests\Fixtures\Sandbox;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
@@ -15,8 +16,9 @@ use Yoast\PHPUnitPolyfills\TestCases\TestCase;
  * Invariants, for every spelling:
  * - I1 (safety): what is not refused is strictly inside the layout, not reached through a link out of it.
  * - I2 (safety): what is not refused is not the working directory, holds it not, and is not inside it.
- * - I3 (liveness): a path spelled as listed, inside the layout and away from the working directory, is not refused
- *   (a link included: the link is removed, not what it leads to).
+ * - I3 (liveness): a path inside the layout and away from the working directory is not refused, however it is
+ *   spelled, but for an 8.3 name of the entry itself (a link included: the link is removed, not what it leads to;
+ *   one that is not there only when it is away from the working directory without regard to case).
  *
  * Only refusal() is called: nothing here deletes but the layout itself, through Sandbox::remove() once the working
  * directory is back. Size: WPCHECKPOINT_SANDBOX_LAYOUTS layouts from seed WPCHECKPOINT_SANDBOX_LAYOUTS_SEED (default
@@ -24,8 +26,14 @@ use Yoast\PHPUnitPolyfills\TestCases\TestCase;
  */
 final class SandboxLayoutsTest extends TestCase {
 
-	/** Names: short ones, and long ones that have 8.3 short names on Windows. Distinct without regard to case. */
-	const NAMES = array( 'ab', 'Cd', 'ef', 'Gh', 'a-long-directory', 'Another-Long-One', 'third-long-name' );
+	/**
+	 * Names: short ones, long ones that have 8.3 short names on Windows, a non-ASCII one, and (not on Windows) a name
+	 * holding "\\" next to the name after it. Distinct without regard to case.
+	 */
+	const NAMES = array( 'ab', 'Cd', 'ef', 'Gh', 'a-long-directory', 'Another-Long-One', 'third-long-name', "caf\u{00E9}", 'x\\y', 'y' );
+
+	/** Where a link out of the layout leads: a small directory of the plugin, never removed (refusal() only). */
+	const OUT = 'tests/Fixtures/PHPStan';
 
 	/** @var string The working directory to go back to. */
 	private $cwd = '';
@@ -67,6 +75,9 @@ final class SandboxLayoutsTest extends TestCase {
 				continue;
 			}
 			$name = self::NAMES[ mt_rand( 0, count( self::NAMES ) - 1 ) ];
+			if ( 'Windows' === PHP_OS_FAMILY && false !== strpos( $name, '\\' ) ) {
+				continue; // A separator there.
+			}
 			$rel  = ltrim( $parent . '/' . $name, '/' );
 			if ( isset( $nodes[ $rel ] ) ) {
 				continue;
@@ -88,9 +99,13 @@ final class SandboxLayoutsTest extends TestCase {
 			if ( ! $out && ( '' === $target || 0 === strpos( $rel . '/', $target . '/' ) ) ) {
 				continue; // No link into itself.
 			}
-			$to = $out ? dirname( __DIR__, 3 ) : $root . '/' . $target;
+			$to = $out ? dirname( __DIR__, 3 ) . '/' . self::OUT : $root . '/' . $target;
 			if ( 'Windows' === PHP_OS_FAMILY ) {
-				Junction::make( $to, $root . '/' . $rel );
+				try {
+					Junction::make( $to, $root . '/' . $rel );
+				} catch ( SkippedTestError $e ) {
+					continue; // No junction on this host: the layout goes without it.
+				}
 			} elseif ( ! symlink( $to, $root . '/' . $rel ) ) {
 				continue;
 			}
@@ -133,7 +148,8 @@ final class SandboxLayoutsTest extends TestCase {
 	/**
 	 * Every spelling of every path of a layout, with what the model says it names: "at" (the relative location of
 	 * the entry named, its directory resolved and its own name as listed), "out" (reached through a link out of the
-	 * layout), "listed" (spelled as listed throughout, no link on the way) and "there".
+	 * layout), "listed" (spelled as listed throughout, no link on the way), "there" and "alias" (the entry itself
+	 * named by an 8.3 name).
 	 *
 	 * @param array $layout Layout.
 	 * @return array<int, array{path: string, at: string, out: bool, listed: bool, there: bool}>
@@ -166,7 +182,7 @@ final class SandboxLayoutsTest extends TestCase {
 			// Through a link: its target's entries by the link's name, and a name not there.
 			if ( 0 === strpos( $layout['nodes'][ $rel ], 'link:' ) ) {
 				$target = substr( $layout['nodes'][ $rel ], 5 );
-				$inner  = 'out' === $target ? array( 'tests', 'src' ) : array();
+				$inner  = 'out' === $target ? array_values( array_diff( (array) scandir( dirname( __DIR__, 3 ) . '/' . self::OUT ), array( '.', '..' ) ) ) : array();
 				foreach ( array_keys( $layout['nodes'] ) as $other ) {
 					if ( 'out' !== $target && '' !== $other && 0 === strpos( $other, $target . '/' ) ) {
 						$inner[] = substr( $other, strlen( $target ) + 1 );
@@ -196,6 +212,7 @@ final class SandboxLayoutsTest extends TestCase {
 		$at     = '';
 		$listed = true;
 		$there  = true;
+		$alias  = false; // The entry itself named by an 8.3 name.
 		foreach ( $names as $i => $name ) {
 			$last  = count( $names ) - 1 === $i;
 			$found = null;
@@ -207,6 +224,7 @@ final class SandboxLayoutsTest extends TestCase {
 				if ( $own === $name || ( $layout['fold'] && 0 === strcasecmp( $own, $name ) ) || ( $layout['short'][ $rel ] ?? '' ) === $name ) {
 					$found  = $rel;
 					$listed = $listed && $own === $name;
+					$alias  = $last && ( $layout['short'][ $rel ] ?? '' ) === $name && $own !== $name;
 					break;
 				}
 			}
@@ -220,14 +238,14 @@ final class SandboxLayoutsTest extends TestCase {
 			if ( ! $last && 0 === strpos( $kind, 'link:' ) ) {
 				$listed = false;
 				if ( 'link:out' === $kind ) {
-					return array( 'path' => $layout['root'] . '/' . $spelt . $end, 'at' => '', 'out' => true, 'listed' => false, 'there' => true );
+					return array( 'path' => $layout['root'] . '/' . $spelt . $end, 'at' => '', 'out' => true, 'listed' => false, 'there' => true, 'alias' => false );
 				}
 				$at = substr( $kind, 5 );
 				continue;
 			}
 			$at = $found;
 		}
-		return array( 'path' => $layout['root'] . '/' . $spelt . $end, 'at' => $at, 'out' => false, 'listed' => $listed, 'there' => $there );
+		return array( 'path' => $layout['root'] . '/' . $spelt . $end, 'at' => $at, 'out' => false, 'listed' => $listed, 'there' => $there, 'alias' => $alias );
 	}
 
 	/**
@@ -244,21 +262,30 @@ final class SandboxLayoutsTest extends TestCase {
 			foreach ( self::spellings( $layout ) as $one ) {
 				$why     = Sandbox::judged( $one['path'], $withdrawn );
 				$cwd     = $layout['cwd'];
-				$related = '' === $cwd || $one['at'] === $cwd || 0 === strpos( $cwd . '/', $one['at'] . '/' ) || 0 === strpos( $one['at'] . '/', $cwd . '/' );
+				$related = self::related( $one['at'], $cwd );
+				// Compared without regard to case, a path that is not there may be refused near the working directory.
+				$near = self::related( strtolower( $one['at'] ), strtolower( $cwd ) );
 				if ( '' === $why && $one['out'] ) {
 					$found[] = 'I1: through a link out of the layout, not refused: ' . $one['path'];
 				}
 				if ( '' === $why && ! $one['out'] && $one['there'] && $related ) {
 					$found[] = 'I2: the working directory (' . $cwd . '), holding it or inside it, not refused: ' . $one['path'];
 				}
-				if ( '' !== $why && ! $one['out'] && $one['listed'] && ! $related ) {
-					$found[] = 'I3: spelled as listed, away from the working directory, refused (' . $why . '): ' . $one['path'];
+				if ( '' !== $why && ! $one['out'] && ! $one['alias'] && ( $one['there'] ? ! $related : ! $near ) ) {
+					$found[] = 'I3: away from the working directory and not an 8.3 name for it, refused (' . $why . '): ' . $one['path'];
 				}
 			}
 		} finally {
 			chdir( $this->cwd );
 		}
 		return $found;
+	}
+
+	/**
+	 * Whether a location and the working directory (relative, '' the layout's root) are one, or one holds the other.
+	 */
+	private static function related( string $at, string $cwd ): bool {
+		return '' === $cwd || $at === $cwd || 0 === strpos( $cwd . '/', $at . '/' ) || 0 === strpos( $at . '/', $cwd . '/' );
 	}
 
 	public function test_generated_layouts_keep_the_invariants(): void {
@@ -287,6 +314,7 @@ final class SandboxLayoutsTest extends TestCase {
 			'nothing inside the working directory refused'                 => array( array( 'inside' ), 'I2:', false ),
 			'an entry judged by where it leads (a link to it refused)'     => array( array( 'resolve' ), 'I3:', false ),
 			'an entry judged by the name given (an 8.3 name of it let by)' => array( array( 'listed' ), 'I2:', true ),
+			'"\\" a separator everywhere (another entry judged)'             => array( array( 'backslash' ), 'I2:', false ),
 		);
 	}
 
@@ -301,8 +329,13 @@ final class SandboxLayoutsTest extends TestCase {
 		if ( $windows && 'Windows' !== PHP_OS_FAMILY ) {
 			$this->markTestSkipped( 'Windows only: 8.3 short names.' );
 		}
-		for ( $seed = 1; $seed <= 150; $seed++ ) {
+		if ( in_array( 'backslash', $rules, true ) && 'Windows' === PHP_OS_FAMILY ) {
+			$this->markTestSkipped( 'Not on Windows: "\\" is a separator there.' );
+		}
+		$short = false;
+		for ( $seed = 1; $seed <= 1000; $seed++ ) {
 			$layout = $this->build( $seed );
+			$short  = $short || array() !== $layout['short'];
 			$this->assertSame( array(), $this->violations( $layout ), 'the control: seed ' . $seed . ' is clean with every rule' );
 			$found = $this->violations( $layout, $rules );
 			chdir( $this->cwd );
@@ -314,6 +347,9 @@ final class SandboxLayoutsTest extends TestCase {
 					return;
 				}
 			}
+		}
+		if ( $windows && ! $short ) {
+			$this->markTestSkipped( 'This volume makes no 8.3 names.' );
 		}
 		$this->fail( 'No layout breaks ' . $breaks . ' with ' . implode( ', ', $rules ) . ' withdrawn' );
 	}
