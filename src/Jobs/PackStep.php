@@ -876,7 +876,7 @@ final class PackStep implements Step {
 	private static function judged( array $roots, $ids ): array {
 		foreach ( $roots as $i => $root ) {
 			$path                   = rtrim( (string) $root['path'], '/\\' );
-			$verdict                = Links::root_verdict( $path, defined( 'ABSPATH' ) ? (string) ABSPATH : '', isset( $root['skip'] ) ? (array) $root['skip'] : array(), null, isset( $root['hold'] ) ? (array) $root['hold'] : array() );
+			$verdict                = Links::root_verdict( $path, defined( 'ABSPATH' ) ? (string) ABSPATH : '', isset( $root['skip'] ) ? (array) $root['skip'] : array(), null, isset( $root['hold'] ) ? (array) $root['hold'] : array(), isset( $root['same'] ) ? (array) $root['same'] : array() );
 			$moved                  = null !== $ids && isset( $ids[ (string) $root['prefix'] ] ) && Links::fingerprint( $path ) !== (string) $ids[ (string) $root['prefix'] ];
 			$roots[ $i ]['refused'] = '' !== $verdict['refusal'] || $moved;
 		}

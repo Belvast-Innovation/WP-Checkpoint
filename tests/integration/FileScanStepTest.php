@@ -250,13 +250,14 @@ final class FileScanStepTest extends JobTestCase {
 		file_put_contents( $content . '/index.php', 'i' );
 		$all   = array( 'plugins', 'themes', 'uploads', 'other-content' );
 		$cases = array(
-			// Where uploads leads, which groups are chosen, why it is refused, and a file that must be backed up.
-			'the content directory' => array( $content, $all, 'it leads to another content group or the content directory', 'wp-content/plugins/p/p.php' ),
-			'the site'              => array( $this->site, $all, 'it leads to the WordPress directory', 'wp-content/themes/t/style.css' ),
-			'a group directory'     => array( $content . '/plugins', $all, 'it leads to another content group or the content directory', 'wp-content/plugins/p/p.php' ),
-			'the content directory, no other group chosen' => array( $content, array( 'uploads', 'other-content' ), 'it leads to another content group or the content directory', 'wp-content/index.php' ),
+			// Where uploads leads, which groups are chosen, why it is refused, a file that must be backed up, and the
+			// same file a second time through the link.
+			'the content directory' => array( $content, $all, 'or to the content directory or a directory that holds it', 'wp-content/plugins/p/p.php', 'wp-content/uploads/plugins/p/p.php' ),
+			'the site'              => array( $this->site, $all, 'it leads to the WordPress directory', 'wp-content/themes/t/style.css', 'wp-content/uploads/wp-content/themes/t/style.css' ),
+			'a group directory'     => array( $content . '/plugins', $all, 'it leads to the directory of another content group', 'wp-content/plugins/p/p.php', 'wp-content/uploads/p/p.php' ),
+			'the content directory, no other group chosen' => array( $content, array( 'uploads', 'other-content' ), 'or to the content directory or a directory that holds it', 'wp-content/index.php', 'wp-content/uploads/index.php' ),
 		);
-		foreach ( $cases as $case => list( $target, $groups, $reason, $kept ) ) {
+		foreach ( $cases as $case => list( $target, $groups, $reason, $kept, $twice ) ) {
 			@unlink( $this->root . '/uploads-link' );
 			$this->assertTrue( symlink( $target, $this->root . '/uploads-link' ) );
 			$overrides = array(
@@ -271,12 +272,58 @@ final class FileScanStepTest extends JobTestCase {
 			$this->assertSame( $groups, array_column( $resolved['roots'], 'group' ), $case . ': nothing is merged into the link' );
 			list( $lines, $state ) = $this->scan_roots( $resolved['roots'] );
 			$this->assertContains( $kept, $lines, $case . ': the control, the file is backed up under its own path' );
-			$this->assertSame( array(), array_values( array_filter( $lines, static function ( string $p ): bool {
-				return 0 === strpos( $p, 'wp-content/uploads/' );
-			} ) ), $case . ': nothing a second time under the link\'s path' );
+			$this->assertNotContains( $twice, $lines, $case . ': not a second time under the link\'s path' );
+			$this->assertSame( array_values( array_unique( $lines ) ), $lines, $case . ': no archive path twice' );
 			$this->assertSame( 1, $state['counts']['unreadable'], $case . ': the refused link is a finding the pre-flight asks about' );
 			$this->assertStringContainsString( $reason, implode( "\n", $state['warnings'] ), $case );
 		}
+	}
+
+	public function test_a_group_spelled_inside_a_group_that_is_a_link_is_backed_up_once_with_everything_else(): void {
+		// uploads is a link to network storage; mu-plugins is configured inside it (a plain directory there).
+		$content = $this->site . '/wp-content';
+		$nfs     = $this->root . '/nfs';
+		mkdir( $nfs . '/mu', 0755, true );
+		file_put_contents( $nfs . '/photo.jpg', 'p' );
+		file_put_contents( $nfs . '/mu/m.php', 'm' );
+		Deleter::empty_directory( $content . '/uploads' );
+		rmdir( $content . '/uploads' );
+		$this->assertTrue( symlink( $nfs, $content . '/uploads' ) );
+		$overrides = array(
+			'abspath'    => $this->site,
+			'content'    => $content,
+			'uploads'    => $content . '/uploads',
+			'mu-plugins' => $content . '/uploads/mu',
+		);
+		$resolved = ScanRoots::resolve( array( 'uploads', 'mu-plugins' ), '', $overrides );
+		$this->assertSame( array( 'wp-content/uploads', 'wp-content/uploads/mu' ), array_column( $resolved['roots'], 'prefix' ) );
+		list( $lines, $state ) = $this->scan_roots( $resolved['roots'] );
+		sort( $lines );
+		$this->assertSame( array( 'wp-content/uploads/mu/m.php', 'wp-content/uploads/photo.jpg' ), $lines, 'each file once, nothing refused' );
+		$this->assertSame( 0, $state['counts']['unreadable'] );
+	}
+
+	public function test_groups_in_one_directory_are_backed_up_once(): void {
+		// uploads is the content directory itself (upload_path set to it), and mu-plugins is the plugins directory.
+		$content = $this->site . '/wp-content';
+		mkdir( $content . '/plugins/p', 0755, true );
+		file_put_contents( $content . '/plugins/p/p.php', 'p' );
+		file_put_contents( $content . '/index.php', 'i' );
+		$overrides = array(
+			'abspath'       => $this->site,
+			'content'       => $content,
+			'plugins'       => $content . '/plugins',
+			'mu-plugins'    => $content . '/plugins',
+			'uploads'       => $content,
+			'other-content' => $content,
+		);
+		$resolved = ScanRoots::resolve( array( 'plugins', 'uploads', 'mu-plugins', 'other-content' ), '', $overrides );
+		$this->assertSame( array( 'other-content' ), array_column( $resolved['roots'], 'group' ), 'uploads is the content directory, the plugins lie inside it, mu-plugins is the plugins directory' );
+		list( $lines ) = $this->scan_roots( $resolved['roots'] );
+		$this->assertSame( array_values( array_unique( $lines ) ), $lines, 'no archive path twice' );
+		$this->assertContains( 'wp-content/plugins/p/p.php', $lines, 'the control: the plugins are backed up' );
+		$this->assertContains( 'wp-content/index.php', $lines );
+		$this->assertContains( 'wp-content/uploads/top.txt', $lines );
 	}
 
 	public function test_a_directory_at_the_archive_path_of_a_group_kept_elsewhere_is_left_out_with_a_warning(): void {
@@ -297,8 +344,9 @@ final class FileScanStepTest extends JobTestCase {
 		$resolved = ScanRoots::resolve( array( 'uploads', 'other-content' ), '', $overrides );
 		$this->assertSame( array( 'wp-content/uploads', 'wp-content' ), array_column( $resolved['roots'], 'prefix' ) );
 		$this->assertContains( 'The directory wp-content/uploads in the content directory was not backed up: the "uploads" group, backed up under that path, is in another place on this site.', $resolved['warnings'] );
-		list( $lines ) = $this->scan_roots( $resolved['roots'] );
+		list( $lines, $state ) = $this->scan_roots( $resolved['roots'] );
 		$this->assertSame( array( 'wp-content/uploads/2026/new.jpg', 'wp-content/index.php' ), $lines, 'each archive path once, from the directory the site uses' );
+		$this->assertSame( array( 'wp-content/uploads' ), $state['lists']['unreadable'], 'the old directory is a finding the pre-flight asks about' );
 
 		// The control: with uploads where WordPress keeps it by default, nothing is left out and nothing is said.
 		$plain = ScanRoots::resolve( array( 'uploads', 'other-content' ), '', array_merge( $overrides, array( 'uploads' => $content . '/uploads' ) ) );
