@@ -9,6 +9,7 @@ namespace WPCheckpoint\Restore;
 
 use WPCheckpoint\Jobs\TempTables;
 use WPCheckpoint\Support\Schema;
+use WPCheckpoint\Database\OwnTables;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -103,12 +104,13 @@ final class TablePlan {
 				$plan->skipped[ $name ] = 'excluded';
 				continue;
 			}
-			if ( $name === $jobs || ( $fold_case && strtolower( $name ) === strtolower( $jobs ) ) ) {
-				$plan->skipped[ $name ] = 'jobs';
-				continue;
-			}
-			if ( 1 === preg_match( '/\A(?:wcptmp|wcpold)/', $name ) ) {
-				$plan->skipped[ $name ] = 'temporary';
+			if ( OwnTables::is_own( $name, $backup_prefix, $fold_case ) ) {
+				// This plugin's own run tables (OwnTables; an older backup may hold them): never restored.
+				if ( OwnTables::generated( $name ) ) {
+					$plan->skipped[ $name ] = 'temporary';
+				} else {
+					$plan->skipped[ $name ] = $name === $jobs || ( $fold_case && strtolower( $name ) === strtolower( $jobs ) ) ? 'jobs' : 'own';
+				}
 				continue;
 			}
 			if ( ! self::has_prefix( $name, $backup_prefix ) ) {

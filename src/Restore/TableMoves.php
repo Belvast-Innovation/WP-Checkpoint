@@ -7,8 +7,7 @@
 
 namespace WPCheckpoint\Restore;
 
-use WPCheckpoint\Jobs\TempTables;
-use WPCheckpoint\Support\Schema;
+use WPCheckpoint\Database\OwnTables;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -69,6 +68,6 @@ final class TableMoves {
 	 * @return bool
 	 */
 	public static function never( string $name, string $base ): bool {
-		return $base . Schema::JOBS_TABLE === $name || $base . SwapPlan::TABLE === $name || 0 === strncmp( $name, TempTables::PREFIX, strlen( TempTables::PREFIX ) ) || 0 === strncmp( $name, TempTables::OLD_PREFIX, strlen( TempTables::OLD_PREFIX ) );
+		return OwnTables::is_own( $name, $base );
 	}
 }
