@@ -346,12 +346,12 @@ final class PreflightStep implements Step {
 	 */
 	public static function routine_notes( array $found ): array {
 		$notes = array();
-		$count = static function ( array $list ): string {
-			return count( $list ) >= WpdbConnection::ROUTINES_READ ? 'At least ' . count( $list ) : (string) count( $list );
+		$count = static function ( array $items ): string {
+			return count( $items ) >= WpdbConnection::ROUTINES_READ ? 'At least ' . count( $items ) : (string) count( $items );
 		};
-		$names = static function ( array $list ): string {
-			$shown = array_slice( $list, 0, self::MAX_ROUTINES_LISTED );
-			return implode( ', ', $shown ) . ( count( $list ) > count( $shown ) ? sprintf( ' and %d more', count( $list ) - count( $shown ) ) : '' );
+		$names = static function ( array $items ): string {
+			$shown = array_slice( $items, 0, self::MAX_ROUTINES_LISTED );
+			return implode( ', ', $shown ) . ( count( $items ) > count( $shown ) ? sprintf( ' and %d more', count( $items ) - count( $shown ) ) : '' );
 		};
 		if ( null === $found['triggers'] || null === $found['routines'] || null === $found['events'] ) {
 			$notes[] = 'Triggers, stored procedures and events could not be listed; any the site has are not part of the backup (they are not exported).';
