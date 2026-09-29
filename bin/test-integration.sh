@@ -8,8 +8,9 @@
 # The run gets a directory of its own, "{TMPDIR}/wpcheckpoint-it.XXXXXX": "cwd" is its working directory and "tmp"
 # its temporary directory (TMPDIR), so two runs in one container never see each other's temporary entries (the
 # leftover check, tests/Fixtures/Leftovers.php, looks at this one only). Arguments go to PHPUnit; the paths in them
-# (a test file or directory, and the values of --log-*, --testdox-*, --coverage-* and --cache-result-file) are taken
-# relative to the plugin's directory, as before. The configuration is phpunit.xml when there is one, else
+# (a test file or directory, and the values of the options that name a file or directory: --log-*, --testdox-html,
+# -text and -xml, --coverage-*, --cache-result-file, --bootstrap, --include-path, --list-tests-xml,
+# --dump-xdebug-filter, --whitelist) are taken relative to the plugin's directory, as before. The configuration is phpunit.xml when there is one, else
 # phpunit.xml.dist. Anything the suite leaves in its working directory is kept there and fails the run: a test wrote
 # to a relative path. Used by `composer test:integration`, npm run test:integration and CI.
 # (WPCHECKPOINT_TEST_PHPUNIT names another PHPUnit, for this script's own test.)
@@ -38,13 +39,13 @@ for arg in "$@"; do
 		NEXT=""
 	else
 		case "$arg" in
-			--log-*=* | --testdox-html=* | --testdox-text=* | --testdox-xml=* | --coverage-*=* | --cache-result-file=*)
+			--log-*=* | --testdox-html=* | --testdox-text=* | --testdox-xml=* | --coverage-*=* | --cache-result-file=* | --bootstrap=* | --include-path=* | --list-tests-xml=* | --dump-xdebug-filter=* | --whitelist=*)
 				arg="${arg%%=*}=$(absolute "${arg#*=}")"
 				;;
-			--log-* | --testdox-html | --testdox-text | --testdox-xml | --cache-result-file | --coverage-clover | --coverage-cobertura | --coverage-crap4j | --coverage-html | --coverage-php | --coverage-xml | --coverage-filter)
+			--log-* | --testdox-html | --testdox-text | --testdox-xml | --cache-result-file | --coverage-clover | --coverage-cobertura | --coverage-crap4j | --coverage-html | --coverage-php | --coverage-xml | --coverage-filter | --coverage-cache | --bootstrap | --include-path | --list-tests-xml | --dump-xdebug-filter | --whitelist)
 				NEXT=path
 				;;
-			--filter | --group | --exclude-group | --testsuite | --covers | --uses | --include-path | -d | --printer | --test-suffix | --order-by | --random-order-seed | --columns | --loader | --repeat | --extensions | --testdox-group | --testdox-exclude-group | --whitelist)
+			--filter | --group | --exclude-group | --testsuite | --covers | --uses | -d | --printer | --test-suffix | --order-by | --random-order-seed | --columns | --loader | --repeat | --extensions | --testdox-group | --testdox-exclude-group)
 				NEXT=value
 				;;
 			-*) ;;

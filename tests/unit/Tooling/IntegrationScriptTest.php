@@ -47,8 +47,10 @@ final class IntegrationScriptTest extends TestCase {
 	 * @param array<string,string> $extra Environment.
 	 * @return array{code: int, stderr: string, call: array<string, mixed>}
 	 */
-	private function run_script( array $args, array $extra = array(), bool $relative = false ): array {
-		$script = $relative ? 'bin/test-integration.sh' : dirname( __DIR__, 3 ) . '/bin/test-integration.sh';
+	private function run_script( array $args, array $extra = array(), bool $relative = false, string $script = '' ): array {
+		if ( '' === $script ) {
+			$script = $relative ? 'bin/test-integration.sh' : dirname( __DIR__, 3 ) . '/bin/test-integration.sh';
+		}
 		$env    = array_merge(
 			array(
 				'PATH'                      => (string) getenv( 'PATH' ),
@@ -89,7 +91,7 @@ final class IntegrationScriptTest extends TestCase {
 
 	public function test_the_suite_runs_from_a_directory_of_its_own_with_the_configuration_in_full(): void {
 		$plugin = (string) realpath( dirname( __DIR__, 3 ) );
-		$run    = $this->run_script( array( '--log-junit', 'build/junit-integration.xml', '--filter', "a b'c \"d\"", '--log-junit=build/second.xml', '--log-junit=/abs/third.xml', '--testdox-text=build/dox.txt', '--group', 'tests', 'tests/integration', 'no/such/path' ) );
+		$run    = $this->run_script( array( '--log-junit', 'build/junit-integration.xml', '--filter', "a b'c \"d\"", '--log-junit=build/second.xml', '--log-junit=/abs/third.xml', '--testdox-text=build/dox.txt', '--group', 'tests', 'tests/integration', 'no/such/path', '--bootstrap=tests/bootstrap.php', '--whitelist', 'build/not-there' ) );
 		$this->assertSame( 0, $run['code'], $run['stderr'] );
 		$cwd = (string) $run['call']['cwd']; // Gone by now: not resolved.
 		$this->assertSame( 'cwd', basename( $cwd ), 'a working directory made for the run' );
@@ -99,7 +101,7 @@ final class IntegrationScriptTest extends TestCase {
 		$this->assertSame( $run['call']['tmpdir'], $run['call']['run_tmp'], 'named for the leftover check' );
 		$this->assertSame( 'integration', $run['call']['suite'] );
 		$this->assertSame(
-			array( '-c', ExpectedPath::slashed( $plugin, 'phpunit.xml.dist' ), '--testsuite', 'integration', '--log-junit', ExpectedPath::slashed( $plugin, 'build/junit-integration.xml' ), '--filter', "a b'c \"d\"", '--log-junit=' . ExpectedPath::slashed( $plugin, 'build/second.xml' ), '--log-junit=/abs/third.xml', '--testdox-text=' . ExpectedPath::slashed( $plugin, 'build/dox.txt' ), '--group', 'tests', ExpectedPath::slashed( $plugin, 'tests/integration' ), 'no/such/path' ),
+			array( '-c', ExpectedPath::slashed( $plugin, 'phpunit.xml.dist' ), '--testsuite', 'integration', '--log-junit', ExpectedPath::slashed( $plugin, 'build/junit-integration.xml' ), '--filter', "a b'c \"d\"", '--log-junit=' . ExpectedPath::slashed( $plugin, 'build/second.xml' ), '--log-junit=/abs/third.xml', '--testdox-text=' . ExpectedPath::slashed( $plugin, 'build/dox.txt' ), '--group', 'tests', ExpectedPath::slashed( $plugin, 'tests/integration' ), 'no/such/path', '--bootstrap=' . ExpectedPath::slashed( $plugin, 'tests/bootstrap.php' ), '--whitelist', ExpectedPath::slashed( $plugin, 'build/not-there' ) ),
 			$run['call']['argv'],
 			'the configuration in full; output paths and an existing test path from the plugin\'s directory; option values (a group named like a directory) and the rest as given'
 		);
@@ -121,6 +123,17 @@ final class IntegrationScriptTest extends TestCase {
 		$this->assertSame( 0, $run['code'], $run['stderr'] );
 		$this->assertSame( ExpectedPath::slashed( (string) realpath( dirname( __DIR__, 3 ) ), 'phpunit.xml.dist' ), $run['call']['argv'][1] );
 		$this->assertSame( ExpectedPath::slashed( $this->sandbox, 'tmp' ), dirname( (string) $run['call']['cwd'], 2 ) );
+	}
+
+	public function test_a_local_phpunit_xml_is_the_configuration_when_there_is_one(): void {
+		// A copy of the script in a plugin directory of its own: nothing is written to the repository.
+		mkdir( $this->sandbox . '/plugin/bin', 0755, true );
+		copy( dirname( __DIR__, 3 ) . '/bin/test-integration.sh', $this->sandbox . '/plugin/bin/test-integration.sh' );
+		file_put_contents( $this->sandbox . '/plugin/phpunit.xml.dist', '<phpunit/>' );
+		$script = $this->sandbox . '/plugin/bin/test-integration.sh';
+		$this->assertSame( ExpectedPath::slashed( $this->sandbox, 'plugin/phpunit.xml.dist' ), $this->run_script( array(), array(), false, $script )['call']['argv'][1], 'the control: the distributed one' );
+		file_put_contents( $this->sandbox . '/plugin/phpunit.xml', '<phpunit/>' );
+		$this->assertSame( ExpectedPath::slashed( $this->sandbox, 'plugin/phpunit.xml' ), $this->run_script( array(), array(), false, $script )['call']['argv'][1] );
 	}
 
 	public function test_the_suites_status_is_the_scripts(): void {

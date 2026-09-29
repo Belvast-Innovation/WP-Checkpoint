@@ -14,8 +14,8 @@ use PHPUnit\Framework\TestSuite;
  * What the integration tests leave behind: the restore's tables ("wcptmp", "wcpold") in the database, and this
  * plugin's and its tests' entries in the run's own temporary directory. A test that leaves one fails, named, and what
  * it left is removed so the next test starts clean; a test class that leaves one in its class-level set-up fails as a
- * class; and the run fails when any is left at its end. What an earlier run left is reported when the run starts and
- * left alone: it is not this run's.
+ * class; and the run fails when any is left at its end. What an earlier run left is reported when the run starts; its
+ * tables are removed (the database is this run's alone), anything else is left alone.
  *
  * The temporary directory is looked at only when it is the run's own (bin/test-integration.sh gives each run one and
  * names it in WPCHECKPOINT_TEST_RUN_TMP): in a directory other runs share, their entries would be blamed on this
@@ -159,11 +159,25 @@ final class Leftovers implements TestListener {
 			return;
 		}
 		if ( array() === $this->suites && array() !== $now ) {
-			$text = "\nLeft by an earlier run (not removed; a failure only if this run leaves more):\n  " . implode( "\n  ", $now ) . "\n";
+			// The tables go: the core test library reinstalls this database for every run, so no other run is using
+			// them (a killed run's). Temporary entries stay: another run's directory is never this run's to empty.
+			$tables = array_values(
+				array_filter(
+					$now,
+					static function ( string $item ): bool {
+						return 0 === strpos( $item, 'table:' );
+					}
+				)
+			);
+			$text   = "\nLeft by an earlier run (tables removed, anything else left alone):\n  " . implode( "\n  ", $now ) . "\n";
 			if ( null !== $this->notice ) {
 				call_user_func( $this->notice, $text );
 			} else {
 				fwrite( STDERR, $text );
+			}
+			if ( array() !== $tables ) {
+				$this->remove( $tables );
+				$now = (array) $this->now();
 			}
 		}
 		$this->suites[] = $now;

@@ -6,6 +6,8 @@ use PHPUnit\Framework\TestResult;
 use PHPUnit\Framework\TestSuite;
 use WPCheckpoint\Tests\Fixtures\Leftovers;
 use WPCheckpoint\Tests\Fixtures\LeftoversStandIn;
+use WPCheckpoint\Tests\Fixtures\Sandbox;
+use PHPUnit\Util\Log\JUnit;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 /**
@@ -23,6 +25,16 @@ final class LeftoversTest extends TestCase {
 
 	/** @var string[] Its notices. */
 	private $notices = array();
+
+	/** @var string */
+	private $sandbox = '';
+
+	protected function tear_down(): void {
+		if ( '' !== $this->sandbox ) {
+			Sandbox::remove( $this->sandbox );
+		}
+		parent::tear_down();
+	}
 
 	private function listener(): Leftovers {
 		return new Leftovers(
@@ -56,7 +68,9 @@ final class LeftoversTest extends TestCase {
 		$listener->startTestSuite( $root );
 		$this->assertCount( 1, $this->notices );
 		$this->assertStringContainsString( 'wcptmpabcdef_3_beef_posts', $this->notices[0], 'an earlier run\'s leftovers are reported' );
-		$this->assertSame( $earlier, $this->there, 'and left alone: not this run\'s' );
+		$kept = array( 'temp:/tmp/wpc-plugin-00000000' );
+		$this->assertSame( $kept, $this->there, 'its tables removed (the database is this run\'s), anything else left alone' );
+		$this->assertSame( array( 'table:wcptmpabcdef_3_beef_posts' ), $this->removed );
 		$this->assertSame( 0, $result->failureCount(), 'they fail nothing' );
 		$listener->startTestSuite( $class );
 
@@ -75,8 +89,8 @@ final class LeftoversTest extends TestCase {
 		$this->assertSame( $leaky, $failure->failedTest() );
 		$this->assertStringContainsString( 'wcpoldabcdef_4_beef_options', $failure->exceptionMessage() );
 		$this->assertStringContainsString( 'wp-checkpoint-stage-x', $failure->exceptionMessage() );
-		$this->assertStringNotContainsString( 'wcptmpabcdef_3_beef_posts', $failure->exceptionMessage(), 'not what was there before' );
-		$this->assertSame( $earlier, $this->there, 'what it left is removed, so the next test starts clean; nothing else' );
+		$this->assertStringNotContainsString( 'wpc-plugin-00000000', $failure->exceptionMessage(), 'not what was there before' );
+		$this->assertSame( $kept, $this->there, 'what it left is removed, so the next test starts clean; nothing else' );
 
 		$next = self::probe( $result, 'test_next' );
 		$listener->startTest( $next );
@@ -117,6 +131,39 @@ final class LeftoversTest extends TestCase {
 		$this->assertSame( 'leftovers of root', $result->failures()[1]->failedTest()->getName() );
 		$this->assertSame( array(), $this->there );
 		$this->assertSame( 0.1, $result->time(), 'the stand-ins and failures add no time' );
+	}
+
+	public function test_a_class_and_the_run_are_recorded_in_the_junit_log(): void {
+		$this->sandbox = Sandbox::make( 'leftovers-junit' );
+		$file          = $this->sandbox . '/junit.xml';
+		$result        = new TestResult();
+		$junit         = new JUnit( $file );
+		// In the order PHPUnit's runner adds them: the configuration's listeners, then the loggers.
+		$result->addListener( $this->listener() );
+		$result->addListener( $junit );
+		$root  = new TestSuite( 'root' );
+		$class = new TestSuite( 'ClassLevelTest' );
+		$result->startTestSuite( $root );
+		$result->startTestSuite( $class );
+		$this->there[] = 'table:wcptmpabcdef_9_beef_made_before_class';
+		$test          = self::probe( $result, 'test_one' );
+		$result->startTest( $test );
+		$result->endTest( $test, 0.1 );
+		$result->endTestSuite( $class );
+		$this->there[] = 'temp:/tmp/wpcheckpoint-verify-00000000';
+		$result->endTestSuite( $root );
+		$junit->flush();
+
+		$xml   = new \SimpleXMLElement( (string) file_get_contents( $file ) );
+		$names = array();
+		foreach ( $xml->xpath( '//testcase' ) as $case ) {
+			$names[ (string) $case['name'] ] = isset( $case->failure ) ? (string) $case->failure : '';
+		}
+		$this->assertArrayHasKey( 'test_one', $names, 'the control: the log records the tests' );
+		$this->assertSame( '', $names['test_one'] );
+		$this->assertStringContainsString( 'made_before_class', $names['leftovers of ClassLevelTest'] ?? '', 'the class\'s leftovers' );
+		$this->assertStringContainsString( 'wpcheckpoint-verify-00000000', $names['leftovers of root'] ?? '', 'the run\'s' );
+		$this->assertSame( '2', (string) $xml->testsuite['failures'] );
 	}
 
 	public function test_the_temporary_directory_is_looked_at_only_when_it_is_the_runs_own(): void {

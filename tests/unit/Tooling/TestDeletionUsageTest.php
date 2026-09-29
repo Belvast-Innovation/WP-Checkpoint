@@ -157,14 +157,15 @@ final class TestDeletionUsageTest extends TestCase {
 				continue;
 			}
 			if ( in_array( $token[0], $names, true ) && in_array( strtolower( ltrim( $token[1], '\\' ) ), array( 'unlink', 'rmdir' ), true ) ) {
-				$before = $tokens[ $i - 1 ] ?? null;
+				$at     = $i - 1;
+				$before = $tokens[ $at ] ?? null;
 				if ( is_array( $before ) && T_NS_SEPARATOR === $before[0] ) {
-					$before = $tokens[ $i - 2 ] ?? null;
+					$before = $tokens[ --$at ] ?? null; // "\\unlink" before PHP 8.
 				}
 				$after  = $tokens[ $i + 1 ] ?? null;
 				$method = is_array( $before ) && in_array( $before[0], array( T_OBJECT_OPERATOR, T_DOUBLE_COLON, T_FUNCTION ), true );
 				// "use function unlink as remove;" imports it under another name: that counts.
-				$import = is_array( $before ) && T_FUNCTION === $before[0] && is_array( $tokens[ $i - 2 ] ?? null ) && T_USE === $tokens[ $i - 2 ][0];
+				$import = is_array( $before ) && T_FUNCTION === $before[0] && is_array( $tokens[ $at - 1 ] ?? null ) && T_USE === $tokens[ $at - 1 ][0];
 				if ( $import ) {
 					$found[] = 'use function ' . $token[1];
 					continue;
@@ -222,8 +223,9 @@ exec( 'rm -f x' );
 exec( 'rm --recursive ' . $dir );
 exec( "find {$dir} -type f -delete" );
 use function unlink as remove_file;
+use function \\rmdir as remove_dir;
 PHP;
-		$this->assertCount( 15, self::deletions( $code ), implode( ' | ', self::deletions( $code ) ) );
+		$this->assertCount( 16, self::deletions( $code ), implode( ' | ', self::deletions( $code ) ) );
 		$code = <<<'PHP'
 <?php
 // unlink( $a ) in a comment

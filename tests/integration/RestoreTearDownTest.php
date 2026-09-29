@@ -42,10 +42,12 @@ final class RestoreTearDownTest extends RestoreTestCase {
 	public function test_a_test_makes_tables_of_its_own(): void {
 		foreach ( self::OWN as $table ) {
 			self::query( "CREATE TABLE `{$table}` ( id int )" );
+		}
+		self::$made = true;
+		foreach ( self::OWN as $table ) {
 			$this->assertTrue( self::exists( $table ), 'the control: ' . $table . ' is there' );
 		}
 		$this->assertTrue( self::exists( self::NEIGHBOUR ) );
-		self::$made = true;
 	}
 
 	/**
@@ -53,10 +55,10 @@ final class RestoreTearDownTest extends RestoreTestCase {
 	 * too) must not skip the neighbour's assertion here.
 	 */
 	public function test_its_tear_down_dropped_them_and_left_the_one_that_was_there_before(): void {
-		$this->assertTrue( self::$made, 'the control: the tables were made (run the class whole, in declaration order)' );
 		foreach ( self::OWN as $table ) {
 			$this->assertFalse( self::exists( $table ), $table );
 		}
 		$this->assertTrue( self::exists( self::NEIGHBOUR ), 'another\'s table is left' );
+		$this->assertTrue( self::$made, 'the control: the tables were made (run the class whole, in declaration order)' );
 	}
 }

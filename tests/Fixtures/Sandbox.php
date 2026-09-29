@@ -3,6 +3,7 @@
 namespace WPCheckpoint\Tests\Fixtures;
 
 use WPCheckpoint\Files\Links;
+use WPCheckpoint\Support\Paths;
 
 /**
  * Deleting in tests, apart from the Deleter: only under the system's temporary directory, never following a link.
@@ -65,6 +66,7 @@ final class Sandbox {
 		}
 		$parent = realpath( dirname( $path ) );
 		if ( false === $parent ) {
+			// Defensive: no way to reach this on the platforms the tests run on is known (not tested).
 			if ( file_exists( $path ) || is_link( $path ) ) {
 				return 'its directory cannot be resolved';
 			}
@@ -75,8 +77,9 @@ final class Sandbox {
 				return 'outside the temporary directory, through a link';
 			}
 		}
-		// The entry itself as the file system names it (a short 8.3 name, another letter case), unless it is a link.
-		$resolved = is_link( $path ) ? false : realpath( $path );
+		// The entry itself as the file system names it (a short 8.3 name, another letter case), unless it is a link
+		// (a junction on Windows too, which is_link() does not report): a link is removed, not what it leads to.
+		$resolved = Links::LINK === Links::state( rtrim( $path, '/\\' ) ) ? false : Paths::real( $path );
 		$compared = array_unique( false === $resolved ? array( $target ) : array( $target, self::slashed( $resolved ) ) );
 		$protected = array( dirname( __DIR__, 2 ), (string) getcwd() );
 		if ( defined( 'ABSPATH' ) ) {

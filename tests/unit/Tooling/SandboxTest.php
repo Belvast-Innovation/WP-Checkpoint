@@ -85,6 +85,28 @@ final class SandboxTest extends TestCase {
 		$this->assertSame( '', Sandbox::refusal( $dir ), 'the control: once the working directory is elsewhere' );
 	}
 
+	public function test_a_short_name_is_compared_as_it_resolves(): void {
+		if ( 'Windows' !== PHP_OS_FAMILY ) {
+			$this->markTestSkipped( 'Windows only: 8.3 short names.' );
+		}
+		$dir = $this->sandbox();
+		mkdir( $dir . '/a-long-directory-name/in', 0755, true );
+		$out = array();
+		exec( 'cmd /c for %I in ("' . str_replace( '/', '\\', $dir . '/a-long-directory-name' ) . '") do @echo %~sI', $out );
+		$short = basename( str_replace( '\\', '/', trim( (string) end( $out ) ) ) );
+		if ( false === strpos( $short, '~' ) ) {
+			$this->markTestSkipped( 'This volume makes no 8.3 names (' . $short . ').' );
+		}
+		$cwd = (string) getcwd();
+		chdir( $dir . '/a-long-directory-name/in' );
+		try {
+			$this->assertSame( 'the plugin, the site or the working directory, or holding or inside one', Sandbox::refusal( $dir . '/' . $short ), $short . ' holds the working directory' );
+		} finally {
+			chdir( $cwd );
+		}
+		$this->assertSame( '', Sandbox::refusal( $dir . '/' . $short ), 'the control: once the working directory is elsewhere' );
+	}
+
 	public function test_a_refused_path_throws_and_nothing_is_touched(): void {
 		$dir = $this->sandbox();
 		file_put_contents( $dir . '/keep.txt', 'keep' );
