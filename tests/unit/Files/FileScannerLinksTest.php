@@ -71,6 +71,10 @@ final class FileScannerLinksTest extends TestCase {
 		$this->assertFalse( $without['readlink'], 'the switch took effect: readlink() is disabled in the second run' );
 		$this->assertSame( array( 'wp-content/uploads/photo.jpg' ), $without['lines'] );
 		$this->assertStringStartsWith( 'The "uploads" content directory is a link; the directory it leads to was backed up', $without['warnings'][0], 'a link with something in it is still recognised as one, and followed at the root' );
+		// Whether a link answer for the root could only have come from probing its entries (the correction of
+		// FileScanner): never for a symbolic link; for a junction only when readlink() does not answer.
+		$this->assertFalse( $with['probed'], 'readlink() answered, or a symbolic link' );
+		$this->assertSame( 'Windows' === PHP_OS_FAMILY, $without['probed'], 'without readlink(), a junction is told apart only by probing' );
 		if ( 'Windows' === PHP_OS_FAMILY ) {
 			// A junction is told apart through a child; an empty directory has none to probe through, and is checked
 			// by where it resolves instead: in place, so scanned, with nothing for the pre-flight to ask.
