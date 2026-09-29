@@ -29,8 +29,9 @@ defined( 'ABSPATH' ) || exit;
  * path is not found in the middle of a longer one (`/home/u/var/www/old`).
  * Known limit: a URL-encoded form written with mixed-case hexadecimal
  * (`%3A%2f`) is not found; encoders write one case throughout. Bare host
- * names (multisite `domain` columns) are not pairs of their own: the
- * restore updates those columns itself. Replacement
+ * names (multisite `domain` columns) are not pairs of their own; nothing
+ * updates those columns yet (the restore's address replacement, a later
+ * part of T042). Replacement
  * runs once, left to right, the longest needle first where several start at
  * the same byte; replaced text is never searched again.
  *
