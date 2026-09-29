@@ -8,6 +8,7 @@ use WPCheckpoint\Archive\Limits;
 use WPCheckpoint\Archive\Manifest;
 use WPCheckpoint\Archive\Packer;
 use WPCheckpoint\Archive\ZipReader;
+use WPCheckpoint\Files\Links;
 use WPCheckpoint\Jobs\ExportPlan;
 use WPCheckpoint\Jobs\DatabaseExportStep;
 use WPCheckpoint\Jobs\FileScanStep;
@@ -644,7 +645,7 @@ final class PackStepTest extends TestCase {
 			),
 			$summary['outside']
 		);
-		$this->assertContains( '2 files resolve outside their content directory (through a link) and are not in the backup: wp-content/uploads/media/a.txt, wp-content/uploads/media/b.txt', $summary['warnings'] );
+		$this->assertContains( '2 files resolve outside their content directory (through a link), or their content directory no longer leads where it did at the scan, and are not in the backup: wp-content/uploads/media/a.txt, wp-content/uploads/media/b.txt', $summary['warnings'] );
 		$this->assertStringContainsString( 'resolves outside its content directory', $this->ctx->log() );
 		$this->assertStringNotContainsString( 'secret', implode( '', array_map( 'file_get_contents', glob( $this->ctx->work() . '/volumes/*' ) ?: array() ) ) );
 	}
@@ -660,10 +661,43 @@ final class PackStepTest extends TestCase {
 		symlink( $shared, $this->site );
 		$photo = $this->file( '2026/photo.txt', 500, 21 );
 		$this->index( array( $photo ) );
+		$this->scanned_at( $this->site );
 		list( $result ) = $this->drive( $this->step() );
 		$this->assertSame( StepResult::DONE, $result->kind );
-		$this->assertSame( array( $photo ), array_column( $this->packed(), 'p' ), 'the control: a root that is a link is packed' );
+		$this->assertSame( array( $photo ), array_column( $this->packed(), 'p' ), 'the control: a root that is a link, still leading where the scan saw it, is packed' );
 		$this->assertSame( 0, $this->summary()['outside']['count'] );
+	}
+
+	/**
+	 * The scan summary's record of where the uploads root led.
+	 */
+	private function scanned_at( string $root ): void {
+		ExportPlan::write( $this->ctx->work(), FileScanStep::SUMMARY, array( 'root_ids' => array( 'wp-content/uploads' => Links::fingerprint( $root ) ) ) );
+	}
+
+	public function test_a_content_root_link_pointed_elsewhere_after_the_scan_is_left_out_even_where_the_rule_allows_it(): void {
+		if ( 'Windows' === PHP_OS_FAMILY ) {
+			$this->markTestSkipped( 'symlinks need privileges on Windows' );
+		}
+		// At the scan, uploads led to one shared directory; before packing it leads to another one that the rule for
+		// links allows as well (another account's uploads), holding a file of the same name.
+		$shared = $this->ctx->root . '/shared/uploads';
+		mkdir( dirname( $shared ), 0700 );
+		rename( $this->site, $shared );
+		symlink( $shared, $this->site );
+		$photo = $this->file( '2026/photo.txt', 500, 22 );
+		$this->index( array( $photo ) );
+		$this->scanned_at( $this->site );
+		$other = $this->ctx->root . '/other/uploads/2026';
+		mkdir( $other, 0700, true );
+		copy( $shared . '/2026/photo.txt', $other . '/photo.txt' );
+		unlink( $this->site );
+		symlink( dirname( $other ), $this->site );
+		$this->assertFileExists( $this->site . '/2026/photo.txt', 'the control: the listed path exists behind the new target' );
+		list( $result ) = $this->drive( $this->step() );
+		$this->assertSame( StepResult::DONE, $result->kind );
+		$this->assertSame( array(), $this->packed() );
+		$this->assertSame( array( 'count' => 1, 'listed' => array( $photo ) ), $this->summary()['outside'] );
 	}
 
 	public function test_a_content_root_link_pointed_at_the_root_of_the_file_system_after_the_scan_is_left_out(): void {

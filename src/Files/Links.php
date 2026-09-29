@@ -40,6 +40,8 @@ final class Links {
 	const FILESYSTEM_ROOT = 'filesystem_root';
 	const HOLDS_SITE      = 'holds_site';
 	const SITE_UNKNOWN    = 'site_unknown';
+	const INTO_SKIPPED    = 'into_skipped';
+	const UNDECIDED       = 'undecided';
 
 	/**
 	 * Whether a path is a link: LINK, PLAIN or UNKNOWN.
@@ -77,7 +79,8 @@ final class Links {
 			return self::NOT_A_DIRECTORY;
 		}
 		$trimmed = rtrim( $target, '/\\' );
-		if ( '' === $trimmed || dirname( $target ) === $target || 1 === preg_match( '/\A[A-Za-z]:\z/', $trimmed ) ) {
+		// "/", "C:\", and the root of a network share ("\\server\share").
+		if ( '' === $trimmed || dirname( $target ) === $target || 1 === preg_match( '#\A(?:[A-Za-z]:|[\\\\/]{2}[^\\\\/]+[\\\\/][^\\\\/]+)\z#', $trimmed ) ) {
 			return self::FILESYSTEM_ROOT;
 		}
 		// Unknown or unresolvable: nothing can say the link does not lead onto the site itself.
@@ -85,6 +88,73 @@ final class Links {
 			return self::SITE_UNKNOWN;
 		}
 		return Paths::is_same_or_inside( $target, $abspath ) ? self::HOLDS_SITE : '';
+	}
+
+	/**
+	 * The one judgement of a content root, for the scan and the pack step alike: whether it is a link, and why it
+	 * is not scanned ('' when it is). Beyond root_refusal(): a root that cannot be told apart from a link is not
+	 * scanned (UNDECIDED), and a link that leads into one of the directories the root skips (the plugin's storage
+	 * directory, the other content groups) is refused (INTO_SKIPPED), compared by real path.
+	 *
+	 * @param string        $path    The root.
+	 * @param string        $abspath The WordPress directory (ABSPATH); '' when unknown.
+	 * @param string[]      $skip    Directories the root skips.
+	 * @param callable|null $state   Link test (state()); tests inject.
+	 * @return array{link: bool, refusal: string}
+	 */
+	public static function root_verdict( string $path, string $abspath, array $skip = array(), $state = null ): array {
+		$link = (string) call_user_func( null === $state ? array( self::class, 'state' ) : $state, $path );
+		if ( self::UNKNOWN === $link ) {
+			return array(
+				'link'    => false,
+				'refusal' => self::UNDECIDED,
+			);
+		}
+		if ( self::LINK !== $link ) {
+			return array(
+				'link'    => false,
+				'refusal' => '',
+			);
+		}
+		$refusal = self::root_refusal( $path, $abspath );
+		if ( '' === $refusal ) {
+			$target = (string) realpath( $path );
+			foreach ( $skip as $dir ) {
+				if ( Paths::is_same_or_inside( (string) $dir, $target ) ) {
+					$refusal = self::INTO_SKIPPED;
+					break;
+				}
+			}
+		}
+		return array(
+			'link'    => true,
+			'refusal' => $refusal,
+		);
+	}
+
+	/**
+	 * A path as a comparison key: its real path when it resolves (as written otherwise), with "/" separators and
+	 * no trailing one, case-folded on Windows.
+	 *
+	 * @param string $path Path.
+	 * @param bool   $real Resolve it first.
+	 * @return string
+	 */
+	public static function key( string $path, bool $real = true ): string {
+		$resolved = $real ? realpath( $path ) : false;
+		$key      = rtrim( Paths::normalize( false === $resolved ? $path : $resolved ), '/' );
+		return Paths::is_windows() ? strtolower( $key ) : $key;
+	}
+
+	/**
+	 * Where a root leads, as a hash (never a path: it is kept in the cursor and the scan summary): the scan
+	 * records it and the pack step refuses a root that leads somewhere else by then. '' when it does not resolve.
+	 *
+	 * @param string $path The root.
+	 * @return string
+	 */
+	public static function fingerprint( string $path ): string {
+		return false === realpath( $path ) ? '' : hash( 'sha256', self::key( $path ) );
 	}
 
 	/**
@@ -101,6 +171,10 @@ final class Links {
 				return 'it leads to the root of the file system';
 			case self::HOLDS_SITE:
 				return 'it leads to the WordPress directory or a directory that holds it';
+			case self::INTO_SKIPPED:
+				return 'it leads into a directory that is not backed up as part of this group (the plugin\'s storage directory or another content group)';
+			case self::UNDECIDED:
+				return 'it could not be determined whether it is a link';
 			default:
 				return 'the WordPress directory could not be located to check where it leads';
 		}

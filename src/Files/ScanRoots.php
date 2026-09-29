@@ -49,10 +49,21 @@ final class ScanRoots {
 			}
 			$chosen[ $group ] = $path;
 		}
-		// A group inside another chosen group is covered by the outer one (with the outer prefix).
+		// A group inside another chosen group is covered by the outer one (with the outer prefix). Compared by real
+		// path: a group directory that is a link (followed by the scan) may lead into another group's directory,
+		// and two groups that lead to one directory are scanned once, under the first.
+		$real = array();
+		foreach ( $chosen as $group => $path ) {
+			$real[ $group ] = Links::key( $path );
+		}
+		$order = array_flip( array_keys( $chosen ) );
 		foreach ( $chosen as $group => $path ) {
 			foreach ( $chosen as $other => $other_path ) {
-				if ( $group !== $other && 'other-content' !== $other && Paths::is_inside( $other_path, $path ) ) {
+				if ( $group === $other || 'other-content' === $other ) {
+					continue;
+				}
+				$same = $real[ $group ] === $real[ $other ] && $order[ $other ] < $order[ $group ];
+				if ( $same || Paths::is_prefix( $real[ $other ], $real[ $group ], false ) ) {
 					$warnings[] = 'The "' . $group . '" directory lies inside the "' . $other . '" directory and is backed up as part of it.';
 					continue 2;
 				}

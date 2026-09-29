@@ -180,9 +180,35 @@ final class FileScanStepTest extends JobTestCase {
 		$this->assertStringContainsString( 'The "uploads" content directory is a link; the directory it leads to was backed up (wp-content/uploads -> {tmp}/', $warning, 'the report says so, with the target masked' );
 		$this->assertStringEndsWith( '/shared/uploads).', $warning );
 		$this->assertStringNotContainsString( $this->root, $warning );
+		$this->assertSame( array( 'wp-content/uploads' => \WPCheckpoint\Files\Links::fingerprint( $shared ) ), $summary['root_ids'], 'the summary tells the pack step where the root led' );
 		$log = (string) file_get_contents( $this->dirs->base() . '/' . $this->repo->find( $job->id )->log_path );
 		$this->assertStringContainsString( 'content directory is a link', $log, 'the control: the job log has the warning' );
 		$this->assertStringNotContainsString( $this->root, $log );
+	}
+
+	public function test_groups_that_lead_into_each_other_through_a_link_are_scanned_once(): void {
+		$content = $this->site . '/wp-content';
+		mkdir( $content . '/plugins/media', 0755, true );
+		mkdir( $content . '/themes', 0755 );
+		$this->assertTrue( symlink( $content . '/plugins/media', $this->root . '/uploads-link' ) );
+		$this->assertTrue( symlink( $content . '/themes', $this->root . '/themes-link' ) );
+		$overrides = array(
+			'abspath'    => $this->site,
+			'content'    => $content,
+			'plugins'    => $content . '/plugins',
+			'themes'     => $content . '/themes',
+			'uploads'    => $this->root . '/uploads-link',
+			'mu-plugins' => $this->root . '/themes-link',
+		);
+		$resolved = ScanRoots::resolve( array( 'plugins', 'themes', 'uploads', 'mu-plugins' ), '', $overrides );
+		$this->assertSame( array( 'plugins', 'themes' ), array_column( $resolved['roots'], 'group' ), 'uploads leads into plugins, mu-plugins to the themes directory itself' );
+		$this->assertContains( 'The "uploads" directory lies inside the "plugins" directory and is backed up as part of it.', $resolved['warnings'] );
+		$this->assertContains( 'The "mu-plugins" directory lies inside the "themes" directory and is backed up as part of it.', $resolved['warnings'] );
+
+		// The control: without the links, every group is its own root.
+		$plain = ScanRoots::resolve( array( 'plugins', 'themes', 'uploads' ), '', array_merge( $overrides, array( 'uploads' => $content . '/uploads' ) ) );
+		$this->assertSame( array( 'plugins', 'themes', 'uploads' ), array_column( $plain['roots'], 'group' ) );
+		$this->assertSame( array(), $plain['warnings'] );
 	}
 
 	public function test_a_cancelled_scan_leaves_no_work_directory(): void {

@@ -61,7 +61,7 @@ $out = array(
 	'links'      => $state['counts']['links'],
 	'undecided'  => $state['counts']['undecided'],
 	'unreadable' => $state['lists']['unreadable'],
-	'warnings'   => count( $state['warnings'] ),
+	'warnings'   => $state['warnings'],
 );
 
 // Taken apart by name: the link as a link, then what it led to.

@@ -249,6 +249,7 @@ final class FileScanStep implements Step {
 			'limits'                  => isset( $state['limits'] ) && is_array( $state['limits'] ) ? $state['limits'] : array(),
 			'warnings'                => array_merge( $this->root_warnings, $state['warnings'], PathKey::normalization_available() ? array() : array( self::normalization_warning() ) ),
 			'normalization_available' => PathKey::normalization_available(),
+			'root_ids'                => isset( $state['root_ids'] ) && is_array( $state['root_ids'] ) ? $state['root_ids'] : array(),
 			'exclusions'              => $this->exclusions->globs(),
 		);
 		$json    = wp_json_encode( $summary, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE );

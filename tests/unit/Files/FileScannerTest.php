@@ -191,7 +191,7 @@ final class FileScannerTest extends TestCase {
 			$this->assertSame( array( 'wp-content/uploads/photo.jpg' ), $this->paths( $lines ) );
 			$this->assertSame( 1, $state['counts']['links'], 'the junction inside the root is not entered' );
 			$this->assertSame( 0, $state['counts']['unreadable'] );
-			$this->assertSame( array( 'The "uploads" content directory is a link; the directory it leads to was backed up (wp-content/uploads -> {root}/elsewhere).' ), str_replace( '\\', '/', $state['warnings'] ) );
+			$this->assertSame( array( 'The "uploads" content directory is a link; the directory it leads to was backed up (wp-content/uploads -> {root}/elsewhere).' ), $state['warnings'] );
 		} finally {
 			Junction::remove( $this->root . '/elsewhere/inner' );
 			Junction::remove( $this->root . '/uploads' );
@@ -225,7 +225,11 @@ final class FileScannerTest extends TestCase {
 		$options = array(
 			'abspath' => $this->root . '/site',
 			'mask'    => static function ( string $target ) use ( $root ): string {
-				return str_replace( array( realpath( $root ), $root ), '{root}', $target );
+				// One separator throughout: on Windows the sandbox is spelled with both (sys_get_temp_dir() . '/...').
+				$slashed = static function ( string $path ): string {
+					return str_replace( '\\', '/', $path );
+				};
+				return str_replace( array( $slashed( (string) realpath( $root ) ), $slashed( $root ) ), '{root}', $slashed( $target ) );
 			},
 		);
 		if ( null !== $link_state ) {
@@ -258,6 +262,7 @@ final class FileScannerTest extends TestCase {
 		$this->assertSame( 1, $state['counts']['links'], 'the link inside the root is counted and not entered' );
 		$this->assertSame( 0, $state['counts']['unreadable'], 'a followed root is not a finding the pre-flight asks about' );
 		$this->assertSame( array( 'The "uploads" content directory is a link; the directory it leads to was backed up (wp-content/uploads -> {root}/shared/uploads).' ), $state['warnings'] );
+		$this->assertSame( array( 'wp-content/uploads' => Links::fingerprint( $this->root . '/shared/uploads' ) ), $state['root_ids'], 'where the root led, for the pack step' );
 
 		// Where it leads is shown only through the mask: without one it is not shown at all.
 		$plain                 = new FileScanner( array( array( 'group' => 'uploads', 'path' => $this->root . '/uploads', 'prefix' => 'wp-content/uploads' ) ), new Exclusions( array(), array() ), PHP_INT_SIZE, Manifest::DEFAULT_CHUNK, array( 'abspath' => $this->root . '/site' ) );
@@ -340,6 +345,93 @@ final class FileScannerTest extends TestCase {
 			'one warning for the directories however many, one for the root'
 		);
 		$this->assertSame( 0, $state['counts']['links'] );
+	}
+
+	public function test_a_content_directory_behind_a_link_skips_the_storage_and_the_other_groups_by_real_path(): void {
+		$this->require_symlinks();
+		// wp-content is a link to where the content really is; the plugins directory and the plugin's storage are
+		// configured with their real spelling. The other-content root lists its entries under the link's spelling.
+		mkdir( $this->root . '/site' );
+		$this->put( 'data/content/index.php' );
+		$this->put( 'data/content/plugins/p/a.php' );
+		$this->put( 'data/content/store/backups/old.zip' );
+		symlink( $this->root . '/data/content', $this->root . '/site/wp-content' );
+		$real  = $this->root . '/data/content';
+		$roots = array(
+			array( 'group' => 'plugins', 'path' => $real . '/plugins', 'prefix' => 'wp-content/plugins', 'skip' => array( $real . '/store' ) ),
+			array( 'group' => 'other-content', 'path' => $this->root . '/site/wp-content', 'prefix' => 'wp-content', 'skip' => array( $real . '/plugins', $real . '/store' ) ),
+		);
+		$scanner               = new FileScanner( $roots, new Exclusions( array(), array() ), PHP_INT_SIZE, Manifest::DEFAULT_CHUNK, array( 'abspath' => $this->root . '/site' ) );
+		list( $lines, $state ) = $this->run_all( $scanner );
+		$this->assertSame( array( 'wp-content/plugins/p/a.php', 'wp-content/index.php' ), $this->paths( $lines ), 'the plugins once, the storage never, the rest of the content through the link' );
+		$this->assertSame( 2, $state['counts']['excluded'], 'plugins and storage skipped under the other-content root' );
+
+		// The other spelling the same way: the skipped directories written through the link, the root resolved.
+		$roots = array(
+			array( 'group' => 'other-content', 'path' => $real, 'prefix' => 'wp-content', 'skip' => array( $this->root . '/site/wp-content/plugins', $this->root . '/site/wp-content/store' ) ),
+		);
+		list( $lines ) = $this->run_all( new FileScanner( $roots, new Exclusions( array(), array() ), PHP_INT_SIZE, Manifest::DEFAULT_CHUNK, array( 'abspath' => $this->root . '/site' ) ) );
+		$this->assertSame( array( 'wp-content/index.php' ), $this->paths( $lines ) );
+	}
+
+	public function test_a_content_root_link_into_a_directory_it_skips_is_refused(): void {
+		$this->require_symlinks();
+		mkdir( $this->root . '/site' );
+		$this->put( 'store/backups/old.zip' );
+		symlink( $this->root . '/store/backups', $this->root . '/uploads' );
+		$scanner               = new FileScanner(
+			array( array( 'group' => 'uploads', 'path' => $this->root . '/uploads', 'prefix' => 'wp-content/uploads', 'skip' => array( $this->root . '/store' ) ) ),
+			new Exclusions( array(), array() ),
+			PHP_INT_SIZE,
+			Manifest::DEFAULT_CHUNK,
+			array( 'abspath' => $this->root . '/site' )
+		);
+		list( $lines, $state ) = $this->run_all( $scanner );
+		$this->assertSame( array(), $lines );
+		$this->assertSame( array( 'The "uploads" content directory is a link and was not scanned: it leads into a directory that is not backed up as part of this group (the plugin\'s storage directory or another content group) (wp-content/uploads).' ), $state['warnings'] );
+	}
+
+	public function test_what_happened_to_a_root_is_reported_however_many_warnings_came_before(): void {
+		$this->require_symlinks();
+		mkdir( $this->root . '/site' );
+		for ( $i = 0; $i < FileScanner::MAX_LISTED + 5; $i++ ) {
+			$this->put( sprintf( "themes/bad\x01%02d.txt", $i ) );
+		}
+		$this->put( 'shared/photo.jpg' );
+		symlink( $this->root . '/shared', $this->root . '/uploads' );
+		$scanner               = $this->link_scanner( $this->root . '/themes', null, array( array( 'group' => 'plugins', 'path' => $this->root . '/uploads', 'prefix' => 'wp-content/plugins' ), array( 'group' => 'mu-plugins', 'path' => $this->root . '/missing', 'prefix' => 'wp-content/mu-plugins' ) ) );
+		list( $lines, $state ) = $this->run_all( $scanner );
+		$this->assertSame( FileScanner::MAX_LISTED + 5, $state['counts']['bad_names'], 'the control: more per-entry warnings than the list keeps' );
+		$this->assertCount( FileScanner::MAX_LISTED + 2, $state['warnings'] );
+		$this->assertStringContainsString( 'The "plugins" content directory is a link; the directory it leads to was backed up', $state['warnings'][ FileScanner::MAX_LISTED ] );
+		$this->assertSame( 'A content directory is missing and was not scanned: wp-content/mu-plugins', $state['warnings'][ FileScanner::MAX_LISTED + 1 ] );
+	}
+
+	public function test_the_verdict_on_a_root_is_one_for_the_scan_and_the_pack_step(): void {
+		$this->require_symlinks();
+		$site = $this->root . '/site';
+		mkdir( $site );
+		$this->put( 'shared/a.txt' );
+		$this->put( 'store/b.txt' );
+		symlink( $this->root . '/shared', $this->root . '/uploads' );
+		symlink( $this->root . '/store', $this->root . '/into-store' );
+		$unknown = static function (): string {
+			return Links::UNKNOWN;
+		};
+		$this->assertSame( array( 'link' => false, 'refusal' => Links::UNDECIDED ), Links::root_verdict( $this->root . '/shared', $site, array(), $unknown ) );
+		$this->assertSame( array( 'link' => false, 'refusal' => '' ), Links::root_verdict( $this->root . '/shared', $site ), 'the control: a plain directory' );
+		$this->assertSame( array( 'link' => true, 'refusal' => '' ), Links::root_verdict( $this->root . '/uploads', $site, array( $this->root . '/store' ) ) );
+		$this->assertSame( array( 'link' => true, 'refusal' => Links::INTO_SKIPPED ), Links::root_verdict( $this->root . '/into-store', $site, array( $this->root . '/store' ) ) );
+		$this->assertSame( array( 'link' => true, 'refusal' => Links::HOLDS_SITE ), Links::root_verdict( $this->root . '/uploads', $this->root . '/shared' ), 'the refusals of root_refusal() carry through' );
+
+		// Where a root leads, as a hash: the same through either spelling, different once the link is re-pointed.
+		$before = Links::fingerprint( $this->root . '/uploads' );
+		$this->assertSame( $before, Links::fingerprint( $this->root . '/shared' ) );
+		$this->assertStringNotContainsString( $this->root, $before );
+		unlink( $this->root . '/uploads' );
+		symlink( $this->root . '/store', $this->root . '/uploads' );
+		$this->assertNotSame( $before, Links::fingerprint( $this->root . '/uploads' ) );
+		$this->assertSame( '', Links::fingerprint( $this->root . '/missing' ) );
 	}
 
 	public function test_a_link_to_the_root_of_the_file_system_or_to_nothing_is_never_followed(): void {

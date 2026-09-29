@@ -201,7 +201,11 @@ final class PackStep implements Step {
 		$packer = Packer::open( $volumes, $base, $cursor['packer'], $this->packer_options_with( $context ) );
 		self::cut( $work . DIRECTORY_SEPARATOR . self::PACKED_INDEX, $cursor['packed_bytes'] );
 		self::cut( $work . DIRECTORY_SEPARATOR . self::CHUNKS, $cursor['chunks_bytes'] );
-		$roots      = self::judged( null === $this->roots ? ScanRoots::resolve( $active['groups'], $context->storage_path() )['roots'] : $this->roots );
+		$scanned    = ExportPlan::exists( $work, FileScanStep::SUMMARY ) ? ExportPlan::read( $work, FileScanStep::SUMMARY ) : array();
+		$roots      = self::judged(
+			null === $this->roots ? ScanRoots::resolve( $active['groups'], $context->storage_path() )['roots'] : $this->roots,
+			isset( $scanned['root_ids'] ) && is_array( $scanned['root_ids'] ) ? $scanned['root_ids'] : null
+		);
 		$exclusions = new Exclusions( $active['exclusions'], array() );
 		$since      = 0;
 		$last       = 0.0;
@@ -385,8 +389,8 @@ final class PackStep implements Step {
 		}
 		if ( ! empty( $root['refused'] ) || ! Paths::is_inside( (string) $root['path'], $source ) ) {
 			// The scan saw a directory; a link put in its place since would take the backup outside the
-			// content directory (another site's files on a shared host). Resolved paths only. A root that is a
-			// link is judged again here by the scan's rule (it may have been pointed elsewhere since).
+			// content directory (another site's files on a shared host). Resolved paths only. The root itself is
+			// judged again (judged()): by the scan's rule, and by whether it still leads where it led then.
 			$context->logger()->warning( 'File left out: it resolves outside its content directory', array( 'p' => $p ) );
 			self::note( $cursor, 'outside', $p );
 			$cursor['offset']  = $line['next'];
@@ -850,17 +854,21 @@ final class PackStep implements Step {
 	}
 
 	/**
-	 * The roots, each marked 'refused' when the scan's rule for a root that is a link (Files\Links) does not let
-	 * it be followed now: judged once per tick, where the scan judged once per root.
+	 * The roots, each marked 'refused' when the scan's judgement of a root (Files\Links::root_verdict()) no longer
+	 * lets it be scanned, or when it no longer leads where it led at the scan (a link pointed elsewhere since, or
+	 * a directory replaced by a link): judged once per tick, where the scan judged once per root.
 	 *
 	 * @param array<int, array<string, mixed>> $roots Roots.
+	 * @param array<string, string>|null       $ids   Prefix => Links::fingerprint() at the scan; null when the scan
+	 *                                                summary predates them (no comparison then).
 	 * @return array<int, array<string, mixed>>
 	 */
-	private static function judged( array $roots ): array {
+	private static function judged( array $roots, $ids ): array {
 		foreach ( $roots as $i => $root ) {
 			$path                   = rtrim( (string) $root['path'], '/\\' );
-			$state                  = Links::state( $path );
-			$roots[ $i ]['refused'] = Links::UNKNOWN === $state || ( Links::LINK === $state && '' !== Links::root_refusal( $path, defined( 'ABSPATH' ) ? (string) ABSPATH : '' ) );
+			$verdict                = Links::root_verdict( $path, defined( 'ABSPATH' ) ? (string) ABSPATH : '', isset( $root['skip'] ) ? (array) $root['skip'] : array() );
+			$moved                  = null !== $ids && isset( $ids[ (string) $root['prefix'] ] ) && Links::fingerprint( $path ) !== (string) $ids[ (string) $root['prefix'] ];
+			$roots[ $i ]['refused'] = '' !== $verdict['refusal'] || $moved;
 		}
 		return $roots;
 	}
@@ -934,7 +942,7 @@ final class PackStep implements Step {
 			'skipped'  => '%d files listed by the scan were missing or unreadable when they were packed and are not in the backup: %s',
 			'unstable' => '%d files changed repeatedly while they were being packed and are not in the backup: %s',
 			'changed'  => '%d files were modified while they were being packed; their content in the backup may be inconsistent: %s',
-			'outside'  => '%d files resolve outside their content directory (through a link) and are not in the backup: %s',
+			'outside'  => '%d files resolve outside their content directory (through a link), or their content directory no longer leads where it did at the scan, and are not in the backup: %s',
 		);
 		$out   = array();
 		foreach ( $texts as $kind => $text ) {

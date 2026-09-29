@@ -63,12 +63,14 @@ final class FileScannerLinksTest extends TestCase {
 		$with = $this->scan( '' );
 		$this->assertTrue( $with['readlink'], 'the control: readlink() is there in the first run' );
 		$this->assertSame( array( 'wp-content/uploads/photo.jpg' ), $with['lines'], 'the root that is a link is followed' );
+		$this->assertStringStartsWith( 'The "uploads" content directory is a link; the directory it leads to was backed up', $with['warnings'][0], 'as a link, not as a plain directory' );
 		$this->assertSame( 0, $with['undecided'], 'with readlink() every directory is decided' );
 		$this->assertSame( array(), $with['unreadable'] );
 
 		$without = $this->scan( 'readlink' );
 		$this->assertFalse( $without['readlink'], 'the switch took effect: readlink() is disabled in the second run' );
-		$this->assertSame( array( 'wp-content/uploads/photo.jpg' ), $without['lines'], 'a link with something in it is still recognised, and followed at the root' );
+		$this->assertSame( array( 'wp-content/uploads/photo.jpg' ), $without['lines'] );
+		$this->assertStringStartsWith( 'The "uploads" content directory is a link; the directory it leads to was backed up', $without['warnings'][0], 'a link with something in it is still recognised as one, and followed at the root' );
 		if ( 'Windows' === PHP_OS_FAMILY ) {
 			// A junction is told apart through a child; an empty directory has none to probe through.
 			$this->assertSame( 1, $without['undecided'] );

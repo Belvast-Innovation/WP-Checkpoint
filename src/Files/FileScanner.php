@@ -101,6 +101,20 @@ final class FileScanner {
 	private $link_state;
 
 	/**
+	 * Per root: the skipped directories as comparison keys (Links::key()), as written and as real paths.
+	 *
+	 * @var array<int, array<string, bool>>
+	 */
+	private $skip_keys = array();
+
+	/**
+	 * Per root, once known this request: its real path as a comparison key ('' when it does not resolve).
+	 *
+	 * @var array<int, string>
+	 */
+	private $real_roots = array();
+
+	/**
 	 * Constructor.
 	 *
 	 * @param array<int, array{group: string, path: string, prefix: string, skip?: string[]}> $roots      Roots in scan order.
@@ -125,6 +139,15 @@ final class FileScanner {
 					isset( $root['skip'] ) ? (array) $root['skip'] : array()
 				),
 			);
+		}
+		foreach ( $this->roots as $i => $root ) {
+			// Both spellings of each: a root reached through a link lists its entries under the link's spelling,
+			// and the skipped directories may be configured through a link or resolved (compare real paths).
+			$this->skip_keys[ $i ] = array();
+			foreach ( $root['skip'] as $dir ) {
+				$this->skip_keys[ $i ][ Links::key( $dir, false ) ] = true;
+				$this->skip_keys[ $i ][ Links::key( $dir ) ]        = true;
+			}
 		}
 		$this->exclusions = $exclusions;
 		$this->max_file   = Packer::max_file_bytes( $chunk_bytes, $int_size );
@@ -267,26 +290,51 @@ final class FileScanner {
 	 * @return bool
 	 */
 	private function root_usable( array &$state, array $root ): bool {
-		$link = (string) call_user_func( $this->link_state, $root['path'] );
-		if ( Links::UNKNOWN === $link ) {
-			$this->warn( $state, 'unreadable', sprintf( 'The "%1$s" content directory was not scanned: it could not be determined whether it is a link (%2$s).', $root['group'], $root['prefix'] ) );
+		$verdict = Links::root_verdict( $root['path'], $this->abspath, $root['skip'], $this->link_state );
+		if ( Links::UNDECIDED === $verdict['refusal'] ) {
+			$this->warn( $state, 'unreadable', sprintf( 'The "%1$s" content directory was not scanned: it could not be determined whether it is a link (%2$s).', $root['group'], $root['prefix'] ), true );
 			return false;
 		}
-		if ( Links::LINK === $link ) {
-			$refusal = Links::root_refusal( $root['path'], $this->abspath );
-			if ( '' !== $refusal ) {
-				$this->warn( $state, 'unreadable', sprintf( 'The "%1$s" content directory is a link and was not scanned: %2$s (%3$s).', $root['group'], Links::refusal_text( $refusal ), $root['prefix'] ) );
-				return false;
-			}
+		if ( '' !== $verdict['refusal'] ) {
+			$this->warn( $state, 'unreadable', sprintf( 'The "%1$s" content directory is a link and was not scanned: %2$s (%3$s).', $root['group'], Links::refusal_text( $verdict['refusal'] ), $root['prefix'] ), true );
+			return false;
+		}
+		if ( ! $verdict['link'] && ! is_dir( $root['path'] ) ) {
+			$this->warn( $state, 'unreadable', 'A content directory is missing and was not scanned: ' . $root['prefix'], true );
+			return false;
+		}
+		if ( $verdict['link'] ) {
 			$target = realpath( $root['path'] );
-			$this->warn( $state, 'links', sprintf( 'The "%1$s" content directory is a link; the directory it leads to was backed up (%2$s -> %3$s).', $root['group'], $root['prefix'], (string) call_user_func( $this->mask, false === $target ? '' : $target ) ) );
+			$this->warn( $state, 'links', sprintf( 'The "%1$s" content directory is a link; the directory it leads to was backed up (%2$s -> %3$s).', $root['group'], $root['prefix'], (string) call_user_func( $this->mask, false === $target ? '' : $target ) ), true );
+		}
+		// Where the root leads, for the pack step to see whether it still leads there (a hash, not a path).
+		$state['root_ids'][ $root['prefix'] ] = Links::fingerprint( $root['path'] );
+		return true;
+	}
+
+	/**
+	 * Whether an entry is one of the directories its root skips, by spelling or by real path. Links below a root
+	 * are never followed, so the root's real path and the entry's relative path are the entry's real path.
+	 *
+	 * @param array<string, mixed>                                               $state State.
+	 * @param array{group: string, path: string, prefix: string, skip: string[]} $root  Root.
+	 * @param string                                                             $rel   Path relative to the root.
+	 * @param string                                                             $abs   Absolute path as listed.
+	 * @return bool
+	 */
+	private function skipped( array $state, array $root, string $rel, string $abs ): bool {
+		$index = (int) $state['root'];
+		$keys  = isset( $this->skip_keys[ $index ] ) ? $this->skip_keys[ $index ] : array();
+		if ( array() === $keys ) {
+			return false;
+		}
+		if ( isset( $keys[ Links::key( $abs, false ) ] ) ) {
 			return true;
 		}
-		if ( ! is_dir( $root['path'] ) ) {
-			$this->warn( $state, 'unreadable', 'A content directory is missing and was not scanned: ' . $root['prefix'] );
-			return false;
+		if ( ! isset( $this->real_roots[ $index ] ) ) {
+			$this->real_roots[ $index ] = false === realpath( $root['path'] ) ? '' : Links::key( $root['path'] );
 		}
-		return true;
+		return '' !== $this->real_roots[ $index ] && isset( $keys[ Links::key( $this->real_roots[ $index ] . '/' . $rel, false ) ] );
 	}
 
 	/**
@@ -327,7 +375,7 @@ final class FileScanner {
 			}
 			return null;
 		}
-		if ( in_array( $abs, $root['skip'], true ) || $this->exclusions->excludes( $p ) ) {
+		if ( $this->skipped( $state, $root, $rel, $abs ) || $this->exclusions->excludes( $p ) ) {
 			++$state['counts']['excluded'];
 			return null;
 		}
@@ -454,18 +502,20 @@ final class FileScanner {
 	}
 
 	/**
-	 * Count a warning and keep the first MAX_LISTED texts.
+	 * Count a warning and keep the first MAX_LISTED texts (a root's always).
 	 *
 	 * @param array<string, mixed> $state   State (updated).
 	 * @param string               $counter Counter to increment (already incremented by some callers: see collisions).
-	 * @param string               $text    Warning text (relative paths only).
+	 * @param string               $text    Warning text (relative paths only; a followed root's target through the mask).
+	 * @param bool                 $always  Keep it past MAX_LISTED (what happened to a whole root).
 	 * @return void
 	 */
-	private function warn( array &$state, string $counter, string $text ): void {
+	private function warn( array &$state, string $counter, string $text, bool $always = false ): void {
 		if ( 'invalid_patterns' === $counter || 'unreadable' === $counter ) {
 			++$state['counts'][ $counter ];
 		}
-		if ( count( $state['warnings'] ) < self::MAX_LISTED ) {
+		// What happened to a whole root (at most one text per root) is never crowded out by per-entry warnings.
+		if ( $always || count( $state['warnings'] ) < self::MAX_LISTED ) {
 			$state['warnings'][] = $text;
 		}
 	}
