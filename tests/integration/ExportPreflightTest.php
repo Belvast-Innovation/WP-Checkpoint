@@ -508,7 +508,8 @@ final class ExportPreflightTest extends JobTestCase {
 		foreach ( array( 'wcp_', 'w', 'wc' ) as $prefix ) {
 			// The site's own tables, some of them spelled much like the plugin's names but not in their form.
 			$site = array( $prefix . 'options', $prefix . 'posts', $prefix . 'wc_orders', $prefix . 'cptmp_notes', $prefix . 'ptmpabcdef12_notes' );
-			$mine = OwnTables::names( $prefix );
+			// The plugin's run tables, and a neighbour's under a longer prefix (its recovery record).
+			$mine = array_merge( OwnTables::names( $prefix ), array( $prefix . 'old_wpcheckpoint_swap_plan' ) );
 			foreach ( array_merge( $site, $mine, $generated ) as $table ) {
 				$this->tables[] = $table;
 				$wpdb->query( "DROP TABLE IF EXISTS `{$table}`" );
@@ -526,9 +527,7 @@ final class ExportPreflightTest extends JobTestCase {
 								$this->env( $connection ),
 								array(
 									'prefix' => $prefix,
-									'own'    => static function ( string $table ) use ( $prefix ): bool {
-										return OwnTables::is_own( $table, $prefix );
-									},
+									'own'    => array( OwnTables::class, 'is_own' ),
 								)
 							),
 							self::CHUNK

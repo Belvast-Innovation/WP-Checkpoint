@@ -24,14 +24,14 @@ final class OwnTablesTest extends TestCase {
 		);
 		foreach ( $names as $name ) {
 			$this->assertTrue( OwnTables::generated( $name ), $name );
-			$this->assertTrue( OwnTables::is_own( $name, 'wp_' ), $name );
+			$this->assertTrue( OwnTables::is_own( $name ), $name );
 		}
 	}
 
 	public function test_a_site_whose_prefix_looks_like_them_keeps_its_tables(): void {
 		foreach ( array( 'wcp_', 'w', 'wc', 'wcp', 'wcptmp', 'wcpold_' ) as $prefix ) {
 			foreach ( array( 'posts', 'options', 'wc_orders', 'cptmp_notes', 'ptmpabcdef12_notes' ) as $table ) {
-				$this->assertFalse( OwnTables::is_own( $prefix . $table, 'wp_' ), $prefix . $table );
+				$this->assertFalse( OwnTables::is_own( $prefix . $table ), $prefix . $table );
 			}
 		}
 		// Near misses of the grammar: no job id, job id 0, upper-case hex, short token, no run, another word.
@@ -40,13 +40,14 @@ final class OwnTablesTest extends TestCase {
 		}
 	}
 
-	public function test_the_tables_kept_by_name_are_the_base_prefixs_and_letter_case_counts_only_when_asked(): void {
+	public function test_the_run_tables_are_any_installations_by_name_in_any_letter_case(): void {
 		$this->assertSame( array( 'wp_wpcheckpoint_jobs', 'wp_wpcheckpoint_swap_plan' ), OwnTables::names( 'wp_' ) );
-		$this->assertTrue( OwnTables::is_own( 'wp_wpcheckpoint_swap_plan', 'wp_' ) );
-		$this->assertFalse( OwnTables::is_own( 'wp_wpcheckpoint_swap_plan', 'wp2_' ), 'another installation\'s is its own business' );
-		$this->assertFalse( OwnTables::is_own( 'WP_WPCHECKPOINT_JOBS', 'wp_' ) );
-		$this->assertTrue( OwnTables::is_own( 'WP_WPCHECKPOINT_JOBS', 'wp_', true ) );
-		$this->assertFalse( OwnTables::is_own( 'wp_wpcheckpoint_jobs_old', 'wp_' ), 'only the names themselves' );
+		foreach ( array( 'wp_wpcheckpoint_jobs', 'wp_wpcheckpoint_swap_plan', 'wp_old_wpcheckpoint_swap_plan', 'wp2_wpcheckpoint_jobs', 'wpcheckpoint_jobs', 'WP_WPCHECKPOINT_JOBS', 'Wp_Old_WpCheckpoint_Swap_Plan' ) as $name ) {
+			$this->assertTrue( OwnTables::is_own( $name ), $name . ': this installation\'s, or a neighbour\'s in the same database (its recovery record)' );
+		}
+		foreach ( array( 'wp_wpcheckpoint_jobs_old', 'wp_wpcheckpoint_swap_plans', 'wp_wpcheckpoint-jobs', 'wp_posts' ) as $name ) {
+			$this->assertFalse( OwnTables::is_own( $name ), $name . ': only the names themselves' );
+		}
 	}
 
 	/**
@@ -59,10 +60,12 @@ final class OwnTablesTest extends TestCase {
 		$found = array();
 		foreach ( token_get_all( $code ) as $token ) {
 			if ( is_array( $token ) && in_array( $token[0], array( T_CONSTANT_ENCAPSED_STRING, T_ENCAPSED_AND_WHITESPACE ), true ) ) {
-				$text = ltrim( $token[1], "'\"" );
-				// The statement, not a message about one: the table's name follows (quoted, interpolated, concatenated
-				// after the literal ends, or a plain name and its column list).
-				if ( 1 === preg_match( '/\A\s*CREATE\s+(?:TEMPORARY\s+)?TABLE(?:\s+IF\s+NOT\s+EXISTS)?(?:\s*[`{$]|\s*[\'"]?\z|\s+[A-Za-z_][A-Za-z0-9_]*\s*\()/i', $text ) ) {
+				// Reading a table's definition is not making one.
+				$text = (string) preg_replace( '/\bSHOW\s+CREATE\s+TABLE\b/i', '', ltrim( $token[1], "'\"" ) );
+				// The statement, not a message about one: the table's name follows (quoted, interpolated, a sprintf or
+				// prepare placeholder, concatenated after the literal ends, or a plain name and its column list, LIKE,
+				// AS or SELECT), anywhere in the literal.
+				if ( 1 === preg_match( '/\bCREATE\s+(?:TEMPORARY\s+)?TABLE(?:\s+IF\s+NOT\s+EXISTS)?(?:\s*[`{$]|\s*%[si]|\s*[\'"]?\z|\s+[A-Za-z_][A-Za-z0-9_]*\b(?:\s*\(|\s+(?:LIKE|AS|SELECT)\b))/i', $text ) ) {
 					$found[] = $token[1];
 				}
 			}
@@ -78,19 +81,32 @@ $b = 'CREATE TABLE IF NOT EXISTS ' . $name;
 $c = 'create temporary table x (y int)';
 $d = 'The table will be created; if this persists, the database user lacks CREATE TABLE.';
 $e = 'CREATE TABLE has two primary keys.';
+$f = sprintf( 'CREATE TABLE %s (id int)', $t );
+$g = $wpdb->prepare( 'CREATE TABLE %i LIKE %i', $a, $b );
+$h = 'CREATE TABLE copy AS SELECT * FROM src';
+$i = "-- setup; CREATE TABLE `t` (id int)";
+$j = 'SHOW CREATE TABLE ' . $t;
+$k = 'CREATE TABLE has an item of a kind the restore does not create (';
 // CREATE TABLE in a comment
 /* CREATE TABLE in another */
 PHP;
-		$this->assertCount( 3, self::creates_tables( $code ), 'three statements, not the messages or the comments' );
+		$this->assertCount( 7, self::creates_tables( $code ), 'seven statements, not the messages or the comments' );
 	}
 
 	public function test_every_statement_in_src_that_creates_a_table_is_registered(): void {
 		$root  = dirname( __DIR__, 3 );
 		$found = array();
-		$it    = new \RecursiveIteratorIterator( new \RecursiveDirectoryIterator( $root . '/src', \FilesystemIterator::SKIP_DOTS ) );
-		foreach ( $it as $file ) {
-			if ( 'php' === $file->getExtension() && array() !== self::creates_tables( (string) file_get_contents( $file->getPathname() ) ) ) {
-				$found[] = str_replace( '\\', '/', substr( $file->getPathname(), strlen( $root ) + 1 ) );
+		$files = array( $root . '/wp-checkpoint.php', $root . '/uninstall.php' );
+		foreach ( array( '/src', '/restore' ) as $dir ) {
+			if ( is_dir( $root . $dir ) ) {
+				foreach ( new \RecursiveIteratorIterator( new \RecursiveDirectoryIterator( $root . $dir, \FilesystemIterator::SKIP_DOTS ) ) as $file ) {
+					$files[] = $file->getPathname();
+				}
+			}
+		}
+		foreach ( $files as $file ) {
+			if ( 'php' === pathinfo( $file, PATHINFO_EXTENSION ) && is_file( $file ) && array() !== self::creates_tables( (string) file_get_contents( $file ) ) ) {
+				$found[] = str_replace( '\\', '/', substr( $file, strlen( $root ) + 1 ) );
 			}
 		}
 		sort( $found );

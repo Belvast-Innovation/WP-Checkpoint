@@ -13,12 +13,15 @@ use WPCheckpoint\Support\Schema;
 
 /**
  * One list for the tables this plugin keeps for its own work: the jobs
- * table and the swap plan (by name, with the installation's base prefix),
- * and the tables a restore makes (by the grammar TempTables names them
- * with: temporary tables and the ledger, "wcptmp", and the site's tables
- * moved aside, "wcpold"). They describe this installation's jobs, not the
- * site: the export leaves them out, and a restore skips them where an
- * older backup holds them.
+ * table and the swap plan (by name, after any table prefix: another
+ * installation in the same database, even one under a longer prefix such
+ * as "wp_old_", has its own, and they are its recovery record), and the
+ * tables a restore makes (by the grammar TempTables names them with:
+ * temporary tables and the ledger, "wcptmp", and the site's tables moved
+ * aside, "wcpold"; any installation's). They describe an installation's
+ * jobs, not a site: the export leaves them out, a restore skips them where
+ * an older backup holds them, and the swap never moves them. Names are
+ * compared without regard to letter case (lower_case_table_names).
  *
  * Generated names are recognised by their whole grammar, never by a
  * prefix: a site whose table prefix is "wcp_" or "w" has tables such as
@@ -26,8 +29,11 @@ use WPCheckpoint\Support\Schema;
  * the whole form itself, a prefix "wcptmp" and a table "abcdef_7_1a2b_x",
  * cannot be told apart from one.)
  *
- * Every statement in src/ that creates a table is listed in SOURCES
- * (OwnTablesUsageTest): a new one fails the test until it is registered.
+ * Every file that creates a table with a statement of its own is listed
+ * in SOURCES (OwnTablesTest): a new one fails the test until it is
+ * registered. The restore's temporary tables are made from the backup's
+ * own CREATE TABLE under a name of the grammar above, and are covered by
+ * it rather than listed.
  *
  * Pure PHP.
  */
@@ -71,19 +77,24 @@ final class OwnTables {
 	}
 
 	/**
-	 * Whether a table is one of the plugin's own.
+	 * Whether a name is the jobs table or the swap plan of any installation: the name after a table prefix
+	 * (letters, digits and "_", or none), in any letter case. (A site's own table of that very name would be
+	 * taken for one; the names are this plugin's.)
 	 *
-	 * @param string $name        Table name.
-	 * @param string $base_prefix The installation's base table prefix.
-	 * @param bool   $fold_case   Compare the names kept by name without regard to case (lower_case_table_names).
+	 * @param string $name Table name.
 	 * @return bool
 	 */
-	public static function is_own( string $name, string $base_prefix, bool $fold_case = false ): bool {
-		foreach ( self::names( $base_prefix ) as $own ) {
-			if ( $own === $name || ( $fold_case && strtolower( $own ) === strtolower( $name ) ) ) {
-				return true;
-			}
-		}
-		return self::generated( $name );
+	public static function named( string $name ): bool {
+		return 1 === preg_match( '/\A[A-Za-z0-9_]*(?:' . preg_quote( Schema::JOBS_TABLE, '/' ) . '|' . preg_quote( SwapPlan::TABLE, '/' ) . ')\z/i', $name );
+	}
+
+	/**
+	 * Whether a table is one of the plugin's own: this installation's or another's (named(), generated()).
+	 *
+	 * @param string $name Table name.
+	 * @return bool
+	 */
+	public static function is_own( string $name ): bool {
+		return self::named( $name ) || self::generated( $name );
 	}
 }

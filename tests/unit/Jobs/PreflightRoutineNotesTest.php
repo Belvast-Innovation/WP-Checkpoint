@@ -42,6 +42,20 @@ final class PreflightRoutineNotesTest extends TestCase {
 		);
 	}
 
+	public function test_a_name_that_is_not_utf_8_is_made_valid_for_the_plan(): void {
+		$notes = PreflightStep::routine_notes(
+			array(
+				'triggers' => array(),
+				'capped'   => false,
+				'routines' => array( array( 'PROCEDURE', "caf\xE9" ) ),
+				'events'   => array(),
+			)
+		);
+		$this->assertStringContainsString( 'procedure caf', $notes[0], 'the control: the note names it' );
+		$this->assertSame( 1, preg_match( '//u', $notes[0] ), 'valid UTF-8' );
+		$this->assertNotFalse( json_encode( $notes ), 'and so written to the plan' );
+	}
+
 	public function test_many_are_counted_and_a_few_named_and_what_could_not_be_read_is_said(): void {
 		$many  = array();
 		$names = array();

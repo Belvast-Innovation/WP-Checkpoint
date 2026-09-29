@@ -56,7 +56,8 @@ final class TablePlan {
 	private $tables = array();
 
 	/**
-	 * Left out: name => reason ("excluded", "jobs", "temporary").
+	 * Left out: name => reason ("excluded", "jobs": this installation's jobs table, "own": another run table of this
+	 * plugin, "temporary": a name of TempTables).
 	 *
 	 * @var array<string, string>
 	 */
@@ -104,7 +105,7 @@ final class TablePlan {
 				$plan->skipped[ $name ] = 'excluded';
 				continue;
 			}
-			if ( OwnTables::is_own( $name, $backup_prefix, $fold_case ) ) {
+			if ( OwnTables::is_own( $name ) ) {
 				// This plugin's own run tables (OwnTables; an older backup may hold them): never restored.
 				if ( OwnTables::generated( $name ) ) {
 					$plan->skipped[ $name ] = 'temporary';

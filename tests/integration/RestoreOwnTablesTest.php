@@ -2,6 +2,7 @@
 
 namespace WPCheckpoint\Tests\Integration;
 
+use WPCheckpoint\Backups\ExportResults;
 use WPCheckpoint\Jobs\ExportJob;
 use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\PreflightStep;
@@ -69,25 +70,22 @@ final class RestoreOwnTablesTest extends RestoreTestCase {
 				)
 			)
 		);
-		$this->assertSame( Job::COMPLETED, $export->status, (string) $export->last_error );
-		$backups   = Plugin::instance()->directories()->backups();
-		$manifests = glob( $backups . '/*.manifest.json' ) ?: array();
-		usort(
-			$manifests,
-			static function ( string $a, string $b ): int {
-				return filemtime( $b ) <=> filemtime( $a );
-			}
-		);
-		$this->assertNotSame( array(), $manifests );
-		$manifest         = json_decode( (string) file_get_contents( $manifests[0] ), true );
-		$this->exported[] = $manifests[0];
-		foreach ( $manifest['volumes'] as $volume ) {
+		// The export job's own backup (not the newest file: another could share its second), registered for removal
+		// before anything else is asserted.
+		$backups = Plugin::instance()->directories()->backups();
+		$base    = ExportResults::base_of( $export->id );
+		$this->assertNotSame( '', $base, 'the export recorded its backup' );
+		$path             = $backups . '/' . $base . '.manifest.json';
+		$this->exported[] = $path;
+		$manifest         = json_decode( (string) file_get_contents( $path ), true );
+		foreach ( (array) ( $manifest['volumes'] ?? array() ) as $volume ) {
 			$this->exported[] = $backups . '/' . $volume['path'];
 		}
+		$this->assertSame( Job::COMPLETED, $export->status, (string) $export->last_error );
 		$this->assertContains( $plan_table, array_column( $manifest['database']['tables'], 'name' ), 'the backup, made by the plugin\'s own export, holds the swap plan' );
 
 		// The restore of that backup.
-		$job = $this->run_restore( $this->start_restore( substr( basename( $manifests[0] ), 0, -strlen( '.manifest.json' ) ) ) );
+		$job = $this->run_restore( $this->start_restore( $base ) );
 		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
 		$plan = RestorePreflightStep::load_plan( $this->work( $job ) )['plan'];
 		$this->assertSame( 'own', $plan->skipped()[ $plan_table ] ?? null, 'the backup\'s plan table is not restored' );

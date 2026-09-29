@@ -46,7 +46,7 @@ final class TableMoves {
 		);
 		foreach ( $live as $name ) {
 			$name = (string) $name;
-			if ( isset( $skip[ $name ] ) || self::never( $name, $base ) ) {
+			if ( isset( $skip[ $name ] ) || self::never( $name ) ) {
 				continue;
 			}
 			if ( '' === $prefix ) {
@@ -60,14 +60,13 @@ final class TableMoves {
 	}
 
 	/**
-	 * Whether a table is one the swap never touches: the plugin's jobs table and swap plan, and its temporary and
-	 * old tables.
+	 * Whether a table is one the swap never touches: a run table of this plugin, this installation's or another's
+	 * in the same database (Database\OwnTables).
 	 *
 	 * @param string $name Table name.
-	 * @param string $base The site's base table prefix.
 	 * @return bool
 	 */
-	public static function never( string $name, string $base ): bool {
-		return OwnTables::is_own( $name, $base );
+	public static function never( string $name ): bool {
+		return OwnTables::is_own( $name );
 	}
 }

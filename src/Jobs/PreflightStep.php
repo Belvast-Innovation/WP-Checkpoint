@@ -8,6 +8,7 @@
 namespace WPCheckpoint\Jobs;
 
 use WPCheckpoint\Database\WpdbConnection;
+use WPCheckpoint\Support\Utf8;
 
 use WPCheckpoint\Archive\Packer;
 use WPCheckpoint\Database\Connection;
@@ -298,7 +299,7 @@ final class PreflightStep implements Step {
 				$tables[]        = $table;
 			}
 			foreach ( (array) $listing['views'] as $view ) {
-				$notes[] = sprintf( 'View %s is not part of the backup (views are not exported).', (string) $view );
+				$notes[] = sprintf( 'View %s is not part of the backup (views are not exported).', Utf8::scrub( (string) $view ) );
 			}
 			if ( isset( $this->env['routines'] ) && is_callable( $this->env['routines'] ) ) {
 				$notes = array_merge( $notes, self::routine_notes( (array) call_user_func( $this->env['routines'], $tables ) ) );
@@ -350,7 +351,8 @@ final class PreflightStep implements Step {
 			return count( $items ) >= WpdbConnection::ROUTINES_READ ? 'At least ' . count( $items ) : (string) count( $items );
 		};
 		$names = static function ( array $items ): string {
-			$shown = array_slice( $items, 0, self::MAX_ROUTINES_LISTED );
+			// Names as the connection's character set gave them: valid UTF-8 for the plan, whatever they were.
+			$shown = array_map( array( Utf8::class, 'scrub' ), array_slice( $items, 0, self::MAX_ROUTINES_LISTED ) );
 			return implode( ', ', $shown ) . ( count( $items ) > count( $shown ) ? sprintf( ' and %d more', count( $items ) - count( $shown ) ) : '' );
 		};
 		if ( null === $found['triggers'] || null === $found['routines'] || null === $found['events'] ) {

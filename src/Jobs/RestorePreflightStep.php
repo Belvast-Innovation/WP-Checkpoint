@@ -402,7 +402,7 @@ final class RestorePreflightStep implements Step {
 		}
 		$moved = array();
 		foreach ( $live as $name ) {
-			if ( ! isset( $staying[ $name ] ) && ! OwnTables::generated( $name ) ) {
+			if ( ! isset( $staying[ $name ] ) && ! OwnTables::is_own( $name ) ) {
 				$moved[ $name ] = true;
 			}
 		}
@@ -452,7 +452,7 @@ final class RestorePreflightStep implements Step {
 			}
 			foreach ( is_array( $rows ) ? $rows : array() as $row ) {
 				list( $owner, $name, $referenced ) = array_map( 'strval', $row );
-				if ( isset( $moved[ $owner ] ) || OwnTables::generated( $owner ) || ! isset( $moved[ $referenced ] ) ) {
+				if ( isset( $moved[ $owner ] ) || OwnTables::is_own( $owner ) || ! isset( $moved[ $referenced ] ) ) {
 					continue;
 				}
 				throw new Refused( sprintf( 'The table %1$s stays as it is, but its foreign key %2$s references %3$s, which the restore replaces. InnoDB would keep the key on the old %3$s: the new data would be held to the old rows, and the old tables could not be deleted after the restore. Either restore %1$s too (it must be in the backup and not left out), or remove that foreign key first; then start the restore again.', $owner, $name, $referenced ) );

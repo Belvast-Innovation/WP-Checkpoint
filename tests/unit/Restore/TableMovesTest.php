@@ -68,11 +68,11 @@ final class TableMovesTest extends TestCase {
 	}
 
 	public function test_the_plugins_own_tables_are_never_touched(): void {
-		foreach ( self::plugins_own( 'wp_' ) as $name ) {
-			$this->assertTrue( TableMoves::never( $name, 'wp_' ), $name );
+		foreach ( array_merge( self::plugins_own( 'wp_' ), array( 'wpcheckpoint_jobs', 'wp_old_wpcheckpoint_swap_plan' ) ) as $name ) {
+			$this->assertTrue( TableMoves::never( $name ), $name . ': this installation\'s, or a neighbour\'s' );
 		}
-		foreach ( array( 'wp_posts', 'wpcheckpoint_jobs', 'wp_wpcheckpoint_jobs_old', 'wcp_posts' ) as $name ) {
-			$this->assertFalse( TableMoves::never( $name, 'wp_' ), $name );
+		foreach ( array( 'wp_posts', 'wp_wpcheckpoint_jobs_old', 'wcp_posts', 'wcptmp_notes' ) as $name ) {
+			$this->assertFalse( TableMoves::never( $name ), $name );
 		}
 	}
 }

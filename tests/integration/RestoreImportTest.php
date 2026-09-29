@@ -180,8 +180,9 @@ final class RestoreImportTest extends RestoreTestCase {
 		$this->assertSame( '', $wpdb->last_error );
 
 		// The control: the server's own text for this very refusal carries the row's value.
-		$raw = mysqli_init();
-		$raw->real_connect( DB_HOST, DB_USER, DB_PASSWORD, DB_NAME );
+		$raw  = mysqli_init();
+		$host = explode( ':', DB_HOST, 2 );
+		$raw->real_connect( $host[0], DB_USER, DB_PASSWORD, DB_NAME, isset( $host[1] ) && ctype_digit( $host[1] ) ? (int) $host[1] : 3306 );
 		$raw->query( "CREATE TEMPORARY TABLE `wpcp_dup_probe` (`code` varchar(64) NOT NULL, UNIQUE KEY `code_once` (`code`))" );
 		$raw->query( "INSERT INTO `wpcp_dup_probe` VALUES ('{$secret}')" );
 		$raw->query( "INSERT INTO `wpcp_dup_probe` VALUES ('{$secret}')" );

@@ -126,9 +126,7 @@ final class ExportJob implements JobType {
 						// sub-site's. The sub-sites' own tables are protected by their naming rule (TableSelection).
 						return array_values( $wpdb->tables( 'all', true, is_multisite() ? get_main_site_id() : 0 ) );
 					},
-					'own'           => static function ( string $table ) use ( $wpdb ): bool {
-						return OwnTables::is_own( $table, (string) $wpdb->base_prefix );
-					},
+					'own'           => array( OwnTables::class, 'is_own' ),
 				)
 			),
 			FileScanStep::from_plan( Manifest::DEFAULT_CHUNK, $this->clean ),
@@ -181,8 +179,8 @@ final class ExportJob implements JobType {
 		$tables     = array_values(
 			array_filter(
 				array_map( 'strval', (array) $listing['tables'] ),
-				static function ( string $table ) use ( $wpdb ): bool {
-					return ! OwnTables::is_own( $table, (string) $wpdb->base_prefix );
+				static function ( string $table ): bool {
+					return ! OwnTables::is_own( $table );
 				}
 			)
 		);

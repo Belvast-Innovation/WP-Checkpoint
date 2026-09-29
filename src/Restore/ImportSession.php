@@ -38,14 +38,22 @@ defined( 'ABSPATH' ) || exit;
 final class ImportSession implements Queries {
 
 	/**
-	 * Errors whose text holds a value of the row (MySQL and MariaDB): the value is never recorded (error()).
-	 * 1062, 1586: Duplicate entry '<value>' for key '<key>'. 1557, 1761, 1762: a foreign key would lead to a
-	 * duplicate entry '<value>'. 1366: Incorrect <type> value: '<value>' for column. 1292: Truncated incorrect
-	 * <type> value: '<value>'. 1367: Illegal <type> '<value>' value found during parsing. 1411: Incorrect <type>
-	 * value: '<value>' for function. 1300: Invalid <charset> character string: '<value>'. 1525: Incorrect <type>
-	 * value: '<value>'. 1644: a trigger's SIGNAL text, anything at all.
+	 * Errors whose text names only the schema (tables, columns, keys, constraints, types, collations, the
+	 * database as "[database]"), in MySQL 5.7 to 8.4 and MariaDB 10.6 to 12: kept as the server wrote them. Any
+	 * other refusal may hold values of the rows (a duplicate entry, a value it could not convert, the statement
+	 * near a syntax error, a trigger's SIGNAL text), and only its number and the key or column it names are kept
+	 * (error()). A list of what may be kept, not of what must not: a message not listed here is never trusted.
+	 * 1005, 1215, 1822, 1824: a foreign key cannot be made. 1022: a duplicate key in table t (no value).
+	 * 1048: column c cannot be null. 1050, 1051, 1146: a table exists / is unknown / does not exist.
+	 * 1054: unknown column. 1067: invalid default value for c. 1071: key too long. 1101: BLOB default.
+	 * 1115: unknown character set. 1117: too many columns. 1118: row size too large. 1136: column count.
+	 * 1166: incorrect column name. 1170: BLOB key without length. 1264: out of range value for column c.
+	 * 1265: data truncated for column c. 1273: unknown collation. 1286: unknown storage engine.
+	 * 1364: field c has no default. 1406: data too long for column c. 1451, 1452: a foreign key fails
+	 * (constraint and tables). 3780: columns of a foreign key are incompatible. 3819: check constraint c.
+	 * 4025: MariaDB's CONSTRAINT c failed.
 	 */
-	const ROW_DATA_ERRNOS = array( 1062, 1586, 1557, 1761, 1762, 1366, 1292, 1367, 1411, 1300, 1525, 1644 );
+	const SCHEMA_ONLY_ERRNOS = array( 1005, 1022, 1048, 1050, 1051, 1054, 1067, 1071, 1101, 1115, 1117, 1118, 1136, 1146, 1166, 1170, 1215, 1264, 1265, 1273, 1286, 1364, 1406, 1451, 1452, 1822, 1824, 3780, 3819, 4025 );
 
 
 	/**
@@ -291,13 +299,12 @@ final class ImportSession implements Queries {
 		if ( in_array( $errno, self::TRANSIENT_ERRNOS, true ) ) {
 			return new TransientFailure( sprintf( 'The database is busy or the connection was lost (%d): %s', $errno, $text ) );
 		}
-		if ( in_array( $errno, self::ROW_DATA_ERRNOS, true ) ) {
-			// The server's text holds a value of the row (a duplicate entry, a value it could not convert): never
-			// kept, in the log, the screen or the REST answer alike. Only the error number and, where the text
-			// names it, the key or the column: the schema, not the data.
-			return new StatementFailed( sprintf( 'The database refused a statement (%d%s); the value it named is not recorded', $errno, self::schema_part( $text ) ), $errno );
+		if ( in_array( $errno, self::SCHEMA_ONLY_ERRNOS, true ) ) {
+			return new StatementFailed( sprintf( 'The database refused a statement (%d): %s', $errno, $text ), $errno );
 		}
-		return new StatementFailed( sprintf( 'The database refused a statement (%d): %s', $errno, $text ), $errno );
+		// The server's text may hold values of the rows: never kept, in the log, the screen or the REST answer
+		// alike. Only the error number and, where the text names it, the key or the column: the schema, not the data.
+		return new StatementFailed( sprintf( 'The database refused a statement (%d%s); its text is not recorded, as it may hold values of the rows', $errno, self::schema_part( $text ) ), $errno );
 	}
 
 	/**
