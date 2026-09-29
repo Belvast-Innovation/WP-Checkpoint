@@ -231,11 +231,13 @@ final class PathsTest extends TestCase {
 			$this->markTestSkipped( 'Symbolic links cannot be created here.' );
 		}
 		$this->assertFalse( Paths::same( $this->root . '/base', $link, Paths::is_windows() ), 'the control: the spellings differ' );
-		$target = realpath( $this->root . '/base' );
-		$via    = realpath( $link );
+		// On the Windows runner realpath() returns the link's target with its 8.3 short name (RUNNER~1) and the
+		// directory with its long one; Paths::real() resolves them to one spelling.
+		$target = Paths::real( $this->root . '/base' );
+		$via    = Paths::real( $link );
 		if ( false === $via || false === $target || ! Paths::same( $via, $target, Paths::is_windows() ) ) {
-			// realpath() does not resolve this link to its target here (seen on Windows): nothing shows that the
-			// two are the same, and the answer is no, the direction in which callers wait instead of acting.
+			// Not resolved to its target here: nothing shows that the two are the same, and the answer is no, the
+			// direction in which callers wait instead of acting.
 			$this->assertFalse( Paths::same_location( $this->root . '/base', $link ) );
 			return;
 		}
