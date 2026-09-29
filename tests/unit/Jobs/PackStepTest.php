@@ -729,6 +729,65 @@ final class PackStepTest extends TestCase {
 		}
 	}
 
+	public function test_a_line_is_packed_only_under_the_root_the_scan_listed_it_under(): void {
+		// At the scan, uploads was a root of its own. At pack time it is gone from the roots (a group left out, a
+		// directory replaced): its lines would fall to the content directory's root and be read from there.
+		$photo   = $this->file( '2026/photo.txt', 500, 23 );
+		$content = dirname( $this->site );
+		$this->index( array( $photo ) );
+		$only_content = array(
+			array(
+				'group'  => 'other-content',
+				'path'   => $content,
+				'prefix' => 'wp-content',
+				'skip'   => array(),
+			),
+		);
+		ExportPlan::write( $this->ctx->work(), FileScanStep::SUMMARY, array( 'root_ids' => array( 'wp-content/uploads' => Links::fingerprint( $this->site ), 'wp-content' => Links::fingerprint( $content ) ) ) );
+		list( $result ) = $this->drive( new PackStep( $only_content, $this->options(), self::CHUNK ) );
+		$this->assertSame( StepResult::DONE, $result->kind );
+		$this->assertSame( array(), $this->packed() );
+		$this->assertSame( array( 'count' => 1, 'listed' => array( $photo ) ), $this->summary()['outside'] );
+	}
+
+	public function test_without_the_scan_record_of_the_roots_lines_are_packed_as_before(): void {
+		// A scan summary written before the record existed (an export started before an upgrade): no comparison.
+		$photo   = $this->file( '2026/photo.txt', 500, 24 );
+		$content = dirname( $this->site );
+		$this->index( array( $photo ) );
+		ExportPlan::write( $this->ctx->work(), FileScanStep::SUMMARY, array( 'warnings' => array() ) );
+		$only_content = array(
+			array(
+				'group'  => 'other-content',
+				'path'   => $content,
+				'prefix' => 'wp-content',
+				'skip'   => array(),
+			),
+		);
+		list( $result ) = $this->drive( new PackStep( $only_content, $this->options(), self::CHUNK ) );
+		$this->assertSame( StepResult::DONE, $result->kind );
+		$this->assertSame( array( $photo ), array_column( $this->packed(), 'p' ) );
+	}
+
+	public function test_a_content_root_link_into_a_directory_it_skips_is_left_out_at_pack_time(): void {
+		if ( 'Windows' === PHP_OS_FAMILY ) {
+			$this->markTestSkipped( 'symlinks need privileges on Windows' );
+		}
+		$store = $this->ctx->root . '/store';
+		mkdir( $store, 0700 );
+		rename( $this->site, $store . '/uploads' );
+		symlink( $store . '/uploads', $this->site );
+		$photo = $this->file( '2026/photo.txt', 500, 25 );
+		$this->index( array( $photo ) );
+		$this->assertSame( '', Links::root_verdict( $this->site, ABSPATH )['refusal'], 'the control: with nothing skipped there, the rule lets this link be followed' );
+		$roots            = $this->roots();
+		$roots[0]['skip'] = array( $store );
+		list( $result ) = $this->drive( new PackStep( $roots, $this->options(), self::CHUNK ) );
+		$this->assertSame( StepResult::DONE, $result->kind );
+		$this->assertSame( array(), $this->packed() );
+		$this->assertSame( 1, $this->summary()['outside']['count'] );
+	}
+
 	public function test_listed_paths_stop_at_the_cap_while_the_count_and_the_warning_go_on(): void {
 		$paths = array();
 		for ( $i = 0; $i < PackStep::MAX_LISTED + 10; $i++ ) {

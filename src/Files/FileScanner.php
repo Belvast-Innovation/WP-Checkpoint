@@ -61,7 +61,7 @@ final class FileScanner {
 	/**
 	 * Roots: group, path (absolute), prefix (archive path, no trailing slash), skip (absolute paths not to enter).
 	 *
-	 * @var array<int, array{group: string, path: string, prefix: string, skip: string[]}>
+	 * @var array<int, array{group: string, path: string, prefix: string, skip: string[], also: string[]}>
 	 */
 	private $roots;
 
@@ -117,13 +117,13 @@ final class FileScanner {
 	/**
 	 * Constructor.
 	 *
-	 * @param array<int, array{group: string, path: string, prefix: string, skip?: string[]}> $roots      Roots in scan order.
-	 * @param Exclusions                                                                      $exclusions Exclusions.
-	 * @param int                                                                             $int_size   PHP_INT_SIZE of the platform.
-	 * @param int                                                                             $chunk_bytes Content chunk size (bounds the largest indexable file).
-	 * @param array{abspath?: string, mask?: callable, link_state?: callable}                 $options    'abspath': the WordPress directory ('' refuses every root that is a link);
-	 *                                                                                                    'mask': function( string $path ): string for the target of a followed root (without it the
-	 *                                                                                                    target is not shown); 'link_state': the link test (Links::state()).
+	 * @param array<int, array{group: string, path: string, prefix: string, skip?: string[], also_skip?: string[]}> $roots Roots in scan order ('also_skip': skipped, never a reason to refuse the root).
+	 * @param Exclusions                                                                                            $exclusions Exclusions.
+	 * @param int                                                                                                   $int_size   PHP_INT_SIZE of the platform.
+	 * @param int                                                                                                   $chunk_bytes Content chunk size (bounds the largest indexable file).
+	 * @param array{abspath?: string, mask?: callable, link_state?: callable}                                       $options    'abspath': the WordPress directory ('' refuses every root that is a link);
+	 *                                                                                                                          'mask': function( string $path ): string for the target of a followed root (without it the
+	 *                                                                                                                          target is not shown); 'link_state': the link test (Links::state()).
 	 */
 	public function __construct( array $roots, Exclusions $exclusions, int $int_size = PHP_INT_SIZE, int $chunk_bytes = Manifest::DEFAULT_CHUNK, array $options = array() ) {
 		$this->roots = array();
@@ -138,15 +138,16 @@ final class FileScanner {
 					},
 					isset( $root['skip'] ) ? (array) $root['skip'] : array()
 				),
+				// Only skipped, never a reason to refuse the root (ScanRoots: where other roots that are links lead).
+				'also'   => isset( $root['also_skip'] ) ? array_map( 'strval', (array) $root['also_skip'] ) : array(),
 			);
 		}
 		foreach ( $this->roots as $i => $root ) {
-			// Both spellings of each: a root reached through a link lists its entries under the link's spelling,
-			// and the skipped directories may be configured through a link or resolved (compare real paths).
+			// By real path (the spelling when it does not resolve yet): a root reached through a link lists its
+			// entries under the link's spelling, and the skipped directories may be configured either way.
 			$this->skip_keys[ $i ] = array();
-			foreach ( $root['skip'] as $dir ) {
-				$this->skip_keys[ $i ][ Links::key( $dir, false ) ] = true;
-				$this->skip_keys[ $i ][ Links::key( $dir ) ]        = true;
+			foreach ( array_merge( $root['skip'], $root['also'] ) as $dir ) {
+				$this->skip_keys[ $i ][ Links::key( $dir ) ] = true;
 			}
 		}
 		$this->exclusions = $exclusions;

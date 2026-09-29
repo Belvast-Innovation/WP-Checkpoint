@@ -186,29 +186,49 @@ final class FileScanStepTest extends JobTestCase {
 		$this->assertStringNotContainsString( $this->root, $log );
 	}
 
-	public function test_groups_that_lead_into_each_other_through_a_link_are_scanned_once(): void {
+	public function test_a_group_that_is_a_link_into_another_group_keeps_its_own_path_and_is_backed_up_once(): void {
 		$content = $this->site . '/wp-content';
-		mkdir( $content . '/plugins/media', 0755, true );
-		mkdir( $content . '/themes', 0755 );
+		mkdir( $content . '/plugins/media/sub', 0755, true );
+		mkdir( $content . '/themes/t', 0755, true );
+		file_put_contents( $content . '/plugins/p.php', 'p' );
+		file_put_contents( $content . '/plugins/media/m.jpg', 'm' );
+		file_put_contents( $content . '/plugins/media/sub/s.jpg', 's' );
+		file_put_contents( $content . '/themes/t/style.css', 't' );
+		// uploads leads into the plugins directory, mu-plugins into a directory inside uploads' target.
 		$this->assertTrue( symlink( $content . '/plugins/media', $this->root . '/uploads-link' ) );
-		$this->assertTrue( symlink( $content . '/themes', $this->root . '/themes-link' ) );
+		$this->assertTrue( symlink( $content . '/plugins/media/sub', $this->root . '/mu-link' ) );
 		$overrides = array(
 			'abspath'    => $this->site,
 			'content'    => $content,
 			'plugins'    => $content . '/plugins',
 			'themes'     => $content . '/themes',
 			'uploads'    => $this->root . '/uploads-link',
-			'mu-plugins' => $this->root . '/themes-link',
+			'mu-plugins' => $this->root . '/mu-link',
 		);
 		$resolved = ScanRoots::resolve( array( 'plugins', 'themes', 'uploads', 'mu-plugins' ), '', $overrides );
-		$this->assertSame( array( 'plugins', 'themes' ), array_column( $resolved['roots'], 'group' ), 'uploads leads into plugins, mu-plugins to the themes directory itself' );
-		$this->assertContains( 'The "uploads" directory lies inside the "plugins" directory and is backed up as part of it.', $resolved['warnings'] );
-		$this->assertContains( 'The "mu-plugins" directory lies inside the "themes" directory and is backed up as part of it.', $resolved['warnings'] );
+		$this->assertSame( array( 'plugins', 'themes', 'uploads', 'mu-plugins' ), array_column( $resolved['roots'], 'group' ), 'a group that is a link stays a root of its own' );
+		$this->assertSame( array(), $resolved['warnings'] );
+		$scanner = new \WPCheckpoint\Files\FileScanner( $resolved['roots'], new Exclusions(), PHP_INT_SIZE, \WPCheckpoint\Archive\Manifest::DEFAULT_CHUNK, array( 'abspath' => $this->site ) );
+		$state   = \WPCheckpoint\Files\FileScanner::initial_state();
+		$lines   = array();
+		while ( empty( $state['done'] ) ) {
+			$state = $scanner->scan_unit(
+				$state,
+				static function ( array $line ) use ( &$lines ): void {
+					$lines[] = $line['p'];
+				}
+			);
+		}
+		$this->assertSame(
+			array( 'wp-content/plugins/p.php', 'wp-content/themes/t/style.css', 'wp-content/uploads/m.jpg', 'wp-content/mu-plugins/s.jpg' ),
+			$lines,
+			'each file once, under the path of the group whose link leads to it; neither link is refused for leading where the other leads'
+		);
+		$this->assertSame( 0, $state['counts']['unreadable'] );
 
-		// The control: without the links, every group is its own root.
-		$plain = ScanRoots::resolve( array( 'plugins', 'themes', 'uploads' ), '', array_merge( $overrides, array( 'uploads' => $content . '/uploads' ) ) );
-		$this->assertSame( array( 'plugins', 'themes', 'uploads' ), array_column( $plain['roots'], 'group' ) );
-		$this->assertSame( array(), $plain['warnings'] );
+		// The control: without the links, the groups are plain directories and each is its own root with nothing added.
+		$plain = ScanRoots::resolve( array( 'plugins', 'themes' ), '', $overrides );
+		$this->assertSame( array( array(), array() ), array_column( $plain['roots'], 'also_skip' ) );
 	}
 
 	public function test_a_cancelled_scan_leaves_no_work_directory(): void {

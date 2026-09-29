@@ -31,7 +31,7 @@ final class ScanRoots {
 	 * @param string[]              $groups      Content groups (subset of GROUPS).
 	 * @param string                $storage_dir The plugin's storage directory, never scanned.
 	 * @param array<string, string> $overrides   Group => absolute directory (tests); defaults come from WordPress.
-	 * @return array{roots: array<int, array{group: string, path: string, prefix: string, skip: string[]}>, warnings: string[]}
+	 * @return array{roots: array<int, array{group: string, path: string, prefix: string, skip: string[], also_skip: string[]}>, warnings: string[]}
 	 */
 	public static function resolve( array $groups, string $storage_dir = '', array $overrides = array() ): array {
 		$dirs     = array_merge( self::wordpress_directories(), $overrides );
@@ -49,21 +49,12 @@ final class ScanRoots {
 			}
 			$chosen[ $group ] = $path;
 		}
-		// A group inside another chosen group is covered by the outer one (with the outer prefix). Compared by real
-		// path: a group directory that is a link (followed by the scan) may lead into another group's directory,
-		// and two groups that lead to one directory are scanned once, under the first.
-		$real = array();
-		foreach ( $chosen as $group => $path ) {
-			$real[ $group ] = Links::key( $path );
-		}
-		$order = array_flip( array_keys( $chosen ) );
+		// A group inside another chosen group is covered by the outer one (with the outer prefix). A group whose
+		// directory is a link stays a root of its own even where it leads into another group (below): merged away,
+		// its files would come back under the other group's path, and the group's own directory would be missing.
 		foreach ( $chosen as $group => $path ) {
 			foreach ( $chosen as $other => $other_path ) {
-				if ( $group === $other || 'other-content' === $other ) {
-					continue;
-				}
-				$same = $real[ $group ] === $real[ $other ] && $order[ $other ] < $order[ $group ];
-				if ( $same || Paths::is_prefix( $real[ $other ], $real[ $group ], false ) ) {
+				if ( $group !== $other && 'other-content' !== $other && Paths::is_inside( $other_path, $path ) ) {
 					$warnings[] = 'The "' . $group . '" directory lies inside the "' . $other . '" directory and is backed up as part of it.';
 					continue 2;
 				}
@@ -85,6 +76,21 @@ final class ScanRoots {
 				'prefix' => self::prefix( $group, $path, $dirs['abspath'], $dirs['content'] ),
 				'skip'   => $skip,
 			);
+		}
+		// A root that is a link the scan follows is backed up under its own prefix: where it leads is skipped by
+		// every other root (compared by real path, 'also_skip'), so a target inside another group is not backed up
+		// twice. A root the scan refuses adds nothing: its files stay with the group they are in. Kept apart from
+		// 'skip', which is what a root must not lead into (Links::root_verdict()): two links, one leading inside the
+		// other's target, are each scanned and each skip the other's target.
+		$targets = array();
+		foreach ( $roots as $i => $root ) {
+			$verdict = Links::root_verdict( $root['path'], (string) $dirs['abspath'], $root['skip'] );
+			if ( $verdict['link'] && '' === $verdict['refusal'] ) {
+				$targets[ $i ] = rtrim( Paths::normalize( (string) realpath( $root['path'] ) ), '/' );
+			}
+		}
+		foreach ( array_keys( $roots ) as $i ) {
+			$roots[ $i ]['also_skip'] = array_values( array_diff_key( $targets, array( $i => true ) ) );
 		}
 		return array(
 			'roots'    => $roots,

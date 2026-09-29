@@ -427,11 +427,24 @@ final class FileScannerTest extends TestCase {
 		// Where a root leads, as a hash: the same through either spelling, different once the link is re-pointed.
 		$before = Links::fingerprint( $this->root . '/uploads' );
 		$this->assertSame( $before, Links::fingerprint( $this->root . '/shared' ) );
-		$this->assertStringNotContainsString( $this->root, $before );
+		$this->assertMatchesRegularExpression( '/\A[0-9a-f]{64}\z/', $before, 'a hash, not a path' );
 		unlink( $this->root . '/uploads' );
 		symlink( $this->root . '/store', $this->root . '/uploads' );
 		$this->assertNotSame( $before, Links::fingerprint( $this->root . '/uploads' ) );
 		$this->assertSame( '', Links::fingerprint( $this->root . '/missing' ) );
+	}
+
+	public function test_a_skipped_directory_spelled_in_another_case_is_skipped_on_windows(): void {
+		if ( 'Windows' !== PHP_OS_FAMILY ) {
+			$this->markTestSkipped( 'Windows only: paths there compare without regard to case' );
+		}
+		$this->put( 'c/keep.txt' );
+		$this->put( 'c/Store/old.zip' );
+		$skip    = strtoupper( $this->root . '/c/store' );
+		$scanner = new FileScanner( array( array( 'group' => 'other-content', 'path' => $this->root . '/c', 'prefix' => 'wp-content', 'skip' => array( $skip ) ) ), new Exclusions( array(), array() ) );
+		list( $lines, $state ) = $this->run_all( $scanner );
+		$this->assertSame( array( 'wp-content/keep.txt' ), $this->paths( $lines ) );
+		$this->assertSame( 1, $state['counts']['excluded'] );
 	}
 
 	public function test_a_link_to_the_root_of_the_file_system_or_to_nothing_is_never_followed(): void {

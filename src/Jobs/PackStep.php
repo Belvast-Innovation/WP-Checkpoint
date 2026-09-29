@@ -73,6 +73,15 @@ final class PackStep implements Step {
 	const TIME_MARGIN = 1.5;
 
 	/**
+	 * The prefixes of the roots the scan listed files under (its root_ids), for this tick; null when the scan
+	 * summary has no record of them. A line is packed only under the root the scan listed it under: the roots are
+	 * resolved again every tick, and where one is gone a line would fall to a shorter prefix and be read there.
+	 *
+	 * @var string[]|null
+	 */
+	private $scanned_prefixes = null;
+
+	/**
 	 * Scan roots (prefix => absolute path), or null to resolve them from
 	 * plan.json and the storage path (the export job).
 	 *
@@ -201,16 +210,15 @@ final class PackStep implements Step {
 		$packer = Packer::open( $volumes, $base, $cursor['packer'], $this->packer_options_with( $context ) );
 		self::cut( $work . DIRECTORY_SEPARATOR . self::PACKED_INDEX, $cursor['packed_bytes'] );
 		self::cut( $work . DIRECTORY_SEPARATOR . self::CHUNKS, $cursor['chunks_bytes'] );
-		$scanned    = ExportPlan::exists( $work, FileScanStep::SUMMARY ) ? ExportPlan::read( $work, FileScanStep::SUMMARY ) : array();
-		$roots      = self::judged(
-			null === $this->roots ? ScanRoots::resolve( $active['groups'], $context->storage_path() )['roots'] : $this->roots,
-			isset( $scanned['root_ids'] ) && is_array( $scanned['root_ids'] ) ? $scanned['root_ids'] : null
-		);
-		$exclusions = new Exclusions( $active['exclusions'], array() );
-		$since      = 0;
-		$last       = 0.0;
-		$first      = true;
-		$budget     = $context->budget()->seconds;
+		$scanned                = ExportPlan::exists( $work, FileScanStep::SUMMARY ) ? ExportPlan::read( $work, FileScanStep::SUMMARY ) : array();
+		$root_ids               = isset( $scanned['root_ids'] ) && is_array( $scanned['root_ids'] ) ? array_map( 'strval', $scanned['root_ids'] ) : null;
+		$roots                  = self::judged( null === $this->roots ? ScanRoots::resolve( $active['groups'], $context->storage_path() )['roots'] : $this->roots, $root_ids );
+		$this->scanned_prefixes = null === $root_ids ? null : array_map( 'strval', array_keys( $root_ids ) );
+		$exclusions             = new Exclusions( $active['exclusions'], array() );
+		$since                  = 0;
+		$last                   = 0.0;
+		$first                  = true;
+		$budget                 = $context->budget()->seconds;
 
 		try {
 			while ( 'done' !== $cursor['phase'] ) {
@@ -387,7 +395,7 @@ final class PackStep implements Step {
 			$cursor['pending'] = null;
 			return 0;
 		}
-		if ( ! empty( $root['refused'] ) || ! Paths::is_inside( (string) $root['path'], $source ) ) {
+		if ( ! empty( $root['refused'] ) || ( null !== $this->scanned_prefixes && ! self::same_root( $this->scanned_prefixes, (string) $root['prefix'], $p ) ) || ! Paths::is_inside( (string) $root['path'], $source ) ) {
 			// The scan saw a directory; a link put in its place since would take the backup outside the
 			// content directory (another site's files on a shared host). Resolved paths only. The root itself is
 			// judged again (judged()): by the scan's rule, and by whether it still leads where it led then.
@@ -871,6 +879,25 @@ final class PackStep implements Step {
 			$roots[ $i ]['refused'] = '' !== $verdict['refusal'] || $moved;
 		}
 		return $roots;
+	}
+
+	/**
+	 * Whether the root that takes an archive path now is the one the scan listed it under: the longest of the
+	 * scan's prefixes that holds the path.
+	 *
+	 * @param string[] $scanned The scan's root prefixes.
+	 * @param string   $prefix  The prefix of the root that takes the path now.
+	 * @param string   $p       Archive path.
+	 * @return bool
+	 */
+	private static function same_root( array $scanned, string $prefix, string $p ): bool {
+		$best = '';
+		foreach ( $scanned as $candidate ) {
+			if ( ( $p === $candidate || 0 === strpos( $p, $candidate . '/' ) ) && strlen( $candidate ) > strlen( $best ) ) {
+				$best = $candidate;
+			}
+		}
+		return '' === $best || $best === $prefix;
 	}
 
 	/**
