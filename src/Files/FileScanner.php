@@ -10,6 +10,7 @@ namespace WPCheckpoint\Files;
 use WPCheckpoint\Archive\EntryPath;
 use WPCheckpoint\Archive\Manifest;
 use WPCheckpoint\Archive\Packer;
+use WPCheckpoint\Support\Paths;
 use WPCheckpoint\Support\Utf8;
 
 /**
@@ -26,8 +27,9 @@ use WPCheckpoint\Support\Utf8;
  * costs stack entries, not call frames. A content root that is a link is
  * followed within the limits of Links::root_refusal() and reported; links
  * below a root are never followed and are counted as skipped; a directory
- * that cannot be told apart from a link (Links::state() "unknown") is not
- * entered and is recorded as unreadable; special files (fifo, socket,
+ * that cannot be told apart from a link (Links::state() "unknown") is
+ * entered only where it resolves to exactly where it is listed, and counted
+ * as a link otherwise (in_place()); special files (fifo, socket,
  * device) are skipped; an unreadable file or directory is recorded (the
  * pre-flight asks the user to confirm before backing up without it) and
  * the walk goes on.
@@ -112,6 +114,21 @@ final class FileScanner {
 	private $link_state;
 
 	/**
+	 * Whether a "link" answer can only have come from probing a directory's entries (Links::only_probed(); tests inject).
+	 *
+	 * @var callable
+	 */
+	private $probed;
+
+	/**
+	 * What entries are compared with (in_place(), skipped()): function( string $root ): string, the root's real path
+	 * as a comparison key (Links::key()). Tests put the link's own spelling in its place to show what that would lose.
+	 *
+	 * @var callable
+	 */
+	private $root_base;
+
+	/**
 	 * Per root: the skipped directories ('skip' and 'also' as SKIP, 'collide' as COLLIDE) by comparison key
 	 * (Links::key(): the real path, or
 	 * the spelling when it does not resolve).
@@ -134,9 +151,11 @@ final class FileScanner {
 	 * @param Exclusions                                                                                                                                                  $exclusions Exclusions.
 	 * @param int                                                                                                                                                         $int_size   PHP_INT_SIZE of the platform.
 	 * @param int                                                                                                                                                         $chunk_bytes Content chunk size (bounds the largest indexable file).
-	 * @param array{abspath?: string, mask?: callable, link_state?: callable}                                                                                             $options    'abspath': the WordPress directory ('' refuses every root that is a link);
-	 *                                                                                                                                                                                'mask': function( string $path ): string for the target of a followed root (without it the
-	 *                                                                                                                                                                                target is not shown); 'link_state': the link test (Links::state()).
+	 * @param array{abspath?: string, mask?: callable, link_state?: callable, probed?: callable, root_base?: callable}                                                    $options    'abspath': the WordPress directory ('' refuses every root that is a link);
+	 *                                                                                                                                       'mask': function( string $path ): string for the target of a followed root (without it the
+	 *                                                                                                                                       target is not shown); 'link_state': the link test (Links::state()); 'probed': whether a link
+	 *                                                                                                                                       answer can only have come from probing the entries (Links::only_probed()); 'root_base': what entries are
+	 *                                                                                                                                                          compared with (the root's real path, Links::key()).
 	 */
 	public function __construct( array $roots, Exclusions $exclusions, int $int_size = PHP_INT_SIZE, int $chunk_bytes = Manifest::DEFAULT_CHUNK, array $options = array() ) {
 		$this->roots = array();
@@ -177,6 +196,8 @@ final class FileScanner {
 			return '(not shown)';
 		};
 		$this->link_state = isset( $options['link_state'] ) && is_callable( $options['link_state'] ) ? $options['link_state'] : array( Links::class, 'state' );
+		$this->probed     = isset( $options['probed'] ) && is_callable( $options['probed'] ) ? $options['probed'] : array( Links::class, 'only_probed' );
+		$this->root_base  = isset( $options['root_base'] ) && is_callable( $options['root_base'] ) ? $options['root_base'] : array( Links::class, 'key' );
 	}
 
 	/**
@@ -316,9 +337,8 @@ final class FileScanner {
 			return false;
 		}
 		$verdict = Links::root_verdict( $root['path'], $this->abspath, $root['skip'], $this->link_state, $root['hold'] );
-		if ( Links::UNDECIDED === $verdict['refusal'] ) {
-			$this->warn( $state, 'unreadable', sprintf( 'The "%1$s" content directory was not scanned: it could not be determined whether it is a link (%2$s).', $root['group'], $root['prefix'] ), true );
-			return false;
+		if ( $verdict['unknown'] ) {
+			$this->undecided( $state );
 		}
 		if ( '' !== $verdict['refusal'] ) {
 			$this->warn( $state, 'unreadable', sprintf( $verdict['link'] ? 'The "%1$s" content directory is a link and was not scanned: %2$s (%3$s).' : 'The "%1$s" content directory was not scanned: %2$s (%3$s).', $root['group'], Links::refusal_text( $verdict['refusal'], $verdict['link'] ), $root['prefix'] ), true );
@@ -329,7 +349,7 @@ final class FileScanner {
 			return false;
 		}
 		if ( $verdict['link'] ) {
-			$target = realpath( $root['path'] );
+			$target = Paths::real( $root['path'] );
 			$this->warn( $state, 'links', sprintf( 'The "%1$s" content directory is a link; the directory it leads to was backed up (%2$s -> %3$s).', $root['group'], $root['prefix'], (string) call_user_func( $this->mask, false === $target ? '' : $target ) ), true );
 		}
 		// Where the root leads, for the pack step to see whether it still leads there (a hash, not a path).
@@ -358,11 +378,50 @@ final class FileScanner {
 		if ( isset( $keys[ $key ] ) ) {
 			return $keys[ $key ];
 		}
+		$real = $this->real_root( $index, $root );
+		$key  = Links::key( $real . '/' . $rel, false );
+		return '' !== $real && isset( $keys[ $key ] ) ? $keys[ $key ] : '';
+	}
+
+	/**
+	 * A root's real path as a comparison key, once per request ('' when it does not resolve).
+	 *
+	 * @param int                  $index Root index.
+	 * @param array<string, mixed> $root  Root.
+	 * @return string
+	 */
+	private function real_root( int $index, array $root ): string {
 		if ( ! isset( $this->real_roots[ $index ] ) ) {
-			$this->real_roots[ $index ] = false === realpath( $root['path'] ) ? '' : Links::key( $root['path'] );
+			$this->real_roots[ $index ] = false === Paths::real( (string) $root['path'] ) ? '' : (string) call_user_func( $this->root_base, (string) $root['path'] );
 		}
-		$key = Links::key( $this->real_roots[ $index ] . '/' . $rel, false );
-		return '' !== $this->real_roots[ $index ] && isset( $keys[ $key ] ) ? $keys[ $key ] : '';
+		return $this->real_roots[ $index ];
+	}
+
+	/**
+	 * Whether an entry resolves to exactly where it is listed: the root's real path and its relative path.
+	 *
+	 * @param array<string, mixed> $state State.
+	 * @param array<string, mixed> $root  Root.
+	 * @param string               $rel   Path relative to the root.
+	 * @param string               $abs   Absolute path as listed.
+	 * @return bool
+	 */
+	private function in_place( array $state, array $root, string $rel, string $abs ): bool {
+		$real = $this->real_root( (int) $state['root'], $root );
+		return '' !== $real && false !== Paths::real( $abs ) && Links::key( $abs ) === Links::key( $real . '/' . $rel, false );
+	}
+
+	/**
+	 * Count a directory whose link state could not be told, and say once what was done instead.
+	 *
+	 * @param array<string, mixed> $state State (updated).
+	 * @return void
+	 */
+	private function undecided( array &$state ): void {
+		$state['counts']['undecided'] = ( isset( $state['counts']['undecided'] ) ? (int) $state['counts']['undecided'] : 0 ) + 1;
+		if ( 1 === $state['counts']['undecided'] ) {
+			$this->warn( $state, 'undecided', 'This server does not let PHP tell every link apart; link detection fell back to a containment check: directories were scanned where they resolve to exactly where they are listed, and left out otherwise.', true );
+		}
 	}
 
 	/**
@@ -388,20 +447,38 @@ final class FileScanner {
 		// is_dir() and is_file() are both false for a junction too, observed on the Windows CI runner: without this
 		// it was counted as a special file and stayed out only because is_dir() was false).
 		$link = (string) call_user_func( $this->link_state, $abs );
+		if ( Links::LINK === $link && (bool) call_user_func( $this->probed, $abs ) && $this->in_place( $state, $root, $rel, $abs ) ) {
+			// Judged a link only through what is inside it (Windows without readlink(): a junction as its first entry
+			// makes a plain directory look redirected), yet it resolves exactly where it is listed, which such a link
+			// never does: a plain directory, not to be left out with everything in it. Only then: where is_link() or
+			// readlink() said so, it stays a link (realpath() does not resolve a volume mount point, which would
+			// look in place).
+			$link = Links::PLAIN;
+		}
 		if ( Links::LINK === $link ) {
 			++$state['counts']['links'];
 			return null;
 		}
-		if ( Links::UNKNOWN === $link ) {
-			// Entering could follow a link out of the content directory; leaving it out silently would lose files.
-			// Listed with the unreadable entries (the pre-flight asks before backing up without them); one warning
-			// says why, however many there are.
+		if ( Links::UNKNOWN === $link && false === Paths::real( $abs ) ) {
+			// Not resolvable at all (gone since the listing, or the host refuses): no evidence of a link, so the
+			// pre-flight asks, as for anything unreadable.
+			$this->undecided( $state );
 			$this->record( $state, 'unreadable', $p );
-			$state['counts']['undecided'] = ( isset( $state['counts']['undecided'] ) ? (int) $state['counts']['undecided'] : 0 ) + 1;
-			if ( 1 === $state['counts']['undecided'] ) {
-				$this->warn( $state, 'undecided', 'Some directories were not scanned because it could not be determined whether they are links (for example when this server does not let PHP resolve links); they are listed with the unreadable files, the first is ' . $p . '.' );
-			}
 			return null;
+		}
+		if ( Links::UNKNOWN === $link ) {
+			// Whether it is a link cannot be told here (a Windows host without readlink()). What not entering links
+			// guards against is taking the backup outside the root, or into a loop, or backing a directory up twice;
+			// the positive evidence against all three is that the entry resolves to exactly where it is listed (no
+			// link below a root is entered, so the root's real path and the relative path are where it should be).
+			// Such an entry is handled like any other; one that resolves anywhere else is left out like a link and
+			// reported. The fallback itself is reported once, however many directories it checks.
+			$this->undecided( $state );
+			if ( ! $this->in_place( $state, $root, $rel, $abs ) ) {
+				++$state['counts']['links'];
+				$this->warn( $state, 'links', 'A directory that resolves to another place than where it is listed was left out: ' . $p );
+				return null;
+			}
 		}
 		$skipped = $this->skipped( $state, $root, $rel, $abs );
 		if ( self::COLLIDE === $skipped ) {

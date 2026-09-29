@@ -314,37 +314,96 @@ final class FileScannerTest extends TestCase {
 		}
 	}
 
-	public function test_a_root_or_directory_that_cannot_be_told_apart_from_a_link_is_not_entered_and_is_reported(): void {
+	public function test_a_directory_that_cannot_be_told_apart_from_a_link_is_entered_only_where_it_resolves_in_place(): void {
+		$this->require_symlinks();
 		$this->put( 'uploads/2026/a.jpg' );
-		$this->put( 'uploads/2026/b.jpg' );
-		$this->put( 'uploads/undecided-one/x.jpg' );
-		$this->put( 'uploads/undecided-two/y.jpg' );
+		$this->put( 'uploads/in-place/x.jpg' );
+		$this->put( 'outside/secret.txt' );
+		$this->put( 'uploads/2026/nested/n.jpg' );
 		$this->put( 'themes/t/style.css' );
 		mkdir( $this->root . '/site' );
+		// Links the test for links cannot see (as on Windows without readlink()): one out of the root, one into it.
+		symlink( $this->root . '/outside', $this->root . '/uploads/away' );
+		symlink( $this->root . '/uploads/2026', $this->root . '/uploads/again' );
 		$themes = array( array( 'group' => 'themes', 'path' => $this->root . '/themes', 'prefix' => 'wp-content/themes' ) );
 
-		// The control: with the real link test, everything is a plain directory and listed.
-		list( $lines ) = $this->run_all( $this->link_scanner( $this->root . '/uploads', null, $themes ) );
-		$this->assertSame( array( 'wp-content/uploads/2026/a.jpg', 'wp-content/uploads/2026/b.jpg', 'wp-content/uploads/undecided-one/x.jpg', 'wp-content/uploads/undecided-two/y.jpg', 'wp-content/themes/t/style.css' ), $this->paths( $lines ) );
+		// The control: with the real link test, both links are seen and neither is entered.
+		list( $lines, $state ) = $this->run_all( $this->link_scanner( $this->root . '/uploads', null, $themes ) );
+		$expected              = array( 'wp-content/uploads/2026/a.jpg', 'wp-content/uploads/2026/nested/n.jpg', 'wp-content/uploads/in-place/x.jpg', 'wp-content/themes/t/style.css' );
+		$this->assertSame( $expected, $this->paths( $lines ) );
+		$this->assertSame( 2, $state['counts']['links'] );
 
-		$root  = $this->root;
-		$state = static function ( string $path ) use ( $root ): string {
-			return in_array( basename( $path ), array( 'undecided-one', 'undecided-two' ), true ) || $root . '/themes' === $path ? Links::UNKNOWN : Links::state( $path );
+		$root    = $this->root;
+		$unknown = static function ( string $path ) use ( $root ): string {
+			return is_dir( $path ) && $root . '/uploads' !== $path ? Links::UNKNOWN : Links::state( $path );
 		};
-		list( $lines, $state ) = $this->run_all( $this->link_scanner( $this->root . '/uploads', $state, $themes ) );
-		$this->assertSame( array( 'wp-content/uploads/2026/a.jpg', 'wp-content/uploads/2026/b.jpg' ), $this->paths( $lines ), 'neither the undecided directories nor the undecided root are entered' );
-		$this->assertSame( 2, $state['counts']['undecided'] );
-		$this->assertSame( 3, $state['counts']['unreadable'], 'the pre-flight asks about them like unreadable entries' );
-		$this->assertSame( array( 'wp-content/uploads/undecided-one', 'wp-content/uploads/undecided-two' ), $state['lists']['unreadable'] );
-		$this->assertSame(
-			array(
-				'Some directories were not scanned because it could not be determined whether they are links (for example when this server does not let PHP resolve links); they are listed with the unreadable files, the first is wp-content/uploads/undecided-one.',
-				'The "themes" content directory was not scanned: it could not be determined whether it is a link (wp-content/themes).',
-			),
-			$state['warnings'],
-			'one warning for the directories however many, one for the root'
-		);
-		$this->assertSame( 0, $state['counts']['links'] );
+		list( $lines, $state ) = $this->run_all( $this->link_scanner( $this->root . '/uploads', $unknown, $themes ) );
+		$this->assertSame( $expected, $this->paths( $lines ), 'every directory in place is scanned, neither link is followed, nothing twice' );
+		$this->assertSame( 2, $state['counts']['links'], 'the two that resolve elsewhere count as links' );
+		$this->assertSame( 0, $state['counts']['unreadable'], 'nothing for the pre-flight to ask' );
+		$this->assertSame( array(), $state['lists']['unreadable'] );
+		$this->assertGreaterThan( 2, $state['counts']['undecided'] );
+		$fallback = array_values( array_filter( $state['warnings'], static function ( string $w ): bool {
+			return false !== strpos( $w, 'link detection fell back to a containment check' );
+		} ) );
+		$this->assertCount( 1, $fallback, 'said once, however many directories' );
+		$this->assertContains( 'A directory that resolves to another place than where it is listed was left out: wp-content/uploads/again', $state['warnings'] );
+		$this->assertContains( 'A directory that resolves to another place than where it is listed was left out: wp-content/uploads/away', $state['warnings'] );
+	}
+
+	public function test_a_directory_judged_a_link_is_kept_a_link_unless_the_answer_came_only_from_its_entries(): void {
+		// Windows answers "link" for a volume mount point through readlink(), which realpath() does not resolve (it
+		// looks in place); only an answer from probing the entries may be corrected by where the directory resolves.
+		$this->put( 'uploads/a.jpg' );
+		$this->put( 'uploads/mount/m.jpg' );
+		mkdir( $this->root . '/site' );
+		$root = $this->root;
+		$link = static function ( string $path ) use ( $root ): string {
+			return $root . '/uploads/mount' === $path ? Links::LINK : Links::state( $path );
+		};
+		foreach ( array( 'readlink said so' => false, 'only the entries said so' => true ) as $case => $probed ) {
+			$scanner               = new FileScanner(
+				array( array( 'group' => 'uploads', 'path' => $this->root . '/uploads', 'prefix' => 'wp-content/uploads' ) ),
+				new Exclusions( array(), array() ),
+				PHP_INT_SIZE,
+				Manifest::DEFAULT_CHUNK,
+				array(
+					'abspath'    => $this->root . '/site',
+					'link_state' => $link,
+					'probed'     => static function () use ( $probed ): bool {
+						return $probed;
+					},
+				)
+			);
+			list( $lines, $state ) = $this->run_all( $scanner );
+			if ( $probed ) {
+				$this->assertSame( array( 'wp-content/uploads/a.jpg', 'wp-content/uploads/mount/m.jpg' ), $this->paths( $lines ), $case . ': in place, so a plain directory' );
+				$this->assertSame( 0, $state['counts']['links'], $case );
+			} else {
+				$this->assertSame( array( 'wp-content/uploads/a.jpg' ), $this->paths( $lines ), $case . ': stays a link' );
+				$this->assertSame( 1, $state['counts']['links'], $case );
+			}
+		}
+	}
+
+	public function test_an_undecidable_directory_that_does_not_resolve_at_all_is_asked_about_not_taken_for_a_link(): void {
+		$this->require_symlinks();
+		$this->put( 'uploads/a.jpg' );
+		mkdir( $this->root . '/site' );
+		symlink( $this->root . '/nowhere', $this->root . '/uploads/gone' );
+		// The control: the real test for links sees the broken link and counts it.
+		list( , $state ) = $this->run_all( $this->link_scanner( $this->root . '/uploads' ) );
+		$this->assertSame( 1, $state['counts']['links'] );
+		$this->assertSame( array(), $state['lists']['unreadable'] );
+
+		$root    = $this->root;
+		$unknown = static function ( string $path ) use ( $root ): string {
+			return $root . '/uploads/gone' === $path ? Links::UNKNOWN : Links::state( $path );
+		};
+		list( $lines, $state ) = $this->run_all( $this->link_scanner( $this->root . '/uploads', $unknown ) );
+		$this->assertSame( array( 'wp-content/uploads/a.jpg' ), $this->paths( $lines ) );
+		$this->assertSame( 0, $state['counts']['links'], 'no evidence of a link' );
+		$this->assertSame( array( 'wp-content/uploads/gone' ), $state['lists']['unreadable'], 'the pre-flight asks' );
 	}
 
 	public function test_a_content_directory_behind_a_link_skips_the_storage_and_the_other_groups_by_real_path(): void {
@@ -419,14 +478,15 @@ final class FileScannerTest extends TestCase {
 		$unknown = static function (): string {
 			return Links::UNKNOWN;
 		};
-		$this->assertSame( array( 'link' => false, 'refusal' => Links::UNDECIDED ), Links::root_verdict( $this->root . '/shared', $site, array(), $unknown ) );
-		$this->assertSame( array( 'link' => false, 'refusal' => '' ), Links::root_verdict( $this->root . '/shared', $site ), 'the control: a plain directory' );
-		$this->assertSame( array( 'link' => true, 'refusal' => '' ), Links::root_verdict( $this->root . '/uploads', $site, array( $this->root . '/store' ) ) );
-		$this->assertSame( array( 'link' => true, 'refusal' => Links::INTO_SKIPPED ), Links::root_verdict( $this->root . '/into-store', $site, array( $this->root . '/store' ) ) );
-		$this->assertSame( array( 'link' => true, 'refusal' => Links::HOLDS_GROUP ), Links::root_verdict( $this->root . '/uploads', $site, array(), null, array( $this->root . '/shared' ) ), 'leads to a group directory' );
-		$this->assertSame( array( 'link' => true, 'refusal' => Links::HOLDS_GROUP ), Links::root_verdict( $this->root . '/uploads', $site, array(), null, array( $this->root . '/shared/inner' ) ), 'leads above one' );
-		$this->assertSame( array( 'link' => true, 'refusal' => '' ), Links::root_verdict( $this->root . '/uploads', $site, array(), null, array( $this->root . '/store' ) ), 'the control: a group elsewhere' );
-		$this->assertSame( array( 'link' => true, 'refusal' => Links::HOLDS_SITE ), Links::root_verdict( $this->root . '/uploads', $this->root . '/shared' ), 'the refusals of root_refusal() carry through' );
+		$this->assertSame( array( 'link' => false, 'refusal' => '', 'unknown' => true ), Links::root_verdict( $this->root . '/shared', $site, array(), $unknown ), 'unknown, held to the limits by its real path' );
+		$this->assertSame( array( 'link' => false, 'refusal' => Links::HOLDS_SITE, 'unknown' => true ), Links::root_verdict( $this->root, $site, array(), $unknown ), 'unknown and holding the site' );
+		$this->assertSame( array( 'link' => false, 'refusal' => '', 'unknown' => false ), Links::root_verdict( $this->root . '/shared', $site ), 'the control: a plain directory' );
+		$this->assertSame( array( 'link' => true, 'refusal' => '', 'unknown' => false ), Links::root_verdict( $this->root . '/uploads', $site, array( $this->root . '/store' ) ) );
+		$this->assertSame( array( 'link' => true, 'refusal' => Links::INTO_SKIPPED, 'unknown' => false ), Links::root_verdict( $this->root . '/into-store', $site, array( $this->root . '/store' ) ) );
+		$this->assertSame( array( 'link' => true, 'refusal' => Links::HOLDS_GROUP, 'unknown' => false ), Links::root_verdict( $this->root . '/uploads', $site, array(), null, array( $this->root . '/shared' ) ), 'leads to a group directory' );
+		$this->assertSame( array( 'link' => true, 'refusal' => Links::HOLDS_GROUP, 'unknown' => false ), Links::root_verdict( $this->root . '/uploads', $site, array(), null, array( $this->root . '/shared/inner' ) ), 'leads above one' );
+		$this->assertSame( array( 'link' => true, 'refusal' => '', 'unknown' => false ), Links::root_verdict( $this->root . '/uploads', $site, array(), null, array( $this->root . '/store' ) ), 'the control: a group elsewhere' );
+		$this->assertSame( array( 'link' => true, 'refusal' => Links::HOLDS_SITE, 'unknown' => false ), Links::root_verdict( $this->root . '/uploads', $this->root . '/shared' ), 'the refusals of root_refusal() carry through' );
 
 		// Where a root leads, as a hash: the same through either spelling, different once the link is re-pointed.
 		$before = Links::fingerprint( $this->root . '/uploads' );

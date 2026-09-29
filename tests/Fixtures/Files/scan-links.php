@@ -62,6 +62,7 @@ $out = array(
 	'undecided'  => $state['counts']['undecided'],
 	'unreadable' => $state['lists']['unreadable'],
 	'warnings'   => $state['warnings'],
+	'probed'     => \WPCheckpoint\Files\Links::only_probed( $base . '/uploads' ),
 );
 
 // Taken apart by name: the link as a link, then what it led to.

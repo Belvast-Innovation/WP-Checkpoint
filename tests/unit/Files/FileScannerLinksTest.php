@@ -59,7 +59,7 @@ final class FileScannerLinksTest extends TestCase {
 		return $result;
 	}
 
-	public function test_a_root_that_is_a_link_is_followed_and_what_cannot_be_decided_without_readlink_is_left_out_and_listed(): void {
+	public function test_a_root_that_is_a_link_is_followed_and_without_readlink_directories_are_checked_by_where_they_resolve(): void {
 		$with = $this->scan( '' );
 		$this->assertTrue( $with['readlink'], 'the control: readlink() is there in the first run' );
 		$this->assertSame( array( 'wp-content/uploads/photo.jpg' ), $with['lines'], 'the root that is a link is followed' );
@@ -71,10 +71,16 @@ final class FileScannerLinksTest extends TestCase {
 		$this->assertFalse( $without['readlink'], 'the switch took effect: readlink() is disabled in the second run' );
 		$this->assertSame( array( 'wp-content/uploads/photo.jpg' ), $without['lines'] );
 		$this->assertStringStartsWith( 'The "uploads" content directory is a link; the directory it leads to was backed up', $without['warnings'][0], 'a link with something in it is still recognised as one, and followed at the root' );
+		// Whether a link answer for the root could only have come from probing its entries (the correction of
+		// FileScanner): never for a symbolic link; for a junction only when readlink() does not answer.
+		$this->assertFalse( $with['probed'], 'readlink() answered, or a symbolic link' );
+		$this->assertSame( 'Windows' === PHP_OS_FAMILY, $without['probed'], 'without readlink(), a junction is told apart only by probing' );
 		if ( 'Windows' === PHP_OS_FAMILY ) {
-			// A junction is told apart through a child; an empty directory has none to probe through.
+			// A junction is told apart through a child; an empty directory has none to probe through, and is checked
+			// by where it resolves instead: in place, so scanned, with nothing for the pre-flight to ask.
 			$this->assertSame( 1, $without['undecided'] );
-			$this->assertSame( array( 'wp-content/uploads/empty' ), $without['unreadable'], 'left out, and listed for the pre-flight to ask about' );
+			$this->assertSame( array(), $without['unreadable'] );
+			$this->assertStringContainsString( 'link detection fell back to a containment check', implode( "\n", $without['warnings'] ) );
 		} else {
 			// is_link() answers on POSIX: nothing depends on readlink().
 			$this->assertSame( 0, $without['undecided'] );
