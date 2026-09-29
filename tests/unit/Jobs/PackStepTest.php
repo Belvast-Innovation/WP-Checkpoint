@@ -751,6 +751,33 @@ final class PackStepTest extends TestCase {
 		$this->assertStringContainsString( 'File left out: its content directory changed after the scan', $this->ctx->log() );
 	}
 
+	public function test_where_two_roots_share_a_path_the_one_not_refused_packs_the_line(): void {
+		// Another group was set to the same archive path and is refused (never scanned); it comes first in scan order.
+		$photo = $this->file( '2026/photo.txt', 500, 26 );
+		$other = $this->ctx->root . '/other';
+		mkdir( $other . '/2026', 0700, true );
+		file_put_contents( $other . '/2026/photo.txt', 'another directory' );
+		$this->index( array( $photo ) );
+		$this->scanned_at( $this->site );
+		$roots = array_merge(
+			array(
+				array(
+					'group'  => 'plugins',
+					'path'   => $other,
+					'prefix' => 'wp-content/uploads',
+					'skip'   => array(),
+					'refuse' => 'another content group is backed up under the same path',
+				),
+			),
+			$this->roots()
+		);
+		list( $result ) = $this->drive( new PackStep( $roots, $this->options(), self::CHUNK ) );
+		$this->assertSame( StepResult::DONE, $result->kind );
+		$packed = $this->packed();
+		$this->assertSame( array( $photo ), array_column( $packed, 'p' ), 'packed, not left out' );
+		$this->assertSame( hash_file( 'sha256', $this->site . '/2026/photo.txt' ), $packed[0]['h'], 'from the directory the scan read' );
+	}
+
 	public function test_without_the_scan_record_of_the_roots_lines_are_packed_as_before(): void {
 		// A scan summary written before the record existed (an export started before an upgrade): no comparison.
 		$photo   = $this->file( '2026/photo.txt', 500, 24 );

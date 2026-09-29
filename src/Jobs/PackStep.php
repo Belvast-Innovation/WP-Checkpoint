@@ -386,29 +386,16 @@ final class PackStep implements Step {
 			$cursor['pending'] = null;
 			return 0;
 		}
-		// Only the root the scan listed the line under takes it: the longest of the scan's prefixes that holds it.
-		// The roots are resolved again every tick; where that root is gone, the line would fall to another one.
-		$candidates = $roots;
-		if ( null !== $this->scanned_prefixes ) {
-			$scanned    = self::scanned_prefix( $this->scanned_prefixes, $p );
-			$candidates = '' === $scanned ? $roots : array_values(
-				array_filter(
-					$roots,
-					static function ( array $root ) use ( $scanned ): bool {
-						return (string) $root['prefix'] === $scanned;
-					}
-				)
-			);
-			if ( array() === $candidates ) {
-				$context->logger()->warning( 'File left out: its content directory changed after the scan', array( 'p' => $p ) );
-				self::note( $cursor, 'outside', $p );
-				$cursor['offset']  = $line['next'];
-				$cursor['pending'] = null;
-				return 0;
-			}
+		$picked = $this->line_root( $roots, $p );
+		if ( $picked['gone'] ) {
+			$context->logger()->warning( 'File left out: its content directory changed after the scan', array( 'p' => $p ) );
+			self::note( $cursor, 'outside', $p );
+			$cursor['offset']  = $line['next'];
+			$cursor['pending'] = null;
+			return 0;
 		}
-		$root   = self::root_of( $candidates, $p );
-		$source = null === $root ? null : self::source_of( $candidates, $p );
+		$root   = $picked['root'];
+		$source = null === $root ? null : self::source_of( array( $root ), $p );
 		$stat   = null === $source ? false : self::fresh_stat( $source );
 		if ( false === $stat || ! is_readable( $source ) ) {
 			self::note( $cursor, 'skipped', $p );
@@ -518,7 +505,8 @@ final class PackStep implements Step {
 	 */
 	private function chunk( JobContext $context, string $work, array $roots, Packer $packer, array &$cursor ): int {
 		$file   = $cursor['file'];
-		$source = self::source_of( $roots, (string) $file['p'] );
+		$root   = $this->line_root( $roots, (string) $file['p'] )['root'];
+		$source = null === $root ? null : self::source_of( array( $root ), (string) $file['p'] );
 		if ( empty( $file['final'] ) ) {
 			// Compared with the stat the entry began with; a file already past MAX_RESTARTS is finished as declared.
 			$stat = null === $source ? false : self::fresh_stat( $source );
@@ -901,6 +889,53 @@ final class PackStep implements Step {
 			$roots[ $i ]['refused'] = '' !== $verdict['refusal'] || $moved || ( isset( $root['refuse'] ) && '' !== (string) $root['refuse'] );
 		}
 		return $roots;
+	}
+
+	/**
+	 * The root that packs an archive path, the same in every phase of a file: only the root the scan listed it
+	 * under (the longest of the scan's prefixes that holds it, when the scan recorded them), and where two roots
+	 * share that prefix, the one not refused (the scan never scans a refused root, ScanRoots::resolve()). A root
+	 * with a shorter prefix never stands in: it is another directory. 'gone': the scan's root is not among the
+	 * roots any more.
+	 *
+	 * @param array<int, array<string, mixed>> $roots Roots (judged()).
+	 * @param string                           $p     Archive path.
+	 * @return array{root: array<string, mixed>|null, gone: bool}
+	 */
+	private function line_root( array $roots, string $p ): array {
+		$candidates = $roots;
+		if ( null !== $this->scanned_prefixes ) {
+			$scanned = self::scanned_prefix( $this->scanned_prefixes, $p );
+			if ( '' !== $scanned ) {
+				$candidates = array_values(
+					array_filter(
+						$roots,
+						static function ( array $root ) use ( $scanned ): bool {
+							return (string) $root['prefix'] === $scanned;
+						}
+					)
+				);
+				if ( array() === $candidates ) {
+					return array(
+						'root' => null,
+						'gone' => true,
+					);
+				}
+			}
+		}
+		$root = self::root_of( $candidates, $p );
+		if ( null !== $root && ! empty( $root['refused'] ) ) {
+			foreach ( $candidates as $other ) {
+				if ( (string) $other['prefix'] === (string) $root['prefix'] && empty( $other['refused'] ) ) {
+					$root = $other;
+					break;
+				}
+			}
+		}
+		return array(
+			'root' => $root,
+			'gone' => false,
+		);
 	}
 
 	/**
