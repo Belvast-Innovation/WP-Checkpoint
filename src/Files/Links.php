@@ -93,7 +93,7 @@ final class Links {
 	 * @return string '' or one of NOT_A_DIRECTORY, FILESYSTEM_ROOT, HOLDS_SITE, SITE_UNKNOWN.
 	 */
 	public static function root_refusal( string $path, string $abspath ): string {
-		$target = realpath( $path );
+		$target = Paths::real( $path );
 		if ( false === $target || ! is_dir( $target ) ) {
 			return self::NOT_A_DIRECTORY;
 		}
@@ -103,7 +103,7 @@ final class Links {
 			return self::FILESYSTEM_ROOT;
 		}
 		// Unknown or unresolvable: nothing can say the link does not lead onto the site itself.
-		if ( '' === rtrim( $abspath, '/\\' ) || false === realpath( $abspath ) ) {
+		if ( '' === rtrim( $abspath, '/\\' ) || false === Paths::real( $abspath ) ) {
 			return self::SITE_UNKNOWN;
 		}
 		return Paths::is_same_or_inside( $target, $abspath ) ? self::HOLDS_SITE : '';
@@ -144,7 +144,7 @@ final class Links {
 		// the WordPress directory, above it, or the root of the file system would back up the whole site or more.
 		$refusal = self::root_refusal( $path, $abspath );
 		if ( '' === $refusal ) {
-			$target = (string) realpath( $path );
+			$target = (string) Paths::real( $path );
 			foreach ( $skip as $dir ) {
 				if ( Paths::is_same_or_inside( (string) $dir, $target ) ) {
 					$refusal = self::INTO_SKIPPED;
@@ -154,7 +154,7 @@ final class Links {
 		}
 		if ( '' === $refusal ) {
 			foreach ( $hold as $dir ) {
-				if ( Paths::is_same_or_inside( (string) realpath( $path ), (string) $dir ) ) {
+				if ( Paths::is_same_or_inside( (string) Paths::real( $path ), (string) $dir ) ) {
 					$refusal = self::HOLDS_GROUP;
 					break;
 				}
@@ -176,7 +176,7 @@ final class Links {
 	 * @return string
 	 */
 	public static function key( string $path, bool $real = true ): string {
-		$resolved = $real ? realpath( $path ) : false;
+		$resolved = $real ? Paths::real( $path ) : false;
 		$key      = rtrim( Paths::normalize( false === $resolved ? $path : $resolved ), '/' );
 		return Paths::is_windows() ? strtolower( $key ) : $key;
 	}
@@ -189,7 +189,7 @@ final class Links {
 	 * @return string
 	 */
 	public static function fingerprint( string $path ): string {
-		return false === realpath( $path ) ? '' : hash( 'sha256', self::key( $path ) );
+		return false === Paths::real( $path ) ? '' : hash( 'sha256', self::key( $path ) );
 	}
 
 	/**

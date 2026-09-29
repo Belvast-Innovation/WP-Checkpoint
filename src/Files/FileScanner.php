@@ -10,6 +10,7 @@ namespace WPCheckpoint\Files;
 use WPCheckpoint\Archive\EntryPath;
 use WPCheckpoint\Archive\Manifest;
 use WPCheckpoint\Archive\Packer;
+use WPCheckpoint\Support\Paths;
 use WPCheckpoint\Support\Utf8;
 
 /**
@@ -120,6 +121,14 @@ final class FileScanner {
 	private $probed;
 
 	/**
+	 * What entries are compared with (in_place(), skipped()): function( string $root ): string, the root's real path
+	 * as a comparison key (Links::key()). Tests put the link's own spelling in its place to show what that would lose.
+	 *
+	 * @var callable
+	 */
+	private $root_base;
+
+	/**
 	 * Per root: the skipped directories ('skip' and 'also' as SKIP, 'collide' as COLLIDE) by comparison key
 	 * (Links::key(): the real path, or
 	 * the spelling when it does not resolve).
@@ -142,10 +151,11 @@ final class FileScanner {
 	 * @param Exclusions                                                                                                                                                  $exclusions Exclusions.
 	 * @param int                                                                                                                                                         $int_size   PHP_INT_SIZE of the platform.
 	 * @param int                                                                                                                                                         $chunk_bytes Content chunk size (bounds the largest indexable file).
-	 * @param array{abspath?: string, mask?: callable, link_state?: callable, probed?: callable}                                                                          $options    'abspath': the WordPress directory ('' refuses every root that is a link);
-	 *                                                                                                                                                             'mask': function( string $path ): string for the target of a followed root (without it the
-	 *                                                                                                                                                             target is not shown); 'link_state': the link test (Links::state()); 'probed': whether a link
-	 *                                                                                                                                                             answer can only have come from probing the entries (Links::only_probed()).
+	 * @param array{abspath?: string, mask?: callable, link_state?: callable, probed?: callable, root_base?: callable}                                                    $options    'abspath': the WordPress directory ('' refuses every root that is a link);
+	 *                                                                                                                                       'mask': function( string $path ): string for the target of a followed root (without it the
+	 *                                                                                                                                       target is not shown); 'link_state': the link test (Links::state()); 'probed': whether a link
+	 *                                                                                                                                       answer can only have come from probing the entries (Links::only_probed()); 'root_base': what entries are
+	 *                                                                                                                                                          compared with (the root's real path, Links::key()).
 	 */
 	public function __construct( array $roots, Exclusions $exclusions, int $int_size = PHP_INT_SIZE, int $chunk_bytes = Manifest::DEFAULT_CHUNK, array $options = array() ) {
 		$this->roots = array();
@@ -187,6 +197,7 @@ final class FileScanner {
 		};
 		$this->link_state = isset( $options['link_state'] ) && is_callable( $options['link_state'] ) ? $options['link_state'] : array( Links::class, 'state' );
 		$this->probed     = isset( $options['probed'] ) && is_callable( $options['probed'] ) ? $options['probed'] : array( Links::class, 'only_probed' );
+		$this->root_base  = isset( $options['root_base'] ) && is_callable( $options['root_base'] ) ? $options['root_base'] : array( Links::class, 'key' );
 	}
 
 	/**
@@ -338,7 +349,7 @@ final class FileScanner {
 			return false;
 		}
 		if ( $verdict['link'] ) {
-			$target = realpath( $root['path'] );
+			$target = Paths::real( $root['path'] );
 			$this->warn( $state, 'links', sprintf( 'The "%1$s" content directory is a link; the directory it leads to was backed up (%2$s -> %3$s).', $root['group'], $root['prefix'], (string) call_user_func( $this->mask, false === $target ? '' : $target ) ), true );
 		}
 		// Where the root leads, for the pack step to see whether it still leads there (a hash, not a path).
@@ -381,7 +392,7 @@ final class FileScanner {
 	 */
 	private function real_root( int $index, array $root ): string {
 		if ( ! isset( $this->real_roots[ $index ] ) ) {
-			$this->real_roots[ $index ] = false === realpath( (string) $root['path'] ) ? '' : Links::key( (string) $root['path'] );
+			$this->real_roots[ $index ] = false === Paths::real( (string) $root['path'] ) ? '' : (string) call_user_func( $this->root_base, (string) $root['path'] );
 		}
 		return $this->real_roots[ $index ];
 	}
@@ -397,7 +408,7 @@ final class FileScanner {
 	 */
 	private function in_place( array $state, array $root, string $rel, string $abs ): bool {
 		$real = $this->real_root( (int) $state['root'], $root );
-		return '' !== $real && false !== realpath( $abs ) && Links::key( $abs ) === Links::key( $real . '/' . $rel, false );
+		return '' !== $real && false !== Paths::real( $abs ) && Links::key( $abs ) === Links::key( $real . '/' . $rel, false );
 	}
 
 	/**
@@ -448,7 +459,7 @@ final class FileScanner {
 			++$state['counts']['links'];
 			return null;
 		}
-		if ( Links::UNKNOWN === $link && false === realpath( $abs ) ) {
+		if ( Links::UNKNOWN === $link && false === Paths::real( $abs ) ) {
 			// Not resolvable at all (gone since the listing, or the host refuses): no evidence of a link, so the
 			// pre-flight asks, as for anything unreadable.
 			$this->undecided( $state );
