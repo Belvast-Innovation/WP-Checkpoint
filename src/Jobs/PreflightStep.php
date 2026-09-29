@@ -7,6 +7,8 @@
 
 namespace WPCheckpoint\Jobs;
 
+use WPCheckpoint\Database\WpdbConnection;
+
 use WPCheckpoint\Archive\Packer;
 use WPCheckpoint\Database\Connection;
 use WPCheckpoint\Database\RowSizeCheck;
@@ -38,6 +40,12 @@ use WPCheckpoint\Database\TableSelection;
  * site's slug) come in as callables so the step is testable without it.
  */
 final class PreflightStep implements Step {
+
+	/**
+	 * At most this many triggers, routines or events are named in a note; the rest are counted.
+	 */
+	const MAX_ROUTINES_LISTED = 10;
+
 
 	/**
 	 * Tables of a left-out group named in the findings (the rest are counted).
@@ -292,6 +300,9 @@ final class PreflightStep implements Step {
 			foreach ( (array) $listing['views'] as $view ) {
 				$notes[] = sprintf( 'View %s is not part of the backup (views are not exported).', (string) $view );
 			}
+			if ( isset( $this->env['routines'] ) && is_callable( $this->env['routines'] ) ) {
+				$notes = array_merge( $notes, self::routine_notes( (array) call_user_func( $this->env['routines'], $tables ) ) );
+			}
 			$stats = $this->statistics( $tables );
 		}
 		// The table data only: InnoDB's index pages never reach the exported SQL. Floats throughout: free space and
@@ -324,6 +335,45 @@ final class PreflightStep implements Step {
 				'foreign'    => $foreign,
 			)
 		);
+	}
+
+	/**
+	 * Notes on what the export does not take though a site may rely on it: triggers, stored procedures and
+	 * functions, and events, named (a few) and counted, like the views.
+	 *
+	 * @param array<string, mixed> $found WpdbConnection::routines().
+	 * @return string[]
+	 */
+	public static function routine_notes( array $found ): array {
+		$notes = array();
+		$count = static function ( array $list ): string {
+			return count( $list ) >= WpdbConnection::ROUTINES_READ ? 'At least ' . count( $list ) : (string) count( $list );
+		};
+		$names = static function ( array $list ): string {
+			$shown = array_slice( $list, 0, self::MAX_ROUTINES_LISTED );
+			return implode( ', ', $shown ) . ( count( $list ) > count( $shown ) ? sprintf( ' and %d more', count( $list ) - count( $shown ) ) : '' );
+		};
+		if ( null === $found['triggers'] || null === $found['routines'] || null === $found['events'] ) {
+			$notes[] = 'Triggers, stored procedures and events could not be listed; any the site has are not part of the backup (they are not exported).';
+		}
+		if ( is_array( $found['triggers'] ) && array() !== $found['triggers'] ) {
+			$listed = array();
+			foreach ( $found['triggers'] as $trigger ) {
+				$listed[] = sprintf( '%s (on %s)', $trigger[0], $trigger[1] );
+			}
+			$notes[] = sprintf( '%s triggers on the tables of the backup are not part of it (triggers are not exported): %s.', empty( $found['capped'] ) ? $count( $listed ) : 'At least ' . count( $listed ), $names( $listed ) );
+		}
+		if ( is_array( $found['routines'] ) && array() !== $found['routines'] ) {
+			$listed = array();
+			foreach ( $found['routines'] as $routine ) {
+				$listed[] = sprintf( '%s %s', 'FUNCTION' === strtoupper( $routine[0] ) ? 'function' : 'procedure', $routine[1] );
+			}
+			$notes[] = sprintf( '%s stored procedures and functions in this database are not part of the backup (they are not exported): %s.', $count( $listed ), $names( $listed ) );
+		}
+		if ( is_array( $found['events'] ) && array() !== $found['events'] ) {
+			$notes[] = sprintf( '%s events in this database are not part of the backup (events are not exported): %s.', $count( $found['events'] ), $names( $found['events'] ) );
+		}
+		return $notes;
 	}
 
 	/**

@@ -555,6 +555,59 @@ final class ExportPreflightTest extends JobTestCase {
 		}
 	}
 
+	public function test_triggers_procedures_functions_and_events_are_named_in_the_notes_and_the_database_summary(): void {
+		global $wpdb;
+		$p          = self::PREFIX;
+		$connection = new WpdbConnection();
+		$this->tables[] = 'wpcpother_t';
+		$wpdb->query( 'CREATE TABLE `wpcpother_t` (`id` int NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB' );
+		$made = array(
+			'DROP TRIGGER IF EXISTS `wpcptest_count_posts`'   => "CREATE TRIGGER `wpcptest_count_posts` BEFORE INSERT ON `{$p}posts` FOR EACH ROW SET NEW.post_title = NEW.post_title",
+			'DROP TRIGGER IF EXISTS `wpcptest_other_trigger`' => 'CREATE TRIGGER `wpcptest_other_trigger` BEFORE INSERT ON `wpcpother_t` FOR EACH ROW SET NEW.id = NEW.id',
+			'DROP PROCEDURE IF EXISTS `wpcptest_tidy`'        => 'CREATE PROCEDURE `wpcptest_tidy`() SELECT 1',
+			'DROP FUNCTION IF EXISTS `wpcptest_slugify`'      => 'CREATE FUNCTION `wpcptest_slugify`( t TEXT ) RETURNS TEXT DETERMINISTIC RETURN LOWER( t )',
+			'DROP EVENT IF EXISTS `wpcptest_nightly`'         => 'CREATE EVENT `wpcptest_nightly` ON SCHEDULE EVERY 1 DAY DISABLE DO SELECT 1',
+		);
+		try {
+			foreach ( $made as $drop => $create ) {
+				$wpdb->query( $drop );
+				$wpdb->query( $create );
+				$this->assertSame( '', $wpdb->last_error, $create );
+			}
+			$this->register_export( 'export-routines', array( 'routines' => array( $connection, 'routines' ) ) );
+			$job = $this->repo->create(
+				'export-routines',
+				0,
+				array(),
+				array(
+					'contents' => array( 'files' => array() ),
+					'policy'   => array(
+						'unreadable' => 'continue',
+						'oversize'   => 'exclude',
+						'large_dirs' => 'include',
+					),
+				)
+			);
+			$this->assertSame( TickResult::COMPLETED, $this->drive( $job->id )->status, (string) $this->repo->find( $job->id )->last_error );
+			$work  = $this->work( $this->repo->find( $job->id ) );
+			$notes = implode( "\n", (array) ExportPlan::read( $work, ExportPlan::PLAN )['notes'] );
+			$this->assertStringContainsString( "wpcptest_count_posts (on {$p}posts)", $notes, 'a trigger on a table of the backup' );
+			$this->assertStringNotContainsString( 'wpcptest_other_trigger', $notes, 'not one on a table outside it' );
+			$this->assertStringContainsString( 'procedure wpcptest_tidy', $notes );
+			$this->assertStringContainsString( 'function wpcptest_slugify', $notes );
+			$this->assertStringContainsString( 'wpcptest_nightly', $notes );
+			$this->assertStringContainsString( 'View ' . $p . 'view is not part of the backup', $notes, 'the control: next to the views, as they are' );
+			// On to the manifest's warnings: the database export's summary carries them.
+			$summary = (string) wp_json_encode( ExportPlan::read( $work, DatabaseExportStep::SUMMARY ) );
+			$this->assertStringContainsString( 'wpcptest_count_posts', $summary );
+			$this->assertStringContainsString( 'wpcptest_nightly', $summary );
+		} finally {
+			foreach ( array_keys( $made ) as $drop ) {
+				$wpdb->query( $drop );
+			}
+		}
+	}
+
 	public function test_bad_options_and_a_database_only_export_are_handled_by_the_preflight(): void {
 		$this->register_export( 'export-b' );
 		$job    = $this->repo->create( 'export-b', 0, array(), array( 'contents' => array( 'files' => array( 'media' ) ) ) );

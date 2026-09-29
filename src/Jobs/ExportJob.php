@@ -101,6 +101,7 @@ final class ExportJob implements JobType {
 				array(
 					'prefix'        => Environment::table_prefix(),
 					'tables'        => array( $connection, 'tables_with_prefix' ),
+					'routines'      => array( $connection, 'routines' ),
 					'writable'      => static function () use ( $directories ): array {
 						$bad = array();
 						foreach ( Directories::SUBDIRS as $sub ) {
