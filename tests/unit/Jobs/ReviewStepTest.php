@@ -27,6 +27,7 @@ final class ReviewStepTest extends TestCase {
 	private $work;
 
 	protected function set_up(): void {
+		parent::set_up();
 		$this->root = sys_get_temp_dir() . '/wpcheckpoint-review-' . bin2hex( random_bytes( 4 ) );
 		mkdir( $this->root . '/tmp', 0700, true );
 		$this->work = $this->root . '/tmp/job-5';

@@ -12,6 +12,7 @@ final class DeleterTest extends TestCase {
 	private $root;
 
 	protected function set_up(): void {
+		parent::set_up();
 		$this->root = sys_get_temp_dir() . '/wpcheckpoint-deleter-' . bin2hex( random_bytes( 4 ) );
 		mkdir( $this->root . '/base/a/b', 0700, true );
 		mkdir( $this->root . '/outside/dir', 0700, true );

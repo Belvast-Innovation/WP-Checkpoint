@@ -21,6 +21,7 @@ final class AtomicWriteTest extends TestCase {
 	private $dir;
 
 	protected function set_up(): void {
+		parent::set_up();
 		$this->dir = sys_get_temp_dir() . '/wpcheckpoint-atomic-' . bin2hex( random_bytes( 4 ) );
 		mkdir( $this->dir, 0700, true );
 	}

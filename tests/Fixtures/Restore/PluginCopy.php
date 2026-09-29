@@ -2,6 +2,8 @@
 
 namespace WPCheckpoint\Tests\Fixtures\Restore;
 
+use WPCheckpoint\Tests\Fixtures\Sandbox;
+
 /**
  * A small stand-in for the running copy of this plugin, which a restore stages into plugins: a development
  * checkout carries vendor/ and node_modules/, hundreds of megabytes a test restore should not copy each time.
@@ -31,16 +33,17 @@ final class PluginCopy {
 	}
 
 	/**
-	 * Remove one.
+	 * Remove one, with anything a test added to it. Only a directory of the shape make() returns, under the
+	 * temporary directory (Sandbox::remove()): an empty or other path is refused before anything is touched.
 	 *
 	 * @param string $dir The plugin directory make() returned.
+	 * @throws \LogicException When $dir is not one make() returns.
 	 */
 	public static function remove( string $dir ): void {
-		foreach ( array( '/wp-checkpoint.php', '/src/Thing.php', '/readme.txt' ) as $file ) {
-			@unlink( $dir . $file );
+		$dir = rtrim( $dir, '/\\' );
+		if ( 'wp-checkpoint' !== basename( $dir ) || 1 !== preg_match( '/\Awpc-plugin-[0-9a-f]{8}\z/', basename( dirname( $dir ) ) ) ) {
+			throw new \LogicException( sprintf( 'PluginCopy::remove( %s ) refused: not a stand-in PluginCopy::make() returned. Nothing was deleted.', var_export( $dir, true ) ) );
 		}
-		@rmdir( $dir . '/src' );
-		@rmdir( $dir );
-		@rmdir( dirname( $dir ) );
+		Sandbox::remove( dirname( $dir ) );
 	}
 }

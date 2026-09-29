@@ -20,6 +20,7 @@ final class LocalHeaderCheckTest extends TestCase {
 	private $root;
 
 	protected function set_up(): void {
+		parent::set_up();
 		$this->root = sys_get_temp_dir() . '/wpcheckpoint-lhc-' . bin2hex( random_bytes( 4 ) );
 		mkdir( $this->root . '/out', 0700, true );
 		mkdir( $this->root . '/src', 0700 );

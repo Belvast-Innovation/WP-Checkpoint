@@ -23,6 +23,7 @@ final class EstimateRecordStepTest extends TestCase {
 	private $recorded = array();
 
 	protected function set_up(): void {
+		parent::set_up();
 		$this->ctx = new WorkContext( 'wpcheckpoint-estimate-' );
 		ExportPlan::write( $this->ctx->work(), FileScanStep::SUMMARY, array( 'counts' => array( 'files' => 12, 'bytes' => 3456 ) ) );
 	}

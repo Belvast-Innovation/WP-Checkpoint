@@ -107,6 +107,7 @@ final class StorageLocationTest extends TestCase {
 	}
 
 	public function test_a_wordpress_directory_that_is_no_local_path_is_compared_as_written(): void {
+		$cwd = (string) getcwd();
 		chdir( $this->sandbox ); // Where a relative path would lead.
 		try {
 			$within = array(
@@ -117,7 +118,7 @@ final class StorageLocationTest extends TestCase {
 			$this->assertSame( 'uploads (stream)', StorageLocation::refusal( 's3://bucket/uploads/x', $within, array() ), 'the control: compared as written' );
 			$this->assertSame( 'themes', StorageLocation::refusal( $this->sandbox . '/wp/wp-content/themes', $this->within, array() ), 'the control: the same directory, named in full' );
 		} finally {
-			chdir( dirname( __DIR__, 3 ) );
+			chdir( $cwd ); // Where the suite was, not the repository: the suite may run from elsewhere.
 		}
 	}
 

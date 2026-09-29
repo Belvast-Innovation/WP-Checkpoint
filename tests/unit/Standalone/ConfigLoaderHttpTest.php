@@ -22,6 +22,7 @@ final class ConfigLoaderHttpTest extends TestCase {
 	private $port = 0;
 
 	protected function set_up(): void {
+		parent::set_up();
 		if ( '\\' === DIRECTORY_SEPARATOR ) {
 			$this->markTestSkipped( 'Starts PHP\'s built-in server through a POSIX shell.' );
 		}
