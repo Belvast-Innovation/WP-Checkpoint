@@ -1210,7 +1210,7 @@ final class SwapCheckStep implements Step {
 	 * @return bool
 	 */
 	private static function ours( string $name ): bool {
-		return TableMoves::never( $name, self::base_prefix() );
+		return TableMoves::never( $name );
 	}
 
 	/**

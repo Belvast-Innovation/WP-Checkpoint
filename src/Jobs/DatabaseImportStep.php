@@ -215,7 +215,7 @@ final class DatabaseImportStep implements Step {
 				if ( ! isset( $defined[ $table['number'] ] ) ) {
 					$defined = array( $table['number'] => RestorePreflightStep::definition( RestoreFiles::path( $work, RestoreFiles::DEFINITIONS ), $table['number'] ) );
 				}
-				$target  = new ImportTarget(
+				$target = new ImportTarget(
 					$table['table'],
 					$table['temporary'],
 					$table['final'],
@@ -224,7 +224,13 @@ final class DatabaseImportStep implements Step {
 					array( $plan['plan'], 'reference' ),
 					$defined[ $table['number'] ]['columns']
 				);
-				$outcome = $this->import_chunk( $context, $db, $ledger, $target, $file, (int) $cursor['current']['c'], $counted, $slowest, $first, $cursor, $plan['plan'], $site_set, (string) ( $defined[ $table['number'] ]['auto_increment'] ?? '' ) );
+				try {
+					$outcome = $this->import_chunk( $context, $db, $ledger, $target, $file, (int) $cursor['current']['c'], $counted, $slowest, $first, $cursor, $plan['plan'], $site_set, (string) ( $defined[ $table['number'] ]['auto_increment'] ?? '' ) );
+				} catch ( StatementFailed $e ) {
+					// Which table: the database's own message names none, or (for the errors that carry row data) is
+					// not kept at all (ImportSession::error()).
+					throw new StatementFailed( sprintf( 'Table %1$s: %2$s', $target->table, $e->getMessage() ), (int) $e->getCode(), $e );
+				}
 				if ( 'restart' === $outcome ) {
 					$cursor['current'] = null;
 					$cursor['walk']    = $cursor['table_start'];

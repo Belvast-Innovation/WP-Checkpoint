@@ -127,10 +127,14 @@ final class TablePlanTest extends TestCase {
 		self::plan( array( 'wp_options', 'wp_a-b', $twin ) );
 	}
 
-	public function test_the_jobs_table_is_left_out_in_any_case_where_the_server_ignores_case(): void {
-		$this->assertSame( array( 'wp_WPCheckpoint_Jobs' ), array_keys( array_diff_key( array_flip( array_column( self::plan( array( 'wp_options', 'wp_WPCheckpoint_Jobs' ) )->tables(), 'table' ) ), array( 'wp_options' => 0 ) ) ), 'the control: a server that tells case apart keeps it' );
+	public function test_the_jobs_table_is_left_out_in_any_letter_case(): void {
+		// A run table of this plugin by its name in any case (lower_case_table_names): this installation's jobs
+		// table where the server ignores case, a run table of the plugin all the same where it does not.
 		$plan = self::plan( array( 'wp_options', 'wp_WPCheckpoint_Jobs' ), 'wp_', 'wp_', array(), true );
 		$this->assertSame( array( 'wp_WPCheckpoint_Jobs' => 'jobs' ), $plan->skipped() );
+		$this->assertSame( array( 'wp_WPCheckpoint_Jobs' => 'own' ), self::plan( array( 'wp_options', 'wp_WPCheckpoint_Jobs' ) )->skipped() );
+		$this->assertSame( array( 'wp_options' ), array_column( $plan->tables(), 'table' ), 'the control: the site\'s table is planned' );
+		$this->assertSame( array( 'wp_old_wpcheckpoint_swap_plan' => 'own' ), self::plan( array( 'wp_options', 'wp_old_wpcheckpoint_swap_plan' ) )->skipped(), 'a neighbour\'s under a longer prefix' );
 	}
 
 	public function test_the_options_table_and_on_a_network_the_sitemeta_table_are_required(): void {

@@ -22,7 +22,7 @@ use WPCheckpoint\Restore\Refused;
 use WPCheckpoint\Restore\RestoreFiles;
 use WPCheckpoint\Restore\Statement;
 use WPCheckpoint\Restore\TablePlan;
-use WPCheckpoint\Support\Schema;
+use WPCheckpoint\Database\OwnTables;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -396,13 +396,13 @@ final class RestorePreflightStep implements Step {
 		$options = RestoreJob::options( $context->options() );
 		$table   = $plan['plan'];
 		$live    = ( new WpdbConnection() )->tables_with_prefix( (string) $wpdb->base_prefix )['tables'];
-		$staying = array( Schema::jobs_table() => true );
+		$staying = array_fill_keys( OwnTables::names( (string) $wpdb->base_prefix ), true );
 		foreach ( $options['exclude_tables'] as $name ) {
 			$staying[ $table->final_name( $name ) ] = true;
 		}
 		$moved = array();
 		foreach ( $live as $name ) {
-			if ( ! isset( $staying[ $name ] ) && 1 !== preg_match( '/\A(?:wcptmp|wcpold)/', $name ) ) {
+			if ( ! isset( $staying[ $name ] ) && ! OwnTables::is_own( $name ) ) {
 				$moved[ $name ] = true;
 			}
 		}
@@ -452,7 +452,7 @@ final class RestorePreflightStep implements Step {
 			}
 			foreach ( is_array( $rows ) ? $rows : array() as $row ) {
 				list( $owner, $name, $referenced ) = array_map( 'strval', $row );
-				if ( isset( $moved[ $owner ] ) || 1 === preg_match( '/\A(?:wcptmp|wcpold)/', $owner ) || ! isset( $moved[ $referenced ] ) ) {
+				if ( isset( $moved[ $owner ] ) || OwnTables::is_own( $owner ) || ! isset( $moved[ $referenced ] ) ) {
 					continue;
 				}
 				throw new Refused( sprintf( 'The table %1$s stays as it is, but its foreign key %2$s references %3$s, which the restore replaces. InnoDB would keep the key on the old %3$s: the new data would be held to the old rows, and the old tables could not be deleted after the restore. Either restore %1$s too (it must be in the backup and not left out), or remove that foreign key first; then start the restore again.', $owner, $name, $referenced ) );
