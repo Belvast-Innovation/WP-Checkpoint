@@ -78,7 +78,9 @@ final class FileScannerJunctionRootTest extends TestCase {
 		$real = $this->scan( 'real' );
 		$this->assertSame( $every, $real['lines'] );
 		$this->assertGreaterThan( 0, $real['undecided'], 'the fallback was used' );
-		$this->assertSame( 1, $real['links'], 'the working junction inside is still a link' );
+		// The working junction inside is not entered (without readlink() Windows reports it as neither a directory
+		// nor a link, so it counts as a special entry; observed on the CI runner): nothing behind it is listed.
+		$this->assertNotContains( 'wp-content/uploads/first/0out/o.txt', $real['lines'] );
 	}
 
 	public function test_one_directory_in_another_letter_case_drive_letter_or_short_name_is_the_same_key(): void {
