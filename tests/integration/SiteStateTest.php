@@ -18,7 +18,6 @@ use WPCheckpoint\Jobs\Runner;
 use WPCheckpoint\Jobs\StaleJob;
 use WPCheckpoint\Jobs\StepResult;
 use WPCheckpoint\Jobs\TickResult;
-use WPCheckpoint\Support\Deleter;
 use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Support\Logger;
 use WPCheckpoint\Support\Options;
@@ -30,6 +29,7 @@ use WPCheckpoint\Tests\Fixtures\Jobs\ClosureStep;
 use WPCheckpoint\Tests\Fixtures\Jobs\CliHoldingStep;
 use WPCheckpoint\Tests\Fixtures\Jobs\FixtureJobType;
 use WPCheckpoint\Tests\Fixtures\Jobs\HoldingStep;
+use WPCheckpoint\Tests\Fixtures\Sandbox;
 
 /**
  * A job that holds the site changed (site_state), and a step only WP-CLI runs (CliOnly): what the engine does
@@ -37,8 +37,8 @@ use WPCheckpoint\Tests\Fixtures\Jobs\HoldingStep;
  */
 final class SiteStateTest extends WP_UnitTestCase {
 
-	/** @var string */
-	private $root;
+	/** @var string The test's directory; '' before set_up() made it. */
+	private $root = '';
 
 	/** @var Directories */
 	private $dirs;
@@ -79,11 +79,14 @@ final class SiteStateTest extends WP_UnitTestCase {
 		// The DROP TABLE below commits what the test wrote: the settings the uninstall tests changed are put back.
 		UninstallSetting::save( false );
 		false === $this->version ? delete_option( Uninstaller::OPTION_VERSION ) : update_option( Uninstaller::OPTION_VERSION, $this->version );
-		$wpdb->query( 'DROP TABLE IF EXISTS ' . Schema::jobs_table() );
-		Deleter::empty_directory( $this->root );
-		@rmdir( $this->root );
+		// Before the DROP TABLE, which commits them: after it, parent::tear_down()'s rollback would undo the deletes and
+		// leave this test's storage state (a clone detected, a removed directory) to the tests after it.
 		Options::delete( Schema::OPTION );
 		Options::delete( Directories::OPTION );
+		$wpdb->query( 'DROP TABLE IF EXISTS ' . Schema::jobs_table() );
+		if ( '' !== $this->root ) {
+			Sandbox::remove( $this->root );
+		}
 		parent::tear_down();
 	}
 
