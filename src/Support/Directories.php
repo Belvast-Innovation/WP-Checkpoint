@@ -306,10 +306,14 @@ final class Directories {
 	 */
 	private function note_clone(): void {
 		// The tokens are another installation's when the state was last taken up under another ABSPATH (the
-		// original's, or a copy's of which this is a copy again); state this installation wrote holds its own, and
-		// state that never took a directory up says nothing.
+		// original's, or a copy's of which this is a copy again): another place, not another spelling of this one
+		// (WP-CLI's --path through a link, where the web server resolves it). State this installation wrote holds its
+		// own, and state that never took a directory up says nothing. A written ABSPATH that cannot be resolved here
+		// is another place (the copy's host has no such directory). Not seen: a copy at the very same ABSPATH on
+		// another host, whose directories look like the original's in every way.
 		$written = (string) $this->state['abspath'];
-		if ( '' === $written || OwnerMarker::hash_path( $written ) === OwnerMarker::hash_path( (string) $this->context['abspath'] ) ) {
+		$here    = (string) $this->context['abspath'];
+		if ( '' === $written || OwnerMarker::hash_path( $written ) === OwnerMarker::hash_path( $here ) ) { // Resolved paths where they resolve.
 			return;
 		}
 		$tokens                       = array_merge( (array) $this->state['copied_tokens'], array( (string) $this->state['token'] ), (array) $this->state['past_tokens'] );

@@ -49,13 +49,16 @@ final class OwnerMarker {
 	}
 
 	/**
-	 * Hash of a normalised installation path.
+	 * Hash of an installation path: of the directory it resolves to where it can be resolved (WP-CLI's --path through
+	 * a link and the web server's resolved __DIR__ are one installation), of its normalised spelling otherwise (a
+	 * path of another host). A marker written from under a link before this resolved the path does not match once.
 	 *
 	 * @param string $abspath ABSPATH.
 	 * @return string
 	 */
 	public static function hash_path( string $abspath ): string {
-		$normalized = rtrim( Paths::normalize( $abspath ), '/' );
+		$real       = '' === $abspath ? false : Paths::real( rtrim( $abspath, '/\\' ) );
+		$normalized = rtrim( Paths::normalize( false !== $real ? $real : $abspath ), '/' );
 		if ( Paths::is_windows() ) {
 			$normalized = strtolower( $normalized );
 		}

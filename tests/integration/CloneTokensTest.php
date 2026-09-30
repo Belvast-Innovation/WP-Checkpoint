@@ -19,6 +19,13 @@ use WPCheckpoint\Tests\Fixtures\Sandbox;
  * - I1: a job the original started (one that holds the site changed, and one that does not) is never let through
  *   by the gate nor taken by acquire() on the copy;
  * - I2: a job that holds the site, started by the copy, is let through and taken.
+ * And on sequences of the original alone, its requests and jobs under its ABSPATH and under another spelling of it
+ * (a link, as WP-CLI's --path may be where the web server resolves it):
+ * - I3: every job the original started is let through and taken, under either spelling.
+ *
+ * The copy and the original share one stored state here, as a copy's database starts as the original's: the original
+ * does not act once the copy does. Not covered, as not seen by the plugin: a copy at the very same ABSPATH on another
+ * host.
  *
  * The rule under test (Directories): the tokens held when a clone is detected are the original's, and none of them is
  * ever this installation's again. Size: WPCHECKPOINT_CLONE_SEQUENCES sequences from seed
@@ -81,14 +88,15 @@ final class CloneTokensTest extends WP_UnitTestCase {
 	/**
 	 * Whether the copy's next request lets a job through and takes it (the lock given back after).
 	 */
-	private function runs_on_copy( int $id, string $site, string $custom ): bool {
+	private function runs_on_copy( int $id, string $site, string $custom, bool $both = false ): bool {
 		global $wpdb;
 		$repo = self::repo( $this->dirs( $site, $custom ) );
 		$job  = $repo->find( $id );
 		$let  = null !== $job && $repo->gate( $job )['allowed'];
 		$took = null !== $repo->acquire( $id );
 		$wpdb->update( Schema::jobs_table(), array( 'lock_token' => '', 'locked_until' => 0 ), array( 'id' => $id ) );
-		return $let || $took;
+		// Run: let through and taken (a driver needs both). Not run: neither (either alone would be a way in).
+		return $both ? $let && $took : $let || $took;
 	}
 
 	/**
@@ -162,12 +170,67 @@ final class CloneTokensTest extends WP_UnitTestCase {
 				}
 			}
 			foreach ( $ours as $id => $what ) {
-				if ( ! $this->runs_on_copy( $id, $site_dir, $custom ) ) {
+				if ( ! $this->runs_on_copy( $id, $site_dir, $custom, true ) ) {
 					$found[] = sprintf( 'I2 (seed %d, %s, after %s): %s does not run on the copy', $seed, $custom_mode ? 'custom' : 'default', implode( ', ', $steps ), $what );
 				}
 			}
 		}
 		return $found;
+	}
+
+	/**
+	 * Run one sequence of the original alone, under its ABSPATH and a link to it; the invariants it breaks.
+	 *
+	 * @return string[]
+	 */
+	private function original_sequence( int $seed ): array {
+		global $wpdb;
+		mt_srand( $seed );
+		$custom_mode = 1 === mt_rand( 0, 1 );
+		$tag         = 'orig' . $seed;
+		mkdir( $this->root . '/' . $tag . '/real/wp-includes', 0755, true );
+		symlink( $this->root . '/' . $tag . '/real', $this->root . '/' . $tag . '/link' );
+		$custom = $custom_mode ? $this->root . '/' . $tag . '/store' : '';
+		Options::delete( Directories::OPTION );
+		$wpdb->query( 'DELETE FROM ' . Schema::jobs_table() );
+		$jobs  = array();
+		$found = array();
+		$steps = array();
+		for ( $i = 0, $n = mt_rand( 1, 8 ); $i < $n; $i++ ) {
+			$site    = $tag . '/' . ( 0 === mt_rand( 0, 1 ) ? 'real' : 'link' );
+			$start   = 0 === mt_rand( 0, 2 ) || array() === $jobs;
+			$steps[] = ( $start ? 'start' : 'request' ) . ' as ' . basename( $site );
+			$dirs    = $this->dirs( $site, $custom );
+			if ( '' === $dirs->base() ) {
+				$found[] = sprintf( 'I3 (seed %d, %s, after %s): no directory: %s', $seed, $custom_mode ? 'custom' : 'default', implode( ', ', $steps ), $dirs->last_error() );
+				continue;
+			}
+			if ( $start ) {
+				$job = self::repo( $dirs )->create( 'plain' );
+				self::hold( $job->id );
+				$jobs[] = $job->id;
+			}
+			foreach ( $jobs as $id ) {
+				foreach ( array( 'real', 'link' ) as $as ) {
+					if ( ! $this->runs_on_copy( $id, $tag . '/' . $as, $custom, true ) ) {
+						$found[] = sprintf( 'I3 (seed %d, %s, after %s): the original\'s job %d does not run as %s', $seed, $custom_mode ? 'custom' : 'default', implode( ', ', $steps ), $id, $as );
+					}
+				}
+			}
+		}
+		return $found;
+	}
+
+	public function test_the_original_runs_its_jobs_under_either_spelling_of_its_abspath(): void {
+		Schema::ensure();
+		$count = max( 1, (int) ( getenv( 'WPCHECKPOINT_CLONE_SEQUENCES' ) ?: 300 ) / 3 );
+		$found = array();
+		for ( $seed = 1; $seed <= $count; $seed++ ) {
+			$found = array_merge( $found, $this->original_sequence( $seed ) );
+		}
+		$this->assertSame( array(), array_slice( $found, 0, 10 ), count( $found ) . ' violations' );
+		global $wpdb;
+		$this->assertGreaterThan( 0, (int) $wpdb->get_var( 'SELECT COUNT(*) FROM ' . Schema::jobs_table() ), 'the control: there were jobs to check' );
 	}
 
 	public function test_a_copy_never_takes_back_a_copied_restores_token(): void {
