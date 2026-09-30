@@ -18,6 +18,9 @@ defined( 'ABSPATH' ) || exit;
  * before it changes anything, and confirms its lease right before each
  * change it cannot take back, so that every rule that leaves such a job
  * alone already sees it (a checkpoint the database refuses stops the run).
+ * A step that is done checkpoints SITE_SWAPPED (or SITE_UNTOUCHED, the site
+ * put back) before it returns done: done() carries no cursor, and the Runner
+ * fails a job whose step ends while the site is still being changed.
  */
 interface HoldsSite {
 

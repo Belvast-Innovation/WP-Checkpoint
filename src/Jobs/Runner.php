@@ -948,7 +948,7 @@ final class Runner {
 			if ( ! in_array( $now->status, array( Job::QUEUED, Job::RUNNING, Job::PAUSED ), true ) ) {
 				return new TickResult( TickResult::FINISHED, -1, $now );
 			}
-			if ( Job::SITE_UNTOUCHED !== $now->site_state ) {
+			if ( Job::SITE_UNTOUCHED !== $now->site_state && ! $now->is_locked( time() ) ) {
 				// Not failed: a failed job no longer puts the site back. Said as what it is.
 				return new TickResult( TickResult::BLOCKED, JobRepository::BACKOFF_SECONDS[ count( JobRepository::BACKOFF_SECONDS ) - 1 ], $now, $this->redactor->redact( $message ) . ' ' . __( 'This job holds the site changed, so it is not failed: it goes on once the table is repaired (deactivate and activate WP Checkpoint, or update it).', 'wp-checkpoint' ) );
 			}

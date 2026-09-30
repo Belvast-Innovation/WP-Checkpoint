@@ -441,8 +441,19 @@ final class SiteStateTest extends WP_UnitTestCase {
 		$this->assertFalse( $repo->gate( $held )['allowed'] );
 		$this->assertNull( $repo->acquire( $held->id ), 'acquire refuses it too, not only the gate' );
 		$this->assertSame( 0, $ran );
-		$this->assertSame( TickResult::MORE, $this->runner( true, $original )->tick( $held->id, $this->now )->status, 'the control: the original runs it' );
-		$this->assertGreaterThan( 0, $ran );
+
+		// The copy's operator empties the copied directory (it said "another installation's"): the copy now resolves
+		// a usable directory, with the copied token still. The original's job is still not the copy's to run.
+		Sandbox::remove( $this->root . '/store-a' );
+		mkdir( $this->root . '/store-a' );
+		$again = new Directories( array( 'is_web_request' => false, 'document_root' => '', 'abspath' => $this->root . '/releases/b/', 'custom_dir' => $this->root . '/store-a' ) );
+		$this->assertNotSame( '', $again->base(), 'the control: the copy has a directory now: ' . $again->last_error() );
+		$this->assertTrue( $again->state()['clone_detected'] );
+		$this->assertSame( $held->storage_token, (string) $again->state()['token'], 'the control: still the copied token' );
+		$repo = $this->repo_for( $again );
+		$this->assertFalse( $repo->gate( $held )['allowed'] );
+		$this->assertNull( $repo->acquire( $held->id ) );
+		$this->assertSame( 0, $ran );
 	}
 
 	public function test_a_job_that_holds_the_site_is_not_run_by_code_older_than_the_table(): void {
@@ -519,7 +530,8 @@ final class SiteStateTest extends WP_UnitTestCase {
 	}
 
 	public function test_a_progress_message_the_column_cannot_hold_whole_is_stored_cut_not_refused(): void {
-		$long = str_repeat( 'é', 150 ) . str_repeat( 'x', 150 ); // 300 characters, a cut through the multi-byte ones.
+		// 300 characters, the 191st inside a word, multi-byte ones around the cut.
+		$long = str_repeat( 'é', 150 ) . ' /srv/account/' . str_repeat( 'x', 135 );
 		$this->register(
 			'long',
 			array(
@@ -536,7 +548,7 @@ final class SiteStateTest extends WP_UnitTestCase {
 		$this->assertSame( TickResult::MORE, $result->status, (string) $result->message );
 		$stored = $this->repo->find( $job->id );
 		$this->assertSame( Job::SITE_CHANGING, $stored->site_state, 'the cursor was stored' );
-		$this->assertSame( mb_substr( $long, 0, 191, 'UTF-8' ), $stored->progress_message );
+		$this->assertSame( str_repeat( 'é', 150 ), $stored->progress_message, 'cut at the end of the last whole word: no part of the path' );
 	}
 
 	public function test_the_engine_refuses_what_would_leave_the_site_changed_behind(): void {
@@ -941,6 +953,10 @@ final class SiteStateTest extends WP_UnitTestCase {
 		$this->assertSame( Job::RUNNING, $this->repo->find( $held->id )->status );
 		$control = $this->runner( true )->tick( $plain->id, $this->now );
 		$this->assertSame( TickResult::FAILED, $control->status, 'the control: a job that holds nothing is failed with the reason' );
+		// While a live run holds it, that is what is said.
+		$this->set( $held->id, array( 'lock_token' => 'a-live-run', 'locked_until' => time() + 600 ) );
+		$busy = $this->runner( true )->tick( $held->id, $this->now );
+		$this->assertSame( TickResult::BUSY, $busy->status, (string) $busy->message );
 	}
 }
 

@@ -369,20 +369,20 @@ final class JobRepository {
 
 	/**
 	 * The storage tokens a job that holds the site changed may carry to be run here (gate() and acquire() alike):
-	 * this installation's (Directories::own_tokens(), none while a clone is unresolved), and the token this request
-	 * resolved a usable storage directory for. The latter is never a copy's: on a copy of the site with the default
-	 * directory, a new token is chosen with a new directory, so a job started there after the copy was detected runs;
-	 * a row copied with the database carries the original's token and does not. With a custom directory the copy gets
-	 * no usable directory at all (it is another installation's) and runs none.
+	 * this installation's (Directories::own_tokens(), none while a clone is unresolved), and, while a clone is
+	 * unresolved, the current token when it is not the one in effect as the clone was detected (state clone_token):
+	 * a token this copy was given after that is its own, so a job it started then runs; the copied one, which every
+	 * row copied with the database carries, never does, whatever directory the copy resolves meanwhile. A clone
+	 * detected before that token was recorded gets none.
 	 *
 	 * @return string[]
 	 */
 	private function held_tokens(): array {
-		$base   = $this->directories->base(); // First: resolving it may choose the token.
-		$state  = $this->directories->state();
+		$state  = $this->directories->state(); // Resolved for this request.
 		$tokens = Directories::own_tokens( $state );
 		$token  = (string) $state['token'];
-		if ( '' !== $base && Directories::is_valid_token( $token ) && ! in_array( $token, $tokens, true ) ) {
+		$copied = (string) ( $state['clone_token'] ?? '' );
+		if ( ! empty( $state['clone_detected'] ) && '' !== $copied && Directories::is_valid_token( $token ) && $token !== $copied && ! in_array( $token, $tokens, true ) ) {
 			$tokens[] = $token;
 		}
 		return $tokens;
@@ -414,7 +414,7 @@ final class JobRepository {
 			}
 			$message = empty( $this->directories->state()['clone_detected'] )
 				? __( 'This job belongs to another installation of WP Checkpoint (its storage token is not this site\'s); it is not run here.', 'wp-checkpoint' )
-				: __( 'This job holds the site changed, and whether it is this site\'s own cannot be told while the clone notice is unresolved (its storage token is not one this installation holds). Resolve the clone notice on the WP Checkpoint page: if this is the original site, continue with the original directory, and the job goes on.', 'wp-checkpoint' );
+				: __( 'This job holds the site changed, and whether it is this site\'s own cannot be told while the clone notice is unresolved (its storage token is not one this installation holds). Resolve the clone notice on the WP Checkpoint page: continue with the original directory if this is the original site (the job then goes on), or keep the new one if this is the copy (the job is then the original\'s, and is not run here).', 'wp-checkpoint' );
 			return self::verdict( false, 'storage_changed', $message, $retry );
 		}
 		$base = $this->directories->base();
@@ -754,7 +754,7 @@ final class JobRepository {
 		if ( ! $holds && '' === $this->directories->base() ) {
 			return null; // A job that holds the site changed needs no storage directory (gate()).
 		}
-		$held             = $this->held_tokens(); // Resolves the directories: state() below is this request's.
+		$held             = $this->held_tokens();
 		$state            = $this->directories->state();
 		$storage_token    = (string) $state['token'];
 		$held_sql         = array() === $held ? 'NULL' : implode( ', ', array_map( array( $wpdb, 'prepare' ), array_fill( 0, count( $held ), '%s' ), $held ) );
@@ -1027,10 +1027,11 @@ final class JobRepository {
 	private static function fit_message( string $message ): string {
 		global $wpdb;
 		$message = Utf8::scrub( $message );
-		if ( function_exists( 'mb_substr' ) ) {
-			$message = mb_substr( $message, 0, 191, 'UTF-8' );
-		} elseif ( strlen( $message ) > 191 ) {
-			$message = (string) preg_replace( '/[\x80-\xBF]{0,3}\z/', '', substr( $message, 0, 191 ) ); // No cut character.
+		if ( mb_strlen( $message, 'UTF-8' ) > 191 ) {
+			// Cut at a word's end: a path, a host or a secret cut in two would no longer be recognised by the masks
+			// the text passes through on its way out, and its first part would show.
+			$cut     = preg_replace( '/\s+\S*\z/u', '', mb_substr( $message, 0, 192, 'UTF-8' ) );
+			$message = is_string( $cut ) && mb_strlen( $cut, 'UTF-8' ) <= 191 ? rtrim( $cut ) : '';
 		}
 		$stored = $wpdb->strip_invalid_text_for_column( self::table(), 'progress_message', $message );
 		return is_string( $stored ) ? $stored : '';

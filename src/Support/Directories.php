@@ -180,6 +180,7 @@ final class Directories {
 				'provisional'         => false,
 				'verification'        => array(),
 				'clone_detected'      => false,
+				'clone_token'         => '', // The token in effect when the clone was detected: the copied one.
 				'previous_path'       => '',
 				'abspath'             => '',
 				'previous_abspath'    => '',
@@ -292,6 +293,19 @@ final class Directories {
 		$this->state['previous_path']    = '';
 		$this->state['previous_abspath'] = '';
 		$this->save_state();
+	}
+
+	/**
+	 * Record the token in effect as a clone is detected (the copied one), once per detection (a clone resolved and
+	 * detected again records anew): a job carrying it is the original's whatever this copy resolves later; a token
+	 * this copy is given after that is its own (JobRepository). Read only while a clone is detected.
+	 *
+	 * @return void
+	 */
+	private function note_clone(): void {
+		if ( empty( $this->state['clone_detected'] ) || '' === (string) $this->state['clone_token'] ) {
+			$this->state['clone_token'] = (string) $this->state['token'];
+		}
 	}
 
 	/**
@@ -422,6 +436,7 @@ final class Directories {
 					return;
 				}
 				// Same options, different ABSPATH: a clone, a move, or a new release of a deployment.
+				$this->note_clone();
 				$this->state['clone_detected']   = true;
 				$this->state['previous_path']    = $existing;
 				$this->state['previous_abspath'] = (string) $this->state['abspath'];
@@ -535,6 +550,7 @@ final class Directories {
 		// Another installation's marker, read: a clone. One that cannot be read is no evidence of that (past_tokens
 		// are kept, nothing is saved): prepare() refuses the directory with the reason (unowned()).
 		if ( self::MARKER_OTHER === $this->marker( $dir ) ) {
+			$this->note_clone();
 			$this->state['clone_detected'] = true;
 			$this->state['previous_path']  = $dir;
 			$this->state['past_tokens']    = array(); // The original installation's (own_tokens()).
