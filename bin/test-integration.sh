@@ -16,12 +16,56 @@
 # there is one, else phpunit.xml.dist; a -c of your own is not supported.
 #
 # Anything the suite leaves in its working directory is kept there and fails the run: a test wrote to a relative
-# path. Used by `composer test:integration`, npm run test:integration and CI. (WPCHECKPOINT_TEST_PHPUNIT names
-# another PHPUnit, for this script's own test.)
+# path. Used by `composer test:integration`, npm run test:integration and CI.
+#
+# One run at a time: runs share the tests database, and a second one's start (the core test library reinstalls the
+# tables; the leftover check removes an earlier run's) breaks the first. The lock, /tmp/wpcheckpoint-integration.lock in
+# the container every run executes in, holds the process ID and start time of the run that has it; another run is
+# refused while that process is alive and is an integration run (its ID reused by something else does not count), and
+# takes over a lock whose run has died. Refused, the script exits with status 75. (WPCHECKPOINT_TEST_PHPUNIT and
+# WPCHECKPOINT_TEST_LOCK name another PHPUnit and another lock, for this script's own test.)
 PLUGIN=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 PHPUNIT=${WPCHECKPOINT_TEST_PHPUNIT:-$PLUGIN/vendor/bin/phpunit}
 CONFIG=$PLUGIN/phpunit.xml
 [ -f "$CONFIG" ] || CONFIG=$PLUGIN/phpunit.xml.dist
+LOCK=${WPCHECKPOINT_TEST_LOCK:-/tmp/wpcheckpoint-integration.lock}
+
+# Whether process $1 is alive and an integration run.
+running() {
+	[ -n "$1" ] && kill -0 "$1" 2>/dev/null || return 1
+	if [ -r "/proc/$1/cmdline" ]; then
+		tr '\000' ' ' < "/proc/$1/cmdline" | grep -q 'test-integration' || return 1
+	fi
+	return 0
+}
+# Create the lock, only if there is none (noclobber: one of two runs creates it).
+take() {
+	( set -C; printf '%s\n%s\n' "$$" "$(date -u '+%Y-%m-%d %H:%M:%S UTC')" > "$LOCK" ) 2>/dev/null
+}
+if ! take; then
+	HOLDER=$(sed -n 1p "$LOCK" 2>/dev/null)
+	SINCE=$(sed -n 2p "$LOCK" 2>/dev/null)
+	if running "$HOLDER"; then
+		echo "Another integration run is in progress: process $HOLDER, started $SINCE (lock $LOCK). Runs share the tests database; wait until it ends, or stop it." >&2
+		exit 75
+	fi
+	echo "Taking over the lock of an integration run that is no longer running: process ${HOLDER:-unknown}, started ${SINCE:-unknown}." >&2
+	rm -f -- "$LOCK"
+	if ! take; then
+		echo "Another integration run took the lock meanwhile: $(sed -n 1p "$LOCK" 2>/dev/null), started $(sed -n 2p "$LOCK" 2>/dev/null)." >&2
+		exit 75
+	fi
+fi
+# Released when this run ends, if it is still this run's.
+release() {
+	if [ "$(sed -n 1p "$LOCK" 2>/dev/null)" = "$$" ]; then
+		rm -f -- "$LOCK"
+	fi
+}
+trap release EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/wpcheckpoint-it.XXXXXX") || exit 1
 mkdir "$WORK/cwd" "$WORK/tmp" || exit 1
 
