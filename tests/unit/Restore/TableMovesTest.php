@@ -130,11 +130,13 @@ final class TableMovesTest extends TestCase {
 	public function test_short_prefixes_move_their_own_and_never_the_restores_tables_nor_a_longer_neighbour(): void {
 		foreach ( array( 'w', 'wc', 'wcp', 'wcp_', 'wcptmp', 'wcpold' ) as $prefix ) {
 			$core   = array_merge( self::site( $prefix ), array( $prefix . 'users', $prefix . 'usermeta' ) );
-			$runs   = array(
-				TempTables::name( self::TOKEN, 12, 'beef', 'posts' ),
-				TempTables::old( self::TOKEN, 12, 'beef', 'options' ),
-				TempTables::ledger( self::TOKEN, 12, 'beef' ),
-			);
+			// A whole restore's worth: its temporary and old tables of every WordPress table form what looks like
+			// an installation of their own under a short prefix ("wcptmp…_12_beef_posts", "…_options", …).
+			$runs = array( TempTables::ledger( self::TOKEN, 12, 'beef' ) );
+			foreach ( array( 'posts', 'postmeta', 'options', 'comments', 'commentmeta', 'terms', 'term_taxonomy', 'term_relationships', 'users' ) as $name ) {
+				$runs[] = TempTables::name( self::TOKEN, 12, 'beef', $name );
+				$runs[] = TempTables::old( self::TOKEN, 12, 'beef', $name );
+			}
 			$live   = array_merge( $core, $runs, array( $prefix . 'shop_orders' ) );
 			$out    = TableMoves::select( $prefix, false, $live, array( $prefix . 'posts', $prefix . 'options' ), array(), $core );
 			$expect = array_values( array_merge( array_diff( $core, array( $prefix . 'posts', $prefix . 'options' ) ), array( $prefix . 'shop_orders' ) ) );

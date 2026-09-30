@@ -21,11 +21,15 @@ final class IntegrationScriptTest extends TestCase {
 		if ( 'Windows' === PHP_OS_FAMILY ) {
 			$this->markTestSkipped( 'A POSIX shell script; the integration suite runs in the wp-env container.' );
 		}
+		if ( '' === trim( (string) shell_exec( 'command -v flock' ) ) ) {
+			$this->markTestSkipped( 'No flock here; the script needs it (util-linux, or BusyBox\'s flock in the wp-env container).' );
+		}
 		$this->sandbox = Sandbox::make( 'it-script' );
 		mkdir( $this->sandbox . '/tmp' );
 		file_put_contents(
 			$this->sandbox . '/phpunit',
 			'<?php' . "\n"
+			. 'if ( getenv( "FAKE_PID" ) ) { file_put_contents( getenv( "FAKE_PID" ), (string) getmypid() ); }' . "\n"
 			. 'if ( getenv( "FAKE_WAIT" ) ) { $t = time(); while ( ! file_exists( getenv( "FAKE_WAIT" ) ) && time() - $t < 30 ) { usleep( 20000 ); } }' . "\n"
 			. 'if ( getenv( "FAKE_TEMP" ) ) { mkdir( getenv( "TMPDIR" ) . "/wpc-left-in-temp" ); file_put_contents( getenv( "TMPDIR" ) . "/wpc-left-in-temp/x", "x" ); }' . "\n"
 			. 'file_put_contents( getenv( "FAKE_RECORD" ), json_encode( array( "cwd" => getcwd(), "argv" => array_slice( $argv, 1 ), "suite" => getenv( "WPCHECKPOINT_TEST_SUITE" ), "tmpdir" => getenv( "TMPDIR" ), "run_tmp" => getenv( "WPCHECKPOINT_TEST_RUN_TMP" ), "left_in_temp" => is_file( getenv( "TMPDIR" ) . "/wpc-left-in-temp/x" ) ) ) );' . "\n"
@@ -199,7 +203,7 @@ final class IntegrationScriptTest extends TestCase {
 		}
 		$this->assertSame( 0, $done['code'], $done['stderr'] );
 		$this->assertFileExists( $this->sandbox . '/first.json', 'the control: a run that starts PHPUnit is seen to' );
-		$this->assertFileDoesNotExist( $lock, 'released when the run ends' );
+		$this->assertSame( '', (string) file_get_contents( $lock ), 'released when the run ends: its name taken out' );
 
 		$third = $this->run_script( array() );
 		$this->assertSame( 0, $third['code'], 'and the next run goes ahead: ' . $third['stderr'] );
@@ -217,9 +221,71 @@ final class IntegrationScriptTest extends TestCase {
 			file_put_contents( $lock, $pid . "\n2026-01-01 00:00:00 UTC\n" );
 			$run = $this->run_script( array() );
 			$this->assertSame( 0, $run['code'], $what . ': ' . $run['stderr'] );
-			$this->assertStringContainsString( 'Taking over the lock of an integration run that is no longer running: process ' . $pid . ', started 2026-01-01 00:00:00 UTC', $run['stderr'], $what );
-			$this->assertFileDoesNotExist( $lock, $what . ': released at the end' );
+			$this->assertStringContainsString( 'Taking over the lock of an integration run that ended without releasing it: process ' . $pid . ', started 2026-01-01 00:00:00 UTC', $run['stderr'], $what );
+			$this->assertSame( '', (string) file_get_contents( $lock ), $what . ': released at the end' );
 		}
+	}
+
+	/**
+	 * Wait until a condition holds, at most five seconds.
+	 */
+	private static function until( callable $condition ): bool {
+		for ( $i = 0; $i < 250; $i++ ) {
+			clearstatcache();
+			if ( $condition() ) {
+				return true;
+			}
+			usleep( 20000 );
+		}
+		return false;
+	}
+
+	public function test_a_run_whose_shell_was_killed_keeps_the_lock_while_its_phpunit_runs(): void {
+		$lock = $this->sandbox . '/run.lock';
+		$go   = $this->sandbox . '/go';
+		$pid  = $this->sandbox . '/phpunit.pid';
+		$run  = $this->start_script( array( 'FAKE_WAIT' => $go, 'FAKE_PID' => $pid, 'FAKE_RECORD' => $this->sandbox . '/first.json' ) );
+		try {
+			$this->assertTrue( self::until( static function () use ( $pid ): bool {
+				return is_file( $pid ) && '' !== (string) file_get_contents( $pid );
+			} ), 'its PHPUnit started' );
+			proc_terminate( $run[0], 9 ); // The shell only, as a timeout's SIGKILL would: its PHPUnit goes on.
+			$this->assertTrue( self::until( static function () use ( $run ): bool {
+				return ! proc_get_status( $run[0] )['running'];
+			} ), 'the shell is gone' );
+			$this->assertTrue( posix_kill( (int) file_get_contents( $pid ), 0 ), 'the control: its PHPUnit still runs' );
+
+			$second = self::finish( $this->start_script( array( 'FAKE_RECORD' => $this->sandbox . '/second.json' ) ) );
+			$this->assertSame( 75, $second['code'], 'refused while the PHPUnit runs: ' . $second['stderr'] );
+			$this->assertStringContainsString( 'Another integration run is in progress: process ' . $run[2] . ',', $second['stderr'] );
+			$this->assertFileDoesNotExist( $this->sandbox . '/second.json' );
+		} finally {
+			touch( $go );
+			self::finish( $run );
+		}
+		$this->assertTrue( self::until( static function () use ( $pid ): bool {
+			return ! posix_kill( (int) file_get_contents( $pid ), 0 );
+		} ), 'its PHPUnit ended' );
+		$third = $this->run_script( array() );
+		$this->assertSame( 0, $third['code'], $third['stderr'] );
+		$this->assertStringContainsString( 'Taking over the lock of an integration run that ended without releasing it: process ' . $run[2] . ',', $third['stderr'], 'the killed run is named' );
+	}
+
+	public function test_an_interrupted_run_releases_the_lock_and_cleans_up(): void {
+		$lock = $this->sandbox . '/run.lock';
+		$go   = $this->sandbox . '/go';
+		$pid  = $this->sandbox . '/phpunit.pid';
+		$run  = $this->start_script( array( 'FAKE_WAIT' => $go, 'FAKE_PID' => $pid, 'FAKE_RECORD' => $this->sandbox . '/first.json' ) );
+		$this->assertTrue( self::until( static function () use ( $pid ): bool {
+			return is_file( $pid ) && '' !== (string) file_get_contents( $pid );
+		} ), 'its PHPUnit started' );
+		$this->assertCount( 1, $this->work_dirs(), 'the control: the run has its directory' );
+		proc_terminate( $run[0], 2 ); // SIGINT to the shell: it ends once its PHPUnit has.
+		touch( $go );
+		$done = self::finish( $run );
+		$this->assertSame( 130, $done['code'], $done['stderr'] );
+		$this->assertSame( array(), $this->work_dirs(), 'its directory is cleaned up' );
+		$this->assertSame( '', (string) file_get_contents( $lock ), 'and the lock released' );
 	}
 
 	public function test_the_suites_status_is_the_scripts(): void {
