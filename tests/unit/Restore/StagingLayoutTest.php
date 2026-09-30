@@ -3,6 +3,7 @@
 namespace WPCheckpoint\Tests\Unit\Restore;
 
 use WPCheckpoint\Restore\StagingLayout;
+use WPCheckpoint\Tests\Fixtures\ExpectedPath;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 /**
@@ -37,7 +38,7 @@ final class StagingLayoutTest extends TestCase {
 				'group'    => 'plugins',
 				'relative' => 'akismet/akismet.php',
 				'target'   => '/srv/wp/wp-content/plugins/akismet/akismet.php',
-				'staged'   => $root . '/plugins/akismet/akismet.php',
+				'staged'   => ExpectedPath::slashed( $root, 'plugins/akismet/akismet.php' ),
 			),
 			$layout->map( 'wp-content/plugins/akismet/akismet.php' )
 		);
@@ -48,7 +49,7 @@ final class StagingLayoutTest extends TestCase {
 				'group'    => 'other-content',
 				'relative' => 'languages/de_DE.mo',
 				'target'   => '/srv/wp/wp-content/languages/de_DE.mo',
-				'staged'   => $root . '/other-content/languages/de_DE.mo',
+				'staged'   => ExpectedPath::slashed( $root, 'other-content/languages/de_DE.mo' ),
 			),
 			$layout->map( 'wp-content/languages/de_DE.mo' )
 		);
@@ -135,7 +136,7 @@ final class StagingLayoutTest extends TestCase {
 			self::RANDOM
 		);
 		$this->assertSame( array( '/srv/wp/wp-content', '/mnt/media' ), $layout->parents() );
-		$this->assertSame( '/mnt/media/wp-checkpoint-stage-' . self::TOKEN . '-7-' . self::RANDOM . '/uploads', $layout->stage_dir( 'uploads' ) );
+		$this->assertSame( ExpectedPath::slashed( '/mnt/media/wp-checkpoint-stage-' . self::TOKEN . '-7-' . self::RANDOM, 'uploads' ), $layout->stage_dir( 'uploads' ) );
 		$this->assertSame( $layout->root( 'plugins' ), $layout->root( 'other-content' ), 'other-content is staged in the content directory, its entries\' parent' );
 		$this->assertSame( '/srv/wp/wp-content', $layout->parent( 'other-content' ) );
 	}

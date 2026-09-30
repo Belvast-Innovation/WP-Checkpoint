@@ -20,6 +20,8 @@ use WPCheckpoint\Support\Deleter;
 use WPCheckpoint\Support\Redactor;
 use WPCheckpoint\Tests\Fixtures\Archive\ArchiveBuilder;
 use WPCheckpoint\Tests\Fixtures\Jobs\JobTestCase;
+use WPCheckpoint\Tests\Fixtures\Leftovers;
+use WPCheckpoint\Tests\Fixtures\Sandbox;
 
 /**
  * Backups made of this site's own tables with the real exporter (1 MiB
@@ -40,8 +42,12 @@ abstract class RestoreTestCase extends JobTestCase {
 	/** @var string The stand-in for the running copy of this plugin (PluginCopy). */
 	protected $plugin_copy = '';
 
+	/** @var string[]|null The restore's tables ("wcptmp", "wcpold") there before the test; null before set_up(). */
+	private $run_tables_before = null;
+
 	public function set_up(): void {
 		parent::set_up();
+		$this->run_tables_before = Leftovers::tables();
 		// The restore as it is, with a small stand-in for the running plugin copy it stages.
 		$this->plugin_copy = PluginCopy::make();
 		$steps             = Plugin::instance()->job_types()->get( RestoreJob::ID )->steps();
@@ -85,8 +91,12 @@ abstract class RestoreTestCase extends JobTestCase {
 		foreach ( $this->created as $table ) {
 			$wpdb->query( "DROP TABLE IF EXISTS `{$table}`" );
 		}
-		foreach ( (array) $wpdb->get_col( "SHOW TABLES LIKE 'wcptmp%'" ) as $table ) {
-			$wpdb->query( "DROP TABLE IF EXISTS `{$table}`" );
+		// The restore's tables this test's jobs made (moved-aside "wcpold" ones included), and only those: another
+		// test's are its own to remove, and the suite's leftover check names the test that left them.
+		if ( null !== $this->run_tables_before ) {
+			foreach ( array_diff( Leftovers::tables(), $this->run_tables_before ) as $table ) {
+				$wpdb->query( "DROP TABLE IF EXISTS `{$table}`" );
+			}
 		}
 		$wpdb->query( 'SET FOREIGN_KEY_CHECKS=1' );
 		foreach ( $this->builders as $builder ) {
@@ -94,7 +104,9 @@ abstract class RestoreTestCase extends JobTestCase {
 		}
 		// PHPUnit keeps every test object to the end of the suite: what they hold adds up in one process.
 		$this->builders = array();
-		PluginCopy::remove( $this->plugin_copy );
+		if ( '' !== $this->plugin_copy ) { // Not set when set_up() stopped early.
+			PluginCopy::remove( $this->plugin_copy );
+		}
 		// The staging a completed restore leaves for the swap (and a failed one for its retry): not left behind a test.
 		foreach ( Residue::scan_site( Residue::site_dirs( ScanRoots::site_directories() ), Directories::own_tokens() ) as $entry ) {
 			Deleter::delete_tree( $entry['parent'], $entry['path'] );
@@ -133,8 +145,7 @@ abstract class RestoreTestCase extends JobTestCase {
 		for ( $c = 1; $c <= (int) $state['chunks']; $c++ ) {
 			$chunks[] = (string) file_get_contents( $exporter->chunk_path( $table, $c ) );
 		}
-		Deleter::empty_directory( $dir );
-		rmdir( $dir );
+		Sandbox::remove( $dir );
 		return array( $chunks, (int) $state['rows'] );
 	}
 

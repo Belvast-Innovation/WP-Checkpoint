@@ -63,6 +63,43 @@ final class OwnerMarker {
 	}
 
 	/**
+	 * Whether marker contents are the start of this installation's marker and not all of it (empty included): what a
+	 * request that died while writing it leaves behind.
+	 *
+	 * @param string $contents   Raw marker file contents.
+	 * @param string $install_id Install ID.
+	 * @param string $abspath    ABSPATH.
+	 * @return bool
+	 */
+	public static function is_unfinished( string $contents, string $install_id, string $abspath ): bool {
+		if ( '' === $install_id ) {
+			return false;
+		}
+		$expected = self::build( $install_id, $abspath );
+		return strlen( $contents ) < strlen( $expected ) && 0 === strncmp( $expected, $contents, strlen( $contents ) );
+	}
+
+	/**
+	 * Write a marker only if none is there yet (exclusive creation: of two requests preparing the same directory,
+	 * one writes it and the other finds it). A marker this call created but could not write in full (a full disk) is
+	 * left as it is: it holds the start of these contents, which is_unfinished() recognises next time. Removing it
+	 * could remove another request's finished marker that replaced it meanwhile.
+	 *
+	 * @param string $path     Marker path.
+	 * @param string $contents Marker contents (build()).
+	 * @return bool Whether this call created it with all of its contents.
+	 */
+	public static function create( string $path, string $contents ): bool {
+		$handle = @fopen( $path, 'x' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- an existing marker is an answer, not an error.
+		if ( false === $handle ) {
+			return false;
+		}
+		$written = fwrite( $handle, $contents ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- plugin-owned file.
+		$closed  = fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- plugin-owned file.
+		return strlen( $contents ) === $written && $closed;
+	}
+
+	/**
 	 * Generate a random install ID.
 	 *
 	 * @return string

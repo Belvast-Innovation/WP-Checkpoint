@@ -28,6 +28,7 @@ final class BackupStoreTest extends TestCase {
 	private $dir;
 
 	protected function set_up(): void {
+		parent::set_up();
 		$this->builder = ( new ArchiveBuilder() )->typical()->build();
 		$this->dir     = $this->builder->dir;
 	}

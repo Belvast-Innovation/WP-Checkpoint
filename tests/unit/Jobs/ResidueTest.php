@@ -3,6 +3,7 @@
 namespace WPCheckpoint\Tests\Unit\Jobs;
 
 use WPCheckpoint\Jobs\Residue;
+use WPCheckpoint\Tests\Fixtures\ExpectedPath;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 final class ResidueTest extends TestCase {
@@ -11,6 +12,7 @@ final class ResidueTest extends TestCase {
 	private $base;
 
 	protected function set_up(): void {
+		parent::set_up();
 		$this->base = sys_get_temp_dir() . '/wpcheckpoint-residue-' . bin2hex( random_bytes( 4 ) );
 		mkdir( $this->base . '/tmp', 0700, true );
 	}
@@ -20,7 +22,7 @@ final class ResidueTest extends TestCase {
 	}
 
 	public function test_work_directory_names_round_trip_and_reject_anything_else(): void {
-		$this->assertSame( $this->base . DIRECTORY_SEPARATOR . 'tmp' . DIRECTORY_SEPARATOR . 'job-42', Residue::work_dir( $this->base, 42 ) );
+		$this->assertSame( ExpectedPath::native( $this->base, 'tmp', 'job-42' ), Residue::work_dir( $this->base, 42 ) );
 		$this->assertSame( 42, Residue::work_dir_id( 'job-42' ) );
 		foreach ( array( 'job-0', 'job-', 'job-42.lock', 'job-4a', 'job--1', 'jobs-42', 'job-042', '' ) as $bad ) {
 			$this->assertSame( 0, Residue::work_dir_id( $bad ), $bad );
@@ -91,7 +93,7 @@ final class ResidueTest extends TestCase {
 		$seen = array();
 		foreach ( Residue::scan_site( array( $content, $apps, $content, $this->base . '/missing' ), array( 'aaaaaaaaaaaa', 'bbbbbbbbbbbb', '' ) ) as $entry ) {
 			$seen[] = $entry['kind'] . ':' . $entry['token'] . ':' . $entry['id'] . ':' . basename( $entry['parent'] );
-			$this->assertSame( $entry['parent'] . DIRECTORY_SEPARATOR . basename( $entry['path'] ), $entry['path'] );
+			$this->assertSame( ExpectedPath::native( $entry['parent'], basename( $entry['path'] ) ), $entry['path'] );
 		}
 		sort( $seen );
 		$this->assertSame( array( 'probe:aaaaaaaaaaaa:9:apps', 'stage_dir:aaaaaaaaaaaa:7:content', 'stage_dir:bbbbbbbbbbbb:8:apps' ), $seen, 'each once, only the given tokens' );

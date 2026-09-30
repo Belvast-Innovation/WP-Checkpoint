@@ -3,6 +3,7 @@
 namespace WPCheckpoint\Tests\Unit\Support;
 
 use WPCheckpoint\Support\Paths;
+use WPCheckpoint\Tests\Fixtures\Junction;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 final class PathsTest extends TestCase {
@@ -11,6 +12,7 @@ final class PathsTest extends TestCase {
 	private $root;
 
 	protected function set_up(): void {
+		parent::set_up();
 		$this->root = sys_get_temp_dir() . '/wpcheckpoint-paths-' . bin2hex( random_bytes( 4 ) );
 		mkdir( $this->root . '/base/sub', 0700, true );
 		mkdir( $this->root . '/outside', 0700, true );
@@ -146,6 +148,17 @@ final class PathsTest extends TestCase {
 		$this->assertFalse( Paths::is_inside( $this->base(), $this->base() . '/linked-dir/secret.txt' ) );
 	}
 
+	public function test_a_path_through_a_junction_pointing_outside_is_rejected(): void {
+		Junction::make( $this->root . '/outside', $this->base() . '/junction-dir' );
+		try {
+			$this->assertFileExists( $this->base() . '/junction-dir/secret.txt', 'the control: the junction leads outside' );
+			$this->assertTrue( Paths::is_inside( $this->base(), $this->base() . '/sub/deep.txt' ), 'the control: a plain path inside' );
+			$this->assertFalse( Paths::is_inside( $this->base(), $this->base() . '/junction-dir/secret.txt' ) );
+		} finally {
+			Junction::remove( $this->base() . '/junction-dir' );
+		}
+	}
+
 	public function test_symlinked_base_resolves_to_real_directory(): void {
 		if ( Paths::is_windows() ) {
 			// PHP's realpath() on Windows leaves a symlink alone when it is the final path
@@ -219,11 +232,13 @@ final class PathsTest extends TestCase {
 			$this->markTestSkipped( 'Symbolic links cannot be created here.' );
 		}
 		$this->assertFalse( Paths::same( $this->root . '/base', $link, Paths::is_windows() ), 'the control: the spellings differ' );
-		$target = realpath( $this->root . '/base' );
-		$via    = realpath( $link );
+		// On the Windows runner realpath() returns the link's target with its 8.3 short name (RUNNER~1) and the
+		// directory with its long one; Paths::real() resolves them to one spelling.
+		$target = Paths::real( $this->root . '/base' );
+		$via    = Paths::real( $link );
 		if ( false === $via || false === $target || ! Paths::same( $via, $target, Paths::is_windows() ) ) {
-			// realpath() does not resolve this link to its target here (seen on Windows): nothing shows that the
-			// two are the same, and the answer is no, the direction in which callers wait instead of acting.
+			// Not resolved to its target here: nothing shows that the two are the same, and the answer is no, the
+			// direction in which callers wait instead of acting.
 			$this->assertFalse( Paths::same_location( $this->root . '/base', $link ) );
 			return;
 		}

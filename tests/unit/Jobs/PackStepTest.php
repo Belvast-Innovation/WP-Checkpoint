@@ -8,6 +8,7 @@ use WPCheckpoint\Archive\Limits;
 use WPCheckpoint\Archive\Manifest;
 use WPCheckpoint\Archive\Packer;
 use WPCheckpoint\Archive\ZipReader;
+use WPCheckpoint\Files\Links;
 use WPCheckpoint\Jobs\ExportPlan;
 use WPCheckpoint\Jobs\DatabaseExportStep;
 use WPCheckpoint\Jobs\FileScanStep;
@@ -34,6 +35,7 @@ final class PackStepTest extends TestCase {
 	private $site;
 
 	protected function set_up(): void {
+		parent::set_up();
 		$this->ctx  = new WorkContext( 'wpcheckpoint-pack-' );
 		$this->site = $this->ctx->root . '/site/wp-content/uploads';
 		mkdir( $this->site, 0700, true );
@@ -334,7 +336,7 @@ final class PackStepTest extends TestCase {
 
 	public function test_a_file_changed_between_two_chunks_of_one_tick_is_started_over_and_ends_up_consistent(): void {
 		if ( 'Windows' === PHP_OS_FAMILY ) {
-			$this->markTestSkipped( 'A file open for reading cannot be renamed over on Windows, and stat() reports no inode there: the inode swap is a POSIX scenario.' );
+			$this->markTestSkipped( 'A file open for reading cannot be renamed over on Windows (access denied), so the swap this test makes cannot happen there.' );
 		}
 		$p = $this->file( 'live.bin', 3 * self::CHUNK, 5 );
 		$this->index( array( $p ) );
@@ -644,9 +646,175 @@ final class PackStepTest extends TestCase {
 			),
 			$summary['outside']
 		);
-		$this->assertContains( '2 files resolve outside their content directory (through a link) and are not in the backup: wp-content/uploads/media/a.txt, wp-content/uploads/media/b.txt', $summary['warnings'] );
+		$this->assertContains( '2 files resolve outside their content directory (through a link), or their content directory no longer leads where it did at the scan, and are not in the backup: wp-content/uploads/media/a.txt, wp-content/uploads/media/b.txt', $summary['warnings'] );
 		$this->assertStringContainsString( 'resolves outside its content directory', $this->ctx->log() );
 		$this->assertStringNotContainsString( 'secret', implode( '', array_map( 'file_get_contents', glob( $this->ctx->work() . '/volumes/*' ) ?: array() ) ) );
+	}
+
+	public function test_a_content_root_that_is_a_link_is_packed_through_it_until_it_leads_somewhere_the_scan_refuses(): void {
+		if ( 'Windows' === PHP_OS_FAMILY ) {
+			$this->markTestSkipped( 'symlinks need privileges on Windows' );
+		}
+		// The uploads root is a link to a shared directory (a deployment tool's layout): packed through it.
+		$shared = $this->ctx->root . '/shared/uploads';
+		mkdir( dirname( $shared ), 0700 );
+		rename( $this->site, $shared );
+		symlink( $shared, $this->site );
+		$photo = $this->file( '2026/photo.txt', 500, 21 );
+		$this->index( array( $photo ) );
+		$this->scanned_at( $this->site );
+		list( $result ) = $this->drive( $this->step() );
+		$this->assertSame( StepResult::DONE, $result->kind );
+		$this->assertSame( array( $photo ), array_column( $this->packed(), 'p' ), 'the control: a root that is a link, still leading where the scan saw it, is packed' );
+		$this->assertSame( 0, $this->summary()['outside']['count'] );
+	}
+
+	/**
+	 * The scan summary's record of where the uploads root led.
+	 */
+	private function scanned_at( string $root ): void {
+		ExportPlan::write( $this->ctx->work(), FileScanStep::SUMMARY, array( 'root_ids' => array( 'wp-content/uploads' => Links::fingerprint( $root ) ) ) );
+	}
+
+	public function test_a_content_root_link_pointed_elsewhere_after_the_scan_is_left_out_even_where_the_rule_allows_it(): void {
+		if ( 'Windows' === PHP_OS_FAMILY ) {
+			$this->markTestSkipped( 'symlinks need privileges on Windows' );
+		}
+		// At the scan, uploads led to one shared directory; before packing it leads to another one that the rule for
+		// links allows as well (another account's uploads), holding a file of the same name.
+		$shared = $this->ctx->root . '/shared/uploads';
+		mkdir( dirname( $shared ), 0700 );
+		rename( $this->site, $shared );
+		symlink( $shared, $this->site );
+		$photo = $this->file( '2026/photo.txt', 500, 22 );
+		$this->index( array( $photo ) );
+		$this->scanned_at( $this->site );
+		$other = $this->ctx->root . '/other/uploads/2026';
+		mkdir( $other, 0700, true );
+		copy( $shared . '/2026/photo.txt', $other . '/photo.txt' );
+		unlink( $this->site );
+		symlink( dirname( $other ), $this->site );
+		$this->assertFileExists( $this->site . '/2026/photo.txt', 'the control: the listed path exists behind the new target' );
+		list( $result ) = $this->drive( $this->step() );
+		$this->assertSame( StepResult::DONE, $result->kind );
+		$this->assertSame( array(), $this->packed() );
+		$this->assertSame( array( 'count' => 1, 'listed' => array( $photo ) ), $this->summary()['outside'] );
+	}
+
+	public function test_a_content_root_link_pointed_at_the_root_of_the_file_system_after_the_scan_is_left_out(): void {
+		if ( 'Windows' === PHP_OS_FAMILY ) {
+			$this->markTestSkipped( 'symlinks need privileges on Windows' );
+		}
+		// The scan listed a path; before packing, the uploads root became a link to "/", where a file of that path
+		// exists (this test file): everything under "/" is inside the root's real path, so only the scan's rule for
+		// a root that is a link, applied again, keeps it out.
+		$here = (string) realpath( __FILE__ );
+		$p    = 'wp-content/uploads' . $here;
+		rmdir( $this->site );
+		symlink( '/', $this->site );
+		try {
+			$this->assertFileExists( $this->site . $here, 'the control: the listed path exists through the link' );
+			file_put_contents( $this->ctx->work() . '/files.index.jsonl', json_encode( array( 'p' => $p, 'b' => filesize( $here ), 'm' => filemtime( $here ) ), JSON_UNESCAPED_SLASHES ) . "\n" );
+			list( $result ) = $this->drive( $this->step() );
+			$this->assertSame( StepResult::DONE, $result->kind );
+			$this->assertSame( array(), $this->packed() );
+			$this->assertSame(
+				array(
+					'count'  => 1,
+					'listed' => array( $p ),
+				),
+				$this->summary()['outside']
+			);
+		} finally {
+			unlink( $this->site ); // The link only, before anything removes the sandbox.
+		}
+	}
+
+	public function test_a_line_is_packed_only_under_the_root_the_scan_listed_it_under(): void {
+		// At the scan, uploads was a root of its own. At pack time it is gone from the roots (a group left out, a
+		// directory replaced): its lines would fall to the content directory's root and be read from there.
+		$photo   = $this->file( '2026/photo.txt', 500, 23 );
+		$content = dirname( $this->site );
+		$this->index( array( $photo ) );
+		$only_content = array(
+			array(
+				'group'  => 'other-content',
+				'path'   => $content,
+				'prefix' => 'wp-content',
+				'skip'   => array(),
+			),
+		);
+		ExportPlan::write( $this->ctx->work(), FileScanStep::SUMMARY, array( 'root_ids' => array( 'wp-content/uploads' => Links::fingerprint( $this->site ), 'wp-content' => Links::fingerprint( $content ) ) ) );
+		list( $result ) = $this->drive( new PackStep( $only_content, $this->options(), self::CHUNK ) );
+		$this->assertSame( StepResult::DONE, $result->kind );
+		$this->assertSame( array(), $this->packed() );
+		$this->assertSame( array( 'count' => 1, 'listed' => array( $photo ) ), $this->summary()['outside'] );
+		$this->assertStringContainsString( 'File left out: its content directory changed after the scan', $this->ctx->log() );
+	}
+
+	public function test_where_two_roots_share_a_path_the_one_not_refused_packs_the_line(): void {
+		// Another group was set to the same archive path and is refused (never scanned); it comes first in scan order.
+		$photo = $this->file( '2026/photo.txt', 500, 26 );
+		$other = $this->ctx->root . '/other';
+		mkdir( $other . '/2026', 0700, true );
+		file_put_contents( $other . '/2026/photo.txt', 'another directory' );
+		$this->index( array( $photo ) );
+		$this->scanned_at( $this->site );
+		$roots = array_merge(
+			array(
+				array(
+					'group'  => 'plugins',
+					'path'   => $other,
+					'prefix' => 'wp-content/uploads',
+					'skip'   => array(),
+					'refuse' => 'another content group is backed up under the same path',
+				),
+			),
+			$this->roots()
+		);
+		list( $result ) = $this->drive( new PackStep( $roots, $this->options(), self::CHUNK ) );
+		$this->assertSame( StepResult::DONE, $result->kind );
+		$packed = $this->packed();
+		$this->assertSame( array( $photo ), array_column( $packed, 'p' ), 'packed, not left out' );
+		$this->assertSame( hash_file( 'sha256', $this->site . '/2026/photo.txt' ), $packed[0]['h'], 'from the directory the scan read' );
+	}
+
+	public function test_without_the_scan_record_of_the_roots_lines_are_packed_as_before(): void {
+		// A scan summary written before the record existed (an export started before an upgrade): no comparison.
+		$photo   = $this->file( '2026/photo.txt', 500, 24 );
+		$content = dirname( $this->site );
+		$this->index( array( $photo ) );
+		ExportPlan::write( $this->ctx->work(), FileScanStep::SUMMARY, array( 'warnings' => array() ) );
+		$only_content = array(
+			array(
+				'group'  => 'other-content',
+				'path'   => $content,
+				'prefix' => 'wp-content',
+				'skip'   => array(),
+			),
+		);
+		list( $result ) = $this->drive( new PackStep( $only_content, $this->options(), self::CHUNK ) );
+		$this->assertSame( StepResult::DONE, $result->kind );
+		$this->assertSame( array( $photo ), array_column( $this->packed(), 'p' ) );
+	}
+
+	public function test_a_content_root_link_into_a_directory_it_skips_is_left_out_at_pack_time(): void {
+		if ( 'Windows' === PHP_OS_FAMILY ) {
+			$this->markTestSkipped( 'symlinks need privileges on Windows' );
+		}
+		$store = $this->ctx->root . '/store';
+		mkdir( $store, 0700 );
+		rename( $this->site, $store . '/uploads' );
+		symlink( $store . '/uploads', $this->site );
+		$photo = $this->file( '2026/photo.txt', 500, 25 );
+		$this->index( array( $photo ) );
+		$this->assertSame( '', Links::root_verdict( $this->site, ABSPATH )['refusal'], 'the control: with nothing skipped there, the rule lets this link be followed' );
+		$roots            = $this->roots();
+		$roots[0]['skip'] = array( $store );
+		list( $result ) = $this->drive( new PackStep( $roots, $this->options(), self::CHUNK ) );
+		$this->assertSame( StepResult::DONE, $result->kind );
+		$this->assertSame( array(), $this->packed() );
+		$this->assertSame( 1, $this->summary()['outside']['count'] );
 	}
 
 	public function test_listed_paths_stop_at_the_cap_while_the_count_and_the_warning_go_on(): void {

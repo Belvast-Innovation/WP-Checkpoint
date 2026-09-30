@@ -16,8 +16,8 @@ use WPCheckpoint\Database\WpdbConnection;
 use WPCheckpoint\Files\PathKey;
 use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Support\Environment;
-use WPCheckpoint\Support\Schema;
 use WPCheckpoint\Support\HostFunctions;
+use WPCheckpoint\Database\OwnTables;
 
 /**
  * The seven steps in order (pre-flight, scan, review, database, pack,
@@ -101,6 +101,7 @@ final class ExportJob implements JobType {
 				array(
 					'prefix'        => Environment::table_prefix(),
 					'tables'        => array( $connection, 'tables_with_prefix' ),
+					'routines'      => array( $connection, 'routines' ),
 					'writable'      => static function () use ( $directories ): array {
 						$bad = array();
 						foreach ( Directories::SUBDIRS as $sub ) {
@@ -125,10 +126,10 @@ final class ExportJob implements JobType {
 						// sub-site's. The sub-sites' own tables are protected by their naming rule (TableSelection).
 						return array_values( $wpdb->tables( 'all', true, is_multisite() ? get_main_site_id() : 0 ) );
 					},
-					'own_tables'    => array( Schema::jobs_table() ),
+					'own'           => array( OwnTables::class, 'is_own' ),
 				)
 			),
-			FileScanStep::from_plan(),
+			FileScanStep::from_plan( Manifest::DEFAULT_CHUNK, $this->clean ),
 			new ReviewStep(
 				static function () use ( $directories ) {
 					return Environment::default_probes()['disk_free_space']( $directories->base() );
@@ -175,7 +176,14 @@ final class ExportJob implements JobType {
 		$connection = new WpdbConnection();
 		$listing    = $connection->tables_with_prefix( Environment::table_prefix() );
 		$core       = array_values( $wpdb->tables( 'all', true, is_multisite() ? get_main_site_id() : 0 ) );
-		$tables     = array_values( array_diff( array_map( 'strval', (array) $listing['tables'] ), array( Schema::jobs_table() ) ) );
+		$tables     = array_values(
+			array_filter(
+				array_map( 'strval', (array) $listing['tables'] ),
+				static function ( string $table ): bool {
+					return ! OwnTables::is_own( $table );
+				}
+			)
+		);
 		$out        = array();
 		foreach ( TableSelection::foreign( $tables, Environment::table_prefix(), is_multisite(), $core ) as $prefix => $group ) {
 			if ( array() !== $group['excluded'] ) {

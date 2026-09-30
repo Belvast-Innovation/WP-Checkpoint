@@ -21,6 +21,7 @@ use WPCheckpoint\Support\Schema;
 use WPCheckpoint\Support\StorageReclaim;
 use WPCheckpoint\Support\Uninstaller;
 use WPCheckpoint\Tests\Fixtures\Permissions;
+use WPCheckpoint\Tests\Fixtures\Leftovers;
 
 final class JobRepositoryTest extends WP_UnitTestCase {
 
@@ -38,6 +39,9 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 
 	/** @var string */
 	private $root;
+
+	/** @var string[]|null The restore's tables there before the test; null before set_up(). */
+	private $tables_before = null;
 
 	public function set_up(): void {
 		parent::set_up();
@@ -60,11 +64,20 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		$this->now  = 1_800_000_000;
 		$this->repo = $this->repo_for( $this->dirs );
 		$this->assertSame( 'created', Schema::ensure()['action'] );
+		$this->tables_before = Leftovers::tables();
 	}
 
 	public function tear_down(): void {
 		global $wpdb;
 		$wpdb->query( 'DROP TABLE IF EXISTS ' . Schema::jobs_table() );
+		// The temporary tables this test made (live work the reap rightly kept), and no other's.
+		if ( null !== $this->tables_before ) {
+			$wpdb->query( 'SET FOREIGN_KEY_CHECKS=0' );
+			foreach ( array_diff( Leftovers::tables(), $this->tables_before ) as $table ) {
+				$wpdb->query( "DROP TABLE IF EXISTS `{$table}`" );
+			}
+			$wpdb->query( 'SET FOREIGN_KEY_CHECKS=1' );
+		}
 		foreach ( glob( WP_CONTENT_DIR . '/wp-checkpoint-*' ) ?: array() as $dir ) {
 			Deleter::empty_directory( $dir );
 			@rmdir( $dir );

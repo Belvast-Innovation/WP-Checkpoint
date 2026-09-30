@@ -85,6 +85,7 @@ final class ExportReplayTest extends JobTestCase {
 		$this->types = new JobTypes();
 		Schema::ensure();
 		$this->uploads = wp_upload_dir()['basedir'] . '/wpcreplay-uploads';
+		\WPCheckpoint\Support\Deleter::allow( $this->uploads ); // Made by this test under the site's own directories: registered to be deleted.
 		mkdir( $this->uploads . '/a', 0755, true );
 		mkdir( $this->uploads . '/b', 0755, true );
 		mt_srand( 7 );

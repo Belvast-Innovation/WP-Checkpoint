@@ -45,6 +45,7 @@ final class ExportJobTest extends JobTestCase {
 	public function set_up(): void {
 		parent::set_up();
 		$this->uploads = wp_upload_dir()['basedir'] . '/wpcexport';
+		\WPCheckpoint\Support\Deleter::allow( $this->uploads ); // Made by this test under the site's own directories: registered to be deleted.
 		mkdir( $this->uploads . '/images', 0755, true );
 		file_put_contents( $this->uploads . '/images/a.jpg', str_repeat( 'jpeg', 500 ) );
 		file_put_contents( $this->uploads . '/images/b.txt', 'text' );

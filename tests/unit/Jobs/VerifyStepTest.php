@@ -29,6 +29,7 @@ final class VerifyStepTest extends TestCase {
 	private $ctx;
 
 	protected function set_up(): void {
+		parent::set_up();
 		$this->ctx = new WorkContext( 'wpcheckpoint-verifystep-' );
 	}
 

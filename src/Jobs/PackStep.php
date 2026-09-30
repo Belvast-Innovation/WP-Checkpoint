@@ -17,6 +17,7 @@ use WPCheckpoint\Archive\SealRequired;
 use WPCheckpoint\Archive\SourceChanged;
 use WPCheckpoint\Archive\SourceGone;
 use WPCheckpoint\Files\Exclusions;
+use WPCheckpoint\Files\Links;
 use WPCheckpoint\Files\ScanRoots;
 use WPCheckpoint\Support\Paths;
 use WPCheckpoint\Support\HostFunctions;
@@ -70,6 +71,15 @@ final class PackStep implements Step {
 	 * last chunk of the same tick.
 	 */
 	const TIME_MARGIN = 1.5;
+
+	/**
+	 * The prefixes of the roots the scan listed files under (its root_ids), for this tick; null when the scan
+	 * summary has no record of them. A line is packed only under the root the scan listed it under: the roots are
+	 * resolved again every tick, and where one is gone a line would fall to a shorter prefix and be read there.
+	 *
+	 * @var string[]|null
+	 */
+	private $scanned_prefixes = null;
 
 	/**
 	 * Scan roots (prefix => absolute path), or null to resolve them from
@@ -200,12 +210,15 @@ final class PackStep implements Step {
 		$packer = Packer::open( $volumes, $base, $cursor['packer'], $this->packer_options_with( $context ) );
 		self::cut( $work . DIRECTORY_SEPARATOR . self::PACKED_INDEX, $cursor['packed_bytes'] );
 		self::cut( $work . DIRECTORY_SEPARATOR . self::CHUNKS, $cursor['chunks_bytes'] );
-		$roots      = null === $this->roots ? ScanRoots::resolve( $active['groups'], $context->storage_path() )['roots'] : $this->roots;
-		$exclusions = new Exclusions( $active['exclusions'], array() );
-		$since      = 0;
-		$last       = 0.0;
-		$first      = true;
-		$budget     = $context->budget()->seconds;
+		$scanned                = ExportPlan::exists( $work, FileScanStep::SUMMARY ) ? ExportPlan::read( $work, FileScanStep::SUMMARY ) : array();
+		$root_ids               = isset( $scanned['root_ids'] ) && is_array( $scanned['root_ids'] ) ? array_map( 'strval', $scanned['root_ids'] ) : null;
+		$roots                  = self::judged( null === $this->roots ? ScanRoots::resolve( $active['groups'], $context->storage_path() )['roots'] : $this->roots, $root_ids, defined( 'ABSPATH' ) ? (string) ABSPATH : '' );
+		$this->scanned_prefixes = null === $root_ids ? null : array_map( 'strval', array_keys( $root_ids ) );
+		$exclusions             = new Exclusions( $active['exclusions'], array() );
+		$since                  = 0;
+		$last                   = 0.0;
+		$first                  = true;
+		$budget                 = $context->budget()->seconds;
 
 		try {
 			while ( 'done' !== $cursor['phase'] ) {
@@ -373,8 +386,16 @@ final class PackStep implements Step {
 			$cursor['pending'] = null;
 			return 0;
 		}
-		$root   = self::root_of( $roots, $p );
-		$source = null === $root ? null : self::source_of( $roots, $p );
+		$picked = $this->line_root( $roots, $p );
+		if ( $picked['gone'] ) {
+			$context->logger()->warning( 'File left out: its content directory changed after the scan', array( 'p' => $p ) );
+			self::note( $cursor, 'outside', $p );
+			$cursor['offset']  = $line['next'];
+			$cursor['pending'] = null;
+			return 0;
+		}
+		$root   = $picked['root'];
+		$source = null === $root ? null : self::source_of( array( $root ), $p );
 		$stat   = null === $source ? false : self::fresh_stat( $source );
 		if ( false === $stat || ! is_readable( $source ) ) {
 			self::note( $cursor, 'skipped', $p );
@@ -382,10 +403,12 @@ final class PackStep implements Step {
 			$cursor['pending'] = null;
 			return 0;
 		}
-		if ( ! Paths::is_inside( (string) $root['path'], $source ) ) {
+		// The root itself is judged again (judged()): by the scan's rule, and by whether it still leads where it led.
+		$changed = ! empty( $root['refused'] );
+		if ( $changed || ! Paths::is_inside( (string) $root['path'], $source ) ) {
 			// The scan saw a directory; a link put in its place since would take the backup outside the
 			// content directory (another site's files on a shared host). Resolved paths only.
-			$context->logger()->warning( 'File left out: it resolves outside its content directory', array( 'p' => $p ) );
+			$context->logger()->warning( $changed ? 'File left out: its content directory changed after the scan' : 'File left out: it resolves outside its content directory', array( 'p' => $p ) );
 			self::note( $cursor, 'outside', $p );
 			$cursor['offset']  = $line['next'];
 			$cursor['pending'] = null;
@@ -482,7 +505,8 @@ final class PackStep implements Step {
 	 */
 	private function chunk( JobContext $context, string $work, array $roots, Packer $packer, array &$cursor ): int {
 		$file   = $cursor['file'];
-		$source = self::source_of( $roots, (string) $file['p'] );
+		$root   = $this->line_root( $roots, (string) $file['p'] )['root'];
+		$source = null === $root ? null : self::source_of( array( $root ), (string) $file['p'] );
 		if ( empty( $file['final'] ) ) {
 			// Compared with the stat the entry began with; a file already past MAX_RESTARTS is finished as declared.
 			$stat = null === $source ? false : self::fresh_stat( $source );
@@ -848,6 +872,95 @@ final class PackStep implements Step {
 	}
 
 	/**
+	 * The roots, each marked 'refused' when the scan's judgement of a root (Files\Links::root_verdict()) no longer
+	 * lets it be scanned, or when it no longer leads where it led at the scan (a link pointed elsewhere since, or
+	 * a directory replaced by a link): judged once per tick, where the scan judged once per root.
+	 *
+	 * @param array<int, array<string, mixed>> $roots Roots.
+	 * @param array<string, string>|null       $ids   Prefix => Links::fingerprint() at the scan; null when the scan
+	 *                                                summary predates them (no comparison then).
+	 * @param string                           $abspath The WordPress directory.
+	 * @return array<int, array<string, mixed>>
+	 */
+	private static function judged( array $roots, $ids, string $abspath ): array {
+		foreach ( $roots as $i => $root ) {
+			$path                   = rtrim( (string) $root['path'], '/\\' );
+			$verdict                = Links::root_verdict( $path, $abspath, isset( $root['skip'] ) ? (array) $root['skip'] : array(), null, isset( $root['hold'] ) ? (array) $root['hold'] : array() );
+			$moved                  = null !== $ids && isset( $ids[ (string) $root['prefix'] ] ) && Links::fingerprint( $path ) !== (string) $ids[ (string) $root['prefix'] ];
+			$roots[ $i ]['refused'] = '' !== $verdict['refusal'] || $moved || ( isset( $root['refuse'] ) && '' !== (string) $root['refuse'] );
+		}
+		return $roots;
+	}
+
+	/**
+	 * The root that packs an archive path, the same in every phase of a file: only the root the scan listed it
+	 * under (the longest of the scan's prefixes that holds it, when the scan recorded them), and where two roots
+	 * share that prefix, the one not refused (the scan never scans a refused root, ScanRoots::resolve()). A root
+	 * with a shorter prefix never stands in: it is another directory. 'gone': the scan's root is not among the
+	 * roots any more.
+	 *
+	 * @param array<int, array<string, mixed>> $roots Roots (judged()).
+	 * @param string                           $p     Archive path.
+	 * @return array{root: array<string, mixed>|null, gone: bool}
+	 */
+	private function line_root( array $roots, string $p ): array {
+		$candidates = $roots;
+		if ( null !== $this->scanned_prefixes ) {
+			$scanned = self::scanned_prefix( $this->scanned_prefixes, $p );
+			if ( '' !== $scanned ) {
+				$candidates = array_values(
+					array_filter(
+						$roots,
+						static function ( array $root ) use ( $scanned ): bool {
+							return (string) $root['prefix'] === $scanned;
+						}
+					)
+				);
+				if ( array() === $candidates ) {
+					return array(
+						'root' => null,
+						'gone' => true,
+					);
+				}
+			}
+		}
+		$root = self::root_of( $candidates, $p );
+		if ( null !== $root && ! empty( $root['refused'] ) ) {
+			foreach ( $candidates as $other ) {
+				if ( (string) $other['prefix'] === (string) $root['prefix'] && empty( $other['refused'] ) ) {
+					$root = $other;
+					break;
+				}
+			}
+		}
+		return array(
+			'root' => $root,
+			'gone' => false,
+		);
+	}
+
+	/**
+	 * The prefix of the root the scan listed an archive path under: the longest of the scan's prefixes that holds
+	 * it ('' when none does). ScanRoots::resolve() makes that root the only one that lists it: every root skips the
+	 * directories of the others and, where another root's path lies below its own but that root is elsewhere, the
+	 * directory of that name; two roots with one prefix are not both scanned; and no root enters a link below it.
+	 *
+	 * @param string[] $scanned The scan's root prefixes.
+	 * @param string   $p       Archive path.
+	 * @return string
+	 */
+	private static function scanned_prefix( array $scanned, string $p ): string {
+		$best = '';
+		foreach ( $scanned as $candidate ) {
+			if ( ( $p === $candidate || 0 === strpos( $p, $candidate . '/' ) ) && strlen( $candidate ) > strlen( $best ) ) {
+				$best = $candidate;
+			}
+		}
+		return $best;
+	}
+
+
+	/**
 	 * The root an archive path belongs to (longest prefix wins).
 	 *
 	 * @param array<int, array<string, mixed>> $roots Roots.
@@ -916,7 +1029,7 @@ final class PackStep implements Step {
 			'skipped'  => '%d files listed by the scan were missing or unreadable when they were packed and are not in the backup: %s',
 			'unstable' => '%d files changed repeatedly while they were being packed and are not in the backup: %s',
 			'changed'  => '%d files were modified while they were being packed; their content in the backup may be inconsistent: %s',
-			'outside'  => '%d files resolve outside their content directory (through a link) and are not in the backup: %s',
+			'outside'  => '%d files resolve outside their content directory (through a link), or their content directory no longer leads where it did at the scan, and are not in the backup: %s',
 		);
 		$out   = array();
 		foreach ( $texts as $kind => $text ) {

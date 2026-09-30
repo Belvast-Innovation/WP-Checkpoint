@@ -3,6 +3,7 @@
 namespace WPCheckpoint\Tests\Unit\Jobs;
 
 use WPCheckpoint\Jobs\LockFile;
+use WPCheckpoint\Tests\Fixtures\ExpectedPath;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 final class LockFileTest extends TestCase {
@@ -11,6 +12,7 @@ final class LockFileTest extends TestCase {
 	private $base;
 
 	protected function set_up(): void {
+		parent::set_up();
 		$this->base = sys_get_temp_dir() . '/wpcheckpoint-lockfile-' . bin2hex( random_bytes( 4 ) );
 		mkdir( $this->base . '/tmp', 0700, true );
 	}
@@ -27,7 +29,7 @@ final class LockFileTest extends TestCase {
 		$token = bin2hex( random_bytes( 16 ) );
 		$this->assertTrue( LockFile::write( $this->base, 12, $token, 2000 ) );
 		$path = LockFile::path( $this->base, 12 );
-		$this->assertSame( $this->base . DIRECTORY_SEPARATOR . 'tmp' . DIRECTORY_SEPARATOR . 'job-12.lock', $path );
+		$this->assertSame( ExpectedPath::native( $this->base, 'tmp', 'job-12.lock' ), $path );
 
 		$raw = (string) file_get_contents( $path );
 		$this->assertStringNotContainsString( $token, $raw, 'the token never lands on disk' );

@@ -172,6 +172,50 @@ final class RestoreImportTest extends RestoreTestCase {
 		$this->assertSame( array(), $this->job_tables( $job ), 'nothing was created' );
 	}
 
+	public function test_a_row_the_database_refuses_is_recorded_by_error_number_table_and_key_never_by_its_value(): void {
+		global $wpdb;
+		$secret = 'row-value-7f3a9c';
+		$this->create( $this->p . 'uniq', '(`id` int NOT NULL, `code` varchar(64) NOT NULL, PRIMARY KEY (`id`), UNIQUE KEY `code_once` (`code`)) ENGINE=InnoDB' );
+		$wpdb->query( "INSERT INTO `{$this->p}uniq` VALUES (1, '{$secret}'), (2, 'placeholder-other')" );
+		$this->assertSame( '', $wpdb->last_error );
+
+		// The control: the server's own text for this very refusal carries the row's value.
+		$raw  = mysqli_init();
+		$host = explode( ':', DB_HOST, 2 );
+		$raw->real_connect( $host[0], DB_USER, DB_PASSWORD, DB_NAME, isset( $host[1] ) && ctype_digit( $host[1] ) ? (int) $host[1] : 3306 );
+		$raw->query( "CREATE TEMPORARY TABLE `wpcp_dup_probe` (`code` varchar(64) NOT NULL, UNIQUE KEY `code_once` (`code`))" );
+		$raw->query( "INSERT INTO `wpcp_dup_probe` VALUES ('{$secret}')" );
+		$raw->query( "INSERT INTO `wpcp_dup_probe` VALUES ('{$secret}')" );
+		$this->assertSame( 1062, $raw->errno );
+		$this->assertStringContainsString( $secret, $raw->error, 'the control: the database names the value' );
+		$raw->close();
+
+		// The backup holds the same value twice in a unique column: the import is refused at that row.
+		$base = $this->backup(
+			array_merge( self::site_tables(), array( $this->p . 'uniq' ) ),
+			function ( string $table, array $chunks ) use ( $secret ): array {
+				if ( $this->p . 'uniq' === $table ) {
+					foreach ( $chunks as $i => $chunk ) {
+						$chunks[ $i ] = str_replace( "'placeholder-other'", "'{$secret}'", $chunk );
+					}
+				}
+				return $chunks;
+			}
+		);
+		$job = $this->run_restore( $this->start_restore( $base ) );
+		$this->assertSame( Job::FAILED, $job->status );
+		$this->assertStringContainsString( 'Table ' . $this->p . 'uniq', (string) $job->last_error );
+		$this->assertStringContainsString( '1062', (string) $job->last_error );
+		$this->assertStringContainsString( 'code_once', (string) $job->last_error, 'the key' );
+		$log       = (string) file_get_contents( $job->storage_path . '/' . $job->log_path );
+		$presented = (string) wp_json_encode( Plugin::instance()->job_presenter()->present( $job ) );
+		$this->assertStringContainsString( '1062', $log, 'the control: the refusal is in the job log' );
+		$this->assertStringContainsString( '1062', $presented, 'the control: and in what the screen and the REST answer show' );
+		foreach ( array( 'the job' => (string) $job->last_error, 'the job log' => $log, 'the screen and REST' => $presented ) as $where => $text ) {
+			$this->assertStringNotContainsString( $secret, $text, 'the row\'s value is not in ' . $where );
+		}
+	}
+
 	public function test_only_a_table_whose_constraint_name_had_to_be_shortened_is_warned_about(): void {
 		$long = str_repeat( 'k', 60 );
 		$this->create( $this->p . 'longfk', "(`id` int NOT NULL, `parent_id` bigint unsigned NULL, PRIMARY KEY (`id`), CONSTRAINT `{$long}` FOREIGN KEY (`parent_id`) REFERENCES `{$this->p}parent` (`id`)) ENGINE=InnoDB" );

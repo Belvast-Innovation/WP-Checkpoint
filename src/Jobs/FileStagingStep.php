@@ -80,9 +80,10 @@ defined( 'ABSPATH' ) || exit;
  * before a staged file is removed, and renewed between units; a run that
  * lost it writes on until its next checkpoint (the engine's pace: at most
  * 2 seconds or 16 MB of units) fails, and cannot move the cursor (the
- * holder rewrites those units from its own position). Nothing checks a
- * staged tree as a whole yet: that is the swap's final check, a later part
- * of T042.
+ * holder rewrites those units from its own position). The staged tree as
+ * a whole is checked after this step, by SwapCheckStep (every staged file
+ * against the index, entries the index does not have, and a rehash where
+ * staging continued after a takeover).
  */
 final class FileStagingStep implements Step {
 

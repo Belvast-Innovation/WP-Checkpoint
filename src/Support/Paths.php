@@ -13,6 +13,25 @@ namespace WPCheckpoint\Support;
 final class Paths {
 
 	/**
+	 * A path resolved like realpath(), with one addition on Windows: a junction's target comes back as it is
+	 * stored, 8.3 short names included ("C:\Users\RUNNER~1\...", seen on the Windows CI runner), where the same
+	 * directory reached otherwise has its long names; resolved once more, now without the junction, every name is
+	 * the long one, so two spellings of one directory compare equal. Silenced: a warning would put the path into
+	 * the error log.
+	 *
+	 * @param string $path Path.
+	 * @return string|false
+	 */
+	public static function real( string $path ) {
+		$real = @realpath( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
+		if ( false === $real || ! self::is_windows() || false === strpos( $real, '~' ) ) {
+			return $real;
+		}
+		$again = @realpath( $real ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
+		return false === $again ? $real : $again;
+	}
+
+	/**
 	 * Whether $target is a real descendant of $base.
 	 *
 	 * Both paths are resolved with realpath(), so ".." segments and symlinked
@@ -35,12 +54,12 @@ final class Paths {
 			return false;
 		}
 
-		$real_base = realpath( $base );
+		$real_base = self::real( $base );
 		if ( false === $real_base || ! is_dir( $real_base ) ) {
 			return false;
 		}
 
-		$real_target = realpath( $target );
+		$real_target = self::real( $target );
 		if ( false === $real_target ) {
 			return false;
 		}
@@ -68,8 +87,8 @@ final class Paths {
 		if ( '' === $base || '' === $target ) {
 			return false;
 		}
-		$real_base   = realpath( $base );
-		$real_target = realpath( $target );
+		$real_base   = self::real( $base );
+		$real_target = self::real( $target );
 		if ( false === $real_base || false === $real_target ) {
 			return false;
 		}
@@ -120,8 +139,8 @@ final class Paths {
 		if ( '' === $a || '' === $b ) {
 			return false;
 		}
-		$ra = @realpath( $a ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a warning would put the path into the error log.
-		$rb = @realpath( $b ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
+		$ra = self::real( $a );
+		$rb = self::real( $b );
 		return false !== $ra && false !== $rb && self::same( $ra, $rb, $windows );
 	}
 

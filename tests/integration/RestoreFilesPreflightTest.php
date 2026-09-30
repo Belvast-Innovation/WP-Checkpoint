@@ -18,7 +18,9 @@ use WPCheckpoint\Restore\StagingLayout;
 use WPCheckpoint\Restore\TargetNames;
 use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Support\Schema;
+use WPCheckpoint\Support\Deleter;
 use WPCheckpoint\Tests\Fixtures\Restore\RestoreTestCase;
+use WPCheckpoint\Tests\Fixtures\Sandbox;
 
 /**
  * What stops a restore before any file is staged: paths this site's file
@@ -34,8 +36,14 @@ final class RestoreFilesPreflightTest extends RestoreTestCase {
 
 	public function tear_down(): void {
 		foreach ( array_reverse( $this->made ) as $path ) {
-			if ( is_link( $path ) || is_file( $path ) ) {
-				@unlink( $path );
+			if ( '' === Sandbox::refusal( $path ) ) {
+				// A directory of the temporary directory, whole; and what a restore staged next to it, in its parent.
+				foreach ( Residue::scan_site( array( dirname( $path ) ), Directories::own_tokens() ) as $entry ) {
+					Deleter::delete_tree( $entry['parent'], $entry['path'] );
+				}
+				Sandbox::remove( $path );
+			} elseif ( is_link( $path ) || is_file( $path ) ) {
+				@unlink( $path ); // A link it made in the content directory.
 			} elseif ( is_dir( $path ) ) {
 				@rmdir( $path );
 			}
@@ -370,6 +378,7 @@ final class RestoreFilesPreflightTest extends RestoreTestCase {
 			$job = $this->run_restore( $this->job_for( $this->type( array( 'dev' => $foreign( $which ) ) ), $base ) );
 			$this->assertSame( Job::FAILED, $job->status, $which );
 			$this->assertStringContainsString( 'The directory ' . self::shown( $which ) . ' is on another disk than', (string) $job->last_error );
+			$this->assertStringContainsString( 'If it has to stay on its own disk, make your own copy of ' . self::shown( $which ) . ' and restore by hand instead', (string) $job->last_error, 'the second way out' );
 		}
 		$this->assertSame( Job::COMPLETED, $this->run_restore( $this->job_for( $this->type( array( 'dev' => $foreign( '/nowhere' ) ) ), $base ) )->status, 'the control' );
 	}

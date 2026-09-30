@@ -85,7 +85,7 @@ final class Environment {
 			'int_size'         => static function (): int {
 				return PHP_INT_SIZE;
 			},
-			// The one way this plugin reads free and total disk space (HostFunctions guards the calls).
+			// Free and total disk space, through HostFunctions (which answers false where the host disabled the calls).
 			'disk_free_space'  => static function ( string $dir ) {
 				return HostFunctions::disk_free_space( $dir );
 			},
@@ -502,13 +502,13 @@ final class Environment {
 			self::GROUP_PHP,
 			__( 'ZipArchive', 'wp-checkpoint' ),
 			$has_zip ? __( 'available', 'wp-checkpoint' ) : __( 'missing', 'wp-checkpoint' ),
-			$has_zip ? Check::OK : Check::WARNING,
-			$has_zip ? '' : __( 'Backups will use the tar format instead of zip.', 'wp-checkpoint' ),
+			$has_zip ? Check::OK : Check::INFO,
+			$has_zip ? '' : __( 'Not needed: this plugin writes and reads zip archives itself.', 'wp-checkpoint' ),
 			__( 'Archive format.', 'wp-checkpoint' )
 		);
 
 		$extensions = array(
-			'zlib'     => array( Check::WARNING, __( 'Tar backups will not be compressed and take more space.', 'wp-checkpoint' ), __( 'Compression.', 'wp-checkpoint' ) ),
+			'zlib'     => array( Check::WARNING, __( 'Backups made here are stored without compression and take more space; compressed backups from other servers cannot be checked or restored here.', 'wp-checkpoint' ), __( 'Compression.', 'wp-checkpoint' ) ),
 			'mysqli'   => array( Check::ERROR, __( 'Database export and import cannot work without it.', 'wp-checkpoint' ), __( 'Database export and restore.', 'wp-checkpoint' ) ),
 			'openssl'  => array( Check::WARNING, __( 'Remote storage destinations (S3, Google Drive) are unavailable.', 'wp-checkpoint' ), __( 'Remote storage.', 'wp-checkpoint' ) ),
 			'mbstring' => array( Check::WARNING, __( 'Search and replace falls back to slower compatibility functions for multibyte text.', 'wp-checkpoint' ), __( 'Search and replace.', 'wp-checkpoint' ) ),
@@ -759,7 +759,7 @@ final class Environment {
 		$value   = __( 'unknown', 'wp-checkpoint' );
 		$message = __( 'This host does not report free space (disk_free_space is disabled or unreliable). Backups check space as they are written.', 'wp-checkpoint' );
 		if ( Check::INFO !== $status ) {
-			$value   = size_format( (int) $free, 1 );
+			$value   = Bytes::text( $free );
 			$message = '';
 			if ( Thresholds::is_disk_value( $total ) && $total >= $free ) {
 				/* translators: %s: percentage */

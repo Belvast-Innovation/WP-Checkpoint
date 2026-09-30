@@ -8,8 +8,27 @@
 		<testsuite name="unit">
 			<directory suffix="Test.php">tests/unit</directory>
 		</testsuite>
+		<!-- The Windows unit job runs in parts (CI matrix), split by each file's time there (the junit-unit-windows-*
+		     artifacts): a file that takes minutes on Windows gets a part of its own, the last part takes every other
+		     file, new ones included. tests/unit/Support/WindowsPartsTest.php keeps these in step. -->
+		<testsuite name="unit-windows-1">
+			<file>tests/unit/Archive/LayoutWalkLimitTest.php</file>
+		</testsuite>
+		<testsuite name="unit-windows-2">
+			<file>tests/unit/Files/FileScannerTest.php</file>
+		</testsuite>
+		<testsuite name="unit-windows-3">
+			<directory suffix="Test.php">tests/unit</directory>
+			<exclude>tests/unit/Archive/LayoutWalkLimitTest.php</exclude>
+			<exclude>tests/unit/Files/FileScannerTest.php</exclude>
+		</testsuite>
 		<testsuite name="integration">
 			<directory suffix="Test.php">tests/integration</directory>
 		</testsuite>
 	</testsuites>
+	<listeners>
+		<!-- The integration suite: a test that leaves the restore's tables or temporary entries behind fails, and the
+		     run ends with none (tests/Fixtures/Leftovers.php). Does nothing in the unit suite. -->
+		<listener class="WPCheckpoint\Tests\Fixtures\Leftovers"/>
+	</listeners>
 </phpunit>

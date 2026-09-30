@@ -32,6 +32,17 @@ final class Directories {
 	const SOURCE_CONTENT = 'content';
 	const SOURCE_CUSTOM  = 'custom';
 
+	/*
+	 * What a directory's owner marker says (marker()): none there; this installation's; nothing but the start of
+	 * this installation's in an otherwise empty directory (a request died writing it); another installation's; or
+	 * there but not readable (permissions, open_basedir), which says nothing about whose it is.
+	 */
+	const MARKER_NONE       = 'none';
+	const MARKER_OWN        = 'own';
+	const MARKER_UNFINISHED = 'unfinished';
+	const MARKER_OTHER      = 'other';
+	const MARKER_UNREADABLE = 'unreadable';
+
 	/**
 	 * Sub-directories created inside the base directory.
 	 *
@@ -42,7 +53,7 @@ final class Directories {
 	/**
 	 * Environment (injectable for tests).
 	 *
-	 * @var array{abspath: string, content_dir: string, document_root: string, is_web_request: bool, custom_dir: string}
+	 * @var array{abspath: string, content_dir: string, document_root: string, is_web_request: bool, custom_dir: string, wordpress_dirs: array{within: array<string, string>, itself: array<string, string>}|null, after_marker: callable|null, read_marker: callable|null, before_mark: callable|null}
 	 */
 	private $context;
 
@@ -80,7 +91,14 @@ final class Directories {
 	/**
 	 * Environment as seen in the current request.
 	 *
-	 * @return array{abspath: string, content_dir: string, document_root: string, is_web_request: bool, custom_dir: string}
+	 * The wordpress_dirs entry is null here: WordPress's own directories (wordpress_dirs()) are looked up only when a custom
+	 * directory is checked. Tests pass stand-ins, an after_marker callable (called in prepare() right after the owner
+	 * marker is written: a request that dies there), a before_mark callable (called in prepare() right before the marker
+	 * is written, once the directory was found usable: another request writing one meanwhile), and a read_marker
+	 * callable (function( string $path ): string|false, reading the owner marker in place of file_get_contents(): a
+	 * marker that cannot be read).
+	 *
+	 * @return array{abspath: string, content_dir: string, document_root: string, is_web_request: bool, custom_dir: string, wordpress_dirs: array{within: array<string, string>, itself: array<string, string>}|null, after_marker: callable|null, read_marker: callable|null, before_mark: callable|null}
 	 */
 	public static function default_context(): array {
 		$document_root = '';
@@ -93,6 +111,56 @@ final class Directories {
 			'document_root'  => $document_root,
 			'is_web_request' => 'cli' !== PHP_SAPI && ! wp_doing_cron() && ! ( defined( 'WP_CLI' ) && WP_CLI ),
 			'custom_dir'     => defined( 'WPCHECKPOINT_STORAGE_DIR' ) ? (string) WPCHECKPOINT_STORAGE_DIR : '',
+			'wordpress_dirs' => null,
+			'after_marker'   => null,
+			'read_marker'    => null,
+			'before_mark'    => null,
+		);
+	}
+
+	/**
+	 * WordPress's own directories, which a custom storage directory may not be, lie in or hold (StorageLocation):
+	 * wp-admin, wp-includes and the content groups (plugins, must-use plugins, themes, uploads, languages, upgrade,
+	 * the update backups, fonts), where WordPress resolves them now (UPLOADS, WPMU_PLUGIN_DIR and the like moved);
+	 * and the content directory itself, which may hold one (inside it, a directory of none of these may be used).
+	 * On a network, the main site's uploads and blogs.dir too. Not covered: an uploads directory moved for a single
+	 * site of a network other than the main one.
+	 *
+	 * @return array{within: array<string, string>, itself: array<string, string>} directory => label.
+	 */
+	public static function wordpress_dirs(): array {
+		$within = array();
+		$add    = function ( string $dir, string $label ) use ( &$within ): void {
+			if ( '' !== $dir && ! isset( $within[ $dir ] ) ) {
+				$within[ $dir ] = $label;
+			}
+		};
+		$add( ABSPATH . 'wp-admin', __( 'the wp-admin directory', 'wp-checkpoint' ) );
+		$add( ABSPATH . 'wp-includes', __( 'the wp-includes directory', 'wp-checkpoint' ) ); // WPINC, which core never changes.
+		$add( WP_PLUGIN_DIR, __( 'the plugins directory', 'wp-checkpoint' ) );
+		$add( WPMU_PLUGIN_DIR, __( 'the must-use plugins directory', 'wp-checkpoint' ) );
+		$add( (string) get_theme_root(), __( 'a themes directory', 'wp-checkpoint' ) );
+		foreach ( (array) ( $GLOBALS['wp_theme_directories'] ?? array() ) as $themes ) {
+			$add( (string) $themes, __( 'a themes directory', 'wp-checkpoint' ) );
+		}
+		$add( (string) wp_upload_dir( null, false )['basedir'], __( 'the uploads directory', 'wp-checkpoint' ) );
+		if ( is_multisite() ) {
+			if ( ! is_main_site() ) {
+				switch_to_blog( get_main_site_id() );
+				$add( (string) wp_upload_dir( null, false )['basedir'], __( 'the uploads directory', 'wp-checkpoint' ) );
+				restore_current_blog();
+			}
+			$add( WP_CONTENT_DIR . '/blogs.dir', __( 'the uploads directory', 'wp-checkpoint' ) );
+		}
+		$add( WP_LANG_DIR, __( 'the languages directory', 'wp-checkpoint' ) );
+		$add( WP_CONTENT_DIR . '/upgrade', __( 'the upgrade directory', 'wp-checkpoint' ) );
+		$add( WP_CONTENT_DIR . '/upgrade-temp-backup', __( 'the directory WordPress keeps backups in during updates', 'wp-checkpoint' ) );
+		if ( function_exists( 'wp_get_font_dir' ) ) {
+			$add( (string) wp_get_font_dir()['basedir'], __( 'the fonts directory', 'wp-checkpoint' ) );
+		}
+		return array(
+			'within' => $within,
+			'itself' => array( WP_CONTENT_DIR => __( 'the content directory (wp-content)', 'wp-checkpoint' ) ),
 		);
 	}
 
@@ -229,7 +297,7 @@ final class Directories {
 	/**
 	 * Environment of this instance.
 	 *
-	 * @return array{abspath: string, content_dir: string, document_root: string, is_web_request: bool, custom_dir: string}
+	 * @return array{abspath: string, content_dir: string, document_root: string, is_web_request: bool, custom_dir: string, wordpress_dirs: array{within: array<string, string>, itself: array<string, string>}|null, after_marker: callable|null}
 	 */
 	public function context(): array {
 		return $this->context;
@@ -270,7 +338,7 @@ final class Directories {
 		$this->save_state();
 
 		if ( '' !== $abandoned && $abandoned !== $dir && is_dir( $abandoned ) && $this->holds_only_plugin_files( $abandoned ) ) {
-			Deleter::empty_directory( $abandoned );
+			$this->empty_directory( $abandoned );
 			@rmdir( $abandoned ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_rmdir -- best effort cleanup of the empty replacement directory.
 		}
 	}
@@ -342,9 +410,15 @@ final class Directories {
 		if ( '' !== $this->state['path'] && self::is_valid_token( $this->state['token'] ) ) {
 			$existing = $this->state['path'];
 			if ( is_dir( $existing ) ) {
-				if ( $this->owns( $existing ) ) {
+				$found = $this->marker( $existing );
+				if ( self::MARKER_OWN === $found ) {
 					$this->adopt( $existing, $this->state['source'], (bool) $this->state['provisional'] );
 					$this->maybe_migrate();
+					return;
+				}
+				if ( self::MARKER_UNREADABLE === $found ) {
+					// Not evidence of a clone: nothing is recorded, saved or chosen instead.
+					$this->error = self::unreadable_marker( $existing );
 					return;
 				}
 				// Same options, different ABSPATH: a clone, a move, or a new release of a deployment.
@@ -392,6 +466,20 @@ final class Directories {
 	}
 
 	/**
+	 * Deleter::empty_directory(), with a refused path logged: nothing was deleted, and resolving the storage goes on.
+	 *
+	 * @param string $dir Directory.
+	 * @return void
+	 */
+	private function empty_directory( string $dir ): void {
+		try {
+			Deleter::empty_directory( $dir );
+		} catch ( DeletionRefused $e ) {
+			$this->log_event( $e->getMessage() );
+		}
+	}
+
+	/**
 	 * Append a line to logs/storage.log in the base directory.
 	 *
 	 * @param string $message Message.
@@ -421,13 +509,32 @@ final class Directories {
 	 * @return void
 	 */
 	private function resolve_custom(): void {
+		$refused = Deleter::storage_refusal( $this->context['custom_dir'] );
+		if ( '' !== $refused ) {
+			// Nothing in it could ever be deleted (reclaim, purge, uninstall): refused before anything is written there.
+			// The constant as set, before any trimming (a drive root keeps its separator).
+			$this->error = Deleter::NOT_A_FULL_PATH === $refused
+				? __( 'WPCHECKPOINT_STORAGE_DIR must be an absolute path, without . or .. segments unless the directory exists. Set it to the full path of a directory of its own.', 'wp-checkpoint' )
+				: __( 'WPCHECKPOINT_STORAGE_DIR names the root of the file system, a WordPress directory or a directory that holds one. Set it to a directory of its own, for example a new directory next to the WordPress directory. Backups already stored there stay in its backups sub-directory; move them to the new directory by hand.', 'wp-checkpoint' );
+			return;
+		}
+		$wordpress = null === $this->context['wordpress_dirs'] ? self::wordpress_dirs() : $this->context['wordpress_dirs'];
+		$label     = StorageLocation::refusal( $this->context['custom_dir'], $wordpress['within'], $wordpress['itself'] );
+		if ( '' !== $label ) {
+			// What the plugin writes there (index.php, .htaccess denying access) would change what WordPress serves.
+			$this->error = in_array( $label, $wordpress['itself'], true )
+				? sprintf( /* translators: %s: which directory, e.g. "the content directory (wp-content)" */ __( 'WPCHECKPOINT_STORAGE_DIR names %s or a directory that holds it. The files WP Checkpoint writes into its storage directory would change what WordPress serves from there. Set it to a new directory of its own, for example next to the WordPress directory or inside wp-content. If it was the storage directory before, its backups stay in its backups sub-directory; move them to the new one by hand.', 'wp-checkpoint' ), $label )
+				: sprintf( /* translators: %s: which directory, e.g. "the uploads directory" */ __( 'WPCHECKPOINT_STORAGE_DIR names %s, a directory inside it or one that holds it. The files WP Checkpoint writes into its storage directory would change what WordPress serves from there. Set it to a new directory of its own, for example next to the WordPress directory or inside wp-content. If it was the storage directory before, its backups stay in its backups sub-directory; move them to the new one by hand.', 'wp-checkpoint' ), $label );
+			return;
+		}
 		$dir = rtrim( $this->context['custom_dir'], '/\\' );
 		if ( '' === $dir ) {
 			$this->error = __( 'WPCHECKPOINT_STORAGE_DIR is empty.', 'wp-checkpoint' );
 			return;
 		}
-		$marker = $dir . DIRECTORY_SEPARATOR . OwnerMarker::FILENAME;
-		if ( is_file( $marker ) && ! $this->owns( $dir ) ) {
+		// Another installation's marker, read: a clone. One that cannot be read is no evidence of that (past_tokens
+		// are kept, nothing is saved): prepare() refuses the directory with the reason (unowned()).
+		if ( self::MARKER_OTHER === $this->marker( $dir ) ) {
 			$this->state['clone_detected'] = true;
 			$this->state['previous_path']  = $dir;
 			$this->state['past_tokens']    = array(); // The original installation's (own_tokens()).
@@ -529,13 +636,37 @@ final class Directories {
 	 * Create the directory tree, protection files and owner marker, and prove
 	 * it is writable.
 	 *
+	 * Only a directory that does not exist yet, one that is empty, or one
+	 * that carries this installation's owner marker is written into
+	 * (unowned()); anything else is refused before the first write. The
+	 * marker is the first thing written, with exclusive creation, so a
+	 * directory the plugin created is marked as its own before it holds
+	 * anything else: a request that dies after creating it leaves an empty
+	 * directory, and one that dies while writing the marker leaves nothing
+	 * but a marker holding the start of this installation's (both taken up
+	 * again by the next request).
+	 *
 	 * @param string $dir Base directory.
 	 * @return bool
 	 */
 	private function prepare( string $dir ): bool {
+		$unowned = $this->unowned( $dir );
+		if ( '' !== $unowned ) {
+			$this->error = $unowned;
+			return false;
+		}
 		if ( ! wp_mkdir_p( $dir ) || ! is_dir( $dir ) || ! wp_is_writable( $dir ) ) {
 			$this->error = sprintf( /* translators: %s: directory path */ __( 'Cannot create or write to %s.', 'wp-checkpoint' ), $dir );
 			return false;
+		}
+		if ( null !== $this->context['before_mark'] ) {
+			call_user_func( $this->context['before_mark'], $dir );
+		}
+		if ( ! $this->mark( $dir ) ) {
+			return false;
+		}
+		if ( null !== $this->context['after_marker'] ) {
+			call_user_func( $this->context['after_marker'], $dir );
 		}
 
 		$probe = $dir . DIRECTORY_SEPARATOR . '.probe-' . bin2hex( random_bytes( 4 ) );
@@ -563,35 +694,171 @@ final class Directories {
 			return false;
 		}
 
-		$marker = $dir . DIRECTORY_SEPARATOR . OwnerMarker::FILENAME;
-		if ( ! is_file( $marker ) ) {
-			$contents = OwnerMarker::build( $this->state['install_id'], $this->context['abspath'] );
-			if ( false === file_put_contents( $marker, $contents, LOCK_EX ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- plugin-owned directory.
-				$this->error = __( 'Cannot write the owner marker.', 'wp-checkpoint' );
-				return false;
-			}
-		} elseif ( ! $this->owns( $dir ) ) {
-			$this->error = __( 'The directory belongs to another installation.', 'wp-checkpoint' );
-			return false;
-		}
-
 		$this->error = '';
 		return true;
 	}
 
 	/**
-	 * Whether the owner marker in $dir belongs to this installation.
+	 * Why nothing may be written into $dir, or '' when it may: it does not exist yet (or is not a directory, which
+	 * creating it will report), it is empty, it carries this installation's owner marker, or it holds nothing but an
+	 * unfinished one (marker_unfinished()). A directory whose contents cannot be listed is refused: it cannot be shown
+	 * to be empty.
+	 *
+	 * @param string $dir Directory.
+	 * @return string
+	 */
+	private function unowned( string $dir ): string {
+		clearstatcache();
+		if ( ! @is_dir( $dir ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- open_basedir warnings would name the path.
+			return '';
+		}
+		$found = $this->marker( $dir );
+		if ( self::MARKER_OWN === $found || self::MARKER_UNFINISHED === $found ) {
+			return '';
+		}
+		if ( self::MARKER_UNREADABLE === $found ) {
+			return self::unreadable_marker( $dir );
+		}
+		$entries = @scandir( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- as above.
+		if ( false === $entries ) {
+			return sprintf( /* translators: %s: directory path */ __( 'What %s holds cannot be listed, so it cannot be shown to be empty or to be WP Checkpoint\'s own; nothing is written there. Make it readable, or use a directory that does not exist yet (WP Checkpoint creates it).', 'wp-checkpoint' ), $dir );
+		}
+		$entries = array_values( array_diff( $entries, array( '.', '..' ) ) );
+		if ( array() === $entries ) {
+			return '';
+		}
+		if ( in_array( OwnerMarker::FILENAME, $entries, true ) ) {
+			return __( 'The directory belongs to another installation.', 'wp-checkpoint' );
+		}
+		return sprintf( /* translators: %s: directory path */ __( '%s already holds files and does not carry WP Checkpoint\'s owner marker, so nothing is written there. Use a directory that does not exist yet (WP Checkpoint creates it) or an empty one.', 'wp-checkpoint' ), $dir );
+	}
+
+	/**
+	 * Whether $dir holds nothing but an owner marker whose contents are the start of this installation's (empty
+	 * included): what a request that died while writing the marker leaves behind. The marker is written in one call
+	 * right after the directory is created, before anything else.
+	 *
+	 * @param string $dir Directory.
+	 * @return bool
+	 */
+	private function marker_unfinished( string $dir ): bool {
+		return self::MARKER_UNFINISHED === $this->marker( $dir );
+	}
+
+	/**
+	 * What the owner marker in $dir says (MARKER_*). It reads the file system on every call (another request may have
+	 * written the marker meanwhile). Each answer rests on what was seen: "another installation's" on contents read,
+	 * "none" on a listing of the directory without a marker. What cannot be seen is MARKER_UNREADABLE, never someone
+	 * else's and never no one's: a marker that cannot be read, a directory that cannot be searched or listed. Nothing
+	 * it reads warns: a warning would name the path in the error log.
+	 *
+	 * @phpstan-impure
+	 *
+	 * @param string $dir Base directory.
+	 * @return string
+	 */
+	private function marker( string $dir ): string {
+		$dir    = rtrim( $dir, '/\\' );
+		$marker = $dir . DIRECTORY_SEPARATOR . OwnerMarker::FILENAME;
+		clearstatcache();
+		if ( ! @is_dir( $dir ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- open_basedir warnings would name the path.
+			return self::MARKER_NONE; // Nothing there to be anyone's.
+		}
+		if ( ! @is_file( $marker ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- as above.
+			// No marker only when the directory is listed without one: a directory that cannot be searched says
+			// neither (its marker cannot be looked at, listed or not).
+			$entries = @scandir( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- as above.
+			return false === $entries || in_array( OwnerMarker::FILENAME, $entries, true ) ? self::MARKER_UNREADABLE : self::MARKER_NONE;
+		}
+		$contents = null === $this->context['read_marker']
+			? @file_get_contents( $marker ) // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- as above; a tiny local file.
+			: call_user_func( $this->context['read_marker'], $marker );
+		if ( ! is_string( $contents ) ) {
+			return self::MARKER_UNREADABLE;
+		}
+		$install_id = (string) $this->state['install_id'];
+		if ( OwnerMarker::matches( $contents, $install_id, $this->context['abspath'] ) ) {
+			return self::MARKER_OWN;
+		}
+		if ( OwnerMarker::is_unfinished( $contents, $install_id, $this->context['abspath'] ) ) {
+			$entries = @scandir( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- as above.
+			if ( false === $entries ) {
+				return self::MARKER_UNREADABLE; // Whether anything else is there cannot be seen.
+			}
+			if ( array( OwnerMarker::FILENAME ) === array_values( array_diff( $entries, array( '.', '..' ) ) ) ) {
+				return self::MARKER_UNFINISHED;
+			}
+		}
+		return self::MARKER_OTHER;
+	}
+
+	/**
+	 * Why a directory whose owner marker cannot be seen (MARKER_UNREADABLE) is not used: something that is not a file
+	 * where the marker belongs (a directory, a link to nothing), or the directory or the marker cannot be read.
+	 *
+	 * @param string $dir Directory.
+	 * @return string
+	 */
+	private static function unreadable_marker( string $dir ): string {
+		$marker = rtrim( $dir, '/\\' ) . DIRECTORY_SEPARATOR . OwnerMarker::FILENAME;
+		if ( ( @file_exists( $marker ) || @is_link( $marker ) ) && ! @is_file( $marker ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- open_basedir warnings would name the path.
+			return sprintf(
+				/* translators: 1: owner marker file name, 2: directory path */
+				__( 'Whether %2$s is this site\'s own storage directory cannot be told: what is named %1$s there is not a file. Nothing was changed. Remove or rename it if it is not needed, and reload.', 'wp-checkpoint' ),
+				OwnerMarker::FILENAME,
+				$dir
+			);
+		}
+		return sprintf(
+			/* translators: 1: owner marker file name, 2: directory path */
+			__( 'Whether %2$s is this site\'s own storage directory cannot be told: the directory or its owner marker %1$s cannot be read (file permissions, or the host\'s open_basedir setting). Nothing was changed. Make both readable by PHP and reload.', 'wp-checkpoint' ),
+			OwnerMarker::FILENAME,
+			$dir
+		);
+	}
+
+	/**
+	 * Write this installation's owner marker into $dir unless it is there (exclusive creation); an unfinished one is
+	 * replaced first.
+	 *
+	 * @param string $dir Directory.
+	 * @return bool Whether the directory carries this installation's marker now.
+	 */
+	private function mark( string $dir ): bool {
+		$marker = $dir . DIRECTORY_SEPARATOR . OwnerMarker::FILENAME;
+		if ( $this->owns( $dir ) ) {
+			return true; // The usual case: a directory prepared before.
+		}
+		if ( $this->marker_unfinished( $dir ) ) {
+			wp_delete_file( $marker );
+		}
+		if ( OwnerMarker::create( $marker, OwnerMarker::build( (string) $this->state['install_id'], $this->context['abspath'] ) ) ) {
+			return true;
+		}
+		$found = $this->marker( $dir );
+		if ( self::MARKER_OWN === $found ) {
+			return true; // Written meanwhile by another request of this installation.
+		}
+		// A marker still there, read, and not the start of this installation's was written by someone else.
+		if ( self::MARKER_UNREADABLE === $found ) {
+			$this->error = self::unreadable_marker( $dir );
+		} else {
+			$this->error = self::MARKER_OTHER === $found ? __( 'The directory belongs to another installation.', 'wp-checkpoint' ) : __( 'Cannot write the owner marker.', 'wp-checkpoint' );
+		}
+		return false;
+	}
+
+	/**
+	 * Whether the owner marker in $dir belongs to this installation. It reads the file system on every call (another
+	 * request may have written the marker meanwhile).
+	 *
+	 * @phpstan-impure
 	 *
 	 * @param string $dir Base directory.
 	 * @return bool
 	 */
 	private function owns( string $dir ): bool {
-		$marker = rtrim( $dir, '/\\' ) . DIRECTORY_SEPARATOR . OwnerMarker::FILENAME;
-		if ( ! is_file( $marker ) ) {
-			return false;
-		}
-		$contents = file_get_contents( $marker ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- tiny local file.
-		return is_string( $contents ) && OwnerMarker::matches( $contents, (string) $this->state['install_id'], $this->context['abspath'] );
+		return self::MARKER_OWN === $this->marker( $dir );
 	}
 
 	/**
@@ -657,7 +924,7 @@ final class Directories {
 			return;
 		}
 
-		Deleter::empty_directory( $current );
+		$this->empty_directory( $current );
 		@rmdir( $current ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_rmdir -- best effort cleanup of the empty provisional directory.
 		$this->adopt( $outside, self::SOURCE_OUTSIDE, false );
 	}

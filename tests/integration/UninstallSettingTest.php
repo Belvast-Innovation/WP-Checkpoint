@@ -32,6 +32,9 @@ final class UninstallSettingTest extends WP_UnitTestCase {
 
 	public function tear_down(): void {
 		foreach ( glob( WP_CONTENT_DIR . '/wp-checkpoint-*' ) ?: array() as $dir ) {
+			if ( '' === (string) $dir || '' !== Deleter::refusal( (string) $dir ) ) {
+				continue; // Not set, or not one the plugin may delete (what the test made elsewhere it removes itself).
+			}
 			Deleter::empty_directory( $dir );
 			@rmdir( $dir );
 		}

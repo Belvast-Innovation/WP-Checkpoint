@@ -7,18 +7,24 @@
 
 namespace WPCheckpoint\Restore;
 
-use WPCheckpoint\Jobs\TempTables;
-use WPCheckpoint\Support\Schema;
+use WPCheckpoint\Database\OwnTables;
+use WPCheckpoint\Database\TableSelection;
 
 defined( 'ABSPATH' ) || exit;
 
 /**
  * The swap makes the site's set of tables the backup's: a live table of the
  * backup's name is replaced (its entry in the plan moves it away first),
- * and a live table the backup does not have is moved away when it is known
- * to be this site's. With a table prefix, those are the tables that start
- * with it; with an empty prefix, only WordPress's own table names are known
- * to be this site's: every other table is left where it is and reported.
+ * and a live table the backup does not have is moved away only when it is
+ * shown to be this site's. The rule is the export's (TableSelection): with
+ * a table prefix, every table under it that no other installation in the
+ * same database claims, a network's sub-sites' tables among them. A table
+ * that another installation's WordPress tables show to be its own (a longer
+ * prefix, such as "wp_old_" under "wp_"), or that may be either's, is left
+ * where it is and reported, even when it is this site's too (a users table
+ * the two share), as is every table outside the prefix. With an empty prefix,
+ * only WordPress's own table names are this site's: every other table is
+ * left and reported.
  *
  * Never moved nor reported: the backup's own tables (their entries replace
  * them), the tables left out of the restore (the live one stays), and this
@@ -30,45 +36,61 @@ final class TableMoves {
 	/**
 	 * The live tables the backup does not have: those the swap moves away, and those it leaves and reports.
 	 *
-	 * @param string   $prefix   The site's table prefix ('' for none).
-	 * @param string   $base     The site's base table prefix (the plugin's own tables have it).
-	 * @param string[] $live     The live tables.
-	 * @param string[] $incoming The final names of the backup's tables.
-	 * @param string[] $excluded The final names of the tables left out of the restore.
-	 * @param string[] $core     WordPress's own table names for this site (read with an empty prefix only).
+	 * @param string   $prefix    The site's table prefix ('' for none).
+	 * @param bool     $multisite Whether the site is a network (its sub-sites' tables are its own).
+	 * @param string[] $live      The live tables.
+	 * @param string[] $incoming  The final names of the backup's tables.
+	 * @param string[] $excluded  The final names of the tables left out of the restore.
+	 * @param string[] $core      WordPress's own tables of this site (read with an empty prefix only).
 	 * @return array{move: string[], report: string[]} Each in the order of $live.
 	 */
-	public static function select( string $prefix, string $base, array $live, array $incoming, array $excluded, array $core ): array {
-		$skip = array_fill_keys( array_merge( $incoming, $excluded ), true );
-		$own  = array_fill_keys( $core, true );
-		$out  = array(
+	public static function select( string $prefix, bool $multisite, array $live, array $incoming, array $excluded, array $core ): array {
+		$skip   = array_fill_keys( array_merge( $incoming, $excluded ), true );
+		$own    = array_fill_keys( array_map( 'strval', $core ), true );
+		$out    = array(
 			'move'   => array(),
 			'report' => array(),
 		);
+		$theirs = array();
+		if ( '' !== $prefix ) {
+			// Every live table under the prefix, the backup's included: another installation shows by its own tables.
+			$under = array();
+			foreach ( $live as $name ) {
+				if ( 0 === strncmp( (string) $name, $prefix, strlen( $prefix ) ) ) {
+					$under[] = (string) $name;
+				}
+			}
+			// This site's WordPress tables are not protected here, unlike in the export: one that another installation
+			// claims too (a users table shared through CUSTOM_USER_TABLE) is left where it is, not moved.
+			foreach ( TableSelection::foreign( $under, $prefix, $multisite ) as $group ) {
+				foreach ( array_merge( $group['excluded'], $group['kept'] ) as $name ) {
+					$theirs[ $name ] = true;
+				}
+			}
+		}
 		foreach ( $live as $name ) {
 			$name = (string) $name;
-			if ( isset( $skip[ $name ] ) || self::never( $name, $base ) ) {
+			if ( isset( $skip[ $name ] ) || self::never( $name ) ) {
 				continue;
 			}
 			if ( '' === $prefix ) {
-				$out[ isset( $own[ $name ] ) ? 'move' : 'report' ][] = $name;
-			} elseif ( 0 === strncmp( $name, $prefix, strlen( $prefix ) ) ) {
-				$out['move'][] = $name;
+				$mine = isset( $own[ $name ] );
+			} else {
+				$mine = 0 === strncmp( $name, $prefix, strlen( $prefix ) ) && ! isset( $theirs[ $name ] );
 			}
-			// Otherwise not this site's (another installation's prefix): left where it is.
+			$out[ $mine ? 'move' : 'report' ][] = $name;
 		}
 		return $out;
 	}
 
 	/**
-	 * Whether a table is one the swap never touches: the plugin's jobs table and swap plan, and its temporary and
-	 * old tables.
+	 * Whether a table is one the swap never touches: a run table of this plugin, this installation's or another's
+	 * in the same database (Database\OwnTables).
 	 *
 	 * @param string $name Table name.
-	 * @param string $base The site's base table prefix.
 	 * @return bool
 	 */
-	public static function never( string $name, string $base ): bool {
-		return $base . Schema::JOBS_TABLE === $name || $base . SwapPlan::TABLE === $name || 0 === strncmp( $name, TempTables::PREFIX, strlen( TempTables::PREFIX ) ) || 0 === strncmp( $name, TempTables::OLD_PREFIX, strlen( TempTables::OLD_PREFIX ) );
+	public static function never( string $name ): bool {
+		return OwnTables::is_own( $name );
 	}
 }

@@ -29,7 +29,8 @@
     },
     "platform": {
       "php": "7.4.33"
-    }
+    },
+    "process-timeout": 900
   },
   "scripts": {
     "lint": "phpcs",
@@ -40,8 +41,7 @@
       "phpunit --testsuite unit"
     ],
     "test:integration": [
-      "@putenv WPCHECKPOINT_TEST_SUITE=integration",
-      "phpunit --testsuite integration"
+      "sh bin/test-integration.sh"
     ]
   }
 }

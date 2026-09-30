@@ -21,6 +21,12 @@ defined( 'ABSPATH' ) || exit;
 final class WpdbConnection implements Connection {
 
 	/**
+	 * At most this many triggers, routines or events are read (routines()): the notes name a few and count the rest.
+	 */
+	const ROUTINES_READ = 1000;
+
+
+	/**
 	 * Rows of a query.
 	 *
 	 * @param string   $sql  SQL with "?" placeholders.
@@ -103,6 +109,57 @@ final class WpdbConnection implements Connection {
 	public function server_info(): string {
 		global $wpdb;
 		return (string) $wpdb->db_server_info();
+	}
+
+	/**
+	 * What the export does not take and a site may rely on: triggers on the given tables, and the database's
+	 * stored procedures, functions and events (they belong to the database, not to a table prefix). At most
+	 * ROUTINES_READ of each are read ('capped': as many triggers as that were found); null for a kind that could
+	 * not be read. A database user without the privileges to see them gets empty lists from information_schema,
+	 * which cannot be told apart from none.
+	 *
+	 * @param string[] $tables The tables of the backup.
+	 * @return array{triggers: array<int, array{0: string, 1: string}>|null, capped: bool, routines: array<int, array{0: string, 1: string}>|null, events: string[]|null}
+	 */
+	public function routines( array $tables ): array {
+		// Triggers on the backup's tables only, asked of the database in batches (a shared database may hold many
+		// more of other sites': a cap over all of them could leave this site's out).
+		$triggers = array();
+		$capped   = false;
+		foreach ( array_chunk( array_values( $tables ), 200 ) as $batch ) {
+			$left = self::ROUTINES_READ - count( $triggers );
+			if ( $left <= 0 ) {
+				$capped = true;
+				break;
+			}
+			$rows = $this->rows( 'SELECT TRIGGER_NAME, EVENT_OBJECT_TABLE FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = DATABASE() AND EVENT_OBJECT_TABLE IN (' . implode( ', ', array_fill( 0, count( $batch ), '?' ) ) . ') ORDER BY EVENT_OBJECT_TABLE, TRIGGER_NAME LIMIT ' . $left, $batch );
+			if ( null === $rows ) {
+				$triggers = null;
+				break;
+			}
+			foreach ( $rows as $row ) {
+				$triggers[] = array( (string) $row[0], (string) $row[1] );
+			}
+			$capped = $capped || count( $rows ) >= $left;
+		}
+		$routines = $this->rows( 'SELECT ROUTINE_TYPE, ROUTINE_NAME FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = DATABASE() ORDER BY ROUTINE_TYPE, ROUTINE_NAME LIMIT ' . self::ROUTINES_READ );
+		$events   = $this->rows( 'SELECT EVENT_NAME FROM information_schema.EVENTS WHERE EVENT_SCHEMA = DATABASE() ORDER BY EVENT_NAME LIMIT ' . self::ROUTINES_READ );
+		return array(
+			'triggers' => $triggers,
+			'capped'   => $capped,
+			'routines' => null === $routines ? null : array_map(
+				static function ( array $row ): array {
+					return array( (string) $row[0], (string) $row[1] );
+				},
+				$routines
+			),
+			'events'   => null === $events ? null : array_map(
+				static function ( array $row ): string {
+					return (string) $row[0];
+				},
+				$events
+			),
+		);
 	}
 
 	/**

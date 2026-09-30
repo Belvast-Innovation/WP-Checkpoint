@@ -27,6 +27,7 @@ final class StoreStepTest extends TestCase {
 	private $names;
 
 	protected function set_up(): void {
+		parent::set_up();
 		$this->ctx = new WorkContext( 'wpcheckpoint-store-' );
 		mkdir( $this->ctx->work() . '/' . PackStep::VOLUMES );
 		ExportPlan::write( $this->ctx->work(), ExportPlan::PLAN, array( 'base' => self::BASE, 'tables' => array(), 'groups' => array(), 'exclusions' => array() ) );

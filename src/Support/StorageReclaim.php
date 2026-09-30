@@ -252,10 +252,10 @@ final class StorageReclaim {
 	 */
 	public static function read_marker( string $dir ) {
 		$file = $dir . DIRECTORY_SEPARATOR . OwnerMarker::FILENAME;
-		if ( ! is_file( $file ) ) {
+		if ( ! @is_file( $file ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a warning would name the path.
 			return null;
 		}
-		$contents = file_get_contents( $file ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- tiny local file.
+		$contents = @file_get_contents( $file ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- as above; a tiny local file.
 		if ( ! is_string( $contents ) ) {
 			return null;
 		}

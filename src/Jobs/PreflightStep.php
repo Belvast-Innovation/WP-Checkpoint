@@ -7,6 +7,9 @@
 
 namespace WPCheckpoint\Jobs;
 
+use WPCheckpoint\Database\WpdbConnection;
+use WPCheckpoint\Support\Utf8;
+
 use WPCheckpoint\Archive\Packer;
 use WPCheckpoint\Database\Connection;
 use WPCheckpoint\Database\RowSizeCheck;
@@ -38,6 +41,12 @@ use WPCheckpoint\Database\TableSelection;
  * site's slug) come in as callables so the step is testable without it.
  */
 final class PreflightStep implements Step {
+
+	/**
+	 * At most this many triggers, routines or events are named in a note; the rest are counted.
+	 */
+	const MAX_ROUTINES_LISTED = 10;
+
 
 	/**
 	 * Tables of a left-out group named in the findings (the rest are counted).
@@ -86,7 +95,7 @@ final class PreflightStep implements Step {
 	 *                                          'slug' (callable(): string), 'can_deflate' (bool), 'normalization' (bool),
 	 *                                          'int_size' (int), 'now' (callable(): int), 'random' (callable(): string, four hex digits; tests),
 	 *                                          'multisite' (bool), 'core_tables' (callable(): string[], this installation's core tables),
-	 *                                          'own_tables' (string[], the plugin's own tables: never in a backup).
+	 *                                          'own' (callable(string $table): bool, the plugin's own run tables, Database\OwnTables: never in a backup).
 	 * @param int                  $chunk_bytes Chunk size.
 	 */
 	public function __construct( Connection $connection, array $env, int $chunk_bytes = TableExporter::CHUNK_BYTES ) {
@@ -245,9 +254,12 @@ final class PreflightStep implements Step {
 				// filtered query, a wrong prefix): a backup made from it would hold no database and look complete.
 				throw new \RuntimeException( sprintf( 'The database did not list this site\'s own tables (%s missing). The backup is stopped rather than made without the database; check the table prefix and the database connection, and try again.', implode( ', ', $missing ) ) );
 			}
-			// The plugin's own job table describes this installation's jobs and storage, not the site: a restore
-			// keeps the target's own.
-			$own    = isset( $this->env['own_tables'] ) ? array_map( 'strval', (array) $this->env['own_tables'] ) : array();
+			// The plugin's own run tables (Database\OwnTables) describe this installation's jobs, not the site: never
+			// in a backup, and a restore keeps the target's own.
+			$is_own = isset( $this->env['own'] ) && is_callable( $this->env['own'] ) ? $this->env['own'] : static function (): bool {
+				return false;
+			};
+			$own    = array_values( array_filter( array_map( 'strval', (array) $listing['tables'] ), $is_own ) );
 			$all    = array_values( array_diff( array_map( 'strval', (array) $listing['tables'] ), $own ) );
 			$groups = TableSelection::foreign( $all, (string) $this->env['prefix'], ! empty( $this->env['multisite'] ), $core );
 			$left   = array_fill_keys( $own, true );
@@ -287,7 +299,10 @@ final class PreflightStep implements Step {
 				$tables[]        = $table;
 			}
 			foreach ( (array) $listing['views'] as $view ) {
-				$notes[] = sprintf( 'View %s is not part of the backup (views are not exported).', (string) $view );
+				$notes[] = sprintf( 'View %s is not part of the backup (views are not exported).', Utf8::scrub( (string) $view ) );
+			}
+			if ( isset( $this->env['routines'] ) && is_callable( $this->env['routines'] ) ) {
+				$notes = array_merge( $notes, self::routine_notes( (array) call_user_func( $this->env['routines'], $tables ) ) );
 			}
 			$stats = $this->statistics( $tables );
 		}
@@ -321,6 +336,46 @@ final class PreflightStep implements Step {
 				'foreign'    => $foreign,
 			)
 		);
+	}
+
+	/**
+	 * Notes on what the export does not take though a site may rely on it: triggers, stored procedures and
+	 * functions, and events, named (a few) and counted, like the views.
+	 *
+	 * @param array<string, mixed> $found WpdbConnection::routines().
+	 * @return string[]
+	 */
+	public static function routine_notes( array $found ): array {
+		$notes = array();
+		$count = static function ( array $items ): string {
+			return count( $items ) >= WpdbConnection::ROUTINES_READ ? 'At least ' . count( $items ) : (string) count( $items );
+		};
+		$names = static function ( array $items ): string {
+			// Names as the connection's character set gave them: valid UTF-8 for the plan, whatever they were.
+			$shown = array_map( array( Utf8::class, 'scrub' ), array_slice( $items, 0, self::MAX_ROUTINES_LISTED ) );
+			return implode( ', ', $shown ) . ( count( $items ) > count( $shown ) ? sprintf( ' and %d more', count( $items ) - count( $shown ) ) : '' );
+		};
+		if ( null === $found['triggers'] || null === $found['routines'] || null === $found['events'] ) {
+			$notes[] = 'Triggers, stored procedures and events could not be listed; any the site has are not part of the backup (they are not exported).';
+		}
+		if ( is_array( $found['triggers'] ) && array() !== $found['triggers'] ) {
+			$listed = array();
+			foreach ( $found['triggers'] as $trigger ) {
+				$listed[] = sprintf( '%s (on %s)', $trigger[0], $trigger[1] );
+			}
+			$notes[] = sprintf( '%s triggers on the tables of the backup are not part of it (triggers are not exported): %s.', empty( $found['capped'] ) ? $count( $listed ) : 'At least ' . count( $listed ), $names( $listed ) );
+		}
+		if ( is_array( $found['routines'] ) && array() !== $found['routines'] ) {
+			$listed = array();
+			foreach ( $found['routines'] as $routine ) {
+				$listed[] = sprintf( '%s %s', 'FUNCTION' === strtoupper( $routine[0] ) ? 'function' : 'procedure', $routine[1] );
+			}
+			$notes[] = sprintf( '%s stored procedures and functions in this database are not part of the backup (they are not exported): %s.', $count( $listed ), $names( $listed ) );
+		}
+		if ( is_array( $found['events'] ) && array() !== $found['events'] ) {
+			$notes[] = sprintf( '%s events in this database are not part of the backup (events are not exported): %s.', $count( $found['events'] ), $names( $found['events'] ) );
+		}
+		return $notes;
 	}
 
 	/**
