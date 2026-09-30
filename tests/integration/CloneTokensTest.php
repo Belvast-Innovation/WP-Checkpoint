@@ -5,6 +5,7 @@ namespace WPCheckpoint\Tests\Integration;
 use WP_UnitTestCase;
 use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\JobRepository;
+use WPCheckpoint\Support\CloneClassifier;
 use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Support\Options;
 use WPCheckpoint\Support\OwnerMarker;
@@ -259,6 +260,30 @@ final class CloneTokensTest extends WP_UnitTestCase {
 	}
 
 	/**
+	 * What a request that could not resolve an ABSPATH changed of what it may not: the token, the directory, the
+	 * copied tokens, the clone flag. Finishing a take-over that died after rewriting the marker is not judged from
+	 * paths (the marker holds the hash the take-over recorded, for this ABSPATH): it may clear the flag and switch
+	 * to that directory.
+	 *
+	 * @param array<string, mixed> $before State before.
+	 * @param array<string, mixed> $after  State after.
+	 * @return string[]
+	 */
+	private static function blind_changes( array $before, array $after ): array {
+		$finished = ! empty( $before['clone_detected'] ) && '' !== (string) ( $before['reclaim_marker_hash'] ?? '' ) && empty( $after['clone_detected'] ) && ( $before['previous_path'] ?? '' ) === ( $after['path'] ?? '' );
+		if ( $finished ) {
+			return array();
+		}
+		$changed = array();
+		foreach ( array( 'token', 'path', 'copied_tokens', 'clone_detected' ) as $key ) {
+			if ( ( $before[ $key ] ?? null ) !== ( $after[ $key ] ?? null ) ) {
+				$changed[] = $key;
+			}
+		}
+		return $changed;
+	}
+
+	/**
 	 * What a request can change: the stored state and the directories in the content and custom places.
 	 *
 	 * @return array{state: mixed, dirs: string[]}
@@ -304,10 +329,12 @@ final class CloneTokensTest extends WP_UnitTestCase {
 		// for good, unless the deployment root is trusted: those jobs are no longer expected to run.
 		$mark    = 0;
 		$waiting = null;
-		$observe = static function () use ( &$jobs, &$mark, &$waiting ): void {
+		$dead    = false; // A take-over died after rewriting the marker and nothing has finished it yet.
+		$observe = static function () use ( &$jobs, &$mark, &$waiting, &$dead ): void {
 			$state = Options::get( Directories::OPTION, array() );
 			if ( empty( $state['clone_detected'] ) ) {
 				$waiting = null;
+				$dead    = false;
 				return;
 			}
 			if ( $waiting === $state['previous_path'] ) {
@@ -336,9 +363,10 @@ final class CloneTokensTest extends WP_UnitTestCase {
 					case 'switch': // A deployment: a new release, "current" pointed at it.
 						++$release;
 						mkdir( $root . '/releases/' . $release . '/wp-includes', 0755, true );
-						Sandbox::remove( $root . '/current' );
-						symlink( $root . '/releases/' . $release, $root . '/current' );
-						break; // The realpath cache is not cleared here: a web server worker keeps it across requests.
+						// As a deployment tool does it, from outside PHP: PHP's own unlink() and symlink() would clear the
+						// realpath cache, which a web server worker keeps across requests.
+						shell_exec( 'ln -sfn ' . escapeshellarg( $root . '/releases/' . $release ) . ' ' . escapeshellarg( $root . '/current' ) );
+						break;
 					case 'lock':
 						$locked = $can_lock && chmod( $root . '/locked', 0 );
 						break;
@@ -362,6 +390,11 @@ final class CloneTokensTest extends WP_UnitTestCase {
 						$result = $dirs->reclaim()->reclaim( false );
 						if ( $result['ok'] && 'reclaim' !== $action ) {
 							$this->seen['died after the marker was rewritten'] = ( $this->seen['died after the marker was rewritten'] ?? 0 ) + 1;
+							$dead = true;
+						} elseif ( ! $result['ok'] && $dead ) {
+							// A take-over died and ABSPATH moved again before any request finished it: the marker
+							// names a place that is not this request's, as a copy's would. Refused, by design.
+							$this->seen['refused after a dead take-over and another move'] = ( $this->seen['refused after a dead take-over and another move'] ?? 0 ) + 1;
 						} elseif ( $result['ok'] ) {
 							$this->seen['reclaimed'] = ( $this->seen['reclaimed'] ?? 0 ) + 1;
 							$dirs->finish_reclaim();
@@ -385,16 +418,15 @@ final class CloneTokensTest extends WP_UnitTestCase {
 						if ( 'previous' === $as && $release > 1 ) {
 							$this->seen['a worker on the release before'] = ( $this->seen['a worker on the release before'] ?? 0 ) + 1;
 						}
-						// Its ABSPATH, or the one the state was written under, cannot be resolved: whether the state is
-						// this installation's cannot be told from the paths. Never a clone or a move for that.
-						$blind = $locked && ( 'locked' === $as || $this->root . '/' . $this->spelled( $tag, 'locked', $release ) . '/' === (string) ( $before['state']['abspath'] ?? '' ) );
+						// Its ABSPATH, or the one the state was written under (with no resolved directory on record), cannot
+						// be resolved: whether the state is this installation's cannot be told from the paths. Never a clone
+						// or a move for that.
+						$blind = $locked && ( 'locked' === $as || ( $this->root . '/' . $this->spelled( $tag, 'locked', $release ) . '/' === (string) ( $before['state']['abspath'] ?? '' ) && '' === (string) ( $before['state']['abspath_real'] ?? '' ) ) );
 						if ( $blind ) {
 							$this->seen[ '' === $base ? 'blind, not told' : 'blind, told by the marker' ] = ( $this->seen[ '' === $base ? 'blind, not told' : 'blind, told by the marker' ] ?? 0 ) + 1;
 							$after = $this->footprint( $tag )['state'];
-							foreach ( array( 'token', 'path', 'copied_tokens', 'clone_detected' ) as $key ) {
-								if ( ( $before['state'][ $key ] ?? null ) !== ( $after[ $key ] ?? null ) ) {
-									$found[] = sprintf( 'I4 %s: a request that could not resolve an ABSPATH changed %s', $where, $key );
-								}
+							foreach ( self::blind_changes( $before['state'], $after ) as $key ) {
+								$found[] = sprintf( 'I4 %s: a request that could not resolve an ABSPATH changed %s', $where, $key );
 							}
 						}
 						if ( '' === $base ) {
@@ -431,7 +463,7 @@ final class CloneTokensTest extends WP_UnitTestCase {
 					foreach ( $order as $as ) {
 						$site   = $this->spelled( $tag, $as, $release );
 						$before = Options::get( Directories::OPTION, array() );
-						$blind  = $locked && ( 'locked' === $as || $this->root . '/' . $this->spelled( $tag, 'locked', $release ) . '/' === (string) ( $before['abspath'] ?? '' ) );
+						$blind  = $locked && ( 'locked' === $as || ( $this->root . '/' . $this->spelled( $tag, 'locked', $release ) . '/' === (string) ( $before['abspath'] ?? '' ) && '' === (string) ( $before['abspath_real'] ?? '' ) ) );
 						$probe  = $this->dirs( $site, $custom );
 						$here   = $probe->base(); // The request first: it may be the one that sees a deployment.
 						$observe();
@@ -439,10 +471,8 @@ final class CloneTokensTest extends WP_UnitTestCase {
 						if ( $blind ) {
 							$case                = ( '' === $here ? 'blind, not told' : 'blind, told by the marker' ) . ( 'locked' === $as ? ', as the unresolvable spelling' : '' );
 							$this->seen[ $case ] = ( $this->seen[ $case ] ?? 0 ) + 1;
-							foreach ( array( 'token', 'path', 'copied_tokens', 'clone_detected' ) as $key ) {
-								if ( ( $before[ $key ] ?? null ) !== ( $after[ $key ] ?? null ) ) {
-									$found[] = sprintf( 'I4 %s: a request as %s that could not resolve an ABSPATH changed %s', $where, $as, $key );
-								}
+							foreach ( self::blind_changes( (array) $before, (array) $after ) as $key ) {
+								$found[] = sprintf( 'I4 %s: a request as %s that could not resolve an ABSPATH changed %s', $where, $as, $key );
 							}
 						}
 						if ( ! empty( $after['clone_detected'] ) ) {
@@ -708,15 +738,12 @@ final class CloneTokensTest extends WP_UnitTestCase {
 		$base = $web->base();
 		$next = $this->dirs( 'deploy/releases/2', '' );
 		$this->assertNotSame( $base, $next->base(), 'the control: the move is detected' );
+		$this->assertTrue( $next->state()['clone_detected'], 'the control: waiting for the administrator' );
 		$this->assertTrue( $next->reclaim()->reclaim( false )['ok'] );
-		// The request dies here: the marker names release 2, the state was never saved.
+		// The request dies here: the marker names release 2, the state was never saved. The next request finishes it.
 		$again = $this->dirs( 'deploy/releases/2', '' );
-		$again->base();
-		$this->assertTrue( $again->state()['clone_detected'], 'the control: still waiting for the administrator' );
-		$result = $again->reclaim()->reclaim( false );
-		$this->assertTrue( $result['ok'], $result['message'] );
-		$again->finish_reclaim();
-		$this->assertSame( $base, $this->dirs( 'deploy/releases/2', '' )->base() );
+		$this->assertSame( $base, $again->base(), $again->last_error() );
+		$this->assertFalse( $again->state()['clone_detected'] );
 	}
 
 	public function test_a_copy_goes_on_where_the_originals_directory_cannot_be_looked_at(): void {
@@ -739,6 +766,10 @@ final class CloneTokensTest extends WP_UnitTestCase {
 			$this->assertNotSame( $first, $base );
 			$this->assertTrue( $copy->state()['clone_detected'] );
 			$this->assertFalse( $this->runs_on_copy( $held->id, 'h2/b', '' ), 'the original\'s job does not run on it' );
+			// Nothing shows the original gone: a copy, and the notice says to keep the new directory.
+			$verdict = $copy->reclaim()->classify();
+			$this->assertSame( CloneClassifier::CLONE, $verdict['verdict'] );
+			$this->assertSame( CloneClassifier::RECOMMEND_NEW, $verdict['recommendation'] );
 		} finally {
 			chmod( $this->root . '/h2/home', 0755 );
 		}
@@ -759,5 +790,86 @@ final class CloneTokensTest extends WP_UnitTestCase {
 		$this->assertSame( $base, $next->base(), $next->last_error() );
 		$this->assertSame( array(), $next->state()['copied_tokens'], 'none of its tokens set aside' );
 		$this->assertTrue( $this->runs_on_copy( $job->id, 'deploy/releases/2', '', true ), 'its job runs' );
+	}
+
+	public function test_a_take_over_of_a_custom_directory_that_died_keeps_the_sites_token(): void {
+		Schema::ensure();
+		global $wpdb;
+		foreach ( array( 'A', 'B' ) as $site ) {
+			mkdir( $this->root . '/cc/' . $site . '/wp-includes', 0755, true );
+		}
+		$store = $this->root . '/cc/store';
+		$first = $this->dirs( 'cc/A', $store );
+		$this->assertSame( $store, $first->base(), $first->last_error() );
+		$token = (string) $first->state()['token'];
+		$plain = self::repo( $first )->create( 'plain' ); // Needs the current token to be taken.
+		$wpdb->update( Schema::jobs_table(), array( 'status' => Job::RUNNING ), array( 'id' => $plain->id ) );
+		$moved = $this->dirs( 'cc/B', $store );
+		$this->assertSame( '', $moved->base(), 'the control: the move is detected' );
+		$this->assertTrue( $moved->reclaim()->reclaim( false )['ok'] );
+		// The request dies before the state is saved.
+		$next = $this->dirs( 'cc/B', $store );
+		$this->assertSame( $store, $next->base(), $next->last_error() );
+		$this->assertSame( $token, (string) $next->state()['token'], 'its token kept' );
+		$this->assertNotNull( self::repo( $next )->acquire( $plain->id ), 'its job taken' );
+	}
+
+	public function test_a_copy_made_while_a_take_over_was_under_way_cannot_take_the_directory_back(): void {
+		foreach ( array( 'A', 'B', 'C' ) as $site ) {
+			mkdir( $this->root . '/cp/' . $site . '/wp-includes', 0755, true );
+		}
+		$store = $this->root . '/cp/store';
+		$this->assertSame( $store, $this->dirs( 'cp/A', $store )->base() );
+		// The original moves to B; a take-over from there records the hash it is about to write, and fails.
+		$original = $this->dirs( 'cp/B', $store );
+		$this->assertSame( '', $original->base(), 'the control: the move is detected' );
+		$state                        = Options::get( Directories::OPTION, array() );
+		$state['reclaim_marker_hash'] = OwnerMarker::hash_path( $this->root . '/cp/B/' );
+		Options::set( Directories::OPTION, $state );
+		$copied = $state; // The database is copied now, to a copy at C.
+		// The original then continues from B.
+		$retry  = $this->dirs( 'cp/B', $store );
+		$retry->base();
+		$this->assertTrue( $retry->reclaim()->reclaim( false )['ok'] );
+		$retry->finish_reclaim();
+		$this->assertSame( $store, $this->dirs( 'cp/B', $store )->base(), 'the control: the original has it again' );
+		// The copy, with the database as it was, detects the directory as another installation's and continues.
+		Options::set( Directories::OPTION, $copied );
+		$copy = $this->dirs( 'cp/C', $store );
+		$this->assertSame( '', $copy->base() );
+		$result = $copy->reclaim()->reclaim( false );
+		$this->assertFalse( $result['ok'], 'the original claimed it since' );
+		$this->assertStringContainsString( 'already claimed', $result['message'] );
+	}
+
+	public function test_a_worker_on_the_release_before_keeps_the_token_of_a_shared_custom_directory(): void {
+		Schema::ensure();
+		$root  = $this->deployment();
+		$store = $this->root . '/deploy/store';
+		$first = $this->dirs( 'deploy/releases/1', $store );
+		$this->assertSame( $store, $first->base(), $first->last_error() );
+		$token = (string) $first->state()['token'];
+		$job   = self::repo( $first )->create( 'plain' );
+		self::hold( $job->id );
+		// Release 2 sees the move (the directory is shared), and waits for the administrator.
+		$this->assertSame( '', $this->dirs( 'deploy/releases/2', $store )->base(), 'the control: the move is detected' );
+		// A worker still on release 1: the directory is marked for it, and its token is its own.
+		$worker = $this->dirs( 'deploy/releases/1', $store );
+		$this->assertSame( $store, $worker->base(), $worker->last_error() );
+		$this->assertSame( $token, (string) $worker->state()['token'], 'its token kept' );
+		$this->assertTrue( $this->runs_on_copy( $job->id, 'deploy/releases/1', $store, true ), 'its job runs' );
+	}
+
+	public function test_a_deployment_first_seen_by_wp_cli_through_current_is_taken_over_under_a_trusted_root(): void {
+		$root = $this->deployment();
+		$web  = $this->dirs( 'deploy/releases/1', '' );
+		$base = $web->base();
+		$state                        = Options::get( Directories::OPTION, array() );
+		$state['trusted_deploy_root'] = (string) realpath( $root . '/releases' );
+		Options::set( Directories::OPTION, $state );
+		shell_exec( 'ln -sfn ' . escapeshellarg( $root . '/releases/2' ) . ' ' . escapeshellarg( $root . '/current' ) );
+		$cli = $this->dirs( 'deploy/current', '' ); // The first request after the deployment: WP-CLI through the link.
+		$this->assertSame( $base, $cli->base(), 'taken over without asking: ' . $cli->last_error() );
+		$this->assertNotEmpty( $cli->state()['auto_reclaimed'] );
 	}
 }

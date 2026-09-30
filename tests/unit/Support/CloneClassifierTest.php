@@ -8,7 +8,8 @@ use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 final class CloneClassifierTest extends TestCase {
 
 	/**
-	 * Fake filesystem: directories that exist, and a realpath that only knows them.
+	 * Fake filesystem: directories that exist, a realpath that only knows them, and "positively gone" for a path whose
+	 * parent is one of them (listed, and without it); anything else cannot be looked at.
 	 */
 	private function probes( array $dirs ): array {
 		$dirs   = array_map( static function ( string $d ): string {
@@ -21,12 +22,16 @@ final class CloneClassifierTest extends TestCase {
 			$path = rtrim( $path, '/' );
 			return in_array( $path, $dirs, true ) ? $path : false;
 		};
-		return array( $is_dir, $real );
+		$gone   = static function ( string $path ) use ( $dirs ): bool {
+			$path = rtrim( $path, '/' );
+			return ! in_array( $path, $dirs, true ) && in_array( dirname( $path ), $dirs, true );
+		};
+		return array( $is_dir, $real, $gone );
 	}
 
 	public function test_release_siblings_are_a_deployment_even_when_the_old_release_still_exists(): void {
-		list( $is_dir, $real ) = $this->probes( array( '/srv/app/releases', '/srv/app/releases/20260917', '/srv/app/releases/20260917/wp-includes', '/srv/app/releases/20260918', '/srv/app/releases/20260918/wp-includes' ) );
-		$r = CloneClassifier::classify( '/srv/app/releases/20260917/', '/srv/app/releases/20260918/', $is_dir, $real );
+		list( $is_dir, $real, $gone ) = $this->probes( array( '/srv/app/releases', '/srv/app/releases/20260917', '/srv/app/releases/20260917/wp-includes', '/srv/app/releases/20260918', '/srv/app/releases/20260918/wp-includes' ) );
+		$r = CloneClassifier::classify( '/srv/app/releases/20260917/', '/srv/app/releases/20260918/', $is_dir, $real, $gone );
 
 		$this->assertSame( CloneClassifier::DEPLOYMENT, $r['verdict'] );
 		$this->assertSame( CloneClassifier::RECOMMEND_ORIGINAL, $r['recommendation'] );
@@ -36,8 +41,8 @@ final class CloneClassifierTest extends TestCase {
 	}
 
 	public function test_release_siblings_after_the_old_release_was_pruned(): void {
-		list( $is_dir, $real ) = $this->probes( array( '/srv/app/releases', '/srv/app/releases/20260918', '/srv/app/releases/20260918/wp-includes' ) );
-		$r = CloneClassifier::classify( '/srv/app/releases/20260917/', '/srv/app/releases/20260918/', $is_dir, $real );
+		list( $is_dir, $real, $gone ) = $this->probes( array( '/srv/app/releases', '/srv/app/releases/20260918', '/srv/app/releases/20260918/wp-includes' ) );
+		$r = CloneClassifier::classify( '/srv/app/releases/20260917/', '/srv/app/releases/20260918/', $is_dir, $real, $gone );
 
 		$this->assertSame( CloneClassifier::DEPLOYMENT, $r['verdict'] );
 		$this->assertFalse( $r['previous_exists'] );
@@ -45,8 +50,8 @@ final class CloneClassifierTest extends TestCase {
 	}
 
 	public function test_missing_previous_directory_elsewhere_is_a_move(): void {
-		list( $is_dir, $real ) = $this->probes( array( '/var/www/new', '/var/www/new/wp-includes', '/home/old' ) );
-		$r = CloneClassifier::classify( '/home/old/public_html/', '/var/www/new/', $is_dir, $real );
+		list( $is_dir, $real, $gone ) = $this->probes( array( '/var/www/new', '/var/www/new/wp-includes', '/home/old' ) );
+		$r = CloneClassifier::classify( '/home/old/public_html/', '/var/www/new/', $is_dir, $real, $gone );
 
 		$this->assertSame( CloneClassifier::MOVED, $r['verdict'] );
 		$this->assertSame( CloneClassifier::RECOMMEND_ORIGINAL, $r['recommendation'] );
@@ -55,16 +60,16 @@ final class CloneClassifierTest extends TestCase {
 	}
 
 	public function test_previous_directory_without_wordpress_is_a_move(): void {
-		list( $is_dir, $real ) = $this->probes( array( '/home/old/public_html', '/var/www', '/var/www/new', '/home/old' ) );
-		$r = CloneClassifier::classify( '/home/old/public_html/', '/var/www/new/', $is_dir, $real );
+		list( $is_dir, $real, $gone ) = $this->probes( array( '/home/old/public_html', '/var/www', '/var/www/new', '/home/old' ) );
+		$r = CloneClassifier::classify( '/home/old/public_html/', '/var/www/new/', $is_dir, $real, $gone );
 		$this->assertSame( CloneClassifier::MOVED, $r['verdict'] );
 		$this->assertTrue( $r['previous_exists'] );
 		$this->assertFalse( $r['previous_is_wordpress'] );
 	}
 
 	public function test_live_previous_wordpress_elsewhere_is_a_clone(): void {
-		list( $is_dir, $real ) = $this->probes( array( '/home/old/public_html', '/home/old/public_html/wp-includes', '/home/old', '/home/copy', '/home/copy/public_html', '/home/copy/public_html/wp-includes' ) );
-		$r = CloneClassifier::classify( '/home/old/public_html/', '/home/copy/public_html/', $is_dir, $real );
+		list( $is_dir, $real, $gone ) = $this->probes( array( '/home/old/public_html', '/home/old/public_html/wp-includes', '/home/old', '/home/copy', '/home/copy/public_html', '/home/copy/public_html/wp-includes' ) );
+		$r = CloneClassifier::classify( '/home/old/public_html/', '/home/copy/public_html/', $is_dir, $real, $gone );
 
 		$this->assertSame( CloneClassifier::CLONE, $r['verdict'] );
 		$this->assertSame( CloneClassifier::RECOMMEND_NEW, $r['recommendation'] );
@@ -72,42 +77,42 @@ final class CloneClassifierTest extends TestCase {
 	}
 
 	public function test_same_parent_but_identical_path_is_not_siblings(): void {
-		list( $is_dir, $real ) = $this->probes( array( '/srv/app', '/srv/app/wp', '/srv/app/wp/wp-includes' ) );
-		$r = CloneClassifier::classify( '/srv/app/wp/', '/srv/app/wp', $is_dir, $real );
+		list( $is_dir, $real, $gone ) = $this->probes( array( '/srv/app', '/srv/app/wp', '/srv/app/wp/wp-includes' ) );
+		$r = CloneClassifier::classify( '/srv/app/wp/', '/srv/app/wp', $is_dir, $real, $gone );
 		$this->assertFalse( $r['siblings'] );
 		$this->assertSame( CloneClassifier::CLONE, $r['verdict'] );
 	}
 
 	public function test_plain_siblings_are_clones_not_deployments(): void {
-		list( $is_dir, $real ) = $this->probes( array( '/var/www', '/var/www/example.com', '/var/www/example.com/wp-includes', '/var/www/staging.example.com', '/var/www/staging.example.com/wp-includes' ) );
-		$r = CloneClassifier::classify( '/var/www/example.com/', '/var/www/staging.example.com/', $is_dir, $real );
+		list( $is_dir, $real, $gone ) = $this->probes( array( '/var/www', '/var/www/example.com', '/var/www/example.com/wp-includes', '/var/www/staging.example.com', '/var/www/staging.example.com/wp-includes' ) );
+		$r = CloneClassifier::classify( '/var/www/example.com/', '/var/www/staging.example.com/', $is_dir, $real, $gone );
 		$this->assertSame( CloneClassifier::CLONE, $r['verdict'] );
 		$this->assertSame( CloneClassifier::RECOMMEND_NEW, $r['recommendation'] );
 		$this->assertTrue( $r['siblings'] );
 		$this->assertFalse( $r['release_layout'] );
 		$this->assertSame( '', $r['deploy_root'], 'nothing to trust' );
 
-		list( $is_dir, $real ) = $this->probes( array( '/home/u/public_html', '/home/u/public_html/shop', '/home/u/public_html/shop/wp-includes', '/home/u/public_html/shop-staging', '/home/u/public_html/shop-staging/wp-includes' ) );
-		$r = CloneClassifier::classify( '/home/u/public_html/shop/', '/home/u/public_html/shop-staging/', $is_dir, $real );
+		list( $is_dir, $real, $gone ) = $this->probes( array( '/home/u/public_html', '/home/u/public_html/shop', '/home/u/public_html/shop/wp-includes', '/home/u/public_html/shop-staging', '/home/u/public_html/shop-staging/wp-includes' ) );
+		$r = CloneClassifier::classify( '/home/u/public_html/shop/', '/home/u/public_html/shop-staging/', $is_dir, $real, $gone );
 		$this->assertSame( CloneClassifier::CLONE, $r['verdict'] );
 	}
 
 	public function test_release_identifiers_make_siblings_a_deployment(): void {
-		list( $is_dir, $real ) = $this->probes( array( '/srv/app/deploy', '/srv/app/deploy/abc1234', '/srv/app/deploy/abc1234/wp-includes', '/srv/app/deploy/def5678', '/srv/app/deploy/def5678/wp-includes' ) );
-		$r = CloneClassifier::classify( '/srv/app/deploy/abc1234/', '/srv/app/deploy/def5678/', $is_dir, $real );
+		list( $is_dir, $real, $gone ) = $this->probes( array( '/srv/app/deploy', '/srv/app/deploy/abc1234', '/srv/app/deploy/abc1234/wp-includes', '/srv/app/deploy/def5678', '/srv/app/deploy/def5678/wp-includes' ) );
+		$r = CloneClassifier::classify( '/srv/app/deploy/abc1234/', '/srv/app/deploy/def5678/', $is_dir, $real, $gone );
 		$this->assertSame( CloneClassifier::DEPLOYMENT, $r['verdict'], 'git hashes' );
 		$this->assertSame( '/srv/app/deploy', $r['deploy_root'] );
 
-		list( $is_dir, $real ) = $this->probes( array( '/srv/app', '/srv/app/v1.2.3', '/srv/app/v1.2.3/wp-includes', '/srv/app/v1.2.4', '/srv/app/v1.2.4/wp-includes' ) );
-		$r = CloneClassifier::classify( '/srv/app/v1.2.3/', '/srv/app/v1.2.4/', $is_dir, $real );
+		list( $is_dir, $real, $gone ) = $this->probes( array( '/srv/app', '/srv/app/v1.2.3', '/srv/app/v1.2.3/wp-includes', '/srv/app/v1.2.4', '/srv/app/v1.2.4/wp-includes' ) );
+		$r = CloneClassifier::classify( '/srv/app/v1.2.3/', '/srv/app/v1.2.4/', $is_dir, $real, $gone );
 		$this->assertSame( CloneClassifier::DEPLOYMENT, $r['verdict'], 'version numbers' );
 
-		list( $is_dir, $real ) = $this->probes( array( '/srv/app/releases', '/srv/app/releases/hotfix', '/srv/app/releases/hotfix/wp-includes', '/srv/app/releases/main', '/srv/app/releases/main/wp-includes' ) );
-		$r = CloneClassifier::classify( '/srv/app/releases/hotfix/', '/srv/app/releases/main/', $is_dir, $real );
+		list( $is_dir, $real, $gone ) = $this->probes( array( '/srv/app/releases', '/srv/app/releases/hotfix', '/srv/app/releases/hotfix/wp-includes', '/srv/app/releases/main', '/srv/app/releases/main/wp-includes' ) );
+		$r = CloneClassifier::classify( '/srv/app/releases/hotfix/', '/srv/app/releases/main/', $is_dir, $real, $gone );
 		$this->assertSame( CloneClassifier::DEPLOYMENT, $r['verdict'], 'a parent named releases is enough' );
 
-		list( $is_dir, $real ) = $this->probes( array( '/srv/app/deploy', '/srv/app/deploy/abc1234', '/srv/app/deploy/abc1234/wp-includes', '/srv/app/deploy/hotfix', '/srv/app/deploy/hotfix/wp-includes' ) );
-		$r = CloneClassifier::classify( '/srv/app/deploy/abc1234/', '/srv/app/deploy/hotfix/', $is_dir, $real );
+		list( $is_dir, $real, $gone ) = $this->probes( array( '/srv/app/deploy', '/srv/app/deploy/abc1234', '/srv/app/deploy/abc1234/wp-includes', '/srv/app/deploy/hotfix', '/srv/app/deploy/hotfix/wp-includes' ) );
+		$r = CloneClassifier::classify( '/srv/app/deploy/abc1234/', '/srv/app/deploy/hotfix/', $is_dir, $real, $gone );
 		$this->assertSame( CloneClassifier::CLONE, $r['verdict'], 'one arbitrary name breaks the release layout' );
 	}
 
@@ -131,9 +136,25 @@ final class CloneClassifierTest extends TestCase {
 	}
 
 	public function test_windows_style_paths(): void {
-		list( $is_dir, $real ) = $this->probes( array( 'C:/sites/releases', 'C:/sites/releases/b', 'C:/sites/releases/b/wp-includes' ) );
-		$r = CloneClassifier::classify( 'C:\\sites\\releases\\a\\', 'C:\\sites\\releases\\b\\', $is_dir, $real );
+		list( $is_dir, $real, $gone ) = $this->probes( array( 'C:/sites/releases', 'C:/sites/releases/b', 'C:/sites/releases/b/wp-includes' ) );
+		$r = CloneClassifier::classify( 'C:\\sites\\releases\\a\\', 'C:\\sites\\releases\\b\\', $is_dir, $real, $gone );
 		$this->assertSame( CloneClassifier::DEPLOYMENT, $r['verdict'] );
 		$this->assertSame( 'C:/sites/releases', $r['deploy_root'] );
+	}
+
+	public function test_a_previous_directory_that_cannot_be_looked_at_is_not_taken_for_gone(): void {
+		// The copy cannot search the original's home directory: nothing shows the original gone or not WordPress.
+		list( $is_dir, $real, $gone ) = $this->probes( array( '/home/copy', '/home/copy/public_html', '/home/copy/public_html/wp-includes' ) );
+		$r = CloneClassifier::classify( '/home/old/public_html/', '/home/copy/public_html/', $is_dir, $real, $gone );
+		$this->assertSame( CloneClassifier::CLONE, $r['verdict'] );
+		$this->assertSame( CloneClassifier::RECOMMEND_NEW, $r['recommendation'] );
+		$this->assertTrue( $r['previous_exists'], 'not shown to be gone' );
+		$this->assertFalse( $r['previous_seen'], 'nor seen' );
+
+		// The control: the same, where the home directory is listed without it, is a move.
+		list( $is_dir, $real, $gone ) = $this->probes( array( '/home', '/home/copy', '/home/copy/public_html', '/home/copy/public_html/wp-includes', '/home/old' ) );
+		$r = CloneClassifier::classify( '/home/old/public_html/', '/home/copy/public_html/', $is_dir, $real, $gone );
+		$this->assertSame( CloneClassifier::MOVED, $r['verdict'] );
+		$this->assertFalse( $r['previous_exists'] );
 	}
 }

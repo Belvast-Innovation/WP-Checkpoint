@@ -209,7 +209,7 @@ final class ToolsTab implements Tab {
 		$verdicts = array(
 			CloneClassifier::DEPLOYMENT => __( 'The previous and the current WordPress directory are siblings under the same parent, which is how release-based deployments (Deployer, Capistrano, Trellis) work. The previous release may still exist on disk. If the old directory no longer serves this site, continuing with the original storage directory is the right choice.', 'wp-checkpoint' ),
 			CloneClassifier::MOVED      => __( 'The previous WordPress directory no longer exists or no longer holds WordPress. This looks like a move or a migration; continuing with the original storage directory is usually right.', 'wp-checkpoint' ),
-			CloneClassifier::CLONE      => __( 'The previous WordPress directory still exists and still holds WordPress somewhere else. This looks like a copy of the site; unless you know the other copy is gone, keep the new directory.', 'wp-checkpoint' ),
+			CloneClassifier::CLONE      => __( 'The previous WordPress directory still exists and still holds WordPress somewhere else, or cannot be looked at from here. This looks like a copy of the site; unless you know the other copy is gone, keep the new directory.', 'wp-checkpoint' ),
 		);
 		?>
 		<div class="wpcheckpoint-reclaim">
@@ -217,7 +217,7 @@ final class ToolsTab implements Tab {
 			<table class="widefat striped">
 				<tbody>
 					<tr><th scope="row"><?php esc_html_e( 'Original directory', 'wp-checkpoint' ); ?></th><td><code><?php echo esc_html( $target ); ?></code></td></tr>
-					<tr><th scope="row"><?php esc_html_e( 'Previous WordPress directory', 'wp-checkpoint' ); ?></th><td><code><?php echo esc_html( (string) $state['previous_abspath'] ); ?></code> <?php echo $verdict['previous_exists'] ? esc_html__( '(still exists)', 'wp-checkpoint' ) : esc_html__( '(no longer exists)', 'wp-checkpoint' ); ?></td></tr>
+					<tr><th scope="row"><?php esc_html_e( 'Previous WordPress directory', 'wp-checkpoint' ); ?></th><td><code><?php echo esc_html( (string) $state['previous_abspath'] ); ?></code> <?php echo $verdict['previous_seen'] ? esc_html__( '(still exists)', 'wp-checkpoint' ) : ( $verdict['previous_exists'] ? esc_html__( '(cannot be looked at from here)', 'wp-checkpoint' ) : esc_html__( '(no longer exists)', 'wp-checkpoint' ) ); ?></td></tr>
 					<tr><th scope="row"><?php esc_html_e( 'Current WordPress directory', 'wp-checkpoint' ); ?></th><td><code><?php echo esc_html( $directories->context()['abspath'] ); ?></code></td></tr>
 					<tr><th scope="row"><?php esc_html_e( 'Assessment', 'wp-checkpoint' ); ?></th><td><?php echo esc_html( $verdicts[ $verdict['verdict'] ] ); ?> <strong><?php echo CloneClassifier::RECOMMEND_ORIGINAL === $verdict['recommendation'] ? esc_html__( 'Recommended: continue with the original directory.', 'wp-checkpoint' ) : esc_html__( 'Recommended: keep the new directory.', 'wp-checkpoint' ); ?></strong></td></tr>
 					<tr><th scope="row"><?php esc_html_e( 'Backups in it', 'wp-checkpoint' ); ?></th><td><?php echo esc_html( (string) $facts['backups'] ); ?>

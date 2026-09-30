@@ -102,13 +102,14 @@ final class StorageReclaim {
 	/**
 	 * Classification of the ABSPATH change.
 	 *
-	 * @return array{verdict: string, recommendation: string, previous_exists: bool, previous_is_wordpress: bool, siblings: bool, deploy_root: string}
+	 * @return array{verdict: string, recommendation: string, previous_exists: bool, previous_seen: bool, previous_is_wordpress: bool, siblings: bool, deploy_root: string}
 	 */
 	public function classify(): array {
 		// The directory ABSPATH resolved to when the state was recorded: WP-CLI's --path through a deployment's
 		// "current" link says nothing about which release it was.
 		$previous = isset( $this->state['previous_abspath_real'] ) && '' !== (string) $this->state['previous_abspath_real'] ? (string) $this->state['previous_abspath_real'] : (string) $this->state['previous_abspath'];
-		return CloneClassifier::classify( $previous, (string) $this->context['abspath'] );
+		$current  = OwnerMarker::real( (string) $this->context['abspath'] );
+		return CloneClassifier::classify( $previous, '' !== $current ? $current : (string) $this->context['abspath'] );
 	}
 
 	/**

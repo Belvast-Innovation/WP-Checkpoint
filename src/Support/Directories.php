@@ -211,6 +211,7 @@ final class Directories {
 				'previous_marker_hash'  => '', // The same, as it was when a clone was detected (StorageReclaim).
 				'reclaim_tokens'        => array(), // Set aside by the detection "continue with the original directory" undoes.
 				'reclaim_marker_hash'   => '', // The hash a "continue" was about to write into the marker (StorageReclaim).
+				'detected_real'         => '', // Where ABSPATH resolved to when the clone was detected (note_detection()).
 				'trusted_deploy_root'   => '',
 				'auto_reclaimed'        => array(),
 				'past_tokens'           => array(),
@@ -323,6 +324,7 @@ final class Directories {
 		$this->state['previous_marker_hash']  = '';
 		$this->state['reclaim_tokens']        = array(); // Another installation's, as the administrator says: they stay copied.
 		$this->state['reclaim_marker_hash']   = '';
+		$this->state['detected_real']         = '';
 		$this->save_state();
 	}
 
@@ -369,9 +371,15 @@ final class Directories {
 	 */
 	private function note_detection( string $dir ): void {
 		// The same detection again (a custom directory refused on every request) keeps what it set aside; a new one
-		// sets aside only what this request did: an earlier detection's tokens, never acknowledged, stay copied.
-		$again                                = ! empty( $this->state['clone_detected'] ) && Paths::same( (string) $this->state['previous_path'], $dir, Paths::is_windows() );
+		// sets aside only what this request did: an earlier detection's tokens, never acknowledged, stay copied. The
+		// same means the same directory, detected from the same place: a copy of the database asking from elsewhere
+		// starts its own, without what the original's attempts recorded.
+		$here                                 = OwnerMarker::real( (string) $this->context['abspath'] );
+		$here                                 = '' === $here ? rtrim( Paths::normalize( (string) $this->context['abspath'] ), '/' ) : rtrim( Paths::normalize( $here ), '/' );
+		$again                                = ! empty( $this->state['clone_detected'] ) && Paths::same( (string) $this->state['previous_path'], $dir, Paths::is_windows() ) && Paths::same( (string) $this->state['detected_real'], $here, Paths::is_windows() );
 		$this->state['reclaim_tokens']        = array_values( array_unique( array_merge( $again ? array_map( 'strval', (array) $this->state['reclaim_tokens'] ) : array(), $this->copied_now ) ) );
+		$this->state['reclaim_marker_hash']   = $again ? (string) $this->state['reclaim_marker_hash'] : '';
+		$this->state['detected_real']         = $here;
 		$this->state['clone_detected']        = true;
 		$this->state['previous_path']         = $dir;
 		$this->state['previous_abspath']      = (string) $this->state['abspath'];
@@ -493,6 +501,7 @@ final class Directories {
 		$this->state['copied_tokens']         = array_values( array_diff( (array) $this->state['copied_tokens'], $given, array( $token ) ) );
 		$this->state['reclaim_tokens']        = array();
 		$this->state['reclaim_marker_hash']   = '';
+		$this->state['detected_real']         = '';
 		$this->state['clone_detected']        = false;
 		$this->state['previous_path']         = '';
 		$this->state['previous_abspath']      = '';
@@ -578,10 +587,27 @@ final class Directories {
 		// look: its tokens are recorded as copied before any is chosen, whether or not a marker shows the clone (a
 		// copy whose custom directory names another place, or was emptied, never sees the original's marker). When
 		// that cannot be told either, nothing is chosen, recorded or saved.
+		// A "continue with the original directory" that rewrote the marker and died before saving the state: the
+		// previous directory now carries this installation's marker for this ABSPATH with the very hash the take-over
+		// recorded before rewriting it. It is finished here (the replay rule of that step).
+		$previous = (string) $this->state['previous_path'];
+		$recorded = (string) $this->state['reclaim_marker_hash'];
+		if ( ! empty( $this->state['clone_detected'] ) && '' !== $previous && '' !== $recorded && self::MARKER_OWN === $this->marker( $previous ) && hash_equals( $recorded, (string) ( $this->marker_hashes[ rtrim( $previous, '/\\' ) ] ?? '' ) ) ) {
+			$this->finish_reclaim();
+			$this->log_event( sprintf( 'Continuing with the storage directory %s, which a request had taken over but died before recording it.', $previous ) );
+			return;
+		}
+
 		$marked = '' !== (string) $this->state['path'] && self::MARKER_OWN === $this->marker( (string) $this->state['path'] );
 		if ( ! $marked && ! $this->note_clone() ) {
 			$this->error = $this->undecidable_abspath();
 			return;
+		}
+		if ( $marked && $this->is_copied( (string) $this->state['token'] ) ) {
+			// The token of that directory is this installation's, whatever a detection from another ABSPATH (a
+			// release after a deployment, sharing a custom directory) set aside meanwhile.
+			$this->state['copied_tokens'] = array_values( array_diff( (array) $this->state['copied_tokens'], array( (string) $this->state['token'] ) ) );
+			$this->save_state();
 		}
 
 		if ( '' !== $this->context['custom_dir'] ) {
