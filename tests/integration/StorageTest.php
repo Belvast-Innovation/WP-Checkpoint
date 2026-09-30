@@ -726,8 +726,32 @@ final class StorageTest extends WP_UnitTestCase {
 				$this->markTestSkipped( 'A directory without search permission can still be searched here (the tests run as root).' );
 			}
 			$this->assertTrue( is_dir( $dir ), 'the control: the directory itself is there' );
-			$dirs = new Directories( $this->cli_context() );
-			$this->assertSame( '', $dirs->base(), 'no other directory is chosen meanwhile' );
+			$warnings = array();
+			set_error_handler( // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_set_error_handler -- the test observes warnings.
+				static function ( int $level, string $message ) use ( &$warnings ): bool {
+					if ( 0 !== ( error_reporting() & $level ) ) { // What reaches the log: not what "@" silenced.
+						$warnings[] = $message;
+					}
+					return true;
+				}
+			);
+			try {
+				file_get_contents( $dir . '/' . OwnerMarker::FILENAME ); // The control: a plain read warns, naming the path.
+				$control  = $warnings;
+				$warnings = array();
+				$dirs     = new Directories( $this->cli_context() );
+				$base     = $dirs->base(); // Resolved here (lazily), while the handler watches.
+			} finally {
+				restore_error_handler();
+			}
+			$names = static function ( array $messages ) use ( $dir ): array {
+				return array_values( array_filter( $messages, static function ( string $w ) use ( $dir ): bool {
+					return false !== strpos( $w, $dir );
+				} ) );
+			};
+			$this->assertNotSame( array(), $names( $control ), 'the control: a plain read warns with the path' );
+			$this->assertSame( array(), $names( $warnings ), 'nothing it does warns with the path' );
+			$this->assertSame( '', $base, 'no other directory is chosen meanwhile' );
 			$this->assertStringContainsString( 'cannot be read (file permissions, or the host\'s open_basedir setting)', $dirs->last_error() );
 			$this->assertFalse( Directories::load_state()['clone_detected'] );
 			$this->assertSame( $before, Directories::load_state() );
@@ -737,6 +761,30 @@ final class StorageTest extends WP_UnitTestCase {
 		}
 		$dirs = new Directories( $this->cli_context() );
 		$this->assertSame( $dir, $dirs->base(), 'the control: searchable again, it is this installation\'s: ' . $dirs->last_error() );
+	}
+
+	public function test_something_not_a_file_where_the_marker_belongs_is_no_clone_and_is_named(): void {
+		$first = new Directories( $this->cli_context() );
+		$dir   = $first->base();
+		$this->assertNotSame( '', $dir, $first->last_error() );
+		$before = Directories::load_state();
+		$saves  = $this->count_saves();
+		$marker = $dir . '/' . OwnerMarker::FILENAME;
+		$this->assertTrue( rename( $marker, $dir . '/marker-aside' ) ); // Kept, to put back: the test's own file.
+		mkdir( $marker );
+		try {
+			$dirs = new Directories( $this->cli_context() );
+			$this->assertSame( '', $dirs->base() );
+			$this->assertStringContainsString( 'what is named .wpcheckpoint-owner there is not a file', $dirs->last_error() );
+			$this->assertFalse( Directories::load_state()['clone_detected'] );
+			$this->assertSame( $before, Directories::load_state() );
+			$this->assertSame( 0, $saves(), 'nothing saved' );
+		} finally {
+			rename( $marker, $dir . '/was-in-the-way' ); // Removed with the directory by tear_down().
+			rename( $dir . '/marker-aside', $marker );
+		}
+		$dirs = new Directories( $this->cli_context() );
+		$this->assertSame( $dir, $dirs->base(), 'the control: the marker back, it is this installation\'s: ' . $dirs->last_error() );
 	}
 
 	public function test_a_marker_the_file_system_will_not_let_be_read_warns_nothing_that_names_the_path(): void {

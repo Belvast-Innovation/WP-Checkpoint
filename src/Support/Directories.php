@@ -787,12 +787,22 @@ final class Directories {
 	}
 
 	/**
-	 * Why a directory whose owner marker cannot be seen (MARKER_UNREADABLE) is not used.
+	 * Why a directory whose owner marker cannot be seen (MARKER_UNREADABLE) is not used: something that is not a file
+	 * where the marker belongs (a directory, a link to nothing), or the directory or the marker cannot be read.
 	 *
 	 * @param string $dir Directory.
 	 * @return string
 	 */
 	private static function unreadable_marker( string $dir ): string {
+		$marker = rtrim( $dir, '/\\' ) . DIRECTORY_SEPARATOR . OwnerMarker::FILENAME;
+		if ( ( @file_exists( $marker ) || @is_link( $marker ) ) && ! @is_file( $marker ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- open_basedir warnings would name the path.
+			return sprintf(
+				/* translators: 1: owner marker file name, 2: directory path */
+				__( 'Whether %2$s is this site\'s own storage directory cannot be told: what is named %1$s there is not a file. Nothing was changed. Remove or rename it if it is not needed, and reload.', 'wp-checkpoint' ),
+				OwnerMarker::FILENAME,
+				$dir
+			);
+		}
 		return sprintf(
 			/* translators: 1: owner marker file name, 2: directory path */
 			__( 'Whether %2$s is this site\'s own storage directory cannot be told: the directory or its owner marker %1$s cannot be read (file permissions, or the host\'s open_basedir setting). Nothing was changed. Make both readable by PHP and reload.', 'wp-checkpoint' ),
