@@ -552,6 +552,20 @@ final class SiteStateTest extends WP_UnitTestCase {
 			$this->assertSame( '', $after->lock_token, $label . ': the lock is given back' );
 			$this->assertArrayNotHasKey( JobRepository::RETRY_FROM_KEY, $after->cursor, $label . ': a retry continues this step' );
 		}
+		// A step's cancel is taken only with a request and the site as it was: each half of that alone fails the job.
+		foreach ( array(
+			'a request, the site still changing' => array( Job::SITE_CHANGING, 5, 'while it still holds the site changed' ),
+			'the site as it was, no request'     => array( Job::SITE_UNTOUCHED, 0, 'while no cancel was requested' ),
+		) as $label => $case ) {
+			$type = 'cancel_' . md5( $label );
+			$this->register( $type, array( new CliHoldingStep( 'swap', $cases['cancelled while changing'] ) ) );
+			$job = $this->repo->create( $type );
+			$this->set( $job->id, array( 'step' => 'swap', 'status' => Job::RUNNING, 'site_state' => $case[0], 'cancel_requested' => $case[1] ) );
+			$this->runner( true )->tick( $job->id, $this->now );
+			$after = $this->repo->find( $job->id );
+			$this->assertSame( Job::FAILED, $after->status, $label );
+			$this->assertStringContainsString( $case[2], (string) $after->last_error, $label );
+		}
 		// The control: with the site as it was, a retry from an earlier step is recorded.
 		$this->register( 'refuse_control', array( new ClosureStep( 'first', static function (): StepResult {
 			return StepResult::done( 'first' );
@@ -759,13 +773,34 @@ final class SiteStateTest extends WP_UnitTestCase {
 		$this->assertFalse( get_option( Uninstaller::OPTION_VERSION ) );
 	}
 
-	public function test_uninstalling_keeps_everything_when_whether_a_job_holds_the_site_cannot_be_read(): void {
+	/**
+	 * Each read of whether a job holds the site, made to fail or not to run at all.
+	 *
+	 * @return array<string, array{0: string, 1: bool}> The read's text, and whether the filter drops it (not run).
+	 */
+	public function unreadable_reads(): array {
+		return array(
+			'the table cannot be listed'   => array( 'SHOW TABLES LIKE', false ),
+			'the columns cannot be listed' => array( "LIKE 'site_state'", false ),
+			'the count cannot be read'     => array( 'WHERE site_state <> 0', false ),
+			'the listing never runs'       => array( 'SHOW TABLES LIKE', true ),
+		);
+	}
+
+	/**
+	 * @dataProvider unreadable_reads
+	 */
+	public function test_uninstalling_keeps_everything_when_whether_a_job_holds_the_site_cannot_be_read( string $read, bool $dropped ): void {
 		global $wpdb;
 		UninstallSetting::save( true );
 		update_option( Uninstaller::OPTION_VERSION, '1.2.3' );
 		$this->job( array( 'status' => Job::RUNNING ) );
-		$filter = static function ( string $sql ): string {
-			return false !== strpos( $sql, "LIKE 'site_state'" ) ? 'SELECT * FROM a_table_that_is_not_there' : $sql;
+		$this->assertSame( 0, Uninstaller::jobs_holding_the_site(), 'the control: readable, it holds none' );
+		$filter = static function ( string $sql ) use ( $read, $dropped ): string {
+			if ( false === strpos( $sql, $read ) ) {
+				return $sql;
+			}
+			return $dropped ? '' : 'SELECT * FROM a_table_that_is_not_there';
 		};
 		$was   = ini_get( 'error_log' );
 		$quiet = $wpdb->suppress_errors( true );
@@ -773,6 +808,7 @@ final class SiteStateTest extends WP_UnitTestCase {
 		add_filter( 'query', $filter );
 		try {
 			$this->assertNull( Uninstaller::jobs_holding_the_site() );
+			$this->assertNotSame( Uninstaller::NOT_RUN, $wpdb->last_error, 'no mark is left for anyone else to find' );
 			Uninstaller::run();
 		} finally {
 			remove_filter( 'query', $filter );
@@ -782,7 +818,6 @@ final class SiteStateTest extends WP_UnitTestCase {
 		$this->assertTrue( Schema::table_exists(), 'the jobs table stays' );
 		$this->assertSame( '1.2.3', get_option( Uninstaller::OPTION_VERSION ) );
 		$this->assertStringContainsString( 'could not tell', (string) file_get_contents( $this->root . '/php-error.log' ) );
-		$this->assertSame( 0, Uninstaller::jobs_holding_the_site(), 'the control: readable, it holds none' );
 	}
 
 	public function test_a_cancel_request_ends_with_the_swap_and_with_a_retry_of_a_job_that_holds_nothing(): void {

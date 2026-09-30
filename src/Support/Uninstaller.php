@@ -24,6 +24,11 @@ defined( 'ABSPATH' ) || exit;
 final class Uninstaller {
 
 	/**
+	 * What expect() leaves in wpdb's last_error until a query runs.
+	 */
+	const NOT_RUN = 'WP Checkpoint: the query did not run.';
+
+	/**
 	 * Option holding the user's choice (boolean, default false).
 	 */
 	const OPTION_DELETE_DATA = StoredNames::DELETE_DATA;
@@ -104,6 +109,7 @@ final class Uninstaller {
 		// Each answer read with its error: a query that failed answers like "nothing" in wpdb, and nothing is not
 		// evidence that no job holds the site.
 		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix.
+		self::expect();
 		$there = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $table ) ) );
 		if ( self::failed() ) {
 			return null;
@@ -111,6 +117,7 @@ final class Uninstaller {
 		if ( $table !== $there ) {
 			return 0;
 		}
+		self::expect();
 		$column = $wpdb->get_results( "SHOW COLUMNS FROM {$table} LIKE 'site_state'", ARRAY_A );
 		if ( self::failed() || ! is_array( $column ) ) {
 			return null;
@@ -118,20 +125,38 @@ final class Uninstaller {
 		if ( array() === $column ) {
 			return 0;
 		}
+		self::expect();
 		$count = $wpdb->get_var( "SELECT COUNT(*) FROM {$table} WHERE site_state <> 0" );
 		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		return self::failed() || null === $count ? null : (int) $count;
 	}
 
 	/**
-	 * Whether the last query failed (wpdb sets its error at every query, and returns "nothing" for a failure).
+	 * Mark wpdb's error before a query: wpdb clears it only when it runs one, so a query refused before that (a
+	 * query filter that returns nothing, a connection not ready) keeps the mark and reads as failed, not as
+	 * "nothing".
+	 *
+	 * @return void
+	 */
+	private static function expect(): void {
+		global $wpdb;
+		$wpdb->last_error = self::NOT_RUN;
+	}
+
+	/**
+	 * Whether the last query failed or never ran (expect()). wpdb sets its error at every query it runs, and returns
+	 * "nothing" for a failure.
 	 *
 	 * @phpstan-impure
 	 * @return bool
 	 */
 	private static function failed(): bool {
 		global $wpdb;
-		return '' !== (string) $wpdb->last_error;
+		$failed = '' !== (string) $wpdb->last_error;
+		if ( self::NOT_RUN === $wpdb->last_error ) {
+			$wpdb->last_error = ''; // The mark is not an error of anyone else's to find.
+		}
+		return $failed;
 	}
 
 	/**
