@@ -24,6 +24,7 @@ final class LoaderProbeTest extends TestCase {
 	private $name;
 
 	protected function set_up(): void {
+		parent::set_up();
 		$this->root = sys_get_temp_dir() . '/wpcheckpoint-lprobe-' . bin2hex( random_bytes( 4 ) );
 		$this->mu   = $this->root . '/mu-plugins';
 		$this->name = ( new StagingLayout( array_fill_keys( StagingLayout::GROUPS, $this->root ), 'a1b2c3d4e5f6', 7, StagingLayout::new_random() ) )->probe_name( '.php' );

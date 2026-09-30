@@ -41,8 +41,7 @@
       "phpunit --testsuite unit"
     ],
     "test:integration": [
-      "@putenv WPCHECKPOINT_TEST_SUITE=integration",
-      "phpunit --testsuite integration"
+      "sh bin/test-integration.sh"
     ]
   }
 }

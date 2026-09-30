@@ -18,7 +18,9 @@ use WPCheckpoint\Restore\StagingLayout;
 use WPCheckpoint\Restore\TargetNames;
 use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Support\Schema;
+use WPCheckpoint\Support\Deleter;
 use WPCheckpoint\Tests\Fixtures\Restore\RestoreTestCase;
+use WPCheckpoint\Tests\Fixtures\Sandbox;
 
 /**
  * What stops a restore before any file is staged: paths this site's file
@@ -34,8 +36,14 @@ final class RestoreFilesPreflightTest extends RestoreTestCase {
 
 	public function tear_down(): void {
 		foreach ( array_reverse( $this->made ) as $path ) {
-			if ( is_link( $path ) || is_file( $path ) ) {
-				@unlink( $path );
+			if ( '' === Sandbox::refusal( $path ) ) {
+				// A directory of the temporary directory, whole; and what a restore staged next to it, in its parent.
+				foreach ( Residue::scan_site( array( dirname( $path ) ), Directories::own_tokens() ) as $entry ) {
+					Deleter::delete_tree( $entry['parent'], $entry['path'] );
+				}
+				Sandbox::remove( $path );
+			} elseif ( is_link( $path ) || is_file( $path ) ) {
+				@unlink( $path ); // A link it made in the content directory.
 			} elseif ( is_dir( $path ) ) {
 				@rmdir( $path );
 			}

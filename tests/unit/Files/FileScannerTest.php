@@ -19,6 +19,7 @@ final class FileScannerTest extends TestCase {
 	private $root;
 
 	protected function set_up(): void {
+		parent::set_up();
 		$this->root = sys_get_temp_dir() . '/wpcheckpoint-scan-' . bin2hex( random_bytes( 4 ) );
 		mkdir( $this->root, 0700, true );
 	}

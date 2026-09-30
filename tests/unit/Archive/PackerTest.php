@@ -28,6 +28,7 @@ final class PackerTest extends TestCase {
 	private $out;
 
 	protected function set_up(): void {
+		parent::set_up();
 		$this->root = sys_get_temp_dir() . '/wpcheckpoint-packer-' . bin2hex( random_bytes( 4 ) );
 		$this->src  = $this->root . '/src';
 		$this->out  = $this->root . '/out';

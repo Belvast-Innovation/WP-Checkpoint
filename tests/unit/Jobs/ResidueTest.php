@@ -12,6 +12,7 @@ final class ResidueTest extends TestCase {
 	private $base;
 
 	protected function set_up(): void {
+		parent::set_up();
 		$this->base = sys_get_temp_dir() . '/wpcheckpoint-residue-' . bin2hex( random_bytes( 4 ) );
 		mkdir( $this->base . '/tmp', 0700, true );
 	}

@@ -11,6 +11,7 @@ final class LogTailTest extends TestCase {
 	private $file;
 
 	protected function set_up(): void {
+		parent::set_up();
 		$this->file = sys_get_temp_dir() . '/wpcheckpoint-tail-' . bin2hex( random_bytes( 4 ) ) . '.log';
 	}
 

@@ -26,4 +26,9 @@
 			<directory suffix="Test.php">tests/integration</directory>
 		</testsuite>
 	</testsuites>
+	<listeners>
+		<!-- The integration suite: a test that leaves the restore's tables or temporary entries behind fails, and the
+		     run ends with none (tests/Fixtures/Leftovers.php). Does nothing in the unit suite. -->
+		<listener class="WPCheckpoint\Tests\Fixtures\Leftovers"/>
+	</listeners>
 </phpunit>

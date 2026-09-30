@@ -21,6 +21,7 @@ final class StagedWriterTest extends TestCase {
 	private $outside;
 
 	protected function set_up(): void {
+		parent::set_up();
 		$base          = sys_get_temp_dir() . '/wpc-staged-' . bin2hex( random_bytes( 4 ) );
 		$this->root    = $base . '/root';
 		$this->outside = $base . '/outside';

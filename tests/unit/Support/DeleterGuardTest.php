@@ -7,6 +7,7 @@ use WPCheckpoint\Support\DeletionRefused;
 use WPCheckpoint\Support\OwnerMarker;
 use WPCheckpoint\Tests\Fixtures\ExpectedPath;
 use WPCheckpoint\Tests\Fixtures\Junction;
+use WPCheckpoint\Tests\Fixtures\Sandbox;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 /**
@@ -49,28 +50,9 @@ final class DeleterGuardTest extends TestCase {
 		Deleter::replace_protected( $this->protected_before );
 		Deleter::replace_roots( $this->roots_before );
 		if ( '' !== $this->sandbox ) {
-			self::remove( $this->sandbox );
+			Sandbox::remove( $this->sandbox ); // Not the Deleter: the class under test.
 		}
 		parent::tear_down();
-	}
-
-	/**
-	 * Remove a sandbox tree without the Deleter (the class under test).
-	 */
-	private static function remove( string $path ): void {
-		if ( is_link( $path ) || is_file( $path ) ) {
-			@unlink( $path );
-			return;
-		}
-		if ( ! is_dir( $path ) ) {
-			return;
-		}
-		foreach ( (array) scandir( $path ) as $entry ) {
-			if ( '.' !== $entry && '..' !== $entry ) {
-				self::remove( $path . '/' . $entry );
-			}
-		}
-		@rmdir( $path );
 	}
 
 	/**

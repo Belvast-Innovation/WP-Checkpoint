@@ -37,6 +37,7 @@ final class ManifestStepTest extends TestCase {
 	private $site_facts;
 
 	protected function set_up(): void {
+		parent::set_up();
 		$this->ctx  = new WorkContext( 'wpcheckpoint-manifest-' );
 		$this->site = $this->ctx->root . '/site/wp-content/uploads';
 		mkdir( $this->site . '/2026', 0700, true );

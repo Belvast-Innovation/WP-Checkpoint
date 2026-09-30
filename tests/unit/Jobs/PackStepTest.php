@@ -35,6 +35,7 @@ final class PackStepTest extends TestCase {
 	private $site;
 
 	protected function set_up(): void {
+		parent::set_up();
 		$this->ctx  = new WorkContext( 'wpcheckpoint-pack-' );
 		$this->site = $this->ctx->root . '/site/wp-content/uploads';
 		mkdir( $this->site, 0700, true );
