@@ -32,6 +32,17 @@ final class Directories {
 	const SOURCE_CONTENT = 'content';
 	const SOURCE_CUSTOM  = 'custom';
 
+	/*
+	 * What a directory's owner marker says (marker()): none there; this installation's; nothing but the start of
+	 * this installation's in an otherwise empty directory (a request died writing it); another installation's; or
+	 * there but not readable (permissions, open_basedir), which says nothing about whose it is.
+	 */
+	const MARKER_NONE       = 'none';
+	const MARKER_OWN        = 'own';
+	const MARKER_UNFINISHED = 'unfinished';
+	const MARKER_OTHER      = 'other';
+	const MARKER_UNREADABLE = 'unreadable';
+
 	/**
 	 * Sub-directories created inside the base directory.
 	 *
@@ -42,7 +53,7 @@ final class Directories {
 	/**
 	 * Environment (injectable for tests).
 	 *
-	 * @var array{abspath: string, content_dir: string, document_root: string, is_web_request: bool, custom_dir: string, wordpress_dirs: array{within: array<string, string>, itself: array<string, string>}|null, after_marker: callable|null}
+	 * @var array{abspath: string, content_dir: string, document_root: string, is_web_request: bool, custom_dir: string, wordpress_dirs: array{within: array<string, string>, itself: array<string, string>}|null, after_marker: callable|null, read_marker: callable|null}
 	 */
 	private $context;
 
@@ -81,10 +92,11 @@ final class Directories {
 	 * Environment as seen in the current request.
 	 *
 	 * The wordpress_dirs entry is null here: WordPress's own directories (wordpress_dirs()) are looked up only when a custom
-	 * directory is checked. Tests pass stand-ins, and an after_marker callable (called in prepare() right after the owner
-	 * marker is written: a request that dies there).
+	 * directory is checked. Tests pass stand-ins, an after_marker callable (called in prepare() right after the owner
+	 * marker is written: a request that dies there), and a read_marker callable (function( string $path ): string|false,
+	 * reading the owner marker in place of file_get_contents(): a marker that cannot be read).
 	 *
-	 * @return array{abspath: string, content_dir: string, document_root: string, is_web_request: bool, custom_dir: string, wordpress_dirs: array{within: array<string, string>, itself: array<string, string>}|null, after_marker: callable|null}
+	 * @return array{abspath: string, content_dir: string, document_root: string, is_web_request: bool, custom_dir: string, wordpress_dirs: array{within: array<string, string>, itself: array<string, string>}|null, after_marker: callable|null, read_marker: callable|null}
 	 */
 	public static function default_context(): array {
 		$document_root = '';
@@ -99,6 +111,7 @@ final class Directories {
 			'custom_dir'     => defined( 'WPCHECKPOINT_STORAGE_DIR' ) ? (string) WPCHECKPOINT_STORAGE_DIR : '',
 			'wordpress_dirs' => null,
 			'after_marker'   => null,
+			'read_marker'    => null,
 		);
 	}
 
@@ -394,9 +407,15 @@ final class Directories {
 		if ( '' !== $this->state['path'] && self::is_valid_token( $this->state['token'] ) ) {
 			$existing = $this->state['path'];
 			if ( is_dir( $existing ) ) {
-				if ( $this->owns( $existing ) ) {
+				$found = $this->marker( $existing );
+				if ( self::MARKER_OWN === $found ) {
 					$this->adopt( $existing, $this->state['source'], (bool) $this->state['provisional'] );
 					$this->maybe_migrate();
+					return;
+				}
+				if ( self::MARKER_UNREADABLE === $found ) {
+					// Not evidence of a clone: nothing is recorded, saved or chosen instead.
+					$this->error = self::unreadable_marker( $existing );
 					return;
 				}
 				// Same options, different ABSPATH: a clone, a move, or a new release of a deployment.
@@ -510,8 +529,9 @@ final class Directories {
 			$this->error = __( 'WPCHECKPOINT_STORAGE_DIR is empty.', 'wp-checkpoint' );
 			return;
 		}
-		$marker = $dir . DIRECTORY_SEPARATOR . OwnerMarker::FILENAME;
-		if ( is_file( $marker ) && ! $this->owns( $dir ) && ! $this->marker_unfinished( $dir ) ) {
+		// Another installation's marker, read: a clone. One that cannot be read is no evidence of that (past_tokens
+		// are kept, nothing is saved): prepare() refuses the directory with the reason (unowned()).
+		if ( self::MARKER_OTHER === $this->marker( $dir ) ) {
 			$this->state['clone_detected'] = true;
 			$this->state['previous_path']  = $dir;
 			$this->state['past_tokens']    = array(); // The original installation's (own_tokens()).
@@ -683,8 +703,15 @@ final class Directories {
 	 */
 	private function unowned( string $dir ): string {
 		clearstatcache();
-		if ( ! @is_dir( $dir ) || $this->owns( $dir ) || $this->marker_unfinished( $dir ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- open_basedir warnings would name the path.
+		if ( ! @is_dir( $dir ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- open_basedir warnings would name the path.
 			return '';
+		}
+		$found = $this->marker( $dir );
+		if ( self::MARKER_OWN === $found || self::MARKER_UNFINISHED === $found ) {
+			return '';
+		}
+		if ( self::MARKER_UNREADABLE === $found ) {
+			return self::unreadable_marker( $dir );
 		}
 		$entries = @scandir( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- as above.
 		if ( false === $entries ) {
@@ -709,12 +736,61 @@ final class Directories {
 	 * @return bool
 	 */
 	private function marker_unfinished( string $dir ): bool {
-		$entries = @scandir( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- open_basedir warnings would name the path.
-		if ( false === $entries || array( OwnerMarker::FILENAME ) !== array_values( array_diff( $entries, array( '.', '..' ) ) ) ) {
-			return false;
+		return self::MARKER_UNFINISHED === $this->marker( $dir );
+	}
+
+	/**
+	 * What the owner marker in $dir says (MARKER_*). It reads the file system on every call (another request may have
+	 * written the marker meanwhile). "Another installation's" is concluded only from contents read: a marker that is
+	 * there but cannot be read is MARKER_UNREADABLE, never someone else's. Nothing it reads warns: a warning would name
+	 * the path in the error log.
+	 *
+	 * @phpstan-impure
+	 *
+	 * @param string $dir Base directory.
+	 * @return string
+	 */
+	private function marker( string $dir ): string {
+		$marker = rtrim( $dir, '/\\' ) . DIRECTORY_SEPARATOR . OwnerMarker::FILENAME;
+		clearstatcache( true, $marker );
+		if ( ! @is_file( $marker ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- open_basedir warnings would name the path.
+			return self::MARKER_NONE;
 		}
-		$contents = @file_get_contents( $dir . DIRECTORY_SEPARATOR . OwnerMarker::FILENAME ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- as above; a tiny local file.
-		return is_string( $contents ) && OwnerMarker::is_unfinished( $contents, (string) $this->state['install_id'], $this->context['abspath'] );
+		$contents = null === $this->context['read_marker']
+			? @file_get_contents( $marker ) // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- as above; a tiny local file.
+			: call_user_func( $this->context['read_marker'], $marker );
+		if ( ! is_string( $contents ) ) {
+			return self::MARKER_UNREADABLE;
+		}
+		$install_id = (string) $this->state['install_id'];
+		if ( OwnerMarker::matches( $contents, $install_id, $this->context['abspath'] ) ) {
+			return self::MARKER_OWN;
+		}
+		if ( OwnerMarker::is_unfinished( $contents, $install_id, $this->context['abspath'] ) ) {
+			$entries = @scandir( rtrim( $dir, '/\\' ) ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- as above.
+			if ( false === $entries ) {
+				return self::MARKER_UNREADABLE; // Whether anything else is there cannot be seen.
+			}
+			if ( array( OwnerMarker::FILENAME ) === array_values( array_diff( $entries, array( '.', '..' ) ) ) ) {
+				return self::MARKER_UNFINISHED;
+			}
+		}
+		return self::MARKER_OTHER;
+	}
+
+	/**
+	 * Why a directory whose owner marker cannot be read is not used.
+	 *
+	 * @param string $dir Directory.
+	 * @return string
+	 */
+	private static function unreadable_marker( string $dir ): string {
+		return sprintf(
+			/* translators: 1: owner marker file name, 2: directory path */
+			__( 'The owner marker %1$s in %2$s cannot be read (file permissions, or the host\'s open_basedir setting), so whether the directory is this site\'s own cannot be told; nothing was changed. Make the file readable by PHP and reload.', 'wp-checkpoint' ),
+			OwnerMarker::FILENAME,
+			$dir
+		);
 	}
 
 	/**
@@ -735,12 +811,16 @@ final class Directories {
 		if ( OwnerMarker::create( $marker, OwnerMarker::build( (string) $this->state['install_id'], $this->context['abspath'] ) ) ) {
 			return true;
 		}
-		clearstatcache( true, $marker );
-		if ( $this->owns( $dir ) ) {
+		$found = $this->marker( $dir );
+		if ( self::MARKER_OWN === $found ) {
 			return true; // Written meanwhile by another request of this installation.
 		}
-		// A marker still there that is not the start of this installation's was written by someone else.
-		$this->error = is_file( $marker ) && ! $this->marker_unfinished( $dir ) ? __( 'The directory belongs to another installation.', 'wp-checkpoint' ) : __( 'Cannot write the owner marker.', 'wp-checkpoint' );
+		// A marker still there, read, and not the start of this installation's was written by someone else.
+		if ( self::MARKER_UNREADABLE === $found ) {
+			$this->error = self::unreadable_marker( $dir );
+		} else {
+			$this->error = self::MARKER_OTHER === $found ? __( 'The directory belongs to another installation.', 'wp-checkpoint' ) : __( 'Cannot write the owner marker.', 'wp-checkpoint' );
+		}
 		return false;
 	}
 
@@ -754,12 +834,7 @@ final class Directories {
 	 * @return bool
 	 */
 	private function owns( string $dir ): bool {
-		$marker = rtrim( $dir, '/\\' ) . DIRECTORY_SEPARATOR . OwnerMarker::FILENAME;
-		if ( ! is_file( $marker ) ) {
-			return false;
-		}
-		$contents = file_get_contents( $marker ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- tiny local file.
-		return is_string( $contents ) && OwnerMarker::matches( $contents, (string) $this->state['install_id'], $this->context['abspath'] );
+		return self::MARKER_OWN === $this->marker( $dir );
 	}
 
 	/**
