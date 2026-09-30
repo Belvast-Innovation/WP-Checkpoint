@@ -507,6 +507,7 @@ final class SiteStateTest extends WP_UnitTestCase {
 			remove_filter( 'query', $filter );
 		}
 		$this->assertSame( TickResult::LOST, $result->status );
+		$this->assertStringContainsString( 'The database refused to save the job\'s progress', (string) $result->message, 'said as what it is, not as a cancel or a takeover' );
 		$this->assertSame( 0, $after, 'the step did not go on' );
 		$this->assertSame( Job::SITE_UNTOUCHED, $this->repo->find( $job->id )->site_state );
 
@@ -515,6 +516,27 @@ final class SiteStateTest extends WP_UnitTestCase {
 		$this->runner( true )->tick( $job->id, $this->now );
 		$this->assertGreaterThan( 0, $after, 'the control: with the write stored it goes on' );
 		$this->assertSame( Job::SITE_SWAPPED, $this->repo->find( $job->id )->site_state );
+	}
+
+	public function test_a_progress_message_the_column_cannot_hold_whole_is_stored_cut_not_refused(): void {
+		$long = str_repeat( 'é', 150 ) . str_repeat( 'x', 150 ); // 300 characters, a cut through the multi-byte ones.
+		$this->register(
+			'long',
+			array(
+				new CliHoldingStep(
+					'swap',
+					static function () use ( $long ): StepResult {
+						return StepResult::progress( array( 'site' => Job::SITE_CHANGING ), 50, $long );
+					}
+				),
+			)
+		);
+		$job    = $this->repo->create( 'long' );
+		$result = $this->runner( true )->tick( $job->id, $this->now );
+		$this->assertSame( TickResult::MORE, $result->status, (string) $result->message );
+		$stored = $this->repo->find( $job->id );
+		$this->assertSame( Job::SITE_CHANGING, $stored->site_state, 'the cursor was stored' );
+		$this->assertSame( mb_substr( $long, 0, 191, 'UTF-8' ), $stored->progress_message );
 	}
 
 	public function test_the_engine_refuses_what_would_leave_the_site_changed_behind(): void {
@@ -552,6 +574,22 @@ final class SiteStateTest extends WP_UnitTestCase {
 			$this->assertSame( '', $after->lock_token, $label . ': the lock is given back' );
 			$this->assertArrayNotHasKey( JobRepository::RETRY_FROM_KEY, $after->cursor, $label . ': a retry continues this step' );
 		}
+		// Not past any step while the site is half changed, the last or another.
+		$this->register(
+			'refuse_middle',
+			array(
+				new CliHoldingStep( 'swap', $cases['done while changing'] ),
+				new ClosureStep( 'after', static function (): StepResult {
+					return StepResult::done( 'after' );
+				} ),
+			)
+		);
+		$job = $this->repo->create( 'refuse_middle' );
+		$this->set( $job->id, array( 'step' => 'swap', 'status' => Job::RUNNING, 'site_state' => Job::SITE_CHANGING ) );
+		$this->runner( true )->tick( $job->id, $this->now );
+		$after = $this->repo->find( $job->id );
+		$this->assertSame( Job::FAILED, $after->status, 'a step that is not the last' );
+		$this->assertSame( 'swap', $after->step, 'the next step never ran' );
 		// A step's cancel is taken only with a request and the site as it was: each half of that alone fails the job.
 		foreach ( array(
 			'a request, the site still changing' => array( Job::SITE_CHANGING, 5, 'while it still holds the site changed' ),
@@ -885,6 +923,24 @@ final class SiteStateTest extends WP_UnitTestCase {
 		$this->assertSame( JobRepository::FAIL_DONE, $this->repo->fail_for_missing_columns( $plain, 'columns missing', array( 'x' ) ), 'the control' );
 		$this->assertSame( JobRepository::FAIL_HELD, $this->repo->fail_for_missing_columns( $held, 'columns missing', array( 'x' ) ) );
 		$this->assertSame( Job::RUNNING, $this->repo->find( $held->id )->status );
+	}
+
+	public function test_a_run_on_a_table_without_columns_this_code_needs_says_why_a_job_that_holds_the_site_waits(): void {
+		global $wpdb;
+		$this->register( 'hold7', array( new CliHoldingStep( 'swap', static function (): StepResult {
+			return StepResult::progress( array( 'site' => Job::SITE_CHANGING ), 50 );
+		} ) ) );
+		$held  = $this->repo->create( 'hold7' );
+		$plain = $this->repo->create( 'hold7' );
+		$this->set( $held->id, array( 'status' => Job::RUNNING, 'site_state' => Job::SITE_CHANGING ) );
+		$this->set( $plain->id, array( 'status' => Job::RUNNING ) );
+		$wpdb->query( 'ALTER TABLE ' . Schema::jobs_table() . ' DROP COLUMN takeover_mark' ); // A table older than this code.
+		$result = $this->runner( true )->tick( $held->id, $this->now );
+		$this->assertSame( TickResult::BLOCKED, $result->status, (string) $result->message );
+		$this->assertStringContainsString( 'This job holds the site changed, so it is not failed', (string) $result->message );
+		$this->assertSame( Job::RUNNING, $this->repo->find( $held->id )->status );
+		$control = $this->runner( true )->tick( $plain->id, $this->now );
+		$this->assertSame( TickResult::FAILED, $control->status, 'the control: a job that holds nothing is failed with the reason' );
 	}
 }
 

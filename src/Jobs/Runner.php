@@ -269,6 +269,10 @@ final class Runner {
 		try {
 			return $this->run_steps( $job, $token, $logger, $budget, $start );
 		} catch ( LockLost $e ) {
+			if ( $e->getPrevious() instanceof WriteRefused ) {
+				$logger->warning( 'The database refused to write the progress; stopping without further writes', array( 'error' => $this->describe( $e ) ) );
+				return new TickResult( TickResult::LOST, 0, $this->repository->find( $job_id ), __( 'The database refused to save the job\'s progress, so the job stopped where it was saved last. It goes on from there when it runs again, once the lock of this run has lapsed.', 'wp-checkpoint' ) );
+			}
 			$logger->warning( 'Lock lost; stopping without further writes', array( 'error' => $this->describe( $e ) ) );
 			return new TickResult( TickResult::LOST, 0, $this->repository->find( $job_id ), __( 'The job was cancelled or taken over by another process.', 'wp-checkpoint' ) );
 		}
@@ -414,11 +418,12 @@ final class Runner {
 			if ( StepResult::DONE === $result->kind ) {
 				$logger->info( 'Step done', array( 'step' => $step_id ) );
 				$state = $this->reset( $state );
+				if ( Job::SITE_CHANGING === $job->site_state ) {
+					// Never past a step while the site is half changed: a completed job is not run again, and a later
+					// step does not know how to put the site back.
+					return $this->fail( $job, $token, $logger, sprintf( 'Step "%s" ended while the site is still being changed.', $step_id ) );
+				}
 				if ( $index + 1 >= $count ) {
-					if ( Job::SITE_CHANGING === $job->site_state ) {
-						// Never completed while the site is half changed: a completed job is not run again.
-						return $this->fail( $job, $token, $logger, sprintf( 'Step "%s" ended while the site is still being changed.', $step_id ) );
-					}
 					$this->persist( $job, $token, $step_id, array(), $state, 100, $result->message, true );
 					$this->transition( $job, $token, Job::COMPLETED, '' );
 					$logger->info( 'Job completed' );
@@ -942,6 +947,10 @@ final class Runner {
 			}
 			if ( ! in_array( $now->status, array( Job::QUEUED, Job::RUNNING, Job::PAUSED ), true ) ) {
 				return new TickResult( TickResult::FINISHED, -1, $now );
+			}
+			if ( Job::SITE_UNTOUCHED !== $now->site_state ) {
+				// Not failed: a failed job no longer puts the site back. Said as what it is.
+				return new TickResult( TickResult::BLOCKED, JobRepository::BACKOFF_SECONDS[ count( JobRepository::BACKOFF_SECONDS ) - 1 ], $now, $this->redactor->redact( $message ) . ' ' . __( 'This job holds the site changed, so it is not failed: it goes on once the table is repaired (deactivate and activate WP Checkpoint, or update it).', 'wp-checkpoint' ) );
 			}
 			return new TickResult( TickResult::BUSY, self::BUSY_RETRY_SECONDS, $now, __( 'Another process is working on this job.', 'wp-checkpoint' ) );
 		}

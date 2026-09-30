@@ -7,6 +7,7 @@
 
 namespace WPCheckpoint\Jobs;
 
+use WPCheckpoint\Support\Utf8;
 use WPCheckpoint\Files\ScanRoots;
 use WPCheckpoint\Support\Deleter;
 use WPCheckpoint\Support\DeletionRefused;
@@ -549,8 +550,9 @@ final class JobRepository {
 	 * Runner, in one statement that counts only while fewer than $limit are
 	 * counted, the job is queued, running or paused (not waiting for an
 	 * answer) and no live run holds it (a job being run is not one late
-	 * requests keep from running). Reaching the Runner sets the count back
-	 * to 0 (reset_cron_deferrals()), and so do a retry and an answer.
+	 * requests keep from running). A tick the Runner takes up sets the count
+	 * back to 0 (reset_cron_deferrals()), and so do a retry and an answer;
+	 * a tick stopped at a step only WP-CLI runs writes nothing and does not.
 	 *
 	 * @param int $id    Job id.
 	 * @param int $limit The count this call does not go beyond (see JobActions::cron_tick()).
@@ -660,8 +662,9 @@ final class JobRepository {
 	 * @param Job      $job      Job, as read (updated in place).
 	 * @param string   $message  Why.
 	 * @param string[] $unusable The columns missing or too narrow.
-	 * @return string FAIL_DONE when it was failed, FAIL_HELD when a live run holds it (or it ended meanwhile),
-	 *                FAIL_ERROR when the statement itself failed.
+	 * @return string FAIL_DONE when it was failed, FAIL_HELD when a live run holds it, it holds the site changed
+	 *                (site_state, which a failure would drop: such a job is never failed here), or it ended
+	 *                meanwhile, FAIL_ERROR when the statement itself failed.
 	 */
 	public function fail_for_missing_columns( Job $job, string $message, array $unusable ): string {
 		global $wpdb;
@@ -946,6 +949,7 @@ final class JobRepository {
 		self::assert_cursor_has_no_secrets( $cursor );
 		$now      = $this->now();
 		$progress = max( 0, min( 100, $progress ) );
+		$message  = self::fit_message( $message );
 		$data     = array(
 			'step'             => $step,
 			'cursor_json'      => wp_json_encode( $cursor ),
@@ -988,7 +992,7 @@ final class JobRepository {
 			// Refused (a lock wait, the server gone): nothing of this cursor is stored, and a step that goes on would
 			// change what the row does not say (a site state above all). Stopped as a lost lock: no further writes.
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
-			throw new StaleJob( sprintf( 'Job %d: its progress could not be written.', $job->id ) );
+			throw new WriteRefused( sprintf( 'Job %d: its progress could not be written.', $job->id ) );
 		}
 		if ( 1 !== (int) $affected && ! $this->holds_lock( $job->id, $token ) ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
@@ -1010,6 +1014,26 @@ final class JobRepository {
 			}
 		}
 		return $pending;
+	}
+
+	/**
+	 * A progress message the column takes: at most 191 characters (varchar(191)), without what its character set
+	 * cannot store. wpdb refuses a whole statement with a value that does not fit, which would stop the run as
+	 * a refused write every time the same message came.
+	 *
+	 * @param string $message Message.
+	 * @return string
+	 */
+	private static function fit_message( string $message ): string {
+		global $wpdb;
+		$message = Utf8::scrub( $message );
+		if ( function_exists( 'mb_substr' ) ) {
+			$message = mb_substr( $message, 0, 191, 'UTF-8' );
+		} elseif ( strlen( $message ) > 191 ) {
+			$message = (string) preg_replace( '/[\x80-\xBF]{0,3}\z/', '', substr( $message, 0, 191 ) ); // No cut character.
+		}
+		$stored = $wpdb->strip_invalid_text_for_column( self::table(), 'progress_message', $message );
+		return is_string( $stored ) ? $stored : '';
 	}
 
 	// phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- messages carry field names and numbers; the runner stores them through the redactor and the presenter cleans them before display.

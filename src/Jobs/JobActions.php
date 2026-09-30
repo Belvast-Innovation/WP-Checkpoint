@@ -347,9 +347,10 @@ final class JobActions {
 	 * proxy's) cannot be seen from here, so the floor applies only where
 	 * PHP's own limit is set; without one, the tick runs its first unit as
 	 * described. The count (Job::$cron_deferrals) is of cron requests in a
-	 * row that did not reach the Runner for the job: any driver that hands
-	 * the job to the Runner sets it back to 0 (the forced tick too, whatever
-	 * it then does), and so do a retry and an answer.
+	 * row that did not reach the Runner for the job: any driver whose tick
+	 * the Runner takes up sets it back to 0 (the forced tick too, whatever it
+	 * then does), and so do a retry and an answer; a tick the Runner stops at
+	 * a step only WP-CLI runs writes nothing, the count included.
 	 * Each deferral and each forced tick is logged. Like web_tick(), nothing
 	 * is sent to the client.
 	 *
