@@ -797,6 +797,37 @@ final class SiteStateTest extends WP_UnitTestCase {
 		$after = $this->repo->find( $job->id );
 		$this->assertSame( Job::COMPLETED, $after->status );
 		$this->assertSame( 0, $after->cancel_requested, 'a request the swap outran does not act on what changes the site later' );
+		$said = 'A cancel was requested while the site was being swapped; the swap was complete before it could act';
+		$this->assertStringContainsString( $said, (string) file_get_contents( $after->storage_path . '/' . $after->log_path ), 'and the person who asked is told why' );
+
+		// A request that lands during the tick (in the row, not in the job the tick read) is told of too.
+		$this->register(
+			'swaps-late',
+			array(
+				new CliHoldingStep(
+					'swap',
+					function ( JobContext $ctx ): StepResult {
+						$this->set( $ctx->job()->id, array( 'cancel_requested' => 7 ) );
+						$ctx->checkpoint( array( 'site' => Job::SITE_SWAPPED ), 90 );
+						return StepResult::done( 'swapped' );
+					}
+				),
+			)
+		);
+		$late = $this->repo->create( 'swaps-late' );
+		$this->set( $late->id, array( 'status' => Job::RUNNING, 'site_state' => Job::SITE_CHANGING ) );
+		$this->runner( true )->tick( $late->id, $this->now );
+		$late = $this->repo->find( $late->id );
+		$this->assertSame( 0, $late->cancel_requested );
+		$this->assertStringContainsString( $said, (string) file_get_contents( $late->storage_path . '/' . $late->log_path ) );
+
+		// The control: without a request, nothing of the kind.
+		$plain = $this->repo->create( 'swaps' );
+		$this->set( $plain->id, array( 'status' => Job::RUNNING, 'site_state' => Job::SITE_CHANGING ) );
+		$this->runner( true )->tick( $plain->id, $this->now );
+		$plain = $this->repo->find( $plain->id );
+		$this->assertSame( Job::COMPLETED, $plain->status );
+		$this->assertStringNotContainsString( $said, (string) file_get_contents( $plain->storage_path . '/' . $plain->log_path ) );
 
 		$held  = $this->job( array( 'status' => Job::FAILED, 'site_state' => Job::SITE_CHANGING, 'cancel_requested' => 5, 'finished_at' => (int) $this->now ) );
 		$plain = $this->job( array( 'status' => Job::FAILED, 'cancel_requested' => 5, 'finished_at' => (int) $this->now ) );

@@ -938,10 +938,10 @@ final class JobRepository {
 	 * @param string               $message    Progress text.
 	 * @param bool                 $advanced   Whether the cursor really moved.
 	 * @param int|null             $site_state Job::SITE_* for this cursor, or null to leave the stored one.
-	 * @return void
+	 * @return int The cancel request this write cleared (Job::SITE_SWAPPED: the swap outran it), 0 for none.
 	 * @throws StaleJob When the lock is no longer held with this token.
 	 */
-	public function save_progress( Job $job, string $token, string $step, array $cursor, int $progress, string $message = '', bool $advanced = true, $site_state = null ): void {
+	public function save_progress( Job $job, string $token, string $step, array $cursor, int $progress, string $message = '', bool $advanced = true, $site_state = null ): int {
 		global $wpdb;
 		self::assert_cursor_has_no_secrets( $cursor );
 		$now      = $this->now();
@@ -960,12 +960,15 @@ final class JobRepository {
 			$formats[]             = '%d';
 			$formats[]             = '%d';
 		}
+		$pending = 0;
 		if ( null !== $site_state ) {
 			$data['site_state'] = (int) $site_state;
 			$formats[]          = '%d';
 			if ( Job::SITE_SWAPPED === (int) $site_state ) {
 				// The swap is complete: a cancel requested while it was under way can no longer act, and must not act
-				// on whatever changes the site later (an undo).
+				// on whatever changes the site later (an undo). What is cleared is read just before, for the caller to
+				// say so (a request that lands between this read and the write is cleared without that note).
+				$pending                  = max( (int) $job->cancel_requested, (int) $wpdb->get_var( $wpdb->prepare( 'SELECT cancel_requested FROM ' . self::table() . ' WHERE id = %d', $job->id ) ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- plugin table name from the prefix; the row as it is now.
 				$data['cancel_requested'] = 0;
 				$formats[]                = '%d';
 			}
@@ -1006,6 +1009,7 @@ final class JobRepository {
 				$job->cancel_requested = 0;
 			}
 		}
+		return $pending;
 	}
 
 	// phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- messages carry field names and numbers; the runner stores them through the redactor and the presenter cleans them before display.

@@ -813,9 +813,13 @@ final class Runner {
 			call_user_func( $this->on_persist, $job, $step, $cursor );
 		}
 		try {
-			$this->repository->save_progress( $job, $token, $step, $cursor, $percent, $message, $advanced, $site_state );
+			$outrun = $this->repository->save_progress( $job, $token, $step, $cursor, $percent, $message, $advanced, $site_state );
 		} catch ( StaleJob $e ) {
 			throw new LockLost( $e->getMessage(), 0, $e ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+		}
+		if ( $outrun > 0 ) {
+			// The only word the person who asked to cancel gets on why the restore finished all the same.
+			$this->logger_for( $job )->info( 'A cancel was requested while the site was being swapped; the swap was complete before it could act, so the restore goes on to its end', array( 'requested_at' => $outrun ) );
 		}
 	}
 
