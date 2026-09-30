@@ -34,6 +34,8 @@ final class IntegrationScriptTest extends TestCase {
 			. 'if ( getenv( "FAKE_TEMP" ) ) { mkdir( getenv( "TMPDIR" ) . "/wpc-left-in-temp" ); file_put_contents( getenv( "TMPDIR" ) . "/wpc-left-in-temp/x", "x" ); }' . "\n"
 			. 'file_put_contents( getenv( "FAKE_RECORD" ), json_encode( array( "cwd" => getcwd(), "argv" => array_slice( $argv, 1 ), "suite" => getenv( "WPCHECKPOINT_TEST_SUITE" ), "tmpdir" => getenv( "TMPDIR" ), "run_tmp" => getenv( "WPCHECKPOINT_TEST_RUN_TMP" ), "left_in_temp" => is_file( getenv( "TMPDIR" ) . "/wpc-left-in-temp/x" ) ) ) );' . "\n"
 			. 'if ( getenv( "FAKE_LEAVE" ) ) { file_put_contents( "left.txt", "x" ); }' . "\n"
+			. 'if ( getenv( "FAKE_HIDE" ) ) { chmod( getenv( "FAKE_HIDE" ), 0 ); }' . "\n"
+			. 'if ( getenv( "FAKE_CHANGE" ) ) { file_put_contents( getenv( "FAKE_CHANGE" ), "changed during the run" ); }' . "\n"
 			. 'exit( (int) getenv( "FAKE_EXIT" ) );' . "\n"
 		);
 	}
@@ -133,10 +135,7 @@ final class IntegrationScriptTest extends TestCase {
 
 	public function test_a_local_phpunit_xml_is_the_configuration_when_there_is_one(): void {
 		// A copy of the script in a plugin directory of its own: nothing is written to the repository.
-		mkdir( $this->sandbox . '/plugin/bin', 0755, true );
-		copy( dirname( __DIR__, 3 ) . '/bin/test-integration.sh', $this->sandbox . '/plugin/bin/test-integration.sh' );
-		file_put_contents( $this->sandbox . '/plugin/phpunit.xml.dist', '<phpunit/>' );
-		$script = $this->sandbox . '/plugin/bin/test-integration.sh';
+		$script = $this->plugin_copy();
 		$this->assertSame( ExpectedPath::slashed( $this->sandbox, 'plugin/phpunit.xml.dist' ), $this->run_script( array(), array(), false, $script )['call']['argv'][1], 'the control: the distributed one' );
 		file_put_contents( $this->sandbox . '/plugin/phpunit.xml', '<phpunit/>' );
 		$this->assertSame( ExpectedPath::slashed( $this->sandbox, 'plugin/phpunit.xml' ), $this->run_script( array(), array(), false, $script )['call']['argv'][1] );
@@ -332,5 +331,82 @@ final class IntegrationScriptTest extends TestCase {
 
 		$run = $this->run_script( array(), array( 'FAKE_LEAVE' => '1', 'FAKE_EXIT' => '2' ) );
 		$this->assertSame( 2, $run['code'], 'a failing suite keeps its own status' );
+	}
+
+	/**
+	 * A copy of the script in a plugin's layout of its own in the sandbox, with a file under src/ and one under tests/.
+	 *
+	 * @return string The copy of the script.
+	 */
+	private function plugin_copy(): string {
+		foreach ( array( 'bin', 'src', 'tests', 'build' ) as $dir ) {
+			mkdir( $this->sandbox . '/plugin/' . $dir, 0755, true );
+		}
+		copy( dirname( __DIR__, 3 ) . '/bin/test-integration.sh', $this->sandbox . '/plugin/bin/test-integration.sh' );
+		file_put_contents( $this->sandbox . '/plugin/phpunit.xml.dist', '<phpunit/>' );
+		file_put_contents( $this->sandbox . '/plugin/src/Code.php', '<?php // the code' );
+		file_put_contents( $this->sandbox . '/plugin/tests/CodeTest.php', '<?php // its test' );
+		return $this->sandbox . '/plugin/bin/test-integration.sh';
+	}
+
+	public function test_a_run_during_which_the_code_changed_is_not_valid(): void {
+		$script = $this->plugin_copy();
+		$run    = $this->run_script( array(), array(), false, $script );
+		$this->assertSame( 0, $run['code'], 'the control: a run on code that stays as it is is valid: ' . $run['stderr'] );
+		$this->assertStringNotContainsString( 'not valid', $run['stderr'] );
+
+		$run = $this->run_script( array(), array( 'FAKE_CHANGE' => $this->sandbox . '/plugin/build/junit.xml' ), false, $script );
+		$this->assertSame( 0, $run['code'], 'what the run writes outside src/ and tests/ (its log) changes nothing: ' . $run['stderr'] );
+
+		$run = $this->run_script( array(), array( 'FAKE_CHANGE' => $this->sandbox . '/plugin/src/Code.php' ), false, $script );
+		$this->assertSame( 70, $run['code'], 'a passing suite on code that changed under it is not valid' );
+		$this->assertStringContainsString( 'This run is not valid: files under src/ or tests/ changed while it ran', $run['stderr'] );
+		$this->assertSame( array(), $this->work_dirs(), 'and it still cleans up' );
+
+		$run = $this->run_script( array(), array( 'FAKE_CHANGE' => $this->sandbox . '/plugin/tests/NewTest.php' ), false, $script );
+		$this->assertSame( 70, $run['code'], 'a file added under tests/ is a change' );
+
+		$run = $this->run_script( array(), array( 'FAKE_CHANGE' => $this->sandbox . '/plugin/tests/CodeTest.php', 'FAKE_EXIT' => '2' ), false, $script );
+		$this->assertSame( 70, $run['code'], 'nor is a failing one: its failures may be the change\'s' );
+	}
+
+	public function test_code_that_cannot_be_read_is_not_run(): void {
+		if ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) {
+			$this->markTestSkipped( 'Root reads every file.' );
+		}
+		$script = $this->plugin_copy();
+		$run    = $this->run_script( array(), array(), false, $script );
+		$this->assertSame( 0, $run['code'], 'the control: the readable layout runs: ' . $run['stderr'] );
+		chmod( $this->sandbox . '/plugin/src/Code.php', 0 );
+		try {
+			$pipes   = array();
+			$process = proc_open( array( 'sh', $script ), array( 1 => array( 'pipe', 'w' ), 2 => array( 'pipe', 'w' ) ), $pipes, $this->sandbox, array(
+				'PATH'                      => (string) getenv( 'PATH' ),
+				'TMPDIR'                    => $this->sandbox . '/tmp',
+				'WPCHECKPOINT_TEST_PHPUNIT' => $this->sandbox . '/phpunit',
+				'FAKE_RECORD'               => $this->sandbox . '/unread.json',
+				'WPCHECKPOINT_TEST_LOCK'    => $this->sandbox . '/run.lock',
+			) );
+			$this->assertIsResource( $process );
+			stream_get_contents( $pipes[1] );
+			$stderr = (string) stream_get_contents( $pipes[2] );
+			fclose( $pipes[1] );
+			fclose( $pipes[2] );
+			$code = proc_close( $process );
+		} finally {
+			chmod( $this->sandbox . '/plugin/src/Code.php', 0644 );
+		}
+		$this->assertSame( 1, $code, $stderr );
+		$this->assertStringContainsString( 'could not all be read', $stderr );
+		$this->assertFileDoesNotExist( $this->sandbox . '/unread.json', 'PHPUnit never started' );
+		$this->assertSame( array(), $this->work_dirs() );
+
+		try {
+			$run = $this->run_script( array(), array( 'FAKE_HIDE' => $this->sandbox . '/plugin/src/Code.php' ), false, $script );
+		} finally {
+			chmod( $this->sandbox . '/plugin/src/Code.php', 0644 );
+		}
+		$this->assertSame( 70, $run['code'], 'code that cannot be read again at the end cannot be shown unchanged' );
+		$this->assertStringContainsString( 'could not be read again at its end', $run['stderr'] );
 	}
 }

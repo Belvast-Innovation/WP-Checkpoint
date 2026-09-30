@@ -16,7 +16,8 @@
 # there is one, else phpunit.xml.dist; a -c of your own is not supported.
 #
 # Anything the suite leaves in its working directory is kept there and fails the run: a test wrote to a relative
-# path. Used by `composer test:integration`, npm run test:integration and CI.
+# path. Used by `composer test:integration`, npm run test:integration and CI. A run during which files under src/ or
+# tests/ changed is declared not valid and exits with status 70, whatever the suite said.
 #
 # One run at a time: runs share the tests database, and a second one's start (the core test library reinstalls the
 # tables; the leftover check removes an earlier run's) breaks the first. The lock is a flock() on
@@ -36,6 +37,14 @@ HELD=""
 NAMED=""
 WORK=""
 READY=""
+BEFORE=""
+
+# The code the run tests: a fingerprint of every file under src/ and tests/, by content and name. PHP loads a class
+# when it is first used, so a file changed during a run mixes two versions of the code in one result. Fails when a
+# file cannot be read: no fingerprint, rather than one that leaves that file out.
+fingerprint() {
+	( cd "$PLUGIN" && sums=$(find src tests -type f -exec md5sum {} +) && printf '%s\n' "$sums" | LC_ALL=C sort | md5sum | cut -c1-32 )
+}
 
 # On any exit: the run's directory (its temporary directory goes; its working directory only when empty, else the run
 # fails: a test wrote to a relative path), then the lock.
@@ -56,6 +65,15 @@ on_exit() {
 			echo "The run's temporary directory, $WORK/tmp, could not be removed entirely." >&2
 		fi
 	fi
+	if [ -n "$BEFORE" ]; then
+		if ! AFTER=$(fingerprint); then
+			echo "This run is not valid: the files under src/ and tests/ could not be read again at its end, so it cannot be shown that they stayed as they were." >&2
+			rc=70
+		elif [ "$AFTER" != "$BEFORE" ]; then
+			echo "This run is not valid: files under src/ or tests/ changed while it ran, so its result mixes two versions of the code. Run it again on code that stays as it is." >&2
+			rc=70
+		fi
+	fi
 	if [ -n "$NAMED" ]; then
 		: > "$LOCK" # This run's name out; the kernel lets the lock go as the descriptor closes.
 	fi
@@ -67,6 +85,10 @@ trap 'exit 143' TERM
 
 if ! command -v flock >/dev/null 2>&1; then
 	echo "flock is needed to keep integration runs from overlapping (util-linux, or BusyBox's flock)." >&2
+	exit 1
+fi
+if ! command -v md5sum >/dev/null 2>&1; then
+	echo "md5sum is needed to tell whether src/ and tests/ changed during the run (coreutils, or BusyBox's md5sum)." >&2
 	exit 1
 fi
 # Tried in a subshell first: a redirection that fails on exec ends the shell itself.
@@ -98,6 +120,7 @@ fi
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/wpcheckpoint-it.XXXXXX") || { WORK=""; exit 1; }
 mkdir "$WORK/cwd" "$WORK/tmp" || exit 1
 READY=1
+BEFORE=$(fingerprint) || { BEFORE=""; echo "The files under src/ and tests/ could not all be read; the run could not tell whether they change during it." >&2; exit 1; }
 
 # A path relative to the plugin's directory, made absolute.
 absolute() {
