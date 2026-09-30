@@ -13,6 +13,11 @@ namespace WPCheckpoint\Support;
  * A cloned or migrated site carries the same options and would otherwise
  * write into (or delete) the original site's directory. The marker file
  * holds the random install ID and a hash of ABSPATH; both must match.
+ *
+ * The hash is of the directory ABSPATH resolves to (hash_path()); markers
+ * written before hashed ABSPATH as spelled, and those match as written, for
+ * good: under the spelling they were written with, or wherever that spelling
+ * is the resolved path (hashes()). They are never rewritten to the new form.
  */
 final class OwnerMarker {
 
@@ -44,21 +49,80 @@ final class OwnerMarker {
 		if ( '' === $install_id ) {
 			return false;
 		}
-		$lines = array_map( 'trim', explode( "\n", trim( $contents ) ) );
-		return count( $lines ) >= 2 && hash_equals( $install_id, $lines[0] ) && hash_equals( self::hash_path( $abspath ), $lines[1] );
+		$lines = self::lines( $contents );
+		return null !== $lines && hash_equals( $install_id, $lines[0] ) && self::is_hash_of( $lines[1], $abspath );
 	}
 
 	/**
-	 * Hash of an installation path: of the directory it resolves to where it can be resolved (WP-CLI's --path through
-	 * a link and the web server's resolved __DIR__ are one installation), of its normalised spelling otherwise (a
-	 * path of another host). A marker written from under a link before this resolved the path does not match once.
+	 * A marker's install ID and path hash, or null when it does not hold both.
+	 *
+	 * @param string $contents Raw marker file contents.
+	 * @return array{0: string, 1: string}|null
+	 */
+	public static function lines( string $contents ) {
+		$lines = array_map( 'trim', explode( "\n", trim( $contents ) ) );
+		return count( $lines ) >= 2 ? array( $lines[0], $lines[1] ) : null;
+	}
+
+	/**
+	 * Whether a marker's path hash is one of an ABSPATH's (hashes()).
+	 *
+	 * @param string $hash    Hash from a marker.
+	 * @param string $abspath ABSPATH.
+	 * @return bool
+	 */
+	public static function is_hash_of( string $hash, string $abspath ): bool {
+		foreach ( self::hashes( $abspath ) as $candidate ) {
+			if ( hash_equals( $candidate, $hash ) ) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Hash a marker is written with: of the directory ABSPATH resolves to (WP-CLI's --path through a link and the web
+	 * server's resolved __DIR__ are one installation), of its spelling when it cannot be resolved.
 	 *
 	 * @param string $abspath ABSPATH.
 	 * @return string
 	 */
 	public static function hash_path( string $abspath ): string {
-		$real       = '' === $abspath ? false : Paths::real( rtrim( $abspath, '/\\' ) );
-		$normalized = rtrim( Paths::normalize( false !== $real ? $real : $abspath ), '/' );
+		$real = self::real( $abspath );
+		return self::hash_spelling( '' !== $real ? $real : $abspath );
+	}
+
+	/**
+	 * The hashes a marker of an ABSPATH may carry: of its spelling (what markers written before hashed) and of the
+	 * directory it resolves to, when it can be resolved.
+	 *
+	 * @param string $abspath ABSPATH.
+	 * @return string[]
+	 */
+	public static function hashes( string $abspath ): array {
+		return array_values( array_unique( array( self::hash_spelling( $abspath ), self::hash_path( $abspath ) ) ) );
+	}
+
+	/**
+	 * The directory an ABSPATH resolves to, '' when it cannot be resolved (it does not exist here, a directory on the
+	 * way cannot be searched, open_basedir).
+	 *
+	 * @param string $abspath ABSPATH.
+	 * @return string
+	 */
+	public static function real( string $abspath ): string {
+		$real = '' === $abspath ? false : Paths::real( rtrim( $abspath, '/\\' ) );
+		return false === $real ? '' : $real;
+	}
+
+	/**
+	 * Hash of an ABSPATH as spelled, normalised (separators, trailing slash; case on Windows).
+	 *
+	 * @param string $abspath ABSPATH.
+	 * @return string
+	 */
+	public static function hash_spelling( string $abspath ): string {
+		$normalized = rtrim( Paths::normalize( $abspath ), '/' );
 		if ( Paths::is_windows() ) {
 			$normalized = strtolower( $normalized );
 		}
@@ -78,8 +142,14 @@ final class OwnerMarker {
 		if ( '' === $install_id ) {
 			return false;
 		}
-		$expected = self::build( $install_id, $abspath );
-		return strlen( $contents ) < strlen( $expected ) && 0 === strncmp( $expected, $contents, strlen( $contents ) );
+		// Of either form: a request of the version before may have died writing one.
+		foreach ( self::hashes( $abspath ) as $hash ) {
+			$expected = $install_id . "\n" . $hash . "\n";
+			if ( strlen( $contents ) < strlen( $expected ) && 0 === strncmp( $expected, $contents, strlen( $contents ) ) ) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**

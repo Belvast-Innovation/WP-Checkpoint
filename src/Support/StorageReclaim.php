@@ -354,7 +354,11 @@ final class StorageReclaim {
 					'message' => __( 'The owner marker changed in the meantime.', 'wp-checkpoint' ),
 				);
 			}
-			if ( ! hash_equals( OwnerMarker::hash_path( (string) $this->state['previous_abspath'] ), $lines[1] ) ) {
+			// As this installation last found it (the hash recorded as it adopted the directory: an ABSPATH spelled
+			// through a link may resolve elsewhere by now, a deployment's "current" pointed at a new release), or, for
+			// state written before that was recorded, a hash of the ABSPATH recorded then, either form.
+			$recorded = isset( $this->state['previous_marker_hash'] ) ? (string) $this->state['previous_marker_hash'] : '';
+			if ( ! ( '' !== $recorded && hash_equals( $recorded, $lines[1] ) ) && ! OwnerMarker::is_hash_of( $lines[1], (string) $this->state['previous_abspath'] ) ) {
 				return array(
 					'ok'      => false,
 					'message' => __( 'Another copy of this site has already claimed the directory since it was recorded here.', 'wp-checkpoint' ),
