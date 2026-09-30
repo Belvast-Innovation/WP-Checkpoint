@@ -367,6 +367,27 @@ final class JobRepository {
 	}
 
 	/**
+	 * The storage tokens a job that holds the site changed may carry to be run here (gate() and acquire() alike):
+	 * this installation's (Directories::own_tokens(), none while a clone is unresolved), and the token this request
+	 * resolved a usable storage directory for. The latter is never a copy's: on a copy of the site with the default
+	 * directory, a new token is chosen with a new directory, so a job started there after the copy was detected runs;
+	 * a row copied with the database carries the original's token and does not. With a custom directory the copy gets
+	 * no usable directory at all (it is another installation's) and runs none.
+	 *
+	 * @return string[]
+	 */
+	private function held_tokens(): array {
+		$base   = $this->directories->base(); // First: resolving it may choose the token.
+		$state  = $this->directories->state();
+		$tokens = Directories::own_tokens( $state );
+		$token  = (string) $state['token'];
+		if ( '' !== $base && Directories::is_valid_token( $token ) && ! in_array( $token, $tokens, true ) ) {
+			$tokens[] = $token;
+		}
+		return $tokens;
+	}
+
+	/**
 	 * Whether a job may be ticked now, and how long to wait otherwise.
 	 *
 	 * @param Job $job Job.
@@ -385,12 +406,15 @@ final class JobRepository {
 		}
 		if ( Job::SITE_UNTOUCHED !== $job->site_state ) {
 			// A job that holds the site changed goes on (to put it back, or to finish) from whatever storage directory
-			// this request resolves, or none: it needs the job row and the site, not its files. Only this
-			// installation's: a token it holds (none while a clone is unresolved), never a copied database's row.
-			if ( in_array( $job->storage_token, Directories::own_tokens( $this->directories->state() ), true ) ) {
+			// this request resolves, or none: it needs the job row and the site, not its files. Only a token this
+			// installation may run such a job with (held_tokens()).
+			if ( in_array( $job->storage_token, $this->held_tokens(), true ) ) {
 				return self::verdict( true, '', '', 0 );
 			}
-			return self::verdict( false, 'storage_changed', __( 'This job belongs to another installation of WP Checkpoint (its storage token is not this site\'s); it is not run here.', 'wp-checkpoint' ), $retry );
+			$message = empty( $this->directories->state()['clone_detected'] )
+				? __( 'This job belongs to another installation of WP Checkpoint (its storage token is not this site\'s); it is not run here.', 'wp-checkpoint' )
+				: __( 'This job holds the site changed, and whether it is this site\'s own cannot be told while the clone notice is unresolved (its storage token is not one this installation holds). Resolve the clone notice on the WP Checkpoint page: if this is the original site, continue with the original directory, and the job goes on.', 'wp-checkpoint' );
+			return self::verdict( false, 'storage_changed', $message, $retry );
 		}
 		$base = $this->directories->base();
 		if ( '' === $base ) {
@@ -727,10 +751,10 @@ final class JobRepository {
 		if ( ! $holds && '' === $this->directories->base() ) {
 			return null; // A job that holds the site changed needs no storage directory (gate()).
 		}
+		$held             = $this->held_tokens(); // Resolves the directories: state() below is this request's.
 		$state            = $this->directories->state();
 		$storage_token    = (string) $state['token'];
-		$own              = Directories::own_tokens( $state );
-		$own_sql          = array() === $own ? "''" : implode( ', ', array_map( array( $wpdb, 'prepare' ), array_fill( 0, count( $own ), '%s' ), $own ) );
+		$held_sql         = array() === $held ? 'NULL' : implode( ', ', array_map( array( $wpdb, 'prepare' ), array_fill( 0, count( $held ), '%s' ), $held ) );
 		$now              = $this->now();
 		$token            = bin2hex( random_bytes( 16 ) );
 		$table            = $wpdb->base_prefix . Schema::JOBS_TABLE;
@@ -741,7 +765,7 @@ final class JobRepository {
 		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix; the WHERE clause is the compare-and-set.
 		$affected = $wpdb->query(
 			$wpdb->prepare(
-				"UPDATE {$table} SET takeovers = IF(lock_token <> '', IF(takeover_mark = MD5(CONCAT(step, '|', COALESCE(cursor_json, ''))), takeovers + 1, 1), takeovers), takeover_mark = IF(lock_token <> '', MD5(CONCAT(step, '|', COALESCE(cursor_json, ''))), takeover_mark), attempts = IF(status = %s, attempts + 1, attempts), started_at = IF(started_at = 0, %d, started_at), status = %s, lock_token = %s, locked_until = %d, updated_at = %d, questions_json = NULL WHERE id = %d AND status IN (%s, %s, %s) AND (status <> %s OR questions_json IS NULL OR questions_json = '' OR questions_json = '[]') AND (storage_token = %s OR (site_state <> 0 AND storage_token IN ({$own_sql}))) AND (lock_token = '' OR locked_until < %d)",
+				"UPDATE {$table} SET takeovers = IF(lock_token <> '', IF(takeover_mark = MD5(CONCAT(step, '|', COALESCE(cursor_json, ''))), takeovers + 1, 1), takeovers), takeover_mark = IF(lock_token <> '', MD5(CONCAT(step, '|', COALESCE(cursor_json, ''))), takeover_mark), attempts = IF(status = %s, attempts + 1, attempts), started_at = IF(started_at = 0, %d, started_at), status = %s, lock_token = %s, locked_until = %d, updated_at = %d, questions_json = NULL WHERE id = %d AND status IN (%s, %s, %s) AND (status <> %s OR questions_json IS NULL OR questions_json = '' OR questions_json = '[]') AND ((site_state = 0 AND storage_token = %s) OR (site_state <> 0 AND storage_token IN ({$held_sql}))) AND (lock_token = '' OR locked_until < %d)",
 				Job::QUEUED,
 				$now,
 				Job::RUNNING,

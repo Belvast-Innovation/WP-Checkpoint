@@ -365,16 +365,83 @@ final class SiteStateTest extends WP_UnitTestCase {
 		);
 		$held = $this->repo->create( 'hold3' );
 		$this->set( $held->id, array( 'site_state' => Job::SITE_CHANGING, 'status' => Job::RUNNING ) );
+		$held = $this->repo->find( $held->id ); // As stored: the gate judges the job that holds the site.
+		$this->assertSame( Job::SITE_CHANGING, $held->site_state, 'the control' );
 		// Another ABSPATH with the same stored state: a copy of the site (the clone notice is pending).
 		$copy = $this->site( 'releases/b' );
 		$copy->base();
 		$this->assertTrue( $copy->state()['clone_detected'], 'the control: the copy is detected' );
 		$repo = $this->repo_for( $copy );
-		$this->assertFalse( $repo->gate( $held )['allowed'] );
+		$gate = $repo->gate( $held );
+		$this->assertFalse( $gate['allowed'] );
+		$this->assertStringContainsString( 'Resolve the clone notice', $gate['message'], 'the way on is named' );
 		$this->assertNull( $repo->acquire( $held->id ), 'the storage token is part of the compare-and-set' );
 		$this->assertSame( TickResult::BLOCKED, $this->runner( true, $repo )->tick( $held->id, $this->now )->status );
 		$this->assertSame( 0, $ran );
 		$this->assertSame( TickResult::MORE, $this->runner( true )->tick( $held->id, $this->now )->status, 'the control: the original runs it' );
+		$this->assertGreaterThan( 0, $ran );
+	}
+
+	public function test_a_job_that_holds_the_site_started_on_a_copy_after_it_was_detected_runs_there(): void {
+		$ran = 0;
+		$this->register(
+			'hold5',
+			array(
+				new CliHoldingStep(
+					'swap',
+					static function () use ( &$ran ): StepResult {
+						++$ran;
+						return StepResult::progress( array( 'site' => Job::SITE_CHANGING ), 50 );
+					}
+				),
+			)
+		);
+		$this->repo->create( 'hold5' ); // The original's directory and token.
+		$copy = $this->site( 'releases/b' );
+		$this->assertNotSame( '', $copy->base(), $copy->last_error() );
+		$state = $copy->state();
+		$this->assertTrue( $state['clone_detected'], 'the control: the copy is detected, the notice unresolved' );
+		$this->assertSame( array(), Directories::own_tokens( $state ), 'the control: no token is this installation\'s yet' );
+		$repo = $this->repo_for( $copy );
+		$held = $repo->create( 'hold5' ); // A restore started on the copy, with the copy's new token.
+		$this->assertSame( (string) $state['token'], $held->storage_token );
+		$this->set( $held->id, array( 'site_state' => Job::SITE_CHANGING, 'status' => Job::RUNNING ) );
+		$held = $repo->find( $held->id );
+		$this->assertTrue( $repo->gate( $held )['allowed'], 'its own job, holding its site changed, goes on' );
+		$result = $this->runner( true, $repo )->tick( $held->id, $this->now );
+		$this->assertSame( TickResult::MORE, $result->status, (string) $result->message );
+		$this->assertGreaterThan( 0, $ran );
+	}
+
+	public function test_a_copy_with_a_custom_directory_runs_none_of_the_originals_jobs_that_hold_the_site(): void {
+		$ran = 0;
+		$this->register(
+			'hold6',
+			array(
+				new CliHoldingStep(
+					'swap',
+					static function () use ( &$ran ): StepResult {
+						++$ran;
+						return StepResult::progress( array( 'site' => Job::SITE_CHANGING ), 50 );
+					}
+				),
+			)
+		);
+		mkdir( $this->root . '/store-a' );
+		$original = $this->repo_for( $this->custom( 'store-a' ) );
+		$held     = $original->create( 'hold6' );
+		$this->set( $held->id, array( 'site_state' => Job::SITE_CHANGING, 'status' => Job::RUNNING ) );
+		$held = $original->find( $held->id );
+		// The same stored state and custom directory, another ABSPATH: the directory is the original's.
+		$copy = new Directories( array( 'is_web_request' => false, 'document_root' => '', 'abspath' => $this->root . '/releases/b/', 'custom_dir' => $this->root . '/store-a' ) );
+		$this->assertSame( '', $copy->base(), 'the control: the copy gets no directory' );
+		$this->assertTrue( $copy->state()['clone_detected'] );
+		$this->assertSame( $held->storage_token, (string) $copy->state()['token'], 'the control: the copied token is the one the job carries' );
+		$repo = $this->repo_for( $copy );
+		$this->assertFalse( $repo->gate( $held )['allowed'] );
+		$this->assertNull( $repo->acquire( $held->id ), 'acquire refuses it too, not only the gate' );
+		$this->assertSame( 0, $ran );
+		$this->assertSame( TickResult::MORE, $this->runner( true, $original )->tick( $held->id, $this->now )->status, 'the control: the original runs it' );
 		$this->assertGreaterThan( 0, $ran );
 	}
 
