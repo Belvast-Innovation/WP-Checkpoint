@@ -134,6 +134,21 @@ final class SandboxTest extends TestCase {
 		$this->assertDirectoryExists( $dir . '/b', 'and only it' );
 	}
 
+	public function test_an_entry_whose_directory_cannot_be_resolved_is_refused(): void {
+		$dir = $this->sandbox();
+		file_put_contents( $dir . '/there.txt', 'x' );
+		$asked     = array();
+		$unresolved = static function ( string $parent ) use ( &$asked ) {
+			$asked[] = $parent;
+			return false;
+		};
+		$this->assertSame( '', Sandbox::judged( $dir . '/there.txt' ), 'the control: resolved, it may be removed' );
+		$this->assertSame( 'its directory cannot be resolved', Sandbox::judged( $dir . '/there.txt', array(), $unresolved ) );
+		$this->assertSame( array( $dir ), $asked, 'the entry\'s own directory was the one not resolved' );
+		$this->assertSame( '', Sandbox::judged( $dir . '/not-there.txt', array(), $unresolved ), 'nothing there: nothing to remove, judged as written' );
+		$this->assertFileExists( $dir . '/there.txt' );
+	}
+
 	public function test_a_refused_path_throws_and_nothing_is_touched(): void {
 		$dir = $this->sandbox();
 		file_put_contents( $dir . '/keep.txt', 'keep' );

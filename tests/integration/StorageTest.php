@@ -523,6 +523,313 @@ final class StorageTest extends WP_UnitTestCase {
 		$this->assertSame( '', StorageLocation::refusal( dirname( ABSPATH ) . '/wpc-storage', $wordpress['within'], $wordpress['itself'] ), 'the control: next to the WordPress directory' );
 	}
 
+	/**
+	 * Count the writes of the storage state (update_option or, on a network, update_site_option): each attempt, an
+	 * unchanged value included.
+	 *
+	 * @return callable Returns the count so far.
+	 */
+	private function count_saves(): callable {
+		$saves = 0;
+		$count = static function ( $value ) use ( &$saves ) {
+			++$saves;
+			return $value;
+		};
+		add_filter( 'pre_update_option_' . Directories::OPTION, $count );
+		add_filter( 'pre_update_site_option_' . Directories::OPTION, $count );
+		return static function () use ( &$saves ): int {
+			return $saves;
+		};
+	}
+
+	/**
+	 * A marker reader that fails, and one that reads, counting what it was asked.
+	 *
+	 * @param int $calls Calls, by reference.
+	 * @return array{0: callable, 1: callable} Failing, reading.
+	 */
+	private static function readers( int &$calls ): array {
+		return array(
+			static function ( string $path ) use ( &$calls ) {
+				++$calls;
+				unset( $path );
+				return false;
+			},
+			static function ( string $path ) use ( &$calls ) {
+				++$calls;
+				return file_get_contents( $path );
+			},
+		);
+	}
+
+	public function test_an_unreadable_owner_marker_of_a_custom_directory_changes_nothing(): void {
+		$custom = $this->fake_root . '/custom-storage';
+		$first  = $this->custom( $custom );
+		$this->assertSame( $custom, $first->base(), $first->last_error() );
+		$state                = Directories::load_state();
+		$state['past_tokens'] = array( 'aaaaaaaaaaaa' ); // The history an unreadable marker must not cost.
+		Options::set( Directories::OPTION, $state );
+		$before = Directories::load_state();
+		$files  = self::files_of( $custom );
+		$saves  = $this->count_saves();
+		$calls  = 0;
+		list( $failing, $reading ) = self::readers( $calls );
+
+		// The control: read, the marker reaches the ownership decision (this installation's: taken).
+		$dirs = new Directories( $this->cli_context( array( 'custom_dir' => $custom, 'wordpress_dirs' => $this->stand_ins(), 'read_marker' => $reading ) ) );
+		$this->assertSame( $custom, $dirs->base(), $dirs->last_error() );
+		$this->assertGreaterThan( 0, $calls, 'the marker was read through the reader' );
+		$this->assertSame( $before, Directories::load_state() );
+
+		// Not read: an environment error, and nothing recorded, saved or written.
+		$calls = 0;
+		$saved = $saves();
+		$dirs  = new Directories( $this->cli_context( array( 'custom_dir' => $custom, 'wordpress_dirs' => $this->stand_ins(), 'read_marker' => $failing ) ) );
+		$this->assertSame( '', $dirs->base() );
+		$this->assertGreaterThan( 0, $calls, 'the reader was asked' );
+		$this->assertStringContainsString( 'cannot be read (file permissions, or the host\'s open_basedir setting)', $dirs->last_error() );
+		$this->assertStringNotContainsString( 'another installation', $dirs->last_error() );
+		$this->assertFalse( $dirs->state()['clone_detected'] );
+		$this->assertSame( $before, Directories::load_state(), 'past_tokens and the rest as they were' );
+		$this->assertSame( $saved, $saves(), 'nothing saved' );
+		$this->assertSame( $files, self::files_of( $custom ), 'nothing written' );
+
+		// The control for the counter and for the other answer: another installation's marker, read, is a clone.
+		file_put_contents( $custom . '/' . OwnerMarker::FILENAME, OwnerMarker::build( 'other-install', '/srv/other/' ) );
+		$dirs = new Directories( $this->cli_context( array( 'custom_dir' => $custom, 'wordpress_dirs' => $this->stand_ins(), 'read_marker' => $reading ) ) );
+		$this->assertSame( '', $dirs->base() );
+		$this->assertStringContainsString( 'belongs to another installation', $dirs->last_error() );
+		$this->assertTrue( Directories::load_state()['clone_detected'] );
+		$this->assertSame( array(), Directories::load_state()['past_tokens'] );
+		$this->assertGreaterThan( $saved, $saves(), 'the counter sees a save' );
+	}
+
+	public function test_an_unreadable_owner_marker_of_the_default_directory_changes_nothing(): void {
+		$first = new Directories( $this->cli_context() );
+		$dir   = $first->base();
+		$this->assertNotSame( '', $dir, $first->last_error() );
+		$state                = Directories::load_state();
+		$state['past_tokens'] = array( 'aaaaaaaaaaaa' );
+		Options::set( Directories::OPTION, $state );
+		$before = Directories::load_state();
+		$files  = $this->snapshot( $dir );
+		$saves  = $this->count_saves();
+		$calls  = 0;
+		list( $failing, $reading ) = self::readers( $calls );
+
+		$dirs = new Directories( $this->cli_context( array( 'read_marker' => $reading ) ) );
+		$this->assertSame( $dir, $dirs->base(), 'the control: read, it is this installation\'s: ' . $dirs->last_error() );
+		$this->assertGreaterThan( 0, $calls );
+
+		$saved = $saves();
+		$dirs  = new Directories( $this->cli_context( array( 'read_marker' => $failing ) ) );
+		$this->assertSame( '', $dirs->base(), 'no other directory is chosen meanwhile' );
+		$this->assertStringContainsString( 'cannot be read (file permissions, or the host\'s open_basedir setting)', $dirs->last_error() );
+		$this->assertFalse( $dirs->state()['clone_detected'] );
+		$this->assertSame( $before, Directories::load_state() );
+		$this->assertSame( $saved, $saves(), 'nothing saved' );
+		$this->assertSame( $files, $this->snapshot( $dir ) );
+		$this->assertSame( array( $dir ), glob( dirname( $dir ) . '/' . Directories::DIR_PREFIX . '*' ), 'no other directory made' );
+
+		// The control for the counter: another installation's marker, read, is a clone and is saved.
+		file_put_contents( $dir . '/' . OwnerMarker::FILENAME, OwnerMarker::build( 'other-install', '/srv/other/' ) );
+		$dirs = new Directories( $this->cli_context( array( 'read_marker' => $reading ) ) );
+		$this->assertNotSame( $dir, $dirs->base(), 'another directory: ' . $dirs->last_error() ); // Resolved here (lazily).
+		$this->assertTrue( Directories::load_state()['clone_detected'] );
+		$this->assertGreaterThan( $saved, $saves() );
+	}
+
+	public function test_a_candidate_directory_with_an_unreadable_marker_is_not_called_another_installations(): void {
+		// A new default directory in a stand-in content directory, where something with a marker is already.
+		$content = $this->fake_root . '/htdocs/wp/wp-content';
+		mkdir( $content );
+		$token          = 'abcdef012345';
+		$state          = Directories::load_state();
+		$state['token'] = $token;
+		Options::set( Directories::OPTION, $state );
+		$candidate = $content . '/' . Directories::DIR_PREFIX . $token;
+		mkdir( $candidate );
+		file_put_contents( $candidate . '/' . OwnerMarker::FILENAME, 'whatever it holds' );
+		file_put_contents( $candidate . '/other-file', 'x' );
+		$calls = 0;
+		list( $failing, $reading ) = self::readers( $calls );
+
+		$dirs = new Directories( $this->cli_context( array( 'content_dir' => $content, 'read_marker' => $reading ) ) );
+		$this->assertSame( '', $dirs->base() );
+		$this->assertSame( 'The directory belongs to another installation.', $dirs->last_error(), 'the control: read, it is someone else\'s' );
+		$this->assertGreaterThan( 0, $calls );
+
+		$dirs = new Directories( $this->cli_context( array( 'content_dir' => $content, 'read_marker' => $failing ) ) );
+		$this->assertSame( '', $dirs->base() );
+		$this->assertStringContainsString( 'cannot be read (file permissions, or the host\'s open_basedir setting)', $dirs->last_error() );
+		$this->assertFalse( Directories::load_state()['clone_detected'] );
+		$this->assertSame( array( '.', '..', OwnerMarker::FILENAME, 'other-file' ), scandir( $candidate ), 'nothing written' );
+	}
+
+	public function test_the_start_of_this_installations_marker_in_a_directory_that_cannot_be_listed_is_no_clone(): void {
+		$first = $this->custom( $this->fake_root . '/first' ); // This installation's install ID.
+		$this->assertNotSame( '', $first->base(), $first->last_error() );
+		$state                = Directories::load_state();
+		$state['past_tokens'] = array( 'aaaaaaaaaaaa' );
+		Options::set( Directories::OPTION, $state );
+		$before = Directories::load_state();
+		$dir    = $this->fake_root . '/died-in-marker';
+		mkdir( $dir );
+		file_put_contents( $dir . '/' . OwnerMarker::FILENAME, substr( OwnerMarker::build( (string) $before['install_id'], ABSPATH ), 0, 20 ) );
+		chmod( $dir, 0300 ); // Its files can be reached by name, its contents not listed.
+		clearstatcache();
+		try {
+			if ( false !== @scandir( $dir ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- the test's own directory.
+				$this->markTestSkipped( 'A directory without read permission can still be listed here (the tests run as root).' );
+			}
+			$this->assertIsString( file_get_contents( $dir . '/' . OwnerMarker::FILENAME ), 'the control: the marker itself can be read' );
+			$dirs = $this->custom( $dir );
+			$this->assertSame( '', $dirs->base() );
+			$this->assertStringContainsString( 'cannot be read (file permissions, or the host\'s open_basedir setting)', $dirs->last_error(), 'whether anything but the marker is there cannot be seen' );
+			$this->assertFalse( Directories::load_state()['clone_detected'] );
+			$this->assertSame( $before, Directories::load_state() );
+		} finally {
+			chmod( $dir, 0755 );
+		}
+		$dirs = $this->custom( $dir );
+		$this->assertSame( $dir, $dirs->base(), 'the control: listed, it is taken up as a directory a request died in: ' . $dirs->last_error() );
+	}
+
+	/**
+	 * A storage directory that cannot be searched (0600: listed, its marker not looked at) or not even listed (0000).
+	 *
+	 * @return array<string, array{0: int}>
+	 */
+	public function unsearchable_modes(): array {
+		return array(
+			'listed, not searched' => array( 0600 ),
+			'neither'              => array( 0000 ),
+		);
+	}
+
+	/**
+	 * @dataProvider unsearchable_modes
+	 */
+	public function test_a_default_directory_whose_marker_cannot_be_looked_at_is_no_clone( int $mode ): void {
+		$first = new Directories( $this->cli_context() );
+		$dir   = $first->base();
+		$this->assertNotSame( '', $dir, $first->last_error() );
+		$state                = Directories::load_state();
+		$state['past_tokens'] = array( 'aaaaaaaaaaaa' );
+		Options::set( Directories::OPTION, $state );
+		$before = Directories::load_state();
+		$saves  = $this->count_saves();
+		chmod( $dir, $mode );
+		clearstatcache();
+		try {
+			if ( @is_file( $dir . '/' . OwnerMarker::FILENAME ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- the test's own directory.
+				$this->markTestSkipped( 'A directory without search permission can still be searched here (the tests run as root).' );
+			}
+			$this->assertTrue( is_dir( $dir ), 'the control: the directory itself is there' );
+			$warnings = array();
+			set_error_handler( // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_set_error_handler -- the test observes warnings.
+				static function ( int $level, string $message ) use ( &$warnings ): bool {
+					if ( 0 !== ( error_reporting() & $level ) ) { // What reaches the log: not what "@" silenced.
+						$warnings[] = $message;
+					}
+					return true;
+				}
+			);
+			try {
+				file_get_contents( $dir . '/' . OwnerMarker::FILENAME ); // The control: a plain read warns, naming the path.
+				$control  = $warnings;
+				$warnings = array();
+				$dirs     = new Directories( $this->cli_context() );
+				$base     = $dirs->base(); // Resolved here (lazily), while the handler watches.
+			} finally {
+				restore_error_handler();
+			}
+			$names = static function ( array $messages ) use ( $dir ): array {
+				return array_values( array_filter( $messages, static function ( string $w ) use ( $dir ): bool {
+					return false !== strpos( $w, $dir );
+				} ) );
+			};
+			$this->assertNotSame( array(), $names( $control ), 'the control: a plain read warns with the path' );
+			$this->assertSame( array(), $names( $warnings ), 'nothing it does warns with the path' );
+			$this->assertSame( '', $base, 'no other directory is chosen meanwhile' );
+			$this->assertStringContainsString( 'cannot be read (file permissions, or the host\'s open_basedir setting)', $dirs->last_error() );
+			$this->assertFalse( Directories::load_state()['clone_detected'] );
+			$this->assertSame( $before, Directories::load_state() );
+			$this->assertSame( 0, $saves(), 'nothing saved' );
+		} finally {
+			chmod( $dir, 0755 );
+		}
+		$dirs = new Directories( $this->cli_context() );
+		$this->assertSame( $dir, $dirs->base(), 'the control: searchable again, it is this installation\'s: ' . $dirs->last_error() );
+	}
+
+	public function test_something_not_a_file_where_the_marker_belongs_is_no_clone_and_is_named(): void {
+		$first = new Directories( $this->cli_context() );
+		$dir   = $first->base();
+		$this->assertNotSame( '', $dir, $first->last_error() );
+		$before = Directories::load_state();
+		$saves  = $this->count_saves();
+		$marker = $dir . '/' . OwnerMarker::FILENAME;
+		$this->assertTrue( rename( $marker, $dir . '/marker-aside' ) ); // Kept, to put back: the test's own file.
+		mkdir( $marker );
+		try {
+			$dirs = new Directories( $this->cli_context() );
+			$this->assertSame( '', $dirs->base() );
+			$this->assertStringContainsString( 'what is named .wpcheckpoint-owner there is not a file', $dirs->last_error() );
+			$this->assertFalse( Directories::load_state()['clone_detected'] );
+			$this->assertSame( $before, Directories::load_state() );
+			$this->assertSame( 0, $saves(), 'nothing saved' );
+		} finally {
+			rename( $marker, $dir . '/was-in-the-way' ); // Removed with the directory by tear_down().
+			rename( $dir . '/marker-aside', $marker );
+		}
+		$dirs = new Directories( $this->cli_context() );
+		$this->assertSame( $dir, $dirs->base(), 'the control: the marker back, it is this installation\'s: ' . $dirs->last_error() );
+	}
+
+	public function test_a_marker_the_file_system_will_not_let_be_read_warns_nothing_that_names_the_path(): void {
+		$custom = $this->fake_root . '/unreadable-marker';
+		$first  = $this->custom( $custom );
+		$this->assertSame( $custom, $first->base(), $first->last_error() );
+		$marker = $custom . '/' . OwnerMarker::FILENAME;
+		chmod( $marker, 0000 );
+		clearstatcache();
+		try {
+			if ( is_readable( $marker ) ) {
+				$this->markTestSkipped( 'A file without permissions is still readable here (the tests run as root).' );
+			}
+			$warnings = array();
+			set_error_handler( // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_set_error_handler -- the test observes warnings.
+				static function ( int $level, string $message ) use ( &$warnings ): bool {
+					if ( 0 !== ( error_reporting() & $level ) ) { // What reaches the log: not what "@" silenced.
+						$warnings[] = $message;
+					}
+					return true;
+				}
+			);
+			try {
+				file_get_contents( $marker ); // The control: reading it warns, naming the path.
+				$control  = $warnings;
+				$warnings = array();
+				$dirs     = $this->custom( $custom );
+				$base     = $dirs->base(); // Resolved here (lazily), while the handler watches.
+			} finally {
+				restore_error_handler();
+			}
+			$this->assertNotSame( array(), array_filter( $control, static function ( string $w ) use ( $custom ): bool {
+				return false !== strpos( $w, $custom );
+			} ), 'the control: a plain read warns with the path' );
+			$this->assertSame( '', $base );
+			$this->assertStringContainsString( 'cannot be read', $dirs->last_error() );
+			$this->assertFalse( $dirs->state()['clone_detected'] );
+			$this->assertSame( array(), array_values( array_filter( $warnings, static function ( string $w ) use ( $custom ): bool {
+				return false !== strpos( $w, $custom );
+			} ) ), 'no warning names the path' );
+		} finally {
+			chmod( $marker, 0644 );
+		}
+	}
+
 	public function test_custom_directory_owned_by_another_site_is_refused(): void {
 		$custom = $this->fake_root . '/custom-storage';
 		mkdir( $custom );

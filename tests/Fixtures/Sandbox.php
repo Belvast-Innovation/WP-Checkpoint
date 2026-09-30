@@ -62,13 +62,16 @@ final class Sandbox {
 	 * generated layouts catch what each rule is there for. "listed" judges an entry by the name given; "parent" by
 	 * the path as written; "inside" lets through what is inside a protected directory; "resolve" judges an entry
 	 * that is there also by where it leads (as before the rules: a link to a protected directory refused);
-	 * "backslash" takes the name after the last "\\" everywhere (as before: on POSIX it is part of a name).
+	 * "backslash" takes the name after the last "\\" everywhere (as before: on POSIX it is part of a name). $resolve,
+	 * when given, resolves the entry's directory in place of Paths::real(): a directory that cannot be resolved
+	 * (SandboxTest; no way to bring that about for real is known on the platforms the tests run on).
 	 *
-	 * @param string   $path      Path.
-	 * @param string[] $withdrawn Rules withdrawn.
+	 * @param string        $path      Path.
+	 * @param string[]      $withdrawn Rules withdrawn.
+	 * @param callable|null $resolve   function( string $dir ): string|false.
 	 * @return string
 	 */
-	public static function judged( string $path, array $withdrawn = array() ): string {
+	public static function judged( string $path, array $withdrawn = array(), $resolve = null ): string {
 		if ( '' === $path ) {
 			return 'empty path';
 		}
@@ -97,7 +100,7 @@ final class Sandbox {
 			return 'outside the temporary directory';
 		}
 		$there  = file_exists( $path ) || is_link( $path );
-		$parent = Paths::real( dirname( $path ) );
+		$parent = null === $resolve ? Paths::real( dirname( $path ) ) : call_user_func( $resolve, dirname( $path ) );
 		if ( in_array( 'parent', $withdrawn, true ) ) {
 			$parent = false;
 			$there  = false;

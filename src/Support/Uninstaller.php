@@ -257,10 +257,10 @@ final class Uninstaller {
 			return '';
 		}
 		$marker = $path . DIRECTORY_SEPARATOR . OwnerMarker::FILENAME;
-		if ( ! is_file( $marker ) ) {
+		if ( ! @is_file( $marker ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a warning would name the path.
 			return '';
 		}
-		$contents = file_get_contents( $marker ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- tiny local file.
+		$contents = @file_get_contents( $marker ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- as above; a tiny local file.
 		return is_string( $contents ) && OwnerMarker::matches( $contents, (string) $state['install_id'], ABSPATH ) ? $path : '';
 	}
 
