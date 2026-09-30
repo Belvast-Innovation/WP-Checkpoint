@@ -195,7 +195,7 @@ final class IntegrationScriptTest extends TestCase {
 
 			$second = self::finish( $this->start_script( array( 'FAKE_RECORD' => $this->sandbox . '/second.json' ) ) );
 			$this->assertSame( 75, $second['code'], $second['stderr'] );
-			$this->assertStringContainsString( 'Another integration run is in progress: process ' . $first[2] . ', started ', $second['stderr'] );
+			$this->assertStringContainsString( 'Another integration run is in progress (lock ' . $lock . ', which names process ' . $first[2] . ', started ', $second['stderr'] );
 			$this->assertFileDoesNotExist( $this->sandbox . '/second.json', 'the second run never started PHPUnit' );
 		} finally {
 			touch( $go );
@@ -209,21 +209,46 @@ final class IntegrationScriptTest extends TestCase {
 		$this->assertSame( 0, $third['code'], 'and the next run goes ahead: ' . $third['stderr'] );
 	}
 
-	public function test_a_lock_whose_run_is_gone_is_taken_over(): void {
+	public function test_a_name_left_in_the_lock_is_taken_over_when_no_run_holds_it(): void {
 		$lock = $this->sandbox . '/run.lock';
-		// A process that has ended: its ID names no process now.
+		// What names the holder is the flock, not the name in the file: a name left by a run that was killed, whether
+		// that process is gone or its ID now belongs to a live process (this test's), holds nothing.
 		$ended = proc_open( array( 'sh', '-c', 'exit 0' ), array(), $pipes );
 		$this->assertIsResource( $ended );
 		$gone = (int) proc_get_status( $ended )['pid'];
 		proc_close( $ended );
-		// A live process that is not an integration run (this test's own): its ID, reused, does not hold the lock.
-		foreach ( array( $gone => 'an ended process', getmypid() => 'a process that is no integration run' ) as $pid => $what ) {
+		foreach ( array( $gone => 'an ended process', getmypid() => 'a live process' ) as $pid => $what ) {
 			file_put_contents( $lock, $pid . "\n2026-01-01 00:00:00 UTC\n" );
 			$run = $this->run_script( array() );
 			$this->assertSame( 0, $run['code'], $what . ': ' . $run['stderr'] );
 			$this->assertStringContainsString( 'Taking over the lock of an integration run that ended without releasing it: process ' . $pid . ', started 2026-01-01 00:00:00 UTC', $run['stderr'], $what );
 			$this->assertSame( '', (string) file_get_contents( $lock ), $what . ': released at the end' );
 		}
+	}
+
+	public function test_a_lock_file_this_run_cannot_write_still_keeps_runs_apart(): void {
+		$lock = $this->sandbox . '/run.lock';
+		$go   = $this->sandbox . '/go';
+		$first = $this->start_script( array( 'FAKE_WAIT' => $go, 'FAKE_RECORD' => $this->sandbox . '/first.json' ) );
+		try {
+			$this->assertTrue( self::until( static function () use ( $lock ): bool {
+				return '' !== (string) @file_get_contents( $lock );
+			} ), 'the first run holds the lock' );
+			chmod( $lock, 0444 ); // As another user's file would be to this run.
+			if ( is_writable( $lock ) ) {
+				$this->markTestSkipped( 'A read-only file is still writable here (the tests run as root).' );
+			}
+			$second = self::finish( $this->start_script( array( 'FAKE_RECORD' => $this->sandbox . '/second.json' ) ) );
+			$this->assertSame( 75, $second['code'], 'read-only, the lock is still taken, and refused: ' . $second['stderr'] );
+		} finally {
+			touch( $go );
+			self::finish( $first );
+		}
+		$named = (string) file_get_contents( $lock ); // The first run could not empty it either.
+		$third = $this->run_script( array() );
+		$this->assertSame( 0, $third['code'], 'and taken when free: ' . $third['stderr'] );
+		$this->assertSame( $named, (string) file_get_contents( $lock ), 'without writing its name into another\'s file' );
+		chmod( $lock, 0644 );
 	}
 
 	/**
@@ -241,6 +266,9 @@ final class IntegrationScriptTest extends TestCase {
 	}
 
 	public function test_a_run_whose_shell_was_killed_keeps_the_lock_while_its_phpunit_runs(): void {
+		if ( ! function_exists( 'posix_kill' ) ) {
+			$this->markTestSkipped( 'Needs ext-posix to see whether the PHPUnit process lives.' );
+		}
 		$lock = $this->sandbox . '/run.lock';
 		$go   = $this->sandbox . '/go';
 		$pid  = $this->sandbox . '/phpunit.pid';
@@ -257,7 +285,7 @@ final class IntegrationScriptTest extends TestCase {
 
 			$second = self::finish( $this->start_script( array( 'FAKE_RECORD' => $this->sandbox . '/second.json' ) ) );
 			$this->assertSame( 75, $second['code'], 'refused while the PHPUnit runs: ' . $second['stderr'] );
-			$this->assertStringContainsString( 'Another integration run is in progress: process ' . $run[2] . ',', $second['stderr'] );
+			$this->assertStringContainsString( 'which names process ' . $run[2] . ',', $second['stderr'] );
 			$this->assertFileDoesNotExist( $this->sandbox . '/second.json' );
 		} finally {
 			touch( $go );
