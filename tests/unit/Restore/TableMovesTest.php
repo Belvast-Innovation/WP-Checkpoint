@@ -43,7 +43,7 @@ final class TableMovesTest extends TestCase {
 		);
 		$out  = TableMoves::select(
 			'',
-			'',
+			false,
 			$live,
 			array( 'posts', 'options', 'users' ), // The backup's.
 			array( 'comments', 'excluded_log' ), // Left out of the restore.
@@ -57,14 +57,99 @@ final class TableMovesTest extends TestCase {
 		}
 	}
 
-	public function test_with_a_prefix_the_tables_that_start_with_it_are_moved_and_nothing_is_reported(): void {
+	/**
+	 * A site's WordPress tables under a prefix.
+	 *
+	 * @return string[]
+	 */
+	private static function site( string $prefix ): array {
+		return array_map(
+			static function ( string $name ) use ( $prefix ): string {
+				return $prefix . $name;
+			},
+			array( 'posts', 'postmeta', 'options', 'comments', 'commentmeta', 'terms', 'termmeta', 'term_taxonomy', 'term_relationships', 'links' )
+		);
+	}
+
+	public function test_with_a_prefix_the_tables_under_it_are_moved_and_the_others_reported(): void {
 		$live = array_merge(
 			array( 'wp_posts', 'wp_options', 'wp_links', 'wp_2_posts', 'wp_shop_orders', 'wp_excluded_log', 'other_posts', 'app_sessions' ),
 			self::plugins_own( 'wp_' )
 		);
-		$out  = TableMoves::select( 'wp_', 'wp_', $live, array( 'wp_posts', 'wp_options' ), array( 'wp_excluded_log' ), array() );
-		$this->assertSame( array( 'wp_links', 'wp_2_posts', 'wp_shop_orders' ), $out['move'] );
-		$this->assertSame( array(), $out['report'] );
+		$out  = TableMoves::select( 'wp_', false, $live, array( 'wp_posts', 'wp_options' ), array( 'wp_excluded_log' ), array_merge( self::site( 'wp_' ), array( 'wp_users', 'wp_usermeta' ) ) );
+		$this->assertSame( array( 'wp_links', 'wp_2_posts', 'wp_shop_orders' ), $out['move'], 'no other installation claims them (one table of a "wp_2_" is not an installation)' );
+		$this->assertSame( array( 'other_posts', 'app_sessions' ), $out['report'], 'outside the prefix: left, and said so' );
+	}
+
+	public function test_a_neighbour_installation_under_a_longer_prefix_is_left_and_reported(): void {
+		$core  = array_merge( self::site( 'wp_' ), array( 'wp_users', 'wp_usermeta' ) );
+		$old   = array_merge( self::site( 'wp_old_' ), array( 'wp_old_users', 'wp_old_usermeta' ) );
+		$live  = array_merge( $core, $old, array( 'wp_old_wc_orders', 'wp_wc_orders', 'wp_new_plugin_log' ) );
+		$out   = TableMoves::select( 'wp_', false, $live, array( 'wp_posts', 'wp_options', 'wp_users' ), array(), $core );
+		$this->assertSame( array_values( array_diff( $core, array( 'wp_posts', 'wp_options', 'wp_users' ) ) ), array_values( array_intersect( $out['move'], $core ) ), 'this site\'s own WordPress tables the backup lacks are moved' );
+		foreach ( array( 'wp_wc_orders', 'wp_new_plugin_log' ) as $name ) {
+			$this->assertContains( $name, $out['move'], $name . ': claimed by no other installation' );
+		}
+		foreach ( array_merge( $old, array( 'wp_old_wc_orders' ) ) as $name ) {
+			$this->assertNotContains( $name, $out['move'], $name . ': the neighbour\'s (or may be) is never moved' );
+			$this->assertContains( $name, $out['report'], $name . ': and is reported' );
+		}
+	}
+
+	public function test_a_neighbour_is_recognised_by_all_its_tables_the_backups_included(): void {
+		// A backup made before neighbours were left out holds "wp_old_posts": the rest of that installation still
+		// shows it is one, so its other tables stay.
+		$core = array_merge( self::site( 'wp_' ), array( 'wp_users', 'wp_usermeta' ) );
+		$old  = self::site( 'wp_old_' );
+		$out  = TableMoves::select( 'wp_', false, array_merge( $core, $old ), array_merge( $core, array( 'wp_old_posts' ) ), array(), $core );
+		$this->assertSame( array(), $out['move'] );
+		$this->assertSame( array_values( array_diff( $old, array( 'wp_old_posts' ) ) ), $out['report'] );
+	}
+
+	public function test_a_table_both_installations_claim_is_left(): void {
+		// This site's users table is the neighbour's (CUSTOM_USER_TABLE): its own, and not only its own.
+		$core = array_merge( self::site( 'wp_' ), array( 'wp_old_users', 'wp_old_usermeta' ) );
+		$old  = self::site( 'wp_old_' );
+		$out  = TableMoves::select( 'wp_', false, array_merge( $core, $old ), self::site( 'wp_' ), array(), $core );
+		$this->assertSame( array(), $out['move'], 'the shared users tables are not moved from under the neighbour' );
+		$this->assertContains( 'wp_old_users', $out['report'] );
+		$this->assertContains( 'wp_old_usermeta', $out['report'] );
+	}
+
+	public function test_a_networks_sub_sites_are_its_own_and_a_single_sites_look_alike_is_not(): void {
+		$core = array_merge( self::site( 'wp_' ), array( 'wp_users', 'wp_usermeta', 'wp_blogs', 'wp_site', 'wp_sitemeta' ) );
+		$live = array_merge( $core, self::site( 'wp_2_' ) );
+		$net  = TableMoves::select( 'wp_', true, $live, $core, array(), $core );
+		$this->assertSame( self::site( 'wp_2_' ), $net['move'], 'a sub-site of this network the backup lacks is moved' );
+		$this->assertSame( array(), $net['report'] );
+		$one = TableMoves::select( 'wp_', false, $live, $core, array(), $core );
+		$this->assertSame( array(), $one['move'], 'a single site has no sub-sites: a complete "wp_2_" is another installation' );
+		$this->assertSame( self::site( 'wp_2_' ), $one['report'] );
+	}
+
+	public function test_short_prefixes_move_their_own_and_never_the_restores_tables_nor_a_longer_neighbour(): void {
+		foreach ( array( 'w', 'wc', 'wcp', 'wcp_', 'wcptmp', 'wcpold' ) as $prefix ) {
+			$core   = array_merge( self::site( $prefix ), array( $prefix . 'users', $prefix . 'usermeta' ) );
+			$runs   = array(
+				TempTables::name( self::TOKEN, 12, 'beef', 'posts' ),
+				TempTables::old( self::TOKEN, 12, 'beef', 'options' ),
+				TempTables::ledger( self::TOKEN, 12, 'beef' ),
+			);
+			$live   = array_merge( $core, $runs, array( $prefix . 'shop_orders' ) );
+			$out    = TableMoves::select( $prefix, false, $live, array( $prefix . 'posts', $prefix . 'options' ), array(), $core );
+			$expect = array_values( array_merge( array_diff( $core, array( $prefix . 'posts', $prefix . 'options' ) ), array( $prefix . 'shop_orders' ) ) );
+			$this->assertSame( $expect, $out['move'], $prefix . ': its own tables' );
+			foreach ( $runs as $name ) {
+				$this->assertNotContains( $name, $out['move'], $prefix . ': ' . $name );
+				$this->assertNotContains( $name, $out['report'], $prefix . ': ' . $name );
+			}
+		}
+		// A site with the prefix "w" and a WordPress installation "wp_" in the same database: "wp_" starts with "w".
+		$core = array_merge( self::site( 'w' ), array( 'wusers', 'wusermeta' ) );
+		$wp   = array_merge( self::site( 'wp_' ), array( 'wp_users', 'wp_usermeta' ) );
+		$out  = TableMoves::select( 'w', false, array_merge( $core, $wp ), array( 'wposts' ), array(), $core );
+		$this->assertSame( array(), array_values( array_intersect( $wp, $out['move'] ) ), 'the "wp_" installation is never moved' );
+		$this->assertSame( $wp, $out['report'] );
 	}
 
 	public function test_the_plugins_own_tables_are_never_touched(): void {

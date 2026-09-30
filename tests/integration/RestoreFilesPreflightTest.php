@@ -378,6 +378,7 @@ final class RestoreFilesPreflightTest extends RestoreTestCase {
 			$job = $this->run_restore( $this->job_for( $this->type( array( 'dev' => $foreign( $which ) ) ), $base ) );
 			$this->assertSame( Job::FAILED, $job->status, $which );
 			$this->assertStringContainsString( 'The directory ' . self::shown( $which ) . ' is on another disk than', (string) $job->last_error );
+			$this->assertStringContainsString( 'If it has to stay on its own disk, make your own copy of ' . self::shown( $which ) . ' and restore by hand instead', (string) $job->last_error, 'the second way out' );
 		}
 		$this->assertSame( Job::COMPLETED, $this->run_restore( $this->job_for( $this->type( array( 'dev' => $foreign( '/nowhere' ) ) ), $base ) )->status, 'the control' );
 	}

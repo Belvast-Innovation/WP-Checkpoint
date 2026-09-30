@@ -1039,7 +1039,7 @@ final class SwapCheckStep implements Step {
 		$left = self::moves( $run, array_keys( $this->live_tables( $context->work_path() ) ), $finals )['report'];
 		if ( array() !== $left ) {
 			$context->logger()->warning(
-				'Tables left where they are: this site has no table prefix, so only WordPress\'s own tables are known to be its own; the others stay in the database next to the restored site',
+				'Tables left where they are: they are not in the backup and not shown to be this site\'s (outside its table prefix, claimed by another installation in the same database, or, without a table prefix, not WordPress\'s own); they stay in the database next to the restored site',
 				array(
 					'count'  => count( $left ),
 					'tables' => implode( ', ', array_slice( $left, 0, self::LISTED ) ),
@@ -1173,7 +1173,7 @@ final class SwapCheckStep implements Step {
 		foreach ( array_keys( $plan->skipped() ) as $name ) {
 			$kept[] = $plan->final_name( (string) $name ); // Left out of the restore: the live one stays.
 		}
-		return TableMoves::select( $site, self::base_prefix(), $live, $finals, $kept, '' === $site ? self::core_tables() : array() );
+		return TableMoves::select( $site, is_multisite(), $live, $finals, $kept, self::core_tables() );
 	}
 
 	/**
@@ -1224,13 +1224,14 @@ final class SwapCheckStep implements Step {
 	}
 
 	/**
-	 * WordPress's own table names for this site, read without a prefix (for an empty one).
+	 * WordPress's own tables of this site with its prefix: the main site's on a network, where a tick may run in a
+	 * sub-site's context (the sub-sites' tables are recognised by their naming rule, TableSelection).
 	 *
 	 * @return string[]
 	 */
 	private static function core_tables(): array {
 		global $wpdb;
-		return array_values( array_map( 'strval', $wpdb->tables( 'all', false ) ) );
+		return array_values( array_map( 'strval', $wpdb->tables( 'all', true, is_multisite() ? get_main_site_id() : 0 ) ) );
 	}
 
 	/**
