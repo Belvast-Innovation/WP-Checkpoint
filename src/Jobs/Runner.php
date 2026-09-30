@@ -7,6 +7,7 @@
 
 namespace WPCheckpoint\Jobs;
 
+use WPCheckpoint\Plugin;
 use WPCheckpoint\Archive\ConcurrentWriter;
 use WPCheckpoint\Restore\BackupUnusable;
 use WPCheckpoint\Restore\LedgerOutdated;
@@ -615,24 +616,25 @@ final class Runner {
 	 */
 	private function logger_for( Job $job ): Logger {
 		$relative = '' !== $job->log_path ? $job->log_path : 'logs/job-' . $job->id . '.log';
-		// A job that holds the site changed may run with its storage directory gone: its log then goes to PHP's, with
-		// the same masks as any text that leaves the engine (PHP's log may be readable from the web).
-		return new Logger( $job->storage_path . DIRECTORY_SEPARATOR . str_replace( '/', DIRECTORY_SEPARATOR, $relative ), $this->redactor, Logger::DEFAULT_MAX_BYTES, Job::SITE_UNTOUCHED !== $job->site_state ? array( self::class, 'to_php_log' ) : null );
+		// A job that holds the site changed may run with its storage directory gone: its log then goes to PHP's, through
+		// the same pipeline as any text that leaves the engine (PHP's log may be readable from the web).
+		$storage  = $job->storage_path;
+		$fallback = static function ( string $line ) use ( $storage ): void {
+			self::to_php_log( $line, '' !== $storage ? array( '{storage}' => $storage ) : array() );
+		};
+		return new Logger( $job->storage_path . DIRECTORY_SEPARATOR . str_replace( '/', DIRECTORY_SEPARATOR, $relative ), $this->redactor, Logger::DEFAULT_MAX_BYTES, Job::SITE_UNTOUCHED !== $job->site_state ? $fallback : null );
 	}
 
 	/**
-	 * A job's log line in PHP's error log, its paths and hosts masked (fixed text when a mask fails).
+	 * A job's log line in PHP's error log, through JobPresenter::clean() like every text that leaves the engine
+	 * (fixed text when a mask fails).
 	 *
-	 * @param string $line Line (redacted).
+	 * @param string                $line  Line (redacted).
+	 * @param array<string, string> $extra Extra placeholder => path (the job's storage directory).
 	 * @return void
 	 */
-	public static function to_php_log( string $line ): void {
-		$masked = Report::mask_paths( $line, JobPresenter::installation_paths() );
-		if ( is_string( $masked ) ) {
-			$site   = Environment::report_site_paths();
-			$masked = Report::mask_hosts( $masked, Environment::report_hosts(), $site['paths'], $site['coarse'], $site['network_root'] );
-		}
-		error_log( 'WP Checkpoint: ' . ( is_string( $masked ) ? $masked : Report::failure_text() ) ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- the job's own log cannot be written.
+	public static function to_php_log( string $line, array $extra = array() ): void {
+		error_log( 'WP Checkpoint: ' . Plugin::instance()->job_presenter()->clean( $line, $extra ) ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- the job's own log cannot be written.
 	}
 
 	/**

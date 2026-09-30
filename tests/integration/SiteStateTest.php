@@ -710,6 +710,9 @@ final class SiteStateTest extends WP_UnitTestCase {
 			( new Logger( $this->root . '/missing/dir/job.log', $redac ) )->info( 'dropped line' );
 			( new Logger( $this->root . '/missing/dir/job.log', $redac, Logger::DEFAULT_MAX_BYTES, array( Runner::class, 'to_php_log' ) ) )->info( 'kept line', array( 'at' => ABSPATH . 'wp-content/x' ) );
 			( new Logger( $this->root . '/job.log', $redac, Logger::DEFAULT_MAX_BYTES, array( Runner::class, 'to_php_log' ) ) )->info( 'file line' );
+			// The whole pipeline, not only the paths: a backup's name (it carries the site's slug), a terminal's escape
+			// sequence, and a storage directory away from the site.
+			Runner::to_php_log( "piped line: /srv/elsewhere/store/backups/shop-example-com-20260930-101010-abcd.part001.wpcheckpoint.zip \033[31mred", array( '{storage}' => '/srv/elsewhere/store' ) );
 		} finally {
 			ini_set( 'error_log', (string) $was );
 		}
@@ -717,6 +720,10 @@ final class SiteStateTest extends WP_UnitTestCase {
 		$this->assertStringContainsString( 'kept line', $php );
 		$this->assertStringContainsString( '{wp-content}/x', $php, 'the paths in it are masked' );
 		$this->assertStringNotContainsString( rtrim( ABSPATH, '/' ), $php );
+		$this->assertStringContainsString( 'piped line: {storage}/backups/[backup].part001.wpcheckpoint.zip', $php, 'the storage directory and the backup\'s name are masked' );
+		$this->assertStringNotContainsString( 'shop-example-com', $php );
+		$this->assertStringNotContainsString( "\033", $php, 'no escape sequence reaches the log' );
+		$this->assertStringContainsString( 'red', $php, 'the control: the rest of the line is there' );
 		$this->assertStringNotContainsString( 'dropped line', $php, 'without the fallback a line is dropped, as before' );
 		$this->assertStringNotContainsString( 'file line', $php, 'a writable file takes the line' );
 		$this->assertStringContainsString( 'file line', (string) file_get_contents( $this->root . '/job.log' ), 'the control: the file was written' );
