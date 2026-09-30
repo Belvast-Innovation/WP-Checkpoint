@@ -190,10 +190,13 @@ final class StorageTest extends WP_UnitTestCase {
 		$this->assertTrue( $state['clone_detected'] );
 		$this->assertSame( $old, $state['previous_path'] );
 		$this->assertNotSame( basename( $old ), basename( $new ), 'a new token was chosen' );
-		$this->assertSame( array(), $state['past_tokens'], 'the original\'s history is dropped' );
+		$original_token = substr( basename( $old ), strlen( Directories::DIR_PREFIX ) );
+		$this->assertContains( $original_token, $state['copied_tokens'], 'the original\'s token is recorded as copied' );
+		$this->assertContains( 'aaaaaaaaaaaa', $state['copied_tokens'], 'and its history' );
 		$this->assertSame( array(), Directories::own_tokens(), 'nothing is claimed while the clone is unresolved: no staging is reaped here' );
 		$clone->acknowledge_clone();
 		$this->assertSame( array( substr( basename( $new ), strlen( Directories::DIR_PREFIX ) ) ), Directories::own_tokens(), 'once resolved: the clone\'s new token only' );
+		$this->assertNotContains( $original_token, Directories::own_tokens(), 'the original\'s token never' );
 		$state = $clone->state();
 
 		// Uninstall on the clone must refuse to delete the original.
@@ -600,7 +603,9 @@ final class StorageTest extends WP_UnitTestCase {
 		$this->assertSame( '', $dirs->base() );
 		$this->assertStringContainsString( 'belongs to another installation', $dirs->last_error() );
 		$this->assertTrue( Directories::load_state()['clone_detected'] );
-		$this->assertSame( array(), Directories::load_state()['past_tokens'] );
+		// The state was written here (this ABSPATH): only the directory is another's, the tokens stay this one's.
+		$this->assertSame( array( 'aaaaaaaaaaaa' ), Directories::load_state()['past_tokens'] );
+		$this->assertSame( array(), Directories::load_state()['copied_tokens'] );
 		$this->assertGreaterThan( $saved, $saves(), 'the counter sees a save' );
 	}
 

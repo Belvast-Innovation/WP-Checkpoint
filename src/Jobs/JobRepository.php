@@ -369,23 +369,25 @@ final class JobRepository {
 
 	/**
 	 * The storage tokens a job that holds the site changed may carry to be run here (gate() and acquire() alike):
-	 * this installation's (Directories::own_tokens(), none while a clone is unresolved), and, while a clone is
-	 * unresolved, the current token when it is not the one in effect as the clone was detected (state clone_token):
-	 * a token this copy was given after that is its own, so a job it started then runs; the copied one, which every
-	 * row copied with the database carries, never does, whatever directory the copy resolves meanwhile. A clone
-	 * detected before that token was recorded gets none.
+	 * this installation's current and earlier tokens, a clone unresolved or not. Directories never makes a token
+	 * copied from the original installation one of these (it takes a new one, and keeps copied ones out of the
+	 * earlier ones), so a row copied with the database is never run here, and a job a copy started is.
 	 *
 	 * @return string[]
 	 */
 	private function held_tokens(): array {
 		$state  = $this->directories->state(); // Resolved for this request.
-		$tokens = Directories::own_tokens( $state );
-		$token  = (string) $state['token'];
-		$copied = (string) ( $state['clone_token'] ?? '' );
-		if ( ! empty( $state['clone_detected'] ) && '' !== $copied && Directories::is_valid_token( $token ) && $token !== $copied && ! in_array( $token, $tokens, true ) ) {
-			$tokens[] = $token;
-		}
-		return $tokens;
+		$tokens = array_merge( array( (string) $state['token'] ), (array) $state['past_tokens'] );
+		$copied = (array) $state['copied_tokens'];
+		return array_values(
+			array_filter(
+				array_unique( array_map( 'strval', $tokens ) ),
+				static function ( string $token ) use ( $copied ): bool {
+					// A copy that holds no directory yet still carries the original's current token: not its own.
+					return Directories::is_valid_token( $token ) && ! in_array( $token, $copied, true );
+				}
+			)
+		);
 	}
 
 	/**

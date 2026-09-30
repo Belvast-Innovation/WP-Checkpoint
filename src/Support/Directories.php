@@ -180,7 +180,7 @@ final class Directories {
 				'provisional'         => false,
 				'verification'        => array(),
 				'clone_detected'      => false,
-				'clone_token'         => '', // The token in effect when the clone was detected: the copied one.
+				'copied_tokens'       => array(), // The tokens held when a clone was detected: the original's (note_clone()).
 				'previous_path'       => '',
 				'abspath'             => '',
 				'previous_abspath'    => '',
@@ -296,16 +296,34 @@ final class Directories {
 	}
 
 	/**
-	 * Record the token in effect as a clone is detected (the copied one), once per detection (a clone resolved and
-	 * detected again records anew): a job carrying it is the original's whatever this copy resolves later; a token
-	 * this copy is given after that is its own (JobRepository). Read only while a clone is detected.
+	 * Record, as a clone is detected, the tokens held then: the current one and the earlier ones, copied with the
+	 * database from the installation that last wrote the state (not when that is this one). None of them is ever this installation's again (is_copied()): it is
+	 * never adopted, taken back or kept as an earlier one, so no job or staging carrying one is claimed here. Only
+	 * "continue with the original directory" (finish_reclaim(), and a trusted deployment's automatic reclaim) says
+	 * this installation is the original, and clears them. Kept across detections and acknowledgements.
 	 *
 	 * @return void
 	 */
 	private function note_clone(): void {
-		if ( empty( $this->state['clone_detected'] ) || '' === (string) $this->state['clone_token'] ) {
-			$this->state['clone_token'] = (string) $this->state['token'];
+		// The tokens are another installation's when the state was last taken up under another ABSPATH (the
+		// original's, or a copy's of which this is a copy again); state this installation wrote holds its own, and
+		// state that never took a directory up says nothing.
+		$written = (string) $this->state['abspath'];
+		if ( '' === $written || OwnerMarker::hash_path( $written ) === OwnerMarker::hash_path( (string) $this->context['abspath'] ) ) {
+			return;
 		}
+		$tokens                       = array_merge( (array) $this->state['copied_tokens'], array( (string) $this->state['token'] ), (array) $this->state['past_tokens'] );
+		$this->state['copied_tokens'] = array_values( array_unique( array_filter( array_map( 'strval', $tokens ), array( self::class, 'is_valid_token' ) ) ) );
+	}
+
+	/**
+	 * Whether a token is one of the original installation's, copied with the database (note_clone()).
+	 *
+	 * @param string $token Token.
+	 * @return bool
+	 */
+	private function is_copied( string $token ): bool {
+		return in_array( $token, (array) $this->state['copied_tokens'], true );
 	}
 
 	/**
@@ -344,6 +362,7 @@ final class Directories {
 			$this->state['trusted_deploy_root'] = $trusted_root;
 		}
 		$this->state['clone_detected']   = false;
+		$this->state['copied_tokens']    = array(); // This is the original: its tokens are its own.
 		$this->state['previous_path']    = '';
 		$this->state['previous_abspath'] = '';
 		$this->state['token']            = self::SOURCE_CUSTOM === $this->state['source'] ? $this->state['token'] : substr( basename( $dir ), strlen( self::DIR_PREFIX ) );
@@ -416,6 +435,11 @@ final class Directories {
 			$this->save_state();
 		}
 
+		// State written under another ABSPATH is a copy's (or a move's), however the directories look: its tokens are
+		// recorded as copied before any is chosen, whether or not a marker shows the clone (a copy whose custom
+		// directory names another place, or was emptied, never sees the original's marker).
+		$this->note_clone();
+
 		if ( '' !== $this->context['custom_dir'] ) {
 			$this->resolve_custom();
 			return;
@@ -444,7 +468,7 @@ final class Directories {
 					return;
 				}
 				$this->state['token']        = '';
-				$this->state['past_tokens']  = array(); // The original installation's (own_tokens()).
+				$this->state['past_tokens']  = array_values( array_diff( (array) $this->state['past_tokens'], (array) $this->state['copied_tokens'] ) ); // Only the original's go (note_clone()).
 				$this->state['verification'] = array();
 			} elseif ( $this->restore_keeps( $existing ) && ! Paths::positively_gone( $existing ) ) {
 				// Not reachable from this request (open_basedir, permissions), yet not shown to be gone, and a
@@ -454,7 +478,7 @@ final class Directories {
 			}
 		}
 
-		$token = self::is_valid_token( $this->state['token'] ) ? $this->state['token'] : bin2hex( random_bytes( 6 ) );
+		$token = self::is_valid_token( $this->state['token'] ) && ! $this->is_copied( (string) $this->state['token'] ) ? $this->state['token'] : bin2hex( random_bytes( 6 ) );
 		$this->select( $token );
 	}
 
@@ -553,7 +577,7 @@ final class Directories {
 			$this->note_clone();
 			$this->state['clone_detected'] = true;
 			$this->state['previous_path']  = $dir;
-			$this->state['past_tokens']    = array(); // The original installation's (own_tokens()).
+			$this->state['past_tokens']    = array_values( array_diff( (array) $this->state['past_tokens'], (array) $this->state['copied_tokens'] ) ); // Only the original's go (note_clone()).
 			$this->save_state();
 			$this->error = __( 'WPCHECKPOINT_STORAGE_DIR belongs to another installation.', 'wp-checkpoint' );
 			return;
@@ -571,8 +595,8 @@ final class Directories {
 			}
 			$listings = array();
 			foreach ( $restores as $restore ) {
-				if ( Paths::same_location( $dir, $restore['path'] ) ) {
-					$token = $restore['token']; // Its own directory: taken back with its own token.
+				if ( Paths::same_location( $dir, $restore['path'] ) && ! $this->is_copied( (string) $restore['token'] ) ) {
+					$token = $restore['token']; // Its own directory: taken back with its own token (never a copied one).
 					break;
 				}
 			}
@@ -591,7 +615,9 @@ final class Directories {
 		$before = (string) $this->state['token'];
 		if ( self::is_valid_token( $token ) ) {
 			$this->state['token'] = $token;
-		} elseif ( ! self::is_valid_token( $this->state['token'] ) || $moved ) {
+		} elseif ( ! self::is_valid_token( $this->state['token'] ) || $moved || $this->is_copied( (string) $this->state['token'] ) ) {
+			// A copy holding the original's token (a clone detected in this directory, which it may now use: emptied)
+			// takes one of its own before it writes anything under a token.
 			$this->state['token'] = bin2hex( random_bytes( 6 ) );
 		}
 		// The token and the path are saved together (one write): never a restore's token on another path.
@@ -1037,9 +1063,10 @@ final class Directories {
 	private function save_state(): void {
 		// A token this installation used before (its custom directory moved, a restore's token taken back) still
 		// names its staging roots and probes next to the site (Residue::scan_site()): it is kept, a few of them.
-		// Not after a clone was detected: the previous token is then the original installation's.
+		// One copied from the original installation may be kept here: whatever reads these leaves copied ones out
+		// (own_tokens(), JobRepository::held_tokens()).
 		$saved = self::load_state()['token'];
-		if ( self::is_valid_token( $saved ) && $saved !== $this->state['token'] && empty( $this->state['clone_detected'] ) ) {
+		if ( self::is_valid_token( $saved ) && $saved !== $this->state['token'] ) {
 			$past = array_values( array_diff( (array) $this->state['past_tokens'], array( $saved, (string) $this->state['token'] ) ) );
 			array_unshift( $past, $saved );
 			$this->state['past_tokens'] = array_slice( $past, 0, self::PAST_TOKENS );
@@ -1062,6 +1089,14 @@ final class Directories {
 			return array();
 		}
 		$tokens = array_merge( array( (string) $state['token'] ), (array) $state['past_tokens'] );
-		return array_values( array_unique( array_filter( array_map( 'strval', $tokens ), array( __CLASS__, 'is_valid_token' ) ) ) );
+		$copied = (array) ( $state['copied_tokens'] ?? array() );
+		return array_values(
+			array_filter(
+				array_unique( array_map( 'strval', $tokens ) ),
+				static function ( string $token ) use ( $copied ): bool {
+					return self::is_valid_token( $token ) && ! in_array( $token, $copied, true );
+				}
+			)
+		);
 	}
 }

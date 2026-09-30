@@ -449,7 +449,7 @@ final class SiteStateTest extends WP_UnitTestCase {
 		$again = new Directories( array( 'is_web_request' => false, 'document_root' => '', 'abspath' => $this->root . '/releases/b/', 'custom_dir' => $this->root . '/store-a' ) );
 		$this->assertNotSame( '', $again->base(), 'the control: the copy has a directory now: ' . $again->last_error() );
 		$this->assertTrue( $again->state()['clone_detected'] );
-		$this->assertSame( $held->storage_token, (string) $again->state()['token'], 'the control: still the copied token' );
+		$this->assertNotSame( $held->storage_token, (string) $again->state()['token'], 'the copy took a token of its own before using the directory' );
 		$repo = $this->repo_for( $again );
 		$this->assertFalse( $repo->gate( $held )['allowed'] );
 		$this->assertNull( $repo->acquire( $held->id ) );
