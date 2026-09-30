@@ -514,7 +514,9 @@ final class CloneTokensTest extends WP_UnitTestCase {
 		// The controls: each case came up (not as root, which searches every directory).
 		$cases = array( 'reclaimed', 'an old marker under a link, matched', 'died after the marker was rewritten', 'a worker on the release before' );
 		if ( ! ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) ) {
-			$cases = array_merge( $cases, array( 'blind, not told', 'blind, told by the marker', 'blind, not told, as the unresolvable spelling' ) );
+			// ("Blind, told by the marker" needs state without a resolved directory on record, which only an upgrade
+			// leaves: rare here, and covered by test_an_abspath_that_cannot_be_resolved_changes_nothing.)
+			$cases = array_merge( $cases, array( 'blind, not told', 'blind, not told, as the unresolvable spelling' ) );
 		}
 		foreach ( $cases as $case ) {
 			$this->assertGreaterThan( 0, $this->seen[ $case ] ?? 0, 'the control: ' . $case . ' ' . wp_json_encode( $this->seen ) );
@@ -578,6 +580,10 @@ final class CloneTokensTest extends WP_UnitTestCase {
 		$base  = $cli->base();
 		$this->assertNotSame( '', $base, $cli->last_error() );
 		$this->assertNotSame( $empty, $this->footprint( 'deploy' ), 'the control: a request that decides is seen to' );
+		// As state the version before wrote: no resolved directory on record, so the paths alone cannot tell.
+		$state = Options::get( Directories::OPTION, array() );
+		unset( $state['abspath_real'] );
+		Options::set( Directories::OPTION, $state );
 		chmod( $root . '/locked', 0 );
 		try {
 			// The state's ABSPATH cannot be resolved; the directory it names carries this installation's marker for
@@ -810,6 +816,7 @@ final class CloneTokensTest extends WP_UnitTestCase {
 		// The request dies before the state is saved.
 		$next = $this->dirs( 'cc/B', $store );
 		$this->assertSame( $store, $next->base(), $next->last_error() );
+		$this->assertFalse( $next->state()['clone_detected'], 'the take-over finished' );
 		$this->assertSame( $token, (string) $next->state()['token'], 'its token kept' );
 		$this->assertNotNull( self::repo( $next )->acquire( $plain->id ), 'its job taken' );
 	}
@@ -871,5 +878,21 @@ final class CloneTokensTest extends WP_UnitTestCase {
 		$cli = $this->dirs( 'deploy/current', '' ); // The first request after the deployment: WP-CLI through the link.
 		$this->assertSame( $base, $cli->base(), 'taken over without asking: ' . $cli->last_error() );
 		$this->assertNotEmpty( $cli->state()['auto_reclaimed'] );
+	}
+
+	public function test_a_dead_take_over_is_not_finished_for_a_request_whose_custom_directory_is_another(): void {
+		foreach ( array( 'A', 'B' ) as $site ) {
+			mkdir( $this->root . '/cd/' . $site . '/wp-includes', 0755, true );
+		}
+		$store = $this->root . '/cd/store';
+		$this->assertSame( $store, $this->dirs( 'cd/A', $store )->base() );
+		$moved = $this->dirs( 'cd/B', $store );
+		$this->assertSame( '', $moved->base(), 'the control: the move is detected' );
+		$this->assertTrue( $moved->reclaim()->reclaim( false )['ok'] );
+		// The request dies before the state is saved; the next one has WPCHECKPOINT_STORAGE_DIR set elsewhere.
+		$other = $this->root . '/cd/other';
+		$next  = $this->dirs( 'cd/B', $other );
+		$this->assertSame( $other, $next->base(), 'the directory it names, checked as usual: ' . $next->last_error() );
+		$this->assertSame( $store, $this->dirs( 'cd/B', $store )->base(), 'the control: with the constant as before, it is finished' );
 	}
 }

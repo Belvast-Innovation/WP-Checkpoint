@@ -354,8 +354,7 @@ final class StorageReclaim {
 
 	/**
 	 * Rewrite the owner marker with the current ABSPATH, under a lock and
-	 * only while the marker still reads exactly as recorded (or as an
-	 * earlier attempt recorded it was about to write it).
+	 * only while the marker still reads exactly as recorded.
 	 *
 	 * @param string $dir Directory.
 	 * @return array{ok: bool, message: string}
@@ -378,20 +377,10 @@ final class StorageReclaim {
 			}
 			// As this installation last found it (the hash recorded as it adopted the directory: an ABSPATH spelled
 			// through a link may resolve elsewhere by now, a deployment's "current" pointed at a new release), or, for
-			// state written before that was recorded, a hash of the ABSPATH recorded then, either form.
-			// Also as an earlier attempt was about to write it: one that died after the rewrite, before the state was
-			// saved (a deployment may have moved ABSPATH again since).
-			$recorded    = array_filter(
-				array(
-					isset( $this->state['previous_marker_hash'] ) ? (string) $this->state['previous_marker_hash'] : '',
-					isset( $this->state['reclaim_marker_hash'] ) ? (string) $this->state['reclaim_marker_hash'] : '',
-				)
-			);
-			$as_recorded = false;
-			foreach ( $recorded as $hash ) {
-				$as_recorded = $as_recorded || hash_equals( $hash, $lines[1] );
-			}
-			if ( ! $as_recorded && ! OwnerMarker::is_hash_of( $lines[1], (string) $this->state['previous_abspath'] ) ) {
+			// state written before that was recorded, a hash of the ABSPATH recorded then, either form. An attempt
+			// that died after rewriting the marker is finished by the next request (Directories::resolve()).
+			$recorded = isset( $this->state['previous_marker_hash'] ) ? (string) $this->state['previous_marker_hash'] : '';
+			if ( ! ( '' !== $recorded && hash_equals( $recorded, $lines[1] ) ) && ! OwnerMarker::is_hash_of( $lines[1], (string) $this->state['previous_abspath'] ) ) {
 				return array(
 					'ok'      => false,
 					'message' => __( 'Another copy of this site has already claimed the directory since it was recorded here.', 'wp-checkpoint' ),

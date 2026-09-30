@@ -373,12 +373,11 @@ final class Directories {
 		// The same detection again (a custom directory refused on every request) keeps what it set aside; a new one
 		// sets aside only what this request did: an earlier detection's tokens, never acknowledged, stay copied. The
 		// same means the same directory, detected from the same place: a copy of the database asking from elsewhere
-		// starts its own, without what the original's attempts recorded.
+		// starts its own, without the tokens the original's detection set aside.
 		$here                                 = OwnerMarker::real( (string) $this->context['abspath'] );
 		$here                                 = '' === $here ? rtrim( Paths::normalize( (string) $this->context['abspath'] ), '/' ) : rtrim( Paths::normalize( $here ), '/' );
 		$again                                = ! empty( $this->state['clone_detected'] ) && Paths::same( (string) $this->state['previous_path'], $dir, Paths::is_windows() ) && Paths::same( (string) $this->state['detected_real'], $here, Paths::is_windows() );
 		$this->state['reclaim_tokens']        = array_values( array_unique( array_merge( $again ? array_map( 'strval', (array) $this->state['reclaim_tokens'] ) : array(), $this->copied_now ) ) );
-		$this->state['reclaim_marker_hash']   = $again ? (string) $this->state['reclaim_marker_hash'] : '';
 		$this->state['detected_real']         = $here;
 		$this->state['clone_detected']        = true;
 		$this->state['previous_path']         = $dir;
@@ -589,10 +588,12 @@ final class Directories {
 		// that cannot be told either, nothing is chosen, recorded or saved.
 		// A "continue with the original directory" that rewrote the marker and died before saving the state: the
 		// previous directory now carries this installation's marker for this ABSPATH with the very hash the take-over
-		// recorded before rewriting it. It is finished here (the replay rule of that step).
-		$previous = (string) $this->state['previous_path'];
-		$recorded = (string) $this->state['reclaim_marker_hash'];
-		if ( ! empty( $this->state['clone_detected'] ) && '' !== $previous && '' !== $recorded && self::MARKER_OWN === $this->marker( $previous ) && hash_equals( $recorded, (string) ( $this->marker_hashes[ rtrim( $previous, '/\\' ) ] ?? '' ) ) ) {
+		// recorded before rewriting it. It is finished here (the replay rule of that step), unless this request's
+		// WPCHECKPOINT_STORAGE_DIR names another directory: that one is checked as usual.
+		$previous  = (string) $this->state['previous_path'];
+		$recorded  = (string) $this->state['reclaim_marker_hash'];
+		$other_dir = '' !== (string) $this->context['custom_dir'] && ! Paths::same_location( rtrim( (string) $this->context['custom_dir'], '/\\' ), $previous );
+		if ( ! empty( $this->state['clone_detected'] ) && '' !== $previous && '' !== $recorded && ! $other_dir && self::MARKER_OWN === $this->marker( $previous ) && hash_equals( $recorded, (string) ( $this->marker_hashes[ rtrim( $previous, '/\\' ) ] ?? '' ) ) ) {
 			$this->finish_reclaim();
 			$this->log_event( sprintf( 'Continuing with the storage directory %s, which a request had taken over but died before recording it.', $previous ) );
 			return;

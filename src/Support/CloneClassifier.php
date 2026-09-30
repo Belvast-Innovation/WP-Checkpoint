@@ -62,8 +62,9 @@ final class CloneClassifier {
 	 * @return array{verdict: string, recommendation: string, previous_exists: bool, previous_seen: bool, previous_is_wordpress: bool, siblings: bool, release_layout: bool, deploy_root: string}
 	 */
 	public static function classify( string $previous_abspath, string $current_abspath, $is_dir = null, $realpath = null, $gone = null ): array {
-		$is_dir   = is_callable( $is_dir ) ? $is_dir : 'is_dir';
-		$realpath = is_callable( $realpath ) ? $realpath : 'realpath';
+		// Silent probes: under open_basedir, which a copy's host may well have, a warning would name the path.
+		$is_dir   = is_callable( $is_dir ) ? $is_dir : array( self::class, 'quiet_is_dir' );
+		$realpath = is_callable( $realpath ) ? $realpath : array( Paths::class, 'real' );
 		$gone     = is_callable( $gone ) ? $gone : array( Paths::class, 'positively_gone' );
 
 		$previous = rtrim( Paths::normalize( $previous_abspath ), '/' );
@@ -109,6 +110,16 @@ final class CloneClassifier {
 			'release_layout'        => $release_layout,
 			'deploy_root'           => $deploy_root,
 		);
+	}
+
+	/**
+	 * The is_dir() of a path, without a warning (open_basedir would name the path in the error log).
+	 *
+	 * @param string $path Path.
+	 * @return bool
+	 */
+	public static function quiet_is_dir( string $path ): bool {
+		return @is_dir( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a warning would name the path.
 	}
 
 	/**
@@ -176,7 +187,7 @@ final class CloneClassifier {
 	 * @return string Normalised parent, empty when it cannot be resolved.
 	 */
 	public static function parent( string $path, $realpath = null ): string {
-		$realpath = is_callable( $realpath ) ? $realpath : 'realpath';
+		$realpath = is_callable( $realpath ) ? $realpath : array( Paths::class, 'real' );
 		$parent   = dirname( $path );
 		if ( '' === $parent || '.' === $parent || $parent === $path ) {
 			return '';
