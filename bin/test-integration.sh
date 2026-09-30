@@ -41,9 +41,10 @@ BEFORE=""
 
 # The code the run tests: a fingerprint of every file under src/ and tests/, by content and name. PHP loads a class
 # when it is first used, so a file changed during a run mixes two versions of the code in one result. Fails when a
-# file cannot be read: no fingerprint, rather than one that leaves that file out.
+# file cannot be read: no fingerprint, rather than one that leaves that file out. Left out: the one-time key the
+# standalone HTTP test writes next to its fixture while it runs (never committed; left behind if a run dies there).
 fingerprint() {
-	( cd "$PLUGIN" && sums=$(find src tests -type f -exec md5sum {} +) && printf '%s\n' "$sums" | LC_ALL=C sort | md5sum | cut -c1-32 )
+	( cd "$PLUGIN" && sums=$(find src tests -type f ! -path tests/Fixtures/Standalone/http/probe.key -exec md5sum {} +) && printf '%s\n' "$sums" | LC_ALL=C sort | md5sum | cut -c1-32 )
 }
 
 # On any exit: the run's directory (its temporary directory goes; its working directory only when empty, else the run

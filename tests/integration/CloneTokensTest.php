@@ -7,6 +7,8 @@ use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\JobRepository;
 use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Support\Options;
+use WPCheckpoint\Support\OwnerMarker;
+use WPCheckpoint\Support\Paths;
 use WPCheckpoint\Support\Schema;
 use WPCheckpoint\Tests\Fixtures\Sandbox;
 
@@ -27,7 +29,11 @@ use WPCheckpoint\Tests\Fixtures\Sandbox;
  * - I3: whenever no move waits for the administrator, every job the original started is let through and taken,
  *   under every spelling from which the answer can be told;
  * - I4: a request that cannot tell whether the state is its own (realpath() fails) chooses, records and saves nothing;
- * - I5: continuing with the original directory is never refused as the directory having been claimed since.
+ * - I5: continuing with the original directory is never refused as the directory having been claimed since, also when
+ *   an earlier attempt died after rewriting the marker;
+ * - I6: a request that keeps the directory it had (marked for it, no move detected) never sets its tokens aside as
+ *   copied (a web server worker still on the release before a deployment, among others).
+ * The realpath cache is never cleared by the test: a web server worker keeps it across requests.
  *
  * The copy and the original share one stored state here, as a copy's database starts as the original's: the original
  * does not act once the copy does. Not covered, as not seen by the plugin: a copy at the very same ABSPATH on another
@@ -131,6 +137,7 @@ final class CloneTokensTest extends WP_UnitTestCase {
 		if ( '' === $original->base() ) {
 			return array( 'setup: the original has no directory: ' . $original->last_error() );
 		}
+		$first    = $original->base();
 		$repo     = self::repo( $original );
 		$held     = $repo->create( 'plain' );
 		$plain    = $repo->create( 'plain' );
@@ -139,7 +146,8 @@ final class CloneTokensTest extends WP_UnitTestCase {
 		$theirs   = array( $held->id => 'the original\'s job that holds the site', $plain->id => 'the original\'s job' );
 		$ours     = array();
 		$found    = array();
-		$actions  = $custom_mode ? array( 'request', 'empty', 'acknowledge', 'move', 'back', 'start', 'start', 'vanish' ) : array( 'request', 'acknowledge', 'start', 'start', 'vanish' );
+		$actions  = $custom_mode ? array( 'request', 'empty', 'acknowledge', 'move', 'back', 'start', 'start', 'vanish', 'relocate', 'continue' ) : array( 'request', 'acknowledge', 'start', 'start', 'vanish', 'relocate', 'continue' );
+		$moved    = array(); // The copy's jobs from before it moved: they follow the move (continue gives them back).
 		$steps    = array();
 		$site_dir = $tag . '/b';
 		for ( $i = 0, $n = mt_rand( 1, 8 ); $i < $n; $i++ ) {
@@ -158,6 +166,29 @@ final class CloneTokensTest extends WP_UnitTestCase {
 					break;
 				case 'acknowledge':
 					$copy->acknowledge_clone();
+					$moved = array();
+					break;
+				case 'relocate': // The copy itself moves to another directory (its own move, or a deployment).
+					$site_dir = $tag . '/b' . $i;
+					mkdir( $this->root . '/' . $site_dir . '/wp-includes', 0755, true );
+					$moved = $ours; // What an earlier move set aside, never continued from, stays aside (the copy moved on).
+					$ours  = array();
+					break;
+				case 'continue': // Its administrator continues with the directory it had before it moved.
+					$copy->base();
+					$state = $copy->state();
+					if ( empty( $state['clone_detected'] ) || '' === (string) $state['previous_path'] || Paths::same_location( (string) $state['previous_path'], $first ) ) {
+						break; // Not after a move of its own (the original's directory: that would be the copy claiming to be the original).
+					}
+					foreach ( glob( rtrim( (string) $state['previous_path'], '/' ) . '/tmp/job-*.lock' ) ?: array() as $lock ) {
+						Sandbox::remove( $lock );
+					}
+					if ( $copy->reclaim()->reclaim( false )['ok'] ) {
+						$copy->finish_reclaim();
+						$ours  = $ours + $moved;
+						$moved = array();
+						$this->seen['a copy continued after its own move'] = ( $this->seen['a copy continued after its own move'] ?? 0 ) + 1;
+					}
 					break;
 				case 'move':
 					$custom = $this->root . '/' . $tag . '/store-' . $i;
@@ -168,7 +199,6 @@ final class CloneTokensTest extends WP_UnitTestCase {
 				case 'vanish': // The copy is on another host: the original's ABSPATH is nowhere here.
 					if ( is_dir( $this->root . '/' . $tag . '/a' ) ) {
 						Sandbox::remove( $this->root . '/' . $tag . '/a' );
-						clearstatcache( true );
 						$this->seen['vanished'] = ( $this->seen['vanished'] ?? 0 ) + 1;
 					}
 					break;
@@ -201,7 +231,8 @@ final class CloneTokensTest extends WP_UnitTestCase {
 	 */
 	private function spelled( string $tag, string $as, int $release ): string {
 		$paths = array(
-			'release' => 'releases/' . $release,
+			'release'  => 'releases/' . $release,
+			'previous' => 'releases/' . max( 1, $release - 1 ), // A web server worker still on the release before.
 			'current' => 'current',
 			'locked'  => 'locked/site',
 		);
@@ -223,7 +254,7 @@ final class CloneTokensTest extends WP_UnitTestCase {
 		$state = Options::get( Directories::OPTION, array() );
 		$dir   = rtrim( (string) $state['path'], '/\\' );
 		file_put_contents( $dir . '/.wpcheckpoint-owner', self::old_marker( (string) $state['install_id'], $abspath ) );
-		unset( $state['marker_hash'], $state['previous_marker_hash'] );
+		unset( $state['marker_hash'], $state['previous_marker_hash'], $state['abspath_real'], $state['previous_abspath_real'], $state['reclaim_tokens'], $state['reclaim_marker_hash'] ); // Keys the version before did not have.
 		Options::set( Directories::OPTION, $state );
 	}
 
@@ -268,16 +299,36 @@ final class CloneTokensTest extends WP_UnitTestCase {
 		$found  = array();
 		$steps  = array();
 		$locked = false;
+		// What "continue with the original directory" promises: the jobs held when the move it undoes was detected.
+		// A second move detected while one waits (workers of two releases taking turns) sets the first one's aside
+		// for good, unless the deployment root is trusted: those jobs are no longer expected to run.
+		$mark    = 0;
+		$waiting = null;
+		$observe = static function () use ( &$jobs, &$mark, &$waiting ): void {
+			$state = Options::get( Directories::OPTION, array() );
+			if ( empty( $state['clone_detected'] ) ) {
+				$waiting = null;
+				return;
+			}
+			if ( $waiting === $state['previous_path'] ) {
+				return;
+			}
+			if ( null !== $waiting ) {
+				$jobs = array_values( array_slice( $jobs, $mark ) );
+			}
+			$mark    = count( $jobs );
+			$waiting = $state['previous_path'];
+		};
 		$mode   = ( $custom_mode ? 'custom' : 'default' ) . ( $upgraded ? ', upgraded' : '' );
 		$can_lock = ! ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ); // Root searches every directory.
 		try {
 			for ( $i = 0, $n = mt_rand( 2, 10 ); $i < $n; $i++ ) {
-				$roll = mt_rand( 0, 9 );
+				$roll = mt_rand( 0, 11 );
 				$as   = array( 'release', 'current', 'locked' )[ mt_rand( 0, 2 ) ];
 				if ( 0 === $i || $roll < 5 ) {
 					$action = ( 0 === $i || 0 === mt_rand( 0, 2 ) ? 'start' : 'request' ) . ' as ' . $as;
 				} else {
-					$action = array( 5 => 'switch', 6 => 'lock', 7 => 'unlock', 8 => 'reclaim', 9 => 'reclaim' )[ $roll ];
+					$action = array( 5 => 'switch', 6 => 'lock', 7 => 'unlock', 8 => 'reclaim', 9 => 'reclaim', 10 => 'request as previous', 11 => 'reclaim, dying before the state is saved' )[ $roll ];
 				}
 				$steps[] = $action;
 				$where   = sprintf( '(seed %d, %s, after %s)', $seed, $mode, implode( ', ', $steps ) );
@@ -287,20 +338,19 @@ final class CloneTokensTest extends WP_UnitTestCase {
 						mkdir( $root . '/releases/' . $release . '/wp-includes', 0755, true );
 						Sandbox::remove( $root . '/current' );
 						symlink( $root . '/releases/' . $release, $root . '/current' );
-						clearstatcache( true ); // As a new request's process sees it: the realpath cache would not.
-						break;
+						break; // The realpath cache is not cleared here: a web server worker keeps it across requests.
 					case 'lock':
 						$locked = $can_lock && chmod( $root . '/locked', 0 );
-						clearstatcache( true );
 						break;
 					case 'unlock':
 						chmod( $root . '/locked', 0755 );
-						clearstatcache( true );
 						$locked = false;
 						break;
 					case 'reclaim': // The administrator continues with the original directory (from the web server).
+					case 'reclaim, dying before the state is saved':
 						$dirs = $this->dirs( $this->spelled( $tag, 'release', $release ), $custom );
 						$dirs->base();
+						$observe();
 						$state = $dirs->state();
 						if ( empty( $state['clone_detected'] ) || '' === (string) $state['previous_path'] ) {
 							break;
@@ -310,9 +360,12 @@ final class CloneTokensTest extends WP_UnitTestCase {
 							Sandbox::remove( $lock );
 						}
 						$result = $dirs->reclaim()->reclaim( false );
-						if ( $result['ok'] ) {
+						if ( $result['ok'] && 'reclaim' !== $action ) {
+							$this->seen['died after the marker was rewritten'] = ( $this->seen['died after the marker was rewritten'] ?? 0 ) + 1;
+						} elseif ( $result['ok'] ) {
 							$this->seen['reclaimed'] = ( $this->seen['reclaimed'] ?? 0 ) + 1;
 							$dirs->finish_reclaim();
+							$observe();
 						} elseif ( false !== strpos( $result['message'], 'already claimed' ) || false !== strpos( $result['message'], 'changed in the meantime' ) ) {
 							$found[] = sprintf( 'I5 %s: continuing with the original directory is refused: %s', $where, $result['message'] );
 						}
@@ -323,6 +376,15 @@ final class CloneTokensTest extends WP_UnitTestCase {
 						$before = $this->footprint( $tag );
 						$dirs   = $this->dirs( $site, $custom );
 						$base   = $dirs->base();
+						$observe();
+						// A request that keeps the directory it had, marked for it, sets none of its tokens aside.
+						$now = $this->footprint( $tag )['state'];
+						if ( '' !== $base && empty( $now['clone_detected'] ) && ( $before['state']['path'] ?? '' ) === $now['path'] && count( (array) ( $now['copied_tokens'] ?? array() ) ) > count( (array) ( $before['state']['copied_tokens'] ?? array() ) ) ) {
+							$found[] = sprintf( 'I6 %s: its own directory kept, its tokens set aside as copied', $where );
+						}
+						if ( 'previous' === $as && $release > 1 ) {
+							$this->seen['a worker on the release before'] = ( $this->seen['a worker on the release before'] ?? 0 ) + 1;
+						}
 						// Its ABSPATH, or the one the state was written under, cannot be resolved: whether the state is
 						// this installation's cannot be told from the paths. Never a clone or a move for that.
 						$blind = $locked && ( 'locked' === $as || $this->root . '/' . $this->spelled( $tag, 'locked', $release ) . '/' === (string) ( $before['state']['abspath'] ?? '' ) );
@@ -372,6 +434,7 @@ final class CloneTokensTest extends WP_UnitTestCase {
 						$blind  = $locked && ( 'locked' === $as || $this->root . '/' . $this->spelled( $tag, 'locked', $release ) . '/' === (string) ( $before['abspath'] ?? '' ) );
 						$probe  = $this->dirs( $site, $custom );
 						$here   = $probe->base(); // The request first: it may be the one that sees a deployment.
+						$observe();
 						$after  = Options::get( Directories::OPTION, array() );
 						if ( $blind ) {
 							$case                = ( '' === $here ? 'blind, not told' : 'blind, told by the marker' ) . ( 'locked' === $as ? ', as the unresolvable spelling' : '' );
@@ -419,7 +482,7 @@ final class CloneTokensTest extends WP_UnitTestCase {
 		global $wpdb;
 		$this->assertGreaterThan( 0, (int) $wpdb->get_var( 'SELECT COUNT(*) FROM ' . Schema::jobs_table() ), 'the control: there were jobs to check' );
 		// The controls: each case came up (not as root, which searches every directory).
-		$cases = array( 'reclaimed', 'an old marker under a link, matched' );
+		$cases = array( 'reclaimed', 'an old marker under a link, matched', 'died after the marker was rewritten', 'a worker on the release before' );
 		if ( ! ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) ) {
 			$cases = array_merge( $cases, array( 'blind, not told', 'blind, told by the marker', 'blind, not told, as the unresolvable spelling' ) );
 		}
@@ -448,7 +511,6 @@ final class CloneTokensTest extends WP_UnitTestCase {
 		// The deployment points "current" at the next release; the web server resolves it.
 		Sandbox::remove( $root . '/current' );
 		symlink( $root . '/releases/2', $root . '/current' );
-		clearstatcache( true ); // As a new request's process sees it: the realpath cache would not.
 		$web = $this->dirs( 'deploy/releases/2', '' );
 		$this->assertNotSame( $base, $web->base(), 'the control: the move is detected' );
 		$this->assertTrue( $web->state()['clone_detected'] );
@@ -487,20 +549,17 @@ final class CloneTokensTest extends WP_UnitTestCase {
 		$this->assertNotSame( '', $base, $cli->last_error() );
 		$this->assertNotSame( $empty, $this->footprint( 'deploy' ), 'the control: a request that decides is seen to' );
 		chmod( $root . '/locked', 0 );
-		clearstatcache( true ); // As a new request's process sees it: the realpath cache would not.
 		try {
 			// The state's ABSPATH cannot be resolved; the directory it names carries this installation's marker for
 			// this one (written where it resolved): that shows the state to be its own.
 			$this->assertSame( $base, $this->dirs( 'deploy/releases/1', '' )->base(), 'the marker tells' );
 		} finally {
 			chmod( $root . '/locked', 0755 );
-			clearstatcache( true );
 		}
 		$this->assertSame( $base, $this->dirs( 'deploy/locked/site', '' )->base() );
 		// This request's own ABSPATH cannot be resolved, the state was written under that very spelling, and the
 		// marker holds the resolved form: whether it is this ABSPATH's cannot be told.
 		chmod( $root . '/locked', 0 );
-		clearstatcache( true );
 		try {
 			$before = $this->footprint( 'deploy' );
 			$blind  = $this->dirs( 'deploy/locked/site', '' );
@@ -509,11 +568,9 @@ final class CloneTokensTest extends WP_UnitTestCase {
 			$this->assertSame( $before, $this->footprint( 'deploy' ), 'nothing chosen, recorded or saved' );
 		} finally {
 			chmod( $root . '/locked', 0755 );
-			clearstatcache( true );
 		}
 		$this->downgrade( $root . '/locked/site/' ); // A marker that holds the spelling only: nothing else says whose it is.
 		chmod( $root . '/locked', 0 );
-		clearstatcache( true );
 		try {
 			$before = $this->footprint( 'deploy' );
 			$web    = $this->dirs( 'deploy/releases/1', '' );
@@ -522,7 +579,6 @@ final class CloneTokensTest extends WP_UnitTestCase {
 			$this->assertSame( $before, $this->footprint( 'deploy' ), 'no token, no directory, nothing saved' );
 		} finally {
 			chmod( $root . '/locked', 0755 );
-			clearstatcache( true );
 		}
 		$this->assertSame( $base, $this->dirs( 'deploy/locked/site', '' )->base(), 'searchable again: as before' );
 	}
@@ -581,5 +637,127 @@ final class CloneTokensTest extends WP_UnitTestCase {
 		$this->assertSame( array(), array_slice( $found, 0, 10 ), count( $found ) . ' violations' );
 		$this->assertGreaterThan( $count / 4, $starts, 'the control: the copies started jobs of their own to check' );
 		$this->assertGreaterThan( 0, $this->seen['vanished'] ?? 0, 'the control: copies whose original\'s ABSPATH is nowhere here' );
+		$this->assertGreaterThan( 0, $this->seen['a copy continued after its own move'] ?? 0, 'the control: copies that moved and continued' );
+	}
+
+	public function test_a_copy_that_moves_and_continues_never_takes_the_originals_tokens_back(): void {
+		Schema::ensure();
+		foreach ( array( 'a', 'b', 'b2' ) as $site ) {
+			mkdir( $this->root . '/h1/' . $site . '/wp-includes', 0755, true );
+		}
+		$original = $this->dirs( 'h1/a', '' );
+		$first    = $original->base();
+		$theirs   = (string) $original->state()['token'];
+		$held     = self::repo( $original )->create( 'plain' );
+		self::hold( $held->id );
+		// The copy sees the clone and its administrator keeps the new directory.
+		$copy = $this->dirs( 'h1/b', '' );
+		$this->assertNotSame( $first, $copy->base() );
+		$copy->acknowledge_clone();
+		$own = self::repo( $copy )->create( 'plain' );
+		self::hold( $own->id );
+		// Later the copy moves, and its administrator continues with the directory it had.
+		$moved = $this->dirs( 'h1/b2', '' );
+		$moved->base();
+		$state = $moved->state();
+		$this->assertTrue( $state['clone_detected'], 'the control: the move is detected' );
+		$this->assertFalse( Paths::same_location( (string) $state['previous_path'], $first ), 'the control: its own directory, not the original\'s' );
+		$result = $moved->reclaim()->reclaim( false );
+		$this->assertTrue( $result['ok'], $result['message'] );
+		$moved->finish_reclaim();
+		$this->assertTrue( $this->runs_on_copy( $own->id, 'h1/b2', '', true ), 'the control: its own job runs again' );
+		$this->assertNotContains( $theirs, Directories::own_tokens(), 'the original\'s token is not the copy\'s' );
+		$this->assertFalse( $this->runs_on_copy( $held->id, 'h1/b2', '' ), 'nor does the original\'s job run on it' );
+	}
+
+	public function test_a_worker_still_on_the_release_before_keeps_its_tokens(): void {
+		Schema::ensure();
+		$root = $this->deployment();
+		$cli  = $this->dirs( 'deploy/current', '' ); // WP-CLI through the link, while it points at release 1.
+		$base = $cli->base();
+		$job  = self::repo( $cli )->create( 'plain' );
+		self::hold( $job->id );
+		Sandbox::remove( $root . '/current' );
+		symlink( $root . '/releases/2', $root . '/current' );
+		clearstatcache( true ); // A worker that never resolved "current" itself.
+		$worker = $this->dirs( 'deploy/releases/1', '' );
+		$this->assertSame( $base, $worker->base(), $worker->last_error() );
+		$this->assertFalse( $worker->state()['clone_detected'] );
+		$this->assertSame( array(), $worker->state()['copied_tokens'], 'none of its tokens set aside' );
+		$this->assertTrue( $this->runs_on_copy( $job->id, 'deploy/releases/1', '', true ), 'its job runs' );
+	}
+
+	public function test_a_deployment_after_wp_cli_chose_the_directory_is_taken_over_under_a_trusted_root(): void {
+		$root = $this->deployment();
+		$cli  = $this->dirs( 'deploy/current', '' );
+		$base = $cli->base();
+		$this->assertNotSame( '', $base, $cli->last_error() );
+		$state                        = Options::get( Directories::OPTION, array() );
+		$state['trusted_deploy_root'] = (string) realpath( $root . '/releases' );
+		Options::set( Directories::OPTION, $state );
+		Sandbox::remove( $root . '/current' );
+		symlink( $root . '/releases/2', $root . '/current' );
+		$web = $this->dirs( 'deploy/releases/2', '' );
+		$this->assertSame( $base, $web->base(), 'taken over without asking: ' . $web->last_error() );
+		$this->assertNotEmpty( $web->state()['auto_reclaimed'] );
+	}
+
+	public function test_continuing_again_after_a_request_died_between_the_marker_and_the_state(): void {
+		$root = $this->deployment();
+		$web  = $this->dirs( 'deploy/releases/1', '' );
+		$base = $web->base();
+		$next = $this->dirs( 'deploy/releases/2', '' );
+		$this->assertNotSame( $base, $next->base(), 'the control: the move is detected' );
+		$this->assertTrue( $next->reclaim()->reclaim( false )['ok'] );
+		// The request dies here: the marker names release 2, the state was never saved.
+		$again = $this->dirs( 'deploy/releases/2', '' );
+		$again->base();
+		$this->assertTrue( $again->state()['clone_detected'], 'the control: still waiting for the administrator' );
+		$result = $again->reclaim()->reclaim( false );
+		$this->assertTrue( $result['ok'], $result['message'] );
+		$again->finish_reclaim();
+		$this->assertSame( $base, $this->dirs( 'deploy/releases/2', '' )->base() );
+	}
+
+	public function test_a_copy_goes_on_where_the_originals_directory_cannot_be_looked_at(): void {
+		if ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) {
+			$this->markTestSkipped( 'Root searches every directory.' );
+		}
+		Schema::ensure();
+		mkdir( $this->root . '/h2/home/a/wp-includes', 0755, true ); // The original, in a home directory the copy cannot search.
+		mkdir( $this->root . '/h2/b/wp-includes', 0755, true );
+		$original = $this->dirs( 'h2/home/a', '' );
+		$first    = $original->base();
+		$held     = self::repo( $original )->create( 'plain' );
+		self::hold( $held->id );
+		chmod( $this->root . '/h2/home', 0 );
+		try {
+			// Where the original resolved to when it chose its directory is on record: not where the copy is.
+			$copy = $this->dirs( 'h2/b', '' );
+			$base = $copy->base();
+			$this->assertNotSame( '', $base, $copy->last_error() );
+			$this->assertNotSame( $first, $base );
+			$this->assertTrue( $copy->state()['clone_detected'] );
+			$this->assertFalse( $this->runs_on_copy( $held->id, 'h2/b', '' ), 'the original\'s job does not run on it' );
+		} finally {
+			chmod( $this->root . '/h2/home', 0755 );
+		}
+	}
+
+	public function test_a_take_over_that_died_before_saving_the_state_keeps_the_sites_tokens(): void {
+		Schema::ensure();
+		$root = $this->deployment();
+		$web  = $this->dirs( 'deploy/releases/1', '' );
+		$base = $web->base();
+		$job  = self::repo( $web )->create( 'plain' );
+		self::hold( $job->id );
+		// A deployment to release 2 under a trusted root: the take-over rewrote the marker for release 2, and the
+		// request died before the state was saved (it still names release 1).
+		$state = Options::get( Directories::OPTION, array() );
+		file_put_contents( $base . '/.wpcheckpoint-owner', OwnerMarker::build( (string) $state['install_id'], $root . '/releases/2/' ) );
+		$next = $this->dirs( 'deploy/releases/2', '' );
+		$this->assertSame( $base, $next->base(), $next->last_error() );
+		$this->assertSame( array(), $next->state()['copied_tokens'], 'none of its tokens set aside' );
+		$this->assertTrue( $this->runs_on_copy( $job->id, 'deploy/releases/2', '', true ), 'its job runs' );
 	}
 }

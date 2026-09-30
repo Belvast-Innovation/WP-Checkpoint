@@ -47,6 +47,13 @@ final class StorageReclaim {
 	private $before_rename = null;
 
 	/**
+	 * Called with the hash the marker is about to hold, before it is rewritten (Directories records it).
+	 *
+	 * @var callable|null
+	 */
+	private $on_rewrite = null;
+
+	/**
 	 * Constructor.
 	 *
 	 * @param array<string, mixed> $state   Storage state.
@@ -69,6 +76,16 @@ final class StorageReclaim {
 	}
 
 	/**
+	 * Record, before the marker is rewritten, the hash it is about to hold.
+	 *
+	 * @param callable $callback Receives the hash.
+	 * @return void
+	 */
+	public function on_rewrite( callable $callback ): void {
+		$this->on_rewrite = $callback;
+	}
+
+	/**
 	 * Directory that may be reclaimed: the one recorded when the clone was
 	 * detected. Empty when there is nothing to reclaim.
 	 *
@@ -88,7 +105,10 @@ final class StorageReclaim {
 	 * @return array{verdict: string, recommendation: string, previous_exists: bool, previous_is_wordpress: bool, siblings: bool, deploy_root: string}
 	 */
 	public function classify(): array {
-		return CloneClassifier::classify( (string) $this->state['previous_abspath'], (string) $this->context['abspath'] );
+		// The directory ABSPATH resolved to when the state was recorded: WP-CLI's --path through a deployment's
+		// "current" link says nothing about which release it was.
+		$previous = isset( $this->state['previous_abspath_real'] ) && '' !== (string) $this->state['previous_abspath_real'] ? (string) $this->state['previous_abspath_real'] : (string) $this->state['previous_abspath'];
+		return CloneClassifier::classify( $previous, (string) $this->context['abspath'] );
 	}
 
 	/**
@@ -333,7 +353,8 @@ final class StorageReclaim {
 
 	/**
 	 * Rewrite the owner marker with the current ABSPATH, under a lock and
-	 * only while the marker still reads exactly as recorded.
+	 * only while the marker still reads exactly as recorded (or as an
+	 * earlier attempt recorded it was about to write it).
 	 *
 	 * @param string $dir Directory.
 	 * @return array{ok: bool, message: string}
@@ -357,8 +378,19 @@ final class StorageReclaim {
 			// As this installation last found it (the hash recorded as it adopted the directory: an ABSPATH spelled
 			// through a link may resolve elsewhere by now, a deployment's "current" pointed at a new release), or, for
 			// state written before that was recorded, a hash of the ABSPATH recorded then, either form.
-			$recorded = isset( $this->state['previous_marker_hash'] ) ? (string) $this->state['previous_marker_hash'] : '';
-			if ( ! ( '' !== $recorded && hash_equals( $recorded, $lines[1] ) ) && ! OwnerMarker::is_hash_of( $lines[1], (string) $this->state['previous_abspath'] ) ) {
+			// Also as an earlier attempt was about to write it: one that died after the rewrite, before the state was
+			// saved (a deployment may have moved ABSPATH again since).
+			$recorded    = array_filter(
+				array(
+					isset( $this->state['previous_marker_hash'] ) ? (string) $this->state['previous_marker_hash'] : '',
+					isset( $this->state['reclaim_marker_hash'] ) ? (string) $this->state['reclaim_marker_hash'] : '',
+				)
+			);
+			$as_recorded = false;
+			foreach ( $recorded as $hash ) {
+				$as_recorded = $as_recorded || hash_equals( $hash, $lines[1] );
+			}
+			if ( ! $as_recorded && ! OwnerMarker::is_hash_of( $lines[1], (string) $this->state['previous_abspath'] ) ) {
 				return array(
 					'ok'      => false,
 					'message' => __( 'Another copy of this site has already claimed the directory since it was recorded here.', 'wp-checkpoint' ),
@@ -375,6 +407,9 @@ final class StorageReclaim {
 				call_user_func( $this->before_rename, $dir );
 			}
 
+			if ( null !== $this->on_rewrite ) {
+				call_user_func( $this->on_rewrite, OwnerMarker::hash_path( (string) $this->context['abspath'] ) );
+			}
 			$marker  = $dir . DIRECTORY_SEPARATOR . OwnerMarker::FILENAME;
 			$temp    = $marker . '.' . bin2hex( random_bytes( 4 ) ) . '.tmp';
 			$written = false !== file_put_contents( $temp, OwnerMarker::build( (string) $this->state['install_id'], (string) $this->context['abspath'] ), LOCK_EX ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- plugin-owned directory.

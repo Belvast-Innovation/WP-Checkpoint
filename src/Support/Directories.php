@@ -86,6 +86,20 @@ final class Directories {
 	private $marker_hashes = array();
 
 	/**
+	 * The tokens this request recorded as copied (note_clone()): those a move detected in it sets aside.
+	 *
+	 * @var string[]
+	 */
+	private $copied_now = array();
+
+	/**
+	 * Whether this request found the state written at another ABSPATH (note_clone()).
+	 *
+	 * @var bool
+	 */
+	private $elsewhere = false;
+
+	/**
 	 * Constructor.
 	 *
 	 * @param array<string, mixed> $context Overrides for default_context().
@@ -180,22 +194,26 @@ final class Directories {
 		$stored = Options::get( self::OPTION, array() );
 		return array_merge(
 			array(
-				'install_id'           => '',
-				'token'                => '',
-				'path'                 => '',
-				'source'               => '',
-				'provisional'          => false,
-				'verification'         => array(),
-				'clone_detected'       => false,
-				'copied_tokens'        => array(), // The tokens held when a clone was detected: the original's (note_clone()).
-				'previous_path'        => '',
-				'abspath'              => '',
-				'previous_abspath'     => '',
-				'marker_hash'          => '', // The path hash in the marker of the directory last adopted (adopt()).
-				'previous_marker_hash' => '', // The same, as it was when a clone was detected (StorageReclaim).
-				'trusted_deploy_root'  => '',
-				'auto_reclaimed'       => array(),
-				'past_tokens'          => array(),
+				'install_id'            => '',
+				'token'                 => '',
+				'path'                  => '',
+				'source'                => '',
+				'provisional'           => false,
+				'verification'          => array(),
+				'clone_detected'        => false,
+				'copied_tokens'         => array(), // The tokens held when a clone was detected: the original's (note_clone()).
+				'previous_path'         => '',
+				'abspath'               => '',
+				'previous_abspath'      => '',
+				'abspath_real'          => '', // The directory ABSPATH resolved to then ('' when it did not resolve).
+				'previous_abspath_real' => '', // The same, as it was when a clone was detected (StorageReclaim).
+				'marker_hash'           => '', // The path hash in the marker of the directory last adopted (adopt()).
+				'previous_marker_hash'  => '', // The same, as it was when a clone was detected (StorageReclaim).
+				'reclaim_tokens'        => array(), // Set aside by the detection "continue with the original directory" undoes.
+				'reclaim_marker_hash'   => '', // The hash a "continue" was about to write into the marker (StorageReclaim).
+				'trusted_deploy_root'   => '',
+				'auto_reclaimed'        => array(),
+				'past_tokens'           => array(),
 			),
 			is_array( $stored ) ? $stored : array()
 		);
@@ -298,10 +316,13 @@ final class Directories {
 	 */
 	public function acknowledge_clone(): void {
 		$this->base();
-		$this->state['clone_detected']       = false;
-		$this->state['previous_path']        = '';
-		$this->state['previous_abspath']     = '';
-		$this->state['previous_marker_hash'] = '';
+		$this->state['clone_detected']        = false;
+		$this->state['previous_path']         = '';
+		$this->state['previous_abspath']      = '';
+		$this->state['previous_abspath_real'] = '';
+		$this->state['previous_marker_hash']  = '';
+		$this->state['reclaim_tokens']        = array(); // Another installation's, as the administrator says: they stay copied.
+		$this->state['reclaim_marker_hash']   = '';
 		$this->save_state();
 	}
 
@@ -325,38 +346,66 @@ final class Directories {
 		if ( '' === $written ) {
 			return true;
 		}
-		$same = self::same_place( $written, (string) $this->context['abspath'] );
+		$same = self::same_place( $written, (string) $this->state['abspath_real'], (string) $this->context['abspath'] );
 		if ( null === $same ) {
 			return false;
 		}
 		if ( ! $same ) {
-			$tokens                       = array_merge( (array) $this->state['copied_tokens'], array( (string) $this->state['token'] ), (array) $this->state['past_tokens'] );
-			$this->state['copied_tokens'] = array_values( array_unique( array_filter( array_map( 'strval', $tokens ), array( self::class, 'is_valid_token' ) ) ) );
+			$this->elsewhere              = true;
+			$held                         = array_filter( array_map( 'strval', array_merge( array( (string) $this->state['token'] ), (array) $this->state['past_tokens'] ) ), array( self::class, 'is_valid_token' ) );
+			$this->copied_now             = array_values( array_unique( array_merge( $this->copied_now, array_diff( $held, (array) $this->state['copied_tokens'] ) ) ) );
+			$this->state['copied_tokens'] = array_values( array_unique( array_merge( array_map( 'strval', (array) $this->state['copied_tokens'] ), $held ) ) );
 		}
 		return true;
 	}
 
 	/**
-	 * Whether two ABSPATHs are one directory: spelled alike, or resolving to one. Another directory only on evidence:
-	 * both resolve, to two; or the written one is positively gone here (a copy's host has no such directory). Null
-	 * when neither can be shown: one cannot be resolved (a directory on the way cannot be searched, open_basedir) and
-	 * is not shown to be gone.
+	 * Record, as a clone or move is detected, what "continue with the original directory" needs: the ABSPATH and the
+	 * marker as they were, and the tokens this request set aside (none that were set aside before: an earlier clone's,
+	 * which the administrator may have said are another installation's).
 	 *
-	 * @param string $written ABSPATH recorded in the state.
-	 * @param string $here    ABSPATH of this request.
+	 * @param string $dir The directory the state named.
+	 * @return void
+	 */
+	private function note_detection( string $dir ): void {
+		// The same detection again (a custom directory refused on every request) keeps what it set aside; a new one
+		// sets aside only what this request did: an earlier detection's tokens, never acknowledged, stay copied.
+		$again                                = ! empty( $this->state['clone_detected'] ) && Paths::same( (string) $this->state['previous_path'], $dir, Paths::is_windows() );
+		$this->state['reclaim_tokens']        = array_values( array_unique( array_merge( $again ? array_map( 'strval', (array) $this->state['reclaim_tokens'] ) : array(), $this->copied_now ) ) );
+		$this->state['clone_detected']        = true;
+		$this->state['previous_path']         = $dir;
+		$this->state['previous_abspath']      = (string) $this->state['abspath'];
+		$this->state['previous_abspath_real'] = (string) $this->state['abspath_real'];
+		$this->state['previous_marker_hash']  = (string) $this->state['marker_hash'];
+	}
+
+	/**
+	 * Whether two ABSPATHs are one directory: spelled alike, or resolving to one. The directory the recorded one
+	 * resolved to when it was recorded is compared as it is (it is not resolved again: it may lie where this request
+	 * cannot look, open_basedir); state written before that was recorded has its ABSPATH resolved here. Another
+	 * directory only on evidence: two resolved directories; or the recorded ABSPATH positively gone here (a copy's host
+	 * has no such directory). Null when neither can be shown: a path cannot be resolved (a directory on the way cannot
+	 * be searched, open_basedir) and is not shown to be gone.
+	 *
+	 * @param string $written      ABSPATH recorded in the state.
+	 * @param string $written_real The directory it resolved to when recorded ('' when not recorded).
+	 * @param string $here         ABSPATH of this request.
 	 * @return bool|null
 	 */
-	private static function same_place( string $written, string $here ) {
+	private static function same_place( string $written, string $written_real, string $here ) {
 		if ( Paths::same( $written, $here, Paths::is_windows() ) ) {
 			return true;
 		}
+		$real_here = OwnerMarker::real( $here );
+		if ( '' !== $written_real && '' !== $real_here ) {
+			return Paths::same( $written_real, $real_here, Paths::is_windows() );
+		}
 		$real_written = OwnerMarker::real( $written );
-		$real_here    = OwnerMarker::real( $here );
 		if ( '' !== $real_written && '' !== $real_here ) {
 			return Paths::same( $real_written, $real_here, Paths::is_windows() );
 		}
-		if ( '' !== $real_here && Paths::positively_gone( $written ) ) {
-			return false;
+		if ( Paths::positively_gone( $written ) ) {
+			return false; // Nothing there: not where this request runs.
 		}
 		return null;
 	}
@@ -401,7 +450,24 @@ final class Directories {
 	 */
 	public function reclaim(): StorageReclaim {
 		$this->base();
-		return new StorageReclaim( $this->state, $this->context );
+		return $this->reclaimer();
+	}
+
+	/**
+	 * A take-over of the recorded directory that saves, before the marker is rewritten, the hash it is about to hold:
+	 * a request that dies between the rewrite and finish_reclaim() leaves a marker the next attempt recognises.
+	 *
+	 * @return StorageReclaim
+	 */
+	private function reclaimer(): StorageReclaim {
+		$reclaim = new StorageReclaim( $this->state, $this->context );
+		$reclaim->on_rewrite(
+			function ( string $hash ): void {
+				$this->state['reclaim_marker_hash'] = $hash;
+				Options::set( self::OPTION, array_merge( self::load_state(), array( 'reclaim_marker_hash' => $hash ) ) );
+			}
+		);
+		return $reclaim;
 	}
 
 	/**
@@ -421,15 +487,19 @@ final class Directories {
 			$this->state['trusted_deploy_root'] = $trusted_root;
 		}
 		// This is the original: its tokens are its own, the earlier ones among them (dropped as the move was detected).
-		$token                               = self::SOURCE_CUSTOM === $this->state['source'] ? (string) $this->state['token'] : substr( basename( $dir ), strlen( self::DIR_PREFIX ) );
-		$this->state['past_tokens']          = array_slice( array_values( array_diff( array_unique( array_merge( (array) $this->state['past_tokens'], (array) $this->state['copied_tokens'] ) ), array( $token ) ) ), 0, self::PAST_TOKENS );
-		$this->state['clone_detected']       = false;
-		$this->state['copied_tokens']        = array();
-		$this->state['previous_path']        = '';
-		$this->state['previous_abspath']     = '';
-		$this->state['previous_marker_hash'] = '';
-		$this->state['token']                = $token;
-		$this->base                          = null;
+		$token                                = self::SOURCE_CUSTOM === $this->state['source'] ? (string) $this->state['token'] : substr( basename( $dir ), strlen( self::DIR_PREFIX ) );
+		$given                                = array_map( 'strval', (array) $this->state['reclaim_tokens'] );
+		$this->state['past_tokens']           = array_slice( array_values( array_diff( array_unique( array_merge( (array) $this->state['past_tokens'], $given ) ), array( $token ) ) ), 0, self::PAST_TOKENS );
+		$this->state['copied_tokens']         = array_values( array_diff( (array) $this->state['copied_tokens'], $given, array( $token ) ) );
+		$this->state['reclaim_tokens']        = array();
+		$this->state['reclaim_marker_hash']   = '';
+		$this->state['clone_detected']        = false;
+		$this->state['previous_path']         = '';
+		$this->state['previous_abspath']      = '';
+		$this->state['previous_abspath_real'] = '';
+		$this->state['previous_marker_hash']  = '';
+		$this->state['token']                 = $token;
+		$this->base                           = null;
 		$this->adopt( $dir, $this->source_for( $dir ), false );
 		$this->save_state();
 
@@ -498,12 +568,18 @@ final class Directories {
 			$this->save_state();
 		}
 
-		// State written under another ABSPATH is a copy's (or a move's), however the directories look: its tokens are
-		// recorded as copied before any is chosen, whether or not a marker shows the clone (a copy whose custom
-		// directory names another place, or was emptied, never sees the original's marker). When that cannot be
-		// told, the directory the state names carrying this installation's marker for this ABSPATH shows the state
-		// to be this installation's (it is adopted only then); without it, nothing is chosen, recorded or saved.
-		if ( ! $this->note_clone() && ! ( '' !== (string) $this->state['path'] && self::MARKER_OWN === $this->marker( (string) $this->state['path'] ) ) ) {
+		// Links are judged as they are now: a web server worker keeps PHP's realpath cache across requests, and a
+		// deployment may have pointed "current" elsewhere since.
+		clearstatcache( true );
+
+		// The directory the state names carrying this installation's marker for this ABSPATH shows the state to be
+		// this installation's: a directory is adopted only then, and a copy elsewhere matches neither form of the
+		// marker. Otherwise, state written under another ABSPATH is a copy's (or a move's), however the directories
+		// look: its tokens are recorded as copied before any is chosen, whether or not a marker shows the clone (a
+		// copy whose custom directory names another place, or was emptied, never sees the original's marker). When
+		// that cannot be told either, nothing is chosen, recorded or saved.
+		$marked = '' !== (string) $this->state['path'] && self::MARKER_OWN === $this->marker( (string) $this->state['path'] );
+		if ( ! $marked && ! $this->note_clone() ) {
 			$this->error = $this->undecidable_abspath();
 			return;
 		}
@@ -529,10 +605,7 @@ final class Directories {
 				}
 				// Same options, different ABSPATH: a clone, a move, or a new release of a deployment.
 				$this->note_clone();
-				$this->state['clone_detected']       = true;
-				$this->state['previous_path']        = $existing;
-				$this->state['previous_abspath']     = (string) $this->state['abspath'];
-				$this->state['previous_marker_hash'] = (string) $this->state['marker_hash'];
+				$this->note_detection( $existing );
 				if ( $this->auto_reclaim( $existing ) ) {
 					return;
 				}
@@ -558,7 +631,7 @@ final class Directories {
 	 * @return bool
 	 */
 	private function auto_reclaim( string $dir ): bool {
-		$reclaim = new StorageReclaim( $this->state, $this->context );
+		$reclaim = $this->reclaimer();
 		if ( ! $reclaim->auto() ) {
 			return false;
 		}
@@ -644,11 +717,8 @@ final class Directories {
 		// are kept, nothing is saved): prepare() refuses the directory with the reason (unowned()).
 		if ( self::MARKER_OTHER === $this->marker( $dir ) ) {
 			$this->note_clone();
-			$this->state['clone_detected']       = true;
-			$this->state['previous_path']        = $dir;
-			$this->state['previous_abspath']     = (string) $this->state['abspath'];
-			$this->state['previous_marker_hash'] = (string) $this->state['marker_hash'];
-			$this->state['past_tokens']          = array_values( array_diff( (array) $this->state['past_tokens'], (array) $this->state['copied_tokens'] ) ); // Only the original's go (note_clone()).
+			$this->note_detection( $dir );
+			$this->state['past_tokens'] = array_values( array_diff( (array) $this->state['past_tokens'], (array) $this->state['copied_tokens'] ) ); // Only the original's go (note_clone()).
 			$this->save_state();
 			$this->error = __( 'WPCHECKPOINT_STORAGE_DIR belongs to another installation.', 'wp-checkpoint' );
 			return;
@@ -913,14 +983,14 @@ final class Directories {
 	/**
 	 * Whether a marker of this installation's ID written at another ABSPATH, as spelled, could still be for this one:
 	 * this request's ABSPATH cannot be resolved, so a resolved form of it cannot be compared (the marker may carry
-	 * one). Not evidence of another installation.
+	 * one). Not evidence of another installation, unless the state was found written at another ABSPATH.
 	 *
 	 * @param string $contents Marker contents.
 	 * @return bool
 	 */
 	private function undecidable_marker( string $contents ): bool {
 		$lines = OwnerMarker::lines( $contents );
-		return null !== $lines && '' !== (string) $this->state['install_id'] && hash_equals( (string) $this->state['install_id'], $lines[0] ) && '' === OwnerMarker::real( (string) $this->context['abspath'] );
+		return ! $this->elsewhere && null !== $lines && '' !== (string) $this->state['install_id'] && hash_equals( (string) $this->state['install_id'], $lines[0] ) && '' === OwnerMarker::real( (string) $this->context['abspath'] );
 	}
 
 	/**
@@ -1023,19 +1093,22 @@ final class Directories {
 			$this->marker( $dir );
 		}
 		$marker_hash = isset( $this->marker_hashes[ $key ] ) ? $this->marker_hashes[ $key ] : (string) $this->state['marker_hash'];
+		$real        = OwnerMarker::real( (string) $this->context['abspath'] );
+		$real        = '' === $real ? '' : rtrim( Paths::normalize( $real ), '/' ) . '/';
 		if ( '' !== (string) $this->state['path'] && $dir !== $this->state['path'] && Paths::same_location( $dir, (string) $this->state['path'] ) ) {
 			$dir = (string) $this->state['path']; // The same directory spelled another way: the stored spelling stays.
 		}
-		$changed = $save || $dir !== $this->state['path'] || $source !== $this->state['source'] || $provisional !== (bool) $this->state['provisional'] || $abspath !== $this->state['abspath'] || $marker_hash !== $this->state['marker_hash'];
+		$changed = $save || $dir !== $this->state['path'] || $source !== $this->state['source'] || $provisional !== (bool) $this->state['provisional'] || $abspath !== $this->state['abspath'] || $marker_hash !== $this->state['marker_hash'] || $real !== $this->state['abspath_real'];
 		if ( $changed ) {
 			if ( $dir !== $this->state['path'] ) {
 				$this->state['verification'] = array();
 			}
-			$this->state['path']        = $dir;
-			$this->state['source']      = $source;
-			$this->state['provisional'] = $provisional;
-			$this->state['abspath']     = $abspath;
-			$this->state['marker_hash'] = $marker_hash;
+			$this->state['path']         = $dir;
+			$this->state['source']       = $source;
+			$this->state['provisional']  = $provisional;
+			$this->state['abspath']      = $abspath;
+			$this->state['marker_hash']  = $marker_hash;
+			$this->state['abspath_real'] = $real;
 			$this->save_state();
 		}
 	}

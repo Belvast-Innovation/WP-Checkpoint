@@ -358,6 +358,11 @@ final class IntegrationScriptTest extends TestCase {
 		$run = $this->run_script( array(), array( 'FAKE_CHANGE' => $this->sandbox . '/plugin/build/junit.xml' ), false, $script );
 		$this->assertSame( 0, $run['code'], 'what the run writes outside src/ and tests/ (its log) changes nothing: ' . $run['stderr'] );
 
+		// The standalone HTTP test's one-time key, written under tests/ while it runs (and left if the run dies there).
+		mkdir( $this->sandbox . '/plugin/tests/Fixtures/Standalone/http', 0755, true );
+		$run = $this->run_script( array(), array( 'FAKE_CHANGE' => $this->sandbox . '/plugin/tests/Fixtures/Standalone/http/probe.key' ), false, $script );
+		$this->assertSame( 0, $run['code'], 'the one-time key the suite writes changes nothing: ' . $run['stderr'] );
+
 		$run = $this->run_script( array(), array( 'FAKE_CHANGE' => $this->sandbox . '/plugin/src/Code.php' ), false, $script );
 		$this->assertSame( 70, $run['code'], 'a passing suite on code that changed under it is not valid' );
 		$this->assertStringContainsString( 'This run is not valid: files under src/ or tests/ changed while it ran', $run['stderr'] );
