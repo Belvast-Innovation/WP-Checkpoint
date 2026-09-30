@@ -741,9 +741,10 @@ final class Directories {
 
 	/**
 	 * What the owner marker in $dir says (MARKER_*). It reads the file system on every call (another request may have
-	 * written the marker meanwhile). "Another installation's" is concluded only from contents read: a marker that is
-	 * there but cannot be read is MARKER_UNREADABLE, never someone else's. Nothing it reads warns: a warning would name
-	 * the path in the error log.
+	 * written the marker meanwhile). Each answer rests on what was seen: "another installation's" on contents read,
+	 * "none" on a listing of the directory without a marker. What cannot be seen is MARKER_UNREADABLE, never someone
+	 * else's and never no one's: a marker that cannot be read, a directory that cannot be searched or listed. Nothing
+	 * it reads warns: a warning would name the path in the error log.
 	 *
 	 * @phpstan-impure
 	 *
@@ -751,10 +752,17 @@ final class Directories {
 	 * @return string
 	 */
 	private function marker( string $dir ): string {
-		$marker = rtrim( $dir, '/\\' ) . DIRECTORY_SEPARATOR . OwnerMarker::FILENAME;
-		clearstatcache( true, $marker );
-		if ( ! @is_file( $marker ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- open_basedir warnings would name the path.
-			return self::MARKER_NONE;
+		$dir    = rtrim( $dir, '/\\' );
+		$marker = $dir . DIRECTORY_SEPARATOR . OwnerMarker::FILENAME;
+		clearstatcache();
+		if ( ! @is_dir( $dir ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- open_basedir warnings would name the path.
+			return self::MARKER_NONE; // Nothing there to be anyone's.
+		}
+		if ( ! @is_file( $marker ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- as above.
+			// No marker only when the directory is listed without one: a directory that cannot be searched says
+			// neither (its marker cannot be looked at, listed or not).
+			$entries = @scandir( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- as above.
+			return false === $entries || in_array( OwnerMarker::FILENAME, $entries, true ) ? self::MARKER_UNREADABLE : self::MARKER_NONE;
 		}
 		$contents = null === $this->context['read_marker']
 			? @file_get_contents( $marker ) // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- as above; a tiny local file.
@@ -767,7 +775,7 @@ final class Directories {
 			return self::MARKER_OWN;
 		}
 		if ( OwnerMarker::is_unfinished( $contents, $install_id, $this->context['abspath'] ) ) {
-			$entries = @scandir( rtrim( $dir, '/\\' ) ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- as above.
+			$entries = @scandir( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- as above.
 			if ( false === $entries ) {
 				return self::MARKER_UNREADABLE; // Whether anything else is there cannot be seen.
 			}
@@ -779,7 +787,7 @@ final class Directories {
 	}
 
 	/**
-	 * Why a directory whose owner marker cannot be read is not used.
+	 * Why a directory whose owner marker cannot be seen (MARKER_UNREADABLE) is not used.
 	 *
 	 * @param string $dir Directory.
 	 * @return string
@@ -787,7 +795,7 @@ final class Directories {
 	private static function unreadable_marker( string $dir ): string {
 		return sprintf(
 			/* translators: 1: owner marker file name, 2: directory path */
-			__( 'The owner marker %1$s in %2$s cannot be read (file permissions, or the host\'s open_basedir setting), so whether the directory is this site\'s own cannot be told; nothing was changed. Make the file readable by PHP and reload.', 'wp-checkpoint' ),
+			__( 'Whether %2$s is this site\'s own storage directory cannot be told: the directory or its owner marker %1$s cannot be read (file permissions, or the host\'s open_basedir setting). Nothing was changed. Make both readable by PHP and reload.', 'wp-checkpoint' ),
 			OwnerMarker::FILENAME,
 			$dir
 		);

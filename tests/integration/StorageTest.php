@@ -695,6 +695,50 @@ final class StorageTest extends WP_UnitTestCase {
 		$this->assertSame( $dir, $dirs->base(), 'the control: listed, it is taken up as a directory a request died in: ' . $dirs->last_error() );
 	}
 
+	/**
+	 * A storage directory that cannot be searched (0600: listed, its marker not looked at) or not even listed (0000).
+	 *
+	 * @return array<string, array{0: int}>
+	 */
+	public function unsearchable_modes(): array {
+		return array(
+			'listed, not searched' => array( 0600 ),
+			'neither'              => array( 0000 ),
+		);
+	}
+
+	/**
+	 * @dataProvider unsearchable_modes
+	 */
+	public function test_a_default_directory_whose_marker_cannot_be_looked_at_is_no_clone( int $mode ): void {
+		$first = new Directories( $this->cli_context() );
+		$dir   = $first->base();
+		$this->assertNotSame( '', $dir, $first->last_error() );
+		$state                = Directories::load_state();
+		$state['past_tokens'] = array( 'aaaaaaaaaaaa' );
+		Options::set( Directories::OPTION, $state );
+		$before = Directories::load_state();
+		$saves  = $this->count_saves();
+		chmod( $dir, $mode );
+		clearstatcache();
+		try {
+			if ( @is_file( $dir . '/' . OwnerMarker::FILENAME ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- the test's own directory.
+				$this->markTestSkipped( 'A directory without search permission can still be searched here (the tests run as root).' );
+			}
+			$this->assertTrue( is_dir( $dir ), 'the control: the directory itself is there' );
+			$dirs = new Directories( $this->cli_context() );
+			$this->assertSame( '', $dirs->base(), 'no other directory is chosen meanwhile' );
+			$this->assertStringContainsString( 'cannot be read (file permissions, or the host\'s open_basedir setting)', $dirs->last_error() );
+			$this->assertFalse( Directories::load_state()['clone_detected'] );
+			$this->assertSame( $before, Directories::load_state() );
+			$this->assertSame( 0, $saves(), 'nothing saved' );
+		} finally {
+			chmod( $dir, 0755 );
+		}
+		$dirs = new Directories( $this->cli_context() );
+		$this->assertSame( $dir, $dirs->base(), 'the control: searchable again, it is this installation\'s: ' . $dirs->last_error() );
+	}
+
 	public function test_a_marker_the_file_system_will_not_let_be_read_warns_nothing_that_names_the_path(): void {
 		$custom = $this->fake_root . '/unreadable-marker';
 		$first  = $this->custom( $custom );
@@ -709,7 +753,9 @@ final class StorageTest extends WP_UnitTestCase {
 			$warnings = array();
 			set_error_handler( // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_set_error_handler -- the test observes warnings.
 				static function ( int $level, string $message ) use ( &$warnings ): bool {
-					$warnings[] = $message;
+					if ( 0 !== ( error_reporting() & $level ) ) { // What reaches the log: not what "@" silenced.
+						$warnings[] = $message;
+					}
 					return true;
 				}
 			);
@@ -718,13 +764,14 @@ final class StorageTest extends WP_UnitTestCase {
 				$control  = $warnings;
 				$warnings = array();
 				$dirs     = $this->custom( $custom );
+				$base     = $dirs->base(); // Resolved here (lazily), while the handler watches.
 			} finally {
 				restore_error_handler();
 			}
 			$this->assertNotSame( array(), array_filter( $control, static function ( string $w ) use ( $custom ): bool {
 				return false !== strpos( $w, $custom );
 			} ), 'the control: a plain read warns with the path' );
-			$this->assertSame( '', $dirs->base() );
+			$this->assertSame( '', $base );
 			$this->assertStringContainsString( 'cannot be read', $dirs->last_error() );
 			$this->assertFalse( $dirs->state()['clone_detected'] );
 			$this->assertSame( array(), array_values( array_filter( $warnings, static function ( string $w ) use ( $custom ): bool {
