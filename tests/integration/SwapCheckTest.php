@@ -189,6 +189,34 @@ final class SwapCheckTest extends RestoreTestCase {
 		}
 	}
 
+	public function test_a_neighbour_installation_in_the_same_database_is_left_where_it_is_and_reported(): void {
+		global $wpdb;
+		$q = $wpdb->base_prefix;
+		$this->create( $q . 'wpc_extra', '(id int NOT NULL PRIMARY KEY) ENGINE=InnoDB' ); // This site's, not in the backup.
+		$neighbour = array();
+		foreach ( array( 'posts', 'postmeta', 'options', 'comments', 'terms', 'term_taxonomy', 'term_relationships' ) as $name ) {
+			$neighbour[] = $q . 'old_' . $name; // Another WordPress installation, under a longer prefix.
+			$this->create( $q . 'old_' . $name, '(id int NOT NULL PRIMARY KEY) ENGINE=InnoDB' );
+		}
+		$job = $this->run_restore( $this->start_restore( $this->base() ) );
+		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
+		$moved = array_column(
+			array_filter(
+				$this->entries( $job ),
+				static function ( array $e ): bool {
+					return SwapPlan::MOVE === $e[0];
+				}
+			),
+			1
+		);
+		$this->assertContains( $q . 'wpc_extra', $moved, 'the control: this site\'s table the backup lacks is moved away' );
+		foreach ( $neighbour as $name ) {
+			$this->assertNotContains( $name, $moved, $name . ': the neighbour\'s is never moved' );
+		}
+		$log = (string) file_get_contents( $job->storage_path . '/' . $job->log_path );
+		$this->assertStringContainsString( 'Tables left where they are: they are not in the backup and not shown to be this site\'s', $log, 'reported (which ones, TableMovesTest)' );
+	}
+
 	/**
 	 * The plan of a restore: [table, temporary, final] per table.
 	 *

@@ -934,7 +934,7 @@ final class RestoreFilesPreflightStep implements Step {
 	 * @return string
 	 */
 	private static function other_disk( string $live, string $where ): string {
-		return sprintf( 'The directory %1$s is on another disk than %2$s, where the restore stages its replacement. The restore swaps directories by renaming, which cannot cross disks, so it could not put the old one back if something went wrong. Move %1$s onto the same disk as %2$s, then try again.', $live, $where );
+		return sprintf( 'The directory %1$s is on another disk than %2$s, where the restore stages its replacement. The restore swaps directories by renaming, which cannot cross disks, so it could not put the old one back if something went wrong. Move %1$s onto the same disk as %2$s, then try again. If it has to stay on its own disk, make your own copy of %1$s and restore by hand instead: the backup is a standard zip archive whose files and database (as SQL) can be restored without WP Checkpoint.', $live, $where );
 	}
 
 	/**

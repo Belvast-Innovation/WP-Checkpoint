@@ -53,7 +53,7 @@ final class Directories {
 	/**
 	 * Environment (injectable for tests).
 	 *
-	 * @var array{abspath: string, content_dir: string, document_root: string, is_web_request: bool, custom_dir: string, wordpress_dirs: array{within: array<string, string>, itself: array<string, string>}|null, after_marker: callable|null, read_marker: callable|null}
+	 * @var array{abspath: string, content_dir: string, document_root: string, is_web_request: bool, custom_dir: string, wordpress_dirs: array{within: array<string, string>, itself: array<string, string>}|null, after_marker: callable|null, read_marker: callable|null, before_mark: callable|null}
 	 */
 	private $context;
 
@@ -93,10 +93,12 @@ final class Directories {
 	 *
 	 * The wordpress_dirs entry is null here: WordPress's own directories (wordpress_dirs()) are looked up only when a custom
 	 * directory is checked. Tests pass stand-ins, an after_marker callable (called in prepare() right after the owner
-	 * marker is written: a request that dies there), and a read_marker callable (function( string $path ): string|false,
-	 * reading the owner marker in place of file_get_contents(): a marker that cannot be read).
+	 * marker is written: a request that dies there), a before_mark callable (called in prepare() right before the marker
+	 * is written, once the directory was found usable: another request writing one meanwhile), and a read_marker
+	 * callable (function( string $path ): string|false, reading the owner marker in place of file_get_contents(): a
+	 * marker that cannot be read).
 	 *
-	 * @return array{abspath: string, content_dir: string, document_root: string, is_web_request: bool, custom_dir: string, wordpress_dirs: array{within: array<string, string>, itself: array<string, string>}|null, after_marker: callable|null, read_marker: callable|null}
+	 * @return array{abspath: string, content_dir: string, document_root: string, is_web_request: bool, custom_dir: string, wordpress_dirs: array{within: array<string, string>, itself: array<string, string>}|null, after_marker: callable|null, read_marker: callable|null, before_mark: callable|null}
 	 */
 	public static function default_context(): array {
 		$document_root = '';
@@ -112,6 +114,7 @@ final class Directories {
 			'wordpress_dirs' => null,
 			'after_marker'   => null,
 			'read_marker'    => null,
+			'before_mark'    => null,
 		);
 	}
 
@@ -655,6 +658,9 @@ final class Directories {
 		if ( ! wp_mkdir_p( $dir ) || ! is_dir( $dir ) || ! wp_is_writable( $dir ) ) {
 			$this->error = sprintf( /* translators: %s: directory path */ __( 'Cannot create or write to %s.', 'wp-checkpoint' ), $dir );
 			return false;
+		}
+		if ( null !== $this->context['before_mark'] ) {
+			call_user_func( $this->context['before_mark'], $dir );
 		}
 		if ( ! $this->mark( $dir ) ) {
 			return false;

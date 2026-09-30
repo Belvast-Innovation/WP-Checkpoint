@@ -787,6 +787,49 @@ final class StorageTest extends WP_UnitTestCase {
 		$this->assertSame( $dir, $dirs->base(), 'the control: the marker back, it is this installation\'s: ' . $dirs->last_error() );
 	}
 
+	public function test_a_marker_another_request_writes_before_this_one_is_judged_by_what_can_be_read(): void {
+		$first   = new Directories( $this->cli_context( array( 'custom_dir' => $this->fake_root . '/first', 'wordpress_dirs' => $this->stand_ins() ) ) );
+		$this->assertNotSame( '', $first->base(), $first->last_error() ); // This installation's install ID is set now.
+		$install = (string) Directories::load_state()['install_id'];
+		$calls   = 0;
+		list( $failing, $reading ) = self::readers( $calls );
+		$cases = array(
+			// What the other request wrote, the reader, the outcome.
+			'this installation\'s, readable' => array( OwnerMarker::build( $install, ABSPATH ), $reading, '' ),
+			'another\'s, readable'           => array( OwnerMarker::build( 'other-install', '/srv/other/' ), $reading, 'The directory belongs to another installation.' ),
+			'one that cannot be read'        => array( 'whatever it holds', $failing, 'cannot be read (file permissions, or the host\'s open_basedir setting)' ),
+		);
+		foreach ( $cases as $name => $case ) {
+			$dir   = $this->fake_root . '/raced-' . count( $this->cleanup );
+			$this->cleanup[] = $dir;
+			$calls = 0;
+			$dirs  = new Directories(
+				$this->cli_context(
+					array(
+						'custom_dir'     => $dir,
+						'wordpress_dirs' => $this->stand_ins(),
+						'read_marker'    => $case[1],
+						'before_mark'    => static function ( string $at ) use ( $case ): void {
+							file_put_contents( $at . '/' . OwnerMarker::FILENAME, $case[0] ); // Another request, meanwhile.
+						},
+					)
+				)
+			);
+			$base = $dirs->base();
+			if ( '' === $case[2] ) {
+				// The control: taken (mark() finds it its own before writing; the check after a failed write for one
+				// written by this installation between the two is reached only in a race, not here).
+				$this->assertSame( $dir, $base, $name . ': ' . $dirs->last_error() );
+				continue;
+			}
+			$this->assertSame( '', $base, $name );
+			$this->assertStringContainsString( $case[2], $dirs->last_error(), $name );
+			$this->assertGreaterThan( 0, $calls, $name . ': the marker was read through the reader' );
+			$this->assertFalse( Directories::load_state()['clone_detected'], $name );
+			$this->assertSame( array( '.', '..', OwnerMarker::FILENAME ), scandir( $dir ), $name . ': nothing written after it' );
+		}
+	}
+
 	public function test_a_marker_the_file_system_will_not_let_be_read_warns_nothing_that_names_the_path(): void {
 		$custom = $this->fake_root . '/unreadable-marker';
 		$first  = $this->custom( $custom );

@@ -16,14 +16,88 @@
 # there is one, else phpunit.xml.dist; a -c of your own is not supported.
 #
 # Anything the suite leaves in its working directory is kept there and fails the run: a test wrote to a relative
-# path. Used by `composer test:integration`, npm run test:integration and CI. (WPCHECKPOINT_TEST_PHPUNIT names
-# another PHPUnit, for this script's own test.)
+# path. Used by `composer test:integration`, npm run test:integration and CI.
+#
+# One run at a time: runs share the tests database, and a second one's start (the core test library reinstalls the
+# tables; the leftover check removes an earlier run's) breaks the first. The lock is a flock() on
+# /tmp/wpcheckpoint-integration.lock in the container every run executes in, taken on a descriptor PHPUnit inherits:
+# the kernel holds it while the run's shell or its PHPUnit is alive, and lets it go when both are gone, however they
+# ended. The file names the run that has it (process ID and start time) and is emptied when the run ends: a name left
+# in it is a run that ended without that (killed), and is said so when the next run takes the lock. Refused, the script
+# exits with status 75. On any exit, a signal included, the lock is released and the run's directory cleaned up.
+# (WPCHECKPOINT_TEST_PHPUNIT and WPCHECKPOINT_TEST_LOCK name another PHPUnit and another lock, for this script's own
+# test.)
 PLUGIN=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 PHPUNIT=${WPCHECKPOINT_TEST_PHPUNIT:-$PLUGIN/vendor/bin/phpunit}
 CONFIG=$PLUGIN/phpunit.xml
 [ -f "$CONFIG" ] || CONFIG=$PLUGIN/phpunit.xml.dist
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/wpcheckpoint-it.XXXXXX") || exit 1
+LOCK=${WPCHECKPOINT_TEST_LOCK:-/tmp/wpcheckpoint-integration.lock}
+HELD=""
+NAMED=""
+WORK=""
+READY=""
+
+# On any exit: the run's directory (its temporary directory goes; its working directory only when empty, else the run
+# fails: a test wrote to a relative path), then the lock.
+on_exit() {
+	rc=$?
+	trap - EXIT
+	if [ -n "$WORK" ]; then
+		cd / || :
+		case "$WORK" in
+			*/wpcheckpoint-it.*) rm -rf -- "$WORK/tmp" ;;
+		esac
+		if [ -z "$READY" ]; then
+			rmdir "$WORK/cwd" "$WORK" 2>/dev/null # Never used: whatever was made of it goes quietly.
+		elif ! rmdir "$WORK/cwd" 2>/dev/null; then
+			echo "The suite left files in its working directory, $WORK/cwd (kept to be looked at): a test wrote to a relative path." >&2
+			[ "$rc" -eq 0 ] && rc=1
+		elif ! rmdir "$WORK" 2>/dev/null; then
+			echo "The run's temporary directory, $WORK/tmp, could not be removed entirely." >&2
+		fi
+	fi
+	if [ -n "$NAMED" ]; then
+		: > "$LOCK" # This run's name out; the kernel lets the lock go as the descriptor closes.
+	fi
+	exit "$rc"
+}
+trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if ! command -v flock >/dev/null 2>&1; then
+	echo "flock is needed to keep integration runs from overlapping (util-linux, or BusyBox's flock)." >&2
+	exit 1
+fi
+# Tried in a subshell first: a redirection that fails on exec ends the shell itself.
+if ( exec 9>>"$LOCK" ) 2>/dev/null; then
+	exec 9>>"$LOCK"
+	WRITABLE=1
+elif ( exec 9<"$LOCK" ) 2>/dev/null; then
+	exec 9<"$LOCK" # Another user's lock file: locked all the same, without this run's name in it.
+	WRITABLE=""
+else
+	echo "The lock file $LOCK can be neither written nor read; runs cannot be kept from overlapping." >&2
+	exit 1
+fi
+if ! flock -n 9; then
+	HOLDER=$(sed -n 1p "$LOCK" 2>/dev/null)
+	SINCE=$(sed -n 2p "$LOCK" 2>/dev/null)
+	echo "Another integration run is in progress (lock $LOCK, which names process ${HOLDER:-unknown}, started ${SINCE:-unknown}; a run that has only just started may not have written its name yet). Runs share the tests database; wait until it ends, or stop it (its PHPUnit too, if its shell was killed)." >&2
+	exit 75
+fi
+HELD=1
+if [ -s "$LOCK" ]; then
+	echo "Taking over the lock of an integration run that ended without releasing it: process $(sed -n 1p "$LOCK" 2>/dev/null), started $(sed -n 2p "$LOCK" 2>/dev/null). Its run directory (wpcheckpoint-it.*) may be left in its temporary directory." >&2
+fi
+if [ -n "$WRITABLE" ]; then
+	printf '%s\n%s\n' "$$" "$(date -u '+%Y-%m-%d %H:%M:%S UTC')" > "$LOCK"
+	NAMED=1
+fi
+
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/wpcheckpoint-it.XXXXXX") || { WORK=""; exit 1; }
 mkdir "$WORK/cwd" "$WORK/tmp" || exit 1
+READY=1
 
 # A path relative to the plugin's directory, made absolute.
 absolute() {
@@ -67,17 +141,4 @@ done
 cd "$WORK/cwd" || exit 1
 eval "set -- $ARGS"
 TMPDIR="$WORK/tmp" WPCHECKPOINT_TEST_RUN_TMP="$WORK/tmp" WPCHECKPOINT_TEST_SUITE=integration php "$PHPUNIT" -c "$CONFIG" --testsuite integration "$@"
-STATUS=$?
-cd / || exit 1
-# The run's temporary directory goes (what the suite's own leftovers were, the leftover check has already failed
-# and named); its working directory only when nothing was left in it.
-case "$WORK" in
-	*/wpcheckpoint-it.*) rm -rf -- "$WORK/tmp" ;;
-esac
-if ! rmdir "$WORK/cwd" 2>/dev/null; then
-	echo "The suite left files in its working directory, $WORK/cwd (kept to be looked at): a test wrote to a relative path." >&2
-	[ "$STATUS" -eq 0 ] && STATUS=1
-elif ! rmdir "$WORK" 2>/dev/null; then
-	echo "The run's temporary directory, $WORK/tmp, could not be removed entirely." >&2
-fi
-exit $STATUS
+exit $?
