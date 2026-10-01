@@ -519,4 +519,167 @@ final class SiteIdentityTest extends WP_UnitTestCase {
 		$this->assertSame( array(), (array) Options::get( Directories::OPTION, array() )['identity_answers'], 'the control: not recorded' );
 		$this->assertNull( $this->dirs( 's2/releases/3', $store )->identity_question(), 'nothing left to answer' );
 	}
+
+	/** The marker hash a directory holds ('' when it has none). */
+	private static function marker_hash( string $dir ): string {
+		$lines = \WPCheckpoint\Support\StorageReclaim::read_marker( $dir );
+		return null === $lines ? '' : $lines[1];
+	}
+
+	/**
+	 * Another WordPress directory with the same database (a copy, or a release nobody answered for) gets neither the
+	 * directory nor the job, and asks nothing it could answer into it without a take-over.
+	 */
+	private function assert_nothing_for_another_place( string $site, string $store, int $job, array $taken ): void {
+		mkdir( $this->root . '/' . $site . '/wp-includes', 0755, true );
+		$other = $this->dirs( $site, $store );
+		$this->assertNotContains( $other->base(), $taken, 'another place gets none of the site\'s directories' );
+		$this->assertFalse( $this->runs( $job, $site, $store ), 'nor the job' );
+	}
+
+	/**
+	 * Known limit 1, two requests at once: one loaded the state before a take-over, which then replaced the marker and
+	 * died, and saves the state after it, overwriting the hashes the take-over recorded. Worst case on the safe side:
+	 * the place that answered "same" keeps the directory it took over (the marker it wrote is its own proof), with the
+	 * original token; nothing is given to another place.
+	 */
+	public function test_a_concurrent_save_over_a_dead_take_over_gives_nothing_to_another_place(): void {
+		list( $store, $job, $token ) = $this->claimed();
+		$question                    = $this->dirs( 's2/releases/3', $store )->identity_question();
+		$this->assertNotNull( $question, 'the control: asked' );
+		$stale = Options::get( Directories::OPTION, array() ); // Another request loads the state.
+		$dying = $this->dirs( 's2/releases/3', $store, array( 'identity_step' => self::dies_at( 'taken' ) ) );
+		try {
+			$dying->answer_identity( Directories::ANSWER_SAME, $question['id'] );
+			$this->fail( 'the control: the request was meant to die' );
+		} catch ( \RuntimeException $e ) {
+			$this->assertSame( 'died', $e->getMessage() );
+		}
+		$written = self::marker_hash( $store );
+		$this->assertTrue( OwnerMarker::is_hash_of( $written, $this->root . '/s2/releases/3/' ), 'the control: the marker was replaced' );
+		Options::set( Directories::OPTION, $stale ); // ... and the other request saves what it loaded.
+		$slots = array( (string) $stale['reclaim_marker_hash'], (string) $stale['reclaim_marker_prior'] );
+		$this->assertNotContains( $written, $slots, 'the control: the hashes the take-over recorded are gone' );
+
+		$here = $this->dirs( 's2/releases/3', $store );
+		$this->assertSame( $store, $here->base(), 'where "same" was answered: ' . $here->last_error() );
+		$this->assertSame( $token, (string) $here->state()['token'], 'with the original token' );
+		$this->assertTrue( $this->runs( $job, 's2/releases/3', $store ) );
+		$this->assert_nothing_for_another_place( 's2/copy', $store, $job, array( $store ) );
+	}
+
+	/**
+	 * Known limit 2, the storage constant changed and changed back while a move waits: a "continue" from release 2
+	 * fails after keeping the marker's hash (release 1's), the constant names another directory there, then the
+	 * original one again from release 3. Worst case on the safe side: release 3 is asked (a question no take-over
+	 * caused), release 1, whose own marker the directory carries, continues with it under the token it holds now; the
+	 * original token's job stops; nothing is given to another place.
+	 */
+	public function test_the_storage_constant_changed_and_back_gives_nothing_to_another_place(): void {
+		foreach ( array( 1, 2, 3 ) as $release ) {
+			mkdir( $this->root . '/s5/releases/' . $release . '/wp-includes', 0755, true );
+		}
+		$store  = $this->root . '/s5/store';
+		$other  = $this->root . '/s5/store2';
+		$first  = $this->dirs( 's5/releases/1', $store );
+		$this->assertSame( $store, $first->base(), $first->last_error() );
+		$token  = (string) $first->state()['token'];
+		$job    = self::held( $first );
+		$marker = self::marker_hash( $store );
+		$moved  = $this->dirs(
+			's5/releases/2',
+			$store,
+			array(
+				'before_rename' => static function (): void {
+					throw new \RuntimeException( 'died' );
+				},
+			)
+		);
+		$this->assertSame( '', $moved->base(), 'the control: the move is detected' );
+		try {
+			$moved->reclaim()->reclaim( false );
+			$this->fail( 'the control: the continue was meant to die' );
+		} catch ( \RuntimeException $e ) {
+			$this->assertSame( 'died', $e->getMessage() );
+		}
+		$this->assertSame( $marker, (string) Options::get( Directories::OPTION, array() )['reclaim_marker_prior'], 'the control: the marker\'s hash kept' );
+		$this->assertSame( $marker, self::marker_hash( $store ), 'the control: the marker not replaced' );
+		$elsewhere = $this->dirs( 's5/releases/2', $other );
+		$this->assertSame( $other, $elsewhere->base(), 'the control: the constant names another directory: ' . $elsewhere->last_error() );
+
+		$back = $this->dirs( 's5/releases/3', $store );
+		$this->assertSame( '', $back->base(), 'release 3 does not get the directory' );
+		$this->assertSame( 'claimed', $back->identity_question()['kind'] ?? '', 'it is asked' );
+		$this->assertFalse( $this->runs( $job, 's5/releases/3', $store ) );
+
+		$original = $this->dirs( 's5/releases/1', $store );
+		$this->assertSame( $store, $original->base(), 'release 1, whose marker the directory carries: ' . $original->last_error() );
+		$this->assertSame( $marker, self::marker_hash( $store ), 'its own marker, unchanged' );
+		$this->assert_nothing_for_another_place( 's5/copy', $store, $job, array( $store, $other ) );
+		// What is lost on the way, on the safe side: the original token's job stops.
+		$this->assertNotSame( $token, (string) $original->state()['token'], 'under the token it holds now' );
+		$this->assertFalse( $this->runs( $job, 's5/releases/1', $store ), 'the original token\'s job stops' );
+	}
+
+	/**
+	 * Known limit 3, the default directory: a "continue" from release 2 replaces the marker of release 1's directory
+	 * and dies; the site is at release 3 before anything finished it. Nothing is asked there because release 3 is a
+	 * move of its own, detected as usual from what the state recorded (the WordPress directory as resolved, release
+	 * 2's directory with release 2's marker): it takes a directory and token of its own, release 2's detection
+	 * replaces release 1's, and the job release 1's detection set aside fails with the reason. No answer is carried:
+	 * none was recorded, and answers are kept per pair of paths. Worst case on the safe side: the jobs stop (one that
+	 * does not hold the site fails with the reason once the latest move is resolved; one that holds it is left as it
+	 * is and runs nowhere); release 1's directory is given to no place.
+	 */
+	public function test_a_newer_move_in_the_default_directory_is_detected_as_usual_and_gives_nothing(): void {
+		global $wpdb;
+		foreach ( array( 1, 2, 3 ) as $release ) {
+			mkdir( $this->root . '/s4/releases/' . $release . '/wp-includes', 0755, true );
+		}
+		$first = $this->dirs( 's4/releases/1' );
+		$one   = $first->base();
+		$this->assertNotSame( '', $one, $first->last_error() );
+		$token = (string) $first->state()['token'];
+		$job   = self::held( $first );
+		$plain = self::repo( $first )->create( 'plain' )->id;
+		$wpdb->update( Schema::jobs_table(), array( 'status' => Job::RUNNING ), array( 'id' => $plain ) );
+		$moved = $this->dirs( 's4/releases/2' );
+		$two   = $moved->base();
+		$this->assertNotSame( $one, $two, 'the control: the move is detected, with a directory of its own' );
+		$this->assertTrue( $moved->reclaim()->reclaim( false )['ok'], 'the continue replaces the marker' );
+		$this->assertTrue( OwnerMarker::is_hash_of( self::marker_hash( $one ), $this->root . '/s4/releases/2/' ), 'the control: replaced' );
+		// The request dies here; the next one is from release 3.
+		$third = $this->dirs( 's4/releases/3' );
+		$three = $third->base();
+		$state = $third->state();
+		$this->assertNotSame( '', $three, $third->last_error() );
+		$this->assertNotContains( $three, array( $one, $two ), 'a directory of its own' );
+		$this->assertNotSame( $token, (string) $state['token'] );
+		$this->assertNull( $third->identity_question(), 'nothing asked' );
+		$this->assertFalse( $this->runs( $job, 's4/releases/3' ), 'the job holding the site does not run here' );
+		$this->assertFalse( $this->runs( $plain, 's4/releases/3' ) );
+		// The latest move resolved: release 3 continues with release 2's directory.
+		$latest = $this->dirs( 's4/releases/3' );
+		$this->assertTrue( $latest->reclaim()->reclaim( false )['ok'] );
+		$latest->finish_reclaim();
+		self::repo( $this->dirs( 's4/releases/3' ) )->settle_storage();
+		$this->assertFalse( $this->runs( $job, 's4/releases/3' ), 'release 1\'s jobs do not run with the latest move\'s directory' );
+		$this->assertFalse( $this->runs( $plain, 's4/releases/3' ) );
+		$stopped = self::repo( $this->dirs( 's4/releases/3' ) )->find( $plain );
+		$this->assertSame( Job::FAILED, $stopped->status, 'the job set aside fails' );
+		$this->assertStringContainsString( 'identity changed during a deployment', (string) $stopped->last_error );
+		$this->assertSame( Job::RUNNING, self::repo( $this->dirs( 's4/releases/3' ) )->find( $job )->status, 'the job holding the site is left as it is' );
+		foreach ( array( 's4/releases/3', 's4/releases/2', 's4/releases/1' ) as $site ) {
+			$this->assertFalse( $this->runs( $job, $site ), 'and runs nowhere: ' . $site );
+		}
+		// Every directory the site took by now (each request of a release that moved took one).
+		$taken = glob( $this->root . '/content/' . Directories::DIR_PREFIX . '*', GLOB_ONLYDIR ) ?: array();
+		$this->assertContains( $one, $taken, 'the control: the list holds the site\'s directories' );
+		$this->assert_nothing_for_another_place( 's4/copy', '', $job, $taken );
+		// How release 3 was taken up: as usual, from what the state recorded; no answer carried over.
+		$this->assertSame( array(), (array) $state['identity_answers'], 'no answer recorded, none carried' );
+		$this->assertSame( $two, (string) $state['previous_path'], 'detected as usual: release 2\'s directory is the one before' );
+		$this->assertSame( rtrim( (string) realpath( $this->root . '/s4/releases/3' ), '/' ), rtrim( (string) $state['abspath_real'], '/' ), 'with the WordPress directory as resolved' );
+		$this->assertArrayHasKey( $token, (array) $state['lost_tokens'], 'release 1\'s detection replaced' );
+	}
 }
