@@ -165,6 +165,8 @@ final class Loopback {
 				self::unschedule( $id );
 				self::revoke_tokens( $id );
 				break;
+			case TickResult::CLI:
+				// Only WP-CLI goes on with it: no event, no hop (as for a finished job).
 			default:
 				self::unschedule( $id );
 				self::revoke_tokens( $id );

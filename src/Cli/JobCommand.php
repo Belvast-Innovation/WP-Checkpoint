@@ -300,7 +300,25 @@ final class JobCommand {
 		if ( null === $outcome ) {
 			WP_CLI::error( 'No such job.' );
 		}
-		WP_CLI::success( \WPCheckpoint\Rest\JobsController::cancel_message( $outcome['reason'] ) );
+		$verdict = self::cancel_verdict( $outcome['reason'] );
+		if ( $verdict['error'] ) {
+			WP_CLI::error( $verdict['message'] );
+		}
+		WP_CLI::success( $verdict['message'] );
+	}
+
+	/**
+	 * What the cancel command says for an outcome (JobActions::cancel()): refused when the restored site is in place
+	 * ("swapped", an error), otherwise what was done or requested.
+	 *
+	 * @param string $reason The outcome's reason.
+	 * @return array{error: bool, message: string}
+	 */
+	public static function cancel_verdict( string $reason ): array {
+		return array(
+			'error'   => 'swapped' === $reason,
+			'message' => \WPCheckpoint\Rest\JobsController::cancel_message( $reason ),
+		);
 	}
 
 	/**

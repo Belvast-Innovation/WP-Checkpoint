@@ -24,6 +24,11 @@ defined( 'ABSPATH' ) || exit;
 final class Uninstaller {
 
 	/**
+	 * What expect() leaves in wpdb's last_error until a query runs.
+	 */
+	const NOT_RUN = 'WP Checkpoint: the query did not run.';
+
+	/**
 	 * Option holding the user's choice (boolean, default false).
 	 */
 	const OPTION_DELETE_DATA = StoredNames::DELETE_DATA;
@@ -71,6 +76,14 @@ final class Uninstaller {
 	 */
 	public static function run(): void {
 		self::clear_transient_state();
+		$held = self::jobs_holding_the_site();
+		if ( 0 !== $held ) {
+			// A restore holds the site changed (its swap under way, or the site as it was kept for an undo): no job
+			// is cancelled, and its staging roots, old tables, job row and storage stay, whatever the user chose;
+			// the reason is logged. A count that cannot be read keeps them too.
+			error_log( sprintf( 'WP Checkpoint was uninstalled while %s; its staging next to the site, its tables and its storage directory were left in place so the site can still be put back. Reinstall WP Checkpoint to finish or undo the restore.', null === $held ? 'it could not tell whether a restore holds the site changed' : 'a restore holds the site changed' ) ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- uninstall has no screen to say it on.
+			return;
+		}
 		self::cancel_jobs();
 		self::delete_site_residue();
 
@@ -82,6 +95,68 @@ final class Uninstaller {
 		Schema::drop();
 		self::delete_options();
 		self::delete_user_meta();
+	}
+
+	/**
+	 * How many jobs hold the site changed (Job::$site_state), or null when that cannot be read. A table without
+	 * the column (made before it existed) holds none.
+	 *
+	 * @return int|null
+	 */
+	public static function jobs_holding_the_site() {
+		global $wpdb;
+		$table = $wpdb->base_prefix . Schema::JOBS_TABLE;
+		// Each answer read with its error: a query that failed answers like "nothing" in wpdb, and nothing is not
+		// evidence that no job holds the site.
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix.
+		self::expect();
+		$there = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $table ) ) );
+		if ( self::failed() ) {
+			return null;
+		}
+		if ( $table !== $there ) {
+			return 0;
+		}
+		self::expect();
+		$column = $wpdb->get_results( "SHOW COLUMNS FROM {$table} LIKE 'site_state'", ARRAY_A );
+		if ( self::failed() || ! is_array( $column ) ) {
+			return null;
+		}
+		if ( array() === $column ) {
+			return 0;
+		}
+		self::expect();
+		$count = $wpdb->get_var( "SELECT COUNT(*) FROM {$table} WHERE site_state <> 0" );
+		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		return self::failed() || null === $count ? null : (int) $count;
+	}
+
+	/**
+	 * Mark wpdb's error before a query: wpdb clears it only when it runs one, so a query refused before that (a
+	 * query filter that returns nothing, a connection not ready) keeps the mark and reads as failed, not as
+	 * "nothing".
+	 *
+	 * @return void
+	 */
+	private static function expect(): void {
+		global $wpdb;
+		$wpdb->last_error = self::NOT_RUN;
+	}
+
+	/**
+	 * Whether the last query failed or never ran (expect()). wpdb sets its error at every query it runs, and returns
+	 * "nothing" for a failure.
+	 *
+	 * @phpstan-impure
+	 * @return bool
+	 */
+	private static function failed(): bool {
+		global $wpdb;
+		$failed = '' !== (string) $wpdb->last_error;
+		if ( self::NOT_RUN === $wpdb->last_error ) {
+			$wpdb->last_error = ''; // The mark is not an error of anyone else's to find.
+		}
+		return $failed;
 	}
 
 	/**

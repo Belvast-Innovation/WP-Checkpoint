@@ -247,9 +247,12 @@ final class JobsController extends Controller {
 		if ( null === $outcome ) {
 			return $this->not_found();
 		}
+		if ( 'swapped' === $outcome['reason'] ) {
+			return $this->conflict( self::cancel_message( 'swapped' ) );
+		}
 		return $this->respond(
 			array(
-				'result'  => 'cancelled',
+				'result'  => 'requested' === $outcome['reason'] ? 'requested' : 'cancelled',
 				'cleaned' => $outcome['cleaned'],
 				'message' => self::cancel_message( $outcome['reason'] ),
 				'job'     => $this->presenter->present( $outcome['job'] ),
@@ -359,6 +362,10 @@ final class JobsController extends Controller {
 				return __( 'The job was cancelled; its temporary files are removed as soon as the current step stops.', 'wp-checkpoint' );
 			case 'unavailable':
 				return __( 'The job was cancelled. Its storage directory is not available from here, so its temporary files were not removed.', 'wp-checkpoint' );
+			case 'requested':
+				return __( 'The restore is changing the site. It puts the site back as it was, then the job is cancelled; that happens when the restore runs again in WP-CLI (wp wpcheckpoint job run, after wp wpcheckpoint job retry if it failed).', 'wp-checkpoint' );
+			case 'swapped':
+				return __( 'The restored site is in place: cancelling the job cannot change it back.', 'wp-checkpoint' );
 		}
 		return __( 'The job was cancelled.', 'wp-checkpoint' );
 	}

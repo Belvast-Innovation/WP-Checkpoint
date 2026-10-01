@@ -27,6 +27,13 @@ final class Job {
 	const CANCELLED = 'cancelled';
 
 	/**
+	 * What a job has done to the site (site_state).
+	 */
+	const SITE_UNTOUCHED = 0;
+	const SITE_CHANGING  = 1;
+	const SITE_SWAPPED   = 2;
+
+	/**
 	 * Kinds of failure (failure_kind). FAILURE_FINAL carries three meanings
 	 * for now: the job's work files are gone or not what it wrote (WorkLost);
 	 * going on would give a wrong backup (TableChanged, recorded with the
@@ -348,6 +355,26 @@ final class Job {
 	 * @var string
 	 */
 	public $takeover_mark = '';
+
+	/**
+	 * What the job has done to the site: SITE_UNTOUCHED, SITE_CHANGING (a restore's swap is under way, or being
+	 * rolled back) or SITE_SWAPPED (the restored site is in place). Written by the Runner in the statement that
+	 * writes the cursor, from the step (HoldsSite::site_state()); while it is not SITE_UNTOUCHED no rule that
+	 * reclaims, expires, purges or fails a job by time or by its storage directory touches the job, a cancel is
+	 * only requested (SITE_CHANGING) or refused (SITE_SWAPPED), and uninstalling leaves the plugin's data where it
+	 * is. No step of a job type writes it yet: the restore's swap (T042) will.
+	 *
+	 * @var int
+	 */
+	public $site_state = 0;
+
+	/**
+	 * When a cancel was requested of a job whose swap is under way (0: none): the step rolls the site back, then
+	 * the job is cancelled (Cancelled).
+	 *
+	 * @var int
+	 */
+	public $cancel_requested = 0;
 
 	/**
 	 * User who created the job.

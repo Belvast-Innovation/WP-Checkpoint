@@ -63,7 +63,6 @@ final class TestDeletionUsageTest extends TestCase {
 		'tests/integration/RunnerTest.php' => 1,
 		'tests/integration/SchemaColumnsTest.php' => 1,
 		'tests/integration/StagingResidueTest.php' => 2,
-		'tests/integration/StandaloneConfigHttpTest.php' => 1,
 		'tests/integration/StorageTest.php' => 3,
 		'tests/integration/SwapCheckTest.php' => 4,
 		'tests/integration/SymlinkAbspathTest.php' => 7,

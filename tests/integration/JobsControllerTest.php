@@ -163,6 +163,39 @@ final class JobsControllerTest extends JobTestCase {
 		}
 	}
 
+	public function test_a_cancel_of_a_job_that_holds_the_site_is_requested_or_refused(): void {
+		global $wpdb;
+		$this->register( 'held', array( new ClosureStep( 's', static function ( JobContext $ctx ): StepResult {
+			return StepResult::progress( array( 'n' => 1 ), 10 );
+		} ) ) );
+		$changing = Plugin::instance()->jobs()->create( 'held' );
+		$swapped  = Plugin::instance()->jobs()->create( 'held' );
+		$wpdb->update( Schema::jobs_table(), array( 'status' => Job::RUNNING, 'site_state' => Job::SITE_CHANGING ), array( 'id' => $changing->id ) );
+		$wpdb->update( Schema::jobs_table(), array( 'status' => Job::RUNNING, 'site_state' => Job::SITE_SWAPPED ), array( 'id' => $swapped->id ) );
+
+		// Changing the site: the request is recorded for its step, which puts the site back first; nothing else.
+		$response = $this->rest( 'POST', 'jobs/' . $changing->id . '/cancel' );
+		$this->assertSame( 200, $response->get_status() );
+		$this->assertSame( 'requested', $response->get_data()['result'] );
+		$this->assertStringContainsString( 'puts the site back as it was, then the job is cancelled', $response->get_data()['message'] );
+		$stored = Plugin::instance()->jobs()->find( $changing->id );
+		$this->assertSame( Job::RUNNING, $stored->status, 'not cancelled from here' );
+		$this->assertGreaterThan( 0, $stored->cancel_requested, 'the request is recorded' );
+
+		// Swapped: refused, the job as it was.
+		$response = $this->rest( 'POST', 'jobs/' . $swapped->id . '/cancel' );
+		$this->assertSame( 409, $response->get_status() );
+		$this->assertStringContainsString( 'cannot change it back', (string) $response->get_data()['message'] );
+		$stored = Plugin::instance()->jobs()->find( $swapped->id );
+		$this->assertSame( Job::RUNNING, $stored->status );
+		$this->assertSame( 0, $stored->cancel_requested );
+
+		// The CLI says the same: an error for the swapped site, a success for a request or a cancel.
+		$this->assertSame( array( 'error' => true, 'message' => \WPCheckpoint\Rest\JobsController::cancel_message( 'swapped' ) ), \WPCheckpoint\Cli\JobCommand::cancel_verdict( 'swapped' ) );
+		$this->assertFalse( \WPCheckpoint\Cli\JobCommand::cancel_verdict( 'requested' )['error'] );
+		$this->assertFalse( \WPCheckpoint\Cli\JobCommand::cancel_verdict( 'cleaned' )['error'], 'the control: a plain cancel is a success' );
+	}
+
 	public function test_a_failed_cancel_write_releases_the_lock_and_leaves_the_job_tickable(): void {
 		$this->register( 'plain', array( $this->counting_step( 'p', 1 ) ) );
 		$job  = Plugin::instance()->jobs()->create( 'plain' );

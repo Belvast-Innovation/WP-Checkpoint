@@ -11,5 +11,5 @@ namespace WPCheckpoint\Jobs;
  * The guarded UPDATE affected no row: another process changed the status
  * (for example cancelled a running job). Reload and decide again.
  */
-final class StaleJob extends \RuntimeException {
+class StaleJob extends \RuntimeException {
 }

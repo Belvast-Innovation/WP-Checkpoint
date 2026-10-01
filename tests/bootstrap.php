@@ -125,4 +125,11 @@ function wpcheckpoint_bootstrap_integration() {
 	if ( function_exists( 'get_temp_dir' ) && rtrim( get_temp_dir(), '/' ) !== rtrim( sys_get_temp_dir(), '/' ) ) {
 		\WPCheckpoint\Support\Deleter::allow( get_temp_dir(), false );
 	}
+
+	// A run killed with SIGKILL could not remove its probe directory; bin/test-integration.sh names that run as it
+	// takes the lock over, and the directory goes now.
+	$stale = \WPCheckpoint\Tests\Fixtures\ProbeDir::remove_stale( WP_CONTENT_DIR, (string) getenv( 'WPCHECKPOINT_TEST_STALE_RUN_ID' ) );
+	if ( '' !== $stale ) {
+		fwrite( STDERR, $stale . "\n" );
+	}
 }

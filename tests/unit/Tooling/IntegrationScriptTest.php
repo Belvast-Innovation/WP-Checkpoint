@@ -32,8 +32,10 @@ final class IntegrationScriptTest extends TestCase {
 			. 'if ( getenv( "FAKE_PID" ) ) { file_put_contents( getenv( "FAKE_PID" ), (string) getmypid() ); }' . "\n"
 			. 'if ( getenv( "FAKE_WAIT" ) ) { $t = time(); while ( ! file_exists( getenv( "FAKE_WAIT" ) ) && time() - $t < 30 ) { usleep( 20000 ); } }' . "\n"
 			. 'if ( getenv( "FAKE_TEMP" ) ) { mkdir( getenv( "TMPDIR" ) . "/wpc-left-in-temp" ); file_put_contents( getenv( "TMPDIR" ) . "/wpc-left-in-temp/x", "x" ); }' . "\n"
-			. 'file_put_contents( getenv( "FAKE_RECORD" ), json_encode( array( "cwd" => getcwd(), "argv" => array_slice( $argv, 1 ), "suite" => getenv( "WPCHECKPOINT_TEST_SUITE" ), "tmpdir" => getenv( "TMPDIR" ), "run_tmp" => getenv( "WPCHECKPOINT_TEST_RUN_TMP" ), "left_in_temp" => is_file( getenv( "TMPDIR" ) . "/wpc-left-in-temp/x" ) ) ) );' . "\n"
+			. 'file_put_contents( getenv( "FAKE_RECORD" ), json_encode( array( "cwd" => getcwd(), "argv" => array_slice( $argv, 1 ), "suite" => getenv( "WPCHECKPOINT_TEST_SUITE" ), "tmpdir" => getenv( "TMPDIR" ), "run_tmp" => getenv( "WPCHECKPOINT_TEST_RUN_TMP" ), "left_in_temp" => is_file( getenv( "TMPDIR" ) . "/wpc-left-in-temp/x" ), "run_id" => getenv( "WPCHECKPOINT_TEST_RUN_ID" ), "stale_run_id" => getenv( "WPCHECKPOINT_TEST_STALE_RUN_ID" ) ) ) );' . "\n"
 			. 'if ( getenv( "FAKE_LEAVE" ) ) { file_put_contents( "left.txt", "x" ); }' . "\n"
+			. 'if ( getenv( "FAKE_HIDE" ) ) { chmod( getenv( "FAKE_HIDE" ), 0 ); }' . "\n"
+			. 'if ( getenv( "FAKE_CHANGE" ) ) { file_put_contents( getenv( "FAKE_CHANGE" ), "changed during the run" ); }' . "\n"
 			. 'exit( (int) getenv( "FAKE_EXIT" ) );' . "\n"
 		);
 	}
@@ -133,10 +135,7 @@ final class IntegrationScriptTest extends TestCase {
 
 	public function test_a_local_phpunit_xml_is_the_configuration_when_there_is_one(): void {
 		// A copy of the script in a plugin directory of its own: nothing is written to the repository.
-		mkdir( $this->sandbox . '/plugin/bin', 0755, true );
-		copy( dirname( __DIR__, 3 ) . '/bin/test-integration.sh', $this->sandbox . '/plugin/bin/test-integration.sh' );
-		file_put_contents( $this->sandbox . '/plugin/phpunit.xml.dist', '<phpunit/>' );
-		$script = $this->sandbox . '/plugin/bin/test-integration.sh';
+		$script = $this->plugin_copy();
 		$this->assertSame( ExpectedPath::slashed( $this->sandbox, 'plugin/phpunit.xml.dist' ), $this->run_script( array(), array(), false, $script )['call']['argv'][1], 'the control: the distributed one' );
 		file_put_contents( $this->sandbox . '/plugin/phpunit.xml', '<phpunit/>' );
 		$this->assertSame( ExpectedPath::slashed( $this->sandbox, 'plugin/phpunit.xml' ), $this->run_script( array(), array(), false, $script )['call']['argv'][1] );
@@ -192,6 +191,8 @@ final class IntegrationScriptTest extends TestCase {
 		try {
 			$this->assertFileExists( $lock, 'the first run holds the lock' );
 			$this->assertSame( (string) $first[2], trim( (string) strtok( (string) file_get_contents( $lock ), "\n" ) ), 'by its process ID' );
+			$named = explode( "\n", (string) file_get_contents( $lock ) );
+			$this->assertMatchesRegularExpression( '/^[0-9a-f]{16}$/D', $named[2] ?? '', 'and its run ID, of the form' );
 
 			$second = self::finish( $this->start_script( array( 'FAKE_RECORD' => $this->sandbox . '/second.json' ) ) );
 			$this->assertSame( 75, $second['code'], $second['stderr'] );
@@ -203,6 +204,7 @@ final class IntegrationScriptTest extends TestCase {
 		}
 		$this->assertSame( 0, $done['code'], $done['stderr'] );
 		$this->assertFileExists( $this->sandbox . '/first.json', 'the control: a run that starts PHPUnit is seen to' );
+		$this->assertSame( $named[2], json_decode( (string) file_get_contents( $this->sandbox . '/first.json' ), true )['run_id'], 'the ID PHPUnit is given is the one in the lock' );
 		$this->assertSame( '', (string) file_get_contents( $lock ), 'released when the run ends: its name taken out' );
 
 		$third = $this->run_script( array() );
@@ -332,5 +334,165 @@ final class IntegrationScriptTest extends TestCase {
 
 		$run = $this->run_script( array(), array( 'FAKE_LEAVE' => '1', 'FAKE_EXIT' => '2' ) );
 		$this->assertSame( 2, $run['code'], 'a failing suite keeps its own status' );
+	}
+
+	/**
+	 * A copy of the script in a plugin's layout of its own in the sandbox, with a file under src/ and one under tests/.
+	 *
+	 * @return string The copy of the script.
+	 */
+	private function plugin_copy(): string {
+		foreach ( array( 'bin', 'src', 'tests', 'build' ) as $dir ) {
+			mkdir( $this->sandbox . '/plugin/' . $dir, 0755, true );
+		}
+		copy( dirname( __DIR__, 3 ) . '/bin/test-integration.sh', $this->sandbox . '/plugin/bin/test-integration.sh' );
+		file_put_contents( $this->sandbox . '/plugin/phpunit.xml.dist', '<phpunit/>' );
+		file_put_contents( $this->sandbox . '/plugin/src/Code.php', '<?php // the code' );
+		file_put_contents( $this->sandbox . '/plugin/tests/CodeTest.php', '<?php // its test' );
+		return $this->sandbox . '/plugin/bin/test-integration.sh';
+	}
+
+	public function test_a_run_during_which_the_code_changed_is_not_valid(): void {
+		$script = $this->plugin_copy();
+		$run    = $this->run_script( array(), array(), false, $script );
+		$this->assertSame( 0, $run['code'], 'the control: a run on code that stays as it is is valid: ' . $run['stderr'] );
+		$this->assertStringNotContainsString( 'not valid', $run['stderr'] );
+
+		$run = $this->run_script( array(), array( 'FAKE_CHANGE' => $this->sandbox . '/plugin/build/junit.xml' ), false, $script );
+		$this->assertSame( 0, $run['code'], 'what the run writes outside src/ and tests/ (its log) changes nothing: ' . $run['stderr'] );
+
+		// The standalone HTTP test's one-time key, written under tests/ while it runs (and left if the run dies there).
+		mkdir( $this->sandbox . '/plugin/tests/Fixtures/Standalone/http', 0755, true );
+		$run = $this->run_script( array(), array( 'FAKE_CHANGE' => $this->sandbox . '/plugin/tests/Fixtures/Standalone/http/probe.key' ), false, $script );
+		$this->assertSame( 0, $run['code'], 'the one-time key the suite writes changes nothing: ' . $run['stderr'] );
+
+		$run = $this->run_script( array(), array( 'FAKE_CHANGE' => $this->sandbox . '/plugin/src/Code.php' ), false, $script );
+		$this->assertSame( 70, $run['code'], 'a passing suite on code that changed under it is not valid' );
+		$this->assertStringContainsString( 'This run is not valid: files under src/ or tests/ changed while it ran', $run['stderr'] );
+		$this->assertSame( array(), $this->work_dirs(), 'and it still cleans up' );
+
+		$run = $this->run_script( array(), array( 'FAKE_CHANGE' => $this->sandbox . '/plugin/tests/NewTest.php' ), false, $script );
+		$this->assertSame( 70, $run['code'], 'a file added under tests/ is a change' );
+
+		$run = $this->run_script( array(), array( 'FAKE_CHANGE' => $this->sandbox . '/plugin/tests/CodeTest.php', 'FAKE_EXIT' => '2' ), false, $script );
+		$this->assertSame( 70, $run['code'], 'nor is a failing one: its failures may be the change\'s' );
+	}
+
+	public function test_code_that_cannot_be_read_is_not_run(): void {
+		if ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) {
+			$this->markTestSkipped( 'Root reads every file.' );
+		}
+		$script = $this->plugin_copy();
+		$run    = $this->run_script( array(), array(), false, $script );
+		$this->assertSame( 0, $run['code'], 'the control: the readable layout runs: ' . $run['stderr'] );
+		chmod( $this->sandbox . '/plugin/src/Code.php', 0 );
+		try {
+			$pipes   = array();
+			$process = proc_open( array( 'sh', $script ), array( 1 => array( 'pipe', 'w' ), 2 => array( 'pipe', 'w' ) ), $pipes, $this->sandbox, array(
+				'PATH'                      => (string) getenv( 'PATH' ),
+				'TMPDIR'                    => $this->sandbox . '/tmp',
+				'WPCHECKPOINT_TEST_PHPUNIT' => $this->sandbox . '/phpunit',
+				'FAKE_RECORD'               => $this->sandbox . '/unread.json',
+				'WPCHECKPOINT_TEST_LOCK'    => $this->sandbox . '/run.lock',
+			) );
+			$this->assertIsResource( $process );
+			stream_get_contents( $pipes[1] );
+			$stderr = (string) stream_get_contents( $pipes[2] );
+			fclose( $pipes[1] );
+			fclose( $pipes[2] );
+			$code = proc_close( $process );
+		} finally {
+			chmod( $this->sandbox . '/plugin/src/Code.php', 0644 );
+		}
+		$this->assertSame( 1, $code, $stderr );
+		$this->assertStringContainsString( 'could not all be read', $stderr );
+		$this->assertFileDoesNotExist( $this->sandbox . '/unread.json', 'PHPUnit never started' );
+		$this->assertSame( array(), $this->work_dirs() );
+
+		try {
+			$run = $this->run_script( array(), array( 'FAKE_HIDE' => $this->sandbox . '/plugin/src/Code.php' ), false, $script );
+		} finally {
+			chmod( $this->sandbox . '/plugin/src/Code.php', 0644 );
+		}
+		$this->assertSame( 70, $run['code'], 'code that cannot be read again at the end cannot be shown unchanged' );
+		$this->assertStringContainsString( 'could not be read again at its end', $run['stderr'] );
+	}
+
+	public function test_a_run_at_other_than_the_default_counts_is_called_partial(): void {
+		$run = $this->run_script( array() );
+		$this->assertSame( 0, $run['code'], $run['stderr'] );
+		$this->assertStringContainsString( 'Integration run summary: default counts.', $run['stderr'], 'the control: the summary is there' );
+		$this->assertStringNotContainsString( 'PARTIAL', $run['stderr'] );
+
+		$run = $this->run_script( array(), array( 'WPCHECKPOINT_CLONE_SEQUENCES' => '300' ) );
+		$this->assertStringContainsString( 'Integration run summary: default counts.', $run['stderr'], 'the default, set explicitly' );
+
+		foreach ( array( array( 'WPCHECKPOINT_CLONE_SEQUENCES', '3000', '300' ), array( 'WPCHECKPOINT_CLONE_SEQUENCES', '50', '300' ), array( 'WPCHECKPOINT_CLONE_SEQUENCES_SEED', '7', '1' ) ) as list( $name, $value, $default ) ) {
+			$run = $this->run_script( array(), array( $name => $value ) );
+			$this->assertSame( 0, $run['code'], 'the status is the suite\'s' );
+			$this->assertStringContainsString( 'Integration run summary: PARTIAL run (' . $name . '=' . $value . ' instead of ' . $default . ')', $run['stderr'], 'larger or smaller' );
+			$this->assertStringNotContainsString( 'summary: default counts', $run['stderr'] );
+		}
+	}
+
+	/**
+	 * The generator settings the integration tests read, with their defaults: getenv( 'NAME' ) ?: N.
+	 *
+	 * @return array<string, string>
+	 */
+	private static function generator_settings( string $source ): array {
+		preg_match_all( "/getenv\\(\\s*'(WPCHECKPOINT_[A-Z0-9_]+)'\\s*\\)\\s*\\?:\\s*(\\d+)/", $source, $found, PREG_SET_ORDER );
+		$settings = array();
+		foreach ( $found as $match ) {
+			$settings[ $match[1] ][] = $match[2];
+		}
+		return array_map(
+			static function ( array $defaults ): string {
+				return implode( ' or ', array_unique( $defaults ) ); // Two defaults for one name never match the script's one.
+			},
+			$settings
+		);
+	}
+
+	public function test_the_script_knows_every_generator_setting_and_its_default(): void {
+		$this->assertSame( array( 'WPCHECKPOINT_X' => '12' ), self::generator_settings( "\$n = (int) ( getenv( 'WPCHECKPOINT_X' ) ?: 12 );" ), 'the control: the scan finds the form' );
+		$source = '';
+		foreach ( glob( dirname( __DIR__, 2 ) . '/integration/*.php' ) ?: array() as $file ) {
+			$source .= (string) file_get_contents( $file );
+		}
+		$tests = self::generator_settings( $source );
+		$this->assertArrayHasKey( 'WPCHECKPOINT_CLONE_SEQUENCES', $tests, 'the control: the scan sees the tests' );
+		$this->assertSame( 1, preg_match( '/^COVERAGE="([^"]*)"$/m', (string) file_get_contents( dirname( __DIR__, 3 ) . '/bin/test-integration.sh' ), $line ) );
+		$script = array();
+		foreach ( preg_split( '/\s+/', trim( $line[1] ) ) ?: array() as $setting ) {
+			list( $name, $default ) = explode( '=', $setting, 2 );
+			$script[ $name ]        = $default;
+		}
+		ksort( $tests );
+		ksort( $script );
+		$this->assertSame( $tests, $script, 'every setting the tests read, with the same default' );
+	}
+
+	public function test_taking_over_a_killed_runs_lock_names_its_probe_directory_for_removal(): void {
+		$lock = $this->sandbox . '/run.lock';
+		file_put_contents( $lock, "1\n2026-01-01 00:00:00 UTC\n0123456789abcdef\n" );
+		$run = $this->run_script( array() );
+		$this->assertSame( 0, $run['code'], $run['stderr'] );
+		$this->assertSame( '0123456789abcdef', $run['call']['stale_run_id'], 'the killed run\'s ID, for its probe directory' );
+		$this->assertStringContainsString( 'Its probe directory (wp-content/wpcheckpoint-it-probe.0123456789abcdef) is removed as this run starts.', $run['stderr'] );
+		$this->assertMatchesRegularExpression( '/^[0-9a-f]{16}$/D', (string) $run['call']['run_id'], 'its own ID, of the form' );
+		$this->assertNotSame( '0123456789abcdef', $run['call']['run_id'] );
+
+		foreach ( array( "0123456789ABCDEF", "../3456789abcdef", "0123456789abcde", "0123456789abcdef0" ) as $bad ) {
+			file_put_contents( $lock, "1\n2026-01-01 00:00:00 UTC\n" . $bad . "\n" );
+			$run = $this->run_script( array() );
+			$this->assertSame( 0, $run['code'], $run['stderr'] );
+			$this->assertSame( '', $run['call']['stale_run_id'], 'not of the form: no directory named: ' . $bad );
+			$this->assertStringContainsString( 'Taking over the lock', $run['stderr'], 'the control: the takeover is seen' );
+			$this->assertStringNotContainsString( 'probe directory', $run['stderr'] );
+		}
+
+		$run = $this->run_script( array() );
+		$this->assertSame( '', $run['call']['stale_run_id'], 'a lock released as it should names no one' );
 	}
 }

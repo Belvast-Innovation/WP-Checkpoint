@@ -347,9 +347,10 @@ final class JobActions {
 	 * proxy's) cannot be seen from here, so the floor applies only where
 	 * PHP's own limit is set; without one, the tick runs its first unit as
 	 * described. The count (Job::$cron_deferrals) is of cron requests in a
-	 * row that did not reach the Runner for the job: any driver that hands
-	 * the job to the Runner sets it back to 0 (the forced tick too, whatever
-	 * it then does), and so do a retry and an answer.
+	 * row that did not reach the Runner for the job: any driver whose tick
+	 * the Runner takes up sets it back to 0 (the forced tick too, whatever it
+	 * then does), and so do a retry and an answer; a tick the Runner stops at
+	 * a step only WP-CLI runs writes nothing, the count included.
 	 * Each deferral and each forced tick is logged. Like web_tick(), nothing
 	 * is sent to the client.
 	 *
@@ -624,8 +625,11 @@ final class JobActions {
 	 * @param int $id Job id.
 	 * @return array{job: Job, cleaned: bool, reason: string}|null Null when the job does not exist. reason: "cleaned",
 	 *                                                            "holder" (a driver holds the lock and cleans up when it
-	 *                                                            stops) or "unavailable" (the storage directory cannot be
-	 *                                                            used from here; nothing will clean up).
+	 *                                                            stops), "unavailable" (the storage directory cannot be
+	 *                                                            used from here; nothing will clean up), "requested"
+	 *                                                            (a restore's swap is under way: it is rolled back, then
+	 *                                                            the job is cancelled) or "swapped" (refused: the restored
+	 *                                                            site is in place; the job is not cancelled).
 	 * @throws InvalidTransition When the job is already finished.
 	 * @throws StaleJob When the job changed meanwhile.
 	 */
@@ -633,6 +637,23 @@ final class JobActions {
 		$job = $this->repository->find( $id );
 		if ( null === $job ) {
 			return null;
+		}
+		if ( Job::SITE_CHANGING === $job->site_state ) {
+			// Its step rolls the site back first (in WP-CLI), then cancels it; nothing is taken from it here.
+			$this->repository->request_cancel( $job );
+			return array(
+				'job'     => $job,
+				'cleaned' => false,
+				'reason'  => 'requested',
+			);
+		}
+		if ( Job::SITE_SWAPPED === $job->site_state ) {
+			// Refused: a cancel cannot change the restored site back.
+			return array(
+				'job'     => $job,
+				'cleaned' => false,
+				'reason'  => 'swapped',
+			);
 		}
 		Loopback::unschedule( $id );
 		Loopback::revoke_tokens( $id );

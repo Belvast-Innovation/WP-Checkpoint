@@ -77,9 +77,9 @@ final class Notices {
 			$reclaim = $this->directories->reclaim();
 			$verdict = $reclaim->classify();
 			if ( CloneClassifier::CLONE === $verdict['verdict'] ) {
-				$message = __( 'This site looks like a copy: the WordPress directory changed and the previous one still exists. WP Checkpoint left the previous backup directory untouched and now uses a new one.', 'wp-checkpoint' );
+				$message = __( 'This site looks like a copy: the WordPress directory changed and the previous one still exists, or cannot be looked at from here. WP Checkpoint left the previous backup directory untouched and now uses a new one. Jobs started before (a restore in progress among them) are then the original site\'s, and are not run here.', 'wp-checkpoint' );
 			} else {
-				$message = __( 'The WordPress directory changed (a deployment or a move?). WP Checkpoint left the previous backup directory untouched and now uses a new one. If this is the same site, you can continue with the original directory.', 'wp-checkpoint' );
+				$message = __( 'The WordPress directory changed (a deployment or a move?). WP Checkpoint left the previous backup directory untouched and now uses a new one. If this is the same site, continue with the original directory: keeping the new one makes the jobs started before (a restore in progress among them) the original site\'s, and they are not run here.', 'wp-checkpoint' );
 			}
 			$notices['clone_detected'] = array(
 				'type'        => 'warning',

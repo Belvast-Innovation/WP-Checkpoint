@@ -58,17 +58,23 @@ final class CloneClassifier {
 	 * @param string        $current_abspath  ABSPATH of this request.
 	 * @param callable|null $is_dir           Directory existence probe (defaults to is_dir()).
 	 * @param callable|null $realpath         Path resolver (defaults to realpath()).
-	 * @return array{verdict: string, recommendation: string, previous_exists: bool, previous_is_wordpress: bool, siblings: bool, release_layout: bool, deploy_root: string}
+	 * @param callable|null $gone             Whether a path is positively gone (defaults to Paths::positively_gone()).
+	 * @return array{verdict: string, recommendation: string, previous_exists: bool, previous_seen: bool, previous_is_wordpress: bool, siblings: bool, release_layout: bool, deploy_root: string}
 	 */
-	public static function classify( string $previous_abspath, string $current_abspath, $is_dir = null, $realpath = null ): array {
-		$is_dir   = is_callable( $is_dir ) ? $is_dir : 'is_dir';
-		$realpath = is_callable( $realpath ) ? $realpath : 'realpath';
+	public static function classify( string $previous_abspath, string $current_abspath, $is_dir = null, $realpath = null, $gone = null ): array {
+		// Silent probes: under open_basedir, which a copy's host may well have, a warning would name the path.
+		$is_dir   = is_callable( $is_dir ) ? $is_dir : array( self::class, 'quiet_is_dir' );
+		$realpath = is_callable( $realpath ) ? $realpath : array( Paths::class, 'real' );
+		$gone     = is_callable( $gone ) ? $gone : array( Paths::class, 'positively_gone' );
 
 		$previous = rtrim( Paths::normalize( $previous_abspath ), '/' );
 		$current  = rtrim( Paths::normalize( $current_abspath ), '/' );
 
-		$previous_exists = '' !== $previous && (bool) call_user_func( $is_dir, $previous );
-		$previous_is_wp  = $previous_exists && (bool) call_user_func( $is_dir, $previous . '/wp-includes' );
+		// Gone, or not WordPress, only on evidence: a directory this request cannot look at (another account's home,
+		// open_basedir) may well be the original, alive; taking it for gone would recommend a copy to take its place.
+		$previous_seen   = '' !== $previous && (bool) call_user_func( $is_dir, $previous );
+		$previous_exists = '' !== $previous && ( $previous_seen || ! (bool) call_user_func( $gone, $previous ) );
+		$previous_is_wp  = $previous_exists && ( (bool) call_user_func( $is_dir, $previous . '/wp-includes' ) || ! (bool) call_user_func( $gone, $previous . '/wp-includes' ) );
 
 		$siblings       = false;
 		$release_layout = false;
@@ -98,11 +104,22 @@ final class CloneClassifier {
 			'verdict'               => $verdict,
 			'recommendation'        => $recommendation,
 			'previous_exists'       => $previous_exists,
+			'previous_seen'         => $previous_seen,
 			'previous_is_wordpress' => $previous_is_wp,
 			'siblings'              => $siblings,
 			'release_layout'        => $release_layout,
 			'deploy_root'           => $deploy_root,
 		);
+	}
+
+	/**
+	 * The is_dir() of a path, without a warning (open_basedir would name the path in the error log).
+	 *
+	 * @param string $path Path.
+	 * @return bool
+	 */
+	public static function quiet_is_dir( string $path ): bool {
+		return @is_dir( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a warning would name the path.
 	}
 
 	/**
@@ -170,7 +187,7 @@ final class CloneClassifier {
 	 * @return string Normalised parent, empty when it cannot be resolved.
 	 */
 	public static function parent( string $path, $realpath = null ): string {
-		$realpath = is_callable( $realpath ) ? $realpath : 'realpath';
+		$realpath = is_callable( $realpath ) ? $realpath : array( Paths::class, 'real' );
 		$parent   = dirname( $path );
 		if ( '' === $parent || '.' === $parent || $parent === $path ) {
 			return '';
