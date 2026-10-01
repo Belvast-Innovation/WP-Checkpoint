@@ -76,9 +76,9 @@ final class StorageReclaim {
 	}
 
 	/**
-	 * Record, before the marker is rewritten, the hash it is about to hold.
+	 * Record, before the marker is rewritten, the hash it is about to hold and the one it holds (read under the lock).
 	 *
-	 * @param callable $callback Receives the hash.
+	 * @param callable $callback Receives the hash to be written and the marker's current one.
 	 * @return void
 	 */
 	public function on_rewrite( callable $callback ): void {
@@ -177,10 +177,12 @@ final class StorageReclaim {
 	/**
 	 * Manual take-over after the administrator confirmed.
 	 *
-	 * @param bool $trust_root Remember the deployment root for automatic take-overs.
+	 * @param bool   $trust_root Remember the deployment root for automatic take-overs.
+	 * @param string $answered   A marker hash the administrator answered for (Directories::answer_identity(): this
+	 *                           installation's own take-over that died, when the site moved again since), or ''.
 	 * @return array{ok: bool, message: string, trusted_root: string}
 	 */
-	public function reclaim( bool $trust_root ): array {
+	public function reclaim( bool $trust_root, string $answered = '' ): array {
 		$checks = $this->prechecks();
 		if ( ! $checks['ok'] ) {
 			return array(
@@ -190,7 +192,7 @@ final class StorageReclaim {
 			);
 		}
 		$dir    = $this->target();
-		$result = $this->rewrite_marker( $dir );
+		$result = $this->rewrite_marker( $dir, $answered );
 		if ( ! $result['ok'] ) {
 			return array(
 				'ok'           => false,
@@ -356,10 +358,11 @@ final class StorageReclaim {
 	 * Rewrite the owner marker with the current ABSPATH, under a lock and
 	 * only while the marker still reads exactly as recorded.
 	 *
-	 * @param string $dir Directory.
+	 * @param string $dir      Directory.
+	 * @param string $answered A marker hash the administrator answered for, or ''.
 	 * @return array{ok: bool, message: string}
 	 */
-	private function rewrite_marker( string $dir ): array {
+	private function rewrite_marker( string $dir, string $answered = '' ): array {
 		$secret = $this->acquire_lock( $dir );
 		if ( '' === $secret ) {
 			return array(
@@ -379,8 +382,9 @@ final class StorageReclaim {
 			// through a link may resolve elsewhere by now, a deployment's "current" pointed at a new release), or, for
 			// state written before that was recorded, a hash of the ABSPATH recorded then, either form. An attempt
 			// that died after rewriting the marker is finished by the next request (Directories::resolve()).
-			$recorded = isset( $this->state['previous_marker_hash'] ) ? (string) $this->state['previous_marker_hash'] : '';
-			if ( ! ( '' !== $recorded && hash_equals( $recorded, $lines[1] ) ) && ! OwnerMarker::is_hash_of( $lines[1], (string) $this->state['previous_abspath'] ) ) {
+			$recorded    = isset( $this->state['previous_marker_hash'] ) ? (string) $this->state['previous_marker_hash'] : '';
+			$as_answered = '' !== $answered && hash_equals( $answered, $lines[1] ); // The administrator said it is this site's.
+			if ( ! $as_answered && ! ( '' !== $recorded && hash_equals( $recorded, $lines[1] ) ) && ! OwnerMarker::is_hash_of( $lines[1], (string) $this->state['previous_abspath'] ) ) {
 				return array(
 					'ok'      => false,
 					'message' => __( 'Another copy of this site has already claimed the directory since it was recorded here.', 'wp-checkpoint' ),
@@ -393,17 +397,20 @@ final class StorageReclaim {
 				);
 			}
 
+			if ( null !== $this->on_rewrite ) {
+				call_user_func( $this->on_rewrite, OwnerMarker::hash_path( (string) $this->context['abspath'] ), $lines[1] );
+			}
+
 			if ( null !== $this->before_rename ) {
 				call_user_func( $this->before_rename, $dir );
 			}
-
-			if ( null !== $this->on_rewrite ) {
-				call_user_func( $this->on_rewrite, OwnerMarker::hash_path( (string) $this->context['abspath'] ) );
-			}
 			$marker  = $dir . DIRECTORY_SEPARATOR . OwnerMarker::FILENAME;
 			$temp    = $marker . '.' . bin2hex( random_bytes( 4 ) ) . '.tmp';
-			$written = false !== file_put_contents( $temp, OwnerMarker::build( (string) $this->state['install_id'], (string) $this->context['abspath'] ), LOCK_EX ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- plugin-owned directory.
+			$written = false !== @file_put_contents( $temp, OwnerMarker::build( (string) $this->state['install_id'], (string) $this->context['abspath'] ), LOCK_EX ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents,WordPress.PHP.NoSilencedErrors.Discouraged -- plugin-owned directory; a warning would name the path (the failure is answered below).
 			if ( ! $written ) {
+				if ( @is_file( $temp ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a warning would name the path.
+					wp_delete_file( $temp ); // What a write that failed part way (a full disk) left.
+				}
 				return array(
 					'ok'      => false,
 					'message' => __( 'The owner marker could not be rewritten.', 'wp-checkpoint' ),
@@ -417,7 +424,7 @@ final class StorageReclaim {
 					'message' => __( 'The reclaim lock was taken over by another process.', 'wp-checkpoint' ),
 				);
 			}
-			$ok = rename( $temp, $marker ); // phpcs:ignore WordPress.WP.AlternativeFunctions.rename_rename -- atomic replace of a plugin-owned file.
+			$ok = @rename( $temp, $marker ); // phpcs:ignore WordPress.WP.AlternativeFunctions.rename_rename,WordPress.PHP.NoSilencedErrors.Discouraged -- atomic replace of a plugin-owned file; a warning would name the path (the failure is answered below).
 			if ( is_file( $temp ) ) {
 				wp_delete_file( $temp );
 			}

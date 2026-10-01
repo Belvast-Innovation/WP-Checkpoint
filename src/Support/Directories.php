@@ -28,6 +28,17 @@ final class Directories {
 	 */
 	const PAST_TOKENS = 10;
 
+	/**
+	 * How many answers, lost tokens and moves the state keeps (the oldest go first).
+	 */
+	const KEPT_RECORDS = 20;
+
+	/*
+	 * The administrator's answers to identity_question().
+	 */
+	const ANSWER_COPY = 'copy';
+	const ANSWER_SAME = 'same';
+
 	const SOURCE_OUTSIDE = 'outside';
 	const SOURCE_CONTENT = 'content';
 	const SOURCE_CUSTOM  = 'custom';
@@ -53,7 +64,7 @@ final class Directories {
 	/**
 	 * Environment (injectable for tests).
 	 *
-	 * @var array{abspath: string, content_dir: string, document_root: string, is_web_request: bool, custom_dir: string, wordpress_dirs: array{within: array<string, string>, itself: array<string, string>}|null, after_marker: callable|null, read_marker: callable|null, before_mark: callable|null}
+	 * @var array{abspath: string, content_dir: string, document_root: string, is_web_request: bool, custom_dir: string, wordpress_dirs: array{within: array<string, string>, itself: array<string, string>}|null, after_marker: callable|null, read_marker: callable|null, before_mark: callable|null, before_rename: callable|null, identity_step: callable|null}
 	 */
 	private $context;
 
@@ -100,6 +111,21 @@ final class Directories {
 	private $elsewhere = false;
 
 	/**
+	 * What the administrator recorded for this request's pair of paths, when they cannot be told apart otherwise:
+	 * true for "the same site", false for "a copy or a move", null when nothing was recorded (identity_answer()).
+	 *
+	 * @var bool|null
+	 */
+	private $decided = null;
+
+	/**
+	 * The question this request could not answer itself (identity_question()), or null.
+	 *
+	 * @var array{kind: string, id: string, recorded: string, here: string, hash: string}|null
+	 */
+	private $question = null;
+
+	/**
 	 * Constructor.
 	 *
 	 * @param array<string, mixed> $context Overrides for default_context().
@@ -115,11 +141,14 @@ final class Directories {
 	 * The wordpress_dirs entry is null here: WordPress's own directories (wordpress_dirs()) are looked up only when a custom
 	 * directory is checked. Tests pass stand-ins, an after_marker callable (called in prepare() right after the owner
 	 * marker is written: a request that dies there), a before_mark callable (called in prepare() right before the marker
-	 * is written, once the directory was found usable: another request writing one meanwhile), and a read_marker
+	 * is written, once the directory was found usable: another request writing one meanwhile), a read_marker
 	 * callable (function( string $path ): string|false, reading the owner marker in place of file_get_contents(): a
-	 * marker that cannot be read).
+	 * marker that cannot be read), a before_rename callable (StorageReclaim::on_before_rename(), called in a
+	 * take-over after the hash it is about to write was recorded and before the marker is replaced), and an
+	 * identity_step callable (function( string $step ): void, called in answer_identity() between its writes: "taken",
+	 * "recorded", "acknowledged"; a request that dies there).
 	 *
-	 * @return array{abspath: string, content_dir: string, document_root: string, is_web_request: bool, custom_dir: string, wordpress_dirs: array{within: array<string, string>, itself: array<string, string>}|null, after_marker: callable|null, read_marker: callable|null, before_mark: callable|null}
+	 * @return array{abspath: string, content_dir: string, document_root: string, is_web_request: bool, custom_dir: string, wordpress_dirs: array{within: array<string, string>, itself: array<string, string>}|null, after_marker: callable|null, read_marker: callable|null, before_mark: callable|null, before_rename: callable|null, identity_step: callable|null}
 	 */
 	public static function default_context(): array {
 		$document_root = '';
@@ -136,6 +165,8 @@ final class Directories {
 			'after_marker'   => null,
 			'read_marker'    => null,
 			'before_mark'    => null,
+			'before_rename'  => null,
+			'identity_step'  => null,
 		);
 	}
 
@@ -211,7 +242,11 @@ final class Directories {
 				'previous_marker_hash'  => '', // The same, as it was when a clone was detected (StorageReclaim).
 				'reclaim_tokens'        => array(), // Set aside by the detection "continue with the original directory" undoes.
 				'reclaim_marker_hash'   => '', // The hash a "continue" was about to write into the marker (StorageReclaim).
+				'reclaim_marker_prior'  => '', // The one recorded before it, while a later attempt may not have written its own.
 				'detected_real'         => '', // Where ABSPATH resolved to when the clone was detected (note_detection()).
+				'identity_answers'      => array(), // The administrator's answers, by pair of paths (answer_identity()).
+				'lost_tokens'           => array(), // Set aside by a detection a newer one replaced, by token: when (note_detection()).
+				'moves'                 => array(), // The latest detections, from where to where ABSPATH resolved (note_detection()).
 				'trusted_deploy_root'   => '',
 				'auto_reclaimed'        => array(),
 				'past_tokens'           => array(),
@@ -324,6 +359,7 @@ final class Directories {
 		$this->state['previous_marker_hash']  = '';
 		$this->state['reclaim_tokens']        = array(); // Another installation's, as the administrator says: they stay copied.
 		$this->state['reclaim_marker_hash']   = '';
+		$this->state['reclaim_marker_prior']  = '';
 		$this->state['detected_real']         = '';
 		$this->save_state();
 	}
@@ -350,6 +386,9 @@ final class Directories {
 		}
 		$same = self::same_place( $written, (string) $this->state['abspath_real'], (string) $this->context['abspath'] );
 		if ( null === $same ) {
+			$same = $this->decided; // What the administrator recorded for this pair of paths, if anything.
+		}
+		if ( null === $same ) {
 			return false;
 		}
 		if ( ! $same ) {
@@ -374,9 +413,21 @@ final class Directories {
 		// sets aside only what this request did: an earlier detection's tokens, never acknowledged, stay copied. The
 		// same means the same directory, detected from the same place: a copy of the database asking from elsewhere
 		// starts its own, without the tokens the original's detection set aside.
-		$here                                 = OwnerMarker::real( (string) $this->context['abspath'] );
-		$here                                 = '' === $here ? rtrim( Paths::normalize( (string) $this->context['abspath'] ), '/' ) : rtrim( Paths::normalize( $here ), '/' );
-		$again                                = ! empty( $this->state['clone_detected'] ) && Paths::same( (string) $this->state['previous_path'], $dir, Paths::is_windows() ) && Paths::same( (string) $this->state['detected_real'], $here, Paths::is_windows() );
+		$here  = OwnerMarker::real( (string) $this->context['abspath'] );
+		$here  = '' === $here ? rtrim( Paths::normalize( (string) $this->context['abspath'] ), '/' ) : rtrim( Paths::normalize( $here ), '/' );
+		$again = ! empty( $this->state['clone_detected'] ) && Paths::same( (string) $this->state['previous_path'], $dir, Paths::is_windows() ) && Paths::same( (string) $this->state['detected_real'], $here, Paths::is_windows() );
+		if ( ! $again ) {
+			// A newer detection replaces one the administrator never answered: what that one set aside is not given
+			// back by any "continue" any more. Its jobs are failed with that reason (JobRepository::settle_storage()).
+			$lost = ! empty( $this->state['clone_detected'] ) ? array_diff( array_map( 'strval', (array) $this->state['reclaim_tokens'] ), $this->copied_now, array( (string) $this->state['token'] ) ) : array();
+			foreach ( $lost as $token ) {
+				$this->state['lost_tokens'][ $token ] = time();
+			}
+			$this->state['lost_tokens'] = array_slice( (array) $this->state['lost_tokens'], -self::KEPT_RECORDS, null, true );
+			$from                       = '' !== (string) $this->state['abspath_real'] ? (string) $this->state['abspath_real'] : (string) $this->state['abspath'];
+			$this->state['moves'][]     = array( rtrim( Paths::normalize( $from ), '/' ), $here );
+			$this->state['moves']       = array_slice( (array) $this->state['moves'], -self::KEPT_RECORDS );
+		}
 		$this->state['reclaim_tokens']        = array_values( array_unique( array_merge( $again ? array_map( 'strval', (array) $this->state['reclaim_tokens'] ) : array(), $this->copied_now ) ) );
 		$this->state['detected_real']         = $here;
 		$this->state['clone_detected']        = true;
@@ -432,6 +483,254 @@ final class Directories {
 	}
 
 	/**
+	 * The question for this request's pair of paths when they cannot be told apart: the ABSPATH the state was written
+	 * under and this request's, each as spelled and as resolved ('' when it does not resolve).
+	 *
+	 * @return array{kind: string, id: string, recorded: string, here: string, hash: string}
+	 */
+	private function paths_question(): array {
+		$recorded = (string) $this->state['abspath'];
+		$here     = (string) $this->context['abspath'];
+		return array(
+			'kind'     => 'paths',
+			'id'       => hash( 'sha256', implode( "\0", array( 'paths', $recorded, (string) $this->state['abspath_real'], $here, OwnerMarker::real( $here ) ) ) ),
+			'recorded' => $recorded,
+			'here'     => $here,
+			'hash'     => '',
+		);
+	}
+
+	/**
+	 * The question when continuing with the original directory cannot be decided: the take-over a request of this
+	 * installation started (its hash recorded before it rewrote the marker) died, and ABSPATH moved again before any
+	 * request finished it. The marker then holds a hash of neither this ABSPATH nor the one recorded: as a copy of the
+	 * database, made in between, would see it. Null when that is not the case.
+	 *
+	 * @return array{kind: string, id: string, recorded: string, here: string, hash: string}|null
+	 */
+	private function claimed_question() {
+		$previous = (string) $this->state['previous_path'];
+		if ( empty( $this->state['clone_detected'] ) || '' === $previous ) {
+			return null;
+		}
+		$lines = StorageReclaim::read_marker( $previous );
+		if ( null === $lines || ! hash_equals( (string) $this->state['install_id'], $lines[0] ) ) {
+			return null;
+		}
+		// The hash recorded by the take-over that died, or by the one before it when a later attempt recorded its own
+		// and failed or died before replacing the marker.
+		if ( ! $this->recorded_by_take_over( $lines[1] ) ) {
+			return null;
+		}
+		$recorded = $lines[1];
+		$here     = (string) $this->context['abspath'];
+		if ( OwnerMarker::is_hash_of( $lines[1], $here ) || hash_equals( (string) $this->state['previous_marker_hash'], $lines[1] ) || OwnerMarker::is_hash_of( $lines[1], (string) $this->state['previous_abspath'] ) ) {
+			return null; // The marker reads as recorded, or as this ABSPATH's: nothing to ask.
+		}
+		return array(
+			'kind'     => 'claimed',
+			'id'       => hash( 'sha256', implode( "\0", array( 'claimed', $recorded, $here, OwnerMarker::real( $here ) ) ) ),
+			'recorded' => (string) $this->state['previous_abspath'],
+			'here'     => $here,
+			'hash'     => $recorded,
+		);
+	}
+
+	/**
+	 * What the administrator answered for a question: true for "the same site", false for "a copy or a move", null
+	 * when not answered.
+	 *
+	 * @param string $id The question's id.
+	 * @return bool|null
+	 */
+	private function identity_answer( string $id ) {
+		$answers = (array) $this->state['identity_answers'];
+		if ( ! isset( $answers[ $id ] ) || ! is_array( $answers[ $id ] ) ) {
+			return null;
+		}
+		$answer = $answers[ $id ]['answer'] ?? '';
+		return self::ANSWER_SAME === $answer ? true : ( self::ANSWER_COPY === $answer ? false : null );
+	}
+
+	/**
+	 * The question this installation cannot answer by itself in this request, for the administrator: whether this is
+	 * the site that chose the storage directory (kind "paths": the two ABSPATHs cannot be compared), or whether to
+	 * continue with the original directory after a take-over died and the site moved again (kind "claimed"). Null
+	 * when there is none, or it was answered for this pair of paths.
+	 *
+	 * @return array{kind: string, id: string, recorded: string, here: string, hash: string}|null
+	 */
+	public function identity_question() {
+		$this->base();
+		if ( null !== $this->question ) {
+			return $this->question;
+		}
+		$claimed = $this->claimed_question();
+		return null !== $claimed && null === $this->identity_answer( $claimed['id'] ) ? $claimed : null;
+	}
+
+	/**
+	 * Record the administrator's answer to the current question (identity_question()), with the time, and act on it.
+	 * Kind "paths": "copy" sets the tokens held aside as another installation's and takes a new token and directory;
+	 * "same" keeps them this installation's. Kind "claimed": "same" finishes the take-over, "copy" keeps the new
+	 * directory. The same pair of paths is not asked about again.
+	 *
+	 * @param string $answer      ANSWER_COPY or ANSWER_SAME.
+	 * @param string $question_id The id of the question the answer is for (identity_question()): an answer to a
+	 *                            question this request would not ask is refused.
+	 * @return array{ok: bool, message: string}
+	 */
+	public function answer_identity( string $answer, string $question_id ): array {
+		if ( self::ANSWER_COPY !== $answer && self::ANSWER_SAME !== $answer ) {
+			return array(
+				'ok'      => false,
+				'message' => __( 'The answer must be "copy" or "same".', 'wp-checkpoint' ),
+			);
+		}
+		$question = $this->identity_question();
+		if ( null === $question ) {
+			return array(
+				'ok'      => false,
+				'message' => __( 'There is no question about this site\'s identity to answer.', 'wp-checkpoint' ),
+			);
+		}
+		if ( ! hash_equals( $question['id'], $question_id ) ) {
+			// The answer is for the question that was shown, not for whatever this request would ask.
+			return array(
+				'ok'      => false,
+				'message' => __( 'The question changed since it was shown; reload it and answer again.', 'wp-checkpoint' ),
+			);
+		}
+
+		if ( 'claimed' === $question['kind'] && self::ANSWER_SAME === $answer ) {
+			// Recorded only once the take-over is done: "answered, not taken over" would leave the question gone
+			// and a "continue" that refuses the marker.
+			$result = $this->reclaimer()->reclaim( false, (string) $question['hash'] );
+			if ( ! $result['ok'] ) {
+				return array(
+					'ok'      => false,
+					'message' => $result['message'],
+				);
+			}
+			// Between the marker and the state: a request that dies here leaves the answer recorded and the marker
+			// this ABSPATH's, with the hash recorded before it was written; the next request finishes (resolve()).
+			$this->identity_step( 'taken' );
+			$this->record_answer( $question, $answer );
+			$this->identity_step( 'recorded' );
+			$this->finish_reclaim( $result['trusted_root'] );
+			$this->log_answer( $question, $answer );
+			return array(
+				'ok'      => true,
+				'message' => $result['message'],
+			);
+		}
+		if ( 'claimed' === $question['kind'] ) {
+			// Acknowledged first: a request that dies before the answer is recorded leaves no question behind.
+			$this->acknowledge_clone();
+			$this->identity_step( 'acknowledged' );
+			$this->record_answer( $question, $answer );
+			$this->log_answer( $question, $answer );
+			return array(
+				'ok'      => true,
+				'message' => __( 'The new storage directory is kept; the original one is left to the other copy of this site.', 'wp-checkpoint' ),
+			);
+		}
+		$this->record_answer( $question, $answer );
+		$this->base     = null;
+		$this->question = null;
+		$this->decided  = null;
+		$this->base();
+		$this->log_answer( $question, $answer );
+		return array(
+			'ok'      => true,
+			'message' => self::ANSWER_SAME === $answer
+				? __( 'Recorded: this is the same site. Its jobs go on with its storage token.', 'wp-checkpoint' )
+				: __( 'Recorded: this site is a copy or was moved here. It uses a storage token and directory of its own; the jobs started before are not run here.', 'wp-checkpoint' ),
+		);
+	}
+
+	/**
+	 * Record an answer, with the time, in one write (the oldest go first).
+	 *
+	 * @param array{kind: string, id: string, recorded: string, here: string, hash: string} $question The question.
+	 * @param string                                                                        $answer   The answer.
+	 * @return void
+	 */
+	private function record_answer( array $question, string $answer ): void {
+		$this->state['identity_answers'][ $question['id'] ] = array(
+			'answer'   => $answer,
+			'at'       => time(),
+			'kind'     => $question['kind'],
+			'recorded' => $question['recorded'],
+			'here'     => $question['here'],
+		);
+		$this->state['identity_answers']                    = array_slice( (array) $this->state['identity_answers'], -self::KEPT_RECORDS, null, true );
+		$this->save_state();
+	}
+
+	/**
+	 * Whether a marker hash is one a take-over of this installation recorded (reclaim_marker_hash, or the one kept
+	 * beside it: reclaimer()).
+	 *
+	 * @param string $hash Marker hash.
+	 * @return bool
+	 */
+	private function recorded_by_take_over( string $hash ): bool {
+		foreach ( array( (string) $this->state['reclaim_marker_hash'], (string) $this->state['reclaim_marker_prior'] ) as $recorded ) {
+			if ( '' !== $recorded && '' !== $hash && hash_equals( $recorded, $hash ) ) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * The context's identity_step hook, if any (tests: a request that dies between two writes of answer_identity()).
+	 *
+	 * @param string $step Where.
+	 * @return void
+	 */
+	private function identity_step( string $step ): void {
+		if ( null !== $this->context['identity_step'] ) {
+			call_user_func( $this->context['identity_step'], $step );
+		}
+	}
+
+	/**
+	 * Write an answer into the storage log, once the storage directory it decided about is known (nothing is written
+	 * while there is none).
+	 *
+	 * @param array{kind: string, id: string, recorded: string, here: string, hash: string} $question The question.
+	 * @param string                                                                        $answer   The answer.
+	 * @return void
+	 */
+	private function log_answer( array $question, string $answer ): void {
+		$this->log_event( sprintf( 'The administrator answered "%1$s" to whether this is the site that chose the storage directory (WordPress directory %2$s then, %3$s now).', $answer, $question['recorded'], $question['here'] ) );
+	}
+
+
+	/**
+	 * Whether the latest detected move went back to where an earlier one came from (A to B, then B to A): workers of
+	 * two releases taking turns, which a trusted deployment root would take over without asking. A hint only.
+	 *
+	 * @return bool
+	 */
+	public function moved_back(): bool {
+		$moves = array_values( (array) $this->state['moves'] );
+		$count = count( $moves );
+		if ( $count < 2 || ! is_array( $moves[ $count - 1 ] ) ) {
+			return false;
+		}
+		list( $from, $to ) = array_pad( $moves[ $count - 1 ], 2, '' );
+		for ( $i = 0; $i < $count - 1; $i++ ) {
+			if ( is_array( $moves[ $i ] ) && Paths::same( (string) ( $moves[ $i ][0] ?? '' ), (string) $to, Paths::is_windows() ) && Paths::same( (string) ( $moves[ $i ][1] ?? '' ), (string) $from, Paths::is_windows() ) ) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
 	 * Whether a token is one of the original installation's, copied with the database (note_clone()).
 	 *
 	 * @param string $token Token.
@@ -469,11 +768,28 @@ final class Directories {
 	private function reclaimer(): StorageReclaim {
 		$reclaim = new StorageReclaim( $this->state, $this->context );
 		$reclaim->on_rewrite(
-			function ( string $hash ): void {
-				$this->state['reclaim_marker_hash'] = $hash;
-				Options::set( self::OPTION, array_merge( self::load_state(), array( 'reclaim_marker_hash' => $hash ) ) );
+			function ( string $hash, string $current ): void {
+				// The hash the marker holds now (read under the lock: a take-over that died, which a question may be
+				// about) is kept beside the new one: this attempt may fail or die before its rename, and the marker
+				// then still holds it. So the marker's hash is always one of the two recorded, after any attempt.
+				$keep                                = $current;
+				$this->state['reclaim_marker_hash']  = $hash;
+				$this->state['reclaim_marker_prior'] = $keep;
+				Options::set(
+					self::OPTION,
+					array_merge(
+						self::load_state(),
+						array(
+							'reclaim_marker_hash'  => $hash,
+							'reclaim_marker_prior' => $keep,
+						)
+					)
+				);
 			}
 		);
+		if ( null !== $this->context['before_rename'] ) {
+			$reclaim->on_before_rename( $this->context['before_rename'] );
+		}
 		return $reclaim;
 	}
 
@@ -494,12 +810,16 @@ final class Directories {
 			$this->state['trusted_deploy_root'] = $trusted_root;
 		}
 		// This is the original: its tokens are its own, the earlier ones among them (dropped as the move was detected).
-		$token                                = self::SOURCE_CUSTOM === $this->state['source'] ? (string) $this->state['token'] : substr( basename( $dir ), strlen( self::DIR_PREFIX ) );
-		$given                                = array_map( 'strval', (array) $this->state['reclaim_tokens'] );
-		$this->state['past_tokens']           = array_slice( array_values( array_diff( array_unique( array_merge( (array) $this->state['past_tokens'], $given ) ), array( $token ) ) ), 0, self::PAST_TOKENS );
-		$this->state['copied_tokens']         = array_values( array_diff( (array) $this->state['copied_tokens'], $given, array( $token ) ) );
+		$token                        = self::SOURCE_CUSTOM === $this->state['source'] ? (string) $this->state['token'] : substr( basename( $dir ), strlen( self::DIR_PREFIX ) );
+		$given                        = array_map( 'strval', (array) $this->state['reclaim_tokens'] );
+		$this->state['past_tokens']   = array_slice( array_values( array_diff( array_unique( array_merge( (array) $this->state['past_tokens'], $given ) ), array( $token ) ) ), 0, self::PAST_TOKENS );
+		$this->state['copied_tokens'] = array_values( array_diff( (array) $this->state['copied_tokens'], $given, array( $token ) ) );
+		foreach ( array_merge( $given, array( $token ) ) as $own ) {
+			unset( $this->state['lost_tokens'][ $own ] ); // This installation's again.
+		}
 		$this->state['reclaim_tokens']        = array();
 		$this->state['reclaim_marker_hash']   = '';
+		$this->state['reclaim_marker_prior']  = '';
 		$this->state['detected_real']         = '';
 		$this->state['clone_detected']        = false;
 		$this->state['previous_path']         = '';
@@ -587,22 +907,29 @@ final class Directories {
 		// copy whose custom directory names another place, or was emptied, never sees the original's marker). When
 		// that cannot be told either, nothing is chosen, recorded or saved.
 		// A "continue with the original directory" that rewrote the marker and died before saving the state: the
-		// previous directory now carries this installation's marker for this ABSPATH with the very hash the take-over
-		// recorded before rewriting it. It is finished here (the replay rule of that step), unless this request's
-		// WPCHECKPOINT_STORAGE_DIR names another directory: that one is checked as usual.
+		// previous directory now carries this installation's marker for this ABSPATH, with a hash a take-over of this
+		// installation recorded (the one it was about to write, or the one it found the marker holding). It is
+		// finished here (the replay rule of that step), unless this request's WPCHECKPOINT_STORAGE_DIR names another
+		// directory: that one is checked as usual. Not told apart: the storage constant pointed elsewhere and back
+		// while the move was waiting, so that the hash was recorded by an attempt that never replaced the marker.
 		$previous  = (string) $this->state['previous_path'];
-		$recorded  = (string) $this->state['reclaim_marker_hash'];
 		$other_dir = '' !== (string) $this->context['custom_dir'] && ! Paths::same_location( rtrim( (string) $this->context['custom_dir'], '/\\' ), $previous );
-		if ( ! empty( $this->state['clone_detected'] ) && '' !== $previous && '' !== $recorded && ! $other_dir && self::MARKER_OWN === $this->marker( $previous ) && hash_equals( $recorded, (string) ( $this->marker_hashes[ rtrim( $previous, '/\\' ) ] ?? '' ) ) ) {
+		if ( ! empty( $this->state['clone_detected'] ) && '' !== $previous && ! $other_dir && self::MARKER_OWN === $this->marker( $previous ) && $this->recorded_by_take_over( (string) ( $this->marker_hashes[ rtrim( $previous, '/\\' ) ] ?? '' ) ) ) {
 			$this->finish_reclaim();
-			$this->log_event( sprintf( 'Continuing with the storage directory %s, which a request had taken over but died before recording it.', $previous ) );
+			$this->log_event( sprintf( 'Continuing with the storage directory %s: it carries this site\'s marker for this WordPress directory, with a hash a take-over of this site recorded, and the move was still waiting (a take-over that died before recording that it was done).', $previous ) );
 			return;
 		}
 
 		$marked = '' !== (string) $this->state['path'] && self::MARKER_OWN === $this->marker( (string) $this->state['path'] );
 		if ( ! $marked && ! $this->note_clone() ) {
-			$this->error = $this->undecidable_abspath();
-			return;
+			// The paths cannot tell; the administrator may have (answer_identity()), for this very pair of paths.
+			$question      = $this->paths_question();
+			$this->decided = $this->identity_answer( $question['id'] );
+			if ( null === $this->decided || ! $this->note_clone() ) {
+				$this->question = $question;
+				$this->error    = $this->undecidable_abspath();
+				return;
+			}
 		}
 		if ( $marked && $this->is_copied( (string) $this->state['token'] ) ) {
 			// The token of that directory is this installation's, whatever a detection from another ABSPATH (a
