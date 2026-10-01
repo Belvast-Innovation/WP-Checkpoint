@@ -83,6 +83,7 @@ final class Notices {
 				/* translators: 1: WordPress directory recorded before, 2: WordPress directory of this request */
 				'extra'       => sprintf( __( "WordPress directory then: %1\$s\nWordPress directory now:  %2\$s", 'wp-checkpoint' ), $question['recorded'], $question['here'] ),
 				'dismissible' => false,
+				'question'    => $question['id'],
 				'answers'     => array(
 					array(
 						Directories::ANSWER_COPY,
@@ -236,6 +237,7 @@ final class Notices {
 						<input type="hidden" name="action" value="<?php echo esc_attr( SiteIdentityActions::ACTION ); ?>" />
 						<input type="hidden" name="_wpnonce" value="<?php echo esc_attr( Guard::nonce( SiteIdentityActions::NONCE ) ); ?>" />
 						<input type="hidden" name="<?php echo esc_attr( SiteIdentityActions::FIELD ); ?>" value="<?php echo esc_attr( $answer[0] ); ?>" />
+						<input type="hidden" name="<?php echo esc_attr( SiteIdentityActions::QUESTION ); ?>" value="<?php echo esc_attr( $notice['question'] ); ?>" />
 						<p><button type="submit" class="button"><?php echo esc_html( $answer[1] ); ?></button> <?php echo esc_html( $answer[2] ); ?></p>
 					</form>
 				<?php endforeach; ?>

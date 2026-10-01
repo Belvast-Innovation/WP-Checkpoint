@@ -60,7 +60,7 @@ final class SiteIdentityTest extends WP_UnitTestCase {
 			Sandbox::remove( $this->root );
 		}
 		remove_all_filters( 'wp_redirect' );
-		unset( $_POST[ SiteIdentityActions::FIELD ], $_REQUEST['_wpnonce'] );
+		unset( $_POST[ SiteIdentityActions::FIELD ], $_POST[ SiteIdentityActions::QUESTION ], $_REQUEST['_wpnonce'] );
 		parent::tear_down();
 	}
 
@@ -88,6 +88,12 @@ final class SiteIdentityTest extends WP_UnitTestCase {
 		$job = self::repo( $dirs )->create( 'plain' );
 		$wpdb->update( Schema::jobs_table(), array( 'status' => Job::RUNNING, 'site_state' => Job::SITE_CHANGING ), array( 'id' => $job->id ) );
 		return $job->id;
+	}
+
+	/** The handler's answer to the question this request shows, as the form sends it (with its id). */
+	private static function answer( Directories $dirs, string $answer ): array {
+		$question = $dirs->identity_question();
+		return ( new SiteIdentityActions( $dirs ) )->run( $answer, (string) ( $question['id'] ?? '' ) );
 	}
 
 	/** Whether a request lets a job through and takes it (the lock given back after). */
@@ -133,7 +139,7 @@ final class SiteIdentityTest extends WP_UnitTestCase {
 		$question = $web->identity_question();
 		$this->assertSame( 'paths', $question['kind'] ?? '' );
 		$before = time();
-		$result = ( new SiteIdentityActions( $web ) )->run( Directories::ANSWER_COPY );
+		$result = self::answer( $web, Directories::ANSWER_COPY );
 		$this->assertTrue( $result['ok'], $result['message'] );
 		$answer = Options::get( Directories::OPTION, array() )['identity_answers'][ $question['id'] ] ?? array();
 		$this->assertSame( 'copy', $answer['answer'] ?? '', 'recorded' );
@@ -150,7 +156,7 @@ final class SiteIdentityTest extends WP_UnitTestCase {
 		list( , $job ) = $this->undecidable();
 		$web           = $this->dirs( 's1/real' );
 		$this->assertSame( '', $web->base(), 'the control: it cannot be told' );
-		$this->assertTrue( ( new SiteIdentityActions( $web ) )->run( Directories::ANSWER_SAME )['ok'] );
+		$this->assertTrue( self::answer( $web, Directories::ANSWER_SAME )['ok'] );
 
 		$next = $this->dirs( 's1/real' );
 		$this->assertNotSame( '', $next->base(), $next->last_error() );
@@ -168,7 +174,7 @@ final class SiteIdentityTest extends WP_UnitTestCase {
 		$elsewhere = $this->dirs( 's1/real2' )->identity_question();
 		$this->assertNotNull( $elsewhere, 'the control: asked there too' );
 		$this->assertNotSame( $answered['id'], $elsewhere['id'], 'this request\'s directory is part of the pair' );
-		$this->assertTrue( ( new SiteIdentityActions( $web ) )->run( Directories::ANSWER_SAME )['ok'] );
+		$this->assertTrue( self::answer( $web, Directories::ANSWER_SAME )['ok'] );
 		$this->assertNull( $this->dirs( 's1/real' )->identity_question(), 'the control: this pair is not asked again' );
 		// A request from the spelling that cannot be resolved: another pair of paths.
 		$other = $this->dirs( 's1/locked/site' );
@@ -199,6 +205,7 @@ final class SiteIdentityTest extends WP_UnitTestCase {
 		// The request dies here; the next one is from release 3.
 		$next = $this->dirs( 's2/releases/3', $store );
 		$this->assertSame( '', $next->base() );
+		$this->assertArrayNotHasKey( $token, (array) $next->state()['lost_tokens'], 'the token the state holds is never a lost one' );
 		return array( $store, $job, $token );
 	}
 
@@ -210,7 +217,7 @@ final class SiteIdentityTest extends WP_UnitTestCase {
 		$notices = ( new Notices( $next ) )->notices();
 		$this->assertArrayHasKey( 'site_identity', $notices, 'the question in the admin' );
 		$this->assertSame( array(), $notices['clone_detected']['link'], 'instead of a "continue" that would be refused' );
-		$this->assertTrue( ( new SiteIdentityActions( $next ) )->run( Directories::ANSWER_SAME )['ok'] );
+		$this->assertTrue( self::answer( $next, Directories::ANSWER_SAME )['ok'] );
 		$after = $this->dirs( 's2/releases/3', $store );
 		$this->assertSame( $store, $after->base(), $after->last_error() );
 		$this->assertSame( $token, (string) $after->state()['token'], 'its token kept' );
@@ -222,7 +229,7 @@ final class SiteIdentityTest extends WP_UnitTestCase {
 		list( $store, $job ) = $this->claimed();
 		$next                = $this->dirs( 's2/releases/3', $store );
 		$this->assertNotNull( $next->identity_question(), 'the control: asked' );
-		$this->assertTrue( ( new SiteIdentityActions( $next ) )->run( Directories::ANSWER_COPY )['ok'] );
+		$this->assertTrue( self::answer( $next, Directories::ANSWER_COPY )['ok'] );
 		$after = $this->dirs( 's2/releases/3', $store );
 		$this->assertSame( '', $after->base(), 'the directory is another installation\'s now' );
 		$this->assertNull( $after->identity_question(), 'not asked again' );
@@ -233,7 +240,8 @@ final class SiteIdentityTest extends WP_UnitTestCase {
 		$this->undecidable();
 		$web = $this->dirs( 's1/real' );
 		$web->base();
-		$_POST[ SiteIdentityActions::FIELD ] = Directories::ANSWER_SAME;
+		$_POST[ SiteIdentityActions::FIELD ]    = Directories::ANSWER_SAME;
+		$_POST[ SiteIdentityActions::QUESTION ] = $web->identity_question()['id'];
 		$recorded                            = static function (): array {
 			return (array) Options::get( Directories::OPTION, array() )['identity_answers'];
 		};
@@ -276,11 +284,17 @@ final class SiteIdentityTest extends WP_UnitTestCase {
 		$this->undecidable();
 		$web = $this->dirs( 's1/real' );
 		$web->base();
+		$id  = $web->identity_question()['id'];
 		foreach ( array( '', 'yes', 'SAME', 'copy ' ) as $bad ) {
-			$this->assertFalse( $web->answer_identity( $bad )['ok'], var_export( $bad, true ) );
+			$this->assertFalse( $web->answer_identity( $bad, $id )['ok'], var_export( $bad, true ) );
 		}
+		// An answer to another question than this request asks: the one shown changed meanwhile.
+		$changed = $web->answer_identity( Directories::ANSWER_SAME, str_repeat( '0', 64 ) );
+		$this->assertFalse( $changed['ok'] );
+		$this->assertStringContainsString( 'The question changed', $changed['message'] );
+		$this->assertFalse( $web->answer_identity( Directories::ANSWER_SAME, '' )['ok'], 'nor without the question' );
 		$this->assertSame( array(), (array) Options::get( Directories::OPTION, array() )['identity_answers'] );
-		$this->assertTrue( $web->answer_identity( Directories::ANSWER_COPY )['ok'], 'the control' );
+		$this->assertTrue( $web->answer_identity( Directories::ANSWER_COPY, $id )['ok'], 'the control' );
 	}
 
 	public function test_the_question_in_the_admin_has_two_answers_and_no_default(): void {
@@ -298,6 +312,7 @@ final class SiteIdentityTest extends WP_UnitTestCase {
 		$this->assertSame( 2, substr_count( $html, 'name="' . SiteIdentityActions::FIELD . '"' ), 'two forms' );
 		$this->assertStringNotContainsString( 'checked', $html, 'nothing preselected' );
 		$this->assertStringContainsString( 'name="_wpnonce"', $html );
+		$this->assertSame( 2, substr_count( $html, 'name="' . SiteIdentityActions::QUESTION . '" value="' . $web->identity_question()['id'] . '"' ), 'each answer names its question' );
 	}
 
 	public function test_wp_cli_shows_and_answers_the_question(): void {
@@ -312,7 +327,9 @@ final class SiteIdentityTest extends WP_UnitTestCase {
 		$this->assertStringContainsString( 'there is no default', $text );
 		$this->assertStringContainsString( '{tmp}', $text, 'the control: the paths are there, masked' );
 		$this->assertStringNotContainsString( sys_get_temp_dir(), $text, 'through the same masking as every output' );
-		$answered = $command->run( 'copy' );
+		$this->assertStringContainsString( '--question=' . $web->identity_question()['id'] . ' --answer=copy', $text, 'the command names its question' );
+		$this->assertSame( 1, $command->run( 'copy', '' )['code'], 'an answer without its question is refused' );
+		$answered = $command->run( 'copy', $web->identity_question()['id'] );
 		$this->assertSame( 0, $answered['code'], implode( "\n", $answered['lines'] ) );
 		$this->assertSame( 0, ( new SiteIdentityCommand( \WPCheckpoint\Plugin::instance()->job_presenter(), $this->dirs( 's1/real' ) ) )->run( null )['code'], 'no question any more' );
 	}
@@ -361,5 +378,40 @@ final class SiteIdentityTest extends WP_UnitTestCase {
 		$back->base();
 		$this->assertTrue( $back->moved_back() );
 		$this->assertStringContainsString( 'trusted deployment root', ( new Notices( $back ) )->notices()['clone_detected']['message'] );
+	}
+
+	public function test_a_take_over_that_cannot_be_done_records_no_answer_and_keeps_the_question(): void {
+		list( $store, $job, $token ) = $this->claimed();
+		$next                        = $this->dirs( 's2/releases/3', $store );
+		$question                    = $next->identity_question();
+		file_put_contents( $store . '/tmp/recent.tmp', 'x' ); // Something is working there: the take-over's prechecks refuse.
+		$refused = self::answer( $next, Directories::ANSWER_SAME );
+		$this->assertFalse( $refused['ok'], 'the control: the take-over cannot be done now' );
+		$this->assertSame( array(), (array) Options::get( Directories::OPTION, array() )['identity_answers'], 'nothing recorded' );
+		$again = $this->dirs( 's2/releases/3', $store );
+		$this->assertSame( $question['id'], $again->identity_question()['id'] ?? '', 'still asked' );
+		Sandbox::remove( $store . '/tmp/recent.tmp' );
+		// A stale record (an older detection's) of the token about to be given back.
+		$state                          = Options::get( Directories::OPTION, array() );
+		$state['lost_tokens'][ $token ] = time() - 60;
+		Options::set( Directories::OPTION, $state );
+		$again = $this->dirs( 's2/releases/3', $store ); // A request that reads the state with that record.
+		$this->assertArrayHasKey( $token, (array) $again->state()['lost_tokens'], 'the control: the stale record is there' );
+		$this->assertTrue( self::answer( $again, Directories::ANSWER_SAME )['ok'], 'answered once it can be done' );
+		$after = $this->dirs( 's2/releases/3', $store );
+		$this->assertSame( $store, $after->base(), $after->last_error() );
+		$this->assertSame( $token, (string) $after->state()['token'] );
+		$this->assertArrayNotHasKey( $token, (array) $after->state()['lost_tokens'], 'the token in use is not a lost one' );
+		$this->assertTrue( $this->runs( $job, 's2/releases/3', $store ) );
+	}
+
+	public function test_an_answer_is_written_into_the_storage_log(): void {
+		$this->undecidable();
+		$web = $this->dirs( 's1/real' );
+		$this->assertTrue( self::answer( $web, Directories::ANSWER_SAME )['ok'] );
+		$after = $this->dirs( 's1/real' );
+		$log   = $after->base() . '/logs/storage.log';
+		$this->assertFileExists( $log, 'the control: the storage log is there' );
+		$this->assertStringContainsString( 'The administrator answered "same"', (string) file_get_contents( $log ) );
 	}
 }

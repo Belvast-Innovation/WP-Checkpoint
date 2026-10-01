@@ -54,6 +54,10 @@ final class SiteIdentityCommand {
 	 *
 	 * ## OPTIONS
 	 *
+	 * [--question=<id>]
+	 * : The id of the question being answered, as shown without --answer: an answer to another question than this
+	 * request would ask is refused.
+	 *
 	 * [--answer=<answer>]
 	 * : copy: this site is a copy, or was moved here (it takes a storage token and directory of its own; the jobs
 	 * started before are not run here). same: this is the same site (it keeps the original storage token; if it is in
@@ -70,8 +74,9 @@ final class SiteIdentityCommand {
 	 */
 	public function __invoke( array $args, array $assoc_args ): void {
 		unset( $args );
-		$answer = isset( $assoc_args['answer'] ) ? (string) $assoc_args['answer'] : null;
-		$result = $this->run( $answer );
+		$answer   = isset( $assoc_args['answer'] ) ? (string) $assoc_args['answer'] : null;
+		$question = isset( $assoc_args['question'] ) ? (string) $assoc_args['question'] : '';
+		$result   = $this->run( $answer, $question );
 		foreach ( $result['lines'] as $line ) {
 			WP_CLI::line( $line );
 		}
@@ -83,12 +88,13 @@ final class SiteIdentityCommand {
 	/**
 	 * What the command prints and its exit status. Separated for tests.
 	 *
-	 * @param string|null $answer The answer, or null to show the question.
+	 * @param string|null $answer   The answer, or null to show the question.
+	 * @param string      $question The id of the question being answered.
 	 * @return array{code: int, lines: string[]}
 	 */
-	public function run( $answer ): array {
+	public function run( $answer, string $question = '' ): array {
 		if ( null !== $answer ) {
-			$result = $this->directories->answer_identity( $answer );
+			$result = $this->directories->answer_identity( $answer, $question );
 			if ( $result['ok'] ) {
 				( new JobRepository( $this->directories ) )->settle_storage();
 			}
@@ -113,10 +119,10 @@ final class SiteIdentityCommand {
 			/* translators: %s: WordPress directory of this request */
 			sprintf( __( 'WordPress directory now: %s', 'wp-checkpoint' ), $question['here'] ),
 			__( 'Answer with one of (there is no default):', 'wp-checkpoint' ),
-			'  wp wpcheckpoint site-identity --answer=copy  ' . ( 'claimed' === $question['kind']
+			'  wp wpcheckpoint site-identity --question=' . $question['id'] . ' --answer=copy  ' . ( 'claimed' === $question['kind']
 				? __( 'Keeps the new storage directory; the original one, and the jobs started with it, are left to the other copy.', 'wp-checkpoint' )
 				: __( 'This site takes a storage token and directory of its own; the jobs started before are not run here.', 'wp-checkpoint' ) ),
-			'  wp wpcheckpoint site-identity --answer=same  ' . ( 'claimed' === $question['kind']
+			'  wp wpcheckpoint site-identity --question=' . $question['id'] . ' --answer=same  ' . ( 'claimed' === $question['kind']
 				? __( 'Continues with the original storage directory and its jobs. If this is in fact a copy, it takes the directory away from the original site, and the original\'s jobs may run here.', 'wp-checkpoint' )
 				: __( 'Keeps using the original storage token. If this is in fact a copy, the original site\'s jobs may run here.', 'wp-checkpoint' ) ),
 		);

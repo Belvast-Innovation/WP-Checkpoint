@@ -412,7 +412,7 @@ final class Directories {
 		if ( ! $again ) {
 			// A newer detection replaces one the administrator never answered: what that one set aside is not given
 			// back by any "continue" any more. Its jobs are failed with that reason (JobRepository::settle_storage()).
-			$lost = ! empty( $this->state['clone_detected'] ) ? array_diff( array_map( 'strval', (array) $this->state['reclaim_tokens'] ), $this->copied_now ) : array();
+			$lost = ! empty( $this->state['clone_detected'] ) ? array_diff( array_map( 'strval', (array) $this->state['reclaim_tokens'] ), $this->copied_now, array( (string) $this->state['token'] ) ) : array();
 			foreach ( $lost as $token ) {
 				$this->state['lost_tokens'][ $token ] = time();
 			}
@@ -561,10 +561,12 @@ final class Directories {
 	 * "same" keeps them this installation's. Kind "claimed": "same" finishes the take-over, "copy" keeps the new
 	 * directory. The same pair of paths is not asked about again.
 	 *
-	 * @param string $answer ANSWER_COPY or ANSWER_SAME.
+	 * @param string $answer      ANSWER_COPY or ANSWER_SAME.
+	 * @param string $question_id The id of the question the answer is for (identity_question()): an answer to a
+	 *                            question this request would not ask is refused.
 	 * @return array{ok: bool, message: string}
 	 */
-	public function answer_identity( string $answer ): array {
+	public function answer_identity( string $answer, string $question_id ): array {
 		if ( self::ANSWER_COPY !== $answer && self::ANSWER_SAME !== $answer ) {
 			return array(
 				'ok'      => false,
@@ -578,6 +580,62 @@ final class Directories {
 				'message' => __( 'There is no question about this site\'s identity to answer.', 'wp-checkpoint' ),
 			);
 		}
+		if ( ! hash_equals( $question['id'], $question_id ) ) {
+			// The answer is for the question that was shown, not for whatever this request would ask.
+			return array(
+				'ok'      => false,
+				'message' => __( 'The question changed since it was shown; reload it and answer again.', 'wp-checkpoint' ),
+			);
+		}
+
+		if ( 'claimed' === $question['kind'] && self::ANSWER_SAME === $answer ) {
+			// Recorded only once the take-over is done: "answered, not taken over" would leave the question gone
+			// and a "continue" that refuses the marker.
+			$result = $this->reclaimer()->reclaim( false, (string) $this->state['reclaim_marker_hash'] );
+			if ( ! $result['ok'] ) {
+				return array(
+					'ok'      => false,
+					'message' => $result['message'],
+				);
+			}
+			$this->finish_reclaim( $result['trusted_root'] );
+			$this->record_answer( $question, $answer );
+			$this->log_answer( $question, $answer );
+			return array(
+				'ok'      => true,
+				'message' => $result['message'],
+			);
+		}
+		$this->record_answer( $question, $answer );
+		if ( 'claimed' === $question['kind'] ) {
+			$this->acknowledge_clone();
+			$this->log_answer( $question, $answer );
+			return array(
+				'ok'      => true,
+				'message' => __( 'The new storage directory is kept; the original one is left to the other copy of this site.', 'wp-checkpoint' ),
+			);
+		}
+		$this->base     = null;
+		$this->question = null;
+		$this->decided  = null;
+		$this->base();
+		$this->log_answer( $question, $answer );
+		return array(
+			'ok'      => true,
+			'message' => self::ANSWER_SAME === $answer
+				? __( 'Recorded: this is the same site. Its jobs go on with its storage token.', 'wp-checkpoint' )
+				: __( 'Recorded: this site is a copy or was moved here. It uses a storage token and directory of its own; the jobs started before are not run here.', 'wp-checkpoint' ),
+		);
+	}
+
+	/**
+	 * Record an answer, with the time, in one write (the oldest go first).
+	 *
+	 * @param array{kind: string, id: string, recorded: string, here: string} $question The question.
+	 * @param string                                                          $answer   The answer.
+	 * @return void
+	 */
+	private function record_answer( array $question, string $answer ): void {
 		$this->state['identity_answers'][ $question['id'] ] = array(
 			'answer'   => $answer,
 			'at'       => time(),
@@ -587,40 +645,20 @@ final class Directories {
 		);
 		$this->state['identity_answers']                    = array_slice( (array) $this->state['identity_answers'], -self::KEPT_RECORDS, null, true );
 		$this->save_state();
-		$this->log_event( sprintf( 'The administrator answered "%1$s" to whether this is the site that chose the storage directory (WordPress directory %2$s then, %3$s now).', $answer, $question['recorded'], $question['here'] ) );
-
-		if ( 'claimed' === $question['kind'] ) {
-			if ( self::ANSWER_COPY === $answer ) {
-				$this->acknowledge_clone();
-				return array(
-					'ok'      => true,
-					'message' => __( 'The new storage directory is kept; the original one is left to the other copy of this site.', 'wp-checkpoint' ),
-				);
-			}
-			$result = $this->reclaimer()->reclaim( false, (string) $this->state['reclaim_marker_hash'] );
-			if ( ! $result['ok'] ) {
-				return array(
-					'ok'      => false,
-					'message' => $result['message'],
-				);
-			}
-			$this->finish_reclaim( $result['trusted_root'] );
-			return array(
-				'ok'      => true,
-				'message' => $result['message'],
-			);
-		}
-		$this->base     = null;
-		$this->question = null;
-		$this->decided  = null;
-		$this->base();
-		return array(
-			'ok'      => true,
-			'message' => self::ANSWER_SAME === $answer
-				? __( 'Recorded: this is the same site. Its jobs go on with its storage token.', 'wp-checkpoint' )
-				: __( 'Recorded: this site is a copy or was moved here. It uses a storage token and directory of its own; the jobs started before are not run here.', 'wp-checkpoint' ),
-		);
 	}
+
+	/**
+	 * Write an answer into the storage log, once the storage directory it decided about is known (nothing is written
+	 * while there is none).
+	 *
+	 * @param array{kind: string, id: string, recorded: string, here: string} $question The question.
+	 * @param string                                                          $answer   The answer.
+	 * @return void
+	 */
+	private function log_answer( array $question, string $answer ): void {
+		$this->log_event( sprintf( 'The administrator answered "%1$s" to whether this is the site that chose the storage directory (WordPress directory %2$s then, %3$s now).', $answer, $question['recorded'], $question['here'] ) );
+	}
+
 
 	/**
 	 * Whether the latest detected move went back to where an earlier one came from (A to B, then B to A): workers of
@@ -706,10 +744,13 @@ final class Directories {
 			$this->state['trusted_deploy_root'] = $trusted_root;
 		}
 		// This is the original: its tokens are its own, the earlier ones among them (dropped as the move was detected).
-		$token                                = self::SOURCE_CUSTOM === $this->state['source'] ? (string) $this->state['token'] : substr( basename( $dir ), strlen( self::DIR_PREFIX ) );
-		$given                                = array_map( 'strval', (array) $this->state['reclaim_tokens'] );
-		$this->state['past_tokens']           = array_slice( array_values( array_diff( array_unique( array_merge( (array) $this->state['past_tokens'], $given ) ), array( $token ) ) ), 0, self::PAST_TOKENS );
-		$this->state['copied_tokens']         = array_values( array_diff( (array) $this->state['copied_tokens'], $given, array( $token ) ) );
+		$token                        = self::SOURCE_CUSTOM === $this->state['source'] ? (string) $this->state['token'] : substr( basename( $dir ), strlen( self::DIR_PREFIX ) );
+		$given                        = array_map( 'strval', (array) $this->state['reclaim_tokens'] );
+		$this->state['past_tokens']   = array_slice( array_values( array_diff( array_unique( array_merge( (array) $this->state['past_tokens'], $given ) ), array( $token ) ) ), 0, self::PAST_TOKENS );
+		$this->state['copied_tokens'] = array_values( array_diff( (array) $this->state['copied_tokens'], $given, array( $token ) ) );
+		foreach ( array_merge( $given, array( $token ) ) as $own ) {
+			unset( $this->state['lost_tokens'][ $own ] ); // This installation's again.
+		}
 		$this->state['reclaim_tokens']        = array();
 		$this->state['reclaim_marker_hash']   = '';
 		$this->state['detected_real']         = '';
