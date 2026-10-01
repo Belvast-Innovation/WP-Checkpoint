@@ -111,7 +111,11 @@ final class CredentialsTest extends TestCase {
 		// The control: the probes exist, under tests/.
 		$this->assertFileExists( $root . '/tests/Fixtures/Standalone/http/config-probe.php' );
 		$this->assertFileExists( $root . '/tests/Fixtures/Standalone/http/wordpress-probe.php' );
-		$this->assertContains( '/tests', array_map( 'trim', (array) file( $root . '/.distignore' ) ), 'tests/ is left out of the package' );
+		// The package holds only the paths bin/build-dist.sh ships (BuildDistTest): tests/ is not one of them.
+		preg_match( '/^SHIP=\(([^)]*)\)/m', (string) file_get_contents( $root . '/bin/build-dist.sh' ), $ship );
+		$shipped = preg_split( '/\s+/', trim( $ship[1] ?? '' ) );
+		$this->assertContains( 'src', $shipped, 'the control: the list is read' );
+		$this->assertNotContains( 'tests', $shipped, 'tests/ is left out of the package' );
 		// The one-time key is written outside the plugin, in the run's probe directory under wp-content.
 		$guard = (string) file_get_contents( $root . '/tests/Fixtures/Standalone/http/guard.php' );
 		$this->assertStringContainsString( "'wpcheckpoint-it-probe.'", $guard, 'the control: the guard reads the key from the probe directory' );

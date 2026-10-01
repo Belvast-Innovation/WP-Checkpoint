@@ -41,7 +41,7 @@ The integration tests run inside a WordPress install managed by wp-env, so Docke
 npx wp-env start          # first start downloads images; site at http://localhost:8888 (admin / password)
 npm run test:integration  # runs `composer test:integration` inside the tests container
 npm run test:integration:multisite  # same suite with WordPress installed as a network
-npm run check:plugin      # builds build/wp-checkpoint from .distignore and runs Plugin Check on it
+npm run check:plugin      # builds and checks the package (bin/build-dist.sh), then runs Plugin Check on it
 npx wp-env stop
 ```
 

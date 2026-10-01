@@ -306,8 +306,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Check the distributable tree (built with .distignore), not the development checkout.
-      - run: bash bin/build-dist.sh
+      # The package, not the development checkout: only the paths the build lists, and the build fails when
+      # the package holds anything else, a symbolic link, a vendor directory or a name beginning with a dot.
+      - name: Build and check the package
+        run: bash bin/build-dist.sh
 
       # The action resolves "latest" through the WordPress/WordPress GitHub mirror, which lags behind
       # wordpress.org on release days (missing tag); trunk always exists and Plugin Check only lints.
