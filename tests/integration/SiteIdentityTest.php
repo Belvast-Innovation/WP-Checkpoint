@@ -64,14 +64,17 @@ final class SiteIdentityTest extends WP_UnitTestCase {
 		parent::tear_down();
 	}
 
-	private function dirs( string $site, string $custom = '' ): Directories {
+	private function dirs( string $site, string $custom = '', array $extra = array() ): Directories {
 		return new Directories(
-			array(
-				'is_web_request' => false,
-				'document_root'  => '',
-				'abspath'        => $this->root . '/' . $site . '/',
-				'content_dir'    => $this->root . '/content',
-				'custom_dir'     => $custom,
+			array_merge(
+				array(
+					'is_web_request' => false,
+					'document_root'  => '',
+					'abspath'        => $this->root . '/' . $site . '/',
+					'content_dir'    => $this->root . '/content',
+					'custom_dir'     => $custom,
+				),
+				$extra
 			)
 		);
 	}
@@ -413,5 +416,79 @@ final class SiteIdentityTest extends WP_UnitTestCase {
 		$log   = $after->base() . '/logs/storage.log';
 		$this->assertFileExists( $log, 'the control: the storage log is there' );
 		$this->assertStringContainsString( 'The administrator answered "same"', (string) file_get_contents( $log ) );
+	}
+
+	/**
+	 * Answer "same" to the claimed question from a request whose take-over meets $interference after it recorded the
+	 * hash it is about to write and before it replaces the marker; then from a request without it.
+	 */
+	private function answer_through( callable $interference, string $what, ?callable $meanwhile = null ): void {
+		list( $store, $job, $token ) = $this->claimed();
+		$question                    = $this->dirs( 's2/releases/3', $store )->identity_question();
+		$this->assertNotNull( $question, 'the control: asked' );
+		$hooked = $this->dirs( 's2/releases/3', $store, array( 'before_rename' => $interference ) );
+		try {
+			$result = $hooked->answer_identity( Directories::ANSWER_SAME, $question['id'] );
+			$this->assertFalse( $result['ok'], $what . ': the take-over did not happen' );
+		} catch ( \RuntimeException $e ) {
+			$this->assertSame( 'died', $e->getMessage(), $what );
+		}
+		$this->assertSame( array(), (array) Options::get( Directories::OPTION, array() )['identity_answers'], $what . ': nothing recorded' );
+		if ( null !== $meanwhile ) {
+			$meanwhile( $store );
+		}
+		$again = $this->dirs( 's2/releases/3', $store );
+		$this->assertSame( $question['id'], $again->identity_question()['id'] ?? '', $what . ': still asked, the same question' );
+		$this->assertTrue( self::answer( $again, Directories::ANSWER_SAME )['ok'], $what . ': answered again, it is done' );
+		$after = $this->dirs( 's2/releases/3', $store );
+		$this->assertSame( $store, $after->base(), $after->last_error() );
+		$this->assertSame( $token, (string) $after->state()['token'] );
+		$this->assertTrue( $this->runs( $job, 's2/releases/3', $store ) );
+	}
+
+	public function test_a_take_over_that_dies_before_replacing_the_marker_leaves_the_question(): void {
+		$this->answer_through(
+			static function (): void {
+				throw new \RuntimeException( 'died' ); // The request dies between recording the hash and the rename.
+			},
+			'died before the rename'
+		);
+	}
+
+	public function test_a_take_over_that_loses_its_lock_at_the_last_check_leaves_the_question(): void {
+		$this->answer_through(
+			static function ( string $dir ): void {
+				file_put_contents( \WPCheckpoint\Support\StorageReclaim::lock_path( $dir ), "intruder\n" ); // Another process takes the lock over.
+			},
+			'lost the lock',
+			static function ( string $store ): void {
+				Sandbox::remove( \WPCheckpoint\Support\StorageReclaim::lock_path( $store ) ); // The other process is done.
+			}
+		);
+	}
+
+	public function test_an_answer_recorded_before_the_take_over_finished_is_finished_by_the_next_request(): void {
+		list( $store, , $token ) = $this->claimed();
+		$next                    = $this->dirs( 's2/releases/3', $store );
+		$question                = $next->identity_question();
+		// The state a request leaves when it dies between recording the answer and finishing: the marker rewritten
+		// for release 3 (with the hash recorded before), the answer recorded, the move still waiting.
+		$this->assertTrue( $next->reclaim()->reclaim( false, $question['hash'] )['ok'] );
+		$state                                        = Options::get( Directories::OPTION, array() );
+		$state['identity_answers'][ $question['id'] ] = array( 'answer' => 'same', 'at' => time() );
+		Options::set( Directories::OPTION, $state );
+		$after = $this->dirs( 's2/releases/3', $store );
+		$this->assertSame( $store, $after->base(), 'finished: ' . $after->last_error() );
+		$this->assertFalse( $after->state()['clone_detected'] );
+		$this->assertSame( $token, (string) $after->state()['token'] );
+		$this->assertNull( $after->identity_question() );
+	}
+
+	public function test_a_copy_answer_that_dies_before_it_is_recorded_leaves_no_question(): void {
+		list( $store ) = $this->claimed();
+		$next          = $this->dirs( 's2/releases/3', $store );
+		$this->assertNotNull( $next->identity_question(), 'the control: asked' );
+		$next->acknowledge_clone(); // The request dies right after this, before recording the answer.
+		$this->assertNull( $this->dirs( 's2/releases/3', $store )->identity_question(), 'nothing left to answer' );
 	}
 }

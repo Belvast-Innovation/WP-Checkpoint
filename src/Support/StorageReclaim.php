@@ -397,12 +397,12 @@ final class StorageReclaim {
 				);
 			}
 
-			if ( null !== $this->before_rename ) {
-				call_user_func( $this->before_rename, $dir );
-			}
-
 			if ( null !== $this->on_rewrite ) {
 				call_user_func( $this->on_rewrite, OwnerMarker::hash_path( (string) $this->context['abspath'] ) );
+			}
+
+			if ( null !== $this->before_rename ) {
+				call_user_func( $this->before_rename, $dir );
 			}
 			$marker  = $dir . DIRECTORY_SEPARATOR . OwnerMarker::FILENAME;
 			$temp    = $marker . '.' . bin2hex( random_bytes( 4 ) ) . '.tmp';
