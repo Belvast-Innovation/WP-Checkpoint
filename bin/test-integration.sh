@@ -19,6 +19,11 @@
 # path. Used by `composer test:integration`, npm run test:integration and CI. A run during which files under src/ or
 # tests/ changed is declared not valid and exits with status 70, whatever the suite said.
 #
+# Generated tests cover as many cases as the environment variables in COVERAGE say (NAME=default). A run with any of
+# them set to another value, smaller or larger, ends with a summary line calling it a PARTIAL run: it is not evidence
+# that the code is ready, which takes a run at the defaults on the head commit (a larger count is extra coverage only).
+# The exit status does not change.
+#
 # One run at a time: runs share the tests database, and a second one's start (the core test library reinstalls the
 # tables; the leftover check removes an earlier run's) breaks the first. The lock is a flock() on
 # /tmp/wpcheckpoint-integration.lock in the container every run executes in, taken on a descriptor PHPUnit inherits:
@@ -38,6 +43,9 @@ NAMED=""
 WORK=""
 READY=""
 BEFORE=""
+PARTIAL=""
+RAN=""
+COVERAGE="WPCHECKPOINT_CLONE_SEQUENCES=300 WPCHECKPOINT_CLONE_SEQUENCES_SEED=1"
 
 # The code the run tests: a fingerprint of every file under src/ and tests/, by content and name. PHP loads a class
 # when it is first used, so a file changed during a run mixes two versions of the code in one result. Fails when a
@@ -73,6 +81,13 @@ on_exit() {
 		elif [ "$AFTER" != "$BEFORE" ]; then
 			echo "This run is not valid: files under src/ or tests/ changed while it ran, so its result mixes two versions of the code. Run it again on code that stays as it is." >&2
 			rc=70
+		fi
+	fi
+	if [ -n "$RAN" ]; then
+		if [ -n "$PARTIAL" ]; then
+			echo "Integration run summary: PARTIAL run (${PARTIAL# }). Not evidence that the code is ready: that takes a run at the default counts on the head commit." >&2
+		else
+			echo "Integration run summary: default counts." >&2
 		fi
 	fi
 	if [ -n "$NAMED" ]; then
@@ -121,6 +136,14 @@ fi
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/wpcheckpoint-it.XXXXXX") || { WORK=""; exit 1; }
 mkdir "$WORK/cwd" "$WORK/tmp" || exit 1
 READY=1
+for setting in $COVERAGE; do
+	name=${setting%%=*}
+	eval "value=\${$name-}" # A name from COVERAGE above, never from outside.
+	if [ -n "$value" ] && [ "$value" != "${setting#*=}" ]; then
+		PARTIAL="$PARTIAL $name=$value instead of ${setting#*=};"
+	fi
+done
+PARTIAL=${PARTIAL%;}
 BEFORE=$(fingerprint) || { BEFORE=""; echo "The files under src/ and tests/ could not all be read; the run could not tell whether they change during it." >&2; exit 1; }
 
 # A path relative to the plugin's directory, made absolute.
@@ -164,5 +187,6 @@ done
 
 cd "$WORK/cwd" || exit 1
 eval "set -- $ARGS"
+RAN=1
 TMPDIR="$WORK/tmp" WPCHECKPOINT_TEST_RUN_TMP="$WORK/tmp" WPCHECKPOINT_TEST_SUITE=integration php "$PHPUNIT" -c "$CONFIG" --testsuite integration "$@"
 exit $?

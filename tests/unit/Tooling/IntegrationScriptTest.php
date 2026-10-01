@@ -414,4 +414,59 @@ final class IntegrationScriptTest extends TestCase {
 		$this->assertSame( 70, $run['code'], 'code that cannot be read again at the end cannot be shown unchanged' );
 		$this->assertStringContainsString( 'could not be read again at its end', $run['stderr'] );
 	}
+
+	public function test_a_run_at_other_than_the_default_counts_is_called_partial(): void {
+		$run = $this->run_script( array() );
+		$this->assertSame( 0, $run['code'], $run['stderr'] );
+		$this->assertStringContainsString( 'Integration run summary: default counts.', $run['stderr'], 'the control: the summary is there' );
+		$this->assertStringNotContainsString( 'PARTIAL', $run['stderr'] );
+
+		$run = $this->run_script( array(), array( 'WPCHECKPOINT_CLONE_SEQUENCES' => '300' ) );
+		$this->assertStringContainsString( 'Integration run summary: default counts.', $run['stderr'], 'the default, set explicitly' );
+
+		foreach ( array( array( 'WPCHECKPOINT_CLONE_SEQUENCES', '3000', '300' ), array( 'WPCHECKPOINT_CLONE_SEQUENCES', '50', '300' ), array( 'WPCHECKPOINT_CLONE_SEQUENCES_SEED', '7', '1' ) ) as list( $name, $value, $default ) ) {
+			$run = $this->run_script( array(), array( $name => $value ) );
+			$this->assertSame( 0, $run['code'], 'the status is the suite\'s' );
+			$this->assertStringContainsString( 'Integration run summary: PARTIAL run (' . $name . '=' . $value . ' instead of ' . $default . ')', $run['stderr'], 'larger or smaller' );
+			$this->assertStringNotContainsString( 'summary: default counts', $run['stderr'] );
+		}
+	}
+
+	/**
+	 * The generator settings the integration tests read, with their defaults: getenv( 'NAME' ) ?: N.
+	 *
+	 * @return array<string, string>
+	 */
+	private static function generator_settings( string $source ): array {
+		preg_match_all( "/getenv\\(\\s*'(WPCHECKPOINT_[A-Z0-9_]+)'\\s*\\)\\s*\\?:\\s*(\\d+)/", $source, $found, PREG_SET_ORDER );
+		$settings = array();
+		foreach ( $found as $match ) {
+			$settings[ $match[1] ][] = $match[2];
+		}
+		return array_map(
+			static function ( array $defaults ): string {
+				return implode( ' or ', array_unique( $defaults ) ); // Two defaults for one name never match the script's one.
+			},
+			$settings
+		);
+	}
+
+	public function test_the_script_knows_every_generator_setting_and_its_default(): void {
+		$this->assertSame( array( 'WPCHECKPOINT_X' => '12' ), self::generator_settings( "\$n = (int) ( getenv( 'WPCHECKPOINT_X' ) ?: 12 );" ), 'the control: the scan finds the form' );
+		$source = '';
+		foreach ( glob( dirname( __DIR__, 2 ) . '/integration/*.php' ) ?: array() as $file ) {
+			$source .= (string) file_get_contents( $file );
+		}
+		$tests = self::generator_settings( $source );
+		$this->assertArrayHasKey( 'WPCHECKPOINT_CLONE_SEQUENCES', $tests, 'the control: the scan sees the tests' );
+		$this->assertSame( 1, preg_match( '/^COVERAGE="([^"]*)"$/m', (string) file_get_contents( dirname( __DIR__, 3 ) . '/bin/test-integration.sh' ), $line ) );
+		$script = array();
+		foreach ( preg_split( '/\s+/', trim( $line[1] ) ) ?: array() as $setting ) {
+			list( $name, $default ) = explode( '=', $setting, 2 );
+			$script[ $name ]        = $default;
+		}
+		ksort( $tests );
+		ksort( $script );
+		$this->assertSame( $tests, $script, 'every setting the tests read, with the same default' );
+	}
 }
