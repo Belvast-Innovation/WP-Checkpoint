@@ -408,6 +408,9 @@ final class StorageReclaim {
 			$temp    = $marker . '.' . bin2hex( random_bytes( 4 ) ) . '.tmp';
 			$written = false !== @file_put_contents( $temp, OwnerMarker::build( (string) $this->state['install_id'], (string) $this->context['abspath'] ), LOCK_EX ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents,WordPress.PHP.NoSilencedErrors.Discouraged -- plugin-owned directory; a warning would name the path (the failure is answered below).
 			if ( ! $written ) {
+				if ( @is_file( $temp ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a warning would name the path.
+					wp_delete_file( $temp ); // What a write that failed part way (a full disk) left.
+				}
 				return array(
 					'ok'      => false,
 					'message' => __( 'The owner marker could not be rewritten.', 'wp-checkpoint' ),

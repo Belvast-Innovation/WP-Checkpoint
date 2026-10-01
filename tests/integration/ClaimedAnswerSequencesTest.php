@@ -17,8 +17,11 @@ use WPCheckpoint\Tests\Fixtures\Sandbox;
  * or die at any point of the take-over and of the answer's writes: the prechecks refusing (a job working there), the
  * take-over lock busy, dying after the take-over recorded the hash it is about to write, losing the lock at its last
  * check, the marker write failing, dying after the marker was replaced, dying after the answer was recorded; and
- * answering "copy", which may die after the acknowledgement. Between attempts the site may be deployed to a new
- * release, so attempts come from several WordPress directories.
+ * answering "copy", which may die after the acknowledgement; and the notice's plain "continue with the original
+ * directory" mixed in. Between attempts the site may be deployed to a new release or go back to an earlier one, so
+ * attempts come from several WordPress directories. Covered: a custom storage directory (WPCHECKPOINT_STORAGE_DIR),
+ * which every release shares and every request detects again; not covered: the default directory (a newer move
+ * replaces the detection there, by design), concurrent requests, multisite.
  *
  * Invariant, from a fresh request after every attempt (the interference gone, the lock's time passed): either the
  * take-over is done (the original directory in use with its token, the job holding the site runs, nothing asked, no
@@ -139,7 +142,7 @@ final class ClaimedAnswerSequencesTest extends WP_UnitTestCase {
 				// Another deployment before this attempt: the site answers from a new release, or goes back to one
 				// it was at before (its earlier release, as a rollback or a worker that still runs it).
 				if ( 0 === mt_rand( 0, 2 ) ) {
-					$here    = $tag . '/releases/' . mt_rand( 2, $release );
+					$here    = $tag . '/releases/' . mt_rand( 1, $release );
 					$steps[] = 'back to ' . basename( $here );
 					$this->seen['back'] = ( $this->seen['back'] ?? 0 ) + 1;
 				} else {
@@ -152,15 +155,20 @@ final class ClaimedAnswerSequencesTest extends WP_UnitTestCase {
 				$moved    = $this->dirs( $here, $store );
 				$question = $moved->identity_question();
 				if ( $store === $moved->base() && empty( $moved->state()['clone_detected'] ) ) {
+					// Back where a take-over had finished: done, with what done means.
+					if ( $token !== (string) $moved->state()['token'] || null !== $question || ! $this->runs( $job->id, $here, $store ) ) {
+						$found[] = sprintf( 'done (seed %d, after %s): the token, the question or the job is wrong', $seed, implode( ', ', $steps ) );
+					}
 					$this->seen['done'] = ( $this->seen['done'] ?? 0 ) + 1;
-					return $found; // Back where a take-over had finished: done.
+					return $found;
 				}
 				if ( null === $question ) {
 					$found[] = sprintf( 'dead end (seed %d, after %s): nothing asked where the site is now', $seed, implode( ', ', $steps ) );
 					return $found;
 				}
 			}
-			$answer = 0 === mt_rand( 0, 9 ) ? Directories::ANSWER_COPY : Directories::ANSWER_SAME;
+			$roll   = mt_rand( 0, 9 );
+			$answer = 0 === $roll ? Directories::ANSWER_COPY : ( 1 === $roll ? 'continue' : Directories::ANSWER_SAME );
 			$point  = self::POINTS[ mt_rand( 0, count( self::POINTS ) - 1 ) ];
 			if ( 'write_fail' === $point && ! $can_lock_out ) {
 				$point = 'none';
@@ -168,17 +176,22 @@ final class ClaimedAnswerSequencesTest extends WP_UnitTestCase {
 			if ( Directories::ANSWER_COPY === $answer ) {
 				$point = 0 === mt_rand( 0, 1 ) ? 'acknowledged' : 'none';
 			}
+			if ( 'continue' === $answer ) {
+				$point = 'none'; // The notice's own "continue with the original directory", as ReclaimActions runs it.
+			}
 			$steps[] = $answer . '@' . $point;
 			$where   = sprintf( '(seed %d, after %s)', $seed, implode( ', ', $steps ) );
 			$this->seen[ $answer . '@' . $point ] = ( $this->seen[ $answer . '@' . $point ] ?? 0 ) + 1;
 
 			$hooks = array();
+			$seen  = &$this->seen;
 			if ( 'prechecks' === $point ) {
 				file_put_contents( $store . '/tmp/working.tmp', 'x' ); // A job working there: the prechecks refuse.
 			} elseif ( 'lock_busy' === $point ) {
 				file_put_contents( StorageReclaim::lock_path( $store ), "other\n" ); // Another take-over holds the lock.
 			} elseif ( in_array( $point, array( 'after_hash', 'lock_lost', 'write_fail' ), true ) ) {
-				$hooks['before_rename'] = static function ( string $dir ) use ( $point ): void {
+				$hooks['before_rename'] = static function ( string $dir ) use ( $point, &$seen ): void {
+					$seen[ 'fired: ' . $point ] = ( $seen[ 'fired: ' . $point ] ?? 0 ) + 1; // It took effect.
 					if ( 'after_hash' === $point ) {
 						throw new \RuntimeException( 'died' );
 					}
@@ -189,8 +202,9 @@ final class ClaimedAnswerSequencesTest extends WP_UnitTestCase {
 					chmod( $dir, 0555 ); // The marker cannot be written.
 				};
 			} elseif ( in_array( $point, array( 'taken', 'recorded', 'acknowledged' ), true ) ) {
-				$hooks['identity_step'] = static function ( string $step ) use ( $point ): void {
+				$hooks['identity_step'] = static function ( string $step ) use ( $point, &$seen ): void {
 					if ( $step === $point ) {
+						$seen[ 'fired: ' . $point ] = ( $seen[ 'fired: ' . $point ] ?? 0 ) + 1; // It took effect.
 						throw new \RuntimeException( 'died' );
 					}
 				};
@@ -198,8 +212,16 @@ final class ClaimedAnswerSequencesTest extends WP_UnitTestCase {
 			$asking = $this->dirs( $here, $store, $hooks );
 			$shown  = $asking->identity_question();
 			try {
-				if ( null !== $shown ) {
-					$asking->answer_identity( $answer, $shown['id'] );
+				if ( 'continue' === $answer ) {
+					$result = $asking->reclaim()->reclaim( false );
+					if ( $result['ok'] ) {
+						$asking->finish_reclaim();
+					}
+				} elseif ( null !== $shown ) {
+					$result = $asking->answer_identity( $answer, $shown['id'] );
+					if ( ! $result['ok'] && in_array( $point, array( 'prechecks', 'lock_busy' ), true ) ) {
+						$this->seen[ 'refused: ' . $point ] = ( $this->seen[ 'refused: ' . $point ] ?? 0 ) + 1; // It took effect.
+					}
 				}
 			} catch ( \RuntimeException $e ) {
 				if ( 'died' !== $e->getMessage() ) {
@@ -219,6 +241,7 @@ final class ClaimedAnswerSequencesTest extends WP_UnitTestCase {
 			$next = $this->dirs( $here, $store );
 			$base = $next->base();
 			if ( Directories::ANSWER_COPY === $answer && null !== $shown ) {
+				// Answered "copy" (possibly dying after the acknowledgement): nothing asked, the directory let go.
 				if ( null !== $next->identity_question() || $store === $base ) {
 					$found[] = sprintf( 'copy %s: still asked, or the directory in use', $where );
 				}
@@ -256,9 +279,10 @@ final class ClaimedAnswerSequencesTest extends WP_UnitTestCase {
 		}
 		$this->assertSame( array(), array_slice( $found, 0, 10 ), count( $found ) . ' violations' );
 		// The controls: each point came up, and sequences ended both ways.
-		$points = array( 'same@none', 'same@prechecks', 'same@lock_busy', 'same@after_hash', 'same@lock_lost', 'same@taken', 'same@recorded', 'copy@none', 'copy@acknowledged', 'done', 'deploy', 'back' );
+		// Counted where they take effect: the hook fired, the attempt was refused; not merely chosen.
+		$points = array( 'same@none', 'refused: prechecks', 'refused: lock_busy', 'fired: after_hash', 'fired: lock_lost', 'fired: taken', 'fired: recorded', 'copy@none', 'fired: acknowledged', 'continue@none', 'done', 'deploy', 'back' );
 		if ( ! ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) ) {
-			$points[] = 'same@write_fail';
+			$points[] = 'fired: write_fail';
 		}
 		foreach ( $points as $point ) {
 			$this->assertGreaterThan( 0, $this->seen[ $point ] ?? 0, 'the control: ' . $point . ' ' . wp_json_encode( $this->seen ) );

@@ -907,14 +907,16 @@ final class Directories {
 		// copy whose custom directory names another place, or was emptied, never sees the original's marker). When
 		// that cannot be told either, nothing is chosen, recorded or saved.
 		// A "continue with the original directory" that rewrote the marker and died before saving the state: the
-		// previous directory now carries this installation's marker for this ABSPATH with the very hash the take-over
-		// recorded before rewriting it. It is finished here (the replay rule of that step), unless this request's
-		// WPCHECKPOINT_STORAGE_DIR names another directory: that one is checked as usual.
+		// previous directory now carries this installation's marker for this ABSPATH, with a hash a take-over of this
+		// installation recorded (the one it was about to write, or the one it found the marker holding). It is
+		// finished here (the replay rule of that step), unless this request's WPCHECKPOINT_STORAGE_DIR names another
+		// directory: that one is checked as usual. Not told apart: the storage constant pointed elsewhere and back
+		// while the move was waiting, so that the hash was recorded by an attempt that never replaced the marker.
 		$previous  = (string) $this->state['previous_path'];
 		$other_dir = '' !== (string) $this->context['custom_dir'] && ! Paths::same_location( rtrim( (string) $this->context['custom_dir'], '/\\' ), $previous );
 		if ( ! empty( $this->state['clone_detected'] ) && '' !== $previous && ! $other_dir && self::MARKER_OWN === $this->marker( $previous ) && $this->recorded_by_take_over( (string) ( $this->marker_hashes[ rtrim( $previous, '/\\' ) ] ?? '' ) ) ) {
 			$this->finish_reclaim();
-			$this->log_event( sprintf( 'Continuing with the storage directory %s, which a request had taken over but died before recording it.', $previous ) );
+			$this->log_event( sprintf( 'Continuing with the storage directory %s: it carries this site\'s marker for this WordPress directory, with a hash a take-over of this site recorded, and the move was still waiting (a take-over that died before recording that it was done).', $previous ) );
 			return;
 		}
 
