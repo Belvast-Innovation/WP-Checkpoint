@@ -2,6 +2,7 @@
 
 namespace WPCheckpoint\Tests\Unit\Tooling;
 
+use WPCheckpoint\Tests\Fixtures\ExpectedPath;
 use WPCheckpoint\Tests\Fixtures\ProbeDir;
 use WPCheckpoint\Tests\Fixtures\Sandbox;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
@@ -47,7 +48,7 @@ final class ProbeDirTest extends TestCase {
 		$stale = $this->make( ProbeDir::PREFIX . '0123456789abcdef' );
 		$other = $this->make( ProbeDir::PREFIX . 'fedcba9876543210' ); // Another run's: not named, so not touched.
 		$said  = ProbeDir::remove_stale( $this->content, '0123456789abcdef' );
-		$this->assertStringContainsString( 'Removed the probe directory ' . $stale, $said );
+		$this->assertStringContainsString( 'Removed the probe directory ' . ExpectedPath::native( $this->content, ProbeDir::PREFIX . '0123456789abcdef' ), $said );
 		$this->assertDirectoryDoesNotExist( $stale );
 		$this->assertFileExists( $other . '/probe.key', 'the control: only the named run\'s goes' );
 		$this->assertSame( '', ProbeDir::remove_stale( $this->content, '0123456789abcdef' ), 'gone already: nothing to say' );
