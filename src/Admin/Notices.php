@@ -73,6 +73,35 @@ final class Notices {
 			);
 		}
 
+		$question = $this->directories->identity_question();
+		if ( null !== $question ) {
+			$notices['site_identity'] = array(
+				'type'        => 'warning',
+				'message'     => 'claimed' === $question['kind']
+					? __( 'Whether to continue with the original storage directory cannot be told: a request of this site took it over and stopped before recording that, and the WordPress directory has moved again since; a copy of this site made meanwhile would look the same. Only you can tell. Your answer is recorded with the time, and the same pair of directories is not asked about again.', 'wp-checkpoint' )
+					: __( 'Whether this is the site that chose the storage directory cannot be told from the paths: one of the two WordPress directories below cannot be looked at from here. Only you can tell. Your answer is recorded with the time, and the same pair of directories is not asked about again.', 'wp-checkpoint' ),
+				/* translators: 1: WordPress directory recorded before, 2: WordPress directory of this request */
+				'extra'       => sprintf( __( "WordPress directory then: %1\$s\nWordPress directory now:  %2\$s", 'wp-checkpoint' ), $question['recorded'], $question['here'] ),
+				'dismissible' => false,
+				'answers'     => array(
+					array(
+						Directories::ANSWER_COPY,
+						__( 'This site is a copy, or was moved here', 'wp-checkpoint' ),
+						'claimed' === $question['kind']
+							? __( 'Keeps the new storage directory; the original one, and the jobs started with it, are left to the other copy.', 'wp-checkpoint' )
+							: __( 'This site takes a storage token and directory of its own; the jobs started before are not run here.', 'wp-checkpoint' ),
+					),
+					array(
+						Directories::ANSWER_SAME,
+						__( 'This is the same site', 'wp-checkpoint' ),
+						'claimed' === $question['kind']
+							? __( 'Continues with the original storage directory and its jobs. If this is in fact a copy, it takes the directory away from the original site, and the original\'s jobs may run here.', 'wp-checkpoint' )
+							: __( 'Keeps using the original storage token. If this is in fact a copy, the original site\'s jobs may run here.', 'wp-checkpoint' ),
+					),
+				),
+			);
+		}
+
 		if ( ! empty( $state['clone_detected'] ) ) {
 			$reclaim = $this->directories->reclaim();
 			$verdict = $reclaim->classify();
@@ -81,12 +110,15 @@ final class Notices {
 			} else {
 				$message = __( 'The WordPress directory changed (a deployment or a move?). WP Checkpoint left the previous backup directory untouched and now uses a new one. If this is the same site, continue with the original directory: keeping the new one makes the jobs started before (a restore in progress among them) the original site\'s, and they are not run here.', 'wp-checkpoint' );
 			}
+			if ( $this->directories->moved_back() ) {
+				$message .= ' ' . __( 'The WordPress directory went back to where an earlier move came from (as when workers of two releases take turns during a deployment). If this site is deployed in releases, set a trusted deployment root in Settings: each new release is then taken over without asking.', 'wp-checkpoint' );
+			}
 			$notices['clone_detected'] = array(
 				'type'        => 'warning',
 				'message'     => $message,
 				'extra'       => '' !== $state['previous_path'] ? $state['previous_path'] : '',
 				'dismissible' => true,
-				'link'        => $reclaim->marker_install_id_matches( (string) $state['previous_path'] ) ? array( ReclaimActions::confirmation_url(), __( 'This is the same site: review and continue with the original directory', 'wp-checkpoint' ) ) : array(),
+				'link'        => null === $question && $reclaim->marker_install_id_matches( (string) $state['previous_path'] ) ? array( ReclaimActions::confirmation_url(), __( 'This is the same site: review and continue with the original directory', 'wp-checkpoint' ) ) : array(),
 				'dismiss'     => __( 'Keep the new directory', 'wp-checkpoint' ),
 			);
 		}
@@ -199,6 +231,14 @@ final class Notices {
 				<?php if ( $notice['dismissible'] ) : ?>
 					<a class="button button-small" href="<?php echo esc_url( $this->dismiss_url( $id ) ); ?>"><?php echo esc_html( isset( $notice['dismiss'] ) ? $notice['dismiss'] : __( 'Dismiss', 'wp-checkpoint' ) ); ?></a></p>
 				<?php endif; ?>
+				<?php foreach ( isset( $notice['answers'] ) ? $notice['answers'] : array() as $answer ) : ?>
+					<form method="post" action="<?php echo esc_url( Page::post_url() ); ?>">
+						<input type="hidden" name="action" value="<?php echo esc_attr( SiteIdentityActions::ACTION ); ?>" />
+						<input type="hidden" name="_wpnonce" value="<?php echo esc_attr( Guard::nonce( SiteIdentityActions::NONCE ) ); ?>" />
+						<input type="hidden" name="<?php echo esc_attr( SiteIdentityActions::FIELD ); ?>" value="<?php echo esc_attr( $answer[0] ); ?>" />
+						<p><button type="submit" class="button"><?php echo esc_html( $answer[1] ); ?></button> <?php echo esc_html( $answer[2] ); ?></p>
+					</form>
+				<?php endforeach; ?>
 			</div>
 			<?php
 		}

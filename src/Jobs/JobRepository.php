@@ -1363,6 +1363,7 @@ final class JobRepository {
 			return 0;
 		}
 		$token    = (string) $state['token'];
+		$lost     = (array) ( $state['lost_tokens'] ?? array() );
 		$failed   = 0;
 		$listings = array();
 		foreach ( $this->list_jobs( array( Job::QUEUED, Job::RUNNING, Job::PAUSED ), 500 ) as $job ) {
@@ -1379,6 +1380,17 @@ final class JobRepository {
 					// Final: this storage directory is not the job's, and the job's is positively not at its path; a
 					// retry from here could not continue it.
 					$this->force_transition( $job, Job::FAILED, __( 'The storage directory of this job is no longer at the path it was started in; the job cannot continue from this storage directory.', 'wp-checkpoint' ), Job::FAILURE_FINAL );
+					++$failed;
+				} catch ( StaleJob $e ) {
+					continue;
+				}
+				continue;
+			}
+			if ( isset( $lost[ $job->storage_token ] ) ) {
+				try {
+					// Final: a move detected after the one that set this job's token aside replaced it before the
+					// administrator answered; no "continue with the original directory" gives the token back.
+					$this->force_transition( $job, Job::FAILED, __( 'The site\'s identity changed during a deployment: its WordPress directory moved again before the earlier move was resolved, and continuing with the original directory gives back only the latest move\'s jobs. Start this job again.', 'wp-checkpoint' ), Job::FAILURE_FINAL );
 					++$failed;
 				} catch ( StaleJob $e ) {
 					continue;

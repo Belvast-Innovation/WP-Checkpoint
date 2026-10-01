@@ -167,16 +167,18 @@ final class ToolsTab implements Tab {
 		$detail   = get_site_transient( StoredNames::reclaim_message( get_current_user_id() ) );
 		$detail   = is_string( $detail ) ? $detail : '';
 		$messages = array(
-			'rechecked'      => array( 'success', __( 'Environment re-checked.', 'wp-checkpoint' ) ),
-			'verified'       => array( 'success', __( 'Directory protection re-verified.', 'wp-checkpoint' ) ),
-			'locked'         => array( 'warning', __( 'That check ran less than a minute ago; please wait before running it again.', 'wp-checkpoint' ) ),
-			'reclaimed'      => array( 'success', '' === $detail ? __( 'The original storage directory is in use again.', 'wp-checkpoint' ) : $detail ),
-			'reclaim_failed' => array( 'error', '' === $detail ? __( 'The original storage directory could not be reclaimed.', 'wp-checkpoint' ) : $detail ),
+			'rechecked'         => array( 'success', __( 'Environment re-checked.', 'wp-checkpoint' ) ),
+			'verified'          => array( 'success', __( 'Directory protection re-verified.', 'wp-checkpoint' ) ),
+			'locked'            => array( 'warning', __( 'That check ran less than a minute ago; please wait before running it again.', 'wp-checkpoint' ) ),
+			'reclaimed'         => array( 'success', '' === $detail ? __( 'The original storage directory is in use again.', 'wp-checkpoint' ) : $detail ),
+			'reclaim_failed'    => array( 'error', '' === $detail ? __( 'The original storage directory could not be reclaimed.', 'wp-checkpoint' ) : $detail ),
+			'identity_answered' => array( 'success', '' === $detail ? __( 'Your answer was recorded.', 'wp-checkpoint' ) : $detail ),
+			'identity_failed'   => array( 'error', '' === $detail ? __( 'Your answer could not be recorded.', 'wp-checkpoint' ) : $detail ),
 		);
 		if ( ! isset( $messages[ $result ] ) ) {
 			return;
 		}
-		if ( in_array( $result, array( 'reclaimed', 'reclaim_failed' ), true ) ) {
+		if ( in_array( $result, array( 'reclaimed', 'reclaim_failed', 'identity_answered', 'identity_failed' ), true ) ) {
 			delete_site_transient( StoredNames::reclaim_message( get_current_user_id() ) );
 		}
 		list( $type, $text ) = $messages[ $result ];

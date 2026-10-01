@@ -177,10 +177,12 @@ final class StorageReclaim {
 	/**
 	 * Manual take-over after the administrator confirmed.
 	 *
-	 * @param bool $trust_root Remember the deployment root for automatic take-overs.
+	 * @param bool   $trust_root Remember the deployment root for automatic take-overs.
+	 * @param string $answered   A marker hash the administrator answered for (Directories::answer_identity(): this
+	 *                           installation's own take-over that died, when the site moved again since), or ''.
 	 * @return array{ok: bool, message: string, trusted_root: string}
 	 */
-	public function reclaim( bool $trust_root ): array {
+	public function reclaim( bool $trust_root, string $answered = '' ): array {
 		$checks = $this->prechecks();
 		if ( ! $checks['ok'] ) {
 			return array(
@@ -190,7 +192,7 @@ final class StorageReclaim {
 			);
 		}
 		$dir    = $this->target();
-		$result = $this->rewrite_marker( $dir );
+		$result = $this->rewrite_marker( $dir, $answered );
 		if ( ! $result['ok'] ) {
 			return array(
 				'ok'           => false,
@@ -356,10 +358,11 @@ final class StorageReclaim {
 	 * Rewrite the owner marker with the current ABSPATH, under a lock and
 	 * only while the marker still reads exactly as recorded.
 	 *
-	 * @param string $dir Directory.
+	 * @param string $dir      Directory.
+	 * @param string $answered A marker hash the administrator answered for, or ''.
 	 * @return array{ok: bool, message: string}
 	 */
-	private function rewrite_marker( string $dir ): array {
+	private function rewrite_marker( string $dir, string $answered = '' ): array {
 		$secret = $this->acquire_lock( $dir );
 		if ( '' === $secret ) {
 			return array(
@@ -379,8 +382,9 @@ final class StorageReclaim {
 			// through a link may resolve elsewhere by now, a deployment's "current" pointed at a new release), or, for
 			// state written before that was recorded, a hash of the ABSPATH recorded then, either form. An attempt
 			// that died after rewriting the marker is finished by the next request (Directories::resolve()).
-			$recorded = isset( $this->state['previous_marker_hash'] ) ? (string) $this->state['previous_marker_hash'] : '';
-			if ( ! ( '' !== $recorded && hash_equals( $recorded, $lines[1] ) ) && ! OwnerMarker::is_hash_of( $lines[1], (string) $this->state['previous_abspath'] ) ) {
+			$recorded    = isset( $this->state['previous_marker_hash'] ) ? (string) $this->state['previous_marker_hash'] : '';
+			$as_answered = '' !== $answered && hash_equals( $answered, $lines[1] ); // The administrator said it is this site's.
+			if ( ! $as_answered && ! ( '' !== $recorded && hash_equals( $recorded, $lines[1] ) ) && ! OwnerMarker::is_hash_of( $lines[1], (string) $this->state['previous_abspath'] ) ) {
 				return array(
 					'ok'      => false,
 					'message' => __( 'Another copy of this site has already claimed the directory since it was recorded here.', 'wp-checkpoint' ),

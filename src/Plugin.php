@@ -14,10 +14,12 @@ use WPCheckpoint\Admin\Notices;
 use WPCheckpoint\Admin\ReclaimActions;
 use WPCheckpoint\Admin\Page;
 use WPCheckpoint\Admin\SettingsActions;
+use WPCheckpoint\Admin\SiteIdentityActions;
 use WPCheckpoint\Admin\JobProgress;
 use WPCheckpoint\Admin\LogDownload;
 use WPCheckpoint\Cli\ExportCommand;
 use WPCheckpoint\Cli\JobCommand;
+use WPCheckpoint\Cli\SiteIdentityCommand;
 use WPCheckpoint\Cli\VerifyCommand;
 use WPCheckpoint\Jobs\JobActions;
 use WPCheckpoint\Jobs\JobPresenter;
@@ -159,6 +161,7 @@ final class Plugin {
 			\WP_CLI::add_command( 'wpcheckpoint job', new JobCommand( $this->job_actions(), $this->job_presenter(), $this->directories() ) );
 			\WP_CLI::add_command( 'wpcheckpoint verify', new VerifyCommand( $this->job_presenter(), $this->directories() ) );
 			\WP_CLI::add_command( 'wpcheckpoint export', new ExportCommand( $this->job_actions(), $this->job_presenter(), $this->directories() ) );
+			\WP_CLI::add_command( 'wpcheckpoint site-identity', new SiteIdentityCommand( $this->job_presenter(), $this->directories() ) );
 		}
 
 		if ( is_admin() ) {
@@ -204,6 +207,7 @@ final class Plugin {
 		( new Notices( $this->directories() ) )->register();
 		( new EnvironmentActions( $this->directories() ) )->register();
 		( new ReclaimActions( $this->directories() ) )->register();
+		( new SiteIdentityActions( $this->directories() ) )->register();
 		add_action( 'admin_enqueue_scripts', array( $this, 'enqueue_admin_assets' ) );
 	}
 
