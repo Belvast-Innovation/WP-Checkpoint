@@ -467,16 +467,29 @@ final class SiteIdentityTest extends WP_UnitTestCase {
 		);
 	}
 
+	/**
+	 * A hook that ends the request at one step of answer_identity() (between two of its writes).
+	 */
+	private static function dies_at( string $at ): callable {
+		return static function ( string $step ) use ( $at ): void {
+			if ( $step === $at ) {
+				throw new \RuntimeException( 'died' );
+			}
+		};
+	}
+
 	public function test_an_answer_recorded_before_the_take_over_finished_is_finished_by_the_next_request(): void {
 		list( $store, , $token ) = $this->claimed();
-		$next                    = $this->dirs( 's2/releases/3', $store );
-		$question                = $next->identity_question();
-		// The state a request leaves when it dies between recording the answer and finishing: the marker rewritten
-		// for release 3 (with the hash recorded before), the answer recorded, the move still waiting.
-		$this->assertTrue( $next->reclaim()->reclaim( false, $question['hash'] )['ok'] );
-		$state                                        = Options::get( Directories::OPTION, array() );
-		$state['identity_answers'][ $question['id'] ] = array( 'answer' => 'same', 'at' => time() );
-		Options::set( Directories::OPTION, $state );
+		$question                = $this->dirs( 's2/releases/3', $store )->identity_question();
+		$dying                   = $this->dirs( 's2/releases/3', $store, array( 'identity_step' => self::dies_at( 'recorded' ) ) );
+		try {
+			$dying->answer_identity( Directories::ANSWER_SAME, $question['id'] );
+			$this->fail( 'the control: the request was meant to die' );
+		} catch ( \RuntimeException $e ) {
+			$this->assertSame( 'died', $e->getMessage() );
+		}
+		$this->assertArrayHasKey( $question['id'], (array) Options::get( Directories::OPTION, array() )['identity_answers'], 'the answer recorded' );
+		$this->assertTrue( Options::get( Directories::OPTION, array() )['clone_detected'], 'the control: not finished' );
 		$after = $this->dirs( 's2/releases/3', $store );
 		$this->assertSame( $store, $after->base(), 'finished: ' . $after->last_error() );
 		$this->assertFalse( $after->state()['clone_detected'] );
@@ -486,9 +499,16 @@ final class SiteIdentityTest extends WP_UnitTestCase {
 
 	public function test_a_copy_answer_that_dies_before_it_is_recorded_leaves_no_question(): void {
 		list( $store ) = $this->claimed();
-		$next          = $this->dirs( 's2/releases/3', $store );
-		$this->assertNotNull( $next->identity_question(), 'the control: asked' );
-		$next->acknowledge_clone(); // The request dies right after this, before recording the answer.
+		$question      = $this->dirs( 's2/releases/3', $store )->identity_question();
+		$this->assertNotNull( $question, 'the control: asked' );
+		$dying = $this->dirs( 's2/releases/3', $store, array( 'identity_step' => self::dies_at( 'acknowledged' ) ) );
+		try {
+			$dying->answer_identity( Directories::ANSWER_COPY, $question['id'] );
+			$this->fail( 'the control: the request was meant to die' );
+		} catch ( \RuntimeException $e ) {
+			$this->assertSame( 'died', $e->getMessage() );
+		}
+		$this->assertSame( array(), (array) Options::get( Directories::OPTION, array() )['identity_answers'], 'the control: not recorded' );
 		$this->assertNull( $this->dirs( 's2/releases/3', $store )->identity_question(), 'nothing left to answer' );
 	}
 }

@@ -76,9 +76,9 @@ final class StorageReclaim {
 	}
 
 	/**
-	 * Record, before the marker is rewritten, the hash it is about to hold.
+	 * Record, before the marker is rewritten, the hash it is about to hold and the one it holds (read under the lock).
 	 *
-	 * @param callable $callback Receives the hash.
+	 * @param callable $callback Receives the hash to be written and the marker's current one.
 	 * @return void
 	 */
 	public function on_rewrite( callable $callback ): void {
@@ -398,7 +398,7 @@ final class StorageReclaim {
 			}
 
 			if ( null !== $this->on_rewrite ) {
-				call_user_func( $this->on_rewrite, OwnerMarker::hash_path( (string) $this->context['abspath'] ) );
+				call_user_func( $this->on_rewrite, OwnerMarker::hash_path( (string) $this->context['abspath'] ), $lines[1] );
 			}
 
 			if ( null !== $this->before_rename ) {
@@ -406,7 +406,7 @@ final class StorageReclaim {
 			}
 			$marker  = $dir . DIRECTORY_SEPARATOR . OwnerMarker::FILENAME;
 			$temp    = $marker . '.' . bin2hex( random_bytes( 4 ) ) . '.tmp';
-			$written = false !== file_put_contents( $temp, OwnerMarker::build( (string) $this->state['install_id'], (string) $this->context['abspath'] ), LOCK_EX ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- plugin-owned directory.
+			$written = false !== @file_put_contents( $temp, OwnerMarker::build( (string) $this->state['install_id'], (string) $this->context['abspath'] ), LOCK_EX ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents,WordPress.PHP.NoSilencedErrors.Discouraged -- plugin-owned directory; a warning would name the path (the failure is answered below).
 			if ( ! $written ) {
 				return array(
 					'ok'      => false,
@@ -421,7 +421,7 @@ final class StorageReclaim {
 					'message' => __( 'The reclaim lock was taken over by another process.', 'wp-checkpoint' ),
 				);
 			}
-			$ok = rename( $temp, $marker ); // phpcs:ignore WordPress.WP.AlternativeFunctions.rename_rename -- atomic replace of a plugin-owned file.
+			$ok = @rename( $temp, $marker ); // phpcs:ignore WordPress.WP.AlternativeFunctions.rename_rename,WordPress.PHP.NoSilencedErrors.Discouraged -- atomic replace of a plugin-owned file; a warning would name the path (the failure is answered below).
 			if ( is_file( $temp ) ) {
 				wp_delete_file( $temp );
 			}

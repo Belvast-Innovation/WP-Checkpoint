@@ -64,7 +64,7 @@ final class Directories {
 	/**
 	 * Environment (injectable for tests).
 	 *
-	 * @var array{abspath: string, content_dir: string, document_root: string, is_web_request: bool, custom_dir: string, wordpress_dirs: array{within: array<string, string>, itself: array<string, string>}|null, after_marker: callable|null, read_marker: callable|null, before_mark: callable|null, before_rename: callable|null}
+	 * @var array{abspath: string, content_dir: string, document_root: string, is_web_request: bool, custom_dir: string, wordpress_dirs: array{within: array<string, string>, itself: array<string, string>}|null, after_marker: callable|null, read_marker: callable|null, before_mark: callable|null, before_rename: callable|null, identity_step: callable|null}
 	 */
 	private $context;
 
@@ -143,10 +143,12 @@ final class Directories {
 	 * marker is written: a request that dies there), a before_mark callable (called in prepare() right before the marker
 	 * is written, once the directory was found usable: another request writing one meanwhile), a read_marker
 	 * callable (function( string $path ): string|false, reading the owner marker in place of file_get_contents(): a
-	 * marker that cannot be read), and a before_rename callable (StorageReclaim::on_before_rename(), called in a
-	 * take-over after the hash it is about to write was recorded and before the marker is replaced).
+	 * marker that cannot be read), a before_rename callable (StorageReclaim::on_before_rename(), called in a
+	 * take-over after the hash it is about to write was recorded and before the marker is replaced), and an
+	 * identity_step callable (function( string $step ): void, called in answer_identity() between its writes: "taken",
+	 * "recorded", "acknowledged"; a request that dies there).
 	 *
-	 * @return array{abspath: string, content_dir: string, document_root: string, is_web_request: bool, custom_dir: string, wordpress_dirs: array{within: array<string, string>, itself: array<string, string>}|null, after_marker: callable|null, read_marker: callable|null, before_mark: callable|null, before_rename: callable|null}
+	 * @return array{abspath: string, content_dir: string, document_root: string, is_web_request: bool, custom_dir: string, wordpress_dirs: array{within: array<string, string>, itself: array<string, string>}|null, after_marker: callable|null, read_marker: callable|null, before_mark: callable|null, before_rename: callable|null, identity_step: callable|null}
 	 */
 	public static function default_context(): array {
 		$document_root = '';
@@ -164,6 +166,7 @@ final class Directories {
 			'read_marker'    => null,
 			'before_mark'    => null,
 			'before_rename'  => null,
+			'identity_step'  => null,
 		);
 	}
 
@@ -516,16 +519,11 @@ final class Directories {
 		}
 		// The hash recorded by the take-over that died, or by the one before it when a later attempt recorded its own
 		// and failed or died before replacing the marker.
-		$recorded = '';
-		foreach ( array( (string) $this->state['reclaim_marker_hash'], (string) $this->state['reclaim_marker_prior'] ) as $candidate ) {
-			if ( '' !== $candidate && hash_equals( $candidate, $lines[1] ) ) {
-				$recorded = $candidate;
-			}
-		}
-		if ( '' === $recorded ) {
+		if ( ! $this->recorded_by_take_over( $lines[1] ) ) {
 			return null;
 		}
-		$here = (string) $this->context['abspath'];
+		$recorded = $lines[1];
+		$here     = (string) $this->context['abspath'];
 		if ( OwnerMarker::is_hash_of( $lines[1], $here ) || hash_equals( (string) $this->state['previous_marker_hash'], $lines[1] ) || OwnerMarker::is_hash_of( $lines[1], (string) $this->state['previous_abspath'] ) ) {
 			return null; // The marker reads as recorded, or as this ABSPATH's: nothing to ask.
 		}
@@ -616,7 +614,9 @@ final class Directories {
 			}
 			// Between the marker and the state: a request that dies here leaves the answer recorded and the marker
 			// this ABSPATH's, with the hash recorded before it was written; the next request finishes (resolve()).
+			$this->identity_step( 'taken' );
 			$this->record_answer( $question, $answer );
+			$this->identity_step( 'recorded' );
 			$this->finish_reclaim( $result['trusted_root'] );
 			$this->log_answer( $question, $answer );
 			return array(
@@ -627,6 +627,7 @@ final class Directories {
 		if ( 'claimed' === $question['kind'] ) {
 			// Acknowledged first: a request that dies before the answer is recorded leaves no question behind.
 			$this->acknowledge_clone();
+			$this->identity_step( 'acknowledged' );
 			$this->record_answer( $question, $answer );
 			$this->log_answer( $question, $answer );
 			return array(
@@ -665,6 +666,34 @@ final class Directories {
 		);
 		$this->state['identity_answers']                    = array_slice( (array) $this->state['identity_answers'], -self::KEPT_RECORDS, null, true );
 		$this->save_state();
+	}
+
+	/**
+	 * Whether a marker hash is one a take-over of this installation recorded (reclaim_marker_hash, or the one kept
+	 * beside it: reclaimer()).
+	 *
+	 * @param string $hash Marker hash.
+	 * @return bool
+	 */
+	private function recorded_by_take_over( string $hash ): bool {
+		foreach ( array( (string) $this->state['reclaim_marker_hash'], (string) $this->state['reclaim_marker_prior'] ) as $recorded ) {
+			if ( '' !== $recorded && '' !== $hash && hash_equals( $recorded, $hash ) ) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * The context's identity_step hook, if any (tests: a request that dies between two writes of answer_identity()).
+	 *
+	 * @param string $step Where.
+	 * @return void
+	 */
+	private function identity_step( string $step ): void {
+		if ( null !== $this->context['identity_step'] ) {
+			call_user_func( $this->context['identity_step'], $step );
+		}
 	}
 
 	/**
@@ -739,11 +768,11 @@ final class Directories {
 	private function reclaimer(): StorageReclaim {
 		$reclaim = new StorageReclaim( $this->state, $this->context );
 		$reclaim->on_rewrite(
-			function ( string $hash ): void {
-				// The hash recorded before (a take-over that died, which a question may be about) is kept beside it:
-				// this attempt may fail or die before its rename, and the marker then still holds the earlier one.
-				$prior                               = (string) $this->state['reclaim_marker_hash'];
-				$keep                                = '' !== $prior && ! hash_equals( $prior, $hash ) ? $prior : (string) $this->state['reclaim_marker_prior'];
+			function ( string $hash, string $current ): void {
+				// The hash the marker holds now (read under the lock: a take-over that died, which a question may be
+				// about) is kept beside the new one: this attempt may fail or die before its rename, and the marker
+				// then still holds it. So the marker's hash is always one of the two recorded, after any attempt.
+				$keep                                = $current;
 				$this->state['reclaim_marker_hash']  = $hash;
 				$this->state['reclaim_marker_prior'] = $keep;
 				Options::set(
@@ -882,9 +911,8 @@ final class Directories {
 		// recorded before rewriting it. It is finished here (the replay rule of that step), unless this request's
 		// WPCHECKPOINT_STORAGE_DIR names another directory: that one is checked as usual.
 		$previous  = (string) $this->state['previous_path'];
-		$recorded  = (string) $this->state['reclaim_marker_hash'];
 		$other_dir = '' !== (string) $this->context['custom_dir'] && ! Paths::same_location( rtrim( (string) $this->context['custom_dir'], '/\\' ), $previous );
-		if ( ! empty( $this->state['clone_detected'] ) && '' !== $previous && '' !== $recorded && ! $other_dir && self::MARKER_OWN === $this->marker( $previous ) && hash_equals( $recorded, (string) ( $this->marker_hashes[ rtrim( $previous, '/\\' ) ] ?? '' ) ) ) {
+		if ( ! empty( $this->state['clone_detected'] ) && '' !== $previous && ! $other_dir && self::MARKER_OWN === $this->marker( $previous ) && $this->recorded_by_take_over( (string) ( $this->marker_hashes[ rtrim( $previous, '/\\' ) ] ?? '' ) ) ) {
 			$this->finish_reclaim();
 			$this->log_event( sprintf( 'Continuing with the storage directory %s, which a request had taken over but died before recording it.', $previous ) );
 			return;
