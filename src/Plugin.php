@@ -7,6 +7,8 @@
 
 namespace WPCheckpoint;
 
+defined( 'ABSPATH' ) || exit; // Before the imports: checks that look for it near the top of the file find it.
+
 use WPCheckpoint\Admin\DownloadHandler;
 use WPCheckpoint\Admin\EnvironmentActions;
 use WPCheckpoint\Admin\Menu;
@@ -49,8 +51,6 @@ use WPCheckpoint\Support\Redactor;
 use WPCheckpoint\Support\Schema;
 use WPCheckpoint\Support\Uninstaller;
 use WPCheckpoint\Support\UninstallSetting;
-
-defined( 'ABSPATH' ) || exit;
 
 /**
  * Wires services together. Keep this class thin: it only registers hooks
