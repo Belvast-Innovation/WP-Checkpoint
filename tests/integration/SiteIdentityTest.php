@@ -3,11 +3,13 @@
 namespace WPCheckpoint\Tests\Integration;
 
 use WP_UnitTestCase;
+use WPCheckpoint\Admin\JobProgress;
 use WPCheckpoint\Admin\Notices;
 use WPCheckpoint\Admin\SiteIdentityActions;
 use WPCheckpoint\Cli\SiteIdentityCommand;
 use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\JobRepository;
+use WPCheckpoint\Plugin;
 use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Support\Guard;
 use WPCheckpoint\Support\Options;
@@ -370,6 +372,12 @@ final class SiteIdentityTest extends WP_UnitTestCase {
 		$this->assertSame( Job::FAILED, $lost->status );
 		$this->assertSame( Job::FAILURE_FINAL, $lost->failure_kind );
 		$this->assertStringContainsString( 'identity changed during a deployment', (string) $lost->last_error );
+		// Shown on the page: under the failure text, as rendered and as assets/admin/jobs.js updates it.
+		$presenter = Plugin::instance()->job_presenter();
+		$this->assertStringContainsString( 'identity changed during a deployment', (string) $presenter->present( $lost )['error_detail'] );
+		ob_start();
+		( new JobProgress( $presenter ) )->render( $lost );
+		$this->assertStringContainsString( 'identity changed during a deployment', (string) ob_get_clean() );
 		$this->assertNotSame( Job::FAILED, self::repo( $this->dirs( 's3/releases/3' ) )->find( $two )->status, 'the control: the latest move\'s job goes on' );
 	}
 
