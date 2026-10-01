@@ -112,6 +112,9 @@ final class CredentialsTest extends TestCase {
 		$this->assertFileExists( $root . '/tests/Fixtures/Standalone/http/config-probe.php' );
 		$this->assertFileExists( $root . '/tests/Fixtures/Standalone/http/wordpress-probe.php' );
 		$this->assertContains( '/tests', array_map( 'trim', (array) file( $root . '/.distignore' ) ), 'tests/ is left out of the package' );
-		$this->assertContains( 'tests/Fixtures/Standalone/http/probe.key', array_map( 'trim', (array) file( $root . '/.gitignore' ) ), 'the one-time key is never committed' );
+		// The one-time key is written outside the plugin, in the run's probe directory under wp-content.
+		$guard = (string) file_get_contents( $root . '/tests/Fixtures/Standalone/http/guard.php' );
+		$this->assertStringContainsString( "'wpcheckpoint-it-probe.'", $guard, 'the control: the guard reads the key from the probe directory' );
+		$this->assertStringNotContainsString( "__DIR__ . '/probe.key'", $guard, 'never from next to itself' );
 	}
 }

@@ -32,7 +32,7 @@ final class IntegrationScriptTest extends TestCase {
 			. 'if ( getenv( "FAKE_PID" ) ) { file_put_contents( getenv( "FAKE_PID" ), (string) getmypid() ); }' . "\n"
 			. 'if ( getenv( "FAKE_WAIT" ) ) { $t = time(); while ( ! file_exists( getenv( "FAKE_WAIT" ) ) && time() - $t < 30 ) { usleep( 20000 ); } }' . "\n"
 			. 'if ( getenv( "FAKE_TEMP" ) ) { mkdir( getenv( "TMPDIR" ) . "/wpc-left-in-temp" ); file_put_contents( getenv( "TMPDIR" ) . "/wpc-left-in-temp/x", "x" ); }' . "\n"
-			. 'file_put_contents( getenv( "FAKE_RECORD" ), json_encode( array( "cwd" => getcwd(), "argv" => array_slice( $argv, 1 ), "suite" => getenv( "WPCHECKPOINT_TEST_SUITE" ), "tmpdir" => getenv( "TMPDIR" ), "run_tmp" => getenv( "WPCHECKPOINT_TEST_RUN_TMP" ), "left_in_temp" => is_file( getenv( "TMPDIR" ) . "/wpc-left-in-temp/x" ) ) ) );' . "\n"
+			. 'file_put_contents( getenv( "FAKE_RECORD" ), json_encode( array( "cwd" => getcwd(), "argv" => array_slice( $argv, 1 ), "suite" => getenv( "WPCHECKPOINT_TEST_SUITE" ), "tmpdir" => getenv( "TMPDIR" ), "run_tmp" => getenv( "WPCHECKPOINT_TEST_RUN_TMP" ), "left_in_temp" => is_file( getenv( "TMPDIR" ) . "/wpc-left-in-temp/x" ), "run_id" => getenv( "WPCHECKPOINT_TEST_RUN_ID" ), "stale_run_id" => getenv( "WPCHECKPOINT_TEST_STALE_RUN_ID" ) ) ) );' . "\n"
 			. 'if ( getenv( "FAKE_LEAVE" ) ) { file_put_contents( "left.txt", "x" ); }' . "\n"
 			. 'if ( getenv( "FAKE_HIDE" ) ) { chmod( getenv( "FAKE_HIDE" ), 0 ); }' . "\n"
 			. 'if ( getenv( "FAKE_CHANGE" ) ) { file_put_contents( getenv( "FAKE_CHANGE" ), "changed during the run" ); }' . "\n"
@@ -191,6 +191,8 @@ final class IntegrationScriptTest extends TestCase {
 		try {
 			$this->assertFileExists( $lock, 'the first run holds the lock' );
 			$this->assertSame( (string) $first[2], trim( (string) strtok( (string) file_get_contents( $lock ), "\n" ) ), 'by its process ID' );
+			$named = explode( "\n", (string) file_get_contents( $lock ) );
+			$this->assertMatchesRegularExpression( '/^[0-9a-f]{16}$/D', $named[2] ?? '', 'and its run ID, of the form' );
 
 			$second = self::finish( $this->start_script( array( 'FAKE_RECORD' => $this->sandbox . '/second.json' ) ) );
 			$this->assertSame( 75, $second['code'], $second['stderr'] );
@@ -202,6 +204,7 @@ final class IntegrationScriptTest extends TestCase {
 		}
 		$this->assertSame( 0, $done['code'], $done['stderr'] );
 		$this->assertFileExists( $this->sandbox . '/first.json', 'the control: a run that starts PHPUnit is seen to' );
+		$this->assertSame( $named[2], json_decode( (string) file_get_contents( $this->sandbox . '/first.json' ), true )['run_id'], 'the ID PHPUnit is given is the one in the lock' );
 		$this->assertSame( '', (string) file_get_contents( $lock ), 'released when the run ends: its name taken out' );
 
 		$third = $this->run_script( array() );
@@ -468,5 +471,28 @@ final class IntegrationScriptTest extends TestCase {
 		ksort( $tests );
 		ksort( $script );
 		$this->assertSame( $tests, $script, 'every setting the tests read, with the same default' );
+	}
+
+	public function test_taking_over_a_killed_runs_lock_names_its_probe_directory_for_removal(): void {
+		$lock = $this->sandbox . '/run.lock';
+		file_put_contents( $lock, "1\n2026-01-01 00:00:00 UTC\n0123456789abcdef\n" );
+		$run = $this->run_script( array() );
+		$this->assertSame( 0, $run['code'], $run['stderr'] );
+		$this->assertSame( '0123456789abcdef', $run['call']['stale_run_id'], 'the killed run\'s ID, for its probe directory' );
+		$this->assertStringContainsString( 'Its probe directory (wp-content/wpcheckpoint-it-probe.0123456789abcdef) is removed as this run starts.', $run['stderr'] );
+		$this->assertMatchesRegularExpression( '/^[0-9a-f]{16}$/D', (string) $run['call']['run_id'], 'its own ID, of the form' );
+		$this->assertNotSame( '0123456789abcdef', $run['call']['run_id'] );
+
+		foreach ( array( "0123456789ABCDEF", "../3456789abcdef", "0123456789abcde", "0123456789abcdef0" ) as $bad ) {
+			file_put_contents( $lock, "1\n2026-01-01 00:00:00 UTC\n" . $bad . "\n" );
+			$run = $this->run_script( array() );
+			$this->assertSame( 0, $run['code'], $run['stderr'] );
+			$this->assertSame( '', $run['call']['stale_run_id'], 'not of the form: no directory named: ' . $bad );
+			$this->assertStringContainsString( 'Taking over the lock', $run['stderr'], 'the control: the takeover is seen' );
+			$this->assertStringNotContainsString( 'probe directory', $run['stderr'] );
+		}
+
+		$run = $this->run_script( array() );
+		$this->assertSame( '', $run['call']['stale_run_id'], 'a lock released as it should names no one' );
 	}
 }

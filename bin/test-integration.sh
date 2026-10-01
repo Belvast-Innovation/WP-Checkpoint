@@ -28,9 +28,10 @@
 # tables; the leftover check removes an earlier run's) breaks the first. The lock is a flock() on
 # /tmp/wpcheckpoint-integration.lock in the container every run executes in, taken on a descriptor PHPUnit inherits:
 # the kernel holds it while the run's shell or its PHPUnit is alive, and lets it go when both are gone, however they
-# ended. The file names the run that has it (process ID and start time) and is emptied when the run ends: a name left
-# in it is a run that ended without that (killed), and is said so when the next run takes the lock. Refused, the script
-# exits with status 75. On any exit, a signal included, the lock is released and the run's directory cleaned up.
+# ended. The file names the run that has it (process ID, start time and run ID) and is emptied when the run ends: a
+# name left in it is a run that ended without that (killed), and is said so when the next run takes the lock; that
+# run's probe directory (tests/Fixtures/ProbeDir.php) is removed as the next one starts (WPCHECKPOINT_TEST_STALE_RUN_ID;
+# this run's own ID is WPCHECKPOINT_TEST_RUN_ID). Refused, the script exits with status 75. On any exit, a signal included, the lock is released and the run's directory cleaned up.
 # (WPCHECKPOINT_TEST_PHPUNIT and WPCHECKPOINT_TEST_LOCK name another PHPUnit and another lock, for this script's own
 # test.)
 PLUGIN=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
@@ -125,11 +126,28 @@ if ! flock -n 9; then
 	exit 75
 fi
 HELD=1
+# This run's ID: names its probe directory (tests/Fixtures/ProbeDir.php), recorded in the lock with its name.
+RUN_ID=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+case "$RUN_ID" in
+	????????????????) ;;
+	*) RUN_ID="" ;;
+esac
+case "$RUN_ID" in
+	"" | *[!0-9a-f]*) echo "No run ID could be made (od and /dev/urandom are needed)." >&2; exit 1 ;;
+esac
+STALE_RUN_ID=""
 if [ -s "$LOCK" ]; then
-	echo "Taking over the lock of an integration run that ended without releasing it: process $(sed -n 1p "$LOCK" 2>/dev/null), started $(sed -n 2p "$LOCK" 2>/dev/null). Its run directory (wpcheckpoint-it.*) may be left in its temporary directory." >&2
+	STALE_RUN_ID=$(sed -n 3p "$LOCK" 2>/dev/null)
+	case "$STALE_RUN_ID" in
+		????????????????) case "$STALE_RUN_ID" in *[!0-9a-f]*) STALE_RUN_ID="" ;; esac ;;
+		*) STALE_RUN_ID="" ;;
+	esac
+	PROBE=""
+	[ -n "$STALE_RUN_ID" ] && PROBE=" Its probe directory (wp-content/wpcheckpoint-it-probe.$STALE_RUN_ID) is removed as this run starts."
+	echo "Taking over the lock of an integration run that ended without releasing it: process $(sed -n 1p "$LOCK" 2>/dev/null), started $(sed -n 2p "$LOCK" 2>/dev/null). Its run directory (wpcheckpoint-it.*) may be left in its temporary directory.$PROBE" >&2
 fi
 if [ -n "$WRITABLE" ]; then
-	printf '%s\n%s\n' "$$" "$(date -u '+%Y-%m-%d %H:%M:%S UTC')" > "$LOCK"
+	printf '%s\n%s\n%s\n' "$$" "$(date -u '+%Y-%m-%d %H:%M:%S UTC')" "$RUN_ID" > "$LOCK"
 	NAMED=1
 fi
 
@@ -188,5 +206,5 @@ done
 cd "$WORK/cwd" || exit 1
 eval "set -- $ARGS"
 RAN=1
-TMPDIR="$WORK/tmp" WPCHECKPOINT_TEST_RUN_TMP="$WORK/tmp" WPCHECKPOINT_TEST_SUITE=integration php "$PHPUNIT" -c "$CONFIG" --testsuite integration "$@"
+TMPDIR="$WORK/tmp" WPCHECKPOINT_TEST_RUN_TMP="$WORK/tmp" WPCHECKPOINT_TEST_RUN_ID="$RUN_ID" WPCHECKPOINT_TEST_STALE_RUN_ID="$STALE_RUN_ID" WPCHECKPOINT_TEST_SUITE=integration php "$PHPUNIT" -c "$CONFIG" --testsuite integration "$@"
 exit $?
