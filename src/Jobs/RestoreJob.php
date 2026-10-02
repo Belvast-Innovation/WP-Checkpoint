@@ -50,8 +50,9 @@ defined( 'ABSPATH' ) || exit;
  * options. The policy says what to do with each kind of table another
  * installation in the same database may use (IncomingTables): "ask" (the
  * default), "restore" or "exclude". A restore nobody attends ("unattended")
- * is never asked, so it must say both; missing either refuses it before the
- * first step does anything.
+ * is never asked, so it must say both; missing either refuses it before
+ * anything of the backup is read (RestoreVerifyStep validates the options
+ * first).
  */
 final class RestoreJob implements JobType {
 
