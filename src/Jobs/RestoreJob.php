@@ -12,6 +12,8 @@ use WPCheckpoint\Support\Directories;
 
 defined( 'ABSPATH' ) || exit;
 
+// phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- validation messages that name an option; the presenter cleans them.
+
 /**
  * Restores a backup of the backups directory. The steps so far prepare
  * the database next to the live one and change nothing the site uses:
@@ -43,8 +45,13 @@ defined( 'ABSPATH' ) || exit;
  *
  * The swap and what follows are later parts of T042; no user
  * interface starts this job yet (only tests and, later, the restore
- * wizard). Options: {base, exclude_tables}; the backups directory comes
- * from the current storage directories, never from the options.
+ * wizard). Options: {base, exclude_tables, policy, unattended}; the backups
+ * directory comes from the current storage directories, never from the
+ * options. The policy says what to do with each kind of table another
+ * installation in the same database may use (IncomingTables): "ask" (the
+ * default), "restore" or "exclude". A restore nobody attends ("unattended")
+ * is never asked, so it must say both; missing either refuses it before the
+ * first step does anything.
  */
 final class RestoreJob implements JobType {
 
@@ -54,6 +61,15 @@ final class RestoreJob implements JobType {
 	 * Most tables a restore may leave out (names of at most Manifest::MAX_TABLE_NAME bytes each).
 	 */
 	const MAX_EXCLUDED = 10000;
+
+	/**
+	 * What the restore does with each kind of table another installation may use, and the choices: the id of the
+	 * question each is asked by, too (RestorePreflightStep).
+	 */
+	const POLICIES = array(
+		'uncertain_tables' => array( 'ask', 'restore', 'exclude' ),
+		'shared_tables'    => array( 'ask', 'restore', 'exclude' ),
+	);
 
 	/**
 	 * Returns the current storage directories: function(): Directories.
@@ -134,8 +150,8 @@ final class RestoreJob implements JobType {
 	 * Validated options.
 	 *
 	 * @param array<string, mixed> $options Options.
-	 * @return array{base: string, exclude_tables: string[]}
-	 * @throws \InvalidArgumentException When they are not valid.
+	 * @return array{base: string, exclude_tables: string[], policy: array<string, string>, unattended: bool}
+	 * @throws \InvalidArgumentException When they are not valid (the message names the option).
 	 */
 	public static function options( array $options ): array {
 		$base = isset( $options['base'] ) && is_string( $options['base'] ) ? $options['base'] : '';
@@ -151,9 +167,35 @@ final class RestoreJob implements JobType {
 				throw new \InvalidArgumentException( 'The tables to leave out are not a list of table names.' );
 			}
 		}
+		$given  = isset( $options['policy'] ) ? $options['policy'] : array();
+		$policy = array();
+		if ( ! is_array( $given ) || array() !== array_diff( array_keys( $given ), array_keys( self::POLICIES ) ) ) {
+			throw new \InvalidArgumentException( sprintf( 'The restore policy may only say: %s.', implode( ', ', array_keys( self::POLICIES ) ) ) );
+		}
+		foreach ( self::POLICIES as $key => $allowed ) {
+			$value = $given[ $key ] ?? 'ask';
+			if ( ! is_string( $value ) || ! in_array( $value, $allowed, true ) ) {
+				throw new \InvalidArgumentException( sprintf( 'The restore policy "%1$s" must be one of: %2$s.', $key, implode( ', ', $allowed ) ) );
+			}
+			$policy[ $key ] = $value;
+		}
+		$unattended = $options['unattended'] ?? false;
+		if ( ! is_bool( $unattended ) ) {
+			throw new \InvalidArgumentException( 'The restore option "unattended" must be true or false.' );
+		}
+		if ( $unattended ) {
+			// Nobody answers a question of a restore nobody attends: what it would ask must be said up front.
+			foreach ( $policy as $key => $value ) {
+				if ( 'ask' === $value ) {
+					throw new \InvalidArgumentException( sprintf( 'An unattended restore must say what to do with %1$s: set the restore policy "%2$s" to "restore" or "exclude".', 'uncertain_tables' === $key ? 'tables that may belong to this site or to another installation in the same database' : 'tables this site shares with another installation in the same database', $key ) );
+				}
+			}
+		}
 		return array(
 			'base'           => $base,
 			'exclude_tables' => array_values( $exclude ),
+			'policy'         => $policy,
+			'unattended'     => $unattended,
 		);
 	}
 }

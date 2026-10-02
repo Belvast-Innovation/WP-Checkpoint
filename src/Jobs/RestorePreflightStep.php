@@ -18,9 +18,12 @@ use WPCheckpoint\Restore\ChunkReader;
 use WPCheckpoint\Restore\ChunkWalk;
 use WPCheckpoint\Restore\ConstraintNames;
 use WPCheckpoint\Restore\ImportTarget;
+use WPCheckpoint\Restore\IncomingTables;
 use WPCheckpoint\Restore\Refused;
 use WPCheckpoint\Restore\RestoreFiles;
+use WPCheckpoint\Restore\SiteTables;
 use WPCheckpoint\Restore\Statement;
+use WPCheckpoint\Restore\TableMoves;
 use WPCheckpoint\Restore\TablePlan;
 use WPCheckpoint\Database\OwnTables;
 
@@ -40,7 +43,13 @@ defined( 'ABSPATH' ) || exit;
  *    (TablePlan: temporary and final names, which are fixed here with the
  *    restore's random part and never change); database.index.jsonl
  *    extracted from the last volume and checked against the manifest's
- *    hash.
+ *    hash. A table of the backup whose live table another installation in
+ *    the same database uses (IncomingTables) is judged first: one of that
+ *    installation's own is left out; one that may be either's, and one
+ *    this site shares with it, are left to the user's choice, by kind
+ *    (RestoreJob::POLICIES). When a choice is missing, both questions are
+ *    asked at once, the tables listed in RestoreFiles::INCOMING, and the
+ *    phase runs again with the answers.
  * 2. heads: every chunk of every planned table, in lockstep (ChunkWalk),
  *    one per unit: the head of the chunk (at most HEAD_BYTES, or FIRST_BYTES
  *    for a table's first chunk) is extracted and read by the same reader
@@ -51,9 +60,10 @@ defined( 'ABSPATH' ) || exit;
  *    table the manifest lists without a chunk has no definition and is
  *    refused.
  * 3. references: the foreign keys that would cross the swap. The swap
- *    moves aside every live table of this site's prefix and puts the
- *    restored ones in their place; tables of other prefixes, this plugin's
- *    jobs table and the tables the user left out stay. A restored table's
+ *    moves aside the live tables TableMoves shows to be this site's and
+ *    puts the restored ones in their place; another installation's
+ *    tables, tables of other prefixes, this plugin's run tables and the
+ *    tables left out of the restore stay. A restored table's
  *    key to a table that is moved aside and not restored would point at
  *    the old table after the swap; a staying table's key to a moved table
  *    would too (InnoDB follows the rename), holding the new data to the
@@ -133,7 +143,11 @@ final class RestorePreflightStep implements Step {
 			$context->cursor()
 		);
 		if ( 'plan' === $cursor['phase'] ) {
-			$cursor = $this->plan( $context );
+			$planned = $this->plan( $context );
+			if ( $planned instanceof StepResult ) {
+				return $planned;
+			}
+			$cursor = $planned;
 			$context->checkpoint( $cursor, 5, __( 'Reading the backup\'s tables', 'wp-checkpoint' ) );
 		}
 		$work = $context->work_path();
@@ -148,13 +162,14 @@ final class RestorePreflightStep implements Step {
 	}
 
 	/**
-	 * The plan phase: returns the cursor of the heads phase.
+	 * The plan phase: returns the cursor of the heads phase, or the questions about the tables another installation
+	 * may use.
 	 *
 	 * @param JobContext $context Context.
-	 * @return array<string, mixed>
+	 * @return array<string, mixed>|StepResult
 	 * @throws Refused When the backup does not fit this site.
 	 */
-	private function plan( JobContext $context ): array {
+	private function plan( JobContext $context ) {
 		global $wpdb;
 		$work     = $context->work_path();
 		$options  = RestoreJob::options( $context->options() );
@@ -174,6 +189,13 @@ final class RestorePreflightStep implements Step {
 		$fold   = (int) $wpdb->get_var( 'SELECT @@lower_case_table_names' ) > 0; // phpcs:ignore WordPress.DB.DirectDatabaseQuery.NoCaching -- a server setting.
 		$random = bin2hex( random_bytes( 2 ) );
 		$plan   = TablePlan::make( $manifest->tables(), (string) ( $site['table_prefix'] ?? '' ), (string) $wpdb->base_prefix, $multisite, $options['exclude_tables'], $context->job()->storage_token, $context->job()->id, $random, $fold );
+		$skip   = $this->incoming( $context, $plan, $multisite, $options['policy'] );
+		if ( $skip instanceof StepResult ) {
+			return $skip;
+		}
+		if ( array() !== $skip ) {
+			$plan = TablePlan::make( $manifest->tables(), (string) ( $site['table_prefix'] ?? '' ), (string) $wpdb->base_prefix, $multisite, $options['exclude_tables'], $context->job()->storage_token, $context->job()->id, $random, $fold, $skip );
+		}
 		foreach ( $plan->tables() as $table ) {
 			if ( $table['chunks'] < 1 ) {
 				throw new Refused( sprintf( 'The backup holds no definition of the table %s (no chunk); leave it out of the restore.', $table['table'] ) );
@@ -217,6 +239,99 @@ final class RestorePreflightStep implements Step {
 			'chunk'   => 0,
 			'line'    => 0,
 		);
+	}
+
+	/**
+	 * The backup's tables whose live table another installation may use (IncomingTables), by their final names: one of
+	 * a neighbour's own is left out; the two kinds the user decides (RestoreJob::POLICIES) are left out or restored
+	 * as answered or as the policy says. Asks both questions at once when a decision is missing.
+	 *
+	 * @param JobContext            $context   Context.
+	 * @param TablePlan             $plan      The plan with every table of the backup.
+	 * @param bool                  $multisite Whether this site is a network.
+	 * @param array<string, string> $policy    RestoreJob::options()'s policy.
+	 * @return array<string, string>|StepResult Tables to leave out (names in the backup) => why, or the questions.
+	 */
+	private function incoming( JobContext $context, TablePlan $plan, bool $multisite, array $policy ) {
+		$finals = array();
+		foreach ( $plan->tables() as $table ) {
+			$finals[ $table['final'] ] = $table['table'];
+		}
+		$prefix = $plan->site_prefix();
+		$live   = ( new WpdbConnection() )->tables_with_prefix( $prefix )['tables'];
+		$found  = SiteTables::meta_keys_present( IncomingTables::role_keys( $prefix, $multisite, $live ) );
+		$kinds  = IncomingTables::classify( $prefix, $multisite, $live, array_keys( $finals ), SiteTables::core(), SiteTables::users(), SiteTables::usermeta(), $found );
+		$listed = array(
+			IncomingTables::NEIGHBOUR => array(),
+			IncomingTables::UNCERTAIN => array(),
+			IncomingTables::SHARED    => array(),
+		);
+		foreach ( $kinds as $final => $kind ) {
+			$listed[ $kind ][] = (string) $final;
+		}
+		$answers   = isset( $context->options()['answers'] ) && is_array( $context->options()['answers'] ) ? $context->options()['answers'] : array();
+		$decided   = array();
+		$questions = array();
+		foreach ( array(
+			'uncertain_tables' => IncomingTables::UNCERTAIN,
+			'shared_tables'    => IncomingTables::SHARED,
+		) as $id => $kind ) {
+			if ( array() === $listed[ $kind ] ) {
+				continue;
+			}
+			$choice = isset( $answers[ $id ] ) && is_string( $answers[ $id ] ) ? $answers[ $id ] : $policy[ $id ];
+			if ( 'restore' === $choice || 'exclude' === $choice ) {
+				$decided[ $kind ] = $choice;
+				continue;
+			}
+			$questions[] = array(
+				'id'      => $id,
+				'kind'    => 'uncertain_tables' === $id ? 'tables_of_either_installation' : 'tables_shared_with_another_installation',
+				'count'   => count( $listed[ $kind ] ),
+				'file'    => RestoreFiles::INCOMING,
+				'choices' => array( 'restore', 'exclude' ),
+			);
+		}
+		if ( array() !== $questions ) {
+			ExportPlan::write( $context->work_path(), RestoreFiles::INCOMING, $listed );
+			// Every table the questions are about, in the log (the questions list a few of them).
+			$context->logger()->info(
+				'Tables of the backup whose live tables another installation in the same database may use; asked what to do with them',
+				array(
+					'may_be_either'   => $listed[ IncomingTables::UNCERTAIN ],
+					'shared'          => $listed[ IncomingTables::SHARED ],
+					'its_own_skipped' => $listed[ IncomingTables::NEIGHBOUR ],
+				)
+			);
+			return StepResult::ask(
+				array( 'phase' => 'plan' ),
+				$questions,
+				sprintf(
+					/* translators: %d: number of questions */
+					_n( 'Waiting for your decision on %d question', 'Waiting for your decision on %d questions', count( $questions ), 'wp-checkpoint' ),
+					count( $questions )
+				)
+			);
+		}
+		$skip = array();
+		foreach ( $listed[ IncomingTables::NEIGHBOUR ] as $final ) {
+			$skip[ $finals[ $final ] ] = IncomingTables::NEIGHBOUR;
+		}
+		foreach ( $decided as $kind => $choice ) {
+			$context->logger()->info(
+				IncomingTables::SHARED === $kind ? 'Tables this site shares with another installation in the same database' : 'Tables that may belong to this site or to another installation in the same database',
+				array(
+					'tables' => $listed[ $kind ],
+					'choice' => $choice,
+				)
+			);
+			if ( 'exclude' === $choice ) {
+				foreach ( $listed[ $kind ] as $final ) {
+					$skip[ $finals[ $final ] ] = $kind;
+				}
+			}
+		}
+		return $skip;
 	}
 
 	/**
@@ -393,22 +508,17 @@ final class RestorePreflightStep implements Step {
 	private function references( JobContext $context, array $cursor, array $plan ): StepResult {
 		global $wpdb;
 		$work    = $context->work_path();
-		$options = RestoreJob::options( $context->options() );
 		$table   = $plan['plan'];
 		$live    = ( new WpdbConnection() )->tables_with_prefix( (string) $wpdb->base_prefix )['tables'];
 		$staying = array_fill_keys( OwnTables::names( (string) $wpdb->base_prefix ), true );
-		foreach ( $options['exclude_tables'] as $name ) {
-			$staying[ $table->final_name( $name ) ] = true;
+		$left    = array();
+		foreach ( array_keys( $table->skipped() ) as $name ) {
+			$left[] = $table->final_name( (string) $name );
+			$staying[ $table->final_name( (string) $name ) ] = true;
 		}
-		$moved = array();
-		foreach ( $live as $name ) {
-			if ( ! isset( $staying[ $name ] ) && ! OwnTables::is_own( $name ) ) {
-				$moved[ $name ] = true;
-			}
-		}
-		foreach ( $table->tables() as $planned ) {
-			$moved[ $planned['final'] ] = true;
-		}
+		// What the swap moves aside, by its rule (TableMoves): this site's live tables, never another installation's.
+		$finals = array_column( $table->tables(), 'final' );
+		$moved  = array_fill_keys( array_merge( TableMoves::select( $table->site_prefix(), is_multisite(), $live, $finals, $left, SiteTables::core() )['move'], $finals ), true );
 		if ( 0 === (int) $cursor['page'] ) {
 			$handle = @fopen( RestoreFiles::path( $work, RestoreFiles::DEFINITIONS ), 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- reported below.
 			if ( false === $handle ) {

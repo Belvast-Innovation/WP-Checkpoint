@@ -58,9 +58,11 @@ final class RestorePlatformStep implements Step {
 	 * @param JobContext $context Context.
 	 * @return StepResult
 	 * @throws PlatformUnsupported On Windows.
+	 * @throws \InvalidArgumentException When the options are not valid (an unattended restore that does not say what to
+	 *                                   do with the tables another installation may use, among them).
 	 */
 	public function run( JobContext $context ): StepResult {
-		unset( $context );
+		RestoreJob::options( $context->options() ); // Before anything: options a later step would refuse stop the restore here.
 		$family = null === $this->platform ? PHP_OS_FAMILY : (string) call_user_func( $this->platform );
 		if ( 'Windows' === $family ) {
 			throw new PlatformUnsupported( 'This version of WP Checkpoint cannot restore onto a Windows server yet. Backups and exports are not affected.' );

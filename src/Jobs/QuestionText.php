@@ -7,6 +7,8 @@
 
 namespace WPCheckpoint\Jobs;
 
+use WPCheckpoint\Restore\IncomingTables;
+use WPCheckpoint\Restore\RestoreFiles;
 use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Support\Paths;
 
@@ -24,9 +26,18 @@ defined( 'ABSPATH' ) || exit;
 final class QuestionText {
 
 	/**
-	 * Unreadable files listed with their question.
+	 * Unreadable files, or tables, listed with their question.
 	 */
 	const MAX_LISTED = 5;
+
+	/**
+	 * The restore's questions about tables another installation may use (RestorePreflightStep), by id: the kind of
+	 * table each is about (IncomingTables).
+	 */
+	const TABLE_QUESTIONS = array(
+		'uncertain_tables' => IncomingTables::UNCERTAIN,
+		'shared_tables'    => IncomingTables::SHARED,
+	);
 
 	/**
 	 * The job's questions in words.
@@ -38,6 +49,7 @@ final class QuestionText {
 	 */
 	public static function for_job( Job $job, Directories $directories, callable $clean ): array {
 		$findings = array();
+		$tables   = array();
 		$work     = self::work_dir( $job, $directories );
 		if ( '' !== $work && ExportPlan::exists( $work, ExportPlan::REVIEW ) ) {
 			try {
@@ -47,11 +59,21 @@ final class QuestionText {
 				$findings = array(); // Gone or changed since: each question is still listed, with a generic line.
 			}
 		}
+		if ( '' !== $work && ExportPlan::exists( $work, RestoreFiles::INCOMING ) ) {
+			try {
+				$tables = ExportPlan::read( $work, RestoreFiles::INCOMING );
+			} catch ( \RuntimeException $e ) {
+				$tables = array(); // As above: the question stays, without its tables.
+			}
+		}
 		$out = array();
 		foreach ( $job->questions as $question ) {
 			$id     = (string) $question['id'];
 			$listed = 'unreadable' === $id && isset( $findings['unreadable']['listed'] ) ? array_slice( array_filter( (array) $findings['unreadable']['listed'], 'is_string' ), 0, self::MAX_LISTED ) : array();
-			$out[]  = array(
+			if ( isset( self::TABLE_QUESTIONS[ $id ], $tables[ self::TABLE_QUESTIONS[ $id ] ] ) ) {
+				$listed = array_slice( array_filter( (array) $tables[ self::TABLE_QUESTIONS[ $id ] ], 'is_string' ), 0, self::MAX_LISTED );
+			}
+			$out[] = array(
 				'id'      => $id,
 				'kind'    => (string) ( $question['kind'] ?? '' ),
 				'choices' => array_map( 'strval', (array) ( $question['choices'] ?? array() ) ),
@@ -112,6 +134,30 @@ final class QuestionText {
 		}
 		if ( 'free_space' === $id ) {
 			return sprintf( 'This server does not say how much disk space is free, so whether the restore\'s staged files (%d MB with a margin) fit cannot be confirmed. Continue anyway, or stop?', (int) ceil( (int) ( $question['bytes'] ?? 0 ) / 1048576 ) );
+		}
+		if ( 'uncertain_tables' === $id ) {
+			return sprintf(
+				/* translators: %d: number of tables */
+				_n(
+					'%d table of the backup has the name of a table that may belong to this site or to another WordPress installation in the same database (listed below, all of them in the job log): its name fits both. Restore it: if it is the other installation\'s, its data is replaced by the backup\'s. Or leave it out: if it is this site\'s, it keeps its current data and is not restored.',
+					'%d tables of the backup have the names of tables that may belong to this site or to another WordPress installation in the same database (listed below, all of them in the job log): their names fit both. Restore them: if they are the other installation\'s, their data is replaced by the backup\'s. Or leave them out: if they are this site\'s, they keep their current data and are not restored.',
+					$count,
+					'wp-checkpoint'
+				),
+				$count
+			);
+		}
+		if ( 'shared_tables' === $id ) {
+			return sprintf(
+				/* translators: %d: number of tables */
+				_n(
+					'%d table of the backup is used by this site and by another WordPress installation in the same database (listed below, all of them in the job log), for example a users table both share. Restore it: the other installation\'s data in it is replaced by the backup\'s too. Or leave it out: it keeps its current data, for this site as well.',
+					'%d tables of the backup are used by this site and by another WordPress installation in the same database (listed below, all of them in the job log), for example a users table both share. Restore them: the other installation\'s data in them is replaced by the backup\'s too. Or leave them out: they keep their current data, for this site as well.',
+					$count,
+					'wp-checkpoint'
+				),
+				$count
+			);
 		}
 		if ( 'oversize_more' === $id ) {
 			return sprintf( '%d more tables have rows larger than the single-row limit (listed in the job log). Leave those rows out, or stop?', $count );

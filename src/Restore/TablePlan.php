@@ -36,8 +36,10 @@ defined( 'ABSPATH' ) || exit;
  *
  * Left out of the plan, and reported: tables the user excluded, this
  * plugin's jobs table (a backup written before it was left out of backups
- * may hold it; it is never restored), and tables named like this plugin's
- * temporary or old tables.
+ * may hold it; it is never restored), tables named like this plugin's
+ * temporary or old tables, and the tables the caller leaves out for a
+ * reason of its own (IncomingTables: another installation's, or one left
+ * out as the user chose).
  *
  * The backup must hold the options table (and the network's sitemeta
  * table on multisite): this plugin's state is carried into them before the
@@ -57,7 +59,7 @@ final class TablePlan {
 
 	/**
 	 * Left out: name => reason ("excluded", "jobs": this installation's jobs table, "own": another run table of this
-	 * plugin, "temporary": a name of TempTables).
+	 * plugin, "temporary": a name of TempTables, or a reason given in $skip).
 	 *
 	 * @var array<string, string>
 	 */
@@ -89,10 +91,11 @@ final class TablePlan {
 	 * @param int                                          $job_id        The restore job's id.
 	 * @param string                                       $random        The restore's random part (4 hex).
 	 * @param bool                                         $fold_case     Whether the server compares table names without case (lower_case_table_names <> 0).
+	 * @param array<string, string>                        $skip          Tables (names in the backup) left out for a reason => the reason.
 	 * @return self
 	 * @throws Refused When a final name does not fit or is shared, or the options (sitemeta) table is missing.
 	 */
-	public static function make( array $tables, string $backup_prefix, string $site_prefix, bool $multisite, array $excluded, string $token, int $job_id, string $random, bool $fold_case ): self {
+	public static function make( array $tables, string $backup_prefix, string $site_prefix, bool $multisite, array $excluded, string $token, int $job_id, string $random, bool $fold_case, array $skip = array() ): self {
 		$plan                = new self();
 		$plan->backup_prefix = $backup_prefix;
 		$plan->site_prefix   = $site_prefix;
@@ -103,6 +106,10 @@ final class TablePlan {
 			$name = (string) $summary['name'];
 			if ( in_array( $name, $excluded, true ) ) {
 				$plan->skipped[ $name ] = 'excluded';
+				continue;
+			}
+			if ( isset( $skip[ $name ] ) ) {
+				$plan->skipped[ $name ] = (string) $skip[ $name ];
 				continue;
 			}
 			if ( OwnTables::is_own( $name ) ) {

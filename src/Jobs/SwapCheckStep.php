@@ -17,6 +17,7 @@ use WPCheckpoint\Restore\ImportSession;
 use WPCheckpoint\Restore\Ledger;
 use WPCheckpoint\Restore\Queries;
 use WPCheckpoint\Restore\RestoreFiles;
+use WPCheckpoint\Restore\SiteTables;
 use WPCheckpoint\Restore\StagingLayout;
 use WPCheckpoint\Restore\SwapPlan;
 use WPCheckpoint\Restore\TableMoves;
@@ -1173,7 +1174,7 @@ final class SwapCheckStep implements Step {
 		foreach ( array_keys( $plan->skipped() ) as $name ) {
 			$kept[] = $plan->final_name( (string) $name ); // Left out of the restore: the live one stays.
 		}
-		return TableMoves::select( $site, is_multisite(), $live, $finals, $kept, self::core_tables() );
+		return TableMoves::select( $site, is_multisite(), $live, $finals, $kept, SiteTables::core() );
 	}
 
 	/**
@@ -1221,17 +1222,6 @@ final class SwapCheckStep implements Step {
 	private static function base_prefix(): string {
 		global $wpdb;
 		return (string) $wpdb->base_prefix;
-	}
-
-	/**
-	 * WordPress's own tables of this site with its prefix: the main site's on a network, where a tick may run in a
-	 * sub-site's context (the sub-sites' tables are recognised by their naming rule, TableSelection).
-	 *
-	 * @return string[]
-	 */
-	private static function core_tables(): array {
-		global $wpdb;
-		return array_values( array_map( 'strval', $wpdb->tables( 'all', true, is_multisite() ? get_main_site_id() : 0 ) ) );
 	}
 
 	/**
