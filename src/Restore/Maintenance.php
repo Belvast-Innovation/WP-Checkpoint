@@ -24,7 +24,7 @@ defined( 'ABSPATH' ) || exit;
  * steps, and removed only while it still holds this restore's own
  * contents (its mark, new_mark(): random, kept in the swap's cursor).
  * While the site is half swapped the file is held (hold()): its time is
- * HELD, far in the future, so WordPress never lets it lapse after its ten
+ * held(), far in the future, so WordPress never lets it lapse after its ten
  * minutes. A run that dies there leaves the site answering with the
  * maintenance page, not a mix of the old site and the restored one that
  * visitors could write to; WP-CLI, which runs the swap and its rollback,
@@ -49,9 +49,47 @@ final class Maintenance {
 	const MAX_READ = 4096;
 
 	/**
-	 * The time of a held file: 2100-01-01, which WordPress's ten minutes never reach.
+	 * The time of a held file on a 64-bit PHP: 2100-01-01, which WordPress's ten minutes never reach.
 	 */
-	const HELD = 4102444800;
+	const HELD_64 = 4102444800;
+
+	/**
+	 * The time of a held file (held_for() this PHP's integer size).
+	 *
+	 * @return int
+	 */
+	public static function held(): int {
+		return self::held_for( PHP_INT_SIZE );
+	}
+
+	/**
+	 * The time of a held file for an integer size: 2100-01-01, or on a 32-bit PHP the largest integer (2038, as
+	 * far beyond WordPress's ten minutes; 2100 would not fit, and could not be written as one).
+	 *
+	 * @param int $int_size PHP_INT_SIZE.
+	 * @return int
+	 */
+	public static function held_for( int $int_size ): int {
+		return $int_size >= 8 ? (int) self::HELD_64 : 2147483647;
+	}
+
+	/**
+	 * Whether a directory holds a held maintenance file of this plugin's (any restore's mark): the site answers
+	 * with the maintenance page, and it does not lapse.
+	 *
+	 * @param string $dir Directory (ABSPATH).
+	 * @return bool
+	 */
+	public static function held_in( string $dir ): bool {
+		$path = rtrim( $dir, '/\\' ) . DIRECTORY_SEPARATOR . self::FILE;
+		clearstatcache( true, $path );
+		$stat = @lstat( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- not there: not held.
+		if ( false === $stat || 0100000 !== ( $stat['mode'] & 0170000 ) || $stat['size'] > self::MAX_READ ) {
+			return false;
+		}
+		$contents = @file_get_contents( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
+		return is_string( $contents ) && 1 === preg_match( '/\A<\?php\n\$upgrading = ' . self::held() . '; \/\/ WP Checkpoint restore [0-9a-f]{32}\n\z/', $contents );
+	}
 
 	/**
 	 * Directory (ABSPATH, or a test's stand-in).
@@ -165,14 +203,14 @@ final class Maintenance {
 	}
 
 	/**
-	 * Put up (or keep up) this restore's file so that it never lapses (HELD), while the site is half swapped.
+	 * Put up (or keep up) this restore's file so that it never lapses (held()), while the site is half swapped.
 	 *
 	 * @param callable|null $confirm Called right before the file is put in place.
 	 * @return void
 	 * @throws \RuntimeException When another maintenance file is there or what is there cannot be told.
 	 */
 	public function hold( $confirm = null ): void {
-		$this->put( self::HELD, $confirm );
+		$this->put( self::held(), $confirm );
 	}
 
 	/**
@@ -185,7 +223,7 @@ final class Maintenance {
 			return false;
 		}
 		$contents = @file_get_contents( $this->path() ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- ours: a few dozen bytes.
-		return is_string( $contents ) && self::HELD === $this->time_of( $contents );
+		return is_string( $contents ) && self::held() === $this->time_of( $contents );
 	}
 
 	/**

@@ -214,6 +214,8 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 			if ( 'rename' === $phase ) {
 				$entries = $this->entries( $context, $db, $cursor );
 				if ( SwapRules::committed( $entries['tables'], $this->there( $db, $entries['tables'] ) ) ) {
+					$this->release( $context, $this->maintenance( $cursor ) );
+					$this->at( 'unheld_commit' );
 					$cursor = array(
 						'phase'   => 'committed',
 						'attempt' => $cursor['attempt'],
@@ -486,6 +488,8 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 		if ( ! SwapRules::committed( $entries['tables'], $this->there( $db, $entries['tables'] ) ) ) {
 			throw $this->roll_back( $context, $db, $cursor, self::INCOMPLETE );
 		}
+		$this->release( $context, $this->maintenance( $cursor ) ); // The swap is made: the site is whole again.
+		$this->at( 'unheld_commit' );
 		$cursor = array(
 			'phase'   => 'committed',
 			'attempt' => $attempt,
@@ -657,6 +661,8 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 		} catch ( \Throwable $e ) {
 			throw new TransientFailure( 'The object cache could not be flushed after the site was put back; the rollback waits to finish: ' . $e->getMessage() );
 		}
+		$this->release( $context, $file );
+		$this->at( 'unheld' );
 		$reason = (string) ( $cursor['reason'] ?? $reason );
 		$cursor = array(
 			'phase'  => 'reverted',
@@ -781,8 +787,10 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 					$want = array( $layout->live_dir( $group ), $layout->root( $group ) . '/old/' . $group );
 				}
 			}
-			$name = basename( $entry['stage'] );
-			if ( null === $want && in_array( $other, $staged, true ) && dirname( $entry['stage'] ) === $layout->stage_dir( $other ) && ! in_array( $name, SwapCheckStep::DROP_INS, true ) ) {
+			// The entry's name by prefix, not basename() / dirname() (locale-dependent): byte for byte what the check built.
+			$prefix = $layout->stage_dir( $other ) . '/';
+			$name   = 0 === strncmp( $entry['stage'], $prefix, strlen( $prefix ) ) ? (string) substr( $entry['stage'], strlen( $prefix ) ) : '';
+			if ( null === $want && in_array( $other, $staged, true ) && '' !== $name && false === strpos( $name, '/' ) && ! in_array( $name, SwapCheckStep::DROP_INS, true ) ) {
 				$want = array( $layout->live_dir( $other ) . '/' . $name, $layout->root( $other ) . '/old/' . $other . '/' . $name );
 			}
 			if ( null === $want || $want[0] !== $entry['live'] || $want[1] !== $entry['old'] ) {
@@ -939,8 +947,36 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 			throw $e;
 		} catch ( StaleJob $e ) {
 			throw $e;
-		} catch ( \RuntimeException $e ) {
-			$context->logger()->warning( 'The maintenance file could not be refreshed during the rollback', array( 'error' => $e->getMessage() ) );
+		} catch ( \Throwable $e ) {
+			$context->logger()->warning( $held ? 'The maintenance file could not be kept up during the rollback' : 'The maintenance file could not be refreshed after the swap was made', array( 'error' => $e->getMessage() ) );
+		}
+	}
+
+	/**
+	 * Let this restore's maintenance file lapse again once the site is whole (put back, or swapped in): it is
+	 * rewritten with the time before the state is recorded, so a run that dies before it takes the file down leaves
+	 * a file that lapses after WordPress's ten minutes, not one held for good. Someone else's file in its place is
+	 * left (there is none of ours to let go). What cannot be told or written is waited out: until then the site is
+	 * recorded as being changed, and every WP-CLI command of the plugin says so.
+	 *
+	 * @param JobContext  $context Context.
+	 * @param Maintenance $file    The file.
+	 * @return void
+	 * @throws TransientFailure When it could not be rewritten.
+	 */
+	private function release( JobContext $context, Maintenance $file ): void {
+		if ( Maintenance::OTHER === $file->state() ) {
+			$context->logger()->warning( 'Another maintenance file is in place of this restore\'s; it is left as it is' );
+			return;
+		}
+		try {
+			$file->put( $this->now(), array( $context, 'confirm_lease' ) );
+		} catch ( LockLost $e ) {
+			throw $e;
+		} catch ( StaleJob $e ) {
+			throw $e;
+		} catch ( \Throwable $e ) {
+			throw new TransientFailure( 'The maintenance file could not be let go yet: ' . $e->getMessage() );
 		}
 	}
 

@@ -186,22 +186,39 @@ final class Plugin {
 	}
 
 	/**
-	 * What a WP-CLI command says first while a restore holds the site half swapped: one line per such job, with the
-	 * command that puts the site back (the swap is not complete, so running the job rolls it back). Empty when the
-	 * jobs cannot be read (nothing to say for sure).
+	 * What a WP-CLI command says first while a restore holds the site half swapped: one line per such job, saying
+	 * how it is put back (the swap is not complete, so running the job rolls it back; a failed job is retried
+	 * first; a job another process holds is under way); and, whatever the jobs say, a line when a restore's
+	 * maintenance file is up and held, which keeps the site answering with the maintenance page. Nothing about the
+	 * jobs when they cannot be read.
 	 *
 	 * @return string[]
 	 */
 	public function half_swapped_warnings(): array {
+		$out = array();
 		try {
 			$ids = $this->jobs()->changing_site();
 		} catch ( \Throwable $e ) {
-			return array();
+			$ids = array();
 		}
-		$out = array();
 		foreach ( $ids as $id ) {
-			/* translators: 1: job id, 2: job id */
-			$out[] = sprintf( __( 'The site is half swapped by restore job %1$d: visitors see the maintenance page until it is put back. Put it back now with: wp wpcheckpoint job run %2$d', 'wp-checkpoint' ), $id, $id );
+			$job = $this->jobs()->find( $id );
+			if ( null === $job ) {
+				continue;
+			}
+			if ( $job->is_locked( time() ) ) {
+				/* translators: %d: job id */
+				$out[] = sprintf( __( 'Restore job %d is swapping the site in another process: visitors see the maintenance page until it ends.', 'wp-checkpoint' ), $id );
+			} elseif ( Job::FAILED === $job->status ) {
+				/* translators: 1: job id, 2: job id, 3: job id */
+				$out[] = sprintf( __( 'The site is half swapped by restore job %1$d, which failed: visitors see the maintenance page until it is put back. Put it back with: wp wpcheckpoint job retry %2$d, then wp wpcheckpoint job run %3$d', 'wp-checkpoint' ), $id, $id, $id );
+			} else {
+				/* translators: 1: job id, 2: job id */
+				$out[] = sprintf( __( 'The site is half swapped by restore job %1$d: visitors see the maintenance page until it is put back. Put it back now with: wp wpcheckpoint job run %2$d', 'wp-checkpoint' ), $id, $id );
+			}
+		}
+		if ( array() === $out && defined( 'ABSPATH' ) && Restore\Maintenance::held_in( (string) ABSPATH ) ) {
+			$out[] = __( 'A restore\'s maintenance file is up and does not lapse (.maintenance in the WordPress directory): visitors see the maintenance page. Find the restore with: wp wpcheckpoint job list', 'wp-checkpoint' );
 		}
 		return $out;
 	}

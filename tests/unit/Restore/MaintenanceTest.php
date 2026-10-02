@@ -68,9 +68,24 @@ final class MaintenanceTest extends TestCase {
 		$file->hold();
 		$this->assertTrue( $file->is_held() );
 		$this->assertSame( Maintenance::OURS, $file->state() );
-		$this->assertSame( Maintenance::HELD, $file->time_of( (string) file_get_contents( $file->path() ) ) );
-		$this->assertGreaterThan( 2000000000, Maintenance::HELD, 'far beyond any time WordPress compares it with' );
+		$this->assertSame( Maintenance::held(), $file->time_of( (string) file_get_contents( $file->path() ) ) );
+		$this->assertTrue( Maintenance::held_in( $this->dir ), 'a held file of this plugin is there' );
 		$this->assertTrue( $file->remove() );
+		$file->put( 1800000000 );
+		$this->assertFalse( Maintenance::held_in( $this->dir ), 'the control: one with the time is not held' );
+		$this->assertTrue( $file->remove() );
+		file_put_contents( $this->dir . '/.maintenance', "<?php\n\$upgrading = " . Maintenance::held() . "; // an update\n" );
+		$this->assertFalse( Maintenance::held_in( $this->dir ), 'someone else\'s, whatever its time' );
+	}
+
+	public function test_the_held_time_fits_the_integer_of_a_32_and_a_64_bit_php(): void {
+		$this->assertSame( 4102444800, Maintenance::held_for( 8 ) );
+		$this->assertSame( 2147483647, Maintenance::held_for( 4 ), 'the largest 32-bit integer: 2038' );
+		foreach ( array( 4, 8 ) as $size ) {
+			$this->assertIsInt( Maintenance::held_for( $size ) );
+			$this->assertGreaterThan( time() + 10 * 365 * 86400, Maintenance::held_for( $size ), 'far beyond WordPress\'s ten minutes' );
+		}
+		$this->assertSame( Maintenance::held_for( PHP_INT_SIZE ), Maintenance::held() );
 	}
 
 	public function test_the_lease_is_checked_right_before_the_file_is_deleted_and_stops_it(): void {

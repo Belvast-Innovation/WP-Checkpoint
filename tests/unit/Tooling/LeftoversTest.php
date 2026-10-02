@@ -102,6 +102,14 @@ final class LeftoversTest extends TestCase {
 		$this->assertSame( 1, $result->failureCount(), 'nothing new left at the end' );
 	}
 
+	public function test_an_earlier_runs_maintenance_file_goes_at_the_start_like_its_tables(): void {
+		$listener    = $this->listener();
+		$this->there = array( 'maintenance:/srv/site/.maintenance', 'temp:/tmp/wpc-plugin-00000000' );
+		$listener->startTestSuite( new TestSuite( 'root' ) );
+		$this->assertSame( array( 'maintenance:/srv/site/.maintenance' ), $this->removed, 'handed to the removal (which deletes this plugin\'s only)' );
+		$this->assertSame( array( 'temp:/tmp/wpc-plugin-00000000' ), $this->there, 'the control: another run\'s temporary entry stays' );
+	}
+
 	public function test_a_class_that_leaves_something_fails_as_a_class_and_so_does_the_run(): void {
 		$result   = new TestResult();
 		$listener = $this->listener();

@@ -467,11 +467,11 @@ final class SwapCrashTest extends SwapTestCase {
 		$last = 0;
 		foreach ( $times as $seen ) {
 			if ( in_array( $seen[0], array( 'dir_aside', 'dir_in', 'carried', 'batch_recorded' ), true ) ) {
-				$this->assertSame( Maintenance::HELD, $seen[1], 'held while the site is half swapped: ' . $seen[0] );
+				$this->assertSame( Maintenance::held(), $seen[1], 'held while the site is half swapped: ' . $seen[0] );
 				continue;
 			}
 			// Before the first change and after the swap is made: refreshed with the time, as always.
-			$this->assertLessThan( Maintenance::HELD, $seen[1], $seen[0] );
+			$this->assertLessThan( Maintenance::held(), $seen[1], $seen[0] );
 			$this->assertGreaterThan( $last, $seen[1], 'refreshed before ' . $seen[0] );
 			$last = $seen[1];
 		}
@@ -725,6 +725,61 @@ final class SwapCrashTest extends SwapTestCase {
 		$log = (string) file_get_contents( $done->storage_path . '/' . ( '' !== $done->log_path ? $done->log_path : 'logs/job-' . $done->id . '.log' ) );
 		$this->assertStringContainsString( 'A table of the plan was left as it is', $log );
 		$this->assertStringContainsString( 'swt_keep', $log );
+	}
+
+	public function test_killed_after_the_hold_was_let_go_the_file_lapses_and_the_next_run_finishes(): void {
+		// Rolled back: once the site is whole again, the file is rewritten with the time before that is recorded.
+		$job    = $this->at_swap();
+		$before = $this->site();
+		$plan   = $this->plan_of( $job );
+		$last   = $plan['dirs'][ count( $plan['dirs'] ) - 1 ];
+		rename( $last['stage'], $last['stage'] . '-away' );
+		$this->killed_at( $job, 'unheld', 1 );
+		rename( $last['stage'] . '-away', $last['stage'] );
+		$left = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertSame( 'rollback', $left->cursor['phase'] );
+		$file = new Maintenance( $this->abspath, $left->cursor['mark'] );
+		$this->assertSame( Maintenance::OURS, $file->state(), 'up' );
+		$this->assertFalse( $file->is_held(), 'but no longer held: it lapses on its own' );
+		$this->assertPutBack( $this->cli_run( $job ), $before, 'after unheld' );
+		$this->tear_down_swap();
+		$this->set_up_swap();
+		// Swapped in: the same before the swap is recorded as made.
+		$job    = $this->at_swap();
+		$before = $this->site();
+		$this->killed_at( $job, 'unheld_commit', 1 );
+		$left = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertSame( 'rename', $left->cursor['phase'] );
+		$this->assertFalse( ( new Maintenance( $this->abspath, $left->cursor['mark'] ) )->is_held() );
+		$this->assertSwapped( $this->cli_run( $job ), $before, 'after unheld_commit' );
+		$this->undo( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->tear_down_swap();
+		$this->set_up_swap();
+		// Swapped in, found made by the next run: it lets the file go too before it records the swap as made.
+		$job    = $this->at_swap();
+		$before = $this->site();
+		$this->killed_at( $job, 'batch_sent', 1 );
+		$this->assertTrue( ( new Maintenance( $this->abspath, Plugin::instance()->jobs()->find( $job->id )->cursor['mark'] ) )->is_held(), 'the control: held when killed' );
+		$this->killed_at( $job, 'unheld_commit', 1 );
+		$left = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertSame( 'rename', $left->cursor['phase'] );
+		$this->assertFalse( ( new Maintenance( $this->abspath, $left->cursor['mark'] ) )->is_held() );
+		$this->assertSwapped( $this->cli_run( $job ), $before, 'after unheld_commit on the next run' );
+	}
+
+	public function test_the_warning_tells_a_failed_job_to_be_retried_and_one_in_progress_apart(): void {
+		global $wpdb;
+		$job = $this->at_swap();
+		$this->killed_at( $job, 'dir_in', 2 );
+		$this->assertStringContainsString( 'Put it back now with: wp wpcheckpoint job run ' . $job->id, implode( "\n", Plugin::instance()->half_swapped_warnings() ), 'the control: a job that waits for WP-CLI' );
+		$wpdb->query( $wpdb->prepare( 'UPDATE ' . JobRepository::table() . ' SET locked_until = %d, lock_token = %s WHERE id = %d', time() + 120, 'another-process', $job->id ) );
+		$this->assertStringContainsString( 'is swapping the site in another process', implode( "\n", Plugin::instance()->half_swapped_warnings() ) );
+		$wpdb->query( $wpdb->prepare( 'UPDATE ' . JobRepository::table() . " SET locked_until = 0, lock_token = '', status = %s WHERE id = %d", Job::FAILED, $job->id ) );
+		$failed = implode( "\n", Plugin::instance()->half_swapped_warnings() );
+		$this->assertStringContainsString( 'wp wpcheckpoint job retry ' . $job->id . ', then wp wpcheckpoint job run ' . $job->id, $failed );
+		$wpdb->query( $wpdb->prepare( 'UPDATE ' . JobRepository::table() . ' SET status = %s WHERE id = %d', Job::RUNNING, $job->id ) );
+		$wpdb->query( 'COMMIT' );
+		$this->assertSame( Job::FAILED, $this->cli_run( $job )->status, 'and WP-CLI puts it back' );
 	}
 
 	public function test_every_command_of_the_plugin_says_first_that_the_site_is_half_swapped(): void {

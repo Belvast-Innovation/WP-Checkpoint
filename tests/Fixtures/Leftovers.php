@@ -168,7 +168,9 @@ final class Leftovers implements TestListener {
 				array_filter(
 					$now,
 					static function ( string $item ): bool {
-						return 0 === strpos( $item, 'table:' );
+						// Also the swap's maintenance file: removal() deletes only this plugin's (a held one would keep
+						// the test site in maintenance for the whole run), and reports anything else.
+						return 0 === strpos( $item, 'table:' ) || 0 === strpos( $item, 'maintenance:' );
 					}
 				)
 			);
