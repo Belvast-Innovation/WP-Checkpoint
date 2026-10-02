@@ -49,6 +49,9 @@ defined( 'ABSPATH' ) || exit;
  *   string per line, appended under a committed length).
  * - SWAP_PLAN: which attempt of the swap plan the final check wrote, and
  *   how many entries it has, written whole once the plan is complete.
+ * - INCOMING: the backup's tables another installation in the same
+ *   database may use (IncomingTables), by kind, written whole by the
+ *   preflight before it asks about them; the questions name this file.
  */
 final class RestoreFiles {
 
@@ -72,6 +75,8 @@ final class RestoreFiles {
 	const SWAP_CHECK_TREE = 'restore-swap-check-tree.jsonl';
 	const SWAP_PLAN       = 'restore-swap-plan.json';
 	const SWAP_LIVE       = 'restore-swap-live.jsonl';
+
+	const INCOMING = 'restore-incoming-tables.json';
 
 	/**
 	 * A file or directory of the work directory.

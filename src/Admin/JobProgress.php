@@ -150,6 +150,7 @@ final class JobProgress {
 			'choice_stop'     => __( 'Stop the backup', 'wp-checkpoint' ),
 			'choice_include'  => __( 'Include it', 'wp-checkpoint' ),
 			'choice_exclude'  => __( 'Leave it out', 'wp-checkpoint' ),
+			'choice_restore'  => __( 'Restore', 'wp-checkpoint' ),
 		);
 	}
 }

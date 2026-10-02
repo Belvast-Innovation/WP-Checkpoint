@@ -1765,6 +1765,9 @@ final class JobRepository {
 		if ( '' !== $result['stopped'] ) {
 			$this->directories->log_event( sprintf( 'Reclaiming the %1$s stopped: %2$s.', $what, $result['stopped'] ) );
 		}
+		if ( '' !== $result['note'] ) {
+			$this->directories->log_event( sprintf( 'Reclaiming the %1$s: %2$s.', $what, $result['note'] ) );
+		}
 		foreach ( $result['kept'] as $table => $referrers ) {
 			// Dropping it would leave another table's key pointing at nothing: it stays until that key is gone.
 			$this->directories->log_event( sprintf( 'Reclaiming the %1$s: %2$s is kept; a foreign key of %3$s, which stays, references it.', $what, $table, implode( ', ', $referrers ) ) );

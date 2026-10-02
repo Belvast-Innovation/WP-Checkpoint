@@ -7,6 +7,9 @@
 
 namespace WPCheckpoint\Jobs;
 
+use WPCheckpoint\Restore\IncomingQuestions;
+use WPCheckpoint\Restore\IncomingTables;
+use WPCheckpoint\Restore\RestoreFiles;
 use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Support\Paths;
 
@@ -24,9 +27,18 @@ defined( 'ABSPATH' ) || exit;
 final class QuestionText {
 
 	/**
-	 * Unreadable files listed with their question.
+	 * Unreadable files, or tables, listed with their question.
 	 */
 	const MAX_LISTED = 5;
+
+	/**
+	 * The restore's questions about tables another installation may use (RestorePreflightStep), by their kind (their
+	 * ids carry a digest of their tables, IncomingQuestions): the kind of table each is about (IncomingTables).
+	 */
+	const TABLE_QUESTIONS = array(
+		'tables_of_either_installation'           => IncomingTables::UNCERTAIN,
+		'tables_shared_with_another_installation' => IncomingTables::SHARED,
+	);
 
 	/**
 	 * The job's questions in words.
@@ -38,6 +50,7 @@ final class QuestionText {
 	 */
 	public static function for_job( Job $job, Directories $directories, callable $clean ): array {
 		$findings = array();
+		$tables   = array();
 		$work     = self::work_dir( $job, $directories );
 		if ( '' !== $work && ExportPlan::exists( $work, ExportPlan::REVIEW ) ) {
 			try {
@@ -47,15 +60,28 @@ final class QuestionText {
 				$findings = array(); // Gone or changed since: each question is still listed, with a generic line.
 			}
 		}
+		if ( '' !== $work && ExportPlan::exists( $work, RestoreFiles::INCOMING ) ) {
+			try {
+				$tables = ExportPlan::read( $work, RestoreFiles::INCOMING );
+			} catch ( \RuntimeException $e ) {
+				$tables = array(); // As above: the question stays, without its tables.
+			}
+		}
 		$out = array();
 		foreach ( $job->questions as $question ) {
 			$id     = (string) $question['id'];
+			$kind   = (string) ( $question['kind'] ?? '' );
 			$listed = 'unreadable' === $id && isset( $findings['unreadable']['listed'] ) ? array_slice( array_filter( (array) $findings['unreadable']['listed'], 'is_string' ), 0, self::MAX_LISTED ) : array();
-			$out[]  = array(
+			$shown  = array();
+			if ( isset( self::TABLE_QUESTIONS[ $kind ] ) && self::lists( $id, $kind, $tables ) ) {
+				$shown  = $tables;
+				$listed = array_slice( array_filter( (array) $tables[ self::TABLE_QUESTIONS[ $kind ] ], 'is_string' ), 0, self::MAX_LISTED );
+			}
+			$out[] = array(
 				'id'      => $id,
 				'kind'    => (string) ( $question['kind'] ?? '' ),
 				'choices' => array_map( 'strval', (array) ( $question['choices'] ?? array() ) ),
-				'text'    => (string) call_user_func( $clean, self::describe( $id, $question, $findings ) ),
+				'text'    => (string) call_user_func( $clean, self::describe( $id, $question, $findings, $shown ) ),
 				'listed'  => array_map(
 					static function ( string $p ) use ( $clean ): string {
 						return (string) call_user_func( $clean, $p );
@@ -65,6 +91,26 @@ final class QuestionText {
 			);
 		}
 		return $out;
+	}
+
+	/**
+	 * Whether the work file lists the tables (and evidence) of the question, as its id names them: a file written by
+	 * another run (one that outlived its lease) may list others, and then none are shown. The file holds the names
+	 * made valid UTF-8 for display, the id their bytes: a name that is not UTF-8 is not listed (the question, its
+	 * count and the answer are not affected).
+	 *
+	 * @param string               $id     The question's id.
+	 * @param string               $kind   The question's kind.
+	 * @param array<string, mixed> $tables RestoreFiles::INCOMING.
+	 * @return bool
+	 */
+	private static function lists( string $id, string $kind, array $tables ): bool {
+		$key = array_search( $kind, IncomingQuestions::QUESTION_KINDS, true );
+		if ( ! is_string( $key ) || ! isset( $tables[ self::TABLE_QUESTIONS[ $kind ] ] ) ) {
+			return false;
+		}
+		$evidence = array_filter( (array) ( $tables['evidence'] ?? array() ), 'is_string' );
+		return hash_equals( IncomingQuestions::id( $key, array_filter( (array) $tables[ self::TABLE_QUESTIONS[ $kind ] ], 'is_string' ), $evidence, ! empty( $tables['over'] ) ), $id );
 	}
 
 	/**
@@ -90,9 +136,10 @@ final class QuestionText {
 	 * @param string               $id       Question id.
 	 * @param array<string, mixed> $question Question.
 	 * @param array<string, mixed> $findings Review findings.
+	 * @param array<string, mixed> $tables   The restore's tables another installation may use (RestoreFiles::INCOMING).
 	 * @return string
 	 */
-	public static function describe( string $id, array $question, array $findings ): string {
+	public static function describe( string $id, array $question, array $findings, array $tables = array() ): string {
 		$count = (int) ( $question['count'] ?? 0 );
 		if ( 'unreadable' === $id ) {
 			$listed = isset( $findings['unreadable']['listed'] ) ? array_slice( array_filter( (array) $findings['unreadable']['listed'], 'is_string' ), 0, self::MAX_LISTED ) : array();
@@ -112,6 +159,40 @@ final class QuestionText {
 		}
 		if ( 'free_space' === $id ) {
 			return sprintf( 'This server does not say how much disk space is free, so whether the restore\'s staged files (%d MB with a margin) fit cannot be confirmed. Continue anyway, or stop?', (int) ceil( (int) ( $question['bytes'] ?? 0 ) / 1048576 ) );
+		}
+		$kind = (string) ( $question['kind'] ?? '' );
+		if ( 'tables_of_either_installation' === $kind ) {
+			return sprintf(
+				/* translators: %d: number of tables */
+				_n(
+					'%d table of the backup has the name of a table that may belong to this site or to another WordPress installation in the same database (listed below, all of them in the job log): its name fits both. Restore it: if it is the other installation\'s, its data is replaced by the backup\'s. Or leave it out: if it is this site\'s, it keeps its current data and is not restored.',
+					'%d tables of the backup have the names of tables that may belong to this site or to another WordPress installation in the same database (listed below, all of them in the job log): their names fit both. Restore them: if they are the other installation\'s, their data is replaced by the backup\'s. Or leave them out: if they are this site\'s, they keep their current data and are not restored.',
+					$count,
+					'wp-checkpoint'
+				),
+				$count
+			);
+		}
+		if ( 'tables_shared_with_another_installation' === $kind ) {
+			$evidence = array_slice( array_filter( (array) ( $tables['evidence'] ?? array() ), 'is_string' ), 0, self::MAX_LISTED );
+			$found    = '';
+			if ( array() !== $evidence ) {
+				/* translators: %s: table prefixes, comma-separated */
+				$found .= ' ' . sprintf( __( 'This site\'s user table holds the roles of users of another installation, with the table prefix %s.', 'wp-checkpoint' ), implode( ', ', $evidence ) );
+			}
+			if ( ! empty( $tables['over'] ) ) {
+				$found .= ' ' . __( 'This site\'s user table holds the roles of more other installations than could be told apart, so the restore counts it as shared.', 'wp-checkpoint' );
+			}
+			return sprintf(
+				/* translators: %d: number of tables */
+				_n(
+					'%d table of the backup is used by this site and by another WordPress installation in the same database (listed below, all of them in the job log), for example a users table both share. Restore it: the other installation\'s data in it is replaced by the backup\'s too. Or leave it out: it keeps its current data, for this site as well.',
+					'%d tables of the backup are used by this site and by another WordPress installation in the same database (listed below, all of them in the job log), for example a users table both share. Restore them: the other installation\'s data in them is replaced by the backup\'s too. Or leave them out: they keep their current data, for this site as well.',
+					$count,
+					'wp-checkpoint'
+				),
+				$count
+			) . $found;
 		}
 		if ( 'oversize_more' === $id ) {
 			return sprintf( '%d more tables have rows larger than the single-row limit (listed in the job log). Leave those rows out, or stop?', $count );

@@ -63,6 +63,41 @@ final class TablePlanTest extends TestCase {
 		$this->assertEquals( $plan, TablePlan::from_array( $plan->to_array() ) );
 	}
 
+	public function test_tables_left_out_for_a_reason_are_reported_with_it_and_the_rest_are_numbered_without_them(): void {
+		$names = array( 'wp_options', 'wp_old_posts', 'wp_posts', 'wp_old_shop_orders' );
+		$all   = self::plan( $names );
+		$this->assertNotNull( $all->find( 'wp_old_posts' ), 'the control: without a reason, it is planned' );
+		$plan = TablePlan::make(
+			self::tables( $names ),
+			'wp_',
+			'wp_',
+			false,
+			array(),
+			self::TOKEN,
+			7,
+			'1a2b',
+			false,
+			array(
+				'wp_old_posts'       => 'neighbour',
+				'wp_old_shop_orders' => 'uncertain',
+			)
+		);
+		$this->assertNull( $plan->find( 'wp_old_posts' ) );
+		$this->assertNull( $plan->find( 'wp_old_shop_orders' ) );
+		$this->assertSame(
+			array(
+				'wp_old_posts'       => 'neighbour',
+				'wp_old_shop_orders' => 'uncertain',
+			),
+			$plan->skipped()
+		);
+		$this->assertSame( array( 'wp_options', 'wp_posts' ), array_column( $plan->tables(), 'table' ) );
+		$this->assertSame( array( 0, 1 ), array_column( $plan->tables(), 'number' ) );
+		$this->expectException( Refused::class );
+		$this->expectExceptionMessage( 'The backup has no table wp_options' );
+		TablePlan::make( self::tables( $names ), 'wp_', 'wp_', false, array(), self::TOKEN, 7, '1a2b', false, array( 'wp_options' => 'shared' ) );
+	}
+
 	public function test_a_final_name_too_long_is_refused_with_leaving_it_out_first(): void {
 		$long = 'wp_' . str_repeat( 'x', 60 );
 		$this->assertCount( 2, self::plan( array( 'wp_options', $long ) )->tables(), 'the control: 63 bytes fit' );
