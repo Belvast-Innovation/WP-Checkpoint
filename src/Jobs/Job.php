@@ -357,12 +357,12 @@ final class Job {
 	public $takeover_mark = '';
 
 	/**
-	 * What the job has done to the site: SITE_UNTOUCHED, SITE_CHANGING (a restore's swap is under way, or being
-	 * rolled back) or SITE_SWAPPED (the restored site is in place). Written by the Runner in the statement that
-	 * writes the cursor, from the step (HoldsSite::site_state()); while it is not SITE_UNTOUCHED no rule that
-	 * reclaims, expires, purges or fails a job by time or by its storage directory touches the job, a cancel is
-	 * only requested (SITE_CHANGING) or refused (SITE_SWAPPED), and uninstalling leaves the plugin's data where it
-	 * is. No step of a job type writes it yet: the restore's swap (T042) will.
+	 * What the job has done to the site: SITE_UNTOUCHED, SITE_CHANGING (a restore's swap is under way, being
+	 * rolled back, or put back and ending: Jobs\SwapStep's "restored") or SITE_SWAPPED (the restored site is in
+	 * place). Written by the Runner in the statement that writes the cursor, from the step
+	 * (HoldsSite::site_state(); Jobs\SwapStep writes it); while it is not SITE_UNTOUCHED no rule that reclaims,
+	 * expires, purges or fails a job by time or by its storage directory touches the job, a cancel is only
+	 * requested (SITE_CHANGING) or refused (SITE_SWAPPED), and uninstalling leaves the plugin's data where it is.
 	 *
 	 * @var int
 	 */

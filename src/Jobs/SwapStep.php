@@ -52,10 +52,12 @@ defined( 'ABSPATH' ) || exit;
  * options (StateCarry, when the backup replaces them); then the tables, in
  * batches (SwapRules::batches()), each recorded before it is sent, the first
  * one only when this plugin stays active (StateCarry::guard()), each
- * retried after a lock wait of LOCK_WAIT seconds at most RETRIES times. The
- * maintenance file is refreshed between the steps. The swap is made when a
- * listing shows every table entry swapped (SwapRules::committed()): that is
- * recorded (Job::SITE_SWAPPED) and from then on the swap only goes forward.
+ * retried after a lock wait of LOCK_WAIT seconds at most RETRIES times. From
+ * the first change of the site the maintenance file is held (it never lapses).
+ * The swap is made when a listing shows every table entry swapped
+ * (SwapRules::committed()): that is recorded ("committed", Job::SITE_SWAPPED)
+ * while the file is still held, and from then on the swap only goes forward
+ * and nothing is renamed again.
  *
  * Anything that stops the swap before that, in the same tick (an exception)
  * or seen by the next one (a run that died: "enter", "dirs", "carry", or
@@ -63,19 +65,26 @@ defined( 'ABSPATH' ) || exit;
  * directories, in reverse plan order, each by what is there and not by where
  * the cursor stopped (SwapRules::table_back(), dir_back()); what is found in
  * a place the old site's table or directory must go back to (someone made it
- * meanwhile) is moved out of the way and logged, never deleted; the
- * maintenance file is taken down; then the site is recorded as untouched
- * and the job fails with the reason, a retry starting over at the final
- * check, or is cancelled when that was asked for. What cannot be told (a
+ * meanwhile) is moved out of the way and logged, never deleted (the
+ * maintenance file held before the first rename); the site is recorded as
+ * put back ("restored") while the file is still held, and from then on
+ * nothing is renamed again; the file is let go, the site recorded as
+ * untouched ("reverted"), the file taken down; the job fails with the
+ * reason, a retry starting over at the final check, or is cancelled when
+ * that was asked for. What cannot be told (a
  * listing or an lstat that fails) is waited out (TransientFailure), never
  * guessed.
  *
- * After the swap is made: caches flushed, the restored rewrite rules
- * removed (WordPress builds them again), a mark left in the restored
- * options for the plugin to set its fallback events again on its next
- * request (Plugin), the maintenance file taken down: each a step of its
- * own, with plain SQL on the restored tables and no WordPress API but the
- * cache flush (the process still holds the old site's plugins).
+ * After the swap is made: caches flushed (behind the held file), the file
+ * let go, the restored rewrite rules removed (WordPress builds them again),
+ * a mark left in the restored options for the plugin to set its fallback
+ * events again on its next request (Plugin), the cache flushed again, the
+ * end recorded ("done"), the file taken down: each a step of its own, with
+ * plain SQL on the restored tables and no WordPress API but the cache flush
+ * (the process still holds the old site's plugins). The empty cursor of the
+ * ended step, on a job still recorded as holding the site (a run that died
+ * between the Runner's two last writes), ends the step without touching
+ * anything.
  */
 final class SwapStep implements Step, HoldsSite, CliOnly {
 
@@ -186,7 +195,15 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 	 */
 	public function run( JobContext $context ): StepResult {
 		$cursor = $context->cursor();
-		$db     = call_user_func( $this->connect );
+		if ( array() === $cursor && Job::SITE_UNTOUCHED !== $context->job()->site_state ) {
+			// The empty cursor of a step that ended (the Runner writes it, then completes the job in a second write) on a
+			// job that holds the site: the swap is over. Starting it again would find the site swapped and put it back.
+			if ( Job::SITE_SWAPPED === $context->job()->site_state ) {
+				return StepResult::done( __( 'The restored site is in place', 'wp-checkpoint' ) );
+			}
+			throw new \RuntimeException( 'The swap has no position recorded while the site is recorded as being changed; nothing was changed. The job row was changed: look at the site before you go on.' );
+		}
+		$db = call_user_func( $this->connect );
 		try {
 			$phase = (string) ( $cursor['phase'] ?? 'start' );
 			if ( 'start' === $phase ) {
@@ -249,8 +266,9 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 	/**
 	 * This restore's maintenance file, when a cancel finds it: a job is cancelled only while the site is untouched
 	 * (what the swap changed is put back by its own rollback, never by a cleanup), but a run that died between
-	 * recording the site as put back and taking the file down leaves it, held. Only the file with this job's mark
-	 * goes; nothing else is released here (the plan's rows go with the job). Never throws.
+	 * recording the site as untouched and taking the file down leaves it (let go: it lapses, but it is still there).
+	 * Only the file with this job's mark goes; nothing else is released here (the plan's rows go with the job).
+	 * Never throws.
 	 *
 	 * @param JobContext $context Context.
 	 * @return void
@@ -500,7 +518,7 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 			'phase'   => 'committed',
 			'attempt' => $cursor['attempt'],
 			'mark'    => $cursor['mark'] ?? '',
-			'post'    => 'release',
+			'post'    => 'cache',
 		);
 		$context->checkpoint( $cursor, 85, __( 'The restored site is in place', 'wp-checkpoint' ) );
 		$this->at( 'committed' );
@@ -699,10 +717,11 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 	}
 
 	/**
-	 * Hold this restore's maintenance file before the rollback renames anything (a run that let it go and died
-	 * before recording the put-back may have left it lapsed). Someone else's file in its place is left (the site
-	 * answers with a maintenance page all the same). What cannot be told or written is waited out: nothing is renamed
-	 * without the file held.
+	 * Hold this restore's maintenance file before the rollback renames anything: the run that is rolled back held it,
+	 * but it may be gone meanwhile (a WordPress update takes a maintenance file down whoever wrote it), or the
+	 * rollback may start before the file was first put up (from "enter"). Someone else's file in its place is left
+	 * (the site answers with a maintenance page all the same). What cannot be told or written is waited out: nothing
+	 * is renamed without the file held.
 	 *
 	 * @param JobContext  $context Context.
 	 * @param Maintenance $file    The file.
@@ -755,18 +774,18 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 		$entries = null;
 		while ( true ) {
 			switch ( (string) ( $cursor['post'] ?? '' ) ) {
-				case 'release':
-					// The swap is recorded as made: the site is whole, and the maintenance file lapses again.
-					$this->release( $context, $this->maintenance( $cursor ) );
-					$this->at( 'unheld_commit' );
-					$cursor['post'] = 'cache';
-					break;
 				case 'cache':
-					// The swap is made: the maintenance file lapses again as before, refreshed step by step.
-					$this->refresh( $context, $this->maintenance( $cursor ), false );
-					// Before anything reads the site through WordPress: this process holds the old site's options.
+					// Before anything reads the site through WordPress (this process holds the old site's options), and
+					// before visitors can: the maintenance file is still held, so a flush that has to wait does so behind it.
 					$this->flush( $context );
 					$this->at( 'flushed' );
+					$cursor['post'] = 'release';
+					break;
+				case 'release':
+					// The swap is recorded as made and the cache is flushed: the maintenance file lapses again, refreshed
+					// step by step from here on.
+					$this->release( $context, $this->maintenance( $cursor ) );
+					$this->at( 'unheld_commit' );
 					$cursor['post'] = 'rewrite';
 					break;
 				case 'rewrite':
@@ -991,6 +1010,9 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 	 * @throws StaleJob When the job is no longer this run's (not caught).
 	 */
 	private function refresh( JobContext $context, Maintenance $file, bool $held ): void {
+		if ( ! $held && Maintenance::NONE === $file->state() ) {
+			return; // None of ours to refresh: none is made.
+		}
 		try {
 			if ( $held ) {
 				$file->hold( array( $context, 'confirm_lease' ) );
@@ -1007,11 +1029,11 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 	}
 
 	/**
-	 * Let this restore's maintenance file lapse again once the site is whole (put back, or swapped in): it is
-	 * rewritten with the time before the state is recorded, so a run that dies before it takes the file down leaves
-	 * a file that lapses after WordPress's ten minutes, not one held for good. Someone else's file in its place is
-	 * left (there is none of ours to let go). What cannot be told or written is waited out: until then the site is
-	 * recorded as being changed, and every WP-CLI command of the plugin says so.
+	 * Let this restore's maintenance file lapse again once the direction is recorded ("committed" or "restored",
+	 * while it was held): it is rewritten with the time, so a run that dies before it takes the file down leaves a
+	 * file that lapses after WordPress's ten minutes, not one held for good. Someone else's file in its place is
+	 * left, and none is made where there is none. What cannot be told or written is waited out: until then the job
+	 * is recorded as holding the site (changing it, or swapped), and every WP-CLI command of the plugin says so.
 	 *
 	 * @param JobContext  $context Context.
 	 * @param Maintenance $file    The file.

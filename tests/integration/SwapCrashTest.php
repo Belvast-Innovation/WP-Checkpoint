@@ -472,8 +472,8 @@ final class SwapCrashTest extends SwapTestCase {
 		$this->assertGreaterThan( 5, count( $times ), 'the control: the seams were seen' );
 		$last = 0;
 		foreach ( $times as $seen ) {
-			if ( in_array( $seen[0], array( 'dir_aside', 'dir_in', 'carried', 'batch_recorded' ), true ) ) {
-				$this->assertSame( Maintenance::held(), $seen[1], 'held while the site is half swapped: ' . $seen[0] );
+			if ( in_array( $seen[0], array( 'dir_aside', 'dir_in', 'carried', 'batch_recorded', 'flushed' ), true ) ) {
+				$this->assertSame( Maintenance::held(), $seen[1], 'held while the site is half swapped, and until the cache is flushed: ' . $seen[0] );
 				continue;
 			}
 			// Before the first change and after the swap is made: refreshed with the time, as always.
@@ -801,5 +801,34 @@ final class SwapCrashTest extends SwapTestCase {
 		$this->assertStringContainsString( 'wp wpcheckpoint job run ' . $job->id, $warnings[0] );
 		$this->assertSame( Job::FAILED, $this->cli_run( $job )->status );
 		$this->assertSame( array(), Plugin::instance()->half_swapped_warnings(), 'put back: nothing to say' );
+	}
+
+	public function test_a_swap_whose_end_was_written_but_not_its_completion_is_not_started_again(): void {
+		global $wpdb;
+		$job    = $this->at_swap();
+		$before = $this->site();
+		$done   = $this->cli_run( $job );
+		$this->assertSwapped( $done, $before, 'the swap' );
+		// A run that died between the Runner's two last writes: the step's empty cursor written, the job not yet
+		// completed (site_state stays that of the swap).
+		$wpdb->query( $wpdb->prepare( 'UPDATE ' . JobRepository::table() . " SET status = %s, step = %s, cursor_json = '[]', finished_at = 0 WHERE id = %d", Job::RUNNING, \WPCheckpoint\Jobs\SwapStep::ID, $job->id ) );
+		$wpdb->query( 'COMMIT' );
+		$left = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertSame( array(), $left->cursor );
+		$this->assertSame( Job::SITE_SWAPPED, $left->site_state );
+		$this->seams = array();
+		$again       = $this->cli_run( $job );
+		$this->assertSame( Job::COMPLETED, $again->status, (string) $again->last_error );
+		$this->assertSame( array(), $this->seams, 'nothing of the swap ran again' );
+		$this->assertRestored( $before );
+	}
+
+	public function test_a_held_file_is_said_next_to_the_job_that_holds_it(): void {
+		$job = $this->at_swap();
+		$this->killed_at( $job, 'dir_in', 2 );
+		$this->assertTrue( Maintenance::held_in( $this->abspath ), 'the control: the file is held' );
+		$before = Plugin::instance()->half_swapped_warnings();
+		$this->assertCount( 1, $before, 'the sandbox is not ABSPATH: only the job\'s line' );
+		$this->assertSame( Job::FAILED, $this->cli_run( $job )->status );
 	}
 }

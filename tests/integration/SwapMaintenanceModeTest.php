@@ -176,6 +176,7 @@ final class SwapMaintenanceModeTest extends SwapTestCase {
 			$warnings = Plugin::instance()->half_swapped_warnings();
 			$this->assertCount( 1, $warnings );
 			$this->assertStringContainsString( 'maintenance file is up and does not lapse', $warnings[0] );
+			$this->assertStringContainsString( 'No restore holds the site now; check with wp wpcheckpoint job list, and if none does, remove that file', $warnings[0] );
 		} finally {
 			$file->remove();
 		}
@@ -192,5 +193,16 @@ final class SwapMaintenanceModeTest extends SwapTestCase {
 		} finally {
 			$ours->remove(); // Whatever failed above: the file this test wrote does not stay.
 		}
+	}
+
+	public function test_a_held_file_is_said_whatever_the_job_lines_say(): void {
+		$job = $this->at_swap();
+		$this->killed_at( $job, 'committed', 1 );
+		$warnings = Plugin::instance()->half_swapped_warnings();
+		$this->assertCount( 2, $warnings, 'the job at its last step, and the held file' );
+		$this->assertStringContainsString( 'is at its last step (the restored site is swapped in)', $warnings[0] );
+		$this->assertStringContainsString( 'visitors see the maintenance page until the restore above ends', $warnings[1] );
+		$this->assertSame( Job::COMPLETED, $this->cli_run( $job )->status );
+		$this->assertSame( array(), Plugin::instance()->half_swapped_warnings(), 'the control: nothing once it ended' );
 	}
 }

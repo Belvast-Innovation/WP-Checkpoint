@@ -29,19 +29,38 @@ use WPCheckpoint\Tests\Fixtures\Restore\SwapTestCase;
 final class SwapSequencesTest extends SwapTestCase {
 
 	/** The seams of the swap going forward (a run killed there once, then WP-CLI to the end). */
-	const FORWARD = array( 'entered', 'maintenance', 'dir_aside', 'dir_aside_recorded', 'dir_in', 'carry_written', 'carried', 'batch_recorded', 'batch_sent', 'committed', 'unheld_commit', 'flushed', 'rewrite', 'cron', 'done_recorded', 'exited' );
+	const FORWARD = array( 'entered', 'maintenance', 'dir_aside', 'dir_aside_recorded', 'dir_in', 'carry_written', 'carried', 'batch_recorded', 'batch_sent', 'committed', 'flushed', 'unheld_commit', 'rewrite', 'cron', 'done_recorded', 'exited' );
 
 	/** The seams of the rollback (a run killed between two batches first, then the next one killed there). */
 	const BACKWARD = array( 'rollback', 'table_back', 'dir_back', 'dirs_back', 'restored', 'unheld', 'reverted', 'maintenance_down' );
 
 	/** The seams after which the file has been let go: visitors are on the site. */
-	const PUBLIC_SEAMS = array( 'unheld_commit', 'flushed', 'rewrite', 'cron', 'done_recorded', 'exited', 'unheld', 'reverted', 'maintenance_down' );
+	const PUBLIC_SEAMS = array( 'unheld_commit', 'rewrite', 'cron', 'done_recorded', 'exited', 'unheld', 'reverted', 'maintenance_down' );
+
+	/** Seams where a rename has just been made or is made next: the file must be held there (I1). */
+	const AT_RENAME = array( 'dir_aside', 'dir_in', 'batch_sent', 'table_back', 'dir_back' );
+
+	/** The seams that record the direction (I2: nothing that renames after them, in the same run or later). */
+	const DECIDING = array( 'committed', 'restored' );
 
 	/** Seams of a run that renames something (or is about to). */
 	const RENAMING = array( 'entered', 'maintenance', 'dir_aside', 'dir_aside_recorded', 'dir_in', 'carry_written', 'carried', 'batch_recorded', 'batch_sent', 'rollback', 'table_back', 'dir_back', 'dirs_back' );
 
-	/** What happens meanwhile, given out in turn to the seams before the file is let go. */
-	const MEANWHILE = array( 'clock', 'cancel', 'flush_fail', 'remove_fail' );
+	/**
+	 * What happens meanwhile, given out in turn (in this order, so that every kind meets a seam where it has an
+	 * effect): a cancel; the clock (the killed run wrote its times eleven minutes ago); a cache that cannot be
+	 * flushed once (the next run); the maintenance file deleted (as a WordPress update does, whoever wrote it), which
+	 * lands on a run killed between two batches, so the rollback has tables to put back; a file that cannot be taken
+	 * down once (the next run).
+	 */
+	const MEANWHILE = array( 'cancel', 'clock', 'flush_fail', 'file_removed', 'remove_fail' );
+
+	public function test_the_scan_for_renames_after_the_direction_is_recorded_finds_them(): void {
+		$this->assertSame( 'dir_in', self::renamed_after_decision( array( 'carried', 'committed', 'flushed', 'dir_in' ) ), 'in the same run' );
+		$this->assertSame( 'table_back', self::renamed_after_decision( array( 'table_back' ), true ), 'in a run after one that recorded it' );
+		$this->assertSame( '', self::renamed_after_decision( array( 'dir_in', 'batch_sent', 'committed', 'flushed', 'unheld_commit' ) ), 'the control: renames before it are fine' );
+		$this->assertSame( '', self::renamed_after_decision( array( 'table_back', 'dir_back', 'restored', 'unheld' ) ) );
+	}
 
 	public function test_every_seam_and_every_interleaving_keeps_the_invariants(): void {
 		$count = max( 1, (int) ( getenv( 'WPCHECKPOINT_SWAP_SEQUENCES' ) ?: 24 ) );
@@ -95,15 +114,24 @@ final class SwapSequencesTest extends SwapTestCase {
 		file_put_contents( $this->trace, '' );
 		if ( 'clock' === $kind ) {
 			$this->clock_offset = -660; // The killed run wrote its times eleven minutes ago.
-			++$kinds['clock'];
 		}
 		$this->killed_at( $job, $seam, 1 );
-		$passed = array_filter( explode( "\n", (string) file_get_contents( $this->trace ) ) );
+		$passed = array_values( array_filter( explode( "\n", (string) file_get_contents( $this->trace ) ) ) );
 		$this->assertSame( $seam, end( $passed ), $label . ': the run died at its seam' );
 		++$killed[ $seam ];
-		$this->assertRenamedNothingOnceDecided( $passed, $decided, $label . ' (killed run)' );
+		$this->assertSame( '', self::renamed_after_decision( $passed, '' !== $decided ), $label . ': I2, nothing renamed once the direction was recorded (killed run: ' . implode( ', ', $passed ) . ')' );
 		$this->observe( $job, $label, $decided, $public );
+		$left = Plugin::instance()->jobs()->find( $job->id );
+		$file = new Maintenance( $this->abspath, (string) ( $left->cursor['mark'] ?? '' ) );
+		if ( 'clock' === $kind && Maintenance::OURS === $file->state() && ! $file->is_held() ) {
+			++$kinds['clock']; // The killed run left a file that lapses, with its times eleven minutes old.
+		}
 		$this->clock_offset = 0;
+		$removed = false;
+		if ( 'file_removed' === $kind && Maintenance::OURS === $file->state() ) {
+			\WPCheckpoint\Support\Deleter::delete_maintenance_file( $this->abspath, '.maintenance' );
+			$removed = true;
+		}
 
 		$visited = false;
 		if ( in_array( $seam, self::PUBLIC_SEAMS, true ) ) {
@@ -118,17 +146,27 @@ final class SwapSequencesTest extends SwapTestCase {
 			$visited = true;
 			++$kinds['visitor'];
 		}
+		$cancelled = false;
 		if ( 'cancel' === $kind ) {
-			Plugin::instance()->job_actions()->cancel( $job->id );
+			$asked = Plugin::instance()->job_actions()->cancel( $job->id );
 			$wpdb->query( 'COMMIT' );
-			++$kinds['cancel'];
+			$cancelled = in_array( $asked['reason'] ?? '', array( 'requested', 'cleaned', 'holder' ), true );
+			if ( $cancelled ) {
+				++$kinds['cancel'];
+			}
 		}
 		$fails = array( 'flush' => 'flush_fail' === $kind ? 1 : 0, 'remove' => 'remove_fail' === $kind ? 1 : 0 );
 		$this->retype(
 			$job,
 			array(
-				'at'     => function ( string $point ): void {
+				'at'     => function ( string $point ) use ( $job, $label ): void {
 					$this->seams[] = $point;
+					if ( in_array( $point, self::AT_RENAME, true ) ) {
+						// I1, inside the run: at a rename, this restore's file is held (or someone else's is there).
+						$mark = (string) ( Plugin::instance()->jobs()->find( $job->id )->cursor['mark'] ?? '' );
+						$file = new Maintenance( $this->abspath, $mark );
+						$this->assertTrue( $file->is_held() || Maintenance::OTHER === $file->state(), $label . ': I1, held at ' . $point );
+					}
 				},
 				'flush'  => static function () use ( &$fails ): void {
 					if ( $fails['flush'] > 0 ) {
@@ -146,11 +184,13 @@ final class SwapSequencesTest extends SwapTestCase {
 			)
 		);
 		$done = null;
+		$runs = array();
 		for ( $i = 0; $i < 6; $i++ ) {
 			// Each run against what was recorded before it.
 			$this->seams = array();
 			$done        = $this->cli_run( $job );
-			$this->assertRenamedNothingOnceDecided( $this->seams, $decided, $label . ' (next run ' . $i . ')' );
+			$this->assertSame( '', self::renamed_after_decision( $this->seams, '' !== $decided ), $label . ': I2, nothing renamed once the direction was recorded (next run ' . $i . ': ' . implode( ', ', $this->seams ) . ')' );
+			$runs = array_merge( $runs, $this->seams );
 			if ( ! in_array( $done->status, array( Job::QUEUED, Job::RUNNING ), true ) ) {
 				break;
 			}
@@ -162,7 +202,13 @@ final class SwapSequencesTest extends SwapTestCase {
 		if ( 'remove_fail' === $kind && 0 === $fails['remove'] ) {
 			++$kinds['remove_fail'];
 		}
+		if ( $removed && in_array( 'table_back', $runs, true ) ) {
+			++$kinds['file_removed']; // The file was gone when the rollback had tables to put back (checked held there).
+		}
 		$this->assertNotContains( $done->status, array( Job::QUEUED, Job::RUNNING ), $label . ': ended' );
+		if ( $cancelled ) {
+			$this->assertSame( Job::CANCELLED, $done->status, $label . ': a cancel that was taken ends the job cancelled' );
+		}
 		// I4: an ended job leaves none of its files held.
 		$this->assertFalse( Maintenance::held_in( $this->abspath ), $label . ': no held file once the job ended (' . $done->status . ')' );
 		// The outcome, and I5: what visitors wrote after the file was let go is where they wrote it.
@@ -214,19 +260,21 @@ final class SwapSequencesTest extends SwapTestCase {
 	}
 
 	/**
-	 * I2: once the direction is recorded, no seam of a run that renames.
+	 * I2: the first seam that renames after the direction was recorded ("committed", "restored") in a list of seams,
+	 * or after it was recorded before the list began; '' when there is none.
 	 *
 	 * @param string[] $passed  Seams passed, in order.
-	 * @param string   $decided The direction recorded before these ('' for none).
-	 * @param string   $label   For the messages.
-	 * @return void
+	 * @param bool     $decided Whether the direction was recorded before these.
+	 * @return string
 	 */
-	private function assertRenamedNothingOnceDecided( array $passed, string $decided, string $label ): void {
-		if ( '' === $decided ) {
-			return;
-		}
+	private static function renamed_after_decision( array $passed, bool $decided = false ): string {
 		foreach ( $passed as $point ) {
-			$this->assertNotContains( $point, self::RENAMING, $label . ': I2, nothing renamed after ' . $decided . ' (passed ' . implode( ', ', $passed ) . ')' );
+			if ( in_array( $point, self::DECIDING, true ) ) {
+				$decided = true;
+			} elseif ( $decided && in_array( $point, self::RENAMING, true ) ) {
+				return $point;
+			}
 		}
+		return '';
 	}
 }
