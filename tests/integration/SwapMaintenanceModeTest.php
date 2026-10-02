@@ -205,4 +205,33 @@ final class SwapMaintenanceModeTest extends SwapTestCase {
 		$this->assertSame( Job::COMPLETED, $this->cli_run( $job )->status );
 		$this->assertSame( array(), Plugin::instance()->half_swapped_warnings(), 'the control: nothing once it ended' );
 	}
+
+	public function test_the_advice_to_remove_a_held_file_needs_the_jobs_read(): void {
+		$file = new Maintenance( $this->abspath, Maintenance::new_mark() );
+		try {
+			$file->hold();
+			$none = Plugin::instance()->half_swapped_warnings(
+				static function (): array {
+					return array();
+				}
+			);
+			$this->assertStringContainsString( 'if none does, remove that file', implode( "\n", $none ), 'the control: read, and none holds the site' );
+			$unread = Plugin::instance()->half_swapped_warnings(
+				static function (): array {
+					throw new \RuntimeException( 'the jobs table is away' );
+				}
+			);
+			$this->assertCount( 1, $unread );
+			$this->assertStringContainsString( 'The jobs could not be read: do not remove that file', $unread[0] );
+			$this->assertStringNotContainsString( 'if none does, remove that file', $unread[0] );
+			$gone = Plugin::instance()->half_swapped_warnings(
+				static function (): array {
+					return array( 999999 ); // Listed, then not found.
+				}
+			);
+			$this->assertStringNotContainsString( 'remove that file', implode( "\n", $gone ), 'not known what holds the site: no advice to remove it' );
+		} finally {
+			$file->remove();
+		}
+	}
 }

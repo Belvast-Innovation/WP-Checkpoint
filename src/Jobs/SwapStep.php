@@ -255,7 +255,7 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 				$this->take_down( $context, $cursor );
 				return StepResult::done( __( 'The restored site is in place', 'wp-checkpoint' ) );
 			}
-			throw new WorkLost( 'The position of the swap is not one this version wrote; the job row was changed.' );
+			throw new \RuntimeException( 'The position of the swap is not one this version wrote; the job row was changed. Nothing was changed by this run: look at the site before you go on.' ); // Not FINAL: the job may hold the site.
 		} finally {
 			if ( $db instanceof ImportSession ) {
 				$db->close();
@@ -506,7 +506,7 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 
 	/**
 	 * The swap is made: recorded first, while the maintenance file is still held (from here on nothing is renamed,
-	 * whatever is found later), then what follows it, the first step of which lets the file go.
+	 * whatever is found later), then what follows it: the cache flushed behind the held file, then the file let go.
 	 *
 	 * @param JobContext           $context Context.
 	 * @param Queries              $db      Connection.
@@ -768,7 +768,7 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 	 * @param array<string, mixed> $cursor  Cursor ("committed").
 	 * @return StepResult
 	 * @throws TransientFailure When the maintenance file cannot be taken down yet.
-	 * @throws WorkLost When the position is not one this version wrote.
+	 * @throws \RuntimeException When the position is not one this version wrote (not FINAL: the job holds the site).
 	 */
 	private function after( JobContext $context, Queries $db, array $cursor ): StepResult {
 		$entries = null;
@@ -793,6 +793,7 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 					$this->refresh( $context, $this->maintenance( $cursor ), false );
 					foreach ( $entries['tables'] as $entry ) {
 						if ( SwapPlan::TABLE_OF === $entry['kind'] && self::is_options( $entry['live'] ) ) {
+							$context->confirm_lease();
 							$db->write( 'DELETE FROM ' . SqlWriter::identifier( $entry['live'] ) . ' WHERE option_name = ?', array( 'rewrite_rules' ) );
 						}
 					}
@@ -803,6 +804,7 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 					// The restored cron option has none of this installation's fallback events: the plugin sets them
 					// again on its next request, with the restored site loaded (Plugin::after_swap()).
 					$this->refresh( $context, $this->maintenance( $cursor ), false );
+					$context->confirm_lease();
 					$db->write(
 						'INSERT INTO ' . SqlWriter::identifier( self::base_prefix() . 'options' ) . ' (option_name, option_value, autoload) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE option_value = VALUES(option_value)',
 						array( StoredNames::AFTER_SWAP, (string) $this->now(), 'yes' )
@@ -825,7 +827,7 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 					$this->at( 'exited' );
 					return StepResult::done( __( 'The restored site is in place', 'wp-checkpoint' ) );
 				default:
-					throw new WorkLost( 'The position of the swap is not one this version wrote; the job row was changed.' );
+					throw new \RuntimeException( 'The position of the swap is not one this version wrote; the job row was changed. Nothing was changed by this run: look at the site before you go on.' ); // Not FINAL: the job may hold the site.
 			}
 			$context->checkpoint( $cursor, 90, __( 'The restored site is in place', 'wp-checkpoint' ) );
 		}
@@ -999,8 +1001,10 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 	}
 
 	/**
-	 * Refresh this restore's maintenance file during the rollback, as far as it can be: someone else's in its
-	 * place, or a failed write, does not stop the rollback (it is logged).
+	 * Refresh this restore's maintenance file as far as it can be, held (during the rollback, before each directory
+	 * rename) or with the time (after the swap is made, between the steps that follow it): someone else's in its
+	 * place, or a failed write, does not stop the step (it is logged); with the time, none is made where there is
+	 * none.
 	 *
 	 * @param JobContext  $context Context.
 	 * @param Maintenance $file    The file.
@@ -1143,11 +1147,11 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 	 *
 	 * @param array<string, mixed> $cursor Cursor.
 	 * @return Maintenance
-	 * @throws WorkLost When the cursor has no mark.
+	 * @throws \RuntimeException When the cursor has no mark (not FINAL: the job may hold the site).
 	 */
 	private function maintenance( array $cursor ): Maintenance {
 		if ( ! isset( $cursor['mark'] ) || ! is_string( $cursor['mark'] ) || '' === $cursor['mark'] ) {
-			throw new WorkLost( 'The position of the swap is not one this version wrote; the job row was changed.' );
+			throw new \RuntimeException( 'The position of the swap is not one this version wrote; the job row was changed. Nothing was changed by this run: look at the site before you go on.' ); // Not FINAL: the job may hold the site.
 		}
 		return new Maintenance( (string) ( $this->parts['abspath'] ?? ABSPATH ), $cursor['mark'] );
 	}
@@ -1220,7 +1224,7 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 			throw $e;
 		} catch ( \Throwable $e ) {
 			// The site is whole at every flush; what it may serve from the cache is waited out, not given up on.
-			throw new TransientFailure( 'The object cache could not be flushed; this waits to be done: ' . $e->getMessage() );
+			throw new TransientFailure( 'The object cache could not be flushed (the site shows the maintenance page until it is): ' . $e->getMessage() . ' If this goes on, get the object cache (its drop-in or its server) working, then retry the job.' );
 		}
 		if ( false === $flushed ) {
 			$context->logger()->warning( 'The object cache says it could not be flushed' );

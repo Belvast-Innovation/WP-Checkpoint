@@ -816,6 +816,7 @@ final class SwapCrashTest extends SwapTestCase {
 		$left = Plugin::instance()->jobs()->find( $job->id );
 		$this->assertSame( array(), $left->cursor );
 		$this->assertSame( Job::SITE_SWAPPED, $left->site_state );
+		$this->assertStringContainsString( 'Restore job ' . $job->id . ' is at its last step (the restored site is swapped in)', implode( "\n", Plugin::instance()->half_swapped_warnings() ), 'WP-CLI says what is left' );
 		$this->seams = array();
 		$again       = $this->cli_run( $job );
 		$this->assertSame( Job::COMPLETED, $again->status, (string) $again->last_error );
@@ -823,12 +824,68 @@ final class SwapCrashTest extends SwapTestCase {
 		$this->assertRestored( $before );
 	}
 
-	public function test_a_held_file_is_said_next_to_the_job_that_holds_it(): void {
+	public function test_a_flush_that_keeps_failing_after_the_swap_keeps_the_file_held_and_a_retry_completes(): void {
+		$this->swap_parts['flush'] = static function (): void {
+			throw new \RuntimeException( 'the cache server is away' );
+		};
+		$this->register_type();
+		$job    = $this->at_swap();
+		$before = $this->site();
+		$result = $this->cli_tick( $job );
+		$this->assertSame( TickResult::WAITING, $result->status, $result->message );
+		$this->assertStringContainsString( 'get the object cache (its drop-in or its server) working, then retry the job', $result->message );
+		$now = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertSame( 'committed', $now->cursor['phase'] );
+		$this->assertSame( 'cache', $now->cursor['post'], 'the flush comes first, behind the held file' );
+		$this->assertTrue( ( new Maintenance( $this->abspath, $now->cursor['mark'] ) )->is_held(), 'held while the flush waits' );
+		$this->assertStringContainsString( 'is at its last step (the restored site is swapped in)', implode( "\n", Plugin::instance()->half_swapped_warnings() ) );
+		for ( $i = 0; $i < 10 && Job::FAILED !== Plugin::instance()->jobs()->find( $job->id )->status; $i++ ) {
+			$this->cli_tick( $job );
+		}
+		$failed = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertSame( Job::FAILED, $failed->status, 'the retries ran out' );
+		$this->assertNotSame( Job::FAILURE_FINAL, $failed->failure_kind );
+		$this->assertSame( Job::SITE_SWAPPED, $failed->site_state );
+		$this->assertTrue( ( new Maintenance( $this->abspath, $failed->cursor['mark'] ) )->is_held(), 'still held: never a half-flushed site served' );
+		$this->assertStringContainsString( 'wp wpcheckpoint job retry ' . $job->id . ', then wp wpcheckpoint job run ' . $job->id, implode( "\n", Plugin::instance()->half_swapped_warnings() ) );
+		// The cache is back: retried, then run.
+		$this->retype( $job, array( 'flush' => static function (): void {} ) );
+		Plugin::instance()->job_actions()->retry( $job->id );
+		$GLOBALS['wpdb']->query( 'COMMIT' );
+		$this->assertSwapped( $this->cli_run( $job ), $before, 'after the retry' );
+		$this->assertFalse( Maintenance::held_in( $this->abspath ) );
+	}
+
+	public function test_a_half_swapped_job_whose_position_is_lost_is_not_to_be_run_blindly(): void {
+		global $wpdb;
 		$job = $this->at_swap();
 		$this->killed_at( $job, 'dir_in', 2 );
-		$this->assertTrue( Maintenance::held_in( $this->abspath ), 'the control: the file is held' );
-		$before = Plugin::instance()->half_swapped_warnings();
-		$this->assertCount( 1, $before, 'the sandbox is not ABSPATH: only the job\'s line' );
-		$this->assertSame( Job::FAILED, $this->cli_run( $job )->status );
+		$wpdb->query( $wpdb->prepare( 'UPDATE ' . JobRepository::table() . " SET cursor_json = '[]' WHERE id = %d", $job->id ) );
+		$wpdb->query( 'COMMIT' );
+		$warnings = implode( "\n", Plugin::instance()->half_swapped_warnings() );
+		$this->assertStringContainsString( 'its position is lost (the job row was changed): do not run it', $warnings );
+		$this->assertStringNotContainsString( 'wp wpcheckpoint job run', $warnings, 'no command to run it' );
+		$this->seams = array();
+		$done        = $this->cli_run( $job );
+		$this->assertSame( Job::FAILED, $done->status );
+		$this->assertNotSame( Job::FAILURE_FINAL, $done->failure_kind, 'not final: the job holds the site' );
+		$this->assertStringContainsString( 'no position recorded while the site is recorded as being changed', (string) $done->last_error );
+		$this->assertSame( array(), $this->seams, 'nothing ran' );
+		// The tear-down puts the site back from the plan (SwapTestCase::undo()).
+	}
+
+	public function test_an_unknown_position_of_a_job_that_holds_the_site_is_not_final(): void {
+		global $wpdb;
+		$job = $this->at_swap();
+		$this->killed_at( $job, 'dir_in', 2 );
+		$cursor          = Plugin::instance()->jobs()->find( $job->id )->cursor;
+		$cursor['phase'] = 'no-such-phase';
+		$wpdb->query( $wpdb->prepare( 'UPDATE ' . JobRepository::table() . ' SET cursor_json = %s WHERE id = %d', wp_json_encode( $cursor ), $job->id ) );
+		$wpdb->query( 'COMMIT' );
+		$done = $this->cli_run( $job );
+		$this->assertSame( Job::FAILED, $done->status );
+		$this->assertStringContainsString( 'The position of the swap is not one this version wrote', (string) $done->last_error );
+		$this->assertNotSame( Job::FAILURE_FINAL, $done->failure_kind, 'the job holds the site: its retry stays' );
+		$this->assertSame( Job::SITE_CHANGING, $done->site_state );
 	}
 }

@@ -37,8 +37,14 @@ final class SwapSequencesTest extends SwapTestCase {
 	/** The seams after which the file has been let go: visitors are on the site. */
 	const PUBLIC_SEAMS = array( 'unheld_commit', 'rewrite', 'cron', 'done_recorded', 'exited', 'unheld', 'reverted', 'maintenance_down' );
 
-	/** Seams where a rename has just been made or is made next: the file must be held there (I1). */
-	const AT_RENAME = array( 'dir_aside', 'dir_in', 'batch_sent', 'table_back', 'dir_back' );
+	/**
+	 * Seams of the finishing runs where a rename has just been made: the file must be held there (I1). The finishing
+	 * runs only roll back or end; the forward renames are checked by what the killed run left (observe()).
+	 */
+	const AT_RENAME = array( 'table_back', 'dir_back' );
+
+	/** @var array<string, int> I1 checks made inside the finishing runs, per seam. */
+	private $held_checks = array();
 
 	/** The seams that record the direction (I2: nothing that renames after them, in the same run or later). */
 	const DECIDING = array( 'committed', 'restored' );
@@ -67,6 +73,7 @@ final class SwapSequencesTest extends SwapTestCase {
 		$seed  = (int) ( getenv( 'WPCHECKPOINT_SWAP_SEQUENCES_SEED' ) ?: 1 );
 		$seams = array_merge( self::FORWARD, self::BACKWARD );
 		$this->assertSame( 24, count( $seams ), 'the default count is one sequence per seam' );
+		$this->held_checks = array_fill_keys( self::AT_RENAME, 0 );
 		mt_srand( $seed );
 		$killed = array_fill_keys( $seams, 0 );
 		$kinds  = array_fill_keys( array_merge( self::MEANWHILE, array( 'visitor' ) ), 0 );
@@ -83,6 +90,9 @@ final class SwapSequencesTest extends SwapTestCase {
 		}
 		foreach ( $kinds as $kind => $times ) {
 			$this->assertGreaterThan( 0, $times, 'the control: ' . $kind . ' happened in some sequence' );
+		}
+		foreach ( $this->held_checks as $point => $times ) {
+			$this->assertGreaterThan( 0, $times, 'the control: the file was checked held at ' . $point . ' inside a run' );
 		}
 	}
 
@@ -123,13 +133,15 @@ final class SwapSequencesTest extends SwapTestCase {
 		$this->observe( $job, $label, $decided, $public );
 		$left = Plugin::instance()->jobs()->find( $job->id );
 		$file = new Maintenance( $this->abspath, (string) ( $left->cursor['mark'] ?? '' ) );
-		if ( 'clock' === $kind && Maintenance::OURS === $file->state() && ! $file->is_held() ) {
-			++$kinds['clock']; // The killed run left a file that lapses, with its times eleven minutes old.
+		$written = Maintenance::OURS === $file->state() ? $file->time_of( (string) file_get_contents( $file->path() ) ) : null;
+		if ( 'clock' === $kind && null !== $written && $written <= time() - 600 ) {
+			++$kinds['clock']; // The killed run left a file WordPress already takes as lapsed.
 		}
 		$this->clock_offset = 0;
 		$removed = false;
 		if ( 'file_removed' === $kind && Maintenance::OURS === $file->state() ) {
-			\WPCheckpoint\Support\Deleter::delete_maintenance_file( $this->abspath, '.maintenance' );
+			$this->assertTrue( \WPCheckpoint\Support\Deleter::delete_maintenance_file( $this->abspath, '.maintenance' ) );
+			$this->assertSame( Maintenance::NONE, $file->state(), $label . ': the file is gone' );
 			$removed = true;
 		}
 
@@ -166,6 +178,7 @@ final class SwapSequencesTest extends SwapTestCase {
 						$mark = (string) ( Plugin::instance()->jobs()->find( $job->id )->cursor['mark'] ?? '' );
 						$file = new Maintenance( $this->abspath, $mark );
 						$this->assertTrue( $file->is_held() || Maintenance::OTHER === $file->state(), $label . ': I1, held at ' . $point );
+						++$this->held_checks[ $point ];
 					}
 				},
 				'flush'  => static function () use ( &$fails ): void {
