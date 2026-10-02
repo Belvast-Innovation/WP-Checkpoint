@@ -8,6 +8,7 @@ use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\QuestionText;
 use WPCheckpoint\Jobs\RestorePreflightStep;
 use WPCheckpoint\Jobs\TempTables;
+use WPCheckpoint\Jobs\TransientFailure;
 use WPCheckpoint\Restore\IncomingQuestions;
 use WPCheckpoint\Restore\SiteTables;
 use WPCheckpoint\Plugin;
@@ -571,6 +572,43 @@ final class RestoreNeighboursTest extends RestoreTestCase {
 		} finally {
 			$fold->setValue( null, null );
 		}
+	}
+
+	public function test_a_case_setting_that_cannot_be_read_stops_the_restore_as_a_retryable_failure(): void {
+		$base = $this->backup( self::site_tables() );
+		$this->assertIsBool( SiteTables::fold_case(), 'the control: read, it is an answer' );
+		$this->assertSame( Job::COMPLETED, $this->run_restore( $this->start_restore( $base ) )->status, 'the control: read, the restore goes on' );
+		$fail = static function ( string $query ): string {
+			return false !== stripos( $query, '@@lower_case_table_names' ) ? 'SELECT @@wpcheckpoint_no_such_variable' : $query;
+		};
+		add_filter( 'query', $fail );
+		try {
+			try {
+				SiteTables::fold_case();
+				$this->fail( 'not read: it must not answer' );
+			} catch ( TransientFailure $e ) {
+				$this->assertStringContainsString( 'could not be read', $e->getMessage() );
+			}
+			$job = $this->start_restore( $base );
+			for ( $i = 0; $i < 20; $i++ ) {
+				$now = Plugin::instance()->jobs()->find( $job->id );
+				if ( '' !== (string) $now->last_error || ! in_array( $now->status, array( Job::QUEUED, Job::RUNNING ), true ) ) {
+					break;
+				}
+				Plugin::instance()->runner()->tick( $job->id, microtime( true ) );
+			}
+		} finally {
+			remove_filter( 'query', $fail );
+		}
+		$now = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertNotSame( Job::COMPLETED, $now->status, 'not gone on as if names kept their case' );
+		if ( Job::FAILED === $now->status ) {
+			// Retried until the retries ran out (the ticks here do not wait): failed as temporary, which the user can retry.
+			$this->assertSame( Job::FAILURE_TEMPORARY, $now->failure_kind );
+			$this->assertTrue( $now->can_retry() );
+		}
+		$this->assertStringContainsString( 'compares table names without letter case could not be read', (string) $now->last_error );
+		$this->assertFileDoesNotExist( RestoreFiles::path( $this->work( $now ), RestoreFiles::PLAN ), 'no plan made as if names kept their case' );
 	}
 
 	public function test_an_unattended_restore_that_does_not_say_both_is_refused_before_anything(): void {

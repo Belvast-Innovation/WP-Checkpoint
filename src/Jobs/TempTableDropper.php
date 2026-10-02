@@ -66,13 +66,20 @@ final class TempTableDropper {
 	const CHECKS_CHANGED = 'foreign_key_checks was not as expected right before a drop (a reconnect, or other code on the connection); the rest waits for the next pass';
 
 	/**
+	 * What a call notes when how the server compares table names could not be read: names were compared as written,
+	 * which drops only the tables listed and keeps every name apart, but on a server that compares them without case
+	 * a key from a table spelt in another case goes unseen.
+	 */
+	const CASE_UNKNOWN = 'whether the database server compares table names without letter case could not be read; names were compared as written (on a server that compares them without case, a foreign key from a table spelt in another case would go unseen)';
+
+	/**
 	 * Drop tables, at most MAX_STATEMENTS statements and MAX_SECONDS seconds in one call.
 	 *
 	 * @param string[]      $tables         Names TempTables::is_safe_name() accepts (others are reported as failed).
 	 * @param string        $like           The prefix every one of them has (TempTables::owner_prefix()), to find the keys that point at them.
 	 * @param int           $max_statements Most statements (tests use fewer).
 	 * @param callable|null $clock          function(): float, seconds (tests); microtime by default.
-	 * @return array{dropped: string[], failed: string[], kept: array<string, string[]>, remaining: string[], stopped: string}
+	 * @return array{dropped: string[], failed: string[], kept: array<string, string[]>, remaining: string[], stopped: string, note: string}
 	 */
 	public static function drop( array $tables, string $like, int $max_statements = self::MAX_STATEMENTS, $clock = null ): array {
 		global $wpdb;
@@ -85,6 +92,7 @@ final class TempTableDropper {
 			'kept'      => array(),
 			'remaining' => array(),
 			'stopped'   => '',
+			'note'      => '',
 		);
 		$safe  = array();
 		foreach ( $tables as $table ) {
@@ -104,9 +112,11 @@ final class TempTableDropper {
 			try {
 				$fold = SiteTables::fold_case();
 			} catch ( TransientFailure $e ) {
-				// Unknown: names compared as given, as before the setting was read in one place. Compared without case,
-				// two tables that differ only in case would be one, and the other would be neither dropped nor reported.
-				$fold = false;
+				// Unknown: names compared as written, as before the setting was read in one place. That drops only the
+				// tables listed; compared without case, two tables that differ only in case would be one, and the
+				// other would be neither dropped nor reported.
+				$fold        = false;
+				$out['note'] = self::CASE_UNKNOWN;
 			}
 			$keys  = self::keys( $like );
 			$plan  = DropOrder::plan( $safe, null === $keys ? array() : $keys, $fold );

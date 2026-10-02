@@ -149,6 +149,7 @@ final class IncomingTablesTest extends TestCase {
 			$why = IncomingTables::fold_refusal( true, $given[0], $given[1], $given[2], $given[3] );
 			$this->assertStringContainsString( 'compares table names without letter case', $why, $what );
 			$this->assertStringContainsString( $what . ' has upper-case letters or letters outside ASCII', $why );
+			$this->assertStringContainsString( 'full support for it is not implemented yet', $why, 'says what is not there yet' );
 		}
 	}
 

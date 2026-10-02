@@ -120,7 +120,7 @@ final class IncomingTables {
 		$high = implode( '', array_map( 'chr', range( 128, 255 ) ) );
 		foreach ( $named as $item ) {
 			if ( strtolower( $item[1] ) !== $item[1] || strcspn( $item[1], $high ) !== strlen( $item[1] ) ) {
-				return sprintf( 'This database server compares table names without letter case (lower_case_table_names), and %s has upper-case letters or letters outside ASCII. This version of WP Checkpoint restores on such a server only when every table name involved is lowercase ASCII. Nothing was changed.', $item[0] );
+				return sprintf( 'This database server compares table names without letter case (lower_case_table_names), and %s has upper-case letters or letters outside ASCII. On such a server this version of WP Checkpoint restores only when every table name involved is lowercase ASCII; full support for it is not implemented yet. Nothing was changed.', $item[0] );
 			}
 		}
 		return '';

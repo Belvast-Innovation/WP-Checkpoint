@@ -824,6 +824,41 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 	}
 
 	/**
+	 * When how the server compares table names cannot be read, names are compared as written: only the tables listed
+	 * are dropped, two that differ only in case each as itself, and the storage log says so.
+	 */
+	public function test_temporary_tables_are_compared_as_written_when_the_case_setting_cannot_be_read(): void {
+		global $wpdb;
+		$token = $this->dirs->state()['token'];
+		$fail  = static function ( string $query ): string {
+			return false !== stripos( $query, '@@lower_case_table_names' ) ? 'SELECT @@wpcheckpoint_no_such_variable' : $query;
+		};
+		$runs  = array();
+		foreach ( array( 'read' => false, 'unread' => true ) as $label => $unread ) {
+			list( $job ) = $this->failed_job_with_work();
+			$upper       = TempTables::name( $token, $job->id, 'beef', 'Case' );
+			$lower       = TempTables::name( $token, $job->id, 'beef', 'case' );
+			$wpdb->query( "CREATE TABLE `{$upper}` (id INT PRIMARY KEY) ENGINE=InnoDB" );
+			$wpdb->query( "CREATE TABLE `{$lower}` (id INT PRIMARY KEY) ENGINE=InnoDB" );
+			$this->assertTrue( $this->table_exists( $upper ) && $this->table_exists( $lower ), $label . ': the control: two tables that differ only in case' );
+			if ( $unread ) {
+				add_filter( 'query', $fail );
+			}
+			try {
+				$runs[ $label ] = $this->repo->reclaim_work( $job );
+				$left           = array_values( array_filter( array( $upper, $lower ), array( $this, 'table_exists' ) ) ); // Before the clean-up below.
+			} finally {
+				remove_filter( 'query', $fail );
+				$this->force_drop( array( $upper, $lower ) );
+			}
+			$this->assertTrue( $runs[ $label ], $label . ': reported as all gone' );
+			$this->assertSame( array(), $left, $label . ': every table went, each as itself' );
+		}
+		$log = (string) file_get_contents( $this->base . '/logs/storage.log' );
+		$this->assertSame( 1, substr_count( $log, TempTableDropper::CASE_UNKNOWN ), 'said once: for the pass that could not read it, not for the one that could' );
+	}
+
+	/**
 	 * Uninstall drops the temporary tables the same way.
 	 */
 	public function test_uninstall_drops_temporary_tables_with_foreign_keys_among_them(): void {
