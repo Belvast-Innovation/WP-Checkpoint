@@ -28,7 +28,7 @@ final class Leftovers implements TestListener {
 	use TestListenerDefaultImplementation;
 
 	/** The table names looked for, by their start. */
-	const TABLE_PREFIXES = array( 'wcptmp', 'wcpold' );
+	const TABLE_PREFIXES = array( 'wcptmp', 'wcpold', 'wcpstray' );
 
 	/** The temporary directory's entries looked for, by their start. */
 	const TEMP_PREFIXES = array( 'wpc-', 'wpcheckpoint-', 'wp-checkpoint-' );

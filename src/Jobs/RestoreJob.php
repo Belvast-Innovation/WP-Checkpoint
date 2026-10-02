@@ -1,6 +1,6 @@
 <?php
 /**
- * The restore job (T042): so far, stages A and B of the database.
+ * The restore job (T042): so far, up to the swap.
  *
  * @package WPCheckpoint
  */
@@ -43,7 +43,9 @@ defined( 'ABSPATH' ) || exit;
  *    updated meanwhile, the site's directories did not move, no table left
  *    in place references one the swap moves away) and the swap's plan.
  *
- * The swap and what follows are later parts of T042; no user
+ * 8. SwapStep (WP-CLI only): the restored directories and tables take
+ *    the site's place, or the site is put back as it was.
+ * The check after the swap and what follows are later parts of T042; no user
  * interface starts this job yet (only tests and, later, the restore
  * wizard). Options: {base, exclude_tables, policy, unattended}; the backups
  * directory comes from the current storage directories, never from the
@@ -144,6 +146,7 @@ final class RestoreJob implements JobType {
 			new PrefixRewriteStep(),
 			new FileStagingStep(),
 			new SwapCheckStep(),
+			new SwapStep(),
 		);
 	}
 

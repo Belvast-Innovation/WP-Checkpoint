@@ -139,7 +139,7 @@ final class NoBudgetLeftTest extends JobTestCase {
 	public function test_a_restore_moves_on_in_every_tick_with_no_time_left(): void {
 		$base  = $this->export();
 		$copy  = PluginCopy::make();
-		$steps = Plugin::instance()->job_types()->get( RestoreJob::ID )->steps();
+		$steps = \WPCheckpoint\Tests\Fixtures\Restore\RestoreTestCase::up_to_check( Plugin::instance()->job_types()->get( RestoreJob::ID )->steps() );
 		foreach ( $steps as $i => $step ) {
 			if ( FileStagingStep::ID === $step->id() ) {
 				// A small stand-in for the running plugin copy (a development checkout is hundreds of megabytes).

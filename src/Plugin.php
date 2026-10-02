@@ -23,6 +23,7 @@ use WPCheckpoint\Cli\ExportCommand;
 use WPCheckpoint\Cli\JobCommand;
 use WPCheckpoint\Cli\SiteIdentityCommand;
 use WPCheckpoint\Cli\VerifyCommand;
+use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\JobActions;
 use WPCheckpoint\Jobs\JobPresenter;
 use WPCheckpoint\Jobs\JobRepository;
@@ -156,6 +157,8 @@ final class Plugin {
 		add_action( Loopback::HOOK, array( $this, 'cron_tick' ) );
 		// Automatic updates run in cron and admin requests: held while a restore is unfinished.
 		Support\AutoUpdateHold::register();
+		// After a restore's swap, the first request with the restored site loaded sets the fallback events again.
+		add_action( 'init', array( $this, 'after_swap' ) );
 
 		if ( defined( 'WP_CLI' ) && WP_CLI ) {
 			\WP_CLI::add_command( 'wpcheckpoint job', new JobCommand( $this->job_actions(), $this->job_presenter(), $this->directories() ) );
@@ -184,6 +187,37 @@ final class Plugin {
 		} catch ( \Throwable $e ) {
 			$this->directories()->log_event( sprintf( 'Cron tick of job %d failed: %s', (int) $job_id, get_class( $e ) ) );
 		}
+	}
+
+	/**
+	 * After a restore's swap (Jobs\SwapStep left StoredNames::AFTER_SWAP in the restored options): the restored
+	 * cron option holds none of this installation's fallback events, so the jobs still queued or running get one
+	 * again (Loopback::schedule()), in this request, with the restored site loaded rather than in the process that
+	 * swapped (which still held the old site's plugins). Read from the autoloaded options already in memory: a
+	 * request without the mark costs nothing. On a network, the main site's requests (the events are the main
+	 * site's). The mark stays when the jobs cannot be read, for the next request.
+	 *
+	 * @return void
+	 */
+	public function after_swap(): void {
+		if ( ! function_exists( 'wp_load_alloptions' ) || ( function_exists( 'is_multisite' ) && is_multisite() && ! is_main_site() ) ) {
+			return;
+		}
+		$all = wp_load_alloptions();
+		if ( ! is_array( $all ) || ! array_key_exists( Support\StoredNames::AFTER_SWAP, $all ) ) {
+			return;
+		}
+		try {
+			foreach ( $this->job_actions()->active() as $job ) {
+				if ( in_array( $job->status, array( Job::QUEUED, Job::RUNNING ), true ) && Job::SITE_UNTOUCHED === $job->site_state ) {
+					Loopback::schedule( $job->id, Loopback::FALLBACK_SECONDS, Loopback::KEEP );
+				}
+			}
+		} catch ( \Throwable $e ) {
+			$this->directories()->log_event( sprintf( 'Setting the fallback events after a restore failed: %s', get_class( $e ) ) );
+			return;
+		}
+		delete_option( Support\StoredNames::AFTER_SWAP );
 	}
 
 	/**

@@ -7,6 +7,7 @@ use WPCheckpoint\Database\TableExporter;
 use WPCheckpoint\Database\WpdbConnection;
 use WPCheckpoint\Jobs\FileStagingStep;
 use WPCheckpoint\Jobs\SwapCheckStep;
+use WPCheckpoint\Jobs\SwapStep;
 use WPCheckpoint\Jobs\Budget;
 use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\Residue;
@@ -58,8 +59,13 @@ abstract class RestoreTestCase extends JobTestCase {
 			if ( SwapCheckStep::ID === $step->id() ) {
 				$steps[ $i ] = new SwapCheckStep( null, $this->check_parts() );
 			}
+			if ( SwapStep::ID === $step->id() ) {
+				// Up to the final check: the swap renames the site's own tables and directories, and its tests set it
+				// up in a sandbox of their own (SwapTestCase).
+				unset( $steps[ $i ] );
+			}
 		}
-		$this->register( RestoreJob::ID, $steps );
+		$this->register( RestoreJob::ID, array_values( $steps ) );
 	}
 
 	/**
@@ -239,13 +245,30 @@ abstract class RestoreTestCase extends JobTestCase {
 	}
 
 	/**
+	 * The restore's steps up to the final check (without the swap, which the swap's own tests set up).
+	 *
+	 * @param \WPCheckpoint\Jobs\Step[] $steps Steps.
+	 * @return \WPCheckpoint\Jobs\Step[]
+	 */
+	public static function up_to_check( array $steps ): array {
+		return array_values(
+			array_filter(
+				$steps,
+				static function ( \WPCheckpoint\Jobs\Step $step ): bool {
+					return SwapStep::ID !== $step->id();
+				}
+			)
+		);
+	}
+
+	/**
 	 * The restore's steps with the one of the same id replaced (by id: a step added in between moves the others).
 	 *
 	 * @param \WPCheckpoint\Jobs\Step $step Replacement.
 	 * @return \WPCheckpoint\Jobs\Step[]
 	 */
 	protected static function restore_steps_with( \WPCheckpoint\Jobs\Step $step ): array {
-		$steps = Plugin::instance()->job_types()->get( RestoreJob::ID )->steps();
+		$steps = self::up_to_check( Plugin::instance()->job_types()->get( RestoreJob::ID )->steps() );
 		foreach ( $steps as $i => $existing ) {
 			if ( $existing->id() === $step->id() ) {
 				$steps[ $i ] = $step;
