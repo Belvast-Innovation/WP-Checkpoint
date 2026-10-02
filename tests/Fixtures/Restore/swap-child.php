@@ -31,7 +31,7 @@ $at   = static function ( string $point ) use ( $config, &$seen ): void {
 	}
 	++$seen;
 	if ( $seen === (int) $config['nth'] ) {
-		posix_kill( getmypid(), SIGKILL ); // No catch, finally, destructor or shutdown function runs.
+		posix_kill( getmypid(), 9 ); // SIGKILL (the constant is pcntl's). No catch, finally, destructor or shutdown function runs.
 		sleep( 5 );
 		fwrite( STDOUT, "WPCHECKPOINT-CHILD-NOT-KILLED\n" );
 		exit( 3 );
@@ -54,6 +54,9 @@ if ( '' !== (string) $config['plugin'] ) {
 }
 if ( (int) $config['packet'] > 0 ) {
 	$parts['packet'] = (int) $config['packet'];
+}
+if ( (int) ( $config['batch'] ?? 0 ) > 0 ) {
+	$parts['batch'] = (int) $config['batch'];
 }
 \WPCheckpoint\Plugin::instance()->job_types()->add( new \WPCheckpoint\Tests\Fixtures\Jobs\FixtureJobType( (string) $config['type'], array( new \WPCheckpoint\Jobs\SwapStep( null, $parts ) ) ) );
 wp_set_current_user( (int) $config['admin'] );

@@ -62,7 +62,22 @@ abstract class SwapTestCase extends RestoreTestCase {
 
 	public function set_up(): void {
 		parent::set_up();
+		$this->set_up_swap();
+	}
+
+	public function tear_down(): void {
+		$this->tear_down_swap();
+		parent::tear_down();
+	}
+
+	/**
+	 * The sandbox, the live tables and the type (again, for a test that runs several cases).
+	 *
+	 * @return void
+	 */
+	protected function set_up_swap(): void {
 		global $wpdb;
+		$this->seams   = array();
 		$this->sandbox = Sandbox::make( 'swap' );
 		$content       = $this->sandbox . '/wp-content';
 		$this->abspath = $this->sandbox . '/site';
@@ -98,14 +113,20 @@ abstract class SwapTestCase extends RestoreTestCase {
 		$this->register_type();
 	}
 
-	public function tear_down(): void {
+	/**
+	 * Undo what the test's swap left, and remove the sandbox.
+	 *
+	 * @return void
+	 */
+	protected function tear_down_swap(): void {
 		if ( null !== $this->swap_job ) {
 			$this->undo( $this->swap_job );
+			$this->swap_job = null;
 		}
 		if ( '' !== $this->sandbox ) {
 			Sandbox::remove( $this->sandbox );
+			$this->sandbox = '';
 		}
-		parent::tear_down();
 	}
 
 	/**
@@ -146,10 +167,11 @@ abstract class SwapTestCase extends RestoreTestCase {
 	 * Register the restore type of this test: the real steps, the directories of the sandbox, and the swap with
 	 * $this->swap_parts (and $more).
 	 *
-	 * @param array<string, mixed> $more More parts of the swap step.
+	 * @param array<string, mixed> $more    More parts of the swap step.
+	 * @param callable|null        $connect The swap's connection (null: the site's own).
 	 * @return void
 	 */
-	protected function register_type( array $more = array() ): void {
+	protected function register_type( array $more = array(), $connect = null ): void {
 		$dirs  = function (): array {
 			return $this->dirs;
 		};
@@ -170,9 +192,24 @@ abstract class SwapTestCase extends RestoreTestCase {
 			}
 		}
 		// The test case's restore type ends at the final check (RestoreTestCase); the swap comes after it.
-		$steps[] = new SwapStep( null, $more + $this->swap_parts );
+		$steps[] = new SwapStep( $connect, $more + $this->swap_parts );
 		$this->type = 'restore_swap_' . bin2hex( random_bytes( 3 ) );
 		$this->register( $this->type, $steps );
+	}
+
+	/**
+	 * Register the type again with these parts and point the job at it (the job keeps its position).
+	 *
+	 * @param Job                  $job     Job.
+	 * @param array<string, mixed> $more    More parts of the swap step.
+	 * @param callable|null        $connect The swap's connection.
+	 * @return void
+	 */
+	protected function retype( Job $job, array $more = array(), $connect = null ): void {
+		global $wpdb;
+		$this->register_type( $more, $connect );
+		$wpdb->query( $wpdb->prepare( 'UPDATE ' . \WPCheckpoint\Jobs\JobRepository::table() . ' SET type = %s WHERE id = %d', $this->type, $job->id ) );
+		$wpdb->query( 'COMMIT' );
 	}
 
 	/**
@@ -327,6 +364,7 @@ abstract class SwapTestCase extends RestoreTestCase {
 					'dirs'    => $this->dirs,
 					'plugin'  => (string) ( $this->swap_parts['plugin'] ?? '' ),
 					'packet'  => (int) ( $this->swap_parts['packet'] ?? 0 ),
+					'batch'   => (int) ( $this->swap_parts['batch'] ?? 0 ),
 					'admin'   => self::$admin_id,
 				)
 			)
@@ -337,7 +375,8 @@ abstract class SwapTestCase extends RestoreTestCase {
 		$text = implode( "\n", $output );
 		$this->assertStringContainsString( 'WPCHECKPOINT-CHILD-READY', $text, 'the child ran the tick: ' . $text );
 		$this->assertStringNotContainsString( 'WPCHECKPOINT-CHILD-DONE', $text, 'the child was killed at ' . $seam . ' #' . $nth . ', not done: ' . $text );
-		$this->assertSame( 137, $status, 'killed by SIGKILL: ' . $text );
+		// Signal 9: reported as 9 by PHP's exec() here, as 128 + 9 by a shell in between.
+		$this->assertContains( $status, array( 9, 137 ), 'killed by SIGKILL: ' . $text );
 		// The lease of the killed run is still there: as after a real crash, the next run takes over once it ran out.
 		$GLOBALS['wpdb']->query( $GLOBALS['wpdb']->prepare( 'UPDATE ' . \WPCheckpoint\Jobs\JobRepository::table() . ' SET locked_until = %d WHERE id = %d', time() - 1, $job->id ) );
 	}

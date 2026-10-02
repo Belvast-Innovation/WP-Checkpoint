@@ -209,4 +209,76 @@ final class SwapTest extends SwapTestCase {
 		$this->assertSame( $before, $this->site() );
 		$this->assertSame( TickResult::COMPLETED, $this->cli_tick( $job )->status, 'the control: WP-CLI moves it' );
 	}
+
+	public function test_a_directory_of_the_site_moved_since_the_check_starts_the_restore_over_at_the_check(): void {
+		$job    = $this->at_swap();
+		$before = $this->site();
+		$was    = $this->dirs['uploads'];
+		$this->dirs['uploads'] = $this->sandbox . '/elsewhere/uploads';
+		mkdir( $this->dirs['uploads'], 0755, true );
+		$done = $this->cli_run( $job );
+		$this->dirs['uploads'] = $was;
+		$this->assertSame( Job::FAILED, $done->status );
+		$this->assertStringContainsString( 'The uploads directory of the site moved since the restore staged its files', (string) $done->last_error );
+		$this->assertSame( SwapCheckStep::ID, $done->cursor[ \WPCheckpoint\Jobs\JobRepository::RETRY_FROM_KEY ] ?? null );
+		$this->assertSame( Job::SITE_UNTOUCHED, $done->site_state );
+		$this->assertNotContains( 'entered', $this->seams );
+		$this->assertSame( $before, $this->site() );
+	}
+
+	public function test_after_the_swap_the_restored_rewrite_rules_are_gone_without_any_call_to_wordpress(): void {
+		global $wpdb;
+		update_option( 'rewrite_rules', array( 'old/?$' => 'index.php' ) );
+		$wpdb->query( 'COMMIT' );
+		$job  = $this->at_swap();
+		$temp = $this->temporary_names( $job )[ $wpdb->base_prefix . 'options' ];
+		$this->assertSame( '1', (string) $wpdb->get_var( "SELECT COUNT(*) FROM `{$temp}` WHERE option_name = 'rewrite_rules'" ), 'the control: the restored options have them' );
+		$calls = array();
+		$count = static function ( string $name ) use ( &$calls ): void {
+			$calls[] = $name;
+		};
+		add_action( 'delete_option', $count );
+		add_action( 'update_option', $count );
+		add_action( 'add_option', $count );
+		try {
+			$done = $this->cli_run( $job );
+		} finally {
+			remove_action( 'delete_option', $count );
+			remove_action( 'update_option', $count );
+			remove_action( 'add_option', $count );
+		}
+		$this->assertSame( Job::COMPLETED, $done->status, (string) $done->last_error );
+		$this->assertSame( '0', (string) $wpdb->get_var( "SELECT COUNT(*) FROM `{$wpdb->base_prefix}options` WHERE option_name = 'rewrite_rules'" ), 'removed from the restored options' );
+		$this->assertSame( '1', (string) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM `{$wpdb->base_prefix}options` WHERE option_name = %s", \WPCheckpoint\Support\StoredNames::AFTER_SWAP ) ), 'the mark for the next request' );
+		$this->assertNotContains( 'rewrite_rules', $calls, 'not through WordPress' );
+		$this->assertNotContains( \WPCheckpoint\Support\StoredNames::AFTER_SWAP, $calls, 'not through WordPress' );
+		$this->assertNotContains( 'cron', $calls, 'the cron option is not written in the process that swapped' );
+		// The control: the same hooks do see a call through WordPress.
+		add_option( 'wpcheckpoint_test_seen', 'x' );
+		add_action( 'delete_option', $count );
+		delete_option( 'wpcheckpoint_test_seen' );
+		remove_action( 'delete_option', $count );
+		$this->assertContains( 'wpcheckpoint_test_seen', $calls );
+	}
+
+	public function test_the_next_request_sets_the_fallback_event_of_a_job_still_running(): void {
+		$this->register( 'swap_bystander', array( $this->counting_step( 'b', 1 ) ) );
+		$other = Plugin::instance()->jobs()->create( 'swap_bystander', self::$admin_id );
+		$job   = $this->at_swap();
+		\WPCheckpoint\Jobs\Loopback::schedule( $other->id, 60 );
+		$GLOBALS['wpdb']->query( 'COMMIT' );
+		$done = $this->cli_run( $job );
+		$this->assertSame( Job::COMPLETED, $done->status, (string) $done->last_error );
+		wp_cache_flush(); // A request after the swap: nothing of the old site's options in memory.
+		$this->assertFalse( wp_next_scheduled( \WPCheckpoint\Jobs\Loopback::HOOK, array( $other->id ) ), 'the restored cron option has no event for it' );
+		Plugin::instance()->after_swap();
+		$this->assertNotFalse( wp_next_scheduled( \WPCheckpoint\Jobs\Loopback::HOOK, array( $other->id ) ), 'set again by the next request' );
+		$this->assertFalse( get_option( \WPCheckpoint\Support\StoredNames::AFTER_SWAP ), 'once' );
+		do_action( \WPCheckpoint\Jobs\Loopback::HOOK, $other->id );
+		$this->assertSame( Job::COMPLETED, Plugin::instance()->jobs()->find( $other->id )->status, 'and WP-Cron drives it to its end' );
+		// The control: without the mark a request sets nothing.
+		$third = Plugin::instance()->jobs()->create( 'swap_bystander', self::$admin_id );
+		Plugin::instance()->after_swap();
+		$this->assertFalse( wp_next_scheduled( \WPCheckpoint\Jobs\Loopback::HOOK, array( $third->id ) ) );
+	}
 }

@@ -111,7 +111,8 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 	 * server's), "now" function(): int, "flush" function(): void (in place of the cache flush), "plugin" (this
 	 * plugin's file relative to the plugins directory), "rows" (rows counted per unit), "site_dirs" function():
 	 * array (group => directory), "random" function(): string (hex for the names of what is moved out of the
-	 * way), "limit" function(): string (in place of reading max_execution_time back).
+	 * way), "limit" function(): string (in place of reading max_execution_time back), "batch" (bytes of a batch
+	 * of renames, in place of SwapRules::limit()).
 	 *
 	 * @var array<string, mixed>
 	 */
@@ -207,6 +208,7 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 						'post'    => 'cache',
 					);
 					$context->checkpoint( $cursor, 85, __( 'The restored site is in place', 'wp-checkpoint' ) );
+					$this->at( 'committed' );
 					return $this->after( $context, $db, $cursor );
 				}
 				throw $this->roll_back( $context, $db, $cursor, 'The swap was interrupted while the tables were renamed.' );
@@ -413,6 +415,7 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 					$cursor['step'] = 'b';
 					$context->checkpoint( $cursor, 25, __( 'Swapping in the restored files', 'wp-checkpoint' ) );
 					$this->at( 'dir_aside_recorded' );
+					$file->put( $this->now(), array( $context, 'confirm_lease' ) );
 				}
 				$this->rename( $context, $entry['stage'], $entry['live'] );
 				$this->at( 'dir_in' );
@@ -450,6 +453,7 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 			'post'    => 'cache',
 		);
 		$context->checkpoint( $cursor, 85, __( 'The restored site is in place', 'wp-checkpoint' ) );
+		$this->at( 'committed' );
 		$context->logger()->info( 'The restored site is in place' );
 		return $this->after( $context, $db, $cursor );
 	}
@@ -467,7 +471,7 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 	 */
 	private function rename_tables( JobContext $context, Queries $db, array &$cursor, array $tables, $guard, $carry ): void {
 		$db->run( 'SET SESSION lock_wait_timeout = ' . self::LOCK_WAIT );
-		$batches = SwapRules::batches( $tables, SwapRules::limit( $this->packet( $db ) ) );
+		$batches = SwapRules::batches( $tables, isset( $this->parts['batch'] ) ? (int) $this->parts['batch'] : SwapRules::limit( $this->packet( $db ) ) );
 		$file    = $this->maintenance( $cursor );
 		foreach ( $batches as $k => $batch ) {
 			$cursor = array(
@@ -479,6 +483,7 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 			);
 			$context->checkpoint( $cursor, 60, __( 'Swapping in the restored tables', 'wp-checkpoint' ) );
 			$file->put( $this->now(), array( $context, 'confirm_lease' ) );
+			$this->at( 'batch_recorded' );
 			$send = function () use ( $context, $db, $batch ): void {
 				$this->send( $context, $db, $batch['sql'] );
 			};
@@ -591,6 +596,7 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 				$this->at( 'dir_back' );
 			}
 		}
+		$this->at( 'dirs_back' );
 		if ( ! $file->remove() ) {
 			throw new TransientFailure( 'The maintenance file could not be taken down yet.' );
 		}
@@ -856,7 +862,14 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 			throw new \RuntimeException( 'The swap\'s connection cannot carry this plugin\'s state.' );
 		}
 		$plugin = isset( $this->parts['plugin'] ) ? (string) $this->parts['plugin'] : plugin_basename( WPCHECKPOINT_FILE );
-		return new StateCarry( $db, $plugin, is_multisite() ? get_current_network_id() : 0 );
+		return new StateCarry(
+			$db,
+			$plugin,
+			is_multisite() ? get_current_network_id() : 0,
+			function ( string $point ): void {
+				$this->at( $point );
+			}
+		);
 	}
 
 	/**

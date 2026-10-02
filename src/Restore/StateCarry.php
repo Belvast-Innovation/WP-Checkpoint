@@ -39,9 +39,8 @@ defined( 'ABSPATH' ) || exit;
  * ends in an SQL equality). It is a delete and an insert, so running
  * it again gives the same result. guard() checks that list and runs the
  * swap it is given only when this plugin is in it, right after the check.
- * There is no swap yet: the swap unit (a later part of T042) is to call
- * carry(), then guard() with the RENAME, and nothing in between. Today the
- * import uses readable() only.
+ * The swap (Jobs\SwapStep) calls carry(), then guard() with its first
+ * batch of renames; the import uses readable().
  *
  * Not carried: the user-level dismissed notices (the users table is
  * replaced and dismissals start over), the plugin's cron events inside the
@@ -77,16 +76,25 @@ final class StateCarry {
 	private $network;
 
 	/**
+	 * A crash seam (tests): function( string $point ): void, or null.
+	 *
+	 * @var callable|null
+	 */
+	private $seam;
+
+	/**
 	 * Constructor.
 	 *
 	 * @param ImportSession $db      Connection.
 	 * @param string        $plugin  This plugin's file ("wp-checkpoint/wp-checkpoint.php").
 	 * @param int           $network The network's id on multisite, 0 on a single site.
+	 * @param callable|null $seam    A crash seam (tests): called at "carry_written", inside the transaction.
 	 */
-	public function __construct( ImportSession $db, string $plugin, int $network ) {
+	public function __construct( ImportSession $db, string $plugin, int $network, $seam = null ) {
 		$this->db      = $db;
 		$this->plugin  = $plugin;
 		$this->network = $network;
+		$this->seam    = is_callable( $seam ) ? $seam : null;
 	}
 
 	/**
@@ -118,6 +126,9 @@ final class StateCarry {
 				$this->activate_network( $temp_meta );
 			} else {
 				$this->activate( $temp_options );
+			}
+			if ( null !== $this->seam ) {
+				call_user_func( $this->seam, 'carry_written' );
 			}
 			$this->db->commit();
 		} catch ( \Throwable $e ) {
