@@ -212,9 +212,40 @@ final class RestoreNeighboursTest extends RestoreTestCase {
 
 		$done = $this->answer( $job, array( 'uncertain_tables' => 'exclude' ) );
 		$this->assertSame( Job::COMPLETED, $done->status, (string) $done->last_error );
+		$this->assertNotSame( array(), $this->job_tables( $done ), 'the control: a job\'s temporary tables are found' );
 		$plan = RestorePreflightStep::load_plan( $this->work( $done ) )['plan'];
 		$this->assertSame( 'uncertain', $plan->skipped()[ $n . 'shop_orders' ] ?? null );
 		$this->assertNotContains( $n . 'shop_orders', $this->swapped( $done ) );
+	}
+
+	public function test_an_answer_holds_only_for_the_tables_it_was_given_for(): void {
+		global $wpdb;
+		$n = $this->neighbour();
+		$this->create( $n . 'shop_orders', '(`id` int NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB' );
+		$this->create( $n . 'shop_items', '(`id` int NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB' );
+		$base = $this->backup( array_merge( self::site_tables(), array( $n . 'shop_orders', $n . 'shop_items' ) ) );
+		$wpdb->query( "DROP TABLE `{$n}shop_items`" ); // Not here when the question is asked.
+
+		$job = $this->run_restore( $this->start_restore( $base ) );
+		$this->assertSame( Job::PAUSED, $job->status, (string) $job->last_error );
+		$this->assertSame( array( $n . 'shop_orders' ), $this->asked( $job )['uncertain_tables']['listed'], 'the control: asked about the one table' );
+
+		// Answered "restore" for that table; meanwhile the neighbour gets another table the backup holds.
+		Plugin::instance()->jobs()->answer( Plugin::instance()->jobs()->find( $job->id ), array( 'uncertain_tables' => 'restore' ) );
+		$this->create( $n . 'shop_items', '(`id` int NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB' );
+		Plugin::instance()->runner()->tick( $job->id, microtime( true ) );
+		$again = $this->run_restore( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( Job::PAUSED, $again->status, 'asked again: the answer was for other tables: ' . $again->last_error );
+		$this->assertSame( array( 'uncertain_tables' ), array_column( $again->questions, 'id' ) );
+		$this->assertSame( 2, $again->questions[0]['count'] );
+		$this->assertSame( array( $n . 'shop_orders', $n . 'shop_items' ), $this->asked( $again )['uncertain_tables']['listed'], 'the tables as they are now' );
+		$this->assertSame( array(), $this->job_tables( $again ), 'nothing created on the answer meant for one table' );
+
+		$done = $this->answer( $again, array( 'uncertain_tables' => 'exclude' ) );
+		$this->assertSame( Job::COMPLETED, $done->status, (string) $done->last_error );
+		$plan = RestorePreflightStep::load_plan( $this->work( $done ) )['plan'];
+		$this->assertSame( 'uncertain', $plan->skipped()[ $n . 'shop_orders' ] ?? null );
+		$this->assertSame( 'uncertain', $plan->skipped()[ $n . 'shop_items' ] ?? null );
 	}
 
 	public function test_a_table_that_may_be_either_installations_is_restored_when_so_answered(): void {
@@ -272,6 +303,17 @@ final class RestoreNeighboursTest extends RestoreTestCase {
 				$this->assertNotContains( $table, $swapped, $table );
 			}
 		}
+	}
+
+	public function test_a_role_key_spelt_in_another_case_is_found_as_the_column_compares_it(): void {
+		global $wpdb;
+		$n = $this->neighbour();
+		// As a neighbour's wp-config.php may spell its prefix where the server lists its tables lowercased.
+		$this->role_key( strtoupper( $n ) . 'capabilities' );
+		$base = $this->backup( array_merge( self::site_tables(), array( $wpdb->users, $wpdb->usermeta ) ) );
+		$job  = $this->run_restore( $this->start_restore( $base ) );
+		$this->assertSame( Job::PAUSED, $job->status, (string) $job->last_error );
+		$this->assertSame( array( 'shared_tables' ), array_column( $job->questions, 'id' ) );
 	}
 
 	public function test_both_kinds_are_asked_at_once_and_each_answer_holds_for_its_own_kind(): void {
@@ -386,6 +428,7 @@ final class RestoreNeighboursTest extends RestoreTestCase {
 		);
 		$this->assertSame( Job::COMPLETED, $done->status, (string) $done->last_error );
 		$this->assertFileExists( RestoreFiles::path( $this->work( $done ), RestoreFiles::MANIFEST ), 'the control: a restore that goes on checks the backup' );
+		$this->assertNotSame( array(), $this->job_tables( $done ), 'the control: its temporary tables are found' );
 		$this->assertSame( array(), $done->questions );
 		$this->assertSame( 'uncertain', RestorePreflightStep::load_plan( $this->work( $done ) )['plan']->skipped()[ $n . 'shop_orders' ] ?? null );
 	}

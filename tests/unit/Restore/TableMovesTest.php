@@ -106,6 +106,21 @@ final class TableMovesTest extends TestCase {
 		$this->assertSame( array_values( array_diff( $old, array( 'wp_old_posts' ) ) ), $out['report'] );
 	}
 
+	public function test_where_the_server_folds_case_a_mixed_case_prefix_moves_its_own_and_leaves_the_neighbours(): void {
+		$core = array_merge( self::site( 'wpABC_' ), array( 'wpABC_users', 'wpABC_usermeta' ) );
+		$live = array_map( 'strtolower', array_merge( $core, self::site( 'wpabc_old_' ), array( 'wpabc_shop' ) ) );
+		$as   = TableMoves::select( 'wpABC_', false, $live, array( 'wpABC_options', 'wpABC_posts' ), array(), $core );
+		$this->assertSame( array(), $as['move'], 'the control: compared as spelled, nothing is this site\'s' );
+		$out = TableMoves::select( 'wpABC_', false, $live, array( 'wpABC_options', 'wpABC_posts' ), array( 'wpABC_links' ), $core, true );
+		$this->assertContains( 'wpabc_shop', $out['move'], 'this site\'s table the backup lacks, as the server lists it' );
+		$this->assertContains( 'wpabc_postmeta', $out['move'] );
+		$this->assertNotContains( 'wpabc_options', array_merge( $out['move'], $out['report'] ), 'the backup\'s own: replaced by its entry' );
+		$this->assertNotContains( 'wpabc_links', array_merge( $out['move'], $out['report'] ), 'left out of the restore: it stays' );
+		foreach ( self::site( 'wpabc_old_' ) as $name ) {
+			$this->assertContains( $name, $out['report'], $name . ': the neighbour\'s, left' );
+		}
+	}
+
 	public function test_a_table_both_installations_claim_is_left(): void {
 		// This site's users table is the neighbour's (CUSTOM_USER_TABLE): its own, and not only its own.
 		$core = array_merge( self::site( 'wp_' ), array( 'wp_old_users', 'wp_old_usermeta' ) );

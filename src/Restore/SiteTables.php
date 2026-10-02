@@ -54,12 +54,22 @@ final class SiteTables {
 	}
 
 	/**
-	 * Which of the given meta keys the usermeta table this site uses holds.
+	 * Whether the server compares table names without case (lower_case_table_names <> 0): the one place it is read.
+	 *
+	 * @return bool
+	 */
+	public static function fold_case(): bool {
+		global $wpdb;
+		return (int) $wpdb->get_var( 'SELECT @@lower_case_table_names' ) > 0; // phpcs:ignore WordPress.DB.DirectDatabaseQuery.NoCaching -- a server setting.
+	}
+
+	/**
+	 * Which of the given meta keys the usermeta table this site uses holds. The keys are matched as the column
+	 * compares them (WordPress's tables: without case); the given spelling is returned.
 	 *
 	 * @param string[] $keys Meta keys (IncomingTables::role_keys()).
 	 * @return string[]
 	 * @throws TransientFailure When the table cannot be read: whether another installation uses it cannot be told.
-	 * @throws \UnexpectedValueException When the usermeta table is not one WordPress names (a retry would not change that).
 	 */
 	public static function meta_keys_present( array $keys ): array {
 		global $wpdb;
@@ -67,14 +77,19 @@ final class SiteTables {
 		if ( array() === $keys ) {
 			return array();
 		}
-		$table = self::usermeta();
-		if ( ! in_array( $table, self::core(), true ) ) {
-			throw new \UnexpectedValueException( 'The user meta table of this site is not among the tables WordPress names, so whether another installation in the same database uses it cannot be told.' ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- a job error; the presenter cleans it.
-		}
-		$rows = $wpdb->get_col( $wpdb->prepare( 'SELECT DISTINCT meta_key FROM ' . SqlWriter::identifier( $table ) . ' WHERE meta_key IN (' . implode( ', ', array_fill( 0, count( $keys ), '%s' ) ) . ')', $keys ) ); // phpcs:ignore WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare,WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.DirectDatabaseQuery.NoCaching -- a table WordPress names (checked above), one placeholder per key.
+		// The table $wpdb queries (wp-config.php's prefix or CUSTOM_USER_META_TABLE), quoted as an identifier.
+		$rows = $wpdb->get_col( $wpdb->prepare( 'SELECT DISTINCT meta_key FROM ' . SqlWriter::identifier( self::usermeta() ) . ' WHERE meta_key IN (' . implode( ', ', array_fill( 0, count( $keys ), '%s' ) ) . ')', $keys ) ); // phpcs:ignore WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare,WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.DirectDatabaseQuery.NoCaching -- the table name quoted, one placeholder per key.
 		if ( '' !== (string) $wpdb->last_error || ! is_array( $rows ) ) {
 			throw new TransientFailure( 'The user meta table of this site could not be read, so whether another installation in the same database uses it cannot be told.' );
 		}
-		return array_values( array_intersect( $keys, array_map( 'strval', $rows ) ) );
+		$held = array_fill_keys( array_map( 'strtolower', array_map( 'strval', $rows ) ), true );
+		return array_values(
+			array_filter(
+				$keys,
+				static function ( string $key ) use ( $held ): bool {
+					return isset( $held[ strtolower( $key ) ] );
+				}
+			)
+		);
 	}
 }

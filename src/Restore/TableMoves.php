@@ -30,6 +30,10 @@ defined( 'ABSPATH' ) || exit;
  * them), the tables left out of the restore (the live one stays), and this
  * plugin's (its jobs table and swap plan, and the temporary and old tables,
  * the restore's ledger among them).
+ *
+ * Where the server compares table names without case, names are compared
+ * lowercased (it lists them so; WordPress spells the prefix as wp-config.php
+ * does); the live tables are returned as listed.
  */
 final class TableMoves {
 
@@ -42,11 +46,16 @@ final class TableMoves {
 	 * @param string[] $incoming  The final names of the backup's tables.
 	 * @param string[] $excluded  The final names of the tables left out of the restore.
 	 * @param string[] $core      WordPress's own tables of this site (read with an empty prefix only).
+	 * @param bool     $fold      Whether the server compares table names without case (lower_case_table_names <> 0).
 	 * @return array{move: string[], report: string[]} Each in the order of $live.
 	 */
-	public static function select( string $prefix, bool $multisite, array $live, array $incoming, array $excluded, array $core ): array {
-		$skip   = array_fill_keys( array_merge( $incoming, $excluded ), true );
-		$own    = array_fill_keys( array_map( 'strval', $core ), true );
+	public static function select( string $prefix, bool $multisite, array $live, array $incoming, array $excluded, array $core, bool $fold = false ): array {
+		$key    = static function ( string $name ) use ( $fold ): string {
+			return $fold ? strtolower( $name ) : $name;
+		};
+		$skip   = array_fill_keys( array_map( $key, array_map( 'strval', array_merge( $incoming, $excluded ) ) ), true );
+		$own    = array_fill_keys( array_map( $key, array_map( 'strval', $core ) ), true );
+		$prefix = $key( $prefix );
 		$out    = array(
 			'move'   => array(),
 			'report' => array(),
@@ -56,8 +65,8 @@ final class TableMoves {
 			// Every live table under the prefix, the backup's included: another installation shows by its own tables.
 			$under = array();
 			foreach ( $live as $name ) {
-				if ( 0 === strncmp( (string) $name, $prefix, strlen( $prefix ) ) ) {
-					$under[] = (string) $name;
+				if ( 0 === strncmp( $key( (string) $name ), $prefix, strlen( $prefix ) ) ) {
+					$under[] = $key( (string) $name );
 				}
 			}
 			// This site's WordPress tables are not protected here, unlike in the export: one that another installation
@@ -70,13 +79,14 @@ final class TableMoves {
 		}
 		foreach ( $live as $name ) {
 			$name = (string) $name;
-			if ( isset( $skip[ $name ] ) || self::never( $name ) ) {
+			$k    = $key( $name );
+			if ( isset( $skip[ $k ] ) || self::never( $name ) ) {
 				continue;
 			}
 			if ( '' === $prefix ) {
-				$mine = isset( $own[ $name ] );
+				$mine = isset( $own[ $k ] );
 			} else {
-				$mine = 0 === strncmp( $name, $prefix, strlen( $prefix ) ) && ! isset( $theirs[ $name ] );
+				$mine = 0 === strncmp( $k, $prefix, strlen( $prefix ) ) && ! isset( $theirs[ $k ] );
 			}
 			$out[ $mine ? 'move' : 'report' ][] = $name;
 		}

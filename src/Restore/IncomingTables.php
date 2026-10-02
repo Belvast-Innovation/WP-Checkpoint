@@ -28,10 +28,17 @@ defined( 'ABSPATH' ) || exit;
  *   "wp_" + "old_shop_orders"): either installation's.
  * - none of these: this site's, restored as usual.
  *
+ * A WordPress table of this site's that falls among a neighbour's tables that may be either's (its CUSTOM_USER_TABLE
+ * "wp_old_members") is this site's: WordPress says this site uses it, and the neighbour does not claim it.
+ *
  * Only the neighbours' prefixes count for role keys, never a network's sub-sites ("wp_2_capabilities": the sub-sites
  * are this network's, never a group of foreign()). Not seen: an installation that uses this site's users table
  * (its CUSTOM_USER_TABLE names it) and a usermeta table of its own leaves nothing in this database that shows it.
  * With an empty prefix nothing is judged, as in TableMoves: no prefix tells installations apart.
+ *
+ * Where the server compares table names without case ($fold, lower_case_table_names <> 0), names are compared
+ * lowercased: such a server lists them lowercased, while WordPress names them as wp-config.php spells the prefix.
+ * The tables are returned as given.
  */
 final class IncomingTables {
 
@@ -45,11 +52,12 @@ final class IncomingTables {
 	 * @param string   $prefix    This site's table prefix.
 	 * @param bool     $multisite Whether this site is a network.
 	 * @param string[] $live      The live tables.
+	 * @param bool     $fold      Whether the server compares table names without case.
 	 * @return string[]
 	 */
-	public static function role_keys( string $prefix, bool $multisite, array $live ): array {
+	public static function role_keys( string $prefix, bool $multisite, array $live, bool $fold = false ): array {
 		$keys = array();
-		foreach ( array_keys( self::groups( $prefix, $multisite, $live ) ) as $neighbour ) {
+		foreach ( array_keys( self::groups( $prefix, $multisite, $live, $fold ) ) as $neighbour ) {
 			$keys[] = $neighbour . 'capabilities';
 			$keys[] = $neighbour . 'user_level';
 		}
@@ -67,10 +75,11 @@ final class IncomingTables {
 	 * @param string   $users     The users table this site uses.
 	 * @param string   $usermeta  The usermeta table this site uses.
 	 * @param string[] $found     The role keys (role_keys()) the usermeta table this site uses holds.
+	 * @param bool     $fold      Whether the server compares table names without case.
 	 * @return array<string, string> Final name => SHARED, NEIGHBOUR or UNCERTAIN, in the order of $finals.
 	 */
-	public static function classify( string $prefix, bool $multisite, array $live, array $finals, array $core, string $users, string $usermeta, array $found ): array {
-		$groups = self::groups( $prefix, $multisite, $live );
+	public static function classify( string $prefix, bool $multisite, array $live, array $finals, array $core, string $users, string $usermeta, array $found, bool $fold = false ): array {
+		$groups = self::groups( $prefix, $multisite, $live, $fold );
 		$theirs = array();
 		$either = array();
 		foreach ( $groups as $group ) {
@@ -81,28 +90,40 @@ final class IncomingTables {
 				$either[ $name ] = true;
 			}
 		}
-		$own    = array_fill_keys( array_map( 'strval', $core ), true );
+		$own = array();
+		foreach ( $core as $name ) {
+			$own[ self::key( (string) $name, $fold ) ] = true;
+		}
 		$shared = array();
 		foreach ( array_keys( $own ) as $name ) {
 			if ( isset( $theirs[ $name ] ) ) {
 				$shared[ $name ] = true;
 			}
 		}
-		$evidence = array_intersect( array_map( 'strval', $found ), self::role_keys( $prefix, $multisite, $live ) );
+		$evidence = array_intersect(
+			array_map(
+				static function ( $key ): string {
+					return strtolower( (string) $key ); // Meta keys: the column compares them without case.
+				},
+				$found
+			),
+			array_map( 'strtolower', self::role_keys( $prefix, $multisite, $live, $fold ) )
+		);
 		if ( array() !== $evidence ) {
-			$shared[ $users ]    = true;
-			$shared[ $usermeta ] = true;
+			$shared[ self::key( $users, $fold ) ]    = true;
+			$shared[ self::key( $usermeta, $fold ) ] = true;
 		}
 		$out = array();
 		foreach ( $finals as $name ) {
 			$name = (string) $name;
-			if ( isset( $shared[ $name ] ) ) {
+			$key  = self::key( $name, $fold );
+			if ( isset( $shared[ $key ] ) ) {
 				$out[ $name ] = self::SHARED;
-			} elseif ( isset( $own[ $name ] ) ) {
+			} elseif ( isset( $own[ $key ] ) ) {
 				continue; // One of this site's WordPress tables that no neighbour claims as one of its own.
-			} elseif ( isset( $theirs[ $name ] ) ) {
+			} elseif ( isset( $theirs[ $key ] ) ) {
 				$out[ $name ] = self::NEIGHBOUR;
-			} elseif ( isset( $either[ $name ] ) ) {
+			} elseif ( isset( $either[ $key ] ) ) {
 				$out[ $name ] = self::UNCERTAIN;
 			}
 		}
@@ -115,18 +136,32 @@ final class IncomingTables {
 	 * @param string   $prefix    This site's table prefix.
 	 * @param bool     $multisite Whether this site is a network.
 	 * @param string[] $live      The live tables.
+	 * @param bool     $fold      Whether the server compares table names without case (then all lowercased).
 	 * @return array<string, array{excluded: string[], kept: string[]}>
 	 */
-	private static function groups( string $prefix, bool $multisite, array $live ): array {
+	private static function groups( string $prefix, bool $multisite, array $live, bool $fold ): array {
 		if ( '' === $prefix ) {
 			return array();
 		}
-		$under = array();
+		$prefix = self::key( $prefix, $fold );
+		$under  = array();
 		foreach ( $live as $name ) {
-			if ( 0 === strncmp( (string) $name, $prefix, strlen( $prefix ) ) ) {
-				$under[] = (string) $name;
+			$name = self::key( (string) $name, $fold );
+			if ( 0 === strncmp( $name, $prefix, strlen( $prefix ) ) ) {
+				$under[] = $name;
 			}
 		}
 		return TableSelection::foreign( $under, $prefix, $multisite );
+	}
+
+	/**
+	 * A table name as the server compares it.
+	 *
+	 * @param string $name Table name.
+	 * @param bool   $fold Whether the server compares table names without case.
+	 * @return string
+	 */
+	private static function key( string $name, bool $fold ): string {
+		return $fold ? strtolower( $name ) : $name;
 	}
 }

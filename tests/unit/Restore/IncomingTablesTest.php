@@ -141,6 +141,34 @@ final class IncomingTablesTest extends TestCase {
 		$this->assertSame( array(), IncomingTables::role_keys( 'wp_', false, self::core() ), 'no neighbour, nothing to look for' );
 	}
 
+	public function test_where_the_server_folds_case_a_mixed_case_prefix_finds_the_neighbour_it_lists_lowercased(): void {
+		// lower_case_table_names = 1: the server lists "wpabc_old_posts"; WordPress names this site's tables "wpABC_…".
+		$lower  = static function ( array $names ): array {
+			return array_map( 'strtolower', $names );
+		};
+		$core   = array_merge( self::site( 'wpABC_' ), array( 'wpABC_users', 'wpABC_usermeta' ) );
+		$live   = $lower( array_merge( $core, self::site( 'wpabc_old_' ), array( 'wpabc_old_shop_orders' ) ) );
+		$finals = array( 'wpABC_options', 'wpABC_old_posts', 'wpABC_old_shop_orders', 'wpABC_users', 'wpABC_usermeta' );
+		$this->assertSame( array(), IncomingTables::classify( 'wpABC_', false, $live, $finals, $core, 'wpABC_users', 'wpABC_usermeta', array() ), 'the control: compared as spelled, nothing is found' );
+		$this->assertSame(
+			array(
+				'wpABC_old_posts'       => IncomingTables::NEIGHBOUR,
+				'wpABC_old_shop_orders' => IncomingTables::UNCERTAIN,
+			),
+			IncomingTables::classify( 'wpABC_', false, $live, $finals, $core, 'wpABC_users', 'wpABC_usermeta', array(), true ),
+			'as the server compares them, with the names as given'
+		);
+		$this->assertSame( array( 'wpabc_old_capabilities', 'wpabc_old_user_level' ), IncomingTables::role_keys( 'wpABC_', false, $live, true ) );
+		$this->assertSame(
+			array(
+				'wpABC_users'    => IncomingTables::SHARED,
+				'wpABC_usermeta' => IncomingTables::SHARED,
+			),
+			IncomingTables::classify( 'wpABC_', false, $live, array( 'wpABC_users', 'wpABC_usermeta' ), $core, 'wpABC_users', 'wpABC_usermeta', array( 'wpABC_old_capabilities' ), true ),
+			'a role key as the neighbour\'s wp-config.php spells its prefix'
+		);
+	}
+
 	public function test_with_an_empty_prefix_nothing_is_judged(): void {
 		$live = array_merge( self::site( '' ), array( 'users', 'usermeta' ), self::site( 'wp_' ) );
 		$this->assertSame( array(), IncomingTables::classify( '', false, $live, array( 'wp_posts', 'options' ), self::site( '' ), 'users', 'usermeta', array( 'wp_capabilities' ) ) );

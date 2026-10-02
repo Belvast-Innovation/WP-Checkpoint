@@ -186,10 +186,10 @@ final class RestorePreflightStep implements Step {
 		if ( is_multisite() !== $multisite ) {
 			throw new Refused( $multisite ? 'This backup is of a multisite network and this site is a single site; it can only be restored onto a network.' : 'This backup is of a single site and this site is a multisite network; it can only be restored onto a single site.' );
 		}
-		$fold   = (int) $wpdb->get_var( 'SELECT @@lower_case_table_names' ) > 0; // phpcs:ignore WordPress.DB.DirectDatabaseQuery.NoCaching -- a server setting.
+		$fold   = SiteTables::fold_case();
 		$random = bin2hex( random_bytes( 2 ) );
 		$plan   = TablePlan::make( $manifest->tables(), (string) ( $site['table_prefix'] ?? '' ), (string) $wpdb->base_prefix, $multisite, $options['exclude_tables'], $context->job()->storage_token, $context->job()->id, $random, $fold );
-		$skip   = $this->incoming( $context, $plan, $multisite, $options['policy'] );
+		$skip   = $this->incoming( $context, $plan, $multisite, $fold, $options['policy'] );
 		if ( $skip instanceof StepResult ) {
 			return $skip;
 		}
@@ -244,23 +244,26 @@ final class RestorePreflightStep implements Step {
 	/**
 	 * The backup's tables whose live table another installation may use (IncomingTables), by their final names: one of
 	 * a neighbour's own is left out; the two kinds the user decides (RestoreJob::POLICIES) are left out or restored
-	 * as answered or as the policy says. Asks both questions at once when a decision is missing.
+	 * as answered or as the policy says. Asks both questions at once when a decision is missing. An answer holds for
+	 * the tables the question listed (RestoreFiles::INCOMING), never for others: when the tables of its kind are not
+	 * those any more (the live tables changed while the job waited), the answer is set aside and asked again.
 	 *
 	 * @param JobContext            $context   Context.
 	 * @param TablePlan             $plan      The plan with every table of the backup.
 	 * @param bool                  $multisite Whether this site is a network.
+	 * @param bool                  $fold      Whether the server compares table names without case.
 	 * @param array<string, string> $policy    RestoreJob::options()'s policy.
 	 * @return array<string, string>|StepResult Tables to leave out (names in the backup) => why, or the questions.
 	 */
-	private function incoming( JobContext $context, TablePlan $plan, bool $multisite, array $policy ) {
+	private function incoming( JobContext $context, TablePlan $plan, bool $multisite, bool $fold, array $policy ) {
 		$finals = array();
 		foreach ( $plan->tables() as $table ) {
 			$finals[ $table['final'] ] = $table['table'];
 		}
 		$prefix = $plan->site_prefix();
 		$live   = ( new WpdbConnection() )->tables_with_prefix( $prefix )['tables'];
-		$found  = SiteTables::meta_keys_present( IncomingTables::role_keys( $prefix, $multisite, $live ) );
-		$kinds  = IncomingTables::classify( $prefix, $multisite, $live, array_keys( $finals ), SiteTables::core(), SiteTables::users(), SiteTables::usermeta(), $found );
+		$found  = SiteTables::meta_keys_present( IncomingTables::role_keys( $prefix, $multisite, $live, $fold ) );
+		$kinds  = IncomingTables::classify( $prefix, $multisite, $live, array_keys( $finals ), SiteTables::core(), SiteTables::users(), SiteTables::usermeta(), $found, $fold );
 		$listed = array(
 			IncomingTables::NEIGHBOUR => array(),
 			IncomingTables::UNCERTAIN => array(),
@@ -270,8 +273,10 @@ final class RestorePreflightStep implements Step {
 			$listed[ $kind ][] = (string) $final;
 		}
 		$answers   = isset( $context->options()['answers'] ) && is_array( $context->options()['answers'] ) ? $context->options()['answers'] : array();
+		$seen      = ExportPlan::exists( $context->work_path(), RestoreFiles::INCOMING ) ? ExportPlan::read( $context->work_path(), RestoreFiles::INCOMING ) : array();
 		$decided   = array();
 		$questions = array();
+		$changed   = array();
 		foreach ( array(
 			'uncertain_tables' => IncomingTables::UNCERTAIN,
 			'shared_tables'    => IncomingTables::SHARED,
@@ -279,7 +284,14 @@ final class RestorePreflightStep implements Step {
 			if ( array() === $listed[ $kind ] ) {
 				continue;
 			}
-			$choice = isset( $answers[ $id ] ) && is_string( $answers[ $id ] ) ? $answers[ $id ] : $policy[ $id ];
+			$choice = $policy[ $id ];
+			if ( isset( $answers[ $id ] ) && is_string( $answers[ $id ] ) ) {
+				if ( self::same_tables( $listed[ $kind ], $seen[ $kind ] ?? null ) ) {
+					$choice = $answers[ $id ];
+				} else {
+					$changed[] = $id; // Answered for other tables than these: not an answer for these.
+				}
+			}
 			if ( 'restore' === $choice || 'exclude' === $choice ) {
 				$decided[ $kind ] = $choice;
 				continue;
@@ -290,6 +302,12 @@ final class RestorePreflightStep implements Step {
 				'count'   => count( $listed[ $kind ] ),
 				'file'    => RestoreFiles::INCOMING,
 				'choices' => array( 'restore', 'exclude' ),
+			);
+		}
+		if ( array() !== $changed ) {
+			$context->logger()->warning(
+				'The tables a question was answered for changed before the restore went on; the answer is not used for the tables now in its place',
+				array( 'questions' => $changed )
 			);
 		}
 		if ( array() !== $questions ) {
@@ -332,6 +350,23 @@ final class RestorePreflightStep implements Step {
 			}
 		}
 		return $skip;
+	}
+
+	/**
+	 * Whether the tables now are those a question listed (in any order).
+	 *
+	 * @param string[]   $now    Tables now.
+	 * @param mixed|null $listed What the question's file listed for that kind (null when nothing).
+	 * @return bool
+	 */
+	private static function same_tables( array $now, $listed ): bool {
+		if ( ! is_array( $listed ) ) {
+			return false;
+		}
+		$listed = array_map( 'strval', $listed );
+		sort( $now, SORT_STRING );
+		sort( $listed, SORT_STRING );
+		return $now === $listed;
 	}
 
 	/**
@@ -518,7 +553,7 @@ final class RestorePreflightStep implements Step {
 		}
 		// What the swap moves aside, by its rule (TableMoves): this site's live tables, never another installation's.
 		$finals = array_column( $table->tables(), 'final' );
-		$moved  = array_fill_keys( array_merge( TableMoves::select( $table->site_prefix(), is_multisite(), $live, $finals, $left, SiteTables::core() )['move'], $finals ), true );
+		$moved  = array_fill_keys( array_merge( TableMoves::select( $table->site_prefix(), is_multisite(), $live, $finals, $left, SiteTables::core(), SiteTables::fold_case() )['move'], $finals ), true );
 		if ( 0 === (int) $cursor['page'] ) {
 			$handle = @fopen( RestoreFiles::path( $work, RestoreFiles::DEFINITIONS ), 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- reported below.
 			if ( false === $handle ) {
