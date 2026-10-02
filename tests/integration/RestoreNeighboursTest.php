@@ -282,6 +282,23 @@ final class RestoreNeighboursTest extends RestoreTestCase {
 		$this->assertSame( 'uncertain', $plan->skipped()[ $n . 'shop_items' ] ?? null );
 	}
 
+	public function test_a_question_lists_its_tables_only_from_a_file_that_lists_the_tables_its_id_names(): void {
+		$n = $this->neighbour();
+		$this->create( $n . 'shop_orders', '(`id` int NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB' );
+		$base = $this->backup( array_merge( self::site_tables(), array( $n . 'shop_orders' ) ) );
+		$job  = $this->run_restore( $this->start_restore( $base ) );
+		$this->assertSame( Job::PAUSED, $job->status, (string) $job->last_error );
+		$this->assertSame( array( $n . 'shop_orders' ), $this->asked( $job )['uncertain_tables']['listed'], 'the control: the file the question was asked with' );
+		// Another run's file (one that outlived its lease) lists other tables than the question's id names.
+		$path            = RestoreFiles::path( $this->work( $job ), RestoreFiles::INCOMING );
+		$file            = json_decode( (string) file_get_contents( $path ), true );
+		$file['uncertain'] = array( $n . 'shop_other' );
+		file_put_contents( $path, (string) wp_json_encode( $file ) );
+		$asked = $this->asked( $job )['uncertain_tables'];
+		$this->assertSame( array(), $asked['listed'], 'not shown as the tables the question is about' );
+		$this->assertStringContainsString( 'may belong to this site or to another WordPress installation', $asked['text'], 'the question itself is still shown' );
+	}
+
 	public function test_a_table_that_may_be_either_installations_is_restored_when_so_answered(): void {
 		$n = $this->neighbour();
 		$this->create( $n . 'shop_orders', '(`id` int NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB' );
@@ -485,6 +502,7 @@ final class RestoreNeighboursTest extends RestoreTestCase {
 		$job    = $this->start_restore( $base );
 		$runner = $this->small_runner();
 		$shown  = array();
+		$waited = false;
 		// Short ticks until the walk is over (the step's next phase), then the rest as usual.
 		for ( $i = 0; $i < 300; $i++ ) {
 			$now = Plugin::instance()->jobs()->find( $job->id );
@@ -493,9 +511,13 @@ final class RestoreNeighboursTest extends RestoreTestCase {
 			}
 			if ( RestorePreflightStep::ID === $now->step ) {
 				$shown[] = $now->progress_message;
+				if ( 'plan' === ( $now->cursor['phase'] ?? '' ) && ! empty( $now->cursor['meta']['done'] ) ) {
+					$waited = true; // The walk ended in a tick with no time left: the rest of the plan waited for the next.
+				}
 			}
 			$runner->tick( $job->id, microtime( true ) );
 		}
+		$this->assertTrue( $waited, 'the plan after the walk waits for a tick with time' );
 		$done = $this->run_restore( Plugin::instance()->jobs()->find( $job->id ) );
 		$this->assertSame( Job::PAUSED, $done->status, (string) $done->last_error );
 		$this->assertStringContainsString( 'with the table prefix far_', $this->asked( $done )['shared_tables']['text'], 'the walk went on to the last window' );

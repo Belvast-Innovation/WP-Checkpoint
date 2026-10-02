@@ -21,6 +21,18 @@ defined( 'ABSPATH' ) || exit;
 final class SiteTables {
 
 	/**
+	 * One window of the walk over the usermeta table ({table}: its quoted name): the rows' keys that end in the
+	 * suffix, among the ids of the window. tests/Fixtures/Restore/meta-key-scan.php runs these very statements on
+	 * every supported database server and checks that each is read through the primary key.
+	 */
+	const WINDOW_SQL = 'SELECT meta_key FROM {table} WHERE umeta_id > %d AND umeta_id <= %d AND meta_key LIKE %s';
+
+	/**
+	 * The next id there is past a window.
+	 */
+	const NEXT_SQL = 'SELECT MIN(umeta_id) FROM {table} WHERE umeta_id > %d';
+
+	/**
 	 * This site's WordPress tables (a network's global tables and its main site's), as WordPress names them: the main
 	 * site's on a network, where a tick may run in a sub-site's context (the sub-sites' tables are recognised by their
 	 * naming rule, TableSelection). The users and usermeta tables are the ones $wpdb queries.
@@ -93,10 +105,10 @@ final class SiteTables {
 		global $wpdb;
 		$table = SqlWriter::identifier( self::usermeta() );
 		$end   = $after + $window;
-		// phpcs:disable WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.DirectDatabaseQuery.NoCaching -- the table name quoted; bounded reads through the primary key.
-		$keys = $wpdb->get_col( $wpdb->prepare( 'SELECT meta_key FROM ' . $table . ' WHERE umeta_id > %d AND umeta_id <= %d AND meta_key LIKE %s', $after, $end, '%' . $wpdb->esc_like( IncomingTables::CAPABILITIES ) ) );
+		// phpcs:disable WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare,WordPress.DB.DirectDatabaseQuery.NoCaching -- the statements are the constants above (their placeholders there), the table name quoted; bounded reads through the primary key.
+		$keys = $wpdb->get_col( $wpdb->prepare( str_replace( '{table}', $table, self::WINDOW_SQL ), $after, $end, '%' . $wpdb->esc_like( IncomingTables::CAPABILITIES ) ) );
 		$fail = '' !== (string) $wpdb->last_error || ! is_array( $keys );
-		$next = $fail ? null : $wpdb->get_var( $wpdb->prepare( 'SELECT MIN(umeta_id) FROM ' . $table . ' WHERE umeta_id > %d', $end ) );
+		$next = $fail ? null : $wpdb->get_var( $wpdb->prepare( str_replace( '{table}', $table, self::NEXT_SQL ), $end ) );
 		// phpcs:enable
 		if ( $fail || '' !== (string) $wpdb->last_error ) {
 			throw new TransientFailure( 'The user meta table of this site could not be read, so whether another installation in the same database uses it cannot be told.' );

@@ -35,7 +35,8 @@ defined( 'ABSPATH' ) || exit;
  * installations apart.
  *
  * Names are compared as given: a server that compares table names without case is refused, unless every name the
- * restore compares is lowercase (fold_refusal()).
+ * restore compares is lowercase ASCII (fold_refusal(): this site's prefix and users tables, the backup's tables, the
+ * live tables under the prefix, the tables left out).
  */
 final class IncomingTables {
 
@@ -84,16 +85,19 @@ final class IncomingTables {
 
 	/**
 	 * Why names this restore compares cannot be compared here: the server compares table names without case and one
-	 * of them is not lowercase. '' when nothing is in the way.
+	 * of them has an upper-case letter, or a byte outside ASCII (whose case the server may fold and PHP's strtolower()
+	 * does not). '' when nothing is in the way.
 	 *
 	 * @param bool        $fold     Whether the server compares table names without case.
 	 * @param string      $prefix   This site's table prefix.
 	 * @param string|null $users    CUSTOM_USER_TABLE, when defined.
 	 * @param string|null $usermeta CUSTOM_USER_META_TABLE, when defined.
 	 * @param string[]    $backup   The tables of the backup.
+	 * @param string[]    $live     The live tables under this site's prefix (as the server lists them).
+	 * @param string[]    $excluded The tables the user leaves out of the restore.
 	 * @return string
 	 */
-	public static function fold_refusal( bool $fold, string $prefix, $users, $usermeta, array $backup ): string {
+	public static function fold_refusal( bool $fold, string $prefix, $users, $usermeta, array $backup, array $live = array(), array $excluded = array() ): string {
 		if ( ! $fold ) {
 			return '';
 		}
@@ -107,9 +111,16 @@ final class IncomingTables {
 		foreach ( $backup as $table ) {
 			$named[] = array( 'the backup\'s table ' . $table, (string) $table );
 		}
+		foreach ( $live as $table ) {
+			$named[] = array( 'the table ' . $table . ' of this database', (string) $table );
+		}
+		foreach ( $excluded as $table ) {
+			$named[] = array( 'the table ' . $table . ' left out of the restore', (string) $table );
+		}
+		$high = implode( '', array_map( 'chr', range( 128, 255 ) ) );
 		foreach ( $named as $item ) {
-			if ( strtolower( $item[1] ) !== $item[1] ) {
-				return sprintf( 'This database server compares table names without letter case (lower_case_table_names), and %s has upper-case letters. This version of WP Checkpoint restores on such a server only when every table name involved is lowercase. Nothing was changed.', $item[0] );
+			if ( strtolower( $item[1] ) !== $item[1] || strcspn( $item[1], $high ) !== strlen( $item[1] ) ) {
+				return sprintf( 'This database server compares table names without letter case (lower_case_table_names), and %s has upper-case letters or letters outside ASCII. This version of WP Checkpoint restores on such a server only when every table name involved is lowercase ASCII. Nothing was changed.', $item[0] );
 			}
 		}
 		return '';

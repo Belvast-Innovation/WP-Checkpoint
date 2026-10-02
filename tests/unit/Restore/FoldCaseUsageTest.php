@@ -47,7 +47,7 @@ final class FoldCaseUsageTest extends TestCase {
 		foreach ( $files as $path => $content ) {
 			$count = 0;
 			foreach ( token_get_all( $content ) as $token ) {
-				if ( is_array( $token ) && in_array( $token[0], array( T_CONSTANT_ENCAPSED_STRING, T_ENCAPSED_AND_WHITESPACE ), true ) && false !== stripos( $token[1], '@@lower_case_table_names' ) ) {
+				if ( is_array( $token ) && in_array( $token[0], array( T_CONSTANT_ENCAPSED_STRING, T_ENCAPSED_AND_WHITESPACE ), true ) && false !== stripos( $token[1], 'lower_case_table_names' ) && 1 === preg_match( '/@@|\bselect\b|\bshow\s+variables\b/i', $token[1] ) ) {
 					++$count;
 				}
 			}
@@ -67,7 +67,7 @@ final class FoldCaseUsageTest extends TestCase {
 	public static function overrides( array $files ): array {
 		$out = array();
 		foreach ( $files as $path => $content ) {
-			$count = preg_match_all( '/(?<!private static )\$fold_case_in_tests\s*=(?!=)|fold_case_in_tests[\'"]/', $content );
+			$count = preg_match_all( '/(?<!private static )\$fold_case_in_tests\s*(?:\?\?)?=(?!=)|fold_case_in_tests[\'"]/', $content );
 			if ( $count > 0 ) {
 				$out[ $path ] = $count;
 			}
@@ -89,24 +89,30 @@ final class FoldCaseUsageTest extends TestCase {
 		$files = array(
 			'a.php' => "<?php // @@lower_case_table_names in a comment\n\$x = \$wpdb->get_var( 'SELECT @@lower_case_table_names' );",
 			'b.php' => "<?php \$s = \"SELECT @@LOWER_CASE_TABLE_NAMES\";",
-			'c.php' => "<?php echo 'lower_case_table_names';",
+			'c.php' => "<?php echo 'The server compares names without case (lower_case_table_names).';",
+			'h.php' => "<?php \$x = \$wpdb->get_var( 'SELECT @@GLOBAL.lower_case_table_names' );",
+			'i.php' => "<?php \$x = \$wpdb->get_row( \"SHOW VARIABLES LIKE 'lower_case_table_names'\" );",
 			'd.php' => "<?php class S { private static \$fold_case_in_tests = null; }",
 			'e.php' => "<?php S::\$fold_case_in_tests = true;",
 			'f.php' => "<?php \$p = new ReflectionProperty( S::class, 'fold_case_in_tests' );",
 			'g.php' => "<?php if ( null !== self::\$fold_case_in_tests ) {}",
+			'j.php' => "<?php S::\$fold_case_in_tests ??= true;",
 		);
 		$this->assertSame(
 			array(
 				'a.php' => 1,
 				'b.php' => 1,
+				'h.php' => 1,
+				'i.php' => 1,
 			),
 			self::reads( $files ),
-			'reads in code, any case; not in comments, nor the name without "@@"'
+			'reads in code, any case and form; not in comments, nor the name in a message'
 		);
 		$this->assertSame(
 			array(
 				'e.php' => 1,
 				'f.php' => 1,
+				'j.php' => 1,
 			),
 			self::overrides( $files ),
 			'an assignment or a reflection by name; not the declaration, not a read'

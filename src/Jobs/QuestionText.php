@@ -7,6 +7,7 @@
 
 namespace WPCheckpoint\Jobs;
 
+use WPCheckpoint\Restore\IncomingQuestions;
 use WPCheckpoint\Restore\IncomingTables;
 use WPCheckpoint\Restore\RestoreFiles;
 use WPCheckpoint\Support\Directories;
@@ -71,14 +72,16 @@ final class QuestionText {
 			$id     = (string) $question['id'];
 			$kind   = (string) ( $question['kind'] ?? '' );
 			$listed = 'unreadable' === $id && isset( $findings['unreadable']['listed'] ) ? array_slice( array_filter( (array) $findings['unreadable']['listed'], 'is_string' ), 0, self::MAX_LISTED ) : array();
-			if ( isset( self::TABLE_QUESTIONS[ $kind ], $tables[ self::TABLE_QUESTIONS[ $kind ] ] ) ) {
+			$shown  = array();
+			if ( isset( self::TABLE_QUESTIONS[ $kind ] ) && self::lists( $id, $kind, $tables ) ) {
+				$shown  = $tables;
 				$listed = array_slice( array_filter( (array) $tables[ self::TABLE_QUESTIONS[ $kind ] ], 'is_string' ), 0, self::MAX_LISTED );
 			}
 			$out[] = array(
 				'id'      => $id,
 				'kind'    => (string) ( $question['kind'] ?? '' ),
 				'choices' => array_map( 'strval', (array) ( $question['choices'] ?? array() ) ),
-				'text'    => (string) call_user_func( $clean, self::describe( $id, $question, $findings, $tables ) ),
+				'text'    => (string) call_user_func( $clean, self::describe( $id, $question, $findings, $shown ) ),
 				'listed'  => array_map(
 					static function ( string $p ) use ( $clean ): string {
 						return (string) call_user_func( $clean, $p );
@@ -88,6 +91,24 @@ final class QuestionText {
 			);
 		}
 		return $out;
+	}
+
+	/**
+	 * Whether the work file lists the tables (and evidence) of the question, as its id names them: a file written by
+	 * another run (one that outlived its lease) may list others, and then none are shown.
+	 *
+	 * @param string               $id     The question's id.
+	 * @param string               $kind   The question's kind.
+	 * @param array<string, mixed> $tables RestoreFiles::INCOMING.
+	 * @return bool
+	 */
+	private static function lists( string $id, string $kind, array $tables ): bool {
+		$key = array_search( $kind, IncomingQuestions::QUESTION_KINDS, true );
+		if ( ! is_string( $key ) || ! isset( $tables[ self::TABLE_QUESTIONS[ $kind ] ] ) ) {
+			return false;
+		}
+		$evidence = array_filter( (array) ( $tables['evidence'] ?? array() ), 'is_string' );
+		return hash_equals( IncomingQuestions::id( $key, array_filter( (array) $tables[ self::TABLE_QUESTIONS[ $kind ] ], 'is_string' ), $evidence, ! empty( $tables['over'] ) ), $id );
 	}
 
 	/**

@@ -132,6 +132,7 @@ final class IncomingQuestionsTest extends TestCase {
 			IncomingTables::UNCERTAIN => array( 'wp_old_a' ),
 			IncomingTables::SHARED    => array(),
 			'evidence'                => array(),
+			'over'                    => false,
 		);
 		$answers  = array(); // As JobRepository::answer() keeps them: merged, never cleared.
 		$given    = array(); // What each answer was given for: [kind, tables, evidence, choice].
@@ -141,7 +142,7 @@ final class IncomingQuestionsTest extends TestCase {
 		$found    = array();
 		$snapshot = static function ( array $state, string $kind ): string {
 			$tables = self::sorted( $state[ $kind ] );
-			return json_encode( IncomingTables::SHARED === $kind ? array( $tables, self::sorted( $state['evidence'] ) ) : array( $tables ) );
+			return json_encode( IncomingTables::SHARED === $kind ? array( $tables, self::sorted( $state['evidence'] ), $state['over'] ) : array( $tables ) );
 		};
 		for ( $i = 0, $n = mt_rand( 4, 14 ); $i < $n; $i++ ) {
 			$roll = mt_rand( 0, 9 );
@@ -167,6 +168,10 @@ final class IncomingQuestionsTest extends TestCase {
 				$what = mt_rand( 0, 2 );
 				if ( 2 === $what ) {
 					$state['evidence'] = 0 === mt_rand( 0, 1 ) ? array() : array_slice( array( 'wp2_', 'wp3_' ), 0, mt_rand( 1, 2 ) );
+					$state['over']     = array() !== $state['evidence'] && 0 === mt_rand( 0, 3 );
+					if ( $state['over'] ) {
+						$seen['over'] = ( $seen['over'] ?? 0 ) + 1;
+					}
 				} else {
 					$kind           = 0 === $what ? IncomingTables::UNCERTAIN : IncomingTables::SHARED;
 					$list           = 0 === $what ? $pool : array( 'wp_users', 'wp_usermeta' );
@@ -183,7 +188,7 @@ final class IncomingQuestionsTest extends TestCase {
 				IncomingTables::UNCERTAIN => $state[ IncomingTables::UNCERTAIN ],
 				IncomingTables::SHARED    => $state[ IncomingTables::SHARED ],
 			);
-			$decision = $before ? self::rule_before( $listed, $answers, $file ) : IncomingQuestions::decide( $listed, $state['evidence'], false, $answers, self::POLICY );
+			$decision = $before ? self::rule_before( $listed, $answers, $file ) : IncomingQuestions::decide( $listed, $state['evidence'], $state['over'], $answers, self::POLICY );
 			foreach ( $decision['decided'] as $kind => $choice ) {
 				if ( 'answer' !== $decision['from'][ $kind ] ) {
 					continue;
@@ -227,7 +232,7 @@ final class IncomingQuestionsTest extends TestCase {
 			$found = array_merge( $found, self::sequence( $seed, false, $seen ) );
 		}
 		$this->assertSame( array(), array_slice( $found, 0, 5 ), count( $found ) . ' violations' );
-		foreach ( array( 'asked', 'partial answer', 'crash', 'decided by an answer' ) as $point ) {
+		foreach ( array( 'asked', 'partial answer', 'crash', 'decided by an answer', 'over' ) as $point ) {
 			$this->assertGreaterThan( 0, $seen[ $point ] ?? 0, 'the control: ' . $point . ' ' . json_encode( $seen ) );
 		}
 	}

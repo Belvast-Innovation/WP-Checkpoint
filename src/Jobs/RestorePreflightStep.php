@@ -207,13 +207,25 @@ final class RestorePreflightStep implements Step {
 			throw new Refused( $multisite ? 'This backup is of a multisite network and this site is a single site; it can only be restored onto a network.' : 'This backup is of a single site and this site is a multisite network; it can only be restored onto a single site.' );
 		}
 		$fold    = SiteTables::fold_case();
-		$refusal = IncomingTables::fold_refusal( $fold, (string) $wpdb->base_prefix, defined( 'CUSTOM_USER_TABLE' ) ? (string) CUSTOM_USER_TABLE : null, defined( 'CUSTOM_USER_META_TABLE' ) ? (string) CUSTOM_USER_META_TABLE : null, array_column( $manifest->tables(), 'name' ) );
+		$refusal = IncomingTables::fold_refusal( $fold, (string) $wpdb->base_prefix, defined( 'CUSTOM_USER_TABLE' ) ? (string) CUSTOM_USER_TABLE : null, defined( 'CUSTOM_USER_META_TABLE' ) ? (string) CUSTOM_USER_META_TABLE : null, array_column( $manifest->tables(), 'name' ), $fold ? ( new WpdbConnection() )->tables_with_prefix( (string) $wpdb->base_prefix )['tables'] : array(), $options['exclude_tables'] );
 		if ( '' !== $refusal ) {
 			throw new Refused( $refusal );
 		}
-		$meta = $this->usermeta( $context, $cursor, $multisite );
+		$walked = empty( $cursor['meta']['done'] );
+		$meta   = $this->usermeta( $context, $cursor, $multisite );
 		if ( $meta instanceof StepResult ) {
 			return $meta;
+		}
+		if ( $walked && $context->should_stop() ) {
+			// The walk ended in this tick: the rest of the plan waits for the next one.
+			return StepResult::progress(
+				array(
+					'phase' => 'plan',
+					'meta'  => $meta,
+				),
+				self::meta_percent( $meta ),
+				__( 'Looking for other installations\' users in this site\'s user table', 'wp-checkpoint' )
+			);
 		}
 		$random = bin2hex( random_bytes( 2 ) );
 		$plan   = TablePlan::make( $manifest->tables(), (string) ( $site['table_prefix'] ?? '' ), (string) $wpdb->base_prefix, $multisite, $options['exclude_tables'], $context->job()->storage_token, $context->job()->id, $random, $fold );
@@ -289,8 +301,12 @@ final class RestorePreflightStep implements Step {
 			'done'  => false,
 		);
 		$prefix  = (string) $wpdb->base_prefix;
-		$is_blog = static function ( int $blog_id ): bool {
-			return SiteTables::blog_exists( $blog_id );
+		$sites   = array();
+		$is_blog = static function ( int $blog_id ) use ( &$sites ): bool {
+			if ( ! isset( $sites[ $blog_id ] ) ) {
+				$sites[ $blog_id ] = SiteTables::blog_exists( $blog_id ); // Once per site in a tick, whatever the rows.
+			}
+			return $sites[ $blog_id ];
 		};
 		$message = __( 'Looking for other installations\' users in this site\'s user table', 'wp-checkpoint' );
 		$first   = true;
@@ -425,11 +441,10 @@ final class RestorePreflightStep implements Step {
 				$question['file'] = RestoreFiles::INCOMING;
 				$questions[]      = $question;
 			}
+			// Without the walk: after the answers the usermeta table is walked again, as the live tables are read again,
+			// so the questions' ids (the evidence among them) are those of what is there then.
 			return StepResult::ask(
-				array(
-					'phase' => 'plan',
-					'meta'  => $meta,
-				),
+				array( 'phase' => 'plan' ),
 				$questions,
 				sprintf(
 					/* translators: %d: number of questions */

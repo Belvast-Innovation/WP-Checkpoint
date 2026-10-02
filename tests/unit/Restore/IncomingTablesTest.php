@@ -148,7 +148,20 @@ final class IncomingTablesTest extends TestCase {
 		) {
 			$why = IncomingTables::fold_refusal( true, $given[0], $given[1], $given[2], $given[3] );
 			$this->assertStringContainsString( 'compares table names without letter case', $why, $what );
-			$this->assertStringContainsString( $what . ' has upper-case letters', $why );
+			$this->assertStringContainsString( $what . ' has upper-case letters or letters outside ASCII', $why );
+		}
+	}
+
+	public function test_a_server_that_folds_case_refuses_live_and_left_out_names_and_letters_outside_ascii(): void {
+		$this->assertSame( '', IncomingTables::fold_refusal( true, 'wp_', null, null, array( 'wp_options' ), array( 'wp_options', 'wp_old_posts' ), array( 'wp_skip' ) ), 'the control: all lowercase ASCII' );
+		foreach (
+			array(
+				'the table wp_Old_posts of this database'     => array( array( 'wp_options' ), array( 'wp_Old_posts' ), array() ),
+				'the table wp_Skip left out of the restore'   => array( array( 'wp_options' ), array(), array( 'wp_Skip' ) ),
+				"the backup's table wp_\xC3\xA4rger"         => array( array( 'wp_options', "wp_\xC3\xA4rger" ), array(), array() ),
+			) as $what => $given
+		) {
+			$this->assertStringContainsString( $what . ' has upper-case letters or letters outside ASCII', IncomingTables::fold_refusal( true, 'wp_', null, null, $given[0], $given[1], $given[2] ) );
 		}
 	}
 
