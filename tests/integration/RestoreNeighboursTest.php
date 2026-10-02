@@ -8,6 +8,8 @@ use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\QuestionText;
 use WPCheckpoint\Jobs\RestorePreflightStep;
 use WPCheckpoint\Jobs\TempTables;
+use WPCheckpoint\Restore\IncomingQuestions;
+use WPCheckpoint\Restore\SiteTables;
 use WPCheckpoint\Plugin;
 use WPCheckpoint\Restore\ImportSession;
 use WPCheckpoint\Restore\RestoreFiles;
@@ -113,13 +115,45 @@ final class RestoreNeighboursTest extends RestoreTestCase {
 	private function asked( Job $job ): array {
 		$out = array();
 		foreach ( QuestionText::for_job( $job, Plugin::instance()->directories(), array( Plugin::instance()->job_presenter(), 'clean' ) ) as $question ) {
-			$out[ $question['id'] ] = $question;
+			$out[ (string) array_search( $question['kind'], IncomingQuestions::QUESTION_KINDS, true ) ] = $question;
+		}
+		return $out;
+	}
+
+	/**
+	 * The policy keys of a job's questions (their ids carry a digest of their tables).
+	 *
+	 * @return string[]
+	 */
+	private static function keys_of( Job $job ): array {
+		$out = array();
+		foreach ( $job->questions as $question ) {
+			$key = (string) array_search( $question['kind'], IncomingQuestions::QUESTION_KINDS, true );
+			self::assertStringStartsWith( $key . '_', (string) $question['id'], 'its id names its kind' );
+			$out[] = $key;
+		}
+		return $out;
+	}
+
+	/**
+	 * Answers by policy key, under the ids of the questions the job asks now.
+	 *
+	 * @param array<string, string> $by_key Policy key => choice.
+	 * @return array<string, string>
+	 */
+	private static function ids_for( Job $job, array $by_key ): array {
+		$out = array();
+		foreach ( $job->questions as $question ) {
+			$key = (string) array_search( $question['kind'], IncomingQuestions::QUESTION_KINDS, true );
+			if ( isset( $by_key[ $key ] ) ) {
+				$out[ (string) $question['id'] ] = $by_key[ $key ];
+			}
 		}
 		return $out;
 	}
 
 	private function answer( Job $job, array $answers ): Job {
-		Plugin::instance()->jobs()->answer( Plugin::instance()->jobs()->find( $job->id ), $answers );
+		Plugin::instance()->jobs()->answer( Plugin::instance()->jobs()->find( $job->id ), self::ids_for( Plugin::instance()->jobs()->find( $job->id ), $answers ) );
 		Plugin::instance()->runner()->tick( $job->id, microtime( true ) ); // Answered, it is taken up again (still "paused" until then).
 		return $this->run_restore( Plugin::instance()->jobs()->find( $job->id ) );
 	}
@@ -200,7 +234,7 @@ final class RestoreNeighboursTest extends RestoreTestCase {
 
 		$job = $this->run_restore( $this->start_restore( $base ) );
 		$this->assertSame( Job::PAUSED, $job->status, (string) $job->last_error );
-		$this->assertSame( array( 'uncertain_tables' ), array_column( $job->questions, 'id' ), 'that question only' );
+		$this->assertSame( array( 'uncertain_tables' ), self::keys_of( $job ), 'that question only' );
 		$this->assertSame( 1, $job->questions[0]['count'] );
 		$this->assertSame( array( 'restore', 'exclude' ), $job->questions[0]['choices'], 'no default: both choices' );
 		$asked = $this->asked( $job );
@@ -231,12 +265,12 @@ final class RestoreNeighboursTest extends RestoreTestCase {
 		$this->assertSame( array( $n . 'shop_orders' ), $this->asked( $job )['uncertain_tables']['listed'], 'the control: asked about the one table' );
 
 		// Answered "restore" for that table; meanwhile the neighbour gets another table the backup holds.
-		Plugin::instance()->jobs()->answer( Plugin::instance()->jobs()->find( $job->id ), array( 'uncertain_tables' => 'restore' ) );
+		Plugin::instance()->jobs()->answer( Plugin::instance()->jobs()->find( $job->id ), self::ids_for( $job, array( 'uncertain_tables' => 'restore' ) ) );
 		$this->create( $n . 'shop_items', '(`id` int NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB' );
 		Plugin::instance()->runner()->tick( $job->id, microtime( true ) );
 		$again = $this->run_restore( Plugin::instance()->jobs()->find( $job->id ) );
 		$this->assertSame( Job::PAUSED, $again->status, 'asked again: the answer was for other tables: ' . $again->last_error );
-		$this->assertSame( array( 'uncertain_tables' ), array_column( $again->questions, 'id' ) );
+		$this->assertSame( array( 'uncertain_tables' ), self::keys_of( $again ) );
 		$this->assertSame( 2, $again->questions[0]['count'] );
 		$this->assertSame( array( $n . 'shop_orders', $n . 'shop_items' ), $this->asked( $again )['uncertain_tables']['listed'], 'the tables as they are now' );
 		$this->assertSame( array(), $this->job_tables( $again ), 'nothing created on the answer meant for one table' );
@@ -283,7 +317,7 @@ final class RestoreNeighboursTest extends RestoreTestCase {
 
 		$job = $this->run_restore( $this->start_restore( $base ) );
 		$this->assertSame( Job::PAUSED, $job->status, (string) $job->last_error );
-		$this->assertSame( array( 'shared_tables' ), array_column( $job->questions, 'id' ) );
+		$this->assertSame( array( 'shared_tables' ), self::keys_of( $job ) );
 		$this->assertSame( 2, $job->questions[0]['count'] );
 		$asked = $this->asked( $job );
 		$this->assertSame( $users, $asked['shared_tables']['listed'] );
@@ -313,18 +347,18 @@ final class RestoreNeighboursTest extends RestoreTestCase {
 		$base = $this->backup( array_merge( self::site_tables(), array( $wpdb->users, $wpdb->usermeta ) ) );
 		$job  = $this->run_restore( $this->start_restore( $base ) );
 		$this->assertSame( Job::PAUSED, $job->status, (string) $job->last_error );
-		$this->assertSame( array( 'shared_tables' ), array_column( $job->questions, 'id' ) );
+		$this->assertSame( array( 'shared_tables' ), self::keys_of( $job ) );
 	}
 
 	public function test_both_kinds_are_asked_at_once_and_each_answer_holds_for_its_own_kind(): void {
 		global $wpdb;
 		$n = $this->neighbour();
 		$this->create( $n . 'shop_orders', '(`id` int NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB' );
-		$this->role_key( $n . 'user_level' );
+		$this->role_key( $n . 'capabilities' );
 		$base = $this->backup( array_merge( self::site_tables(), array( $n . 'shop_orders', $wpdb->users, $wpdb->usermeta ) ) );
 		$job  = $this->run_restore( $this->start_restore( $base ) );
 		$this->assertSame( Job::PAUSED, $job->status, (string) $job->last_error );
-		$this->assertSame( array( 'uncertain_tables', 'shared_tables' ), array_column( $job->questions, 'id' ), 'both questions, in one pause' );
+		$this->assertSame( array( 'uncertain_tables', 'shared_tables' ), self::keys_of( $job ), 'both questions, in one pause' );
 		$done = $this->answer(
 			$job,
 			array(
@@ -368,30 +402,129 @@ final class RestoreNeighboursTest extends RestoreTestCase {
 			$wpdb->usermeta = $default;
 		}
 		$this->assertSame( Job::PAUSED, $asked->status, (string) $asked->last_error );
-		$this->assertSame( array( 'shared_tables' ), array_column( $asked->questions, 'id' ) );
+		$this->assertSame( array( 'shared_tables' ), self::keys_of( $asked ) );
 		$this->assertSame( array( $wpdb->users, $custom ), $this->asked( $asked )['shared_tables']['listed'], 'the users table and the usermeta table the site uses' );
 	}
 
-	public function test_role_keys_of_a_sub_site_or_of_no_neighbour_are_not_asked_about(): void {
+	public function test_only_this_sites_own_keys_and_its_sites_are_not_asked_about(): void {
 		global $wpdb;
 		$this->neighbour();
 		if ( is_multisite() ) {
 			$blog = self::factory()->blog->create();
-			$this->role_key( $wpdb->get_blog_prefix( $blog ) . 'capabilities' ); // A sub-site of this network.
-		} else {
-			// A sub-site's form of key on a single site, of a number no tables here have (a database shared with
-			// multisite test runs may hold whole "{base}2_" sets, which are an installation here).
-			for ( $number = 900; array() !== $wpdb->get_col( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $wpdb->base_prefix . $number . '_' ) . '%' ) ); $number++ ) {
-				$this->assertLessThan( 1000, $number, 'a number without tables' );
-			}
-			$this->role_key( $wpdb->base_prefix . $number . '_capabilities' ); // No such installation here.
+			$this->role_key( $wpdb->get_blog_prefix( $blog ) . 'capabilities' ); // A site of this network.
 		}
-		$this->role_key( $wpdb->base_prefix . 'new_capabilities' ); // A prefix no installation here has.
 		$base = $this->backup( array_merge( self::site_tables(), array( $wpdb->users, $wpdb->usermeta ) ) );
 		$job  = $this->run_restore( $this->start_restore( $base ) );
 		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error . wp_json_encode( $job->questions ) );
 		$this->assertSame( array(), $job->questions );
 		$this->assertContains( $wpdb->usermeta, $this->swapped( $job ), 'restored as this site\'s' );
+		// The control: a key of any other prefix is looked at, and asked about.
+		$this->role_key( $wpdb->base_prefix . 'new_capabilities' );
+		$asked = $this->run_restore( $this->start_restore( $base ) );
+		$this->assertSame( Job::PAUSED, $asked->status, (string) $asked->last_error );
+		$this->assertSame( array( 'shared_tables' ), self::keys_of( $asked ) );
+	}
+
+	public function test_another_installation_whose_prefix_is_not_under_this_sites_is_found_by_its_keys(): void {
+		global $wpdb;
+		$this->role_key( 'wp2_capabilities' ); // An installation "wp2_" with CUSTOM_USER_TABLE and CUSTOM_USER_META_TABLE set to this site's.
+		$base = $this->backup( array_merge( self::site_tables(), array( $wpdb->users, $wpdb->usermeta ) ) );
+		$job  = $this->run_restore( $this->start_restore( $base ) );
+		$this->assertSame( Job::PAUSED, $job->status, (string) $job->last_error );
+		$this->assertSame( array( 'shared_tables' ), self::keys_of( $job ) );
+		$asked = $this->asked( $job )['shared_tables'];
+		$this->assertSame( array( $wpdb->users, $wpdb->usermeta ), $asked['listed'] );
+		$this->assertStringContainsString( 'with the table prefix wp2_', $asked['text'], 'the evidence: the prefix found' );
+	}
+
+	public function test_a_key_of_a_site_number_this_network_does_not_have_is_asked_about(): void {
+		global $wpdb;
+		$number = 2;
+		if ( is_multisite() ) {
+			// A number past every site this network has.
+			$number = 1 + (int) $wpdb->get_var( "SELECT MAX(blog_id) FROM {$wpdb->blogs}" );
+		}
+		$this->role_key( $wpdb->base_prefix . $number . '_capabilities' ); // On a single site, "wp_2_" is not one of its sites.
+		$base = $this->backup( array_merge( self::site_tables(), array( $wpdb->users, $wpdb->usermeta ) ) );
+		$job  = $this->run_restore( $this->start_restore( $base ) );
+		$this->assertSame( Job::PAUSED, $job->status, (string) $job->last_error );
+		$this->assertSame( array( 'shared_tables' ), self::keys_of( $job ) );
+		$this->assertStringContainsString( 'with the table prefix ' . $wpdb->base_prefix . $number . '_', $this->asked( $job )['shared_tables']['text'] );
+	}
+
+	public function test_more_other_installations_than_can_be_told_apart_are_asked_about(): void {
+		global $wpdb;
+		for ( $i = 0; $i <= RestorePreflightStep::MAX_EVIDENCE; $i++ ) {
+			$this->role_key( 'other' . $i . '_capabilities' );
+		}
+		$base = $this->backup( array_merge( self::site_tables(), array( $wpdb->users, $wpdb->usermeta ) ) );
+		$job  = $this->run_restore( $this->start_restore( $base ) );
+		$this->assertSame( Job::PAUSED, $job->status, (string) $job->last_error );
+		$this->assertSame( array( 'shared_tables' ), self::keys_of( $job ) );
+		$this->assertStringContainsString( 'more other installations than could be told apart', $this->asked( $job )['shared_tables']['text'] );
+	}
+
+	public function test_the_walk_over_the_user_table_shows_its_progress_and_goes_on_across_requests(): void {
+		global $wpdb;
+		// Rows far apart: each is a window of its own, and the walk jumps the gaps.
+		$last = (int) $wpdb->get_var( "SELECT MAX(umeta_id) FROM {$wpdb->usermeta}" );
+		foreach ( array( 1, 2, 3 ) as $step ) {
+			$wpdb->insert(
+				$wpdb->usermeta,
+				array(
+					'umeta_id'   => $last + $step * 3 * RestorePreflightStep::META_WINDOW,
+					'user_id'    => 1,
+					'meta_key'   => 'wpc_far_' . $step, // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_key -- a test fixture.
+					'meta_value' => 'x', // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_value -- a test fixture.
+				)
+			);
+			$this->assertSame( '', $wpdb->last_error );
+			$this->meta[] = (int) $wpdb->insert_id;
+		}
+		$base   = $this->backup( self::site_tables() );
+		$job    = $this->start_restore( $base );
+		$runner = $this->small_runner();
+		$shown  = array();
+		// Short ticks until the walk is over (the step's next phase), then the rest as usual.
+		for ( $i = 0; $i < 300; $i++ ) {
+			$now = Plugin::instance()->jobs()->find( $job->id );
+			if ( ! in_array( $now->status, array( Job::QUEUED, Job::RUNNING ), true ) || ( RestorePreflightStep::ID === $now->step && 'plan' !== ( $now->cursor['phase'] ?? 'plan' ) ) ) {
+				break;
+			}
+			if ( RestorePreflightStep::ID === $now->step ) {
+				$shown[] = $now->progress_message;
+			}
+			$runner->tick( $job->id, microtime( true ) );
+		}
+		$done = $this->run_restore( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( Job::COMPLETED, $done->status, (string) $done->last_error );
+		$walking = array_filter(
+			$shown,
+			static function ( string $message ): bool {
+				return false !== strpos( $message, 'Looking for other installations\' users' );
+			}
+		);
+		$this->assertGreaterThanOrEqual( 2, count( $walking ), 'shown on the page while the walk goes on, over more than one request: ' . wp_json_encode( array_values( array_unique( $shown ) ) ) );
+	}
+
+	public function test_a_server_that_folds_case_refuses_a_backup_with_an_upper_case_table_name(): void {
+		global $wpdb;
+		$mixed = $wpdb->base_prefix . 'Shop';
+		$this->create( $mixed, '(`id` int NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB' );
+		$base = $this->backup( array_merge( self::site_tables(), array( $mixed ) ) );
+		$this->assertSame( Job::COMPLETED, $this->run_restore( $this->start_restore( $base ) )->status, 'the control: where names keep their case, it is restored' );
+		$fold = new \ReflectionProperty( SiteTables::class, 'fold_case_in_tests' );
+		$fold->setAccessible( true );
+		$fold->setValue( null, true );
+		try {
+			$job = $this->run_restore( $this->start_restore( $base ) );
+		} finally {
+			$fold->setValue( null, null );
+		}
+		$this->assertSame( Job::FAILED, $job->status );
+		$this->assertStringContainsString( 'compares table names without letter case', (string) $job->last_error );
+		$this->assertStringContainsString( "the backup's table {$mixed} has upper-case letters", (string) $job->last_error );
+		$this->assertSame( array(), $this->job_tables( $job ), 'nothing created' );
 	}
 
 	public function test_an_unattended_restore_that_does_not_say_both_is_refused_before_anything(): void {

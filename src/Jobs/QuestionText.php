@@ -31,12 +31,12 @@ final class QuestionText {
 	const MAX_LISTED = 5;
 
 	/**
-	 * The restore's questions about tables another installation may use (RestorePreflightStep), by id: the kind of
-	 * table each is about (IncomingTables).
+	 * The restore's questions about tables another installation may use (RestorePreflightStep), by their kind (their
+	 * ids carry a digest of their tables, IncomingQuestions): the kind of table each is about (IncomingTables).
 	 */
 	const TABLE_QUESTIONS = array(
-		'uncertain_tables' => IncomingTables::UNCERTAIN,
-		'shared_tables'    => IncomingTables::SHARED,
+		'tables_of_either_installation'           => IncomingTables::UNCERTAIN,
+		'tables_shared_with_another_installation' => IncomingTables::SHARED,
 	);
 
 	/**
@@ -69,15 +69,16 @@ final class QuestionText {
 		$out = array();
 		foreach ( $job->questions as $question ) {
 			$id     = (string) $question['id'];
+			$kind   = (string) ( $question['kind'] ?? '' );
 			$listed = 'unreadable' === $id && isset( $findings['unreadable']['listed'] ) ? array_slice( array_filter( (array) $findings['unreadable']['listed'], 'is_string' ), 0, self::MAX_LISTED ) : array();
-			if ( isset( self::TABLE_QUESTIONS[ $id ], $tables[ self::TABLE_QUESTIONS[ $id ] ] ) ) {
-				$listed = array_slice( array_filter( (array) $tables[ self::TABLE_QUESTIONS[ $id ] ], 'is_string' ), 0, self::MAX_LISTED );
+			if ( isset( self::TABLE_QUESTIONS[ $kind ], $tables[ self::TABLE_QUESTIONS[ $kind ] ] ) ) {
+				$listed = array_slice( array_filter( (array) $tables[ self::TABLE_QUESTIONS[ $kind ] ], 'is_string' ), 0, self::MAX_LISTED );
 			}
 			$out[] = array(
 				'id'      => $id,
 				'kind'    => (string) ( $question['kind'] ?? '' ),
 				'choices' => array_map( 'strval', (array) ( $question['choices'] ?? array() ) ),
-				'text'    => (string) call_user_func( $clean, self::describe( $id, $question, $findings ) ),
+				'text'    => (string) call_user_func( $clean, self::describe( $id, $question, $findings, $tables ) ),
 				'listed'  => array_map(
 					static function ( string $p ) use ( $clean ): string {
 						return (string) call_user_func( $clean, $p );
@@ -112,9 +113,10 @@ final class QuestionText {
 	 * @param string               $id       Question id.
 	 * @param array<string, mixed> $question Question.
 	 * @param array<string, mixed> $findings Review findings.
+	 * @param array<string, mixed> $tables   The restore's tables another installation may use (RestoreFiles::INCOMING).
 	 * @return string
 	 */
-	public static function describe( string $id, array $question, array $findings ): string {
+	public static function describe( string $id, array $question, array $findings, array $tables = array() ): string {
 		$count = (int) ( $question['count'] ?? 0 );
 		if ( 'unreadable' === $id ) {
 			$listed = isset( $findings['unreadable']['listed'] ) ? array_slice( array_filter( (array) $findings['unreadable']['listed'], 'is_string' ), 0, self::MAX_LISTED ) : array();
@@ -135,7 +137,8 @@ final class QuestionText {
 		if ( 'free_space' === $id ) {
 			return sprintf( 'This server does not say how much disk space is free, so whether the restore\'s staged files (%d MB with a margin) fit cannot be confirmed. Continue anyway, or stop?', (int) ceil( (int) ( $question['bytes'] ?? 0 ) / 1048576 ) );
 		}
-		if ( 'uncertain_tables' === $id ) {
+		$kind = (string) ( $question['kind'] ?? '' );
+		if ( 'tables_of_either_installation' === $kind ) {
 			return sprintf(
 				/* translators: %d: number of tables */
 				_n(
@@ -147,7 +150,16 @@ final class QuestionText {
 				$count
 			);
 		}
-		if ( 'shared_tables' === $id ) {
+		if ( 'tables_shared_with_another_installation' === $kind ) {
+			$evidence = array_slice( array_filter( (array) ( $tables['evidence'] ?? array() ), 'is_string' ), 0, self::MAX_LISTED );
+			$found    = '';
+			if ( array() !== $evidence ) {
+				/* translators: %s: table prefixes, comma-separated */
+				$found .= ' ' . sprintf( __( 'This site\'s user table holds the roles of users of another installation, with the table prefix %s.', 'wp-checkpoint' ), implode( ', ', $evidence ) );
+			}
+			if ( ! empty( $tables['over'] ) ) {
+				$found .= ' ' . __( 'This site\'s user table holds the roles of more other installations than could be told apart, so the restore counts it as shared.', 'wp-checkpoint' );
+			}
 			return sprintf(
 				/* translators: %d: number of tables */
 				_n(
@@ -157,7 +169,7 @@ final class QuestionText {
 					'wp-checkpoint'
 				),
 				$count
-			);
+			) . $found;
 		}
 		if ( 'oversize_more' === $id ) {
 			return sprintf( '%d more tables have rows larger than the single-row limit (listed in the job log). Leave those rows out, or stop?', $count );

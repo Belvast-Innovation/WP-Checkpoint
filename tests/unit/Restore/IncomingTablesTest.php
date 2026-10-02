@@ -7,7 +7,8 @@ use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 /**
  * Which of a backup's tables would replace a live table another installation in the same database uses: one of its
- * own (left out), one that may be either's, one this site shares with it (both asked about).
+ * own (left out), one that may be either's, one this site shares with it (both asked about); the other
+ * installations' capabilities keys in this site's usermeta table; and the names a server that folds case refuses.
  */
 final class IncomingTablesTest extends TestCase {
 
@@ -35,8 +36,15 @@ final class IncomingTablesTest extends TestCase {
 	 *
 	 * @return array<string, string>
 	 */
-	private static function classify( array $live, array $finals, array $core, array $found = array(), bool $multisite = false ): array {
-		return IncomingTables::classify( 'wp_', $multisite, $live, $finals, $core, 'wp_users', 'wp_usermeta', $found );
+	private static function classify( array $live, array $finals, array $core, bool $evidence = false ): array {
+		return IncomingTables::classify( 'wp_', false, $live, $finals, $core, 'wp_users', 'wp_usermeta', $evidence );
+	}
+
+	/** No site of a network is there. */
+	private static function no_blogs(): callable {
+		return static function (): bool {
+			return false;
+		};
 	}
 
 	public function test_a_neighbours_own_table_is_left_out_and_this_sites_are_not_judged(): void {
@@ -68,7 +76,7 @@ final class IncomingTablesTest extends TestCase {
 		// This site's CUSTOM_USER_TABLE is the neighbour's users table.
 		$live = array_merge( self::core(), self::site( 'wp_old_' ), array( 'wp_old_users', 'wp_old_usermeta' ) );
 		$core = array_merge( self::site( 'wp_' ), array( 'wp_old_users', 'wp_usermeta' ) );
-		$out  = IncomingTables::classify( 'wp_', false, $live, array( 'wp_options', 'wp_old_users', 'wp_old_usermeta' ), $core, 'wp_old_users', 'wp_usermeta', array() );
+		$out  = IncomingTables::classify( 'wp_', false, $live, array( 'wp_options', 'wp_old_users', 'wp_old_usermeta' ), $core, 'wp_old_users', 'wp_usermeta', false );
 		$this->assertSame(
 			array(
 				'wp_old_users'    => IncomingTables::SHARED,
@@ -88,90 +96,64 @@ final class IncomingTablesTest extends TestCase {
 		$this->assertSame( array( 'wp_old_members' => IncomingTables::UNCERTAIN ), self::classify( $live, array( 'wp_old_members' ), self::core() ), 'the control: not this site\'s, either\'s' );
 	}
 
-	public function test_a_neighbours_role_keys_in_this_sites_usermeta_table_make_both_users_tables_shared(): void {
-		$live   = array_merge( self::core(), self::site( 'wp_old_' ) );
+	public function test_evidence_of_another_installation_makes_the_users_tables_this_site_uses_shared(): void {
 		$finals = array( 'wp_options', 'wp_users', 'wp_usermeta' );
-		$this->assertSame( array(), self::classify( $live, $finals, self::core() ), 'the control: no role keys, nothing shared' );
-		foreach ( array( 'wp_old_capabilities', 'wp_old_user_level' ) as $key ) {
-			$this->assertSame(
-				array(
-					'wp_users'    => IncomingTables::SHARED,
-					'wp_usermeta' => IncomingTables::SHARED,
-				),
-				self::classify( $live, $finals, self::core(), array( $key ) ),
-				$key
-			);
-		}
-	}
-
-	public function test_the_users_tables_this_site_uses_are_the_ones_shared(): void {
+		$this->assertSame( array(), self::classify( self::core(), $finals, self::core() ), 'the control: no evidence, nothing shared' );
+		$this->assertSame(
+			array(
+				'wp_users'    => IncomingTables::SHARED,
+				'wp_usermeta' => IncomingTables::SHARED,
+			),
+			self::classify( self::core(), $finals, self::core(), true ),
+			'with no neighbour under this site\'s prefix at all'
+		);
 		// CUSTOM_USER_TABLE and CUSTOM_USER_META_TABLE of this site: "wp_members", "wp_membermeta".
-		$core   = array_merge( self::site( 'wp_' ), array( 'wp_members', 'wp_membermeta' ) );
-		$live   = array_merge( $core, array( 'wp_users', 'wp_usermeta' ), self::site( 'wp_old_' ) );
-		$finals = array( 'wp_users', 'wp_usermeta', 'wp_members', 'wp_membermeta' );
-		$out    = IncomingTables::classify( 'wp_', false, $live, $finals, $core, 'wp_members', 'wp_membermeta', array( 'wp_old_capabilities' ) );
+		$core = array_merge( self::site( 'wp_' ), array( 'wp_members', 'wp_membermeta' ) );
 		$this->assertSame(
 			array(
 				'wp_members'    => IncomingTables::SHARED,
 				'wp_membermeta' => IncomingTables::SHARED,
 			),
-			$out
+			IncomingTables::classify( 'wp_', false, $core, array( 'wp_users', 'wp_usermeta', 'wp_members', 'wp_membermeta' ), $core, 'wp_members', 'wp_membermeta', true ),
+			'the ones this site uses'
 		);
 	}
 
-	public function test_only_the_neighbours_prefixes_count_for_role_keys(): void {
-		// A network's sub-site keys ("wp_2_capabilities") in its usermeta: the sub-sites are the network's own.
-		$network = array_merge( self::core(), array( 'wp_blogs', 'wp_site', 'wp_sitemeta' ), self::site( 'wp_2_' ) );
-		$finals  = array( 'wp_options', 'wp_users', 'wp_usermeta' );
-		$this->assertSame( array(), IncomingTables::role_keys( 'wp_', true, $network ) );
-		$this->assertSame( array(), self::classify( $network, $finals, $network, array( 'wp_2_capabilities', 'wp_2_user_level' ), true ) );
-		// A single site with such keys and no such installation: nothing.
-		$this->assertSame( array(), self::classify( self::core(), $finals, self::core(), array( 'wp_2_capabilities' ) ) );
-		// The control: on a single site, a whole "wp_2_" installation is a neighbour, and its keys count.
-		$single = array_merge( self::core(), self::site( 'wp_2_' ) );
-		$this->assertSame( array( 'wp_2_capabilities', 'wp_2_user_level' ), IncomingTables::role_keys( 'wp_', false, $single ) );
-		$this->assertSame( IncomingTables::SHARED, self::classify( $single, $finals, self::core(), array( 'wp_2_capabilities' ) )['wp_users'] ?? null );
-		// Keys of other prefixes than the neighbours' are not evidence.
-		$this->assertSame( array(), self::classify( array_merge( self::core(), self::site( 'wp_old_' ) ), $finals, self::core(), array( 'wp_capabilities', 'wp_new_capabilities' ) ) );
+	public function test_evidence_is_every_capabilities_key_of_a_prefix_that_is_not_this_sites(): void {
+		$keys = array( 'wp_capabilities', 'wp_user_level', 'nickname', 'wp2_capabilities', 'WP_OLD_Capabilities', 'wp_old_capabilities', 'shop_capabilities', 'wp2_capabilities' );
+		$this->assertSame( array( 'WP_OLD_', 'shop_', 'wp2_', 'wp_old_' ), IncomingTables::evidence( 'wp_', false, $keys, self::no_blogs() ), 'sorted, each once, in the case found' );
+		$this->assertSame( array(), IncomingTables::evidence( 'wp_', false, array( 'wp_capabilities', 'wp_user_level', 'session_tokens' ), self::no_blogs() ), 'the control: this site\'s own' );
+		$this->assertSame( array(), IncomingTables::evidence( 'wp_', false, array( 'capabilities', 'abccapabilities', 'wp_old_user_level' ), self::no_blogs() ), 'not looked for: no "_" before "capabilities", or another key' );
 	}
 
-	public function test_role_keys_name_each_neighbours_two_keys(): void {
-		$live = array_merge( self::core(), self::site( 'wp_old_' ), self::site( 'wp_new_' ) );
-		$this->assertSame( array( 'wp_new_capabilities', 'wp_new_user_level', 'wp_old_capabilities', 'wp_old_user_level' ), IncomingTables::role_keys( 'wp_', false, $live ) );
-		$this->assertSame( array(), IncomingTables::role_keys( 'wp_', false, self::core() ), 'no neighbour, nothing to look for' );
-	}
-
-	public function test_where_the_server_folds_case_a_mixed_case_prefix_finds_the_neighbour_it_lists_lowercased(): void {
-		// lower_case_table_names = 1: the server lists "wpabc_old_posts"; WordPress names this site's tables "wpABC_…".
-		$lower  = static function ( array $names ): array {
-			return array_map( 'strtolower', $names );
+	public function test_on_a_network_only_the_sites_it_has_are_its_own(): void {
+		$blogs = static function ( int $id ): bool {
+			return in_array( $id, array( 1, 2, 7 ), true );
 		};
-		$core   = array_merge( self::site( 'wpABC_' ), array( 'wpABC_users', 'wpABC_usermeta' ) );
-		$live   = $lower( array_merge( $core, self::site( 'wpabc_old_' ), array( 'wpabc_old_shop_orders' ) ) );
-		$finals = array( 'wpABC_options', 'wpABC_old_posts', 'wpABC_old_shop_orders', 'wpABC_users', 'wpABC_usermeta' );
-		$this->assertSame( array(), IncomingTables::classify( 'wpABC_', false, $live, $finals, $core, 'wpABC_users', 'wpABC_usermeta', array() ), 'the control: compared as spelled, nothing is found' );
-		$this->assertSame(
+		$keys  = array( 'wp_capabilities', 'wp_2_capabilities', 'wp_7_capabilities', 'wp_3_capabilities', 'wp_02_capabilities', 'wp_2x_capabilities' );
+		$this->assertSame( array( 'wp_02_', 'wp_2x_', 'wp_3_' ), IncomingTables::evidence( 'wp_', true, $keys, $blogs ), 'a number with no site, or not a site number' );
+		$this->assertSame( array( 'wp_2_', 'wp_3_', 'wp_7_' ), IncomingTables::evidence( 'wp_', false, array( 'wp_capabilities', 'wp_2_capabilities', 'wp_7_capabilities', 'wp_3_capabilities' ), $blogs ), 'a single site has no sites: nothing more is its own' );
+	}
+
+	public function test_a_server_that_folds_case_refuses_any_name_with_upper_case_and_says_which(): void {
+		$this->assertSame( '', IncomingTables::fold_refusal( true, 'wp_', 'wp_users', 'wp_usermeta', array( 'wp_options', 'wp_posts' ) ), 'the control: all lowercase' );
+		$this->assertSame( '', IncomingTables::fold_refusal( false, 'wpABC_', 'Users', 'Meta', array( 'wp_Options' ) ), 'a server that keeps case: nothing in the way' );
+		foreach (
 			array(
-				'wpABC_old_posts'       => IncomingTables::NEIGHBOUR,
-				'wpABC_old_shop_orders' => IncomingTables::UNCERTAIN,
-			),
-			IncomingTables::classify( 'wpABC_', false, $live, $finals, $core, 'wpABC_users', 'wpABC_usermeta', array(), true ),
-			'as the server compares them, with the names as given'
-		);
-		$this->assertSame( array( 'wpabc_old_capabilities', 'wpabc_old_user_level' ), IncomingTables::role_keys( 'wpABC_', false, $live, true ) );
-		$this->assertSame(
-			array(
-				'wpABC_users'    => IncomingTables::SHARED,
-				'wpABC_usermeta' => IncomingTables::SHARED,
-			),
-			IncomingTables::classify( 'wpABC_', false, $live, array( 'wpABC_users', 'wpABC_usermeta' ), $core, 'wpABC_users', 'wpABC_usermeta', array( 'wpABC_old_capabilities' ), true ),
-			'a role key as the neighbour\'s wp-config.php spells its prefix'
-		);
+				'the table prefix of this site (wpABC_)' => array( 'wpABC_', null, null, array( 'wpabc_options' ) ),
+				'CUSTOM_USER_TABLE (Members)'            => array( 'wp_', 'Members', null, array( 'wp_options' ) ),
+				'CUSTOM_USER_META_TABLE (MemberMeta)'    => array( 'wp_', 'members', 'MemberMeta', array( 'wp_options' ) ),
+				'the backup\'s table wp_Shop'            => array( 'wp_', null, null, array( 'wp_options', 'wp_Shop' ) ),
+			) as $what => $given
+		) {
+			$why = IncomingTables::fold_refusal( true, $given[0], $given[1], $given[2], $given[3] );
+			$this->assertStringContainsString( 'compares table names without letter case', $why, $what );
+			$this->assertStringContainsString( $what . ' has upper-case letters', $why );
+		}
 	}
 
 	public function test_with_an_empty_prefix_nothing_is_judged(): void {
 		$live = array_merge( self::site( '' ), array( 'users', 'usermeta' ), self::site( 'wp_' ) );
-		$this->assertSame( array(), IncomingTables::classify( '', false, $live, array( 'wp_posts', 'options' ), self::site( '' ), 'users', 'usermeta', array( 'wp_capabilities' ) ) );
-		$this->assertSame( array(), IncomingTables::role_keys( '', false, $live ) );
+		$this->assertSame( array(), IncomingTables::classify( '', false, $live, array( 'wp_posts', 'options' ), self::site( '' ), 'users', 'usermeta', false ) );
 	}
 }

@@ -7,6 +7,8 @@
 
 namespace WPCheckpoint\Jobs;
 
+use WPCheckpoint\Restore\SiteTables;
+
 defined( 'ABSPATH' ) || exit;
 
 /**
@@ -64,6 +66,12 @@ final class TempTableDropper {
 	const CHECKS_CHANGED = 'foreign_key_checks was not as expected right before a drop (a reconnect, or other code on the connection); the rest waits for the next pass';
 
 	/**
+	 * Why a call stopped before any drop when how the server compares table names could not be read: a key from
+	 * outside might go unseen, so nothing is dropped this pass.
+	 */
+	const CASE_UNKNOWN = 'whether the database server compares table names without letter case could not be read; the tables wait for the next pass';
+
+	/**
 	 * Drop tables, at most MAX_STATEMENTS statements and MAX_SECONDS seconds in one call.
 	 *
 	 * @param string[]      $tables         Names TempTables::is_safe_name() accepts (others are reported as failed).
@@ -99,8 +107,13 @@ final class TempTableDropper {
 		$before  = self::checks();
 		self::set_checks( 1 );
 		try {
-			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- a server setting.
-			$fold  = (int) $wpdb->get_var( 'SELECT @@lower_case_table_names' ) > 0;
+			try {
+				$fold = SiteTables::fold_case();
+			} catch ( TransientFailure $e ) {
+				$out['stopped']   = self::CASE_UNKNOWN;
+				$out['remaining'] = $safe;
+				return $out;
+			}
 			$keys  = self::keys( $like );
 			$plan  = DropOrder::plan( $safe, null === $keys ? array() : $keys, $fold );
 			$steps = $plan->steps();

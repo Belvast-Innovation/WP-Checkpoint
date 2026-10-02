@@ -18,6 +18,7 @@ use WPCheckpoint\Restore\ChunkReader;
 use WPCheckpoint\Restore\ChunkWalk;
 use WPCheckpoint\Restore\ConstraintNames;
 use WPCheckpoint\Restore\ImportTarget;
+use WPCheckpoint\Restore\IncomingQuestions;
 use WPCheckpoint\Restore\IncomingTables;
 use WPCheckpoint\Restore\Refused;
 use WPCheckpoint\Restore\RestoreFiles;
@@ -26,6 +27,7 @@ use WPCheckpoint\Restore\Statement;
 use WPCheckpoint\Restore\TableMoves;
 use WPCheckpoint\Restore\TablePlan;
 use WPCheckpoint\Database\OwnTables;
+use WPCheckpoint\Support\Utf8;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -43,13 +45,19 @@ defined( 'ABSPATH' ) || exit;
  *    (TablePlan: temporary and final names, which are fixed here with the
  *    restore's random part and never change); database.index.jsonl
  *    extracted from the last volume and checked against the manifest's
- *    hash. A table of the backup whose live table another installation in
- *    the same database uses (IncomingTables) is judged first: one of that
+ *    hash. Before that: a server that compares table names without case
+ *    is refused unless every name involved is lowercase
+ *    (IncomingTables::fold_refusal()); the usermeta table this site uses
+ *    is walked for other installations' capabilities keys, a window of
+ *    ids per unit (the progress shown), on from where a tick stopped; then
+ *    a table of the backup whose live table another installation in the
+ *    same database uses (IncomingTables) is judged: one of that
  *    installation's own is left out; one that may be either's, and one
  *    this site shares with it, are left to the user's choice, by kind
  *    (RestoreJob::POLICIES). When a choice is missing, both questions are
- *    asked at once, the tables listed in RestoreFiles::INCOMING, and the
- *    phase runs again with the answers.
+ *    asked at once (IncomingQuestions: each named after its tables, so an
+ *    answer holds for those only; the tables shown from
+ *    RestoreFiles::INCOMING), and the phase runs again with the answers.
  * 2. heads: every chunk of every planned table, in lockstep (ChunkWalk),
  *    one per unit: the head of the chunk (at most HEAD_BYTES, or FIRST_BYTES
  *    for a table's first chunk) is extracted and read by the same reader
@@ -92,6 +100,17 @@ final class RestorePreflightStep implements Step {
 	 * Live foreign keys read per unit.
 	 */
 	const PAGE = 1000;
+
+	/**
+	 * Ids of the usermeta table read per unit of the walk for other installations' capabilities keys.
+	 */
+	const META_WINDOW = 5000;
+
+	/**
+	 * Other installations' prefixes found in the usermeta table beyond which the search stops as one that could not
+	 * finish (the restore asks all the same).
+	 */
+	const MAX_EVIDENCE = 100;
 
 	/**
 	 * Returns the backups directory: function(): string.
@@ -143,7 +162,7 @@ final class RestorePreflightStep implements Step {
 			$context->cursor()
 		);
 		if ( 'plan' === $cursor['phase'] ) {
-			$planned = $this->plan( $context );
+			$planned = $this->plan( $context, $cursor );
 			if ( $planned instanceof StepResult ) {
 				return $planned;
 			}
@@ -165,11 +184,12 @@ final class RestorePreflightStep implements Step {
 	 * The plan phase: returns the cursor of the heads phase, or the questions about the tables another installation
 	 * may use.
 	 *
-	 * @param JobContext $context Context.
+	 * @param JobContext           $context Context.
+	 * @param array<string, mixed> $cursor  Cursor (the walk over the usermeta table, when it went on in a tick before).
 	 * @return array<string, mixed>|StepResult
 	 * @throws Refused When the backup does not fit this site.
 	 */
-	private function plan( JobContext $context ) {
+	private function plan( JobContext $context, array $cursor ) {
 		global $wpdb;
 		$work     = $context->work_path();
 		$options  = RestoreJob::options( $context->options() );
@@ -186,10 +206,18 @@ final class RestorePreflightStep implements Step {
 		if ( is_multisite() !== $multisite ) {
 			throw new Refused( $multisite ? 'This backup is of a multisite network and this site is a single site; it can only be restored onto a network.' : 'This backup is of a single site and this site is a multisite network; it can only be restored onto a single site.' );
 		}
-		$fold   = SiteTables::fold_case();
+		$fold    = SiteTables::fold_case();
+		$refusal = IncomingTables::fold_refusal( $fold, (string) $wpdb->base_prefix, defined( 'CUSTOM_USER_TABLE' ) ? (string) CUSTOM_USER_TABLE : null, defined( 'CUSTOM_USER_META_TABLE' ) ? (string) CUSTOM_USER_META_TABLE : null, array_column( $manifest->tables(), 'name' ) );
+		if ( '' !== $refusal ) {
+			throw new Refused( $refusal );
+		}
+		$meta = $this->usermeta( $context, $cursor, $multisite );
+		if ( $meta instanceof StepResult ) {
+			return $meta;
+		}
 		$random = bin2hex( random_bytes( 2 ) );
 		$plan   = TablePlan::make( $manifest->tables(), (string) ( $site['table_prefix'] ?? '' ), (string) $wpdb->base_prefix, $multisite, $options['exclude_tables'], $context->job()->storage_token, $context->job()->id, $random, $fold );
-		$skip   = $this->incoming( $context, $plan, $multisite, $fold, $options['policy'] );
+		$skip   = $this->incoming( $context, $plan, $multisite, $options['policy'], $meta );
 		if ( $skip instanceof StepResult ) {
 			return $skip;
 		}
@@ -242,29 +270,110 @@ final class RestorePreflightStep implements Step {
 	}
 
 	/**
+	 * The walk over the usermeta table this site uses for other installations' capabilities keys
+	 * (IncomingTables::evidence()), a window of ids per unit, on from where a tick before stopped: the first unit of a
+	 * tick always runs. Returns the walk's state once it is over, or the progress to go on from.
+	 *
+	 * @param JobContext           $context   Context.
+	 * @param array<string, mixed> $cursor    Cursor.
+	 * @param bool                 $multisite Whether this site is a network.
+	 * @return array{after: int, last: int, found: string[], over: bool, done: bool}|StepResult The prefixes found in hex.
+	 */
+	private function usermeta( JobContext $context, array $cursor, bool $multisite ) {
+		global $wpdb;
+		$meta    = isset( $cursor['meta'] ) && is_array( $cursor['meta'] ) ? $cursor['meta'] : array(
+			'after' => 0,
+			'last'  => SiteTables::last_meta_id(),
+			'found' => array(),
+			'over'  => false,
+			'done'  => false,
+		);
+		$prefix  = (string) $wpdb->base_prefix;
+		$is_blog = static function ( int $blog_id ): bool {
+			return SiteTables::blog_exists( $blog_id );
+		};
+		$message = __( 'Looking for other installations\' users in this site\'s user table', 'wp-checkpoint' );
+		$first   = true;
+		$read    = 0;
+		while ( empty( $meta['done'] ) ) {
+			if ( ! $first && $context->should_stop() ) {
+				return StepResult::progress(
+					array(
+						'phase' => 'plan',
+						'meta'  => $meta,
+					),
+					self::meta_percent( $meta ),
+					$message
+				);
+			}
+			$first  = false;
+			$window = SiteTables::capability_keys( (int) $meta['after'], self::META_WINDOW );
+			$found  = array_fill_keys( array_map( 'strval', (array) $meta['found'] ), true );
+			foreach ( IncomingTables::evidence( $prefix, $multisite, $window['keys'], $is_blog ) as $owner ) {
+				$found[ bin2hex( $owner ) ] = true;
+			}
+			$meta['found'] = array_map( 'strval', array_keys( $found ) );
+			if ( count( $meta['found'] ) > self::MAX_EVIDENCE ) {
+				// Too many to tell: a search that could not finish, asked about as one that found something.
+				$meta['found'] = array_slice( $meta['found'], 0, self::MAX_EVIDENCE );
+				$meta['over']  = true;
+				$meta['done']  = true;
+			} elseif ( null === $window['after'] ) {
+				$meta['done'] = true;
+			} else {
+				$meta['after'] = $window['after'];
+			}
+			$read += self::META_WINDOW * 255; // At most this much of meta keys per window.
+			if ( empty( $meta['done'] ) && $context->should_checkpoint( $read ) ) {
+				$context->checkpoint(
+					array(
+						'phase' => 'plan',
+						'meta'  => $meta,
+					),
+					self::meta_percent( $meta ),
+					$message
+				);
+				$read = 0;
+			}
+		}
+		return $meta;
+	}
+
+	/**
+	 * The step's progress while the usermeta table is walked (the plan phase is its first 5 %).
+	 *
+	 * @param array<string, mixed> $meta The walk's state.
+	 * @return int
+	 */
+	private static function meta_percent( array $meta ): int {
+		$last = max( 1, (int) ( $meta['last'] ?? 0 ) );
+		return 1 + (int) floor( 3 * min( 1.0, (int) ( $meta['after'] ?? 0 ) / $last ) );
+	}
+
+	/**
 	 * The backup's tables whose live table another installation may use (IncomingTables), by their final names: one of
 	 * a neighbour's own is left out; the two kinds the user decides (RestoreJob::POLICIES) are left out or restored
-	 * as answered or as the policy says. Asks both questions at once when a decision is missing. An answer holds for
-	 * the tables the question listed (RestoreFiles::INCOMING), never for others: when the tables of its kind are not
-	 * those any more (the live tables changed while the job waited), the answer is set aside and asked again.
+	 * as answered or as the policy says (IncomingQuestions: an answer holds for the very tables its question listed).
+	 * Asks both questions at once when a decision is missing.
 	 *
-	 * @param JobContext            $context   Context.
-	 * @param TablePlan             $plan      The plan with every table of the backup.
-	 * @param bool                  $multisite Whether this site is a network.
-	 * @param bool                  $fold      Whether the server compares table names without case.
-	 * @param array<string, string> $policy    RestoreJob::options()'s policy.
+	 * @param JobContext                                                            $context   Context.
+	 * @param TablePlan                                                             $plan      The plan with every table of the backup.
+	 * @param bool                                                                  $multisite Whether this site is a network.
+	 * @param array<string, string>                                                 $policy    RestoreJob::options()'s policy.
+	 * @param array{after: int, last: int, found: string[], over: bool, done: bool} $meta      The walk over the usermeta table.
 	 * @return array<string, string>|StepResult Tables to leave out (names in the backup) => why, or the questions.
 	 */
-	private function incoming( JobContext $context, TablePlan $plan, bool $multisite, bool $fold, array $policy ) {
+	private function incoming( JobContext $context, TablePlan $plan, bool $multisite, array $policy, array $meta ) {
 		$finals = array();
 		foreach ( $plan->tables() as $table ) {
 			$finals[ $table['final'] ] = $table['table'];
 		}
-		$prefix = $plan->site_prefix();
-		$live   = ( new WpdbConnection() )->tables_with_prefix( $prefix )['tables'];
-		$found  = SiteTables::meta_keys_present( IncomingTables::role_keys( $prefix, $multisite, $live, $fold ) );
-		$kinds  = IncomingTables::classify( $prefix, $multisite, $live, array_keys( $finals ), SiteTables::core(), SiteTables::users(), SiteTables::usermeta(), $found, $fold );
-		$listed = array(
+		$prefix   = $plan->site_prefix();
+		$live     = ( new WpdbConnection() )->tables_with_prefix( $prefix )['tables'];
+		$evidence = array_map( 'hex2bin', array_map( 'strval', (array) $meta['found'] ) );
+		$over     = ! empty( $meta['over'] );
+		$kinds    = IncomingTables::classify( $prefix, $multisite, $live, array_keys( $finals ), SiteTables::core(), SiteTables::users(), SiteTables::usermeta(), array() !== $evidence || $over );
+		$listed   = array(
 			IncomingTables::NEIGHBOUR => array(),
 			IncomingTables::UNCERTAIN => array(),
 			IncomingTables::SHARED    => array(),
@@ -272,57 +381,55 @@ final class RestorePreflightStep implements Step {
 		foreach ( $kinds as $final => $kind ) {
 			$listed[ $kind ][] = (string) $final;
 		}
-		$answers   = isset( $context->options()['answers'] ) && is_array( $context->options()['answers'] ) ? $context->options()['answers'] : array();
-		$seen      = ExportPlan::exists( $context->work_path(), RestoreFiles::INCOMING ) ? ExportPlan::read( $context->work_path(), RestoreFiles::INCOMING ) : array();
-		$decided   = array();
-		$questions = array();
-		$changed   = array();
-		foreach ( array(
-			'uncertain_tables' => IncomingTables::UNCERTAIN,
-			'shared_tables'    => IncomingTables::SHARED,
-		) as $id => $kind ) {
-			if ( array() === $listed[ $kind ] ) {
-				continue;
+		$answers  = isset( $context->options()['answers'] ) && is_array( $context->options()['answers'] ) ? $context->options()['answers'] : array();
+		$decision = IncomingQuestions::decide( $listed, $evidence, $over, $answers, $policy );
+		$current  = array_column( $decision['questions'], 'id' );
+		foreach ( IncomingQuestions::KINDS as $key => $kind ) {
+			if ( array() !== $listed[ $kind ] ) {
+				$current[] = IncomingQuestions::id( $key, $listed[ $kind ], $evidence, $over );
 			}
-			$choice = $policy[ $id ];
-			if ( isset( $answers[ $id ] ) && is_string( $answers[ $id ] ) ) {
-				if ( self::same_tables( $listed[ $kind ], $seen[ $kind ] ?? null ) ) {
-					$choice = $answers[ $id ];
-				} else {
-					$changed[] = $id; // Answered for other tables than these: not an answer for these.
+		}
+		$stale = array();
+		foreach ( array_keys( $answers ) as $id ) {
+			foreach ( array_keys( IncomingQuestions::KINDS ) as $key ) {
+				if ( 0 === strpos( (string) $id, $key . '_' ) && ! in_array( (string) $id, $current, true ) ) {
+					$stale[] = (string) $id; // Answered for other tables than these: it holds for none of them.
 				}
 			}
-			if ( 'restore' === $choice || 'exclude' === $choice ) {
-				$decided[ $kind ] = $choice;
-				continue;
+		}
+		if ( array() !== $stale ) {
+			$context->logger()->warning( 'An answer given for other tables than the restore would now ask about is not used', array( 'questions' => $stale ) );
+		}
+		if ( array() !== $decision['questions'] ) {
+			$shown = array(
+				'evidence' => array_map( array( Utf8::class, 'scrub' ), $evidence ),
+				'over'     => $over,
+			);
+			foreach ( $listed as $kind => $tables ) {
+				$shown[ $kind ] = array_map( array( Utf8::class, 'scrub' ), $tables );
 			}
-			$questions[] = array(
-				'id'      => $id,
-				'kind'    => 'uncertain_tables' === $id ? 'tables_of_either_installation' : 'tables_shared_with_another_installation',
-				'count'   => count( $listed[ $kind ] ),
-				'file'    => RestoreFiles::INCOMING,
-				'choices' => array( 'restore', 'exclude' ),
-			);
-		}
-		if ( array() !== $changed ) {
-			$context->logger()->warning(
-				'The tables a question was answered for changed before the restore went on; the answer is not used for the tables now in its place',
-				array( 'questions' => $changed )
-			);
-		}
-		if ( array() !== $questions ) {
-			ExportPlan::write( $context->work_path(), RestoreFiles::INCOMING, $listed );
+			ExportPlan::write( $context->work_path(), RestoreFiles::INCOMING, $shown ); // Only shown: the ids tie answers to tables.
 			// Every table the questions are about, in the log (the questions list a few of them).
 			$context->logger()->info(
 				'Tables of the backup whose live tables another installation in the same database may use; asked what to do with them',
 				array(
-					'may_be_either'   => $listed[ IncomingTables::UNCERTAIN ],
-					'shared'          => $listed[ IncomingTables::SHARED ],
-					'its_own_skipped' => $listed[ IncomingTables::NEIGHBOUR ],
+					'may_be_either'      => $listed[ IncomingTables::UNCERTAIN ],
+					'shared'             => $listed[ IncomingTables::SHARED ],
+					'its_own_skipped'    => $listed[ IncomingTables::NEIGHBOUR ],
+					'other_installation' => $shown['evidence'],
+					'search_unfinished'  => $over,
 				)
 			);
+			$questions = array();
+			foreach ( $decision['questions'] as $question ) {
+				$question['file'] = RestoreFiles::INCOMING;
+				$questions[]      = $question;
+			}
 			return StepResult::ask(
-				array( 'phase' => 'plan' ),
+				array(
+					'phase' => 'plan',
+					'meta'  => $meta,
+				),
 				$questions,
 				sprintf(
 					/* translators: %d: number of questions */
@@ -335,12 +442,13 @@ final class RestorePreflightStep implements Step {
 		foreach ( $listed[ IncomingTables::NEIGHBOUR ] as $final ) {
 			$skip[ $finals[ $final ] ] = IncomingTables::NEIGHBOUR;
 		}
-		foreach ( $decided as $kind => $choice ) {
+		foreach ( $decision['decided'] as $kind => $choice ) {
 			$context->logger()->info(
 				IncomingTables::SHARED === $kind ? 'Tables this site shares with another installation in the same database' : 'Tables that may belong to this site or to another installation in the same database',
 				array(
 					'tables' => $listed[ $kind ],
 					'choice' => $choice,
+					'from'   => $decision['from'][ $kind ],
 				)
 			);
 			if ( 'exclude' === $choice ) {
@@ -350,23 +458,6 @@ final class RestorePreflightStep implements Step {
 			}
 		}
 		return $skip;
-	}
-
-	/**
-	 * Whether the tables now are those a question listed (in any order).
-	 *
-	 * @param string[]   $now    Tables now.
-	 * @param mixed|null $listed What the question's file listed for that kind (null when nothing).
-	 * @return bool
-	 */
-	private static function same_tables( array $now, $listed ): bool {
-		if ( ! is_array( $listed ) ) {
-			return false;
-		}
-		$listed = array_map( 'strval', $listed );
-		sort( $now, SORT_STRING );
-		sort( $listed, SORT_STRING );
-		return $now === $listed;
 	}
 
 	/**
@@ -553,7 +644,7 @@ final class RestorePreflightStep implements Step {
 		}
 		// What the swap moves aside, by its rule (TableMoves): this site's live tables, never another installation's.
 		$finals = array_column( $table->tables(), 'final' );
-		$moved  = array_fill_keys( array_merge( TableMoves::select( $table->site_prefix(), is_multisite(), $live, $finals, $left, SiteTables::core(), SiteTables::fold_case() )['move'], $finals ), true );
+		$moved  = array_fill_keys( array_merge( TableMoves::select( $table->site_prefix(), is_multisite(), $live, $finals, $left, SiteTables::core() )['move'], $finals ), true );
 		if ( 0 === (int) $cursor['page'] ) {
 			$handle = @fopen( RestoreFiles::path( $work, RestoreFiles::DEFINITIONS ), 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- reported below.
 			if ( false === $handle ) {

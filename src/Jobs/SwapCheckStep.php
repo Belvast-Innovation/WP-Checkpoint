@@ -1174,7 +1174,7 @@ final class SwapCheckStep implements Step {
 		foreach ( array_keys( $plan->skipped() ) as $name ) {
 			$kept[] = $plan->final_name( (string) $name ); // Left out of the restore: the live one stays.
 		}
-		return TableMoves::select( $site, is_multisite(), $live, $finals, $kept, SiteTables::core(), SiteTables::fold_case() );
+		return TableMoves::select( $site, is_multisite(), $live, $finals, $kept, SiteTables::core() );
 	}
 
 	/**
