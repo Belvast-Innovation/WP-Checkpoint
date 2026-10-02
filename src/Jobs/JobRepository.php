@@ -1582,7 +1582,7 @@ final class JobRepository {
 			$this->report_reclaim( $entry['kind'] . ' of job ' . $entry['id'], $result );
 		}
 		// The maintenance file's temporary files a swap that died before its rename left in ABSPATH.
-		foreach ( Residue::scan_maintenance( defined( 'ABSPATH' ) ? (string) ABSPATH : '' ) as $entry ) {
+		foreach ( Residue::scan_maintenance( Residue::maintenance_dir() ) as $entry ) {
 			if ( $budget <= 0 ) {
 				return;
 			}
@@ -1591,7 +1591,7 @@ final class JobRepository {
 			}
 			--$budget;
 			try {
-				if ( ! Deleter::delete_maintenance_file( (string) ABSPATH, basename( $entry['path'] ) ) ) {
+				if ( ! Deleter::delete_maintenance_file( Residue::maintenance_dir(), basename( $entry['path'] ) ) ) {
 					$this->directories->log_event( 'A temporary maintenance file of a restore could not be removed: ' . basename( $entry['path'] ) );
 				}
 			} catch ( DeletionRefused $e ) {

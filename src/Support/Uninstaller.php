@@ -223,9 +223,9 @@ final class Uninstaller {
 		}
 		// A swap that died before its rename left a temporary maintenance file; never the maintenance file itself,
 		// which a swap only leaves while it holds the site (and then nothing is uninstalled).
-		foreach ( Residue::scan_maintenance( defined( 'ABSPATH' ) ? (string) ABSPATH : '' ) as $entry ) {
+		foreach ( Residue::scan_maintenance( Residue::maintenance_dir() ) as $entry ) {
 			try {
-				if ( Deleter::delete_maintenance_file( (string) ABSPATH, basename( $entry['path'] ) ) ) {
+				if ( Deleter::delete_maintenance_file( Residue::maintenance_dir(), basename( $entry['path'] ) ) ) {
 					++$result['deleted'];
 				} else {
 					$result['failed'][] = $entry['path'];

@@ -286,7 +286,39 @@ final class Residue {
 	}
 
 	/**
-	 * The maintenance file's temporary files left in a directory (ABSPATH).
+	 * Where the maintenance file is (null: ABSPATH). Tests only (replace_maintenance_dir()).
+	 *
+	 * @var string|null
+	 */
+	private static $maintenance_dir = null;
+
+	/**
+	 * The directory of the maintenance file, where its temporary files are looked for: ABSPATH.
+	 *
+	 * @return string '' when it is not known.
+	 */
+	public static function maintenance_dir(): string {
+		if ( null !== self::$maintenance_dir ) {
+			return self::$maintenance_dir;
+		}
+		return defined( 'ABSPATH' ) ? (string) ABSPATH : '';
+	}
+
+	/**
+	 * Tests: look for the maintenance file's temporary files in a sandbox instead of ABSPATH, returning the one
+	 * before (null: ABSPATH).
+	 *
+	 * @param string|null $dir Directory, or null for ABSPATH.
+	 * @return string|null
+	 */
+	public static function replace_maintenance_dir( $dir ) {
+		$before                = self::$maintenance_dir;
+		self::$maintenance_dir = null === $dir ? null : (string) $dir;
+		return $before;
+	}
+
+	/**
+	 * The maintenance file's temporary files left in a directory (maintenance_dir()).
 	 *
 	 * @param string $dir Directory.
 	 * @return array<int, array{kind: string, path: string, id: int, mtime: int}>

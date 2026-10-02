@@ -301,6 +301,82 @@ final class StagingResidueTest extends JobTestCase {
 		}
 	}
 
+	/**
+	 * A staging root of $layout whose stray/ directory holds what a swap's rollback moved out of the way.
+	 */
+	private function leave_stray( StagingLayout $layout ): string {
+		$root = $layout->root( 'uploads' );
+		wp_mkdir_p( $root . '/' . Residue::STRAY_DIR . '/uploads-0a0b0c0d' );
+		file_put_contents( $root . '/' . Residue::STRAY_DIR . '/uploads-0a0b0c0d/someone.txt', 'made meanwhile' );
+		return $root . '/' . Residue::STRAY_DIR . '/uploads-0a0b0c0d/someone.txt';
+	}
+
+	public function test_a_staging_root_holding_what_a_rollback_moved_aside_is_kept_by_the_reaper_the_cancel_and_uninstall(): void {
+		$this->register( 'plain', array( $this->counting_step( 'p', 5 ) ) );
+		// The reaper: an ended job's root with stray/ is kept, its other roots and another ended job's go.
+		$ended   = $this->job_of( 'plain' );
+		$control = $this->job_of( 'plain' );
+		$layout  = $this->layout( $ended );
+		$made    = $this->leave( $layout );
+		$stray   = $this->leave_stray( $layout );
+		$others  = $this->leave( $this->layout( $control ) );
+		foreach ( array( $ended, $control ) as $id ) {
+			Plugin::instance()->jobs()->transition( Plugin::instance()->jobs()->find( $id ), Job::CANCELLED );
+		}
+		$this->reap();
+		$this->assertFileExists( $stray, 'reaper: kept' );
+		foreach ( $others as $path ) {
+			$this->assertFileDoesNotExist( $path, 'the control: another ended job\'s, reaped' );
+		}
+		foreach ( self::split( $made )[1] as $path ) {
+			$this->assertFileDoesNotExist( $path, 'the same job\'s probes go' );
+		}
+		// The cancel's reclaim of the job's work.
+		$id     = $this->job_of( 'plain' );
+		$layout = $this->layout( $id );
+		$this->leave( $layout );
+		$kept = $this->leave_stray( $layout );
+		Plugin::instance()->job_actions()->cancel( $id );
+		$this->assertFileExists( $kept, 'cancel: kept' );
+		$this->assertSame( Job::CANCELLED, Plugin::instance()->jobs()->find( $id )->status );
+		// Uninstall, whatever the data setting.
+		$last   = $this->job_of( 'plain' );
+		$layout = $this->layout( $last );
+		$gone   = $this->leave( $this->layout( $this->job_of( 'plain' ) ) );
+		$this->leave( $layout );
+		$left = $this->leave_stray( $layout );
+		update_option( Uninstaller::OPTION_DELETE_DATA, false );
+		Uninstaller::run();
+		$this->assertFileExists( $left, 'uninstall: kept' );
+		foreach ( self::split( $gone )[0] as $path ) {
+			$this->assertFileDoesNotExist( $path, 'the control: a root without stray/ is removed' );
+		}
+	}
+
+	public function test_the_maintenance_files_temporary_files_are_reaped_after_a_day_and_by_uninstall(): void {
+		$dir    = \WPCheckpoint\Tests\Fixtures\Sandbox::make( 'maintenance-residue' );
+		$this->made[] = $dir;
+		$before = Residue::replace_maintenance_dir( $dir );
+		try {
+			$old = $dir . '/.maintenance.0123456789abcdef.tmp';
+			$new = $dir . '/.maintenance.fedcba9876543210.tmp';
+			file_put_contents( $old, 'x' );
+			file_put_contents( $new, 'x' );
+			file_put_contents( $dir . '/.maintenance', 'not a temporary file' );
+			touch( $old, time() - Residue::VERIFY_TTL - 10 );
+			$this->reap();
+			$this->assertFileDoesNotExist( $old, 'older than a day: reaped' );
+			$this->assertFileExists( $new, 'the control: a fresh one is left (a swap may be writing it)' );
+			$this->assertFileExists( $dir . '/.maintenance', 'never the maintenance file itself' );
+			update_option( Uninstaller::OPTION_DELETE_DATA, false );
+			Uninstaller::run();
+			$this->assertFileDoesNotExist( $new, 'uninstall removes it' );
+			$this->assertFileExists( $dir . '/.maintenance' );
+		} finally {
+			Residue::replace_maintenance_dir( $before );
+		}
+	}
+
 	public function test_on_a_network_uploads_is_the_main_sites_from_any_site(): void {
 		if ( ! is_multisite() ) {
 			$this->markTestSkipped( 'Multisite only.' );
