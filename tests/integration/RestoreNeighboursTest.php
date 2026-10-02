@@ -474,14 +474,14 @@ final class RestoreNeighboursTest extends RestoreTestCase {
 				array(
 					'umeta_id'   => $last + $step * 3 * RestorePreflightStep::META_WINDOW,
 					'user_id'    => 1,
-					'meta_key'   => 'wpc_far_' . $step, // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_key -- a test fixture.
+					'meta_key'   => 3 === $step ? 'far_capabilities' : 'wpc_far_' . $step, // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_key -- a test fixture.  The last window holds another installation's key.
 					'meta_value' => 'x', // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_value -- a test fixture.
 				)
 			);
 			$this->assertSame( '', $wpdb->last_error );
 			$this->meta[] = (int) $wpdb->insert_id;
 		}
-		$base   = $this->backup( self::site_tables() );
+		$base   = $this->backup( array_merge( self::site_tables(), array( $wpdb->users, $wpdb->usermeta ) ) );
 		$job    = $this->start_restore( $base );
 		$runner = $this->small_runner();
 		$shown  = array();
@@ -497,7 +497,8 @@ final class RestoreNeighboursTest extends RestoreTestCase {
 			$runner->tick( $job->id, microtime( true ) );
 		}
 		$done = $this->run_restore( Plugin::instance()->jobs()->find( $job->id ) );
-		$this->assertSame( Job::COMPLETED, $done->status, (string) $done->last_error );
+		$this->assertSame( Job::PAUSED, $done->status, (string) $done->last_error );
+		$this->assertStringContainsString( 'with the table prefix far_', $this->asked( $done )['shared_tables']['text'], 'the walk went on to the last window' );
 		$walking = array_filter(
 			$shown,
 			static function ( string $message ): bool {

@@ -372,7 +372,7 @@ final class RestorePreflightStep implements Step {
 		$live     = ( new WpdbConnection() )->tables_with_prefix( $prefix )['tables'];
 		$evidence = array_map( 'hex2bin', array_map( 'strval', (array) $meta['found'] ) );
 		$over     = ! empty( $meta['over'] );
-		$kinds    = IncomingTables::classify( $prefix, $multisite, $live, array_keys( $finals ), SiteTables::core(), SiteTables::users(), SiteTables::usermeta(), array() !== $evidence || $over );
+		$kinds    = IncomingTables::classify( $prefix, $multisite, $live, array_keys( $finals ), SiteTables::core(), SiteTables::users(), SiteTables::usermeta(), array() !== $evidence ); // A search that could not finish found MAX_EVIDENCE already.
 		$listed   = array(
 			IncomingTables::NEIGHBOUR => array(),
 			IncomingTables::UNCERTAIN => array(),

@@ -125,8 +125,7 @@ final class IncomingTables {
 	 * @param string[] $core      This site's WordPress tables, as WordPress names them (CUSTOM_USER_TABLE included).
 	 * @param string   $users     The users table this site uses.
 	 * @param string   $usermeta  The usermeta table this site uses.
-	 * @param bool     $evidence  Whether the usermeta table this site uses shows another installation (evidence(), or
-	 *                            a search that could not finish).
+	 * @param bool     $evidence  Whether the usermeta table this site uses shows another installation (evidence()).
 	 * @return array<string, string> Final name => SHARED, NEIGHBOUR or UNCERTAIN, in the order of $finals.
 	 */
 	public static function classify( string $prefix, bool $multisite, array $live, array $finals, array $core, string $users, string $usermeta, bool $evidence ): array {
