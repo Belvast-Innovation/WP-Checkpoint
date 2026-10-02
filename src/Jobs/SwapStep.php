@@ -701,7 +701,8 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 	 * @param Queries              $db      Connection.
 	 * @param array<string, mixed> $cursor  Cursor (its attempt).
 	 * @return array{dirs: array<int, array{seq: int, kind: string, live: string, stage: string, old: string, had_live: bool}>, tables: array<int, array{seq: int, kind: string, live: string, stage: string, old: string, had_live: bool}>}
-	 * @throws WorkLost When the plan's rows are gone or are not whole.
+	 * @throws \RuntimeException When the plan's rows are gone or are not whole: an ordinary failure, never FINAL (a job
+	 *                           that holds the site changed must keep its retry, which goes on putting it back).
 	 */
 	private function entries( JobContext $context, Queries $db, array $cursor ): array {
 		$plan    = new SwapPlan( $db, self::base_prefix() . SwapPlan::TABLE );
@@ -709,7 +710,7 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 		$attempt = (int) ( $cursor['attempt'] ?? 0 );
 		$count   = $plan->complete_count( $job, $attempt );
 		if ( null === $count ) {
-			throw new WorkLost( 'The swap\'s plan is gone from the database or no longer whole; what the swap changed cannot be told from it.' );
+			throw new \RuntimeException( 'The swap\'s plan is gone from the database or no longer whole; what the swap changed cannot be told from it. Retry once the plan\'s rows are back.' );
 		}
 		$out   = array(
 			'dirs'   => array(),
@@ -727,7 +728,7 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 			}
 		}
 		if ( count( $out['dirs'] ) + count( $out['tables'] ) !== $count ) {
-			throw new WorkLost( 'The swap\'s plan in the database does not hold the entries it says it has.' );
+			throw new \RuntimeException( 'The swap\'s plan in the database does not hold the entries it says it has. Retry once the plan\'s rows are back.' );
 		}
 		return $out;
 	}

@@ -488,4 +488,27 @@ final class SwapCrashTest extends SwapTestCase {
 		$this->assertSame( array( array( 'id' => '5', 'v' => 'someone' ) ), $wpdb->get_results( "SELECT id, v FROM `{$stray[0]}`", ARRAY_A ) );
 		$this->assertStringContainsString( 'moved out of the way and kept', (string) file_get_contents( $done->storage_path . '/' . ( '' !== $done->log_path ? $done->log_path : 'logs/job-' . $done->id . '.log' ) ), 'and logged' );
 	}
+
+	public function test_a_swap_whose_plan_is_gone_keeps_its_retry_which_puts_the_site_back_once_the_plan_is_there(): void {
+		global $wpdb;
+		$job    = $this->at_swap();
+		$before = $this->site();
+		$this->killed_at( $job, 'dir_in', 2 );
+		$table = $wpdb->base_prefix . \WPCheckpoint\Restore\SwapPlan::TABLE;
+		$rows  = $wpdb->get_results( $wpdb->prepare( "SELECT * FROM `{$table}` WHERE job_id = %d", $job->id ), ARRAY_A );
+		$this->assertNotSame( array(), $rows );
+		$wpdb->query( $wpdb->prepare( "DELETE FROM `{$table}` WHERE job_id = %d", $job->id ) );
+		$wpdb->query( 'COMMIT' );
+		$failed = $this->cli_run( $job );
+		$this->assertSame( Job::FAILED, $failed->status );
+		$this->assertStringContainsString( 'The swap\'s plan is gone', (string) $failed->last_error );
+		$this->assertNotSame( Job::FAILURE_FINAL, $failed->failure_kind, 'not final: the retry is what puts the site back' );
+		$this->assertSame( Job::SITE_CHANGING, $failed->site_state );
+		foreach ( $rows as $row ) {
+			$wpdb->insert( $table, $row );
+		}
+		$wpdb->query( 'COMMIT' );
+		Plugin::instance()->job_actions()->retry( $job->id );
+		$this->assertPutBack( $this->cli_run( $job ), $before, 'after the retry' );
+	}
 }
