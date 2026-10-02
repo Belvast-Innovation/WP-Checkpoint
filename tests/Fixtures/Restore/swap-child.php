@@ -26,6 +26,9 @@ ob_end_clean();
 
 $seen = 0;
 $at   = static function ( string $point ) use ( $config, &$seen ): void {
+	if ( '' !== (string) ( $config['trace'] ?? '' ) ) {
+		file_put_contents( (string) $config['trace'], $point . "\n", FILE_APPEND ); // What this run passed, for the parent.
+	}
 	if ( $point !== $config['seam'] ) {
 		return;
 	}

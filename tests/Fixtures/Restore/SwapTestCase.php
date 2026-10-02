@@ -63,6 +63,9 @@ abstract class SwapTestCase extends RestoreTestCase {
 	/** @var int Seconds the swap's clock is set off from the real one (here and in the killed child). */
 	protected $clock_offset = 0;
 
+	/** @var string A file the killed child appends every seam it passes to ('' for none). */
+	protected $trace = '';
+
 	public function set_up(): void {
 		parent::set_up();
 		$this->set_up_swap();
@@ -372,6 +375,7 @@ abstract class SwapTestCase extends RestoreTestCase {
 					'packet'  => (int) ( $this->swap_parts['packet'] ?? 0 ),
 					'batch'   => (int) ( $this->swap_parts['batch'] ?? 0 ),
 					'offset'  => $this->clock_offset,
+					'trace'   => $this->trace,
 					'admin'   => self::$admin_id,
 				)
 			)
@@ -425,7 +429,7 @@ abstract class SwapTestCase extends RestoreTestCase {
 		$plan  = $this->plan_of( $job );
 		$there = array_fill_keys( (array) $wpdb->get_col( 'SHOW TABLES' ), true );
 		foreach ( array_reverse( $plan['tables'] ) as $entry ) {
-			$pairs = SwapRules::table_back( $entry, $there, 'wcpstray_undo_' . $entry['seq'] );
+			$pairs = SwapRules::table_back( $entry, $there, 'wcpstray_undo_' . bin2hex( random_bytes( 3 ) ) . '_' . $entry['seq'] ); // Dropped with the test's tables.
 			if ( array() !== $pairs ) {
 				$wpdb->query( SwapRules::rename_sql( $pairs ) );
 				foreach ( $pairs as $pair ) {

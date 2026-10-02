@@ -337,7 +337,7 @@ final class SwapCrashTest extends SwapTestCase {
 
 	public function test_k16_k17_killed_while_the_swap_was_rolled_back(): void {
 		global $wpdb;
-		foreach ( array( array( 'table_back', 1 ), array( 'dir_back', 1 ), array( 'dirs_back', 1 ), array( 'maintenance_down', 1 ), array( 'reverted', 1 ) ) as $case ) {
+		foreach ( array( array( 'table_back', 1 ), array( 'dir_back', 1 ), array( 'dirs_back', 1 ), array( 'restored', 1 ), array( 'unheld', 1 ), array( 'reverted', 1 ), array( 'maintenance_down', 1 ) ) as $case ) {
 			$this->swap_parts['batch'] = 1;
 			$this->register_type();
 			$job    = $this->at_swap();
@@ -350,7 +350,13 @@ final class SwapCrashTest extends SwapTestCase {
 			$this->killed_at( $job, $case[0], $case[1] );
 			$left = Plugin::instance()->jobs()->find( $job->id );
 			// Recorded as put back before the maintenance file comes down, the last step.
-			$this->assertSame( in_array( $case[0], array( 'reverted', 'maintenance_down' ), true ) ? 'reverted' : 'rollback', $left->cursor['phase'], $case[0] );
+			$phases = array(
+				'restored'         => 'restored',
+				'unheld'           => 'restored',
+				'reverted'         => 'reverted',
+				'maintenance_down' => 'reverted',
+			);
+			$this->assertSame( $phases[ $case[0] ] ?? 'rollback', $left->cursor['phase'], $case[0] );
 			$this->assertSame( 'maintenance_down' !== $case[0], file_exists( $this->abspath . '/.maintenance' ), 'up until the last step: ' . $case[0] );
 			$done = $this->cli_run( $job );
 			$this->assertPutBack( $done, $before, 'killed at ' . $case[0] );
@@ -737,7 +743,7 @@ final class SwapCrashTest extends SwapTestCase {
 		$this->killed_at( $job, 'unheld', 1 );
 		rename( $last['stage'] . '-away', $last['stage'] );
 		$left = Plugin::instance()->jobs()->find( $job->id );
-		$this->assertSame( 'rollback', $left->cursor['phase'] );
+		$this->assertSame( 'restored', $left->cursor['phase'], 'recorded as put back before the file was let go' );
 		$file = new Maintenance( $this->abspath, $left->cursor['mark'] );
 		$this->assertSame( Maintenance::OURS, $file->state(), 'up' );
 		$this->assertFalse( $file->is_held(), 'but no longer held: it lapses on its own' );
@@ -749,7 +755,7 @@ final class SwapCrashTest extends SwapTestCase {
 		$before = $this->site();
 		$this->killed_at( $job, 'unheld_commit', 1 );
 		$left = Plugin::instance()->jobs()->find( $job->id );
-		$this->assertSame( 'rename', $left->cursor['phase'] );
+		$this->assertSame( 'committed', $left->cursor['phase'], 'recorded as made before the file was let go' );
 		$this->assertFalse( ( new Maintenance( $this->abspath, $left->cursor['mark'] ) )->is_held() );
 		$this->assertSwapped( $this->cli_run( $job ), $before, 'after unheld_commit' );
 		$this->undo( Plugin::instance()->jobs()->find( $job->id ) );
@@ -762,7 +768,7 @@ final class SwapCrashTest extends SwapTestCase {
 		$this->assertTrue( ( new Maintenance( $this->abspath, Plugin::instance()->jobs()->find( $job->id )->cursor['mark'] ) )->is_held(), 'the control: held when killed' );
 		$this->killed_at( $job, 'unheld_commit', 1 );
 		$left = Plugin::instance()->jobs()->find( $job->id );
-		$this->assertSame( 'rename', $left->cursor['phase'] );
+		$this->assertSame( 'committed', $left->cursor['phase'] );
 		$this->assertFalse( ( new Maintenance( $this->abspath, $left->cursor['mark'] ) )->is_held() );
 		$this->assertSwapped( $this->cli_run( $job ), $before, 'after unheld_commit on the next run' );
 	}
@@ -771,15 +777,18 @@ final class SwapCrashTest extends SwapTestCase {
 		global $wpdb;
 		$job = $this->at_swap();
 		$this->killed_at( $job, 'dir_in', 2 );
-		$this->assertStringContainsString( 'Put it back now with: wp wpcheckpoint job run ' . $job->id, implode( "\n", Plugin::instance()->half_swapped_warnings() ), 'the control: a job that waits for WP-CLI' );
+		$this->assertStringContainsString( 'Resolve it with: wp wpcheckpoint job run ' . $job->id, implode( "\n", Plugin::instance()->half_swapped_warnings() ), 'the control: a job that waits for WP-CLI' );
 		$wpdb->query( $wpdb->prepare( 'UPDATE ' . JobRepository::table() . ' SET locked_until = %d, lock_token = %s WHERE id = %d', time() + 120, 'another-process', $job->id ) );
-		$this->assertStringContainsString( 'is swapping the site in another process', implode( "\n", Plugin::instance()->half_swapped_warnings() ) );
+		$this->assertStringContainsString( 'is at work on the site in another process', implode( "\n", Plugin::instance()->half_swapped_warnings() ) );
 		$wpdb->query( $wpdb->prepare( 'UPDATE ' . JobRepository::table() . " SET locked_until = 0, lock_token = '', status = %s WHERE id = %d", Job::FAILED, $job->id ) );
 		$failed = implode( "\n", Plugin::instance()->half_swapped_warnings() );
 		$this->assertStringContainsString( 'wp wpcheckpoint job retry ' . $job->id . ', then wp wpcheckpoint job run ' . $job->id, $failed );
-		$wpdb->query( $wpdb->prepare( 'UPDATE ' . JobRepository::table() . ' SET status = %s WHERE id = %d', Job::RUNNING, $job->id ) );
+		// What the warning says, done: retried, then run by WP-CLI, which puts the site back from where it stopped.
+		Plugin::instance()->job_actions()->retry( $job->id );
 		$wpdb->query( 'COMMIT' );
-		$this->assertSame( Job::FAILED, $this->cli_run( $job )->status, 'and WP-CLI puts it back' );
+		$back = $this->cli_run( $job );
+		$this->assertSame( Job::FAILED, $back->status, (string) $back->last_error );
+		$this->assertSame( Job::SITE_UNTOUCHED, $back->site_state, 'and the site is put back' );
 	}
 
 	public function test_every_command_of_the_plugin_says_first_that_the_site_is_half_swapped(): void {
