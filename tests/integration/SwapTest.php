@@ -281,4 +281,15 @@ final class SwapTest extends SwapTestCase {
 		Plugin::instance()->after_swap();
 		$this->assertFalse( wp_next_scheduled( \WPCheckpoint\Jobs\Loopback::HOOK, array( $third->id ) ) );
 	}
+
+	public function test_the_object_cache_is_flushed_once_the_swap_is_made(): void {
+		unset( $this->swap_parts['flush'] ); // The real flush.
+		$this->register_type();
+		$job = $this->at_swap();
+		wp_cache_set( 'wpcheckpoint_test_marker', 'old site', 'wpcheckpoint_test' );
+		$this->assertSame( 'old site', wp_cache_get( 'wpcheckpoint_test_marker', 'wpcheckpoint_test' ), 'the control: the cache holds it' );
+		$done = $this->cli_run( $job );
+		$this->assertSame( Job::COMPLETED, $done->status, (string) $done->last_error );
+		$this->assertFalse( wp_cache_get( 'wpcheckpoint_test_marker', 'wpcheckpoint_test' ), 'flushed: nothing of the old site is read from it' );
+	}
 }

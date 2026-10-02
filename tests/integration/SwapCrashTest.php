@@ -462,4 +462,30 @@ final class SwapCrashTest extends SwapTestCase {
 			$last = $seen[1];
 		}
 	}
+
+	public function test_a_table_made_under_a_moved_aside_name_is_moved_out_of_the_way_and_kept(): void {
+		global $wpdb;
+		$this->swap_parts['batch'] = 1;
+		$this->register_type();
+		$job    = $this->at_swap();
+		$before = $this->site();
+		$plan   = $this->plan_of( $job );
+		$moves  = array_keys( array_filter( array_column( $plan['tables'], 'kind' ), static function ( string $kind ): bool {
+			return \WPCheckpoint\Restore\SwapPlan::MOVE === $kind;
+		} ) );
+		$this->assertNotSame( array(), $moves, 'the control: the plan moves swt_gone aside' );
+		$this->killed_at( $job, 'batch_sent', $moves[0] + 1 );
+		$this->assertNull( $this->site()['tables']['swt_gone'], 'moved aside' );
+		$this->create( $wpdb->prefix . 'swt_gone', '(id INT UNSIGNED NOT NULL PRIMARY KEY, v VARCHAR(20) NOT NULL) ENGINE=InnoDB' );
+		$wpdb->query( "INSERT INTO `{$wpdb->prefix}swt_gone` (id, v) VALUES (5, 'someone')" );
+		$wpdb->query( 'COMMIT' );
+		$done = $this->cli_run( $job );
+		$this->assertSame( Job::FAILED, $done->status, (string) $done->last_error );
+		$this->assertSame( $before, $this->site(), 'the old site\'s table is back in its place' );
+		$stray = (array) $wpdb->get_col( "SHOW TABLES LIKE 'wcpstray%'" );
+		$this->assertCount( 1, $stray, 'the table in the way was moved, not dropped' );
+		$this->assertTrue( \WPCheckpoint\Database\OwnTables::generated( $stray[0] ), 'under a name of the grammar' );
+		$this->assertSame( array( array( 'id' => '5', 'v' => 'someone' ) ), $wpdb->get_results( "SELECT id, v FROM `{$stray[0]}`", ARRAY_A ) );
+		$this->assertStringContainsString( 'moved out of the way and kept', (string) file_get_contents( $done->storage_path . '/' . ( '' !== $done->log_path ? $done->log_path : 'logs/job-' . $done->id . '.log' ) ), 'and logged' );
+	}
 }
