@@ -9,6 +9,7 @@ namespace WPCheckpoint\Jobs;
 
 use WPCheckpoint\Restore\StagingLayout;
 use WPCheckpoint\Support\Directories;
+use WPCheckpoint\Support\Paths;
 
 /**
  * Every kind of temporary thing the plugin creates on disk is listed in
@@ -48,6 +49,18 @@ use WPCheckpoint\Support\Directories;
  *   between. An orphan as soon as no live run holds its job (a probe in
  *   mu-plugins would otherwise stay loaded on every request for days):
  *   the work_dir rule, or a job without a live lease.
+ *   A staging root whose stray/ directory holds anything, or cannot be
+ *   listed, is kept (keeps_stray()): the swap's rollback moves there what
+ *   someone else put where the site's own directory had to go back, and
+ *   that is never the plugin's to delete.
+ * - maintenance_tmp: a temporary file of the maintenance file the swap
+ *   writes in ABSPATH (".maintenance.{16 hex}.tmp", AtomicFile), left only
+ *   by a process that died before its rename. No owner in the name; an
+ *   orphan after VERIFY_TTL (scan_maintenance()).
+ * - stray_table: a table the swap's rollback renamed out of the way
+ *   (TempTables::stray()): someone else's, created under a name the old
+ *   site's table had to go back to. Never an orphan: it is reported, and
+ *   left for the administrator.
  *
  * Only entries whose name carries one of this installation's storage
  * tokens are ever listed (scan_site(), Directories::own_tokens()); another
@@ -67,7 +80,20 @@ final class Residue {
 	const STAGE_DIR  = 'stage_dir';
 	const PROBE      = 'probe';
 
-	const KINDS = array( self::WORK_DIR, self::TEMP_TABLE, self::VERIFY_DIR, self::STRAY, self::STAGE_DIR, self::PROBE );
+	const MAINTENANCE_TMP = 'maintenance_tmp';
+	const STRAY_TABLE     = 'stray_table';
+
+	const KINDS = array( self::WORK_DIR, self::TEMP_TABLE, self::VERIFY_DIR, self::STRAY, self::STAGE_DIR, self::PROBE, self::MAINTENANCE_TMP, self::STRAY_TABLE );
+
+	/**
+	 * The directory in a staging root where the swap's rollback moves what is in its way.
+	 */
+	const STRAY_DIR = 'stray';
+
+	/**
+	 * The temporary names of the maintenance file (AtomicFile: the name, a dot, 16 hex characters, ".tmp").
+	 */
+	const MAINTENANCE_TMP_NAME = '/\A\.maintenance\.[0-9a-f]{16}\.tmp\z/';
 
 	const TMP            = 'tmp';
 	const WORK_PREFIX    = 'job-';
@@ -242,7 +268,48 @@ final class Residue {
 	}
 
 	/**
-	 * Whether an unowned entry (verify_dir, stray) is old enough to remove.
+	 * Whether a staging root must be kept for what the swap's rollback moved into it: its stray/ directory holds
+	 * an entry, or is there and cannot be listed (not knowing keeps it). A root without one (positively: lstat
+	 * says there is none) is not kept for this.
+	 *
+	 * @param string $root Staging root.
+	 * @return bool
+	 */
+	public static function keeps_stray( string $root ): bool {
+		$dir = rtrim( $root, '/\\' ) . DIRECTORY_SEPARATOR . self::STRAY_DIR;
+		clearstatcache( true, $dir );
+		if ( false === @lstat( $dir ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- not there: nothing to keep.
+			return ! Paths::positively_gone( $dir );
+		}
+		$entries = @scandir( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- unreadable: kept.
+		return ! is_array( $entries ) || array() !== array_diff( $entries, array( '.', '..' ) );
+	}
+
+	/**
+	 * The maintenance file's temporary files left in a directory (ABSPATH).
+	 *
+	 * @param string $dir Directory.
+	 * @return array<int, array{kind: string, path: string, id: int, mtime: int}>
+	 */
+	public static function scan_maintenance( string $dir ): array {
+		$out     = array();
+		$entries = '' === $dir ? false : @scandir( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- an unreadable directory is simply nothing to reap.
+		foreach ( is_array( $entries ) ? $entries : array() as $name ) {
+			if ( 1 !== preg_match( self::MAINTENANCE_TMP_NAME, (string) $name ) ) {
+				continue;
+			}
+			$path = rtrim( $dir, '/\\' ) . DIRECTORY_SEPARATOR . $name;
+			$stat = @lstat( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- gone meanwhile: skipped.
+			if ( false === $stat || 0100000 !== ( $stat['mode'] & 0170000 ) ) {
+				continue; // Only a regular file: AtomicFile never makes anything else.
+			}
+			$out[] = self::entry( self::MAINTENANCE_TMP, $path, 0, (int) $stat['mtime'] );
+		}
+		return $out;
+	}
+
+	/**
+	 * Whether an unowned entry (verify_dir, stray, maintenance_tmp) is old enough to remove.
 	 *
 	 * @param array{kind: string, path: string, id: int, mtime: int} $entry Entry from scan().
 	 * @param int                                                    $now   Current time.
@@ -254,6 +321,8 @@ final class Residue {
 				return $entry['mtime'] + self::VERIFY_TTL <= $now;
 			case self::STRAY:
 				return $entry['mtime'] + self::STRAY_TTL <= $now;
+			case self::MAINTENANCE_TMP:
+				return $entry['mtime'] + self::VERIFY_TTL <= $now;
 			default:
 				return false;
 		}

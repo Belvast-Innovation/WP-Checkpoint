@@ -21,6 +21,8 @@ final class OwnTablesTest extends TestCase {
 			TempTables::ledger( 'abcdef12', 7, '1a2b' ),
 			TempTables::old( '0123456789', 7, 'ffff', 'options' ),
 			TempTables::old( '0123456789', 7, 'ffff', str_repeat( 'x', 80 ) ),
+			TempTables::stray( '0123456789', 7, '0f0f', 'options' ),
+			TempTables::stray( '0123456789', 1234567, '0f0f', str_repeat( 'x', 80 ) ),
 		);
 		foreach ( $names as $name ) {
 			$this->assertTrue( OwnTables::generated( $name ), $name );
@@ -29,13 +31,13 @@ final class OwnTablesTest extends TestCase {
 	}
 
 	public function test_a_site_whose_prefix_looks_like_them_keeps_its_tables(): void {
-		foreach ( array( 'wcp_', 'w', 'wc', 'wcp', 'wcptmp', 'wcpold_' ) as $prefix ) {
+		foreach ( array( 'wcp_', 'w', 'wc', 'wcp', 'wcptmp', 'wcpold_', 'wcpstray', 'wcpstray_' ) as $prefix ) {
 			foreach ( array( 'posts', 'options', 'wc_orders', 'cptmp_notes', 'ptmpabcdef12_notes' ) as $table ) {
 				$this->assertFalse( OwnTables::is_own( $prefix . $table ), $prefix . $table );
 			}
 		}
 		// Near misses of the grammar: no job id, job id 0, upper-case hex, short token, no run, another word.
-		foreach ( array( 'wcptmpabcdef_1a2b_posts', 'wcptmpabcdef_0_1a2b_posts', 'wcptmpABCDEF_7_1a2b_posts', 'wcptmpabcde_7_1a2b_posts', 'wcptmpabcdef_7_posts', 'wcpoldabcdef_7_1a2b_', 'wcpnewabcdef_7_1a2b_posts', 'wcptmpabcdef_7_1a2b_' . str_repeat( 'x', 60 ) ) as $name ) {
+		foreach ( array( 'wcptmpabcdef_1a2b_posts', 'wcptmpabcdef_0_1a2b_posts', 'wcptmpABCDEF_7_1a2b_posts', 'wcptmpabcde_7_1a2b_posts', 'wcptmpabcdef_7_posts', 'wcpoldabcdef_7_1a2b_', 'wcpstrayabcdef_7_1a2b_', 'wcpstrayabcdef_7_posts', 'wcpnewabcdef_7_1a2b_posts', 'wcptmpabcdef_7_1a2b_' . str_repeat( 'x', 60 ) ) as $name ) {
 			$this->assertFalse( OwnTables::generated( $name ), $name );
 		}
 	}

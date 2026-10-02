@@ -1574,9 +1574,29 @@ final class JobRepository {
 			if ( ! $this->is_site_orphan( $entry, $owners ) ) {
 				continue;
 			}
+			if ( Residue::STAGE_DIR === $entry['kind'] && Residue::keeps_stray( $entry['path'] ) ) {
+				continue; // What the swap's rollback moved aside is someone's; it stays (logged when it was moved).
+			}
 			$result  = $this->delete_tree( $entry['parent'], $entry['path'], $budget );
 			$budget -= $result['deleted'] + count( $result['failed'] );
 			$this->report_reclaim( $entry['kind'] . ' of job ' . $entry['id'], $result );
+		}
+		// The maintenance file's temporary files a swap that died before its rename left in ABSPATH.
+		foreach ( Residue::scan_maintenance( defined( 'ABSPATH' ) ? (string) ABSPATH : '' ) as $entry ) {
+			if ( $budget <= 0 ) {
+				return;
+			}
+			if ( ! Residue::is_expired( $entry, $now ) ) {
+				continue;
+			}
+			--$budget;
+			try {
+				if ( ! Deleter::delete_maintenance_file( (string) ABSPATH, basename( $entry['path'] ) ) ) {
+					$this->directories->log_event( 'A temporary maintenance file of a restore could not be removed: ' . basename( $entry['path'] ) );
+				}
+			} catch ( DeletionRefused $e ) {
+				$this->directories->log_event( $e->getMessage() );
+			}
 		}
 		$this->drop_tables_of(
 			$token,
@@ -1703,6 +1723,11 @@ final class JobRepository {
 			}
 			if ( $budget <= 0 ) {
 				return false;
+			}
+			if ( Residue::STAGE_DIR === $entry['kind'] && Residue::keeps_stray( $entry['path'] ) ) {
+				// What the swap's rollback moved aside is someone's: the root stays, and that is not a failure.
+				$this->directories->log_event( sprintf( 'A staging root of job %d holds what the swap\'s rollback moved out of the way; it was left in place.', $job->id ) );
+				continue;
 			}
 			$result  = $this->delete_tree( $entry['parent'], $entry['path'], $budget );
 			$budget -= $result['deleted'] + count( $result['failed'] );

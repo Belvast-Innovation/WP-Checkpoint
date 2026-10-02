@@ -214,9 +214,25 @@ final class Uninstaller {
 			return $result;
 		}
 		foreach ( Residue::scan_site( Residue::site_dirs( ScanRoots::site_directories() ), Directories::own_tokens( $state ) ) as $entry ) {
+			if ( Residue::STAGE_DIR === $entry['kind'] && Residue::keeps_stray( $entry['path'] ) ) {
+				continue; // What a swap's rollback moved out of the way is someone's data, not the plugin's.
+			}
 			$part               = self::delete_tree( $entry['parent'], $entry['path'] );
 			$result['deleted'] += $part['deleted'];
 			$result['failed']   = array_merge( $result['failed'], $part['failed'] );
+		}
+		// A swap that died before its rename left a temporary maintenance file; never the maintenance file itself,
+		// which a swap only leaves while it holds the site (and then nothing is uninstalled).
+		foreach ( Residue::scan_maintenance( defined( 'ABSPATH' ) ? (string) ABSPATH : '' ) as $entry ) {
+			try {
+				if ( Deleter::delete_maintenance_file( (string) ABSPATH, basename( $entry['path'] ) ) ) {
+					++$result['deleted'];
+				} else {
+					$result['failed'][] = $entry['path'];
+				}
+			} catch ( DeletionRefused $e ) {
+				$result['failed'][] = $entry['path'];
+			}
 		}
 		return $result;
 	}
