@@ -346,6 +346,23 @@ final class JobRepository {
 	}
 
 	/**
+	 * The ids of the jobs that hold the site half changed (Job::SITE_CHANGING: a restore's swap under way or being
+	 * rolled back), whatever their status.
+	 *
+	 * @return int[]
+	 */
+	public function changing_site(): array {
+		global $wpdb;
+		if ( ! Schema::table_exists() ) {
+			return array();
+		}
+		$table = $wpdb->base_prefix . Schema::JOBS_TABLE;
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix.
+		$ids = $wpdb->get_col( $wpdb->prepare( "SELECT id FROM {$table} WHERE site_state = %d ORDER BY id", Job::SITE_CHANGING ) );
+		return array_map( 'intval', is_array( $ids ) ? $ids : array() );
+	}
+
+	/**
 	 * Number of jobs per status.
 	 *
 	 * @return array<string, int>

@@ -11,8 +11,9 @@ use PHPUnit\Framework\TestResult;
 use PHPUnit\Framework\TestSuite;
 
 /**
- * What the integration tests leave behind: the restore's tables ("wcptmp", "wcpold") in the database, and this
- * plugin's and its tests' entries in the run's own temporary directory. A test that leaves one fails, named, and what
+ * What the integration tests leave behind: the restore's tables ("wcptmp", "wcpold", "wcpstray") in the database,
+ * the swap's maintenance file (and its temporary names) in ABSPATH, and this plugin's and its tests' entries in the
+ * run's own temporary directory. A test that leaves one fails, named, and what
  * it left is removed so the next test starts clean; a test class that leaves one in its class-level set-up fails as a
  * class; and the run fails when any is left at its end. What an earlier run left is reported when the run starts; its
  * tables are removed (the tests database is taken to be this run's while it runs), anything else is left alone.
@@ -288,6 +289,15 @@ final class Leftovers implements TestListener {
 		foreach ( self::tables() as $table ) {
 			$items[] = 'table:' . $table;
 		}
+		// The swap's maintenance file and its temporary names in ABSPATH (the maintenance mode tests write there:
+		// wp_is_maintenance_mode() reads that file only).
+		if ( defined( 'ABSPATH' ) ) {
+			foreach ( (array) @scandir( ABSPATH ) as $entry ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a test fixture.
+				if ( '.maintenance' === $entry || 1 === preg_match( \WPCheckpoint\Jobs\Residue::MAINTENANCE_TMP_NAME, (string) $entry ) ) {
+					$items[] = 'maintenance:' . rtrim( ABSPATH, '/' ) . '/' . $entry;
+				}
+			}
+		}
 		$dir = self::run_temp_dir();
 		if ( '' !== $dir ) {
 			foreach ( (array) scandir( $dir ) as $entry ) {
@@ -317,6 +327,15 @@ final class Leftovers implements TestListener {
 		foreach ( $items as $item ) {
 			if ( 0 === strpos( $item, 'table:' ) ) {
 				mysqli_query( $dbh, 'DROP TABLE IF EXISTS `' . str_replace( '`', '``', substr( $item, 6 ) ) . '`' );
+			} elseif ( 0 === strpos( $item, 'maintenance:' ) ) {
+				$path = substr( $item, 12 );
+				$text = (string) @file_get_contents( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a test fixture.
+				// Only what this plugin writes: a restore's mark (or a temporary name of one); anything else is reported.
+				if ( '.maintenance' !== basename( $path ) || 1 === preg_match( '/\/\/ WP Checkpoint restore [0-9a-f]{32}\n\z/', $text ) ) {
+					\WPCheckpoint\Support\Deleter::delete_maintenance_file( dirname( $path ), basename( $path ) );
+				} else {
+					fwrite( STDERR, "\nA maintenance file that is not this plugin's was left in place: {$path}\n" );
+				}
 			} elseif ( 0 === strpos( $item, 'temp:' ) ) {
 				try {
 					Sandbox::remove( substr( $item, 5 ) );

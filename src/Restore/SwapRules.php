@@ -231,8 +231,11 @@ final class SwapRules {
 	}
 
 	/**
-	 * Why a plan entry is not one the final check writes for this job ('' when it is): the plan is read from the
-	 * database and its paths and names become rename targets, so they are held to the shape the check gives them.
+	 * Why a plan entry does not have the shape of one the final check writes for this job ('' when it has): the
+	 * plan is read from the database and its paths and names become rename targets. A shape, not the entry
+	 * itself: a live path is only held to be in the directory of this job's staging root, which holds other
+	 * things too (the swap checks every entry exactly against the staging layout before it starts:
+	 * SwapStep::check_plan(); the rollback, which must not read the work directory, has only this).
 	 * A directory unit: absolute paths without "." or ".." segments; the staged and the old path under one staging
 	 * root of this job (StagingLayout's name, with the job's token and id), the old one under its "old" directory,
 	 * and the live path in the directory that holds that root. A table entry: the temporary and the old name of

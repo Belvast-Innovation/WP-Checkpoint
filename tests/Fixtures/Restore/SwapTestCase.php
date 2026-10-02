@@ -60,6 +60,9 @@ abstract class SwapTestCase extends RestoreTestCase {
 	/** @var Job|null The job of the test (for tear_down). */
 	protected $swap_job = null;
 
+	/** @var int Seconds the swap's clock is set off from the real one (here and in the killed child). */
+	protected $clock_offset = 0;
+
 	public function set_up(): void {
 		parent::set_up();
 		$this->set_up_swap();
@@ -98,6 +101,9 @@ abstract class SwapTestCase extends RestoreTestCase {
 			$wpdb->query( "INSERT INTO `{$wpdb->prefix}{$name}` (id, v) VALUES (1, 'live'), (2, 'live')" );
 		}
 		$this->swap_parts = array(
+			'now'       => function (): int {
+				return time() + $this->clock_offset;
+			},
 			'abspath'   => $this->abspath,
 			'site_dirs' => function (): array {
 				return $this->dirs;
@@ -365,6 +371,7 @@ abstract class SwapTestCase extends RestoreTestCase {
 					'plugin'  => (string) ( $this->swap_parts['plugin'] ?? '' ),
 					'packet'  => (int) ( $this->swap_parts['packet'] ?? 0 ),
 					'batch'   => (int) ( $this->swap_parts['batch'] ?? 0 ),
+					'offset'  => $this->clock_offset,
 					'admin'   => self::$admin_id,
 				)
 			)

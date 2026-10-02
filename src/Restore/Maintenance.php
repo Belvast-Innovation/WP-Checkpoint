@@ -22,7 +22,13 @@ defined( 'ABSPATH' ) || exit;
  * or not at all (AtomicFile; a half-written file would be a parse error on
  * every request), rewritten with the time of the moment between the swap's
  * steps, and removed only while it still holds this restore's own
- * contents (its mark, new_mark(): random, kept in the swap's cursor). A maintenance file of anyone else (an update in progress, an
+ * contents (its mark, new_mark(): random, kept in the swap's cursor).
+ * While the site is half swapped the file is held (hold()): its time is
+ * HELD, far in the future, so WordPress never lets it lapse after its ten
+ * minutes. A run that dies there leaves the site answering with the
+ * maintenance page, not a mix of the old site and the restored one that
+ * visitors could write to; WP-CLI, which runs the swap and its rollback,
+ * does not stop for a maintenance file. A maintenance file of anyone else (an update in progress, an
  * administrator's own) is never written over or removed: state() says
  * "other" and the swap waits. Whether the file is there is told by
  * positive evidence only (lstat, or its directory listed without it); what
@@ -41,6 +47,11 @@ final class Maintenance {
 	 * Most bytes read of a maintenance file: ours is far shorter, so a longer one is someone else's.
 	 */
 	const MAX_READ = 4096;
+
+	/**
+	 * The time of a held file: 2100-01-01, which WordPress's ten minutes never reach.
+	 */
+	const HELD = 4102444800;
 
 	/**
 	 * Directory (ABSPATH, or a test's stand-in).
@@ -154,15 +165,40 @@ final class Maintenance {
 	}
 
 	/**
+	 * Put up (or keep up) this restore's file so that it never lapses (HELD), while the site is half swapped.
+	 *
+	 * @param callable|null $confirm Called right before the file is put in place.
+	 * @return void
+	 * @throws \RuntimeException When another maintenance file is there or what is there cannot be told.
+	 */
+	public function hold( $confirm = null ): void {
+		$this->put( self::HELD, $confirm );
+	}
+
+	/**
+	 * Whether this restore's file is there and held.
+	 *
+	 * @return bool
+	 */
+	public function is_held(): bool {
+		if ( self::OURS !== $this->state() ) {
+			return false;
+		}
+		$contents = @file_get_contents( $this->path() ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- ours: a few dozen bytes.
+		return is_string( $contents ) && self::HELD === $this->time_of( $contents );
+	}
+
+	/**
 	 * Take this restore's file down. Anything else in its place stays.
 	 *
+	 * @param callable|null $confirm Called right before the file is deleted (a lease check; throws to stop).
 	 * @return bool Whether none of this restore's is there now (removed, or none was).
 	 * @throws \WPCheckpoint\Support\DeletionRefused When the Deleter refuses the path (not ABSPATH).
 	 */
-	public function remove(): bool {
+	public function remove( $confirm = null ): bool {
 		$state = $this->state();
 		if ( self::OURS === $state ) {
-			return Deleter::delete_maintenance_file( $this->dir, self::FILE ) && self::OURS !== $this->state();
+			return Deleter::delete_maintenance_file( $this->dir, self::FILE, $confirm ) && self::OURS !== $this->state();
 		}
 		return self::UNKNOWN !== $state;
 	}

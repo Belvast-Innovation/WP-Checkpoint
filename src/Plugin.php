@@ -165,11 +165,45 @@ final class Plugin {
 			\WP_CLI::add_command( 'wpcheckpoint verify', new VerifyCommand( $this->job_presenter(), $this->directories() ) );
 			\WP_CLI::add_command( 'wpcheckpoint export', new ExportCommand( $this->job_actions(), $this->job_presenter(), $this->directories() ) );
 			\WP_CLI::add_command( 'wpcheckpoint site-identity', new SiteIdentityCommand( $this->job_presenter(), $this->directories() ) );
+			// Every command of the plugin says it first when a restore left the site half swapped ("before_invoke"
+			// fires for a command's own parent only, never for "wpcheckpoint" under "wpcheckpoint job list").
+			\WP_CLI::add_hook(
+				'before_run_command',
+				function ( $args = array() ): void {
+					if ( ! is_array( $args ) || 'wpcheckpoint' !== ( $args[0] ?? '' ) ) {
+						return;
+					}
+					foreach ( $this->half_swapped_warnings() as $warning ) {
+						\WP_CLI::warning( $warning );
+					}
+				}
+			);
 		}
 
 		if ( is_admin() ) {
 			$this->boot_admin();
 		}
+	}
+
+	/**
+	 * What a WP-CLI command says first while a restore holds the site half swapped: one line per such job, with the
+	 * command that puts the site back (the swap is not complete, so running the job rolls it back). Empty when the
+	 * jobs cannot be read (nothing to say for sure).
+	 *
+	 * @return string[]
+	 */
+	public function half_swapped_warnings(): array {
+		try {
+			$ids = $this->jobs()->changing_site();
+		} catch ( \Throwable $e ) {
+			return array();
+		}
+		$out = array();
+		foreach ( $ids as $id ) {
+			/* translators: 1: job id, 2: job id */
+			$out[] = sprintf( __( 'The site is half swapped by restore job %1$d: visitors see the maintenance page until it is put back. Put it back now with: wp wpcheckpoint job run %2$d', 'wp-checkpoint' ), $id, $id );
+		}
+		return $out;
 	}
 
 	/**

@@ -58,6 +58,10 @@ if ( (int) $config['packet'] > 0 ) {
 if ( (int) ( $config['batch'] ?? 0 ) > 0 ) {
 	$parts['batch'] = (int) $config['batch'];
 }
+$offset       = (int) ( $config['offset'] ?? 0 );
+$parts['now'] = static function () use ( $offset ): int {
+	return time() + $offset;
+};
 \WPCheckpoint\Plugin::instance()->job_types()->add( new \WPCheckpoint\Tests\Fixtures\Jobs\FixtureJobType( (string) $config['type'], array( new \WPCheckpoint\Jobs\SwapStep( null, $parts ) ) ) );
 wp_set_current_user( (int) $config['admin'] );
 

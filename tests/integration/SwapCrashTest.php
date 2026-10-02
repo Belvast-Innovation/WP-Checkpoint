@@ -317,13 +317,15 @@ final class SwapCrashTest extends SwapTestCase {
 	}
 
 	public function test_k11_to_k15_killed_after_the_swap_was_made_it_goes_forward(): void {
-		foreach ( array( 'committed', 'flushed', 'rewrite', 'cron', 'exited' ) as $seam ) {
+		foreach ( array( 'committed', 'flushed', 'rewrite', 'cron', 'done_recorded', 'exited' ) as $seam ) {
 			list( $done, $before ) = $this->crash(
 				$seam,
 				1,
 				function ( Job $job ) use ( $seam ): void {
 					$this->assertSame( Job::SITE_SWAPPED, $job->site_state, $seam );
-					$this->assertSame( 'committed', $job->cursor['phase'], $seam );
+					// Recorded as done before the maintenance file comes down, the last step.
+					$this->assertSame( in_array( $seam, array( 'done_recorded', 'exited' ), true ) ? 'done' : 'committed', $job->cursor['phase'], $seam );
+					$this->assertSame( 'exited' !== $seam, file_exists( $this->abspath . '/.maintenance' ), 'the file is up until the last step: ' . $seam );
 				}
 			);
 			$this->assertSwapped( $done, $before, $seam );
@@ -347,7 +349,9 @@ final class SwapCrashTest extends SwapTestCase {
 			$before['tables']['swt_new'] = array();
 			$this->killed_at( $job, $case[0], $case[1] );
 			$left = Plugin::instance()->jobs()->find( $job->id );
-			$this->assertSame( 'reverted' === $case[0] ? 'reverted' : 'rollback', $left->cursor['phase'], $case[0] );
+			// Recorded as put back before the maintenance file comes down, the last step.
+			$this->assertSame( in_array( $case[0], array( 'reverted', 'maintenance_down' ), true ) ? 'reverted' : 'rollback', $left->cursor['phase'], $case[0] );
+			$this->assertSame( 'maintenance_down' !== $case[0], file_exists( $this->abspath . '/.maintenance' ), 'up until the last step: ' . $case[0] );
 			$done = $this->cli_run( $job );
 			$this->assertPutBack( $done, $before, 'killed at ' . $case[0] );
 			$this->undo( $done );
@@ -437,7 +441,7 @@ final class SwapCrashTest extends SwapTestCase {
 		$this->assertSwapped( $this->cli_run( $job ), $before, 'K26 after the swap' );
 	}
 
-	public function test_k27_the_maintenance_file_is_refreshed_between_the_steps(): void {
+	public function test_k27_the_maintenance_file_is_held_while_the_site_is_half_swapped_and_refreshed_before_and_after(): void {
 		$clock = 1800000000;
 		$times = array();
 		$this->swap_parts['now'] = static function () use ( &$clock ): int {
@@ -445,7 +449,7 @@ final class SwapCrashTest extends SwapTestCase {
 		};
 		$this->swap_parts['at']  = function ( string $point ) use ( &$times, &$clock ): void {
 			$this->seams[] = $point;
-			if ( in_array( $point, array( 'dir_aside', 'dir_in', 'carried', 'batch_recorded' ), true ) ) {
+			if ( in_array( $point, array( 'maintenance', 'dir_aside', 'dir_in', 'carried', 'batch_recorded', 'flushed', 'rewrite', 'cron' ), true ) ) {
 				$file = new Maintenance( $this->abspath, $this->swap_job->cursor['mark'] ?? Plugin::instance()->jobs()->find( $this->swap_job->id )->cursor['mark'] );
 				$text = (string) file_get_contents( $this->abspath . '/.maintenance' );
 				$time = $file->time_of( $text );
@@ -462,6 +466,12 @@ final class SwapCrashTest extends SwapTestCase {
 		$this->assertGreaterThan( 5, count( $times ), 'the control: the seams were seen' );
 		$last = 0;
 		foreach ( $times as $seen ) {
+			if ( in_array( $seen[0], array( 'dir_aside', 'dir_in', 'carried', 'batch_recorded' ), true ) ) {
+				$this->assertSame( Maintenance::HELD, $seen[1], 'held while the site is half swapped: ' . $seen[0] );
+				continue;
+			}
+			// Before the first change and after the swap is made: refreshed with the time, as always.
+			$this->assertLessThan( Maintenance::HELD, $seen[1], $seen[0] );
 			$this->assertGreaterThan( $last, $seen[1], 'refreshed before ' . $seen[0] );
 			$last = $seen[1];
 		}
@@ -644,5 +654,88 @@ final class SwapCrashTest extends SwapTestCase {
 		$this->assertNotSame( Job::FAILURE_FINAL, $done->failure_kind );
 		$this->assertSame( $before, $this->site(), 'nothing renamed' );
 		$this->assertNotContains( 'entered', $this->seams );
+	}
+
+	public function test_a_cache_that_cannot_be_flushed_after_the_rollback_is_waited_out_with_the_site_back(): void {
+		$job    = $this->at_swap();
+		$before = $this->site();
+		$this->killed_at( $job, 'dir_in', 2 );
+		$this->retype(
+			$job,
+			array(
+				'flush' => static function (): void {
+					throw new \RuntimeException( 'the cache server is away' );
+				},
+			)
+		);
+		$result = $this->cli_tick( $job );
+		$this->assertSame( TickResult::WAITING, $result->status, $result->message );
+		$this->assertStringContainsString( 'The object cache could not be flushed', $result->message );
+		$now = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertSame( 'rollback', $now->cursor['phase'], 'not yet recorded as put back' );
+		$this->assertTrue( file_exists( $this->abspath . '/.maintenance' ), 'the file stays up meanwhile' );
+		$this->retype( $job );
+		$this->assertPutBack( $this->cli_run( $job ), $before, 'once the cache is back' );
+	}
+
+	public function test_a_plan_entry_of_the_right_shape_that_is_not_the_checks_stops_the_swap_before_it_starts(): void {
+		global $wpdb;
+		$job    = $this->at_swap();
+		$before = $this->site();
+		$plan   = $this->plan_of( $job );
+		$entry  = null;
+		foreach ( $plan['dirs'] as $dir ) {
+			if ( false !== strpos( $dir['stage'], '/other-content/' ) ) {
+				$entry = $dir;
+			}
+		}
+		$this->assertNotNull( $entry, 'the control: the plan has an entry of other content' );
+		// Next to the staging root, so of the right shape, but not the entry the check builds for that staged copy.
+		$forged = dirname( $entry['live'] ) . '/live-only.txt';
+		$this->assertSame( '', \WPCheckpoint\Restore\SwapRules::invalid( array( 'live' => $forged ) + $entry, $job->storage_token, $job->id ), 'the control: the shape alone lets it through' );
+		$table = $wpdb->base_prefix . \WPCheckpoint\Restore\SwapPlan::TABLE;
+		$wpdb->query( $wpdb->prepare( "UPDATE `{$table}` SET live = %s WHERE job_id = %d AND seq = %d", $forged, $job->id, $entry['seq'] ) );
+		$wpdb->query( 'COMMIT' );
+		$done = $this->cli_run( $job );
+		$this->assertSame( Job::FAILED, $done->status );
+		$this->assertStringContainsString( 'a directory entry the final check does not write', (string) $done->last_error );
+		$this->assertSame( SwapCheckStep::ID, $done->cursor[ JobRepository::RETRY_FROM_KEY ] ?? null );
+		$this->assertNotContains( 'entered', $this->seams );
+		$this->assertSame( $before, $this->site() );
+	}
+
+	public function test_a_table_whose_restored_copy_went_before_the_swap_is_left_as_it_is_and_said(): void {
+		global $wpdb;
+		$job    = $this->at_swap();
+		$before = $this->site();
+		$plan   = $this->plan_of( $job );
+		$this->killed_at( $job, 'batch_recorded', 1 );
+		$keep = null;
+		foreach ( $plan['tables'] as $entry ) {
+			if ( $wpdb->prefix . 'swt_keep' === $entry['live'] ) {
+				$keep = $entry;
+			}
+		}
+		$this->assertNotNull( $keep );
+		$wpdb->query( "DROP TABLE `{$keep['stage']}`" ); // The restored copy goes before the rename.
+		$wpdb->query( 'COMMIT' );
+		$done = $this->cli_run( $job );
+		$this->assertSame( Job::FAILED, $done->status );
+		$this->assertSame( $before['tables']['swt_keep'], $this->site()['tables']['swt_keep'], 'the live table stays where it is' );
+		$log = (string) file_get_contents( $done->storage_path . '/' . ( '' !== $done->log_path ? $done->log_path : 'logs/job-' . $done->id . '.log' ) );
+		$this->assertStringContainsString( 'A table of the plan was left as it is', $log );
+		$this->assertStringContainsString( 'swt_keep', $log );
+	}
+
+	public function test_every_command_of_the_plugin_says_first_that_the_site_is_half_swapped(): void {
+		$job = $this->at_swap();
+		$this->assertSame( array(), Plugin::instance()->half_swapped_warnings(), 'the control: nothing to say before the swap' );
+		$this->killed_at( $job, 'dir_in', 2 );
+		$warnings = Plugin::instance()->half_swapped_warnings();
+		$this->assertCount( 1, $warnings );
+		$this->assertStringContainsString( 'half swapped by restore job ' . $job->id, $warnings[0] );
+		$this->assertStringContainsString( 'wp wpcheckpoint job run ' . $job->id, $warnings[0] );
+		$this->assertSame( Job::FAILED, $this->cli_run( $job )->status );
+		$this->assertSame( array(), Plugin::instance()->half_swapped_warnings(), 'put back: nothing to say' );
 	}
 }

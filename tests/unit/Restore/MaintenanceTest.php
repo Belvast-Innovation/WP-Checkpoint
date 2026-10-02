@@ -61,6 +61,47 @@ final class MaintenanceTest extends TestCase {
 		$this->assertNotSame( $one, Maintenance::new_mark() );
 	}
 
+	public function test_a_held_file_never_lapses_and_is_still_this_restores(): void {
+		$file = $this->ours();
+		$file->put( 1800000000 );
+		$this->assertFalse( $file->is_held(), 'the control: a file with the time is not held' );
+		$file->hold();
+		$this->assertTrue( $file->is_held() );
+		$this->assertSame( Maintenance::OURS, $file->state() );
+		$this->assertSame( Maintenance::HELD, $file->time_of( (string) file_get_contents( $file->path() ) ) );
+		$this->assertGreaterThan( 2000000000, Maintenance::HELD, 'far beyond any time WordPress compares it with' );
+		$this->assertTrue( $file->remove() );
+	}
+
+	public function test_the_lease_is_checked_right_before_the_file_is_deleted_and_stops_it(): void {
+		$file = $this->ours();
+		$file->put( 1800000000 );
+		$seen = array();
+		try {
+			$file->remove(
+				function () use ( &$seen, $file ): void {
+					$seen[] = file_exists( $file->path() );
+					throw new \RuntimeException( 'the lease is gone' );
+				}
+			);
+			$this->fail( 'removed without the lease' );
+		} catch ( \RuntimeException $e ) {
+			$this->assertSame( 'the lease is gone', $e->getMessage() );
+		}
+		$this->assertSame( array( true ), $seen, 'asked once, with the file still there' );
+		$this->assertFileExists( $file->path(), 'and it stays' );
+		$asked = 0;
+		$this->assertTrue(
+			$file->remove(
+				static function () use ( &$asked ): void {
+					++$asked;
+				}
+			)
+		);
+		$this->assertSame( 1, $asked, 'the control: asked, then deleted' );
+		$this->assertFileDoesNotExist( $file->path() );
+	}
+
 	public function test_another_maintenance_file_is_never_written_over_or_removed(): void {
 		$file   = $this->ours();
 		$others = array(
