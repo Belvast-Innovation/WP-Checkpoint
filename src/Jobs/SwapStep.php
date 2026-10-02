@@ -93,6 +93,19 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 	const PAGE = 500;
 
 	/**
+	 * Why a swap was rolled back, as its cursor keeps it (a code: the cursor holds identifiers and positions, not
+	 * texts with paths), and what the job's error says of it in a later tick.
+	 */
+	const INTERRUPTED = 'interrupted';
+	const INCOMPLETE  = 'incomplete';
+	const STOPPED     = 'stopped';
+	const REASONS     = array(
+		self::INTERRUPTED => 'The swap was interrupted before it was complete.',
+		self::INCOMPLETE  => 'After the renames, not every table of the plan was in its place.',
+		self::STOPPED     => 'The swap stopped (the job log says why).',
+	);
+
+	/**
 	 * Phases in which the site is being changed (or put back), and in which it is swapped.
 	 */
 	const CHANGING = array( 'enter', 'dirs', 'carry', 'rename', 'rollback' );
@@ -196,7 +209,7 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 				return $this->swap( $context, $db, $cursor );
 			}
 			if ( in_array( $phase, array( 'enter', 'dirs', 'carry' ), true ) ) {
-				throw $this->roll_back( $context, $db, $cursor, 'The swap was interrupted before it was complete.' );
+				throw $this->roll_back( $context, $db, $cursor, self::INTERRUPTED );
 			}
 			if ( 'rename' === $phase ) {
 				$entries = $this->entries( $context, $db, $cursor );
@@ -211,7 +224,7 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 					$this->at( 'committed' );
 					return $this->after( $context, $db, $cursor );
 				}
-				throw $this->roll_back( $context, $db, $cursor, 'The swap was interrupted while the tables were renamed.' );
+				throw $this->roll_back( $context, $db, $cursor, self::INTERRUPTED );
 			}
 			if ( 'rollback' === $phase ) {
 				throw $this->roll_back( $context, $db, $cursor, (string) ( $cursor['reason'] ?? '' ) );
@@ -262,12 +275,10 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 		if ( $attempt < 1 || $plan->complete_count( $context->job()->id, $attempt ) !== $count ) {
 			throw new RetryFrom( 'The swap\'s plan is not complete as the final check recorded it; the final check writes it again.', SwapCheckStep::ID );
 		}
-		$job    = $context->job();
-		$random = (string) RestorePreflightStep::load_plan( $work )['random'];
 		return array(
 			'phase'   => 'recount',
 			'attempt' => $attempt,
-			'mark'    => Maintenance::mark( $job->storage_token, $job->id, $random ),
+			'mark'    => Maintenance::new_mark(),
 			'i'       => 0,
 			'key'     => null,
 			'sum'     => 0,
@@ -361,8 +372,8 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 			throw new TransientFailure( 'Whether a maintenance file is in place cannot be told; the swap waits.' );
 		}
 		if ( Maintenance::OTHER === $state ) {
-			$context->logger()->info( 'Another maintenance file is in place (an update?); the swap waits for it to go' );
-			return StepResult::wait( 60, $cursor, __( 'The site is in maintenance mode for something else (an update?); the swap waits until that is over', 'wp-checkpoint' ) );
+			$context->logger()->info( 'Another maintenance file is in place; the swap waits for it to go' );
+			return StepResult::wait( 60, $cursor, __( 'Another maintenance file is in the WordPress directory (.maintenance: an update in progress, or one left by an update that stopped); the swap waits until it is gone. If nothing is being updated, remove that file.', 'wp-checkpoint' ) );
 		}
 		return null;
 	}
@@ -386,6 +397,7 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 			}
 		}
 		$carry   = $this->carry_tables( $entries['tables'] );
+		$record  = null === $carry ? null : $this->carry_record( $context, $db );
 		$file    = $this->maintenance( $cursor );
 		$attempt = $cursor['attempt'];
 		$mark    = $cursor['mark'];
@@ -417,6 +429,11 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 					$this->at( 'dir_aside_recorded' );
 					$file->put( $this->now(), array( $context, 'confirm_lease' ) );
 				}
+				if ( $this->exists( $entry['live'] ) ) {
+					// Made since the plan (or since its live one moved aside): a rename would replace a file or an
+					// empty directory without a word.
+					throw new \RuntimeException( sprintf( 'Something is at %s that was not there when the swap planned to put the restored copy there.', $entry['live'] ) );
+				}
 				$this->rename( $context, $entry['stage'], $entry['live'] );
 				$this->at( 'dir_in' );
 			}
@@ -430,7 +447,7 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 			$guard = null;
 			if ( null !== $carry ) {
 				$guard = $this->state_carry( $db );
-				$guard->carry( $carry['live_options'], $carry['temp_options'], $carry['live_meta'], $carry['temp_meta'] );
+				$guard->carry( $carry['live_options'], $carry['temp_options'], $carry['live_meta'], $carry['temp_meta'], $record );
 			}
 			$this->at( 'carried' );
 			$this->rename_tables( $context, $db, $cursor, $entries['tables'], $guard, $carry );
@@ -439,12 +456,13 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 		} catch ( StaleJob $e ) {
 			throw $e;
 		} catch ( \Throwable $e ) {
-			throw $this->roll_back( $context, $db, $cursor, self::reason( $e ) );
+			$context->logger()->warning( 'The swap stopped', array( 'error' => $e->getMessage() ) );
+			throw $this->roll_back( $context, $db, $cursor, self::STOPPED, self::reason( $e ) );
 		}
 		// Made only by the evidence: a listing that cannot be read is waited out, and the next tick decides from
 		// what is there then (the cursor says the renames were under way).
 		if ( ! SwapRules::committed( $entries['tables'], $this->there( $db, $entries['tables'] ) ) ) {
-			throw $this->roll_back( $context, $db, $cursor, 'After the renames, not every table of the plan is in its place.' );
+			throw $this->roll_back( $context, $db, $cursor, self::INCOMPLETE );
 		}
 		$cursor = array(
 			'phase'   => 'committed',
@@ -533,11 +551,15 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 	 * @param JobContext           $context Context.
 	 * @param Queries              $db      Connection.
 	 * @param array<string, mixed> $cursor  Cursor.
-	 * @param string               $reason  Why.
+	 * @param string               $reason  Why: one of REASONS (the cursor keeps only that).
+	 * @param string               $detail  Why in words, for this tick's error (another tick says the reason's text).
 	 * @return \RuntimeException What ends the job, for the caller to throw (ended()).
 	 * @throws TransientFailure When what is there cannot be told (the rollback goes on later).
 	 */
-	private function roll_back( JobContext $context, Queries $db, array $cursor, string $reason ): \RuntimeException {
+	private function roll_back( JobContext $context, Queries $db, array $cursor, string $reason, string $detail = '' ): \RuntimeException {
+		if ( ! isset( self::REASONS[ $reason ] ) ) {
+			$reason = self::INTERRUPTED;
+		}
 		HostFunctions::set_time_limit( 0 );
 		if ( 'rollback' !== ( $cursor['phase'] ?? '' ) ) {
 			$cursor = array(
@@ -547,7 +569,7 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 				'reason'  => $reason,
 			);
 			$context->checkpoint( $cursor, 90, __( 'Putting the site back as it was', 'wp-checkpoint' ) );
-			$context->logger()->warning( 'The swap is rolled back', array( 'reason' => $reason ) );
+			$context->logger()->warning( 'The swap is rolled back', array( 'reason' => self::REASONS[ $reason ] ) );
 		}
 		$this->at( 'rollback' );
 		$entries = $this->entries( $context, $db, $cursor );
@@ -597,20 +619,24 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 			}
 		}
 		$this->at( 'dirs_back' );
+		// What requests cached of the half-swapped site (a persistent cache outlives this process).
+		$this->flush();
+		$context->confirm_lease();
 		if ( ! $file->remove() ) {
 			throw new TransientFailure( 'The maintenance file could not be taken down yet.' );
 		}
 		$this->at( 'maintenance_down' );
+		$reason = (string) ( $cursor['reason'] ?? $reason );
 		$context->checkpoint(
 			array(
 				'phase'  => 'reverted',
-				'reason' => (string) ( $cursor['reason'] ?? $reason ),
+				'reason' => $reason,
 			),
 			100,
 			__( 'The site is as it was before the restore', 'wp-checkpoint' )
 		);
 		$this->at( 'reverted' );
-		return $this->ended( $context, (string) ( $cursor['reason'] ?? $reason ) );
+		return $this->ended( $context, '' !== $detail ? $detail : $reason );
 	}
 
 	/**
@@ -625,7 +651,8 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 		if ( 0 !== $context->job()->cancel_requested ) {
 			return new Cancelled( 'The restore was cancelled; the site is as it was before it.' );
 		}
-		return new RetryFrom( trim( $reason . ' The swap was rolled back: the site is as it was before the restore.' ), SwapCheckStep::ID );
+		$text = self::REASONS[ $reason ] ?? $reason;
+		return new RetryFrom( trim( $text . ' The swap was rolled back: the site is as it was before the restore.' ), SwapCheckStep::ID );
 	}
 
 	/**
@@ -644,11 +671,7 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 			switch ( (string) ( $cursor['post'] ?? '' ) ) {
 				case 'cache':
 					// Before anything reads the site through WordPress: this process holds the old site's options.
-					if ( isset( $this->parts['flush'] ) ) {
-						call_user_func( $this->parts['flush'] );
-					} else {
-						wp_cache_flush();
-					}
+					$this->flush();
 					$this->at( 'flushed' );
 					$cursor['post'] = 'rewrite';
 					break;
@@ -673,6 +696,10 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 					$cursor['post'] = 'exit';
 					break;
 				case 'exit':
+					// Again: requests that came while a stopped run waited (the maintenance file lapses after ten
+					// minutes) may have cached the restored options before the writes above.
+					$this->flush();
+					$context->confirm_lease();
 					if ( ! $this->maintenance( $cursor )->remove() ) {
 						throw new TransientFailure( 'The maintenance file could not be taken down yet.' );
 					}
@@ -720,6 +747,11 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 		while ( true ) {
 			$page = $plan->read( $job, $attempt, $after, self::PAGE );
 			foreach ( $page as $entry ) {
+				$why = SwapRules::invalid( $entry, $context->job()->storage_token, $job );
+				if ( '' !== $why ) {
+					// Not FINAL: a job that holds the site changed keeps its retry.
+					throw new \RuntimeException( sprintf( 'The swap\'s plan in the database holds an entry the final check does not write (%s); nothing more is renamed by it.', $why ) );
+				}
 				$out[ SwapPlan::DIR === $entry['kind'] ? 'dirs' : 'tables' ][] = $entry;
 				$after = $entry['seq'];
 			}
@@ -852,6 +884,26 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 	}
 
 	/**
+	 * What records the carry's change of each table's rows in the restore's ledger (a retry's count expects it).
+	 *
+	 * @param JobContext $context Context.
+	 * @param Queries    $db      Connection.
+	 * @return callable function( string $temp_table, int $delta ): void
+	 * @throws WorkLost When the plan in the work directory is gone (read before anything changes).
+	 */
+	private function carry_record( JobContext $context, Queries $db ): callable {
+		$loaded  = RestorePreflightStep::load_plan( $context->work_path() );
+		$numbers = array_column( $loaded['plan']->tables(), 'number', 'temporary' );
+		$ledger  = new Ledger( $db, TempTables::ledger( $context->job()->storage_token, $context->job()->id, (string) $loaded['random'] ), bin2hex( random_bytes( 16 ) ) );
+		return static function ( string $table, int $delta ) use ( $numbers, $ledger ): void {
+			if ( ! isset( $numbers[ $table ] ) ) {
+				throw new \RuntimeException( 'The carry changed a table the restore\'s plan does not have.' );
+			}
+			$ledger->add_carried( (int) $numbers[ $table ], $delta );
+		};
+	}
+
+	/**
 	 * The carry of this plugin's state, on the swap's connection.
 	 *
 	 * @param Queries $db Connection.
@@ -938,6 +990,19 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 		}
 		$rows = $db->rows( 'SELECT @@max_allowed_packet' );
 		return (int) ( $rows[0][0] ?? 0 );
+	}
+
+	/**
+	 * Flush the object cache (the persistent one too, through its drop-in).
+	 *
+	 * @return void
+	 */
+	private function flush(): void {
+		if ( isset( $this->parts['flush'] ) ) {
+			call_user_func( $this->parts['flush'] );
+			return;
+		}
+		wp_cache_flush();
 	}
 
 	/**

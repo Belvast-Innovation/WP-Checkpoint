@@ -5,6 +5,7 @@ namespace WPCheckpoint\Tests\Integration;
 use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\JobRepository;
 use WPCheckpoint\Jobs\SwapCheckStep;
+use WPCheckpoint\Jobs\TempTables;
 use WPCheckpoint\Jobs\TickResult;
 use WPCheckpoint\Plugin;
 use WPCheckpoint\Restore\Maintenance;
@@ -446,8 +447,11 @@ final class SwapCrashTest extends SwapTestCase {
 			$this->seams[] = $point;
 			if ( in_array( $point, array( 'dir_aside', 'dir_in', 'carried', 'batch_recorded' ), true ) ) {
 				$file = new Maintenance( $this->abspath, $this->swap_job->cursor['mark'] ?? Plugin::instance()->jobs()->find( $this->swap_job->id )->cursor['mark'] );
-				$time = $file->time_of( (string) file_get_contents( $this->abspath . '/.maintenance' ) );
+				$text = (string) file_get_contents( $this->abspath . '/.maintenance' );
+				$time = $file->time_of( $text );
 				$this->assertNotNull( $time, 'this restore\'s file is up at ' . $point );
+				$this->assertStringNotContainsString( (string) Plugin::instance()->directories()->state()['token'], $text, 'the file in the web root tells nothing of the storage directory' );
+				$this->assertStringContainsString( 'WP Checkpoint restore ', $text, 'the control: the mark is read' );
 				$times[] = array( $point, $time, $clock );
 			}
 		};
@@ -510,5 +514,135 @@ final class SwapCrashTest extends SwapTestCase {
 		$wpdb->query( 'COMMIT' );
 		Plugin::instance()->job_actions()->retry( $job->id );
 		$this->assertPutBack( $this->cli_run( $job ), $before, 'after the retry' );
+	}
+
+	/**
+	 * Retry a job that failed with a retry from the final check, then run it to its end.
+	 */
+	private function retried( Job $job ): Job {
+		Plugin::instance()->job_actions()->retry( $job->id );
+		$GLOBALS['wpdb']->query( 'COMMIT' );
+		$runner = Plugin::instance()->runner(); // The final check runs on any driver; the swap stops it for WP-CLI.
+		for ( $i = 0; $i < 200; $i++ ) {
+			$result = $this->autocommit(
+				static function () use ( $runner, $job ) {
+					return $runner->tick( $job->id, microtime( true ) );
+				}
+			);
+			if ( TickResult::CLI === $result->status || ! in_array( Plugin::instance()->jobs()->find( $job->id )->status, array( Job::QUEUED, Job::RUNNING ), true ) ) {
+				break;
+			}
+		}
+		return $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
+	}
+
+	public function test_a_retry_after_a_rollback_that_came_after_the_carry_completes_the_restore(): void {
+		$job    = $this->at_swap();
+		$before = $this->site();
+		// The live site has one of this plugin's rows the backup has not: the carry adds it to the restored options.
+		add_option( \WPCheckpoint\Support\StoredNames::reclaim_message( 987654 ), 'carried over' );
+		$GLOBALS['wpdb']->query( 'COMMIT' );
+		$this->killed_at( $job, 'carried', 1 );
+		$done = $this->cli_run( $job );
+		$this->assertPutBack( $done, $before, 'K7' );
+		$ledger = TempTables::ledger( $done->storage_token, $done->id, (string) \WPCheckpoint\Jobs\RestorePreflightStep::load_plan( $this->work( $done ) )['random'] );
+		$this->assertNotSame( '0', (string) $GLOBALS['wpdb']->get_var( "SELECT SUM(carried) FROM `{$ledger}`" ), 'the control: the carry changed the rows of the restored options' );
+		$this->assertSwapped( $this->retried( $done ), $before, 'the retry, from the final check' );
+		delete_option( \WPCheckpoint\Support\StoredNames::reclaim_message( 987654 ) );
+	}
+
+	public function test_a_retry_after_the_database_was_busy_completes_the_restore(): void {
+		global $wpdb;
+		$job    = $this->at_swap();
+		$before = $this->site();
+		$other  = \WPCheckpoint\Restore\ImportSession::open( \WPCheckpoint\Standalone\Credentials::from_wordpress() );
+		$other->run( 'LOCK TABLES `' . $wpdb->prefix . 'swt_keep` READ' );
+		try {
+			$done = $this->cli_run( $job );
+		} finally {
+			$other->run( 'UNLOCK TABLES' );
+			$other->close();
+		}
+		$this->assertStringContainsString( 'The database is busy', (string) $done->last_error );
+		$this->assertContains( 'carried', $this->seams, 'the control: the carry ran before the tables were tried' );
+		$this->assertSwapped( $this->retried( $done ), $before, 'the retry once the lock is gone' );
+	}
+
+	public function test_the_cache_is_flushed_after_the_swap_twice_and_after_a_rollback(): void {
+		$flushed = 0;
+		$this->swap_parts['flush'] = static function () use ( &$flushed ): void {
+			++$flushed;
+		};
+		$this->register_type();
+		$job  = $this->at_swap();
+		$done = $this->cli_run( $job );
+		$this->assertSame( Job::COMPLETED, $done->status, (string) $done->last_error );
+		$this->assertSame( 2, $flushed, 'right after the swap, and again before the maintenance file comes down' );
+		$this->undo( $done );
+		$this->tear_down_swap();
+		$this->set_up_swap();
+		$flushed = 0;
+		$this->swap_parts['flush'] = static function () use ( &$flushed ): void {
+			++$flushed;
+		};
+		$this->register_type();
+		$job = $this->at_swap();
+		$this->killed_at( $job, 'dir_in', 2 );
+		$this->assertSame( Job::FAILED, $this->cli_run( $job )->status );
+		$this->assertSame( 1, $flushed, 'after the rollback' );
+	}
+
+	public function test_a_run_that_lost_the_job_during_the_rollback_leaves_the_maintenance_file_up(): void {
+		$job = $this->at_swap();
+		$this->killed_at( $job, 'dir_in', 2 );
+		$taken = false;
+		$this->retype(
+			$job,
+			array(
+				'at' => function ( string $point ) use ( $job, &$taken ): void {
+					$this->seams[] = $point;
+					if ( 'dirs_back' === $point ) {
+						global $wpdb;
+						$taken = true;
+						$wpdb->query( $wpdb->prepare( 'UPDATE ' . JobRepository::table() . ' SET lock_token = %s, locked_until = %d WHERE id = %d', 'someone-else', time() + 60, $job->id ) );
+					}
+				},
+			)
+		);
+		$result = $this->cli_tick( $job );
+		$this->assertTrue( $taken, 'the control: the job was taken over at the end of the rollback' );
+		$this->assertSame( TickResult::LOST, $result->status );
+		$this->assertFileExists( $this->abspath . '/.maintenance', 'the run that lost the job does not take it down' );
+	}
+
+	public function test_something_made_in_the_place_of_a_new_unit_is_never_written_over(): void {
+		$job    = $this->at_swap();
+		$plan   = $this->plan_of( $job );
+		$entry  = $plan['dirs'][ self::first_new( $plan ) ];
+		$before = $this->site();
+		file_put_contents( $entry['live'], 'made since the plan' );
+		$before['files'][ substr( $entry['live'], strlen( $this->dirs['other-content'] ) + 1 ) ] = 'made since the plan';
+		ksort( $before['files'] );
+		$done = $this->cli_run( $job );
+		$this->assertSame( Job::FAILED, $done->status );
+		$this->assertStringContainsString( 'that was not there when the swap planned', (string) $done->last_error );
+		$this->assertSame( $before, $this->site(), 'kept, and the site as it was' );
+	}
+
+	public function test_a_plan_entry_the_check_does_not_write_renames_nothing(): void {
+		global $wpdb;
+		$job    = $this->at_swap();
+		$before = $this->site();
+		$plan   = $this->plan_of( $job );
+		$table  = $wpdb->base_prefix . \WPCheckpoint\Restore\SwapPlan::TABLE;
+		// An entry pointed at a file elsewhere (a forged row): the swap must not move it.
+		$wpdb->query( $wpdb->prepare( "UPDATE `{$table}` SET live = %s WHERE job_id = %d AND seq = %d", $this->dirs['mu-plugins'] . '/live-mu.php', $job->id, $plan['dirs'][0]['seq'] ) );
+		$wpdb->query( 'COMMIT' );
+		$done = $this->cli_run( $job );
+		$this->assertSame( Job::FAILED, $done->status );
+		$this->assertStringContainsString( 'an entry the final check does not write', (string) $done->last_error );
+		$this->assertNotSame( Job::FAILURE_FINAL, $done->failure_kind );
+		$this->assertSame( $before, $this->site(), 'nothing renamed' );
+		$this->assertNotContains( 'entered', $this->seams );
 	}
 }

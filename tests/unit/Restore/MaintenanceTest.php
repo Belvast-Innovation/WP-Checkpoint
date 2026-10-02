@@ -33,7 +33,7 @@ final class MaintenanceTest extends TestCase {
 	}
 
 	private function ours(): Maintenance {
-		return new Maintenance( $this->dir, Maintenance::mark( 'a1b2c3d4e5f6', 7, '0123456789abcdef0123456789abcdef' ) );
+		return new Maintenance( $this->dir, 'WP Checkpoint restore 0123456789abcdef0123456789abcdef' );
 	}
 
 	private function names(): array {
@@ -46,7 +46,7 @@ final class MaintenanceTest extends TestCase {
 		$file->put( 1800000000 );
 		$this->assertSame( array( '.maintenance' ), $this->names(), 'only the file: no temporary one left' );
 		$this->assertSame( Maintenance::OURS, $file->state() );
-		$this->assertSame( "<?php\n\$upgrading = 1800000000; // WP Checkpoint restore a1b2c3d4e5f6-7-0123456789abcdef0123456789abcdef\n", file_get_contents( $file->path() ) );
+		$this->assertSame( "<?php\n\$upgrading = 1800000000; // WP Checkpoint restore 0123456789abcdef0123456789abcdef\n", file_get_contents( $file->path() ) );
 		$file->put( 1800000060 );
 		$this->assertSame( 1800000060, $file->time_of( (string) file_get_contents( $file->path() ) ), 'refreshed' );
 		$this->assertTrue( $file->remove() );
@@ -55,11 +55,17 @@ final class MaintenanceTest extends TestCase {
 		$this->assertTrue( $file->remove(), 'none there: nothing of this restore\'s is there' );
 	}
 
+	public function test_a_new_mark_is_random_and_tells_nothing_else(): void {
+		$one = Maintenance::new_mark();
+		$this->assertMatchesRegularExpression( '/\AWP Checkpoint restore [0-9a-f]{32}\z/', $one );
+		$this->assertNotSame( $one, Maintenance::new_mark() );
+	}
+
 	public function test_another_maintenance_file_is_never_written_over_or_removed(): void {
 		$file   = $this->ours();
 		$others = array(
 			'an update'              => "<?php \$upgrading = 1800000000; ?>",
-			'another restore'        => ( new Maintenance( $this->dir, Maintenance::mark( 'a1b2c3d4e5f6', 8, '0123456789abcdef0123456789abcdef' ) ) )->contents( 1800000000 ),
+			'another restore'        => ( new Maintenance( $this->dir, Maintenance::new_mark() ) )->contents( 1800000000 ),
 			'ours with more in it'   => $file->contents( 1800000000 ) . "\$x = 1;\n",
 			'ours with a time later' => str_replace( '1800000000;', '1800000000 ;', $file->contents( 1800000000 ) ),
 		);

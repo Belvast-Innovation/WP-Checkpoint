@@ -104,13 +104,21 @@ final class StateCarry {
 	 * @param string      $temp_options Temporary options table.
 	 * @param string|null $live_meta    Live sitemeta table (multisite), null on a single site.
 	 * @param string|null $temp_meta    Temporary sitemeta table (multisite).
+	 * @param callable    $record       function( string $temp_table, int $delta ): void, called in the transaction
+	 *                                  with how many rows the carry added (negative: removed) in each table it
+	 *                                  changed (the restore's ledger records it).
 	 * @return void
 	 * @throws Refused When the temporary table's list of active plugins cannot be read.
 	 * @throws \Throwable Whatever else stops it, after the transaction is rolled back.
 	 */
-	public function carry( string $live_options, string $temp_options, $live_meta = null, $temp_meta = null ): void {
+	public function carry( string $live_options, string $temp_options, $live_meta = null, $temp_meta = null, $record = null ): void {
 		$this->db->begin();
 		try {
+			$tables = array_values( array_filter( array( $temp_options, null !== $live_meta ? $temp_meta : null ) ) );
+			$before = array();
+			foreach ( $tables as $table ) {
+				$before[ $table ] = $this->rows_in( (string) $table );
+			}
 			$names = StoredNames::stored_forms( false );
 			$in    = self::marks( $names );
 			$this->db->rows( 'DELETE FROM ' . SqlWriter::identifier( $temp_options ) . ' WHERE option_name IN (' . $in . ')', $names );
@@ -126,6 +134,11 @@ final class StateCarry {
 				$this->activate_network( $temp_meta );
 			} else {
 				$this->activate( $temp_options );
+			}
+			if ( is_callable( $record ) ) {
+				foreach ( $before as $table => $count ) {
+					call_user_func( $record, (string) $table, $this->rows_in( (string) $table ) - $count );
+				}
 			}
 			if ( null !== $this->seam ) {
 				call_user_func( $this->seam, 'carry_written' );
@@ -165,6 +178,16 @@ final class StateCarry {
 	 */
 	public static function readable( $value ): bool {
 		return null === $value || null !== PluginList::read( $value );
+	}
+
+	/**
+	 * The rows of a table now (in the carry's transaction).
+	 *
+	 * @param string $table Table.
+	 * @return int
+	 */
+	private function rows_in( string $table ): int {
+		return (int) ( $this->db->rows( 'SELECT COUNT(*) FROM ' . SqlWriter::identifier( $table ) )[0][0] ?? 0 );
 	}
 
 	/**

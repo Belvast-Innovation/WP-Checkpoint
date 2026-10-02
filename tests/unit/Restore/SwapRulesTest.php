@@ -166,6 +166,17 @@ final class SwapRulesTest extends TestCase {
 		$this->assertSame( array(), SwapRules::table_back( $move, self::there( array( 'wp_x' ) ), 'stray' ), 'never moved: nothing' );
 	}
 
+	public function test_a_live_table_is_never_taken_for_the_restored_one_without_the_old_one_there(): void {
+		$entry = self::table( 0, 'posts', true );
+		// T gone before the swap (dropped by someone), nothing renamed: F is the site's own table.
+		$this->assertSame( array(), SwapRules::table_back( $entry, self::there( array( 'wp_posts' ) ), 'stray' ) );
+		// The control: swapped, the old one in O: the restored one goes back to T, the old one to F.
+		$this->assertSame(
+			array( array( 'wp_posts', 'wcptmpa1b2c3_7_beef_posts' ), array( 'wcpolda1b2c3_7_beef_posts', 'wp_posts' ) ),
+			SwapRules::table_back( $entry, self::there( array( 'wp_posts', 'wcpolda1b2c3_7_beef_posts' ) ), 'stray' )
+		);
+	}
+
 	public function test_a_directory_unit_is_put_back_from_what_is_there(): void {
 		$had = array(
 			'live'     => '/s/uploads',
@@ -186,6 +197,54 @@ final class SwapRulesTest extends TestCase {
 		$this->assertSame( array( array( '/s/uploads', '/s/root/uploads' ) ), SwapRules::dir_back( $new, true, false, false, 'X' ) );
 		$this->assertSame( array(), SwapRules::dir_back( $new, false, true, false, 'X' ) );
 		$this->assertSame( array(), SwapRules::dir_back( $new, true, true, false, 'X' ), 'L someone else\'s and S still staged: left alone' );
+	}
+
+	public function test_only_entries_of_the_shape_the_check_writes_for_this_job_are_taken(): void {
+		$token = 'a1b2c3d4e5f6';
+		$root  = '/srv/site/wp-content/wp-checkpoint-stage-' . $token . '-7-' . str_repeat( 'ab', 16 );
+		$dir   = array(
+			'kind'  => SwapPlan::DIR,
+			'live'  => '/srv/site/wp-content/uploads',
+			'stage' => $root . '/uploads',
+			'old'   => $root . '/old/uploads',
+		);
+		$other = array(
+			'live'  => '/srv/site/wp-content/languages',
+			'stage' => $root . '/other-content/languages',
+			'old'   => $root . '/old/other-content/languages',
+		) + $dir;
+		$this->assertSame( '', SwapRules::invalid( $dir, $token, 7 ), 'the control: a group' );
+		$this->assertSame( '', SwapRules::invalid( $other, $token, 7 ), 'the control: an entry of other content' );
+		$bad = array(
+			'another job\'s root'      => array( 'stage' => str_replace( '-7-', '-8-', $root ) . '/uploads' ),
+			'another token\'s root'    => array( 'stage' => str_replace( $token, 'ffffffffffff', $root ) . '/uploads' ),
+			'no root at all'           => array( 'stage' => '/srv/site/wp-content/elsewhere/uploads' ),
+			'old outside old/'         => array( 'old' => $root . '/uploads-old' ),
+			'old in another root'      => array( 'old' => str_replace( '-7-', '-8-', $root ) . '/old/uploads' ),
+			'live elsewhere'           => array( 'live' => '/srv/site/wp-content/mu-plugins/x.php' ),
+			'a .. segment'             => array( 'live' => '/srv/site/wp-content/../wp-content/uploads' ),
+			'a relative path'          => array( 'live' => 'wp-content/uploads' ),
+		);
+		foreach ( $bad as $what => $change ) {
+			$this->assertNotSame( '', SwapRules::invalid( $change + $dir, $token, 7 ), $what );
+		}
+		$table = self::table( 0, 'posts', true );
+		$move  = self::move( 1, 'gone' );
+		foreach ( array( $table, $move ) as $entry ) {
+			$entry['stage'] = '' === $entry['stage'] ? '' : 'wcptmpa1b2c3_7_beef_' . substr( $entry['live'], 3 );
+			$this->assertSame( '', SwapRules::invalid( $entry, $token, 7 ), 'the control: ' . $entry['kind'] );
+		}
+		$bad = array(
+			'old of another job'       => array( 'old' => 'wcpolda1b2c3_8_beef_posts' ),
+			'old not of the grammar'   => array( 'old' => 'wp_posts_old' ),
+			'temporary of another job' => array( 'stage' => 'wcptmpa1b2c3_8_beef_posts' ),
+			'temporary not a table'    => array( 'stage' => 'wp_users' ),
+			'live is the plugin\'s'    => array( 'live' => 'wp_wpcheckpoint_jobs' ),
+			'an unknown kind'          => array( 'kind' => 'drop' ),
+		);
+		foreach ( $bad as $what => $change ) {
+			$this->assertNotSame( '', SwapRules::invalid( $change + $table, $token, 7 ), $what );
+		}
 	}
 
 	private static function there( array $names ): array {

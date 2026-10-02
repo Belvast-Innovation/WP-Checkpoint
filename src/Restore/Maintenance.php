@@ -22,7 +22,7 @@ defined( 'ABSPATH' ) || exit;
  * or not at all (AtomicFile; a half-written file would be a parse error on
  * every request), rewritten with the time of the moment between the swap's
  * steps, and removed only while it still holds this restore's own
- * contents. A maintenance file of anyone else (an update in progress, an
+ * contents (its mark, new_mark(): random, kept in the swap's cursor). A maintenance file of anyone else (an update in progress, an
  * administrator's own) is never written over or removed: state() says
  * "other" and the swap waits. Whether the file is there is told by
  * positive evidence only (lstat, or its directory listed without it); what
@@ -68,15 +68,13 @@ final class Maintenance {
 	}
 
 	/**
-	 * What names a restore in its maintenance file: the installation's storage token, the job and the run.
+	 * A new mark for a restore's maintenance file: random, and nothing else (the file is in the web root and may be
+	 * served: it must not tell the storage token, which names the storage directory, or anything of the job).
 	 *
-	 * @param string $token  Storage token.
-	 * @param int    $job_id Job id.
-	 * @param string $random The restore's random part (hex).
 	 * @return string
 	 */
-	public static function mark( string $token, int $job_id, string $random ): string {
-		return sprintf( 'WP Checkpoint restore %s-%d-%s', preg_replace( '/[^0-9a-f]/', '', $token ), $job_id, preg_replace( '/[^0-9a-f]/', '', $random ) );
+	public static function new_mark(): string {
+		return 'WP Checkpoint restore ' . bin2hex( random_bytes( 16 ) );
 	}
 
 	/**

@@ -177,7 +177,8 @@ final class TempTableCount {
 	 */
 	private function counted( array $table, int $held ): void {
 		$state = $this->ledger->get( (int) $table['number'] );
-		$want  = null === $state ? -1 : $state['rows'] - (int) ( self::rewrite( $this->work )['removed'][ $table['temporary'] ] ?? 0 );
+		// The import's rows, less what the prefix rewrite removed, and what the swap's carry added or removed.
+		$want = null === $state ? -1 : $state['rows'] - (int) ( self::rewrite( $this->work )['removed'][ $table['temporary'] ] ?? 0 ) + $state['carried'];
 		if ( $held !== $want ) {
 			throw new WorkLost( sprintf( 'The temporary table of %1$s holds %2$d rows where the restore left %3$d: it was changed after the import. Start the restore again.', $table['table'], $held, $want ) );
 		}

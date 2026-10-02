@@ -106,7 +106,7 @@ final class SwapTest extends SwapTestCase {
 		$before = $this->site();
 		$result = $this->cli_tick( $job );
 		$this->assertSame( TickResult::WAITING, $result->status );
-		$this->assertStringContainsString( 'maintenance mode for something else', $result->message );
+		$this->assertStringContainsString( 'Another maintenance file is in the WordPress directory', $result->message );
 		$now = Plugin::instance()->jobs()->find( $job->id );
 		$this->assertSame( 'ready', $now->cursor['phase'] );
 		$this->assertSame( Job::SITE_UNTOUCHED, $now->site_state );

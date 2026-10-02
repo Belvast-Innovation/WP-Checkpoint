@@ -8,7 +8,9 @@
 
 namespace WPCheckpoint\Restore;
 
+use WPCheckpoint\Database\OwnTables;
 use WPCheckpoint\Database\SqlWriter;
+use WPCheckpoint\Jobs\TempTables;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -159,7 +161,8 @@ final class SwapRules {
 	/**
 	 * The renames that put a table entry back, in one statement (none: nothing to do).
 	 *
-	 * A table of the backup: the restored table under F goes back to T and the old one comes back to F; half a swap
+	 * A table of the backup: the restored table under F goes back to T and the old one comes back to F (with a live
+	 * one, only when the old one is there: F alone is no evidence that it is the restored table); half a swap
 	 * (T and O there, F not) is finished backwards; a table someone made under F while the old one was away is
 	 * moved out of the way ($stray) first. A live table moved aside comes back the same way.
 	 *
@@ -178,6 +181,11 @@ final class SwapRules {
 			return $f ? array( array( $entry['live'], $stray ), array( $entry['old'], $entry['live'] ) ) : array( array( $entry['old'], $entry['live'] ) );
 		}
 		$t = isset( $there[ $entry['stage'] ] );
+		if ( ! $t && $f && $entry['had_live'] && ! $o ) {
+			// The live table had to go to O before the restored one could take F: with neither T nor O there, F is
+			// no evidence of the restored table (T may have gone before the swap, and F be the live one). Left alone.
+			return array();
+		}
 		if ( ! $t && $f ) {
 			$out = array( array( $entry['live'], $entry['stage'] ) );
 			if ( $entry['had_live'] && $o ) {
@@ -220,6 +228,72 @@ final class SwapRules {
 			return array( array( $entry['live'], $entry['stage'] ) );
 		}
 		return array();
+	}
+
+	/**
+	 * Why a plan entry is not one the final check writes for this job ('' when it is): the plan is read from the
+	 * database and its paths and names become rename targets, so they are held to the shape the check gives them.
+	 * A directory unit: absolute paths without "." or ".." segments; the staged and the old path under one staging
+	 * root of this job (StagingLayout's name, with the job's token and id), the old one under its "old" directory,
+	 * and the live path in the directory that holds that root. A table entry: the temporary and the old name of
+	 * this job's grammar (TempTables), and a live name that is none of the plugin's own tables.
+	 *
+	 * @param array{kind: string, live: string, stage: string, old: string} $entry  Entry.
+	 * @param string                                                        $token  The job's storage token.
+	 * @param int                                                           $job_id The job's id.
+	 * @return string
+	 */
+	public static function invalid( array $entry, string $token, int $job_id ): string {
+		if ( SwapPlan::DIR === $entry['kind'] ) {
+			foreach ( array( $entry['live'], $entry['stage'], $entry['old'] ) as $path ) {
+				$path = str_replace( '\\', '/', $path );
+				if ( '' === $path || '/' !== $path[0] || 1 === preg_match( '#(?:\A|/)\.{1,2}(?:/|\z)#', $path ) ) {
+					return 'a path that is not absolute, or has . or .. segments';
+				}
+			}
+			$root = self::root_of( $entry['stage'], $token, $job_id );
+			if ( '' === $root || self::root_of( $entry['old'], $token, $job_id ) !== $root ) {
+				return 'a staged or old path outside this job\'s staging root';
+			}
+			if ( 0 !== strpos( $entry['old'], $root . '/old/' ) ) {
+				return 'an old path outside the staging root\'s old directory';
+			}
+			if ( dirname( $entry['live'] ) !== dirname( $root ) ) {
+				return 'a live path that is not next to its staging root';
+			}
+			return '';
+		}
+		if ( ! in_array( $entry['kind'], array( SwapPlan::TABLE_OF, SwapPlan::MOVE ), true ) ) {
+			return 'an entry of an unknown kind';
+		}
+		if ( 0 !== strncmp( $entry['old'], TempTables::OLD_PREFIX . substr( $token, 0, TempTables::TOKEN_LEN ) . '_' . $job_id . '_', strlen( TempTables::OLD_PREFIX ) + TempTables::TOKEN_LEN + strlen( (string) $job_id ) + 2 ) || ! OwnTables::generated( $entry['old'] ) ) {
+			return 'an old table name that is not this job\'s';
+		}
+		if ( SwapPlan::TABLE_OF === $entry['kind'] && ( TempTables::job_id_of( $token, $entry['stage'] ) !== $job_id || ! OwnTables::generated( $entry['stage'] ) ) ) {
+			return 'a temporary table name that is not this job\'s';
+		}
+		return '' === $entry['live'] || OwnTables::is_own( $entry['live'] ) ? 'a live table name that is the plugin\'s own' : '';
+	}
+
+	/**
+	 * The staging root of this job a path is in (the nearest directory above it that StagingLayout names with the
+	 * job's token and id), or ''.
+	 *
+	 * @param string $path   Path.
+	 * @param string $token  Storage token.
+	 * @param int    $job_id Job id.
+	 * @return string
+	 */
+	private static function root_of( string $path, string $token, int $job_id ): string {
+		$dir = dirname( $path );
+		while ( dirname( $dir ) !== $dir ) {
+			$parsed = StagingLayout::parse( basename( $dir ) );
+			if ( null !== $parsed ) {
+				return 'stage' === $parsed['kind'] && $parsed['token'] === $token && $parsed['job_id'] === $job_id ? $dir : '';
+			}
+			$dir = dirname( $dir );
+		}
+		return '';
 	}
 
 	/**
