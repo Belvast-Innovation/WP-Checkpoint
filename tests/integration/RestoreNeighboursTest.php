@@ -297,6 +297,39 @@ final class RestoreNeighboursTest extends RestoreTestCase {
 		$this->assertSame( 'shared', $plan->skipped()[ $wpdb->usermeta ] ?? null );
 	}
 
+	public function test_the_usermeta_table_this_site_uses_is_the_one_looked_in(): void {
+		global $wpdb;
+		$n      = $this->neighbour();
+		$custom = $wpdb->base_prefix . 'wpcr_membermeta';
+		$this->create( $custom, 'LIKE `' . $wpdb->usermeta . '`' );
+		$wpdb->insert(
+			$custom,
+			array(
+				'user_id'    => 1,
+				'meta_key'   => $n . 'capabilities', // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_key -- a test fixture.
+				'meta_value' => 'a:0:{}', // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_value -- a test fixture.
+			)
+		);
+		$this->assertSame( '', $wpdb->last_error );
+		$default = $wpdb->usermeta;
+		$base    = $this->backup( array_merge( self::site_tables(), array( $wpdb->users, $default, $custom ) ) );
+
+		// The control: the site uses the usual usermeta table, where no neighbour keeps roles: nothing to ask.
+		$job = $this->run_restore( $this->start_restore( $base ) );
+		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error . wp_json_encode( $job->questions ) );
+
+		// The site uses the other table (as CUSTOM_USER_META_TABLE makes WordPress do): the neighbour's keys are there.
+		$wpdb->usermeta = $custom;
+		try {
+			$asked = $this->run_restore( $this->start_restore( $base ) );
+		} finally {
+			$wpdb->usermeta = $default;
+		}
+		$this->assertSame( Job::PAUSED, $asked->status, (string) $asked->last_error );
+		$this->assertSame( array( 'shared_tables' ), array_column( $asked->questions, 'id' ) );
+		$this->assertSame( array( $wpdb->users, $custom ), $this->asked( $asked )['shared_tables']['listed'], 'the users table and the usermeta table the site uses' );
+	}
+
 	public function test_role_keys_of_a_sub_site_or_of_no_neighbour_are_not_asked_about(): void {
 		global $wpdb;
 		$this->neighbour();

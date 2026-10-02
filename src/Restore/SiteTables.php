@@ -23,13 +23,14 @@ final class SiteTables {
 	/**
 	 * This site's WordPress tables (a network's global tables and its main site's), as WordPress names them: the main
 	 * site's on a network, where a tick may run in a sub-site's context (the sub-sites' tables are recognised by their
-	 * naming rule, TableSelection).
+	 * naming rule, TableSelection). The users and usermeta tables are the ones $wpdb queries.
 	 *
 	 * @return string[]
 	 */
 	public static function core(): array {
 		global $wpdb;
-		return array_values( array_map( 'strval', $wpdb->tables( 'all', true, is_multisite() ? get_main_site_id() : 0 ) ) );
+		// With the users tables $wpdb queries: the ones WordPress uses, whatever names their constants gave them.
+		return array_values( array_unique( array_merge( array_map( 'strval', $wpdb->tables( 'all', true, is_multisite() ? get_main_site_id() : 0 ) ), array( self::users(), self::usermeta() ) ) ) );
 	}
 
 	/**
