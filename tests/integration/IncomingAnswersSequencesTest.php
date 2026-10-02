@@ -18,7 +18,9 @@ use WPCheckpoint\Tests\Fixtures\Restore\RestoreTestCase;
  * installations' prefixes. Generated sequences change the neighbour's tables and the other installations' keys in
  * the usermeta table, also while the restore waits for an answer, run the restore, and answer some or all of the
  * questions asked. The expected kinds are worked out again from the database at the moment the plan is written (what
- * changes after it is the swap's to judge again, not the plan's).
+ * changes after it is the swap's to judge again, not the plan's): the plan reads the live tables then, and the
+ * evidence as of its walk over the usermeta table, which in these sequences is one window and so in the same tick
+ * (nothing changes between them here).
  */
 final class IncomingAnswersSequencesTest extends RestoreTestCase {
 
@@ -119,6 +121,7 @@ final class IncomingAnswersSequencesTest extends RestoreTestCase {
 		$job    = $this->start_restore( $base );
 		$paused = null;
 		$given  = array();
+		$ids    = array(); // Kind => the ids answered for it.
 		$steps  = array();
 		$found  = array();
 		$now    = null; // The kinds as the database showed them when the plan was written.
@@ -127,13 +130,14 @@ final class IncomingAnswersSequencesTest extends RestoreTestCase {
 				$now = $this->kinds_now( $job );
 			}
 		};
-		$answer = function ( Job $job, bool $all ) use ( &$paused, &$given, &$steps, $plan ): void {
+		$answer = function ( Job $job, bool $all ) use ( &$paused, &$given, &$steps, &$ids, $plan ): void {
 			$ids  = array_keys( $paused );
 			$pick = ! $all && count( $ids ) > 1 && 0 === mt_rand( 0, 1 ) ? array( $ids[ mt_rand( 0, count( $ids ) - 1 ) ] ) : $ids;
 			$new  = array();
 			foreach ( $pick as $id ) {
-				$new[ $id ] = 0 === mt_rand( 0, 1 ) ? 'restore' : 'exclude';
-				$given[]    = array( $paused[ $id ][0], $paused[ $id ][1], $new[ $id ] );
+				$new[ $id ]                 = 0 === mt_rand( 0, 1 ) ? 'restore' : 'exclude';
+				$given[]                    = array( $paused[ $id ][0], $paused[ $id ][1], $new[ $id ] );
+				$ids[ $paused[ $id ][0] ][] = $id;
 			}
 			if ( count( $pick ) < count( $ids ) ) {
 				$this->note( 'partial answer' );
@@ -145,11 +149,16 @@ final class IncomingAnswersSequencesTest extends RestoreTestCase {
 			$plan();
 			$paused = null;
 		};
-		$run = function () use ( &$job, &$paused, &$steps, $plan ): string {
+		$run = function () use ( &$job, &$paused, &$steps, &$ids, $plan ): string {
 			$job = $this->run_restore( Plugin::instance()->jobs()->find( $job->id ) );
 			$plan();
 			if ( Job::PAUSED === $job->status && array() !== $job->questions ) {
-				$paused  = $this->shown( $job );
+				$paused = $this->shown( $job );
+				foreach ( $paused as $id => $shown ) {
+					if ( array() !== array_diff( $ids[ $shown[0] ] ?? array(), array( $id ) ) ) {
+						$this->note( 'asked again under another id after an answer' ); // The answer did not hold for these tables.
+					}
+				}
 				$steps[] = 'run: asked ' . count( $paused );
 				$this->note( 'asked' );
 			}
@@ -233,8 +242,12 @@ final class IncomingAnswersSequencesTest extends RestoreTestCase {
 				}
 				if ( null !== $name ) {
 					++$planned;
-				} elseif ( in_array( $kind, $plan->skipped(), true ) ) {
-					++$left;
+					continue;
+				}
+				foreach ( $plan->skipped() as $skipped => $why ) {
+					if ( $plan->final_name( (string) $skipped ) === $final && $kind === $why ) {
+						++$left; // This very table, left out for this kind.
+					}
 				}
 			}
 			$decision = count( $tables ) === $planned ? 'restore' : ( count( $tables ) === $left ? 'exclude' : '' );
@@ -267,7 +280,7 @@ final class IncomingAnswersSequencesTest extends RestoreTestCase {
 			$found = array_merge( $found, $this->sequence( $seed, $base, $pool ) );
 		}
 		$this->assertSame( array(), array_slice( $found, 0, 5 ), count( $found ) . ' violations' );
-		foreach ( array( 'asked', 'partial answer', 'tables changed while asked', 'evidence changed while asked', 'decided by an answer: ' . IncomingTables::UNCERTAIN, 'decided by an answer: ' . IncomingTables::SHARED ) as $point ) {
+		foreach ( array( 'asked', 'partial answer', 'tables changed while asked', 'evidence changed while asked', 'asked again under another id after an answer', 'decided by an answer: ' . IncomingTables::UNCERTAIN, 'decided by an answer: ' . IncomingTables::SHARED ) as $point ) {
 			$this->assertGreaterThan( 0, $this->seen[ $point ] ?? 0, 'the control: ' . $point . ' ' . wp_json_encode( $this->seen ) );
 		}
 	}

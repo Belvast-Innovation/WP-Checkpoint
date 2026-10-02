@@ -104,8 +104,9 @@ final class TempTableDropper {
 			try {
 				$fold = SiteTables::fold_case();
 			} catch ( TransientFailure $e ) {
-				// Unknown: compared without case, a key from outside is found in either spelling, so none goes unseen.
-				$fold = true;
+				// Unknown: names compared as given, as before the setting was read in one place. Compared without case,
+				// two tables that differ only in case would be one, and the other would be neither dropped nor reported.
+				$fold = false;
 			}
 			$keys  = self::keys( $like );
 			$plan  = DropOrder::plan( $safe, null === $keys ? array() : $keys, $fold );

@@ -550,6 +550,29 @@ final class RestoreNeighboursTest extends RestoreTestCase {
 		$this->assertSame( array(), $this->job_tables( $job ), 'nothing created' );
 	}
 
+	public function test_a_server_that_folds_case_refuses_upper_case_in_a_live_table_or_a_table_left_out(): void {
+		global $wpdb;
+		$live = $wpdb->base_prefix . 'wpcrLive';
+		$base = $this->backup( self::site_tables() );
+		$fold = new \ReflectionProperty( SiteTables::class, 'fold_case_in_tests' );
+		$fold->setAccessible( true );
+		$fold->setValue( null, true );
+		try {
+			$control = $this->run_restore( $this->start_restore( $base ) );
+			$this->assertSame( Job::COMPLETED, $control->status, 'the control: nothing upper-case: ' . $control->last_error );
+			$this->create( $live, '(`id` int NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB' );
+			$job = $this->run_restore( $this->start_restore( $base ) );
+			$this->assertSame( Job::FAILED, $job->status );
+			$this->assertStringContainsString( "the table {$live} of this database has upper-case letters", (string) $job->last_error );
+			$wpdb->query( "DROP TABLE `{$live}`" );
+			$left = $this->run_restore( $this->start_restore( $base, array( 'exclude_tables' => array( $wpdb->base_prefix . 'SkipMe' ) ) ) );
+			$this->assertSame( Job::FAILED, $left->status );
+			$this->assertStringContainsString( 'the table ' . $wpdb->base_prefix . 'SkipMe left out of the restore has upper-case letters', (string) $left->last_error );
+		} finally {
+			$fold->setValue( null, null );
+		}
+	}
+
 	public function test_an_unattended_restore_that_does_not_say_both_is_refused_before_anything(): void {
 		$n = $this->neighbour();
 		$this->create( $n . 'shop_orders', '(`id` int NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB' );

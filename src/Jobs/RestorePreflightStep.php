@@ -207,7 +207,7 @@ final class RestorePreflightStep implements Step {
 			throw new Refused( $multisite ? 'This backup is of a multisite network and this site is a single site; it can only be restored onto a network.' : 'This backup is of a single site and this site is a multisite network; it can only be restored onto a single site.' );
 		}
 		$fold    = SiteTables::fold_case();
-		$refusal = IncomingTables::fold_refusal( $fold, (string) $wpdb->base_prefix, defined( 'CUSTOM_USER_TABLE' ) ? (string) CUSTOM_USER_TABLE : null, defined( 'CUSTOM_USER_META_TABLE' ) ? (string) CUSTOM_USER_META_TABLE : null, array_column( $manifest->tables(), 'name' ), $fold ? ( new WpdbConnection() )->tables_with_prefix( (string) $wpdb->base_prefix )['tables'] : array(), $options['exclude_tables'] );
+		$refusal = IncomingTables::fold_refusal( $fold, (string) $wpdb->base_prefix, defined( 'CUSTOM_USER_TABLE' ) ? (string) CUSTOM_USER_TABLE : null, defined( 'CUSTOM_USER_META_TABLE' ) ? (string) CUSTOM_USER_META_TABLE : null, array_column( $manifest->tables(), 'name' ), array(), $options['exclude_tables'] );
 		if ( '' !== $refusal ) {
 			throw new Refused( $refusal );
 		}
@@ -215,6 +215,13 @@ final class RestorePreflightStep implements Step {
 		$meta   = $this->usermeta( $context, $cursor, $multisite );
 		if ( $meta instanceof StepResult ) {
 			return $meta;
+		}
+		if ( $fold ) {
+			// The live tables, once the walk is over (listing a whole network's tables in every tick of it would not be).
+			$refusal = IncomingTables::fold_refusal( true, (string) $wpdb->base_prefix, null, null, array(), ( new WpdbConnection() )->tables_with_prefix( (string) $wpdb->base_prefix )['tables'] );
+			if ( '' !== $refusal ) {
+				throw new Refused( $refusal );
+			}
 		}
 		if ( $walked && $context->should_stop() ) {
 			// The walk ended in this tick: the rest of the plan waits for the next one.

@@ -47,7 +47,7 @@ final class FoldCaseUsageTest extends TestCase {
 		foreach ( $files as $path => $content ) {
 			$count = 0;
 			foreach ( token_get_all( $content ) as $token ) {
-				if ( is_array( $token ) && in_array( $token[0], array( T_CONSTANT_ENCAPSED_STRING, T_ENCAPSED_AND_WHITESPACE ), true ) && false !== stripos( $token[1], 'lower_case_table_names' ) && 1 === preg_match( '/@@|\bselect\b|\bshow\s+variables\b/i', $token[1] ) ) {
+				if ( is_array( $token ) && in_array( $token[0], array( T_CONSTANT_ENCAPSED_STRING, T_ENCAPSED_AND_WHITESPACE ), true ) && false !== stripos( $token[1], 'lower_case_table_names' ) && ( 1 === preg_match( '/@@|\bselect\b|\bshow\s+variables\b/i', $token[1] ) || 1 === preg_match( '/\A[\'"]\s*lower_case_table_names\s*[\'"]\z/i', $token[1] ) ) ) {
 					++$count;
 				}
 			}
@@ -97,6 +97,7 @@ final class FoldCaseUsageTest extends TestCase {
 			'f.php' => "<?php \$p = new ReflectionProperty( S::class, 'fold_case_in_tests' );",
 			'g.php' => "<?php if ( null !== self::\$fold_case_in_tests ) {}",
 			'j.php' => "<?php S::\$fold_case_in_tests ??= true;",
+			'k.php' => "<?php \$x = \$wpdb->get_row( \$wpdb->prepare( 'SHOW VARIABLES LIKE %s', 'lower_case_table_names' ) );",
 		);
 		$this->assertSame(
 			array(
@@ -104,6 +105,7 @@ final class FoldCaseUsageTest extends TestCase {
 				'b.php' => 1,
 				'h.php' => 1,
 				'i.php' => 1,
+				'k.php' => 1,
 			),
 			self::reads( $files ),
 			'reads in code, any case and form; not in comments, nor the name in a message'

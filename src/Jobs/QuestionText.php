@@ -95,7 +95,9 @@ final class QuestionText {
 
 	/**
 	 * Whether the work file lists the tables (and evidence) of the question, as its id names them: a file written by
-	 * another run (one that outlived its lease) may list others, and then none are shown.
+	 * another run (one that outlived its lease) may list others, and then none are shown. The file holds the names
+	 * made valid UTF-8 for display, the id their bytes: a name that is not UTF-8 is not listed (the question, its
+	 * count and the answer are not affected).
 	 *
 	 * @param string               $id     The question's id.
 	 * @param string               $kind   The question's kind.
