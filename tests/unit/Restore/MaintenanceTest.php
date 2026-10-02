@@ -138,8 +138,11 @@ final class MaintenanceTest extends TestCase {
 		file_put_contents( $this->dir . '/.maintenance.0123456789abcdef.tmp', 'x' );
 		touch( $this->dir . '/.maintenance.0123456789abcdef.tmp', 1800000000 );
 		file_put_contents( $this->dir . '/.maintenance', 'x' );
-		file_put_contents( $this->dir . '/.maintenance.0123456789ABCDEF.tmp', 'x' );
 		mkdir( $this->dir . '/.maintenance.fedcba9876543210.tmp' );
+		// Upper-case hex is not the form: in a directory of its own (on a file system without case, the same name).
+		mkdir( $this->dir . '/upper' );
+		file_put_contents( $this->dir . '/upper/.maintenance.0123456789ABCDEF.tmp', 'x' );
+		$this->assertSame( array(), Residue::scan_maintenance( $this->dir . '/upper' ) );
 		$found = Residue::scan_maintenance( $this->dir );
 		$this->assertCount( 1, $found, 'a regular file of the temporary form only' );
 		$this->assertSame( Residue::MAINTENANCE_TMP, $found[0]['kind'] );
