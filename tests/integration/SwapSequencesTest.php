@@ -54,12 +54,13 @@ final class SwapSequencesTest extends SwapTestCase {
 
 	/**
 	 * What happens meanwhile, given out in turn (in this order, so that every kind meets a seam where it has an
-	 * effect): a cancel; the clock (the killed run wrote its times eleven minutes ago); a cache that cannot be
-	 * flushed once (the next run); the maintenance file deleted (as a WordPress update does, whoever wrote it), which
-	 * lands on a run killed between two batches, so the rollback has tables to put back; a file that cannot be taken
-	 * down once (the next run).
+	 * effect): a cancel; the clock (the killed run wrote its times eleven minutes ago); the maintenance file deleted
+	 * (as a WordPress update does, whoever wrote it), which lands on a run killed between two batches, so the rollback
+	 * has tables to put back; a cache that cannot be flushed once (the next run); a table rename of the rollback that
+	 * fails once with an error of the moment (the next run), which lands on a run killed at the rollback's start, so
+	 * it has tables to put back; a file that cannot be taken down once (the next run).
 	 */
-	const MEANWHILE = array( 'cancel', 'clock', 'flush_fail', 'file_removed', 'remove_fail' );
+	const MEANWHILE = array( 'cancel', 'clock', 'file_removed', 'flush_fail', 'rename_fail', 'remove_fail' );
 
 	public function test_the_scan_for_renames_after_the_direction_is_recorded_finds_them(): void {
 		$this->assertSame( 'dir_in', self::renamed_after_decision( array( 'carried', 'committed', 'flushed', 'dir_in' ) ), 'in the same run' );
@@ -167,7 +168,43 @@ final class SwapSequencesTest extends SwapTestCase {
 				++$kinds['cancel'];
 			}
 		}
-		$fails = array( 'flush' => 'flush_fail' === $kind ? 1 : 0, 'remove' => 'remove_fail' === $kind ? 1 : 0 );
+		$fails = array(
+			'flush'  => 'flush_fail' === $kind ? 1 : 0,
+			'remove' => 'remove_fail' === $kind ? 1 : 0,
+			'rename' => 'rename_fail' === $kind ? 1 : 0,
+		);
+		$connect = null;
+		if ( 'rename_fail' === $kind ) {
+			// The rollback's first table rename fails once, as when the connection drops (an error of the moment).
+			$connect = static function () use ( &$fails, $job ) {
+				return new class( \WPCheckpoint\Restore\ImportSession::open( \WPCheckpoint\Standalone\Credentials::from_wordpress() ), $fails, $job->id ) implements \WPCheckpoint\Restore\Queries {
+					/** @var \WPCheckpoint\Restore\ImportSession */
+					private $db;
+					/** @var array<string, int> */
+					private $fails;
+					/** @var int */
+					private $job;
+					public function __construct( $db, array &$fails, int $job ) {
+						$this->db    = $db;
+						$this->fails = &$fails;
+						$this->job   = $job;
+					}
+					public function run( string $sql ): int {
+						if ( $this->fails['rename'] > 0 && 0 === strpos( $sql, 'RENAME TABLE' ) && 'rollback' === ( Plugin::instance()->jobs()->find( $this->job )->cursor['phase'] ?? '' ) ) {
+							--$this->fails['rename'];
+							throw new \WPCheckpoint\Jobs\TransientFailure( 'Lost connection to MySQL server during query', 2013 );
+						}
+						return $this->db->run( $sql );
+					}
+					public function rows( string $sql, array $params = array() ): array {
+						return $this->db->rows( $sql, $params );
+					}
+					public function write( string $sql, array $params ): int {
+						return $this->db->write( $sql, $params );
+					}
+				};
+			};
+		}
 		$this->retype(
 			$job,
 			array(
@@ -194,15 +231,30 @@ final class SwapSequencesTest extends SwapTestCase {
 					}
 					return $file->remove( $confirm );
 				},
-			)
+			),
+			$connect
 		);
-		$done = null;
-		$runs = array();
+		$done    = null;
+		$runs    = array();
+		$renamed = false;
 		for ( $i = 0; $i < 6; $i++ ) {
 			// Each run against what was recorded before it.
 			$this->seams = array();
 			$done        = $this->cli_run( $job );
 			$this->assertSame( '', self::renamed_after_decision( $this->seams, '' !== $decided ), $label . ': I2, nothing renamed once the direction was recorded (next run ' . $i . ': ' . implode( ', ', $this->seams ) . ')' );
+			if ( 'rename_fail' === $kind && 0 === $fails['rename'] && ! $renamed ) {
+				// The run whose rename failed: waited out with the file held, nothing recorded as put back.
+				$renamed = true;
+				++$kinds['rename_fail'];
+				// Waited out by the Runner's back-off: still running (the lease let go), the try counted, not failed.
+				$this->assertSame( Job::RUNNING, $done->status, $label . ': a failed rename of the rollback is waited out (' . $done->status . ' ' . $done->last_error . ')' );
+				$this->assertSame( 1, $done->cursor['__runner']['retries'] ?? null, $label . ': as a try to be made again' );
+				$this->assertSame( 'rollback', $done->cursor['phase'] ?? '', $label . ': not recorded as put back' );
+				$this->assertSame( Job::SITE_CHANGING, $done->site_state, $label . ': still recorded as changing the site' );
+				$held = new Maintenance( $this->abspath, (string) ( $done->cursor['mark'] ?? '' ) );
+				$this->assertTrue( $held->is_held(), $label . ': the file stays held after the failed rename' );
+				$this->assertNotSame( array(), Plugin::instance()->half_swapped_warnings(), $label . ': and WP-CLI says so' );
+			}
 			$runs = array_merge( $runs, $this->seams );
 			if ( ! in_array( $done->status, array( Job::QUEUED, Job::RUNNING ), true ) ) {
 				break;
