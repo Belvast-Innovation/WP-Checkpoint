@@ -52,6 +52,10 @@ defined( 'ABSPATH' ) || exit;
  * - INCOMING: the backup's tables another installation in the same
  *   database may use (IncomingTables), by kind, written whole by the
  *   preflight before it asks about them; the questions name this file.
+ * - LINKED: the content groups whose directory is a link to a directory
+ *   outside this site, with their targets (LinkedTargets), written whole by
+ *   the files preflight before it asks about them; the question names this
+ *   file.
  * - RECLAIM: what an earlier attempt of the restore recorded that a new one
  *   does not use (its temporary tables and staging roots), written whole by
  *   the preflight before anything on it is deleted (PreviousAttempt).
@@ -82,6 +86,8 @@ final class RestoreFiles {
 	const INCOMING = 'restore-incoming-tables.json';
 
 	const RECLAIM = 'restore-reclaim.json';
+
+	const LINKED = 'restore-linked-targets.json';
 
 	/**
 	 * A file or directory of the work directory.

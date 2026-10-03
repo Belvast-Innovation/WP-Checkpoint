@@ -2,6 +2,8 @@
 
 namespace WPCheckpoint\Tests\Integration;
 
+use WPCheckpoint\Jobs\QuestionText;
+use WPCheckpoint\Restore\LinkedTargets;
 use WPCheckpoint\Files\ScanRoots;
 use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\Residue;
@@ -72,8 +74,8 @@ final class RestoreFilesPreflightTest extends RestoreTestCase {
 	/**
 	 * A job of a type, for a backup.
 	 */
-	private function job_for( string $type, string $base ): Job {
-		return Plugin::instance()->jobs()->create( $type, self::$admin_id, array(), array( 'base' => $base ) );
+	private function job_for( string $type, string $base, array $options = array() ): Job {
+		return Plugin::instance()->jobs()->create( $type, self::$admin_id, array(), array_merge( array( 'base' => $base ), $options ) );
 	}
 
 	/**
@@ -525,11 +527,173 @@ final class RestoreFilesPreflightTest extends RestoreTestCase {
 				},
 			)
 		);
-		$job = $this->run_restore( $this->job_for( $type, $this->with_files( array( 'wp-content/uploads/a.txt' => 'a' ) ) ) );
+		// Its target is outside this site (the temporary directory): swapped as the policy says, not asked.
+		$job = $this->run_restore( $this->job_for( $type, $this->with_files( array( 'wp-content/uploads/a.txt' => 'a' ) ), array( 'policy' => array( LinkedTargets::POLICY_KEY => LinkedTargets::SWAP ) ) ) );
 		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
 		$staging = RestoreFilesPreflightStep::staging( $this->work( $job ) );
 		$this->assertSame( rtrim( str_replace( '\\', '/', (string) realpath( $real ) ), '/' ), $staging['groups']['uploads'], 'the directory the swap renames' );
 		$this->assertContains( dirname( $staging['groups']['uploads'] ), $staging['parents'], 'probed and staged next to it, not next to the link' );
+	}
+
+	/**
+	 * A restore type whose uploads directory is a link (in the content directory) to $real.
+	 *
+	 * @return array{0: string, 1: string} The type and the link.
+	 */
+	private function linked_uploads( string $real, array $more = array() ): array {
+		$link = WP_CONTENT_DIR . '/wpc-linked-uploads-' . bin2hex( random_bytes( 3 ) );
+		symlink( $real, $link );
+		$this->made[] = $link;
+		$site         = ScanRoots::site_directories();
+		$type         = $this->type(
+			array(
+				'directories' => static function () use ( $site, $link ): array {
+					return array_merge( $site, array( 'uploads' => $link ) );
+				},
+			) + $more
+		);
+		return array( $type, $link );
+	}
+
+	private static function real( string $dir ): string {
+		return rtrim( str_replace( '\\', '/', (string) realpath( $dir ) ), '/' );
+	}
+
+	private function answered( Job $job, string $answer ): Job {
+		$job = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertNotNull( Plugin::instance()->job_actions()->answer( $job->id, array( (string) $job->questions[0]['id'] => $answer ) ) );
+		Plugin::instance()->runner()->tick( $job->id, microtime( true ) ); // Answered: paused, and ticked again.
+		return $this->run_restore( Plugin::instance()->jobs()->find( $job->id ) );
+	}
+
+	public function test_a_directory_linked_outside_the_site_is_asked_about_and_swapped_or_left_out_as_answered(): void {
+		$real           = $this->dir( sys_get_temp_dir() . '/wpc-real-uploads-' . bin2hex( random_bytes( 3 ) ) );
+		list( $type, )  = $this->linked_uploads( $real );
+		$base           = $this->with_files( array( 'wp-content/uploads/a.txt' => 'a' ) );
+		$job            = $this->run_restore( $this->job_for( $type, $base ) );
+		$this->assertSame( Job::PAUSED, $job->status, (string) $job->last_error );
+		$this->assertCount( 1, $job->questions );
+		$question = $job->questions[0];
+		$this->assertSame( LinkedTargets::KIND, $question['kind'] );
+		$this->assertSame( LinkedTargets::id( array( 'uploads' => self::real( $real ) ) ), $question['id'], 'bound to the group and its target' );
+		$this->assertSame( array( 'swap', 'exclude' ), $question['choices'], 'no default' );
+		$this->assertSame( 1, $question['count'] );
+		// As the admin and the terminal show it: the target masked, the text whole.
+		$shown = QuestionText::for_job( $job, Plugin::instance()->directories(), array( Plugin::instance()->job_presenter(), 'clean' ) );
+		$this->assertStringContainsString( 'is a link to a directory outside this site', $shown[0]['text'] );
+		$this->assertCount( 1, $shown[0]['listed'] );
+		$this->assertStringStartsWith( 'uploads: {tmp}/', $shown[0]['listed'][0] );
+		$this->assertStringContainsString( basename( $real ), $shown[0]['listed'][0], 'the control: the line is the target' );
+		$this->assertStringNotContainsString( sys_get_temp_dir(), implode( "\n", $shown[0]['listed'] ) . $shown[0]['text'] );
+
+		$swapped = $this->answered( $job, 'swap' );
+		$this->assertSame( Job::COMPLETED, $swapped->status, (string) $swapped->last_error );
+		$staging = RestoreFilesPreflightStep::staging( $this->work( $swapped ) );
+		$this->assertContains( 'uploads', $staging['staged'] );
+		$this->assertSame( self::real( $real ), $staging['groups']['uploads'] );
+		$this->assertSame( array(), $staging['left_out'] );
+
+		$left = $this->answered( $this->run_restore( $this->job_for( $type, $base ) ), 'exclude' );
+		$this->assertSame( Job::COMPLETED, $left->status, (string) $left->last_error );
+		$staging = RestoreFilesPreflightStep::staging( $this->work( $left ) );
+		$this->assertNotContains( 'uploads', $staging['staged'], 'left out of the restore' );
+		$this->assertSame( array( 'uploads' ), $staging['left_out'] );
+		$this->assertStringContainsString( 'A content group of the backup is not restored: its directory is a link to a directory outside this site', self::log( $left ) );
+		$this->assertStringNotContainsString( 'belong to no content group', self::log( $left ), 'its files are the left-out group\'s, not of no group' );
+		$staged_here = array_filter(
+			Residue::scan_site( array( dirname( self::real( $real ) ) ), Directories::own_tokens() ),
+			static function ( array $entry ) use ( $left ): bool {
+				return Residue::STAGE_DIR === $entry['kind'] && $entry['id'] === $left->id;
+			}
+		);
+		$this->assertSame( array(), array_values( $staged_here ), 'nothing staged next to the target' );
+		$this->assertNotSame(
+			array(),
+			array_values(
+				array_filter(
+					Residue::scan_site( array( dirname( self::real( $real ) ) ), Directories::own_tokens() ),
+					static function ( array $entry ) use ( $swapped ): bool {
+						return Residue::STAGE_DIR === $entry['kind'] && $entry['id'] === $swapped->id;
+					}
+				)
+			),
+			'the control: the restore that swaps it staged next to the target'
+		);
+	}
+
+	public function test_a_policy_says_it_up_front_and_an_unattended_restore_must(): void {
+		$real          = $this->dir( sys_get_temp_dir() . '/wpc-real-uploads-' . bin2hex( random_bytes( 3 ) ) );
+		list( $type, ) = $this->linked_uploads( $real );
+		$base          = $this->with_files( array( 'wp-content/uploads/a.txt' => 'a' ) );
+		$swap          = $this->run_restore( $this->job_for( $type, $base, array( 'policy' => array( LinkedTargets::POLICY_KEY => 'swap' ) ) ) );
+		$this->assertSame( Job::COMPLETED, $swap->status, (string) $swap->last_error );
+		$this->assertSame( array(), $swap->questions );
+		$this->assertContains( 'uploads', RestoreFilesPreflightStep::staging( $this->work( $swap ) )['staged'] );
+		$this->assertStringContainsString( '"from":"policy"', self::log( $swap ) );
+		$out = $this->run_restore( $this->job_for( $type, $base, array( 'policy' => array( LinkedTargets::POLICY_KEY => 'exclude' ) ) ) );
+		$this->assertSame( Job::COMPLETED, $out->status, (string) $out->last_error );
+		$this->assertSame( array( 'uploads' ), RestoreFilesPreflightStep::staging( $this->work( $out ) )['left_out'] );
+		$tables  = array(
+			'uncertain_tables' => 'exclude',
+			'shared_tables'    => 'exclude',
+		);
+		$refused = $this->run_restore( $this->job_for( $type, $base, array( 'unattended' => true, 'policy' => $tables ) ) );
+		$this->assertSame( Job::FAILED, $refused->status );
+		$this->assertStringContainsString( 'An unattended restore must say what to do with content directories that are links to directories outside this site: set the restore policy "linked_targets" to "swap" or "exclude".', (string) $refused->last_error );
+		$this->assertFileDoesNotExist( RestoreFiles::path( $this->work( $refused ), RestoreFiles::MANIFEST ), 'refused before the backup was even checked' );
+		$said = $this->run_restore( $this->job_for( $type, $base, array( 'unattended' => true, 'policy' => $tables + array( LinkedTargets::POLICY_KEY => 'swap' ) ) ) );
+		$this->assertSame( Job::COMPLETED, $said->status, 'the control: all three said' );
+	}
+
+	public function test_an_answer_holds_only_for_the_target_it_was_given_for(): void {
+		$real              = $this->dir( sys_get_temp_dir() . '/wpc-real-uploads-' . bin2hex( random_bytes( 3 ) ) );
+		$other             = $this->dir( sys_get_temp_dir() . '/wpc-other-uploads-' . bin2hex( random_bytes( 3 ) ) );
+		list( $type, $link ) = $this->linked_uploads( $real );
+		$job               = $this->run_restore( $this->job_for( $type, $this->with_files( array( 'wp-content/uploads/a.txt' => 'a' ) ) ) );
+		$this->assertSame( Job::PAUSED, $job->status, (string) $job->last_error );
+		$first = (string) $job->questions[0]['id'];
+		$this->assertNotNull( Plugin::instance()->job_actions()->answer( $job->id, array( $first => 'swap' ) ) );
+		// Before the answer is taken up, the link is pointed elsewhere (a new link renamed over it).
+		$moved = $link . '-new';
+		symlink( $other, $moved );
+		rename( $moved, $link );
+		$this->assertSame( self::real( $other ), self::real( $link ), 'the control: the link points elsewhere now' );
+		Plugin::instance()->runner()->tick( $job->id, microtime( true ) );
+		$job = $this->run_restore( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( Job::PAUSED, $job->status, 'asked again' );
+		$this->assertNotSame( $first, $job->questions[0]['id'] );
+		$this->assertSame( LinkedTargets::id( array( 'uploads' => self::real( $other ) ) ), $job->questions[0]['id'] );
+		$this->assertStringContainsString( 'An answer given for other linked directories than the restore would now ask about is not used', self::log( $job ) );
+	}
+
+	public function test_a_link_into_the_trusted_root_and_a_plain_directory_outside_the_site_are_not_asked_about(): void {
+		$real          = $this->dir( sys_get_temp_dir() . '/wpc-real-uploads-' . bin2hex( random_bytes( 3 ) ) );
+		$base          = $this->with_files( array( 'wp-content/uploads/a.txt' => 'a' ) );
+		list( $type, ) = $this->linked_uploads(
+			$real,
+			array(
+				'trusted_root' => static function () use ( $real ): string {
+					return dirname( $real );
+				},
+			)
+		);
+		$trusted = $this->run_restore( $this->job_for( $type, $base ) );
+		$this->assertSame( Job::COMPLETED, $trusted->status, (string) $trusted->last_error );
+		$this->assertSame( array(), $trusted->questions );
+		$site  = ScanRoots::site_directories();
+		$plain = $this->type(
+			array(
+				'directories' => static function () use ( $site, $real ): array {
+					return array_merge( $site, array( 'uploads' => $real ) );
+				},
+			)
+		);
+		$job   = $this->run_restore( $this->job_for( $plain, $base ) );
+		$this->assertSame( Job::COMPLETED, $job->status, 'a directory outside the site that is not a link: this site\'s own' );
+		$this->assertSame( array(), $job->questions );
+		// The control: the same link without the trusted root is asked about.
+		list( $asking, ) = $this->linked_uploads( $real );
+		$this->assertSame( Job::PAUSED, $this->run_restore( $this->job_for( $asking, $base ) )->status );
 	}
 
 	public function test_a_name_this_file_system_cannot_store_stops_the_restore_and_is_named(): void {

@@ -19,32 +19,32 @@ final class RestoreOptionsTest extends TestCase {
 			array(
 				'uncertain_tables' => 'ask',
 				'shared_tables'    => 'ask',
+				'linked_targets'   => 'ask',
 			),
 			$options['policy']
 		);
 		$this->assertFalse( $options['unattended'] );
 	}
 
-	public function test_an_unattended_restore_must_say_both_and_is_told_which_is_missing(): void {
-		$both = RestoreJob::options(
+	public function test_an_unattended_restore_must_say_all_three_and_is_told_which_is_missing(): void {
+		$all = array(
+			'uncertain_tables' => 'exclude',
+			'shared_tables'    => 'restore',
+			'linked_targets'   => 'swap',
+		);
+		$said = RestoreJob::options(
 			array(
 				'base'       => self::BASE,
 				'unattended' => true,
-				'policy'     => array(
-					'uncertain_tables' => 'exclude',
-					'shared_tables'    => 'restore',
-				),
+				'policy'     => $all,
 			)
 		);
-		$this->assertSame( 'exclude', $both['policy']['uncertain_tables'], 'the control: both said' );
-		$this->assertSame( 'restore', $both['policy']['shared_tables'] );
-		foreach (
-			array(
-				'uncertain_tables' => array( 'shared_tables' => 'exclude' ),
-				'shared_tables'    => array( 'uncertain_tables' => 'exclude' ),
-			) as $missing => $policy
-		) {
-			foreach ( array( $policy, array_merge( $policy, array( $missing => 'ask' ) ) ) as $given ) {
+		$this->assertSame( $all, $said['policy'], 'the control: all said' );
+		foreach ( array_keys( $all ) as $missing ) {
+			$policy = $all;
+			unset( $policy[ $missing ] );
+			$asked = 'linked_targets' === $missing ? array() : array( array_merge( $policy, array( $missing => 'ask' ) ) ); // "ask" is no choice for links.
+			foreach ( array_merge( array( $policy ), $asked ) as $given ) {
 				try {
 					RestoreJob::options(
 						array(
@@ -56,7 +56,10 @@ final class RestoreOptionsTest extends TestCase {
 					$this->fail( 'refused without ' . $missing );
 				} catch ( \InvalidArgumentException $e ) {
 					$this->assertStringContainsString( '"' . $missing . '"', $e->getMessage() );
-					$this->assertStringNotContainsString( '"' . key( $policy ) . '"', $e->getMessage(), 'it names the one missing, not the one given' );
+					foreach ( array_keys( $policy ) as $given_key ) {
+						$this->assertStringNotContainsString( '"' . $given_key . '"', $e->getMessage(), 'it names the one missing, not one given' );
+					}
+					$this->assertStringContainsString( 'linked_targets' === $missing ? '"swap" or "exclude"' : '"restore" or "exclude"', $e->getMessage(), 'and its own choices' );
 				}
 			}
 		}
@@ -82,6 +85,8 @@ final class RestoreOptionsTest extends TestCase {
 			'an unknown choice'       => array( array( 'policy' => array( 'shared_tables' => 'yes' ) ), '"shared_tables" must be one of' ),
 			'a policy not a list'     => array( array( 'policy' => 'restore' ), 'may only say' ),
 			'unattended not a switch' => array( array( 'unattended' => 'yes' ), '"unattended" must be true or false' ),
+			'ask said for links'      => array( array( 'policy' => array( 'linked_targets' => 'ask' ) ), '"linked_targets" must be one of: swap, exclude' ),
+			'a table choice for links' => array( array( 'policy' => array( 'linked_targets' => 'restore' ) ), '"linked_targets" must be one of: swap, exclude' ),
 		);
 	}
 

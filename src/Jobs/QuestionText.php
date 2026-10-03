@@ -7,6 +7,7 @@
 
 namespace WPCheckpoint\Jobs;
 
+use WPCheckpoint\Restore\LinkedTargets;
 use WPCheckpoint\Restore\IncomingQuestions;
 use WPCheckpoint\Restore\IncomingTables;
 use WPCheckpoint\Restore\RestoreFiles;
@@ -77,6 +78,9 @@ final class QuestionText {
 				$shown  = $tables;
 				$listed = array_slice( array_filter( (array) $tables[ self::TABLE_QUESTIONS[ $kind ] ], 'is_string' ), 0, self::MAX_LISTED );
 			}
+			if ( LinkedTargets::KIND === $kind && '' !== $work ) {
+				$listed = self::linked( $id, $work, $clean );
+			}
 			$out[] = array(
 				'id'      => $id,
 				'kind'    => (string) ( $question['kind'] ?? '' ),
@@ -111,6 +115,46 @@ final class QuestionText {
 		}
 		$evidence = array_filter( (array) ( $tables['evidence'] ?? array() ), 'is_string' );
 		return hash_equals( IncomingQuestions::id( $key, array_filter( (array) $tables[ self::TABLE_QUESTIONS[ $kind ] ], 'is_string' ), $evidence, ! empty( $tables['over'] ) ), $id );
+	}
+
+	/**
+	 * The lines of the question about directories that are links to directories outside this site, when its work
+	 * file names the groups and targets its id was made from (a file written by another run may name others: then
+	 * none are listed). Each target masked, numbered where two read the same (LinkedTargets::lines()).
+	 *
+	 * @param string   $id    The question's id.
+	 * @param string   $work  Work directory.
+	 * @param callable $clean Text cleaner.
+	 * @return string[]
+	 */
+	private static function linked( string $id, string $work, callable $clean ): array {
+		try {
+			$file = ExportPlan::exists( $work, RestoreFiles::LINKED ) ? ExportPlan::read( $work, RestoreFiles::LINKED ) : array();
+		} catch ( \RuntimeException $e ) {
+			return array();
+		}
+		$targets = array();
+		foreach ( (array) ( $file['hex'] ?? array() ) as $group => $hex ) {
+			$bytes = is_string( $hex ) && 1 === preg_match( '/\A(?:[0-9a-f]{2})*\z/', $hex ) ? hex2bin( $hex ) : false;
+			if ( false === $bytes ) {
+				return array();
+			}
+			$targets[ (string) $group ] = $bytes;
+		}
+		if ( array() === $targets || ! hash_equals( LinkedTargets::id( $targets ), $id ) ) {
+			return array();
+		}
+		$entries = array();
+		foreach ( (array) ( $file['entries'] ?? array() ) as $entry ) {
+			if ( is_array( $entry ) && is_string( $entry['group'] ?? null ) && is_string( $entry['target'] ?? null ) && is_string( $entry['relation'] ?? null ) ) {
+				$entries[] = array(
+					'group'    => $entry['group'],
+					'target'   => $entry['target'],
+					'relation' => $entry['relation'],
+				);
+			}
+		}
+		return LinkedTargets::lines( $entries, $clean );
 	}
 
 	/**
@@ -193,6 +237,18 @@ final class QuestionText {
 				),
 				$count
 			) . $found;
+		}
+		if ( LinkedTargets::KIND === $kind ) {
+			return sprintf(
+				/* translators: %d: number of content directories */
+				_n(
+					'%d content directory of this site is a link to a directory outside this site (listed below). The restore replaces a directory where it is, so it would replace the files there, which may be another installation\'s (a staging site whose uploads link to the production site\'s, for example). Swap it as usual, or leave it out of the restore: it then stays as it is, and the job log says it was not restored. If it is this site\'s own (a deployment\'s shared directory), set the trusted deployment root in the settings, and it is not asked about again.',
+					'%d content directories of this site are links to directories outside this site (listed below). The restore replaces a directory where it is, so it would replace the files there, which may be another installation\'s (a staging site whose uploads link to the production site\'s, for example). Swap them as usual, or leave them out of the restore: they then stay as they are, and the job log says they were not restored. If they are this site\'s own (a deployment\'s shared directory), set the trusted deployment root in the settings, and they are not asked about again.',
+					$count,
+					'wp-checkpoint'
+				),
+				$count
+			);
 		}
 		if ( 'oversize_more' === $id ) {
 			return sprintf( '%d more tables have rows larger than the single-row limit (listed in the job log). Leave those rows out, or stop?', $count );

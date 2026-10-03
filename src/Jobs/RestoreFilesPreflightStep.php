@@ -10,9 +10,11 @@ namespace WPCheckpoint\Jobs;
 use WPCheckpoint\Archive\IndexLine;
 use WPCheckpoint\Archive\IndexLineError;
 use WPCheckpoint\Archive\Manifest;
+use WPCheckpoint\Files\Links;
 use WPCheckpoint\Files\ScanRoots;
 use WPCheckpoint\Restore\CannotStage;
 use WPCheckpoint\Restore\DirectoryProbe;
+use WPCheckpoint\Restore\LinkedTargets;
 use WPCheckpoint\Restore\LoaderProbe;
 use WPCheckpoint\Restore\NameClashes;
 use WPCheckpoint\Restore\RestoreFiles;
@@ -21,6 +23,7 @@ use WPCheckpoint\Restore\StagingSpace;
 use WPCheckpoint\Restore\TargetNames;
 use WPCheckpoint\Support\HostFunctions;
 use WPCheckpoint\Support\Paths;
+use WPCheckpoint\Support\Utf8;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -101,7 +104,8 @@ final class RestoreFilesPreflightStep implements Step {
 	 * function( string $parent, TargetNames $probed ): TargetNames, "dev" function( string $path ): ?int (the
 	 * file system of a live directory, null when it is not there), "page_lines" int, "at" function( string
 	 * $point ): void ("appended": the index unit's bytes are written, its cursor is not), "plugin_dir" string,
-	 * "dir_mode" int.
+	 * "dir_mode" int. Not a test part: "trusted_root" function(): string, the trusted deployment root ('' when none;
+	 * RestoreJob passes it from the storage directories' state).
 	 *
 	 * @var array<string, mixed>
 	 */
@@ -140,6 +144,9 @@ final class RestoreFilesPreflightStep implements Step {
 		$first  = true;
 		if ( 'layout' === $cursor['phase'] ) {
 			$cursor = $this->layout( $context );
+			if ( $cursor instanceof StepResult ) {
+				return $cursor; // The question about directories that are links to directories outside this site.
+			}
 			$context->checkpoint( $cursor, 62, __( 'Checking where the files go', 'wp-checkpoint' ) );
 			$first = false; // The layout was this tick's first unit.
 		}
@@ -196,16 +203,35 @@ final class RestoreFilesPreflightStep implements Step {
 	 * The layout phase: the cursor of the probe phase.
 	 *
 	 * @param JobContext $context Context.
-	 * @return array<string, mixed>
+	 * @return array<string, mixed>|StepResult The cursor of the probe phase, or the question about linked directories.
 	 * @throws CannotStage When the layout cannot be staged and swapped.
 	 */
-	private function layout( JobContext $context ): array {
+	private function layout( JobContext $context ) {
 		$manifest = RestorePreflightStep::manifest( $context->work_path() );
-		$groups   = ScanRoots::site_directories();
-		if ( isset( $this->parts['directories'] ) ) {
-			$groups = array_map( array( ScanRoots::class, 'resolved' ), array_map( 'strval', (array) call_user_func( $this->parts['directories'] ) ) );
+		$given    = isset( $this->parts['directories'] ) ? array_map( 'strval', (array) call_user_func( $this->parts['directories'] ) ) : ScanRoots::site_directories_as_given();
+		$groups   = array_map( array( ScanRoots::class, 'resolved' ), $given );
+		$staged   = array_values( array_intersect( StagingLayout::GROUPS, (array) $manifest->to_array()['contents']['files'] ) );
+		$left_out = array();
+		$linked   = $this->linked( $given, $groups, $staged );
+		if ( array() !== $linked ) {
+			$choice = $this->linked_choice( $context, $linked );
+			if ( $choice instanceof StepResult ) {
+				return $choice;
+			}
+			if ( LinkedTargets::EXCLUDE === $choice ) {
+				$left_out = array_keys( $linked );
+				$staged   = array_values( array_diff( $staged, $left_out ) );
+				foreach ( $linked as $group => $target ) {
+					$context->logger()->warning(
+						'A content group of the backup is not restored: its directory is a link to a directory outside this site, and the restore was told to leave such groups out; its directory stays as it is',
+						array(
+							'group'  => $group,
+							'target' => $target,
+						)
+					);
+				}
+			}
 		}
-		$staged = array_values( array_intersect( StagingLayout::GROUPS, (array) $manifest->to_array()['contents']['files'] ) );
 		// The storage directory as the job names it and where it is: a swap that moves either breaks the job's
 		// way to its own files (a link inside a replaced directory, or a directory reached through a link).
 		$real    = realpath( $context->storage_path() );
@@ -246,11 +272,12 @@ final class RestoreFilesPreflightStep implements Step {
 			$context->work_path(),
 			RestoreFiles::STAGING,
 			array(
-				'groups'  => $groups,
-				'staged'  => $staged,
-				'parents' => array_keys( $parents ),
-				'storage' => $storage,
-				'random'  => $random,
+				'groups'   => $groups,
+				'staged'   => $staged,
+				'parents'  => array_keys( $parents ),
+				'storage'  => $storage,
+				'random'   => $random,
+				'left_out' => $left_out,
 			)
 		);
 		return array(
@@ -390,6 +417,9 @@ final class RestoreFilesPreflightStep implements Step {
 					$prev['raw'] = $raw;
 					$map         = $layout->map( $line['p'] );
 					$index       = null === $map ? null : ( $parent[ $layout->parent( $map['group'] ) ] ?? null );
+					if ( null !== $map && in_array( $map['group'], (array) ( $staging['left_out'] ?? array() ), true ) ) {
+						continue; // A group left out of the restore (the layout logged it): not a path of no group.
+					}
 					if ( null === $map || null === $index || ! in_array( $map['group'], (array) $staging['staged'], true ) ) {
 						$lost .= self::json( array( 'p' => $line['p'] ) ) . "\n";
 						++$cursor['count'];
@@ -632,6 +662,109 @@ final class RestoreFilesPreflightStep implements Step {
 			$context->logger()->warning( 'The free space for the staged files could not be read; the restore continues as you chose', array( 'need' => $check['unknown'] ) );
 		}
 		return StepResult::done( __( 'The backup\'s files can be staged here', 'wp-checkpoint' ) );
+	}
+
+	/**
+	 * The staged groups whose directory is a link (or cannot be told not to be one) to a directory outside this site:
+	 * neither in its WordPress directory nor in the trusted deployment root (LinkedTargets).
+	 *
+	 * @param array<string, string> $given  Group => directory as WordPress names it.
+	 * @param array<string, string> $groups Group => directory, resolved.
+	 * @param string[]              $staged The staged groups.
+	 * @return array<string, string> Group => its target, resolved.
+	 */
+	private function linked( array $given, array $groups, array $staged ): array {
+		$abspath = Paths::real( rtrim( ABSPATH, '/\\' ) );
+		$trusted = isset( $this->parts['trusted_root'] ) ? (string) call_user_func( $this->parts['trusted_root'] ) : '';
+		clearstatcache( true );
+		$out = array();
+		foreach ( $staged as $group ) {
+			$path  = rtrim( (string) ( $given[ $group ] ?? '' ), '/\\' );
+			$state = '' === $path ? Links::UNKNOWN : Links::state( $path );
+			if ( Links::PLAIN === $state || ( Links::UNKNOWN === $state && Paths::normalize( $path ) === (string) $groups[ $group ] ) ) {
+				continue; // Not a link, or resolved to itself: no link anywhere on its path.
+			}
+			if ( LinkedTargets::outside( (string) $groups[ $group ], false === $abspath ? '' : (string) $abspath, $trusted ) ) {
+				$out[ $group ] = (string) $groups[ $group ];
+			}
+		}
+		return $out;
+	}
+
+	/**
+	 * What to do with the groups whose directory is a link to a directory outside this site: the answer to the
+	 * question about these very groups and targets, or the policy; otherwise the question (no default).
+	 *
+	 * @param JobContext            $context Context.
+	 * @param array<string, string> $linked  Group => target, resolved.
+	 * @return string|StepResult LinkedTargets::SWAP or EXCLUDE, or the question.
+	 * @throws TransientFailure When the question's file cannot be written.
+	 */
+	private function linked_choice( JobContext $context, array $linked ) {
+		$abspath = Paths::real( rtrim( ABSPATH, '/\\' ) );
+		$id      = LinkedTargets::id( $linked );
+		$answers = isset( $context->options()['answers'] ) && is_array( $context->options()['answers'] ) ? $context->options()['answers'] : array();
+		$policy  = RestoreJob::options( $context->options() )['policy'][ LinkedTargets::POLICY_KEY ];
+		foreach ( array_keys( $answers ) as $other ) {
+			if ( 0 === strpos( (string) $other, LinkedTargets::POLICY_KEY . '_' ) && $other !== $id ) {
+				// Given for other groups or targets (a link pointed elsewhere since): it holds for none of these.
+				$context->logger()->warning( 'An answer given for other linked directories than the restore would now ask about is not used', array( 'question' => (string) $other ) );
+			}
+		}
+		$answer = $answers[ $id ] ?? null;
+		if ( in_array( $answer, LinkedTargets::CHOICES, true ) ) {
+			$choice = (string) $answer;
+			$from   = 'answer';
+		} elseif ( in_array( $policy, LinkedTargets::CHOICES, true ) ) {
+			$choice = (string) $policy;
+			$from   = 'policy';
+		} else {
+			$entries = array();
+			$hex     = array();
+			foreach ( $linked as $group => $target ) {
+				$entries[]     = array(
+					'group'    => (string) $group,
+					'target'   => Utf8::scrub( $target ),
+					'relation' => LinkedTargets::relation( $target, false === $abspath ? '' : (string) $abspath ),
+				);
+				$hex[ $group ] = bin2hex( $target );
+			}
+			try {
+				ExportPlan::write(
+					$context->work_path(),
+					RestoreFiles::LINKED,
+					array(
+						'entries' => $entries,
+						'hex'     => $hex, // The targets' bytes, for the id: the question lists them only for its own id.
+					)
+				);
+			} catch ( \RuntimeException $e ) {
+				throw new TransientFailure( 'A work file of the restore could not be written: ' . $e->getMessage() ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+			}
+			$context->logger()->info( 'Content directories that are links to directories outside this site; asked what to do with them', array( 'targets' => $linked ) );
+			return StepResult::ask(
+				array( 'phase' => 'layout' ),
+				array(
+					array(
+						'id'      => $id,
+						'kind'    => LinkedTargets::KIND,
+						'count'   => count( $linked ),
+						'file'    => RestoreFiles::LINKED,
+						'choices' => LinkedTargets::CHOICES,
+					),
+				),
+				__( 'Waiting for your decision on 1 question', 'wp-checkpoint' )
+			);
+		}
+		$context->logger()->info(
+			'Content directories that are links to directories outside this site',
+			array(
+				'targets' => $linked,
+				'choice'  => $choice,
+				'from'    => $from,
+			)
+		);
+		return $choice;
 	}
 
 	/**

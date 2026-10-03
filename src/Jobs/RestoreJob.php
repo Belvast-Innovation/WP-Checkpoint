@@ -7,6 +7,7 @@
 
 namespace WPCheckpoint\Jobs;
 
+use WPCheckpoint\Restore\LinkedTargets;
 use WPCheckpoint\Archive\Manifest;
 use WPCheckpoint\Support\Directories;
 
@@ -51,10 +52,12 @@ defined( 'ABSPATH' ) || exit;
  * directory comes from the current storage directories, never from the
  * options. The policy says what to do with each kind of table another
  * installation in the same database may use (IncomingTables): "ask" (the
- * default), "restore" or "exclude". A restore nobody attends ("unattended")
- * is never asked, so it must say both; missing either refuses it before
- * anything of the backup is read (RestoreVerifyStep validates the options
- * first).
+ * default), "restore" or "exclude"; and what to do with a content group whose
+ * directory is a link to a directory outside this site (LinkedTargets):
+ * "swap" or "exclude", asked when not said. A restore nobody attends
+ * ("unattended") is never asked, so it must say all three; missing any
+ * refuses it before anything of the backup is read (RestoreVerifyStep
+ * validates the options first).
  */
 final class RestoreJob implements JobType {
 
@@ -70,8 +73,18 @@ final class RestoreJob implements JobType {
 	 * question each is asked by, too (RestorePreflightStep).
 	 */
 	const POLICIES = array(
-		'uncertain_tables' => array( 'ask', 'restore', 'exclude' ),
-		'shared_tables'    => array( 'ask', 'restore', 'exclude' ),
+		'uncertain_tables'        => array( 'ask', 'restore', 'exclude' ),
+		'shared_tables'           => array( 'ask', 'restore', 'exclude' ),
+		LinkedTargets::POLICY_KEY => LinkedTargets::CHOICES, // Not said: asked ("ask" itself is not a choice to give).
+	);
+
+	/**
+	 * What each policy is about, for the refusal of an unattended restore that does not say it.
+	 */
+	const POLICY_SUBJECTS = array(
+		'uncertain_tables'        => 'tables that may belong to this site or to another installation in the same database',
+		'shared_tables'           => 'tables this site shares with another installation in the same database',
+		LinkedTargets::POLICY_KEY => 'content directories that are links to directories outside this site',
 	);
 
 	/**
@@ -141,7 +154,14 @@ final class RestoreJob implements JobType {
 			new RestorePlatformStep(),
 			new RestoreVerifyStep( $backups, $this->clean ),
 			new RestorePreflightStep( $backups ),
-			new RestoreFilesPreflightStep(),
+			new RestoreFilesPreflightStep(
+				array(
+					'trusted_root' => static function () use ( $directories ): string {
+						$dirs = call_user_func( $directories );
+						return $dirs instanceof Directories ? (string) ( $dirs->state()['trusted_deploy_root'] ?? '' ) : '';
+					},
+				)
+			),
 			new DatabaseImportStep(),
 			new PrefixRewriteStep(),
 			new FileStagingStep(),
@@ -178,7 +198,7 @@ final class RestoreJob implements JobType {
 		}
 		foreach ( self::POLICIES as $key => $allowed ) {
 			$value = $given[ $key ] ?? 'ask';
-			if ( ! is_string( $value ) || ! in_array( $value, $allowed, true ) ) {
+			if ( ! is_string( $value ) || ( ! in_array( $value, $allowed, true ) && ( isset( $given[ $key ] ) || 'ask' !== $value ) ) ) {
 				throw new \InvalidArgumentException( sprintf( 'The restore policy "%1$s" must be one of: %2$s.', $key, implode( ', ', $allowed ) ) );
 			}
 			$policy[ $key ] = $value;
@@ -191,7 +211,8 @@ final class RestoreJob implements JobType {
 			// Nobody answers a question of a restore nobody attends: what it would ask must be said up front.
 			foreach ( $policy as $key => $value ) {
 				if ( 'ask' === $value ) {
-					throw new \InvalidArgumentException( sprintf( 'An unattended restore must say what to do with %1$s: set the restore policy "%2$s" to "restore" or "exclude".', 'uncertain_tables' === $key ? 'tables that may belong to this site or to another installation in the same database' : 'tables this site shares with another installation in the same database', $key ) );
+					$choices = array_values( array_diff( self::POLICIES[ $key ], array( 'ask' ) ) );
+					throw new \InvalidArgumentException( sprintf( 'An unattended restore must say what to do with %1$s: set the restore policy "%2$s" to "%3$s".', self::POLICY_SUBJECTS[ $key ], $key, implode( '" or "', $choices ) ) );
 				}
 			}
 		}
