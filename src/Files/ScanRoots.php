@@ -206,6 +206,17 @@ final class ScanRoots {
 	 * @return array<string, string>
 	 */
 	public static function site_directories(): array {
+		return array_map( array( self::class, 'resolved' ), self::site_directories_as_given() );
+	}
+
+	/**
+	 * Each content group's live directory as WordPress reports it, normalised but not resolved: a directory that is
+	 * a link is named by the link (the restore judges each by where it finally is, LinkedTargets).
+	 * On a multisite network, uploads is the main site's upload directory, as in site_directories().
+	 *
+	 * @return array<string, string>
+	 */
+	public static function site_directories_as_given(): array {
 		$dirs = self::wordpress_directories();
 		if ( function_exists( 'is_multisite' ) && is_multisite() && ! is_main_site() ) {
 			switch_to_blog( get_main_site_id() );
@@ -217,7 +228,7 @@ final class ScanRoots {
 		}
 		$out = array();
 		foreach ( self::GROUPS as $group ) {
-			$out[ $group ] = self::resolved( rtrim( $dirs[ $group ], '/' ) );
+			$out[ $group ] = rtrim( $dirs[ $group ], '/' );
 		}
 		return $out;
 	}

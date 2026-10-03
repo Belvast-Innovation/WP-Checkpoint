@@ -13,6 +13,7 @@ use WPCheckpoint\Archive\Manifest;
 use WPCheckpoint\Files\ScanRoots;
 use WPCheckpoint\Restore\CannotStage;
 use WPCheckpoint\Restore\DirectoryProbe;
+use WPCheckpoint\Restore\LinkedTargets;
 use WPCheckpoint\Restore\LoaderProbe;
 use WPCheckpoint\Restore\NameClashes;
 use WPCheckpoint\Restore\RestoreFiles;
@@ -21,6 +22,7 @@ use WPCheckpoint\Restore\StagingSpace;
 use WPCheckpoint\Restore\TargetNames;
 use WPCheckpoint\Support\HostFunctions;
 use WPCheckpoint\Support\Paths;
+use WPCheckpoint\Support\Utf8;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -39,8 +41,12 @@ defined( 'ABSPATH' ) || exit;
  *    file system, a group directory on, inside or around another, a
  *    group's parent inside the content directory but not the content
  *    directory itself, and a storage directory inside a directory the swap
- *    replaces whole. The layout, with the staging roots' random part, goes
- *    to RestoreFiles::STAGING and never changes.
+ *    replaces whole. A group whose directory is not positively this site's
+ *    (where it finally is: outside the site's zones, inside another
+ *    installation, or not to be told; LinkedTargets) is asked about first:
+ *    swapped as usual, or left out (its directory stays as it is). The layout, with the staging
+ *    roots' random part and the groups left out, goes to RestoreFiles::STAGING
+ *    and never changes.
  * 2. probe: one staging parent per unit (DirectoryProbe): create, write,
  *    rename, remove; how names compare there (TargetNames) and which file
  *    system it is on. A group directory on another file system than its
@@ -60,6 +66,9 @@ defined( 'ABSPATH' ) || exit;
  *    put on one file refuse the restore, named.
  * 6. space: each file system must have StagingSpace::required() free; when
  *    free space cannot be read, the user is asked (free_space_unknown).
+ *    This is the one step that may ask twice, in two phases: what has to fit
+ *    depends on the answer about those directories (a group left out is
+ *    not staged), so the two questions cannot be asked at once.
  *
  * The probes create and remove their own entries within one unit; a unit
  * that dies in between is replayed with new names, and what it left is a
@@ -101,7 +110,9 @@ final class RestoreFilesPreflightStep implements Step {
 	 * function( string $parent, TargetNames $probed ): TargetNames, "dev" function( string $path ): ?int (the
 	 * file system of a live directory, null when it is not there), "page_lines" int, "at" function( string
 	 * $point ): void ("appended": the index unit's bytes are written, its cursor is not), "plugin_dir" string,
-	 * "dir_mode" int.
+	 * "dir_mode" int, "config_dir" function(): string (the directory of the site's wp-config.php, as found). Not a
+	 * test part: "trusted_root" function(): string, the trusted deployment root ('' when none; RestoreJob passes it
+	 * from the storage directories' state).
 	 *
 	 * @var array<string, mixed>
 	 */
@@ -140,6 +151,9 @@ final class RestoreFilesPreflightStep implements Step {
 		$first  = true;
 		if ( 'layout' === $cursor['phase'] ) {
 			$cursor = $this->layout( $context );
+			if ( $cursor instanceof StepResult ) {
+				return $cursor; // The question about content directories that are not positively this site's.
+			}
 			$context->checkpoint( $cursor, 62, __( 'Checking where the files go', 'wp-checkpoint' ) );
 			$first = false; // The layout was this tick's first unit.
 		}
@@ -196,16 +210,38 @@ final class RestoreFilesPreflightStep implements Step {
 	 * The layout phase: the cursor of the probe phase.
 	 *
 	 * @param JobContext $context Context.
-	 * @return array<string, mixed>
+	 * @return array<string, mixed>|StepResult The cursor of the probe phase, or the question about directories that are not
+	 *                                         positively this site's.
 	 * @throws CannotStage When the layout cannot be staged and swapped.
 	 */
-	private function layout( JobContext $context ): array {
+	private function layout( JobContext $context ) {
 		$manifest = RestorePreflightStep::manifest( $context->work_path() );
-		$groups   = ScanRoots::site_directories();
-		if ( isset( $this->parts['directories'] ) ) {
-			$groups = array_map( array( ScanRoots::class, 'resolved' ), array_map( 'strval', (array) call_user_func( $this->parts['directories'] ) ) );
+		clearstatcache( true ); // Before anything is resolved: a worker's realpath cache may hold a link as it was.
+		$given    = isset( $this->parts['directories'] ) ? array_map( 'strval', (array) call_user_func( $this->parts['directories'] ) ) : ScanRoots::site_directories_as_given();
+		$groups   = array_map( array( ScanRoots::class, 'resolved' ), $given );
+		$staged   = array_values( array_intersect( StagingLayout::GROUPS, (array) $manifest->to_array()['contents']['files'] ) );
+		$left_out = array();
+		$linked   = $this->linked( $given, $staged );
+		if ( array() !== $linked ) {
+			$choice = $this->linked_choice( $context, $linked );
+			if ( $choice instanceof StepResult ) {
+				return $choice;
+			}
+			if ( LinkedTargets::EXCLUDE === $choice ) {
+				$left_out = array_keys( $linked );
+				$staged   = array_values( array_diff( $staged, $left_out ) );
+				foreach ( $linked as $group => $why ) {
+					$context->logger()->warning(
+						'A content group of the backup is not restored: its directory is not positively this site\'s, and the restore was told to leave such groups out; its directory stays as it is',
+						array(
+							'group'   => $group,
+							'target'  => $why['target'],
+							'verdict' => $why['verdict'],
+						)
+					);
+				}
+			}
 		}
-		$staged = array_values( array_intersect( StagingLayout::GROUPS, (array) $manifest->to_array()['contents']['files'] ) );
 		// The storage directory as the job names it and where it is: a swap that moves either breaks the job's
 		// way to its own files (a link inside a replaced directory, or a directory reached through a link).
 		$real    = realpath( $context->storage_path() );
@@ -246,11 +282,12 @@ final class RestoreFilesPreflightStep implements Step {
 			$context->work_path(),
 			RestoreFiles::STAGING,
 			array(
-				'groups'  => $groups,
-				'staged'  => $staged,
-				'parents' => array_keys( $parents ),
-				'storage' => $storage,
-				'random'  => $random,
+				'groups'   => $groups,
+				'staged'   => $staged,
+				'parents'  => array_keys( $parents ),
+				'storage'  => $storage,
+				'random'   => $random,
+				'left_out' => $left_out,
 			)
 		);
 		return array(
@@ -390,6 +427,9 @@ final class RestoreFilesPreflightStep implements Step {
 					$prev['raw'] = $raw;
 					$map         = $layout->map( $line['p'] );
 					$index       = null === $map ? null : ( $parent[ $layout->parent( $map['group'] ) ] ?? null );
+					if ( null !== $map && in_array( $map['group'], (array) ( $staging['left_out'] ?? array() ), true ) ) {
+						continue; // A group left out of the restore (the layout logged it): not a path of no group.
+					}
 					if ( null === $map || null === $index || ! in_array( $map['group'], (array) $staging['staged'], true ) ) {
 						$lost .= self::json( array( 'p' => $line['p'] ) ) . "\n";
 						++$cursor['count'];
@@ -632,6 +672,138 @@ final class RestoreFilesPreflightStep implements Step {
 			$context->logger()->warning( 'The free space for the staged files could not be read; the restore continues as you chose', array( 'need' => $check['unknown'] ) );
 		}
 		return StepResult::done( __( 'The backup\'s files can be staged here', 'wp-checkpoint' ) );
+	}
+
+	/**
+	 * The staged groups whose directory is not positively this site's, judged by where it finally is
+	 * (LinkedTargets::judge()): this site's zones are its WordPress directory, the trusted deployment root and the
+	 * directory of the wp-config.php it loaded (unless that is a file system's root or a home directory).
+	 *
+	 * @param array<string, string> $given  Group => directory as WordPress names it.
+	 * @param string[]              $staged The staged groups.
+	 * @return array<string, array{target: string, verdict: string, at: string}> Group => why it is asked about.
+	 */
+	private function linked( array $given, array $staged ): array {
+		$zones = array();
+		foreach ( array( rtrim( ABSPATH, '/\\' ), isset( $this->parts['trusted_root'] ) ? (string) call_user_func( $this->parts['trusted_root'] ) : '' ) as $dir ) {
+			$real = '' === $dir ? false : Paths::real( $dir );
+			if ( false !== $real ) {
+				$zones[] = rtrim( Paths::normalize( (string) $real ), '/' );
+			}
+		}
+		$config  = isset( $this->parts['config_dir'] ) ? (string) call_user_func( $this->parts['config_dir'] ) : self::config_dir();
+		$real    = '' === $config ? false : Paths::real( $config );
+		$zones[] = false === $real ? '' : LinkedTargets::config_zone( rtrim( Paths::normalize( (string) $real ), '/' ), null, $config );
+		$out     = array();
+		foreach ( $staged as $group ) {
+			$why = LinkedTargets::judge( (string) ( $given[ $group ] ?? '' ), $zones );
+			if ( LinkedTargets::SITE !== $why['verdict'] ) {
+				$out[ $group ] = $why;
+			}
+		}
+		return $out;
+	}
+
+	/**
+	 * The directory of the wp-config.php this site loads, as found (not resolved): under WP-CLI the one WP-CLI loads
+	 * (it reads the file rather than including it, and honours WP_CONFIG_PATH), otherwise the one wp-load.php loads
+	 * (LinkedTargets::config_file()). '' when there is none.
+	 *
+	 * @return string
+	 */
+	private static function config_dir(): string {
+		$file = '';
+		if ( defined( 'WP_CLI' ) && WP_CLI && function_exists( '\\WP_CLI\\Utils\\locate_wp_config' ) ) {
+			$file = (string) \WP_CLI\Utils\locate_wp_config();
+		}
+		if ( '' === $file ) {
+			$file = LinkedTargets::config_file( rtrim( ABSPATH, '/\\' ) );
+		}
+		return '' === $file ? '' : rtrim( Paths::normalize( dirname( $file ) ), '/' );
+	}
+
+	/**
+	 * What to do with the groups whose directory is not positively this site's: the answer to the question about these
+	 * very groups and directories, or the policy; otherwise the question (no default).
+	 *
+	 * @param JobContext                                                        $context Context.
+	 * @param array<string, array{target: string, verdict: string, at: string}> $linked  Group => why it is asked about.
+	 * @return string|StepResult LinkedTargets::SWAP or EXCLUDE, or the question.
+	 * @throws TransientFailure When the question's file cannot be written.
+	 */
+	private function linked_choice( JobContext $context, array $linked ) {
+		$abspath = Paths::real( rtrim( ABSPATH, '/\\' ) );
+		$targets = array_map(
+			static function ( array $why ): string {
+				return $why['target'];
+			},
+			$linked
+		);
+		$id      = LinkedTargets::id( $targets );
+		$answers = isset( $context->options()['answers'] ) && is_array( $context->options()['answers'] ) ? $context->options()['answers'] : array();
+		$policy  = RestoreJob::options( $context->options() )['policy'][ LinkedTargets::POLICY_KEY ];
+		foreach ( array_keys( $answers ) as $other ) {
+			if ( 0 === strpos( (string) $other, LinkedTargets::POLICY_KEY . '_' ) && $other !== $id ) {
+				// Given for other groups or targets (a link pointed elsewhere since): it holds for none of these.
+				$context->logger()->warning( 'An answer given for other content directories than the restore would now ask about is not used', array( 'question' => (string) $other ) );
+			}
+		}
+		$answer = $answers[ $id ] ?? null;
+		if ( in_array( $answer, LinkedTargets::CHOICES, true ) ) {
+			$choice = (string) $answer;
+			$from   = 'answer';
+		} elseif ( in_array( $policy, LinkedTargets::CHOICES, true ) ) {
+			$choice = (string) $policy;
+			$from   = 'policy';
+		} else {
+			$entries = array();
+			$hex     = array();
+			foreach ( $linked as $group => $why ) {
+				$entries[]     = array(
+					'group'    => (string) $group,
+					'target'   => Utf8::scrub( $why['target'] ),
+					'relation' => LinkedTargets::relation( $why['target'], false === $abspath ? '' : (string) $abspath ),
+					'verdict'  => $why['verdict'],
+					'at'       => Utf8::scrub( $why['at'] ),
+				);
+				$hex[ $group ] = bin2hex( $why['target'] );
+			}
+			try {
+				ExportPlan::write(
+					$context->work_path(),
+					RestoreFiles::LINKED,
+					array(
+						'entries' => $entries,
+						'hex'     => $hex, // The targets' bytes, for the id: the question lists them only for its own id.
+					)
+				);
+			} catch ( \RuntimeException $e ) {
+				throw new TransientFailure( 'A work file of the restore could not be written: ' . $e->getMessage() ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+			}
+			$context->logger()->info( 'Content directories that are not positively this site\'s; asked what to do with them', array( 'groups' => $linked ) );
+			return StepResult::ask(
+				array( 'phase' => 'layout' ),
+				array(
+					array(
+						'id'      => $id,
+						'kind'    => LinkedTargets::KIND,
+						'count'   => count( $linked ),
+						'file'    => RestoreFiles::LINKED,
+						'choices' => LinkedTargets::CHOICES,
+					),
+				),
+				__( 'Waiting for your decision on 1 question', 'wp-checkpoint' )
+			);
+		}
+		$context->logger()->info(
+			'Content directories that are not positively this site\'s',
+			array(
+				'groups' => $linked,
+				'choice' => $choice,
+				'from'   => $from,
+			)
+		);
+		return $choice;
 	}
 
 	/**

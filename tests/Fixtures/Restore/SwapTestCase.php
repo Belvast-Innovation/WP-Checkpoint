@@ -54,6 +54,12 @@ abstract class SwapTestCase extends RestoreTestCase {
 	/** @var array<string, mixed> Parts of the swap step for this test. */
 	protected $swap_parts = array();
 
+	/** @var array{seam?: string, sql?: string[]} Statements a killed run sends when it reaches the seam (killed_at()). */
+	protected $child_sql = array();
+
+	/** @var array<string, mixed> Test seams of the preflight for this test (RestorePreflightStep). */
+	protected $preflight_parts = array();
+
 	/** @var string[] What the swap step's crash seam saw, in order. */
 	protected $seams = array();
 
@@ -83,8 +89,9 @@ abstract class SwapTestCase extends RestoreTestCase {
 	 */
 	protected function set_up_swap(): void {
 		global $wpdb;
-		$this->seams   = array();
-		$this->sandbox = Sandbox::make( 'swap' );
+		$this->seams     = array();
+		$this->child_sql = array();
+		$this->sandbox   = Sandbox::make( 'swap' );
 		$content       = $this->sandbox . '/wp-content';
 		$this->abspath = $this->sandbox . '/site';
 		mkdir( $this->abspath );
@@ -187,8 +194,25 @@ abstract class SwapTestCase extends RestoreTestCase {
 		$steps = array();
 		foreach ( Plugin::instance()->job_types()->get( RestoreJob::ID )->steps() as $step ) {
 			switch ( $step->id() ) {
+				case \WPCheckpoint\Jobs\RestorePreflightStep::ID:
+					$steps[] = new \WPCheckpoint\Jobs\RestorePreflightStep(
+						static function (): string {
+							return Plugin::instance()->directories()->backups();
+						},
+						\WPCheckpoint\Jobs\RestorePreflightStep::HEAD_BYTES,
+						$this->preflight_parts
+					);
+					break;
 				case RestoreFilesPreflightStep::ID:
-					$steps[] = new RestoreFilesPreflightStep( array( 'directories' => $dirs ) );
+					$steps[] = new RestoreFilesPreflightStep(
+						array(
+							'directories'  => $dirs,
+							// The sandbox stands for the site's own directories (its WordPress directory is elsewhere).
+							'trusted_root' => function (): string {
+								return $this->sandbox;
+							},
+						)
+					);
 					break;
 				case FileStagingStep::ID:
 					$steps[] = new FileStagingStep( $this->staging_parts() );
@@ -265,12 +289,16 @@ abstract class SwapTestCase extends RestoreTestCase {
 	/**
 	 * A restore of the swap backup, run up to the swap (the job then stands at the swap step, queued for WP-CLI).
 	 *
-	 * @param array<string, mixed> $options More options of the job.
+	 * @param array<string, mixed> $options      More options of the job.
+	 * @param callable|null        $after_backup function(): void, between the backup and the restore.
 	 * @return Job
 	 */
-	protected function at_swap( array $options = array() ): Job {
+	protected function at_swap( array $options = array(), $after_backup = null ): Job {
 		global $wpdb;
 		$base    = $this->swap_backup();
+		if ( null !== $after_backup ) {
+			call_user_func( $after_backup );
+		}
 		// The restore must bring the options (and a network's sitemeta): the restored site's list of active plugins.
 		$exclude = array_values( array_diff( self::live_tables(), array_merge( array( $wpdb->prefix . 'swt_keep', $wpdb->prefix . 'swt_gone' ), self::site_tables() ) ) );
 		$job     = Plugin::instance()->jobs()->create( $this->type, self::$admin_id, array(), array_merge( array( 'base' => $base, 'exclude_tables' => $exclude ), $options ) );
@@ -376,6 +404,7 @@ abstract class SwapTestCase extends RestoreTestCase {
 					'batch'   => (int) ( $this->swap_parts['batch'] ?? 0 ),
 					'offset'  => $this->clock_offset,
 					'trace'   => $this->trace,
+					'sql_at'  => $this->child_sql,
 					'admin'   => self::$admin_id,
 				)
 			)

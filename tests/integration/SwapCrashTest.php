@@ -4,6 +4,7 @@ namespace WPCheckpoint\Tests\Integration;
 
 use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\JobRepository;
+use WPCheckpoint\Jobs\Runner;
 use WPCheckpoint\Jobs\SwapCheckStep;
 use WPCheckpoint\Jobs\TempTables;
 use WPCheckpoint\Jobs\TickResult;
@@ -887,5 +888,82 @@ final class SwapCrashTest extends SwapTestCase {
 		$this->assertStringContainsString( 'The position of the swap is not one this version wrote', (string) $done->last_error );
 		$this->assertNotSame( Job::FAILURE_FINAL, $done->failure_kind, 'the job holds the site: its retry stays' );
 		$this->assertSame( Job::SITE_CHANGING, $done->site_state );
+	}
+
+	public function test_a_directory_rename_of_the_rollback_that_keeps_failing_leaves_a_job_to_retry_with_the_file_held(): void {
+		$job    = $this->at_swap();
+		$before = $this->site();
+		$this->killed_at( $job, 'dir_in', 1 ); // A directory swapped: the rollback has one to put back.
+		$tries = 0;
+		$this->retype(
+			$job,
+			array(
+				'rename' => static function ( string $from, string $to ) use ( &$tries ): bool {
+					++$tries;
+					trigger_error( sprintf( 'rename(%1$s,%2$s): Permission denied', $from, $to ), E_USER_WARNING ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_trigger_error -- what PHP says.
+					return false;
+				},
+			)
+		);
+		$results = array();
+		for ( $i = 0; $i <= Runner::MAX_RETRIES; $i++ ) {
+			$results[] = $this->cli_tick( $job )->status;
+		}
+		$this->assertSame( array_merge( array_fill( 0, Runner::MAX_RETRIES, TickResult::WAITING ), array( TickResult::FAILED ) ), $results, 'waited out after each try, failed once the tries ran out' );
+		$this->assertSame( Runner::MAX_RETRIES + 1, $tries, 'one rename tried per run, each after the evidence was read again' );
+		$now = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertSame( Job::FAILED, $now->status );
+		$this->assertSame( Job::FAILURE_TEMPORARY, $now->failure_kind, 'not final: one to retry' );
+		$this->assertTrue( $now->retry_useful() );
+		$this->assertSame( Job::SITE_CHANGING, $now->site_state, 'still holds the site' );
+		$this->assertSame( 'rollback', $now->cursor['phase'] ?? '', 'not recorded as put back' );
+		$this->assertTrue( ( new Maintenance( $this->abspath, (string) $now->cursor['mark'] ) )->is_held(), 'the file stays held' );
+		// The reason, as WP-CLI gives it: masked. The control: the job's own error has the path and PHP's words.
+		$this->assertStringContainsString( sys_get_temp_dir(), (string) $now->last_error );
+		$this->assertStringContainsString( 'Permission denied', (string) $now->last_error );
+		$said = implode( "\n", Plugin::instance()->half_swapped_warnings() );
+		$this->assertStringContainsString( sprintf( 'wp wpcheckpoint job retry %1$d, then wp wpcheckpoint job run %1$d', $job->id ), $said );
+		$this->assertStringContainsString( 'Its last try failed:', $said );
+		$this->assertStringContainsString( 'Permission denied', $said );
+		$this->assertStringContainsString( '{tmp}', $said );
+		$this->assertStringNotContainsString( sys_get_temp_dir(), $said );
+		$this->assertStringNotContainsString( (string) wp_parse_url( home_url(), PHP_URL_HOST ), $said );
+		// Retried, with a rename that works: put back as it was.
+		$this->retype( $job );
+		Plugin::instance()->job_actions()->retry( $job->id );
+		$GLOBALS['wpdb']->query( 'COMMIT' );
+		$this->assertPutBack( $this->cli_run( $job ), $before, 'after the retry' );
+	}
+
+	public function test_a_directory_rename_of_the_rollback_made_but_reported_as_failed_is_not_made_again(): void {
+		$job    = $this->at_swap();
+		$before = $this->site();
+		$this->killed_at( $job, 'dir_in', 1 );
+		$calls = array();
+		$lie   = 1;
+		$this->retype(
+			$job,
+			array(
+				'rename' => static function ( string $from, string $to ) use ( &$calls, &$lie ): bool {
+					$calls[] = array( $from, $to );
+					$moved   = rename( $from, $to );
+					if ( $moved && $lie > 0 ) {
+						--$lie; // Made, but reported as failed (as NFS may).
+						trigger_error( 'rename(): Input/output error', E_USER_WARNING ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_trigger_error -- what PHP says.
+						return false;
+					}
+					return $moved;
+				},
+			)
+		);
+		$this->assertSame( TickResult::WAITING, $this->cli_tick( $job )->status );
+		$this->assertCount( 1, $calls, 'one rename tried' );
+		$made = $calls[0];
+		$this->assertFalse( self::there( $made[0] ), 'the control: it was made (nothing left where it was)' );
+		$this->assertTrue( self::there( $made[1] ) );
+		$done = $this->cli_run( $job );
+		$this->assertNotContains( $made, array_slice( $calls, 1 ), 'not made a second time' );
+		$this->assertGreaterThan( 1, count( $calls ), 'the control: the next run renamed what was left' );
+		$this->assertPutBack( $done, $before, 'after a rename reported as failed' );
 	}
 }
