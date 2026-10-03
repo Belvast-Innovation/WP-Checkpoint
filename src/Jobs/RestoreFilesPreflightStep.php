@@ -676,26 +676,20 @@ final class RestoreFilesPreflightStep implements Step {
 
 	/**
 	 * The staged groups whose directory is not positively this site's, judged by where it finally is
-	 * (LinkedTargets::judge()): this site's zones are its WordPress directory, the trusted deployment root and the
-	 * directory of the wp-config.php it loaded (unless that is a file system's root or a home directory).
+	 * (LinkedTargets::judge()) against this site's zones (LinkedTargets::zones(): its WordPress directory, the trusted
+	 * deployment root, and the directory of its wp-config.php when that is a zone and stands).
 	 *
 	 * @param array<string, string> $given  Group => directory as WordPress names it.
 	 * @param string[]              $staged The staged groups.
 	 * @return array<string, array{target: string, verdict: string, at: string}> Group => why it is asked about.
 	 */
 	private function linked( array $given, array $staged ): array {
-		$zones = array();
-		foreach ( array( rtrim( ABSPATH, '/\\' ), isset( $this->parts['trusted_root'] ) ? (string) call_user_func( $this->parts['trusted_root'] ) : '' ) as $dir ) {
-			$real    = '' === $dir ? false : Paths::real( $dir );
-			$zones[] = false === $real ? '' : rtrim( Paths::normalize( (string) $real ), '/' );
-		}
-		$config = isset( $this->parts['config_dir'] ) ? (string) call_user_func( $this->parts['config_dir'] ) : self::config_dir();
-		$real   = '' === $config ? false : Paths::real( $config );
-		$zone   = false === $real ? '' : LinkedTargets::config_zone( rtrim( Paths::normalize( (string) $real ), '/' ), null, $config );
-		// Not a zone when it holds another installation beside this site: back to the WordPress directory and the
-		// trusted root alone.
-		$zones[] = '' !== $zone && LinkedTargets::zone_stands( $zone, $zones[0] ) ? $zone : '';
-		$out     = array();
+		$zones = LinkedTargets::zones(
+			rtrim( ABSPATH, '/\\' ),
+			isset( $this->parts['trusted_root'] ) ? (string) call_user_func( $this->parts['trusted_root'] ) : '',
+			isset( $this->parts['config_dir'] ) ? (string) call_user_func( $this->parts['config_dir'] ) : self::config_dir()
+		);
+		$out   = array();
 		foreach ( $staged as $group ) {
 			$why = LinkedTargets::judge( (string) ( $given[ $group ] ?? '' ), $zones );
 			if ( LinkedTargets::SITE !== $why['verdict'] ) {

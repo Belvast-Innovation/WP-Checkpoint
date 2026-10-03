@@ -231,6 +231,9 @@ final class RestoreRetryReclaimTest extends SwapTestCase {
 
 	public function test_a_name_that_differs_only_in_case_from_one_left_is_tried_once_not_in_every_unit(): void {
 		global $wpdb;
+		if ( \WPCheckpoint\Restore\SiteTables::fold_case() ) {
+			$this->markTestSkipped( 'Needs a server that keeps the case of table names: on one that folds it, the two names are one table.' );
+		}
 		$job    = $this->at_swap();
 		$this->retried_from_the_preflight( $job );
 		$now    = Plugin::instance()->jobs()->find( $job->id );

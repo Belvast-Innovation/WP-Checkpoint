@@ -305,7 +305,7 @@ final class Report {
 		}
 
 		$patterns = array(
-			'#((?:^|[^\w/\\\\])(?:/home|/Users|/var/www/vhosts|/srv/users|/usr/home|/export/home)/)[^/\s"\':;,)]+#u' => '$1***',
+			'#((?:^|[^\w/\\\\])(?:/home\d*|/Users|/var/www/vhosts|/srv/users|/usr/home|/export/home)/)[^/\s"\':;,)]+#u' => '$1***',
 			'#((?:^|[^\w\\\\])[A-Za-z]:\\\\Users\\\\)[^\\\\\s"\':;,)]+#iu' => '$1***',
 			'#((?:^|[^\w/])[A-Za-z]:/Users/)[^/\s"\':;,)]+#iu' => '$1***',
 		);

@@ -221,21 +221,60 @@ final class LinkedTargetsTest extends TestCase {
 		$this->assertSame( '', LinkedTargets::resolve( '../uploads' ) );
 	}
 
-	public function test_a_directory_on_the_way_that_cannot_be_listed_is_not_to_be_told_and_named(): void {
+	public function test_a_directory_that_cannot_be_looked_into_is_not_to_be_told_and_named_one_that_cannot_be_listed_is_judged_by_name(): void {
 		if ( '\\' === DIRECTORY_SEPARATOR || ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) ) {
-			$this->markTestSkipped( 'Needs a directory this user cannot list (not on Windows, not as root).' );
+			$this->markTestSkipped( 'Needs directories this user cannot search or list (not on Windows, not as root).' );
 		}
-		mkdir( $this->dir . '/site/wp-content/locked/uploads', 0755, true );
-		$locked = $this->dir . '/site/wp-content/locked';
-		chmod( $locked, 0311 ); // Searchable, not listable.
+		mkdir( $this->dir . '/site/wp-content/unlisted/uploads', 0755, true );
+		mkdir( $this->dir . '/site/wp-content/closed', 0755, true );
+		$site     = rtrim( Paths::normalize( (string) realpath( $this->dir . '/site' ) ), '/' );
+		$unlisted = $this->dir . '/site/wp-content/unlisted';
+		$closed   = $this->dir . '/site/wp-content/closed';
+		chmod( $unlisted, 0311 ); // Searchable, not listable: its root files are looked up by name.
+		chmod( $closed, 0600 );   // Listable, not searchable: nothing in it can be looked at.
 		try {
-			$this->assertFalse( @scandir( $locked ), 'the control: it cannot be listed' );
-			$why = LinkedTargets::judge( $locked . '/uploads', array( rtrim( Paths::normalize( (string) realpath( $this->dir . '/site' ) ), '/' ) ) );
+			$this->assertFalse( @scandir( $unlisted ), 'the control: it cannot be listed' );
+			$this->assertSame( LinkedTargets::SITE, LinkedTargets::judge( $unlisted . '/uploads', array( $site ) )['verdict'], 'no root file in it, by name' );
+			$why = LinkedTargets::judge( $closed, array( $site ) );
 			$this->assertSame( LinkedTargets::UNKNOWN, $why['verdict'] );
-			$this->assertSame( rtrim( Paths::normalize( (string) realpath( $locked ) ), '/' ), $why['at'], 'the path that could not be read' );
+			$this->assertSame( rtrim( Paths::normalize( (string) realpath( $closed ) ), '/' ), $why['at'], 'the path that could not be read' );
 		} finally {
-			chmod( $locked, 0755 );
+			chmod( $unlisted, 0755 );
+			chmod( $closed, 0755 );
 		}
+	}
+
+	public function test_an_index_php_that_cannot_be_read_beside_a_core_is_not_to_be_told(): void {
+		if ( '\\' === DIRECTORY_SEPARATOR || ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) ) {
+			$this->markTestSkipped( 'Needs a file this user cannot read (not on Windows, not as root).' );
+		}
+		mkdir( $this->dir . '/own/wp', 0755, true );
+		file_put_contents( $this->dir . '/own/wp/wp-load.php', '<?php' );
+		file_put_contents( $this->dir . '/own/index.php', "<?php require __DIR__ . '/wp/wp-blog-header.php';" );
+		$this->assertTrue( LinkedTargets::root_state( $this->dir . '/own' ), 'the control: readable, a root' );
+		chmod( $this->dir . '/own/index.php', 0000 );
+		try {
+			$this->assertNull( LinkedTargets::root_state( $this->dir . '/own' ) );
+		} finally {
+			chmod( $this->dir . '/own/index.php', 0644 );
+		}
+		mkdir( $this->dir . '/odd/index.php', 0755, true ); // A directory by that name.
+		mkdir( $this->dir . '/odd/wp', 0755, true );
+		file_put_contents( $this->dir . '/odd/wp/wp-load.php', '<?php' );
+		$this->assertFalse( LinkedTargets::root_state( $this->dir . '/odd' ), 'a directory named index.php is no front controller' );
+	}
+
+	public function test_a_link_in_the_zone_to_another_installation_does_not_undo_the_zone(): void {
+		$d = $this->dir;
+		mkdir( "{$d}/web/wp", 0755, true );
+		file_put_contents( "{$d}/web/wp-config.php", '<?php' );
+		mkdir( "{$d}/elsewhere/other", 0755, true );
+		file_put_contents( "{$d}/elsewhere/other/wp-load.php", '<?php' );
+		symlink( "{$d}/elsewhere/other", "{$d}/web/linked" ); // What is reached through it is judged where it is.
+		$this->assertTrue( LinkedTargets::zone_stands( "{$d}/web", "{$d}/web/wp" ) );
+		mkdir( "{$d}/web/other", 0755, true );
+		file_put_contents( "{$d}/web/other/wp-load.php", '<?php' );
+		$this->assertFalse( LinkedTargets::zone_stands( "{$d}/web", "{$d}/web/wp" ), 'the control: the same installation as a directory of the zone' );
 	}
 
 	public function test_a_directory_with_a_great_many_entries_is_read_in_bounded_memory(): void {

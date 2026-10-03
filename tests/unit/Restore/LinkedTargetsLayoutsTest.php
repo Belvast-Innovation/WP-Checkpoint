@@ -24,8 +24,14 @@ use Yoast\PHPUnitPolyfills\TestCases\TestCase;
  *   the restriction, as hosts set it), no directory of this site is asked about;
  * - other directories of this site that are asked about are allowed (the safe side), counted.
  *
+ * Also: a hardened layout (wp-config.php one level above, beside another site and a directory it shares), a Trellis
+ * deployment (its shared uploads the site's by fact: asked about, allowed and counted), a staging site inside
+ * wp-content, and an installation in its own directory (a front controller, the core beside it).
+ *
  * Reverse validation: without the check for another installation's root, without the exclusion of a home
- * directory as the directory of wp-config.php, and with the earlier rule (a link on the path), the invariants break.
+ * directory as the directory of wp-config.php, with the earlier rule (a link on the path), without the directory of
+ * wp-config.php as a zone, without the check of what that zone holds, and without the front controller rule, the
+ * invariants break.
  */
 final class LinkedTargetsLayoutsTest extends TestCase {
 
@@ -258,12 +264,16 @@ final class LinkedTargetsLayoutsTest extends TestCase {
 	 * @return string[]
 	 */
 	private static function zones( array $layout, bool $structure = true ): array {
+		if ( $structure ) {
+			// The restore's own composition (the preflight calls the same function).
+			return LinkedTargets::zones( $layout['abspath'], $layout['trusted'], $layout['config'], $layout['is_home'] );
+		}
+		// For the reverse validation: the same without the check of what the zone holds.
 		$abspath = rtrim( Paths::normalize( (string) realpath( $layout['abspath'] ) ), '/' );
-		$config  = LinkedTargets::config_zone( rtrim( Paths::normalize( (string) realpath( $layout['config'] ) ), '/' ), $layout['is_home'] );
 		return array(
 			$abspath,
 			'' === $layout['trusted'] ? '' : rtrim( Paths::normalize( (string) realpath( $layout['trusted'] ) ), '/' ),
-			'' !== $config && ( ! $structure || LinkedTargets::zone_stands( $config, $abspath ) ) ? $config : '',
+			LinkedTargets::config_zone( rtrim( Paths::normalize( (string) realpath( $layout['config'] ) ), '/' ), $layout['is_home'] ),
 		);
 	}
 

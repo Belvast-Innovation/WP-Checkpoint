@@ -80,11 +80,4 @@ namespace WP_CLI\Utils {
 	 * @return void
 	 */
 	function format_items( $format, $items, $fields ) {}
-
-	/**
-	 * @return string|false
-	 */
-	function locate_wp_config() {
-		return false;
-	}
 }

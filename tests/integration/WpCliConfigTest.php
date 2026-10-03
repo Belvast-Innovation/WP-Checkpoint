@@ -60,6 +60,32 @@ final class WpCliConfigTest extends TestCase {
 		$this->assertSame( '0', $included, 'the control: WP-CLI included no wp-config.php (found otherwise than by the included files)' );
 	}
 
+	public function test_a_wp_config_that_is_a_link_is_taken_where_it_is_named_as_a_web_request_does(): void {
+		mkdir( $this->dir . '/releases/7', 0755, true );
+		mkdir( $this->dir . '/shared', 0755, true );
+		file_put_contents( $this->dir . '/shared/wp-config.php', '<?php' );
+		file_put_contents( $this->dir . '/releases/7/wp-load.php', '<?php' );
+		symlink( $this->dir . '/shared/wp-config.php', $this->dir . '/releases/7/wp-config.php' );
+		list( $found ) = $this->in_wp_cli( $this->dir . '/releases/7' );
+		$this->assertSame( $this->dir . '/releases/7/wp-config.php', $found, 'not resolved into shared: the zone is the release\'s' );
+	}
+
+	public function test_wp_cli_loading_the_site_includes_no_wp_config_and_it_is_found_all_the_same(): void {
+		// The test site, loaded as WP-CLI loads a site: it evaluates wp-config.php rather than including it.
+		$plugin = dirname( __DIR__, 2 );
+		$code   = 'require_once ' . var_export( $plugin . '/vendor/autoload.php', true ) . '; '
+			. 'echo \\WPCheckpoint\\Restore\\LinkedTargets::config_location( ABSPATH ), "|", count( preg_grep( "#/wp-config\\.php$#", get_included_files() ) );';
+		$output = array();
+		$status = 0;
+		exec( 'cd ' . escapeshellarg( ABSPATH ) . ' && wp --allow-root eval ' . escapeshellarg( $code ) . ' 2>&1', $output, $status );
+		$this->assertSame( 0, $status, implode( "\n", $output ) );
+		$parts = explode( '|', (string) end( $output ) );
+		$this->assertCount( 2, $parts, implode( "\n", $output ) );
+		$this->assertSame( '0', $parts[1], 'WordPress loaded, and no wp-config.php among the included files' );
+		$this->assertFileExists( $parts[0] );
+		$this->assertSame( 'wp-config.php', basename( $parts[0] ), 'found all the same' );
+	}
+
 	public function test_wp_cli_finds_the_wp_config_it_was_told_of_and_the_standard_one_otherwise(): void {
 		mkdir( $this->dir . '/site', 0755, true );
 		mkdir( $this->dir . '/elsewhere', 0755, true );

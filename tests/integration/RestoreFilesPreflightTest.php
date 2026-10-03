@@ -719,6 +719,41 @@ final class RestoreFilesPreflightTest extends RestoreTestCase {
 		$this->assertSame( LinkedTargets::id( self::outside( 'uploads', self::real( $real . '/uploads' ) ) ), $job->questions[0]['id'] );
 	}
 
+	public function test_the_directory_of_wp_config_counts_only_when_it_holds_no_other_site(): void {
+		$root = $this->dir( sys_get_temp_dir() . '/wpc-zone-' . bin2hex( random_bytes( 3 ) ) );
+		$base = $this->with_files( array( 'wp-content/uploads/a.txt' => 'a' ) );
+		$site = ScanRoots::site_directories();
+		$type = function ( string $config, string $uploads ) use ( $site ): string {
+			return $this->type(
+				array(
+					'directories'  => static function () use ( $site, $uploads ): array {
+						return array_merge( $site, array( 'uploads' => $uploads ) );
+					},
+					'trusted_root' => static function (): string {
+						return '';
+					},
+					'config_dir'   => static function () use ( $config ): string {
+						return $config;
+					},
+				)
+			);
+		};
+		// Like Bedrock: the directory of wp-config.php holds the content directory, nothing else.
+		mkdir( $root . '/bed/app/uploads', 0755, true );
+		file_put_contents( $root . '/bed/wp-config.php', '<?php' );
+		$bed = $this->run_restore( $this->job_for( $type( $root . '/bed', $root . '/bed/app/uploads' ), $base ) );
+		$this->assertSame( Job::COMPLETED, $bed->status, (string) $bed->last_error );
+		$this->assertSame( array(), $bed->questions, 'in the zone of wp-config.php: this site\'s' );
+		// Hardened: it also holds another site, and a directory that site shares.
+		mkdir( $root . '/www/other', 0755, true );
+		mkdir( $root . '/www/shared-media/uploads', 0755, true );
+		file_put_contents( $root . '/www/wp-config.php', '<?php' );
+		file_put_contents( $root . '/www/other/wp-load.php', '<?php' );
+		$hard = $this->run_restore( $this->job_for( $type( $root . '/www', $root . '/www/shared-media/uploads' ), $base ) );
+		$this->assertSame( Job::PAUSED, $hard->status, 'the zone does not stand: the shared directory is asked about' );
+		$this->assertSame( LinkedTargets::id( self::outside( 'uploads', self::real( $root . '/www/shared-media/uploads' ) ) ), $hard->questions[0]['id'] );
+	}
+
 	public function test_an_answer_holds_only_for_the_reason_it_was_given_for(): void {
 		$root    = $this->dir( sys_get_temp_dir() . '/wpc-reason-' . bin2hex( random_bytes( 3 ) ) );
 		$uploads = $root . '/site/uploads';

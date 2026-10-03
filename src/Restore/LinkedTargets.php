@@ -21,10 +21,12 @@ defined( 'ABSPATH' ) || exit;
  * this site's (judge()):
  *
  * - it is in this site's WordPress directory, in the trusted deployment root, or in the directory of the
- *   wp-config.php this site loaded (Bedrock; a deployment's current link), that one only when it is neither the
- *   root of a file system nor a home directory (config_zone());
- * - and no directory between it and that zone (the zone itself not included) holds wp-load.php or wp-config.php:
- *   such a directory is another installation's root (a staging site inside the production site's directory).
+ *   wp-config.php this site loads (Bedrock; a deployment's current link; zones()), that one only when it is not the
+ *   root of a file system, a home directory or a broad directory that holds sites (config_zone()), and when none of
+ *   its direct subdirectories but this site's own is another installation's root (zone_stands());
+ * - and no directory between it and that zone (the zone itself not included) is an installation's root
+ *   (root_state(): it holds wp-load.php or wp-config.php, or WordPress's front controller with the core beside it;
+ *   a staging site inside the production site's directory, WordPress in its own directory).
  *
  * Anything else is asked about in the files preflight, with no default: swap it as usual, or leave it out of the
  * restore (its live directory stays as it is). A directory that cannot be resolved, or a directory on the way up
@@ -60,10 +62,9 @@ final class LinkedTargets {
 	const UNKNOWN      = 'unknown';
 
 	/**
-	 * Home directories, as the masks of paths know them (Report::mask_paths()): the directory under one of these is a
-	 * user's.
+	 * Home directories: the directory under one of these is a user's.
 	 */
-	const HOMES = '#\A((?:[A-Za-z]:)?/(?:home\d*|users|var/www/vhosts|srv/users|usr/home|export/home)/[^/]+)(?:/|\z)#i';
+	const HOMES = '#\A((?:[A-Za-z]:)?/(?:home\d*|users|var/www/vhosts|srv/users|usr/home|export/home)/[^/]+)(?:/|\z)#i'; // As Report::mask_paths() masks them.
 
 	/**
 	 * The directories that hold home directories (each of them broader than one home).
@@ -138,18 +139,20 @@ final class LinkedTargets {
 	}
 
 	/**
-	 * The wp-config.php this site loads: under WP-CLI the one WP-CLI loads (it evaluates the file rather than
-	 * including it, and honours WP_CONFIG_PATH: WP_CLI\Utils\locate_wp_config()), otherwise the one wp-load.php loads
-	 * (config_file()). '' when there is none.
+	 * The wp-config.php this site loads, as named (not resolved): under WP-CLI the one WP-CLI loads (it evaluates the
+	 * file rather than including it, so the included files never show it, and honours WP_CONFIG_PATH), otherwise the
+	 * one wp-load.php loads (config_file()). '' when there is none.
 	 *
 	 * @param string $abspath The WordPress directory.
 	 * @return string
 	 */
 	public static function config_location( string $abspath ): string {
-		if ( defined( 'WP_CLI' ) && WP_CLI && function_exists( '\\WP_CLI\\Utils\\locate_wp_config' ) ) {
-			$file = \WP_CLI\Utils\locate_wp_config();
-			if ( is_string( $file ) && '' !== $file ) {
-				return rtrim( Paths::normalize( $file ), '/' );
+		if ( defined( 'WP_CLI' ) && WP_CLI ) {
+			// WP-CLI's order (WP_CLI\Utils\locate_wp_config()) without resolving the file: a wp-config.php that is a
+			// link (a deployment's shared one) is judged where it is named, as a web request finds it.
+			$told = getenv( 'WP_CONFIG_PATH' );
+			if ( is_string( $told ) && '' !== $told && @is_file( $told ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- open_basedir: not there.
+				return rtrim( Paths::normalize( $told ), '/' );
 			}
 		}
 		return self::config_file( $abspath );
@@ -186,6 +189,28 @@ final class LinkedTargets {
 			return ''; // The user's home, or a directory holding it.
 		}
 		return $dir;
+	}
+
+	/**
+	 * This site's zones, the way the restore takes them: its WordPress directory and the trusted deployment root,
+	 * resolved, and the directory of its wp-config.php when it is a zone (config_zone()) and stands (zone_stands());
+	 * '' for each that is none.
+	 *
+	 * @param string        $abspath    The WordPress directory.
+	 * @param string        $trusted    The trusted deployment root ('' when none).
+	 * @param string        $config_dir The directory of the wp-config.php, as found ('' when none).
+	 * @param callable|null $is_home    See config_zone() (tests).
+	 * @return string[] Three entries.
+	 */
+	public static function zones( string $abspath, string $trusted, string $config_dir, $is_home = null ): array {
+		$out = array();
+		foreach ( array( $abspath, $trusted, $config_dir ) as $dir ) {
+			$real  = '' === $dir ? false : Paths::real( rtrim( $dir, '/\\' ) );
+			$out[] = false === $real ? '' : rtrim( Paths::normalize( (string) $real ), '/' );
+		}
+		$zone   = '' === $out[2] ? '' : self::config_zone( $out[2], $is_home, $config_dir );
+		$out[2] = '' !== $zone && self::zone_stands( $zone, $out[0] ) ? $zone : '';
+		return $out;
 	}
 
 	/**
@@ -263,7 +288,7 @@ final class LinkedTargets {
 
 	/**
 	 * The first directory from the resolved one up to the boundary (the boundary itself not included) that is
-	 * another installation's root (it holds wp-load.php or wp-config.php), or that cannot be told about.
+	 * another installation's root (root_state()), or that cannot be told about.
 	 *
 	 * @param string $resolved The directory, resolved.
 	 * @param string $boundary The zone it is in.
@@ -316,56 +341,48 @@ final class LinkedTargets {
 	 * Whether a directory is a WordPress installation's root: it holds wp-load.php or wp-config.php, or (WordPress in
 	 * its own directory) its index.php is WordPress's front controller (it loads wp-blog-header.php) and one of its
 	 * direct subdirectories holds wp-load.php. Not merely the parent of an installation: wp-content holds an index.php
-	 * of its own ("silence is golden"), and would be a root as soon as a staging site is put in it. Read an entry at a
-	 * time (memory bounded whatever the directory holds); null when it cannot be listed, or when its front controller
-	 * has more than CHILDREN_LIMIT subdirectories beside it to look in.
+	 * of its own ("silence is golden"), and would be a root as soon as a staging site is put in it. The files are
+	 * looked up by name (bounded in memory and time whatever the directory holds); only beside a front controller
+	 * is the directory listed, an entry at a time, at most CHILDREN_LIMIT. Null when what is in it cannot be looked
+	 * at, its index.php cannot be read, or there are more entries beside a front controller than are looked into.
 	 *
 	 * @param string $dir Directory.
 	 * @return bool|null
 	 */
 	public static function root_state( string $dir ) {
+		clearstatcache( true );
+		if ( false === @lstat( $dir . '/.' ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- not searchable: null.
+			return null; // What is in it cannot be looked at.
+		}
+		// Searchable: a name that lstat() does not find is not there (a check by name, whatever the directory holds).
+		foreach ( self::ROOT_FILES as $file ) {
+			if ( false !== @lstat( $dir . '/' . $file ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- not there: false.
+				return true;
+			}
+		}
+		$front = self::front_controller( $dir . '/index.php' );
+		if ( true !== $front ) {
+			return $front; // Not a front controller (false), or one that cannot be read (null).
+		}
 		$handle = @opendir( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- not listable: null.
 		if ( false === $handle ) {
 			return null;
 		}
-		$index = false;
-		$subs  = array();
-		$over  = false;
+		$count = 0;
 		try {
 			while ( false !== ( $name = readdir( $handle ) ) ) { // phpcs:ignore Generic.CodeAnalysis.AssignmentInCondition.FoundInWhileCondition -- the readdir() idiom.
-				if ( in_array( $name, self::ROOT_FILES, true ) ) {
+				if ( '.' === $name || '..' === $name ) {
+					continue;
+				}
+				if ( ++$count > self::CHILDREN_LIMIT ) {
+					return null; // Too many beside the front controller to look into.
+				}
+				if ( false !== @lstat( $dir . '/' . $name . '/wp-load.php' ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- not there: on.
 					return true;
 				}
-				if ( 'index.php' === $name ) {
-					$index = true;
-					continue;
-				}
-				if ( '.' === $name || '..' === $name || $over ) {
-					continue;
-				}
-				if ( count( $subs ) >= self::CHILDREN_LIMIT ) {
-					$over = true; // Kept reading for the root files; too many to look into.
-					continue;
-				}
-				$subs[] = $name;
 			}
 		} finally {
 			closedir( $handle );
-		}
-		$front = $index ? self::front_controller( $dir . '/index.php' ) : false;
-		if ( null === $front ) {
-			return null; // Its index.php cannot be read: whether it is a root cannot be told.
-		}
-		if ( ! $front ) {
-			return false;
-		}
-		if ( $over ) {
-			return null;
-		}
-		foreach ( $subs as $name ) {
-			if ( @is_file( $dir . '/' . $name . '/wp-load.php' ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- open_basedir: not there.
-				return true;
-			}
 		}
 		return false;
 	}
@@ -378,12 +395,21 @@ final class LinkedTargets {
 	 * @return bool|null
 	 */
 	private static function front_controller( string $file ) {
+		if ( false === @lstat( $file ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- not there: no.
+			return false;
+		}
+		if ( ! @is_file( $file ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- as above.
+			return false; // A directory named index.php is no front controller.
+		}
 		$handle = @fopen( $file, 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- not readable: null.
 		if ( false === $handle ) {
 			return null;
 		}
-		$head = (string) fread( $handle, 8192 ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- a bounded read.
+		$head = @fread( $handle, 8192 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_fread -- a bounded read.
 		fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- as above.
+		if ( false === $head ) {
+			return null;
+		}
 		return false !== strpos( $head, 'wp-blog-header.php' );
 	}
 

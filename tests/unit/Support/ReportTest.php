@@ -40,6 +40,8 @@ final class ReportTest extends TestCase {
 		$samples = array(
 			'/home/alice/site/wp-config.php'          => '/home/***/site/wp-config.php',
 			'/Users/bob/Sites/wp'                     => '/Users/***/Sites/wp',
+			'/home2/carol/public_html'                => '/home2/***/public_html',
+			'/home12/dave/public_html'                => '/home12/***/public_html',
 			'/var/www/vhosts/example.com/httpdocs'   => '/var/www/vhosts/***/httpdocs',
 			'/srv/users/carol/apps/wp'                => '/srv/users/***/apps/wp',
 			'C:\\Users\\dave\\Sites\\wp'              => 'C:\\Users\\***\\Sites\\wp',
