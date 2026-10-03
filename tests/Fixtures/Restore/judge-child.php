@@ -6,14 +6,16 @@
  * Usage: php judge-child.php <cases.json> [<open_basedir>]. The restriction is set here, before anything is loaded,
  * rather than with -d: on Windows its separator ";" would start a comment in the -d value (an INI line).
  * Cases: [{"given": "...", "zones": ["...", ...]}, ...], or "zone_args": [abspath, trusted, config_dir] in place of "zones"
- * to have the zones found under the restriction too (LinkedTargets::zones(), no directory taken as a home). Prints JSON: ["site"|"outside"|"installation"|"unknown", ...].
+ * to have the zones found under the restriction too (LinkedTargets::zones(), no directory taken as a home). Prints JSON:
+ * {"open_basedir": the restriction in effect, "verdicts": ["site"|"outside"|"installation"|"unknown", ...]}. Run it
+ * through Tests\Fixtures\Restore\JudgeChild, which asserts the restriction.
  *
  * @package WPCheckpoint
  */
 
 // phpcs:disable -- a test fixture run as a script.
 
-if ( isset( $argv[2] ) && ( false === ini_set( 'open_basedir', $argv[2] ) || ini_get( 'open_basedir' ) !== $argv[2] ) ) {
+if ( isset( $argv[2] ) && ( '' === $argv[2] || false === ini_set( 'open_basedir', $argv[2] ) || ini_get( 'open_basedir' ) !== $argv[2] ) ) {
 	fwrite( STDERR, "open_basedir not set\n" );
 	exit( 3 );
 }
@@ -36,5 +38,10 @@ foreach ( $cases as $case ) {
 		: array_map( 'strval', (array) $case['zones'] );
 	$out[] = \WPCheckpoint\Restore\LinkedTargets::judge( (string) $case['given'], $zones )['verdict'];
 }
-echo json_encode( $out );
+echo json_encode(
+	array(
+		'open_basedir' => (string) ini_get( 'open_basedir' ),
+		'verdicts'     => $out,
+	)
+);
 exit( 0 );

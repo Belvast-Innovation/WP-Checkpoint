@@ -5,6 +5,7 @@ namespace WPCheckpoint\Tests\Unit\Restore;
 use WPCheckpoint\Files\Links;
 use WPCheckpoint\Restore\LinkedTargets;
 use WPCheckpoint\Support\Paths;
+use WPCheckpoint\Tests\Fixtures\Restore\JudgeChild;
 use WPCheckpoint\Tests\Fixtures\Sandbox;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
@@ -349,12 +350,7 @@ final class LinkedTargetsLayoutsTest extends TestCase {
 			$this->assertNotSame( array(), $cases );
 			$file = $cases[0]['base'] . '/cases.json';
 			file_put_contents( $file, (string) json_encode( $cases ) );
-			$output = array();
-			$status = 0;
-			exec( escapeshellarg( PHP_BINARY ) . ' ' . escapeshellarg( $repo . '/tests/Fixtures/Restore/judge-child.php' ) . ' ' . escapeshellarg( $file ) . ' ' . escapeshellarg( $cases[0]['base'] . PATH_SEPARATOR . $repo ) . ' 2>&1', $output, $status );
-			$this->assertSame( 0, $status, implode( "\n", $output ) );
-			$verdicts = json_decode( (string) end( $output ), true );
-			$this->assertIsArray( $verdicts, implode( "\n", $output ) );
+			$verdicts = JudgeChild::verdicts( $file, $cases[0]['base'] . PATH_SEPARATOR . $repo );
 			$asked = array_map(
 				static function ( $verdict ): bool {
 					return LinkedTargets::SITE !== $verdict;
@@ -406,12 +402,7 @@ final class LinkedTargetsLayoutsTest extends TestCase {
 		}
 		$this->assertSame( array( LinkedTargets::INSTALLATION, LinkedTargets::INSTALLATION, LinkedTargets::SITE ), $plain );
 		file_put_contents( $base . '/cases.json', (string) json_encode( $cases ) );
-		$output = array();
-		$status = 0;
-		exec( escapeshellarg( PHP_BINARY ) . ' ' . escapeshellarg( $repo . '/tests/Fixtures/Restore/judge-child.php' ) . ' ' . escapeshellarg( $base . '/cases.json' ) . ' ' . escapeshellarg( $base . PATH_SEPARATOR . $repo ) . ' 2>&1', $output, $status );
-		$this->assertSame( 0, $status, implode( "\n", $output ) );
-		$verdicts = json_decode( (string) end( $output ), true );
-		$this->assertIsArray( $verdicts, implode( "\n", $output ) );
+		$verdicts = JudgeChild::verdicts( $base . '/cases.json', $base . PATH_SEPARATOR . $repo );
 		$this->assertSame( LinkedTargets::INSTALLATION, $verdicts[0], 'a root file that is a link out of open_basedir is still listed' );
 		$this->assertSame( LinkedTargets::UNKNOWN, $verdicts[1], 'a front controller out of reach cannot be read: not to be told' );
 		$this->assertSame( LinkedTargets::SITE, $verdicts[2], 'the control: this site\'s own, under the restriction too' );

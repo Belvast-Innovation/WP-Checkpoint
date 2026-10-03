@@ -4,6 +4,7 @@ namespace WPCheckpoint\Tests\Unit\Restore;
 
 use WPCheckpoint\Restore\LinkedTargets;
 use WPCheckpoint\Support\Paths;
+use WPCheckpoint\Tests\Fixtures\Restore\JudgeChild;
 use WPCheckpoint\Tests\Fixtures\Sandbox;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
@@ -30,6 +31,9 @@ final class LinkedTargetsObstructionsTest extends TestCase {
 
 	/** @var string */
 	private $dir = '';
+
+	/** @var int[] Restricted scenarios run, and those whose verdicts differ from the same tree judged here unrestricted. */
+	private $restricted = array( 0, 0 );
 
 	/** @var string[] Paths whose mode a scenario changed (given back before the sandbox goes). */
 	private $changed = array();
@@ -177,14 +181,15 @@ final class LinkedTargetsObstructionsTest extends TestCase {
 				'zone_args' => $layout['zones'],
 			);
 		}
+		clearstatcache( true );
+		$here = array_map(
+			static function ( array $case ): string {
+				return LinkedTargets::judge( $case['given'], $case['zones'] )['verdict'];
+			},
+			$cases
+		);
 		if ( ! $restricted ) {
-			clearstatcache( true );
-			return array_map(
-				static function ( array $case ): string {
-					return LinkedTargets::judge( $case['given'], $case['zones'] )['verdict'];
-				},
-				$cases
-			);
+			return $here;
 		}
 		// Under the restriction the zones are found there too: zone_stands() reads the zone's entries.
 		$cases = array_map(
@@ -196,13 +201,12 @@ final class LinkedTargetsObstructionsTest extends TestCase {
 		);
 		$repo  = dirname( __DIR__, 3 );
 		file_put_contents( $base . '/cases.json', (string) json_encode( $cases ) );
-		$output = array();
-		$status = 0;
-		exec( escapeshellarg( PHP_BINARY ) . ' ' . escapeshellarg( $repo . '/tests/Fixtures/Restore/judge-child.php' ) . ' ' . escapeshellarg( $base . '/cases.json' ) . ' ' . escapeshellarg( $base . PATH_SEPARATOR . $repo ) . ' 2>&1', $output, $status );
-		$this->assertSame( 0, $status, implode( "\n", $output ) );
-		$verdicts = json_decode( (string) end( $output ), true );
-		$this->assertIsArray( $verdicts, implode( "\n", $output ) );
-		return $verdicts;
+		$there = JudgeChild::verdicts( $base . '/cases.json', $base . PATH_SEPARATOR . $repo );
+		++$this->restricted[0];
+		if ( $there !== $here ) {
+			++$this->restricted[1];
+		}
+		return $there;
 	}
 
 	public function test_no_directory_of_another_installation_is_judged_this_sites_whatever_is_in_the_way(): void {
@@ -274,6 +278,7 @@ final class LinkedTargetsObstructionsTest extends TestCase {
 			$this->assertGreaterThan( 0, $changed[ $kind ] ?? 0, 'the control: ' . $kind . ' was in the way' );
 		}
 		$this->assertGreaterThan( 50, $scenarios, 'the control: alone and in pairs' );
+		$this->assertGreaterThan( 0, $this->restricted[1], 'the control: ' . $this->restricted[0] . ' scenarios under open_basedir, and the restriction changed what was told' );
 		fwrite( STDERR, sprintf( "\nObstruction scenarios: %d; questions about this site's own directories (allowed): %d\n", $scenarios, $allowed ) ); // phpcs:ignore -- reported.
 	}
 }

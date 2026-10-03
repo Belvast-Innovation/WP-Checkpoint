@@ -423,7 +423,8 @@ final class LinkedTargets {
 	/**
 	 * What a directory entry is, told only from positive evidence: "dir", "other" (positively not a directory), or
 	 * "unknown" (its status cannot be read: a link out of open_basedir, a target that cannot be searched, a thread-safe
-	 * PHP's lookup in a directory that cannot be searched). A link counts as what it leads to.
+	 * PHP's lookup in a directory that cannot be searched, a link that leads nowhere). A link counts as what it resolves
+	 * to (realpath()), read there.
 	 *
 	 * @param string $path The entry.
 	 * @return string
@@ -435,7 +436,13 @@ final class LinkedTargets {
 		}
 		$mode = (int) $stat['mode'] & 0170000;
 		if ( 0120000 === $mode ) {
-			$stat = @stat( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- as above.
+			// What it leads to, read where it resolves, not by stat() through the link: on the Windows CI a link whose
+			// target had been removed came out as positively not a directory that way.
+			$real = Paths::real( $path );
+			if ( false === $real ) {
+				return 'unknown';
+			}
+			$stat = @stat( $real ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- as above.
 			if ( false === $stat ) {
 				return 'unknown';
 			}
