@@ -52,8 +52,8 @@ defined( 'ABSPATH' ) || exit;
  * - INCOMING: the backup's tables another installation in the same
  *   database may use (IncomingTables), by kind, written whole by the
  *   preflight before it asks about them; the questions name this file.
- * - LINKED: the content groups whose directory is a link to a directory
- *   outside this site, with their targets (LinkedTargets), written whole by
+ * - LINKED: the content groups whose directory is not positively this
+ *   site's, with where each is and why (LinkedTargets), written whole by
  *   the files preflight before it asks about them; the question names this
  *   file.
  * - RECLAIM: what an earlier attempt of the restore recorded that a new one

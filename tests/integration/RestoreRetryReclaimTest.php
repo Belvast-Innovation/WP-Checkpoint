@@ -229,6 +229,65 @@ final class RestoreRetryReclaimTest extends SwapTestCase {
 		$this->assertStringContainsString( 'plan could not be read; its tables are left to the reclaim at the end of the job', (string) file_get_contents( $now->storage_path . '/' . $now->log_path ) );
 	}
 
+	public function test_a_name_that_differs_only_in_case_from_one_left_is_tried_once_not_in_every_unit(): void {
+		global $wpdb;
+		$job    = $this->at_swap();
+		$this->retried_from_the_preflight( $job );
+		$now    = Plugin::instance()->jobs()->find( $job->id );
+		$kept   = TempTables::name( $now->storage_token, $now->id, 'ab12', 'zzTwin' );
+		$gone   = TempTables::name( $now->storage_token, $now->id, 'ab12', 'zztwin' );
+		$ref    = $wpdb->prefix . 'swt_twin_ref';
+		$this->assertNotSame( $kept, $gone );
+		$this->assertSame( strtolower( $kept ), strtolower( $gone ), 'the control: only the case differs' );
+		// The one there cannot be dropped (a table off the list holds a key to it); the other is not there. On a server
+		// that keeps case (this one), listing without case finds the first under the second's name.
+		$wpdb->query( "CREATE TABLE `{$kept}` (id INT UNSIGNED NOT NULL PRIMARY KEY) ENGINE=InnoDB" );
+		$wpdb->query( "CREATE TABLE `{$ref}` (id INT UNSIGNED NOT NULL PRIMARY KEY, t INT UNSIGNED, CONSTRAINT `{$ref}_fk` FOREIGN KEY (t) REFERENCES `{$kept}` (id)) ENGINE=InnoDB" );
+		$this->assertSame( '', $wpdb->last_error );
+		$wpdb->query( 'COMMIT' );
+		$work                  = $this->work( $now );
+		$added                 = false;
+		$this->preflight_parts = array(
+			'deleting' => static function () use ( &$added, $work, $kept, $gone ): void {
+				if ( $added ) {
+					return;
+				}
+				$added = true;
+				$path  = $work . '/' . \WPCheckpoint\Restore\RestoreFiles::RECLAIM;
+				$list  = json_decode( (string) file_get_contents( $path ), true );
+				$list['tables'][] = $kept;
+				$list['tables'][] = $gone;
+				file_put_contents( $path, (string) wp_json_encode( $list ) );
+			},
+		);
+		$this->retype( $job );
+		try {
+			$runner = new Runner(
+				Plugin::instance()->jobs(),
+				Plugin::instance()->job_types(),
+				new Redactor( Redactor::installation_secrets() ),
+				array( 'budget' => new Budget( 20, 32 * 1048576, false ) )
+			);
+			$reached = false;
+			for ( $i = 0; $i < 200; $i++ ) {
+				$runner->tick( $job->id, microtime( true ) - 3600 );
+				$state = Plugin::instance()->jobs()->find( $job->id );
+				if ( $added && ( RestorePreflightStep::ID !== $state->step || 'reclaim' !== ( $state->cursor['phase'] ?? '' ) ) ) {
+					$reached = true; // Past the reclaim.
+					break;
+				}
+			}
+			$this->assertTrue( $added, 'the control: the names were on the list' );
+			$state = Plugin::instance()->jobs()->find( $job->id );
+			$this->assertTrue( $reached, sprintf( 'the reclaim went on past the two names (one unit a tick, at most 200): %s at %s (%s) %s', $state->status, $state->step, (string) ( $state->cursor['phase'] ?? '' ), (string) $state->last_error ) );
+			$this->assertSame( $kept, $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $kept ) ) ), 'the one held by a key stays' );
+		} finally {
+			$wpdb->query( "DROP TABLE IF EXISTS `{$ref}`" );
+			$wpdb->query( "DROP TABLE IF EXISTS `{$kept}`" );
+			$wpdb->query( 'COMMIT' );
+		}
+	}
+
 	public function test_a_staging_root_holding_what_a_rollback_moved_aside_is_kept(): void {
 		$job  = $this->at_swap();
 		$old  = $this->recorded( $job );

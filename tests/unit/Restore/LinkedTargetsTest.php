@@ -6,6 +6,8 @@ use WPCheckpoint\Restore\LinkedTargets;
 use WPCheckpoint\Support\Report;
 use WPCheckpoint\Tests\Fixtures\ExpectedPath;
 use WPCheckpoint\Tests\Fixtures\Sandbox;
+use WPCheckpoint\Tests\Fixtures\MemoryBudget;
+use WPCheckpoint\Support\Paths;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 /**
@@ -112,6 +114,82 @@ final class LinkedTargetsTest extends TestCase {
 			),
 			'a home directory as a test names it'
 		);
+	}
+
+	public function test_the_wp_config_wordpress_loads_is_found_by_its_own_rule(): void {
+		mkdir( $this->dir . '/a/wp', 0755, true );
+		file_put_contents( $this->dir . '/a/wp/wp-config.php', '<?php' );
+		$this->assertSame( ExpectedPath::slashed( $this->dir, 'a/wp/wp-config.php' ), LinkedTargets::config_file( $this->dir . '/a/wp' ), 'in the WordPress directory' );
+		mkdir( $this->dir . '/b/web/wp', 0755, true );
+		file_put_contents( $this->dir . '/b/web/wp-config.php', '<?php' );
+		$this->assertSame( ExpectedPath::slashed( $this->dir, 'b/web/wp-config.php' ), LinkedTargets::config_file( $this->dir . '/b/web/wp' ), 'one level above (Bedrock)' );
+		mkdir( $this->dir . '/c/wp', 0755, true );
+		file_put_contents( $this->dir . '/c/wp-config.php', '<?php' );
+		file_put_contents( $this->dir . '/c/wp-settings.php', '<?php' );
+		$this->assertSame( '', LinkedTargets::config_file( $this->dir . '/c/wp' ), 'not that of another WordPress directory above' );
+		$this->assertSame( '', LinkedTargets::config_file( $this->dir . '/nowhere' ) );
+	}
+
+	public function test_a_home_directory_by_any_of_its_names_or_one_holding_homes_is_no_zone(): void {
+		foreach ( array( '/home2/u', '/home/u', '/home', '/home3', '/Users', '/var/www/vhosts' ) as $dir ) {
+			$this->assertSame( '', LinkedTargets::config_zone( $dir ), $dir );
+		}
+		$this->assertSame( '', LinkedTargets::config_zone( '/data/u', null, '/home/u' ), 'a home reached through a link: by its name as found' );
+		$this->assertSame( '/data/u/site', LinkedTargets::config_zone( '/data/u/site', null, '/home/u/site' ), 'the control: a directory in a home is a zone' );
+		// The home of the user PHP runs as, and the directories holding it.
+		mkdir( $this->dir . '/h/site', 0755, true );
+		$home = getenv( 'HOME' );
+		putenv( 'HOME=' . $this->dir . '/h' );
+		try {
+			$this->assertSame( '', LinkedTargets::config_zone( rtrim( Paths::normalize( (string) realpath( $this->dir . '/h' ) ), '/' ) ) );
+			$this->assertSame( '', LinkedTargets::config_zone( rtrim( Paths::normalize( (string) realpath( $this->dir ) ), '/' ) ), 'one holding it' );
+			$site = rtrim( Paths::normalize( (string) realpath( $this->dir . '/h/site' ) ), '/' );
+			$this->assertSame( $site, LinkedTargets::config_zone( $site ), 'the control: a directory in it is a zone' );
+		} finally {
+			putenv( false === $home ? 'HOME' : 'HOME=' . $home );
+		}
+	}
+
+	public function test_a_path_that_is_not_absolute_is_not_to_be_told(): void {
+		// One that resolves against this process's working directory, into a zone: it would be taken for this site's.
+		$cwd = rtrim( Paths::normalize( (string) realpath( (string) getcwd() ) ), '/' );
+		$this->assertDirectoryExists( 'src', 'the control: it resolves from here' );
+		$this->assertSame( LinkedTargets::SITE, LinkedTargets::judge( $cwd . '/src', array( $cwd ) )['verdict'], 'the control: as an absolute path, this site\'s' );
+		$this->assertSame( LinkedTargets::UNKNOWN, LinkedTargets::judge( 'src', array( $cwd ) )['verdict'] );
+		$this->assertSame( '', LinkedTargets::resolve( '../uploads' ) );
+	}
+
+	public function test_a_directory_on_the_way_that_cannot_be_listed_is_not_to_be_told_and_named(): void {
+		if ( '\\' === DIRECTORY_SEPARATOR || ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) ) {
+			$this->markTestSkipped( 'Needs a directory this user cannot list (not on Windows, not as root).' );
+		}
+		mkdir( $this->dir . '/site/wp-content/locked/uploads', 0755, true );
+		$locked = $this->dir . '/site/wp-content/locked';
+		chmod( $locked, 0311 ); // Searchable, not listable.
+		try {
+			$this->assertFalse( @scandir( $locked ), 'the control: it cannot be listed' );
+			$why = LinkedTargets::judge( $locked . '/uploads', array( rtrim( Paths::normalize( (string) realpath( $this->dir . '/site' ) ), '/' ) ) );
+			$this->assertSame( LinkedTargets::UNKNOWN, $why['verdict'] );
+			$this->assertSame( rtrim( Paths::normalize( (string) realpath( $locked ) ), '/' ), $why['at'], 'the path that could not be read' );
+		} finally {
+			chmod( $locked, 0755 );
+		}
+	}
+
+	public function test_a_directory_with_a_great_many_entries_is_read_in_bounded_memory(): void {
+		$flat = $this->dir . '/site/wp-content/uploads';
+		mkdir( $flat, 0755, true );
+		for ( $i = 0; $i < 30000; $i++ ) {
+			touch( $flat . '/f' . $i . '-' . str_repeat( 'x', 40 ) );
+		}
+		$zone = rtrim( Paths::normalize( (string) realpath( $this->dir . '/site' ) ), '/' );
+		$why  = MemoryBudget::within(
+			1048576,
+			static function () use ( $flat, $zone ): array {
+				return LinkedTargets::judge( $flat, array( $zone ) );
+			}
+		);
+		$this->assertSame( LinkedTargets::SITE, $why['verdict'], '30000 entries read within 1 MB' );
 	}
 
 	public function test_whether_a_target_is_in_this_sites_home_directory(): void {

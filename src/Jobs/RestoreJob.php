@@ -53,8 +53,8 @@ defined( 'ABSPATH' ) || exit;
  * options. The policy says what to do with each kind of table another
  * installation in the same database may use (IncomingTables): "ask" (the
  * default), "restore" or "exclude"; and what to do with a content group whose
- * directory is a link to a directory outside this site (LinkedTargets):
- * "swap" or "exclude", asked when not said. A restore nobody attends
+ * directory is not positively this site's (LinkedTargets): "swap" or
+ * "exclude", asked when not said. A restore nobody attends
  * ("unattended") is never asked, so it must say all three; missing any
  * refuses it before anything of the backup is read (RestoreVerifyStep
  * validates the options first).
@@ -84,7 +84,7 @@ final class RestoreJob implements JobType {
 	const POLICY_SUBJECTS = array(
 		'uncertain_tables'        => 'tables that may belong to this site or to another installation in the same database',
 		'shared_tables'           => 'tables this site shares with another installation in the same database',
-		LinkedTargets::POLICY_KEY => 'content directories that are links to directories outside this site',
+		LinkedTargets::POLICY_KEY => 'content directories that are not positively this site\'s own (outside its directories, inside another installation, or not to be told)',
 	);
 
 	/**

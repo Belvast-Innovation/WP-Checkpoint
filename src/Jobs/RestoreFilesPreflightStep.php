@@ -110,8 +110,9 @@ final class RestoreFilesPreflightStep implements Step {
 	 * function( string $parent, TargetNames $probed ): TargetNames, "dev" function( string $path ): ?int (the
 	 * file system of a live directory, null when it is not there), "page_lines" int, "at" function( string
 	 * $point ): void ("appended": the index unit's bytes are written, its cursor is not), "plugin_dir" string,
-	 * "dir_mode" int. Not a test part: "trusted_root" function(): string, the trusted deployment root ('' when none;
-	 * RestoreJob passes it from the storage directories' state).
+	 * "dir_mode" int, "config_dir" function(): string (the directory of the site's wp-config.php, as found). Not a
+	 * test part: "trusted_root" function(): string, the trusted deployment root ('' when none; RestoreJob passes it
+	 * from the storage directories' state).
 	 *
 	 * @var array<string, mixed>
 	 */
@@ -151,7 +152,7 @@ final class RestoreFilesPreflightStep implements Step {
 		if ( 'layout' === $cursor['phase'] ) {
 			$cursor = $this->layout( $context );
 			if ( $cursor instanceof StepResult ) {
-				return $cursor; // The question about directories that are links to directories outside this site.
+				return $cursor; // The question about content directories that are not positively this site's.
 			}
 			$context->checkpoint( $cursor, 62, __( 'Checking where the files go', 'wp-checkpoint' ) );
 			$first = false; // The layout was this tick's first unit.
@@ -209,7 +210,8 @@ final class RestoreFilesPreflightStep implements Step {
 	 * The layout phase: the cursor of the probe phase.
 	 *
 	 * @param JobContext $context Context.
-	 * @return array<string, mixed>|StepResult The cursor of the probe phase, or the question about linked directories.
+	 * @return array<string, mixed>|StepResult The cursor of the probe phase, or the question about directories that are not
+	 *                                         positively this site's.
 	 * @throws CannotStage When the layout cannot be staged and swapped.
 	 */
 	private function layout( JobContext $context ) {
@@ -219,7 +221,7 @@ final class RestoreFilesPreflightStep implements Step {
 		$groups   = array_map( array( ScanRoots::class, 'resolved' ), $given );
 		$staged   = array_values( array_intersect( StagingLayout::GROUPS, (array) $manifest->to_array()['contents']['files'] ) );
 		$left_out = array();
-		$linked   = $this->linked( $given, $groups, $staged );
+		$linked   = $this->linked( $given, $staged );
 		if ( array() !== $linked ) {
 			$choice = $this->linked_choice( $context, $linked );
 			if ( $choice instanceof StepResult ) {
@@ -678,12 +680,10 @@ final class RestoreFilesPreflightStep implements Step {
 	 * directory of the wp-config.php it loaded (unless that is a file system's root or a home directory).
 	 *
 	 * @param array<string, string> $given  Group => directory as WordPress names it.
-	 * @param array<string, string> $groups Group => directory, resolved (unused: judged from the path as given).
 	 * @param string[]              $staged The staged groups.
 	 * @return array<string, array{target: string, verdict: string, at: string}> Group => why it is asked about.
 	 */
-	private function linked( array $given, array $groups, array $staged ): array {
-		unset( $groups );
+	private function linked( array $given, array $staged ): array {
 		$zones = array();
 		foreach ( array( rtrim( ABSPATH, '/\\' ), isset( $this->parts['trusted_root'] ) ? (string) call_user_func( $this->parts['trusted_root'] ) : '' ) as $dir ) {
 			$real = '' === $dir ? false : Paths::real( $dir );
@@ -691,8 +691,9 @@ final class RestoreFilesPreflightStep implements Step {
 				$zones[] = rtrim( Paths::normalize( (string) $real ), '/' );
 			}
 		}
-		$config  = isset( $this->parts['config_dir'] ) ? (string) call_user_func( $this->parts['config_dir'] ) : self::loaded_config_dir();
-		$zones[] = LinkedTargets::config_zone( $config );
+		$config  = isset( $this->parts['config_dir'] ) ? (string) call_user_func( $this->parts['config_dir'] ) : self::config_dir();
+		$real    = '' === $config ? false : Paths::real( $config );
+		$zones[] = false === $real ? '' : LinkedTargets::config_zone( rtrim( Paths::normalize( (string) $real ), '/' ), null, $config );
 		$out     = array();
 		foreach ( $staged as $group ) {
 			$why = LinkedTargets::judge( (string) ( $given[ $group ] ?? '' ), $zones );
@@ -704,19 +705,21 @@ final class RestoreFilesPreflightStep implements Step {
 	}
 
 	/**
-	 * The directory of the wp-config.php this request loaded, resolved ('' when none was: a test harness, WP-CLI with
-	 * another config).
+	 * The directory of the wp-config.php this site loads, as found (not resolved): under WP-CLI the one WP-CLI loads
+	 * (it reads the file rather than including it, and honours WP_CONFIG_PATH), otherwise the one wp-load.php loads
+	 * (LinkedTargets::config_file()). '' when there is none.
 	 *
 	 * @return string
 	 */
-	private static function loaded_config_dir(): string {
-		foreach ( get_included_files() as $file ) {
-			if ( 'wp-config.php' === basename( (string) $file ) ) {
-				$real = Paths::real( dirname( (string) $file ) );
-				return false === $real ? '' : rtrim( Paths::normalize( (string) $real ), '/' );
-			}
+	private static function config_dir(): string {
+		$file = '';
+		if ( defined( 'WP_CLI' ) && WP_CLI && function_exists( '\\WP_CLI\\Utils\\locate_wp_config' ) ) {
+			$file = (string) \WP_CLI\Utils\locate_wp_config();
 		}
-		return '';
+		if ( '' === $file ) {
+			$file = LinkedTargets::config_file( rtrim( ABSPATH, '/\\' ) );
+		}
+		return '' === $file ? '' : rtrim( Paths::normalize( dirname( $file ) ), '/' );
 	}
 
 	/**

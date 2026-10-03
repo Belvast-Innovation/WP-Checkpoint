@@ -653,7 +653,7 @@ final class RestoreFilesPreflightTest extends RestoreTestCase {
 		);
 		$refused = $this->run_restore( $this->job_for( $type, $base, array( 'unattended' => true, 'policy' => $tables ) ) );
 		$this->assertSame( Job::FAILED, $refused->status );
-		$this->assertStringContainsString( 'An unattended restore must say what to do with content directories that are links to directories outside this site: set the restore policy "linked_targets" to "swap" or "exclude".', (string) $refused->last_error );
+		$this->assertStringContainsString( 'An unattended restore must say what to do with content directories that are not positively this site\'s own (outside its directories, inside another installation, or not to be told): set the restore policy "linked_targets" to "swap" or "exclude".', (string) $refused->last_error );
 		$this->assertFileDoesNotExist( RestoreFiles::path( $this->work( $refused ), RestoreFiles::MANIFEST ), 'refused before the backup was even checked' );
 		$said = $this->run_restore( $this->job_for( $type, $base, array( 'unattended' => true, 'policy' => $tables + array( LinkedTargets::POLICY_KEY => 'swap' ) ) ) );
 		$this->assertSame( Job::COMPLETED, $said->status, 'the control: all three said' );

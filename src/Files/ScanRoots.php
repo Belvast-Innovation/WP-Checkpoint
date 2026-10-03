@@ -211,7 +211,7 @@ final class ScanRoots {
 
 	/**
 	 * Each content group's live directory as WordPress reports it, normalised but not resolved: a directory that is
-	 * a link is named by the link (the restore asks about a link whose target is outside this site, LinkedTargets).
+	 * a link is named by the link (the restore judges each by where it finally is, LinkedTargets).
 	 * On a multisite network, uploads is the main site's upload directory, as in site_directories().
 	 *
 	 * @return array<string, string>

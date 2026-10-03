@@ -124,6 +124,22 @@ final class LinkedTargetsLayoutsTest extends TestCase {
 					$current = array( $root, "{$base}/srv/bed/current" );
 				}
 				break;
+			case 'trellis':
+				// A deployment whose uploads are a link from the release into the deployment's shared directory: the
+				// site's by fact, outside every zone the rule knows (the trusted root not set). Asked about: allowed, counted.
+				$root = "{$base}/srv/tr";
+				self::wp( "{$root}/releases/4/web", array( 'wp-config.php' ) );
+				self::wp( "{$root}/releases/4/web/wp", array( 'wp-load.php' ) );
+				self::mk( "{$root}/releases/4/web/app/plugins" );
+				self::mk( "{$root}/shared/uploads" );
+				symlink( "{$root}/shared/uploads", "{$root}/releases/4/web/app/uploads" );
+				symlink( "{$root}/releases/4", "{$root}/current" );
+				$targets[] = array( "{$root}/releases/4/web/app/plugins", self::SITE, true );
+				$targets[] = array( "{$root}/shared/uploads", self::SITE, true );
+				$abspath   = "{$root}/current/web/wp";
+				$config    = "{$root}/releases/4/web";
+				$current   = array( "{$root}/releases/4", "{$root}/current" );
+				break;
 			default: // home-config: wp-config.php one level above the WordPress directory, in the home directory.
 				$site = "{$base}/home/u/public_html";
 				self::wp( $site, array( 'wp-load.php' ) );
@@ -184,7 +200,7 @@ final class LinkedTargetsLayoutsTest extends TestCase {
 	private function cases( $zones_of = null ): array {
 		$cases = array();
 		foreach ( array( false, true ) as $trusted ) {
-			foreach ( array_merge( self::NAMED, array( 'home-config' ) ) as $name ) {
+			foreach ( array_merge( self::NAMED, array( 'home-config', 'trellis' ) ) as $name ) {
 				$layout = $this->layout( $name, $trusted );
 				$zones  = null !== $zones_of ? call_user_func( $zones_of, $layout ) : self::zones( $layout );
 				foreach ( $layout['targets'] as $target ) {
@@ -193,6 +209,7 @@ final class LinkedTargetsLayoutsTest extends TestCase {
 							'layout' => $name . ( $trusted ? ' (trusted root)' : '' ),
 							'named'  => in_array( $name, self::NAMED, true ),
 							'given'  => $given,
+							'target' => $target[0],
 							'owner'  => $target[1],
 							'zones'  => $zones,
 							'base'   => $layout['base'],
@@ -223,11 +240,11 @@ final class LinkedTargetsLayoutsTest extends TestCase {
 	 *
 	 * @param array<int, array<string, mixed>> $cases   Cases.
 	 * @param array<int, bool>                 $asked   Whether each was asked about.
-	 * @return array{violations: string[], allowed: int, seen: array<string, int>}
+	 * @return array{violations: string[], allowed: string[], seen: array<string, int>}
 	 */
 	private static function check( array $cases, array $asked ): array {
 		$violations = array();
-		$allowed    = 0;
+		$allowed    = array();
 		$seen       = array();
 		foreach ( $cases as $i => $case ) {
 			$seen[ $case['owner'] ] = ( $seen[ $case['owner'] ] ?? 0 ) + 1;
@@ -237,7 +254,7 @@ final class LinkedTargetsLayoutsTest extends TestCase {
 				if ( $case['named'] ) {
 					$violations[] = sprintf( 'O2 %s: %s (this site\'s) asked about', $case['layout'], $case['given'] );
 				} else {
-					++$allowed;
+					$allowed[] = $case['layout'] . ': ' . $case['target'] . ' as ' . $case['given'];
 				}
 			}
 		}
@@ -262,7 +279,15 @@ final class LinkedTargetsLayoutsTest extends TestCase {
 			$this->assertGreaterThan( 0, $result['seen'][ $owner ] ?? 0, 'the control: ' . $owner );
 		}
 		$this->assertGreaterThan( 0, $this->links, 'the control: spelt through links' );
-		$this->assertSame( 0, $result['allowed'], 'directories of this site asked about outside the named layouts (allowed, counted)' );
+		// Directories of this site asked about outside the named layouts: allowed (the safe side), and known: only the
+		// Trellis deployment's shared uploads, which no zone holds unless the trusted root is set. Anything else here
+		// is a new kind and is looked at.
+		$this->assertNotSame( array(), $result['allowed'], 'the control: the Trellis shared uploads are asked about' );
+		foreach ( $result['allowed'] as $case ) {
+			$this->assertStringStartsWith( 'trellis', $case, 'only the known kind of question about this site\'s directories' );
+			$this->assertStringContainsString( '/srv/tr/shared/uploads as ', $case );
+		}
+		fwrite( STDERR, sprintf( "\nAllowed questions about this site's directories: %d (Trellis shared uploads)\n", count( $result['allowed'] ) ) ); // phpcs:ignore -- reported.
 	}
 
 	public function test_under_open_basedir_too(): void {
@@ -311,6 +336,7 @@ final class LinkedTargetsLayoutsTest extends TestCase {
 			'without the check for another installation\'s root' => array( 'no-installation', 'O1' ),
 			'without the home and root exclusion'                 => array( 'no-exclusion', 'O1' ),
 			'the earlier rule (a link on the path)'               => array( 'old-rule', 'O1' ),
+			'without the directory of wp-config.php as a zone'    => array( 'no-config-zone', 'O2' ),
 		);
 	}
 
@@ -319,6 +345,13 @@ final class LinkedTargetsLayoutsTest extends TestCase {
 	 */
 	public function test_a_withdrawn_part_breaks_an_invariant( string $variant, string $invariant ): void {
 		$zones_of = null;
+		if ( 'no-config-zone' === $variant ) {
+			$zones_of = static function ( array $layout ): array {
+				$zones    = self::zones( $layout );
+				$zones[2] = '';
+				return $zones;
+			};
+		}
 		if ( 'no-exclusion' === $variant ) {
 			$zones_of = static function ( array $layout ): array {
 				$zones    = self::zones( $layout );

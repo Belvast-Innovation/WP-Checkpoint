@@ -118,7 +118,7 @@ final class QuestionText {
 	}
 
 	/**
-	 * The lines of the question about directories that are links to directories outside this site, when its work
+	 * The lines of the question about content directories that are not positively this site's, when its work
 	 * file names the groups and targets its id was made from (a file written by another run may name others: then
 	 * none are listed). Each target masked, numbered where two read the same (LinkedTargets::lines()).
 	 *

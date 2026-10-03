@@ -8,6 +8,7 @@
 namespace WPCheckpoint\Restore;
 
 use WPCheckpoint\Support\Paths;
+use WPCheckpoint\Support\StorageReclaim;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -61,7 +62,12 @@ final class LinkedTargets {
 	 * Home directories, as the masks of paths know them (Report::mask_paths()): the directory under one of these is a
 	 * user's.
 	 */
-	const HOMES = '#\A((?:[A-Za-z]:)?/(?:home|users|var/www/vhosts|srv/users|usr/home|export/home)/[^/]+)(?:/|\z)#i';
+	const HOMES = '#\A((?:[A-Za-z]:)?/(?:home\d*|users|var/www/vhosts|srv/users|usr/home|export/home)/[^/]+)(?:/|\z)#i';
+
+	/**
+	 * The directories that hold home directories (each of them broader than one home).
+	 */
+	const HOME_ROOTS = '#\A(?:[A-Za-z]:)?/(?:home\d*|users|var/www/vhosts|srv/users|usr/home|export/home)\z#i';
 
 	/**
 	 * The files whose presence in a directory makes it a WordPress installation's root.
@@ -78,8 +84,8 @@ final class LinkedTargets {
 	 */
 	public static function resolve( string $given ): string {
 		$given = rtrim( Paths::normalize( $given ), '/' );
-		if ( '' === $given ) {
-			return '';
+		if ( 1 !== preg_match( '#\A(?:/|[A-Za-z]:/)#', $given ) ) {
+			return ''; // Not absolute: it would be resolved against whatever directory this request works in.
 		}
 		$real = Paths::real( $given );
 		if ( false !== $real ) {
@@ -97,20 +103,57 @@ final class LinkedTargets {
 	}
 
 	/**
-	 * The directory of the wp-config.php this site loaded, as a zone of this site: '' when it is the root of a file
-	 * system or a home directory (it would take in everything below it).
+	 * The wp-config.php WordPress loads for a WordPress directory, by wp-load.php's own rule: the one in it, else the
+	 * one in its parent when the parent is not itself a WordPress directory (no wp-settings.php there). '' when none.
 	 *
-	 * @param string        $dir     The directory, resolved ('' when not known).
-	 * @param callable|null $is_home function( string $dir ): bool, whether it is a home directory (tests); HOMES.
+	 * @param string $abspath The WordPress directory.
 	 * @return string
 	 */
-	public static function config_zone( string $dir, $is_home = null ): string {
+	public static function config_file( string $abspath ): string {
+		$abspath = rtrim( Paths::normalize( $abspath ), '/' );
+		if ( '' === $abspath ) {
+			return '';
+		}
+		if ( @is_file( $abspath . '/wp-config.php' ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- open_basedir: not there.
+			return $abspath . '/wp-config.php';
+		}
+		$parent = dirname( $abspath );
+		if ( @is_file( $parent . '/wp-config.php' ) && ! @is_file( $parent . '/wp-settings.php' ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- as above.
+			return $parent . '/wp-config.php';
+		}
+		return '';
+	}
+
+	/**
+	 * The directory of the wp-config.php this site loads, as a zone of this site: '' when it is the root of a file
+	 * system, a home directory (by its name as given or where it is, or the home of the user PHP runs as), or a
+	 * directory that holds home directories: it would take in everything below it.
+	 *
+	 * @param string        $dir     The directory, resolved ('' when not known).
+	 * @param callable|null $is_home function( string $dir ): bool, whether it is a home directory (tests); otherwise
+	 *                               HOMES, HOME_ROOTS and the user's home.
+	 * @param string        $given   The directory as found, before it was resolved ('' when the same).
+	 * @return string
+	 */
+	public static function config_zone( string $dir, $is_home = null, string $given = '' ): string {
 		$dir = rtrim( Paths::normalize( $dir ), '/' );
 		if ( '' === $dir || 1 === preg_match( '#\A(?:[A-Za-z]:|//[^/]+/[^/]+)\z#', $dir ) ) {
 			return ''; // A file system's root ("/" normalises to "").
 		}
-		$home = is_callable( $is_home ) ? (bool) call_user_func( $is_home, $dir ) : 0 === strcasecmp( self::home( $dir ), $dir );
-		return $home ? '' : $dir;
+		if ( is_callable( $is_home ) ) {
+			return call_user_func( $is_home, $dir ) ? '' : $dir;
+		}
+		$user = StorageReclaim::home_directory();
+		$user = '' === $user ? false : Paths::real( $user );
+		foreach ( array_filter( array( $dir, rtrim( Paths::normalize( $given ), '/' ) ) ) as $name ) {
+			if ( 0 === strcasecmp( self::home( $name ), $name ) || 1 === preg_match( self::HOME_ROOTS, $name ) ) {
+				return '';
+			}
+		}
+		if ( false !== $user && self::within( $dir, rtrim( Paths::normalize( (string) $user ), '/' ) ) ) {
+			return ''; // The user's home, or a directory holding it.
+		}
+		return $dir;
 	}
 
 	/**
@@ -156,14 +199,14 @@ final class LinkedTargets {
 					);
 				}
 			} else {
-				$entries = is_dir( $dir ) ? @scandir( $dir ) : false; // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- not listable: told below.
-				if ( ! is_array( $entries ) ) {
+				$holds = is_dir( $dir ) ? self::holds_root_file( $dir ) : null;
+				if ( null === $holds ) {
 					return array(
 						'verdict' => self::UNKNOWN,
 						'at'      => $dir,
 					);
 				}
-				if ( array() !== array_intersect( self::ROOT_FILES, $entries ) ) {
+				if ( $holds ) {
 					return array(
 						'verdict' => self::INSTALLATION,
 						'at'      => $dir,
@@ -180,6 +223,30 @@ final class LinkedTargets {
 			'verdict' => self::SITE,
 			'at'      => '',
 		);
+	}
+
+	/**
+	 * Whether a directory's listing holds wp-load.php or wp-config.php, read an entry at a time and stopped at the
+	 * first (memory bounded whatever the directory holds); null when it cannot be listed.
+	 *
+	 * @param string $dir Directory.
+	 * @return bool|null
+	 */
+	private static function holds_root_file( string $dir ) {
+		$handle = @opendir( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- not listable: null.
+		if ( false === $handle ) {
+			return null;
+		}
+		try {
+			while ( false !== ( $name = readdir( $handle ) ) ) { // phpcs:ignore Generic.CodeAnalysis.AssignmentInCondition.FoundInWhileCondition -- the readdir() idiom.
+				if ( in_array( $name, self::ROOT_FILES, true ) ) {
+					return true;
+				}
+			}
+		} finally {
+			closedir( $handle );
+		}
+		return false;
 	}
 
 	/**
