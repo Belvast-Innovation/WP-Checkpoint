@@ -29,8 +29,8 @@ defined( 'ABSPATH' ) || exit;
  *   a staging site inside the production site's directory, WordPress in its own directory).
  *
  * Anything else is asked about in the files preflight, with no default: swap it as usual, or leave it out of the
- * restore (its live directory stays as it is). A directory that cannot be resolved, or a directory on the way up
- * that cannot be listed, is asked about too, saying which path could not be told. The answer holds for the very
+ * restore (its live directory stays as it is). A directory that cannot be resolved, or one on the way up whose
+ * listing cannot be read, is asked about too, saying which path could not be told. The answer holds for the very
  * groups and directories its question named (id()). A restore nobody attends says it up front (the policy
  * POLICY_KEY, RestoreJob).
  */
@@ -64,7 +64,7 @@ final class LinkedTargets {
 	/**
 	 * Home directories: the directory under one of these is a user's.
 	 */
-	const HOMES = '#\A((?:[A-Za-z]:)?/(?:home\d*|users|var/www/vhosts|srv/users|usr/home|export/home)/[^/]+)(?:/|\z)#i'; // As Report::mask_paths() masks them.
+	const HOMES = '#\A((?:[A-Za-z]:)?/(?:home\d*|users|var/www/vhosts|srv/users|usr/home|export/home)/[^/]+)(?:/|\z)#i'; // Those Report::mask_paths() masks, in any case.
 
 	/**
 	 * The directories that hold home directories (each of them broader than one home).
@@ -205,7 +205,9 @@ final class LinkedTargets {
 	public static function zones( string $abspath, string $trusted, string $config_dir, $is_home = null ): array {
 		$out = array();
 		foreach ( array( $abspath, $trusted, $config_dir ) as $dir ) {
-			$real  = '' === $dir ? false : Paths::real( rtrim( $dir, '/\\' ) );
+			$trimmed = rtrim( $dir, '/\\' );
+			// A file system's root is no zone; and realpath() of '' or of a bare drive is the working directory.
+			$real  = '' === $trimmed || 1 === preg_match( '#\A[A-Za-z]:\z#', $trimmed ) ? false : Paths::real( $trimmed );
 			$out[] = false === $real ? '' : rtrim( Paths::normalize( (string) $real ), '/' );
 		}
 		$zone   = '' === $out[2] ? '' : self::config_zone( $out[2], $is_home, $config_dir );
@@ -341,69 +343,103 @@ final class LinkedTargets {
 	 * Whether a directory is a WordPress installation's root: it holds wp-load.php or wp-config.php, or (WordPress in
 	 * its own directory) its index.php is WordPress's front controller (it loads wp-blog-header.php) and one of its
 	 * direct subdirectories holds wp-load.php. Not merely the parent of an installation: wp-content holds an index.php
-	 * of its own ("silence is golden"), and would be a root as soon as a staging site is put in it. The files are
-	 * looked up by name (bounded in memory and time whatever the directory holds); only beside a front controller
-	 * is the directory listed, an entry at a time, at most CHILDREN_LIMIT. Null when what is in it cannot be looked
-	 * at, its index.php cannot be read, or there are more entries beside a front controller than are looked into.
+	 * of its own ("silence is golden"), and would be a root as soon as a staging site is put in it. Told by the
+	 * directory's listing (lists()), never by looking names up one by one; beside a front controller, at most
+	 * CHILDREN_LIMIT entries are looked into. Null when it cannot be listed, its index.php cannot be read, or there
+	 * are more entries beside a front controller than are looked into (or one of them cannot be listed and none
+	 * shows the core).
 	 *
 	 * @param string $dir Directory.
 	 * @return bool|null
 	 */
 	public static function root_state( string $dir ) {
-		clearstatcache( true );
-		if ( false === @lstat( $dir . '/.' ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- not searchable: null.
-			return null; // What is in it cannot be looked at.
+		$listed = self::lists( $dir, self::ROOT_FILES + array( 2 => 'index.php' ) );
+		if ( null === $listed ) {
+			return null; // What is in it cannot be read.
 		}
-		// Searchable: a name that lstat() does not find is not there (a check by name, whatever the directory holds).
-		foreach ( self::ROOT_FILES as $file ) {
-			if ( false !== @lstat( $dir . '/' . $file ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- not there: false.
-				return true;
-			}
+		if ( array() !== array_intersect( self::ROOT_FILES, $listed ) ) {
+			return true;
+		}
+		if ( ! in_array( 'index.php', $listed, true ) ) {
+			return false;
 		}
 		$front = self::front_controller( $dir . '/index.php' );
 		if ( true !== $front ) {
 			return $front; // Not a front controller (false), or one that cannot be read (null).
 		}
+		// The core beside it: each subdirectory's listing names wp-load.php or not (by listing, as above).
 		$handle = @opendir( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- not listable: null.
 		if ( false === $handle ) {
 			return null;
 		}
-		$count = 0;
+		$count   = 0;
+		$unknown = false;
 		try {
 			while ( false !== ( $name = readdir( $handle ) ) ) { // phpcs:ignore Generic.CodeAnalysis.AssignmentInCondition.FoundInWhileCondition -- the readdir() idiom.
-				if ( '.' === $name || '..' === $name ) {
+				if ( '.' === $name || '..' === $name || 'index.php' === $name ) {
 					continue;
 				}
 				if ( ++$count > self::CHILDREN_LIMIT ) {
 					return null; // Too many beside the front controller to look into.
 				}
-				if ( false !== @lstat( $dir . '/' . $name . '/wp-load.php' ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- not there: on.
+				if ( ! @is_dir( $dir . '/' . $name ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a file: passed.
+					continue;
+				}
+				$inside = self::lists( $dir . '/' . $name, array( 'wp-load.php' ) );
+				if ( null === $inside ) {
+					$unknown = true; // Read the others: one of them may tell.
+				} elseif ( array() !== $inside ) {
 					return true;
 				}
 			}
 		} finally {
 			closedir( $handle );
 		}
-		return false;
+		return $unknown ? null : false;
 	}
 
 	/**
-	 * Whether an index.php is WordPress's front controller: it loads wp-blog-header.php (its first 8 KB read); null
-	 * when it cannot be read.
+	 * Which of the names a directory's listing holds, read an entry at a time (memory bounded whatever it holds; time
+	 * as many entries as it has); null when it cannot be listed. A listing is the evidence: a name looked up one by
+	 * one may not be found for other reasons than not being there (a thread-safe PHP's lookups in a directory that
+	 * cannot be searched, open_basedir for a link to a file outside it).
+	 *
+	 * @param string   $dir   Directory.
+	 * @param string[] $names Names.
+	 * @return string[]|null
+	 */
+	private static function lists( string $dir, array $names ) {
+		$handle = @opendir( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- not listable: null.
+		if ( false === $handle ) {
+			return null;
+		}
+		$found = array();
+		try {
+			while ( false !== ( $name = readdir( $handle ) ) ) { // phpcs:ignore Generic.CodeAnalysis.AssignmentInCondition.FoundInWhileCondition -- the readdir() idiom.
+				if ( in_array( $name, $names, true ) ) {
+					$found[] = $name;
+				}
+			}
+		} finally {
+			closedir( $handle );
+		}
+		return $found;
+	}
+
+	/**
+	 * Whether an index.php its directory lists is WordPress's front controller: it loads wp-blog-header.php (its
+	 * first 8 KB read). False only for one positively a directory; null when it cannot be read.
 	 *
 	 * @param string $file The file.
 	 * @return bool|null
 	 */
 	private static function front_controller( string $file ) {
-		if ( false === @lstat( $file ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- not there: no.
-			return false;
-		}
-		if ( ! @is_file( $file ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- as above.
+		if ( @is_dir( $file ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- not a directory: read below.
 			return false; // A directory named index.php is no front controller.
 		}
 		$handle = @fopen( $file, 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- not readable: null.
 		if ( false === $handle ) {
-			return null;
+			return null; // Listed, but it cannot be read (or its link's target cannot be: open_basedir).
 		}
 		$head = @fread( $handle, 8192 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_fread -- a bounded read.
 		fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- as above.

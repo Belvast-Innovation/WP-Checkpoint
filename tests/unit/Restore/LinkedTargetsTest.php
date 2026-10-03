@@ -221,29 +221,34 @@ final class LinkedTargetsTest extends TestCase {
 		$this->assertSame( '', LinkedTargets::resolve( '../uploads' ) );
 	}
 
-	public function test_a_directory_that_cannot_be_looked_into_is_not_to_be_told_and_named_one_that_cannot_be_listed_is_judged_by_name(): void {
+	public function test_a_directory_whose_listing_cannot_be_read_is_not_to_be_told_and_named(): void {
 		if ( '\\' === DIRECTORY_SEPARATOR || ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) ) {
-			$this->markTestSkipped( 'Needs directories this user cannot search or list (not on Windows, not as root).' );
+			$this->markTestSkipped( 'Needs directories this user cannot list (not on Windows, not as root).' );
 		}
 		mkdir( $this->dir . '/site/wp-content/unlisted/uploads', 0755, true );
 		mkdir( $this->dir . '/site/wp-content/closed', 0755, true );
+		file_put_contents( $this->dir . '/site/wp-content/closed/a.txt', 'x' );
 		$site     = rtrim( Paths::normalize( (string) realpath( $this->dir . '/site' ) ), '/' );
 		$unlisted = $this->dir . '/site/wp-content/unlisted';
 		$closed   = $this->dir . '/site/wp-content/closed';
-		chmod( $unlisted, 0311 ); // Searchable, not listable: its root files are looked up by name.
-		chmod( $closed, 0600 );   // Listable, not searchable: nothing in it can be looked at.
+		chmod( $unlisted, 0311 ); // Searchable, not listable: whether it holds a root file is not looked up by name.
+		chmod( $closed, 0600 );   // Listable, not searchable: its listing is the evidence.
 		try {
 			$this->assertFalse( @scandir( $unlisted ), 'the control: it cannot be listed' );
-			$this->assertSame( LinkedTargets::SITE, LinkedTargets::judge( $unlisted . '/uploads', array( $site ) )['verdict'], 'no root file in it, by name' );
-			$why = LinkedTargets::judge( $closed, array( $site ) );
+			$why = LinkedTargets::judge( $unlisted . '/uploads', array( $site ) );
 			$this->assertSame( LinkedTargets::UNKNOWN, $why['verdict'] );
-			$this->assertSame( rtrim( Paths::normalize( (string) realpath( $closed ) ), '/' ), $why['at'], 'the path that could not be read' );
+			$this->assertSame( rtrim( Paths::normalize( (string) realpath( $unlisted ) ), '/' ), $why['at'], 'the path that could not be read' );
+			$this->assertSame( LinkedTargets::SITE, LinkedTargets::judge( $closed, array( $site ) )['verdict'], 'listed: no root file in it' );
 		} finally {
 			chmod( $unlisted, 0755 );
 			chmod( $closed, 0755 );
 		}
 	}
 
+	/**
+	 * Not covered: a read of index.php that fails after it was opened (front_controller(): null too); it cannot be
+	 * brought about here.
+	 */
 	public function test_an_index_php_that_cannot_be_read_beside_a_core_is_not_to_be_told(): void {
 		if ( '\\' === DIRECTORY_SEPARATOR || ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) ) {
 			$this->markTestSkipped( 'Needs a file this user cannot read (not on Windows, not as root).' );

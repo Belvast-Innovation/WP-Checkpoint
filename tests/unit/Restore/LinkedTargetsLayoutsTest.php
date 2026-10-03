@@ -370,6 +370,53 @@ final class LinkedTargetsLayoutsTest extends TestCase {
 		$this->assertGreaterThan( 0, $total );
 	}
 
+	public function test_root_files_that_are_links_out_of_open_basedir_still_ask(): void {
+		$repo = dirname( __DIR__, 3 );
+		$base = $this->dir . '/obd';
+		$out  = $this->dir . '/outside';
+		self::mk( $out );
+		file_put_contents( $out . '/wp-config.php', '<?php' );
+		file_put_contents( $out . '/index.php', "<?php\nrequire __DIR__ . '/wp/wp-blog-header.php';\n" );
+		self::mk( "{$base}/site/wp-content/uploads" );
+		self::mk( "{$base}/site/staging/wp-content/uploads" );
+		symlink( $out . '/wp-config.php', "{$base}/site/staging/wp-config.php" ); // A staging site's shared wp-config.php.
+		self::mk( "{$base}/site/blog/wp" );
+		self::mk( "{$base}/site/blog/wp-content/uploads" );
+		file_put_contents( "{$base}/site/blog/wp/wp-load.php", '<?php' );
+		symlink( $out . '/index.php', "{$base}/site/blog/index.php" ); // Its front controller, linked from outside.
+		$zones = array( rtrim( Paths::normalize( (string) realpath( "{$base}/site" ) ), '/' ) );
+		$cases = array(
+			array(
+				'given' => "{$base}/site/staging/wp-content/uploads",
+				'zones' => $zones,
+			),
+			array(
+				'given' => "{$base}/site/blog/wp-content/uploads",
+				'zones' => $zones,
+			),
+			array(
+				'given' => "{$base}/site/wp-content/uploads",
+				'zones' => $zones,
+			),
+		);
+		// The control: without the restriction, the two other installations are asked about, this site's is not.
+		$plain = array();
+		foreach ( $cases as $case ) {
+			$plain[] = LinkedTargets::judge( $case['given'], $case['zones'] )['verdict'];
+		}
+		$this->assertSame( array( LinkedTargets::INSTALLATION, LinkedTargets::INSTALLATION, LinkedTargets::SITE ), $plain );
+		file_put_contents( $base . '/cases.json', (string) json_encode( $cases ) );
+		$output = array();
+		$status = 0;
+		exec( escapeshellarg( PHP_BINARY ) . ' -d open_basedir=' . escapeshellarg( $base . PATH_SEPARATOR . $repo ) . ' ' . escapeshellarg( $repo . '/tests/Fixtures/Restore/judge-child.php' ) . ' ' . escapeshellarg( $base . '/cases.json' ) . ' 2>&1', $output, $status );
+		$this->assertSame( 0, $status, implode( "\n", $output ) );
+		$verdicts = json_decode( (string) end( $output ), true );
+		$this->assertIsArray( $verdicts, implode( "\n", $output ) );
+		$this->assertSame( LinkedTargets::INSTALLATION, $verdicts[0], 'a root file that is a link out of open_basedir is still listed' );
+		$this->assertSame( LinkedTargets::UNKNOWN, $verdicts[1], 'a front controller out of reach cannot be read: not to be told' );
+		$this->assertSame( LinkedTargets::SITE, $verdicts[2], 'the control: this site\'s own, under the restriction too' );
+	}
+
 	/**
 	 * @return array<string, array{0: string, 1: string}>
 	 */
