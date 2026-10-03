@@ -37,6 +37,13 @@ use WPCheckpoint\Restore\StagingLayout;
 final class Deleter {
 
 	/**
+	 * The confirmation of the delete_tree() call under way (null: none).
+	 *
+	 * @var callable|null
+	 */
+	private static $confirm = null;
+
+	/**
 	 * What storage_refusal() says of a path that is not absolute, or has . or .. segments and leads nowhere yet.
 	 */
 	public const NOT_A_FULL_PATH = 'the path is relative or has . or .. segments';
@@ -437,14 +444,37 @@ final class Deleter {
 	 * directory with millions of entries would exhaust memory; only this
 	 * plugin's own steps can create such a directory.
 	 *
-	 * @param string $base        Directory the plugin owns.
-	 * @param string $target      Entry to delete; must be inside $base.
-	 * @param int    $max_entries Stop after this many entries (0: no limit).
+	 * With $confirm, it is called right before each unlink() and rmdir() (a job's lease check: a run that lost its
+	 * job stops before its next deletion); what it throws stops the call, and the deletion it stood before is not
+	 * made.
+	 *
+	 * @param string        $base        Directory the plugin owns.
+	 * @param string        $target      Entry to delete; must be inside $base.
+	 * @param int           $max_entries Stop after this many entries (0: no limit).
+	 * @param callable|null $confirm     function(): void, right before each deletion; may throw.
 	 * @return array{deleted: int, failed: string[], remaining: bool}
 	 * @throws DeletionRefused When the target is not one the plugin may delete (refusal()); nothing is deleted.
 	 */
-	public static function delete_tree( string $base, string $target, int $max_entries = 0 ): array {
+	public static function delete_tree( string $base, string $target, int $max_entries = 0, $confirm = null ): array {
 		self::guard( $target );
+		$before        = self::$confirm;
+		self::$confirm = is_callable( $confirm ) ? $confirm : null;
+		try {
+			return self::delete_tree_now( $base, $target, $max_entries );
+		} finally {
+			self::$confirm = $before;
+		}
+	}
+
+	/**
+	 * The deletion of delete_tree(), past its guard.
+	 *
+	 * @param string $base        Directory the plugin owns.
+	 * @param string $target      Entry to delete.
+	 * @param int    $max_entries Stop after this many entries (0: no limit).
+	 * @return array{deleted: int, failed: string[], remaining: bool}
+	 */
+	private static function delete_tree_now( string $base, string $target, int $max_entries ): array {
 		$result = array(
 			'deleted'   => 0,
 			'failed'    => array(),
@@ -685,6 +715,7 @@ final class Deleter {
 	 * @return void
 	 */
 	private static function remove_link( string $path, array &$result ): void {
+		self::confirm();
 		// Directory links on Windows must be removed with rmdir().
 		if ( @unlink( $path ) || @rmdir( $path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- failure is recorded below.
 			++$result['deleted'];
@@ -701,6 +732,7 @@ final class Deleter {
 	 * @return void
 	 */
 	private static function remove_file( string $path, array &$result ): void {
+		self::confirm();
 		if ( @unlink( $path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- failure is recorded below.
 			++$result['deleted'];
 			return;
@@ -716,11 +748,23 @@ final class Deleter {
 	 * @return void
 	 */
 	private static function remove_dir( string $path, array &$result ): void {
+		self::confirm();
 		if ( @rmdir( $path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- failure is recorded below.
 			++$result['deleted'];
 			return;
 		}
 		$result['failed'][] = $path;
+	}
+
+	/**
+	 * Call the confirmation delete_tree() was given, if any, right before a deletion.
+	 *
+	 * @return void
+	 */
+	private static function confirm(): void {
+		if ( null !== self::$confirm ) {
+			call_user_func( self::$confirm );
+		}
 	}
 
 	/**

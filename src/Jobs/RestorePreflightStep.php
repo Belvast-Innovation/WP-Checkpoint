@@ -127,14 +127,24 @@ final class RestorePreflightStep implements Step {
 	private $head_bytes;
 
 	/**
+	 * Test seams: "deleting" function(): void, before the lease is confirmed for each deletion of what an earlier
+	 * attempt left (a test stops a run there).
+	 *
+	 * @var array<string, mixed>
+	 */
+	private $parts;
+
+	/**
 	 * Constructor.
 	 *
-	 * @param callable $backups    function(): string.
-	 * @param int      $head_bytes Head of a later chunk read.
+	 * @param callable             $backups    function(): string.
+	 * @param int                  $head_bytes Head of a later chunk read.
+	 * @param array<string, mixed> $parts      Test seams.
 	 */
-	public function __construct( callable $backups, int $head_bytes = self::HEAD_BYTES ) {
+	public function __construct( callable $backups, int $head_bytes = self::HEAD_BYTES, array $parts = array() ) {
 		$this->backups    = $backups;
 		$this->head_bytes = max( 1, $head_bytes );
+		$this->parts      = $parts;
 	}
 
 	/**
@@ -155,12 +165,30 @@ final class RestorePreflightStep implements Step {
 	 * @throws TransientFailure When a work file cannot be written.
 	 */
 	public function run( JobContext $context ): StepResult {
+		$cursor = $context->cursor();
+		if ( array() === $cursor ) {
+			// The step's start, in a first attempt or in one that starts over here: what an earlier attempt recorded
+			// is listed before anything else (PreviousAttempt).
+			$cursor = array( 'phase' => 'plan' );
+			if ( PreviousAttempt::record( $context ) ) {
+				$cursor = array_merge( array( 'phase' => 'reclaim' ), PreviousAttempt::start() );
+				$context->checkpoint( $cursor, 0, __( 'Removing what an earlier attempt of the restore left', 'wp-checkpoint' ) );
+			}
+		}
 		$cursor = array_merge(
 			array(
 				'phase' => 'plan',
 			),
-			$context->cursor()
+			$cursor
 		);
+		if ( 'reclaim' === $cursor['phase'] ) {
+			$reclaimed = $this->reclaim( $context, $cursor );
+			if ( null !== $reclaimed ) {
+				return $reclaimed;
+			}
+			$cursor = array( 'phase' => 'plan' );
+			$context->checkpoint( $cursor, 0, __( 'Reading the backup\'s tables', 'wp-checkpoint' ) );
+		}
 		if ( 'plan' === $cursor['phase'] ) {
 			$planned = $this->plan( $context, $cursor );
 			if ( $planned instanceof StepResult ) {
@@ -178,6 +206,44 @@ final class RestorePreflightStep implements Step {
 			}
 		}
 		return $this->references( $context, $cursor, $plan );
+	}
+
+	/**
+	 * The reclaim phase: what an earlier attempt left, a unit at a time within the budget (the first unit of a tick
+	 * always runs), each deletion right after the lease is confirmed. Null once it is all done.
+	 *
+	 * @param JobContext           $context Context.
+	 * @param array<string, mixed> $cursor  Cursor ("reclaim" and the position in the list).
+	 * @return StepResult|null
+	 */
+	private function reclaim( JobContext $context, array $cursor ): ?StepResult {
+		$position = array(
+			'part'  => 'roots' === ( $cursor['part'] ?? '' ) ? 'roots' : 'tables',
+			'r'     => (int) ( $cursor['r'] ?? 0 ),
+			'left'  => array_map( 'strval', (array) ( $cursor['left'] ?? array() ) ),
+			'units' => (int) ( $cursor['units'] ?? 0 ),
+		);
+		$seam     = $this->parts['deleting'] ?? null;
+		$confirm  = static function () use ( $context, $seam ): void {
+			if ( is_callable( $seam ) ) {
+				call_user_func( $seam );
+			}
+			$context->confirm_lease();
+		};
+		$message  = __( 'Removing what an earlier attempt of the restore left', 'wp-checkpoint' );
+		$first    = true;
+		while ( true ) {
+			if ( ! $first && $context->should_stop() ) {
+				return StepResult::progress( array_merge( array( 'phase' => 'reclaim' ), $position ), 0, $message );
+			}
+			$first = false;
+			if ( PreviousAttempt::unit( $context, $position, $confirm ) ) {
+				return null;
+			}
+			if ( $context->should_checkpoint( 0 ) ) {
+				$context->checkpoint( array_merge( array( 'phase' => 'reclaim' ), $position ), 0, $message );
+			}
+		}
 	}
 
 	/**

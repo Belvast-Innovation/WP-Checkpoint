@@ -54,6 +54,9 @@ abstract class SwapTestCase extends RestoreTestCase {
 	/** @var array<string, mixed> Parts of the swap step for this test. */
 	protected $swap_parts = array();
 
+	/** @var array<string, mixed> Test seams of the preflight for this test (RestorePreflightStep). */
+	protected $preflight_parts = array();
+
 	/** @var string[] What the swap step's crash seam saw, in order. */
 	protected $seams = array();
 
@@ -187,6 +190,15 @@ abstract class SwapTestCase extends RestoreTestCase {
 		$steps = array();
 		foreach ( Plugin::instance()->job_types()->get( RestoreJob::ID )->steps() as $step ) {
 			switch ( $step->id() ) {
+				case \WPCheckpoint\Jobs\RestorePreflightStep::ID:
+					$steps[] = new \WPCheckpoint\Jobs\RestorePreflightStep(
+						static function (): string {
+							return Plugin::instance()->directories()->backups();
+						},
+						\WPCheckpoint\Jobs\RestorePreflightStep::HEAD_BYTES,
+						$this->preflight_parts
+					);
+					break;
 				case RestoreFilesPreflightStep::ID:
 					$steps[] = new RestoreFilesPreflightStep( array( 'directories' => $dirs ) );
 					break;

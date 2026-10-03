@@ -52,6 +52,9 @@ defined( 'ABSPATH' ) || exit;
  * - INCOMING: the backup's tables another installation in the same
  *   database may use (IncomingTables), by kind, written whole by the
  *   preflight before it asks about them; the questions name this file.
+ * - RECLAIM: what an earlier attempt of the restore recorded that a new one
+ *   does not use (its temporary tables and staging roots), written whole by
+ *   the preflight before anything on it is deleted (PreviousAttempt).
  */
 final class RestoreFiles {
 
@@ -77,6 +80,8 @@ final class RestoreFiles {
 	const SWAP_LIVE       = 'restore-swap-live.jsonl';
 
 	const INCOMING = 'restore-incoming-tables.json';
+
+	const RECLAIM = 'restore-reclaim.json';
 
 	/**
 	 * A file or directory of the work directory.
