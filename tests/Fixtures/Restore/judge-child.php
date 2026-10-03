@@ -3,7 +3,8 @@
  * LinkedTargets::judge() in a process of its own, so a test can run it under an open_basedir restriction (as Plesk,
  * ISPConfig and many DirectAdmin hosts set it). Reads the cases from the JSON file given, prints each verdict.
  *
- * Usage: php -d open_basedir=... judge-child.php <cases.json>
+ * Usage: php judge-child.php <cases.json> [<open_basedir>]. The restriction is set here, before anything is loaded,
+ * rather than with -d: on Windows its separator ";" would start a comment in the -d value (an INI line).
  * Cases: [{"given": "...", "zones": ["...", ...]}, ...], or "zone_args": [abspath, trusted, config_dir] in place of "zones"
  * to have the zones found under the restriction too (LinkedTargets::zones(), no directory taken as a home). Prints JSON: ["site"|"outside"|"installation"|"unknown", ...].
  *
@@ -12,6 +13,10 @@
 
 // phpcs:disable -- a test fixture run as a script.
 
+if ( isset( $argv[2] ) && ( false === ini_set( 'open_basedir', $argv[2] ) || ini_get( 'open_basedir' ) !== $argv[2] ) ) {
+	fwrite( STDERR, "open_basedir not set\n" );
+	exit( 3 );
+}
 require dirname( __DIR__, 3 ) . '/vendor/autoload.php';
 if ( ! defined( 'ABSPATH' ) ) {
 	define( 'ABSPATH', dirname( __DIR__, 3 ) . '/build/unit-abspath/' );

@@ -271,19 +271,32 @@ final class LinkedTargetsTest extends TestCase {
 
 	public function test_a_subdirectory_beside_a_front_controller_that_cannot_be_told_is_not_passed_over(): void {
 		if ( '\\' === DIRECTORY_SEPARATOR || ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) ) {
-			$this->markTestSkipped( 'Needs a directory this user cannot list (not on Windows, not as root).' );
+			$this->markTestSkipped( 'Needs directories this user cannot list or search (not on Windows, not as root).' );
 		}
 		$d = $this->dir;
+		// The core reached through a link into a directory that cannot be searched (another user's tree): what the
+		// link leads to cannot be told, by its name or otherwise.
+		mkdir( "{$d}/closed/wp", 0755, true );
+		file_put_contents( "{$d}/closed/wp/wp-load.php", '<?php' );
+		mkdir( "{$d}/linked/plain", 0755, true ); // Another subdirectory that tells nothing: the unknown is kept past it.
+		file_put_contents( "{$d}/linked/index.php", "<?php require __DIR__ . '/wp/wp-blog-header.php';" );
+		symlink( "{$d}/closed/wp", "{$d}/linked/wp" );
+		// The core in a directory that is searched but cannot be listed.
 		mkdir( "{$d}/own/wp", 0755, true );
-		mkdir( "{$d}/own/zz-plain", 0755, true ); // Read after the one that cannot be: the unknown is carried over.
+		mkdir( "{$d}/own/plain", 0755, true );
 		file_put_contents( "{$d}/own/index.php", "<?php require __DIR__ . '/wp/wp-blog-header.php';" );
 		file_put_contents( "{$d}/own/wp/wp-load.php", '<?php' );
+		$this->assertTrue( LinkedTargets::root_state( "{$d}/linked" ), 'the control: reachable, a root' );
 		$this->assertTrue( LinkedTargets::root_state( "{$d}/own" ), 'the control: listed, a root' );
-		chmod( "{$d}/own/wp", 0311 ); // Searchable, not listable: its core cannot be seen.
+		chmod( "{$d}/closed", 0600 );
+		chmod( "{$d}/own/wp", 0311 );
 		try {
+			$this->assertFalse( @is_dir( "{$d}/linked/wp" ), 'the control: it cannot be looked up' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- the control.
+			$this->assertNull( LinkedTargets::root_state( "{$d}/linked" ) );
 			$this->assertFalse( @scandir( "{$d}/own/wp" ), 'the control: it cannot be listed' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- the control.
 			$this->assertNull( LinkedTargets::root_state( "{$d}/own" ) );
 		} finally {
+			chmod( "{$d}/closed", 0755 );
 			chmod( "{$d}/own/wp", 0755 );
 		}
 	}
@@ -360,10 +373,18 @@ final class LinkedTargetsTest extends TestCase {
 		symlink( "{$d}/elsewhere/other", "{$d}/srv/linked" );
 		$this->assertFalse( LinkedTargets::zone_stands( "{$d}/srv", "{$d}/srv/releases/7" ) );
 		mkdir( "{$d}/two/html", 0755, true );
+		mkdir( "{$d}/gone", 0755, true );
 		file_put_contents( "{$d}/two/html/wp-load.php", '<?php' );
-		$this->assertTrue( LinkedTargets::zone_stands( "{$d}/two", "{$d}/two/html" ), 'the control' );
-		symlink( "{$d}/no-such", "{$d}/two/linked" ); // Leads nowhere that can be told.
+		symlink( "{$d}/gone", "{$d}/two/linked" );
+		$this->assertTrue( LinkedTargets::zone_stands( "{$d}/two", "{$d}/two/html" ), 'the control: it leads to a plain directory' );
+		$this->assertTrue( Sandbox::remove( "{$d}/gone" ) ); // Now it leads nowhere that can be told (made so on Windows too).
+		clearstatcache( true );
 		$this->assertFalse( LinkedTargets::zone_stands( "{$d}/two", "{$d}/two/html" ) );
+		// This site's WordPress directory outside the zone (WP_CONFIG_PATH): no child is its branch.
+		mkdir( "{$d}/three/other", 0755, true );
+		file_put_contents( "{$d}/three/other/wp-load.php", '<?php' );
+		$this->assertFalse( LinkedTargets::zone_stands( "{$d}/three", "{$d}/srv/releases/7" ) );
+		$this->assertFalse( LinkedTargets::zone_stands( "{$d}/three", '' ), 'or not resolved' );
 	}
 
 	public function test_a_directory_with_a_great_many_entries_is_read_in_bounded_memory(): void {

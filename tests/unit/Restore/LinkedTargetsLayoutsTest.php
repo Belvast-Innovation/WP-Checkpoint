@@ -351,7 +351,7 @@ final class LinkedTargetsLayoutsTest extends TestCase {
 			file_put_contents( $file, (string) json_encode( $cases ) );
 			$output = array();
 			$status = 0;
-			exec( escapeshellarg( PHP_BINARY ) . ' -d open_basedir=' . escapeshellarg( $cases[0]['base'] . PATH_SEPARATOR . $repo ) . ' ' . escapeshellarg( $repo . '/tests/Fixtures/Restore/judge-child.php' ) . ' ' . escapeshellarg( $file ) . ' 2>&1', $output, $status );
+			exec( escapeshellarg( PHP_BINARY ) . ' ' . escapeshellarg( $repo . '/tests/Fixtures/Restore/judge-child.php' ) . ' ' . escapeshellarg( $file ) . ' ' . escapeshellarg( $cases[0]['base'] . PATH_SEPARATOR . $repo ) . ' 2>&1', $output, $status );
 			$this->assertSame( 0, $status, implode( "\n", $output ) );
 			$verdicts = json_decode( (string) end( $output ), true );
 			$this->assertIsArray( $verdicts, implode( "\n", $output ) );
@@ -408,7 +408,7 @@ final class LinkedTargetsLayoutsTest extends TestCase {
 		file_put_contents( $base . '/cases.json', (string) json_encode( $cases ) );
 		$output = array();
 		$status = 0;
-		exec( escapeshellarg( PHP_BINARY ) . ' -d open_basedir=' . escapeshellarg( $base . PATH_SEPARATOR . $repo ) . ' ' . escapeshellarg( $repo . '/tests/Fixtures/Restore/judge-child.php' ) . ' ' . escapeshellarg( $base . '/cases.json' ) . ' 2>&1', $output, $status );
+		exec( escapeshellarg( PHP_BINARY ) . ' ' . escapeshellarg( $repo . '/tests/Fixtures/Restore/judge-child.php' ) . ' ' . escapeshellarg( $base . '/cases.json' ) . ' ' . escapeshellarg( $base . PATH_SEPARATOR . $repo ) . ' 2>&1', $output, $status );
 		$this->assertSame( 0, $status, implode( "\n", $output ) );
 		$verdicts = json_decode( (string) end( $output ), true );
 		$this->assertIsArray( $verdicts, implode( "\n", $output ) );

@@ -198,7 +198,7 @@ final class LinkedTargetsObstructionsTest extends TestCase {
 		file_put_contents( $base . '/cases.json', (string) json_encode( $cases ) );
 		$output = array();
 		$status = 0;
-		exec( escapeshellarg( PHP_BINARY ) . ' -d open_basedir=' . escapeshellarg( $base . PATH_SEPARATOR . $repo ) . ' ' . escapeshellarg( $repo . '/tests/Fixtures/Restore/judge-child.php' ) . ' ' . escapeshellarg( $base . '/cases.json' ) . ' 2>&1', $output, $status );
+		exec( escapeshellarg( PHP_BINARY ) . ' ' . escapeshellarg( $repo . '/tests/Fixtures/Restore/judge-child.php' ) . ' ' . escapeshellarg( $base . '/cases.json' ) . ' ' . escapeshellarg( $base . PATH_SEPARATOR . $repo ) . ' 2>&1', $output, $status );
 		$this->assertSame( 0, $status, implode( "\n", $output ) );
 		$verdicts = json_decode( (string) end( $output ), true );
 		$this->assertIsArray( $verdicts, implode( "\n", $output ) );
@@ -213,8 +213,9 @@ final class LinkedTargetsObstructionsTest extends TestCase {
 		$violations = array();
 		$allowed    = 0;
 		$scenarios  = 0;
-		$asked      = array(); // The control: per obstruction kind, how often it made another installation's ask.
+		$changed    = array(); // The control: per obstruction kind, how often it changed a verdict about another's directory.
 		foreach ( array( 'nested', 'zone' ) as $name ) {
+			$baseline = array();
 			// The obstructions: each point and kind alone, and every pair of two points.
 			$plain  = $this->build( $name, $this->dir . '/probe-' . $name );
 			$single = array();
@@ -256,17 +257,21 @@ final class LinkedTargetsObstructionsTest extends TestCase {
 					} elseif ( self::SITE === $target[1] && LinkedTargets::SITE !== $verdicts[ $t ] ) {
 						++$allowed;
 					}
-					if ( self::SITE !== $target[1] && 1 === count( $scenario ) ) {
-						$asked[ $scenario[0][1] ] = ( $asked[ $scenario[0][1] ] ?? 0 ) + 1;
+					if ( self::SITE !== $target[1] && 1 === count( $scenario ) && $baseline[ $t ] !== $verdicts[ $t ] ) {
+						$changed[ $scenario[0][1] ] = ( $changed[ $scenario[0][1] ] ?? 0 ) + 1;
 					}
+				}
+				if ( array() === $scenario ) {
+					$baseline = $verdicts;
 				}
 				$this->give_back();
 			}
 		}
 		$this->assertSame( array(), array_slice( $violations, 0, 10 ), count( $violations ) . ' violations in ' . $scenarios . ' scenarios' );
-		// The control: every kind of obstruction occurred where it could hide another installation.
+		// The control: every kind of obstruction was in effect where it could hide another installation (it changed a
+		// verdict about another's directory from the one with nothing in the way).
 		foreach ( array( '0311', '0600', '0000', 'link', 'link-closed', 'link-out' ) as $kind ) {
-			$this->assertGreaterThan( 0, $asked[ $kind ] ?? 0, 'the control: ' . $kind . ' was put in the way' );
+			$this->assertGreaterThan( 0, $changed[ $kind ] ?? 0, 'the control: ' . $kind . ' was in the way' );
 		}
 		$this->assertGreaterThan( 50, $scenarios, 'the control: alone and in pairs' );
 		fwrite( STDERR, sprintf( "\nObstruction scenarios: %d; questions about this site's own directories (allowed): %d\n", $scenarios, $allowed ) ); // phpcs:ignore -- reported.
