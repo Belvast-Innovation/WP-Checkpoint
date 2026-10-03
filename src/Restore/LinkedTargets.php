@@ -7,18 +7,19 @@
 
 namespace WPCheckpoint\Restore;
 
+use WPCheckpoint\Files\Links;
 use WPCheckpoint\Support\Paths;
 
 defined( 'ABSPATH' ) || exit;
 
 /**
- * Pure PHP. The restore replaces a group's directory where it is (a group reached through a link: its target), so a
- * link to a directory of another installation (a staging site whose uploads link to the production site's) would
- * have the restore change that installation's files. A group whose directory is a link (or cannot be told not to
- * be one) and whose target is neither in this site's WordPress directory nor in the trusted deployment root is asked
- * about in the files preflight, with no default: swap it as usual, or leave it out of the restore (its live
- * directory stays as it is). The answer holds for the very groups and targets its question named (id()). A restore
- * nobody attends says it up front (the policy LINKED_TARGETS, RestoreJob).
+ * The restore replaces a group's directory where it is (a group reached through a link: where the link leads), so a
+ * link to a directory of another installation (a staging site whose uploads link to the production site's, or whose
+ * whole content directory does) would have the restore change that installation's files. Whether a group is asked
+ * about is one rule over the path WordPress names its directory by, walked a component at a time
+ * (reached_from_outside()); the files preflight asks, with no default: swap it as usual, or leave it out of the
+ * restore (its live directory stays as it is). The answer holds for the very groups and targets its question named
+ * (id()). A restore nobody attends says it up front (the policy POLICY_KEY, RestoreJob).
  */
 final class LinkedTargets {
 
@@ -46,21 +47,113 @@ final class LinkedTargets {
 	const HOMES = '#\A((?:[A-Za-z]:)?/(?:home|users|var/www/vhosts|srv/users|usr/home|export/home)/[^/]+)(?:/|\z)#i';
 
 	/**
-	 * Whether a target is outside this site: neither in its WordPress directory nor in the trusted deployment root.
-	 * A WordPress directory that cannot be resolved is no evidence of being inside: outside.
+	 * Whether a resolved path is outside this site: neither in its WordPress directory nor in the trusted deployment
+	 * root, both resolved; compared as resolved strings (a path that does not exist is judged by where it would be).
+	 * A WordPress directory that could not be resolved is no evidence of being inside: outside.
 	 *
-	 * @param string $target       The target, resolved.
+	 * @param string $target       The path, resolved.
 	 * @param string $abspath_real This site's WordPress directory, resolved ('' when it could not be).
-	 * @param string $trusted      The trusted deployment root ('' when none).
+	 * @param string $trusted_real The trusted deployment root, resolved ('' when none).
 	 * @return bool
 	 */
-	public static function outside( string $target, string $abspath_real, string $trusted ): bool {
-		foreach ( array( $abspath_real, $trusted ) as $root ) {
-			if ( '' !== $root && Paths::is_same_or_inside( $root, $target ) ) {
+	public static function outside( string $target, string $abspath_real, string $trusted_real ): bool {
+		foreach ( array( $abspath_real, $trusted_real ) as $root ) {
+			if ( '' !== $root && self::within( $root, $target ) ) {
 				return false;
 			}
 		}
 		return true;
+	}
+
+	/**
+	 * Whether a group's directory, as WordPress names it, is reached through a link that leads outside this site. The
+	 * path is walked a component at a time, as the system does: "." is passed over, ".." goes to the parent of where
+	 * the walk is (after any link), a component that is not there ends what can be a link (the rest is a name). A
+	 * component that is a link (or whose kind cannot be told and that resolves elsewhere) is harmless when it leads
+	 * into this site's WordPress directory or the trusted deployment root, or, when components follow it, to a
+	 * directory that holds the WordPress directory (a deployment's link: current -> releases/N). Any other link asks.
+	 * A path that is not absolute, or a component whose existence or target cannot be told, asks too: nothing is
+	 * concluded without positive evidence. A path with no link on it never asks, wherever it is (a directory outside
+	 * the WordPress directory that WordPress names directly is this site's own).
+	 *
+	 * @param string $given        The directory as WordPress names it.
+	 * @param string $abspath_real This site's WordPress directory, resolved ('' when it could not be).
+	 * @param string $trusted_real The trusted deployment root, resolved ('' when none).
+	 * @return bool
+	 */
+	public static function reached_from_outside( string $given, string $abspath_real, string $trusted_real ): bool {
+		$path = Paths::normalize( $given );
+		if ( 1 !== preg_match( '#\A(/|[A-Za-z]:/|//[^/]+/[^/]+/)(.*)\z#s', $path, $m ) ) {
+			return true; // Not absolute: where it is cannot be told.
+		}
+		$cur   = rtrim( $m[1], '/' );
+		$parts = array_values(
+			array_filter(
+				explode( '/', $m[2] ),
+				static function ( string $part ): bool {
+					return '' !== $part;
+				}
+			)
+		);
+		$gone  = ''; // Where the walk left what is there: below it, names only (until ".." climbs above it).
+		$count = count( $parts );
+		foreach ( $parts as $i => $part ) {
+			if ( '.' === $part ) {
+				continue;
+			}
+			if ( '..' === $part ) {
+				$cur = '' === $cur || false === strpos( $cur, '/' ) ? $cur : (string) substr( $cur, 0, (int) strrpos( $cur, '/' ) );
+				if ( '' !== $gone && ! self::within( $gone, $cur ) ) {
+					$gone = ''; // Back where things are there.
+				}
+				continue;
+			}
+			$next = $cur . '/' . $part;
+			if ( '' !== $gone ) {
+				$cur = $next; // Below a component that is not there: names only.
+				continue;
+			}
+			if ( false === @lstat( $next ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- told apart below.
+				if ( ! Paths::positively_gone( $next ) ) {
+					return true; // Whether it is there cannot be told.
+				}
+				$gone = $next;
+				$cur  = $next;
+				continue;
+			}
+			$real = Paths::real( $next );
+			if ( false === $real ) {
+				return true; // There, but where it leads cannot be told.
+			}
+			$real  = rtrim( Paths::normalize( (string) $real ), '/' );
+			$state = Links::state( $next );
+			if ( Links::LINK === $state || ( Links::UNKNOWN === $state && ! Paths::same( $real, $next, Paths::is_windows() ) ) ) {
+				$last = true;
+				for ( $j = $i + 1; $j < $count; $j++ ) {
+					if ( '.' !== $parts[ $j ] ) {
+						$last = false;
+						break;
+					}
+				}
+				$deployment = ! $last && '' !== $abspath_real && self::within( $real, $abspath_real );
+				if ( ! $deployment && self::outside( $real, $abspath_real, $trusted_real ) ) {
+					return true;
+				}
+			}
+			$cur = $real;
+		}
+		return false;
+	}
+
+	/**
+	 * Whether a resolved path is a directory or in it (strings compared; case folded on Windows).
+	 *
+	 * @param string $dir  Directory, resolved.
+	 * @param string $path Path, resolved.
+	 * @return bool
+	 */
+	private static function within( string $dir, string $path ): bool {
+		return Paths::same( $dir, $path, Paths::is_windows() ) || Paths::is_prefix( $dir, $path, Paths::is_windows() );
 	}
 
 	/**

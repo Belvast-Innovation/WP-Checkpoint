@@ -8,7 +8,6 @@
 namespace WPCheckpoint\Jobs;
 
 use WPCheckpoint\Restore\RestoreFiles;
-use WPCheckpoint\Restore\SiteTables;
 use WPCheckpoint\Restore\StagingLayout;
 use WPCheckpoint\Support\Deleter;
 use WPCheckpoint\Support\DeletionRefused;
@@ -146,12 +145,13 @@ final class PreviousAttempt {
 			throw new TransientFailure( 'The list of what the earlier attempt of the restore left could not be read: ' . $e->getMessage() ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
 		}
 		if ( 'tables' === $position['part'] ) {
-			$fold  = SiteTables::fold_case(); // A server that folds case lists the names folded.
-			$there = self::there( $job, $fold );
+			// Compared without case whatever the server does (one that folds case lists the names folded): the listing
+			// only says which names on the list to try; a DROP of a name that is not there fails and is left.
+			$there = self::there( $job );
 			$drop  = array();
 			foreach ( (array) ( $list['tables'] ?? array() ) as $name ) {
 				$name = (string) $name;
-				if ( isset( $there[ $fold ? strtolower( $name ) : $name ] ) && ! in_array( $name, $position['left'], true ) ) {
+				if ( isset( $there[ strtolower( $name ) ] ) && ! in_array( $name, $position['left'], true ) ) {
 					$drop[] = $name; // On the list and still there: what is gone already is passed.
 				}
 			}
@@ -223,12 +223,11 @@ final class PreviousAttempt {
 	/**
 	 * This job's temporary tables as the server lists them (only to tell which names on the list are still there).
 	 *
-	 * @param Job  $job  Job.
-	 * @param bool $fold Whether the server compares table names without case (the names then lowercase).
-	 * @return array<string, true>
+	 * @param Job $job Job.
+	 * @return array<string, true> Lowercase.
 	 * @throws TransientFailure When they cannot be listed.
 	 */
-	private static function there( Job $job, bool $fold ): array {
+	private static function there( Job $job ): array {
 		global $wpdb;
 		$prefix = TempTables::job_prefix( $job->storage_token, $job->id );
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- table listing.
@@ -237,7 +236,7 @@ final class PreviousAttempt {
 			throw new TransientFailure( 'The tables of the database could not be listed.' );
 		}
 		$names = array_map( 'strval', (array) $names );
-		return array_fill_keys( $fold ? array_map( 'strtolower', $names ) : $names, true );
+		return array_fill_keys( array_map( 'strtolower', $names ), true );
 	}
 
 	/**

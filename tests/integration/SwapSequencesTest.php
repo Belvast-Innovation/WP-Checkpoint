@@ -95,6 +95,7 @@ final class SwapSequencesTest extends SwapTestCase {
 			$kind  = self::MEANWHILE[ $n % count( self::MEANWHILE ) ];
 			$label = sprintf( '#%d %s/%s', $n, $seam, $kind );
 			$this->sequence( $seam, $kind, $label, $killed, $kinds );
+			$this->release_backups();
 			$this->tear_down_swap();
 			$this->set_up_swap();
 		}

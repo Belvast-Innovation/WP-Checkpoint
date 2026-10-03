@@ -89,6 +89,18 @@ abstract class RestoreTestCase extends JobTestCase {
 		return $more + $this->staging_parts() + array( 'version' => PluginCopy::VERSION );
 	}
 
+	/**
+	 * Clean up and let go of the backups this test made so far (tear_down() does; a test that makes many in a loop
+	 * does between them, or what they hold adds up in one process).
+	 */
+	protected function release_backups(): void {
+		foreach ( $this->builders as $builder ) {
+			$builder->cleanup();
+		}
+		// PHPUnit keeps every test object to the end of the suite: what they hold adds up in one process.
+		$this->builders = array();
+	}
+
 	public function tear_down(): void {
 		global $wpdb;
 		// Job ids start over with every test: plan rows of an earlier test's job would be this one's.
@@ -105,11 +117,7 @@ abstract class RestoreTestCase extends JobTestCase {
 			}
 		}
 		$wpdb->query( 'SET FOREIGN_KEY_CHECKS=1' );
-		foreach ( $this->builders as $builder ) {
-			$builder->cleanup();
-		}
-		// PHPUnit keeps every test object to the end of the suite: what they hold adds up in one process.
-		$this->builders = array();
+		$this->release_backups();
 		if ( '' !== $this->plugin_copy ) { // Not set when set_up() stopped early.
 			PluginCopy::remove( $this->plugin_copy );
 		}

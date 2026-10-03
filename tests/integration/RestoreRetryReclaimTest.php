@@ -285,6 +285,7 @@ final class RestoreRetryReclaimTest extends SwapTestCase {
 			}
 			$this->preflight_parts = array();
 			$this->undo( Plugin::instance()->jobs()->find( $job->id ) );
+			$this->release_backups();
 			$this->tear_down_swap();
 			$this->set_up_swap();
 		}
@@ -308,6 +309,7 @@ final class RestoreRetryReclaimTest extends SwapTestCase {
 		for ( $n = 1; $n <= $total; $n++ ) {
 			$this->undo( Plugin::instance()->jobs()->find( $job->id ) );
 			$this->preflight_parts = array();
+			$this->release_backups();
 			$this->tear_down_swap();
 			$this->set_up_swap();
 			$this->uploads_elsewhere();

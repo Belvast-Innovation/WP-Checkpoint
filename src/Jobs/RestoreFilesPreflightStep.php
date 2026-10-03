@@ -10,7 +10,6 @@ namespace WPCheckpoint\Jobs;
 use WPCheckpoint\Archive\IndexLine;
 use WPCheckpoint\Archive\IndexLineError;
 use WPCheckpoint\Archive\Manifest;
-use WPCheckpoint\Files\Links;
 use WPCheckpoint\Files\ScanRoots;
 use WPCheckpoint\Restore\CannotStage;
 use WPCheckpoint\Restore\DirectoryProbe;
@@ -214,6 +213,7 @@ final class RestoreFilesPreflightStep implements Step {
 	 */
 	private function layout( JobContext $context ) {
 		$manifest = RestorePreflightStep::manifest( $context->work_path() );
+		clearstatcache( true ); // Before anything is resolved: a worker's realpath cache may hold a link as it was.
 		$given    = isset( $this->parts['directories'] ) ? array_map( 'strval', (array) call_user_func( $this->parts['directories'] ) ) : ScanRoots::site_directories_as_given();
 		$groups   = array_map( array( ScanRoots::class, 'resolved' ), $given );
 		$staged   = array_values( array_intersect( StagingLayout::GROUPS, (array) $manifest->to_array()['contents']['files'] ) );
@@ -671,10 +671,10 @@ final class RestoreFilesPreflightStep implements Step {
 	}
 
 	/**
-	 * The staged groups whose directory is reached through a link (the directory itself, or a directory on its path:
-	 * a content directory that is a link holds the groups under it) to a directory outside this site: neither in its
-	 * WordPress directory nor in the trusted deployment root (LinkedTargets). A site reached through a deployment's
-	 * link (current -> releases/N) is not asked about: its resolved WordPress directory holds the targets.
+	 * The staged groups whose directory, as WordPress names it, is reached through a link that leads outside this site
+	 * (LinkedTargets::reached_from_outside(): the link itself or one on its path; a deployment's link to a directory
+	 * holding the WordPress directory, and links into the WordPress directory or the trusted deployment root, do not
+	 * ask).
 	 *
 	 * @param array<string, string> $given  Group => directory as WordPress names it.
 	 * @param array<string, string> $groups Group => directory, resolved.
@@ -683,18 +683,13 @@ final class RestoreFilesPreflightStep implements Step {
 	 */
 	private function linked( array $given, array $groups, array $staged ): array {
 		$abspath = Paths::real( rtrim( ABSPATH, '/\\' ) );
+		$abspath = false === $abspath ? '' : rtrim( Paths::normalize( (string) $abspath ), '/' );
 		$trusted = isset( $this->parts['trusted_root'] ) ? (string) call_user_func( $this->parts['trusted_root'] ) : '';
-		clearstatcache( true );
-		$out = array();
+		$trusted = '' === $trusted ? false : Paths::real( $trusted );
+		$trusted = false === $trusted ? '' : rtrim( Paths::normalize( (string) $trusted ), '/' );
+		$out     = array();
 		foreach ( $staged as $group ) {
-			$path = rtrim( (string) ( $given[ $group ] ?? '' ), '/\\' );
-			// A link anywhere on its path, not only the directory itself (a content directory that is a link holds
-			// the groups under it): the path as given resolves elsewhere. Resolved to itself, no link is on it.
-			$through = '' === $path || Paths::normalize( $path ) !== (string) $groups[ $group ];
-			if ( ! $through && Links::LINK !== ( '' === $path ? Links::UNKNOWN : Links::state( $path ) ) ) {
-				continue;
-			}
-			if ( LinkedTargets::outside( (string) $groups[ $group ], false === $abspath ? '' : (string) $abspath, $trusted ) ) {
+			if ( LinkedTargets::reached_from_outside( (string) ( $given[ $group ] ?? '' ), $abspath, $trusted ) ) {
 				$out[ $group ] = (string) $groups[ $group ];
 			}
 		}
