@@ -346,6 +346,41 @@ final class JobRepository {
 	}
 
 	/**
+	 * The ids of the jobs that hold the site and have something left to do: a restore's swap under way, being rolled
+	 * back or ending (site_state not untouched), not completed or cancelled.
+	 *
+	 * @return int[]
+	 * @throws \RuntimeException When the jobs could not be read (no answer is not "none").
+	 */
+	public function holding_site(): array {
+		global $wpdb;
+		$wpdb->last_error = '';
+		if ( ! Schema::table_exists() ) {
+			if ( '' !== self::db_error() ) {
+				throw new \RuntimeException( 'The jobs could not be read.' );
+			}
+			return array();
+		}
+		$table = $wpdb->base_prefix . Schema::JOBS_TABLE;
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix.
+		$ids = $wpdb->get_col( $wpdb->prepare( "SELECT id FROM {$table} WHERE site_state <> %d AND status IN (%s, %s, %s, %s) ORDER BY id", Job::SITE_UNTOUCHED, Job::QUEUED, Job::RUNNING, Job::PAUSED, Job::FAILED ) );
+		if ( ! is_array( $ids ) || '' !== self::db_error() ) {
+			throw new \RuntimeException( 'The jobs could not be read.' );
+		}
+		return array_map( 'intval', $ids );
+	}
+
+	/**
+	 * The error of the site connection's last statement ('' for none).
+	 *
+	 * @return string
+	 */
+	private static function db_error(): string {
+		global $wpdb;
+		return (string) $wpdb->last_error;
+	}
+
+	/**
 	 * Number of jobs per status.
 	 *
 	 * @return array<string, int>
@@ -1574,9 +1609,29 @@ final class JobRepository {
 			if ( ! $this->is_site_orphan( $entry, $owners ) ) {
 				continue;
 			}
+			if ( Residue::STAGE_DIR === $entry['kind'] && Residue::keeps_stray( $entry['path'] ) ) {
+				continue; // What the swap's rollback moved aside is someone's; it stays (logged when it was moved).
+			}
 			$result  = $this->delete_tree( $entry['parent'], $entry['path'], $budget );
 			$budget -= $result['deleted'] + count( $result['failed'] );
 			$this->report_reclaim( $entry['kind'] . ' of job ' . $entry['id'], $result );
+		}
+		// The maintenance file's temporary files a swap that died before its rename left in ABSPATH.
+		foreach ( Residue::scan_maintenance( Residue::maintenance_dir() ) as $entry ) {
+			if ( $budget <= 0 ) {
+				return;
+			}
+			if ( ! Residue::is_expired( $entry, $now ) ) {
+				continue;
+			}
+			--$budget;
+			try {
+				if ( ! Deleter::delete_maintenance_file( Residue::maintenance_dir(), basename( $entry['path'] ) ) ) {
+					$this->directories->log_event( 'A temporary maintenance file of a restore could not be removed: ' . basename( $entry['path'] ) );
+				}
+			} catch ( DeletionRefused $e ) {
+				$this->directories->log_event( $e->getMessage() );
+			}
 		}
 		$this->drop_tables_of(
 			$token,
@@ -1703,6 +1758,11 @@ final class JobRepository {
 			}
 			if ( $budget <= 0 ) {
 				return false;
+			}
+			if ( Residue::STAGE_DIR === $entry['kind'] && Residue::keeps_stray( $entry['path'] ) ) {
+				// What the swap's rollback moved aside is someone's: the root stays, and that is not a failure.
+				$this->directories->log_event( sprintf( 'A staging root of job %d holds what the swap\'s rollback moved out of the way; it was left in place.', $job->id ) );
+				continue;
 			}
 			$result  = $this->delete_tree( $entry['parent'], $entry['path'], $budget );
 			$budget -= $result['deleted'] + count( $result['failed'] );

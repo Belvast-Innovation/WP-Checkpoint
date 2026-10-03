@@ -59,6 +59,9 @@ final class FirstUnitRuleTest extends TestCase {
 		'src/Jobs/FileStagingStep.php' => 'tests/integration/NoBudgetLeftTest.php::test_a_restore_moves_on_in_every_tick_with_no_time_left',
 		'src/Jobs/PrefixRewriteStep.php' => 'tests/integration/PrefixRewriteTest.php::test_a_rewrite_moves_on_in_every_tick_with_no_time_left',
 		'src/Jobs/SwapCheckStep.php'     => 'tests/integration/NoBudgetLeftTest.php::test_a_restore_moves_on_in_every_tick_with_no_time_left',
+		// The recount before the swap; the swap itself (WP-CLI only, CliOnly) is one piece that never stops for the
+		// budget: cut short, the site would be half swapped.
+		'src/Jobs/SwapStep.php'          => 'tests/integration/SwapTest.php::test_the_recount_moves_on_in_every_tick_with_no_time_left',
 		'src/Jobs/DatabaseImportStep.php'   => 'tests/integration/NoBudgetLeftTest.php::test_a_restore_moves_on_in_every_tick_with_no_time_left',
 		'src/Jobs/TempTableDropper.php'     => 'tests/integration/JobRepositoryTest.php::test_the_first_drop_of_a_call_runs_even_when_the_time_is_already_up',
 		'src/Support/Schema.php'            => 'tests/integration/JobRepositoryTest.php::test_uninstall_runs_one_call_even_when_its_time_is_already_up',

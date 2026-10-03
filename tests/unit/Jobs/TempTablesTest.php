@@ -23,6 +23,18 @@ final class TempTablesTest extends TestCase {
 		$this->assertSame( 0, TempTables::job_id_of( '', $name ) );
 	}
 
+	public function test_a_table_moved_out_of_the_way_is_named_apart_and_never_taken_for_a_temporary_one(): void {
+		$name = TempTables::stray( self::TOKEN, 12, '0f0f', 'posts' );
+		$this->assertSame( 'wcpstraya1b2c3_12_0f0f_posts', $name );
+		$this->assertSame( 0, TempTables::job_id_of( self::TOKEN, $name ), 'the reaper of temporary tables never takes it' );
+		$this->assertSame( 12, TempTables::job_id_of( self::TOKEN, TempTables::name( self::TOKEN, 12, '0f0f', 'posts' ) ), 'the control: a temporary table of the same job is taken' );
+		$long = TempTables::stray( self::TOKEN, 1234567, '0f0f', str_repeat( 'x', 80 ) );
+		$this->assertLessThanOrEqual( TempTables::MAX_NAME, strlen( $long ) );
+		$this->assertTrue( TempTables::is_safe_name( $long ) );
+		$this->expectException( \InvalidArgumentException::class );
+		TempTables::stray( self::TOKEN, 12, 'xyz1', 'posts' );
+	}
+
 	public function test_long_names_are_truncated_with_a_hash_and_stay_distinct(): void {
 		$long  = str_repeat( 'a', 70 ) . 'x';
 		$other = str_repeat( 'a', 70 ) . 'y';

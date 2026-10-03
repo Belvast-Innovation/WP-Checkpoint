@@ -73,7 +73,7 @@ final class ResidueUsageTest extends TestCase {
 		foreach ( Residue::SOURCES as $relative ) {
 			$this->assertArrayHasKey( $relative, $files, "Residue::SOURCES names a file that does not exist: {$relative}" );
 		}
-		$this->assertSame( array( Residue::WORK_DIR, Residue::TEMP_TABLE, Residue::VERIFY_DIR, Residue::STRAY, Residue::STAGE_DIR, Residue::PROBE ), Residue::KINDS );
+		$this->assertSame( array( Residue::WORK_DIR, Residue::TEMP_TABLE, Residue::VERIFY_DIR, Residue::STRAY, Residue::STAGE_DIR, Residue::PROBE, Residue::MAINTENANCE_TMP, Residue::STRAY_TABLE ), Residue::KINDS );
 		$this->assertArrayHasKey( 'src/Jobs/JobContext.php', $files );
 		$this->assertStringContainsString( 'Residue::work_dir(', (string) file_get_contents( $files['src/Jobs/JobContext.php'] ), 'the work path comes from the catalogue' );
 		$this->assertStringContainsString( 'Residue::new_verify_dir(', (string) file_get_contents( $files['src/Cli/VerifyCommand.php'] ) );

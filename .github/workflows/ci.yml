@@ -300,6 +300,7 @@ jobs:
       - run: php tests/Fixtures/Restore/foreign-keys.php 127.0.0.1 33306 root password --check
       - run: php tests/Fixtures/Restore/constraint-rules.php 127.0.0.1 33306 root password
       - run: php tests/Fixtures/Restore/meta-key-scan.php 127.0.0.1 33306 root password
+      - run: php tests/Fixtures/Restore/rename-matrix.php 127.0.0.1 33306 root password
 
   plugin-check:
     name: Plugin Check

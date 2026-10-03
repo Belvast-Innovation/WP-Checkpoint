@@ -89,7 +89,7 @@ final class RestoreStagingTest extends RestoreTestCase {
 	 * The restore's steps with these in place of the ones of the same id.
 	 */
 	private function type_with( Step ...$replacements ): string {
-		$steps = Plugin::instance()->job_types()->get( RestoreJob::ID )->steps();
+		$steps = \WPCheckpoint\Tests\Fixtures\Restore\RestoreTestCase::up_to_check( Plugin::instance()->job_types()->get( RestoreJob::ID )->steps() );
 		foreach ( $replacements as $replacement ) {
 			foreach ( $steps as $i => $step ) {
 				if ( $step->id() === $replacement->id() ) {

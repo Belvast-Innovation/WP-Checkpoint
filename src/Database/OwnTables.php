@@ -17,8 +17,9 @@ use WPCheckpoint\Support\Schema;
  * installation in the same database, even one under a longer prefix such
  * as "wp_old_", has its own, and they are its recovery record), and the
  * tables a restore makes (by the grammar TempTables names them with:
- * temporary tables and the ledger, "wcptmp", and the site's tables moved
- * aside, "wcpold"; any installation's). They describe an installation's
+ * temporary tables and the ledger, "wcptmp", the site's tables moved
+ * aside, "wcpold", and tables the swap's rollback moved out of the way,
+ * "wcpstray"; any installation's). They describe an installation's
  * jobs, not a site: the export leaves them out, a restore skips them where
  * an older backup holds them, and the swap never moves them. Names are
  * compared without regard to letter case (lower_case_table_names).
@@ -59,10 +60,11 @@ final class OwnTables {
 	}
 
 	/**
-	 * Whether a name is one TempTables makes: "wcptmp" or "wcpold", six hex characters of an installation's
-	 * token, "_", a job id, "_", four hex characters of the run, "_", and the table's own name (only characters
-	 * TempTables keeps; nothing after the run's characters: a ledger, "wcptmp" only), at most TempTables::MAX_NAME
-	 * bytes. Any installation's: two sites sharing a database never back up each other's either.
+	 * Whether a name is one TempTables makes: "wcptmp", "wcpold" or "wcpstray", six hex characters of an
+	 * installation's token, "_", a job id, "_", four hex characters of the run (of the move, for "wcpstray"), "_",
+	 * and the table's own name (only characters TempTables keeps; nothing after the run's characters: a ledger,
+	 * "wcptmp" only), at most TempTables::MAX_NAME bytes. Any installation's: two sites sharing a database never
+	 * back up each other's either.
 	 *
 	 * @param string $name Table name.
 	 * @return bool
@@ -73,7 +75,7 @@ final class OwnTables {
 		}
 		$head = '[0-9a-f]{' . TempTables::TOKEN_LEN . '}_[1-9][0-9]{0,18}_[0-9a-f]{' . TempTables::RANDOM_LEN . '}_';
 		return 1 === preg_match( '/\A' . TempTables::PREFIX . $head . '[A-Za-z0-9_]*\z/', $name )
-			|| 1 === preg_match( '/\A' . TempTables::OLD_PREFIX . $head . '[A-Za-z0-9_]+\z/', $name );
+			|| 1 === preg_match( '/\A(?:' . TempTables::OLD_PREFIX . '|' . TempTables::STRAY_PREFIX . ')' . $head . '[A-Za-z0-9_]+\z/', $name );
 	}
 
 	/**

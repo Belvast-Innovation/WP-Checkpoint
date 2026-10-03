@@ -23,6 +23,7 @@ use WPCheckpoint\Cli\ExportCommand;
 use WPCheckpoint\Cli\JobCommand;
 use WPCheckpoint\Cli\SiteIdentityCommand;
 use WPCheckpoint\Cli\VerifyCommand;
+use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\JobActions;
 use WPCheckpoint\Jobs\JobPresenter;
 use WPCheckpoint\Jobs\JobRepository;
@@ -156,17 +157,90 @@ final class Plugin {
 		add_action( Loopback::HOOK, array( $this, 'cron_tick' ) );
 		// Automatic updates run in cron and admin requests: held while a restore is unfinished.
 		Support\AutoUpdateHold::register();
+		// After a restore's swap, the first request with the restored site loaded sets the fallback events again.
+		add_action( 'init', array( $this, 'after_swap' ) );
 
 		if ( defined( 'WP_CLI' ) && WP_CLI ) {
 			\WP_CLI::add_command( 'wpcheckpoint job', new JobCommand( $this->job_actions(), $this->job_presenter(), $this->directories() ) );
 			\WP_CLI::add_command( 'wpcheckpoint verify', new VerifyCommand( $this->job_presenter(), $this->directories() ) );
 			\WP_CLI::add_command( 'wpcheckpoint export', new ExportCommand( $this->job_actions(), $this->job_presenter(), $this->directories() ) );
 			\WP_CLI::add_command( 'wpcheckpoint site-identity', new SiteIdentityCommand( $this->job_presenter(), $this->directories() ) );
+			// Every command of the plugin says it first when a restore left the site half swapped ("before_invoke"
+			// fires for a command's own parent only, never for "wpcheckpoint" under "wpcheckpoint job list").
+			\WP_CLI::add_hook(
+				'before_run_command',
+				function ( $args = array() ): void {
+					if ( ! is_array( $args ) || 'wpcheckpoint' !== ( $args[0] ?? '' ) ) {
+						return;
+					}
+					foreach ( $this->half_swapped_warnings() as $warning ) {
+						\WP_CLI::warning( $warning );
+					}
+				}
+			);
 		}
 
 		if ( is_admin() ) {
 			$this->boot_admin();
 		}
+	}
+
+	/**
+	 * What a WP-CLI command says first while a restore holds the site: one line per such job that has something left
+	 * to do, by where it is. Swapped in (the swap recorded as made, its end, or the ended step's position cleared) or
+	 * put back ("restored"): only the end is left. Half swapped: running the job finishes the swap or puts the site
+	 * back (by what is there). Half swapped with no position recorded (the row was changed): not to be run blindly. A
+	 * failed job is retried first; one another process holds is under way. And whenever a held maintenance file of
+	 * this plugin is up, a line saying so, with the advice to remove it only when the jobs were read and none holds
+	 * the site.
+	 *
+	 * @param callable|null $holding function(): int[] in place of the jobs table (tests); it may throw.
+	 * @return string[]
+	 */
+	public function half_swapped_warnings( $holding = null ): array {
+		$out  = array();
+		$read = true;
+		try {
+			$ids = is_callable( $holding ) ? (array) call_user_func( $holding ) : $this->jobs()->holding_site();
+		} catch ( \Throwable $e ) {
+			$ids  = array();
+			$read = false;
+		}
+		foreach ( $ids as $id ) {
+			$job = $this->jobs()->find( (int) $id );
+			if ( null === $job ) {
+				continue; // Listed, then not found: the list is not empty, so no advice to remove the file follows.
+			}
+			$phase = (string) ( $job->cursor['phase'] ?? '' );
+			/* translators: 1: job id, 2: job id */
+			$finish = Job::FAILED === $job->status ? sprintf( __( 'wp wpcheckpoint job retry %1$d, then wp wpcheckpoint job run %2$d', 'wp-checkpoint' ), $id, $id ) : sprintf( 'wp wpcheckpoint job run %d', $id );
+			if ( $job->is_locked( time() ) ) {
+				/* translators: %d: job id */
+				$out[] = sprintf( __( 'Restore job %d is at work on the site in another process.', 'wp-checkpoint' ), $id );
+			} elseif ( Job::SITE_SWAPPED === $job->site_state ) {
+				/* translators: 1: job id, 2: the command */
+				$out[] = sprintf( __( 'Restore job %1$d is at its last step (the restored site is swapped in). Finish it with: %2$s', 'wp-checkpoint' ), $id, $finish );
+			} elseif ( 'restored' === $phase ) {
+				/* translators: 1: job id, 2: the command */
+				$out[] = sprintf( __( 'Restore job %1$d is at its last step (the site is put back as it was). Finish it with: %2$s', 'wp-checkpoint' ), $id, $finish );
+			} elseif ( '' === $phase ) {
+				/* translators: %d: job id */
+				$out[] = sprintf( __( 'Restore job %d holds the site half swapped, and its position is lost (the job row was changed): do not run it. Look at the site\'s directories and tables, and the .maintenance file in the WordPress directory, before anything else.', 'wp-checkpoint' ), $id );
+			} else {
+				/* translators: 1: job id, 2: the command */
+				$out[] = sprintf( __( 'The site is half swapped by restore job %1$d: visitors see the maintenance page until the restore finishes or puts the site back. Resolve it with: %2$s', 'wp-checkpoint' ), $id, $finish );
+			}
+		}
+		if ( defined( 'ABSPATH' ) && Restore\Maintenance::held_in( (string) ABSPATH ) ) {
+			if ( array() !== $ids ) {
+				$out[] = __( 'A restore\'s maintenance file is up and does not lapse (.maintenance in the WordPress directory): visitors see the maintenance page until the restore above ends.', 'wp-checkpoint' );
+			} elseif ( $read ) {
+				$out[] = __( 'A restore\'s maintenance file is up and does not lapse (.maintenance in the WordPress directory): visitors see the maintenance page. No restore holds the site now; check with wp wpcheckpoint job list, and if none does, remove that file.', 'wp-checkpoint' );
+			} else {
+				$out[] = __( 'A restore\'s maintenance file is up and does not lapse (.maintenance in the WordPress directory): visitors see the maintenance page. The jobs could not be read: do not remove that file until wp wpcheckpoint job list shows no restore that holds the site.', 'wp-checkpoint' );
+			}
+		}
+		return $out;
 	}
 
 	/**
@@ -184,6 +258,37 @@ final class Plugin {
 		} catch ( \Throwable $e ) {
 			$this->directories()->log_event( sprintf( 'Cron tick of job %d failed: %s', (int) $job_id, get_class( $e ) ) );
 		}
+	}
+
+	/**
+	 * After a restore's swap (Jobs\SwapStep left StoredNames::AFTER_SWAP in the restored options): the restored
+	 * cron option holds none of this installation's fallback events, so the jobs still queued or running get one
+	 * again (Loopback::schedule()), in this request, with the restored site loaded rather than in the process that
+	 * swapped (which still held the old site's plugins). Read from the autoloaded options already in memory: a
+	 * request without the mark costs nothing. On a network, the main site's requests (the events are the main
+	 * site's). The mark stays when the jobs cannot be read, for the next request.
+	 *
+	 * @return void
+	 */
+	public function after_swap(): void {
+		if ( ! function_exists( 'wp_load_alloptions' ) || ( function_exists( 'is_multisite' ) && is_multisite() && ! is_main_site() ) ) {
+			return;
+		}
+		$all = wp_load_alloptions();
+		if ( ! is_array( $all ) || ! array_key_exists( Support\StoredNames::AFTER_SWAP, $all ) ) {
+			return;
+		}
+		try {
+			foreach ( $this->job_actions()->active() as $job ) {
+				if ( in_array( $job->status, array( Job::QUEUED, Job::RUNNING ), true ) && Job::SITE_UNTOUCHED === $job->site_state ) {
+					Loopback::schedule( $job->id, Loopback::FALLBACK_SECONDS, Loopback::KEEP );
+				}
+			}
+		} catch ( \Throwable $e ) {
+			$this->directories()->log_event( sprintf( 'Setting the fallback events after a restore failed: %s', get_class( $e ) ) );
+			return;
+		}
+		delete_option( Support\StoredNames::AFTER_SWAP );
 	}
 
 	/**

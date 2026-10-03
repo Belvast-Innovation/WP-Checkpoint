@@ -62,6 +62,13 @@ namespace {
 		public static function add_command( $name, $callable, $args = array() ) {
 			return true;
 		}
+
+		/**
+		 * @param string   $when
+		 * @param callable $callback
+		 * @return void
+		 */
+		public static function add_hook( $when, $callback ) {}
 	}
 }
 

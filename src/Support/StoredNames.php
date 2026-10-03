@@ -46,6 +46,12 @@ final class StoredNames {
 	const AUTO_UPDATE_UNCHECKED = 'wpcheckpoint_auto_update_unchecked';
 
 	/**
+	 * Left in the restored options by a restore's swap (plain SQL): the next request sets the fallback events of
+	 * the jobs still running, which the restored cron option does not hold (Plugin::after_swap()).
+	 */
+	const AFTER_SWAP = 'wpcheckpoint_after_swap';
+
+	/**
 	 * Every exact name, whatever it is stored as (option, site option, transient, site transient).
 	 */
 	const EXACT = array(
@@ -66,6 +72,7 @@ final class StoredNames {
 		self::LOCK_RECHECK,
 		self::LOCK_VERIFY,
 		self::AUTO_UPDATE_UNCHECKED,
+		self::AFTER_SWAP,
 	);
 
 	const LOOPBACK_TOKEN  = 'wpcheckpoint_loopback_';

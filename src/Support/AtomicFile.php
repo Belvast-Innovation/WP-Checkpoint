@@ -55,7 +55,9 @@ final class AtomicFile {
 	 *
 	 * @param string               $dir      Directory (exists).
 	 * @param string               $name     File name (no separator; a name StagingLayout::parse() recognises, as
-	 *                                       its temporary name must be too, or one of ROOT_FILES in a staging root).
+	 *                                       its temporary name must be too, one of ROOT_FILES in a staging root, or
+	 *                                       the maintenance file in ABSPATH, whose temporary names the residue
+	 *                                       catalogue knows there: Residue::scan_maintenance()).
 	 * @param string               $contents Contents (at most MAX_BYTES).
 	 * @param array<string, mixed> $options  "confirm": function(): void, called right before the rename (throws to
 	 *                                       stop; the temporary file is removed);
@@ -73,7 +75,8 @@ final class AtomicFile {
 		// a probe's name, or a protection file of a staging root (the root is reclaimed whole, whatever is in it).
 		$registered = null !== StagingLayout::parse( $name ) && null !== StagingLayout::parse( $name . $suffix );
 		$protection = in_array( $name, self::ROOT_FILES, true ) && 'stage' === ( StagingLayout::parse( basename( rtrim( $dir, '/\\' ) ) )['kind'] ?? '' );
-		if ( '' === $name || false !== strpbrk( $name, "/\\\0" ) || ! ( $registered || $protection ) ) {
+		$upgrading  = '.maintenance' === $name && self::maintenance_dir( $dir );
+		if ( '' === $name || false !== strpbrk( $name, "/\\\0" ) || ! ( $registered || $protection || $upgrading ) ) {
 			throw new \InvalidArgumentException( 'Not a file name this plugin writes.' );
 		}
 		if ( strlen( $contents ) > self::MAX_BYTES ) {
@@ -131,6 +134,17 @@ final class AtomicFile {
 			throw new AtomicWriteFailed( 'The file did not read back as written.' );
 		}
 		return $final;
+	}
+
+	/**
+	 * Whether the maintenance file may be written in a directory: ABSPATH, where the reaper looks for its temporary
+	 * names, or a directory the plugin may delete in (Deleter::allow(): the tests' stand-in for ABSPATH).
+	 *
+	 * @param string $dir Directory.
+	 * @return bool
+	 */
+	private static function maintenance_dir( string $dir ): bool {
+		return ( defined( 'ABSPATH' ) && Paths::same_location( $dir, (string) ABSPATH ) ) || '' === Deleter::refusal( rtrim( $dir, '/\\' ) . DIRECTORY_SEPARATOR . '.maintenance' );
 	}
 
 	/**

@@ -38,8 +38,17 @@ final class LedgerColumnsTest extends RestoreTestCase {
 			$this->fail( 'an older ledger was used' );
 		} catch ( LedgerOutdated $e ) {
 			$this->assertStringContainsString( 'started by an older version of WP Checkpoint', $e->getMessage() );
-			$this->assertStringContainsString( '(restarting)', $e->getMessage() );
+			$this->assertStringContainsString( '(restarting, carried)', $e->getMessage() );
 			$this->assertStringContainsString( 'Start the restore again', $e->getMessage() );
+		}
+		// The ledger as it was before the carried column.
+		$older = 'wcptmpabcdef_9_0003_';
+		$this->create( $older, "(n INT UNSIGNED NOT NULL PRIMARY KEY, chunk INT UNSIGNED NOT NULL, pos BIGINT UNSIGNED NOT NULL, row_count BIGINT UNSIGNED NOT NULL, data_offset BIGINT UNSIGNED NOT NULL, transactional TINYINT NOT NULL, restarts INT UNSIGNED NOT NULL DEFAULT 0, restarting TINYINT NOT NULL DEFAULT 0, holder VARCHAR(64) NOT NULL DEFAULT '', constraint_names MEDIUMTEXT NULL) ENGINE=InnoDB" );
+		try {
+			new Ledger( $this->db, $older, 'aaaa' );
+			$this->fail( 'a ledger without the carried column was used' );
+		} catch ( LedgerOutdated $e ) {
+			$this->assertStringContainsString( '(carried)', $e->getMessage() );
 		}
 
 		// The control: a ledger this version creates is taken, and so is the same table the next time.

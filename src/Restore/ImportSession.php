@@ -57,7 +57,7 @@ final class ImportSession implements Queries {
 
 
 	/**
-	 * Error numbers after which the same statement may succeed later.
+	 * Error numbers after which the same statement may succeed later (the exception's code is the number).
 	 */
 	const TRANSIENT_ERRNOS = array( 1040, 1053, 1205, 1213, 2002, 2003, 2006, 2013 );
 
@@ -297,7 +297,7 @@ final class ImportSession implements Queries {
 			$text = str_replace( $this->database, '[database]', $text );
 		}
 		if ( in_array( $errno, self::TRANSIENT_ERRNOS, true ) ) {
-			return new TransientFailure( sprintf( 'The database is busy or the connection was lost (%d): %s', $errno, $text ) );
+			return new TransientFailure( sprintf( 'The database is busy or the connection was lost (%d): %s', $errno, $text ), $errno );
 		}
 		if ( in_array( $errno, self::SCHEMA_ONLY_ERRNOS, true ) ) {
 			return new StatementFailed( sprintf( 'The database refused a statement (%d): %s', $errno, $text ), $errno );

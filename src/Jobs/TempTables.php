@@ -42,6 +42,11 @@ final class TempTables {
 	const NAME_RULE  = '/\A[A-Za-z0-9_]{1,64}\z/';
 
 	/**
+	 * Prefix of the tables the swap's rollback moves out of the way (stray()).
+	 */
+	const STRAY_PREFIX = 'wcpstray';
+
+	/**
 	 * The prefix shared by every temporary table of this installation.
 	 *
 	 * @param string $token Storage token.
@@ -107,6 +112,27 @@ final class TempTables {
 		}
 		$prefix = self::job_prefix( $token, $job_id );
 		return self::shaped( self::OLD_PREFIX . substr( $prefix, strlen( self::PREFIX ) ) . $random . '_', $table );
+	}
+
+	/**
+	 * The name the swap's rollback moves a table to when it finds another table under a name it must put the old
+	 * site's table back to (one created by someone else while the swap was under way): the shape of name() under
+	 * STRAY_PREFIX, with a random part of its own (a restore that rolls back twice may meet two such tables of one
+	 * name). Never dropped by the plugin (Residue::STRAY_TABLE): it is someone's data.
+	 *
+	 * @param string $token  Storage token.
+	 * @param int    $job_id Job id.
+	 * @param string $random RANDOM_LEN lowercase hex characters, chosen when the table is moved.
+	 * @param string $table  Original table name without the site prefix.
+	 * @return string At most MAX_NAME bytes of [A-Za-z0-9_].
+	 * @throws \InvalidArgumentException When an argument is not usable.
+	 */
+	public static function stray( string $token, int $job_id, string $random, string $table ): string {
+		if ( 1 !== preg_match( '/\A[0-9a-f]{' . self::RANDOM_LEN . '}\z/', $random ) ) {
+			throw new \InvalidArgumentException( 'The random part must be four lowercase hex characters.' );
+		}
+		$prefix = self::job_prefix( $token, $job_id );
+		return self::shaped( self::STRAY_PREFIX . substr( $prefix, strlen( self::PREFIX ) ) . $random . '_', $table );
 	}
 
 	/**

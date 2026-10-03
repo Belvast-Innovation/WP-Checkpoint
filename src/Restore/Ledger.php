@@ -59,6 +59,11 @@ defined( 'ABSPATH' ) || exit;
  * first chunk, and restarted() removes the mark there. A run that reads
  * the mark does all of it again from the start, whichever step a stopped
  * run had reached; each of them can be repeated.
+ * The swap's carry of this plugin's state (StateCarry) replaces rows of the
+ * options and sitemeta tables after the import: how many rows it added or
+ * took away is recorded here ("carried", add_carried()) in the carry's own
+ * transaction, so a later count of the table (a retry's final check, after
+ * the swap was rolled back) expects the import's rows and the carry's.
  */
 final class Ledger {
 
@@ -76,6 +81,7 @@ final class Ledger {
 		'restarting'       => 'TINYINT NOT NULL DEFAULT 0',
 		'holder'           => "VARCHAR(64) NOT NULL DEFAULT ''",
 		'constraint_names' => 'MEDIUMTEXT NULL',
+		'carried'          => 'BIGINT NOT NULL DEFAULT 0',
 	);
 
 	/**
@@ -138,10 +144,10 @@ final class Ledger {
 	 * A table's record, or null before any run claimed it.
 	 *
 	 * @param int $number The table's number.
-	 * @return array{chunk: int, pos: int, rows: int, data_offset: int, transactional: bool, restarts: int, holder: string, constraints: string, restarting: bool}|null
+	 * @return array{chunk: int, pos: int, rows: int, data_offset: int, transactional: bool, restarts: int, holder: string, constraints: string, restarting: bool, carried: int}|null
 	 */
 	public function get( int $number ) {
-		$rows = $this->db->rows( 'SELECT chunk, pos, row_count, data_offset, transactional, restarts, holder, constraint_names, restarting FROM ' . SqlWriter::identifier( $this->name ) . ' WHERE n = ?', array( (string) $number ) );
+		$rows = $this->db->rows( 'SELECT chunk, pos, row_count, data_offset, transactional, restarts, holder, constraint_names, restarting, carried FROM ' . SqlWriter::identifier( $this->name ) . ' WHERE n = ?', array( (string) $number ) );
 		if ( array() === $rows ) {
 			return null;
 		}
@@ -155,7 +161,27 @@ final class Ledger {
 			'holder'        => (string) $rows[0][6],
 			'constraints'   => (string) $rows[0][7],
 			'restarting'    => '1' === (string) $rows[0][8],
+			'carried'       => (int) $rows[0][9],
 		);
+	}
+
+	/**
+	 * Record rows the swap's carry added (or, negative, took away) in a table, in the carry's transaction. Not
+	 * fenced by the holder: the carry runs after the final check took every record, and the job's lease fences it.
+	 *
+	 * @param int $number The table's number.
+	 * @param int $delta  Rows added (negative: removed).
+	 * @return void
+	 * @throws \RuntimeException When the table has no record.
+	 */
+	public function add_carried( int $number, int $delta ): void {
+		if ( 0 === $delta ) {
+			return;
+		}
+		$changed = $this->db->write( 'UPDATE ' . SqlWriter::identifier( $this->name ) . ' SET carried = carried + ? WHERE n = ?', array( (string) $delta, (string) $number ) );
+		if ( 1 !== $changed ) {
+			throw new \RuntimeException( 'The restore ledger has no record of a table the carry changed.' );
+		}
 	}
 
 	/**

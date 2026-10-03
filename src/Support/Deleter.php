@@ -382,6 +382,47 @@ final class Deleter {
 	}
 
 	/**
+	 * The names delete_maintenance_file() deletes: the maintenance file the swap writes and its temporary names
+	 * (AtomicFile).
+	 */
+	const MAINTENANCE_NAMES = '/\A\.maintenance(?:\.[0-9a-f]{16}\.tmp)?\z/';
+
+	/**
+	 * Delete the maintenance file a restore's swap wrote in ABSPATH, or one of its temporary files. The only file
+	 * the plugin deletes in ABSPATH: one of MAINTENANCE_NAMES, directly in ABSPATH (or in a directory registered
+	 * with allow(), the tests' stand-in), a regular file and not a link. Whether it is this restore's to delete
+	 * (its contents) is the caller's to check; nothing else is checked here.
+	 *
+	 * @param string        $dir     ABSPATH (or a registered directory).
+	 * @param string        $name    One of MAINTENANCE_NAMES.
+	 * @param callable|null $confirm Called right before the file is deleted (a job's lease check; throws to stop).
+	 * @return bool Whether it is gone (deleted now, or not there).
+	 * @throws DeletionRefused When it is not such a file; nothing is deleted.
+	 */
+	public static function delete_maintenance_file( string $dir, string $name, $confirm = null ): bool {
+		$path = rtrim( $dir, '/\\' ) . DIRECTORY_SEPARATOR . $name;
+		$why  = 1 === preg_match( self::MAINTENANCE_NAMES, $name ) ? self::basic_refusal( $path ) : 'it is not a maintenance file of the plugin';
+		if ( '' === $why && ! ( defined( 'ABSPATH' ) && Paths::same_location( $dir, (string) ABSPATH ) ) && '' !== self::refusal( $path ) ) {
+			$why = 'it is not in the WordPress directory';
+		}
+		clearstatcache( true, $path );
+		$stat = @lstat( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- not there: nothing to delete.
+		if ( '' === $why && false !== $stat && 0100000 !== ( $stat['mode'] & 0170000 ) ) {
+			$why = 'it is not a regular file';
+		}
+		if ( '' !== $why ) {
+			throw new DeletionRefused( sprintf( 'Nothing was deleted: %1$s is not deleted because %2$s.', $path, $why ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+		}
+		if ( false === $stat ) {
+			return Paths::positively_gone( $path );
+		}
+		if ( is_callable( $confirm ) ) {
+			call_user_func( $confirm );
+		}
+		return @unlink( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- the result says it.
+	}
+
+	/**
 	 * Delete a file or directory tree strictly inside $base.
 	 *
 	 * With $max_entries > 0 the call stops after that many entries were
