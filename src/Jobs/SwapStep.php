@@ -669,7 +669,7 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 					);
 				}
 				$this->refresh( $context, $file, true );
-				$this->rename( $context, $pair[0], $pair[1] );
+				$this->rename_back( $context, $pair[0], $pair[1] );
 				$this->at( 'dir_back' );
 			}
 		}
@@ -985,7 +985,8 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 	}
 
 	/**
-	 * Rename right after a lease check.
+	 * Rename a directory of the swap going forward, right after a lease check. A failure stops the swap: the caller
+	 * rolls it back in the same tick.
 	 *
 	 * @param JobContext $context Context.
 	 * @param string     $from    From.
@@ -994,10 +995,58 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 	 * @throws \RuntimeException When the rename failed.
 	 */
 	private function rename( JobContext $context, string $from, string $to ): void {
-		$context->confirm_lease();
-		if ( ! @rename( $from, $to ) ) {
+		if ( null !== $this->move( $context, $from, $to ) ) {
 			throw new \RuntimeException( sprintf( 'Moving %1$s to %2$s failed.', $from, $to ) );
 		}
+	}
+
+	/**
+	 * Rename a directory of the rollback, right after a lease check. rename() gives no reliable error code (only
+	 * PHP's warning, in the words of the system), so every failure here is taken as one of the moment: the Runner
+	 * tries again after its back-off, a bounded number of times, then fails the job as one to retry (it still holds
+	 * the site, the maintenance file stays held, nothing is recorded as put back). Each try decides again from what
+	 * is there (SwapRules::dir_back()), so a rename that was made but reported as failed (as on NFS) is not made a
+	 * second time.
+	 *
+	 * @param JobContext $context Context.
+	 * @param string     $from    From.
+	 * @param string     $to      To.
+	 * @return void
+	 * @throws TransientFailure When the rename failed, with PHP's warning.
+	 */
+	private function rename_back( JobContext $context, string $from, string $to ): void {
+		$warning = $this->move( $context, $from, $to );
+		if ( null !== $warning ) {
+			throw new TransientFailure( sprintf( 'Moving %1$s back to %2$s failed: %3$s', $from, $to, $warning ) );
+		}
+	}
+
+	/**
+	 * Rename right after a lease check, with PHP's warning kept instead of shown.
+	 *
+	 * @param JobContext $context Context.
+	 * @param string     $from    From.
+	 * @param string     $to      To.
+	 * @return string|null Null when it was renamed; otherwise PHP's warning (or that there was none).
+	 */
+	private function move( JobContext $context, string $from, string $to ): ?string {
+		$move    = $this->parts['rename'] ?? null;
+		$warning = '';
+		$keep    = static function ( int $number, string $text ) use ( &$warning ): bool {
+			$warning = $text;
+			return true;
+		};
+		$context->confirm_lease();
+		set_error_handler( $keep ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_set_error_handler -- the warning is kept for the job's error.
+		try {
+			$moved = is_callable( $move ) ? (bool) call_user_func( $move, $from, $to ) : rename( $from, $to );
+		} finally {
+			restore_error_handler();
+		}
+		if ( $moved ) {
+			return null;
+		}
+		return '' !== $warning ? $warning : 'PHP gave no reason';
 	}
 
 	/**

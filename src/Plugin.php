@@ -230,6 +230,11 @@ final class Plugin {
 				/* translators: 1: job id, 2: the command */
 				$out[] = sprintf( __( 'The site is half swapped by restore job %1$d: visitors see the maintenance page until the restore finishes or puts the site back. Resolve it with: %2$s', 'wp-checkpoint' ), $id, $finish );
 			}
+			if ( Job::FAILED === $job->status && '' !== $phase && '' !== (string) $job->last_error ) {
+				// Why the last try failed, masked as every text that leaves the engine.
+				/* translators: %s: the error of the job's last try */
+				$out[ count( $out ) - 1 ] .= ' ' . sprintf( __( 'Its last try failed: %s', 'wp-checkpoint' ), $this->job_presenter()->clean( (string) $job->last_error ) );
+			}
 		}
 		if ( defined( 'ABSPATH' ) && Restore\Maintenance::held_in( (string) ABSPATH ) ) {
 			if ( array() !== $ids ) {

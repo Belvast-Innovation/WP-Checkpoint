@@ -54,13 +54,15 @@ final class SwapSequencesTest extends SwapTestCase {
 
 	/**
 	 * What happens meanwhile, given out in turn (in this order, so that every kind meets a seam where it has an
-	 * effect): a cancel; the clock (the killed run wrote its times eleven minutes ago); the maintenance file deleted
-	 * (as a WordPress update does, whoever wrote it), which lands on a run killed between two batches, so the rollback
-	 * has tables to put back; a cache that cannot be flushed once (the next run); a table rename of the rollback that
-	 * fails once with an error of the moment (the next run), which lands on a run killed at the rollback's start, so
-	 * it has tables to put back; a file that cannot be taken down once (the next run).
+	 * effect): a cancel; a table rename of the rollback that fails once with an error of the moment (the next run),
+	 * which lands on a run killed between two batches, so the rollback has tables to put back; the maintenance file
+	 * deleted (as a WordPress update does, whoever wrote it), which lands on a run killed at the rollback's start, so
+	 * it has tables to put back; a file that cannot be taken down once (the next run); a directory rename of the
+	 * rollback that fails once (the next run), which lands on runs killed after a directory was swapped; the clock
+	 * (the killed run wrote its times eleven minutes ago), which lands on a run killed after the file was let go; a
+	 * cache that cannot be flushed once (the next run).
 	 */
-	const MEANWHILE = array( 'cancel', 'clock', 'file_removed', 'flush_fail', 'rename_fail', 'remove_fail' );
+	const MEANWHILE = array( 'cancel', 'rename_fail', 'file_removed', 'remove_fail', 'dir_rename_fail', 'clock', 'flush_fail' );
 
 	public function test_the_scan_for_renames_after_the_direction_is_recorded_finds_them(): void {
 		$this->assertSame( 'dir_in', self::renamed_after_decision( array( 'carried', 'committed', 'flushed', 'dir_in' ) ), 'in the same run' );
@@ -172,6 +174,7 @@ final class SwapSequencesTest extends SwapTestCase {
 			'flush'  => 'flush_fail' === $kind ? 1 : 0,
 			'remove' => 'remove_fail' === $kind ? 1 : 0,
 			'rename' => 'rename_fail' === $kind ? 1 : 0,
+			'dir'    => 'dir_rename_fail' === $kind ? 1 : 0,
 		);
 		$connect = null;
 		if ( 'rename_fail' === $kind ) {
@@ -224,6 +227,13 @@ final class SwapSequencesTest extends SwapTestCase {
 						throw new \RuntimeException( 'the cache is away for a moment' );
 					}
 				},
+				'rename' => static function ( string $from, string $to ) use ( &$fails, $job ): bool {
+					if ( $fails['dir'] > 0 && 'rollback' === ( Plugin::instance()->jobs()->find( $job->id )->cursor['phase'] ?? '' ) ) {
+						--$fails['dir'];
+						return false; // The rollback's first directory rename fails once, nothing moved.
+					}
+					return rename( $from, $to );
+				},
 				'remove' => static function ( Maintenance $file, callable $confirm ) use ( &$fails ): bool {
 					if ( $fails['remove'] > 0 ) {
 						--$fails['remove'];
@@ -242,10 +252,10 @@ final class SwapSequencesTest extends SwapTestCase {
 			$this->seams = array();
 			$done        = $this->cli_run( $job );
 			$this->assertSame( '', self::renamed_after_decision( $this->seams, '' !== $decided ), $label . ': I2, nothing renamed once the direction was recorded (next run ' . $i . ': ' . implode( ', ', $this->seams ) . ')' );
-			if ( 'rename_fail' === $kind && 0 === $fails['rename'] && ! $renamed ) {
+			if ( ( 'rename_fail' === $kind && 0 === $fails['rename'] || 'dir_rename_fail' === $kind && 0 === $fails['dir'] ) && ! $renamed ) {
 				// The run whose rename failed: waited out with the file held, nothing recorded as put back.
 				$renamed = true;
-				++$kinds['rename_fail'];
+				++$kinds[ $kind ];
 				// Waited out by the Runner's back-off: still running (the lease let go), the try counted, not failed.
 				$this->assertSame( Job::RUNNING, $done->status, $label . ': a failed rename of the rollback is waited out (' . $done->status . ' ' . $done->last_error . ')' );
 				$this->assertSame( 1, $done->cursor['__runner']['retries'] ?? null, $label . ': as a try to be made again' );
