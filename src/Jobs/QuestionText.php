@@ -151,6 +151,8 @@ final class QuestionText {
 					'group'    => $entry['group'],
 					'target'   => $entry['target'],
 					'relation' => $entry['relation'],
+					'verdict'  => is_string( $entry['verdict'] ?? null ) ? $entry['verdict'] : LinkedTargets::OUTSIDE,
+					'at'       => is_string( $entry['at'] ?? null ) ? $entry['at'] : '',
 				);
 			}
 		}
@@ -242,8 +244,8 @@ final class QuestionText {
 			return sprintf(
 				/* translators: %d: number of content directories */
 				_n(
-					'%d content directory of this site is a link to a directory outside this site (listed below). The restore replaces a directory where it is, so it would replace the files there, which may be another installation\'s (a staging site whose uploads link to the production site\'s, for example). Swap it as usual, or leave it out of the restore: it then stays as it is, and the job log says it was not restored. If it is this site\'s own (a deployment\'s shared directory, for example), swap it.',
-					'%d content directories of this site are links to directories outside this site (listed below). The restore replaces a directory where it is, so it would replace the files there, which may be another installation\'s (a staging site whose uploads link to the production site\'s, for example). Swap them as usual, or leave them out of the restore: they then stay as they are, and the job log says they were not restored. If they are this site\'s own (a deployment\'s shared directories, for example), swap them.',
+					'%d content directory of this site is not positively this site\'s own (listed below, with why): it is outside this site\'s directories, or inside another WordPress installation, or whether it is this site\'s could not be told. The restore replaces a directory where it is, so it would replace the files there, which may be another installation\'s (a staging site whose uploads are the production site\'s, through a link or its settings, for example). Swap it as usual, or leave it out of the restore: it then stays as it is, and the job log says it was not restored. If it is this site\'s own (a deployment\'s shared directory, for example), swap it.',
+					'%d content directories of this site are not positively this site\'s own (listed below, with why): each is outside this site\'s directories, or inside another WordPress installation, or whether it is this site\'s could not be told. The restore replaces a directory where it is, so it would replace the files there, which may be another installation\'s (a staging site whose uploads are the production site\'s, through a link or its settings, for example). Swap them as usual, or leave them out of the restore: they then stay as they are, and the job log says they were not restored. If they are this site\'s own (a deployment\'s shared directories, for example), swap them.',
 					$count,
 					'wp-checkpoint'
 				),

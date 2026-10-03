@@ -146,7 +146,9 @@ final class PreviousAttempt {
 		}
 		if ( 'tables' === $position['part'] ) {
 			// Compared without case whatever the server does (one that folds case lists the names folded): the listing
-			// only says which names on the list to try; a DROP of a name that is not there fails and is left.
+			// only says which names on the list to try. A name tried and still listed after its unit (DROP TABLE IF
+			// EXISTS of a name that differs only in case succeeds without dropping anything) is left, so each name is
+			// tried once in a pass.
 			$there = self::there( $job );
 			$drop  = array();
 			foreach ( (array) ( $list['tables'] ?? array() ) as $name ) {
@@ -165,6 +167,12 @@ final class PreviousAttempt {
 				// The dropper stopped before them (the session's key checks could not be read back as set): they would
 				// be tried again in every unit. Left, like those it could not drop.
 				$left = array_merge( $left, $result['remaining'] );
+			}
+			$after = self::there( $job );
+			foreach ( $result['dropped'] as $name ) {
+				if ( isset( $after[ strtolower( (string) $name ) ] ) ) {
+					$left[] = (string) $name; // Dropped, and still there: not this name's table (only its case is).
+				}
 			}
 			if ( array() !== $left ) {
 				// Given up on in this pass (a foreign key of another table, or a DROP the server refused): the reclaim at the

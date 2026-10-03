@@ -4,6 +4,7 @@ namespace WPCheckpoint\Tests\Unit\Restore;
 
 use WPCheckpoint\Restore\LinkedTargets;
 use WPCheckpoint\Support\Report;
+use WPCheckpoint\Tests\Fixtures\ExpectedPath;
 use WPCheckpoint\Tests\Fixtures\Sandbox;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
@@ -70,17 +71,47 @@ final class LinkedTargetsTest extends TestCase {
 		);
 	}
 
-	public function test_a_target_is_outside_unless_in_the_wordpress_directory_or_the_trusted_root(): void {
-		mkdir( $this->dir . '/site/wp-content/uploads', 0755, true );
-		mkdir( $this->dir . '/shared/uploads', 0755, true );
-		mkdir( $this->dir . '/elsewhere/uploads', 0755, true );
+	public function test_a_directory_is_this_sites_only_inside_a_zone_and_below_no_other_installation(): void {
 		$site = $this->dir . '/site';
-		$this->assertFalse( LinkedTargets::outside( $site . '/wp-content/uploads', $site, '' ), 'in the WordPress directory' );
-		$this->assertTrue( LinkedTargets::outside( $this->dir . '/shared/uploads', $site, '' ), 'outside, without a trusted root' );
-		$this->assertFalse( LinkedTargets::outside( $this->dir . '/shared/uploads', $site, $this->dir . '/shared' ), 'in the trusted root' );
-		$this->assertTrue( LinkedTargets::outside( $this->dir . '/elsewhere/uploads', $site, $this->dir . '/shared' ), 'in neither' );
-		$this->assertTrue( LinkedTargets::outside( $site . '/wp-content/uploads', '', '' ), 'a WordPress directory that could not be resolved is no evidence of inside' );
-		$this->assertTrue( LinkedTargets::outside( $this->dir . '/site-copy/uploads', $site, '' ), 'a name that only begins like it' );
+		foreach ( array( '/site/wp-content/uploads', '/site/staging/wp-content/uploads', '/shared/uploads', '/elsewhere', '/site-copy/uploads' ) as $dir ) {
+			mkdir( $this->dir . $dir, 0755, true );
+		}
+		file_put_contents( $site . '/wp-load.php', '<?php' );
+		file_put_contents( $this->dir . '/site/staging/wp-config.php', '<?php' ); // A staging installation inside the site.
+		$zones = array( $site );
+		$this->assertSame( LinkedTargets::SITE, LinkedTargets::judge( $site . '/wp-content/uploads', $zones )['verdict'], 'in the WordPress directory (its own root files are the boundary\'s)' );
+		$this->assertSame( LinkedTargets::SITE, LinkedTargets::judge( $site . '/wp-content/missing', $zones )['verdict'], 'not there yet: judged by where it would be' );
+		$staging = LinkedTargets::judge( $site . '/staging/wp-content/uploads', $zones );
+		$this->assertSame( LinkedTargets::INSTALLATION, $staging['verdict'], 'inside another installation inside the site' );
+		$this->assertSame( ExpectedPath::slashed( $site, 'staging' ), $staging['at'] );
+		$this->assertSame( LinkedTargets::OUTSIDE, LinkedTargets::judge( $this->dir . '/shared/uploads', $zones )['verdict'], 'outside, whether a link leads there or not' );
+		$this->assertSame( LinkedTargets::SITE, LinkedTargets::judge( $this->dir . '/shared/uploads', array( $site, $this->dir . '/shared' ) )['verdict'], 'in the trusted root' );
+		$this->assertSame( LinkedTargets::OUTSIDE, LinkedTargets::judge( $this->dir . '/site-copy/uploads', $zones )['verdict'], 'a name that only begins like it' );
+		$this->assertSame( LinkedTargets::OUTSIDE, LinkedTargets::judge( $site . '/wp-content/uploads', array( '' ) )['verdict'], 'no zone known: nothing is positively this site\'s' );
+		$unknown = LinkedTargets::judge( $this->dir . '/no-such/deeper/uploads', $zones );
+		$this->assertSame( LinkedTargets::OUTSIDE === $unknown['verdict'] ? LinkedTargets::OUTSIDE : LinkedTargets::UNKNOWN, $unknown['verdict'], 'not there, its parent not either: asked either way' );
+		$this->assertNotSame( LinkedTargets::SITE, $unknown['verdict'] );
+	}
+
+	public function test_the_directory_of_wp_config_is_a_zone_unless_it_is_a_file_systems_root_or_a_home_directory(): void {
+		$this->assertSame( '/srv/site/web', LinkedTargets::config_zone( '/srv/site/web' ) );
+		$this->assertSame( '/home/alice/site', LinkedTargets::config_zone( '/home/alice/site' ) );
+		$this->assertSame( '', LinkedTargets::config_zone( '/home/alice' ), 'a home directory' );
+		$this->assertSame( '', LinkedTargets::config_zone( '/var/www/vhosts/example.com' ), 'a Plesk home directory' );
+		$this->assertSame( '', LinkedTargets::config_zone( '/' ), 'a file system\'s root' );
+		$this->assertSame( '', LinkedTargets::config_zone( 'C:/' ) );
+		$this->assertSame( '', LinkedTargets::config_zone( '//server/share' ) );
+		$this->assertSame( '', LinkedTargets::config_zone( '' ) );
+		$this->assertSame(
+			'',
+			LinkedTargets::config_zone(
+				'/tmp/x/home/u',
+				static function ( string $dir ): bool {
+					return '/tmp/x/home/u' === $dir;
+				}
+			),
+			'a home directory as a test names it'
+		);
 	}
 
 	public function test_whether_a_target_is_in_this_sites_home_directory(): void {
@@ -120,12 +151,35 @@ final class LinkedTargetsTest extends TestCase {
 		$lines = LinkedTargets::lines( $entries, $clean );
 		$this->assertSame(
 			array(
-				'uploads: /home/***/shared/uploads (target 1) (not in this site\'s home directory)',
-				'themes: /home/***/shared/uploads (target 2) (not in this site\'s home directory)',
-				'plugins: /home/***/shared/plugins (in this site\'s home directory)',
+				'uploads: /home/***/shared/uploads (target 1) (outside this site\'s directories) (not in this site\'s home directory)',
+				'themes: /home/***/shared/uploads (target 2) (outside this site\'s directories) (not in this site\'s home directory)',
+				'plugins: /home/***/shared/plugins (outside this site\'s directories) (in this site\'s home directory)',
 			),
 			$lines
 		);
+		// Why, for the other two verdicts: the directory on the way that is another installation's, or the path that
+		// could not be read; masked too.
+		$why = LinkedTargets::lines(
+			array(
+				array(
+					'group'    => 'uploads',
+					'target'   => '/home/alice/staging/wp-content/uploads',
+					'relation' => 'other',
+					'verdict'  => LinkedTargets::INSTALLATION,
+					'at'       => '/home/alice/staging',
+				),
+				array(
+					'group'    => 'themes',
+					'target'   => '/home/bob/themes',
+					'relation' => 'other',
+					'verdict'  => LinkedTargets::UNKNOWN,
+					'at'       => '/home/bob/themes',
+				),
+			),
+			$clean
+		);
+		$this->assertSame( 'uploads: /home/***/staging/wp-content/uploads (inside another WordPress installation, at /home/***/staging) (not in this site\'s home directory)', $why[0] );
+		$this->assertSame( 'themes: /home/***/themes (whether it is this site\'s could not be told: /home/***/themes could not be read) (not in this site\'s home directory)', $why[1] );
 		$text = implode( "\n", $lines );
 		$this->assertStringNotContainsString( 'alice', $text );
 		$this->assertStringNotContainsString( 'bob', $text );

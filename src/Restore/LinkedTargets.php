@@ -1,25 +1,34 @@
 <?php
 /**
- * Content groups whose directory is a link to a directory outside this site: what the restore asks about them.
+ * Content groups whose directory is not positively this site's: what the restore asks about them.
  *
  * @package WPCheckpoint
  */
 
 namespace WPCheckpoint\Restore;
 
-use WPCheckpoint\Files\Links;
 use WPCheckpoint\Support\Paths;
 
 defined( 'ABSPATH' ) || exit;
 
 /**
- * The restore replaces a group's directory where it is (a group reached through a link: where the link leads), so a
- * link to a directory of another installation (a staging site whose uploads link to the production site's, or whose
- * whole content directory does) would have the restore change that installation's files. Whether a group is asked
- * about is one rule over the path WordPress names its directory by, walked a component at a time
- * (reached_from_outside()); the files preflight asks, with no default: swap it as usual, or leave it out of the
- * restore (its live directory stays as it is). The answer holds for the very groups and targets its question named
- * (id()). A restore nobody attends says it up front (the policy POLICY_KEY, RestoreJob).
+ * The restore replaces a group's directory where it finally is. When that is another installation's (a staging site
+ * whose uploads are the production site's, through a link or through WordPress's own settings, UPLOADS or
+ * upload_path), the restore would change that installation's files. So it is judged by where the directory finally
+ * lands (one realpath() of the whole path), never by how the path gets there, and only positive evidence makes it
+ * this site's (judge()):
+ *
+ * - it is in this site's WordPress directory, in the trusted deployment root, or in the directory of the
+ *   wp-config.php this site loaded (Bedrock; a deployment's current link), that one only when it is neither the
+ *   root of a file system nor a home directory (config_zone());
+ * - and no directory between it and that zone (the zone itself not included) holds wp-load.php or wp-config.php:
+ *   such a directory is another installation's root (a staging site inside the production site's directory).
+ *
+ * Anything else is asked about in the files preflight, with no default: swap it as usual, or leave it out of the
+ * restore (its live directory stays as it is). A directory that cannot be resolved, or a directory on the way up
+ * that cannot be listed, is asked about too, saying which path could not be told. The answer holds for the very
+ * groups and directories its question named (id()). A restore nobody attends says it up front (the policy
+ * POLICY_KEY, RestoreJob).
  */
 final class LinkedTargets {
 
@@ -41,108 +50,171 @@ final class LinkedTargets {
 	const CHOICES = array( self::SWAP, self::EXCLUDE );
 
 	/**
+	 * Verdicts: this site's; outside every zone of this site; inside another installation's root; cannot be told.
+	 */
+	const SITE         = 'site';
+	const OUTSIDE      = 'outside';
+	const INSTALLATION = 'installation';
+	const UNKNOWN      = 'unknown';
+
+	/**
 	 * Home directories, as the masks of paths know them (Report::mask_paths()): the directory under one of these is a
 	 * user's.
 	 */
 	const HOMES = '#\A((?:[A-Za-z]:)?/(?:home|users|var/www/vhosts|srv/users|usr/home|export/home)/[^/]+)(?:/|\z)#i';
 
 	/**
-	 * Whether a resolved path is outside this site: neither in its WordPress directory nor in the trusted deployment
-	 * root, both resolved; compared as resolved strings (a path that does not exist is judged by where it would be).
-	 * A WordPress directory that could not be resolved is no evidence of being inside: outside.
-	 *
-	 * @param string $target       The path, resolved.
-	 * @param string $abspath_real This site's WordPress directory, resolved ('' when it could not be).
-	 * @param string $trusted_real The trusted deployment root, resolved ('' when none).
-	 * @return bool
+	 * The files whose presence in a directory makes it a WordPress installation's root.
 	 */
-	public static function outside( string $target, string $abspath_real, string $trusted_real ): bool {
-		foreach ( array( $abspath_real, $trusted_real ) as $root ) {
-			if ( '' !== $root && self::within( $root, $target ) ) {
-				return false;
-			}
+	const ROOT_FILES = array( 'wp-load.php', 'wp-config.php' );
+
+	/**
+	 * A directory where it finally is, with one realpath() of the whole path (normalised, no trailing slash); a
+	 * directory that is not there, by its parent's realpath() and its name when it is positively not there; '' when
+	 * neither can be told.
+	 *
+	 * @param string $given The directory as WordPress names it.
+	 * @return string
+	 */
+	public static function resolve( string $given ): string {
+		$given = rtrim( Paths::normalize( $given ), '/' );
+		if ( '' === $given ) {
+			return '';
 		}
-		return true;
+		$real = Paths::real( $given );
+		if ( false !== $real ) {
+			return rtrim( Paths::normalize( (string) $real ), '/' );
+		}
+		// Not there, or not to be told: its parent where it is (realpath() follows ".." as the system does), then
+		// whether it is positively not there, asked of that place.
+		$name   = basename( $given );
+		$parent = Paths::real( dirname( $given ) );
+		if ( false === $parent || '.' === $name || '..' === $name ) {
+			return '';
+		}
+		$where = rtrim( Paths::normalize( (string) $parent ), '/' ) . '/' . $name;
+		return Paths::positively_gone( $where ) ? $where : '';
 	}
 
 	/**
-	 * Whether a group's directory, as WordPress names it, is reached through a link that leads outside this site. The
-	 * path is walked a component at a time, as the system does: "." is passed over, ".." goes to the parent of where
-	 * the walk is (after any link), a component that is not there ends what can be a link (the rest is a name). A
-	 * component that is a link (or whose kind cannot be told and that resolves elsewhere) is harmless when it leads
-	 * into this site's WordPress directory or the trusted deployment root, or, when components follow it, to a
-	 * directory that holds the WordPress directory (a deployment's link: current -> releases/N). Any other link asks.
-	 * A path that is not absolute, or a component whose existence or target cannot be told, asks too: nothing is
-	 * concluded without positive evidence. A path with no link on it never asks, wherever it is (a directory outside
-	 * the WordPress directory that WordPress names directly is this site's own).
+	 * The directory of the wp-config.php this site loaded, as a zone of this site: '' when it is the root of a file
+	 * system or a home directory (it would take in everything below it).
 	 *
-	 * @param string $given        The directory as WordPress names it.
-	 * @param string $abspath_real This site's WordPress directory, resolved ('' when it could not be).
-	 * @param string $trusted_real The trusted deployment root, resolved ('' when none).
-	 * @return bool
+	 * @param string        $dir     The directory, resolved ('' when not known).
+	 * @param callable|null $is_home function( string $dir ): bool, whether it is a home directory (tests); HOMES.
+	 * @return string
 	 */
-	public static function reached_from_outside( string $given, string $abspath_real, string $trusted_real ): bool {
-		$path = Paths::normalize( $given );
-		if ( 1 !== preg_match( '#\A(/|[A-Za-z]:/|//[^/]+/[^/]+/)(.*)\z#s', $path, $m ) ) {
-			return true; // Not absolute: where it is cannot be told.
+	public static function config_zone( string $dir, $is_home = null ): string {
+		$dir = rtrim( Paths::normalize( $dir ), '/' );
+		if ( '' === $dir || 1 === preg_match( '#\A(?:[A-Za-z]:|//[^/]+/[^/]+)\z#', $dir ) ) {
+			return ''; // A file system's root ("/" normalises to "").
 		}
-		$cur   = rtrim( $m[1], '/' );
-		$parts = array_values(
-			array_filter(
-				explode( '/', $m[2] ),
-				static function ( string $part ): bool {
-					return '' !== $part;
+		$home = is_callable( $is_home ) ? (bool) call_user_func( $is_home, $dir ) : 0 === strcasecmp( self::home( $dir ), $dir );
+		return $home ? '' : $dir;
+	}
+
+	/**
+	 * The innermost zone of this site the resolved directory is in ('' when none).
+	 *
+	 * @param string   $resolved The directory, resolved.
+	 * @param string[] $zones    Zones, resolved ('' entries ignored).
+	 * @return string
+	 */
+	public static function boundary( string $resolved, array $zones ): string {
+		$boundary = '';
+		foreach ( $zones as $zone ) {
+			$zone = rtrim( (string) $zone, '/' );
+			if ( '' !== $zone && self::within( $zone, $resolved ) && strlen( $zone ) > strlen( $boundary ) ) {
+				$boundary = $zone;
+			}
+		}
+		return $boundary;
+	}
+
+	/**
+	 * The first directory from the resolved one up to the boundary (the boundary itself not included) that is
+	 * another installation's root (it holds wp-load.php or wp-config.php), or that cannot be told about.
+	 *
+	 * @param string $resolved The directory, resolved.
+	 * @param string $boundary The zone it is in.
+	 * @return array{verdict: string, at: string} SITE when there is none.
+	 */
+	public static function installation_between( string $resolved, string $boundary ): array {
+		$dir   = $resolved;
+		$floor = strlen( $boundary );
+		while ( true ) {
+			$length = strlen( $dir );
+			if ( $length <= $floor || ! self::within( $boundary, $dir ) ) {
+				break;
+			}
+			clearstatcache( true, $dir );
+			if ( false === @lstat( $dir ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- told apart below.
+				if ( ! Paths::positively_gone( $dir ) ) {
+					return array(
+						'verdict' => self::UNKNOWN,
+						'at'      => $dir,
+					);
 				}
-			)
+			} else {
+				$entries = is_dir( $dir ) ? @scandir( $dir ) : false; // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- not listable: told below.
+				if ( ! is_array( $entries ) ) {
+					return array(
+						'verdict' => self::UNKNOWN,
+						'at'      => $dir,
+					);
+				}
+				if ( array() !== array_intersect( self::ROOT_FILES, $entries ) ) {
+					return array(
+						'verdict' => self::INSTALLATION,
+						'at'      => $dir,
+					);
+				}
+			}
+			$up = rtrim( Paths::normalize( dirname( $dir ) ), '/' );
+			if ( $up === $dir ) {
+				break;
+			}
+			$dir = $up;
+		}
+		return array(
+			'verdict' => self::SITE,
+			'at'      => '',
 		);
-		$gone  = ''; // Where the walk left what is there: below it, names only (until ".." climbs above it).
-		$count = count( $parts );
-		foreach ( $parts as $i => $part ) {
-			if ( '.' === $part ) {
-				continue;
-			}
-			if ( '..' === $part ) {
-				$cur = '' === $cur || false === strpos( $cur, '/' ) ? $cur : (string) substr( $cur, 0, (int) strrpos( $cur, '/' ) );
-				if ( '' !== $gone && ! self::within( $gone, $cur ) ) {
-					$gone = ''; // Back where things are there.
-				}
-				continue;
-			}
-			$next = $cur . '/' . $part;
-			if ( '' !== $gone ) {
-				$cur = $next; // Below a component that is not there: names only.
-				continue;
-			}
-			if ( false === @lstat( $next ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- told apart below.
-				if ( ! Paths::positively_gone( $next ) ) {
-					return true; // Whether it is there cannot be told.
-				}
-				$gone = $next;
-				$cur  = $next;
-				continue;
-			}
-			$real = Paths::real( $next );
-			if ( false === $real ) {
-				return true; // There, but where it leads cannot be told.
-			}
-			$real  = rtrim( Paths::normalize( (string) $real ), '/' );
-			$state = Links::state( $next );
-			if ( Links::LINK === $state || ( Links::UNKNOWN === $state && ! Paths::same( $real, $next, Paths::is_windows() ) ) ) {
-				$last = true;
-				for ( $j = $i + 1; $j < $count; $j++ ) {
-					if ( '.' !== $parts[ $j ] ) {
-						$last = false;
-						break;
-					}
-				}
-				$deployment = ! $last && '' !== $abspath_real && self::within( $real, $abspath_real );
-				if ( ! $deployment && self::outside( $real, $abspath_real, $trusted_real ) ) {
-					return true;
-				}
-			}
-			$cur = $real;
+	}
+
+	/**
+	 * Whether a group's directory is positively this site's, and if not, why (SITE needs no question).
+	 *
+	 * @param string   $given The directory as WordPress names it.
+	 * @param string[] $zones This site's zones, resolved: its WordPress directory, the trusted deployment root, the
+	 *                        directory of its wp-config.php (config_zone()).
+	 * @return array{verdict: string, target: string, at: string} The target is where the directory finally is (or the
+	 *                                                            path as given when that cannot be told).
+	 */
+	public static function judge( string $given, array $zones ): array {
+		$resolved = self::resolve( $given );
+		if ( '' === $resolved ) {
+			$path = rtrim( Paths::normalize( $given ), '/' );
+			return array(
+				'verdict' => self::UNKNOWN,
+				'target'  => $path,
+				'at'      => $path,
+			);
 		}
-		return false;
+		$boundary = self::boundary( $resolved, $zones );
+		if ( '' === $boundary ) {
+			return array(
+				'verdict' => self::OUTSIDE,
+				'target'  => $resolved,
+				'at'      => '',
+			);
+		}
+		$between = self::installation_between( $resolved, $boundary );
+		return array(
+			'verdict' => $between['verdict'],
+			'target'  => $resolved,
+			'at'      => $between['at'],
+		);
 	}
 
 	/**
@@ -152,15 +224,16 @@ final class LinkedTargets {
 	 * @param string $path Path, resolved.
 	 * @return bool
 	 */
-	private static function within( string $dir, string $path ): bool {
+	public static function within( string $dir, string $path ): bool {
 		return Paths::same( $dir, $path, Paths::is_windows() ) || Paths::is_prefix( $dir, $path, Paths::is_windows() );
 	}
 
 	/**
-	 * The question's id: the policy key and a digest of the groups and their targets. An answer holds only for the
-	 * question it was given to; another target (a link pointed elsewhere since) is another question.
+	 * The question's id: the policy key and a digest of the groups and their directories. An answer holds only for the
+	 * question it was given to; another directory (a link pointed elsewhere since, a setting changed) is another
+	 * question.
 	 *
-	 * @param array<string, string> $targets Group => target, resolved.
+	 * @param array<string, string> $targets Group => directory, resolved.
 	 * @return string
 	 */
 	public static function id( array $targets ): string {
@@ -183,10 +256,10 @@ final class LinkedTargets {
 	}
 
 	/**
-	 * Whether a target is in this site's home directory: "same", "other", or "unknown" (this site is in no home
+	 * Whether a directory is in this site's home directory: "same", "other", or "unknown" (this site is in no home
 	 * directory, so nothing can be said).
 	 *
-	 * @param string $target       Target.
+	 * @param string $target       Directory.
 	 * @param string $abspath_real This site's WordPress directory, resolved.
 	 * @return string
 	 */
@@ -199,11 +272,13 @@ final class LinkedTargets {
 	}
 
 	/**
-	 * The question's lines: each group with its target as masked, whether it is in this site's home directory (said,
-	 * not shown: the mask hides whose home it is), and a number where two targets read the same once masked.
+	 * The question's lines: each group with its directory as masked, why it is asked about (outside this site's
+	 * directories; inside another installation, at which directory; or which path could not be told), whether it
+	 * is in this site's home directory (said, not shown: the mask hides whose home it is), and a number where two
+	 * directories read the same once masked.
 	 *
-	 * @param array<int, array{group: string, target: string, relation: string}> $entries Entries.
-	 * @param callable                                                           $clean   Text cleaner (masks paths).
+	 * @param array<int, array{group: string, target: string, relation: string, verdict?: string, at?: string}> $entries Entries.
+	 * @param callable                                                                                          $clean   Text cleaner (masks paths).
 	 * @return string[]
 	 */
 	public static function lines( array $entries, callable $clean ): array {
@@ -218,8 +293,19 @@ final class LinkedTargets {
 			$line = sprintf( '%1$s: %2$s', (string) $entry['group'], $shown[ $i ] );
 			if ( $counts[ $shown[ $i ] ] > 1 ) {
 				$seen[ $shown[ $i ] ] = ( $seen[ $shown[ $i ] ] ?? 0 ) + 1;
-				/* translators: %d: number of the target among those that read the same */
+				/* translators: %d: number of the directory among those that read the same */
 				$line .= ' ' . sprintf( __( '(target %d)', 'wp-checkpoint' ), $seen[ $shown[ $i ] ] );
+			}
+			$verdict = (string) ( $entry['verdict'] ?? self::OUTSIDE );
+			$at      = (string) call_user_func( $clean, (string) ( $entry['at'] ?? '' ) );
+			if ( self::INSTALLATION === $verdict ) {
+				/* translators: %s: a directory */
+				$line .= ' ' . sprintf( __( '(inside another WordPress installation, at %s)', 'wp-checkpoint' ), $at );
+			} elseif ( self::UNKNOWN === $verdict ) {
+				/* translators: %s: a path */
+				$line .= ' ' . sprintf( __( '(whether it is this site\'s could not be told: %s could not be read)', 'wp-checkpoint' ), $at );
+			} else {
+				$line .= ' ' . __( '(outside this site\'s directories)', 'wp-checkpoint' );
 			}
 			if ( 'same' === $entry['relation'] ) {
 				$line .= ' ' . __( '(in this site\'s home directory)', 'wp-checkpoint' );

@@ -204,7 +204,15 @@ abstract class SwapTestCase extends RestoreTestCase {
 					);
 					break;
 				case RestoreFilesPreflightStep::ID:
-					$steps[] = new RestoreFilesPreflightStep( array( 'directories' => $dirs ) );
+					$steps[] = new RestoreFilesPreflightStep(
+						array(
+							'directories'  => $dirs,
+							// The sandbox stands for the site's own directories (its WordPress directory is elsewhere).
+							'trusted_root' => function (): string {
+								return $this->sandbox;
+							},
+						)
+					);
 					break;
 				case FileStagingStep::ID:
 					$steps[] = new FileStagingStep( $this->staging_parts() );

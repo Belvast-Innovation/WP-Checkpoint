@@ -41,9 +41,10 @@ defined( 'ABSPATH' ) || exit;
  *    file system, a group directory on, inside or around another, a
  *    group's parent inside the content directory but not the content
  *    directory itself, and a storage directory inside a directory the swap
- *    replaces whole. A group reached through a link to a directory outside
- *    this site is asked about first (LinkedTargets): swapped as usual, or
- *    left out (its directory stays as it is). The layout, with the staging
+ *    replaces whole. A group whose directory is not positively this site's
+ *    (where it finally is: outside the site's zones, inside another
+ *    installation, or not to be told; LinkedTargets) is asked about first:
+ *    swapped as usual, or left out (its directory stays as it is). The layout, with the staging
  *    roots' random part and the groups left out, goes to RestoreFiles::STAGING
  *    and never changes.
  * 2. probe: one staging parent per unit (DirectoryProbe): create, write,
@@ -66,7 +67,7 @@ defined( 'ABSPATH' ) || exit;
  * 6. space: each file system must have StagingSpace::required() free; when
  *    free space cannot be read, the user is asked (free_space_unknown).
  *    This is the one step that may ask twice, in two phases: what has to fit
- *    depends on the answer about linked directories (a group left out is
+ *    depends on the answer about those directories (a group left out is
  *    not staged), so the two questions cannot be asked at once.
  *
  * The probes create and remove their own entries within one unit; a unit
@@ -227,12 +228,13 @@ final class RestoreFilesPreflightStep implements Step {
 			if ( LinkedTargets::EXCLUDE === $choice ) {
 				$left_out = array_keys( $linked );
 				$staged   = array_values( array_diff( $staged, $left_out ) );
-				foreach ( $linked as $group => $target ) {
+				foreach ( $linked as $group => $why ) {
 					$context->logger()->warning(
-						'A content group of the backup is not restored: its directory is a link to a directory outside this site, and the restore was told to leave such groups out; its directory stays as it is',
+						'A content group of the backup is not restored: its directory is not positively this site\'s, and the restore was told to leave such groups out; its directory stays as it is',
 						array(
-							'group'  => $group,
-							'target' => $target,
+							'group'   => $group,
+							'target'  => $why['target'],
+							'verdict' => $why['verdict'],
 						)
 					);
 				}
@@ -671,49 +673,76 @@ final class RestoreFilesPreflightStep implements Step {
 	}
 
 	/**
-	 * The staged groups whose directory, as WordPress names it, is reached through a link that leads outside this site
-	 * (LinkedTargets::reached_from_outside(): the link itself or one on its path; a deployment's link to a directory
-	 * holding the WordPress directory, and links into the WordPress directory or the trusted deployment root, do not
-	 * ask).
+	 * The staged groups whose directory is not positively this site's, judged by where it finally is
+	 * (LinkedTargets::judge()): this site's zones are its WordPress directory, the trusted deployment root and the
+	 * directory of the wp-config.php it loaded (unless that is a file system's root or a home directory).
 	 *
 	 * @param array<string, string> $given  Group => directory as WordPress names it.
-	 * @param array<string, string> $groups Group => directory, resolved.
+	 * @param array<string, string> $groups Group => directory, resolved (unused: judged from the path as given).
 	 * @param string[]              $staged The staged groups.
-	 * @return array<string, string> Group => its target, resolved.
+	 * @return array<string, array{target: string, verdict: string, at: string}> Group => why it is asked about.
 	 */
 	private function linked( array $given, array $groups, array $staged ): array {
-		$abspath = Paths::real( rtrim( ABSPATH, '/\\' ) );
-		$abspath = false === $abspath ? '' : rtrim( Paths::normalize( (string) $abspath ), '/' );
-		$trusted = isset( $this->parts['trusted_root'] ) ? (string) call_user_func( $this->parts['trusted_root'] ) : '';
-		$trusted = '' === $trusted ? false : Paths::real( $trusted );
-		$trusted = false === $trusted ? '' : rtrim( Paths::normalize( (string) $trusted ), '/' );
+		unset( $groups );
+		$zones = array();
+		foreach ( array( rtrim( ABSPATH, '/\\' ), isset( $this->parts['trusted_root'] ) ? (string) call_user_func( $this->parts['trusted_root'] ) : '' ) as $dir ) {
+			$real = '' === $dir ? false : Paths::real( $dir );
+			if ( false !== $real ) {
+				$zones[] = rtrim( Paths::normalize( (string) $real ), '/' );
+			}
+		}
+		$config  = isset( $this->parts['config_dir'] ) ? (string) call_user_func( $this->parts['config_dir'] ) : self::loaded_config_dir();
+		$zones[] = LinkedTargets::config_zone( $config );
 		$out     = array();
 		foreach ( $staged as $group ) {
-			if ( LinkedTargets::reached_from_outside( (string) ( $given[ $group ] ?? '' ), $abspath, $trusted ) ) {
-				$out[ $group ] = (string) $groups[ $group ];
+			$why = LinkedTargets::judge( (string) ( $given[ $group ] ?? '' ), $zones );
+			if ( LinkedTargets::SITE !== $why['verdict'] ) {
+				$out[ $group ] = $why;
 			}
 		}
 		return $out;
 	}
 
 	/**
-	 * What to do with the groups whose directory is a link to a directory outside this site: the answer to the
-	 * question about these very groups and targets, or the policy; otherwise the question (no default).
+	 * The directory of the wp-config.php this request loaded, resolved ('' when none was: a test harness, WP-CLI with
+	 * another config).
 	 *
-	 * @param JobContext            $context Context.
-	 * @param array<string, string> $linked  Group => target, resolved.
+	 * @return string
+	 */
+	private static function loaded_config_dir(): string {
+		foreach ( get_included_files() as $file ) {
+			if ( 'wp-config.php' === basename( (string) $file ) ) {
+				$real = Paths::real( dirname( (string) $file ) );
+				return false === $real ? '' : rtrim( Paths::normalize( (string) $real ), '/' );
+			}
+		}
+		return '';
+	}
+
+	/**
+	 * What to do with the groups whose directory is not positively this site's: the answer to the question about these
+	 * very groups and directories, or the policy; otherwise the question (no default).
+	 *
+	 * @param JobContext                                                        $context Context.
+	 * @param array<string, array{target: string, verdict: string, at: string}> $linked  Group => why it is asked about.
 	 * @return string|StepResult LinkedTargets::SWAP or EXCLUDE, or the question.
 	 * @throws TransientFailure When the question's file cannot be written.
 	 */
 	private function linked_choice( JobContext $context, array $linked ) {
 		$abspath = Paths::real( rtrim( ABSPATH, '/\\' ) );
-		$id      = LinkedTargets::id( $linked );
+		$targets = array_map(
+			static function ( array $why ): string {
+				return $why['target'];
+			},
+			$linked
+		);
+		$id      = LinkedTargets::id( $targets );
 		$answers = isset( $context->options()['answers'] ) && is_array( $context->options()['answers'] ) ? $context->options()['answers'] : array();
 		$policy  = RestoreJob::options( $context->options() )['policy'][ LinkedTargets::POLICY_KEY ];
 		foreach ( array_keys( $answers ) as $other ) {
 			if ( 0 === strpos( (string) $other, LinkedTargets::POLICY_KEY . '_' ) && $other !== $id ) {
 				// Given for other groups or targets (a link pointed elsewhere since): it holds for none of these.
-				$context->logger()->warning( 'An answer given for other linked directories than the restore would now ask about is not used', array( 'question' => (string) $other ) );
+				$context->logger()->warning( 'An answer given for other content directories than the restore would now ask about is not used', array( 'question' => (string) $other ) );
 			}
 		}
 		$answer = $answers[ $id ] ?? null;
@@ -726,13 +755,15 @@ final class RestoreFilesPreflightStep implements Step {
 		} else {
 			$entries = array();
 			$hex     = array();
-			foreach ( $linked as $group => $target ) {
+			foreach ( $linked as $group => $why ) {
 				$entries[]     = array(
 					'group'    => (string) $group,
-					'target'   => Utf8::scrub( $target ),
-					'relation' => LinkedTargets::relation( $target, false === $abspath ? '' : (string) $abspath ),
+					'target'   => Utf8::scrub( $why['target'] ),
+					'relation' => LinkedTargets::relation( $why['target'], false === $abspath ? '' : (string) $abspath ),
+					'verdict'  => $why['verdict'],
+					'at'       => Utf8::scrub( $why['at'] ),
 				);
-				$hex[ $group ] = bin2hex( $target );
+				$hex[ $group ] = bin2hex( $why['target'] );
 			}
 			try {
 				ExportPlan::write(
@@ -746,7 +777,7 @@ final class RestoreFilesPreflightStep implements Step {
 			} catch ( \RuntimeException $e ) {
 				throw new TransientFailure( 'A work file of the restore could not be written: ' . $e->getMessage() ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
 			}
-			$context->logger()->info( 'Content directories that are links to directories outside this site; asked what to do with them', array( 'targets' => $linked ) );
+			$context->logger()->info( 'Content directories that are not positively this site\'s; asked what to do with them', array( 'groups' => $linked ) );
 			return StepResult::ask(
 				array( 'phase' => 'layout' ),
 				array(
@@ -762,11 +793,11 @@ final class RestoreFilesPreflightStep implements Step {
 			);
 		}
 		$context->logger()->info(
-			'Content directories that are links to directories outside this site',
+			'Content directories that are not positively this site\'s',
 			array(
-				'targets' => $linked,
-				'choice'  => $choice,
-				'from'    => $from,
+				'groups' => $linked,
+				'choice' => $choice,
+				'from'   => $from,
 			)
 		);
 		return $choice;
