@@ -54,6 +54,9 @@ abstract class SwapTestCase extends RestoreTestCase {
 	/** @var array<string, mixed> Parts of the swap step for this test. */
 	protected $swap_parts = array();
 
+	/** @var array{seam?: string, sql?: string[]} Statements a killed run sends when it reaches the seam (killed_at()). */
+	protected $child_sql = array();
+
 	/** @var array<string, mixed> Test seams of the preflight for this test (RestorePreflightStep). */
 	protected $preflight_parts = array();
 
@@ -86,8 +89,9 @@ abstract class SwapTestCase extends RestoreTestCase {
 	 */
 	protected function set_up_swap(): void {
 		global $wpdb;
-		$this->seams   = array();
-		$this->sandbox = Sandbox::make( 'swap' );
+		$this->seams     = array();
+		$this->child_sql = array();
+		$this->sandbox   = Sandbox::make( 'swap' );
 		$content       = $this->sandbox . '/wp-content';
 		$this->abspath = $this->sandbox . '/site';
 		mkdir( $this->abspath );
@@ -388,6 +392,7 @@ abstract class SwapTestCase extends RestoreTestCase {
 					'batch'   => (int) ( $this->swap_parts['batch'] ?? 0 ),
 					'offset'  => $this->clock_offset,
 					'trace'   => $this->trace,
+					'sql_at'  => $this->child_sql,
 					'admin'   => self::$admin_id,
 				)
 			)

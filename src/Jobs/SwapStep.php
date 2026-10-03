@@ -8,12 +8,15 @@
 namespace WPCheckpoint\Jobs;
 
 use WPCheckpoint\Database\SqlWriter;
+use WPCheckpoint\Database\WpdbConnection;
 use WPCheckpoint\Files\ScanRoots;
 use WPCheckpoint\Restore\ImportSession;
+use WPCheckpoint\Restore\IncomingTables;
 use WPCheckpoint\Restore\Ledger;
 use WPCheckpoint\Restore\Maintenance;
 use WPCheckpoint\Restore\Queries;
 use WPCheckpoint\Restore\RestoreFiles;
+use WPCheckpoint\Restore\SiteTables;
 use WPCheckpoint\Restore\StagingLayout;
 use WPCheckpoint\Restore\StateCarry;
 use WPCheckpoint\Restore\SwapPlan;
@@ -115,6 +118,13 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 	);
 
 	/**
+	 * Why the swap did not go on when the backup's tables are judged otherwise than at the preflight (judge(), and
+	 * once more before the first rename), and what it did then in the second case.
+	 */
+	const REJUDGED   = 'The backup\'s tables are judged otherwise than at the preflight of this restore: another installation\'s tables or users appeared in this database, or went, since then (the job log says what changed). A retry starts the restore over at its preflight, which asks about them again.';
+	const STOOD_DOWN = 'The swap stopped before it renamed anything, and took its maintenance file down: the site is as it was.';
+
+	/**
 	 * Phases in which the site is being changed (or put back), and in which it is swapped.
 	 */
 	const CHANGING = array( 'enter', 'dirs', 'carry', 'rename', 'rollback', 'restored' );
@@ -208,6 +218,14 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 			$phase = (string) ( $cursor['phase'] ?? 'start' );
 			if ( 'start' === $phase ) {
 				$cursor = $this->start( $context, $db );
+				$context->checkpoint( $cursor, 3, __( 'Judging the backup\'s tables once more before the swap', 'wp-checkpoint' ) );
+				$phase = 'judge';
+			}
+			if ( 'judge' === $phase ) {
+				$cursor = $this->judge( $context, $cursor );
+				if ( 'judge' === $cursor['phase'] ) {
+					return StepResult::progress( $cursor, 4, __( 'Judging the backup\'s tables once more before the swap', 'wp-checkpoint' ) );
+				}
 				$context->checkpoint( $cursor, 5, __( 'Counting the restored tables once more before the swap', 'wp-checkpoint' ) );
 				$phase = 'recount';
 			}
@@ -238,6 +256,12 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 			}
 			if ( 'rollback' === $phase ) {
 				throw $this->roll_back( $context, $db, $cursor, (string) ( $cursor['reason'] ?? '' ) );
+			}
+			if ( 'rejudged' === $phase ) {
+				// Recorded as untouched after the second judgement differed: the file comes down (again, if a run died
+				// before), and the restore starts over at its preflight.
+				$this->take_down( $context, $cursor );
+				throw new RetryFrom( self::REJUDGED . ' ' . self::STOOD_DOWN, RestorePreflightStep::ID );
 			}
 			if ( 'restored' === $phase ) {
 				// Recorded as put back while the file was held: only the end is left, nothing is renamed any more.
@@ -310,13 +334,79 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 			throw new RetryFrom( 'The swap\'s plan is not complete as the final check recorded it; the final check writes it again.', SwapCheckStep::ID );
 		}
 		return array(
-			'phase'   => 'recount',
+			'phase'   => 'judge',
 			'attempt' => $attempt,
 			'mark'    => Maintenance::new_mark(),
+		);
+	}
+
+	/**
+	 * Judge the backup's tables once more before anything is changed (the site is untouched): the usermeta table is
+	 * walked again within the budget, the live tables listed, and the judgement compared with the one the preflight
+	 * recorded. Another installation's tables or users that appeared or went since then would make the plan act on
+	 * tables nobody was asked about.
+	 *
+	 * @param JobContext           $context Context.
+	 * @param array<string, mixed> $cursor  Cursor ("judge", with the walk's state when a tick before stopped in it).
+	 * @return array<string, mixed> The cursor: still "judge" when the budget ran out, "recount" when it is the same.
+	 * @throws RetryFrom When the judgement differs, or the preflight recorded none (the restore starts over there).
+	 */
+	private function judge( JobContext $context, array $cursor ): array {
+		$work     = $context->work_path();
+		$recorded = RestorePreflightStep::judged( $work );
+		if ( null === $recorded ) {
+			throw new RetryFrom( 'The preflight of this restore recorded no judgement of the backup\'s tables to compare with (its plan was written by another version); the swap was not started, and the site is as it was. A retry starts the restore over at its preflight.', RestorePreflightStep::ID );
+		}
+		$loaded  = RestorePreflightStep::load_plan( $work );
+		$message = __( 'Judging the backup\'s tables once more before the swap', 'wp-checkpoint' );
+		$walk    = RestorePreflightStep::search_usermeta(
+			$context,
+			isset( $cursor['meta'] ) && is_array( $cursor['meta'] ) ? $cursor['meta'] : null,
+			$loaded['multisite'],
+			static function ( array $meta ) use ( $context, $cursor, $message ): void {
+				$cursor['meta'] = $meta;
+				$context->checkpoint( $cursor, 4, $message );
+			}
+		);
+		if ( ! $walk['done'] ) {
+			$cursor['meta'] = $walk['meta'];
+			return $cursor;
+		}
+		$now = $this->judgement( $loaded, $recorded['finals'], $walk['meta']['found'], $walk['meta']['over'] );
+		if ( $now !== $recorded['judgement'] ) {
+			$context->logger()->warning(
+				'The backup\'s tables are judged otherwise than at the preflight',
+				array(
+					'then' => $recorded['judgement'],
+					'now'  => $now,
+				)
+			);
+			throw new RetryFrom( self::REJUDGED . ' The swap was not started, and the site is as it was.', RestorePreflightStep::ID );
+		}
+		return array(
+			'phase'   => 'recount',
+			'attempt' => $cursor['attempt'],
+			'mark'    => $cursor['mark'],
 			'i'       => 0,
 			'key'     => null,
 			'sum'     => 0,
 		);
+	}
+
+	/**
+	 * The judgement of the backup's tables now (IncomingTables::judgement()), with the live tables listed now and
+	 * the given search of the usermeta table.
+	 *
+	 * @param array{plan: \WPCheckpoint\Restore\TablePlan, multisite: bool} $loaded   The plan file.
+	 * @param string[]                                                      $finals   The final names the preflight judged.
+	 * @param string[]                                                      $evidence What the search found, in hex.
+	 * @param bool                                                          $over     Whether the search stopped at its limit.
+	 * @return array{neighbour: string[], uncertain: string[], shared: string[], evidence: string[], over: bool}
+	 */
+	private function judgement( array $loaded, array $finals, array $evidence, bool $over ): array {
+		$prefix = $loaded['plan']->site_prefix();
+		$live   = ( new WpdbConnection() )->tables_with_prefix( $prefix )['tables'];
+		return IncomingTables::judgement( $prefix, $loaded['multisite'], $live, $finals, SiteTables::core(), SiteTables::users(), SiteTables::usermeta(), $evidence, $over );
 	}
 
 	/**
@@ -447,6 +537,13 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 			$this->at( 'entered' );
 			$file->put( $this->now(), array( $context, 'confirm_lease' ) );
 			$this->at( 'maintenance' );
+			// Once more before the first rename, the live tables only (the usermeta table was walked in this attempt's
+			// judge phase, and that judgement was the preflight's): the site's only change so far is the maintenance file.
+			$recorded = RestorePreflightStep::judged( $context->work_path() );
+			$loaded   = RestorePreflightStep::load_plan( $context->work_path() );
+			if ( null === $recorded || $this->judgement( $loaded, $recorded['finals'], $recorded['judgement']['evidence'], $recorded['judgement']['over'] ) !== $recorded['judgement'] ) {
+				throw new IncomingChanged( self::REJUDGED );
+			}
 			foreach ( $entries['dirs'] as $i => $entry ) {
 				$cursor = array(
 					'phase'   => 'dirs',
@@ -491,6 +588,20 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 			throw $e; // The run that takes the job over rolls back.
 		} catch ( StaleJob $e ) {
 			throw $e;
+		} catch ( IncomingChanged $e ) {
+			// Nothing renamed, the maintenance file the only change: it comes down first, then the site is recorded as
+			// untouched (a run that dies between the two finds the site entering and puts it back; one that dies after
+			// takes the file down again), then the restore starts over at its preflight. Never the rollback.
+			$context->logger()->warning( 'The backup\'s tables are judged otherwise than at the preflight; the swap stops before it renames anything' );
+			$this->take_down( $context, $cursor );
+			$this->at( 'judge_file_down' );
+			$cursor = array(
+				'phase' => 'rejudged',
+				'mark'  => $mark,
+			);
+			$context->checkpoint( $cursor, 20, __( 'The swap stopped before it changed the site', 'wp-checkpoint' ) );
+			$this->at( 'judge_recorded' );
+			throw new RetryFrom( self::REJUDGED . ' ' . self::STOOD_DOWN, RestorePreflightStep::ID );
 		} catch ( \Throwable $e ) {
 			$context->logger()->warning( 'The swap stopped', array( 'error' => $e->getMessage() ) );
 			throw $this->roll_back( $context, $db, $cursor, self::STOPPED, self::reason( $e ) );

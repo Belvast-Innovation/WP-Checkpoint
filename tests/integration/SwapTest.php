@@ -66,6 +66,7 @@ final class SwapTest extends SwapTestCase {
 			)
 		);
 		$positions = array();
+		$judged    = array();
 		for ( $i = 0; $i < 20; $i++ ) {
 			$this->autocommit(
 				static function () use ( $runner, $job ) {
@@ -73,6 +74,12 @@ final class SwapTest extends SwapTestCase {
 				}
 			);
 			$now = Plugin::instance()->jobs()->find( $job->id );
+			if ( 'judge' === ( $now->cursor['phase'] ?? '' ) ) {
+				// The judgement before it walks the usermeta table a window per unit: each tick moves that on too.
+				$judged[] = wp_json_encode( $now->cursor['meta'] ?? null );
+				$this->assertSame( count( $judged ), count( array_unique( $judged ) ), 'every tick of the judgement moved on' );
+				continue;
+			}
 			if ( 'recount' !== ( $now->cursor['phase'] ?? '' ) ) {
 				break;
 			}

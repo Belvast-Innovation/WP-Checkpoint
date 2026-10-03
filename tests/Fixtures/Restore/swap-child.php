@@ -25,7 +25,16 @@ require dirname( __DIR__, 2 ) . '/bootstrap.php';
 ob_end_clean();
 
 $seen = 0;
-$at   = static function ( string $point ) use ( $config, &$seen ): void {
+$ran  = false;
+$at   = static function ( string $point ) use ( $config, &$seen, &$ran ): void {
+	$sql_at = (array) ( $config['sql_at'] ?? array() );
+	if ( ! $ran && $point === (string) ( $sql_at['seam'] ?? '' ) ) {
+		$ran = true; // What happens meanwhile in this run (another installation's tables made, say), once.
+		foreach ( (array) ( $sql_at['sql'] ?? array() ) as $statement ) {
+			$GLOBALS['wpdb']->query( (string) $statement );
+		}
+		$GLOBALS['wpdb']->query( 'COMMIT' );
+	}
 	if ( '' !== (string) ( $config['trace'] ?? '' ) ) {
 		file_put_contents( (string) $config['trace'], $point . "\n", FILE_APPEND ); // What this run passed, for the parent.
 	}

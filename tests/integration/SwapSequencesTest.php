@@ -34,6 +34,16 @@ final class SwapSequencesTest extends SwapTestCase {
 	/** The seams of the rollback (a run killed between two batches first, then the next one killed there). */
 	const BACKWARD = array( 'rollback', 'table_back', 'dir_back', 'dirs_back', 'restored', 'unheld', 'reverted', 'maintenance_down' );
 
+	/**
+	 * The seams of a swap that stops before any rename because the backup's tables are judged otherwise once the
+	 * maintenance file is up (another installation's tables appear in the killed run at "maintenance"): the file comes
+	 * down, then the site is recorded as untouched.
+	 */
+	const JUDGE = array( 'judge_file_down', 'judge_recorded' );
+
+	/** The renames a killed run makes, by the seam right after each. */
+	const RENAMED = array( 'dir_aside', 'dir_in', 'batch_sent', 'table_back', 'dir_back' );
+
 	/** The seams after which the file has been let go: visitors are on the site. */
 	const PUBLIC_SEAMS = array( 'unheld_commit', 'rewrite', 'cron', 'done_recorded', 'exited', 'unheld', 'reverted', 'maintenance_down' );
 
@@ -72,10 +82,10 @@ final class SwapSequencesTest extends SwapTestCase {
 	}
 
 	public function test_every_seam_and_every_interleaving_keeps_the_invariants(): void {
-		$count = max( 1, (int) ( getenv( 'WPCHECKPOINT_SWAP_SEQUENCES' ) ?: 24 ) );
+		$count = max( 1, (int) ( getenv( 'WPCHECKPOINT_SWAP_SEQUENCES' ) ?: 26 ) );
 		$seed  = (int) ( getenv( 'WPCHECKPOINT_SWAP_SEQUENCES_SEED' ) ?: 1 );
-		$seams = array_merge( self::FORWARD, self::BACKWARD );
-		$this->assertSame( 24, count( $seams ), 'the default count is one sequence per seam' );
+		$seams = array_merge( self::FORWARD, self::BACKWARD, self::JUDGE );
+		$this->assertSame( 26, count( $seams ), 'the default count is one sequence per seam' );
 		$this->held_checks = array_fill_keys( self::AT_RENAME, 0 );
 		mt_srand( $seed );
 		$killed = array_fill_keys( $seams, 0 );
@@ -125,6 +135,12 @@ final class SwapSequencesTest extends SwapTestCase {
 			$this->observe( $job, $label . ' (between batches)', $decided, $public );
 		}
 		file_put_contents( $this->trace, '' );
+		if ( in_array( $seam, self::JUDGE, true ) ) {
+			$this->child_sql = array(
+				'seam' => 'maintenance',
+				'sql'  => self::neighbour_sql(),
+			);
+		}
 		if ( 'clock' === $kind ) {
 			$this->clock_offset = -660; // The killed run wrote its times eleven minutes ago.
 		}
@@ -132,6 +148,10 @@ final class SwapSequencesTest extends SwapTestCase {
 		$passed = array_values( array_filter( explode( "\n", (string) file_get_contents( $this->trace ) ) ) );
 		$this->assertSame( $seam, end( $passed ), $label . ': the run died at its seam' );
 		++$killed[ $seam ];
+		$this->child_sql = array();
+		if ( in_array( $seam, self::JUDGE, true ) ) {
+			$this->assertSame( array(), array_values( array_intersect( $passed, self::RENAMED ) ), $label . ': judged otherwise once the file was up, nothing renamed' );
+		}
 		$this->assertSame( '', self::renamed_after_decision( $passed, '' !== $decided ), $label . ': I2, nothing renamed once the direction was recorded (killed run: ' . implode( ', ', $passed ) . ')' );
 		$this->observe( $job, $label, $decided, $public );
 		$left = Plugin::instance()->jobs()->find( $job->id );
@@ -299,7 +319,28 @@ final class SwapSequencesTest extends SwapTestCase {
 		}
 		$this->undo( Plugin::instance()->jobs()->find( $job->id ) );
 		$wpdb->query( "DROP TABLE IF EXISTS `{$wpdb->prefix}swt_gone`" );
+		foreach ( self::NEIGHBOUR as $marker ) {
+			$wpdb->query( "DROP TABLE IF EXISTS `{$wpdb->prefix}swt_{$marker}`" );
+		}
 		$this->trace = '';
+	}
+
+	/** The tables of another installation under "{prefix}swt_" (JUDGE). */
+	const NEIGHBOUR = array( 'posts', 'postmeta', 'options', 'comments', 'terms', 'term_taxonomy', 'term_relationships' );
+
+	/**
+	 * The statements that make another installation's tables under "{prefix}swt_": the backup's swt_ tables become
+	 * ones that may be either installation's.
+	 *
+	 * @return string[]
+	 */
+	private static function neighbour_sql(): array {
+		global $wpdb;
+		$out = array();
+		foreach ( self::NEIGHBOUR as $marker ) {
+			$out[] = "CREATE TABLE `{$wpdb->prefix}swt_{$marker}` (id INT UNSIGNED NOT NULL PRIMARY KEY) ENGINE=InnoDB";
+		}
+		return $out;
 	}
 
 	/**

@@ -178,6 +178,46 @@ final class IncomingTables {
 	}
 
 	/**
+	 * The judgement of the backup's tables a restore acts on, in a form two judgements compare in: the tables of
+	 * each kind (classify()), sorted, and what the search of the usermeta table found. The preflight records it; the
+	 * swap judges again before it changes anything and compares (SwapStep).
+	 *
+	 * @param string   $prefix    This site's table prefix.
+	 * @param bool     $multisite Whether this site is a network.
+	 * @param string[] $live      The live tables.
+	 * @param string[] $finals    The final names of the backup's tables.
+	 * @param string[] $core      This site's WordPress tables, as WordPress names them (CUSTOM_USER_TABLE included).
+	 * @param string   $users     The users table this site uses.
+	 * @param string   $usermeta  The usermeta table this site uses.
+	 * @param string[] $evidence  The other installations' prefixes the search found (evidence()).
+	 * @param bool     $over      Whether the search stopped at its limit.
+	 * @return array{neighbour: string[], uncertain: string[], shared: string[], evidence: string[], over: bool}
+	 */
+	public static function judgement( string $prefix, bool $multisite, array $live, array $finals, array $core, string $users, string $usermeta, array $evidence, bool $over ): array {
+		$out = array(
+			self::NEIGHBOUR => array(),
+			self::UNCERTAIN => array(),
+			self::SHARED    => array(),
+		);
+		foreach ( self::classify( $prefix, $multisite, $live, $finals, $core, $users, $usermeta, array() !== $evidence ) as $final => $kind ) {
+			$out[ $kind ][] = (string) $final;
+		}
+		$evidence = array_values( array_unique( array_map( 'strval', $evidence ) ) );
+		foreach ( $out as $kind => $tables ) {
+			sort( $tables, SORT_STRING );
+			$out[ $kind ] = $tables;
+		}
+		sort( $evidence, SORT_STRING );
+		return array(
+			'neighbour' => $out[ self::NEIGHBOUR ],
+			'uncertain' => $out[ self::UNCERTAIN ],
+			'shared'    => $out[ self::SHARED ],
+			'evidence'  => $evidence,
+			'over'      => $over,
+		);
+	}
+
+	/**
 	 * The neighbours under this site's prefix, as the swap sees them.
 	 *
 	 * @param string   $prefix    This site's table prefix.

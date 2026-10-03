@@ -166,6 +166,28 @@ final class IncomingTablesTest extends TestCase {
 		}
 	}
 
+	public function test_a_judgement_compares_whatever_the_order_and_differs_when_what_it_judges_differs(): void {
+		$live   = array_merge( self::core(), self::site( 'wp_old_' ), array( 'wp_old_shop_orders', 'wp_old_zz' ) );
+		$finals = array( 'wp_options', 'wp_old_zz', 'wp_users', 'wp_old_shop_orders', 'wp_old_posts', 'wp_usermeta' );
+		$one    = IncomingTables::judgement( 'wp_', false, $live, $finals, self::core(), 'wp_users', 'wp_usermeta', array( 'b1', 'a0' ), false );
+		$this->assertSame(
+			array(
+				'neighbour' => array( 'wp_old_posts' ),
+				'uncertain' => array( 'wp_old_shop_orders', 'wp_old_zz' ),
+				'shared'    => array( 'wp_usermeta', 'wp_users' ),
+				'evidence'  => array( 'a0', 'b1' ),
+				'over'      => false,
+			),
+			$one,
+			'each kind sorted; the evidence makes the users tables shared'
+		);
+		$this->assertSame( $one, IncomingTables::judgement( 'wp_', false, array_reverse( $live ), array_reverse( $finals ), array_reverse( self::core() ), 'wp_users', 'wp_usermeta', array( 'a0', 'b1', 'a0' ), false ), 'the same in any order' );
+		// Differs with each thing it judges.
+		$this->assertNotSame( $one, IncomingTables::judgement( 'wp_', false, self::core(), $finals, self::core(), 'wp_users', 'wp_usermeta', array( 'b1', 'a0' ), false ), 'the neighbour went' );
+		$this->assertNotSame( $one, IncomingTables::judgement( 'wp_', false, $live, $finals, self::core(), 'wp_users', 'wp_usermeta', array( 'a0' ), false ), 'one installation less in the users table' );
+		$this->assertNotSame( $one, IncomingTables::judgement( 'wp_', false, $live, $finals, self::core(), 'wp_users', 'wp_usermeta', array( 'b1', 'a0' ), true ), 'the search stopped at its limit' );
+	}
+
 	public function test_with_an_empty_prefix_nothing_is_judged(): void {
 		$live = array_merge( self::site( '' ), array( 'users', 'usermeta' ), self::site( 'wp_' ) );
 		$this->assertSame( array(), IncomingTables::classify( '', false, $live, array( 'wp_posts', 'options' ), self::site( '' ), 'users', 'usermeta', false ) );
