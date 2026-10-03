@@ -42,8 +42,11 @@ defined( 'ABSPATH' ) || exit;
  *    file system, a group directory on, inside or around another, a
  *    group's parent inside the content directory but not the content
  *    directory itself, and a storage directory inside a directory the swap
- *    replaces whole. The layout, with the staging roots' random part, goes
- *    to RestoreFiles::STAGING and never changes.
+ *    replaces whole. A group reached through a link to a directory outside
+ *    this site is asked about first (LinkedTargets): swapped as usual, or
+ *    left out (its directory stays as it is). The layout, with the staging
+ *    roots' random part and the groups left out, goes to RestoreFiles::STAGING
+ *    and never changes.
  * 2. probe: one staging parent per unit (DirectoryProbe): create, write,
  *    rename, remove; how names compare there (TargetNames) and which file
  *    system it is on. A group directory on another file system than its
@@ -63,6 +66,9 @@ defined( 'ABSPATH' ) || exit;
  *    put on one file refuse the restore, named.
  * 6. space: each file system must have StagingSpace::required() free; when
  *    free space cannot be read, the user is asked (free_space_unknown).
+ *    This is the one step that may ask twice, in two phases: what has to fit
+ *    depends on the answer about linked directories (a group left out is
+ *    not staged), so the two questions cannot be asked at once.
  *
  * The probes create and remove their own entries within one unit; a unit
  * that dies in between is replayed with new names, and what it left is a
@@ -665,8 +671,10 @@ final class RestoreFilesPreflightStep implements Step {
 	}
 
 	/**
-	 * The staged groups whose directory is a link (or cannot be told not to be one) to a directory outside this site:
-	 * neither in its WordPress directory nor in the trusted deployment root (LinkedTargets).
+	 * The staged groups whose directory is reached through a link (the directory itself, or a directory on its path:
+	 * a content directory that is a link holds the groups under it) to a directory outside this site: neither in its
+	 * WordPress directory nor in the trusted deployment root (LinkedTargets). A site reached through a deployment's
+	 * link (current -> releases/N) is not asked about: its resolved WordPress directory holds the targets.
 	 *
 	 * @param array<string, string> $given  Group => directory as WordPress names it.
 	 * @param array<string, string> $groups Group => directory, resolved.
@@ -679,10 +687,12 @@ final class RestoreFilesPreflightStep implements Step {
 		clearstatcache( true );
 		$out = array();
 		foreach ( $staged as $group ) {
-			$path  = rtrim( (string) ( $given[ $group ] ?? '' ), '/\\' );
-			$state = '' === $path ? Links::UNKNOWN : Links::state( $path );
-			if ( Links::PLAIN === $state || ( Links::UNKNOWN === $state && Paths::normalize( $path ) === (string) $groups[ $group ] ) ) {
-				continue; // Not a link, or resolved to itself: no link anywhere on its path.
+			$path = rtrim( (string) ( $given[ $group ] ?? '' ), '/\\' );
+			// A link anywhere on its path, not only the directory itself (a content directory that is a link holds
+			// the groups under it): the path as given resolves elsewhere. Resolved to itself, no link is on it.
+			$through = '' === $path || Paths::normalize( $path ) !== (string) $groups[ $group ];
+			if ( ! $through && Links::LINK !== ( '' === $path ? Links::UNKNOWN : Links::state( $path ) ) ) {
+				continue;
 			}
 			if ( LinkedTargets::outside( (string) $groups[ $group ], false === $abspath ? '' : (string) $abspath, $trusted ) ) {
 				$out[ $group ] = (string) $groups[ $group ];

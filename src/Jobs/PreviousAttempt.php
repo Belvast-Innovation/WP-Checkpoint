@@ -8,6 +8,7 @@
 namespace WPCheckpoint\Jobs;
 
 use WPCheckpoint\Restore\RestoreFiles;
+use WPCheckpoint\Restore\SiteTables;
 use WPCheckpoint\Restore\StagingLayout;
 use WPCheckpoint\Support\Deleter;
 use WPCheckpoint\Support\DeletionRefused;
@@ -72,7 +73,8 @@ final class PreviousAttempt {
 						$tables[ $name ] = true;
 					}
 				}
-			} catch ( \RuntimeException $e ) {
+			} catch ( \RuntimeException | \InvalidArgumentException $e ) {
+				// Gone, damaged, or naming its tables in a form that is not this job's: no record to go by.
 				$context->logger()->warning( 'The earlier attempt\'s plan could not be read; its tables are left to the reclaim at the end of the job', array( 'error' => $e->getMessage() ) );
 			}
 		}
@@ -87,7 +89,7 @@ final class PreviousAttempt {
 						$roots[ $layout->root( (string) $group ) ] = $layout->parent( (string) $group );
 					}
 				}
-			} catch ( \RuntimeException $e ) {
+			} catch ( \RuntimeException | \InvalidArgumentException $e ) {
 				$context->logger()->warning( 'The earlier attempt\'s staging layout could not be read; its staging roots are left to the reclaim at the end of the job', array( 'error' => $e->getMessage() ) );
 			}
 		}
@@ -144,11 +146,12 @@ final class PreviousAttempt {
 			throw new TransientFailure( 'The list of what the earlier attempt of the restore left could not be read: ' . $e->getMessage() ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
 		}
 		if ( 'tables' === $position['part'] ) {
-			$there = self::there( $job );
+			$fold  = SiteTables::fold_case(); // A server that folds case lists the names folded.
+			$there = self::there( $job, $fold );
 			$drop  = array();
 			foreach ( (array) ( $list['tables'] ?? array() ) as $name ) {
 				$name = (string) $name;
-				if ( isset( $there[ $name ] ) && ! in_array( $name, $position['left'], true ) ) {
+				if ( isset( $there[ $fold ? strtolower( $name ) : $name ] ) && ! in_array( $name, $position['left'], true ) ) {
 					$drop[] = $name; // On the list and still there: what is gone already is passed.
 				}
 			}
@@ -158,6 +161,11 @@ final class PreviousAttempt {
 			}
 			$result = TempTableDropper::drop( $drop, TempTables::owner_prefix( $job->storage_token ), self::UNIT_STATEMENTS, null, $confirm );
 			$left   = array_merge( $result['failed'], array_keys( $result['kept'] ) );
+			if ( '' !== $result['stopped'] ) {
+				// The dropper stopped before them (the session's key checks could not be read back as set): they would
+				// be tried again in every unit. Left, like those it could not drop.
+				$left = array_merge( $left, $result['remaining'] );
+			}
 			if ( array() !== $left ) {
 				// Given up on in this pass (a foreign key of another table, or a DROP the server refused): the reclaim at the
 				// end of the job tries them again.
@@ -172,9 +180,17 @@ final class PreviousAttempt {
 		}
 		$root   = (string) ( $roots[ $position['r'] ]['path'] ?? '' );
 		$parent = (string) ( $roots[ $position['r'] ]['parent'] ?? '' );
+		$owner  = StagingLayout::parse( basename( $root ) );
+		if ( null === $owner || 'stage' !== $owner['kind'] || $owner['token'] !== $job->storage_token || $owner['job_id'] !== $job->id || '' === $parent || ! Paths::same( dirname( $root ), $parent, false ) ) {
+			// Not one of this job's staging roots in the directory it names (the list was changed since it was written):
+			// never deleted here.
+			$context->logger()->warning( 'An entry of the list of what the earlier attempt of the restore left is not one of this job\'s staging roots; it is left as it is', array( 'root' => $root ) );
+			++$position['r'];
+			return $position['r'] >= count( $roots );
+		}
 		clearstatcache( true, $root );
-		if ( '' === $root || '' === $parent || false === @lstat( $root ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- not there: told apart below.
-			if ( '' !== $root && ! Paths::positively_gone( $root ) ) {
+		if ( false === @lstat( $root ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- not there: told apart below.
+			if ( ! Paths::positively_gone( $root ) ) {
 				$context->logger()->warning( 'Whether a staging root of the earlier attempt of the restore is there cannot be told; it is left to the reclaim at the end of the job', array( 'root' => $root ) );
 			}
 			++$position['r'];
@@ -207,11 +223,12 @@ final class PreviousAttempt {
 	/**
 	 * This job's temporary tables as the server lists them (only to tell which names on the list are still there).
 	 *
-	 * @param Job $job Job.
+	 * @param Job  $job  Job.
+	 * @param bool $fold Whether the server compares table names without case (the names then lowercase).
 	 * @return array<string, true>
 	 * @throws TransientFailure When they cannot be listed.
 	 */
-	private static function there( Job $job ): array {
+	private static function there( Job $job, bool $fold ): array {
 		global $wpdb;
 		$prefix = TempTables::job_prefix( $job->storage_token, $job->id );
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- table listing.
@@ -219,7 +236,8 @@ final class PreviousAttempt {
 		if ( '' !== self::db_error() ) {
 			throw new TransientFailure( 'The tables of the database could not be listed.' );
 		}
-		return array_fill_keys( array_map( 'strval', (array) $names ), true );
+		$names = array_map( 'strval', (array) $names );
+		return array_fill_keys( $fold ? array_map( 'strtolower', $names ) : $names, true );
 	}
 
 	/**

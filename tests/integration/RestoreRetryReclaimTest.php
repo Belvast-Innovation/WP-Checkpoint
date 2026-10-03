@@ -169,6 +169,66 @@ final class RestoreRetryReclaimTest extends SwapTestCase {
 		}
 	}
 
+	public function test_an_entry_of_the_list_that_is_not_one_of_this_jobs_staging_roots_is_never_deleted(): void {
+		$job     = $this->at_swap();
+		$old     = $this->recorded( $job );
+		$name    = basename( $old['roots'][0] );
+		$foreign = $old['parent'] . '/' . str_replace( '-' . $job->id . '-', '-' . ( $job->id + 1000 ) . '-', $name );
+		$this->assertNotSame( $old['parent'] . '/' . $name, $foreign );
+		mkdir( $foreign . '/uploads', 0755, true );
+		file_put_contents( $foreign . '/uploads/theirs.txt', 'another job\'s' );
+		$this->retried_from_the_preflight( $job );
+		$work                  = $this->work( Plugin::instance()->jobs()->find( $job->id ) );
+		$changed               = false;
+		$this->preflight_parts = array(
+			'deleting' => static function () use ( &$changed, $work, $foreign ): void {
+				if ( $changed ) {
+					return;
+				}
+				// The list is changed after it was written (before the first deletion): another job's root added.
+				$changed = true;
+				$path    = $work . '/' . \WPCheckpoint\Restore\RestoreFiles::RECLAIM;
+				$list    = json_decode( (string) file_get_contents( $path ), true );
+				array_unshift(
+					$list['roots'],
+					array(
+						'path'   => $foreign,
+						'parent' => dirname( $foreign ),
+					)
+				);
+				file_put_contents( $path, (string) wp_json_encode( $list ) );
+			},
+		);
+		$this->retype( $job );
+		$this->back_at_the_swap( $job );
+		$this->assertTrue( $changed, 'the control: the list was changed' );
+		$this->assertFileExists( $foreign . '/uploads/theirs.txt', 'another job\'s staging root is never deleted' );
+		foreach ( $old['roots'] as $root ) {
+			$this->assertDirectoryDoesNotExist( $root, 'the control: this job\'s roots went' );
+		}
+		$now = Plugin::instance()->jobs()->find( $job->id );
+		// (Not the word after it: the test database's user is "root", and the log redacts the database credentials.)
+		$this->assertStringContainsString( 'the earlier attempt of the restore left is not one of this job\'s staging', (string) file_get_contents( $now->storage_path . '/' . $now->log_path ) );
+	}
+
+	public function test_a_damaged_earlier_plan_leaves_its_tables_to_the_end_of_the_job_and_the_restore_goes_on(): void {
+		global $wpdb;
+		$job  = $this->at_swap();
+		$old  = $this->recorded( $job );
+		$path = $this->work( $job ) . '/' . \WPCheckpoint\Restore\RestoreFiles::PLAN;
+		$plan = json_decode( (string) file_get_contents( $path ), true );
+		$plan['random'] = 'not-hex'; // A random part no table name of this job can have.
+		file_put_contents( $path, (string) wp_json_encode( $plan ) );
+		$this->retried_from_the_preflight( $job );
+		$this->back_at_the_swap( $job );
+		$this->assertTrue( self::table_there( $old['tables'][0] ), 'no record to go by: the earlier tables wait for the end of the job' );
+		foreach ( $old['roots'] as $root ) {
+			$this->assertDirectoryDoesNotExist( $root, 'the staging roots have their own record' );
+		}
+		$now = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertStringContainsString( 'plan could not be read; its tables are left to the reclaim at the end of the job', (string) file_get_contents( $now->storage_path . '/' . $now->log_path ) );
+	}
+
 	public function test_a_staging_root_holding_what_a_rollback_moved_aside_is_kept(): void {
 		$job  = $this->at_swap();
 		$old  = $this->recorded( $job );

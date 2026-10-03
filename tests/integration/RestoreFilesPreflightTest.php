@@ -666,6 +666,27 @@ final class RestoreFilesPreflightTest extends RestoreTestCase {
 		$this->assertStringContainsString( 'An answer given for other linked directories than the restore would now ask about is not used', self::log( $job ) );
 	}
 
+	public function test_a_group_under_a_directory_that_is_a_link_is_asked_about_too(): void {
+		// The group's own directory is not a link; the one holding it is (a content directory linked elsewhere).
+		$real = $this->dir( sys_get_temp_dir() . '/wpc-real-content-' . bin2hex( random_bytes( 3 ) ) );
+		mkdir( $real . '/uploads' );
+		$link = WP_CONTENT_DIR . '/wpc-linked-content-' . bin2hex( random_bytes( 3 ) );
+		symlink( $real, $link );
+		$this->made[] = $link;
+		$this->assertFalse( is_link( $link . '/uploads' ), 'the control: the group directory itself is no link' );
+		$site = ScanRoots::site_directories();
+		$type = $this->type(
+			array(
+				'directories' => static function () use ( $site, $link ): array {
+					return array_merge( $site, array( 'uploads' => $link . '/uploads' ) );
+				},
+			)
+		);
+		$job  = $this->run_restore( $this->job_for( $type, $this->with_files( array( 'wp-content/uploads/a.txt' => 'a' ) ) ) );
+		$this->assertSame( Job::PAUSED, $job->status, (string) $job->last_error );
+		$this->assertSame( LinkedTargets::id( array( 'uploads' => self::real( $real . '/uploads' ) ) ), $job->questions[0]['id'] );
+	}
+
 	public function test_a_link_into_the_trusted_root_and_a_plain_directory_outside_the_site_are_not_asked_about(): void {
 		$real          = $this->dir( sys_get_temp_dir() . '/wpc-real-uploads-' . bin2hex( random_bytes( 3 ) ) );
 		$base          = $this->with_files( array( 'wp-content/uploads/a.txt' => 'a' ) );
