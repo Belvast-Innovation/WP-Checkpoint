@@ -4,7 +4,8 @@
  * ISPConfig and many DirectAdmin hosts set it). Reads the cases from the JSON file given, prints each verdict.
  *
  * Usage: php -d open_basedir=... judge-child.php <cases.json>
- * Cases: [{"given": "...", "zones": ["...", ...]}, ...]. Prints JSON: ["site"|"outside"|"installation"|"unknown", ...].
+ * Cases: [{"given": "...", "zones": ["...", ...]}, ...], or "zone_args": [abspath, trusted, config_dir] in place of "zones"
+ * to have the zones found under the restriction too (LinkedTargets::zones(), no directory taken as a home). Prints JSON: ["site"|"outside"|"installation"|"unknown", ...].
  *
  * @package WPCheckpoint
  */
@@ -23,7 +24,12 @@ if ( ! is_array( $cases ) ) {
 }
 $out = array();
 foreach ( $cases as $case ) {
-	$out[] = \WPCheckpoint\Restore\LinkedTargets::judge( (string) $case['given'], array_map( 'strval', (array) $case['zones'] ) )['verdict'];
+	$zones = isset( $case['zone_args'] )
+		? \WPCheckpoint\Restore\LinkedTargets::zones( ...array_merge( array_map( 'strval', (array) $case['zone_args'] ), array( static function (): bool {
+			return false;
+		} ) ) )
+		: array_map( 'strval', (array) $case['zones'] );
+	$out[] = \WPCheckpoint\Restore\LinkedTargets::judge( (string) $case['given'], $zones )['verdict'];
 }
 echo json_encode( $out );
 exit( 0 );

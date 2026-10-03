@@ -230,8 +230,9 @@ final class LinkedTargets {
 	 * Whether the zone of a wp-config.php stands: none of its direct subdirectories but the one this site's WordPress
 	 * directory is in (its branch) is another installation's root (root_state()). Names would always miss some
 	 * (/data/www, /opt/sites): a zone that holds another site beside this one is broader than this site, and a shared
-	 * directory beside them (another site's UPLOADS) would be taken in. A zone whose entries cannot all be read, or
-	 * that has more than CHILDREN_LIMIT, does not stand.
+	 * directory beside them (another site's UPLOADS) would be taken in. A subdirectory that is a link counts where it
+	 * leads (a link to this site's branch is the branch). A zone whose entries, or where they lead, cannot all be told,
+	 * or that has more than CHILDREN_LIMIT, does not stand.
 	 *
 	 * @param string $zone         The zone, resolved.
 	 * @param string $abspath_real This site's WordPress directory, resolved.
@@ -257,10 +258,26 @@ final class LinkedTargets {
 					return false;
 				}
 				$child = $zone . '/' . $name;
-				if ( $name === $branch || is_link( $child ) || ! is_dir( $child ) ) {
-					continue; // This site's branch; a file; a link (not this zone's own subdirectory).
+				if ( $name === $branch ) {
+					continue; // This site's branch.
 				}
-				if ( false !== self::root_state( $child ) ) {
+				$kind = self::kind( $child );
+				if ( 'unknown' === $kind ) {
+					return false; // What it is, or what it leads to, cannot be told.
+				}
+				if ( 'dir' !== $kind ) {
+					continue; // A file, or a link to one.
+				}
+				// A link is judged by where it leads: another site linked into the zone sits beside this one all the same.
+				$real = Paths::real( $child );
+				if ( false === $real ) {
+					return false;
+				}
+				$real = rtrim( Paths::normalize( (string) $real ), '/' );
+				if ( '' !== $branch && self::within( $zone . '/' . $branch, $real ) ) {
+					continue; // This site's branch by another name (a deployment's current).
+				}
+				if ( false !== self::root_state( $real ) ) {
 					return false; // Another installation's root, or a directory that cannot be told.
 				}
 			}
@@ -382,7 +399,12 @@ final class LinkedTargets {
 				if ( ++$count > self::CHILDREN_LIMIT ) {
 					return null; // Too many beside the front controller to look into.
 				}
-				if ( ! @is_dir( $dir . '/' . $name ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a file: passed.
+				$kind = self::kind( $dir . '/' . $name );
+				if ( 'other' === $kind ) {
+					continue; // Positively not a directory.
+				}
+				if ( 'unknown' === $kind ) {
+					$unknown = true; // Read the others: one of them may tell.
 					continue;
 				}
 				$inside = self::lists( $dir . '/' . $name, array( 'wp-load.php' ) );
@@ -399,13 +421,37 @@ final class LinkedTargets {
 	}
 
 	/**
+	 * What a directory entry is, told only from positive evidence: "dir", "other" (positively not a directory), or
+	 * "unknown" (its status cannot be read: a link out of open_basedir, a target that cannot be searched, a thread-safe
+	 * PHP's lookup in a directory that cannot be searched). A link counts as what it leads to.
+	 *
+	 * @param string $path The entry.
+	 * @return string
+	 */
+	private static function kind( string $path ): string {
+		$stat = @lstat( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- not to be read: unknown.
+		if ( false === $stat ) {
+			return 'unknown';
+		}
+		$mode = (int) $stat['mode'] & 0170000;
+		if ( 0120000 === $mode ) {
+			$stat = @stat( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- as above.
+			if ( false === $stat ) {
+				return 'unknown';
+			}
+			$mode = (int) $stat['mode'] & 0170000;
+		}
+		return 0040000 === $mode ? 'dir' : 'other';
+	}
+
+	/**
 	 * Which of the names a directory's listing holds, read an entry at a time (memory bounded whatever it holds; time
 	 * as many entries as it has); null when it cannot be listed. A listing is the evidence: a name looked up one by
 	 * one may not be found for other reasons than not being there (a thread-safe PHP's lookups in a directory that
 	 * cannot be searched, open_basedir for a link to a file outside it).
 	 *
 	 * @param string   $dir   Directory.
-	 * @param string[] $names Names.
+	 * @param string[] $names Names, lowercase (the listing is compared without case).
 	 * @return string[]|null
 	 */
 	private static function lists( string $dir, array $names ) {
@@ -416,8 +462,11 @@ final class LinkedTargets {
 		$found = array();
 		try {
 			while ( false !== ( $name = readdir( $handle ) ) ) { // phpcs:ignore Generic.CodeAnalysis.AssignmentInCondition.FoundInWhileCondition -- the readdir() idiom.
-				if ( in_array( $name, $names, true ) ) {
-					$found[] = $name;
+				$lower = strtolower( $name );
+				foreach ( $names as $wanted ) {
+					if ( $lower === $wanted ) {
+						$found[] = $wanted; // Without case: a file system that ignores it loads it too (and a name in another case only asks).
+					}
 				}
 			}
 		} finally {

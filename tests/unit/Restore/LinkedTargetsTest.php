@@ -269,17 +269,101 @@ final class LinkedTargetsTest extends TestCase {
 		$this->assertFalse( LinkedTargets::root_state( $this->dir . '/odd' ), 'a directory named index.php is no front controller' );
 	}
 
-	public function test_a_link_in_the_zone_to_another_installation_does_not_undo_the_zone(): void {
+	public function test_a_subdirectory_beside_a_front_controller_that_cannot_be_told_is_not_passed_over(): void {
+		if ( '\\' === DIRECTORY_SEPARATOR || ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) ) {
+			$this->markTestSkipped( 'Needs a directory this user cannot list (not on Windows, not as root).' );
+		}
 		$d = $this->dir;
-		mkdir( "{$d}/web/wp", 0755, true );
-		file_put_contents( "{$d}/web/wp-config.php", '<?php' );
+		mkdir( "{$d}/own/wp", 0755, true );
+		mkdir( "{$d}/own/zz-plain", 0755, true ); // Read after the one that cannot be: the unknown is carried over.
+		file_put_contents( "{$d}/own/index.php", "<?php require __DIR__ . '/wp/wp-blog-header.php';" );
+		file_put_contents( "{$d}/own/wp/wp-load.php", '<?php' );
+		$this->assertTrue( LinkedTargets::root_state( "{$d}/own" ), 'the control: listed, a root' );
+		chmod( "{$d}/own/wp", 0311 ); // Searchable, not listable: its core cannot be seen.
+		try {
+			$this->assertFalse( @scandir( "{$d}/own/wp" ), 'the control: it cannot be listed' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- the control.
+			$this->assertNull( LinkedTargets::root_state( "{$d}/own" ) );
+		} finally {
+			chmod( "{$d}/own/wp", 0755 );
+		}
+	}
+
+	public function test_root_files_are_read_from_a_listing_even_where_they_cannot_be_looked_up(): void {
+		if ( '\\' === DIRECTORY_SEPARATOR || ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) ) {
+			$this->markTestSkipped( 'Needs a directory this user cannot search (not on Windows, not as root).' );
+		}
+		$d = $this->dir;
+		// 0600: listable, not searchable; a lookup of a name in it fails (on a thread-safe PHP even when it is there).
+		mkdir( "{$d}/other", 0755, true );
+		file_put_contents( "{$d}/other/wp-config.php", '<?php' );
+		mkdir( "{$d}/zone/html", 0755, true );
+		mkdir( "{$d}/zone/beside", 0755, true );
+		file_put_contents( "{$d}/zone/beside/wp-load.php", '<?php' );
+		mkdir( "{$d}/quiet/html", 0755, true );
+		mkdir( "{$d}/quiet/plain", 0755, true );
+		chmod( "{$d}/other", 0600 );
+		chmod( "{$d}/zone/beside", 0600 );
+		chmod( "{$d}/quiet/plain", 0600 );
+		try {
+			$this->assertFalse( @file_exists( "{$d}/other/wp-config.php" ), 'the control: it cannot be looked up' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- the control.
+			$this->assertTrue( LinkedTargets::root_state( "{$d}/other" ) );
+			$this->assertFalse( LinkedTargets::zone_stands( "{$d}/zone", "{$d}/zone/html" ), 'another site beside this one' );
+			$this->assertTrue( LinkedTargets::zone_stands( "{$d}/quiet", "{$d}/quiet/html" ), 'the control: a plain directory beside it, listed' );
+		} finally {
+			chmod( "{$d}/other", 0755 );
+			chmod( "{$d}/zone/beside", 0755 );
+			chmod( "{$d}/quiet/plain", 0755 );
+		}
+	}
+
+	public function test_names_are_matched_without_regard_to_case(): void {
+		$d = $this->dir;
+		mkdir( "{$d}/upper", 0755, true );
+		file_put_contents( "{$d}/upper/WP-Config.PHP", '<?php' ); // As a case-insensitive file system may hold it.
+		$this->assertTrue( LinkedTargets::root_state( "{$d}/upper" ) );
+		mkdir( "{$d}/front/WP", 0755, true );
+		file_put_contents( "{$d}/front/index.php", "<?php require __DIR__ . '/WP/wp-blog-header.php';" );
+		file_put_contents( "{$d}/front/WP/WP-LOAD.php", '<?php' );
+		$this->assertTrue( LinkedTargets::root_state( "{$d}/front" ), 'a front controller and its core' );
+		mkdir( "{$d}/plain", 0755, true );
+		file_put_contents( "{$d}/plain/wp-config.php.bak", '<?php' );
+		$this->assertFalse( LinkedTargets::root_state( "{$d}/plain" ), 'the control: another name' );
+	}
+
+	public function test_a_file_systems_root_given_as_a_zone_is_none_not_the_working_directory(): void {
+		$cwd = (string) getcwd();
+		mkdir( $this->dir . '/cwd', 0755, true );
+		chdir( $this->dir . '/cwd' ); // realpath( '' ) would be this.
+		try {
+			$this->assertSame( array( '', '', '' ), LinkedTargets::zones( '/', '//', '/' ) );
+			$this->assertSame( array( '', '', '' ), LinkedTargets::zones( '', 'C:', 'c:\\' ) );
+			$real = rtrim( Paths::normalize( (string) realpath( $this->dir . '/cwd' ) ), '/' );
+			$this->assertSame( $real, LinkedTargets::zones( $this->dir . '/cwd', '', '' )[0], 'the control: a directory is' );
+		} finally {
+			chdir( $cwd );
+		}
+	}
+
+	public function test_a_link_in_the_zone_counts_where_it_leads(): void {
+		$d = $this->dir;
+		mkdir( "{$d}/srv/releases/7", 0755, true ); // A deployment: wp-config.php above, current linked to a release.
+		mkdir( "{$d}/srv/media/uploads", 0755, true );
+		file_put_contents( "{$d}/srv/wp-config.php", '<?php' );
+		file_put_contents( "{$d}/srv/releases/7/wp-load.php", '<?php' );
+		symlink( "{$d}/srv/releases/7", "{$d}/srv/current" );
+		mkdir( "{$d}/elsewhere/media", 0755, true );
+		symlink( "{$d}/elsewhere/media", "{$d}/srv/linked-media" );
+		$this->assertTrue( LinkedTargets::zone_stands( "{$d}/srv", "{$d}/srv/releases/7" ), 'this site\'s branch by another name, and a plain directory elsewhere' );
+		// Another site linked into the zone sits beside this one all the same (media beside it may be its).
 		mkdir( "{$d}/elsewhere/other", 0755, true );
 		file_put_contents( "{$d}/elsewhere/other/wp-load.php", '<?php' );
-		symlink( "{$d}/elsewhere/other", "{$d}/web/linked" ); // What is reached through it is judged where it is.
-		$this->assertTrue( LinkedTargets::zone_stands( "{$d}/web", "{$d}/web/wp" ) );
-		mkdir( "{$d}/web/other", 0755, true );
-		file_put_contents( "{$d}/web/other/wp-load.php", '<?php' );
-		$this->assertFalse( LinkedTargets::zone_stands( "{$d}/web", "{$d}/web/wp" ), 'the control: the same installation as a directory of the zone' );
+		symlink( "{$d}/elsewhere/other", "{$d}/srv/linked" );
+		$this->assertFalse( LinkedTargets::zone_stands( "{$d}/srv", "{$d}/srv/releases/7" ) );
+		mkdir( "{$d}/two/html", 0755, true );
+		file_put_contents( "{$d}/two/html/wp-load.php", '<?php' );
+		$this->assertTrue( LinkedTargets::zone_stands( "{$d}/two", "{$d}/two/html" ), 'the control' );
+		symlink( "{$d}/no-such", "{$d}/two/linked" ); // Leads nowhere that can be told.
+		$this->assertFalse( LinkedTargets::zone_stands( "{$d}/two", "{$d}/two/html" ) );
 	}
 
 	public function test_a_directory_with_a_great_many_entries_is_read_in_bounded_memory(): void {
