@@ -281,12 +281,16 @@ abstract class SwapTestCase extends RestoreTestCase {
 	/**
 	 * A restore of the swap backup, run up to the swap (the job then stands at the swap step, queued for WP-CLI).
 	 *
-	 * @param array<string, mixed> $options More options of the job.
+	 * @param array<string, mixed> $options      More options of the job.
+	 * @param callable|null        $after_backup function(): void, between the backup and the restore.
 	 * @return Job
 	 */
-	protected function at_swap( array $options = array() ): Job {
+	protected function at_swap( array $options = array(), $after_backup = null ): Job {
 		global $wpdb;
 		$base    = $this->swap_backup();
+		if ( null !== $after_backup ) {
+			call_user_func( $after_backup );
+		}
 		// The restore must bring the options (and a network's sitemeta): the restored site's list of active plugins.
 		$exclude = array_values( array_diff( self::live_tables(), array_merge( array( $wpdb->prefix . 'swt_keep', $wpdb->prefix . 'swt_gone' ), self::site_tables() ) ) );
 		$job     = Plugin::instance()->jobs()->create( $this->type, self::$admin_id, array(), array_merge( array( 'base' => $base, 'exclude_tables' => $exclude ), $options ) );
