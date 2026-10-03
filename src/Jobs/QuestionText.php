@@ -133,15 +133,20 @@ final class QuestionText {
 		} catch ( \RuntimeException $e ) {
 			return array();
 		}
-		$targets = array();
-		foreach ( (array) ( $file['hex'] ?? array() ) as $group => $hex ) {
-			$bytes = is_string( $hex ) && 1 === preg_match( '/\A(?:[0-9a-f]{2})*\z/', $hex ) ? hex2bin( $hex ) : false;
-			if ( false === $bytes ) {
+		$why = array();
+		foreach ( (array) ( $file['hex'] ?? array() ) as $group => $entry ) {
+			$target = is_array( $entry ) ? self::unhex( $entry['target'] ?? null ) : false;
+			$at     = is_array( $entry ) ? self::unhex( $entry['at'] ?? null ) : false;
+			if ( false === $target || false === $at || ! is_string( $entry['verdict'] ?? null ) ) {
 				return array();
 			}
-			$targets[ (string) $group ] = $bytes;
+			$why[ (string) $group ] = array(
+				'target'  => $target,
+				'verdict' => $entry['verdict'],
+				'at'      => $at,
+			);
 		}
-		if ( array() === $targets || ! hash_equals( LinkedTargets::id( $targets ), $id ) ) {
+		if ( array() === $why || ! hash_equals( LinkedTargets::id( $why ), $id ) ) {
 			return array();
 		}
 		$entries = array();
@@ -157,6 +162,16 @@ final class QuestionText {
 			}
 		}
 		return LinkedTargets::lines( $entries, $clean );
+	}
+
+	/**
+	 * Bytes from hex as the work file holds them, or false when it is not hex.
+	 *
+	 * @param mixed $hex Hex.
+	 * @return string|false
+	 */
+	private static function unhex( $hex ) {
+		return is_string( $hex ) && 1 === preg_match( '/\A(?:[0-9a-f]{2})*\z/', $hex ) ? hex2bin( $hex ) : false;
 	}
 
 	/**

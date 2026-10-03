@@ -95,6 +95,17 @@ final class LinkedTargetsLayoutsTest extends TestCase {
 				self::wp( "{$site}/staging", array( 'wp-config.php' ) );
 				self::mk( "{$site}/staging/wp-content/uploads" );
 				$targets[] = array( "{$site}/staging/wp-content/uploads", self::OTHER, true );
+				// wp-content's own index.php, and a staging site inside wp-content: wp-content stays this site's.
+				file_put_contents( "{$site}/wp-content/index.php", "<?php\n// Silence is golden.\n" );
+				self::wp( "{$site}/wp-content/staging2", array( 'wp-load.php' ) );
+				self::mk( "{$site}/wp-content/staging2/wp-content/uploads" );
+				$targets[] = array( "{$site}/wp-content/staging2/wp-content/uploads", self::OTHER, true );
+				// Another installation in its own directory inside this one: a front controller, the core beside it.
+				self::mk( "{$site}/blog/wp" );
+				file_put_contents( "{$site}/blog/index.php", "<?php\nrequire __DIR__ . '/wp/wp-blog-header.php';\n" );
+				file_put_contents( "{$site}/blog/wp/wp-load.php", '<?php' );
+				self::mk( "{$site}/blog/wp-content/uploads" );
+				$targets[] = array( "{$site}/blog/wp-content/uploads", self::OTHER, true );
 				$abspath = $site;
 				$config  = $site;
 				if ( 'standard+current' === $name ) {
@@ -108,6 +119,7 @@ final class LinkedTargetsLayoutsTest extends TestCase {
 				$root = 'bedrock' === $name ? "{$base}/srv/bed" : "{$base}/srv/bed/releases/9";
 				self::wp( "{$root}/web", array( 'wp-config.php' ) );
 				self::wp( "{$root}/web/wp", array( 'wp-load.php' ) );
+				file_put_contents( "{$root}/web/index.php", "<?php\nrequire __DIR__ . '/wp/wp-blog-header.php';\n" );
 				foreach ( array( 'uploads', 'plugins', 'themes', 'mu-plugins' ) as $dir ) {
 					self::mk( "{$root}/web/app/{$dir}" );
 					$targets[] = array( "{$root}/web/app/{$dir}", self::SITE, true );
@@ -123,6 +135,24 @@ final class LinkedTargetsLayoutsTest extends TestCase {
 					$abspath = "{$base}/srv/bed/current/web/wp";
 					$current = array( $root, "{$base}/srv/bed/current" );
 				}
+				break;
+			case 'hardened':
+				// wp-config.php one level above the WordPress directory, in a directory that also holds another site and
+				// a directory that site shares (its UPLOADS): the zone does not stand, the shared one is asked about.
+				$www = "{$base}/var/www";
+				self::wp( "{$www}/html", array( 'wp-load.php' ) );
+				self::wp( $www, array( 'wp-config.php' ) );
+				foreach ( array( 'uploads', 'plugins' ) as $dir ) {
+					self::mk( "{$www}/html/wp-content/{$dir}" );
+					$targets[] = array( "{$www}/html/wp-content/{$dir}", self::SITE, true );
+				}
+				self::wp( "{$www}/other", array( 'wp-load.php', 'wp-config.php' ) );
+				self::mk( "{$www}/other/wp-content/uploads" );
+				$targets[] = array( "{$www}/other/wp-content/uploads", self::OTHER, true );
+				self::mk( "{$www}/shared-media/uploads" );
+				$targets[] = array( "{$www}/shared-media/uploads", self::NONE, true );
+				$abspath = "{$www}/html";
+				$config  = $www;
 				break;
 			case 'trellis':
 				// A deployment whose uploads are a link from the release into the deployment's shared directory: the
@@ -200,7 +230,7 @@ final class LinkedTargetsLayoutsTest extends TestCase {
 	private function cases( $zones_of = null ): array {
 		$cases = array();
 		foreach ( array( false, true ) as $trusted ) {
-			foreach ( array_merge( self::NAMED, array( 'home-config', 'trellis' ) ) as $name ) {
+			foreach ( array_merge( self::NAMED, array( 'home-config', 'trellis', 'hardened' ) ) as $name ) {
 				$layout = $this->layout( $name, $trusted );
 				$zones  = null !== $zones_of ? call_user_func( $zones_of, $layout ) : self::zones( $layout );
 				foreach ( $layout['targets'] as $target ) {
@@ -227,11 +257,13 @@ final class LinkedTargetsLayoutsTest extends TestCase {
 	 *
 	 * @return string[]
 	 */
-	private static function zones( array $layout ): array {
+	private static function zones( array $layout, bool $structure = true ): array {
+		$abspath = rtrim( Paths::normalize( (string) realpath( $layout['abspath'] ) ), '/' );
+		$config  = LinkedTargets::config_zone( rtrim( Paths::normalize( (string) realpath( $layout['config'] ) ), '/' ), $layout['is_home'] );
 		return array(
-			rtrim( Paths::normalize( (string) realpath( $layout['abspath'] ) ), '/' ),
+			$abspath,
 			'' === $layout['trusted'] ? '' : rtrim( Paths::normalize( (string) realpath( $layout['trusted'] ) ), '/' ),
-			LinkedTargets::config_zone( rtrim( Paths::normalize( (string) realpath( $layout['config'] ) ), '/' ), $layout['is_home'] ),
+			'' !== $config && ( ! $structure || LinkedTargets::zone_stands( $config, $abspath ) ) ? $config : '',
 		);
 	}
 
@@ -337,6 +369,8 @@ final class LinkedTargetsLayoutsTest extends TestCase {
 			'without the home and root exclusion'                 => array( 'no-exclusion', 'O1' ),
 			'the earlier rule (a link on the path)'               => array( 'old-rule', 'O1' ),
 			'without the directory of wp-config.php as a zone'    => array( 'no-config-zone', 'O2' ),
+			'without the check of what the zone holds'           => array( 'no-zone-check', 'O1' ),
+			'without the front controller rule for a root'        => array( 'no-front-controller', 'O1' ),
 		);
 	}
 
@@ -345,6 +379,11 @@ final class LinkedTargetsLayoutsTest extends TestCase {
 	 */
 	public function test_a_withdrawn_part_breaks_an_invariant( string $variant, string $invariant ): void {
 		$zones_of = null;
+		if ( 'no-zone-check' === $variant ) {
+			$zones_of = static function ( array $layout ): array {
+				return self::zones( $layout, false );
+			};
+		}
 		if ( 'no-config-zone' === $variant ) {
 			$zones_of = static function ( array $layout ): array {
 				$zones    = self::zones( $layout );
@@ -366,6 +405,8 @@ final class LinkedTargetsLayoutsTest extends TestCase {
 			if ( 'no-installation' === $variant ) {
 				$resolved = LinkedTargets::resolve( $case['given'] );
 				$asked[]  = '' === $resolved || '' === LinkedTargets::boundary( $resolved, $case['zones'] );
+			} elseif ( 'no-front-controller' === $variant ) {
+				$asked[] = self::asked_by_files_only( $case );
 			} elseif ( 'old-rule' === $variant ) {
 				$asked[] = self::old_rule( $case['given'], $case['zones'][0], $case['zones'][1] );
 			} else {
@@ -374,6 +415,26 @@ final class LinkedTargetsLayoutsTest extends TestCase {
 		}
 		$result = self::check( $cases, $asked );
 		$this->assertNotSame( array(), preg_grep( '/\A' . $invariant . ' /', $result['violations'] ), $variant . ': ' . implode( ' | ', array_slice( $result['violations'], 0, 3 ) ) );
+	}
+
+	/**
+	 * The rule with a root told by wp-load.php and wp-config.php only (no front controller), for the reverse
+	 * validation.
+	 */
+	private static function asked_by_files_only( array $case ): bool {
+		clearstatcache( true );
+		$resolved = LinkedTargets::resolve( $case['given'] );
+		$boundary = '' === $resolved ? '' : LinkedTargets::boundary( $resolved, $case['zones'] );
+		if ( '' === $boundary ) {
+			return true;
+		}
+		for ( $dir = $resolved; strlen( $dir ) > strlen( $boundary ); $dir = dirname( $dir ) ) {
+			$entries = is_dir( $dir ) ? scandir( $dir ) : array();
+			if ( array() !== array_intersect( LinkedTargets::ROOT_FILES, (array) $entries ) ) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**

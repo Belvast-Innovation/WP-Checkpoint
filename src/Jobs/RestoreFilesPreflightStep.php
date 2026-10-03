@@ -686,14 +686,15 @@ final class RestoreFilesPreflightStep implements Step {
 	private function linked( array $given, array $staged ): array {
 		$zones = array();
 		foreach ( array( rtrim( ABSPATH, '/\\' ), isset( $this->parts['trusted_root'] ) ? (string) call_user_func( $this->parts['trusted_root'] ) : '' ) as $dir ) {
-			$real = '' === $dir ? false : Paths::real( $dir );
-			if ( false !== $real ) {
-				$zones[] = rtrim( Paths::normalize( (string) $real ), '/' );
-			}
+			$real    = '' === $dir ? false : Paths::real( $dir );
+			$zones[] = false === $real ? '' : rtrim( Paths::normalize( (string) $real ), '/' );
 		}
-		$config  = isset( $this->parts['config_dir'] ) ? (string) call_user_func( $this->parts['config_dir'] ) : self::config_dir();
-		$real    = '' === $config ? false : Paths::real( $config );
-		$zones[] = false === $real ? '' : LinkedTargets::config_zone( rtrim( Paths::normalize( (string) $real ), '/' ), null, $config );
+		$config = isset( $this->parts['config_dir'] ) ? (string) call_user_func( $this->parts['config_dir'] ) : self::config_dir();
+		$real   = '' === $config ? false : Paths::real( $config );
+		$zone   = false === $real ? '' : LinkedTargets::config_zone( rtrim( Paths::normalize( (string) $real ), '/' ), null, $config );
+		// Not a zone when it holds another installation beside this site: back to the WordPress directory and the
+		// trusted root alone.
+		$zones[] = '' !== $zone && LinkedTargets::zone_stands( $zone, $zones[0] ) ? $zone : '';
 		$out     = array();
 		foreach ( $staged as $group ) {
 			$why = LinkedTargets::judge( (string) ( $given[ $group ] ?? '' ), $zones );
@@ -712,13 +713,7 @@ final class RestoreFilesPreflightStep implements Step {
 	 * @return string
 	 */
 	private static function config_dir(): string {
-		$file = '';
-		if ( defined( 'WP_CLI' ) && WP_CLI && function_exists( '\\WP_CLI\\Utils\\locate_wp_config' ) ) {
-			$file = (string) \WP_CLI\Utils\locate_wp_config();
-		}
-		if ( '' === $file ) {
-			$file = LinkedTargets::config_file( rtrim( ABSPATH, '/\\' ) );
-		}
+		$file = LinkedTargets::config_location( rtrim( ABSPATH, '/\\' ) );
 		return '' === $file ? '' : rtrim( Paths::normalize( dirname( $file ) ), '/' );
 	}
 
@@ -733,13 +728,7 @@ final class RestoreFilesPreflightStep implements Step {
 	 */
 	private function linked_choice( JobContext $context, array $linked ) {
 		$abspath = Paths::real( rtrim( ABSPATH, '/\\' ) );
-		$targets = array_map(
-			static function ( array $why ): string {
-				return $why['target'];
-			},
-			$linked
-		);
-		$id      = LinkedTargets::id( $targets );
+		$id      = LinkedTargets::id( $linked );
 		$answers = isset( $context->options()['answers'] ) && is_array( $context->options()['answers'] ) ? $context->options()['answers'] : array();
 		$policy  = RestoreJob::options( $context->options() )['policy'][ LinkedTargets::POLICY_KEY ];
 		foreach ( array_keys( $answers ) as $other ) {
@@ -766,7 +755,11 @@ final class RestoreFilesPreflightStep implements Step {
 					'verdict'  => $why['verdict'],
 					'at'       => Utf8::scrub( $why['at'] ),
 				);
-				$hex[ $group ] = bin2hex( $why['target'] );
+				$hex[ $group ] = array(
+					'target'  => bin2hex( $why['target'] ),
+					'verdict' => $why['verdict'],
+					'at'      => bin2hex( $why['at'] ),
+				);
 			}
 			try {
 				ExportPlan::write(
@@ -774,7 +767,7 @@ final class RestoreFilesPreflightStep implements Step {
 					RestoreFiles::LINKED,
 					array(
 						'entries' => $entries,
-						'hex'     => $hex, // The targets' bytes, for the id: the question lists them only for its own id.
+						'hex'     => $hex, // The directories' bytes and why, for the id: the question lists them only for its own id.
 					)
 				);
 			} catch ( \RuntimeException $e ) {

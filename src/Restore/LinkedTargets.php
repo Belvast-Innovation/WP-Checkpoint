@@ -7,6 +7,7 @@
 
 namespace WPCheckpoint\Restore;
 
+use WPCheckpoint\Support\CloneClassifier;
 use WPCheckpoint\Support\Paths;
 use WPCheckpoint\Support\StorageReclaim;
 
@@ -75,6 +76,18 @@ final class LinkedTargets {
 	const ROOT_FILES = array( 'wp-load.php', 'wp-config.php' );
 
 	/**
+	 * Broad directories that hold sites rather than being one, besides CloneClassifier::BROAD_ROOTS: never the zone of
+	 * a wp-config.php.
+	 */
+	const BROAD = array( '/srv/www', '/srv/http', '/usr/local/www' );
+
+	/**
+	 * Most entries of a directory read to tell whether it is an installation's root by its subdirectories, or whether
+	 * the zone of a wp-config.php holds another installation beside this site: more cannot be told.
+	 */
+	const CHILDREN_LIMIT = 1000;
+
+	/**
 	 * A directory where it finally is, with one realpath() of the whole path (normalised, no trailing slash); a
 	 * directory that is not there, by its parent's realpath() and its name when it is positively not there; '' when
 	 * neither can be told.
@@ -125,9 +138,28 @@ final class LinkedTargets {
 	}
 
 	/**
+	 * The wp-config.php this site loads: under WP-CLI the one WP-CLI loads (it evaluates the file rather than
+	 * including it, and honours WP_CONFIG_PATH: WP_CLI\Utils\locate_wp_config()), otherwise the one wp-load.php loads
+	 * (config_file()). '' when there is none.
+	 *
+	 * @param string $abspath The WordPress directory.
+	 * @return string
+	 */
+	public static function config_location( string $abspath ): string {
+		if ( defined( 'WP_CLI' ) && WP_CLI && function_exists( '\\WP_CLI\\Utils\\locate_wp_config' ) ) {
+			$file = \WP_CLI\Utils\locate_wp_config();
+			if ( is_string( $file ) && '' !== $file ) {
+				return rtrim( Paths::normalize( $file ), '/' );
+			}
+		}
+		return self::config_file( $abspath );
+	}
+
+	/**
 	 * The directory of the wp-config.php this site loads, as a zone of this site: '' when it is the root of a file
-	 * system, a home directory (by its name as given or where it is, or the home of the user PHP runs as), or a
-	 * directory that holds home directories: it would take in everything below it.
+	 * system, a home directory (by its name as given or where it is, or the home of the user PHP runs as), a
+	 * directory that holds home directories, or a broad directory that holds sites (/var/www, /srv/www and the like):
+	 * it would take in everything below it. Whether a zone stands is then judged by what is in it (zone_stands()).
 	 *
 	 * @param string        $dir     The directory, resolved ('' when not known).
 	 * @param callable|null $is_home function( string $dir ): bool, whether it is a home directory (tests); otherwise
@@ -146,7 +178,7 @@ final class LinkedTargets {
 		$user = StorageReclaim::home_directory();
 		$user = '' === $user ? false : Paths::real( $user );
 		foreach ( array_filter( array( $dir, rtrim( Paths::normalize( $given ), '/' ) ) ) as $name ) {
-			if ( 0 === strcasecmp( self::home( $name ), $name ) || 1 === preg_match( self::HOME_ROOTS, $name ) ) {
+			if ( 0 === strcasecmp( self::home( $name ), $name ) || 1 === preg_match( self::HOME_ROOTS, $name ) || self::broad( $name ) ) {
 				return '';
 			}
 		}
@@ -154,6 +186,61 @@ final class LinkedTargets {
 			return ''; // The user's home, or a directory holding it.
 		}
 		return $dir;
+	}
+
+	/**
+	 * Whether a directory is a broad one that holds sites rather than being one.
+	 *
+	 * @param string $dir Directory, normalised.
+	 * @return bool
+	 */
+	private static function broad( string $dir ): bool {
+		$lower = strtolower( $dir );
+		return in_array( $lower, CloneClassifier::BROAD_ROOTS, true ) || in_array( $lower, self::BROAD, true ) || 1 === preg_match( '#\A[a-z]:/(?:users|inetpub|xampp|wamp)\z#', $lower );
+	}
+
+	/**
+	 * Whether the zone of a wp-config.php stands: none of its direct subdirectories but the one this site's WordPress
+	 * directory is in (its branch) is another installation's root (root_state()). Names would always miss some
+	 * (/data/www, /opt/sites): a zone that holds another site beside this one is broader than this site, and a shared
+	 * directory beside them (another site's UPLOADS) would be taken in. A zone whose entries cannot all be read, or
+	 * that has more than CHILDREN_LIMIT, does not stand.
+	 *
+	 * @param string $zone         The zone, resolved.
+	 * @param string $abspath_real This site's WordPress directory, resolved.
+	 * @return bool
+	 */
+	public static function zone_stands( string $zone, string $abspath_real ): bool {
+		$branch = '';
+		if ( '' !== $abspath_real && Paths::is_prefix( $zone, $abspath_real, Paths::is_windows() ) ) {
+			$rest   = substr( $abspath_real, strlen( rtrim( $zone, '/' ) ) + 1 );
+			$branch = (string) strtok( $rest, '/' );
+		}
+		$handle = @opendir( $zone ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- not listable: does not stand.
+		if ( false === $handle ) {
+			return false;
+		}
+		$count = 0;
+		try {
+			while ( false !== ( $name = readdir( $handle ) ) ) { // phpcs:ignore Generic.CodeAnalysis.AssignmentInCondition.FoundInWhileCondition -- the readdir() idiom.
+				if ( '.' === $name || '..' === $name ) {
+					continue;
+				}
+				if ( ++$count > self::CHILDREN_LIMIT ) {
+					return false;
+				}
+				$child = $zone . '/' . $name;
+				if ( $name === $branch || is_link( $child ) || ! is_dir( $child ) ) {
+					continue; // This site's branch; a file; a link (not this zone's own subdirectory).
+				}
+				if ( false !== self::root_state( $child ) ) {
+					return false; // Another installation's root, or a directory that cannot be told.
+				}
+			}
+		} finally {
+			closedir( $handle );
+		}
+		return true;
 	}
 
 	/**
@@ -199,7 +286,7 @@ final class LinkedTargets {
 					);
 				}
 			} else {
-				$holds = is_dir( $dir ) ? self::holds_root_file( $dir ) : null;
+				$holds = is_dir( $dir ) ? self::root_state( $dir ) : null;
 				if ( null === $holds ) {
 					return array(
 						'verdict' => self::UNKNOWN,
@@ -226,27 +313,78 @@ final class LinkedTargets {
 	}
 
 	/**
-	 * Whether a directory's listing holds wp-load.php or wp-config.php, read an entry at a time and stopped at the
-	 * first (memory bounded whatever the directory holds); null when it cannot be listed.
+	 * Whether a directory is a WordPress installation's root: it holds wp-load.php or wp-config.php, or (WordPress in
+	 * its own directory) its index.php is WordPress's front controller (it loads wp-blog-header.php) and one of its
+	 * direct subdirectories holds wp-load.php. Not merely the parent of an installation: wp-content holds an index.php
+	 * of its own ("silence is golden"), and would be a root as soon as a staging site is put in it. Read an entry at a
+	 * time (memory bounded whatever the directory holds); null when it cannot be listed, or when its front controller
+	 * has more than CHILDREN_LIMIT subdirectories beside it to look in.
 	 *
 	 * @param string $dir Directory.
 	 * @return bool|null
 	 */
-	private static function holds_root_file( string $dir ) {
+	public static function root_state( string $dir ) {
 		$handle = @opendir( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- not listable: null.
 		if ( false === $handle ) {
 			return null;
 		}
+		$index = false;
+		$subs  = array();
+		$over  = false;
 		try {
 			while ( false !== ( $name = readdir( $handle ) ) ) { // phpcs:ignore Generic.CodeAnalysis.AssignmentInCondition.FoundInWhileCondition -- the readdir() idiom.
 				if ( in_array( $name, self::ROOT_FILES, true ) ) {
 					return true;
 				}
+				if ( 'index.php' === $name ) {
+					$index = true;
+					continue;
+				}
+				if ( '.' === $name || '..' === $name || $over ) {
+					continue;
+				}
+				if ( count( $subs ) >= self::CHILDREN_LIMIT ) {
+					$over = true; // Kept reading for the root files; too many to look into.
+					continue;
+				}
+				$subs[] = $name;
 			}
 		} finally {
 			closedir( $handle );
 		}
+		$front = $index ? self::front_controller( $dir . '/index.php' ) : false;
+		if ( null === $front ) {
+			return null; // Its index.php cannot be read: whether it is a root cannot be told.
+		}
+		if ( ! $front ) {
+			return false;
+		}
+		if ( $over ) {
+			return null;
+		}
+		foreach ( $subs as $name ) {
+			if ( @is_file( $dir . '/' . $name . '/wp-load.php' ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- open_basedir: not there.
+				return true;
+			}
+		}
 		return false;
+	}
+
+	/**
+	 * Whether an index.php is WordPress's front controller: it loads wp-blog-header.php (its first 8 KB read); null
+	 * when it cannot be read.
+	 *
+	 * @param string $file The file.
+	 * @return bool|null
+	 */
+	private static function front_controller( string $file ) {
+		$handle = @fopen( $file, 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- not readable: null.
+		if ( false === $handle ) {
+			return null;
+		}
+		$head = (string) fread( $handle, 8192 ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- a bounded read.
+		fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- as above.
+		return false !== strpos( $head, 'wp-blog-header.php' );
 	}
 
 	/**
@@ -296,18 +434,19 @@ final class LinkedTargets {
 	}
 
 	/**
-	 * The question's id: the policy key and a digest of the groups and their directories. An answer holds only for the
-	 * question it was given to; another directory (a link pointed elsewhere since, a setting changed) is another
-	 * question.
+	 * The question's id: the policy key and a digest of the groups, their directories and why each is asked about
+	 * (for another installation, its root too). An answer holds only for the question it was given to; another
+	 * directory (a link pointed elsewhere since, a setting changed), or another reason (outside before, inside
+	 * another installation now), is another question.
 	 *
-	 * @param array<string, string> $targets Group => directory, resolved.
+	 * @param array<string, array{target: string, verdict: string, at: string}> $why Group => why it is asked about.
 	 * @return string
 	 */
-	public static function id( array $targets ): string {
-		ksort( $targets, SORT_STRING );
+	public static function id( array $why ): string {
+		ksort( $why, SORT_STRING );
 		$canonical = array();
-		foreach ( $targets as $group => $target ) {
-			$canonical[] = bin2hex( (string) $group ) . ':' . bin2hex( (string) $target );
+		foreach ( $why as $group => $entry ) {
+			$canonical[] = implode( ':', array( bin2hex( (string) $group ), bin2hex( (string) $entry['target'] ), (string) $entry['verdict'], bin2hex( self::INSTALLATION === $entry['verdict'] ? (string) $entry['at'] : '' ) ) );
 		}
 		return self::POLICY_KEY . '_' . substr( hash( 'sha256', implode( ';', $canonical ) ), 0, 16 );
 	}

@@ -31,11 +31,22 @@ final class LinkedTargetsTest extends TestCase {
 		parent::tear_down();
 	}
 
-	public function test_the_id_is_bound_to_the_groups_and_their_targets(): void {
+	/**
+	 * @return array{target: string, verdict: string, at: string}
+	 */
+	private static function why( string $target, string $verdict = LinkedTargets::OUTSIDE, string $at = '' ): array {
+		return array(
+			'target'  => $target,
+			'verdict' => $verdict,
+			'at'      => $at,
+		);
+	}
+
+	public function test_the_id_is_bound_to_the_groups_their_directories_and_why(): void {
 		$one = LinkedTargets::id(
 			array(
-				'uploads' => '/srv/shared/uploads',
-				'themes'  => '/srv/shared/themes',
+				'uploads' => self::why( '/srv/shared/uploads' ),
+				'themes'  => self::why( '/srv/shared/themes' ),
 			)
 		);
 		$this->assertStringStartsWith( 'linked_targets_', $one );
@@ -44,33 +55,84 @@ final class LinkedTargetsTest extends TestCase {
 			$one,
 			LinkedTargets::id(
 				array(
-					'themes'  => '/srv/shared/themes',
-					'uploads' => '/srv/shared/uploads',
+					'themes'  => self::why( '/srv/shared/themes' ),
+					'uploads' => self::why( '/srv/shared/uploads' ),
 				)
 			),
 			'in any order'
 		);
-		$this->assertNotSame( $one, LinkedTargets::id( array( 'uploads' => '/srv/shared/uploads' ) ), 'a group less' );
-		$this->assertNotSame(
-			$one,
-			LinkedTargets::id(
-				array(
-					'uploads' => '/srv/other/uploads',
-					'themes'  => '/srv/shared/themes',
-				)
-			),
-			'a link pointed elsewhere'
-		);
-		$this->assertNotSame(
-			$one,
-			LinkedTargets::id(
-				array(
-					'plugins' => '/srv/shared/uploads',
-					'themes'  => '/srv/shared/themes',
-				)
-			),
-			'another group'
-		);
+		$this->assertNotSame( $one, LinkedTargets::id( array( 'uploads' => self::why( '/srv/shared/uploads' ) ) ), 'a group less' );
+		$this->assertNotSame( $one, LinkedTargets::id( array( 'uploads' => self::why( '/srv/other/uploads' ), 'themes' => self::why( '/srv/shared/themes' ) ) ), 'another directory' );
+		$this->assertNotSame( $one, LinkedTargets::id( array( 'plugins' => self::why( '/srv/shared/uploads' ), 'themes' => self::why( '/srv/shared/themes' ) ) ), 'another group' );
+		// Another reason is another question; for another installation, so is another root of it.
+		$in_a = LinkedTargets::id( array( 'uploads' => self::why( '/srv/shared/uploads', LinkedTargets::INSTALLATION, '/srv/shared' ), 'themes' => self::why( '/srv/shared/themes' ) ) );
+		$this->assertNotSame( $one, $in_a, 'outside before, inside another installation now' );
+		$this->assertNotSame( $in_a, LinkedTargets::id( array( 'uploads' => self::why( '/srv/shared/uploads', LinkedTargets::INSTALLATION, '/srv' ), 'themes' => self::why( '/srv/shared/themes' ) ) ), 'another installation\'s root' );
+		$this->assertNotSame( $one, LinkedTargets::id( array( 'uploads' => self::why( '/srv/shared/uploads', LinkedTargets::UNKNOWN, '/srv/shared/uploads' ), 'themes' => self::why( '/srv/shared/themes' ) ) ), 'not to be told now' );
+	}
+
+	public function test_an_installations_root_by_its_files_or_by_its_front_controller_and_core_beside_it(): void {
+		$d = $this->dir;
+		mkdir( "{$d}/plain/uploads", 0755, true );
+		mkdir( "{$d}/loads", 0755, true );
+		file_put_contents( "{$d}/loads/wp-load.php", '<?php' );
+		mkdir( "{$d}/own/wp", 0755, true ); // WordPress in its own directory.
+		file_put_contents( "{$d}/own/index.php", "<?php\ndefine( 'WP_USE_THEMES', true );\nrequire __DIR__ . '/wp/wp-blog-header.php';\n" );
+		file_put_contents( "{$d}/own/wp/wp-load.php", '<?php' );
+		mkdir( "{$d}/content/staging", 0755, true ); // A wp-content holding a staging site: not a root itself.
+		file_put_contents( "{$d}/content/index.php", "<?php\n// Silence is golden.\n" );
+		file_put_contents( "{$d}/content/staging/wp-load.php", '<?php' );
+		mkdir( "{$d}/front-alone", 0755, true );
+		file_put_contents( "{$d}/front-alone/index.php", "<?php require __DIR__ . '/wp-blog-header.php';" );
+		$this->assertFalse( LinkedTargets::root_state( "{$d}/plain" ) );
+		$this->assertTrue( LinkedTargets::root_state( "{$d}/loads" ) );
+		$this->assertTrue( LinkedTargets::root_state( "{$d}/own" ), 'a front controller and the core beside it' );
+		$this->assertFalse( LinkedTargets::root_state( "{$d}/content" ), 'an index.php that is no front controller' );
+		$this->assertTrue( LinkedTargets::root_state( "{$d}/content/staging" ), 'the control: the staging site is one' );
+		$this->assertFalse( LinkedTargets::root_state( "{$d}/front-alone" ), 'a front controller without a core beside it' );
+		// More subdirectories beside a front controller than are looked into: cannot be told.
+		mkdir( "{$d}/crowded", 0755, true );
+		file_put_contents( "{$d}/crowded/index.php", "<?php require __DIR__ . '/wp/wp-blog-header.php';" );
+		for ( $i = 0; $i <= LinkedTargets::CHILDREN_LIMIT; $i++ ) {
+			mkdir( "{$d}/crowded/d{$i}" );
+		}
+		$this->assertNull( LinkedTargets::root_state( "{$d}/crowded" ) );
+		$this->assertNull( LinkedTargets::root_state( "{$d}/no-such" ), 'not there to be listed' );
+	}
+
+	public function test_the_zone_of_wp_config_stands_only_without_another_installation_beside_this_site(): void {
+		$d = $this->dir;
+		// Bedrock: web holds wp-config.php, the WordPress directory (this site's branch) and the content directory.
+		mkdir( "{$d}/web/wp", 0755, true );
+		mkdir( "{$d}/web/app/uploads", 0755, true );
+		file_put_contents( "{$d}/web/wp-config.php", '<?php' );
+		file_put_contents( "{$d}/web/index.php", "<?php require __DIR__ . '/wp/wp-blog-header.php';" );
+		file_put_contents( "{$d}/web/wp/wp-load.php", '<?php' );
+		$this->assertTrue( LinkedTargets::zone_stands( "{$d}/web", "{$d}/web/wp" ) );
+		// Hardened: wp-config.php one level above the WordPress directory, beside other sites and a shared directory.
+		mkdir( "{$d}/www/html", 0755, true );
+		mkdir( "{$d}/www/shared-media/uploads", 0755, true );
+		file_put_contents( "{$d}/www/wp-config.php", '<?php' );
+		file_put_contents( "{$d}/www/html/wp-load.php", '<?php' );
+		$this->assertTrue( LinkedTargets::zone_stands( "{$d}/www", "{$d}/www/html" ), 'the control: only a shared directory beside it' );
+		mkdir( "{$d}/www/other", 0755, true );
+		file_put_contents( "{$d}/www/other/wp-load.php", '<?php' );
+		$this->assertFalse( LinkedTargets::zone_stands( "{$d}/www", "{$d}/www/html" ), 'another site beside this one' );
+		// Too many entries to read: it does not stand.
+		mkdir( "{$d}/wide/html", 0755, true );
+		for ( $i = 0; $i <= LinkedTargets::CHILDREN_LIMIT; $i++ ) {
+			touch( "{$d}/wide/f{$i}" );
+		}
+		$this->assertFalse( LinkedTargets::zone_stands( "{$d}/wide", "{$d}/wide/html" ) );
+		$this->assertFalse( LinkedTargets::zone_stands( "{$d}/no-such", "{$d}/no-such/html" ), 'not to be listed' );
+	}
+
+	public function test_broad_directories_that_hold_sites_are_no_zone(): void {
+		foreach ( array( '/var/www', '/srv/www', '/srv', '/data', '/opt', '/usr/local/www', 'C:/inetpub' ) as $dir ) {
+			$this->assertSame( '', LinkedTargets::config_zone( $dir ), $dir );
+		}
+		$this->assertSame( '/var/www/example', LinkedTargets::config_zone( '/var/www/example' ), 'the control: one site\'s directory is' );
+		$this->assertSame( '/srv/bedrock/web', LinkedTargets::config_zone( '/srv/bedrock/web' ), 'and Bedrock\'s web' );
 	}
 
 	public function test_a_directory_is_this_sites_only_inside_a_zone_and_below_no_other_installation(): void {

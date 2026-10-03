@@ -568,6 +568,21 @@ final class RestoreFilesPreflightTest extends RestoreTestCase {
 		return array( $type, $link );
 	}
 
+	/**
+	 * What the question's id is made of for one group outside this site.
+	 *
+	 * @return array<string, array{target: string, verdict: string, at: string}>
+	 */
+	private static function outside( string $group, string $target ): array {
+		return array(
+			$group => array(
+				'target'  => $target,
+				'verdict' => LinkedTargets::OUTSIDE,
+				'at'      => '',
+			),
+		);
+	}
+
 	private static function real( string $dir ): string {
 		return rtrim( str_replace( '\\', '/', (string) realpath( $dir ) ), '/' );
 	}
@@ -588,7 +603,7 @@ final class RestoreFilesPreflightTest extends RestoreTestCase {
 		$this->assertCount( 1, $job->questions );
 		$question = $job->questions[0];
 		$this->assertSame( LinkedTargets::KIND, $question['kind'] );
-		$this->assertSame( LinkedTargets::id( array( 'uploads' => self::real( $real ) ) ), $question['id'], 'bound to the group and its target' );
+		$this->assertSame( LinkedTargets::id( self::outside( 'uploads', self::real( $real ) ) ), $question['id'], 'bound to the group and its target' );
 		$this->assertSame( array( 'swap', 'exclude' ), $question['choices'], 'no default' );
 		$this->assertSame( 1, $question['count'] );
 		// As the admin and the terminal show it: the target masked, the text whole.
@@ -676,7 +691,7 @@ final class RestoreFilesPreflightTest extends RestoreTestCase {
 		$job = $this->run_restore( Plugin::instance()->jobs()->find( $job->id ) );
 		$this->assertSame( Job::PAUSED, $job->status, 'asked again' );
 		$this->assertNotSame( $first, $job->questions[0]['id'] );
-		$this->assertSame( LinkedTargets::id( array( 'uploads' => self::real( $other ) ) ), $job->questions[0]['id'] );
+		$this->assertSame( LinkedTargets::id( self::outside( 'uploads', self::real( $other ) ) ), $job->questions[0]['id'] );
 		$this->assertStringContainsString( 'An answer given for other content directories than the restore would now ask about is not used', self::log( $job ) );
 	}
 
@@ -701,7 +716,49 @@ final class RestoreFilesPreflightTest extends RestoreTestCase {
 		);
 		$job  = $this->run_restore( $this->job_for( $type, $this->with_files( array( 'wp-content/uploads/a.txt' => 'a' ) ) ) );
 		$this->assertSame( Job::PAUSED, $job->status, (string) $job->last_error );
-		$this->assertSame( LinkedTargets::id( array( 'uploads' => self::real( $real . '/uploads' ) ) ), $job->questions[0]['id'] );
+		$this->assertSame( LinkedTargets::id( self::outside( 'uploads', self::real( $real . '/uploads' ) ) ), $job->questions[0]['id'] );
+	}
+
+	public function test_an_answer_holds_only_for_the_reason_it_was_given_for(): void {
+		$root    = $this->dir( sys_get_temp_dir() . '/wpc-reason-' . bin2hex( random_bytes( 3 ) ) );
+		$uploads = $root . '/site/uploads';
+		mkdir( $uploads, 0755, true );
+		$trusted = '';
+		$site    = ScanRoots::site_directories();
+		$type    = $this->type(
+			array(
+				'directories'  => static function () use ( $site, $uploads ): array {
+					return array_merge( $site, array( 'uploads' => $uploads ) );
+				},
+				'trusted_root' => static function () use ( &$trusted ): string {
+					return $trusted;
+				},
+			)
+		);
+		$job = $this->run_restore( $this->job_for( $type, $this->with_files( array( 'wp-content/uploads/a.txt' => 'a' ) ) ) );
+		$this->assertSame( Job::PAUSED, $job->status, (string) $job->last_error );
+		$first = (string) $job->questions[0]['id'];
+		$this->assertSame( LinkedTargets::id( self::outside( 'uploads', self::real( $uploads ) ) ), $first, 'asked as outside the site' );
+		$this->assertNotNull( Plugin::instance()->job_actions()->answer( $job->id, array( $first => 'swap' ) ) );
+		// Before the answer is taken up, the same directory is inside another installation (in the trusted root).
+		$trusted = $root;
+		file_put_contents( $root . '/site/wp-load.php', '<?php' );
+		Plugin::instance()->runner()->tick( $job->id, microtime( true ) );
+		$job = $this->run_restore( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( Job::PAUSED, $job->status, 'asked again: the reason changed' );
+		$this->assertSame(
+			LinkedTargets::id(
+				array(
+					'uploads' => array(
+						'target'  => self::real( $uploads ),
+						'verdict' => LinkedTargets::INSTALLATION,
+						'at'      => self::real( $root . '/site' ),
+					),
+				)
+			),
+			$job->questions[0]['id']
+		);
+		$this->assertStringContainsString( 'An answer given for other content directories than the restore would now ask about is not used', self::log( $job ) );
 	}
 
 	public function test_a_directory_in_the_trusted_root_is_not_asked_about_and_one_outside_the_site_is_with_or_without_a_link(): void {
@@ -733,7 +790,7 @@ final class RestoreFilesPreflightTest extends RestoreTestCase {
 		};
 		$asked = $this->run_restore( $this->job_for( $this->type( $plain( '' ) ), $base ) );
 		$this->assertSame( Job::PAUSED, $asked->status, 'a directory outside the site, no link: asked about' );
-		$this->assertSame( LinkedTargets::id( array( 'uploads' => self::real( $real ) ) ), $asked->questions[0]['id'] );
+		$this->assertSame( LinkedTargets::id( self::outside( 'uploads', self::real( $real ) ) ), $asked->questions[0]['id'] );
 		$job = $this->run_restore( $this->job_for( $this->type( $plain( dirname( $real ) ) ), $base ) );
 		$this->assertSame( Job::COMPLETED, $job->status, 'the same directory in the trusted root: this site\'s' );
 		$this->assertSame( array(), $job->questions );
