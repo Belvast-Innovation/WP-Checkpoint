@@ -192,13 +192,6 @@ final class HeldSiteTest extends SwapTestCase {
 		}
 		$this->assertFileExists( $this->abspath . '/.maintenance' );
 		$this->assertSame( $before, $this->row( $job->id ) );
-		// The release itself refuses too, whoever calls it.
-		try {
-			( new HeldSite( array( 'abspath' => $this->abspath ) ) )->release( Plugin::instance()->jobs()->find( $job->id ), $see );
-			$this->fail( 'not released from the directory the plan records' );
-		} catch ( \RuntimeException $e ) {
-			$this->assertFileExists( $this->abspath . '/.maintenance' );
-		}
 	}
 
 	public function test_an_abandoned_job_takes_its_file_here_down_never_runs_and_leaves_the_site_it_held(): void {

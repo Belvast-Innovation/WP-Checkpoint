@@ -16,6 +16,7 @@ use WPCheckpoint\Restore\Ledger;
 use WPCheckpoint\Restore\Maintenance;
 use WPCheckpoint\Restore\Queries;
 use WPCheckpoint\Restore\RestoreFiles;
+use WPCheckpoint\Restore\SiteChanged;
 use WPCheckpoint\Restore\SiteTables;
 use WPCheckpoint\Restore\StagingLayout;
 use WPCheckpoint\Restore\StateCarry;
@@ -970,7 +971,7 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 		$real = Paths::real( (string) ( $this->parts['abspath'] ?? ABSPATH ) );
 		$site = $entries['site'][0] ?? null;
 		if ( 1 !== count( $entries['site'] ) || 0 !== ( $site['seq'] ?? -1 ) || false === $real || rtrim( Paths::normalize( (string) $real ), '/' ) !== $site['live'] || self::base_prefix() !== $site['stage'] ) {
-			throw new RetryFrom( 'The swap\'s plan was written for a WordPress directory or table prefix other than this site\'s now; the swap was not started, and the final check writes the plan again.', SwapCheckStep::ID );
+			throw new SiteChanged( 'The swap\'s plan was written for a WordPress directory or table prefix other than this site\'s now. The swap was refused before it changed anything, and its plan is kept as it was written. Start the restore again.' );
 		}
 		foreach ( $entries['dirs'] as $entry ) {
 			$want = null;

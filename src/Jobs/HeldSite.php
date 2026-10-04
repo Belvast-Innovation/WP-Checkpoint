@@ -130,11 +130,24 @@ final class HeldSite {
 	 * @throws \RuntimeException When this WordPress directory is not positively another one.
 	 */
 	public function release( Job $job, array $assessment ): bool {
-		if ( ! $assessment['differs'] ) {
-			throw new \RuntimeException( 'This WordPress directory is not positively another than the one the job\'s plan records; nothing was taken down.' );
+		$why = self::not_another( $assessment );
+		if ( '' !== $why ) {
+			throw new \RuntimeException( $why ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- a message of this class.
 		}
 		$mark = (string) ( $job->cursor['mark'] ?? '' );
 		return '' === $mark || ( new Maintenance( $this->abspath(), $mark ) )->remove();
+	}
+
+	/**
+	 * Why nothing of a job may be taken down or given up from this WordPress directory: it is not positively another
+	 * than the one the job's plan records (the same, or it cannot be told); '' when it is. The one rule for release and
+	 * abandon (JobActions and release() both ask it).
+	 *
+	 * @param array<string, mixed> $assessment assess().
+	 * @return string
+	 */
+	public static function not_another( array $assessment ): string {
+		return true === $assessment['differs'] ? '' : __( 'This WordPress directory is not positively another than the one the job\'s plan records (the same, or it cannot be told); nothing was changed.', 'wp-checkpoint' );
 	}
 
 	/**

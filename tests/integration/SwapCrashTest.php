@@ -714,7 +714,7 @@ final class SwapCrashTest extends SwapTestCase {
 	/**
 	 * @dataProvider site_columns
 	 */
-	public function test_a_plan_written_for_another_wordpress_directory_or_prefix_is_written_again_before_the_swap( string $column ): void {
+	public function test_a_plan_written_for_another_wordpress_directory_or_prefix_is_refused_and_kept( string $column ): void {
 		global $wpdb;
 		$job    = $this->at_swap();
 		$before = $this->site();
@@ -727,11 +727,25 @@ final class SwapCrashTest extends SwapTestCase {
 		$table = $wpdb->base_prefix . \WPCheckpoint\Restore\SwapPlan::TABLE;
 		$wpdb->query( $wpdb->prepare( "UPDATE `{$table}` SET {$column} = %s WHERE job_id = %d AND seq = 0", $value, $job->id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- a column name from the data provider.
 		$wpdb->query( 'COMMIT' );
-		$done = $this->cli_run( $job );
+		$rows = static function () use ( $table, $job ): array {
+			global $wpdb;
+			$wpdb->query( 'COMMIT' );
+			return (array) $wpdb->get_results( $wpdb->prepare( "SELECT attempt, seq, kind, live, stage, old FROM `{$table}` WHERE job_id = %d ORDER BY attempt, seq", $job->id ), ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the plan table.
+		};
+		$evidence = $rows();
+		$done     = $this->cli_run( $job );
 		$this->assertSame( Job::FAILED, $done->status );
-		$this->assertStringContainsString( 'written for a WordPress directory or table prefix other than this site', (string) $done->last_error );
-		$this->assertSame( SwapCheckStep::ID, $done->cursor[ JobRepository::RETRY_FROM_KEY ] ?? null );
+		$this->assertSame( Job::FAILURE_FINAL, $done->failure_kind, 'retrying would refuse the same way' );
+		$this->assertStringContainsString( 'refused before it changed anything, and its plan is kept as it was written', (string) $done->last_error );
+		$this->assertArrayNotHasKey( JobRepository::RETRY_FROM_KEY, $done->cursor, 'no retry from the final check: it would write the plan again' );
 		$this->assertNotContains( 'entered', $this->seams, 'nothing was changed' );
+		$this->assertSame( $before, $this->site() );
+		$this->assertSame( $evidence, $rows(), 'the plan is kept as it was' );
+		// Retried all the same (from WP-CLI): refused again, and still nothing written over the plan.
+		Plugin::instance()->job_actions()->retry( $job->id );
+		$again = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( Job::FAILED, $again->status );
+		$this->assertSame( $evidence, $rows(), 'never written again' );
 		$this->assertSame( $before, $this->site() );
 	}
 

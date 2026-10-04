@@ -253,8 +253,9 @@ final class JobActions {
 		if ( HeldSite::SITE === $see['branch'] ) {
 			return __( 'As far as can be told from here, the job is this site\'s: take it over instead (wp wpcheckpoint job status shows how).', 'wp-checkpoint' );
 		}
-		if ( ! $see['differs'] ) {
-			return __( 'This WordPress directory is not positively another than the one the job\'s plan records (the same, or it cannot be told); nothing was changed.', 'wp-checkpoint' );
+		$why = HeldSite::not_another( $see );
+		if ( '' !== $why ) {
+			return $why;
 		}
 		if ( ! hash_equals( HeldSite::code( $action, $held['job'], (string) $see['recorded'] ), $confirm ) ) {
 			return __( 'The confirmation code is not this job\'s; wp wpcheckpoint job status shows the command with its code.', 'wp-checkpoint' );

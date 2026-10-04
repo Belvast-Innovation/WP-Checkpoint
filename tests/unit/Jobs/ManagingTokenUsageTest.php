@@ -112,6 +112,29 @@ final class ManagingTokenUsageTest extends TestCase {
 		$this->assertSame( array(), array_diff_key( $found, array_flip( $allowed ) ), 'compare Job::managing_token() (or Job::MANAGING_SQL), not storage_token, for who manages a job' );
 	}
 
+	/**
+	 * Reads of storage_token that the scan does not flag (no comparison where it is read) but that decide something
+	 * about a token, each with why it is not the managing token: path => [the code that reads it, the code that uses
+	 * it, why]. Pinned: when either changes, this test fails and the reason is to be looked at again.
+	 */
+	const DIRECTORY_IDENTITY = array(
+		array(
+			'src/Jobs/JobRepository.php',
+			"'SELECT storage_path, storage_token FROM '",
+			'src/Support/Directories.php',
+			"Paths::same_location( \$dir, \$restore['path'] ) && ! \$this->is_copied( (string) \$restore['token'] )",
+			'JobRepository::unfinished_restores() gives each unfinished restore\'s storage directory with the token that directory was chosen with; Directories takes that directory back with its own token. A storage directory\'s identity, paired with its path: held_by says who took over the job, and does not change which token a directory carries.',
+		),
+	);
+
+	public function test_the_reads_of_a_directorys_own_token_are_still_what_their_reason_says(): void {
+		$files = self::plugin_files();
+		foreach ( self::DIRECTORY_IDENTITY as $entry ) {
+			$this->assertStringContainsString( $entry[1], $files[ $entry[0] ], $entry[0] . ': ' . $entry[4] );
+			$this->assertStringContainsString( $entry[3], $files[ $entry[2] ], $entry[2] . ': ' . $entry[4] );
+		}
+	}
+
 	public function test_the_scan_finds_each_form_and_leaves_names_alone(): void {
 		$bad = <<<'PHP'
 <?php
