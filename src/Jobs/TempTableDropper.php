@@ -79,9 +79,11 @@ final class TempTableDropper {
 	 * @param string        $like           The prefix every one of them has (TempTables::owner_prefix()), to find the keys that point at them.
 	 * @param int           $max_statements Most statements (tests use fewer).
 	 * @param callable|null $clock          function(): float, seconds (tests); microtime by default.
+	 * @param callable|null $confirm        function(): void, right before each DROP (a job's lease check); what it
+	 *                                      throws stops the call, the DROP it stood before not sent.
 	 * @return array{dropped: string[], failed: string[], kept: array<string, string[]>, remaining: string[], stopped: string, note: string}
 	 */
-	public static function drop( array $tables, string $like, int $max_statements = self::MAX_STATEMENTS, $clock = null ): array {
+	public static function drop( array $tables, string $like, int $max_statements = self::MAX_STATEMENTS, $clock = null, $confirm = null ): array {
 		global $wpdb;
 		$clock = is_callable( $clock ) ? $clock : static function (): float {
 			return microtime( true );
@@ -139,6 +141,9 @@ final class TempTableDropper {
 						$out['remaining'] = self::tables_from( $steps, $n );
 						break;
 					}
+					if ( is_callable( $confirm ) ) {
+						call_user_func( $confirm );
+					}
 					$ok = self::run_drop( $step['tables'] );
 				} elseif ( null !== $keys ) { // Without keys every table is free: never reached then.
 					$fresh = self::keys( $like );
@@ -149,6 +154,9 @@ final class TempTableDropper {
 								$out['stopped']   = self::CHECKS_CHANGED;
 								$out['remaining'] = self::tables_from( $steps, $n );
 								break;
+							}
+							if ( is_callable( $confirm ) ) {
+								call_user_func( $confirm );
 							}
 							$ok = self::run_drop( $step['tables'] );
 						} finally {

@@ -630,7 +630,7 @@ final class RestoreNeighboursTest extends RestoreTestCase {
 		$this->assertSame( array(), $this->job_tables( $job ), 'nothing created' );
 		$this->assertFileDoesNotExist( RestoreFiles::path( $this->work( $job ), RestoreFiles::MANIFEST ), 'refused before the backup was even checked' );
 
-		// The control: both said, nothing is asked and the policy is followed.
+		// The control: all said, nothing is asked and the policy is followed.
 		$done = $this->run_restore(
 			$this->start_restore(
 				$base,
@@ -639,6 +639,7 @@ final class RestoreNeighboursTest extends RestoreTestCase {
 					'policy'     => array(
 						'uncertain_tables' => 'exclude',
 						'shared_tables'    => 'exclude',
+						'linked_targets'   => 'swap',
 					),
 				)
 			)

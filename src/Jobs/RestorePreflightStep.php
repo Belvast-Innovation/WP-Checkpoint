@@ -127,14 +127,24 @@ final class RestorePreflightStep implements Step {
 	private $head_bytes;
 
 	/**
+	 * Test seams: "deleting" function(): void, before the lease is confirmed for each deletion of what an earlier
+	 * attempt left (a test stops a run there).
+	 *
+	 * @var array<string, mixed>
+	 */
+	private $parts;
+
+	/**
 	 * Constructor.
 	 *
-	 * @param callable $backups    function(): string.
-	 * @param int      $head_bytes Head of a later chunk read.
+	 * @param callable             $backups    function(): string.
+	 * @param int                  $head_bytes Head of a later chunk read.
+	 * @param array<string, mixed> $parts      Test seams.
 	 */
-	public function __construct( callable $backups, int $head_bytes = self::HEAD_BYTES ) {
+	public function __construct( callable $backups, int $head_bytes = self::HEAD_BYTES, array $parts = array() ) {
 		$this->backups    = $backups;
 		$this->head_bytes = max( 1, $head_bytes );
+		$this->parts      = $parts;
 	}
 
 	/**
@@ -155,12 +165,30 @@ final class RestorePreflightStep implements Step {
 	 * @throws TransientFailure When a work file cannot be written.
 	 */
 	public function run( JobContext $context ): StepResult {
+		$cursor = $context->cursor();
+		if ( array() === $cursor ) {
+			// The step's start, in a first attempt or in one that starts over here: what an earlier attempt recorded
+			// is listed before anything else (PreviousAttempt).
+			$cursor = array( 'phase' => 'plan' );
+			if ( PreviousAttempt::record( $context ) ) {
+				$cursor = array_merge( array( 'phase' => 'reclaim' ), PreviousAttempt::start() );
+				$context->checkpoint( $cursor, 0, __( 'Removing what an earlier attempt of the restore left', 'wp-checkpoint' ) );
+			}
+		}
 		$cursor = array_merge(
 			array(
 				'phase' => 'plan',
 			),
-			$context->cursor()
+			$cursor
 		);
+		if ( 'reclaim' === $cursor['phase'] ) {
+			$reclaimed = $this->reclaim( $context, $cursor );
+			if ( null !== $reclaimed ) {
+				return $reclaimed;
+			}
+			$cursor = array( 'phase' => 'plan' );
+			$context->checkpoint( $cursor, 0, __( 'Reading the backup\'s tables', 'wp-checkpoint' ) );
+		}
 		if ( 'plan' === $cursor['phase'] ) {
 			$planned = $this->plan( $context, $cursor );
 			if ( $planned instanceof StepResult ) {
@@ -178,6 +206,44 @@ final class RestorePreflightStep implements Step {
 			}
 		}
 		return $this->references( $context, $cursor, $plan );
+	}
+
+	/**
+	 * The reclaim phase: what an earlier attempt left, a unit at a time within the budget (the first unit of a tick
+	 * always runs), each deletion right after the lease is confirmed. Null once it is all done.
+	 *
+	 * @param JobContext           $context Context.
+	 * @param array<string, mixed> $cursor  Cursor ("reclaim" and the position in the list).
+	 * @return StepResult|null
+	 */
+	private function reclaim( JobContext $context, array $cursor ): ?StepResult {
+		$position = array(
+			'part'  => 'roots' === ( $cursor['part'] ?? '' ) ? 'roots' : 'tables',
+			'r'     => (int) ( $cursor['r'] ?? 0 ),
+			'left'  => array_map( 'strval', (array) ( $cursor['left'] ?? array() ) ),
+			'units' => (int) ( $cursor['units'] ?? 0 ),
+		);
+		$seam     = $this->parts['deleting'] ?? null;
+		$confirm  = static function () use ( $context, $seam ): void {
+			if ( is_callable( $seam ) ) {
+				call_user_func( $seam );
+			}
+			$context->confirm_lease();
+		};
+		$message  = __( 'Removing what an earlier attempt of the restore left', 'wp-checkpoint' );
+		$first    = true;
+		while ( true ) {
+			if ( ! $first && $context->should_stop() ) {
+				return StepResult::progress( array_merge( array( 'phase' => 'reclaim' ), $position ), 0, $message );
+			}
+			$first = false;
+			if ( PreviousAttempt::unit( $context, $position, $confirm ) ) {
+				return null;
+			}
+			if ( $context->should_checkpoint( 0 ) ) {
+				$context->checkpoint( array_merge( array( 'phase' => 'reclaim' ), $position ), 0, $message );
+			}
+		}
 	}
 
 	/**
@@ -236,7 +302,8 @@ final class RestorePreflightStep implements Step {
 		}
 		$random = bin2hex( random_bytes( 2 ) );
 		$plan   = TablePlan::make( $manifest->tables(), (string) ( $site['table_prefix'] ?? '' ), (string) $wpdb->base_prefix, $multisite, $options['exclude_tables'], $context->job()->storage_token, $context->job()->id, $random, $fold );
-		$skip   = $this->incoming( $context, $plan, $multisite, $options['policy'], $meta );
+		$judged = array();
+		$skip   = $this->incoming( $context, $plan, $multisite, $options['policy'], $meta, $judged );
 		if ( $skip instanceof StepResult ) {
 			return $skip;
 		}
@@ -263,6 +330,7 @@ final class RestorePreflightStep implements Step {
 				'chunk_bytes' => $manifest->chunk_bytes(),
 				'volumes'     => $volumes,
 				'multisite'   => $multisite,
+				'incoming'    => $judged,
 			)
 		);
 		foreach ( $plan->skipped() as $name => $reason ) {
@@ -290,8 +358,8 @@ final class RestorePreflightStep implements Step {
 
 	/**
 	 * The walk over the usermeta table this site uses for other installations' capabilities keys
-	 * (IncomingTables::evidence()), a window of ids per unit, on from where a tick before stopped: the first unit of a
-	 * tick always runs. Returns the walk's state once it is over, or the progress to go on from.
+	 * (IncomingTables::evidence()), on from where a tick before stopped. Returns the walk's state once it is over, or
+	 * the progress to go on from.
 	 *
 	 * @param JobContext           $context   Context.
 	 * @param array<string, mixed> $cursor    Cursor.
@@ -299,8 +367,56 @@ final class RestorePreflightStep implements Step {
 	 * @return array{after: int, last: int, found: string[], over: bool, done: bool}|StepResult The prefixes found in hex.
 	 */
 	private function usermeta( JobContext $context, array $cursor, bool $multisite ) {
+		$message = __( 'Looking for other installations\' users in this site\'s user table', 'wp-checkpoint' );
+		$walk    = self::search_usermeta(
+			$context,
+			isset( $cursor['meta'] ) && is_array( $cursor['meta'] ) ? $cursor['meta'] : null,
+			$multisite,
+			static function ( array $meta ) use ( $context, $message ): void {
+				$context->checkpoint(
+					array(
+						'phase' => 'plan',
+						'meta'  => $meta,
+					),
+					self::meta_percent( $meta ),
+					$message
+				);
+			}
+		);
+		if ( ! $walk['done'] ) {
+			return StepResult::progress(
+				array(
+					'phase' => 'plan',
+					'meta'  => $walk['meta'],
+				),
+				self::meta_percent( $walk['meta'] ),
+				$message
+			);
+		}
+		return $walk['meta'];
+	}
+
+	/**
+	 * Walk the usermeta table this site uses for other installations' capabilities keys (IncomingTables::evidence()),
+	 * a window of ids per unit, on from $meta: the first unit always runs, then it goes on while the budget lasts. The
+	 * preflight walks it, and the swap walks it again before it changes anything (SwapStep).
+	 *
+	 * @param JobContext                $context   Context.
+	 * @param array<string, mixed>|null $meta      The walk's state (null: from the start).
+	 * @param bool                      $multisite Whether this site is a network.
+	 * @param callable                  $save      function( array $meta ): void, a checkpoint of the caller's cursor with it.
+	 * @return array{meta: array{after: int, last: int, found: string[], over: bool, done: bool}, done: bool} The prefixes
+	 *                                                                                                      found in hex.
+	 */
+	public static function search_usermeta( JobContext $context, $meta, bool $multisite, callable $save ): array {
 		global $wpdb;
-		$meta    = isset( $cursor['meta'] ) && is_array( $cursor['meta'] ) ? $cursor['meta'] : array(
+		$meta    = is_array( $meta ) ? array(
+			'after' => (int) ( $meta['after'] ?? 0 ),
+			'last'  => (int) ( $meta['last'] ?? 0 ),
+			'found' => array_map( 'strval', (array) ( $meta['found'] ?? array() ) ),
+			'over'  => ! empty( $meta['over'] ),
+			'done'  => ! empty( $meta['done'] ),
+		) : array(
 			'after' => 0,
 			'last'  => SiteTables::last_meta_id(),
 			'found' => array(),
@@ -315,23 +431,18 @@ final class RestorePreflightStep implements Step {
 			}
 			return $sites[ $blog_id ];
 		};
-		$message = __( 'Looking for other installations\' users in this site\'s user table', 'wp-checkpoint' );
 		$first   = true;
 		$read    = 0;
-		while ( empty( $meta['done'] ) ) {
+		while ( ! $meta['done'] ) {
 			if ( ! $first && $context->should_stop() ) {
-				return StepResult::progress(
-					array(
-						'phase' => 'plan',
-						'meta'  => $meta,
-					),
-					self::meta_percent( $meta ),
-					$message
+				return array(
+					'meta' => $meta,
+					'done' => false,
 				);
 			}
 			$first  = false;
-			$window = SiteTables::capability_keys( (int) $meta['after'], self::META_WINDOW );
-			$found  = array_fill_keys( array_map( 'strval', (array) $meta['found'] ), true );
+			$window = SiteTables::capability_keys( $meta['after'], self::META_WINDOW );
+			$found  = array_fill_keys( $meta['found'], true );
 			foreach ( IncomingTables::evidence( $prefix, $multisite, $window['keys'], $is_blog ) as $owner ) {
 				$found[ bin2hex( $owner ) ] = true;
 			}
@@ -344,22 +455,18 @@ final class RestorePreflightStep implements Step {
 			} elseif ( null === $window['after'] ) {
 				$meta['done'] = true;
 			} else {
-				$meta['after'] = $window['after'];
+				$meta['after'] = (int) $window['after'];
 			}
 			$read += self::META_WINDOW * 255; // At most this much of meta keys per window.
-			if ( empty( $meta['done'] ) && $context->should_checkpoint( $read ) ) {
-				$context->checkpoint(
-					array(
-						'phase' => 'plan',
-						'meta'  => $meta,
-					),
-					self::meta_percent( $meta ),
-					$message
-				);
+			if ( ! $meta['done'] && $context->should_checkpoint( $read ) ) {
+				call_user_func( $save, $meta );
 				$read = 0;
 			}
 		}
-		return $meta;
+		return array(
+			'meta' => $meta,
+			'done' => true,
+		);
 	}
 
 	/**
@@ -384,9 +491,11 @@ final class RestorePreflightStep implements Step {
 	 * @param bool                                                                  $multisite Whether this site is a network.
 	 * @param array<string, string>                                                 $policy    RestoreJob::options()'s policy.
 	 * @param array{after: int, last: int, found: string[], over: bool, done: bool} $meta      The walk over the usermeta table.
+	 * @param array<string, mixed>                                                  $judged    Set to the judgement (IncomingTables::judgement(), the
+	 *                                                                                         evidence in hex) and the final names it judged.
 	 * @return array<string, string>|StepResult Tables to leave out (names in the backup) => why, or the questions.
 	 */
-	private function incoming( JobContext $context, TablePlan $plan, bool $multisite, array $policy, array $meta ) {
+	private function incoming( JobContext $context, TablePlan $plan, bool $multisite, array $policy, array $meta, array &$judged ) {
 		$finals = array();
 		foreach ( $plan->tables() as $table ) {
 			$finals[ $table['final'] ] = $table['table'];
@@ -396,6 +505,10 @@ final class RestorePreflightStep implements Step {
 		$evidence = array_map( 'hex2bin', array_map( 'strval', (array) $meta['found'] ) );
 		$over     = ! empty( $meta['over'] );
 		$kinds    = IncomingTables::classify( $prefix, $multisite, $live, array_keys( $finals ), SiteTables::core(), SiteTables::users(), SiteTables::usermeta(), array() !== $evidence ); // A search that could not finish found MAX_EVIDENCE already.
+		$judged   = array(
+			'finals'    => array_map( 'strval', array_keys( $finals ) ),
+			'judgement' => IncomingTables::judgement( $prefix, $multisite, $live, array_keys( $finals ), SiteTables::core(), SiteTables::users(), SiteTables::usermeta(), array_map( 'strval', (array) $meta['found'] ), $over ),
+		);
 		$listed   = array(
 			IncomingTables::NEIGHBOUR => array(),
 			IncomingTables::UNCERTAIN => array(),
@@ -765,6 +878,39 @@ final class RestorePreflightStep implements Step {
 			'chunk_bytes' => (int) $data['chunk_bytes'],
 			'volumes'     => array_map( 'strval', $data['volumes'] ),
 			'multisite'   => ! empty( $data['multisite'] ),
+		);
+	}
+
+	/**
+	 * The judgement of the backup's tables the preflight recorded in its plan file (incoming()): the final names it
+	 * judged and IncomingTables::judgement(), the evidence in hex. Null when the plan has none in that form (a plan
+	 * of an earlier version, or one changed): the swap then cannot compare, and starts the restore over at the
+	 * preflight.
+	 *
+	 * @param string $work Work directory.
+	 * @return array{finals: string[], judgement: array{neighbour: string[], uncertain: string[], shared: string[], evidence: string[], over: bool}}|null
+	 * @throws WorkLost When the plan file is gone or damaged.
+	 */
+	public static function judged( string $work ): ?array {
+		$data = ExportPlan::read( $work, RestoreFiles::PLAN );
+		$in   = $data['incoming'] ?? null;
+		if ( ! is_array( $in ) || ! isset( $in['finals'], $in['judgement'] ) || ! is_array( $in['finals'] ) || ! is_array( $in['judgement'] ) ) {
+			return null;
+		}
+		$judgement = array();
+		foreach ( array( 'neighbour', 'uncertain', 'shared', 'evidence' ) as $key ) {
+			if ( ! isset( $in['judgement'][ $key ] ) || ! is_array( $in['judgement'][ $key ] ) ) {
+				return null;
+			}
+			$judgement[ $key ] = array_map( 'strval', $in['judgement'][ $key ] );
+		}
+		if ( ! isset( $in['judgement']['over'] ) || ! is_bool( $in['judgement']['over'] ) ) {
+			return null;
+		}
+		$judgement['over'] = $in['judgement']['over'];
+		return array(
+			'finals'    => array_map( 'strval', $in['finals'] ),
+			'judgement' => $judgement,
 		);
 	}
 

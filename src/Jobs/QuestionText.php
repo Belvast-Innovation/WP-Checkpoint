@@ -7,6 +7,7 @@
 
 namespace WPCheckpoint\Jobs;
 
+use WPCheckpoint\Restore\LinkedTargets;
 use WPCheckpoint\Restore\IncomingQuestions;
 use WPCheckpoint\Restore\IncomingTables;
 use WPCheckpoint\Restore\RestoreFiles;
@@ -77,6 +78,9 @@ final class QuestionText {
 				$shown  = $tables;
 				$listed = array_slice( array_filter( (array) $tables[ self::TABLE_QUESTIONS[ $kind ] ], 'is_string' ), 0, self::MAX_LISTED );
 			}
+			if ( LinkedTargets::KIND === $kind && '' !== $work ) {
+				$listed = self::linked( $id, $work, $clean );
+			}
 			$out[] = array(
 				'id'      => $id,
 				'kind'    => (string) ( $question['kind'] ?? '' ),
@@ -111,6 +115,63 @@ final class QuestionText {
 		}
 		$evidence = array_filter( (array) ( $tables['evidence'] ?? array() ), 'is_string' );
 		return hash_equals( IncomingQuestions::id( $key, array_filter( (array) $tables[ self::TABLE_QUESTIONS[ $kind ] ], 'is_string' ), $evidence, ! empty( $tables['over'] ) ), $id );
+	}
+
+	/**
+	 * The lines of the question about content directories that are not positively this site's, when its work
+	 * file names the groups and targets its id was made from (a file written by another run may name others: then
+	 * none are listed). Each target masked, numbered where two read the same (LinkedTargets::lines()).
+	 *
+	 * @param string   $id    The question's id.
+	 * @param string   $work  Work directory.
+	 * @param callable $clean Text cleaner.
+	 * @return string[]
+	 */
+	private static function linked( string $id, string $work, callable $clean ): array {
+		try {
+			$file = ExportPlan::exists( $work, RestoreFiles::LINKED ) ? ExportPlan::read( $work, RestoreFiles::LINKED ) : array();
+		} catch ( \RuntimeException $e ) {
+			return array();
+		}
+		$why = array();
+		foreach ( (array) ( $file['hex'] ?? array() ) as $group => $entry ) {
+			$target = is_array( $entry ) ? self::unhex( $entry['target'] ?? null ) : false;
+			$at     = is_array( $entry ) ? self::unhex( $entry['at'] ?? null ) : false;
+			if ( false === $target || false === $at || ! is_string( $entry['verdict'] ?? null ) ) {
+				return array();
+			}
+			$why[ (string) $group ] = array(
+				'target'  => $target,
+				'verdict' => $entry['verdict'],
+				'at'      => $at,
+			);
+		}
+		if ( array() === $why || ! hash_equals( LinkedTargets::id( $why ), $id ) ) {
+			return array();
+		}
+		$entries = array();
+		foreach ( (array) ( $file['entries'] ?? array() ) as $entry ) {
+			if ( is_array( $entry ) && is_string( $entry['group'] ?? null ) && is_string( $entry['target'] ?? null ) && is_string( $entry['relation'] ?? null ) ) {
+				$entries[] = array(
+					'group'    => $entry['group'],
+					'target'   => $entry['target'],
+					'relation' => $entry['relation'],
+					'verdict'  => is_string( $entry['verdict'] ?? null ) ? $entry['verdict'] : LinkedTargets::OUTSIDE,
+					'at'       => is_string( $entry['at'] ?? null ) ? $entry['at'] : '',
+				);
+			}
+		}
+		return LinkedTargets::lines( $entries, $clean );
+	}
+
+	/**
+	 * Bytes from hex as the work file holds them, or false when it is not hex.
+	 *
+	 * @param mixed $hex Hex.
+	 * @return string|false
+	 */
+	private static function unhex( $hex ) {
+		return is_string( $hex ) && 1 === preg_match( '/\A(?:[0-9a-f]{2})*\z/', $hex ) ? hex2bin( $hex ) : false;
 	}
 
 	/**
@@ -193,6 +254,18 @@ final class QuestionText {
 				),
 				$count
 			) . $found;
+		}
+		if ( LinkedTargets::KIND === $kind ) {
+			return sprintf(
+				/* translators: %d: number of content directories */
+				_n(
+					'%d content directory of this site is not positively this site\'s own (listed below, with why): it is outside this site\'s directories, or inside another WordPress installation, or whether it is this site\'s could not be told. The restore replaces a directory where it is, so it would replace the files there, which may be another installation\'s (a staging site whose uploads are the production site\'s, through a link or its settings, for example). Swap it as usual, or leave it out of the restore: it then stays as it is, and the job log says it was not restored. If it is this site\'s own (a deployment\'s shared directory, for example), swap it.',
+					'%d content directories of this site are not positively this site\'s own (listed below, with why): each is outside this site\'s directories, or inside another WordPress installation, or whether it is this site\'s could not be told. The restore replaces a directory where it is, so it would replace the files there, which may be another installation\'s (a staging site whose uploads are the production site\'s, through a link or its settings, for example). Swap them as usual, or leave them out of the restore: they then stay as they are, and the job log says they were not restored. If they are this site\'s own (a deployment\'s shared directories, for example), swap them.',
+					$count,
+					'wp-checkpoint'
+				),
+				$count
+			);
 		}
 		if ( 'oversize_more' === $id ) {
 			return sprintf( '%d more tables have rows larger than the single-row limit (listed in the job log). Leave those rows out, or stop?', $count );
