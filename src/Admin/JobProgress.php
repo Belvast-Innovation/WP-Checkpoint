@@ -74,6 +74,7 @@ final class JobProgress {
 			</div>
 			<p class="wpcheckpoint-job-notice" data-field="notice" hidden></p>
 			<p class="wpcheckpoint-job-notice wpcheckpoint-job-stalled" data-field="stalled"<?php echo '' === $data['stalled_text'] ? ' hidden' : ''; ?>><?php echo esc_html( $data['stalled_text'] ); ?></p>
+			<p class="wpcheckpoint-job-notice wpcheckpoint-job-held" data-field="held_elsewhere"<?php echo '' === $data['held_elsewhere'] ? ' hidden' : ''; ?>><?php echo esc_html( $data['held_elsewhere'] ); ?></p>
 			<details class="wpcheckpoint-job-log-box">
 				<summary><?php esc_html_e( 'Log', 'wp-checkpoint' ); ?></summary>
 				<pre class="wpcheckpoint-job-log" data-field="log_tail"><?php echo esc_html( $data['log_tail'] ); ?></pre>

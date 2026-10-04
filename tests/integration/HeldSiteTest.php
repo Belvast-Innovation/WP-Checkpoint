@@ -248,6 +248,26 @@ final class HeldSiteTest extends SwapTestCase {
 		$this->assertSame( Job::REASON_ABANDONED, Plugin::instance()->jobs()->find( $job->id )->failure_reason );
 	}
 
+	public function test_the_warning_and_the_admin_say_what_can_be_done_with_a_job_managed_elsewhere(): void {
+		global $wpdb;
+		$job = $this->at_swap();
+		$this->killed_at( $job, 'dir_aside_recorded' );
+		$here = implode( "\n", Plugin::instance()->half_swapped_warnings() );
+		$this->assertStringContainsString( 'Resolve it with: wp wpcheckpoint job run ' . $job->id, $here, 'the control: managed here, run here' );
+		$this->assertSame( '', Plugin::instance()->job_presenter()->present( Plugin::instance()->jobs()->find( $job->id ), false )['held_elsewhere'], 'the control' );
+		$wpdb->update( JobRepository::table(), array( 'held_by' => self::ELSEWHERE ), array( 'id' => $job->id ) );
+		$wpdb->query( 'COMMIT' );
+		$job  = Plugin::instance()->jobs()->find( $job->id );
+		$see  = ( new HeldSite() )->assess( $job ); // As this site sees it: not this site's (the plan swapped the sandbox).
+		$code = HeldSite::code( HeldSite::ABANDON, $job, $see['recorded'] );
+		$warn = implode( "\n", Plugin::instance()->half_swapped_warnings() );
+		$this->assertStringContainsString( 'managed by another installation', $warn );
+		$this->assertStringContainsString( 'wp wpcheckpoint job abandon ' . $job->id . ' --confirm=' . $code, $warn );
+		$this->assertStringNotContainsString( 'Resolve it with: wp wpcheckpoint job run ' . $job->id, $warn, 'not advised to run what is never run here' );
+		$admin = Plugin::instance()->job_presenter()->present( $job, false )['held_elsewhere'];
+		$this->assertStringContainsString( 'wp wpcheckpoint job abandon ' . $job->id . ' --confirm=' . $code, $admin );
+	}
+
 	public function test_an_abandon_takes_the_file_down_before_it_records_the_job_abandoned(): void {
 		$job = $this->held();
 		copy( $this->abspath . '/.maintenance', $this->copy_dir() . '/.maintenance' );

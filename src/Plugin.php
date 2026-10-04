@@ -190,7 +190,8 @@ final class Plugin {
 	 * to do, by where it is. Swapped in (the swap recorded as made, its end, or the ended step's position cleared) or
 	 * put back ("restored"): only the end is left. Half swapped: running the job finishes the swap or puts the site
 	 * back (by what is there). Half swapped with no position recorded (the row was changed): not to be run blindly. A
-	 * failed job is retried first; one another process holds is under way. And whenever a held maintenance file of
+	 * failed job is retried first; one another process holds is under way; one another installation manages is never
+	 * run here, and what can be done from here is said instead (JobPresenter::held_lines()). And whenever a held maintenance file of
 	 * this plugin is up, a line saying so, with the advice to remove it only when the jobs were read and none holds
 	 * the site.
 	 *
@@ -214,9 +215,14 @@ final class Plugin {
 			$phase = (string) ( $job->cursor['phase'] ?? '' );
 			/* translators: 1: job id, 2: job id */
 			$finish = Job::FAILED === $job->status ? sprintf( __( 'wp wpcheckpoint job retry %1$d, then wp wpcheckpoint job run %2$d', 'wp-checkpoint' ), $id, $id ) : sprintf( 'wp wpcheckpoint job run %d', $id );
+			$held   = $job->is_locked( time() ) ? null : $this->job_actions()->held_elsewhere( (int) $id );
 			if ( $job->is_locked( time() ) ) {
 				/* translators: %d: job id */
 				$out[] = sprintf( __( 'Restore job %d is at work on the site in another process.', 'wp-checkpoint' ), $id );
+			} elseif ( null !== $held ) {
+				// Managed by another installation: why it is not run here, and what can be done from here.
+				$out[] = $this->job_presenter()->clean( implode( "\n", JobPresenter::held_lines( $held['job'], $held['assessment'] ) ) );
+				continue;
 			} elseif ( Job::SITE_SWAPPED === $job->site_state ) {
 				/* translators: 1: job id, 2: the command */
 				$out[] = sprintf( __( 'Restore job %1$d is at its last step (the restored site is swapped in). Finish it with: %2$s', 'wp-checkpoint' ), $id, $finish );
@@ -436,6 +442,11 @@ final class Plugin {
 	public function job_presenter(): JobPresenter {
 		if ( null === $this->presenter ) {
 			$this->presenter = new JobPresenter( $this->redactor(), $this->job_types(), $this->directories() );
+			$this->presenter->with_held(
+				function ( int $id ) {
+					return $this->job_actions()->held_elsewhere( $id );
+				}
+			);
 		}
 		return $this->presenter;
 	}

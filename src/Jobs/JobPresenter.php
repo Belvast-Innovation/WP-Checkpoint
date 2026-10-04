@@ -74,6 +74,25 @@ final class JobPresenter {
 	private $site_paths;
 
 	/**
+	 * Lookup of a job that holds the site and is managed elsewhere: function( int $id ): array|null
+	 * (JobActions::held_elsewhere()), or null for none (with_held()).
+	 *
+	 * @var callable|null
+	 */
+	private $held = null;
+
+	/**
+	 * The lookup present() uses for a job that holds the site and is managed elsewhere (the plugin wires
+	 * JobActions::held_elsewhere(); it is not a constructor argument because JobActions is built after the presenter).
+	 *
+	 * @param callable $lookup function( int $id ): array{job: Job, assessment: array<string, mixed>}|null.
+	 * @return void
+	 */
+	public function with_held( callable $lookup ): void {
+		$this->held = $lookup;
+	}
+
+	/**
 	 * Constructor.
 	 *
 	 * @param Redactor                                                        $redactor    Redactor.
@@ -392,6 +411,9 @@ final class JobPresenter {
 			'stalled'      => self::stalled_minutes( $job, time() ),
 		);
 		$data['stalled_text'] = self::stalled_text( $data['stalled'] );
+		// A job that holds the site and is managed elsewhere: why it is not run here, and the WP-CLI commands.
+		$held                   = Job::SITE_UNTOUCHED !== $job->site_state && is_callable( $this->held ) ? call_user_func( $this->held, $job->id ) : null;
+		$data['held_elsewhere'] = is_array( $held ) ? $this->clean( implode( "\n", self::held_lines( $held['job'], $held['assessment'] ) ), $extra ) : '';
 		if ( $with_log ) {
 			$data['log_tail'] = $this->log_tail( $job );
 		}
