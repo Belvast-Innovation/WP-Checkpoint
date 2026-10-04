@@ -53,6 +53,34 @@ final class Job {
 	const REASON_TABLE_CHANGED = 'table_changed';
 
 	/**
+	 * The one rule for which storage token manages a job now (who may run it, cancel it, reclaim its work, warn
+	 * about it): the token of the installation that took it over (held_by), else the one it was started with.
+	 * Nothing else compares storage_token for ownership; storage_token stays what the job's names are made from
+	 * and checked against (tests/unit/Jobs/ManagingTokenUsageTest.php).
+	 *
+	 * @param string $storage_token The job's storage token.
+	 * @param string $held_by       The token that took it over, or ''.
+	 * @return string
+	 */
+	public static function managing( string $storage_token, string $held_by ): string {
+		return '' !== $held_by ? $held_by : $storage_token;
+	}
+
+	/**
+	 * The same rule in SQL, over the jobs table's columns (for the compare-and-set statements).
+	 */
+	const MANAGING_SQL = "(CASE WHEN held_by <> '' THEN held_by ELSE storage_token END)";
+
+	/**
+	 * The storage token that manages this job now (managing()).
+	 *
+	 * @return string
+	 */
+	public function managing_token(): string {
+		return self::managing( $this->storage_token, $this->held_by );
+	}
+
+	/**
 	 * Whether the job is paused because a step asked for a decision. Such
 	 * a job is not ticked until JobRepository::answer() stored the answers;
 	 * a paused job without questions is resumed by the next tick.
@@ -281,6 +309,15 @@ final class Job {
 	 * @var string
 	 */
 	public $storage_path = '';
+
+	/**
+	 * The token of the installation that took over this job while it holds the site, after the site's identity
+	 * changed (wp wpcheckpoint job rebind); '' when none did. The job keeps its storage_token: the names of what it
+	 * made (staging roots, temporary and old tables, its ledger) carry that one.
+	 *
+	 * @var string
+	 */
+	public $held_by = '';
 
 	/**
 	 * Log file path relative to the storage base directory, e.g. "logs/job-3-ab12cd34.log".

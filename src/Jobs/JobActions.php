@@ -628,8 +628,10 @@ final class JobActions {
 	 *                                                            stops), "unavailable" (the storage directory cannot be
 	 *                                                            used from here; nothing will clean up), "requested"
 	 *                                                            (a restore's swap is under way: it is rolled back, then
-	 *                                                            the job is cancelled) or "swapped" (refused: the restored
-	 *                                                            site is in place; the job is not cancelled).
+	 *                                                            the job is cancelled), "swapped" (refused: the restored
+	 *                                                            site is in place; the job is not cancelled) or
+	 *                                                            "elsewhere" (refused: it holds the site and another
+	 *                                                            installation manages it, JobRepository::manages()).
 	 * @throws InvalidTransition When the job is already finished.
 	 * @throws StaleJob When the job changed meanwhile.
 	 */
@@ -637,6 +639,14 @@ final class JobActions {
 		$job = $this->repository->find( $id );
 		if ( null === $job ) {
 			return null;
+		}
+		if ( Job::SITE_UNTOUCHED !== $job->site_state && ! $this->repository->manages( $job ) ) {
+			// Refused: another installation manages it (its rollback would run there, or nowhere).
+			return array(
+				'job'     => $job,
+				'cleaned' => false,
+				'reason'  => 'elsewhere',
+			);
 		}
 		if ( Job::SITE_CHANGING === $job->site_state ) {
 			// Its step rolls the site back first (in WP-CLI), then cancels it; nothing is taken from it here.

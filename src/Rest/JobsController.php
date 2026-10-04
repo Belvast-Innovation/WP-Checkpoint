@@ -247,8 +247,8 @@ final class JobsController extends Controller {
 		if ( null === $outcome ) {
 			return $this->not_found();
 		}
-		if ( 'swapped' === $outcome['reason'] ) {
-			return $this->conflict( self::cancel_message( 'swapped' ) );
+		if ( 'swapped' === $outcome['reason'] || 'elsewhere' === $outcome['reason'] ) {
+			return $this->conflict( self::cancel_message( $outcome['reason'] ) );
 		}
 		return $this->respond(
 			array(
@@ -353,7 +353,7 @@ final class JobsController extends Controller {
 	/**
 	 * Message for a cancel outcome.
 	 *
-	 * @param string $reason cleaned, holder or unavailable.
+	 * @param string $reason cleaned, holder, unavailable, requested, swapped or elsewhere.
 	 * @return string
 	 */
 	public static function cancel_message( string $reason ): string {
@@ -366,6 +366,8 @@ final class JobsController extends Controller {
 				return __( 'The restore is changing the site. It puts the site back as it was, then the job is cancelled; that happens when the restore runs again in WP-CLI (wp wpcheckpoint job run, after wp wpcheckpoint job retry if it failed).', 'wp-checkpoint' );
 			case 'swapped':
 				return __( 'The restored site is in place: cancelling the job cannot change it back.', 'wp-checkpoint' );
+			case 'elsewhere':
+				return __( 'This restore holds the site changed and is managed by another installation of WP Checkpoint (the site\'s identity changed since it started); it is not cancelled from here. wp wpcheckpoint job status shows what can be done.', 'wp-checkpoint' );
 		}
 		return __( 'The job was cancelled.', 'wp-checkpoint' );
 	}

@@ -1311,6 +1311,25 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		$this->assertSame( 0, $this->repo->find( $job->id )->work_expired_at );
 	}
 
+	public function test_schema_version_ten_adds_held_by_to_a_version_nine_table(): void {
+		global $wpdb;
+		$table = Schema::jobs_table();
+		$job   = $this->repo->create( 'export' );
+		$wpdb->query( "ALTER TABLE {$table} DROP COLUMN held_by" );
+		$this->assertNotContains( 'held_by', $wpdb->get_col( "SHOW COLUMNS FROM {$table}" ), 'the control: a version 9 table' );
+		Options::set( Schema::OPTION, array( 'version' => 9, 'min_compatible' => 1 ) );
+		$result = Schema::ensure();
+		$this->assertSame( 'migrated', $result['action'] );
+		$this->assertSame( Schema::CURRENT, $result['version'] );
+		$this->assertSame( 10, Schema::CURRENT, 'the control: this is the migration under test' );
+		$this->assertSame( 1, $result['min_compatible'], 'older code ignores the column' );
+		$this->assertContains( 'held_by', $wpdb->get_col( "SHOW COLUMNS FROM {$table}" ) );
+		$found = $this->repo->find( $job->id );
+		$this->assertSame( '', $found->held_by, 'a row from before: nobody took it over' );
+		$this->assertSame( $found->storage_token, $found->managing_token() );
+		$this->assertSame( array(), $found->missing_columns );
+	}
+
 	public function test_schema_version_three_adds_the_options_and_questions_columns_to_a_version_two_table(): void {
 		global $wpdb;
 		$table = Schema::jobs_table();

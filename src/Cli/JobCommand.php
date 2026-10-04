@@ -309,14 +309,15 @@ final class JobCommand {
 
 	/**
 	 * What the cancel command says for an outcome (JobActions::cancel()): refused when the restored site is in place
-	 * ("swapped", an error), otherwise what was done or requested.
+	 * ("swapped") or another installation manages the job ("elsewhere"), both errors; otherwise what was done or
+	 * requested.
 	 *
 	 * @param string $reason The outcome's reason.
 	 * @return array{error: bool, message: string}
 	 */
 	public static function cancel_verdict( string $reason ): array {
 		return array(
-			'error'   => 'swapped' === $reason,
+			'error'   => in_array( $reason, array( 'swapped', 'elsewhere' ), true ),
 			'message' => \WPCheckpoint\Rest\JobsController::cancel_message( $reason ),
 		);
 	}

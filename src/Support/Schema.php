@@ -24,7 +24,7 @@ defined( 'ABSPATH' ) || exit;
 final class Schema {
 
 	const OPTION  = StoredNames::DB_VERSION;
-	const CURRENT = 9;
+	const CURRENT = 10;
 
 	/**
 	 * Jobs table name without the prefix.
@@ -67,6 +67,7 @@ final class Schema {
 		'lock_token'       => "varchar(32) NOT NULL DEFAULT ''",
 		'site_state'       => 'tinyint(3) unsigned NOT NULL DEFAULT 0',
 		'cancel_requested' => 'bigint(20) unsigned NOT NULL DEFAULT 0',
+		'held_by'          => "varchar(32) NOT NULL DEFAULT ''",
 	);
 
 	/**
@@ -506,6 +507,11 @@ final class Schema {
 				return 1;
 			case 9:
 				// Adds site_state (0) and cancel_requested (0); older code ignores both, so min_compatible stays 1.
+				self::create_jobs_table();
+				return 1;
+			case 10:
+				// Adds held_by (''); older code ignores it and goes by storage_token alone, which refuses a job
+				// another installation took over (never runs one it should not), so min_compatible stays 1.
 				self::create_jobs_table();
 				return 1;
 		}

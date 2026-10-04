@@ -223,6 +223,24 @@ final class StagingResidueTest extends JobTestCase {
 		}
 	}
 
+	public function test_a_job_taken_over_reclaims_the_staging_named_with_the_token_it_started_with(): void {
+		$this->register( 'plain', array( $this->counting_step( 'p', 5 ) ) );
+		$id = $this->job_of( 'plain' );
+		// Started under another installation's token; this one took it over (held_by): it manages the job, and the
+		// job's names keep the token it started with.
+		self::set( $id, array( 'storage_token' => 'ffffffffffff' ) );
+		$made = $this->leave( $this->layout( $id, 'ffffffffffff' ) );
+		$this->assertFalse( Plugin::instance()->jobs()->reclaim_work( Plugin::instance()->jobs()->find( $id ) ), 'the control: not taken over, nothing is reclaimed' );
+		foreach ( $made as $path ) {
+			$this->assertFileExists( $path, 'the control' );
+		}
+		self::set( $id, array( 'held_by' => (string) Plugin::instance()->directories()->state()['token'] ) );
+		Plugin::instance()->jobs()->reclaim_work( Plugin::instance()->jobs()->find( $id ) );
+		foreach ( $made as $path ) {
+			$this->assertFileDoesNotExist( $path, 'taken over: its staging, by the names it made, is reclaimed' );
+		}
+	}
+
 	public function test_nothing_is_claimed_while_a_clone_is_unresolved(): void {
 		$this->register( 'plain', array( $this->counting_step( 'p', 5 ) ) );
 		$ended = $this->job_of( 'plain' );
