@@ -53,6 +53,17 @@ final class Job {
 	const REASON_TABLE_CHANGED = 'table_changed';
 
 	/**
+	 * A job that held the site changed, given up from another WordPress directory after the site's identity changed
+	 * (wp wpcheckpoint job abandon, Jobs\HeldSite): it never runs again, and nothing of it is reclaimed.
+	 */
+	const REASON_ABANDONED = 'abandoned';
+
+	/**
+	 * The reasons a final failure may carry (stamp_failure() writes them, parse_failure() reads them).
+	 */
+	const REASONS = array( self::REASON_TABLE_CHANGED, self::REASON_ABANDONED );
+
+	/**
 	 * The one rule for which storage token manages a job now (who may run it, cancel it, reclaim its work, warn
 	 * about it): the token of the installation that took it over (held_by), else the one it was started with.
 	 * Nothing else compares storage_token for ownership; storage_token stays what the job's names are made from
@@ -123,7 +134,7 @@ final class Job {
 	 *
 	 * @param string $stored      failure_kind column.
 	 * @param int    $finished_at finished_at column.
-	 * @return string REASON_TABLE_CHANGED or ''.
+	 * @return string One of REASONS, or ''.
 	 */
 	public static function read_failure_reason( string $stored, int $finished_at ): string {
 		return self::parse_failure( $stored, $finished_at )[1];
@@ -144,7 +155,7 @@ final class Job {
 		if ( 1 === count( $parts ) && in_array( $parts[0], array( self::FAILURE_TEMPORARY, self::FAILURE_FINAL ), true ) ) {
 			return $parts[0] . ':' . $now;
 		}
-		if ( 2 === count( $parts ) && self::FAILURE_FINAL === $parts[0] && self::REASON_TABLE_CHANGED === $parts[1] ) {
+		if ( 2 === count( $parts ) && self::FAILURE_FINAL === $parts[0] && in_array( $parts[1], self::REASONS, true ) ) {
 			return $parts[0] . ':' . $now . ':' . $parts[1];
 		}
 		return '';
@@ -164,7 +175,7 @@ final class Job {
 		if ( ( 2 !== $count && 3 !== $count ) || ! in_array( $parts[0], array( self::FAILURE_TEMPORARY, self::FAILURE_FINAL ), true ) ) {
 			return array( '', '' );
 		}
-		if ( 3 === $count && ( self::FAILURE_FINAL !== $parts[0] || self::REASON_TABLE_CHANGED !== $parts[2] ) ) {
+		if ( 3 === $count && ( self::FAILURE_FINAL !== $parts[0] || ! in_array( $parts[2], self::REASONS, true ) ) ) {
 			return array( '', '' ); // A reason this code does not know: no kind, Retry offered.
 		}
 		if ( ! ctype_digit( $parts[1] ) || $finished_at <= 0 || (int) $parts[1] !== $finished_at ) {

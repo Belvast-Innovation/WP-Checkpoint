@@ -21,6 +21,7 @@ final class ManagingTokenUsageTest extends TestCase {
 	 */
 	const NAME_CHECKS = array(
 		'src/Jobs/PreviousAttempt.php' => array( 1, 'a staging root\'s name carries the token the job made it with' ),
+		'src/Jobs/JobRepository.php'   => array( 2, 'take_over() and abandon_held() write only the row as read, the job started with that token (a second take-over too); who may do so is decided before, by manages() and HeldSite' ),
 	);
 
 	/**

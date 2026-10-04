@@ -146,6 +146,57 @@ final class JobPresenter {
 	}
 
 	/**
+	 * What can be done, from here, with a job that holds the site changed and is managed elsewhere: why it is not run
+	 * here, and the commands that apply (HeldSite), each with its confirmation code. Not masked: callers send the
+	 * lines through clean().
+	 *
+	 * @param Job                  $job Job.
+	 * @param array<string, mixed> $see HeldSite::assess().
+	 * @return string[]
+	 */
+	public static function held_lines( Job $job, array $see ): array {
+		$id = $job->id;
+		if ( HeldSite::SITE === $see['branch'] ) {
+			$code  = HeldSite::code( HeldSite::REBIND, $job, '' );
+			$lines = array(
+				/* translators: %d: job id */
+				sprintf( __( 'Restore job %d holds the site changed and is managed by another installation of WP Checkpoint: the site\'s identity changed since it started, so it is not run here. As far as can be told, it is this site\'s own (the directories it swaps are this site\'s, and so is the table prefix). Take it over here with one of:', 'wp-checkpoint' ), $id ),
+			);
+			if ( '' === $see['direction'] ) {
+				$lines[] = '  wp wpcheckpoint job rebind ' . $id . ' --confirm=' . $code . ' --then=continue  ' . __( 'The restore goes on as after any interruption (a swap cut off half way is put back first; then it can be retried).', 'wp-checkpoint' );
+				$lines[] = '  wp wpcheckpoint job rebind ' . $id . ' --confirm=' . $code . ' --then=rollback  ' . __( 'The restore puts the site back as it was and is cancelled.', 'wp-checkpoint' );
+			} else {
+				$lines[] = '  wp wpcheckpoint job rebind ' . $id . ' --confirm=' . $code . '  ' . __( 'The restore recorded its direction; it only finishes.', 'wp-checkpoint' );
+			}
+			return $lines;
+		}
+		/* translators: 1: job id, 2: why it is not taken to be this site's, 3: the WordPress directory its plan records */
+		$lines = array( sprintf( __( 'Restore job %1$d holds a site changed and is managed by another installation of WP Checkpoint; it is never run here: as far as can be told it is not this site\'s (%2$s). Its plan was written for the WordPress directory %3$s.', 'wp-checkpoint' ), $id, $see['why'], '' === $see['recorded'] ? __( '(not recorded)', 'wp-checkpoint' ) : $see['recorded'] ) );
+		if ( ! $see['differs'] ) {
+			$lines[] = __( 'This WordPress directory is not positively another than that one (the same, or it cannot be told), so nothing can be done with the job from here.', 'wp-checkpoint' );
+			return $lines;
+		}
+		$shared = sprintf(
+			/* translators: %s: the WordPress directory the job's plan records */
+			__( 'If this database is shared with the site at %s, its restore stays half swapped.', 'wp-checkpoint' ),
+			$see['recorded']
+		);
+		$abandon = '  wp wpcheckpoint job abandon ' . $id . ' --confirm=' . HeldSite::code( HeldSite::ABANDON, $job, $see['recorded'] );
+		if ( $see['file_here'] ) {
+			$lines[] = __( 'Its maintenance file is in this WordPress directory, so this site answers only with a maintenance page. Take it down (the job is not changed; safe whether or not this database is shared):', 'wp-checkpoint' );
+			$lines[] = '  wp wpcheckpoint job release ' . $id . ' --confirm=' . HeldSite::code( HeldSite::RELEASE, $job, $see['recorded'] );
+			$lines[] = __( 'Or take it down and give the job up for good, only if this database is not shared with that site (this site\'s tables may be half swapped: restoring this copy from a backup first is advised):', 'wp-checkpoint' );
+			$lines[] = $abandon;
+			$lines[] = $shared;
+			return $lines;
+		}
+		$lines[] = __( 'It belongs to that other location; this WordPress directory holds no maintenance file of it. Give it up only if this database is not shared with that site:', 'wp-checkpoint' );
+		$lines[] = $abandon;
+		$lines[] = $shared;
+		return $lines;
+	}
+
+	/**
 	 * Why a failed job can no longer be retried.
 	 *
 	 * @return string
