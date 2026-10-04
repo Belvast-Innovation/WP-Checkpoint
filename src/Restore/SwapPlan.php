@@ -21,8 +21,9 @@ defined( 'ABSPATH' ) || exit;
  * unit (DIR: the live path, the staged path, where the live one goes), a
  * table of the backup (TABLE: its final, temporary and old names) or a live
  * table the backup does not have (MOVE: its name and where it goes), each
- * with whether the live one was there; COMPLETE closes the plan and holds
- * how many entries it has.
+ * with whether the live one was there; SITE, the first entry, the site it was
+ * written for (see the constant); COMPLETE closes the plan and holds how many
+ * entries it has.
  *
  * Rows belong to one attempt of the job: the check takes a new attempt
  * number each time it runs from its start, removes the rows of earlier
@@ -48,6 +49,15 @@ final class SwapPlan {
 	const TABLE_OF = 'table';
 	const MOVE     = 'move';
 	const COMPLETE = 'complete';
+
+	/**
+	 * The site the plan was written for, the plan's first entry (sequence 0), counted like the others. It borrows
+	 * two columns: "live" holds the WordPress directory (ABSPATH) resolved (Paths::real(), normalised, no trailing
+	 * slash), "stage" the table prefix ($wpdb->base_prefix, possibly empty); "old" is empty and "had_live" 0. The
+	 * swap checks it against the site before it starts (SwapStep::check_plan()); after an identity change it tells
+	 * whether the job is this site's and where its maintenance file was (Jobs\HeldSite).
+	 */
+	const SITE = 'site';
 
 	/**
 	 * Columns: name => definition (the one definition, used to create the table and to check it).

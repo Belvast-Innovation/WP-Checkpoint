@@ -247,6 +247,27 @@ final class SwapRulesTest extends TestCase {
 		}
 	}
 
+	public function test_the_site_entry_is_a_resolved_directory_and_a_table_prefix(): void {
+		$site = array(
+			'kind'  => SwapPlan::SITE,
+			'live'  => '/srv/site/releases/7',
+			'stage' => 'wp_',
+			'old'   => '',
+		);
+		$this->assertSame( '', SwapRules::invalid( $site, 'a1b2c3d4e5f6', 7 ), 'the control' );
+		$this->assertSame( '', SwapRules::invalid( array( 'stage' => '' ) + $site, 'a1b2c3d4e5f6', 7 ), 'a site without a table prefix' );
+		$bad = array(
+			'a relative directory'   => array( 'live' => 'srv/site' ),
+			'no directory'           => array( 'live' => '' ),
+			'a .. segment'           => array( 'live' => '/srv/site/../other' ),
+			'a prefix of other bytes' => array( 'stage' => 'wp-' ),
+			'an old column'          => array( 'old' => '/srv/old' ),
+		);
+		foreach ( $bad as $what => $change ) {
+			$this->assertNotSame( '', SwapRules::invalid( $change + $site, 'a1b2c3d4e5f6', 7 ), $what );
+		}
+	}
+
 	private static function there( array $names ): array {
 		return array_fill_keys( $names, true );
 	}

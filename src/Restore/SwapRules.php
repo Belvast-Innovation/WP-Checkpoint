@@ -239,7 +239,8 @@ final class SwapRules {
 	 * A directory unit: absolute paths without "." or ".." segments; the staged and the old path under one staging
 	 * root of this job (StagingLayout's name, with the job's token and id), the old one under its "old" directory,
 	 * and the live path in the directory that holds that root. A table entry: the temporary and the old name of
-	 * this job's grammar (TempTables), and a live name that is none of the plugin's own tables.
+	 * this job's grammar (TempTables), and a live name that is none of the plugin's own tables. The site entry
+	 * (SwapPlan::SITE): an absolute directory without "." or ".." segments and a table prefix.
 	 *
 	 * @param array{kind: string, live: string, stage: string, old: string} $entry  Entry.
 	 * @param string                                                        $token  The job's storage token.
@@ -247,6 +248,14 @@ final class SwapRules {
 	 * @return string
 	 */
 	public static function invalid( array $entry, string $token, int $job_id ): string {
+		if ( SwapPlan::SITE === $entry['kind'] ) {
+			// The site the plan was written for: a resolved absolute directory and a table prefix (SwapPlan::SITE).
+			$path = str_replace( '\\', '/', $entry['live'] );
+			if ( '' === $path || '/' !== $path[0] || 1 === preg_match( '#(?:\A|/)\.{1,2}(?:/|\z)#', $path ) ) {
+				return 'a site entry whose WordPress directory is not absolute, or has . or .. segments';
+			}
+			return 1 === preg_match( '/\A[A-Za-z0-9_]*\z/', $entry['stage'] ) && '' === $entry['old'] ? '' : 'a site entry whose table prefix is not one';
+		}
 		if ( SwapPlan::DIR === $entry['kind'] ) {
 			foreach ( array( $entry['live'], $entry['stage'], $entry['old'] ) as $path ) {
 				$path = str_replace( '\\', '/', $path );

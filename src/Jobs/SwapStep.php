@@ -966,6 +966,12 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 		$staged  = (array) $staging['staged'];
 		$entries = $this->entries( $context, $db, $cursor );
 		$other   = StagingLayout::OTHER;
+		// The site the plan was written for is this one: the WordPress directory and the table prefix as they are now.
+		$real = Paths::real( (string) ( $this->parts['abspath'] ?? ABSPATH ) );
+		$site = $entries['site'][0] ?? null;
+		if ( 1 !== count( $entries['site'] ) || 0 !== ( $site['seq'] ?? -1 ) || false === $real || rtrim( Paths::normalize( (string) $real ), '/' ) !== $site['live'] || self::base_prefix() !== $site['stage'] ) {
+			throw new RetryFrom( 'The swap\'s plan was written for a WordPress directory or table prefix other than this site\'s now; the swap was not started, and the final check writes the plan again.', SwapCheckStep::ID );
+		}
 		foreach ( $entries['dirs'] as $entry ) {
 			$want = null;
 			foreach ( StagingLayout::GROUPS as $group ) {
@@ -1007,12 +1013,13 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 	}
 
 	/**
-	 * The plan's entries of the attempt, in order: the directory units and the table entries.
+	 * The plan's entries of the attempt, in order: the site entry (SwapPlan::SITE), the directory units and the table
+	 * entries.
 	 *
 	 * @param JobContext           $context Context.
 	 * @param Queries              $db      Connection.
 	 * @param array<string, mixed> $cursor  Cursor (its attempt).
-	 * @return array{dirs: array<int, array{seq: int, kind: string, live: string, stage: string, old: string, had_live: bool}>, tables: array<int, array{seq: int, kind: string, live: string, stage: string, old: string, had_live: bool}>}
+	 * @return array{site: array<int, array{seq: int, kind: string, live: string, stage: string, old: string, had_live: bool}>, dirs: array<int, array{seq: int, kind: string, live: string, stage: string, old: string, had_live: bool}>, tables: array<int, array{seq: int, kind: string, live: string, stage: string, old: string, had_live: bool}>}
 	 * @throws \RuntimeException When the plan's rows are gone or are not whole: an ordinary failure, never FINAL (a job
 	 *                           that holds the site changed must keep its retry, which goes on putting it back).
 	 */
@@ -1025,6 +1032,7 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 			throw new \RuntimeException( 'The swap\'s plan is gone from the database or no longer whole; what the swap changed cannot be told from it. Retry once the plan\'s rows are back.' );
 		}
 		$out   = array(
+			'site'   => array(),
 			'dirs'   => array(),
 			'tables' => array(),
 		);
@@ -1037,14 +1045,14 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 					// Not FINAL: a job that holds the site changed keeps its retry.
 					throw new \RuntimeException( sprintf( 'The swap\'s plan in the database holds an entry the final check does not write (%s); nothing more is renamed by it.', $why ) );
 				}
-				$out[ SwapPlan::DIR === $entry['kind'] ? 'dirs' : 'tables' ][] = $entry;
+				$out[ SwapPlan::SITE === $entry['kind'] ? 'site' : ( SwapPlan::DIR === $entry['kind'] ? 'dirs' : 'tables' ) ][] = $entry;
 				$after = $entry['seq'];
 			}
 			if ( count( $page ) < self::PAGE ) {
 				break;
 			}
 		}
-		if ( count( $out['dirs'] ) + count( $out['tables'] ) !== $count ) {
+		if ( count( $out['site'] ) + count( $out['dirs'] ) + count( $out['tables'] ) !== $count ) {
 			throw new \RuntimeException( 'The swap\'s plan in the database does not hold the entries it says it has. Retry once the plan\'s rows are back.' );
 		}
 		return $out;

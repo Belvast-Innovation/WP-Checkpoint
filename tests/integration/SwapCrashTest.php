@@ -711,6 +711,40 @@ final class SwapCrashTest extends SwapTestCase {
 		$this->assertSame( $before, $this->site() );
 	}
 
+	/**
+	 * @dataProvider site_columns
+	 */
+	public function test_a_plan_written_for_another_wordpress_directory_or_prefix_is_written_again_before_the_swap( string $column ): void {
+		global $wpdb;
+		$job    = $this->at_swap();
+		$before = $this->site();
+		$plan   = $this->plan_of( $job );
+		$this->assertCount( 1, $plan['site'], 'the control: the plan records its site' );
+		$this->assertSame( 0, $plan['site'][0]['seq'], 'first' );
+		$this->assertSame( rtrim( str_replace( '\\', '/', (string) realpath( $this->abspath ) ), '/' ), $plan['site'][0]['live'] );
+		$this->assertSame( $wpdb->base_prefix, $plan['site'][0]['stage'] );
+		$value = 'live' === $column ? $plan['site'][0]['live'] . '-elsewhere' : 'other_';
+		$table = $wpdb->base_prefix . \WPCheckpoint\Restore\SwapPlan::TABLE;
+		$wpdb->query( $wpdb->prepare( "UPDATE `{$table}` SET {$column} = %s WHERE job_id = %d AND seq = 0", $value, $job->id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- a column name from the data provider.
+		$wpdb->query( 'COMMIT' );
+		$done = $this->cli_run( $job );
+		$this->assertSame( Job::FAILED, $done->status );
+		$this->assertStringContainsString( 'written for a WordPress directory or table prefix other than this site', (string) $done->last_error );
+		$this->assertSame( SwapCheckStep::ID, $done->cursor[ JobRepository::RETRY_FROM_KEY ] ?? null );
+		$this->assertNotContains( 'entered', $this->seams, 'nothing was changed' );
+		$this->assertSame( $before, $this->site() );
+	}
+
+	/**
+	 * @return array<string, array{0: string}>
+	 */
+	public function site_columns(): array {
+		return array(
+			'the WordPress directory' => array( 'live' ),
+			'the table prefix'        => array( 'stage' ),
+		);
+	}
+
 	public function test_a_table_whose_restored_copy_went_before_the_swap_is_left_as_it_is_and_said(): void {
 		global $wpdb;
 		$job    = $this->at_swap();

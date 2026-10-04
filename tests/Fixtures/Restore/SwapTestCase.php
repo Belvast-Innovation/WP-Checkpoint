@@ -218,7 +218,7 @@ abstract class SwapTestCase extends RestoreTestCase {
 					$steps[] = new FileStagingStep( $this->staging_parts() );
 					break;
 				case SwapCheckStep::ID:
-					$steps[] = new SwapCheckStep( null, $this->check_parts( array( 'site_dirs' => $dirs ) ) );
+					$steps[] = new SwapCheckStep( null, $this->check_parts( array( 'site_dirs' => $dirs, 'abspath' => $this->abspath ) ) );
 					break;
 				default:
 					$steps[] = $step;
@@ -432,11 +432,12 @@ abstract class SwapTestCase extends RestoreTestCase {
 		$db   = ImportSession::open( Credentials::from_wordpress() );
 		$file = json_decode( (string) file_get_contents( RestoreFiles::path( $this->work( $job ), RestoreFiles::SWAP_PLAN ) ), true );
 		$out  = array(
+			'site'   => array(),
 			'dirs'   => array(),
 			'tables' => array(),
 		);
 		foreach ( ( new SwapPlan( $db, $wpdb->base_prefix . SwapPlan::TABLE ) )->read( $job->id, (int) $file['attempt'], -1, 100000 ) as $entry ) {
-			$out[ SwapPlan::DIR === $entry['kind'] ? 'dirs' : 'tables' ][] = $entry;
+			$out[ SwapPlan::SITE === $entry['kind'] ? 'site' : ( SwapPlan::DIR === $entry['kind'] ? 'dirs' : 'tables' ) ][] = $entry;
 		}
 		$db->close();
 		return $out;
