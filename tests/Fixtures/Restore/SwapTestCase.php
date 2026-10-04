@@ -18,6 +18,8 @@ use WPCheckpoint\Restore\RestoreFiles;
 use WPCheckpoint\Restore\SwapPlan;
 use WPCheckpoint\Restore\SwapRules;
 use WPCheckpoint\Standalone\Credentials;
+use WPCheckpoint\Jobs\JobRepository;
+use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Support\Redactor;
 use WPCheckpoint\Tests\Fixtures\Sandbox;
 
@@ -71,6 +73,37 @@ abstract class SwapTestCase extends RestoreTestCase {
 
 	/** @var string A file the killed child appends every seam it passes to ('' for none). */
 	protected $trace = '';
+
+	/**
+	 * The installation the test's restore runs under, as the context of its Directories (an empty array: the
+	 * plugin's own). Its storage directory holds the backups and the restore's work, and its token is the job's:
+	 * the restore is created, run up to the swap and killed (in the child too) with that installation's jobs.
+	 *
+	 * @var array<string, mixed>
+	 */
+	protected $storage = array();
+
+	/**
+	 * The installation the test's restore runs under (see $storage), a fresh instance.
+	 *
+	 * @return Directories
+	 */
+	protected function installation(): Directories {
+		return array() === $this->storage ? Plugin::instance()->directories() : new Directories( $this->storage );
+	}
+
+	/**
+	 * Its jobs.
+	 *
+	 * @return JobRepository
+	 */
+	protected function installation_jobs(): JobRepository {
+		return array() === $this->storage ? Plugin::instance()->jobs() : new JobRepository( $this->installation() );
+	}
+
+	protected function backups_dir(): string {
+		return $this->installation()->backups();
+	}
 
 	public function set_up(): void {
 		parent::set_up();
@@ -191,13 +224,19 @@ abstract class SwapTestCase extends RestoreTestCase {
 		$dirs  = function (): array {
 			return $this->dirs;
 		};
-		$steps = array();
-		foreach ( Plugin::instance()->job_types()->get( RestoreJob::ID )->steps() as $step ) {
+		$steps   = array();
+		$restore = new RestoreJob(
+			function (): Directories {
+				return $this->installation();
+			},
+			array( Plugin::instance()->job_presenter(), 'clean' )
+		);
+		foreach ( $restore->steps() as $step ) {
 			switch ( $step->id() ) {
 				case \WPCheckpoint\Jobs\RestorePreflightStep::ID:
 					$steps[] = new \WPCheckpoint\Jobs\RestorePreflightStep(
-						static function (): string {
-							return Plugin::instance()->directories()->backups();
+						function (): string {
+							return $this->backups_dir();
 						},
 						\WPCheckpoint\Jobs\RestorePreflightStep::HEAD_BYTES,
 						$this->preflight_parts
@@ -301,8 +340,9 @@ abstract class SwapTestCase extends RestoreTestCase {
 		}
 		// The restore must bring the options (and a network's sitemeta): the restored site's list of active plugins.
 		$exclude = array_values( array_diff( self::live_tables(), array_merge( array( $wpdb->prefix . 'swt_keep', $wpdb->prefix . 'swt_gone' ), self::site_tables() ) ) );
-		$job     = Plugin::instance()->jobs()->create( $this->type, self::$admin_id, array(), array_merge( array( 'base' => $base, 'exclude_tables' => $exclude ), $options ) );
-		$runner  = Plugin::instance()->runner();
+		$jobs    = $this->installation_jobs();
+		$job     = $jobs->create( $this->type, self::$admin_id, array(), array_merge( array( 'base' => $base, 'exclude_tables' => $exclude ), $options ) );
+		$runner  = array() === $this->storage ? Plugin::instance()->runner() : new Runner( $jobs, Plugin::instance()->job_types(), new Redactor( Redactor::installation_secrets() ) );
 		for ( $i = 0; $i < 500; $i++ ) {
 			$result = $runner->tick( $job->id, microtime( true ) );
 			$now    = Plugin::instance()->jobs()->find( $job->id );
@@ -406,6 +446,7 @@ abstract class SwapTestCase extends RestoreTestCase {
 					'trace'   => $this->trace,
 					'sql_at'  => $this->child_sql,
 					'admin'   => self::$admin_id,
+					'storage' => $this->storage,
 				)
 			)
 		);

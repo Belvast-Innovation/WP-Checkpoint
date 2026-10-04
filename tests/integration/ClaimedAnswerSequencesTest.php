@@ -2,13 +2,14 @@
 
 namespace WPCheckpoint\Tests\Integration;
 
-use WP_UnitTestCase;
 use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\JobRepository;
 use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Support\Options;
 use WPCheckpoint\Support\Schema;
 use WPCheckpoint\Support\StorageReclaim;
+use WPCheckpoint\Tests\Fixtures\Leftovers;
+use WPCheckpoint\Tests\Fixtures\Restore\SwapTestCase;
 use WPCheckpoint\Tests\Fixtures\Sandbox;
 
 /**
@@ -38,9 +39,13 @@ use WPCheckpoint\Tests\Fixtures\Sandbox;
  * does not hold the site fails with the reason and the one that holds it runs nowhere; or the new directory kept by
  * the administrator, the original's jobs not run here. Never a job silently waiting for nothing.
  *
+ * The job holding the site is a real restore under the sequence's own installation (its storage directory and
+ * token), run up to its swap and killed there (a child process, SIGKILL) once the maintenance file is up: its row,
+ * cursor and plan are the swap's own, never written into the table by the test (held_job()).
+ *
  * Fixed seeds; size: WPCHECKPOINT_IDENTITY_SEQUENCES (default 200) for each.
  */
-final class ClaimedAnswerSequencesTest extends WP_UnitTestCase {
+final class ClaimedAnswerSequencesTest extends SwapTestCase {
 
 	const POINTS = array( 'none', 'prechecks', 'lock_busy', 'after_hash', 'lock_lost', 'write_fail', 'taken', 'recorded' );
 
@@ -68,6 +73,7 @@ final class ClaimedAnswerSequencesTest extends WP_UnitTestCase {
 		Options::delete( Directories::OPTION );
 		$this->root = Sandbox::make( 'claimed-answers' );
 		Schema::ensure();
+		$this->tables_at_start = Leftovers::tables();
 		if ( is_multisite() ) {
 			$this->blog = self::factory()->blog->create();
 		}
@@ -88,19 +94,111 @@ final class ClaimedAnswerSequencesTest extends WP_UnitTestCase {
 		parent::tear_down();
 	}
 
+	/** @var string[] The restore's tables there before the test (Leftovers::tables()). */
+	private $tables_at_start = array();
+
 	private function dirs( string $site, string $store, array $extra = array() ): Directories {
-		return new Directories(
-			array_merge(
-				array(
-					'is_web_request' => false,
-					'document_root'  => '',
-					'abspath'        => $this->root . '/' . $site . '/',
-					'content_dir'    => $this->root . '/content',
-					'custom_dir'     => $store,
-				),
-				$extra
-			)
+		return new Directories( $this->custom_context( $site, $store, $extra ) );
+	}
+
+	/**
+	 * The context of a request of the site at $site with the custom storage directory $store.
+	 *
+	 * @return array<string, mixed>
+	 */
+	private function custom_context( string $site, string $store, array $extra = array() ): array {
+		return array_merge(
+			array(
+				'is_web_request' => false,
+				'document_root'  => '',
+				'abspath'        => $this->root . '/' . $site . '/',
+				'content_dir'    => $this->root . '/content',
+				'custom_dir'     => $store,
+			),
+			$extra
 		);
+	}
+
+	/**
+	 * The context of a request of the site at $site with the default storage directory in $content.
+	 *
+	 * @return array<string, mixed>
+	 */
+	private function default_context( string $site, string $content, array $extra = array() ): array {
+		return array_merge(
+			array(
+				'is_web_request' => false,
+				'document_root'  => '',
+				'abspath'        => $this->root . '/' . $site . '/',
+				'content_dir'    => $content,
+				'custom_dir'     => '',
+			),
+			$extra
+		);
+	}
+
+	/**
+	 * A job that holds the site, made as the swap makes one: a restore under the installation of $context (its
+	 * storage directory, its token) run up to its swap, and killed there (a child process, SIGKILL) once the
+	 * maintenance file is up. Its row, cursor and plan are the swap's.
+	 *
+	 * @param array<string, mixed> $context The installation's Directories context.
+	 * @return int The job's id.
+	 */
+	private function held_job( array $context ): int {
+		$this->storage = $context;
+		$job           = $this->at_swap();
+		$this->killed_at( $job, 'maintenance' );
+		$this->storage = array();
+		$held          = self::repo( new Directories( $context ) )->find( $job->id );
+		$this->assertSame( Job::SITE_CHANGING, $held->site_state, 'the control: the killed swap holds the site' );
+		$this->assertSame( Job::RUNNING, $held->status );
+		$this->assertSame( (string) ( new Directories( $context ) )->state()['token'], $held->storage_token, 'the control: under the installation\'s token' );
+		$this->after_activity_window( ( new Directories( $context ) )->base() );
+		return $job->id;
+	}
+
+	/**
+	 * Time passes after the kill, past the window in which a take-over takes the original directory for busy
+	 * (StorageReclaim::is_busy(): the killed run's lock file, and the entries its work wrote in tmp/): as when the
+	 * administrator answers some minutes later. The lock files say an older lease, the entries an older time; the job
+	 * row is not touched.
+	 *
+	 * @param string $base The storage directory.
+	 * @return void
+	 */
+	private function after_activity_window( string $base ): void {
+		$then = time() - StorageReclaim::ACTIVITY_WINDOW - 60;
+		$tmp  = $base . '/tmp';
+		$this->assertTrue( StorageReclaim::is_busy( $base ), 'the control: right after the kill, the directory is taken for busy' );
+		foreach ( glob( $tmp . '/*' ) ?: array() as $entry ) {
+			if ( \WPCheckpoint\Jobs\LockFile::job_id_from_path( $entry ) > 0 ) {
+				file_put_contents( $entry, (string) preg_replace( '/^locked_until:\d+$/m', 'locked_until:' . $then, (string) file_get_contents( $entry ) ) );
+			}
+			touch( $entry, $then );
+		}
+		clearstatcache();
+		$this->assertFalse( StorageReclaim::is_busy( $base ), 'once the window passed, it is not' );
+	}
+
+	/**
+	 * Between sequences: the swap's sandbox again, the restore's tables and plan rows gone.
+	 *
+	 * @return void
+	 */
+	private function next_swap(): void {
+		global $wpdb;
+		$this->storage = array();
+		$this->release_backups();
+		$this->tear_down_swap();
+		$wpdb->query( 'DELETE FROM `' . $wpdb->base_prefix . 'wpcheckpoint_swap_plan`' );
+		$wpdb->query( 'SET FOREIGN_KEY_CHECKS=0' );
+		foreach ( array_diff( Leftovers::tables(), $this->tables_at_start ) as $table ) {
+			$wpdb->query( "DROP TABLE IF EXISTS `{$table}`" );
+		}
+		$wpdb->query( 'SET FOREIGN_KEY_CHECKS=1' );
+		$wpdb->query( 'COMMIT' );
+		$this->set_up_swap();
 	}
 
 	private static function repo( Directories $dirs ): JobRepository {
@@ -148,8 +246,7 @@ final class ClaimedAnswerSequencesTest extends WP_UnitTestCase {
 			return array( 'setup: ' . $first->last_error() );
 		}
 		$token = (string) $first->state()['token'];
-		$job   = self::repo( $first )->create( 'plain' );
-		$wpdb->update( Schema::jobs_table(), array( 'status' => Job::RUNNING, 'site_state' => Job::SITE_CHANGING ), array( 'id' => $job->id ) );
+		$job   = self::repo( $first )->find( $this->held_job( $this->custom_context( $tag . '/releases/1', $store ) ) );
 		$this->dirs( $tag . '/releases/2', $store )->base();
 		if ( ! $this->dirs( $tag . '/releases/2', $store )->reclaim()->reclaim( false )['ok'] ) {
 			return array( 'setup: the first take-over' );
@@ -305,6 +402,7 @@ final class ClaimedAnswerSequencesTest extends WP_UnitTestCase {
 		$found = array();
 		for ( $seed = 1; $seed <= $count; $seed++ ) {
 			$found = array_merge( $found, $this->sequence( $seed ) );
+			$this->next_swap();
 		}
 		$this->assertSame( array(), array_slice( $found, 0, 10 ), count( $found ) . ' violations' );
 		// The controls: each point came up, and sequences ended both ways.
@@ -344,18 +442,7 @@ final class ClaimedAnswerSequencesTest extends WP_UnitTestCase {
 	}
 
 	private function in_default( string $site, string $content, array $extra = array() ): Directories {
-		return new Directories(
-			array_merge(
-				array(
-					'is_web_request' => false,
-					'document_root'  => '',
-					'abspath'        => $this->root . '/' . $site . '/',
-					'content_dir'    => $content,
-					'custom_dir'     => '',
-				),
-				$extra
-			)
-		);
+		return new Directories( $this->default_context( $site, $content, $extra ) );
 	}
 
 	/** The site's directories so far. */
@@ -490,10 +577,9 @@ final class ClaimedAnswerSequencesTest extends WP_UnitTestCase {
 		if ( '' === $one ) {
 			return array( 'setup: ' . $first->last_error() );
 		}
-		$held  = self::repo( $first )->create( 'plain' )->id;
+		$held  = $this->held_job( $this->default_context( $tag . '/releases/1', $content ) );
 		$plain = self::repo( $first )->create( 'plain' )->id;
-		$wpdb->update( Schema::jobs_table(), array( 'status' => Job::RUNNING, 'site_state' => Job::SITE_CHANGING ), array( 'id' => $held ) );
-		$wpdb->update( Schema::jobs_table(), array( 'status' => Job::RUNNING ), array( 'id' => $plain ) );
+		$wpdb->update( Schema::jobs_table(), array( 'status' => Job::RUNNING ), array( 'id' => $plain ) ); // A job that does not hold the site.
 		$site    = array(
 			'one'        => $one,
 			'token'      => (string) $first->state()['token'],
@@ -614,6 +700,7 @@ final class ClaimedAnswerSequencesTest extends WP_UnitTestCase {
 		$found = array();
 		for ( $seed = 1; $seed <= $count; $seed++ ) {
 			$found = array_merge( $found, $this->default_sequence( $seed ) );
+			$this->next_swap();
 		}
 		$this->assertSame( array(), array_slice( $found, 0, 10 ), count( $found ) . ' violations' );
 		// The controls, counted where they take effect: each point, each way a sequence ends, the copy's request.
