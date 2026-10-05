@@ -279,7 +279,33 @@ final class HeldSiteTest extends SwapTestCase {
 		$see  = $held['assessment'];
 		$lines = implode( "\n", JobPresenter::held_lines( $held['job'], $see ) );
 		$this->assertStringContainsString( 'removes the restore\'s temporary tables; the tables its swap moved aside, named wcpold…, stay', $lines, 'said before it is confirmed' );
-		// A table that stays references one of them: it cannot go yet.
+		// A table that stays references one of them: it cannot go yet. Dropped whatever happens (it is no table of the
+		// plugin's: the leftover check would not take it, and the next run could not make its reference).
+		try {
+			$this->abandon_against_a_reference( $job, $acts, $see, $staged, $aside, $like );
+		} finally {
+			$wpdb->query( "DROP TABLE IF EXISTS `{$wpdb->prefix}swt_ref`" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- test tables.
+		}
+		Plugin::instance()->jobs()->reap_residue();
+		$this->assertSame( array(), $like( \WPCheckpoint\Jobs\TempTables::job_prefix( $job->storage_token, $job->id ) ), 'the reaper takes the rest' );
+		$this->assertSame( $aside, $like( \WPCheckpoint\Jobs\TempTables::OLD_PREFIX . substr( $job->storage_token, 0, \WPCheckpoint\Jobs\TempTables::TOKEN_LEN ) . '_' . $job->id . '_' ), 'and not the tables moved aside' );
+		$this->undo( Plugin::instance()->jobs()->find( $job->id ) );
+	}
+
+	/**
+	 * The abandon of test_an_abandon_says_what_it_removed_and_keeps_the_tables_its_swap_moved_aside(), with a table
+	 * that stays referencing one of its temporary tables.
+	 *
+	 * @param Job                  $job    Job.
+	 * @param JobActions           $acts   Actions, from the copy.
+	 * @param array<string, mixed> $see    HeldSite::assess().
+	 * @param string[]             $staged Its staged tables.
+	 * @param string[]             $aside  Its tables moved aside.
+	 * @param callable             $like   Tables by prefix.
+	 */
+	private function abandon_against_a_reference( Job $job, JobActions $acts, array $see, array $staged, array $aside, callable $like ): void {
+		global $wpdb;
+		$wpdb->query( "DROP TABLE IF EXISTS `{$wpdb->prefix}swt_ref`" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- test tables.
 		$wpdb->query( "CREATE TABLE `{$wpdb->prefix}swt_ref` (id INT UNSIGNED NOT NULL PRIMARY KEY, CONSTRAINT `{$wpdb->prefix}swt_ref_fk` FOREIGN KEY (id) REFERENCES `{$staged[0]}` (id)) ENGINE=InnoDB" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- test tables.
 		$this->assertSame( '', (string) $wpdb->last_error, 'the control: the reference was made' );
 		$outcome = $acts->abandon( $job->id, HeldSite::code( HeldSite::ABANDON, $job, $see['recorded'] ) );
@@ -289,11 +315,6 @@ final class HeldSiteTest extends SwapTestCase {
 		$this->assertStringContainsString( 'The tables its swap moved aside (named wcpold…) stay', $outcome['message'] );
 		$this->assertSame( $aside, $like( \WPCheckpoint\Jobs\TempTables::OLD_PREFIX . substr( $job->storage_token, 0, \WPCheckpoint\Jobs\TempTables::TOKEN_LEN ) . '_' . $job->id . '_' ), 'the tables moved aside stay' );
 		$this->assertContains( $staged[0], $like( \WPCheckpoint\Jobs\TempTables::job_prefix( $job->storage_token, $job->id ) ), 'the referenced one stays for now' );
-		$wpdb->query( "DROP TABLE `{$wpdb->prefix}swt_ref`" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- test tables.
-		Plugin::instance()->jobs()->reap_residue();
-		$this->assertSame( array(), $like( \WPCheckpoint\Jobs\TempTables::job_prefix( $job->storage_token, $job->id ) ), 'the reaper takes the rest' );
-		$this->assertSame( $aside, $like( \WPCheckpoint\Jobs\TempTables::OLD_PREFIX . substr( $job->storage_token, 0, \WPCheckpoint\Jobs\TempTables::TOKEN_LEN ) . '_' . $job->id . '_' ), 'and not the tables moved aside' );
-		$this->undo( Plugin::instance()->jobs()->find( $job->id ) );
 	}
 
 	public function test_a_code_shown_before_another_take_over_confirms_nothing(): void {
