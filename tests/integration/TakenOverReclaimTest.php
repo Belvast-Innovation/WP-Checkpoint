@@ -160,6 +160,30 @@ final class TakenOverReclaimTest extends SwapTestCase {
 				$this->assertSame( array( '', '', $job->status ), array( $now->held_by, $now->failure_reason, $now->status ), $write . ': nothing written' );
 			}
 		}
+		// Through the command: refused before the file at the copy goes (the refusal is known in advance).
+		$copy = $this->sandbox . '/install/releases/2';
+		copy( $this->abspath . '/.maintenance', $copy . '/.maintenance' );
+		$acts = new JobActions(
+			$repo,
+			$this->runner(),
+			new Loopback( false ),
+			new HeldSite(
+				array(
+					'abspath'   => $copy,
+					'site_dirs' => function (): array {
+						return array( 'uploads' => $this->sandbox . '/install/content' );
+					},
+				)
+			)
+		);
+		$held = $acts->held_elsewhere( $job->id );
+		$this->assertTrue( $held['assessment']['file_here'], 'the control: the copy has the job\'s file' );
+		$this->assertTrue( $held['assessment']['differs'], 'the control: another WordPress directory' );
+		$outcome = $acts->abandon( $job->id, HeldSite::code( HeldSite::ABANDON, $job, (string) $held['assessment']['recorded'] ) );
+		$this->assertFalse( $outcome['ok'] );
+		$this->assertStringContainsString( 'holds no storage token of its own yet', $outcome['message'], 'refused for that reason' );
+		$this->assertTrue( \WPCheckpoint\Restore\Maintenance::held_in( $copy ), 'the copy\'s file stays' );
+		$this->assertSame( '', $repo->find( $job->id )->failure_reason, 'not abandoned' );
 	}
 
 	public function test_uninstall_drops_the_tables_of_a_job_taken_over_by_their_names(): void {
@@ -228,7 +252,7 @@ final class TakenOverReclaimTest extends SwapTestCase {
 		$log  = ( new Directories( $this->moved ) )->base() . '/logs/storage.log';
 		$said = static function () use ( $log, $job ): int {
 			clearstatcache( true, $log );
-			return substr_count( is_file( $log ) ? (string) file_get_contents( $log ) : '', 'Job ' . $job->id . ' is bound to another storage directory' );
+			return substr_count( is_file( $log ) ? (string) file_get_contents( $log ) : '', 'Job ' . $job->id . ' is bound to another storage directory; its work files were left alone' );
 		};
 		$before = $said();
 		$this->repo()->reap_residue();
@@ -239,6 +263,39 @@ final class TakenOverReclaimTest extends SwapTestCase {
 		$this->repo()->reap_residue();
 		$this->repo()->reap_residue();
 		$this->assertSame( $before + 1, $said(), 'the passes after, with nothing of it left, neither reclaim nor say it again' );
+	}
+
+	public function test_the_reaper_does_not_come_back_for_a_root_kept_for_what_a_rollback_moved_aside(): void {
+		$job = $this->taken( 'dir_aside_recorded' );
+		$this->assertTrue( $this->actions()->rebind( $job->id, HeldSite::code( HeldSite::REBIND, $job, '' ), 'continue' )['ok'] );
+		$done = $this->run_here( $job->id );
+		$this->assertSame( Job::FAILED, $done->status, (string) $done->last_error );
+		$roots = array_values(
+			array_filter(
+				Residue::scan_site( Residue::site_dirs( $this->dirs ), array( $this->token ) ),
+				static function ( array $entry ) use ( $job ): bool {
+					return $entry['id'] === $job->id && Residue::STAGE_DIR === $entry['kind'];
+				}
+			)
+		);
+		$this->assertNotSame( array(), $roots, 'the control: a staging root of the job is there' );
+		// Someone's file the rollback moved out of the way: the root is kept for it.
+		mkdir( $roots[0]['path'] . '/' . Residue::STRAY_DIR . '/uploads-0a0b0c0d', 0755, true );
+		file_put_contents( $roots[0]['path'] . '/' . Residue::STRAY_DIR . '/uploads-0a0b0c0d/someone.txt', 'made meanwhile' );
+		$log  = ( new Directories( $this->moved ) )->base() . '/logs/storage.log';
+		// Not "A staging root of job": the log's redaction may hide the word (the tests database user is "root").
+		$said = static function () use ( $log, $job ): int {
+			clearstatcache( true, $log );
+			return substr_count( is_file( $log ) ? (string) file_get_contents( $log ) : '', 'of job ' . $job->id . ' holds what the swap\'s rollback moved out of the way' );
+		};
+		$before = $said();
+		$this->repo()->reap_residue();
+		$this->assertSame( array(), $this->left( $job->id )['tables'], 'the rest reclaimed' );
+		$this->assertSame( $before + 1, $said(), 'the control: the pass that reclaimed the rest said the root stays' );
+		$this->repo()->reap_residue();
+		$this->repo()->reap_residue();
+		$this->assertSame( $before + 1, $said(), 'the passes after leave it alone without saying it again' );
+		$this->assertFileExists( $roots[0]['path'] . '/' . Residue::STRAY_DIR . '/uploads-0a0b0c0d/someone.txt', 'kept' );
 	}
 
 	public function test_a_job_taken_over_and_finished_leaves_what_a_restore_finished_here_leaves(): void {

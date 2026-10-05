@@ -156,10 +156,11 @@ final class HeldSite {
 	 * Take down, from this WordPress directory, the maintenance file of a job that no longer holds the site: only the
 	 * file that carries the mark the job's row recorded (Job::$site_mark).
 	 *
-	 * @param Job $job Job (ended, or abandoned).
+	 * @param Job           $job     Job (ended, or abandoned).
+	 * @param callable|null $confirm Called right before the file is deleted (throws to stop: Maintenance::remove()).
 	 * @return bool|null Whether it is gone now; null when there was no file of this job here.
 	 */
-	public function release_ended( Job $job ) {
+	public function release_ended( Job $job, $confirm = null ) {
 		if ( '' === $job->site_mark ) {
 			return null;
 		}
@@ -167,7 +168,7 @@ final class HeldSite {
 		if ( Maintenance::OURS !== $file->state() ) {
 			return null;
 		}
-		return $file->remove();
+		return $file->remove( $confirm );
 	}
 
 	/**

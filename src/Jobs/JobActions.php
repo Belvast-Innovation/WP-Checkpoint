@@ -209,13 +209,19 @@ final class JobActions {
 			return self::outcome( false, __( 'The confirmation code is not this job\'s; wp wpcheckpoint job status shows the command with its code.', 'wp-checkpoint' ) );
 		}
 		$this->held->at( 'release_confirmed' );
-		// Read again right before the file goes: a retry or a run between the checks above and here holds it again.
-		$job = $this->repository->find( $id );
-		$why = null === $job ? __( 'No such job.', 'wp-checkpoint' ) : self::not_ended( $job );
-		if ( '' !== $why || null === $job ) {
-			return self::outcome( false, $why );
+		// Read again right before the file goes (Deleter calls it just before the unlink): a retry or a run between
+		// the checks above and there holds it again.
+		$confirm = function () use ( $id ): void {
+			$now = $this->repository->find( $id );
+			if ( null === $now || '' !== self::not_ended( $now ) ) {
+				throw new StaleJob( 'The job is no longer ended, or a run holds it.' );
+			}
+		};
+		try {
+			$gone = $this->held->release_ended( $job, $confirm );
+		} catch ( StaleJob $e ) {
+			return self::outcome( false, __( 'The job has not ended, or a run holds it: its maintenance file stays. Try again once it has ended.', 'wp-checkpoint' ) );
 		}
-		$gone = $this->held->release_ended( $job );
 		if ( null === $gone ) {
 			return self::outcome( true, __( 'There is no maintenance file of this job in this WordPress directory; nothing was changed.', 'wp-checkpoint' ) );
 		}
@@ -270,6 +276,10 @@ final class JobActions {
 			return self::outcome( false, $why );
 		}
 		$job = $held['job'];
+		if ( ! $this->repository->holds_own_token() ) {
+			// abandon_held() would refuse: the file must not go first for a refusal known in advance.
+			return self::outcome( false, __( 'This installation holds no storage token of its own yet (it was found to be a copy, and that is not settled): settle it on the plugin\'s page first, then abandon the job. Nothing was changed.', 'wp-checkpoint' ) );
+		}
 		try {
 			$gone = ! $held['assessment']['file_here'] || $this->held->release( $job, $held['assessment'] );
 		} catch ( \RuntimeException $e ) {

@@ -492,7 +492,7 @@ final class JobRepository {
 	public function take_over( Job $job, bool $rollback ): Job {
 		global $wpdb;
 		$token = (string) $this->directories->state()['token'];
-		if ( ! in_array( $token, $this->held_tokens(), true ) ) {
+		if ( ! $this->holds_own_token() ) {
 			// A copy that holds no token of its own yet still carries the original's (copied, not held).
 			throw new StaleJob( 'This installation holds no storage token of its own to take the job over with.' );
 		}
@@ -532,6 +532,16 @@ final class JobRepository {
 	}
 
 	/**
+	 * Whether this request's storage token is one this installation holds (not one recorded as copied): what a
+	 * take-over or an abandon writes into held_by.
+	 *
+	 * @return bool
+	 */
+	public function holds_own_token(): bool {
+		return in_array( (string) $this->directories->state()['token'], $this->held_tokens(), true );
+	}
+
+	/**
 	 * Give up a job that holds the site changed (wp wpcheckpoint job abandon): failed, final, with the reason
 	 * Job::REASON_ABANDONED, and its site_state kept (what it did to a site stays recorded); held_by becomes this
 	 * installation's token, so that what may be reclaimed of it (its tables: reclaim_scope()) is this installation's
@@ -547,7 +557,7 @@ final class JobRepository {
 	public function abandon_held( Job $job, string $message ): Job {
 		global $wpdb;
 		$token = (string) $this->directories->state()['token'];
-		if ( ! in_array( $token, $this->held_tokens(), true ) ) {
+		if ( ! $this->holds_own_token() ) {
 			// As take_over(): a copy still carrying the original's token would otherwise put it in held_by.
 			throw new StaleJob( 'This installation holds no storage token of its own to give the job up with.' );
 		}
@@ -1834,17 +1844,13 @@ final class JobRepository {
 			if ( self::RECLAIM_NONE === $scope || $job->is_locked( $now ) ) {
 				continue;
 			}
-			if ( ! $this->leaves_anything( $job, $scope ) ) {
+			$ended = Job::CANCELLED === $job->status || ( Job::FAILED === $job->status && ( $job->work_expired_at > 0 || '' === $this->files_base( $job ) ) );
+			if ( self::RECLAIM_TABLES !== $scope && ! ( Job::SITE_UNTOUCHED === $job->site_state && $ended ) ) {
+				continue;
+			}
+			if ( $this->leaves_anything( $job, $scope ) ) {
 				// Every pass reads these rows again (they stay for 90 days): one with nothing left is not reclaimed
 				// again, nor logged again as bound to another storage directory.
-				continue;
-			}
-			if ( self::RECLAIM_TABLES === $scope ) {
-				$this->reclaim_work( $job );
-				continue;
-			}
-			$ended = Job::CANCELLED === $job->status || ( Job::FAILED === $job->status && ( $job->work_expired_at > 0 || '' === $this->files_base( $job ) ) );
-			if ( Job::SITE_UNTOUCHED === $job->site_state && $ended ) {
 				$this->reclaim_work( $job );
 			}
 		}
@@ -1852,8 +1858,10 @@ final class JobRepository {
 
 	/**
 	 * Whether reclaim_work() would find anything of a job taken over or given up, within $scope: its temporary
-	 * tables; with RECLAIM_ALL also its plan rows, its staging roots and probes next to the site's directories, and
-	 * its work directory where its storage directory is here. A listing that fails counts as something left.
+	 * tables; with RECLAIM_ALL also its plan rows, its staging roots and probes next to the site's directories (not a
+	 * root that keeps what a rollback moved aside), and its work directory where its storage directory is here. A
+	 * plan table that is there (or may be) and cannot be read counts as something left; a table listing that fails
+	 * reads as none, as in drop_tables_of(), and the next pass lists again.
 	 *
 	 * @param Job    $job   Job.
 	 * @param string $scope reclaim_scope().
@@ -1873,7 +1881,8 @@ final class JobRepository {
 			return true; // Plan rows, or a plan table that is there (or may be) and could not be read.
 		}
 		foreach ( Residue::scan_site( Residue::site_dirs( $this->site_directories() ), array( $job->storage_token ) ) as $entry ) {
-			if ( $entry['id'] === $job->id ) {
+			// A root that keeps what a rollback moved aside stays (reclaim_work() leaves it): it is not left to reclaim.
+			if ( $entry['id'] === $job->id && ! ( Residue::STAGE_DIR === $entry['kind'] && Residue::keeps_stray( $entry['path'] ) ) ) {
 				return true;
 			}
 		}

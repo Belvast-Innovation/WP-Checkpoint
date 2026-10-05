@@ -298,9 +298,10 @@ final class SwapSequencesTest extends SwapTestCase {
 			),
 			$connect
 		);
-		$done    = null;
-		$runs    = array();
-		$renamed = false;
+		$done     = null;
+		$runs     = array();
+		$renamed  = false;
+		$at_retry = null;
 		for ( $i = 0; $i < 6; $i++ ) {
 			// Each run against what was recorded before it.
 			$this->seams = array();
@@ -324,7 +325,8 @@ final class SwapSequencesTest extends SwapTestCase {
 				// Put back by the original; retried while the copy still holds the file the killed run left there.
 				$this->assertTrue( $done->retry_useful(), $label . ': put back, it may be retried (' . $done->last_error . ')' );
 				$this->assertTrue( Maintenance::held_in( $this->copy ), $label . ': the control, the copy still holds its file' );
-				Plugin::instance()->job_actions()->retry( $job->id );
+				$this->assertSame( Job::QUEUED, Plugin::instance()->job_actions()->retry( $job->id )->status, $label . ': retried' );
+				$at_retry = $this->copy_checks;
 				++$kinds[ $kind ];
 				$this->observe( $job, $label . ' (retried)', $decided, $public );
 				// A new attempt: the direction the last one recorded (put back) is not this one's (I2 starts again).
@@ -347,6 +349,11 @@ final class SwapSequencesTest extends SwapTestCase {
 			++$kinds['file_removed']; // The file was gone when the rollback had tables to put back (checked held there).
 		}
 		$this->assertNotContains( $done->status, array( Job::QUEUED, Job::RUNNING ), $label . ': ended' );
+		if ( 'elsewhere_retry' === $kind ) {
+			$this->assertNotNull( $at_retry, $label . ': the control, it was retried' );
+			$this->assertSame( Job::COMPLETED, $done->status, $label . ': the retry ran to the end (' . $done->last_error . ')' );
+			$this->assertGreaterThan( $at_retry, $this->copy_checks, $label . ': I6 met the copy\'s held file during the retry' );
+		}
 		if ( $cancelled ) {
 			$this->assertSame( Job::CANCELLED, $done->status, $label . ': a cancel that was taken ends the job cancelled' );
 		}
@@ -563,12 +570,18 @@ final class SwapSequencesTest extends SwapTestCase {
 				continue;
 			}
 			++$this->mark_checks;
+			if ( $dir === $this->copy ) {
+				++$this->copy_checks;
+			}
 			$this->assertSame( $mark, Plugin::instance()->jobs()->find( $job->id )->site_mark, $label . ': I6, the held file\'s mark is its job\'s' );
 		}
 	}
 
 	/** @var int I6 checks that met a held file. */
 	private $mark_checks = 0;
+
+	/** @var int I6 checks that met a held file at the copy of the site. */
+	private $copy_checks = 0;
 
 	/**
 	 * The kinds of the staging a job left next to the site's directories (by the names it made).
