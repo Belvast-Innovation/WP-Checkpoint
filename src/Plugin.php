@@ -243,10 +243,10 @@ final class Plugin {
 			}
 		}
 		if ( defined( 'ABSPATH' ) && Restore\Maintenance::held_in( (string) ABSPATH ) ) {
+			$owner = array() === $ids && $read ? $this->ended_owner() : null;
 			if ( array() !== $ids ) {
 				$out[] = __( 'A restore\'s maintenance file is up and does not lapse (.maintenance in the WordPress directory): visitors see the maintenance page until the restore above ends.', 'wp-checkpoint' );
-			} elseif ( $read && null !== $this->ended_owner() ) {
-				$owner = $this->ended_owner();
+			} elseif ( null !== $owner ) {
 				$out[] = $this->job_presenter()->clean(
 					sprintf(
 						/* translators: 1: job id, 2: the release command */

@@ -537,7 +537,7 @@ final class JobRepository {
 	 * installation's token, so that what may be reclaimed of it (its tables: reclaim_scope()) is this installation's
 	 * to reclaim. One statement, on the job as read: its storage token, who managed it, still holding the site, not
 	 * ended, no live lock, finished_at as read; finished_at moves at least one second past it, so a retry or take-over
-	 * read before this writes nothing.
+	 * read before this writes nothing. Only with a token this installation holds, as take_over().
 	 *
 	 * @param Job    $job     Job, as read.
 	 * @param string $message Why (last_error).
@@ -546,6 +546,11 @@ final class JobRepository {
 	 */
 	public function abandon_held( Job $job, string $message ): Job {
 		global $wpdb;
+		$token = (string) $this->directories->state()['token'];
+		if ( ! in_array( $token, $this->held_tokens(), true ) ) {
+			// As take_over(): a copy still carrying the original's token would otherwise put it in held_by.
+			throw new StaleJob( 'This installation holds no storage token of its own to give the job up with.' );
+		}
 		$now = $this->now();
 		$at  = max( $now, (int) $job->finished_at + 1 );
 		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- plugin table name from the prefix; the WHERE clause is the compare-and-set.
@@ -556,7 +561,7 @@ final class JobRepository {
 				Job::stamp_failure( Job::FAILURE_FINAL . ':' . Job::REASON_ABANDONED, $at ),
 				$at,
 				$message,
-				(string) $this->directories->state()['token'],
+				$token,
 				$now,
 				$job->id,
 				$job->storage_token,
@@ -1829,6 +1834,11 @@ final class JobRepository {
 			if ( self::RECLAIM_NONE === $scope || $job->is_locked( $now ) ) {
 				continue;
 			}
+			if ( ! $this->leaves_anything( $job, $scope ) ) {
+				// Every pass reads these rows again (they stay for 90 days): one with nothing left is not reclaimed
+				// again, nor logged again as bound to another storage directory.
+				continue;
+			}
 			if ( self::RECLAIM_TABLES === $scope ) {
 				$this->reclaim_work( $job );
 				continue;
@@ -1838,6 +1848,37 @@ final class JobRepository {
 				$this->reclaim_work( $job );
 			}
 		}
+	}
+
+	/**
+	 * Whether reclaim_work() would find anything of a job taken over or given up, within $scope: its temporary
+	 * tables; with RECLAIM_ALL also its plan rows, its staging roots and probes next to the site's directories, and
+	 * its work directory where its storage directory is here. A listing that fails counts as something left.
+	 *
+	 * @param Job    $job   Job.
+	 * @param string $scope reclaim_scope().
+	 * @return bool
+	 */
+	private function leaves_anything( Job $job, string $scope ): bool {
+		global $wpdb;
+		if ( array() !== $this->temp_tables( $job->storage_token, $job->id ) ) {
+			return true;
+		}
+		if ( self::RECLAIM_ALL !== $scope ) {
+			return false;
+		}
+		$table = $wpdb->base_prefix . SwapPlan::TABLE;
+		$plan  = self::read_rows( $wpdb->prepare( 'SELECT 1 FROM ' . $table . ' WHERE job_id = %d LIMIT 1', $job->id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- plugin table name from the prefix.
+		if ( array() !== $plan && ( null !== $plan || array() !== self::read_rows( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $table ) ) ) ) ) {
+			return true; // Plan rows, or a plan table that is there (or may be) and could not be read.
+		}
+		foreach ( Residue::scan_site( Residue::site_dirs( $this->site_directories() ), array( $job->storage_token ) ) as $entry ) {
+			if ( $entry['id'] === $job->id ) {
+				return true;
+			}
+		}
+		$base = $this->files_base( $job );
+		return '' !== $base && is_dir( Residue::work_dir( $base, $job->id ) );
 	}
 
 	/**

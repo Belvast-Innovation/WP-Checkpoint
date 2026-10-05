@@ -228,8 +228,10 @@ final class JobCommand {
 	}
 
 	/**
-	 * Take down, from this WordPress directory, the maintenance file of a restore that is managed by another
-	 * installation and is not this site's as far as can be told. The job itself is not changed.
+	 * Take down, from this WordPress directory, the maintenance file of a restore that no longer holds the site
+	 * (completed, rolled back, or abandoned) and is not running: only the file that carries the mark the job
+	 * recorded. While the restore still holds the site it is refused, and wp wpcheckpoint job status says what to
+	 * do instead. The job itself is not changed.
 	 *
 	 * ## OPTIONS
 	 *
@@ -254,8 +256,10 @@ final class JobCommand {
 
 	/**
 	 * Give up for good a restore that is managed by another installation and is not this site's as far as can be
-	 * told: its maintenance file is taken down from this WordPress directory, and it never runs again. If this
-	 * database is shared with the site the restore was started on, that site's restore stays half swapped.
+	 * told: its maintenance file is taken down from this WordPress directory, its temporary tables are removed, and
+	 * it never runs again. The tables its swap moved aside (named wcpold…) stay, and nothing at the paths its plan
+	 * records is touched. If this database is shared with the site the restore was started on, that site's restore
+	 * stays half swapped.
 	 *
 	 * ## OPTIONS
 	 *

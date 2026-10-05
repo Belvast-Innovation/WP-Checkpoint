@@ -150,11 +150,15 @@ final class TakenOverReclaimTest extends SwapTestCase {
 		$this->replace_internal( $dirs, 'state', $state );
 		$repo = new JobRepository( $dirs );
 		$this->assertFalse( $repo->manages( $job ), 'the control' );
-		try {
-			$repo->take_over( $job, false );
-			$this->fail( 'taken over with a token this site does not hold' );
-		} catch ( \WPCheckpoint\Jobs\StaleJob $e ) {
-			$this->assertSame( '', $repo->find( $job->id )->held_by, 'nothing written' );
+		foreach ( array( 'take_over', 'abandon_held' ) as $write ) {
+			try {
+				'take_over' === $write ? $repo->take_over( $job, false ) : $repo->abandon_held( $job, 'x' );
+				$this->fail( $write . ': with a token this site does not hold' );
+			} catch ( \WPCheckpoint\Jobs\StaleJob $e ) {
+				$this->assertStringContainsString( 'holds no storage token of its own', $e->getMessage(), $write . ': refused for that reason' );
+				$now = $repo->find( $job->id );
+				$this->assertSame( array( '', '', $job->status ), array( $now->held_by, $now->failure_reason, $now->status ), $write . ': nothing written' );
+			}
 		}
 	}
 
@@ -221,10 +225,20 @@ final class TakenOverReclaimTest extends SwapTestCase {
 		$this->assertStringContainsString( 'the site stays as it is. Start the restore again from here.', (string) $done->last_error );
 		$this->assertSame( $before, $this->site() );
 		$this->assertNotSame( array(), $this->left( $job->id )['tables'], 'the control: left until the reaper' );
+		$log  = ( new Directories( $this->moved ) )->base() . '/logs/storage.log';
+		$said = static function () use ( $log, $job ): int {
+			clearstatcache( true, $log );
+			return substr_count( is_file( $log ) ? (string) file_get_contents( $log ) : '', 'Job ' . $job->id . ' is bound to another storage directory' );
+		};
+		$before = $said();
 		$this->repo()->reap_residue();
 		$left = $this->left( $job->id );
 		$this->assertSame( array(), $left['tables'] );
 		$this->assertSame( array(), $left['staging'] );
+		$this->assertSame( $before + 1, $said(), 'the control: the pass that reclaimed it said why its work files stayed' );
+		$this->repo()->reap_residue();
+		$this->repo()->reap_residue();
+		$this->assertSame( $before + 1, $said(), 'the passes after, with nothing of it left, neither reclaim nor say it again' );
 	}
 
 	public function test_a_job_taken_over_and_finished_leaves_what_a_restore_finished_here_leaves(): void {

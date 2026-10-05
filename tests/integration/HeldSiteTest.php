@@ -110,7 +110,7 @@ final class HeldSiteTest extends SwapTestCase {
 		$this->assertSame( Job::COMPLETED, $done->status, (string) $done->last_error );
 		$this->assertRestored( $site );
 		$this->assertArrayNotHasKey( 'mark', $done->cursor, 'the control: the cursor no longer says it once it completed' );
-		$this->assertNotSame( $mark, (string) $done->site_mark, 'a retry is a new attempt, with a mark of its own' );
+		$this->assertSame( $mark, (string) $done->site_mark, 'a retry is a new attempt with the job\'s one mark: a file an earlier attempt holds elsewhere still carries it' );
 		$this->assertNotSame( '', $done->site_mark, 'and the mark stays once the job ended' );
 	}
 
@@ -190,6 +190,110 @@ final class HeldSiteTest extends SwapTestCase {
 		$outcome = $copy->release( $job->id, $code );
 		$this->assertTrue( $outcome['ok'], $outcome['message'] );
 		$this->assertFileDoesNotExist( $this->copy_dir() . '/.maintenance', 'this job\'s file, by the mark its row kept' );
+	}
+
+	public function test_release_waits_until_the_job_has_ended_and_no_run_holds_it(): void {
+		global $wpdb;
+		$job = $this->held();
+		copy( $this->abspath . '/.maintenance', $this->copy_dir() . '/.maintenance' );
+		$this->assertTrue( $this->actions()->rebind( $job->id, HeldSite::code( HeldSite::REBIND, $job, '' ), 'rollback' )['ok'] );
+		$ended = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( Job::CANCELLED, $ended->status, (string) $ended->last_error );
+		$code = HeldSite::code( HeldSite::RELEASE, $ended, ( new HeldSite( array( 'abspath' => $this->copy_dir() ) ) )->assess( $ended )['recorded'] );
+		$set  = static function ( array $columns ) use ( $wpdb, $job ): void {
+			$wpdb->update( JobRepository::table(), $columns, array( 'id' => $job->id ) );
+			$wpdb->query( 'COMMIT' );
+		};
+		// Queued again (a retry's attempt carries the same mark) or held by a live run: the file stays.
+		foreach ( array(
+			'queued'   => array( 'status' => Job::QUEUED ),
+			'a run'    => array(
+				'lock_token'   => 'live',
+				'locked_until' => time() + 300,
+			),
+		) as $what => $columns ) {
+			$set( $columns );
+			$outcome = $this->actions( true )->release( $job->id, $code );
+			$this->assertFalse( $outcome['ok'], $what . ': refused' );
+			$this->assertStringContainsString( 'has not ended, or a run holds it', $outcome['message'], $what );
+			$this->assertTrue( \WPCheckpoint\Restore\Maintenance::held_in( $this->copy_dir() ), $what . ': the file stays' );
+			$set(
+				array(
+					'status'       => Job::CANCELLED,
+					'lock_token'   => '',
+					'locked_until' => 0,
+				)
+			);
+		}
+		// A run takes the job between the checks and the file: read again right before, the file stays.
+		$racing = new JobActions(
+			Plugin::instance()->jobs(),
+			Plugin::instance()->runner(),
+			new Loopback( false ),
+			new HeldSite(
+				array(
+					'abspath' => $this->copy_dir(),
+					'at'      => static function ( string $point ) use ( $set ): void {
+						if ( 'release_confirmed' === $point ) {
+							$set(
+								array(
+									'lock_token'   => 'live',
+									'locked_until' => time() + 300,
+								)
+							);
+						}
+					},
+				)
+			)
+		);
+		$this->assertFalse( $racing->release( $job->id, $code )['ok'], 'a run took it meanwhile: refused' );
+		$this->assertTrue( \WPCheckpoint\Restore\Maintenance::held_in( $this->copy_dir() ), 'the file stays' );
+		$set(
+			array(
+				'lock_token'   => '',
+				'locked_until' => 0,
+			)
+		);
+		$outcome = $this->actions( true )->release( $job->id, $code );
+		$this->assertTrue( $outcome['ok'], 'the control: ended, no run: released (' . $outcome['message'] . ')' );
+		$this->assertFalse( \WPCheckpoint\Restore\Maintenance::held_in( $this->copy_dir() ) );
+	}
+
+	public function test_an_abandon_says_what_it_removed_and_keeps_the_tables_its_swap_moved_aside(): void {
+		global $wpdb;
+		$this->swap_parts['batch'] = 1; // A batch per table: killed after the first, some tables are moved aside.
+		$this->register_type();
+		$job = $this->held( 'batch_sent' );
+		copy( $this->abspath . '/.maintenance', $this->copy_dir() . '/.maintenance' );
+		$like = static function ( string $prefix ) use ( $wpdb ): array {
+			$wpdb->query( 'COMMIT' );
+			return (array) $wpdb->get_col( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $prefix ) . '%' ) );
+		};
+		$aside = $like( \WPCheckpoint\Jobs\TempTables::OLD_PREFIX . substr( $job->storage_token, 0, \WPCheckpoint\Jobs\TempTables::TOKEN_LEN ) . '_' . $job->id . '_' );
+		$temp  = $like( \WPCheckpoint\Jobs\TempTables::job_prefix( $job->storage_token, $job->id ) );
+		$this->assertNotSame( array(), $aside, 'the control: a table was moved aside' );
+		$staged = array_values( preg_grep( '/swt_(keep|new)\z/', $temp ) );
+		$this->assertNotSame( array(), $staged, 'the control: a staged table of the backup is left' );
+		$acts = $this->actions( true );
+		$held = $acts->held_elsewhere( $job->id );
+		$see  = $held['assessment'];
+		$lines = implode( "\n", JobPresenter::held_lines( $held['job'], $see ) );
+		$this->assertStringContainsString( 'removes the restore\'s temporary tables; the tables its swap moved aside, named wcpold…, stay', $lines, 'said before it is confirmed' );
+		// A table that stays references one of them: it cannot go yet.
+		$wpdb->query( "CREATE TABLE `{$wpdb->prefix}swt_ref` (id INT UNSIGNED NOT NULL PRIMARY KEY, CONSTRAINT `{$wpdb->prefix}swt_ref_fk` FOREIGN KEY (id) REFERENCES `{$staged[0]}` (id)) ENGINE=InnoDB" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- test tables.
+		$this->assertSame( '', (string) $wpdb->last_error, 'the control: the reference was made' );
+		$outcome = $acts->abandon( $job->id, HeldSite::code( HeldSite::ABANDON, $job, $see['recorded'] ) );
+		$this->assertTrue( $outcome['ok'], $outcome['message'] );
+		$this->assertStringContainsString( 'Not all of its temporary tables could be removed yet', $outcome['message'], 'not said removed when they were not' );
+		$this->assertStringNotContainsString( 'Its temporary tables were removed.', $outcome['message'] );
+		$this->assertStringContainsString( 'The tables its swap moved aside (named wcpold…) stay', $outcome['message'] );
+		$this->assertSame( $aside, $like( \WPCheckpoint\Jobs\TempTables::OLD_PREFIX . substr( $job->storage_token, 0, \WPCheckpoint\Jobs\TempTables::TOKEN_LEN ) . '_' . $job->id . '_' ), 'the tables moved aside stay' );
+		$this->assertContains( $staged[0], $like( \WPCheckpoint\Jobs\TempTables::job_prefix( $job->storage_token, $job->id ) ), 'the referenced one stays for now' );
+		$wpdb->query( "DROP TABLE `{$wpdb->prefix}swt_ref`" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- test tables.
+		Plugin::instance()->jobs()->reap_residue();
+		$this->assertSame( array(), $like( \WPCheckpoint\Jobs\TempTables::job_prefix( $job->storage_token, $job->id ) ), 'the reaper takes the rest' );
+		$this->assertSame( $aside, $like( \WPCheckpoint\Jobs\TempTables::OLD_PREFIX . substr( $job->storage_token, 0, \WPCheckpoint\Jobs\TempTables::TOKEN_LEN ) . '_' . $job->id . '_' ), 'and not the tables moved aside' );
+		$this->undo( Plugin::instance()->jobs()->find( $job->id ) );
 	}
 
 	public function test_a_code_shown_before_another_take_over_confirms_nothing(): void {
@@ -283,6 +387,7 @@ final class HeldSiteTest extends SwapTestCase {
 		$outcome = $acts->abandon( $job->id, $code );
 		$this->assertTrue( $outcome['ok'], $outcome['message'] );
 		$this->assertStringContainsString( 'its restore stays half swapped', $outcome['message'] );
+		$this->assertStringContainsString( 'Its temporary tables were removed. The tables its swap moved aside (named wcpold…) stay', $outcome['message'], 'what it removed, as it happened' );
 		$this->assertFileDoesNotExist( $this->copy_dir() . '/.maintenance' );
 		$now = Plugin::instance()->jobs()->find( $job->id );
 		$this->assertSame( Job::FAILED, $now->status );
@@ -292,6 +397,14 @@ final class HeldSiteTest extends SwapTestCase {
 		$this->assertSame( $site, $this->site(), 'the site it held is not touched: its paths, tables and file' );
 		$this->assertNotContains( $job->id, Plugin::instance()->jobs()->holding_site(), 'no longer warned about' );
 		$this->assertSame( 0, \WPCheckpoint\Support\Uninstaller::jobs_holding_the_site(), 'and an uninstall is not held back by it' );
+		// Abandoned from another installation (its token in held_by), the site here may be the one it left half swapped.
+		global $wpdb;
+		$own = $this->row( $job->id )['held_by'];
+		$wpdb->update( JobRepository::table(), array( 'held_by' => self::ELSEWHERE ), array( 'id' => $job->id ) );
+		$wpdb->query( 'COMMIT' );
+		$this->assertSame( 1, \WPCheckpoint\Support\Uninstaller::jobs_holding_the_site(), 'abandoned elsewhere: an uninstall here is held back' );
+		$wpdb->update( JobRepository::table(), array( 'held_by' => $own ), array( 'id' => $job->id ) );
+		$wpdb->query( 'COMMIT' );
 		$this->assertNull( $acts->held_elsewhere( $job->id ) );
 		try {
 			Plugin::instance()->job_actions()->retry( $job->id );

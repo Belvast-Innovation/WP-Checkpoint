@@ -346,10 +346,13 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		if ( $attempt < 1 || $plan->complete_count( $context->job()->id, $attempt ) !== $count ) {
 			throw new RetryFrom( 'The swap\'s plan is not complete as the final check recorded it; the final check writes it again.', SwapCheckStep::ID );
 		}
+		// One mark for the job, whatever the attempt: a held file of an earlier attempt somewhere else (a copy of the
+		// site) carries it, and the row must keep saying it (Job::$site_mark) or nothing could tell that file again.
+		$mark = (string) $context->job()->site_mark;
 		return array(
 			'phase'   => 'judge',
 			'attempt' => $attempt,
-			'mark'    => Maintenance::new_mark(),
+			'mark'    => '' !== $mark ? $mark : Maintenance::new_mark(),
 		);
 	}
 
