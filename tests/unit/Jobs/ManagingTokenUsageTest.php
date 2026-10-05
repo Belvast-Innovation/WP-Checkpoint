@@ -72,10 +72,17 @@ final class ManagingTokenUsageTest extends TestCase {
 		}
 		$found = array();
 		$x     = '\$\w+(?:\s*->\s*\w+\s*(?:\([^()]*\))?)*\s*->\s*storage_token\b';
+		// A variable given the token stands for it (\$t = \$job->storage_token; ... \$t === ...).
+		if ( preg_match_all( '/(\$\w+)\s*=\s*(?:\(\s*string\s*\)\s*)?' . $x . '/', $code, $assigned ) > 0 ) {
+			$x = '(?:' . $x . '|' . implode( '|', array_map( static function ( string $v ): string {
+				return preg_quote( $v, '/' ) . '\b';
+			}, array_unique( $assigned[1] ) ) ) . ')';
+		}
 		$forms = array(
 			'/' . $x . '\s*(?:===|!==|==|!=|<>)/',
 			'/(?:===|!==|==|!=|<>)\s*(?:\(\s*string\s*\)\s*)?' . $x . '/',
-			'/\b(?:in_array|array_search)\s*\(\s*' . $x . '/',
+			'/\b(?:in_array|array_search|array_key_exists)\s*\(\s*' . $x . '/',
+			'/\b(?:hash_equals|strcmp|strcasecmp|strncmp)\s*\([^;]*?' . $x . '/',
 			'/\[\s*' . $x . '\s*\]/',
 		);
 		foreach ( $forms as $form ) {
@@ -86,7 +93,7 @@ final class ManagingTokenUsageTest extends TestCase {
 			}
 		}
 		foreach ( $strings as $string ) {
-			if ( preg_match_all( '/(?<![\$\w])storage_token\s*(?:=|<>|!=|\bIN\b)/i', $string, $matches ) > 0 ) {
+			if ( preg_match_all( '/(?<![\$\w])`?storage_token`?\s*(?:=|<>|!=|\bIN\b)/i', $string, $matches ) > 0 ) {
 				foreach ( $matches[0] as $match ) {
 					$found[] = trim( (string) preg_replace( '/\s+/', ' ', $match ) );
 				}
@@ -144,8 +151,14 @@ if ( in_array( $context->job()->storage_token, $held, true ) ) {}
 if ( isset( $lost[ $job->storage_token ] ) ) {}
 $wpdb->query( "UPDATE t SET a = 1 WHERE storage_token = %s" );
 $wpdb->query( 'SELECT id FROM t WHERE storage_token IN (' . $list . ')' );
+$t = $job->storage_token;
+if ( $t === $token ) {}
+if ( hash_equals( $job->storage_token, $token ) ) {}
+if ( 0 === strcmp( $token, $job->storage_token ) ) {}
+if ( array_key_exists( $job->storage_token, $lost ) ) {}
+$wpdb->query( "SELECT id FROM t WHERE `storage_token` = %s" );
 PHP;
-		$this->assertCount( 6, self::comparisons( $bad ), implode( "\n", self::comparisons( $bad ) ) );
+		$this->assertCount( 11, self::comparisons( $bad ), implode( "\n", self::comparisons( $bad ) ) );
 		$good = <<<'PHP'
 <?php
 $name          = TempTables::old( $job->storage_token, $job->id, $random, $bare );

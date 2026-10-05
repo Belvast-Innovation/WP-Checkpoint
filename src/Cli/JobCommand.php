@@ -442,7 +442,7 @@ final class JobCommand {
 		} catch ( InvalidTransition $e ) {
 			$current = $this->actions->find( (int) $args[0] );
 			if ( null !== $current && Job::REASON_ABANDONED === $current->failure_reason ) {
-				WP_CLI::error( 'The job was abandoned; it is not run again.' );
+				WP_CLI::error( __( 'The job was abandoned; it is not run again.', 'wp-checkpoint' ) );
 			}
 			if ( null !== $current && Job::FAILED === $current->status && ! $current->can_retry() ) {
 				WP_CLI::error( JobPresenter::retry_note() );

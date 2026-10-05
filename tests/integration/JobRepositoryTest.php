@@ -1321,12 +1321,29 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		$result = Schema::ensure();
 		$this->assertSame( 'migrated', $result['action'] );
 		$this->assertSame( Schema::CURRENT, $result['version'] );
-		$this->assertSame( 10, Schema::CURRENT, 'the control: this is the migration under test' );
+		$this->assertGreaterThanOrEqual( 10, Schema::CURRENT, 'the control: this migration is among those run' );
 		$this->assertSame( 1, $result['min_compatible'], 'older code ignores the column' );
 		$this->assertContains( 'held_by', $wpdb->get_col( "SHOW COLUMNS FROM {$table}" ) );
 		$found = $this->repo->find( $job->id );
 		$this->assertSame( '', $found->held_by, 'a row from before: nobody took it over' );
 		$this->assertSame( $found->storage_token, $found->managing_token() );
+		$this->assertSame( array(), $found->missing_columns );
+	}
+
+	public function test_schema_version_eleven_adds_site_mark_to_a_version_ten_table(): void {
+		global $wpdb;
+		$table = Schema::jobs_table();
+		$job   = $this->repo->create( 'export' );
+		$wpdb->query( "ALTER TABLE {$table} DROP COLUMN site_mark" );
+		$this->assertNotContains( 'site_mark', $wpdb->get_col( "SHOW COLUMNS FROM {$table}" ), 'the control: a version 10 table' );
+		Options::set( Schema::OPTION, array( 'version' => 10, 'min_compatible' => 1 ) );
+		$result = Schema::ensure();
+		$this->assertSame( 'migrated', $result['action'] );
+		$this->assertSame( 11, Schema::CURRENT, 'the control: this is the migration under test' );
+		$this->assertSame( 1, $result['min_compatible'], 'older code ignores the column' );
+		$this->assertContains( 'site_mark', $wpdb->get_col( "SHOW COLUMNS FROM {$table}" ) );
+		$found = $this->repo->find( $job->id );
+		$this->assertSame( '', $found->site_mark, 'a row from before: no mark' );
 		$this->assertSame( array(), $found->missing_columns );
 	}
 

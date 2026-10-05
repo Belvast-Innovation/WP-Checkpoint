@@ -749,6 +749,27 @@ final class SwapCrashTest extends SwapTestCase {
 		$this->assertSame( $before, $this->site() );
 	}
 
+	public function test_a_plan_from_before_the_site_entry_is_refused_for_that_reason(): void {
+		global $wpdb;
+		$job    = $this->at_swap();
+		$before = $this->site();
+		$table  = $wpdb->base_prefix . \WPCheckpoint\Restore\SwapPlan::TABLE;
+		// A plan an earlier version wrote: no site entry (its count, as the earlier version made it, one less).
+		$wpdb->query( $wpdb->prepare( "DELETE FROM `{$table}` WHERE job_id = %d AND kind = 'site'", $job->id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the plan table.
+		$wpdb->query( $wpdb->prepare( "UPDATE `{$table}` SET seq = seq - 1 WHERE job_id = %d AND kind <> 'complete' ORDER BY seq", $job->id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the plan table.
+		$wpdb->query( $wpdb->prepare( "UPDATE `{$table}` SET seq = seq - 1, live = CAST(CAST(live AS UNSIGNED) - 1 AS CHAR) WHERE job_id = %d AND kind = 'complete'", $job->id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the plan table.
+		$wpdb->query( 'COMMIT' );
+		$file = \WPCheckpoint\Restore\RestoreFiles::path( $this->work( $job ), \WPCheckpoint\Restore\RestoreFiles::SWAP_PLAN );
+		$plan = json_decode( (string) file_get_contents( $file ), true );
+		--$plan['entries'];
+		file_put_contents( $file, (string) wp_json_encode( $plan ) );
+		$done = $this->cli_run( $job );
+		$this->assertSame( Job::FAILED, $done->status );
+		$this->assertSame( Job::FAILURE_FINAL, $done->failure_kind );
+		$this->assertStringContainsString( 'written by an earlier version of WP Checkpoint, which did not record the site', (string) $done->last_error );
+		$this->assertSame( $before, $this->site() );
+	}
+
 	/**
 	 * @return array<string, array{0: string}>
 	 */

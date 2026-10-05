@@ -24,10 +24,12 @@ use WPCheckpoint\Tests\Fixtures\Restore\SwapTestCase;
  * - Abandoned: a job given up from another location never runs again and nothing of it is reclaimed.
  *
  * Besides one sequence per seam, a fixed few (ELSEWHERE) where, after the kill, the job is managed by another
- * installation and seen from a copy of the site (another WordPress directory with a copy of the file): its file
- * there taken down (release), then the job taken back by the original (rebind) and run to the end; or the job given
- * up (abandon), at once or after a run that died between its two steps.
+ * installation and seen from a copy of the site (another WordPress directory with a copy of the file): nothing
+ * released there while it holds the site, then the job taken back by the original (rebind) and run to the end; or the
+ * job given up (abandon), at once or after a run that died between its two steps.
  * - I5: visitors' writes after the file was let go are kept where they wrote them.
+ * - I6: whenever a held maintenance file of this plugin with mark M is there (at the site, or at a copy of it), its
+ *   job's row already says M (Job::$site_mark): a held file nobody can tell as a job's would never come down.
  *
  * Fixed: the seams in order, one sequence each (WPCHECKPOINT_SWAP_SEQUENCES more are drawn with
  * WPCHECKPOINT_SWAP_SEQUENCES_SEED). Every seam and every kind of interleaving must occur, counted where it happened.
@@ -125,6 +127,7 @@ final class SwapSequencesTest extends SwapTestCase {
 		foreach ( $this->held_checks as $point => $times ) {
 			$this->assertGreaterThan( 0, $times, 'the control: the file was checked held at ' . $point . ' inside a run' );
 		}
+		$this->assertGreaterThan( 0, $this->mark_checks, 'the control: I6 met held files' );
 	}
 
 	/**
@@ -188,6 +191,7 @@ final class SwapSequencesTest extends SwapTestCase {
 
 		if ( 0 === strpos( $kind, 'elsewhere_' ) && ! $this->elsewhere( $job, $kind, $label, $kinds ) ) {
 			// Abandoned: it never runs again, and the site it held stays as it is; undone here, as at the end.
+			$this->copy = '';
 			$this->undo( Plugin::instance()->jobs()->find( $job->id ) );
 			$wpdb->query( "DROP TABLE IF EXISTS `{$wpdb->prefix}swt_gone`" );
 			$this->trace = '';
@@ -259,6 +263,7 @@ final class SwapSequencesTest extends SwapTestCase {
 			array(
 				'at'     => function ( string $point ) use ( $job, $label ): void {
 					$this->seams[] = $point;
+					$this->marked( $job, $label . ' at ' . $point );
 					if ( in_array( $point, self::AT_RENAME, true ) ) {
 						// I1, inside the run: at a rename, this restore's file is held (or someone else's is there).
 						$mark = (string) ( Plugin::instance()->jobs()->find( $job->id )->cursor['mark'] ?? '' );
@@ -332,6 +337,16 @@ final class SwapSequencesTest extends SwapTestCase {
 		}
 		// I4: an ended job leaves none of its files held.
 		$this->assertFalse( Maintenance::held_in( $this->abspath ), $label . ': no held file once the job ended (' . $done->status . ')' );
+		$this->marked( $job, $label . ' (ended)' );
+		if ( '' !== $this->copy ) {
+			// The copy's file, the job ended: released by the mark the job's row kept, whether the database is shared.
+			$ended = Plugin::instance()->jobs()->find( $job->id );
+			$this->assertNotSame( '', $ended->site_mark, $label . ': the mark kept once the job ended' );
+			$release = $this->from_copy()->release( $job->id, \WPCheckpoint\Jobs\HeldSite::code( \WPCheckpoint\Jobs\HeldSite::RELEASE, $ended, (string) ( new \WPCheckpoint\Jobs\HeldSite( array( 'abspath' => $this->copy ) ) )->assess( $ended )['recorded'] ) );
+			$this->assertTrue( $release['ok'], $label . ': ' . $release['message'] );
+			$this->assertFalse( Maintenance::held_in( $this->copy ), $label . ': the copy\'s file is down once the job ended' );
+			$this->copy = '';
+		}
 		// The outcome, and I5: what visitors wrote after the file was let go is where they wrote it.
 		$site     = $this->site();
 		$restored = Job::COMPLETED === $done->status;
@@ -388,7 +403,8 @@ final class SwapSequencesTest extends SwapTestCase {
 		$this->assertContains( $now->status, array( Job::QUEUED, Job::RUNNING ), $label . ': the control, not ended' );
 		$wpdb->update( \WPCheckpoint\Jobs\JobRepository::table(), array( 'held_by' => 'ffffffffffff' ), array( 'id' => $job->id ) );
 		$wpdb->query( 'COMMIT' );
-		$copy = $this->sandbox . '/copy';
+		$copy       = $this->sandbox . '/copy';
+		$this->copy = $copy;
 		mkdir( $copy . '/wp-content/uploads', 0755, true );
 		$file = new Maintenance( $this->abspath, (string) ( $now->cursor['mark'] ?? '' ) );
 		$had  = Maintenance::OURS === $file->state();
@@ -417,15 +433,43 @@ final class SwapSequencesTest extends SwapTestCase {
 			$job = Plugin::instance()->jobs()->find( $job->id );
 			return array( $job->status, $job->site_state, $job->held_by, $job->cursor );
 		};
-		if ( 'elsewhere_abandon' !== $kind ) {
+		if ( 'elsewhere_release' === $kind ) {
+			// While the job holds the site, nothing is released from the copy: it stays behind its maintenance page.
 			$before = $row();
-			$this->assertTrue( $there->release( $job->id, \WPCheckpoint\Jobs\HeldSite::code( \WPCheckpoint\Jobs\HeldSite::RELEASE, $job, $see['recorded'] ) )['ok'], $label . ': released' );
-			$this->assertFalse( Maintenance::held_in( $copy ), $label . ': no held file left at the copy' );
-			$this->assertSame( $had, Maintenance::OURS === $file->state(), $label . ': the site keeps its file' );
-			$this->assertSame( $before, $row(), $label . ': the job is not changed by a release' );
+			$this->assertFalse( $there->release( $job->id, \WPCheckpoint\Jobs\HeldSite::code( \WPCheckpoint\Jobs\HeldSite::RELEASE, $held['job'], $see['recorded'] ) )['ok'], $label . ': nothing released while it holds the site' );
+			$this->assertSame( $had, Maintenance::held_in( $copy ), $label . ': the copy keeps its file' );
+			$this->assertSame( $before, $row(), $label . ': the job is not changed' );
+		}
+		if ( 'elsewhere_abandon_killed' === $kind ) {
+			// An abandon that died between its two steps: the file down, the job not yet abandoned.
+			$dying = new \WPCheckpoint\Jobs\JobActions(
+				Plugin::instance()->jobs(),
+				Plugin::instance()->runner(),
+				new \WPCheckpoint\Jobs\Loopback( false ),
+				new \WPCheckpoint\Jobs\HeldSite(
+					array(
+						'abspath'   => $copy,
+						'site_dirs' => static function () use ( $copy ): array {
+							return array( 'uploads' => $copy . '/wp-content/uploads' );
+						},
+						'at'        => static function ( string $point ): void {
+							throw new \RuntimeException( 'died at ' . $point );
+						},
+					)
+				)
+			);
+			try {
+				$dying->abandon( $job->id, \WPCheckpoint\Jobs\HeldSite::code( \WPCheckpoint\Jobs\HeldSite::ABANDON, Plugin::instance()->jobs()->find( $job->id ), $see['recorded'] ) );
+				$this->fail( $label . ': the abandon died between its steps' );
+			} catch ( \RuntimeException $e ) {
+				$this->assertSame( 'died at abandon_released', $e->getMessage(), $label );
+			}
+			$this->assertFalse( Maintenance::held_in( $copy ), $label . ': the first step was done' );
+			$this->assertContains( $job->id, Plugin::instance()->jobs()->holding_site(), $label . ': still holding, still warned about' );
 		}
 		if ( 'elsewhere_release' !== $kind ) {
-			$this->assertTrue( $there->abandon( $job->id, \WPCheckpoint\Jobs\HeldSite::code( \WPCheckpoint\Jobs\HeldSite::ABANDON, $job, $see['recorded'] ) )['ok'], $label . ': abandoned' );
+			$staged = $this->staging_of( $job );
+			$this->assertTrue( $there->abandon( $job->id, \WPCheckpoint\Jobs\HeldSite::code( \WPCheckpoint\Jobs\HeldSite::ABANDON, Plugin::instance()->jobs()->find( $job->id ), $see['recorded'] ) )['ok'], $label . ': abandoned' );
 			++$kinds[ $kind ];
 			$this->assertFalse( Maintenance::held_in( $copy ), $label . ': I4, no held file at the location it ended from' );
 			$ended = Plugin::instance()->jobs()->find( $job->id );
@@ -434,7 +478,10 @@ final class SwapSequencesTest extends SwapTestCase {
 			$this->seams = array();
 			$this->cli_tick( $ended );
 			$this->assertSame( array(), $this->seams, $label . ': an abandoned job never runs' );
-			$this->assertFalse( Plugin::instance()->jobs()->reclaim_work( $ended ), $label . ': nothing of it is reclaimed' );
+			global $wpdb;
+			$wpdb->query( 'COMMIT' );
+			$this->assertSame( array(), (array) $wpdb->get_col( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( \WPCheckpoint\Jobs\TempTables::job_prefix( $ended->storage_token, $ended->id ) ) . '%' ) ), $label . ': its tables are gone' );
+			$this->assertSame( $staged, $this->staging_of( $ended ), $label . ': nothing at the paths its plan records is touched' );
 			return false;
 		}
 		++$kinds[ $kind ];
@@ -455,8 +502,72 @@ final class SwapSequencesTest extends SwapTestCase {
 		$back = $here->held_elsewhere( $job->id );
 		$this->assertSame( \WPCheckpoint\Jobs\HeldSite::SITE, $back['assessment']['branch'], $label . ': the original\'s: ' . $back['assessment']['why'] );
 		$then = '' === $back['assessment']['direction'] ? 'continue' : '';
-		$this->assertTrue( $here->rebind( $job->id, \WPCheckpoint\Jobs\HeldSite::code( \WPCheckpoint\Jobs\HeldSite::REBIND, $job, '' ), $then )['ok'], $label . ': taken back' );
+		$this->assertTrue( $here->rebind( $job->id, \WPCheckpoint\Jobs\HeldSite::code( \WPCheckpoint\Jobs\HeldSite::REBIND, $back['job'], '' ), $then )['ok'], $label . ': taken back' );
 		return true;
+	}
+
+	/** @var string The copy of the site of an ELSEWHERE sequence ('' for none). */
+	private $copy = '';
+
+	/**
+	 * Actions as the copy of the site sees them.
+	 *
+	 * @return \WPCheckpoint\Jobs\JobActions
+	 */
+	private function from_copy(): \WPCheckpoint\Jobs\JobActions {
+		$copy = $this->copy;
+		return new \WPCheckpoint\Jobs\JobActions(
+			Plugin::instance()->jobs(),
+			Plugin::instance()->runner(),
+			new \WPCheckpoint\Jobs\Loopback( false ),
+			new \WPCheckpoint\Jobs\HeldSite(
+				array(
+					'abspath'   => $copy,
+					'site_dirs' => static function () use ( $copy ): array {
+						return array( 'uploads' => $copy . '/wp-content/uploads' );
+					},
+				)
+			)
+		);
+	}
+
+	/**
+	 * I6: every held maintenance file of this plugin there (at the site, at a copy of it) carries the mark its job's row
+	 * says. Counted where a held file was there (the control: the check met one).
+	 *
+	 * @param Job    $job   Job.
+	 * @param string $label For the messages.
+	 * @return void
+	 */
+	private function marked( Job $job, string $label ): void {
+		foreach ( array_filter( array( $this->abspath, $this->copy ) ) as $dir ) {
+			$mark = Maintenance::mark_in( $dir );
+			if ( '' === $mark || ! ( new Maintenance( $dir, $mark ) )->is_held() ) {
+				continue;
+			}
+			++$this->mark_checks;
+			$this->assertSame( $mark, Plugin::instance()->jobs()->find( $job->id )->site_mark, $label . ': I6, the held file\'s mark is its job\'s' );
+		}
+	}
+
+	/** @var int I6 checks that met a held file. */
+	private $mark_checks = 0;
+
+	/**
+	 * The kinds of the staging a job left next to the site's directories (by the names it made).
+	 *
+	 * @param Job $job Job.
+	 * @return string[]
+	 */
+	private function staging_of( Job $job ): array {
+		$out = array();
+		foreach ( \WPCheckpoint\Jobs\Residue::scan_site( \WPCheckpoint\Jobs\Residue::site_dirs( $this->dirs ), array( $job->storage_token ) ) as $entry ) {
+			if ( $entry['id'] === $job->id ) {
+				$out[] = $entry['kind'] . ' ' . $entry['path'];
+			}
+		}
+		sort( $out );
+		return $out;
 	}
 
 	/**
@@ -469,6 +580,7 @@ final class SwapSequencesTest extends SwapTestCase {
 	 * @return void
 	 */
 	private function observe( Job $job, string $label, string &$decided, bool &$public ): void {
+		$this->marked( $job, $label );
 		$now   = Plugin::instance()->jobs()->find( $job->id );
 		$phase = (string) ( $now->cursor['phase'] ?? '' );
 		$mark  = (string) ( $now->cursor['mark'] ?? '' );

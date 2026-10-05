@@ -126,9 +126,19 @@ final class Uninstaller {
 			return 0;
 		}
 		self::expect();
-		$count = $wpdb->get_var( "SELECT COUNT(*) FROM {$table} WHERE site_state <> 0" );
+		$rows = $wpdb->get_results( "SELECT failure_kind, finished_at FROM {$table} WHERE site_state <> 0", ARRAY_N );
 		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-		return self::failed() || null === $count ? null : (int) $count;
+		if ( self::failed() || ! is_array( $rows ) ) {
+			return null;
+		}
+		$count = 0;
+		foreach ( $rows as $row ) {
+			// A job given up (abandoned) holds nothing any more: nothing is left for a reinstall to finish or undo.
+			if ( Job::REASON_ABANDONED !== Job::read_failure_reason( (string) $row[0], (int) $row[1] ) ) {
+				++$count;
+			}
+		}
+		return $count;
 	}
 
 	/**
@@ -220,6 +230,22 @@ final class Uninstaller {
 			$part               = self::delete_tree( $entry['parent'], $entry['path'] );
 			$result['deleted'] += $part['deleted'];
 			$result['failed']   = array_merge( $result['failed'], $part['failed'] );
+		}
+		// The staging of jobs another installation started and this one took over, by the names they made (only those:
+		// JobRepository::reclaim_scope(); a job given up keeps its files, which are at the original site's paths).
+		$taken = \WPCheckpoint\Jobs\JobRepository::taken_over( Directories::own_tokens( $state ) );
+		foreach ( null === $taken ? array() : $taken as $job ) {
+			if ( \WPCheckpoint\Jobs\JobRepository::RECLAIM_ALL !== \WPCheckpoint\Jobs\JobRepository::reclaim_scope( $job, Directories::own_tokens( $state ) ) ) {
+				continue;
+			}
+			foreach ( Residue::scan_site( Residue::site_dirs( ScanRoots::site_directories() ), array( $job->storage_token ) ) as $entry ) {
+				if ( $entry['id'] !== $job->id || ( Residue::STAGE_DIR === $entry['kind'] && Residue::keeps_stray( $entry['path'] ) ) ) {
+					continue;
+				}
+				$part               = self::delete_tree( $entry['parent'], $entry['path'] );
+				$result['deleted'] += $part['deleted'];
+				$result['failed']   = array_merge( $result['failed'], $part['failed'] );
+			}
 		}
 		// A swap that died before its rename left a temporary maintenance file; never the maintenance file itself,
 		// which a swap only leaves while it holds the site (and then nothing is uninstalled).

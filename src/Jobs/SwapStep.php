@@ -90,7 +90,7 @@ defined( 'ABSPATH' ) || exit;
  * between the Runner's two last writes), ends the step without touching
  * anything.
  */
-final class SwapStep implements Step, HoldsSite, CliOnly {
+final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 
 	const ID = 'restore_swap';
 
@@ -177,6 +177,18 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 	 */
 	public function id(): string {
 		return self::ID;
+	}
+
+	/**
+	 * The maintenance file's mark a cursor carries (MarksSite): from the cursor start() returns, checkpointed before
+	 * the file is first put up, on every cursor after it.
+	 *
+	 * @param array<string, mixed> $cursor Cursor.
+	 * @return string|null
+	 */
+	public static function site_mark( array $cursor ) {
+		$mark = (string) ( $cursor['mark'] ?? '' );
+		return '' === $mark ? null : $mark;
 	}
 
 	/**
@@ -970,6 +982,9 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 		// The site the plan was written for is this one: the WordPress directory and the table prefix as they are now.
 		$real = Paths::real( (string) ( $this->parts['abspath'] ?? ABSPATH ) );
 		$site = $entries['site'][0] ?? null;
+		if ( array() === $entries['site'] ) {
+			throw new SiteChanged( 'The swap\'s plan was written by an earlier version of WP Checkpoint, which did not record the site it was written for. The swap was refused before it changed anything, and its plan is kept as it was written. Start the restore again.' );
+		}
 		if ( 1 !== count( $entries['site'] ) || 0 !== ( $site['seq'] ?? -1 ) || false === $real || rtrim( Paths::normalize( (string) $real ), '/' ) !== $site['live'] || self::base_prefix() !== $site['stage'] ) {
 			throw new SiteChanged( 'The swap\'s plan was written for a WordPress directory or table prefix other than this site\'s now. The swap was refused before it changed anything, and its plan is kept as it was written. Start the restore again.' );
 		}

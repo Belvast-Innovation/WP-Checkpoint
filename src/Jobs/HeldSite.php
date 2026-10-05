@@ -75,7 +75,7 @@ final class HeldSite {
 		$rows = $this->plan_rows( $job );
 		$site = null;
 		$dirs = array();
-		foreach ( $rows as $row ) {
+		foreach ( null === $rows ? array() : $rows as $row ) {
 			if ( SwapPlan::SITE === $row['kind'] && 0 === $row['seq'] ) {
 				$site = $row;
 			} elseif ( SwapPlan::DIR === $row['kind'] ) {
@@ -85,10 +85,12 @@ final class HeldSite {
 		$real = Paths::real( $this->abspath() );
 		$here = false === $real ? '' : rtrim( Paths::normalize( (string) $real ), '/' );
 		$why  = '';
-		if ( null === $site ) {
-			$why = 'its plan does not say which site it was written for';
+		if ( null === $rows ) {
+			$why = __( 'its plan cannot be read from the database now', 'wp-checkpoint' );
+		} elseif ( null === $site ) {
+			$why = __( 'its plan does not say which site it was written for', 'wp-checkpoint' );
 		} elseif ( self::base_prefix() !== $site['stage'] ) {
-			$why = 'its plan was written for another table prefix';
+			$why = __( 'its plan was written for another table prefix', 'wp-checkpoint' );
 		} else {
 			$why = $this->outside( $dirs );
 		}
@@ -101,7 +103,7 @@ final class HeldSite {
 			'recorded'  => $recorded,
 			'prefix'    => null === $site ? null : $site['stage'],
 			'here'      => $here,
-			'differs'   => '' !== $here && '' !== $recorded && ! Paths::same( $recorded, $here, Paths::is_windows() ),
+			'differs'   => self::another( $recorded, $here ),
 			'direction' => in_array( $phase, array( 'committed', 'done' ), true ) ? 'committed' : ( 'restored' === $phase ? 'restored' : '' ),
 			'file_here' => '' !== $mark && Maintenance::OURS === ( new Maintenance( $this->abspath(), $mark ) )->state(),
 		);
@@ -117,7 +119,7 @@ final class HeldSite {
 	 */
 	public static function code( string $action, Job $job, string $recorded ): string {
 		$bound = self::REBIND === $action ? '' : $recorded;
-		return hash( 'sha256', implode( "\0", array( 'wpcheckpoint-held-site', $action, (string) $job->id, $job->storage_token, $bound ) ) );
+		return hash( 'sha256', implode( "\0", array( 'wpcheckpoint-held-site', $action, (string) $job->id, $job->storage_token, $job->managing_token(), $bound ) ) );
 	}
 
 	/**
@@ -151,6 +153,24 @@ final class HeldSite {
 	}
 
 	/**
+	 * Take down, from this WordPress directory, the maintenance file of a job that no longer holds the site: only the
+	 * file that carries the mark the job's row recorded (Job::$site_mark).
+	 *
+	 * @param Job $job Job (ended, or abandoned).
+	 * @return bool|null Whether it is gone now; null when there was no file of this job here.
+	 */
+	public function release_ended( Job $job ) {
+		if ( '' === $job->site_mark ) {
+			return null;
+		}
+		$file = new Maintenance( $this->abspath(), $job->site_mark );
+		if ( Maintenance::OURS !== $file->state() ) {
+			return null;
+		}
+		return $file->remove();
+	}
+
+	/**
 	 * A test seam.
 	 *
 	 * @param string $point Seam.
@@ -181,7 +201,7 @@ final class HeldSite {
 			$slash = strrpos( $live, '/' );
 			$real  = false === $slash || 0 === $slash ? false : Paths::real( (string) substr( $live, 0, $slash ) );
 			if ( false === $real ) {
-				return 'where one of the directories it swaps is cannot be told from here';
+				return __( 'where one of the directories it swaps is cannot be told from here', 'wp-checkpoint' );
 			}
 			$path   = rtrim( Paths::normalize( (string) $real ), '/' ) . substr( $live, (int) $slash );
 			$inside = false;
@@ -189,28 +209,36 @@ final class HeldSite {
 				$inside = $inside || LinkedTargets::within( $group, $path );
 			}
 			if ( ! $inside ) {
-				return 'a directory it swaps is not one of this site\'s content directories';
+				return __( 'a directory it swaps is not one of this site\'s content directories', 'wp-checkpoint' );
 			}
 		}
-		return array() === $dirs ? 'its plan swaps no directory of this site' : '';
+		return array() === $dirs ? __( 'its plan swaps no directory of this site', 'wp-checkpoint' ) : '';
 	}
 
 	/**
-	 * The job's plan rows (site and directory units) of the attempt its cursor names, else of its last complete one.
+	 * The job's plan rows (site and directory units) of the attempt its cursor names, else of its last complete one;
+	 * null when they cannot be read (an error, not an answer: never taken for a plan without them).
 	 *
 	 * @param Job $job Job.
-	 * @return array<int, array{seq: int, kind: string, live: string, stage: string}>
+	 * @return array<int, array{seq: int, kind: string, live: string, stage: string}>|null
 	 */
-	private function plan_rows( Job $job ): array {
+	private function plan_rows( Job $job ) {
 		global $wpdb;
-		$table   = self::base_prefix() . SwapPlan::TABLE;
-		$attempt = (int) ( $job->cursor['attempt'] ?? 0 );
+		$quiet            = $wpdb->suppress_errors( true );
+		$wpdb->last_error = '';
+		$table            = self::base_prefix() . SwapPlan::TABLE;
+		$attempt          = (int) ( $job->cursor['attempt'] ?? 0 );
 		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix.
 		if ( $attempt <= 0 ) {
 			$attempt = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COALESCE(MAX(attempt), 0) FROM {$table} WHERE job_id = %d AND kind = %s", $job->id, SwapPlan::COMPLETE ) );
 		}
 		$rows = $wpdb->get_results( $wpdb->prepare( "SELECT seq, kind, live, stage FROM {$table} WHERE job_id = %d AND attempt = %d AND kind IN (%s, %s) ORDER BY seq", $job->id, $attempt, SwapPlan::SITE, SwapPlan::DIR ), ARRAY_N );
 		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		$failed = '' !== JobRepository::db_error() || ! is_array( $rows );
+		$wpdb->suppress_errors( $quiet );
+		if ( $failed ) {
+			return null;
+		}
 		$out = array();
 		foreach ( is_array( $rows ) ? $rows : array() as $row ) {
 			$out[] = array(
@@ -221,6 +249,32 @@ final class HeldSite {
 			);
 		}
 		return $out;
+	}
+
+	/**
+	 * Whether this WordPress directory is positively another than the one a plan records: the recorded one is
+	 * positively gone (Paths::positively_gone()), or both are there and their device and inode numbers differ. Two
+	 * spellings of one directory (a bind mount, a file system that ignores case) are the same directory; anything that
+	 * cannot be told (a stat that fails, inode numbers the platform does not give) is not "another".
+	 *
+	 * @param string $recorded The WordPress directory the plan records ('' for none).
+	 * @param string $here     This WordPress directory, resolved ('' when it cannot be).
+	 * @return bool
+	 */
+	private static function another( string $recorded, string $here ): bool {
+		if ( '' === $recorded || '' === $here ) {
+			return false;
+		}
+		clearstatcache( true );
+		$then = @stat( $recorded ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- not to be read: told below.
+		if ( false === $then ) {
+			return Paths::positively_gone( $recorded );
+		}
+		$now = @stat( $here ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- not to be read: cannot be told.
+		if ( false === $now || 0 === (int) $then['ino'] || 0 === (int) $now['ino'] ) {
+			return false;
+		}
+		return (int) $then['dev'] !== (int) $now['dev'] || (int) $then['ino'] !== (int) $now['ino'];
 	}
 
 	/**

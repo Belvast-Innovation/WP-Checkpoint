@@ -245,6 +245,16 @@ final class Plugin {
 		if ( defined( 'ABSPATH' ) && Restore\Maintenance::held_in( (string) ABSPATH ) ) {
 			if ( array() !== $ids ) {
 				$out[] = __( 'A restore\'s maintenance file is up and does not lapse (.maintenance in the WordPress directory): visitors see the maintenance page until the restore above ends.', 'wp-checkpoint' );
+			} elseif ( $read && null !== $this->ended_owner() ) {
+				$owner = $this->ended_owner();
+				$out[] = $this->job_presenter()->clean(
+					sprintf(
+						/* translators: 1: job id, 2: the release command */
+						__( 'The maintenance file of restore job %1$d is up and does not lapse (.maintenance in the WordPress directory): visitors see the maintenance page. That job no longer holds the site; take its file down with: %2$s', 'wp-checkpoint' ),
+						$owner->id,
+						'wp wpcheckpoint job release ' . $owner->id . ' --confirm=' . Jobs\HeldSite::code( Jobs\HeldSite::RELEASE, $owner, (string) ( new Jobs\HeldSite() )->assess( $owner )['recorded'] )
+					)
+				);
 			} elseif ( $read ) {
 				$out[] = __( 'A restore\'s maintenance file is up and does not lapse (.maintenance in the WordPress directory): visitors see the maintenance page. No restore holds the site now; check with wp wpcheckpoint job list, and if none does, remove that file.', 'wp-checkpoint' );
 			} else {
@@ -252,6 +262,17 @@ final class Plugin {
 			}
 		}
 		return $out;
+	}
+
+	/**
+	 * The job whose maintenance file is in the WordPress directory, when that job no longer holds the site (its row
+	 * recorded the file's mark: Job::$site_mark); null otherwise.
+	 *
+	 * @return Jobs\Job|null
+	 */
+	private function ended_owner() {
+		$owner = $this->jobs()->find_by_site_mark( Restore\Maintenance::mark_in( (string) ABSPATH ) );
+		return null !== $owner && ! JobActions::holds( $owner ) ? $owner : null;
 	}
 
 	/**

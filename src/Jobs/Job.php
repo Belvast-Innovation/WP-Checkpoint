@@ -331,6 +331,15 @@ final class Job {
 	public $held_by = '';
 
 	/**
+	 * The mark of the maintenance file the job's swap holds the site with (Restore\Maintenance), written by the Runner
+	 * from the step's cursor (MarksSite) in the statement that writes the cursor, and kept once the job ended: what
+	 * tells this job's file from any other, after the cursor is gone ('' when it never had one).
+	 *
+	 * @var string
+	 */
+	public $site_mark = '';
+
+	/**
 	 * Log file path relative to the storage base directory, e.g. "logs/job-3-ab12cd34.log".
 	 *
 	 * @var string
