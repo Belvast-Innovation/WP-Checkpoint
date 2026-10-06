@@ -11,6 +11,7 @@ use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Files\ScanRoots;
 use WPCheckpoint\Jobs\LockFile;
 use WPCheckpoint\Jobs\Residue;
+use WPCheckpoint\Jobs\UninstallFence;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -84,17 +85,72 @@ final class Uninstaller {
 			error_log( self::held_back( $held ) ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- uninstall has no screen to say it on.
 			return;
 		}
+		// The fence first (UninstallFence): from here no swap enters the site. Its close waits for one entering now,
+		// and the read after it sees that one; a schema older than the fence has no swap that could use it.
+		$fence = UninstallFence::close( time() );
+		if ( UninstallFence::FAILED === $fence ) {
+			error_log( 'WP Checkpoint was uninstalled, but the fence that keeps a restore from starting to change the site meanwhile could not be closed; nothing was removed. Reinstall WP Checkpoint and uninstall it again.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- uninstall has no screen to say it on.
+			return;
+		}
+		$closed  = UninstallFence::DONE === $fence;
+		$removed = array();
+		// Read again before each step that removes something: after the close, and as a second line for a swap of an
+		// older version on a database this site shares (it does not know the fence).
+		if ( self::held_meanwhile( $closed, $removed ) ) {
+			return;
+		}
 		self::cancel_jobs();
+		$removed[] = 'cancelled the jobs that had not changed the site';
+		if ( self::held_meanwhile( $closed, $removed ) ) {
+			return;
+		}
 		self::delete_site_residue();
+		$removed[] = 'removed its staging next to the site';
 
 		if ( ! self::should_delete_data() ) {
+			if ( $closed ) {
+				UninstallFence::open(); // The plugin's files go next; a site sharing this database still restores.
+			}
 			return;
 		}
 
+		if ( self::held_meanwhile( $closed, $removed ) ) {
+			return;
+		}
 		self::delete_storage();
-		Schema::drop();
+		$removed[] = 'removed its storage directory';
+		if ( self::held_meanwhile( $closed, $removed ) ) {
+			return;
+		}
+		Schema::drop_temporary();
+		$removed[] = 'dropped its temporary tables';
+		if ( self::held_meanwhile( $closed, $removed ) ) {
+			return;
+		}
+		Schema::drop_tables();
 		self::delete_options();
 		self::delete_user_meta();
+	}
+
+	/**
+	 * Whether a job holds the site changed now, or that cannot be read (holding()): then the fence is opened again
+	 * (when this uninstall closed it) and the reason is logged, with what was already done.
+	 *
+	 * @phpstan-impure It reads the database each time.
+	 * @param bool     $closed  Whether this uninstall closed the fence.
+	 * @param string[] $removed What was done so far, in order.
+	 * @return bool
+	 */
+	private static function held_meanwhile( bool $closed, array $removed ): bool {
+		$held = self::holding();
+		if ( null !== $held && 0 === $held['all'] ) {
+			return false;
+		}
+		if ( $closed ) {
+			UninstallFence::open();
+		}
+		error_log( self::held_back( $held, $removed ) ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- uninstall has no screen to say it on.
+		return true;
 	}
 
 	/**
@@ -108,12 +164,14 @@ final class Uninstaller {
 	}
 
 	/**
-	 * Why the uninstall left everything in place (logged: uninstall has no screen), from holding().
+	 * Why the uninstall stopped (logged: uninstall has no screen), from holding(), and what it had done before it
+	 * found that (nothing, when it found it at the start): only what was left is said to be left.
 	 *
-	 * @param array{all: int, abandoned: int}|null $held holding().
+	 * @param array{all: int, abandoned: int}|null $held    holding().
+	 * @param string[]                             $removed What it had done, in order (run()).
 	 * @return string
 	 */
-	public static function held_back( $held ): string {
+	public static function held_back( $held, array $removed = array() ): string {
 		$then = 'Reinstall WP Checkpoint to finish or undo the restore.';
 		if ( null === $held ) {
 			$why = 'it could not tell whether a restore holds the site changed';
@@ -123,7 +181,22 @@ final class Uninstaller {
 		} else {
 			$why = 'a restore holds the site changed';
 		}
-		return sprintf( 'WP Checkpoint was uninstalled while %1$s; its staging next to the site, its tables and its storage directory were left in place so the site can still be put back. %2$s', $why, $then );
+		if ( array() === $removed ) {
+			return sprintf( 'WP Checkpoint was uninstalled while %1$s; its staging next to the site, its tables and its storage directory were left in place so the site can still be put back. %2$s', $why, $then );
+		}
+		$left = array();
+		foreach ( array(
+			'removed its staging next to the site' => 'its staging next to the site',
+			'removed its storage directory'        => 'its storage directory',
+			'dropped its temporary tables'         => 'its temporary tables',
+		) as $done => $what ) {
+			if ( ! in_array( $done, $removed, true ) ) {
+				$left[] = $what;
+			}
+		}
+		$left[] = 'its jobs table and swap plan';
+		/* The uninstall found it only after it had begun: what it had done, and what it left. */
+		return sprintf( 'WP Checkpoint was being uninstalled when %1$s, after it had %2$s; it stopped there and left %3$s in place. %4$s', $why, implode( ', ', $removed ), implode( ', ', $left ), $then );
 	}
 
 	/**
@@ -210,11 +283,14 @@ final class Uninstaller {
 	}
 
 	/**
-	 * Cancel every queued, running or paused job and remove its lock file:
-	 * nothing can continue once the plugin is gone, and a driver still
-	 * holding a lock must stop before the directory or the table disappears.
-	 * Runs whether or not data is deleted, so a reinstall does not find jobs
-	 * that look alive.
+	 * Cancel every queued, running or paused job that has not changed the site,
+	 * and remove the lock file of each it cancelled: nothing can continue once
+	 * the plugin is gone, and a driver still holding a lock must stop before
+	 * the directory or the table disappears. A job that changed the site
+	 * meanwhile is left alone (run() reads again after this and stops); a
+	 * table without the site_state column (made before it existed) has no such
+	 * job. Runs whether or not data is deleted, so a reinstall does not find
+	 * jobs that look alive.
 	 *
 	 * @return int Jobs cancelled.
 	 */
@@ -227,11 +303,18 @@ final class Uninstaller {
 		$state = Directories::load_state();
 		$path  = is_string( $state['path'] ) ? rtrim( $state['path'], '/\\' ) : '';
 		$live  = array( Job::QUEUED, Job::RUNNING, Job::PAUSED );
-		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix.
-		$rows = $wpdb->get_results( $wpdb->prepare( "SELECT id, storage_path FROM {$table} WHERE status IN (%s, %s, %s)", $live[0], $live[1], $live[2] ), ARRAY_A );
-		$now  = time();
-		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix.
-		$affected = $wpdb->query( $wpdb->prepare( "UPDATE {$table} SET status = %s, finished_at = %d, updated_at = %d, lock_token = '', locked_until = 0 WHERE status IN (%s, %s, %s)", Job::CANCELLED, $now, $now, $live[0], $live[1], $live[2] ) );
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix.
+		self::expect();
+		$column = $wpdb->get_results( "SHOW COLUMNS FROM {$table} LIKE 'site_state'", ARRAY_A );
+		if ( self::failed() || ! is_array( $column ) ) {
+			return 0; // Which jobs changed the site cannot be told: none is cancelled (run() stops when it reads again).
+		}
+		$untouched = array() === $column ? '' : ' AND site_state = ' . Job::SITE_UNTOUCHED;
+		$now       = time();
+		$affected  = $wpdb->query( $wpdb->prepare( "UPDATE {$table} SET status = %s, finished_at = %d, updated_at = %d, lock_token = '', locked_until = 0 WHERE status IN (%s, %s, %s){$untouched}", Job::CANCELLED, $now, $now, $live[0], $live[1], $live[2] ) );
+		// The lock files of the jobs this cancelled (one cancelled otherwise in the same second too: it is cancelled).
+		$rows = $wpdb->get_results( $wpdb->prepare( "SELECT id, storage_path FROM {$table} WHERE status = %s AND finished_at = %d AND updated_at = %d", Job::CANCELLED, $now, $now ), ARRAY_A );
+		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		foreach ( is_array( $rows ) ? $rows : array() as $row ) {
 			// Only the current directory's files: another directory is another installation's.
 			if ( '' !== $path && Paths::same_location( (string) $row['storage_path'], $path ) ) {

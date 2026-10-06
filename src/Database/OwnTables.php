@@ -8,12 +8,13 @@
 namespace WPCheckpoint\Database;
 
 use WPCheckpoint\Jobs\TempTables;
+use WPCheckpoint\Jobs\UninstallFence;
 use WPCheckpoint\Restore\SwapPlan;
 use WPCheckpoint\Support\Schema;
 
 /**
  * One list for the tables this plugin keeps for its own work: the jobs
- * table and the swap plan (by name, after any table prefix: another
+ * table, the swap plan and the uninstall fence (by name, after any table prefix: another
  * installation in the same database, even one under a longer prefix such
  * as "wp_old_", has its own, and they are its recovery record), and the
  * tables a restore makes (by the grammar TempTables names them with:
@@ -44,9 +45,10 @@ final class OwnTables {
 	 * Where src/ creates a table, and what it creates.
 	 */
 	const SOURCES = array(
-		'src/Support/Schema.php'   => 'the jobs table (names())',
-		'src/Restore/SwapPlan.php' => 'the swap plan (names())',
-		'src/Restore/Ledger.php'   => 'a restore\'s ledger (generated(): TempTables::ledger())',
+		'src/Support/Schema.php'      => 'the jobs table (names())',
+		'src/Restore/SwapPlan.php'    => 'the swap plan (names())',
+		'src/Jobs/UninstallFence.php' => 'the uninstall fence (names())',
+		'src/Restore/Ledger.php'      => 'a restore\'s ledger (generated(): TempTables::ledger())',
 	);
 
 	/**
@@ -56,7 +58,7 @@ final class OwnTables {
 	 * @return string[]
 	 */
 	public static function names( string $base_prefix ): array {
-		return array( $base_prefix . Schema::JOBS_TABLE, $base_prefix . SwapPlan::TABLE );
+		return array( $base_prefix . Schema::JOBS_TABLE, $base_prefix . SwapPlan::TABLE, $base_prefix . UninstallFence::TABLE );
 	}
 
 	/**
@@ -79,7 +81,7 @@ final class OwnTables {
 	}
 
 	/**
-	 * Whether a name is the jobs table or the swap plan of any installation: the name after a table prefix
+	 * Whether a name is the jobs table, the swap plan or the uninstall fence of any installation: the name after a table prefix
 	 * (letters, digits and "_", or none), in any letter case. (A site's own table of that very name would be
 	 * taken for one; the names are this plugin's.)
 	 *
@@ -87,7 +89,7 @@ final class OwnTables {
 	 * @return bool
 	 */
 	public static function named( string $name ): bool {
-		return 1 === preg_match( '/\A[A-Za-z0-9_]*(?:' . preg_quote( Schema::JOBS_TABLE, '/' ) . '|' . preg_quote( SwapPlan::TABLE, '/' ) . ')\z/i', $name );
+		return 1 === preg_match( '/\A[A-Za-z0-9_]*(?:' . preg_quote( Schema::JOBS_TABLE, '/' ) . '|' . preg_quote( SwapPlan::TABLE, '/' ) . '|' . preg_quote( UninstallFence::TABLE, '/' ) . ')\z/i', $name );
 	}
 
 	/**

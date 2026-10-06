@@ -34,6 +34,11 @@ defined( 'ABSPATH' ) || exit;
 final class Runner {
 
 	/**
+	 * How long a job waits when the write after a step returned found the uninstall fence closed (FenceClosed).
+	 */
+	const FENCE_WAIT_SECONDS = 60;
+
+	/**
 	 * TransientFailure is retried this many times (back-off 5, 15, 60, 300 s).
 	 */
 	const MAX_RETRIES = 5;
@@ -269,6 +274,16 @@ final class Runner {
 
 		try {
 			return $this->run_steps( $job, $token, $logger, $budget, $start );
+		} catch ( FenceClosed $e ) {
+			// The write after a step returned would have entered the site with the uninstall fence closed (a step that
+			// enters by a checkpoint gets the back-off of any TransientFailure instead): nothing was written; wait.
+			$logger->warning( 'The site may not be changed now; waiting', array( 'error' => $this->describe( $e ) ) );
+			try {
+				$this->release( $job, $token );
+			} catch ( LockLost $lost ) {
+				unset( $lost ); // The lease lapses on its own.
+			}
+			return new TickResult( TickResult::WAITING, self::FENCE_WAIT_SECONDS, $job, $this->redactor->redact( $e->getMessage() ) );
 		} catch ( LockLost $e ) {
 			if ( $e->getPrevious() instanceof WriteRefused ) {
 				$logger->warning( 'The database refused to write the progress; stopping without further writes', array( 'error' => $this->describe( $e ) ) );
@@ -289,6 +304,7 @@ final class Runner {
 	 * @param float  $start  When the budget started.
 	 * @return TickResult
 	 * @throws LockLost When a fenced write refused; nothing is written afterwards.
+	 * @throws FenceClosed When a write after a step returned would enter the site with the uninstall fence closed.
 	 */
 	private function run_steps( Job $job, string $token, Logger $logger, Budget $budget, float $start ): TickResult {
 		$type = $this->types->get( $job->type );
@@ -830,6 +846,7 @@ final class Runner {
 	 * @param string|null                           $site_mark  The maintenance file's mark the cursor carries (MarksSite), or null to leave it.
 	 * @return void
 	 * @throws LockLost When the write refused.
+	 * @throws FenceClosed When the write would enter the site with the uninstall fence closed.
 	 */
 	private function persist( Job $job, string $token, string $step, array $cursor, array $state, int $percent, string $message, bool $advanced, $site_state = null, $site_mark = null ): void {
 		$cursor                       = JobContext::strip_reserved( $cursor );
