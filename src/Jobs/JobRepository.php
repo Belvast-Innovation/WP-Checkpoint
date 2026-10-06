@@ -1367,6 +1367,11 @@ final class JobRepository {
 				array( '%d', '%s' )
 			);
 		}
+		if ( false === $affected && $entering && UninstallFence::absent() ) {
+			// The fence table is positively not there (dropped by an uninstall sharing this database, a schema not yet
+			// upgraded): no swap enters without it.
+			throw new FenceClosed( 'The uninstall fence is not there (WP Checkpoint was uninstalled on a site that shares this database, or its tables are not up to date): the restore does not start changing the site, and tries again later. Nothing was changed.' );
+		}
 		if ( false === $affected ) {
 			// Refused (a lock wait, the server gone): nothing of this cursor is stored, and a step that goes on would
 			// change what the row does not say (a site state above all). Stopped as a lost lock: no further writes.

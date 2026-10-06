@@ -155,6 +155,20 @@ final class UninstallFence {
 	}
 
 	/**
+	 * Whether the fence table is positively not there (listed, and not found); false when it is there or the listing
+	 * failed.
+	 *
+	 * @return bool
+	 */
+	public static function absent(): bool {
+		global $wpdb;
+		$quiet  = $wpdb->suppress_errors( true );
+		$listed = self::listed( self::name() );
+		$wpdb->suppress_errors( $quiet );
+		return array() === $listed;
+	}
+
+	/**
 	 * The tables of that name listed (the table there or not); null when the listing failed.
 	 *
 	 * @param string $name Table name.

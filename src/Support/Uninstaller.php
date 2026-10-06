@@ -77,6 +77,7 @@ final class Uninstaller {
 	 */
 	public static function run(): void {
 		self::clear_transient_state();
+		self::at( 'check' );
 		$held = self::holding();
 		if ( null === $held || 0 !== $held['all'] ) {
 			// A restore holds the site changed (its swap under way, or the site as it was kept for an undo), or was
@@ -88,6 +89,7 @@ final class Uninstaller {
 		// The fence first (UninstallFence): from here no swap enters the site. Its close waits for one entering now,
 		// and the read after it sees that one; a schema older than the fence has no swap that could use it.
 		$fence = UninstallFence::close( time() );
+		self::at( 'closed:' . $fence );
 		if ( UninstallFence::FAILED === $fence ) {
 			error_log( 'WP Checkpoint was uninstalled, but the fence that keeps a restore from starting to change the site meanwhile could not be closed; nothing was removed. Reinstall WP Checkpoint and uninstall it again.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- uninstall has no screen to say it on.
 			return;
@@ -99,11 +101,13 @@ final class Uninstaller {
 		if ( self::held_meanwhile( $closed, $removed ) ) {
 			return;
 		}
+		self::at( 'unit:cancel' );
 		self::cancel_jobs();
 		$removed[] = 'cancelled the jobs that had not changed the site';
 		if ( self::held_meanwhile( $closed, $removed ) ) {
 			return;
 		}
+		self::at( 'unit:staging' );
 		self::delete_site_residue();
 		$removed[] = 'removed its staging next to the site';
 
@@ -117,19 +121,43 @@ final class Uninstaller {
 		if ( self::held_meanwhile( $closed, $removed ) ) {
 			return;
 		}
+		self::at( 'unit:storage' );
 		self::delete_storage();
 		$removed[] = 'removed its storage directory';
 		if ( self::held_meanwhile( $closed, $removed ) ) {
 			return;
 		}
+		self::at( 'unit:temporary' );
 		Schema::drop_temporary();
 		$removed[] = 'dropped its temporary tables';
 		if ( self::held_meanwhile( $closed, $removed ) ) {
 			return;
 		}
+		self::at( 'unit:tables' );
 		Schema::drop_tables();
 		self::delete_options();
 		self::delete_user_meta();
+	}
+
+	/**
+	 * A test seam: function( string $point ), called before each read of whether a job holds the site ("check"),
+	 * after the fence's close ("closed:" and what close() found), and before each step that removes something
+	 * ("unit:" and its name). Null outside tests.
+	 *
+	 * @var callable|null
+	 */
+	private static $at = null; // @phpstan-ignore property.unusedType (set by tests only, through reflection)
+
+	/**
+	 * Call the test seam.
+	 *
+	 * @param string $point Where run() is.
+	 * @return void
+	 */
+	private static function at( string $point ): void {
+		if ( null !== self::$at ) {
+			call_user_func( self::$at, $point );
+		}
 	}
 
 	/**
@@ -142,6 +170,7 @@ final class Uninstaller {
 	 * @return bool
 	 */
 	private static function held_meanwhile( bool $closed, array $removed ): bool {
+		self::at( 'check' );
 		$held = self::holding();
 		if ( null !== $held && 0 === $held['all'] ) {
 			return false;
