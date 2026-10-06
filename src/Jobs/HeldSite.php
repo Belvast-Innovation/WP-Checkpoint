@@ -11,6 +11,7 @@ use WPCheckpoint\Files\ScanRoots;
 use WPCheckpoint\Restore\Maintenance;
 use WPCheckpoint\Restore\LinkedTargets;
 use WPCheckpoint\Restore\SwapPlan;
+use WPCheckpoint\Restore\SwapRules;
 use WPCheckpoint\Support\Paths;
 
 defined( 'ABSPATH' ) || exit;
@@ -106,7 +107,50 @@ final class HeldSite {
 			'differs'   => self::another( $recorded, $here ),
 			'direction' => in_array( $phase, array( 'committed', 'done' ), true ) ? 'committed' : ( 'restored' === $phase ? 'restored' : '' ),
 			'file_here' => '' !== $mark && Maintenance::OURS === ( new Maintenance( $this->abspath(), $mark ) )->state(),
+			'finishes'  => 'rename' === $phase ? $this->renamed_all( $job ) : false,
 		);
+	}
+
+	/**
+	 * Whether a swap interrupted while renaming tables had made every rename: then its next run finishes it, whatever
+	 * a rollback request says (SwapStep, phase "rename": SwapRules::committed() on the plan's table entries and the
+	 * tables there). Null when that cannot be read (the plan or the tables).
+	 *
+	 * @param Job $job Job (its cursor at phase "rename").
+	 * @return bool|null
+	 */
+	private function renamed_all( Job $job ) {
+		global $wpdb;
+		$quiet            = $wpdb->suppress_errors( true );
+		$wpdb->last_error = '';
+		$table            = self::base_prefix() . SwapPlan::TABLE;
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix.
+		$rows    = $wpdb->get_results( $wpdb->prepare( "SELECT kind, live, stage, old, had_live FROM {$table} WHERE job_id = %d AND attempt = %d AND kind IN (%s, %s) ORDER BY seq", $job->id, (int) ( $job->cursor['attempt'] ?? 0 ), SwapPlan::TABLE_OF, SwapPlan::MOVE ), ARRAY_N );
+		$failed  = '' !== JobRepository::db_error() || ! is_array( $rows ) || array() === $rows;
+		$entries = array();
+		foreach ( $failed ? array() : $rows as $row ) {
+			$entries[] = array(
+				'kind'     => (string) $row[0],
+				'live'     => (string) $row[1],
+				'stage'    => (string) $row[2],
+				'old'      => (string) $row[3],
+				'had_live' => '1' === (string) $row[4],
+			);
+		}
+		$there = array();
+		foreach ( $failed ? array() : array_chunk( SwapRules::names( $entries ), SwapStep::PAGE ) as $names ) {
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare -- placeholders built from the list.
+			$found = $wpdb->get_col( $wpdb->prepare( 'SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN (' . implode( ', ', array_fill( 0, count( $names ), '%s' ) ) . ')', $names ) );
+			if ( '' !== JobRepository::db_error() || ! is_array( $found ) ) {
+				$failed = true;
+				break;
+			}
+			foreach ( array_intersect( array_map( 'strval', $found ), $names ) as $name ) {
+				$there[ $name ] = true;
+			}
+		}
+		$wpdb->suppress_errors( $quiet );
+		return $failed ? null : SwapRules::committed( $entries, $there );
 	}
 
 	/**

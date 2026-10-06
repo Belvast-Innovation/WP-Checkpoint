@@ -159,7 +159,7 @@ final class JobActions {
 			return self::outcome( false, __( 'The restore already recorded its direction: taken over, it only finishes. Leave --then out.', 'wp-checkpoint' ) );
 		}
 		if ( '' === $see['direction'] && ! in_array( $then, array( 'continue', 'rollback' ), true ) ) {
-			return self::outcome( false, __( 'Say what the restore does once taken over: --then=continue (it goes on as after any interruption: a swap cut off half way is put back first, then it can be retried) or --then=rollback (it puts the site back as it was and is cancelled).', 'wp-checkpoint' ) );
+			return self::outcome( false, __( 'Say what the restore does once taken over: --then=continue (it goes on as after any interruption: a swap cut off half way is put back first, then it can be retried) or --then=rollback (it puts the site back as it was and is cancelled). A swap that made every rename before it was interrupted finishes either way: wp wpcheckpoint job status says which applies.', 'wp-checkpoint' ) );
 		}
 		try {
 			$job = $this->repository->take_over( $job, $then );

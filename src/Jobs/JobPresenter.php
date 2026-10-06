@@ -188,9 +188,17 @@ final class JobPresenter {
 					/* translators: %d: job id */
 					: sprintf( __( 'Restore job %d holds the site changed and is managed by another installation of WP Checkpoint: the site\'s identity changed since it started, so it is not run here. As far as can be told, it is this site\'s own (the directories it swaps are this site\'s, and so is the table prefix). Take it over here with one of:', 'wp-checkpoint' ), $id ),
 			);
-			if ( '' === $see['direction'] ) {
-				$lines[] = '  wp wpcheckpoint job rebind ' . $id . ' --confirm=' . $code . ' --then=continue  ' . __( 'The restore goes on as after any interruption (a swap cut off half way is put back first; then it can be retried).', 'wp-checkpoint' );
-				$lines[] = '  wp wpcheckpoint job rebind ' . $id . ' --confirm=' . $code . ' --then=rollback  ' . __( 'The restore puts the site back as it was and is cancelled.', 'wp-checkpoint' );
+			if ( '' === $see['direction'] && true === $see['finishes'] ) {
+				// Every rename was made before it was interrupted: the next run finishes the swap, whichever is chosen.
+				$finished = __( 'The swap made every rename before it was interrupted: the restore finishes, and the restored site stays. It is not put back.', 'wp-checkpoint' );
+				$lines[]  = '  wp wpcheckpoint job rebind ' . $id . ' --confirm=' . $code . ' --then=continue  ' . $finished;
+				$lines[]  = '  wp wpcheckpoint job rebind ' . $id . ' --confirm=' . $code . ' --then=rollback  ' . $finished;
+			} elseif ( '' === $see['direction'] ) {
+				$unknown = null === $see['finishes']
+					? ' ' . __( 'Whether the swap made every rename before it was interrupted cannot be read now; if it did, the restore finishes instead, and the restored site stays.', 'wp-checkpoint' )
+					: '';
+				$lines[] = '  wp wpcheckpoint job rebind ' . $id . ' --confirm=' . $code . ' --then=continue  ' . __( 'The restore goes on as after any interruption (a swap cut off half way is put back first; then it can be retried).', 'wp-checkpoint' ) . $unknown;
+				$lines[] = '  wp wpcheckpoint job rebind ' . $id . ' --confirm=' . $code . ' --then=rollback  ' . __( 'The restore puts the site back as it was and is cancelled.', 'wp-checkpoint' ) . $unknown;
 			} else {
 				$lines[] = '  wp wpcheckpoint job rebind ' . $id . ' --confirm=' . $code . '  ' . __( 'The restore recorded its direction; it only finishes.', 'wp-checkpoint' );
 			}

@@ -193,6 +193,54 @@ final class HeldSiteTest extends SwapTestCase {
 		$this->assertSame( 0, $now->cancel_requested, 'the control: read with it, the take-over writes' );
 	}
 
+	public function test_job_status_says_what_a_rollback_does_by_whether_every_rename_was_made(): void {
+		$this->swap_parts['batch'] = 1; // A batch per table: killed after the first, or after the last.
+		$this->register_type();
+		// The control: killed after the first batch, a rollback puts the site back.
+		$before = $this->site();
+		$job    = $this->at_swap();
+		$this->killed_at( $job, 'batch_sent', 1 );
+		$this->manage_elsewhere( $job );
+		$see = $this->actions()->held_elsewhere( $job->id );
+		$this->assertFalse( $see['assessment']['finishes'], 'the control: not every rename was made' );
+		$lines = implode( "\n", JobPresenter::held_lines( $see['job'], $see['assessment'] ) );
+		$this->assertStringContainsString( '--then=rollback  The restore puts the site back as it was and is cancelled.', $lines );
+		$this->assertTrue( $this->actions()->rebind( $job->id, HeldSite::code( HeldSite::REBIND, $see['job'], '' ), 'rollback' )['ok'] );
+		$done = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( Job::CANCELLED, $done->status, (string) $done->last_error );
+		$this->assertSame( $before, $this->site(), 'put back' );
+		// Killed after the last batch: every rename was made, and the swap is finished whatever is chosen.
+		$this->release_backups();
+		$this->tear_down_swap();
+		$this->set_up_swap();
+		$this->swap_parts['batch'] = 1;
+		$this->register_type();
+		$before = $this->site();
+		$job    = $this->at_swap();
+		$this->killed_at( $job, 'batch_sent', count( $this->plan_of( $job )['tables'] ) );
+		$this->manage_elsewhere( $job );
+		$see = $this->actions()->held_elsewhere( $job->id );
+		$this->assertSame( '', $see['assessment']['direction'], 'the direction is not recorded yet' );
+		$this->assertTrue( $see['assessment']['finishes'], 'every rename was made' );
+		$lines = implode( "\n", JobPresenter::held_lines( $see['job'], $see['assessment'] ) );
+		$this->assertStringContainsString( '--then=rollback  The swap made every rename before it was interrupted: the restore finishes, and the restored site stays. It is not put back.', $lines );
+		$this->assertStringNotContainsString( 'puts the site back as it was', $lines, 'no promise of a rollback' );
+		$this->assertTrue( $this->actions()->rebind( $job->id, HeldSite::code( HeldSite::REBIND, $see['job'], '' ), 'rollback' )['ok'] );
+		$done = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( Job::COMPLETED, $done->status, 'it finished, as said (' . $done->last_error . ')' );
+		$this->assertRestored( $before );
+		$this->undo( $done );
+	}
+
+	/**
+	 * Let another token manage a job (the site's identity changed since it started).
+	 */
+	private function manage_elsewhere( Job $job ): void {
+		global $wpdb;
+		$wpdb->update( JobRepository::table(), array( 'held_by' => self::ELSEWHERE ), array( 'id' => $job->id ) );
+		$wpdb->query( 'COMMIT' );
+	}
+
 	public function test_a_job_taken_over_with_rollback_puts_the_site_back(): void {
 		$before = $this->site();
 		$job    = $this->held();
