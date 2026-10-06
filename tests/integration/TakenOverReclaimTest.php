@@ -152,7 +152,7 @@ final class TakenOverReclaimTest extends SwapTestCase {
 		$this->assertFalse( $repo->manages( $job ), 'the control' );
 		foreach ( array( 'take_over', 'abandon_held' ) as $write ) {
 			try {
-				'take_over' === $write ? $repo->take_over( $job, false ) : $repo->abandon_held( $job, 'x' );
+				'take_over' === $write ? $repo->take_over( $job, 'continue' ) : $repo->abandon_held( $job, 'x' );
 				$this->fail( $write . ': with a token this site does not hold' );
 			} catch ( \WPCheckpoint\Jobs\StaleJob $e ) {
 				$this->assertStringContainsString( 'holds no storage token of its own', $e->getMessage(), $write . ': refused for that reason' );
@@ -226,7 +226,7 @@ final class TakenOverReclaimTest extends SwapTestCase {
 		$wpdb->query( 'COMMIT' );
 		foreach ( array( 'take_over', 'abandon_held' ) as $write ) {
 			try {
-				'take_over' === $write ? $this->repo()->take_over( $read, false ) : $this->repo()->abandon_held( $read, 'x' );
+				'take_over' === $write ? $this->repo()->take_over( $read, 'continue' ) : $this->repo()->abandon_held( $read, 'x' );
 				$this->fail( $write . ': written over the other take-over' );
 			} catch ( \WPCheckpoint\Jobs\StaleJob $e ) {
 				$this->assertSame( 'eeeeeeeeeeee', $this->repo()->find( $job->id )->held_by, $write );

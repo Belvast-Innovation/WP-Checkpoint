@@ -478,28 +478,40 @@ final class JobRepository {
 
 	/**
 	 * Let this installation manage a job that holds the site changed (wp wpcheckpoint job rebind): held_by becomes the
-	 * token of this request (Job::managing()), and with $rollback the cancel request that rolls the site back is
-	 * recorded in the same statement. One statement, on the job as read: its storage token (the one it was started
+	 * token of this request (Job::managing()), and the cancel request is written as $then says, in the same
+	 * statement: "rollback" records it (the site is put back, then the job is cancelled), "continue" clears one
+	 * recorded before (a cancel requested by whoever managed it would otherwise turn "continue" into a rollback), and
+	 * '' (the direction is recorded: it only finishes) leaves it as it is (a recorded rollback ends as cancelled only
+	 * with it). One statement, on the job as read: its storage token (the one it was started
 	 * with, again on a second take-over), who managed it as read (held_by), still holding the site (changing, for a
 	 * rollback), not ended, no live lock, and finished_at as read (an abandon moves it: a take-over read before it
 	 * writes nothing). Only with a token this installation holds, and the row managed by it afterwards. A job
 	 * abandoned from another installation is taken over too, and the abandon lifted.
 	 *
-	 * @param Job  $job      Job, as read.
-	 * @param bool $rollback Whether to record the cancel request (the site is put back).
+	 * @param Job    $job  Job, as read.
+	 * @param string $then "rollback", "continue" or '' (the direction is recorded).
 	 * @return Job The row as now stored.
 	 * @throws StaleJob When the row is no longer the job as read, or is locked by a run.
+	 * @throws \InvalidArgumentException When $then is none of those.
 	 */
-	public function take_over( Job $job, bool $rollback ): Job {
+	public function take_over( Job $job, string $then ): Job {
 		global $wpdb;
 		$token = (string) $this->directories->state()['token'];
 		if ( ! $this->holds_own_token() ) {
 			// A copy that holds no token of its own yet still carries the original's (copied, not held).
 			throw new StaleJob( 'This installation holds no storage token of its own to take the job over with.' );
 		}
-		$now = $this->now();
-		// A rollback records the cancel request (once); otherwise cancel_requested is left as it is (+ 0).
-		$cancel = $rollback ? 'IF(cancel_requested = 0, %d, cancel_requested)' : 'cancel_requested + %d';
+		$now      = $this->now();
+		$rollback = 'rollback' === $then;
+		$writes   = array(
+			'rollback' => array( 'IF(cancel_requested = 0, %d, cancel_requested)', $now ), // Recorded (once).
+			'continue' => array( '%d', 0 ), // Cleared.
+			''         => array( 'cancel_requested + %d', 0 ), // As it is.
+		);
+		if ( ! isset( $writes[ $then ] ) ) {
+			throw new \InvalidArgumentException( 'A take-over goes on with "rollback", "continue" or nothing (the direction is recorded).' );
+		}
+		$cancel = $writes[ $then ][0];
 		// A job abandoned from another installation, taken over here (HeldSite found it this site's): the abandon is
 		// lifted in the same statement (a failure of no kind, which may be retried; the abandon's message goes with
 		// it). The WHERE clause is on the job as read, abandoned or not: an abandon moves held_by and finished_at.
@@ -510,7 +522,7 @@ final class JobRepository {
 			$wpdb->prepare(
 				'UPDATE ' . self::table() . ' SET held_by = %s, cancel_requested = ' . $cancel . $lift . ', updated_at = %d WHERE id = %d AND storage_token = %s AND held_by = %s AND site_state ' . $state . ' AND status IN (%s, %s, %s, %s) AND finished_at = %d AND (lock_token = \'\' OR locked_until < %d)',
 				$token,
-				$rollback ? $now : 0,
+				$writes[ $then ][1],
 				$now,
 				$job->id,
 				$job->storage_token,
@@ -539,7 +551,8 @@ final class JobRepository {
 	/**
 	 * Whether a job was abandoned from this installation: abandoned (Job::REASON_ABANDONED), and its held_by, which an
 	 * abandon sets to the token of the installation that gave it up, is one of $own. The one rule for "abandoned
-	 * here" (holds_site(): the warnings, release, the plugin's notices; uninstall): a job abandoned from another
+	 * here" (holds_site(): the warnings, release, the plugin's notices; uninstall counts every abandoned job, as it
+	 * cannot tell which installation it is: Uninstaller::holding()): a job abandoned from another
 	 * installation holds the site everywhere else, until it is taken over (take_over() lifts the abandon; nothing
 	 * cleans an abandoned job up yet); it may have left a site half swapped, if that installation was wrong that its
 	 * database is not shared, and no comparison of WordPress directories is trusted to say which site.
@@ -676,22 +689,6 @@ final class JobRepository {
 		$failed           = '' !== self::db_error() || ! is_array( $rows );
 		$wpdb->suppress_errors( $quiet );
 		return $failed ? null : array_map( array( __CLASS__, 'hydrate' ), (array) $rows );
-	}
-
-	/**
-	 * One job's row, without a storage context (uninstall); null when it cannot be read or is not there.
-	 *
-	 * @param int $id Job id.
-	 * @return Job|null
-	 */
-	public static function load( int $id ) {
-		global $wpdb;
-		$quiet            = $wpdb->suppress_errors( true );
-		$wpdb->last_error = '';
-		$row              = $wpdb->get_row( $wpdb->prepare( 'SELECT * FROM ' . self::table() . ' WHERE id = %d', $id ), ARRAY_A ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- plugin table name from the prefix.
-		$failed           = '' !== self::db_error();
-		$wpdb->suppress_errors( $quiet );
-		return ! $failed && is_array( $row ) ? self::hydrate( $row ) : null;
 	}
 
 	/**

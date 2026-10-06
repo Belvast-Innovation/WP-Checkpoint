@@ -162,7 +162,7 @@ final class JobActions {
 			return self::outcome( false, __( 'Say what the restore does once taken over: --then=continue (it goes on as after any interruption: a swap cut off half way is put back first, then it can be retried) or --then=rollback (it puts the site back as it was and is cancelled).', 'wp-checkpoint' ) );
 		}
 		try {
-			$job = $this->repository->take_over( $job, 'rollback' === $then );
+			$job = $this->repository->take_over( $job, $then );
 		} catch ( StaleJob $e ) {
 			return self::outcome( false, __( 'The job changed meanwhile, or a run holds it; nothing was changed. Try again.', 'wp-checkpoint' ) );
 		}
