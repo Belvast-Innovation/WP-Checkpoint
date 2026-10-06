@@ -379,6 +379,7 @@ final class HeldSiteTest extends SwapTestCase {
 		$now = Plugin::instance()->jobs()->find( $job->id );
 		$this->assertSame( '', $now->failure_reason, 'the abandon is lifted' );
 		$this->assertSame( '', (string) $now->last_error, 'and its message with it' );
+		$this->assertNotSame( '0', (string) $this->row( $job->id )['cancel_requested'], 'the control: the rollback\'s cancel request is seen through the row' );
 		$this->assertSame( (string) Plugin::instance()->directories()->state()['token'], $now->held_by );
 		Plugin::instance()->job_actions()->retry( $job->id );
 		$done = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );

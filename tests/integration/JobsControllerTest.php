@@ -194,6 +194,36 @@ final class JobsControllerTest extends JobTestCase {
 		$this->assertSame( array( 'error' => true, 'message' => \WPCheckpoint\Rest\JobsController::cancel_message( 'swapped' ) ), \WPCheckpoint\Cli\JobCommand::cancel_verdict( 'swapped' ) );
 		$this->assertFalse( \WPCheckpoint\Cli\JobCommand::cancel_verdict( 'requested' )['error'] );
 		$this->assertFalse( \WPCheckpoint\Cli\JobCommand::cancel_verdict( 'cleaned' )['error'], 'the control: a plain cancel is a success' );
+
+		// Abandoned (here, then from another installation): refused, no request recorded (it would turn a later
+		// take-over's "continue" into a rollback); retry refused with the reason for each.
+		$abandoned = Plugin::instance()->jobs()->create( 'held' );
+		$at        = time() - 60;
+		$wpdb->update(
+			Schema::jobs_table(),
+			array(
+				'status'       => Job::FAILED,
+				'site_state'   => Job::SITE_CHANGING,
+				'finished_at'  => $at,
+				'failure_kind' => Job::stamp_failure( Job::FAILURE_FINAL . ':' . Job::REASON_ABANDONED, $at ),
+				'held_by'      => (string) Plugin::instance()->directories()->state()['token'],
+			),
+			array( 'id' => $abandoned->id )
+		);
+		$response = $this->rest( 'POST', 'jobs/' . $abandoned->id . '/cancel' );
+		$this->assertSame( 409, $response->get_status() );
+		$this->assertStringContainsString( 'was abandoned; it is not cancelled', (string) $response->get_data()['message'] );
+		$this->assertSame( 0, Plugin::instance()->jobs()->find( $abandoned->id )->cancel_requested, 'no request recorded' );
+		$this->assertSame( array( 'error' => true, 'message' => \WPCheckpoint\Rest\JobsController::cancel_message( 'abandoned' ) ), \WPCheckpoint\Cli\JobCommand::cancel_verdict( 'abandoned' ) );
+		$response = $this->rest( 'POST', 'jobs/' . $abandoned->id . '/retry' );
+		$this->assertSame( 409, $response->get_status() );
+		$this->assertSame( \WPCheckpoint\Jobs\JobPresenter::abandoned_note( true ), $response->get_data()['message'], 'abandoned here: never again' );
+		$wpdb->update( Schema::jobs_table(), array( 'held_by' => 'abababababab' ), array( 'id' => $abandoned->id ) );
+		$response = $this->rest( 'POST', 'jobs/' . $abandoned->id . '/cancel' );
+		$this->assertSame( 409, $response->get_status(), 'from another installation: refused too' );
+		$this->assertSame( 0, Plugin::instance()->jobs()->find( $abandoned->id )->cancel_requested );
+		$response = $this->rest( 'POST', 'jobs/' . $abandoned->id . '/retry' );
+		$this->assertSame( \WPCheckpoint\Jobs\JobPresenter::abandoned_note( false ), $response->get_data()['message'], 'abandoned elsewhere: once the site takes it over' );
 	}
 
 	public function test_a_failed_cancel_write_releases_the_lock_and_leaves_the_job_tickable(): void {

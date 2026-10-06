@@ -206,6 +206,19 @@ final class JobPresenter {
 	}
 
 	/**
+	 * Why an abandoned job is not retried: from the installation that gave it up, never; from another, only once the
+	 * site it was started on took it over (JobRepository::take_over() lifts the abandon).
+	 *
+	 * @param bool $here Whether it was abandoned from this installation (JobRepository::abandoned_here()).
+	 * @return string
+	 */
+	public static function abandoned_note( bool $here ): string {
+		return $here
+			? __( 'The job was abandoned; it is not run again.', 'wp-checkpoint' )
+			: __( 'The job was abandoned from another installation; it runs again only once the site it was started on takes it over (wp wpcheckpoint job status says whether this is that site).', 'wp-checkpoint' );
+	}
+
+	/**
 	 * Why a failed job can no longer be retried.
 	 *
 	 * @return string

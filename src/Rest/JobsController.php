@@ -278,6 +278,9 @@ final class JobsController extends Controller {
 			return $this->unavailable( $e );
 		} catch ( InvalidTransition $e ) {
 			$current = $this->actions->find( $id );
+			if ( null !== $current && Job::REASON_ABANDONED === $current->failure_reason ) {
+				return $this->conflict( JobPresenter::abandoned_note( $this->actions->abandoned_here( $current ) ) );
+			}
 			if ( null !== $current && Job::FAILED === $current->status && ! $current->can_retry() ) {
 				return $this->conflict( JobPresenter::retry_note() );
 			}

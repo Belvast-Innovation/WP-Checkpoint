@@ -540,9 +540,9 @@ final class JobRepository {
 	 * Whether a job was abandoned from this installation: abandoned (Job::REASON_ABANDONED), and its held_by, which an
 	 * abandon sets to the token of the installation that gave it up, is one of $own. The one rule for "abandoned
 	 * here" (holds_site(): the warnings, release, the plugin's notices; uninstall): a job abandoned from another
-	 * installation holds the site everywhere else, until it is taken over (take_over() lifts the abandon) or cleaned
-	 * up; it may have left a site half swapped, if that installation was wrong that its database is not shared, and
-	 * no comparison of WordPress directories is trusted to say which site.
+	 * installation holds the site everywhere else, until it is taken over (take_over() lifts the abandon; nothing
+	 * cleans an abandoned job up yet); it may have left a site half swapped, if that installation was wrong that its
+	 * database is not shared, and no comparison of WordPress directories is trusted to say which site.
 	 *
 	 * @param Job      $job Job.
 	 * @param string[] $own The tokens this installation holds (Directories::own_tokens()).

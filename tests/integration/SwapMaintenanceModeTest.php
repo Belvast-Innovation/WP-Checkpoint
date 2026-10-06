@@ -229,22 +229,35 @@ final class SwapMaintenanceModeTest extends SwapTestCase {
 			$see = $acts->held_elsewhere( $job->id )['assessment'];
 			$this->assertTrue( $acts->abandon( $job->id, \WPCheckpoint\Jobs\HeldSite::code( \WPCheckpoint\Jobs\HeldSite::ABANDON, Plugin::instance()->jobs()->find( $job->id ), $see['recorded'] ) )['ok'] );
 			$this->assertTrue( $file->is_held(), 'the file here stays' );
-			$none = static function (): array {
+			$none  = static function (): array {
 				return array(); // The notice's own path (ended_owner()): no job listed as holding the site.
 			};
-			$here = implode( "\n", Plugin::instance()->half_swapped_warnings( $none ) );
-			$this->assertStringContainsString( 'That job no longer holds the site; take its file down with: wp wpcheckpoint job release ' . $job->id, $here, 'the control: abandoned here, the notice offers release' );
-			// Seen from another installation than the one that gave it up (its token in held_by).
-			$wpdb->update( JobRepository::table(), array( 'held_by' => 'abababababab' ), array( 'id' => $job->id ) );
-			$wpdb->query( 'COMMIT' );
-			foreach ( array(
-				'the jobs read'          => Plugin::instance()->half_swapped_warnings(),
-				'the notice\'s own path' => Plugin::instance()->half_swapped_warnings( $none ),
-			) as $what => $warnings ) {
-				$text = implode( "\n", $warnings );
-				$this->assertStringNotContainsString( 'job release', $text, $what . ': no release offered' );
+			$paths = function () use ( $none ): array {
+				return array(
+					'the jobs read'          => implode( "\n", Plugin::instance()->half_swapped_warnings() ),
+					'the notice\'s own path' => implode( "\n", Plugin::instance()->half_swapped_warnings( $none ) ),
+				);
+			};
+			foreach ( $paths() as $what => $text ) {
+				$this->assertStringContainsString( 'That job no longer holds the site; take its file down with: wp wpcheckpoint job release ' . $job->id, $text, $what . ': the control, abandoned here, release is offered' );
 			}
-			$this->assertStringContainsString( 'This site may still be half swapped by it', implode( "\n", Plugin::instance()->half_swapped_warnings() ), 'abandoned elsewhere: this site may be half swapped' );
+			// Seen from another installation than the one that gave it up (its token in held_by), and from a WordPress
+			// directory positively another than the one its plan records: it still holds the site.
+			$wpdb->update( JobRepository::table(), array( 'held_by' => 'abababababab' ), array( 'id' => $job->id ) );
+			$plan     = $wpdb->base_prefix . \WPCheckpoint\Restore\SwapPlan::TABLE;
+			$recorded = (string) $wpdb->get_var( $wpdb->prepare( "SELECT live FROM `{$plan}` WHERE job_id = %d AND kind = 'site'", $job->id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the plan table.
+			$wpdb->query( $wpdb->prepare( "UPDATE `{$plan}` SET live = %s WHERE job_id = %d AND kind = 'site'", (string) realpath( $copy ), $job->id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the plan table.
+			$wpdb->query( 'COMMIT' );
+			try {
+				$this->assertTrue( ( new \WPCheckpoint\Jobs\HeldSite() )->assess( Plugin::instance()->jobs()->find( $job->id ) )['differs'], 'the control: positively another directory than the plan\'s' );
+				foreach ( $paths() as $what => $text ) {
+					$this->assertStringNotContainsString( 'job release', $text, $what . ': no release offered' );
+				}
+				$this->assertStringContainsString( 'This site may still be half swapped by it', $paths()['the jobs read'], 'abandoned elsewhere: this site may be half swapped' );
+			} finally {
+				$wpdb->query( $wpdb->prepare( "UPDATE `{$plan}` SET live = %s WHERE job_id = %d AND kind = 'site'", $recorded, $job->id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the plan table.
+				$wpdb->query( 'COMMIT' );
+			}
 		} finally {
 			$file->remove();
 		}

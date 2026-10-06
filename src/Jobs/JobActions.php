@@ -187,7 +187,8 @@ final class JobActions {
 	 * no run holds it, and only the file that carries the mark its row recorded (Job::$site_mark): a file another job
 	 * wrote carries another mark and stays. While the job holds the site it is refused, and what can be done is said
 	 * (holding_paths(); abandoned_elsewhere() for a job abandoned from another installation, which holds the site
-	 * everywhere until it is taken over or cleaned up). Checked on each read, the last right before the file goes.
+	 * everywhere until it is taken over; nothing cleans it up yet). Checked on each read, the last right before the
+	 * file goes.
 	 * The job is not changed.
 	 *
 	 * @param int    $id      Job id.
@@ -346,7 +347,7 @@ final class JobActions {
 			? __( 'If the restore is this site\'s, take it over here and finish it or roll it back: wp wpcheckpoint job status shows how.', 'wp-checkpoint' )
 			: __( 'As far as can be told from here it is not this site\'s, and nothing can be done with it from this WordPress directory.', 'wp-checkpoint' );
 		/* translators: 1: job id, 2: what can be done */
-		return sprintf( __( 'Restore job %1$d was abandoned from another installation of WP Checkpoint, which said its database is not shared with this site. This site may still be half swapped by it: the restore holds the site here, and its maintenance file stays, until it is taken over or cleaned up. %2$s', 'wp-checkpoint' ), $job->id, $how );
+		return sprintf( __( 'Restore job %1$d was abandoned from another installation of WP Checkpoint, which said its database is not shared with this site. This site may still be half swapped by it: the restore holds the site here, and its maintenance file stays, until it is taken over (nothing cleans up an abandoned restore yet). %2$s', 'wp-checkpoint' ), $job->id, $how );
 	}
 
 	/**
@@ -933,9 +934,11 @@ final class JobActions {
 	 *                                                            used from here; nothing will clean up), "requested"
 	 *                                                            (a restore's swap is under way: it is rolled back, then
 	 *                                                            the job is cancelled), "swapped" (refused: the restored
-	 *                                                            site is in place; the job is not cancelled) or
+	 *                                                            site is in place; the job is not cancelled),
 	 *                                                            "elsewhere" (refused: it holds the site and another
-	 *                                                            installation manages it, JobRepository::manages()).
+	 *                                                            installation manages it, JobRepository::manages()) or
+	 *                                                            "abandoned" (refused: a cancel request would turn a
+	 *                                                            later take-over's "continue" into a rollback).
 	 * @throws InvalidTransition When the job is already finished.
 	 * @throws StaleJob When the job changed meanwhile.
 	 */

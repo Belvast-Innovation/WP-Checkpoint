@@ -256,8 +256,8 @@ final class JobCommand {
 
 	/**
 	 * Give up for good a restore that is managed by another installation and is not this site's as far as can be
-	 * told: its maintenance file is taken down from this WordPress directory, its temporary tables are removed, and
-	 * it never runs again. The tables its swap moved aside (named wcpold…) stay, and nothing at the paths its plan
+	 * told: its maintenance file is taken down from this WordPress directory, and it never runs again from here. Its
+	 * tables are kept, the ones its swap moved aside (named wcpold…) among them, and nothing at the paths its plan
 	 * records is touched. If this database is shared with the site the restore was started on, that site's restore
 	 * stays half swapped.
 	 *
@@ -446,11 +446,7 @@ final class JobCommand {
 		} catch ( InvalidTransition $e ) {
 			$current = $this->actions->find( (int) $args[0] );
 			if ( null !== $current && Job::REASON_ABANDONED === $current->failure_reason ) {
-				WP_CLI::error(
-					$this->actions->abandoned_here( $current )
-						? __( 'The job was abandoned; it is not run again.', 'wp-checkpoint' )
-						: __( 'The job was abandoned from another installation; it runs again only once the site it was started on takes it over (wp wpcheckpoint job status says whether this is that site).', 'wp-checkpoint' )
-				);
+				WP_CLI::error( JobPresenter::abandoned_note( $this->actions->abandoned_here( $current ) ) );
 			}
 			if ( null !== $current && Job::FAILED === $current->status && ! $current->can_retry() ) {
 				WP_CLI::error( JobPresenter::retry_note() );
