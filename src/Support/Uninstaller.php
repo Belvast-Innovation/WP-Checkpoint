@@ -88,14 +88,22 @@ final class Uninstaller {
 			return;
 		}
 		// The fence first (UninstallFence): from here no swap enters the site. Its close waits for one entering now,
-		// and the read after it sees that one; a schema older than the fence has no swap that could use it.
+		// and the read after it sees that one; a schema older than the fence has no swap that could use it. A fence
+		// left closed by an uninstall that did not finish is opened first, so that one closed now is a live uninstall's.
+		UninstallFence::heal();
 		$fence = UninstallFence::close();
 		self::at( 'closed:' . $fence );
 		if ( UninstallFence::FAILED === $fence ) {
 			error_log( 'WP Checkpoint was uninstalled, but the fence that keeps a restore from starting to change the site meanwhile could not be closed; nothing was removed. Reinstall WP Checkpoint and uninstall it again.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- uninstall has no screen to say it on.
 			return;
 		}
-		// Opened again only by the uninstall that closed it (HELD: another one did, and opens it when it is done).
+		if ( UninstallFence::HELD === $fence ) {
+			// Another uninstall, on a site sharing this database, holds the fence and opens it when it is done: what
+			// this one removed after that would have nothing but the reads in between.
+			error_log( 'WP Checkpoint was uninstalled while it was being uninstalled on a site that shares this database (or such an uninstall stopped less than an hour ago); nothing was removed. Reinstall WP Checkpoint and uninstall it again once that is over.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- uninstall has no screen to say it on.
+			return;
+		}
+		// Opened again only by the uninstall that closed it.
 		$closed = UninstallFence::DONE === $fence;
 		try {
 			self::remove( $closed );
@@ -353,10 +361,15 @@ final class Uninstaller {
 	 */
 	public static function cancel_jobs() {
 		global $wpdb;
-		if ( ! Schema::table_exists() ) {
+		$table = $wpdb->base_prefix . Schema::JOBS_TABLE;
+		self::expect();
+		$there = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $table ) ) );
+		if ( self::failed() ) {
+			return null; // Whether there are jobs cannot be read: none was cancelled.
+		}
+		if ( $table !== $there ) {
 			return 0;
 		}
-		$table = $wpdb->base_prefix . Schema::JOBS_TABLE;
 		$state = Directories::load_state();
 		$path  = is_string( $state['path'] ) ? rtrim( $state['path'], '/\\' ) : '';
 		$live  = array( Job::QUEUED, Job::RUNNING, Job::PAUSED );
@@ -378,7 +391,7 @@ final class Uninstaller {
 				LockFile::remove( $path, (int) $row['id'] );
 			}
 		}
-		return max( 0, (int) $affected );
+		return false === $affected ? null : max( 0, (int) $affected );
 	}
 
 	/**

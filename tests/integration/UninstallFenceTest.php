@@ -31,6 +31,7 @@ final class UninstallFenceTest extends SwapTestCase {
 		$wpdb->query( 'COMMIT' );
 		UninstallFence::create(); // The table and its row, made again if a test dropped them.
 		UninstallFence::open();
+		UninstallSetting::save( false ); // A setting a test committed does not delete a later test's data.
 		foreach ( $this->committed as $id ) {
 			$wpdb->delete( JobRepository::table(), array( 'id' => $id ) );
 		}
@@ -228,6 +229,7 @@ final class UninstallFenceTest extends SwapTestCase {
 			$this->assertSame( Job::SITE_UNTOUCHED, $now->site_state, $how . ': not entered' );
 			$this->assertNotSame( 'enter', $now->cursor['phase'] ?? '', $how . ': the cursor is the one last written, not the refused one' );
 			$this->assertSame( 0, (int) ( $now->cursor['__runner']['retries'] ?? 0 ), $how . ': not counted as a try' );
+			$this->assertStringContainsString( 'the restore does not start changing the site', (string) $now->progress_message, $how . ': the reason on the job while it waits' );
 			$this->assertFalse( Maintenance::held_in( $this->abspath ), $how . ': no maintenance file' );
 			$this->assertSame( $before, $this->site(), $how . ': the site is untouched' );
 		}
@@ -335,11 +337,22 @@ final class UninstallFenceTest extends SwapTestCase {
 			$this->logged( array( Uninstaller::class, 'run' ) );
 			$this->assertSame( array( UninstallFence::DONE ), $found );
 			$this->assertSame( UninstallFence::OPEN, UninstallFence::row()['state'] );
-			// Closed already by another uninstall (a site sharing this database): this one goes on and leaves it closed.
+			// Closed already by another uninstall under way (a site sharing this database): this one removes nothing and
+			// leaves the fence to it.
+			$job = $this->running_job();
 			$this->autocommit( array( UninstallFence::class, 'close' ) );
-			$this->logged( array( Uninstaller::class, 'run' ) );
+			$log = $this->logged( array( Uninstaller::class, 'run' ) );
 			$this->assertSame( array( UninstallFence::DONE, UninstallFence::HELD ), $found );
+			$this->assertStringContainsString( 'while it was being uninstalled on a site that shares this database', $log );
+			$this->assertSame( Job::RUNNING, Plugin::instance()->jobs()->find( $job->id )->status, 'nothing cancelled' );
 			$this->assertSame( UninstallFence::CLOSED, UninstallFence::row()['state'], 'not opened under the other uninstall' );
+			// Closed for more than an hour (an uninstall that did not finish): opened first, then this one closes it.
+			global $wpdb;
+			$wpdb->update( UninstallFence::name(), array( 'closed_at' => time() - UninstallFence::STALE_SECONDS - 60 ), array( 'id' => UninstallFence::ROW ) );
+			$wpdb->query( 'COMMIT' );
+			$this->logged( array( Uninstaller::class, 'run' ) );
+			$this->assertSame( array( UninstallFence::DONE, UninstallFence::HELD, UninstallFence::DONE ), $found );
+			$this->assertSame( UninstallFence::OPEN, UninstallFence::row()['state'], 'and opens it again when it is done' );
 		} finally {
 			$this->seam( null );
 		}
@@ -367,7 +380,22 @@ final class UninstallFenceTest extends SwapTestCase {
 		$this->assertSame( UninstallFence::OPEN, $closed, 'opened again' );
 	}
 
-	public function test_a_cancel_that_cannot_tell_which_jobs_changed_the_site_stops_the_uninstall(): void {
+	/**
+	 * The reads the cancel makes before it changes anything.
+	 *
+	 * @return array<string, array{0: string}>
+	 */
+	public function cancel_reads(): array {
+		return array(
+			'the column'    => array( "LIKE 'site_state'" ),
+			'the job table' => array( 'SHOW TABLES LIKE' ),
+		);
+	}
+
+	/**
+	 * @dataProvider cancel_reads
+	 */
+	public function test_a_cancel_that_cannot_tell_which_jobs_changed_the_site_stops_the_uninstall( string $read ): void {
 		UninstallSetting::save( true );
 		$job    = $this->running_job();
 		$broken = false;
@@ -378,10 +406,10 @@ final class UninstallFenceTest extends SwapTestCase {
 				}
 			}
 		);
-		$filter = static function ( $sql ) use ( &$broken ) {
-			if ( $broken && false !== strpos( (string) $sql, "LIKE 'site_state'" ) ) {
+		$filter = static function ( $sql ) use ( &$broken, $read ) {
+			if ( $broken && false !== strpos( (string) $sql, $read ) ) {
 				$broken = false;
-				return 'SELECT * FROM a_table_that_is_not_there_for_this_test'; // The column check fails, once.
+				return 'SELECT * FROM a_table_that_is_not_there_for_this_test'; // The read fails, once.
 			}
 			return $sql;
 		};
@@ -397,6 +425,29 @@ final class UninstallFenceTest extends SwapTestCase {
 		$this->assertSame( Job::RUNNING, Plugin::instance()->jobs()->find( $job->id )->status, 'nothing cancelled' );
 		$this->assertTrue( Schema::table_exists(), 'nothing removed' );
 		$this->assertSame( UninstallFence::OPEN, UninstallFence::row()['state'], 'the fence open again' );
+	}
+
+	public function test_a_cancel_that_fails_stops_the_uninstall(): void {
+		UninstallSetting::save( false );
+		$job    = $this->running_job();
+		$broken = false;
+		$filter = static function ( $sql ) use ( &$broken ) {
+			if ( ! $broken && false !== strpos( (string) $sql, "SET status = 'cancelled'" ) ) {
+				$broken = true;
+				return 'UPDATE a_table_that_is_not_there_for_this_test SET x = 1'; // The cancel fails, once.
+			}
+			return $sql;
+		};
+		add_filter( 'query', $filter );
+		try {
+			$log = $this->logged( array( Uninstaller::class, 'run' ) );
+		} finally {
+			remove_filter( 'query', $filter );
+		}
+		$this->assertTrue( $broken, 'the control: the cancel was the statement that failed' );
+		$this->assertStringContainsString( 'it could not tell whether a restore holds the site changed', $log );
+		$this->assertSame( Job::RUNNING, Plugin::instance()->jobs()->find( $job->id )->status );
+		$this->assertSame( UninstallFence::OPEN, UninstallFence::row()['state'] );
 	}
 
 	public function test_once_the_fence_is_closed_no_swap_enters(): void {

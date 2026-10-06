@@ -65,6 +65,10 @@ function fm_connect( array $argv, bool $make = false ): mysqli {
  * @return string
  */
 function fm_fill( mysqli $db, string $template, array $values ): string {
+	if ( preg_match_all( '/%[ds]/', $template ) !== count( $values ) ) {
+		fwrite( STDERR, "A template's placeholders and its values differ in number\n" );
+		exit( 2 );
+	}
 	return (string) preg_replace_callback(
 		'/%[ds]/',
 		static function ( array $m ) use ( $db, &$values ): string {

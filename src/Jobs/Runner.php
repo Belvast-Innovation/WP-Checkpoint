@@ -34,7 +34,8 @@ defined( 'ABSPATH' ) || exit;
 final class Runner {
 
 	/**
-	 * How long a job waits when the write after a step returned found the uninstall fence closed (FenceClosed).
+	 * How long a job waits when its write that would enter the site found the uninstall fence closed or missing
+	 * (FenceClosed), in a step's checkpoint or after the step returned; not counted as a try.
 	 */
 	const FENCE_WAIT_SECONDS = 60;
 
@@ -276,7 +277,7 @@ final class Runner {
 			return $this->run_steps( $job, $token, $logger, $budget, $start );
 		} catch ( FenceClosed $e ) {
 			// The write after a step returned would have entered the site with the uninstall fence closed (a step that
-			// enters by a checkpoint gets the back-off of any TransientFailure instead): nothing was written; wait.
+			// enters by a checkpoint is handled in run_steps() the same way): nothing was written; wait.
 			$logger->warning( 'The site may not be changed now; waiting', array( 'error' => $this->describe( $e ) ) );
 			try {
 				$this->release( $job, $token );
@@ -379,6 +380,8 @@ final class Runner {
 				// Not the job's failure: an uninstall holds the fence (UninstallFence). Nothing was written; the cursor
 				// last written stays, the tries are not counted, and it waits.
 				$logger->info( 'The site may not be changed now; waiting', array( 'reason' => $this->describe( $e ) ) );
+				// The reason on the job too (its cursor as last written, not advanced): it shows while it waits.
+				$this->persist( $job, $token, $step_id, $job->cursor, $state, $job->progress, $this->redactor->redact( $e->getMessage() ), false );
 				$this->release( $job, $token );
 				return new TickResult( TickResult::WAITING, self::FENCE_WAIT_SECONDS, $job, $this->redactor->redact( $e->getMessage() ) );
 			} catch ( TransientFailure $e ) {
