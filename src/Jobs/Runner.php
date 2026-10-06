@@ -358,10 +358,10 @@ final class Runner {
 				function ( array $cursor, int $percent, string $message ) use ( &$job, $token, $step_id, $step, $index, $count, &$state ) {
 					// A checkpoint is progress only when the cursor moved; an identical one keeps the counters and the stall timestamp.
 					$advanced = wp_json_encode( JobContext::strip_reserved( $job->cursor ) ) !== wp_json_encode( JobContext::strip_reserved( $cursor ) );
-					if ( $advanced ) {
-						$state = $this->reset( $state );
-					}
-					$this->persist( $job, $token, $step_id, $cursor, $state, self::overall( $index, $count, $percent ), $message, $advanced, self::site_state_of( $step, $cursor ), self::site_mark_of( $step, $cursor ) );
+					// The counters start over only once the cursor that moved is written (a write that refused leaves them).
+					$next = $advanced ? $this->reset( $state ) : $state;
+					$this->persist( $job, $token, $step_id, $cursor, $next, self::overall( $index, $count, $percent ), $message, $advanced, self::site_state_of( $step, $cursor ), self::site_mark_of( $step, $cursor ) );
+					$state = $next;
 					$this->maybe_heartbeat( $job, $token );
 				},
 				$token
@@ -375,6 +375,12 @@ final class Runner {
 				throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged.
 			} catch ( StaleJob $e ) {
 				throw new LockLost( $e->getMessage(), 0, $e ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+			} catch ( FenceClosed $e ) {
+				// Not the job's failure: an uninstall holds the fence (UninstallFence). Nothing was written; the cursor
+				// last written stays, the tries are not counted, and it waits.
+				$logger->info( 'The site may not be changed now; waiting', array( 'reason' => $this->describe( $e ) ) );
+				$this->release( $job, $token );
+				return new TickResult( TickResult::WAITING, self::FENCE_WAIT_SECONDS, $job, $this->redactor->redact( $e->getMessage() ) );
 			} catch ( TransientFailure $e ) {
 				if ( $e instanceof ConcurrentWriter ) {
 					// Kept in the job log only (never in last_error): the one trace of two processes on one work

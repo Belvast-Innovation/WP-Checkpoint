@@ -37,9 +37,11 @@ final class UninstallFence {
 	const CLOSED = 'closed';
 
 	/**
-	 * What close() found.
+	 * What close() found: DONE, this uninstall closed it; HELD, it was closed already (another uninstall on a site
+	 * sharing this database, or one that did not finish): no swap enters, and this one must not open it again.
 	 */
 	const DONE   = 'closed';
+	const HELD   = 'held';
 	const ABSENT = 'absent';
 	const FAILED = 'failed';
 
@@ -48,6 +50,40 @@ final class UninstallFence {
 	 * Schema::ensure() opens it again where the request may upgrade (the page, activation, WP-CLI), logged.
 	 */
 	const STALE_SECONDS = 3600;
+
+	/**
+	 * The statement by which a job enters the site, with placeholders in order (%d and %s): the fence row's id and
+	 * state "open" (the join's condition), the value of each column in $columns (with its format in $formats), the
+	 * time, the job's id and its lock token. One multi-table UPDATE that writes the job's row and the fence row
+	 * (JobRepository::entering_sql() fills it in; the server matrix runs the same text).
+	 *
+	 * @param string   $jobs    The jobs table.
+	 * @param string   $fence   The fence table.
+	 * @param string[] $columns Columns of the job's row.
+	 * @param string[] $formats Their formats (%s, %d), in the same order.
+	 * @return string
+	 */
+	public static function entering_template( string $jobs, string $fence, array $columns, array $formats ): string {
+		$set = array();
+		foreach ( array_values( $columns ) as $i => $column ) {
+			$set[] = 'j.`' . str_replace( '`', '', $column ) . '` = ' . ( $formats[ $i ] ?? '%s' );
+		}
+		$set[] = 'f.entries = f.entries + 1';
+		$set[] = 'f.entered_at = %d';
+		return 'UPDATE ' . SqlWriter::identifier( $jobs ) . ' AS j INNER JOIN ' . SqlWriter::identifier( $fence ) . ' AS f ON f.id = %d AND f.state = %s SET ' . implode( ', ', $set ) . ' WHERE j.id = %d AND j.lock_token = %s';
+	}
+
+	/**
+	 * The statement that closes the fence, with placeholders in order: state "closed", the row's id, state "open".
+	 * It changes the row only while it is open (one row affected: this uninstall closed it), and takes the time from
+	 * the server (one clock for every installation sharing the database).
+	 *
+	 * @param string $fence The fence table.
+	 * @return string
+	 */
+	public static function close_template( string $fence ): string {
+		return 'UPDATE ' . SqlWriter::identifier( $fence ) . ' SET state = %s, closed_at = UNIX_TIMESTAMP() WHERE id = %d AND state = %s';
+	}
 
 	/**
 	 * The fence table's name.
@@ -82,29 +118,35 @@ final class UninstallFence {
 	}
 
 	/**
-	 * Close the fence: one UPDATE of its row (it waits while a swap's entering UPDATE holds the row). DONE once the
-	 * row is closed; ABSENT when the table is positively not there (a schema older than the fence: no swap of this
-	 * version can have entered without it); FAILED when the statement failed, or the row is missing, or it cannot be
+	 * Close the fence: one UPDATE of its row while it is open (it waits while a swap's entering UPDATE holds the row).
+	 * DONE when this closed it; HELD when it was closed already (read after: no swap enters, and the one who closed it
+	 * opens it); ABSENT when the table is positively not there (a schema older than the fence: no swap of this version
+	 * can enter without it); FAILED when the statement failed (it changed nothing), the row is missing, or it cannot be
 	 * told.
 	 *
-	 * @param int $now Unix time.
 	 * @return string
 	 */
-	public static function close( int $now ): string {
+	public static function close(): string {
 		global $wpdb;
 		$name             = self::name();
 		$quiet            = $wpdb->suppress_errors( true );
 		$wpdb->last_error = '';
-		$done             = $wpdb->query( $wpdb->prepare( 'UPDATE ' . SqlWriter::identifier( $name ) . ' SET state = %s, closed_at = %d WHERE id = %d', self::CLOSED, $now, self::ROW ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- table name from the prefix.
+		$done             = $wpdb->query( $wpdb->prepare( self::close_template( $name ), self::CLOSED, self::ROW, self::OPEN ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- the fence table.
 		$failed           = false === $done || '' !== JobRepository::db_error();
-		$state            = $failed ? null : $wpdb->get_var( $wpdb->prepare( 'SELECT state FROM ' . SqlWriter::identifier( $name ) . ' WHERE id = %d', self::ROW ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- table name from the prefix.
+		$state            = $failed || 1 === (int) $done ? null : $wpdb->get_var( $wpdb->prepare( 'SELECT state FROM ' . SqlWriter::identifier( $name ) . ' WHERE id = %d', self::ROW ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- table name from the prefix.
 		$failed           = $failed || '' !== JobRepository::db_error();
 		$absent           = $failed && array() === self::listed( $name );
 		$wpdb->suppress_errors( $quiet );
 		if ( $absent ) {
 			return self::ABSENT;
 		}
-		return ! $failed && self::CLOSED === $state ? self::DONE : self::FAILED;
+		if ( $failed ) {
+			return self::FAILED;
+		}
+		if ( 1 === (int) $done ) {
+			return self::DONE;
+		}
+		return self::CLOSED === $state ? self::HELD : self::FAILED;
 	}
 
 	/**
@@ -141,17 +183,18 @@ final class UninstallFence {
 	}
 
 	/**
-	 * Open a fence closed longer than STALE_SECONDS ago (an uninstall whose process died before it opened it again).
+	 * Open a fence closed longer than STALE_SECONDS ago (an uninstall whose process died before it opened it again):
+	 * one UPDATE on the row as it is, by the server's clock (as close() writes it), so an uninstall that closes it
+	 * meanwhile is not undone.
 	 *
-	 * @param int $now Unix time.
 	 * @return bool Whether a stale fence was opened.
 	 */
-	public static function heal( int $now ): bool {
-		$row = self::row();
-		if ( null === $row || self::CLOSED !== $row['state'] || $now - $row['closed_at'] < self::STALE_SECONDS ) {
-			return false;
-		}
-		return self::open();
+	public static function heal(): bool {
+		global $wpdb;
+		$quiet = $wpdb->suppress_errors( true );
+		$done  = $wpdb->query( $wpdb->prepare( 'UPDATE ' . SqlWriter::identifier( self::name() ) . ' SET state = %s WHERE id = %d AND state = %s AND closed_at < UNIX_TIMESTAMP() - %d', self::OPEN, self::ROW, self::CLOSED, self::STALE_SECONDS ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- table name from the prefix.
+		$wpdb->suppress_errors( $quiet );
+		return 1 === (int) $done;
 	}
 
 	/**

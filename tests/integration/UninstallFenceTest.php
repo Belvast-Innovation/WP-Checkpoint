@@ -112,7 +112,7 @@ final class UninstallFenceTest extends SwapTestCase {
 					global $wpdb;
 					$wpdb->query( 'SET SESSION innodb_lock_wait_timeout = 1' );
 					$start  = microtime( true );
-					$result = UninstallFence::close( time() );
+					$result = UninstallFence::close();
 					$waited = microtime( true ) - $start;
 					$wpdb->query( 'SET SESSION innodb_lock_wait_timeout = 50' );
 				}
@@ -210,7 +210,7 @@ final class UninstallFenceTest extends SwapTestCase {
 				static function () use ( $how ): void {
 					global $wpdb;
 					if ( 'closed' === $how ) {
-						UninstallFence::close( time() );
+						UninstallFence::close();
 					} else {
 						UninstallFence::open();
 						$wpdb->query( 'DROP TABLE IF EXISTS ' . UninstallFence::name() ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- the fence table.
@@ -238,7 +238,7 @@ final class UninstallFenceTest extends SwapTestCase {
 		global $wpdb;
 		$this->autocommit(
 			static function (): void {
-				UninstallFence::close( time() );
+				UninstallFence::close();
 			}
 		);
 		Schema::ensure( true );
@@ -259,7 +259,7 @@ final class UninstallFenceTest extends SwapTestCase {
 		$this->assertStringContainsString( 'its staging next to the site, its tables and its storage directory were left in place', Uninstaller::held_back( $held ), 'the control: found at the start, everything left' );
 		$after = Uninstaller::held_back( $held, array( 'cancelled the jobs that had not changed the site', 'removed its staging next to the site', 'removed its storage directory' ) );
 		$this->assertStringContainsString( 'after it had cancelled the jobs that had not changed the site, removed its staging next to the site, removed its storage directory', $after );
-		$this->assertStringContainsString( 'left its temporary tables, its jobs table and swap plan in place', $after );
+		$this->assertStringContainsString( 'left its temporary tables, its jobs table, swap plan and uninstall fence, and its settings in place', $after );
 		$this->assertStringNotContainsString( 'its storage directory were left', $after, 'not said to be left' );
 	}
 
@@ -311,7 +311,7 @@ final class UninstallFenceTest extends SwapTestCase {
 		$other = self::other();
 		$this->autocommit(
 			static function (): void {
-				UninstallFence::close( time() );
+				UninstallFence::close();
 			}
 		);
 		$this->assertSame( UninstallFence::CLOSED, UninstallFence::row()['state'] );

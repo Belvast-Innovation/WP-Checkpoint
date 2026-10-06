@@ -74,6 +74,7 @@ final class Uninstaller {
 	 * Run the uninstall routine.
 	 *
 	 * @return void
+	 * @throws \Throwable What a step that removes something threw, once a fence this uninstall closed is open again.
 	 */
 	public static function run(): void {
 		self::clear_transient_state();
@@ -88,21 +89,48 @@ final class Uninstaller {
 		}
 		// The fence first (UninstallFence): from here no swap enters the site. Its close waits for one entering now,
 		// and the read after it sees that one; a schema older than the fence has no swap that could use it.
-		$fence = UninstallFence::close( time() );
+		$fence = UninstallFence::close();
 		self::at( 'closed:' . $fence );
 		if ( UninstallFence::FAILED === $fence ) {
 			error_log( 'WP Checkpoint was uninstalled, but the fence that keeps a restore from starting to change the site meanwhile could not be closed; nothing was removed. Reinstall WP Checkpoint and uninstall it again.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- uninstall has no screen to say it on.
 			return;
 		}
-		$closed  = UninstallFence::DONE === $fence;
+		// Opened again only by the uninstall that closed it (HELD: another one did, and opens it when it is done).
+		$closed = UninstallFence::DONE === $fence;
+		try {
+			self::remove( $closed );
+		} catch ( \Throwable $e ) {
+			// Whatever failed, a fence this uninstall closed does not stay closed (restores on a site sharing this
+			// database would be refused until it is healed); a process killed outright leaves that to heal().
+			if ( $closed ) {
+				UninstallFence::open();
+			}
+			throw $e;
+		}
+	}
+
+	/**
+	 * The steps that remove something, each right after a read of whether a job holds the site: after the fence's
+	 * close, and as a second line for a swap of an older version on a database this site shares (it does not know
+	 * the fence).
+	 *
+	 * @param bool $closed Whether this uninstall closed the fence (it opens it again when it stops or keeps the data).
+	 * @return void
+	 */
+	private static function remove( bool $closed ): void {
 		$removed = array();
-		// Read again before each step that removes something: after the close, and as a second line for a swap of an
-		// older version on a database this site shares (it does not know the fence).
 		if ( self::held_meanwhile( $closed, $removed ) ) {
 			return;
 		}
 		self::at( 'unit:cancel' );
-		self::cancel_jobs();
+		if ( null === self::cancel_jobs() ) {
+			// Which jobs changed the site cannot be read: none was cancelled, and nothing is removed.
+			if ( $closed ) {
+				UninstallFence::open();
+			}
+			error_log( self::held_back( null, $removed ) ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- uninstall has no screen to say it on.
+			return;
+		}
 		$removed[] = 'cancelled the jobs that had not changed the site';
 		if ( self::held_meanwhile( $closed, $removed ) ) {
 			return;
@@ -223,7 +251,7 @@ final class Uninstaller {
 				$left[] = $what;
 			}
 		}
-		$left[] = 'its jobs table and swap plan';
+		$left[] = 'its jobs table, swap plan and uninstall fence, and its settings';
 		/* The uninstall found it only after it had begun: what it had done, and what it left. */
 		return sprintf( 'WP Checkpoint was being uninstalled when %1$s, after it had %2$s; it stopped there and left %3$s in place. %4$s', $why, implode( ', ', $removed ), implode( ', ', $left ), $then );
 	}
@@ -321,9 +349,9 @@ final class Uninstaller {
 	 * job. Runs whether or not data is deleted, so a reinstall does not find
 	 * jobs that look alive.
 	 *
-	 * @return int Jobs cancelled.
+	 * @return int|null Jobs cancelled; null when which jobs changed the site cannot be read (none was cancelled).
 	 */
-	public static function cancel_jobs(): int {
+	public static function cancel_jobs() {
 		global $wpdb;
 		if ( ! Schema::table_exists() ) {
 			return 0;
@@ -336,7 +364,7 @@ final class Uninstaller {
 		self::expect();
 		$column = $wpdb->get_results( "SHOW COLUMNS FROM {$table} LIKE 'site_state'", ARRAY_A );
 		if ( self::failed() || ! is_array( $column ) ) {
-			return 0; // Which jobs changed the site cannot be told: none is cancelled (run() stops when it reads again).
+			return null; // Which jobs changed the site cannot be told: none is cancelled, and run() stops.
 		}
 		$untouched = array() === $column ? '' : ' AND site_state = ' . Job::SITE_UNTOUCHED;
 		$now       = time();

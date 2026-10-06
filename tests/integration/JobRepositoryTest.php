@@ -1366,7 +1366,7 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 			'its one row, open'
 		);
 		// Made again where the request may upgrade, a closed row left as it is.
-		$this->assertSame( \WPCheckpoint\Jobs\UninstallFence::DONE, \WPCheckpoint\Jobs\UninstallFence::close( time() ) );
+		$this->assertSame( \WPCheckpoint\Jobs\UninstallFence::DONE, \WPCheckpoint\Jobs\UninstallFence::close() );
 		Schema::ensure( true );
 		$this->assertSame( \WPCheckpoint\Jobs\UninstallFence::CLOSED, \WPCheckpoint\Jobs\UninstallFence::row()['state'], 'a fence closed just now stays closed' );
 		$this->assertTrue( \WPCheckpoint\Jobs\UninstallFence::open() );

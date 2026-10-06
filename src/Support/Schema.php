@@ -381,7 +381,7 @@ final class Schema {
 	 */
 	private static function fence(): void {
 		self::quietly( array( \WPCheckpoint\Jobs\UninstallFence::class, 'create' ) );
-		if ( \WPCheckpoint\Jobs\UninstallFence::heal( time() ) ) {
+		if ( \WPCheckpoint\Jobs\UninstallFence::heal() ) {
 			\WPCheckpoint\Plugin::instance()->directories()->log_event( 'The uninstall fence was closed for more than an hour (an uninstall that did not finish, on this site or one sharing its database); it was opened again so that restores can change the site.' );
 		}
 	}

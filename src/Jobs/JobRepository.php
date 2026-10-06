@@ -584,19 +584,9 @@ final class JobRepository {
 	 */
 	public static function entering_sql( int $job_id, string $token, array $data, array $formats, int $now ): string {
 		global $wpdb;
-		$set    = array();
-		$params = array( UninstallFence::ROW, UninstallFence::OPEN ); // The join's condition comes first.
-		$i      = 0;
-		foreach ( $data as $column => $value ) {
-			$set[]    = 'j.`' . str_replace( '`', '', (string) $column ) . '` = ' . ( $formats[ $i ] ?? '%s' );
-			$params[] = $value;
-			++$i;
-		}
-		$set[] = 'f.entries = f.entries + 1';
-		$set[] = 'f.entered_at = %d';
-		array_push( $params, $now, $job_id, $token );
+		$params = array_merge( array( UninstallFence::ROW, UninstallFence::OPEN ), array_values( $data ), array( $now, $job_id, $token ) );
 		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare,WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber -- table names from the prefix; one placeholder per value, in order (the sniff counts the array as one).
-		return $wpdb->prepare( 'UPDATE ' . self::table() . ' AS j INNER JOIN ' . UninstallFence::name() . ' AS f ON f.id = %d AND f.state = %s SET ' . implode( ', ', $set ) . ' WHERE j.id = %d AND j.lock_token = %s', $params );
+		return $wpdb->prepare( UninstallFence::entering_template( self::table(), UninstallFence::name(), array_keys( $data ), array_values( $formats ) ), $params );
 	}
 
 	/**
