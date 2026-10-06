@@ -266,7 +266,8 @@ jobs:
 
   database-servers:
     # A restore's handling of foreign keys rests on how each server behaves (constraint names, renames,
-    # drops): measured on the real servers, compared with the recorded expectations on every change.
+    # drops), and the uninstall fence on how it locks one row both sides write: measured on the real servers,
+    # compared with the recorded expectations on every change.
     name: Database server (${{ matrix.image }})
     runs-on: ubuntu-latest
     strategy:
@@ -301,6 +302,7 @@ jobs:
       - run: php tests/Fixtures/Restore/constraint-rules.php 127.0.0.1 33306 root password
       - run: php tests/Fixtures/Restore/meta-key-scan.php 127.0.0.1 33306 root password
       - run: php tests/Fixtures/Restore/rename-matrix.php 127.0.0.1 33306 root password
+      - run: php tests/Fixtures/Jobs/fence-matrix.php 127.0.0.1 33306 root password
 
   plugin-check:
     name: Plugin Check
