@@ -111,10 +111,13 @@ final class UninstallFenceTest extends SwapTestCase {
 				static function () use ( &$result, &$waited ): void {
 					global $wpdb;
 					$wpdb->query( 'SET SESSION innodb_lock_wait_timeout = 1' );
-					$start  = microtime( true );
-					$result = UninstallFence::close();
-					$waited = microtime( true ) - $start;
-					$wpdb->query( 'SET SESSION innodb_lock_wait_timeout = 50' );
+					try {
+						$start  = microtime( true );
+						$result = UninstallFence::close();
+						$waited = microtime( true ) - $start;
+					} finally {
+						$wpdb->query( 'SET SESSION innodb_lock_wait_timeout = 50' );
+					}
 				}
 			);
 			$this->assertSame( UninstallFence::FAILED, $result, 'it cannot pass the swap that is entering' );
@@ -220,9 +223,11 @@ final class UninstallFenceTest extends SwapTestCase {
 			$tick = $this->cli_tick( Plugin::instance()->jobs()->find( $job->id ) );
 			$now  = Plugin::instance()->jobs()->find( $job->id );
 			$this->assertSame( TickResult::WAITING, $tick->status, $how . ': the swap waits (' . $tick->message . ')' );
+			$this->assertSame( \WPCheckpoint\Jobs\Runner::FENCE_WAIT_SECONDS, $tick->retry_after, $how . ': a minute, not the back-off of a failure' );
 			$this->assertStringContainsString( 'the restore does not start changing the site', (string) $tick->message, $how );
 			$this->assertSame( Job::SITE_UNTOUCHED, $now->site_state, $how . ': not entered' );
 			$this->assertNotSame( 'enter', $now->cursor['phase'] ?? '', $how . ': the cursor is the one last written, not the refused one' );
+			$this->assertSame( 0, (int) ( $now->cursor['__runner']['retries'] ?? 0 ), $how . ': not counted as a try' );
 			$this->assertFalse( Maintenance::held_in( $this->abspath ), $how . ': no maintenance file' );
 			$this->assertSame( $before, $this->site(), $how . ': the site is untouched' );
 		}
@@ -304,6 +309,94 @@ final class UninstallFenceTest extends SwapTestCase {
 			$wpdb->query( "ALTER TABLE {$table} ADD COLUMN site_state " . Schema::COLUMNS['site_state'] ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared,WordPress.DB.PreparedSQL.NotPrepared -- the jobs table and its definition.
 			$wpdb->query( 'COMMIT' );
 		}
+	}
+
+	/**
+	 * Set the uninstall's test seam (null: none).
+	 */
+	private function seam( ?callable $at ): void {
+		$property = new \ReflectionProperty( Uninstaller::class, 'at' );
+		$property->setAccessible( true );
+		$property->setValue( null, $at );
+	}
+
+	public function test_an_uninstall_opens_again_only_a_fence_it_closed(): void {
+		UninstallSetting::save( false );
+		$found = array();
+		$this->seam(
+			static function ( string $point ) use ( &$found ): void {
+				if ( 0 === strpos( $point, 'closed:' ) ) {
+					$found[] = substr( $point, 7 );
+				}
+			}
+		);
+		try {
+			// The control: it closes the fence itself, keeps the data, and opens it again.
+			$this->logged( array( Uninstaller::class, 'run' ) );
+			$this->assertSame( array( UninstallFence::DONE ), $found );
+			$this->assertSame( UninstallFence::OPEN, UninstallFence::row()['state'] );
+			// Closed already by another uninstall (a site sharing this database): this one goes on and leaves it closed.
+			$this->autocommit( array( UninstallFence::class, 'close' ) );
+			$this->logged( array( Uninstaller::class, 'run' ) );
+			$this->assertSame( array( UninstallFence::DONE, UninstallFence::HELD ), $found );
+			$this->assertSame( UninstallFence::CLOSED, UninstallFence::row()['state'], 'not opened under the other uninstall' );
+		} finally {
+			$this->seam( null );
+		}
+	}
+
+	public function test_a_step_that_fails_opens_the_fence_again(): void {
+		UninstallSetting::save( false );
+		$this->seam(
+			static function ( string $point ): void {
+				if ( 'unit:staging' === $point ) {
+					throw new \RuntimeException( 'the staging cannot be listed' );
+				}
+			}
+		);
+		$closed = '';
+		try {
+			$this->logged( array( Uninstaller::class, 'run' ) );
+			$this->fail( 'the failure is passed on' );
+		} catch ( \RuntimeException $e ) {
+			$this->assertSame( 'the staging cannot be listed', $e->getMessage() );
+			$closed = (string) UninstallFence::row()['state'];
+		} finally {
+			$this->seam( null );
+		}
+		$this->assertSame( UninstallFence::OPEN, $closed, 'opened again' );
+	}
+
+	public function test_a_cancel_that_cannot_tell_which_jobs_changed_the_site_stops_the_uninstall(): void {
+		UninstallSetting::save( true );
+		$job    = $this->running_job();
+		$broken = false;
+		$this->seam(
+			static function ( string $point ) use ( &$broken ): void {
+				if ( 'unit:cancel' === $point ) {
+					$broken = true;
+				}
+			}
+		);
+		$filter = static function ( $sql ) use ( &$broken ) {
+			if ( $broken && false !== strpos( (string) $sql, "LIKE 'site_state'" ) ) {
+				$broken = false;
+				return 'SELECT * FROM a_table_that_is_not_there_for_this_test'; // The column check fails, once.
+			}
+			return $sql;
+		};
+		add_filter( 'query', $filter );
+		try {
+			$log = $this->logged( array( Uninstaller::class, 'run' ) );
+		} finally {
+			remove_filter( 'query', $filter );
+			$this->seam( null );
+		}
+		$this->assertFalse( $broken, 'the control: the column check after the cancel began did fail' );
+		$this->assertStringContainsString( 'it could not tell whether a restore holds the site changed', $log );
+		$this->assertSame( Job::RUNNING, Plugin::instance()->jobs()->find( $job->id )->status, 'nothing cancelled' );
+		$this->assertTrue( Schema::table_exists(), 'nothing removed' );
+		$this->assertSame( UninstallFence::OPEN, UninstallFence::row()['state'], 'the fence open again' );
 	}
 
 	public function test_once_the_fence_is_closed_no_swap_enters(): void {

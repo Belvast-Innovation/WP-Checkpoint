@@ -358,10 +358,10 @@ final class Runner {
 				function ( array $cursor, int $percent, string $message ) use ( &$job, $token, $step_id, $step, $index, $count, &$state ) {
 					// A checkpoint is progress only when the cursor moved; an identical one keeps the counters and the stall timestamp.
 					$advanced = wp_json_encode( JobContext::strip_reserved( $job->cursor ) ) !== wp_json_encode( JobContext::strip_reserved( $cursor ) );
-					// The counters start over only once the cursor that moved is written (a write that refused leaves them).
-					$next = $advanced ? $this->reset( $state ) : $state;
-					$this->persist( $job, $token, $step_id, $cursor, $next, self::overall( $index, $count, $percent ), $message, $advanced, self::site_state_of( $step, $cursor ), self::site_mark_of( $step, $cursor ) );
-					$state = $next;
+					if ( $advanced ) {
+						$state = $this->reset( $state );
+					}
+					$this->persist( $job, $token, $step_id, $cursor, $state, self::overall( $index, $count, $percent ), $message, $advanced, self::site_state_of( $step, $cursor ), self::site_mark_of( $step, $cursor ) );
 					$this->maybe_heartbeat( $job, $token );
 				},
 				$token
