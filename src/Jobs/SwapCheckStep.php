@@ -73,7 +73,8 @@ defined( 'ABSPATH' ) || exit;
  *    away would reference the old site's table afterwards: the swap is
  *    refused and they are named (not FINAL: remove the reference, retry).
  * 10. plan: the rows of other attempts removed (bounded), the entries
- *    written in batches by their sequence number (DIR: each staged group,
+ *    written in batches by their sequence number (SITE first: the site the
+ *    plan is written for, see SwapPlan::SITE; DIR: each staged group,
  *    then each top-level entry of other-content but the drop-ins; TABLE:
  *    each table of the plan; MOVE: each live table the backup does not
  *    have that is this site's), then the COMPLETE row; the attempt and the
@@ -137,7 +138,8 @@ final class SwapCheckStep implements Step {
 	 * "version" (the running version), "site_dirs" function(): array (group => directory), "sizes", "window" (bytes
 	 * hashed again after a takeover position, in place of SUSPECT_WINDOW_BYTES; or a function returning them),
 	 * "opendir" function( string $dir ): resource|false and "scandir" function( string $dir ): array|false (in
-	 * place of opendir() and scandir() on the staged directories).
+	 * place of opendir() and scandir() on the staged directories), "abspath" (the WordPress directory the plan's
+	 * site entry records, in place of ABSPATH; the swap step takes the same part).
 	 *
 	 * @var array<string, mixed>
 	 */
@@ -846,7 +848,7 @@ final class SwapCheckStep implements Step {
 			$this->at( 'plan_old' );
 			return $cursor;
 		}
-		$entries = array_merge( $this->dir_entries( $run ), $this->table_entries( $context, $run ) );
+		$entries = array_merge( array( $this->site_entry() ), $this->dir_entries( $run ), $this->table_entries( $context, $run ) );
 		if ( 'entries' === $cursor['part'] ) {
 			$from  = (int) $cursor['seq'];
 			$batch = array();
@@ -899,6 +901,26 @@ final class SwapCheckStep implements Step {
 			'i'       => 0,
 			'key'     => null,
 			'sum'     => 0,
+		);
+	}
+
+	/**
+	 * The plan's site entry (SwapPlan::SITE): the WordPress directory resolved, and the table prefix.
+	 *
+	 * @return array{kind: string, live: string, stage: string, old: string, had_live: bool}
+	 * @throws TransientFailure When the WordPress directory cannot be resolved.
+	 */
+	private function site_entry(): array {
+		$real = Paths::real( (string) ( $this->parts['abspath'] ?? ABSPATH ) );
+		if ( false === $real ) {
+			throw new TransientFailure( 'The WordPress directory cannot be resolved; the swap\'s plan records it.' );
+		}
+		return array(
+			'kind'     => SwapPlan::SITE,
+			'live'     => rtrim( Paths::normalize( (string) $real ), '/' ),
+			'stage'    => self::base_prefix(),
+			'old'      => '',
+			'had_live' => false,
 		);
 	}
 

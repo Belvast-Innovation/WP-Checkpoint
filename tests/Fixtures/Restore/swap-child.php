@@ -77,8 +77,10 @@ $parts['now'] = static function () use ( $offset ): int {
 \WPCheckpoint\Plugin::instance()->job_types()->add( new \WPCheckpoint\Tests\Fixtures\Jobs\FixtureJobType( (string) $config['type'], array( new \WPCheckpoint\Jobs\SwapStep( null, $parts ) ) ) );
 wp_set_current_user( (int) $config['admin'] );
 
+// The installation the test's restore runs under (SwapTestCase::$storage): its jobs, with its token; else the plugin's.
+$jobs   = array() === (array) ( $config['storage'] ?? array() ) ? \WPCheckpoint\Plugin::instance()->jobs() : new \WPCheckpoint\Jobs\JobRepository( new \WPCheckpoint\Support\Directories( (array) $config['storage'] ) );
 $runner = new \WPCheckpoint\Jobs\Runner(
-	\WPCheckpoint\Plugin::instance()->jobs(),
+	$jobs,
 	\WPCheckpoint\Plugin::instance()->job_types(),
 	new \WPCheckpoint\Support\Redactor( \WPCheckpoint\Support\Redactor::installation_secrets() ),
 	array( 'cli' => true )

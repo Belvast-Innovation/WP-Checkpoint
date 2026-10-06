@@ -206,6 +206,63 @@ final class SwapMaintenanceModeTest extends SwapTestCase {
 		$this->assertSame( array(), Plugin::instance()->half_swapped_warnings(), 'the control: nothing once it ended' );
 	}
 
+	public function test_the_notice_offers_release_for_a_job_abandoned_here_and_not_for_one_abandoned_elsewhere(): void {
+		global $wpdb;
+		$job = $this->at_swap();
+		$this->killed_at( $job, 'dir_aside_recorded' );
+		$job  = Plugin::instance()->jobs()->find( $job->id );
+		$file = new Maintenance( $this->abspath, (string) $job->site_mark );
+		try {
+			$this->assertTrue( $file->is_held(), 'the control: the site here is behind its held file' );
+			// Abandoned by this installation, from a copy of the site in another WordPress directory (the copy's file
+			// is the copy's; the one here stays).
+			$copy = $this->sandbox . '/copy';
+			mkdir( $copy . '/wp-content/uploads', 0755, true );
+			$acts = new \WPCheckpoint\Jobs\JobActions(
+				Plugin::instance()->jobs(),
+				Plugin::instance()->runner(),
+				new \WPCheckpoint\Jobs\Loopback( false ),
+				new \WPCheckpoint\Jobs\HeldSite( array( 'abspath' => $copy ) )
+			);
+			$wpdb->update( JobRepository::table(), array( 'held_by' => 'ffffffffffff' ), array( 'id' => $job->id ) ); // Managed elsewhere, so it can be given up.
+			$wpdb->query( 'COMMIT' );
+			$see = $acts->held_elsewhere( $job->id )['assessment'];
+			$this->assertTrue( $acts->abandon( $job->id, \WPCheckpoint\Jobs\HeldSite::code( \WPCheckpoint\Jobs\HeldSite::ABANDON, Plugin::instance()->jobs()->find( $job->id ), $see['recorded'] ) )['ok'] );
+			$this->assertTrue( $file->is_held(), 'the file here stays' );
+			$none  = static function (): array {
+				return array(); // The notice's own path (ended_owner()): no job listed as holding the site.
+			};
+			$paths = function () use ( $none ): array {
+				return array(
+					'the jobs read'          => implode( "\n", Plugin::instance()->half_swapped_warnings() ),
+					'the notice\'s own path' => implode( "\n", Plugin::instance()->half_swapped_warnings( $none ) ),
+				);
+			};
+			foreach ( $paths() as $what => $text ) {
+				$this->assertStringContainsString( 'That job no longer holds the site; take its file down with: wp wpcheckpoint job release ' . $job->id, $text, $what . ': the control, abandoned here, release is offered' );
+			}
+			// Seen from another installation than the one that gave it up (its token in held_by), and from a WordPress
+			// directory positively another than the one its plan records: it still holds the site.
+			$wpdb->update( JobRepository::table(), array( 'held_by' => 'abababababab' ), array( 'id' => $job->id ) );
+			$plan     = $wpdb->base_prefix . \WPCheckpoint\Restore\SwapPlan::TABLE;
+			$recorded = (string) $wpdb->get_var( $wpdb->prepare( "SELECT live FROM `{$plan}` WHERE job_id = %d AND kind = 'site'", $job->id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the plan table.
+			$wpdb->query( $wpdb->prepare( "UPDATE `{$plan}` SET live = %s WHERE job_id = %d AND kind = 'site'", (string) realpath( $copy ), $job->id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the plan table.
+			$wpdb->query( 'COMMIT' );
+			try {
+				$this->assertTrue( ( new \WPCheckpoint\Jobs\HeldSite() )->assess( Plugin::instance()->jobs()->find( $job->id ) )['differs'], 'the control: positively another directory than the plan\'s' );
+				foreach ( $paths() as $what => $text ) {
+					$this->assertStringNotContainsString( 'job release', $text, $what . ': no release offered' );
+				}
+				$this->assertStringContainsString( 'This site may still be half swapped by it', $paths()['the jobs read'], 'abandoned elsewhere: this site may be half swapped' );
+			} finally {
+				$wpdb->query( $wpdb->prepare( "UPDATE `{$plan}` SET live = %s WHERE job_id = %d AND kind = 'site'", $recorded, $job->id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the plan table.
+				$wpdb->query( 'COMMIT' );
+			}
+		} finally {
+			$file->remove();
+		}
+	}
+
 	public function test_the_advice_to_remove_a_held_file_needs_the_jobs_read(): void {
 		$file = new Maintenance( $this->abspath, Maintenance::new_mark() );
 		try {

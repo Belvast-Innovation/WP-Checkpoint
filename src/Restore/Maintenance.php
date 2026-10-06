@@ -214,6 +214,24 @@ final class Maintenance {
 	}
 
 	/**
+	 * The mark of the restore whose maintenance file is in a directory, or '' when there is none of this plugin's (or
+	 * it cannot be read): what JobRepository::find_by_site_mark() finds the job by.
+	 *
+	 * @param string $dir Directory (ABSPATH).
+	 * @return string
+	 */
+	public static function mark_in( string $dir ): string {
+		$path   = rtrim( $dir, '/\\' ) . DIRECTORY_SEPARATOR . self::FILE;
+		$handle = @fopen( $path, 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- not there or not readable: none.
+		if ( false === $handle ) {
+			return '';
+		}
+		$contents = @fread( $handle, self::MAX_READ + 1 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_fread -- as above.
+		@fclose( $handle ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- as above.
+		return is_string( $contents ) && 1 === preg_match( '/WP Checkpoint restore [0-9a-f]{32}/', $contents, $found ) ? $found[0] : '';
+	}
+
+	/**
 	 * Whether this restore's file is there and held.
 	 *
 	 * @return bool

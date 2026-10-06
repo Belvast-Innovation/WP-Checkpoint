@@ -74,6 +74,25 @@ final class JobPresenter {
 	private $site_paths;
 
 	/**
+	 * Lookup of a job that holds the site and is managed elsewhere: function( int $id ): array|null
+	 * (JobActions::held_elsewhere()), or null for none (with_held()).
+	 *
+	 * @var callable|null
+	 */
+	private $held = null;
+
+	/**
+	 * The lookup present() uses for a job that holds the site and is managed elsewhere (the plugin wires
+	 * JobActions::held_elsewhere(); it is not a constructor argument because JobActions is built after the presenter).
+	 *
+	 * @param callable $lookup function( int $id ): array{job: Job, assessment: array<string, mixed>}|null.
+	 * @return void
+	 */
+	public function with_held( callable $lookup ): void {
+		$this->held = $lookup;
+	}
+
+	/**
 	 * Constructor.
 	 *
 	 * @param Redactor                                                        $redactor    Redactor.
@@ -143,6 +162,68 @@ final class JobPresenter {
 		// those); a user's file that merely looks alike and goes on with another extension is left alone.
 		$masked = preg_replace( '/[a-z0-9][a-z0-9-]*-\d{8}-\d{6}-[0-9a-f]{4}(?![a-z0-9-])(?!\.(?!(?:part\d{3,}\.)?wpcheckpoint\.|manifest\.json)[A-Za-z0-9])/', '[backup]', $masked );
 		return is_string( $masked ) ? $masked : Report::failure_text();
+	}
+
+	/**
+	 * What can be done, from here, with a job that holds the site changed and is managed elsewhere: why it is not run
+	 * here, and the commands that apply (HeldSite), each with its confirmation code. Not masked: callers send the
+	 * lines through clean().
+	 *
+	 * @param Job                  $job Job.
+	 * @param array<string, mixed> $see HeldSite::assess().
+	 * @return string[]
+	 */
+	public static function held_lines( Job $job, array $see ): array {
+		$id        = $job->id;
+		$abandoned = Job::REASON_ABANDONED === $job->failure_reason;
+		if ( $abandoned && HeldSite::SITE !== $see['branch'] ) {
+			return array( JobActions::abandoned_elsewhere( $job, $see ) );
+		}
+		if ( HeldSite::SITE === $see['branch'] ) {
+			$code  = HeldSite::code( HeldSite::REBIND, $job, '' );
+			$lines = array(
+				$abandoned
+					/* translators: %d: job id */
+					? sprintf( __( 'Restore job %d holds the site changed and was abandoned from another installation of WP Checkpoint, which said its database is not shared with this site: this site may be the one it left half swapped. As far as can be told, it is this site\'s own (the directories it swaps are this site\'s, and so is the table prefix). Take it over here with one of:', 'wp-checkpoint' ), $id )
+					/* translators: %d: job id */
+					: sprintf( __( 'Restore job %d holds the site changed and is managed by another installation of WP Checkpoint: the site\'s identity changed since it started, so it is not run here. As far as can be told, it is this site\'s own (the directories it swaps are this site\'s, and so is the table prefix). Take it over here with one of:', 'wp-checkpoint' ), $id ),
+			);
+			if ( '' === $see['direction'] && true === $see['finishes'] ) {
+				// Every rename was made before it was interrupted: the next run finishes the swap, whichever is chosen.
+				$finished = __( 'The swap made every rename before it was interrupted: the restore finishes, and the restored site stays. It is not put back.', 'wp-checkpoint' );
+				$lines[]  = '  wp wpcheckpoint job rebind ' . $id . ' --confirm=' . $code . ' --then=continue  ' . $finished;
+				$lines[]  = '  wp wpcheckpoint job rebind ' . $id . ' --confirm=' . $code . ' --then=rollback  ' . $finished;
+			} elseif ( '' === $see['direction'] ) {
+				$unknown = null === $see['finishes']
+					? ' ' . __( 'Whether the swap made every rename before it was interrupted cannot be read now; if it did, the restore finishes instead, and the restored site stays.', 'wp-checkpoint' )
+					: '';
+				$lines[] = '  wp wpcheckpoint job rebind ' . $id . ' --confirm=' . $code . ' --then=continue  ' . __( 'The restore goes on as after any interruption (a swap cut off half way is put back first; then it can be retried).', 'wp-checkpoint' ) . $unknown;
+				$lines[] = '  wp wpcheckpoint job rebind ' . $id . ' --confirm=' . $code . ' --then=rollback  ' . __( 'The restore puts the site back as it was and is cancelled.', 'wp-checkpoint' ) . $unknown;
+			} else {
+				$lines[] = '  wp wpcheckpoint job rebind ' . $id . ' --confirm=' . $code . '  ' . __( 'The restore recorded its direction; it only finishes.', 'wp-checkpoint' );
+			}
+			return $lines;
+		}
+		/* translators: 1: job id, 2: why it is not taken to be this site's, 3: the WordPress directory its plan records */
+		$lines   = array( sprintf( __( 'Restore job %1$d holds a site changed and is managed by another installation of WP Checkpoint; it is never run here: as far as can be told it is not this site\'s (%2$s). Its plan was written for the WordPress directory %3$s.', 'wp-checkpoint' ), $id, $see['why'], '' === $see['recorded'] ? __( '(not recorded)', 'wp-checkpoint' ) : $see['recorded'] ) );
+		$lines[] = $see['file_here']
+			? __( 'Its maintenance file is in this WordPress directory too, so this site answers only with a maintenance page.', 'wp-checkpoint' )
+			: __( 'This WordPress directory holds no maintenance file of it.', 'wp-checkpoint' );
+		$lines[] = JobActions::holding_paths( $job, $see );
+		return $lines;
+	}
+
+	/**
+	 * Why an abandoned job is not retried: from the installation that gave it up, never; from another, only once the
+	 * site it was started on took it over (JobRepository::take_over() lifts the abandon).
+	 *
+	 * @param bool $here Whether it was abandoned from this installation (JobRepository::abandoned_here()).
+	 * @return string
+	 */
+	public static function abandoned_note( bool $here ): string {
+		return $here
+			? __( 'The job was abandoned; it is not run again.', 'wp-checkpoint' )
+			: __( 'The job was abandoned from another installation; it runs again only once the site it was started on takes it over (wp wpcheckpoint job status says whether this is that site).', 'wp-checkpoint' );
 	}
 
 	/**
@@ -341,6 +422,9 @@ final class JobPresenter {
 			'stalled'      => self::stalled_minutes( $job, time() ),
 		);
 		$data['stalled_text'] = self::stalled_text( $data['stalled'] );
+		// A job that holds the site and is managed elsewhere: why it is not run here, and the WP-CLI commands.
+		$held                   = Job::SITE_UNTOUCHED !== $job->site_state && is_callable( $this->held ) ? call_user_func( $this->held, $job->id ) : null;
+		$data['held_elsewhere'] = is_array( $held ) ? $this->clean( implode( "\n", self::held_lines( $held['job'], $held['assessment'] ) ), $extra ) : '';
 		if ( $with_log ) {
 			$data['log_tail'] = $this->log_tail( $job );
 		}

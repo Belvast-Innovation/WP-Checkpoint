@@ -210,11 +210,21 @@ abstract class RestoreTestCase extends JobTestCase {
 			$builder->table( $table, $chunks );
 		}
 		$builder->build();
-		$backups = Plugin::instance()->directories()->backups();
+		$backups = $this->backups_dir();
 		foreach ( array_merge( $builder->volumes, array( $builder->manifest_path ) ) as $file ) {
 			copy( $file, $backups . '/' . basename( $file ) );
 		}
 		return ArchiveBuilder::BASE;
+	}
+
+	/**
+	 * The backups directory the test's backups are put in (the plugin's own; SwapTestCase may name another
+	 * installation's).
+	 *
+	 * @return string
+	 */
+	protected function backups_dir(): string {
+		return Plugin::instance()->directories()->backups();
 	}
 
 	/**

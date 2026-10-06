@@ -24,7 +24,7 @@ defined( 'ABSPATH' ) || exit;
 final class Schema {
 
 	const OPTION  = StoredNames::DB_VERSION;
-	const CURRENT = 9;
+	const CURRENT = 11;
 
 	/**
 	 * Jobs table name without the prefix.
@@ -67,6 +67,8 @@ final class Schema {
 		'lock_token'       => "varchar(32) NOT NULL DEFAULT ''",
 		'site_state'       => 'tinyint(3) unsigned NOT NULL DEFAULT 0',
 		'cancel_requested' => 'bigint(20) unsigned NOT NULL DEFAULT 0',
+		'held_by'          => "varchar(32) NOT NULL DEFAULT ''",
+		'site_mark'        => "varchar(64) NOT NULL DEFAULT ''",
 	);
 
 	/**
@@ -508,6 +510,18 @@ final class Schema {
 				// Adds site_state (0) and cancel_requested (0); older code ignores both, so min_compatible stays 1.
 				self::create_jobs_table();
 				return 1;
+			case 11:
+				// Adds site_mark (''); older code ignores it (it neither reads nor writes it), so min_compatible stays 1.
+				self::create_jobs_table();
+				return 1;
+			case 10:
+				// Adds held_by (''); older code ignores it, so min_compatible stays 1. What older code does with the rows
+				// this version writes: it goes by storage_token alone, so a job another installation took over is run
+				// by none but the installation it was started with (the taker's side refuses it; the starter's would
+				// run it again: only after a downgrade on a shared database); and it reads the reason "abandoned" as
+				// one it does not know (no kind of failure: Retry is offered, and the retry is refused by nothing).
+				self::create_jobs_table();
+				return 1;
 		}
 		return self::MIN_COMPATIBLE;
 	}
@@ -592,6 +606,26 @@ final class Schema {
 		} catch ( \InvalidArgumentException $e ) {
 			// No usable token: no temporary tables can have been created.
 			unset( $e );
+		}
+		// The tables of jobs another installation started and this one took over or gave up, by the names they made
+		// (JobRepository::reclaim_scope()); read before the jobs table goes.
+		$own   = Directories::own_tokens( $state );
+		$taken = \WPCheckpoint\Jobs\JobRepository::taken_over( $own );
+		foreach ( null === $taken ? array() : $taken as $job ) {
+			if ( \WPCheckpoint\Jobs\JobRepository::RECLAIM_NONE === \WPCheckpoint\Jobs\JobRepository::reclaim_scope( $job, $own ) ) {
+				continue;
+			}
+			try {
+				$prefix = \WPCheckpoint\Jobs\TempTables::job_prefix( $job->storage_token, $job->id );
+				// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- table listing.
+				$names = $wpdb->get_col( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $prefix ) . '%' ) );
+				$names = array_values( array_map( 'strval', is_array( $names ) ? $names : array() ) );
+				if ( array() !== $names ) {
+					\WPCheckpoint\Jobs\TempTableDropper::drop( $names, \WPCheckpoint\Jobs\TempTables::owner_prefix( $job->storage_token ) );
+				}
+			} catch ( \InvalidArgumentException $e ) {
+				unset( $e ); // A token that names no tables.
+			}
 		}
 		$table = $wpdb->base_prefix . self::JOBS_TABLE;
 		$wpdb->query( "DROP TABLE IF EXISTS {$table}" ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- table name from the prefix and a constant; uninstall only.

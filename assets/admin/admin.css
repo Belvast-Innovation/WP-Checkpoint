@@ -14,6 +14,7 @@
 .wpcheckpoint-job-bar { width: 100%; max-width: 480px; }
 .wpcheckpoint-job-log { max-height: 12em; overflow: auto; background: #f6f7f7; padding: 6px; white-space: pre-wrap; }
 .wpcheckpoint-job-notice { color: #50575e; }
+.wpcheckpoint-job-held { white-space: pre-line; overflow-wrap: anywhere; }
 .wpcheckpoint-job-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
 .wpcheckpoint-job-questions { font-size: 14px; }
 .wpcheckpoint-job-questions legend { font-weight: 600; margin-bottom: 4px; }

@@ -194,6 +194,112 @@ final class JobCommand {
 	}
 
 	/**
+	 * Take over a restore that holds the site changed and is managed by another installation, when it is this site's
+	 * as far as can be told (wp wpcheckpoint job status shows the command with its code).
+	 *
+	 * ## OPTIONS
+	 *
+	 * <id>
+	 * : Job id.
+	 *
+	 * --confirm=<code>
+	 * : The confirmation code wp wpcheckpoint job status shows for this job.
+	 *
+	 * [--then=<what>]
+	 * : While the restore has not recorded its direction: continue (it goes on as after any interruption: a swap cut
+	 * off half way is put back first, then it can be retried) or rollback (it puts the site back and is cancelled).
+	 * A swap that made every rename before it was interrupted finishes either way, and the restored site stays:
+	 * wp wpcheckpoint job status says which applies.
+	 * ---
+	 * options:
+	 *   - continue
+	 *   - rollback
+	 * ---
+	 *
+	 * @param string[]             $args       Positional arguments.
+	 * @param array<string, mixed> $assoc_args Options.
+	 * @return void
+	 */
+	public function rebind( array $args, array $assoc_args ): void {
+		Unexpected::guard(
+			function () use ( $args, $assoc_args ): void {
+				$this->report( $this->actions->rebind( (int) $args[0], (string) ( $assoc_args['confirm'] ?? '' ), (string) ( $assoc_args['then'] ?? '' ) ) );
+			},
+			array( $this->presenter, 'clean' )
+		);
+	}
+
+	/**
+	 * Take down, from this WordPress directory, the maintenance file of a restore that no longer holds the site
+	 * (completed, rolled back, or abandoned) and is not running: only the file that carries the mark the job
+	 * recorded. While the restore still holds the site it is refused, and wp wpcheckpoint job status says what to
+	 * do instead. The job itself is not changed.
+	 *
+	 * ## OPTIONS
+	 *
+	 * <id>
+	 * : Job id.
+	 *
+	 * --confirm=<code>
+	 * : The confirmation code wp wpcheckpoint job status shows for this job.
+	 *
+	 * @param string[]             $args       Positional arguments.
+	 * @param array<string, mixed> $assoc_args Options.
+	 * @return void
+	 */
+	public function release( array $args, array $assoc_args ): void {
+		Unexpected::guard(
+			function () use ( $args, $assoc_args ): void {
+				$this->report( $this->actions->release( (int) $args[0], (string) ( $assoc_args['confirm'] ?? '' ) ) );
+			},
+			array( $this->presenter, 'clean' )
+		);
+	}
+
+	/**
+	 * Give up for good a restore that is managed by another installation and is not this site's as far as can be
+	 * told: its maintenance file is taken down from this WordPress directory, and it never runs again from here. Its
+	 * tables are kept, the ones its swap moved aside (named wcpold…) among them, and nothing at the paths its plan
+	 * records is touched. If this database is shared with the site the restore was started on, that site's restore
+	 * stays half swapped.
+	 *
+	 * ## OPTIONS
+	 *
+	 * <id>
+	 * : Job id.
+	 *
+	 * --confirm=<code>
+	 * : The confirmation code wp wpcheckpoint job status shows for this job.
+	 *
+	 * @param string[]             $args       Positional arguments.
+	 * @param array<string, mixed> $assoc_args Options.
+	 * @return void
+	 */
+	public function abandon( array $args, array $assoc_args ): void {
+		Unexpected::guard(
+			function () use ( $args, $assoc_args ): void {
+				$this->report( $this->actions->abandon( (int) $args[0], (string) ( $assoc_args['confirm'] ?? '' ) ) );
+			},
+			array( $this->presenter, 'clean' )
+		);
+	}
+
+	/**
+	 * Print an outcome of rebind, release or abandon: success, or an error (exit 1).
+	 *
+	 * @param array{ok: bool, message: string} $outcome Outcome.
+	 * @return void
+	 */
+	private function report( array $outcome ): void {
+		$message = $this->presenter->clean( $outcome['message'] );
+		if ( $outcome['ok'] ) {
+			WP_CLI::success( $message );
+			return;
+		}
+		WP_CLI::error( $message );
+	}
+
+	/**
 	 * Answer the questions of a paused job, then run it again.
 	 *
 	 * ## OPTIONS
@@ -265,6 +371,12 @@ final class JobCommand {
 			);
 		}
 		\WP_CLI\Utils\format_items( isset( $assoc_args['format'] ) ? (string) $assoc_args['format'] : 'table', $rows, array( 'field', 'value' ) );
+		$held = $this->actions->held_elsewhere( $job->id );
+		if ( null !== $held && ! isset( $assoc_args['format'] ) ) {
+			foreach ( JobPresenter::held_lines( $held['job'], $held['assessment'] ) as $line ) {
+				WP_CLI::line( $this->presenter->clean( $line ) );
+			}
+		}
 	}
 
 	/**
@@ -309,14 +421,15 @@ final class JobCommand {
 
 	/**
 	 * What the cancel command says for an outcome (JobActions::cancel()): refused when the restored site is in place
-	 * ("swapped", an error), otherwise what was done or requested.
+	 * ("swapped"), another installation manages the job ("elsewhere") or it was abandoned ("abandoned"), all errors;
+	 * otherwise what was done or requested.
 	 *
 	 * @param string $reason The outcome's reason.
 	 * @return array{error: bool, message: string}
 	 */
 	public static function cancel_verdict( string $reason ): array {
 		return array(
-			'error'   => 'swapped' === $reason,
+			'error'   => in_array( $reason, array( 'swapped', 'elsewhere', 'abandoned' ), true ),
 			'message' => \WPCheckpoint\Rest\JobsController::cancel_message( $reason ),
 		);
 	}
@@ -334,6 +447,9 @@ final class JobCommand {
 			WP_CLI::error( $this->presenter->clean( $e->getMessage() ) );
 		} catch ( InvalidTransition $e ) {
 			$current = $this->actions->find( (int) $args[0] );
+			if ( null !== $current && Job::REASON_ABANDONED === $current->failure_reason ) {
+				WP_CLI::error( JobPresenter::abandoned_note( $this->actions->abandoned_here( $current ) ) );
+			}
 			if ( null !== $current && Job::FAILED === $current->status && ! $current->can_retry() ) {
 				WP_CLI::error( JobPresenter::retry_note() );
 			}

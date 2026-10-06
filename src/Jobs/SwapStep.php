@@ -16,6 +16,7 @@ use WPCheckpoint\Restore\Ledger;
 use WPCheckpoint\Restore\Maintenance;
 use WPCheckpoint\Restore\Queries;
 use WPCheckpoint\Restore\RestoreFiles;
+use WPCheckpoint\Restore\SiteChanged;
 use WPCheckpoint\Restore\SiteTables;
 use WPCheckpoint\Restore\StagingLayout;
 use WPCheckpoint\Restore\StateCarry;
@@ -89,7 +90,7 @@ defined( 'ABSPATH' ) || exit;
  * between the Runner's two last writes), ends the step without touching
  * anything.
  */
-final class SwapStep implements Step, HoldsSite, CliOnly {
+final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 
 	const ID = 'restore_swap';
 
@@ -176,6 +177,18 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 	 */
 	public function id(): string {
 		return self::ID;
+	}
+
+	/**
+	 * The maintenance file's mark a cursor carries (MarksSite): from the cursor start() returns, checkpointed before
+	 * the file is first put up, on every cursor after it.
+	 *
+	 * @param array<string, mixed> $cursor Cursor.
+	 * @return string|null
+	 */
+	public static function site_mark( array $cursor ) {
+		$mark = (string) ( $cursor['mark'] ?? '' );
+		return '' === $mark ? null : $mark;
 	}
 
 	/**
@@ -333,10 +346,13 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 		if ( $attempt < 1 || $plan->complete_count( $context->job()->id, $attempt ) !== $count ) {
 			throw new RetryFrom( 'The swap\'s plan is not complete as the final check recorded it; the final check writes it again.', SwapCheckStep::ID );
 		}
+		// One mark for the job, whatever the attempt: a held file of an earlier attempt somewhere else (a copy of the
+		// site) carries it, and the row must keep saying it (Job::$site_mark) or nothing could tell that file again.
+		$mark = (string) $context->job()->site_mark;
 		return array(
 			'phase'   => 'judge',
 			'attempt' => $attempt,
-			'mark'    => Maintenance::new_mark(),
+			'mark'    => '' !== $mark ? $mark : Maintenance::new_mark(),
 		);
 	}
 
@@ -966,6 +982,15 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 		$staged  = (array) $staging['staged'];
 		$entries = $this->entries( $context, $db, $cursor );
 		$other   = StagingLayout::OTHER;
+		// The site the plan was written for is this one: the WordPress directory and the table prefix as they are now.
+		$real = Paths::real( (string) ( $this->parts['abspath'] ?? ABSPATH ) );
+		$site = $entries['site'][0] ?? null;
+		if ( array() === $entries['site'] ) {
+			throw new SiteChanged( 'The swap\'s plan was written by an earlier version of WP Checkpoint, which did not record the site it was written for. The swap was refused before it changed anything, and its plan is kept as it was written. Start the restore again.' );
+		}
+		if ( 1 !== count( $entries['site'] ) || 0 !== ( $site['seq'] ?? -1 ) || false === $real || rtrim( Paths::normalize( (string) $real ), '/' ) !== $site['live'] || self::base_prefix() !== $site['stage'] ) {
+			throw new SiteChanged( 'The swap\'s plan was written for a WordPress directory or table prefix other than this site\'s now. The swap was refused before it changed anything, and its plan is kept as it was written. Start the restore again.' );
+		}
 		foreach ( $entries['dirs'] as $entry ) {
 			$want = null;
 			foreach ( StagingLayout::GROUPS as $group ) {
@@ -1007,12 +1032,13 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 	}
 
 	/**
-	 * The plan's entries of the attempt, in order: the directory units and the table entries.
+	 * The plan's entries of the attempt, in order: the site entry (SwapPlan::SITE), the directory units and the table
+	 * entries.
 	 *
 	 * @param JobContext           $context Context.
 	 * @param Queries              $db      Connection.
 	 * @param array<string, mixed> $cursor  Cursor (its attempt).
-	 * @return array{dirs: array<int, array{seq: int, kind: string, live: string, stage: string, old: string, had_live: bool}>, tables: array<int, array{seq: int, kind: string, live: string, stage: string, old: string, had_live: bool}>}
+	 * @return array{site: array<int, array{seq: int, kind: string, live: string, stage: string, old: string, had_live: bool}>, dirs: array<int, array{seq: int, kind: string, live: string, stage: string, old: string, had_live: bool}>, tables: array<int, array{seq: int, kind: string, live: string, stage: string, old: string, had_live: bool}>}
 	 * @throws \RuntimeException When the plan's rows are gone or are not whole: an ordinary failure, never FINAL (a job
 	 *                           that holds the site changed must keep its retry, which goes on putting it back).
 	 */
@@ -1025,6 +1051,7 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 			throw new \RuntimeException( 'The swap\'s plan is gone from the database or no longer whole; what the swap changed cannot be told from it. Retry once the plan\'s rows are back.' );
 		}
 		$out   = array(
+			'site'   => array(),
 			'dirs'   => array(),
 			'tables' => array(),
 		);
@@ -1037,14 +1064,14 @@ final class SwapStep implements Step, HoldsSite, CliOnly {
 					// Not FINAL: a job that holds the site changed keeps its retry.
 					throw new \RuntimeException( sprintf( 'The swap\'s plan in the database holds an entry the final check does not write (%s); nothing more is renamed by it.', $why ) );
 				}
-				$out[ SwapPlan::DIR === $entry['kind'] ? 'dirs' : 'tables' ][] = $entry;
+				$out[ SwapPlan::SITE === $entry['kind'] ? 'site' : ( SwapPlan::DIR === $entry['kind'] ? 'dirs' : 'tables' ) ][] = $entry;
 				$after = $entry['seq'];
 			}
 			if ( count( $page ) < self::PAGE ) {
 				break;
 			}
 		}
-		if ( count( $out['dirs'] ) + count( $out['tables'] ) !== $count ) {
+		if ( count( $out['site'] ) + count( $out['dirs'] ) + count( $out['tables'] ) !== $count ) {
 			throw new \RuntimeException( 'The swap\'s plan in the database does not hold the entries it says it has. Retry once the plan\'s rows are back.' );
 		}
 		return $out;

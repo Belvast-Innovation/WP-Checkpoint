@@ -90,16 +90,321 @@ final class JobActions {
 	private $runtime = array( Budget::class, 'current_runtime' );
 
 	/**
+	 * What a job that holds the site and is managed elsewhere shows from here.
+	 *
+	 * @var HeldSite
+	 */
+	private $held;
+
+	/**
 	 * Constructor.
 	 *
 	 * @param JobRepository $repository Repository.
 	 * @param Runner        $runner     Runner.
 	 * @param Loopback      $loopback   Loopback.
+	 * @param HeldSite|null $held       What a job managed elsewhere shows from here (tests inject its parts).
 	 */
-	public function __construct( JobRepository $repository, Runner $runner, Loopback $loopback ) {
+	public function __construct( JobRepository $repository, Runner $runner, Loopback $loopback, ?HeldSite $held = null ) {
 		$this->repository = $repository;
 		$this->runner     = $runner;
 		$this->loopback   = $loopback;
+		$this->held       = $held ?? new HeldSite();
+	}
+
+	/**
+	 * A job that holds the site changed and is managed by another token than this installation's (HeldSite): it, and
+	 * what its plan shows from here; null when there is no such job, or it does not hold the site, was abandoned from
+	 * this installation (JobRepository::abandoned_here()), or this installation manages it. A job abandoned from
+	 * another installation is one: this site may be the one it left half swapped, and may take it over.
+	 *
+	 * @param int $id Job id.
+	 * @return array{job: Job, assessment: array<string, mixed>}|null
+	 */
+	public function held_elsewhere( int $id ) {
+		$job = $this->repository->find( $id );
+		if ( null === $job || Job::SITE_UNTOUCHED === $job->site_state || $this->repository->abandoned_here( $job ) || in_array( $job->status, array( Job::COMPLETED, Job::CANCELLED ), true ) || $this->repository->manages( $job ) ) {
+			return null;
+		}
+		return array(
+			'job'        => $job,
+			'assessment' => $this->held->assess( $job ),
+		);
+	}
+
+	/**
+	 * Let this installation manage a job that holds the site and is this site's (HeldSite::SITE): wp wpcheckpoint job
+	 * rebind. Refused unless the code confirms it (HeldSite::code()) and, while the direction is not recorded, $then
+	 * says "continue" or "rollback"; once it is recorded, $then is refused (the job only finishes).
+	 *
+	 * @param int    $id      Job id.
+	 * @param string $confirm The confirmation code.
+	 * @param string $then    "continue", "rollback" or ''.
+	 * @return array{ok: bool, message: string}
+	 */
+	public function rebind( int $id, string $confirm, string $then ): array {
+		$held = $this->held_elsewhere( $id );
+		if ( null === $held ) {
+			return self::outcome( false, $this->not_held( $id ) );
+		}
+		$job = $held['job'];
+		$see = $held['assessment'];
+		if ( HeldSite::SITE !== $see['branch'] ) {
+			/* translators: %s: why the job is not taken to be this site's */
+			return self::outcome( false, sprintf( __( 'The job is not taken over: as far as can be told from here it is not this site\'s (%s). It is not run here.', 'wp-checkpoint' ), $see['why'] ) );
+		}
+		if ( ! hash_equals( HeldSite::code( HeldSite::REBIND, $job, '' ), $confirm ) ) {
+			return self::outcome( false, __( 'The confirmation code is not this job\'s; wp wpcheckpoint job status shows the command with its code.', 'wp-checkpoint' ) );
+		}
+		if ( '' !== $see['direction'] && '' !== $then ) {
+			return self::outcome( false, __( 'The restore already recorded its direction: taken over, it only finishes. Leave --then out.', 'wp-checkpoint' ) );
+		}
+		if ( '' === $see['direction'] && ! in_array( $then, array( 'continue', 'rollback' ), true ) ) {
+			return self::outcome( false, __( 'Say what the restore does once taken over: --then=continue (it goes on as after any interruption: a swap cut off half way is put back first, then it can be retried) or --then=rollback (it puts the site back as it was and is cancelled). A swap that made every rename before it was interrupted finishes either way: wp wpcheckpoint job status says which applies.', 'wp-checkpoint' ) );
+		}
+		try {
+			$job = $this->repository->take_over( $job, $then );
+		} catch ( StaleJob $e ) {
+			return self::outcome( false, __( 'The job changed meanwhile, or a run holds it; nothing was changed. Try again.', 'wp-checkpoint' ) );
+		}
+		$run = Job::FAILED === $job->status
+			/* translators: %d: job id */
+			? sprintf( __( 'Run it: wp wpcheckpoint job retry %1$d, then wp wpcheckpoint job run %1$d', 'wp-checkpoint' ), $job->id )
+			/* translators: %d: job id */
+			: sprintf( __( 'Run it: wp wpcheckpoint job run %d', 'wp-checkpoint' ), $job->id );
+		$note = '';
+		if ( $see['differs'] ) {
+			// Taken over from another WordPress directory: the maintenance file there is not this one's to take down.
+			/* translators: 1: the WordPress directory the job's plan records, 2: job id */
+			$note = ' ' . sprintf( __( 'Its maintenance file stays up in %1$s, the WordPress directory its plan was written for: once this restore has ended, take it down there with wp wpcheckpoint job release %2$d.', 'wp-checkpoint' ), $see['recorded'], $job->id );
+		}
+		/* translators: 1: job id, 2: how to run it */
+		return self::outcome( true, sprintf( __( 'Job %1$d is managed by this installation now. %2$s', 'wp-checkpoint' ), $job->id, $run ) . $note );
+	}
+
+	/**
+	 * Take a job's maintenance file down from this WordPress directory (wp wpcheckpoint job release): only once the job
+	 * no longer holds the site (completed, cancelled, put back, or abandoned from here: JobRepository::holds_site()),
+	 * no run holds it, and only the file that carries the mark its row recorded (Job::$site_mark): a file another job
+	 * wrote carries another mark and stays. While the job holds the site it is refused, and what can be done is said
+	 * (holding_paths(); abandoned_elsewhere() for a job abandoned from another installation, which holds the site
+	 * everywhere until it is taken over; nothing cleans it up yet). Checked on each read, the last right before the
+	 * file goes.
+	 * The job is not changed.
+	 *
+	 * @param int    $id      Job id.
+	 * @param string $confirm The confirmation code.
+	 * @return array{ok: bool, message: string}
+	 */
+	public function release( int $id, string $confirm ): array {
+		$job = $this->repository->find( $id );
+		if ( null === $job ) {
+			return self::outcome( false, __( 'No such job.', 'wp-checkpoint' ) );
+		}
+		$why = $this->not_ended( $job );
+		if ( '' !== $why ) {
+			return self::outcome( false, $why );
+		}
+		if ( ! hash_equals( HeldSite::code( HeldSite::RELEASE, $job, (string) $this->held->assess( $job )['recorded'] ), $confirm ) ) {
+			return self::outcome( false, __( 'The confirmation code is not this job\'s; wp wpcheckpoint job status shows the command with its code.', 'wp-checkpoint' ) );
+		}
+		$this->held->at( 'release_confirmed' );
+		// Read again right before the file goes (Deleter calls it just before the unlink): a retry or a run between
+		// the checks above and there holds it again.
+		$late    = '';
+		$confirm = function () use ( $id, &$late ): void {
+			$now  = $this->repository->find( $id );
+			$late = null === $now ? __( 'No such job.', 'wp-checkpoint' ) : $this->not_ended( $now );
+			if ( '' !== $late ) {
+				throw new StaleJob( 'The job no longer lets its maintenance file go.' );
+			}
+		};
+		try {
+			$gone = $this->held->release_ended( $job, $confirm );
+		} catch ( StaleJob $e ) {
+			return self::outcome( false, $late );
+		}
+		if ( null === $gone ) {
+			return self::outcome( true, __( 'There is no maintenance file of this job in this WordPress directory; nothing was changed.', 'wp-checkpoint' ) );
+		}
+		return $gone
+			? self::outcome( true, __( 'This job\'s maintenance file was taken down from this WordPress directory: the site here answers again. The job itself was not changed.', 'wp-checkpoint' ) )
+			: self::outcome( false, __( 'This job\'s maintenance file could not be taken down; nothing else was changed. Try again.', 'wp-checkpoint' ) );
+	}
+
+	/**
+	 * Why a job's maintenance file may not be taken down yet, or '': it no longer holds the site
+	 * (JobRepository::holds_site(): a job abandoned from another installation does), it is completed, cancelled or
+	 * failed (queued, running or paused, a run may be about to hold it again: a retry's attempt carries the same
+	 * mark), and no run holds its lock.
+	 *
+	 * @param Job $job Job.
+	 * @return string
+	 */
+	private function not_ended( Job $job ): string {
+		if ( $this->repository->holds_site( $job ) ) {
+			if ( Job::REASON_ABANDONED === $job->failure_reason ) {
+				return self::abandoned_elsewhere( $job, $this->held->assess( $job ) );
+			}
+			if ( ! $this->repository->manages( $job ) ) {
+				// While the job holds the site there is no case in which taking its file down here is right.
+				return self::holding_paths( $job, $this->held->assess( $job ) );
+			}
+			return __( 'This installation manages the job and it still holds the site: run it with wp wpcheckpoint job run.', 'wp-checkpoint' );
+		}
+		if ( ! in_array( $job->status, array( Job::COMPLETED, Job::CANCELLED, Job::FAILED ), true ) || $job->is_locked( time() ) ) {
+			return __( 'The job has not ended, or a run holds it: its maintenance file stays. Try again once it has ended.', 'wp-checkpoint' );
+		}
+		return '';
+	}
+
+	/**
+	 * Whether a job was abandoned from this installation (JobRepository::abandoned_here()).
+	 *
+	 * @param Job $job Job.
+	 * @return bool
+	 */
+	public function abandoned_here( Job $job ): bool {
+		return $this->repository->abandoned_here( $job );
+	}
+
+	/**
+	 * Give up a job that holds the site and is not this site's as far as can be told (wp wpcheckpoint job abandon):
+	 * first its maintenance file is taken down from this WordPress directory (as release()), then the job is
+	 * recorded as abandoned (JobRepository::abandon_held()). In that order: a run that dies between them leaves the
+	 * job holding the site with no file here, and a second abandon finishes; the other order could leave a site that
+	 * answers only with a maintenance page and no job to say why.
+	 *
+	 * @param int    $id      Job id.
+	 * @param string $confirm The confirmation code.
+	 * @return array{ok: bool, message: string}
+	 */
+	public function abandon( int $id, string $confirm ): array {
+		$held = $this->held_elsewhere( $id );
+		$why  = null === $held ? $this->not_held( $id ) : $this->may_release( $held, HeldSite::ABANDON, $confirm );
+		if ( '' !== $why ) {
+			return self::outcome( false, $why );
+		}
+		$job = $held['job'];
+		if ( Job::REASON_ABANDONED === $job->failure_reason ) {
+			// Once is the record: abandoning it again would make it this installation's to have given up.
+			/* translators: %d: job id */
+			return self::outcome( false, sprintf( __( 'Job %d was already abandoned from another installation; nothing was changed.', 'wp-checkpoint' ), $job->id ) );
+		}
+		if ( ! $this->repository->holds_own_token() ) {
+			// abandon_held() would refuse: the file must not go first for a refusal known in advance.
+			return self::outcome( false, __( 'This installation holds no storage token of its own yet (it was found to be a copy, and that is not settled): settle it on the plugin\'s page first, then abandon the job. Nothing was changed.', 'wp-checkpoint' ) );
+		}
+		try {
+			$gone = ! $held['assessment']['file_here'] || $this->held->release( $job, $held['assessment'] );
+		} catch ( \RuntimeException $e ) {
+			$gone = false;
+		}
+		if ( ! $gone ) {
+			return self::outcome( false, __( 'This job\'s maintenance file could not be taken down, so the job was not abandoned; nothing else was changed. Try again.', 'wp-checkpoint' ) );
+		}
+		$this->held->at( 'abandon_released' );
+		/* translators: %s: the WordPress directory the job's plan records */
+		$message = sprintf( __( 'Abandoned from another WordPress directory (wp wpcheckpoint job abandon). The site its plan was written for, at %s, may hold tables and directories half swapped.', 'wp-checkpoint' ), $held['assessment']['recorded'] );
+		try {
+			$this->repository->abandon_held( $job, $message );
+		} catch ( StaleJob $e ) {
+			return self::outcome( false, __( 'The job changed meanwhile, or a run holds it; it was not abandoned (its maintenance file here is down). Try again.', 'wp-checkpoint' ) );
+		}
+		// Nothing of it is reclaimed (JobRepository::reclaim_scope()): its tables, the ones its swap moved aside among
+		// them, are what that site needs to roll the restore back, if this database is shared with it after all.
+		/* translators: 1: job id, 2: the WordPress directory the job's plan records */
+		return self::outcome( true, sprintf( __( 'Job %1$d was abandoned: it never runs again from this installation. Its tables are kept, the ones its swap moved aside (named wcpold…) among them, and nothing at the paths its plan records is touched. If this database is shared with the site at %2$s after all, that site stays half swapped. While an abandoned restore exists, uninstalling WP Checkpoint leaves everything in place: nothing cleans one up yet.', 'wp-checkpoint' ), $job->id, $held['assessment']['recorded'] ) );
+	}
+
+	/**
+	 * What to do from here with a job that holds the site, is managed elsewhere and is not this site's as far as can
+	 * be told: the two ways, by whether the database is shared.
+	 *
+	 * @param Job                  $job Job.
+	 * @param array<string, mixed> $see HeldSite::assess().
+	 * @return string
+	 */
+	public static function holding_paths( Job $job, array $see ): string {
+		return sprintf(
+			/* translators: 1: the WordPress directory the job's plan records, 2: job id, 3: the abandon command */
+			__( 'The restore still holds the site, so its maintenance file stays up here. If this database is shared with the site at %1$s: finish the restore or roll it back there; afterwards take its file down here with wp wpcheckpoint job release %2$d. If it is not shared: %3$s (it takes the file down too; the restore\'s tables are kept, the ones its swap moved aside among them).', 'wp-checkpoint' ),
+			'' === $see['recorded'] ? __( '(not recorded)', 'wp-checkpoint' ) : $see['recorded'],
+			$job->id,
+			$see['differs'] ? 'wp wpcheckpoint job abandon ' . $job->id . ' --confirm=' . HeldSite::code( HeldSite::ABANDON, $job, (string) $see['recorded'] ) : __( 'nothing can be done from this WordPress directory (it is not positively another than that one)', 'wp-checkpoint' )
+		);
+	}
+
+	/**
+	 * What to say of a job abandoned from another installation, wherever it is seen from (it holds the site everywhere
+	 * but there): this may be the site it left half swapped.
+	 *
+	 * @param Job                  $job Job.
+	 * @param array<string, mixed> $see HeldSite::assess().
+	 * @return string
+	 */
+	public static function abandoned_elsewhere( Job $job, array $see ): string {
+		$how = HeldSite::SITE === $see['branch']
+			? __( 'If the restore is this site\'s, take it over here and finish it or roll it back: wp wpcheckpoint job status shows how.', 'wp-checkpoint' )
+			: __( 'As far as can be told from here it is not this site\'s, and nothing can be done with it from this WordPress directory.', 'wp-checkpoint' );
+		/* translators: 1: job id, 2: what can be done */
+		return sprintf( __( 'Restore job %1$d was abandoned from another installation of WP Checkpoint, which said its database is not shared with this site. This site may still be half swapped by it: the restore holds the site here, and its maintenance file stays, until it is taken over (nothing cleans up an abandoned restore yet). %2$s', 'wp-checkpoint' ), $job->id, $how );
+	}
+
+	/**
+	 * Why a job managed elsewhere may not be released or abandoned from here, or ''.
+	 *
+	 * @param array{job: Job, assessment: array<string, mixed>} $held    held_elsewhere().
+	 * @param string                                            $action  HeldSite::RELEASE or ABANDON.
+	 * @param string                                            $confirm The confirmation code.
+	 * @return string
+	 */
+	private function may_release( array $held, string $action, string $confirm ): string {
+		$see = $held['assessment'];
+		if ( HeldSite::SITE === $see['branch'] ) {
+			return __( 'As far as can be told from here, the job is this site\'s: take it over instead (wp wpcheckpoint job status shows how).', 'wp-checkpoint' );
+		}
+		$why = HeldSite::not_another( $see );
+		if ( '' !== $why ) {
+			return $why;
+		}
+		if ( ! hash_equals( HeldSite::code( $action, $held['job'], (string) $see['recorded'] ), $confirm ) ) {
+			return __( 'The confirmation code is not this job\'s; wp wpcheckpoint job status shows the command with its code.', 'wp-checkpoint' );
+		}
+		return '';
+	}
+
+	/**
+	 * Why a job is none that holds the site and is managed elsewhere.
+	 *
+	 * @param int $id Job id.
+	 * @return string
+	 */
+	private function not_held( int $id ): string {
+		$job = $this->repository->find( $id );
+		if ( null === $job ) {
+			return __( 'No such job.', 'wp-checkpoint' );
+		}
+		if ( Job::REASON_ABANDONED === $job->failure_reason ) {
+			return __( 'The job was abandoned; there is nothing more to do with it.', 'wp-checkpoint' );
+		}
+		if ( Job::SITE_UNTOUCHED === $job->site_state || in_array( $job->status, array( Job::COMPLETED, Job::CANCELLED ), true ) ) {
+			return __( 'The job does not hold the site changed.', 'wp-checkpoint' );
+		}
+		return __( 'This installation manages the job: run it with wp wpcheckpoint job run.', 'wp-checkpoint' );
+	}
+
+	/**
+	 * An outcome.
+	 *
+	 * @param bool   $ok      Whether it was done.
+	 * @param string $message What to say.
+	 * @return array{ok: bool, message: string}
+	 */
+	private static function outcome( bool $ok, string $message ): array {
+		return array(
+			'ok'      => $ok,
+			'message' => $message,
+		);
 	}
 
 	/**
@@ -628,8 +933,12 @@ final class JobActions {
 	 *                                                            stops), "unavailable" (the storage directory cannot be
 	 *                                                            used from here; nothing will clean up), "requested"
 	 *                                                            (a restore's swap is under way: it is rolled back, then
-	 *                                                            the job is cancelled) or "swapped" (refused: the restored
-	 *                                                            site is in place; the job is not cancelled).
+	 *                                                            the job is cancelled), "swapped" (refused: the restored
+	 *                                                            site is in place; the job is not cancelled),
+	 *                                                            "elsewhere" (refused: it holds the site and another
+	 *                                                            installation manages it, JobRepository::manages()) or
+	 *                                                            "abandoned" (refused: a cancel request would turn a
+	 *                                                            later take-over's "continue" into a rollback).
 	 * @throws InvalidTransition When the job is already finished.
 	 * @throws StaleJob When the job changed meanwhile.
 	 */
@@ -637,6 +946,22 @@ final class JobActions {
 		$job = $this->repository->find( $id );
 		if ( null === $job ) {
 			return null;
+		}
+		if ( Job::REASON_ABANDONED === $job->failure_reason ) {
+			// Refused: a cancel request on its row would end a later take-over's "continue" cancelled, not retryable.
+			return array(
+				'job'     => $job,
+				'cleaned' => false,
+				'reason'  => 'abandoned',
+			);
+		}
+		if ( Job::SITE_UNTOUCHED !== $job->site_state && ! $this->repository->manages( $job ) ) {
+			// Refused: another installation manages it (its rollback would run there, or nowhere).
+			return array(
+				'job'     => $job,
+				'cleaned' => false,
+				'reason'  => 'elsewhere',
+			);
 		}
 		if ( Job::SITE_CHANGING === $job->site_state ) {
 			// Its step rolls the site back first (in WP-CLI), then cancels it; nothing is taken from it here.

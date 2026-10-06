@@ -53,6 +53,45 @@ final class Job {
 	const REASON_TABLE_CHANGED = 'table_changed';
 
 	/**
+	 * A job that held the site changed, given up from another WordPress directory after the site's identity changed
+	 * (wp wpcheckpoint job abandon, Jobs\HeldSite): it never runs again, and nothing of it is reclaimed.
+	 */
+	const REASON_ABANDONED = 'abandoned';
+
+	/**
+	 * The reasons a final failure may carry (stamp_failure() writes them, parse_failure() reads them).
+	 */
+	const REASONS = array( self::REASON_TABLE_CHANGED, self::REASON_ABANDONED );
+
+	/**
+	 * The one rule for which storage token manages a job now (who may run it, cancel it, reclaim its work, warn
+	 * about it): the token of the installation that took it over (held_by), else the one it was started with.
+	 * Nothing else compares storage_token for ownership; storage_token stays what the job's names are made from
+	 * and checked against (tests/unit/Jobs/ManagingTokenUsageTest.php).
+	 *
+	 * @param string $storage_token The job's storage token.
+	 * @param string $held_by       The token that took it over, or ''.
+	 * @return string
+	 */
+	public static function managing( string $storage_token, string $held_by ): string {
+		return '' !== $held_by ? $held_by : $storage_token;
+	}
+
+	/**
+	 * The same rule in SQL, over the jobs table's columns (for the compare-and-set statements).
+	 */
+	const MANAGING_SQL = "(CASE WHEN held_by <> '' THEN held_by ELSE storage_token END)";
+
+	/**
+	 * The storage token that manages this job now (managing()).
+	 *
+	 * @return string
+	 */
+	public function managing_token(): string {
+		return self::managing( $this->storage_token, $this->held_by );
+	}
+
+	/**
 	 * Whether the job is paused because a step asked for a decision. Such
 	 * a job is not ticked until JobRepository::answer() stored the answers;
 	 * a paused job without questions is resumed by the next tick.
@@ -95,7 +134,7 @@ final class Job {
 	 *
 	 * @param string $stored      failure_kind column.
 	 * @param int    $finished_at finished_at column.
-	 * @return string REASON_TABLE_CHANGED or ''.
+	 * @return string One of REASONS, or ''.
 	 */
 	public static function read_failure_reason( string $stored, int $finished_at ): string {
 		return self::parse_failure( $stored, $finished_at )[1];
@@ -116,7 +155,7 @@ final class Job {
 		if ( 1 === count( $parts ) && in_array( $parts[0], array( self::FAILURE_TEMPORARY, self::FAILURE_FINAL ), true ) ) {
 			return $parts[0] . ':' . $now;
 		}
-		if ( 2 === count( $parts ) && self::FAILURE_FINAL === $parts[0] && self::REASON_TABLE_CHANGED === $parts[1] ) {
+		if ( 2 === count( $parts ) && self::FAILURE_FINAL === $parts[0] && in_array( $parts[1], self::REASONS, true ) ) {
 			return $parts[0] . ':' . $now . ':' . $parts[1];
 		}
 		return '';
@@ -136,7 +175,7 @@ final class Job {
 		if ( ( 2 !== $count && 3 !== $count ) || ! in_array( $parts[0], array( self::FAILURE_TEMPORARY, self::FAILURE_FINAL ), true ) ) {
 			return array( '', '' );
 		}
-		if ( 3 === $count && ( self::FAILURE_FINAL !== $parts[0] || self::REASON_TABLE_CHANGED !== $parts[2] ) ) {
+		if ( 3 === $count && ( self::FAILURE_FINAL !== $parts[0] || ! in_array( $parts[2], self::REASONS, true ) ) ) {
 			return array( '', '' ); // A reason this code does not know: no kind, Retry offered.
 		}
 		if ( ! ctype_digit( $parts[1] ) || $finished_at <= 0 || (int) $parts[1] !== $finished_at ) {
@@ -281,6 +320,24 @@ final class Job {
 	 * @var string
 	 */
 	public $storage_path = '';
+
+	/**
+	 * The token of the installation that took over this job while it holds the site, after the site's identity
+	 * changed (wp wpcheckpoint job rebind); '' when none did. The job keeps its storage_token: the names of what it
+	 * made (staging roots, temporary and old tables, its ledger) carry that one.
+	 *
+	 * @var string
+	 */
+	public $held_by = '';
+
+	/**
+	 * The mark of the maintenance file the job's swap holds the site with (Restore\Maintenance), written by the Runner
+	 * from the step's cursor (MarksSite) in the statement that writes the cursor, and kept once the job ended: what
+	 * tells this job's file from any other, after the cursor is gone ('' when it never had one).
+	 *
+	 * @var string
+	 */
+	public $site_mark = '';
 
 	/**
 	 * Log file path relative to the storage base directory, e.g. "logs/job-3-ab12cd34.log".

@@ -11,6 +11,7 @@ use WPCheckpoint\Jobs\RestoreJob;
 use WPCheckpoint\Jobs\Runner;
 use WPCheckpoint\Jobs\SwapCheckStep;
 use WPCheckpoint\Jobs\SwapStep;
+use WPCheckpoint\Jobs\TempTables;
 use WPCheckpoint\Jobs\TickResult;
 use WPCheckpoint\Plugin;
 use WPCheckpoint\Restore\ImportSession;
@@ -18,6 +19,8 @@ use WPCheckpoint\Restore\RestoreFiles;
 use WPCheckpoint\Restore\SwapPlan;
 use WPCheckpoint\Restore\SwapRules;
 use WPCheckpoint\Standalone\Credentials;
+use WPCheckpoint\Jobs\JobRepository;
+use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Support\Redactor;
 use WPCheckpoint\Tests\Fixtures\Sandbox;
 
@@ -71,6 +74,37 @@ abstract class SwapTestCase extends RestoreTestCase {
 
 	/** @var string A file the killed child appends every seam it passes to ('' for none). */
 	protected $trace = '';
+
+	/**
+	 * The installation the test's restore runs under, as the context of its Directories (an empty array: the
+	 * plugin's own). Its storage directory holds the backups and the restore's work, and its token is the job's:
+	 * the restore is created, run up to the swap and killed (in the child too) with that installation's jobs.
+	 *
+	 * @var array<string, mixed>
+	 */
+	protected $storage = array();
+
+	/**
+	 * The installation the test's restore runs under (see $storage), a fresh instance.
+	 *
+	 * @return Directories
+	 */
+	protected function installation(): Directories {
+		return array() === $this->storage ? Plugin::instance()->directories() : new Directories( $this->storage );
+	}
+
+	/**
+	 * Its jobs.
+	 *
+	 * @return JobRepository
+	 */
+	protected function installation_jobs(): JobRepository {
+		return array() === $this->storage ? Plugin::instance()->jobs() : new JobRepository( $this->installation() );
+	}
+
+	protected function backups_dir(): string {
+		return $this->installation()->backups();
+	}
 
 	public function set_up(): void {
 		parent::set_up();
@@ -135,6 +169,7 @@ abstract class SwapTestCase extends RestoreTestCase {
 	 * @return void
 	 */
 	protected function tear_down_swap(): void {
+		$this->discard_abandoned();
 		if ( null !== $this->swap_job ) {
 			$this->undo( $this->swap_job );
 			$this->swap_job = null;
@@ -191,13 +226,19 @@ abstract class SwapTestCase extends RestoreTestCase {
 		$dirs  = function (): array {
 			return $this->dirs;
 		};
-		$steps = array();
-		foreach ( Plugin::instance()->job_types()->get( RestoreJob::ID )->steps() as $step ) {
+		$steps   = array();
+		$restore = new RestoreJob(
+			function (): Directories {
+				return $this->installation();
+			},
+			array( Plugin::instance()->job_presenter(), 'clean' )
+		);
+		foreach ( $restore->steps() as $step ) {
 			switch ( $step->id() ) {
 				case \WPCheckpoint\Jobs\RestorePreflightStep::ID:
 					$steps[] = new \WPCheckpoint\Jobs\RestorePreflightStep(
-						static function (): string {
-							return Plugin::instance()->directories()->backups();
+						function (): string {
+							return $this->backups_dir();
 						},
 						\WPCheckpoint\Jobs\RestorePreflightStep::HEAD_BYTES,
 						$this->preflight_parts
@@ -218,7 +259,7 @@ abstract class SwapTestCase extends RestoreTestCase {
 					$steps[] = new FileStagingStep( $this->staging_parts() );
 					break;
 				case SwapCheckStep::ID:
-					$steps[] = new SwapCheckStep( null, $this->check_parts( array( 'site_dirs' => $dirs ) ) );
+					$steps[] = new SwapCheckStep( null, $this->check_parts( array( 'site_dirs' => $dirs, 'abspath' => $this->abspath ) ) );
 					break;
 				default:
 					$steps[] = $step;
@@ -301,8 +342,9 @@ abstract class SwapTestCase extends RestoreTestCase {
 		}
 		// The restore must bring the options (and a network's sitemeta): the restored site's list of active plugins.
 		$exclude = array_values( array_diff( self::live_tables(), array_merge( array( $wpdb->prefix . 'swt_keep', $wpdb->prefix . 'swt_gone' ), self::site_tables() ) ) );
-		$job     = Plugin::instance()->jobs()->create( $this->type, self::$admin_id, array(), array_merge( array( 'base' => $base, 'exclude_tables' => $exclude ), $options ) );
-		$runner  = Plugin::instance()->runner();
+		$jobs    = $this->installation_jobs();
+		$job     = $jobs->create( $this->type, self::$admin_id, array(), array_merge( array( 'base' => $base, 'exclude_tables' => $exclude ), $options ) );
+		$runner  = array() === $this->storage ? Plugin::instance()->runner() : new Runner( $jobs, Plugin::instance()->job_types(), new Redactor( Redactor::installation_secrets() ) );
 		for ( $i = 0; $i < 500; $i++ ) {
 			$result = $runner->tick( $job->id, microtime( true ) );
 			$now    = Plugin::instance()->jobs()->find( $job->id );
@@ -406,6 +448,7 @@ abstract class SwapTestCase extends RestoreTestCase {
 					'trace'   => $this->trace,
 					'sql_at'  => $this->child_sql,
 					'admin'   => self::$admin_id,
+					'storage' => $this->storage,
 				)
 			)
 		);
@@ -432,14 +475,35 @@ abstract class SwapTestCase extends RestoreTestCase {
 		$db   = ImportSession::open( Credentials::from_wordpress() );
 		$file = json_decode( (string) file_get_contents( RestoreFiles::path( $this->work( $job ), RestoreFiles::SWAP_PLAN ) ), true );
 		$out  = array(
+			'site'   => array(),
 			'dirs'   => array(),
 			'tables' => array(),
 		);
 		foreach ( ( new SwapPlan( $db, $wpdb->base_prefix . SwapPlan::TABLE ) )->read( $job->id, (int) $file['attempt'], -1, 100000 ) as $entry ) {
-			$out[ SwapPlan::DIR === $entry['kind'] ? 'dirs' : 'tables' ][] = $entry;
+			$out[ SwapPlan::SITE === $entry['kind'] ? 'site' : ( SwapPlan::DIR === $entry['kind'] ? 'dirs' : 'tables' ) ][] = $entry;
 		}
 		$db->close();
 		return $out;
+	}
+
+	/**
+	 * Put away what abandoned jobs keep on purpose (JobRepository::reclaim_scope(): nothing of an abandoned job is
+	 * reclaimed): the tables their swaps moved aside back (undo()), their temporary tables dropped. Only abandoned jobs:
+	 * anything else a test leaves is still a leak the leftover check reports.
+	 */
+	protected function discard_abandoned(): void {
+		global $wpdb;
+		$wpdb->query( 'COMMIT' );
+		foreach ( (array) $wpdb->get_col( 'SELECT id FROM ' . JobRepository::table() ) as $id ) { // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- the plugin's table.
+			$job = Plugin::instance()->jobs()->find( (int) $id );
+			if ( null === $job || Job::REASON_ABANDONED !== $job->failure_reason ) {
+				continue;
+			}
+			$this->undo( $job );
+			foreach ( (array) $wpdb->get_col( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( TempTables::job_prefix( $job->storage_token, $job->id ) ) . '%' ) ) as $table ) {
+				$wpdb->query( 'DROP TABLE `' . str_replace( '`', '', (string) $table ) . '`' ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- a listed table name.
+			}
+		}
 	}
 
 	/**

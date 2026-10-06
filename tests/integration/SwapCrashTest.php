@@ -711,6 +711,75 @@ final class SwapCrashTest extends SwapTestCase {
 		$this->assertSame( $before, $this->site() );
 	}
 
+	/**
+	 * @dataProvider site_columns
+	 */
+	public function test_a_plan_written_for_another_wordpress_directory_or_prefix_is_refused_and_kept( string $column ): void {
+		global $wpdb;
+		$job    = $this->at_swap();
+		$before = $this->site();
+		$plan   = $this->plan_of( $job );
+		$this->assertCount( 1, $plan['site'], 'the control: the plan records its site' );
+		$this->assertSame( 0, $plan['site'][0]['seq'], 'first' );
+		$this->assertSame( rtrim( str_replace( '\\', '/', (string) realpath( $this->abspath ) ), '/' ), $plan['site'][0]['live'] );
+		$this->assertSame( $wpdb->base_prefix, $plan['site'][0]['stage'] );
+		$value = 'live' === $column ? $plan['site'][0]['live'] . '-elsewhere' : 'other_';
+		$table = $wpdb->base_prefix . \WPCheckpoint\Restore\SwapPlan::TABLE;
+		$wpdb->query( $wpdb->prepare( "UPDATE `{$table}` SET {$column} = %s WHERE job_id = %d AND seq = 0", $value, $job->id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- a column name from the data provider.
+		$wpdb->query( 'COMMIT' );
+		$rows = static function () use ( $table, $job ): array {
+			global $wpdb;
+			$wpdb->query( 'COMMIT' );
+			return (array) $wpdb->get_results( $wpdb->prepare( "SELECT attempt, seq, kind, live, stage, old FROM `{$table}` WHERE job_id = %d ORDER BY attempt, seq", $job->id ), ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the plan table.
+		};
+		$evidence = $rows();
+		$done     = $this->cli_run( $job );
+		$this->assertSame( Job::FAILED, $done->status );
+		$this->assertSame( Job::FAILURE_FINAL, $done->failure_kind, 'retrying would refuse the same way' );
+		$this->assertStringContainsString( 'refused before it changed anything, and its plan is kept as it was written', (string) $done->last_error );
+		$this->assertArrayNotHasKey( JobRepository::RETRY_FROM_KEY, $done->cursor, 'no retry from the final check: it would write the plan again' );
+		$this->assertNotContains( 'entered', $this->seams, 'nothing was changed' );
+		$this->assertSame( $before, $this->site() );
+		$this->assertSame( $evidence, $rows(), 'the plan is kept as it was' );
+		// Retried all the same (from WP-CLI): refused again, and still nothing written over the plan.
+		Plugin::instance()->job_actions()->retry( $job->id );
+		$again = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( Job::FAILED, $again->status );
+		$this->assertSame( $evidence, $rows(), 'never written again' );
+		$this->assertSame( $before, $this->site() );
+	}
+
+	public function test_a_plan_from_before_the_site_entry_is_refused_for_that_reason(): void {
+		global $wpdb;
+		$job    = $this->at_swap();
+		$before = $this->site();
+		$table  = $wpdb->base_prefix . \WPCheckpoint\Restore\SwapPlan::TABLE;
+		// A plan an earlier version wrote: no site entry (its count, as the earlier version made it, one less).
+		$wpdb->query( $wpdb->prepare( "DELETE FROM `{$table}` WHERE job_id = %d AND kind = 'site'", $job->id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the plan table.
+		$wpdb->query( $wpdb->prepare( "UPDATE `{$table}` SET seq = seq - 1 WHERE job_id = %d AND kind <> 'complete' ORDER BY seq", $job->id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the plan table.
+		$wpdb->query( $wpdb->prepare( "UPDATE `{$table}` SET seq = seq - 1, live = CAST(CAST(live AS UNSIGNED) - 1 AS CHAR) WHERE job_id = %d AND kind = 'complete'", $job->id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the plan table.
+		$wpdb->query( 'COMMIT' );
+		$file = \WPCheckpoint\Restore\RestoreFiles::path( $this->work( $job ), \WPCheckpoint\Restore\RestoreFiles::SWAP_PLAN );
+		$plan = json_decode( (string) file_get_contents( $file ), true );
+		--$plan['entries'];
+		file_put_contents( $file, (string) wp_json_encode( $plan ) );
+		$done = $this->cli_run( $job );
+		$this->assertSame( Job::FAILED, $done->status );
+		$this->assertSame( Job::FAILURE_FINAL, $done->failure_kind );
+		$this->assertStringContainsString( 'written by an earlier version of WP Checkpoint, which did not record the site', (string) $done->last_error );
+		$this->assertSame( $before, $this->site() );
+	}
+
+	/**
+	 * @return array<string, array{0: string}>
+	 */
+	public function site_columns(): array {
+		return array(
+			'the WordPress directory' => array( 'live' ),
+			'the table prefix'        => array( 'stage' ),
+		);
+	}
+
 	public function test_a_table_whose_restored_copy_went_before_the_swap_is_left_as_it_is_and_said(): void {
 		global $wpdb;
 		$job    = $this->at_swap();

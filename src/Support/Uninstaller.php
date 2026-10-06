@@ -76,12 +76,12 @@ final class Uninstaller {
 	 */
 	public static function run(): void {
 		self::clear_transient_state();
-		$held = self::jobs_holding_the_site();
-		if ( 0 !== $held ) {
-			// A restore holds the site changed (its swap under way, or the site as it was kept for an undo): no job
-			// is cancelled, and its staging roots, old tables, job row and storage stay, whatever the user chose;
-			// the reason is logged. A count that cannot be read keeps them too.
-			error_log( sprintf( 'WP Checkpoint was uninstalled while %s; its staging next to the site, its tables and its storage directory were left in place so the site can still be put back. Reinstall WP Checkpoint to finish or undo the restore.', null === $held ? 'it could not tell whether a restore holds the site changed' : 'a restore holds the site changed' ) ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- uninstall has no screen to say it on.
+		$held = self::holding();
+		if ( null === $held || 0 !== $held['all'] ) {
+			// A restore holds the site changed (its swap under way, or the site as it was kept for an undo), or was
+			// abandoned: no job is cancelled, and its staging roots, old tables, job row and storage stay, whatever the
+			// user chose; the reason is logged. A count that cannot be read keeps them too.
+			error_log( self::held_back( $held ) ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- uninstall has no screen to say it on.
 			return;
 		}
 		self::cancel_jobs();
@@ -98,12 +98,44 @@ final class Uninstaller {
 	}
 
 	/**
-	 * How many jobs hold the site changed (Job::$site_state), or null when that cannot be read. A table without
-	 * the column (made before it existed) holds none.
+	 * How many jobs hold the site changed (Job::$site_state), or null when that cannot be read (holding()).
 	 *
 	 * @return int|null
 	 */
 	public static function jobs_holding_the_site() {
+		$held = self::holding();
+		return null === $held ? null : $held['all'];
+	}
+
+	/**
+	 * Why the uninstall left everything in place (logged: uninstall has no screen), from holding().
+	 *
+	 * @param array{all: int, abandoned: int}|null $held holding().
+	 * @return string
+	 */
+	public static function held_back( $held ): string {
+		$then = 'Reinstall WP Checkpoint to finish or undo the restore.';
+		if ( null === $held ) {
+			$why = 'it could not tell whether a restore holds the site changed';
+		} elseif ( $held['abandoned'] > 0 ) {
+			$why  = sprintf( 'a restore was abandoned (%d of the %d that hold a site changed): an abandoned restore keeps its tables, which the site it was started on may need to be put back if this database is shared with it', $held['abandoned'], $held['all'] );
+			$then = 'They stay until the site the restore was started on takes it over; nothing cleans an abandoned restore up yet.';
+		} else {
+			$why = 'a restore holds the site changed';
+		}
+		return sprintf( 'WP Checkpoint was uninstalled while %1$s; its staging next to the site, its tables and its storage directory were left in place so the site can still be put back. %2$s', $why, $then );
+	}
+
+	/**
+	 * How many jobs hold the site changed (Job::$site_state), and how many of them were abandoned; null when that
+	 * cannot be read. A table without the column (made before it existed) holds none. Every abandoned job counts,
+	 * whoever gave it up: which installation this is cannot be told here (uninstall runs without the plugin, and the
+	 * stored state may have been written by another installation sharing this database), and one abandoned from
+	 * elsewhere may have left this site half swapped, its staging what the site was.
+	 *
+	 * @return array{all: int, abandoned: int}|null
+	 */
+	public static function holding() {
 		global $wpdb;
 		$table = $wpdb->base_prefix . Schema::JOBS_TABLE;
 		// Each answer read with its error: a query that failed answers like "nothing" in wpdb, and nothing is not
@@ -115,7 +147,10 @@ final class Uninstaller {
 			return null;
 		}
 		if ( $table !== $there ) {
-			return 0;
+			return array(
+				'all'       => 0,
+				'abandoned' => 0,
+			);
 		}
 		self::expect();
 		$column = $wpdb->get_results( "SHOW COLUMNS FROM {$table} LIKE 'site_state'", ARRAY_A );
@@ -123,12 +158,27 @@ final class Uninstaller {
 			return null;
 		}
 		if ( array() === $column ) {
-			return 0;
+			return array(
+				'all'       => 0,
+				'abandoned' => 0,
+			);
 		}
 		self::expect();
-		$count = $wpdb->get_var( "SELECT COUNT(*) FROM {$table} WHERE site_state <> 0" );
+		$rows = $wpdb->get_results( "SELECT failure_kind, finished_at FROM {$table} WHERE site_state <> 0", ARRAY_N );
 		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-		return self::failed() || null === $count ? null : (int) $count;
+		if ( self::failed() || ! is_array( $rows ) ) {
+			return null;
+		}
+		$abandoned = 0;
+		foreach ( $rows as $row ) {
+			if ( Job::REASON_ABANDONED === Job::read_failure_reason( (string) $row[0], (int) $row[1] ) ) {
+				++$abandoned;
+			}
+		}
+		return array(
+			'all'       => count( $rows ),
+			'abandoned' => $abandoned,
+		);
 	}
 
 	/**
@@ -220,6 +270,22 @@ final class Uninstaller {
 			$part               = self::delete_tree( $entry['parent'], $entry['path'] );
 			$result['deleted'] += $part['deleted'];
 			$result['failed']   = array_merge( $result['failed'], $part['failed'] );
+		}
+		// The staging of jobs another installation started and this one took over, by the names they made (only those:
+		// JobRepository::reclaim_scope(); a job given up keeps its files, which are at the original site's paths).
+		$taken = \WPCheckpoint\Jobs\JobRepository::taken_over( Directories::own_tokens( $state ) );
+		foreach ( null === $taken ? array() : $taken as $job ) {
+			if ( \WPCheckpoint\Jobs\JobRepository::RECLAIM_ALL !== \WPCheckpoint\Jobs\JobRepository::reclaim_scope( $job, Directories::own_tokens( $state ) ) ) {
+				continue;
+			}
+			foreach ( Residue::scan_site( Residue::site_dirs( ScanRoots::site_directories() ), array( $job->storage_token ) ) as $entry ) {
+				if ( $entry['id'] !== $job->id || ( Residue::STAGE_DIR === $entry['kind'] && Residue::keeps_stray( $entry['path'] ) ) ) {
+					continue;
+				}
+				$part               = self::delete_tree( $entry['parent'], $entry['path'] );
+				$result['deleted'] += $part['deleted'];
+				$result['failed']   = array_merge( $result['failed'], $part['failed'] );
+			}
 		}
 		// A swap that died before its rename left a temporary maintenance file; never the maintenance file itself,
 		// which a swap only leaves while it holds the site (and then nothing is uninstalled).

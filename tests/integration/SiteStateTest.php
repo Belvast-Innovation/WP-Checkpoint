@@ -413,6 +413,106 @@ final class SiteStateTest extends WP_UnitTestCase {
 		$this->assertGreaterThan( 0, $ran );
 	}
 
+	public function test_a_job_another_installation_took_over_is_managed_by_that_installation_alone(): void {
+		global $wpdb;
+		$ran = 0;
+		$this->register(
+			'hold6',
+			array(
+				new CliHoldingStep(
+					'swap',
+					static function () use ( &$ran ): StepResult {
+						++$ran;
+						return StepResult::progress( array( 'site' => Job::SITE_CHANGING ), 50 );
+					}
+				),
+			)
+		);
+		$held = $this->repo->create( 'hold6' ); // Started by the original, with its token.
+		$this->set( $held->id, array( 'site_state' => Job::SITE_CHANGING, 'status' => Job::RUNNING ) );
+		$copy = $this->site( 'releases/b' );
+		$this->assertNotSame( '', $copy->base(), $copy->last_error() );
+		$theirs = (string) $copy->state()['token'];
+		$this->assertNotSame( $held->storage_token, $theirs, 'the control: the copy holds a token of its own' );
+		$repo    = $this->repo_for( $copy );
+		$actions = new JobActions( $repo, $this->runner( true, $repo ), new Loopback( false ) );
+		$job     = $repo->find( $held->id );
+		$this->assertFalse( $repo->manages( $job ), 'the control: not taken over, the copy does not manage it' );
+		$this->assertFalse( $repo->gate( $job )['allowed'] );
+		$this->assertNull( $repo->acquire( $held->id ) );
+		$this->assertSame( 'elsewhere', $actions->cancel( $held->id )['reason'], 'a cancel is refused, not requested' );
+		$this->assertSame( 0, (int) $this->row( $held->id )['cancel_requested'] );
+		$this->assertSame( (string) $held->storage_token, (string) $wpdb->get_var( $wpdb->prepare( 'SELECT ' . Job::MANAGING_SQL . ' FROM ' . Schema::jobs_table() . ' WHERE id = %d', $held->id ) ), 'the SQL form agrees: no held_by, the token it started with' );
+		// Taken over by the copy: the copy manages it, by held_by; its storage token (its names) stays.
+		$this->set( $held->id, array( 'held_by' => $theirs ) );
+		$job = $repo->find( $held->id );
+		$this->assertSame( $held->storage_token, $job->storage_token, 'the names stay with the token it started with' );
+		$this->assertSame( $theirs, $job->managing_token() );
+		$this->assertSame( $theirs, (string) $wpdb->get_var( $wpdb->prepare( 'SELECT ' . Job::MANAGING_SQL . ' FROM ' . Schema::jobs_table() . ' WHERE id = %d', $held->id ) ), 'the SQL form agrees: held_by' );
+		$this->assertTrue( $repo->manages( $job ) );
+		$this->assertTrue( $repo->gate( $job )['allowed'] );
+		$result = $this->runner( true, $repo )->tick( $held->id, $this->now );
+		$this->assertSame( TickResult::MORE, $result->status, (string) $result->message );
+		$this->assertGreaterThan( 0, $ran );
+		// The original no longer manages it: it does not run it, nor cancel it.
+		$job = $this->repo->find( $held->id );
+		$this->assertFalse( $this->repo->manages( $job ) );
+		$this->assertFalse( $this->repo->gate( $job )['allowed'] );
+		$this->now += JobRepository::LOCK_SECONDS + 1;
+		$this->assertNull( $this->repo->acquire( $held->id ), 'the compare-and-set goes by the managing token too' );
+		$mine = new JobActions( $this->repo, $this->runner( true ), new Loopback( false ) );
+		$this->assertSame( 'elsewhere', $mine->cancel( $held->id )['reason'] );
+		try {
+			$this->repo->request_cancel( $this->repo->find( $held->id ) ); // Past the check in JobActions: the statement itself.
+			$this->fail( 'a cancel request of a job another installation manages is refused' );
+		} catch ( StaleJob $e ) {
+			$this->assertSame( 0, (int) $this->row( $held->id )['cancel_requested'], 'and nothing was written' );
+		}
+		$this->assertSame( 'requested', $actions->cancel( $held->id )['reason'], 'the control: the copy that took it over may' );
+	}
+
+	public function test_the_lost_token_rule_goes_by_the_managing_token(): void {
+		$lost    = str_repeat( 'a', 12 );
+		$current = (string) $this->dirs->state()['token'];
+		$taken   = $this->job( array( 'status' => Job::QUEUED, 'storage_token' => $lost, 'held_by' => $current ) );
+		$left    = $this->job( array( 'status' => Job::QUEUED, 'storage_token' => $lost ) );
+		$state   = Options::get( Directories::OPTION, array() );
+		$state['lost_tokens'][ $lost ] = (int) $this->now;
+		Options::set( Directories::OPTION, $state );
+		$dirs = $this->site( 'releases/a' );
+		$this->assertNotSame( '', $dirs->base(), $dirs->last_error() );
+		$this->assertArrayHasKey( $lost, (array) $dirs->state()['lost_tokens'], 'the control: the token is recorded as lost' );
+		$repo = $this->repo_for( $dirs );
+		$this->assertSame( 1, $repo->settle_storage() );
+		$this->assertSame( Job::FAILED, $repo->find( $left->id )->status, 'the control: a job the lost token manages is failed' );
+		$this->assertSame( Job::FAILURE_FINAL, $repo->find( $left->id )->failure_kind );
+		$this->assertSame( Job::QUEUED, $repo->find( $taken->id )->status, 'a job taken over is managed by the token that took it over' );
+		$this->assertTrue( $repo->gate( $repo->find( $taken->id ) )['allowed'] );
+		// Taken over by yet another token: not the lost one's, so not failed as lost (the storage changed, retryable).
+		$state                         = Options::get( Directories::OPTION, array() );
+		$state['lost_tokens'][ $lost ] = (int) $this->now;
+		Options::set( Directories::OPTION, $state );
+		$elsewhere = $this->job( array( 'status' => Job::QUEUED, 'storage_token' => $lost, 'held_by' => str_repeat( 'b', 12 ) ) );
+		$repo      = $this->repo_for( $this->site( 'releases/a' ) );
+		$repo->settle_storage();
+		$this->assertSame( Job::FAILED, $repo->find( $elsewhere->id )->status );
+		$this->assertNotSame( Job::FAILURE_FINAL, $repo->find( $elsewhere->id )->failure_kind, 'not the lost token\'s rule' );
+	}
+
+	public function test_the_work_of_a_job_taken_over_is_not_an_orphan_of_another_token(): void {
+		$current = (string) $this->dirs->state()['token'];
+		$taken   = $this->job( array( 'status' => Job::QUEUED, 'storage_token' => 'ffffffffffff', 'held_by' => $current ) );
+		$theirs  = $this->job( array( 'status' => Job::QUEUED, 'storage_token' => 'ffffffffffff' ) );
+		$this->repo->reap_residue();
+		$this->assertFalse( $this->work_left( $theirs ), 'the control: another token\'s job here is an orphan' );
+		$this->assertTrue( $this->work_left( $taken ), 'a job this installation took over is not' );
+		// A cancel takes the lock by the managing token too, and cleans up here.
+		$actions = new JobActions( $this->repo, $this->runner( true ), new Loopback( false ) );
+		$this->assertSame( 'cleaned', $actions->cancel( $taken->id )['reason'] );
+		$other = $this->job( array( 'status' => Job::QUEUED, 'storage_token' => 'ffffffffffff' ) );
+		$this->assertNotSame( 'cleaned', $actions->cancel( $other->id )['reason'], 'the control: another token\'s job is not taken in hand here' );
+	}
+
 	public function test_a_copy_with_a_custom_directory_runs_none_of_the_originals_jobs_that_hold_the_site(): void {
 		$ran = 0;
 		$this->register(

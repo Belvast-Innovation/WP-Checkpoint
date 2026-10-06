@@ -12,6 +12,7 @@ use WPCheckpoint\Archive\ConcurrentWriter;
 use WPCheckpoint\Restore\BackupUnusable;
 use WPCheckpoint\Restore\LedgerOutdated;
 use WPCheckpoint\Restore\PlatformUnsupported;
+use WPCheckpoint\Restore\SiteChanged;
 use WPCheckpoint\Support\Environment;
 use WPCheckpoint\Support\Logger;
 use WPCheckpoint\Support\Redactor;
@@ -344,7 +345,7 @@ final class Runner {
 					if ( $advanced ) {
 						$state = $this->reset( $state );
 					}
-					$this->persist( $job, $token, $step_id, $cursor, $state, self::overall( $index, $count, $percent ), $message, $advanced, self::site_state_of( $step, $cursor ) );
+					$this->persist( $job, $token, $step_id, $cursor, $state, self::overall( $index, $count, $percent ), $message, $advanced, self::site_state_of( $step, $cursor ), self::site_mark_of( $step, $cursor ) );
 					$this->maybe_heartbeat( $job, $token );
 				},
 				$token
@@ -353,6 +354,7 @@ final class Runner {
 			try {
 				$result = $step->run( $context );
 				$held   = self::site_state_of( $step, $result->cursor ); // Checked here: a value out of range fails the job.
+				$mark   = self::site_mark_of( $step, $result->cursor );
 			} catch ( LockLost $e ) {
 				throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged.
 			} catch ( StaleJob $e ) {
@@ -401,6 +403,12 @@ final class Runner {
 					// any other failure, the retry continues this step.
 					$logger->error( 'A step named a step to retry from while the job holds the site changed', array( 'retry_from' => $e->step() ) );
 					return $this->fail( $job, $token, $logger, sprintf( 'Step "%s": %s', $step_id, $this->describe( $e ) ) );
+				}
+				if ( '' !== $job->held_by && '' === $this->repository->files_base( $job ) ) {
+					// Taken over from another installation (held_by), its files in the storage directory it was started
+					// with: a retry from here could not read them. Final, and said so.
+					$logger->error( 'A job taken over from another installation would retry from files that are not here', array( 'retry_from' => $e->step() ) );
+					return $this->fail( $job, $token, $logger, sprintf( 'Step "%1$s": %2$s %3$s', $step_id, $this->describe( $e ), __( 'This restore was taken over from another installation of WP Checkpoint, and its files are in the storage directory it was started with, not here: the site stays as it is. Start the restore again from here.', 'wp-checkpoint' ) ), Job::FAILURE_FINAL );
 				}
 				$from = array_search( $e->step(), $ids, true );
 				if ( false === $from || $from > $index ) {
@@ -457,7 +465,7 @@ final class Runner {
 						'reason'  => $result->message,
 					)
 				);
-				$this->persist( $job, $token, $step_id, $result->cursor, $state, $job->progress, $result->message, false, $held );
+				$this->persist( $job, $token, $step_id, $result->cursor, $state, $job->progress, $result->message, false, $held, $mark );
 				$this->release( $job, $token );
 				return new TickResult( TickResult::WAITING, $seconds, $job, $result->message );
 			}
@@ -472,7 +480,7 @@ final class Runner {
 						'questions' => count( $result->questions ),
 					)
 				);
-				$this->persist( $job, $token, $step_id, $result->cursor, $state, $job->progress, $result->message, false, $held );
+				$this->persist( $job, $token, $step_id, $result->cursor, $state, $job->progress, $result->message, false, $held, $mark );
 				try {
 					$this->repository->pause_for_answer( $job, $token, $result->questions );
 				} catch ( StaleJob $e ) {
@@ -499,12 +507,12 @@ final class Runner {
 						'attempt' => $state['no_progress'],
 					)
 				);
-				$this->persist( $job, $token, $step_id, $result->cursor, $state, $percent, $result->message, false, $held );
+				$this->persist( $job, $token, $step_id, $result->cursor, $state, $percent, $result->message, false, $held, $mark );
 				$this->release( $job, $token );
 				return new TickResult( TickResult::MORE, 0, $job, $result->message );
 			}
 			$state = $this->reset( $state );
-			$this->persist( $job, $token, $step_id, $result->cursor, $state, $percent, $result->message, true, $held );
+			$this->persist( $job, $token, $step_id, $result->cursor, $state, $percent, $result->message, true, $held, $mark );
 			$this->maybe_heartbeat( $job, $token );
 			if ( $context->should_stop() ) {
 				return $this->pause( $job, $token, $logger, $context->stop_reason() );
@@ -697,6 +705,17 @@ final class Runner {
 	}
 
 	/**
+	 * The maintenance file's mark a step's cursor carries (MarksSite), or null.
+	 *
+	 * @param Step                 $step   Step.
+	 * @param array<string, mixed> $cursor Cursor.
+	 * @return string|null
+	 */
+	private static function site_mark_of( Step $step, array $cursor ) {
+		return $step instanceof MarksSite ? $step::site_mark( JobContext::strip_reserved( $cursor ) ) : null;
+	}
+
+	/**
 	 * Build a step context.
 	 *
 	 * @param Job                  $job        Job.
@@ -808,10 +827,11 @@ final class Runner {
 	 * @param string                                $message  Progress text.
 	 * @param bool                                  $advanced Whether real progress was made (drives the stall timestamp).
 	 * @param int|null                              $site_state Job::SITE_* the cursor stands for (HoldsSite), or null to leave it.
+	 * @param string|null                           $site_mark  The maintenance file's mark the cursor carries (MarksSite), or null to leave it.
 	 * @return void
 	 * @throws LockLost When the write refused.
 	 */
-	private function persist( Job $job, string $token, string $step, array $cursor, array $state, int $percent, string $message, bool $advanced, $site_state = null ): void {
+	private function persist( Job $job, string $token, string $step, array $cursor, array $state, int $percent, string $message, bool $advanced, $site_state = null, $site_mark = null ): void {
 		$cursor                       = JobContext::strip_reserved( $cursor );
 		$cursor[ self::RESERVED_KEY ] = $state;
 		if ( null !== $this->on_persist ) {
@@ -820,7 +840,7 @@ final class Runner {
 			call_user_func( $this->on_persist, $job, $step, $cursor );
 		}
 		try {
-			$outrun = $this->repository->save_progress( $job, $token, $step, $cursor, $percent, $message, $advanced, $site_state );
+			$outrun = $this->repository->save_progress( $job, $token, $step, $cursor, $percent, $message, $advanced, $site_state, $site_mark );
 		} catch ( StaleJob $e ) {
 			throw new LockLost( $e->getMessage(), 0, $e ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
 		}
@@ -962,8 +982,9 @@ final class Runner {
 	 * The kind of failure an exception from a step means (Job::stamp_failure()):
 	 * final for lost work files, a table that changed under the export, a
 	 * restore ledger of an older version, a restore on a server this
-	 * version does not restore on and a backup whose file changed or is
-	 * damaged, no kind for anything else.
+	 * version does not restore on, a backup whose file changed or is
+	 * damaged and a swap's plan written for another site, no kind for
+	 * anything else.
 	 *
 	 * @param \Throwable $e Exception.
 	 * @return string
@@ -972,7 +993,7 @@ final class Runner {
 		if ( $e instanceof TableChanged ) {
 			return Job::FAILURE_FINAL . ':' . Job::REASON_TABLE_CHANGED;
 		}
-		return $e instanceof WorkLost || $e instanceof LedgerOutdated || $e instanceof PlatformUnsupported || $e instanceof BackupUnusable ? Job::FAILURE_FINAL : '';
+		return $e instanceof WorkLost || $e instanceof LedgerOutdated || $e instanceof PlatformUnsupported || $e instanceof BackupUnusable || $e instanceof SiteChanged ? Job::FAILURE_FINAL : '';
 	}
 
 	/**

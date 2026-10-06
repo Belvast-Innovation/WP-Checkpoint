@@ -148,6 +148,8 @@ final class SwapCheckTest extends RestoreTestCase {
 		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
 		$entries = $this->entries( $job );
 		$kinds   = array_count_values( array_column( $entries, 0 ) );
+		$this->assertSame( array( SwapPlan::SITE, rtrim( str_replace( '\\', '/', (string) realpath( ABSPATH ) ), '/' ), $q, '', false ), $entries[0], 'first the site it was written for: its WordPress directory, resolved, and its table prefix' );
+		$this->assertSame( 1, $kinds[ SwapPlan::SITE ] ?? 0 );
 		$dirs    = array_map(
 			'basename',
 			array_column(
@@ -172,7 +174,7 @@ final class SwapCheckTest extends RestoreTestCase {
 			array_filter(
 				$entries,
 				static function ( array $e ): bool {
-					return SwapPlan::DIR !== $e[0];
+					return SwapPlan::DIR !== $e[0] && SwapPlan::SITE !== $e[0];
 				}
 			),
 			1
@@ -182,7 +184,7 @@ final class SwapCheckTest extends RestoreTestCase {
 		foreach ( $entries as $entry ) {
 			$this->assertNotSame( $q . 'wpcheckpoint_jobs', $entry[1], 'the jobs table is never in the plan' );
 			$this->assertNotSame( $q . SwapPlan::TABLE, $entry[1] );
-			if ( SwapPlan::DIR !== $entry[0] ) {
+			if ( SwapPlan::DIR !== $entry[0] && SwapPlan::SITE !== $entry[0] ) {
 				$this->assertLessThanOrEqual( 60, strlen( $entry[3] ) );
 				$this->assertStringStartsWith( TempTables::OLD_PREFIX, $entry[3] );
 			}

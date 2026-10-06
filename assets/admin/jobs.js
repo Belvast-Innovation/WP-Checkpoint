@@ -127,6 +127,8 @@
 		setHidden( root.querySelector( '[data-action="dismiss"]' ), job.status !== 'failed' );
 		setText( root, 'stalled', job.stalled_text || '' );
 		setHidden( root.querySelector( '[data-field="stalled"]' ), ! job.stalled_text );
+		setText( root, 'held_elsewhere', job.held_elsewhere || '' );
+		setHidden( root.querySelector( '[data-field="held_elsewhere"]' ), ! job.held_elsewhere );
 		if ( layout !== 'decision' ) {
 			setHidden( root.querySelector( '[data-field="questions"]' ), true );
 		}
