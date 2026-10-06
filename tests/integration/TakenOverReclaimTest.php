@@ -197,6 +197,25 @@ final class TakenOverReclaimTest extends SwapTestCase {
 		\WPCheckpoint\Support\Schema::ensure(); // The test's tables back for what follows.
 	}
 
+	public function test_uninstall_keeps_the_tables_of_a_job_abandoned_from_here(): void {
+		global $wpdb;
+		$job     = $this->taken( 'dir_aside_recorded' );
+		$acts    = $this->actions( true );
+		$see     = $acts->held_elsewhere( $job->id )['assessment'];
+		$tables  = $this->left( $job->id )['tables'];
+		$this->assertNotSame( array(), $tables, 'the control: its tables are there' );
+		$this->assertTrue( $acts->abandon( $job->id, HeldSite::code( HeldSite::ABANDON, $job, $see['recorded'] ) )['ok'] );
+		$this->assertSame( array( $job->id ), array_map( static function ( Job $taken ): int { return $taken->id; }, (array) JobRepository::taken_over( Directories::own_tokens( Directories::load_state() ) ) ), 'the control: uninstall looks at it (given up from here)' );
+		// Uninstall with its data (the staging half looks at the real site's directories: MANUAL-TESTS).
+		\WPCheckpoint\Support\Schema::drop();
+		$this->assertSame( $tables, $this->left( $job->id )['tables'], 'its tables stay: the site it was started on may need them' );
+		// The job table went with the uninstall: put away what the job kept, as discard_abandoned() would have.
+		foreach ( $tables as $table ) {
+			$wpdb->query( 'DROP TABLE `' . $table . '`' ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- a listed table name.
+		}
+		\WPCheckpoint\Support\Schema::ensure(); // The test's tables back for what follows.
+	}
+
 	public function test_a_take_over_or_abandon_read_before_another_take_over_writes_nothing(): void {
 		global $wpdb;
 		$job = $this->taken( 'dir_aside_recorded' );
