@@ -313,7 +313,7 @@ final class JobActions {
 		// Nothing of it is reclaimed (JobRepository::reclaim_scope()): its tables, the ones its swap moved aside among
 		// them, are what that site needs to roll the restore back, if this database is shared with it after all.
 		/* translators: 1: job id, 2: the WordPress directory the job's plan records */
-		return self::outcome( true, sprintf( __( 'Job %1$d was abandoned: it never runs again from this installation. Its tables are kept, the ones its swap moved aside (named wcpold…) among them, and nothing at the paths its plan records is touched. If this database is shared with the site at %2$s after all, that site stays half swapped.', 'wp-checkpoint' ), $job->id, $held['assessment']['recorded'] ) );
+		return self::outcome( true, sprintf( __( 'Job %1$d was abandoned: it never runs again from this installation. Its tables are kept, the ones its swap moved aside (named wcpold…) among them, and nothing at the paths its plan records is touched. If this database is shared with the site at %2$s after all, that site stays half swapped. While an abandoned restore exists, uninstalling WP Checkpoint leaves everything in place: nothing cleans one up yet.', 'wp-checkpoint' ), $job->id, $held['assessment']['recorded'] ) );
 	}
 
 	/**
@@ -948,7 +948,7 @@ final class JobActions {
 			return null;
 		}
 		if ( Job::REASON_ABANDONED === $job->failure_reason ) {
-			// Refused: a cancel request on its row would turn a later take-over's "continue" into a rollback.
+			// Refused: a cancel request on its row would end a later take-over's "continue" cancelled, not retryable.
 			return array(
 				'job'     => $job,
 				'cleaned' => false,

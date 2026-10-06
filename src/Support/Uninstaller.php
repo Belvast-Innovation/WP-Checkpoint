@@ -85,6 +85,12 @@ final class Uninstaller {
 			return;
 		}
 		self::cancel_jobs();
+		// Read again before anything is removed, and again before the tables go: a swap may have started meanwhile
+		// (another installation sharing this database, a run still going after deactivation), and cancel_jobs() leaves
+		// a job that changed the site alone.
+		if ( self::held_meanwhile() ) {
+			return;
+		}
 		self::delete_site_residue();
 
 		if ( ! self::should_delete_data() ) {
@@ -92,9 +98,27 @@ final class Uninstaller {
 		}
 
 		self::delete_storage();
+		if ( self::held_meanwhile() ) {
+			return;
+		}
 		Schema::drop();
 		self::delete_options();
 		self::delete_user_meta();
+	}
+
+	/**
+	 * Whether a job holds the site changed now, or that cannot be read (holding()); the reason is logged.
+	 *
+	 * @phpstan-impure It reads the database each time.
+	 * @return bool
+	 */
+	private static function held_meanwhile(): bool {
+		$held = self::holding();
+		if ( null !== $held && 0 === $held['all'] ) {
+			return false;
+		}
+		error_log( self::held_back( $held ) ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- uninstall has no screen to say it on.
+		return true;
 	}
 
 	/**
@@ -114,14 +138,16 @@ final class Uninstaller {
 	 * @return string
 	 */
 	public static function held_back( $held ): string {
+		$then = 'Reinstall WP Checkpoint to finish or undo the restore.';
 		if ( null === $held ) {
 			$why = 'it could not tell whether a restore holds the site changed';
 		} elseif ( $held['abandoned'] > 0 ) {
-			$why = sprintf( 'a restore was abandoned (%d of the %d that hold a site changed): an abandoned restore keeps its tables, which the site it was started on may need to be put back if this database is shared with it, and nothing cleans an abandoned restore up yet', $held['abandoned'], $held['all'] );
+			$why  = sprintf( 'a restore was abandoned (%d of the %d that hold a site changed): an abandoned restore keeps its tables, which the site it was started on may need to be put back if this database is shared with it', $held['abandoned'], $held['all'] );
+			$then = 'They stay until the site the restore was started on takes it over; nothing cleans an abandoned restore up yet.';
 		} else {
 			$why = 'a restore holds the site changed';
 		}
-		return sprintf( 'WP Checkpoint was uninstalled while %s; its staging next to the site, its tables and its storage directory were left in place so the site can still be put back. Reinstall WP Checkpoint to finish or undo the restore.', $why );
+		return sprintf( 'WP Checkpoint was uninstalled while %1$s; its staging next to the site, its tables and its storage directory were left in place so the site can still be put back. %2$s', $why, $then );
 	}
 
 	/**
@@ -225,11 +251,12 @@ final class Uninstaller {
 		$state = Directories::load_state();
 		$path  = is_string( $state['path'] ) ? rtrim( $state['path'], '/\\' ) : '';
 		$live  = array( Job::QUEUED, Job::RUNNING, Job::PAUSED );
+		// Only jobs that have not changed the site: one that has holds the uninstall back (run() reads it again after).
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix.
-		$rows = $wpdb->get_results( $wpdb->prepare( "SELECT id, storage_path FROM {$table} WHERE status IN (%s, %s, %s)", $live[0], $live[1], $live[2] ), ARRAY_A );
+		$rows = $wpdb->get_results( $wpdb->prepare( "SELECT id, storage_path FROM {$table} WHERE status IN (%s, %s, %s) AND site_state = %d", $live[0], $live[1], $live[2], Job::SITE_UNTOUCHED ), ARRAY_A );
 		$now  = time();
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix.
-		$affected = $wpdb->query( $wpdb->prepare( "UPDATE {$table} SET status = %s, finished_at = %d, updated_at = %d, lock_token = '', locked_until = 0 WHERE status IN (%s, %s, %s)", Job::CANCELLED, $now, $now, $live[0], $live[1], $live[2] ) );
+		$affected = $wpdb->query( $wpdb->prepare( "UPDATE {$table} SET status = %s, finished_at = %d, updated_at = %d, lock_token = '', locked_until = 0 WHERE status IN (%s, %s, %s) AND site_state = %d", Job::CANCELLED, $now, $now, $live[0], $live[1], $live[2], Job::SITE_UNTOUCHED ) );
 		foreach ( is_array( $rows ) ? $rows : array() as $row ) {
 			// Only the current directory's files: another directory is another installation's.
 			if ( '' !== $path && Paths::same_location( (string) $row['storage_path'], $path ) ) {

@@ -480,10 +480,12 @@ final class JobRepository {
 	 * Let this installation manage a job that holds the site changed (wp wpcheckpoint job rebind): held_by becomes the
 	 * token of this request (Job::managing()), and the cancel request is written as $then says, in the same
 	 * statement: "rollback" records it (the site is put back, then the job is cancelled), "continue" clears one
-	 * recorded before (a cancel requested by whoever managed it would otherwise turn "continue" into a rollback), and
+	 * recorded before (a cancel requested by whoever managed it would otherwise end the job cancelled, for good,
+	 * where "continue" leaves it failed and retryable), and
 	 * '' (the direction is recorded: it only finishes) leaves it as it is (a recorded rollback ends as cancelled only
 	 * with it). One statement, on the job as read: its storage token (the one it was started
-	 * with, again on a second take-over), who managed it as read (held_by), still holding the site (changing, for a
+	 * with, again on a second take-over), who managed it as read (held_by), its cancel request as read (one recorded
+	 * meanwhile writes nothing: the choice was made without it), still holding the site (changing, for a
 	 * rollback), not ended, no live lock, and finished_at as read (an abandon moves it: a take-over read before it
 	 * writes nothing). Only with a token this installation holds, and the row managed by it afterwards. A job
 	 * abandoned from another installation is taken over too, and the abandon lifted.
@@ -520,13 +522,14 @@ final class JobRepository {
 		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber -- plugin table name from the prefix; $cancel holds one placeholder the sniff cannot see; the WHERE clause is the compare-and-set.
 		$affected = $wpdb->query(
 			$wpdb->prepare(
-				'UPDATE ' . self::table() . ' SET held_by = %s, cancel_requested = ' . $cancel . $lift . ', updated_at = %d WHERE id = %d AND storage_token = %s AND held_by = %s AND site_state ' . $state . ' AND status IN (%s, %s, %s, %s) AND finished_at = %d AND (lock_token = \'\' OR locked_until < %d)',
+				'UPDATE ' . self::table() . ' SET held_by = %s, cancel_requested = ' . $cancel . $lift . ', updated_at = %d WHERE id = %d AND storage_token = %s AND held_by = %s AND cancel_requested = %d AND site_state ' . $state . ' AND status IN (%s, %s, %s, %s) AND finished_at = %d AND (lock_token = \'\' OR locked_until < %d)',
 				$token,
 				$writes[ $then ][1],
 				$now,
 				$job->id,
 				$job->storage_token,
 				$job->held_by,
+				(int) $job->cancel_requested,
 				Job::QUEUED,
 				Job::RUNNING,
 				Job::PAUSED,
