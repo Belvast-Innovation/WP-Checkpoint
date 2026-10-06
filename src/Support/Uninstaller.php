@@ -7,7 +7,6 @@
 
 namespace WPCheckpoint\Support;
 
-use WPCheckpoint\Jobs\HeldSite;
 use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\JobRepository;
 use WPCheckpoint\Files\ScanRoots;
@@ -102,10 +101,9 @@ final class Uninstaller {
 	/**
 	 * How many jobs hold the site changed (Job::$site_state), or null when that cannot be read. A table without
 	 * the column (made before it existed) holds none. A job abandoned from this installation (held_by one of its
-	 * tokens: JobRepository::abandoned_by()) holds nothing any more; one abandoned from another installation still
-	 * counts, unless this WordPress directory is positively another than the one its plan records (HeldSite): if this
-	 * database is shared with it, this site may be the one its restore left half swapped, and its staging is what the
-	 * site was.
+	 * tokens: JobRepository::abandoned_by()) holds nothing any more; one abandoned from another installation counts,
+	 * wherever this is (as JobRepository::holds_site()): this site may be the one its restore left half swapped, and
+	 * its staging what the site was.
 	 *
 	 * @return int|null
 	 */
@@ -148,11 +146,8 @@ final class Uninstaller {
 			if ( null === $job ) {
 				return null;
 			}
-			if ( JobRepository::abandoned_by( $job, $own ) ) {
-				continue; // Given up from here: nothing is left for a reinstall to finish or undo.
-			}
-			if ( true !== ( new HeldSite() )->assess( $job )['differs'] ) {
-				++$count;
+			if ( ! JobRepository::abandoned_by( $job, $own ) ) {
+				++$count; // Given up from here, nothing is left for a reinstall to finish or undo; from elsewhere, it holds.
 			}
 		}
 		return $count;

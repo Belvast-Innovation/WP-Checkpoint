@@ -176,19 +176,6 @@ final class JobPresenter {
 	public static function held_lines( Job $job, array $see ): array {
 		$id        = $job->id;
 		$abandoned = Job::REASON_ABANDONED === $job->failure_reason;
-		if ( $abandoned && true === $see['differs'] ) {
-			// Abandoned from another installation, and this is positively another WordPress directory than the one its
-			// plan records: nothing of it is this site's; its file here, if any, may come down.
-			$recorded = (string) $see['recorded'];
-			return array(
-				/* translators: 1: job id, 2: the WordPress directory its plan records */
-				sprintf( __( 'Restore job %1$d was abandoned from another installation of WP Checkpoint; its plan was written for the WordPress directory %2$s, not this one.', 'wp-checkpoint' ), $id, $recorded ),
-				$see['file_here']
-					/* translators: %s: the release command */
-					? sprintf( __( 'Its maintenance file is in this WordPress directory, so this site answers only with a maintenance page. Take it down with: %s', 'wp-checkpoint' ), 'wp wpcheckpoint job release ' . $id . ' --confirm=' . HeldSite::code( HeldSite::RELEASE, $job, $recorded ) )
-					: __( 'This WordPress directory holds no maintenance file of it.', 'wp-checkpoint' ),
-			);
-		}
 		if ( $abandoned && HeldSite::SITE !== $see['branch'] ) {
 			return array( JobActions::abandoned_elsewhere( $job, $see ) );
 		}

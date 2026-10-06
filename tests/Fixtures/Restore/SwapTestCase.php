@@ -487,13 +487,6 @@ abstract class SwapTestCase extends RestoreTestCase {
 	}
 
 	/**
-	 * Put back whatever the swap moved (the swap's own rules, run as the rollback runs them), and remove the
-	 * maintenance file: what a committed swap leaves is not left behind a test.
-	 *
-	 * @param Job $job Job.
-	 * @return void
-	 */
-	/**
 	 * Put away what abandoned jobs keep on purpose (JobRepository::reclaim_scope(): nothing of an abandoned job is
 	 * reclaimed): the tables their swaps moved aside back (undo()), their temporary tables dropped. Only abandoned jobs:
 	 * anything else a test leaves is still a leak the leftover check reports.
@@ -513,6 +506,13 @@ abstract class SwapTestCase extends RestoreTestCase {
 		}
 	}
 
+	/**
+	 * Put back whatever the swap moved (the swap's own rules, run as the rollback runs them), and remove the
+	 * maintenance file: what a committed swap leaves is not left behind a test.
+	 *
+	 * @param Job $job Job.
+	 * @return void
+	 */
 	protected function undo( Job $job ): void {
 		global $wpdb;
 		$file = RestoreFiles::path( $this->work( $job ), RestoreFiles::SWAP_PLAN );

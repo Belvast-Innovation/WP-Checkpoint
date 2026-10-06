@@ -283,7 +283,7 @@ final class HeldSiteTest extends SwapTestCase {
 	 * token of its own (this site's recorded as copied, as its detection records it), seen from that directory. The
 	 * state is this request's only: the stored one stays this site's.
 	 */
-	private function another_installation(): JobActions {
+	private function another_installation( ?callable $at = null ): JobActions {
 		$dirs = new \WPCheckpoint\Support\Directories();
 		$dirs->base();
 		$state                    = $dirs->state();
@@ -298,11 +298,14 @@ final class HeldSiteTest extends SwapTestCase {
 			Plugin::instance()->runner(),
 			new Loopback( false ),
 			new HeldSite(
-				array(
-					'abspath'   => $this->copy_dir(),
-					'site_dirs' => function (): array {
-						return array( 'uploads' => $this->copy_dir() . '/wp-content/uploads' );
-					},
+				array_filter(
+					array(
+						'abspath'   => $this->copy_dir(),
+						'site_dirs' => function (): array {
+							return array( 'uploads' => $this->copy_dir() . '/wp-content/uploads' );
+						},
+						'at'        => $at,
+					)
 				)
 			)
 		);
@@ -326,7 +329,19 @@ final class HeldSiteTest extends SwapTestCase {
 		$this->assertTrue( $held['assessment']['differs'] );
 		$outcome = $copy->abandon( $job->id, HeldSite::code( HeldSite::ABANDON, $job, $held['assessment']['recorded'] ) );
 		$this->assertTrue( $outcome['ok'], $outcome['message'] );
+		$this->assertStringContainsString( 'that site stays half swapped.', $outcome['message'] );
+		$this->assertStringNotContainsString( 'take the restore over', $outcome['message'], 'no promise of a later take-over' );
 		$this->assertFalse( \WPCheckpoint\Restore\Maintenance::held_in( $this->copy_dir() ), 'the copy\'s file is down' );
+		// Not cancelled, from either side: a cancel request on its row would turn a take-over's "continue" into a
+		// rollback.
+		foreach ( array(
+			'the copy'  => $copy,
+			'this site' => $this->actions(),
+		) as $what => $acts ) {
+			$cancel = $acts->cancel( $job->id );
+			$this->assertSame( 'abandoned', $cancel['reason'], $what );
+			$this->assertSame( '0', (string) $this->row( $job->id )['cancel_requested'], $what . ': no cancel request recorded' );
+		}
 		$this->assertSame( self::ANOTHER, $this->row( $job->id )['held_by'], 'abandoned by the copy' );
 		$this->assertSame( $tables, $this->tables_of( $job ), 'its tables are kept, the ones moved aside among them' );
 		Plugin::instance()->jobs()->reap_residue();
@@ -363,6 +378,7 @@ final class HeldSiteTest extends SwapTestCase {
 		$this->assertTrue( $outcome['ok'], $outcome['message'] );
 		$now = Plugin::instance()->jobs()->find( $job->id );
 		$this->assertSame( '', $now->failure_reason, 'the abandon is lifted' );
+		$this->assertSame( '', (string) $now->last_error, 'and its message with it' );
 		$this->assertSame( (string) Plugin::instance()->directories()->state()['token'], $now->held_by );
 		Plugin::instance()->job_actions()->retry( $job->id );
 		$done = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
@@ -372,34 +388,61 @@ final class HeldSiteTest extends SwapTestCase {
 		$this->assertSame( array(), $this->tables_of( $done ), 'and its tables reclaimed once it ended here' );
 	}
 
-	public function test_release_of_a_job_abandoned_elsewhere_only_from_another_wordpress_directory(): void {
+	public function test_a_job_abandoned_elsewhere_is_released_only_where_it_was_given_up(): void {
+		global $wpdb;
 		$job = $this->at_swap();
 		$this->killed_at( $job, 'dir_aside_recorded' );
 		$job = Plugin::instance()->jobs()->find( $job->id );
-		copy( $this->abspath . '/.maintenance', $this->copy_dir() . '/.maintenance' );
 		$copy = $this->another_installation();
 		$see  = $copy->held_elsewhere( $job->id )['assessment'];
 		$this->assertTrue( $copy->abandon( $job->id, HeldSite::code( HeldSite::ABANDON, $job, $see['recorded'] ) )['ok'] );
 		$abandoned = Plugin::instance()->jobs()->find( $job->id );
-		// A third directory with the file (another copy): positively another than the plan's, so the file comes down.
+		$code      = HeldSite::code( HeldSite::RELEASE, $abandoned, $see['recorded'] );
+		// A third WordPress directory with the file (another copy): the job holds the site there too, whatever the
+		// directories say, until it is taken over or cleaned up.
 		$third = $this->sandbox . '/third';
 		mkdir( $third . '/wp-content/uploads', 0755, true );
 		copy( $this->abspath . '/.maintenance', $third . '/.maintenance' );
 		$there = new JobActions( Plugin::instance()->jobs(), Plugin::instance()->runner(), new Loopback( false ), new HeldSite( array( 'abspath' => $third ) ) );
-		$lines = implode( "\n", JobPresenter::held_lines( $abandoned, $there->held_elsewhere( $job->id )['assessment'] ) );
-		$code  = HeldSite::code( HeldSite::RELEASE, $abandoned, $see['recorded'] );
-		$this->assertStringContainsString( 'wp wpcheckpoint job release ' . $job->id . ' --confirm=' . $code, $lines, 'offered there' );
-		$outcome = $there->release( $job->id, $code );
-		$this->assertTrue( $outcome['ok'], $outcome['message'] );
-		$this->assertFalse( \WPCheckpoint\Restore\Maintenance::held_in( $third ), 'taken down at another directory' );
+		$from  = $there->held_elsewhere( $job->id );
+		$this->assertTrue( $from['assessment']['differs'], 'the control: positively another directory' );
+		$lines = implode( "\n", JobPresenter::held_lines( $from['job'], $from['assessment'] ) );
+		$this->assertStringContainsString( 'This site may still be half swapped by it', $lines );
+		$this->assertStringNotContainsString( 'job release', $lines, 'no release offered' );
+		foreach ( array(
+			'a third directory'          => array( $there, $third ),
+			'the directory it was for'   => array( $this->actions(), $this->abspath ),
+		) as $what => $at ) {
+			$outcome = $at[0]->release( $job->id, $code );
+			$this->assertFalse( $outcome['ok'], $what . ': refused' );
+			$this->assertStringContainsString( 'This site may still be half swapped by it', $outcome['message'], $what );
+			$this->assertTrue( \WPCheckpoint\Restore\Maintenance::held_in( $at[1] ), $what . ': the file stays' );
+		}
 		// Abandoned once: not again from another place (that would make it that installation's to have given up).
 		$again = $there->abandon( $job->id, HeldSite::code( HeldSite::ABANDON, $abandoned, $see['recorded'] ) );
 		$this->assertFalse( $again['ok'] );
 		$this->assertStringContainsString( 'already abandoned', $again['message'] );
 		$this->assertSame( self::ANOTHER, $this->row( $job->id )['held_by'], 'still the copy\'s to have given up' );
-		// The control: at the directory its plan records, the same command is refused.
-		$this->assertFalse( $this->actions()->release( $job->id, $code )['ok'] );
-		$this->assertTrue( \WPCheckpoint\Restore\Maintenance::held_in( $this->abspath ), 'the site keeps its file' );
+		// Where it was given up, it holds nothing: its file there comes down (the control, same command). Read again
+		// right before the file goes: given up by another meanwhile, it stays.
+		copy( $this->abspath . '/.maintenance', $this->copy_dir() . '/.maintenance' );
+		$racing = $this->another_installation(
+			static function ( string $point ) use ( $wpdb, $job ): void {
+				if ( 'release_confirmed' === $point ) {
+					$wpdb->update( JobRepository::table(), array( 'held_by' => self::ELSEWHERE ), array( 'id' => $job->id ) );
+					$wpdb->query( 'COMMIT' );
+				}
+			}
+		);
+		$outcome = $racing->release( $job->id, $code );
+		$this->assertFalse( $outcome['ok'], 'given up by another meanwhile: refused' );
+		$this->assertStringContainsString( 'This site may still be half swapped by it', $outcome['message'] );
+		$this->assertTrue( \WPCheckpoint\Restore\Maintenance::held_in( $this->copy_dir() ), 'the file stays' );
+		$wpdb->update( JobRepository::table(), array( 'held_by' => self::ANOTHER ), array( 'id' => $job->id ) );
+		$wpdb->query( 'COMMIT' );
+		$outcome = $copy->release( $job->id, $code );
+		$this->assertTrue( $outcome['ok'], $outcome['message'] );
+		$this->assertFalse( \WPCheckpoint\Restore\Maintenance::held_in( $this->copy_dir() ), 'released where it was given up' );
 	}
 
 	public function test_a_code_shown_before_another_take_over_confirms_nothing(): void {
@@ -494,7 +537,7 @@ final class HeldSiteTest extends SwapTestCase {
 		$this->assertNotSame( array(), $tables, 'the control: it made tables' );
 		$outcome = $acts->abandon( $job->id, $code );
 		$this->assertTrue( $outcome['ok'], $outcome['message'] );
-		$this->assertStringContainsString( 'that site stays half swapped; it can still take the restore over there', $outcome['message'] );
+		$this->assertStringContainsString( 'that site stays half swapped.', $outcome['message'] );
 		$this->assertStringContainsString( 'Its tables are kept, the ones its swap moved aside (named wcpold…) among them', $outcome['message'] );
 		$this->assertFileDoesNotExist( $this->copy_dir() . '/.maintenance' );
 		$now = Plugin::instance()->jobs()->find( $job->id );
@@ -505,26 +548,18 @@ final class HeldSiteTest extends SwapTestCase {
 		$this->assertSame( $site, $this->site(), 'the site it held is not touched: its paths, tables and file' );
 		$this->assertNotContains( $job->id, Plugin::instance()->jobs()->holding_site(), 'no longer warned about' );
 		$this->assertSame( 0, \WPCheckpoint\Support\Uninstaller::jobs_holding_the_site(), 'and an uninstall is not held back by it' );
-		// Abandoned from another installation (its token in held_by): an uninstall is held back where the site may be
-		// the one it left half swapped (the WordPress directory its plan records), not at another directory. The
-		// uninstall looks from this test site's own WordPress directory, which the plan does not record.
+		// Abandoned from another installation (its token in held_by): warned about and an uninstall held back wherever
+		// it is seen from; the uninstall here looks from this test site's own WordPress directory, which is positively
+		// another than the one the plan records, and still counts it.
 		global $wpdb;
-		$own   = $this->row( $job->id )['held_by'];
-		$plan  = $wpdb->base_prefix . \WPCheckpoint\Restore\SwapPlan::TABLE;
-		$where = function ( string $live ) use ( $wpdb, $plan, $job ): void {
-			$wpdb->query( $wpdb->prepare( "UPDATE `{$plan}` SET live = %s WHERE job_id = %d AND kind = 'site'", $live, $job->id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the plan table.
-			$wpdb->query( 'COMMIT' );
-		};
-		$recorded = (string) $wpdb->get_var( $wpdb->prepare( "SELECT live FROM `{$plan}` WHERE job_id = %d AND kind = 'site'", $job->id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the plan table.
+		$own = $this->row( $job->id )['held_by'];
 		$wpdb->update( JobRepository::table(), array( 'held_by' => self::ELSEWHERE ), array( 'id' => $job->id ) );
 		$wpdb->query( 'COMMIT' );
 		$this->assertContains( $job->id, Plugin::instance()->jobs()->holding_site(), 'abandoned elsewhere: warned about' );
-		$this->assertSame( 0, \WPCheckpoint\Support\Uninstaller::jobs_holding_the_site(), 'abandoned elsewhere, seen from another WordPress directory: not held back' );
-		$where( (string) realpath( ABSPATH ) );
-		$this->assertSame( 1, \WPCheckpoint\Support\Uninstaller::jobs_holding_the_site(), 'abandoned elsewhere, seen from the WordPress directory its plan records: held back' );
-		$where( $recorded );
+		$this->assertSame( 1, \WPCheckpoint\Support\Uninstaller::jobs_holding_the_site(), 'abandoned elsewhere: an uninstall is held back, whatever the directories' );
 		$wpdb->update( JobRepository::table(), array( 'held_by' => $own ), array( 'id' => $job->id ) );
 		$wpdb->query( 'COMMIT' );
+		$this->assertSame( 0, \WPCheckpoint\Support\Uninstaller::jobs_holding_the_site(), 'the control: abandoned here again, not held back' );
 		$this->assertNull( $acts->held_elsewhere( $job->id ) );
 		try {
 			Plugin::instance()->job_actions()->retry( $job->id );

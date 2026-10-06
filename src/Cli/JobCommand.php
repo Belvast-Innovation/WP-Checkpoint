@@ -419,15 +419,15 @@ final class JobCommand {
 
 	/**
 	 * What the cancel command says for an outcome (JobActions::cancel()): refused when the restored site is in place
-	 * ("swapped") or another installation manages the job ("elsewhere"), both errors; otherwise what was done or
-	 * requested.
+	 * ("swapped"), another installation manages the job ("elsewhere") or it was abandoned ("abandoned"), all errors;
+	 * otherwise what was done or requested.
 	 *
 	 * @param string $reason The outcome's reason.
 	 * @return array{error: bool, message: string}
 	 */
 	public static function cancel_verdict( string $reason ): array {
 		return array(
-			'error'   => in_array( $reason, array( 'swapped', 'elsewhere' ), true ),
+			'error'   => in_array( $reason, array( 'swapped', 'elsewhere', 'abandoned' ), true ),
 			'message' => \WPCheckpoint\Rest\JobsController::cancel_message( $reason ),
 		);
 	}
@@ -449,7 +449,7 @@ final class JobCommand {
 				WP_CLI::error(
 					$this->actions->abandoned_here( $current )
 						? __( 'The job was abandoned; it is not run again.', 'wp-checkpoint' )
-						: __( 'The job was abandoned from another installation; to run it here, take it over first (wp wpcheckpoint job status shows how).', 'wp-checkpoint' )
+						: __( 'The job was abandoned from another installation; it runs again only once the site it was started on takes it over (wp wpcheckpoint job status says whether this is that site).', 'wp-checkpoint' )
 				);
 			}
 			if ( null !== $current && Job::FAILED === $current->status && ! $current->can_retry() ) {

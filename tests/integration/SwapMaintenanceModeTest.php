@@ -206,6 +206,50 @@ final class SwapMaintenanceModeTest extends SwapTestCase {
 		$this->assertSame( array(), Plugin::instance()->half_swapped_warnings(), 'the control: nothing once it ended' );
 	}
 
+	public function test_the_notice_offers_release_for_a_job_abandoned_here_and_not_for_one_abandoned_elsewhere(): void {
+		global $wpdb;
+		$job = $this->at_swap();
+		$this->killed_at( $job, 'dir_aside_recorded' );
+		$job  = Plugin::instance()->jobs()->find( $job->id );
+		$file = new Maintenance( $this->abspath, (string) $job->site_mark );
+		try {
+			$this->assertTrue( $file->is_held(), 'the control: the site here is behind its held file' );
+			// Abandoned by this installation, from a copy of the site in another WordPress directory (the copy's file
+			// is the copy's; the one here stays).
+			$copy = $this->sandbox . '/copy';
+			mkdir( $copy . '/wp-content/uploads', 0755, true );
+			$acts = new \WPCheckpoint\Jobs\JobActions(
+				Plugin::instance()->jobs(),
+				Plugin::instance()->runner(),
+				new \WPCheckpoint\Jobs\Loopback( false ),
+				new \WPCheckpoint\Jobs\HeldSite( array( 'abspath' => $copy ) )
+			);
+			$wpdb->update( JobRepository::table(), array( 'held_by' => 'ffffffffffff' ), array( 'id' => $job->id ) ); // Managed elsewhere, so it can be given up.
+			$wpdb->query( 'COMMIT' );
+			$see = $acts->held_elsewhere( $job->id )['assessment'];
+			$this->assertTrue( $acts->abandon( $job->id, \WPCheckpoint\Jobs\HeldSite::code( \WPCheckpoint\Jobs\HeldSite::ABANDON, Plugin::instance()->jobs()->find( $job->id ), $see['recorded'] ) )['ok'] );
+			$this->assertTrue( $file->is_held(), 'the file here stays' );
+			$none = static function (): array {
+				return array(); // The notice's own path (ended_owner()): no job listed as holding the site.
+			};
+			$here = implode( "\n", Plugin::instance()->half_swapped_warnings( $none ) );
+			$this->assertStringContainsString( 'That job no longer holds the site; take its file down with: wp wpcheckpoint job release ' . $job->id, $here, 'the control: abandoned here, the notice offers release' );
+			// Seen from another installation than the one that gave it up (its token in held_by).
+			$wpdb->update( JobRepository::table(), array( 'held_by' => 'abababababab' ), array( 'id' => $job->id ) );
+			$wpdb->query( 'COMMIT' );
+			foreach ( array(
+				'the jobs read'          => Plugin::instance()->half_swapped_warnings(),
+				'the notice\'s own path' => Plugin::instance()->half_swapped_warnings( $none ),
+			) as $what => $warnings ) {
+				$text = implode( "\n", $warnings );
+				$this->assertStringNotContainsString( 'job release', $text, $what . ': no release offered' );
+			}
+			$this->assertStringContainsString( 'This site may still be half swapped by it', implode( "\n", Plugin::instance()->half_swapped_warnings() ), 'abandoned elsewhere: this site may be half swapped' );
+		} finally {
+			$file->remove();
+		}
+	}
+
 	public function test_the_advice_to_remove_a_held_file_needs_the_jobs_read(): void {
 		$file = new Maintenance( $this->abspath, Maintenance::new_mark() );
 		try {

@@ -403,7 +403,7 @@ final class JobRepository {
 		$ids = array();
 		foreach ( $rows as $row ) {
 			$job = self::hydrate( $row );
-			if ( ! $this->abandoned_here( $job ) ) {
+			if ( $this->holds_site( $job ) ) {
 				$ids[] = $job->id;
 			}
 		}
@@ -501,9 +501,9 @@ final class JobRepository {
 		// A rollback records the cancel request (once); otherwise cancel_requested is left as it is (+ 0).
 		$cancel = $rollback ? 'IF(cancel_requested = 0, %d, cancel_requested)' : 'cancel_requested + %d';
 		// A job abandoned from another installation, taken over here (HeldSite found it this site's): the abandon is
-		// lifted in the same statement (a failure of no kind, which may be retried). The WHERE clause is on the job as
-		// read, abandoned or not: an abandon moves held_by and finished_at.
-		$lift  = Job::REASON_ABANDONED === $job->failure_reason ? ", failure_kind = ''" : '';
+		// lifted in the same statement (a failure of no kind, which may be retried; the abandon's message goes with
+		// it). The WHERE clause is on the job as read, abandoned or not: an abandon moves held_by and finished_at.
+		$lift  = Job::REASON_ABANDONED === $job->failure_reason ? ", failure_kind = '', last_error = ''" : '';
 		$state = $rollback ? '= ' . Job::SITE_CHANGING : '<> ' . Job::SITE_UNTOUCHED;
 		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber -- plugin table name from the prefix; $cancel holds one placeholder the sniff cannot see; the WHERE clause is the compare-and-set.
 		$affected = $wpdb->query(
@@ -539,8 +539,10 @@ final class JobRepository {
 	/**
 	 * Whether a job was abandoned from this installation: abandoned (Job::REASON_ABANDONED), and its held_by, which an
 	 * abandon sets to the token of the installation that gave it up, is one of $own. The one rule for "abandoned
-	 * here" (the warnings, release, the plugin's notices, uninstall): a job abandoned from another installation may
-	 * have left this site half swapped, if that installation was wrong that its database is not shared with this one.
+	 * here" (holds_site(): the warnings, release, the plugin's notices; uninstall): a job abandoned from another
+	 * installation holds the site everywhere else, until it is taken over (take_over() lifts the abandon) or cleaned
+	 * up; it may have left a site half swapped, if that installation was wrong that its database is not shared, and
+	 * no comparison of WordPress directories is trusted to say which site.
 	 *
 	 * @param Job      $job Job.
 	 * @param string[] $own The tokens this installation holds (Directories::own_tokens()).
@@ -551,13 +553,25 @@ final class JobRepository {
 	}
 
 	/**
-	 * Whether a job was abandoned from this installation: abandoned_by() with its tokens.
+	 * Whether a job was abandoned from this installation: abandoned_by() with the tokens it holds (as manages()).
 	 *
 	 * @param Job $job Job.
 	 * @return bool
 	 */
 	public function abandoned_here( Job $job ): bool {
-		return self::abandoned_by( $job, Directories::own_tokens( $this->directories->state() ) );
+		return self::abandoned_by( $job, $this->held_tokens() );
+	}
+
+	/**
+	 * Whether a job holds the site, as seen from this installation: it changed the site (site_state), has not ended
+	 * (completed, cancelled) and was not abandoned from here (abandoned_here()). A job abandoned from another
+	 * installation holds it. The one rule for release, the plugin's notices and the warnings (holding_site()).
+	 *
+	 * @param Job $job Job.
+	 * @return bool
+	 */
+	public function holds_site( Job $job ): bool {
+		return Job::SITE_UNTOUCHED !== $job->site_state && ! in_array( $job->status, array( Job::COMPLETED, Job::CANCELLED ), true ) && ! $this->abandoned_here( $job );
 	}
 
 	/**
