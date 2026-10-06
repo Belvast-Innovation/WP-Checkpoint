@@ -7,7 +7,9 @@
 
 namespace WPCheckpoint\Support;
 
+use WPCheckpoint\Jobs\HeldSite;
 use WPCheckpoint\Jobs\Job;
+use WPCheckpoint\Jobs\JobRepository;
 use WPCheckpoint\Files\ScanRoots;
 use WPCheckpoint\Jobs\LockFile;
 use WPCheckpoint\Jobs\Residue;
@@ -100,8 +102,10 @@ final class Uninstaller {
 	/**
 	 * How many jobs hold the site changed (Job::$site_state), or null when that cannot be read. A table without
 	 * the column (made before it existed) holds none. A job abandoned from this installation (held_by one of its
-	 * tokens) holds nothing any more; one abandoned from another installation still counts: if this database is
-	 * shared with it, this site is the one its restore left half swapped, and its staging is what the site was.
+	 * tokens: JobRepository::abandoned_by()) holds nothing any more; one abandoned from another installation still
+	 * counts, unless this WordPress directory is positively another than the one its plan records (HeldSite): if this
+	 * database is shared with it, this site may be the one its restore left half swapped, and its staging is what the
+	 * site was.
 	 *
 	 * @return int|null
 	 */
@@ -128,14 +132,7 @@ final class Uninstaller {
 			return 0;
 		}
 		self::expect();
-		$held = $wpdb->get_results( "SHOW COLUMNS FROM {$table} LIKE 'held_by'", ARRAY_A );
-		if ( self::failed() || ! is_array( $held ) ) {
-			return null;
-		}
-		// Without the column no job was abandoned (abandoning writes it).
-		$by = array() === $held ? "''" : 'held_by';
-		self::expect();
-		$rows = $wpdb->get_results( "SELECT failure_kind, finished_at, {$by} FROM {$table} WHERE site_state <> 0", ARRAY_N );
+		$rows = $wpdb->get_results( "SELECT failure_kind, finished_at, id FROM {$table} WHERE site_state <> 0", ARRAY_N );
 		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		if ( self::failed() || ! is_array( $rows ) ) {
 			return null;
@@ -143,8 +140,18 @@ final class Uninstaller {
 		$own   = Directories::own_tokens( Directories::load_state() );
 		$count = 0;
 		foreach ( $rows as $row ) {
-			// A job given up from here holds nothing any more: nothing is left for a reinstall to finish or undo.
-			if ( Job::REASON_ABANDONED !== Job::read_failure_reason( (string) $row[0], (int) $row[1] ) || ! in_array( (string) $row[2], $own, true ) ) {
+			if ( Job::REASON_ABANDONED !== Job::read_failure_reason( (string) $row[0], (int) $row[1] ) ) {
+				++$count;
+				continue;
+			}
+			$job = JobRepository::load( (int) $row[2] );
+			if ( null === $job ) {
+				return null;
+			}
+			if ( JobRepository::abandoned_by( $job, $own ) ) {
+				continue; // Given up from here: nothing is left for a reinstall to finish or undo.
+			}
+			if ( true !== ( new HeldSite() )->assess( $job )['differs'] ) {
 				++$count;
 			}
 		}

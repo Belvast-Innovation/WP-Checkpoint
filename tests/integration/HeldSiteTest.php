@@ -22,6 +22,9 @@ final class HeldSiteTest extends SwapTestCase {
 
 	const ELSEWHERE = 'ffffffffffff';
 
+	/** The token of another installation on this database (another_installation()). */
+	const ANOTHER = 'abababababab';
+
 	/** @var string Another WordPress directory (a copy's), in the sandbox. */
 	private $copy = '';
 
@@ -58,6 +61,22 @@ final class HeldSiteTest extends SwapTestCase {
 				},
 			);
 		return new JobActions( Plugin::instance()->jobs(), Plugin::instance()->runner(), new Loopback( false ), new HeldSite( $parts ) );
+	}
+
+	/**
+	 * A job's tables by the names it made: temporary, and moved aside by its swap.
+	 *
+	 * @return string[]
+	 */
+	private function tables_of( Job $job ): array {
+		global $wpdb;
+		$wpdb->query( 'COMMIT' );
+		$out = array();
+		foreach ( array( \WPCheckpoint\Jobs\TempTables::job_prefix( $job->storage_token, $job->id ), \WPCheckpoint\Jobs\TempTables::OLD_PREFIX . substr( $job->storage_token, 0, \WPCheckpoint\Jobs\TempTables::TOKEN_LEN ) . '_' . $job->id . '_' ) as $prefix ) {
+			$out = array_merge( $out, (array) $wpdb->get_col( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $prefix ) . '%' ) ) );
+		}
+		sort( $out );
+		return $out;
 	}
 
 	private function copy_dir(): string {
@@ -259,62 +278,128 @@ final class HeldSiteTest extends SwapTestCase {
 		$this->assertFalse( \WPCheckpoint\Restore\Maintenance::held_in( $this->copy_dir() ) );
 	}
 
-	public function test_an_abandon_says_what_it_removed_and_keeps_the_tables_its_swap_moved_aside(): void {
-		global $wpdb;
-		$this->swap_parts['batch'] = 1; // A batch per table: killed after the first, some tables are moved aside.
-		$this->register_type();
-		$job = $this->held( 'batch_sent' );
-		copy( $this->abspath . '/.maintenance', $this->copy_dir() . '/.maintenance' );
-		$like = static function ( string $prefix ) use ( $wpdb ): array {
-			$wpdb->query( 'COMMIT' );
-			return (array) $wpdb->get_col( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $prefix ) . '%' ) );
-		};
-		$aside = $like( \WPCheckpoint\Jobs\TempTables::OLD_PREFIX . substr( $job->storage_token, 0, \WPCheckpoint\Jobs\TempTables::TOKEN_LEN ) . '_' . $job->id . '_' );
-		$temp  = $like( \WPCheckpoint\Jobs\TempTables::job_prefix( $job->storage_token, $job->id ) );
-		$this->assertNotSame( array(), $aside, 'the control: a table was moved aside' );
-		$staged = array_values( preg_grep( '/swt_(keep|new)\z/', $temp ) );
-		$this->assertNotSame( array(), $staged, 'the control: a staged table of the backup is left' );
-		$acts = $this->actions( true );
-		$held = $acts->held_elsewhere( $job->id );
-		$see  = $held['assessment'];
-		$lines = implode( "\n", JobPresenter::held_lines( $held['job'], $see ) );
-		$this->assertStringContainsString( 'removes the restore\'s temporary tables; the tables its swap moved aside, named wcpold…, stay', $lines, 'said before it is confirmed' );
-		// A table that stays references one of them: it cannot go yet. Dropped whatever happens (it is no table of the
-		// plugin's: the leftover check would not take it, and the next run could not make its reference).
-		try {
-			$this->abandon_against_a_reference( $job, $acts, $see, $staged, $aside, $like );
-		} finally {
-			$wpdb->query( "DROP TABLE IF EXISTS `{$wpdb->prefix}swt_ref`" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- test tables.
-		}
-		Plugin::instance()->jobs()->reap_residue();
-		$this->assertSame( array(), $like( \WPCheckpoint\Jobs\TempTables::job_prefix( $job->storage_token, $job->id ) ), 'the reaper takes the rest' );
-		$this->assertSame( $aside, $like( \WPCheckpoint\Jobs\TempTables::OLD_PREFIX . substr( $job->storage_token, 0, \WPCheckpoint\Jobs\TempTables::TOKEN_LEN ) . '_' . $job->id . '_' ), 'and not the tables moved aside' );
-		$this->undo( Plugin::instance()->jobs()->find( $job->id ) );
+	/**
+	 * Another installation of the plugin on this database: a copy of the site in another WordPress directory, with a
+	 * token of its own (this site's recorded as copied, as its detection records it), seen from that directory. The
+	 * state is this request's only: the stored one stays this site's.
+	 */
+	private function another_installation(): JobActions {
+		$dirs = new \WPCheckpoint\Support\Directories();
+		$dirs->base();
+		$state                    = $dirs->state();
+		$state['copied_tokens'][] = (string) $state['token'];
+		$state['token']           = self::ANOTHER;
+		$state['past_tokens']     = array();
+		$this->replace_internal( $dirs, 'state', $state );
+		$repo = new JobRepository( $dirs );
+		$this->assertTrue( $repo->holds_own_token(), 'the control: a token of its own' );
+		return new JobActions(
+			$repo,
+			Plugin::instance()->runner(),
+			new Loopback( false ),
+			new HeldSite(
+				array(
+					'abspath'   => $this->copy_dir(),
+					'site_dirs' => function (): array {
+						return array( 'uploads' => $this->copy_dir() . '/wp-content/uploads' );
+					},
+				)
+			)
+		);
 	}
 
-	/**
-	 * The abandon of test_an_abandon_says_what_it_removed_and_keeps_the_tables_its_swap_moved_aside(), with a table
-	 * that stays referencing one of its temporary tables.
-	 *
-	 * @param Job                  $job    Job.
-	 * @param JobActions           $acts   Actions, from the copy.
-	 * @param array<string, mixed> $see    HeldSite::assess().
-	 * @param string[]             $staged Its staged tables.
-	 * @param string[]             $aside  Its tables moved aside.
-	 * @param callable             $like   Tables by prefix.
-	 */
-	private function abandon_against_a_reference( Job $job, JobActions $acts, array $see, array $staged, array $aside, callable $like ): void {
-		global $wpdb;
-		$wpdb->query( "DROP TABLE IF EXISTS `{$wpdb->prefix}swt_ref`" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- test tables.
-		$wpdb->query( "CREATE TABLE `{$wpdb->prefix}swt_ref` (id INT UNSIGNED NOT NULL PRIMARY KEY, CONSTRAINT `{$wpdb->prefix}swt_ref_fk` FOREIGN KEY (id) REFERENCES `{$staged[0]}` (id)) ENGINE=InnoDB" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- test tables.
-		$this->assertSame( '', (string) $wpdb->last_error, 'the control: the reference was made' );
-		$outcome = $acts->abandon( $job->id, HeldSite::code( HeldSite::ABANDON, $job, $see['recorded'] ) );
+	public function test_a_job_abandoned_from_a_copy_on_a_shared_database_keeps_its_tables_and_the_site_takes_it_back(): void {
+		$this->swap_parts['batch'] = 1; // A batch per table: killed after the first, a table is moved aside.
+		$this->register_type();
+		$before = $this->site();
+		$job    = $this->at_swap();
+		$this->killed_at( $job, 'batch_sent' );
+		$job = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertSame( Job::SITE_CHANGING, $job->site_state, 'the control: half swapped' );
+		$tables = $this->tables_of( $job );
+		$this->assertNotSame( array(), preg_grep( '/\Awcpold/', $tables ), 'the control: a table was moved aside' );
+		copy( $this->abspath . '/.maintenance', $this->copy_dir() . '/.maintenance' );
+		// The copy, wrong that its database is not shared with this site, abandons the restore.
+		$copy = $this->another_installation();
+		$held = $copy->held_elsewhere( $job->id );
+		$this->assertSame( HeldSite::OTHER, $held['assessment']['branch'] );
+		$this->assertTrue( $held['assessment']['differs'] );
+		$outcome = $copy->abandon( $job->id, HeldSite::code( HeldSite::ABANDON, $job, $held['assessment']['recorded'] ) );
 		$this->assertTrue( $outcome['ok'], $outcome['message'] );
-		$this->assertStringContainsString( 'Not all of its temporary tables could be removed yet', $outcome['message'], 'not said removed when they were not' );
-		$this->assertStringNotContainsString( 'Its temporary tables were removed.', $outcome['message'] );
-		$this->assertStringContainsString( 'The tables its swap moved aside (named wcpold…) stay', $outcome['message'] );
-		$this->assertSame( $aside, $like( \WPCheckpoint\Jobs\TempTables::OLD_PREFIX . substr( $job->storage_token, 0, \WPCheckpoint\Jobs\TempTables::TOKEN_LEN ) . '_' . $job->id . '_' ), 'the tables moved aside stay' );
-		$this->assertContains( $staged[0], $like( \WPCheckpoint\Jobs\TempTables::job_prefix( $job->storage_token, $job->id ) ), 'the referenced one stays for now' );
+		$this->assertFalse( \WPCheckpoint\Restore\Maintenance::held_in( $this->copy_dir() ), 'the copy\'s file is down' );
+		$this->assertSame( self::ANOTHER, $this->row( $job->id )['held_by'], 'abandoned by the copy' );
+		$this->assertSame( $tables, $this->tables_of( $job ), 'its tables are kept, the ones moved aside among them' );
+		Plugin::instance()->jobs()->reap_residue();
+		$this->assertSame( $tables, $this->tables_of( $job ), 'nor taken by this site\'s reaper' );
+		try {
+			$copy->retry( $job->id );
+			$this->fail( 'the copy that abandoned it runs it again' );
+		} catch ( InvalidTransition $e ) {
+			$this->assertStringContainsString( 'it is not run again', $e->getMessage() );
+		}
+		// This site: still behind its maintenance page and warned about; nothing released, not run as it is.
+		$here = $this->actions();
+		$this->assertTrue( \WPCheckpoint\Restore\Maintenance::held_in( $this->abspath ), 'the control: the file here is held' );
+		$this->assertContains( $job->id, Plugin::instance()->jobs()->holding_site(), 'warned about here' );
+		$abandoned = Plugin::instance()->jobs()->find( $job->id );
+		$release   = $here->release( $job->id, HeldSite::code( HeldSite::RELEASE, $abandoned, $held['assessment']['recorded'] ) );
+		$this->assertFalse( $release['ok'], 'not released at the WordPress directory its plan records' );
+		$this->assertStringContainsString( 'This site may still be half swapped by it', $release['message'] );
+		$this->assertTrue( \WPCheckpoint\Restore\Maintenance::held_in( $this->abspath ), 'the file here stays' );
+		try {
+			Plugin::instance()->job_actions()->retry( $job->id );
+			$this->fail( 'retried here without being taken over' );
+		} catch ( InvalidTransition $e ) {
+			$this->assertStringContainsString( 'take it over here', $e->getMessage() );
+		}
+		// Taken back by this site, by the same evidence as any take-over, and rolled back.
+		$back = $here->held_elsewhere( $job->id );
+		$this->assertSame( HeldSite::SITE, $back['assessment']['branch'], (string) $back['assessment']['why'] );
+		$lines = implode( "\n", JobPresenter::held_lines( $back['job'], $back['assessment'] ) );
+		$this->assertStringContainsString( 'was abandoned from another installation', $lines );
+		$code = HeldSite::code( HeldSite::REBIND, $back['job'], '' );
+		$this->assertStringContainsString( 'wp wpcheckpoint job rebind ' . $job->id . ' --confirm=' . $code . ' --then=rollback', $lines );
+		$outcome = $here->rebind( $job->id, $code, 'rollback' );
+		$this->assertTrue( $outcome['ok'], $outcome['message'] );
+		$now = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertSame( '', $now->failure_reason, 'the abandon is lifted' );
+		$this->assertSame( (string) Plugin::instance()->directories()->state()['token'], $now->held_by );
+		Plugin::instance()->job_actions()->retry( $job->id );
+		$done = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( Job::CANCELLED, $done->status, (string) $done->last_error );
+		$this->assertSame( $before, $this->site(), 'the site as it was before the swap: the tables moved aside were there to put back' );
+		$this->assertFalse( \WPCheckpoint\Restore\Maintenance::held_in( $this->abspath ) );
+		$this->assertSame( array(), $this->tables_of( $done ), 'and its tables reclaimed once it ended here' );
+	}
+
+	public function test_release_of_a_job_abandoned_elsewhere_only_from_another_wordpress_directory(): void {
+		$job = $this->at_swap();
+		$this->killed_at( $job, 'dir_aside_recorded' );
+		$job = Plugin::instance()->jobs()->find( $job->id );
+		copy( $this->abspath . '/.maintenance', $this->copy_dir() . '/.maintenance' );
+		$copy = $this->another_installation();
+		$see  = $copy->held_elsewhere( $job->id )['assessment'];
+		$this->assertTrue( $copy->abandon( $job->id, HeldSite::code( HeldSite::ABANDON, $job, $see['recorded'] ) )['ok'] );
+		$abandoned = Plugin::instance()->jobs()->find( $job->id );
+		// A third directory with the file (another copy): positively another than the plan's, so the file comes down.
+		$third = $this->sandbox . '/third';
+		mkdir( $third . '/wp-content/uploads', 0755, true );
+		copy( $this->abspath . '/.maintenance', $third . '/.maintenance' );
+		$there = new JobActions( Plugin::instance()->jobs(), Plugin::instance()->runner(), new Loopback( false ), new HeldSite( array( 'abspath' => $third ) ) );
+		$lines = implode( "\n", JobPresenter::held_lines( $abandoned, $there->held_elsewhere( $job->id )['assessment'] ) );
+		$code  = HeldSite::code( HeldSite::RELEASE, $abandoned, $see['recorded'] );
+		$this->assertStringContainsString( 'wp wpcheckpoint job release ' . $job->id . ' --confirm=' . $code, $lines, 'offered there' );
+		$outcome = $there->release( $job->id, $code );
+		$this->assertTrue( $outcome['ok'], $outcome['message'] );
+		$this->assertFalse( \WPCheckpoint\Restore\Maintenance::held_in( $third ), 'taken down at another directory' );
+		// Abandoned once: not again from another place (that would make it that installation's to have given up).
+		$again = $there->abandon( $job->id, HeldSite::code( HeldSite::ABANDON, $abandoned, $see['recorded'] ) );
+		$this->assertFalse( $again['ok'] );
+		$this->assertStringContainsString( 'already abandoned', $again['message'] );
+		$this->assertSame( self::ANOTHER, $this->row( $job->id )['held_by'], 'still the copy\'s to have given up' );
+		// The control: at the directory its plan records, the same command is refused.
+		$this->assertFalse( $this->actions()->release( $job->id, $code )['ok'] );
+		$this->assertTrue( \WPCheckpoint\Restore\Maintenance::held_in( $this->abspath ), 'the site keeps its file' );
 	}
 
 	public function test_a_code_shown_before_another_take_over_confirms_nothing(): void {
@@ -405,10 +490,12 @@ final class HeldSiteTest extends SwapTestCase {
 			$this->assertSame( $before, $this->row( $job->id ) );
 			$this->assertFileExists( $this->copy_dir() . '/.maintenance' );
 		}
+		$tables = $this->tables_of( $job );
+		$this->assertNotSame( array(), $tables, 'the control: it made tables' );
 		$outcome = $acts->abandon( $job->id, $code );
 		$this->assertTrue( $outcome['ok'], $outcome['message'] );
-		$this->assertStringContainsString( 'its restore stays half swapped', $outcome['message'] );
-		$this->assertStringContainsString( 'Its temporary tables were removed. The tables its swap moved aside (named wcpold…) stay', $outcome['message'], 'what it removed, as it happened' );
+		$this->assertStringContainsString( 'that site stays half swapped; it can still take the restore over there', $outcome['message'] );
+		$this->assertStringContainsString( 'Its tables are kept, the ones its swap moved aside (named wcpold…) among them', $outcome['message'] );
 		$this->assertFileDoesNotExist( $this->copy_dir() . '/.maintenance' );
 		$now = Plugin::instance()->jobs()->find( $job->id );
 		$this->assertSame( Job::FAILED, $now->status );
@@ -418,12 +505,24 @@ final class HeldSiteTest extends SwapTestCase {
 		$this->assertSame( $site, $this->site(), 'the site it held is not touched: its paths, tables and file' );
 		$this->assertNotContains( $job->id, Plugin::instance()->jobs()->holding_site(), 'no longer warned about' );
 		$this->assertSame( 0, \WPCheckpoint\Support\Uninstaller::jobs_holding_the_site(), 'and an uninstall is not held back by it' );
-		// Abandoned from another installation (its token in held_by), the site here may be the one it left half swapped.
+		// Abandoned from another installation (its token in held_by): an uninstall is held back where the site may be
+		// the one it left half swapped (the WordPress directory its plan records), not at another directory. The
+		// uninstall looks from this test site's own WordPress directory, which the plan does not record.
 		global $wpdb;
-		$own = $this->row( $job->id )['held_by'];
+		$own   = $this->row( $job->id )['held_by'];
+		$plan  = $wpdb->base_prefix . \WPCheckpoint\Restore\SwapPlan::TABLE;
+		$where = function ( string $live ) use ( $wpdb, $plan, $job ): void {
+			$wpdb->query( $wpdb->prepare( "UPDATE `{$plan}` SET live = %s WHERE job_id = %d AND kind = 'site'", $live, $job->id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the plan table.
+			$wpdb->query( 'COMMIT' );
+		};
+		$recorded = (string) $wpdb->get_var( $wpdb->prepare( "SELECT live FROM `{$plan}` WHERE job_id = %d AND kind = 'site'", $job->id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the plan table.
 		$wpdb->update( JobRepository::table(), array( 'held_by' => self::ELSEWHERE ), array( 'id' => $job->id ) );
 		$wpdb->query( 'COMMIT' );
-		$this->assertSame( 1, \WPCheckpoint\Support\Uninstaller::jobs_holding_the_site(), 'abandoned elsewhere: an uninstall here is held back' );
+		$this->assertContains( $job->id, Plugin::instance()->jobs()->holding_site(), 'abandoned elsewhere: warned about' );
+		$this->assertSame( 0, \WPCheckpoint\Support\Uninstaller::jobs_holding_the_site(), 'abandoned elsewhere, seen from another WordPress directory: not held back' );
+		$where( (string) realpath( ABSPATH ) );
+		$this->assertSame( 1, \WPCheckpoint\Support\Uninstaller::jobs_holding_the_site(), 'abandoned elsewhere, seen from the WordPress directory its plan records: held back' );
+		$where( $recorded );
 		$wpdb->update( JobRepository::table(), array( 'held_by' => $own ), array( 'id' => $job->id ) );
 		$wpdb->query( 'COMMIT' );
 		$this->assertNull( $acts->held_elsewhere( $job->id ) );
@@ -433,9 +532,9 @@ final class HeldSiteTest extends SwapTestCase {
 		} catch ( InvalidTransition $e ) {
 			$this->assertSame( Job::FAILED, Plugin::instance()->jobs()->find( $job->id )->status );
 		}
-		global $wpdb;
-		$wpdb->query( 'COMMIT' );
-		$this->assertSame( array(), (array) $wpdb->get_col( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( \WPCheckpoint\Jobs\TempTables::job_prefix( $job->storage_token, $job->id ) ) . '%' ) ), 'its tables are gone' );
+		$this->assertSame( $tables, $this->tables_of( $job ), 'its tables are kept' );
+		Plugin::instance()->jobs()->reap_residue();
+		$this->assertSame( $tables, $this->tables_of( $job ), 'by the reaper too' );
 		$this->assertFalse( $acts->abandon( $job->id, $code )['ok'], 'once is enough' );
 	}
 

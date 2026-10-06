@@ -113,15 +113,16 @@ final class JobActions {
 
 	/**
 	 * A job that holds the site changed and is managed by another token than this installation's (HeldSite): it, and
-	 * what its plan shows from here; null when there is no such job, or it does not hold the site, was abandoned, or
-	 * this installation manages it.
+	 * what its plan shows from here; null when there is no such job, or it does not hold the site, was abandoned from
+	 * this installation (JobRepository::abandoned_here()), or this installation manages it. A job abandoned from
+	 * another installation is one: this site may be the one it left half swapped, and may take it over.
 	 *
 	 * @param int $id Job id.
 	 * @return array{job: Job, assessment: array<string, mixed>}|null
 	 */
 	public function held_elsewhere( int $id ) {
 		$job = $this->repository->find( $id );
-		if ( null === $job || Job::SITE_UNTOUCHED === $job->site_state || Job::REASON_ABANDONED === $job->failure_reason || in_array( $job->status, array( Job::COMPLETED, Job::CANCELLED ), true ) || $this->repository->manages( $job ) ) {
+		if ( null === $job || Job::SITE_UNTOUCHED === $job->site_state || $this->repository->abandoned_here( $job ) || in_array( $job->status, array( Job::COMPLETED, Job::CANCELLED ), true ) || $this->repository->manages( $job ) ) {
 			return null;
 		}
 		return array(
@@ -184,8 +185,9 @@ final class JobActions {
 	 * Take a job's maintenance file down from this WordPress directory (wp wpcheckpoint job release): only once the job
 	 * no longer holds the site (completed, cancelled, put back, or abandoned: holds()), no run holds it, and only the
 	 * file that carries the mark its row recorded (Job::$site_mark): a file another job wrote carries another mark and
-	 * stays. While the job holds the site it is refused, and the two ways are said (holding_paths()). The job is not
-	 * changed.
+	 * stays. While the job holds the site it is refused, and the two ways are said (holding_paths()); so it is for a
+	 * job abandoned from another installation, unless this WordPress directory is positively another than the one
+	 * its plan records (abandoned_elsewhere()). The job is not changed.
 	 *
 	 * @param int    $id      Job id.
 	 * @param string $confirm The confirmation code.
@@ -193,9 +195,14 @@ final class JobActions {
 	 */
 	public function release( int $id, string $confirm ): array {
 		$held = $this->held_elsewhere( $id );
-		if ( null !== $held ) {
+		if ( null !== $held && Job::REASON_ABANDONED !== $held['job']->failure_reason ) {
 			// While the job holds the site there is no case in which taking its file down here is right.
 			return self::outcome( false, self::holding_paths( $held['job'], $held['assessment'] ) );
+		}
+		if ( null !== $held && true !== $held['assessment']['differs'] ) {
+			// Abandoned from another installation, seen from the WordPress directory its plan records (or from one not
+			// positively another): this may be the site it left half swapped.
+			return self::outcome( false, self::abandoned_elsewhere( $held['job'], $held['assessment'] ) );
 		}
 		$job = $this->repository->find( $id );
 		if ( null === $job ) {
@@ -249,6 +256,16 @@ final class JobActions {
 	}
 
 	/**
+	 * Whether a job was abandoned from this installation (JobRepository::abandoned_here()).
+	 *
+	 * @param Job $job Job.
+	 * @return bool
+	 */
+	public function abandoned_here( Job $job ): bool {
+		return $this->repository->abandoned_here( $job );
+	}
+
+	/**
 	 * Whether a job still holds the site: it changed it, and has not ended (completed, cancelled) or been abandoned.
 	 *
 	 * @param Job $job Job.
@@ -276,6 +293,11 @@ final class JobActions {
 			return self::outcome( false, $why );
 		}
 		$job = $held['job'];
+		if ( Job::REASON_ABANDONED === $job->failure_reason ) {
+			// Once is the record: abandoning it again would make it this installation's to have given up.
+			/* translators: %d: job id */
+			return self::outcome( false, sprintf( __( 'Job %d was already abandoned from another installation; nothing was changed.', 'wp-checkpoint' ), $job->id ) );
+		}
 		if ( ! $this->repository->holds_own_token() ) {
 			// abandon_held() would refuse: the file must not go first for a refusal known in advance.
 			return self::outcome( false, __( 'This installation holds no storage token of its own yet (it was found to be a copy, and that is not settled): settle it on the plugin\'s page first, then abandon the job. Nothing was changed.', 'wp-checkpoint' ) );
@@ -292,18 +314,14 @@ final class JobActions {
 		/* translators: %s: the WordPress directory the job's plan records */
 		$message = sprintf( __( 'Abandoned from another WordPress directory (wp wpcheckpoint job abandon). The site its plan was written for, at %s, may hold tables and directories half swapped.', 'wp-checkpoint' ), $held['assessment']['recorded'] );
 		try {
-			$abandoned = $this->repository->abandon_held( $job, $message );
+			$this->repository->abandon_held( $job, $message );
 		} catch ( StaleJob $e ) {
 			return self::outcome( false, __( 'The job changed meanwhile, or a run holds it; it was not abandoned (its maintenance file here is down). Try again.', 'wp-checkpoint' ) );
 		}
-		// Its temporary tables (the administrator confirmed this database is not shared); what one call leaves, the
-		// reaper takes (JobRepository::reclaim_scope(): tables only). The tables its swap moved aside are not among
-		// them (TempTables::old(): they hold the site's tables as they were) and stay.
-		$tables = $this->repository->reclaim_work( $abandoned )
-			? __( 'Its temporary tables were removed.', 'wp-checkpoint' )
-			: __( 'Not all of its temporary tables could be removed yet; they are removed later, in the background.', 'wp-checkpoint' );
-		/* translators: 1: job id, 2: whether its temporary tables were removed, 3: the WordPress directory the job's plan records */
-		return self::outcome( true, sprintf( __( 'Job %1$d was abandoned: it never runs again. %2$s The tables its swap moved aside (named wcpold…) stay, and nothing at the paths its plan records is touched. If this database is shared with the site at %3$s, its restore stays half swapped.', 'wp-checkpoint' ), $job->id, $tables, $held['assessment']['recorded'] ) );
+		// Nothing of it is reclaimed (JobRepository::reclaim_scope()): its tables, the ones its swap moved aside among
+		// them, are what that site needs to roll the restore back, if this database is shared with it after all.
+		/* translators: 1: job id, 2: the WordPress directory the job's plan records */
+		return self::outcome( true, sprintf( __( 'Job %1$d was abandoned: it never runs again from this installation. Its tables are kept, the ones its swap moved aside (named wcpold…) among them, and nothing at the paths its plan records is touched. If this database is shared with the site at %2$s after all, that site stays half swapped; it can still take the restore over there and finish it or roll it back.', 'wp-checkpoint' ), $job->id, $held['assessment']['recorded'] ) );
 	}
 
 	/**
@@ -317,11 +335,27 @@ final class JobActions {
 	public static function holding_paths( Job $job, array $see ): string {
 		return sprintf(
 			/* translators: 1: the WordPress directory the job's plan records, 2: job id, 3: the abandon command */
-			__( 'The restore still holds the site, so its maintenance file stays up here. If this database is shared with the site at %1$s: finish the restore or roll it back there; afterwards take its file down here with wp wpcheckpoint job release %2$d. If it is not shared: %3$s (it takes the file down too and removes the restore\'s temporary tables; the tables its swap moved aside, named wcpold…, stay).', 'wp-checkpoint' ),
+			__( 'The restore still holds the site, so its maintenance file stays up here. If this database is shared with the site at %1$s: finish the restore or roll it back there; afterwards take its file down here with wp wpcheckpoint job release %2$d. If it is not shared: %3$s (it takes the file down too; the restore\'s tables are kept, the ones its swap moved aside among them).', 'wp-checkpoint' ),
 			'' === $see['recorded'] ? __( '(not recorded)', 'wp-checkpoint' ) : $see['recorded'],
 			$job->id,
 			$see['differs'] ? 'wp wpcheckpoint job abandon ' . $job->id . ' --confirm=' . HeldSite::code( HeldSite::ABANDON, $job, (string) $see['recorded'] ) : __( 'nothing can be done from this WordPress directory (it is not positively another than that one)', 'wp-checkpoint' )
 		);
+	}
+
+	/**
+	 * What to say of a job abandoned from another installation, seen from a WordPress directory that is not
+	 * positively another than the one its plan records: this may be the site it left half swapped.
+	 *
+	 * @param Job                  $job Job.
+	 * @param array<string, mixed> $see HeldSite::assess().
+	 * @return string
+	 */
+	public static function abandoned_elsewhere( Job $job, array $see ): string {
+		$how = HeldSite::SITE === $see['branch']
+			? __( 'If the restore is this site\'s, take it over here and finish it or roll it back: wp wpcheckpoint job status shows how.', 'wp-checkpoint' )
+			: __( 'As far as can be told from here it is not this site\'s, and nothing can be done with it from this WordPress directory.', 'wp-checkpoint' );
+		/* translators: 1: job id, 2: what can be done */
+		return sprintf( __( 'Restore job %1$d was abandoned from another installation of WP Checkpoint, which said its database is not shared with this site. This site may still be half swapped by it, so its maintenance file stays. %2$s', 'wp-checkpoint' ), $job->id, $how );
 	}
 
 	/**

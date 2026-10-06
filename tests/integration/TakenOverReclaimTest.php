@@ -331,22 +331,25 @@ final class TakenOverReclaimTest extends SwapTestCase {
 		$this->undo( $local );
 	}
 
-	public function test_an_abandoned_job_leaves_no_table_and_touches_no_file_at_the_paths_its_plan_records(): void {
+	public function test_an_abandoned_job_keeps_its_tables_and_touches_no_file_at_the_paths_its_plan_records(): void {
 		$job = $this->taken( 'dir_aside_recorded' );
 		$site    = $this->site();
 		$staging = $this->left( $job->id )['staging'];
+		$tables  = $this->left( $job->id )['tables'];
 		$this->assertNotSame( array(), $staging, 'the control: its staging is there, at the paths its plan records' );
+		$this->assertNotSame( array(), $tables, 'the control: and its tables' );
 		$acts = $this->actions( true );
 		$see  = $acts->held_elsewhere( $job->id )['assessment'];
 		$this->assertSame( HeldSite::OTHER, $see['branch'] );
 		$this->assertTrue( $see['differs'] );
 		$this->assertTrue( $acts->abandon( $job->id, HeldSite::code( HeldSite::ABANDON, $job, $see['recorded'] ) )['ok'] );
 		$left = $this->left( $job->id );
-		$this->assertSame( array(), $left['tables'], 'its tables, by the names it made, are gone' );
+		$this->assertSame( $tables, $left['tables'], 'its tables, by the names it made, are kept' );
 		$this->assertSame( $staging, $left['staging'], 'nothing at the paths its plan records is touched' );
 		$this->assertGreaterThan( 0, $left['plan'], 'its plan stays' );
 		$this->assertSame( $site, $this->site(), 'the site it held is not touched' );
 		$this->repo()->reap_residue();
 		$this->assertSame( $staging, $this->left( $job->id )['staging'], 'nor by the reaper' );
+		$this->assertSame( $tables, $this->left( $job->id )['tables'], 'its tables neither' );
 	}
 }

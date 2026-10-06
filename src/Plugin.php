@@ -266,13 +266,21 @@ final class Plugin {
 
 	/**
 	 * The job whose maintenance file is in the WordPress directory, when that job no longer holds the site (its row
-	 * recorded the file's mark: Job::$site_mark); null otherwise.
+	 * recorded the file's mark: Job::$site_mark); null otherwise. A job abandoned from another installation still
+	 * holds it here unless this WordPress directory is positively another than the one its plan records (as
+	 * JobActions::release() judges).
 	 *
 	 * @return Jobs\Job|null
 	 */
 	private function ended_owner() {
 		$owner = $this->jobs()->find_by_site_mark( Restore\Maintenance::mark_in( (string) ABSPATH ) );
-		return null !== $owner && ! JobActions::holds( $owner ) ? $owner : null;
+		if ( null === $owner || JobActions::holds( $owner ) ) {
+			return null;
+		}
+		if ( Jobs\Job::REASON_ABANDONED === $owner->failure_reason && ! $this->jobs()->abandoned_here( $owner ) && true !== ( new Jobs\HeldSite() )->assess( $owner )['differs'] ) {
+			return null;
+		}
+		return $owner;
 	}
 
 	/**

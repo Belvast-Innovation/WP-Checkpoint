@@ -11,6 +11,7 @@ use WPCheckpoint\Jobs\RestoreJob;
 use WPCheckpoint\Jobs\Runner;
 use WPCheckpoint\Jobs\SwapCheckStep;
 use WPCheckpoint\Jobs\SwapStep;
+use WPCheckpoint\Jobs\TempTables;
 use WPCheckpoint\Jobs\TickResult;
 use WPCheckpoint\Plugin;
 use WPCheckpoint\Restore\ImportSession;
@@ -168,6 +169,7 @@ abstract class SwapTestCase extends RestoreTestCase {
 	 * @return void
 	 */
 	protected function tear_down_swap(): void {
+		$this->discard_abandoned();
 		if ( null !== $this->swap_job ) {
 			$this->undo( $this->swap_job );
 			$this->swap_job = null;
@@ -491,6 +493,26 @@ abstract class SwapTestCase extends RestoreTestCase {
 	 * @param Job $job Job.
 	 * @return void
 	 */
+	/**
+	 * Put away what abandoned jobs keep on purpose (JobRepository::reclaim_scope(): nothing of an abandoned job is
+	 * reclaimed): the tables their swaps moved aside back (undo()), their temporary tables dropped. Only abandoned jobs:
+	 * anything else a test leaves is still a leak the leftover check reports.
+	 */
+	protected function discard_abandoned(): void {
+		global $wpdb;
+		$wpdb->query( 'COMMIT' );
+		foreach ( (array) $wpdb->get_col( 'SELECT id FROM ' . JobRepository::table() ) as $id ) { // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- the plugin's table.
+			$job = Plugin::instance()->jobs()->find( (int) $id );
+			if ( null === $job || Job::REASON_ABANDONED !== $job->failure_reason ) {
+				continue;
+			}
+			$this->undo( $job );
+			foreach ( (array) $wpdb->get_col( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( TempTables::job_prefix( $job->storage_token, $job->id ) ) . '%' ) ) as $table ) {
+				$wpdb->query( 'DROP TABLE `' . str_replace( '`', '', (string) $table ) . '`' ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- a listed table name.
+			}
+		}
+	}
+
 	protected function undo( Job $job ): void {
 		global $wpdb;
 		$file = RestoreFiles::path( $this->work( $job ), RestoreFiles::SWAP_PLAN );

@@ -491,6 +491,7 @@ final class SwapSequencesTest extends SwapTestCase {
 		}
 		if ( ! in_array( $kind, array( 'elsewhere_release', 'elsewhere_retry' ), true ) ) {
 			$staged = $this->staging_of( $job );
+			$tables = $this->job_tables( $job );
 			$this->assertTrue( $there->abandon( $job->id, \WPCheckpoint\Jobs\HeldSite::code( \WPCheckpoint\Jobs\HeldSite::ABANDON, Plugin::instance()->jobs()->find( $job->id ), $see['recorded'] ) )['ok'], $label . ': abandoned' );
 			++$kinds[ $kind ];
 			$this->assertFalse( Maintenance::held_in( $copy ), $label . ': I4, no held file at the location it ended from' );
@@ -500,9 +501,8 @@ final class SwapSequencesTest extends SwapTestCase {
 			$this->seams = array();
 			$this->cli_tick( $ended );
 			$this->assertSame( array(), $this->seams, $label . ': an abandoned job never runs' );
-			global $wpdb;
-			$wpdb->query( 'COMMIT' );
-			$this->assertSame( array(), (array) $wpdb->get_col( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( \WPCheckpoint\Jobs\TempTables::job_prefix( $ended->storage_token, $ended->id ) ) . '%' ) ), $label . ': its tables are gone' );
+			$this->assertNotSame( array(), $tables, $label . ': the control, it made tables' );
+			$this->assertSame( $tables, $this->job_tables( $ended ), $label . ': its tables are kept (the site it was started on may need them)' );
 			$this->assertSame( $staged, $this->staging_of( $ended ), $label . ': nothing at the paths its plan records is touched' );
 			return false;
 		}
@@ -575,6 +575,23 @@ final class SwapSequencesTest extends SwapTestCase {
 			}
 			$this->assertSame( $mark, Plugin::instance()->jobs()->find( $job->id )->site_mark, $label . ': I6, the held file\'s mark is its job\'s' );
 		}
+	}
+
+	/**
+	 * A job's tables by the names it made: temporary, and moved aside by its swap.
+	 *
+	 * @param Job $job Job.
+	 * @return string[]
+	 */
+	private function job_tables( Job $job ): array {
+		global $wpdb;
+		$wpdb->query( 'COMMIT' );
+		$out = array();
+		foreach ( array( \WPCheckpoint\Jobs\TempTables::job_prefix( $job->storage_token, $job->id ), \WPCheckpoint\Jobs\TempTables::OLD_PREFIX . substr( $job->storage_token, 0, \WPCheckpoint\Jobs\TempTables::TOKEN_LEN ) . '_' . $job->id . '_' ) as $prefix ) {
+			$out = array_merge( $out, (array) $wpdb->get_col( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $prefix ) . '%' ) ) );
+		}
+		sort( $out );
+		return $out;
 	}
 
 	/** @var int I6 checks that met a held file. */

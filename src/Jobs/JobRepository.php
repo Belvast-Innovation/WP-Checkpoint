@@ -81,9 +81,8 @@ final class JobRepository {
 	/**
 	 * What of a job this installation may reclaim (reclaim_scope()).
 	 */
-	const RECLAIM_ALL    = 'all';
-	const RECLAIM_TABLES = 'tables';
-	const RECLAIM_NONE   = 'none';
+	const RECLAIM_ALL  = 'all';
+	const RECLAIM_NONE = 'none';
 
 	/**
 	 * Bounds on what a step may ask and a person may answer. Questions
@@ -380,8 +379,8 @@ final class JobRepository {
 
 	/**
 	 * The ids of the jobs that hold the site and have something left to do: a restore's swap under way, being rolled
-	 * back or ending (site_state not untouched), not completed or cancelled, and not given up (Job::REASON_ABANDONED,
-	 * read through Job::read_failure_reason()).
+	 * back or ending (site_state not untouched), not completed or cancelled, and not given up from this installation
+	 * (abandoned_by(): one abandoned from another installation may have left this site half swapped).
 	 *
 	 * @return int[]
 	 * @throws \RuntimeException When the jobs could not be read (no answer is not "none").
@@ -397,14 +396,15 @@ final class JobRepository {
 		}
 		$table = $wpdb->base_prefix . Schema::JOBS_TABLE;
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix.
-		$rows = $wpdb->get_results( $wpdb->prepare( "SELECT id, failure_kind, finished_at FROM {$table} WHERE site_state <> %d AND status IN (%s, %s, %s, %s) ORDER BY id", Job::SITE_UNTOUCHED, Job::QUEUED, Job::RUNNING, Job::PAUSED, Job::FAILED ), ARRAY_N );
+		$rows = $wpdb->get_results( $wpdb->prepare( "SELECT * FROM {$table} WHERE site_state <> %d AND status IN (%s, %s, %s, %s) ORDER BY id", Job::SITE_UNTOUCHED, Job::QUEUED, Job::RUNNING, Job::PAUSED, Job::FAILED ), ARRAY_A );
 		if ( ! is_array( $rows ) || '' !== self::db_error() ) {
 			throw new \RuntimeException( 'The jobs could not be read.' );
 		}
 		$ids = array();
 		foreach ( $rows as $row ) {
-			if ( Job::REASON_ABANDONED !== Job::read_failure_reason( (string) $row[1], (int) $row[2] ) ) {
-				$ids[] = (int) $row[0];
+			$job = self::hydrate( $row );
+			if ( ! $this->abandoned_here( $job ) ) {
+				$ids[] = $job->id;
 			}
 		}
 		return $ids;
@@ -482,7 +482,8 @@ final class JobRepository {
 	 * recorded in the same statement. One statement, on the job as read: its storage token (the one it was started
 	 * with, again on a second take-over), who managed it as read (held_by), still holding the site (changing, for a
 	 * rollback), not ended, no live lock, and finished_at as read (an abandon moves it: a take-over read before it
-	 * writes nothing). Only with a token this installation holds, and the row managed by it afterwards.
+	 * writes nothing). Only with a token this installation holds, and the row managed by it afterwards. A job
+	 * abandoned from another installation is taken over too, and the abandon lifted.
 	 *
 	 * @param Job  $job      Job, as read.
 	 * @param bool $rollback Whether to record the cancel request (the site is put back).
@@ -499,11 +500,15 @@ final class JobRepository {
 		$now = $this->now();
 		// A rollback records the cancel request (once); otherwise cancel_requested is left as it is (+ 0).
 		$cancel = $rollback ? 'IF(cancel_requested = 0, %d, cancel_requested)' : 'cancel_requested + %d';
-		$state  = $rollback ? '= ' . Job::SITE_CHANGING : '<> ' . Job::SITE_UNTOUCHED;
+		// A job abandoned from another installation, taken over here (HeldSite found it this site's): the abandon is
+		// lifted in the same statement (a failure of no kind, which may be retried). The WHERE clause is on the job as
+		// read, abandoned or not: an abandon moves held_by and finished_at.
+		$lift  = Job::REASON_ABANDONED === $job->failure_reason ? ", failure_kind = ''" : '';
+		$state = $rollback ? '= ' . Job::SITE_CHANGING : '<> ' . Job::SITE_UNTOUCHED;
 		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber -- plugin table name from the prefix; $cancel holds one placeholder the sniff cannot see; the WHERE clause is the compare-and-set.
 		$affected = $wpdb->query(
 			$wpdb->prepare(
-				'UPDATE ' . self::table() . ' SET held_by = %s, cancel_requested = ' . $cancel . ', updated_at = %d WHERE id = %d AND storage_token = %s AND held_by = %s AND site_state ' . $state . ' AND status IN (%s, %s, %s, %s) AND finished_at = %d AND (lock_token = \'\' OR locked_until < %d)',
+				'UPDATE ' . self::table() . ' SET held_by = %s, cancel_requested = ' . $cancel . $lift . ', updated_at = %d WHERE id = %d AND storage_token = %s AND held_by = %s AND site_state ' . $state . ' AND status IN (%s, %s, %s, %s) AND finished_at = %d AND (lock_token = \'\' OR locked_until < %d)',
 				$token,
 				$rollback ? $now : 0,
 				$now,
@@ -529,6 +534,30 @@ final class JobRepository {
 			throw new StaleJob( sprintf( 'Job %d was taken over, yet this installation does not manage it; run wp wpcheckpoint job status.', $job->id ) );
 		}
 		return $row;
+	}
+
+	/**
+	 * Whether a job was abandoned from this installation: abandoned (Job::REASON_ABANDONED), and its held_by, which an
+	 * abandon sets to the token of the installation that gave it up, is one of $own. The one rule for "abandoned
+	 * here" (the warnings, release, the plugin's notices, uninstall): a job abandoned from another installation may
+	 * have left this site half swapped, if that installation was wrong that its database is not shared with this one.
+	 *
+	 * @param Job      $job Job.
+	 * @param string[] $own The tokens this installation holds (Directories::own_tokens()).
+	 * @return bool
+	 */
+	public static function abandoned_by( Job $job, array $own ): bool {
+		return Job::REASON_ABANDONED === $job->failure_reason && '' !== $job->held_by && in_array( $job->held_by, $own, true );
+	}
+
+	/**
+	 * Whether a job was abandoned from this installation: abandoned_by() with its tokens.
+	 *
+	 * @param Job $job Job.
+	 * @return bool
+	 */
+	public function abandoned_here( Job $job ): bool {
+		return self::abandoned_by( $job, Directories::own_tokens( $this->directories->state() ) );
 	}
 
 	/**
@@ -597,10 +626,11 @@ final class JobRepository {
 	/**
 	 * What of a job this installation may reclaim, by the evidence it has (the one rule for reclaim_work(), the
 	 * reaper's pass over jobs taken over, and uninstall): RECLAIM_NONE when another installation manages it (it is
-	 * not this one's to touch); RECLAIM_TABLES when it was abandoned from here (the administrator confirmed this
-	 * database is not shared: the tables it named go, never files at the paths its plan records, which are the
-	 * original site's); RECLAIM_ALL otherwise (this installation's own job, or one it took over after HeldSite found
-	 * its plan to be this site's: its tables and staging by the names it made, its work files where they are here).
+	 * not this one's to touch), and when it was abandoned (its tables, the ones its swap moved aside among them, hold
+	 * what the site it was started on had before the swap: if the administrator was wrong that this database is not
+	 * shared with that site, the site still needs them to take the restore over and roll it back); RECLAIM_ALL
+	 * otherwise (this installation's own job, or one it took over after HeldSite found its plan to be this site's: its
+	 * tables and staging by the names it made, its work files where they are here).
 	 *
 	 * @param Job      $job Job.
 	 * @param string[] $own The tokens this installation holds (Directories::own_tokens()).
@@ -610,7 +640,7 @@ final class JobRepository {
 		if ( ! in_array( $job->managing_token(), $own, true ) ) {
 			return self::RECLAIM_NONE;
 		}
-		return Job::REASON_ABANDONED === $job->failure_reason ? self::RECLAIM_TABLES : self::RECLAIM_ALL;
+		return Job::REASON_ABANDONED === $job->failure_reason ? self::RECLAIM_NONE : self::RECLAIM_ALL;
 	}
 
 	/**
@@ -632,6 +662,22 @@ final class JobRepository {
 		$failed           = '' !== self::db_error() || ! is_array( $rows );
 		$wpdb->suppress_errors( $quiet );
 		return $failed ? null : array_map( array( __CLASS__, 'hydrate' ), (array) $rows );
+	}
+
+	/**
+	 * One job's row, without a storage context (uninstall); null when it cannot be read or is not there.
+	 *
+	 * @param int $id Job id.
+	 * @return Job|null
+	 */
+	public static function load( int $id ) {
+		global $wpdb;
+		$quiet            = $wpdb->suppress_errors( true );
+		$wpdb->last_error = '';
+		$row              = $wpdb->get_row( $wpdb->prepare( 'SELECT * FROM ' . self::table() . ' WHERE id = %d', $id ), ARRAY_A ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- plugin table name from the prefix.
+		$failed           = '' !== self::db_error();
+		$wpdb->suppress_errors( $quiet );
+		return ! $failed && is_array( $row ) ? self::hydrate( $row ) : null;
 	}
 
 	/**
@@ -1578,8 +1624,11 @@ final class JobRepository {
 			throw new InvalidTransition( sprintf( 'Job %d: leaving running for %s requires the lock token.', $job->id, $to ) );
 		}
 		if ( Job::QUEUED === $to && Job::FAILED === $job->status && Job::REASON_ABANDONED === $job->failure_reason ) {
+			// From here, never again. From another installation, only once this one took it over (take_over() lifts
+			// the abandon): queued as it is, only the installation that gave it up would pick it up.
+			$here = $this->abandoned_here( $job );
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
-			throw new InvalidTransition( sprintf( 'Job %d was abandoned; it is not run again.', $job->id ) );
+			throw new InvalidTransition( $here ? sprintf( 'Job %d was abandoned; it is not run again.', $job->id ) : sprintf( 'Job %d was abandoned from another installation; take it over here (wp wpcheckpoint job rebind) to run it.', $job->id ) );
 		}
 		if ( Job::QUEUED === $to && Job::FAILED === $job->status && ! $job->can_retry() ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
@@ -1824,7 +1873,7 @@ final class JobRepository {
 
 	/**
 	 * What the jobs this installation took over or gave up made, by their own names (taken_over(): the listings by
-	 * this installation's token never find them), as reclaim_scope() allows: a job given up, its tables; a job taken
+	 * this installation's token never find them), as reclaim_scope() allows (nothing of a job given up): a job taken
 	 * over, once it ended and cannot go on from here (cancelled; failed with its work expired, or with its work in
 	 * another storage directory), what reclaim_work() reclaims. A job that holds the site, or a live run holds, is
 	 * left alone.
@@ -1845,10 +1894,10 @@ final class JobRepository {
 				continue;
 			}
 			$ended = Job::CANCELLED === $job->status || ( Job::FAILED === $job->status && ( $job->work_expired_at > 0 || '' === $this->files_base( $job ) ) );
-			if ( self::RECLAIM_TABLES !== $scope && ! ( Job::SITE_UNTOUCHED === $job->site_state && $ended ) ) {
+			if ( ! ( Job::SITE_UNTOUCHED === $job->site_state && $ended ) ) {
 				continue;
 			}
-			if ( $this->leaves_anything( $job, $scope ) ) {
+			if ( $this->leaves_anything( $job ) ) {
 				// Every pass reads these rows again (they stay for 90 days): one with nothing left is not reclaimed
 				// again, nor logged again as bound to another storage directory.
 				$this->reclaim_work( $job );
@@ -1857,23 +1906,19 @@ final class JobRepository {
 	}
 
 	/**
-	 * Whether reclaim_work() would find anything of a job taken over or given up, within $scope: its temporary
-	 * tables; with RECLAIM_ALL also its plan rows, its staging roots and probes next to the site's directories (not a
-	 * root that keeps what a rollback moved aside), and its work directory where its storage directory is here. A
+	 * Whether reclaim_work() would find anything of a job taken over (RECLAIM_ALL): its temporary tables, its plan
+	 * rows, its staging roots and probes next to the site's directories (not a root that keeps what a rollback moved
+	 * aside), and its work directory where its storage directory is here. A
 	 * plan table that is there (or may be) and cannot be read counts as something left; a table listing that fails
 	 * reads as none, as in drop_tables_of(), and the next pass lists again.
 	 *
-	 * @param Job    $job   Job.
-	 * @param string $scope reclaim_scope().
+	 * @param Job $job Job.
 	 * @return bool
 	 */
-	private function leaves_anything( Job $job, string $scope ): bool {
+	private function leaves_anything( Job $job ): bool {
 		global $wpdb;
 		if ( array() !== $this->temp_tables( $job->storage_token, $job->id ) ) {
 			return true;
-		}
-		if ( self::RECLAIM_ALL !== $scope ) {
-			return false;
 		}
 		$table = $wpdb->base_prefix . SwapPlan::TABLE;
 		$plan  = self::read_rows( $wpdb->prepare( 'SELECT 1 FROM ' . $table . ' WHERE job_id = %d LIMIT 1', $job->id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- plugin table name from the prefix.
@@ -2056,11 +2101,6 @@ final class JobRepository {
 	 */
 	public function reclaim_work( Job $job, int $budget = self::RECLAIM_MAX_ENTRIES ): bool {
 		$scope = self::reclaim_scope( $job, Directories::own_tokens( $this->directories->state() ) );
-		if ( self::RECLAIM_TABLES === $scope ) {
-			// Given up from here: only the tables it named (the administrator confirmed this database is not shared);
-			// never files at the paths its plan records, which are the original site's, and its plan stays.
-			return $this->drop_tables_of( $job->storage_token, $job->id );
-		}
 		if ( Job::SITE_UNTOUCHED !== $job->site_state ) {
 			// Its staging roots hold the site as it was (or the restore's copy, while the swap is under way).
 			$this->directories->log_event( sprintf( 'Job %d holds the site changed; its work was left alone.', $job->id ) );
