@@ -59,34 +59,42 @@ final class LeftoversCheckTest extends WP_UnitTestCase {
 	}
 
 	public function test_it_sees_and_removes_a_storage_directory_in_wp_content_other_than_the_stored_one(): void {
-		wp_cache_flush();
-		$stored = \WPCheckpoint\Tests\Fixtures\StorageDirs::stored_path();
-		$this->assertSame( rtrim( (string) \WPCheckpoint\Support\Directories::load_state()['path'], '/' ), $stored, 'read from the database, as the plugin reads it' );
-		$dir    = WP_CONTENT_DIR . '/' . \WPCheckpoint\Support\Directories::DIR_PREFIX . 'leftovercheck';
-		$this->assertTrue( mkdir( $dir . '/tmp', 0755, true ) );
-		file_put_contents( $dir . '/tmp/index.php', '<?php' );
-		$items = Leftovers::listing();
-		$this->assertContains( 'storage:' . $dir, $items, 'a storage directory that is not the stored one' );
-		if ( '' !== $stored && is_dir( $stored ) ) {
-			$this->assertNotContains( 'storage:' . $stored, $items, 'the stored one is the plugin\'s own, kept from test to test' );
-		}
-		Leftovers::removal( array( 'storage:' . $dir ) );
-		clearstatcache();
-		$this->assertDirectoryDoesNotExist( $dir, 'removed, though it has no owner marker' );
-		$this->assertNotContains( 'storage:' . $dir, Leftovers::listing() );
-		// Registered with the Deleter for that deletion only: the same directory, made again, is refused.
-		$this->assertTrue( mkdir( $dir ) );
-		$roots = \WPCheckpoint\Support\Deleter::replace_roots( array() );
-		\WPCheckpoint\Support\Deleter::replace_roots( $roots );
+		$prefix = WP_CONTENT_DIR . '/' . \WPCheckpoint\Support\Directories::DIR_PREFIX;
+		$dir    = $prefix . 'leftovercheck';
+		$stored = $prefix . 'leftoverstored';
 		try {
-			$this->assertNotSame( '', \WPCheckpoint\Support\Deleter::refusal( $dir ), 'not registered any more' );
-			\WPCheckpoint\Support\Deleter::allow( $dir );
-			$this->assertSame( '', \WPCheckpoint\Support\Deleter::refusal( $dir ), 'the control: registered, it is allowed' );
-			\WPCheckpoint\Support\Deleter::delete_tree( dirname( $dir ), $dir );
-		} finally {
+			$this->assertTrue( mkdir( $dir . '/tmp', 0755, true ) );
+			file_put_contents( $dir . '/tmp/index.php', '<?php' );
+			$this->assertTrue( mkdir( $stored ) );
+			// A stored state that names $stored, in this test's transaction (read back on the same connection).
+			\WPCheckpoint\Support\Options::set( \WPCheckpoint\Support\Directories::OPTION, array_merge( \WPCheckpoint\Support\Directories::load_state(), array( 'path' => $stored ) ) );
+			wp_cache_flush();
+			$this->assertSame( $stored, \WPCheckpoint\Tests\Fixtures\StorageDirs::stored_path(), 'read from the database' );
+			$this->assertSame( $stored, rtrim( (string) \WPCheckpoint\Support\Directories::load_state()['path'], '/' ), 'as the plugin reads it' );
+			$items = Leftovers::listing();
+			$this->assertContains( 'storage:' . $dir, $items, 'a storage directory that is not the stored one' );
+			$this->assertNotContains( 'storage:' . $stored, $items, 'the stored one is the plugin\'s own, kept from test to test' );
+			Leftovers::removal( array( 'storage:' . $dir ) );
+			clearstatcache();
+			$this->assertDirectoryDoesNotExist( $dir, 'removed, though it has no owner marker' );
+			$this->assertNotContains( 'storage:' . $dir, Leftovers::listing() );
+			// Registered with the Deleter for that deletion only: the same directory, made again, is refused.
+			$this->assertTrue( mkdir( $dir ) );
+			$roots = \WPCheckpoint\Support\Deleter::replace_roots( array() );
 			\WPCheckpoint\Support\Deleter::replace_roots( $roots );
+			try {
+				$this->assertNotSame( '', \WPCheckpoint\Support\Deleter::refusal( $dir ), 'not registered any more' );
+				\WPCheckpoint\Support\Deleter::allow( $dir );
+				$this->assertSame( '', \WPCheckpoint\Support\Deleter::refusal( $dir ), 'the control: registered, it is allowed' );
+			} finally {
+				\WPCheckpoint\Support\Deleter::replace_roots( $roots );
+			}
+		} finally {
+			clearstatcache();
+			\WPCheckpoint\Tests\Fixtures\StorageDirs::remove( array_values( array_filter( array( $dir, $stored ), 'is_dir' ) ) );
 		}
 		clearstatcache();
 		$this->assertDirectoryDoesNotExist( $dir );
+		$this->assertDirectoryDoesNotExist( $stored );
 	}
 }
