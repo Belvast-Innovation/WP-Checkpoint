@@ -24,7 +24,7 @@ defined( 'ABSPATH' ) || exit;
 final class Schema {
 
 	const OPTION  = StoredNames::DB_VERSION;
-	const CURRENT = 12;
+	const CURRENT = 13;
 
 	/**
 	 * Jobs table name without the prefix.
@@ -533,6 +533,11 @@ final class Schema {
 				// A table of its own for the uninstall fence, with its one row open (Jobs\UninstallFence); older code
 				// neither reads nor writes it (its swaps enter without it: a known boundary), so min_compatible stays 1.
 				\WPCheckpoint\Jobs\UninstallFence::create();
+				return 1;
+			case 13:
+				// Adds closed_by ('') and beats (0) to the fence, which version 12 made without them: the uninstall that
+				// closed it, and its heartbeat. Code of version 12 neither reads nor writes them, so min_compatible stays 1.
+				\WPCheckpoint\Jobs\UninstallFence::upgrade();
 				return 1;
 			case 10:
 				// Adds held_by (''); older code ignores it, so min_compatible stays 1. What older code does with the rows

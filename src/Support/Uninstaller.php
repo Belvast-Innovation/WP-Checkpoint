@@ -7,6 +7,7 @@
 
 namespace WPCheckpoint\Support;
 
+use WPCheckpoint\Jobs\FenceLost;
 use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Files\ScanRoots;
 use WPCheckpoint\Jobs\LockFile;
@@ -91,7 +92,8 @@ final class Uninstaller {
 		// and the read after it sees that one; a schema older than the fence has no swap that could use it. A fence
 		// left closed by an uninstall that did not finish is opened first, so that one closed now is a live uninstall's.
 		UninstallFence::heal();
-		$fence = UninstallFence::close();
+		$run   = bin2hex( random_bytes( 16 ) ); // This uninstall's own mark on the fence (closed_by).
+		$fence = UninstallFence::close( $run );
 		self::at( 'closed:' . $fence );
 		if ( UninstallFence::FAILED === $fence ) {
 			error_log( 'WP Checkpoint was uninstalled, but the fence that keeps a restore from starting to change the site meanwhile could not be closed; nothing was removed. Reinstall WP Checkpoint and uninstall it again.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- uninstall has no screen to say it on.
@@ -103,15 +105,15 @@ final class Uninstaller {
 			error_log( 'WP Checkpoint was uninstalled while it was being uninstalled on a site that shares this database (or such an uninstall stopped less than an hour ago); nothing was removed. Reinstall WP Checkpoint and uninstall it again once that is over.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- uninstall has no screen to say it on.
 			return;
 		}
-		// Opened again only by the uninstall that closed it.
-		$closed = UninstallFence::DONE === $fence;
+		// Beaten and opened again only by the uninstall that closed it ('': no fence, a schema older than it).
+		$by = UninstallFence::DONE === $fence ? $run : '';
 		try {
-			self::remove( $closed );
+			self::remove( $by );
 		} catch ( \Throwable $e ) {
 			// Whatever failed, a fence this uninstall closed does not stay closed (restores on a site sharing this
 			// database would be refused until it is healed); a process killed outright leaves that to heal().
-			if ( $closed ) {
-				UninstallFence::open();
+			if ( '' !== $by ) {
+				UninstallFence::open( $by );
 			}
 			throw $e;
 		}
@@ -122,25 +124,26 @@ final class Uninstaller {
 	 * close, and as a second line for a swap of an older version on a database this site shares (it does not know
 	 * the fence).
 	 *
-	 * @param bool $closed Whether this uninstall closed the fence (it opens it again when it stops or keeps the data).
+	 * @param string $by This uninstall's run, when it closed the fence (it beats it before each step, and opens it again
+	 *                   when it stops or keeps the data); '' for none.
 	 * @return void
 	 */
-	private static function remove( bool $closed ): void {
+	private static function remove( string $by ): void {
 		$removed = array();
-		if ( self::held_meanwhile( $closed, $removed ) ) {
+		if ( self::held_meanwhile( $by, $removed ) ) {
 			return;
 		}
 		self::at( 'unit:cancel' );
 		if ( null === self::cancel_jobs() ) {
 			// Which jobs changed the site cannot be read: none was cancelled, and nothing is removed.
-			if ( $closed ) {
-				UninstallFence::open();
+			if ( '' !== $by ) {
+				UninstallFence::open( $by );
 			}
 			error_log( self::held_back( null, $removed ) ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- uninstall has no screen to say it on.
 			return;
 		}
 		$removed[] = 'cancelled the jobs that had not changed the site';
-		if ( self::held_meanwhile( $closed, $removed ) ) {
+		if ( self::held_meanwhile( $by, $removed ) ) {
 			return;
 		}
 		self::at( 'unit:staging' );
@@ -148,25 +151,32 @@ final class Uninstaller {
 		$removed[] = 'removed its staging next to the site';
 
 		if ( ! self::should_delete_data() ) {
-			if ( $closed ) {
-				UninstallFence::open(); // The plugin's files go next; a site sharing this database still restores.
+			if ( '' !== $by ) {
+				UninstallFence::open( $by ); // The plugin's files go next; a site sharing this database still restores.
 			}
 			return;
 		}
 
-		if ( self::held_meanwhile( $closed, $removed ) ) {
+		if ( self::held_meanwhile( $by, $removed ) ) {
 			return;
 		}
 		self::at( 'unit:storage' );
-		self::delete_storage();
+		try {
+			// A step without a bound: it beats while it deletes, and stops before the next deletion once the fence is
+			// no longer its own.
+			self::delete_storage( self::beating( $by ) );
+		} catch ( FenceLost $e ) {
+			error_log( self::fence_lost( array_merge( $removed, array( 'begun to remove its storage directory' ) ) ) ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- uninstall has no screen to say it on.
+			return;
+		}
 		$removed[] = 'removed its storage directory';
-		if ( self::held_meanwhile( $closed, $removed ) ) {
+		if ( self::held_meanwhile( $by, $removed ) ) {
 			return;
 		}
 		self::at( 'unit:temporary' );
 		Schema::drop_temporary();
 		$removed[] = 'dropped its temporary tables';
-		if ( self::held_meanwhile( $closed, $removed ) ) {
+		if ( self::held_meanwhile( $by, $removed ) ) {
 			return;
 		}
 		self::at( 'unit:tables' );
@@ -176,9 +186,55 @@ final class Uninstaller {
 	}
 
 	/**
+	 * The confirmation delete_storage() calls before each deletion (Deleter): a heartbeat once BEAT_SECONDS have passed
+	 * since the last, FenceLost when the fence is no longer this uninstall's. Null without a fence.
+	 *
+	 * @param string $by This uninstall's run ('' for none).
+	 * @return callable|null
+	 */
+	private static function beating( string $by ) {
+		if ( '' === $by ) {
+			return null;
+		}
+		$last = microtime( true ); // The beat right before this step.
+		return static function () use ( $by, &$last ): void {
+			$now = microtime( true );
+			if ( $now - $last >= ( self::$beat_seconds ?? UninstallFence::BEAT_SECONDS ) ) {
+				self::at( 'beat' );
+				if ( ! UninstallFence::beat( $by ) ) {
+					throw new FenceLost( 'The uninstall fence is no longer this uninstall\'s.' );
+				}
+				$last = $now;
+			}
+			self::at( 'delete' );
+		};
+	}
+
+	/**
+	 * How often the storage deletion beats, in tests (null: UninstallFence::BEAT_SECONDS).
+	 *
+	 * @var int|null
+	 */
+	private static $beat_seconds = null; // @phpstan-ignore property.unusedType (set by tests only, through reflection)
+
+	/**
+	 * Why the uninstall stopped when the fence it closed was no longer its own, and what it had done.
+	 *
+	 * @param string[] $removed What it had done, in order.
+	 * @return string
+	 */
+	public static function fence_lost( array $removed ): string {
+		if ( array() === $removed ) {
+			return 'WP Checkpoint was being uninstalled when the fence it had closed was opened (it went without a heartbeat for more than an hour, or was opened by hand), before it had removed anything; nothing was removed. Reinstall WP Checkpoint and uninstall it again.';
+		}
+		return sprintf( 'WP Checkpoint was being uninstalled when the fence it had closed was opened (it went without a heartbeat for more than an hour, or was opened by hand), after it had %1$s; it stopped there and left %2$s in place. Reinstall WP Checkpoint and uninstall it again.', implode( ', ', $removed ), implode( ', ', self::left( $removed ) ) );
+	}
+
+	/**
 	 * A test seam: function( string $point ), called before each read of whether a job holds the site ("check"),
 	 * after the fence's close ("closed:" and what close() found), and before each step that removes something
-	 * ("unit:" and its name). Null outside tests.
+	 * ("unit:" and its name), before each heartbeat ("beat"), and before each deletion of the storage directory
+	 * ("delete"). Null outside tests.
 	 *
 	 * @var callable|null
 	 */
@@ -197,22 +253,35 @@ final class Uninstaller {
 	}
 
 	/**
-	 * Whether a job holds the site changed now, or that cannot be read (holding()): then the fence is opened again
-	 * (when this uninstall closed it) and the reason is logged, with what was already done.
+	 * Whether the uninstall stops before its next step: a job holds the site changed now, or that cannot be read
+	 * (holding()), and then the fence is opened again (when this uninstall closed it); or, after that read, the
+	 * heartbeat finds the fence no longer this uninstall's (UninstallFence::beat(): opened, healed as stale, or closed
+	 * by another), and a swap may have entered since. The reason is logged, with what was already done.
+	 *
+	 * The beat comes after the read: a swap that entered after the read did so through a fence opened before it,
+	 * which the beat finds; and the beat makes closed_at now, so the fence is not healed before the step ends.
 	 *
 	 * @phpstan-impure It reads the database each time.
-	 * @param bool     $closed  Whether this uninstall closed the fence.
+	 * @param string   $by      This uninstall's run, when it closed the fence; '' for none.
 	 * @param string[] $removed What was done so far, in order.
 	 * @return bool
 	 */
-	private static function held_meanwhile( bool $closed, array $removed ): bool {
+	private static function held_meanwhile( string $by, array $removed ): bool {
 		self::at( 'check' );
 		$held = self::holding();
 		if ( null !== $held && 0 === $held['all'] ) {
-			return false;
+			if ( '' === $by ) {
+				return false;
+			}
+			self::at( 'beat' );
+			if ( UninstallFence::beat( $by ) ) {
+				return false;
+			}
+			error_log( self::fence_lost( $removed ) ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- uninstall has no screen to say it on.
+			return true;
 		}
-		if ( $closed ) {
-			UninstallFence::open();
+		if ( '' !== $by ) {
+			UninstallFence::open( $by );
 		}
 		error_log( self::held_back( $held, $removed ) ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- uninstall has no screen to say it on.
 		return true;
@@ -249,6 +318,17 @@ final class Uninstaller {
 		if ( array() === $removed ) {
 			return sprintf( 'WP Checkpoint was uninstalled while %1$s; its staging next to the site, its tables and its storage directory were left in place so the site can still be put back. %2$s', $why, $then );
 		}
+		/* The uninstall found it only after it had begun: what it had done, and what it left. */
+		return sprintf( 'WP Checkpoint was being uninstalled when %1$s, after it had %2$s; it stopped there and left %3$s in place. %4$s', $why, implode( ', ', $removed ), implode( ', ', self::left( $removed ) ), $then );
+	}
+
+	/**
+	 * What an uninstall that stopped after $removed left in place.
+	 *
+	 * @param string[] $removed What it had done, in order.
+	 * @return string[]
+	 */
+	private static function left( array $removed ): array {
 		$left = array();
 		foreach ( array(
 			'removed its staging next to the site' => 'its staging next to the site',
@@ -256,12 +336,11 @@ final class Uninstaller {
 			'dropped its temporary tables'         => 'its temporary tables',
 		) as $done => $what ) {
 			if ( ! in_array( $done, $removed, true ) ) {
-				$left[] = $what;
+				$left[] = in_array( 'begun to remove its storage directory', $removed, true ) && 'its storage directory' === $what ? 'the rest of its storage directory' : $what;
 			}
 		}
 		$left[] = 'its jobs table, swap plan and uninstall fence, and its settings';
-		/* The uninstall found it only after it had begun: what it had done, and what it left. */
-		return sprintf( 'WP Checkpoint was being uninstalled when %1$s, after it had %2$s; it stopped there and left %3$s in place. %4$s', $why, implode( ', ', $removed ), implode( ', ', $left ), $then );
+		return $left;
 	}
 
 	/**
@@ -466,9 +545,13 @@ final class Uninstaller {
 	 * directory or holds one, which Directories no longer takes) is counted
 	 * as failed and left in place.
 	 *
+	 * With $confirm (the uninstall's heartbeat, beating()), it is called right before each deletion, the directory's
+	 * own included; what it throws stops the deletion before that one.
+	 *
+	 * @param callable|null $confirm function(): void, right before each deletion; may throw.
 	 * @return array{deleted: int, failed: string[]}
 	 */
-	public static function delete_storage(): array {
+	public static function delete_storage( $confirm = null ): array {
 		$none  = array(
 			'deleted' => 0,
 			'failed'  => array(),
@@ -483,14 +566,14 @@ final class Uninstaller {
 			$result = $none;
 			foreach ( Directories::SUBDIRS as $sub ) {
 				if ( is_dir( $path . DIRECTORY_SEPARATOR . $sub ) ) {
-					$part               = self::delete_tree( $path, $path . DIRECTORY_SEPARATOR . $sub );
+					$part               = self::delete_tree( $path, $path . DIRECTORY_SEPARATOR . $sub, $confirm );
 					$result['deleted'] += $part['deleted'];
 					$result['failed']   = array_merge( $result['failed'], $part['failed'] );
 				}
 			}
 			foreach ( array( 'index.php', '.htaccess', OwnerMarker::FILENAME ) as $file ) {
 				if ( is_file( $path . DIRECTORY_SEPARATOR . $file ) ) {
-					$part               = self::delete_tree( $path, $path . DIRECTORY_SEPARATOR . $file );
+					$part               = self::delete_tree( $path, $path . DIRECTORY_SEPARATOR . $file, $confirm );
 					$result['deleted'] += $part['deleted'];
 					$result['failed']   = array_merge( $result['failed'], $part['failed'] );
 				}
@@ -501,8 +584,11 @@ final class Uninstaller {
 		if ( basename( $path ) !== Directories::DIR_PREFIX . $state['token'] ) {
 			return $none;
 		}
-		$result = self::empty_directory( $path );
+		$result = self::empty_directory( $path, $confirm );
 		if ( array() === $result['failed'] ) {
+			if ( null !== $confirm ) {
+				$confirm();
+			}
 			if ( @rmdir( $path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_rmdir -- failure is reported below.
 				++$result['deleted'];
 			} else {
@@ -515,12 +601,13 @@ final class Uninstaller {
 	/**
 	 * Deleter::empty_directory(), with a refused path logged and counted as a failure (nothing was deleted).
 	 *
-	 * @param string $path Directory.
+	 * @param string        $path    Directory.
+	 * @param callable|null $confirm Deleter's confirmation; what it throws passes through.
 	 * @return array{deleted: int, failed: string[]}
 	 */
-	private static function empty_directory( string $path ): array {
+	private static function empty_directory( string $path, $confirm = null ): array {
 		try {
-			$result = Deleter::empty_directory( $path );
+			$result = Deleter::empty_directory( $path, $confirm );
 			return array(
 				'deleted' => $result['deleted'],
 				'failed'  => $result['failed'],
@@ -537,13 +624,14 @@ final class Uninstaller {
 	/**
 	 * Deleter::delete_tree(), with a refused path logged and counted as a failure (nothing was deleted).
 	 *
-	 * @param string $base   Base.
-	 * @param string $target Target.
+	 * @param string        $base    Base.
+	 * @param string        $target  Target.
+	 * @param callable|null $confirm Deleter's confirmation; what it throws passes through.
 	 * @return array{deleted: int, failed: string[], remaining: bool}
 	 */
-	private static function delete_tree( string $base, string $target ): array {
+	private static function delete_tree( string $base, string $target, $confirm = null ): array {
 		try {
-			return Deleter::delete_tree( $base, $target );
+			return Deleter::delete_tree( $base, $target, 0, $confirm );
 		} catch ( DeletionRefused $e ) {
 			error_log( 'WP Checkpoint: ' . $e->getMessage() ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- uninstall has no screen to say it on.
 			return array(

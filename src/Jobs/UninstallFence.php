@@ -46,10 +46,17 @@ final class UninstallFence {
 	const FAILED = 'failed';
 
 	/**
-	 * A fence closed longer ago than this is taken to be left by an uninstall that did not finish (its process died):
+	 * A fence with no heartbeat (beat(): the uninstall that holds it beats before each step, and every BEAT_SECONDS
+	 * while it deletes its storage) for longer than this is taken to be left by an uninstall that did not finish:
 	 * Schema::ensure() opens it again where the request may upgrade (the page, activation, WP-CLI), logged.
 	 */
 	const STALE_SECONDS = 3600;
+
+	/**
+	 * How often, at most, the uninstall beats while it deletes its storage directory (before each deletion, once this
+	 * long has passed since its last beat): far inside STALE_SECONDS.
+	 */
+	const BEAT_SECONDS = 30;
 
 	/**
 	 * The statement by which a job enters the site, with placeholders in order (%d and %s): the fence row's id and
@@ -74,15 +81,28 @@ final class UninstallFence {
 	}
 
 	/**
-	 * The statement that closes the fence, with placeholders in order: state "closed", the row's id, state "open".
-	 * It changes the row only while it is open (one row affected: this uninstall closed it), and takes the time from
-	 * the server (one clock for every installation sharing the database).
+	 * The statement that closes the fence, with placeholders in order: state "closed", the uninstall's run (closed_by),
+	 * the row's id, state "open". It changes the row only while it is open (one row affected: this uninstall closed
+	 * it), and takes the time from the server (one clock for every installation sharing the database).
 	 *
 	 * @param string $fence The fence table.
 	 * @return string
 	 */
 	public static function close_template( string $fence ): string {
-		return 'UPDATE ' . SqlWriter::identifier( $fence ) . ' SET state = %s, closed_at = UNIX_TIMESTAMP() WHERE id = %d AND state = %s';
+		return 'UPDATE ' . SqlWriter::identifier( $fence ) . ' SET state = %s, closed_at = UNIX_TIMESTAMP(), closed_by = %s, beats = 0 WHERE id = %d AND state = %s';
+	}
+
+	/**
+	 * The heartbeat of the uninstall that holds the fence, with placeholders in order: the row's id, state "closed",
+	 * the uninstall's run. One statement both checks that the fence is still closed by this run and moves closed_at
+	 * (what heal() measures staleness by) to now; beats changes every time, so one row affected means "still mine"
+	 * even twice in one second.
+	 *
+	 * @param string $fence The fence table.
+	 * @return string
+	 */
+	public static function beat_template( string $fence ): string {
+		return 'UPDATE ' . SqlWriter::identifier( $fence ) . ' SET closed_at = UNIX_TIMESTAMP(), beats = beats + 1 WHERE id = %d AND state = %s AND closed_by = %s';
 	}
 
 	/**
@@ -102,7 +122,28 @@ final class UninstallFence {
 	 * @return string
 	 */
 	public static function create_sql( string $name ): string {
-		return 'CREATE TABLE IF NOT EXISTS ' . SqlWriter::identifier( $name ) . " (id tinyint(3) unsigned NOT NULL, state varchar(8) NOT NULL DEFAULT 'open', entries bigint(20) unsigned NOT NULL DEFAULT 0, entered_at bigint(20) unsigned NOT NULL DEFAULT 0, closed_at bigint(20) unsigned NOT NULL DEFAULT 0, PRIMARY KEY (id)) ENGINE=InnoDB";
+		return 'CREATE TABLE IF NOT EXISTS ' . SqlWriter::identifier( $name ) . " (id tinyint(3) unsigned NOT NULL, state varchar(8) NOT NULL DEFAULT 'open', entries bigint(20) unsigned NOT NULL DEFAULT 0, entered_at bigint(20) unsigned NOT NULL DEFAULT 0, closed_at bigint(20) unsigned NOT NULL DEFAULT 0, closed_by varchar(32) NOT NULL DEFAULT '', beats bigint(20) unsigned NOT NULL DEFAULT 0, PRIMARY KEY (id)) ENGINE=InnoDB";
+	}
+
+	/**
+	 * The columns schema version 13 adds to a table version 12 made (closed_by, beats), when they are missing; the
+	 * table a later create_sql() makes has them already.
+	 *
+	 * @return void
+	 */
+	public static function upgrade(): void {
+		global $wpdb;
+		$name = SqlWriter::identifier( self::name() );
+		$have = $wpdb->get_col( 'SHOW COLUMNS FROM ' . $name ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- the fence table.
+		$have = is_array( $have ) ? array_map( 'strval', $have ) : array();
+		foreach ( array(
+			'closed_by' => "varchar(32) NOT NULL DEFAULT ''",
+			'beats'     => 'bigint(20) unsigned NOT NULL DEFAULT 0',
+		) as $column => $definition ) {
+			if ( array() !== $have && ! in_array( $column, $have, true ) ) {
+				$wpdb->query( 'ALTER TABLE ' . $name . ' ADD COLUMN ' . $column . ' ' . $definition ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.NotPrepared -- the fence table and a constant definition.
+			}
+		}
 	}
 
 	/**
@@ -118,20 +159,22 @@ final class UninstallFence {
 	}
 
 	/**
-	 * Close the fence: one UPDATE of its row while it is open (it waits while a swap's entering UPDATE holds the row).
+	 * Close the fence for this uninstall's run ($by: a random value of its own, closed_by): one UPDATE of its row while
+	 * it is open (it waits while a swap's entering UPDATE holds the row).
 	 * DONE when this closed it; HELD when it was closed already (read after: no swap enters, and the one who closed it
 	 * opens it); ABSENT when the table is positively not there (a schema older than the fence: no swap of this version
 	 * can enter without it); FAILED when the statement failed (it changed nothing), the row is missing, or it cannot be
 	 * told.
 	 *
+	 * @param string $by This uninstall's run.
 	 * @return string
 	 */
-	public static function close(): string {
+	public static function close( string $by ): string {
 		global $wpdb;
 		$name             = self::name();
 		$quiet            = $wpdb->suppress_errors( true );
 		$wpdb->last_error = '';
-		$done             = $wpdb->query( $wpdb->prepare( self::close_template( $name ), self::CLOSED, self::ROW, self::OPEN ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- the fence table.
+		$done             = $wpdb->query( $wpdb->prepare( self::close_template( $name ), self::CLOSED, $by, self::ROW, self::OPEN ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- the fence table.
 		$failed           = false === $done || '' !== JobRepository::db_error();
 		$state            = $failed || 1 === (int) $done ? null : $wpdb->get_var( $wpdb->prepare( 'SELECT state FROM ' . SqlWriter::identifier( $name ) . ' WHERE id = %d', self::ROW ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- table name from the prefix.
 		$failed           = $failed || '' !== JobRepository::db_error();
@@ -150,18 +193,44 @@ final class UninstallFence {
 	}
 
 	/**
-	 * Open the fence again (an uninstall that stopped, or that kept the data): true when the row is open now.
+	 * Open the fence again (an uninstall that stopped, or that kept the data: only a fence its run closed, $by; '' for
+	 * any, for repair and tests): true when the row is open now. A fence another uninstall closed since stays closed.
 	 *
+	 * @param string $by The run that closed it ('': any).
 	 * @return bool
 	 */
-	public static function open(): bool {
+	public static function open( string $by = '' ): bool {
 		global $wpdb;
 		$name  = self::name();
 		$quiet = $wpdb->suppress_errors( true );
-		$wpdb->query( $wpdb->prepare( 'UPDATE ' . SqlWriter::identifier( $name ) . ' SET state = %s WHERE id = %d', self::OPEN, self::ROW ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- table name from the prefix.
+		if ( '' === $by ) {
+			// Whoever closed it (repair and tests; an uninstall opens only its own).
+			$wpdb->query( $wpdb->prepare( 'UPDATE ' . SqlWriter::identifier( $name ) . ' SET state = %s WHERE id = %d', self::OPEN, self::ROW ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- table name from the prefix.
+		} else {
+			$wpdb->query( $wpdb->prepare( 'UPDATE ' . SqlWriter::identifier( $name ) . ' SET state = %s WHERE id = %d AND closed_by = %s', self::OPEN, self::ROW, $by ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- table name from the prefix.
+		}
 		$state = $wpdb->get_var( $wpdb->prepare( 'SELECT state FROM ' . SqlWriter::identifier( $name ) . ' WHERE id = %d', self::ROW ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- table name from the prefix.
 		$wpdb->suppress_errors( $quiet );
 		return self::OPEN === $state;
+	}
+
+	/**
+	 * The heartbeat (beat_template()): true when the fence is still closed by this run, and its closed_at is now;
+	 * false when it was opened (healed as stale, or by hand) or closed by another since, or the statement failed, or
+	 * $by is empty.
+	 *
+	 * @param string $by This uninstall's run.
+	 * @return bool
+	 */
+	public static function beat( string $by ): bool {
+		global $wpdb;
+		if ( '' === $by ) {
+			return false; // No run: a fence closed by version 12 (closed_by '') is no one's to beat.
+		}
+		$quiet = $wpdb->suppress_errors( true );
+		$done  = $wpdb->query( $wpdb->prepare( self::beat_template( self::name() ), self::ROW, self::CLOSED, $by ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- the fence table.
+		$wpdb->suppress_errors( $quiet );
+		return 1 === (int) $done;
 	}
 
 	/**
@@ -183,7 +252,8 @@ final class UninstallFence {
 	}
 
 	/**
-	 * Open a fence closed longer than STALE_SECONDS ago (an uninstall whose process died before it opened it again):
+	 * Open a fence closed with no heartbeat (beat()) for longer than STALE_SECONDS (an uninstall whose process died
+	 * before it opened it again):
 	 * one UPDATE on the row as it is, by the server's clock (as close() writes it), so an uninstall that closes it
 	 * meanwhile is not undone.
 	 *

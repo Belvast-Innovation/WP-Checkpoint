@@ -32,10 +32,14 @@ final class UninstallFenceTest extends SwapTestCase {
 		UninstallFence::create(); // The table and its row, made again if a test dropped them.
 		UninstallFence::open();
 		UninstallSetting::save( false ); // A setting a test committed does not delete a later test's data.
+		$this->seam( null );
+		$this->beat_every( null );
 		foreach ( $this->committed as $id ) {
 			$wpdb->delete( JobRepository::table(), array( 'id' => $id ) );
 		}
 		$wpdb->query( 'COMMIT' );
+		Plugin::instance()->reset_directories(); // The storage directory, made again if a test's uninstall removed it.
+		Plugin::instance()->directories()->base();
 		parent::tear_down();
 	}
 
@@ -114,7 +118,7 @@ final class UninstallFenceTest extends SwapTestCase {
 					$wpdb->query( 'SET SESSION innodb_lock_wait_timeout = 1' );
 					try {
 						$start  = microtime( true );
-						$result = UninstallFence::close();
+						$result = UninstallFence::close( 'test-run' );
 						$waited = microtime( true ) - $start;
 					} finally {
 						$wpdb->query( 'SET SESSION innodb_lock_wait_timeout = 50' );
@@ -214,7 +218,7 @@ final class UninstallFenceTest extends SwapTestCase {
 				static function () use ( $how ): void {
 					global $wpdb;
 					if ( 'closed' === $how ) {
-						UninstallFence::close();
+						UninstallFence::close( 'test-run' );
 					} else {
 						UninstallFence::open();
 						$wpdb->query( 'DROP TABLE IF EXISTS ' . UninstallFence::name() ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- the fence table.
@@ -245,7 +249,7 @@ final class UninstallFenceTest extends SwapTestCase {
 		global $wpdb;
 		$this->autocommit(
 			static function (): void {
-				UninstallFence::close();
+				UninstallFence::close( 'test-run' );
 			}
 		);
 		Schema::ensure( true );
@@ -340,7 +344,11 @@ final class UninstallFenceTest extends SwapTestCase {
 			// Closed already by another uninstall under way (a site sharing this database): this one removes nothing and
 			// leaves the fence to it.
 			$job = $this->running_job();
-			$this->autocommit( array( UninstallFence::class, 'close' ) );
+			$this->autocommit(
+				static function (): void {
+					UninstallFence::close( 'another-uninstall' );
+				}
+			);
 			$log = $this->logged( array( Uninstaller::class, 'run' ) );
 			$this->assertSame( array( UninstallFence::DONE, UninstallFence::HELD ), $found );
 			$this->assertStringContainsString( 'while it was being uninstalled on a site that shares this database', $log );
@@ -455,7 +463,7 @@ final class UninstallFenceTest extends SwapTestCase {
 		$other = self::other();
 		$this->autocommit(
 			static function (): void {
-				UninstallFence::close();
+				UninstallFence::close( 'test-run' );
 			}
 		);
 		$this->assertSame( UninstallFence::CLOSED, UninstallFence::row()['state'] );
@@ -466,5 +474,186 @@ final class UninstallFenceTest extends SwapTestCase {
 		$other->close();
 		global $wpdb;
 		$wpdb->update( JobRepository::table(), array( 'site_state' => Job::SITE_UNTOUCHED ), array( 'id' => $job->id ) );
+	}
+
+	/**
+	 * Set how often the uninstall's storage deletion beats (null: UninstallFence::BEAT_SECONDS).
+	 */
+	private function beat_every( ?int $seconds ): void {
+		$property = new \ReflectionProperty( Uninstaller::class, 'beat_seconds' );
+		$property->setAccessible( true );
+		$property->setValue( null, $seconds );
+	}
+
+	public function test_an_uninstall_that_beats_is_not_healed_while_it_runs(): void {
+		global $wpdb;
+		UninstallSetting::save( false );
+		$checks = 0;
+		$healed = null;
+		$after  = null;
+		$this->seam(
+			static function ( string $point ) use ( &$checks, &$healed, &$after, $wpdb ): void {
+				if ( 'check' === $point && 3 === ++$checks ) {
+					// Before the read for the staging step, its last beat more than an hour ago: an uninstall that runs
+					// that long.
+					$wpdb->update( UninstallFence::name(), array( 'closed_at' => time() - UninstallFence::STALE_SECONDS - 60 ), array( 'id' => UninstallFence::ROW ) );
+				}
+				if ( 'unit:staging' === $point ) {
+					$after  = UninstallFence::row();
+					$healed = UninstallFence::heal(); // What a request on a site sharing this database does meanwhile.
+				}
+			}
+		);
+		$this->logged( array( Uninstaller::class, 'run' ) );
+		$this->assertSame( 3, $checks, 'the control: the third read came before the staging step' );
+		$this->assertSame( UninstallFence::CLOSED, $after['state'] ?? null );
+		$this->assertGreaterThanOrEqual( time() - 60, $after['closed_at'] ?? 0, 'the beat after the read made closed_at now' );
+		$this->assertFalse( $healed, 'a fence whose uninstall beats is not healed' );
+		$this->assertSame( UninstallFence::OPEN, UninstallFence::row()['state'], 'opened by that uninstall when it was done' );
+		$this->assertGreaterThan( 0, (int) $wpdb->get_var( 'SELECT beats FROM ' . UninstallFence::name() ), 'its beats counted' ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- the fence table.
+	}
+
+	public function test_a_fence_opened_after_a_read_stops_the_uninstall_before_its_next_step(): void {
+		UninstallSetting::save( true );
+		$job    = null;
+		$other  = self::other();
+		$beats  = 0;
+		$events = array();
+		$this->seam(
+			function ( string $point ) use ( &$beats, &$events, &$job, $other ): void {
+				$events[] = $point;
+				if ( 'beat' === $point && 2 === ++$beats ) {
+					// After the read before the staging step: the fence opened (by hand, or healed), and a swap (one
+					// that began after the cancel) enters.
+					$job = $this->running_job();
+					$other->query( $other->prepare( 'UPDATE ' . UninstallFence::name() . ' SET state = %s WHERE id = %d', UninstallFence::OPEN, UninstallFence::ROW ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- the fence table.
+					$other->query( self::entering( $job ) );
+				}
+			}
+		);
+		$log = $this->logged( array( Uninstaller::class, 'run' ) );
+		$other->close();
+		$this->assertSame( 2, $beats, 'the control: it beat before the cancel and again before the staging step' );
+		$this->assertInstanceOf( Job::class, $job );
+		$this->assertContains( 'unit:cancel', $events, 'the control: the first step ran' );
+		$this->assertNotContains( 'unit:staging', $events, 'the next step did not' );
+		$this->assertStringContainsString( 'when the fence it had closed was opened', $log );
+		$this->assertStringContainsString( 'after it had cancelled the jobs that had not changed the site; it stopped there and left its staging next to the site, its storage directory', $log );
+		$this->assertSame( Job::SITE_CHANGING, Plugin::instance()->jobs()->find( $job->id )->site_state, 'the control: the swap entered' );
+		$this->assertTrue( Schema::table_exists(), 'nothing more removed' );
+		$this->assertDirectoryExists( Plugin::instance()->directories()->base() );
+		global $wpdb;
+		$wpdb->update( JobRepository::table(), array( 'site_state' => Job::SITE_UNTOUCHED ), array( 'id' => $job->id ) );
+	}
+
+	public function test_an_uninstall_does_not_open_a_fence_another_uninstall_closed_meanwhile(): void {
+		UninstallSetting::save( true );
+		$job    = null;
+		$other  = self::other();
+		$checks = 0;
+		$this->seam(
+			function ( string $point ) use ( &$checks, &$job, $other ): void {
+				if ( 'check' === $point && 2 === ++$checks ) {
+					// Before the read for the cancel: the fence opened, a swap enters, and another uninstall closes it.
+					$job = $this->running_job();
+					$other->query( $other->prepare( 'UPDATE ' . UninstallFence::name() . ' SET state = %s WHERE id = %d', UninstallFence::OPEN, UninstallFence::ROW ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- the fence table.
+					$other->query( self::entering( $job ) );
+					$other->query( $other->prepare( UninstallFence::close_template( UninstallFence::name() ), UninstallFence::CLOSED, 'another-uninstall', UninstallFence::ROW, UninstallFence::OPEN ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- the plugin's own statement.
+				}
+			}
+		);
+		$log = $this->logged( array( Uninstaller::class, 'run' ) );
+		$other->close();
+		$this->assertSame( 2, $checks, 'the control: the read before the cancel' );
+		$this->assertInstanceOf( Job::class, $job );
+		$this->assertStringContainsString( 'a restore holds the site changed', $log, 'the control: the read saw the swap' );
+		$this->assertSame( UninstallFence::CLOSED, UninstallFence::row()['state'], 'the other uninstall\'s fence stays closed' );
+		global $wpdb;
+		$this->assertSame( 'another-uninstall', (string) $wpdb->get_var( 'SELECT closed_by FROM ' . UninstallFence::name() ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- the fence table.
+		$wpdb->update( JobRepository::table(), array( 'site_state' => Job::SITE_UNTOUCHED ), array( 'id' => $job->id ) );
+	}
+
+	/**
+	 * Files in the storage directory, so that its deletion has several to delete.
+	 */
+	private function storage_files( int $count ): void {
+		$dir = Plugin::instance()->directories()->base() . '/backups';
+		$this->assertDirectoryExists( $dir, 'the control: the storage directory' );
+		for ( $i = 0; $i < $count; $i++ ) {
+			file_put_contents( $dir . '/fence-test-' . $i . '.txt', 'x' );
+		}
+	}
+
+	/**
+	 * How many files and directories the storage directory holds, itself included (0: gone).
+	 */
+	private static function storage_entries( string $base ): int {
+		if ( ! is_dir( $base ) ) {
+			return 0;
+		}
+		$count = 1;
+		foreach ( new \RecursiveIteratorIterator( new \RecursiveDirectoryIterator( $base, \FilesystemIterator::SKIP_DOTS ), \RecursiveIteratorIterator::SELF_FIRST ) as $entry ) {
+			++$count;
+		}
+		return $count;
+	}
+
+	public function test_a_fence_opened_while_the_storage_is_deleted_stops_the_deletion_before_its_next_file(): void {
+		UninstallSetting::save( true );
+		$this->storage_files( 6 );
+		$base   = Plugin::instance()->directories()->base();
+		$before = self::storage_entries( $base );
+		$this->beat_every( 0 );
+		$deletes = 0;
+		$beats   = 0;
+		$events  = array();
+		$this->seam(
+			static function ( string $point ) use ( &$deletes, &$beats, &$events ): void {
+				$events[] = $point;
+				if ( 'delete' === $point ) {
+					++$deletes;
+				}
+				if ( 'beat' === $point && $deletes > 0 && 1 === ++$beats ) {
+					// Between the first deletion and the next: the fence opened.
+					$other = self::other();
+					$other->query( $other->prepare( 'UPDATE ' . UninstallFence::name() . ' SET state = %s WHERE id = %d', UninstallFence::OPEN, UninstallFence::ROW ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- the fence table.
+					$other->close();
+				}
+			}
+		);
+		$log = $this->logged( array( Uninstaller::class, 'run' ) );
+		$this->assertSame( 1, $deletes, 'one deletion, and none after the beat that found the fence open' );
+		$this->assertSame( 1, $beats, 'the control: it beat between the two' );
+		$this->assertGreaterThan( 8, $before, 'the control: the storage directory had more to delete' );
+		$this->assertSame( $before - 1, self::storage_entries( $base ), 'one entry went, the rest is there' );
+		$this->assertNotContains( 'unit:temporary', $events, 'no later step' );
+		$this->assertTrue( Schema::table_exists() );
+		$this->assertStringContainsString( 'after it had cancelled the jobs that had not changed the site, removed its staging next to the site, begun to remove its storage directory; it stopped there and left the rest of its storage directory, its temporary tables', $log );
+		Uninstaller::delete_storage(); // The rest, as the uninstall would have; tear_down() makes the directory again.
+		$this->assertSame( 0, self::storage_entries( $base ) );
+	}
+
+	public function test_the_storage_deletion_beats_no_more_often_than_every_beat_seconds(): void {
+		UninstallSetting::save( true );
+		$this->storage_files( 6 );
+		$events = array();
+		$this->seam(
+			static function ( string $point ) use ( &$events ): void {
+				$events[] = $point;
+				if ( 'check' === $point && in_array( 'unit:storage', $events, true ) ) {
+					throw new \RuntimeException( 'stop after the storage step' );
+				}
+			}
+		);
+		try {
+			$this->logged( array( Uninstaller::class, 'run' ) );
+			$this->fail( 'the control: stopped after the storage step' );
+		} catch ( \RuntimeException $e ) {
+			$this->assertSame( 'stop after the storage step', $e->getMessage() );
+		}
+		$during = array_slice( $events, (int) array_search( 'unit:storage', $events, true ) + 1 );
+		$this->assertGreaterThan( 6, count( array_keys( $during, 'delete', true ) ), 'the control: each deletion was seen' );
+		$this->assertSame( array(), array_keys( $during, 'beat', true ), 'no beat within the first BEAT_SECONDS' );
+		$this->assertSame( UninstallFence::OPEN, UninstallFence::row()['state'], 'the failure opened it again' );
 	}
 }

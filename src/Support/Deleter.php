@@ -523,12 +523,31 @@ final class Deleter {
 	/**
 	 * Delete everything inside $base but keep $base itself.
 	 *
-	 * @param string $base Directory the plugin owns.
+	 * With $confirm, as delete_tree(): called right before each unlink() and rmdir(); what it throws stops the call.
+	 *
+	 * @param string        $base    Directory the plugin owns.
+	 * @param callable|null $confirm function(): void, right before each deletion; may throw.
 	 * @return array{deleted: int, failed: string[]}
 	 * @throws DeletionRefused When the directory is not one the plugin may empty (refusal()); nothing is deleted.
 	 */
-	public static function empty_directory( string $base ): array {
+	public static function empty_directory( string $base, $confirm = null ): array {
 		self::guard( $base );
+		$before        = self::$confirm;
+		self::$confirm = is_callable( $confirm ) ? $confirm : null;
+		try {
+			return self::empty_directory_now( $base );
+		} finally {
+			self::$confirm = $before;
+		}
+	}
+
+	/**
+	 * The emptying of empty_directory(), past its guard.
+	 *
+	 * @param string $base Directory the plugin owns.
+	 * @return array{deleted: int, failed: string[]}
+	 */
+	private static function empty_directory_now( string $base ): array {
 		$result = array(
 			'deleted'   => 0,
 			'failed'    => array(),

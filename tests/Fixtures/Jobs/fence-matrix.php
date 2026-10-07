@@ -11,6 +11,9 @@
  * - Once the fence is closed, the entering statement changes nothing.
  * - The reverse: a statement that writes the job's row alone (the fence row left out) does not make the close wait;
  *   the first observation rests on the fence row and nothing else.
+ * - The heartbeat (UninstallFence::beat_template()) of the uninstall that closed the fence changes the row even in the
+ *   second it closed it (beats counts up, so the server reports it changed); another's changes nothing, nor does it
+ *   once the fence is open.
  *
  * Usage: php fence-matrix.php <host> <port> <user> <password>
  *
@@ -100,7 +103,10 @@ mysqli_query( $a, "INSERT INTO jobs (id, lock_token) VALUES (1, 'run')" );
 mysqli_query( $a, "INSERT INTO fence (id, state) VALUES (1, 'open')" );
 
 $entering = fm_fill( $a, UninstallFence::entering_template( 'jobs', 'fence', array( 'site_state', 'updated_at' ), array( '%d', '%d' ) ), array( UninstallFence::ROW, UninstallFence::OPEN, 1, time(), time(), 1, 'run' ) );
-$close    = fm_fill( $b, UninstallFence::close_template( 'fence' ), array( UninstallFence::CLOSED, UninstallFence::ROW, UninstallFence::OPEN ) );
+$close    = fm_fill( $b, UninstallFence::close_template( 'fence' ), array( UninstallFence::CLOSED, 'run', UninstallFence::ROW, UninstallFence::OPEN ) );
+$beat     = static function ( mysqli $db, string $by ): string {
+	return fm_fill( $db, UninstallFence::beat_template( 'fence' ), array( UninstallFence::ROW, UninstallFence::CLOSED, $by ) );
+};
 $alone    = "UPDATE jobs SET site_state = 1, updated_at = 0 WHERE id = 1 AND lock_token = 'run'";
 $reset    = static function () use ( $a ): void {
 	mysqli_query( $a, 'UPDATE jobs SET site_state = 0' );
@@ -137,6 +143,14 @@ foreach ( array( 'READ COMMITTED', 'REPEATABLE READ' ) as $level ) {
 	$seen[ $key . ':closed' ]         = $closed;
 	$seen[ $key . ':entering_closed' ] = array( $enter_errno, $refused );
 
+	// The heartbeat, right after the close: its own (twice in the same second), another's, and once open.
+	list( , $own )           = fm_run( $b, $beat( $b, 'run' ) );
+	list( , $again )         = fm_run( $b, $beat( $b, 'run' ) );
+	list( , $another )       = fm_run( $b, $beat( $b, 'another' ) );
+	mysqli_query( $a, "UPDATE fence SET state = 'open'" );
+	list( , $open )          = fm_run( $b, $beat( $b, 'run' ) );
+	$seen[ $key . ':beats' ] = array( $own, $again, $another, $open );
+
 	// The reverse: the job's row alone does not hold the close.
 	$reset();
 	mysqli_query( $a, 'START TRANSACTION' );
@@ -153,6 +167,7 @@ foreach ( array( 'READ COMMITTED', 'REPEATABLE READ' ) as $level ) {
 		$key . ':read_after_close'            => 1,
 		$key . ':closed'                      => 1,
 		$key . ':entering_closed'             => array( 0, 0 ),
+		$key . ':beats'                       => array( 1, 1, 0, 0 ),
 		$key . ':close_without_the_fence_row' => 0,
 	);
 }

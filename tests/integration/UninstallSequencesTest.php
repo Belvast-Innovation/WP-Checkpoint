@@ -16,9 +16,11 @@ use WPCheckpoint\Tests\Fixtures\Sandbox;
 /**
  * The uninstall against a swap that enters the site meanwhile, generated: each sequence is a real Uninstaller::run()
  * with one swap entering (its real statement, on a second connection) at one of the run's opportunities (any query of
- * the run, any point it reads whether a job holds the site, closes the fence or begins a step that removes something),
- * or at none. The fence is there ("fence": this version) or not ("old": a site sharing the database runs an older
- * version, whose swap enters without the fence); the data is deleted or kept.
+ * the run, any point it reads whether a job holds the site, closes the fence, beats it, begins a step that removes
+ * something or deletes a file of the storage directory), or at none. The fence is there ("fence": this version) or not
+ * ("old": a site sharing the database runs an older version, whose swap enters without the fence); or it is there and
+ * opened under the uninstall right before the swap enters ("reopen": healed as stale, or opened by hand). The data is
+ * deleted or kept; the storage deletion beats before each file.
  *
  * - I1 (fence): no swap enters once the uninstall closed the fence.
  * - I2: no step that removes something runs after a read of whether a job holds the site that came after a swap
@@ -27,7 +29,9 @@ use WPCheckpoint\Tests\Fixtures\Sandbox;
  * - I3 (fence): once the uninstall ends, the fence is open (it stopped, or kept the data), or gone with the tables.
  * - I4: a job that entered is never cancelled.
  * - I5: every step that removes something comes right after a read of whether a job holds the site (the second line:
- *   with the fence too, for a site sharing the database that runs an older version).
+ *   with the fence too, for a site sharing the database that runs an older version), with the fence closed by this
+ *   uninstall after a beat that follows that read; and each deletion of the storage directory right after a beat.
+ * - I6 (reopen): once the fence was opened under the uninstall, nothing is removed after its next beat.
  *
  * Fixed seed; WPCHECKPOINT_UNINSTALL_SEQUENCES sequences (default 120), WPCHECKPOINT_UNINSTALL_SEQUENCES_SEED. Every
  * case must occur, counted where it happened.
@@ -40,6 +44,7 @@ final class UninstallSequencesTest extends SwapTestCase {
 	public function tear_down(): void {
 		global $wpdb;
 		$this->seam( null );
+		$this->beat_every( null );
 		$wpdb->query( 'COMMIT' );
 		Options::delete( Schema::OPTION );
 		Schema::ensure();
@@ -57,20 +62,21 @@ final class UninstallSequencesTest extends SwapTestCase {
 		$log   = Sandbox::make( 'uninstall-sequences' );
 		$was   = ini_get( 'error_log' );
 		ini_set( 'error_log', $log . '/php-error.log' );
+		$this->beat_every( 0 );
 		try {
 			// The opportunities of each kind of run, from one run without a swap.
 			$length = array();
-			foreach ( array( 'fence', 'old' ) as $mode ) {
+			foreach ( array( 'fence', 'old', 'reopen' ) as $mode ) {
 				foreach ( array( false, true ) as $delete ) {
 					$length[ $mode . (int) $delete ] = $this->sequence( $mode, $delete, 0 )['opportunities'];
 					$this->assertGreaterThan( 5, $length[ $mode . (int) $delete ], 'the control: the run has opportunities' );
 				}
 			}
 			mt_srand( $seed );
-			$cases = array_fill_keys( array( 'fence: entered before the close', 'fence: refused after the close', 'old: stopped by a read after the entry', 'old: entered after the last read before a step', 'old: entered right before the cancel', 'none', 'deleted the data', 'kept the data' ), 0 );
+			$cases = array_fill_keys( array( 'fence: entered before the close', 'fence: refused after the close', 'old: stopped by a read after the entry', 'old: entered after the last read before a step', 'old: entered right before the cancel', 'reopen: stopped by a beat before a step', 'reopen: stopped by a beat in the storage deletion', 'reopen: opened after the last beat before a step', 'none', 'deleted the data', 'kept the data' ), 0 );
 			for ( $n = 0; $n < $count; $n++ ) {
-				$mode   = 0 === $n % 2 ? 'fence' : 'old';
-				$delete = 1 === intdiv( $n, 2 ) % 2;
+				$mode   = array( 'fence', 'old', 'reopen' )[ $n % 3 ];
+				$delete = 1 === intdiv( $n, 3 ) % 2;
 				$at     = mt_rand( 1, $length[ $mode . (int) $delete ] + 1 ); // One past the last: no swap.
 				$label  = sprintf( '#%d %s %s, at %d', $n, $mode, $delete ? 'deleting the data' : 'keeping it', $at );
 				$run    = $this->sequence( $mode, $delete, $at );
@@ -103,8 +109,12 @@ final class UninstallSequencesTest extends SwapTestCase {
 				return;
 			}
 			// With the token of its own run (a cancel clears the row's: then it does not enter, as a real run would not).
-			$token    = 'sequence-' . $job->id;
-			$sql      = 'fence' === $mode
+			$token = 'sequence-' . $job->id;
+			if ( 'reopen' === $mode ) {
+				$other->query( $other->prepare( 'UPDATE ' . UninstallFence::name() . ' SET state = %s WHERE id = %d', UninstallFence::OPEN, UninstallFence::ROW ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- the fence table.
+				$events[] = 'inject:reopened';
+			}
+			$sql      = 'old' !== $mode
 				? JobRepository::entering_sql( $job->id, $token, array( 'site_state' => Job::SITE_CHANGING, 'updated_at' => time() ), array( '%d', '%d' ), time() )
 				: $other->prepare( 'UPDATE ' . JobRepository::table() . ' SET site_state = %d, updated_at = %d WHERE id = %d AND lock_token = %s', Job::SITE_CHANGING, time(), $job->id, $token ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- the jobs table.
 			$events[] = (int) $other->query( $sql ) > 0 ? 'inject:entered' : 'inject:refused';
@@ -154,9 +164,11 @@ final class UninstallSequencesTest extends SwapTestCase {
 	 * @param array<string, int>   $cases Cases seen.
 	 */
 	private function check( array $run, string $mode, string $label, array &$cases ): void {
-		$events  = $run['events'];
-		$entered = array_search( 'inject:entered', $events, true );
-		$closed  = array_search( 'closed:' . UninstallFence::DONE, $events, true );
+		$events   = $run['events'];
+		$entered  = array_search( 'inject:entered', $events, true );
+		$closed   = array_search( 'closed:' . UninstallFence::DONE, $events, true );
+		$reopened = array_search( 'inject:reopened', $events, true );
+		$reopened = false !== $reopened && false !== $closed && $reopened > $closed ? $reopened : false; // Before the close it changes nothing.
 		$label  .= ' (' . implode( ', ', $events ) . ')';
 		if ( 'fence' === $mode ) {
 			// I1.
@@ -168,24 +180,61 @@ final class UninstallSequencesTest extends SwapTestCase {
 				++$cases['fence: entered before the close'];
 			}
 		}
-		// I2: every step that removes something follows a read that no entry preceded. I5: right after a read.
+		// I2: every step that removes something follows a read that no entry preceded. I5: right after a read (and a
+		// beat, with the fence), each deletion right after a beat. I6: nothing removed after a beat that followed the
+		// fence opened under the uninstall.
 		$last_check = -1;
-		$previous   = '';
+		$last_beat  = -1;
+		$previous   = array( '', '' );
+		$in_storage = false;
 		foreach ( $events as $index => $event ) {
 			if ( 'check' === $event ) {
 				$last_check = $index;
-			} elseif ( 0 === strpos( $event, 'unit:' ) ) {
+				$in_storage = false;
+			} elseif ( 'beat' === $event ) {
+				$last_beat = $index;
+			} elseif ( 0 === strpos( $event, 'unit:' ) || 'delete' === $event ) {
+				$this->assertFalse( false !== $reopened && $reopened < $last_beat, $label . ': I6, ' . $event . ' after a beat that came after the fence was opened' );
+				if ( 'delete' === $event ) {
+					$this->assertTrue( $in_storage, $label . ': a deletion of the storage directory outside its step' );
+					$this->assertSame( 'beat', $previous[0], $label . ': I5, ' . $event . ' right after a beat' );
+					if ( false !== $reopened && $reopened > $last_beat ) {
+						++$cases['reopen: opened after the last beat before a step'];
+					}
+					$previous = array( $event, $previous[0] );
+					continue;
+				}
 				$this->assertFalse( false !== $entered && $entered < $last_check, $label . ': I2, ' . $event . ' after a read that came after the entry' );
-				$this->assertSame( 'check', $previous, $label . ': I5, ' . $event . ' right after a read' );
-				if ( false !== $entered && $entered > $last_check ) {
+				if ( 'old' === $mode ) {
+					$this->assertSame( 'check', $previous[0], $label . ': I5, ' . $event . ' right after a read' );
+				} else {
+					$this->assertSame( array( 'beat', 'check' ), $previous, $label . ': I5, ' . $event . ' right after a read and a beat' );
+				}
+				if ( 'old' === $mode && false !== $entered && $entered > $last_check ) {
 					++$cases['old: entered after the last read before a step'];
 					if ( 'unit:cancel' === $event ) {
 						++$cases['old: entered right before the cancel'];
 					}
 				}
+				if ( false !== $reopened && $reopened > $last_beat ) {
+					++$cases['reopen: opened after the last beat before a step'];
+				}
+				$in_storage = 'unit:storage' === $event;
 			}
 			if ( 0 !== strpos( $event, 'inject:' ) ) {
-				$previous = $event;
+				$previous = array( $event, $previous[0] );
+			}
+		}
+		if ( false !== $reopened ) {
+			$after = array_slice( $events, (int) $reopened );
+			$beat  = array_search( 'beat', $after, true );
+			if ( false !== $beat ) {
+				// Stopped by that beat: where it was.
+				$before = array_slice( $events, 0, (int) $reopened );
+				$step   = array_values( array_filter( $before, static function ( string $event ): bool {
+					return 0 === strpos( $event, 'unit:' ) || 'check' === $event;
+				} ) );
+				++$cases[ 'unit:storage' === end( $step ) ? 'reopen: stopped by a beat in the storage deletion' : 'reopen: stopped by a beat before a step' ];
 			}
 		}
 		if ( false !== $entered && 'old' === $mode && ! in_array( 'unit:cancel', array_slice( $events, (int) $entered ), true ) ) {
@@ -193,7 +242,7 @@ final class UninstallSequencesTest extends SwapTestCase {
 		}
 		$deleted = in_array( 'unit:tables', $events, true );
 		// I3.
-		if ( 'fence' === $mode ) {
+		if ( 'old' !== $mode ) {
 			if ( $deleted ) {
 				$this->assertTrue( $run['fence_absent'], $label . ': I3, the fence went with the tables' );
 			} else {
@@ -241,8 +290,11 @@ final class UninstallSequencesTest extends SwapTestCase {
 			}
 		}
 		UninstallSetting::save( $delete );
+		for ( $i = 0; $i < 4; $i++ ) {
+			file_put_contents( $base . '/backups/sequence-' . $i . '.txt', 'x' ); // More for the storage deletion to delete.
+		}
 		// The fence last: making the jobs may make it again (Schema::ensure()).
-		if ( 'fence' === $mode ) {
+		if ( 'old' !== $mode ) {
 			UninstallFence::create();
 			UninstallFence::open();
 		} else {
@@ -250,6 +302,15 @@ final class UninstallSequencesTest extends SwapTestCase {
 		}
 		$wpdb->query( 'COMMIT' );
 		$this->assertSame( 'old' === $mode, UninstallFence::absent(), 'the control: the fence is there only for this version' );
+	}
+
+	/**
+	 * Set how often the uninstall's storage deletion beats (null: UninstallFence::BEAT_SECONDS).
+	 */
+	private function beat_every( ?int $seconds ): void {
+		$property = new \ReflectionProperty( Uninstaller::class, 'beat_seconds' );
+		$property->setAccessible( true );
+		$property->setValue( null, $seconds );
 	}
 
 	/**
