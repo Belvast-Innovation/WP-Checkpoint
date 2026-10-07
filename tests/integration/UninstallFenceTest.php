@@ -784,4 +784,41 @@ final class UninstallFenceTest extends SwapTestCase {
 			$wpdb->query( 'COMMIT' );
 		}
 	}
+
+	public function test_a_fence_opened_by_hand_has_no_owner_so_a_version_twelve_close_is_no_ones_to_beat(): void {
+		global $wpdb;
+		$this->autocommit(
+			static function (): void {
+				UninstallFence::close( 'run-a' );
+			}
+		);
+		$this->assertTrue( UninstallFence::beat( 'run-a' ), 'the control: closed by run-a, it beats' );
+		$this->assertTrue( UninstallFence::open(), 'opened for repair' );
+		$this->assertSame( '', (string) $wpdb->get_var( 'SELECT closed_by FROM ' . UninstallFence::name() ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- the fence table.
+		// An uninstall of version 12 closes it, writing no owner.
+		$wpdb->query( $wpdb->prepare( 'UPDATE ' . UninstallFence::name() . ' SET state = %s, closed_at = %d WHERE id = %d AND state = %s', UninstallFence::CLOSED, time(), UninstallFence::ROW, UninstallFence::OPEN ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- the fence table.
+		$this->assertFalse( UninstallFence::beat( 'run-a' ), 'run-a does not take it for its own' );
+		UninstallFence::open( 'run-a' );
+		$this->assertSame( UninstallFence::CLOSED, UninstallFence::row()['state'], 'nor opens it' );
+	}
+
+	public function test_a_stale_fence_on_a_table_without_the_new_columns_is_opened_and_so_is_one_opened_for_repair(): void {
+		global $wpdb;
+		$fence = UninstallFence::name();
+		$stale = static function () use ( $wpdb, $fence ): void {
+			$wpdb->query( $wpdb->prepare( "UPDATE {$fence} SET state = %s, closed_at = %d WHERE id = %d", UninstallFence::CLOSED, time() - UninstallFence::STALE_SECONDS - 60, UninstallFence::ROW ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the fence table.
+		};
+		try {
+			$wpdb->query( "ALTER TABLE {$fence} DROP COLUMN closed_by, DROP COLUMN beats" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the fence table.
+			$this->assertNotContains( 'closed_by', $wpdb->get_col( "SHOW COLUMNS FROM {$fence}" ), 'the control: the columns missing' ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the fence table.
+			$stale();
+			$this->assertTrue( UninstallFence::heal(), 'left closed by an uninstall that died: opened all the same' );
+			$this->assertSame( UninstallFence::OPEN, UninstallFence::row()['state'] );
+			$stale();
+			$this->assertTrue( UninstallFence::open(), 'opened for repair' );
+		} finally {
+			UninstallFence::upgrade();
+			$wpdb->query( 'COMMIT' );
+		}
+	}
 }

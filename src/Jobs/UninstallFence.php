@@ -47,14 +47,14 @@ final class UninstallFence {
 
 	/**
 	 * A fence with no heartbeat (beat(): the uninstall that holds it beats before each step, and every BEAT_SECONDS
-	 * while it deletes its storage) for longer than this is taken to be left by an uninstall that did not finish:
+	 * while it deletes its staging and its storage) for longer than this is taken to be left by an uninstall that did not finish:
 	 * Schema::ensure() opens it again where the request may upgrade (the page, activation, WP-CLI), logged.
 	 */
 	const STALE_SECONDS = 3600;
 
 	/**
-	 * How often, at most, the uninstall beats while it deletes its storage directory (before each deletion, once this
-	 * long has passed since its last beat): far inside STALE_SECONDS.
+	 * How often, at most, the uninstall beats while it deletes its staging and its storage directory (before each
+	 * deletion, once this long has passed since its last beat): far inside STALE_SECONDS.
 	 */
 	const BEAT_SECONDS = 30;
 
@@ -214,11 +214,17 @@ final class UninstallFence {
 		global $wpdb;
 		$name  = self::name();
 		$quiet = $wpdb->suppress_errors( true );
+		// An open fence has no owner (its owner cleared in the same statement): a close that writes none, by version 12,
+		// is then no one's.
 		if ( '' === $by ) {
 			// Whoever closed it (repair and tests; an uninstall opens only its own).
-			$wpdb->query( $wpdb->prepare( 'UPDATE ' . SqlWriter::identifier( $name ) . ' SET state = %s WHERE id = %d', self::OPEN, self::ROW ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- table name from the prefix.
+			$done = $wpdb->query( $wpdb->prepare( 'UPDATE ' . SqlWriter::identifier( $name ) . ' SET state = %s, closed_by = %s WHERE id = %d', self::OPEN, '', self::ROW ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- table name from the prefix.
+			if ( false === $done ) {
+				// A table version 12 made whose columns could not be added (UninstallFence::upgrade()): no owner to clear.
+				$wpdb->query( $wpdb->prepare( 'UPDATE ' . SqlWriter::identifier( $name ) . ' SET state = %s WHERE id = %d', self::OPEN, self::ROW ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- table name from the prefix.
+			}
 		} else {
-			$wpdb->query( $wpdb->prepare( 'UPDATE ' . SqlWriter::identifier( $name ) . ' SET state = %s WHERE id = %d AND closed_by = %s', self::OPEN, self::ROW, $by ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- table name from the prefix.
+			$wpdb->query( $wpdb->prepare( 'UPDATE ' . SqlWriter::identifier( $name ) . ' SET state = %s, closed_by = %s WHERE id = %d AND closed_by = %s', self::OPEN, '', self::ROW, $by ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- table name from the prefix.
 		}
 		$state = $wpdb->get_var( $wpdb->prepare( 'SELECT state FROM ' . SqlWriter::identifier( $name ) . ' WHERE id = %d', self::ROW ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- table name from the prefix.
 		$wpdb->suppress_errors( $quiet );
@@ -275,6 +281,11 @@ final class UninstallFence {
 		global $wpdb;
 		$quiet = $wpdb->suppress_errors( true );
 		$done  = $wpdb->query( $wpdb->prepare( 'UPDATE ' . SqlWriter::identifier( self::name() ) . ' SET state = %s, closed_by = %s WHERE id = %d AND state = %s AND closed_at < UNIX_TIMESTAMP() - %d', self::OPEN, '', self::ROW, self::CLOSED, self::STALE_SECONDS ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- table name from the prefix.
+		if ( false === $done ) {
+			// A table version 12 made whose columns could not be added (upgrade()): no owner to clear, and a fence left
+			// closed there is opened all the same.
+			$done = $wpdb->query( $wpdb->prepare( 'UPDATE ' . SqlWriter::identifier( self::name() ) . ' SET state = %s WHERE id = %d AND state = %s AND closed_at < UNIX_TIMESTAMP() - %d', self::OPEN, self::ROW, self::CLOSED, self::STALE_SECONDS ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- table name from the prefix.
+		}
 		$wpdb->suppress_errors( $quiet );
 		return 1 === (int) $done;
 	}
