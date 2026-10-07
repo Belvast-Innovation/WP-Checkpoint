@@ -169,6 +169,48 @@ final class DeleterTest extends TestCase {
 		$this->assert_outside_untouched();
 	}
 
+	public function test_empty_directory_calls_confirm_before_each_deletion_and_stops_on_what_it_throws(): void {
+		$calls  = 0;
+		$result = Deleter::empty_directory(
+			$this->base(),
+			static function () use ( &$calls ): void {
+				++$calls;
+			}
+		);
+		$this->assertSame( 4, $result['deleted'], 'the control: top.txt, a, a/b, a/b/deep.txt' );
+		$this->assertSame( 4, $calls, 'once before each' );
+
+		// Again, stopped at the second deletion.
+		mkdir( $this->base() . '/a/b', 0700, true );
+		file_put_contents( $this->base() . '/top.txt', 'x' );
+		file_put_contents( $this->base() . '/a/b/deep.txt', 'x' );
+		$calls = 0;
+		try {
+			Deleter::empty_directory(
+				$this->base(),
+				static function () use ( &$calls ): void {
+					if ( 2 === ++$calls ) {
+						throw new \RuntimeException( 'stop' );
+					}
+				}
+			);
+			$this->fail( 'what it throws is passed on' );
+		} catch ( \RuntimeException $e ) {
+			$this->assertSame( 'stop', $e->getMessage() );
+		}
+		$left = 0;
+		foreach ( new \RecursiveIteratorIterator( new \RecursiveDirectoryIterator( $this->base(), \FilesystemIterator::SKIP_DOTS ), \RecursiveIteratorIterator::SELF_FIRST ) as $entry ) {
+			++$left;
+		}
+		$this->assertSame( 3, $left, 'one deletion, none after the throw' );
+
+		// The confirmation does not outlive the call.
+		$calls = 0;
+		Deleter::empty_directory( $this->base() );
+		$this->assertSame( 0, $calls );
+		$this->assertSame( array( '.', '..' ), scandir( $this->base() ) );
+	}
+
 	public function test_is_reparse_detects_links(): void {
 		$this->require_symlinks();
 		symlink( $this->root . '/outside/dir', $this->base() . '/ld' );

@@ -569,6 +569,27 @@ final class JobRepository {
 	}
 
 	/**
+	 * The statement by which a job enters the site (its site_state from untouched to changed): one multi-table UPDATE
+	 * of the job's row (as save_progress() writes it, fenced by its lock token) and the uninstall fence's row (its count
+	 * of entries and the time), joined on the fence being open (UninstallFence). It changes rows only while the fence
+	 * row is there and open; both rows are written, so the statement holds the fence row's lock until it commits.
+	 * Public for the test that runs it on a second connection.
+	 *
+	 * @param int                  $job_id  Job id.
+	 * @param string               $token   Lock token.
+	 * @param array<string, mixed> $data    Column => value, as save_progress() writes them.
+	 * @param string[]             $formats Their formats (%s, %d).
+	 * @param int                  $now     Unix time.
+	 * @return string Prepared.
+	 */
+	public static function entering_sql( int $job_id, string $token, array $data, array $formats, int $now ): string {
+		global $wpdb;
+		$params = array_merge( array( UninstallFence::ROW, UninstallFence::OPEN ), array_values( $data ), array( $now, $job_id, $token ) );
+		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare,WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber -- table names from the prefix; one placeholder per value, in order (the sniff counts the array as one).
+		return $wpdb->prepare( UninstallFence::entering_template( self::table(), UninstallFence::name(), array_keys( $data ), array_values( $formats ) ), $params );
+	}
+
+	/**
 	 * Whether a job was abandoned from this installation: abandoned_by() with the tokens it holds (as manages()).
 	 *
 	 * @param Job $job Job.
@@ -1277,6 +1298,8 @@ final class JobRepository {
 	 * @param string|null          $site_mark  The maintenance file's mark this cursor carries (MarksSite), or null to leave it.
 	 * @return int The cancel request this write cleared (Job::SITE_SWAPPED: the swap outran it), 0 for none.
 	 * @throws StaleJob When the lock is no longer held with this token.
+	 * @throws FenceClosed When the write would record the site as changed (from untouched) and the uninstall fence is
+	 *                     not open: nothing was written.
 	 */
 	public function save_progress( Job $job, string $token, string $step, array $cursor, int $progress, string $message = '', bool $advanced = true, $site_state = null, $site_mark = null ): int {
 		global $wpdb;
@@ -1316,24 +1339,43 @@ final class JobRepository {
 				$formats[]                = '%d';
 			}
 		}
-		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin table; the WHERE on lock_token is the fence.
-		$affected = $wpdb->update(
-			self::table(),
-			$data,
-			array(
-				'id'         => $job->id,
-				'lock_token' => $token,
-			),
-			$formats,
-			array( '%d', '%s' )
-		);
+		$entering = null !== $site_state && Job::SITE_UNTOUCHED !== (int) $site_state && Job::SITE_UNTOUCHED === $job->site_state;
+		if ( $entering ) {
+			// The site is about to be changed: the job's row and the uninstall fence's row in one statement, on the
+			// condition that the fence is open (UninstallFence: both sides write that row, so they cannot interleave).
+			$affected = $wpdb->query( self::entering_sql( $job->id, $token, $data, $formats, $now ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- prepared by entering_sql().
+		} else {
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin table; the WHERE on lock_token is the fence.
+			$affected = $wpdb->update(
+				self::table(),
+				$data,
+				array(
+					'id'         => $job->id,
+					'lock_token' => $token,
+				),
+				$formats,
+				array( '%d', '%s' )
+			);
+		}
+		if ( false === $affected && $entering && UninstallFence::absent() ) {
+			// The fence table is positively not there (dropped by an uninstall sharing this database, a schema not yet
+			// upgraded): no swap enters without it.
+			throw new FenceClosed( 'The uninstall fence is not there (WP Checkpoint was uninstalled on a site that shares this database, or its tables are not up to date): the restore does not start changing the site, and tries again later. Nothing was changed.' );
+		}
 		if ( false === $affected ) {
 			// Refused (a lock wait, the server gone): nothing of this cursor is stored, and a step that goes on would
 			// change what the row does not say (a site state above all). Stopped as a lost lock: no further writes.
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
 			throw new WriteRefused( sprintf( 'Job %d: its progress could not be written.', $job->id ) );
 		}
-		if ( 1 !== (int) $affected && ! $this->holds_lock( $job->id, $token ) ) {
+		if ( $entering && 0 === (int) $affected ) {
+			if ( ! $this->holds_lock( $job->id, $token ) ) {
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+				throw new StaleJob( sprintf( 'Job %d is no longer locked by this driver.', $job->id ) );
+			}
+			throw new FenceClosed( 'WP Checkpoint is being uninstalled on this site or on one that shares its database (or such an uninstall did not finish): the restore does not start changing the site while it is, and tries again later. Nothing was changed.' );
+		}
+		if ( 1 !== (int) $affected && ! $entering && ! $this->holds_lock( $job->id, $token ) ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
 			throw new StaleJob( sprintf( 'Job %d is no longer locked by this driver.', $job->id ) );
 		}

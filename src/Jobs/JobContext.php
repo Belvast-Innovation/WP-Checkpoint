@@ -371,8 +371,11 @@ final class JobContext {
 		if ( null === $this->checkpoint ) {
 			throw new \LogicException( 'Checkpoints are only possible while the step runs.' );
 		}
-		$this->cursor = self::strip_reserved( $cursor );
-		call_user_func( $this->checkpoint, $this->cursor, max( 0, min( 100, $percent ) ), $message );
+		$cursor = self::strip_reserved( $cursor );
+		call_user_func( $this->checkpoint, $cursor, max( 0, min( 100, $percent ) ), $message );
+		// Only once it is written: a write that refused (FenceClosed: the site may not be changed now) leaves the cursor
+		// as last written, which is what a retry goes on from.
+		$this->cursor          = $cursor;
 		$this->checkpointed_at = (float) call_user_func( $this->clock );
 	}
 

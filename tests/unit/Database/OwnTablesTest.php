@@ -43,11 +43,11 @@ final class OwnTablesTest extends TestCase {
 	}
 
 	public function test_the_run_tables_are_any_installations_by_name_in_any_letter_case(): void {
-		$this->assertSame( array( 'wp_wpcheckpoint_jobs', 'wp_wpcheckpoint_swap_plan' ), OwnTables::names( 'wp_' ) );
-		foreach ( array( 'wp_wpcheckpoint_jobs', 'wp_wpcheckpoint_swap_plan', 'wp_old_wpcheckpoint_swap_plan', 'wp2_wpcheckpoint_jobs', 'wpcheckpoint_jobs', 'WP_WPCHECKPOINT_JOBS', 'Wp_Old_WpCheckpoint_Swap_Plan' ) as $name ) {
+		$this->assertSame( array( 'wp_wpcheckpoint_jobs', 'wp_wpcheckpoint_swap_plan', 'wp_wpcheckpoint_fence' ), OwnTables::names( 'wp_' ) );
+		foreach ( array( 'wp_wpcheckpoint_jobs', 'wp_wpcheckpoint_swap_plan', 'wp_old_wpcheckpoint_swap_plan', 'wp2_wpcheckpoint_jobs', 'wpcheckpoint_jobs', 'WP_WPCHECKPOINT_JOBS', 'Wp_Old_WpCheckpoint_Swap_Plan', 'wp_wpcheckpoint_fence', 'WP2_WPCHECKPOINT_FENCE' ) as $name ) {
 			$this->assertTrue( OwnTables::is_own( $name ), $name . ': this installation\'s, or a neighbour\'s in the same database (its recovery record)' );
 		}
-		foreach ( array( 'wp_wpcheckpoint_jobs_old', 'wp_wpcheckpoint_swap_plans', 'wp_wpcheckpoint-jobs', 'wp_posts' ) as $name ) {
+		foreach ( array( 'wp_wpcheckpoint_jobs_old', 'wp_wpcheckpoint_swap_plans', 'wp_wpcheckpoint-jobs', 'wp_posts', 'wp_wpcheckpoint_fences' ) as $name ) {
 			$this->assertFalse( OwnTables::is_own( $name ), $name . ': only the names themselves' );
 		}
 	}

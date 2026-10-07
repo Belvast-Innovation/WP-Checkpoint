@@ -409,4 +409,79 @@ final class StagingResidueTest extends JobTestCase {
 			restore_current_blog();
 		}
 	}
+
+	/**
+	 * Files and directories under $paths, themselves included, that are there.
+	 *
+	 * @param string[] $paths Paths.
+	 */
+	private static function entries( array $paths ): int {
+		$count = 0;
+		foreach ( $paths as $path ) {
+			if ( is_file( $path ) ) {
+				++$count;
+			} elseif ( is_dir( $path ) ) {
+				$count += 1 + iterator_count( new \RecursiveIteratorIterator( new \RecursiveDirectoryIterator( $path, \FilesystemIterator::SKIP_DOTS ), \RecursiveIteratorIterator::SELF_FIRST ) );
+			}
+		}
+		return $count;
+	}
+
+	/**
+	 * Set one of the uninstall's private test properties.
+	 *
+	 * @param mixed $value Value.
+	 */
+	private static function uninstall_seam( string $name, $value ): void {
+		$property = new \ReflectionProperty( Uninstaller::class, $name );
+		$property->setAccessible( true );
+		$property->setValue( null, $value );
+	}
+
+	public function test_uninstall_beats_while_it_deletes_the_staging_and_stops_before_the_next_deletion_once_the_fence_is_not_its_own(): void {
+		global $wpdb;
+		$this->register( 'plain', array( $this->counting_step( 'p', 5 ) ) );
+		$ended = $this->job_of( 'plain' );
+		Plugin::instance()->jobs()->transition( Plugin::instance()->jobs()->find( $ended ), Job::CANCELLED );
+		$made = $this->leave( $this->layout( $ended ) );
+		\WPCheckpoint\Jobs\UninstallFence::create();
+		\WPCheckpoint\Jobs\UninstallFence::open();
+		$before  = self::entries( $made );
+		$deletes = 0;
+		$beats   = 0;
+		$events  = array();
+		self::uninstall_seam( 'beat_seconds', 0 );
+		self::uninstall_seam(
+			'at',
+			static function ( string $point ) use ( &$deletes, &$beats, &$events, $wpdb ): void {
+				$events[] = $point;
+				if ( 'delete' === $point ) {
+					++$deletes;
+				}
+				if ( 'beat' === $point && $deletes > 0 && 1 === ++$beats ) {
+					// Between the first deletion of the staging and the next: the fence opened.
+					$wpdb->update( \WPCheckpoint\Jobs\UninstallFence::name(), array( 'state' => \WPCheckpoint\Jobs\UninstallFence::OPEN ), array( 'id' => \WPCheckpoint\Jobs\UninstallFence::ROW ) );
+				}
+			}
+		);
+		$dir = \WPCheckpoint\Tests\Fixtures\Sandbox::make( 'staging-beat' );
+		$was = ini_get( 'error_log' );
+		ini_set( 'error_log', $dir . '/php-error.log' );
+		try {
+			Uninstaller::run();
+		} finally {
+			self::uninstall_seam( 'at', null );
+			self::uninstall_seam( 'beat_seconds', null );
+			ini_set( 'error_log', (string) $was );
+			$log = (string) @file_get_contents( $dir . '/php-error.log' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- read before the sandbox goes.
+			\WPCheckpoint\Tests\Fixtures\Sandbox::remove( $dir );
+		}
+		$this->assertGreaterThan( 5, $before, 'the control: the staging had more to delete' );
+		$this->assertContains( 'unit:staging', $events, 'the control: the staging step began' );
+		$this->assertSame( $before - 1, self::entries( $made ), 'one deletion, the rest of the staging is there' );
+		$this->assertSame( 1, $beats, 'the control: it beat after the first deletion' );
+		$this->assertSame( 1, $deletes, 'none after the beat that found the fence open' );
+		$this->assertNotContains( 'unit:storage', $events );
+		$this->assertStringContainsString( 'after it had cancelled the jobs that had not changed the site, begun to remove its staging next to the site; it stopped there and left the rest of its staging next to the site, its storage directory', $log );
+	}
 }

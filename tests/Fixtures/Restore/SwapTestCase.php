@@ -408,14 +408,59 @@ abstract class SwapTestCase extends RestoreTestCase {
 	 * @return Job
 	 */
 	protected function cli_run( Job $job, int $max = 50 ): Job {
+		$seen = array();
 		for ( $i = 0; $i < $max; $i++ ) {
 			$result = $this->cli_tick( $job );
+			$seen[] = $result->status . ( '' !== (string) $result->message ? ': ' . $result->message : '' );
 			$now    = Plugin::instance()->jobs()->find( $job->id );
 			if ( ! in_array( $now->status, array( Job::QUEUED, Job::RUNNING ), true ) || TickResult::WAITING === $result->status ) {
 				return $now;
 			}
 		}
-		$this->fail( 'the swap did not end' );
+		$this->fail( "the swap did not end\n" . $this->stuck( $job, $seen ) );
+	}
+
+	/**
+	 * What a job that did not end was left as: what the ticks returned, its row, the uninstall fence, the maintenance
+	 * file, the lock files and the schema's record (for a failure that does not show up again on a rerun).
+	 *
+	 * @param Job      $job  Job.
+	 * @param string[] $seen What each tick returned, in order.
+	 * @return string
+	 */
+	protected function stuck( Job $job, array $seen ): string {
+		global $wpdb;
+		$wpdb->query( 'COMMIT' );
+		$quiet  = $wpdb->suppress_errors( true );
+		$counts = array_count_values( $seen );
+		$row    = $wpdb->get_row( $wpdb->prepare( 'SELECT * FROM ' . JobRepository::table() . ' WHERE id = %d', $job->id ), ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- the jobs table.
+		$fence  = $wpdb->get_row( 'SELECT * FROM ' . \WPCheckpoint\Jobs\UninstallFence::name(), ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- the fence table.
+		$wpdb->suppress_errors( $quiet );
+		$file = ABSPATH . '.maintenance';
+		clearstatcache( true, $file );
+		$tmp   = $this->installation()->base() . '/tmp';
+		$locks = array();
+		foreach ( glob( $tmp . '/job-*.lock' ) ?: array() as $lock ) {
+			$locks[ basename( $lock ) ] = (string) @file_get_contents( $lock ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- may go meanwhile.
+		}
+		return (string) print_r( // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_print_r -- test diagnostics.
+			array(
+				'now'         => time(),
+				'ticks'       => $counts,
+				'first ticks' => array_slice( $seen, 0, 3 ),
+				'last ticks'  => array_slice( $seen, -3 ),
+				'job row'     => $row,
+				'fence row'   => $fence,
+				'maintenance' => is_file( $file ) ? array(
+					'mtime'   => filemtime( $file ),
+					'content' => substr( (string) file_get_contents( $file ), 0, 600 ),
+				) : 'none',
+				'lock files'  => $locks,
+				'schema'      => \WPCheckpoint\Support\Options::get( \WPCheckpoint\Support\Schema::OPTION, null ),
+				'schema retry' => \WPCheckpoint\Support\Options::get( \WPCheckpoint\Support\Schema::RETRY_OPTION, null ),
+			),
+			true
+		);
 	}
 
 	/**

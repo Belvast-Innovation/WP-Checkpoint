@@ -1339,12 +1339,78 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		Options::set( Schema::OPTION, array( 'version' => 10, 'min_compatible' => 1 ) );
 		$result = Schema::ensure();
 		$this->assertSame( 'migrated', $result['action'] );
-		$this->assertSame( 11, Schema::CURRENT, 'the control: this is the migration under test' );
+		$this->assertSame( Schema::CURRENT, $result['version'], 'every later migration runs too' );
 		$this->assertSame( 1, $result['min_compatible'], 'older code ignores the column' );
 		$this->assertContains( 'site_mark', $wpdb->get_col( "SHOW COLUMNS FROM {$table}" ) );
 		$found = $this->repo->find( $job->id );
 		$this->assertSame( '', $found->site_mark, 'a row from before: no mark' );
 		$this->assertSame( array(), $found->missing_columns );
+	}
+
+	public function test_schema_version_twelve_adds_the_uninstall_fence_open_to_a_version_eleven_database(): void {
+		global $wpdb;
+		$fence = \WPCheckpoint\Jobs\UninstallFence::name();
+		$wpdb->query( "DROP TABLE IF EXISTS {$fence}" );
+		$this->assertSame( array(), $wpdb->get_col( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $fence ) ) ), 'the control: a version 11 database has no fence' );
+		Options::set( Schema::OPTION, array( 'version' => 11, 'min_compatible' => 1 ) );
+		$result = Schema::ensure();
+		$this->assertSame( 'migrated', $result['action'] );
+		$this->assertSame( Schema::CURRENT, $result['version'] );
+		$this->assertSame( 1, $result['min_compatible'], 'older code neither reads nor writes it' );
+		$this->assertSame(
+			array(
+				'state'     => \WPCheckpoint\Jobs\UninstallFence::OPEN,
+				'closed_at' => 0,
+			),
+			\WPCheckpoint\Jobs\UninstallFence::row(),
+			'its one row, open'
+		);
+		// Made again where the request may upgrade, a closed row left as it is.
+		try {
+			$this->assertSame( \WPCheckpoint\Jobs\UninstallFence::DONE, \WPCheckpoint\Jobs\UninstallFence::close( 'test-run' ) );
+			Schema::ensure( true );
+			$this->assertSame( \WPCheckpoint\Jobs\UninstallFence::CLOSED, \WPCheckpoint\Jobs\UninstallFence::row()['state'], 'a fence closed just now stays closed' );
+		} finally {
+			\WPCheckpoint\Jobs\UninstallFence::open();
+		}
+	}
+
+	public function test_schema_version_thirteen_adds_the_owner_and_the_heartbeat_to_a_version_twelve_fence(): void {
+		global $wpdb;
+		$fence = \WPCheckpoint\Jobs\UninstallFence::name();
+		$wpdb->query( "DROP TABLE IF EXISTS {$fence}" );
+		// The table as version 12 made it, closed by an uninstall of that version.
+		$wpdb->query( "CREATE TABLE {$fence} (id tinyint(3) unsigned NOT NULL, state varchar(8) NOT NULL DEFAULT 'open', entries bigint(20) unsigned NOT NULL DEFAULT 0, entered_at bigint(20) unsigned NOT NULL DEFAULT 0, closed_at bigint(20) unsigned NOT NULL DEFAULT 0, PRIMARY KEY (id)) ENGINE=InnoDB" );
+		$wpdb->query( $wpdb->prepare( "INSERT INTO {$fence} (id, state, closed_at) VALUES (%d, %s, %d)", \WPCheckpoint\Jobs\UninstallFence::ROW, \WPCheckpoint\Jobs\UninstallFence::CLOSED, 1234 ) );
+		$this->assertSame( array( 'id', 'state', 'entries', 'entered_at', 'closed_at' ), $wpdb->get_col( "SHOW COLUMNS FROM {$fence}" ), 'the control: no owner, no beats' );
+		try {
+			Options::set( Schema::OPTION, array( 'version' => 12, 'min_compatible' => 1 ) );
+			$result = Schema::ensure();
+			$this->assertSame( 'migrated', $result['action'] );
+			$this->assertSame( Schema::CURRENT, $result['version'] );
+			$this->assertSame( 1, $result['min_compatible'], 'code of version 12 neither reads nor writes them' );
+			$this->assertSame( array( 'id', 'state', 'entries', 'entered_at', 'closed_at', 'closed_by', 'beats' ), $wpdb->get_col( "SHOW COLUMNS FROM {$fence}" ) );
+			$this->assertSame(
+				array(
+					'state'     => \WPCheckpoint\Jobs\UninstallFence::CLOSED,
+					'closed_at' => '1234',
+					'closed_by' => '',
+					'beats'     => '0',
+				),
+				$wpdb->get_row( "SELECT state, closed_at, closed_by, beats FROM {$fence}", ARRAY_A ),
+				'the row kept as it was, with the defaults'
+			);
+			// A fence closed by version 12 has no owner: no uninstall beats it or opens it as its own.
+			$this->assertFalse( \WPCheckpoint\Jobs\UninstallFence::beat( '' ) );
+			\WPCheckpoint\Jobs\UninstallFence::open();
+			$this->assertSame( \WPCheckpoint\Jobs\UninstallFence::DONE, \WPCheckpoint\Jobs\UninstallFence::close( 'test-run' ) );
+			$this->assertTrue( \WPCheckpoint\Jobs\UninstallFence::beat( 'test-run' ), 'closed by this version: it beats' );
+			$this->assertFalse( \WPCheckpoint\Jobs\UninstallFence::beat( 'another-run' ), 'and only its owner does' );
+		} finally {
+			$wpdb->query( "DROP TABLE IF EXISTS {$fence}" );
+			\WPCheckpoint\Jobs\UninstallFence::create();
+			$wpdb->query( 'COMMIT' );
+		}
 	}
 
 	public function test_schema_version_three_adds_the_options_and_questions_columns_to_a_version_two_table(): void {

@@ -24,7 +24,7 @@ defined( 'ABSPATH' ) || exit;
 final class Schema {
 
 	const OPTION  = StoredNames::DB_VERSION;
-	const CURRENT = 11;
+	const CURRENT = 13;
 
 	/**
 	 * Jobs table name without the prefix.
@@ -319,6 +319,7 @@ final class Schema {
 		}
 
 		if ( $current ) {
+			self::fence();
 			$problems = self::column_problems();
 			if ( null === $problems || array() === $problems ) {
 				// Nothing missing; unreadable columns are no evidence that something is (nor that it was fixed).
@@ -369,6 +370,21 @@ final class Schema {
 			'version'        => self::CURRENT,
 			'min_compatible' => $min,
 		);
+	}
+
+	/**
+	 * The uninstall fence where the request may upgrade: its table and row made again when they are missing (no swap
+	 * enters without them), and a fence an uninstall left closed longer than UninstallFence::STALE_SECONDS ago opened
+	 * again, in the storage log.
+	 *
+	 * @return void
+	 */
+	private static function fence(): void {
+		self::quietly( array( \WPCheckpoint\Jobs\UninstallFence::class, 'create' ) );
+		\WPCheckpoint\Jobs\UninstallFence::upgrade(); // A refused ALTER of version 13 is tried again; the uninstall says when it is still missing.
+		if ( \WPCheckpoint\Jobs\UninstallFence::heal() ) {
+			\WPCheckpoint\Plugin::instance()->directories()->log_event( 'The uninstall fence was closed for more than an hour (an uninstall that did not finish, on this site or one sharing its database); it was opened again so that restores can change the site.' );
+		}
 	}
 
 	/**
@@ -514,6 +530,16 @@ final class Schema {
 				// Adds site_mark (''); older code ignores it (it neither reads nor writes it), so min_compatible stays 1.
 				self::create_jobs_table();
 				return 1;
+			case 12:
+				// A table of its own for the uninstall fence, with its one row open (Jobs\UninstallFence); older code
+				// neither reads nor writes it (its swaps enter without it: a known boundary), so min_compatible stays 1.
+				\WPCheckpoint\Jobs\UninstallFence::create();
+				return 1;
+			case 13:
+				// Adds closed_by ('') and beats (0) to the fence, which version 12 made without them: the uninstall that
+				// closed it, and its heartbeat. Code of version 12 neither reads nor writes them, so min_compatible stays 1.
+				\WPCheckpoint\Jobs\UninstallFence::upgrade();
+				return 1;
 			case 10:
 				// Adds held_by (''); older code ignores it, so min_compatible stays 1. What older code does with the rows
 				// this version writes: it goes by storage_token alone, so a job another installation took over is run
@@ -571,6 +597,18 @@ final class Schema {
 	 * @return void
 	 */
 	public static function drop( $clock = null ): void {
+		self::drop_temporary( $clock );
+		self::drop_tables();
+	}
+
+	/**
+	 * The temporary tables of this installation's jobs, and of the jobs it took over (uninstall, before
+	 * drop_tables(); Uninstaller::run() reads again in between whether a job holds the site).
+	 *
+	 * @param callable|null $clock function(): float, seconds (tests); microtime by default.
+	 * @return void
+	 */
+	public static function drop_temporary( $clock = null ): void {
 		$clock = is_callable( $clock ) ? $clock : static function (): float {
 			return microtime( true );
 		};
@@ -627,10 +665,21 @@ final class Schema {
 				unset( $e ); // A token that names no tables.
 			}
 		}
+	}
+
+	/**
+	 * The jobs table, the swap plan and the uninstall fence, and the schema's options (uninstall, last).
+	 *
+	 * @return void
+	 */
+	public static function drop_tables(): void {
+		global $wpdb;
 		$table = $wpdb->base_prefix . self::JOBS_TABLE;
 		$wpdb->query( "DROP TABLE IF EXISTS {$table}" ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- table name from the prefix and a constant; uninstall only.
 		$plan = $wpdb->base_prefix . SwapPlan::TABLE;
 		$wpdb->query( "DROP TABLE IF EXISTS {$plan}" ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- table name from the prefix and a constant; uninstall only.
+		$fence = \WPCheckpoint\Jobs\UninstallFence::name();
+		$wpdb->query( "DROP TABLE IF EXISTS {$fence}" ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- table name from the prefix and a constant; uninstall only.
 		Options::delete( self::OPTION );
 		Options::delete( self::RETRY_OPTION );
 	}
