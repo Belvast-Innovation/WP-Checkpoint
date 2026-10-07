@@ -9,6 +9,7 @@ use WPCheckpoint\Jobs\TickResult;
 use WPCheckpoint\Jobs\UninstallFence;
 use WPCheckpoint\Plugin;
 use WPCheckpoint\Restore\Maintenance;
+use WPCheckpoint\Support\Deleter;
 use WPCheckpoint\Support\Schema;
 use WPCheckpoint\Support\Uninstaller;
 use WPCheckpoint\Support\UninstallSetting;
@@ -513,21 +514,39 @@ final class UninstallFenceTest extends SwapTestCase {
 		$this->assertGreaterThan( 0, (int) $wpdb->get_var( 'SELECT beats FROM ' . UninstallFence::name() ), 'its beats counted' ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- the fence table.
 	}
 
-	public function test_a_fence_opened_after_a_read_stops_the_uninstall_before_its_next_step(): void {
+	/**
+	 * What happens to the fence after the read: opened, or opened and closed again by another uninstall.
+	 *
+	 * @return array<string, array{0: bool}>
+	 */
+	public function after_the_read(): array {
+		return array(
+			'opened'                            => array( false ),
+			'closed again by another uninstall' => array( true ),
+		);
+	}
+
+	/**
+	 * @dataProvider after_the_read
+	 */
+	public function test_a_fence_opened_after_a_read_stops_the_uninstall_before_its_next_step( bool $closed_again ): void {
 		UninstallSetting::save( true );
 		$job    = null;
 		$other  = self::other();
 		$beats  = 0;
 		$events = array();
 		$this->seam(
-			function ( string $point ) use ( &$beats, &$events, &$job, $other ): void {
+			function ( string $point ) use ( &$beats, &$events, &$job, $other, $closed_again ): void {
 				$events[] = $point;
 				if ( 'beat' === $point && 2 === ++$beats ) {
 					// After the read before the staging step: the fence opened (by hand, or healed), and a swap (one
-					// that began after the cancel) enters.
+					// that began after the cancel) enters; then, perhaps, another uninstall closes it.
 					$job = $this->running_job();
 					$other->query( $other->prepare( 'UPDATE ' . UninstallFence::name() . ' SET state = %s WHERE id = %d', UninstallFence::OPEN, UninstallFence::ROW ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- the fence table.
 					$other->query( self::entering( $job ) );
+					if ( $closed_again ) {
+						$other->query( $other->prepare( UninstallFence::close_template( UninstallFence::name() ), UninstallFence::CLOSED, 'another-uninstall', UninstallFence::ROW, UninstallFence::OPEN ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- the plugin's own statement.
+					}
 				}
 			}
 		);
@@ -542,6 +561,7 @@ final class UninstallFenceTest extends SwapTestCase {
 		$this->assertSame( Job::SITE_CHANGING, Plugin::instance()->jobs()->find( $job->id )->site_state, 'the control: the swap entered' );
 		$this->assertTrue( Schema::table_exists(), 'nothing more removed' );
 		$this->assertDirectoryExists( Plugin::instance()->directories()->base() );
+		$this->assertSame( $closed_again ? UninstallFence::CLOSED : UninstallFence::OPEN, UninstallFence::row()['state'], 'the fence left as the other side left it' );
 		global $wpdb;
 		$wpdb->update( JobRepository::table(), array( 'site_state' => Job::SITE_UNTOUCHED ), array( 'id' => $job->id ) );
 	}
@@ -629,7 +649,10 @@ final class UninstallFenceTest extends SwapTestCase {
 		$this->assertNotContains( 'unit:temporary', $events, 'no later step' );
 		$this->assertTrue( Schema::table_exists() );
 		$this->assertStringContainsString( 'after it had cancelled the jobs that had not changed the site, removed its staging next to the site, begun to remove its storage directory; it stopped there and left the rest of its storage directory, its temporary tables', $log );
-		Uninstaller::delete_storage(); // The rest, as the uninstall would have; tear_down() makes the directory again.
+		// The rest: the owner marker may have been the one deletion, so the directory is registered and deleted here;
+		// tear_down() makes it again.
+		Deleter::allow( $base );
+		Deleter::delete_tree( dirname( $base ), $base );
 		$this->assertSame( 0, self::storage_entries( $base ) );
 	}
 

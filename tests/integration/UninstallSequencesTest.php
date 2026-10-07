@@ -6,6 +6,7 @@ use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\JobRepository;
 use WPCheckpoint\Jobs\UninstallFence;
 use WPCheckpoint\Plugin;
+use WPCheckpoint\Support\Deleter;
 use WPCheckpoint\Support\Options;
 use WPCheckpoint\Support\Schema;
 use WPCheckpoint\Support\Uninstaller;
@@ -99,6 +100,7 @@ final class UninstallSequencesTest extends SwapTestCase {
 	private function sequence( string $mode, bool $delete, int $at ): array {
 		global $wpdb;
 		$this->reset( $mode, $delete );
+		$base   = Plugin::instance()->directories()->base();
 		$other  = new \wpdb( DB_USER, DB_PASSWORD, DB_NAME, DB_HOST );
 		$events = array();
 		$i      = 0;
@@ -145,6 +147,12 @@ final class UninstallSequencesTest extends SwapTestCase {
 			remove_filter( 'query', $filter );
 			$this->seam( null );
 			$other->close();
+			// A deletion stopped part way leaves the directory without its owner marker: registered here and deleted,
+			// so no later test finds it.
+			if ( in_array( 'unit:storage', $events, true ) && is_dir( $base ) ) {
+				Deleter::allow( $base );
+				Deleter::delete_tree( dirname( $base ), $base );
+			}
 		}
 		$wpdb->query( 'COMMIT' );
 		return array(
