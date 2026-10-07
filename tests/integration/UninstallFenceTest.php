@@ -763,8 +763,8 @@ final class UninstallFenceTest extends SwapTestCase {
 			} finally {
 				remove_filter( 'query', $filter );
 			}
-			$this->assertGreaterThan( 0, $refused, 'the control: the uninstall tried to add them' );
 			$this->assertStringContainsString( 'lacks columns this version adds and the database did not let them be added', $log );
+			$this->assertGreaterThan( 0, $refused, 'the control: the uninstall tried to add them' );
 			$this->assertSame( Job::RUNNING, Plugin::instance()->jobs()->find( $job->id )->status, 'nothing cancelled' );
 			$this->assertSame( UninstallFence::OPEN, UninstallFence::row()['state'], 'not closed' );
 			$this->assertNotContains( 'closed_by', $columns() );

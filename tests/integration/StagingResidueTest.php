@@ -478,9 +478,9 @@ final class StagingResidueTest extends JobTestCase {
 		}
 		$this->assertGreaterThan( 5, $before, 'the control: the staging had more to delete' );
 		$this->assertContains( 'unit:staging', $events, 'the control: the staging step began' );
+		$this->assertSame( $before - 1, self::entries( $made ), 'one deletion, the rest of the staging is there' );
 		$this->assertSame( 1, $beats, 'the control: it beat after the first deletion' );
-		$this->assertSame( 1, $deletes, 'one deletion, none after the beat that found the fence open' );
-		$this->assertSame( $before - 1, self::entries( $made ), 'the rest of the staging is there' );
+		$this->assertSame( 1, $deletes, 'none after the beat that found the fence open' );
 		$this->assertNotContains( 'unit:storage', $events );
 		$this->assertStringContainsString( 'after it had cancelled the jobs that had not changed the site, begun to remove its staging next to the site; it stopped there and left the rest of its staging next to the site, its storage directory', $log );
 	}
