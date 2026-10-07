@@ -556,7 +556,7 @@ final class UninstallFenceTest extends SwapTestCase {
 		$this->assertInstanceOf( Job::class, $job );
 		$this->assertContains( 'unit:cancel', $events, 'the control: the first step ran' );
 		$this->assertNotContains( 'unit:staging', $events, 'the next step did not' );
-		$this->assertStringContainsString( 'when the fence it had closed was opened', $log );
+		$this->assertStringContainsString( 'when the fence it had closed could not be confirmed to be still its own', $log );
 		$this->assertStringContainsString( 'after it had cancelled the jobs that had not changed the site; it stopped there and left its staging next to the site, its storage directory', $log );
 		$this->assertSame( Job::SITE_CHANGING, Plugin::instance()->jobs()->find( $job->id )->site_state, 'the control: the swap entered' );
 		$this->assertTrue( Schema::table_exists(), 'nothing more removed' );
@@ -651,8 +651,14 @@ final class UninstallFenceTest extends SwapTestCase {
 		$this->assertStringContainsString( 'after it had cancelled the jobs that had not changed the site, removed its staging next to the site, begun to remove its storage directory; it stopped there and left the rest of its storage directory, its temporary tables', $log );
 		// The rest: the owner marker may have been the one deletion, so the directory is registered and deleted here;
 		// tear_down() makes it again.
-		Deleter::allow( $base );
-		Deleter::delete_tree( dirname( $base ), $base );
+		$roots = Deleter::replace_roots( array() );
+		Deleter::replace_roots( $roots );
+		try {
+			Deleter::allow( $base );
+			Deleter::delete_tree( dirname( $base ), $base );
+		} finally {
+			Deleter::replace_roots( $roots ); // Registered for this deletion only.
+		}
 		$this->assertSame( 0, self::storage_entries( $base ) );
 	}
 
@@ -674,9 +680,108 @@ final class UninstallFenceTest extends SwapTestCase {
 		} catch ( \RuntimeException $e ) {
 			$this->assertSame( 'stop after the storage step', $e->getMessage() );
 		}
-		$during = array_slice( $events, (int) array_search( 'unit:storage', $events, true ) + 1 );
+		$start = (int) array_search( 'unit:storage', $events, true );
+		$this->assertSame( 'beat', $events[ $start - 1 ] ?? '', 'the control: a beat is seen, right before the step' );
+		$during = array_slice( $events, $start + 1 );
 		$this->assertGreaterThan( 6, count( array_keys( $during, 'delete', true ) ), 'the control: each deletion was seen' );
 		$this->assertSame( array(), array_keys( $during, 'beat', true ), 'no beat within the first BEAT_SECONDS' );
 		$this->assertSame( UninstallFence::OPEN, UninstallFence::row()['state'], 'the failure opened it again' );
+	}
+
+	public function test_a_heartbeat_the_database_refuses_stops_the_uninstall_and_opens_its_fence(): void {
+		UninstallSetting::save( true );
+		$beats  = 0;
+		$events = array();
+		$filter = static function ( $sql ) use ( &$beats ) {
+			if ( false !== strpos( (string) $sql, 'beats = beats + 1' ) && 2 === ++$beats ) {
+				return 'UPDATE a_table_that_is_not_there_for_this_test SET x = 1'; // The second beat fails, once.
+			}
+			return $sql;
+		};
+		$this->seam(
+			static function ( string $point ) use ( &$events ): void {
+				$events[] = $point;
+			}
+		);
+		add_filter( 'query', $filter );
+		try {
+			$log = $this->logged( array( Uninstaller::class, 'run' ) );
+		} finally {
+			remove_filter( 'query', $filter );
+		}
+		$this->assertSame( 2, $beats, 'the control: the second beat was the statement that failed' );
+		$this->assertContains( 'unit:cancel', $events, 'the control: the first step ran' );
+		$this->assertNotContains( 'unit:staging', $events, 'the next step did not' );
+		$this->assertStringContainsString( 'or the database refused the heartbeat', $log );
+		$this->assertSame( UninstallFence::OPEN, UninstallFence::row()['state'], 'its own fence opened again, not left closed for an hour' );
+		$this->assertTrue( Schema::table_exists() );
+	}
+
+	public function test_a_healed_fence_has_no_owner_so_a_version_twelve_close_is_no_ones_to_beat(): void {
+		global $wpdb;
+		$this->autocommit(
+			static function (): void {
+				UninstallFence::close( 'run-a' );
+			}
+		);
+		$this->assertTrue( UninstallFence::beat( 'run-a' ), 'the control: closed by run-a, it beats' );
+		$wpdb->update( UninstallFence::name(), array( 'closed_at' => time() - UninstallFence::STALE_SECONDS - 60 ), array( 'id' => UninstallFence::ROW ) );
+		$this->assertTrue( UninstallFence::heal() );
+		$this->assertSame( '', (string) $wpdb->get_var( 'SELECT closed_by FROM ' . UninstallFence::name() ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- the fence table.
+		// An uninstall of version 12 closes it, writing no owner.
+		$wpdb->query( $wpdb->prepare( 'UPDATE ' . UninstallFence::name() . ' SET state = %s, closed_at = %d WHERE id = %d AND state = %s', UninstallFence::CLOSED, time(), UninstallFence::ROW, UninstallFence::OPEN ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- the fence table.
+		$this->assertFalse( UninstallFence::beat( 'run-a' ), 'run-a does not take it for its own' );
+		UninstallFence::open( 'run-a' );
+		$this->assertSame( UninstallFence::CLOSED, UninstallFence::row()['state'], 'nor opens it' );
+	}
+
+	public function test_an_uninstall_adds_the_fence_columns_the_migration_could_not_and_stops_while_it_cannot(): void {
+		global $wpdb;
+		$fence = UninstallFence::name();
+		$drop  = static function () use ( $wpdb, $fence ): void {
+			$wpdb->query( "ALTER TABLE {$fence} DROP COLUMN closed_by, DROP COLUMN beats" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the fence table.
+		};
+		$columns = static function () use ( $wpdb, $fence ): array {
+			return $wpdb->get_col( "SHOW COLUMNS FROM {$fence}" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the fence table.
+		};
+		$refused = 0;
+		$filter  = static function ( $sql ) use ( &$refused ) {
+			if ( false !== strpos( (string) $sql, 'wpcheckpoint_fence` ADD COLUMN' ) ) {
+				++$refused;
+				return 'ALTER TABLE a_table_that_is_not_there_for_this_test ADD COLUMN x int'; // The ALTER is refused.
+			}
+			return $sql;
+		};
+		UninstallSetting::save( false );
+		try {
+			$job = $this->running_job(); // Before the columns go: making a job checks the schema, which adds them.
+			$drop();
+			$this->assertNotContains( 'closed_by', $columns(), 'the control: version 13 recorded, the columns missing' );
+			add_filter( 'query', $filter );
+			try {
+				$log = $this->logged( array( Uninstaller::class, 'run' ) );
+			} finally {
+				remove_filter( 'query', $filter );
+			}
+			$this->assertGreaterThan( 0, $refused, 'the control: the uninstall tried to add them' );
+			$this->assertStringContainsString( 'lacks columns this version adds and the database did not let them be added', $log );
+			$this->assertSame( Job::RUNNING, Plugin::instance()->jobs()->find( $job->id )->status, 'nothing cancelled' );
+			$this->assertSame( UninstallFence::OPEN, UninstallFence::row()['state'], 'not closed' );
+			$this->assertNotContains( 'closed_by', $columns() );
+			// The check of the schema adds them once the database lets it.
+			Schema::ensure( true );
+			$this->assertContains( 'closed_by', $columns(), 'added by the check of the schema' );
+			$this->assertContains( 'beats', $columns() );
+			// And the uninstall adds them itself, and goes on.
+			$drop();
+			$log = $this->logged( array( Uninstaller::class, 'run' ) );
+			$this->assertContains( 'closed_by', $columns(), 'added by the uninstall' );
+			$this->assertStringNotContainsString( 'lacks columns', $log );
+			$this->assertSame( Job::CANCELLED, Plugin::instance()->jobs()->find( $job->id )->status, 'the control: it went on' );
+			$this->assertSame( UninstallFence::OPEN, UninstallFence::row()['state'] );
+		} finally {
+			UninstallFence::upgrade();
+			$wpdb->query( 'COMMIT' );
+		}
 	}
 }

@@ -150,8 +150,14 @@ final class UninstallSequencesTest extends SwapTestCase {
 			// A deletion stopped part way leaves the directory without its owner marker: registered here and deleted,
 			// so no later test finds it.
 			if ( in_array( 'unit:storage', $events, true ) && is_dir( $base ) ) {
-				Deleter::allow( $base );
-				Deleter::delete_tree( dirname( $base ), $base );
+				$roots = Deleter::replace_roots( array() );
+				Deleter::replace_roots( $roots );
+				try {
+					Deleter::allow( $base );
+					Deleter::delete_tree( dirname( $base ), $base );
+				} finally {
+					Deleter::replace_roots( $roots ); // Registered for this deletion only.
+				}
 			}
 		}
 		$wpdb->query( 'COMMIT' );
@@ -194,17 +200,17 @@ final class UninstallSequencesTest extends SwapTestCase {
 		$last_check = -1;
 		$last_beat  = -1;
 		$previous   = array( '', '' );
-		$in_storage = false;
+		$in_step    = false; // In a step that deletes files (the staging, the storage directory).
 		foreach ( $events as $index => $event ) {
 			if ( 'check' === $event ) {
 				$last_check = $index;
-				$in_storage = false;
+				$in_step    = false;
 			} elseif ( 'beat' === $event ) {
 				$last_beat = $index;
 			} elseif ( 0 === strpos( $event, 'unit:' ) || 'delete' === $event ) {
 				$this->assertFalse( false !== $reopened && $reopened < $last_beat, $label . ': I6, ' . $event . ' after a beat that came after the fence was opened' );
 				if ( 'delete' === $event ) {
-					$this->assertTrue( $in_storage, $label . ': a deletion of the storage directory outside its step' );
+					$this->assertTrue( $in_step, $label . ': a deletion outside the staging and storage steps' );
 					$this->assertSame( 'beat', $previous[0], $label . ': I5, ' . $event . ' right after a beat' );
 					if ( false !== $reopened && $reopened > $last_beat ) {
 						++$cases['reopen: opened after the last beat before a step'];
@@ -227,7 +233,7 @@ final class UninstallSequencesTest extends SwapTestCase {
 				if ( false !== $reopened && $reopened > $last_beat ) {
 					++$cases['reopen: opened after the last beat before a step'];
 				}
-				$in_storage = 'unit:storage' === $event;
+				$in_step = in_array( $event, array( 'unit:staging', 'unit:storage' ), true );
 			}
 			if ( 0 !== strpos( $event, 'inject:' ) ) {
 				$previous = array( $event, $previous[0] );

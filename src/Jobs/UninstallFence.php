@@ -127,23 +127,34 @@ final class UninstallFence {
 
 	/**
 	 * The columns schema version 13 adds to a table version 12 made (closed_by, beats), when they are missing; the
-	 * table a later create_sql() makes has them already.
+	 * table a later create_sql() makes has them already. Run by the migration, again on every check of the schema
+	 * (Schema::ensure( true )) and by the uninstall before it closes the fence, so that one refused ALTER is not
+	 * final: true when the table has both columns afterwards, read from the table; false when it does not, or its
+	 * columns cannot be read (also when the table is not there).
 	 *
-	 * @return void
+	 * @return bool
 	 */
-	public static function upgrade(): void {
+	public static function upgrade(): bool {
 		global $wpdb;
-		$name = SqlWriter::identifier( self::name() );
-		$have = $wpdb->get_col( 'SHOW COLUMNS FROM ' . $name ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- the fence table.
-		$have = is_array( $have ) ? array_map( 'strval', $have ) : array();
-		foreach ( array(
+		$name    = SqlWriter::identifier( self::name() );
+		$quiet   = $wpdb->suppress_errors( true );
+		$columns = static function () use ( $wpdb, $name ): array {
+			$have = $wpdb->get_col( 'SHOW COLUMNS FROM ' . $name ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- the fence table.
+			return is_array( $have ) ? array_map( 'strval', $have ) : array();
+		};
+		$added   = array(
 			'closed_by' => "varchar(32) NOT NULL DEFAULT ''",
 			'beats'     => 'bigint(20) unsigned NOT NULL DEFAULT 0',
-		) as $column => $definition ) {
+		);
+		$have    = $columns();
+		foreach ( $added as $column => $definition ) {
 			if ( array() !== $have && ! in_array( $column, $have, true ) ) {
 				$wpdb->query( 'ALTER TABLE ' . $name . ' ADD COLUMN ' . $column . ' ' . $definition ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.NotPrepared -- the fence table and a constant definition.
+				$have = $columns();
 			}
 		}
+		$wpdb->suppress_errors( $quiet );
+		return array() === array_diff( array_keys( $added ), $have );
 	}
 
 	/**
@@ -255,14 +266,15 @@ final class UninstallFence {
 	 * Open a fence closed with no heartbeat (beat()) for longer than STALE_SECONDS (an uninstall whose process died
 	 * before it opened it again):
 	 * one UPDATE on the row as it is, by the server's clock (as close() writes it), so an uninstall that closes it
-	 * meanwhile is not undone.
+	 * meanwhile is not undone. Its owner is cleared with it: an uninstall of version 12, which writes none, may close
+	 * it next, and the run it was healed under must not take that for its own.
 	 *
 	 * @return bool Whether a stale fence was opened.
 	 */
 	public static function heal(): bool {
 		global $wpdb;
 		$quiet = $wpdb->suppress_errors( true );
-		$done  = $wpdb->query( $wpdb->prepare( 'UPDATE ' . SqlWriter::identifier( self::name() ) . ' SET state = %s WHERE id = %d AND state = %s AND closed_at < UNIX_TIMESTAMP() - %d', self::OPEN, self::ROW, self::CLOSED, self::STALE_SECONDS ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- table name from the prefix.
+		$done  = $wpdb->query( $wpdb->prepare( 'UPDATE ' . SqlWriter::identifier( self::name() ) . ' SET state = %s, closed_by = %s WHERE id = %d AND state = %s AND closed_at < UNIX_TIMESTAMP() - %d', self::OPEN, '', self::ROW, self::CLOSED, self::STALE_SECONDS ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- table name from the prefix.
 		$wpdb->suppress_errors( $quiet );
 		return 1 === (int) $done;
 	}
