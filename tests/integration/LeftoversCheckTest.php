@@ -59,7 +59,9 @@ final class LeftoversCheckTest extends WP_UnitTestCase {
 	}
 
 	public function test_it_sees_and_removes_a_storage_directory_in_wp_content_other_than_the_stored_one(): void {
-		$stored = rtrim( (string) \WPCheckpoint\Support\Directories::load_state()['path'], '/' );
+		wp_cache_flush();
+		$stored = \WPCheckpoint\Tests\Fixtures\StorageDirs::stored_path();
+		$this->assertSame( rtrim( (string) \WPCheckpoint\Support\Directories::load_state()['path'], '/' ), $stored, 'read from the database, as the plugin reads it' );
 		$dir    = WP_CONTENT_DIR . '/' . \WPCheckpoint\Support\Directories::DIR_PREFIX . 'leftovercheck';
 		$this->assertTrue( mkdir( $dir . '/tmp', 0755, true ) );
 		file_put_contents( $dir . '/tmp/index.php', '<?php' );

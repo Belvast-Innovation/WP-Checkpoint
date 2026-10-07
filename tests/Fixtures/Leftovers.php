@@ -345,25 +345,11 @@ final class Leftovers implements TestListener {
 		}
 		// Storage directories in the test site's wp-content, other than the one the stored state names (the plugin's
 		// own, kept from test to test): one a test left (a deletion stopped part way takes the owner marker first).
-		if ( defined( 'WP_CONTENT_DIR' ) ) {
-			$current = self::current_storage();
-			foreach ( glob( WP_CONTENT_DIR . '/' . \WPCheckpoint\Support\Directories::DIR_PREFIX . '*', GLOB_ONLYDIR ) ?: array() as $dir ) {
-				if ( $dir !== $current ) {
-					$items[] = 'storage:' . $dir;
-				}
-			}
+		foreach ( StorageDirs::listing() as $dir ) {
+			$items[] = 'storage:' . $dir;
 		}
 		sort( $items );
 		return $items;
-	}
-
-	/**
-	 * The storage directory the stored state names ('' for none stored yet).
-	 *
-	 * @return string
-	 */
-	private static function current_storage(): string {
-		return rtrim( (string) \WPCheckpoint\Support\Directories::load_state()['path'], '/' );
 	}
 
 	/**
@@ -439,19 +425,7 @@ final class Leftovers implements TestListener {
 					fwrite( STDERR, "\nA maintenance file that is not this plugin's was left in place: {$path}\n" );
 				}
 			} elseif ( 0 === strpos( $item, 'storage:' ) ) {
-				// A storage directory a test left in the site's wp-content: registered with the Deleter for this deletion
-				// only (it may have lost its owner marker).
-				$dir   = substr( $item, 8 );
-				$roots = \WPCheckpoint\Support\Deleter::replace_roots( array() );
-				\WPCheckpoint\Support\Deleter::replace_roots( $roots );
-				try {
-					\WPCheckpoint\Support\Deleter::allow( $dir );
-					\WPCheckpoint\Support\Deleter::delete_tree( dirname( $dir ), $dir );
-				} catch ( \WPCheckpoint\Support\DeletionRefused $e ) {
-					fwrite( STDERR, "\n" . $e->getMessage() . "\n" );
-				} finally {
-					\WPCheckpoint\Support\Deleter::replace_roots( $roots );
-				}
+				StorageDirs::remove( array( substr( $item, 8 ) ) ); // A storage directory a test left in the site's wp-content.
 			} elseif ( 0 === strpos( $item, 'temp:' ) ) {
 				try {
 					Sandbox::remove( substr( $item, 5 ) );

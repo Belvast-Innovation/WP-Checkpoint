@@ -6,11 +6,27 @@ use ErrorException;
 use WP_UnitTestCase;
 use WPCheckpoint\Plugin;
 use WPCheckpoint\Support\Uninstaller;
+use WPCheckpoint\Tests\Fixtures\StorageDirs;
 
 /**
  * Activation and deactivation must not emit warnings, notices or output.
  */
 final class ActivationTest extends WP_UnitTestCase {
+
+	/** @var string[]|null The storage directories in wp-content when the test started (StorageDirs); null before set_up(). */
+	private $storage_before = null;
+
+	public function set_up(): void {
+		parent::set_up();
+		$this->storage_before = StorageDirs::listing();
+	}
+
+	public function tear_down(): void {
+		parent::tear_down();
+		if ( null !== $this->storage_before ) {
+			StorageDirs::remove_made_since( $this->storage_before ); // Activation makes a storage directory.
+		}
+	}
 
 	private const BASENAME = 'wp-checkpoint/wp-checkpoint.php';
 

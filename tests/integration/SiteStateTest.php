@@ -30,12 +30,16 @@ use WPCheckpoint\Tests\Fixtures\Jobs\CliHoldingStep;
 use WPCheckpoint\Tests\Fixtures\Jobs\FixtureJobType;
 use WPCheckpoint\Tests\Fixtures\Jobs\HoldingStep;
 use WPCheckpoint\Tests\Fixtures\Sandbox;
+use WPCheckpoint\Tests\Fixtures\StorageDirs;
 
 /**
  * A job that holds the site changed (site_state), and a step only WP-CLI runs (CliOnly): what the engine does
  * and does not do with them. Every rule has its control: the same with a job that holds nothing.
  */
 final class SiteStateTest extends WP_UnitTestCase {
+
+	/** @var string[]|null The storage directories in wp-content when the test started (StorageDirs); null before set_up(). */
+	private $storage_before = null;
 
 	/** @var string The test's directory; '' before set_up() made it. */
 	private $root = '';
@@ -57,6 +61,7 @@ final class SiteStateTest extends WP_UnitTestCase {
 
 	public function set_up(): void {
 		parent::set_up();
+		$this->storage_before = StorageDirs::listing();
 		global $wpdb;
 		remove_filter( 'query', array( $this, '_create_temporary_tables' ) );
 		remove_filter( 'query', array( $this, '_drop_temporary_tables' ) );
@@ -88,6 +93,9 @@ final class SiteStateTest extends WP_UnitTestCase {
 			Sandbox::remove( $this->root );
 		}
 		parent::tear_down();
+		if ( null !== $this->storage_before ) {
+			StorageDirs::remove_made_since( $this->storage_before ); // The Directories it made has its directory in wp-content.
+		}
 	}
 
 	private function site( string $abspath ): Directories {
