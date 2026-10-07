@@ -165,7 +165,8 @@ final class SchemaColumnsTest extends JobTestCase {
 		self::drop_column( 'cron_deferrals' );
 		Options::set( Schema::OPTION, array( 'version' => 6, 'min_compatible' => 1 ) );
 		$hits = 0;
-		$this->refuse( '/^SHOW COLUMNS FROM /i', $hits );
+		// The jobs table's columns only: the fence's (UninstallFence::upgrade()) are read on their own.
+		$this->refuse( '/^SHOW COLUMNS FROM ' . preg_quote( Schema::jobs_table(), '/' ) . '$/i', $hits );
 		$result = self::ensure();
 		$this->assertSame( 1, $hits, 'the control: the columns were asked for' );
 		$this->assertSame( 'failed', $result['action'], 'no answer is not an answer that all is there' );
