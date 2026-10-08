@@ -146,6 +146,16 @@ final class LeftoversTest extends TestCase {
 		$this->assertSame( 0, $result->failureCount() );
 	}
 
+	public function test_only_wp_envs_tests_database_on_its_host_may_have_its_other_tables_dropped(): void {
+		$this->assertSame( '', Leftovers::database_refusal( 'tests-wordpress', 'tests-wordpress', 'tests-mysql' ), 'the control: wp-env\'s tests database' );
+		$this->assertSame( '', Leftovers::database_refusal( 'tests-wordpress', 'tests-wordpress', 'tests-mysql:3306' ), 'any port' );
+		$this->assertStringContainsString( 'the database "wordpress"', Leftovers::database_refusal( 'wordpress', 'wordpress', 'tests-mysql' ) );
+		$this->assertStringContainsString( 'the server says the connection uses the database "wordpress"', Leftovers::database_refusal( 'tests-wordpress', 'wordpress', 'tests-mysql' ) );
+		$this->assertStringContainsString( 'the host "mysql"', Leftovers::database_refusal( 'tests-wordpress', 'tests-wordpress', 'mysql' ) );
+		$this->assertStringContainsString( 'the host "127.0.0.1:9678"', Leftovers::database_refusal( 'tests-wordpress', 'tests-wordpress', '127.0.0.1:9678' ) );
+		$this->assertNotSame( '', Leftovers::database_refusal( 'tests-wordpress', '', 'tests-mysql' ), 'the server did not say' );
+	}
+
 	public function test_the_tables_that_are_neither_wordpresss_nor_the_plugins_are_strays(): void {
 		$global = array( 'users', 'usermeta', 'blogs', 'site', 'sitemeta' );
 		$blog   = array( 'posts', 'options', 'postmeta' );

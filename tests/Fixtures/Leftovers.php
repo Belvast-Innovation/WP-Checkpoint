@@ -34,6 +34,10 @@ final class Leftovers implements TestListener {
 	/** The table names looked for, by their start. */
 	const TABLE_PREFIXES = array( 'wcptmp', 'wcpold', 'wcpstray' );
 
+	/** The database wp-env gives the tests site, and the host it is on: the only one whose other tables are dropped. */
+	const TEST_DATABASE = 'tests-wordpress';
+	const TEST_DB_HOST  = 'tests-mysql';
+
 	/** The temporary directory's entries looked for, by their start. */
 	const TEMP_PREFIXES = array( 'wpc-', 'wpcheckpoint-', 'wp-checkpoint-' );
 
@@ -69,7 +73,8 @@ final class Leftovers implements TestListener {
 
 	/**
 	 * Lists the other tables an earlier run may have left, read at the start of the run only: function(): string[]
-	 * ("table:{name}"); stray_listing() when the lister is not given, none when it is and this is not.
+	 * ("table:{name}"), reported and removed with the rest (a test of this class). When it is not given and the lister
+	 * is not either, start_cleanup() drops them on the tests database itself.
 	 *
 	 * @var callable|null
 	 */
@@ -105,7 +110,8 @@ final class Leftovers implements TestListener {
 	}
 
 	/**
-	 * The other tables an earlier run may have left (stray_listing()), at the start of the run.
+	 * The other tables an earlier run may have left, at the start of the run: the given lister's, or none after
+	 * start_cleanup() has dropped them (on wp-env's tests database only).
 	 *
 	 * @return string[]
 	 */
@@ -113,7 +119,20 @@ final class Leftovers implements TestListener {
 		if ( null !== $this->strays ) {
 			return array_values( (array) call_user_func( $this->strays ) );
 		}
-		return $this->given ? array() : self::stray_listing();
+		if ( ! $this->given && isset( $GLOBALS['wpdb'] ) ) {
+			// Dropped here, on the tests database only, each named before it goes (start_cleanup()); nothing to list after.
+			self::start_cleanup(
+				$GLOBALS['wpdb'],
+				function ( string $text ): void {
+					if ( null !== $this->notice ) {
+						call_user_func( $this->notice, $text );
+					} else {
+						fwrite( STDERR, $text );
+					}
+				}
+			);
+		}
+		return array();
 	}
 
 	/**
@@ -357,14 +376,69 @@ final class Leftovers implements TestListener {
 	 *
 	 * @return string[] As "table:{name}".
 	 */
-	public static function stray_listing(): array {
-		global $wpdb;
-		$all = array_map( 'strval', (array) $wpdb->get_col( 'SHOW TABLES' ) );
+	public static function stray_listing( \wpdb $db ): array {
+		$all = array_map( 'strval', (array) $db->get_col( 'SHOW TABLES' ) );
 		$out = array();
-		foreach ( self::stray_tables( $all, (string) $wpdb->base_prefix, array_values( $wpdb->tables( 'global', false ) ), array_values( $wpdb->tables( 'blog', false ) ) ) as $table ) {
+		foreach ( self::stray_tables( $all, (string) $db->base_prefix, array_values( $db->tables( 'global', false ) ), array_values( $db->tables( 'blog', false ) ) ) as $table ) {
 			$out[] = 'table:' . $table;
 		}
 		return $out;
+	}
+
+	/**
+	 * Why the tables of this database must not be dropped as an earlier run's, '' when they may: the connection's
+	 * database and the one the server says it uses must both be wp-env's tests database, on its host (any port).
+	 *
+	 * @param string $name   The connection's database (wpdb's dbname).
+	 * @param string $server The database the server says the connection uses (SELECT DATABASE()).
+	 * @param string $host   The connection's host (wpdb's dbhost).
+	 * @return string
+	 */
+	public static function database_refusal( string $name, string $server, string $host ): string {
+		$bare = (string) preg_replace( '/:.*\z/s', '', $host );
+		if ( self::TEST_DATABASE !== $name ) {
+			return sprintf( 'the connection is to the database "%1$s", not to wp-env\'s tests database "%2$s"', $name, self::TEST_DATABASE );
+		}
+		if ( self::TEST_DATABASE !== $server ) {
+			return sprintf( 'the server says the connection uses the database "%1$s", not "%2$s"', $server, self::TEST_DATABASE );
+		}
+		if ( self::TEST_DB_HOST !== $bare ) {
+			return sprintf( 'the connection is to the host "%1$s", not to wp-env\'s tests database server "%2$s"', $host, self::TEST_DB_HOST );
+		}
+		return '';
+	}
+
+	/**
+	 * At the start of a run: drop the tables an earlier run left that are neither WordPress's nor this plugin's
+	 * (stray_listing()), on wp-env's tests database only (database_refusal(): anywhere else nothing is dropped and the
+	 * reason is said). Their names are said (through $say) before the first is dropped.
+	 *
+	 * @param \wpdb    $db  Connection.
+	 * @param callable $say function( string ): void.
+	 * @return string[] The tables dropped.
+	 */
+	public static function start_cleanup( \wpdb $db, callable $say ): array {
+		$refusal = self::database_refusal( (string) $db->dbname, (string) $db->get_var( 'SELECT DATABASE()' ), (string) $db->dbhost );
+		if ( '' !== $refusal ) {
+			$say( "\nAn earlier run's other tables are not looked for: {$refusal}. Nothing was dropped.\n" );
+			return array();
+		}
+		$tables = array_map(
+			static function ( string $item ): string {
+				return substr( $item, 6 );
+			},
+			self::stray_listing( $db )
+		);
+		if ( array() === $tables ) {
+			return array();
+		}
+		$say( "\nDropping the tables an earlier run left that are neither WordPress's nor this plugin's:\n  " . implode( "\n  ", $tables ) . "\n" );
+		mysqli_query( $db->dbh, 'SET FOREIGN_KEY_CHECKS=0' );
+		foreach ( $tables as $table ) {
+			mysqli_query( $db->dbh, 'DROP TABLE IF EXISTS `' . str_replace( '`', '``', $table ) . '`' );
+		}
+		mysqli_query( $db->dbh, 'SET FOREIGN_KEY_CHECKS=1' );
+		return $tables;
 	}
 
 	/**
