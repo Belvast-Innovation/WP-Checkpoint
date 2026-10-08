@@ -149,7 +149,8 @@ final class LeftoversTest extends TestCase {
 	public function test_only_wp_envs_tests_database_on_its_host_may_have_its_other_tables_dropped(): void {
 		$this->assertSame( '', Leftovers::database_refusal( 'tests-wordpress', 'tests-wordpress', 'tests-mysql' ), 'the control: wp-env\'s tests database' );
 		$this->assertSame( '', Leftovers::database_refusal( 'tests-wordpress', 'tests-wordpress', 'tests-mysql:3306' ), 'any port' );
-		$this->assertStringContainsString( 'the database "wordpress"', Leftovers::database_refusal( 'wordpress', 'wordpress', 'tests-mysql' ) );
+		$this->assertStringContainsString( 'the connection is to the database "wordpress"', Leftovers::database_refusal( 'wordpress', 'wordpress', 'tests-mysql' ) );
+		$this->assertStringContainsString( 'the connection is to the database "wordpress"', Leftovers::database_refusal( 'wordpress', 'tests-wordpress', 'tests-mysql' ), 'the connection\'s own name, whatever the server says' );
 		$this->assertStringContainsString( 'the server says the connection uses the database "wordpress"', Leftovers::database_refusal( 'tests-wordpress', 'wordpress', 'tests-mysql' ) );
 		$this->assertStringContainsString( 'the host "mysql"', Leftovers::database_refusal( 'tests-wordpress', 'tests-wordpress', 'mysql' ) );
 		$this->assertStringContainsString( 'the host "127.0.0.1:9678"', Leftovers::database_refusal( 'tests-wordpress', 'tests-wordpress', '127.0.0.1:9678' ) );
