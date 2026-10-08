@@ -119,12 +119,14 @@ final class RestoreFailureTextTest extends JobTestCase {
 		$this->assertStringContainsString( '{site-host}, wp_table_001, wp_table_002, wp_table_003, wp_table_004 and others (230 tables in all; the job log lists them all)', $card['error_detail'], 'cleaned: the site\'s host is masked, the rest kept' );
 		$this->assertStringNotContainsString( 'wp_table_005', $card['error_detail'], 'the first few only' );
 		$this->assertStringNotContainsString( $host, $card['error_detail'], 'cleaned: the site\'s host is masked' );
-		$this->assertStringContainsString( $host, $job->last_error, 'the control: it is in what was stored' );
+		$this->assertStringContainsString( '{site-host}, wp_table_001', $job->last_error, 'stored cleaned too' );
 
 		$log = (string) file_get_contents( Plugin::instance()->directories()->base() . '/' . $job->log_path );
 		foreach ( array( 'wp_table_001', 'wp_table_100', 'wp_table_229' ) as $table ) {
 			$this->assertStringContainsString( $table, $log, 'every table in the log' );
 		}
 		$this->assertSame( 3, substr_count( $log, 'The database server cannot take what these tables use' ), '230 tables in lines of 100' );
+		$this->assertStringNotContainsString( $host, $log, 'the table named as the site\'s host is masked in the log too, in every line' );
+		$this->assertSame( 2, substr_count( $log, '{site-host}' ), 'the control: masked where it was, in the list and in the failure\'s line' );
 	}
 }
