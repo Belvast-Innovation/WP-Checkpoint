@@ -13,6 +13,7 @@ use WPCheckpoint\Restore\BackupUnusable;
 use WPCheckpoint\Restore\LedgerOutdated;
 use WPCheckpoint\Restore\PlatformUnsupported;
 use WPCheckpoint\Restore\SiteChanged;
+use WPCheckpoint\Restore\TargetIncompatible;
 use WPCheckpoint\Support\Environment;
 use WPCheckpoint\Support\Logger;
 use WPCheckpoint\Support\Redactor;
@@ -444,6 +445,19 @@ final class Runner {
 				$logger->info( 'A retry starts at an earlier step', array( 'retry_from' => $e->step() ) );
 				return $this->fail( $job, $token, $logger, sprintf( 'Step "%s": %s', $step_id, $this->describe( $e ) ), '', $e->step() );
 			} catch ( \Throwable $e ) {
+				if ( $e instanceof TargetIncompatible ) {
+					// The message names a few tables; the log keeps all of them.
+					foreach ( array_chunk( $e->tables(), 100 ) as $tables ) {
+						$logger->error(
+							'The database server cannot take what these tables use',
+							array(
+								'kind'    => $e->kind(),
+								'missing' => $e->missing(),
+								'tables'  => $tables,
+							)
+						);
+					}
+				}
 				// Lost work files, and a table changed under the export, are final; anything else may pass once its cause is fixed.
 				return $this->fail( $job, $token, $logger, sprintf( 'Step "%s": %s', $step_id, $this->describe( $e ) ), self::failure_of( $e ) );
 			}
@@ -1009,7 +1023,8 @@ final class Runner {
 	 * final for lost work files, a table that changed under the export, a
 	 * restore ledger of an older version, a restore on a server this
 	 * version does not restore on, a backup whose file changed or is
-	 * damaged and a swap's plan written for another site, no kind for
+	 * damaged, a swap's plan written for another site and a target
+	 * database that cannot take what the backup uses, no kind for
 	 * anything else.
 	 *
 	 * @param \Throwable $e Exception.
@@ -1019,7 +1034,7 @@ final class Runner {
 		if ( $e instanceof TableChanged ) {
 			return Job::FAILURE_FINAL . ':' . Job::REASON_TABLE_CHANGED;
 		}
-		return $e instanceof WorkLost || $e instanceof LedgerOutdated || $e instanceof PlatformUnsupported || $e instanceof BackupUnusable || $e instanceof SiteChanged ? Job::FAILURE_FINAL : '';
+		return $e instanceof WorkLost || $e instanceof LedgerOutdated || $e instanceof PlatformUnsupported || $e instanceof BackupUnusable || $e instanceof SiteChanged || $e instanceof TargetIncompatible ? Job::FAILURE_FINAL : '';
 	}
 
 	/**
