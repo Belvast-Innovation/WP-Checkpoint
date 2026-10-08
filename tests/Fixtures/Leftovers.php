@@ -12,11 +12,14 @@ use PHPUnit\Framework\TestSuite;
 
 /**
  * What the integration tests leave behind: the restore's tables ("wcptmp", "wcpold", "wcpstray") in the database,
- * the swap's maintenance file (and its temporary names) in ABSPATH, and this plugin's and its tests' entries in the
- * run's own temporary directory. A test that leaves one fails, named, and what
- * it left is removed so the next test starts clean; a test class that leaves one in its class-level set-up fails as a
- * class; and the run fails when any is left at its end. What an earlier run left is reported when the run starts; its
- * tables are removed (the tests database is taken to be this run's while it runs), anything else is left alone.
+ * the swap's maintenance file (and its temporary names) in ABSPATH, storage directories in the test site's
+ * wp-content (wp-checkpoint-*, other than the one the stored state names), and this plugin's and its tests' entries in
+ * the run's own temporary directory. A test that leaves one fails, named, and what it left is removed so the next test
+ * starts clean; a test class that leaves one in its class-level set-up fails as a class; and the run fails when any is
+ * left at its end. What an earlier run left is reported when the run starts: its tables are removed (the tests database
+ * is taken to be this run's while it runs), the restore's and every other table that is neither WordPress's (the main
+ * site's and every site's of a network) nor this plugin's own (a test's fixture table, swt_* among them, left by a run
+ * that was killed); anything else is left alone.
  *
  * The temporary directory is looked at only when it is the run's own (bin/test-integration.sh gives each run one and
  * names it in WPCHECKPOINT_TEST_RUN_TMP): in a directory other runs share, their entries would be blamed on this
@@ -30,6 +33,10 @@ final class Leftovers implements TestListener {
 
 	/** The table names looked for, by their start. */
 	const TABLE_PREFIXES = array( 'wcptmp', 'wcpold', 'wcpstray' );
+
+	/** The database wp-env gives the tests site, and the host it is on: the only one whose other tables are dropped. */
+	const TEST_DATABASE = 'tests-wordpress';
+	const TEST_DB_HOST  = 'tests-mysql';
 
 	/** The temporary directory's entries looked for, by their start. */
 	const TEMP_PREFIXES = array( 'wpc-', 'wpcheckpoint-', 'wp-checkpoint-' );
@@ -64,6 +71,15 @@ final class Leftovers implements TestListener {
 	 */
 	private $notice;
 
+	/**
+	 * Lists the other tables an earlier run may have left, read at the start of the run only: function(): string[]
+	 * ("table:{name}"), reported and removed with the rest (a test of this class). When it is not given and the lister
+	 * is not either, start_cleanup() drops them on the tests database itself.
+	 *
+	 * @var callable|null
+	 */
+	private $strays;
+
 	/** @var bool Whether the lister and remover were given (a test of this class). */
 	private $given;
 
@@ -82,12 +98,41 @@ final class Leftovers implements TestListener {
 	 * @param callable|null $lister  function(): string[]; the database and the run's temporary directory when null.
 	 * @param callable|null $remover function( string[] ): void; drops and removes when null.
 	 * @param callable|null $notice  function( string ): void; standard error when null.
+	 * @param callable|null $strays  function(): string[]; the tests database's other tables when null (and the lister
+	 *                               is not given).
 	 */
-	public function __construct( $lister = null, $remover = null, $notice = null ) {
+	public function __construct( $lister = null, $remover = null, $notice = null, $strays = null ) {
 		$this->lister  = $lister;
 		$this->remover = $remover;
 		$this->notice  = $notice;
+		$this->strays  = $strays;
 		$this->given   = null !== $lister;
+	}
+
+	/**
+	 * The other tables an earlier run may have left, at the start of the run: the given lister's, or none after
+	 * start_cleanup() has dropped them (on wp-env's tests database only).
+	 *
+	 * @return string[]
+	 */
+	private function strays(): array {
+		if ( null !== $this->strays ) {
+			return array_values( (array) call_user_func( $this->strays ) );
+		}
+		if ( ! $this->given && isset( $GLOBALS['wpdb'] ) ) {
+			// Dropped here, on the tests database only, each named before it goes (start_cleanup()); nothing to list after.
+			self::start_cleanup(
+				$GLOBALS['wpdb'],
+				function ( string $text ): void {
+					if ( null !== $this->notice ) {
+						call_user_func( $this->notice, $text );
+					} else {
+						fwrite( STDERR, $text );
+					}
+				}
+			);
+		}
+		return array();
 	}
 
 	/**
@@ -159,6 +204,10 @@ final class Leftovers implements TestListener {
 		if ( null === $now ) {
 			return;
 		}
+		if ( array() === $this->suites ) {
+			$now = array_values( array_unique( array_merge( $now, $this->strays() ) ) );
+			sort( $now );
+		}
 		if ( array() === $this->suites && array() !== $now ) {
 			// The tables go: they carry no site's prefix, and the tests database is taken to be this run's while it
 			// runs (a second run would collide on the core library's reinstall of its tables anyway; the site that
@@ -174,7 +223,9 @@ final class Leftovers implements TestListener {
 					}
 				)
 			);
-			$text   = "\nLeft by an earlier run (tables removed, anything else left alone):\n  " . implode( "\n  ", $now ) . "\n";
+			$stale  = (string) getenv( 'WPCHECKPOINT_TEST_STALE_RUN_ID' );
+			$which  = '' === $stale ? 'an earlier run' : 'an earlier run (' . $stale . ', which ended without releasing the lock)';
+			$text   = "\nLeft by {$which} (tables removed, anything else left alone):\n  " . implode( "\n  ", $now ) . "\n";
 			if ( null !== $this->notice ) {
 				call_user_func( $this->notice, $text );
 			} else {
@@ -311,8 +362,117 @@ final class Leftovers implements TestListener {
 				}
 			}
 		}
+		// Storage directories in the test site's wp-content, other than the one the stored state names (the plugin's
+		// own, kept from test to test): one a test left (a deletion stopped part way takes the owner marker first).
+		foreach ( StorageDirs::listing() as $dir ) {
+			$items[] = 'storage:' . $dir;
+		}
 		sort( $items );
 		return $items;
+	}
+
+	/**
+	 * The tables in the tests database that are neither WordPress's nor this plugin's own (stray_tables()).
+	 *
+	 * @return string[] As "table:{name}".
+	 */
+	public static function stray_listing( \wpdb $db ): array {
+		$all = array_map( 'strval', (array) $db->get_col( 'SHOW TABLES' ) );
+		$out = array();
+		foreach ( self::stray_tables( $all, (string) $db->base_prefix, array_values( $db->tables( 'global', false ) ), array_values( $db->tables( 'blog', false ) ) ) as $table ) {
+			$out[] = 'table:' . $table;
+		}
+		return $out;
+	}
+
+	/**
+	 * Why the tables of this database must not be dropped as an earlier run's, '' when they may: the connection's
+	 * database and the one the server says it uses must both be wp-env's tests database, on its host (any port).
+	 *
+	 * @param string $name   The connection's database (wpdb's dbname).
+	 * @param string $server The database the server says the connection uses (SELECT DATABASE()).
+	 * @param string $host   The connection's host (wpdb's dbhost).
+	 * @return string
+	 */
+	public static function database_refusal( string $name, string $server, string $host ): string {
+		$bare = (string) preg_replace( '/:.*\z/s', '', $host );
+		if ( self::TEST_DATABASE !== $name ) {
+			return sprintf( 'the connection is to the database "%1$s", not to wp-env\'s tests database "%2$s"', $name, self::TEST_DATABASE );
+		}
+		if ( self::TEST_DATABASE !== $server ) {
+			return sprintf( 'the server says the connection uses the database "%1$s", not "%2$s"', $server, self::TEST_DATABASE );
+		}
+		if ( self::TEST_DB_HOST !== $bare ) {
+			return sprintf( 'the connection is to the host "%1$s", not to wp-env\'s tests database server "%2$s"', $host, self::TEST_DB_HOST );
+		}
+		return '';
+	}
+
+	/**
+	 * At the start of a run: drop the tables an earlier run left that are neither WordPress's nor this plugin's
+	 * (stray_listing()), on wp-env's tests database only (database_refusal(): anywhere else nothing is dropped and the
+	 * reason is said). Their names are said (through $say) before the first is dropped.
+	 *
+	 * @param \wpdb    $db  Connection.
+	 * @param callable $say function( string ): void.
+	 * @return string[] The tables dropped.
+	 */
+	public static function start_cleanup( \wpdb $db, callable $say ): array {
+		$refusal = self::database_refusal( (string) $db->dbname, (string) $db->get_var( 'SELECT DATABASE()' ), (string) $db->dbhost );
+		if ( '' !== $refusal ) {
+			$say( "\nAn earlier run's other tables are not looked for: {$refusal}. Nothing was dropped.\n" );
+			return array();
+		}
+		$tables = array_map(
+			static function ( string $item ): string {
+				return substr( $item, 6 );
+			},
+			self::stray_listing( $db )
+		);
+		if ( array() === $tables ) {
+			return array();
+		}
+		$say( "\nDropping the tables an earlier run left that are neither WordPress's nor this plugin's:\n  " . implode( "\n  ", $tables ) . "\n" );
+		mysqli_query( $db->dbh, 'SET FOREIGN_KEY_CHECKS=0' );
+		foreach ( $tables as $table ) {
+			mysqli_query( $db->dbh, 'DROP TABLE IF EXISTS `' . str_replace( '`', '``', $table ) . '`' );
+		}
+		mysqli_query( $db->dbh, 'SET FOREIGN_KEY_CHECKS=1' );
+		return $tables;
+	}
+
+	/**
+	 * Of $all, the tables that are neither WordPress's (a global table of the main prefix, a site's table of the main
+	 * prefix or of "{prefix}{site id}_"), this plugin's own (OwnTables::is_own(), of any installation), nor the
+	 * restore's that tables() lists already.
+	 *
+	 * @param string[] $all         Every table in the database.
+	 * @param string   $base_prefix The main table prefix.
+	 * @param string[] $global      WordPress's global tables, without the prefix.
+	 * @param string[] $blog        WordPress's tables of a site, without the prefix.
+	 * @return string[]
+	 */
+	public static function stray_tables( array $all, string $base_prefix, array $global, array $blog ): array {
+		$known = array();
+		foreach ( array_merge( $global, $blog ) as $name ) {
+			$known[ $base_prefix . $name ] = true;
+		}
+		$site  = '/\A' . preg_quote( $base_prefix, '/' ) . '[1-9][0-9]*_(?:' . implode( '|', array_map( static function ( string $name ): string {
+			return preg_quote( $name, '/' );
+		}, $blog ) ) . ')\z/';
+		$out = array();
+		foreach ( $all as $table ) {
+			if ( isset( $known[ $table ] ) || 1 === preg_match( $site, $table ) || \WPCheckpoint\Database\OwnTables::is_own( $table ) ) {
+				continue;
+			}
+			foreach ( self::TABLE_PREFIXES as $prefix ) {
+				if ( 0 === strpos( $table, $prefix ) ) {
+					continue 2; // Listed by tables().
+				}
+			}
+			$out[] = $table;
+		}
+		return $out;
 	}
 
 	/**
@@ -338,6 +498,8 @@ final class Leftovers implements TestListener {
 				} else {
 					fwrite( STDERR, "\nA maintenance file that is not this plugin's was left in place: {$path}\n" );
 				}
+			} elseif ( 0 === strpos( $item, 'storage:' ) ) {
+				StorageDirs::remove( array( substr( $item, 8 ) ) ); // A storage directory a test left in the site's wp-content.
 			} elseif ( 0 === strpos( $item, 'temp:' ) ) {
 				try {
 					Sandbox::remove( substr( $item, 5 ) );

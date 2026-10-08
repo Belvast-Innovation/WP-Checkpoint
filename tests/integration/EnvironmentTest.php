@@ -14,14 +14,19 @@ use WPCheckpoint\Support\Environment;
 use WPCheckpoint\Support\Options;
 use WPCheckpoint\Support\Report;
 use WPCheckpoint\Support\Schema;
+use WPCheckpoint\Tests\Fixtures\StorageDirs;
 
 final class EnvironmentTest extends WP_UnitTestCase {
+
+	/** @var string[]|null The storage directories in wp-content when the test started (StorageDirs); null before set_up(). */
+	private $storage_before = null;
 
 	/** @var Directories */
 	private $dirs;
 
 	public function set_up(): void {
 		parent::set_up();
+		$this->storage_before = StorageDirs::listing();
 		Options::delete( Directories::OPTION );
 		Environment::invalidate();
 		delete_site_transient( 'wpcheckpoint_lock_recheck' );
@@ -44,6 +49,9 @@ final class EnvironmentTest extends WP_UnitTestCase {
 		delete_site_transient( 'wpcheckpoint_lock_verify' );
 		remove_all_filters( 'pre_http_request' );
 		parent::tear_down();
+		if ( null !== $this->storage_before ) {
+			StorageDirs::remove_made_since( $this->storage_before ); // The environment check makes the plugin's storage directory.
+		}
 	}
 
 	/**

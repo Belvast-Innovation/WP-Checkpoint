@@ -9,8 +9,12 @@ use WPCheckpoint\Support\Deleter;
 use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Support\Guard;
 use WPCheckpoint\Support\Options;
+use WPCheckpoint\Tests\Fixtures\StorageDirs;
 
 final class DownloadTest extends WP_UnitTestCase {
+
+	/** @var string[]|null The storage directories in wp-content when the test started (StorageDirs); null before set_up(). */
+	private $storage_before = null;
 
 	/** @var Directories */
 	private $dirs;
@@ -26,6 +30,7 @@ final class DownloadTest extends WP_UnitTestCase {
 
 	public function set_up(): void {
 		parent::set_up();
+		$this->storage_before = StorageDirs::listing();
 		Options::delete( Directories::OPTION );
 		$this->dirs = new Directories( array( 'is_web_request' => false, 'document_root' => '' ) );
 		$this->base = $this->dirs->base();
@@ -49,6 +54,9 @@ final class DownloadTest extends WP_UnitTestCase {
 		Options::delete( Directories::OPTION );
 		unset( $_REQUEST['_wpnonce'] );
 		parent::tear_down();
+		if ( null !== $this->storage_before ) {
+			StorageDirs::remove_made_since( $this->storage_before ); // The Directories it made has its directory in wp-content.
+		}
 	}
 
 	private function handler(): DownloadHandler {

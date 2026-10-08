@@ -23,6 +23,7 @@ use WPCheckpoint\Support\Redactor;
 use WPCheckpoint\Support\Schema;
 use WPCheckpoint\Tests\Fixtures\Jobs\ClosureStep;
 use WPCheckpoint\Tests\Fixtures\Jobs\FixtureJobType;
+use WPCheckpoint\Tests\Fixtures\StorageDirs;
 
 /**
  * A step that asks the user a question: the job pauses, no driver ticks
@@ -30,6 +31,9 @@ use WPCheckpoint\Tests\Fixtures\Jobs\FixtureJobType;
  * options travel with the job and never carry a secret.
  */
 final class AskStepTest extends WP_UnitTestCase {
+
+	/** @var string[]|null The storage directories in wp-content when the test started (StorageDirs); null before set_up(). */
+	private $storage_before = null;
 
 	/** @var Directories */
 	private $dirs;
@@ -51,6 +55,7 @@ final class AskStepTest extends WP_UnitTestCase {
 
 	public function set_up(): void {
 		parent::set_up();
+		$this->storage_before = StorageDirs::listing();
 		global $wpdb;
 		remove_filter( 'query', array( $this, '_create_temporary_tables' ) );
 		remove_filter( 'query', array( $this, '_drop_temporary_tables' ) );
@@ -77,6 +82,9 @@ final class AskStepTest extends WP_UnitTestCase {
 		Options::delete( Schema::OPTION );
 		Options::delete( Directories::OPTION );
 		parent::tear_down();
+		if ( null !== $this->storage_before ) {
+			StorageDirs::remove_made_since( $this->storage_before ); // The Directories it made has its directory in wp-content.
+		}
 	}
 
 	private function runner(): Runner {

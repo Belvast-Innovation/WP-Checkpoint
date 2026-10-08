@@ -110,6 +110,82 @@ final class LeftoversTest extends TestCase {
 		$this->assertSame( array( 'temp:/tmp/wpc-plugin-00000000' ), $this->there, 'the control: another run\'s temporary entry stays' );
 	}
 
+	public function test_an_earlier_runs_other_tables_are_reported_and_removed_at_the_start_and_name_a_run_that_kept_the_lock(): void {
+		$strays   = array( 'table:wp_swt_keep' );
+		$listener = new Leftovers(
+			function (): array {
+				return $this->there;
+			},
+			function ( array $items ): void {
+				$this->removed = array_merge( $this->removed, $items );
+			},
+			function ( string $text ): void {
+				$this->notices[] = $text;
+			},
+			static function () use ( &$strays ): array {
+				return $strays;
+			}
+		);
+		$before = getenv( 'WPCHECKPOINT_TEST_STALE_RUN_ID' );
+		putenv( 'WPCHECKPOINT_TEST_STALE_RUN_ID=0123456789abcdef' );
+		try {
+			$listener->startTestSuite( new TestSuite( 'root' ) );
+		} finally {
+			putenv( false === $before ? 'WPCHECKPOINT_TEST_STALE_RUN_ID' : 'WPCHECKPOINT_TEST_STALE_RUN_ID=' . $before );
+		}
+		$this->assertSame( array( 'table:wp_swt_keep' ), $this->removed, 'a fixture table an earlier run left goes' );
+		$this->assertCount( 1, $this->notices );
+		$this->assertStringContainsString( 'table:wp_swt_keep', $this->notices[0] );
+		$this->assertStringContainsString( '0123456789abcdef, which ended without releasing the lock', $this->notices[0] );
+		// Read at the start of the run only: one that shows up later is not a test's leftover by this check.
+		$strays   = array( 'table:wp_swt_new' );
+		$result   = new TestResult();
+		$test     = self::probe( $result, 'test_one' );
+		$listener->startTest( $test );
+		$listener->endTest( $test, 0.1 );
+		$this->assertSame( 0, $result->failureCount() );
+	}
+
+	public function test_only_wp_envs_tests_database_on_its_host_may_have_its_other_tables_dropped(): void {
+		$this->assertSame( '', Leftovers::database_refusal( 'tests-wordpress', 'tests-wordpress', 'tests-mysql' ), 'the control: wp-env\'s tests database' );
+		$this->assertSame( '', Leftovers::database_refusal( 'tests-wordpress', 'tests-wordpress', 'tests-mysql:3306' ), 'any port' );
+		$this->assertStringContainsString( 'the connection is to the database "wordpress"', Leftovers::database_refusal( 'wordpress', 'wordpress', 'tests-mysql' ) );
+		$this->assertStringContainsString( 'the connection is to the database "wordpress"', Leftovers::database_refusal( 'wordpress', 'tests-wordpress', 'tests-mysql' ), 'the connection\'s own name, whatever the server says' );
+		$this->assertStringContainsString( 'the server says the connection uses the database "wordpress"', Leftovers::database_refusal( 'tests-wordpress', 'wordpress', 'tests-mysql' ) );
+		$this->assertStringContainsString( 'the host "mysql"', Leftovers::database_refusal( 'tests-wordpress', 'tests-wordpress', 'mysql' ) );
+		$this->assertStringContainsString( 'the host "127.0.0.1:9678"', Leftovers::database_refusal( 'tests-wordpress', 'tests-wordpress', '127.0.0.1:9678' ) );
+		$this->assertNotSame( '', Leftovers::database_refusal( 'tests-wordpress', '', 'tests-mysql' ), 'the server did not say' );
+	}
+
+	public function test_the_tables_that_are_neither_wordpresss_nor_the_plugins_are_strays(): void {
+		$global = array( 'users', 'usermeta', 'blogs', 'site', 'sitemeta' );
+		$blog   = array( 'posts', 'options', 'postmeta' );
+		$all    = array(
+			'wp_posts',
+			'wp_users',
+			'wp_options',
+			'wp_2_posts',
+			'wp_16_options',
+			'wp_wpcheckpoint_jobs',
+			'wp_wpcheckpoint_swap_plan',
+			'wp_wpcheckpoint_fence',
+			'wcptmpabcdef_3_beef_posts',
+			'wcptmp_a',
+			'wcpold_child',
+			'wp_swt_keep',
+			'wp_swt_new',
+			'wpcx_blob',
+			'wpcpother_t',
+			'wp_2_users',
+			'wp_0_posts',
+			'other_posts',
+		);
+		$this->assertSame(
+			array( 'wp_swt_keep', 'wp_swt_new', 'wpcx_blob', 'wpcpother_t', 'wp_2_users', 'wp_0_posts', 'other_posts' ),
+			Leftovers::stray_tables( $all, 'wp_', $global, $blog )
+		);
+	}
+
 	public function test_a_class_that_leaves_something_fails_as_a_class_and_so_does_the_run(): void {
 		$result   = new TestResult();
 		$listener = $this->listener();

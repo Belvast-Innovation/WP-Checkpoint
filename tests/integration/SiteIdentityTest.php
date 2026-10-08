@@ -16,6 +16,7 @@ use WPCheckpoint\Support\Options;
 use WPCheckpoint\Support\OwnerMarker;
 use WPCheckpoint\Support\Schema;
 use WPCheckpoint\Tests\Fixtures\Sandbox;
+use WPCheckpoint\Tests\Fixtures\StorageDirs;
 
 /**
  * When whether this is the site that chose the storage directory cannot be told, the administrator answers
@@ -26,6 +27,9 @@ use WPCheckpoint\Tests\Fixtures\Sandbox;
  */
 final class SiteIdentityTest extends WP_UnitTestCase {
 
+	/** @var string[]|null The storage directories in wp-content when the test started (StorageDirs); null before set_up(). */
+	private $storage_before = null;
+
 	/** @var string The test's directory; '' before set_up() made it. */
 	private $root = '';
 
@@ -34,6 +38,7 @@ final class SiteIdentityTest extends WP_UnitTestCase {
 
 	public function set_up(): void {
 		parent::set_up();
+		$this->storage_before = StorageDirs::listing();
 		global $wpdb;
 		remove_filter( 'query', array( $this, '_create_temporary_tables' ) );
 		remove_filter( 'query', array( $this, '_drop_temporary_tables' ) );
@@ -64,6 +69,9 @@ final class SiteIdentityTest extends WP_UnitTestCase {
 		remove_all_filters( 'wp_redirect' );
 		unset( $_POST[ SiteIdentityActions::FIELD ], $_POST[ SiteIdentityActions::QUESTION ], $_REQUEST['_wpnonce'] );
 		parent::tear_down();
+		if ( null !== $this->storage_before ) {
+			StorageDirs::remove_made_since( $this->storage_before ); // The Directories it made has its directory in wp-content.
+		}
 	}
 
 	private function dirs( string $site, string $custom = '', array $extra = array() ): Directories {

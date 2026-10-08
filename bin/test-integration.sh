@@ -30,7 +30,9 @@
 # the kernel holds it while the run's shell or its PHPUnit is alive, and lets it go when both are gone, however they
 # ended. The file names the run that has it (process ID, start time and run ID) and is emptied when the run ends: a
 # name left in it is a run that ended without that (killed), and is said so when the next run takes the lock; that
-# run's probe directory (tests/Fixtures/ProbeDir.php) is removed as the next one starts (WPCHECKPOINT_TEST_STALE_RUN_ID;
+# run's probe directory (tests/Fixtures/ProbeDir.php) is removed as the next one starts, and the tables it left are
+# listed and dropped as the suite starts (tests/Fixtures/Leftovers.php: every table neither WordPress's nor the
+# plugin's, fixture tables such as swt_* among them) (WPCHECKPOINT_TEST_STALE_RUN_ID;
 # this run's own ID is WPCHECKPOINT_TEST_RUN_ID). Refused, the script exits with status 75. On any exit, a signal included, the lock is released and the run's directory cleaned up.
 # (WPCHECKPOINT_TEST_PHPUNIT and WPCHECKPOINT_TEST_LOCK name another PHPUnit and another lock, for this script's own
 # test.)
@@ -144,7 +146,7 @@ if [ -s "$LOCK" ]; then
 	esac
 	PROBE=""
 	[ -n "$STALE_RUN_ID" ] && PROBE=" Its probe directory (wp-content/wpcheckpoint-it-probe.$STALE_RUN_ID) is removed as this run starts."
-	echo "Taking over the lock of an integration run that ended without releasing it: process $(sed -n 1p "$LOCK" 2>/dev/null), started $(sed -n 2p "$LOCK" 2>/dev/null). Its run directory (wpcheckpoint-it.*) may be left in its temporary directory.$PROBE" >&2
+	echo "Taking over the lock of an integration run that ended without releasing it: process $(sed -n 1p "$LOCK" 2>/dev/null), started $(sed -n 2p "$LOCK" 2>/dev/null). Its run directory (wpcheckpoint-it.*) may be left in its temporary directory.$PROBE The tables it left (the restore's, and its tests' fixture tables such as swt_*) are listed and removed as the suite starts; storage directories it left in wp-content are listed." >&2
 fi
 if [ -n "$WRITABLE" ]; then
 	printf '%s\n%s\n%s\n' "$$" "$(date -u '+%Y-%m-%d %H:%M:%S UTC')" "$RUN_ID" > "$LOCK"
