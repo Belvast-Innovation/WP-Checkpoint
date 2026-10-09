@@ -271,6 +271,9 @@ final class JobPresenter {
 	 * @return string
 	 */
 	public static function failure_text( Job $job ): string {
+		if ( RestoreJob::ID === $job->type ) {
+			return self::restore_failure_text( $job );
+		}
 		$verify = 'verify' === $job->type;
 		if ( ! $job->can_retry() ) {
 			return $verify
@@ -293,6 +296,26 @@ final class JobPresenter {
 		return $verify
 			? __( 'The check could not be finished. Retry goes on where it stopped; if it fails the same way again, start a new check.', 'wp-checkpoint' )
 			: __( 'The backup could not be finished. Retry goes on where it stopped; if it fails the same way again, create a new backup.', 'wp-checkpoint' );
+	}
+
+	/**
+	 * What a failed restore means for the user, by failure_text()'s rules: what to do next is the restore's own
+	 * (retry it, or start it again from the backup), never the backup's ("create a new backup").
+	 *
+	 * @param Job $job Failed restore.
+	 * @return string
+	 */
+	private static function restore_failure_text( Job $job ): string {
+		if ( ! $job->can_retry() ) {
+			return __( 'The restore could not be finished, and its work files have been removed, so it cannot go on. Start the restore again from the backup.', 'wp-checkpoint' );
+		}
+		if ( Job::FAILURE_TEMPORARY === $job->failure_kind ) {
+			return __( 'The restore stopped because of a problem on the server that may pass, such as a full disk or the database being unavailable. Retry when it is solved: the restore goes on where it stopped.', 'wp-checkpoint' );
+		}
+		if ( Job::FAILURE_FINAL === $job->failure_kind ) {
+			return __( 'The restore could not be finished, and retrying would fail the same way.', 'wp-checkpoint' );
+		}
+		return __( 'The restore could not be finished. Retry goes on where it stopped; if it fails the same way again, start the restore again from the backup.', 'wp-checkpoint' );
 	}
 
 	/**
@@ -319,6 +342,26 @@ final class JobPresenter {
 				return __( 'Storing the backup', 'wp-checkpoint' );
 			case 'verify':
 				return __( 'Checking the backup', 'wp-checkpoint' );
+			case EstimateRecordStep::ID:
+				return __( 'Recording the estimate', 'wp-checkpoint' );
+			case RestorePlatformStep::ID:
+				return __( 'Checking that this server can restore', 'wp-checkpoint' );
+			case RestoreVerifyStep::ID:
+				return __( 'Checking the backup', 'wp-checkpoint' );
+			case RestorePreflightStep::ID:
+				return __( 'Checking the backup\'s database against this site', 'wp-checkpoint' );
+			case RestoreFilesPreflightStep::ID:
+				return __( 'Checking the backup\'s files against this site', 'wp-checkpoint' );
+			case DatabaseImportStep::ID:
+				return __( 'Importing the database', 'wp-checkpoint' );
+			case PrefixRewriteStep::ID:
+				return __( 'Renaming for this site\'s table prefix', 'wp-checkpoint' );
+			case FileStagingStep::ID:
+				return __( 'Staging the restored files', 'wp-checkpoint' );
+			case SwapCheckStep::ID:
+				return __( 'Checking before the swap', 'wp-checkpoint' );
+			case SwapStep::ID:
+				return __( 'Swapping in the restored site', 'wp-checkpoint' );
 		}
 		return $step;
 	}

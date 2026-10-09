@@ -3,7 +3,17 @@
 namespace WPCheckpoint\Tests\Unit\Jobs;
 
 use WPCheckpoint\Jobs\Job;
+use WPCheckpoint\Jobs\DatabaseImportStep;
+use WPCheckpoint\Jobs\FileStagingStep;
 use WPCheckpoint\Jobs\JobPresenter;
+use WPCheckpoint\Jobs\PrefixRewriteStep;
+use WPCheckpoint\Jobs\RestoreFilesPreflightStep;
+use WPCheckpoint\Jobs\RestoreJob;
+use WPCheckpoint\Jobs\RestorePlatformStep;
+use WPCheckpoint\Jobs\RestorePreflightStep;
+use WPCheckpoint\Jobs\RestoreVerifyStep;
+use WPCheckpoint\Jobs\SwapCheckStep;
+use WPCheckpoint\Jobs\SwapStep;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 /**
@@ -12,9 +22,9 @@ use Yoast\PHPUnitPolyfills\TestCases\TestCase;
  */
 final class JobPresenterTextTest extends TestCase {
 
-	private static function job( string $status, string $kind = '', array $questions = array() ): Job {
+	private static function job( string $status, string $kind = '', array $questions = array(), string $type = 'export' ): Job {
 		$job               = new Job();
-		$job->type         = 'export';
+		$job->type         = $type;
 		$job->status       = $status;
 		$job->failure_kind = $kind;
 		$job->questions    = $questions;
@@ -66,5 +76,53 @@ final class JobPresenterTextTest extends TestCase {
 		$expired->work_expired_at = 1;
 		$this->assertFalse( $expired->retry_useful() );
 		$this->assertStringContainsString( 'its work files have been removed', JobPresenter::failure_text( $expired ) );
+	}
+
+	/**
+	 * A failed job of a type in each of the states failure_text() tells apart.
+	 *
+	 * @return array<string, Job>
+	 */
+	private static function failed( string $type ): array {
+		$expired                  = self::job( Job::FAILED, Job::FAILURE_TEMPORARY, array(), $type );
+		$expired->work_expired_at = 1;
+		return array(
+			'temporary'   => self::job( Job::FAILED, Job::FAILURE_TEMPORARY, array(), $type ),
+			'final'       => self::job( Job::FAILED, Job::FAILURE_FINAL, array(), $type ),
+			'no kind'     => self::job( Job::FAILED, '', array(), $type ),
+			'files gone'  => $expired,
+		);
+	}
+
+	public function test_a_failed_restore_says_what_to_do_with_the_restore_never_to_make_a_new_backup(): void {
+		$advice = '/\b(?:create|make|take) a new backup\b/i';
+		foreach ( self::failed( 'export' ) as $state => $job ) {
+			if ( 'temporary' !== $state ) {
+				$this->assertMatchesRegularExpression( $advice, JobPresenter::failure_text( $job ), 'the control: a backup in this state is told to create a new one (' . $state . ')' );
+			}
+		}
+		$texts = array();
+		foreach ( self::failed( RestoreJob::ID ) as $state => $job ) {
+			$text = JobPresenter::failure_text( $job );
+			$this->assertDoesNotMatchRegularExpression( $advice, $text, $state );
+			$this->assertStringContainsString( 'restore', $text, 'about the restore: ' . $state );
+			$texts[ $state ] = $text;
+		}
+		$this->assertStringContainsString( 'Retry when it is solved: the restore goes on where it stopped.', $texts['temporary'] );
+		$this->assertStringContainsString( 'retrying would fail the same way', $texts['final'] );
+		$this->assertStringContainsString( 'start the restore again from the backup', $texts['no kind'] );
+		$this->assertStringContainsString( 'Start the restore again from the backup.', $texts['files gone'] );
+		$this->assertSame( 4, count( array_unique( $texts ) ), 'four states, four texts' );
+		$this->assertStringContainsString( 'Start a new check.', JobPresenter::failure_text( self::failed( 'verify' )['final'] ), 'the control: a check keeps its own' );
+	}
+
+	public function test_every_restore_step_is_named_in_words(): void {
+		foreach ( array( RestorePlatformStep::ID, RestoreVerifyStep::ID, RestorePreflightStep::ID, RestoreFilesPreflightStep::ID, DatabaseImportStep::ID, PrefixRewriteStep::ID, FileStagingStep::ID, SwapCheckStep::ID, SwapStep::ID ) as $id ) {
+			$label = JobPresenter::step_label( $id );
+			$this->assertNotSame( $id, $label, $id );
+			$this->assertStringNotContainsString( 'restore_', $label, $id );
+		}
+		$this->assertSame( 'Importing the database', JobPresenter::step_label( DatabaseImportStep::ID ) );
+		$this->assertSame( 'restore_unknown', JobPresenter::step_label( 'restore_unknown' ), 'the control: an id it does not know is shown as it is' );
 	}
 }
