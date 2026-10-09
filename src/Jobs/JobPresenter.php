@@ -12,6 +12,7 @@ use WPCheckpoint\Support\Environment;
 use WPCheckpoint\Support\Paths;
 use WPCheckpoint\Support\Redactor;
 use WPCheckpoint\Support\Report;
+use WPCheckpoint\Support\TextMask;
 use WPCheckpoint\Support\Utf8;
 
 defined( 'ABSPATH' ) || exit;
@@ -32,11 +33,11 @@ final class JobPresenter {
 	const STALL_SECONDS = 600;
 
 	/**
-	 * Redactor.
+	 * The pipeline every text goes through (TextMask::clean()).
 	 *
-	 * @var Redactor
+	 * @var TextMask
 	 */
-	private $redactor;
+	private $mask;
 
 	/**
 	 * Job types (labels).
@@ -51,27 +52,6 @@ final class JobPresenter {
 	 * @var Directories
 	 */
 	private $directories;
-
-	/**
-	 * Placeholder => absolute path.
-	 *
-	 * @var array<string, string>
-	 */
-	private $paths;
-
-	/**
-	 * Site host names.
-	 *
-	 * @var string[]
-	 */
-	private $hosts;
-
-	/**
-	 * Site path prefixes (see Environment::report_site_paths()).
-	 *
-	 * @var array{paths: string[], coarse: bool, network_root: string}
-	 */
-	private $site_paths;
 
 	/**
 	 * Lookup of a job that holds the site and is managed elsewhere: function( int $id ): array|null
@@ -103,12 +83,14 @@ final class JobPresenter {
 	 * @param array{paths: string[], coarse: bool, network_root: string}|null $site_paths  Site paths; null uses the installation's.
 	 */
 	public function __construct( Redactor $redactor, JobTypes $types, Directories $directories, $paths = null, $hosts = null, $site_paths = null ) {
-		$this->redactor    = $redactor;
 		$this->types       = $types;
 		$this->directories = $directories;
-		$this->paths       = is_array( $paths ) ? $paths : self::installation_paths();
-		$this->hosts       = is_array( $hosts ) ? $hosts : Environment::report_hosts();
-		$this->site_paths  = is_array( $site_paths ) ? $site_paths : Environment::report_site_paths();
+		$this->mask        = new TextMask(
+			$redactor,
+			is_array( $paths ) ? $paths : self::installation_paths(),
+			is_array( $hosts ) ? $hosts : Environment::report_hosts(),
+			is_array( $site_paths ) ? $site_paths : Environment::report_site_paths()
+		);
 	}
 
 	/**
@@ -117,22 +99,12 @@ final class JobPresenter {
 	 * @return array<string, string>
 	 */
 	public static function installation_paths(): array {
-		$abspath = rtrim( ABSPATH, '/\\' );
-		$paths   = array(
-			'{abspath}'        => $abspath,
-			'{abspath-parent}' => dirname( $abspath ),
-			'{wp-content}'     => WP_CONTENT_DIR,
-			'{tmp}'            => sys_get_temp_dir(),
-		);
-		if ( isset( $_SERVER['DOCUMENT_ROOT'] ) && is_string( $_SERVER['DOCUMENT_ROOT'] ) && '' !== $_SERVER['DOCUMENT_ROOT'] ) {
-			$paths['{document-root}'] = sanitize_text_field( wp_unslash( $_SERVER['DOCUMENT_ROOT'] ) );
-		}
-		return $paths;
+		return TextMask::installation_paths();
 	}
 
 	/**
-	 * The pipeline: scrub, neutralize terminal controls, redact, mask
-	 * paths, mask hosts. Fails closed. Every text that leaves the engine
+	 * The pipeline (TextMask::clean()): scrub, neutralize terminal controls,
+	 * redact, mask paths, mask hosts. Fails closed. Every text that leaves the engine
 	 * (progress messages, errors, log tails, verification findings) goes
 	 * through here, and untrusted input reaches it (archive entry names,
 	 * manifest strings), so the pipeline must cover what a terminal, a
@@ -144,24 +116,7 @@ final class JobPresenter {
 	 * @return string
 	 */
 	public function clean( string $text, array $extra = array() ): string {
-		if ( '' === $text ) {
-			return '';
-		}
-		$text   = $this->redactor->redact( Utf8::neutralize_controls( Utf8::scrub( $text ) ) );
-		$masked = Report::mask_paths( $text, array_merge( $extra, $this->paths ) );
-		if ( ! is_string( $masked ) ) {
-			return Report::failure_text();
-		}
-		$masked = Report::mask_hosts( $masked, $this->hosts, $this->site_paths['paths'], $this->site_paths['coarse'], $this->site_paths['network_root'] );
-		if ( ! is_string( $masked ) ) {
-			return Report::failure_text();
-		}
-		// A backup's base name ({slug}-{date}-{time}-{hex}) carries the site's slug: the second line of
-		// defence behind messages that refer to files by number. Fail-closed like the other masks. Masked
-		// bare or with the suffixes the plugin gives it (volume, single archive, manifest, and what follows
-		// those); a user's file that merely looks alike and goes on with another extension is left alone.
-		$masked = preg_replace( '/[a-z0-9][a-z0-9-]*-\d{8}-\d{6}-[0-9a-f]{4}(?![a-z0-9-])(?!\.(?!(?:part\d{3,}\.)?wpcheckpoint\.|manifest\.json)[A-Za-z0-9])/', '[backup]', $masked );
-		return is_string( $masked ) ? $masked : Report::failure_text();
+		return $this->mask->clean( $text, $extra );
 	}
 
 	/**

@@ -82,8 +82,7 @@ final class DownloadTest extends WP_UnitTestCase {
 		$h = $this->handler();
 		$this->assertSame( realpath( $this->base . '/backups/site.wpcheckpoint.zip' ), $h->resolve( 'backups/site.wpcheckpoint.zip' ) );
 		$this->assertSame( realpath( $this->base . '/backups/site.manifest.json' ), $h->resolve( 'backups/site.manifest.json' ) );
-		$this->assertSame( realpath( $this->base . '/logs/job-1-abcd.log' ), $h->resolve( 'logs/job-1-abcd.log' ) );
-		$this->assertSame( realpath( $this->base . '/logs/job-1-abcd.log' ), $h->resolve( '/logs/job-1-abcd.log' ), 'leading slash is tolerated' );
+		$this->assertSame( realpath( $this->base . '/backups/site.wpcheckpoint.zip' ), $h->resolve( '/backups/site.wpcheckpoint.zip' ), 'leading slash is tolerated' );
 	}
 
 	/**
@@ -113,6 +112,8 @@ final class DownloadTest extends WP_UnitTestCase {
 			'owner marker'                   => array( '.wpcheckpoint-owner' ),
 			'directory'                      => array( 'backups' ),
 			'symlink to outside log'         => array( 'logs/link.log' ),
+			'a log (LogDownload serves it)'  => array( 'logs/job-1-abcd.log' ),
+			'a log, leading slash'           => array( '/logs/job-1-abcd.log' ),
 			'empty'                          => array( '' ),
 		);
 	}
@@ -135,7 +136,6 @@ final class DownloadTest extends WP_UnitTestCase {
 			$this->assertContains( 'Content-Type: text/plain; charset=utf-8 [409]', $headers );
 		}
 		$this->assertSame( 200, $this->request( 'backups/other-20260923-120000-cd34.wpcheckpoint.zip' )[0], 'another backup is not held' );
-		$this->assertSame( 200, $this->request( 'logs/job-1-abcd.log' )[0], 'logs are not held' );
 
 		$verify       = clone $restore;
 		$verify->type = 'verify';
@@ -163,10 +163,10 @@ final class DownloadTest extends WP_UnitTestCase {
 		$this->assertContains( 'Content-Range: bytes */5000 [416]', $headers );
 		$this->assertSame( '', $body );
 
-		list( $status, $headers, $body ) = $this->request( 'logs/job-1-abcd.log', 'HEAD' );
+		list( $status, $headers, $body ) = $this->request( 'backups/site.wpcheckpoint.zip', 'HEAD' );
 		$this->assertSame( 200, $status );
 		$this->assertSame( '', $body );
-		$this->assertContains( 'Content-Length: 5', $headers );
+		$this->assertContains( 'Content-Length: 5000', $headers );
 	}
 
 	public function test_serve_requires_the_download_nonce_and_capability(): void {
@@ -177,10 +177,10 @@ final class DownloadTest extends WP_UnitTestCase {
 	}
 
 	public function test_download_url_carries_the_nonce(): void {
-		$url = DownloadHandler::url( 'logs/job-1-abcd.log' );
+		$url = DownloadHandler::url( 'backups/site.wpcheckpoint.zip' );
 		$this->assertStringContainsString( 'admin-post.php', $url );
 		$this->assertStringContainsString( 'action=wpcheckpoint_download', $url );
-		$this->assertStringContainsString( 'file=logs/job-1-abcd.log', $url );
+		$this->assertStringContainsString( 'file=backups/site.wpcheckpoint.zip', $url );
 		$this->assertStringContainsString( '_wpnonce=', $url );
 	}
 }

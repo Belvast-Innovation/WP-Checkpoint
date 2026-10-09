@@ -56,4 +56,40 @@ final class LogDownloadTest extends JobTestCase {
 		$this->assertStringContainsString( 'action=' . LogDownload::ACTION, html_entity_decode( $html ) );
 		$this->assertStringNotContainsString( 'file=logs', html_entity_decode( $html ), 'never the raw file' );
 	}
+
+	public function test_a_log_is_not_served_raw_by_the_file_download_and_is_served_masked_by_the_log_download(): void {
+		$job  = Plugin::instance()->jobs()->create( 'export', self::$admin_id );
+		$job  = Plugin::instance()->jobs()->find( $job->id );
+		$host = (string) wp_parse_url( home_url(), PHP_URL_HOST );
+		$path = $job->storage_path . '/' . $job->log_path;
+		wp_mkdir_p( dirname( $path ) );
+		// Written raw, as a log of an earlier version was.
+		file_put_contents( $path, "[t] ERROR Could not reach https://{$host}/wp-json at " . ABSPATH . "wp-config.php marker-three\n" );
+
+		$files   = new \WPCheckpoint\Admin\DownloadHandler(
+			Plugin::instance()->directories(),
+			static function (): array {
+				return array();
+			}
+		);
+		$out     = fopen( 'php://memory', 'w+' );
+		$refused = $files->handle(
+			$job->log_path,
+			'GET',
+			null,
+			null,
+			static function (): void {},
+			$out
+		);
+		rewind( $out );
+		$this->assertSame( 404, $refused, 'the file download serves backups only' );
+		$this->assertSame( 'Not found.', (string) stream_get_contents( $out ) );
+		$this->assertSame( '', $files->resolve( $job->log_path ) );
+
+		list( $status, , $body ) = $this->download( $job->id );
+		$this->assertSame( 200, $status, 'the control: the log download serves it' );
+		$this->assertStringContainsString( 'marker-three', $body );
+		$this->assertStringContainsString( 'https://{site-host}/wp-json at {abspath}/wp-config.php', $body, 'masked' );
+		$this->assertStringNotContainsString( $host, $body );
+	}
 }

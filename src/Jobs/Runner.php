@@ -20,6 +20,7 @@ use WPCheckpoint\Support\Redactor;
 use WPCheckpoint\Support\Thresholds;
 use WPCheckpoint\Support\Report;
 use WPCheckpoint\Support\Schema;
+use WPCheckpoint\Support\TextMask;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -689,7 +690,8 @@ final class Runner {
 		$fallback = static function ( string $line ) use ( $storage ): void {
 			self::to_php_log( $line, '' !== $storage ? array( '{storage}' => $storage ) : array() );
 		};
-		return new Logger( $job->storage_path . DIRECTORY_SEPARATOR . str_replace( '/', DIRECTORY_SEPARATOR, $relative ), $this->redactor, Logger::DEFAULT_MAX_BYTES, Job::SITE_UNTOUCHED !== $job->site_state ? $fallback : null );
+		$mask     = TextMask::for_installation( $this->redactor, '' !== $storage ? array( '{storage}' => $storage ) : array() );
+		return new Logger( $job->storage_path . DIRECTORY_SEPARATOR . str_replace( '/', DIRECTORY_SEPARATOR, $relative ), $mask, Logger::DEFAULT_MAX_BYTES, Job::SITE_UNTOUCHED !== $job->site_state ? $fallback : null );
 	}
 
 	/**

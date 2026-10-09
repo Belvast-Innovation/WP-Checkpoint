@@ -1,6 +1,6 @@
 <?php
 /**
- * Authenticated, streamed download of backups and logs.
+ * Authenticated, streamed download of backups.
  *
  * @package WPCheckpoint
  */
@@ -21,7 +21,7 @@ defined( 'ABSPATH' ) || exit;
  * Serves admin-post.php?action=wpcheckpoint_download&file=backups/x.wpcheckpoint.zip
  *
  * The file parameter is relative to the storage base directory. After
- * realpath() the result must lie inside backups/ or logs/ and carry an
+ * realpath() the result must lie inside backups/ and carry an
  * allowed extension; everything else is a 404. A file of a backup that is
  * being restored is refused with a 409 until the restore has ended.
  */
@@ -35,7 +35,7 @@ final class DownloadHandler {
 	 *
 	 * @var string[]
 	 */
-	const ALLOWED_SUFFIXES = array( '.wpcheckpoint.zip', '.wpcheckpoint.tar', '.manifest.json', '.log' );
+	const ALLOWED_SUFFIXES = array( '.wpcheckpoint.zip', '.wpcheckpoint.tar', '.manifest.json' );
 
 	/**
 	 * Storage directories.
@@ -74,7 +74,7 @@ final class DownloadHandler {
 	/**
 	 * URL to download a file relative to the storage base.
 	 *
-	 * @param string $relative Relative path, e.g. "logs/job-1-abcd.log".
+	 * @param string $relative Relative path, e.g. "backups/site.wpcheckpoint.zip".
 	 * @return string
 	 */
 	public static function url( string $relative ): string {
@@ -145,7 +145,8 @@ final class DownloadHandler {
 	}
 
 	/**
-	 * Map a relative request path to a real file inside backups/ or logs/.
+	 * Map a relative request path to a real file inside backups/. Logs are not served here: they go out through
+	 * LogDownload, line by line through the mask.
 	 *
 	 * @param string $file Requested relative path.
 	 * @return string Real path or empty string.
@@ -165,7 +166,7 @@ final class DownloadHandler {
 			return '';
 		}
 
-		$allowed_dirs = array( $this->directories->backups(), $this->directories->logs() );
+		$allowed_dirs = array( $this->directories->backups() );
 		$inside       = false;
 		foreach ( $allowed_dirs as $dir ) {
 			if ( '' !== $dir && Paths::is_inside( $dir, $real ) ) {
@@ -188,7 +189,7 @@ final class DownloadHandler {
 
 	/**
 	 * Why a resolved file must not be sent now: it belongs to a backup that
-	 * is being restored. '' otherwise (logs, other backups).
+	 * is being restored. '' otherwise (other backups).
 	 *
 	 * @param string $real Resolved real path.
 	 * @return string
