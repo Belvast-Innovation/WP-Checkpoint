@@ -53,16 +53,19 @@ final class RestoreCollationsTest extends RestoreTestCase {
 	}
 
 	/**
-	 * Hide the collations matching $like from what the server says it knows: as a server that does not have them.
+	 * Hide the collations matching any of $likes from what the server says it knows: as a server that does not have them.
 	 */
-	private function hide_collations( string $like ): void {
-		$this->filter = static function ( $sql ) use ( $like ) {
+	private function hide_collations( string ...$likes ): void {
+		$this->filter = static function ( $sql ) use ( $likes ) {
 			$sql = (string) $sql;
-			if ( RestorePreflightStep::COLLATIONS_SQL === $sql ) {
-				return $sql . " WHERE FULL_COLLATION_NAME NOT LIKE '" . $like . "'";
-			}
-			if ( RestorePreflightStep::COLLATIONS_SQL_FALLBACK === $sql ) {
-				return $sql . " WHERE COLLATION_NAME NOT LIKE '" . $like . "'";
+			foreach ( array( RestorePreflightStep::COLLATIONS_SQL => 'FULL_COLLATION_NAME', RestorePreflightStep::COLLATIONS_SQL_FALLBACK => 'COLLATION_NAME' ) as $query => $column ) {
+				if ( $query === $sql ) {
+					$conditions = array();
+					foreach ( $likes as $like ) {
+						$conditions[] = $column . " NOT LIKE '" . $like . "'";
+					}
+					return $sql . ' WHERE ' . implode( ' AND ', $conditions );
+				}
 			}
 			return $sql;
 		};
@@ -83,8 +86,8 @@ final class RestoreCollationsTest extends RestoreTestCase {
 
 	public function test_a_collation_this_server_does_not_know_is_written_under_a_name_it_knows_logged_and_counted(): void {
 		$known = RestorePreflightStep::known_collations();
-		if ( ! isset( $known['utf8mb4_uca1400_nopad_ai_ci'] ) ) {
-			$this->markTestSkipped( 'The server has no utf8mb4_uca1400_nopad_ai_ci to map to (MariaDB 10.10 or later has).' );
+		if ( ! isset( $known['utf8mb4_unicode_520_nopad_ci'] ) ) {
+			$this->markTestSkipped( 'The server has no utf8mb4_unicode_520_nopad_ci to map to (MariaDB 10.6 or later has).' );
 		}
 		$c    = $this->p . 'c';
 		$base = $this->backup(
@@ -105,18 +108,22 @@ final class RestoreCollationsTest extends RestoreTestCase {
 			$this->assertStringNotContainsString( 'is written under another name', $this->log_of( $plain ) );
 		}
 
-		// A server without it: the two places are written under the NO PAD name it knows.
-		$this->hide_collations( '%0900%' );
-		$this->assertArrayNotHasKey( 'utf8mb4_0900_ai_ci', RestorePreflightStep::known_collations(), 'the control: hidden from the check' );
+		// A server without it, nor the first candidate (MariaDB 11.4 and later know utf8mb4_0900_ai_ci as an alias
+		// of utf8mb4_uca1400_nopad_ai_ci, so only the second candidate shows that the rewrite was written): the two
+		// places are written under the NO PAD name it knows.
+		$this->hide_collations( '%0900%', '%uca1400_nopad_ai_ci' );
+		$hidden = RestorePreflightStep::known_collations();
+		$this->assertArrayNotHasKey( 'utf8mb4_0900_ai_ci', $hidden, 'the control: hidden from the check' );
+		$this->assertArrayNotHasKey( 'utf8mb4_uca1400_nopad_ai_ci', $hidden, 'the control: the first candidate hidden too' );
 		$job = $this->run_restore( $this->start_restore( $base ) );
 		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
 		$temporary = $this->temporary_names( $job )[ $c ];
-		$this->assertSame( 'utf8mb4_uca1400_nopad_ai_ci', self::table_collation( $temporary ), 'the restored table, under the mapped name' );
+		$this->assertSame( 'utf8mb4_unicode_520_nopad_ci', self::table_collation( $temporary ), 'the restored table, under the mapped name (an alias of the backup\'s would resolve to another)' );
 		$this->assertSame( 2, $job->options['recorded']['collations_mapped'] ?? null, 'the table option and the column, recorded on the job for the swap to say' );
 		$log = $this->log_of( $job );
 		$this->assertSame( 2, substr_count( $log, 'A collation this server does not know is written under another name' ) );
-		$this->assertStringContainsString( '"table":"' . $c . '","at":"table","from":"utf8mb4_0900_ai_ci","to":"utf8mb4_uca1400_nopad_ai_ci"', $log );
-		$this->assertStringContainsString( '"table":"' . $c . '","at":"column:v","from":"utf8mb4_0900_ai_ci","to":"utf8mb4_uca1400_nopad_ai_ci"', $log );
+		$this->assertStringContainsString( '"table":"' . $c . '","at":"table","from":"utf8mb4_0900_ai_ci","to":"utf8mb4_unicode_520_nopad_ci"', $log );
+		$this->assertStringContainsString( '"table":"' . $c . '","at":"column:v","from":"utf8mb4_0900_ai_ci","to":"utf8mb4_unicode_520_nopad_ci"', $log );
 		$this->assertSame( array( array( 'id' => '1', 'name' => 'a', 'v' => 'x' ), array( 'id' => '2', 'name' => 'B', 'v' => 'y' ) ), $this->rows_of( $temporary ), 'the rows came through' );
 	}
 
