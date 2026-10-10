@@ -10,9 +10,11 @@ use WPCheckpoint\Tests\Fixtures\Restore\RestoreTestCase;
 
 /**
  * The restore's collation check (RestorePreflightStep, collations phase): a collation this server does not know is
- * written under a name it knows, logged, counted on the job and said when the restored site is in place; one with no
+ * written under a name it knows, logged and counted on the job (what the swap says of the count is the swap's test,
+ * SwapCollationSummaryTest; the restores here end at the swap check, as RestoreTestCase runs them); one with no
  * such name stops the restore for good before any table is created, naming every table; and the server's collations
- * are read from SHOW COLLATION, not from information_schema.COLLATIONS, which leaves some out.
+ * are read by their full names, which SHOW COLLATION and information_schema.COLLATIONS do not give for MariaDB's UCA
+ * 14 ones.
  */
 final class RestoreCollationsTest extends RestoreTestCase {
 
@@ -55,7 +57,14 @@ final class RestoreCollationsTest extends RestoreTestCase {
 	 */
 	private function hide_collations( string $like ): void {
 		$this->filter = static function ( $sql ) use ( $like ) {
-			return 'SHOW COLLATION' === trim( (string) $sql ) ? "SHOW COLLATION WHERE `Collation` NOT LIKE '" . $like . "'" : $sql;
+			$sql = (string) $sql;
+			if ( RestorePreflightStep::COLLATIONS_SQL === $sql ) {
+				return $sql . " WHERE FULL_COLLATION_NAME NOT LIKE '" . $like . "'";
+			}
+			if ( RestorePreflightStep::COLLATIONS_SQL_FALLBACK === $sql ) {
+				return $sql . " WHERE COLLATION_NAME NOT LIKE '" . $like . "'";
+			}
+			return $sql;
 		};
 		add_filter( 'query', $this->filter );
 	}
@@ -72,7 +81,7 @@ final class RestoreCollationsTest extends RestoreTestCase {
 		return (string) $wpdb->get_var( $wpdb->prepare( 'SELECT TABLE_COLLATION FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s', $table ) );
 	}
 
-	public function test_a_collation_this_server_does_not_know_is_written_under_a_name_it_knows_logged_counted_and_said_last(): void {
+	public function test_a_collation_this_server_does_not_know_is_written_under_a_name_it_knows_logged_and_counted(): void {
 		$known = RestorePreflightStep::known_collations();
 		if ( ! isset( $known['utf8mb4_uca1400_nopad_ai_ci'] ) ) {
 			$this->markTestSkipped( 'The server has no utf8mb4_uca1400_nopad_ai_ci to map to (MariaDB 10.10 or later has).' );
@@ -88,13 +97,12 @@ final class RestoreCollationsTest extends RestoreTestCase {
 				return $chunks;
 			}
 		);
-		// The control: a server that knows the name keeps it, counts nothing and says nothing.
-		$plain = $this->run_restore( $this->start_restore( $base ) );
-		$this->assertSame( Job::COMPLETED, $plain->status, (string) $plain->last_error );
+		// The control: a server that knows the name keeps it, counts nothing and logs nothing.
 		if ( isset( $known['utf8mb4_0900_ai_ci'] ) ) {
-			$this->assertSame( 'The restored site is in place', $plain->progress_message );
+			$plain = $this->run_restore( $this->start_restore( $base ) );
+			$this->assertSame( Job::COMPLETED, $plain->status, (string) $plain->last_error );
 			$this->assertSame( 0, $plain->options['recorded']['collations_mapped'] ?? null, 'recorded as none' );
-			$this->assertSame( 'utf8mb4_0900_ai_ci', self::table_collation( $c ), 'kept as written' );
+			$this->assertStringNotContainsString( 'is written under another name', $this->log_of( $plain ) );
 		}
 
 		// A server without it: the two places are written under the NO PAD name it knows.
@@ -102,14 +110,14 @@ final class RestoreCollationsTest extends RestoreTestCase {
 		$this->assertArrayNotHasKey( 'utf8mb4_0900_ai_ci', RestorePreflightStep::known_collations(), 'the control: hidden from the check' );
 		$job = $this->run_restore( $this->start_restore( $base ) );
 		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
-		$this->assertSame( 'utf8mb4_uca1400_nopad_ai_ci', self::table_collation( $c ), 'the restored table, in place, under the mapped name' );
-		$this->assertSame( 2, $job->options['recorded']['collations_mapped'] ?? null, 'the table option and the column, recorded on the job' );
-		$this->assertSame( 'The restored site is in place 2 collations the backup uses were written under names this server knows; the job log says which.', $job->progress_message, 'said last, from the record' );
+		$temporary = $this->temporary_names( $job )[ $c ];
+		$this->assertSame( 'utf8mb4_uca1400_nopad_ai_ci', self::table_collation( $temporary ), 'the restored table, under the mapped name' );
+		$this->assertSame( 2, $job->options['recorded']['collations_mapped'] ?? null, 'the table option and the column, recorded on the job for the swap to say' );
 		$log = $this->log_of( $job );
 		$this->assertSame( 2, substr_count( $log, 'A collation this server does not know is written under another name' ) );
 		$this->assertStringContainsString( '"table":"' . $c . '","at":"table","from":"utf8mb4_0900_ai_ci","to":"utf8mb4_uca1400_nopad_ai_ci"', $log );
 		$this->assertStringContainsString( '"table":"' . $c . '","at":"column:v","from":"utf8mb4_0900_ai_ci","to":"utf8mb4_uca1400_nopad_ai_ci"', $log );
-		$this->assertSame( array( array( 'id' => '1', 'name' => 'a', 'v' => 'x' ), array( 'id' => '2', 'name' => 'B', 'v' => 'y' ) ), $this->rows_of( $c ), 'the rows came through' );
+		$this->assertSame( array( array( 'id' => '1', 'name' => 'a', 'v' => 'x' ), array( 'id' => '2', 'name' => 'B', 'v' => 'y' ) ), $this->rows_of( $temporary ), 'the rows came through' );
 	}
 
 	public function test_a_collation_with_no_name_this_server_knows_stops_the_restore_before_any_table_is_created_naming_every_table(): void {
@@ -143,17 +151,22 @@ final class RestoreCollationsTest extends RestoreTestCase {
 		$this->assertSame( Job::COMPLETED, $this->run_restore( $this->start_restore( $base, array( 'exclude_tables' => array( $c, $d ) ) ) )->status );
 	}
 
-	public function test_the_servers_collations_are_read_from_show_collation_which_lists_what_information_schema_leaves_out(): void {
+	public function test_the_servers_collations_are_read_by_their_full_names_which_show_collation_and_the_collations_view_do_not_give(): void {
 		global $wpdb;
 		$known = RestorePreflightStep::known_collations();
 		$this->assertArrayHasKey( 'utf8mb4_general_ci', $known, 'the control: a name every server has' );
 		$this->assertArrayHasKey( 'utf8mb4_bin', $known );
 		$this->assertArrayNotHasKey( 'no_such_collation', $known );
-		if ( ! isset( $known['utf8mb4_uca1400_ai_ci'] ) ) {
+		if ( false === stripos( (string) $wpdb->db_server_info(), 'mariadb' ) || version_compare( (string) $wpdb->db_version(), '10.10', '<' ) ) {
 			$this->markTestSkipped( 'The trap shows on MariaDB 10.10 and later only.' );
 		}
-		$listed = array_map( 'strtolower', (array) $wpdb->get_col( 'SELECT COLLATION_NAME FROM information_schema.COLLATIONS' ) );
-		$this->assertNotContains( 'utf8mb4_uca1400_ai_ci', $listed, 'the trap: information_schema.COLLATIONS leaves it out, so a check reading it would map a name the server knows' );
-		$this->assertContains( 'utf8mb4_general_ci', $listed, 'the control: the listing is not empty' );
+		$this->assertArrayHasKey( 'utf8mb4_uca1400_ai_ci', $known, 'the full name of a UCA 14 collation this server creates tables with' );
+		$this->assertArrayHasKey( 'utf8mb4_uca1400_nopad_ai_ci', $known );
+		foreach ( array( 'SHOW COLLATION', 'SELECT COLLATION_NAME FROM information_schema.COLLATIONS' ) as $other ) {
+			$listed = array_map( 'strtolower', (array) $wpdb->get_col( $other ) );
+			$this->assertNotContains( 'utf8mb4_uca1400_ai_ci', $listed, 'the trap: ' . $other . ' gives the generic name only, so a check reading it would map a name the server knows' );
+			$this->assertContains( 'uca1400_ai_ci', $listed, 'the control: the generic name is what it gives' );
+			$this->assertContains( 'utf8mb4_general_ci', $listed, 'the control: the listing is not empty' );
+		}
 	}
 }

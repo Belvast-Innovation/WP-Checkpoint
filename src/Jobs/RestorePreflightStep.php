@@ -71,8 +71,12 @@ defined( 'ABSPATH' ) || exit;
  *    refused.
  * 3. collations: every collation the definitions name (the table option, a
  *    column, an expression, a CHECK), against the ones this server knows
- *    (SHOW COLLATION: information_schema.COLLATIONS leaves out names
- *    MariaDB 10.10 and later know, such as utf8mb4_uca1400_ai_ci). A name
+ *    (known_collations(): the full names of
+ *    information_schema.COLLATION_CHARACTER_SET_APPLICABILITY; SHOW
+ *    COLLATION and information_schema.COLLATIONS list MariaDB 10.10's and
+ *    later's UCA 14 collations by a generic name, "uca1400_ai_ci" for
+ *    utf8mb4_uca1400_ai_ci, and a check reading them would take the
+ *    server not to know what it does). A name
  *    the server knows is kept; one it does not know is written under the
  *    first name CollationRules offers that the server knows, each such
  *    mapping logged and written to RestoreFiles::COLLATIONS for the import;
@@ -119,6 +123,14 @@ final class RestorePreflightStep implements Step {
 	 * Table definitions read in one unit of the collations phase.
 	 */
 	const COLLATION_LINES = 200;
+
+	/**
+	 * The collations a server knows, by their full names (MariaDB 10.10 and later: FULL_COLLATION_NAME), and the
+	 * query for a server without that column (MySQL, older MariaDB), where COLLATION_NAME is the full name. The
+	 * fixture tests/Fixtures/Restore/collation-matrix.php runs the same text on every supported server.
+	 */
+	const COLLATIONS_SQL          = 'SELECT FULL_COLLATION_NAME FROM information_schema.COLLATION_CHARACTER_SET_APPLICABILITY';
+	const COLLATIONS_SQL_FALLBACK = 'SELECT COLLATION_NAME FROM information_schema.COLLATION_CHARACTER_SET_APPLICABILITY';
 
 	/**
 	 * Ids of the usermeta table read per unit of the walk for other installations' capabilities keys.
@@ -796,20 +808,30 @@ final class RestorePreflightStep implements Step {
 	}
 
 	/**
-	 * The collations this server knows, as CollationRules::resolve() takes them: SHOW COLLATION, which lists every
-	 * one; information_schema.COLLATIONS does not (MariaDB 10.10 and later leave out utf8mb4_uca1400_ai_ci and its
-	 * kind there), so a check that read it would replace names the server knows.
+	 * The collations this server knows, as CollationRules::resolve() takes them: the full names of
+	 * information_schema.COLLATION_CHARACTER_SET_APPLICABILITY (COLLATIONS_SQL), or its COLLATION_NAME on a server
+	 * without that column (COLLATIONS_SQL_FALLBACK). Measured 2026-10-10 on MariaDB 12.3: SHOW COLLATION and
+	 * information_schema.COLLATIONS list "uca1400_ai_ci", not utf8mb4_uca1400_ai_ci, so a check reading either would
+	 * replace names the server knows.
 	 *
 	 * @return array<string, bool>
-	 * @throws TransientFailure When the server does not answer.
+	 * @throws TransientFailure When the server does not answer either query.
 	 */
 	public static function known_collations(): array {
 		global $wpdb;
-		$names = $wpdb->get_col( 'SHOW COLLATION' ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.NoCaching -- the server's own list, read once per unit.
-		if ( '' !== (string) $wpdb->last_error || ! is_array( $names ) || array() === $names ) {
-			throw new TransientFailure( 'The collations of this database server could not be read.' );
+		$quiet = $wpdb->suppress_errors( true );
+		try {
+			foreach ( array( self::COLLATIONS_SQL, self::COLLATIONS_SQL_FALLBACK ) as $sql ) {
+				$wpdb->last_error = '';
+				$names            = $wpdb->get_col( $sql ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- the server's own list, a constant query, read once per unit.
+				if ( '' === JobRepository::db_error() && is_array( $names ) && array() !== $names ) {
+					return CollationRules::set( $names );
+				}
+			}
+		} finally {
+			$wpdb->suppress_errors( $quiet );
 		}
-		return CollationRules::set( $names );
+		throw new TransientFailure( 'The collations of this database server could not be read.' );
 	}
 
 	/**
