@@ -167,6 +167,7 @@ final class DatabaseImportStep implements Step {
 		$site_set     = $db->charset(); // Each chunk starts from the site's own character set; its preamble may set another.
 		$counted      = array();
 		$defined      = array();
+		$collated     = array();
 		$this->marked = array();
 		$slowest      = 0.0;
 		$first        = true;
@@ -213,7 +214,8 @@ final class DatabaseImportStep implements Step {
 					}
 				}
 				if ( ! isset( $defined[ $table['number'] ] ) ) {
-					$defined = array( $table['number'] => RestorePreflightStep::definition( RestoreFiles::path( $work, RestoreFiles::DEFINITIONS ), $table['number'] ) );
+					$defined  = array( $table['number'] => RestorePreflightStep::definition( RestoreFiles::path( $work, RestoreFiles::DEFINITIONS ), $table['number'] ) );
+					$collated = array( $table['number'] => RestorePreflightStep::collations_of( RestoreFiles::path( $work, RestoreFiles::COLLATIONS ), $table['number'] ) );
 				}
 				$target = new ImportTarget(
 					$table['table'],
@@ -222,7 +224,8 @@ final class DatabaseImportStep implements Step {
 					$table['number'],
 					$names,
 					array( $plan['plan'], 'reference' ),
-					$defined[ $table['number'] ]['columns']
+					$defined[ $table['number'] ]['columns'],
+					$collated[ $table['number'] ]
 				);
 				try {
 					$outcome = $this->import_chunk( $context, $db, $ledger, $target, $file, (int) $cursor['current']['c'], $counted, $slowest, $first, $cursor, $plan['plan'], $site_set, (string) ( $defined[ $table['number'] ]['auto_increment'] ?? '' ) );

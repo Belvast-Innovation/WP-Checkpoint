@@ -117,6 +117,13 @@ final class JobContext {
 	private $lease;
 
 	/**
+	 * Records a fact on the job's row (record()); null when recording is not possible (cleanup, tests).
+	 *
+	 * @var callable|null
+	 */
+	private $record;
+
+	/**
 	 * When the cursor was last persisted (tick start before the first checkpoint).
 	 *
 	 * @var float
@@ -144,8 +151,9 @@ final class JobContext {
 	 * @param callable|null        $checkpoint      function( array $cursor, int $percent, string $message ): void.
 	 * @param callable|null        $lease           function( bool $force ): void; throws LockLost when the lease is gone (see should_stop(), confirm_lease()).
 	 * @param array<string, bool>  $facts           What the Runner knows about this run: cli (see is_cli()).
+	 * @param callable|null        $record          function( string $key, mixed $value ): void; throws LockLost when the lease is gone (see record()).
 	 */
-	public function __construct( Job $job, array $cursor, Budget $budget, Logger $logger, callable $clock, callable $memory, float $started_at, int $memory_limit, $checkpoint = null, $lease = null, array $facts = array() ) {
+	public function __construct( Job $job, array $cursor, Budget $budget, Logger $logger, callable $clock, callable $memory, float $started_at, int $memory_limit, $checkpoint = null, $lease = null, array $facts = array(), $record = null ) {
 		$this->job             = $job;
 		$this->cursor          = self::strip_reserved( $cursor );
 		$this->budget          = $budget;
@@ -159,6 +167,7 @@ final class JobContext {
 		$this->checkpointed_at = $started_at;
 		$this->lease           = is_callable( $lease ) ? $lease : null;
 		$this->cli             = ! empty( $facts['cli'] );
+		$this->record          = is_callable( $record ) ? $record : null;
 	}
 
 	/**
@@ -377,6 +386,23 @@ final class JobContext {
 		// as last written, which is what a retry goes on from.
 		$this->cursor          = $cursor;
 		$this->checkpointed_at = (float) call_user_func( $this->clock );
+	}
+
+	/**
+	 * Record a fact of the run on the job's row, under "recorded" in the options (options()['recorded'][$key]): a
+	 * count or a flag a later step shows. Unlike the cursor it outlives the step and a retry. Written at once, fenced
+	 * like a checkpoint: throws LockLost when the lock is no longer held, which the step must not catch. Not progress.
+	 *
+	 * @param string $key   The fact's name: a-z, digits and "_".
+	 * @param mixed  $value A scalar or null.
+	 * @return void
+	 * @throws \LogicException When the context cannot record (cleanup).
+	 */
+	public function record( string $key, $value ): void {
+		if ( null === $this->record ) {
+			throw new \LogicException( 'Records are only possible while the step runs.' );
+		}
+		call_user_func( $this->record, $key, $value );
 	}
 
 	/**

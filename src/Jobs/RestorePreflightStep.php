@@ -16,6 +16,7 @@ use WPCheckpoint\Archive\ZipReader;
 use WPCheckpoint\Database\WpdbConnection;
 use WPCheckpoint\Restore\ChunkReader;
 use WPCheckpoint\Restore\ChunkWalk;
+use WPCheckpoint\Restore\CollationRules;
 use WPCheckpoint\Restore\ConstraintNames;
 use WPCheckpoint\Restore\ImportTarget;
 use WPCheckpoint\Restore\IncomingQuestions;
@@ -26,6 +27,7 @@ use WPCheckpoint\Restore\SiteTables;
 use WPCheckpoint\Restore\Statement;
 use WPCheckpoint\Restore\TableMoves;
 use WPCheckpoint\Restore\TablePlan;
+use WPCheckpoint\Restore\TargetIncompatible;
 use WPCheckpoint\Database\OwnTables;
 use WPCheckpoint\Support\Utf8;
 
@@ -67,7 +69,23 @@ defined( 'ABSPATH' ) || exit;
  *    the first INSERT of every chunk must list exactly those columns. A
  *    table the manifest lists without a chunk has no definition and is
  *    refused.
- * 3. references: the foreign keys that would cross the swap. The swap
+ * 3. collations: every collation the definitions name (the table option, a
+ *    column, an expression, a CHECK), against the ones this server knows
+ *    (known_collations(): the full names of
+ *    information_schema.COLLATION_CHARACTER_SET_APPLICABILITY; SHOW
+ *    COLLATION and information_schema.COLLATIONS list MariaDB 10.10's and
+ *    later's UCA 14 collations by a generic name, "uca1400_ai_ci" for
+ *    utf8mb4_uca1400_ai_ci, and a check reading them would take the
+ *    server not to know what it does). A name
+ *    the server knows is kept; one it does not know is written under the
+ *    first name CollationRules offers that the server knows, each such
+ *    mapping logged and written to RestoreFiles::COLLATIONS for the import;
+ *    one with no such name stops the restore for good
+ *    (TargetIncompatible), before any table is created, naming every
+ *    missing collation and every table that uses one. The definitions are
+ *    read COLLATION_LINES a unit. How many were mapped is recorded on the
+ *    job (JobContext::record()) for the swap's last word.
+ * 4. references: the foreign keys that would cross the swap. The swap
  *    moves aside the live tables TableMoves shows to be this site's and
  *    puts the restored ones in their place; another installation's
  *    tables, tables of other prefixes, this plugin's run tables and the
@@ -100,6 +118,19 @@ final class RestorePreflightStep implements Step {
 	 * Live foreign keys read per unit.
 	 */
 	const PAGE = 1000;
+
+	/**
+	 * Table definitions read in one unit of the collations phase.
+	 */
+	const COLLATION_LINES = 200;
+
+	/**
+	 * The collations a server knows, by their full names (MariaDB 10.10 and later: FULL_COLLATION_NAME), and the
+	 * query for a server without that column (MySQL, older MariaDB), where COLLATION_NAME is the full name. The
+	 * fixture tests/Fixtures/Restore/collation-matrix.php runs the same text on every supported server.
+	 */
+	const COLLATIONS_SQL          = 'SELECT FULL_COLLATION_NAME FROM information_schema.COLLATION_CHARACTER_SET_APPLICABILITY';
+	const COLLATIONS_SQL_FALLBACK = 'SELECT COLLATION_NAME FROM information_schema.COLLATION_CHARACTER_SET_APPLICABILITY';
 
 	/**
 	 * Ids of the usermeta table read per unit of the walk for other installations' capabilities keys.
@@ -201,6 +232,12 @@ final class RestorePreflightStep implements Step {
 		$plan = self::load_plan( $work );
 		if ( 'heads' === $cursor['phase'] ) {
 			$result = $this->heads( $context, $cursor, $plan );
+			if ( null !== $result ) {
+				return $result;
+			}
+		}
+		if ( 'collations' === $cursor['phase'] ) {
+			$result = $this->collations( $context, $cursor );
 			if ( null !== $result ) {
 				return $result;
 			}
@@ -622,10 +659,13 @@ final class RestorePreflightStep implements Step {
 					throw new Refused( 'The database index ends before every chunk of the restored tables.' );
 				}
 				$cursor = array(
-					'phase' => 'references',
-					'page'  => 0,
+					'phase'   => 'collations',
+					'line'    => 0,
+					'written' => 0,
+					'mapped'  => 0,
+					'missing' => array(),
 				);
-				$context->checkpoint( $cursor, 60, __( 'Checking the foreign keys', 'wp-checkpoint' ) );
+				$context->checkpoint( $cursor, 56, __( 'Checking the collations', 'wp-checkpoint' ) );
 				return null;
 			}
 			$line  = $chunk['line'];
@@ -647,6 +687,181 @@ final class RestorePreflightStep implements Step {
 				$context->checkpoint( $cursor, min( 55, $percent ), __( 'Reading the backup\'s tables', 'wp-checkpoint' ) );
 			}
 		}
+	}
+
+	/**
+	 * The collations phase: the definitions a page at a time (COLLATION_LINES; the cursor's "line" is the next),
+	 * each table's collations against the server's (known_collations()), the outcome of a table that needs one
+	 * written as a JSON line to RestoreFiles::COLLATIONS (the cursor's "written" is its committed length); "mapped"
+	 * counts the mappings, "missing" the distinct names without a replacement. At the end a missing name stops the
+	 * restore (TargetIncompatible, the tables read back from the file), else the count is recorded on the job and the
+	 * references phase follows. Null when this phase is done in this tick.
+	 *
+	 * @param JobContext           $context Context.
+	 * @param array<string, mixed> $cursor  Cursor (updated).
+	 * @return StepResult|null
+	 * @throws TargetIncompatible When a collation has no replacement this server knows.
+	 * @throws TransientFailure When the server's collations cannot be read, or a work file not written.
+	 */
+	private function collations( JobContext $context, array &$cursor ) {
+		$work     = $context->work_path();
+		$outcomes = RestoreFiles::path( $work, RestoreFiles::COLLATIONS );
+		if ( ! is_file( $outcomes ) && false === @file_put_contents( $outcomes, '' ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- reported below.
+			throw new TransientFailure( 'A work file of the restore could not be written.' );
+		}
+		self::truncate_to( $outcomes, (int) $cursor['written'] );
+		$known  = self::known_collations();
+		$handle = @fopen( RestoreFiles::path( $work, RestoreFiles::DEFINITIONS ), 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- reported below.
+		if ( false === $handle ) {
+			throw new WorkLost( 'The table definitions of the restore are gone from the work directory.' );
+		}
+		try {
+			$index = 0;
+			$read  = 0;
+			for ( $text = fgets( $handle ); false !== $text; $text = fgets( $handle ) ) {
+				if ( $index++ < (int) $cursor['line'] ) {
+					continue; // Done in an earlier unit.
+				}
+				$definition = json_decode( $text, true );
+				if ( ! is_array( $definition ) || ! isset( $definition['table'] ) || ! is_array( $definition['collations'] ?? null ) ) {
+					throw new WorkLost( 'The table definitions of the restore in the work directory are damaged.' );
+				}
+				$map     = array();
+				$missing = array();
+				foreach ( $definition['collations'] as $found ) {
+					$name = (string) $found['name'];
+					$to   = CollationRules::resolve( $name, $known );
+					if ( null === $to ) {
+						$missing[ strtolower( $name ) ] = $name;
+						$context->logger()->warning(
+							'A collation this server does not know has no name to write instead',
+							array(
+								'table' => (string) $definition['table'],
+								'at'    => (string) $found['at'],
+								'name'  => $name,
+							)
+						);
+					} elseif ( $to !== $name ) {
+						$map[ $name ] = $to;
+						++$cursor['mapped'];
+						$context->logger()->info(
+							'A collation this server does not know is written under another name',
+							array(
+								'table' => (string) $definition['table'],
+								'at'    => (string) $found['at'],
+								'from'  => $name,
+								'to'    => $to,
+							)
+						);
+					}
+				}
+				if ( array() !== $map || array() !== $missing ) {
+					$line = wp_json_encode(
+						array(
+							'n'       => (int) $definition['n'],
+							'table'   => (string) $definition['table'],
+							'map'     => $map,
+							'missing' => array_values( $missing ),
+						)
+					);
+					if ( false === $line ) {
+						throw new Refused( sprintf( 'The collations of the table %s cannot be written down (names that are not UTF-8).', (string) $definition['table'] ) );
+					}
+					if ( false === @file_put_contents( $outcomes, $line . "\n", FILE_APPEND ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- reported below.
+						throw new TransientFailure( 'A work file of the restore could not be written.' );
+					}
+					$cursor['missing'] = array_values( array_unique( array_merge( (array) $cursor['missing'], array_values( $missing ) ) ) );
+				}
+				$cursor['line'] = $index;
+				clearstatcache( true, $outcomes );
+				$cursor['written'] = (int) filesize( $outcomes );
+				if ( ++$read >= self::COLLATION_LINES ) {
+					$context->checkpoint( $cursor, 58, __( 'Checking the collations', 'wp-checkpoint' ) );
+					if ( $context->should_stop() ) {
+						return StepResult::progress( $cursor, 58, __( 'Checking the collations', 'wp-checkpoint' ) );
+					}
+					$read = 0;
+				}
+			}
+		} finally {
+			fclose( $handle );
+		}
+		if ( array() !== $cursor['missing'] ) {
+			// Read whole: one line per table that needs a collation, read once, on the way to a failure for good.
+			$tables = array();
+			$lines  = file( $outcomes, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES );
+			foreach ( is_array( $lines ) ? $lines : array() as $text ) {
+				$outcome = json_decode( $text, true );
+				if ( is_array( $outcome ) && array() !== ( $outcome['missing'] ?? array() ) ) {
+					$tables[] = (string) $outcome['table'];
+				}
+			}
+			throw new TargetIncompatible( TargetIncompatible::COLLATION, (array) $cursor['missing'], $tables );
+		}
+		$context->record( 'collations_mapped', (int) $cursor['mapped'] );
+		$cursor = array(
+			'phase' => 'references',
+			'page'  => 0,
+		);
+		$context->checkpoint( $cursor, 60, __( 'Checking the foreign keys', 'wp-checkpoint' ) );
+		return null;
+	}
+
+	/**
+	 * The collations this server knows, as CollationRules::resolve() takes them: the full names of
+	 * information_schema.COLLATION_CHARACTER_SET_APPLICABILITY (COLLATIONS_SQL), or its COLLATION_NAME on a server
+	 * without that column (COLLATIONS_SQL_FALLBACK). Measured 2026-10-10 on MariaDB 12.3: SHOW COLLATION and
+	 * information_schema.COLLATIONS list "uca1400_ai_ci", not utf8mb4_uca1400_ai_ci, so a check reading either would
+	 * replace names the server knows.
+	 *
+	 * @return array<string, bool>
+	 * @throws TransientFailure When the server does not answer either query.
+	 */
+	public static function known_collations(): array {
+		global $wpdb;
+		$quiet = $wpdb->suppress_errors( true );
+		try {
+			foreach ( array( self::COLLATIONS_SQL, self::COLLATIONS_SQL_FALLBACK ) as $sql ) {
+				$wpdb->last_error = '';
+				$names            = $wpdb->get_col( $sql ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- the server's own list, a constant query, read once per unit.
+				if ( '' === JobRepository::db_error() && is_array( $names ) && array() !== $names ) {
+					return CollationRules::set( $names );
+				}
+			}
+		} finally {
+			$wpdb->suppress_errors( $quiet );
+		}
+		throw new TransientFailure( 'The collations of this database server could not be read.' );
+	}
+
+	/**
+	 * The collations of table $number the import writes under another name (RestoreFiles::COLLATIONS): the backup's
+	 * name => the name to write; empty when it keeps every one.
+	 *
+	 * @param string $outcomes The file.
+	 * @param int    $number   Table number.
+	 * @return array<string, string>
+	 * @throws WorkLost When the file is gone or damaged.
+	 */
+	public static function collations_of( string $outcomes, int $number ): array {
+		$handle = @fopen( $outcomes, 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- reported below.
+		if ( false === $handle ) {
+			throw new WorkLost( 'The collation check of the restore is gone from the work directory.' );
+		}
+		try {
+			for ( $text = fgets( $handle ); false !== $text; $text = fgets( $handle ) ) {
+				$outcome = json_decode( $text, true );
+				if ( ! is_array( $outcome ) || ! isset( $outcome['n'] ) || ! is_array( $outcome['map'] ?? null ) ) {
+					throw new WorkLost( 'The collation check of the restore in the work directory is damaged.' );
+				}
+				if ( $number === (int) $outcome['n'] ) {
+					return array_map( 'strval', $outcome['map'] );
+				}
+			}
+		} finally {
+			fclose( $handle );
+		}
+		return array();
 	}
 
 	/**
@@ -746,6 +961,7 @@ final class RestorePreflightStep implements Step {
 				'engine'         => $create->engine(),
 				// TRUNCATE sets the counter back; a table started over gets this value again.
 				'auto_increment' => $create->auto_increment(),
+				'collations'     => $create->collations(),
 			);
 			$json       = json_encode( $definition, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE ); // phpcs:ignore WordPress.WP.AlternativeFunctions.json_encode_json_encode -- read back; a failure is thrown.
 			if ( ! is_string( $json ) ) {

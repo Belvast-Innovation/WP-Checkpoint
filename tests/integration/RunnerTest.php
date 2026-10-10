@@ -226,6 +226,41 @@ final class RunnerTest extends WP_UnitTestCase {
 		$this->assertSame( '', $stored->lock_token );
 	}
 
+	public function test_a_record_outlives_the_step_and_is_not_written_once_the_lock_is_lost(): void {
+		$other = $this->repo_for( $this->dirs );
+		$seen  = null;
+		$this->register(
+			'recording',
+			array(
+				new ClosureStep(
+					'count',
+					static function ( JobContext $ctx ): StepResult {
+						$ctx->record( 'collations_mapped', 3 );
+						return StepResult::done();
+					}
+				),
+				new ClosureStep(
+					'show',
+					function ( JobContext $ctx ) use ( &$seen, $other ): StepResult {
+						$seen = $ctx->options()['recorded'] ?? null;
+						$ctx->checkpoint( array( 'i' => 1 ), 10 );
+						$other->transition( $other->find( $ctx->job()->id ), Job::CANCELLED ); // An administrator cancels meanwhile.
+						$ctx->record( 'late', 1 ); // Throws LockLost.
+						return StepResult::done();
+					}
+				),
+			)
+		);
+		$job    = $this->repo->create( 'recording', 0, array(), array( 'base' => 'kept' ) );
+		$result = $this->runner()->tick( $job->id );
+		$this->assertSame( TickResult::LOST, $result->status );
+		$this->assertSame( array( 'collations_mapped' => 3 ), $seen, 'the next step reads what the first recorded' );
+		$stored = $this->repo->find( $job->id );
+		$this->assertSame( Job::CANCELLED, $stored->status );
+		$this->assertSame( 'kept', $stored->options['base'], 'the options the job was created with stay' );
+		$this->assertSame( array( 'collations_mapped' => 3 ), $stored->options['recorded'], 'written on the row, and the late record was not' );
+	}
+
 	public function test_transient_failures_back_off_and_fail_after_the_limit(): void {
 		$this->register( 'flaky', array( new ClosureStep( 'f', static function (): StepResult {
 			throw new TransientFailure( 'remote timed out' );

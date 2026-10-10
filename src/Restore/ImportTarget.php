@@ -15,7 +15,9 @@ defined( 'ABSPATH' ) || exit;
  * temporary and final names and position (for the table name and the
  * constraint names), the name a foreign key references instead of each
  * table named in the backup (TablePlan::reference()), and, once the
- * table's CREATE TABLE has been read, the columns every INSERT must list.
+ * table's CREATE TABLE has been read, the columns every INSERT must list;
+ * and the collations to write under another name, when this server does
+ * not know those of the backup (the restore's collation check).
  */
 final class ImportTarget {
 
@@ -69,17 +71,25 @@ final class ImportTarget {
 	public $columns;
 
 	/**
+	 * Collation name in the backup => the name CREATE TABLE is written with instead; empty when every one stays.
+	 *
+	 * @var array<string, string>
+	 */
+	public $collations;
+
+	/**
 	 * Constructor.
 	 *
-	 * @param string          $table     Name in the backup.
-	 * @param string          $temporary Temporary name.
-	 * @param string          $final_name Final name.
-	 * @param int             $number    Position in the backup.
-	 * @param ConstraintNames $names     Constraint names.
-	 * @param callable        $reference What a foreign key references instead of a table named in the backup.
-	 * @param string[]|null   $columns   Columns every INSERT must list.
+	 * @param string                $table      Name in the backup.
+	 * @param string                $temporary  Temporary name.
+	 * @param string                $final_name Final name.
+	 * @param int                   $number     Position in the backup.
+	 * @param ConstraintNames       $names      Constraint names.
+	 * @param callable              $reference  What a foreign key references instead of a table named in the backup.
+	 * @param string[]|null         $columns    Columns every INSERT must list.
+	 * @param array<string, string> $collations Collation name in the backup => the name to write instead.
 	 */
-	public function __construct( string $table, string $temporary, string $final_name, int $number, ConstraintNames $names, callable $reference, $columns = null ) {
+	public function __construct( string $table, string $temporary, string $final_name, int $number, ConstraintNames $names, callable $reference, $columns = null, array $collations = array() ) {
 		$this->table      = $table;
 		$this->temporary  = $temporary;
 		$this->final_name = $final_name;
@@ -87,5 +97,6 @@ final class ImportTarget {
 		$this->names      = $names;
 		$this->reference  = $reference;
 		$this->columns    = $columns;
+		$this->collations = $collations;
 	}
 }
