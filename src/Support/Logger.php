@@ -1,6 +1,6 @@
 <?php
 /**
- * Per-job log file with mandatory redaction.
+ * Per-job log file with mandatory redaction and masking.
  *
  * @package WPCheckpoint
  */
@@ -9,7 +9,9 @@ namespace WPCheckpoint\Support;
 
 /**
  * Appends lines to one log file. There is exactly one write path and it
- * redacts the fully rendered line, so no field can bypass redaction.
+ * sends the fully rendered line through the mask (TextMask::clean():
+ * redaction, then path and host placeholders), so no field can bypass it
+ * and no raw host or path reaches the file.
  */
 final class Logger {
 
@@ -31,11 +33,11 @@ final class Logger {
 	private $path;
 
 	/**
-	 * Redactor applied to every line.
+	 * The mask every line goes through.
 	 *
-	 * @var Redactor
+	 * @var TextMask
 	 */
-	private $redactor;
+	private $mask;
 
 	/**
 	 * Size cap in bytes.
@@ -62,13 +64,13 @@ final class Logger {
 	 * Constructor.
 	 *
 	 * @param string        $path      Absolute path of the log file (created on first write).
-	 * @param Redactor      $redactor  Redactor.
+	 * @param TextMask      $mask      The mask every line goes through (TextMask::for_installation() for the plugin's logs).
 	 * @param int           $max_bytes Size cap.
-	 * @param callable|null $fallback Where a line the file cannot take goes (function( string $line ): void), redacted.
+	 * @param callable|null $fallback Where a line the file cannot take goes (function( string $line ): void), masked.
 	 */
-	public function __construct( string $path, Redactor $redactor, int $max_bytes = self::DEFAULT_MAX_BYTES, $fallback = null ) {
+	public function __construct( string $path, TextMask $mask, int $max_bytes = self::DEFAULT_MAX_BYTES, $fallback = null ) {
 		$this->path      = $path;
-		$this->redactor  = $redactor;
+		$this->mask      = $mask;
 		$this->max_bytes = $max_bytes;
 		$this->fallback  = is_callable( $fallback ) ? $fallback : null;
 	}
@@ -78,17 +80,17 @@ final class Logger {
 	 *
 	 * @param string   $logs_dir Logs directory.
 	 * @param string   $job_id   Job identifier; reduced to [a-z0-9-].
-	 * @param Redactor $redactor Redactor.
+	 * @param TextMask $mask     The mask every line goes through.
 	 * @return Logger
 	 */
-	public static function for_job( string $logs_dir, string $job_id, Redactor $redactor ): Logger {
+	public static function for_job( string $logs_dir, string $job_id, TextMask $mask ): Logger {
 		$safe = strtolower( (string) preg_replace( '/[^A-Za-z0-9-]+/', '-', $job_id ) );
 		$safe = trim( $safe, '-' );
 		if ( '' === $safe ) {
 			$safe = 'job';
 		}
 		$name = 'job-' . $safe . '-' . bin2hex( random_bytes( 4 ) ) . '.log';
-		return new self( rtrim( $logs_dir, '/\\' ) . DIRECTORY_SEPARATOR . $name, $redactor );
+		return new self( rtrim( $logs_dir, '/\\' ) . DIRECTORY_SEPARATOR . $name, $mask );
 	}
 
 	/**
@@ -185,7 +187,7 @@ final class Logger {
 	}
 
 	/**
-	 * The only place that touches the file: redact, then append.
+	 * The only place that touches the file: mask, then append.
 	 *
 	 * @param string $line Rendered line without trailing newline.
 	 * @return void
@@ -195,7 +197,7 @@ final class Logger {
 			return;
 		}
 
-		$line = $this->redactor->redact( Utf8::scrub( $line ) ) . "\n";
+		$line = $this->mask->clean( $line ) . "\n";
 
 		clearstatcache( true, $this->path );
 		$size = is_file( $this->path ) ? (int) filesize( $this->path ) : 0;

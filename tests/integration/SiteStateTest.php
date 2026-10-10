@@ -879,9 +879,9 @@ final class SiteStateTest extends WP_UnitTestCase {
 		$redac = new Redactor( array() );
 		ini_set( 'error_log', $sink );
 		try {
-			( new Logger( $this->root . '/missing/dir/job.log', $redac ) )->info( 'dropped line' );
-			( new Logger( $this->root . '/missing/dir/job.log', $redac, Logger::DEFAULT_MAX_BYTES, array( Runner::class, 'to_php_log' ) ) )->info( 'kept line', array( 'at' => ABSPATH . 'wp-content/x' ) );
-			( new Logger( $this->root . '/job.log', $redac, Logger::DEFAULT_MAX_BYTES, array( Runner::class, 'to_php_log' ) ) )->info( 'file line' );
+			( new Logger( $this->root . '/missing/dir/job.log', \WPCheckpoint\Support\TextMask::redact_only( $redac ) ) )->info( 'dropped line' );
+			( new Logger( $this->root . '/missing/dir/job.log', \WPCheckpoint\Support\TextMask::redact_only( $redac ), Logger::DEFAULT_MAX_BYTES, array( Runner::class, 'to_php_log' ) ) )->info( 'kept line', array( 'at' => ABSPATH . 'wp-content/x' ) );
+			( new Logger( $this->root . '/job.log', \WPCheckpoint\Support\TextMask::redact_only( $redac ), Logger::DEFAULT_MAX_BYTES, array( Runner::class, 'to_php_log' ) ) )->info( 'file line' );
 			// The whole pipeline, not only the paths: a backup's name (it carries the site's slug), a terminal's escape
 			// sequence, and a storage directory away from the site.
 			Runner::to_php_log( "piped line: /srv/elsewhere/store/backups/shop-example-com-20260930-101010-abcd.part001.wpcheckpoint.zip \033[31mred", array( '{storage}' => '/srv/elsewhere/store' ) );

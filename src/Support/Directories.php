@@ -705,7 +705,13 @@ final class Directories {
 	 * @return void
 	 */
 	private function log_answer( array $question, string $answer ): void {
-		$this->log_event( sprintf( 'The administrator answered "%1$s" to whether this is the site that chose the storage directory (WordPress directory %2$s then, %3$s now).', $answer, $question['recorded'], $question['here'] ) );
+		$this->log_event(
+			sprintf( 'The administrator answered "%1$s" to whether this is the site that chose the storage directory (WordPress directory %2$s then, %3$s now).', $answer, $question['recorded'], $question['here'] ),
+			array(
+				'{abspath-then}' => $question['recorded'],
+				'{abspath-now}'  => $question['here'],
+			)
+		);
 	}
 
 
@@ -916,7 +922,8 @@ final class Directories {
 		$other_dir = '' !== (string) $this->context['custom_dir'] && ! Paths::same_location( rtrim( (string) $this->context['custom_dir'], '/\\' ), $previous );
 		if ( ! empty( $this->state['clone_detected'] ) && '' !== $previous && ! $other_dir && self::MARKER_OWN === $this->marker( $previous ) && $this->recorded_by_take_over( (string) ( $this->marker_hashes[ rtrim( $previous, '/\\' ) ] ?? '' ) ) ) {
 			$this->finish_reclaim();
-			$this->log_event( sprintf( 'Continuing with the storage directory %s: it carries this site\'s marker for this WordPress directory, with a hash a take-over of this site recorded, and the move was still waiting (a take-over that died before recording that it was done).', $previous ) );
+			// The state no longer names it (finish_reclaim()): the line gives it to the mask itself.
+			$this->log_event( sprintf( 'Continuing with the storage directory %s: it carries this site\'s marker for this WordPress directory, with a hash a take-over of this site recorded, and the move was still waiting (a take-over that died before recording that it was done).', $previous ), array( '{storage-before}' => $previous ) );
 			return;
 		}
 
@@ -996,7 +1003,14 @@ final class Directories {
 			'to'   => (string) $this->context['abspath'],
 		);
 		$this->finish_reclaim();
-		$this->log_event( sprintf( 'Storage directory %s reclaimed automatically after a deployment: ABSPATH changed from %s to %s.', $dir, $from, (string) $this->context['abspath'] ) );
+		$this->log_event(
+			sprintf( 'Storage directory %s reclaimed automatically after a deployment: ABSPATH changed from %s to %s.', $dir, $from, (string) $this->context['abspath'] ),
+			array(
+				'{storage-before}' => $dir,
+				'{abspath-before}' => $from,
+				'{abspath-now}'    => (string) $this->context['abspath'],
+			)
+		);
 		return true;
 	}
 
@@ -1015,18 +1029,54 @@ final class Directories {
 	}
 
 	/**
-	 * Append a line to logs/storage.log in the base directory.
+	 * Append a line to logs/storage.log in the base directory, masked as every text that leaves the plugin
+	 * (TextMask): besides the installation's paths, the paths this choice of storage directory names (candidate_paths()),
+	 * which may not be resolved yet when a line is written while the directory is being resolved, and $paths, the
+	 * candidates the line itself names.
 	 *
-	 * @param string $message Message.
+	 * @param string                $message Message.
+	 * @param array<string, string> $paths   More placeholder => path the line names.
 	 * @return void
 	 */
-	public function log_event( string $message ): void {
+	public function log_event( string $message, array $paths = array() ): void {
 		$logs = $this->logs();
 		if ( '' === $logs || ! is_dir( $logs ) ) {
 			return;
 		}
 		$redactor = new Redactor( Redactor::installation_secrets( array( (string) $this->state['token'] ) ) );
-		( new Logger( $logs . DIRECTORY_SEPARATOR . 'storage.log', $redactor ) )->info( $message );
+		$mask     = TextMask::for_installation( $redactor, array_merge( $paths, $this->candidate_paths() ) );
+		( new Logger( $logs . DIRECTORY_SEPARATOR . 'storage.log', $mask ) )->info( $message );
+	}
+
+	/**
+	 * The paths this choice of storage directory names, as placeholder => path (empty ones left out): the stored and
+	 * the configured storage directory, the one before a move, and the WordPress directories it recorded.
+	 *
+	 * @return array<string, string>
+	 */
+	private function candidate_paths(): array {
+		$paths = array(
+			'{storage}'             => (string) $this->state['path'],
+			'{storage-configured}'  => (string) $this->context['custom_dir'],
+			'{storage-before}'      => (string) $this->state['previous_path'],
+			'{abspath-recorded}'    => (string) $this->state['abspath'],
+			'{abspath-before}'      => (string) $this->state['previous_abspath'],
+			'{abspath-real}'        => (string) $this->state['abspath_real'],
+			'{abspath-real-before}' => (string) $this->state['previous_abspath_real'],
+			'{abspath-detected}'    => (string) $this->state['detected_real'],
+			'{deploy-root}'         => (string) $this->state['trusted_deploy_root'],
+		);
+		foreach ( array_values( (array) $this->state['moves'] ) as $i => $move ) {
+			foreach ( array_values( (array) $move ) as $j => $path ) {
+				$paths[ '{abspath-moved-' . $i . '-' . $j . '}' ] = (string) $path;
+			}
+		}
+		return array_filter(
+			$paths,
+			static function ( string $path ): bool {
+				return '' !== $path;
+			}
+		);
 	}
 
 	/**

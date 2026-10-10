@@ -21,7 +21,7 @@ final class JobContextTest extends TestCase {
 	private function context( array $cursor = array(), int $seconds = 10, int $memory_budget = 33554432, int $memory_limit = -1, $checkpoint = null ): JobContext {
 		$job     = new Job();
 		$job->id = 5;
-		$logger  = new Logger( sys_get_temp_dir() . '/wpcheckpoint-context-' . bin2hex( random_bytes( 4 ) ) . '.log', new Redactor() );
+		$logger  = new Logger( sys_get_temp_dir() . '/wpcheckpoint-context-' . bin2hex( random_bytes( 4 ) ) . '.log', \WPCheckpoint\Support\TextMask::redact_only( new Redactor() ) );
 		return new JobContext(
 			$job,
 			$cursor,

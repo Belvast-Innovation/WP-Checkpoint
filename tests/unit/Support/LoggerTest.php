@@ -25,8 +25,8 @@ final class LoggerTest extends TestCase {
 	}
 
 	public function test_lines_are_rendered_and_redacted(): void {
-		$logger = Logger::for_job( $this->dir, 'Export #12', new Redactor( array( 'hunter2!' ) ) );
-		$logger->info( 'Connecting as admin@example.com with hunter2!', array( 'note' => 'pw is hunter2!', 'url' => 'https://a/b' ) );
+		$logger = Logger::for_job( $this->dir, 'Export #12', \WPCheckpoint\Support\TextMask::redact_only( new Redactor( array( 'hunter2!' ) ) ) );
+		$logger->info( 'Connecting as admin@example.com with hunter2!', array( 'note' => 'pw is hunter2!', 'kind' => 'a/b' ) );
 		$logger->error( "multi\nline", array( 'password' => 'x' ) );
 
 		$this->assertMatchesRegularExpression( '#[/\\\\]job-export-12-[0-9a-f]{8}\.log$#', $logger->path() );
@@ -35,13 +35,13 @@ final class LoggerTest extends TestCase {
 		$this->assertMatchesRegularExpression( '/^\[\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\] INFO /', $lines[0] );
 		$this->assertStringNotContainsString( 'hunter2!', $lines[0] );
 		$this->assertStringContainsString( 'a***@example.com', $lines[0] );
-		$this->assertStringContainsString( '"url":"https://a/b"', $lines[0], 'slashes are not escaped' );
+		$this->assertStringContainsString( '"kind":"a/b"', $lines[0], 'slashes are not escaped' );
 		$this->assertStringContainsString( 'ERROR multi line', $lines[1] );
 		$this->assertStringContainsString( '"password":"[redacted]"', $lines[1] );
 	}
 
 	public function test_invalid_utf8_in_context_and_message_is_scrubbed_not_dropped(): void {
-		$logger = new Logger( $this->dir . '/x.log', new Redactor( array( 'Hunter2!x' ) ) );
+		$logger = new Logger( $this->dir . '/x.log', \WPCheckpoint\Support\TextMask::redact_only( new Redactor( array( 'Hunter2!x' ) ) ) );
 		$logger->info( "bad \xFF message pw=Hunter2!x", array( 'blob' => "\xB1\x31", 'nested' => array( "k\xFE" => "v\xD6\xD0" ), 'ok' => 1 ) );
 		$line = (string) file_get_contents( $logger->path() );
 		$this->assertStringContainsString( '"ok":1', $line );
@@ -54,7 +54,7 @@ final class LoggerTest extends TestCase {
 	}
 
 	public function test_an_unencodable_context_is_replaced_by_its_key_list_and_the_line_is_written(): void {
-		$logger = new Logger( $this->dir . '/x.log', new Redactor() );
+		$logger = new Logger( $this->dir . '/x.log', \WPCheckpoint\Support\TextMask::redact_only( new Redactor() ) );
 		$logger->info( 'bad', array( 'blob' => fopen( 'php://memory', 'r' ), 'ok' => 1 ) );
 		$line = (string) file_get_contents( $logger->path() );
 		$this->assertStringContainsString( 'INFO bad {"_unencodable_keys":["blob","ok"]}', $line, 'no partial encoding: the whole context is replaced by fixed text' );
@@ -62,7 +62,7 @@ final class LoggerTest extends TestCase {
 	}
 
 	public function test_size_cap_writes_marker_and_stops(): void {
-		$logger = new Logger( $this->dir . '/cap.log', new Redactor(), 300 );
+		$logger = new Logger( $this->dir . '/cap.log', \WPCheckpoint\Support\TextMask::redact_only( new Redactor() ), 300 );
 		for ( $i = 0; $i < 20; $i++ ) {
 			$logger->info( str_repeat( 'x', 50 ) );
 		}
@@ -72,14 +72,14 @@ final class LoggerTest extends TestCase {
 		$this->assertSame( 1, substr_count( $content, 'Log size limit reached' ) );
 	}
 
-	public function test_logger_has_a_single_write_path_after_redaction(): void {
+	public function test_logger_has_a_single_write_path_after_the_mask(): void {
 		$source = file_get_contents( dirname( __DIR__, 3 ) . '/src/Support/Logger.php' );
 		$this->assertSame( 1, preg_match_all( '/\bfwrite\s*\(/', $source ), 'exactly one fwrite() in Logger' );
 		$this->assertSame( 0, preg_match_all( '/\bfile_put_contents\s*\(/', $source ) );
-		$redact_pos = strpos( $source, '$this->redactor->redact(' );
-		$write_pos  = strpos( $source, 'fwrite(' );
-		$this->assertNotFalse( $redact_pos );
-		$this->assertLessThan( $write_pos, $redact_pos, 'redaction happens before the write' );
+		$mask_pos  = strpos( $source, '$this->mask->clean(' );
+		$write_pos = strpos( $source, 'fwrite(' );
+		$this->assertNotFalse( $mask_pos );
+		$this->assertLessThan( $write_pos, $mask_pos, 'the mask (redaction included) comes before the write' );
 		$this->assertSame( 1, preg_match_all( '/private function write\(/', $source ), 'write() is private' );
 	}
 }

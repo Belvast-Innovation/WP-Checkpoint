@@ -50,7 +50,7 @@ final class ReviewStepTest extends TestCase {
 			$job,
 			array(),
 			new Budget( 10, 33554432, false ),
-			new Logger( $this->root . '/job.log', new Redactor() ),
+			new Logger( $this->root . '/job.log', \WPCheckpoint\Support\TextMask::redact_only( new Redactor() ) ),
 			static function (): float {
 				return microtime( true );
 			},

@@ -149,8 +149,10 @@ final class Report {
 					array_keys( $hosts )
 				)
 			);
-			$result      = preg_replace_callback(
-				'#(?<![\w.\-{])((?:[a-z0-9-]+\.)*?)(' . $alternation . ')(?![\w\-.]|\.[a-z])#iu',
+			// A full stop after the host ends it only where a sentence ends (a space or the end follows), not before
+			// another label ("example.org.evil").
+			$result = preg_replace_callback(
+				'#(?<![\w.\-{])((?:[a-z0-9-]+\.)*?)(' . $alternation . ')(?![\w\-]|\.(?!\s|$))#iu',
 				static function ( array $m ): string {
 					$prefix = strtolower( $m[1] );
 					if ( '' === $prefix ) {
@@ -295,8 +297,10 @@ final class Report {
 		);
 		foreach ( $replacements as $form => $placeholder ) {
 			// Whole path components only: "/tmp" must not match inside "/home/x/tmp"
-			// or right after an already inserted placeholder ("{abspath-parent}/tmp").
-			$pattern = '#(?<![\\w/\\\\.\\-}])' . preg_quote( $form, '#' ) . '(?=$|[/\\\\\\s:"\',;)])#mu';
+			// or right after an already inserted placeholder ("{abspath-parent}/tmp"). A full stop
+			// after the path ends it only where a sentence ends (a space or the end follows), not
+			// before an extension ("/srv/site.old").
+			$pattern = '#(?<![\\w/\\\\.\\-}])' . preg_quote( $form, '#' ) . '(?=$|[/\\\\\\s:"\',;)]|\\.(?:\\s|$))#mu';
 			$result  = preg_replace( $pattern, $placeholder, $text );
 			if ( null === $result ) {
 				return null;

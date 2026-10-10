@@ -73,7 +73,7 @@ final class WorkContext {
 			$job,
 			$cursor,
 			new Budget( $seconds, 32 * 1048576, false ),
-			new Logger( $this->root . '/logs/job.log', new Redactor() ),
+			new Logger( $this->root . '/logs/job.log', \WPCheckpoint\Support\TextMask::redact_only( new Redactor() ) ),
 			static function () use ( $self ): float {
 				$self->now += $self->tick;
 				return $self->now;

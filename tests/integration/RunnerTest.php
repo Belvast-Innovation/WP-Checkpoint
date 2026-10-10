@@ -734,23 +734,25 @@ final class RunnerTest extends WP_UnitTestCase {
 
 	public function test_the_database_clock_is_asked_again_after_a_failed_read_and_the_failure_is_logged(): void {
 		global $wpdb;
-		$repo  = new JobRepository( $this->dirs );
-		$saved = $wpdb;
-		$wpdb  = new class() {
-			/**
-			 * The clock query fails.
-			 *
-			 * @return null
-			 */
-			public function get_var() {
-				return null;
+		$repo   = new JobRepository( $this->dirs );
+		$failed = 0;
+		// The clock query fails, and nothing else: the storage log is written (and masked) on the real connection.
+		$filter = static function ( $sql ) use ( &$failed ) {
+			if ( 'SELECT UNIX_TIMESTAMP()' === trim( (string) $sql ) ) {
+				++$failed;
+				return 'SELECT UNIX_TIMESTAMP() FROM a_table_that_is_not_there_for_this_test';
 			}
+			return $sql;
 		};
+		add_filter( 'query', $filter );
+		$quiet = $wpdb->suppress_errors( true );
 		try {
 			$this->assertEqualsWithDelta( time(), $repo->now(), 2, 'the web server clock stands in for this call' );
 		} finally {
-			$wpdb = $saved;
+			$wpdb->suppress_errors( $quiet );
+			remove_filter( 'query', $filter );
 		}
+		$this->assertSame( 1, $failed, 'the control: the clock query was the one that failed' );
 		$log = (string) file_get_contents( $this->base . '/logs/storage.log' );
 		$this->assertStringContainsString( 'The database clock could not be read', $log );
 		// Not cached: the next call reads the database clock.
