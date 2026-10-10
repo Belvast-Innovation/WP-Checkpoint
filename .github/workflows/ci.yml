@@ -303,6 +303,8 @@ jobs:
       - run: php tests/Fixtures/Restore/meta-key-scan.php 127.0.0.1 33306 root password
       - run: php tests/Fixtures/Restore/rename-matrix.php 127.0.0.1 33306 root password
       - run: php tests/Fixtures/Jobs/fence-matrix.php 127.0.0.1 33306 root password
+      # Printed, not yet checked: the expectations are written from these outputs first (collation-matrix.expected.php).
+      - run: php tests/Fixtures/Restore/collation-matrix.php 127.0.0.1 33306 root password
 
   plugin-check:
     name: Plugin Check
