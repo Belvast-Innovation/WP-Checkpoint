@@ -84,6 +84,14 @@ final class RestoreCollationsTest extends RestoreTestCase {
 		return (string) $wpdb->get_var( $wpdb->prepare( 'SELECT TABLE_COLLATION FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s', $table ) );
 	}
 
+	/**
+	 * The collation of a column of a live table.
+	 */
+	private static function column_collation( string $table, string $column ): string {
+		global $wpdb;
+		return (string) $wpdb->get_var( $wpdb->prepare( 'SELECT COLLATION_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND COLUMN_NAME = %s', $table, $column ) );
+	}
+
 	public function test_a_collation_this_server_does_not_know_is_written_under_a_name_it_knows_logged_and_counted(): void {
 		$known = RestorePreflightStep::known_collations();
 		if ( ! isset( $known['utf8mb4_unicode_520_nopad_ci'] ) ) {
@@ -125,6 +133,37 @@ final class RestoreCollationsTest extends RestoreTestCase {
 		$this->assertStringContainsString( '"table":"' . $c . '","at":"table","from":"utf8mb4_0900_ai_ci","to":"utf8mb4_unicode_520_nopad_ci"', $log );
 		$this->assertStringContainsString( '"table":"' . $c . '","at":"column:v","from":"utf8mb4_0900_ai_ci","to":"utf8mb4_unicode_520_nopad_ci"', $log );
 		$this->assertSame( array( array( 'id' => '1', 'name' => 'a', 'v' => 'x' ), array( 'id' => '2', 'name' => 'B', 'v' => 'y' ) ), $this->rows_of( $temporary ), 'the rows came through' );
+	}
+
+	public function test_the_other_direction_a_mariadb_collation_is_written_under_the_pad_space_name_every_server_knows(): void {
+		$c    = $this->p . 'c';
+		$base = $this->backup(
+			array_merge( self::site_tables(), array( $c, $this->p . 'd' ) ),
+			static function ( string $table, array $chunks ) use ( $c ): array {
+				if ( $c === $table ) {
+					// As a MariaDB 11.4 backup writes a column: the PAD SPACE UCA 14 collation MySQL does not know.
+					$chunks[0] = str_replace( '`v` varchar(20) DEFAULT NULL', '`v` varchar(20) COLLATE utf8mb4_uca1400_ai_ci DEFAULT NULL', $chunks[0] );
+				}
+				return $chunks;
+			}
+		);
+		// As MySQL 5.7, 8.0, 8.4 and MariaDB 10.6 are: without the name (a no-op where the server has not got it).
+		$this->hide_collations( 'utf8mb4\\_uca1400\\_ai\\_ci' );
+		$hidden = RestorePreflightStep::known_collations();
+		$this->assertArrayNotHasKey( 'utf8mb4_uca1400_ai_ci', $hidden, 'the control: hidden from the check' );
+		$this->assertArrayHasKey( 'utf8mb4_unicode_520_ci', $hidden, 'the control: the candidate every supported server has' );
+		$job = $this->run_restore( $this->start_restore( $base ) );
+		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
+		$temporary = $this->temporary_names( $job )[ $c ];
+		$this->assertSame( 'utf8mb4_unicode_520_ci', self::column_collation( $temporary, 'v' ), 'the column, under the PAD SPACE name (the table keeps its own)' );
+		$log      = $this->log_of( $job );
+		$recorded = $job->options['recorded']['collations_mapped'] ?? null;
+		$this->assertStringContainsString( '"table":"' . $c . '","at":"column:v","from":"utf8mb4_uca1400_ai_ci","to":"utf8mb4_unicode_520_ci"', $log );
+		// Tables this server created without naming a collation carry its default, utf8mb4_uca1400_ai_ci on MariaDB
+		// 11.4 and later, and are mapped too: the count is whatever the log says, at least this column.
+		$this->assertIsInt( $recorded );
+		$this->assertGreaterThanOrEqual( 1, $recorded );
+		$this->assertSame( $recorded, substr_count( $log, 'A collation this server does not know is written under another name' ), 'the count is the mappings logged' );
 	}
 
 	public function test_a_collation_with_no_name_this_server_knows_stops_the_restore_before_any_table_is_created_naming_every_table(): void {

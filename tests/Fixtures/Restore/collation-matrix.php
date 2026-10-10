@@ -3,9 +3,10 @@
  * What the restore's collation check rests on, measured on a real server (CI runs it on every supported one):
  *
  * - probe: which of the two queries the check reads the server's collations with answers
- *   (RestorePreflightStep::COLLATIONS_SQL, else COLLATIONS_SQL_FALLBACK), and whether each name of interest is
- *   listed by it, and whether a table can be created with it (1273 when not). A name created but not listed, or
- *   listed but not created, is a server quirk the expectations record.
+ *   (RestorePreflightStep::COLLATIONS_SQL, else COLLATIONS_SQL_FALLBACK); and for each name of interest (CollationSamples)
+ *   whether that query lists it, and whether a table can be created with it (1273 when not). A name created but not
+ *   listed, or listed but not created, is a server quirk the expectations record. How many collations the probe lists
+ *   is printed, not expected: it differs between patch versions of one group (MariaDB 11.4 and 11.8).
  * - eq: for every collation of interest the server creates tables with, whether each pair of sample strings compares
  *   equal under it (1), not (0). The rule table (CollationRules) is judged on these vectors by
  *   tests/unit/Restore/CollationRulesMatrixTest.php: a candidate may add no equality the source lacks, may lose only
@@ -33,8 +34,10 @@ spl_autoload_register(
 	}
 );
 
+require __DIR__ . '/CollationSamples.php';
+
 use WPCheckpoint\Jobs\RestorePreflightStep;
-use WPCheckpoint\Restore\CollationRules;
+use WPCheckpoint\Tests\Fixtures\Restore\CollationSamples;
 
 mysqli_report( MYSQLI_REPORT_OFF );
 $db = mysqli_init();
@@ -46,77 +49,6 @@ mysqli_set_charset( $db, 'utf8mb4' );
 $schema = 'wpccm_' . bin2hex( random_bytes( 3 ) );
 mysqli_query( $db, 'CREATE DATABASE `' . $schema . '` CHARACTER SET utf8mb4' );
 mysqli_select_db( $db, $schema );
-
-/**
- * The names of interest: every source and candidate of the rule table, and the names the restore's design measured.
- *
- * @return string[]
- */
-function cm_names(): array {
-	$names = array(
-		'utf8mb4_general_ci',
-		'utf8mb4_unicode_ci',
-		'utf8mb4_unicode_520_ci',
-		'utf8mb4_unicode_520_nopad_ci',
-		'utf8mb4_bin',
-		'utf8mb4_nopad_bin',
-		'utf8mb4_0900_ai_ci',
-		'utf8mb4_0900_as_ci',
-		'utf8mb4_0900_as_cs',
-		'utf8mb4_0900_bin',
-		'utf8mb4_de_pb_0900_ai_ci',
-		'utf8mb4_ja_0900_as_cs',
-		'utf8mb4_uca1400_ai_ci',
-		'utf8mb4_uca1400_as_ci',
-		'utf8mb4_uca1400_as_cs',
-		'utf8mb4_uca1400_nopad_ai_ci',
-		'utf8mb4_uca1400_nopad_as_ci',
-		'utf8mb4_uca1400_nopad_as_cs',
-	);
-	foreach ( CollationRules::CANDIDATES as $source => $candidates ) {
-		$names[] = $source;
-		foreach ( $candidates as $candidate ) {
-			$names[] = $candidate;
-		}
-	}
-	return array_values( array_unique( $names ) );
-}
-
-/**
- * The sample pairs: id => [left, right, class]. The class says what the pair tells: "ci" differs by case only,
- * "ai" by accent only, "pad" by trailing spaces only, "other" anything else (recorded; judged as new or lost
- * equalities only).
- *
- * @return array<string, array{0: string, 1: string, 2: string}>
- */
-function cm_pairs(): array {
-	return array(
-		'case_ascii'       => array( 'a', 'A', 'ci' ),
-		'case_word'        => array( 'WordPress', 'wordpress', 'ci' ),
-		'case_accented'    => array( 'é', 'É', 'ci' ),
-		'accent_a'         => array( 'a', 'á', 'ai' ),
-		'accent_e'         => array( 'e', 'é', 'ai' ),
-		'accent_u_umlaut'  => array( 'u', 'ü', 'ai' ),
-		'accent_n_tilde'   => array( 'n', 'ñ', 'ai' ),
-		'accent_c_cedilla' => array( 'c', 'ç', 'ai' ),
-		'pad_one'          => array( 'a', 'a ', 'pad' ),
-		'pad_two'          => array( 'ab', 'ab  ', 'pad' ),
-		'nfc_nfd'          => array( "\u{E9}", "e\u{301}", 'other' ),
-		'eszett'           => array( 'ß', 'ss', 'other' ),
-		'ae_ligature'      => array( 'æ', 'ae', 'other' ),
-		'oe_slash'         => array( 'ø', 'o', 'other' ),
-		'turkish_dotted'   => array( 'i', 'İ', 'other' ),
-		'turkish_dotless'  => array( 'ı', 'I', 'other' ),
-		'greek_sigma'      => array( 'σ', 'ς', 'other' ),
-		'kana_width'       => array( 'ｱ', 'ア', 'other' ),
-		'kana_kind'        => array( 'あ', 'ア', 'other' ),
-		'cjk_two'          => array( '中', '國', 'other' ),
-		'emoji_two'        => array( '😀', '😁', 'other' ),
-		'emoji_skin'       => array( '👍', '👍🏽', 'other' ),
-		'digits'           => array( '1', '１', 'other' ),
-		'control'          => array( 'a', 'b', 'other' ),
-	);
-}
 
 /**
  * Run a statement: ok, or E and the error number.
@@ -170,10 +102,7 @@ foreach ( array( 'full' => RestorePreflightStep::COLLATIONS_SQL, 'fallback' => R
 		break;
 	}
 }
-$cases['probe'] = array(
-	'query' => $probe,
-	'count' => count( $listed ),
-);
+$cases['probe'] = array( 'query' => $probe );
 if ( '' === $probe ) {
 	fwrite( STDERR, "Neither query of the check answers on this server.\n" );
 	mysqli_query( $db, 'DROP DATABASE `' . $schema . '`' );
@@ -182,7 +111,7 @@ if ( '' === $probe ) {
 
 // Each name: listed by the probe, and accepted in CREATE TABLE.
 $knows = array();
-foreach ( cm_names() as $name ) {
+foreach ( CollationSamples::names() as $name ) {
 	$created = cm_run( $db, 'CREATE TABLE t (a VARCHAR(10)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=' . $name );
 	mysqli_query( $db, 'DROP TABLE IF EXISTS t' );
 	$knows[ $name ]           = 'ok' === $created;
@@ -193,12 +122,12 @@ foreach ( cm_names() as $name ) {
 }
 
 // The equality vectors, for every name the server creates tables with.
-foreach ( cm_names() as $name ) {
+foreach ( CollationSamples::names() as $name ) {
 	if ( ! $knows[ $name ] ) {
 		continue;
 	}
 	$vector = array();
-	foreach ( cm_pairs() as $id => $pair ) {
+	foreach ( CollationSamples::pairs() as $id => $pair ) {
 		$result = mysqli_query( $db, "SELECT _utf8mb4'" . mysqli_real_escape_string( $db, $pair[0] ) . "' COLLATE " . $name . " = _utf8mb4'" . mysqli_real_escape_string( $db, $pair[1] ) . "' COLLATE " . $name );
 		$row    = $result ? mysqli_fetch_row( $result ) : null;
 		$vector[ $id ] = null === $row ? 'E' . mysqli_errno( $db ) : (string) (int) $row[0];
@@ -229,15 +158,16 @@ $group    = cm_group( $version );
 if ( ! in_array( '--check', $argv, true ) ) {
 	echo json_encode(
 		array(
-			'server' => $version,
-			'group'  => $group,
-			'cases'  => $observed,
+			'server'     => $version,
+			'group'      => $group,
+			'collations' => count( $listed ),
+			'cases'      => $observed,
 		),
 		JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
 	), "\n";
 	exit( 0 );
 }
-$expected = require __DIR__ . '/collation-matrix.expected.php';
+$expected = ( require __DIR__ . '/collation-matrix.expected.php' )['servers'];
 if ( ! isset( $expected[ $group ] ) ) {
 	fwrite( STDERR, 'No expectations for server ' . $version . ' (' . $group . "): measure it and add a group.\n" );
 	exit( 1 );
