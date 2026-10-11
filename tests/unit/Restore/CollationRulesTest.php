@@ -37,6 +37,15 @@ final class CollationRulesTest extends TestCase {
 		$this->assertNull( CollationRules::resolve( 'utf8mb4_uca1400_as_ci', $mysql_57 ), 'nor an accent-sensitive one' );
 	}
 
+	public function test_writing_a_pad_space_collation_as_mysqls_no_pad_one_is_known_to_change_trailing_spaces(): void {
+		$this->assertTrue( CollationRules::loses_padding( 'utf8mb4_uca1400_as_ci', 'utf8mb4_0900_as_ci' ) );
+		$this->assertTrue( CollationRules::loses_padding( 'UTF8MB4_UCA1400_AS_CS', 'utf8mb4_0900_as_cs' ), 'any case' );
+		$this->assertFalse( CollationRules::loses_padding( 'utf8mb4_uca1400_nopad_as_ci', 'utf8mb4_0900_as_ci' ), 'NO PAD to NO PAD' );
+		$this->assertFalse( CollationRules::loses_padding( 'utf8mb4_uca1400_ai_ci', 'utf8mb4_unicode_520_ci' ), 'PAD SPACE to PAD SPACE' );
+		$this->assertFalse( CollationRules::loses_padding( 'utf8mb4_0900_ai_ci', 'utf8mb4_uca1400_nopad_ai_ci' ) );
+		$this->assertFalse( CollationRules::loses_padding( 'no_such', 'utf8mb4_0900_as_ci' ), 'not a row' );
+	}
+
 	public function test_a_name_without_a_usable_candidate_has_no_replacement(): void {
 		$mysql_57 = CollationRules::set( array( 'utf8mb4_unicode_520_ci', 'utf8mb4_general_ci' ) );
 		$this->assertNull( CollationRules::resolve( 'utf8mb4_0900_ai_ci', $mysql_57 ), 'MySQL 5.7 has no NO PAD collation' );
