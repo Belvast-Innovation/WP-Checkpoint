@@ -15,10 +15,18 @@ use WPCheckpoint\Restore\CollationRules;
  */
 final class CollationSamples {
 
-	const CASE   = 'ci';
-	const ACCENT = 'ai';
-	const PAD    = 'pad';
-	const OTHER  = 'other';
+	const CASE            = 'ci';
+	const ACCENT          = 'ai';
+	const PAD             = 'pad';
+	const UNICODE_VERSION = 'unicode_version';
+	const OTHER           = 'other';
+
+	/**
+	 * The classes a candidate may lose equalities of (when recorded in the expectations): a difference between UCA
+	 * versions on single characters, and the trailing-space equality when PAD SPACE is written as NO PAD. A loss of
+	 * any other class refuses the row, recorded or not.
+	 */
+	const LOSS_CLASSES = array( self::UNICODE_VERSION, self::PAD );
 
 	/**
 	 * The names of interest: the names the restore's design measured, and every source and candidate of the rule
@@ -58,8 +66,10 @@ final class CollationSamples {
 
 	/**
 	 * The sample pairs: id => [left, right, class]. The class says what the pair tells: CASE differs by case only,
-	 * ACCENT by accent only, PAD by trailing spaces only, OTHER anything else (recorded; judged as new or lost
-	 * equalities only).
+	 * ACCENT by accent only, PAD by trailing spaces only, UNICODE_VERSION two characters that UCA versions weigh
+	 * differently (two supplementary-plane emoji: equal under UCA 4.0.0's utf8mb4_unicode_ci, which has no weights for
+	 * them, apart from UCA 5.2.0 on), OTHER anything else (recorded; judged as new or lost equalities only). A pair of
+	 * a class in LOSS_CLASSES must be witnessed (witnesses()), or the label is only a claim.
 	 *
 	 * @return array<string, array{0: string, 1: string, 2: string}>
 	 */
@@ -85,11 +95,97 @@ final class CollationSamples {
 			'kana_width'       => array( 'ｱ', 'ア', self::OTHER ),
 			'kana_kind'        => array( 'あ', 'ア', self::OTHER ),
 			'cjk_two'          => array( '中', '國', self::OTHER ),
-			'emoji_two'        => array( '😀', '😁', self::OTHER ),
+			'emoji_two'        => array( '😀', '😁', self::UNICODE_VERSION ),
 			'emoji_skin'       => array( '👍', '👍🏽', self::OTHER ),
 			'digits'           => array( '1', '１', self::OTHER ),
 			'control'          => array( 'a', 'b', self::OTHER ),
 		);
+	}
+
+	/**
+	 * The collation pairs that differ only in what $class names, which a sample pair of that class must be told apart
+	 * by: for UNICODE_VERSION, two UCA versions with the same pad mode; for PAD, the PAD SPACE and NO PAD variants of
+	 * one version.
+	 *
+	 * @param string $class A class of LOSS_CLASSES.
+	 * @return array<int, array{0: string, 1: string}>
+	 */
+	public static function witnesses( string $class ): array {
+		if ( self::UNICODE_VERSION === $class ) {
+			return array(
+				array( 'utf8mb4_unicode_ci', 'utf8mb4_unicode_520_ci' ),
+				array( 'utf8mb4_unicode_520_ci', 'utf8mb4_uca1400_ai_ci' ),
+				array( 'utf8mb4_unicode_520_nopad_ci', 'utf8mb4_uca1400_nopad_ai_ci' ),
+				array( 'utf8mb4_unicode_520_nopad_ci', 'utf8mb4_0900_ai_ci' ),
+				array( 'utf8mb4_0900_ai_ci', 'utf8mb4_uca1400_nopad_ai_ci' ),
+			);
+		}
+		if ( self::PAD === $class ) {
+			return array(
+				array( 'utf8mb4_unicode_520_ci', 'utf8mb4_unicode_520_nopad_ci' ),
+				array( 'utf8mb4_uca1400_ai_ci', 'utf8mb4_uca1400_nopad_ai_ci' ),
+				array( 'utf8mb4_uca1400_as_ci', 'utf8mb4_uca1400_nopad_as_ci' ),
+				array( 'utf8mb4_uca1400_as_cs', 'utf8mb4_uca1400_nopad_as_cs' ),
+				array( 'utf8mb4_bin', 'utf8mb4_nopad_bin' ),
+			);
+		}
+		return array();
+	}
+
+	/**
+	 * The sample pairs of a loss class that no server witnesses, as messages: on every server (group => observations,
+	 * eq.<collation>.<pair> => '1' | '0') that creates both collations of at least one witness pair of the class, at
+	 * least one witness pair must compare the sample pair differently; and at least one server must have been able
+	 * to. A server with no witness pair created is not asked. A label without a witness is only a claim: a wrongly
+	 * labelled pair, or a measurement that could not see the difference (emoji sent over a connection whose
+	 * character set turns them into question marks), is found here.
+	 *
+	 * @param array<string, array<string, string>>           $servers Group => observations.
+	 * @param array<string, array{0: string, 1: string, 2: string}> $pairs   The sample pairs (pairs() unless a test says otherwise).
+	 * @return string[]
+	 */
+	public static function unwitnessed( array $servers, array $pairs = null ): array {
+		$problems = array();
+		foreach ( null === $pairs ? self::pairs() : $pairs as $id => $pair ) {
+			$class = $pair[2];
+			if ( ! in_array( $class, self::LOSS_CLASSES, true ) ) {
+				continue;
+			}
+			$able = array();
+			foreach ( $servers as $group => $observed ) {
+				$seen = false;
+				foreach ( self::witnesses( $class ) as $witness ) {
+					$a = $observed[ 'eq.' . $witness[0] . '.' . $id ] ?? null;
+					$b = $observed[ 'eq.' . $witness[1] . '.' . $id ] ?? null;
+					if ( null === $a || null === $b ) {
+						continue;
+					}
+					$seen = true;
+					if ( $a !== $b ) {
+						continue 2;
+					}
+				}
+				if ( $seen ) {
+					$able[] = $group;
+				}
+			}
+			if ( array() !== $able ) {
+				$problems[] = "$id ($class): no witness pair tells it apart on " . implode( ', ', $able );
+			} elseif ( array() === array_filter(
+				$servers,
+				static function ( array $observed ) use ( $class, $id ): bool {
+					foreach ( self::witnesses( $class ) as $witness ) {
+						if ( isset( $observed[ 'eq.' . $witness[0] . '.' . $id ], $observed[ 'eq.' . $witness[1] . '.' . $id ] ) ) {
+							return true;
+						}
+					}
+					return false;
+				}
+			) ) {
+				$problems[] = "$id ($class): no server creates a witness pair for it";
+			}
+		}
+		return $problems;
 	}
 
 	/**

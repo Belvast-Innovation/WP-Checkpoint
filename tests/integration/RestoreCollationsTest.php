@@ -166,6 +166,32 @@ final class RestoreCollationsTest extends RestoreTestCase {
 		$this->assertSame( $recorded, substr_count( $log, 'A collation this server does not know is written under another name' ), 'the count is the mappings logged' );
 	}
 
+	public function test_writing_a_pad_space_collation_as_a_no_pad_one_says_so_in_the_log(): void {
+		$known = RestorePreflightStep::known_collations();
+		if ( ! isset( $known['utf8mb4_0900_as_ci'] ) ) {
+			$this->markTestSkipped( 'The server has no utf8mb4_0900_as_ci to map to (MySQL 8, MariaDB 11.4.5 and later have).' );
+		}
+		$c    = $this->p . 'c';
+		$base = $this->backup(
+			array_merge( self::site_tables(), array( $c, $this->p . 'd' ) ),
+			static function ( string $table, array $chunks ) use ( $c ): array {
+				if ( $c === $table ) {
+					// A MariaDB 10.11 backup's accent-sensitive PAD SPACE column, which MySQL writes NO PAD.
+					$chunks[0] = str_replace( '`v` varchar(20) DEFAULT NULL', '`v` varchar(20) COLLATE utf8mb4_uca1400_as_ci DEFAULT NULL', $chunks[0] );
+				}
+				return $chunks;
+			}
+		);
+		$this->hide_collations( 'utf8mb4\\_uca1400\\_as\\_ci' );
+		$this->assertArrayNotHasKey( 'utf8mb4_uca1400_as_ci', RestorePreflightStep::known_collations(), 'the control: hidden from the check' );
+		$job = $this->run_restore( $this->start_restore( $base ) );
+		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
+		$log = $this->log_of( $job );
+		$this->assertStringContainsString( 'A collation this server does not know is written under another name, and the comparison of trailing spaces changes (PAD SPACE to NO PAD)', $log );
+		$this->assertStringContainsString( '"table":"' . $c . '","at":"column:v","from":"utf8mb4_uca1400_as_ci","to":"utf8mb4_0900_as_ci"', $log );
+		$this->assertSame( 1, substr_count( $log, 'trailing spaces' ), 'said for this mapping only' );
+	}
+
 	public function test_a_collation_with_no_name_this_server_knows_stops_the_restore_before_any_table_is_created_naming_every_table(): void {
 		$c    = $this->p . 'c';
 		$d    = $this->p . 'd';

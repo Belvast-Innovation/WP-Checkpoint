@@ -10,8 +10,11 @@
  * - eq: for every collation of interest the server creates tables with, whether each pair of sample strings compares
  *   equal under it (1), not (0). The rule table (CollationRules) is judged on these vectors by
  *   tests/unit/Restore/CollationRulesMatrixTest.php: a candidate may add no equality the source lacks, may lose only
- *   the equalities recorded as known differences, and must keep the source's sensitivity (the "ci" pairs equal under
- *   a _ci source, the "ai" pairs equal under an _ai one, each unequal under _cs and _as).
+ *   the equalities recorded as known differences, of the two classes a loss may have (a difference between UCA
+ *   versions, trailing spaces when PAD SPACE is written as NO PAD), and must keep the source's sensitivity (the "ci"
+ *   pairs equal under a _ci source, the "ai" pairs equal under an _ai one, each unequal under _cs and _as). With
+ *   --check, a sample pair of a loss class that this server could witness and does not (CollationSamples::witnesses())
+ *   fails the check: the label must be measured, not claimed.
  *
  * Usage: php collation-matrix.php <host> <port> <user> <password> [--check]
  * Without --check the observations are printed as JSON, to be put into collation-matrix.expected.php under the
@@ -170,6 +173,12 @@ if ( ! in_array( '--check', $argv, true ) ) {
 $expected = ( require __DIR__ . '/collation-matrix.expected.php' )['servers'];
 if ( ! isset( $expected[ $group ] ) ) {
 	fwrite( STDERR, 'No expectations for server ' . $version . ' (' . $group . "): measure it and add a group.\n" );
+	exit( 1 );
+}
+// The labels first: a loss class on a sample pair must be witnessed by this server when it can, else the label is a claim.
+$unwitnessed = CollationSamples::unwitnessed( array( $group => $observed ) + $expected );
+if ( array() !== $unwitnessed ) {
+	fwrite( STDERR, 'Server ' . $version . ' (' . $group . ') does not witness the class of every sample pair:' . "\n    " . implode( "\n    ", $unwitnessed ) . "\n" );
 	exit( 1 );
 }
 $differences = array();

@@ -745,7 +745,9 @@ final class RestorePreflightStep implements Step {
 						$map[ $name ] = $to;
 						++$cursor['mapped'];
 						$context->logger()->info(
-							'A collation this server does not know is written under another name',
+							CollationRules::loses_padding( $name, $to )
+								? 'A collation this server does not know is written under another name, and the comparison of trailing spaces changes (PAD SPACE to NO PAD)'
+								: 'A collation this server does not know is written under another name',
 							array(
 								'table' => (string) $definition['table'],
 								'at'    => (string) $found['at'],

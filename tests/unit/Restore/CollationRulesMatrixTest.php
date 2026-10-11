@@ -10,10 +10,14 @@ use Yoast\PHPUnitPolyfills\TestCases\TestCase;
  * The rule table against what the servers measured (collation-matrix.expected.php, written from
  * collation-matrix.php on every supported server): for every row, on every server that creates the candidate, the
  * candidate makes no two sample strings equal that the source keeps apart; the equalities it loses are exactly the
- * recorded ones; and it keeps the source's sensitivity (the case pairs and the accent pairs compare as under the
- * source). The source's own behaviour is read where the name is the collation itself, not an alias. A row whose source
- * or candidate no server was measured with is refused too: a name nobody can create is a dead row, and one measured
- * nowhere natively has nothing to be judged against.
+ * recorded ones, and of the two classes a loss may have (CollationSamples::LOSS_CLASSES: a difference between UCA
+ * versions, trailing spaces when PAD SPACE is written as NO PAD; any other class refuses the row, recorded or not);
+ * and it keeps the source's sensitivity (the case pairs and the accent pairs compare as under the source). The
+ * source's own behaviour is read where the name is the collation itself, not an alias. A row whose source or
+ * candidate no server was measured with is refused too: a name nobody can create is a dead row, and one measured
+ * nowhere natively has nothing to be judged against. The rows losing the trailing-space equality are exactly
+ * CollationRules::PAD_LOSS, which the restore says in the job log. And a loss class on a sample pair is a claim until
+ * a server witnesses it (CollationSamples::unwitnessed()).
  */
 final class CollationRulesMatrixTest extends TestCase {
 
@@ -79,9 +83,10 @@ final class CollationRulesMatrixTest extends TestCase {
 	 *
 	 * @param array<string, string[]>                                                                                                      $rules    Source => candidates.
 	 * @param array{native: array<string, string[]>, lost: array<string, array<string, string[]>>, servers: array<string, array<string, string>>} $expected The expectations.
+	 * @param array<string, string[]>                                                                                                      $pad_loss The rows said to lose the trailing-space equality.
 	 * @return string[]
 	 */
-	public static function problems( array $rules, array $expected ): array {
+	public static function problems( array $rules, array $expected, array $pad_loss = CollationRules::PAD_LOSS ): array {
 		$problems = array();
 		$servers  = $expected['servers'];
 		$pairs    = CollationSamples::pairs();
@@ -151,6 +156,20 @@ final class CollationRulesMatrixTest extends TestCase {
 					if ( $lost !== $known ) {
 						$problems[] = "$source -> $candidate on $group: loses [" . implode( ', ', $lost ) . '], recorded as [' . implode( ', ', $known ) . ']';
 					}
+					foreach ( $lost as $id ) {
+						if ( ! in_array( $pairs[ $id ][2], CollationSamples::LOSS_CLASSES, true ) ) {
+							$problems[] = "$source -> $candidate on $group: loses $id, of class {$pairs[ $id ][2]}, which no row may lose";
+						}
+					}
+					$pad_lost = array() !== array_filter(
+						$lost,
+						static function ( string $id ) use ( $pairs ): bool {
+							return CollationSamples::PAD === $pairs[ $id ][2];
+						}
+					);
+					if ( $pad_lost !== in_array( $candidate, $pad_loss[ $source ] ?? array(), true ) ) {
+						$problems[] = "$source -> $candidate on $group: " . ( $pad_lost ? 'loses the trailing-space equality and is not in PAD_LOSS' : 'is in PAD_LOSS and does not lose the trailing-space equality' );
+					}
 					if ( array() !== $class ) {
 						$problems[] = "$source -> $candidate on $group: changes the source's sensitivity on: " . implode( ', ', $class );
 					}
@@ -164,6 +183,13 @@ final class CollationRulesMatrixTest extends TestCase {
 				}
 			}
 		}
+		foreach ( $pad_loss as $source => $candidates ) {
+			foreach ( $candidates as $candidate ) {
+				if ( ! in_array( $candidate, $rules[ $source ] ?? array(), true ) ) {
+					$problems[] = "$source -> $candidate: in PAD_LOSS but not a row of the table";
+				}
+			}
+		}
 		return $problems;
 	}
 
@@ -172,6 +198,31 @@ final class CollationRulesMatrixTest extends TestCase {
 		$this->assertSame( array(), self::problems( CollationRules::CANDIDATES, $expected ) );
 		$this->assertGreaterThanOrEqual( 6, count( $expected['servers'] ), 'the control: the matrix covers the server groups' );
 		$this->assertGreaterThanOrEqual( 10, count( CollationRules::CANDIDATES ), 'the control: the table is not empty' );
+	}
+
+	public function test_every_loss_class_on_a_sample_pair_is_witnessed_by_a_server(): void {
+		$expected = self::expected();
+		$this->assertSame( array(), CollationSamples::unwitnessed( $expected['servers'] ) );
+		$pairs = CollationSamples::pairs();
+		$this->assertSame( CollationSamples::UNICODE_VERSION, $pairs['emoji_two'][2], 'the control: a pair of each loss class is in the sample' );
+		$this->assertSame( CollationSamples::PAD, $pairs['pad_one'][2] );
+		// The control for the reverse: a case pair relabelled as a version difference has no witness (no two UCA
+		// versions compare a/A differently), and a server whose emoji were sent as question marks cannot witness.
+		$relabelled                  = $pairs;
+		$relabelled['case_ascii'][2] = CollationSamples::UNICODE_VERSION;
+		$this->assertSame( array( 'case_ascii (unicode_version): no witness pair tells it apart on ' . implode( ', ', array_keys( $expected['servers'] ) ) ), CollationSamples::unwitnessed( $expected['servers'], $relabelled ) );
+		$blind = $expected['servers'];
+		foreach ( array_keys( $blind['mysql-8'] ) as $key ) {
+			if ( preg_match( '/^eq\\..*\\.emoji_two$/', $key ) ) {
+				$blind['mysql-8'][ $key ] = '1';
+			}
+		}
+		$this->assertSame( array( 'emoji_two (unicode_version): no witness pair tells it apart on mysql-8' ), CollationSamples::unwitnessed( $blind ) );
+		// A MySQL server alone has no NO PAD variant to witness the pad pairs with (--check merges the other servers' expectations for that).
+		$no_pad_witness = array( 'pad_one (pad): no server creates a witness pair for it', 'pad_two (pad): no server creates a witness pair for it' );
+		$this->assertSame( array_merge( $no_pad_witness, array( 'emoji_two (unicode_version): no witness pair tells it apart on mysql-8' ) ), CollationSamples::unwitnessed( array( 'mysql-8' => $blind['mysql-8'] ) ), 'the one server checked alone' );
+		$this->assertSame( $no_pad_witness, CollationSamples::unwitnessed( array( 'mysql-8' => $expected['servers']['mysql-8'] ) ), 'the control: the measured server alone witnesses the version pair' );
+		$this->assertSame( array(), CollationSamples::unwitnessed( array( 'mariadb-12' => $expected['servers']['mariadb-12'] ) ), 'the control: a MariaDB server alone witnesses both classes' );
 	}
 
 	public function test_every_name_of_the_table_was_measured_on_every_server(): void {
@@ -241,6 +292,14 @@ final class CollationRulesMatrixTest extends TestCase {
 				},
 				'the servers it is native on disagree',
 			),
+			'a recorded loss of a class no row may lose'                 => array(
+				$language_specific,
+				static function ( array $expected ): array {
+					$expected['lost'] = array( 'utf8mb4_ja_0900_as_cs' => array( 'utf8mb4_uca1400_nopad_as_cs' => array( 'digits', 'kana_kind', 'kana_width' ) ) );
+					return $expected;
+				},
+				'utf8mb4_ja_0900_as_cs -> utf8mb4_uca1400_nopad_as_cs on mariadb-10.11: loses digits, of class other, which no row may lose',
+			),
 			'a source the sample does not show the sensitivity of'      => array(
 				array( 'utf8mb4_0900_as_cs' => array( 'utf8mb4_uca1400_nopad_as_cs' ) ),
 				static function ( array $expected ): array {
@@ -250,6 +309,17 @@ final class CollationRulesMatrixTest extends TestCase {
 				'the sample pair case_word does not show what the name promises for its ci pairs',
 			),
 		);
+	}
+
+	public function test_the_pad_loss_table_is_exactly_the_rows_that_lose_the_trailing_space_equality(): void {
+		$expected = self::expected();
+		$this->assertSame( array(), self::problems( CollationRules::CANDIDATES, $expected ), 'the control' );
+		$problems = implode( "\n", self::problems( CollationRules::CANDIDATES, $expected, array( 'utf8mb4_uca1400_as_ci' => array( 'utf8mb4_0900_as_ci' ) ) ) );
+		$this->assertStringContainsString( 'utf8mb4_uca1400_as_cs -> utf8mb4_0900_as_cs on mysql-8: loses the trailing-space equality and is not in PAD_LOSS', $problems );
+		$problems = implode( "\n", self::problems( CollationRules::CANDIDATES, $expected, CollationRules::PAD_LOSS + array( 'utf8mb4_uca1400_nopad_as_ci' => array( 'utf8mb4_0900_as_ci' ) ) ) );
+		$this->assertStringContainsString( 'utf8mb4_uca1400_nopad_as_ci -> utf8mb4_0900_as_ci on mysql-8: is in PAD_LOSS and does not lose the trailing-space equality', $problems );
+		$problems = implode( "\n", self::problems( CollationRules::CANDIDATES, $expected, CollationRules::PAD_LOSS + array( 'utf8mb4_0900_bin' => array( 'utf8mb4_bin' ) ) ) );
+		$this->assertStringContainsString( 'utf8mb4_0900_bin -> utf8mb4_bin: in PAD_LOSS but not a row of the table', $problems );
 	}
 
 	/**

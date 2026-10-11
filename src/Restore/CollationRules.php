@@ -54,6 +54,28 @@ final class CollationRules {
 	);
 
 	/**
+	 * Source collation (lowercase) => the candidates (of CANDIDATES) under which the comparison of trailing spaces
+	 * changes: the source is PAD SPACE, the candidate NO PAD. Measured like the rows themselves; CollationRulesMatrixTest
+	 * holds this table to exactly the rows whose lost equalities are the trailing-space pairs. The restore says so in
+	 * the job log when it writes one of these.
+	 */
+	const PAD_LOSS = array(
+		'utf8mb4_uca1400_as_ci' => array( 'utf8mb4_0900_as_ci' ),
+		'utf8mb4_uca1400_as_cs' => array( 'utf8mb4_0900_as_cs' ),
+	);
+
+	/**
+	 * Whether writing $from as $to changes the comparison of trailing spaces (PAD SPACE to NO PAD).
+	 *
+	 * @param string $from The backup's collation, any case.
+	 * @param string $to   The name written instead.
+	 * @return bool
+	 */
+	public static function loses_padding( string $from, string $to ): bool {
+		return in_array( strtolower( $to ), self::PAD_LOSS[ strtolower( $from ) ] ?? array(), true );
+	}
+
+	/**
 	 * The name to write for $name on a server that knows $known: $name itself when the server knows it, else the first
 	 * candidate it knows, else null (no replacement).
 	 *
