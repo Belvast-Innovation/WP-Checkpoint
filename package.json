@@ -11,5 +11,11 @@
   },
   "devDependencies": {
     "@wordpress/env": "^11.15.0"
+  },
+  "overrides": {
+    "js-yaml": {
+      "argparse": "^2.0.1"
+    },
+    "qs": "^6.16.0"
   }
 }
