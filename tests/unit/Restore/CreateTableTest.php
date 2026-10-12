@@ -68,6 +68,13 @@ final class CreateTableTest extends TestCase {
 		ksort( $expected );
 		$this->assertSame( $expected, $keys );
 
+		// Every COLLATE the server wrote, in the order written: a column's, and the table option last when there is one.
+		preg_match_all( '/\bCOLLATE(?:=| )([a-z0-9_]+)/', $shown['wp_child;x'], $m );
+		$this->assertSame( $m[1], array_column( $child->collations(), 'name' ), 'as this server writes them (MySQL 5.7 writes none)' );
+		if ( array() !== $m[1] ) {
+			$last = $child->collations()[ count( $m[1] ) - 1 ];
+			$this->assertSame( false !== strpos( $shown['wp_child;x'], ' COLLATE=' ) ? CreateTable::AT_TABLE : 'column:meta', $last['at'] );
+		}
 		$part = self::read( $shown['wp_part'], 'wp_part' );
 		$this->assertSame( array( 'id', 'd' ), $part->primary_key(), 'partitioned, in a versioned comment on MySQL' );
 		if ( isset( $shown['wp_inv'] ) ) {
@@ -113,6 +120,74 @@ final class CreateTableTest extends TestCase {
 		};
 		$this->assertSame( $strip( $shown['wp_child;x'] ), $strip( $sql ) );
 		$this->assertNotEmpty( $names );
+	}
+
+	/**
+	 * A statement naming collations everywhere one can stand, and the same words where they are only text.
+	 */
+	const COLLATED = "CREATE TABLE `wp_c` (\n"
+		. "  `id` int NOT NULL,\n"
+		. "  `name` varchar(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL COMMENT 'kept COLLATE utf8mb4_zzz',\n"
+		. "  `note` varchar(20) DEFAULT 'COLLATE utf8mb4_zzz',\n"
+		. "  `up` varchar(20) GENERATED ALWAYS AS (upper(`name` collate utf8mb4_0900_as_cs)) VIRTUAL,\n"
+		. "  `d` varchar(20) DEFAULT (_utf8mb4'x' COLLATE `utf8mb4_general_ci`),\n"
+		. "  PRIMARY KEY (`id`),\n"
+		. "  KEY `fx` (((`name` COLLATE utf8mb4_0900_ai_ci))),\n"
+		. "  CONSTRAINT `c1` CHECK ((`name` COLLATE 'utf8mb4_bin') <> _utf8mb4'x'),\n"
+		. "  CHECK ((`note` COLLATE utf8mb4_0900_ai_ci) <> 'y')\n"
+		. ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='COLLATE utf8mb4_zzz'";
+
+	public function test_every_collation_is_found_with_where_it_stands_and_text_is_not(): void {
+		$create = self::read( self::COLLATED, 'wp_c' );
+		$this->assertSame(
+			array(
+				array( 'name' => 'utf8mb4_bin', 'at' => 'column:name' ),
+				array( 'name' => 'utf8mb4_0900_as_cs', 'at' => CreateTable::AT_EXPRESSION ),
+				array( 'name' => 'utf8mb4_general_ci', 'at' => CreateTable::AT_EXPRESSION ),
+				array( 'name' => 'utf8mb4_0900_ai_ci', 'at' => CreateTable::AT_EXPRESSION ),
+				array( 'name' => 'utf8mb4_bin', 'at' => CreateTable::AT_CHECK ),
+				array( 'name' => 'utf8mb4_0900_ai_ci', 'at' => CreateTable::AT_CHECK ),
+				array( 'name' => 'utf8mb4_0900_ai_ci', 'at' => CreateTable::AT_TABLE ),
+			),
+			$create->collations(),
+			'a column attribute, a generated column, a DEFAULT expression, a functional index, a named and an unnamed CHECK, the table option; never COMMENT or a DEFAULT string'
+		);
+		$this->assertSame( array(), self::read( 'CREATE TABLE `wp_a` (`id` int NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB', 'wp_a' )->collations(), 'the control: none when none is named' );
+	}
+
+	public function test_the_rewrite_renames_only_the_collations_it_is_given_bare_and_in_place(): void {
+		$create  = self::read( self::COLLATED, 'wp_c' );
+		$rewrite = $create->rewrite(
+			'wcptmp_c',
+			'wp_c',
+			0,
+			new ConstraintNames( '0000' ),
+			self::map( array() ),
+			array(
+				'UTF8MB4_0900_AI_CI' => 'utf8mb4_uca1400_nopad_ai_ci', // Any case.
+				'utf8mb4_0900_as_cs' => 'utf8mb4_uca1400_nopad_as_cs',
+				'utf8mb4_bin'        => 'utf8mb4_bin', // The same name: nothing to write.
+			)
+		);
+		$sql     = $rewrite['sql'];
+		$this->assertStringContainsString( 'AS (upper(`name` collate utf8mb4_uca1400_nopad_as_cs))', $sql, 'the generated column' );
+		$this->assertStringContainsString( 'KEY `fx` (((`name` COLLATE utf8mb4_uca1400_nopad_ai_ci)))', $sql, 'the functional index' );
+		$this->assertStringContainsString( 'CHECK ((`note` COLLATE utf8mb4_uca1400_nopad_ai_ci) <> \'y\')', $sql, 'the unnamed CHECK' );
+		$this->assertStringContainsString( 'COLLATE=utf8mb4_uca1400_nopad_ai_ci COMMENT=\'COLLATE utf8mb4_zzz\'', $sql, 'the table option, bare; the comment as it was' );
+		$this->assertStringContainsString( "COLLATE utf8mb4_bin DEFAULT NULL COMMENT 'kept COLLATE utf8mb4_zzz'", $sql, 'a name given itself stays as it was' );
+		$this->assertStringContainsString( "CHECK ((`name` COLLATE 'utf8mb4_bin') <> _utf8mb4'x')", $sql, 'a name written as a string, not renamed, keeps its quotes' );
+		$this->assertStringContainsString( "DEFAULT 'COLLATE utf8mb4_zzz'", $sql, 'a DEFAULT string is text' );
+		$this->assertStringNotContainsString( 'utf8mb4_0900_', $sql, 'none of the renamed names is left' );
+		// Every byte outside the names is the original's: the renamed names put back give the original.
+		$back = str_replace( array( 'utf8mb4_uca1400_nopad_ai_ci', 'utf8mb4_uca1400_nopad_as_cs', '`wcptmp_c`', '`wcp0000_0_c1`' ), array( 'utf8mb4_0900_ai_ci', 'utf8mb4_0900_as_cs', '`wp_c`', '`c1`' ), $sql );
+		$this->assertSame( self::COLLATED, $back );
+		$quoted = self::read( str_replace( "COLLATE 'utf8mb4_bin') <>", "COLLATE 'utf8mb4_0900_bin') <>", self::COLLATED ), 'wp_c' )->rewrite( 'wcptmp_c', 'wp_c', 0, new ConstraintNames( '0000' ), self::map( array() ), array( 'utf8mb4_0900_bin' => 'utf8mb4_nopad_bin' ) )['sql'];
+		$this->assertStringContainsString( 'CHECK ((`name` COLLATE utf8mb4_nopad_bin) <>', $quoted, 'a name written as a string is renamed whole, bare' );
+	}
+
+	public function test_collate_without_a_name_is_refused(): void {
+		$this->expectException( Refused::class );
+		self::read( 'CREATE TABLE `wp_a` (`id` int NOT NULL, `n` varchar(9) COLLATE, PRIMARY KEY (`id`)) ENGINE=InnoDB', 'wp_a' );
 	}
 
 	public function test_a_reference_to_a_table_outside_the_restore_keeps_its_name(): void {

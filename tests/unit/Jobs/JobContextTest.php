@@ -18,7 +18,7 @@ final class JobContextTest extends TestCase {
 	/** @var int */
 	private $memory = 10485760; // 10 MB
 
-	private function context( array $cursor = array(), int $seconds = 10, int $memory_budget = 33554432, int $memory_limit = -1, $checkpoint = null ): JobContext {
+	private function context( array $cursor = array(), int $seconds = 10, int $memory_budget = 33554432, int $memory_limit = -1, $checkpoint = null, $record = null ): JobContext {
 		$job     = new Job();
 		$job->id = 5;
 		$logger  = new Logger( sys_get_temp_dir() . '/wpcheckpoint-context-' . bin2hex( random_bytes( 4 ) ) . '.log', \WPCheckpoint\Support\TextMask::redact_only( new Redactor() ) );
@@ -35,8 +35,32 @@ final class JobContextTest extends TestCase {
 			},
 			$this->now,
 			$memory_limit,
-			$checkpoint
+			$checkpoint,
+			null,
+			array(),
+			$record
 		);
+	}
+
+	public function test_a_record_is_handed_on_as_given_and_refused_outside_a_run(): void {
+		$seen = array();
+		$ctx  = $this->context(
+			array(),
+			10,
+			33554432,
+			-1,
+			null,
+			static function ( string $key, $value ) use ( &$seen ): void {
+				$seen[] = array( $key, $value );
+			}
+		);
+		$ctx->record( 'collations_mapped', 3 );
+		$ctx->record( 'flag', true );
+		$this->assertSame( array( array( 'collations_mapped', 3 ), array( 'flag', true ) ), $seen );
+		$this->assertSame( array(), $ctx->cursor(), 'the control: a record is not a checkpoint' );
+
+		$this->expectException( \LogicException::class );
+		$this->context()->record( 'x', 1 );
 	}
 
 	public function test_time_budget_is_wall_clock_since_the_given_start(): void {

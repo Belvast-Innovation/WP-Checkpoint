@@ -784,7 +784,7 @@ final class Runner {
 	 * @return JobContext
 	 */
 	private function context( Job $job, array $cursor, Budget $budget, Logger $logger, float $started_at, $checkpoint, string $token = '' ): JobContext {
-		$lease = '' === $token ? null : function ( bool $force ) use ( $job, $token ): void {
+		$lease  = '' === $token ? null : function ( bool $force ) use ( $job, $token ): void {
 			if ( $force ) {
 				if ( ! $this->repository->heartbeat( $job, $token, $this->lease ) ) {
 					throw new LockLost( sprintf( 'Job %d: the lock is no longer held.', $job->id ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
@@ -792,6 +792,13 @@ final class Runner {
 				return;
 			}
 			$this->maybe_heartbeat( $job, $token );
+		};
+		$record = '' === $token ? null : function ( string $key, $value ) use ( $job, $token ): void {
+			try {
+				$this->repository->save_record( $job, $token, $key, $value );
+			} catch ( StaleJob $e ) {
+				throw new LockLost( $e->getMessage(), 0, $e ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+			}
 		};
 		return new JobContext(
 			$job,
@@ -804,7 +811,8 @@ final class Runner {
 			$this->memory_limit,
 			$checkpoint,
 			$lease,
-			array( 'cli' => $this->cli )
+			array( 'cli' => $this->cli ),
+			$record
 		);
 	}
 

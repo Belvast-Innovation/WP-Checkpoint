@@ -167,6 +167,7 @@ final class ChunkReaderTest extends TestCase {
 			'a variable'                    => array( $head . "(1,@x);\n", 'literal values' ),
 			'a hex value with a non-hex'    => array( $head . "(1,X'4g');\n", 'not hexadecimal' ),
 			'set names with more'           => array( "/*!40101 SET NAMES utf8mb4, @x=1 */;\n", 'not the session preamble' ),
+			'set names with a collation'    => array( "/*!40101 SET NAMES utf8mb4 COLLATE utf8mb4_0900_ai_ci */;\n", 'not the session preamble' ), // No session collation comes from a backup: the collation check covers CREATE TABLE only.
 			'set something else'            => array( "/*!40101 SET GLOBAL general_log=1 */;\n", 'not the session preamble' ),
 			'a plain set'                   => array( "SET FOREIGN_KEY_CHECKS=0;\n", 'does not run (SET)' ),
 			'a block comment'               => array( "/* x */ DROP TABLE `wp_users`;\n", 'does not run' ),

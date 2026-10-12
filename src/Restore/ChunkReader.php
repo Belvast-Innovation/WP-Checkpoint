@@ -306,7 +306,7 @@ final class ChunkReader {
 			$tokens = SqlLexer::tokens( $buffer, 0, $this->eof );
 			$this->single_byte_view( $tokens );
 			$create = CreateTable::read( $buffer, $tokens, $this->target->table );
-			$sql    = $create->rewrite( $this->target->temporary, $this->target->final_name, $this->target->number, $this->target->names, $this->target->reference );
+			$sql    = $create->rewrite( $this->target->temporary, $this->target->final_name, $this->target->number, $this->target->names, $this->target->reference, $this->target->collations );
 
 			$statement              = new Statement( Statement::CREATE, $sql['sql'], $tokens[ count( $tokens ) - 1 ][2] );
 			$statement->create      = $create;

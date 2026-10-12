@@ -45,7 +45,12 @@ defined( 'ABSPATH' ) || exit;
  * foreign key and CHECK constraint (ConstraintNames), and the referenced
  * table of each foreign key: a target restored too is referenced by its
  * temporary name (the server follows the rename at the swap), any other
- * by the name it has on this site. Every other byte is kept.
+ * by the name it has on this site), and the collations it is given a new
+ * name for. Every other byte is kept.
+ * Collations are found by their token, wherever COLLATE stands: the table
+ * option, a column, a generated column's expression, a DEFAULT expression,
+ * a CHECK constraint, a functional index. A string literal is never one
+ * (COMMENT 'COLLATE x' is text), nor is a comment (the lexer drops them).
  */
 final class CreateTable {
 
@@ -133,6 +138,29 @@ final class CreateTable {
 	 * @var string
 	 */
 	private $auto_increment = '';
+
+	/**
+	 * Every collation named after a COLLATE, in order: its name as written, where it stands (AT_* or "column:<name>")
+	 * and the byte range of the name in $sql (the quotes included when it was written as a string).
+	 *
+	 * @var array<int, array{name: string, at: string, span: array{0: int, 1: int}}>
+	 */
+	private $collations = array();
+
+	/**
+	 * Where a collation stands: the table option.
+	 */
+	const AT_TABLE = 'table';
+
+	/**
+	 * Where a collation stands: inside an expression (a generated column, a DEFAULT, a functional index).
+	 */
+	const AT_EXPRESSION = 'expression';
+
+	/**
+	 * Where a collation stands: a CHECK constraint.
+	 */
+	const AT_CHECK = 'check';
 
 	/**
 	 * Read a CREATE TABLE statement.
@@ -286,31 +314,59 @@ final class CreateTable {
 	}
 
 	/**
+	 * The collations the statement names, in order: each with its name as written and where it stands (AT_TABLE,
+	 * AT_EXPRESSION, AT_CHECK, or "column:<name>" for a column's own). The same name may come more than once.
+	 *
+	 * @return array<int, array{name: string, at: string}>
+	 */
+	public function collations(): array {
+		$out = array();
+		foreach ( $this->collations as $found ) {
+			$out[] = array(
+				'name' => $found['name'],
+				'at'   => $found['at'],
+			);
+		}
+		return $out;
+	}
+
+	/**
 	 * The statement for the temporary table.
 	 *
-	 * @param string          $temporary  The table's temporary name.
-	 * @param string          $final_name  The table's final name.
-	 * @param int             $number     The table's position in the backup (0-based).
-	 * @param ConstraintNames $names      Constraint names.
-	 * @param callable        $reference  function( string $table ): string, the name to reference instead of a table named in the backup (TablePlan::reference()).
+	 * @param string                $temporary  The table's temporary name.
+	 * @param string                $final_name  The table's final name.
+	 * @param int                   $number     The table's position in the backup (0-based).
+	 * @param ConstraintNames       $names      Constraint names.
+	 * @param callable              $reference  function( string $table ): string, the name to reference instead of a table named in the backup (TablePlan::reference()).
+	 * @param array<string, string> $collations Collation name (as in the backup, any case) => the name to write instead; the others stay.
 	 * @return array{sql: string, constraints: array<int, array{kind: string, name: string, intended: string, shortened: bool}>}
 	 */
-	public function rewrite( string $temporary, string $final_name, int $number, ConstraintNames $names, callable $reference ): array {
-		$replace     = array( array( $this->table_span, $temporary ) );
+	public function rewrite( string $temporary, string $final_name, int $number, ConstraintNames $names, callable $reference, array $collations = array() ): array {
+		$replace     = array( array( $this->table_span, $temporary, true ) );
 		$constraints = array();
 		foreach ( $this->foreign as $key ) {
 			$chosen        = $names->choose( $key['name'], 'ibfk', $this->table, $temporary, $final_name, $number );
-			$replace[]     = array( $key['name_span'], $chosen['name'] );
+			$replace[]     = array( $key['name_span'], $chosen['name'], true );
 			$constraints[] = array( 'kind' => 'foreign' ) + $chosen;
 			$target        = (string) call_user_func( $reference, $key['references'] );
 			if ( $target !== $key['references'] ) {
-				$replace[] = array( $key['references_span'], $target );
+				$replace[] = array( $key['references_span'], $target, true );
 			}
 		}
 		foreach ( $this->checks as $check ) {
 			$chosen        = $names->choose( $check['name'], 'chk', $this->table, $temporary, $final_name, $number );
-			$replace[]     = array( $check['name_span'], $chosen['name'] );
+			$replace[]     = array( $check['name_span'], $chosen['name'], true );
 			$constraints[] = array( 'kind' => 'check' ) + $chosen;
+		}
+		$renamed = array();
+		foreach ( $collations as $from => $to ) {
+			$renamed[ strtolower( (string) $from ) ] = (string) $to;
+		}
+		foreach ( $this->collations as $found ) {
+			$key = strtolower( $found['name'] );
+			if ( isset( $renamed[ $key ] ) && $renamed[ $key ] !== $found['name'] ) {
+				$replace[] = array( $found['span'], $renamed[ $key ], false ); // A collation name is written bare, as the server writes it.
+			}
 		}
 		usort(
 			$replace,
@@ -320,7 +376,7 @@ final class CreateTable {
 		);
 		$sql = $this->sql;
 		foreach ( $replace as $piece ) {
-			$sql = substr_replace( $sql, SqlWriter::identifier( $piece[1] ), $piece[0][0], $piece[0][1] - $piece[0][0] );
+			$sql = substr_replace( $sql, $piece[2] ? SqlWriter::identifier( $piece[1] ) : $piece[1], $piece[0][0], $piece[0][1] - $piece[0][0] );
 		}
 		return array(
 			'sql'         => $sql,
@@ -341,6 +397,7 @@ final class CreateTable {
 		}
 		$first = $item[0];
 		if ( 'id' === $first[0] ) {
+			$this->collate_in( $item, 'column:' . $first[3], self::AT_EXPRESSION );
 			$this->column( $item );
 			return;
 		}
@@ -353,9 +410,11 @@ final class CreateTable {
 			return;
 		}
 		if ( in_array( $word, self::INDEX_WORDS, true ) ) {
+			$this->collate_in( $item, self::AT_EXPRESSION, self::AT_EXPRESSION ); // A functional index.
 			return;
 		}
 		if ( 'CHECK' === $word ) {
+			$this->collate_in( $item, self::AT_CHECK, self::AT_CHECK );
 			return; // Unnamed: the server names it for this table.
 		}
 		if ( 'FOREIGN' === $word ) {
@@ -379,6 +438,7 @@ final class CreateTable {
 			return;
 		}
 		if ( 'CHECK' === $kind ) {
+			$this->collate_in( $item, self::AT_CHECK, self::AT_CHECK );
 			if ( null !== $name ) {
 				$this->checks[] = array(
 					'name'      => $name[3],
@@ -508,6 +568,7 @@ final class CreateTable {
 	 * @throws Refused When an option points the table elsewhere or names an engine outside ENGINES.
 	 */
 	private function options( array $options ): void {
+		$this->collate_in( $options, self::AT_TABLE, self::AT_TABLE );
 		foreach ( $options as $i => $token ) {
 			if ( 'word' !== $token[0] ) {
 				continue;
@@ -543,6 +604,56 @@ final class CreateTable {
 			if ( '' === $this->engine ) {
 				$this->engine = $value[3];
 			}
+		}
+	}
+
+	/**
+	 * Note every collation named after a COLLATE among $tokens (a word, not a string: COMMENT 'COLLATE x' is text).
+	 * The name follows, after an "=" when there is one, as a word, a quoted identifier or a string; its byte range is
+	 * kept for rewrite(). Where it stands is $at_top outside any parenthesis and $at_nested inside one (a column's
+	 * COLLATE attribute against the expression of its DEFAULT or of a generated column).
+	 *
+	 * @param array<int, array{0: string, 1: int, 2: int, 3: string}> $tokens    Tokens of one item, or the table options.
+	 * @param string                                                  $at_top    Where a collation at depth 0 stands.
+	 * @param string                                                  $at_nested Where a collation inside parentheses stands.
+	 * @return void
+	 * @throws Refused When COLLATE is not followed by a name.
+	 */
+	private function collate_in( array $tokens, string $at_top, string $at_nested ): void {
+		$depth = 0;
+		$count = count( $tokens );
+		for ( $i = 0; $i < $count; $i++ ) {
+			$token = $tokens[ $i ];
+			if ( 'p' === $token[0] && '(' === $token[3] ) {
+				++$depth;
+				continue;
+			}
+			if ( 'p' === $token[0] && ')' === $token[3] ) {
+				--$depth;
+				continue;
+			}
+			if ( 'word' !== $token[0] || 'COLLATE' !== strtoupper( $token[3] ) ) {
+				continue;
+			}
+			$j = $i + 1;
+			if ( isset( $tokens[ $j ] ) && 'p' === $tokens[ $j ][0] && '=' === $tokens[ $j ][3] ) {
+				++$j;
+			}
+			$name = $tokens[ $j ] ?? null;
+			if ( null === $name || ! in_array( $name[0], array( 'word', 'id', 'str' ), true ) ) {
+				throw new Refused( 'CREATE TABLE has COLLATE without a collation name.' );
+			}
+			$text = $name[3];
+			if ( 'str' === $name[0] ) {
+				$quote = $text[0];
+				$text  = str_replace( $quote . $quote, $quote, substr( $text, 1, -1 ) );
+			}
+			$this->collations[] = array(
+				'name' => $text,
+				'at'   => $depth > 0 ? $at_nested : $at_top,
+				'span' => array( $name[1], $name[2] ),
+			);
+			$i                  = $j;
 		}
 	}
 

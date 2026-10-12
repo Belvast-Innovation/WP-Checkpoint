@@ -1258,6 +1258,48 @@ final class JobRepository {
 	}
 
 	/**
+	 * Record a fact of the run on the job's row, under "recorded" in its options (JobContext::record()): a count or a
+	 * flag a later step shows, which survives the step's cursor (reset when the step ends) and a retry (options are
+	 * kept; a retry from an earlier step runs the recording step again, which writes the value again). Fenced like a
+	 * checkpoint: the whole column is written from this run's view of the options, which nothing else changes while a
+	 * run holds the lock (answers are only written to a paused job).
+	 *
+	 * @param Job    $job   Job.
+	 * @param string $token Lock token.
+	 * @param string $key   The fact's name: a-z, digits and "_", 64 at most.
+	 * @param mixed  $value A scalar or null.
+	 * @return void
+	 * @throws StaleJob When the lock is no longer held: nothing was written.
+	 * @throws \InvalidArgumentException When the key or the value is not one a record may hold.
+	 */
+	public function save_record( Job $job, string $token, string $key, $value ): void {
+		global $wpdb;
+		if ( 1 !== preg_match( '/\A[a-z][a-z0-9_]{0,63}\z/', $key ) ) {
+			throw new \InvalidArgumentException( 'A record is named with a-z, digits and "_".' );
+		}
+		if ( ! is_scalar( $value ) && null !== $value ) {
+			throw new \InvalidArgumentException( 'A record holds a scalar.' );
+		}
+		$options = $job->options;
+		if ( ! isset( $options['recorded'] ) || ! is_array( $options['recorded'] ) ) {
+			$options['recorded'] = array();
+		}
+		$options['recorded'][ $key ] = $value;
+		self::assert_cursor_has_no_secrets( $options );
+		$json = wp_json_encode( $options );
+		if ( false === $json ) {
+			throw new \RuntimeException( sprintf( 'Job %d: its options cannot be written.', $job->id ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+		}
+		$table = $wpdb->base_prefix . Schema::JOBS_TABLE;
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix; the WHERE clause is the fence.
+		$affected = $wpdb->query( $wpdb->prepare( "UPDATE {$table} SET options_json = %s, updated_at = %d WHERE id = %d AND lock_token = %s", $json, $this->now(), $job->id, $token ) );
+		if ( 1 !== (int) $affected && ! $this->holds_lock( $job->id, $token ) ) {
+			throw new StaleJob( sprintf( 'Job %d: the lock is no longer held; the record was not written.', $job->id ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+		}
+		$job->options = $options;
+	}
+
+	/**
 	 * Give the database lock back between two ticks. The lock file stays: it
 	 * covers the whole running phase and is removed with the terminal status.
 	 *

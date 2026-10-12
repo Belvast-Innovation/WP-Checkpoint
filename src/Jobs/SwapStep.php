@@ -222,7 +222,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			// The empty cursor of a step that ended (the Runner writes it, then completes the job in a second write) on a
 			// job that holds the site: the swap is over. Starting it again would find the site swapped and put it back.
 			if ( Job::SITE_SWAPPED === $context->job()->site_state ) {
-				return StepResult::done( __( 'The restored site is in place', 'wp-checkpoint' ) );
+				return $this->completed( $context );
 			}
 			throw new \RuntimeException( 'The swap has no position recorded while the site is recorded as being changed; nothing was changed. The job row was changed: look at the site before you go on.' );
 		}
@@ -290,7 +290,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			if ( 'done' === $phase ) {
 				// Recorded as swapped; the maintenance file comes down last (again, if a run died before).
 				$this->take_down( $context, $cursor );
-				return StepResult::done( __( 'The restored site is in place', 'wp-checkpoint' ) );
+				return $this->completed( $context );
 			}
 			throw new \RuntimeException( 'The position of the swap is not one this version wrote; the job row was changed. Nothing was changed by this run: look at the site before you go on.' ); // Not FINAL: the job may hold the site.
 		} finally {
@@ -952,7 +952,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 					$this->at( 'done_recorded' );
 					$this->take_down( $context, $cursor );
 					$this->at( 'exited' );
-					return StepResult::done( __( 'The restored site is in place', 'wp-checkpoint' ) );
+					return $this->completed( $context );
 				default:
 					throw new \RuntimeException( 'The position of the swap is not one this version wrote; the job row was changed. Nothing was changed by this run: look at the site before you go on.' ); // Not FINAL: the job may hold the site.
 			}
@@ -1486,6 +1486,27 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	private static function base_prefix(): string {
 		global $wpdb;
 		return (string) $wpdb->base_prefix;
+	}
+
+	/**
+	 * The swap's last word, on every way it ends with the restored site in place: what the restore's collation check
+	 * recorded on the job (JobContext::record()), when it recorded a count above zero and it can be read; nothing is
+	 * said otherwise. A swap that put the site back does not come here.
+	 *
+	 * @param JobContext $context Context.
+	 * @return StepResult
+	 */
+	private function completed( JobContext $context ): StepResult {
+		$text     = __( 'The restored site is in place', 'wp-checkpoint' );
+		$recorded = $context->options()['recorded']['collations_mapped'] ?? null;
+		if ( is_int( $recorded ) && $recorded > 0 ) {
+			$text .= ' ' . sprintf(
+				/* translators: %d: how many collations */
+				_n( '%d collation the backup uses was written under a name this server knows; the job log says which.', '%d collations the backup uses were written under names this server knows; the job log says which.', $recorded, 'wp-checkpoint' ),
+				$recorded
+			);
+		}
+		return StepResult::done( $text );
 	}
 
 	/**

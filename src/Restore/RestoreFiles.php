@@ -19,7 +19,13 @@ defined( 'ABSPATH' ) || exit;
  *   part, written whole once by the preflight.
  * - INDEX: database.index.jsonl extracted from the last volume.
  * - DEFINITIONS: what each planned table's CREATE TABLE defines (one JSON
- *   line per table, appended by the preflight under a committed length).
+ *   line per table, appended by the preflight under a committed length),
+ *   the collations it names among it.
+ * - COLLATIONS: for each table whose collations this server does not all
+ *   know, which are written under another name and which have none (one
+ *   JSON line per such table, appended by the preflight under a committed
+ *   length); always there once the check ran, empty when every name is
+ *   known.
  * - HEADS, CHUNKS: directories the preflight and the import extract chunks
  *   into, one at a time.
  * - STAGING: where the files are staged (the site's directories as the
@@ -66,6 +72,7 @@ final class RestoreFiles {
 	const PLAN        = 'restore-plan.json';
 	const INDEX       = 'restore-database.index.jsonl';
 	const DEFINITIONS = 'restore-definitions.jsonl';
+	const COLLATIONS  = 'restore-collations.jsonl';
 	const HEADS       = 'restore-heads';
 	const CHUNKS      = 'restore-chunks';
 	const STAGING     = 'restore-staging.json';
