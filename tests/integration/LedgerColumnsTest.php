@@ -38,17 +38,19 @@ final class LedgerColumnsTest extends RestoreTestCase {
 			$this->fail( 'an older ledger was used' );
 		} catch ( LedgerOutdated $e ) {
 			$this->assertStringContainsString( 'started by an older version of WP Checkpoint', $e->getMessage() );
-			$this->assertStringContainsString( '(restarting, carried)', $e->getMessage() );
+			$this->assertStringContainsString( '(restarting, owned)', $e->getMessage() );
 			$this->assertStringContainsString( 'Start the restore again', $e->getMessage() );
 		}
-		// The ledger as it was before the carried column.
+		// The ledger as it was with the carried column (4c-A replaced it with owned: a carry's delta cannot be kept
+		// by a transaction on a table without one), without the owned column.
 		$older = 'wcptmpabcdef_9_0003_';
 		$this->create( $older, "(n INT UNSIGNED NOT NULL PRIMARY KEY, chunk INT UNSIGNED NOT NULL, pos BIGINT UNSIGNED NOT NULL, row_count BIGINT UNSIGNED NOT NULL, data_offset BIGINT UNSIGNED NOT NULL, transactional TINYINT NOT NULL, restarts INT UNSIGNED NOT NULL DEFAULT 0, restarting TINYINT NOT NULL DEFAULT 0, holder VARCHAR(64) NOT NULL DEFAULT '', constraint_names MEDIUMTEXT NULL) ENGINE=InnoDB" );
 		try {
 			new Ledger( $this->db, $older, 'aaaa' );
-			$this->fail( 'a ledger without the carried column was used' );
+			$this->fail( 'a ledger without the owned column was used' );
 		} catch ( LedgerOutdated $e ) {
-			$this->assertStringContainsString( '(carried)', $e->getMessage() );
+			$this->assertStringContainsString( '(owned)', $e->getMessage() );
+			$this->assertStringNotContainsString( 'carried', $e->getMessage(), 'a column this version no longer needs is not asked for' );
 		}
 
 		// The control: a ledger this version creates is taken, and so is the same table the next time.
