@@ -489,6 +489,7 @@ abstract class SwapTestCase extends RestoreTestCase {
 					'plugin'  => (string) ( $this->swap_parts['plugin'] ?? '' ),
 					'packet'  => (int) ( $this->swap_parts['packet'] ?? 0 ),
 					'batch'   => (int) ( $this->swap_parts['batch'] ?? 0 ),
+					'verify'  => isset( $this->swap_parts['verify'] ) ? ( call_user_func( $this->swap_parts['verify'] ) ? 'pass' : 'fail' ) : '',
 					'offset'  => $this->clock_offset,
 					'trace'   => $this->trace,
 					'sql_at'  => $this->child_sql,

@@ -70,6 +70,13 @@ if ( (int) $config['packet'] > 0 ) {
 if ( (int) ( $config['batch'] ?? 0 ) > 0 ) {
 	$parts['batch'] = (int) $config['batch'];
 }
+if ( '' !== (string) ( $config['verify'] ?? '' ) ) {
+	// The restored site's checks (4c-B) stood in for: pass, or fail (the swap is reversed).
+	$verdict          = 'pass' === (string) $config['verify'];
+	$parts['verify'] = static function () use ( $verdict ): bool {
+		return $verdict;
+	};
+}
 $offset       = (int) ( $config['offset'] ?? 0 );
 $parts['now'] = static function () use ( $offset ): int {
 	return time() + $offset;

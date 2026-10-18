@@ -79,7 +79,9 @@ defined( 'ABSPATH' ) || exit;
  * listing or an lstat that fails) is waited out (TransientFailure), never
  * guessed.
  *
- * After the swap is made: caches flushed (behind the held file), the file
+ * After the swap is made: caches flushed (behind the held file), the
+ * restored site verified where the "verify" part says so (the place of the
+ * checks of 4c-B; without the part nothing is checked), the file
  * let go, the restored rewrite rules removed (WordPress builds them again),
  * a mark left in the restored options for the plugin to set its fallback
  * events again on its next request (Plugin), the cache flushed again, the
@@ -89,6 +91,18 @@ defined( 'ABSPATH' ) || exit;
  * ended step, on a job still recorded as holding the site (a run that died
  * between the Runner's two last writes), ends the step without touching
  * anything.
+ *
+ * The reverse: a swap that was made can be swapped back out (reverse():
+ * the restored site failed its checks; later an undo). The direction is
+ * recorded first ("reverse", with the reason), the maintenance file held
+ * before the first rename, then the site is put back exactly as the
+ * rollback does it, from what is there (every table entry is in its swapped
+ * state, which table_back() and dir_back() put back), recorded as put back
+ * ("restored") while the file is held, let go, recorded "reverted", the
+ * file taken down; the job ends failed with the reason, a retry starting
+ * over at the final check. A run that dies anywhere in it reads "reverse"
+ * and goes on putting the site back: once the direction is recorded, no run
+ * goes forward again. Nothing but reverse() renames after "committed".
  */
 final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 
@@ -112,10 +126,12 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	const INTERRUPTED = 'interrupted';
 	const INCOMPLETE  = 'incomplete';
 	const STOPPED     = 'stopped';
+	const REVERSED    = 'reversed';
 	const REASONS     = array(
 		self::INTERRUPTED => 'The swap was interrupted before it was complete.',
 		self::INCOMPLETE  => 'After the renames, not every table of the plan was in its place.',
 		self::STOPPED     => 'The swap stopped (the job log says why).',
+		self::REVERSED    => 'The restored site was swapped back out after the swap was made (the job log says why).',
 	);
 
 	/**
@@ -128,7 +144,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	/**
 	 * Phases in which the site is being changed (or put back), and in which it is swapped.
 	 */
-	const CHANGING = array( 'enter', 'dirs', 'carry', 'rename', 'rollback', 'restored' );
+	const CHANGING = array( 'enter', 'dirs', 'carry', 'rename', 'rollback', 'reverse', 'restored' );
 	const SWAPPED  = array( 'committed', 'done' );
 
 	/**
@@ -146,7 +162,8 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * array (group => directory), "random" function(): string (hex for the names of what is moved out of the
 	 * way), "limit" function(): string (in place of reading max_execution_time back), "batch" (bytes of a batch
 	 * of renames, in place of SwapRules::limit()), "remove" function( Maintenance $file, callable $confirm ): bool
-	 * (in place of taking the maintenance file down).
+	 * (in place of taking the maintenance file down), "verify" function( JobContext ): bool (whether the restored
+	 * site passed its checks, in place of the checks 4c-B will make; false reverses the swap).
 	 *
 	 * @var array<string, mixed>
 	 */
@@ -269,6 +286,10 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			}
 			if ( 'rollback' === $phase ) {
 				throw $this->roll_back( $context, $db, $cursor, (string) ( $cursor['reason'] ?? '' ) );
+			}
+			if ( 'reverse' === $phase ) {
+				// Recorded as being swapped back out: the direction holds, whatever this run finds.
+				throw $this->roll_back( $context, $db, $cursor, (string) ( $cursor['reason'] ?? self::REVERSED ) );
 			}
 			if ( 'rejudged' === $phase ) {
 				// Recorded as untouched after the second judgement differed: the file comes down (again, if a run died
@@ -447,7 +468,8 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			(int) ( $this->parts['rows'] ?? SwapCheckStep::SIZES['rows'] ),
 			function ( string $point ): void {
 				$this->at( 'recount_' . $point );
-			}
+			},
+			StateCarry::counted( self::base_prefix(), is_multisite() ? get_current_network_id() : 0 )
 		);
 		$first   = true;
 		$slowest = 0.0;
@@ -539,7 +561,6 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			}
 		}
 		$carry   = $this->carry_tables( $entries['tables'] );
-		$record  = null === $carry ? null : $this->carry_record( $context, $db );
 		$file    = $this->maintenance( $cursor );
 		$attempt = $cursor['attempt'];
 		$mark    = $cursor['mark'];
@@ -596,7 +617,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			$guard = null;
 			if ( null !== $carry ) {
 				$guard = $this->state_carry( $db );
-				$guard->carry( $carry['live_options'], $carry['temp_options'], $carry['live_meta'], $carry['temp_meta'], $record );
+				$guard->carry( $carry['live_options'], $carry['temp_options'], $carry['live_meta'], $carry['temp_meta'] );
 			}
 			$this->at( 'carried' );
 			$this->rename_tables( $context, $db, $cursor, $entries['tables'], $guard, $carry );
@@ -737,7 +758,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			$reason = self::INTERRUPTED;
 		}
 		HostFunctions::set_time_limit( 0 );
-		if ( 'rollback' !== ( $cursor['phase'] ?? '' ) ) {
+		if ( ! in_array( $cursor['phase'] ?? '', array( 'rollback', 'reverse' ), true ) ) {
 			$cursor = array(
 				'phase'   => 'rollback',
 				'attempt' => $cursor['attempt'],
@@ -883,7 +904,39 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			return new Cancelled( 'The restore was cancelled; the site is as it was before it.' );
 		}
 		$text = self::REASONS[ $reason ] ?? $reason;
-		return new RetryFrom( trim( $text . ' The swap was rolled back: the site is as it was before the restore.' ), SwapCheckStep::ID );
+		$back = self::REVERSED === $reason ? ' The swap was reversed: the site is as it was before the restore.' : ' The swap was rolled back: the site is as it was before the restore.';
+		return new RetryFrom( trim( $text . $back ), SwapCheckStep::ID );
+	}
+
+	/**
+	 * Swap a swap that was made back out: the direction recorded first ("reverse", with the reason; from here on no
+	 * run goes forward again), then the site put back from what is there exactly as the rollback does it (the
+	 * maintenance file held before the first rename, the directories and the tables in reverse plan order, "restored"
+	 * recorded while the file is held, "reverted" once it is let go, the file taken down), and the job ended with
+	 * the reason. Called from the "verify" post-swap step while the file is still held (nothing of the restored site
+	 * was served); later an undo calls it from a job that ended.
+	 *
+	 * @param JobContext           $context Context.
+	 * @param Queries              $db      Connection.
+	 * @param array<string, mixed> $cursor  Cursor (its attempt and mark).
+	 * @param string               $reason  Why: one of REASONS.
+	 * @return \RuntimeException What ends the job, for the caller to throw.
+	 * @throws TransientFailure When what is there cannot be told (the reverse goes on later).
+	 */
+	private function reverse( JobContext $context, Queries $db, array $cursor, string $reason ): \RuntimeException {
+		if ( ! isset( self::REASONS[ $reason ] ) ) {
+			$reason = self::REVERSED;
+		}
+		$cursor = array(
+			'phase'   => 'reverse',
+			'attempt' => $cursor['attempt'],
+			'mark'    => $cursor['mark'] ?? '',
+			'reason'  => $reason,
+		);
+		$context->checkpoint( $cursor, 88, __( 'Putting the site back as it was', 'wp-checkpoint' ) );
+		$context->logger()->warning( 'The swap is reversed after it was made', array( 'reason' => self::REASONS[ $reason ] ) );
+		$this->at( 'reverse_recorded' );
+		return $this->roll_back( $context, $db, $cursor, $reason );
 	}
 
 	/**
@@ -906,6 +959,17 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 					// before visitors can: the maintenance file is still held, so a flush that has to wait does so behind it.
 					$this->flush( $context );
 					$this->at( 'flushed' );
+					$cursor['post'] = 'verify';
+					break;
+				case 'verify':
+					// Where the restored site is checked before it is let out, behind the held file: the checks
+					// themselves are 4c-B's; here only a "verify" part (tests) can say the site failed, and the swap is
+					// then reversed with nothing of the restored site served. Without the part nothing is checked.
+					$passed = ! isset( $this->parts['verify'] ) || (bool) call_user_func( $this->parts['verify'], $context );
+					$this->at( 'verified' );
+					if ( ! $passed ) {
+						throw $this->reverse( $context, $db, $cursor, self::REVERSED );
+					}
 					$cursor['post'] = 'release';
 					break;
 				case 'release':
@@ -1284,26 +1348,6 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			'live_meta'    => null === $meta ? null : $meta['live'],
 			'temp_meta'    => null === $meta ? null : $meta['stage'],
 		);
-	}
-
-	/**
-	 * What records the carry's change of each table's rows in the restore's ledger (a retry's count expects it).
-	 *
-	 * @param JobContext $context Context.
-	 * @param Queries    $db      Connection.
-	 * @return callable function( string $temp_table, int $delta ): void
-	 * @throws WorkLost When the plan in the work directory is gone (read before anything changes).
-	 */
-	private function carry_record( JobContext $context, Queries $db ): callable {
-		$loaded  = RestorePreflightStep::load_plan( $context->work_path() );
-		$numbers = array_column( $loaded['plan']->tables(), 'number', 'temporary' );
-		$ledger  = new Ledger( $db, TempTables::ledger( $context->job()->storage_token, $context->job()->id, (string) $loaded['random'] ), bin2hex( random_bytes( 16 ) ) );
-		return static function ( string $table, int $delta ) use ( $numbers, $ledger ): void {
-			if ( ! isset( $numbers[ $table ] ) ) {
-				throw new \RuntimeException( 'The carry changed a table the restore\'s plan does not have.' );
-			}
-			$ledger->add_carried( (int) $numbers[ $table ], $delta );
-		};
 	}
 
 	/**

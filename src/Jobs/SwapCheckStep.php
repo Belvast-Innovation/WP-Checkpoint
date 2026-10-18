@@ -15,6 +15,7 @@ use WPCheckpoint\Restore\ChunkWalk;
 use WPCheckpoint\Restore\ClaimLost;
 use WPCheckpoint\Restore\ImportSession;
 use WPCheckpoint\Restore\Ledger;
+use WPCheckpoint\Restore\StateCarry;
 use WPCheckpoint\Restore\Queries;
 use WPCheckpoint\Restore\RestoreFiles;
 use WPCheckpoint\Restore\SiteTables;
@@ -218,7 +219,8 @@ final class SwapCheckStep implements Step {
 				$this->sizes['rows'],
 				function ( string $point ): void {
 					$this->at( $point );
-				}
+				},
+				StateCarry::counted( self::base_prefix(), is_multisite() ? get_current_network_id() : 0 )
 			);
 			$slowest        = 0.0;
 			$budget         = (float) $context->budget()->seconds;

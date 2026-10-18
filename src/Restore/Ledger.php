@@ -60,10 +60,12 @@ defined( 'ABSPATH' ) || exit;
  * the mark does all of it again from the start, whichever step a stopped
  * run had reached; each of them can be repeated.
  * The swap's carry of this plugin's state (StateCarry) replaces rows of the
- * options and sitemeta tables after the import: how many rows it added or
- * took away is recorded here ("carried", add_carried()) in the carry's own
- * transaction, so a later count of the table (a retry's final check, after
- * the swap was rolled back) expects the import's rows and the carry's.
+ * options and sitemeta tables after the import, and on a table without
+ * transactions a carry cut short leaves some of them behind: the count of
+ * such a table leaves the plugin's own rows out (StateCarry::own_names()),
+ * and what it expects is the import's rows less the own rows the import
+ * wrote, recorded here at the first count ("owned", set_owned(), before any
+ * carry; -1 until then).
  */
 final class Ledger {
 
@@ -81,7 +83,7 @@ final class Ledger {
 		'restarting'       => 'TINYINT NOT NULL DEFAULT 0',
 		'holder'           => "VARCHAR(64) NOT NULL DEFAULT ''",
 		'constraint_names' => 'MEDIUMTEXT NULL',
-		'carried'          => 'BIGINT NOT NULL DEFAULT 0',
+		'owned'            => 'BIGINT NOT NULL DEFAULT -1',
 	);
 
 	/**
@@ -144,10 +146,10 @@ final class Ledger {
 	 * A table's record, or null before any run claimed it.
 	 *
 	 * @param int $number The table's number.
-	 * @return array{chunk: int, pos: int, rows: int, data_offset: int, transactional: bool, restarts: int, holder: string, constraints: string, restarting: bool, carried: int}|null
+	 * @return array{chunk: int, pos: int, rows: int, data_offset: int, transactional: bool, restarts: int, holder: string, constraints: string, restarting: bool, owned: int}|null
 	 */
 	public function get( int $number ) {
-		$rows = $this->db->rows( 'SELECT chunk, pos, row_count, data_offset, transactional, restarts, holder, constraint_names, restarting, carried FROM ' . SqlWriter::identifier( $this->name ) . ' WHERE n = ?', array( (string) $number ) );
+		$rows = $this->db->rows( 'SELECT chunk, pos, row_count, data_offset, transactional, restarts, holder, constraint_names, restarting, owned FROM ' . SqlWriter::identifier( $this->name ) . ' WHERE n = ?', array( (string) $number ) );
 		if ( array() === $rows ) {
 			return null;
 		}
@@ -161,26 +163,23 @@ final class Ledger {
 			'holder'        => (string) $rows[0][6],
 			'constraints'   => (string) $rows[0][7],
 			'restarting'    => '1' === (string) $rows[0][8],
-			'carried'       => (int) $rows[0][9],
+			'owned'         => (int) $rows[0][9],
 		);
 	}
 
 	/**
-	 * Record rows the swap's carry added (or, negative, took away) in a table, in the carry's transaction. Not
-	 * fenced by the holder: the carry runs after the final check took every record, and the job's lease fences it.
+	 * Record how many of a table's rows are the plugin's own (StateCarry::own_names()) at the first count, before
+	 * any carry: set once, never changed (a later count that found a different number would be one after a carry).
 	 *
 	 * @param int $number The table's number.
-	 * @param int $delta  Rows added (negative: removed).
+	 * @param int $owned  Own rows.
 	 * @return void
 	 * @throws \RuntimeException When the table has no record.
 	 */
-	public function add_carried( int $number, int $delta ): void {
-		if ( 0 === $delta ) {
-			return;
-		}
-		$changed = $this->db->write( 'UPDATE ' . SqlWriter::identifier( $this->name ) . ' SET carried = carried + ? WHERE n = ?', array( (string) $delta, (string) $number ) );
+	public function set_owned( int $number, int $owned ): void {
+		$changed = $this->db->write( 'UPDATE ' . SqlWriter::identifier( $this->name ) . ' SET owned = ? WHERE n = ? AND owned < 0', array( (string) $owned, (string) $number ) );
 		if ( 1 !== $changed ) {
-			throw new \RuntimeException( 'The restore ledger has no record of a table the carry changed.' );
+			throw new \RuntimeException( 'The restore ledger has no record of a table the count met, or recorded its own rows already.' );
 		}
 	}
 
