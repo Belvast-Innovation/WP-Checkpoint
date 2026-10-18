@@ -140,6 +140,42 @@ final class RunnerTest extends WP_UnitTestCase {
 		} );
 	}
 
+	/**
+	 * On the injected clock the budget rule is exact: a tick runs units until the first should_stop() after the
+	 * budget is used up, so it goes over the budget by at most one unit, and the next tick carries on where it
+	 * stopped. Twelve units of 0.3 seconds under a 2 second budget: seven in the first tick (2.1 seconds, one unit
+	 * over), five in the second (1.5 seconds, done).
+	 */
+	public function test_a_tick_stops_at_the_first_unit_after_the_budget_is_used_up_and_ticks_add_up_to_one_run(): void {
+		$seen = array();
+		$this->register( 'paced', array( $this->counting_step( 'count', 12, function ( int $n ) use ( &$seen ): void {
+			$this->now += 0.3;
+			$seen[]     = $n;
+		} ) ) );
+		$job = $this->repo->create( 'paced' );
+
+		$started = $this->now;
+		$result  = $this->runner( 2 )->tick( $job->id, $started );
+		$this->assertSame( TickResult::MORE, $result->status );
+		$this->assertSame( 0, $result->retry_after );
+		$this->assertSame( range( 1, 7 ), $seen, 'the budget is used up at unit 7 (2.1 seconds): one unit over, not two' );
+		$this->assertEqualsWithDelta( 2.1, $this->now - $started, 0.0001, 'the tick returns right after the unit that used the budget up' );
+		$this->assertSame( 7, $this->repo->find( $job->id )->cursor['n'] );
+
+		$started = $this->now;
+		$result  = $this->runner( 2 )->tick( $job->id, $started );
+		$this->assertSame( TickResult::COMPLETED, $result->status );
+		$this->assertSame( range( 1, 12 ), $seen, 'no unit repeated or skipped across ticks' );
+		$this->assertEqualsWithDelta( 1.5, $this->now - $started, 0.0001, 'the rest fits in one budget' );
+		$this->assertSame( Job::COMPLETED, $this->repo->find( $job->id )->status );
+	}
+
+	/**
+	 * The same run on the real clock (no clock injected), which only shows that the Runner reads the real clock when
+	 * none is given: the exact rule is the fake-clock test above. The wall-clock bounds are loose, as a busy host
+	 * stretches a tick for reasons that have nothing to do with the budget; the lower bound (the budget is used up
+	 * before a MORE is returned) is the part that cannot be stretched the wrong way.
+	 */
 	public function test_slow_step_respects_a_real_time_budget_and_ticks_add_up_to_one_run(): void {
 		$seen = array();
 		$this->register( 'slow', array( $this->counting_step( 'count', 12, function ( int $n ) use ( &$seen ): void {
@@ -155,7 +191,7 @@ final class RunnerTest extends WP_UnitTestCase {
 			$result  = $runner->tick( $job->id, $started );
 			$took    = microtime( true ) - $started;
 			++$ticks;
-			$this->assertLessThan( 3.0, $took, 'a tick returns within budget + one unit' );
+			$this->assertLessThan( 10.0, $took, 'a tick returns within budget + one unit, with room for a busy host' );
 			if ( TickResult::MORE === $result->status ) {
 				$this->assertGreaterThanOrEqual( 2.0, $took, 'the budget is used up before returning' );
 				$this->assertSame( 0, $result->retry_after );

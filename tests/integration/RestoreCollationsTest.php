@@ -163,9 +163,9 @@ final class RestoreCollationsTest extends RestoreTestCase {
 		$this->assertStringNotContainsString( 'trailing spaces', $log, 'PAD SPACE to PAD SPACE: nothing about trailing spaces (the pad test is the control that the note is said when it applies)' );
 		// Tables this server created without naming a collation carry its default, utf8mb4_uca1400_ai_ci on MariaDB
 		// 11.4 and later, and are mapped too: the count is whatever the log says, at least this column.
-		$this->assertIsInt( $recorded );
-		$this->assertGreaterThanOrEqual( 1, $recorded );
-		$this->assertSame( $recorded, substr_count( $log, 'A collation this server does not know is written under another name' ), 'the count is the mappings logged' );
+		$mapped = substr_count( $log, 'A collation this server does not know is written under another name' );
+		$this->assertGreaterThanOrEqual( 1, $mapped, 'the control: this column was mapped' );
+		$this->assertSame( $mapped, $recorded, 'the recorded count is the number of mappings logged' );
 	}
 
 	public function test_writing_a_pad_space_collation_as_a_no_pad_one_says_so_in_the_log(): void {
