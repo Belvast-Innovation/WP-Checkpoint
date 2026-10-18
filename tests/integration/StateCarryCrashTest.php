@@ -23,30 +23,48 @@ use WPCheckpoint\Tests\Fixtures\Restore\SwapTestCase;
 final class StateCarryCrashTest extends SwapTestCase {
 
 	/**
-	 * The job's temporary options table (the plan's entry for the live options table).
+	 * The tables the carry writes, live name => how StateCarry::own_names() reads them: the main site's options
+	 * table, and on a network its sitemeta table.
+	 *
+	 * @return array<string, array{sitemeta: bool, site: string[]}>
 	 */
-	private function temp_options( Job $job ): string {
+	private static function carried(): array {
 		global $wpdb;
+		return StateCarry::counted( $wpdb->base_prefix, is_multisite() ? get_current_network_id() : 0 );
+	}
+
+	/**
+	 * The job's temporary tables of the carried ones (the plan's entries for them).
+	 *
+	 * @return string[]
+	 */
+	private function temp_tables( Job $job ): array {
+		$out = array();
 		foreach ( $this->plan_of( $job )['tables'] as $entry ) {
-			if ( SwapPlan::TABLE_OF === $entry['kind'] && $wpdb->prefix . 'options' === $entry['live'] ) {
-				return $entry['stage'];
+			if ( SwapPlan::TABLE_OF === $entry['kind'] && isset( self::carried()[ $entry['live'] ] ) ) {
+				$out[] = $entry['stage'];
 			}
 		}
-		$this->fail( 'the plan has no entry for the options table' );
+		$this->assertCount( count( self::carried() ), $out, 'the control: the plan has an entry for each carried table' );
+		return $out;
 	}
 
 	/**
-	 * A table without transactions: the carry's statements stay whatever happens to the run.
+	 * Tables without transactions: the carry's statements stay whatever happens to the run.
+	 *
+	 * @param string[] $tables Tables.
 	 */
-	private function without_transactions( string $table ): void {
+	private function without_transactions( array $tables ): void {
 		global $wpdb;
-		$this->assertNotFalse( $wpdb->query( 'ALTER TABLE `' . $table . '` ENGINE=MyISAM' ), $wpdb->last_error );
-		$this->assertSame( 'MyISAM', $wpdb->get_var( $wpdb->prepare( 'SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s', $table ) ), 'the control' );
+		foreach ( $tables as $table ) {
+			$this->assertNotFalse( $wpdb->query( 'ALTER TABLE `' . $table . '` ENGINE=MyISAM' ), $wpdb->last_error );
+			$this->assertSame( 'MyISAM', $wpdb->get_var( $wpdb->prepare( 'SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s', $table ) ), 'the control' );
+		}
 	}
 
 	/**
-	 * The live options table's rows as they can be compared between runs: name => value for the backup's rows, the
-	 * name alone for the plugin's own rows (their values carry tokens and times) and for what WordPress rewrites.
+	 * The live carried tables' rows as they can be compared between runs: "table:name" => value for the backup's
+	 * rows, true for the plugin's own rows (their values carry tokens and times) and for what WordPress rewrites.
 	 *
 	 * @return array<string, string|true>
 	 */
@@ -54,17 +72,45 @@ final class StateCarryCrashTest extends SwapTestCase {
 		global $wpdb;
 		$wpdb->query( 'COMMIT' );
 		$db  = ImportSession::open( Credentials::from_wordpress() );
-		$own = StateCarry::own_names( $db, $wpdb->prefix . 'options', false, array() );
-		$db->close();
 		$out = array();
-		foreach ( (array) $wpdb->get_results( "SELECT option_name, option_value FROM `{$wpdb->prefix}options` ORDER BY option_name", ARRAY_A ) as $row ) {
-			$name = (string) $row['option_name'];
-			if ( in_array( $name, $own, true ) || 'cron' === $name || 1 === preg_match( '/^_(site_)?transient_/', $name ) ) {
-				$out[ $name ] = true;
-			} else {
-				$out[ $name ] = (string) $row['option_value'];
+		foreach ( self::carried() as $table => $how ) {
+			$own    = StateCarry::own_names( $db, $table, $how['sitemeta'], $how['site'] );
+			$column = $how['sitemeta'] ? 'meta_key' : 'option_name';
+			$value  = $how['sitemeta'] ? 'meta_value' : 'option_value';
+			$where  = $how['sitemeta'] ? $wpdb->prepare( ' WHERE site_id = %d', (int) $how['site'][0] ) : '';
+			foreach ( (array) $wpdb->get_results( "SELECT {$column} AS n, {$value} AS v FROM `{$table}`{$where} ORDER BY {$column}", ARRAY_A ) as $row ) {
+				$name = (string) $row['n'];
+				if ( in_array( $name, $own, true ) || 'cron' === $name || 1 === preg_match( '/^_(site_)?transient_/', $name ) ) {
+					$out[ $table . ':' . $name ] = true;
+				} else {
+					$out[ $table . ':' . $name ] = (string) $row['v'];
+				}
 			}
 		}
+		$db->close();
+		return $out;
+	}
+
+	/**
+	 * The plugin's own rows that are in the live carried tables now (without the activation rows), "table:name".
+	 *
+	 * @return string[]
+	 */
+	private function own_rows_live(): array {
+		global $wpdb;
+		$wpdb->query( 'COMMIT' );
+		$db  = ImportSession::open( Credentials::from_wordpress() );
+		$out = array();
+		foreach ( self::carried() as $table => $how ) {
+			$column = $how['sitemeta'] ? 'meta_key' : 'option_name';
+			$where  = $how['sitemeta'] ? $wpdb->prepare( ' AND site_id = %d', (int) $how['site'][0] ) : '';
+			foreach ( array_diff( StateCarry::own_names( $db, $table, $how['sitemeta'], $how['site'] ), array( StateCarry::ACTIVE, StateCarry::ACTIVE_NETWORK ) ) as $name ) {
+				if ( null !== $wpdb->get_var( $wpdb->prepare( "SELECT 1 FROM `{$table}` WHERE {$column} = %s{$where} LIMIT 1", $name ) ) ) {
+					$out[] = $table . ':' . $name;
+				}
+			}
+		}
+		$db->close();
 		return $out;
 	}
 
@@ -72,16 +118,20 @@ final class StateCarryCrashTest extends SwapTestCase {
 		$this->swap_parts['batch'] = 1;
 		$this->register_type();
 		// A whole swap first: the carry's statements counted, its outcome the expectation.
-		$job = $this->at_swap();
-		$this->without_transactions( $this->temp_options( $job ) );
+		$job  = $this->at_swap();
+		$live = $this->own_rows_live();
+		$this->assertNotSame( array(), $live, 'the control: the live site holds rows of the plugin\'s own' );
+		$this->without_transactions( $this->temp_tables( $job ) );
 		$done = $this->cli_run( $job );
 		$this->assertSame( Job::COMPLETED, $done->status, (string) $done->last_error );
 		$statements = count( preg_grep( '/^carry_\d+$/', $this->seams ) );
 		$this->assertGreaterThanOrEqual( 2, $statements, 'the control: the carry deletes and inserts in at least one statement each' );
 		$this->assertContains( 'carry_written', $this->seams );
 		$expected = $this->comparable();
-		$this->assertArrayHasKey( StoredNames::STORAGE, $expected, 'the control: the plugin\'s own state is in the restored options' );
-		$this->assertArrayHasKey( 'siteurl', $expected, 'the control: the backup\'s rows are there' );
+		foreach ( $live as $row ) {
+			$this->assertTrue( $expected[ $row ] ?? null, 'the control: the plugin\'s own row ' . $row . ' was carried into the restored site' );
+		}
+		$this->assertArrayHasKey( $GLOBALS['wpdb']->prefix . 'options:siteurl', $expected, 'the control: the backup\'s rows are there' );
 		$this->undo( Plugin::instance()->jobs()->find( $job->id ) );
 		$this->tear_down_swap();
 		$this->set_up_swap();
@@ -92,7 +142,7 @@ final class StateCarryCrashTest extends SwapTestCase {
 			$this->swap_parts['batch'] = 1;
 			$this->register_type();
 			$job = $this->at_swap();
-			$this->without_transactions( $this->temp_options( $job ) );
+			$this->without_transactions( $this->temp_tables( $job ) );
 			$this->trace = $this->sandbox . '/trace';
 			$this->killed_at( $job, 0 === $k ? 'dir_in' : 'carry_' . $k, 1 );
 			$left = Plugin::instance()->jobs()->find( $job->id );
