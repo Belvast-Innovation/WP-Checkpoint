@@ -71,10 +71,10 @@ if ( (int) ( $config['batch'] ?? 0 ) > 0 ) {
 	$parts['batch'] = (int) $config['batch'];
 }
 if ( '' !== (string) ( $config['verify'] ?? '' ) ) {
-	// The restored site's checks (4c-B) stood in for: pass, or fail (the swap is reversed).
-	$verdict          = 'pass' === (string) $config['verify'];
-	$parts['verify'] = static function () use ( $verdict ): bool {
-		return $verdict;
+	// The restored site's checks (4c-B) stood in for: "pass", or the id of the check that failed (the swap is reversed).
+	$verdict         = (string) $config['verify'];
+	$parts['verify'] = static function () use ( $verdict ) {
+		return 'pass' === $verdict ? true : $verdict;
 	};
 }
 $offset       = (int) ( $config['offset'] ?? 0 );

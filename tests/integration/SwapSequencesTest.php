@@ -36,7 +36,11 @@ use WPCheckpoint\Tests\Fixtures\Restore\SwapTestCase;
  *
  * The reverse (REVERSE): the restored site fails its checks (the step's "verify" part, standing in for 4c-B's
  * checks) and the swap made is swapped back out behind the held file: killed at each of its seams once, the finishing
- * runs put the site back and the job ends failed (a retry would swap again), the site as it was.
+ * runs put the site back and the job ends failed (a retry would swap again), the site as it was. The verdict a
+ * finishing run would get is not the killed run's: a check that failed passes when asked again (as a real check may
+ * pass, or be unable to decide, the second time).
+ * - I7: once any run's check found the restored site broken (verify_failed), the job does not end with the restored
+ *   site in place: whatever the next run would find, the site ends as it was.
  *
  * Fixed: the seams in order, one sequence each (WPCHECKPOINT_SWAP_SEQUENCES more are drawn with
  * WPCHECKPOINT_SWAP_SEQUENCES_SEED). Every seam and every kind of interleaving must occur, counted where it happened.
@@ -61,7 +65,10 @@ final class SwapSequencesTest extends SwapTestCase {
 	 * recorded again and the site put back by the finishing runs). The first two are before the direction is recorded
 	 * (killed there, the next run verifies and reverses whole); the rest share the rollback's names.
 	 */
-	const REVERSE = array( 'flushed', 'verified', 'reverse_recorded', 'table_back', 'dir_back', 'dirs_back', 'restored', 'unheld', 'reverted', 'maintenance_down' );
+	const REVERSE = array( 'flushed', 'verified', 'verify_failed', 'reverse_recorded', 'table_back', 'dir_back', 'dirs_back', 'restored', 'unheld', 'reverted', 'maintenance_down' );
+
+	/** The seam after a failed verdict was recorded, before the direction is (I7 starts there). */
+	const FAILED = 'verify_failed';
 
 	/** The renames a killed run makes, by the seam right after each. */
 	const RENAMED = array( 'dir_aside', 'dir_in', 'batch_sent', 'table_back', 'dir_back' );
@@ -124,7 +131,7 @@ final class SwapSequencesTest extends SwapTestCase {
 	}
 
 	public function test_every_seam_and_every_interleaving_keeps_the_invariants(): void {
-		$count = max( 1, (int) ( getenv( 'WPCHECKPOINT_SWAP_SEQUENCES' ) ?: 36 ) );
+		$count = max( 1, (int) ( getenv( 'WPCHECKPOINT_SWAP_SEQUENCES' ) ?: 37 ) );
 		$seed  = (int) ( getenv( 'WPCHECKPOINT_SWAP_SEQUENCES_SEED' ) ?: 1 );
 		// A seam with its path: the rollback's and the reverse's share names.
 		$seams = array();
@@ -134,7 +141,7 @@ final class SwapSequencesTest extends SwapTestCase {
 		foreach ( self::REVERSE as $seam ) {
 			$seams[] = array( 'reverse', $seam );
 		}
-		$this->assertSame( 36, count( $seams ), 'the default count is one sequence per seam' );
+		$this->assertSame( 37, count( $seams ), 'the default count is one sequence per seam' );
 		$this->held_checks = array_fill_keys( self::AT_RENAME, 0 );
 		mt_srand( $seed );
 		$killed = array();
@@ -180,10 +187,13 @@ final class SwapSequencesTest extends SwapTestCase {
 		global $wpdb;
 		$this->swap_parts['batch'] = 1; // A batch per table: a run can be killed between two.
 		if ( $reverse ) {
-			$this->swap_parts['verify'] = static function (): bool {
-				return false; // The restored site fails its checks: the swap made is reversed.
-			};
+			// The first check fails (the home page), every later one passes: the recorded verdict must decide, not a
+			// later check. A run killed right after checking and before its verdict is recorded ("verified") lost it:
+			// the next run checks again, and that check fails too (it is the first one recorded).
+			$this->verdicts             = 'verified' === $seam ? array( 'home', 'home', true, true, true, true, true, true ) : array( 'home', true, true, true, true, true, true, true );
+			$this->swap_parts['verify'] = $this->verdicts();
 		} else {
+			$this->verdicts = array();
 			unset( $this->swap_parts['verify'] );
 		}
 		$this->register_type();
@@ -211,9 +221,13 @@ final class SwapSequencesTest extends SwapTestCase {
 		$passed = array_values( array_filter( explode( "\n", (string) file_get_contents( $this->trace ) ) ) );
 		$this->assertSame( $seam, end( $passed ), $label . ': the run died at its seam' );
 		++$killed[ ( $reverse ? 'reverse:' : '' ) . $seam ];
-		if ( $reverse && in_array( $seam, array_slice( self::REVERSE, 2 ), true ) ) {
+		if ( $reverse && in_array( $seam, array_slice( self::REVERSE, 3 ), true ) ) {
 			$this->assertContains( 'committed', $passed, $label . ': the control, the swap was made before it was reversed' );
 			$this->assertContains( self::REVERSING, $passed, $label . ': the control, the reverse was recorded' );
+		}
+		if ( $reverse && self::FAILED === $seam ) {
+			$this->assertNotContains( self::REVERSING, $passed, $label . ': the control, killed after the verdict and before the direction' );
+			$this->assertSame( 'failed', Plugin::instance()->jobs()->find( $job->id )->cursor['verdict'] ?? '', $label . ': the control, the verdict is recorded' );
 		}
 		$this->child_sql = array();
 		if ( in_array( $seam, self::JUDGE, true ) ) {
@@ -398,8 +412,17 @@ final class SwapSequencesTest extends SwapTestCase {
 			if ( ! $cancelled ) {
 				$this->assertSame( Job::FAILED, $done->status, $label . ': reversed, the job ends failed (' . $done->last_error . ')' );
 				$this->assertTrue( $done->retry_useful(), $label . ': and may be retried' );
-				$this->assertStringContainsString( 'swapped back out', (string) $done->last_error, $label );
+				$this->assertStringContainsString( 'found it broken', (string) $done->last_error, $label );
+				$this->assertStringContainsString( 'the home page', (string) $done->last_error, $label . ': the check that failed is named' );
 			}
+		}
+		// I7: a check that found the site broken decides, whatever a later check would say.
+		$failed_once = in_array( self::FAILED, array_merge( $passed, $runs ), true );
+		if ( $reverse ) {
+			$this->assertTrue( $failed_once, $label . ': the control, a check failed in this sequence' );
+		}
+		if ( $failed_once ) {
+			$this->assertNotSame( Job::COMPLETED, $done->status, $label . ': I7, a site found broken does not stay in place (' . $done->last_error . ')' );
 		}
 		if ( 'elsewhere_retry' === $kind ) {
 			$this->assertNotNull( $at_retry, $label . ': the control, it was retried' );

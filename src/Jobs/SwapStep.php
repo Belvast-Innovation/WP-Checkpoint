@@ -131,7 +131,18 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		self::INTERRUPTED => 'The swap was interrupted before it was complete.',
 		self::INCOMPLETE  => 'After the renames, not every table of the plan was in its place.',
 		self::STOPPED     => 'The swap stopped (the job log says why).',
-		self::REVERSED    => 'The restored site was swapped back out after the swap was made (the job log says why).',
+		self::REVERSED    => 'A check of the restored site found it broken: the site was put back as it was before the restore.',
+	);
+
+	/**
+	 * The checks of the restored site a failed verdict names (the cursor keeps the id): what 4c-B checks, and what
+	 * the job's error says of each. "unknown" is what a verdict without a known id is kept as.
+	 */
+	const CHECKS = array(
+		'home'    => 'the home page did not answer as a WordPress site',
+		'login'   => 'the login page did not answer as a WordPress site',
+		'self'    => 'the plugin\'s self-check did not answer from the restored tables',
+		'unknown' => 'the check is not named',
 	);
 
 	/**
@@ -162,8 +173,9 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * array (group => directory), "random" function(): string (hex for the names of what is moved out of the
 	 * way), "limit" function(): string (in place of reading max_execution_time back), "batch" (bytes of a batch
 	 * of renames, in place of SwapRules::limit()), "remove" function( Maintenance $file, callable $confirm ): bool
-	 * (in place of taking the maintenance file down), "verify" function( JobContext ): bool (whether the restored
-	 * site passed its checks, in place of the checks 4c-B will make; false reverses the swap).
+	 * (in place of taking the maintenance file down), "verify" function( JobContext ): true|string (whether the
+	 * restored site passed its checks, in place of the checks 4c-B will make; a string, the id of the check that
+	 * failed (CHECKS), reverses the swap).
 	 *
 	 * @var array<string, mixed>
 	 */
@@ -830,6 +842,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			'phase'  => 'restored',
 			'mark'   => $cursor['mark'] ?? '',
 			'reason' => (string) ( $cursor['reason'] ?? $reason ),
+			'check'  => (string) ( $cursor['check'] ?? '' ),
 		);
 		$context->checkpoint( $cursor, 98, __( 'The site is as it was before the restore', 'wp-checkpoint' ) );
 		$this->at( 'restored' );
@@ -855,13 +868,14 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 				'phase'  => 'reverted',
 				'mark'   => $cursor['mark'] ?? '',
 				'reason' => $reason,
+				'check'  => (string) ( $cursor['check'] ?? '' ),
 			);
 			$context->checkpoint( $cursor, 100, __( 'The site is as it was before the restore', 'wp-checkpoint' ) );
 			$this->at( 'reverted' );
 		}
 		$this->take_down( $context, $cursor );
 		$this->at( 'maintenance_down' );
-		return $this->ended( $context, '' !== $detail ? $detail : $reason );
+		return $this->ended( $context, '' !== $detail ? $detail : $reason, (string) ( $cursor['check'] ?? '' ) );
 	}
 
 	/**
@@ -897,15 +911,21 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 *
 	 * @param JobContext $context Context.
 	 * @param string     $reason  Why it was rolled back.
+	 * @param string     $check   The check that failed (an id of CHECKS), when it was reversed for one.
 	 * @return \RuntimeException Cancelled or RetryFrom.
 	 */
-	private function ended( JobContext $context, string $reason ): \RuntimeException {
+	private function ended( JobContext $context, string $reason, string $check = '' ): \RuntimeException {
 		if ( 0 !== $context->job()->cancel_requested ) {
 			return new Cancelled( 'The restore was cancelled; the site is as it was before it.' );
 		}
 		$text = self::REASONS[ $reason ] ?? $reason;
-		$back = self::REVERSED === $reason ? ' The swap was reversed: the site is as it was before the restore.' : ' The swap was rolled back: the site is as it was before the restore.';
-		return new RetryFrom( trim( $text . $back ), SwapCheckStep::ID );
+		if ( self::REVERSED === $reason ) {
+			// The restored copy is kept under its temporary names, next to the site, for a retry (the engine reclaims
+			// it with the failed job's work after WORK_RETENTION_SECONDS); the retry checks and swaps again.
+			$what = '' !== $check && isset( self::CHECKS[ $check ] ) ? ' What failed: ' . self::CHECKS[ $check ] . '.' : '';
+			return new RetryFrom( trim( $text . $what . ' The swap was reversed; the restored copy is kept for a retry, which checks the site again.' ), SwapCheckStep::ID );
+		}
+		return new RetryFrom( trim( $text . ' The swap was rolled back: the site is as it was before the restore.' ), SwapCheckStep::ID );
 	}
 
 	/**
@@ -920,10 +940,11 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @param Queries              $db      Connection.
 	 * @param array<string, mixed> $cursor  Cursor (its attempt and mark).
 	 * @param string               $reason  Why: one of REASONS.
+	 * @param string               $check   The check that failed (an id of CHECKS), or ''.
 	 * @return \RuntimeException What ends the job, for the caller to throw.
 	 * @throws TransientFailure When what is there cannot be told (the reverse goes on later).
 	 */
-	private function reverse( JobContext $context, Queries $db, array $cursor, string $reason ): \RuntimeException {
+	private function reverse( JobContext $context, Queries $db, array $cursor, string $reason, string $check = '' ): \RuntimeException {
 		if ( ! isset( self::REASONS[ $reason ] ) ) {
 			$reason = self::REVERSED;
 		}
@@ -932,9 +953,16 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			'attempt' => $cursor['attempt'],
 			'mark'    => $cursor['mark'] ?? '',
 			'reason'  => $reason,
+			'check'   => isset( self::CHECKS[ $check ] ) ? $check : '',
 		);
 		$context->checkpoint( $cursor, 88, __( 'Putting the site back as it was', 'wp-checkpoint' ) );
-		$context->logger()->warning( 'The swap is reversed after it was made', array( 'reason' => self::REASONS[ $reason ] ) );
+		$context->logger()->warning(
+			'The swap is reversed after it was made',
+			array(
+				'reason' => self::REASONS[ $reason ],
+				'check'  => '' === $cursor['check'] ? '' : self::CHECKS[ $cursor['check'] ],
+			)
+		);
 		$this->at( 'reverse_recorded' );
 		return $this->roll_back( $context, $db, $cursor, $reason );
 	}
@@ -963,13 +991,23 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 					break;
 				case 'verify':
 					// Where the restored site is checked before it is let out, behind the held file: the checks
-					// themselves are 4c-B's; here only a "verify" part (tests) can say the site failed, and the swap is
-					// then reversed with nothing of the restored site served. Without the part nothing is checked.
-					$passed = ! isset( $this->parts['verify'] ) || (bool) call_user_func( $this->parts['verify'], $context );
-					$this->at( 'verified' );
-					if ( ! $passed ) {
-						throw $this->reverse( $context, $db, $cursor, self::REVERSED );
+					// themselves are 4c-B's; here only a "verify" part (tests) can say the site failed (true, or the id
+					// of the check that failed: CHECKS), and the swap is then reversed with nothing of the restored site
+					// served. Without the part nothing is checked. The verdict is made durable before anything acts on
+					// it: a run that dies after a failed verdict is continued by one that reads the verdict, not by one
+					// that checks again (the second check may be unable to decide, and a site found broken would stay).
+					if ( ! isset( $cursor['verdict'] ) ) {
+						$verdict = ! isset( $this->parts['verify'] ) ? true : call_user_func( $this->parts['verify'], $context );
+						$this->at( 'verified' );
+						$cursor['verdict'] = true === $verdict ? 'passed' : 'failed';
+						$cursor['check']   = true === $verdict ? '' : ( is_string( $verdict ) && isset( self::CHECKS[ $verdict ] ) ? $verdict : 'unknown' );
+						$context->checkpoint( $cursor, 86, __( 'Checking the restored site', 'wp-checkpoint' ) );
+						$this->at( 'passed' === $cursor['verdict'] ? 'verdict_recorded' : 'verify_failed' );
 					}
+					if ( 'failed' === $cursor['verdict'] ) {
+						throw $this->reverse( $context, $db, $cursor, self::REVERSED, (string) $cursor['check'] );
+					}
+					unset( $cursor['verdict'], $cursor['check'] );
 					$cursor['post'] = 'release';
 					break;
 				case 'release':

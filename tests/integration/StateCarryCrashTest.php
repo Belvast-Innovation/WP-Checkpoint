@@ -165,6 +165,68 @@ final class StateCarryCrashTest extends SwapTestCase {
 		}
 	}
 
+	/**
+	 * The temporary tables seeded with any subset of the plugin's own rows before the swap, as a multi-row INSERT cut
+	 * short on MyISAM leaves them (with values of their own, so that a stale copy is told from a carried one): the
+	 * count leaves them out, the carry replaces them, and the restored site ends with the same rows.
+	 */
+	public function test_the_temporary_tables_seeded_with_any_subset_of_the_plugins_own_rows_end_with_the_same_rows(): void {
+		global $wpdb;
+		$this->swap_parts['batch'] = 1;
+		$this->register_type();
+		$job = $this->at_swap();
+		$this->without_transactions( $this->temp_tables( $job ) );
+		$done = $this->cli_run( $job );
+		$this->assertSame( Job::COMPLETED, $done->status, (string) $done->last_error );
+		$expected = $this->comparable();
+		$this->undo( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->tear_down_swap();
+		$this->set_up_swap();
+
+		mt_srand( 7 );
+		$seeded = 0;
+		for ( $round = 0; $round < 6; $round++ ) {
+			$label = 'seeded round ' . $round;
+			$this->swap_parts['batch'] = 1;
+			$this->register_type();
+			$job    = $this->at_swap();
+			$stages = $this->temp_tables( $job );
+			$this->without_transactions( $stages );
+			$db = ImportSession::open( Credentials::from_wordpress() );
+			$i  = 0;
+			foreach ( self::carried() as $live => $how ) {
+				$stage  = $stages[ $i++ ];
+				$column = $how['sitemeta'] ? 'meta_key' : 'option_name';
+				$value  = $how['sitemeta'] ? 'meta_value' : 'option_value';
+				$own    = array_values( array_diff( StateCarry::own_names( $db, $live, $how['sitemeta'], $how['site'] ), array( StateCarry::ACTIVE, StateCarry::ACTIVE_NETWORK ) ) );
+				// A subset: each own row with probability 1/2 in rounds 0-4, every one in round 5.
+				foreach ( $own as $name ) {
+					if ( 5 !== $round && 0 === mt_rand( 0, 1 ) ) {
+						continue;
+					}
+					$row = $how['sitemeta'] ? array( 'site_id' => (int) $how['site'][0], $column => $name, $value => 'stale ' . $round ) : array( $column => $name, $value => 'stale ' . $round, 'autoload' => 'no' );
+					$wpdb->delete( $stage, $how['sitemeta'] ? array( 'site_id' => (int) $how['site'][0], $column => $name ) : array( $column => $name ) );
+					$this->assertNotFalse( $wpdb->insert( $stage, $row ), $label . ': ' . $wpdb->last_error );
+					++$seeded;
+				}
+			}
+			$db->close();
+			$wpdb->query( 'COMMIT' );
+			$done = $this->cli_run( $job );
+			$this->assertSame( Job::COMPLETED, $done->status, $label . ': the count left the seeded rows out and the swap went on (' . $done->last_error . ')' );
+			$this->assertSame( $expected, $this->comparable(), $label . ': the same rows' );
+			foreach ( self::carried() as $live => $how ) {
+				$column = $how['sitemeta'] ? 'meta_key' : 'option_name';
+				$value  = $how['sitemeta'] ? 'meta_value' : 'option_value';
+				$this->assertSame( '0', (string) $wpdb->get_var( "SELECT COUNT(*) FROM `{$live}` WHERE {$value} LIKE 'stale %'" ), $label . ': no stale copy of an own row survives in ' . $live . ' (' . $column . ')' );
+			}
+			$this->undo( Plugin::instance()->jobs()->find( $job->id ) );
+			$this->tear_down_swap();
+			$this->set_up_swap();
+		}
+		$this->assertGreaterThan( 0, $seeded, 'the control: rows were seeded' );
+	}
+
 	public function test_own_names_are_the_plugins_rows_and_nothing_that_merely_looks_like_them(): void {
 		global $wpdb;
 		$table = $wpdb->prefix . 'swt_own';
