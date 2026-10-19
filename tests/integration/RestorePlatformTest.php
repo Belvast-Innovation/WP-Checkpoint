@@ -72,8 +72,10 @@ final class RestorePlatformTest extends RestoreTestCase {
 			add_filter( 'query', $broken );
 			$job = $this->run_restore( $this->restore_on( 'Linux', $base ) );
 			$this->assertSame( Job::FAILED, $job->status );
-			$this->assertStringContainsString( 'The jobs table is myisam, not InnoDB', (string) $job->last_error, 'read from the table' );
+			// The step's own text, not the fence's (which refuses the same table after the import, with work made).
+			$this->assertStringContainsString( 'The jobs table is myisam, not InnoDB: a restore cannot lock its job row before it writes. Convert the table to InnoDB', (string) $job->last_error, 'read from the table, by the step' );
 			$this->assertSame( Job::FAILURE_FINAL, $job->failure_kind );
+			$this->assertSame( array( 'work' => false, 'tables' => array(), 'site' => 0 ), self::made( $job ), 'nothing of the restore was made' );
 		} finally {
 			remove_filter( 'query', $broken );
 			$this->assertNotFalse( $wpdb->query( "ALTER TABLE {$table} ENGINE=InnoDB" ), 'the jobs table could not be put back: ' . $wpdb->last_error );
