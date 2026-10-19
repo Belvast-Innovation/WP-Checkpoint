@@ -118,17 +118,25 @@ final class StateCarry {
 	 * under its own names inserted, and the plugin put into the list of active plugins; a crash seam after each
 	 * statement ("carry_1", "carry_2", ...) and one at the end ("carry_written"), inside the transaction.
 	 *
-	 * @param string      $live_options Live options table.
-	 * @param string      $temp_options Temporary options table.
-	 * @param string|null $live_meta    Live sitemeta table (multisite), null on a single site.
-	 * @param string|null $temp_meta    Temporary sitemeta table (multisite).
+	 * The transaction's first statement locks the job row under the run's token (JobFence::lock()): a take-over
+	 * rewrites that row, so it waits until this transaction ends, and a run that lost the job finds no row, rolls
+	 * back and writes nothing. That holds for temporary tables without transactions too: the lock is on the job row.
+	 *
+	 * @param string                                       $live_options Live options table.
+	 * @param string                                       $temp_options Temporary options table.
+	 * @param string|null                                  $live_meta    Live sitemeta table (multisite), null on a single site.
+	 * @param string|null                                  $temp_meta    Temporary sitemeta table (multisite).
+	 * @param array{table: string, id: int, token: string} $fence        The job row and the run's token.
 	 * @return void
 	 * @throws Refused When the temporary table's list of active plugins cannot be read.
+	 * @throws \WPCheckpoint\Jobs\LockLost When the job is no longer this run's: nothing is written.
 	 * @throws \Throwable Whatever else stops it, after the transaction is rolled back.
 	 */
-	public function carry( string $live_options, string $temp_options, $live_meta = null, $temp_meta = null ): void {
+	public function carry( string $live_options, string $temp_options, $live_meta, $temp_meta, array $fence ): void {
 		$this->db->begin();
 		try {
+			JobFence::lock( $this->db, $fence['table'], (int) $fence['id'], (string) $fence['token'] );
+			$this->at( 'carry_locked' );
 			$this->statements = 0;
 			$this->carry_table( $live_options, $temp_options, false, array(), '(option_name, option_value, autoload) SELECT option_name, option_value, autoload' );
 			if ( null !== $live_meta && null !== $temp_meta ) {

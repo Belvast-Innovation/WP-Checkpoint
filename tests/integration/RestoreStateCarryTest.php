@@ -92,6 +92,30 @@ final class RestoreStateCarryTest extends RestoreTestCase {
 	}
 
 	/**
+	 * The job row and the token a carry is fenced by: a job of this test, acquired as a run does.
+	 *
+	 * @return array{table: string, id: int, token: string}
+	 */
+	private function fence(): array {
+		if ( null === $this->fence ) {
+			$jobs = \WPCheckpoint\Plugin::instance()->jobs();
+			$job  = $jobs->create( 'export', self::$admin_id );
+			$held = $jobs->acquire( $job->id );
+			$this->assertNotNull( $held, 'the control: the job is held for the carry' );
+			$this->fence = array(
+				'table' => \WPCheckpoint\Jobs\JobRepository::table(),
+				'id'    => $job->id,
+				'token' => (string) $held['token'],
+			);
+			$GLOBALS['wpdb']->query( 'COMMIT' );
+		}
+		return $this->fence;
+	}
+
+	/** @var array{table: string, id: int, token: string}|null */
+	private $fence = null;
+
+	/**
 	 * Rows of a table under the given names (or, with none, under every stored form of the registry): name => value.
 	 *
 	 * @param string[] $names Names.
@@ -162,7 +186,7 @@ final class RestoreStateCarryTest extends RestoreTestCase {
 			$this->assertStringContainsString( 'backup', $value );
 		}
 
-		$this->carry()->carry( $wpdb->base_prefix . 'options', $this->temporary[0], is_multisite() ? $wpdb->base_prefix . 'sitemeta' : null, $this->temporary[1] );
+		$this->carry()->carry( $wpdb->base_prefix . 'options', $this->temporary[0], is_multisite() ? $wpdb->base_prefix . 'sitemeta' : null, $this->temporary[1], $this->fence() );
 		foreach ( $this->tables() as $pair ) {
 			$this->assertSame( $this->rows_of_names( $pair[0] ), $this->rows_of_names( $pair[1] ), 'every row under a registered name is the live one, and only those: ' . $pair[1] );
 		}
@@ -186,7 +210,7 @@ final class RestoreStateCarryTest extends RestoreTestCase {
 		$this->assertSame( $foreign, $this->rows_of_names( $state, $others ) + $this->rows_of_names( $this->temporary[0], array( 'wpcheckpoint_user_roles' ) ), 'the rows outside the registry are the backup\'s' );
 		$this->assertTrue( $this->is_active( $this->active() ) );
 
-		$this->carry()->carry( $wpdb->base_prefix . 'options', $this->temporary[0], is_multisite() ? $wpdb->base_prefix . 'sitemeta' : null, $this->temporary[1] );
+		$this->carry()->carry( $wpdb->base_prefix . 'options', $this->temporary[0], is_multisite() ? $wpdb->base_prefix . 'sitemeta' : null, $this->temporary[1], $this->fence() );
 		foreach ( $this->tables() as $pair ) {
 			$this->assertSame( $this->rows_of_names( $pair[0] ), $this->rows_of_names( $pair[1] ), 'again: the same result' );
 		}
@@ -200,7 +224,7 @@ final class RestoreStateCarryTest extends RestoreTestCase {
 	public function test_the_swap_does_not_happen_when_this_plugin_would_not_be_active(): void {
 		global $wpdb;
 		$this->imported();
-		$this->carry()->carry( $wpdb->base_prefix . 'options', $this->temporary[0], is_multisite() ? $wpdb->base_prefix . 'sitemeta' : null, $this->temporary[1] );
+		$this->carry()->carry( $wpdb->base_prefix . 'options', $this->temporary[0], is_multisite() ? $wpdb->base_prefix . 'sitemeta' : null, $this->temporary[1], $this->fence() );
 
 		$swaps  = 0;
 		$swap   = static function () use ( &$swaps ): string {

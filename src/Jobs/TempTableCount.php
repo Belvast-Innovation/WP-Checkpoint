@@ -9,6 +9,7 @@ namespace WPCheckpoint\Jobs;
 
 use WPCheckpoint\Database\SqlWriter;
 use WPCheckpoint\Restore\Ledger;
+use WPCheckpoint\Restore\JobFence;
 use WPCheckpoint\Restore\StateCarry;
 use WPCheckpoint\Restore\Queries;
 use WPCheckpoint\Restore\RestoreFiles;
@@ -88,6 +89,14 @@ final class TempTableCount {
 	private $names = array();
 
 	/**
+	 * The job row the count's one write is conditioned on: table, id, token (JobFence); empty for none (then the own
+	 * rows cannot be recorded, and a table that needs them is a transient failure).
+	 *
+	 * @var array{table: string, id: int, token: string}|array{}
+	 */
+	private $fence;
+
+	/**
 	 * Constructor.
 	 *
 	 * @param Queries                                              $db     Connection.
@@ -97,8 +106,9 @@ final class TempTableCount {
 	 * @param int                                                  $rows   Rows of a key counted per unit.
 	 * @param callable|null                                        $seam   Crash seam (tests): called at "counted_whole" and "counted".
 	 * @param array<string, array{sitemeta: bool, site: string[]}> $own    The tables counted without the plugin's own rows (StateCarry::counted()).
+	 * @param array{table: string, id: int, token: string}|array{} $fence  The job row the record of the own rows is conditioned on.
 	 */
-	public function __construct( Queries $db, TablePlan $plan, Ledger $ledger, string $work, int $rows, $seam = null, array $own = array() ) {
+	public function __construct( Queries $db, TablePlan $plan, Ledger $ledger, string $work, int $rows, $seam = null, array $own = array(), array $fence = array() ) {
 		$this->db     = $db;
 		$this->plan   = $plan;
 		$this->ledger = $ledger;
@@ -106,6 +116,7 @@ final class TempTableCount {
 		$this->rows   = max( 1, $rows );
 		$this->seam   = is_callable( $seam ) ? $seam : null;
 		$this->own    = $own;
+		$this->fence  = $fence;
 	}
 
 	/**
@@ -119,6 +130,7 @@ final class TempTableCount {
 	 * @return array{position: array{i: int, key: array<int, string>|null, sum: int}, done: bool, unbounded: bool, what: string}
 	 * @throws WorkLost When a table holds other rows than the import recorded.
 	 * @throws TransientFailure When the ledger's record of the own rows, written by another run meanwhile, cannot be read back.
+	 * @throws LockLost When the job is no longer this run's: the record was refused and nothing was written.
 	 */
 	public function unit( array $cursor, bool $want ): array {
 		$db     = $this->db;
@@ -167,9 +179,16 @@ final class TempTableCount {
 			if ( $owned < 0 ) {
 				$owned = (int) ( $db->rows( 'SELECT COUNT(*) FROM ' . $name . ' WHERE ' . $where . $column . ' IN (' . $marks . ')', $params )[0][0] ?? 0 );
 				$this->at( 'own_counted' );
-				if ( ! $this->ledger->set_owned( (int) $table['number'], $owned ) ) {
-					// Recorded meanwhile by another run counting the same table (a lease that ran out while its run
-					// lived): what it recorded is what every count takes; a record that is still unset is not there.
+				if ( array() === $this->fence ) {
+					throw new TransientFailure( 'The own rows of a table cannot be recorded outside a run.' );
+				}
+				if ( ! $this->ledger->set_owned( (int) $table['number'], $owned, $this->fence['table'], $this->fence['id'], $this->fence['token'] ) ) {
+					// Not written: the job is no longer this run's (it stops here and writes nothing more), or the
+					// record was made meanwhile by another run counting the same table while this one still held
+					// the job (then what it recorded is what every count takes).
+					if ( ! JobFence::holds( $db, $this->fence['table'], $this->fence['id'], $this->fence['token'] ) ) {
+						throw new LockLost( sprintf( 'Job %d: the lock is no longer held; the count wrote nothing.', $this->fence['id'] ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+					}
 					$state = $this->ledger->get( (int) $table['number'] );
 					if ( null === $state || $state['owned'] < 0 ) {
 						throw new TransientFailure( 'The restore ledger\'s record of the table being counted could not be read back; the count is tried again.' );

@@ -812,7 +812,8 @@ final class Runner {
 			$checkpoint,
 			$lease,
 			array( 'cli' => $this->cli ),
-			$record
+			$record,
+			$token
 		);
 	}
 

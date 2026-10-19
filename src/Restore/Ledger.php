@@ -170,15 +170,30 @@ final class Ledger {
 	/**
 	 * Record how many of a table's rows are the plugin's own (StateCarry::own_names()) at the first count, before
 	 * any carry: set once, never changed (a later count that found a different number would be one after a carry).
-	 * False when it was recorded already (another run counting the same table got there first, or this one did:
-	 * the caller reads what was recorded), or when the table has no record.
+	 * The statement itself is conditioned on the run still holding the job (the job row under the run's token, in
+	 * one UPDATE with the record): false when it was recorded already (another run counting the same table got there
+	 * first, or this one did: the caller reads what was recorded), when the job is no longer held, or when the table
+	 * has no record; the caller tells the three apart (JobFence::holds(), get()).
 	 *
-	 * @param int $number The table's number.
-	 * @param int $owned  Own rows.
+	 * @param int    $number     The table's number.
+	 * @param int    $owned      Own rows.
+	 * @param string $jobs_table The jobs table.
+	 * @param int    $job_id     Job id.
+	 * @param string $token      The run's lock token.
 	 * @return bool
 	 */
-	public function set_owned( int $number, int $owned ): bool {
-		return 1 === $this->db->write( 'UPDATE ' . SqlWriter::identifier( $this->name ) . ' SET owned = ? WHERE n = ? AND owned < 0', array( (string) $owned, (string) $number ) );
+	public function set_owned( int $number, int $owned, string $jobs_table, int $job_id, string $token ): bool {
+		$db = $this->db;
+		return 1 === JobFence::bounded(
+			$db,
+			function () use ( $db, $jobs_table, $job_id, $owned, $number, $token ): int {
+				// The job row is read for the update: the wait for it, should a fenced write hold it, is bounded.
+				return $db->write(
+					'UPDATE ' . SqlWriter::identifier( $this->name ) . ' AS l JOIN ' . SqlWriter::identifier( $jobs_table ) . ' AS j ON j.id = ? SET l.owned = ? WHERE l.n = ? AND l.owned < 0 AND j.lock_token = ?',
+					array( (string) $job_id, (string) $owned, (string) $number, $token )
+				);
+			}
+		);
 	}
 
 	/**

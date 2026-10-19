@@ -355,7 +355,12 @@ abstract class SwapTestCase extends RestoreTestCase {
 		$job     = $jobs->create( $this->type, self::$admin_id, array(), array_merge( array( 'base' => $base, 'exclude_tables' => $exclude ), $options ) );
 		$runner  = array() === $this->storage ? Plugin::instance()->runner() : new Runner( $jobs, Plugin::instance()->job_types(), new Redactor( Redactor::installation_secrets() ) );
 		for ( $i = 0; $i < 500; $i++ ) {
-			$result = $runner->tick( $job->id, microtime( true ) );
+			// Committed between ticks: the restore's connection fences its writes on the job row (Restore\JobFence).
+			$result = $this->autocommit(
+				static function () use ( $runner, $job ): TickResult {
+					return $runner->tick( $job->id, microtime( true ) );
+				}
+			);
 			$now    = Plugin::instance()->jobs()->find( $job->id );
 			if ( TickResult::CLI === $result->status || ! in_array( $now->status, array( Job::QUEUED, Job::RUNNING ), true ) ) {
 				break;
@@ -389,25 +394,6 @@ abstract class SwapTestCase extends RestoreTestCase {
 		);
 	}
 
-	/**
-	 * Run with the site's connection in autocommit, as in a WP-CLI process. The test framework keeps it in a
-	 * transaction, and every table it reads in one stays locked against a RENAME until it commits: the swap would
-	 * wait for the test's own connection.
-	 *
-	 * @template T
-	 * @param callable(): T $work Work.
-	 * @return T
-	 */
-	protected function autocommit( callable $work ) {
-		global $wpdb;
-		$wpdb->query( 'COMMIT' );
-		$wpdb->query( 'SET autocommit = 1' );
-		try {
-			return $work();
-		} finally {
-			$wpdb->query( 'SET autocommit = 0' );
-		}
-	}
 
 	/**
 	 * WP-CLI ticks until the job is no longer queued or running (or waits).
