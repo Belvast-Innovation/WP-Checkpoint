@@ -320,6 +320,7 @@ final class Schema {
 
 		if ( $current ) {
 			self::fence();
+			self::quietly( array( __CLASS__, 'jobs_table_innodb' ) ); // Best effort: the engine is a restore's need, not the schema's.
 			$problems = self::verified();
 			if ( null === $problems || array() === $problems ) {
 				// Nothing missing; unreadable columns are no evidence that something is (nor that it was fixed).
@@ -328,14 +329,9 @@ final class Schema {
 				}
 				return $result( 'none' );
 			}
-			// Lost after the version was recorded (removed by hand, a table brought from elsewhere, another engine):
-			// the table in its current shape again. The version stays as it is either way.
-			self::quietly(
-				static function (): void {
-					self::create_jobs_table();
-					self::jobs_table_innodb();
-				}
-			);
+			// Lost after the version was recorded (removed by hand, a table brought from elsewhere): the table in its
+			// current shape again. The version stays as it is either way.
+			self::quietly( array( __CLASS__, 'create_jobs_table' ) );
 			$problems = self::verified();
 			if ( array() !== $problems ) {
 				self::record_failure( $problems );
@@ -463,18 +459,7 @@ final class Schema {
 	 * @return string[]|null
 	 */
 	private static function verified() {
-		if ( ! self::table_exists() ) {
-			return array( self::NO_TABLE );
-		}
-		$problems = self::column_problems();
-		if ( null === $problems ) {
-			return null;
-		}
-		$engine = self::engine_problem();
-		if ( '' !== $engine ) {
-			$problems[] = $engine;
-		}
-		return $problems;
+		return self::table_exists() ? self::column_problems() : array( self::NO_TABLE );
 	}
 
 	/**
@@ -558,8 +543,9 @@ final class Schema {
 				return 1;
 			case 14:
 				// The jobs table pinned to InnoDB (its definition, and a table an earlier version made under the server's
-				// default engine converted): a restore's run locks its job row before it writes outside it. Older code
-				// reads and writes the table as before, so min_compatible stays 1.
+				// default engine converted, best effort: the version is recorded either way, a restore refuses the table
+				// itself): a restore's run locks its job row before it writes outside it. Older code reads and writes the
+				// table as before, so min_compatible stays 1.
 				self::create_jobs_table();
 				self::jobs_table_innodb();
 				return 1;
@@ -616,7 +602,10 @@ final class Schema {
 	/**
 	 * The jobs table as InnoDB: a restore's run locks its job row (Restore\JobFence) and a locked read on another
 	 * engine holds nothing. A table made by an earlier version took the server's default engine. Nothing to do when
-	 * it is InnoDB already, or when the engine cannot be read (the fence refuses such a table itself).
+	 * it is InnoDB already, or when the engine cannot be read. Best effort, as a restore-only need: an ALTER that is
+	 * refused does not hold the schema's version or any other job back (a restore refuses such a table at its
+	 * platform check, RestorePlatformStep, and says what to run); every verifying request (ensure( true )) tries
+	 * again.
 	 *
 	 * @return void
 	 */
@@ -642,16 +631,7 @@ final class Schema {
 		return '' === $engine ? null : $engine;
 	}
 
-	/**
-	 * What is wrong with the jobs table's engine ('' when nothing, or it cannot be read): not InnoDB, which a
-	 * restore's run needs to lock its job row (Restore\JobFence).
-	 *
-	 * @return string
-	 */
-	public static function engine_problem(): string {
-		$engine = self::jobs_table_engine();
-		return null === $engine || 'innodb' === $engine ? '' : sprintf( 'engine (%s, needs InnoDB)', $engine );
-	}
+
 
 	/**
 	 * Drop the tables (uninstall with data deletion).

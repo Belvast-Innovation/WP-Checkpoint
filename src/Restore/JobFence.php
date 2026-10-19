@@ -52,7 +52,9 @@ final class JobFence {
 	 * @param array{table: string, id: int, token: string} $fence The job row and the run's token.
 	 * @param callable(): T                                $work  The writes.
 	 * @return T
-	 * @throws LockLost When the row is not held under the token: nothing was written.
+	 * @throws LockLost When the row is not held under the token (or the run has no token): nothing was written.
+	 * @throws PlatformUnsupported When the jobs table is not InnoDB: the fence cannot hold (before the transaction).
+	 * @throws TransientFailure When the table's engine cannot be read (before the transaction).
 	 * @throws \LogicException When called inside another within() on the same connection.
 	 * @throws \Throwable Whatever stops $work, after the rollback.
 	 */
@@ -60,6 +62,9 @@ final class JobFence {
 		$id = spl_object_id( $db );
 		if ( isset( self::$within[ $id ] ) ) {
 			throw new \LogicException( 'JobFence::within() inside another: the inner transaction would commit the outer\'s writes.' );
+		}
+		if ( '' === (string) $fence['token'] ) {
+			throw new LockLost( sprintf( 'Job %d: no lock token to write under.', (int) $fence['id'] ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
 		}
 		$table = (string) $fence['table'];
 		self::require_innodb( $db, $table );
@@ -97,25 +102,6 @@ final class JobFence {
 	}
 
 	/**
-	 * Lock the job row under the run's token, inside a transaction the caller opened (within() is the usual way):
-	 * the table's engine and the session's wait are read first, which inside a transaction would come before the
-	 * locking read.
-	 *
-	 * @param Queries $db    Connection, with a transaction open.
-	 * @param string  $table The jobs table.
-	 * @param int     $id    Job id.
-	 * @param string  $token The run's lock token.
-	 * @return void
-	 * @throws LockLost When the row is not held under the token: the caller rolls back and writes nothing.
-	 * @throws PlatformUnsupported When the table is not InnoDB (the fence cannot hold; the schema pins the engine).
-	 * @throws TransientFailure When the table's engine cannot be read.
-	 */
-	public static function lock( Queries $db, string $table, int $id, string $token ): void {
-		self::require_innodb( $db, $table );
-		self::locking_read( $db, $table, $id, $token, self::session_wait( $db ) );
-	}
-
-	/**
 	 * The locking read of the job row, its wait bounded (WAIT seconds; $wait, the session's own, put back after).
 	 *
 	 * @param Queries $db    Connection, with a transaction open.
@@ -127,9 +113,6 @@ final class JobFence {
 	 * @throws LockLost When the row is not held under the token.
 	 */
 	private static function locking_read( Queries $db, string $table, int $id, string $token, int $wait ): void {
-		if ( '' === $token ) {
-			throw new LockLost( sprintf( 'Job %d: no lock token to write under.', $id ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
-		}
 		if ( $wait > 0 ) {
 			$db->run( 'SET SESSION innodb_lock_wait_timeout = ' . self::WAIT );
 		}
@@ -156,13 +139,6 @@ final class JobFence {
 	}
 
 	/**
-	 * The tables seen to be InnoDB, by connection and table.
-	 *
-	 * @var array<string, true>
-	 */
-	private static $innodb = array();
-
-	/**
 	 * A table's engine as the server names it, lower-cased, or null when it cannot be read (one place for the read:
 	 * the import's transactional judgement uses it too).
 	 *
@@ -177,8 +153,8 @@ final class JobFence {
 	}
 
 	/**
-	 * Refuse a table that is not InnoDB: a locked read on another engine holds nothing. Checked once per connection
-	 * and table; what cannot be read is no evidence, and is tried again.
+	 * Refuse a table that is not InnoDB: a locked read on another engine holds nothing. Read every time (one row of
+	 * information_schema per fenced write); what cannot be read is no evidence either way.
 	 *
 	 * @param Queries $db    Connection.
 	 * @param string  $table Table.
@@ -187,19 +163,14 @@ final class JobFence {
 	 * @throws TransientFailure When its engine cannot be read.
 	 */
 	public static function require_innodb( Queries $db, string $table ): void {
-		$key = spl_object_id( $db ) . ':' . $table;
-		if ( isset( self::$innodb[ $key ] ) ) {
-			return;
-		}
 		$engine = self::engine_of( $db, $table );
 		if ( null === $engine ) {
-			throw new TransientFailure( 'The engine of the jobs table could not be read; the fenced write is tried again.' );
+			throw new TransientFailure( 'The engine of the jobs table could not be read.' );
 		}
 		if ( 'innodb' !== $engine ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- the engine name from the server.
 			throw new PlatformUnsupported( sprintf( 'The jobs table is %s, not InnoDB: a run cannot lock its job row, so the restore cannot fence its writes. Convert the table to InnoDB (ALTER TABLE ... ENGINE=InnoDB).', $engine ) );
 		}
-		self::$innodb[ $key ] = true;
 	}
 
 	/**

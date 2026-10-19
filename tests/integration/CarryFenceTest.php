@@ -110,16 +110,22 @@ final class CarryFenceTest extends SwapTestCase {
 	public function test_a_take_over_waits_for_a_carry_that_holds_the_job_row_and_goes_through_once_it_committed(): void {
 		$held      = $this->held();
 		$this->old = ImportSession::open( Credentials::from_wordpress() );
-		$this->old->begin();
-		JobFence::lock( $this->old, $held['fence']['table'], $held['fence']['id'], $held['fence']['token'] );
-		// The row is locked in the old run's transaction: a take-over (another connection) waits for it, here for a
-		// second, then gives up (1205: acquire() answers null).
-		$start = microtime( true );
-		$taken = $this->take_over( $held['job'], 1 );
-		$this->assertGreaterThanOrEqual( 0.9, microtime( true ) - $start, 'the take-over waited for the row' );
+		// Inside the old run's fenced transaction the row is locked: a take-over (another connection) waits for it,
+		// here for a second, then gives up (1205: acquire() answers null).
+		$waited = 0.0;
+		$taken  = JobFence::within(
+			$this->old,
+			$held['fence'],
+			function () use ( $held, &$waited ) {
+				$start  = microtime( true );
+				$taken  = $this->take_over( $held['job'], 1 );
+				$waited = microtime( true ) - $start;
+				return $taken;
+			}
+		);
+		$this->assertGreaterThanOrEqual( 0.9, $waited, 'the take-over waited for the row' );
 		$this->assertNull( $taken, 'and could not pass the carry that holds it' );
 		$this->assertSame( $held['token'], Plugin::instance()->jobs()->find( $held['job']->id )->lock_token, 'the control: the old run still holds it' );
-		$this->old->commit();
 		$taken = $this->take_over( $held['job'], 1 );
 		$this->assertNotNull( $taken, 'once the carry committed, the take-over goes through' );
 		$this->assertNotSame( $held['token'], $taken['token'] );

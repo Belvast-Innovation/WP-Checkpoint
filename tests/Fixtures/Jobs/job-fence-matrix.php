@@ -11,7 +11,7 @@
  * - Taken over, the run's SELECT ... FOR UPDATE under its old token finds no row and does not wait; the ledger's
  *   UPDATE joined with the row under the old token changes nothing; under the new token it changes the record.
  * - The jobs table must be InnoDB for any of this: on another engine the locked read holds nothing (what the schema
- *   pins, and what JobFence::lock() refuses).
+ *   pins, and what JobFence::within() refuses).
  *
  * Usage: php job-fence-matrix.php <host> <port> <user> <password>
  *

@@ -83,7 +83,7 @@ final class RestorePlatformStep implements Step {
 		}
 		if ( 'innodb' !== $engine ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- the engine name from the server; the presenter cleans it.
-			throw new PlatformUnsupported( sprintf( 'The jobs table is %s, not InnoDB: a restore cannot lock its job row before it writes. Convert the table to InnoDB (ALTER TABLE ... ENGINE=InnoDB) and retry.', $engine ) );
+			throw new PlatformUnsupported( sprintf( 'The jobs table is %s, not InnoDB: a restore cannot lock its job row before it writes. Convert the table to InnoDB (ALTER TABLE ... ENGINE=InnoDB; the plugin tries that itself when its admin page loads), then start the restore again.', $engine ) );
 		}
 		return StepResult::done( __( 'This server can run a restore', 'wp-checkpoint' ) );
 	}

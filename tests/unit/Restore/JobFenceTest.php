@@ -182,7 +182,13 @@ final class JobFenceTest extends TestCase {
 		$db = self::recorder( array() );
 		JobFence::bounded( $db, static function (): void {} );
 		$this->assertCount( 1, $db->sent, 'unreadable: only the read, nothing set' );
-		$this->expectException( LockLost::class );
-		JobFence::lock( self::recorder( self::INNODB_HELD ), 'wp_wpcheckpoint_jobs', 1, '' ); // No token: nothing to write under.
+		$db = self::recorder( self::INNODB_HELD );
+		try {
+			JobFence::within( $db, array( 'table' => 'wp_wpcheckpoint_jobs', 'id' => 1, 'token' => '' ), static function (): void {} );
+			$this->fail( 'a fence without a token was run' );
+		} catch ( LockLost $e ) {
+			$this->assertStringContainsString( 'no lock token', $e->getMessage() );
+		}
+		$this->assertSame( array(), $db->sent, 'no token: refused before any statement' );
 	}
 }

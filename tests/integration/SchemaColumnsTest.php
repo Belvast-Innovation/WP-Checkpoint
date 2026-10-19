@@ -110,59 +110,71 @@ final class SchemaColumnsTest extends JobTestCase {
 		$this->fail( 'no database.jobs check' );
 	}
 
-	public function test_the_jobs_table_of_an_earlier_version_is_made_innodb_on_upgrade(): void {
-		global $wpdb;
-		// A table an earlier version made under the server's default engine, here MyISAM: a run could not lock its row.
-		$table = Schema::jobs_table();
-		$this->assertNotFalse( $wpdb->query( "ALTER TABLE {$table} ENGINE=MyISAM" ), $wpdb->last_error );
-		$engine = static function () use ( $wpdb, $table ): string {
-			return strtolower( (string) $wpdb->get_var( $wpdb->prepare( 'SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s', $table ) ) );
-		};
-		$this->assertSame( 'myisam', $engine(), 'the control' );
-		Options::set( Schema::OPTION, array( 'version' => 13, 'min_compatible' => 1 ) );
-		$result = Schema::ensure();
-		$this->assertSame( 'migrated', $result['action'], wp_json_encode( $result ) );
-		$this->assertSame( 14, Options::get( Schema::OPTION )['version'] );
-		$this->assertSame( 'innodb', $engine(), 'version 14 pins the engine' );
-		$this->assertSame( 'none', Schema::ensure()['action'], 'and once more does nothing' );
+	/**
+	 * The jobs table's engine as read, and a way to put it back (a test that leaves it MyISAM would fail every later
+	 * restore test at its platform check).
+	 */
+	private function engine(): string {
+		return (string) Schema::jobs_table_engine();
 	}
 
-	public function test_an_engine_the_migration_could_not_change_keeps_the_version_and_says_why(): void {
+	private function make_myisam(): void {
 		global $wpdb;
 		$table = Schema::jobs_table();
 		$this->assertNotFalse( $wpdb->query( "ALTER TABLE {$table} ENGINE=MyISAM" ), $wpdb->last_error );
-		Options::set( Schema::OPTION, array( 'version' => 13, 'min_compatible' => 1 ) );
-		// The ALTER refused (as without the privilege): the version stays, the problem names the engine.
+		$this->assertSame( 'myisam', $this->engine(), 'the control' );
+	}
+
+	private function make_innodb(): void {
+		global $wpdb;
+		$table = Schema::jobs_table();
+		$wpdb->query( "ALTER TABLE {$table} ENGINE=InnoDB" );
+	}
+
+	public function test_the_jobs_table_of_an_earlier_version_is_made_innodb_on_upgrade(): void {
+		try {
+			// A table an earlier version made under the server's default engine, here MyISAM: a run could not lock its row.
+			$this->make_myisam();
+			Options::set( Schema::OPTION, array( 'version' => 13, 'min_compatible' => 1 ) );
+			$result = Schema::ensure();
+			$this->assertSame( 'migrated', $result['action'], wp_json_encode( $result ) );
+			$this->assertSame( 14, Options::get( Schema::OPTION )['version'] );
+			$this->assertSame( 'innodb', $this->engine(), 'version 14 pins the engine' );
+			$this->assertSame( 'none', Schema::ensure()['action'], 'and once more does nothing' );
+		} finally {
+			$this->make_innodb();
+		}
+	}
+
+	public function test_an_engine_the_migration_could_not_change_holds_no_job_back_and_is_tried_again_by_a_verifying_request(): void {
+		// The ALTER refused (as without the privilege): the engine is a restore's need, not the schema's, so the version
+		// is recorded, no problem is reported (every job would otherwise stop), and a verifying request tries again.
 		$broken = static function ( $sql ) {
 			return 0 === strpos( (string) $sql, 'ALTER TABLE' ) && false !== stripos( (string) $sql, 'ENGINE=InnoDB' ) ? 'ALTER TABLE no_such_table ENGINE=InnoDB' : $sql;
 		};
-		add_filter( 'query', $broken );
 		try {
-			$result = $this->ensure();
+			$this->make_myisam();
+			Options::set( Schema::OPTION, array( 'version' => 13, 'min_compatible' => 1 ) );
+			add_filter( 'query', $broken );
+			try {
+				$result = $this->ensure();
+				$this->assertSame( 'migrated', $result['action'], wp_json_encode( $result ) );
+				$this->assertSame( 14, Options::get( Schema::OPTION )['version'], 'recorded: the columns are there' );
+				$this->assertSame( 'myisam', $this->engine(), 'the control: the ALTER was refused' );
+				$this->assertSame( 'none', $this->ensure()['action'], 'a plain request reports nothing' );
+				$this->assertSame( 'none', Schema::ensure( true )['action'], 'a verifying one neither (the engine is not a schema problem)' );
+				$this->assertSame( 'myisam', $this->engine(), 'the control: still refused' );
+			} finally {
+				remove_filter( 'query', $broken );
+			}
+			// Once the ALTER goes through, the next verifying request converts it; a plain one does not look.
+			$this->assertSame( 'none', $this->ensure()['action'] );
+			$this->assertSame( 'myisam', $this->engine(), 'a plain request does not look' );
+			$this->assertSame( 'none', Schema::ensure( true )['action'] );
+			$this->assertSame( 'innodb', $this->engine(), 'a verifying request converted it' );
 		} finally {
-			remove_filter( 'query', $broken );
+			$this->make_innodb();
 		}
-		$this->assertSame( 'failed', $result['action'], wp_json_encode( $result ) );
-		$this->assertContains( 'engine (myisam, needs InnoDB)', (array) $result['problems'] );
-		$this->assertSame( 13, Options::get( Schema::OPTION )['version'], 'not recorded as upgraded' );
-		// Once the ALTER goes through, the migration completes.
-		Options::delete( Schema::RETRY_OPTION );
-		$result = $this->ensure();
-		$this->assertSame( 'migrated', $result['action'], wp_json_encode( $result ) );
-		$this->assertSame( 14, Options::get( Schema::OPTION )['version'] );
-	}
-
-	public function test_a_current_jobs_table_on_another_engine_is_repaired(): void {
-		global $wpdb;
-		$table = Schema::jobs_table();
-		$this->assertSame( 'none', $this->ensure()['action'], 'the control: current' );
-		$this->assertNotFalse( $wpdb->query( "ALTER TABLE {$table} ENGINE=MyISAM" ), $wpdb->last_error );
-		$this->assertSame( 'myisam', Schema::jobs_table_engine(), 'the control: the engine is read as changed' );
-		$this->assertSame( 'engine (myisam, needs InnoDB)', Schema::engine_problem(), 'the control: named as the problem' );
-		$this->assertSame( 'none', $this->ensure()['action'], 'a plain request does not look' );
-		$this->assertSame( 'repaired', Schema::ensure( true )['action'], 'one that verifies repairs it' );
-		$this->assertSame( 'innodb', Schema::jobs_table_engine() );
-		$this->assertSame( 14, Options::get( Schema::OPTION )['version'] );
 	}
 
 	public function test_a_column_the_migration_could_not_add_keeps_the_version_and_says_why(): void {
