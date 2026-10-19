@@ -320,7 +320,7 @@ final class Schema {
 
 		if ( $current ) {
 			self::fence();
-			$problems = self::column_problems();
+			$problems = self::verified();
 			if ( null === $problems || array() === $problems ) {
 				// Nothing missing; unreadable columns are no evidence that something is (nor that it was fixed).
 				if ( array() === $problems ) {
@@ -328,9 +328,14 @@ final class Schema {
 				}
 				return $result( 'none' );
 			}
-			// Lost after the version was recorded (removed by hand, a table brought from elsewhere): the table
-			// in its current shape again. The version stays as it is either way.
-			self::quietly( array( __CLASS__, 'create_jobs_table' ) );
+			// Lost after the version was recorded (removed by hand, a table brought from elsewhere, another engine):
+			// the table in its current shape again. The version stays as it is either way.
+			self::quietly(
+				static function (): void {
+					self::create_jobs_table();
+					self::jobs_table_innodb();
+				}
+			);
 			$problems = self::verified();
 			if ( array() !== $problems ) {
 				self::record_failure( $problems );
@@ -458,7 +463,18 @@ final class Schema {
 	 * @return string[]|null
 	 */
 	private static function verified() {
-		return self::table_exists() ? self::column_problems() : array( self::NO_TABLE );
+		if ( ! self::table_exists() ) {
+			return array( self::NO_TABLE );
+		}
+		$problems = self::column_problems();
+		if ( null === $problems ) {
+			return null;
+		}
+		$engine = self::engine_problem();
+		if ( '' !== $engine ) {
+			$problems[] = $engine;
+		}
+		return $problems;
 	}
 
 	/**
@@ -606,13 +622,35 @@ final class Schema {
 	 */
 	private static function jobs_table_innodb(): void {
 		global $wpdb;
-		$table  = $wpdb->base_prefix . self::JOBS_TABLE;
-		$engine = (string) $wpdb->get_var( $wpdb->prepare( 'SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s', $table ) );
-		if ( '' === $engine || 'innodb' === strtolower( $engine ) ) {
+		$engine = self::jobs_table_engine();
+		if ( null === $engine || 'innodb' === $engine ) {
 			return;
 		}
+		$table = $wpdb->base_prefix . self::JOBS_TABLE;
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix.
 		$wpdb->query( "ALTER TABLE {$table} ENGINE=InnoDB" );
+	}
+
+	/**
+	 * The jobs table's engine as the server names it, lower-cased, or null when it cannot be read.
+	 *
+	 * @return string|null
+	 */
+	public static function jobs_table_engine() {
+		global $wpdb;
+		$engine = strtolower( trim( (string) $wpdb->get_var( $wpdb->prepare( 'SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s', $wpdb->base_prefix . self::JOBS_TABLE ) ) ) );
+		return '' === $engine ? null : $engine;
+	}
+
+	/**
+	 * What is wrong with the jobs table's engine ('' when nothing, or it cannot be read): not InnoDB, which a
+	 * restore's run needs to lock its job row (Restore\JobFence).
+	 *
+	 * @return string
+	 */
+	public static function engine_problem(): string {
+		$engine = self::jobs_table_engine();
+		return null === $engine || 'innodb' === $engine ? '' : sprintf( 'engine (%s, needs InnoDB)', $engine );
 	}
 
 	/**

@@ -16,6 +16,7 @@ use WPCheckpoint\Restore\ClaimLost;
 use WPCheckpoint\Restore\ConstraintNames;
 use WPCheckpoint\Restore\ImportSession;
 use WPCheckpoint\Restore\ImportTarget;
+use WPCheckpoint\Restore\JobFence;
 use WPCheckpoint\Restore\Ledger;
 use WPCheckpoint\Restore\Refused;
 use WPCheckpoint\Restore\RestoreFiles;
@@ -400,9 +401,9 @@ final class DatabaseImportStep implements Step {
 						// DROP and the CREATE after it form one unit, ended by the ledger's record of the CREATE.
 						continue;
 					}
-					$engine = $db->rows( 'SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?', array( $target->temporary ) );
+					$engine = JobFence::engine_of( $db, $target->temporary );
 					$this->warn_shortened( $context, $target, $statement );
-					$ledger->created( $number, $statement->end, in_array( strtolower( (string) ( $engine[0][0] ?? '' ) ), self::TRANSACTIONAL, true ), self::constraints_json( $statement ) );
+					$ledger->created( $number, $statement->end, in_array( (string) $engine, self::TRANSACTIONAL, true ), self::constraints_json( $statement ) );
 					$this->crash( 'commit', $target->table, $chunk );
 					$state    = $ledger->get( $number );
 					$at_chunk = 1;

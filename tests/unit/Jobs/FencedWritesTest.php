@@ -108,11 +108,11 @@ final class FencedWritesTest extends TestCase {
 	public static function asserted_before( string $source, int $line ): bool {
 		$lines = explode( "\n", $source );
 		for ( $i = $line - 2; $i >= 0; $i-- ) {
+			if ( 1 === preg_match( '/\bfunction\b/', $lines[ $i ] ) ) {
+				return false; // The function's own line, or a one-line closure in between: a guard on it is not this function's.
+			}
 			if ( false !== strpos( $lines[ $i ], 'JobFence::assert_locked(' ) ) {
 				return true;
-			}
-			if ( 1 === preg_match( '/\bfunction\b/', $lines[ $i ] ) ) {
-				return false;
 			}
 		}
 		return false;
@@ -198,6 +198,8 @@ final class FencedWritesTest extends TestCase {
 		$elsewhere  = $within . "} );\nfunction other( \$db ) {\n\t\$db->write( 'UPDATE t SET a = 1', array() );\n}\nfunction f( \$db ) { JobFence::assert_locked( \$db ); }\n";
 		$this->assertStringContainsString( 'does not assert the lock before it', implode( "\n", self::problems( 'x.php', $unasserted, array( array( 'SET a = 1', self::LOCKED ) ) ) ), 'inside the transaction, without the guard' );
 		$this->assertStringContainsString( 'does not assert the lock before it', implode( "\n", self::problems( 'x.php', $elsewhere, array( array( 'SET a = 1', self::LOCKED ) ) ) ), 'a guard in another function does not count' );
+		$one_liner = $within . "\t\$cb = function () use ( \$db ) { JobFence::assert_locked( \$db ); };\n\t\$db->write( 'UPDATE t SET a = 1', array() );\n} );\n";
+		$this->assertStringContainsString( 'does not assert the lock before it', implode( "\n", self::problems( 'x.php', $one_liner, array( array( 'SET a = 1', self::LOCKED ) ) ) ), 'a guard inside a one-line closure in between does not count' );
 		$this->assertSame( array(), self::problems( 'x.php', $asserted, array( array( 'SET a = 1', self::LOCKED ) ) ), 'the guard right before it, in the fenced transaction' );
 		$this->assertStringContainsString( 'without a reason', implode( "\n", self::problems( 'x.php', $source, array( array( 'SET a = 1', self::EXCEPTION ) ) ) ) );
 		$this->assertSame( array(), self::problems( 'x.php', $source, array( array( 'SET a = 1', self::EXCEPTION, 'a reason' ) ) ) );

@@ -90,7 +90,7 @@ final class TempTableCount {
 
 	/**
 	 * The job row the count's one write is conditioned on: table, id, token (JobFence); empty for none (then the own
-	 * rows cannot be recorded, and a table that needs them is a transient failure).
+	 * rows cannot be recorded: a table that needs them is a programming error, LogicException).
 	 *
 	 * @var array{table: string, id: int, token: string}|array{}
 	 */

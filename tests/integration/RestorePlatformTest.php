@@ -20,7 +20,7 @@ final class RestorePlatformTest extends RestoreTestCase {
 	/**
 	 * A restore job whose platform check sees this operating system family.
 	 */
-	private function restore_on( string $family, string $base ): Job {
+	private function restore_on( string $family, string $base, $engine = null ): Job {
 		$type = 'restore_on_' . strtolower( $family ) . '_' . bin2hex( random_bytes( 2 ) );
 		$this->register(
 			$type,
@@ -28,6 +28,9 @@ final class RestorePlatformTest extends RestoreTestCase {
 				new RestorePlatformStep(
 					static function () use ( $family ): string {
 						return $family;
+					},
+					null === $engine ? null : static function () use ( $engine ) {
+						return '' === $engine ? null : $engine;
 					}
 				)
 			)
@@ -47,6 +50,21 @@ final class RestorePlatformTest extends RestoreTestCase {
 			'tables' => (array) $wpdb->get_col( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( TempTables::job_prefix( $job->storage_token, $job->id ) ) . '%' ) ),
 			'site'   => count( Residue::scan_site( Residue::site_dirs( ScanRoots::site_directories() ), Directories::own_tokens() ) ),
 		);
+	}
+
+	public function test_a_jobs_table_that_is_not_innodb_is_refused_before_anything_is_made(): void {
+		$base = $this->backup( self::site_tables(), null, null, array( 'files' => array( 'wp-content/uploads/a.txt' => 'a' ) ) );
+		// As the step reads it: another engine is refused for good, before the restore makes anything.
+		$job = $this->run_restore( $this->restore_on( 'Linux', $base, 'myisam' ) );
+		$this->assertSame( Job::FAILED, $job->status );
+		$this->assertStringContainsString( 'The jobs table is myisam, not InnoDB: a restore cannot lock its job row before it writes. Convert the table to InnoDB', (string) $job->last_error );
+		$this->assertSame( Job::FAILURE_FINAL, $job->failure_kind, 'retrying cannot change it' );
+		$this->assertSame( array( 'work' => false, 'tables' => array(), 'site' => 0 ), self::made( $job ), 'nothing of the restore was made' );
+		// The real table made MyISAM is not a case here: the schema's verification repairs the engine before a job
+		// is created (SchemaColumnsTest), so the step never reads it. The control: the engine as read, InnoDB, goes past.
+		$this->assertSame( 'innodb', \WPCheckpoint\Support\Schema::jobs_table_engine(), 'the control: the table as the schema makes it' );
+		$job = $this->run_restore( $this->restore_on( 'Linux', $base, 'innodb' ) );
+		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
 	}
 
 	public function test_a_windows_server_is_refused_before_anything_is_made_and_another_goes_on(): void {

@@ -80,13 +80,47 @@ final class JobFenceTest extends TestCase {
 			}
 		);
 		$this->assertSame( 'done', $result );
-		$this->assertSame( 'START TRANSACTION', $db->sent[0] );
-		$this->assertStringContainsString( 'SELECT id FROM `wp_wpcheckpoint_jobs` WHERE id = ? AND lock_token = ? FOR UPDATE [7,tok]', implode( "\n", array_slice( $db->sent, 0, $inside ) ), 'the lock before the writes' );
+		$begin = array_search( 'START TRANSACTION', $db->sent, true );
+		$this->assertNotFalse( $begin );
+		$before = implode( "\n", array_slice( $db->sent, 0, $begin ) );
+		$this->assertStringContainsString( 'information_schema.TABLES', $before, 'the engine is read before the transaction opens' );
+		$this->assertStringContainsString( '@@SESSION.innodb_lock_wait_timeout', $before, 'and so is the session\'s wait: no read view before the locking read' );
+		$this->assertStringContainsString( 'FOR UPDATE [7,tok]', $db->sent[ $begin + 2 ], 'the locking read is the first read of the transaction (after the wait is set)' );
+		$this->assertSame( 'SET SESSION innodb_lock_wait_timeout = ' . JobFence::WAIT, $db->sent[ $begin + 1 ] );
 		$this->assertSame( 'UPDATE t SET a = 1 []', $db->sent[ $inside ] );
 		$this->assertSame( 'COMMIT', end( $db->sent ) );
 		$this->assertNotContains( 'ROLLBACK', $db->sent );
 		$this->expectException( \LogicException::class );
 		JobFence::assert_locked( $db ); // After the fence: the guard refuses.
+	}
+
+	public function test_a_fence_inside_another_on_the_same_connection_is_refused(): void {
+		$db = self::recorder( self::INNODB_HELD );
+		try {
+			JobFence::within(
+				$db,
+				self::fence(),
+				static function () use ( $db ): void {
+					JobFence::within( $db, self::fence(), static function (): void {} );
+				}
+			);
+			$this->fail( 'a nested fence was run' );
+		} catch ( \LogicException $e ) {
+			$this->assertStringContainsString( 'inside another', $e->getMessage() );
+		}
+		$this->assertSame( 1, count( array_keys( $db->sent, 'START TRANSACTION', true ) ), 'the inner transaction never opened (it would have committed the outer\'s writes)' );
+		$this->assertSame( 'ROLLBACK', end( $db->sent ) );
+	}
+
+	public function test_an_engine_that_cannot_be_read_is_a_transient_failure_before_the_transaction(): void {
+		$db = self::recorder( array_merge( self::INNODB_HELD, array( 'information_schema.TABLES' => array() ) ) );
+		try {
+			JobFence::within( $db, array( 'table' => 'unread_jobs', 'id' => 7, 'token' => 'tok' ), static function (): void {} );
+			$this->fail( 'an unreadable engine was taken as a fence' );
+		} catch ( \WPCheckpoint\Jobs\TransientFailure $e ) {
+			$this->assertStringContainsString( 'could not be read', $e->getMessage() );
+		}
+		$this->assertNotContains( 'START TRANSACTION', $db->sent );
 	}
 
 	public function test_a_row_not_held_under_the_token_is_lock_lost_with_nothing_written(): void {
@@ -133,11 +167,11 @@ final class JobFenceTest extends TestCase {
 		try {
 			JobFence::within( $db, array( 'table' => 'myisam_jobs', 'id' => 7, 'token' => 'tok' ), static function (): void {} );
 			$this->fail( 'a MyISAM table was taken as a fence' );
-		} catch ( \RuntimeException $e ) {
+		} catch ( \WPCheckpoint\Restore\PlatformUnsupported $e ) {
 			$this->assertStringContainsString( 'myisam, not InnoDB', $e->getMessage() );
 		}
 		$this->assertStringNotContainsString( 'FOR UPDATE', implode( "\n", $db->sent ), 'no locked read on a table that cannot hold it' );
-		$this->assertSame( 'ROLLBACK', end( $db->sent ) );
+		$this->assertNotContains( 'START TRANSACTION', $db->sent, 'refused before the transaction opens' );
 	}
 
 	public function test_the_bounded_wait_is_set_and_put_back_and_left_alone_when_unreadable(): void {
@@ -149,6 +183,6 @@ final class JobFenceTest extends TestCase {
 		JobFence::bounded( $db, static function (): void {} );
 		$this->assertCount( 1, $db->sent, 'unreadable: only the read, nothing set' );
 		$this->expectException( LockLost::class );
-		JobFence::lock( $db, 't', 1, '' ); // No token: nothing to write under.
+		JobFence::lock( self::recorder( self::INNODB_HELD ), 'wp_wpcheckpoint_jobs', 1, '' ); // No token: nothing to write under.
 	}
 }

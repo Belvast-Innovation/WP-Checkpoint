@@ -118,9 +118,10 @@ final class StateCarry {
 	 * under its own names inserted, and the plugin put into the list of active plugins; a crash seam after each
 	 * statement ("carry_1", "carry_2", ...) and one at the end ("carry_written"), inside the transaction.
 	 *
-	 * The transaction's first statement locks the job row under the run's token (JobFence::lock()): a take-over
-	 * rewrites that row, so it waits until this transaction ends, and a run that lost the job finds no row, rolls
-	 * back and writes nothing. That holds for temporary tables without transactions too: the lock is on the job row.
+	 * In the fenced transaction (JobFence::within(): its first statement locks the job row under the run's token):
+	 * a take-over rewrites that row, so it waits until this transaction ends, and a run that lost the job finds no
+	 * row, rolls back and writes nothing. That holds for temporary tables without transactions too: the lock is on
+	 * the job row.
 	 *
 	 * @param string                                       $live_options Live options table.
 	 * @param string                                       $temp_options Temporary options table.

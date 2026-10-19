@@ -158,9 +158,9 @@ final class SwapPlan {
 	}
 
 	/**
-	 * Write a batch of entries from a sequence number on, after removing what the attempt holds from there: in a
-	 * transaction whose first statement locks the job row under the run's token (JobFence::lock()), so a run that
-	 * lost the job writes nothing and a take-over waits for the batch.
+	 * Write a batch of entries from a sequence number on, after removing what the attempt holds from there: in the
+	 * fenced transaction (JobFence::within(): its first statement locks the job row under the run's token), so a run
+	 * that lost the job writes nothing and a take-over waits for the batch.
 	 *
 	 * @param int                                          $job_id  Job id.
 	 * @param int                                          $attempt Attempt.
