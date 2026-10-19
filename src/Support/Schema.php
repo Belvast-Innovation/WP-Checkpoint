@@ -604,8 +604,8 @@ final class Schema {
 	 * engine holds nothing. A table made by an earlier version took the server's default engine. Nothing to do when
 	 * it is InnoDB already, or when the engine cannot be read. Best effort, as a restore-only need: an ALTER that is
 	 * refused does not hold the schema's version or any other job back (a restore refuses such a table at its
-	 * platform check, RestorePlatformStep, and says what to run); every verifying request (ensure( true )) tries
-	 * again.
+	 * platform check, RestorePlatformStep, and says what to run); a verifying request that may upgrade (ensure( true )
+	 * from the page, activation, cron or WP-CLI: may_upgrade()) tries again.
 	 *
 	 * @return void
 	 */
@@ -630,8 +630,6 @@ final class Schema {
 		$engine = strtolower( trim( (string) $wpdb->get_var( $wpdb->prepare( 'SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s', $wpdb->base_prefix . self::JOBS_TABLE ) ) ) );
 		return '' === $engine ? null : $engine;
 	}
-
-
 
 	/**
 	 * Drop the tables (uninstall with data deletion).

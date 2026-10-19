@@ -128,7 +128,7 @@ final class SchemaColumnsTest extends JobTestCase {
 	private function make_innodb(): void {
 		global $wpdb;
 		$table = Schema::jobs_table();
-		$wpdb->query( "ALTER TABLE {$table} ENGINE=InnoDB" );
+		$this->assertNotFalse( $wpdb->query( "ALTER TABLE {$table} ENGINE=InnoDB" ), 'the jobs table could not be put back to InnoDB; every later restore test would fail at its platform check: ' . $wpdb->last_error );
 	}
 
 	public function test_the_jobs_table_of_an_earlier_version_is_made_innodb_on_upgrade(): void {

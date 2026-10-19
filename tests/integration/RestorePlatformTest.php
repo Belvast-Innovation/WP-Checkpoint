@@ -60,10 +60,27 @@ final class RestorePlatformTest extends RestoreTestCase {
 		$this->assertStringContainsString( 'The jobs table is myisam, not InnoDB: a restore cannot lock its job row before it writes. Convert the table to InnoDB', (string) $job->last_error );
 		$this->assertSame( Job::FAILURE_FINAL, $job->failure_kind, 'retrying cannot change it' );
 		$this->assertSame( array( 'work' => false, 'tables' => array(), 'site' => 0 ), self::made( $job ), 'nothing of the restore was made' );
-		// The real table made MyISAM is not a case here: the schema's verification repairs the engine before a job
-		// is created (SchemaColumnsTest), so the step never reads it. The control: the engine as read, InnoDB, goes past.
+		// From the table itself: the real jobs table MyISAM, the schema's conversion refused (as without the ALTER
+		// privilege), is refused the same way by the step reading the engine on its own.
+		global $wpdb;
+		$table  = \WPCheckpoint\Support\Schema::jobs_table();
+		$broken = static function ( $sql ) {
+			return 0 === strpos( (string) $sql, 'ALTER TABLE' ) && false !== stripos( (string) $sql, 'ENGINE=InnoDB' ) ? 'ALTER TABLE no_such_table ENGINE=InnoDB' : $sql;
+		};
+		try {
+			$this->assertNotFalse( $wpdb->query( "ALTER TABLE {$table} ENGINE=MyISAM" ), $wpdb->last_error );
+			add_filter( 'query', $broken );
+			$job = $this->run_restore( $this->restore_on( 'Linux', $base ) );
+			$this->assertSame( Job::FAILED, $job->status );
+			$this->assertStringContainsString( 'The jobs table is myisam, not InnoDB', (string) $job->last_error, 'read from the table' );
+			$this->assertSame( Job::FAILURE_FINAL, $job->failure_kind );
+		} finally {
+			remove_filter( 'query', $broken );
+			$this->assertNotFalse( $wpdb->query( "ALTER TABLE {$table} ENGINE=InnoDB" ), 'the jobs table could not be put back: ' . $wpdb->last_error );
+		}
+		// The control: InnoDB (the table as the schema makes it) goes past the check.
 		$this->assertSame( 'innodb', \WPCheckpoint\Support\Schema::jobs_table_engine(), 'the control: the table as the schema makes it' );
-		$job = $this->run_restore( $this->restore_on( 'Linux', $base, 'innodb' ) );
+		$job = $this->run_restore( $this->restore_on( 'Linux', $base ) );
 		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
 	}
 

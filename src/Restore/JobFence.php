@@ -17,7 +17,7 @@ defined( 'ABSPATH' ) || exit;
  * A run that outlived its lease must not write after the job was taken over, and "confirm, then write" leaves a
  * window between the two. The writes that cannot carry the condition in their own statement (a batch of them, or
  * ones to tables of their own) are made inside a transaction that first locks the job row under the run's token
- * (lock()): a take-over rewrites that row, so it waits for the transaction to end, and a run that lost the job finds
+ * (within()): a take-over rewrites that row, so it waits for the transaction to end, and a run that lost the job finds
  * no row and writes nothing. holds() is the plain read for a write that found no row: whether the token still holds.
  *
  * Pure PHP.

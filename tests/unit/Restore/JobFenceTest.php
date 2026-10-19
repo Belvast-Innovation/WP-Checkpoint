@@ -11,8 +11,9 @@ use Yoast\PHPUnitPolyfills\TestCases\TestCase;
  * The fence's shape on a recorded connection: a transaction whose first statement locks the job row under the token,
  * the writes, a commit; a quiet rollback and the exception when the writes throw; no row under the token, LockLost
  * and nothing written; a table that is not InnoDB refused before any locked read; the writers' guard refusing
- * outside the fence; the bounded wait put back. The database's own behaviour is the server matrix's and
- * CarryFenceTest's; here the statements and their order.
+ * outside the fence; the bounded wait put back; an empty token refused before any statement; the engine read on
+ * every fence, not once per connection. The database's own behaviour is the server matrix's and CarryFenceTest's;
+ * here the statements and their order.
  */
 final class JobFenceTest extends TestCase {
 
@@ -182,6 +183,9 @@ final class JobFenceTest extends TestCase {
 		$db = self::recorder( array() );
 		JobFence::bounded( $db, static function (): void {} );
 		$this->assertCount( 1, $db->sent, 'unreadable: only the read, nothing set' );
+	}
+
+	public function test_a_fence_without_a_token_is_refused_before_any_statement(): void {
 		$db = self::recorder( self::INNODB_HELD );
 		try {
 			JobFence::within( $db, array( 'table' => 'wp_wpcheckpoint_jobs', 'id' => 1, 'token' => '' ), static function (): void {} );
@@ -190,5 +194,15 @@ final class JobFenceTest extends TestCase {
 			$this->assertStringContainsString( 'no lock token', $e->getMessage() );
 		}
 		$this->assertSame( array(), $db->sent, 'no token: refused before any statement' );
+	}
+
+	public function test_the_engine_is_read_on_every_fence_not_once_per_connection(): void {
+		$db = self::recorder( self::INNODB_HELD );
+		JobFence::within( $db, self::fence(), static function (): void {} );
+		JobFence::within( $db, self::fence(), static function (): void {} );
+		$reads = count( array_filter( $db->sent, static function ( string $sql ): bool {
+			return false !== strpos( $sql, 'information_schema.TABLES' );
+		} ) );
+		$this->assertSame( 2, $reads, 'no cache: an object id that is recycled must not stand for a table seen before' );
 	}
 }
