@@ -128,7 +128,7 @@ final class FencedWritesTest extends TestCase {
 			if ( self::CONDITIONED === $entry[1] && 1 !== preg_match( '/lock_token|holder = \?/', $statement ) ) {
 				$problems[] = "$file:$line: registered as conditioned, but the statement names neither lock_token nor the holder";
 			}
-			if ( self::LOCKED === $entry[1] && false === strpos( $source, 'JobFence::lock(' ) ) {
+			if ( self::LOCKED === $entry[1] && 1 !== preg_match( '/JobFence::lock\(\s*\$/', $source ) ) { // The call, not a docblock's mention.
 				$problems[] = "$file:$line: registered as locked, but the file never locks the job row (JobFence::lock())";
 			}
 			if ( self::EXCEPTION === $entry[1] && '' === trim( (string) ( $entry[2] ?? '' ) ) ) {
@@ -165,6 +165,8 @@ final class FencedWritesTest extends TestCase {
 		$this->assertStringContainsString( 'not registered', implode( "\n", self::problems( 'x.php', $source, array() ) ) );
 		$this->assertStringContainsString( 'names neither lock_token nor the holder', implode( "\n", self::problems( 'x.php', $source, array( array( 'SET a = 1', self::CONDITIONED ) ) ) ) );
 		$this->assertStringContainsString( 'never locks the job row', implode( "\n", self::problems( 'x.php', $source, array( array( 'SET a = 1', self::LOCKED ) ) ) ) );
+		$this->assertStringContainsString( 'never locks the job row', implode( "\n", self::problems( 'x.php', "<?php\n// JobFence::lock() is mentioned, not called.\n" . substr( $source, 6 ), array( array( 'SET a = 1', self::LOCKED ) ) ) ), 'a mention in a comment is not the call' );
+		$this->assertSame( array(), self::problems( 'x.php', "<?php\nJobFence::lock( \$db, 't', 1, 'x' );\n" . substr( $source, 6 ), array( array( 'SET a = 1', self::LOCKED ) ) ), 'the call is' );
 		$this->assertStringContainsString( 'without a reason', implode( "\n", self::problems( 'x.php', $source, array( array( 'SET a = 1', self::EXCEPTION ) ) ) ) );
 		$this->assertSame( array(), self::problems( 'x.php', $source, array( array( 'SET a = 1', self::EXCEPTION, 'a reason' ) ) ) );
 		$this->assertStringContainsString( 'matches 0 writes', implode( "\n", self::problems( 'x.php', $source, array( array( 'SET a = 1', self::EXCEPTION, 'r' ), array( 'gone', self::EXCEPTION, 'r' ) ) ) ), 'a stale entry' );
