@@ -170,17 +170,15 @@ final class Ledger {
 	/**
 	 * Record how many of a table's rows are the plugin's own (StateCarry::own_names()) at the first count, before
 	 * any carry: set once, never changed (a later count that found a different number would be one after a carry).
+	 * False when it was recorded already (another run counting the same table got there first, or this one did:
+	 * the caller reads what was recorded), or when the table has no record.
 	 *
 	 * @param int $number The table's number.
 	 * @param int $owned  Own rows.
-	 * @return void
-	 * @throws \RuntimeException When the table has no record.
+	 * @return bool
 	 */
-	public function set_owned( int $number, int $owned ): void {
-		$changed = $this->db->write( 'UPDATE ' . SqlWriter::identifier( $this->name ) . ' SET owned = ? WHERE n = ? AND owned < 0', array( (string) $owned, (string) $number ) );
-		if ( 1 !== $changed ) {
-			throw new \RuntimeException( 'The restore ledger has no record of a table the count met, or recorded its own rows already.' );
-		}
+	public function set_owned( int $number, int $owned ): bool {
+		return 1 === $this->db->write( 'UPDATE ' . SqlWriter::identifier( $this->name ) . ' SET owned = ? WHERE n = ? AND owned < 0', array( (string) $owned, (string) $number ) );
 	}
 
 	/**

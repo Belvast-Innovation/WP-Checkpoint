@@ -68,8 +68,9 @@ final class HeldSite {
 	 *         branch: SITE or OTHER; why: what kept it from SITE (''); recorded: the WordPress directory the plan
 	 *         records ('' when it records none); here: this WordPress directory resolved ('' when it cannot be);
 	 *         differs: whether here is positively another directory than recorded; direction: "committed",
-	 *         "restored" or '' (not recorded yet); file_here: whether this job's maintenance file is in this
-	 *         WordPress directory.
+	 *         "restored", "back" (a swap that was made is being swapped back out after a failed check: recorded,
+	 *         the next run only puts the site back) or '' (not recorded yet); file_here: whether this job's
+	 *         maintenance file is in this WordPress directory.
 	 */
 	public function assess( Job $job ): array {
 		clearstatcache( true );
@@ -105,7 +106,7 @@ final class HeldSite {
 			'prefix'    => null === $site ? null : $site['stage'],
 			'here'      => $here,
 			'differs'   => self::another( $recorded, $here ),
-			'direction' => in_array( $phase, array( 'committed', 'done' ), true ) ? 'committed' : ( 'restored' === $phase ? 'restored' : '' ),
+			'direction' => in_array( $phase, array( 'committed', 'done' ), true ) ? 'committed' : ( 'restored' === $phase ? 'restored' : ( 'reverse' === $phase ? 'back' : '' ) ),
 			'file_here' => '' !== $mark && Maintenance::OURS === ( new Maintenance( $this->abspath(), $mark ) )->state(),
 			'finishes'  => 'rename' === $phase ? $this->renamed_all( $job ) : false,
 		);

@@ -80,6 +80,14 @@ final class TempTableCount {
 	private $own;
 
 	/**
+	 * The plugin's own names found in a temporary table, by table, for this instance (a tick): the same names serve
+	 * every range of the table's count.
+	 *
+	 * @var array<string, string[]>
+	 */
+	private $names = array();
+
+	/**
 	 * Constructor.
 	 *
 	 * @param Queries                                              $db     Connection.
@@ -110,6 +118,7 @@ final class TempTableCount {
 	 *                                                                      are counted (else those without).
 	 * @return array{position: array{i: int, key: array<int, string>|null, sum: int}, done: bool, unbounded: bool, what: string}
 	 * @throws WorkLost When a table holds other rows than the import recorded.
+	 * @throws TransientFailure When the ledger's record of the own rows, written by another run meanwhile, cannot be read back.
 	 */
 	public function unit( array $cursor, bool $want ): array {
 		$db     = $this->db;
@@ -144,8 +153,11 @@ final class TempTableCount {
 		// table (before any carry) how many of them the import wrote is recorded, and taken off what is expected.
 		$owned = 0;
 		if ( isset( $this->own[ $table['table'] ] ) && null !== $state ) {
-			$how    = $this->own[ $table['table'] ];
-			$names  = StateCarry::own_names( $db, $table['temporary'], $how['sitemeta'], $how['site'] );
+			$how = $this->own[ $table['table'] ];
+			if ( ! isset( $this->names[ $table['temporary'] ] ) ) {
+				$this->names[ $table['temporary'] ] = StateCarry::own_names( $db, $table['temporary'], $how['sitemeta'], $how['site'] );
+			}
+			$names  = $this->names[ $table['temporary'] ];
 			$column = $how['sitemeta'] ? 'meta_key' : 'option_name';
 			$where  = array() === $how['site'] ? '' : 'site_id = ? AND ';
 			$marks  = implode( ', ', array_fill( 0, count( $names ), '?' ) );
@@ -154,7 +166,16 @@ final class TempTableCount {
 			$owned  = $state['owned'];
 			if ( $owned < 0 ) {
 				$owned = (int) ( $db->rows( 'SELECT COUNT(*) FROM ' . $name . ' WHERE ' . $where . $column . ' IN (' . $marks . ')', $params )[0][0] ?? 0 );
-				$this->ledger->set_owned( (int) $table['number'], $owned );
+				$this->at( 'own_counted' );
+				if ( ! $this->ledger->set_owned( (int) $table['number'], $owned ) ) {
+					// Recorded meanwhile by another run counting the same table (a lease that ran out while its run
+					// lived): what it recorded is what every count takes; a record that is still unset is not there.
+					$state = $this->ledger->get( (int) $table['number'] );
+					if ( null === $state || $state['owned'] < 0 ) {
+						throw new TransientFailure( 'The restore ledger\'s record of the table being counted could not be read back; the count is tried again.' );
+					}
+					$owned = $state['owned'];
+				}
 			}
 		}
 		if ( array() === $key ) {

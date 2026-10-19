@@ -227,6 +227,53 @@ final class StateCarryCrashTest extends SwapTestCase {
 		$this->assertGreaterThan( 0, $seeded, 'the control: rows were seeded' );
 	}
 
+	/**
+	 * Two runs counting the same table before either recorded its own rows (a lease that ran out while its run
+	 * lived): the one whose record loses takes what the other recorded and goes on, rather than failing the job over
+	 * a ledger that is whole. The other run is played by the seam between counting the own rows and recording them.
+	 */
+	public function test_a_count_whose_ownership_record_loses_to_another_run_takes_that_record_and_goes_on(): void {
+		global $wpdb;
+		$this->swap_parts['batch'] = 1;
+		$ledger                    = null;
+		$temp                      = null;
+		$number                    = null;
+		$raced                     = 0;
+		$this->swap_parts['at']    = function ( string $point ) use ( &$ledger, &$temp, &$number, &$raced ): void {
+			$this->seams[] = $point;
+			if ( 'recount_own_counted' === $point && null !== $ledger && null !== $temp && null !== $number ) {
+				// Another run counting the same table records first: the own rows as that run counts them.
+				global $wpdb;
+				$db    = ImportSession::open( Credentials::from_wordpress() );
+				$names = StateCarry::own_names( $db, $temp, false, array() );
+				$db->close();
+				$owned = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM `{$temp}` WHERE option_name IN (" . implode( ', ', array_fill( 0, count( $names ), '%s' ) ) . ')', $names ) );
+				$this->assertSame( 1, $wpdb->query( $wpdb->prepare( "UPDATE `{$ledger}` SET owned = %d WHERE n = %d AND owned < 0", $owned, $number ) ), 'the control: the other run recorded first' );
+				$wpdb->query( 'COMMIT' );
+				++$raced;
+			}
+		};
+		$this->register_type();
+		$job = $this->at_swap();
+		// The first count (the final check) recorded the own rows: unset it again, as before any count, and have the
+		// options table counted again by the swap's recount, which counts the tables imported without transactions.
+		$plan   = \WPCheckpoint\Jobs\RestorePreflightStep::load_plan( \WPCheckpoint\Jobs\Residue::work_dir( $job->storage_path, $job->id ) );
+		$ledger = \WPCheckpoint\Jobs\TempTables::ledger( $job->storage_token, $job->id, (string) $plan['random'] );
+		foreach ( $plan['plan']->tables() as $table ) {
+			if ( $wpdb->prefix . 'options' === $table['table'] ) {
+				$number = (int) $table['number'];
+				$temp   = (string) $table['temporary'];
+			}
+		}
+		$this->assertNotNull( $number, 'the control: the plan has the options table' );
+		$this->assertSame( 1, $wpdb->query( $wpdb->prepare( "UPDATE `{$ledger}` SET owned = -1, transactional = 0 WHERE n = %d", $number ) ), $wpdb->last_error );
+		$wpdb->query( 'COMMIT' );
+		$done = $this->cli_run( $job );
+		$this->assertGreaterThan( 0, $raced, 'the control: the other run recorded between the count and the record (' . $done->status . ': ' . $done->last_error . '; seams ' . implode( ',', $this->seams ) . ')' );
+		$this->assertSame( Job::COMPLETED, $done->status, 'the count took the other run\'s record and went on (' . $done->last_error . ')' );
+		$this->assertStringNotContainsString( 'recorded its own rows already', (string) $done->last_error );
+	}
+
 	public function test_own_names_are_the_plugins_rows_and_nothing_that_merely_looks_like_them(): void {
 		global $wpdb;
 		$table = $wpdb->prefix . 'swt_own';

@@ -545,10 +545,13 @@ abstract class SwapTestCase extends RestoreTestCase {
 		$this->assertContains( $status, array( 9, 137 ), 'killed by SIGKILL: ' . $text );
 		// The lease of the killed run is still there: as after a real crash, the next run takes over once it ran out.
 		$GLOBALS['wpdb']->query( $GLOBALS['wpdb']->prepare( 'UPDATE ' . \WPCheckpoint\Jobs\JobRepository::table() . ' SET locked_until = %d WHERE id = %d', time() - 1, $job->id ) );
-		// The killed run took the next verdict only if it got as far as checking (its trace says; without a trace,
-		// it is taken as checked).
-		if ( isset( $this->swap_parts['verify'] ) && ( '' === $this->trace || in_array( 'verified', array_filter( explode( "\n", (string) file_get_contents( $this->trace ) ) ), true ) ) ) {
-			$this->next_verdict();
+		// The killed run took the next verdict only if it got as far as checking: its trace says, so a test that
+		// gives verdicts must trace the child.
+		if ( isset( $this->swap_parts['verify'] ) ) {
+			$this->assertNotSame( '', $this->trace, 'a test that gives verdicts to a killed child must set a trace, which says whether the child checked' );
+			if ( in_array( 'verified', array_filter( explode( "\n", (string) file_get_contents( $this->trace ) ) ), true ) ) {
+				$this->next_verdict();
+			}
 		}
 	}
 

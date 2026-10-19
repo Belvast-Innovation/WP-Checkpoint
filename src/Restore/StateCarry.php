@@ -279,9 +279,9 @@ final class StateCarry {
 	 * @throws Refused When the list cannot be read.
 	 */
 	private function activate( string $temp_options ): void {
-		$rows = $this->db->rows( 'SELECT option_value FROM ' . SqlWriter::identifier( $temp_options ) . " WHERE option_name = 'active_plugins'" );
+		$rows = $this->db->rows( 'SELECT option_value FROM ' . SqlWriter::identifier( $temp_options ) . " WHERE option_name = '" . self::ACTIVE . "'" );
 		if ( array() === $rows ) {
-			$this->db->rows( 'INSERT INTO ' . SqlWriter::identifier( $temp_options ) . " (option_name, option_value, autoload) VALUES ('active_plugins', ?, 'yes')", array( PluginList::write( array( $this->plugin ) ) ) );
+			$this->db->rows( 'INSERT INTO ' . SqlWriter::identifier( $temp_options ) . " (option_name, option_value, autoload) VALUES ('" . self::ACTIVE . "', ?, 'yes')", array( PluginList::write( array( $this->plugin ) ) ) );
 			return;
 		}
 		$list = PluginList::read( (string) $rows[0][0] );
@@ -292,7 +292,7 @@ final class StateCarry {
 			return;
 		}
 		$list[] = $this->plugin;
-		$this->db->rows( 'UPDATE ' . SqlWriter::identifier( $temp_options ) . " SET option_value = ? WHERE option_name = 'active_plugins'", array( PluginList::write( array_values( $list ) ) ) );
+		$this->db->rows( 'UPDATE ' . SqlWriter::identifier( $temp_options ) . " SET option_value = ? WHERE option_name = '" . self::ACTIVE . "'", array( PluginList::write( array_values( $list ) ) ) );
 	}
 
 	/**
@@ -303,9 +303,9 @@ final class StateCarry {
 	 * @throws Refused When the list cannot be read.
 	 */
 	private function activate_network( string $temp_meta ): void {
-		$rows = $this->db->rows( 'SELECT meta_value FROM ' . SqlWriter::identifier( $temp_meta ) . " WHERE site_id = ? AND meta_key = 'active_sitewide_plugins'", array( (string) $this->network ) );
+		$rows = $this->db->rows( 'SELECT meta_value FROM ' . SqlWriter::identifier( $temp_meta ) . " WHERE site_id = ? AND meta_key = '" . self::ACTIVE_NETWORK . "'", array( (string) $this->network ) );
 		if ( array() === $rows ) {
-			$this->db->rows( 'INSERT INTO ' . SqlWriter::identifier( $temp_meta ) . " (site_id, meta_key, meta_value) VALUES (?, 'active_sitewide_plugins', ?)", array( (string) $this->network, PluginList::write( array( $this->plugin => time() ) ) ) );
+			$this->db->rows( 'INSERT INTO ' . SqlWriter::identifier( $temp_meta ) . " (site_id, meta_key, meta_value) VALUES (?, '" . self::ACTIVE_NETWORK . "', ?)", array( (string) $this->network, PluginList::write( array( $this->plugin => time() ) ) ) );
 			return;
 		}
 		$list = PluginList::read( (string) $rows[0][0] );
@@ -316,7 +316,7 @@ final class StateCarry {
 			return;
 		}
 		$list[ $this->plugin ] = time();
-		$this->db->rows( 'UPDATE ' . SqlWriter::identifier( $temp_meta ) . " SET meta_value = ? WHERE site_id = ? AND meta_key = 'active_sitewide_plugins'", array( PluginList::write( $list ), (string) $this->network ) );
+		$this->db->rows( 'UPDATE ' . SqlWriter::identifier( $temp_meta ) . " SET meta_value = ? WHERE site_id = ? AND meta_key = '" . self::ACTIVE_NETWORK . "'", array( PluginList::write( $list ), (string) $this->network ) );
 	}
 
 	/**
@@ -326,7 +326,7 @@ final class StateCarry {
 	 * @return array<int|string, int|string>|null
 	 */
 	private function site_list( string $temp_options ) {
-		$rows = $this->db->rows( 'SELECT option_value FROM ' . SqlWriter::identifier( $temp_options ) . " WHERE option_name = 'active_plugins'" );
+		$rows = $this->db->rows( 'SELECT option_value FROM ' . SqlWriter::identifier( $temp_options ) . " WHERE option_name = '" . self::ACTIVE . "'" );
 		return array() === $rows ? null : PluginList::read( (string) $rows[0][0] );
 	}
 
@@ -337,7 +337,7 @@ final class StateCarry {
 	 * @return array<int|string, int|string>|null
 	 */
 	private function network_list( string $temp_meta ) {
-		$rows = $this->db->rows( 'SELECT meta_value FROM ' . SqlWriter::identifier( $temp_meta ) . " WHERE site_id = ? AND meta_key = 'active_sitewide_plugins'", array( (string) $this->network ) );
+		$rows = $this->db->rows( 'SELECT meta_value FROM ' . SqlWriter::identifier( $temp_meta ) . " WHERE site_id = ? AND meta_key = '" . self::ACTIVE_NETWORK . "'", array( (string) $this->network ) );
 		return array() === $rows ? null : PluginList::read( (string) $rows[0][0] );
 	}
 

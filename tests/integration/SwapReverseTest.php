@@ -134,6 +134,50 @@ final class SwapReverseTest extends SwapTestCase {
 		$this->trace = '';
 	}
 
+	public function test_a_job_in_the_reverse_is_taken_over_as_one_whose_direction_is_recorded_and_only_finishes(): void {
+		global $wpdb;
+		$this->swap_parts['batch']  = 1;
+		$this->verdicts             = array( 'home' );
+		$this->swap_parts['verify'] = $this->verdicts();
+		$this->register_type();
+		$job    = $this->at_swap();
+		$before = $this->site();
+		$this->trace = $this->sandbox . '/trace';
+		$this->killed_at( $job, 'table_back', 1 );
+		// Managed by another installation meanwhile; this site takes it back.
+		$wpdb->update( \WPCheckpoint\Jobs\JobRepository::table(), array( 'held_by' => 'ffffffffffff' ), array( 'id' => $job->id ) );
+		$wpdb->query( 'COMMIT' );
+		$here = new \WPCheckpoint\Jobs\JobActions(
+			Plugin::instance()->jobs(),
+			Plugin::instance()->runner(),
+			new \WPCheckpoint\Jobs\Loopback( false ),
+			new \WPCheckpoint\Jobs\HeldSite(
+				array(
+					'abspath'   => $this->abspath,
+					'site_dirs' => function (): array {
+						return $this->dirs;
+					},
+				)
+			)
+		);
+		$held = $here->held_elsewhere( $job->id );
+		$this->assertNotNull( $held );
+		$this->assertSame( \WPCheckpoint\Jobs\HeldSite::SITE, $held['assessment']['branch'], $held['assessment']['why'] );
+		$this->assertSame( 'back', $held['assessment']['direction'], 'the reverse is a recorded direction' );
+		$this->assertStringContainsString( 'recorded its direction; it only finishes', implode( "\n", \WPCheckpoint\Jobs\JobPresenter::held_lines( $held['job'], $held['assessment'] ) ), 'what the operator is told' );
+		$code = \WPCheckpoint\Jobs\HeldSite::code( \WPCheckpoint\Jobs\HeldSite::REBIND, $held['job'], '' );
+		$this->assertFalse( $here->rebind( $job->id, $code, 'rollback' )['ok'], '--then is refused: a rollback request would cancel the job and reclaim the restored copy' );
+		$this->assertFalse( $here->rebind( $job->id, $code, 'continue' )['ok'] );
+		$this->assertTrue( $here->rebind( $job->id, $code, '' )['ok'], 'taken over without --then' );
+		$this->seams = array();
+		$done        = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( Job::FAILED, $done->status, (string) $done->last_error );
+		$this->assertTrue( $done->retry_useful() );
+		$this->assertNotSame( array(), $this->job_tables( $done ), 'the restored copy is kept' );
+		$this->assertSame( $before, $this->site() );
+		$this->trace = '';
+	}
+
 	public function test_a_run_that_dies_in_the_reverse_is_continued_in_the_same_direction(): void {
 		$this->swap_parts['batch']  = 1;
 		$this->verdicts             = array( 'home' );

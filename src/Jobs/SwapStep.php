@@ -93,7 +93,8 @@ defined( 'ABSPATH' ) || exit;
  * anything.
  *
  * The reverse: a swap that was made can be swapped back out (reverse():
- * the restored site failed its checks; later an undo). The direction is
+ * the restored site failed its checks; there is no undo yet, 4c-C adds
+ * it). The direction is
  * recorded first ("reverse", with the reason), the maintenance file held
  * before the first rename, then the site is put back exactly as the
  * rollback does it, from what is there (every table entry is in its swapped
@@ -934,7 +935,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * maintenance file held before the first rename, the directories and the tables in reverse plan order, "restored"
 	 * recorded while the file is held, "reverted" once it is let go, the file taken down), and the job ended with
 	 * the reason. Called from the "verify" post-swap step while the file is still held (nothing of the restored site
-	 * was served); later an undo calls it from a job that ended.
+	 * was served). There is no undo yet: 4c-C calls it from a job that ended.
 	 *
 	 * @param JobContext           $context Context.
 	 * @param Queries              $db      Connection.
@@ -990,8 +991,9 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 					$cursor['post'] = 'verify';
 					break;
 				case 'verify':
-					// Where the restored site is checked before it is let out, behind the held file: the checks
-					// themselves are 4c-B's; here only a "verify" part (tests) can say the site failed (true, or the id
+					// Where the restored site is checked before it is let out, behind the held file (4c-B's HTTP checks
+					// pass it with a one-time key the maintenance file lets through; its self-check reads the tables): the
+					// checks themselves are 4c-B's; here only a "verify" part (tests) can say the site failed (true, or the id
 					// of the check that failed: CHECKS), and the swap is then reversed with nothing of the restored site
 					// served. Without the part nothing is checked. The verdict is made durable before anything acts on
 					// it: a run that dies after a failed verdict is continued by one that reads the verdict, not by one
