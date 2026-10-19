@@ -587,7 +587,7 @@ final class PrefixRewriteTest extends RestoreTestCase {
 			if ( ! in_array( $job->status, array( Job::QUEUED, Job::RUNNING ), true ) ) {
 				break;
 			}
-			$runner->tick( $job->id, microtime( true ) + 3600 ); // Past the back-off.
+			$this->autocommit( static function () use ( $runner, $job ) { return $runner->tick( $job->id, microtime( true ) + 3600 ); } ); // Past the back-off.
 		}
 		$GLOBALS['wpdb']->query( 'COMMIT' );
 		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
@@ -643,7 +643,7 @@ final class PrefixRewriteTest extends RestoreTestCase {
 		$runner = Plugin::instance()->runner();
 		$result = null;
 		for ( $i = 0; $i < 500 && ! $stolen; $i++ ) {
-			$result = $runner->tick( $job->id, microtime( true ) );
+			$result = $this->autocommit( static function () use ( $runner, $job ) { return $runner->tick( $job->id, microtime( true ) ); } );
 			$job    = Plugin::instance()->jobs()->find( $job->id );
 		}
 		$this->assertTrue( $stolen, 'the control: the claim was taken in the middle of the rewrite' );
@@ -775,7 +775,7 @@ final class PrefixRewriteTest extends RestoreTestCase {
 			if ( ! in_array( $job->status, array( Job::QUEUED, Job::RUNNING ), true ) ) {
 				break;
 			}
-			$runner->tick( $job->id, microtime( true ) );
+			$this->autocommit( static function () use ( $runner, $job ) { return $runner->tick( $job->id, microtime( true ) ); } );
 		}
 		$GLOBALS['wpdb']->query( 'COMMIT' );
 		$this->assertSame( Job::FAILED, $job->status );
@@ -794,7 +794,7 @@ final class PrefixRewriteTest extends RestoreTestCase {
 			if ( PrefixRewriteStep::ID === $now->step ) {
 				++$ticks;
 			}
-			$runner->tick( $job->id, microtime( true ) - 3600 );
+			$this->autocommit( static function () use ( $runner, $job ) { return $runner->tick( $job->id, microtime( true ) - 3600 ); } );
 		}
 		$GLOBALS['wpdb']->query( 'COMMIT' );
 		$this->assertSame( Job::COMPLETED, $now->status, (string) $now->last_error );

@@ -221,7 +221,7 @@ final class SwapCheckStep implements Step {
 					$this->at( $point );
 				},
 				StateCarry::counted( self::base_prefix(), is_multisite() ? get_current_network_id() : 0 ),
-				self::fence( $context )
+				$context->fence()
 			);
 			$slowest        = 0.0;
 			$budget         = (float) $context->budget()->seconds;
@@ -866,7 +866,7 @@ final class SwapCheckStep implements Step {
 				$batch[] = $entries[ $i ];
 				$bytes  += $size;
 			}
-			$swap->write( $job, $attempt, $from, $batch, self::fence( $context ) );
+			$swap->write( $job, $attempt, $from, $batch, $context->fence() );
 			$this->at( 'plan_batch' );
 			$cursor['seq'] = $from + count( $batch );
 			if ( (int) $cursor['seq'] >= count( $entries ) ) {
@@ -874,7 +874,7 @@ final class SwapCheckStep implements Step {
 			}
 			return $cursor;
 		}
-		$swap->complete( $job, $attempt, count( $entries ), self::fence( $context ) );
+		$swap->complete( $job, $attempt, count( $entries ), $context->fence() );
 		$this->at( 'plan_complete' );
 		$finals = array();
 		foreach ( $run['plan']->tables() as $table ) {
@@ -1085,20 +1085,6 @@ final class SwapCheckStep implements Step {
 	private static function base_prefix(): string {
 		global $wpdb;
 		return (string) $wpdb->base_prefix;
-	}
-
-	/**
-	 * The job row and the run's token, for the writes outside the job row to be conditioned on (Restore\JobFence).
-	 *
-	 * @param JobContext $context Context.
-	 * @return array{table: string, id: int, token: string}
-	 */
-	public static function fence( JobContext $context ): array {
-		return array(
-			'table' => JobRepository::table(),
-			'id'    => $context->job()->id,
-			'token' => $context->lock_token(),
-		);
 	}
 
 	/**

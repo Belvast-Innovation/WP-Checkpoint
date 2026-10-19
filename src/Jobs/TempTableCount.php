@@ -131,6 +131,7 @@ final class TempTableCount {
 	 * @throws WorkLost When a table holds other rows than the import recorded.
 	 * @throws TransientFailure When the ledger's record of the own rows, written by another run meanwhile, cannot be read back.
 	 * @throws LockLost When the job is no longer this run's: the record was refused and nothing was written.
+	 * @throws \LogicException When the counter was built without its fence and a table needs the own rows recorded.
 	 */
 	public function unit( array $cursor, bool $want ): array {
 		$db     = $this->db;
@@ -180,7 +181,7 @@ final class TempTableCount {
 				$owned = (int) ( $db->rows( 'SELECT COUNT(*) FROM ' . $name . ' WHERE ' . $where . $column . ' IN (' . $marks . ')', $params )[0][0] ?? 0 );
 				$this->at( 'own_counted' );
 				if ( array() === $this->fence ) {
-					throw new TransientFailure( 'The own rows of a table cannot be recorded outside a run.' );
+					throw new \LogicException( 'The own rows of a table cannot be recorded outside a run: the counter was built without its fence.' );
 				}
 				if ( ! $this->ledger->set_owned( (int) $table['number'], $owned, $this->fence['table'], $this->fence['id'], $this->fence['token'] ) ) {
 					// Not written: the job is no longer this run's (it stops here and writes nothing more), or the

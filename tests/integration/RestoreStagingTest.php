@@ -474,7 +474,7 @@ final class RestoreStagingTest extends RestoreTestCase {
 			if ( ! in_array( $now->status, array( Job::QUEUED, Job::RUNNING ), true ) ) {
 				break;
 			}
-			$runner->tick( $job->id, microtime( true ) - 3600 ); // No time left: one unit per tick.
+			$this->autocommit( static function () use ( $runner, $job ) { return $runner->tick( $job->id, microtime( true ) - 3600 ); } ); // No time left: one unit per tick.
 		}
 		$GLOBALS['wpdb']->query( 'COMMIT' );
 		$this->assertSame( Job::COMPLETED, $now->status, (string) $now->last_error );

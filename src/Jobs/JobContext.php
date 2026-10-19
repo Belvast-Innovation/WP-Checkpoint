@@ -193,6 +193,21 @@ final class JobContext {
 	}
 
 	/**
+	 * The job row and the run's token, for a write outside the job row to be conditioned on or locked under
+	 * (Restore\JobFence).
+	 *
+	 * @return array{table: string, id: int, token: string}
+	 * @throws \LogicException Outside a run.
+	 */
+	public function fence(): array {
+		return array(
+			'table' => JobRepository::table(),
+			'id'    => $this->job->id,
+			'token' => $this->lock_token(),
+		);
+	}
+
+	/**
 	 * Whether this run is a WP-CLI process: no web server's time limit ends it.
 	 *
 	 * @return bool

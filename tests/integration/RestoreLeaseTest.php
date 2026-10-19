@@ -71,7 +71,7 @@ final class RestoreLeaseTest extends RestoreTestCase {
 	 */
 	private function tick_until_lost_or_done( Job $job ): string {
 		for ( $i = 0; $i < 200; $i++ ) {
-			$result = Plugin::instance()->runner()->tick( $job->id, microtime( true ) )->status;
+			$result = $this->autocommit( static function () use ( $job ) { return Plugin::instance()->runner()->tick( $job->id, microtime( true ) ); } )->status;
 			if ( 'lost' === $result || ! in_array( Plugin::instance()->jobs()->find( $job->id )->status, array( Job::QUEUED, Job::RUNNING ), true ) ) {
 				$GLOBALS['wpdb']->query( 'COMMIT' );
 				return $result;
@@ -279,7 +279,7 @@ final class RestoreLeaseTest extends RestoreTestCase {
 			}
 		);
 		for ( $i = 0; $i < 200 && ! $claimed; $i++ ) {
-			$result = Plugin::instance()->runner()->tick( $job->id, microtime( true ) );
+			$result = $this->autocommit( static function () use ( $job ) { return Plugin::instance()->runner()->tick( $job->id, microtime( true ) ); } );
 		}
 		$wpdb->query( 'COMMIT' );
 		$this->assertTrue( $claimed, 'the control: the table was claimed by another run mid-batch' );
@@ -407,7 +407,7 @@ final class RestoreLeaseTest extends RestoreTestCase {
 			return (string) file_get_contents( $now->storage_path . '/' . $now->log_path );
 		};
 		for ( $i = 0; $i < 200 && 'holder' === $phase; $i++ ) {
-			$result = Plugin::instance()->runner()->tick( $job->id, microtime( true ) );
+			$result = $this->autocommit( static function () use ( $job ) { return Plugin::instance()->runner()->tick( $job->id, microtime( true ) ); } );
 		}
 		$GLOBALS['wpdb']->query( 'COMMIT' );
 		$this->assertSame( TickResult::WAITING, $result->status );

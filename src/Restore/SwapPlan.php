@@ -172,11 +172,15 @@ final class SwapPlan {
 	 * @throws \Throwable Whatever else stops a statement, after the transaction is rolled back.
 	 */
 	public function write( int $job_id, int $attempt, int $from, array $entries, array $fence ): void {
-		$this->db->run( 'START TRANSACTION' );
-		try {
-			JobFence::lock( $this->db, $fence['table'], (int) $fence['id'], (string) $fence['token'] );
-			$this->db->write( 'DELETE FROM ' . SqlWriter::identifier( $this->name ) . ' WHERE job_id = ? AND attempt = ? AND seq >= ?', array( (string) $job_id, (string) $attempt, (string) $from ) );
-			if ( array() !== $entries ) {
+		JobFence::within(
+			$this->db,
+			$fence,
+			function () use ( $job_id, $attempt, $from, $entries ): void {
+				JobFence::assert_locked( $this->db );
+				$this->db->write( 'DELETE FROM ' . SqlWriter::identifier( $this->name ) . ' WHERE job_id = ? AND attempt = ? AND seq >= ?', array( (string) $job_id, (string) $attempt, (string) $from ) );
+				if ( array() === $entries ) {
+					return;
+				}
 				$values = array();
 				$params = array();
 				foreach ( array_values( $entries ) as $i => $entry ) {
@@ -185,11 +189,7 @@ final class SwapPlan {
 				}
 				$this->db->write( 'INSERT INTO ' . SqlWriter::identifier( $this->name ) . ' (job_id, attempt, seq, kind, live, stage, old, had_live) VALUES ' . implode( ', ', $values ), $params );
 			}
-			$this->db->run( 'COMMIT' );
-		} catch ( \Throwable $e ) {
-			$this->db->run( 'ROLLBACK' );
-			throw $e;
-		}
+		);
 	}
 
 	/**

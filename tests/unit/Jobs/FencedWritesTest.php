@@ -7,9 +7,11 @@ use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 /**
  * Every write of the swap phase to the plugin's tables and the temporary tables (the final check, the swap, the
  * count, the carry, the ledger, the plan) is one of three: its statement is conditioned on the run still holding the
- * job (lock_token or the ledger's holder in the statement), it is made inside a transaction that first locked the
- * job row (Restore\JobFence::lock()), or it is listed here as an exception with the reason. A write that is none of
- * them fails this test; so does an entry that no longer matches a write. The scanner is shown to find a write.
+ * job (lock_token or the ledger's holder in the statement), it is made inside the fenced transaction
+ * (Restore\JobFence::within(): the file calls it, and the function the write is in asserts the lock before it,
+ * JobFence::assert_locked(), which also refuses at run time), or it is listed here as an exception with the reason.
+ * A write that is none of them fails this test; so does an entry that no longer matches a write. The scanner is
+ * shown to find a write, and each rule to bite.
  */
 final class FencedWritesTest extends TestCase {
 
@@ -36,7 +38,7 @@ final class FencedWritesTest extends TestCase {
 			array( "'INSERT INTO ' . SqlWriter::identifier( self::base_prefix() . 'options' )", self::EXCEPTION, 'After the swap is made: an upsert of the after-swap mark, the same the new holder writes, right after a lease check.' ),
 		),
 		'src/Jobs/SwapCheckStep.php'  => array(
-			array( '$swap->write( $job, $attempt, $from, $batch, self::fence( $context ) );', self::EXCEPTION, 'Not a statement: SwapPlan::write(), whose statements are in a transaction that locks the job row first (registered there).' ),
+			array( '$swap->write( $job, $attempt, $from, $batch, $context->fence() );', self::EXCEPTION, 'Not a statement: SwapPlan::write(), whose statements are in the fenced transaction (registered there).' ),
 		),
 		'src/Restore/StateCarry.php'  => array(
 			array( "'DELETE FROM ' . SqlWriter::identifier( \$temp ) . ' WHERE '", self::LOCKED ),
@@ -63,7 +65,7 @@ final class FencedWritesTest extends TestCase {
 			array( "WHERE job_id = ? AND attempt <> ? ORDER BY id LIMIT", self::EXCEPTION, 'Rows of attempts no run reads any more (an attempt is numbered anew each time the check writes): a run that lost the job removes what the next one would.' ),
 			array( "WHERE job_id = ? AND attempt = ? AND seq >= ?'", self::LOCKED ),
 			array( '(job_id, attempt, seq, kind, live, stage, old, had_live) VALUES', self::LOCKED ),
-			array( '$this->write(', self::LOCKED, 'complete(): write(), the transaction that locks the job row first.' ),
+			array( '$this->write(', self::EXCEPTION, 'Not a statement: complete() calls write(), whose statements are in the fenced transaction (registered above).' ),
 		),
 		'src/Jobs/TempTableCount.php' => array(),
 		'src/Restore/JobFence.php'    => array(),
@@ -94,6 +96,26 @@ final class FencedWritesTest extends TestCase {
 			$out[ $i + 1 ] = $statement;
 		}
 		return $out;
+	}
+
+	/**
+	 * Whether the function (method or closure) a line is in calls JobFence::assert_locked() before that line.
+	 *
+	 * @param string $source Source.
+	 * @param int    $line   Line number (1-based).
+	 * @return bool
+	 */
+	public static function asserted_before( string $source, int $line ): bool {
+		$lines = explode( "\n", $source );
+		for ( $i = $line - 2; $i >= 0; $i-- ) {
+			if ( false !== strpos( $lines[ $i ], 'JobFence::assert_locked(' ) ) {
+				return true;
+			}
+			if ( 1 === preg_match( '/\bfunction\b/', $lines[ $i ] ) ) {
+				return false;
+			}
+		}
+		return false;
 	}
 
 	/**
@@ -128,8 +150,12 @@ final class FencedWritesTest extends TestCase {
 			if ( self::CONDITIONED === $entry[1] && 1 !== preg_match( '/lock_token|holder = \?/', $statement ) ) {
 				$problems[] = "$file:$line: registered as conditioned, but the statement names neither lock_token nor the holder";
 			}
-			if ( self::LOCKED === $entry[1] && 1 !== preg_match( '/JobFence::lock\(\s*\$/', $source ) ) { // The call, not a docblock's mention.
-				$problems[] = "$file:$line: registered as locked, but the file never locks the job row (JobFence::lock())";
+			if ( self::LOCKED === $entry[1] ) {
+				if ( 1 !== preg_match( '/JobFence::within\(\s*\$/', $source ) ) { // The call, not a docblock's mention.
+					$problems[] = "$file:$line: registered as locked, but the file never runs a fenced transaction (JobFence::within())";
+				} elseif ( ! self::asserted_before( $source, $line ) ) {
+					$problems[] = "$file:$line: registered as locked, but the function it is in does not assert the lock before it (JobFence::assert_locked())";
+				}
 			}
 			if ( self::EXCEPTION === $entry[1] && '' === trim( (string) ( $entry[2] ?? '' ) ) ) {
 				$problems[] = "$file:$line: an exception without a reason";
@@ -164,9 +190,15 @@ final class FencedWritesTest extends TestCase {
 		$this->assertSame( array( 2 ), array_keys( self::writes( $source ) ), 'a write found, a setting and a read not' );
 		$this->assertStringContainsString( 'not registered', implode( "\n", self::problems( 'x.php', $source, array() ) ) );
 		$this->assertStringContainsString( 'names neither lock_token nor the holder', implode( "\n", self::problems( 'x.php', $source, array( array( 'SET a = 1', self::CONDITIONED ) ) ) ) );
-		$this->assertStringContainsString( 'never locks the job row', implode( "\n", self::problems( 'x.php', $source, array( array( 'SET a = 1', self::LOCKED ) ) ) ) );
-		$this->assertStringContainsString( 'never locks the job row', implode( "\n", self::problems( 'x.php', "<?php\n// JobFence::lock() is mentioned, not called.\n" . substr( $source, 6 ), array( array( 'SET a = 1', self::LOCKED ) ) ) ), 'a mention in a comment is not the call' );
-		$this->assertSame( array(), self::problems( 'x.php', "<?php\nJobFence::lock( \$db, 't', 1, 'x' );\n" . substr( $source, 6 ), array( array( 'SET a = 1', self::LOCKED ) ) ), 'the call is' );
+		$this->assertStringContainsString( 'never runs a fenced transaction', implode( "\n", self::problems( 'x.php', $source, array( array( 'SET a = 1', self::LOCKED ) ) ) ) );
+		$this->assertStringContainsString( 'never runs a fenced transaction', implode( "\n", self::problems( 'x.php', "<?php\n// JobFence::within() is mentioned, not called.\n" . substr( $source, 6 ), array( array( 'SET a = 1', self::LOCKED ) ) ) ), 'a mention in a comment is not the call' );
+		$within  = "<?php\nJobFence::within( \$db, \$f, function () use ( \$db ) {\n";
+		$unasserted = $within . "\t\$db->write( 'UPDATE t SET a = 1', array() );\n} );\n";
+		$asserted   = $within . "\tJobFence::assert_locked( \$db );\n\t\$db->write( 'UPDATE t SET a = 1', array() );\n} );\n";
+		$elsewhere  = $within . "} );\nfunction other( \$db ) {\n\t\$db->write( 'UPDATE t SET a = 1', array() );\n}\nfunction f( \$db ) { JobFence::assert_locked( \$db ); }\n";
+		$this->assertStringContainsString( 'does not assert the lock before it', implode( "\n", self::problems( 'x.php', $unasserted, array( array( 'SET a = 1', self::LOCKED ) ) ) ), 'inside the transaction, without the guard' );
+		$this->assertStringContainsString( 'does not assert the lock before it', implode( "\n", self::problems( 'x.php', $elsewhere, array( array( 'SET a = 1', self::LOCKED ) ) ) ), 'a guard in another function does not count' );
+		$this->assertSame( array(), self::problems( 'x.php', $asserted, array( array( 'SET a = 1', self::LOCKED ) ) ), 'the guard right before it, in the fenced transaction' );
 		$this->assertStringContainsString( 'without a reason', implode( "\n", self::problems( 'x.php', $source, array( array( 'SET a = 1', self::EXCEPTION ) ) ) ) );
 		$this->assertSame( array(), self::problems( 'x.php', $source, array( array( 'SET a = 1', self::EXCEPTION, 'a reason' ) ) ) );
 		$this->assertStringContainsString( 'matches 0 writes', implode( "\n", self::problems( 'x.php', $source, array( array( 'SET a = 1', self::EXCEPTION, 'r' ), array( 'gone', self::EXCEPTION, 'r' ) ) ) ), 'a stale entry' );

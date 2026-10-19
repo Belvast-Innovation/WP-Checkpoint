@@ -483,7 +483,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 				$this->at( 'recount_' . $point );
 			},
 			StateCarry::counted( self::base_prefix(), is_multisite() ? get_current_network_id() : 0 ),
-			SwapCheckStep::fence( $context )
+			$context->fence()
 		);
 		$first   = true;
 		$slowest = 0.0;
@@ -631,7 +631,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			$guard = null;
 			if ( null !== $carry ) {
 				$guard = $this->state_carry( $db );
-				$guard->carry( $carry['live_options'], $carry['temp_options'], $carry['live_meta'], $carry['temp_meta'], SwapCheckStep::fence( $context ) );
+				$guard->carry( $carry['live_options'], $carry['temp_options'], $carry['live_meta'], $carry['temp_meta'], $context->fence() );
 			}
 			$this->at( 'carried' );
 			$this->rename_tables( $context, $db, $cursor, $entries['tables'], $guard, $carry );

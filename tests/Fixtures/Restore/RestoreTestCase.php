@@ -326,25 +326,6 @@ abstract class RestoreTestCase extends JobTestCase {
 		$this->fail( 'the restore did not end' );
 	}
 
-	/**
-	 * Run with the site's connection in autocommit, as in a WP-CLI process. The test framework keeps it in a
-	 * transaction: every table it reads in one stays locked against a RENAME until it commits, and the job row it
-	 * wrote stays locked against the restore's connection, which locks that row before it writes (JobFence).
-	 *
-	 * @template T
-	 * @param callable(): T $work Work.
-	 * @return T
-	 */
-	protected function autocommit( callable $work ) {
-		global $wpdb;
-		$wpdb->query( 'COMMIT' );
-		$wpdb->query( 'SET autocommit = 1' );
-		try {
-			return $work();
-		} finally {
-			$wpdb->query( 'SET autocommit = 0' );
-		}
-	}
 
 	/**
 	 * A runner whose clock moves on at every look, so each tick does a statement or two.

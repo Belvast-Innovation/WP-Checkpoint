@@ -110,6 +110,23 @@ final class SchemaColumnsTest extends JobTestCase {
 		$this->fail( 'no database.jobs check' );
 	}
 
+	public function test_the_jobs_table_of_an_earlier_version_is_made_innodb_on_upgrade(): void {
+		global $wpdb;
+		// A table an earlier version made under the server's default engine, here MyISAM: a run could not lock its row.
+		$table = Schema::jobs_table();
+		$this->assertNotFalse( $wpdb->query( "ALTER TABLE {$table} ENGINE=MyISAM" ), $wpdb->last_error );
+		$engine = static function () use ( $wpdb, $table ): string {
+			return strtolower( (string) $wpdb->get_var( $wpdb->prepare( 'SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s', $table ) ) );
+		};
+		$this->assertSame( 'myisam', $engine(), 'the control' );
+		Options::set( Schema::OPTION, array( 'version' => 13, 'min_compatible' => 1 ) );
+		$result = Schema::ensure();
+		$this->assertSame( 'migrated', $result['action'], wp_json_encode( $result ) );
+		$this->assertSame( 14, Options::get( Schema::OPTION )['version'] );
+		$this->assertSame( 'innodb', $engine(), 'version 14 pins the engine' );
+		$this->assertSame( 'none', Schema::ensure()['action'], 'and once more does nothing' );
+	}
+
 	public function test_a_column_the_migration_could_not_add_keeps_the_version_and_says_why(): void {
 		global $wpdb;
 		self::drop_column( 'cron_deferrals' );

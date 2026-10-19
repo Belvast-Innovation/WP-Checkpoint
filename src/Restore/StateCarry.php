@@ -133,24 +133,22 @@ final class StateCarry {
 	 * @throws \Throwable Whatever else stops it, after the transaction is rolled back.
 	 */
 	public function carry( string $live_options, string $temp_options, $live_meta, $temp_meta, array $fence ): void {
-		$this->db->begin();
-		try {
-			JobFence::lock( $this->db, $fence['table'], (int) $fence['id'], (string) $fence['token'] );
-			$this->at( 'carry_locked' );
-			$this->statements = 0;
-			$this->carry_table( $live_options, $temp_options, false, array(), '(option_name, option_value, autoload) SELECT option_name, option_value, autoload' );
-			if ( null !== $live_meta && null !== $temp_meta ) {
-				$this->carry_table( $live_meta, $temp_meta, true, array( (string) $this->network ), '(site_id, meta_key, meta_value) SELECT site_id, meta_key, meta_value' );
-				$this->activate_network( $temp_meta );
-			} else {
-				$this->activate( $temp_options );
+		JobFence::within(
+			$this->db,
+			$fence,
+			function () use ( $live_options, $temp_options, $live_meta, $temp_meta ): void {
+				$this->at( 'carry_locked' );
+				$this->statements = 0;
+				$this->carry_table( $live_options, $temp_options, false, array(), '(option_name, option_value, autoload) SELECT option_name, option_value, autoload' );
+				if ( null !== $live_meta && null !== $temp_meta ) {
+					$this->carry_table( $live_meta, $temp_meta, true, array( (string) $this->network ), '(site_id, meta_key, meta_value) SELECT site_id, meta_key, meta_value' );
+					$this->activate_network( $temp_meta );
+				} else {
+					$this->activate( $temp_options );
+				}
+				$this->at( 'carry_written' );
 			}
-			$this->at( 'carry_written' );
-			$this->db->commit();
-		} catch ( \Throwable $e ) {
-			$this->db->rollback();
-			throw $e;
-		}
+		);
 	}
 
 	/**
@@ -184,6 +182,7 @@ final class StateCarry {
 	 * @return void
 	 */
 	private function carry_table( string $live, string $temp, bool $sitemeta, array $site, string $columns ): void {
+		JobFence::assert_locked( $this->db );
 		$column = $sitemeta ? 'meta_key' : 'option_name';
 		$where  = array() === $site ? '' : 'site_id = ? AND ';
 		$active = $sitemeta ? self::ACTIVE_NETWORK : self::ACTIVE;
@@ -287,6 +286,7 @@ final class StateCarry {
 	 * @throws Refused When the list cannot be read.
 	 */
 	private function activate( string $temp_options ): void {
+		JobFence::assert_locked( $this->db );
 		$rows = $this->db->rows( 'SELECT option_value FROM ' . SqlWriter::identifier( $temp_options ) . " WHERE option_name = '" . self::ACTIVE . "'" );
 		if ( array() === $rows ) {
 			$this->db->rows( 'INSERT INTO ' . SqlWriter::identifier( $temp_options ) . " (option_name, option_value, autoload) VALUES ('" . self::ACTIVE . "', ?, 'yes')", array( PluginList::write( array( $this->plugin ) ) ) );
@@ -311,6 +311,7 @@ final class StateCarry {
 	 * @throws Refused When the list cannot be read.
 	 */
 	private function activate_network( string $temp_meta ): void {
+		JobFence::assert_locked( $this->db );
 		$rows = $this->db->rows( 'SELECT meta_value FROM ' . SqlWriter::identifier( $temp_meta ) . " WHERE site_id = ? AND meta_key = '" . self::ACTIVE_NETWORK . "'", array( (string) $this->network ) );
 		if ( array() === $rows ) {
 			$this->db->rows( 'INSERT INTO ' . SqlWriter::identifier( $temp_meta ) . " (site_id, meta_key, meta_value) VALUES (?, '" . self::ACTIVE_NETWORK . "', ?)", array( (string) $this->network, PluginList::write( array( $this->plugin => time() ) ) ) );

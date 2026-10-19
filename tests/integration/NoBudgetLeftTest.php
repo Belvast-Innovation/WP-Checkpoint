@@ -87,7 +87,7 @@ final class NoBudgetLeftTest extends JobTestCase {
 			$was    = Plugin::instance()->jobs()->find( $job->id );
 			$before = self::position( $was );
 			$ran[]  = $was->step;
-			$result = $runner->tick( $job->id, microtime( true ) - 3600 );
+			$result = $this->autocommit( static function () use ( $runner, $job ) { return $runner->tick( $job->id, microtime( true ) - 3600 ); } );
 			$now    = Plugin::instance()->jobs()->find( $job->id );
 			if ( ! in_array( $now->status, array( Job::QUEUED, Job::RUNNING ), true ) ) {
 				$GLOBALS['wpdb']->query( 'COMMIT' );

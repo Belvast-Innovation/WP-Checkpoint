@@ -24,7 +24,7 @@ defined( 'ABSPATH' ) || exit;
 final class Schema {
 
 	const OPTION  = StoredNames::DB_VERSION;
-	const CURRENT = 13;
+	const CURRENT = 14;
 
 	/**
 	 * Jobs table name without the prefix.
@@ -540,6 +540,13 @@ final class Schema {
 				// closed it, and its heartbeat. Code of version 12 neither reads nor writes them, so min_compatible stays 1.
 				\WPCheckpoint\Jobs\UninstallFence::upgrade();
 				return 1;
+			case 14:
+				// The jobs table pinned to InnoDB (its definition, and a table an earlier version made under the server's
+				// default engine converted): a restore's run locks its job row before it writes outside it. Older code
+				// reads and writes the table as before, so min_compatible stays 1.
+				self::create_jobs_table();
+				self::jobs_table_innodb();
+				return 1;
 			case 10:
 				// Adds held_by (''); older code ignores it, so min_compatible stays 1. What older code does with the rows
 				// this version writes: it goes by storage_token alone, so a job another installation took over is run
@@ -586,8 +593,26 @@ final class Schema {
 			KEY status_locked (status,locked_until),
 			KEY type (type),
 			KEY created_at (created_at)
-		) {$collate};";
+		) ENGINE=InnoDB {$collate};";
 		dbDelta( $sql );
+	}
+
+	/**
+	 * The jobs table as InnoDB: a restore's run locks its job row (Restore\JobFence) and a locked read on another
+	 * engine holds nothing. A table made by an earlier version took the server's default engine. Nothing to do when
+	 * it is InnoDB already, or when the engine cannot be read (the fence refuses such a table itself).
+	 *
+	 * @return void
+	 */
+	private static function jobs_table_innodb(): void {
+		global $wpdb;
+		$table  = $wpdb->base_prefix . self::JOBS_TABLE;
+		$engine = (string) $wpdb->get_var( $wpdb->prepare( 'SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s', $table ) );
+		if ( '' === $engine || 'innodb' === strtolower( $engine ) ) {
+			return;
+		}
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix.
+		$wpdb->query( "ALTER TABLE {$table} ENGINE=InnoDB" );
 	}
 
 	/**

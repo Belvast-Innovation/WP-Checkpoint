@@ -70,6 +70,12 @@ final class SwapSequencesTest extends SwapTestCase {
 	/** The seam after a failed verdict was recorded, before the direction is (I7 starts there). */
 	const FAILED = 'verify_failed';
 
+	/**
+	 * The seam where the carry holds the job row and has written nothing yet (Restore\JobFence): a forward seam, kept
+	 * after the others so that the interleavings' turn (MEANWHILE) still meets the seams it was laid out for.
+	 */
+	const LOCKED = array( 'carry_locked' );
+
 	/** The renames a killed run makes, by the seam right after each. */
 	const RENAMED = array( 'dir_aside', 'dir_in', 'batch_sent', 'table_back', 'dir_back' );
 
@@ -92,7 +98,7 @@ final class SwapSequencesTest extends SwapTestCase {
 	const REVERSING = 'reverse_recorded';
 
 	/** Seams of a run that renames something (or is about to). */
-	const RENAMING = array( 'entered', 'maintenance', 'dir_aside', 'dir_aside_recorded', 'dir_in', 'carry_written', 'carried', 'batch_recorded', 'batch_sent', 'rollback', 'reverse_recorded', 'table_back', 'dir_back', 'dirs_back' );
+	const RENAMING = array( 'entered', 'maintenance', 'dir_aside', 'dir_aside_recorded', 'dir_in', 'carry_locked', 'carry_written', 'carried', 'batch_recorded', 'batch_sent', 'rollback', 'reverse_recorded', 'table_back', 'dir_back', 'dirs_back' );
 
 	/**
 	 * What happens meanwhile, given out in turn (in this order, so that every kind meets a seam where it has an
@@ -131,17 +137,17 @@ final class SwapSequencesTest extends SwapTestCase {
 	}
 
 	public function test_every_seam_and_every_interleaving_keeps_the_invariants(): void {
-		$count = max( 1, (int) ( getenv( 'WPCHECKPOINT_SWAP_SEQUENCES' ) ?: 37 ) );
+		$count = max( 1, (int) ( getenv( 'WPCHECKPOINT_SWAP_SEQUENCES' ) ?: 38 ) );
 		$seed  = (int) ( getenv( 'WPCHECKPOINT_SWAP_SEQUENCES_SEED' ) ?: 1 );
 		// A seam with its path: the rollback's and the reverse's share names.
 		$seams = array();
-		foreach ( array_merge( self::FORWARD, self::BACKWARD, self::JUDGE ) as $seam ) {
+		foreach ( array_merge( self::FORWARD, self::BACKWARD, self::JUDGE, self::LOCKED ) as $seam ) {
 			$seams[] = array( '', $seam );
 		}
 		foreach ( self::REVERSE as $seam ) {
 			$seams[] = array( 'reverse', $seam );
 		}
-		$this->assertSame( 37, count( $seams ), 'the default count is one sequence per seam' );
+		$this->assertSame( 38, count( $seams ), 'the default count is one sequence per seam' );
 		$this->held_checks = array_fill_keys( self::AT_RENAME, 0 );
 		mt_srand( $seed );
 		$killed = array();
