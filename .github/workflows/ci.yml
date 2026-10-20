@@ -139,6 +139,7 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "with libarchive below 3.8.6 the difference does not apply; the copy exited $LASTEXITCODE" }
             Write-Host 'control not applicable on this tar (before 3.8.6): the strict comparison ran and passed'
           }
+          exit 0 # The mutated copy's exit code 1 is the expected outcome, not this step's.
 
   integration:
     name: Integration (wp-env, PHP ${{ matrix.php }})
