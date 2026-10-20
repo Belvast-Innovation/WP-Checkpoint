@@ -207,4 +207,34 @@ final class CarryFenceTest extends SwapTestCase {
 		$this->assertTrue( $ledger->set_owned( $number, 3, JobRepository::table(), $fresh->id, $fresh->lock_token ) );
 		$this->assertSame( 3, $ledger->get( $number )['owned'] );
 	}
+
+	public function test_after_a_take_over_the_old_runs_claim_of_every_record_changes_no_holder(): void {
+		global $wpdb;
+		$held = $this->held();
+		$this->assertNotNull( $this->take_over( $held['job'], 5 ), 'the control: taken over' );
+		$this->old = ImportSession::open( Credentials::from_wordpress() );
+		$loaded    = RestorePreflightStep::load_plan( Residue::work_dir( $held['job']->storage_path, $held['job']->id ) );
+		$name      = TempTables::ledger( $held['job']->storage_token, $held['job']->id, (string) $loaded['random'] );
+		$holders   = function () use ( $wpdb, $name ): array {
+			$wpdb->query( 'COMMIT' );
+			return $wpdb->get_results( "SELECT n, holder FROM `{$name}` ORDER BY n", ARRAY_A );
+		};
+		$before = $holders();
+		$this->assertNotEmpty( $before, 'the control: records to take' );
+		$this->assertNotContains( 'dddd', array_column( $before, 'holder' ), 'the control: none held by the old run yet' );
+		$ledger = new Ledger( $this->old, $name, 'dddd' );
+		try {
+			$ledger->take_all( $held['fence'] );
+			$this->fail( 'the old run took the records after the take-over' );
+		} catch ( LockLost $e ) {
+			$this->assertStringContainsString( 'not taken', $e->getMessage() );
+		}
+		$this->assertSame( $before, $holders(), 'no holder changed' );
+		// The control: under the new token every record is taken, and taking again is nothing to do, not a lost lock.
+		$fresh = Plugin::instance()->jobs()->find( $held['job']->id );
+		$fence = array( 'table' => JobRepository::table(), 'id' => $fresh->id, 'token' => $fresh->lock_token );
+		$this->assertSame( count( $before ), $ledger->take_all( $fence ) );
+		$this->assertSame( array_fill( 0, count( $before ), 'dddd' ), array_column( $holders(), 'holder' ) );
+		$this->assertSame( 0, $ledger->take_all( $fence ), 'held already: nothing to take' );
+	}
 }

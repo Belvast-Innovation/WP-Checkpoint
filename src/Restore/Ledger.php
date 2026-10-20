@@ -8,6 +8,7 @@
 namespace WPCheckpoint\Restore;
 
 use WPCheckpoint\Database\SqlWriter;
+use WPCheckpoint\Jobs\LockLost;
 use WPCheckpoint\Jobs\TransientFailure;
 
 defined( 'ABSPATH' ) || exit;
@@ -198,12 +199,34 @@ final class Ledger {
 
 	/**
 	 * Make this run the holder of every table's record at once (the final check before the swap): a run of the
-	 * import that outlived its lease finds its next batch refused, and the batch rolls back with its record.
+	 * import that outlived its lease finds its next batch refused, and the batch rolls back with its record. The
+	 * statement itself is conditioned on the run still holding the job (the job row under the run's token, in one
+	 * UPDATE with the records, as set_owned()): a run that lost the job changes no holder. Zero records changed is
+	 * either that or every record held already; JobFence::holds() tells them apart.
 	 *
+	 * @param array{table: string, id: int, token: string} $fence The job row to hold (JobContext::fence()).
 	 * @return int Records taken.
+	 * @throws LockLost When the job is no longer held under the fence's token: no holder was changed.
 	 */
-	public function take_all(): int {
-		return $this->db->write( 'UPDATE ' . SqlWriter::identifier( $this->name ) . ' SET holder = ? WHERE holder <> ?', array( $this->token, $this->token ) );
+	public function take_all( array $fence ): int {
+		$db    = $this->db;
+		$table = (string) $fence['table'];
+		$id    = (int) $fence['id'];
+		$token = (string) $fence['token'];
+		$taken = JobFence::bounded(
+			$db,
+			function () use ( $db, $table, $id, $token ): int {
+				// The job row is read for the update: the wait for it, should a fenced write hold it, is bounded.
+				return $db->write(
+					'UPDATE ' . SqlWriter::identifier( $this->name ) . ' AS l JOIN ' . SqlWriter::identifier( $table ) . ' AS j ON j.id = ? SET l.holder = ? WHERE l.holder <> ? AND j.lock_token = ?',
+					array( (string) $id, $this->token, $this->token, $token )
+				);
+			}
+		);
+		if ( 0 === $taken && ! JobFence::holds( $db, $table, $id, $token ) ) {
+			throw new LockLost( 'The job is no longer held by this run: the records were not taken.' );
+		}
+		return $taken;
 	}
 
 	/**

@@ -27,6 +27,14 @@ final class FencedWritesTest extends TestCase {
 	const NOT   = '/->(?:run|rows)\(\s*[\'"](?:SET SESSION|START TRANSACTION|COMMIT|ROLLBACK|SELECT)\b/';
 
 	/**
+	 * A statement that commits implicitly (DDL, LOCK TABLES): it ends the fenced transaction and releases the job
+	 * row, so nothing after it is inside the fence. Such a statement is never "locked"; and a locked write must be
+	 * seen to be DML: its statement a literal that begins with one of the four (DML).
+	 */
+	const IMPLICIT_COMMIT = '/->(?:write|run|rows)\(\s*[\'"](?:CREATE|ALTER|DROP|RENAME|TRUNCATE|LOCK)\b/i';
+	const DML             = '/->(?:write|run|rows)\(\s*[\'"](?:DELETE|INSERT|UPDATE|REPLACE)\b/';
+
+	/**
 	 * The writes, by file: a substring of the line, its kind, and for an exception the reason.
 	 *
 	 * @var array<string, array<int, array{0: string, 1: string, 2?: string}>>
@@ -51,7 +59,7 @@ final class FencedWritesTest extends TestCase {
 		'src/Restore/Ledger.php'      => array(
 			array( "'CREATE TABLE IF NOT EXISTS '", self::EXCEPTION, 'DDL, idempotent: the ledger of this job, created once.' ),
 			array( 'SET l.owned = ? WHERE l.n = ? AND l.owned < 0 AND j.lock_token = ?', self::CONDITIONED ),
-			array( "SET holder = ? WHERE holder <> ?'", self::EXCEPTION, 'The claim of every record by the final check (take_all()), between two lease checks.' ),
+			array( 'SET l.holder = ? WHERE l.holder <> ? AND j.lock_token = ?', self::CONDITIONED ),
 			array( '(n, chunk, pos, row_count, data_offset, transactional, holder) VALUES (?, 0, 0, 0, 0, 1, ?)', self::EXCEPTION, 'The claim of a new record (claim()): the row did not exist, and a second claimant is refused by the key.' ),
 			array( "SET holder = ? WHERE n = ? AND holder = ?'", self::EXCEPTION, 'The claim of a record from its previous holder (claim()): a compare-and-set on the holder.' ),
 			array( 'SET chunk = 1, pos = ?, data_offset = ?, transactional = ?, constraint_names = ? WHERE n = ? AND chunk = 0 AND holder = ?', self::CONDITIONED ),
@@ -151,7 +159,11 @@ final class FencedWritesTest extends TestCase {
 				$problems[] = "$file:$line: registered as conditioned, but the statement names neither lock_token nor the holder";
 			}
 			if ( self::LOCKED === $entry[1] ) {
-				if ( 1 !== preg_match( '/JobFence::within\(\s*\$/', $source ) ) { // The call, not a docblock's mention.
+				if ( 1 === preg_match( self::IMPLICIT_COMMIT, $statement ) ) {
+					$problems[] = "$file:$line: registered as locked, but the statement commits implicitly (CREATE / ALTER / DROP / RENAME / TRUNCATE / LOCK TABLES): it releases the job row, and nothing after it is fenced";
+				} elseif ( 1 !== preg_match( self::DML, $statement ) ) {
+					$problems[] = "$file:$line: registered as locked, but the statement is not seen to be DML (a literal beginning with DELETE / INSERT / UPDATE / REPLACE)";
+				} elseif ( 1 !== preg_match( '/JobFence::within\(\s*\$/', $source ) ) { // The call, not a docblock's mention.
 					$problems[] = "$file:$line: registered as locked, but the file never runs a fenced transaction (JobFence::within())";
 				} elseif ( ! self::asserted_before( $source, $line ) ) {
 					$problems[] = "$file:$line: registered as locked, but the function it is in does not assert the lock before it (JobFence::assert_locked())";
@@ -201,6 +213,18 @@ final class FencedWritesTest extends TestCase {
 		$one_liner = $within . "\t\$cb = function () use ( \$db ) { JobFence::assert_locked( \$db ); };\n\t\$db->write( 'UPDATE t SET a = 1', array() );\n} );\n";
 		$this->assertStringContainsString( 'does not assert the lock before it', implode( "\n", self::problems( 'x.php', $one_liner, array( array( 'SET a = 1', self::LOCKED ) ) ) ), 'a guard inside a one-line closure in between does not count' );
 		$this->assertSame( array(), self::problems( 'x.php', $asserted, array( array( 'SET a = 1', self::LOCKED ) ) ), 'the guard right before it, in the fenced transaction' );
+		// A statement that commits implicitly is never locked, however well guarded: each of the six, and a
+		// statement that cannot be seen to be DML (a variable, a call).
+		$guarded = $within . "\tJobFence::assert_locked( \$db );\n";
+		foreach ( array( 'CREATE TABLE t2 (a INT)', 'ALTER TABLE t ADD b INT', 'DROP TABLE t2', 'RENAME TABLE t TO t2', 'TRUNCATE TABLE t', 'LOCK TABLES t WRITE', 'lock tables t write' ) as $ddl ) {
+			$this->assertStringContainsString( 'commits implicitly', implode( "\n", self::problems( 'x.php', $guarded . "\t\$db->run( '$ddl' );\n} );\n", array( array( $ddl, self::LOCKED ) ) ) ), $ddl );
+			$this->assertSame( array(), self::problems( 'x.php', $guarded . "\t\$db->run( '$ddl' );\n} );\n", array( array( $ddl, self::EXCEPTION, 'DDL' ) ) ), "$ddl as an exception with a reason" );
+		}
+		$opaque = $guarded . "\t\$db->run( \$sql );\n\t\$db->run( self::create_sql( \$name ) );\n} );\n";
+		$this->assertStringContainsString( 'not seen to be DML', implode( "\n", self::problems( 'x.php', $opaque, array( array( '$db->run( $sql );', self::LOCKED ), array( 'self::create_sql(', self::EXCEPTION, 'r' ) ) ) ), 'a variable' );
+		$this->assertStringContainsString( 'not seen to be DML', implode( "\n", self::problems( 'x.php', $opaque, array( array( '$db->run( $sql );', self::EXCEPTION, 'r' ), array( 'self::create_sql(', self::LOCKED ) ) ) ), 'a call' );
+		$multiline = $within . "\tJobFence::assert_locked( \$db );\n\t\$db->write(\n\t\t'DELETE FROM ' . \$t . ' WHERE a = 1',\n\t\tarray()\n\t);\n} );\n";
+		$this->assertSame( array(), self::problems( 'x.php', $multiline, array( array( "'DELETE FROM ' . \$t", self::LOCKED ) ) ), 'the DML literal on the line after the call' );
 		$this->assertStringContainsString( 'without a reason', implode( "\n", self::problems( 'x.php', $source, array( array( 'SET a = 1', self::EXCEPTION ) ) ) ) );
 		$this->assertSame( array(), self::problems( 'x.php', $source, array( array( 'SET a = 1', self::EXCEPTION, 'a reason' ) ) ) );
 		$this->assertStringContainsString( 'matches 0 writes', implode( "\n", self::problems( 'x.php', $source, array( array( 'SET a = 1', self::EXCEPTION, 'r' ), array( 'gone', self::EXCEPTION, 'r' ) ) ) ), 'a stale entry' );

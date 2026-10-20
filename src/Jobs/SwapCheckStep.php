@@ -272,9 +272,7 @@ final class SwapCheckStep implements Step {
 		$what      = '';
 		switch ( $cursor['phase'] ) {
 			case 'claim':
-				$context->confirm_lease();
-				$run['ledger']->take_all();
-				$context->confirm_lease(); // A run whose lease ran out between the check and the take stops here.
+				$run['ledger']->take_all( $context->fence() ); // Conditioned on the job row: a run whose lease ran out takes nothing and stops here.
 				$cursor = array(
 					'phase'   => 'ledger',
 					'attempt' => $run['swap']->next_attempt( $context->job()->id ),
