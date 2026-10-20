@@ -183,7 +183,7 @@ final class TempTableCount {
 				if ( array() === $this->fence ) {
 					throw new \LogicException( 'The own rows of a table cannot be recorded outside a run: the counter was built without its fence.' );
 				}
-				if ( ! $this->ledger->set_owned( (int) $table['number'], $owned, $this->fence['table'], $this->fence['id'], $this->fence['token'] ) ) {
+				if ( ! $this->ledger->set_owned( (int) $table['number'], $owned, $this->fence ) ) {
 					// Not written: the job is no longer this run's (it stops here and writes nothing more), or the
 					// record was made meanwhile by another run counting the same table while this one still held
 					// the job (then what it recorded is what every count takes).

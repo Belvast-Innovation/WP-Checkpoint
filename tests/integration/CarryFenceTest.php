@@ -192,7 +192,7 @@ final class CarryFenceTest extends SwapTestCase {
 		$this->assertNotNull( $number );
 		$this->assertSame( 1, $wpdb->query( $wpdb->prepare( "UPDATE `{$name}` SET owned = -1, transactional = 0 WHERE n = %d", $number ) ) );
 		$wpdb->query( 'COMMIT' );
-		$this->assertFalse( $ledger->set_owned( $number, 3, JobRepository::table(), $held['job']->id, $held['token'] ), 'refused under the old token' );
+		$this->assertFalse( $ledger->set_owned( $number, 3, $held['fence'] ), 'refused under the old token' );
 		$this->assertSame( -1, $ledger->get( $number )['owned'], 'and nothing recorded' );
 		$counter = new TempTableCount( $this->old, $loaded['plan'], $ledger, Residue::work_dir( $held['job']->storage_path, $held['job']->id ), 1000, null, StateCarry::counted( $wpdb->base_prefix, is_multisite() ? get_current_network_id() : 0 ), $held['fence'] );
 		try {
@@ -204,7 +204,7 @@ final class CarryFenceTest extends SwapTestCase {
 		$this->assertSame( -1, $ledger->get( $number )['owned'] );
 		// The control: under the new token the record is made.
 		$fresh = Plugin::instance()->jobs()->find( $held['job']->id );
-		$this->assertTrue( $ledger->set_owned( $number, 3, JobRepository::table(), $fresh->id, $fresh->lock_token ) );
+		$this->assertTrue( $ledger->set_owned( $number, 3, array( 'table' => JobRepository::table(), 'id' => $fresh->id, 'token' => $fresh->lock_token ) ) );
 		$this->assertSame( 3, $ledger->get( $number )['owned'] );
 	}
 
@@ -230,26 +230,38 @@ final class CarryFenceTest extends SwapTestCase {
 			$this->assertStringContainsString( 'not taken', $e->getMessage() );
 		}
 		$this->assertSame( $before, $holders(), 'no holder changed' );
-		// No token at all (a context outside a run) is refused before any statement, as JobFence::within() refuses
-		// it: a released row stores an empty token, which a join on it would match.
-		foreach ( array( 'take_all', 'set_owned' ) as $write ) {
-			try {
-				if ( 'take_all' === $write ) {
-					$ledger->take_all( array( 'table' => JobRepository::table(), 'id' => $held['job']->id, 'token' => '' ) );
-				} else {
-					$ledger->set_owned( (int) $before[0]['n'], 1, JobRepository::table(), $held['job']->id, '' );
-				}
-				$this->fail( "$write under no token went through" );
-			} catch ( LockLost $e ) {
-				$this->assertStringContainsString( 'no lock token', $e->getMessage(), $write );
-			}
-		}
-		$this->assertSame( $before, $holders(), 'no holder changed under no token' );
 		// The control: under the new token every record is taken, and taking again is nothing to do, not a lost lock.
 		$fresh = Plugin::instance()->jobs()->find( $held['job']->id );
 		$fence = array( 'table' => JobRepository::table(), 'id' => $fresh->id, 'token' => $fresh->lock_token );
 		$this->assertSame( count( $before ), $ledger->take_all( $fence ) );
 		$this->assertSame( array_fill( 0, count( $before ), 'dddd' ), array_column( $holders(), 'holder' ) );
 		$this->assertSame( 0, $ledger->take_all( $fence ), 'held already: nothing to take' );
+		// No token at all (a context outside a run) is refused before any statement, as JobFence::within() refuses
+		// it. The state in which the join would match: the job row released (an empty token stored), under which
+		// a join on '' takes every record (the control, through the same statement) and the refusal takes none.
+		$wpdb->query( 'COMMIT' );
+		$this->assertSame( 1, $wpdb->update( JobRepository::table(), array( 'lock_token' => '' ), array( 'id' => $held['job']->id ) ), 'the row released' );
+		$wpdb->query( 'COMMIT' );
+		$taken  = $holders();
+		$number = (int) $taken[0]['n'];
+		$this->assertSame( 1, $wpdb->query( $wpdb->prepare( "UPDATE `{$name}` SET owned = -1 WHERE n = %d", $number ) ) );
+		$wpdb->query( 'COMMIT' );
+		$this->assertSame( count( $taken ), (int) $wpdb->query( $wpdb->prepare( "UPDATE `{$name}` AS l JOIN `" . JobRepository::table() . "` AS j ON j.id = %d SET l.holder = 'eeee' WHERE (l.holder <> 'eeee') AND j.lock_token = ''", $held['job']->id ) ), 'the control: the join on an empty token matches the released row and would take every record' );
+		$wpdb->query( 'COMMIT' );
+		$released = array( 'table' => JobRepository::table(), 'id' => $held['job']->id, 'token' => '' );
+		foreach ( array( 'take_all', 'set_owned' ) as $write ) {
+			try {
+				if ( 'take_all' === $write ) {
+					$ledger->take_all( $released );
+				} else {
+					$ledger->set_owned( $number, 1, $released );
+				}
+				$this->fail( "$write under no token went through" );
+			} catch ( LockLost $e ) {
+				$this->assertStringContainsString( 'no lock token', $e->getMessage(), $write );
+			}
+		}
+		$this->assertSame( array_fill( 0, count( $taken ), 'eeee' ), array_column( $holders(), 'holder' ), 'no holder changed under no token' );
+		$this->assertSame( -1, $ledger->get( $number )['owned'], 'nothing recorded under no token' );
 	}
 }
