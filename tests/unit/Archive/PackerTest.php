@@ -120,13 +120,54 @@ final class PackerTest extends TestCase {
 				$this->markTestSkipped( 'Neither unzip nor the system tar is available.' );
 			}
 			exec( '"' . $tar . '" -tf ' . escapeshellarg( $path ) . ' 2>&1', $lines, $code );
-			return 0 === $code;
+			// Since libarchive 3.8.6 that tar skips an entry whose name the ANSI code page cannot represent (one
+			// line each, exit code 1; tests/extractors/check.php has the full rule): the known difference is
+			// accepted only in exactly that shape, with every other name listed.
+			$skipped = self::names_windows_tar_skips( $tar, array_column( ZipReader::open( $path )->entries(), 'name' ) );
+			if ( array() === $skipped ) {
+				return 0 === $code;
+			}
+			$expected = array_fill( 0, count( $skipped ), 'tar: Archive entry has empty or unreadable filename ... skipping' );
+			$expected[] = 'tar: Error exit delayed from previous errors';
+			$messages   = array_values( array_filter( $lines, static function ( string $line ): bool {
+				return 0 === strpos( $line, 'tar: ' );
+			} ) );
+			$listed     = array_values( array_diff( $lines, $messages ) );
+			return 1 === $code && $messages === $expected && count( $listed ) === count( ZipReader::open( $path )->entries() ) - count( $skipped );
 		}
 		if ( ! is_executable( '/usr/bin/unzip' ) ) {
 			$this->markTestSkipped( 'unzip is not available' );
 		}
 		exec( '/usr/bin/unzip -t ' . escapeshellarg( $path ) . ' 2>&1', $lines, $code );
 		return 0 === $code;
+	}
+
+	/**
+	 * The entry names Windows's own tar skips: with libarchive 3.8.6 or later, those the ANSI code page cannot
+	 * represent (converted there and back unchanged otherwise); none before 3.8.6, none when the version or the
+	 * code page cannot be read (the strict comparison then applies), none under a UTF-8 code page.
+	 *
+	 * @param string[] $names Entry names (UTF-8).
+	 * @return string[]
+	 */
+	public static function names_windows_tar_skips( string $tar, array $names ): array {
+		exec( '"' . $tar . '" --version 2>&1', $version_lines, $code );
+		if ( 0 !== $code || 1 !== preg_match( '/libarchive (\\d+\\.\\d+\\.\\d+)/', implode( ' ', $version_lines ), $m ) || version_compare( $m[1], '3.8.6', '<' ) ) {
+			return array();
+		}
+		$code_page = function_exists( 'sapi_windows_cp_get' ) ? (int) sapi_windows_cp_get( 'ansi' ) : 0;
+		if ( $code_page <= 0 || 65001 === $code_page || ! function_exists( 'sapi_windows_cp_conv' ) ) {
+			return array();
+		}
+		$skipped = array();
+		foreach ( $names as $name ) {
+			$there = @sapi_windows_cp_conv( 65001, $code_page, $name );
+			$back  = null === $there ? null : @sapi_windows_cp_conv( $code_page, 65001, $there );
+			if ( $back !== $name ) {
+				$skipped[] = $name;
+			}
+		}
+		return $skipped;
 	}
 
 	public function test_a_single_volume_archive_is_a_valid_zip_that_other_tools_open(): void {
