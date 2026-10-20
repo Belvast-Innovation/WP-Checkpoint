@@ -119,26 +119,37 @@ final class PackerTest extends TestCase {
 			if ( ! is_file( $tar ) ) {
 				$this->markTestSkipped( 'Neither unzip nor the system tar is available.' );
 			}
-			exec( '"' . $tar . '" -tf ' . escapeshellarg( $path ) . ' 2>&1', $lines, $code );
+			// stdout and stderr read apart: merged into one pipe, the unbuffered skip message lands in the middle of
+			// a buffered listing line ("…/empty.txttar.exe: Archive entry …") and no line can be told apart.
+			$proc = proc_open( array( $tar, '-tf', $path ), array( 1 => array( 'pipe', 'w' ), 2 => array( 'pipe', 'w' ) ), $pipes );
+			if ( ! is_resource( $proc ) ) {
+				$this->fail( 'The system tar could not be started.' );
+			}
+			$out  = (string) stream_get_contents( $pipes[1] );
+			$err  = (string) stream_get_contents( $pipes[2] );
+			fclose( $pipes[1] );
+			fclose( $pipes[2] );
+			$code = proc_close( $proc );
 			// Since libarchive 3.8.6 that tar skips an entry whose name the ANSI code page cannot represent (one
 			// line each, exit code 1; tests/extractors/check.php has the full rule): the known difference is
 			// accepted only in exactly that shape, with every other name listed.
-			$skipped = self::names_windows_tar_skips( $tar, array_column( ZipReader::open( $path )->entries(), 'name' ) );
+			$entries = array_column( ZipReader::open( $path )->entries(), 'name' );
+			$skipped = self::names_windows_tar_skips( $tar, $entries );
 			if ( array() === $skipped ) {
-				return 0 === $code;
+				$this->assertSame( 0, $code, "the system tar lists the archive:\n" . $out . $err );
+				return true;
 			}
-			$expected = array_fill( 0, count( $skipped ), 'tar: Archive entry has empty or unreadable filename ... skipping' );
+			$expected   = array_fill( 0, count( $skipped ), 'tar: Archive entry has empty or unreadable filename ... skipping' );
 			$expected[] = 'tar: Error exit delayed from previous errors';
 			$messages   = array();
-			$listed     = array();
-			foreach ( $lines as $line ) { // The messages carry the name tar was invoked by: "tar:" or "tar.exe:".
-				if ( 1 === preg_match( '/^tar(?:\\.exe)?: (.*)$/', $line, $m ) ) {
-					$messages[] = 'tar: ' . $m[1];
-				} else {
-					$listed[] = $line;
-				}
+			foreach ( preg_split( '/\r?\n/', trim( $err ) ) ?: array() as $line ) { // Prefixed by the name tar was invoked by: "tar:" or "tar.exe:".
+				$messages[] = 1 === preg_match( '/^tar(?:\.exe)?: (.*)$/', $line, $m ) ? 'tar: ' . $m[1] : $line;
 			}
-			return 1 === $code && $messages === $expected && count( $listed ) === count( ZipReader::open( $path )->entries() ) - count( $skipped );
+			$listed = array_values( array_filter( preg_split( '/\r?\n/', $out ) ?: array(), 'strlen' ) );
+			$this->assertSame( 1, $code, "exit code under the known difference (skipped: " . implode( ', ', $skipped ) . "):\n" . $out . $err );
+			$this->assertSame( $expected, $messages, 'messages under the known difference' );
+			$this->assertCount( count( $entries ) - count( $skipped ), $listed, "every other name listed:\n" . $out );
+			return true;
 		}
 		if ( ! is_executable( '/usr/bin/unzip' ) ) {
 			$this->markTestSkipped( 'unzip is not available' );
