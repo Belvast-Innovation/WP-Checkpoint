@@ -129,10 +129,15 @@ final class PackerTest extends TestCase {
 			}
 			$expected = array_fill( 0, count( $skipped ), 'tar: Archive entry has empty or unreadable filename ... skipping' );
 			$expected[] = 'tar: Error exit delayed from previous errors';
-			$messages   = array_values( array_filter( $lines, static function ( string $line ): bool {
-				return 0 === strpos( $line, 'tar: ' );
-			} ) );
-			$listed     = array_values( array_diff( $lines, $messages ) );
+			$messages   = array();
+			$listed     = array();
+			foreach ( $lines as $line ) { // The messages carry the name tar was invoked by: "tar:" or "tar.exe:".
+				if ( 1 === preg_match( '/^tar(?:\\.exe)?: (.*)$/', $line, $m ) ) {
+					$messages[] = 'tar: ' . $m[1];
+				} else {
+					$listed[] = $line;
+				}
+			}
 			return 1 === $code && $messages === $expected && count( $listed ) === count( ZipReader::open( $path )->entries() ) - count( $skipped );
 		}
 		if ( ! is_executable( '/usr/bin/unzip' ) ) {
