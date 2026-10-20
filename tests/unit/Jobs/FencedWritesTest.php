@@ -32,10 +32,14 @@ use Yoast\PHPUnitPolyfills\TestCases\TestCase;
  * the fenced connection's name inside a region (an assignment, plain or compound; a foreach, list or [] target; a
  * global or static declaration; a parameter of a function nested there) is refused, since what it holds after that
  * is not known. The reading is static: it sees the source's spellings, not what runs; the fenced files hold the
- * connection as $this->db and are checked by the per-file control. A call named update(),
+ * connection as $this->db and are checked by the per-file control. Known limits of the reading, shapes the fenced
+ * files do not contain and the coding standard does not write: a multi-variable global or static declaration, a
+ * by-reference or destructuring foreach target, a property as a foreach target, a reference binding ($x = &$db),
+ * a string or array callable as a callee ('f'( $db )->run()), and an offset whose key is the connection
+ * ($seen[ $db ] = 1, read as a rebinding). A call named update(),
  * insert(), delete() or replace() on any object is recorded too: it must be registered (an exception with the
- * reason when it is not a statement). The regexes left are on
- * a literal's first characters only, and a regex that fails refuses. Fixed examples show each rule biting; a
+ * reason when it is not a statement). The regexes left are on a literal's first characters (a regex that fails
+ * refuses) and on an import's text. Fixed examples show each rule biting; a
  * generator builds sources with known regions and calls, in every one of these shapes, and checks that exactly the
  * violating lines are reported.
  */
@@ -332,7 +336,7 @@ final class FencedWritesTest extends TestCase {
 			return self::is( $t, T_VARIABLE ) || self::is( $t, T_STRING ) || self::is( $t, T_OBJECT_OPERATOR ) || self::is( $t, T_DOUBLE_COLON ) || ( is_array( $t ) && in_array( $t[0], $name_ids, true ) );
 		};
 		// The chain of tokens from k on, without whitespace: [text, index of its last token]; '' when k begins none.
-		$chain_at = static function ( int $k ) use ( $tokens, $n, $skip, $chain, $next ): array {
+		$chain_at = static function ( int $k ) use ( $tokens, $n, $skip, $chain ): array {
 			$text = '';
 			$last = $k - 1;
 			for ( ; $k < $n && ( $skip( $tokens[ $k ] ) || $chain( $tokens[ $k ] ) ); $k++ ) {
@@ -541,8 +545,8 @@ final class FencedWritesTest extends TestCase {
 		$rebound   = array();
 		$rebinding = static function ( int $j ) use ( $tokens, $at, $next, $prev, $open_of, $close, $closer ): bool { // At the chain's last token.
 			$after = $at( $next( $j ) );
-			if ( '=' === $after || ( is_array( $after ) && 1 === preg_match( '/_EQUAL$/', token_name( $after[0] ) ) && T_IS_EQUAL !== $after[0] && T_IS_NOT_EQUAL !== $after[0] && T_IS_IDENTICAL !== $after[0] && T_IS_NOT_IDENTICAL !== $after[0] && T_IS_SMALLER_OR_EQUAL !== $after[0] && T_IS_GREATER_OR_EQUAL !== $after[0] ) ) {
-				return true;
+			if ( '=' === $after || ( is_array( $after ) && in_array( $after[0], array( T_PLUS_EQUAL, T_MINUS_EQUAL, T_MUL_EQUAL, T_DIV_EQUAL, T_CONCAT_EQUAL, T_MOD_EQUAL, T_AND_EQUAL, T_OR_EQUAL, T_XOR_EQUAL, T_SL_EQUAL, T_SR_EQUAL, T_POW_EQUAL, T_COALESCE_EQUAL ), true ) ) ) {
+				return true; // An assignment, plain or compound.
 			}
 			$before = $at( $prev( $j ) );
 			if ( self::is( $before, T_AS ) || self::is( $before, T_DOUBLE_ARROW ) && self::is( $at( $prev( $prev( $prev( $j ) ) ) ), T_AS ) || self::is( $before, T_GLOBAL ) || self::is( $before, T_STATIC ) ) {
@@ -568,7 +572,7 @@ final class FencedWritesTest extends TestCase {
 					$opener_before = $at( $prev( $i ) );
 					return self::is( $opener_before, T_LIST ) || self::is( $opener_before, T_FUNCTION ) || self::is( $opener_before, T_FN ) || ( self::is( $opener_before, T_STRING ) && self::is( $at( $prev( $prev( $i ) ) ), T_FUNCTION ) );
 				}
-				if ( ';' === $tokens[ $i ] || '{' === $tokens[ $i ] || '}' === $tokens[ $i ] ) {
+				if ( ';' === $tokens[ $i ] || '{' === $tokens[ $i ] ) { // The statement's start (a } was jumped over with its block).
 					return false;
 				}
 			}
@@ -1062,9 +1066,7 @@ final class FencedWritesTest extends TestCase {
 				$seen[ "rebind_$form" ] = 1;
 				$lines = array( $forms[ $form ] );
 				if ( '{' === substr( $forms[ $form ], -1 ) ) {
-					$lines[] = '}';
-				} elseif ( 'param' === $form && false !== strpos( $forms[ $form ], 'function' ) ) {
-					$lines[] = '};';
+					$lines[] = 'param' === $form ? '};' : '}'; // A closure assigned needs its semicolon; a foreach does not.
 				}
 				return array( 'lines' => $lines, 'allowed' => true, 'statement' => false, 'reassigns' => true );
 			}
