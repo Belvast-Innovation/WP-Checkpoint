@@ -603,11 +603,11 @@ final class FencedWritesTest extends TestCase {
 	}
 
 	public function test_the_scanner_finds_an_unregistered_write_and_the_rules_bite(): void {
-		$source = "<?php\n\$db->write( 'UPDATE t SET a = 1 WHERE n = ?', array( '1' ) );\n\$db->run( 'SET SESSION x = 1' );\n\$db->rows( 'SELECT 1' );\n\$db->rows( 'delete from t' );\n\$db->rows(\n\t'DELETE FROM t2'\n);\n\$r = \$db->rows( 'SELECT 1' ); \$db->write( 'UPDATE t3 SET b = 2', array() ); // \$db->run( 'DROP TABLE t' );\n\$x = \$db->rows( 'SELECT 1' ) ? \$db->write( 'DELETE FROM t4', array() ) : null;\n";
-		$this->assertSame( array( 2, 5, 6, 9, 10 ), array_column( self::writes( $source ), 'line' ), 'writes found (DML in lower case, on the line after the call, after a read on the line, in an expression), a setting, a read and a comment not' );
+		$source = "<?php\n\$db->write( 'UPDATE t SET a = 1 WHERE n = ?', array( '1' ) );\n\$db->run( 'SET SESSION x = 1' );\n\$db->rows( 'SELECT 1' );\n\$db->rows( 'delete from t' );\n\$db->rows(\n\t'DELETE FROM t2'\n);\n\$r = \$db->rows( 'SELECT 1' ); \$db->write( 'UPDATE t3 SET b = 2', array() ); // \$db->run( 'DROP TABLE t' );\n\$x = \$db->rows( 'SELECT 1' ) ? \$db->write( 'DELETE FROM t4', array() ) : null;\n\$db->write( 'UPDATE t5 SET c = 3', array() ); \$db->write( 'DELETE FROM t6', array() );\n";
+		$this->assertSame( array( 2, 5, 6, 9, 10, 11, 11 ), array_column( self::writes( $source ), 'line' ), 'writes found (DML in lower case, on the line after the call, after a read on the line, in an expression, two on one line), a setting, a read and a comment not' );
 		$this->assertSame( "\$db->write( 'UPDATE t3 SET b = 2', array() );", self::writes( $source )[3]['text'], 'a write\'s text: from its receiver to its semicolon' );
 		$this->assertSame( "\$db->write( 'DELETE FROM t4', array() ) : null;", self::writes( $source )[4]['text'], 'through the expression it is in, to the semicolon' );
-		$rest = array( array( 'delete from', self::EXCEPTION, 'r' ), array( 'DELETE FROM t2', self::EXCEPTION, 'r' ), array( 'UPDATE t3', self::EXCEPTION, 'r' ), array( 'DELETE FROM t4', self::EXCEPTION, 'r' ) );
+		$rest = array( array( 'delete from', self::EXCEPTION, 'r' ), array( 'DELETE FROM t2', self::EXCEPTION, 'r' ), array( 'UPDATE t3', self::EXCEPTION, 'r' ), array( 'DELETE FROM t4', self::EXCEPTION, 'r' ), array( 'UPDATE t5', self::EXCEPTION, 'r' ), array( 'DELETE FROM t6', self::EXCEPTION, 'r' ) );
 		$this->assertStringContainsString( 'not registered', implode( "\n", self::problems( 'x.php', $source, array() ) ) );
 		$this->assertStringContainsString( 'names neither lock_token nor the holder', implode( "\n", self::problems( 'x.php', $source, array_merge( array( array( 'SET a = 1', self::CONDITIONED ) ), $rest ) ) ) );
 		$one = array_merge( array( array( 'SET a = 1', self::LOCKED ) ), $rest );
