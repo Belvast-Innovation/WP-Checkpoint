@@ -24,7 +24,7 @@ defined( 'ABSPATH' ) || exit;
 final class Schema {
 
 	const OPTION  = StoredNames::DB_VERSION;
-	const CURRENT = 13;
+	const CURRENT = 14;
 
 	/**
 	 * Jobs table name without the prefix.
@@ -320,7 +320,8 @@ final class Schema {
 
 		if ( $current ) {
 			self::fence();
-			$problems = self::column_problems();
+			self::quietly( array( __CLASS__, 'jobs_table_innodb' ) ); // Best effort: the engine is a restore's need, not the schema's.
+			$problems = self::verified();
 			if ( null === $problems || array() === $problems ) {
 				// Nothing missing; unreadable columns are no evidence that something is (nor that it was fixed).
 				if ( array() === $problems ) {
@@ -328,8 +329,8 @@ final class Schema {
 				}
 				return $result( 'none' );
 			}
-			// Lost after the version was recorded (removed by hand, a table brought from elsewhere): the table
-			// in its current shape again. The version stays as it is either way.
+			// Lost after the version was recorded (removed by hand, a table brought from elsewhere): the table in its
+			// current shape again. The version stays as it is either way.
 			self::quietly( array( __CLASS__, 'create_jobs_table' ) );
 			$problems = self::verified();
 			if ( array() !== $problems ) {
@@ -540,6 +541,14 @@ final class Schema {
 				// closed it, and its heartbeat. Code of version 12 neither reads nor writes them, so min_compatible stays 1.
 				\WPCheckpoint\Jobs\UninstallFence::upgrade();
 				return 1;
+			case 14:
+				// The jobs table pinned to InnoDB (its definition, and a table an earlier version made under the server's
+				// default engine converted, best effort: the version is recorded either way, a restore refuses the table
+				// itself): a restore's run locks its job row before it writes outside it. Older code reads and writes the
+				// table as before, so min_compatible stays 1.
+				self::create_jobs_table();
+				self::jobs_table_innodb();
+				return 1;
 			case 10:
 				// Adds held_by (''); older code ignores it, so min_compatible stays 1. What older code does with the rows
 				// this version writes: it goes by storage_token alone, so a job another installation took over is run
@@ -586,8 +595,40 @@ final class Schema {
 			KEY status_locked (status,locked_until),
 			KEY type (type),
 			KEY created_at (created_at)
-		) {$collate};";
+		) ENGINE=InnoDB {$collate};";
 		dbDelta( $sql );
+	}
+
+	/**
+	 * The jobs table as InnoDB: a restore's run locks its job row (Restore\JobFence) and a locked read on another
+	 * engine holds nothing. A table made by an earlier version took the server's default engine. Nothing to do when
+	 * it is InnoDB already, or when the engine cannot be read. Best effort, as a restore-only need: an ALTER that is
+	 * refused does not hold the schema's version or any other job back (a restore refuses such a table at its
+	 * platform check, RestorePlatformStep, and says what to run); a verifying request that may upgrade (ensure( true )
+	 * from the page, activation, cron or WP-CLI: may_upgrade()) tries again.
+	 *
+	 * @return void
+	 */
+	private static function jobs_table_innodb(): void {
+		global $wpdb;
+		$engine = self::jobs_table_engine();
+		if ( null === $engine || 'innodb' === $engine ) {
+			return;
+		}
+		$table = $wpdb->base_prefix . self::JOBS_TABLE;
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix.
+		$wpdb->query( "ALTER TABLE {$table} ENGINE=InnoDB" );
+	}
+
+	/**
+	 * The jobs table's engine as the server names it, lower-cased, or null when it cannot be read.
+	 *
+	 * @return string|null
+	 */
+	public static function jobs_table_engine() {
+		global $wpdb;
+		$engine = strtolower( trim( (string) $wpdb->get_var( $wpdb->prepare( 'SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s', $wpdb->base_prefix . self::JOBS_TABLE ) ) ) );
+		return '' === $engine ? null : $engine;
 	}
 
 	/**

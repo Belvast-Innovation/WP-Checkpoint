@@ -152,8 +152,9 @@ final class JobContext {
 	 * @param callable|null        $lease           function( bool $force ): void; throws LockLost when the lease is gone (see should_stop(), confirm_lease()).
 	 * @param array<string, bool>  $facts           What the Runner knows about this run: cli (see is_cli()).
 	 * @param callable|null        $record          function( string $key, mixed $value ): void; throws LockLost when the lease is gone (see record()).
+	 * @param string               $token           The run's lock token ('' outside a run: lock_token() then refuses).
 	 */
-	public function __construct( Job $job, array $cursor, Budget $budget, Logger $logger, callable $clock, callable $memory, float $started_at, int $memory_limit, $checkpoint = null, $lease = null, array $facts = array(), $record = null ) {
+	public function __construct( Job $job, array $cursor, Budget $budget, Logger $logger, callable $clock, callable $memory, float $started_at, int $memory_limit, $checkpoint = null, $lease = null, array $facts = array(), $record = null, string $token = '' ) {
 		$this->job             = $job;
 		$this->cursor          = self::strip_reserved( $cursor );
 		$this->budget          = $budget;
@@ -168,6 +169,42 @@ final class JobContext {
 		$this->lease           = is_callable( $lease ) ? $lease : null;
 		$this->cli             = ! empty( $facts['cli'] );
 		$this->record          = is_callable( $record ) ? $record : null;
+		$this->token           = $token;
+	}
+
+	/**
+	 * The run's lock token ('' outside a run).
+	 *
+	 * @var string
+	 */
+	private $token;
+
+	/**
+	 * The token this run holds the job under, for a write outside the job row to be conditioned on (Restore\JobFence).
+	 *
+	 * @return string
+	 * @throws \LogicException Outside a run (no token): such a write has nothing to be conditioned on.
+	 */
+	public function lock_token(): string {
+		if ( '' === $this->token ) {
+			throw new \LogicException( 'No lock token: a fenced write can only be made during a run.' );
+		}
+		return $this->token;
+	}
+
+	/**
+	 * The job row and the run's token, for a write outside the job row to be conditioned on or locked under
+	 * (Restore\JobFence).
+	 *
+	 * @return array{table: string, id: int, token: string}
+	 * @throws \LogicException Outside a run.
+	 */
+	public function fence(): array {
+		return array(
+			'table' => JobRepository::table(),
+			'id'    => $this->job->id,
+			'token' => $this->lock_token(),
+		);
 	}
 
 	/**

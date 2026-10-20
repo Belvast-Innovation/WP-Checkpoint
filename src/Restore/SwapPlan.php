@@ -145,7 +145,9 @@ final class SwapPlan {
 	}
 
 	/**
-	 * Remove up to DELETE_ROWS rows of the job's attempts other than this one.
+	 * Remove up to DELETE_ROWS rows of the job's attempts other than this one. Not conditioned on holding the job:
+	 * the rows are of attempts no run reads any more (an attempt's number is new each time the check writes), so a
+	 * run that lost the job removes what the next one would.
 	 *
 	 * @param int $job_id  Job id.
 	 * @param int $attempt The attempt to keep.
@@ -156,37 +158,50 @@ final class SwapPlan {
 	}
 
 	/**
-	 * Write a batch of entries from a sequence number on, after removing what the attempt holds from there.
+	 * Write a batch of entries from a sequence number on, after removing what the attempt holds from there: in the
+	 * fenced transaction (JobFence::within(): its first statement locks the job row under the run's token), so a run
+	 * that lost the job writes nothing and a take-over waits for the batch.
 	 *
-	 * @param int                              $job_id  Job id.
-	 * @param int                              $attempt Attempt.
-	 * @param int                              $from    Sequence number of the first entry.
-	 * @param array<int, array<string, mixed>> $entries Entries: kind, live, stage, old, had_live.
+	 * @param int                                          $job_id  Job id.
+	 * @param int                                          $attempt Attempt.
+	 * @param int                                          $from    Sequence number of the first entry.
+	 * @param array<int, array<string, mixed>>             $entries Entries: kind, live, stage, old, had_live.
+	 * @param array{table: string, id: int, token: string} $fence   The job row and the run's token.
 	 * @return void
+	 * @throws \WPCheckpoint\Jobs\LockLost When the job is no longer this run's: nothing is written.
+	 * @throws \Throwable Whatever else stops a statement, after the transaction is rolled back.
 	 */
-	public function write( int $job_id, int $attempt, int $from, array $entries ): void {
-		$this->db->write( 'DELETE FROM ' . SqlWriter::identifier( $this->name ) . ' WHERE job_id = ? AND attempt = ? AND seq >= ?', array( (string) $job_id, (string) $attempt, (string) $from ) );
-		if ( array() === $entries ) {
-			return;
-		}
-		$values = array();
-		$params = array();
-		foreach ( array_values( $entries ) as $i => $entry ) {
-			$values[] = '(?, ?, ?, ?, ?, ?, ?, ?)';
-			array_push( $params, (string) $job_id, (string) $attempt, (string) ( $from + $i ), (string) $entry['kind'], (string) $entry['live'], (string) ( $entry['stage'] ?? '' ), (string) ( $entry['old'] ?? '' ), empty( $entry['had_live'] ) ? '0' : '1' );
-		}
-		$this->db->write( 'INSERT INTO ' . SqlWriter::identifier( $this->name ) . ' (job_id, attempt, seq, kind, live, stage, old, had_live) VALUES ' . implode( ', ', $values ), $params );
+	public function write( int $job_id, int $attempt, int $from, array $entries, array $fence ): void {
+		JobFence::within(
+			$this->db,
+			$fence,
+			function () use ( $job_id, $attempt, $from, $entries ): void {
+				JobFence::assert_locked( $this->db );
+				$this->db->write( 'DELETE FROM ' . SqlWriter::identifier( $this->name ) . ' WHERE job_id = ? AND attempt = ? AND seq >= ?', array( (string) $job_id, (string) $attempt, (string) $from ) );
+				if ( array() === $entries ) {
+					return;
+				}
+				$values = array();
+				$params = array();
+				foreach ( array_values( $entries ) as $i => $entry ) {
+					$values[] = '(?, ?, ?, ?, ?, ?, ?, ?)';
+					array_push( $params, (string) $job_id, (string) $attempt, (string) ( $from + $i ), (string) $entry['kind'], (string) $entry['live'], (string) ( $entry['stage'] ?? '' ), (string) ( $entry['old'] ?? '' ), empty( $entry['had_live'] ) ? '0' : '1' );
+				}
+				$this->db->write( 'INSERT INTO ' . SqlWriter::identifier( $this->name ) . ' (job_id, attempt, seq, kind, live, stage, old, had_live) VALUES ' . implode( ', ', $values ), $params );
+			}
+		);
 	}
 
 	/**
 	 * Close the plan: its COMPLETE row, after the entries (removing any row from there on first).
 	 *
-	 * @param int $job_id  Job id.
-	 * @param int $attempt Attempt.
-	 * @param int $count   Number of entries.
+	 * @param int                                          $job_id  Job id.
+	 * @param int                                          $attempt Attempt.
+	 * @param int                                          $count   Number of entries.
+	 * @param array{table: string, id: int, token: string} $fence   The job row and the run's token.
 	 * @return void
 	 */
-	public function complete( int $job_id, int $attempt, int $count ): void {
+	public function complete( int $job_id, int $attempt, int $count, array $fence ): void {
 		$this->write(
 			$job_id,
 			$attempt,
@@ -196,7 +211,8 @@ final class SwapPlan {
 					'kind' => self::COMPLETE,
 					'live' => (string) $count,
 				),
-			)
+			),
+			$fence
 		);
 	}
 

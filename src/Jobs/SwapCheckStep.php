@@ -15,6 +15,7 @@ use WPCheckpoint\Restore\ChunkWalk;
 use WPCheckpoint\Restore\ClaimLost;
 use WPCheckpoint\Restore\ImportSession;
 use WPCheckpoint\Restore\Ledger;
+use WPCheckpoint\Restore\StateCarry;
 use WPCheckpoint\Restore\Queries;
 use WPCheckpoint\Restore\RestoreFiles;
 use WPCheckpoint\Restore\SiteTables;
@@ -218,7 +219,9 @@ final class SwapCheckStep implements Step {
 				$this->sizes['rows'],
 				function ( string $point ): void {
 					$this->at( $point );
-				}
+				},
+				StateCarry::counted( self::base_prefix(), is_multisite() ? get_current_network_id() : 0 ),
+				$context->fence()
 			);
 			$slowest        = 0.0;
 			$budget         = (float) $context->budget()->seconds;
@@ -863,7 +866,7 @@ final class SwapCheckStep implements Step {
 				$batch[] = $entries[ $i ];
 				$bytes  += $size;
 			}
-			$swap->write( $job, $attempt, $from, $batch );
+			$swap->write( $job, $attempt, $from, $batch, $context->fence() );
 			$this->at( 'plan_batch' );
 			$cursor['seq'] = $from + count( $batch );
 			if ( (int) $cursor['seq'] >= count( $entries ) ) {
@@ -871,7 +874,7 @@ final class SwapCheckStep implements Step {
 			}
 			return $cursor;
 		}
-		$swap->complete( $job, $attempt, count( $entries ) );
+		$swap->complete( $job, $attempt, count( $entries ), $context->fence() );
 		$this->at( 'plan_complete' );
 		$finals = array();
 		foreach ( $run['plan']->tables() as $table ) {

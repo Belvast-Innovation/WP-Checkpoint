@@ -8,6 +8,7 @@
 namespace WPCheckpoint\Jobs;
 
 use WPCheckpoint\Restore\PlatformUnsupported;
+use WPCheckpoint\Support\Schema;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -37,11 +38,20 @@ final class RestorePlatformStep implements Step {
 	/**
 	 * Constructor.
 	 *
-	 * @param callable|null $platform function(): string in place of PHP_OS_FAMILY (tests).
+	 * @param callable|null $platform    function(): string in place of PHP_OS_FAMILY (tests).
+	 * @param callable|null $jobs_engine function(): string|null in place of Schema::jobs_table_engine() (tests).
 	 */
-	public function __construct( $platform = null ) {
-		$this->platform = $platform;
+	public function __construct( $platform = null, $jobs_engine = null ) {
+		$this->platform    = $platform;
+		$this->jobs_engine = $jobs_engine;
 	}
+
+	/**
+	 * The jobs table's engine (tests).
+	 *
+	 * @var callable|null
+	 */
+	private $jobs_engine;
 
 	/**
 	 * Step id.
@@ -64,6 +74,16 @@ final class RestorePlatformStep implements Step {
 		$family = null === $this->platform ? PHP_OS_FAMILY : (string) call_user_func( $this->platform );
 		if ( 'Windows' === $family ) {
 			throw new PlatformUnsupported( 'This version of WP Checkpoint cannot restore onto a Windows server yet. Backups and exports are not affected.' );
+		}
+		// The swap's writes are fenced on the job row (Restore\JobFence), which a locked read holds only on InnoDB:
+		// refused here, before anything is made, not at the first fenced write after the whole import.
+		$engine = null === $this->jobs_engine ? Schema::jobs_table_engine() : call_user_func( $this->jobs_engine );
+		if ( null === $engine ) {
+			throw new TransientFailure( 'The engine of the jobs table could not be read; the restore is tried again.' );
+		}
+		if ( 'innodb' !== $engine ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- the engine name from the server; the presenter cleans it.
+			throw new PlatformUnsupported( sprintf( 'The jobs table is %s, not InnoDB: a restore cannot lock its job row before it writes. Convert the table to InnoDB (ALTER TABLE ... ENGINE=InnoDB; the plugin tries that itself when its admin page loads), then start the restore again.', $engine ) );
 		}
 		return StepResult::done( __( 'This server can run a restore', 'wp-checkpoint' ) );
 	}

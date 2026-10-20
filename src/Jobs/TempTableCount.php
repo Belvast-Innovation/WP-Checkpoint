@@ -9,6 +9,8 @@ namespace WPCheckpoint\Jobs;
 
 use WPCheckpoint\Database\SqlWriter;
 use WPCheckpoint\Restore\Ledger;
+use WPCheckpoint\Restore\JobFence;
+use WPCheckpoint\Restore\StateCarry;
 use WPCheckpoint\Restore\Queries;
 use WPCheckpoint\Restore\RestoreFiles;
 use WPCheckpoint\Restore\TablePlan;
@@ -71,22 +73,50 @@ final class TempTableCount {
 	private $seam;
 
 	/**
+	 * The tables whose counts leave the plugin's own rows out (StateCarry::counted()): final name => how
+	 * StateCarry::own_names() reads the table.
+	 *
+	 * @var array<string, array{sitemeta: bool, site: string[]}>
+	 */
+	private $own;
+
+	/**
+	 * The plugin's own names found in a temporary table, by table, for this instance (a tick): the same names serve
+	 * every range of the table's count.
+	 *
+	 * @var array<string, string[]>
+	 */
+	private $names = array();
+
+	/**
+	 * The job row the count's one write is conditioned on: table, id, token (JobFence); empty for none (then the own
+	 * rows cannot be recorded: a table that needs them is a programming error, LogicException).
+	 *
+	 * @var array{table: string, id: int, token: string}|array{}
+	 */
+	private $fence;
+
+	/**
 	 * Constructor.
 	 *
-	 * @param Queries       $db     Connection.
-	 * @param TablePlan     $plan   The table plan.
-	 * @param Ledger        $ledger The ledger.
-	 * @param string        $work   Work directory.
-	 * @param int           $rows   Rows of a key counted per unit.
-	 * @param callable|null $seam   Crash seam (tests): called at "counted_whole" and "counted".
+	 * @param Queries                                              $db     Connection.
+	 * @param TablePlan                                            $plan   The table plan.
+	 * @param Ledger                                               $ledger The ledger.
+	 * @param string                                               $work   Work directory.
+	 * @param int                                                  $rows   Rows of a key counted per unit.
+	 * @param callable|null                                        $seam   Crash seam (tests): called at "counted_whole" and "counted".
+	 * @param array<string, array{sitemeta: bool, site: string[]}> $own    The tables counted without the plugin's own rows (StateCarry::counted()).
+	 * @param array{table: string, id: int, token: string}|array{} $fence  The job row the record of the own rows is conditioned on.
 	 */
-	public function __construct( Queries $db, TablePlan $plan, Ledger $ledger, string $work, int $rows, $seam = null ) {
+	public function __construct( Queries $db, TablePlan $plan, Ledger $ledger, string $work, int $rows, $seam = null, array $own = array(), array $fence = array() ) {
 		$this->db     = $db;
 		$this->plan   = $plan;
 		$this->ledger = $ledger;
 		$this->work   = $work;
 		$this->rows   = max( 1, $rows );
 		$this->seam   = is_callable( $seam ) ? $seam : null;
+		$this->own    = $own;
+		$this->fence  = $fence;
 	}
 
 	/**
@@ -99,11 +129,15 @@ final class TempTableCount {
 	 *                                                                      are counted (else those without).
 	 * @return array{position: array{i: int, key: array<int, string>|null, sum: int}, done: bool, unbounded: bool, what: string}
 	 * @throws WorkLost When a table holds other rows than the import recorded.
+	 * @throws TransientFailure When the ledger's record of the own rows, written by another run meanwhile, cannot be read back.
+	 * @throws LockLost When the job is no longer this run's: the record was refused and nothing was written.
+	 * @throws \LogicException When the counter was built without its fence and a table needs the own rows recorded.
 	 */
 	public function unit( array $cursor, bool $want ): array {
 		$db     = $this->db;
 		$tables = $this->plan->tables();
 		$total  = count( $tables );
+		$state  = null;
 		while ( (int) $cursor['i'] < $total ) {
 			$table = $tables[ (int) $cursor['i'] ];
 			$state = $this->ledger->get( (int) $table['number'] );
@@ -124,12 +158,50 @@ final class TempTableCount {
 		$name  = SqlWriter::identifier( $table['temporary'] );
 		$key   = self::key_columns( $db, $table['temporary'] );
 		// Rows the table prefix rewrite copied are above the highest key at its plan: counted are the imported ones.
-		$above = self::rewrite( $this->work )['above'][ $table['temporary'] ] ?? null;
-		$only  = null === $above ? '' : ' AND ' . SqlWriter::identifier( 'umeta_id' ) . ' <= ' . (int) $above;
+		$above  = self::rewrite( $this->work )['above'][ $table['temporary'] ] ?? null;
+		$only   = null === $above ? '' : ' AND ' . SqlWriter::identifier( 'umeta_id' ) . ' <= ' . (int) $above;
+		$params = array();
+		// The plugin's own rows of the options and sitemeta tables are not counted (the swap's carry writes them,
+		// whole or cut short): the same names the carry writes, from the same function. At the first count of such a
+		// table (before any carry) how many of them the import wrote is recorded, and taken off what is expected.
+		$owned = 0;
+		if ( isset( $this->own[ $table['table'] ] ) && null !== $state ) {
+			$how = $this->own[ $table['table'] ];
+			if ( ! isset( $this->names[ $table['temporary'] ] ) ) {
+				$this->names[ $table['temporary'] ] = StateCarry::own_names( $db, $table['temporary'], $how['sitemeta'], $how['site'] );
+			}
+			$names  = $this->names[ $table['temporary'] ];
+			$column = $how['sitemeta'] ? 'meta_key' : 'option_name';
+			$where  = array() === $how['site'] ? '' : 'site_id = ? AND ';
+			$marks  = implode( ', ', array_fill( 0, count( $names ), '?' ) );
+			$only  .= ' AND NOT (' . $where . $column . ' IN (' . $marks . '))';
+			$params = array_merge( $how['site'], $names );
+			$owned  = $state['owned'];
+			if ( $owned < 0 ) {
+				$owned = (int) ( $db->rows( 'SELECT COUNT(*) FROM ' . $name . ' WHERE ' . $where . $column . ' IN (' . $marks . ')', $params )[0][0] ?? 0 );
+				$this->at( 'own_counted' );
+				if ( array() === $this->fence ) {
+					throw new \LogicException( 'The own rows of a table cannot be recorded outside a run: the counter was built without its fence.' );
+				}
+				if ( ! $this->ledger->set_owned( (int) $table['number'], $owned, $this->fence['table'], $this->fence['id'], $this->fence['token'] ) ) {
+					// Not written: the job is no longer this run's (it stops here and writes nothing more), or the
+					// record was made meanwhile by another run counting the same table while this one still held
+					// the job (then what it recorded is what every count takes).
+					if ( ! JobFence::holds( $db, $this->fence['table'], $this->fence['id'], $this->fence['token'] ) ) {
+						throw new LockLost( sprintf( 'Job %d: the lock is no longer held; the count wrote nothing.', $this->fence['id'] ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+					}
+					$state = $this->ledger->get( (int) $table['number'] );
+					if ( null === $state || $state['owned'] < 0 ) {
+						throw new TransientFailure( 'The restore ledger\'s record of the table being counted could not be read back; the count is tried again.' );
+					}
+					$owned = $state['owned'];
+				}
+			}
+		}
 		if ( array() === $key ) {
-			$held = (int) ( $db->rows( 'SELECT COUNT(*) FROM ' . $name . ( '' === $only ? '' : ' WHERE 1 = 1' . $only ) )[0][0] ?? -1 );
+			$held = (int) ( $db->rows( 'SELECT COUNT(*) FROM ' . $name . ( '' === $only ? '' : ' WHERE 1 = 1' . $only ), $params )[0][0] ?? -1 );
 			$this->at( 'counted_whole' );
-			$this->counted( $table, $held );
+			$this->counted( $table, $held, $owned );
 			++$cursor['i'];
 			return array(
 				'position'  => $cursor,
@@ -148,14 +220,14 @@ final class TempTableCount {
 		$where   = null === $after ? '' : ' WHERE ' . $tuple . ' > ' . $marks;
 		$bound   = $db->rows( 'SELECT ' . implode( ', ', array_column( $key, 'select' ) ) . ' FROM ' . $name . $where . ' ORDER BY ' . $columns . ' LIMIT 1 OFFSET ' . ( $this->rows - 1 ), null === $after ? array() : $after );
 		if ( array() === $bound ) {
-			$last = (int) ( $db->rows( 'SELECT COUNT(*) FROM ' . $name . ( '' === $where ? ' WHERE 1 = 1' : $where ) . $only, null === $after ? array() : $after )[0][0] ?? -1 );
-			$this->counted( $table, (int) $cursor['sum'] + $last );
+			$last = (int) ( $db->rows( 'SELECT COUNT(*) FROM ' . $name . ( '' === $where ? ' WHERE 1 = 1' : $where ) . $only, array_merge( null === $after ? array() : $after, $params ) )[0][0] ?? -1 );
+			$this->counted( $table, (int) $cursor['sum'] + $last, $owned );
 			$cursor['i']   = (int) $cursor['i'] + 1;
 			$cursor['key'] = null;
 			$cursor['sum'] = 0;
 		} else {
 			$upper         = array_map( 'strval', $bound[0] );
-			$range         = (int) ( $db->rows( 'SELECT COUNT(*) FROM ' . $name . ( null === $after ? ' WHERE ' : $where . ' AND ' ) . $tuple . ' <= ' . $marks . $only, array_merge( null === $after ? array() : $after, $upper ) )[0][0] ?? -1 );
+			$range         = (int) ( $db->rows( 'SELECT COUNT(*) FROM ' . $name . ( null === $after ? ' WHERE ' : $where . ' AND ' ) . $tuple . ' <= ' . $marks . $only, array_merge( null === $after ? array() : $after, $upper, $params ) )[0][0] ?? -1 );
 			$cursor['key'] = $upper;
 			$cursor['sum'] = (int) $cursor['sum'] + $range;
 		}
@@ -171,14 +243,15 @@ final class TempTableCount {
 	 * A table's count against its record.
 	 *
 	 * @param array<string, mixed> $table The table.
-	 * @param int                  $held  Rows counted.
+	 * @param int                  $held  Rows counted (without the plugin's own rows, where they are left out).
+	 * @param int                  $owned The plugin's own rows the import wrote (0 where they are counted).
 	 * @return void
 	 * @throws WorkLost When they differ.
 	 */
-	private function counted( array $table, int $held ): void {
+	private function counted( array $table, int $held, int $owned = 0 ): void {
 		$state = $this->ledger->get( (int) $table['number'] );
-		// The import's rows, less what the prefix rewrite removed, and what the swap's carry added or removed.
-		$want = null === $state ? -1 : $state['rows'] - (int) ( self::rewrite( $this->work )['removed'][ $table['temporary'] ] ?? 0 ) + $state['carried'];
+		// The import's rows, less what the prefix rewrite removed and the plugin's own rows left out of the count.
+		$want = null === $state ? -1 : $state['rows'] - (int) ( self::rewrite( $this->work )['removed'][ $table['temporary'] ] ?? 0 ) - max( 0, $owned );
 		if ( $held !== $want ) {
 			throw new WorkLost( sprintf( 'The temporary table of %1$s holds %2$d rows where the restore left %3$d: it was changed after the import. Start the restore again.', $table['table'], $held, $want ) );
 		}

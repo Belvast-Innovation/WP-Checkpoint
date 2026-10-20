@@ -76,6 +76,15 @@ abstract class SwapTestCase extends RestoreTestCase {
 	protected $trace = '';
 
 	/**
+	 * The verdicts the step's "verify" part gives, in order (true: passed; a check id: failed), consumed one per
+	 * run that checks, in this process or in a killed child; empty: passed. Set swap_parts['verify'] to verdicts()
+	 * to use them.
+	 *
+	 * @var array<int, true|string>
+	 */
+	protected $verdicts = array();
+
+	/**
 	 * The installation the test's restore runs under, as the context of its Directories (an empty array: the
 	 * plugin's own). Its storage directory holds the backups and the restore's work, and its token is the job's:
 	 * the restore is created, run up to the swap and killed (in the child too) with that installation's jobs.
@@ -346,7 +355,12 @@ abstract class SwapTestCase extends RestoreTestCase {
 		$job     = $jobs->create( $this->type, self::$admin_id, array(), array_merge( array( 'base' => $base, 'exclude_tables' => $exclude ), $options ) );
 		$runner  = array() === $this->storage ? Plugin::instance()->runner() : new Runner( $jobs, Plugin::instance()->job_types(), new Redactor( Redactor::installation_secrets() ) );
 		for ( $i = 0; $i < 500; $i++ ) {
-			$result = $runner->tick( $job->id, microtime( true ) );
+			// Committed between ticks: the restore's connection fences its writes on the job row (Restore\JobFence).
+			$result = $this->autocommit(
+				static function () use ( $runner, $job ): TickResult {
+					return $runner->tick( $job->id, microtime( true ) );
+				}
+			);
 			$now    = Plugin::instance()->jobs()->find( $job->id );
 			if ( TickResult::CLI === $result->status || ! in_array( $now->status, array( Job::QUEUED, Job::RUNNING ), true ) ) {
 				break;
@@ -380,25 +394,6 @@ abstract class SwapTestCase extends RestoreTestCase {
 		);
 	}
 
-	/**
-	 * Run with the site's connection in autocommit, as in a WP-CLI process. The test framework keeps it in a
-	 * transaction, and every table it reads in one stays locked against a RENAME until it commits: the swap would
-	 * wait for the test's own connection.
-	 *
-	 * @template T
-	 * @param callable(): T $work Work.
-	 * @return T
-	 */
-	protected function autocommit( callable $work ) {
-		global $wpdb;
-		$wpdb->query( 'COMMIT' );
-		$wpdb->query( 'SET autocommit = 1' );
-		try {
-			return $work();
-		} finally {
-			$wpdb->query( 'SET autocommit = 0' );
-		}
-	}
 
 	/**
 	 * WP-CLI ticks until the job is no longer queued or running (or waits).
@@ -472,6 +467,34 @@ abstract class SwapTestCase extends RestoreTestCase {
 	 * @param int    $nth  Which time it is reached (1 = the first).
 	 * @return void
 	 */
+	/**
+	 * The "verify" part that gives the verdicts in order.
+	 *
+	 * @return callable
+	 */
+	protected function verdicts(): callable {
+		return function () {
+			$verdict = $this->next_verdict();
+			return 'pass' === $verdict ? true : $verdict;
+		};
+	}
+
+	/**
+	 * The next verdict, consumed: 'pass', or the id of the check that failed.
+	 */
+	protected function next_verdict(): string {
+		$verdict = array_shift( $this->verdicts );
+		return null === $verdict || true === $verdict ? 'pass' : (string) $verdict;
+	}
+
+	/**
+	 * The next verdict, not consumed (a killed child takes it only if it got as far as checking: killed_at()).
+	 */
+	protected function peek_verdict(): string {
+		$verdict = $this->verdicts[0] ?? null;
+		return null === $verdict || true === $verdict ? 'pass' : (string) $verdict;
+	}
+
 	protected function killed_at( Job $job, string $seam, int $nth = 1 ): void {
 		$this->assertTrue( function_exists( 'posix_kill' ), 'the crash tests need the posix extension (a process killed for real, not exit())' );
 		$GLOBALS['wpdb']->query( 'COMMIT' );
@@ -489,6 +512,7 @@ abstract class SwapTestCase extends RestoreTestCase {
 					'plugin'  => (string) ( $this->swap_parts['plugin'] ?? '' ),
 					'packet'  => (int) ( $this->swap_parts['packet'] ?? 0 ),
 					'batch'   => (int) ( $this->swap_parts['batch'] ?? 0 ),
+					'verify'  => isset( $this->swap_parts['verify'] ) ? $this->peek_verdict() : '',
 					'offset'  => $this->clock_offset,
 					'trace'   => $this->trace,
 					'sql_at'  => $this->child_sql,
@@ -507,6 +531,14 @@ abstract class SwapTestCase extends RestoreTestCase {
 		$this->assertContains( $status, array( 9, 137 ), 'killed by SIGKILL: ' . $text );
 		// The lease of the killed run is still there: as after a real crash, the next run takes over once it ran out.
 		$GLOBALS['wpdb']->query( $GLOBALS['wpdb']->prepare( 'UPDATE ' . \WPCheckpoint\Jobs\JobRepository::table() . ' SET locked_until = %d WHERE id = %d', time() - 1, $job->id ) );
+		// The killed run took the next verdict only if it got as far as checking: its trace says, so a test that
+		// gives verdicts must trace the child.
+		if ( isset( $this->swap_parts['verify'] ) ) {
+			$this->assertNotSame( '', $this->trace, 'a test that gives verdicts to a killed child must set a trace, which says whether the child checked' );
+			if ( in_array( 'verified', array_filter( explode( "\n", (string) file_get_contents( $this->trace ) ) ), true ) ) {
+				$this->next_verdict();
+			}
+		}
 	}
 
 	/**

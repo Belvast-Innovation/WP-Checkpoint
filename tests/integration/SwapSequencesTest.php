@@ -17,7 +17,9 @@ use WPCheckpoint\Tests\Fixtures\Restore\SwapTestCase;
  * - I1: while the next run may still rename anything (the swap or its rollback under way), this restore's file is
  *   held.
  * - I2: once the swap is recorded as made ("committed") or the site as put back ("restored"), no run renames
- *   anything again: only the end is left, whatever visitors did.
+ *   anything again: only the end is left, whatever visitors did. The one way out of "committed" is the reverse:
+ *   the direction recorded again ("reverse", at reverse_recorded) before the first rename back, and from then on
+ *   the runs only put the site back, through "restored" (I2 holds again) to the end; a reverse never goes forward.
  * - I3: a held file of this plugin is there only while a job that holds the site has something left to do and was
  *   not abandoned, and every WP-CLI command of the plugin says so.
  * - I4: a job that has ended (abandoned too) leaves none of its files held at the location it ended from.
@@ -31,6 +33,14 @@ use WPCheckpoint\Tests\Fixtures\Restore\SwapTestCase;
  * - I5: visitors' writes after the file was let go are kept where they wrote them.
  * - I6: whenever a held maintenance file of this plugin with mark M is there (at the site, or at a copy of it), its
  *   job's row already says M (Job::$site_mark): a held file nobody can tell as a job's would never come down.
+ *
+ * The reverse (REVERSE): the restored site fails its checks (the step's "verify" part, standing in for 4c-B's
+ * checks) and the swap made is swapped back out behind the held file: killed at each of its seams once, the finishing
+ * runs put the site back and the job ends failed (a retry would swap again), the site as it was. The verdict a
+ * finishing run would get is not the killed run's: a check that failed passes when asked again (as a real check may
+ * pass, or be unable to decide, the second time).
+ * - I7: once any run's check found the restored site broken (verify_failed), the job does not end with the restored
+ *   site in place: whatever the next run would find, the site ends as it was.
  *
  * Fixed: the seams in order, one sequence each (WPCHECKPOINT_SWAP_SEQUENCES more are drawn with
  * WPCHECKPOINT_SWAP_SEQUENCES_SEED). Every seam and every kind of interleaving must occur, counted where it happened.
@@ -50,6 +60,22 @@ final class SwapSequencesTest extends SwapTestCase {
 	 */
 	const JUDGE = array( 'judge_file_down', 'judge_recorded' );
 
+	/**
+	 * The seams of the reverse (the "verify" part fails: a run killed there once after the swap was made, the direction
+	 * recorded again and the site put back by the finishing runs). The first two are before the direction is recorded
+	 * (killed there, the next run verifies and reverses whole); the rest share the rollback's names.
+	 */
+	const REVERSE = array( 'flushed', 'verified', 'verify_failed', 'reverse_recorded', 'table_back', 'dir_back', 'dirs_back', 'restored', 'unheld', 'reverted', 'maintenance_down' );
+
+	/** The seam after a failed verdict was recorded, before the direction is (I7 starts there). */
+	const FAILED = 'verify_failed';
+
+	/**
+	 * The seam where the carry holds the job row and has written nothing yet (Restore\JobFence): a forward seam, kept
+	 * after the others so that the interleavings' turn (MEANWHILE) still meets the seams it was laid out for.
+	 */
+	const LOCKED = array( 'carry_locked' );
+
 	/** The renames a killed run makes, by the seam right after each. */
 	const RENAMED = array( 'dir_aside', 'dir_in', 'batch_sent', 'table_back', 'dir_back' );
 
@@ -68,8 +94,11 @@ final class SwapSequencesTest extends SwapTestCase {
 	/** The seams that record the direction (I2: nothing that renames after them, in the same run or later). */
 	const DECIDING = array( 'committed', 'restored' );
 
+	/** The seam that records the direction again, back: renames follow it (I2 starts over at "restored"). */
+	const REVERSING = 'reverse_recorded';
+
 	/** Seams of a run that renames something (or is about to). */
-	const RENAMING = array( 'entered', 'maintenance', 'dir_aside', 'dir_aside_recorded', 'dir_in', 'carry_written', 'carried', 'batch_recorded', 'batch_sent', 'rollback', 'table_back', 'dir_back', 'dirs_back' );
+	const RENAMING = array( 'entered', 'maintenance', 'dir_aside', 'dir_aside_recorded', 'dir_in', 'carry_locked', 'carry_written', 'carried', 'batch_recorded', 'batch_sent', 'rollback', 'reverse_recorded', 'table_back', 'dir_back', 'dirs_back' );
 
 	/**
 	 * What happens meanwhile, given out in turn (in this order, so that every kind meets a seam where it has an
@@ -101,22 +130,37 @@ final class SwapSequencesTest extends SwapTestCase {
 		$this->assertSame( 'table_back', self::renamed_after_decision( array( 'table_back' ), true ), 'in a run after one that recorded it' );
 		$this->assertSame( '', self::renamed_after_decision( array( 'dir_in', 'batch_sent', 'committed', 'flushed', 'unheld_commit' ) ), 'the control: renames before it are fine' );
 		$this->assertSame( '', self::renamed_after_decision( array( 'table_back', 'dir_back', 'restored', 'unheld' ) ) );
+		$this->assertSame( 'table_back', self::renamed_after_decision( array( 'committed', 'flushed', 'verified', 'table_back' ) ), 'a rename after committed without the direction recorded back' );
+		$this->assertSame( '', self::renamed_after_decision( array( 'committed', 'flushed', 'verified', 'reverse_recorded', 'table_back', 'dir_back', 'restored', 'unheld' ) ), 'the reverse: recorded, then the renames back, then restored' );
+		$this->assertSame( 'table_back', self::renamed_after_decision( array( 'reverse_recorded', 'table_back', 'restored', 'table_back' ) ), 'and nothing after restored' );
+		$this->assertSame( '', self::renamed_after_decision( array( 'table_back', 'dir_back' ), false ), 'a run after one that recorded the reverse' );
 	}
 
 	public function test_every_seam_and_every_interleaving_keeps_the_invariants(): void {
-		$count = max( 1, (int) ( getenv( 'WPCHECKPOINT_SWAP_SEQUENCES' ) ?: 26 ) );
+		$count = max( 1, (int) ( getenv( 'WPCHECKPOINT_SWAP_SEQUENCES' ) ?: 38 ) );
 		$seed  = (int) ( getenv( 'WPCHECKPOINT_SWAP_SEQUENCES_SEED' ) ?: 1 );
-		$seams = array_merge( self::FORWARD, self::BACKWARD, self::JUDGE );
-		$this->assertSame( 26, count( $seams ), 'the default count is one sequence per seam' );
+		// A seam with its path: the rollback's and the reverse's share names.
+		$seams = array();
+		foreach ( array_merge( self::FORWARD, self::BACKWARD, self::JUDGE, self::LOCKED ) as $seam ) {
+			$seams[] = array( '', $seam );
+		}
+		foreach ( self::REVERSE as $seam ) {
+			$seams[] = array( 'reverse', $seam );
+		}
+		$this->assertSame( 38, count( $seams ), 'the default count is one sequence per seam' );
 		$this->held_checks = array_fill_keys( self::AT_RENAME, 0 );
 		mt_srand( $seed );
-		$killed = array_fill_keys( $seams, 0 );
-		$kinds  = array_fill_keys( array_merge( self::MEANWHILE, array( 'visitor' ), array_column( self::ELSEWHERE, 1 ) ), 0 );
+		$killed = array();
+		foreach ( $seams as $at ) {
+			$killed[ ( '' === $at[0] ? '' : $at[0] . ':' ) . $at[1] ] = 0;
+		}
+		$kinds = array_fill_keys( array_merge( self::MEANWHILE, array( 'visitor' ), array_column( self::ELSEWHERE, 1 ) ), 0 );
 		for ( $n = 0; $n < $count + count( self::ELSEWHERE ); $n++ ) {
-			$seam  = $n < count( $seams ) ? $seams[ $n ] : ( $n < $count ? $seams[ mt_rand( 0, count( $seams ) - 1 ) ] : self::ELSEWHERE[ $n - $count ][0] );
+			$at    = $n < count( $seams ) ? $seams[ $n ] : ( $n < $count ? $seams[ mt_rand( 0, count( $seams ) - 1 ) ] : array( '', self::ELSEWHERE[ $n - $count ][0] ) );
+			$seam  = $at[1];
 			$kind  = $n < $count ? self::MEANWHILE[ $n % count( self::MEANWHILE ) ] : self::ELSEWHERE[ $n - $count ][1];
-			$label = sprintf( '#%d %s/%s', $n, $seam, $kind );
-			$this->sequence( $seam, $kind, $label, $killed, $kinds );
+			$label = sprintf( '#%d %s%s/%s', $n, '' === $at[0] ? '' : $at[0] . ':', $seam, $kind );
+			$this->sequence( $seam, $kind, $label, $killed, $kinds, 'reverse' === $at[0] );
 			$this->release_backups();
 			$this->tear_down_swap();
 			$this->set_up_swap();
@@ -142,18 +186,29 @@ final class SwapSequencesTest extends SwapTestCase {
 	 * @param string             $label  For the messages.
 	 * @param array<string, int> $killed Kills per seam (counted where they happened).
 	 * @param array<string, int> $kinds  Interleavings per kind (counted where they happened).
+	 * @param bool               $reverse Whether the seam is one of the reverse's (the restored site fails its checks).
 	 * @return void
 	 */
-	private function sequence( string $seam, string $kind, string $label, array &$killed, array &$kinds ): void {
+	private function sequence( string $seam, string $kind, string $label, array &$killed, array &$kinds, bool $reverse = false ): void {
 		global $wpdb;
 		$this->swap_parts['batch'] = 1; // A batch per table: a run can be killed between two.
+		if ( $reverse ) {
+			// The first check fails (the home page), every later one passes: the recorded verdict must decide, not a
+			// later check. A run killed right after checking and before its verdict is recorded ("verified") lost it:
+			// the next run checks again, and that check fails too (it is the first one recorded).
+			$this->verdicts             = 'verified' === $seam ? array( 'home', 'home', true, true, true, true, true, true ) : array( 'home', true, true, true, true, true, true, true );
+			$this->swap_parts['verify'] = $this->verdicts();
+		} else {
+			$this->verdicts = array();
+			unset( $this->swap_parts['verify'] );
+		}
 		$this->register_type();
 		$this->trace = $this->sandbox . '/trace';
 		$job         = $this->at_swap();
 		$before      = $this->site();
 		$decided     = '';
 		$public      = false;
-		if ( in_array( $seam, self::BACKWARD, true ) ) {
+		if ( ! $reverse && in_array( $seam, self::BACKWARD, true ) ) {
 			// Some tables swapped, the rest not: the next run rolls back.
 			$this->killed_at( $job, 'batch_sent', 1 );
 			$this->observe( $job, $label . ' (between batches)', $decided, $public );
@@ -171,7 +226,15 @@ final class SwapSequencesTest extends SwapTestCase {
 		$this->killed_at( $job, $seam, 1 );
 		$passed = array_values( array_filter( explode( "\n", (string) file_get_contents( $this->trace ) ) ) );
 		$this->assertSame( $seam, end( $passed ), $label . ': the run died at its seam' );
-		++$killed[ $seam ];
+		++$killed[ ( $reverse ? 'reverse:' : '' ) . $seam ];
+		if ( $reverse && in_array( $seam, array_slice( self::REVERSE, 3 ), true ) ) {
+			$this->assertContains( 'committed', $passed, $label . ': the control, the swap was made before it was reversed' );
+			$this->assertContains( self::REVERSING, $passed, $label . ': the control, the reverse was recorded' );
+		}
+		if ( $reverse && self::FAILED === $seam ) {
+			$this->assertNotContains( self::REVERSING, $passed, $label . ': the control, killed after the verdict and before the direction' );
+			$this->assertSame( 'failed', Plugin::instance()->jobs()->find( $job->id )->cursor['verdict'] ?? '', $label . ': the control, the verdict is recorded' );
+		}
 		$this->child_sql = array();
 		if ( in_array( $seam, self::JUDGE, true ) ) {
 			$this->assertSame( array(), array_values( array_intersect( $passed, self::RENAMED ) ), $label . ': judged otherwise once the file was up, nothing renamed' );
@@ -349,6 +412,24 @@ final class SwapSequencesTest extends SwapTestCase {
 			++$kinds['file_removed']; // The file was gone when the rollback had tables to put back (checked held there).
 		}
 		$this->assertNotContains( $done->status, array( Job::QUEUED, Job::RUNNING ), $label . ': ended' );
+		if ( $reverse ) {
+			// The swap was made and reversed: the job ends failed (a retry would swap again), unless a cancel was taken.
+			$this->assertContains( self::REVERSING, array_merge( $passed, $runs ), $label . ': the control, the reverse was recorded (by the killed run or a finishing one)' );
+			if ( ! $cancelled ) {
+				$this->assertSame( Job::FAILED, $done->status, $label . ': reversed, the job ends failed (' . $done->last_error . ')' );
+				$this->assertTrue( $done->retry_useful(), $label . ': and may be retried' );
+				$this->assertStringContainsString( 'found it broken', (string) $done->last_error, $label );
+				$this->assertStringContainsString( 'the home page', (string) $done->last_error, $label . ': the check that failed is named' );
+			}
+		}
+		// I7: a check that found the site broken decides, whatever a later check would say.
+		$failed_once = in_array( self::FAILED, array_merge( $passed, $runs ), true );
+		if ( $reverse ) {
+			$this->assertTrue( $failed_once, $label . ': the control, a check failed in this sequence' );
+		}
+		if ( $failed_once ) {
+			$this->assertNotSame( Job::COMPLETED, $done->status, $label . ': I7, a site found broken does not stay in place (' . $done->last_error . ')' );
+		}
 		if ( 'elsewhere_retry' === $kind ) {
 			$this->assertNotNull( $at_retry, $label . ': the control, it was retried' );
 			$this->assertSame( Job::COMPLETED, $done->status, $label . ': the retry ran to the end (' . $done->last_error . ')' );
@@ -633,7 +714,7 @@ final class SwapSequencesTest extends SwapTestCase {
 		$mark  = (string) ( $now->cursor['mark'] ?? '' );
 		$file  = '' === $mark ? null : new Maintenance( $this->abspath, $mark );
 		$held  = null !== $file && $file->is_held();
-		if ( in_array( $phase, array( 'dirs', 'carry', 'rename', 'rollback' ), true ) ) {
+		if ( in_array( $phase, array( 'dirs', 'carry', 'rename', 'rollback', 'reverse' ), true ) ) {
 			$this->assertTrue( $held, $label . ': I1, the file is held while the next run may rename (' . $phase . ')' );
 		}
 		if ( Maintenance::held_in( $this->abspath ) ) {
@@ -644,6 +725,8 @@ final class SwapSequencesTest extends SwapTestCase {
 			$decided = 'committed';
 		} elseif ( in_array( $phase, array( 'restored', 'reverted' ), true ) ) {
 			$decided = 'restored';
+		} elseif ( 'reverse' === $phase ) {
+			$decided = ''; // Recorded as being swapped back out: the next runs rename back (I2 starts over at "restored").
 		}
 		if ( '' !== $decided && null !== $file && ! $held ) {
 			$public = true;
@@ -662,6 +745,8 @@ final class SwapSequencesTest extends SwapTestCase {
 		foreach ( $passed as $point ) {
 			if ( in_array( $point, self::DECIDING, true ) ) {
 				$decided = true;
+			} elseif ( self::REVERSING === $point ) {
+				$decided = false; // The direction recorded again: the renames back follow.
 			} elseif ( $decided && in_array( $point, self::RENAMING, true ) ) {
 				return $point;
 			}

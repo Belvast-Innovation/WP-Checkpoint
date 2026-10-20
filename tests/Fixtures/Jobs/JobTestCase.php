@@ -105,6 +105,26 @@ abstract class JobTestCase extends WP_UnitTestCase {
 	}
 
 	/**
+	 * Run with the site's connection in autocommit, as in a WP-CLI process. The test framework keeps it in a
+	 * transaction: every table it reads in one stays locked against a RENAME until it commits, and the job row it
+	 * wrote stays locked against the restore's connection, which locks that row before it writes (JobFence).
+	 *
+	 * @template T
+	 * @param callable(): T $work Work.
+	 * @return T
+	 */
+	protected function autocommit( callable $work ) {
+		global $wpdb;
+		$wpdb->query( 'COMMIT' );
+		$wpdb->query( 'SET autocommit = 1' );
+		try {
+			return $work();
+		} finally {
+			$wpdb->query( 'SET autocommit = 0' );
+		}
+	}
+
+	/**
 	 * Register a fixture type on the plugin's registry, for this test only.
 	 */
 	protected function register( string $id, array $steps ): void {

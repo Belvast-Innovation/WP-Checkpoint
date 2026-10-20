@@ -315,10 +315,17 @@ abstract class RestoreTestCase extends JobTestCase {
 				$GLOBALS['wpdb']->query( 'COMMIT' );
 				return $now;
 			}
-			$runner->tick( $job->id, microtime( true ) );
+			// As WP-CLI drives it: the job row committed between ticks, so the restore's own connection, which fences
+			// its writes on that row (Restore\JobFence), does not wait for the test's transaction.
+			$this->autocommit(
+				static function () use ( $runner, $job ): void {
+					$runner->tick( $job->id, microtime( true ) );
+				}
+			);
 		}
 		$this->fail( 'the restore did not end' );
 	}
+
 
 	/**
 	 * A runner whose clock moves on at every look, so each tick does a statement or two.

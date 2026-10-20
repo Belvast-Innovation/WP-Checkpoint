@@ -103,6 +103,24 @@ final class SwapCheckTest extends RestoreTestCase {
 		return $ran;
 	}
 
+	/**
+	 * Rows of the plan as an earlier attempt (1) left them, written straight in: that attempt's run is gone, and the
+	 * plan's own writer is fenced on a run's token (Restore\JobFence).
+	 *
+	 * @param array<int, array<string, mixed>> $old Entries.
+	 */
+	private function leftover( Job $job, array $old ): void {
+		global $wpdb;
+		$this->plan();
+		$table = $wpdb->base_prefix . SwapPlan::TABLE;
+		$seq   = 0;
+		foreach ( $old as $entry ) {
+			$this->assertNotFalse( $wpdb->query( $wpdb->prepare( "INSERT INTO `{$table}` (job_id, attempt, seq, kind, live, stage, old, had_live) VALUES (%d, 1, %d, %s, %s, %s, %s, %d)", $job->id, $seq++, (string) $entry['kind'], (string) $entry['live'], (string) ( $entry['stage'] ?? '' ), (string) ( $entry['old'] ?? '' ), empty( $entry['had_live'] ) ? 0 : 1 ) ), $wpdb->last_error );
+		}
+		$this->assertNotFalse( $wpdb->query( $wpdb->prepare( "INSERT INTO `{$table}` (job_id, attempt, seq, kind, live, stage, old, had_live) VALUES (%d, 1, %d, %s, %s, '', '', 0)", $job->id, $seq, SwapPlan::COMPLETE, (string) count( $old ) ) ), $wpdb->last_error );
+		$wpdb->query( 'COMMIT' );
+	}
+
 	private function plan(): SwapPlan {
 		global $wpdb;
 		if ( null === $this->db ) {
@@ -765,10 +783,15 @@ final class SwapCheckTest extends RestoreTestCase {
 			if ( ! in_array( $job->status, array( Job::QUEUED, Job::RUNNING ), true ) ) {
 				break;
 			}
-			$runner->tick( $job->id, $now );
+			// Committed between ticks: the check fences its writes on the job row (Restore\JobFence).
+			$this->autocommit(
+				static function () use ( $runner, $job, &$now ): void {
+					$runner->tick( $job->id, $now );
+				}
+			);
 		}
 		$wpdb->query( 'COMMIT' );
-		$this->assertTrue( $once, 'the control: the slow unit ran' );
+		$this->assertTrue( $once, 'the control: the slow unit ran (' . $job->status . ': ' . $job->last_error . ')' );
 		if ( $passes ) {
 			$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
 			return;
@@ -791,8 +814,7 @@ final class SwapCheckTest extends RestoreTestCase {
 				'old'  => 'wcpold_left_over',
 			),
 		);
-		$this->plan()->write( $job->id, 1, 0, $old );
-		$this->plan()->complete( $job->id, 1, 1 );
+		$this->leftover( $job, $old );
 		$job = $this->run_restore( $job );
 		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
 		$file = json_decode( (string) file_get_contents( RestoreFiles::path( $this->work( $job ), RestoreFiles::SWAP_PLAN ) ), true );
@@ -801,8 +823,7 @@ final class SwapCheckTest extends RestoreTestCase {
 		$count = count( $this->entries( $job ) );
 
 		// A leftover written after the plan (a stale run): the plan as the swap reads it is still only this one.
-		$this->plan()->write( $job->id, 1, 0, $old );
-		$this->plan()->complete( $job->id, 1, 1 );
+		$this->leftover( $job, $old );
 		$this->assertCount( $count, $this->entries( $job ) );
 		$this->assertNotContains( 'left_over_table', array_column( $this->entries( $job ), 1 ) );
 	}

@@ -95,7 +95,7 @@ final class RestoreRetryReclaimTest extends SwapTestCase {
 		$units = array();
 		for ( $i = 0; $i < 2000; $i++ ) {
 			$was    = Plugin::instance()->jobs()->find( $job->id );
-			$result = $runner->tick( $job->id, microtime( true ) - 3600 );
+			$result = $this->autocommit( static function () use ( $runner, $job ) { return $runner->tick( $job->id, microtime( true ) - 3600 ); } );
 			$now    = Plugin::instance()->jobs()->find( $job->id );
 			if ( RestorePreflightStep::ID === $now->step && 'reclaim' === ( $now->cursor['phase'] ?? '' ) ) {
 				$units[] = (int) $now->cursor['units'];
@@ -273,7 +273,7 @@ final class RestoreRetryReclaimTest extends SwapTestCase {
 			);
 			$reached = false;
 			for ( $i = 0; $i < 200; $i++ ) {
-				$runner->tick( $job->id, microtime( true ) - 3600 );
+				$this->autocommit( static function () use ( $runner, $job ) { return $runner->tick( $job->id, microtime( true ) - 3600 ); } );
 				$state = Plugin::instance()->jobs()->find( $job->id );
 				if ( $added && ( RestorePreflightStep::ID !== $state->step || 'reclaim' !== ( $state->cursor['phase'] ?? '' ) ) ) {
 					$reached = true; // Past the reclaim.
@@ -334,7 +334,7 @@ final class RestoreRetryReclaimTest extends SwapTestCase {
 			$runner = Plugin::instance()->runner();
 			$result = null;
 			for ( $i = 0; $i < 200 && $seen < $n; $i++ ) {
-				$result = $runner->tick( $job->id, microtime( true ) );
+				$result = $this->autocommit( static function () use ( $runner, $job ) { return $runner->tick( $job->id, microtime( true ) ); } );
 			}
 			$this->assertSame( $n, $seen, "the control: the run reached deletion {$n}" );
 			$this->assertSame( TickResult::LOST, null !== $result ? $result->status : null, "taken over before deletion {$n}" );
@@ -390,7 +390,7 @@ final class RestoreRetryReclaimTest extends SwapTestCase {
 			$this->retype( $job );
 			$runner = Plugin::instance()->runner();
 			for ( $i = 0; $i < 200 && $seen < $n; $i++ ) {
-				$result = $runner->tick( $job->id, microtime( true ) );
+				$result = $this->autocommit( static function () use ( $runner, $job ) { return $runner->tick( $job->id, microtime( true ) ); } );
 			}
 			$this->assertSame( $n, $seen, "the control: the run reached deletion {$n}" );
 			$this->assertSame( TickResult::LOST, $result->status, "stopped before deletion {$n}" );
