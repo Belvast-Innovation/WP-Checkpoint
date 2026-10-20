@@ -230,6 +230,21 @@ final class CarryFenceTest extends SwapTestCase {
 			$this->assertStringContainsString( 'not taken', $e->getMessage() );
 		}
 		$this->assertSame( $before, $holders(), 'no holder changed' );
+		// No token at all (a context outside a run) is refused before any statement, as JobFence::within() refuses
+		// it: a released row stores an empty token, which a join on it would match.
+		foreach ( array( 'take_all', 'set_owned' ) as $write ) {
+			try {
+				if ( 'take_all' === $write ) {
+					$ledger->take_all( array( 'table' => JobRepository::table(), 'id' => $held['job']->id, 'token' => '' ) );
+				} else {
+					$ledger->set_owned( (int) $before[0]['n'], 1, JobRepository::table(), $held['job']->id, '' );
+				}
+				$this->fail( "$write under no token went through" );
+			} catch ( LockLost $e ) {
+				$this->assertStringContainsString( 'no lock token', $e->getMessage(), $write );
+			}
+		}
+		$this->assertSame( $before, $holders(), 'no holder changed under no token' );
 		// The control: under the new token every record is taken, and taking again is nothing to do, not a lost lock.
 		$fresh = Plugin::instance()->jobs()->find( $held['job']->id );
 		$fence = array( 'table' => JobRepository::table(), 'id' => $fresh->id, 'token' => $fresh->lock_token );
