@@ -113,6 +113,33 @@ jobs:
       - run: composer install --no-interaction --no-progress --prefer-dist
       - run: php tests/extractors/check.php ${{ matrix.tools }}
 
+      # The positive control of the Windows bsdtar known difference (check.php: windows_bsdtar_difference()): a copy
+      # of the script that treats one name the code page can represent as unrepresentable must fail, because
+      # bsdtar extracts that name. Run against the real tar of this runner, whichever libarchive it carries: with a
+      # bsdtar before 3.8.6 the difference does not apply and the copy is reported as such.
+      - name: Positive control of the known difference (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $source = Get-Content -Raw tests/extractors/check.php
+          $old = 'return null === $back ? false : $back === $name;'
+          $new = 'return null === $back ? false : ( $back === $name && false === strpos( $name, "caf" ) );'
+          if (([regex]::Matches($source, [regex]::Escape($old))).Count -ne 1) { throw 'the line to mutate is not there exactly once' }
+          New-Item -ItemType Directory -Force -Path build | Out-Null
+          [IO.File]::WriteAllText('build/check-mutated.php', $source.Replace($old, $new).Replace("dirname( __DIR__, 2 )", "'" + (Get-Location).Path.Replace('\', '/') + "'"), (New-Object Text.UTF8Encoding $false))
+          $version = (& C:\Windows\System32\tar.exe --version) -join ' '
+          Write-Host "tar: $version"
+          $out = & php build/check-mutated.php bsdtar 2>&1 | Out-String
+          Write-Host $out
+          if ($version -match 'libarchive (\d+\.\d+\.\d+)' -and [version]$Matches[1] -ge [version]'3.8.6') {
+            if ($LASTEXITCODE -ne 1) { throw "the mutated copy exited $LASTEXITCODE, not 1: the known-difference rule did not bite" }
+            if ($out -notmatch 'no longer occurs: unexpected name: caf') { throw 'the mutated copy did not report the representable name as extracted' }
+            Write-Host 'control ok: a representable name treated as skipped is caught'
+          } else {
+            if ($LASTEXITCODE -ne 0) { throw "with libarchive below 3.8.6 the difference does not apply; the copy exited $LASTEXITCODE" }
+            Write-Host 'control not applicable on this tar (before 3.8.6): the strict comparison ran and passed'
+          }
+
   integration:
     name: Integration (wp-env, PHP ${{ matrix.php }})
     runs-on: ubuntu-latest
