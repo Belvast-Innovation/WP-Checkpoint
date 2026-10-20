@@ -25,11 +25,12 @@ use Yoast\PHPUnitPolyfills\TestCases\TestCase;
  * statements on a line), the class is the one resolved against the file's namespace and imports as PHP resolves it
  * (imported, fully qualified, aliased, grouped, in any case, in order; another class's within() is not a fence),
  * an arrow function's parameters are skipped, and a closure nested in a function asserts the lock for itself, not
- * for the function around it. The fence is a transaction on the restore's own connection (ImportSession): a write
- * on WordPress's connection ($wpdb, however reached) is never inside it, so it can be neither locked nor allowed
- * in a region. A call named update(), insert(), delete() or replace() on any other object is recorded too: it is
- * refused in a region and must be registered (an exception with the reason when it is not a statement), since a
- * connection held under another name cannot be told apart from an object that is not one. The regexes left are on
+ * for the function around it. The fence is a transaction on the restore's own connection (ImportSession), which
+ * the fenced code holds as $db or $this->db (CONNECTIONS): a call on any other receiver (WordPress's $wpdb however
+ * reached, another object, the connection under another name) is not on the fenced connection, so it can be
+ * neither locked nor allowed in a region; the rule names what is, not what is not. A call named update(),
+ * insert(), delete() or replace() on any object is recorded too: it must be registered (an exception with the
+ * reason when it is not a statement). The regexes left are on
  * a literal's first characters only, and a regex that fails refuses. Fixed examples show each rule biting; a
  * generator builds sources with known regions and calls, in every one of these shapes, and checks that exactly the
  * violating lines are reported.
@@ -59,7 +60,10 @@ final class FencedWritesTest extends TestCase {
 	const METHODS    = array( 'write', 'run', 'rows', 'query', 'update', 'insert', 'delete', 'replace' );
 	const BUILDS_DML = array( 'update', 'insert', 'delete', 'replace' );
 
-	const NOT_ALLOWED = 'inside a fenced transaction, a call that is not an allowed one: on the fenced connection, a literal beginning with SELECT / SHOW / DELETE / INSERT / UPDATE / REPLACE (anything else, DDL, LOCK TABLES, COMMIT, FLUSH, a statement built at run time, may end the transaction and release the job row, and nothing after it is fenced); a call on WordPress\'s connection ($wpdb) or another object is not on the fenced connection at all, so it is no fenced write (its reads through query() are refused with it; get_var() and the like are not looked at)';
+	/** The receivers the fenced code holds the fenced connection as: the only ones a fenced write can be on. */
+	const CONNECTIONS = array( '$db', '$this->db' );
+
+	const NOT_ALLOWED = 'inside a fenced transaction, a call that is not an allowed one: on the fenced connection ($db, $this->db), by write(), run(), rows() or query(), a literal beginning with SELECT / SHOW / DELETE / INSERT / UPDATE / REPLACE (anything else, DDL, LOCK TABLES, COMMIT, FLUSH, a statement built at run time, may end the transaction and release the job row, and nothing after it is fenced); a call on any other receiver (WordPress\'s $wpdb however reached, another object) is not on the fenced connection at all, so it is no fenced write';
 	const NOT_CLOSURE = 'JobFence::within() is not given a closure (function () { ... }): its statements cannot be examined';
 
 	/** Sources the generator builds per run. */
@@ -395,9 +399,16 @@ final class FencedWritesTest extends TestCase {
 				$method = strtolower( (string) $tokens[ $next( $k ) ][1] );
 				$start  = $k;
 				for ( $j = $prev( $k ); $j >= 0; $j = $prev( $j ) ) {
-					if ( ']' === $tokens[ $j ] || ')' === $tokens[ $j ] ) {
+					if ( ']' === $tokens[ $j ] ) {
 						$j = $open_of( $j );
-					} elseif ( ! ( self::is( $tokens[ $j ], T_VARIABLE ) || self::is( $tokens[ $j ], T_STRING ) || self::is( $tokens[ $j ], T_OBJECT_OPERATOR ) || self::is( $tokens[ $j ], T_DOUBLE_COLON ) ) ) {
+					} elseif ( ')' === $tokens[ $j ] ) { // A call's result, when what precedes its ( names the call; a control structure's parentheses are not a receiver.
+						$open   = $open_of( $j );
+						$before = $open > 0 ? $tokens[ $prev( $open ) ] : null;
+						if ( ! ( self::is( $before, T_STRING ) || self::is( $before, T_VARIABLE ) || self::is( $before, T_OBJECT_OPERATOR ) || self::is( $before, T_DOUBLE_COLON ) || ( is_array( $before ) && in_array( $before[0], $name_ids, true ) ) ) ) {
+							break;
+						}
+						$j = $open;
+					} elseif ( ! ( self::is( $tokens[ $j ], T_VARIABLE ) || self::is( $tokens[ $j ], T_STRING ) || self::is( $tokens[ $j ], T_OBJECT_OPERATOR ) || self::is( $tokens[ $j ], T_DOUBLE_COLON ) || in_array( $tokens[ $j ][0] ?? 0, $name_ids, true ) ) ) {
 						break;
 					}
 					$start = $j;
@@ -489,19 +500,6 @@ final class FencedWritesTest extends TestCase {
 	}
 
 	/**
-	 * Whether a receiver is WordPress's connection by its name: $wpdb, however reached ($this->wpdb,
-	 * $GLOBALS['wpdb'], wpdb()); a regex that fails says yes (the side that refuses). The limit: the connection
-	 * held under another name ($w = $wpdb) cannot be told from the restore's; the fenced files take the restore's
-	 * connection as $db and $this->db, and name nothing else.
-	 *
-	 * @param string $receiver Receiver text, without whitespace.
-	 * @return bool
-	 */
-	private static function is_wpdb( string $receiver ): bool {
-		return 0 !== preg_match( '/wpdb(?:[\'"]\]|\(\))?$/i', $receiver );
-	}
-
-	/**
 	 * Whether a literal's first keyword matches; a regex that fails refuses (no match).
 	 *
 	 * @param string      $pattern Pattern.
@@ -535,14 +533,14 @@ final class FencedWritesTest extends TestCase {
 	}
 
 	/**
-	 * Whether a fenced call is allowed there: given a literal that begins with a read or DML, on a connection that
-	 * is not WordPress's (the fence is a transaction on the restore's own), by a method that runs the literal.
+	 * Whether a fenced call is allowed there: on the fenced connection (CONNECTIONS), by a method that runs the
+	 * literal it is given, a literal that begins with a read or DML.
 	 *
 	 * @param array{method: string, receiver: string, literal: string|null} $call Call.
 	 * @return bool
 	 */
 	private static function is_allowed( array $call ): bool {
-		return ! self::is_wpdb( $call['receiver'] ) && ! in_array( $call['method'], self::BUILDS_DML, true ) && self::begins( self::ALLOWED, $call['literal'] );
+		return in_array( $call['receiver'], self::CONNECTIONS, true ) && ! in_array( $call['method'], self::BUILDS_DML, true ) && self::begins( self::ALLOWED, $call['literal'] );
 	}
 
 	/**
@@ -617,8 +615,8 @@ final class FencedWritesTest extends TestCase {
 				$problems[] = "$file:$line: registered as conditioned, but the statement names neither lock_token nor the holder";
 			}
 			if ( self::LOCKED === $entry[1] ) {
-				if ( self::is_wpdb( $call['receiver'] ) || in_array( $call['method'], self::BUILDS_DML, true ) ) {
-					$problems[] = "$file:$line: registered as locked, but the call is on WordPress's connection (\$wpdb) or another object: the fence is a transaction on the restore's own connection, and this is outside it";
+				if ( ! in_array( $call['receiver'], self::CONNECTIONS, true ) || in_array( $call['method'], self::BUILDS_DML, true ) ) {
+					$problems[] = "$file:$line: registered as locked, but the call is not on the fenced connection (\$db, \$this->db, by write(), run(), rows() or query()): the fence is a transaction on the restore's own connection, and this is outside it";
 				} elseif ( self::begins( self::IMPLICIT_COMMIT, $call['literal'] ) ) {
 					$problems[] = "$file:$line: registered as locked, but the statement commits implicitly (CREATE / ALTER / DROP / RENAME / TRUNCATE / LOCK TABLES): it releases the job row, and nothing after it is fenced";
 				} elseif ( ! self::begins( self::DML, $call['literal'] ) ) {
@@ -793,14 +791,22 @@ final class FencedWritesTest extends TestCase {
 		// and any object's update(), insert(), delete() or replace() are writes to register; outside the fence
 		// they are the registry's business (an exception with the reason), inside a region they are refused, and
 		// registered as locked they are refused: the fence is a transaction on the restore's own connection.
-		$others = "\t\$wpdb\n\t\t->query( 'DELETE FROM t' );\n\t\$this->wpdb->Query( 'DELETE FROM t2' );\n\t\$GLOBALS['wpdb']->update( 't3', array() );\n\t\$wpdb\n\t\t->delete( 't4', array() );\n\t\$hashes->update( \$piece );\n\t\$this->cache->DELETE( 'k' );\n\t\$list->insert( 0, 'a' );\n\twpdb()->query( 'DELETE FROM t5' );\n";
-		$entries = array( array( "'DELETE FROM t'", self::EXCEPTION, 'r' ), array( "'DELETE FROM t2'", self::EXCEPTION, 'r' ), array( "->update( 't3'", self::EXCEPTION, 'r' ), array( "->delete( 't4'", self::EXCEPTION, 'r' ), array( '$hashes->update(', self::EXCEPTION, 'Not a statement.' ), array( '$this->cache->DELETE(', self::EXCEPTION, 'Not a statement.' ), array( '$list->insert(', self::EXCEPTION, 'Not a statement.' ), array( "wpdb()->query( 'DELETE FROM t5'", self::EXCEPTION, 'r' ) );
+		$others = "\t\$wpdb\n\t\t->query( 'DELETE FROM t' );\n\t\$this->wpdb->Query( 'DELETE FROM t2' );\n\t\$GLOBALS['wpdb']->update( 't3', array() );\n\t\$wpdb\n\t\t->delete( 't4', array() );\n\t\$hashes->update( \$piece );\n\t\$this->cache->DELETE( 'k' );\n\t\$list->insert( 0, 'a' );\n\twpdb()->query( 'DELETE FROM t5' );\n\t( \$wpdb )->query( 'DELETE FROM t6' );\n\t\\wpdb()->query( 'DELETE FROM t7' );\n\t\$w->query( 'DELETE FROM t8' );\n\t\$run['db']->run( 'DELETE FROM t9' );\n";
+		$entries = array( array( "'DELETE FROM t'", self::EXCEPTION, 'r' ), array( "'DELETE FROM t2'", self::EXCEPTION, 'r' ), array( "->update( 't3'", self::EXCEPTION, 'r' ), array( "->delete( 't4'", self::EXCEPTION, 'r' ), array( '$hashes->update(', self::EXCEPTION, 'Not a statement.' ), array( '$this->cache->DELETE(', self::EXCEPTION, 'Not a statement.' ), array( '$list->insert(', self::EXCEPTION, 'Not a statement.' ), array( "wpdb()->query( 'DELETE FROM t5'", self::EXCEPTION, 'r' ), array( "'DELETE FROM t6'", self::EXCEPTION, 'r' ), array( "\\wpdb()->query( 'DELETE FROM t7'", self::EXCEPTION, 'r' ), array( "'DELETE FROM t8'", self::EXCEPTION, 'r' ), array( "\$run['db']->run( 'DELETE FROM t9'", self::EXCEPTION, 'r' ) );
 		$outside = "<?php\nnamespace WPCheckpoint\\Restore;\nfunction reach( \$db, \$wpdb ) {\n" . $others . "}\n";
-		$this->assertSame( array( 5, 6, 7, 9, 10, 11, 12, 13 ), array_column( self::writes( $outside ), 'line' ), 'all of them writes to register (the split receiver\'s on its arrow\'s line; a method in any case; a call\'s result as the receiver)' );
+		$this->assertSame( array( 5, 6, 7, 9, 10, 11, 12, 13, 14, 15, 16, 17 ), array_column( self::writes( $outside ), 'line' ), 'all of them writes to register (the split receiver\'s on its arrow\'s line; a method in any case; a call\'s result as the receiver, qualified or not)' );
 		$this->assertSame( array(), self::problems( 'x.php', $outside, $entries ) );
-		$this->assertSame( array( 'x.php:6: ' . self::NOT_ALLOWED, 'x.php:7: ' . self::NOT_ALLOWED, 'x.php:8: ' . self::NOT_ALLOWED, 'x.php:10: ' . self::NOT_ALLOWED, 'x.php:11: ' . self::NOT_ALLOWED, 'x.php:12: ' . self::NOT_ALLOWED, 'x.php:13: ' . self::NOT_ALLOWED, 'x.php:14: ' . self::NOT_ALLOWED ), self::problems( 'x.php', $within . $others . "} );\n", $entries ), 'every one refused in the region' );
-		$locked_wpdb = array( array( "'DELETE FROM t'", self::LOCKED ), array( "'DELETE FROM t2'", self::LOCKED ), array( "->update( 't3'", self::LOCKED ), array( "->delete( 't4'", self::LOCKED ), array( '$hashes->update(', self::LOCKED ), array( '$this->cache->DELETE(', self::LOCKED ), array( '$list->insert(', self::LOCKED ), array( "wpdb()->query( 'DELETE FROM t5'", self::LOCKED ) );
-		$this->assertSame( 8, substr_count( implode( "\n", self::problems( 'x.php', $within . $others . "} );\n", $locked_wpdb ) ), "registered as locked, but the call is on WordPress's connection" ), 'none of them can be locked' );
+		$refused = array();
+		foreach ( array( 6, 7, 8, 10, 11, 12, 13, 14, 15, 16, 17, 18 ) as $line ) {
+			$refused[] = "x.php:$line: " . self::NOT_ALLOWED;
+		}
+		$this->assertSame( $refused, self::problems( 'x.php', $within . $others . "} );\n", $entries ), 'every one refused in the region: none is on the fenced connection' );
+		$locked_others = array();
+		foreach ( $entries as $entry ) {
+			$locked_others[] = array( $entry[0], self::LOCKED );
+		}
+		$this->assertSame( 12, substr_count( implode( "\n", self::problems( 'x.php', $within . $others . "} );\n", $locked_others ) ), 'registered as locked, but the call is not on the fenced connection' ), 'none of them can be locked' );
+		$this->assertSame( "\$db->run( 'DELETE FROM t' );", self::writes( "<?php\nif ( \$x ) \$db->run( 'DELETE FROM t' );\n" )[0]['text'], 'a control structure\'s parentheses are not the receiver' );
 		$cased = $within . "\t\$db->RUN( 'DROP TABLE t' );\n\t\$db->Write( 'UPDATE t SET a = 1', array() );\n} );\n";
 		$this->assertSame( array( 'x.php:5: ' . self::NOT_ALLOWED ), self::problems( 'x.php', $cased, array( array( "'DROP TABLE t'", self::EXCEPTION, 'r' ), array( 'SET a = 1', self::LOCKED ) ) ), 'a method in another case is the method' );
 		// Several calls in one statement: each judged on its own, a line reported once; the nested call on its
@@ -921,34 +927,36 @@ final class FencedWritesTest extends TestCase {
 				$lines[] = ');';
 				return array( 'lines' => $lines, 'allowed' => $ok, 'statement' => true );
 			}
-			if ( 'two_calls' === $kind || 'nested_call' === $kind || 'nested_lines' === $kind ) { // Several calls in one statement: the other one allowed, or not.
+			if ( 'nested_call' === $kind || 'nested_lines' === $kind ) { // A call nested in the statement: allowed, or not.
 				$other_ok = 1 === mt_rand( 0, 1 );
 				$other    = $other_ok ? "\$db->rows( 'SELECT 1' )" : $pick( array( '$db->rows( $q )', "\$db->run( 'FLUSH TABLES' )" ) );
 				if ( 'nested_lines' === $kind ) { // The nested call on a line of its own: judged there.
 					$seen[ $kind . ( $ok && $other_ok ? '_allowed' : '_refused' ) ] = 1;
 					return array( 'lines' => array( '$db->write(', "	$quoted,", "	array( $other )", ');' ), 'allowed' => $ok, 'statement' => true, 'nested' => array( 2, $other_ok ) );
 				}
-				if ( 'nested_call' === $kind ) {
-					$seen[ $kind . ( $ok && $other_ok ? '_allowed' : '_refused' ) ] = 1;
-					return array( 'lines' => array( "\$db->write( $quoted, array( $other ) );" ), 'allowed' => $ok && $other_ok, 'statement' => true );
-				}
+				$seen[ $kind . ( $ok && $other_ok ? '_allowed' : '_refused' ) ] = 1;
+				return array( 'lines' => array( "\$db->write( $quoted, array( $other ) );" ), 'allowed' => $ok && $other_ok, 'statement' => true );
 			}
-			// The shapes on a picked receiver, with a method in any case: WordPress's connection is never inside
-			// the fence, so what is emitted on it is refused whatever its literal.
-			$receiver = $pick( array( '$db', '$db', '$this->db', '$wpdb', '$this->wpdb', "\$GLOBALS['wpdb']", 'wpdb()' ) );
-			$seen[ 'receiver_' . preg_replace( '/[^a-z]/', '', strtolower( $receiver ) ) ] = 1;
-			$ok_call  = $ok && false === stripos( $receiver, 'wpdb' );
-			$method   = $cases( $pick( array( 'run', 'write', 'rows', 'query' ) ) );
-			$call     = 'write' === strtolower( $method ) ? "{$receiver}->{$method}( $quoted, array() );" : "{$receiver}->{$method}( $quoted );";
+			// The shapes on a picked receiver, with a method in any case: only the fenced connection's receivers
+			// are allowed, so what is emitted on any other is refused whatever its literal.
+			$receivers = array( 'db' => '$db', 'db2' => '$db', 'db3' => '$db', 'db4' => '$this->db', 'thisdb' => '$this->db', 'wpdb' => '$wpdb', 'thiswpdb' => '$this->wpdb', 'globalswpdb' => "\$GLOBALS['wpdb']", 'wpdbcall' => 'wpdb()', 'wpdbparens' => '( $wpdb )', 'wpdbqualified' => '\\wpdb()', 'other' => '$w', 'offset' => "\$run['db']" );
+			$key       = $pick( array_keys( $receivers ) );
+			$receiver  = $receivers[ $key ];
+			$seen[ 'receiver_' . str_replace( array( 'db2', 'db3', 'db4' ), array( 'db', 'db', 'thisdb' ), $key ) ] = 1;
+			$ok_call   = $ok && in_array( $receiver, array( '$db', '$this->db' ), true );
 			if ( 'split' === $kind ) { // The receiver on a line of its own: the call is on the arrow's line.
 				$seen['split'] = 1;
 				return array( 'lines' => array( $receiver, "\t->" . $pick( array( 'query', 'run' ) ) . "( $quoted );" ), 'allowed' => $ok_call, 'statement' => true, 'call_line' => 1 );
 			}
+			$method = $cases( $pick( array( 'run', 'write', 'rows', 'query' ) ) );
+			$call   = 'write' === strtolower( $method ) ? "{$receiver}->{$method}( $quoted, array() );" : "{$receiver}->{$method}( $quoted );";
 			if ( 'trailing_comment' === $kind ) {
 				$seen['trailing_comment'] = 1;
 				return array( 'lines' => array( "$call // \$db->rows( \$q ) read" ), 'allowed' => $ok_call, 'statement' => true );
 			}
 			if ( 'two_calls' === $kind ) {
+				$other_ok = 1 === mt_rand( 0, 1 );
+				$other    = $other_ok ? "\$db->rows( 'SELECT 1' )" : $pick( array( '$db->rows( $q )', "\$db->run( 'FLUSH TABLES' )" ) );
 				$seen[ $kind . ( $ok_call && $other_ok ? '_allowed' : '_refused' ) ] = 1;
 				return array( 'lines' => array( "$call $other;" ), 'allowed' => $ok_call && $other_ok, 'statement' => true );
 			}
@@ -1085,7 +1093,7 @@ final class FencedWritesTest extends TestCase {
 		for ( $seed = 1; $seed <= self::SOURCES; $seed++ ) {
 			$seen = array_merge( $seen, self::generate( $seed )['seen'] );
 		}
-		foreach ( array( 'closure', 'static', 'arrow', 'variable', 'asserting', 'plain', 'top', 'filler', 'comment', 'opaque', 'allowed', 'ending', 'allowed_after_comment', 'ending_after_comment', 'multiline', 'violation_in_closure', 'violation_in_static', 'violation_in_asserting', 'spelt_same', 'spelt_import', 'spelt_alias', 'spelt_qualified', 'other_within', 'trailing_comment', 'two_calls_allowed', 'two_calls_refused', 'nested_call_allowed', 'nested_call_refused', 'nested_lines_allowed', 'nested_lines_refused', 'nested_asserting_in_fenced', 'nested_asserting_outside', 'nested_plain_in_fenced', 'nested_plain_outside', 'nested_one_line', 'spelt_group', 'spelt_group_alias', 'spelt_alias_cased', 'spelt_braced', 'receiver_db', 'receiver_thisdb', 'receiver_wpdb', 'receiver_thiswpdb', 'receiver_globalswpdb', 'receiver_wpdb', 'emitted_allowed', 'emitted_refused', 'escaped', 'heredoc', 'split', 'split_in_fenced', 'foreign' ) as $situation ) {
+		foreach ( array( 'closure', 'static', 'arrow', 'variable', 'asserting', 'plain', 'top', 'filler', 'comment', 'opaque', 'allowed', 'ending', 'allowed_after_comment', 'ending_after_comment', 'multiline', 'violation_in_closure', 'violation_in_static', 'violation_in_asserting', 'spelt_same', 'spelt_import', 'spelt_alias', 'spelt_qualified', 'other_within', 'trailing_comment', 'two_calls_allowed', 'two_calls_refused', 'nested_call_allowed', 'nested_call_refused', 'nested_lines_allowed', 'nested_lines_refused', 'nested_asserting_in_fenced', 'nested_asserting_outside', 'nested_plain_in_fenced', 'nested_plain_outside', 'nested_one_line', 'spelt_group', 'spelt_group_alias', 'spelt_alias_cased', 'spelt_braced', 'receiver_db', 'receiver_thisdb', 'receiver_wpdb', 'receiver_thiswpdb', 'receiver_globalswpdb', 'receiver_wpdbcall', 'receiver_wpdbparens', 'receiver_wpdbqualified', 'receiver_other', 'receiver_offset', 'emitted_allowed', 'emitted_refused', 'escaped', 'heredoc', 'split', 'split_in_fenced', 'foreign' ) as $situation ) {
 			$this->assertArrayHasKey( $situation, $seen, "$situation never occurred in " . self::SOURCES . ' sources' );
 		}
 	}
