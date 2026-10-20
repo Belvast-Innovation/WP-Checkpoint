@@ -18,8 +18,12 @@ use Yoast\PHPUnitPolyfills\TestCases\TestCase;
  * end the transaction — DDL, LOCK TABLES, COMMIT, ROLLBACK, FLUSH, ANALYZE, XA, autocommit, a statement built at
  * run time: the list of what commits implicitly is long and grows, so the rule names what cannot — and after it the
  * job row is released and nothing is fenced. A within() that is not given a closure is reported, since its
- * statements cannot be examined. Fixed examples show each rule biting; a generator builds sources with known
- * regions and statements and checks that exactly the violating lines are reported.
+ * statements cannot be examined. The class is recognised by the call ("::within(", "::assert_locked("), however
+ * its name is spelt (imported, fully qualified, aliased); a statement with several calls in it (a nested read, two
+ * statements on a line) is allowed only when every call is; a closure nested in a function fences itself when it
+ * asserts the lock, not the function around it (as asserted_before() rules). Fixed examples show each rule biting;
+ * a generator builds sources with known regions and statements, in every one of these shapes, and checks that
+ * exactly the violating lines are reported.
  */
 final class FencedWritesTest extends TestCase {
 
@@ -36,11 +40,13 @@ final class FencedWritesTest extends TestCase {
 	const CALL    = '->(?:write|run|rows|query)\(';
 
 	/**
-	 * What a write statement looks like: a call that changes rows (or runs a statement), not a SELECT, a session
-	 * setting or a transaction statement.
+	 * What a write statement looks like, judged at its first call (a read nested in it does not make it one, nor
+	 * does it hide one): a call that changes rows (or runs a statement), not a SELECT, a session setting or a
+	 * transaction statement.
 	 */
-	const WRITE = '/->(?:write|run)\(|->rows\(' . self::GAP . '[\'"]' . self::SQL_GAP . '(?:DELETE|INSERT|UPDATE|REPLACE)\b|\$wpdb->(?:query|update|insert|delete|replace)\(/i';
-	const NOT   = '/->(?:run|rows)\(' . self::GAP . '[\'"]' . self::SQL_GAP . '(?:SET SESSION|START TRANSACTION|COMMIT|ROLLBACK|SELECT)\b/i';
+	const FIRST = '/->(?:write|run|rows)\(|\$wpdb->(?:query|update|insert|delete|replace)\(/';
+	const WRITE = '/^->(?:write|run)\(|^->rows\(' . self::GAP . '[\'"]' . self::SQL_GAP . '(?:DELETE|INSERT|UPDATE|REPLACE)\b|^\$wpdb->(?:query|update|insert|delete|replace)\(/i';
+	const NOT   = '/^->(?:run|rows)\(' . self::GAP . '[\'"]' . self::SQL_GAP . '(?:SET SESSION|START TRANSACTION|COMMIT|ROLLBACK|SELECT)\b/i';
 
 	/**
 	 * A locked write of the registry must be seen to be DML: its statement a literal that begins with one of the
@@ -142,11 +148,12 @@ final class FencedWritesTest extends TestCase {
 		$lines = explode( "\n", $source );
 		$out   = array();
 		foreach ( $lines as $i => $line ) {
-			if ( ! self::is_code( $line ) || 1 !== preg_match( self::STATEMENT, $line ) && 1 !== preg_match( '/\$wpdb->/', $line ) ) {
+			if ( ! self::is_code( $line ) || 1 !== preg_match( self::FIRST, $line, $first, PREG_OFFSET_CAPTURE ) ) {
 				continue;
 			}
 			$statement = self::statement( $lines, $i );
-			if ( 1 !== preg_match( self::WRITE, $statement ) || 1 === preg_match( self::NOT, $statement ) ) {
+			$head      = substr( $statement, (int) $first[0][1] );
+			if ( 1 !== preg_match( self::WRITE, $head ) || 1 === preg_match( self::NOT, $head ) ) {
 				continue;
 			}
 			$out[ $i + 1 ] = $statement;
@@ -230,14 +237,34 @@ final class FencedWritesTest extends TestCase {
 			}
 			return null;
 		};
-		$calls  = static function ( int $k, string $method ) use ( $tokens, $is, $at, $next ): bool {
-			return $is( $tokens[ $k ], T_STRING, 'JobFence' ) && $is( $at( $next( $k ) ), T_DOUBLE_COLON ) && $is( $at( $next( $next( $k ) ) ), T_STRING, $method );
+		$calls  = static function ( int $k, string $method ) use ( $tokens, $is, $at, $next ): bool { // At the '::', however the class is spelt.
+			return $is( $tokens[ $k ], T_DOUBLE_COLON ) && $is( $at( $next( $k ) ), T_STRING, $method );
+		};
+		$arrow  = static function ( int $k ) use ( $tokens, $n, $opens ): int { // From an fn token: the index of its last token.
+			for ( ; $k < $n && ! ( is_array( $tokens[ $k ] ) && T_DOUBLE_ARROW === $tokens[ $k ][0] ); $k++ ) {
+				continue;
+			}
+			$depth = 0;
+			for ( $k++; $k < $n; $k++ ) {
+				$t = $tokens[ $k ];
+				if ( '(' === $t || '[' === $t || $opens( $t ) ) {
+					++$depth;
+				} elseif ( ')' === $t || ']' === $t || '}' === $t ) {
+					if ( 0 === $depth ) {
+						return $k - 1;
+					}
+					--$depth;
+				} elseif ( ( ';' === $t || ',' === $t ) && 0 === $depth ) {
+					return $k - 1;
+				}
+			}
+			return $n - 1;
 		};
 		$regions  = array();
 		$problems = array();
 		for ( $k = 0; $k < $n; $k++ ) {
 			if ( $calls( $k, 'within' ) ) {
-				$paren = $next( $next( $next( $k ) ) );
+				$paren = $next( $next( $k ) );
 				$arg   = '(' === $at( $paren ) ? $third( $paren ) : null;
 				if ( null !== $arg && $is( $at( $arg ), T_STATIC ) ) {
 					$arg = $next( $arg );
@@ -254,8 +281,15 @@ final class FencedWritesTest extends TestCase {
 				if ( null === $range ) {
 					continue;
 				}
-				for ( $j = $range[0]; $j < $range[1]; $j++ ) {
-					if ( $calls( $j, 'assert_locked' ) ) {
+				for ( $j = $range[0] + 1; $j < $range[1]; $j++ ) {
+					if ( $is( $tokens[ $j ], T_FUNCTION ) ) { // A closure nested in it asserts for itself, not for it.
+						$inner = $body( $j );
+						if ( null !== $inner ) {
+							$j = $inner[1];
+						}
+					} elseif ( $is( $tokens[ $j ], T_FN ) ) {
+						$j = $arrow( $j );
+					} elseif ( $calls( $j, 'assert_locked' ) ) {
 						$regions[] = array( $lines[ $range[0] ], $lines[ $range[1] ] );
 						break;
 					}
@@ -281,7 +315,7 @@ final class FencedWritesTest extends TestCase {
 			if ( 1 === preg_match( '/\bfunction\b/', $lines[ $i ] ) ) {
 				return false; // The function's own line, or a one-line closure in between: a guard on it is not this function's.
 			}
-			if ( false !== strpos( $lines[ $i ], 'JobFence::assert_locked(' ) ) {
+			if ( false !== strpos( $lines[ $i ], '::assert_locked(' ) ) {
 				return true;
 			}
 		}
@@ -326,7 +360,7 @@ final class FencedWritesTest extends TestCase {
 					$problems[] = "$file:$line: registered as locked, but the statement commits implicitly (CREATE / ALTER / DROP / RENAME / TRUNCATE / LOCK TABLES): it releases the job row, and nothing after it is fenced";
 				} elseif ( 1 !== preg_match( self::DML, $statement ) ) {
 					$problems[] = "$file:$line: registered as locked, but the statement is not seen to be DML (a literal beginning with DELETE / INSERT / UPDATE / REPLACE)";
-				} elseif ( 1 !== preg_match( '/JobFence::within\(\s*\$/', $source ) ) { // The call, not a docblock's mention.
+				} elseif ( 1 !== preg_match( '/::within\(\s*\$/', $source ) ) { // The call, not a docblock's mention.
 					$problems[] = "$file:$line: registered as locked, but the file never runs a fenced transaction (JobFence::within())";
 				} elseif ( ! self::asserted_before( $source, $line ) ) {
 					$problems[] = "$file:$line: registered as locked, but the function it is in does not assert the lock before it (JobFence::assert_locked())";
@@ -346,32 +380,40 @@ final class FencedWritesTest extends TestCase {
 		foreach ( $fenced['problems'] as $problem ) {
 			$problems[] = "$file:$problem";
 		}
+		$flagged = array();
 		foreach ( $fenced['regions'] as $region ) {
 			for ( $i = $region[0] - 1; $i < $region[1]; $i++ ) {
-				if ( self::is_code( $lines[ $i ] ) && 1 === preg_match( self::STATEMENT, $lines[ $i ] ) && 1 !== preg_match( self::ALLOWED, self::statement( $lines, $i ) ) ) {
-					$problems[] = "$file:" . ( $i + 1 ) . ': ' . self::NOT_ALLOWED;
+				if ( ! self::is_code( $lines[ $i ] ) || 1 !== preg_match( self::STATEMENT, $lines[ $i ] ) ) {
+					continue;
+				}
+				// Every call in the statement (a nested read, two statements on the line) must be an allowed literal:
+				// the calls, less the comment lines, as many as the allowed ones.
+				$code = (string) preg_replace( '/^\s*\/\/[^\n]*\n/m', '', self::statement( $lines, $i ) );
+				if ( preg_match_all( '/' . self::CALL . '/', $code ) !== preg_match_all( self::ALLOWED, $code ) ) {
+					$flagged[ $i + 1 ] = true;
 				}
 			}
+		}
+		ksort( $flagged );
+		foreach ( array_keys( $flagged ) as $line ) {
+			$problems[] = "$file:$line: " . self::NOT_ALLOWED;
 		}
 		return $problems;
 	}
 
 	public function test_every_write_of_the_swap_phase_is_conditioned_locked_or_an_exception_with_a_reason(): void {
-		$root = dirname( __DIR__, 3 );
-		$all  = array();
-		foreach ( self::WRITES as $file => $entries ) {
-			$source = (string) file_get_contents( $root . '/' . $file );
-			$this->assertNotSame( '', $source, $file );
-			$all = array_merge( $all, self::problems( $file, $source, $entries ) );
-		}
-		$this->assertSame( array(), $all );
+		$root    = dirname( __DIR__, 3 );
+		$all     = array();
 		$found   = 0;
 		$regions = 0;
 		foreach ( self::WRITES as $file => $entries ) {
-			$source   = (string) file_get_contents( $root . '/' . $file );
+			$source = (string) file_get_contents( $root . '/' . $file );
+			$this->assertNotSame( '', $source, $file );
+			$all      = array_merge( $all, self::problems( $file, $source, $entries ) );
 			$found   += count( self::writes( $source ) );
 			$regions += count( self::fenced_regions( $source )['regions'] );
 		}
+		$this->assertSame( array(), $all );
 		$this->assertGreaterThanOrEqual( 20, $found, 'the control: the scanner finds the writes' );
 		$this->assertGreaterThanOrEqual( 4, $regions, 'the control: the scanner finds the fenced regions (two closures, the carry\'s functions)' );
 	}
@@ -452,14 +494,24 @@ final class FencedWritesTest extends TestCase {
 		$this->assertSame( array( array( 2, 5 ) ), self::fenced_regions( $outside )['regions'], 'g() is not fenced' );
 		$this->assertSame( array(), self::fenced_regions( "<?php\n// JobFence::within( \$db, \$f, function () { JobFence::assert_locked( \$db ); } );\nfunction h() {\n}\n" )['regions'], 'a mention in a comment is neither' );
 		$this->assertSame( array( 'regions' => array(), 'problems' => array() ), self::fenced_regions( "<?php\nJobFence" ) );
+		// The class however it is spelt: fully qualified, aliased; and a within() of another spelling is the fence
+		// the registry asks for.
+		foreach ( array( '\\WPCheckpoint\\Restore\\JobFence', 'Fence' ) as $class ) {
+			$spelt = "<?php\n{$class}::within( \$db, \$f, function () use ( \$db ) {\n\t{$class}::assert_locked( \$db );\n\t\$db->run( 'DROP TABLE t' );\n\t\$db->write( 'UPDATE t SET a = 1', array() );\n} );\nfunction f( \$db ) {\n\t{$class}::assert_locked( \$db );\n\t\$db->run( 'COMMIT' );\n}\n";
+			$this->assertSame( array( array( 2, 6 ), array( 7, 10 ) ), self::fenced_regions( $spelt )['regions'], $class );
+			$this->assertSame( array( 'x.php:4: ' . self::NOT_ALLOWED, 'x.php:9: ' . self::NOT_ALLOWED ), self::problems( 'x.php', $spelt, array( array( "'DROP TABLE t'", self::EXCEPTION, 'r' ), $locked ) ), $class );
+		}
+		// Several calls in one statement: allowed only when every one is; a line in two regions is reported once.
+		$several = $within . "\t\$db->run( \$sql ); \$db->rows( 'SELECT 1' );\n\t\$db->write( \$this->sql(), \$db->rows( 'SELECT 1' ) );\n\t\$db->write( 'UPDATE t SET a = ?', \$db->rows( 'SELECT 1' ) );\n\t\$db->write( 'UPDATE t SET a = ?', array( \$db->rows( \$q ) ) );\n\t\$cb = function () use ( \$db ) { JobFence::assert_locked( \$db ); \$db->run( 'DROP TABLE t' ); };\n} );\n";
+		$entries = array( array( '$db->run( $sql ); $db->rows', self::EXCEPTION, 'r' ), array( '$this->sql()', self::EXCEPTION, 'r' ), array( "SET a = ?', \$db->rows", self::EXCEPTION, 'r' ), array( 'array( $db->rows( $q ) )', self::EXCEPTION, 'r' ), array( "'DROP TABLE t'", self::EXCEPTION, 'r' ) );
+		$this->assertSame( array( 'x.php:4: ' . self::NOT_ALLOWED, 'x.php:5: ' . self::NOT_ALLOWED, 'x.php:7: ' . self::NOT_ALLOWED, 'x.php:8: ' . self::NOT_ALLOWED ), self::problems( 'x.php', $several, $entries ) );
+		$this->assertSame( array( array( 2, 9 ), array( 8, 8 ) ), self::fenced_regions( $several )['regions'] );
+		// A closure nested in a function that is not fenced asserts for itself: the function's own statements are
+		// not examined, the closure's are.
+		$nested = "<?php\nfunction outer( \$db ) {\n\t\$db->run( 'DROP TABLE t' );\n\t\$cb = function () use ( \$db ) {\n\t\tJobFence::assert_locked( \$db );\n\t\t\$db->run( 'DROP TABLE t2' );\n\t};\n\t\$fn = fn () => JobFence::assert_locked( \$db );\n\t\$db->run( 'COMMIT' );\n}\n";
+		$this->assertSame( array( array( 4, 7 ) ), self::fenced_regions( $nested )['regions'] );
+		$this->assertSame( array( 'x.php:6: ' . self::NOT_ALLOWED ), self::problems( 'x.php', $nested, array( array( "'DROP TABLE t'", self::EXCEPTION, 'r' ), array( "'DROP TABLE t2'", self::EXCEPTION, 'r' ) ) ) );
 	}
-
-	/**
-	 * The generator's situations, counted over every source: each must occur, or the generator proves nothing of it.
-	 *
-	 * @var array<string, int>
-	 */
-	private static $seen = array();
 
 	/**
 	 * @return array<string, array{0: int}>
@@ -476,7 +528,7 @@ final class FencedWritesTest extends TestCase {
 	 * A source built from random blocks, with what the scanner must report of it.
 	 *
 	 * @param int $seed Seed.
-	 * @return array{source: string, regions: array<int, array{0: int, 1: int}>, not_allowed: int[], not_closure: int[]}
+	 * @return array{source: string, regions: array<int, array{0: int, 1: int}>, not_allowed: int[], not_closure: int[], seen: array<string, int>}
 	 */
 	public static function generate( int $seed ): array {
 		mt_srand( $seed );
@@ -494,8 +546,10 @@ final class FencedWritesTest extends TestCase {
 		/*
 		 * A statement: its lines, and whether a fenced region allows it. The lines of a filler are no statement.
 		 */
+		$fence     = $pick( array( 'JobFence', 'JobFence', '\\WPCheckpoint\\Restore\\JobFence', 'Fence' ) ); // How the file spells the class.
+		$seen[ 'JobFence' === $fence ? 'spelt_imported' : ( 'Fence' === $fence ? 'spelt_aliased' : 'spelt_qualified' ) ] = 1;
 		$statement = static function () use ( $pick, $cases, $allowed, $ending, $leads, &$seen ): array {
-			$kind = $pick( array( 'literal', 'literal', 'literal', 'multiline', 'opaque', 'filler', 'comment' ) );
+			$kind = $pick( array( 'literal', 'literal', 'literal', 'multiline', 'opaque', 'filler', 'comment', 'two_calls', 'nested_call' ) );
 			if ( 'filler' === $kind ) {
 				$seen['filler'] = 1;
 				return array( 'lines' => array( $pick( array( '$x = 1;', "\$y = array( '{', '}' );", '$z = "a {$x} b";' ) ) ), 'allowed' => true, 'statement' => false );
@@ -519,6 +573,13 @@ final class FencedWritesTest extends TestCase {
 			}
 			$quoted = false === strpos( $text, "'" ) ? "'$text'" : "\"$text\"";
 			$call   = $pick( array( "\$db->run( $quoted );", "\$db->write( $quoted, array() );", "\$db->rows( $quoted );", "\$wpdb->query( $quoted );" ) );
+			if ( 'two_calls' === $kind || 'nested_call' === $kind ) { // Several calls in one statement: the other one allowed, or not.
+				$other_ok = 1 === mt_rand( 0, 1 );
+				$other    = $other_ok ? "\$db->rows( 'SELECT 1' )" : $pick( array( '$db->rows( $q )', "\$db->run( 'FLUSH TABLES' )" ) );
+				$seen[ $kind . ( $ok && $other_ok ? '_allowed' : '_refused' ) ] = 1;
+				$line = 'two_calls' === $kind ? "$call $other;" : "\$db->write( $quoted, array( $other ) );";
+				return array( 'lines' => array( $line ), 'allowed' => $ok && $other_ok, 'statement' => true );
+			}
 			if ( 'multiline' === $kind ) {
 				$seen['multiline'] = 1;
 				$lines = array( '$db->write(', '	// Why.', "	$quoted," );
@@ -534,43 +595,77 @@ final class FencedWritesTest extends TestCase {
 		$regions     = array();
 		$not_allowed = array();
 		$not_closure = array();
-		$blocks      = mt_rand( 2, 6 );
-		for ( $b = 0; $b < $blocks; $b++ ) {
-			$kind   = $pick( array( 'closure', 'closure', 'static', 'arrow', 'variable', 'asserting', 'asserting', 'plain', 'top' ) );
-			$fenced = in_array( $kind, array( 'closure', 'static', 'asserting' ), true );
-			$seen[ $kind ] = 1;
-			if ( 'arrow' === $kind || 'variable' === $kind ) {
-				$lines[]       = 'arrow' === $kind ? "JobFence::within( \$db, array( 'a', 'b' ), fn () => \$db->run( 'DROP TABLE t' ) );" : 'JobFence::within( $db, $f, $work );';
-				$not_closure[] = count( $lines );
-				continue;
-			}
-			$open = count( $lines ) + 1;
-			if ( 'closure' === $kind ) {
-				$lines[] = 'JobFence::within( $db, $f, function () use ( $db ) {';
-			} elseif ( 'static' === $kind ) {
-				$lines[] = 'JobFence::within( $db, array( $a, $b ), static function () use ( $db ) {';
-			} elseif ( 'top' !== $kind ) {
-				$lines[] = "function f$b( \$db ) {";
-			}
+		/*
+		 * The statements of a block (a closure, a function, top-level code), with a closure nested in it now and
+		 * then: one that asserts the lock fences itself, one that does not is fenced only as its surroundings are.
+		 */
+		$fill = static function ( string $kind, bool $fenced, int $depth ) use ( &$fill, &$lines, &$regions, &$not_allowed, &$seen, $statement, $pick, $fence ): void {
+			$indent = str_repeat( '	', $depth );
 			$count  = mt_rand( 0, 4 );
-			$assert = 'asserting' === $kind ? mt_rand( 0, $count ) : ( $fenced && 1 === mt_rand( 0, 1 ) ? 0 : -1 ); // A plain function never asserts: that would fence it.
+			$assert = 'asserting' === $kind ? mt_rand( 0, $count ) : ( ( 'closure' === $kind || 'static' === $kind ) && 1 === mt_rand( 0, 1 ) ? 0 : -1 ); // A plain function or closure never asserts: that would fence it.
 			for ( $i = 0; $i <= $count; $i++ ) {
 				if ( $i === $assert ) {
-					$lines[] = '	JobFence::assert_locked( $db );';
+					$lines[] = "$indent{$fence}::assert_locked( \$db );";
 				}
 				if ( $i === $count ) {
 					break;
 				}
+				if ( $depth < 2 && 0 === mt_rand( 0, 5 ) ) { // A nested closure.
+					$asserts = 1 === mt_rand( 0, 1 );
+					$one     = 1 === mt_rand( 0, 2 );
+					$seen[ 'nested_' . ( $asserts ? 'asserting' : 'plain' ) . ( $fenced ? '_in_fenced' : '_outside' ) ] = 1;
+					if ( $one ) {
+						$text = $pick( array( "\$db->run( 'SELECT 1' );", "\$db->run( 'DROP TABLE t' );", '$db->run( $sql );' ) );
+						$lines[] = "$indent\$cb = function () use ( \$db ) { " . ( $asserts ? "{$fence}::assert_locked( \$db ); " : '' ) . "$text };";
+						$line    = count( $lines );
+						if ( $asserts ) {
+							$regions[] = array( $line, $line );
+						}
+						if ( ( $asserts || $fenced ) && "\$db->run( 'SELECT 1' );" !== $text ) {
+							$not_allowed[] = $line;
+						}
+						$seen['nested_one_line'] = 1;
+						continue;
+					}
+					$lines[] = "$indent\$cb = function () use ( \$db ) {";
+					$open    = count( $lines );
+					$fill( $asserts ? 'asserting' : 'plain', $asserts || $fenced, $depth + 1 );
+					$lines[] = "$indent};";
+					if ( $asserts ) {
+						$regions[] = array( $open, count( $lines ) );
+					}
+					continue;
+				}
 				$s    = $statement();
 				$line = count( $lines ) + 1;
 				foreach ( $s['lines'] as $text ) {
-					$lines[] = ( 'top' === $kind ? '' : '	' ) . $text;
+					$lines[] = $indent . $text;
 				}
 				if ( $fenced && $s['statement'] && ! $s['allowed'] ) {
 					$not_allowed[] = $line;
 					$seen[ "violation_in_$kind" ] = 1;
 				}
 			}
+		};
+		$blocks = mt_rand( 2, 6 );
+		for ( $b = 0; $b < $blocks; $b++ ) {
+			$kind   = $pick( array( 'closure', 'closure', 'static', 'arrow', 'variable', 'asserting', 'asserting', 'plain', 'top' ) );
+			$fenced = in_array( $kind, array( 'closure', 'static', 'asserting' ), true );
+			$seen[ $kind ] = 1;
+			if ( 'arrow' === $kind || 'variable' === $kind ) {
+				$lines[]       = 'arrow' === $kind ? "{$fence}::within( \$db, array( 'a', 'b' ), fn () => \$db->run( 'DROP TABLE t' ) );" : "{$fence}::within( \$db, \$f, \$work );";
+				$not_closure[] = count( $lines );
+				continue;
+			}
+			$open = count( $lines ) + 1;
+			if ( 'closure' === $kind ) {
+				$lines[] = "{$fence}::within( \$db, \$f, function () use ( \$db ) {";
+			} elseif ( 'static' === $kind ) {
+				$lines[] = "{$fence}::within( \$db, array( \$a, \$b ), static function () use ( \$db ) {";
+			} elseif ( 'top' !== $kind ) {
+				$lines[] = "function f$b( \$db ) {";
+			}
+			$fill( $kind, $fenced, 'top' === $kind ? 0 : 1 );
 			if ( 'top' === $kind ) {
 				continue;
 			}
@@ -579,12 +674,15 @@ final class FencedWritesTest extends TestCase {
 				$regions[] = array( $open, count( $lines ) );
 			}
 		}
-		self::$seen = array_merge( self::$seen, $seen );
+		sort( $regions ); // The scanner reports them in order of their first line, then their last.
+		$not_allowed = array_values( array_unique( $not_allowed ) );
+		sort( $not_allowed );
 		return array(
 			'source'      => implode( "\n", $lines ) . "\n",
 			'regions'     => $regions,
 			'not_allowed' => $not_allowed,
 			'not_closure' => $not_closure,
+			'seen'        => $seen,
 		);
 	}
 
@@ -592,9 +690,11 @@ final class FencedWritesTest extends TestCase {
 	 * @dataProvider seeds
 	 */
 	public function test_generated_sources_report_exactly_the_statements_outside_the_invariant( int $seed ): void {
-		$made   = self::generate( $seed );
-		$fenced = self::fenced_regions( $made['source'] );
-		$this->assertSame( $made['regions'], $fenced['regions'], "regions of:\n" . $made['source'] );
+		$made    = self::generate( $seed );
+		$fenced  = self::fenced_regions( $made['source'] );
+		$regions = $fenced['regions'];
+		sort( $regions );
+		$this->assertSame( $made['regions'], $regions, "regions of:\n" . $made['source'] );
 		$reported = array();
 		$closure  = array();
 		foreach ( self::problems( 'x.php', $made['source'], array() ) as $problem ) {
@@ -609,22 +709,27 @@ final class FencedWritesTest extends TestCase {
 	}
 
 	public function test_the_generator_covered_every_situation(): void {
-		foreach ( array( 'closure', 'static', 'arrow', 'variable', 'asserting', 'plain', 'top', 'filler', 'comment', 'opaque', 'allowed', 'ending', 'allowed_after_comment', 'ending_after_comment', 'multiline', 'violation_in_closure', 'violation_in_static', 'violation_in_asserting' ) as $situation ) {
-			$this->assertArrayHasKey( $situation, self::$seen, "$situation never occurred in " . self::SOURCES . ' sources' );
+		$seen = array();
+		for ( $seed = 1; $seed <= self::SOURCES; $seed++ ) {
+			$seen = array_merge( $seen, self::generate( $seed )['seen'] );
+		}
+		foreach ( array( 'closure', 'static', 'arrow', 'variable', 'asserting', 'plain', 'top', 'filler', 'comment', 'opaque', 'allowed', 'ending', 'allowed_after_comment', 'ending_after_comment', 'multiline', 'violation_in_closure', 'violation_in_static', 'violation_in_asserting', 'spelt_imported', 'spelt_qualified', 'spelt_aliased', 'two_calls_allowed', 'two_calls_refused', 'nested_call_allowed', 'nested_call_refused', 'nested_asserting_in_fenced', 'nested_asserting_outside', 'nested_plain_in_fenced', 'nested_plain_outside', 'nested_one_line' ) as $situation ) {
+			$this->assertArrayHasKey( $situation, $seen, "$situation never occurred in " . self::SOURCES . ' sources' );
 		}
 	}
 
 	public function test_the_generator_catches_a_known_violation(): void {
-		// The reverse check: a source the generator built, with one allowed statement of a region turned into one
-		// that ends the transaction, must be reported at that line and nowhere else.
+		// The reverse check: a source the generator built, with one allowed statement of a region (the first one
+		// found over the seeds) turned into one that ends the transaction, must be reported at that line and
+		// nowhere else.
 		$changed = null;
 		for ( $seed = 1; $seed <= self::SOURCES && null === $changed; $seed++ ) {
 			$made  = self::generate( $seed );
 			$lines = explode( "\n", $made['source'] );
 			foreach ( $made['regions'] as $region ) {
 				for ( $i = $region[0] - 1; $i < $region[1] && null === $changed; $i++ ) {
-					if ( 1 === preg_match( '/^\t\$db->run\( \'(?:select|SELECT|Select) /', $lines[ $i ] ) ) {
-						$lines[ $i ] = "\t\$db->run( 'FLUSH TABLES' );";
+					if ( ! in_array( $i + 1, $made['not_allowed'], true ) && 1 === preg_match( '/^(\t+)\$(?:db|wpdb)->(?:run|rows|query)\( [\'"]' . self::SQL_GAP . '(?:select|show|delete|insert|update|replace)\b[^;]*;$/i', $lines[ $i ], $m ) ) {
+						$lines[ $i ] = $m[1] . "\$db->run( 'FLUSH TABLES' );";
 						$changed     = $i + 1;
 					}
 				}

@@ -243,8 +243,14 @@ final class CarryFenceTest extends SwapTestCase {
 		$this->assertSame( 1, $wpdb->update( JobRepository::table(), array( 'lock_token' => '' ), array( 'id' => $held['job']->id ) ), 'the row released' );
 		$wpdb->query( 'COMMIT' );
 		$taken  = $holders();
-		$number = (int) $taken[0]['n'];
-		$this->assertSame( 1, $wpdb->query( $wpdb->prepare( "UPDATE `{$name}` SET owned = -1 WHERE n = %d", $number ) ) );
+		$number = null;
+		foreach ( $loaded['plan']->tables() as $table ) { // The options table: the one whose own rows are recorded.
+			if ( $wpdb->prefix . 'options' === $table['table'] ) {
+				$number = (int) $table['number'];
+			}
+		}
+		$this->assertNotNull( $number );
+		$this->assertSame( 1, $wpdb->query( $wpdb->prepare( "UPDATE `{$name}` SET owned = -1 WHERE n = %d AND owned >= 0", $number ) ), 'the control: a record whose own rows were recorded, to record again' );
 		$wpdb->query( 'COMMIT' );
 		$this->assertSame( count( $taken ), (int) $wpdb->query( $wpdb->prepare( "UPDATE `{$name}` AS l JOIN `" . JobRepository::table() . "` AS j ON j.id = %d SET l.holder = 'eeee' WHERE (l.holder <> 'eeee') AND j.lock_token = ''", $held['job']->id ) ), 'the control: the join on an empty token matches the released row and would take every record' );
 		$wpdb->query( 'COMMIT' );
