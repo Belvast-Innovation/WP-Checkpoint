@@ -45,6 +45,7 @@ use WPCheckpoint\Rest\BackupsController;
 use WPCheckpoint\Rest\JobsController;
 use WPCheckpoint\Rest\LoopbackController;
 use WPCheckpoint\Rest\ProbeController;
+use WPCheckpoint\Rest\SelfCheckController;
 use WPCheckpoint\Rest\StatusController;
 use WPCheckpoint\Support\Guard;
 use WPCheckpoint\Support\Directories;
@@ -595,6 +596,7 @@ final class Plugin {
 			new JobsController( $this->job_actions(), $this->job_presenter(), $this->directories() ),
 			new BackupsController( $this->job_actions(), $this->job_presenter(), $this->directories() ),
 			new LoopbackController( $this->job_actions() ),
+			new SelfCheckController( $this->jobs() ),
 		);
 	}
 

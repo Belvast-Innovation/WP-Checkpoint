@@ -14,9 +14,11 @@ use WPCheckpoint\Plugin;
 use WPCheckpoint\Restore\ImportSession;
 use WPCheckpoint\Restore\JobFence;
 use WPCheckpoint\Restore\Ledger;
+use WPCheckpoint\Restore\SelfCheck;
 use WPCheckpoint\Restore\StateCarry;
 use WPCheckpoint\Restore\SwapPlan;
 use WPCheckpoint\Standalone\Credentials;
+use WPCheckpoint\Support\StoredNames;
 use WPCheckpoint\Tests\Fixtures\Restore\SwapTestCase;
 
 /**
@@ -160,6 +162,58 @@ final class CarryFenceTest extends SwapTestCase {
 		$carry->carry( $wpdb->base_prefix . 'options', $temp, null, null, array( 'table' => JobRepository::table(), 'id' => $fresh->id, 'token' => $fresh->lock_token ) );
 		$this->assertContains( 'carry_locked', $seams );
 		$this->assertContains( 'carry_written', $seams );
+	}
+
+	public function test_the_self_check_row_is_written_and_deleted_under_the_runs_token_and_not_after_a_take_over(): void {
+		global $wpdb;
+		$held      = $this->held();
+		$table     = SelfCheck::table( $wpdb->base_prefix );
+		$this->old = ImportSession::open( Credentials::from_wordpress() );
+		$first     = SelfCheck::value( $held['job']->id, SelfCheck::random(), hash( 'sha256', SelfCheck::random() ) );
+		try {
+			SelfCheck::put( $this->old, $held['fence'], $table, $first );
+			$this->assertSame( SelfCheck::parse( $first ), SelfCheck::read( $this->old, $table ), 'written, read back on the restore\'s connection' );
+			$wpdb->query( 'COMMIT' );
+			$this->assertSame( SelfCheck::parse( $first ), SelfCheck::stored(), 'and as a web request reads it' );
+			$second = SelfCheck::value( $held['job']->id, SelfCheck::random(), hash( 'sha256', SelfCheck::random() ) );
+			SelfCheck::put( $this->old, $held['fence'], $table, $second );
+			$this->assertSame( SelfCheck::parse( $second ), SelfCheck::read( $this->old, $table ), 'written anew: replaced' );
+			SelfCheck::remove( $this->old, $held['fence'], $table );
+			$this->assertNull( SelfCheck::read( $this->old, $table ), 'deleted' );
+			SelfCheck::remove( $this->old, $held['fence'], $table );
+			$this->assertNull( SelfCheck::read( $this->old, $table ), 'none there: done' );
+			SelfCheck::put( $this->old, $held['fence'], $table, $first );
+			$this->assertNotNull( $this->take_over( $held['job'], 5 ), 'the control: taken over' );
+			foreach ( array(
+				'write'  => function () use ( $held, $table, $second ): void {
+					SelfCheck::put( $this->old, $held['fence'], $table, $second );
+				},
+				'delete' => function () use ( $held, $table ): void {
+					SelfCheck::remove( $this->old, $held['fence'], $table );
+				},
+			) as $what => $call ) {
+				try {
+					$call();
+					$this->fail( 'the old run\'s ' . $what . ' went through after the take-over' );
+				} catch ( LockLost $e ) {
+					$this->assertStringContainsString( 'no longer held', $e->getMessage(), $what );
+				}
+				$this->assertSame( SelfCheck::parse( $first ), SelfCheck::read( $this->old, $table ), $what . ': nothing changed' );
+			}
+			$fresh = Plugin::instance()->jobs()->find( $held['job']->id );
+			SelfCheck::remove(
+				$this->old,
+				array(
+					'table' => JobRepository::table(),
+					'id'    => $fresh->id,
+					'token' => $fresh->lock_token,
+				),
+				$table
+			);
+			$this->assertNull( SelfCheck::read( $this->old, $table ), 'the control: under the new token it goes' );
+		} finally {
+			$this->old->run( 'DELETE FROM ' . \WPCheckpoint\Database\SqlWriter::identifier( $table ) . " WHERE option_name = '" . StoredNames::SELF_CHECK . "'" );
+		}
 	}
 
 	public function test_after_a_take_over_the_old_runs_plan_write_and_ownership_record_are_refused(): void {
