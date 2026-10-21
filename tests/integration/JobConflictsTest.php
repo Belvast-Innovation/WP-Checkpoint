@@ -180,6 +180,115 @@ final class JobConflictsTest extends JobTestCase {
 		$this->assertSame( Job::FAILED, $repo->find( $again->id )->status, 'not queued while the lock was held' );
 	}
 
+	/**
+	 * A restore that failed partway through its swap: it holds the site (JobRepository::holding_site()).
+	 */
+	private function holding(): Job {
+		global $wpdb;
+		$job = $this->failed( 'restore', array( 'base' => 'site-20260923-120000-ab12' ) );
+		$wpdb->update( \WPCheckpoint\Jobs\JobRepository::table(), array( 'site_state' => Job::SITE_CHANGING ), array( 'id' => $job->id ) );
+		$this->assertSame( array( $job->id ), Plugin::instance()->jobs()->holding_site(), 'the control: it holds the site' );
+		return $job;
+	}
+
+	/**
+	 * The ids of every job row.
+	 *
+	 * @return int[]
+	 */
+	private function ids(): array {
+		return array_map(
+			static function ( Job $job ): int {
+				return $job->id;
+			},
+			Plugin::instance()->jobs()->list_jobs( array(), 500 )
+		);
+	}
+
+	public function test_nothing_is_created_while_a_failed_restore_holds_the_site(): void {
+		global $wpdb;
+		$repo     = Plugin::instance()->jobs();
+		$actions  = Plugin::instance()->job_actions();
+		$plain    = $this->failed( 'restore', array( 'base' => 'site-20260923-120000-ab12' ) );
+		$held     = $this->holding();
+		$estimate = $repo->create( 'estimate', self::$admin_id );
+		$ids      = $this->ids();
+		$said     = esc_html( sprintf( 'Restore job %1$d stopped partway through and holds the site: no job can start until it has ended (a backup now would capture a half restored site). Resolve it with: wp wpcheckpoint job retry %1$d, then wp wpcheckpoint job run %1$d', $held->id ) );
+		foreach ( array(
+			'an export'       => array( 'export', array() ),
+			'another restore' => array( 'restore', array( 'base' => 'other-20260923-120000-cd34' ) ),
+			'a verify'        => array( 'verify', array( 'base' => 'other-20260923-120000-cd34' ) ),
+			'an estimate'     => array( 'estimate', array() ),
+		) as $case => list( $type, $options ) ) {
+			try {
+				$actions->start( $type, self::$admin_id, $options );
+				$this->fail( $case . ': started while a restore holds the site' );
+			} catch ( JobConflict $e ) {
+				$this->assertSame( $said, $e->getMessage(), $case . ': which job, and what to do with it' );
+			}
+			$this->assertSame( $ids, $this->ids(), $case . ': nothing was created' );
+		}
+		$this->assertSame( Job::QUEUED, $repo->find( $estimate->id )->status, 'nothing gave way for a start that was refused' );
+
+		// The page's "Back up now": 409 with the reason, nothing created.
+		$response = $this->rest( 'POST', 'backups' );
+		$this->assertSame( 409, $response->get_status() );
+		$this->assertSame( sprintf( 'Restore job %1$d stopped partway through and holds the site', $held->id ), strstr( (string) $response->get_data()['message'], ':', true ) );
+		$this->assertSame( $ids, $this->ids(), 'the request created nothing' );
+
+		// Not ended (queued again), and managed by another installation: what is said follows where it is.
+		$wpdb->update( \WPCheckpoint\Jobs\JobRepository::table(), array( 'status' => Job::QUEUED ), array( 'id' => $held->id ) );
+		foreach ( array(
+			'queued'    => sprintf( 'Restore job %1$d holds the site and has not ended: no job can start until it has. wp wpcheckpoint job status %1$d shows where it is.', $held->id ),
+			'elsewhere' => sprintf( 'Restore job %1$d holds the site and another installation manages it: no job can start until it has ended. wp wpcheckpoint job status %1$d says what can be done from here.', $held->id ),
+		) as $case => $expected ) {
+			if ( 'elsewhere' === $case ) {
+				$wpdb->update( \WPCheckpoint\Jobs\JobRepository::table(), array( 'status' => Job::FAILED, 'held_by' => 'abababababab' ), array( 'id' => $held->id ) );
+				$this->assertFalse( $repo->manages( $repo->find( $held->id ) ), 'the control: managed elsewhere' );
+			}
+			try {
+				$actions->start( 'export', self::$admin_id, array() );
+				$this->fail( $case . ': started while a restore holds the site' );
+			} catch ( JobConflict $e ) {
+				$this->assertSame( esc_html( $expected ), $e->getMessage(), $case );
+			}
+			$this->assertSame( $ids, $this->ids(), $case . ': nothing was created' );
+		}
+
+		// The controls: abandoned from here, the restore no longer holds the site (the same rule as release and the
+		// notices), and a failed restore that never changed the site ($plain) never did: an export starts.
+		$at = time() - 60;
+		$wpdb->update(
+			\WPCheckpoint\Jobs\JobRepository::table(),
+			array(
+				'finished_at'  => $at,
+				'failure_kind' => Job::stamp_failure( Job::FAILURE_FINAL . ':' . Job::REASON_ABANDONED, $at ),
+				'held_by'      => (string) Plugin::instance()->directories()->state()['token'],
+			),
+			array( 'id' => $held->id )
+		);
+		$this->assertSame( array(), $repo->holding_site(), 'the control: abandoned here, it holds nothing' );
+		$this->assertSame( Job::FAILED, $repo->find( $plain->id )->status, 'the control: a failed restore that does not hold the site' );
+		$export = $actions->start( 'export', self::$admin_id, array() );
+		$this->assertSame( Job::QUEUED, $export->status );
+		$this->assertSame( Job::CANCELLED, $repo->find( $estimate->id )->status, 'and the estimate gave way to it' );
+	}
+
+	public function test_a_retry_while_another_job_holds_the_site_is_refused_and_the_holder_is_retried(): void {
+		$repo   = Plugin::instance()->jobs();
+		$held   = $this->holding();
+		$export = $this->failed( 'export' );
+		try {
+			Plugin::instance()->job_actions()->retry( $export->id );
+			$this->fail( 'an export retried while a restore holds the site' );
+		} catch ( JobConflict $e ) {
+			$this->assertStringStartsWith( sprintf( 'Restore job %d stopped partway through and holds the site', $held->id ), $e->getMessage() );
+		}
+		$this->assertSame( Job::FAILED, $repo->find( $export->id )->status, 'still failed, not queued' );
+		// The control: the restore that holds the site is retried, the way to put the site right.
+		$this->assertSame( Job::QUEUED, Plugin::instance()->job_actions()->retry( $held->id )->status );
+	}
+
 	public function test_nothing_starts_during_a_restore_and_a_started_job_is_not_discarded(): void {
 		$repo    = Plugin::instance()->jobs();
 		$restore = $repo->create( 'restore', self::$admin_id, array(), array( 'base' => 'site-20260923-120000-ab12' ) );
