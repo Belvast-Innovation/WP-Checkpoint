@@ -56,10 +56,13 @@ final class AtomicFile {
 	 * @param string               $dir      Directory (exists).
 	 * @param string               $name     File name (no separator; a name StagingLayout::parse() recognises, as
 	 *                                       its temporary name must be too, one of ROOT_FILES in a staging root, or
-	 *                                       the maintenance file in ABSPATH, whose temporary names the residue
-	 *                                       catalogue knows there: Residue::scan_maintenance()).
+	 *                                       the maintenance file or its data file in ABSPATH, whose temporary names
+	 *                                       the residue catalogue knows there: Residue::scan_maintenance()).
 	 * @param string               $contents Contents (at most MAX_BYTES).
-	 * @param array<string, mixed> $options  "confirm": function(): void, called right before the rename (throws to
+	 * @param array<string, mixed> $options  "check": function( string $temporary ): void, called with the written
+	 *                                       temporary file before "confirm" (throws to stop; the temporary file is
+	 *                                       removed);
+	 *                                       "confirm": function(): void, called right before the rename (throws to
 	 *                                       stop; the temporary file is removed);
 	 *                                       "at" (tests): function( string $stage ): void at "written" (before the
 	 *                                       rename) and "renamed" (before the read-back), where throwing stands in
@@ -75,13 +78,14 @@ final class AtomicFile {
 		// a probe's name, or a protection file of a staging root (the root is reclaimed whole, whatever is in it).
 		$registered = null !== StagingLayout::parse( $name ) && null !== StagingLayout::parse( $name . $suffix );
 		$protection = in_array( $name, self::ROOT_FILES, true ) && 'stage' === ( StagingLayout::parse( basename( rtrim( $dir, '/\\' ) ) )['kind'] ?? '' );
-		$upgrading  = '.maintenance' === $name && self::maintenance_dir( $dir );
+		$upgrading  = in_array( $name, array( '.maintenance', '.wpcheckpoint-maintenance.php' ), true ) && self::maintenance_dir( $dir );
 		if ( '' === $name || false !== strpbrk( $name, "/\\\0" ) || ! ( $registered || $protection || $upgrading ) ) {
 			throw new \InvalidArgumentException( 'Not a file name this plugin writes.' );
 		}
 		if ( strlen( $contents ) > self::MAX_BYTES ) {
 			throw new \InvalidArgumentException( 'Too large to write this way.' );
 		}
+		$check   = isset( $options['check'] ) && is_callable( $options['check'] ) ? $options['check'] : null;
 		$confirm = isset( $options['confirm'] ) && is_callable( $options['confirm'] ) ? $options['confirm'] : null;
 		$at      = isset( $options['at'] ) && is_callable( $options['at'] ) ? $options['at'] : null;
 		$final   = rtrim( $dir, '/\\' ) . DIRECTORY_SEPARATOR . $name;
@@ -106,6 +110,14 @@ final class AtomicFile {
 		}
 		if ( null !== $at ) {
 			call_user_func( $at, 'written' );
+		}
+		if ( null !== $check ) {
+			try {
+				call_user_func( $check, $temp );
+			} catch ( \Throwable $e ) {
+				@unlink( $temp ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
+				throw $e;
+			}
 		}
 		if ( null !== $confirm ) {
 			try {

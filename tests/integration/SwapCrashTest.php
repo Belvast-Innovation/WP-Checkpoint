@@ -458,8 +458,8 @@ final class SwapCrashTest extends SwapTestCase {
 			$this->seams[] = $point;
 			if ( in_array( $point, array( 'maintenance', 'dir_aside', 'dir_in', 'carried', 'batch_recorded', 'flushed', 'rewrite', 'cron' ), true ) ) {
 				$file = new Maintenance( $this->abspath, $this->swap_job->cursor['mark'] ?? Plugin::instance()->jobs()->find( $this->swap_job->id )->cursor['mark'] );
-				$text = (string) file_get_contents( $this->abspath . '/.maintenance' );
-				$time = $file->time_of( $text );
+				$text = (string) file_get_contents( $this->abspath . '/.maintenance' ) . (string) @file_get_contents( $file->data_path() ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- none: asserted below.
+				$time = $file->time();
 				$this->assertNotNull( $time, 'this restore\'s file is up at ' . $point );
 				$this->assertStringNotContainsString( (string) Plugin::instance()->directories()->state()['token'], $text, 'the file in the web root tells nothing of the storage directory' );
 				$this->assertStringContainsString( 'WP Checkpoint restore ', $text, 'the control: the mark is read' );

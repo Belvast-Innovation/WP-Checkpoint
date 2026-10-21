@@ -297,7 +297,7 @@ final class SwapSequencesTest extends SwapTestCase {
 		}
 		$left = Plugin::instance()->jobs()->find( $job->id );
 		$file = new Maintenance( $this->abspath, (string) ( $left->cursor['mark'] ?? '' ) );
-		$written = Maintenance::OURS === $file->state() ? $file->time_of( (string) file_get_contents( $file->path() ) ) : null;
+		$written = Maintenance::OURS === $file->state() ? $file->time() : null;
 		if ( 'clock' === $kind && null !== $written && $written <= time() - 600 ) {
 			++$kinds['clock']; // The killed run left a file WordPress already takes as lapsed.
 		}
@@ -569,6 +569,9 @@ final class SwapSequencesTest extends SwapTestCase {
 		$had  = Maintenance::OURS === $file->state();
 		if ( $had ) {
 			copy( $file->path(), $copy . '/.maintenance' );
+			if ( file_exists( $file->data_path() ) ) {
+				copy( $file->data_path(), $copy . '/' . Maintenance::DATA );
+			}
 		}
 		$there = new \WPCheckpoint\Jobs\JobActions(
 			Plugin::instance()->jobs(),

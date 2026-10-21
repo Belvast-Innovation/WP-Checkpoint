@@ -395,6 +395,71 @@ final class StagingResidueTest extends JobTestCase {
 		}
 	}
 
+	public function test_the_maintenance_data_file_is_reaped_only_once_nothing_reads_it_and_no_job_that_holds_the_site_has_its_mark(): void {
+		global $wpdb;
+		$dir          = \WPCheckpoint\Tests\Fixtures\Sandbox::make( 'maintenance-data' );
+		$this->made[] = $dir;
+		$before       = Residue::replace_maintenance_dir( $dir );
+		$mark         = \WPCheckpoint\Restore\Maintenance::new_mark();
+		$file         = new \WPCheckpoint\Restore\Maintenance( $dir, $mark );
+		$data         = $file->data_path();
+		$put          = static function ( int $age ) use ( $file, $data ): void {
+			file_put_contents( $data, $file->data( time() - 3600 ) );
+			touch( $data, time() - $age );
+		};
+		try {
+			$holder = Plugin::instance()->jobs()->create( \WPCheckpoint\Jobs\RestoreJob::ID, self::$admin_id );
+			$wpdb->update(
+				\WPCheckpoint\Jobs\JobRepository::table(),
+				array(
+					'status'     => Job::FAILED,
+					'site_state' => Job::SITE_CHANGING,
+					'site_mark'  => $mark,
+				),
+				array( 'id' => $holder->id )
+			);
+			$this->assertSame( array( $holder->id ), Plugin::instance()->jobs()->holding_site(), 'the control: it holds the site' );
+			$old = Residue::VERIFY_TTL + 10;
+			// The code reads it: kept, however old.
+			file_put_contents( $dir . '/.maintenance', \WPCheckpoint\Restore\Maintenance::CODE );
+			$put( $old );
+			$wpdb->update( \WPCheckpoint\Jobs\JobRepository::table(), array( 'site_state' => Job::SITE_UNTOUCHED ), array( 'id' => $holder->id ) );
+			$this->reap();
+			$this->assertFileExists( $data, 'the code reads it: kept' );
+			\WPCheckpoint\Tests\Fixtures\Sandbox::remove( $dir . '/.maintenance' );
+			// Nothing reads it, but a job that holds the site has its mark: kept.
+			$wpdb->update( \WPCheckpoint\Jobs\JobRepository::table(), array( 'site_state' => Job::SITE_CHANGING ), array( 'id' => $holder->id ) );
+			$this->reap();
+			$this->assertFileExists( $data, 'a holder\'s mark: kept' );
+			// Nothing reads it and it is fresh (a swap may be between its two files): kept.
+			$wpdb->update( \WPCheckpoint\Jobs\JobRepository::table(), array( 'site_state' => Job::SITE_UNTOUCHED ), array( 'id' => $holder->id ) );
+			$put( 60 );
+			$this->reap();
+			$this->assertFileExists( $data, 'fresh: kept' );
+			// The control: old, read by nothing, and no holder has its mark: reaped.
+			$put( $old );
+			$this->reap();
+			$this->assertFileDoesNotExist( $data, 'reaped' );
+			// Someone else's .maintenance does not read it: reaped all the same.
+			file_put_contents( $dir . '/.maintenance', '<?php $upgrading = time();' );
+			$put( $old );
+			$this->reap();
+			$this->assertFileDoesNotExist( $data, 'someone else\'s .maintenance: reaped' );
+			$this->assertFileExists( $dir . '/.maintenance', 'never the maintenance file itself' );
+			// Uninstall: removed unless the code reads it.
+			$put( 60 );
+			file_put_contents( $dir . '/.maintenance', \WPCheckpoint\Restore\Maintenance::CODE );
+			update_option( Uninstaller::OPTION_DELETE_DATA, false );
+			Uninstaller::run();
+			$this->assertFileExists( $data, 'uninstall: the code reads it, kept' );
+			\WPCheckpoint\Tests\Fixtures\Sandbox::remove( $dir . '/.maintenance' );
+			Uninstaller::run();
+			$this->assertFileDoesNotExist( $data, 'uninstall: removed' );
+		} finally {
+			Residue::replace_maintenance_dir( $before );
+		}
+	}
+
 	public function test_on_a_network_uploads_is_the_main_sites_from_any_site(): void {
 		if ( ! is_multisite() ) {
 			$this->markTestSkipped( 'Multisite only.' );

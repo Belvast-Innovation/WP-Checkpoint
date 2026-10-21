@@ -448,7 +448,8 @@ abstract class SwapTestCase extends RestoreTestCase {
 				'fence row'   => $fence,
 				'maintenance' => is_file( $file ) ? array(
 					'mtime'   => filemtime( $file ),
-					'content' => substr( (string) file_get_contents( $file ), 0, 600 ),
+					'content' => substr( (string) file_get_contents( $file ), 0, 1600 ),
+					'data'    => is_file( ABSPATH . \WPCheckpoint\Restore\Maintenance::DATA ) ? (string) file_get_contents( ABSPATH . \WPCheckpoint\Restore\Maintenance::DATA ) : 'none',
 				) : 'none',
 				'lock files'  => $locks,
 				'schema'      => \WPCheckpoint\Support\Options::get( \WPCheckpoint\Support\Schema::OPTION, null ),
@@ -640,6 +641,71 @@ abstract class SwapTestCase extends RestoreTestCase {
 	}
 
 	/**
+	 * Write a restore's maintenance file into the stand-in ABSPATH: as the swap writes it ("two": the code and the data
+	 * file), or as #82 wrote it ("single").
+	 *
+	 * @param string $mark The restore's mark.
+	 * @param int    $time Its time.
+	 * @param string $form "two" or "single".
+	 * @return array<string, string> What maintenance_files() reads now.
+	 */
+	protected function put_maintenance( string $mark, int $time, string $form = 'two' ): array {
+		$file = new \WPCheckpoint\Restore\Maintenance( $this->abspath, $mark );
+		if ( 'single' === $form ) {
+			file_put_contents( $file->path(), $file->legacy( $time ) );
+		} else {
+			file_put_contents( $file->data_path(), $file->data( $time ) );
+			file_put_contents( $file->path(), \WPCheckpoint\Restore\Maintenance::CODE );
+		}
+		return $this->maintenance_files();
+	}
+
+	/**
+	 * The maintenance file and its data file in the stand-in ABSPATH: name => contents, for those that are there.
+	 *
+	 * @return array<string, string>
+	 */
+	protected function maintenance_files(): array {
+		$out = array();
+		foreach ( array( '.maintenance', \WPCheckpoint\Restore\Maintenance::DATA ) as $name ) {
+			clearstatcache( true, $this->abspath . '/' . $name );
+			if ( file_exists( $this->abspath . '/' . $name ) ) {
+				$out[ $name ] = (string) file_get_contents( $this->abspath . '/' . $name );
+			}
+		}
+		return $out;
+	}
+
+	/**
+	 * Copy the maintenance file and its data file (those that are there) from one directory to another: a copy of the
+	 * site's files.
+	 *
+	 * @param string $from Directory.
+	 * @param string $to   Directory.
+	 * @return void
+	 */
+	protected function copy_maintenance( string $from, string $to ): void {
+		foreach ( array( '.maintenance', \WPCheckpoint\Restore\Maintenance::DATA ) as $name ) {
+			if ( file_exists( $from . '/' . $name ) ) {
+				copy( $from . '/' . $name, $to . '/' . $name );
+			}
+		}
+	}
+
+	/**
+	 * Remove the maintenance file and its data file from the stand-in ABSPATH (a sandbox).
+	 *
+	 * @return void
+	 */
+	protected function remove_maintenance(): void {
+		foreach ( array( '.maintenance', \WPCheckpoint\Restore\Maintenance::DATA ) as $name ) {
+			if ( file_exists( $this->abspath . '/' . $name ) ) {
+				\WPCheckpoint\Tests\Fixtures\Sandbox::remove( $this->abspath . '/' . $name );
+			}
+		}
+	}
+
+	/**
 	 * The site as the swap could change it: the sandbox's directories (without the staging roots) and the test's
 	 * tables (rows), and whether a maintenance file is up.
 	 *
@@ -663,7 +729,7 @@ abstract class SwapTestCase extends RestoreTestCase {
 		return array(
 			'files'       => $files,
 			'tables'      => $tables,
-			'maintenance' => file_exists( $this->abspath . '/.maintenance' ),
+			'maintenance' => file_exists( $this->abspath . '/.maintenance' ) || file_exists( $this->abspath . '/' . \WPCheckpoint\Restore\Maintenance::DATA ),
 		);
 	}
 

@@ -16,6 +16,7 @@ use WPCheckpoint\Support\Paths;
 use WPCheckpoint\Support\Redactor;
 use WPCheckpoint\Support\Schema;
 use WPCheckpoint\Support\StoredNames;
+use WPCheckpoint\Restore\Maintenance;
 use WPCheckpoint\Restore\SwapPlan;
 
 defined( 'ABSPATH' ) || exit;
@@ -728,6 +729,28 @@ final class JobRepository {
 		}
 		$row = $wpdb->get_row( $wpdb->prepare( 'SELECT * FROM ' . self::table() . ' WHERE site_mark = %s ORDER BY id DESC LIMIT 1', $mark ), ARRAY_A ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- plugin table name from the prefix.
 		return is_array( $row ) ? self::hydrate( $row ) : null;
+	}
+
+	/**
+	 * Whether a job that holds the site has this site mark, or that cannot be told (the safe direction for removing
+	 * a maintenance data file).
+	 *
+	 * @param string $mark Site mark ('' for a data file with none: no job has it).
+	 * @return bool
+	 */
+	private function holder_has_mark( string $mark ): bool {
+		try {
+			$ids = $this->holding_site();
+		} catch ( \RuntimeException $e ) {
+			return true;
+		}
+		foreach ( $ids as $id ) {
+			$job = $this->find( $id );
+			if ( null === $job || ( '' !== $mark && $mark === $job->site_mark ) ) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**
@@ -2092,12 +2115,16 @@ final class JobRepository {
 			$budget -= $result['deleted'] + count( $result['failed'] );
 			$this->report_reclaim( $entry['kind'] . ' of job ' . $entry['id'], $result );
 		}
-		// The maintenance file's temporary files a swap that died before its rename left in ABSPATH.
+		// The maintenance file's temporary files a swap that died before its rename left in ABSPATH, and its data file
+		// when nothing reads it and no job that holds the site has its mark.
 		foreach ( Residue::scan_maintenance( Residue::maintenance_dir() ) as $entry ) {
 			if ( $budget <= 0 ) {
 				return;
 			}
 			if ( ! Residue::is_expired( $entry, $now ) ) {
+				continue;
+			}
+			if ( Residue::MAINTENANCE_DATA === $entry['kind'] && ( false !== Maintenance::code_in( Residue::maintenance_dir() ) || $this->holder_has_mark( Maintenance::data_mark( Residue::maintenance_dir() ) ) ) ) {
 				continue;
 			}
 			--$budget;

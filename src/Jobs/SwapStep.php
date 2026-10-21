@@ -565,6 +565,12 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			$context->logger()->info( 'Another maintenance file is in place; the swap waits for it to go' );
 			return StepResult::wait( 60, $cursor, self::other_file( $left ) );
 		}
+		if ( Maintenance::BARE === $state ) {
+			// This plugin's code with no data file of its form: it names no restore (this one's would, from its first
+			// write on), so it is not this restore's to take over or to take down.
+			$context->logger()->info( 'A maintenance file of this plugin\'s without its data file is in place; the swap waits for it to go' );
+			return StepResult::wait( 60, $cursor, __( 'A maintenance file of WP Checkpoint is in the WordPress directory (.maintenance) without the data file that names its restore (.wpcheckpoint-maintenance.php is missing or was changed); the swap waits until it is gone. If wp wpcheckpoint job list shows no restore that holds this site, remove .maintenance.', 'wp-checkpoint' ) );
+		}
 		return null;
 	}
 
@@ -1043,7 +1049,8 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 					// Where the restored site is checked before it is let out, behind the held file. Each run that checks
 					// writes the self-check row first (Restore\SelfCheck: a new one-time value and the hash of a new pass
 					// key, in the options table swapped in, in its fenced transaction), so that the self-check route
-					// answers this run and no earlier one. The checks themselves are not made yet (T042): only a "verify"
+					// answers this run and no earlier one, then the hash of the same key into the maintenance file's data
+					// file (held as before), so that the file lets this run's requests through and no earlier run's. The checks themselves are not made yet (T042): only a "verify"
 					// part (tests) can say the site failed (true, or the id of the check that failed: CHECKS), and the
 					// swap is then reversed with nothing of the restored site served. Without the part nothing is checked.
 					// The verdict is made durable before anything acts on it: a run that dies after a failed verdict is
@@ -1054,6 +1061,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 						$nonce = SelfCheck::random();
 						$fence = $context->fence();
 						SelfCheck::put( $db, $fence, SelfCheck::table( self::base_prefix() ), SelfCheck::value( $fence['id'], $nonce, hash( 'sha256', $key ) ) );
+						$this->let_through( $context, $this->maintenance( $cursor ), hash( 'sha256', $key ) );
 						$this->at( 'self_check_written' );
 						$verdict = ! isset( $this->parts['verify'] ) ? true : call_user_func(
 							$this->parts['verify'],
@@ -1074,7 +1082,9 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 				case 'forget':
 					// The self-check row goes once the verdict is recorded and before anything acts on it (the reverse,
 					// the release): a step of its own, done again by a run that takes over after the verdict (none there
-					// is done), so that no outcome leaves it in the site's options table.
+					// is done), so that no outcome leaves it in the site's options table. The maintenance file stops
+					// letting the checks through first (held, with no pass).
+					$this->refresh( $context, $this->maintenance( $cursor ), true );
 					SelfCheck::remove( $db, $context->fence(), SelfCheck::table( self::base_prefix() ) );
 					$this->at( 'self_check_removed' );
 					if ( 'failed' === ( $cursor['verdict'] ?? '' ) ) {
@@ -1391,6 +1401,29 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			throw $e;
 		} catch ( \Throwable $e ) {
 			$context->logger()->warning( $held ? 'The maintenance file could not be kept up during the rollback' : 'The maintenance file could not be refreshed after the swap was made', array( 'error' => $e->getMessage() ) );
+		}
+	}
+
+	/**
+	 * Hold this restore's maintenance file with the hash of this run's pass key, so that it lets the checks' requests
+	 * through. A file that cannot be written now (someone else's in its place, or what is there cannot be told) is
+	 * logged and left: the checks are then blocked like any visitor and can only say they could not check.
+	 *
+	 * @param JobContext  $context   Context.
+	 * @param Maintenance $file      The file.
+	 * @param string      $pass_hash SHA-256 of the pass key.
+	 * @return void
+	 * @throws LockLost When the lease is gone (and StaleJob).
+	 */
+	private function let_through( JobContext $context, Maintenance $file, string $pass_hash ): void {
+		try {
+			$file->hold( array( $context, 'confirm_lease' ), $pass_hash );
+		} catch ( LockLost $e ) {
+			throw $e;
+		} catch ( StaleJob $e ) {
+			throw $e;
+		} catch ( \Throwable $e ) {
+			$context->logger()->warning( 'The maintenance file could not be made to let the checks through', array( 'error' => $e->getMessage() ) );
 		}
 	}
 

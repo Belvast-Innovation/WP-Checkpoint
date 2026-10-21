@@ -12,6 +12,7 @@ use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Files\ScanRoots;
 use WPCheckpoint\Jobs\LockFile;
 use WPCheckpoint\Jobs\Residue;
+use WPCheckpoint\Restore\Maintenance;
 use WPCheckpoint\Jobs\UninstallFence;
 
 defined( 'ABSPATH' ) || exit;
@@ -550,9 +551,13 @@ final class Uninstaller {
 				$result['failed']   = array_merge( $result['failed'], $part['failed'] );
 			}
 		}
-		// A swap that died before its rename left a temporary maintenance file; never the maintenance file itself,
-		// which a swap only leaves while it holds the site (and then nothing is uninstalled).
+		// A swap that died before its rename left a temporary maintenance file, or a data file nothing reads; never the
+		// maintenance file itself, which a swap only leaves while it holds the site (and then nothing is uninstalled),
+		// nor a data file it reads.
 		foreach ( Residue::scan_maintenance( Residue::maintenance_dir() ) as $entry ) {
+			if ( Residue::MAINTENANCE_DATA === $entry['kind'] && false !== Maintenance::code_in( Residue::maintenance_dir() ) ) {
+				continue;
+			}
 			try {
 				if ( Deleter::delete_maintenance_file( Residue::maintenance_dir(), basename( $entry['path'] ), $confirm ) ) {
 					++$result['deleted'];
