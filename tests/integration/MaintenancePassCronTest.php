@@ -113,6 +113,10 @@ final class MaintenancePassCronTest extends WP_UnitTestCase {
 			// The control: once the site is not held, the same request runs the due event in itself.
 			RealAbspath::remove( Maintenance::FILE );
 			RealAbspath::remove( Maintenance::DATA );
+			// WordPress runs no cron for a minute after another process spawned it (doing_cron): another test's WP-CLI
+			// process loading WordPress does, so the lock is cleared first.
+			delete_transient( 'doing_cron' );
+			$wpdb->query( 'COMMIT' );
 			$run = $this->request( null, array( 'DISABLE_WP_CRON' => false ) );
 			$this->assertTrue( $run['loaded'] );
 			$this->assertFalse( $this->scheduled(), 'the event ran in the request: ' . wp_json_encode( $run ) );
