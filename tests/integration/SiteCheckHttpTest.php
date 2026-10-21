@@ -138,8 +138,10 @@ final class SiteCheckHttpTest extends SwapTestCase {
 				$table = SelfCheck::table( $wpdb->base_prefix );
 				$row   = SelfCheck::parse( (string) $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM {$table} WHERE option_name = %s", StoredNames::SELF_CHECK ) ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the options table.
 				$this->assertNotNull( $row, 'the control: the row was written' );
-				$wpdb->update( $table, array( 'option_value' => SelfCheck::value( $row['job'], str_repeat( '9', 64 ), $row['pass'] ) ), array( 'option_name' => StoredNames::SELF_CHECK ) );
+				$other = SelfCheck::value( $row['job'], str_repeat( '9', 64 ), $row['pass'] );
+				$this->assertSame( 1, $wpdb->update( $table, array( 'option_value' => $other ), array( 'option_name' => StoredNames::SELF_CHECK ) ), 'changed: ' . $wpdb->last_error );
 				$wpdb->query( 'COMMIT' );
+				$this->assertSame( $other, (string) $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM {$table} WHERE option_name = %s", StoredNames::SELF_CHECK ) ), 'read back' ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the options table.
 			}
 		};
 		$this->register_type();
