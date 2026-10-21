@@ -21,14 +21,18 @@ use WPCheckpoint\Tests\Fixtures\Restore\SwapTestCase;
  * error page twice fails and the swap is reversed; the route missing (the plugin not active there) cannot be told,
  * and the site is asked about.
  *
- * The addresses are the web server's (WPCHECKPOINT_TEST_LOOPBACK_HOST): the test site's own home is not reachable from
- * here. A broken restored site is stood in for by a page that calls wp_die() with HTTP 500 (the swap here changes the
+ * The web server's WordPress answers at its own address (its WP_HOME, read from its REST index), which is not reachable
+ * from here, and redirects any other (even another port) there: the checks ask for its address, and the requests are
+ * sent to the web server (WPCHECKPOINT_TEST_LOOPBACK_HOST) with that address's Host header. A broken restored site is stood in for by a page that calls wp_die() with HTTP 500 (the swap here changes the
  * test's sandbox, not the web server's site).
  */
 final class SiteCheckHttpTest extends SwapTestCase {
 
 	/** @var string The web server's address. */
 	private $host = '';
+
+	/** @var string The web server's WordPress address (its WP_HOME). */
+	private $home = '';
 
 	/** @var string The page the home check asks for ('' for the home page itself). */
 	private $home_page = '';
@@ -39,6 +43,9 @@ final class SiteCheckHttpTest extends SwapTestCase {
 		if ( '' === $this->host ) {
 			$this->markTestSkipped( 'Needs the web server of the test site (WPCHECKPOINT_TEST_LOOPBACK_HOST).' );
 		}
+		$index      = wp_remote_get( $this->host . '/?rest_route=/', array( 'timeout' => 20 ) );
+		$this->home = rtrim( (string) ( json_decode( (string) wp_remote_retrieve_body( $index ), true )['home'] ?? '' ), '/' );
+		$this->assertMatchesRegularExpression( '#\Ahttps?://[^/]+\z#', $this->home, 'the web server\'s WordPress says its address' );
 		$this->abspath               = RealAbspath::claim();
 		$this->swap_parts['abspath'] = $this->abspath;
 		$this->swap_parts['sleep']   = static function ( int $seconds ): void {
@@ -47,10 +54,15 @@ final class SiteCheckHttpTest extends SwapTestCase {
 		$this->swap_parts['urls']    = function (): array {
 			$fresh = 'wpcheckpoint_check=' . bin2hex( random_bytes( 6 ) );
 			return array(
-				'home'  => $this->host . ( '' === $this->home_page ? '/' : $this->home_page ) . '?' . $fresh,
-				'login' => $this->host . '/wp-login.php?' . $fresh,
-				'self'  => $this->host . '/?rest_route=' . SelfCheck::PATH . '&' . $fresh,
+				'home'  => $this->home . ( '' === $this->home_page ? '/' : $this->home_page ) . '?' . $fresh,
+				'login' => $this->home . '/wp-login.php?' . $fresh,
+				'self'  => $this->home . '/?rest_route=' . SelfCheck::PATH . '&' . $fresh,
 			);
+		};
+		$this->swap_parts['http']    = function ( string $url, array $headers ): array {
+			$this->assertStringStartsWith( $this->home . '/', $url, 'only the site\'s own address is asked for' );
+			$host = (string) wp_parse_url( $this->home, PHP_URL_HOST ) . ( null !== wp_parse_url( $this->home, PHP_URL_PORT ) ? ':' . (int) wp_parse_url( $this->home, PHP_URL_PORT ) : '' );
+			return ( new SwapStep() )->http( $this->host . substr( $url, strlen( $this->home ) ), $headers + array( 'Host' => $host ) );
 		};
 		$this->real_checks = true;
 		$this->register_type();
