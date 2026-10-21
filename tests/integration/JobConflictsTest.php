@@ -120,6 +120,41 @@ final class JobConflictsTest extends JobTestCase {
 		}
 	}
 
+	public function test_a_job_that_cannot_be_retried_says_so_first_and_nothing_gives_way_for_it(): void {
+		global $wpdb;
+		$repo     = Plugin::instance()->jobs();
+		$actions  = Plugin::instance()->job_actions();
+		$running  = $repo->create( 'export', self::$admin_id );
+		$this->assertNotFalse( $repo->acquire( $running->id ), 'the control: an export runs' );
+		$estimate = $repo->create( 'estimate', self::$admin_id );
+		$expired  = $this->failed( 'export' );
+		$wpdb->update( \WPCheckpoint\Jobs\JobRepository::table(), array( 'work_expired_at' => time() ), array( 'id' => $expired->id ) );
+		$abandoned = $this->failed( 'export' );
+		$wpdb->update( \WPCheckpoint\Jobs\JobRepository::table(), array( 'failure_reason' => Job::REASON_ABANDONED ), array( 'id' => $abandoned->id ) );
+		$completed = $repo->create( 'export', self::$admin_id );
+		$wpdb->update( \WPCheckpoint\Jobs\JobRepository::table(), array( 'status' => Job::COMPLETED ), array( 'id' => $completed->id ) );
+		foreach ( array(
+			'its work files reclaimed' => array( $expired->id, 'cannot be retried' ),
+			'abandoned'                => array( $abandoned->id, 'was abandoned' ),
+			'not failed'               => array( $completed->id, 'cannot go from completed to queued' ),
+		) as $case => list( $id, $said ) ) {
+			try {
+				$actions->retry( $id );
+				$this->fail( $case . ': retried' );
+			} catch ( \WPCheckpoint\Jobs\InvalidTransition $e ) {
+				$this->assertStringContainsString( $said, $e->getMessage(), $case . ': why it cannot be retried, not the job it would conflict with' );
+			}
+		}
+		$this->assertSame( Job::QUEUED, $repo->find( $estimate->id )->status, 'nothing gave way for a retry that could not happen' );
+		// The control: a job that can be retried, next to the running export, is refused for the conflict.
+		try {
+			$actions->retry( $this->failed( 'export' )->id );
+			$this->fail( 'retried next to a running export' );
+		} catch ( JobConflict $e ) {
+			$this->assertStringStartsWith( sprintf( 'A backup is already being made (job %d)', $running->id ), $e->getMessage() );
+		}
+	}
+
 	public function test_a_retry_cancels_an_estimate_and_holds_the_start_lock(): void {
 		$repo     = Plugin::instance()->jobs();
 		$actions  = Plugin::instance()->job_actions();

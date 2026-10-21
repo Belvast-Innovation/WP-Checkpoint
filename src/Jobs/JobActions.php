@@ -1082,7 +1082,9 @@ final class JobActions {
 	 * Queue a failed job again; the cursor is kept. Under the start lock and by the rules a new job of its type
 	 * starts by (JobConflicts), against every other active job: a job queued again is as much a job that starts as
 	 * a new one, and a retry next to a job it must not run with is refused with the reason, the job left failed. The
-	 * jobs that give way (an estimate) are cancelled as before a new export or restore.
+	 * jobs that give way (an estimate) are cancelled as before a new export or restore. Whether the job can be
+	 * retried at all (the state machine, JobRepository::check_retry()) is checked first, on the job read under the
+	 * lock: a job that cannot be retried says so, and nothing gives way for it.
 	 *
 	 * @param int $id Job id.
 	 * @return Job|null Null when the job does not exist.
@@ -1100,6 +1102,13 @@ final class JobActions {
 			throw new JobsUnavailable( 'Another job is being started right now; try again in a moment.' );
 		}
 		try {
+			// Read again under the lock, and whether it can be retried at all before anything else is weighed.
+			$job = $this->repository->find( $id );
+			if ( null === $job ) {
+				return null;
+			}
+			( clone $job )->transition( Job::QUEUED );
+			$this->repository->check_retry( $job );
 			$others = array_values(
 				array_filter(
 					$this->active(),
