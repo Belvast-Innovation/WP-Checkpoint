@@ -14,6 +14,7 @@ use WPCheckpoint\Restore\ImportSession;
 use WPCheckpoint\Restore\IncomingTables;
 use WPCheckpoint\Restore\Ledger;
 use WPCheckpoint\Restore\Maintenance;
+use WPCheckpoint\Restore\SelfCheck;
 use WPCheckpoint\Restore\Queries;
 use WPCheckpoint\Restore\RestoreFiles;
 use WPCheckpoint\Restore\SiteChanged;
@@ -80,9 +81,9 @@ defined( 'ABSPATH' ) || exit;
  * guessed.
  *
  * After the swap is made: caches flushed (behind the held file), the
- * restored site verified where the "verify" part says so (the place of the
- * checks of 4c-B; without the part nothing is checked), the file
- * let go, the restored rewrite rules removed (WordPress builds them again),
+ * self-check row written and the restored site verified where the "verify"
+ * part says so (the place of the checks of 4c-B; without the part nothing is
+ * checked), the self-check row deleted, the file let go, the restored rewrite rules removed (WordPress builds them again),
  * a mark left in the restored options for the plugin to set its fallback
  * events again on its next request (Plugin), the cache flushed again, the
  * end recorded ("done"), the file taken down: each a step of its own, with
@@ -174,8 +175,9 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * array (group => directory), "random" function(): string (hex for the names of what is moved out of the
 	 * way), "limit" function(): string (in place of reading max_execution_time back), "batch" (bytes of a batch
 	 * of renames, in place of SwapRules::limit()), "remove" function( Maintenance $file, callable $confirm ): bool
-	 * (in place of taking the maintenance file down), "verify" function( JobContext ): true|string (whether the
-	 * restored site passed its checks, in place of the checks 4c-B will make; a string, the id of the check that
+	 * (in place of taking the maintenance file down), "verify" function( JobContext, array{key: string, nonce:
+	 * string} ): true|string (whether the restored site passed its checks, in place of the checks 4c-B will make,
+	 * given the run's pass key and the one-time value of the self-check row; a string, the id of the check that
 	 * failed (CHECKS), reverses the swap), "left" function( string $dir, callable $lease ): array (in place of
 	 * JobActions::release_left()).
 	 *
@@ -981,7 +983,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * run goes forward again), then the site put back from what is there exactly as the rollback does it (the
 	 * maintenance file held before the first rename, the directories and the tables in reverse plan order, "restored"
 	 * recorded while the file is held, "reverted" once it is let go, the file taken down), and the job ended with
-	 * the reason. Called from the "verify" post-swap step while the file is still held (nothing of the restored site
+	 * the reason. Called from the "forget" post-swap step (after a failed verdict) while the file is still held (nothing of the restored site
 	 * was served). There is no undo yet: 4c-C calls it from a job that ended.
 	 *
 	 * @param JobContext           $context Context.
@@ -1038,23 +1040,45 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 					$cursor['post'] = 'verify';
 					break;
 				case 'verify':
-					// Where the restored site is checked before it is let out, behind the held file (4c-B's HTTP checks
-					// pass it with a one-time key the maintenance file lets through; its self-check reads the tables): the
-					// checks themselves are 4c-B's; here only a "verify" part (tests) can say the site failed (true, or the id
-					// of the check that failed: CHECKS), and the swap is then reversed with nothing of the restored site
-					// served. Without the part nothing is checked. The verdict is made durable before anything acts on
-					// it: a run that dies after a failed verdict is continued by one that reads the verdict, not by one
-					// that checks again (the second check may be unable to decide, and a site found broken would stay).
+					// Where the restored site is checked before it is let out, behind the held file. Each run that checks
+					// writes the self-check row first (Restore\SelfCheck: a new one-time value and the hash of a new pass
+					// key, in the options table swapped in, in its fenced transaction), so that the self-check route
+					// answers this run and no earlier one. The checks themselves are not made yet (T042): only a "verify"
+					// part (tests) can say the site failed (true, or the id of the check that failed: CHECKS), and the
+					// swap is then reversed with nothing of the restored site served. Without the part nothing is checked.
+					// The verdict is made durable before anything acts on it: a run that dies after a failed verdict is
+					// continued by one that reads the verdict, not by one that checks again (the second check may be
+					// unable to decide, and a site found broken would stay).
 					if ( ! isset( $cursor['verdict'] ) ) {
-						$verdict = ! isset( $this->parts['verify'] ) ? true : call_user_func( $this->parts['verify'], $context );
+						$key   = SelfCheck::random();
+						$nonce = SelfCheck::random();
+						$fence = $context->fence();
+						SelfCheck::put( $db, $fence, SelfCheck::table( self::base_prefix() ), SelfCheck::value( $fence['id'], $nonce, hash( 'sha256', $key ) ) );
+						$this->at( 'self_check_written' );
+						$verdict = ! isset( $this->parts['verify'] ) ? true : call_user_func(
+							$this->parts['verify'],
+							$context,
+							array(
+								'key'   => $key,
+								'nonce' => $nonce,
+							)
+						);
 						$this->at( 'verified' );
 						$cursor['verdict'] = true === $verdict ? 'passed' : 'failed';
 						$cursor['check']   = true === $verdict ? '' : ( is_string( $verdict ) && isset( self::CHECKS[ $verdict ] ) ? $verdict : 'unknown' );
 						$context->checkpoint( $cursor, 86, __( 'Checking the restored site', 'wp-checkpoint' ) );
 						$this->at( 'passed' === $cursor['verdict'] ? 'verdict_recorded' : 'verify_failed' );
 					}
-					if ( 'failed' === $cursor['verdict'] ) {
-						throw $this->reverse( $context, $db, $cursor, self::REVERSED, (string) $cursor['check'] );
+					$cursor['post'] = 'forget';
+					break;
+				case 'forget':
+					// The self-check row goes once the verdict is recorded and before anything acts on it (the reverse,
+					// the release): a step of its own, done again by a run that takes over after the verdict (none there
+					// is done), so that no outcome leaves it in the site's options table.
+					SelfCheck::remove( $db, $context->fence(), SelfCheck::table( self::base_prefix() ) );
+					$this->at( 'self_check_removed' );
+					if ( 'failed' === ( $cursor['verdict'] ?? '' ) ) {
+						throw $this->reverse( $context, $db, $cursor, self::REVERSED, (string) ( $cursor['check'] ?? '' ) );
 					}
 					unset( $cursor['verdict'], $cursor['check'] );
 					$cursor['post'] = 'release';

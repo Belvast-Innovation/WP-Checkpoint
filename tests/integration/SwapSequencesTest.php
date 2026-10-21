@@ -41,6 +41,9 @@ use WPCheckpoint\Tests\Fixtures\Restore\SwapTestCase;
  * pass, or be unable to decide, the second time).
  * - I7: once any run's check found the restored site broken (verify_failed), the job does not end with the restored
  *   site in place: whatever the next run would find, the site ends as it was.
+ * - I8: the self-check row (Restore\SelfCheck) is in the site's options table exactly while a run checks the site
+ *   (killed after writing it and before the step that deletes it), and no outcome leaves it: a run that takes over
+ *   after the verdict was recorded deletes it before acting on the verdict.
  *
  * Fixed: the seams in order, one sequence each (WPCHECKPOINT_SWAP_SEQUENCES more are drawn with
  * WPCHECKPOINT_SWAP_SEQUENCES_SEED). Every seam and every kind of interleaving must occur, counted where it happened.
@@ -48,7 +51,7 @@ use WPCheckpoint\Tests\Fixtures\Restore\SwapTestCase;
 final class SwapSequencesTest extends SwapTestCase {
 
 	/** The seams of the swap going forward (a run killed there once, then WP-CLI to the end). */
-	const FORWARD = array( 'entered', 'maintenance', 'dir_aside', 'dir_aside_recorded', 'dir_in', 'carry_written', 'carried', 'batch_recorded', 'batch_sent', 'committed', 'flushed', 'unheld_commit', 'rewrite', 'cron', 'done_recorded', 'exited' );
+	const FORWARD = array( 'entered', 'maintenance', 'dir_aside', 'dir_aside_recorded', 'dir_in', 'carry_written', 'carried', 'batch_recorded', 'batch_sent', 'committed', 'flushed', 'self_check_written', 'verdict_recorded', 'self_check_removed', 'unheld_commit', 'rewrite', 'cron', 'done_recorded', 'exited' );
 
 	/** The seams of the rollback (a run killed between two batches first, then the next one killed there). */
 	const BACKWARD = array( 'rollback', 'table_back', 'dir_back', 'dirs_back', 'restored', 'unheld', 'reverted', 'maintenance_down' );
@@ -62,10 +65,14 @@ final class SwapSequencesTest extends SwapTestCase {
 
 	/**
 	 * The seams of the reverse (the "verify" part fails: a run killed there once after the swap was made, the direction
-	 * recorded again and the site put back by the finishing runs). The first two are before the direction is recorded
-	 * (killed there, the next run verifies and reverses whole); the rest share the rollback's names.
+	 * recorded again and the site put back by the finishing runs). The first four are before the direction is recorded
+	 * (killed at the first two, the next run verifies and reverses whole; at the next two, it reads the verdict); the
+	 * rest share the rollback's names.
 	 */
-	const REVERSE = array( 'flushed', 'verified', 'verify_failed', 'reverse_recorded', 'table_back', 'dir_back', 'dirs_back', 'restored', 'unheld', 'reverted', 'maintenance_down' );
+	const REVERSE = array( 'flushed', 'verified', 'verify_failed', 'self_check_removed', 'reverse_recorded', 'table_back', 'dir_back', 'dirs_back', 'restored', 'unheld', 'reverted', 'maintenance_down' );
+
+	/** The seams at which the self-check row is there (I8): written, and not deleted yet. */
+	const CHECKING = array( 'self_check_written', 'verified', 'verdict_recorded', 'verify_failed' );
 
 	/** The seam after a failed verdict was recorded, before the direction is (I7 starts there). */
 	const FAILED = 'verify_failed';
@@ -137,7 +144,7 @@ final class SwapSequencesTest extends SwapTestCase {
 	}
 
 	public function test_every_seam_and_every_interleaving_keeps_the_invariants(): void {
-		$count = max( 1, (int) ( getenv( 'WPCHECKPOINT_SWAP_SEQUENCES' ) ?: 38 ) );
+		$count = max( 1, (int) ( getenv( 'WPCHECKPOINT_SWAP_SEQUENCES' ) ?: 42 ) );
 		$seed  = (int) ( getenv( 'WPCHECKPOINT_SWAP_SEQUENCES_SEED' ) ?: 1 );
 		// A seam with its path: the rollback's and the reverse's share names.
 		$seams = array();
@@ -147,7 +154,7 @@ final class SwapSequencesTest extends SwapTestCase {
 		foreach ( self::REVERSE as $seam ) {
 			$seams[] = array( 'reverse', $seam );
 		}
-		$this->assertSame( 38, count( $seams ), 'the default count is one sequence per seam' );
+		$this->assertSame( 42, count( $seams ), 'the default count is one sequence per seam' );
 		$this->held_checks = array_fill_keys( self::AT_RENAME, 0 );
 		mt_srand( $seed );
 		$killed = array();
@@ -175,6 +182,22 @@ final class SwapSequencesTest extends SwapTestCase {
 			$this->assertGreaterThan( 0, $times, 'the control: the file was checked held at ' . $point . ' inside a run' );
 		}
 		$this->assertGreaterThan( 0, $this->mark_checks, 'the control: I6 met held files' );
+		$this->assertGreaterThan( 0, $this->rows_seen, 'the control: I8 saw the self-check row a killed run left' );
+	}
+
+	/** @var int Killed runs that left the self-check row (I8's control). */
+	private $rows_seen = 0;
+
+	/**
+	 * The self-check row's value, read past every cache, or null.
+	 *
+	 * @return string|null
+	 */
+	private function self_check_row() {
+		global $wpdb;
+		$wpdb->query( 'COMMIT' );
+		$value = $wpdb->get_var( $wpdb->prepare( 'SELECT option_value FROM `' . \WPCheckpoint\Restore\SelfCheck::table( $wpdb->base_prefix ) . '` WHERE option_name = %s', \WPCheckpoint\Support\StoredNames::SELF_CHECK ) );
+		return is_string( $value ) ? $value : null;
 	}
 
 	/**
@@ -227,7 +250,7 @@ final class SwapSequencesTest extends SwapTestCase {
 		$passed = array_values( array_filter( explode( "\n", (string) file_get_contents( $this->trace ) ) ) );
 		$this->assertSame( $seam, end( $passed ), $label . ': the run died at its seam' );
 		++$killed[ ( $reverse ? 'reverse:' : '' ) . $seam ];
-		if ( $reverse && in_array( $seam, array_slice( self::REVERSE, 3 ), true ) ) {
+		if ( $reverse && in_array( $seam, array_slice( self::REVERSE, 4 ), true ) ) {
 			$this->assertContains( 'committed', $passed, $label . ': the control, the swap was made before it was reversed' );
 			$this->assertContains( self::REVERSING, $passed, $label . ': the control, the reverse was recorded' );
 		}
@@ -241,6 +264,15 @@ final class SwapSequencesTest extends SwapTestCase {
 		}
 		$this->assertSame( '', self::renamed_after_decision( $passed, '' !== $decided ), $label . ': I2, nothing renamed once the direction was recorded (killed run: ' . implode( ', ', $passed ) . ')' );
 		$this->observe( $job, $label, $decided, $public );
+		// I8, where the run died: the row is there exactly while it checks the site.
+		$row = $this->self_check_row();
+		if ( in_array( $seam, self::CHECKING, true ) ) {
+			$this->assertNotNull( $row, $label . ': I8, the row of the run that checks' );
+			$this->assertSame( $job->id, \WPCheckpoint\Restore\SelfCheck::parse( (string) $row )['job'] ?? 0, $label . ': I8, it names the job' );
+			++$this->rows_seen;
+		} else {
+			$this->assertNull( $row, $label . ': I8, no row outside the check' );
+		}
 		$left = Plugin::instance()->jobs()->find( $job->id );
 		$file = new Maintenance( $this->abspath, (string) ( $left->cursor['mark'] ?? '' ) );
 		$written = Maintenance::OURS === $file->state() ? $file->time_of( (string) file_get_contents( $file->path() ) ) : null;
@@ -257,6 +289,7 @@ final class SwapSequencesTest extends SwapTestCase {
 
 		if ( 0 === strpos( $kind, 'elsewhere_' ) && ! $this->elsewhere( $job, $kind, $label, $kinds ) ) {
 			// Abandoned: it never runs again, and the site it held stays as it is; undone here, as at the end.
+			$this->assertNull( $this->self_check_row(), $label . ': I8, no self-check row once it was abandoned' );
 			$this->copy = '';
 			$this->undo( Plugin::instance()->jobs()->find( $job->id ) );
 			$wpdb->query( "DROP TABLE IF EXISTS `{$wpdb->prefix}swt_gone`" );
@@ -440,6 +473,7 @@ final class SwapSequencesTest extends SwapTestCase {
 		}
 		// I4: an ended job leaves none of its files held.
 		$this->assertFalse( Maintenance::held_in( $this->abspath ), $label . ': no held file once the job ended (' . $done->status . ')' );
+		$this->assertNull( $this->self_check_row(), $label . ': I8, no self-check row once the job ended (' . $done->status . ')' );
 		$this->marked( $job, $label . ' (ended)' );
 		if ( '' !== $this->copy ) {
 			// The copy's file, the job ended: released by the mark the job's row kept, whether the database is shared.
