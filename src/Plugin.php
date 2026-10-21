@@ -160,6 +160,10 @@ final class Plugin {
 		Support\AutoUpdateHold::register();
 		// After a restore's swap, the first request with the restored site loaded sets the fallback events again.
 		add_action( 'init', array( $this, 'after_swap' ) );
+		// A request the maintenance file lets through for a restore's checks runs no cron (with ALTERNATE_WP_CRON it
+		// would, in the same request, on the site being checked): the file's code defines DISABLE_WP_CRON, and this
+		// is the second layer.
+		add_filter( 'pre_get_ready_cron_jobs', array( $this, 'no_cron_in_checks' ) );
 
 		if ( defined( 'WP_CLI' ) && WP_CLI ) {
 			\WP_CLI::add_command( 'wpcheckpoint job', new JobCommand( $this->job_actions(), $this->job_presenter(), $this->directories() ) );
@@ -263,6 +267,18 @@ final class Plugin {
 			}
 		}
 		return $out;
+	}
+
+	/**
+	 * No cron job is ready in a request the maintenance file let through for a restore's checks (its pass header is the
+	 * one the file holds the hash of: Restore\Maintenance::passes()); otherwise what was given.
+	 *
+	 * @param mixed $pre What pre_get_ready_cron_jobs was given (null: WordPress reads the cron option).
+	 * @return mixed
+	 */
+	public function no_cron_in_checks( $pre ) {
+		$key = isset( $_SERVER['HTTP_X_WPCHECKPOINT_PASS'] ) ? sanitize_text_field( wp_unslash( (string) $_SERVER['HTTP_X_WPCHECKPOINT_PASS'] ) ) : '';
+		return '' !== $key && Restore\Maintenance::passes( (string) ABSPATH, $key ) ? array() : $pre;
 	}
 
 	/**
