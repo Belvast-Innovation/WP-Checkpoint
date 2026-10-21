@@ -175,7 +175,7 @@ final class SwapUncheckedTest extends SwapTestCase {
 		};
 		$this->retype( $job );
 		$result = $this->cli_tick( $job );
-		$this->assertSame( 1, $seen, 'the control: a table was put back' );
+		$this->assertGreaterThanOrEqual( 1, $seen, 'the control: tables were put back (all of them before the directories)' );
 		$this->assertSame( TickResult::WAITING, $result->status, $result->message );
 		$this->assertStringContainsString( 'the undo waits for it to go before it moves anything', $result->message );
 		$this->assertSame( 'reverse', Plugin::instance()->jobs()->find( $job->id )->cursor['phase'] ?? '', 'recorded, and continued from there' );

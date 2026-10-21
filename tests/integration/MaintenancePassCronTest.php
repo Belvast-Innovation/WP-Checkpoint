@@ -115,7 +115,7 @@ final class MaintenancePassCronTest extends WP_UnitTestCase {
 			RealAbspath::remove( Maintenance::DATA );
 			$run = $this->request( null, array( 'DISABLE_WP_CRON' => false ) );
 			$this->assertTrue( $run['loaded'] );
-			$this->assertFalse( $this->scheduled(), 'the event ran in the request' );
+			$this->assertFalse( $this->scheduled(), 'the event ran in the request: ' . wp_json_encode( $run ) );
 		} finally {
 			foreach ( RealAbspath::listing() as $left ) {
 				RealAbspath::remove( basename( $left ) );
