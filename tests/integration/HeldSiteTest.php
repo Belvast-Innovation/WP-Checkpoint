@@ -650,7 +650,7 @@ final class HeldSiteTest extends SwapTestCase {
 		$tables = $this->tables_of( $job );
 		$this->assertNotSame( array(), $tables, 'the control: it made tables' );
 		$held = \WPCheckpoint\Support\Uninstaller::holding();
-		$this->assertSame( array( 'all' => 1, 'abandoned' => 0 ), $held, 'the control: it holds the site, not abandoned' );
+		$this->assertSame( array( 'all' => 1, 'abandoned' => 0, 'kept' => array() ), $held, 'the control: it holds the site, not abandoned' );
 		$this->assertStringContainsString( 'while a restore holds the site changed;', \WPCheckpoint\Support\Uninstaller::held_back( $held ) );
 		$this->assertStringContainsString( 'Reinstall WP Checkpoint to finish or undo the restore.', \WPCheckpoint\Support\Uninstaller::held_back( $held ), 'the control: said where a reinstall finishes it' );
 		$outcome = $acts->abandon( $job->id, $code );
@@ -668,7 +668,7 @@ final class HeldSiteTest extends SwapTestCase {
 		// An uninstall is held back by every abandoned job, whoever gave it up: which installation this is cannot be
 		// told there (it runs without the plugin; the stored state may be another installation's on a shared database).
 		$held = \WPCheckpoint\Support\Uninstaller::holding();
-		$this->assertSame( array( 'all' => 1, 'abandoned' => 1 ), $held, 'abandoned here: an uninstall is held back' );
+		$this->assertSame( array( 'all' => 1, 'abandoned' => 1, 'kept' => array() ), $held, 'abandoned here: an uninstall is held back' );
 		$this->assertStringContainsString( 'a restore was abandoned (1 of the 1 that hold a site changed): an abandoned restore keeps its tables', \WPCheckpoint\Support\Uninstaller::held_back( $held ), 'and the log says why' );
 		$this->assertStringContainsString( 'They stay until the site the restore was started on takes it over; nothing cleans an abandoned restore up yet.', \WPCheckpoint\Support\Uninstaller::held_back( $held ) );
 		$this->assertStringNotContainsString( 'Reinstall', \WPCheckpoint\Support\Uninstaller::held_back( $held ), 'a reinstall here does not finish it' );
@@ -678,7 +678,7 @@ final class HeldSiteTest extends SwapTestCase {
 		$wpdb->update( JobRepository::table(), array( 'held_by' => self::ELSEWHERE ), array( 'id' => $job->id ) );
 		$wpdb->query( 'COMMIT' );
 		$this->assertContains( $job->id, Plugin::instance()->jobs()->holding_site(), 'abandoned elsewhere: warned about' );
-		$this->assertSame( array( 'all' => 1, 'abandoned' => 1 ), \WPCheckpoint\Support\Uninstaller::holding(), 'abandoned elsewhere: held back' );
+		$this->assertSame( array( 'all' => 1, 'abandoned' => 1, 'kept' => array() ), \WPCheckpoint\Support\Uninstaller::holding(), 'abandoned elsewhere: held back' );
 		$wpdb->update( JobRepository::table(), array( 'held_by' => $own ), array( 'id' => $job->id ) );
 		$wpdb->query( 'COMMIT' );
 		$this->assertNull( $acts->held_elsewhere( $job->id ) );

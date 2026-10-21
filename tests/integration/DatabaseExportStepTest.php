@@ -303,6 +303,9 @@ final class DatabaseExportStepTest extends JobTestCase {
 		for ( $ticks = 0; $ticks < 100 && ( null === $result || TickResult::MORE === $result->status ); $ticks++ ) {
 			$result = $this->runner( 3 )->tick( $job->id, $this->now );
 		}
+		$wpdb->delete( $options, array( 'option_name' => \WPCheckpoint\Support\StoredNames::SELF_CHECK ) ); // The export's ticks committed them.
+		$wpdb->delete( $options, array( 'option_name' => \WPCheckpoint\Support\StoredNames::SELF_CHECK . '_control' ) );
+		$wpdb->query( 'COMMIT' );
 		$this->assertSame( TickResult::COMPLETED, $result->status, (string) $result->message );
 		$sql = '';
 		foreach ( $this->index_lines( $this->repo->find( $job->id ) ) as $line ) {

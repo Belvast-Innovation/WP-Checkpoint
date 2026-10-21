@@ -383,7 +383,7 @@ final class Uninstaller {
 	 * stored state may have been written by another installation sharing this database), and one abandoned from
 	 * elsewhere may have left this site half swapped, its staging what the site was.
 	 *
-	 * @return array{all: int, abandoned: int, kept?: int[]}|null kept: restores whose restored site was kept, their last
+	 * @return array{all: int, abandoned: int, kept: int[]}|null kept: restores whose restored site was kept, their last
 	 *                                                         steps left.
 	 */
 	public static function holding() {
@@ -401,6 +401,7 @@ final class Uninstaller {
 			return array(
 				'all'       => 0,
 				'abandoned' => 0,
+				'kept'      => array(),
 			);
 		}
 		self::expect();
@@ -412,6 +413,7 @@ final class Uninstaller {
 			return array(
 				'all'       => 0,
 				'abandoned' => 0,
+				'kept'      => array(),
 			);
 		}
 		self::expect();
