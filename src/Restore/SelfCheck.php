@@ -115,6 +115,23 @@ final class SelfCheck {
 	}
 
 	/**
+	 * What a backup never holds of it: the row, by its name in the main site's options table (TableExporter's
+	 * exclude_rows). A restore that failed while it checked, and was not tried again, leaves the row; no backup made
+	 * after that carries it.
+	 *
+	 * @return array<string, array{column: string, values: string[]}>
+	 */
+	public static function left_out(): array {
+		global $wpdb;
+		return array(
+			self::table( (string) $wpdb->base_prefix ) => array(
+				'column' => 'option_name',
+				'values' => array( StoredNames::SELF_CHECK ),
+			),
+		);
+	}
+
+	/**
 	 * Write the row (or replace it), in the fenced transaction.
 	 *
 	 * @param Queries                                      $db    The restore's connection.

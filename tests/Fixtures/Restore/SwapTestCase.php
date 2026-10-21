@@ -69,6 +69,15 @@ abstract class SwapTestCase extends RestoreTestCase {
 	/** @var Job|null The job of the test (for tear_down). */
 	protected $swap_job = null;
 
+	/**
+	 * Whether the swap checks the restored site for real (SwapStep's checks through the web server, or its "http" and
+	 * "urls" parts): otherwise, without a "verify" part, the checks are stood in for by one that passes, here and in
+	 * the killed child.
+	 *
+	 * @var bool
+	 */
+	protected $real_checks = false;
+
 	/** @var int Seconds the swap's clock is set off from the real one (here and in the killed child). */
 	protected $clock_offset = 0;
 
@@ -275,7 +284,13 @@ abstract class SwapTestCase extends RestoreTestCase {
 			}
 		}
 		// The test case's restore type ends at the final check (RestoreTestCase); the swap comes after it.
-		$steps[] = new SwapStep( $connect, $more + $this->swap_parts );
+		$parts = $more + $this->swap_parts;
+		if ( ! $this->real_checks && ! isset( $parts['verify'] ) && ! isset( $parts['http'] ) ) {
+			$parts['verify'] = static function (): bool {
+				return true; // The restored site's checks stood in for: passed.
+			};
+		}
+		$steps[] = new SwapStep( $connect, $parts );
 		$this->type = 'restore_swap_' . bin2hex( random_bytes( 3 ) );
 		$this->register( $this->type, $steps );
 	}
@@ -514,6 +529,7 @@ abstract class SwapTestCase extends RestoreTestCase {
 					'packet'  => (int) ( $this->swap_parts['packet'] ?? 0 ),
 					'batch'   => (int) ( $this->swap_parts['batch'] ?? 0 ),
 					'verify'  => isset( $this->swap_parts['verify'] ) ? $this->peek_verdict() : '',
+					'real'    => $this->real_checks,
 					'offset'  => $this->clock_offset,
 					'trace'   => $this->trace,
 					'sql_at'  => $this->child_sql,
