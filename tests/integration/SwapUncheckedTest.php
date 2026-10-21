@@ -177,9 +177,12 @@ final class SwapUncheckedTest extends SwapTestCase {
 		$this->tear_down_swap();
 		$this->set_up_swap();
 		$this->register_type();
-		$job  = $this->at_swap();
-		$mark = (string) Plugin::instance()->jobs()->find( $job->id )->cursor['mark'];
-		$this->assertNotSame( '', $mark, 'the control: the swap has its mark' );
+		$job = $this->at_swap();
+		file_put_contents( $this->abspath . '/.maintenance', "<?php \$upgrading = time(); // an update\n" );
+		$this->assertSame( TickResult::WAITING, $this->cli_tick( $job )->status, 'the control: it waits, its mark recorded' );
+		$mark = (string) ( Plugin::instance()->jobs()->find( $job->id )->cursor['mark'] ?? '' );
+		$this->assertNotSame( '', $mark );
+		$this->remove_maintenance();
 		$this->put_maintenance( $mark, time() - 3600 );
 		Plugin::instance()->job_actions()->cancel( $job->id );
 		$this->assertSame( Job::CANCELLED, Plugin::instance()->jobs()->find( $job->id )->status );
