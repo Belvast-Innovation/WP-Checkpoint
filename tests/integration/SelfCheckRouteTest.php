@@ -127,6 +127,10 @@ final class SelfCheckRouteTest extends WP_UnitTestCase {
 	public function test_the_route_is_registered_only_for_a_request_to_it_while_a_restore_that_holds_the_site_swapped_checks_it(): void {
 		$job = $this->checking();
 		$this->assertContains( SelfCheck::PATH, $this->routes_for( SelfCheck::PATH ), 'the control: a request for it while the restore checks the site' );
+		global $wpdb;
+		$wpdb->update( JobRepository::table(), array( 'status' => Job::QUEUED ), array( 'id' => $job->id ) );
+		$this->assertContains( SelfCheck::PATH, $this->routes_for( SelfCheck::PATH ), 'queued between two ticks of the check' );
+		$wpdb->update( JobRepository::table(), array( 'status' => Job::RUNNING ), array( 'id' => $job->id ) );
 		$this->assertContains( SelfCheck::PATH, $this->routes_for( SelfCheck::PATH . '/' ), 'with a trailing slash too' );
 		$this->assertNotContains( SelfCheck::PATH, $this->routes_for( '/' ), 'a request for the index' );
 		$index = rest_get_server()->get_index( new WP_REST_Request( 'GET', '/' ) )->get_data();
@@ -134,10 +138,11 @@ final class SelfCheckRouteTest extends WP_UnitTestCase {
 		$this->assertArrayNotHasKey( SelfCheck::PATH, $index['routes'], 'and not this one' );
 		$this->assertNotContains( SelfCheck::PATH, $this->routes_for( '/wp-checkpoint/v1/status' ), 'a request for another route' );
 		$this->assertNotContains( SelfCheck::PATH, $this->routes_for( '' ), 'not a REST request' );
-		global $wpdb;
 		foreach ( array(
 			'the job completed'          => array( 'status' => Job::COMPLETED ),
 			'the job failed'             => array( 'status' => Job::FAILED ),
+			'the job paused'             => array( 'status' => Job::PAUSED ),
+			'the job cancelled'          => array( 'status' => Job::CANCELLED ),
 			'the swap is not made'       => array( 'site_state' => Job::SITE_CHANGING ),
 			'the site is not changed'    => array( 'site_state' => Job::SITE_UNTOUCHED ),
 		) as $case => $columns ) {

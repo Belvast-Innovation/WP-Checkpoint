@@ -21,8 +21,8 @@ defined( 'ABSPATH' ) || exit;
 /**
  * The route a restore checks the site it swapped in by (Restore\SelfCheck). It exists only for a request to it while
  * a restore checks that site: registered when the request's REST route is this one, the main site's options table
- * holds the self-check row, and the row's job is a restore that holds the site swapped and has not ended; at any
- * other time it is not registered and is not in the index. It is authenticated by the pass key the row holds the
+ * holds the self-check row, and the row's job is a restore that holds the site swapped and is queued or running (a
+ * failed or paused one checks nothing); at any other time it is not registered and is not in the index. It is authenticated by the pass key the row holds the
  * hash of, not by a login: without the key everyone gets 403, administrators included. This is the third and
  * last documented exception to permission_check().
  */
@@ -79,7 +79,7 @@ final class SelfCheckController extends Controller {
 
 	/**
 	 * Whether the route is to be registered: this request's REST route is the route's, on the main site, and a
-	 * restore that holds the site swapped and has not ended wrote the self-check row.
+	 * restore that holds the site swapped and is queued or running wrote the self-check row.
 	 *
 	 * @return bool
 	 */
@@ -93,7 +93,7 @@ final class SelfCheckController extends Controller {
 			return false;
 		}
 		$job = $this->jobs->find( $row['job'] );
-		return null !== $job && RestoreJob::ID === $job->type && Job::SITE_SWAPPED === $job->site_state && ! $job->is_terminal();
+		return null !== $job && RestoreJob::ID === $job->type && Job::SITE_SWAPPED === $job->site_state && in_array( $job->status, array( Job::QUEUED, Job::RUNNING ), true );
 	}
 
 	/**
