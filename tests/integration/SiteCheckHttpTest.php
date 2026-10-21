@@ -99,7 +99,7 @@ final class SiteCheckHttpTest extends SwapTestCase {
 		$job    = $this->at_swap();
 		$before = $this->site();
 		$done   = $this->through( $job );
-		$this->assertSame( Job::COMPLETED, $done->status, (string) $done->last_error );
+		$this->assertSame( Job::COMPLETED, $done->status, (string) $done->last_error . ' ' . wp_json_encode( $done->cursor['unverified'] ?? null ) );
 		$this->assertContains( 'verdict_recorded', $this->seams );
 		$this->assertNotContains( 'verify_failed', $this->seams );
 		$this->assertRestored( $before );
@@ -123,7 +123,7 @@ final class SiteCheckHttpTest extends SwapTestCase {
 		};
 		$this->register_type();
 		$done = $this->through( $job );
-		$this->assertSame( Job::FAILED, $done->status );
+		$this->assertSame( Job::FAILED, $done->status, wp_json_encode( $done->cursor['unverified'] ?? null ) );
 		$this->assertStringContainsString( SwapStep::CHECKS['self_wrong'], (string) $done->last_error );
 		$this->assertSame( $before, $this->site(), 'put back' );
 		$this->assertSame( array(), RealAbspath::contents() );
