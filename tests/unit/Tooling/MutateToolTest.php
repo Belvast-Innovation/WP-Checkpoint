@@ -9,7 +9,8 @@ use Yoast\PHPUnitPolyfills\TestCases\TestCase;
  * The mutation tool (bin/mutate.php), in a repository of its own in a sandbox, with a stand-in for the tests that
  * records what it saw and fails when it sees the mutated text: it refuses a working tree that is not clean (and leaves
  * it as it is), runs each mutation with its file changed, writes the file back byte for byte, tells caught from
- * survived, and does not run a mutation whose text is not found once or that does not pass php -l.
+ * survived, and does not run a mutation whose text is not found once or that does not pass php -l. A result other than
+ * caught prints the command's exit status and its whole output, standard output and standard error apart.
  */
 final class MutateToolTest extends TestCase {
 
@@ -32,14 +33,17 @@ final class MutateToolTest extends TestCase {
 		mkdir( $this->repo . '/src', 0755, true );
 		file_put_contents( $this->repo . '/src/a.php', self::ORIGINAL );
 		file_put_contents( $this->repo . '/.gitignore', "/build/\n" );
-		// The stand-in for the tests: records what src/a.php held while it ran, fails when it holds "return 2".
+		// The stand-in for the tests: records what src/a.php held while it ran, fails when it holds "return 2"; writes two
+		// lines to each of its outputs, and leaves no log (exit 3) for "nolog".
 		file_put_contents(
 			$this->repo . '/check.php',
 			'<?php
 $name = (string) getenv( "MUTATION" );
 @mkdir( "build" );
 file_put_contents( "build/seen-" . $name . ".txt", file_get_contents( "src/a.php" ) );
-if ( "nolog" === $name ) { exit( 1 ); }
+fwrite( STDOUT, "stand-in stdout of " . $name . "\nits second stdout line\n" );
+fwrite( STDERR, "stand-in stderr of " . $name . "\nits second stderr line\n" );
+if ( "nolog" === $name ) { exit( 3 ); }
 $fail = false !== strpos( file_get_contents( "src/a.php" ), "return 2" );
 file_put_contents( $argv[1], "<?xml version=\"1.0\"?><testsuites><testsuite><testcase name=\"test_a\">" . ( $fail ? "<failure>test_a\nreturns two</failure>" : "" ) . "</testcase></testsuite></testsuites>" );
 exit( $fail ? 1 : 0 );
@@ -188,9 +192,54 @@ exit( $fail ? 1 : 0 );
 		$this->assertStringContainsString( 'broken: not run: php -l fails', $run['out'] );
 		$this->assertNull( $this->seen( 'missing' ) );
 		$this->assertNull( $this->seen( 'broken' ) );
-		$this->assertStringContainsString( 'nolog: no result: the command left no JUnit log', $run['out'] );
+		$this->assertStringContainsString( 'nolog: no result: the command left no JUnit log (exit 3)', $run['out'] );
 		$this->assertNotNull( $this->seen( 'nolog' ), 'the control: the stand-in ran for a mutation that was run' );
 		$this->assertSame( self::ORIGINAL, file_get_contents( $this->repo . '/src/a.php' ) );
 		$this->assertSame( '', $this->git( 'status --porcelain' ) );
+	}
+
+	public function test_a_result_other_than_caught_prints_the_exit_status_and_the_whole_output_each_stream_apart(): void {
+		$run = $this->mutate(
+			array(
+				array(
+					'name' => 'nolog',
+					'file' => 'src/a.php',
+					'old'  => 'return 1;',
+					'new'  => 'return 2;',
+				),
+				array(
+					'name' => 'comment',
+					'file' => 'src/a.php',
+					'old'  => '// one',
+					'new'  => '// uno',
+				),
+				array(
+					'name' => 'two',
+					'file' => 'src/a.php',
+					'old'  => 'return 1;',
+					'new'  => 'return 2;',
+				),
+			)
+		);
+		$this->assertSame( 1, $run['code'], $run['out'] );
+		foreach ( array(
+			'nolog'   => 3,
+			'comment' => 0,
+		) as $name => $status ) {
+			$this->assertStringContainsString(
+				"-- {$name}: exit status {$status}\n-- {$name}: standard output (build/mutate-{$name}.stdout.txt):\nstand-in stdout of {$name}\nits second stdout line\n-- {$name}: standard error (build/mutate-{$name}.stderr.txt):\nstand-in stderr of {$name}\nits second stderr line\n-- {$name}: end of the output\n",
+				$run['out'],
+				$name . ': the exit status and both outputs whole, apart'
+			);
+			$this->assertSame( "stand-in stdout of {$name}\nits second stdout line\n", file_get_contents( $this->repo . "/build/mutate-{$name}.stdout.txt" ), $name . ': standard output kept, without standard error' );
+			$this->assertSame( "stand-in stderr of {$name}\nits second stderr line\n", file_get_contents( $this->repo . "/build/mutate-{$name}.stderr.txt" ), $name . ': standard error kept, without standard output' );
+		}
+		$this->assertStringContainsString( 'nolog: no result: the command left no JUnit log (exit 3); its output is printed above and kept in build/mutate-nolog.stdout.txt and build/mutate-nolog.stderr.txt', $run['out'] );
+		$this->assertStringContainsString( 'comment: SURVIVED: no test failed; its output is printed above and kept in build/mutate-comment.stdout.txt and build/mutate-comment.stderr.txt', $run['out'] );
+		// A caught mutation's output is kept, not printed: the control is that the same text is in its file.
+		$this->assertStringContainsString( 'stand-in stdout of two', (string) file_get_contents( $this->repo . '/build/mutate-two.stdout.txt' ) );
+		$this->assertStringNotContainsString( 'stand-in stdout of two', $run['out'] );
+		$this->assertStringNotContainsString( '-- two:', $run['out'] );
+		$this->assertSame( '', $this->git( 'status --porcelain' ), 'the output files are under build/, which git ignores' );
 	}
 }
