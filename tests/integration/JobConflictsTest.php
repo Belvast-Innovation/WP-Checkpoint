@@ -84,11 +84,11 @@ final class JobConflictsTest extends JobTestCase {
 	/**
 	 * A job that failed (queued, then failed before a driver took it: retryable).
 	 */
-	private function failed( string $type, array $options = array() ): Job {
+	private function failed( string $type, array $options = array(), string $failure = Job::FAILURE_TEMPORARY ): Job {
 		$repo = Plugin::instance()->jobs();
 		$job  = $repo->create( $type, self::$admin_id, array(), $options );
-		$job  = $repo->transition( $job, Job::FAILED, 'Stopped.', '', Job::FAILURE_TEMPORARY );
-		$this->assertTrue( $job->can_retry(), 'the control: it can be retried' );
+		$job  = $repo->transition( $job, Job::FAILED, 'Stopped.', '', $failure );
+		$this->assertTrue( $job->can_retry(), 'the control: its work files are there' );
 		return $job;
 	}
 
@@ -129,10 +129,12 @@ final class JobConflictsTest extends JobTestCase {
 		$estimate = $repo->create( 'estimate', self::$admin_id );
 		$expired  = $this->failed( 'export' );
 		$wpdb->update( \WPCheckpoint\Jobs\JobRepository::table(), array( 'work_expired_at' => time() ), array( 'id' => $expired->id ) );
-		$abandoned = $this->failed( 'export' );
-		$wpdb->update( \WPCheckpoint\Jobs\JobRepository::table(), array( 'failure_reason' => Job::REASON_ABANDONED ), array( 'id' => $abandoned->id ) );
+		$this->assertFalse( $repo->find( $expired->id )->can_retry(), 'the control: recorded as reclaimed' );
+		$abandoned = $this->failed( 'export', array(), Job::FAILURE_FINAL . ':' . Job::REASON_ABANDONED );
+		$this->assertSame( Job::REASON_ABANDONED, $repo->find( $abandoned->id )->failure_reason, 'the control: recorded as abandoned' );
 		$completed = $repo->create( 'export', self::$admin_id );
 		$wpdb->update( \WPCheckpoint\Jobs\JobRepository::table(), array( 'status' => Job::COMPLETED ), array( 'id' => $completed->id ) );
+		$this->assertSame( Job::COMPLETED, $repo->find( $completed->id )->status, 'the control: completed' );
 		foreach ( array(
 			'its work files reclaimed' => array( $expired->id, 'cannot be retried' ),
 			'abandoned'                => array( $abandoned->id, 'was abandoned' ),
