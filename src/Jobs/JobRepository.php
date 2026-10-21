@@ -1689,6 +1689,29 @@ final class JobRepository {
 	// phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
 
 	/**
+	 * What a failed job's retry (a transition to queued) is refused for besides the state machine, checked without
+	 * writing anything: abandoned, or its work files reclaimed. transition() checks it, and JobActions::retry() before
+	 * it weighs the other jobs, so that a job that cannot be retried says so first.
+	 *
+	 * @param Job $job Job (failed).
+	 * @return void
+	 * @throws InvalidTransition When it cannot be retried.
+	 */
+	public function check_retry( Job $job ): void {
+		if ( Job::REASON_ABANDONED === $job->failure_reason ) {
+			// From here, never again. From another installation, only once this one took it over (take_over() lifts
+			// the abandon): queued as it is, only the installation that gave it up would pick it up.
+			$here = $this->abandoned_here( $job );
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+			throw new InvalidTransition( $here ? sprintf( 'Job %d was abandoned; it is not run again.', $job->id ) : sprintf( 'Job %d was abandoned from another installation; take it over here (wp wpcheckpoint job rebind) to run it.', $job->id ) );
+		}
+		if ( ! $job->can_retry() ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+			throw new InvalidTransition( sprintf( 'Job %d: its work files passed their retention period and were reclaimed; it cannot be retried.', $job->id ) );
+		}
+	}
+
+	/**
 	 * Change the status, guarded by the status the caller saw.
 	 *
 	 * Leaving "running" for completed, failed or paused is the lock holder's
@@ -1721,16 +1744,8 @@ final class JobRepository {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
 			throw new InvalidTransition( sprintf( 'Job %d: leaving running for %s requires the lock token.', $job->id, $to ) );
 		}
-		if ( Job::QUEUED === $to && Job::FAILED === $job->status && Job::REASON_ABANDONED === $job->failure_reason ) {
-			// From here, never again. From another installation, only once this one took it over (take_over() lifts
-			// the abandon): queued as it is, only the installation that gave it up would pick it up.
-			$here = $this->abandoned_here( $job );
-			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
-			throw new InvalidTransition( $here ? sprintf( 'Job %d was abandoned; it is not run again.', $job->id ) : sprintf( 'Job %d was abandoned from another installation; take it over here (wp wpcheckpoint job rebind) to run it.', $job->id ) );
-		}
-		if ( Job::QUEUED === $to && Job::FAILED === $job->status && ! $job->can_retry() ) {
-			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
-			throw new InvalidTransition( sprintf( 'Job %d: its work files passed their retention period and were reclaimed; it cannot be retried.', $job->id ) );
+		if ( Job::QUEUED === $to && Job::FAILED === $job->status ) {
+			$this->check_retry( $job );
 		}
 		$answers = isset( $job->options['answers'] ) && is_array( $job->options['answers'] ) ? $job->options['answers'] : array();
 		$forget  = array_values( array_intersect( array_map( 'strval', $forget ), array_map( 'strval', array_keys( $answers ) ) ) );

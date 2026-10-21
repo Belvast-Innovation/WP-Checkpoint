@@ -12,6 +12,7 @@ use WPCheckpoint\Jobs\ExportJob;
 use WPCheckpoint\Jobs\InvalidTransition;
 use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\JobActions;
+use WPCheckpoint\Jobs\JobConflict;
 use WPCheckpoint\Jobs\JobPresenter;
 use WPCheckpoint\Jobs\JobsUnavailable;
 use WPCheckpoint\Jobs\StaleJob;
@@ -444,6 +445,8 @@ final class JobCommand {
 		try {
 			$job = $this->actions->retry( (int) $args[0] );
 		} catch ( JobsUnavailable $e ) {
+			WP_CLI::error( $this->presenter->clean( $e->getMessage() ) );
+		} catch ( JobConflict $e ) {
 			WP_CLI::error( $this->presenter->clean( $e->getMessage() ) );
 		} catch ( InvalidTransition $e ) {
 			$current = $this->actions->find( (int) $args[0] );
