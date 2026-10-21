@@ -64,9 +64,29 @@ final class SiteCheckHttpTest extends SwapTestCase {
 			$host = (string) wp_parse_url( $this->home, PHP_URL_HOST ) . ( null !== wp_parse_url( $this->home, PHP_URL_PORT ) ? ':' . (int) wp_parse_url( $this->home, PHP_URL_PORT ) : '' );
 			return ( new SwapStep() )->http( $this->host . substr( $url, strlen( $this->home ) ), $headers + array( 'Host' => $host ) );
 		};
+		$this->swap_parts['at']      = function ( string $point ): void {
+			$this->seams[] = $point;
+			$this->as_restore( $point );
+		};
 		$this->real_checks = true;
 		$this->register_type();
 		ActivePlugin::on();
+	}
+
+	/**
+	 * While the swap checks the site, its job row says the restore type: the web server's WordPress answers the
+	 * self-check route only for a restore (SelfCheckController::wanted()), and the test's job runs a type of its own
+	 * (the swap with the test's parts). The tick under way has its steps already; the type goes back after the check.
+	 *
+	 * @param string $point The swap's seam.
+	 * @return void
+	 */
+	private function as_restore( string $point ): void {
+		global $wpdb;
+		if ( 'self_check_written' === $point || 'verified' === $point ) {
+			$wpdb->update( \WPCheckpoint\Jobs\JobRepository::table(), array( 'type' => 'self_check_written' === $point ? \WPCheckpoint\Jobs\RestoreJob::ID : $this->type ), array( 'id' => $this->swap_job->id ) );
+			$wpdb->query( 'COMMIT' );
+		}
 	}
 
 	public function tear_down(): void {
@@ -112,6 +132,7 @@ final class SiteCheckHttpTest extends SwapTestCase {
 		$job    = $this->at_swap();
 		$this->swap_parts['at'] = function ( string $point ) use ( $wpdb ): void {
 			$this->seams[] = $point;
+			$this->as_restore( $point );
 			if ( 'self_check_written' === $point ) {
 				// What another options table would answer from: the same job and key, another one-time value.
 				$table = SelfCheck::table( $wpdb->base_prefix );
