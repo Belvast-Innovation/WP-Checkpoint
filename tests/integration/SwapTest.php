@@ -213,6 +213,26 @@ final class SwapTest extends SwapTestCase {
 		}
 	}
 
+	public function test_a_file_with_an_ended_restores_mark_that_it_did_not_write_whole_stays_until_it_is_that_restores_own(): void {
+		$job     = $this->at_swap();
+		$mark    = Maintenance::new_mark();
+		$earlier = $this->earlier_restore( array( 'status' => Job::COMPLETED, 'site_state' => Job::SITE_SWAPPED ), $mark );
+		$own     = ( new Maintenance( $this->abspath, $mark ) )->contents( time() - 3600 );
+		$changed = $own . "\$upgrading = time();\n"; // Someone added to it: no longer the file that restore wrote.
+		file_put_contents( $this->abspath . '/.maintenance', $changed );
+		$result = $this->cli_tick( $job );
+		$this->assertSame( TickResult::WAITING, $result->status );
+		$this->assertStringContainsString( 'Another maintenance file is in the WordPress directory', $result->message );
+		$this->assertSame( $changed, file_get_contents( $this->abspath . '/.maintenance' ), 'it stays as it is' );
+		$taken = sprintf( 'The maintenance file left by restore job %d, which has ended, was taken down', $earlier->id );
+		$this->assertStringNotContainsString( $taken, $this->log_of( Plugin::instance()->jobs()->find( $job->id ) ) );
+		// The control: once it is that restore's own file, it goes, and the log says so.
+		file_put_contents( $this->abspath . '/.maintenance', $own );
+		$done = $this->cli_run( $job );
+		$this->assertSame( Job::COMPLETED, $done->status, (string) $done->last_error );
+		$this->assertStringContainsString( $taken, $this->log_of( $done ) );
+	}
+
 	public function test_the_file_of_an_ended_restore_stays_when_that_job_is_queued_again_right_before_it_goes(): void {
 		global $wpdb;
 		$job     = $this->at_swap();
