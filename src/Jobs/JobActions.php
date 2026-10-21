@@ -259,13 +259,13 @@ final class JobActions {
 
 	/**
 	 * Take down a maintenance file that an earlier restore left in a WordPress directory, for a restore about to put
-	 * up its own: only when it carries the mark a job row here recorded (Job::$site_mark) and that job has ended as
-	 * release() judges it (not_ended()), checked again right before the file goes. A file with a mark that no row
+	 * up its own: only when it is the file a job row here recorded the mark of (Job::$site_mark), and that job has
+	 * ended as release() judges it (not_ended()), read right before the file goes. A file with a mark that no row
 	 * here recorded (copied from another site, or its row purged) stays, and so does anyone else's. The job is not
 	 * changed.
 	 *
 	 * @param string   $dir   The WordPress directory.
-	 * @param callable $lease Called right before the file is deleted, after that check (the restore's lease; throws to
+	 * @param callable $lease Called right before the file is deleted, after that read (the restore's lease; throws to
 	 *                        stop).
 	 * @return array{outcome: string, id: int} outcome: one of the LEFT_* constants; id: the job that recorded the
 	 *                                         mark (0 when none did).
@@ -282,19 +282,13 @@ final class JobActions {
 			);
 		}
 		$file = new Maintenance( $dir, $job->site_mark );
-		if ( '' !== $this->not_ended( $job ) ) {
-			return array(
-				'outcome' => self::LEFT_NOT_ENDED,
-				'id'      => $job->id,
-			);
-		}
 		if ( Maintenance::OURS !== $file->state() ) {
 			return array(
 				'outcome' => self::LEFT_NOT_OURS,
 				'id'      => $job->id,
 			);
 		}
-		$this->held->at( 'left_judged' );
+		$this->held->at( 'left_found' );
 		$late    = false;
 		$confirm = function () use ( $job, $lease, &$late ): void {
 			$now = $this->repository->find( $job->id );

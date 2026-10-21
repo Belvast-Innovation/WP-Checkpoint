@@ -248,9 +248,9 @@ final class SwapTest extends SwapTestCase {
 			new \WPCheckpoint\Jobs\HeldSite(
 				array(
 					'at' => static function ( string $point ) use ( $wpdb, $earlier, &$judged ): void {
-						if ( 'left_judged' === $point ) {
+						if ( 'left_found' === $point ) {
 							++$judged;
-							// A retry between the judgement and the file going: its attempt carries the same mark.
+							// A retry between finding the file and its going: its attempt carries the same mark.
 							$wpdb->update( \WPCheckpoint\Jobs\JobRepository::table(), array( 'status' => Job::QUEUED ), array( 'id' => $earlier->id ) );
 							$wpdb->query( 'COMMIT' );
 						}
@@ -267,7 +267,7 @@ final class SwapTest extends SwapTestCase {
 			)
 		);
 		$result = $this->cli_tick( $job );
-		$this->assertSame( 1, $judged, 'the control: the job was judged ended, and queued again after that' );
+		$this->assertSame( 1, $judged, 'the control: the file was found, and its job queued again after that' );
 		$this->assertSame( TickResult::WAITING, $result->status );
 		$this->assertStringContainsString( sprintf( 'The maintenance file of restore job %1$d is in the WordPress directory', $earlier->id ), $result->message );
 		$this->assertSame( $file, file_get_contents( $this->abspath . '/.maintenance' ), 'checked again right before it goes: it stays' );
