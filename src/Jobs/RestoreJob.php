@@ -46,16 +46,17 @@ defined( 'ABSPATH' ) || exit;
  *
  * 8. SwapStep (WP-CLI only): the restored directories and tables take
  *    the site's place, or the site is put back as it was.
- * The check after the swap and what follows are later parts of T042; no user
- * interface starts this job yet (only tests and, later, the restore
+ * No user interface starts this job yet (only tests and, later, the restore
  * wizard). Options: {base, exclude_tables, policy, unattended}; the backups
  * directory comes from the current storage directories, never from the
  * options. The policy says what to do with each kind of table another
  * installation in the same database may use (IncomingTables): "ask" (the
  * default), "restore" or "exclude"; and what to do with a content group whose
  * directory is not positively this site's (LinkedTargets): "swap" or
- * "exclude", asked when not said. A restore nobody attends
- * ("unattended") is never asked, so it must say all three; missing any
+ * "exclude", asked when not said; and what to do with a restored site that
+ * could not be checked after the swap (UNVERIFIED): "keep" or "undo", asked
+ * when not said. A restore nobody attends ("unattended") is never asked, so
+ * it must say all four; missing any
  * refuses it before anything of the backup is read (RestoreVerifyStep
  * validates the options first).
  */
@@ -70,7 +71,7 @@ final class RestoreJob implements JobType {
 
 	/**
 	 * The policy for a restored site whose checks after the swap could not be made (whether it works could not be
-	 * told): keep it, or undo the swap. The swap does not make those checks yet, so nothing reads it yet (T042).
+	 * told): keep it, or undo the swap (SwapStep, its "forget" and "ask" steps).
 	 */
 	const UNVERIFIED = 'unverified';
 	const KEEP       = 'keep';

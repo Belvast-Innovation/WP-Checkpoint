@@ -436,6 +436,24 @@ final class StagingResidueTest extends JobTestCase {
 			$put( 60 );
 			$this->reap();
 			$this->assertFileExists( $data, 'fresh: kept' );
+			// Written anew between the reaper's look and its deletion (a swap putting up its file): it stays. The
+			// second read of the holders is the one right before the deletion.
+			$put( $old );
+			$reads = 0;
+			$swap  = static function ( string $sql ) use ( &$reads, $put ): string {
+				if ( false !== strpos( $sql, 'WHERE site_state <>' ) && 2 === ++$reads ) {
+					$put( 0 );
+				}
+				return $sql;
+			};
+			add_filter( 'query', $swap );
+			try {
+				$this->reap();
+			} finally {
+				remove_filter( 'query', $swap );
+			}
+			$this->assertSame( 2, $reads, 'the control: read again right before the deletion' );
+			$this->assertFileExists( $data, 'written anew meanwhile: kept' );
 			// The control: old, read by nothing, and no holder has its mark: reaped.
 			$put( $old );
 			$this->reap();

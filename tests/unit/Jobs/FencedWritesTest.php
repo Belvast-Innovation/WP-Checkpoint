@@ -123,6 +123,7 @@ final class FencedWritesTest extends TestCase {
 		'src/Restore/SelfCheck.php'   => array(
 			array( "'INSERT INTO ' . SqlWriter::identifier( \$table ) . ' (option_name, option_value, autoload)", self::LOCKED ),
 			array( "'DELETE FROM ' . SqlWriter::identifier( \$table ) . ' WHERE option_name = ?'", self::LOCKED ),
+			array( "'DELETE FROM ' . SqlWriter::identifier( \$table ) . ' WHERE option_name IN (?)'", self::LOCKED ),
 		),
 		'src/Jobs/TempTableCount.php' => array(),
 		'src/Restore/JobFence.php'    => array(),

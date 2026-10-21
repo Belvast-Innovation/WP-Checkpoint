@@ -45,7 +45,8 @@ final class HeldGuard {
 		if ( null !== $first && ( '' === $first || in_array( $first, self::ALLOWED, true ) ) ) {
 			return '';
 		}
-		return __( 'A restore holds this site: its maintenance file is up and does not lapse (.maintenance in the WordPress directory), and the site\'s tables and directories may be half swapped. Until the restore ends, WP-CLI runs no command here but wp wpcheckpoint (and wp help): wp wpcheckpoint job list shows the restore and what finishes it. If no restore holds the site, remove .maintenance and .wpcheckpoint-maintenance.php from the WordPress directory.', 'wp-checkpoint' );
+		// Not translated: this runs while the plugin's file loads, before WordPress may load translations.
+		return 'A restore holds this site: its maintenance file is up and does not lapse (.maintenance in the WordPress directory), and the site\'s tables and directories may be half swapped. Until the restore ends, WP-CLI runs no command here but wp wpcheckpoint (and wp help): wp wpcheckpoint job list shows the restore and what finishes it. If no restore holds the site, remove .maintenance and .wpcheckpoint-maintenance.php from the WordPress directory.';
 	}
 
 	/**

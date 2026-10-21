@@ -328,7 +328,7 @@ final class MaintenanceTest extends TestCase {
 	 *
 	 * @param string|null $header X-WPCheckpoint-Pass, or null for none.
 	 * @param bool        $cron   Whether DISABLE_WP_CRON is defined (false) before.
-	 * @return array{upgrading: int, cron: mixed}
+	 * @return array{upgrading: int|float, type: string, cron: mixed}
 	 */
 	private function request( $header, bool $cron = false ): array {
 		$runner = $this->dir . '/runner.txt';
@@ -340,7 +340,8 @@ final class MaintenanceTest extends TestCase {
 	require ' . var_export( $this->dir . '/.maintenance', true ) . ';
 	return $upgrading;
 };
-echo json_encode( array( "upgrading" => $run(), "cron" => defined( "DISABLE_WP_CRON" ) ? DISABLE_WP_CRON : null ) );
+$upgrading = $run();
+echo json_encode( array( "upgrading" => $upgrading, "type" => gettype( $upgrading ), "cron" => defined( "DISABLE_WP_CRON" ) ? DISABLE_WP_CRON : null ) );
 '
 		);
 		$out = array();
@@ -388,15 +389,17 @@ echo json_encode( array( "upgrading" => $run(), "cron" => defined( "DISABLE_WP_C
 			$this->assertSame( $through, Maintenance::passes( $this->dir, (string) $header ), $what . ': passes()' );
 			if ( $through ) {
 				$this->assertSame( 0, $run['upgrading'], $what . ': let through (a time long past)' );
+				$this->assertSame( 'integer', $run['type'], $what );
 				$this->assertTrue( $run['cron'], $what . ': no cron in it' );
 			} else {
 				$this->assertNull( $run['cron'], $what . ': DISABLE_WP_CRON left alone' );
+				$this->assertSame( 'double', $run['type'], $what . ': blocked with a time that is not an integer (WordPress\'s check for fatal errors after an edit passes a file whose integer time a request carries)' );
 				if ( 'lapse' === $data ) {
-					$this->assertSame( 1800000000, $run['upgrading'], $what . ': the data file\'s time' );
+					$this->assertEquals( 1800000000, $run['upgrading'], $what . ': the data file\'s time' );
 				} elseif ( in_array( $data, array( 'nodata', 'garbled' ), true ) ) {
 					$this->assertGreaterThanOrEqual( $before, $run['upgrading'], $what . ': blocked (the time now)' );
 				} else {
-					$this->assertSame( Maintenance::held(), $run['upgrading'], $what . ': held' );
+					$this->assertEquals( Maintenance::held(), $run['upgrading'], $what . ': held' );
 				}
 			}
 			$seen[ $through ? 'through' : 'blocked' ] = true;
@@ -410,6 +413,27 @@ echo json_encode( array( "upgrading" => $run(), "cron" => defined( "DISABLE_WP_C
 		// Not the code: passes() lets nothing through, whatever the data file says.
 		file_put_contents( $this->dir . '/.maintenance', $file->legacy( Maintenance::held() ) );
 		$this->assertFalse( Maintenance::passes( $this->dir, $key ) );
+	}
+
+	public function test_the_code_is_pinned_and_every_code_written_is_known(): void {
+		// A change of CODE turns every file an earlier version put up into someone else's unless that version's code
+		// stays in KNOWN_CODES: once a version with it is released, add the old code there, then update this digest.
+		$this->assertSame( 'ffb703a94f78f6b2da4ef5fe748e29f7c888f05eed7b1be58f45b83a42d0ed8b', hash( 'sha256', Maintenance::CODE ) );
+		$this->assertContains( Maintenance::CODE, Maintenance::KNOWN_CODES );
+		$this->assertSame( array_values( array_unique( Maintenance::KNOWN_CODES ) ), Maintenance::KNOWN_CODES );
+	}
+
+	public function test_the_code_can_be_required_twice_in_one_request(): void {
+		file_put_contents( $this->dir . '/.maintenance', Maintenance::CODE );
+		file_put_contents( $this->dir . '/.wpcheckpoint-maintenance.php', $this->ours()->data( Maintenance::held() ) );
+		$twice = static function ( string $path ) {
+			$upgrading = null;
+			require $path;
+			$first = $upgrading;
+			require $path;
+			return array( $first, $upgrading );
+		};
+		$this->assertEquals( array( Maintenance::held(), Maintenance::held() ), $twice( $this->dir . '/.maintenance' ), 'it declares nothing that a second require would declare again' );
 	}
 
 	public function test_the_code_is_checked_before_it_is_put_in_place(): void {

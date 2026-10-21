@@ -44,9 +44,10 @@ final class MaintenancePassCronTest extends WP_UnitTestCase {
 	 *
 	 * @param string|null          $key       The pass header, or none.
 	 * @param array<string, mixed> $constants Constants defined before WordPress loads.
+	 * @param string               $query     More of the query string ("&name=value…").
 	 * @return array{loaded: bool, disable: mixed}
 	 */
-	private function request( $key, array $constants ): array {
+	private function request( $key, array $constants, string $query = '' ): array {
 		$config = $this->dir . '/request-' . bin2hex( random_bytes( 4 ) ) . '.json';
 		file_put_contents(
 			$config,
@@ -54,7 +55,7 @@ final class MaintenancePassCronTest extends WP_UnitTestCase {
 				array(
 					'abspath'   => ABSPATH,
 					'host'      => (string) wp_parse_url( home_url(), PHP_URL_HOST ),
-					'uri'       => '/?wpcheckpoint_nocache=' . bin2hex( random_bytes( 4 ) ),
+					'uri'       => '/?wpcheckpoint_nocache=' . bin2hex( random_bytes( 4 ) ) . $query,
 					'headers'   => null === $key ? array() : array( Maintenance::PASS_HEADER => $key ),
 					'constants' => $constants + array( 'ALTERNATE_WP_CRON' => true, 'WP_HTTP_BLOCK_EXTERNAL' => true ),
 				)
@@ -121,6 +122,37 @@ final class MaintenancePassCronTest extends WP_UnitTestCase {
 			}
 			wp_clear_scheduled_hook( self::HOOK );
 			ActivePlugin::off();
+		}
+	}
+
+	public function test_wordpresss_check_for_fatal_errors_after_an_edit_does_not_get_past_the_file(): void {
+		$scrape = static function ( int $time ): string {
+			return '&wp_scrape_key=' . md5( (string) $time ) . '&wp_scrape_nonce=' . $time;
+		};
+		$file  = new Maintenance( ABSPATH, Maintenance::new_mark() );
+		$quiet = array(
+			'ALTERNATE_WP_CRON' => false,
+			'DISABLE_WP_CRON'   => true, // A request let through runs no cron in the test site's tables.
+		);
+		try {
+			RealAbspath::write( Maintenance::DATA, $file->data( Maintenance::held() ) );
+			RealAbspath::write( Maintenance::FILE, Maintenance::CODE );
+			$this->assertFalse( $this->request( null, $quiet, $scrape( Maintenance::held() ) )['loaded'], 'held: the time is public, and it does not let the request through' );
+			RealAbspath::remove( Maintenance::DATA ); // The code with no data file: blocked with the time now.
+			$now = time();
+			foreach ( range( $now - 1, $now + 3 ) as $time ) {
+				$this->assertFalse( $this->request( null, $quiet, $scrape( $time ) )['loaded'], 'no data file: the time now does not let it through either' );
+			}
+			// The control: the single file #82 wrote holds an integer time, and WordPress lets the same request through
+			// it (the parameters reach WordPress; that form's known limit).
+			RealAbspath::remove( Maintenance::FILE );
+			RealAbspath::write( Maintenance::FILE, $file->legacy( Maintenance::held() ) );
+			$this->assertTrue( $this->request( null, $quiet, $scrape( Maintenance::held() ) )['loaded'], 'the single file: let through' );
+			$this->assertFalse( $this->request( null, $quiet )['loaded'], 'and without the parameters, blocked' );
+		} finally {
+			foreach ( RealAbspath::listing() as $left ) {
+				RealAbspath::remove( basename( $left ) );
+			}
 		}
 	}
 }

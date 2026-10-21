@@ -106,15 +106,19 @@ final class Maintenance {
 	/**
 	 * The code of .maintenance, the same for every restore. WordPress require()s it inside wp_is_maintenance_mode(),
 	 * with $upgrading global: it declares nothing (a second require must not fail), and what else it sets is local.
-	 * passes() is the same rule for the plugin's own code; MaintenanceTest runs both on the same requests.
+	 * passes() is the same rule for the plugin's own code; MaintenanceTest runs both on the same requests. While it
+	 * blocks, $upgrading is a float, never an integer: WordPress lets a request through a maintenance file whose time is
+	 * an integer when it carries that time and its MD5 (wp_scrape_key, wp_scrape_nonce: its check for fatal errors after
+	 * a plugin or theme edit), and a held file's time is public. Pinned (MaintenanceTest): code a released version wrote
+	 * stays in KNOWN_CODES, so that a file it put up is still told as this plugin's.
 	 */
 	const CODE = <<<'CODE'
 <?php
 // WP Checkpoint: a restore holds this site. Its mark, its time and its pass are in .wpcheckpoint-maintenance.php.
-$upgrading         = time();
+$upgrading         = (float) time();
 $wpcheckpoint_data = @file_get_contents( __DIR__ . '/.wpcheckpoint-maintenance.php' );
 if ( is_string( $wpcheckpoint_data ) && 1 === preg_match( '/\A<\?php exit; \?>\nWP Checkpoint restore [0-9a-f]{32}\n([0-9]{1,19})\n([0-9a-f]{64}|-)\n\z/', $wpcheckpoint_data, $wpcheckpoint_found ) ) {
-	$upgrading         = (int) $wpcheckpoint_found[1];
+	$upgrading         = (float) $wpcheckpoint_found[1];
 	$wpcheckpoint_pass = isset( $_SERVER['HTTP_X_WPCHECKPOINT_PASS'] ) && is_string( $_SERVER['HTTP_X_WPCHECKPOINT_PASS'] ) ? $_SERVER['HTTP_X_WPCHECKPOINT_PASS'] : '';
 	if ( '-' !== $wpcheckpoint_found[2] && 1 === preg_match( '/\A[0-9a-f]{64}\z/', $wpcheckpoint_pass ) && hash_equals( $wpcheckpoint_found[2], hash( 'sha256', $wpcheckpoint_pass ) ) ) {
 		$upgrading = 0;
@@ -125,6 +129,12 @@ if ( is_string( $wpcheckpoint_data ) && 1 === preg_match( '/\A<\?php exit; \?>\n
 }
 
 CODE;
+
+	/**
+	 * Every code of .maintenance a version of the plugin wrote (CODE among them): a held file of an earlier version is
+	 * read as this plugin's.
+	 */
+	const KNOWN_CODES = array( self::CODE );
 
 	/**
 	 * The time of a held file (held_for() this PHP's integer size).
@@ -163,7 +173,7 @@ CODE;
 		if ( 1 === preg_match( self::LEGACY_FORM, $code, $legacy ) ) {
 			return self::held() === (int) $legacy[1];
 		}
-		if ( self::CODE !== $code ) {
+		if ( ! in_array( $code, self::KNOWN_CODES, true ) ) {
 			return false;
 		}
 		$data = self::parse( self::look( $dir . DIRECTORY_SEPARATOR . self::DATA ) );
@@ -187,7 +197,7 @@ CODE;
 		if ( 1 === preg_match( self::LEGACY_FORM, $code, $legacy ) ) {
 			return $legacy[2];
 		}
-		$data = self::CODE === $code ? self::parse( self::look( $dir . DIRECTORY_SEPARATOR . self::DATA ) ) : null;
+		$data = in_array( $code, self::KNOWN_CODES, true ) ? self::parse( self::look( $dir . DIRECTORY_SEPARATOR . self::DATA ) ) : null;
 		return null === $data ? '' : $data['mark'];
 	}
 
@@ -203,7 +213,7 @@ CODE;
 		if ( self::UNKNOWN === $kind ) {
 			return null;
 		}
-		return 'file' === $kind && self::CODE === $code;
+		return 'file' === $kind && in_array( $code, self::KNOWN_CODES, true );
 	}
 
 	/**
@@ -229,7 +239,7 @@ CODE;
 	public static function passes( string $dir, string $key ): bool {
 		$dir  = rtrim( $dir, '/\\' );
 		$code = @file_get_contents( $dir . DIRECTORY_SEPARATOR . self::FILE ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- not there: not let through.
-		if ( self::CODE !== $code ) {
+		if ( ! in_array( $code, self::KNOWN_CODES, true ) ) {
 			return false;
 		}
 		$data = @file_get_contents( $dir . DIRECTORY_SEPARATOR . self::DATA ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- as above.
@@ -333,7 +343,7 @@ CODE;
 		if ( 1 === preg_match( self::LEGACY_FORM, $code, $legacy ) ) {
 			return $this->mark === $legacy[2] ? self::OURS : self::OTHER;
 		}
-		if ( self::CODE !== $code ) {
+		if ( ! in_array( $code, self::KNOWN_CODES, true ) ) {
 			return self::OTHER;
 		}
 		$look = self::look( $this->data_path() );
@@ -360,7 +370,7 @@ CODE;
 		if ( 1 === preg_match( self::LEGACY_FORM, $code, $legacy ) ) {
 			return $this->mark === $legacy[2] ? (int) $legacy[1] : null;
 		}
-		$data = self::CODE === $code ? self::parse( self::look( $this->data_path() ) ) : null;
+		$data = in_array( $code, self::KNOWN_CODES, true ) ? self::parse( self::look( $this->data_path() ) ) : null;
 		return null !== $data && $this->mark === $data['mark'] ? $data['time'] : null;
 	}
 
@@ -437,7 +447,7 @@ CODE;
 			}
 		}
 		list( $kind, $code ) = self::look( $this->path() );
-		if ( self::UNKNOWN === $kind || ( 'file' === $kind && self::CODE === $code ) ) {
+		if ( self::UNKNOWN === $kind || ( 'file' === $kind && in_array( $code, self::KNOWN_CODES, true ) ) ) {
 			// CODE (another restore's, once this one's is down) reads the data file: it stays.
 			return self::UNKNOWN !== $kind && self::OURS !== $this->state();
 		}

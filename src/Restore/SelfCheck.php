@@ -18,8 +18,9 @@ defined( 'ABSPATH' ) || exit;
  * self-check route (Rest\SelfCheckController) lets through only a request whose pass header hashes to that hash
  * (passes()), and answers a challenge with HMAC-SHA256 keyed by the one-time value (answer()): an answer that
  * matches says the PHP that served the request read the table the swap put in place. The row is written and
- * deleted by the run that holds the job, in its fenced transaction (put(), remove()), and read with plain SQL on
- * both sides, never through an object cache.
+ * deleted by the run that holds the job, in its fenced transaction (put(), remove()); the route reads it with plain
+ * SQL, never through an object cache (stored()), and the run that checks keeps the one-time value it wrote (read()
+ * reads it back on the restore's connection, for tests).
  */
 final class SelfCheck {
 
@@ -132,7 +133,7 @@ final class SelfCheck {
 	}
 
 	/**
-	 * Write the row (or replace it), in the fenced transaction.
+	 * Write the row (every row of its name deleted first), in the fenced transaction.
 	 *
 	 * @param Queries                                      $db    The restore's connection.
 	 * @param array{table: string, id: int, token: string} $fence The job row and the run's token.
@@ -147,7 +148,10 @@ final class SelfCheck {
 			$fence,
 			static function () use ( $db, $table, $value ): void {
 				JobFence::assert_locked( $db );
-				$db->write( 'INSERT INTO ' . SqlWriter::identifier( $table ) . ' (option_name, option_value, autoload) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE option_value = VALUES(option_value)', array( StoredNames::SELF_CHECK, $value, 'no' ) );
+				// Every row of the name first, then one: an options table without its unique key on option_name (a
+				// damaged or migrated site's) would otherwise gain a row per try, and the route read the first.
+				$db->write( 'DELETE FROM ' . SqlWriter::identifier( $table ) . ' WHERE option_name IN (?)', array( StoredNames::SELF_CHECK ) );
+				$db->write( 'INSERT INTO ' . SqlWriter::identifier( $table ) . ' (option_name, option_value, autoload) VALUES (?, ?, ?)', array( StoredNames::SELF_CHECK, $value, 'no' ) );
 			}
 		);
 	}

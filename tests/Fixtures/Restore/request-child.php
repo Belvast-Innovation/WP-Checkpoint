@@ -26,6 +26,9 @@ $_SERVER['REQUEST_URI']     = (string) $config['uri'];
 $_SERVER['SCRIPT_NAME']     = '/index.php';
 $_SERVER['PHP_SELF']        = '/index.php';
 $_SERVER['SERVER_PROTOCOL'] = 'HTTP/1.1';
+$_SERVER['QUERY_STRING']    = (string) parse_url( (string) $config['uri'], PHP_URL_QUERY );
+parse_str( $_SERVER['QUERY_STRING'], $_GET );
+$_REQUEST = $_GET;
 foreach ( (array) ( $config['headers'] ?? array() ) as $name => $value ) {
 	$_SERVER[ 'HTTP_' . strtoupper( str_replace( '-', '_', (string) $name ) ) ] = (string) $value;
 }

@@ -82,14 +82,20 @@ defined( 'ABSPATH' ) || exit;
  * guessed.
  *
  * After the swap is made: caches flushed (behind the held file), the
- * self-check row written and the restored site verified where the "verify"
- * part says so (the place of the checks of 4c-B; without the part nothing is
- * checked), the self-check row deleted, the file let go, the restored rewrite rules removed (WordPress builds them again),
- * a mark left in the restored options for the plugin to set its fallback
- * events again on its next request (Plugin), the cache flushed again, the
- * end recorded ("done"), the file taken down: each a step of its own, with
- * plain SQL on the restored tables and no WordPress API but the cache flush
- * (the process still holds the old site's plugins). The empty cursor of the
+ * self-check row written and the restored site checked through the web
+ * server (Restore\SiteCheck, behind the held file that lets the checks'
+ * requests through; checked again after waits when it could not be told),
+ * the self-check row deleted; a site that failed is swapped back out with
+ * nothing of it served, one that could not be checked is kept or undone as
+ * the policy or the answer to a question says (asked once it is let out);
+ * then the file let go, the restored rewrite rules removed (WordPress builds
+ * them again), a mark left in the restored options for the plugin to set its
+ * fallback events again on its next request (Plugin), the cache flushed
+ * again, the end recorded ("done"), the file taken down: each a step of its
+ * own, with plain SQL on the restored tables (the process still holds the
+ * old site's plugins); of WordPress's API only the cache flush, the HTTP
+ * requests of the checks, and the options WP_HOME and WP_SITEURL stand for
+ * when wp-config.php defines them. The empty cursor of the
  * ended step, on a job still recorded as holding the site (a run that died
  * between the Runner's two last writes), ends the step without touching
  * anything.
@@ -196,10 +202,11 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * way), "limit" function(): string (in place of reading max_execution_time back), "batch" (bytes of a batch
 	 * of renames, in place of SwapRules::limit()), "remove" function( Maintenance $file, callable $confirm ): bool
 	 * (in place of taking the maintenance file down), "verify" function( JobContext, array{key: string, nonce:
-	 * string} ): true|string (whether the restored site passed its checks, in place of the checks 4c-B will make,
-	 * given the run's pass key and the one-time value of the self-check row; a string, the id of the check that
-	 * failed (CHECKS), reverses the swap), "left" function( string $dir, callable $lease ): array (in place of
-	 * JobActions::release_left()).
+	 * string} ): true|string|array (in place of the checks, given the run's pass key and the one-time value of the
+	 * self-check row: true passed; a string, the id of the check that failed (CHECKS), reverses the swap; an array
+	 * is SiteCheck's result), "http" function( string $url, array $headers ): array (in place of http(), each request
+	 * of the checks), "urls" function(): array (in place of check_urls(), where the checks go), "left" function(
+	 * string $dir, callable $lease ): array (in place of JobActions::release_left()).
 	 *
 	 * @var array<string, mixed>
 	 */
@@ -374,7 +381,8 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		}
 		try {
 			$file = $this->maintenance( $cursor );
-			if ( ! $file->remove() ) {
+			// This restore's file only: a bare one (no data file names its restore) is the holder's to take down.
+			if ( Maintenance::BARE !== $file->state() && ! $file->remove() ) {
 				$context->logger()->warning( 'The restore\'s maintenance file could not be taken down' );
 			}
 		} catch ( \Throwable $e ) {
@@ -859,7 +867,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		$this->at( 'rollback' );
 		$entries = $this->entries( $context, $db, $cursor );
 		$file    = $this->maintenance( $cursor );
-		$this->hold_for_renames( $context, $file );
+		$this->hold_for_renames( $context, $file, ! empty( $cursor['out'] ) );
 		$db->run( 'SET SESSION lock_wait_timeout = ' . self::LOCK_WAIT );
 		$there = $this->there( $db, $entries['tables'] );
 		foreach ( array_reverse( $entries['tables'] ) as $entry ) {
@@ -961,13 +969,20 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * (the site answers with a maintenance page all the same). What cannot be told or written is waited out: nothing
 	 * is renamed without the file held.
 	 *
+	 * A reverse of a site that was let out (an undo answered after the release: $out) waits for someone else's file
+	 * instead: the site has been live, and that file may be an update writing into the directories the reverse moves.
+	 *
 	 * @param JobContext  $context Context.
 	 * @param Maintenance $file    The file.
+	 * @param bool        $out     Whether the site was let out before this reverse.
 	 * @return void
 	 * @throws TransientFailure When it cannot be held now.
 	 */
-	private function hold_for_renames( JobContext $context, Maintenance $file ): void {
+	private function hold_for_renames( JobContext $context, Maintenance $file, bool $out = false ): void {
 		if ( Maintenance::OTHER === $file->state() ) {
+			if ( $out ) {
+				throw new TransientFailure( 'Another maintenance file is in place (an update in progress, for example); the undo waits for it to go before it moves anything.' );
+			}
 			return;
 		}
 		try {
@@ -1009,18 +1024,23 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * run goes forward again), then the site put back from what is there exactly as the rollback does it (the
 	 * maintenance file held before the first rename, the directories and the tables in reverse plan order, "restored"
 	 * recorded while the file is held, "reverted" once it is let go, the file taken down), and the job ended with
-	 * the reason. Called from the "forget" post-swap step (after a failed verdict) while the file is still held (nothing of the restored site
-	 * was served). There is no undo yet: 4c-C calls it from a job that ended.
+	 * the reason. Called from the "forget" post-swap step while the file is still held (nothing of the restored site
+	 * was served): after a failed verdict, and after one that could not tell when the policy says undo; and from
+	 * the "ask" step when the answer is undo (the site was let out: $out). There is no undo of a job that ended yet
+	 * (4c-C).
 	 *
 	 * @param JobContext           $context Context.
 	 * @param Queries              $db      Connection.
 	 * @param array<string, mixed> $cursor  Cursor (its attempt and mark).
 	 * @param string               $reason  Why: one of REASONS.
 	 * @param string               $check   The check that failed (an id of CHECKS), or ''.
+	 * @param bool                 $out     Whether the site was let out before (an undo answered after the release):
+	 *                                      recorded, so that a run that takes over waits for another maintenance file
+	 *                                      too (hold_for_renames()).
 	 * @return \RuntimeException What ends the job, for the caller to throw.
 	 * @throws TransientFailure When what is there cannot be told (the reverse goes on later).
 	 */
-	private function reverse( JobContext $context, Queries $db, array $cursor, string $reason, string $check = '' ): \RuntimeException {
+	private function reverse( JobContext $context, Queries $db, array $cursor, string $reason, string $check = '', bool $out = false ): \RuntimeException {
 		if ( ! isset( self::REASONS[ $reason ] ) ) {
 			$reason = self::REVERSED;
 		}
@@ -1031,6 +1051,9 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			'reason'  => $reason,
 			'check'   => isset( self::CHECKS[ $check ] ) ? $check : '',
 		);
+		if ( $out ) {
+			$cursor['out'] = true;
+		}
 		$context->checkpoint( $cursor, 88, __( 'Putting the site back as it was', 'wp-checkpoint' ) );
 		$context->logger()->warning(
 			'The swap is reversed after it was made',
@@ -1174,7 +1197,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 					$choice = $this->unverified_choice( $context, true );
 					if ( RestoreJob::UNDO === $choice ) {
 						$context->logger()->warning( 'The restored site could not be checked; the swap is undone as chosen' );
-						throw $this->reverse( $context, $db, $cursor, self::UNDONE );
+						throw $this->reverse( $context, $db, $cursor, self::UNDONE, '', true );
 					}
 					if ( RestoreJob::KEEP !== $choice ) {
 						// Open to visitors while it waits for the answer: the file let go would still answer with the
@@ -1522,9 +1545,16 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 				'status'  => 0,
 			);
 		}
+		// The lease is confirmed (and extended) before every request and every wait: a request may take its timeout,
+		// and the checks make a few dozen at most.
+		$http  = isset( $this->parts['http'] ) ? $this->parts['http'] : array( $this, 'http' );
 		$check = new SiteCheck(
-			isset( $this->parts['http'] ) ? $this->parts['http'] : array( $this, 'http' ),
-			function ( int $seconds ): void {
+			static function ( string $url, array $headers ) use ( $context, $http ): array {
+				$context->confirm_lease();
+				return (array) call_user_func( $http, $url, $headers );
+			},
+			function ( int $seconds ) use ( $context ): void {
+				$context->confirm_lease();
 				$this->sleep( $seconds );
 			}
 		);

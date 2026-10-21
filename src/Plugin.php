@@ -228,6 +228,9 @@ final class Plugin {
 				// Managed by another installation: why it is not run here, and what can be done from here.
 				$out[] = $this->job_presenter()->clean( implode( "\n", JobPresenter::held_lines( $held['job'], $held['assessment'] ) ) );
 				continue;
+			} elseif ( $job->awaiting_answer() ) {
+				/* translators: 1: job id, 2: job id */
+				$out[] = sprintf( __( 'Restore job %1$d waits for an answer: whether to keep the restored site, which could not be checked (wp wpcheckpoint job status %2$d says why), or to undo the restore. Answer it on WP Checkpoint\'s admin page, or with wp wpcheckpoint job answer.', 'wp-checkpoint' ), $id, $id );
 			} elseif ( Job::SITE_SWAPPED === $job->site_state ) {
 				/* translators: 1: job id, 2: the command */
 				$out[] = sprintf( __( 'Restore job %1$d is at its last step (the restored site is swapped in). Finish it with: %2$s', 'wp-checkpoint' ), $id, $finish );

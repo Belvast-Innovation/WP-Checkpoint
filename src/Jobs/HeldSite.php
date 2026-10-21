@@ -182,7 +182,12 @@ final class HeldSite {
 			throw new \RuntimeException( $why ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- a message of this class.
 		}
 		$mark = (string) ( $job->cursor['mark'] ?? '' );
-		return '' === $mark || ( new Maintenance( $this->abspath(), $mark ) )->remove();
+		if ( '' === $mark ) {
+			return true;
+		}
+		$file = new Maintenance( $this->abspath(), $mark );
+		// This job's file only (its mark): a bare one names no restore, and is not this job's to take down.
+		return Maintenance::BARE === $file->state() || $file->remove();
 	}
 
 	/**

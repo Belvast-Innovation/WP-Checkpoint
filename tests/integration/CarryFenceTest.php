@@ -164,6 +164,30 @@ final class CarryFenceTest extends SwapTestCase {
 		$this->assertContains( 'carry_written', $seams );
 	}
 
+	public function test_the_self_check_row_is_one_row_in_an_options_table_without_its_unique_key(): void {
+		global $wpdb;
+		$held  = $this->held();
+		$table = $wpdb->prefix . 'swt_keyless_options';
+		$wpdb->query( "CREATE TABLE `{$table}` (`option_id` bigint(20) unsigned NOT NULL AUTO_INCREMENT, `option_name` varchar(191) NOT NULL DEFAULT '', `option_value` longtext NOT NULL, `autoload` varchar(20) NOT NULL DEFAULT 'yes', PRIMARY KEY (`option_id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4" );
+		$wpdb->query( 'COMMIT' );
+		try {
+			$wpdb->insert( $table, array( 'option_name' => StoredNames::SELF_CHECK, 'option_value' => 'an old row' ) );
+			$wpdb->insert( $table, array( 'option_name' => StoredNames::SELF_CHECK, 'option_value' => 'another old row' ) );
+			$wpdb->query( 'COMMIT' );
+			$this->assertSame( 2, (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM `{$table}` WHERE option_name = %s", StoredNames::SELF_CHECK ) ), 'the control: the table takes two rows of a name' );
+			$this->old = ImportSession::open( Credentials::from_wordpress() );
+			$last      = '';
+			for ( $i = 0; $i < 3; $i++ ) {
+				$last = SelfCheck::value( $held['job']->id, SelfCheck::random(), hash( 'sha256', SelfCheck::random() ) );
+				SelfCheck::put( $this->old, $held['fence'], $table, $last );
+			}
+			$wpdb->query( 'COMMIT' );
+			$this->assertSame( array( $last ), $wpdb->get_col( $wpdb->prepare( "SELECT option_value FROM `{$table}` WHERE option_name = %s", StoredNames::SELF_CHECK ) ), 'one row, the last one written' );
+		} finally {
+			$wpdb->query( "DROP TABLE IF EXISTS `{$table}`" );
+		}
+	}
+
 	public function test_the_self_check_row_is_written_and_deleted_under_the_runs_token_and_not_after_a_take_over(): void {
 		global $wpdb;
 		$held      = $this->held();

@@ -2160,16 +2160,33 @@ final class JobRepository {
 			if ( ! Residue::is_expired( $entry, $now ) ) {
 				continue;
 			}
-			if ( Residue::MAINTENANCE_DATA === $entry['kind'] && ( false !== Maintenance::code_in( Residue::maintenance_dir() ) || $this->holder_has_mark( Maintenance::data_mark( Residue::maintenance_dir() ) ) ) ) {
-				continue;
+			$unread  = function () use ( $entry, $now ): bool {
+				// Read again right before the deletion too: a swap may have written a new data file meanwhile (its
+				// code follows), which must not go.
+				clearstatcache( true, $entry['path'] );
+				$mtime = @filemtime( $entry['path'] ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- gone or unreadable: not old enough (it stays).
+				return false !== $mtime && $mtime + Residue::VERIFY_TTL <= $now && false === Maintenance::code_in( Residue::maintenance_dir() ) && ! $this->holder_has_mark( Maintenance::data_mark( Residue::maintenance_dir() ) );
+			};
+			$confirm = null;
+			if ( Residue::MAINTENANCE_DATA === $entry['kind'] ) {
+				if ( ! $unread() ) {
+					continue;
+				}
+				$confirm = static function () use ( $unread ): void {
+					if ( ! $unread() ) {
+						throw new \RuntimeException( 'The data file is read, or was written anew, meanwhile.' );
+					}
+				};
 			}
 			--$budget;
 			try {
-				if ( ! Deleter::delete_maintenance_file( Residue::maintenance_dir(), basename( $entry['path'] ) ) ) {
+				if ( ! Deleter::delete_maintenance_file( Residue::maintenance_dir(), basename( $entry['path'] ), $confirm ) ) {
 					$this->directories->log_event( 'A temporary maintenance file of a restore could not be removed: ' . basename( $entry['path'] ) );
 				}
 			} catch ( DeletionRefused $e ) {
 				$this->directories->log_event( $e->getMessage() );
+			} catch ( \RuntimeException $e ) {
+				continue; // Written anew or read meanwhile: it stays.
 			}
 		}
 		$this->drop_tables_of(

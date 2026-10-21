@@ -111,6 +111,7 @@ final class SwapUncheckedTest extends SwapTestCase {
 		$text = QuestionText::for_job( $paused, Plugin::instance()->directories(), array( Plugin::instance()->job_presenter(), 'clean' ) )[0]['text'] ?? '';
 		$this->assertStringContainsString( 'The restored site could not be checked after the swap: the home page answered HTTP 404.', $text );
 		$this->assertStringContainsString( 'everything written on the site since the swap', $text, 'what undoing costs' );
+		$this->assertStringContainsString( sprintf( 'Restore job %d waits for an answer: whether to keep the restored site', $job->id ), implode( "\n", Plugin::instance()->half_swapped_warnings() ), 'WP-CLI says what it waits for' );
 		Plugin::instance()->job_actions()->answer( $job->id, array( SwapStep::UNVERIFIED_QUESTION => 'keep' ) );
 		$done = $this->through( $job );
 		$this->assertSame( Job::COMPLETED, $done->status, (string) $done->last_error );
@@ -138,6 +139,40 @@ final class SwapUncheckedTest extends SwapTestCase {
 		$this->assertSame( array( true ), array_unique( $held ), 'held again before the first rename back' );
 		$this->assertSame( $before, $this->site(), 'the site as it was' );
 		$this->assertSame( Job::SITE_UNTOUCHED, $done->site_state );
+	}
+
+	public function test_undo_after_the_site_was_let_out_waits_for_someone_elses_maintenance_file(): void {
+		$before = $this->site();
+		$job    = $this->at_swap();
+		$this->asked( $job );
+		$restored = $this->site();
+		Plugin::instance()->job_actions()->answer( $job->id, array( SwapStep::UNVERIFIED_QUESTION => 'undo' ) );
+		$update = "<?php \$upgrading = " . time() . "; // an update\n";
+		file_put_contents( $this->abspath . '/.maintenance', $update );
+		$result = $this->cli_tick( $job );
+		$this->assertSame( TickResult::WAITING, $result->status, $result->message );
+		$this->assertStringContainsString( 'the undo waits for it to go before it moves anything', $result->message );
+		$this->assertSame( array( '.maintenance' => $update ), $this->maintenance_files(), 'left as it was' );
+		$now = $this->site();
+		unset( $now['maintenance'], $restored['maintenance'] );
+		$this->assertSame( $restored, $now, 'nothing moved' );
+		$this->remove_maintenance();
+		$done = $this->through( $job );
+		$this->assertSame( Job::FAILED, $done->status );
+		$this->assertStringContainsString( 'the swap was undone as chosen', (string) $done->last_error );
+		$this->assertSame( $before, $this->site(), 'once it is gone, put back' );
+	}
+
+	public function test_a_cancel_leaves_a_maintenance_file_that_names_no_restore(): void {
+		$job = $this->at_swap();
+		file_put_contents( $this->abspath . '/.maintenance', Maintenance::CODE ); // No data file: it names no restore.
+		$result = $this->cli_tick( $job );
+		$this->assertSame( TickResult::WAITING, $result->status, 'the control: the swap waits for it' );
+		$this->assertStringContainsString( 'without the data file that names its restore', $result->message );
+		Plugin::instance()->job_actions()->cancel( $job->id );
+		$this->assertSame( Job::CANCELLED, Plugin::instance()->jobs()->find( $job->id )->status );
+		$this->assertSame( array( '.maintenance' => Maintenance::CODE ), $this->maintenance_files(), 'not this restore\'s to take down' );
+		$this->remove_maintenance();
 	}
 
 	public function test_the_policy_undo_puts_the_site_back_in_maintenance_mode_without_letting_it_out(): void {
@@ -246,5 +281,42 @@ final class SwapUncheckedTest extends SwapTestCase {
 		$this->assertSame( $own, $this->row(), 'a job that holds the site is not reclaimed: its row stays' );
 		$repo->reclaim_work( $failed );
 		$this->assertNull( $this->row(), 'its own row goes with its work' );
+	}
+
+	public function test_the_checks_stop_at_their_next_request_once_another_run_took_the_job_over(): void {
+		global $wpdb;
+		$this->real_checks        = true;
+		$this->swap_parts['urls'] = static function (): array {
+			return array(
+				'home'  => 'http://site.invalid/?wpcheckpoint_check=1',
+				'login' => 'http://site.invalid/wp-login.php?wpcheckpoint_check=1',
+				'self'  => 'http://site.invalid/?rest_route=' . SelfCheck::PATH,
+			);
+		};
+		$this->register_type();
+		$job      = $this->at_swap();
+		$requests = 0;
+		$taken    = static function () use ( &$requests, $wpdb, $job ) {
+			if ( 1 === ++$requests ) {
+				// Another run takes the job over while this one is in its first request.
+				$wpdb->update( \WPCheckpoint\Jobs\JobRepository::table(), array( 'lock_token' => 'another run' ), array( 'id' => $job->id ) );
+				$wpdb->query( 'COMMIT' );
+			}
+			return new \WP_Error( 'http_request_failed', 'no answer' );
+		};
+		add_filter( 'pre_http_request', $taken );
+		try {
+			for ( $i = 0; $i < 10 && 0 === $requests; $i++ ) {
+				try {
+					$this->cli_tick( $job );
+				} catch ( \Throwable $e ) {
+					$this->assertStringContainsString( 'no longer held', $e->getMessage() );
+				}
+			}
+		} finally {
+			remove_filter( 'pre_http_request', $taken );
+		}
+		$this->assertSame( 1, $requests, 'no request after the one during which the job was taken over' );
+		$this->assertSame( 'another run', Plugin::instance()->jobs()->find( $job->id )->lock_token, 'the control: it was taken over' );
 	}
 }
