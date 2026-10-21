@@ -12,6 +12,7 @@ use WPCheckpoint\Jobs\ExportJob;
 use WPCheckpoint\Jobs\InvalidTransition;
 use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\JobActions;
+use WPCheckpoint\Jobs\JobConflict;
 use WPCheckpoint\Jobs\JobPresenter;
 use WPCheckpoint\Jobs\JobsUnavailable;
 use WPCheckpoint\Jobs\StaleJob;
@@ -372,11 +373,22 @@ final class JobCommand {
 		}
 		\WP_CLI\Utils\format_items( isset( $assoc_args['format'] ) ? (string) $assoc_args['format'] : 'table', $rows, array( 'field', 'value' ) );
 		$held = $this->actions->held_elsewhere( $job->id );
-		if ( null !== $held && ! isset( $assoc_args['format'] ) ) {
+		if ( null !== $held && self::shows_lines( $assoc_args ) ) {
 			foreach ( JobPresenter::held_lines( $held['job'], $held['assessment'] ) as $line ) {
 				WP_CLI::line( $this->presenter->clean( $line ) );
 			}
 		}
+	}
+
+	/**
+	 * Whether status prints lines after its table: only as a table. WP-CLI fills an option left out with the default
+	 * its docblock gives, so "--format" is always there ("table" when not given).
+	 *
+	 * @param array<string, mixed> $assoc_args Options, as WP-CLI passes them.
+	 * @return bool
+	 */
+	public static function shows_lines( array $assoc_args ): bool {
+		return 'table' === (string) ( $assoc_args['format'] ?? 'table' );
 	}
 
 	/**
@@ -444,6 +456,8 @@ final class JobCommand {
 		try {
 			$job = $this->actions->retry( (int) $args[0] );
 		} catch ( JobsUnavailable $e ) {
+			WP_CLI::error( $this->presenter->clean( $e->getMessage() ) );
+		} catch ( JobConflict $e ) {
 			WP_CLI::error( $this->presenter->clean( $e->getMessage() ) );
 		} catch ( InvalidTransition $e ) {
 			$current = $this->actions->find( (int) $args[0] );

@@ -85,6 +85,17 @@ final class JobsControllerTest extends JobTestCase {
 		$this->assertSame( 'finished', $response->get_data()['result'], 'a finished job stays readable' );
 	}
 
+	public function test_a_retry_next_to_a_job_it_must_not_run_with_is_409_with_the_reason(): void {
+		$repo    = Plugin::instance()->jobs();
+		$failed  = $repo->transition( $repo->create( 'export', self::$admin_id ), Job::FAILED, 'Stopped.', '', Job::FAILURE_TEMPORARY );
+		$restore = $repo->create( 'restore', self::$admin_id, array(), array( 'base' => 'site-20260923-120000-ab12' ) );
+		$this->assertNotFalse( $repo->acquire( $restore->id ) );
+		$response = $this->rest( 'POST', 'jobs/' . $failed->id . '/retry' );
+		$this->assertSame( 409, $response->get_status() );
+		$this->assertStringStartsWith( sprintf( 'A restore is in progress (job %d)', $restore->id ), $response->get_data()['message'] ?? '' );
+		$this->assertSame( Job::FAILED, $repo->find( $failed->id )->status );
+	}
+
 	public function test_incompatible_schema_blocks_ticks_and_create_is_503(): void {
 		$this->register( 'plain', array( $this->counting_step( 'p', 1 ) ) );
 		$job = Plugin::instance()->jobs()->create( 'plain' );

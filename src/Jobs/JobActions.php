@@ -555,23 +555,30 @@ final class JobActions {
 	}
 
 	/**
-	 * Create a job, unless it must not run next to the active ones
-	 * (JobConflicts). Checked after the insert against the active jobs with
-	 * a lower id, so two requests racing each other cannot both start: the
-	 * later one sees the earlier and removes itself before anything ran.
+	 * Create a job, unless a job holds the site (held_reason(): nothing is
+	 * created then, and nothing gives way) or it must not run next to the
+	 * active ones (JobConflicts). The latter is checked after the insert
+	 * against the active jobs with a lower id, so two requests racing each
+	 * other cannot both start: the later one sees the earlier and removes
+	 * itself before anything ran.
 	 *
 	 * @param string               $type       Job type.
 	 * @param int                  $owner_user Creating user.
 	 * @param array<string, mixed> $options    Options.
 	 * @return Job
 	 * @throws JobsUnavailable When jobs cannot be created now.
-	 * @throws JobConflict When the job must not run next to an active one (the message says which).
+	 * @throws JobConflict When a job holds the site, or the job must not run next to an active one (the message says
+	 *                     which).
 	 */
 	public function start( string $type, int $owner_user, array $options ): Job {
 		if ( ! $this->repository->lock_starts() ) {
 			throw new JobsUnavailable( 'Another job is being started right now; try again in a moment.' );
 		}
 		try {
+			$held = $this->held_reason();
+			if ( '' !== $held ) {
+				throw new JobConflict( esc_html( $held ) );
+			}
 			if ( in_array( $type, array( JobConflicts::EXPORT, JobConflicts::RESTORE ), true ) ) {
 				$this->cancel_yielding();
 			}
@@ -595,6 +602,39 @@ final class JobActions {
 			}
 		}
 		throw new JobConflict( esc_html( $reason ) );
+	}
+
+	/**
+	 * Why no job may start or be queued again while a job holds the site, or '' when none does: a restore's swap under
+	 * way or stopped partway, until it has ended (JobRepository::holding_site(), the rule of release and the
+	 * notices). An export then would capture a site half restored that looks fine, and anything else would run on
+	 * it. Names the first such job and what can be done with it, by where it is. Jobs that cannot be read are not
+	 * "none".
+	 *
+	 * @return string
+	 * @throws JobsUnavailable When the jobs could not be read.
+	 */
+	private function held_reason(): string {
+		try {
+			$ids = $this->repository->holding_site();
+		} catch ( \RuntimeException $e ) {
+			throw new JobsUnavailable( 'Whether a restore holds the site could not be read; try again in a moment.' );
+		}
+		if ( array() === $ids ) {
+			return '';
+		}
+		$id  = (int) $ids[0];
+		$job = $this->repository->find( $id );
+		if ( null !== $job && ! $this->repository->manages( $job ) ) {
+			/* translators: %d: job id */
+			return sprintf( __( 'Restore job %1$d holds the site and another installation manages it: no job can start until it has ended. wp wpcheckpoint job status %1$d says what can be done from here.', 'wp-checkpoint' ), $id );
+		}
+		if ( null !== $job && Job::FAILED === $job->status ) {
+			/* translators: %d: job id */
+			return sprintf( __( 'Restore job %1$d stopped partway through and holds the site: no job can start until it has ended (a backup now would capture a half restored site). Resolve it with: wp wpcheckpoint job retry %1$d, then wp wpcheckpoint job run %1$d', 'wp-checkpoint' ), $id );
+		}
+		/* translators: %d: job id */
+		return sprintf( __( 'Restore job %1$d holds the site and has not ended: no job can start until it has. wp wpcheckpoint job status %1$d shows where it is.', 'wp-checkpoint' ), $id );
 	}
 
 	/**
@@ -1163,20 +1203,64 @@ final class JobActions {
 	}
 
 	/**
-	 * Queue a failed job again; the cursor is kept.
+	 * Queue a failed job again; the cursor is kept. Under the start lock and by the rules a new job of its type
+	 * starts by (JobConflicts), against every other active job: a job queued again is as much a job that starts as
+	 * a new one, and a retry next to a job it must not run with is refused with the reason, the job left failed. The
+	 * jobs that give way (an estimate) are cancelled as before a new export or restore. Whether the job can be
+	 * retried at all (the state machine, JobRepository::check_retry()) is checked first, on the job read under the
+	 * lock: a job that cannot be retried says so, and nothing gives way for it. While another job holds the site
+	 * (held_reason()) it is refused as a new job is; a job that holds the site itself is retried, the way to put the
+	 * site right.
 	 *
 	 * @param int $id Job id.
 	 * @return Job|null Null when the job does not exist.
 	 * @throws InvalidTransition When the job is not failed.
 	 * @throws StaleJob When the job changed meanwhile.
-	 * @throws JobsUnavailable When the job table lacks columns the retry writes.
+	 * @throws JobsUnavailable When the job table lacks columns the retry writes, another start holds the lock, or the
+	 *                         jobs that hold the site could not be read.
+	 * @throws JobConflict When another job holds the site, or the job must not run next to an active one (the message
+	 *                     says which).
 	 */
 	public function retry( int $id ) {
 		$job = $this->usable( $id );
 		if ( null === $job ) {
 			return null;
 		}
-		$queued = $this->repository->transition( $job, Job::QUEUED );
+		if ( ! $this->repository->lock_starts() ) {
+			throw new JobsUnavailable( 'Another job is being started right now; try again in a moment.' );
+		}
+		try {
+			// Read again under the lock, and whether it can be retried at all before anything else is weighed.
+			$job = $this->repository->find( $id );
+			if ( null === $job ) {
+				return null;
+			}
+			( clone $job )->transition( Job::QUEUED );
+			$this->repository->check_retry( $job );
+			// A job that holds the site is retried to put it right; any other waits until none does, as a new one.
+			$held = $this->repository->holds_site( $job ) ? '' : $this->held_reason();
+			if ( '' !== $held ) {
+				throw new JobConflict( esc_html( $held ) );
+			}
+			$others = array_values(
+				array_filter(
+					$this->active(),
+					static function ( Job $other ) use ( $job ): bool {
+						return $other->id !== $job->id;
+					}
+				)
+			);
+			$reason = JobConflicts::conflict( $job->type, $job->options, $others );
+			if ( '' !== $reason ) {
+				throw new JobConflict( esc_html( $reason ) );
+			}
+			if ( in_array( $job->type, array( JobConflicts::EXPORT, JobConflicts::RESTORE ), true ) ) {
+				$this->cancel_yielding();
+			}
+			$queued = $this->repository->transition( $job, Job::QUEUED );
+		} finally {
+			$this->repository->unlock_starts();
+		}
 		Loopback::schedule( $id, Loopback::FALLBACK_SECONDS );
 		return $queued;
 	}
