@@ -125,6 +125,135 @@ final class SwapTest extends SwapTestCase {
 		$this->assertRestored( $before );
 	}
 
+	/**
+	 * A row of an earlier restore whose maintenance file carries $mark.
+	 *
+	 * @param array<string, mixed> $columns Columns of the row (status, site_state, lock...).
+	 * @param string               $mark    The mark its row recorded.
+	 * @return Job
+	 */
+	private function earlier_restore( array $columns, string $mark ): Job {
+		global $wpdb;
+		$earlier = Plugin::instance()->jobs()->create( \WPCheckpoint\Jobs\RestoreJob::ID, self::$admin_id );
+		$wpdb->update( \WPCheckpoint\Jobs\JobRepository::table(), array( 'site_mark' => $mark ) + $columns, array( 'id' => $earlier->id ) );
+		$wpdb->query( 'COMMIT' );
+		return Plugin::instance()->jobs()->find( $earlier->id );
+	}
+
+	/**
+	 * The job's log.
+	 *
+	 * @param Job $job Job.
+	 * @return string
+	 */
+	private function log_of( Job $job ): string {
+		return (string) file_get_contents( $job->storage_path . '/' . ( '' !== $job->log_path ? $job->log_path : 'logs/job-' . $job->id . '.log' ) );
+	}
+
+	public function test_a_maintenance_file_left_by_a_restore_that_has_ended_is_taken_down_and_the_swap_goes_on(): void {
+		foreach ( array(
+			'completed, lapsed'           => array( array( 'status' => Job::COMPLETED, 'site_state' => Job::SITE_SWAPPED ), time() - 3600 ),
+			'cancelled (put back), held'  => array( array( 'status' => Job::CANCELLED, 'site_state' => Job::SITE_CHANGING ), Maintenance::held() ),
+			'failed before it swapped'    => array( array( 'status' => Job::FAILED, 'site_state' => Job::SITE_UNTOUCHED ), time() - 3600 ),
+		) as $case => list( $columns, $time ) ) {
+			if ( 'completed, lapsed' !== $case ) {
+				$this->tear_down_swap();
+				$this->set_up_swap();
+			}
+			$job     = $this->at_swap();
+			$mark    = Maintenance::new_mark();
+			$earlier = $this->earlier_restore( $columns, $mark );
+			file_put_contents( $this->abspath . '/.maintenance', ( new Maintenance( $this->abspath, $mark ) )->contents( $time ) );
+			$before = $this->site();
+			$done   = $this->cli_run( $job );
+			$this->assertSame( Job::COMPLETED, $done->status, $case . ': ' . (string) $done->last_error );
+			$this->assertRestored( $before );
+			$this->assertFileDoesNotExist( $this->abspath . '/.maintenance', $case );
+			$this->assertStringContainsString( sprintf( 'The maintenance file left by restore job %d, which has ended, was taken down', $earlier->id ), $this->log_of( $done ), $case );
+			$this->assertSame( $columns['status'], Plugin::instance()->jobs()->find( $earlier->id )->status, $case . ': the earlier job is not changed' );
+		}
+	}
+
+	public function test_a_maintenance_file_of_a_restore_that_has_not_ended_or_that_no_job_recorded_stays_and_the_swap_waits(): void {
+		foreach ( array(
+			'holds the site'       => array( 'status' => Job::FAILED, 'site_state' => Job::SITE_SWAPPED ),
+			'queued again'         => array( 'status' => Job::QUEUED, 'site_state' => Job::SITE_UNTOUCHED ),
+			'a run holds it'       => array(
+				'status'       => Job::FAILED,
+				'site_state'   => Job::SITE_UNTOUCHED,
+				'lock_token'   => 'live',
+				'locked_until' => time() + 300,
+			),
+			'no job recorded it'   => null,
+		) as $case => $columns ) {
+			if ( 'holds the site' !== $case ) {
+				$this->tear_down_swap();
+				$this->set_up_swap();
+			}
+			$job      = $this->at_swap();
+			$mark     = Maintenance::new_mark();
+			$earlier  = null === $columns ? null : $this->earlier_restore( $columns, $mark );
+			$contents = ( new Maintenance( $this->abspath, $mark ) )->contents( time() - 3600 );
+			file_put_contents( $this->abspath . '/.maintenance', $contents );
+			$before = $this->site();
+			$result = $this->cli_tick( $job );
+			$this->assertSame( TickResult::WAITING, $result->status, $case );
+			if ( null === $earlier ) {
+				$this->assertStringContainsString( 'that no job here recorded', $result->message, $case );
+			} else {
+				$this->assertStringContainsString( sprintf( 'The maintenance file of restore job %1$d is in the WordPress directory', $earlier->id ), $result->message, $case );
+				$this->assertStringContainsString( sprintf( 'wp wpcheckpoint job status %d', $earlier->id ), $result->message, $case );
+			}
+			$now = Plugin::instance()->jobs()->find( $job->id );
+			$this->assertSame( 'ready', $now->cursor['phase'], $case );
+			$this->assertSame( Job::SITE_UNTOUCHED, $now->site_state, $case );
+			$this->assertSame( $before, $this->site(), $case . ': nothing changed, the file included' );
+			$this->assertSame( $contents, file_get_contents( $this->abspath . '/.maintenance' ), $case );
+			\WPCheckpoint\Tests\Fixtures\Sandbox::remove( $this->abspath . '/.maintenance' );
+		}
+	}
+
+	public function test_the_file_of_an_ended_restore_stays_when_that_job_is_queued_again_right_before_it_goes(): void {
+		global $wpdb;
+		$job     = $this->at_swap();
+		$mark    = Maintenance::new_mark();
+		$earlier = $this->earlier_restore( array( 'status' => Job::FAILED, 'site_state' => Job::SITE_UNTOUCHED ), $mark );
+		$file    = ( new Maintenance( $this->abspath, $mark ) )->contents( time() - 3600 );
+		file_put_contents( $this->abspath . '/.maintenance', $file );
+		$judged  = 0;
+		$actions = new \WPCheckpoint\Jobs\JobActions(
+			Plugin::instance()->jobs(),
+			Plugin::instance()->runner(),
+			new \WPCheckpoint\Jobs\Loopback( false ),
+			new \WPCheckpoint\Jobs\HeldSite(
+				array(
+					'at' => static function ( string $point ) use ( $wpdb, $earlier, &$judged ): void {
+						if ( 'left_judged' === $point ) {
+							++$judged;
+							// A retry between the judgement and the file going: its attempt carries the same mark.
+							$wpdb->update( \WPCheckpoint\Jobs\JobRepository::table(), array( 'status' => Job::QUEUED ), array( 'id' => $earlier->id ) );
+							$wpdb->query( 'COMMIT' );
+						}
+					},
+				)
+			)
+		);
+		$this->retype(
+			$job,
+			array(
+				'left' => static function ( string $dir, callable $lease ) use ( $actions ): array {
+					return $actions->release_left( $dir, $lease );
+				},
+			)
+		);
+		$result = $this->cli_tick( $job );
+		$this->assertSame( 1, $judged, 'the control: the job was judged ended, and queued again after that' );
+		$this->assertSame( TickResult::WAITING, $result->status );
+		$this->assertStringContainsString( sprintf( 'The maintenance file of restore job %1$d is in the WordPress directory', $earlier->id ), $result->message );
+		$this->assertSame( $file, file_get_contents( $this->abspath . '/.maintenance' ), 'checked again right before it goes: it stays' );
+		$this->assertSame( Job::SITE_UNTOUCHED, Plugin::instance()->jobs()->find( $job->id )->site_state );
+	}
+
 	public function test_a_process_that_keeps_a_time_limit_does_not_start_the_swap(): void {
 		$job = $this->at_swap();
 		$this->register_type(

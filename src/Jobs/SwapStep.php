@@ -176,7 +176,8 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * of renames, in place of SwapRules::limit()), "remove" function( Maintenance $file, callable $confirm ): bool
 	 * (in place of taking the maintenance file down), "verify" function( JobContext ): true|string (whether the
 	 * restored site passed its checks, in place of the checks 4c-B will make; a string, the id of the check that
-	 * failed (CHECKS), reverses the swap).
+	 * failed (CHECKS), reverses the swap), "left" function( string $dir, callable $lease ): array (in place of
+	 * JobActions::release_left()).
 	 *
 	 * @var array<string, mixed>
 	 */
@@ -545,15 +546,60 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			}
 		}
 		$this->check_plan( $context, $db, $cursor, $staging );
-		$state = $this->maintenance( $cursor )->state();
+		$file  = $this->maintenance( $cursor );
+		$state = $file->state();
+		$left  = null;
+		if ( Maintenance::OTHER === $state ) {
+			$left = $this->release_left( $context );
+			if ( JobActions::LEFT_GONE === $left['outcome'] ) {
+				$context->logger()->info( sprintf( 'The maintenance file left by restore job %d, which has ended, was taken down', $left['id'] ) );
+				$state = $file->state();
+			}
+		}
 		if ( Maintenance::UNKNOWN === $state ) {
 			throw new TransientFailure( 'Whether a maintenance file is in place cannot be told; the swap waits.' );
 		}
 		if ( Maintenance::OTHER === $state ) {
 			$context->logger()->info( 'Another maintenance file is in place; the swap waits for it to go' );
-			return StepResult::wait( 60, $cursor, __( 'Another maintenance file is in the WordPress directory (.maintenance: an update in progress, or one left by an update that stopped); the swap waits until it is gone. If nothing is being updated, remove that file.', 'wp-checkpoint' ) );
+			return StepResult::wait( 60, $cursor, self::other_file( $left ) );
 		}
 		return null;
+	}
+
+	/**
+	 * Take down the maintenance file an earlier restore left, when its job has ended (JobActions::release_left()).
+	 *
+	 * @param JobContext $context Context.
+	 * @return array{outcome: string, id: int}
+	 */
+	private function release_left( JobContext $context ): array {
+		$dir   = (string) ( $this->parts['abspath'] ?? ABSPATH );
+		$lease = array( $context, 'confirm_lease' );
+		return isset( $this->parts['left'] )
+			? (array) call_user_func( $this->parts['left'], $dir, $lease )
+			: \WPCheckpoint\Plugin::instance()->job_actions()->release_left( $dir, $lease );
+	}
+
+	/**
+	 * What the swap waits for while another maintenance file is in place.
+	 *
+	 * @param array{outcome: string, id: int}|null $left What release_left() found (null: not asked).
+	 * @return string
+	 */
+	private static function other_file( ?array $left ): string {
+		$outcome = null === $left ? '' : $left['outcome'];
+		if ( JobActions::LEFT_NO_JOB === $outcome ) {
+			return __( 'A maintenance file of a WP Checkpoint restore that no job here recorded is in the WordPress directory (.maintenance; it may have been copied from another site); the swap waits until it is gone. If wp wpcheckpoint job list shows no restore that holds this site, remove that file.', 'wp-checkpoint' );
+		}
+		if ( JobActions::LEFT_NOT_ENDED === $outcome ) {
+			/* translators: %d: job id. */
+			return sprintf( __( 'The maintenance file of restore job %1$d is in the WordPress directory (.maintenance), and that job has not ended, still holds the site, or is being run; the swap waits until it is gone. wp wpcheckpoint job status %1$d says what to do.', 'wp-checkpoint' ), $left['id'] );
+		}
+		if ( JobActions::LEFT_STAYS === $outcome ) {
+			/* translators: %d: job id. */
+			return sprintf( __( 'The maintenance file left by restore job %d, which has ended, could not be taken down from the WordPress directory (.maintenance); the swap tries again.', 'wp-checkpoint' ), $left['id'] );
+		}
+		return __( 'Another maintenance file is in the WordPress directory (.maintenance: an update in progress, or one left by an update that stopped); the swap waits until it is gone. If nothing is being updated, remove that file.', 'wp-checkpoint' );
 	}
 
 	/**

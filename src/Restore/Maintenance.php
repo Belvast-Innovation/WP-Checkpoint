@@ -250,6 +250,7 @@ final class Maintenance {
 	 * @param callable|null $confirm Called right before the file is deleted (a lease check; throws to stop).
 	 * @return bool Whether none of this restore's is there now (removed, or none was).
 	 * @throws \WPCheckpoint\Support\DeletionRefused When the Deleter refuses the path (not ABSPATH).
+	 * @throws \RuntimeException What $confirm throws to stop; nothing is deleted then.
 	 */
 	public function remove( $confirm = null ): bool {
 		$state = $this->state();

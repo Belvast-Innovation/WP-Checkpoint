@@ -7,6 +7,7 @@
 
 namespace WPCheckpoint\Jobs;
 
+use WPCheckpoint\Restore\Maintenance;
 use WPCheckpoint\Support\Schema;
 use WPCheckpoint\Support\HostFunctions;
 use WPCheckpoint\Support\Logger;
@@ -53,6 +54,31 @@ final class JobActions {
 	 * first unit of a tick always runs) and stops.
 	 */
 	const NO_TIME_LEFT = 0.0;
+
+	/**
+	 * What release_left() found: the file was taken down (or is no longer there).
+	 */
+	const LEFT_GONE = 'gone';
+
+	/**
+	 * What release_left() found: the file is not one of this plugin's restores (no mark, or not one written whole).
+	 */
+	const LEFT_NOT_OURS = 'not_ours';
+
+	/**
+	 * What release_left() found: the file carries a restore's mark that no job row here recorded.
+	 */
+	const LEFT_NO_JOB = 'no_job';
+
+	/**
+	 * What release_left() found: the job that recorded the mark has not ended, holds the site, or a run holds it.
+	 */
+	const LEFT_NOT_ENDED = 'not_ended';
+
+	/**
+	 * What release_left() found: the file of an ended job could not be taken down.
+	 */
+	const LEFT_STAYS = 'stays';
 
 	/**
 	 * Repository.
@@ -229,6 +255,70 @@ final class JobActions {
 		return $gone
 			? self::outcome( true, __( 'This job\'s maintenance file was taken down from this WordPress directory: the site here answers again. The job itself was not changed.', 'wp-checkpoint' ) )
 			: self::outcome( false, __( 'This job\'s maintenance file could not be taken down; nothing else was changed. Try again.', 'wp-checkpoint' ) );
+	}
+
+	/**
+	 * Take down a maintenance file that an earlier restore left in a WordPress directory, for a restore about to put
+	 * up its own: only when it carries the mark a job row here recorded (Job::$site_mark) and that job has ended as
+	 * release() judges it (not_ended()), checked again right before the file goes. A file with a mark that no row
+	 * here recorded (copied from another site, or its row purged) stays, and so does anyone else's. The job is not
+	 * changed.
+	 *
+	 * @param string   $dir   The WordPress directory.
+	 * @param callable $lease Called right before the file is deleted, after that check (the restore's lease; throws to
+	 *                        stop).
+	 * @return array{outcome: string, id: int} outcome: one of the LEFT_* constants; id: the job that recorded the
+	 *                                         mark (0 when none did).
+	 * @throws StaleJob What the lease throws (the restore's own job changed), and the check of the job that left the
+	 *                  file only through its outcome.
+	 */
+	public function release_left( string $dir, callable $lease ): array {
+		$mark = Maintenance::mark_in( $dir );
+		$job  = '' === $mark ? null : $this->repository->find_by_site_mark( $mark );
+		if ( null === $job ) {
+			return array(
+				'outcome' => '' === $mark ? self::LEFT_NOT_OURS : self::LEFT_NO_JOB,
+				'id'      => 0,
+			);
+		}
+		$file = new Maintenance( $dir, $job->site_mark );
+		if ( '' !== $this->not_ended( $job ) ) {
+			return array(
+				'outcome' => self::LEFT_NOT_ENDED,
+				'id'      => $job->id,
+			);
+		}
+		if ( Maintenance::OURS !== $file->state() ) {
+			return array(
+				'outcome' => self::LEFT_NOT_OURS,
+				'id'      => $job->id,
+			);
+		}
+		$this->held->at( 'left_judged' );
+		$late    = false;
+		$confirm = function () use ( $job, $lease, &$late ): void {
+			$now = $this->repository->find( $job->id );
+			if ( null === $now || '' !== $this->not_ended( $now ) ) {
+				$late = true;
+				throw new StaleJob( 'The job no longer lets its maintenance file go.' );
+			}
+			call_user_func( $lease );
+		};
+		try {
+			$gone = $file->remove( $confirm );
+		} catch ( StaleJob $e ) {
+			if ( ! $late ) {
+				throw $e;
+			}
+			return array(
+				'outcome' => self::LEFT_NOT_ENDED,
+				'id'      => $job->id,
+			);
+		}
+		return array(
+			'outcome' => $gone ? self::LEFT_GONE : self::LEFT_STAYS,
+			'id'      => $job->id,
+		);
 	}
 
 	/**
