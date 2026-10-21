@@ -22,7 +22,7 @@ Support questions opened as GitHub issues will be closed with a pointer to the f
 
 ## Development setup
 
-Requirements: PHP 7.4+, Composer 2, Node.js 20+, Docker.
+Requirements: PHP 7.4+, Composer 2, Node.js 22.13+, Docker.
 
 The repository folder must be named `wp-checkpoint` (wp-env mounts it under that name).
 
