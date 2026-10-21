@@ -314,6 +314,9 @@ final class HeldSiteTest extends SwapTestCase {
 		$this->assertTrue( $copy->release( $job->id, $code )['ok'] );
 		$this->assertSame( $theirs, file_get_contents( $data ), 'another restore\'s file is not this job\'s' );
 		$this->assertFileExists( $this->copy_dir() . '/.maintenance', 'nor the code that reads it' );
+		\WPCheckpoint\Tests\Fixtures\Sandbox::remove( $data ); // The code with no data file: it names no restore.
+		$this->assertTrue( $copy->release( $job->id, $code )['ok'] );
+		$this->assertFileExists( $this->copy_dir() . '/.maintenance', 'a file that names no restore is not this job\'s' );
 		file_put_contents( $data, $ours );
 		$this->assertFalse( $copy->release( $job->id, 'nope' )['ok'], 'a wrong code' );
 		$this->assertFileExists( $this->copy_dir() . '/.maintenance' );

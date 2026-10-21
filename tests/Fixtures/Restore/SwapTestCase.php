@@ -279,6 +279,11 @@ abstract class SwapTestCase extends RestoreTestCase {
 				case SwapCheckStep::ID:
 					$steps[] = new SwapCheckStep( null, $this->check_parts( array( 'site_dirs' => $dirs, 'abspath' => $this->abspath ) ) );
 					break;
+				case SwapStep::ID:
+					// The test's own swap step comes after the loop: the type's would be the one a cleanup reaches
+					// first (Runner::cleanup() walks the steps in order and stops at the job's), with ABSPATH for its
+					// maintenance file instead of the sandbox's.
+					break;
 				default:
 					$steps[] = $step;
 			}

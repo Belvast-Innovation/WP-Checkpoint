@@ -184,11 +184,9 @@ final class SwapUncheckedTest extends SwapTestCase {
 		$this->assertNotSame( '', $mark );
 		$this->remove_maintenance();
 		$this->put_maintenance( $mark, time() - 3600 );
-		$cancel = Plugin::instance()->job_actions()->cancel( $job->id );
+		Plugin::instance()->job_actions()->cancel( $job->id );
 		$this->assertSame( Job::CANCELLED, Plugin::instance()->jobs()->find( $job->id )->status );
-		$ended = Plugin::instance()->jobs()->find( $job->id );
-		$log   = (string) @file_get_contents( $ended->storage_path . '/' . ( '' !== $ended->log_path ? $ended->log_path : 'logs/job-' . $ended->id . '.log' ) ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- diagnostics.
-		$this->assertSame( array(), $this->maintenance_files(), "its own file goes with the cancel\n" . wp_json_encode( array( 'cancel' => $cancel['reason'] ?? null, 'lock' => array( $ended->lock_token, $ended->locked_until, time() ), 'cursor' => $ended->cursor, 'step' => $ended->step, 'state' => ( new Maintenance( $this->abspath, $mark ) )->state() ) ) . "\n" . substr( $log, -600 ) );
+		$this->assertSame( array(), $this->maintenance_files(), 'its own file goes with the cancel' );
 	}
 
 	public function test_the_policy_undo_puts_the_site_back_in_maintenance_mode_without_letting_it_out(): void {
