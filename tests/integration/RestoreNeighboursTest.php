@@ -640,6 +640,7 @@ final class RestoreNeighboursTest extends RestoreTestCase {
 						'uncertain_tables' => 'exclude',
 						'shared_tables'    => 'exclude',
 						'linked_targets'   => 'swap',
+						'unverified'       => 'keep',
 					),
 				)
 			)

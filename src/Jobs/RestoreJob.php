@@ -69,13 +69,23 @@ final class RestoreJob implements JobType {
 	const MAX_EXCLUDED = 10000;
 
 	/**
-	 * What the restore does with each kind of table another installation may use, and the choices: the id of the
-	 * question each is asked by, too (RestorePreflightStep).
+	 * The policy for a restored site whose checks after the swap could not be made (whether it works could not be
+	 * told): keep it, or undo the swap. The swap does not make those checks yet, so nothing reads it yet (T042).
+	 */
+	const UNVERIFIED = 'unverified';
+	const KEEP       = 'keep';
+	const UNDO       = 'undo';
+
+	/**
+	 * What the restore does with each kind of table another installation may use (the id of the question each is
+	 * asked by, too: RestorePreflightStep), with content directories that are not positively this site's own
+	 * (RestoreFilesPreflightStep), and with a restored site that could not be checked (UNVERIFIED), and the choices.
 	 */
 	const POLICIES = array(
 		'uncertain_tables'        => array( 'ask', 'restore', 'exclude' ),
 		'shared_tables'           => array( 'ask', 'restore', 'exclude' ),
 		LinkedTargets::POLICY_KEY => LinkedTargets::CHOICES, // Not said: asked ("ask" itself is not a choice to give).
+		self::UNVERIFIED          => array( self::KEEP, self::UNDO ), // As above.
 	);
 
 	/**
@@ -85,6 +95,7 @@ final class RestoreJob implements JobType {
 		'uncertain_tables'        => 'tables that may belong to this site or to another installation in the same database',
 		'shared_tables'           => 'tables this site shares with another installation in the same database',
 		LinkedTargets::POLICY_KEY => 'content directories that are not positively this site\'s own (outside its directories, inside another installation, or not to be told)',
+		self::UNVERIFIED          => 'a restored site that could not be checked after the swap (whether it works could not be told)',
 	);
 
 	/**
