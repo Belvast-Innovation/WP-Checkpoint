@@ -42,7 +42,8 @@ use WPCheckpoint\Tests\Fixtures\Restore\SwapTestCase;
  * - I7: once any run's check found the restored site broken (verify_failed), the job does not end with the restored
  *   site in place: whatever the next run would find, the site ends as it was.
  * - I8: the self-check row (Restore\SelfCheck) is in the site's options table exactly while a run checks the site
- *   (killed after writing it and before the step that deletes it), and no outcome leaves it: a run that takes over
+ *   (killed after writing it and before the step that deletes it), and no outcome leaves it in any options table of
+ *   the database (the site's, or one a reverse swapped out, which a retry would swap in again): a run that takes over
  *   after the verdict was recorded deletes it before acting on the verdict.
  *
  * Fixed: the seams in order, one sequence each (WPCHECKPOINT_SWAP_SEQUENCES more are drawn with
@@ -201,6 +202,27 @@ final class SwapSequencesTest extends SwapTestCase {
 	}
 
 	/**
+	 * The options tables of the database that hold the self-check row (the site's, the swap's temporary and moved
+	 * aside ones, a network's sites').
+	 *
+	 * @return string[]
+	 */
+	private function tables_with_a_self_check_row(): array {
+		global $wpdb;
+		$wpdb->query( 'COMMIT' );
+		$out = array();
+		foreach ( (array) $wpdb->get_col( "SHOW TABLES LIKE '%options'" ) as $table ) {
+			if ( array() === (array) $wpdb->get_col( "SHOW COLUMNS FROM `{$table}` LIKE 'option_name'" ) ) {
+				continue;
+			}
+			if ( 0 < (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM `{$table}` WHERE option_name = %s", \WPCheckpoint\Support\StoredNames::SELF_CHECK ) ) ) {
+				$out[] = $table;
+			}
+		}
+		return $out;
+	}
+
+	/**
 	 * One sequence: the swap up to the seam (through the rollback for its seams), killed there, what happens
 	 * meanwhile, then WP-CLI to the end; the invariants at the kill and at the end.
 	 *
@@ -289,7 +311,7 @@ final class SwapSequencesTest extends SwapTestCase {
 
 		if ( 0 === strpos( $kind, 'elsewhere_' ) && ! $this->elsewhere( $job, $kind, $label, $kinds ) ) {
 			// Abandoned: it never runs again, and the site it held stays as it is; undone here, as at the end.
-			$this->assertNull( $this->self_check_row(), $label . ': I8, no self-check row once it was abandoned' );
+			$this->assertSame( array(), $this->tables_with_a_self_check_row(), $label . ': I8, no self-check row once it was abandoned' );
 			$this->copy = '';
 			$this->undo( Plugin::instance()->jobs()->find( $job->id ) );
 			$wpdb->query( "DROP TABLE IF EXISTS `{$wpdb->prefix}swt_gone`" );
@@ -473,7 +495,7 @@ final class SwapSequencesTest extends SwapTestCase {
 		}
 		// I4: an ended job leaves none of its files held.
 		$this->assertFalse( Maintenance::held_in( $this->abspath ), $label . ': no held file once the job ended (' . $done->status . ')' );
-		$this->assertNull( $this->self_check_row(), $label . ': I8, no self-check row once the job ended (' . $done->status . ')' );
+		$this->assertSame( array(), $this->tables_with_a_self_check_row(), $label . ': I8, no self-check row in any options table once the job ended (' . $done->status . ')' );
 		$this->marked( $job, $label . ' (ended)' );
 		if ( '' !== $this->copy ) {
 			// The copy's file, the job ended: released by the mark the job's row kept, whether the database is shared.
