@@ -40,13 +40,15 @@ register_shutdown_function(
 		while ( ob_get_level() > 0 ) {
 			ob_end_clean();
 		}
+		$loaded = function_exists( 'did_action' ) && did_action( 'wp_loaded' ) > 0;
 		echo "\nWPCHECKPOINT-REQUEST: " . json_encode(
 			array(
-				'loaded'  => function_exists( 'did_action' ) && did_action( 'wp_loaded' ) > 0,
+				'loaded'  => $loaded,
 				'disable' => defined( 'DISABLE_WP_CRON' ) ? DISABLE_WP_CRON : null,
-				'due'     => function_exists( 'wp_get_ready_cron_jobs' ) ? array_keys( array_merge( array(), ...array_values( (array) wp_get_ready_cron_jobs() ) ) ) : null,
-				'lock'    => function_exists( 'get_transient' ) ? get_transient( 'doing_cron' ) : null,
-				'host'    => function_exists( 'home_url' ) ? home_url() : null,
+				// What cron looked like at the end (WordPress loaded only): the events still due, the lock, the address.
+				'due'     => $loaded ? array_keys( array_merge( array(), ...array_values( (array) wp_get_ready_cron_jobs() ) ) ) : null,
+				'lock'    => $loaded ? get_transient( 'doing_cron' ) : null,
+				'host'    => $loaded ? home_url() : null,
 			)
 		) . "\n";
 	}
