@@ -297,6 +297,17 @@ final class SwapMaintenanceModeTest extends SwapTestCase {
 		$this->assertSame( array(), RealAbspath::contents(), 'neither file is left' );
 	}
 
+	public function test_once_the_verdict_is_recorded_the_file_lets_no_check_through_any_more(): void {
+		$job = $this->at_swap();
+		$this->killed_at( $job, 'self_check_removed', 1 );
+		$left = RealAbspath::contents()[ Maintenance::DATA ] ?? '';
+		$this->assertSame( 1, preg_match( Maintenance::DATA_FORM, $left, $found ), 'the data file: ' . $left );
+		$this->assertSame( Maintenance::NO_PASS, $found[3], 'no pass once the self-check row is gone' );
+		$this->assertSame( Maintenance::held(), (int) $found[2], 'still held' );
+		$this->assertSame( Job::COMPLETED, $this->cli_run( $job )->status );
+		$this->assertSame( array(), RealAbspath::contents() );
+	}
+
 	public function test_a_held_file_is_said_whatever_the_job_lines_say(): void {
 		$job = $this->at_swap();
 		$this->killed_at( $job, 'committed', 1 );

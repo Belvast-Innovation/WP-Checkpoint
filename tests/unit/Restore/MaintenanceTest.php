@@ -174,6 +174,37 @@ final class MaintenanceTest extends TestCase {
 		$this->assertSame( array(), $this->names() );
 	}
 
+	public function test_a_put_or_a_removal_stopped_between_the_two_files_never_leaves_the_code_without_its_data(): void {
+		$file = $this->ours();
+		$calls = 0;
+		$second = static function () use ( &$calls ): void {
+			if ( 2 === ++$calls ) {
+				throw new \RuntimeException( 'stopped between the two files' );
+			}
+		};
+		try {
+			$file->hold( $second );
+			$this->fail( 'not stopped' );
+		} catch ( \RuntimeException $e ) {
+			$this->assertSame( 'stopped between the two files', $e->getMessage() );
+		}
+		$this->assertSame( array( '.wpcheckpoint-maintenance.php' ), $this->names(), 'put up: the data file first, nothing reads it yet' );
+		$this->assertFalse( Maintenance::held_in( $this->dir ), 'the site is not blocked' );
+		$file->hold();
+		$this->assertTrue( $file->is_held(), 'the control: put up whole' );
+		$calls = 0;
+		try {
+			$file->remove( $second );
+			$this->fail( 'not stopped' );
+		} catch ( \RuntimeException $e ) {
+			$this->assertSame( 'stopped between the two files', $e->getMessage() );
+		}
+		$this->assertSame( array( '.wpcheckpoint-maintenance.php' ), $this->names(), 'taken down: the code first, its data file after' );
+		$this->assertSame( Maintenance::NONE, $file->state() );
+		$this->assertTrue( $file->remove(), 'and the rest goes the next time' );
+		$this->assertSame( array(), $this->names() );
+	}
+
 	public function test_the_held_time_fits_the_integer_of_a_32_and_a_64_bit_php(): void {
 		$this->assertSame( 4102444800, Maintenance::held_for( 8 ) );
 		$this->assertSame( 2147483647, Maintenance::held_for( 4 ), 'the largest 32-bit integer: 2038' );
