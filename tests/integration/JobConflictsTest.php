@@ -274,6 +274,33 @@ final class JobConflictsTest extends JobTestCase {
 		$this->assertSame( Job::CANCELLED, $repo->find( $estimate->id )->status, 'and the estimate gave way to it' );
 	}
 
+	public function test_nothing_is_created_when_whether_a_restore_holds_the_site_cannot_be_read(): void {
+		$ids    = $this->ids();
+		$broken = 0;
+		$break  = static function ( string $sql ) use ( &$broken ): string {
+			if ( false !== strpos( $sql, 'WHERE site_state <>' ) ) {
+				++$broken;
+				return 'SELECT * FROM a_table_that_is_not_there_wcp';
+			}
+			return $sql;
+		};
+		add_filter( 'query', $break );
+		$suppress = $GLOBALS['wpdb']->suppress_errors( true );
+		try {
+			Plugin::instance()->job_actions()->start( 'export', self::$admin_id, array() );
+			$this->fail( 'started without knowing whether a restore holds the site' );
+		} catch ( JobsUnavailable $e ) {
+			$this->assertSame( 'Whether a restore holds the site could not be read; try again in a moment.', $e->getMessage() );
+		} finally {
+			remove_filter( 'query', $break );
+			$GLOBALS['wpdb']->suppress_errors( $suppress );
+		}
+		$this->assertSame( 1, $broken, 'the control: the read of the jobs that hold the site was the one that failed' );
+		$this->assertSame( $ids, $this->ids(), 'nothing was created' );
+		// The control: read again, nothing holds the site and the export starts.
+		$this->assertSame( Job::QUEUED, Plugin::instance()->job_actions()->start( 'export', self::$admin_id, array() )->status );
+	}
+
 	public function test_a_retry_while_another_job_holds_the_site_is_refused_and_the_holder_is_retried(): void {
 		$repo   = Plugin::instance()->jobs();
 		$held   = $this->holding();
