@@ -192,6 +192,21 @@ final class JobConflictsTest extends JobTestCase {
 	}
 
 	/**
+	 * Whether the start lock is free, as another connection sees it (GET_LOCK is re-entrant on this one).
+	 *
+	 * @return bool
+	 */
+	private function start_lock_free(): bool {
+		$other = new \wpdb( DB_USER, DB_PASSWORD, DB_NAME, DB_HOST );
+		try {
+			$name = 'wpcheckpoint_start_' . substr( md5( DB_NAME . '.' . $GLOBALS['wpdb']->base_prefix . 'wpcheckpoint_jobs' ), 0, 16 );
+			return '1' === (string) $other->get_var( $other->prepare( 'SELECT IS_FREE_LOCK(%s)', $name ) );
+		} finally {
+			$other->close();
+		}
+	}
+
+	/**
 	 * The ids of every job row.
 	 *
 	 * @return int[]
@@ -229,6 +244,10 @@ final class JobConflictsTest extends JobTestCase {
 			$this->assertSame( $ids, $this->ids(), $case . ': nothing was created' );
 		}
 		$this->assertSame( Job::QUEUED, $repo->find( $estimate->id )->status, 'nothing gave way for a start that was refused' );
+		$this->assertTrue( $this->start_lock_free(), 'the start lock was released after the refusals' );
+		$this->assertTrue( $repo->lock_starts(), 'the control: the lock taken here' );
+		$this->assertFalse( $this->start_lock_free(), 'the control: another connection sees it taken' );
+		$repo->unlock_starts();
 
 		// The page's "Back up now": 409 with the reason, nothing created.
 		$response = $this->rest( 'POST', 'backups' );
@@ -245,6 +264,14 @@ final class JobConflictsTest extends JobTestCase {
 			if ( 'elsewhere' === $case ) {
 				$wpdb->update( \WPCheckpoint\Jobs\JobRepository::table(), array( 'status' => Job::FAILED, 'held_by' => 'abababababab' ), array( 'id' => $held->id ) );
 				$this->assertFalse( $repo->manages( $repo->find( $held->id ) ), 'the control: managed elsewhere' );
+				// What the message sends the administrator to: wp wpcheckpoint job status prints what can be done from
+				// here after its table. WP-CLI passes the docblock default of an option left out ("table").
+				$this->assertSame( 1, preg_match( '/\[--format=<format>\][^\[]*?default: (\w+)/', (string) ( new \ReflectionMethod( \WPCheckpoint\Cli\JobCommand::class, 'status' ) )->getDocComment(), $default ), 'the control: status declares a default format' );
+				$this->assertTrue( \WPCheckpoint\Cli\JobCommand::shows_lines( array( 'format' => $default[1] ) ), 'job status without --format prints the lines' );
+				$this->assertFalse( \WPCheckpoint\Cli\JobCommand::shows_lines( array( 'format' => 'json' ) ), 'the control: not with --format=json' );
+				$view = $actions->held_elsewhere( $held->id );
+				$this->assertNotNull( $view );
+				$this->assertNotSame( array(), \WPCheckpoint\Jobs\JobPresenter::held_lines( $view['job'], $view['assessment'] ) );
 			}
 			try {
 				$actions->start( 'export', self::$admin_id, array() );
@@ -271,6 +298,7 @@ final class JobConflictsTest extends JobTestCase {
 		$this->assertSame( Job::FAILED, $repo->find( $plain->id )->status, 'the control: a failed restore that does not hold the site' );
 		$export = $actions->start( 'export', self::$admin_id, array() );
 		$this->assertSame( Job::QUEUED, $export->status );
+		$this->assertContains( $export->id, $this->ids(), 'the control: a job that was created is seen' );
 		$this->assertSame( Job::CANCELLED, $repo->find( $estimate->id )->status, 'and the estimate gave way to it' );
 	}
 
@@ -297,14 +325,18 @@ final class JobConflictsTest extends JobTestCase {
 		}
 		$this->assertSame( 1, $broken, 'the control: the read of the jobs that hold the site was the one that failed' );
 		$this->assertSame( $ids, $this->ids(), 'nothing was created' );
+		$this->assertTrue( $this->start_lock_free(), 'the start lock was released' );
 		// The control: read again, nothing holds the site and the export starts.
-		$this->assertSame( Job::QUEUED, Plugin::instance()->job_actions()->start( 'export', self::$admin_id, array() )->status );
+		$export = Plugin::instance()->job_actions()->start( 'export', self::$admin_id, array() );
+		$this->assertSame( Job::QUEUED, $export->status );
+		$this->assertContains( $export->id, $this->ids(), 'the control: a job that was created is seen' );
 	}
 
 	public function test_a_retry_while_another_job_holds_the_site_is_refused_and_the_holder_is_retried(): void {
 		$repo   = Plugin::instance()->jobs();
-		$held   = $this->holding();
-		$export = $this->failed( 'export' );
+		$held     = $this->holding();
+		$export   = $this->failed( 'export' );
+		$estimate = $repo->create( 'estimate', self::$admin_id );
 		try {
 			Plugin::instance()->job_actions()->retry( $export->id );
 			$this->fail( 'an export retried while a restore holds the site' );
@@ -312,8 +344,12 @@ final class JobConflictsTest extends JobTestCase {
 			$this->assertStringStartsWith( sprintf( 'Restore job %d stopped partway through and holds the site', $held->id ), $e->getMessage() );
 		}
 		$this->assertSame( Job::FAILED, $repo->find( $export->id )->status, 'still failed, not queued' );
-		// The control: the restore that holds the site is retried, the way to put the site right.
+		$this->assertSame( Job::QUEUED, $repo->find( $estimate->id )->status, 'nothing gave way for a retry that was refused' );
+		$this->assertTrue( $this->start_lock_free(), 'the start lock was released' );
+		// The control: the restore that holds the site is retried, the way to put the site right, and the estimate
+		// gives way to it.
 		$this->assertSame( Job::QUEUED, Plugin::instance()->job_actions()->retry( $held->id )->status );
+		$this->assertSame( Job::CANCELLED, $repo->find( $estimate->id )->status );
 	}
 
 	public function test_nothing_starts_during_a_restore_and_a_started_job_is_not_discarded(): void {

@@ -373,11 +373,22 @@ final class JobCommand {
 		}
 		\WP_CLI\Utils\format_items( isset( $assoc_args['format'] ) ? (string) $assoc_args['format'] : 'table', $rows, array( 'field', 'value' ) );
 		$held = $this->actions->held_elsewhere( $job->id );
-		if ( null !== $held && ! isset( $assoc_args['format'] ) ) {
+		if ( null !== $held && self::shows_lines( $assoc_args ) ) {
 			foreach ( JobPresenter::held_lines( $held['job'], $held['assessment'] ) as $line ) {
 				WP_CLI::line( $this->presenter->clean( $line ) );
 			}
 		}
+	}
+
+	/**
+	 * Whether status prints lines after its table: only as a table. WP-CLI fills an option left out with the default
+	 * its docblock gives, so "--format" is always there ("table" when not given).
+	 *
+	 * @param array<string, mixed> $assoc_args Options, as WP-CLI passes them.
+	 * @return bool
+	 */
+	public static function shows_lines( array $assoc_args ): bool {
+		return 'table' === (string) ( $assoc_args['format'] ?? 'table' );
 	}
 
 	/**
