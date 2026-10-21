@@ -173,6 +173,17 @@ final class SwapUncheckedTest extends SwapTestCase {
 		$this->assertSame( Job::CANCELLED, Plugin::instance()->jobs()->find( $job->id )->status );
 		$this->assertSame( array( '.maintenance' => Maintenance::CODE ), $this->maintenance_files(), 'not this restore\'s to take down' );
 		$this->remove_maintenance();
+		// The control: the same cancel takes this restore's own file down (the cleanup runs, and removes).
+		$this->tear_down_swap();
+		$this->set_up_swap();
+		$this->register_type();
+		$job  = $this->at_swap();
+		$mark = (string) Plugin::instance()->jobs()->find( $job->id )->cursor['mark'];
+		$this->assertNotSame( '', $mark, 'the control: the swap has its mark' );
+		$this->put_maintenance( $mark, time() - 3600 );
+		Plugin::instance()->job_actions()->cancel( $job->id );
+		$this->assertSame( Job::CANCELLED, Plugin::instance()->jobs()->find( $job->id )->status );
+		$this->assertSame( array(), $this->maintenance_files(), 'its own file goes with the cancel' );
 	}
 
 	public function test_the_policy_undo_puts_the_site_back_in_maintenance_mode_without_letting_it_out(): void {
