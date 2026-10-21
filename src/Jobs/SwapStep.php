@@ -381,8 +381,10 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		}
 		try {
 			$file = $this->maintenance( $cursor );
-			// This restore's file only: a bare one (no data file names its restore) is the holder's to take down.
-			if ( Maintenance::BARE !== $file->state() && ! $file->remove() ) {
+			// This restore's file only: a bare one (no data file names its restore) is the holder's to take down, and
+			// this job's once it was recorded as untouched after it held the site (its file put up, then let go).
+			$own = in_array( (string) ( $cursor['phase'] ?? '' ), array( 'reverted', 'rejudged' ), true );
+			if ( ( $own || Maintenance::BARE !== $file->state() ) && ! $file->remove() ) {
 				$context->logger()->warning( 'The restore\'s maintenance file could not be taken down' );
 			}
 		} catch ( \Throwable $e ) {
@@ -912,7 +914,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 						)
 					);
 				}
-				$this->refresh( $context, $file, true );
+				$this->refresh( $context, $file, true, ! empty( $cursor['out'] ) );
 				$this->rename_back( $context, $pair[0], $pair[1] );
 				$this->at( 'dir_back' );
 			}
@@ -1195,6 +1197,15 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 					// policy or an answer says it. Undone after it was let out: what was written on it since is gone (the question says so),
 					// and the file is held again before the first rename (reverse()).
 					$choice = $this->unverified_choice( $context, true );
+					if ( RestoreJob::UNDO === $choice && Maintenance::OTHER === $this->maintenance( $cursor )->state() ) {
+						// The site is live: someone else's file (an update in progress, or one left by an update that
+						// stopped, or by an earlier restore) is waited out before the undo is recorded, so nothing is
+						// counted against it and the answer is read again on the next tick.
+						$left = $this->release_left( $context );
+						if ( JobActions::LEFT_GONE !== $left['outcome'] ) {
+							return StepResult::wait( 60, $cursor, self::other_file( $left ) );
+						}
+					}
 					if ( RestoreJob::UNDO === $choice ) {
 						$context->logger()->warning( 'The restored site could not be checked; the swap is undone as chosen' );
 						throw $this->reverse( $context, $db, $cursor, self::UNDONE, '', true );
@@ -1478,13 +1489,21 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @param JobContext  $context Context.
 	 * @param Maintenance $file    The file.
 	 * @param bool        $held    Whether it is held (the site half swapped) or refreshed with the time.
+	 * @param bool        $out     Whether the rollback is a reverse of a site that was let out: someone else's file
+	 *                             in its place is waited out then (TransientFailure), not only logged.
 	 * @return void
 	 * @throws LockLost When the lease is gone (not caught).
 	 * @throws StaleJob When the job is no longer this run's (not caught).
+	 * @throws TransientFailure When the site was let out and someone else's file is in place.
 	 */
-	private function refresh( JobContext $context, Maintenance $file, bool $held ): void {
+	private function refresh( JobContext $context, Maintenance $file, bool $held, bool $out = false ): void {
 		if ( ! $held && Maintenance::NONE === $file->state() ) {
 			return; // None of ours to refresh: none is made.
+		}
+		if ( $out && Maintenance::OTHER === $file->state() ) {
+			// A reverse of a site that was let out: someone else's file put up meanwhile (an update started) is waited
+			// out before the next rename, as before the first one (hold_for_renames()).
+			throw new TransientFailure( 'Another maintenance file is in place (an update in progress, for example); the undo waits for it to go before it moves anything more.' );
 		}
 		try {
 			if ( $held ) {

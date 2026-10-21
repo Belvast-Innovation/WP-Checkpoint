@@ -2169,7 +2169,7 @@ final class JobRepository {
 				// Its age last, after the slower reads: a file written anew meanwhile is seen.
 				clearstatcache( true, $entry['path'] );
 				$mtime = @filemtime( $entry['path'] ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- gone or unreadable: not old enough (it stays).
-				return false !== $mtime && $mtime + Residue::VERIFY_TTL <= $now;
+				return false !== $mtime && Residue::is_expired( array( 'mtime' => (int) $mtime ) + $entry, $now );
 			};
 			$confirm = null;
 			if ( Residue::MAINTENANCE_DATA === $entry['kind'] ) {
@@ -2190,7 +2190,9 @@ final class JobRepository {
 			} catch ( DeletionRefused $e ) {
 				$this->directories->log_event( $e->getMessage() );
 			} catch ( \RuntimeException $e ) {
-				continue; // Written anew or read meanwhile: it stays.
+				// Written anew or read meanwhile: it stays (the trace of how often this window is hit).
+				$this->directories->log_event( 'A maintenance data file was read or written anew right before the reaper would remove it; it was left.' );
+				continue;
 			}
 		}
 		$this->drop_tables_of(

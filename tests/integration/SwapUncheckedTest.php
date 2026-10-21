@@ -142,25 +142,65 @@ final class SwapUncheckedTest extends SwapTestCase {
 	}
 
 	public function test_undo_after_the_site_was_let_out_waits_for_someone_elses_maintenance_file(): void {
+		global $wpdb;
 		$before = $this->site();
 		$job    = $this->at_swap();
 		$this->asked( $job );
 		$restored = $this->site();
+		unset( $restored['maintenance'] );
 		Plugin::instance()->job_actions()->answer( $job->id, array( SwapStep::UNVERIFIED_QUESTION => 'undo' ) );
 		$update = "<?php \$upgrading = " . time() . "; // an update\n";
 		file_put_contents( $this->abspath . '/.maintenance', $update );
+		foreach ( array( 1, 2 ) as $tick ) {
+			$result = $this->cli_tick( $job );
+			$this->assertSame( TickResult::WAITING, $result->status, $tick . ': ' . $result->message );
+			$this->assertStringContainsString( 'Another maintenance file is in the WordPress directory', $result->message, $tick );
+			$now = Plugin::instance()->jobs()->find( $job->id );
+			$this->assertNotSame( 'reverse', $now->cursor['phase'] ?? '', $tick . ': the undo not recorded yet' );
+			$this->assertSame( 0, (int) ( $now->cursor['__runner']['retries'] ?? 0 ), $tick . ': nothing counted against it' );
+			$site = $this->site();
+			unset( $site['maintenance'] );
+			$this->assertSame( $restored, $site, $tick . ': nothing moved' );
+			$this->assertSame( array( '.maintenance' => $update ), $this->maintenance_files(), $tick . ': left as it was' );
+		}
+		$this->remove_maintenance();
+		// Once it is gone the undo starts; another file put up after the first rename back is waited out too.
+		$seen = 0;
+		$this->swap_parts['at'] = function ( string $point ) use ( &$seen, $update ): void {
+			$this->seams[] = $point;
+			if ( 'table_back' === $point && 1 === ++$seen ) {
+				$this->remove_maintenance(); // An update takes the held file down and puts up its own.
+				file_put_contents( $this->abspath . '/.maintenance', $update );
+			}
+		};
+		$this->retype( $job );
 		$result = $this->cli_tick( $job );
+		$this->assertSame( 1, $seen, 'the control: a table was put back' );
 		$this->assertSame( TickResult::WAITING, $result->status, $result->message );
 		$this->assertStringContainsString( 'the undo waits for it to go before it moves anything', $result->message );
-		$this->assertSame( array( '.maintenance' => $update ), $this->maintenance_files(), 'left as it was' );
-		$now = $this->site();
-		unset( $now['maintenance'], $restored['maintenance'] );
-		$this->assertSame( $restored, $now, 'nothing moved' );
+		$this->assertSame( 'reverse', Plugin::instance()->jobs()->find( $job->id )->cursor['phase'] ?? '', 'recorded, and continued from there' );
+		$result = $this->cli_tick( $job );
+		$this->assertSame( TickResult::WAITING, $result->status, 'a later run waits too: ' . $result->message );
 		$this->remove_maintenance();
 		$done = $this->through( $job );
 		$this->assertSame( Job::FAILED, $done->status );
 		$this->assertStringContainsString( 'the swap was undone as chosen', (string) $done->last_error );
 		$this->assertSame( $before, $this->site(), 'once it is gone, put back' );
+	}
+
+	public function test_a_cancel_after_the_site_was_put_back_takes_its_own_bare_file_down(): void {
+		$job  = $this->at_swap();
+		$plan = $this->plan_of( $job );
+		$last = $plan['dirs'][ count( $plan['dirs'] ) - 1 ];
+		rename( $last['stage'], $last['stage'] . '-away' ); // Its rename fails: the swap rolls back.
+		$this->killed_at( $job, 'reverted', 1 );
+		rename( $last['stage'] . '-away', $last['stage'] );
+		$this->assertSame( 'reverted', Plugin::instance()->jobs()->find( $job->id )->cursor['phase'] ?? '' );
+		\WPCheckpoint\Tests\Fixtures\Sandbox::remove( $this->abspath . '/' . Maintenance::DATA ); // Its data file taken away (a scanner).
+		$this->assertSame( array( '.maintenance' ), array_keys( $this->maintenance_files() ), 'the control: the code is left, naming no restore' );
+		Plugin::instance()->job_actions()->cancel( $job->id );
+		$this->assertSame( Job::CANCELLED, Plugin::instance()->jobs()->find( $job->id )->status );
+		$this->assertSame( array(), $this->maintenance_files(), 'this job\'s, put up and let go by it: taken down' );
 	}
 
 	public function test_a_cancel_leaves_a_maintenance_file_that_names_no_restore(): void {
