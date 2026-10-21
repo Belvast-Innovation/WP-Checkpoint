@@ -186,7 +186,9 @@ final class SwapUncheckedTest extends SwapTestCase {
 		$this->put_maintenance( $mark, time() - 3600 );
 		Plugin::instance()->job_actions()->cancel( $job->id );
 		$this->assertSame( Job::CANCELLED, Plugin::instance()->jobs()->find( $job->id )->status );
-		$this->assertSame( array(), $this->maintenance_files(), 'its own file goes with the cancel' );
+		$ended = Plugin::instance()->jobs()->find( $job->id );
+		$log   = (string) @file_get_contents( $ended->storage_path . '/' . ( '' !== $ended->log_path ? $ended->log_path : 'logs/job-' . $ended->id . '.log' ) ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- diagnostics.
+		$this->assertSame( array(), $this->maintenance_files(), "its own file goes with the cancel\n" . substr( $log, -2000 ) );
 	}
 
 	public function test_the_policy_undo_puts_the_site_back_in_maintenance_mode_without_letting_it_out(): void {
