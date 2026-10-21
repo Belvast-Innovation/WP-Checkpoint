@@ -8,6 +8,7 @@
 namespace WPCheckpoint\Restore;
 
 use WPCheckpoint\Database\SqlWriter;
+use WPCheckpoint\Jobs\LockLost;
 use WPCheckpoint\Jobs\TransientFailure;
 
 defined( 'ABSPATH' ) || exit;
@@ -175,22 +176,45 @@ final class Ledger {
 	 * first, or this one did: the caller reads what was recorded), when the job is no longer held, or when the table
 	 * has no record; the caller tells the three apart (JobFence::holds(), get()).
 	 *
-	 * @param int    $number     The table's number.
-	 * @param int    $owned      Own rows.
-	 * @param string $jobs_table The jobs table.
-	 * @param int    $job_id     Job id.
-	 * @param string $token      The run's lock token.
+	 * @param int                                          $number The table's number.
+	 * @param int                                          $owned  Own rows.
+	 * @param array{table: string, id: int, token: string} $fence  The job row (JobContext::fence()).
 	 * @return bool
+	 * @throws LockLost When the fence has no token: nothing was written.
 	 */
-	public function set_owned( int $number, int $owned, string $jobs_table, int $job_id, string $token ): bool {
-		$db = $this->db;
-		return 1 === JobFence::bounded(
+	public function set_owned( int $number, int $owned, array $fence ): bool {
+		return 1 === $this->held_update( $fence, 'SET l.owned = ?', 'l.n = ? AND l.owned < 0', array( (string) $owned, (string) $number ) );
+	}
+
+	/**
+	 * One UPDATE of this ledger joined with the job row under the run's token: the write is conditioned on the run
+	 * still holding the job in the statement itself (every write of the ledger conditioned on the job row, rather
+	 * than on its own holder column, is this one statement), and refused before any statement when the fence has
+	 * no token (a context outside a run), as JobFence::within() refuses: a released row stores an empty token,
+	 * which the join would match. The caller's WHERE is parenthesised, so an OR in it cannot reach past the token
+	 * condition. The job row is read for the update: the wait for it, should a fenced write hold it, is bounded.
+	 *
+	 * @param array{table: string, id: int, token: string} $fence  The job row (JobContext::fence()).
+	 * @param string                                       $set    "SET l.…", the ledger as l.
+	 * @param string                                       $where  The condition on l, without WHERE.
+	 * @param string[]                                     $params The values of their placeholders, in order.
+	 * @return int Rows changed.
+	 * @throws LockLost When the fence has no token: nothing was written.
+	 */
+	private function held_update( array $fence, string $set, string $where, array $params ): int {
+		$token = (string) $fence['token'];
+		if ( '' === $token ) {
+			throw new LockLost( 'The ledger is not written: no lock token to write under.' );
+		}
+		$db    = $this->db;
+		$table = (string) $fence['table'];
+		$id    = (int) $fence['id'];
+		return JobFence::bounded(
 			$db,
-			function () use ( $db, $jobs_table, $job_id, $owned, $number, $token ): int {
-				// The job row is read for the update: the wait for it, should a fenced write hold it, is bounded.
+			function () use ( $db, $table, $id, $set, $where, $params, $token ): int {
 				return $db->write(
-					'UPDATE ' . SqlWriter::identifier( $this->name ) . ' AS l JOIN ' . SqlWriter::identifier( $jobs_table ) . ' AS j ON j.id = ? SET l.owned = ? WHERE l.n = ? AND l.owned < 0 AND j.lock_token = ?',
-					array( (string) $job_id, (string) $owned, (string) $number, $token )
+					'UPDATE ' . SqlWriter::identifier( $this->name ) . ' AS l JOIN ' . SqlWriter::identifier( $table ) . ' AS j ON j.id = ? ' . $set . ' WHERE (' . $where . ') AND j.lock_token = ?',
+					array_merge( array( (string) $id ), $params, array( $token ) )
 				);
 			}
 		);
@@ -198,12 +222,22 @@ final class Ledger {
 
 	/**
 	 * Make this run the holder of every table's record at once (the final check before the swap): a run of the
-	 * import that outlived its lease finds its next batch refused, and the batch rolls back with its record.
+	 * import that outlived its lease finds its next batch refused, and the batch rolls back with its record. The
+	 * statement itself is conditioned on the run still holding the job (the job row under the run's token, in one
+	 * UPDATE with the records, as set_owned()): a run that lost the job changes no holder. Zero records changed is
+	 * either that or every record held already; JobFence::holds() tells them apart.
 	 *
+	 * @param array{table: string, id: int, token: string} $fence The job row to hold (JobContext::fence()).
 	 * @return int Records taken.
+	 * @throws LockLost When the job is no longer held under the fence's token, or the fence has no token: no holder
+	 *                  was changed.
 	 */
-	public function take_all(): int {
-		return $this->db->write( 'UPDATE ' . SqlWriter::identifier( $this->name ) . ' SET holder = ? WHERE holder <> ?', array( $this->token, $this->token ) );
+	public function take_all( array $fence ): int {
+		$taken = $this->held_update( $fence, 'SET l.holder = ?', 'l.holder <> ?', array( $this->token, $this->token ) );
+		if ( 0 === $taken && ! JobFence::holds( $this->db, (string) $fence['table'], (int) $fence['id'], (string) $fence['token'] ) ) {
+			throw new LockLost( 'The job is no longer held by this run: the records were not taken.' );
+		}
+		return $taken;
 	}
 
 	/**
