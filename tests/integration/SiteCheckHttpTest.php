@@ -144,8 +144,9 @@ final class SiteCheckHttpTest extends SwapTestCase {
 				$this->assertSame( $other, (string) $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM {$table} WHERE option_name = %s", StoredNames::SELF_CHECK ) ), 'read back' ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the options table.
 			}
 		};
-		$this->register_type();
+		$this->retype( $job );
 		$done = $this->through( $job );
+		$this->assertContains( 'self_check_written', $this->seams, 'the control: the row was changed' );
 		$this->assertSame( Job::FAILED, $done->status, wp_json_encode( $done->cursor['unverified'] ?? null ) );
 		$this->assertStringContainsString( SwapStep::CHECKS['self_wrong'], (string) $done->last_error );
 		$this->assertSame( $before, $this->site(), 'put back' );
@@ -165,8 +166,13 @@ final class SiteCheckHttpTest extends SwapTestCase {
 	}
 
 	public function test_the_route_missing_cannot_be_told_and_the_site_is_asked_about(): void {
-		ActivePlugin::off(); // The web server's WordPress does not load the plugin: no self-check route there.
-		$job  = $this->at_swap();
+		$job = $this->at_swap();
+		// The job stays of the test's own type while it checks: the web server's WordPress registers the route for a
+		// restore only, so there is none (as on a site whose plugin does not answer it).
+		$this->swap_parts['at'] = function ( string $point ): void {
+			$this->seams[] = $point;
+		};
+		$this->retype( $job );
 		$done = $this->through( $job );
 		$this->assertSame( Job::PAUSED, $done->status, (string) $done->last_error );
 		$this->assertSame( SwapStep::UNVERIFIED_QUESTION, $done->questions[0]['id'] ?? null );

@@ -287,7 +287,7 @@ final class SwapMaintenanceModeTest extends SwapTestCase {
 			);
 			return true;
 		};
-		$this->register_type();
+		$this->retype( $job );
 		$done = $this->cli_run( $job );
 		$this->assertSame( Job::COMPLETED, $done->status, (string) $done->last_error );
 		$this->assertCount( 1, $seen );

@@ -71,7 +71,7 @@ final class SwapUncheckedTest extends SwapTestCase {
 			$keys[] = $pass['key'];
 			return self::unknown();
 		};
-		$this->register_type();
+		$this->retype( $job );
 		$paused = $this->through( $job, $waits );
 		$this->assertSame( Job::PAUSED, $paused->status, (string) $paused->last_error );
 		$this->assertSame( array( 15, 60, 120 ), $waits, 'checked again after the waits' );
@@ -93,7 +93,7 @@ final class SwapUncheckedTest extends SwapTestCase {
 			$keys[] = $pass['key'];
 			return ++$tries < 4 ? self::unknown() : true;
 		};
-		$this->register_type();
+		$this->retype( $job );
 		$waits = array();
 		$done  = $this->through( $job, $waits );
 		$this->assertSame( Job::COMPLETED, $done->status, (string) $done->last_error );
@@ -129,7 +129,7 @@ final class SwapUncheckedTest extends SwapTestCase {
 				$held[] = Maintenance::held_in( $this->abspath );
 			}
 		};
-		$this->register_type();
+		$this->retype( $job );
 		Plugin::instance()->job_actions()->answer( $job->id, array( SwapStep::UNVERIFIED_QUESTION => 'undo' ) );
 		$done = $this->through( $job );
 		$this->assertSame( Job::FAILED, $done->status );
@@ -146,7 +146,7 @@ final class SwapUncheckedTest extends SwapTestCase {
 		$this->swap_parts['verify'] = static function (): array {
 			return self::unknown();
 		};
-		$this->register_type();
+		$this->retype( $job );
 		$done = $this->through( $job );
 		$this->assertSame( Job::FAILED, $done->status );
 		$this->assertStringContainsString( 'could not be checked, and the swap was undone as chosen', (string) $done->last_error );
@@ -163,7 +163,7 @@ final class SwapUncheckedTest extends SwapTestCase {
 		$this->swap_parts['verify'] = static function (): array {
 			return self::unknown();
 		};
-		$this->register_type();
+		$this->retype( $job );
 		$done = $this->through( $job );
 		$this->assertSame( Job::COMPLETED, $done->status, (string) $done->last_error );
 		$this->assertNotContains( 'asked', $this->seams );
