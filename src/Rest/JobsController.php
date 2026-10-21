@@ -14,6 +14,7 @@ use WP_REST_Server;
 use WPCheckpoint\Jobs\InvalidTransition;
 use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\JobActions;
+use WPCheckpoint\Jobs\JobConflict;
 use WPCheckpoint\Jobs\JobPresenter;
 use WPCheckpoint\Jobs\JobsUnavailable;
 use WPCheckpoint\Jobs\QuestionText;
@@ -276,6 +277,8 @@ final class JobsController extends Controller {
 			}
 		} catch ( JobsUnavailable $e ) {
 			return $this->unavailable( $e );
+		} catch ( JobConflict $e ) {
+			return $this->conflict( $this->presenter->clean( $e->getMessage() ) );
 		} catch ( InvalidTransition $e ) {
 			$current = $this->actions->find( $id );
 			if ( null !== $current && Job::REASON_ABANDONED === $current->failure_reason ) {

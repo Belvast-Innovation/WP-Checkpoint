@@ -1079,20 +1079,46 @@ final class JobActions {
 	}
 
 	/**
-	 * Queue a failed job again; the cursor is kept.
+	 * Queue a failed job again; the cursor is kept. Under the start lock and by the rules a new job of its type
+	 * starts by (JobConflicts), against every other active job: a job queued again is as much a job that starts as
+	 * a new one, and a retry next to a job it must not run with is refused with the reason, the job left failed. The
+	 * jobs that give way (an estimate) are cancelled as before a new export or restore.
 	 *
 	 * @param int $id Job id.
 	 * @return Job|null Null when the job does not exist.
 	 * @throws InvalidTransition When the job is not failed.
 	 * @throws StaleJob When the job changed meanwhile.
-	 * @throws JobsUnavailable When the job table lacks columns the retry writes.
+	 * @throws JobsUnavailable When the job table lacks columns the retry writes, or another start holds the lock.
+	 * @throws JobConflict When the job must not run next to an active one (the message says which).
 	 */
 	public function retry( int $id ) {
 		$job = $this->usable( $id );
 		if ( null === $job ) {
 			return null;
 		}
-		$queued = $this->repository->transition( $job, Job::QUEUED );
+		if ( ! $this->repository->lock_starts() ) {
+			throw new JobsUnavailable( 'Another job is being started right now; try again in a moment.' );
+		}
+		try {
+			$others = array_values(
+				array_filter(
+					$this->active(),
+					static function ( Job $other ) use ( $job ): bool {
+						return $other->id !== $job->id;
+					}
+				)
+			);
+			$reason = JobConflicts::conflict( $job->type, $job->options, $others );
+			if ( '' !== $reason ) {
+				throw new JobConflict( esc_html( $reason ) );
+			}
+			if ( in_array( $job->type, array( JobConflicts::EXPORT, JobConflicts::RESTORE ), true ) ) {
+				$this->cancel_yielding();
+			}
+			$queued = $this->repository->transition( $job, Job::QUEUED );
+		} finally {
+			$this->repository->unlock_starts();
+		}
 		Loopback::schedule( $id, Loopback::FALLBACK_SECONDS );
 		return $queued;
 	}
