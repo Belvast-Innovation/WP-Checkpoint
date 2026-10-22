@@ -110,6 +110,16 @@ final class LeftoversTest extends TestCase {
 		$this->assertSame( array( 'temp:/tmp/wpc-plugin-00000000' ), $this->there, 'the control: another run\'s temporary entry stays' );
 	}
 
+	public function test_an_earlier_runs_sites_and_site_tables_are_named_then_removed_at_the_start(): void {
+		$listener    = $this->listener();
+		$this->there = array( 'site-table:wp_2_posts', 'site:2', 'temp:/tmp/wpc-plugin-00000000' );
+		$listener->startTestSuite( new TestSuite( 'root' ) );
+		$this->assertSame( array( 'site-table:wp_2_posts', 'site:2' ), $this->removed, 'handed to the removal (on the tests database only)' );
+		$this->assertCount( 1, $this->notices );
+		$this->assertStringContainsString( "site-table:wp_2_posts\n  site:2", $this->notices[0], 'named first' );
+		$this->assertSame( array( 'temp:/tmp/wpc-plugin-00000000' ), $this->there, 'the control: another run\'s temporary entry stays' );
+	}
+
 	public function test_an_earlier_runs_other_tables_are_reported_and_removed_at_the_start_and_name_a_run_that_kept_the_lock(): void {
 		$strays   = array( 'table:wp_swt_keep' );
 		$listener = new Leftovers(
