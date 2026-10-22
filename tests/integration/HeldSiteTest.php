@@ -133,6 +133,31 @@ final class HeldSiteTest extends SwapTestCase {
 		$this->assertNotSame( '', $done->site_mark, 'and the mark stays once the job ended' );
 	}
 
+	public function test_a_job_whose_cursor_cannot_be_read_is_neither_taken_over_nor_abandoned(): void {
+		global $wpdb;
+		$this->site();
+		$job    = $this->held();
+		$code   = HeldSite::code( HeldSite::REBIND, $job, '' );
+		$cursor = $this->row( $job->id )['cursor_json'];
+		$wpdb->update( JobRepository::table(), array( 'cursor_json' => '{"phase":' ), array( 'id' => $job->id ) );
+		$wpdb->query( 'COMMIT' );
+		$before = $this->row( $job->id );
+		$outcome = $this->actions()->rebind( $job->id, $code, 'continue' );
+		$this->assertFalse( $outcome['ok'] );
+		$this->assertStringContainsString( 'cannot be read', $outcome['message'] );
+		$copy    = $this->actions( true );
+		$see     = $copy->held_elsewhere( $job->id )['assessment'];
+		$outcome = $copy->abandon( $job->id, HeldSite::code( HeldSite::ABANDON, $job, $see['recorded'] ) );
+		$this->assertFalse( $outcome['ok'] );
+		$this->assertStringContainsString( 'cannot be read', $outcome['message'] );
+		$this->assertSame( $before, $this->row( $job->id ), 'nothing changed' );
+		// The control: the same job with its cursor repaired is taken over with the same code.
+		$wpdb->update( JobRepository::table(), array( 'cursor_json' => $cursor ), array( 'id' => $job->id ) );
+		$wpdb->query( 'COMMIT' );
+		$outcome = $this->actions()->rebind( $job->id, $code, 'continue' );
+		$this->assertTrue( $outcome['ok'], $outcome['message'] );
+	}
+
 	public function test_a_take_over_that_continues_clears_a_cancel_requested_before(): void {
 		global $wpdb;
 		$job = $this->held();
