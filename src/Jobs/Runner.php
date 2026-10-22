@@ -257,7 +257,11 @@ final class Runner {
 
 		if ( array() !== $held['job']->unreadable_columns ) {
 			// The row as the lock read it (it may have changed since the first read): the same as before the lock.
-			$this->release( $held['job'], $held['token'] );
+			try {
+				$this->release( $held['job'], $held['token'] );
+			} catch ( LockLost $lost ) {
+				return new TickResult( TickResult::LOST, 0, $this->repository->find( $job_id ), __( 'The job was cancelled or taken over by another process.', 'wp-checkpoint' ) );
+			}
 			return $this->fail_unreadable( $held['job'] );
 		}
 		$job    = $held['job'];
@@ -1050,8 +1054,16 @@ final class Runner {
 				return new TickResult( TickResult::FINISHED, -1, $now );
 			}
 			if ( Job::SITE_UNTOUCHED !== $now->site_state && ! $now->is_locked( time() ) ) {
-				// Not failed: said as what it is, every time it is ticked.
-				return new TickResult( TickResult::BLOCKED, JobRepository::BACKOFF_SECONDS[ count( JobRepository::BACKOFF_SECONDS ) - 1 ], $now, $this->redactor->redact( $message ) . ' ' . __( 'This job holds the site changed, so it is not failed: it goes on once its row is repaired. Look at the site\'s directories and tables, and the .maintenance file in the WordPress directory, before anything else; while the job holds the site, no other job starts on it.', 'wp-checkpoint' ) );
+				// Not failed. A job that waits for an answer, or stands at a step only WP-CLI runs, says so as before:
+				// no driver follows either up (a blocked tick is followed up after the back-off).
+				if ( $now->awaiting_answer() ) {
+					return new TickResult( TickResult::PAUSED, -1, $now, __( 'The job is waiting for your decision.', 'wp-checkpoint' ) );
+				}
+				if ( ! $this->cli && $this->at_cli_only_step( $now ) ) {
+					return new TickResult( TickResult::CLI, -1, $now, self::cli_message( $now ) );
+				}
+				// Said as what it is, every time it is ticked.
+				return new TickResult( TickResult::BLOCKED, JobRepository::BACKOFF_SECONDS[ count( JobRepository::BACKOFF_SECONDS ) - 1 ], $now, $this->redactor->redact( $message ) . ' ' . __( 'This job holds the site changed, so it is not failed: it is not run until its row is repaired. Look at the site\'s directories and tables, and the .maintenance file in the WordPress directory, before anything else; while the job holds the site, no other job starts on it.', 'wp-checkpoint' ) );
 			}
 			return new TickResult( TickResult::BUSY, self::BUSY_RETRY_SECONDS, $now, __( 'Another process is working on this job.', 'wp-checkpoint' ) );
 		}

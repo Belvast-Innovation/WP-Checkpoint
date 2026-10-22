@@ -329,15 +329,16 @@ final class JobActions {
 	 */
 	private function not_ended( Job $job ): string {
 		if ( $this->repository->holds_site( $job ) ) {
+			if ( array() !== $job->unreadable_columns ) {
+				// First: the commands the other answers name refuse such a job (rebind(), abandon()).
+				return self::unreadable_refusal( $job );
+			}
 			if ( Job::REASON_ABANDONED === $job->failure_reason ) {
 				return self::abandoned_elsewhere( $job, $this->held->assess( $job ) );
 			}
 			if ( ! $this->repository->manages( $job ) ) {
 				// While the job holds the site there is no case in which taking its file down here is right.
 				return self::holding_paths( $job, $this->held->assess( $job ) );
-			}
-			if ( array() !== $job->unreadable_columns ) {
-				return self::unreadable_refusal( $job );
 			}
 			return __( 'This installation manages the job and it still holds the site: run it with wp wpcheckpoint job run.', 'wp-checkpoint' );
 		}
