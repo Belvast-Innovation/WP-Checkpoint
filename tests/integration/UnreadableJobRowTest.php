@@ -184,6 +184,34 @@ final class UnreadableJobRowTest extends JobTestCase {
 		$this->assertSame( Job::COMPLETED, Plugin::instance()->jobs()->find( $id )->status );
 	}
 
+	public function test_a_held_back_jobs_reason_is_logged_once_and_again_only_when_it_changes(): void {
+		global $wpdb;
+		$id = $this->job_with(
+			array(
+				'cursor_json' => '{"n":',
+				'site_state'  => Job::SITE_SWAPPED,
+			)
+		);
+		$progress_at = Plugin::instance()->jobs()->find( $id )->progress_at;
+		for ( $i = 0; $i < 3; $i++ ) {
+			$this->assertSame( TickResult::BLOCKED, $this->tick( $id )->status );
+		}
+		$job = Plugin::instance()->jobs()->find( $id );
+		$log = Plugin::instance()->job_presenter()->log_tail( $job );
+		$this->assertSame( 1, substr_count( $log, 'The job is not run' ), 'once in three ticks: ' . $log );
+		$this->assertStringContainsString( 'its position (cursor) cannot be read', $log, 'with the reason' );
+		$this->assertStringContainsString( 'its position (cursor) cannot be read', $job->progress_message, 'and as its progress message' );
+		$this->assertSame( $progress_at, $job->progress_at, 'not counted as progress' );
+		// Another reason: its options cannot be read either.
+		$wpdb->update( JobRepository::table(), array( 'options_json' => '{"x":' ), array( 'id' => $id ) );
+		$wpdb->query( 'COMMIT' );
+		$this->tick( $id );
+		$this->tick( $id );
+		$log = Plugin::instance()->job_presenter()->log_tail( Plugin::instance()->jobs()->find( $id ) );
+		$this->assertSame( 2, substr_count( $log, 'The job is not run' ), 'once more when the reason changed: ' . $log );
+		$this->assertStringContainsString( 'its position (cursor) and its options cannot be read', $log );
+	}
+
 	public function test_a_job_that_holds_the_site_and_waits_for_an_answer_or_for_wp_cli_says_so_as_before(): void {
 		global $wpdb;
 		foreach ( array( 'readable' => '{"n":1}', 'unreadable' => '{"n":' ) as $what => $cursor ) {

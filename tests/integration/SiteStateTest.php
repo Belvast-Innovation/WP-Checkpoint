@@ -1061,6 +1061,19 @@ final class SiteStateTest extends WP_UnitTestCase {
 		$this->assertSame( Job::RUNNING, $this->repo->find( $held->id )->status );
 		$control = $this->runner( true )->tick( $plain->id, $this->now );
 		$this->assertSame( TickResult::FAILED, $control->status, 'the control: a job that holds nothing is failed with the reason' );
+		// Said on every tick; written to its log, and as its progress message, only when the reason changes.
+		$this->runner( true )->tick( $held->id, $this->now );
+		$this->runner( true )->tick( $held->id, $this->now );
+		$log = \WPCheckpoint\Plugin::instance()->job_presenter()->log_tail( $this->repo->find( $held->id ) );
+		$this->assertSame( 1, substr_count( $log, 'The job is not run' ), 'once in three ticks: ' . $log );
+		$this->assertStringContainsString( 'takeover_mark', $log, 'with the reason' );
+		$this->assertStringContainsString( 'This job holds the site changed, so it is not failed', $this->repo->find( $held->id )->progress_message );
+		$wpdb->query( 'ALTER TABLE ' . Schema::jobs_table() . ' DROP COLUMN cron_deferrals' ); // Another reason.
+		$this->runner( true )->tick( $held->id, $this->now );
+		$this->runner( true )->tick( $held->id, $this->now );
+		$log = \WPCheckpoint\Plugin::instance()->job_presenter()->log_tail( $this->repo->find( $held->id ) );
+		$this->assertSame( 2, substr_count( $log, 'The job is not run' ), 'once more when the reason changed: ' . $log );
+		$this->assertStringContainsString( 'cron_deferrals', $log );
 		// While a live run holds it, that is what is said.
 		$this->set( $held->id, array( 'lock_token' => 'a-live-run', 'locked_until' => time() + 600 ) );
 		$busy = $this->runner( true )->tick( $held->id, $this->now );

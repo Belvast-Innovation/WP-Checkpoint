@@ -633,6 +633,10 @@ final class HeldSiteTest extends SwapTestCase {
 		$this->assertStringContainsString( 'not positively another', $outcome['message'], 'refused for that reason' );
 		$this->assertFileExists( $this->abspath . '/.maintenance' );
 		$this->assertSame( $before, $this->row( $job->id ) );
+		// What release says can be done from here: no abandon command, so nothing of what it does.
+		$said = $acts->release( $job->id, '' )['message'];
+		$this->assertStringContainsString( 'If it is not shared, nothing can be done from this WordPress directory', $said );
+		$this->assertStringNotContainsString( 'it takes the file down too', $said );
 	}
 
 	public function test_the_same_directory_by_another_spelling_is_not_another(): void {
@@ -779,6 +783,11 @@ final class HeldSiteTest extends SwapTestCase {
 		$this->assertStringNotContainsString( 'Resolve it with: wp wpcheckpoint job run ' . $job->id, $warn, 'not advised to run what is never run here' );
 		$admin = Plugin::instance()->job_presenter()->present( $job, false )['held_elsewhere'];
 		$this->assertStringContainsString( 'wp wpcheckpoint job abandon ' . $job->id . ' --confirm=' . $code, $admin );
+		$this->assertStringContainsString( '(it takes the file down too;', $admin, 'with the abandon command, what it does' );
+		$this->assertStringContainsString( 'Restore job ' . $job->id . ' changed a site and still holds it. Another installation of WP Checkpoint manages it', $admin );
+		// Left to job status when it prints them after its table; said for any other job.
+		$this->assertStringNotContainsString( 'wp wpcheckpoint job abandon ' . $job->id, implode( "\n", Plugin::instance()->half_swapped_warnings( null, $job->id ) ) );
+		$this->assertStringContainsString( 'wp wpcheckpoint job abandon ' . $job->id, implode( "\n", Plugin::instance()->half_swapped_warnings( null, $job->id + 1 ) ), 'the control' );
 	}
 
 	public function test_an_abandon_takes_the_file_down_before_it_records_the_job_abandoned(): void {
