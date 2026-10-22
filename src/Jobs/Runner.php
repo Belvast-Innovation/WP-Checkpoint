@@ -213,6 +213,11 @@ final class Runner {
 			// fail, or a default would stand in for a value. Failed with the reason, before anything else.
 			return $this->fail_for_missing_columns( $job, $problems );
 		}
+		if ( array() !== $job->unreadable_columns ) {
+			// Its cursor, options or questions cannot be read: no step runs on an empty stand-in (a step that ends on an
+			// empty cursor, a restart from the first unit). Failed with the reason, before anything else.
+			return $this->fail_unreadable( $job );
+		}
 		if ( ! $this->cli && ! $job->awaiting_answer() && $this->at_cli_only_step( $job ) ) {
 			// Before anything writes the row (the gate, the lock, the cron count): nothing is counted, no driver follows up.
 			// A job waiting for an answer says so first: the answer is given anywhere, the step then runs in WP-CLI.
@@ -1007,6 +1012,32 @@ final class Runner {
 	private function fail( Job $job, string $token, Logger $logger, string $message, string $failure = '', string $retry_from = '', array $forget = array() ): TickResult {
 		$logger->error( 'Job failed', array( 'error' => $message ) );
 		$this->transition( $job, $token, Job::FAILED, $message, $failure, $retry_from, $forget );
+		return new TickResult( TickResult::FAILED, -1, $job, $this->redactor->redact( $message ) );
+	}
+
+	/**
+	 * Fail a job whose row cannot be read (JobRepository::fail_unreadable()).
+	 *
+	 * @param Job $job Job, as read.
+	 * @return TickResult
+	 */
+	private function fail_unreadable( Job $job ): TickResult {
+		/* translators: %s: what cannot be read of the job's row */
+		$message = sprintf( __( 'The job stopped: %s. Nothing was run, and its row is left as it is. Look at the site before you go on; while the job holds the site, no other job starts on it.', 'wp-checkpoint' ), JobRepository::unreadable_text( $job->unreadable_columns ) );
+		$outcome = $this->repository->fail_unreadable( $job, $message );
+		if ( JobRepository::FAIL_ERROR === $outcome ) {
+			return new TickResult( TickResult::BLOCKED, JobRepository::BACKOFF_SECONDS[ count( JobRepository::BACKOFF_SECONDS ) - 1 ], $job, $this->redactor->redact( $message ) );
+		}
+		if ( JobRepository::FAIL_HELD === $outcome ) {
+			$now = $this->repository->find( $job->id );
+			if ( null === $now ) {
+				return new TickResult( TickResult::MISSING, -1, null );
+			}
+			return ! in_array( $now->status, array( Job::QUEUED, Job::RUNNING, Job::PAUSED ), true )
+				? new TickResult( TickResult::FINISHED, -1, $now )
+				: new TickResult( TickResult::BUSY, self::BUSY_RETRY_SECONDS, $now, __( 'Another process is working on this job.', 'wp-checkpoint' ) );
+		}
+		$this->note( $job, Logger::ERROR, 'Job failed', array( 'error' => $message ) );
 		return new TickResult( TickResult::FAILED, -1, $job, $this->redactor->redact( $message ) );
 	}
 

@@ -228,6 +228,11 @@ final class Plugin {
 				// Managed by another installation: why it is not run here, and what can be done from here.
 				$out[] = $this->job_presenter()->clean( implode( "\n", JobPresenter::held_lines( $held['job'], $held['assessment'] ) ) );
 				continue;
+			} elseif ( array() !== $job->unreadable_columns ) {
+				// Its row cannot be read: it is not run again (Runner, check_retry()), so no command to finish it.
+				/* translators: %d: job id */
+				$out[] = sprintf( __( 'Restore job %d holds the site changed, and its row cannot be read (it was changed or damaged): it is not run again. Look at the site\'s directories and tables, and the .maintenance file in the WordPress directory, before anything else.', 'wp-checkpoint' ), $id );
+				continue;
 			} elseif ( $job->awaiting_answer() && in_array( Jobs\SwapStep::UNVERIFIED_QUESTION, array_column( $job->questions, 'id' ), true ) ) {
 				/* translators: 1: job id, 2: job id */
 				$out[] = sprintf( __( 'Restore job %1$d waits for an answer: whether to keep the restored site, which could not be checked (wp wpcheckpoint job status %2$d says why), or to undo the restore. Answer it on WP Checkpoint\'s admin page, or with wp wpcheckpoint job answer.', 'wp-checkpoint' ), $id, $id );
