@@ -2,6 +2,7 @@
 
 namespace WPCheckpoint\Tests\Integration;
 
+use WPCheckpoint\Jobs\CliOnly;
 use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\JobContext;
 use WPCheckpoint\Jobs\JobRepository;
@@ -22,6 +23,9 @@ use WPCheckpoint\Tests\Fixtures\Jobs\JobTestCase;
 final class UnreadableJobRowTest extends JobTestCase {
 
 	const TYPE = 'unreadable_row';
+
+	/** A type whose one step only WP-CLI runs. */
+	const CLI_TYPE = 'unreadable_cli';
 
 	/** Cursors that cannot be read, by what they are. */
 	const CURSORS = array(
@@ -58,6 +62,15 @@ final class UnreadableJobRowTest extends JobTestCase {
 						++$this->cleanups;
 					}
 				),
+			)
+		);
+		$this->register(
+			self::CLI_TYPE,
+			array(
+				new class( 'unreadable_cli_step', function (): StepResult {
+					++$this->runs;
+					return StepResult::done( 'ended' );
+				} ) extends HoldingStep implements CliOnly {},
 			)
 		);
 	}
@@ -116,7 +129,7 @@ final class UnreadableJobRowTest extends JobTestCase {
 			$this->assertSame( 0, $this->runs, $what . ': no step ran' );
 			$this->assertSame( TickResult::BLOCKED, $result->status, $what . ': ' . $result->message );
 			$this->assertStringContainsString( 'its position (cursor) cannot be read', $result->message, $what );
-			$this->assertStringContainsString( 'it is not failed: it goes on once its row is repaired', $result->message, $what );
+			$this->assertStringContainsString( 'it is not failed: it is not run until its row is repaired', $result->message, $what );
 			$this->assertSame( Job::QUEUED, $job->status, $what . ': not failed' );
 			$this->assertSame( '', (string) $job->last_error, $what );
 			$this->assertSame( '', $job->lock_token, $what . ': no lock left' );
@@ -169,6 +182,38 @@ final class UnreadableJobRowTest extends JobTestCase {
 		$this->tick( $id );
 		$this->assertSame( 1, $this->runs, 'an empty cursor: the step ran' );
 		$this->assertSame( Job::COMPLETED, Plugin::instance()->jobs()->find( $id )->status );
+	}
+
+	public function test_a_job_that_holds_the_site_and_waits_for_an_answer_or_for_wp_cli_says_so_as_before(): void {
+		global $wpdb;
+		foreach ( array( 'readable' => '{"n":1}', 'unreadable' => '{"n":' ) as $what => $cursor ) {
+			$this->runs = 0;
+			$id         = $this->job_with(
+				array(
+					'cursor_json'    => $cursor,
+					'site_state'     => Job::SITE_SWAPPED,
+					'status'         => Job::PAUSED,
+					'questions_json' => '[{"id":"q","kind":"k","count":1,"choices":["a"]}]',
+				)
+			);
+			$result = $this->tick( $id );
+			$this->assertSame( TickResult::PAUSED, $result->status, $what . ': ' . $result->message );
+			$this->assertSame( 0, $this->runs, $what );
+			// At a step only WP-CLI runs, ticked from elsewhere (the Runner of the tests is not WP-CLI's).
+			$id = Plugin::instance()->jobs()->create( self::CLI_TYPE, self::$admin_id )->id;
+			$wpdb->update(
+				JobRepository::table(),
+				array(
+					'cursor_json' => $cursor,
+					'site_state'  => Job::SITE_SWAPPED,
+				),
+				array( 'id' => $id )
+			);
+			$wpdb->query( 'COMMIT' );
+			$result = $this->tick( $id );
+			$this->assertSame( TickResult::CLI, $result->status, $what . ': ' . $result->message );
+			$this->assertSame( 0, $this->runs, $what );
+		}
 	}
 
 	public function test_any_other_job_whose_cursor_cannot_be_read_is_failed_for_good_before_any_step_runs(): void {
@@ -262,24 +307,32 @@ final class UnreadableJobRowTest extends JobTestCase {
 	public function test_a_row_that_becomes_unreadable_before_the_lock_reads_it_is_not_run(): void {
 		global $wpdb;
 		foreach ( array(
-			'cut short' => '{"n":',
-			'readable'  => '{"n":5}',
+			'cut short'          => '{"n":',
+			'cut short, lost'    => '{"n":',
+			'readable'           => '{"n":5}',
 		) as $what => $written ) {
 			$this->runs = 0;
 			$id         = $this->job_with( array( 'cursor_json' => '{"n":1}' ) );
 			$done       = false;
+			$lose       = 'cut short, lost' === $what;
+			$lost       = false;
 			$table      = JobRepository::table();
 			// Written right before the statement that takes the lock (and reads the row again): after the first read.
-			$hook = static function ( $query ) use ( &$done, $wpdb, $table, $id, $written ) {
+			// "Lost": the statement that gives the lock back then changes nothing (another process took it meanwhile).
+			$hook = static function ( $query ) use ( &$done, &$lost, $lose, $wpdb, $table, $id, $written ) {
 				if ( ! $done && false !== strpos( $query, 'SET takeovers = IF(' ) ) {
 					$done = true;
 					$wpdb->query( $wpdb->prepare( "UPDATE {$table} SET cursor_json = %s WHERE id = %d", $written, $id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the jobs table.
+				}
+				if ( $lose && $done && ! $lost && 0 === strpos( $query, "UPDATE {$table} SET lock_token = '', locked_until = 0, updated_at" ) ) {
+					$lost = true;
+					return $query . ' AND 1 = 0';
 				}
 				return $query;
 			};
 			add_filter( 'query', $hook );
 			try {
-				$this->tick( $id );
+				$result = $this->tick( $id );
 			} finally {
 				remove_filter( 'query', $hook );
 			}
@@ -287,6 +340,12 @@ final class UnreadableJobRowTest extends JobTestCase {
 			$job = Plugin::instance()->jobs()->find( $id );
 			if ( 'readable' === $what ) {
 				$this->assertGreaterThan( 0, $this->runs, 'the control: a readable row is run' );
+				continue;
+			}
+			if ( $lose ) {
+				$this->assertTrue( $lost, 'the control: the lock was not given back' );
+				$this->assertSame( TickResult::LOST, $result->status, $what . ': said, not thrown' );
+				$this->assertSame( 0, $this->runs, $what . ': no step ran' );
 				continue;
 			}
 			$this->assertSame( 0, $this->runs, $what . ': no step ran' );

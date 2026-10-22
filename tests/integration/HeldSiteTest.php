@@ -150,10 +150,15 @@ final class HeldSiteTest extends SwapTestCase {
 		$outcome = $copy->abandon( $job->id, HeldSite::code( HeldSite::ABANDON, $job, $see['recorded'] ) );
 		$this->assertFalse( $outcome['ok'] );
 		$this->assertStringContainsString( 'cannot be read', $outcome['message'] );
+		// Release names no command that is then refused (abandon, rebind).
+		$outcome = $copy->release( $job->id, '' );
+		$this->assertStringContainsString( 'cannot be read', $outcome['message'] );
+		$this->assertStringNotContainsString( 'wp wpcheckpoint job', $outcome['message'] );
 		$this->assertSame( $before, $this->row( $job->id ), 'nothing changed' );
 		// The control: the same job with its cursor repaired is taken over with the same code.
 		$wpdb->update( JobRepository::table(), array( 'cursor_json' => $cursor ), array( 'id' => $job->id ) );
 		$wpdb->query( 'COMMIT' );
+		$this->assertStringContainsString( 'wp wpcheckpoint job abandon ' . $job->id, $copy->release( $job->id, '' )['message'], 'the control: release names the command for a readable row' );
 		$outcome = $this->actions()->rebind( $job->id, $code, 'continue' );
 		$this->assertTrue( $outcome['ok'], $outcome['message'] );
 	}
