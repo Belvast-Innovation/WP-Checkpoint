@@ -423,6 +423,22 @@ echo json_encode( array( "upgrading" => $upgrading, "type" => gettype( $upgradin
 		$this->assertSame( array_values( array_unique( Maintenance::KNOWN_CODES ) ), Maintenance::KNOWN_CODES );
 	}
 
+	public function test_the_code_is_the_same_whatever_line_endings_the_source_file_has(): void {
+		if ( 'Windows' === PHP_OS_FAMILY ) {
+			$this->markTestSkipped( 'Runs PHP with a POSIX redirection.' );
+		}
+		$source = (string) file_get_contents( dirname( __DIR__, 3 ) . '/src/Restore/Maintenance.php' );
+		$crlf   = $this->dir . '/maintenance-crlf.txt';
+		file_put_contents( $crlf, str_replace( "\n", "\r\n", str_replace( "\r\n", "\n", $source ) ) );
+		$this->assertStringContainsString( "\r\n", (string) file_get_contents( $crlf ), 'the control: the copy has CRLF line endings' );
+		$out = array();
+		$rc  = 1;
+		exec( escapeshellarg( PHP_BINARY ) . ' -r ' . escapeshellarg( 'define( "ABSPATH", "/tmp/" ); require ' . var_export( $crlf, true ) . '; echo hash( "sha256", WPCheckpoint\Restore\Maintenance::CODE );' ) . ' 2>/dev/null', $out, $rc );
+		$this->assertSame( 0, $rc, implode( "\n", $out ) );
+		$this->assertSame( array( hash( 'sha256', Maintenance::CODE ) ), $out, 'the source checked out with CRLF line endings gives the same code' );
+		$this->assertStringNotContainsString( "\r", Maintenance::CODE );
+	}
+
 	public function test_the_code_can_be_required_twice_in_one_request(): void {
 		file_put_contents( $this->dir . '/.maintenance', Maintenance::CODE );
 		file_put_contents( $this->dir . '/.wpcheckpoint-maintenance.php', $this->ours()->data( Maintenance::held() ) );

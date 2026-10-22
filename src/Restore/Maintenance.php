@@ -110,25 +110,25 @@ final class Maintenance {
 	 * blocks, $upgrading is a float, never an integer: WordPress lets a request through a maintenance file whose time is
 	 * an integer when it carries that time and its MD5 (wp_scrape_key, wp_scrape_nonce: its check for fatal errors after
 	 * a plugin or theme edit), and a held file's time is public. Pinned (MaintenanceTest): code a released version wrote
-	 * stays in KNOWN_CODES, so that a file it put up is still told as this plugin's.
+	 * stays in KNOWN_CODES, so that a file it put up is still told as this plugin's. Written line by line with "\n",
+	 * not as a nowdoc: the line breaks of a nowdoc are the source file's, which a checkout on Windows (or an upload in
+	 * text mode) turns into "\r\n", and a file that version put up would no longer be told as this plugin's.
 	 */
-	const CODE = <<<'CODE'
-<?php
-// WP Checkpoint: a restore holds this site. Its mark, its time and its pass are in .wpcheckpoint-maintenance.php.
-$upgrading         = (float) time();
-$wpcheckpoint_data = @file_get_contents( __DIR__ . '/.wpcheckpoint-maintenance.php' );
-if ( is_string( $wpcheckpoint_data ) && 1 === preg_match( '/\A<\?php exit; \?>\nWP Checkpoint restore [0-9a-f]{32}\n([0-9]{1,19})\n([0-9a-f]{64}|-)\n\z/', $wpcheckpoint_data, $wpcheckpoint_found ) ) {
-	$upgrading         = (float) $wpcheckpoint_found[1];
-	$wpcheckpoint_pass = isset( $_SERVER['HTTP_X_WPCHECKPOINT_PASS'] ) && is_string( $_SERVER['HTTP_X_WPCHECKPOINT_PASS'] ) ? $_SERVER['HTTP_X_WPCHECKPOINT_PASS'] : '';
-	if ( '-' !== $wpcheckpoint_found[2] && 1 === preg_match( '/\A[0-9a-f]{64}\z/', $wpcheckpoint_pass ) && hash_equals( $wpcheckpoint_found[2], hash( 'sha256', $wpcheckpoint_pass ) ) ) {
-		$upgrading = 0;
-		if ( ! defined( 'DISABLE_WP_CRON' ) ) {
-			define( 'DISABLE_WP_CRON', true );
-		}
-	}
-}
-
-CODE;
+	const CODE =
+		'<?php' . "\n"
+		. '// WP Checkpoint: a restore holds this site. Its mark, its time and its pass are in .wpcheckpoint-maintenance.php.' . "\n"
+		. '$upgrading         = (float) time();' . "\n"
+		. '$wpcheckpoint_data = @file_get_contents( __DIR__ . \'/.wpcheckpoint-maintenance.php\' );' . "\n"
+		. 'if ( is_string( $wpcheckpoint_data ) && 1 === preg_match( \'/\\A<\\?php exit; \\?>\\nWP Checkpoint restore [0-9a-f]{32}\\n([0-9]{1,19})\\n([0-9a-f]{64}|-)\\n\\z/\', $wpcheckpoint_data, $wpcheckpoint_found ) ) {' . "\n"
+		. '	$upgrading         = (float) $wpcheckpoint_found[1];' . "\n"
+		. '	$wpcheckpoint_pass = isset( $_SERVER[\'HTTP_X_WPCHECKPOINT_PASS\'] ) && is_string( $_SERVER[\'HTTP_X_WPCHECKPOINT_PASS\'] ) ? $_SERVER[\'HTTP_X_WPCHECKPOINT_PASS\'] : \'\';' . "\n"
+		. '	if ( \'-\' !== $wpcheckpoint_found[2] && 1 === preg_match( \'/\\A[0-9a-f]{64}\\z/\', $wpcheckpoint_pass ) && hash_equals( $wpcheckpoint_found[2], hash( \'sha256\', $wpcheckpoint_pass ) ) ) {' . "\n"
+		. '		$upgrading = 0;' . "\n"
+		. '		if ( ! defined( \'DISABLE_WP_CRON\' ) ) {' . "\n"
+		. '			define( \'DISABLE_WP_CRON\', true );' . "\n"
+		. '		}' . "\n"
+		. '	}' . "\n"
+		. '}' . "\n";
 
 	/**
 	 * Every code of .maintenance a version of the plugin wrote (CODE among them): a held file of an earlier version is
