@@ -402,6 +402,26 @@ final class Leftovers implements TestListener {
 	}
 
 	/**
+	 * Remove a site a test created with real tables (a test that removes the core test case's temporary-table filters
+	 * commits it): its row in the sites table and its base tables, as removal() removes a leftover one (on wp-env's
+	 * tests database only). Not wp_delete_site(): that also deletes the site's upload directory, in the test site.
+	 *
+	 * @param int $id Site id.
+	 * @return void
+	 */
+	public static function remove_site( int $id ): void {
+		global $wpdb;
+		$tables = 'site-table:' . $wpdb->base_prefix . $id . '_';
+		$items  = array();
+		foreach ( self::site_listing( $wpdb ) as $item ) {
+			if ( 'site:' . $id === $item || 0 === strpos( $item, $tables ) ) {
+				$items[] = $item;
+			}
+		}
+		self::removal( $items );
+	}
+
+	/**
 	 * Of $all, the tables of a site's prefix: "{prefix}{id}_" and anything after it (WordPress's, or a plugin's per site).
 	 *
 	 * @param string[] $all         Every table in the database.

@@ -91,6 +91,9 @@ final class ClaimedAnswerSequencesTest extends SwapTestCase {
 			}
 			Sandbox::remove( $this->root );
 		}
+		if ( 0 !== $this->blog ) {
+			Leftovers::remove_site( $this->blog ); // Created with real tables (the filters are off): committed.
+		}
 		parent::tear_down();
 	}
 
