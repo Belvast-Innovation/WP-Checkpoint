@@ -14,9 +14,11 @@ use WPCheckpoint\Restore\ImportSession;
 use WPCheckpoint\Restore\IncomingTables;
 use WPCheckpoint\Restore\Ledger;
 use WPCheckpoint\Restore\Maintenance;
+use WPCheckpoint\Restore\SelfCheck;
 use WPCheckpoint\Restore\Queries;
 use WPCheckpoint\Restore\RestoreFiles;
 use WPCheckpoint\Restore\SiteChanged;
+use WPCheckpoint\Restore\SiteCheck;
 use WPCheckpoint\Restore\SiteTables;
 use WPCheckpoint\Restore\StagingLayout;
 use WPCheckpoint\Restore\StateCarry;
@@ -80,14 +82,20 @@ defined( 'ABSPATH' ) || exit;
  * guessed.
  *
  * After the swap is made: caches flushed (behind the held file), the
- * restored site verified where the "verify" part says so (the place of the
- * checks of 4c-B; without the part nothing is checked), the file
- * let go, the restored rewrite rules removed (WordPress builds them again),
- * a mark left in the restored options for the plugin to set its fallback
- * events again on its next request (Plugin), the cache flushed again, the
- * end recorded ("done"), the file taken down: each a step of its own, with
- * plain SQL on the restored tables and no WordPress API but the cache flush
- * (the process still holds the old site's plugins). The empty cursor of the
+ * self-check row written and the restored site checked through the web
+ * server (Restore\SiteCheck, behind the held file that lets the checks'
+ * requests through; checked again after waits when it could not be told),
+ * the self-check row deleted; a site that failed is swapped back out with
+ * nothing of it served, one that could not be checked is kept or undone as
+ * the policy or the answer to a question says (asked once it is let out);
+ * then the file let go, the restored rewrite rules removed (WordPress builds
+ * them again), a mark left in the restored options for the plugin to set its
+ * fallback events again on its next request (Plugin), the cache flushed
+ * again, the end recorded ("done"), the file taken down: each a step of its
+ * own, with plain SQL on the restored tables (the process still holds the
+ * old site's plugins); of WordPress's API only the cache flush, the HTTP
+ * requests of the checks, and the options WP_HOME and WP_SITEURL stand for
+ * when wp-config.php defines them. The empty cursor of the
  * ended step, on a job still recorded as holding the site (a run that died
  * between the Runner's two last writes), ends the step without touching
  * anything.
@@ -128,22 +136,41 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	const INCOMPLETE  = 'incomplete';
 	const STOPPED     = 'stopped';
 	const REVERSED    = 'reversed';
+	const UNDONE      = 'undone';
 	const REASONS     = array(
 		self::INTERRUPTED => 'The swap was interrupted before it was complete.',
 		self::INCOMPLETE  => 'After the renames, not every table of the plan was in its place.',
 		self::STOPPED     => 'The swap stopped (the job log says why).',
 		self::REVERSED    => 'A check of the restored site found it broken: the site was put back as it was before the restore.',
+		self::UNDONE      => 'The restored site could not be checked, and the swap was undone as chosen: the site was put back as it was before the restore.',
 	);
+
+	/**
+	 * Checks of the restored site that could not tell made at most, and the waits between them (each try in a tick
+	 * of its own, with a new pass key and one-time value).
+	 */
+	const CHECK_TRIES = 4;
+	const CHECK_WAITS = array( 15, 60, 120 );
+
+	/**
+	 * The question asked when the restored site could not be checked: keep it, or undo the swap (RestoreJob::UNVERIFIED
+	 * says it up front).
+	 */
+	const UNVERIFIED_QUESTION = 'unverified';
+	const UNVERIFIED_KIND     = 'restored_site_unchecked';
 
 	/**
 	 * The checks of the restored site a failed verdict names (the cursor keeps the id): what 4c-B checks, and what
 	 * the job's error says of each. "unknown" is what a verdict without a known id is kept as.
 	 */
 	const CHECKS = array(
-		'home'    => 'the home page did not answer as a WordPress site',
-		'login'   => 'the login page did not answer as a WordPress site',
-		'self'    => 'the plugin\'s self-check did not answer from the restored tables',
-		'unknown' => 'the check is not named',
+		'home'        => 'the home page did not answer as a WordPress site',
+		'login'       => 'the login page did not answer as a WordPress site',
+		'self'        => 'the plugin\'s self-check did not answer from the restored tables',
+		'home_fatal'  => 'the home page answered with WordPress\'s fatal error page (HTTP 500), twice, 15 seconds apart',
+		'login_fatal' => 'wp-login.php answered with WordPress\'s fatal error page (HTTP 500), twice, 15 seconds apart',
+		'self_wrong'  => 'the plugin\'s self-check answered from another options table than the one the restore swapped in',
+		'unknown'     => 'the check is not named',
 	);
 
 	/**
@@ -174,9 +201,12 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * array (group => directory), "random" function(): string (hex for the names of what is moved out of the
 	 * way), "limit" function(): string (in place of reading max_execution_time back), "batch" (bytes of a batch
 	 * of renames, in place of SwapRules::limit()), "remove" function( Maintenance $file, callable $confirm ): bool
-	 * (in place of taking the maintenance file down), "verify" function( JobContext ): true|string (whether the
-	 * restored site passed its checks, in place of the checks 4c-B will make; a string, the id of the check that
-	 * failed (CHECKS), reverses the swap).
+	 * (in place of taking the maintenance file down), "verify" function( JobContext, array{key: string, nonce:
+	 * string} ): true|string|array (in place of the checks, given the run's pass key and the one-time value of the
+	 * self-check row: true passed; a string, the id of the check that failed (CHECKS), reverses the swap; an array
+	 * is SiteCheck's result), "http" function( string $url, array $headers ): array (in place of http(), each request
+	 * of the checks), "urls" function(): array (in place of check_urls(), where the checks go), "left" function(
+	 * string $dir, callable $lease ): array (in place of JobActions::release_left()).
 	 *
 	 * @var array<string, mixed>
 	 */
@@ -351,7 +381,10 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		}
 		try {
 			$file = $this->maintenance( $cursor );
-			if ( ! $file->remove() ) {
+			// This restore's file only: a bare one (no data file names its restore) is the holder's to take down, and
+			// this job's once it was recorded as untouched after it held the site (its file put up, then let go).
+			$own = in_array( (string) ( $cursor['phase'] ?? '' ), array( 'reverted', 'rejudged' ), true );
+			if ( ( $own || Maintenance::BARE !== $file->state() ) && ! $file->remove() ) {
 				$context->logger()->warning( 'The restore\'s maintenance file could not be taken down' );
 			}
 		} catch ( \Throwable $e ) {
@@ -545,15 +578,66 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			}
 		}
 		$this->check_plan( $context, $db, $cursor, $staging );
-		$state = $this->maintenance( $cursor )->state();
+		$file  = $this->maintenance( $cursor );
+		$state = $file->state();
+		$left  = null;
+		if ( Maintenance::OTHER === $state ) {
+			$left = $this->release_left( $context );
+			if ( JobActions::LEFT_GONE === $left['outcome'] ) {
+				$context->logger()->info( sprintf( 'The maintenance file left by restore job %d, which has ended, was taken down', $left['id'] ) );
+				$state = $file->state();
+			}
+		}
 		if ( Maintenance::UNKNOWN === $state ) {
 			throw new TransientFailure( 'Whether a maintenance file is in place cannot be told; the swap waits.' );
 		}
 		if ( Maintenance::OTHER === $state ) {
 			$context->logger()->info( 'Another maintenance file is in place; the swap waits for it to go' );
-			return StepResult::wait( 60, $cursor, __( 'Another maintenance file is in the WordPress directory (.maintenance: an update in progress, or one left by an update that stopped); the swap waits until it is gone. If nothing is being updated, remove that file.', 'wp-checkpoint' ) );
+			return StepResult::wait( 60, $cursor, self::other_file( $left ) );
+		}
+		if ( Maintenance::BARE === $state ) {
+			// This plugin's code with no data file of its form: it names no restore (this one's would, from its first
+			// write on), so it is not this restore's to take over or to take down.
+			$context->logger()->info( 'A maintenance file of this plugin\'s without its data file is in place; the swap waits for it to go' );
+			return StepResult::wait( 60, $cursor, __( 'A maintenance file of WP Checkpoint is in the WordPress directory (.maintenance) without the data file that names its restore (.wpcheckpoint-maintenance.php is missing or was changed); the swap waits until it is gone. If wp wpcheckpoint job list shows no restore that holds this site, remove .maintenance.', 'wp-checkpoint' ) );
 		}
 		return null;
+	}
+
+	/**
+	 * Take down the maintenance file an earlier restore left, when its job has ended (JobActions::release_left()).
+	 *
+	 * @param JobContext $context Context.
+	 * @return array{outcome: string, id: int}
+	 */
+	private function release_left( JobContext $context ): array {
+		$dir   = (string) ( $this->parts['abspath'] ?? ABSPATH );
+		$lease = array( $context, 'confirm_lease' );
+		return isset( $this->parts['left'] )
+			? (array) call_user_func( $this->parts['left'], $dir, $lease )
+			: \WPCheckpoint\Plugin::instance()->job_actions()->release_left( $dir, $lease );
+	}
+
+	/**
+	 * What the swap waits for while another maintenance file is in place.
+	 *
+	 * @param array{outcome: string, id: int}|null $left What release_left() found (null: not asked).
+	 * @return string
+	 */
+	private static function other_file( ?array $left ): string {
+		$outcome = null === $left ? '' : $left['outcome'];
+		if ( JobActions::LEFT_NO_JOB === $outcome ) {
+			return __( 'A maintenance file of a WP Checkpoint restore that no job here recorded is in the WordPress directory (.maintenance; it may have been copied from another site); the swap waits until it is gone. If wp wpcheckpoint job list shows no restore that holds this site, remove that file.', 'wp-checkpoint' );
+		}
+		if ( JobActions::LEFT_NOT_ENDED === $outcome ) {
+			/* translators: %d: job id. */
+			return sprintf( __( 'The maintenance file of restore job %1$d is in the WordPress directory (.maintenance), and that job has not ended, still holds the site, or is being run; the swap waits until it is gone. wp wpcheckpoint job status %1$d says what to do.', 'wp-checkpoint' ), $left['id'] );
+		}
+		if ( JobActions::LEFT_STAYS === $outcome ) {
+			/* translators: %d: job id. */
+			return sprintf( __( 'The maintenance file left by restore job %d, which has ended, could not be taken down from the WordPress directory (.maintenance); the swap tries again.', 'wp-checkpoint' ), $left['id'] );
+		}
+		return __( 'Another maintenance file is in the WordPress directory (.maintenance: an update in progress, or one left by an update that stopped); the swap waits until it is gone. If nothing is being updated, remove that file.', 'wp-checkpoint' );
 	}
 
 	/**
@@ -785,7 +869,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		$this->at( 'rollback' );
 		$entries = $this->entries( $context, $db, $cursor );
 		$file    = $this->maintenance( $cursor );
-		$this->hold_for_renames( $context, $file );
+		$this->hold_for_renames( $context, $file, ! empty( $cursor['out'] ) );
 		$db->run( 'SET SESSION lock_wait_timeout = ' . self::LOCK_WAIT );
 		$there = $this->there( $db, $entries['tables'] );
 		foreach ( array_reverse( $entries['tables'] ) as $entry ) {
@@ -830,7 +914,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 						)
 					);
 				}
-				$this->refresh( $context, $file, true );
+				$this->refresh( $context, $file, true, ! empty( $cursor['out'] ) );
 				$this->rename_back( $context, $pair[0], $pair[1] );
 				$this->at( 'dir_back' );
 			}
@@ -887,13 +971,20 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * (the site answers with a maintenance page all the same). What cannot be told or written is waited out: nothing
 	 * is renamed without the file held.
 	 *
+	 * A reverse of a site that was let out (an undo answered after the release: $out) waits for someone else's file
+	 * instead: the site has been live, and that file may be an update writing into the directories the reverse moves.
+	 *
 	 * @param JobContext  $context Context.
 	 * @param Maintenance $file    The file.
+	 * @param bool        $out     Whether the site was let out before this reverse.
 	 * @return void
 	 * @throws TransientFailure When it cannot be held now.
 	 */
-	private function hold_for_renames( JobContext $context, Maintenance $file ): void {
+	private function hold_for_renames( JobContext $context, Maintenance $file, bool $out = false ): void {
 		if ( Maintenance::OTHER === $file->state() ) {
+			if ( $out ) {
+				throw new TransientFailure( 'Another maintenance file is in place (an update in progress, for example); the undo waits for it to go before it moves anything.' );
+			}
 			return;
 		}
 		try {
@@ -921,7 +1012,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			return new Cancelled( 'The restore was cancelled; the site is as it was before it.' );
 		}
 		$text = self::REASONS[ $reason ] ?? $reason;
-		if ( self::REVERSED === $reason ) {
+		if ( self::REVERSED === $reason || self::UNDONE === $reason ) {
 			// The restored copy is kept under its temporary names, next to the site, for a retry (the engine reclaims
 			// it with the failed job's work after WORK_RETENTION_SECONDS); the retry checks and swaps again.
 			$what = '' !== $check && isset( self::CHECKS[ $check ] ) ? ' What failed: ' . self::CHECKS[ $check ] . '.' : '';
@@ -935,18 +1026,23 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * run goes forward again), then the site put back from what is there exactly as the rollback does it (the
 	 * maintenance file held before the first rename, the directories and the tables in reverse plan order, "restored"
 	 * recorded while the file is held, "reverted" once it is let go, the file taken down), and the job ended with
-	 * the reason. Called from the "verify" post-swap step while the file is still held (nothing of the restored site
-	 * was served). There is no undo yet: 4c-C calls it from a job that ended.
+	 * the reason. Called from the "forget" post-swap step while the file is still held (nothing of the restored site
+	 * was served): after a failed verdict, and after one that could not tell when the policy says undo; and from
+	 * the "ask" step when the answer is undo (the site was let out: $out). There is no undo of a job that ended yet
+	 * (4c-C).
 	 *
 	 * @param JobContext           $context Context.
 	 * @param Queries              $db      Connection.
 	 * @param array<string, mixed> $cursor  Cursor (its attempt and mark).
 	 * @param string               $reason  Why: one of REASONS.
 	 * @param string               $check   The check that failed (an id of CHECKS), or ''.
+	 * @param bool                 $out     Whether the site was let out before (an undo answered after the release):
+	 *                                      recorded, so that a run that takes over waits for another maintenance file
+	 *                                      too (hold_for_renames()).
 	 * @return \RuntimeException What ends the job, for the caller to throw.
 	 * @throws TransientFailure When what is there cannot be told (the reverse goes on later).
 	 */
-	private function reverse( JobContext $context, Queries $db, array $cursor, string $reason, string $check = '' ): \RuntimeException {
+	private function reverse( JobContext $context, Queries $db, array $cursor, string $reason, string $check = '', bool $out = false ): \RuntimeException {
 		if ( ! isset( self::REASONS[ $reason ] ) ) {
 			$reason = self::REVERSED;
 		}
@@ -957,6 +1053,9 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			'reason'  => $reason,
 			'check'   => isset( self::CHECKS[ $check ] ) ? $check : '',
 		);
+		if ( $out ) {
+			$cursor['out'] = true;
+		}
 		$context->checkpoint( $cursor, 88, __( 'Putting the site back as it was', 'wp-checkpoint' ) );
 		$context->logger()->warning(
 			'The swap is reversed after it was made',
@@ -992,23 +1091,71 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 					$cursor['post'] = 'verify';
 					break;
 				case 'verify':
-					// Where the restored site is checked before it is let out, behind the held file (4c-B's HTTP checks
-					// pass it with a one-time key the maintenance file lets through; its self-check reads the tables): the
-					// checks themselves are 4c-B's; here only a "verify" part (tests) can say the site failed (true, or the id
-					// of the check that failed: CHECKS), and the swap is then reversed with nothing of the restored site
-					// served. Without the part nothing is checked. The verdict is made durable before anything acts on
-					// it: a run that dies after a failed verdict is continued by one that reads the verdict, not by one
-					// that checks again (the second check may be unable to decide, and a site found broken would stay).
+					// Where the restored site is checked before it is let out, behind the held file. Each run that checks
+					// writes the self-check row first (Restore\SelfCheck: a new one-time value and the hash of a new pass
+					// key, in the options table swapped in, in its fenced transaction), so that the self-check route
+					// answers this run and no earlier one, then the hash of the same key into the maintenance file's data
+					// file (held as before), so that the file lets this run's requests through and no earlier run's. Then
+					// the checks (Restore\SiteCheck, through the web server; a "verify" part in tests). What could not be
+					// told is checked again, at most CHECK_TRIES times, after the waits of CHECK_WAITS, each try in a
+					// tick of its own. The verdict is made durable before anything acts on it: a run that dies after it
+					// is continued by one that reads the verdict, not by one that checks again (the second check may be
+					// unable to decide, and a site found broken would stay).
 					if ( ! isset( $cursor['verdict'] ) ) {
-						$verdict = ! isset( $this->parts['verify'] ) ? true : call_user_func( $this->parts['verify'], $context );
+						$key   = SelfCheck::random();
+						$nonce = SelfCheck::random();
+						$fence = $context->fence();
+						SelfCheck::put( $db, $fence, SelfCheck::table( self::base_prefix() ), SelfCheck::value( $fence['id'], $nonce, hash( 'sha256', $key ) ) );
+						$this->let_through( $context, $this->maintenance( $cursor ), hash( 'sha256', $key ) );
+						$this->at( 'self_check_written' );
+						$found = $this->check_site( $context, $db, $key, $nonce );
 						$this->at( 'verified' );
-						$cursor['verdict'] = true === $verdict ? 'passed' : 'failed';
-						$cursor['check']   = true === $verdict ? '' : ( is_string( $verdict ) && isset( self::CHECKS[ $verdict ] ) ? $verdict : 'unknown' );
+						$tries = (int) ( $cursor['tries'] ?? 0 ) + 1;
+						if ( SiteCheck::UNKNOWN === $found['verdict'] && $tries < self::CHECK_TRIES ) {
+							$cursor['tries']  = $tries;
+							$cursor['unsure'] = self::finding( $found );
+							$context->checkpoint( $cursor, 86, __( 'Checking the restored site', 'wp-checkpoint' ) );
+							$wait = self::CHECK_WAITS[ $tries - 1 ];
+							$text = self::unchecked_text( $cursor['unsure'] );
+							$context->logger()->info(
+								'The restored site could not be checked yet; it is checked again',
+								array(
+									'try'   => $tries,
+									'found' => $text,
+									'wait'  => $wait,
+								)
+							);
+							/* translators: 1: what was found, 2: seconds, 3: this try, 4: the most tries */
+							return StepResult::wait( $wait, $cursor, sprintf( __( 'The restored site could not be checked yet (%1$s); it is checked again in %2$d seconds (try %3$d of %4$d).', 'wp-checkpoint' ), $text, $wait, $tries, self::CHECK_TRIES ) );
+						}
+						unset( $cursor['tries'], $cursor['unsure'] );
+						$cursor['verdict'] = $found['verdict'];
+						$cursor['check']   = SiteCheck::PASSED === $found['verdict'] ? '' : self::check_id( $found );
+						if ( SiteCheck::UNKNOWN === $found['verdict'] ) {
+							$cursor['unverified'] = self::finding( $found );
+						}
 						$context->checkpoint( $cursor, 86, __( 'Checking the restored site', 'wp-checkpoint' ) );
-						$this->at( 'passed' === $cursor['verdict'] ? 'verdict_recorded' : 'verify_failed' );
+						$this->at( SiteCheck::FAILED === $found['verdict'] ? 'verify_failed' : 'verdict_recorded' );
 					}
-					if ( 'failed' === $cursor['verdict'] ) {
-						throw $this->reverse( $context, $db, $cursor, self::REVERSED, (string) $cursor['check'] );
+					$cursor['post'] = 'forget';
+					break;
+				case 'forget':
+					// The self-check row goes once the verdict is recorded and before anything acts on it (the reverse,
+					// the release): a step of its own, done again by a run that takes over after the verdict (none there
+					// is done), so that no outcome leaves it in the site's options table. The maintenance file stops
+					// letting the checks through first (held, with no pass).
+					$this->refresh( $context, $this->maintenance( $cursor ), true );
+					SelfCheck::remove( $db, $context->fence(), SelfCheck::table( self::base_prefix() ) );
+					$this->at( 'self_check_removed' );
+					if ( SiteCheck::FAILED === ( $cursor['verdict'] ?? '' ) ) {
+						throw $this->reverse( $context, $db, $cursor, self::REVERSED, (string) ( $cursor['check'] ?? '' ) );
+					}
+					if ( SiteCheck::UNKNOWN === ( $cursor['verdict'] ?? '' ) ) {
+						$context->logger()->warning( 'The restored site could not be checked', array( 'found' => self::unchecked_text( (array) ( $cursor['unverified'] ?? array() ) ) ) );
+						if ( RestoreJob::UNDO === $this->unverified_choice( $context, false ) ) {
+							// Said up front (the restore policy): undone behind the held file, nothing of the restored site served.
+							throw $this->reverse( $context, $db, $cursor, self::UNDONE );
+						}
 					}
 					unset( $cursor['verdict'], $cursor['check'] );
 					$cursor['post'] = 'release';
@@ -1042,6 +1189,47 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 						array( StoredNames::AFTER_SWAP, (string) $this->now(), 'yes' )
 					);
 					$this->at( 'cron' );
+					$cursor['post'] = isset( $cursor['unverified'] ) ? 'ask' : 'exit';
+					break;
+				case 'ask':
+					// The restored site could not be checked: it is let out (the file let go, the rewrite rules and the
+					// cron mark written, the file taken down), and whether to keep it is asked before the end, unless the
+					// policy or an answer says it. Undone after it was let out: what was written on it since is gone (the question says so),
+					// and the file is held again before the first rename (reverse()).
+					$choice = $this->unverified_choice( $context, true );
+					if ( RestoreJob::UNDO === $choice && Maintenance::OTHER === $this->maintenance( $cursor )->state() ) {
+						// The site is live: someone else's file (an update in progress, or one left by an update that
+						// stopped, or by an earlier restore) is waited out before the undo is recorded, so nothing is
+						// counted against it and the answer is read again on the next tick.
+						$left = $this->release_left( $context );
+						if ( JobActions::LEFT_GONE !== $left['outcome'] ) {
+							return StepResult::wait( 60, $cursor, self::other_file( $left ) );
+						}
+					}
+					if ( RestoreJob::UNDO === $choice ) {
+						$context->logger()->warning( 'The restored site could not be checked; the swap is undone as chosen' );
+						throw $this->reverse( $context, $db, $cursor, self::UNDONE, '', true );
+					}
+					if ( RestoreJob::KEEP !== $choice ) {
+						// Open to visitors while it waits for the answer: the file let go would still answer with the
+						// maintenance page for up to ten minutes, so it comes down now (again on the way out).
+						$this->flush( $context );
+						$this->take_down( $context, $cursor );
+						$this->at( 'asked' );
+						return StepResult::ask(
+							$cursor,
+							array(
+								array(
+									'id'      => self::UNVERIFIED_QUESTION,
+									'kind'    => self::UNVERIFIED_KIND,
+									'choices' => array( RestoreJob::KEEP, RestoreJob::UNDO ),
+								),
+							),
+							__( 'Waiting for your decision on 1 question', 'wp-checkpoint' )
+						);
+					}
+					$context->logger()->warning( 'The restored site could not be checked; it is kept as chosen' );
+					unset( $cursor['unverified'] );
 					$cursor['post'] = 'exit';
 					break;
 				case 'exit':
@@ -1301,13 +1489,21 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @param JobContext  $context Context.
 	 * @param Maintenance $file    The file.
 	 * @param bool        $held    Whether it is held (the site half swapped) or refreshed with the time.
+	 * @param bool        $out     Whether the rollback is a reverse of a site that was let out: someone else's file
+	 *                             in its place is waited out then (TransientFailure), not only logged.
 	 * @return void
 	 * @throws LockLost When the lease is gone (not caught).
 	 * @throws StaleJob When the job is no longer this run's (not caught).
+	 * @throws TransientFailure When the site was let out and someone else's file is in place.
 	 */
-	private function refresh( JobContext $context, Maintenance $file, bool $held ): void {
+	private function refresh( JobContext $context, Maintenance $file, bool $held, bool $out = false ): void {
 		if ( ! $held && Maintenance::NONE === $file->state() ) {
 			return; // None of ours to refresh: none is made.
+		}
+		if ( $out && Maintenance::OTHER === $file->state() ) {
+			// A reverse of a site that was let out: someone else's file put up meanwhile (an update started) is waited
+			// out before the next rename, as before the first one (hold_for_renames()).
+			throw new TransientFailure( 'Another maintenance file is in place (an update in progress, for example); the undo waits for it to go before it moves anything more.' );
 		}
 		try {
 			if ( $held ) {
@@ -1321,6 +1517,254 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			throw $e;
 		} catch ( \Throwable $e ) {
 			$context->logger()->warning( $held ? 'The maintenance file could not be kept up during the rollback' : 'The maintenance file could not be refreshed after the swap was made', array( 'error' => $e->getMessage() ) );
+		}
+	}
+
+	/**
+	 * Check the restored site (Restore\SiteCheck), or ask the "verify" part (tests: true passed, a check id failed,
+	 * or SiteCheck's own result).
+	 *
+	 * @param JobContext $context Context.
+	 * @param Queries    $db      Connection.
+	 * @param string     $key     The pass key.
+	 * @param string     $nonce   The one-time value of the self-check row.
+	 * @return array{verdict: string, check: string, why: string, status: int}
+	 */
+	private function check_site( JobContext $context, Queries $db, string $key, string $nonce ): array {
+		if ( isset( $this->parts['verify'] ) ) {
+			$said = call_user_func(
+				$this->parts['verify'],
+				$context,
+				array(
+					'key'   => $key,
+					'nonce' => $nonce,
+				)
+			);
+			if ( is_array( $said ) ) {
+				return array(
+					'verdict' => (string) ( $said['verdict'] ?? SiteCheck::UNKNOWN ),
+					'check'   => (string) ( $said['check'] ?? '' ),
+					'why'     => (string) ( $said['why'] ?? '' ),
+					'status'  => (int) ( $said['status'] ?? 0 ),
+				);
+			}
+			return array(
+				'verdict' => true === $said ? SiteCheck::PASSED : SiteCheck::FAILED,
+				'check'   => true === $said ? '' : ( is_string( $said ) && isset( self::CHECKS[ $said ] ) ? $said : 'unknown' ),
+				'why'     => '',
+				'status'  => 0,
+			);
+		}
+		$urls = $this->check_urls( $db );
+		if ( null === $urls ) {
+			return array(
+				'verdict' => SiteCheck::UNKNOWN,
+				'check'   => 'home',
+				'why'     => 'no_address',
+				'status'  => 0,
+			);
+		}
+		// The lease is confirmed (and extended) before every request and every wait: a request may take its timeout,
+		// and the checks make a few dozen at most.
+		$http  = isset( $this->parts['http'] ) ? $this->parts['http'] : array( $this, 'http' );
+		$check = new SiteCheck(
+			static function ( string $url, array $headers ) use ( $context, $http ): array {
+				$context->confirm_lease();
+				return (array) call_user_func( $http, $url, $headers );
+			},
+			function ( int $seconds ) use ( $context ): void {
+				$context->confirm_lease();
+				$this->sleep( $seconds );
+			}
+		);
+		return $check->check( $urls, $key, $nonce, SelfCheck::random() );
+	}
+
+	/**
+	 * Where the checks go (addresses()), from the options table swapped in unless wp-config.php defines WP_HOME or
+	 * WP_SITEURL (WordPress then answers those options with the constants: _config_wp_home()). Null when the options
+	 * cannot be read.
+	 *
+	 * @param Queries $db Connection.
+	 * @return array{home: string, login: string, self: string}|null
+	 */
+	private function check_urls( Queries $db ) {
+		if ( isset( $this->parts['urls'] ) ) {
+			return (array) call_user_func( $this->parts['urls'] );
+		}
+		$table = SqlWriter::identifier( self::base_prefix() . 'options' );
+		$read  = static function ( string $name ) use ( $db, $table ): string {
+			$rows = $db->rows( 'SELECT option_value FROM ' . $table . ' WHERE option_name = ?', array( $name ) );
+			return (string) ( $rows[0][0] ?? '' );
+		};
+		try {
+			return self::addresses( defined( 'WP_HOME' ) ? (string) get_option( 'home' ) : null, defined( 'WP_SITEURL' ) ? (string) get_option( 'siteurl' ) : null, $read, substr( SelfCheck::random(), 0, 16 ) );
+		} catch ( \RuntimeException $e ) {
+			return null;
+		}
+	}
+
+	/**
+	 * The home page and wp-login.php of the restored site, and the self-check route (?rest_route=, whatever the
+	 * permalinks), each with a parameter no cache has seen; the constants' values when they are given (WP_HOME,
+	 * WP_SITEURL), else the options read. Null when either is not an http(s) address.
+	 *
+	 * @param string|null $home  WP_HOME's value, or null when it is not defined.
+	 * @param string|null $site  WP_SITEURL's value, or null when it is not defined.
+	 * @param callable    $read  function( string $option ): string, from the options table swapped in.
+	 * @param string      $fresh The cache-busting value.
+	 * @return array{home: string, login: string, self: string}|null
+	 */
+	public static function addresses( $home, $site, callable $read, string $fresh ) {
+		$home = null === $home ? (string) call_user_func( $read, 'home' ) : $home;
+		$site = null === $site ? (string) call_user_func( $read, 'siteurl' ) : $site;
+		if ( 1 !== preg_match( '#\Ahttps?://#i', $home ) || 1 !== preg_match( '#\Ahttps?://#i', $site ) ) {
+			return null;
+		}
+		$fresh = 'wpcheckpoint_check=' . $fresh;
+		return array(
+			'home'  => rtrim( $home, '/' ) . '/?' . $fresh,
+			'login' => rtrim( $site, '/' ) . '/wp-login.php?' . $fresh,
+			'self'  => rtrim( $home, '/' ) . '/?rest_route=' . SelfCheck::PATH . '&' . $fresh,
+		);
+	}
+
+	/**
+	 * One request of the checks, redirects not followed (SiteCheck follows those to the same host).
+	 *
+	 * @param string                $url     URL.
+	 * @param array<string, string> $headers Headers.
+	 * @return array{status: int, body: string, location: string} status 0 when no answer came.
+	 */
+	public function http( string $url, array $headers ): array {
+		$response = wp_remote_get(
+			$url,
+			array(
+				'timeout'             => 20,
+				'redirection'         => 0,
+				'headers'             => $headers,
+				'sslverify'           => apply_filters( 'https_local_ssl_verify', false ), // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- WordPress's own filter, as its loopback requests use it.
+				'limit_response_size' => 262144,
+			)
+		);
+		if ( is_wp_error( $response ) ) {
+			return array(
+				'status'   => 0,
+				'body'     => '',
+				'location' => '',
+			);
+		}
+		return array(
+			'status'   => (int) wp_remote_retrieve_response_code( $response ),
+			'body'     => (string) wp_remote_retrieve_body( $response ),
+			'location' => (string) wp_remote_retrieve_header( $response, 'location' ),
+		);
+	}
+
+	/**
+	 * What a check found, as the cursor keeps it (ids and a status, nothing of the site's).
+	 *
+	 * @param array{check: string, why: string, status: int} $found SiteCheck's result.
+	 * @return array{check: string, why: string, status: int}
+	 */
+	private static function finding( array $found ): array {
+		return array(
+			'check'  => (string) $found['check'],
+			'why'    => (string) $found['why'],
+			'status' => (int) $found['status'],
+		);
+	}
+
+	/**
+	 * The CHECKS id of a failed check.
+	 *
+	 * @param array{check: string, why: string} $found SiteCheck's result.
+	 * @return string
+	 */
+	private static function check_id( array $found ): string {
+		$id = $found['check'] . '_' . ( 'wrong_answer' === $found['why'] ? 'wrong' : $found['why'] );
+		if ( isset( self::CHECKS[ $id ] ) ) {
+			return $id;
+		}
+		return isset( self::CHECKS[ $found['check'] ] ) ? $found['check'] : 'unknown';
+	}
+
+	/**
+	 * What a check that could not tell found, in words.
+	 *
+	 * @param array<string, mixed> $found finding().
+	 * @return string
+	 */
+	public static function unchecked_text( array $found ): string {
+		$what   = 'self' === ( $found['check'] ?? '' ) ? __( 'the plugin\'s self-check', 'wp-checkpoint' ) : ( 'login' === ( $found['check'] ?? '' ) ? __( 'wp-login.php', 'wp-checkpoint' ) : __( 'the home page', 'wp-checkpoint' ) );
+		$status = (int) ( $found['status'] ?? 0 );
+		switch ( (string) ( $found['why'] ?? '' ) ) {
+			case 'none':
+				/* translators: %s: the page checked */
+				return sprintf( __( '%s did not answer (no connection, or no answer in time)', 'wp-checkpoint' ), $what );
+			case 'other_host':
+				/* translators: %s: the page checked */
+				return sprintf( __( '%s redirected to another address (another host, or https), where the maintenance page cannot be passed', 'wp-checkpoint' ), $what );
+			case 'redirects':
+				/* translators: %s: the page checked */
+				return sprintf( __( '%s redirected too many times', 'wp-checkpoint' ), $what );
+			case 'fatal_once':
+				/* translators: %s: the page checked */
+				return sprintf( __( '%s answered with WordPress\'s fatal error page once, and otherwise 15 seconds later', 'wp-checkpoint' ), $what );
+			case 'no_route':
+				return __( 'the plugin\'s self-check was not found (WP Checkpoint not active on the restored site, or a version without it)', 'wp-checkpoint' );
+			case 'old_answer':
+				return __( 'the plugin\'s self-check gave an answer to an earlier question (a cache in front of the site)', 'wp-checkpoint' );
+			case 'no_address':
+				return __( 'the restored site\'s address could not be read (home and siteurl)', 'wp-checkpoint' );
+			case 'status':
+				/* translators: 1: the page checked, 2: HTTP status */
+				return sprintf( __( '%1$s answered HTTP %2$d', 'wp-checkpoint' ), $what, $status );
+			default:
+				return __( 'the checks could not tell whether the restored site works', 'wp-checkpoint' );
+		}
+	}
+
+	/**
+	 * What to do with a restored site that could not be checked: the answer to the question (when $answers), else the
+	 * restore policy ("keep", "undo", or "ask").
+	 *
+	 * @param JobContext $context Context.
+	 * @param bool       $answers Whether an answer counts.
+	 * @return string
+	 */
+	private function unverified_choice( JobContext $context, bool $answers ): string {
+		$options = $context->options();
+		if ( $answers && isset( $options['answers'][ self::UNVERIFIED_QUESTION ] ) && is_string( $options['answers'][ self::UNVERIFIED_QUESTION ] ) ) {
+			return $options['answers'][ self::UNVERIFIED_QUESTION ];
+		}
+		try {
+			return (string) ( RestoreJob::options( $options )['policy'][ RestoreJob::UNVERIFIED ] ?? 'ask' );
+		} catch ( \InvalidArgumentException $e ) {
+			return 'ask'; // Validated when the restore started; whatever it says now, the question decides.
+		}
+	}
+
+	/**
+	 * Hold this restore's maintenance file with the hash of this run's pass key, so that it lets the checks' requests
+	 * through. A file that cannot be written now (someone else's in its place, or what is there cannot be told) is
+	 * logged and left: the checks are then blocked like any visitor and can only say they could not check.
+	 *
+	 * @param JobContext  $context   Context.
+	 * @param Maintenance $file      The file.
+	 * @param string      $pass_hash SHA-256 of the pass key.
+	 * @return void
+	 * @throws LockLost When the lease is gone (and StaleJob).
+	 */
+	private function let_through( JobContext $context, Maintenance $file, string $pass_hash ): void {
+		try {
+			$file->hold( array( $context, 'confirm_lease' ), $pass_hash );
+		} catch ( LockLost $e ) {
+			throw $e;
+		} catch ( StaleJob $e ) {
+			throw $e;
+		} catch ( \Throwable $e ) {
+			$context->logger()->warning( 'The maintenance file could not be made to let the checks through', array( 'error' => $e->getMessage() ) );
 		}
 	}
 

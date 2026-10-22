@@ -208,20 +208,31 @@ final class TableExporter {
 	private $exclude_oversize;
 
 	/**
+	 * Rows never exported, by table: those whose column holds one of the values, compared byte for byte (this
+	 * plugin's own rows in the site's tables: StoredNames::SELF_CHECK in the main options table). Left out by both
+	 * queries of a batch, as the oversized rows are.
+	 *
+	 * @var array<string, array{column: string, values: string[]}>
+	 */
+	private $exclude_rows;
+
+	/**
 	 * Constructor.
 	 *
-	 * @param Connection $connection       Database.
-	 * @param string     $dir              Existing directory for the chunk files.
-	 * @param int        $chunk_bytes      Chunk size (tests use smaller values).
-	 * @param int        $target_batch     Batch target size; kept at or below a quarter of the chunk size so a batch always fits.
-	 * @param string[]   $exclude_oversize Tables whose oversized rows are left out.
+	 * @param Connection                                             $connection       Database.
+	 * @param string                                                 $dir              Existing directory for the chunk files.
+	 * @param int                                                    $chunk_bytes      Chunk size (tests use smaller values).
+	 * @param int                                                    $target_batch     Batch target size; kept at or below a quarter of the chunk size so a batch always fits.
+	 * @param string[]                                               $exclude_oversize Tables whose oversized rows are left out.
+	 * @param array<string, array{column: string, values: string[]}> $exclude_rows Rows never exported, by table.
 	 */
-	public function __construct( Connection $connection, string $dir, int $chunk_bytes = self::CHUNK_BYTES, int $target_batch = self::TARGET_BATCH_BYTES, array $exclude_oversize = array() ) {
+	public function __construct( Connection $connection, string $dir, int $chunk_bytes = self::CHUNK_BYTES, int $target_batch = self::TARGET_BATCH_BYTES, array $exclude_oversize = array(), array $exclude_rows = array() ) {
 		$this->connection       = $connection;
 		$this->dir              = rtrim( $dir, '/\\' );
 		$this->chunk_bytes      = $chunk_bytes;
 		$this->target_batch     = max( 1, min( $target_batch, intdiv( $chunk_bytes, 4 ) ) );
 		$this->exclude_oversize = array_values( array_map( 'strval', $exclude_oversize ) );
+		$this->exclude_rows     = $exclude_rows;
 		$this->writer           = new SqlWriter( $connection->charset() );
 		$charset                = strtolower( $connection->charset() );
 		$this->charset          = 1 === preg_match( '/\A[a-z0-9_]{1,32}\z/', $charset ) ? $charset : '';
@@ -495,6 +506,11 @@ final class TableExporter {
 			$conditions[]              = '(' . $condition . ')';
 			$args                      = array_merge( $args, $upper );
 		}
+		$left = $this->left_out( $table, $desc );
+		if ( null !== $left ) {
+			$conditions[] = $left[0];
+			$args         = array_merge( $args, $left[1] );
+		}
 		$where = array() === $conditions ? '' : ' WHERE ' . implode( ' AND ', $conditions );
 		if ( array() !== $desc['pk'] ) {
 			$where .= ' ORDER BY ' . implode( ', ', array_map( array( SqlWriter::class, 'identifier' ), $desc['pk'] ) );
@@ -524,6 +540,26 @@ final class TableExporter {
 		}
 		$columns = implode( ', ', array_map( array( SqlWriter::class, 'identifier' ), $desc['columns'] ) );
 		return $this->query( 'SELECT ' . $columns . $from . $where . ' LIMIT ' . $count . $offset, $args );
+	}
+
+	/**
+	 * The condition that leaves a table's excluded rows out (exclude_rows) and its arguments, or null when none of
+	 * the table's are (or it has no such column now). A row whose column is NULL is kept.
+	 *
+	 * @param string                                                                                   $table Table.
+	 * @param array{create: string, columns: string[], kinds: string[], pk: string[], pk_index: int[]} $desc  Description.
+	 * @return array{0: string, 1: string[]}|null
+	 */
+	private function left_out( string $table, array $desc ) {
+		$rule = $this->exclude_rows[ $table ] ?? null;
+		if ( null === $rule || array() === $rule['values'] || ! in_array( $rule['column'], $desc['columns'], true ) ) {
+			return null;
+		}
+		$column = SqlWriter::identifier( $rule['column'] );
+		return array(
+			'(' . $column . ' IS NULL OR CAST(' . $column . ' AS BINARY) NOT IN (' . implode( ', ', array_fill( 0, count( $rule['values'] ), 'CAST(? AS BINARY)' ) ) . '))',
+			array_values( array_map( 'strval', $rule['values'] ) ),
+		);
 	}
 
 	/**
@@ -658,8 +694,13 @@ final class TableExporter {
 		if ( array() === $desc['pk'] ) {
 			// Counted as the rows are read: without the rows left out as oversized. A full scan on a keyless
 			// table, like the table's last OFFSET batches; WordPress's own tables all have a key.
-			$where = in_array( $table, $this->exclude_oversize, true ) ? ' WHERE NOT ' . $this->oversize_predicate( $desc ) : '';
-			$count = $this->query( 'SELECT COUNT(*) FROM ' . SqlWriter::identifier( $table ) . $where );
+			$conditions = in_array( $table, $this->exclude_oversize, true ) ? array( 'NOT ' . $this->oversize_predicate( $desc ) ) : array();
+			$left       = $this->left_out( $table, $desc );
+			if ( null !== $left ) {
+				$conditions[] = $left[0];
+			}
+			$where = array() === $conditions ? '' : ' WHERE ' . implode( ' AND ', $conditions );
+			$count = $this->query( 'SELECT COUNT(*) FROM ' . SqlWriter::identifier( $table ) . $where, null === $left ? array() : $left[1] );
 			return array(
 				'mode' => 'rows',
 				'rows' => (int) ( $count[0][0] ?? 0 ),

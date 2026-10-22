@@ -270,7 +270,7 @@ final class HeldSiteTest extends SwapTestCase {
 		$job      = $this->held();
 		$original = $this->abspath . '/.maintenance';
 		$this->assertFileExists( $original, 'the control: held where the swap runs' );
-		copy( $original, $this->copy_dir() . '/.maintenance' ); // A copy of the site's files, its maintenance file too.
+		$this->copy_maintenance( $this->abspath, $this->copy_dir() ); // A copy of the site's files, its maintenance file too.
 		$acts = $this->actions( true );
 		$held = $acts->held_elsewhere( $job->id );
 		$see  = $held['assessment'];
@@ -293,7 +293,7 @@ final class HeldSiteTest extends SwapTestCase {
 
 	public function test_once_the_job_ended_release_takes_down_only_its_own_file_here(): void {
 		$job = $this->held();
-		copy( $this->abspath . '/.maintenance', $this->copy_dir() . '/.maintenance' ); // A copy, its file too.
+		$this->copy_maintenance( $this->abspath, $this->copy_dir() ); // A copy, its file too.
 		$copy = $this->actions( true );
 		$see  = $copy->held_elsewhere( $job->id )['assessment'];
 		$code = HeldSite::code( HeldSite::RELEASE, $job, $see['recorded'] );
@@ -306,23 +306,30 @@ final class HeldSiteTest extends SwapTestCase {
 		$this->assertTrue( \WPCheckpoint\Restore\Maintenance::held_in( $this->copy_dir() ), 'the control: the copy\'s file stays, and does not lapse' );
 		$code = HeldSite::code( HeldSite::RELEASE, $ended, ( new HeldSite( array( 'abspath' => $this->copy_dir() ) ) )->assess( $ended )['recorded'] );
 		// Another restore's file in its place first: not this job's, it stays.
-		$theirs = ( new \WPCheckpoint\Restore\Maintenance( $this->copy_dir(), \WPCheckpoint\Restore\Maintenance::new_mark() ) )->contents( \WPCheckpoint\Restore\Maintenance::held() );
-		$ours   = (string) file_get_contents( $this->copy_dir() . '/.maintenance' );
-		file_put_contents( $this->copy_dir() . '/.maintenance', $theirs );
+		$data   = $this->copy_dir() . '/' . \WPCheckpoint\Restore\Maintenance::DATA;
+		$theirs = ( new \WPCheckpoint\Restore\Maintenance( $this->copy_dir(), \WPCheckpoint\Restore\Maintenance::new_mark() ) )->data( \WPCheckpoint\Restore\Maintenance::held() );
+		$ours   = (string) file_get_contents( $data );
+		$this->assertSame( \WPCheckpoint\Restore\Maintenance::CODE, file_get_contents( $this->copy_dir() . '/.maintenance' ), 'the control: the code and this job\'s data file' );
+		file_put_contents( $data, $theirs );
 		$this->assertTrue( $copy->release( $job->id, $code )['ok'] );
-		$this->assertSame( $theirs, file_get_contents( $this->copy_dir() . '/.maintenance' ), 'another restore\'s file is not this job\'s' );
-		file_put_contents( $this->copy_dir() . '/.maintenance', $ours );
+		$this->assertSame( $theirs, file_get_contents( $data ), 'another restore\'s file is not this job\'s' );
+		$this->assertFileExists( $this->copy_dir() . '/.maintenance', 'nor the code that reads it' );
+		\WPCheckpoint\Tests\Fixtures\Sandbox::remove( $data ); // The code with no data file: it names no restore.
+		$this->assertTrue( $copy->release( $job->id, $code )['ok'] );
+		$this->assertFileExists( $this->copy_dir() . '/.maintenance', 'a file that names no restore is not this job\'s' );
+		file_put_contents( $data, $ours );
 		$this->assertFalse( $copy->release( $job->id, 'nope' )['ok'], 'a wrong code' );
 		$this->assertFileExists( $this->copy_dir() . '/.maintenance' );
 		$outcome = $copy->release( $job->id, $code );
 		$this->assertTrue( $outcome['ok'], $outcome['message'] );
 		$this->assertFileDoesNotExist( $this->copy_dir() . '/.maintenance', 'this job\'s file, by the mark its row kept' );
+		$this->assertFileDoesNotExist( $data, 'and its data file' );
 	}
 
 	public function test_release_waits_until_the_job_has_ended_and_no_run_holds_it(): void {
 		global $wpdb;
 		$job = $this->held();
-		copy( $this->abspath . '/.maintenance', $this->copy_dir() . '/.maintenance' );
+		$this->copy_maintenance( $this->abspath, $this->copy_dir() );
 		$this->assertTrue( $this->actions()->rebind( $job->id, HeldSite::code( HeldSite::REBIND, $job, '' ), 'rollback' )['ok'] );
 		$ended = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
 		$this->assertSame( Job::CANCELLED, $ended->status, (string) $ended->last_error );
@@ -429,7 +436,7 @@ final class HeldSiteTest extends SwapTestCase {
 		$this->assertSame( Job::SITE_CHANGING, $job->site_state, 'the control: half swapped' );
 		$tables = $this->tables_of( $job );
 		$this->assertNotSame( array(), preg_grep( '/\Awcpold/', $tables ), 'the control: a table was moved aside' );
-		copy( $this->abspath . '/.maintenance', $this->copy_dir() . '/.maintenance' );
+		$this->copy_maintenance( $this->abspath, $this->copy_dir() );
 		// The copy, wrong that its database is not shared with this site, abandons the restore.
 		$copy = $this->another_installation();
 		$held = $copy->held_elsewhere( $job->id );
@@ -512,7 +519,7 @@ final class HeldSiteTest extends SwapTestCase {
 		// directories say, until it is taken over or cleaned up.
 		$third = $this->sandbox . '/third';
 		mkdir( $third . '/wp-content/uploads', 0755, true );
-		copy( $this->abspath . '/.maintenance', $third . '/.maintenance' );
+		$this->copy_maintenance( $this->abspath, $third );
 		$there = new JobActions( Plugin::instance()->jobs(), Plugin::instance()->runner(), new Loopback( false ), new HeldSite( array( 'abspath' => $third ) ) );
 		$from  = $there->held_elsewhere( $job->id );
 		$this->assertTrue( $from['assessment']['differs'], 'the control: positively another directory' );
@@ -535,7 +542,7 @@ final class HeldSiteTest extends SwapTestCase {
 		$this->assertSame( self::ANOTHER, $this->row( $job->id )['held_by'], 'still the copy\'s to have given up' );
 		// Where it was given up, it holds nothing: its file there comes down (the control, same command). Read again
 		// right before the file goes: given up by another meanwhile, it stays.
-		copy( $this->abspath . '/.maintenance', $this->copy_dir() . '/.maintenance' );
+		$this->copy_maintenance( $this->abspath, $this->copy_dir() );
 		$racing = $this->another_installation(
 			static function ( string $point ) use ( $wpdb, $job ): void {
 				if ( 'release_confirmed' === $point ) {
@@ -632,7 +639,7 @@ final class HeldSiteTest extends SwapTestCase {
 
 	public function test_an_abandoned_job_takes_its_file_here_down_never_runs_and_leaves_the_site_it_held(): void {
 		$job = $this->held();
-		copy( $this->abspath . '/.maintenance', $this->copy_dir() . '/.maintenance' );
+		$this->copy_maintenance( $this->abspath, $this->copy_dir() );
 		$site = $this->site();
 		$acts = $this->actions( true );
 		$see  = $acts->held_elsewhere( $job->id )['assessment'];
@@ -646,7 +653,7 @@ final class HeldSiteTest extends SwapTestCase {
 		$tables = $this->tables_of( $job );
 		$this->assertNotSame( array(), $tables, 'the control: it made tables' );
 		$held = \WPCheckpoint\Support\Uninstaller::holding();
-		$this->assertSame( array( 'all' => 1, 'abandoned' => 0 ), $held, 'the control: it holds the site, not abandoned' );
+		$this->assertSame( array( 'all' => 1, 'abandoned' => 0, 'kept' => array() ), $held, 'the control: it holds the site, not abandoned' );
 		$this->assertStringContainsString( 'while a restore holds the site changed;', \WPCheckpoint\Support\Uninstaller::held_back( $held ) );
 		$this->assertStringContainsString( 'Reinstall WP Checkpoint to finish or undo the restore.', \WPCheckpoint\Support\Uninstaller::held_back( $held ), 'the control: said where a reinstall finishes it' );
 		$outcome = $acts->abandon( $job->id, $code );
@@ -664,7 +671,7 @@ final class HeldSiteTest extends SwapTestCase {
 		// An uninstall is held back by every abandoned job, whoever gave it up: which installation this is cannot be
 		// told there (it runs without the plugin; the stored state may be another installation's on a shared database).
 		$held = \WPCheckpoint\Support\Uninstaller::holding();
-		$this->assertSame( array( 'all' => 1, 'abandoned' => 1 ), $held, 'abandoned here: an uninstall is held back' );
+		$this->assertSame( array( 'all' => 1, 'abandoned' => 1, 'kept' => array() ), $held, 'abandoned here: an uninstall is held back' );
 		$this->assertStringContainsString( 'a restore was abandoned (1 of the 1 that hold a site changed): an abandoned restore keeps its tables', \WPCheckpoint\Support\Uninstaller::held_back( $held ), 'and the log says why' );
 		$this->assertStringContainsString( 'They stay until the site the restore was started on takes it over; nothing cleans an abandoned restore up yet.', \WPCheckpoint\Support\Uninstaller::held_back( $held ) );
 		$this->assertStringNotContainsString( 'Reinstall', \WPCheckpoint\Support\Uninstaller::held_back( $held ), 'a reinstall here does not finish it' );
@@ -674,7 +681,7 @@ final class HeldSiteTest extends SwapTestCase {
 		$wpdb->update( JobRepository::table(), array( 'held_by' => self::ELSEWHERE ), array( 'id' => $job->id ) );
 		$wpdb->query( 'COMMIT' );
 		$this->assertContains( $job->id, Plugin::instance()->jobs()->holding_site(), 'abandoned elsewhere: warned about' );
-		$this->assertSame( array( 'all' => 1, 'abandoned' => 1 ), \WPCheckpoint\Support\Uninstaller::holding(), 'abandoned elsewhere: held back' );
+		$this->assertSame( array( 'all' => 1, 'abandoned' => 1, 'kept' => array() ), \WPCheckpoint\Support\Uninstaller::holding(), 'abandoned elsewhere: held back' );
 		$wpdb->update( JobRepository::table(), array( 'held_by' => $own ), array( 'id' => $job->id ) );
 		$wpdb->query( 'COMMIT' );
 		$this->assertNull( $acts->held_elsewhere( $job->id ) );
@@ -692,7 +699,7 @@ final class HeldSiteTest extends SwapTestCase {
 
 	public function test_an_abandon_that_died_after_taking_the_file_down_is_finished_by_another(): void {
 		$job = $this->held();
-		copy( $this->abspath . '/.maintenance', $this->copy_dir() . '/.maintenance' );
+		$this->copy_maintenance( $this->abspath, $this->copy_dir() );
 		$acts = $this->actions( true );
 		$see  = $acts->held_elsewhere( $job->id )['assessment'];
 		// The first step of an abandon, and nothing after it (the process died there).
@@ -746,7 +753,7 @@ final class HeldSiteTest extends SwapTestCase {
 
 	public function test_an_abandon_takes_the_file_down_before_it_records_the_job_abandoned(): void {
 		$job = $this->held();
-		copy( $this->abspath . '/.maintenance', $this->copy_dir() . '/.maintenance' );
+		$this->copy_maintenance( $this->abspath, $this->copy_dir() );
 		$seen = array();
 		$acts = new JobActions(
 			Plugin::instance()->jobs(),

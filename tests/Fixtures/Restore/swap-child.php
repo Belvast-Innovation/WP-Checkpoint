@@ -70,9 +70,10 @@ if ( (int) $config['packet'] > 0 ) {
 if ( (int) ( $config['batch'] ?? 0 ) > 0 ) {
 	$parts['batch'] = (int) $config['batch'];
 }
-if ( '' !== (string) ( $config['verify'] ?? '' ) ) {
-	// The restored site's checks (4c-B) stood in for: "pass", or the id of the check that failed (the swap is reversed).
-	$verdict         = (string) $config['verify'];
+if ( '' !== (string) ( $config['verify'] ?? '' ) || empty( $config['real'] ) ) {
+	// The restored site's checks (4c-B) stood in for: "pass", or the id of the check that failed (the swap is reversed);
+	// passed when the test gave no verdicts and does not check for real (SwapTestCase::$real_checks).
+	$verdict         = '' !== (string) ( $config['verify'] ?? '' ) ? (string) $config['verify'] : 'pass';
 	$parts['verify'] = static function () use ( $verdict ) {
 		return 'pass' === $verdict ? true : $verdict;
 	};

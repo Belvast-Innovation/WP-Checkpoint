@@ -342,14 +342,10 @@ final class Leftovers implements TestListener {
 		foreach ( self::tables() as $table ) {
 			$items[] = 'table:' . $table;
 		}
-		// The swap's maintenance file and its temporary names in ABSPATH (the maintenance mode tests write there:
-		// wp_is_maintenance_mode() reads that file only).
-		if ( defined( 'ABSPATH' ) ) {
-			foreach ( (array) @scandir( ABSPATH ) as $entry ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a test fixture.
-				if ( '.maintenance' === $entry || 1 === preg_match( \WPCheckpoint\Jobs\Residue::MAINTENANCE_TMP_NAME, (string) $entry ) ) {
-					$items[] = 'maintenance:' . rtrim( ABSPATH, '/' ) . '/' . $entry;
-				}
-			}
+		// The swap's maintenance file, its data file and their temporary names in ABSPATH (the maintenance file's tests
+		// write there: RealAbspath).
+		foreach ( RealAbspath::listing() as $path ) {
+			$items[] = 'maintenance:' . $path;
 		}
 		$dir = self::run_temp_dir();
 		if ( '' !== $dir ) {
@@ -490,14 +486,7 @@ final class Leftovers implements TestListener {
 			if ( 0 === strpos( $item, 'table:' ) ) {
 				mysqli_query( $dbh, 'DROP TABLE IF EXISTS `' . str_replace( '`', '``', substr( $item, 6 ) ) . '`' );
 			} elseif ( 0 === strpos( $item, 'maintenance:' ) ) {
-				$path = substr( $item, 12 );
-				$text = (string) @file_get_contents( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a test fixture.
-				// Only what this plugin writes: a restore's mark (or a temporary name of one); anything else is reported.
-				if ( '.maintenance' !== basename( $path ) || 1 === preg_match( '/\/\/ WP Checkpoint restore [0-9a-f]{32}\n\z/', $text ) ) {
-					\WPCheckpoint\Support\Deleter::delete_maintenance_file( dirname( $path ), basename( $path ) );
-				} else {
-					fwrite( STDERR, "\nA maintenance file that is not this plugin's was left in place: {$path}\n" );
-				}
+				RealAbspath::clear( substr( $item, 12 ) ); // Only what this plugin writes; anything else is reported.
 			} elseif ( 0 === strpos( $item, 'storage:' ) ) {
 				StorageDirs::remove( array( substr( $item, 8 ) ) ); // A storage directory a test left in the site's wp-content.
 			} elseif ( 0 === strpos( $item, 'temp:' ) ) {

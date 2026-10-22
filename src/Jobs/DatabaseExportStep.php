@@ -13,6 +13,7 @@ use WPCheckpoint\Archive\IndexLine;
 use WPCheckpoint\Archive\Manifest;
 use WPCheckpoint\Database\Connection;
 use WPCheckpoint\Database\TableExporter;
+use WPCheckpoint\Restore\SelfCheck;
 use WPCheckpoint\Support\Utf8;
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- messages carry table names and numbers; the runner stores them through the redactor and the presenter cleans them before display.
@@ -154,7 +155,7 @@ final class DatabaseExportStep implements Step {
 		$since  = 0;
 		while ( (int) $cursor['index'] < $total ) {
 			$table    = $tables[ (int) $cursor['index'] ];
-			$exporter = new TableExporter( $this->connection, $dir, $this->chunk_bytes, TableExporter::TARGET_BATCH_BYTES, $frozen['exclude_oversize'] );
+			$exporter = new TableExporter( $this->connection, $dir, $this->chunk_bytes, TableExporter::TARGET_BATCH_BYTES, $frozen['exclude_oversize'], SelfCheck::left_out() );
 			$state    = isset( $cursor['state'] ) && is_array( $cursor['state'] ) ? $cursor['state'] : TableExporter::initial_state( $table );
 			$before   = (int) $state['bytes'];
 			$state    = $exporter->step( $state );

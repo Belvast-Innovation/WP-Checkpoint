@@ -26,7 +26,10 @@ final class RestPermissionsTest extends WP_UnitTestCase {
 	 * "params" are the request parameters (query for GET, body otherwise).
 	 * "auth" is "login" (default: Guard capability, anonymous 401) or
 	 * "challenge" (one-time value instead of a login: everyone gets 403
-	 * without it, including administrators; ProbeTest covers the 200 path).
+	 * without it, including administrators; ProbeTest covers the 200 path), or
+	 * "pass" (a restore's pass key instead of a login, the same 403; the route
+	 * is registered only while a restore checks the site and the request is for
+	 * it, so the loops below do not see it: SelfCheckRouteTest covers it).
 	 */
 	private const EXAMPLES = array(
 		'/wp-checkpoint/v1/status' => array(
@@ -86,6 +89,11 @@ final class RestPermissionsTest extends WP_UnitTestCase {
 			'path'   => '/wp-checkpoint/v1/jobs/1/loopback',
 			'params' => array(),
 			'auth'   => 'challenge',
+		),
+		'/wp-checkpoint/v1/self-check' => array(
+			'path'   => '/wp-checkpoint/v1/self-check',
+			'params' => array( 'challenge' => '0000000000000000000000000000000000000000000000000000000000000000' ),
+			'auth'   => 'pass',
 		),
 	);
 
@@ -166,7 +174,7 @@ final class RestPermissionsTest extends WP_UnitTestCase {
 		wp_set_current_user( 0 );
 		foreach ( $this->route_methods() as $label => list( $pattern, $method ) ) {
 			$response = rest_get_server()->dispatch( $this->request( $pattern, $method ) );
-			$expected = 'challenge' === $this->auth( $pattern ) ? 403 : 401;
+			$expected = 'login' !== $this->auth( $pattern ) ? 403 : 401;
 			$this->assertSame( $expected, $response->get_status(), "{$label} must return {$expected} for anonymous users" );
 		}
 	}
@@ -192,7 +200,7 @@ final class RestPermissionsTest extends WP_UnitTestCase {
 		wp_set_current_user( $site_admin );
 		$checked = 0;
 		foreach ( $this->route_methods() as $label => list( $pattern, $method ) ) {
-			if ( 'challenge' === $this->auth( $pattern ) ) {
+			if ( 'login' !== $this->auth( $pattern ) ) {
 				continue; // Refused to everyone without the challenge: says nothing about the network capability.
 			}
 			$response = rest_get_server()->dispatch( $this->request( $pattern, $method ) );
@@ -207,7 +215,7 @@ final class RestPermissionsTest extends WP_UnitTestCase {
 		wp_set_current_user( self::$admin );
 		foreach ( $this->route_methods() as $label => list( $pattern, $method ) ) {
 			$response = rest_get_server()->dispatch( $this->request( $pattern, $method ) );
-			if ( 'challenge' === $this->auth( $pattern ) ) {
+			if ( 'login' !== $this->auth( $pattern ) ) {
 				$this->assertSame( 403, $response->get_status(), "{$label} must reject even administrators without a challenge" );
 				continue;
 			}
@@ -225,12 +233,17 @@ final class RestPermissionsTest extends WP_UnitTestCase {
 
 	public function test_only_documented_routes_use_challenge_auth(): void {
 		$challenge_routes = array();
+		$pass_routes      = array();
 		foreach ( self::EXAMPLES as $pattern => $example ) {
 			if ( 'challenge' === $this->auth( $pattern ) ) {
 				$challenge_routes[] = $pattern;
 			}
+			if ( 'pass' === $this->auth( $pattern ) ) {
+				$pass_routes[] = $pattern;
+			}
 		}
 		$this->assertSame( array( '/wp-checkpoint/v1/probe', '/wp-checkpoint/v1/jobs/(?P<id>\\d+)/loopback' ), $challenge_routes, 'adding a challenge-authenticated route needs a review' );
+		$this->assertSame( array( '/wp-checkpoint/v1/self-check' ), $pass_routes, 'authenticated by a restore\'s pass key: the self-check route alone' );
 	}
 
 	public function test_plugin_routes_only_live_in_the_plugin_namespace(): void {

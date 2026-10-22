@@ -45,6 +45,7 @@ use WPCheckpoint\Rest\BackupsController;
 use WPCheckpoint\Rest\JobsController;
 use WPCheckpoint\Rest\LoopbackController;
 use WPCheckpoint\Rest\ProbeController;
+use WPCheckpoint\Rest\SelfCheckController;
 use WPCheckpoint\Rest\StatusController;
 use WPCheckpoint\Support\Guard;
 use WPCheckpoint\Support\Directories;
@@ -159,6 +160,10 @@ final class Plugin {
 		Support\AutoUpdateHold::register();
 		// After a restore's swap, the first request with the restored site loaded sets the fallback events again.
 		add_action( 'init', array( $this, 'after_swap' ) );
+		// A request the maintenance file lets through for a restore's checks runs no cron (with ALTERNATE_WP_CRON it
+		// would, in the same request, on the site being checked): the file's code defines DISABLE_WP_CRON, and this
+		// is the second layer.
+		add_filter( 'pre_get_ready_cron_jobs', array( $this, 'no_cron_in_checks' ) );
 
 		if ( defined( 'WP_CLI' ) && WP_CLI ) {
 			\WP_CLI::add_command( 'wpcheckpoint job', new JobCommand( $this->job_actions(), $this->job_presenter(), $this->directories() ) );
@@ -223,6 +228,9 @@ final class Plugin {
 				// Managed by another installation: why it is not run here, and what can be done from here.
 				$out[] = $this->job_presenter()->clean( implode( "\n", JobPresenter::held_lines( $held['job'], $held['assessment'] ) ) );
 				continue;
+			} elseif ( $job->awaiting_answer() && in_array( Jobs\SwapStep::UNVERIFIED_QUESTION, array_column( $job->questions, 'id' ), true ) ) {
+				/* translators: 1: job id, 2: job id */
+				$out[] = sprintf( __( 'Restore job %1$d waits for an answer: whether to keep the restored site, which could not be checked (wp wpcheckpoint job status %2$d says why), or to undo the restore. Answer it on WP Checkpoint\'s admin page, or with wp wpcheckpoint job answer.', 'wp-checkpoint' ), $id, $id );
 			} elseif ( Job::SITE_SWAPPED === $job->site_state ) {
 				/* translators: 1: job id, 2: the command */
 				$out[] = sprintf( __( 'Restore job %1$d is at its last step (the restored site is swapped in). Finish it with: %2$s', 'wp-checkpoint' ), $id, $finish );
@@ -262,6 +270,18 @@ final class Plugin {
 			}
 		}
 		return $out;
+	}
+
+	/**
+	 * No cron job is ready in a request the maintenance file let through for a restore's checks (its pass header is the
+	 * one the file holds the hash of: Restore\Maintenance::passes()); otherwise what was given.
+	 *
+	 * @param mixed $pre What pre_get_ready_cron_jobs was given (null: WordPress reads the cron option).
+	 * @return mixed
+	 */
+	public function no_cron_in_checks( $pre ) {
+		$key = isset( $_SERVER['HTTP_X_WPCHECKPOINT_PASS'] ) ? sanitize_text_field( wp_unslash( (string) $_SERVER['HTTP_X_WPCHECKPOINT_PASS'] ) ) : '';
+		return '' !== $key && Restore\Maintenance::passes( (string) ABSPATH, $key ) ? array() : $pre;
 	}
 
 	/**
@@ -595,6 +615,7 @@ final class Plugin {
 			new JobsController( $this->job_actions(), $this->job_presenter(), $this->directories() ),
 			new BackupsController( $this->job_actions(), $this->job_presenter(), $this->directories() ),
 			new LoopbackController( $this->job_actions() ),
+			new SelfCheckController( $this->jobs() ),
 		);
 	}
 

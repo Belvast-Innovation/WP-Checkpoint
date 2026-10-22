@@ -289,6 +289,33 @@ final class DatabaseExportStepTest extends JobTestCase {
 		$this->round_trip( $stored, $lines );
 	}
 
+	public function test_the_self_check_row_is_never_exported_and_the_options_tables_other_rows_are(): void {
+		global $wpdb;
+		$options = $wpdb->base_prefix . 'options';
+		$wpdb->insert( $options, array( 'option_name' => \WPCheckpoint\Support\StoredNames::SELF_CHECK, 'option_value' => '1:' . str_repeat( 'a', 64 ) . ':' . str_repeat( 'b', 64 ), 'autoload' => 'no' ) );
+		$wpdb->insert( $options, array( 'option_name' => \WPCheckpoint\Support\StoredNames::SELF_CHECK . '_control', 'option_value' => 'kept', 'autoload' => 'no' ) );
+		$this->assertSame( '', $wpdb->last_error );
+		$connection = new WpdbConnection();
+		$this->assertFalse( ( new TableExporter( $connection, sys_get_temp_dir(), self::CHUNK ) )->hex_all(), 'the control: names are written as text, so they can be read below' );
+		$this->types->add( new FixtureJobType( 'db-options', array( new DatabaseExportStep( $connection, array( $options ), array(), self::CHUNK ) ) ) );
+		$job    = $this->repo->create( 'db-options' );
+		$result = null;
+		for ( $ticks = 0; $ticks < 100 && ( null === $result || TickResult::MORE === $result->status ); $ticks++ ) {
+			$result = $this->runner( 3 )->tick( $job->id, $this->now );
+		}
+		$wpdb->delete( $options, array( 'option_name' => \WPCheckpoint\Support\StoredNames::SELF_CHECK ) ); // The export's ticks committed them.
+		$wpdb->delete( $options, array( 'option_name' => \WPCheckpoint\Support\StoredNames::SELF_CHECK . '_control' ) );
+		$wpdb->query( 'COMMIT' );
+		$this->assertSame( TickResult::COMPLETED, $result->status, (string) $result->message );
+		$sql = '';
+		foreach ( $this->index_lines( $this->repo->find( $job->id ) ) as $line ) {
+			$sql .= (string) file_get_contents( $this->work( $this->repo->find( $job->id ) ) . '/' . DatabaseExportStep::DIR . '/' . basename( (string) $line['p'] ) );
+		}
+		$this->assertStringContainsString( "'" . \WPCheckpoint\Support\StoredNames::SELF_CHECK . "_control'", $sql, 'the control: another row of the table, its name starting the same, is exported' );
+		$this->assertStringContainsString( "'siteurl'", $sql, 'and the site\'s own' );
+		$this->assertStringNotContainsString( "'" . \WPCheckpoint\Support\StoredNames::SELF_CHECK . "'", $sql, 'the self-check row is not' );
+	}
+
 	public function test_the_upper_bound_follows_the_servers_own_key_order_on_a_composite_string_key(): void {
 		global $wpdb;
 		$table          = self::PREFIX . 'bounded';

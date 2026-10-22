@@ -16,6 +16,9 @@ use WPCheckpoint\Support\Paths;
 use WPCheckpoint\Support\Redactor;
 use WPCheckpoint\Support\Schema;
 use WPCheckpoint\Support\StoredNames;
+use WPCheckpoint\Database\SqlWriter;
+use WPCheckpoint\Restore\Maintenance;
+use WPCheckpoint\Restore\SelfCheck;
 use WPCheckpoint\Restore\SwapPlan;
 
 defined( 'ABSPATH' ) || exit;
@@ -728,6 +731,28 @@ final class JobRepository {
 		}
 		$row = $wpdb->get_row( $wpdb->prepare( 'SELECT * FROM ' . self::table() . ' WHERE site_mark = %s ORDER BY id DESC LIMIT 1', $mark ), ARRAY_A ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- plugin table name from the prefix.
 		return is_array( $row ) ? self::hydrate( $row ) : null;
+	}
+
+	/**
+	 * Whether a job that holds the site has this site mark, or that cannot be told (the safe direction for removing
+	 * a maintenance data file).
+	 *
+	 * @param string $mark Site mark ('' for a data file with none: no job has it).
+	 * @return bool
+	 */
+	private function holder_has_mark( string $mark ): bool {
+		try {
+			$ids = $this->holding_site();
+		} catch ( \RuntimeException $e ) {
+			return true;
+		}
+		foreach ( $ids as $id ) {
+			$job = $this->find( $id );
+			if ( null === $job || ( '' !== $mark && $mark === $job->site_mark ) ) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**
@@ -1599,12 +1624,13 @@ final class JobRepository {
 	 *
 	 * @param Job                  $job     Job (updated in place).
 	 * @param array<string, mixed> $answers Answers keyed by question id.
+	 * @param string|null          $message The job's progress message, in the same write (null: left as it is).
 	 * @return Job
 	 * @throws InvalidTransition When the job is not waiting for an answer.
 	 * @throws \InvalidArgumentException When the answers are not well-formed or carry a secret.
 	 * @throws StaleJob When the job changed meanwhile.
 	 */
-	public function answer( Job $job, array $answers ): Job {
+	public function answer( Job $job, array $answers, $message = null ): Job {
 		global $wpdb;
 		if ( ! $job->awaiting_answer() ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
@@ -1618,11 +1644,12 @@ final class JobRepository {
 		if ( ! is_string( $json ) ) {
 			throw new \InvalidArgumentException( 'Answers cannot be encoded.' );
 		}
-		$now = $this->now();
+		$now  = $this->now();
+		$said = null === $message ? '' : $wpdb->prepare( ', progress_message = %s', (string) $message );
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin table; the WHERE keeps a concurrent cancel or answer from being undone.
 		$affected = $wpdb->query(
 			$wpdb->prepare(
-				'UPDATE ' . self::table() . " SET options_json = %s, questions_json = NULL, updated_at = %d, progress_at = %d, blocked_count = 0, cron_deferrals = 0 WHERE id = %d AND status = %s AND questions_json IS NOT NULL AND questions_json <> '' AND questions_json <> '[]'", // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- table name from the prefix and a constant.
+				'UPDATE ' . self::table() . " SET options_json = %s, questions_json = NULL, updated_at = %d, progress_at = %d, blocked_count = 0, cron_deferrals = 0{$said} WHERE id = %d AND status = %s AND questions_json IS NOT NULL AND questions_json <> '' AND questions_json <> '[]'", // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- table name from the prefix and a constant; the message prepared above.
 				$json,
 				$now,
 				$now,
@@ -1634,12 +1661,13 @@ final class JobRepository {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
 			throw new StaleJob( sprintf( 'Job %d changed while it was being answered.', $job->id ) );
 		}
-		$job->options        = $options;
-		$job->questions      = array();
-		$job->updated_at     = $now;
-		$job->progress_at    = $now;
-		$job->blocked_count  = 0;
-		$job->cron_deferrals = 0;
+		$job->options          = $options;
+		$job->questions        = array();
+		$job->progress_message = null === $message ? $job->progress_message : (string) $message;
+		$job->updated_at       = $now;
+		$job->progress_at      = $now;
+		$job->blocked_count    = 0;
+		$job->cron_deferrals   = 0;
 		return $job;
 	}
 
@@ -1910,9 +1938,15 @@ final class JobRepository {
 		}
 
 		// A job nobody answered holds its work directory; after the retention period it is given up and
-		// its work reclaimed at once (the same rule as a failed job's files, on the same clock).
+		// its work reclaimed at once (the same rule as a failed job's files, on the same clock). Never one that holds
+		// the site: a restore whose restored site could not be checked is open to visitors, and after the same days
+		// (the window an undo has) it is kept, as the question allows; its last steps wait for WP-CLI (SwapStep).
 		foreach ( $this->list_jobs( array( Job::PAUSED ), 500 ) as $job ) {
 			if ( ! $job->awaiting_answer() || $job->updated_at + self::WORK_RETENTION_SECONDS > $now ) {
+				continue;
+			}
+			if ( $this->holds_site( $job ) ) {
+				$this->keep_unanswered( $job );
 				continue;
 			}
 			try {
@@ -1928,6 +1962,31 @@ final class JobRepository {
 
 		$this->settle_storage();
 		$this->reap_residue();
+	}
+
+	/**
+	 * Answer "keep" for a restore that holds the site and was not answered whether to keep its restored site, which
+	 * could not be checked; its progress message says how its last steps are run. Any other question of such a job
+	 * stays unanswered (none is asked once the site is changed), and nothing else is done to it.
+	 *
+	 * @param Job $job Paused job that holds the site.
+	 * @return void
+	 */
+	private function keep_unanswered( Job $job ): void {
+		if ( ! in_array( SwapStep::UNVERIFIED_QUESTION, array_column( $job->questions, 'id' ), true ) ) {
+			return;
+		}
+		try {
+			$this->answer(
+				$job,
+				array( SwapStep::UNVERIFIED_QUESTION => RestoreJob::KEEP ),
+				/* translators: %d: job id */
+				sprintf( __( 'No answer within 7 days: the restored site, which could not be checked, was kept. Run wp wpcheckpoint job run %d to finish the restore.', 'wp-checkpoint' ), $job->id )
+			);
+		} catch ( \RuntimeException | \LogicException $e ) {
+			return; // Answered, cancelled or run meanwhile (StaleJob, InvalidTransition): the next pass reads it again.
+		}
+		$this->directories->log_event( sprintf( 'Job %d: no answer within 7 days; its restored site was kept.', $job->id ) );
 	}
 
 	/**
@@ -2092,7 +2151,8 @@ final class JobRepository {
 			$budget -= $result['deleted'] + count( $result['failed'] );
 			$this->report_reclaim( $entry['kind'] . ' of job ' . $entry['id'], $result );
 		}
-		// The maintenance file's temporary files a swap that died before its rename left in ABSPATH.
+		// The maintenance file's temporary files a swap that died before its rename left in ABSPATH, and its data file
+		// when nothing reads it and no job that holds the site has its mark.
 		foreach ( Residue::scan_maintenance( Residue::maintenance_dir() ) as $entry ) {
 			if ( $budget <= 0 ) {
 				return;
@@ -2100,13 +2160,39 @@ final class JobRepository {
 			if ( ! Residue::is_expired( $entry, $now ) ) {
 				continue;
 			}
+			$unread  = function () use ( $entry, $now ): bool {
+				// Read again right before the deletion too: a swap may have written a new data file meanwhile (its
+				// code follows), which must not go.
+				if ( false !== Maintenance::code_in( Residue::maintenance_dir() ) || $this->holder_has_mark( Maintenance::data_mark( Residue::maintenance_dir() ) ) ) {
+					return false;
+				}
+				// Its age last, after the slower reads: a file written anew meanwhile is seen.
+				clearstatcache( true, $entry['path'] );
+				$mtime = @filemtime( $entry['path'] ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- gone or unreadable: not old enough (it stays).
+				return false !== $mtime && Residue::is_expired( array( 'mtime' => (int) $mtime ) + $entry, $now );
+			};
+			$confirm = null;
+			if ( Residue::MAINTENANCE_DATA === $entry['kind'] ) {
+				if ( ! $unread() ) {
+					continue;
+				}
+				$confirm = static function () use ( $unread ): void {
+					if ( ! $unread() ) {
+						throw new \RuntimeException( 'The data file is read, or was written anew, meanwhile.' );
+					}
+				};
+			}
 			--$budget;
 			try {
-				if ( ! Deleter::delete_maintenance_file( Residue::maintenance_dir(), basename( $entry['path'] ) ) ) {
+				if ( ! Deleter::delete_maintenance_file( Residue::maintenance_dir(), basename( $entry['path'] ), $confirm ) ) {
 					$this->directories->log_event( 'A temporary maintenance file of a restore could not be removed: ' . basename( $entry['path'] ) );
 				}
 			} catch ( DeletionRefused $e ) {
 				$this->directories->log_event( $e->getMessage() );
+			} catch ( \RuntimeException $e ) {
+				// Written anew or read meanwhile: it stays (the trace of how often this window is hit).
+				$this->directories->log_event( 'A maintenance data file was read or written anew right before the reaper would remove it; it was left.' );
+				continue;
 			}
 		}
 		$this->drop_tables_of(
@@ -2251,6 +2337,7 @@ final class JobRepository {
 			// taken over here keeps the names it was started with.
 			$done = $this->drop_tables_of( $job->storage_token, $job->id ) && $done;
 			$done = $this->delete_plan_of( $job->id ) && $done;
+			$done = $this->forget_self_check( $job ) && $done;
 		}
 		$base = $this->files_base( $job );
 		if ( '' === $base ) {
@@ -2417,6 +2504,34 @@ final class JobRepository {
 			);
 		}
 		return count( $victims );
+	}
+
+	/**
+	 * Remove the self-check row (Restore\SelfCheck) from the main site's options table when it names this job: a
+	 * restore that failed while it checked the site and is not tried again leaves it. Another job's row, or one of no
+	 * form, stays; the row is deleted only with the value read (a row written anew meanwhile stays).
+	 *
+	 * @param Job $job Job.
+	 * @return bool True when none of this job's is left (or none could be read as this job's).
+	 */
+	private function forget_self_check( Job $job ): bool {
+		global $wpdb;
+		$table = SqlWriter::identifier( SelfCheck::table( (string) $wpdb->base_prefix ) );
+		$rows  = self::read_rows( $wpdb->prepare( "SELECT option_value FROM {$table} WHERE option_name = %s", StoredNames::SELF_CHECK ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the options table, by its plugin row's name.
+		if ( null === $rows ) {
+			return false;
+		}
+		$value = $rows[0][0] ?? null;
+		$row   = null === $value ? null : SelfCheck::parse( (string) $value );
+		if ( null === $row || $job->id !== $row['job'] ) {
+			return true;
+		}
+		$deleted = $wpdb->query( $wpdb->prepare( "DELETE FROM {$table} WHERE option_name = %s AND option_value = %s", StoredNames::SELF_CHECK, (string) $value ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- as above.
+		if ( false === $deleted ) {
+			return false;
+		}
+		$this->directories->log_event( sprintf( 'The self-check row of job %d, left in the options table, was removed.', $job->id ) );
+		return true;
 	}
 
 	/**

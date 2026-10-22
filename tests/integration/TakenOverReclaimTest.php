@@ -162,7 +162,7 @@ final class TakenOverReclaimTest extends SwapTestCase {
 		}
 		// Through the command: refused before the file at the copy goes (the refusal is known in advance).
 		$copy = $this->sandbox . '/install/releases/2';
-		copy( $this->abspath . '/.maintenance', $copy . '/.maintenance' );
+		$this->copy_maintenance( $this->abspath, $copy );
 		$acts = new JobActions(
 			$repo,
 			$this->runner(),

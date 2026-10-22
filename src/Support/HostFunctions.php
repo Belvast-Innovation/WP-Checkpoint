@@ -48,6 +48,7 @@ final class HostFunctions {
 		'passthru',
 		'popen',
 		'putenv',
+		'opcache_invalidate',
 	);
 
 	/**
@@ -250,5 +251,36 @@ final class HostFunctions {
 		}
 		$out = @gzinflate( $data, max( 1, $max_length ) ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- corrupt data is reported by the caller.
 		return is_string( $out ) ? $out : false;
+	}
+
+	/**
+	 * Tell OPcache that a file changed (opcache_invalidate( $path, true )); false when it cannot be told (no OPcache,
+	 * the function disabled, opcache.restrict_api) or did not take it.
+	 *
+	 * @param string $path File.
+	 * @return bool
+	 */
+	public static function opcache_invalidate( string $path ): bool {
+		if ( ! self::available( 'opcache_invalidate' ) ) {
+			return false;
+		}
+		return true === @opcache_invalidate( $path, true ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a warning (restrict_api) would name the path.
+	}
+
+	/**
+	 * Run php -l on a file with the PHP that runs this (WP-CLI's, PHP_SAPI "cli"): true when it passes, false when
+	 * it does not, null when it cannot be run (not the CLI, exec() disabled, PHP_BINARY empty or not executable).
+	 *
+	 * @param string $path File.
+	 * @return bool|null
+	 */
+	public static function lint( string $path ) {
+		if ( 'cli' !== PHP_SAPI || ! @is_executable( PHP_BINARY ) || ! self::available( 'exec' ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- open_basedir: not run.
+			return null;
+		}
+		$output = array();
+		$status = 1;
+		@exec( escapeshellarg( PHP_BINARY ) . ' -l ' . escapeshellarg( $path ) . ' 2>&1', $output, $status ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.PHP.DiscouragedPHPFunctions.system_calls_exec -- the status says it; the output (kept off WP-CLI's own) is not read.
+		return 0 === $status;
 	}
 }

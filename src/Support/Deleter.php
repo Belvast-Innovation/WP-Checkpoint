@@ -389,14 +389,14 @@ final class Deleter {
 	}
 
 	/**
-	 * The names delete_maintenance_file() deletes: the maintenance file the swap writes and its temporary names
-	 * (AtomicFile).
+	 * The names delete_maintenance_file() deletes: the maintenance file the swap writes, its data file
+	 * (Restore\Maintenance::DATA), and their temporary names (AtomicFile).
 	 */
-	const MAINTENANCE_NAMES = '/\A\.maintenance(?:\.[0-9a-f]{16}\.tmp)?\z/';
+	const MAINTENANCE_NAMES = '/\A(?:\.maintenance|\.wpcheckpoint-maintenance\.php)(?:\.[0-9a-f]{16}\.tmp)?\z/';
 
 	/**
-	 * Delete the maintenance file a restore's swap wrote in ABSPATH, or one of its temporary files. The only file
-	 * the plugin deletes in ABSPATH: one of MAINTENANCE_NAMES, directly in ABSPATH (or in a directory registered
+	 * Delete the maintenance file a restore's swap wrote in ABSPATH, its data file, or a temporary file of either. The
+	 * only files the plugin deletes in ABSPATH: one of MAINTENANCE_NAMES, directly in ABSPATH (or in a directory registered
 	 * with allow(), the tests' stand-in), a regular file and not a link. Whether it is this restore's to delete
 	 * (its contents) is the caller's to check; nothing else is checked here.
 	 *
