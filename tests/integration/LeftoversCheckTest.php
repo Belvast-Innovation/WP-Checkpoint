@@ -41,6 +41,36 @@ final class LeftoversCheckTest extends WP_UnitTestCase {
 		$this->assertDirectoryDoesNotExist( $dir );
 	}
 
+	public function test_it_sees_and_removes_a_real_sites_tables_and_on_a_network_its_row(): void {
+		global $wpdb;
+		$id    = 987654;
+		$table = $wpdb->base_prefix . $id . '_leftover_check';
+		// On the connection itself: through wpdb a test's CREATE TABLE becomes a temporary table, and its rows are rolled
+		// back. Committed, as a site created with real tables is.
+		$this->assertTrue( mysqli_query( $wpdb->dbh, "CREATE TABLE `{$table}` ( id int )" ), $table );
+		if ( is_multisite() ) {
+			$this->assertTrue( mysqli_query( $wpdb->dbh, "INSERT INTO `{$wpdb->blogs}` ( blog_id, site_id, domain, path ) VALUES ( {$id}, 1, 'leftover.check', '/' )" ) );
+			mysqli_query( $wpdb->dbh, 'COMMIT' );
+		}
+		$items = Leftovers::listing();
+		$this->assertContains( 'site-table:' . $table, $items );
+		$this->assertNotContains( 'site-table:' . $wpdb->posts, $items, 'the main site\'s tables are not a site\'s' );
+		if ( is_multisite() ) {
+			$this->assertContains( 'site:' . $id, $items );
+			$this->assertNotContains( 'site:' . get_main_site_id(), $items, 'nor is the main site' );
+		}
+
+		Leftovers::removal( array_values( preg_grep( '/' . $id . '/', $items ) ) );
+		$items = Leftovers::listing();
+		$this->assertSame( array(), array_values( preg_grep( '/' . $id . '/', $items ) ) );
+		$this->assertSame( '0', (string) $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = %s', $table ) ), 'dropped' );
+		if ( is_multisite() ) {
+			$this->assertSame( '0', (string) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM {$wpdb->blogs} WHERE blog_id = %d", $id ) ), 'its row deleted' ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the sites table.
+			$this->assertNotNull( get_site( get_main_site_id() ), 'the control: the main site is there' );
+		}
+		$this->assertContains( $wpdb->posts, (array) $wpdb->get_col( 'SHOW TABLES' ), 'the control: the main site\'s tables are kept' );
+	}
+
 	public function test_on_the_tests_database_an_earlier_runs_fixture_table_is_named_then_dropped_and_no_table_of_wordpress_or_the_plugin(): void {
 		global $wpdb;
 		$table = $wpdb->base_prefix . 'swt_leftover_check';

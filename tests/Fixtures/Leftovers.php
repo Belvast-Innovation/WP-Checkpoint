@@ -12,7 +12,9 @@ use PHPUnit\Framework\TestSuite;
 
 /**
  * What the integration tests leave behind: the restore's tables ("wcptmp", "wcpold", "wcpstray") in the database,
- * the swap's maintenance file (and its temporary names) in ABSPATH, storage directories in the test site's
+ * a network's sites other than the main one (their rows in the sites table, and every table of a site's prefix,
+ * "{prefix}{id}_", whether its row is there or not: a test that creates a site with real tables commits it), the swap's
+ * maintenance file (and its temporary names) in ABSPATH, storage directories in the test site's
  * wp-content (wp-checkpoint-*, other than the one the stored state names), and this plugin's and its tests' entries in
  * the run's own temporary directory. A test that leaves one fails, named, and what it left is removed so the next test
  * starts clean; a test class that leaves one in its class-level set-up fails as a class; and the run fails when any is
@@ -50,7 +52,8 @@ final class Leftovers implements TestListener {
 	private static $watching = '';
 
 	/**
-	 * Lists what is there: function(): string[] (tables as "table:{name}", entries as "temp:{path}"); null while
+	 * Lists what is there: function(): string[] (tables as "table:{name}", a site's tables as "site-table:{name}", sites as
+	 * "site:{id}", entries as "temp:{path}"); null while
 	 * the suite is not the integration suite.
 	 *
 	 * @var callable|null
@@ -219,7 +222,7 @@ final class Leftovers implements TestListener {
 					static function ( string $item ): bool {
 						// Also the swap's maintenance file: removal() deletes only this plugin's (a held one would keep
 						// the test site in maintenance for the whole run), and reports anything else.
-						return 0 === strpos( $item, 'table:' ) || 0 === strpos( $item, 'maintenance:' );
+						return 0 === strpos( $item, 'table:' ) || 0 === strpos( $item, 'site' ) || 0 === strpos( $item, 'maintenance:' );
 					}
 				)
 			);
@@ -347,6 +350,9 @@ final class Leftovers implements TestListener {
 		foreach ( RealAbspath::listing() as $path ) {
 			$items[] = 'maintenance:' . $path;
 		}
+		foreach ( self::site_listing( $GLOBALS['wpdb'] ) as $item ) {
+			$items[] = $item;
+		}
 		$dir = self::run_temp_dir();
 		if ( '' !== $dir ) {
 			foreach ( (array) scandir( $dir ) as $entry ) {
@@ -365,6 +371,46 @@ final class Leftovers implements TestListener {
 		}
 		sort( $items );
 		return $items;
+	}
+
+	/**
+	 * A network's sites other than the main one ("site:{id}", from the sites table as this connection sees it) and every
+	 * table of a site's prefix ("site-table:{name}", site_tables()); on a single site, only such tables (an earlier
+	 * multisite run's).
+	 *
+	 * @param \wpdb $db Connection.
+	 * @return string[]
+	 */
+	public static function site_listing( \wpdb $db ): array {
+		$out = array();
+		foreach ( self::site_tables( array_map( 'strval', (array) $db->get_col( 'SHOW TABLES' ) ), (string) $db->base_prefix ) as $table ) {
+			$out[] = 'site-table:' . $table;
+		}
+		if ( is_multisite() ) {
+			foreach ( (array) $db->get_col( $db->prepare( "SELECT blog_id FROM {$db->blogs} WHERE blog_id <> %d", get_main_site_id() ) ) as $id ) { // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the sites table.
+				$out[] = 'site:' . (int) $id;
+			}
+		}
+		return $out;
+	}
+
+	/**
+	 * Of $all, the tables of a site's prefix: "{prefix}{id}_" and anything after it (WordPress's, or a plugin's per site).
+	 *
+	 * @param string[] $all         Every table in the database.
+	 * @param string   $base_prefix The main table prefix.
+	 * @return string[]
+	 */
+	public static function site_tables( array $all, string $base_prefix ): array {
+		$site = '/\A' . preg_quote( $base_prefix, '/' ) . '[1-9][0-9]*_./';
+		return array_values(
+			array_filter(
+				$all,
+				static function ( string $table ) use ( $site ): bool {
+					return 1 === preg_match( $site, $table );
+				}
+			)
+		);
 	}
 
 	/**
@@ -473,18 +519,44 @@ final class Leftovers implements TestListener {
 
 	/**
 	 * Drop the tables (on the connection itself: the core test case turns a DROP TABLE through wpdb into DROP
-	 * TEMPORARY TABLE while a test runs) and remove the entries (Sandbox::remove()).
+	 * TEMPORARY TABLE while a test runs) and remove the entries (Sandbox::remove()). A site's tables and its row in the
+	 * sites table look like any site's: they go on wp-env's tests database only (database_refusal(); anywhere else they
+	 * are left and the reason is said).
 	 *
 	 * @param string[] $items Items as listing() names them.
 	 * @return void
 	 */
 	public static function removal( array $items ): void {
 		global $wpdb;
-		$dbh = $wpdb->dbh;
+		$dbh   = $wpdb->dbh;
+		$sites = array_values(
+			array_filter(
+				$items,
+				static function ( string $item ): bool {
+					return 0 === strpos( $item, 'site' );
+				}
+			)
+		);
+		if ( array() !== $sites ) {
+			$refusal = self::database_refusal( (string) $wpdb->dbname, (string) $wpdb->get_var( 'SELECT DATABASE()' ), (string) $wpdb->dbhost );
+			if ( '' !== $refusal ) {
+				fwrite( STDERR, "\nThe sites and site tables listed are not removed: {$refusal}.\n" );
+				$items = array_values( array_diff( $items, $sites ) );
+			}
+		}
 		mysqli_query( $dbh, 'SET FOREIGN_KEY_CHECKS=0' );
 		foreach ( $items as $item ) {
-			if ( 0 === strpos( $item, 'table:' ) ) {
-				mysqli_query( $dbh, 'DROP TABLE IF EXISTS `' . str_replace( '`', '``', substr( $item, 6 ) ) . '`' );
+			if ( 0 === strpos( $item, 'table:' ) || 0 === strpos( $item, 'site-table:' ) ) {
+				mysqli_query( $dbh, 'DROP TABLE IF EXISTS `' . str_replace( '`', '``', substr( $item, strpos( $item, ':' ) + 1 ) ) . '`' );
+			} elseif ( 0 === strpos( $item, 'site:' ) ) {
+				// Its row and its meta; committed at once (after a test the connection is left with autocommit off).
+				$id = (int) substr( $item, 5 );
+				mysqli_query( $dbh, 'DELETE FROM `' . str_replace( '`', '``', $wpdb->blogs ) . '` WHERE blog_id = ' . $id );
+				if ( '' !== (string) $wpdb->blogmeta ) {
+					mysqli_query( $dbh, 'DELETE FROM `' . str_replace( '`', '``', $wpdb->blogmeta ) . '` WHERE blog_id = ' . $id );
+				}
+				mysqli_query( $dbh, 'COMMIT' );
+				clean_blog_cache( $id );
 			} elseif ( 0 === strpos( $item, 'maintenance:' ) ) {
 				RealAbspath::clear( substr( $item, 12 ) ); // Only what this plugin writes; anything else is reported.
 			} elseif ( 0 === strpos( $item, 'storage:' ) ) {

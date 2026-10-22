@@ -186,6 +186,26 @@ final class LeftoversTest extends TestCase {
 		);
 	}
 
+	public function test_a_sites_tables_are_every_table_of_a_site_prefix(): void {
+		$all = array(
+			'wp_posts',
+			'wp_blogs',
+			'wp_2_posts',
+			'wp_16_options',
+			'wp_2_users',
+			'wp_2_anything',
+			'wp_0_posts',
+			'wp_02_posts',
+			'wp_2_',
+			'wp_x2_posts',
+			'wp_wpcheckpoint_jobs',
+			'wp2_posts',
+			'other_2_posts',
+		);
+		$this->assertSame( array( 'wp_2_posts', 'wp_16_options', 'wp_2_users', 'wp_2_anything' ), Leftovers::site_tables( $all, 'wp_' ) );
+		$this->assertSame( array( 'x_wp_3_posts' ), Leftovers::site_tables( array( 'x_wp_posts', 'x_wp_3_posts', 'wp_3_posts' ), 'x_wp_' ), 'the prefix as given, not "wp_"' );
+	}
+
 	public function test_a_class_that_leaves_something_fails_as_a_class_and_so_does_the_run(): void {
 		$result   = new TestResult();
 		$listener = $this->listener();
