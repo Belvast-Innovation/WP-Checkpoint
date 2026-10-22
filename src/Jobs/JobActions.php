@@ -172,6 +172,9 @@ final class JobActions {
 		if ( null === $held ) {
 			return self::outcome( false, $this->not_held( $id ) );
 		}
+		if ( array() !== $held['job']->unreadable_columns ) {
+			return self::outcome( false, self::unreadable_refusal( $held['job'] ) );
+		}
 		$job = $held['job'];
 		$see = $held['assessment'];
 		if ( HeldSite::SITE !== $see['branch'] ) {
@@ -326,6 +329,10 @@ final class JobActions {
 	 */
 	private function not_ended( Job $job ): string {
 		if ( $this->repository->holds_site( $job ) ) {
+			if ( array() !== $job->unreadable_columns ) {
+				// First: the commands the other answers name refuse such a job (rebind(), abandon()).
+				return self::unreadable_refusal( $job );
+			}
 			if ( Job::REASON_ABANDONED === $job->failure_reason ) {
 				return self::abandoned_elsewhere( $job, $this->held->assess( $job ) );
 			}
@@ -339,6 +346,18 @@ final class JobActions {
 			return __( 'The job has not ended, or a run holds it: its maintenance file stays. Try again once it has ended.', 'wp-checkpoint' );
 		}
 		return '';
+	}
+
+	/**
+	 * Why nothing is done to a job that holds the site and whose row cannot be read (Job::$unreadable_columns): what
+	 * it did to the site, and so what taking it over, giving it up or taking its file down would do, cannot be told.
+	 *
+	 * @param Job $job Job.
+	 * @return string
+	 */
+	private static function unreadable_refusal( Job $job ): string {
+		/* translators: 1: job id, 2: what cannot be read of the job's row */
+		return sprintf( __( 'Job %1$d holds the site changed, and %2$s: what it did to the site cannot be told from it, so nothing was changed. Look at the site\'s directories and tables, and the .maintenance file in the WordPress directory, before anything else.', 'wp-checkpoint' ), $job->id, JobRepository::unreadable_text( $job->unreadable_columns ) );
 	}
 
 	/**
@@ -364,7 +383,11 @@ final class JobActions {
 	 */
 	public function abandon( int $id, string $confirm ): array {
 		$held = $this->held_elsewhere( $id );
-		$why  = null === $held ? $this->not_held( $id ) : $this->may_release( $held, HeldSite::ABANDON, $confirm );
+		if ( null !== $held && array() !== $held['job']->unreadable_columns ) {
+			// What it did to the site (HeldSite::assess() reads the cursor) cannot be told: not given up on a guess.
+			return self::outcome( false, self::unreadable_refusal( $held['job'] ) );
+		}
+		$why = null === $held ? $this->not_held( $id ) : $this->may_release( $held, HeldSite::ABANDON, $confirm );
 		if ( '' !== $why ) {
 			return self::outcome( false, $why );
 		}
