@@ -1096,8 +1096,9 @@ final class JobRepository {
 	 * Record why a job that holds the site changed is not run (it is not failed: Runner), as its progress message, when
 	 * that is not already what it says: one statement, on a row that holds the site, has not ended and no live run
 	 * holds. True when it was written, that is, when the reason changed: the caller then writes it to the job's log
-	 * once, not on every tick. The progress time and the update time are left as they are (the stall and retention
-	 * rules read them).
+	 * once, not on every tick. Compared as the column holds it (fit_message(): its first 191 characters), so reasons
+	 * are told apart by their start, which names what is wrong. The progress time and the update time are left as they
+	 * are (the stall and retention rules read them).
 	 *
 	 * @param Job    $job     Job, as read.
 	 * @param string $message Why (redacted).

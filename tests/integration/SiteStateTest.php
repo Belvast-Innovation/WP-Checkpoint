@@ -1080,7 +1080,7 @@ final class SiteStateTest extends WP_UnitTestCase {
 		$log = $this->log_of( $held->id );
 		$this->assertSame( 1, substr_count( $log, 'The job is not run' ), 'once in three ticks: ' . $log );
 		$this->assertStringContainsString( 'takeover_mark', $log, 'with the reason' );
-		$this->assertStringContainsString( 'This job holds the site changed, so it is not failed', $this->repo->find( $held->id )->progress_message );
+		$this->assertStringContainsString( 'takeover_mark', $this->repo->find( $held->id )->progress_message, 'and as its progress message (its start: the column holds 191 characters)' );
 		$wpdb->query( 'ALTER TABLE ' . Schema::jobs_table() . ' DROP COLUMN cron_deferrals' ); // Another reason.
 		$this->runner( true )->tick( $held->id, $this->now );
 		$this->runner( true )->tick( $held->id, $this->now );
