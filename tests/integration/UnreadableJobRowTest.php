@@ -71,6 +71,7 @@ final class UnreadableJobRowTest extends JobTestCase {
 	}
 
 	public function test_a_job_whose_cursor_cannot_be_read_stops_before_any_step_runs_and_its_row_is_left_as_it_is(): void {
+		$unreadable = array();
 		foreach ( array(
 			'NULL'         => null,
 			'empty'        => '',
@@ -96,6 +97,22 @@ final class UnreadableJobRowTest extends JobTestCase {
 			$this->assertTrue( Plugin::instance()->jobs()->holds_site( $job ), $what . ': and it holds it' );
 			$this->assertSame( $value, $this->column( $id, 'cursor_json' ), $what . ': the column left as it was' );
 			$this->assertSame( array( 'cursor_json' ), $job->unreadable_columns, $what );
+			$unreadable[ $what ] = $id;
+		}
+		// What WP-CLI says first: no command to finish a job that is not run again. The control: a failed job that
+		// holds the site and whose cursor is read is told to be retried, in the words looked for here.
+		$readable = $this->job_with(
+			array(
+				'cursor_json' => '{"n":1}',
+				'site_state'  => Job::SITE_SWAPPED,
+				'status'      => Job::FAILED,
+			)
+		);
+		$warnings = implode( "\n", Plugin::instance()->half_swapped_warnings() );
+		$this->assertStringContainsString( 'wp wpcheckpoint job retry ' . $readable . ',', $warnings, 'the control' );
+		foreach ( $unreadable as $what => $id ) {
+			$this->assertStringContainsString( 'Restore job ' . $id . ' holds the site changed, and its row cannot be read', $warnings, $what );
+			$this->assertStringNotContainsString( 'wp wpcheckpoint job retry ' . $id . ',', $warnings, $what );
 		}
 		// The controls: an empty cursor is read as empty (the step ends, the job completes), a position as a position.
 		$this->runs = 0;
@@ -151,5 +168,37 @@ final class UnreadableJobRowTest extends JobTestCase {
 		$this->tick( $id );
 		$this->assertSame( 1, $this->runs, 'NULL options and questions: the step ran' );
 		$this->assertSame( array(), Plugin::instance()->jobs()->find( $id )->unreadable_columns );
+	}
+
+	public function test_a_job_whose_options_cannot_be_read_is_not_answered(): void {
+		$question = '[{"id":"q","kind":"k","count":1,"choices":["a","b"]}]';
+		foreach ( array(
+			'options cut short' => '{"policy":{"unverified":"ke',
+			'options readable'  => '{"policy":{"unverified":"keep"}}',
+		) as $what => $options ) {
+			$id  = $this->job_with(
+				array(
+					'status'         => Job::PAUSED,
+					'options_json'   => $options,
+					'questions_json' => $question,
+				)
+			);
+			$job = Plugin::instance()->jobs()->find( $id );
+			try {
+				Plugin::instance()->jobs()->answer( $job, array( 'q' => 'a' ) );
+				$answered = '';
+			} catch ( \Throwable $e ) {
+				$answered = $e->getMessage();
+			}
+			if ( 'options readable' === $what ) {
+				// The control: the same answer to the same question is taken, and written into the options.
+				$this->assertSame( '', $answered );
+				$this->assertStringContainsString( '"answers":{"q":"a"}', (string) $this->column( $id, 'options_json' ) );
+				continue;
+			}
+			$this->assertStringContainsString( 'cannot be read', $answered, $what );
+			$this->assertSame( $options, $this->column( $id, 'options_json' ), $what . ': not written over' );
+			$this->assertSame( $question, $this->column( $id, 'questions_json' ), $what . ': still asked' );
+		}
 	}
 }
