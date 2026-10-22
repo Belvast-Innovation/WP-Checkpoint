@@ -1037,7 +1037,7 @@ final class Runner {
 	private function fail_unreadable( Job $job ): TickResult {
 		/* translators: %s: what cannot be read of the job's row */
 		$message = sprintf( __( 'The job stopped: %s. Nothing was run, and its row is left as it is.', 'wp-checkpoint' ), JobRepository::unreadable_text( $job->unreadable_columns ) );
-		$outcome = Job::SITE_UNTOUCHED === $job->site_state ? $this->repository->fail_unreadable( $job, $message ) : JobRepository::FAIL_HELD;
+		$outcome = $this->repository->fail_unreadable( $job, $message ); // Not one that holds the site: FAIL_HELD.
 		if ( JobRepository::FAIL_ERROR === $outcome ) {
 			return new TickResult( TickResult::BLOCKED, JobRepository::BACKOFF_SECONDS[ count( JobRepository::BACKOFF_SECONDS ) - 1 ], $job, $this->redactor->redact( $message ) );
 		}
