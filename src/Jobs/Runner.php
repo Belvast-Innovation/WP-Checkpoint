@@ -255,6 +255,11 @@ final class Runner {
 			return new TickResult( TickResult::BUSY, self::BUSY_RETRY_SECONDS, $job, __( 'Another process is working on this job.', 'wp-checkpoint' ) );
 		}
 
+		if ( array() !== $held['job']->unreadable_columns ) {
+			// The row as the lock read it (it may have changed since the first read): the same as before the lock.
+			$this->release( $held['job'], $held['token'] );
+			return $this->fail_unreadable( $held['job'] );
+		}
 		$job    = $held['job'];
 		$token  = $held['token'];
 		$start  = is_numeric( $started_at ) ? (float) $started_at : $this->now();
@@ -607,7 +612,14 @@ final class Runner {
 		}
 		$context = $this->context( $job, $job->cursor, $budget, $logger, $this->now(), null );
 		$cleaned = 0;
-		foreach ( $type->steps() as $step ) {
+		$steps   = $type->steps();
+		if ( in_array( 'cursor_json', $job->unreadable_columns, true ) ) {
+			// A step's cleanup reads what it made from the cursor: on the empty stand-in it would clean up as if it had
+			// made nothing, or the wrong things. The engine's reclaim below still runs.
+			$logger->warning( 'The job\'s cursor cannot be read; the steps\' own cleanup was not run' );
+			$steps = array();
+		}
+		foreach ( $steps as $step ) {
 			if ( ! $step instanceof Step ) {
 				continue;
 			}
@@ -1016,15 +1028,16 @@ final class Runner {
 	}
 
 	/**
-	 * Fail a job whose row cannot be read (JobRepository::fail_unreadable()).
+	 * Fail a job whose row cannot be read (JobRepository::fail_unreadable()); one that holds the site changed is not
+	 * failed (a failed job no longer puts the site back): it is not run, and goes on once its row is repaired.
 	 *
 	 * @param Job $job Job, as read.
 	 * @return TickResult
 	 */
 	private function fail_unreadable( Job $job ): TickResult {
 		/* translators: %s: what cannot be read of the job's row */
-		$message = sprintf( __( 'The job stopped: %s. Nothing was run, and its row is left as it is. Look at the site before you go on; while the job holds the site, no other job starts on it.', 'wp-checkpoint' ), JobRepository::unreadable_text( $job->unreadable_columns ) );
-		$outcome = $this->repository->fail_unreadable( $job, $message );
+		$message = sprintf( __( 'The job stopped: %s. Nothing was run, and its row is left as it is.', 'wp-checkpoint' ), JobRepository::unreadable_text( $job->unreadable_columns ) );
+		$outcome = Job::SITE_UNTOUCHED === $job->site_state ? $this->repository->fail_unreadable( $job, $message ) : JobRepository::FAIL_HELD;
 		if ( JobRepository::FAIL_ERROR === $outcome ) {
 			return new TickResult( TickResult::BLOCKED, JobRepository::BACKOFF_SECONDS[ count( JobRepository::BACKOFF_SECONDS ) - 1 ], $job, $this->redactor->redact( $message ) );
 		}
@@ -1033,9 +1046,14 @@ final class Runner {
 			if ( null === $now ) {
 				return new TickResult( TickResult::MISSING, -1, null );
 			}
-			return ! in_array( $now->status, array( Job::QUEUED, Job::RUNNING, Job::PAUSED ), true )
-				? new TickResult( TickResult::FINISHED, -1, $now )
-				: new TickResult( TickResult::BUSY, self::BUSY_RETRY_SECONDS, $now, __( 'Another process is working on this job.', 'wp-checkpoint' ) );
+			if ( ! in_array( $now->status, array( Job::QUEUED, Job::RUNNING, Job::PAUSED ), true ) ) {
+				return new TickResult( TickResult::FINISHED, -1, $now );
+			}
+			if ( Job::SITE_UNTOUCHED !== $now->site_state && ! $now->is_locked( time() ) ) {
+				// Not failed: said as what it is, every time it is ticked.
+				return new TickResult( TickResult::BLOCKED, JobRepository::BACKOFF_SECONDS[ count( JobRepository::BACKOFF_SECONDS ) - 1 ], $now, $this->redactor->redact( $message ) . ' ' . __( 'This job holds the site changed, so it is not failed: it goes on once its row is repaired. Look at the site\'s directories and tables, and the .maintenance file in the WordPress directory, before anything else; while the job holds the site, no other job starts on it.', 'wp-checkpoint' ) );
+			}
+			return new TickResult( TickResult::BUSY, self::BUSY_RETRY_SECONDS, $now, __( 'Another process is working on this job.', 'wp-checkpoint' ) );
 		}
 		$this->note( $job, Logger::ERROR, 'Job failed', array( 'error' => $message ) );
 		return new TickResult( TickResult::FAILED, -1, $job, $this->redactor->redact( $message ) );

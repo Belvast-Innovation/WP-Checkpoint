@@ -248,14 +248,20 @@ final class JobRepository {
 		self::assert_cursor_has_no_secrets( $cursor );
 		self::assert_cursor_has_no_secrets( $options );
 
+		$cursor_json  = wp_json_encode( $cursor );
+		$options_json = wp_json_encode( $options );
+		if ( false === $cursor_json || false === $options_json ) {
+			// Stored as '' it would read back as a row that cannot be read (hydrate()), and the job fail for it.
+			throw new \RuntimeException( 'The job\'s cursor or options cannot be written.' );
+		}
 		$state = $this->directories->state();
 		$now   = $this->now();
 		$row   = array(
 			'site_id'       => get_current_blog_id(),
 			'type'          => $type,
 			'status'        => Job::QUEUED,
-			'cursor_json'   => wp_json_encode( $cursor ),
-			'options_json'  => wp_json_encode( $options ),
+			'cursor_json'   => $cursor_json,
+			'options_json'  => $options_json,
 			'storage_token' => (string) $state['token'],
 			'storage_path'  => $base,
 			'owner_user'    => $owner_user,
@@ -1044,13 +1050,13 @@ final class JobRepository {
 	/**
 	 * Fail a job whose row cannot be read (Job::$unreadable_columns), in one statement that writes the status, the
 	 * error, the times and the lock, and nothing of the columns that cannot be read: they stay as they are, the one
-	 * record of what happened to the row. A job that holds the site stays recorded as holding it (site_state is not
-	 * written), so nothing else starts on the site meanwhile. Final: a retry runs into the same row. Only a job no
-	 * live run holds.
+	 * record of what happened to the row. Final: a retry runs into the same row. Only a job no live run holds, and
+	 * never one that holds the site changed (as fail_for_missing_columns(): a failed job no longer puts the site back;
+	 * such a job is left as it is and goes on once its row is repaired).
 	 *
 	 * @param Job    $job     Job, as read (updated in place).
 	 * @param string $message Why.
-	 * @return string FAIL_DONE, FAIL_HELD (a live run holds it, or it ended meanwhile) or FAIL_ERROR.
+	 * @return string FAIL_DONE, FAIL_HELD (a live run holds it, it holds the site, or it ended meanwhile) or FAIL_ERROR.
 	 */
 	public function fail_unreadable( Job $job, string $message ): string {
 		global $wpdb;
@@ -1061,7 +1067,7 @@ final class JobRepository {
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin table; the WHERE keeps a live run's job and an ended job as they are.
 		$affected = $wpdb->query(
 			$wpdb->prepare(
-				"UPDATE {$table} SET status = %s, last_error = %s, failure_kind = %s, finished_at = %d, updated_at = %d, lock_token = '', locked_until = 0 WHERE id = %d AND status IN (%s, %s, %s) AND (lock_token = '' OR locked_until < %d)", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- table name from the prefix.
+				"UPDATE {$table} SET status = %s, last_error = %s, failure_kind = %s, finished_at = %d, updated_at = %d, lock_token = '', locked_until = 0 WHERE id = %d AND status IN (%s, %s, %s) AND site_state = 0 AND (lock_token = '' OR locked_until < %d)", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- table name from the prefix.
 				Job::FAILED,
 				$error,
 				$stamp,
@@ -1441,12 +1447,17 @@ final class JobRepository {
 	public function save_progress( Job $job, string $token, string $step, array $cursor, int $progress, string $message = '', bool $advanced = true, $site_state = null, $site_mark = null ): int {
 		global $wpdb;
 		self::assert_cursor_has_no_secrets( $cursor );
+		$json = wp_json_encode( $cursor );
+		if ( false === $json ) {
+			// Stored as '' it would read back as a cursor that cannot be read (hydrate()): nothing is written.
+			throw new \RuntimeException( sprintf( 'Job %d: its cursor cannot be written.', $job->id ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+		}
 		$now      = $this->now();
 		$progress = max( 0, min( 100, $progress ) );
 		$message  = self::fit_message( $message );
 		$data     = array(
 			'step'             => $step,
-			'cursor_json'      => wp_json_encode( $cursor ),
+			'cursor_json'      => $json,
 			'progress'         => $progress,
 			'progress_message' => $message,
 			'updated_at'       => $now,
@@ -2008,6 +2019,11 @@ final class JobRepository {
 			$message = 0 === $job->started_at
 				? __( 'Queued for 24 hours without starting; the job was given up.', 'wp-checkpoint' )
 				: __( 'No progress for 24 hours; the job was given up.', 'wp-checkpoint' );
+			if ( array() !== $job->unreadable_columns ) {
+				// Said as what kept it from running (Runner::tick() fails it so when it is ticked).
+				/* translators: %s: what cannot be read of the job's row */
+				$message = sprintf( __( 'The job was given up: %s.', 'wp-checkpoint' ), self::unreadable_text( $job->unreadable_columns ) );
+			}
 			try {
 				// Nothing drove it (no visits, no cron): not a problem of the server; the message says what happened.
 				$this->force_transition( $job, Job::FAILED, $message );
@@ -2021,7 +2037,9 @@ final class JobRepository {
 		// the site: a restore whose restored site could not be checked is open to visitors, and after the same days
 		// (the window an undo has) it is kept, as the question allows; its last steps wait for WP-CLI (SwapStep).
 		foreach ( $this->list_jobs( array( Job::PAUSED ), 500 ) as $job ) {
-			if ( ! $job->awaiting_answer() || $job->updated_at + self::WORK_RETENTION_SECONDS > $now ) {
+			// Questions that cannot be read are read as none (awaiting_answer() false); the job still waits for an answer.
+			$waiting = $job->awaiting_answer() || in_array( 'questions_json', $job->unreadable_columns, true );
+			if ( ! $waiting || $job->updated_at + self::WORK_RETENTION_SECONDS > $now ) {
 				continue;
 			}
 			if ( $this->holds_site( $job ) ) {
