@@ -142,6 +142,19 @@ final class SiteStateTest extends WP_UnitTestCase {
 	}
 
 	/**
+	 * A job's log as written, in this test's storage directory (the plugin's presenter reads only its own).
+	 *
+	 * @param int $id Job id.
+	 * @return string
+	 */
+	private function log_of( int $id ): string {
+		$job  = $this->repo->find( $id );
+		$path = $job->storage_path . '/' . ( '' !== $job->log_path ? $job->log_path : 'logs/job-' . $id . '.log' );
+		clearstatcache( true, $path );
+		return is_file( $path ) ? (string) file_get_contents( $path ) : '';
+	}
+
+	/**
 	 * Set columns of a job's row.
 	 *
 	 * @param array<string, mixed> $columns Columns.
@@ -1064,14 +1077,14 @@ final class SiteStateTest extends WP_UnitTestCase {
 		// Said on every tick; written to its log, and as its progress message, only when the reason changes.
 		$this->runner( true )->tick( $held->id, $this->now );
 		$this->runner( true )->tick( $held->id, $this->now );
-		$log = \WPCheckpoint\Plugin::instance()->job_presenter()->log_tail( $this->repo->find( $held->id ) );
+		$log = $this->log_of( $held->id );
 		$this->assertSame( 1, substr_count( $log, 'The job is not run' ), 'once in three ticks: ' . $log );
 		$this->assertStringContainsString( 'takeover_mark', $log, 'with the reason' );
 		$this->assertStringContainsString( 'This job holds the site changed, so it is not failed', $this->repo->find( $held->id )->progress_message );
 		$wpdb->query( 'ALTER TABLE ' . Schema::jobs_table() . ' DROP COLUMN cron_deferrals' ); // Another reason.
 		$this->runner( true )->tick( $held->id, $this->now );
 		$this->runner( true )->tick( $held->id, $this->now );
-		$log = \WPCheckpoint\Plugin::instance()->job_presenter()->log_tail( $this->repo->find( $held->id ) );
+		$log = $this->log_of( $held->id );
 		$this->assertSame( 2, substr_count( $log, 'The job is not run' ), 'once more when the reason changed: ' . $log );
 		$this->assertStringContainsString( 'cron_deferrals', $log );
 		// While a live run holds it, that is what is said.

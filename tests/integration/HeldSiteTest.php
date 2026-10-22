@@ -778,7 +778,7 @@ final class HeldSiteTest extends SwapTestCase {
 		$see  = ( new HeldSite() )->assess( $job ); // As this site sees it: not this site's (the plan swapped the sandbox).
 		$code = HeldSite::code( HeldSite::ABANDON, $job, $see['recorded'] );
 		$warn = implode( "\n", Plugin::instance()->half_swapped_warnings() );
-		$this->assertStringContainsString( 'managed by another installation', $warn );
+		$this->assertStringContainsString( 'Another installation of WP Checkpoint manages it', $warn );
 		$this->assertStringContainsString( 'wp wpcheckpoint job abandon ' . $job->id . ' --confirm=' . $code, $warn );
 		$this->assertStringNotContainsString( 'Resolve it with: wp wpcheckpoint job run ' . $job->id, $warn, 'not advised to run what is never run here' );
 		$admin = Plugin::instance()->job_presenter()->present( $job, false )['held_elsewhere'];
