@@ -1062,8 +1062,12 @@ final class Runner {
 				if ( ! $this->cli && $this->at_cli_only_step( $now ) ) {
 					return new TickResult( TickResult::CLI, -1, $now, self::cli_message( $now ) );
 				}
-				// Said as what it is, every time it is ticked.
-				return new TickResult( TickResult::BLOCKED, JobRepository::BACKOFF_SECONDS[ count( JobRepository::BACKOFF_SECONDS ) - 1 ], $now, $this->redactor->redact( $message ) . ' ' . __( 'This job holds the site changed, so it is not failed: it is not run until its row is repaired. Look at the site\'s directories and tables, and the .maintenance file in the WordPress directory, before anything else; while the job holds the site, no other job starts on it.', 'wp-checkpoint' ) );
+				// Said as what it is, every time it is ticked; written to its log when the reason changes.
+				$said = $this->redactor->redact( $message ) . ' ' . __( 'This job holds the site changed, so it is not failed: it is not run until its row is repaired. Look at the site\'s directories and tables, and the .maintenance file in the WordPress directory, before anything else; while the job holds the site, no other job starts on it.', 'wp-checkpoint' );
+				if ( $this->repository->note_held_back( $now, $said ) ) {
+					$this->note( $now, Logger::WARNING, 'The job is not run', array( 'reason' => $said ) );
+				}
+				return new TickResult( TickResult::BLOCKED, JobRepository::BACKOFF_SECONDS[ count( JobRepository::BACKOFF_SECONDS ) - 1 ], $now, $said );
 			}
 			return new TickResult( TickResult::BUSY, self::BUSY_RETRY_SECONDS, $now, __( 'Another process is working on this job.', 'wp-checkpoint' ) );
 		}
@@ -1096,8 +1100,13 @@ final class Runner {
 				return new TickResult( TickResult::FINISHED, -1, $now );
 			}
 			if ( Job::SITE_UNTOUCHED !== $now->site_state && ! $now->is_locked( time() ) ) {
-				// Not failed: a failed job no longer puts the site back. Said as what it is.
-				return new TickResult( TickResult::BLOCKED, JobRepository::BACKOFF_SECONDS[ count( JobRepository::BACKOFF_SECONDS ) - 1 ], $now, $this->redactor->redact( $message ) . ' ' . __( 'This job holds the site changed, so it is not failed: it goes on once the table is repaired (deactivate and activate WP Checkpoint, or update it).', 'wp-checkpoint' ) );
+				// Not failed: a failed job no longer puts the site back. Said as what it is; written to its log when the
+				// reason changes, through columns the table has (the statement would fail on a missing one).
+				$said = $this->redactor->redact( $message ) . ' ' . __( 'This job holds the site changed, so it is not failed: it goes on once the table is repaired (deactivate and activate WP Checkpoint, or update it).', 'wp-checkpoint' );
+				if ( array() === array_intersect( array( 'progress_message', 'status', 'site_state', 'lock_token', 'locked_until' ), $unusable ) && $this->repository->note_held_back( $now, $said ) ) {
+					$this->note( $now, Logger::WARNING, 'The job is not run', array( 'reason' => $said ) );
+				}
+				return new TickResult( TickResult::BLOCKED, JobRepository::BACKOFF_SECONDS[ count( JobRepository::BACKOFF_SECONDS ) - 1 ], $now, $said );
 			}
 			return new TickResult( TickResult::BUSY, self::BUSY_RETRY_SECONDS, $now, __( 'Another process is working on this job.', 'wp-checkpoint' ) );
 		}

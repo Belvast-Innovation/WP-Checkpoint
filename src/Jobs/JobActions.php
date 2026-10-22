@@ -432,12 +432,44 @@ final class JobActions {
 	 * @return string
 	 */
 	public static function holding_paths( Job $job, array $see ): string {
-		return sprintf(
-			/* translators: 1: the WordPress directory the job's plan records, 2: job id, 3: the abandon command */
-			__( 'The restore still holds the site, so its maintenance file stays up here. If this database is shared with the site at %1$s: finish the restore or roll it back there; afterwards take its file down here with wp wpcheckpoint job release %2$d. If it is not shared: %3$s (it takes the file down too; the restore\'s tables are kept, the ones its swap moved aside among them).', 'wp-checkpoint' ),
+		$shared = sprintf(
+			/* translators: 1: the WordPress directory the job's plan records, 2: job id */
+			__( 'The restore still holds the site, so its maintenance file stays up here. If this database is shared with the site at %1$s: finish the restore or roll it back there; afterwards take its file down here with wp wpcheckpoint job release %2$d.', 'wp-checkpoint' ),
 			'' === $see['recorded'] ? __( '(not recorded)', 'wp-checkpoint' ) : $see['recorded'],
-			$job->id,
-			$see['differs'] ? 'wp wpcheckpoint job abandon ' . $job->id . ' --confirm=' . HeldSite::code( HeldSite::ABANDON, $job, (string) $see['recorded'] ) : __( 'nothing can be done from this WordPress directory (it is not positively another than that one)', 'wp-checkpoint' )
+			$job->id
+		);
+		if ( ! $see['differs'] ) {
+			// No abandon command: nothing of what it does is said.
+			return $shared . ' ' . __( 'If it is not shared, nothing can be done from this WordPress directory: it cannot be told for certain to be another one than that.', 'wp-checkpoint' );
+		}
+		return $shared . ' ' . sprintf(
+			/* translators: %s: the abandon command */
+			__( 'If it is not shared: %s (it takes the file down too; the restore\'s tables are kept, the ones its swap moved aside among them).', 'wp-checkpoint' ),
+			'wp wpcheckpoint job abandon ' . $job->id . ' --confirm=' . HeldSite::code( HeldSite::ABANDON, $job, (string) $see['recorded'] )
+		);
+	}
+
+	/**
+	 * What to say when more than one job holds the site at once (JobRepository::holding_site()): which they are, and
+	 * that a person has to look at them. It is not expected: no job is started or queued while one holds the site
+	 * (held_reason()). Each holder's own runs and retries do not look at the other, and are left as they are. '' when
+	 * one or none does, or the jobs could not be read (the commands say that themselves).
+	 *
+	 * @return string
+	 */
+	public function holding_warning(): string {
+		try {
+			$ids = $this->repository->holding_site();
+		} catch ( \RuntimeException $e ) {
+			return '';
+		}
+		if ( count( $ids ) < 2 ) {
+			return '';
+		}
+		return sprintf(
+			/* translators: %s: job ids */
+			__( 'Jobs %s hold the site changed at the same time. This should not happen, and needs a person: look at the site, and at each of these jobs with wp wpcheckpoint job status, before running any of them.', 'wp-checkpoint' ),
+			implode( ', ', array_map( 'intval', $ids ) )
 		);
 	}
 

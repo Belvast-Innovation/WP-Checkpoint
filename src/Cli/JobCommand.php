@@ -363,32 +363,65 @@ final class JobCommand {
 		if ( null === $job ) {
 			WP_CLI::error( 'No such job.' );
 		}
-		$data = $this->presenter->present( $job );
-		$rows = array();
-		foreach ( $data as $key => $value ) {
-			$rows[] = array(
-				'field' => $key,
-				'value' => is_scalar( $value ) ? (string) $value : wp_json_encode( $value ),
-			);
-		}
-		\WP_CLI\Utils\format_items( isset( $assoc_args['format'] ) ? (string) $assoc_args['format'] : 'table', $rows, array( 'field', 'value' ) );
-		$held = $this->actions->held_elsewhere( $job->id );
-		if ( null !== $held && self::shows_lines( $assoc_args ) ) {
-			foreach ( JobPresenter::held_lines( $held['job'], $held['assessment'] ) as $line ) {
-				WP_CLI::line( $this->presenter->clean( $line ) );
+		$format = isset( $assoc_args['format'] ) ? (string) $assoc_args['format'] : 'table';
+		$layout = self::status_layout( $this->presenter->present( $job ), $format );
+		\WP_CLI\Utils\format_items( $format, $layout['rows'], array( 'field', 'value' ) );
+		foreach ( $layout['after'] as $field => $text ) {
+			WP_CLI::line( '' );
+			WP_CLI::line( $field . ':' );
+			foreach ( explode( "\n", $text ) as $line ) {
+				WP_CLI::line( '  ' . $line );
 			}
+		}
+		$two = $this->actions->holding_warning();
+		if ( '' !== $two ) {
+			WP_CLI::warning( $two );
 		}
 	}
 
 	/**
-	 * Whether status prints lines after its table: only as a table. WP-CLI fills an option left out with the default
-	 * its docblock gives, so "--format" is always there ("table" when not given).
+	 * What job status puts in its table and what after it: as a table, a value of more than one line (what another
+	 * installation's job leaves to be done from here, a log, an error with its detail) is not put in a cell; the cell
+	 * says it follows, and the value is printed once after the table, under its field's name. Any other format has
+	 * every value in its row (JSON, CSV and YAML hold more than one line).
 	 *
-	 * @param array<string, mixed> $assoc_args Options, as WP-CLI passes them.
-	 * @return bool
+	 * @param array<string, mixed> $data   JobPresenter::present().
+	 * @param string               $format The --format given ("table" when not given: WP-CLI fills it from the docblock).
+	 * @return array{rows: array<int, array{field: string, value: string}>, after: array<string, string>}
 	 */
-	public static function shows_lines( array $assoc_args ): bool {
-		return 'table' === (string) ( $assoc_args['format'] ?? 'table' );
+	public static function status_layout( array $data, string $format ): array {
+		$rows  = array();
+		$after = array();
+		foreach ( $data as $field => $value ) {
+			$text = is_scalar( $value ) ? (string) $value : (string) wp_json_encode( $value );
+			if ( 'table' === $format && false !== strpos( $text, "\n" ) ) {
+				$after[ (string) $field ] = $text;
+				$text                     = '(below the table)';
+			}
+			$rows[] = array(
+				'field' => (string) $field,
+				'value' => $text,
+			);
+		}
+		return array(
+			'rows'  => $rows,
+			'after' => $after,
+		);
+	}
+
+	/**
+	 * The job a command prints after its table, when it is a job that the warning every command says first would name
+	 * too (Plugin::half_swapped_warnings()): job status of a job, as a table. 0 for any other command.
+	 *
+	 * @param mixed[]              $args       The command's words, as WP-CLI's before_run_command hook passes them.
+	 * @param array<string, mixed> $assoc_args Its options, as the hook passes them (before the docblock's defaults).
+	 * @return int
+	 */
+	public static function shown_after_table( array $args, array $assoc_args ): int {
+		if ( array( 'wpcheckpoint', 'job', 'status' ) !== array_slice( array_map( 'strval', $args ), 0, 3 ) || ! isset( $args[3] ) || 1 !== preg_match( '/\A[1-9][0-9]*\z/', (string) $args[3] ) ) {
+			return 0;
+		}
+		return 'table' === (string) ( $assoc_args['format'] ?? 'table' ) ? (int) $args[3] : 0;
 	}
 
 	/**
@@ -405,6 +438,10 @@ final class JobCommand {
 			$rows[] = $this->presenter->present( $job, false );
 		}
 		\WP_CLI\Utils\format_items( isset( $assoc_args['format'] ) ? (string) $assoc_args['format'] : 'table', $rows, array( 'id', 'type', 'status', 'step', 'progress', 'message', 'attempts', 'updated_at' ) );
+		$two = $this->actions->holding_warning();
+		if ( '' !== $two ) {
+			WP_CLI::warning( $two );
+		}
 	}
 
 	/**

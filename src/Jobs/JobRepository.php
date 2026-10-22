@@ -1093,6 +1093,37 @@ final class JobRepository {
 	}
 
 	/**
+	 * Record why a job that holds the site changed is not run (it is not failed: Runner), as its progress message, when
+	 * that is not already what it says: one statement, on a row that holds the site, has not ended and no live run
+	 * holds. True when it was written, that is, when the reason changed: the caller then writes it to the job's log
+	 * once, not on every tick. The progress time and the update time are left as they are (the stall and retention
+	 * rules read them).
+	 *
+	 * @param Job    $job     Job, as read.
+	 * @param string $message Why (redacted).
+	 * @return bool
+	 */
+	public function note_held_back( Job $job, string $message ): bool {
+		global $wpdb;
+		$text  = self::fit_message( $message );
+		$table = self::table();
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin table; the WHERE is the compare-and-set.
+		$affected = $wpdb->query(
+			$wpdb->prepare(
+				"UPDATE {$table} SET progress_message = %s WHERE id = %d AND status IN (%s, %s, %s) AND site_state <> 0 AND progress_message <> %s AND (lock_token = '' OR locked_until < %d)", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- table name from the prefix.
+				$text,
+				$job->id,
+				Job::QUEUED,
+				Job::RUNNING,
+				Job::PAUSED,
+				$text,
+				$this->now()
+			)
+		);
+		return 1 === $affected;
+	}
+
+	/**
 	 * Outcomes of fail_for_missing_columns().
 	 */
 	const FAIL_DONE  = 'failed';
