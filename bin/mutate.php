@@ -23,6 +23,10 @@
  * from git, which would throw away whatever the file held that was not committed. A mutation whose text is not found
  * exactly once, or whose file does not pass php -l, is not run. The tree must be clean again at the end.
  *
+ * The command's standard output and standard error are kept apart in build/mutate-<name>.stdout.txt and
+ * build/mutate-<name>.stderr.txt; for every result but caught (no log, survived) its exit status and both outputs,
+ * whole, are printed right after it ran, so that no result is left without its cause.
+ *
  * Exit status: 0 when every mutation was caught (a failure or error in the log); 1 when one survived, was not run, or
  * left no log; 2 when it refused to start; 3 when a file could not be restored (the run stops there).
  *
@@ -64,6 +68,49 @@ function wcpm_run( string $command ): array {
 	$status = 0;
 	exec( $command . ' 2>&1', $output, $status );
 	return array( implode( "\n", $output ), $status );
+}
+
+/**
+ * Run a command with its standard output and standard error written to two files, apart; its exit status, or null
+ * when it could not be started.
+ *
+ * @param string $command Command (run by the shell: every part of it writes to the files).
+ * @param string $out     File for standard output.
+ * @param string $err     File for standard error.
+ * @return int|null
+ */
+function wcpm_run_apart( string $command, string $out, string $err ) {
+	$pipes   = array();
+	$process = proc_open(
+		$command,
+		array(
+			1 => array( 'file', $out, 'w' ),
+			2 => array( 'file', $err, 'w' ),
+		),
+		$pipes
+	);
+	return is_resource( $process ) ? proc_close( $process ) : null;
+}
+
+/**
+ * Print a command's exit status and its two outputs, whole, under its mutation's name.
+ *
+ * @param string   $name   Mutation.
+ * @param int|null $status Exit status (null: not started).
+ * @param string   $out    Standard output file, relative to the repository.
+ * @param string   $err    Standard error file, relative to the repository.
+ * @return void
+ */
+function wcpm_show( string $name, $status, string $out, string $err ): void {
+	wcpm_say( '-- ' . $name . ': exit status ' . ( null === $status ? 'none (the command could not be started)' : (string) $status ) );
+	foreach ( array(
+		'standard output' => $out,
+		'standard error'  => $err,
+	) as $label => $path ) {
+		$text = is_file( $path ) ? (string) file_get_contents( $path ) : '(no file)';
+		fwrite( STDOUT, '-- ' . $name . ': ' . $label . ' (' . $path . "):\n" . $text . ( '' === $text || "\n" === substr( $text, -1 ) ? '' : "\n" ) );
+	}
+	wcpm_say( '-- ' . $name . ': end of the output' );
 }
 
 /**
@@ -203,16 +250,23 @@ foreach ( $spec['mutations'] as $mutation ) {
 			file_put_contents( $top . '/' . $junit, '' ); // An earlier run's log is not this one's result.
 		}
 		wcpm_say( '== ' . $name . ' (' . (string) $mutation['file'] . ')' );
-		list( , $run_status ) = wcpm_run( 'MUTATION=' . escapeshellarg( $name ) . ' ' . str_replace( '{junit}', $junit, $command ) );
-		$failures = wcpm_failures( $top . '/' . $junit );
-		if ( null === $failures ) {
-			$results[ $name ] = 'no result: the command left no JUnit log (exit ' . $run_status . ')';
-			$worst            = max( $worst, 1 );
+		$out        = 'build/mutate-' . $name . '.stdout.txt';
+		$err        = 'build/mutate-' . $name . '.stderr.txt';
+		$run_status = wcpm_run_apart( 'MUTATION=' . escapeshellarg( $name ) . ' ' . str_replace( '{junit}', $junit, $command ), $top . '/' . $out, $top . '/' . $err );
+		$failures   = null === $run_status ? null : wcpm_failures( $top . '/' . $junit );
+		$kept       = '; its output is printed above and kept in ' . $out . ' and ' . $err;
+		if ( null === $run_status ) {
+			$results[ $name ] = 'no result: the command could not be started' . $kept;
+		} elseif ( null === $failures ) {
+			$results[ $name ] = 'no result: the command left no JUnit log (exit ' . $run_status . ')' . $kept;
 		} elseif ( array() === $failures ) {
-			$results[ $name ] = 'SURVIVED: no test failed';
-			$worst            = max( $worst, 1 );
+			$results[ $name ] = 'SURVIVED: no test failed' . $kept;
 		} else {
 			$results[ $name ] = "caught:\n    " . implode( "\n    ", $failures );
+		}
+		if ( null === $failures || array() === $failures ) {
+			$worst = max( $worst, 1 );
+			wcpm_show( $name, $run_status, $out, $err );
 		}
 	} finally {
 		file_put_contents( $file, $before );
