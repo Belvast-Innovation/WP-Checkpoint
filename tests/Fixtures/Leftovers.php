@@ -376,14 +376,21 @@ final class Leftovers implements TestListener {
 	/**
 	 * A network's sites other than the main one ("site:{id}", from the sites table as this connection sees it) and every
 	 * table of a site's prefix ("site-table:{name}", site_tables()); on a single site, only such tables (an earlier
-	 * multisite run's).
+	 * multisite run's). Base tables only: a site a test creates through the core test case has temporary tables, gone
+	 * with the connection, and some servers list temporary tables in SHOW TABLES (MariaDB 12), others do not (MySQL).
 	 *
 	 * @param \wpdb $db Connection.
 	 * @return string[]
 	 */
 	public static function site_listing( \wpdb $db ): array {
-		$out = array();
-		foreach ( self::site_tables( array_map( 'strval', (array) $db->get_col( 'SHOW TABLES' ) ), (string) $db->base_prefix ) as $table ) {
+		$out  = array();
+		$base = array();
+		foreach ( (array) $db->get_results( 'SHOW FULL TABLES', ARRAY_N ) as $row ) {
+			if ( isset( $row[0], $row[1] ) && 'BASE TABLE' === $row[1] ) {
+				$base[] = (string) $row[0];
+			}
+		}
+		foreach ( self::site_tables( $base, (string) $db->base_prefix ) as $table ) {
 			$out[] = 'site-table:' . $table;
 		}
 		if ( is_multisite() ) {

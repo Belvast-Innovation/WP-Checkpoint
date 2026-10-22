@@ -43,26 +43,34 @@ final class LeftoversCheckTest extends WP_UnitTestCase {
 
 	public function test_it_sees_and_removes_a_real_sites_tables_and_on_a_network_its_row(): void {
 		global $wpdb;
-		$id    = 987654;
-		$table = $wpdb->base_prefix . $id . '_leftover_check';
 		// On the connection itself: through wpdb a test's CREATE TABLE becomes a temporary table, and its rows are rolled
-		// back. Committed, as a site created with real tables is.
-		$this->assertTrue( mysqli_query( $wpdb->dbh, "CREATE TABLE `{$table}` ( id int )" ), $table );
+		// back. Committed, as a site created with real tables is. Its id from the sites table's own counter (an id set
+		// by hand would move the counter, and every later site's id, with it).
+		$id = 424242;
 		if ( is_multisite() ) {
-			$this->assertTrue( mysqli_query( $wpdb->dbh, "INSERT INTO `{$wpdb->blogs}` ( blog_id, site_id, domain, path ) VALUES ( {$id}, 1, 'leftover.check', '/' )" ) );
+			$this->assertTrue( mysqli_query( $wpdb->dbh, "INSERT INTO `{$wpdb->blogs}` ( site_id, domain, path ) VALUES ( 1, 'leftover.check', '/' )" ) );
+			$id = (int) mysqli_insert_id( $wpdb->dbh );
 			mysqli_query( $wpdb->dbh, 'COMMIT' );
 		}
+		$table = $wpdb->base_prefix . $id . '_leftover_check';
+		$temp  = $wpdb->base_prefix . ( $id + 1 ) . '_leftover_check';
+		$this->assertTrue( mysqli_query( $wpdb->dbh, "CREATE TABLE `{$table}` ( id int )" ), $table );
+		// A site's temporary table (as the core test case makes them) is gone with the connection: not one left.
+		$this->assertTrue( mysqli_query( $wpdb->dbh, "CREATE TEMPORARY TABLE `{$temp}` ( id int )" ), $temp );
 		$items = Leftovers::listing();
-		$this->assertContains( 'site-table:' . $table, $items );
+		mysqli_query( $wpdb->dbh, "DROP TEMPORARY TABLE IF EXISTS `{$temp}`" );
+		$this->assertNotContains( 'site-table:' . $temp, $items, 'a temporary table is not listed' );
+		$this->assertContains( 'site-table:' . $table, $items, 'the control: a base table of the same form is' );
 		$this->assertNotContains( 'site-table:' . $wpdb->posts, $items, 'the main site\'s tables are not a site\'s' );
 		if ( is_multisite() ) {
 			$this->assertContains( 'site:' . $id, $items );
 			$this->assertNotContains( 'site:' . get_main_site_id(), $items, 'nor is the main site' );
 		}
 
-		Leftovers::removal( array_values( preg_grep( '/' . $id . '/', $items ) ) );
+		$own = is_multisite() ? array( 'site-table:' . $table, 'site:' . $id ) : array( 'site-table:' . $table );
+		Leftovers::removal( $own );
 		$items = Leftovers::listing();
-		$this->assertSame( array(), array_values( preg_grep( '/' . $id . '/', $items ) ) );
+		$this->assertSame( array(), array_values( array_intersect( $own, $items ) ) );
 		$this->assertSame( '0', (string) $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = %s', $table ) ), 'dropped' );
 		if ( is_multisite() ) {
 			$this->assertSame( '0', (string) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM {$wpdb->blogs} WHERE blog_id = %d", $id ) ), 'its row deleted' ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the sites table.
