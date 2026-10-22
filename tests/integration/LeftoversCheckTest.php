@@ -133,6 +133,36 @@ final class LeftoversCheckTest extends WP_UnitTestCase {
 		}
 	}
 
+	public function test_on_another_database_a_sites_tables_are_not_removed(): void {
+		global $wpdb;
+		$name  = 'wpc_leftovers_sites_not_tests';
+		$table = $wpdb->base_prefix . '5_leftover_other';
+		$tests = $wpdb;
+		$this->assertTrue( mysqli_query( $wpdb->dbh, "CREATE DATABASE `{$name}`" ), 'a database of this test' );
+		try {
+			$other = new \wpdb( DB_USER, DB_PASSWORD, $name, DB_HOST );
+			$other->set_prefix( $wpdb->base_prefix );
+			$this->assertTrue( (bool) $other->query( "CREATE TABLE `{$table}` ( id int )" ), 'a site\'s table there' );
+			$GLOBALS['wpdb'] = $other; // phpcs:ignore WordPress.WP.GlobalVariablesOverride.Prohibited -- removal() works on the global connection; put back below.
+			try {
+				Leftovers::removal( array( 'site-table:' . $table ) );
+			} finally {
+				$GLOBALS['wpdb'] = $tests; // phpcs:ignore WordPress.WP.GlobalVariablesOverride.Prohibited -- put back.
+			}
+			$this->assertContains( $table, (array) $other->get_col( 'SHOW TABLES' ), 'still there' );
+			$other->close();
+			// The control: the same removal on the tests database drops a table of that name.
+			$this->assertTrue( mysqli_query( $wpdb->dbh, "CREATE TABLE `{$table}` ( id int )" ), $table );
+			$this->assertContains( $table, (array) $wpdb->get_col( 'SHOW TABLES' ) );
+			Leftovers::removal( array( 'site-table:' . $table ) );
+			$this->assertNotContains( $table, (array) $wpdb->get_col( 'SHOW TABLES' ), 'the control: dropped on the tests database' );
+		} finally {
+			$GLOBALS['wpdb'] = $tests; // phpcs:ignore WordPress.WP.GlobalVariablesOverride.Prohibited -- put back.
+			mysqli_query( $wpdb->dbh, "DROP TABLE IF EXISTS `{$table}`" );
+			mysqli_query( $wpdb->dbh, "DROP DATABASE IF EXISTS `{$name}`" );
+		}
+	}
+
 	public function test_it_sees_and_removes_a_storage_directory_in_wp_content_other_than_the_stored_one(): void {
 		$prefix = WP_CONTENT_DIR . '/' . \WPCheckpoint\Support\Directories::DIR_PREFIX;
 		$dir    = $prefix . 'leftovercheck';
