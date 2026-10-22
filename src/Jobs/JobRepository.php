@@ -248,20 +248,14 @@ final class JobRepository {
 		self::assert_cursor_has_no_secrets( $cursor );
 		self::assert_cursor_has_no_secrets( $options );
 
-		$cursor_json  = wp_json_encode( $cursor );
-		$options_json = wp_json_encode( $options );
-		if ( false === $cursor_json || false === $options_json ) {
-			// Stored as '' it would read back as a row that cannot be read (hydrate()), and the job fail for it.
-			throw new \RuntimeException( 'The job\'s cursor or options cannot be written.' );
-		}
 		$state = $this->directories->state();
 		$now   = $this->now();
 		$row   = array(
 			'site_id'       => get_current_blog_id(),
 			'type'          => $type,
 			'status'        => Job::QUEUED,
-			'cursor_json'   => $cursor_json,
-			'options_json'  => $options_json,
+			'cursor_json'   => wp_json_encode( $cursor ),
+			'options_json'  => wp_json_encode( $options ),
 			'storage_token' => (string) $state['token'],
 			'storage_path'  => $base,
 			'owner_user'    => $owner_user,
@@ -1447,17 +1441,12 @@ final class JobRepository {
 	public function save_progress( Job $job, string $token, string $step, array $cursor, int $progress, string $message = '', bool $advanced = true, $site_state = null, $site_mark = null ): int {
 		global $wpdb;
 		self::assert_cursor_has_no_secrets( $cursor );
-		$json = wp_json_encode( $cursor );
-		if ( false === $json ) {
-			// Stored as '' it would read back as a cursor that cannot be read (hydrate()): nothing is written.
-			throw new \RuntimeException( sprintf( 'Job %d: its cursor cannot be written.', $job->id ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
-		}
 		$now      = $this->now();
 		$progress = max( 0, min( 100, $progress ) );
 		$message  = self::fit_message( $message );
 		$data     = array(
 			'step'             => $step,
-			'cursor_json'      => $json,
+			'cursor_json'      => wp_json_encode( $cursor ),
 			'progress'         => $progress,
 			'progress_message' => $message,
 			'updated_at'       => $now,

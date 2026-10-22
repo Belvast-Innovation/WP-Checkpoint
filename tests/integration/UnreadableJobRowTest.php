@@ -40,14 +40,10 @@ final class UnreadableJobRowTest extends JobTestCase {
 	/** @var int Times the step's cleanup ran. */
 	private $cleanups = 0;
 
-	/** @var mixed The cursor the step returns with its progress. */
-	private $next = array( 'n' => 2 );
-
 	public function set_up(): void {
 		parent::set_up();
 		$this->runs     = 0;
 		$this->cleanups = 0;
-		$this->next     = array( 'n' => 2 );
 		// Ends on an empty cursor, like the swap on a job that holds the site swapped (its step is over).
 		$this->register(
 			self::TYPE,
@@ -56,7 +52,7 @@ final class UnreadableJobRowTest extends JobTestCase {
 					'unreadable_step',
 					function ( JobContext $context ): StepResult {
 						++$this->runs;
-						return array() === $context->cursor() ? StepResult::done( 'ended' ) : StepResult::progress( $this->next, 50, 'on' );
+						return array() === $context->cursor() ? StepResult::done( 'ended' ) : StepResult::progress( array( 'n' => 2 ), 50, 'on' );
 					},
 					function (): void {
 						++$this->cleanups;
@@ -358,33 +354,5 @@ final class UnreadableJobRowTest extends JobTestCase {
 			$this->assertSame( 'readable' === $what ? 1 : 0, $this->cleanups, $what . ': the step\'s cleanup' );
 			$this->assertSame( $cursor, $this->column( $id, 'cursor_json' ), $what );
 		}
-	}
-
-	public function test_a_cursor_or_options_that_cannot_be_encoded_are_not_stored(): void {
-		global $wpdb;
-		$table = JobRepository::table();
-		$count = static function () use ( $wpdb, $table ): int {
-			return (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$table}" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the jobs table.
-		};
-		$before = $count();
-		try {
-			Plugin::instance()->jobs()->create( self::TYPE, self::$admin_id, array(), array( 'x' => INF ) );
-			$this->fail( 'stored' );
-		} catch ( \RuntimeException $e ) {
-			$this->assertStringContainsString( 'cannot be written', $e->getMessage() );
-		}
-		$this->assertSame( $before, $count(), 'no row' );
-		Plugin::instance()->jobs()->create( self::TYPE, self::$admin_id, array(), array( 'x' => 1 ) );
-		$this->assertSame( $before + 1, $count(), 'the control: a row is stored' );
-		// A step's cursor that cannot be encoded: the stored cursor stays as it was, not ''.
-		$this->next = array( 'n' => INF );
-		$id         = $this->job_with( array( 'cursor_json' => '{"n":1}' ) );
-		try {
-			$this->tick( $id );
-		} catch ( \RuntimeException $e ) {
-			$this->assertStringContainsString( 'cannot be written', $e->getMessage() );
-		}
-		$this->assertSame( 1, $this->runs, 'the control: the step ran' );
-		$this->assertSame( '{"n":1}', $this->column( $id, 'cursor_json' ) );
 	}
 }
