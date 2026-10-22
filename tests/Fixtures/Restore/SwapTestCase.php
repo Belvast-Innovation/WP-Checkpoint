@@ -69,6 +69,15 @@ abstract class SwapTestCase extends RestoreTestCase {
 	/** @var Job|null The job of the test (for tear_down). */
 	protected $swap_job = null;
 
+	/**
+	 * Whether the swap checks the restored site for real (SwapStep's checks through the web server, or its "http" and
+	 * "urls" parts): otherwise, without a "verify" part, the checks are stood in for by one that passes, here and in
+	 * the killed child.
+	 *
+	 * @var bool
+	 */
+	protected $real_checks = false;
+
 	/** @var int Seconds the swap's clock is set off from the real one (here and in the killed child). */
 	protected $clock_offset = 0;
 
@@ -270,12 +279,23 @@ abstract class SwapTestCase extends RestoreTestCase {
 				case SwapCheckStep::ID:
 					$steps[] = new SwapCheckStep( null, $this->check_parts( array( 'site_dirs' => $dirs, 'abspath' => $this->abspath ) ) );
 					break;
+				case SwapStep::ID:
+					// The test's own swap step comes after the loop: the type's would be the one a cleanup reaches
+					// first (Runner::cleanup() walks the steps in order and stops at the job's), with ABSPATH for its
+					// maintenance file instead of the sandbox's.
+					break;
 				default:
 					$steps[] = $step;
 			}
 		}
 		// The test case's restore type ends at the final check (RestoreTestCase); the swap comes after it.
-		$steps[] = new SwapStep( $connect, $more + $this->swap_parts );
+		$parts = $more + $this->swap_parts;
+		if ( ! $this->real_checks && ! isset( $parts['verify'] ) && ! isset( $parts['http'] ) ) {
+			$parts['verify'] = static function (): bool {
+				return true; // The restored site's checks stood in for: passed.
+			};
+		}
+		$steps[] = new SwapStep( $connect, $parts );
 		$this->type = 'restore_swap_' . bin2hex( random_bytes( 3 ) );
 		$this->register( $this->type, $steps );
 	}
@@ -448,7 +468,8 @@ abstract class SwapTestCase extends RestoreTestCase {
 				'fence row'   => $fence,
 				'maintenance' => is_file( $file ) ? array(
 					'mtime'   => filemtime( $file ),
-					'content' => substr( (string) file_get_contents( $file ), 0, 600 ),
+					'content' => substr( (string) file_get_contents( $file ), 0, 1600 ),
+					'data'    => is_file( ABSPATH . \WPCheckpoint\Restore\Maintenance::DATA ) ? (string) file_get_contents( ABSPATH . \WPCheckpoint\Restore\Maintenance::DATA ) : 'none',
 				) : 'none',
 				'lock files'  => $locks,
 				'schema'      => \WPCheckpoint\Support\Options::get( \WPCheckpoint\Support\Schema::OPTION, null ),
@@ -513,6 +534,7 @@ abstract class SwapTestCase extends RestoreTestCase {
 					'packet'  => (int) ( $this->swap_parts['packet'] ?? 0 ),
 					'batch'   => (int) ( $this->swap_parts['batch'] ?? 0 ),
 					'verify'  => isset( $this->swap_parts['verify'] ) ? $this->peek_verdict() : '',
+					'real'    => $this->real_checks,
 					'offset'  => $this->clock_offset,
 					'trace'   => $this->trace,
 					'sql_at'  => $this->child_sql,
@@ -640,6 +662,71 @@ abstract class SwapTestCase extends RestoreTestCase {
 	}
 
 	/**
+	 * Write a restore's maintenance file into the stand-in ABSPATH: as the swap writes it ("two": the code and the data
+	 * file), or as #82 wrote it ("single").
+	 *
+	 * @param string $mark The restore's mark.
+	 * @param int    $time Its time.
+	 * @param string $form "two" or "single".
+	 * @return array<string, string> What maintenance_files() reads now.
+	 */
+	protected function put_maintenance( string $mark, int $time, string $form = 'two' ): array {
+		$file = new \WPCheckpoint\Restore\Maintenance( $this->abspath, $mark );
+		if ( 'single' === $form ) {
+			file_put_contents( $file->path(), $file->legacy( $time ) );
+		} else {
+			file_put_contents( $file->data_path(), $file->data( $time ) );
+			file_put_contents( $file->path(), \WPCheckpoint\Restore\Maintenance::CODE );
+		}
+		return $this->maintenance_files();
+	}
+
+	/**
+	 * The maintenance file and its data file in the stand-in ABSPATH: name => contents, for those that are there.
+	 *
+	 * @return array<string, string>
+	 */
+	protected function maintenance_files(): array {
+		$out = array();
+		foreach ( array( '.maintenance', \WPCheckpoint\Restore\Maintenance::DATA ) as $name ) {
+			clearstatcache( true, $this->abspath . '/' . $name );
+			if ( file_exists( $this->abspath . '/' . $name ) ) {
+				$out[ $name ] = (string) file_get_contents( $this->abspath . '/' . $name );
+			}
+		}
+		return $out;
+	}
+
+	/**
+	 * Copy the maintenance file and its data file (those that are there) from one directory to another: a copy of the
+	 * site's files.
+	 *
+	 * @param string $from Directory.
+	 * @param string $to   Directory.
+	 * @return void
+	 */
+	protected function copy_maintenance( string $from, string $to ): void {
+		foreach ( array( '.maintenance', \WPCheckpoint\Restore\Maintenance::DATA ) as $name ) {
+			if ( file_exists( $from . '/' . $name ) ) {
+				copy( $from . '/' . $name, $to . '/' . $name );
+			}
+		}
+	}
+
+	/**
+	 * Remove the maintenance file and its data file from the stand-in ABSPATH (a sandbox).
+	 *
+	 * @return void
+	 */
+	protected function remove_maintenance(): void {
+		foreach ( array( '.maintenance', \WPCheckpoint\Restore\Maintenance::DATA ) as $name ) {
+			if ( file_exists( $this->abspath . '/' . $name ) ) {
+				\WPCheckpoint\Tests\Fixtures\Sandbox::remove( $this->abspath . '/' . $name );
+			}
+		}
+	}
+
+	/**
 	 * The site as the swap could change it: the sandbox's directories (without the staging roots) and the test's
 	 * tables (rows), and whether a maintenance file is up.
 	 *
@@ -663,7 +750,7 @@ abstract class SwapTestCase extends RestoreTestCase {
 		return array(
 			'files'       => $files,
 			'tables'      => $tables,
-			'maintenance' => file_exists( $this->abspath . '/.maintenance' ),
+			'maintenance' => file_exists( $this->abspath . '/.maintenance' ) || file_exists( $this->abspath . '/' . \WPCheckpoint\Restore\Maintenance::DATA ),
 		);
 	}
 

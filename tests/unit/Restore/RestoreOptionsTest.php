@@ -20,17 +20,19 @@ final class RestoreOptionsTest extends TestCase {
 				'uncertain_tables' => 'ask',
 				'shared_tables'    => 'ask',
 				'linked_targets'   => 'ask',
+				'unverified'       => 'ask',
 			),
 			$options['policy']
 		);
 		$this->assertFalse( $options['unattended'] );
 	}
 
-	public function test_an_unattended_restore_must_say_all_three_and_is_told_which_is_missing(): void {
+	public function test_an_unattended_restore_must_say_all_four_and_is_told_which_is_missing(): void {
 		$all = array(
 			'uncertain_tables' => 'exclude',
 			'shared_tables'    => 'restore',
 			'linked_targets'   => 'swap',
+			'unverified'       => 'keep',
 		);
 		$said = RestoreJob::options(
 			array(
@@ -43,7 +45,7 @@ final class RestoreOptionsTest extends TestCase {
 		foreach ( array_keys( $all ) as $missing ) {
 			$policy = $all;
 			unset( $policy[ $missing ] );
-			$asked = 'linked_targets' === $missing ? array() : array( array_merge( $policy, array( $missing => 'ask' ) ) ); // "ask" is no choice for links.
+			$asked = in_array( $missing, array( 'linked_targets', 'unverified' ), true ) ? array() : array( array_merge( $policy, array( $missing => 'ask' ) ) ); // "ask" is no choice for these.
 			foreach ( array_merge( array( $policy ), $asked ) as $given ) {
 				try {
 					RestoreJob::options(
@@ -59,7 +61,11 @@ final class RestoreOptionsTest extends TestCase {
 					foreach ( array_keys( $policy ) as $given_key ) {
 						$this->assertStringNotContainsString( '"' . $given_key . '"', $e->getMessage(), 'it names the one missing, not one given' );
 					}
-					$this->assertStringContainsString( 'linked_targets' === $missing ? '"swap" or "exclude"' : '"restore" or "exclude"', $e->getMessage(), 'and its own choices' );
+					$choices = array(
+						'linked_targets' => '"swap" or "exclude"',
+						'unverified'     => '"keep" or "undo"',
+					);
+					$this->assertStringContainsString( $choices[ $missing ] ?? '"restore" or "exclude"', $e->getMessage(), 'and its own choices' );
 				}
 			}
 		}
@@ -87,6 +93,8 @@ final class RestoreOptionsTest extends TestCase {
 			'unattended not a switch' => array( array( 'unattended' => 'yes' ), '"unattended" must be true or false' ),
 			'ask said for links'      => array( array( 'policy' => array( 'linked_targets' => 'ask' ) ), '"linked_targets" must be one of: swap, exclude' ),
 			'a table choice for links' => array( array( 'policy' => array( 'linked_targets' => 'restore' ) ), '"linked_targets" must be one of: swap, exclude' ),
+			'ask said for the unchecked' => array( array( 'policy' => array( 'unverified' => 'ask' ) ), '"unverified" must be one of: keep, undo' ),
+			'another choice for the unchecked' => array( array( 'policy' => array( 'unverified' => 'restore' ) ), '"unverified" must be one of: keep, undo' ),
 		);
 	}
 

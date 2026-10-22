@@ -54,9 +54,17 @@ use WPCheckpoint\Support\Paths;
  *   someone else put where the site's own directory had to go back, and
  *   that is never the plugin's to delete.
  * - maintenance_tmp: a temporary file of the maintenance file the swap
- *   writes in ABSPATH (".maintenance.{16 hex}.tmp", AtomicFile), left only
+ *   writes in ABSPATH, or of its data file (".maintenance.{16 hex}.tmp",
+ *   ".wpcheckpoint-maintenance.php.{16 hex}.tmp", AtomicFile), left only
  *   by a process that died before its rename. No owner in the name; an
  *   orphan after VERIFY_TTL (scan_maintenance()).
+ * - maintenance_data: the data file of the maintenance file
+ *   (Restore\Maintenance::DATA), which the swap writes before
+ *   .maintenance and removes after it. Left alone (a run died between the
+ *   two, or another restore's file stands in .maintenance), it is an
+ *   orphan after VERIFY_TTL when .maintenance is positively not the
+ *   maintenance code (which would read it) and no job that holds the site
+ *   has its mark (JobRepository and the uninstall decide that).
  * - stray_table: a table the swap's rollback renamed out of the way
  *   (TempTables::stray()): someone else's, created under a name the old
  *   site's table had to go back to. Never an orphan: it is reported, and
@@ -80,10 +88,11 @@ final class Residue {
 	const STAGE_DIR  = 'stage_dir';
 	const PROBE      = 'probe';
 
-	const MAINTENANCE_TMP = 'maintenance_tmp';
-	const STRAY_TABLE     = 'stray_table';
+	const MAINTENANCE_TMP  = 'maintenance_tmp';
+	const MAINTENANCE_DATA = 'maintenance_data';
+	const STRAY_TABLE      = 'stray_table';
 
-	const KINDS = array( self::WORK_DIR, self::TEMP_TABLE, self::VERIFY_DIR, self::STRAY, self::STAGE_DIR, self::PROBE, self::MAINTENANCE_TMP, self::STRAY_TABLE );
+	const KINDS = array( self::WORK_DIR, self::TEMP_TABLE, self::VERIFY_DIR, self::STRAY, self::STAGE_DIR, self::PROBE, self::MAINTENANCE_TMP, self::MAINTENANCE_DATA, self::STRAY_TABLE );
 
 	/**
 	 * The directory in a staging root where the swap's rollback moves what is in its way.
@@ -91,9 +100,15 @@ final class Residue {
 	const STRAY_DIR = 'stray';
 
 	/**
-	 * The temporary names of the maintenance file (AtomicFile: the name, a dot, 16 hex characters, ".tmp").
+	 * The temporary names of the maintenance file and its data file (AtomicFile: the name, a dot, 16 hex characters,
+	 * ".tmp").
 	 */
-	const MAINTENANCE_TMP_NAME = '/\A\.maintenance\.[0-9a-f]{16}\.tmp\z/';
+	const MAINTENANCE_TMP_NAME = '/\A(?:\.maintenance|\.wpcheckpoint-maintenance\.php)\.[0-9a-f]{16}\.tmp\z/';
+
+	/**
+	 * The data file of the maintenance file (Restore\Maintenance::DATA).
+	 */
+	const MAINTENANCE_DATA_NAME = '.wpcheckpoint-maintenance.php';
 
 	const TMP            = 'tmp';
 	const WORK_PREFIX    = 'job-';
@@ -318,7 +333,8 @@ final class Residue {
 	}
 
 	/**
-	 * The maintenance file's temporary files left in a directory (maintenance_dir()).
+	 * The maintenance file's temporary files left in a directory (maintenance_dir()), and its data file
+	 * (maintenance_data: whether it is an orphan is the caller's to decide).
 	 *
 	 * @param string $dir Directory.
 	 * @return array<int, array{kind: string, path: string, id: int, mtime: int}>
@@ -327,7 +343,8 @@ final class Residue {
 		$out     = array();
 		$entries = '' === $dir ? false : @scandir( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- an unreadable directory is simply nothing to reap.
 		foreach ( is_array( $entries ) ? $entries : array() as $name ) {
-			if ( 1 !== preg_match( self::MAINTENANCE_TMP_NAME, (string) $name ) ) {
+			$data = self::MAINTENANCE_DATA_NAME === $name;
+			if ( ! $data && 1 !== preg_match( self::MAINTENANCE_TMP_NAME, (string) $name ) ) {
 				continue;
 			}
 			$path = rtrim( $dir, '/\\' ) . DIRECTORY_SEPARATOR . $name;
@@ -335,13 +352,13 @@ final class Residue {
 			if ( false === $stat || 0100000 !== ( $stat['mode'] & 0170000 ) ) {
 				continue; // Only a regular file: AtomicFile never makes anything else.
 			}
-			$out[] = self::entry( self::MAINTENANCE_TMP, $path, 0, (int) $stat['mtime'] );
+			$out[] = self::entry( $data ? self::MAINTENANCE_DATA : self::MAINTENANCE_TMP, $path, 0, (int) $stat['mtime'] );
 		}
 		return $out;
 	}
 
 	/**
-	 * Whether an unowned entry (verify_dir, stray, maintenance_tmp) is old enough to remove.
+	 * Whether an unowned entry (verify_dir, stray, maintenance_tmp, maintenance_data) is old enough to remove.
 	 *
 	 * @param array{kind: string, path: string, id: int, mtime: int} $entry Entry from scan().
 	 * @param int                                                    $now   Current time.
@@ -354,6 +371,7 @@ final class Residue {
 			case self::STRAY:
 				return $entry['mtime'] + self::STRAY_TTL <= $now;
 			case self::MAINTENANCE_TMP:
+			case self::MAINTENANCE_DATA:
 				return $entry['mtime'] + self::VERIFY_TTL <= $now;
 			default:
 				return false;

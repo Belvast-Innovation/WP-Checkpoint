@@ -120,6 +120,11 @@ final class FencedWritesTest extends TestCase {
 			array( '(job_id, attempt, seq, kind, live, stage, old, had_live) VALUES', self::LOCKED ),
 			array( '$this->write(', self::EXCEPTION, 'Not a statement: complete() calls write(), whose statements are in the fenced transaction (registered above).' ),
 		),
+		'src/Restore/SelfCheck.php'   => array(
+			array( "'INSERT INTO ' . SqlWriter::identifier( \$table ) . ' (option_name, option_value, autoload)", self::LOCKED ),
+			array( "'DELETE FROM ' . SqlWriter::identifier( \$table ) . ' WHERE option_name = ?'", self::LOCKED ),
+			array( "'DELETE FROM ' . SqlWriter::identifier( \$table ) . ' WHERE option_name IN (?)'", self::LOCKED ),
+		),
 		'src/Jobs/TempTableCount.php' => array(),
 		'src/Restore/JobFence.php'    => array(),
 	);

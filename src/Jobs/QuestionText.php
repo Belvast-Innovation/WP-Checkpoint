@@ -85,7 +85,7 @@ final class QuestionText {
 				'id'      => $id,
 				'kind'    => (string) ( $question['kind'] ?? '' ),
 				'choices' => array_map( 'strval', (array) ( $question['choices'] ?? array() ) ),
-				'text'    => (string) call_user_func( $clean, self::describe( $id, $question, $findings, $shown ) ),
+				'text'    => (string) call_user_func( $clean, SwapStep::UNVERIFIED_KIND === $kind ? self::unverified( $job ) : self::describe( $id, $question, $findings, $shown ) ),
 				'listed'  => array_map(
 					static function ( string $p ) use ( $clean ): string {
 						return (string) call_user_func( $clean, $p );
@@ -95,6 +95,21 @@ final class QuestionText {
 			);
 		}
 		return $out;
+	}
+
+	/**
+	 * The question of a restore whose restored site could not be checked after the swap: what the checks found (the
+	 * swap's cursor keeps it), and what undoing costs.
+	 *
+	 * @param Job $job Job.
+	 * @return string
+	 */
+	private static function unverified( Job $job ): string {
+		return sprintf(
+			/* translators: %s: what the checks found */
+			__( 'The restored site could not be checked after the swap: %s. It is open to visitors now. Keep it, or undo the restore: undoing puts the site back as it was before the restore, and everything written on the site since the swap (orders, comments, edits, new users) is lost.', 'wp-checkpoint' ),
+			SwapStep::unchecked_text( isset( $job->cursor['unverified'] ) && is_array( $job->cursor['unverified'] ) ? $job->cursor['unverified'] : array() )
+		);
 	}
 
 	/**

@@ -39,6 +39,11 @@ spl_autoload_register(
 	}
 );
 
+// While a restore holds the site, other WP-CLI commands stop here, as this file loads: before init, wp_loaded and cron (Cli\HeldGuard).
+if ( defined( 'WP_CLI' ) && WP_CLI ) {
+	WPCheckpoint\Cli\HeldGuard::enforce();
+}
+
 register_activation_hook( __FILE__, array( 'WPCheckpoint\\Plugin', 'activate' ) );
 register_deactivation_hook( __FILE__, array( 'WPCheckpoint\\Plugin', 'deactivate' ) );
 

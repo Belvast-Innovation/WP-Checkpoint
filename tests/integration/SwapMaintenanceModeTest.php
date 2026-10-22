@@ -8,6 +8,7 @@ use WPCheckpoint\Jobs\SwapCheckStep;
 use WPCheckpoint\Plugin;
 use WPCheckpoint\Restore\Maintenance;
 use WPCheckpoint\Tests\Fixtures\Leftovers;
+use WPCheckpoint\Tests\Fixtures\RealAbspath;
 use WPCheckpoint\Tests\Fixtures\Restore\SwapTestCase;
 
 /**
@@ -16,11 +17,12 @@ use WPCheckpoint\Tests\Fixtures\Restore\SwapTestCase;
  * lapses, a run that dies there leaves visitors the maintenance page however long it takes to come back, and once the
  * site is recorded as swapped or put back the file comes down as the last step.
  *
- * wp_is_maintenance_mode() reads ABSPATH/.maintenance only: these tests, and only these, put the swap's maintenance
- * file in the test site's real ABSPATH (one file name, one directory). Guarded: ABSPATH must be the test site's
- * WordPress directory (not the repository, not the working directory), a maintenance file found there at the start
- * fails the test and is not written over, and the leftover check (Leftovers) fails a test that leaves one. Time is not
- * moved: the swap's clock (injected) is set back eleven minutes instead, which is the same to WordPress.
+ * wp_is_maintenance_mode() reads ABSPATH/.maintenance only, and the maintenance code the data file next to it: these
+ * tests put the swap's maintenance file and its data file in the test site's real ABSPATH (the registered exception),
+ * every write and deletion of their own through RealAbspath, which holds the safeguards: ABSPATH must be the test
+ * site's WordPress directory (not the repository, not the working directory), a maintenance file found there at the
+ * start fails the test and is not written over, and the leftover check (Leftovers) fails a test that leaves one. Time
+ * is not moved: the swap's clock (injected) is set back eleven minutes instead, which is the same to WordPress.
  */
 final class SwapMaintenanceModeTest extends SwapTestCase {
 
@@ -28,14 +30,7 @@ final class SwapMaintenanceModeTest extends SwapTestCase {
 
 	public function set_up(): void {
 		parent::set_up();
-		$abspath = realpath( ABSPATH );
-		$this->assertNotFalse( $abspath, 'ABSPATH resolves' );
-		$this->assertFileExists( $abspath . '/wp-settings.php', 'ABSPATH is a WordPress directory' );
-		$repository = (string) realpath( dirname( __DIR__, 2 ) );
-		$this->assertNotSame( $repository, $abspath, 'not the repository' );
-		$this->assertStringStartsNotWith( $repository . '/', $abspath . '/', 'not inside the repository' );
-		$this->assertNotSame( (string) realpath( (string) getcwd() ), $abspath, 'not the working directory' );
-		$this->assertFileDoesNotExist( $abspath . '/.maintenance', 'a maintenance file was already there: not written over' );
+		$abspath                      = RealAbspath::claim();
 		$this->abspath                = $abspath;
 		$this->swap_parts['abspath'] = $abspath;
 		$this->register_type();
@@ -70,7 +65,7 @@ final class SwapMaintenanceModeTest extends SwapTestCase {
 		$this->assertSame( Job::FAILED, $done->status, (string) $done->last_error );
 		$this->assertSame( SwapCheckStep::ID, $done->cursor[ JobRepository::RETRY_FROM_KEY ] ?? null );
 		$this->assertFalse( $this->maintenance_mode(), 'put back: no longer in maintenance' );
-		$this->assertFileDoesNotExist( ABSPATH . '.maintenance' );
+		$this->assertSame( array(), RealAbspath::contents(), 'neither file is left' );
 		$this->assertSame( $before, $this->site() );
 	}
 
@@ -82,7 +77,7 @@ final class SwapMaintenanceModeTest extends SwapTestCase {
 		$this->assertFalse( $this->maintenance_mode(), 'the control: nothing changed yet, the file lapses after ten minutes as it always did' );
 		$this->clock_offset = 0;
 		$this->assertSame( Job::FAILED, $this->cli_run( $job )->status );
-		$this->assertFileDoesNotExist( ABSPATH . '.maintenance' );
+		$this->assertSame( array(), RealAbspath::contents(), 'neither file is left' );
 	}
 
 	public function test_a_completed_swap_leaves_the_site_out_of_maintenance(): void {
@@ -91,7 +86,7 @@ final class SwapMaintenanceModeTest extends SwapTestCase {
 		$done = $this->cli_run( $job );
 		$this->assertSame( Job::COMPLETED, $done->status, (string) $done->last_error );
 		$this->assertFalse( $this->maintenance_mode() );
-		$this->assertFileDoesNotExist( ABSPATH . '.maintenance' );
+		$this->assertSame( array(), RealAbspath::contents(), 'neither file is left' );
 	}
 
 	public function test_killed_once_recorded_as_swapped_the_next_run_takes_the_file_down(): void {
@@ -104,7 +99,7 @@ final class SwapMaintenanceModeTest extends SwapTestCase {
 		$done = $this->cli_run( $job );
 		$this->assertSame( Job::COMPLETED, $done->status );
 		$this->assertFalse( $this->maintenance_mode() );
-		$this->assertFileDoesNotExist( ABSPATH . '.maintenance' );
+		$this->assertSame( array(), RealAbspath::contents(), 'neither file is left' );
 	}
 
 	public function test_killed_once_recorded_as_put_back_the_next_run_or_a_cancel_takes_the_file_down(): void {
@@ -129,11 +124,11 @@ final class SwapMaintenanceModeTest extends SwapTestCase {
 				$this->assertSame( Job::CANCELLED, Plugin::instance()->jobs()->find( $job->id )->status );
 			}
 			$this->assertFalse( $this->maintenance_mode(), 'down after the ' . $then );
-			$this->assertFileDoesNotExist( ABSPATH . '.maintenance' );
+			$this->assertSame( array(), RealAbspath::contents(), 'neither file is left' );
 			$this->assertSame( $before, $this->site() );
 			$this->tear_down_swap();
 			$this->set_up_swap();
-			$this->abspath                = (string) realpath( ABSPATH );
+			$this->abspath                = RealAbspath::claim();
 			$this->swap_parts['abspath'] = $this->abspath;
 			$this->register_type();
 		}
@@ -151,17 +146,17 @@ final class SwapMaintenanceModeTest extends SwapTestCase {
 		// Someone else's file in its place (an update started meanwhile). A time already past: WordPress ignores it,
 		// so a failure below cannot leave the test site in maintenance mode.
 		$someone = "<?php \$upgrading = " . ( time() - 3600 ) . "; // an update\n";
-		file_put_contents( ABSPATH . '.maintenance', $someone );
+		RealAbspath::write( Maintenance::FILE, $someone );
 		try {
 			Plugin::instance()->job_actions()->cancel( $job->id );
 			$this->assertSame( Job::CANCELLED, Plugin::instance()->jobs()->find( $job->id )->status );
-			$this->assertSame( $someone, file_get_contents( ABSPATH . '.maintenance' ), 'left as it was' );
+			$this->assertSame( array( '.maintenance' => $someone ), RealAbspath::contents(), 'left as it was; this job\'s data file, read by nothing, is gone' );
 			$this->assertContains( 'maintenance:' . rtrim( ABSPATH, '/' ) . '/.maintenance', Leftovers::listing(), 'the leftover check sees it' );
 			Leftovers::removal( array( 'maintenance:' . rtrim( ABSPATH, '/' ) . '/.maintenance' ) );
 			$this->assertSame( $someone, file_get_contents( ABSPATH . '.maintenance' ), 'and leaves what is not this plugin\'s' );
 		} finally {
-			// Not the plugin's to remove: the test removes the one it wrote itself, through the Deleter's one entry there.
-			\WPCheckpoint\Support\Deleter::delete_maintenance_file( ABSPATH, '.maintenance' );
+			// Not the plugin's to remove: the test removes the one it wrote itself.
+			RealAbspath::remove( Maintenance::FILE );
 		}
 	}
 
@@ -183,16 +178,134 @@ final class SwapMaintenanceModeTest extends SwapTestCase {
 	}
 
 	public function test_the_leftover_check_lists_the_file_and_removes_only_this_plugins(): void {
-		$ours = ( new Maintenance( $this->abspath, Maintenance::new_mark() ) );
+		$ours  = ( new Maintenance( $this->abspath, Maintenance::new_mark() ) );
+		$names = array( Maintenance::FILE, Maintenance::DATA, Maintenance::FILE . '.0123456789abcdef.tmp', Maintenance::DATA . '.0123456789abcdef.tmp' );
+		$items = array_map(
+			static function ( string $name ): string {
+				return 'maintenance:' . rtrim( ABSPATH, '/' ) . '/' . $name;
+			},
+			$names
+		);
 		$ours->put( time() );
 		try {
-			$this->assertContains( 'maintenance:' . rtrim( ABSPATH, '/' ) . '/.maintenance', Leftovers::listing() );
-			Leftovers::removal( array( 'maintenance:' . rtrim( ABSPATH, '/' ) . '/.maintenance' ) );
-			$this->assertFileDoesNotExist( ABSPATH . '.maintenance', 'this plugin\'s: removed' );
-			$this->assertNotContains( 'maintenance:' . rtrim( ABSPATH, '/' ) . '/.maintenance', Leftovers::listing(), 'the control: not listed once gone' );
+			// The two temporary names, as a run that died before its renames would leave them.
+			RealAbspath::write( $names[2], Maintenance::CODE );
+			RealAbspath::write( $names[3], $ours->data( time() ) );
+			foreach ( $items as $item ) {
+				$this->assertContains( $item, Leftovers::listing() );
+			}
+			Leftovers::removal( $items );
+			$this->assertSame( array(), RealAbspath::contents(), 'this plugin\'s: removed, the temporary names too' );
+			foreach ( $items as $item ) {
+				$this->assertNotContains( $item, Leftovers::listing(), 'the control: not listed once gone' );
+			}
+			RealAbspath::write( Maintenance::DATA, "someone else's\n" );
+			Leftovers::removal( array( $items[1] ) );
+			$this->assertSame( array( Maintenance::DATA => "someone else's\n" ), RealAbspath::contents(), 'a data file not of its form: left' );
 		} finally {
-			$ours->remove(); // Whatever failed above: the file this test wrote does not stay.
+			$ours->remove(); // Whatever failed above: the files this test wrote do not stay.
+			foreach ( RealAbspath::listing() as $left ) {
+				RealAbspath::remove( basename( $left ) );
+			}
 		}
+	}
+
+	/**
+	 * The status of a request for the test site's home page, through its web server: with the pass header, or none.
+	 *
+	 * @param string|null $key Pass key.
+	 * @return int 0 when no answer came.
+	 */
+	private function home( $key = null ): int {
+		$response = wp_remote_get(
+			rtrim( (string) getenv( 'WPCHECKPOINT_TEST_LOOPBACK_HOST' ), '/' ) . '/?wpcheckpoint_nocache=' . bin2hex( random_bytes( 4 ) ),
+			array(
+				'timeout'     => 20,
+				'redirection' => 0,
+				'headers'     => null === $key ? array() : array( Maintenance::PASS_HEADER => $key ),
+			)
+		);
+		return is_wp_error( $response ) ? 0 : (int) wp_remote_retrieve_response_code( $response );
+	}
+
+	public function test_the_file_lets_through_the_requests_of_the_run_that_checks_and_the_next_run_voids_the_last_ones_key(): void {
+		if ( '' === (string) getenv( 'WPCHECKPOINT_TEST_LOOPBACK_HOST' ) ) {
+			$this->markTestSkipped( 'Needs the web server of the test site (WPCHECKPOINT_TEST_LOOPBACK_HOST).' );
+		}
+		$this->assertNotSame( 503, $this->home(), 'the control: the site answers before the swap' );
+		$keys  = array();
+		$codes = array();
+		$this->swap_parts['verify'] = function ( $context, array $pass ) use ( &$keys, &$codes ) {
+			$keys[] = $pass['key'];
+			$run    = count( $keys );
+			$codes[ $run ] = array(
+				'none' => $this->home(),
+				'this' => $this->home( $pass['key'] ),
+				'last' => $run > 1 ? $this->home( $keys[ $run - 2 ] ) : null,
+				'hash' => $this->home( hash( 'sha256', $pass['key'] ) ),
+			);
+			if ( 1 === $run ) {
+				throw new \RuntimeException( 'Stopped before its verdict.' );
+			}
+			return true;
+		};
+		$this->register_type();
+		$job   = $this->at_swap();
+		$first = $this->cli_run( $job );
+		$this->assertSame( Job::FAILED, $first->status, 'the first run stopped in its check: ' . (string) $first->last_error );
+		$this->assertSame( Job::SITE_SWAPPED, $first->site_state );
+		$this->assertSame( 503, $this->home(), 'the site stays behind the file meanwhile' );
+		Plugin::instance()->job_actions()->retry( $job->id );
+		$done = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( Job::COMPLETED, $done->status, (string) $done->last_error );
+		$this->assertCount( 2, $keys, 'each run checked with a key of its own' );
+		$this->assertNotSame( $keys[0], $keys[1] );
+		$this->assertSame( 503, $codes[1]['none'], 'without the header: the maintenance page' );
+		$this->assertSame( 503, $codes[1]['hash'], 'the hash the file holds is not the key' );
+		$this->assertNotSame( 503, $codes[1]['this'], 'the run that checks: let through' );
+		$this->assertNotSame( 0, $codes[1]['this'], 'and answered' );
+		$this->assertSame( 503, $codes[2]['last'], 'the last run\'s key: void once the next run wrote its own' );
+		$this->assertNotSame( 503, $codes[2]['this'] );
+		$this->assertNotSame( 503, $this->home(), 'once it ended: no maintenance page' );
+		$this->assertSame( array(), RealAbspath::contents(), 'neither file is left' );
+	}
+
+	public function test_a_run_killed_in_its_check_leaves_its_key_in_the_file_and_the_next_run_writes_its_own(): void {
+		$job = $this->at_swap();
+		$this->killed_at( $job, 'self_check_written', 1 );
+		$this->assertTrue( $this->maintenance_mode(), 'held while it checks' );
+		$left = RealAbspath::contents()[ Maintenance::DATA ] ?? '';
+		$this->assertSame( 1, preg_match( Maintenance::DATA_FORM, $left, $found ), 'the killed run\'s data file: ' . $left );
+		$this->assertNotSame( Maintenance::NO_PASS, $found[3], 'the control: it holds the hash of that run\'s key' );
+		$seen = array();
+		$this->swap_parts['verify'] = function ( $context, array $pass ) use ( &$seen, $found ) {
+			$now    = RealAbspath::contents()[ Maintenance::DATA ] ?? '';
+			$seen[] = array(
+				'mark'   => 1 === preg_match( Maintenance::DATA_FORM, $now, $m ) ? $m[1] : '',
+				'hash'   => $m[3] ?? '',
+				'passes' => Maintenance::passes( $this->abspath, $pass['key'] ),
+			);
+			return true;
+		};
+		$this->retype( $job );
+		$done = $this->cli_run( $job );
+		$this->assertSame( Job::COMPLETED, $done->status, (string) $done->last_error );
+		$this->assertCount( 1, $seen );
+		$this->assertSame( $found[1], $seen[0]['mark'], 'the same restore\'s file' );
+		$this->assertSame( true, $seen[0]['passes'], 'the new run\'s key is let through' );
+		$this->assertNotSame( $found[3], $seen[0]['hash'], 'the killed run\'s hash is written over' );
+		$this->assertSame( array(), RealAbspath::contents(), 'neither file is left' );
+	}
+
+	public function test_once_the_verdict_is_recorded_the_file_lets_no_check_through_any_more(): void {
+		$job = $this->at_swap();
+		$this->killed_at( $job, 'self_check_removed', 1 );
+		$left = RealAbspath::contents()[ Maintenance::DATA ] ?? '';
+		$this->assertSame( 1, preg_match( Maintenance::DATA_FORM, $left, $found ), 'the data file: ' . $left );
+		$this->assertSame( Maintenance::NO_PASS, $found[3], 'no pass once the self-check row is gone' );
+		$this->assertSame( Maintenance::held(), (int) $found[2], 'still held' );
+		$this->assertSame( Job::COMPLETED, $this->cli_run( $job )->status );
+		$this->assertSame( array(), RealAbspath::contents() );
 	}
 
 	public function test_a_held_file_is_said_whatever_the_job_lines_say(): void {

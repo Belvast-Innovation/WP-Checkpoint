@@ -23,7 +23,7 @@ defined( 'ABSPATH' ) || exit;
  * cookie for itself): the token is issued by Loopback::fire(), bound to the
  * job id, stored hashed for 120 seconds and deleted on first use. Without a
  * valid token everyone gets 403, administrators included. This is the
- * second and last documented exception to permission_check().
+ * second documented exception to permission_check().
  */
 final class LoopbackController extends Controller {
 

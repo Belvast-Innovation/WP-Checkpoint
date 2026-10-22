@@ -69,6 +69,25 @@ namespace {
 		 * @return void
 		 */
 		public static function add_hook( $when, $callback ) {}
+
+		/**
+		 * @return \WP_CLI\Runner
+		 */
+		public static function get_runner() {
+			return new \WP_CLI\Runner();
+		}
+	}
+}
+
+namespace WP_CLI {
+	class Runner {
+
+		/**
+		 * The command's words (read through Runner::__get()).
+		 *
+		 * @var array<int, string>
+		 */
+		public $arguments = array();
 	}
 }
 

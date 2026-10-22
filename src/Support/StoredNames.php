@@ -52,6 +52,12 @@ final class StoredNames {
 	const AFTER_SWAP = 'wpcheckpoint_after_swap';
 
 	/**
+	 * Written (plain SQL) into the options table a restore swapped in, while it checks that site, and deleted when
+	 * the check ends: what the self-check route answers from (Restore\SelfCheck).
+	 */
+	const SELF_CHECK = 'wpcheckpoint_self_check';
+
+	/**
 	 * Every exact name, whatever it is stored as (option, site option, transient, site transient).
 	 */
 	const EXACT = array(
@@ -73,6 +79,7 @@ final class StoredNames {
 		self::LOCK_VERIFY,
 		self::AUTO_UPDATE_UNCHECKED,
 		self::AFTER_SWAP,
+		self::SELF_CHECK,
 	);
 
 	const LOOPBACK_TOKEN  = 'wpcheckpoint_loopback_';

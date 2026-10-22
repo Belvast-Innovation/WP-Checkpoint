@@ -12,6 +12,7 @@ use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Files\ScanRoots;
 use WPCheckpoint\Jobs\LockFile;
 use WPCheckpoint\Jobs\Residue;
+use WPCheckpoint\Restore\Maintenance;
 use WPCheckpoint\Jobs\UninstallFence;
 
 defined( 'ABSPATH' ) || exit;
@@ -329,8 +330,8 @@ final class Uninstaller {
 	 * Why the uninstall stopped (logged: uninstall has no screen), from holding(), and what it had done before it
 	 * found that (nothing, when it found it at the start): only what was left is said to be left.
 	 *
-	 * @param array{all: int, abandoned: int}|null $held    holding().
-	 * @param string[]                             $removed What it had done, in order (run()).
+	 * @param array{all: int, abandoned: int, kept?: int[]}|null $held    holding().
+	 * @param string[]                                           $removed What it had done, in order (run()).
 	 * @return string
 	 */
 	public static function held_back( $held, array $removed = array() ): string {
@@ -342,6 +343,9 @@ final class Uninstaller {
 			$then = 'They stay until the site the restore was started on takes it over; nothing cleans an abandoned restore up yet.';
 		} else {
 			$why = 'a restore holds the site changed';
+			if ( array() !== ( $held['kept'] ?? array() ) ) {
+				$then = sprintf( 'Reinstall WP Checkpoint, then finish the restore with: wp wpcheckpoint job run %s (its restored site was kept; only its last steps are left).', implode( ', then wp wpcheckpoint job run ', array_map( 'intval', $held['kept'] ) ) );
+			}
 		}
 		if ( array() === $removed ) {
 			return sprintf( 'WP Checkpoint was uninstalled while %1$s; its staging next to the site, its tables and its storage directory were left in place so the site can still be put back. %2$s', $why, $then );
@@ -379,7 +383,8 @@ final class Uninstaller {
 	 * stored state may have been written by another installation sharing this database), and one abandoned from
 	 * elsewhere may have left this site half swapped, its staging what the site was.
 	 *
-	 * @return array{all: int, abandoned: int}|null
+	 * @return array{all: int, abandoned: int, kept: int[]}|null kept: restores whose restored site was kept, their last
+	 *                                                         steps left.
 	 */
 	public static function holding() {
 		global $wpdb;
@@ -396,6 +401,7 @@ final class Uninstaller {
 			return array(
 				'all'       => 0,
 				'abandoned' => 0,
+				'kept'      => array(),
 			);
 		}
 		self::expect();
@@ -407,23 +413,32 @@ final class Uninstaller {
 			return array(
 				'all'       => 0,
 				'abandoned' => 0,
+				'kept'      => array(),
 			);
 		}
 		self::expect();
-		$rows = $wpdb->get_results( "SELECT failure_kind, finished_at FROM {$table} WHERE site_state <> 0", ARRAY_N );
+		$rows = $wpdb->get_results( "SELECT failure_kind, finished_at, id, status, questions_json, options_json FROM {$table} WHERE site_state <> 0", ARRAY_N );
 		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		if ( self::failed() || ! is_array( $rows ) ) {
 			return null;
 		}
 		$abandoned = 0;
+		$kept      = array();
 		foreach ( $rows as $row ) {
 			if ( Job::REASON_ABANDONED === Job::read_failure_reason( (string) $row[0], (int) $row[1] ) ) {
 				++$abandoned;
+			}
+			// A restore whose restored site, which could not be checked, was kept (answered, or after 7 days without
+			// an answer): only its last steps are left, which WP-CLI runs.
+			$options = json_decode( (string) $row[5], true );
+			if ( Job::PAUSED === (string) $row[3] && in_array( (string) $row[4], array( '', '[]' ), true ) && 'keep' === ( $options['answers']['unverified'] ?? null ) ) {
+				$kept[] = (int) $row[2];
 			}
 		}
 		return array(
 			'all'       => count( $rows ),
 			'abandoned' => $abandoned,
+			'kept'      => $kept,
 		);
 	}
 
@@ -550,9 +565,13 @@ final class Uninstaller {
 				$result['failed']   = array_merge( $result['failed'], $part['failed'] );
 			}
 		}
-		// A swap that died before its rename left a temporary maintenance file; never the maintenance file itself,
-		// which a swap only leaves while it holds the site (and then nothing is uninstalled).
+		// A swap that died before its rename left a temporary maintenance file, or a data file nothing reads; never the
+		// maintenance file itself, which a swap only leaves while it holds the site (and then nothing is uninstalled),
+		// nor a data file it reads.
 		foreach ( Residue::scan_maintenance( Residue::maintenance_dir() ) as $entry ) {
+			if ( Residue::MAINTENANCE_DATA === $entry['kind'] && false !== Maintenance::code_in( Residue::maintenance_dir() ) ) {
+				continue;
+			}
 			try {
 				if ( Deleter::delete_maintenance_file( Residue::maintenance_dir(), basename( $entry['path'] ), $confirm ) ) {
 					++$result['deleted'];
