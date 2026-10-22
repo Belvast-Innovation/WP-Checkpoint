@@ -1023,6 +1023,76 @@ final class JobRepository {
 	}
 
 	/**
+	 * What cannot be read of a job's row, in words: its position (cursor), its options, its questions.
+	 *
+	 * @param string[] $columns Job::$unreadable_columns.
+	 * @return string
+	 */
+	public static function unreadable_text( array $columns ): string {
+		$what = array(
+			'cursor_json'    => 'its position (cursor)',
+			'options_json'   => 'its options',
+			'questions_json' => 'its questions',
+		);
+		$said = array();
+		foreach ( $columns as $column ) {
+			$said[] = $what[ $column ] ?? $column;
+		}
+		return implode( ' and ', $said ) . ' cannot be read (the job row was changed or damaged)';
+	}
+
+	/**
+	 * Fail a job whose row cannot be read (Job::$unreadable_columns), in one statement that writes the status, the
+	 * error, the times and the lock, and nothing of the columns that cannot be read: they stay as they are, the one
+	 * record of what happened to the row. Final: a retry runs into the same row. Only a job no live run holds, and
+	 * never one that holds the site changed (as fail_for_missing_columns(): a failed job no longer puts the site back;
+	 * such a job is left as it is and goes on once its row is repaired).
+	 *
+	 * @param Job    $job     Job, as read (updated in place).
+	 * @param string $message Why.
+	 * @return string FAIL_DONE, FAIL_HELD (a live run holds it, it holds the site, or it ended meanwhile) or FAIL_ERROR.
+	 */
+	public function fail_unreadable( Job $job, string $message ): string {
+		global $wpdb;
+		$now   = $this->now();
+		$stamp = Job::stamp_failure( Job::FAILURE_FINAL, $now );
+		$error = $this->redactor->redact( $message );
+		$table = self::table();
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin table; the WHERE keeps a live run's job and an ended job as they are.
+		$affected = $wpdb->query(
+			$wpdb->prepare(
+				"UPDATE {$table} SET status = %s, last_error = %s, failure_kind = %s, finished_at = %d, updated_at = %d, lock_token = '', locked_until = 0 WHERE id = %d AND status IN (%s, %s, %s) AND site_state = 0 AND (lock_token = '' OR locked_until < %d)", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- table name from the prefix.
+				Job::FAILED,
+				$error,
+				$stamp,
+				$now,
+				$now,
+				$job->id,
+				Job::QUEUED,
+				Job::RUNNING,
+				Job::PAUSED,
+				$now
+			)
+		);
+		if ( false === $affected ) {
+			return self::FAIL_ERROR;
+		}
+		if ( 1 !== $affected ) {
+			return self::FAIL_HELD;
+		}
+		$this->remove_lock_file( $job );
+		$job->status         = Job::FAILED;
+		$job->last_error     = $error;
+		$job->finished_at    = $now;
+		$job->updated_at     = $now;
+		$job->lock_token     = '';
+		$job->locked_until   = 0;
+		$job->failure_kind   = Job::read_failure_kind( $stamp, $now );
+		$job->failure_reason = Job::read_failure_reason( $stamp, $now );
+		return self::FAIL_DONE;
+	}
+
+	/**
 	 * Outcomes of fail_for_missing_columns().
 	 */
 	const FAIL_DONE  = 'failed';
@@ -1632,6 +1702,11 @@ final class JobRepository {
 	 */
 	public function answer( Job $job, array $answers, $message = null ): Job {
 		global $wpdb;
+		if ( array() !== $job->unreadable_columns ) {
+			// The answers are merged into the options as read: an options column that cannot be read would be written over.
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+			throw new InvalidTransition( sprintf( 'Job %1$d: %2$s; nothing is answered.', $job->id, self::unreadable_text( $job->unreadable_columns ) ) );
+		}
 		if ( ! $job->awaiting_answer() ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
 			throw new InvalidTransition( sprintf( 'Job %d is not waiting for an answer.', $job->id ) );
@@ -1726,6 +1801,10 @@ final class JobRepository {
 	 * @throws InvalidTransition When it cannot be retried.
 	 */
 	public function check_retry( Job $job ): void {
+		if ( array() !== $job->unreadable_columns ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+			throw new InvalidTransition( sprintf( 'Job %1$d: %2$s; it is not run again until its row is repaired.', $job->id, self::unreadable_text( $job->unreadable_columns ) ) );
+		}
 		if ( Job::REASON_ABANDONED === $job->failure_reason ) {
 			// From here, never again. From another installation, only once this one took it over (take_over() lifts
 			// the abandon): queued as it is, only the installation that gave it up would pick it up.
@@ -1929,6 +2008,11 @@ final class JobRepository {
 			$message = 0 === $job->started_at
 				? __( 'Queued for 24 hours without starting; the job was given up.', 'wp-checkpoint' )
 				: __( 'No progress for 24 hours; the job was given up.', 'wp-checkpoint' );
+			if ( array() !== $job->unreadable_columns ) {
+				// Said as what kept it from running (Runner::tick() fails it so when it is ticked).
+				/* translators: %s: what cannot be read of the job's row */
+				$message = sprintf( __( 'The job was given up: %s.', 'wp-checkpoint' ), self::unreadable_text( $job->unreadable_columns ) );
+			}
 			try {
 				// Nothing drove it (no visits, no cron): not a problem of the server; the message says what happened.
 				$this->force_transition( $job, Job::FAILED, $message );
@@ -1942,7 +2026,9 @@ final class JobRepository {
 		// the site: a restore whose restored site could not be checked is open to visitors, and after the same days
 		// (the window an undo has) it is kept, as the question allows; its last steps wait for WP-CLI (SwapStep).
 		foreach ( $this->list_jobs( array( Job::PAUSED ), 500 ) as $job ) {
-			if ( ! $job->awaiting_answer() || $job->updated_at + self::WORK_RETENTION_SECONDS > $now ) {
+			// Questions that cannot be read are read as none (awaiting_answer() false); the job still waits for an answer.
+			$waiting = $job->awaiting_answer() || in_array( 'questions_json', $job->unreadable_columns, true );
+			if ( ! $waiting || $job->updated_at + self::WORK_RETENTION_SECONDS > $now ) {
 				continue;
 			}
 			if ( $this->holds_site( $job ) ) {
@@ -2951,8 +3037,13 @@ final class JobRepository {
 		$job->missing_columns = array_values( array_diff( array_keys( Schema::COLUMNS ), array_keys( $row ) ) );
 		foreach ( $row as $key => $value ) {
 			if ( 'cursor_json' === $key || 'options_json' === $key || 'questions_json' === $key ) {
-				$decoded          = is_string( $value ) ? json_decode( $value, true ) : null;
-				$property         = substr( $key, 0, -5 );
+				$decoded  = is_string( $value ) && '' !== $value ? json_decode( $value, true ) : null;
+				$property = substr( $key, 0, -5 );
+				// Options and questions may be NULL (none given, none asked; a row of a version before them); a cursor is
+				// always written ("[]" when empty). Anything else that is not an array is not what this code wrote.
+				if ( ! is_array( $decoded ) && ( 'cursor_json' === $key || ( null !== $value && '' !== $value ) ) ) {
+					$job->unreadable_columns[] = $key;
+				}
 				$job->{$property} = is_array( $decoded ) ? ( 'questions' === $property ? array_values( $decoded ) : $decoded ) : array();
 				continue;
 			}

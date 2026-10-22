@@ -385,6 +385,16 @@ final class Job {
 	public $missing_columns = array();
 
 	/**
+	 * Columns of the row whose JSON could not be read (cursor_json, options_json, questions_json): NULL or empty
+	 * where this code always writes a value (the cursor), cut short, not JSON, or JSON that is not an array; not a
+	 * column itself. The property of such a column is empty, and must not be taken for the column's value: the
+	 * Runner fails such a job before any step runs, and nothing writes that column from it.
+	 *
+	 * @var string[]
+	 */
+	public $unreadable_columns = array();
+
+	/**
 	 * When a failed job's work files were reclaimed after their retention
 	 * period (0: still there, or never any). A failed job with this set
 	 * cannot be retried: the position in its cursor points at files that

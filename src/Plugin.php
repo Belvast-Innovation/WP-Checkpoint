@@ -221,7 +221,12 @@ final class Plugin {
 			/* translators: 1: job id, 2: job id */
 			$finish = Job::FAILED === $job->status ? sprintf( __( 'wp wpcheckpoint job retry %1$d, then wp wpcheckpoint job run %2$d', 'wp-checkpoint' ), $id, $id ) : sprintf( 'wp wpcheckpoint job run %d', $id );
 			$held   = $job->is_locked( time() ) ? null : $this->job_actions()->held_elsewhere( (int) $id );
-			if ( $job->is_locked( time() ) ) {
+			if ( array() !== $job->unreadable_columns ) {
+				// Its row cannot be read: it is not run, taken over or given up (Runner, JobActions), so no command.
+				/* translators: %d: job id */
+				$out[] = sprintf( __( 'Restore job %d holds the site changed, and its row cannot be read (it was changed or damaged): it is not run until the row is repaired. Look at the site\'s directories and tables, and the .maintenance file in the WordPress directory, before anything else.', 'wp-checkpoint' ), $id );
+				continue;
+			} elseif ( $job->is_locked( time() ) ) {
 				/* translators: %d: job id */
 				$out[] = sprintf( __( 'Restore job %d is at work on the site in another process.', 'wp-checkpoint' ), $id );
 			} elseif ( null !== $held ) {
