@@ -171,7 +171,11 @@ final class NoBudgetLeftTest extends JobTestCase {
 				$this->assertContains( $step, $ran, 'a tick with no time left started in ' . $step );
 			}
 		} finally {
-			Plugin::instance()->jobs()->reclaim_work( Plugin::instance()->jobs()->find( $job->id ) );
+			// A pass drops at most TempTableDropper::MAX_STATEMENTS tables: a network the suite has given many sites
+			// has more than that, and the rest goes in the next passes, as the reaper's would.
+			for ( $i = 0; $i < 10 && ! Plugin::instance()->jobs()->reclaim_work( Plugin::instance()->jobs()->find( $job->id ) ); $i++ ) {
+				continue;
+			}
 			PluginCopy::remove( $copy );
 		}
 	}
