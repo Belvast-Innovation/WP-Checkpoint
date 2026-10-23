@@ -251,16 +251,27 @@ final class StateCarryBackTest extends SwapTestCase {
 					$this->seen  = &$seen;
 					$this->error = $error;
 				}
+				/**
+				 * Count a statement that writes into an old table, however it is sent, and fail the nth.
+				 *
+				 * @param string $sql Statement.
+				 * @return void
+				 */
+				private function count( string $sql ): void {
+					if ( 1 === preg_match( '/^(REPLACE|INSERT|DELETE|UPDATE)\b/', $sql ) && false !== strpos( $sql, \WPCheckpoint\Jobs\TempTables::OLD_PREFIX ) && ++$this->seen === $this->nth ) {
+						throw $this->error;
+					}
+				}
 				public function run( string $sql ): int {
+					$this->count( $sql );
 					return $this->db->run( $sql );
 				}
 				public function rows( string $sql, array $params = array() ): array {
-					if ( ( 0 === strpos( $sql, 'REPLACE INTO' ) || 0 === strpos( $sql, 'DELETE FROM' ) ) && false !== strpos( $sql, \WPCheckpoint\Jobs\TempTables::OLD_PREFIX ) && ++$this->seen === $this->nth ) {
-						throw $this->error;
-					}
+					$this->count( $sql );
 					return $this->db->rows( $sql, $params );
 				}
 				public function write( string $sql, array $params ): int {
+					$this->count( $sql );
 					return $this->db->write( $sql, $params );
 				}
 			};
