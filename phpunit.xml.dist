@@ -30,5 +30,8 @@
 		<!-- The integration suite: a test that leaves the restore's tables or temporary entries behind fails, and the
 		     run ends with none (tests/Fixtures/Leftovers.php). Does nothing in the unit suite. -->
 		<listener class="WPCheckpoint\Tests\Fixtures\Leftovers"/>
+		<!-- The integration suite: a test (or a class) that changes the shape of a table of the test site (its
+		     SHOW CREATE TABLE: engine, collation, columns, keys, row format) fails, named (tests/Fixtures/TableShapes.php). -->
+		<listener class="WPCheckpoint\Tests\Fixtures\TableShapes"/>
 	</listeners>
 </phpunit>
