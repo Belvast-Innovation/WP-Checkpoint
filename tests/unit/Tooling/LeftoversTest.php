@@ -110,6 +110,16 @@ final class LeftoversTest extends TestCase {
 		$this->assertSame( array( 'temp:/tmp/wpc-plugin-00000000' ), $this->there, 'the control: another run\'s temporary entry stays' );
 	}
 
+	public function test_an_earlier_runs_sites_and_site_tables_are_named_then_removed_at_the_start(): void {
+		$listener    = $this->listener();
+		$this->there = array( 'site-table:wp_2_posts', 'site:2', 'temp:/tmp/wpc-plugin-00000000' );
+		$listener->startTestSuite( new TestSuite( 'root' ) );
+		$this->assertSame( array( 'site-table:wp_2_posts', 'site:2' ), $this->removed, 'handed to the removal (on the tests database only)' );
+		$this->assertCount( 1, $this->notices );
+		$this->assertStringContainsString( "site-table:wp_2_posts\n  site:2", $this->notices[0], 'named first' );
+		$this->assertSame( array( 'temp:/tmp/wpc-plugin-00000000' ), $this->there, 'the control: another run\'s temporary entry stays' );
+	}
+
 	public function test_an_earlier_runs_other_tables_are_reported_and_removed_at_the_start_and_name_a_run_that_kept_the_lock(): void {
 		$strays   = array( 'table:wp_swt_keep' );
 		$listener = new Leftovers(
@@ -184,6 +194,26 @@ final class LeftoversTest extends TestCase {
 			array( 'wp_swt_keep', 'wp_swt_new', 'wpcx_blob', 'wpcpother_t', 'wp_2_users', 'wp_0_posts', 'other_posts' ),
 			Leftovers::stray_tables( $all, 'wp_', $global, $blog )
 		);
+	}
+
+	public function test_a_sites_tables_are_every_table_of_a_site_prefix(): void {
+		$all = array(
+			'wp_posts',
+			'wp_blogs',
+			'wp_2_posts',
+			'wp_16_options',
+			'wp_2_users',
+			'wp_2_anything',
+			'wp_0_posts',
+			'wp_02_posts',
+			'wp_2_',
+			'wp_x2_posts',
+			'wp_wpcheckpoint_jobs',
+			'wp2_posts',
+			'other_2_posts',
+		);
+		$this->assertSame( array( 'wp_2_posts', 'wp_16_options', 'wp_2_users', 'wp_2_anything' ), Leftovers::site_tables( $all, 'wp_' ) );
+		$this->assertSame( array( 'x_wp_3_posts' ), Leftovers::site_tables( array( 'x_wp_posts', 'x_wp_3_posts', 'wp_3_posts' ), 'x_wp_' ), 'the prefix as given, not "wp_"' );
 	}
 
 	public function test_a_class_that_leaves_something_fails_as_a_class_and_so_does_the_run(): void {

@@ -41,6 +41,44 @@ final class LeftoversCheckTest extends WP_UnitTestCase {
 		$this->assertDirectoryDoesNotExist( $dir );
 	}
 
+	public function test_it_sees_and_removes_a_real_sites_tables_and_on_a_network_its_row(): void {
+		global $wpdb;
+		// On the connection itself: through wpdb a test's CREATE TABLE becomes a temporary table, and its rows are rolled
+		// back. Committed, as a site created with real tables is. Its id from the sites table's own counter (an id set
+		// by hand would move the counter, and every later site's id, with it).
+		$id = 424242;
+		if ( is_multisite() ) {
+			$this->assertTrue( mysqli_query( $wpdb->dbh, "INSERT INTO `{$wpdb->blogs}` ( site_id, domain, path ) VALUES ( 1, 'leftover.check', '/' )" ) );
+			$id = (int) mysqli_insert_id( $wpdb->dbh );
+			mysqli_query( $wpdb->dbh, 'COMMIT' );
+		}
+		$table = $wpdb->base_prefix . $id . '_leftover_check';
+		$temp  = $wpdb->base_prefix . ( $id + 1 ) . '_leftover_check';
+		$this->assertTrue( mysqli_query( $wpdb->dbh, "CREATE TABLE `{$table}` ( id int )" ), $table );
+		// A site's temporary table (as the core test case makes them) is gone with the connection: not one left.
+		$this->assertTrue( mysqli_query( $wpdb->dbh, "CREATE TEMPORARY TABLE `{$temp}` ( id int )" ), $temp );
+		$items = Leftovers::listing();
+		mysqli_query( $wpdb->dbh, "DROP TEMPORARY TABLE IF EXISTS `{$temp}`" );
+		$this->assertNotContains( 'site-table:' . $temp, $items, 'a temporary table is not listed' );
+		$this->assertContains( 'site-table:' . $table, $items, 'the control: a base table of the same form is' );
+		$this->assertNotContains( 'site-table:' . $wpdb->posts, $items, 'the main site\'s tables are not a site\'s' );
+		if ( is_multisite() ) {
+			$this->assertContains( 'site:' . $id, $items );
+			$this->assertNotContains( 'site:' . get_main_site_id(), $items, 'nor is the main site' );
+		}
+
+		$own = is_multisite() ? array( 'site-table:' . $table, 'site:' . $id ) : array( 'site-table:' . $table );
+		Leftovers::removal( $own );
+		$items = Leftovers::listing();
+		$this->assertSame( array(), array_values( array_intersect( $own, $items ) ) );
+		$this->assertSame( '0', (string) $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = %s', $table ) ), 'dropped' );
+		if ( is_multisite() ) {
+			$this->assertSame( '0', (string) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM {$wpdb->blogs} WHERE blog_id = %d", $id ) ), 'its row deleted' ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the sites table.
+			$this->assertNotNull( get_site( get_main_site_id() ), 'the control: the main site is there' );
+		}
+		$this->assertContains( $wpdb->posts, (array) $wpdb->get_col( 'SHOW TABLES' ), 'the control: the main site\'s tables are kept' );
+	}
+
 	public function test_on_the_tests_database_an_earlier_runs_fixture_table_is_named_then_dropped_and_no_table_of_wordpress_or_the_plugin(): void {
 		global $wpdb;
 		$table = $wpdb->base_prefix . 'swt_leftover_check';
@@ -91,6 +129,36 @@ final class LeftoversCheckTest extends WP_UnitTestCase {
 			$this->assertContains( $wpdb->base_prefix . 'swt_other', (array) $other->get_col( 'SHOW TABLES' ), 'still there' );
 			$other->close();
 		} finally {
+			mysqli_query( $wpdb->dbh, "DROP DATABASE IF EXISTS `{$name}`" );
+		}
+	}
+
+	public function test_on_another_database_a_sites_tables_are_not_removed(): void {
+		global $wpdb;
+		$name  = 'wpc_leftovers_sites_not_tests';
+		$table = $wpdb->base_prefix . '5_leftover_other';
+		$tests = $wpdb;
+		$this->assertTrue( mysqli_query( $wpdb->dbh, "CREATE DATABASE `{$name}`" ), 'a database of this test' );
+		try {
+			$other = new \wpdb( DB_USER, DB_PASSWORD, $name, DB_HOST );
+			$other->set_prefix( $wpdb->base_prefix );
+			$this->assertTrue( (bool) $other->query( "CREATE TABLE `{$table}` ( id int )" ), 'a site\'s table there' );
+			$GLOBALS['wpdb'] = $other; // phpcs:ignore WordPress.WP.GlobalVariablesOverride.Prohibited -- removal() works on the global connection; put back below.
+			try {
+				Leftovers::removal( array( 'site-table:' . $table ) );
+			} finally {
+				$GLOBALS['wpdb'] = $tests; // phpcs:ignore WordPress.WP.GlobalVariablesOverride.Prohibited -- put back.
+			}
+			$this->assertContains( $table, (array) $other->get_col( 'SHOW TABLES' ), 'still there' );
+			$other->close();
+			// The control: the same removal on the tests database drops a table of that name.
+			$this->assertTrue( mysqli_query( $wpdb->dbh, "CREATE TABLE `{$table}` ( id int )" ), $table );
+			$this->assertContains( $table, (array) $wpdb->get_col( 'SHOW TABLES' ) );
+			Leftovers::removal( array( 'site-table:' . $table ) );
+			$this->assertNotContains( $table, (array) $wpdb->get_col( 'SHOW TABLES' ), 'the control: dropped on the tests database' );
+		} finally {
+			$GLOBALS['wpdb'] = $tests; // phpcs:ignore WordPress.WP.GlobalVariablesOverride.Prohibited -- put back.
+			mysqli_query( $wpdb->dbh, "DROP TABLE IF EXISTS `{$table}`" );
 			mysqli_query( $wpdb->dbh, "DROP DATABASE IF EXISTS `{$name}`" );
 		}
 	}
