@@ -144,11 +144,15 @@ final class StateCarryBackTest extends SwapTestCase {
 	public function test_the_self_check_row_is_not_carried_back(): void {
 		global $wpdb;
 		$job = $this->swapped_and_written();
-		// A self-check row in the live table when the put-back carries (none is there in a real run by then: it is
-		// deleted before the reverse; written here to see that the carry leaves it out).
+		// Killed once the reverse was recorded: the check that wrote and deleted the self-check row is over. Then a
+		// self-check row in the live table when the next run carries back (none is there in a real run by then;
+		// written here to see that the carry leaves it out).
+		file_put_contents( $this->trace, '' );
+		$this->killed_at( $job, 'reverse_recorded', 1 );
 		$this->write_live( StoredNames::SELF_CHECK, 'a self-check row' );
+		$this->assertSame( 'a self-check row', $this->value( '', StoredNames::SELF_CHECK ), 'the control: the row is in the live table before the carry' );
 		$this->seams = array();
-		$this->cli_run( $job );
+		$this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
 		$this->assertContains( 'carried_back', $this->seams, 'the control: it carried back' );
 		$this->assertSame( self::STATE, $this->value(), 'the control: the plugin\'s state was carried back' );
 		$this->assertNull( $this->value( '', StoredNames::SELF_CHECK ), 'the self-check row was not carried into the site as it was' );
