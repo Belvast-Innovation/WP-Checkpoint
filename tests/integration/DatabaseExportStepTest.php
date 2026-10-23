@@ -182,6 +182,24 @@ final class DatabaseExportStepTest extends JobTestCase {
 		$this->assertSame( array( self::PREFIX . 'view' ), $listing['views'] );
 	}
 
+	public function test_a_temporary_table_of_this_connection_is_not_listed(): void {
+		global $wpdb;
+		// Some servers list a connection's temporary tables in SHOW FULL TABLES (MariaDB 12, as "TEMPORARY TABLE"),
+		// others do not (MySQL). One another plugin made in this request is gone in the next: not the site's.
+		$temp = self::PREFIX . 'session_temp';
+		$this->assertTrue( mysqli_query( $wpdb->dbh, "CREATE TEMPORARY TABLE `{$temp}` ( id int )" ), $temp );
+		try {
+			$listing = ( new WpdbConnection() )->tables_with_prefix( self::PREFIX );
+		} finally {
+			mysqli_query( $wpdb->dbh, "DROP TEMPORARY TABLE IF EXISTS `{$temp}`" );
+		}
+		$this->assertNotContains( $temp, $listing['tables'] );
+		$this->assertNotContains( $temp, $listing['views'] );
+		$sorted = $this->tables;
+		sort( $sorted, SORT_STRING );
+		$this->assertSame( $sorted, $listing['tables'], 'the control: the base tables of the prefix are listed' );
+	}
+
 	public function test_the_export_spans_ticks_survives_torn_writes_and_round_trips_through_the_mysql_client(): void {
 		global $wpdb;
 		$connection = new WpdbConnection();
