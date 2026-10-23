@@ -163,7 +163,9 @@ final class WpdbConnection implements Connection {
 	}
 
 	/**
-	 * Base tables (not views) whose names start with a prefix, in byte order.
+	 * Tables (not views) whose names start with a prefix, in byte order. Not a temporary table of this connection:
+	 * some servers list those too (MariaDB 12, as "TEMPORARY TABLE"; MySQL does not), and one that another plugin made
+	 * in this request is gone in the next, not one of the site's tables to back up, keep apart or swap.
 	 *
 	 * @param string $prefix Table prefix.
 	 * @return array{tables: string[], views: string[]}
@@ -179,7 +181,11 @@ final class WpdbConnection implements Connection {
 		$tables = array();
 		$views  = array();
 		foreach ( $rows as $row ) {
-			if ( 'VIEW' === strtoupper( (string) $row[1] ) ) {
+			$type = strtoupper( (string) $row[1] );
+			if ( 'TEMPORARY TABLE' === $type ) {
+				continue;
+			}
+			if ( 'VIEW' === $type ) {
 				$views[] = (string) $row[0];
 			} else {
 				$tables[] = (string) $row[0];

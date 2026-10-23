@@ -593,6 +593,9 @@ abstract class SwapTestCase extends RestoreTestCase {
 	protected function discard_abandoned(): void {
 		global $wpdb;
 		$wpdb->query( 'COMMIT' );
+		if ( ! \WPCheckpoint\Support\Schema::table_exists() ) {
+			return; // Dropped already (a test's own tear-down drops it first): no job, none abandoned, nothing to read.
+		}
 		foreach ( (array) $wpdb->get_col( 'SELECT id FROM ' . JobRepository::table() ) as $id ) { // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- the plugin's table.
 			$job = Plugin::instance()->jobs()->find( (int) $id );
 			if ( null === $job || Job::REASON_ABANDONED !== $job->failure_reason ) {

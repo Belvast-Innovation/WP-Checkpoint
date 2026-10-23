@@ -346,7 +346,7 @@ final class Leftovers implements TestListener {
 	}
 
 	/**
-	 * The restore's tables in the database ("wcptmp", "wcpold").
+	 * The restore's tables in the database ("wcptmp", "wcpold"): base tables only (base_tables()).
 	 *
 	 * @return string[]
 	 */
@@ -354,9 +354,28 @@ final class Leftovers implements TestListener {
 		global $wpdb;
 		$tables = array();
 		foreach ( self::TABLE_PREFIXES as $prefix ) {
-			$tables = array_merge( $tables, (array) $wpdb->get_col( "SHOW TABLES LIKE '{$prefix}%'" ) );
+			$tables = array_merge( $tables, self::base_tables( $wpdb, $prefix ) );
 		}
 		return $tables;
+	}
+
+	/**
+	 * The base tables whose names start with a prefix: not a view, and not a temporary table of this connection, which
+	 * some servers list in SHOW TABLES (MariaDB 12) and others do not (MySQL); what the core test case creates through
+	 * wpdb is temporary, gone with the connection, and no one's leftover.
+	 *
+	 * @param \wpdb  $db     Connection.
+	 * @param string $prefix Name prefix.
+	 * @return string[]
+	 */
+	public static function base_tables( \wpdb $db, string $prefix ): array {
+		$out = array();
+		foreach ( (array) $db->get_results( $db->prepare( 'SHOW FULL TABLES LIKE %s', $db->esc_like( $prefix ) . '%' ), ARRAY_N ) as $row ) {
+			if ( isset( $row[0], $row[1] ) && 'BASE TABLE' === $row[1] ) {
+				$out[] = (string) $row[0];
+			}
+		}
+		return $out;
 	}
 
 	/**
@@ -422,14 +441,8 @@ final class Leftovers implements TestListener {
 	 * @return string[]
 	 */
 	public static function site_listing( \wpdb $db ): array {
-		$out  = array();
-		$base = array();
-		foreach ( (array) $db->get_results( 'SHOW FULL TABLES', ARRAY_N ) as $row ) {
-			if ( isset( $row[0], $row[1] ) && 'BASE TABLE' === $row[1] ) {
-				$base[] = (string) $row[0];
-			}
-		}
-		foreach ( self::site_tables( $base, (string) $db->base_prefix ) as $table ) {
+		$out = array();
+		foreach ( self::site_tables( self::base_tables( $db, (string) $db->base_prefix ), (string) $db->base_prefix ) as $table ) {
 			$out[] = 'site-table:' . $table;
 		}
 		if ( is_multisite() ) {
