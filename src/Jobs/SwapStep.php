@@ -949,9 +949,10 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 *
 	 * Putting the site back comes first: a carry that fails for a moment (TransientFailure, as the connection raises
 	 * for a lock wait, a deadlock or a lost connection) is waited out, the maintenance file held, and tried again by
-	 * the next run; one that fails for any other reason is said in the job's log, and the site is put back without it
-	 * (on an old table without transactions the statements sent before the failure stay: the plugin's rows there may
-	 * be partly the live ones).
+	 * the next run; one that fails for any other reason is said in the job's log (with what was thrown), and the site
+	 * is put back without it: on an old table without transactions the statements sent before the failure stay, and
+	 * they leave each of this plugin's rows there either as it was or as the live one, never without one
+	 * (StateCarry::carry_back()).
 	 *
 	 * @param JobContext                                                                                          $context Context.
 	 * @param Queries                                                                                             $db      Connection.
@@ -989,7 +990,13 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			throw $e; // A problem of the moment: the put-back waits, its file held, and goes on.
 		} catch ( \Throwable $e ) {
 			// Nothing a retry would change: the site is put back without the carry, and that is said.
-			$context->logger()->warning( 'This plugin\'s own settings written since the swap were not carried back; the site is put back all the same', array( 'reason' => $e->getMessage() ) );
+			$context->logger()->warning(
+				'This plugin\'s own settings written since the swap were not carried back (or only some of them); the site is put back all the same',
+				array(
+					'error'  => get_class( $e ),
+					'reason' => $e->getMessage(),
+				)
+			);
 			return;
 		}
 		$context->logger()->info( 'This plugin\'s own settings were carried back into the site as it was' );

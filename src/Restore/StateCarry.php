@@ -54,10 +54,15 @@ defined( 'ABSPATH' ) || exit;
  * undo, a rollback once the options table was renamed), the rows under the
  * plugin's own names that are in the live table (written since the swap: a
  * setting, the storage state, the schema version) are carried into the old
- * table about to come back, by the same names and the same statements, so
- * that putting the site back does not put the plugin's state back too. The
- * self-check row (StoredNames::SELF_CHECK) is left out: it belongs to the
- * restored site's checks, and must not reach the old site or a later backup.
+ * table about to come back, by the same names, so that putting the site back
+ * does not put the plugin's state back too. Its statements never leave a name
+ * of the old table's without a row (carry_table_back(): replace first, then
+ * remove only rows older than the carry), so a carry cut short or failed on a
+ * table without transactions leaves each own row either as it was or as the
+ * live one. The self-check row (StoredNames::SELF_CHECK) is left out: it
+ * belongs to the restored site's checks, and must not reach the old site or a
+ * later backup. The old site's lists of active plugins are left alone: that
+ * site ran this plugin until the swap.
  *
  * Not carried: the user-level dismissed notices (the users table is
  * replaced and dismissals start over), the plugin's cron events inside the
@@ -143,15 +148,15 @@ final class StateCarry {
 	 * @throws \Throwable Whatever else stops it, after the transaction is rolled back.
 	 */
 	public function carry( string $live_options, string $temp_options, $live_meta, $temp_meta, array $fence ): void {
-		$this->carry_between( $live_options, $temp_options, $live_meta, $temp_meta, $fence, 'carry', array(), true );
+		$this->carry_between( $live_options, $temp_options, $live_meta, $temp_meta, $fence, 'carry', false );
 	}
 
 	/**
-	 * Carry this plugin's rows the other way, from the live tables into the old ones about to be renamed back, and
-	 * keep it active there: as carry(), but without the self-check row (StoredNames::SELF_CHECK), with its seams
-	 * named "carry_back_…", and without touching the old table's list of active plugins: that table is the one the
-	 * site ran this plugin from until the swap. The caller runs it only while both tables are where the swap left
-	 * them.
+	 * Carry this plugin's rows the other way, from the live tables into the old ones about to be renamed back
+	 * (carry_table_back(): no name of the old table's ever left without a row), without the self-check row
+	 * (StoredNames::SELF_CHECK), with its seams named "carry_back_…", and without touching the old table's list of
+	 * active plugins: that table is the one the site ran this plugin from until the swap. The caller runs it only
+	 * while both tables are where the swap left them.
 	 *
 	 * @param string                                       $live_options Live options table (the restored site's).
 	 * @param string                                       $old_options  The options table the swap moved aside.
@@ -161,10 +166,10 @@ final class StateCarry {
 	 * @return void
 	 * @throws \WPCheckpoint\Jobs\LockLost When the job is no longer this run's: nothing is written.
 	 * @throws \Throwable Whatever else stops it, after the transaction is rolled back (on a table without
-	 *                    transactions the statements sent before stay).
+	 *                    transactions the statements sent before stay: each own row as it was or as the live one).
 	 */
 	public function carry_back( string $live_options, string $old_options, $live_meta, $old_meta, array $fence ): void {
-		$this->carry_between( $live_options, $old_options, $live_meta, $old_meta, $fence, 'carry_back', array( StoredNames::SELF_CHECK ), false );
+		$this->carry_between( $live_options, $old_options, $live_meta, $old_meta, $fence, 'carry_back', true );
 	}
 
 	/**
@@ -176,28 +181,35 @@ final class StateCarry {
 	 * @param string|null                                  $to_meta      Sitemeta table written, or null.
 	 * @param array{table: string, id: int, token: string} $fence        The job row and the run's token.
 	 * @param string                                       $seams        The seams' prefix ("carry", "carry_back").
-	 * @param string[]                                     $except       Own names not carried.
-	 * @param bool                                         $activate     Whether this plugin is put into the written table's
-	 *                                                                   list of active plugins (the carry into the restored
-	 *                                                                   tables), or the list is left alone (the carry back).
+	 * @param bool                                         $back         Whether it is the carry back (carry_table_back(),
+	 *                                                                   the lists of active plugins left alone), or the
+	 *                                                                   carry into the restored tables (carry_table(),
+	 *                                                                   this plugin put into the list of active plugins).
 	 * @return void
 	 */
-	private function carry_between( string $from_options, string $to_options, $from_meta, $to_meta, array $fence, string $seams, array $except, bool $activate ): void {
+	private function carry_between( string $from_options, string $to_options, $from_meta, $to_meta, array $fence, string $seams, bool $back ): void {
 		JobFence::within(
 			$this->db,
 			$fence,
-			function () use ( $from_options, $to_options, $from_meta, $to_meta, $seams, $except, $activate ): void {
+			function () use ( $from_options, $to_options, $from_meta, $to_meta, $seams, $back ): void {
 				$this->seams = $seams;
 				$this->at( $seams . '_locked' );
 				$this->statements = 0;
-				$this->carry_table( $from_options, $to_options, false, array(), '(option_name, option_value, autoload) SELECT option_name, option_value, autoload', $except );
-				if ( null !== $from_meta && null !== $to_meta ) {
-					$this->carry_table( $from_meta, $to_meta, true, array( (string) $this->network ), '(site_id, meta_key, meta_value) SELECT site_id, meta_key, meta_value', $except );
-					if ( $activate ) {
-						$this->activate_network( $to_meta );
+				$options          = '(option_name, option_value, autoload) SELECT option_name, option_value, autoload';
+				$meta             = '(site_id, meta_key, meta_value) SELECT site_id, meta_key, meta_value';
+				if ( $back ) {
+					$this->carry_table_back( $from_options, $to_options, false, array(), $options );
+					if ( null !== $from_meta && null !== $to_meta ) {
+						$this->carry_table_back( $from_meta, $to_meta, true, array( (string) $this->network ), $meta );
 					}
-				} elseif ( $activate ) {
-					$this->activate( $to_options );
+				} else {
+					$this->carry_table( $from_options, $to_options, false, array(), $options );
+					if ( null !== $from_meta && null !== $to_meta ) {
+						$this->carry_table( $from_meta, $to_meta, true, array( (string) $this->network ), $meta );
+						$this->activate_network( $to_meta );
+					} else {
+						$this->activate( $to_options );
+					}
 				}
 				$this->at( $seams . '_written' );
 			}
@@ -239,21 +251,54 @@ final class StateCarry {
 	 * @param bool     $sitemeta Whether the tables are sitemeta tables.
 	 * @param string[] $site     The network's id (sitemeta), or nothing (options).
 	 * @param string   $columns  Columns inserted and their SELECT list.
-	 * @param string[] $except   Own names not carried (neither deleted nor inserted).
 	 * @return void
 	 */
-	private function carry_table( string $live, string $temp, bool $sitemeta, array $site, string $columns, array $except ): void {
+	private function carry_table( string $live, string $temp, bool $sitemeta, array $site, string $columns ): void {
 		JobFence::assert_locked( $this->db );
 		$column = $sitemeta ? 'meta_key' : 'option_name';
 		$where  = array() === $site ? '' : 'site_id = ? AND ';
-		$active = $sitemeta ? self::ACTIVE_NETWORK : self::ACTIVE;
-		$skip   = array_merge( array( $active ), $except );
+		$skip   = array( $sitemeta ? self::ACTIVE_NETWORK : self::ACTIVE );
 		foreach ( array_chunk( array_values( array_diff( self::own_names( $this->db, $temp, $sitemeta, $site ), $skip ) ), self::CHUNK ) as $names ) {
 			$this->db->rows( 'DELETE FROM ' . SqlWriter::identifier( $temp ) . ' WHERE ' . $where . $column . ' IN (' . self::marks( $names ) . ')', array_merge( $site, $names ) );
 			$this->at( $this->seams . '_' . ( ++$this->statements ) );
 		}
 		foreach ( array_chunk( array_values( array_diff( self::own_names( $this->db, $live, $sitemeta, $site ), $skip ) ), self::CHUNK ) as $names ) {
 			$this->db->rows( 'INSERT INTO ' . SqlWriter::identifier( $temp ) . ' ' . $columns . ' FROM ' . SqlWriter::identifier( $live ) . ' WHERE ' . $where . $column . ' IN (' . self::marks( $names ) . ')', array_merge( $site, $names ) );
+			$this->at( $this->seams . '_' . ( ++$this->statements ) );
+		}
+	}
+
+	/**
+	 * One table the other way (carry_back()), in an order that never leaves a name of the old table's without a row:
+	 * the old table's highest row id noted, the live table's own rows put in by REPLACE (on the options table's unique
+	 * name a row is replaced in place; a table without a unique name, as sitemeta, gets a second row), then the old
+	 * table's own rows with an id up to the noted one deleted (the copies the REPLACE did not replace, and names the
+	 * live table no longer has). Cut short after any statement, or failed in any, on a table without transactions:
+	 * each own name has its old row, its live row, or both, never none; run again, it notes the new highest id and
+	 * ends with one row each. The self-check row and the list of active plugins are neither written nor deleted.
+	 *
+	 * @param string   $live     Live table.
+	 * @param string   $old      The table the swap moved aside.
+	 * @param bool     $sitemeta Whether the tables are sitemeta tables.
+	 * @param string[] $site     The network's id (sitemeta), or nothing (options).
+	 * @param string   $columns  Columns inserted and their SELECT list.
+	 * @return void
+	 */
+	private function carry_table_back( string $live, string $old, bool $sitemeta, array $site, string $columns ): void {
+		JobFence::assert_locked( $this->db );
+		$column = $sitemeta ? 'meta_key' : 'option_name';
+		$id     = $sitemeta ? 'meta_id' : 'option_id';
+		$where  = array() === $site ? '' : 'site_id = ? AND ';
+		$skip   = array( $sitemeta ? self::ACTIVE_NETWORK : self::ACTIVE, StoredNames::SELF_CHECK );
+		$top    = $this->db->rows( 'SELECT MAX(' . $id . ') FROM ' . SqlWriter::identifier( $old ) );
+		$before = (string) (int) ( $top[0][0] ?? 0 );
+		$theirs = array_values( array_diff( self::own_names( $this->db, $old, $sitemeta, $site ), $skip ) );
+		foreach ( array_chunk( array_values( array_diff( self::own_names( $this->db, $live, $sitemeta, $site ), $skip ) ), self::CHUNK ) as $names ) {
+			$this->db->rows( 'REPLACE INTO ' . SqlWriter::identifier( $old ) . ' ' . $columns . ' FROM ' . SqlWriter::identifier( $live ) . ' WHERE ' . $where . $column . ' IN (' . self::marks( $names ) . ')', array_merge( $site, $names ) );
+			$this->at( $this->seams . '_' . ( ++$this->statements ) );
+		}
+		foreach ( array_chunk( $theirs, self::CHUNK ) as $names ) {
+			$this->db->rows( 'DELETE FROM ' . SqlWriter::identifier( $old ) . ' WHERE ' . $where . $column . ' IN (' . self::marks( $names ) . ') AND ' . $id . ' <= ?', array_merge( $site, $names, array( $before ) ) );
 			$this->at( $this->seams . '_' . ( ++$this->statements ) );
 		}
 	}
