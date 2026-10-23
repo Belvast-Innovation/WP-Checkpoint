@@ -153,15 +153,15 @@ final class StateCarryBackTest extends SwapTestCase {
 
 	/**
 	 * After the job ended: the swap was put back, its file down, no options table under the live name has the
-	 * self-check row, and the old site's lists of active plugins are as they were; and, unless $carried is false, the
-	 * state written since the swap is in the live tables.
+	 * self-check row, and the old site's lists of active plugins are as they were; and, if $carried is true, the state
+	 * written since the swap is in the live tables, if false, not in the options table (null: either, table by table).
 	 *
-	 * @param Job    $job     Job.
-	 * @param string $label   For the messages.
-	 * @param bool   $carried Whether the state is expected carried back.
+	 * @param Job       $job     Job.
+	 * @param string    $label   For the messages.
+	 * @param bool|null $carried Whether the state is expected carried back, or null for not checked.
 	 * @return void
 	 */
-	private function assert_put_back( Job $job, string $label, bool $carried = true ): void {
+	private function assert_put_back( Job $job, string $label, ?bool $carried = true ): void {
 		$done = Plugin::instance()->jobs()->find( $job->id );
 		$this->assertSame( Job::FAILED, $done->status, $label . ': reversed (' . $done->last_error . ')' );
 		$this->assertStringContainsString( 'found it broken', (string) $done->last_error, $label );
@@ -177,7 +177,7 @@ final class StateCarryBackTest extends SwapTestCase {
 			if ( is_multisite() ) {
 				$this->assertSame( self::STATE, $this->meta(), $label . ': in the network\'s sitemeta too' );
 			}
-		} else {
+		} elseif ( false === $carried ) {
 			$this->assertNotSame( self::STATE, $this->value(), $label . ': the state written since the swap was not carried' );
 		}
 	}
@@ -282,13 +282,13 @@ final class StateCarryBackTest extends SwapTestCase {
 	 * The invariant of the carry back, whatever cut it or failed it: the site put back, and every own name the old
 	 * site had is there, under the live name.
 	 *
-	 * @param Job      $job    Job.
-	 * @param string[] $before The old site's own names before the carry (own_names_in()).
-	 * @param string   $label  For the messages.
-	 * @param bool     $state  Whether the state written since the swap is expected carried.
+	 * @param Job       $job    Job.
+	 * @param string[]  $before The old site's own names before the carry (own_names_in()).
+	 * @param string    $label  For the messages.
+	 * @param bool|null $state  Whether the state written since the swap is expected carried (null: not checked).
 	 * @return void
 	 */
-	private function assert_nothing_missing( Job $job, array $before, string $label, bool $state ): void {
+	private function assert_nothing_missing( Job $job, array $before, string $label, ?bool $state ): void {
 		global $wpdb;
 		$this->assert_put_back( $job, $label, $state );
 		$after = $this->own_names_in( $wpdb->base_prefix . 'options', is_multisite() ? $wpdb->base_prefix . 'sitemeta' : null );
@@ -363,7 +363,7 @@ final class StateCarryBackTest extends SwapTestCase {
 	 * @return void
 	 */
 	private function nothing_missing_whatever_the_state( Job $job, array $before, string $label ): void {
-		$this->assert_nothing_missing( $job, $before, $label, self::STATE === $this->value() );
+		$this->assert_nothing_missing( $job, $before, $label, null ); // Cut part way: the options carried and the sitemeta not is fine.
 		$this->assertStringContainsString( 'the site is put back all the same', Plugin::instance()->job_presenter()->log_tail( Plugin::instance()->jobs()->find( $job->id ) ), $label . ': the failure is said' );
 	}
 
