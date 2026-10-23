@@ -872,6 +872,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		$this->hold_for_renames( $context, $file, ! empty( $cursor['out'] ) );
 		$db->run( 'SET SESSION lock_wait_timeout = ' . self::LOCK_WAIT );
 		$there = $this->there( $db, $entries['tables'] );
+		$this->carry_back( $context, $db, $entries['tables'], $there );
 		foreach ( array_reverse( $entries['tables'] ) as $entry ) {
 			$pairs = SwapRules::table_back( $entry, $there, $this->stray_table( $context, $entry['live'] ) );
 			if ( SwapPlan::TABLE_OF === $entry['kind'] && $entry['had_live'] && ! isset( $there[ $entry['stage'] ] ) && isset( $there[ $entry['live'] ] ) && ! isset( $there[ $entry['old'] ] ) ) {
@@ -933,6 +934,43 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		$context->checkpoint( $cursor, 98, __( 'The site is as it was before the restore', 'wp-checkpoint' ) );
 		$this->at( 'restored' );
 		return $this->end_back( $context, $cursor, $detail );
+	}
+
+	/**
+	 * Before anything is renamed back: this plugin's own state, written since the swap into the options table (and a
+	 * network's sitemeta) under its live name, carried into the table the swap moved aside, which is about to come back
+	 * (StateCarry::carry_back(), in its fenced transaction). Only while the options table is where the swap left it,
+	 * the restored one under the live name and the old one under its moved-aside name (positive evidence, read just
+	 * before): a run taken up after it was renamed back finds no such pair and carries nothing, never the other way;
+	 * the run that renamed it had carried both before its first rename. The sitemeta pair goes with it when it is
+	 * where the swap left it too.
+	 *
+	 * @param JobContext                                                                                          $context Context.
+	 * @param Queries                                                                                             $db      Connection.
+	 * @param array<int, array{seq: int, kind: string, live: string, stage: string, old: string, had_live: bool}> $tables  Table entries.
+	 * @param array<string, bool>                                                                                 $there   Which of their names are there.
+	 * @return void
+	 */
+	private function carry_back( JobContext $context, Queries $db, array $tables, array $there ): void {
+		$pairs = array();
+		foreach ( $tables as $entry ) {
+			if ( SwapPlan::TABLE_OF !== $entry['kind'] || ! $entry['had_live'] || ! isset( $there[ $entry['live'] ], $there[ $entry['old'] ] ) ) {
+				continue;
+			}
+			if ( self::base_prefix() . 'options' === $entry['live'] ) {
+				$pairs['options'] = $entry;
+			}
+			if ( is_multisite() && self::base_prefix() . 'sitemeta' === $entry['live'] ) {
+				$pairs['meta'] = $entry;
+			}
+		}
+		if ( ! isset( $pairs['options'] ) ) {
+			return;
+		}
+		$meta = $pairs['meta'] ?? null;
+		$this->state_carry( $db )->carry_back( $pairs['options']['live'], $pairs['options']['old'], null === $meta ? null : $meta['live'], null === $meta ? null : $meta['old'], $context->fence() );
+		$context->logger()->info( 'This plugin\'s own settings were carried back into the site as it was' );
+		$this->at( 'carried_back' );
 	}
 
 	/**
