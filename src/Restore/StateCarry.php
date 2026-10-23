@@ -80,7 +80,7 @@ final class StateCarry {
 	/**
 	 * Connection.
 	 *
-	 * @var ImportSession
+	 * @var Queries
 	 */
 	private $db;
 
@@ -108,13 +108,13 @@ final class StateCarry {
 	/**
 	 * Constructor.
 	 *
-	 * @param ImportSession $db      Connection.
+	 * @param Queries       $db      Connection (the swap's).
 	 * @param string        $plugin  This plugin's file ("wp-checkpoint/wp-checkpoint.php").
 	 * @param int           $network The network's id on multisite, 0 on a single site.
 	 * @param callable|null $seam    A crash seam (tests): called after each statement ("carry_1", ...) and at
 	 *                               "carry_written", inside the transaction.
 	 */
-	public function __construct( ImportSession $db, string $plugin, int $network, $seam = null ) {
+	public function __construct( Queries $db, string $plugin, int $network, $seam = null ) {
 		$this->db      = $db;
 		$this->plugin  = $plugin;
 		$this->network = $network;

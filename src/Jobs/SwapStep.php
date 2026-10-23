@@ -945,11 +945,18 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * the run that renamed it had carried both before its first rename. The sitemeta pair goes with it when it is
 	 * where the swap left it too.
 	 *
+	 * Putting the site back comes first: a carry that can never pass (the old table's list of active plugins cannot be
+	 * read) is skipped and said in the job's log, and the site is put back all the same; one that fails for a moment
+	 * is waited out, the maintenance file held, and tried again by the next run.
+	 *
 	 * @param JobContext                                                                                          $context Context.
 	 * @param Queries                                                                                             $db      Connection.
 	 * @param array<int, array{seq: int, kind: string, live: string, stage: string, old: string, had_live: bool}> $tables  Table entries.
 	 * @param array<string, bool>                                                                                 $there   Which of their names are there.
 	 * @return void
+	 * @throws TransientFailure When the carry fails for a moment (it wrote nothing; the put-back goes on later).
+	 * @throws LockLost When the job is no longer this run's.
+	 * @throws StaleJob When the job changed meanwhile.
 	 */
 	private function carry_back( JobContext $context, Queries $db, array $tables, array $there ): void {
 		$pairs = array();
@@ -968,7 +975,21 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			return;
 		}
 		$meta = $pairs['meta'] ?? null;
-		$this->state_carry( $db )->carry_back( $pairs['options']['live'], $pairs['options']['old'], null === $meta ? null : $meta['live'], null === $meta ? null : $meta['old'], $context->fence() );
+		try {
+			$this->state_carry( $db )->carry_back( $pairs['options']['live'], $pairs['options']['old'], null === $meta ? null : $meta['live'], null === $meta ? null : $meta['old'], $context->fence() );
+		} catch ( LockLost $e ) {
+			throw $e; // The run that takes the job over puts the site back.
+		} catch ( StaleJob $e ) {
+			throw $e;
+		} catch ( \WPCheckpoint\Restore\Refused $e ) {
+			// The old table's list of active plugins cannot be read: no carry would ever pass. Putting the site back
+			// comes first; the state written since the swap is not carried (the transaction wrote nothing), and said.
+			$context->logger()->warning( 'This plugin\'s own settings written since the swap were not carried back; the site is put back all the same', array( 'reason' => $e->getMessage() ) );
+			return;
+		} catch ( \Throwable $e ) {
+			// A problem of the moment (the transaction wrote nothing): the put-back waits, its file held, and goes on.
+			throw new TransientFailure( 'This plugin\'s own settings could not be carried back into the site as it was yet: ' . $e->getMessage() );
+		}
 		$context->logger()->info( 'This plugin\'s own settings were carried back into the site as it was' );
 		$this->at( 'carried_back' );
 	}
@@ -1878,12 +1899,8 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 *
 	 * @param Queries $db Connection.
 	 * @return StateCarry
-	 * @throws \RuntimeException When the connection is not one the carry works on.
 	 */
 	private function state_carry( Queries $db ): StateCarry {
-		if ( ! $db instanceof ImportSession ) {
-			throw new \RuntimeException( 'The swap\'s connection cannot carry this plugin\'s state.' );
-		}
 		$plugin = isset( $this->parts['plugin'] ) ? (string) $this->parts['plugin'] : plugin_basename( WPCHECKPOINT_FILE );
 		return new StateCarry(
 			$db,
