@@ -121,6 +121,37 @@ final class StateCarryBackTest extends SwapTestCase {
 	}
 
 	/**
+	 * This plugin's keys that are in the live sitemeta more than once (none on a single site).
+	 *
+	 * @return string[]
+	 */
+	private function twice_in_sitemeta(): array {
+		global $wpdb;
+		if ( ! is_multisite() ) {
+			return array();
+		}
+		$wpdb->query( 'COMMIT' );
+		return (array) $wpdb->get_col( $wpdb->prepare( "SELECT meta_key FROM `{$wpdb->base_prefix}sitemeta` WHERE site_id = %d AND meta_key LIKE %s GROUP BY meta_key HAVING COUNT(*) > 1 ORDER BY meta_key", get_current_network_id(), $wpdb->esc_like( 'wpcheckpoint_' ) . '%' ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the sitemeta table.
+	}
+
+	/**
+	 * One row of each of this plugin's keys in the live sitemeta again, the newest kept: a carry back failed between
+	 * the network's replace and delete leaves both (allowed), which the next round would back up and swap in.
+	 *
+	 * @return void
+	 */
+	private function one_row_each(): void {
+		global $wpdb;
+		if ( ! is_multisite() ) {
+			return;
+		}
+		$table = $wpdb->base_prefix . 'sitemeta';
+		$wpdb->query( $wpdb->prepare( "DELETE a FROM `{$table}` a JOIN `{$table}` b ON a.site_id = b.site_id AND a.meta_key = b.meta_key AND a.meta_id < b.meta_id WHERE a.meta_key LIKE %s", $wpdb->esc_like( 'wpcheckpoint_' ) . '%' ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the sitemeta table.
+		$wpdb->query( 'COMMIT' );
+		wp_cache_flush();
+	}
+
+	/**
 	 * A swap made (its run killed right after it was recorded as made), this plugin's state written into the live
 	 * tables since, the old site's lists of active plugins noted; the next check finds the site broken.
 	 *
@@ -130,6 +161,7 @@ final class StateCarryBackTest extends SwapTestCase {
 	private function swapped_and_written( bool $myisam = true ): Job {
 		global $wpdb;
 		$this->forget_state(); // What an earlier round carried back is not this round's.
+		$this->one_row_each();
 		$this->swap_parts['batch']  = 1;
 		$this->verdicts             = array( 'home', true, true, true, true, true, true, true );
 		$this->swap_parts['verify'] = $this->verdicts();
@@ -175,10 +207,8 @@ final class StateCarryBackTest extends SwapTestCase {
 		if ( $carried ) {
 			$this->assertSame( self::STATE, $this->value(), $label . ': the state written since the swap is kept' );
 			if ( is_multisite() ) {
-				global $wpdb;
 				$this->assertSame( self::STATE, $this->meta(), $label . ': in the network\'s sitemeta too' );
-				$twice = $wpdb->get_col( $wpdb->prepare( "SELECT meta_key FROM `{$wpdb->base_prefix}sitemeta` WHERE site_id = %d AND meta_key LIKE %s GROUP BY meta_key HAVING COUNT(*) > 1", get_current_network_id(), $wpdb->esc_like( 'wpcheckpoint_' ) . '%' ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the sitemeta table.
-				$this->assertSame( array(), $twice, $label . ': one row each in the network\'s sitemeta' );
+				$this->assertSame( array(), $this->twice_in_sitemeta(), $label . ': one row each in the network\'s sitemeta' );
 			}
 		} elseif ( false === $carried ) {
 			$this->assertNotSame( self::STATE, $this->value(), $label . ': the state written since the swap was not carried' );
@@ -351,6 +381,10 @@ final class StateCarryBackTest extends SwapTestCase {
 						$this->assertNotContains( 'carry_back_' . $k, $this->seams, $label . ': the control, it failed at that statement' );
 						$this->assertNotContains( 'carried_back', $this->seams, $label . ': the carry failed' );
 						$this->nothing_missing_whatever_the_state( $job, $before, $label );
+						if ( is_multisite() && $k === $statements ) {
+							// Failed at the network's delete: its rows and the live ones both stay (what one_row_each() clears).
+							$this->assertNotSame( array(), $this->twice_in_sitemeta(), $label . ': the control, both rows stay' );
+						}
 					}
 					++$runs;
 					$this->undo( Plugin::instance()->jobs()->find( $job->id ) );
