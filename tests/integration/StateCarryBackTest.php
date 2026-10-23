@@ -568,14 +568,56 @@ final class StateCarryBackTest extends SwapTestCase {
 		$this->write_live( StoredNames::DB_UPGRADE_RETRY, 'deleted meanwhile' );
 		$seen = 0;
 		$this->retype( $job, array(), self::deleting_before_the_replace( $seen ) );
-		$this->seams = array();
-		$this->cli_run( $job );
+		// A server with snapshot isolation (MariaDB from 11.6) refuses the read of the changed row for this run's
+		// transaction (1020, a failure of the moment): the next run, in a new transaction, carries back.
+		for ( $runs = 1; $runs <= 2; $runs++ ) {
+			$this->seams = array();
+			$done        = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
+			if ( Job::RUNNING !== $done->status ) {
+				break;
+			}
+		}
 		$this->assertSame( 1, $seen, 'the control: the row was deleted by another connection, after the carry listed it and before it replaced' );
 		$done = Plugin::instance()->jobs()->find( $job->id );
 		$this->assertContains( 'carried_back', $this->seams, 'carried back all the same (' . $done->status . ', ' . $done->last_error . ': ' . Plugin::instance()->job_presenter()->log_tail( $done ) . ')' );
 		$this->assert_put_back( $job, 'deleted meanwhile' );
 		$this->assertNull( $this->value( '', StoredNames::DB_UPGRADE_RETRY ), 'the row deleted meanwhile is not there' );
 		$this->undo( Plugin::instance()->jobs()->find( $job->id ) );
+	}
+
+	public function test_a_row_changed_since_the_snapshot_is_a_failure_of_the_moment(): void {
+		global $wpdb;
+		$this->innodb_live();
+		$this->write_live( StoredNames::DB_UPGRADE_RETRY, 'as first read', false );
+		$table = $wpdb->base_prefix . 'options';
+		$read  = 'SELECT option_value FROM `' . $table . '` WHERE option_name = ?';
+		$first = ImportSession::open( Credentials::from_wordpress() );
+		$other = ImportSession::open( Credentials::from_wordpress() );
+		try {
+			$first->begin();
+			$this->assertSame( 'as first read', $first->rows( $read, array( StoredNames::DB_UPGRADE_RETRY ) )[0][0] ?? null, 'the control: the snapshot has the row' );
+			$other->rows( 'UPDATE `' . $table . '` SET option_value = ? WHERE option_name = ?', array( 'changed since', StoredNames::DB_UPGRADE_RETRY ) );
+			$other->run( 'COMMIT' );
+			$thrown = null;
+			try {
+				$first->rows( $read . ' FOR UPDATE', array( StoredNames::DB_UPGRADE_RETRY ) );
+			} catch ( \Throwable $e ) {
+				$thrown = $e;
+			}
+			$isolation = strtoupper( (string) $wpdb->get_var( "SHOW VARIABLES LIKE 'innodb_snapshot_isolation'", 1 ) );
+			if ( 'ON' === $isolation ) {
+				$this->assertInstanceOf( \WPCheckpoint\Jobs\TransientFailure::class, $thrown, 'refused as a failure of the moment (' . ( null === $thrown ? 'nothing thrown' : get_class( $thrown ) . ': ' . $thrown->getMessage() ) . ')' );
+				$this->assertSame( 1020, $thrown->getCode() );
+			} else {
+				$this->assertNull( $thrown, 'a server without snapshot isolation reads the row as it is now' );
+			}
+		} finally {
+			$first->rollback();
+			$first->close();
+			$other->close();
+			$wpdb->query( $wpdb->prepare( "DELETE FROM `{$table}` WHERE option_name = %s", StoredNames::DB_UPGRADE_RETRY ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the options table.
+			$wpdb->query( 'COMMIT' );
+		}
 	}
 
 	/**
