@@ -96,7 +96,7 @@ final class StateCarryBackTest extends SwapTestCase {
 	 * @param string $table Live name without the prefix ("options", "sitemeta").
 	 * @return array<string, mixed>
 	 */
-	private function entry( Job $job, string $table ): array {
+	private function plan_entry( Job $job, string $table ): array {
 		global $wpdb;
 		foreach ( $this->plan_of( $job )['tables'] as $entry ) {
 			if ( SwapPlan::TABLE_OF === $entry['kind'] && $wpdb->base_prefix . $table === $entry['live'] ) {
@@ -161,11 +161,11 @@ final class StateCarryBackTest extends SwapTestCase {
 		$this->trace = $this->sandbox . '/trace';
 		$job         = $this->at_swap();
 		$this->killed_at( $job, 'committed', 1 );
-		$old = (string) $this->entry( $job, 'options' )['old'];
+		$old = (string) $this->plan_entry( $job, 'options' )['old'];
 		$this->assertNotNull( $this->value( $old, 'siteurl' ), 'the control: the old options table is there under its moved-aside name' );
 		$this->lists = array(
 			'options' => $this->value( $old, 'active_plugins' ),
-			'meta'    => is_multisite() ? $this->meta( (string) $this->entry( $job, 'sitemeta' )['old'], 'active_sitewide_plugins' ) : null,
+			'meta'    => is_multisite() ? $this->meta( (string) $this->plan_entry( $job, 'sitemeta' )['old'], 'active_sitewide_plugins' ) : null,
 		);
 		$this->write_live( StoredNames::DELETE_DATA, self::STATE );
 		$this->assertNotSame( self::STATE, $this->value( $old ), 'the control: the old table does not have it yet' );
@@ -266,7 +266,7 @@ final class StateCarryBackTest extends SwapTestCase {
 	public function test_an_old_list_of_active_plugins_that_cannot_be_read_is_left_as_it_is_and_the_rows_are_carried(): void {
 		global $wpdb;
 		$job    = $this->swapped_and_written();
-		$old    = (string) $this->entry( $job, 'options' )['old'];
+		$old    = (string) $this->plan_entry( $job, 'options' )['old'];
 		$active = $this->value( $old, 'active_plugins' );
 		$this->assertNotNull( $active, 'the control: the old site has its list of active plugins' );
 		$wpdb->query( $wpdb->prepare( "UPDATE `{$old}` SET option_value = %s WHERE option_name = 'active_plugins'", 'not a list WordPress wrote' ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the old options table.
@@ -358,7 +358,7 @@ final class StateCarryBackTest extends SwapTestCase {
 	public function test_with_a_table_under_the_staging_name_too_nothing_is_carried(): void {
 		global $wpdb;
 		$job   = $this->swapped_and_written();
-		$entry = $this->entry( $job, 'options' );
+		$entry = $this->plan_entry( $job, 'options' );
 		$stage = (string) $entry['stage'];
 		// Something made a table under the staging name since the swap: the one under the live name is then not known
 		// to be the restored one (the put-back moves it out of the way).
