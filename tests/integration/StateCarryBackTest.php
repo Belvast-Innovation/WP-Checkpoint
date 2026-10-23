@@ -306,7 +306,7 @@ final class StateCarryBackTest extends SwapTestCase {
 		$this->assert_nothing_missing( $job, $before, 'whole', true );
 		$statements = count( preg_grep( '/^carry_back_\d+$/', $this->seams ) );
 		$this->assertGreaterThanOrEqual( 2, $statements, 'the control: the carry back replaces and deletes in at least one statement each (' . implode( ',', $this->seams ) . ')' );
-		$this->assertContains( 'o:' . StoredNames::STORAGE, $before, 'the control: the old site has rows of the plugin\'s own (its storage state)' );
+		$this->assertContains( ( is_multisite() ? 'm:' : 'o:' ) . StoredNames::STORAGE, $before, 'the control: the old site has rows of the plugin\'s own (its storage state)' );
 		$this->assertLessThan( array_search( 'table_back', $this->seams, true ), array_search( 'carried_back', $this->seams, true ), 'carried back before the first table was renamed back' );
 		$this->undo( Plugin::instance()->jobs()->find( $job->id ) );
 		$this->tear_down_swap();
@@ -414,13 +414,13 @@ final class StateCarryBackTest extends SwapTestCase {
 	}
 
 	/**
-	 * A connection that throws on the carry back's first insert, once.
+	 * A connection that throws on the carry back's first replace, then lets the statements through.
 	 *
 	 * @param int        $fails How many times (decreased).
 	 * @param \Throwable $error What it throws.
 	 * @return callable
 	 */
-	private static function failing_insert( int &$fails, \Throwable $error ): callable {
+	private static function failing_carry( int &$fails, \Throwable $error ): callable {
 		return static function () use ( &$fails, $error ) {
 			return new class( ImportSession::open( Credentials::from_wordpress() ), $fails, $error ) implements \WPCheckpoint\Restore\Queries {
 				/** @var ImportSession */
@@ -438,7 +438,7 @@ final class StateCarryBackTest extends SwapTestCase {
 					return $this->db->run( $sql );
 				}
 				public function rows( string $sql, array $params = array() ): array {
-					if ( $this->fails > 0 && 0 === strpos( $sql, 'INSERT INTO' ) && false !== strpos( $sql, \WPCheckpoint\Jobs\TempTables::OLD_PREFIX ) ) {
+					if ( $this->fails > 0 && 0 === strpos( $sql, 'REPLACE INTO' ) && false !== strpos( $sql, \WPCheckpoint\Jobs\TempTables::OLD_PREFIX ) ) {
 						--$this->fails;
 						throw $this->error;
 					}
@@ -455,7 +455,7 @@ final class StateCarryBackTest extends SwapTestCase {
 		$job   = $this->swapped_and_written();
 		$fails = 1;
 		// As the connection raises it for a lost connection, a lock wait or a deadlock.
-		$this->retype( $job, array(), self::failing_insert( $fails, new \WPCheckpoint\Jobs\TransientFailure( 'Lost connection to MySQL server during query', 2013 ) ) );
+		$this->retype( $job, array(), self::failing_carry( $fails, new \WPCheckpoint\Jobs\TransientFailure( 'Lost connection to MySQL server during query', 2013 ) ) );
 		$waiting = $this->cli_run( $job );
 		$this->assertSame( 0, $fails, 'the control: the carry back failed once' );
 		$this->assertSame( Job::RUNNING, $waiting->status, 'waited out, not failed (' . $waiting->last_error . ')' );
@@ -471,13 +471,13 @@ final class StateCarryBackTest extends SwapTestCase {
 	public function test_a_carry_back_that_fails_otherwise_does_not_keep_the_site_from_being_put_back(): void {
 		$job   = $this->swapped_and_written( false ); // An old table with transactions: the failed carry leaves nothing.
 		$fails = 1;
-		$this->retype( $job, array(), self::failing_insert( $fails, new \RuntimeException( 'Table is marked as crashed and should be repaired' ) ) );
+		$this->retype( $job, array(), self::failing_carry( $fails, new \RuntimeException( 'Table is marked as crashed and should be repaired' ) ) );
 		$this->seams = array();
 		$this->cli_run( $job );
 		$this->assertSame( 0, $fails, 'the control: the carry back failed' );
 		$this->assertNotContains( 'carried_back', $this->seams, 'not carried' );
 		$this->assert_put_back( $job, 'failed otherwise', false );
-		$this->assertStringContainsString( 'were not carried back; the site is put back all the same', Plugin::instance()->job_presenter()->log_tail( Plugin::instance()->jobs()->find( $job->id ) ) );
+		$this->assertStringContainsString( 'the site is put back all the same', Plugin::instance()->job_presenter()->log_tail( Plugin::instance()->jobs()->find( $job->id ) ) );
 		$this->undo( Plugin::instance()->jobs()->find( $job->id ) );
 	}
 
