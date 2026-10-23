@@ -21,7 +21,8 @@ use PHPUnit\Framework\TestSuite;
  * left at its end. What an earlier run left is reported when the run starts: its tables are removed (the tests database
  * is taken to be this run's while it runs), the restore's and every other table that is neither WordPress's (the main
  * site's and every site's of a network) nor this plugin's own (a test's fixture table, swt_* among them, left by a run
- * that was killed); anything else is left alone.
+ * that was killed); anything else is left alone. The storage directories an earlier run left are kept as they are
+ * through the run: a test (or a class) after which one is gone removed what it did not create, and fails, named.
  *
  * The temporary directory is looked at only when it is the run's own (bin/test-integration.sh gives each run one and
  * names it in WPCHECKPOINT_TEST_RUN_TMP): in a directory other runs share, their entries would be blamed on this
@@ -92,6 +93,23 @@ final class Leftovers implements TestListener {
 	/** @var string[]|null What was there when the running test started. */
 	private $before = null;
 
+	/**
+	 * The storage directories ("storage:") there when the run started, which no test made: one that is gone after a
+	 * test (or a class) was removed by it, which is not its to remove.
+	 *
+	 * @var string[]
+	 */
+	private $kept = array();
+
+	/**
+	 * The storage directories there when this run started (paths), as the registered listener read them: what the
+	 * tests' own clean-up leaves alone (StorageDirs::removable()). Empty for a listener given its lister (a test of this
+	 * class), which never sets it.
+	 *
+	 * @var string[]
+	 */
+	private static $before_run = array();
+
 	/** @var TestResult|null The run's result, for failures of a class or of the run. */
 	private $result = null;
 
@@ -136,6 +154,15 @@ final class Leftovers implements TestListener {
 			);
 		}
 		return array();
+	}
+
+	/**
+	 * The storage directories there when this run started: no test's to remove.
+	 *
+	 * @return string[]
+	 */
+	public static function before_run(): array {
+		return self::$before_run;
 	}
 
 	/**
@@ -239,6 +266,24 @@ final class Leftovers implements TestListener {
 				$now = (array) $this->now();
 			}
 		}
+		if ( array() === $this->suites ) {
+			$this->kept = array_values(
+				array_filter(
+					$now,
+					static function ( string $item ): bool {
+						return 0 === strpos( $item, 'storage:' );
+					}
+				)
+			);
+			if ( ! $this->given ) {
+				self::$before_run = array_map(
+					static function ( string $item ): string {
+						return substr( $item, 8 );
+					},
+					$this->kept
+				);
+			}
+		}
 		$this->suites[] = $now;
 	}
 
@@ -255,7 +300,11 @@ final class Leftovers implements TestListener {
 			return;
 		}
 		$start = (array) array_pop( $this->suites );
-		$left  = array_values( array_diff( $now, $start ) );
+		$gone  = $this->gone( $now );
+		if ( array() !== $gone ) {
+			$this->fail_as( 'removals of ' . $suite->getName(), sprintf( "%s removed what it did not create (there when the run started):\n  %s", $suite->getName(), implode( "\n  ", $gone ) ) );
+		}
+		$left = array_values( array_diff( $now, $start ) );
 		if ( array() !== $left ) {
 			$this->fail_as( 'leftovers of ' . $suite->getName(), sprintf( "%s left behind (removed now):\n  %s", $suite->getName(), implode( "\n  ", $left ) ) );
 			$this->remove( $left );
@@ -295,6 +344,10 @@ final class Leftovers implements TestListener {
 		if ( null === $before || null === $now ) {
 			return;
 		}
+		$gone = $this->gone( $now );
+		if ( array() !== $gone && null !== $this->result ) {
+			$this->result->addFailure( $test, new AssertionFailedError( "The test removed what it did not create (there when the run started):\n  " . implode( "\n  ", $gone ) ), 0.0 );
+		}
 		$left = array_values( array_diff( $now, $before ) );
 		if ( array() === $left ) {
 			return;
@@ -307,7 +360,19 @@ final class Leftovers implements TestListener {
 	}
 
 	/**
-	 * The restore's tables in the database ("wcptmp", "wcpold").
+	 * Of the storage directories there when the run started, those that are gone now; each is said once.
+	 *
+	 * @param string[] $now What is there now.
+	 * @return string[]
+	 */
+	private function gone( array $now ): array {
+		$gone       = array_values( array_diff( $this->kept, $now ) );
+		$this->kept = array_values( array_diff( $this->kept, $gone ) );
+		return $gone;
+	}
+
+	/**
+	 * The restore's tables in the database ("wcptmp", "wcpold"): base tables only (base_tables()).
 	 *
 	 * @return string[]
 	 */
@@ -315,9 +380,28 @@ final class Leftovers implements TestListener {
 		global $wpdb;
 		$tables = array();
 		foreach ( self::TABLE_PREFIXES as $prefix ) {
-			$tables = array_merge( $tables, (array) $wpdb->get_col( "SHOW TABLES LIKE '{$prefix}%'" ) );
+			$tables = array_merge( $tables, self::base_tables( $wpdb, $prefix ) );
 		}
 		return $tables;
+	}
+
+	/**
+	 * The base tables whose names start with a prefix: not a view, and not a temporary table of this connection, which
+	 * some servers list in SHOW TABLES (MariaDB 12) and others do not (MySQL); what the core test case creates through
+	 * wpdb is temporary, gone with the connection, and no one's leftover.
+	 *
+	 * @param \wpdb  $db     Connection.
+	 * @param string $prefix Name prefix.
+	 * @return string[]
+	 */
+	public static function base_tables( \wpdb $db, string $prefix ): array {
+		$out = array();
+		foreach ( (array) $db->get_results( $db->prepare( 'SHOW FULL TABLES LIKE %s', $db->esc_like( $prefix ) . '%' ), ARRAY_N ) as $row ) {
+			if ( isset( $row[0], $row[1] ) && 'BASE TABLE' === $row[1] ) {
+				$out[] = (string) $row[0];
+			}
+		}
+		return $out;
 	}
 
 	/**
@@ -383,14 +467,8 @@ final class Leftovers implements TestListener {
 	 * @return string[]
 	 */
 	public static function site_listing( \wpdb $db ): array {
-		$out  = array();
-		$base = array();
-		foreach ( (array) $db->get_results( 'SHOW FULL TABLES', ARRAY_N ) as $row ) {
-			if ( isset( $row[0], $row[1] ) && 'BASE TABLE' === $row[1] ) {
-				$base[] = (string) $row[0];
-			}
-		}
-		foreach ( self::site_tables( $base, (string) $db->base_prefix ) as $table ) {
+		$out = array();
+		foreach ( self::site_tables( self::base_tables( $db, (string) $db->base_prefix ), (string) $db->base_prefix ) as $table ) {
 			$out[] = 'site-table:' . $table;
 		}
 		if ( is_multisite() ) {

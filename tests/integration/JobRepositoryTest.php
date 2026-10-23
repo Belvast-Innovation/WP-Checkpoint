@@ -2,6 +2,7 @@
 
 namespace WPCheckpoint\Tests\Integration;
 
+use WPCheckpoint\Tests\Fixtures\StorageDirs;
 use WP_UnitTestCase;
 use WPCheckpoint\Admin\Notices;
 use WPCheckpoint\Admin\ReclaimActions;
@@ -78,7 +79,7 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 			}
 			$wpdb->query( 'SET FOREIGN_KEY_CHECKS=1' );
 		}
-		foreach ( glob( WP_CONTENT_DIR . '/wp-checkpoint-*' ) ?: array() as $dir ) {
+		foreach ( StorageDirs::removable() as $dir ) { // Not an earlier run's.
 			Deleter::empty_directory( $dir );
 			@rmdir( $dir );
 		}

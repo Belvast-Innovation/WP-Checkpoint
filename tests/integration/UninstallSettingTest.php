@@ -2,6 +2,7 @@
 
 namespace WPCheckpoint\Tests\Integration;
 
+use WPCheckpoint\Tests\Fixtures\StorageDirs;
 use WP_UnitTestCase;
 use WPCheckpoint\Admin\Notices;
 use WPCheckpoint\Admin\SettingsActions;
@@ -31,7 +32,7 @@ final class UninstallSettingTest extends WP_UnitTestCase {
 	}
 
 	public function tear_down(): void {
-		foreach ( glob( WP_CONTENT_DIR . '/wp-checkpoint-*' ) ?: array() as $dir ) {
+		foreach ( StorageDirs::removable() as $dir ) { // Not an earlier run's.
 			if ( '' === (string) $dir || '' !== Deleter::refusal( (string) $dir ) ) {
 				continue; // Not set, or not one the plugin may delete (what the test made elsewhere it removes itself).
 			}

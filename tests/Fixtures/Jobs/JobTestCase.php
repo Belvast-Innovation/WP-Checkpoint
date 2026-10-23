@@ -2,6 +2,7 @@
 
 namespace WPCheckpoint\Tests\Fixtures\Jobs;
 
+use WPCheckpoint\Tests\Fixtures\StorageDirs;
 use WP_UnitTestCase;
 use WPCheckpoint\Jobs\JobContext;
 use WPCheckpoint\Jobs\StepResult;
@@ -87,7 +88,7 @@ abstract class JobTestCase extends WP_UnitTestCase {
 		global $wpdb;
 		$this->restore_plugin();
 		$wpdb->query( 'DROP TABLE IF EXISTS ' . Schema::jobs_table() );
-		foreach ( glob( WP_CONTENT_DIR . '/wp-checkpoint-*' ) ?: array() as $dir ) {
+		foreach ( StorageDirs::removable() as $dir ) { // Not an earlier run's.
 			if ( '' === (string) $dir || '' !== Deleter::refusal( (string) $dir ) ) {
 				continue; // Not set, or not one the plugin may delete (what the test made elsewhere it removes itself).
 			}

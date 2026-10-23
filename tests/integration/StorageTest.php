@@ -2,6 +2,7 @@
 
 namespace WPCheckpoint\Tests\Integration;
 
+use WPCheckpoint\Tests\Fixtures\StorageDirs;
 use WP_Error;
 use WP_UnitTestCase;
 use WPCheckpoint\Support\Deleter;
@@ -46,7 +47,7 @@ final class StorageTest extends WP_UnitTestCase {
 				@rmdir( $dir );
 			}
 		}
-		foreach ( glob( WP_CONTENT_DIR . '/wp-checkpoint-*' ) ?: array() as $dir ) {
+		foreach ( StorageDirs::removable() as $dir ) { // Not an earlier run's.
 			if ( '' === (string) $dir || '' !== Deleter::refusal( (string) $dir ) ) {
 				continue; // Not set, or not one the plugin may delete (what the test made elsewhere it removes itself).
 			}
@@ -634,7 +635,7 @@ final class StorageTest extends WP_UnitTestCase {
 		$this->assertSame( $before, Directories::load_state() );
 		$this->assertSame( $saved, $saves(), 'nothing saved' );
 		$this->assertSame( $files, $this->snapshot( $dir ) );
-		$this->assertSame( array( $dir ), glob( dirname( $dir ) . '/' . Directories::DIR_PREFIX . '*' ), 'no other directory made' );
+		$this->assertSame( array( $dir ), array_values( array_diff( glob( dirname( $dir ) . '/' . Directories::DIR_PREFIX . '*' ) ?: array(), \WPCheckpoint\Tests\Fixtures\Leftovers::before_run() ) ), 'no other directory made (an earlier run\'s are not this test\'s)' );
 
 		// The control for the counter: another installation's marker, read, is a clone and is saved.
 		file_put_contents( $dir . '/' . OwnerMarker::FILENAME, OwnerMarker::build( 'other-install', '/srv/other/' ) );

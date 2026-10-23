@@ -27,8 +27,13 @@ final class LeftoversCheckTest extends WP_UnitTestCase {
 			// On the connection itself: through wpdb a test's CREATE TABLE becomes a temporary table.
 			$this->assertTrue( mysqli_query( $wpdb->dbh, "CREATE TABLE `{$name}` ( id int )" ), $name );
 		}
+		// A temporary table of the same form (what the core test case makes through wpdb) is gone with the connection.
+		$temp = 'wcptmpabcdef_1_beef_leftover_temp';
+		$this->assertTrue( mysqli_query( $wpdb->dbh, "CREATE TEMPORARY TABLE `{$temp}` ( id int )" ), $temp );
 		$items = Leftovers::listing();
-		$this->assertContains( 'table:' . $table, $items );
+		mysqli_query( $wpdb->dbh, "DROP TEMPORARY TABLE IF EXISTS `{$temp}`" );
+		$this->assertNotContains( 'table:' . $temp, $items, 'a temporary table is not listed' );
+		$this->assertContains( 'table:' . $table, $items, 'the control: a base table of the same form is' );
 		$this->assertContains( 'table:' . $other, $items );
 		$this->assertContains( 'temp:' . Leftovers::run_temp_dir() . '/' . basename( $dir ), $items );
 

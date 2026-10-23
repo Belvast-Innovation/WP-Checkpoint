@@ -602,16 +602,17 @@ final class RestoreStagingTest extends RestoreTestCase {
 		$base    = $this->with( array( 'wp-content/uploads/a.txt' => 'a' ) );
 		$outside = sys_get_temp_dir() . '/wpc-elsewhere-' . bin2hex( random_bytes( 3 ) );
 		$roots   = array();
+		$before  = glob( WP_CONTENT_DIR . '/wp-checkpoint-stage-*' ) ?: array(); // Not this restore's: left alone.
 		$type    = $this->type_with(
 			new FileStagingStep(
 				$this->staging_parts(
 					array(
-						'at' => function ( string $point ) use ( $outside, &$roots ): void {
+						'at' => function ( string $point ) use ( $outside, &$roots, $before ): void {
 							if ( 'identified' !== $point ) {
 								return;
 							}
 							// Every root moved aside, a link to a copy of its tree in its place.
-							foreach ( glob( WP_CONTENT_DIR . '/wp-checkpoint-stage-*' ) as $root ) {
+							foreach ( array_diff( glob( WP_CONTENT_DIR . '/wp-checkpoint-stage-*' ) ?: array(), $before ) as $root ) {
 								exec( 'cp -a ' . escapeshellarg( $root ) . ' ' . escapeshellarg( $outside ) );
 								exec( 'rm -rf ' . escapeshellarg( $root ) );
 								symlink( $outside, $root );
@@ -743,7 +744,7 @@ final class RestoreStagingTest extends RestoreTestCase {
 		try {
 			$job = $this->run_restore( $this->job_of_type( $type, $base ) );
 			$this->assertSame( Job::FAILED, $job->status );
-			$roots = glob( WP_CONTENT_DIR . '/wp-checkpoint-stage-*' );
+			$roots = array_values( array_diff( glob( WP_CONTENT_DIR . '/wp-checkpoint-stage-*' ) ?: array(), \WPCheckpoint\Tests\Fixtures\Leftovers::before_run() ) ); // Not an earlier run's.
 			$this->assertCount( 1, $roots, 'the control: the root was made before the death' );
 			foreach ( array( 'index.php', '.htaccess' ) as $name ) {
 				symlink( $outside . '/' . $name, $roots[0] . '/' . $name );

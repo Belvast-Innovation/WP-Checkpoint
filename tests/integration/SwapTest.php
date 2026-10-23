@@ -470,4 +470,17 @@ final class SwapTest extends SwapTestCase {
 		$this->assertSame( Job::COMPLETED, $done->status, (string) $done->last_error );
 		$this->assertFalse( wp_cache_get( 'wpcheckpoint_test_marker', 'wpcheckpoint_test' ), 'flushed: nothing of the old site is read from it' );
 	}
+
+	public function test_discarding_abandoned_jobs_after_the_jobs_table_was_dropped_reads_nothing(): void {
+		global $wpdb;
+		$table = \WPCheckpoint\Jobs\JobRepository::table();
+		$wpdb->query( "DROP TABLE IF EXISTS {$table}" ); // As a test's own tear-down does before the shared one runs.
+		$quiet = $wpdb->suppress_errors( true );
+		$wpdb->get_col( "SELECT id FROM {$table}" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the plugin's table.
+		$this->assertNotSame( '', $wpdb->last_error, 'the control: reading the dropped table is an error, seen here' );
+		$wpdb->last_error = '';
+		$this->discard_abandoned();
+		$wpdb->suppress_errors( $quiet );
+		$this->assertSame( '', $wpdb->last_error, 'the dropped table was not read' );
+	}
 }

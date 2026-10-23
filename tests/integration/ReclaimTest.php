@@ -2,6 +2,7 @@
 
 namespace WPCheckpoint\Tests\Integration;
 
+use WPCheckpoint\Tests\Fixtures\StorageDirs;
 use WP_UnitTestCase;
 use WPCheckpoint\Admin\Notices;
 use WPCheckpoint\Admin\ReclaimActions;
@@ -46,7 +47,7 @@ final class ReclaimTest extends WP_UnitTestCase {
 	}
 
 	public function tear_down(): void {
-		foreach ( glob( WP_CONTENT_DIR . '/wp-checkpoint-*' ) ?: array() as $dir ) {
+		foreach ( StorageDirs::removable() as $dir ) { // Not an earlier run's.
 			Deleter::empty_directory( $dir );
 			@rmdir( $dir );
 		}
@@ -252,7 +253,7 @@ final class ReclaimTest extends WP_UnitTestCase {
 		$this->assertSame( $this->root . '/releases/20260918/', $state['auto_reclaimed']['from'] );
 		$this->assertTrue( OwnerMarker::matches( (string) file_get_contents( $base . '/' . OwnerMarker::FILENAME ), $state['install_id'], $this->root . '/releases/20260919/' ) );
 		$this->assertStringContainsString( 'reclaimed automatically', (string) file_get_contents( $base . '/logs/storage.log' ) );
-		$this->assertSame( array(), glob( WP_CONTENT_DIR . '/wp-checkpoint-*' ) ? array_diff( glob( WP_CONTENT_DIR . '/wp-checkpoint-*' ), array( $base ) ) : array(), 'no replacement directory was created' );
+		$this->assertSame( array(), array_values( array_diff( StorageDirs::removable(), array( $base ) ) ), 'no replacement directory was created (an earlier run\'s are not this test\'s)' );
 
 		$notices = new Notices( $third );
 		$this->assertArrayHasKey( 'auto_reclaimed', $notices->notices() );

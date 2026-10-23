@@ -35,6 +35,22 @@ final class StorageDirs {
 	}
 
 	/**
+	 * The storage directories in wp-content a test may remove after itself: every one this run made (the plugin's,
+	 * which the tests make and leave from test to test), none that was there when the run started (Leftovers::before_run():
+	 * an earlier run's, which no test made; the leftover check fails a test after which one is gone).
+	 *
+	 * @return string[]
+	 */
+	public static function removable(): array {
+		if ( ! defined( 'WP_CONTENT_DIR' ) ) {
+			return array();
+		}
+		$all = glob( WP_CONTENT_DIR . '/' . Directories::DIR_PREFIX . '*', GLOB_ONLYDIR ) ?: array();
+		sort( $all );
+		return array_values( array_diff( $all, Leftovers::before_run() ) );
+	}
+
+	/**
 	 * The storage directory the stored state names, read from the database itself ('' for none): not through the
 	 * object cache, which still holds a test's state after its transaction was rolled back, until the next test's
 	 * set-up flushes it. The value's "path" is read from its serialized text by its length (nothing is unserialized).
