@@ -107,30 +107,6 @@ final class StateCarryBackTest extends SwapTestCase {
 	}
 
 	/**
-	 * The names of this plugin's own rows in the live tables, "table:name" (StateCarry::own_names(): what the carry
-	 * writes), without the rows of active plugins (left alone by the carry back).
-	 *
-	 * @return string[]
-	 */
-	private function own_live(): array {
-		global $wpdb;
-		$wpdb->query( 'COMMIT' );
-		$db  = ImportSession::open( Credentials::from_wordpress() );
-		$out = array();
-		foreach ( StateCarry::counted( $wpdb->base_prefix, is_multisite() ? get_current_network_id() : 0 ) as $table => $how ) {
-			foreach ( array_diff( StateCarry::own_names( $db, $table, $how['sitemeta'], $how['site'] ), array( StateCarry::ACTIVE, StateCarry::ACTIVE_NETWORK ) ) as $name ) {
-				$column = $how['sitemeta'] ? 'meta_key' : 'option_name';
-				if ( null !== $wpdb->get_var( $wpdb->prepare( "SELECT 1 FROM `{$table}` WHERE {$column} = %s LIMIT 1", $name ) ) ) { // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- a carried table and its column.
-					$out[] = $table . ':' . $name;
-				}
-			}
-		}
-		$db->close();
-		sort( $out );
-		return $out;
-	}
-
-	/**
 	 * Remove the row this test writes (the plugin's uninstall setting) from the live tables.
 	 *
 	 * @return void
@@ -206,39 +182,178 @@ final class StateCarryBackTest extends SwapTestCase {
 		}
 	}
 
-	public function test_a_put_back_cut_short_after_any_statement_of_the_carry_back_keeps_the_state_written_since_the_swap(): void {
-		// The whole put-back first: its carry's statements counted, the plugin's rows it ends with noted.
-		$job         = $this->swapped_and_written();
-		$this->seams = array();
+	/**
+	 * The names of this plugin's own rows in an options table (and a sitemeta table), "o:name" / "m:name": the exact
+	 * names only (a transient may be deleted by a run on its own), without the lists of active plugins.
+	 *
+	 * @param string      $options Options table.
+	 * @param string|null $meta    Sitemeta table, or null.
+	 * @return string[]
+	 */
+	private function own_names_in( string $options, $meta ): array {
+		global $wpdb;
+		$wpdb->query( 'COMMIT' );
+		$db    = ImportSession::open( Credentials::from_wordpress() );
+		$out   = array();
+		$tables = array( 'o' => array( $options, false, array() ) );
+		if ( null !== $meta ) {
+			$tables['m'] = array( $meta, true, array( (string) get_current_network_id() ) );
+		}
+		foreach ( $tables as $key => $how ) {
+			foreach ( StateCarry::own_names( $db, $how[0], $how[1], $how[2] ) as $name ) {
+				if ( in_array( $name, array( StateCarry::ACTIVE, StateCarry::ACTIVE_NETWORK ), true ) || 1 === preg_match( '/^_(site_)?transient_/', $name ) ) {
+					continue;
+				}
+				$column = $how[1] ? 'meta_key' : 'option_name';
+				$site   = $how[1] ? $wpdb->prepare( ' AND site_id = %d', get_current_network_id() ) : '';
+				if ( null !== $wpdb->get_var( $wpdb->prepare( "SELECT 1 FROM `{$how[0]}` WHERE {$column} = %s{$site} LIMIT 1", $name ) ) ) { // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- a carried table and its column.
+					$out[] = $key . ':' . $name;
+				}
+			}
+		}
+		$db->close();
+		sort( $out );
+		return $out;
+	}
+
+	/**
+	 * The old tables of a job (options, and on a network sitemeta).
+	 *
+	 * @param Job $job Job.
+	 * @return array{0: string, 1: string|null}
+	 */
+	private function old_tables( Job $job ): array {
+		return array( (string) $this->plan_entry( $job, 'options' )['old'], is_multisite() ? (string) $this->plan_entry( $job, 'sitemeta' )['old'] : null );
+	}
+
+	/**
+	 * A connection that throws on the carry back's $nth statement into an old table (REPLACE or DELETE), once.
+	 *
+	 * @param int        $nth   Which statement (from 1).
+	 * @param int        $seen  Statements seen (counted).
+	 * @param \Throwable $error What it throws.
+	 * @return callable
+	 */
+	private static function failing_at( int $nth, int &$seen, \Throwable $error ): callable {
+		return static function () use ( $nth, &$seen, $error ) {
+			return new class( ImportSession::open( Credentials::from_wordpress() ), $nth, $seen, $error ) implements \WPCheckpoint\Restore\Queries {
+				/** @var ImportSession */
+				private $db;
+				/** @var int */
+				private $nth;
+				/** @var int */
+				private $seen;
+				/** @var \Throwable */
+				private $error;
+				public function __construct( $db, int $nth, int &$seen, \Throwable $error ) {
+					$this->db    = $db;
+					$this->nth   = $nth;
+					$this->seen  = &$seen;
+					$this->error = $error;
+				}
+				public function run( string $sql ): int {
+					return $this->db->run( $sql );
+				}
+				public function rows( string $sql, array $params = array() ): array {
+					if ( ( 0 === strpos( $sql, 'REPLACE INTO' ) || 0 === strpos( $sql, 'DELETE FROM' ) ) && false !== strpos( $sql, \WPCheckpoint\Jobs\TempTables::OLD_PREFIX ) && ++$this->seen === $this->nth ) {
+						throw $this->error;
+					}
+					return $this->db->rows( $sql, $params );
+				}
+				public function write( string $sql, array $params ): int {
+					return $this->db->write( $sql, $params );
+				}
+			};
+		};
+	}
+
+	/**
+	 * The invariant of the carry back, whatever cut it or failed it: the site put back, and every own name the old
+	 * site had is there, under the live name.
+	 *
+	 * @param Job      $job    Job.
+	 * @param string[] $before The old site's own names before the carry (own_names_in()).
+	 * @param string   $label  For the messages.
+	 * @param bool     $state  Whether the state written since the swap is expected carried.
+	 * @return void
+	 */
+	private function assert_nothing_missing( Job $job, array $before, string $label, bool $state ): void {
+		global $wpdb;
+		$this->assert_put_back( $job, $label, $state );
+		$after = $this->own_names_in( $wpdb->base_prefix . 'options', is_multisite() ? $wpdb->base_prefix . 'sitemeta' : null );
+		$this->assertSame( array(), array_values( array_diff( $before, $after ) ), $label . ': no own row of the old site is missing' );
+	}
+
+	public function test_after_any_statement_of_the_carry_back_is_cut_or_fails_no_row_of_the_plugin_is_missing(): void {
+		global $wpdb;
+		// The whole put-back first: its carry's statements counted, the old site's own names noted.
+		$job              = $this->swapped_and_written();
+		list( $o, $m )    = $this->old_tables( $job );
+		$before           = $this->own_names_in( $o, $m );
+		$this->seams      = array();
 		$this->cli_run( $job );
-		$this->assert_put_back( $job, 'whole' );
-		$own        = $this->own_live();
+		$this->assert_nothing_missing( $job, $before, 'whole', true );
 		$statements = count( preg_grep( '/^carry_back_\d+$/', $this->seams ) );
-		$this->assertGreaterThanOrEqual( 2, $statements, 'the control: the carry back deletes and inserts in at least one statement each (' . implode( ',', $this->seams ) . ')' );
-		$this->assertContains( 'carried_back', $this->seams );
+		$this->assertGreaterThanOrEqual( 2, $statements, 'the control: the carry back replaces and deletes in at least one statement each (' . implode( ',', $this->seams ) . ')' );
+		$this->assertContains( 'o:' . StoredNames::STORAGE, $before, 'the control: the old site has rows of the plugin\'s own (its storage state)' );
 		$this->assertLessThan( array_search( 'table_back', $this->seams, true ), array_search( 'carried_back', $this->seams, true ), 'carried back before the first table was renamed back' );
-		$this->assertContains( $GLOBALS['wpdb']->base_prefix . 'options:' . StoredNames::DELETE_DATA, $own, 'the control: the plugin\'s rows are noted' );
 		$this->undo( Plugin::instance()->jobs()->find( $job->id ) );
 		$this->tear_down_swap();
 		$this->set_up_swap();
 
-		// Killed after each statement of the carry back (0: right after the reverse was recorded), then finished.
-		for ( $k = 0; $k <= $statements; $k++ ) {
-			$label = 'killed after carry-back statement ' . $k;
-			$job   = $this->swapped_and_written();
-			file_put_contents( $this->trace, '' );
-			$this->killed_at( $job, 0 === $k ? 'reverse_recorded' : 'carry_back_' . $k, 1 );
-			$this->assertSame( 'reverse', Plugin::instance()->jobs()->find( $job->id )->cursor['phase'] ?? '', $label . ': the reverse was recorded' );
-			$this->seams = array();
-			$this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
-			$this->assertContains( 'carried_back', $this->seams, $label . ': the finishing run carried back again (both tables still where the swap left them)' );
-			$this->assert_put_back( $job, $label );
-			$this->assertSame( $own, $this->own_live(), $label . ': the plugin\'s rows are those of a whole carry back' );
-			$this->undo( Plugin::instance()->jobs()->find( $job->id ) );
-			$this->trace = '';
-			$this->tear_down_swap();
-			$this->set_up_swap();
+		$runs = 0;
+		foreach ( array( 'MyISAM', 'InnoDB' ) as $engine ) {
+			for ( $k = 0; $k <= $statements; $k++ ) {
+				foreach ( array( 'killed', 'failed' ) as $how ) {
+					if ( 'failed' === $how && 0 === $k ) {
+						continue; // A failure is at a statement.
+					}
+					$label         = sprintf( '%s old table, %s at carry-back statement %d', $engine, $how, $k );
+					$job           = $this->swapped_and_written( 'MyISAM' === $engine );
+					list( $o, $m ) = $this->old_tables( $job );
+					if ( 'MyISAM' === $engine && null !== $m ) {
+						$this->assertNotFalse( $wpdb->query( "ALTER TABLE `{$m}` ENGINE=MyISAM" ), $wpdb->last_error );
+					}
+					$before = $this->own_names_in( $o, $m );
+					if ( 'killed' === $how ) {
+						file_put_contents( $this->trace, '' );
+						$this->killed_at( $job, 0 === $k ? 'reverse_recorded' : 'carry_back_' . $k, 1 );
+						$this->seams = array();
+						$this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
+						$this->assertContains( 'carried_back', $this->seams, $label . ': the finishing run carried back again' );
+						$this->assert_nothing_missing( $job, $before, $label, true );
+					} else {
+						$seen = 0;
+						$this->retype( $job, array(), self::failing_at( $k, $seen, new \RuntimeException( 'Table is marked as crashed and should be repaired' ) ) );
+						$this->seams = array();
+						$this->cli_run( $job );
+						$this->assertGreaterThanOrEqual( $k, $seen, $label . ': the control, the statement was reached' );
+						$this->assertNotContains( 'carried_back', $this->seams, $label . ': the carry failed' );
+						$this->nothing_missing_whatever_the_state( $job, $before, $label );
+					}
+					++$runs;
+					$this->undo( Plugin::instance()->jobs()->find( $job->id ) );
+					$this->trace = '';
+					$this->tear_down_swap();
+					$this->set_up_swap();
+				}
+			}
 		}
+		$this->assertSame( 2 * ( 2 * $statements + 1 ), $runs, 'the control: every statement cut and failed, on both engines' );
+	}
+
+	/**
+	 * assert_nothing_missing() for a carry that failed part-way: the state written since the swap may or may not have
+	 * been carried before the failure.
+	 *
+	 * @param Job      $job    Job.
+	 * @param string[] $before The old site's own names before the carry.
+	 * @param string   $label  For the messages.
+	 * @return void
+	 */
+	private function nothing_missing_whatever_the_state( Job $job, array $before, string $label ): void {
+		$this->assert_nothing_missing( $job, $before, $label, self::STATE === $this->value() );
+		$this->assertStringContainsString( 'were not carried back (or only some of them); the site is put back all the same', Plugin::instance()->job_presenter()->log_tail( Plugin::instance()->jobs()->find( $job->id ) ), $label );
 	}
 
 	public function test_the_self_check_row_is_not_carried_back(): void {
