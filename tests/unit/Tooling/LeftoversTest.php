@@ -102,6 +102,49 @@ final class LeftoversTest extends TestCase {
 		$this->assertSame( 1, $result->failureCount(), 'nothing new left at the end' );
 	}
 
+	public function test_a_test_that_removes_a_storage_directory_there_when_the_run_started_fails_by_name(): void {
+		$result      = new TestResult();
+		$listener    = $this->listener();
+		$root        = new TestSuite( 'root' );
+		$class       = new TestSuite( 'SomeTest' );
+		$earlier     = array( 'storage:/srv/site/wp-content/wp-checkpoint-0123456789ab', 'storage:/srv/site/wp-content/wp-checkpoint-stage-0123456789ab-1-x' );
+		$this->there = $earlier;
+		$listener->startTestSuite( $root );
+		$this->assertSame( $earlier, $this->there, 'the control: an earlier run\'s storage directories are left alone at the start' );
+		$listener->startTestSuite( $class );
+
+		$own = self::probe( $result, 'test_own' );
+		$listener->startTest( $own );
+		$this->there[] = 'storage:/srv/site/wp-content/wp-checkpoint-ffffffffffff';
+		$this->there   = array_values( array_diff( $this->there, array( 'storage:/srv/site/wp-content/wp-checkpoint-ffffffffffff' ) ) ); // Made and removed by the test.
+		$listener->endTest( $own, 0.1 );
+		$this->assertSame( 0, $result->failureCount(), 'the control: a test that removes only what it made passes' );
+
+		$wide = self::probe( $result, 'test_wide' );
+		$listener->startTest( $wide );
+		$this->there = array( $earlier[1] ); // It removed one that was there when the run started.
+		$listener->endTest( $wide, 0.1 );
+		$this->assertSame( 1, $result->failureCount() );
+		$failure = $result->failures()[0];
+		$this->assertSame( $wide, $failure->failedTest() );
+		$this->assertStringContainsString( 'removed what it did not create', $failure->exceptionMessage() );
+		$this->assertStringContainsString( 'wp-checkpoint-0123456789ab', $failure->exceptionMessage() );
+		$this->assertStringNotContainsString( 'stage-0123456789ab', $failure->exceptionMessage(), 'only what is gone' );
+
+		$next = self::probe( $result, 'test_next' );
+		$listener->startTest( $next );
+		$listener->endTest( $next, 0.1 );
+		$this->assertSame( 1, $result->failureCount(), 'said once: the next test is not blamed' );
+
+		$this->there = array(); // Removed outside any test (a class's own tear-down).
+		$listener->endTestSuite( $class );
+		$this->assertSame( 2, $result->failureCount(), 'the class is named' );
+		$this->assertStringContainsString( 'SomeTest removed what it did not create', $result->failures()[1]->exceptionMessage() );
+		$this->assertStringContainsString( 'stage-0123456789ab', $result->failures()[1]->exceptionMessage() );
+		$listener->endTestSuite( $root );
+		$this->assertSame( 2, $result->failureCount() );
+	}
+
 	public function test_an_earlier_runs_maintenance_file_goes_at_the_start_like_its_tables(): void {
 		$listener    = $this->listener();
 		$this->there = array( 'maintenance:/srv/site/.maintenance', 'temp:/tmp/wpc-plugin-00000000' );

@@ -21,7 +21,8 @@ use PHPUnit\Framework\TestSuite;
  * left at its end. What an earlier run left is reported when the run starts: its tables are removed (the tests database
  * is taken to be this run's while it runs), the restore's and every other table that is neither WordPress's (the main
  * site's and every site's of a network) nor this plugin's own (a test's fixture table, swt_* among them, left by a run
- * that was killed); anything else is left alone.
+ * that was killed); anything else is left alone. The storage directories an earlier run left are kept as they are
+ * through the run: a test (or a class) after which one is gone removed what it did not create, and fails, named.
  *
  * The temporary directory is looked at only when it is the run's own (bin/test-integration.sh gives each run one and
  * names it in WPCHECKPOINT_TEST_RUN_TMP): in a directory other runs share, their entries would be blamed on this
@@ -91,6 +92,14 @@ final class Leftovers implements TestListener {
 
 	/** @var string[]|null What was there when the running test started. */
 	private $before = null;
+
+	/**
+	 * The storage directories ("storage:") there when the run started, which no test made: one that is gone after a
+	 * test (or a class) was removed by it, which is not its to remove.
+	 *
+	 * @var string[]
+	 */
+	private $kept = array();
 
 	/** @var TestResult|null The run's result, for failures of a class or of the run. */
 	private $result = null;
@@ -239,6 +248,16 @@ final class Leftovers implements TestListener {
 				$now = (array) $this->now();
 			}
 		}
+		if ( array() === $this->suites ) {
+			$this->kept = array_values(
+				array_filter(
+					$now,
+					static function ( string $item ): bool {
+						return 0 === strpos( $item, 'storage:' );
+					}
+				)
+			);
+		}
 		$this->suites[] = $now;
 	}
 
@@ -255,7 +274,11 @@ final class Leftovers implements TestListener {
 			return;
 		}
 		$start = (array) array_pop( $this->suites );
-		$left  = array_values( array_diff( $now, $start ) );
+		$gone  = $this->gone( $now );
+		if ( array() !== $gone ) {
+			$this->fail_as( 'removals of ' . $suite->getName(), sprintf( "%s removed what it did not create (there when the run started):\n  %s", $suite->getName(), implode( "\n  ", $gone ) ) );
+		}
+		$left = array_values( array_diff( $now, $start ) );
 		if ( array() !== $left ) {
 			$this->fail_as( 'leftovers of ' . $suite->getName(), sprintf( "%s left behind (removed now):\n  %s", $suite->getName(), implode( "\n  ", $left ) ) );
 			$this->remove( $left );
@@ -295,6 +318,10 @@ final class Leftovers implements TestListener {
 		if ( null === $before || null === $now ) {
 			return;
 		}
+		$gone = $this->gone( $now );
+		if ( array() !== $gone && null !== $this->result ) {
+			$this->result->addFailure( $test, new AssertionFailedError( "The test removed what it did not create (there when the run started):\n  " . implode( "\n  ", $gone ) ), 0.0 );
+		}
 		$left = array_values( array_diff( $now, $before ) );
 		if ( array() === $left ) {
 			return;
@@ -304,6 +331,18 @@ final class Leftovers implements TestListener {
 			$this->result->addFailure( $test, new AssertionFailedError( "The test left behind (removed now):\n  " . implode( "\n  ", $left ) ), 0.0 );
 		}
 		$this->remove( $left );
+	}
+
+	/**
+	 * Of the storage directories there when the run started, those that are gone now; each is said once.
+	 *
+	 * @param string[] $now What is there now.
+	 * @return string[]
+	 */
+	private function gone( array $now ): array {
+		$gone       = array_values( array_diff( $this->kept, $now ) );
+		$this->kept = array_values( array_diff( $this->kept, $gone ) );
+		return $gone;
 	}
 
 	/**
