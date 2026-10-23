@@ -573,15 +573,19 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		}
 		global $wpdb;
 		$subsite = self::factory()->blog->create();
-		switch_to_blog( $subsite );
 		try {
-			$this->assertSame( $wpdb->base_prefix . 'wpcheckpoint_jobs', Schema::jobs_table(), 'not the sub-site prefix' );
-			$job = $this->repo->create( 'export' );
-			$this->assertSame( $subsite, $job->site_id );
+			switch_to_blog( $subsite );
+			try {
+				$this->assertSame( $wpdb->base_prefix . 'wpcheckpoint_jobs', Schema::jobs_table(), 'not the sub-site prefix' );
+				$job = $this->repo->create( 'export' );
+				$this->assertSame( $subsite, $job->site_id );
+			} finally {
+				restore_current_blog();
+			}
+			$this->assertSame( $job->id, $this->repo->find( $job->id )->id, 'visible from the main site' );
 		} finally {
-			restore_current_blog();
+			Leftovers::remove_site( $subsite ); // Created with real tables (the filters are off): committed.
 		}
-		$this->assertSame( $job->id, $this->repo->find( $job->id )->id, 'visible from the main site' );
 	}
 
 	/**

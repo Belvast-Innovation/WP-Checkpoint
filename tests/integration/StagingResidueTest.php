@@ -13,6 +13,7 @@ use WPCheckpoint\Support\Options;
 use WPCheckpoint\Support\Schema;
 use WPCheckpoint\Support\Uninstaller;
 use WPCheckpoint\Tests\Fixtures\Jobs\JobTestCase;
+use WPCheckpoint\Tests\Fixtures\Leftovers;
 
 /**
  * A restore's staging roots and probes live next to the site's
@@ -490,6 +491,7 @@ final class StagingResidueTest extends JobTestCase {
 			$this->assertSame( $main, ScanRoots::site_directories()['uploads'] );
 		} finally {
 			restore_current_blog();
+			Leftovers::remove_site( $blog ); // Created with real tables (the filters are off): committed.
 		}
 	}
 

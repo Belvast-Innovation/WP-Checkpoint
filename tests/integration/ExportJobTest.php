@@ -17,6 +17,7 @@ use WPCheckpoint\Plugin;
 use WPCheckpoint\Support\Deleter;
 use WPCheckpoint\Support\Schema;
 use WPCheckpoint\Tests\Fixtures\Jobs\JobTestCase;
+use WPCheckpoint\Tests\Fixtures\Leftovers;
 
 /**
  * The export job as the plugin registers it, driven the way
@@ -247,13 +248,17 @@ final class ExportJobTest extends JobTestCase {
 			$this->markTestSkipped( 'Multisite only.' );
 		}
 		global $wpdb;
-		$site              = self::factory()->blog->create();
-		list( $code, $id ) = $this->run_export( array( 'yes' => true ) );
-		$this->assertSame( RunLoop::EXIT_COMPLETED, $code, implode( "\n", $this->err ) );
-		$tables = ExportPlan::read( $this->work( $id ), ExportPlan::PLAN )['tables'];
-		$this->assertContains( $wpdb->get_blog_prefix( $site ) . 'posts', $tables, 'a sub-site is this network, not a neighbour' );
-		$this->assertContains( $wpdb->base_prefix . 'users', $tables );
-		$this->assertCount( 0, preg_grep( '/look like another WordPress installation/', $this->out ) );
+		$site = self::factory()->blog->create();
+		try {
+			list( $code, $id ) = $this->run_export( array( 'yes' => true ) );
+			$this->assertSame( RunLoop::EXIT_COMPLETED, $code, implode( "\n", $this->err ) );
+			$tables = ExportPlan::read( $this->work( $id ), ExportPlan::PLAN )['tables'];
+			$this->assertContains( $wpdb->get_blog_prefix( $site ) . 'posts', $tables, 'a sub-site is this network, not a neighbour' );
+			$this->assertContains( $wpdb->base_prefix . 'users', $tables );
+			$this->assertCount( 0, preg_grep( '/look like another WordPress installation/', $this->out ) );
+		} finally {
+			Leftovers::remove_site( $site ); // Created with real tables (the filters are off): committed.
+		}
 	}
 
 	/**

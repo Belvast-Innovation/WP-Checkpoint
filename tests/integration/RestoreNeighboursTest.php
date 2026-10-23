@@ -17,6 +17,7 @@ use WPCheckpoint\Restore\RestoreFiles;
 use WPCheckpoint\Restore\SwapPlan;
 use WPCheckpoint\Standalone\Credentials;
 use WPCheckpoint\Support\Deleter;
+use WPCheckpoint\Tests\Fixtures\Leftovers;
 use WPCheckpoint\Tests\Fixtures\Restore\RestoreTestCase;
 
 /**
@@ -427,20 +428,27 @@ final class RestoreNeighboursTest extends RestoreTestCase {
 	public function test_only_this_sites_own_keys_and_its_sites_are_not_asked_about(): void {
 		global $wpdb;
 		$this->neighbour();
-		if ( is_multisite() ) {
-			$blog = self::factory()->blog->create();
-			$this->role_key( $wpdb->get_blog_prefix( $blog ) . 'capabilities' ); // A site of this network.
+		$blog = 0;
+		try {
+			if ( is_multisite() ) {
+				$blog = self::factory()->blog->create();
+				$this->role_key( $wpdb->get_blog_prefix( $blog ) . 'capabilities' ); // A site of this network.
+			}
+			$base = $this->backup( array_merge( self::site_tables(), array( $wpdb->users, $wpdb->usermeta ) ) );
+			$job  = $this->run_restore( $this->start_restore( $base ) );
+			$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error . wp_json_encode( $job->questions ) );
+			$this->assertSame( array(), $job->questions );
+			$this->assertContains( $wpdb->usermeta, $this->swapped( $job ), 'restored as this site\'s' );
+			// The control: a key of any other prefix is looked at, and asked about.
+			$this->role_key( $wpdb->base_prefix . 'new_capabilities' );
+			$asked = $this->run_restore( $this->start_restore( $base ) );
+			$this->assertSame( Job::PAUSED, $asked->status, (string) $asked->last_error );
+			$this->assertSame( array( 'shared_tables' ), self::keys_of( $asked ) );
+		} finally {
+			if ( 0 !== $blog ) {
+				Leftovers::remove_site( $blog ); // Created with real tables (the filters are off): committed.
+			}
 		}
-		$base = $this->backup( array_merge( self::site_tables(), array( $wpdb->users, $wpdb->usermeta ) ) );
-		$job  = $this->run_restore( $this->start_restore( $base ) );
-		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error . wp_json_encode( $job->questions ) );
-		$this->assertSame( array(), $job->questions );
-		$this->assertContains( $wpdb->usermeta, $this->swapped( $job ), 'restored as this site\'s' );
-		// The control: a key of any other prefix is looked at, and asked about.
-		$this->role_key( $wpdb->base_prefix . 'new_capabilities' );
-		$asked = $this->run_restore( $this->start_restore( $base ) );
-		$this->assertSame( Job::PAUSED, $asked->status, (string) $asked->last_error );
-		$this->assertSame( array( 'shared_tables' ), self::keys_of( $asked ) );
 	}
 
 	public function test_another_installation_whose_prefix_is_not_under_this_sites_is_found_by_its_keys(): void {
