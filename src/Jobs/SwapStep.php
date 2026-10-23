@@ -948,11 +948,12 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * where the swap left it too.
 	 *
 	 * Putting the site back comes first: a carry that fails for a moment (TransientFailure, as the connection raises
-	 * for a lock wait, a deadlock or a lost connection) is waited out, the maintenance file held, and tried again by
-	 * the next run; one that fails for any other reason is said in the job's log (with what was thrown), and the site
-	 * is put back without it: on an old table without transactions the statements sent before the failure stay, and
-	 * they never take away a row the old table had under one of this plugin's names the live table has: it stays, or
-	 * the live one is there, or both (a sitemeta table) (StateCarry::carry_back()).
+	 * for a lock wait, a deadlock, a row changed since its snapshot or a lost connection) is waited out, the
+	 * maintenance file held, and tried again by the next run; one that fails for any other reason is said in the
+	 * job's log (with what was thrown), and the site is put back without it: on an old table without transactions the
+	 * statements sent before the failure stay, and they never take away a row the old table had under one of this
+	 * plugin's names the carry listed in the live table and the live table still has: it stays, or the live one is
+	 * there, or both (a sitemeta table) (StateCarry::carry_back()).
 	 *
 	 * @param JobContext                                                                                          $context Context.
 	 * @param Queries                                                                                             $db      Connection.

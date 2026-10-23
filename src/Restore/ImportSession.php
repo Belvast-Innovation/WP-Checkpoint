@@ -31,7 +31,8 @@ defined( 'ABSPATH' ) || exit;
  * same whether or not the chunk's preamble has been read in this session.
  *
  * Errors: the numbers that mean "try again" (a lost connection, a lock
- * wait or deadlock, too many connections) raise TransientFailure; any
+ * wait or deadlock, too many connections, a row changed since the
+ * transaction's snapshot) raise TransientFailure; any
  * other raises StatementFailed with the server's text, the database name
  * masked (it is often the hosting account's name).
  */

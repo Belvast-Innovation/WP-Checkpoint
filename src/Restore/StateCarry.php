@@ -57,12 +57,14 @@ defined( 'ABSPATH' ) || exit;
  * table about to come back, by the same names, so that putting the site back
  * does not put the plugin's state back too; own rows of the old table under
  * names the live table no longer has are deleted. Its statements never take
- * away a row the old table had under a name the live table has
- * (carry_table_back(): replace first, then remove only rows older than the
- * carry, and only once every name the live table has is seen in a newer row),
- * so a carry cut short or failed on a table without transactions leaves each
- * such name with its old row, the live one, or both (a sitemeta table has no
- * unique name). The self-check row (StoredNames::SELF_CHECK) is left out: it
+ * away a row the old table had under a name it listed in the live table and
+ * the live table still has (carry_table_back(): replace first, then remove
+ * only rows older than the carry, and only once each such name is seen in a
+ * newer row), so a carry cut short or failed on a table without transactions
+ * leaves each such name with its old row, the live one, or both (a sitemeta
+ * table has no unique name). A name another request writes into the live
+ * table after it was listed is not carried: that table is about to be renamed
+ * away. The self-check row (StoredNames::SELF_CHECK) is left out: it
  * belongs to the restored site's checks, and must not reach the old site or a
  * later backup. The old site's lists of active plugins are left alone: that
  * site ran this plugin until the swap.
@@ -297,17 +299,19 @@ final class StateCarry {
 
 	/**
 	 * One table the other way (carry_back()), in an order that never takes away a row the old table had under a name
-	 * the live table has: the old table's highest row id noted (its id column checked to be AUTO_INCREMENT before,
-	 * auto_increment()), the live table's own rows put in by REPLACE (on the options table's unique name the old row
-	 * gives way to a new one; a table without a unique name, as sitemeta, gets a second row), every name the live
-	 * table has at that point (read for update: a row another request deleted meanwhile is not looked for) then
-	 * checked to have a row with an id above the noted one, and only then the old table's own rows with an id up to
-	 * the noted one deleted (the copies the REPLACE did not replace, and names the live table no longer has). The
-	 * check rests on what is read, not on how the server numbers rows: when it fails it throws before anything is
-	 * deleted. Cut short after any statement, or failed in any, on a table without transactions: a row the old table
-	 * had under a name the live table has stays, or the live one is there, or both; run again, it notes the new
-	 * highest id and ends with one row each. The self-check row and the list of active plugins are neither written
-	 * nor deleted.
+	 * listed in the live table that the live table still has: the old table's highest row id noted (its id column
+	 * checked to be AUTO_INCREMENT before, auto_increment()), the live table's own rows listed and put in by REPLACE
+	 * (on the options table's unique name the old row gives way to a new one; a table without a unique name, as
+	 * sitemeta, gets a second row), the listed names the live table still has then read (a locking read: the rows as
+	 * they are, a row another request deleted meanwhile not looked for) and each checked, byte for byte in PHP, to be
+	 * a name of a row of the old table with an id above the noted one (the REPLACE copies the live table's bytes; the
+	 * two tables' columns are never compared with each other, as they may have different collations, which the
+	 * server refuses to compare), and only then the old table's own rows with an id up to the noted one deleted (the
+	 * copies the REPLACE did not replace, and names the live table no longer has). The check rests on what is read,
+	 * not on how the server numbers rows: when it fails it throws before anything is deleted. Cut short after any
+	 * statement, or failed in any, on a table without transactions: such a row of the old table stays, or the live
+	 * one is there, or both; run again, it notes the new highest id and ends with one row each. The self-check row and
+	 * the list of active plugins are neither written nor deleted.
 	 *
 	 * @param string   $live     Live table.
 	 * @param string   $old      The table the swap moved aside.
@@ -315,8 +319,8 @@ final class StateCarry {
 	 * @param string[] $site     The network's id (sitemeta), or nothing (options).
 	 * @param string   $columns  Columns inserted and their SELECT list.
 	 * @return void
-	 * @throws \RuntimeException When a name the live table has has no row newer than the noted id: nothing is
-	 *                           deleted.
+	 * @throws \RuntimeException When a listed name the live table still has has no row newer than the noted id:
+	 *                           nothing is deleted.
 	 */
 	private function carry_table_back( string $live, string $old, bool $sitemeta, array $site, string $columns ): void {
 		JobFence::assert_locked( $this->db );
@@ -333,9 +337,14 @@ final class StateCarry {
 			$this->at( $this->seams . '_' . ( ++$this->statements ) );
 		}
 		foreach ( $ours as $names ) {
-			$unseen = $this->db->rows( 'SELECT ' . $column . ' FROM ' . SqlWriter::identifier( $live ) . ' WHERE ' . $where . $column . ' IN (' . self::marks( $names ) . ') AND ' . $column . ' NOT IN (SELECT ' . $column . ' FROM ' . SqlWriter::identifier( $old ) . ' WHERE ' . $where . $column . ' IN (' . self::marks( $names ) . ') AND ' . $id . ' > ?) LIMIT 1 FOR UPDATE', array_merge( $site, $names, $site, $names, array( $before ) ) );
-			if ( array() !== $unseen ) {
-				throw new \RuntimeException( 'A row carried back has no id above the old table\'s own: its rows are left as they are.' );
+			$newer = array();
+			foreach ( $this->db->rows( 'SELECT ' . $column . ' FROM ' . SqlWriter::identifier( $old ) . ' WHERE ' . $where . $column . ' IN (' . self::marks( $names ) . ') AND ' . $id . ' > ?', array_merge( $site, $names, array( $before ) ) ) as $row ) {
+				$newer[ (string) $row[0] ] = true;
+			}
+			foreach ( $this->db->rows( 'SELECT ' . $column . ' FROM ' . SqlWriter::identifier( $live ) . ' WHERE ' . $where . $column . ' IN (' . self::marks( $names ) . ') LOCK IN SHARE MODE', array_merge( $site, $names ) ) as $row ) {
+				if ( ! isset( $newer[ (string) $row[0] ] ) ) {
+					throw new \RuntimeException( 'A row carried back has no id above the old table\'s own: its rows are left as they are.' );
+				}
 			}
 		}
 		foreach ( array_chunk( $theirs, self::CHUNK ) as $names ) {
