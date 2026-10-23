@@ -413,7 +413,9 @@ final class StateCarryBackTest extends SwapTestCase {
 						$this->assertNotContains( 'carry_back_' . $k, $this->seams, $label . ': the control, it failed at that statement' );
 						$this->assertNotContains( 'carried_back', $this->seams, $label . ': the carry failed' );
 						$this->nothing_missing_whatever_the_state( $job, $before, $label );
-						if ( is_multisite() && $k === $statements ) {
+						if ( 'InnoDB' === $engine ) {
+							$this->assertNotSame( self::STATE, $this->value(), $label . ': the transaction rolled back, nothing carried' );
+						} elseif ( is_multisite() && $k === $statements ) {
 							// Failed at the network's delete: its rows and the live ones both stay (what one_row_each() clears).
 							$this->assertNotSame( array(), $this->twice_in_sitemeta(), $label . ': the control, both rows stay' );
 						}
@@ -569,7 +571,8 @@ final class StateCarryBackTest extends SwapTestCase {
 		$this->seams = array();
 		$this->cli_run( $job );
 		$this->assertSame( 1, $seen, 'the control: the row was deleted by another connection, after the carry listed it and before it replaced' );
-		$this->assertContains( 'carried_back', $this->seams, 'carried back all the same' );
+		$done = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertContains( 'carried_back', $this->seams, 'carried back all the same (' . $done->status . ', ' . $done->last_error . ': ' . Plugin::instance()->job_presenter()->log_tail( $done ) . ')' );
 		$this->assert_put_back( $job, 'deleted meanwhile' );
 		$this->assertNull( $this->value( '', StoredNames::DB_UPGRADE_RETRY ), 'the row deleted meanwhile is not there' );
 		$this->undo( Plugin::instance()->jobs()->find( $job->id ) );
