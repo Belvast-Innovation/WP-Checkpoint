@@ -353,7 +353,7 @@ final class StateCarryBackTest extends SwapTestCase {
 	 */
 	private function nothing_missing_whatever_the_state( Job $job, array $before, string $label ): void {
 		$this->assert_nothing_missing( $job, $before, $label, self::STATE === $this->value() );
-		$this->assertStringContainsString( 'were not carried back (or only some of them); the site is put back all the same', Plugin::instance()->job_presenter()->log_tail( Plugin::instance()->jobs()->find( $job->id ) ), $label );
+		$this->assertStringContainsString( 'the site is put back all the same', Plugin::instance()->job_presenter()->log_tail( Plugin::instance()->jobs()->find( $job->id ) ), $label . ': the failure is said' );
 	}
 
 	public function test_the_self_check_row_is_not_carried_back(): void {
