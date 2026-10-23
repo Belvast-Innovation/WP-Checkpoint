@@ -535,7 +535,7 @@ final class SwapSequencesTest extends SwapTestCase {
 			$this->assertSame( Job::CANCELLED, $done->status, $label . ': a cancel that was taken ends the job cancelled' );
 		}
 		// I4: an ended job leaves none of its files held.
-		$this->assertFalse( Maintenance::held_in( $this->abspath ), $label . ': no held file once the job ended (' . $done->status . ')' );
+		$this->assertFalse( Maintenance::held_in( $this->abspath ), $label . ': no held file once the job ended (' . $done->status . ': ' . $done->last_error . ')' );
 		$this->assertSame( array(), $this->tables_with_a_self_check_row(), $label . ': I8, no self-check row in any options table once the job ended (' . $done->status . ')' );
 		$this->marked( $job, $label . ' (ended)' );
 		if ( '' !== $this->copy ) {
