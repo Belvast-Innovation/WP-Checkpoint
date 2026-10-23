@@ -175,7 +175,10 @@ final class StateCarryBackTest extends SwapTestCase {
 		if ( $carried ) {
 			$this->assertSame( self::STATE, $this->value(), $label . ': the state written since the swap is kept' );
 			if ( is_multisite() ) {
+				global $wpdb;
 				$this->assertSame( self::STATE, $this->meta(), $label . ': in the network\'s sitemeta too' );
+				$twice = $wpdb->get_col( $wpdb->prepare( "SELECT meta_key FROM `{$wpdb->base_prefix}sitemeta` WHERE site_id = %d AND meta_key LIKE %s GROUP BY meta_key HAVING COUNT(*) > 1", get_current_network_id(), $wpdb->esc_like( 'wpcheckpoint_' ) . '%' ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the sitemeta table.
+				$this->assertSame( array(), $twice, $label . ': one row each in the network\'s sitemeta' );
 			}
 		} elseif ( false === $carried ) {
 			$this->assertNotSame( self::STATE, $this->value(), $label . ': the state written since the swap was not carried' );
@@ -307,6 +310,9 @@ final class StateCarryBackTest extends SwapTestCase {
 		$statements = count( preg_grep( '/^carry_back_\d+$/', $this->seams ) );
 		$this->assertGreaterThanOrEqual( 2, $statements, 'the control: the carry back replaces and deletes in at least one statement each (' . implode( ',', $this->seams ) . ')' );
 		$this->assertContains( ( is_multisite() ? 'm:' : 'o:' ) . StoredNames::STORAGE, $before, 'the control: the old site has rows of the plugin\'s own (its storage state)' );
+		// The invariant is about the names the live table has (a name it no longer has is deleted on purpose, see
+		// test_a_row_of_the_plugin_deleted_since_the_swap_does_not_come_back()): here the old site has no other.
+		$this->assertSame( array(), array_values( array_diff( $before, $this->own_names_in( $wpdb->base_prefix . 'options', is_multisite() ? $wpdb->base_prefix . 'sitemeta' : null ) ) ), 'the control: every own name of the old site is in the live tables' );
 		$this->assertLessThan( array_search( 'table_back', $this->seams, true ), array_search( 'carried_back', $this->seams, true ), 'carried back before the first table was renamed back' );
 		$this->undo( Plugin::instance()->jobs()->find( $job->id ) );
 		$this->tear_down_swap();
@@ -339,6 +345,10 @@ final class StateCarryBackTest extends SwapTestCase {
 						$this->seams = array();
 						$this->cli_run( $job );
 						$this->assertGreaterThanOrEqual( $k, $seen, $label . ': the control, the statement was reached' );
+						if ( $k > 1 ) {
+							$this->assertContains( 'carry_back_' . ( $k - 1 ), $this->seams, $label . ': the control, the statements before it were sent' );
+						}
+						$this->assertNotContains( 'carry_back_' . $k, $this->seams, $label . ': the control, it failed at that statement' );
 						$this->assertNotContains( 'carried_back', $this->seams, $label . ': the carry failed' );
 						$this->nothing_missing_whatever_the_state( $job, $before, $label );
 					}
@@ -397,23 +407,26 @@ final class StateCarryBackTest extends SwapTestCase {
 			$tables['sitemeta'] = array( 'meta_key', $wpdb->prepare( ' AND site_id = %d', get_current_network_id() ) );
 		}
 		// The old site had a row the plugin deleted since the swap (an upgrade retry that was cleared): in the old
-		// tables, not in the live ones.
+		// tables, not in the live ones. And a row the plugin changed since the swap: in both, another value in the old.
 		foreach ( $tables as $key => $how ) {
 			$live = $wpdb->base_prefix . $key;
 			$old  = (string) $this->plan_entry( $job, $key )['old'];
 			$wpdb->query( $wpdb->prepare( "DELETE FROM `{$live}` WHERE {$how[0]} = %s{$how[1]}", StoredNames::DB_UPGRADE_RETRY ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- a carried table and its column.
-			if ( 'options' === $key ) {
-				$wpdb->query( $wpdb->prepare( "INSERT INTO `{$old}` (option_name, option_value, autoload) VALUES (%s, 'from before the swap', 'no')", StoredNames::DB_UPGRADE_RETRY ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the old options table.
-			} else {
-				$wpdb->query( $wpdb->prepare( "INSERT INTO `{$old}` (site_id, meta_key, meta_value) VALUES (%d, %s, 'from before the swap')", get_current_network_id(), StoredNames::DB_UPGRADE_RETRY ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the old sitemeta table.
+			foreach ( array( StoredNames::DELETE_DATA, StoredNames::DB_UPGRADE_RETRY ) as $name ) {
+				if ( 'options' === $key ) {
+					$wpdb->query( $wpdb->prepare( "INSERT INTO `{$old}` (option_name, option_value, autoload) VALUES (%s, 'from before the swap', 'no')", $name ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the old options table.
+				} else {
+					$wpdb->query( $wpdb->prepare( "INSERT INTO `{$old}` (site_id, meta_key, meta_value) VALUES (%d, %s, 'from before the swap')", get_current_network_id(), $name ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the old sitemeta table.
+				}
 			}
 		}
 		$wpdb->query( 'COMMIT' );
 		$this->assertSame( 'from before the swap', $this->value( (string) $this->plan_entry( $job, 'options' )['old'], StoredNames::DB_UPGRADE_RETRY ), 'the control: the old table has it' );
+		$this->assertSame( 'from before the swap', $this->value( (string) $this->plan_entry( $job, 'options' )['old'] ), 'the control: the old table has its own value of the changed row' );
 		$this->seams = array();
 		$this->cli_run( $job );
 		$this->assertContains( 'carried_back', $this->seams, 'the control: it carried back' );
-		$this->assert_put_back( $job, 'deleted since the swap' );
+		$this->assert_put_back( $job, 'deleted since the swap' ); // The changed row: the live value, one row each.
 		$this->assertNull( $this->value( '', StoredNames::DB_UPGRADE_RETRY ), 'the row deleted since the swap is not back' );
 		if ( is_multisite() ) {
 			$this->assertNull( $this->meta( '', StoredNames::DB_UPGRADE_RETRY ), 'nor in the network\'s sitemeta' );
@@ -443,6 +456,78 @@ final class StateCarryBackTest extends SwapTestCase {
 			}
 			$wpdb->query( 'COMMIT' );
 		}
+	}
+
+	public function test_an_old_table_whose_id_is_not_auto_increment_is_not_carried_into(): void {
+		global $wpdb;
+		$job           = $this->swapped_and_written();
+		list( $o, $m ) = $this->old_tables( $job );
+		$live          = $wpdb->base_prefix . 'options';
+		$before        = $this->own_names_in( $o, $m );
+		// A migration that left the id without AUTO_INCREMENT: a row put in gets id 0, then gives way to the next.
+		$this->assertNotFalse( $wpdb->query( "ALTER TABLE `{$o}` MODIFY option_id bigint(20) unsigned NOT NULL DEFAULT 0" ), $wpdb->last_error );
+		$wpdb->query( 'COMMIT' );
+		try {
+			$this->seams = array();
+			$this->cli_run( $job );
+			$this->assertContains( 'carry_back_locked', $this->seams, 'the control: the carry back began' );
+			$this->assertNotContains( 'carry_back_1', $this->seams, 'nothing was written into it' );
+			$this->assert_nothing_missing( $job, $before, 'not AUTO_INCREMENT', false );
+			$this->assertStringContainsString( 'the site is put back all the same', Plugin::instance()->job_presenter()->log_tail( Plugin::instance()->jobs()->find( $job->id ) ), 'the failure is said' );
+		} finally {
+			// The id made AUTO_INCREMENT again wherever the table is now, for what runs after.
+			foreach ( array( $live, $o ) as $table ) {
+				$column = $wpdb->get_row( "SHOW COLUMNS FROM `{$table}` LIKE 'option_id'", ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- an options table.
+				if ( is_array( $column ) && false === stripos( (string) $column['Extra'], 'auto_increment' ) ) {
+					$wpdb->query( "ALTER TABLE `{$table}` MODIFY option_id bigint(20) unsigned NOT NULL AUTO_INCREMENT" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- an options table.
+				}
+			}
+			$wpdb->query( 'COMMIT' );
+			$this->undo( Plugin::instance()->jobs()->find( $job->id ) );
+		}
+	}
+
+	public function test_when_a_carried_row_is_not_seen_above_the_noted_id_nothing_is_deleted(): void {
+		$job           = $this->swapped_and_written();
+		list( $o, $m ) = $this->old_tables( $job );
+		$before        = $this->own_names_in( $o, $m );
+		// As if the server had numbered the rows put in at or below the old table's highest id.
+		$this->retype( $job, array(), self::noting_too_high() );
+		$this->seams = array();
+		$this->cli_run( $job );
+		$this->assertContains( 'carry_back_1', $this->seams, 'the control: the rows were put in' );
+		$this->assertNotContains( 'carried_back', $this->seams, 'the carry stopped' );
+		$this->nothing_missing_whatever_the_state( $job, $before, 'not seen above the noted id' );
+		$this->undo( Plugin::instance()->jobs()->find( $job->id ) );
+	}
+
+	/**
+	 * A connection on which the old table's highest id reads far above any row's.
+	 *
+	 * @return callable
+	 */
+	private static function noting_too_high(): callable {
+		return static function () {
+			return new class( ImportSession::open( Credentials::from_wordpress() ) ) implements \WPCheckpoint\Restore\Queries {
+				/** @var ImportSession */
+				private $db;
+				public function __construct( $db ) {
+					$this->db = $db;
+				}
+				public function run( string $sql ): int {
+					return $this->db->run( $sql );
+				}
+				public function rows( string $sql, array $params = array() ): array {
+					if ( 0 === strpos( $sql, 'SELECT MAX(' ) && false !== strpos( $sql, \WPCheckpoint\Jobs\TempTables::OLD_PREFIX ) ) {
+						return array( array( '9000000000000' ) );
+					}
+					return $this->db->rows( $sql, $params );
+				}
+				public function write( string $sql, array $params ): int {
+					return $this->db->write( $sql, $params );
+				}
+			};
+		};
 	}
 
 	/**
