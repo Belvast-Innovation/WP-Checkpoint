@@ -191,6 +191,29 @@ final class JobConflictsTest extends JobTestCase {
 		return $job;
 	}
 
+	public function test_after_a_restore_that_was_made_and_completed_an_export_starts(): void {
+		global $wpdb;
+		$repo    = Plugin::instance()->jobs();
+		$actions = Plugin::instance()->job_actions();
+		// A restore that swapped the site in and ended: its site_state stays "swapped" (what it moved aside is kept).
+		$done = $this->failed( 'restore', array( 'base' => 'site-20260923-120000-ab12' ) );
+		$wpdb->update( \WPCheckpoint\Jobs\JobRepository::table(), array( 'status' => Job::COMPLETED, 'site_state' => Job::SITE_SWAPPED ), array( 'id' => $done->id ) );
+		$this->assertSame( Job::SITE_SWAPPED, $repo->find( $done->id )->site_state, 'the control: recorded as swapped' );
+		$this->assertSame( array(), $repo->holding_site(), 'a completed restore does not hold the site' );
+		$export = $actions->start( 'export', self::$admin_id, array() );
+		$this->assertSame( 'export', $export->type, 'an export starts' );
+		// The control: the same restore not ended (failed after the swap was made) holds the site, and nothing starts.
+		$actions->cancel( $export->id );
+		$wpdb->update( \WPCheckpoint\Jobs\JobRepository::table(), array( 'status' => Job::FAILED ), array( 'id' => $done->id ) );
+		$this->assertSame( array( $done->id ), $repo->holding_site(), 'the control: a failed restore that swapped holds the site' );
+		try {
+			$actions->start( 'export', self::$admin_id, array() );
+			$this->fail( 'started while a restore holds the site' );
+		} catch ( JobConflict $e ) {
+			$this->assertStringContainsString( 'holds the site', $e->getMessage() );
+		}
+	}
+
 	public function test_two_jobs_that_hold_the_site_are_named_in_a_warning_and_one_is_not(): void {
 		$actions = Plugin::instance()->job_actions();
 		$first   = $this->holding();
