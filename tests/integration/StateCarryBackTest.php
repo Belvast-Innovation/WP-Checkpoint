@@ -176,14 +176,18 @@ final class StateCarryBackTest extends SwapTestCase {
 			$this->assertStringContainsString( 'found it broken', (string) $done->last_error );
 			$this->assertSame( Job::SITE_UNTOUCHED, $done->site_state, 'the site was put back all the same' );
 			$this->assertSame( array(), $this->maintenance_files(), 'and its maintenance file is down' );
-			$this->assertNotContains( 'carried_back', $this->seams, 'nothing was carried back' );
-			$this->assertNotSame( self::STATE, $this->value(), 'the state written since the swap was not carried (said in the log)' );
-			$this->assertStringContainsString( 'were not carried back; the site is put back all the same', Plugin::instance()->job_presenter()->log_tail( $done ) );
+			$this->assertContains( 'carried_back', $this->seams, 'the rows were carried back' );
+			$this->assertSame( self::STATE, $this->value(), 'the state written since the swap is kept' );
+			$this->assertSame( 'not a list WordPress wrote', $this->value( '', 'active_plugins' ), 'the old list was left as it is' );
+			$this->assertStringContainsString( 'this plugin was not put into it; the site is put back all the same', Plugin::instance()->job_presenter()->log_tail( $done ) );
 		} finally {
-			// The old table is the live one now: its list put back as it was, for what runs after.
-			$wpdb->query( $wpdb->prepare( "UPDATE `{$wpdb->base_prefix}options` SET option_value = %s WHERE option_name = 'active_plugins'", $active ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the options table.
-			$wpdb->query( 'COMMIT' );
+			// The list put back as it was wherever it is now (the live table, or still the moved-aside one if the put-back
+			// stopped), for what runs after.
 			$this->undo( Plugin::instance()->jobs()->find( $job->id ) );
+			foreach ( (array) $wpdb->get_col( "SHOW TABLES LIKE '%options'" ) as $table ) {
+				$wpdb->query( $wpdb->prepare( "UPDATE `{$table}` SET option_value = %s WHERE option_name = 'active_plugins' AND option_value = 'not a list WordPress wrote'", $active ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- an options table.
+			}
+			$wpdb->query( 'COMMIT' );
 		}
 	}
 
