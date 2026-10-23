@@ -87,6 +87,7 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		@rmdir( $this->root );
 		Options::delete( Schema::OPTION );
 		Options::delete( Directories::OPTION );
+		\WPCheckpoint\Tests\Fixtures\RunTables::put_back(); // What a test's uninstall dropped, for the tests after it.
 		parent::tear_down();
 	}
 
