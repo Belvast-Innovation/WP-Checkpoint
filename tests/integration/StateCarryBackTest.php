@@ -477,6 +477,9 @@ final class StateCarryBackTest extends SwapTestCase {
 		} finally {
 			// The id made AUTO_INCREMENT again wherever the table is now, for what runs after.
 			foreach ( array( $live, $o ) as $table ) {
+				if ( $table !== $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $table ) ) ) ) {
+					continue; // Renamed back, or not yet.
+				}
 				$column = $wpdb->get_row( "SHOW COLUMNS FROM `{$table}` LIKE 'option_id'", ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- an options table.
 				if ( is_array( $column ) && false === stripos( (string) $column['Extra'], 'auto_increment' ) ) {
 					$wpdb->query( "ALTER TABLE `{$table}` MODIFY option_id bigint(20) unsigned NOT NULL AUTO_INCREMENT" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- an options table.
