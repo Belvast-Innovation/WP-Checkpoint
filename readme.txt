@@ -24,6 +24,10 @@ Only its own automatic update, and only while a restore is in progress. WP Check
 
 Do not run WP-CLI on the site while a restore swaps it in: from the moment the swap starts until it ends, its tables and directories may be half replaced. WordPress shows visitors a maintenance page then, but WP-CLI does not stop for it, so a system cron that runs `wp cron event run`, or any other command, would work on that half-replaced site. While a restore holds the site, WP Checkpoint refuses every WP-CLI command but its own (`wp wpcheckpoint …`, which finishes or puts back the restore) and `wp help`, and says why; `wp wpcheckpoint job list` shows the restore and what finishes it. It cannot stop a command run with `--skip-plugins`, or one on a site where WP Checkpoint is not active, nor what plugins loaded before it do as they load.
 
+= Do visitors see a maintenance page on every page while a restore is in progress? =
+
+On every page but two. While a restore swaps the site in, WP Checkpoint puts up WordPress's maintenance page, which visitors get instead of the site until the restore ends. WordPress itself does not show that page on two of its own pages: `wp-activate.php` (where new users of a network activate their account) and `wp-admin/upgrade.php` (the database update page). WordPress treats both as part of installing and skips its maintenance check for them, so they still answer while the restore holds the site.
+
 == Changelog ==
 
 = 0.1.0 =

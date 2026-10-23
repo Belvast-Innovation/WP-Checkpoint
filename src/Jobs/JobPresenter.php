@@ -160,7 +160,7 @@ final class JobPresenter {
 			return $lines;
 		}
 		/* translators: 1: job id, 2: why it is not taken to be this site's, 3: the WordPress directory its plan records */
-		$lines   = array( sprintf( __( 'Restore job %1$d holds a site changed and is managed by another installation of WP Checkpoint; it is never run here: as far as can be told it is not this site\'s (%2$s). Its plan was written for the WordPress directory %3$s.', 'wp-checkpoint' ), $id, $see['why'], '' === $see['recorded'] ? __( '(not recorded)', 'wp-checkpoint' ) : $see['recorded'] ) );
+		$lines   = array( sprintf( __( 'Restore job %1$d changed a site and still holds it. Another installation of WP Checkpoint manages it, so it is never run here: as far as can be told, that site is not this one (%2$s). Its plan was written for the WordPress directory %3$s.', 'wp-checkpoint' ), $id, $see['why'], '' === $see['recorded'] ? __( '(not recorded)', 'wp-checkpoint' ) : $see['recorded'] ) );
 		$lines[] = $see['file_here']
 			? __( 'Its maintenance file is in this WordPress directory too, so this site answers only with a maintenance page.', 'wp-checkpoint' )
 			: __( 'This WordPress directory holds no maintenance file of it.', 'wp-checkpoint' );

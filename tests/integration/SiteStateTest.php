@@ -142,6 +142,19 @@ final class SiteStateTest extends WP_UnitTestCase {
 	}
 
 	/**
+	 * A job's log as written, in this test's storage directory (the plugin's presenter reads only its own).
+	 *
+	 * @param int $id Job id.
+	 * @return string
+	 */
+	private function log_of( int $id ): string {
+		$job  = $this->repo->find( $id );
+		$path = $job->storage_path . '/' . ( '' !== $job->log_path ? $job->log_path : 'logs/job-' . $id . '.log' );
+		clearstatcache( true, $path );
+		return is_file( $path ) ? (string) file_get_contents( $path ) : '';
+	}
+
+	/**
 	 * Set columns of a job's row.
 	 *
 	 * @param array<string, mixed> $columns Columns.
@@ -1061,6 +1074,19 @@ final class SiteStateTest extends WP_UnitTestCase {
 		$this->assertSame( Job::RUNNING, $this->repo->find( $held->id )->status );
 		$control = $this->runner( true )->tick( $plain->id, $this->now );
 		$this->assertSame( TickResult::FAILED, $control->status, 'the control: a job that holds nothing is failed with the reason' );
+		// Said on every tick; written to its log, and as its progress message, only when the reason changes.
+		$this->runner( true )->tick( $held->id, $this->now );
+		$this->runner( true )->tick( $held->id, $this->now );
+		$log = $this->log_of( $held->id );
+		$this->assertSame( 1, substr_count( $log, 'The job is not run' ), 'once in three ticks: ' . $log );
+		$this->assertStringContainsString( 'takeover_mark', $log, 'with the reason' );
+		$this->assertStringContainsString( 'takeover_mark', $this->repo->find( $held->id )->progress_message, 'and as its progress message (its start: the column holds 191 characters)' );
+		$wpdb->query( 'ALTER TABLE ' . Schema::jobs_table() . ' DROP COLUMN cron_deferrals' ); // Another reason.
+		$this->runner( true )->tick( $held->id, $this->now );
+		$this->runner( true )->tick( $held->id, $this->now );
+		$log = $this->log_of( $held->id );
+		$this->assertSame( 2, substr_count( $log, 'The job is not run' ), 'once more when the reason changed: ' . $log );
+		$this->assertStringContainsString( 'cron_deferrals', $log );
 		// While a live run holds it, that is what is said.
 		$this->set( $held->id, array( 'lock_token' => 'a-live-run', 'locked_until' => time() + 600 ) );
 		$busy = $this->runner( true )->tick( $held->id, $this->now );

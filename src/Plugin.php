@@ -174,11 +174,12 @@ final class Plugin {
 			// fires for a command's own parent only, never for "wpcheckpoint" under "wpcheckpoint job list").
 			\WP_CLI::add_hook(
 				'before_run_command',
-				function ( $args = array() ): void {
+				function ( $args = array(), $assoc_args = array() ): void {
 					if ( ! is_array( $args ) || 'wpcheckpoint' !== ( $args[0] ?? '' ) ) {
 						return;
 					}
-					foreach ( $this->half_swapped_warnings() as $warning ) {
+					// What job status prints after its table is not said here too (JobCommand::shown_after_table()).
+					foreach ( $this->half_swapped_warnings( null, JobCommand::shown_after_table( $args, is_array( $assoc_args ) ? $assoc_args : array() ) ) as $warning ) {
 						\WP_CLI::warning( $warning );
 					}
 				}
@@ -201,9 +202,11 @@ final class Plugin {
 	 * the site.
 	 *
 	 * @param callable|null $holding function(): int[] in place of the jobs table (tests); it may throw.
+	 * @param int           $shown   A job another installation manages whose lines the command prints itself (job
+	 *                               status, after its table): its lines are not said here too; 0 for none.
 	 * @return string[]
 	 */
-	public function half_swapped_warnings( $holding = null ): array {
+	public function half_swapped_warnings( $holding = null, int $shown = 0 ): array {
 		$out  = array();
 		$read = true;
 		try {
@@ -231,7 +234,9 @@ final class Plugin {
 				$out[] = sprintf( __( 'Restore job %d is at work on the site in another process.', 'wp-checkpoint' ), $id );
 			} elseif ( null !== $held ) {
 				// Managed by another installation: why it is not run here, and what can be done from here.
-				$out[] = $this->job_presenter()->clean( implode( "\n", JobPresenter::held_lines( $held['job'], $held['assessment'] ) ) );
+				if ( (int) $id !== $shown ) {
+					$out[] = $this->job_presenter()->clean( implode( "\n", JobPresenter::held_lines( $held['job'], $held['assessment'] ) ) );
+				}
 				continue;
 			} elseif ( $job->awaiting_answer() && in_array( Jobs\SwapStep::UNVERIFIED_QUESTION, array_column( $job->questions, 'id' ), true ) ) {
 				/* translators: 1: job id, 2: job id */

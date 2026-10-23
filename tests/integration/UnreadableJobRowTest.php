@@ -184,6 +184,67 @@ final class UnreadableJobRowTest extends JobTestCase {
 		$this->assertSame( Job::COMPLETED, Plugin::instance()->jobs()->find( $id )->status );
 	}
 
+	public function test_a_held_back_jobs_reason_is_logged_once_and_again_only_when_it_changes(): void {
+		global $wpdb;
+		$id = $this->job_with(
+			array(
+				'cursor_json' => '{"n":',
+				'site_state'  => Job::SITE_SWAPPED,
+			)
+		);
+		$progress_at = Plugin::instance()->jobs()->find( $id )->progress_at;
+		for ( $i = 0; $i < 3; $i++ ) {
+			$this->assertSame( TickResult::BLOCKED, $this->tick( $id )->status );
+		}
+		$job = Plugin::instance()->jobs()->find( $id );
+		$log = Plugin::instance()->job_presenter()->log_tail( $job );
+		$this->assertSame( 1, substr_count( $log, 'The job is not run' ), 'once in three ticks: ' . $log );
+		$this->assertStringContainsString( 'its position (cursor) cannot be read', $log, 'with the reason' );
+		$this->assertStringContainsString( 'its position (cursor) cannot be read', $job->progress_message, 'and as its progress message' );
+		$this->assertSame( $progress_at, $job->progress_at, 'not counted as progress' );
+		// Another reason: its options cannot be read either.
+		$wpdb->update( JobRepository::table(), array( 'options_json' => '{"x":' ), array( 'id' => $id ) );
+		$wpdb->query( 'COMMIT' );
+		$this->tick( $id );
+		$this->tick( $id );
+		$log = Plugin::instance()->job_presenter()->log_tail( Plugin::instance()->jobs()->find( $id ) );
+		$this->assertSame( 2, substr_count( $log, 'The job is not run' ), 'once more when the reason changed: ' . $log );
+		$this->assertStringContainsString( 'its position (cursor) and its options cannot be read', $log );
+	}
+
+	public function test_a_held_back_jobs_reason_is_logged_once_where_the_connection_counts_matched_rows(): void {
+		global $wpdb;
+		$id    = $this->job_with(
+			array(
+				'cursor_json' => '{"n":',
+				'site_state'  => Job::SITE_SWAPPED,
+			)
+		);
+		$tests = $wpdb;
+		// A connection that counts the rows a statement matches, not the ones it changes: what a site gets with
+		// MYSQL_CLIENT_FLAGS set to MYSQLI_CLIENT_FOUND_ROWS in wp-config.php.
+		$other = new \wpdb( DB_USER, DB_PASSWORD, DB_NAME, DB_HOST );
+		$other->set_prefix( $wpdb->base_prefix );
+		list( $host, $port, $socket ) = $other->parse_db_host( DB_HOST );
+		$dbh = mysqli_init();
+		$this->assertTrue( mysqli_real_connect( $dbh, (string) $host, DB_USER, DB_PASSWORD, DB_NAME, null === $port ? 0 : (int) $port, null === $socket ? '' : (string) $socket, MYSQLI_CLIENT_FOUND_ROWS ) );
+		$other->dbh = $dbh;
+		$table      = JobRepository::table();
+		$message    = (string) $other->get_var( $other->prepare( "SELECT progress_message FROM {$table} WHERE id = %d", $id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the jobs table.
+		$this->assertSame( 1, $other->query( $other->prepare( "UPDATE {$table} SET progress_message = %s WHERE id = %d", $message, $id ) ), 'the control: a statement that changes nothing counts its row here' ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the jobs table.
+		$GLOBALS['wpdb'] = $other; // phpcs:ignore WordPress.WP.GlobalVariablesOverride.Prohibited -- the code under test reads the global connection; put back below.
+		try {
+			for ( $i = 0; $i < 3; $i++ ) {
+				$this->assertSame( TickResult::BLOCKED, Plugin::instance()->runner()->tick( $id )->status );
+			}
+		} finally {
+			$GLOBALS['wpdb'] = $tests; // phpcs:ignore WordPress.WP.GlobalVariablesOverride.Prohibited -- put back.
+			$other->close();
+		}
+		$log = Plugin::instance()->job_presenter()->log_tail( Plugin::instance()->jobs()->find( $id ) );
+		$this->assertSame( 1, substr_count( $log, 'The job is not run' ), 'once in three ticks: ' . $log );
+	}
+
 	public function test_a_job_that_holds_the_site_and_waits_for_an_answer_or_for_wp_cli_says_so_as_before(): void {
 		global $wpdb;
 		foreach ( array( 'readable' => '{"n":1}', 'unreadable' => '{"n":' ) as $what => $cursor ) {

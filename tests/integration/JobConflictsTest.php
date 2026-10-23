@@ -191,6 +191,19 @@ final class JobConflictsTest extends JobTestCase {
 		return $job;
 	}
 
+	public function test_two_jobs_that_hold_the_site_are_named_in_a_warning_and_one_is_not(): void {
+		$actions = Plugin::instance()->job_actions();
+		$first   = $this->holding();
+		$this->assertSame( '', $actions->holding_warning(), 'the control: one holds the site' );
+		$second = $this->failed( 'restore', array( 'base' => 'other-20260923-120000-cd34' ) );
+		$GLOBALS['wpdb']->update( \WPCheckpoint\Jobs\JobRepository::table(), array( 'site_state' => Job::SITE_SWAPPED ), array( 'id' => $second->id ) );
+		$this->assertSame( array( $first->id, $second->id ), Plugin::instance()->jobs()->holding_site(), 'the control: both hold it' );
+		$this->assertSame(
+			sprintf( 'Jobs %1$d, %2$d hold the site changed at the same time. This should not happen, and needs a person: look at the site, and at each of these jobs with wp wpcheckpoint job status, before running any of them.', $first->id, $second->id ),
+			$actions->holding_warning()
+		);
+	}
+
 	/**
 	 * Whether the start lock is free, as another connection sees it (GET_LOCK is re-entrant on this one).
 	 *
@@ -267,11 +280,27 @@ final class JobConflictsTest extends JobTestCase {
 				// What the message sends the administrator to: wp wpcheckpoint job status prints what can be done from
 				// here after its table. WP-CLI passes the docblock default of an option left out ("table").
 				$this->assertSame( 1, preg_match( '/\[--format=<format>\][^\[]*?default: (\w+)/', (string) ( new \ReflectionMethod( \WPCheckpoint\Cli\JobCommand::class, 'status' ) )->getDocComment(), $default ), 'the control: status declares a default format' );
-				$this->assertTrue( \WPCheckpoint\Cli\JobCommand::shows_lines( array( 'format' => $default[1] ) ), 'job status without --format prints the lines' );
-				$this->assertFalse( \WPCheckpoint\Cli\JobCommand::shows_lines( array( 'format' => 'json' ) ), 'the control: not with --format=json' );
 				$view = $actions->held_elsewhere( $held->id );
 				$this->assertNotNull( $view );
-				$this->assertNotSame( array(), \WPCheckpoint\Jobs\JobPresenter::held_lines( $view['job'], $view['assessment'] ) );
+				$lines = \WPCheckpoint\Jobs\JobPresenter::held_lines( $view['job'], $view['assessment'] );
+				$this->assertGreaterThan( 1, count( $lines ), 'the control: more than one line' );
+				// As a table (the default), what can be done from here is printed once, after the table, not in a cell.
+				$data   = Plugin::instance()->job_presenter()->present( $repo->find( $held->id ) );
+				$layout = \WPCheckpoint\Cli\JobCommand::status_layout( $data, $default[1] );
+				$this->assertSame( $data['held_elsewhere'], $layout['after']['held_elsewhere'] ?? null, 'after the table' );
+				$cells = array_column( $layout['rows'], 'value', 'field' );
+				$this->assertSame( '(below the table)', $cells['held_elsewhere'] );
+				foreach ( $cells as $field => $cell ) {
+					$this->assertStringNotContainsString( "\n", $cell, $field . ': no cell of more than one line' );
+				}
+				$json = \WPCheckpoint\Cli\JobCommand::status_layout( $data, 'json' );
+				$this->assertSame( array(), $json['after'], 'the control: as JSON, nothing after' );
+				$this->assertSame( $data['held_elsewhere'], array_column( $json['rows'], 'value', 'field' )['held_elsewhere'], 'the control: in its row' );
+				// The warning every command says first leaves this job's lines to job status, as a table, of this job.
+				$this->assertSame( $held->id, \WPCheckpoint\Cli\JobCommand::shown_after_table( array( 'wpcheckpoint', 'job', 'status', (string) $held->id ), array() ) );
+				$this->assertSame( 0, \WPCheckpoint\Cli\JobCommand::shown_after_table( array( 'wpcheckpoint', 'job', 'status', (string) $held->id ), array( 'format' => 'json' ) ), 'not as JSON' );
+				$this->assertSame( 0, \WPCheckpoint\Cli\JobCommand::shown_after_table( array( 'wpcheckpoint', 'job', 'list' ), array() ), 'not another command' );
+				$this->assertSame( 0, \WPCheckpoint\Cli\JobCommand::shown_after_table( array( 'wpcheckpoint', 'job', 'status', 'x' ), array() ), 'not a word that is no id' );
 			}
 			try {
 				$actions->start( 'export', self::$admin_id, array() );
