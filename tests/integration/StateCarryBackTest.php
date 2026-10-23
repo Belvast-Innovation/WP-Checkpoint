@@ -4,6 +4,7 @@ namespace WPCheckpoint\Tests\Integration;
 
 use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Plugin;
+use WPCheckpoint\Restore\Maintenance;
 use WPCheckpoint\Restore\SwapPlan;
 use WPCheckpoint\Support\StoredNames;
 use WPCheckpoint\Tests\Fixtures\Restore\SwapTestCase;
@@ -156,6 +157,75 @@ final class StateCarryBackTest extends SwapTestCase {
 			$wpdb->query( $wpdb->prepare( "DELETE FROM `{$table}` WHERE option_name = %s", StoredNames::SELF_CHECK ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- an options table.
 		}
 		$wpdb->query( 'COMMIT' );
+		$this->undo( Plugin::instance()->jobs()->find( $job->id ) );
+	}
+
+	public function test_an_old_list_of_active_plugins_that_cannot_be_read_does_not_keep_the_site_from_being_put_back(): void {
+		global $wpdb;
+		$job    = $this->swapped_and_written();
+		$old    = $this->old_options( $job );
+		$active = $this->value( $old, 'active_plugins' );
+		$this->assertNotNull( $active, 'the control: the old site has its list of active plugins' );
+		$wpdb->query( $wpdb->prepare( "UPDATE `{$old}` SET option_value = %s WHERE option_name = 'active_plugins'", 'not a list WordPress wrote' ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the old options table.
+		$wpdb->query( 'COMMIT' );
+		try {
+			$this->seams = array();
+			$this->cli_run( $job );
+			$done = Plugin::instance()->jobs()->find( $job->id );
+			$this->assertSame( Job::FAILED, $done->status, 'put back (' . $done->last_error . ')' );
+			$this->assertStringContainsString( 'found it broken', (string) $done->last_error );
+			$this->assertSame( Job::SITE_UNTOUCHED, $done->site_state, 'the site was put back all the same' );
+			$this->assertSame( array(), $this->maintenance_files(), 'and its maintenance file is down' );
+			$this->assertNotContains( 'carried_back', $this->seams, 'nothing was carried back' );
+			$this->assertNotSame( self::STATE, $this->value(), 'the state written since the swap was not carried (said in the log)' );
+			$this->assertStringContainsString( 'were not carried back; the site is put back all the same', Plugin::instance()->job_presenter()->log_tail( $done ) );
+		} finally {
+			// The old table is the live one now: its list put back as it was, for what runs after.
+			$wpdb->query( $wpdb->prepare( "UPDATE `{$wpdb->base_prefix}options` SET option_value = %s WHERE option_name = 'active_plugins'", $active ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the options table.
+			$wpdb->query( 'COMMIT' );
+			$this->undo( Plugin::instance()->jobs()->find( $job->id ) );
+		}
+	}
+
+	public function test_a_carry_back_that_fails_for_a_moment_is_waited_out_with_the_file_held(): void {
+		$job     = $this->swapped_and_written();
+		$fails   = 1;
+		$connect = static function () use ( &$fails ) {
+			return new class( \WPCheckpoint\Restore\ImportSession::open( \WPCheckpoint\Standalone\Credentials::from_wordpress() ), $fails ) implements \WPCheckpoint\Restore\Queries {
+				/** @var \WPCheckpoint\Restore\ImportSession */
+				private $db;
+				/** @var int */
+				private $fails;
+				public function __construct( $db, int &$fails ) {
+					$this->db    = $db;
+					$this->fails = &$fails;
+				}
+				public function run( string $sql ): int {
+					return $this->db->run( $sql );
+				}
+				public function rows( string $sql, array $params = array() ): array {
+					if ( $this->fails > 0 && 0 === strpos( $sql, 'INSERT INTO' ) && false !== strpos( $sql, \WPCheckpoint\Jobs\TempTables::OLD_PREFIX ) ) {
+						--$this->fails;
+						throw new \RuntimeException( 'Lost connection to MySQL server during query' ); // The carry back's first insert, once.
+					}
+					return $this->db->rows( $sql, $params );
+				}
+				public function write( string $sql, array $params ): int {
+					return $this->db->write( $sql, $params );
+				}
+			};
+		};
+		$this->retype( $job, array(), $connect );
+		$waiting = $this->cli_run( $job );
+		$this->assertSame( 0, $fails, 'the control: the carry back failed once' );
+		$this->assertSame( Job::RUNNING, $waiting->status, 'waited out, not failed (' . $waiting->last_error . ')' );
+		$this->assertSame( 'reverse', $waiting->cursor['phase'] ?? '', 'still putting the site back' );
+		$this->assertTrue( Maintenance::held_in( $this->abspath ), 'its file held meanwhile' );
+		$this->assertStringContainsString( 'could not be carried back into the site as it was yet', (string) $waiting->progress_message . (string) $waiting->last_error . Plugin::instance()->job_presenter()->log_tail( $waiting ) );
+		$this->seams = array();
+		$this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertContains( 'carried_back', $this->seams, 'carried back on the next run' );
+		$this->assert_put_back_with_the_state( $job, 'after the wait' );
 		$this->undo( Plugin::instance()->jobs()->find( $job->id ) );
 	}
 
