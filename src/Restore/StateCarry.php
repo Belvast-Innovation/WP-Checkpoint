@@ -55,11 +55,13 @@ defined( 'ABSPATH' ) || exit;
  * plugin's own names that are in the live table (written since the swap: a
  * setting, the storage state, the schema version) are carried into the old
  * table about to come back, by the same names, so that putting the site back
- * does not put the plugin's state back too. Its statements never leave a name
- * of the old table's without a row (carry_table_back(): replace first, then
- * remove only rows older than the carry), so a carry cut short or failed on a
- * table without transactions leaves each own row either as it was or as the
- * live one. The self-check row (StoredNames::SELF_CHECK) is left out: it
+ * does not put the plugin's state back too; own rows of the old table under
+ * names the live table no longer has are deleted. Its statements never leave
+ * a name the live table has without a row in the old one (carry_table_back():
+ * replace first, then remove only rows older than the carry, and only once
+ * every carried name is seen in a newer row), so a carry cut short or failed
+ * on a table without transactions leaves each such name with its old row, the
+ * live one, or both (a sitemeta table has no unique name). The self-check row (StoredNames::SELF_CHECK) is left out: it
  * belongs to the restored site's checks, and must not reach the old site or a
  * later backup. The old site's lists of active plugins are left alone: that
  * site ran this plugin until the swap.
@@ -153,7 +155,7 @@ final class StateCarry {
 
 	/**
 	 * Carry this plugin's rows the other way, from the live tables into the old ones about to be renamed back
-	 * (carry_table_back(): no name of the old table's ever left without a row), without the self-check row
+	 * (carry_table_back(): no name the live table has ever left without a row), without the self-check row
 	 * (StoredNames::SELF_CHECK), with its seams named "carry_back_…", and without touching the old table's list of
 	 * active plugins: that table is the one the site ran this plugin from until the swap. The caller runs it only
 	 * while both tables are where the swap left them.
@@ -166,7 +168,8 @@ final class StateCarry {
 	 * @return void
 	 * @throws \WPCheckpoint\Jobs\LockLost When the job is no longer this run's: nothing is written.
 	 * @throws \Throwable Whatever else stops it, after the transaction is rolled back (on a table without
-	 *                    transactions the statements sent before stay: each own row as it was or as the live one).
+	 *                    transactions the statements sent before stay: each name the live table has keeps its old
+	 *                    row, the live one, or both).
 	 */
 	public function carry_back( string $live_options, string $old_options, $live_meta, $old_meta, array $fence ): void {
 		$this->carry_between( $live_options, $old_options, $live_meta, $old_meta, $fence, 'carry_back', true );
@@ -269,13 +272,16 @@ final class StateCarry {
 	}
 
 	/**
-	 * One table the other way (carry_back()), in an order that never leaves a name of the old table's without a row:
-	 * the old table's highest row id noted, the live table's own rows put in by REPLACE (on the options table's unique
-	 * name a row is replaced in place; a table without a unique name, as sitemeta, gets a second row), then the old
-	 * table's own rows with an id up to the noted one deleted (the copies the REPLACE did not replace, and names the
-	 * live table no longer has). Cut short after any statement, or failed in any, on a table without transactions:
-	 * each own name has its old row, its live row, or both, never none; run again, it notes the new highest id and
-	 * ends with one row each. The self-check row and the list of active plugins are neither written nor deleted.
+	 * One table the other way (carry_back()), in an order that never leaves a name the live table has without a row in
+	 * the old one: the old table's id column checked to be AUTO_INCREMENT and its highest row id noted, the live
+	 * table's own rows put in by REPLACE (on the options table's unique name the old row gives way to a new one; a
+	 * table without a unique name, as sitemeta, gets a second row), every carried name then checked to have a row
+	 * with an id above the noted one, and only then the old table's own rows with an id up to the noted one deleted
+	 * (the copies the REPLACE did not replace, and names the live table no longer has). The two checks rest on what
+	 * is read, not on how the server numbers rows: when either fails it throws before anything is deleted. Cut short
+	 * after any statement, or failed in any, on a table without transactions: each name the live table has keeps its
+	 * old row, its live row, or both, never none; run again, it notes the new highest id and ends with one row each.
+	 * The self-check row and the list of active plugins are neither written nor deleted.
 	 *
 	 * @param string   $live     Live table.
 	 * @param string   $old      The table the swap moved aside.
@@ -283,6 +289,8 @@ final class StateCarry {
 	 * @param string[] $site     The network's id (sitemeta), or nothing (options).
 	 * @param string   $columns  Columns inserted and their SELECT list.
 	 * @return void
+	 * @throws \RuntimeException When the old table's id column is not AUTO_INCREMENT, or a carried name has no row
+	 *                           newer than the noted id: nothing is deleted.
 	 */
 	private function carry_table_back( string $live, string $old, bool $sitemeta, array $site, string $columns ): void {
 		JobFence::assert_locked( $this->db );
@@ -290,12 +298,23 @@ final class StateCarry {
 		$id     = $sitemeta ? 'meta_id' : 'option_id';
 		$where  = array() === $site ? '' : 'site_id = ? AND ';
 		$skip   = array( $sitemeta ? self::ACTIVE_NETWORK : self::ACTIVE, StoredNames::SELF_CHECK );
+		$key    = $this->db->rows( 'SHOW COLUMNS FROM ' . SqlWriter::identifier( $old ) . ' LIKE ?', array( $id ) );
+		if ( false === stripos( (string) ( $key[0][5] ?? '' ), 'auto_increment' ) ) {
+			throw new \RuntimeException( 'The id column of the table the swap moved aside is not AUTO_INCREMENT: the rows carried back could not be told from its own.' );
+		}
 		$top    = $this->db->rows( 'SELECT MAX(' . $id . ') FROM ' . SqlWriter::identifier( $old ) );
-		$before = (string) (int) ( $top[0][0] ?? 0 );
+		$before = isset( $top[0][0] ) ? (string) $top[0][0] : '0';
 		$theirs = array_values( array_diff( self::own_names( $this->db, $old, $sitemeta, $site ), $skip ) );
-		foreach ( array_chunk( array_values( array_diff( self::own_names( $this->db, $live, $sitemeta, $site ), $skip ) ), self::CHUNK ) as $names ) {
+		$ours   = array_chunk( array_values( array_diff( self::own_names( $this->db, $live, $sitemeta, $site ), $skip ) ), self::CHUNK );
+		foreach ( $ours as $names ) {
 			$this->db->rows( 'REPLACE INTO ' . SqlWriter::identifier( $old ) . ' ' . $columns . ' FROM ' . SqlWriter::identifier( $live ) . ' WHERE ' . $where . $column . ' IN (' . self::marks( $names ) . ')', array_merge( $site, $names ) );
 			$this->at( $this->seams . '_' . ( ++$this->statements ) );
+		}
+		foreach ( $ours as $names ) {
+			$newer = $this->db->rows( 'SELECT COUNT(DISTINCT ' . $column . ') FROM ' . SqlWriter::identifier( $old ) . ' WHERE ' . $where . $column . ' IN (' . self::marks( $names ) . ') AND ' . $id . ' > ?', array_merge( $site, $names, array( $before ) ) );
+			if ( (int) ( $newer[0][0] ?? 0 ) !== count( $names ) ) {
+				throw new \RuntimeException( 'Not every row carried back has an id above the old table\'s own: its rows are left as they are.' );
+			}
 		}
 		foreach ( array_chunk( $theirs, self::CHUNK ) as $names ) {
 			$this->db->rows( 'DELETE FROM ' . SqlWriter::identifier( $old ) . ' WHERE ' . $where . $column . ' IN (' . self::marks( $names ) . ') AND ' . $id . ' <= ?', array_merge( $site, $names, array( $before ) ) );

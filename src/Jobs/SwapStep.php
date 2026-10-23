@@ -951,8 +951,8 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * for a lock wait, a deadlock or a lost connection) is waited out, the maintenance file held, and tried again by
 	 * the next run; one that fails for any other reason is said in the job's log (with what was thrown), and the site
 	 * is put back without it: on an old table without transactions the statements sent before the failure stay, and
-	 * they leave each of this plugin's rows there either as it was or as the live one, never without one
-	 * (StateCarry::carry_back()).
+	 * they leave each of this plugin's names the live table has with its old row, the live one, or both (a sitemeta
+	 * table), never without one (StateCarry::carry_back()).
 	 *
 	 * @param JobContext                                                                                          $context Context.
 	 * @param Queries                                                                                             $db      Connection.
