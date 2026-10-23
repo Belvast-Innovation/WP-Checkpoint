@@ -75,6 +75,7 @@ final class StateCarryBackTest extends SwapTestCase {
 	 */
 	private function swapped_and_written(): Job {
 		global $wpdb;
+		$this->forget_state(); // What an earlier round carried back is not this round's.
 		$this->swap_parts['batch']  = 1;
 		$this->verdicts             = array( 'home', true, true, true, true, true, true, true );
 		$this->swap_parts['verify'] = $this->verdicts();
@@ -158,11 +159,20 @@ final class StateCarryBackTest extends SwapTestCase {
 		$this->undo( Plugin::instance()->jobs()->find( $job->id ) );
 	}
 
-	public function tear_down(): void {
+	/**
+	 * Remove the row this test writes (the plugin's uninstall setting) from the live options table.
+	 *
+	 * @return void
+	 */
+	private function forget_state(): void {
 		global $wpdb;
-		// The row this test writes into the live options table is the plugin's uninstall setting: not left behind.
 		$wpdb->query( $wpdb->prepare( "DELETE FROM `{$wpdb->base_prefix}options` WHERE option_name = %s", StoredNames::DELETE_DATA ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the options table.
 		$wpdb->query( 'COMMIT' );
+	}
+
+	public function tear_down(): void {
 		parent::tear_down();
+		// After the shared tear-down put the site back: the row is not left behind in whichever table is live then.
+		$this->forget_state();
 	}
 }
