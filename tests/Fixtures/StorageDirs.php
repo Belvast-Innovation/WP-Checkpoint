@@ -35,6 +35,32 @@ final class StorageDirs {
 	}
 
 	/**
+	 * Every storage directory in wp-content now (wp-checkpoint-*, the stored one and staging roots among them): what a
+	 * test takes at its start, to remove after it only what it made (made_since()).
+	 *
+	 * @return string[]
+	 */
+	public static function snapshot(): array {
+		if ( ! defined( 'WP_CONTENT_DIR' ) ) {
+			return array();
+		}
+		$out = glob( WP_CONTENT_DIR . '/' . Directories::DIR_PREFIX . '*', GLOB_ONLYDIR ) ?: array();
+		sort( $out );
+		return $out;
+	}
+
+	/**
+	 * The storage directories in wp-content made since a snapshot(): the ones a test may remove after itself. One that
+	 * was there before is not its to remove, whoever made it (an earlier run that was killed, another test's class).
+	 *
+	 * @param string[] $before snapshot() at the test's start.
+	 * @return string[]
+	 */
+	public static function made_since( array $before ): array {
+		return array_values( array_diff( self::snapshot(), $before ) );
+	}
+
+	/**
 	 * The storage directory the stored state names, read from the database itself ('' for none): not through the
 	 * object cache, which still holds a test's state after its transaction was rolled back, until the next test's
 	 * set-up flushes it. The value's "path" is read from its serialized text by its length (nothing is unserialized).

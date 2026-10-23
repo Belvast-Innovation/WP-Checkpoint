@@ -2,6 +2,7 @@
 
 namespace WPCheckpoint\Tests\Integration;
 
+use WPCheckpoint\Tests\Fixtures\StorageDirs;
 use WP_UnitTestCase;
 use WPCheckpoint\Admin\Notices;
 use WPCheckpoint\Admin\ReclaimActions;
@@ -28,8 +29,12 @@ final class ReclaimTest extends WP_UnitTestCase {
 	/** @var int */
 	private $admin;
 
+	/** @var string[] The storage directories in wp-content when the test started (StorageDirs::snapshot()). */
+	private $storage_before = array();
+
 	public function set_up(): void {
 		parent::set_up();
+		$this->storage_before = StorageDirs::snapshot(); // Before anything here makes one: only what the test makes goes after it.
 		Options::delete( Directories::OPTION );
 		$this->root = sys_get_temp_dir() . '/wpcheckpoint-reclaim-' . bin2hex( random_bytes( 4 ) );
 		foreach ( array( 'releases/20260917', 'releases/20260918', 'releases/20260919', 'copy/public_html', 'other/wp', 'sites/example.com', 'sites/staging.example.com', 'public_html/20260917', 'public_html/20260918', 'deploy/abc1234', 'deploy/def5678', 'deploy/hotfix' ) as $dir ) {
@@ -46,7 +51,7 @@ final class ReclaimTest extends WP_UnitTestCase {
 	}
 
 	public function tear_down(): void {
-		foreach ( glob( WP_CONTENT_DIR . '/wp-checkpoint-*' ) ?: array() as $dir ) {
+		foreach ( StorageDirs::made_since( $this->storage_before ) as $dir ) {
 			Deleter::empty_directory( $dir );
 			@rmdir( $dir );
 		}

@@ -2,6 +2,7 @@
 
 namespace WPCheckpoint\Tests\Integration;
 
+use WPCheckpoint\Tests\Fixtures\StorageDirs;
 use WP_UnitTestCase;
 use WPCheckpoint\Admin\Notices;
 use WPCheckpoint\Admin\ReclaimActions;
@@ -43,8 +44,12 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 	/** @var string[]|null The restore's tables there before the test; null before set_up(). */
 	private $tables_before = null;
 
+	/** @var string[] The storage directories in wp-content when the test started (StorageDirs::snapshot()). */
+	private $storage_before = array();
+
 	public function set_up(): void {
 		parent::set_up();
+		$this->storage_before = StorageDirs::snapshot(); // Before anything here makes one: only what the test makes goes after it.
 		global $wpdb;
 		// The core test case rewrites CREATE TABLE into CREATE TEMPORARY TABLE, which
 		// SHOW TABLES cannot see; the plugin's own table is created for real and dropped again.
@@ -78,7 +83,7 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 			}
 			$wpdb->query( 'SET FOREIGN_KEY_CHECKS=1' );
 		}
-		foreach ( glob( WP_CONTENT_DIR . '/wp-checkpoint-*' ) ?: array() as $dir ) {
+		foreach ( StorageDirs::made_since( $this->storage_before ) as $dir ) {
 			Deleter::empty_directory( $dir );
 			@rmdir( $dir );
 		}

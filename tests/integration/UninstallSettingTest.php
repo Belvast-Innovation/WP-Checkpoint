@@ -2,6 +2,7 @@
 
 namespace WPCheckpoint\Tests\Integration;
 
+use WPCheckpoint\Tests\Fixtures\StorageDirs;
 use WP_UnitTestCase;
 use WPCheckpoint\Admin\Notices;
 use WPCheckpoint\Admin\SettingsActions;
@@ -14,8 +15,12 @@ use WPCheckpoint\Support\UninstallSetting;
 
 final class UninstallSettingTest extends WP_UnitTestCase {
 
+	/** @var string[] The storage directories in wp-content when the test started (StorageDirs::snapshot()). */
+	private $storage_before = array();
+
 	public function set_up(): void {
 		parent::set_up();
+		$this->storage_before = StorageDirs::snapshot(); // Before anything here makes one: only what the test makes goes after it.
 		delete_option( UninstallSetting::OPTION );
 		if ( is_multisite() ) {
 			delete_site_option( UninstallSetting::OPTION );
@@ -31,7 +36,7 @@ final class UninstallSettingTest extends WP_UnitTestCase {
 	}
 
 	public function tear_down(): void {
-		foreach ( glob( WP_CONTENT_DIR . '/wp-checkpoint-*' ) ?: array() as $dir ) {
+		foreach ( StorageDirs::made_since( $this->storage_before ) as $dir ) {
 			if ( '' === (string) $dir || '' !== Deleter::refusal( (string) $dir ) ) {
 				continue; // Not set, or not one the plugin may delete (what the test made elsewhere it removes itself).
 			}

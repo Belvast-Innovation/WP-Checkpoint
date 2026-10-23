@@ -2,6 +2,7 @@
 
 namespace WPCheckpoint\Tests\Integration;
 
+use WPCheckpoint\Tests\Fixtures\StorageDirs;
 use WP_Error;
 use WP_UnitTestCase;
 use WPCheckpoint\Support\Deleter;
@@ -21,8 +22,12 @@ final class StorageTest extends WP_UnitTestCase {
 	/** @var string */
 	private $fake_root;
 
+	/** @var string[] The storage directories in wp-content when the test started (StorageDirs::snapshot()). */
+	private $storage_before = array();
+
 	public function set_up(): void {
 		parent::set_up();
+		$this->storage_before = StorageDirs::snapshot(); // Before anything here makes one: only what the test makes goes after it.
 		Options::delete( Directories::OPTION );
 		$this->fake_root = sys_get_temp_dir() . '/wpcheckpoint-storage-' . bin2hex( random_bytes( 4 ) );
 		mkdir( $this->fake_root . '/htdocs/wp', 0755, true );
@@ -46,7 +51,7 @@ final class StorageTest extends WP_UnitTestCase {
 				@rmdir( $dir );
 			}
 		}
-		foreach ( glob( WP_CONTENT_DIR . '/wp-checkpoint-*' ) ?: array() as $dir ) {
+		foreach ( StorageDirs::made_since( $this->storage_before ) as $dir ) {
 			if ( '' === (string) $dir || '' !== Deleter::refusal( (string) $dir ) ) {
 				continue; // Not set, or not one the plugin may delete (what the test made elsewhere it removes itself).
 			}

@@ -2,6 +2,7 @@
 
 namespace WPCheckpoint\Tests\Fixtures\Jobs;
 
+use WPCheckpoint\Tests\Fixtures\StorageDirs;
 use WP_UnitTestCase;
 use WPCheckpoint\Jobs\JobContext;
 use WPCheckpoint\Jobs\StepResult;
@@ -35,8 +36,12 @@ abstract class JobTestCase extends WP_UnitTestCase {
 		}
 	}
 
+	/** @var string[] The storage directories in wp-content when the test started (StorageDirs::snapshot()). */
+	protected $storage_before = array();
+
 	public function set_up(): void {
 		parent::set_up();
+		$this->storage_before = StorageDirs::snapshot(); // Before anything here makes one: only what the test makes goes after it.
 		global $wpdb;
 		// Whatever the test registers (a fixture under a real type's id such as export, or a new id) is gone
 		// afterwards: later tests would run the fixture instead of the job.
@@ -87,7 +92,7 @@ abstract class JobTestCase extends WP_UnitTestCase {
 		global $wpdb;
 		$this->restore_plugin();
 		$wpdb->query( 'DROP TABLE IF EXISTS ' . Schema::jobs_table() );
-		foreach ( glob( WP_CONTENT_DIR . '/wp-checkpoint-*' ) ?: array() as $dir ) {
+		foreach ( StorageDirs::made_since( $this->storage_before ) as $dir ) {
 			if ( '' === (string) $dir || '' !== Deleter::refusal( (string) $dir ) ) {
 				continue; // Not set, or not one the plugin may delete (what the test made elsewhere it removes itself).
 			}
