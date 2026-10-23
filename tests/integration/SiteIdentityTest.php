@@ -38,6 +38,7 @@ final class SiteIdentityTest extends WP_UnitTestCase {
 
 	public function set_up(): void {
 		parent::set_up();
+		\WPCheckpoint\Tests\Fixtures\RunTables::note(); // The run tables as the test finds them, put back at its end.
 		$this->storage_before = StorageDirs::listing();
 		global $wpdb;
 		remove_filter( 'query', array( $this, '_create_temporary_tables' ) );

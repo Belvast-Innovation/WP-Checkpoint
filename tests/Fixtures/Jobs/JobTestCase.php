@@ -38,6 +38,7 @@ abstract class JobTestCase extends WP_UnitTestCase {
 
 	public function set_up(): void {
 		parent::set_up();
+		\WPCheckpoint\Tests\Fixtures\RunTables::note(); // The run tables as the test finds them, put back at its end.
 		global $wpdb;
 		// Whatever the test registers (a fixture under a real type's id such as export, or a new id) is gone
 		// afterwards: later tests would run the fixture instead of the job.
