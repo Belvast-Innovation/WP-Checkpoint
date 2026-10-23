@@ -35,29 +35,19 @@ final class StorageDirs {
 	}
 
 	/**
-	 * Every storage directory in wp-content now (wp-checkpoint-*, the stored one and staging roots among them): what a
-	 * test takes at its start, to remove after it only what it made (made_since()).
+	 * The storage directories in wp-content a test may remove after itself: every one this run made (the plugin's,
+	 * which the tests make and leave from test to test), none that was there when the run started (Leftovers::before_run():
+	 * an earlier run's, which no test made; the leftover check fails a test after which one is gone).
 	 *
 	 * @return string[]
 	 */
-	public static function snapshot(): array {
+	public static function removable(): array {
 		if ( ! defined( 'WP_CONTENT_DIR' ) ) {
 			return array();
 		}
-		$out = glob( WP_CONTENT_DIR . '/' . Directories::DIR_PREFIX . '*', GLOB_ONLYDIR ) ?: array();
-		sort( $out );
-		return $out;
-	}
-
-	/**
-	 * The storage directories in wp-content made since a snapshot(): the ones a test may remove after itself. One that
-	 * was there before is not its to remove, whoever made it (an earlier run that was killed, another test's class).
-	 *
-	 * @param string[] $before snapshot() at the test's start.
-	 * @return string[]
-	 */
-	public static function made_since( array $before ): array {
-		return array_values( array_diff( self::snapshot(), $before ) );
+		$all = glob( WP_CONTENT_DIR . '/' . Directories::DIR_PREFIX . '*', GLOB_ONLYDIR ) ?: array();
+		sort( $all );
+		return array_values( array_diff( $all, Leftovers::before_run() ) );
 	}
 
 	/**

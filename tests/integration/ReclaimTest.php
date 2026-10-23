@@ -29,12 +29,8 @@ final class ReclaimTest extends WP_UnitTestCase {
 	/** @var int */
 	private $admin;
 
-	/** @var string[] The storage directories in wp-content when the test started (StorageDirs::snapshot()). */
-	private $storage_before = array();
-
 	public function set_up(): void {
 		parent::set_up();
-		$this->storage_before = StorageDirs::snapshot(); // Before anything here makes one: only what the test makes goes after it.
 		Options::delete( Directories::OPTION );
 		$this->root = sys_get_temp_dir() . '/wpcheckpoint-reclaim-' . bin2hex( random_bytes( 4 ) );
 		foreach ( array( 'releases/20260917', 'releases/20260918', 'releases/20260919', 'copy/public_html', 'other/wp', 'sites/example.com', 'sites/staging.example.com', 'public_html/20260917', 'public_html/20260918', 'deploy/abc1234', 'deploy/def5678', 'deploy/hotfix' ) as $dir ) {
@@ -51,7 +47,7 @@ final class ReclaimTest extends WP_UnitTestCase {
 	}
 
 	public function tear_down(): void {
-		foreach ( StorageDirs::made_since( $this->storage_before ) as $dir ) {
+		foreach ( StorageDirs::removable() as $dir ) { // Not an earlier run's.
 			Deleter::empty_directory( $dir );
 			@rmdir( $dir );
 		}
@@ -257,7 +253,7 @@ final class ReclaimTest extends WP_UnitTestCase {
 		$this->assertSame( $this->root . '/releases/20260918/', $state['auto_reclaimed']['from'] );
 		$this->assertTrue( OwnerMarker::matches( (string) file_get_contents( $base . '/' . OwnerMarker::FILENAME ), $state['install_id'], $this->root . '/releases/20260919/' ) );
 		$this->assertStringContainsString( 'reclaimed automatically', (string) file_get_contents( $base . '/logs/storage.log' ) );
-		$this->assertSame( array(), array_values( array_diff( StorageDirs::made_since( $this->storage_before ), array( $base ) ) ), 'no replacement directory was created (an earlier run\'s are not this test\'s)' );
+		$this->assertSame( array(), array_values( array_diff( StorageDirs::removable(), array( $base ) ) ), 'no replacement directory was created (an earlier run\'s are not this test\'s)' );
 
 		$notices = new Notices( $third );
 		$this->assertArrayHasKey( 'auto_reclaimed', $notices->notices() );

@@ -101,6 +101,15 @@ final class Leftovers implements TestListener {
 	 */
 	private $kept = array();
 
+	/**
+	 * The storage directories there when this run started (paths), as the registered listener read them: what the
+	 * tests' own clean-up leaves alone (StorageDirs::removable()). Empty for a listener given its lister (a test of this
+	 * class), which never sets it.
+	 *
+	 * @var string[]
+	 */
+	private static $before_run = array();
+
 	/** @var TestResult|null The run's result, for failures of a class or of the run. */
 	private $result = null;
 
@@ -145,6 +154,15 @@ final class Leftovers implements TestListener {
 			);
 		}
 		return array();
+	}
+
+	/**
+	 * The storage directories there when this run started: no test's to remove.
+	 *
+	 * @return string[]
+	 */
+	public static function before_run(): array {
+		return self::$before_run;
 	}
 
 	/**
@@ -257,6 +275,14 @@ final class Leftovers implements TestListener {
 					}
 				)
 			);
+			if ( ! $this->given ) {
+				self::$before_run = array_map(
+					static function ( string $item ): string {
+						return substr( $item, 8 );
+					},
+					$this->kept
+				);
+			}
 		}
 		$this->suites[] = $now;
 	}

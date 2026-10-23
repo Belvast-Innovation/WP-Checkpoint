@@ -22,12 +22,8 @@ final class StorageTest extends WP_UnitTestCase {
 	/** @var string */
 	private $fake_root;
 
-	/** @var string[] The storage directories in wp-content when the test started (StorageDirs::snapshot()). */
-	private $storage_before = array();
-
 	public function set_up(): void {
 		parent::set_up();
-		$this->storage_before = StorageDirs::snapshot(); // Before anything here makes one: only what the test makes goes after it.
 		Options::delete( Directories::OPTION );
 		$this->fake_root = sys_get_temp_dir() . '/wpcheckpoint-storage-' . bin2hex( random_bytes( 4 ) );
 		mkdir( $this->fake_root . '/htdocs/wp', 0755, true );
@@ -51,7 +47,7 @@ final class StorageTest extends WP_UnitTestCase {
 				@rmdir( $dir );
 			}
 		}
-		foreach ( StorageDirs::made_since( $this->storage_before ) as $dir ) {
+		foreach ( StorageDirs::removable() as $dir ) { // Not an earlier run's.
 			if ( '' === (string) $dir || '' !== Deleter::refusal( (string) $dir ) ) {
 				continue; // Not set, or not one the plugin may delete (what the test made elsewhere it removes itself).
 			}
@@ -639,7 +635,7 @@ final class StorageTest extends WP_UnitTestCase {
 		$this->assertSame( $before, Directories::load_state() );
 		$this->assertSame( $saved, $saves(), 'nothing saved' );
 		$this->assertSame( $files, $this->snapshot( $dir ) );
-		$this->assertSame( array( $dir ), array_values( array_diff( glob( dirname( $dir ) . '/' . Directories::DIR_PREFIX . '*' ) ?: array(), $this->storage_before ) ), 'no other directory made (an earlier run\'s are not this test\'s)' );
+		$this->assertSame( array( $dir ), array_values( array_diff( glob( dirname( $dir ) . '/' . Directories::DIR_PREFIX . '*' ) ?: array(), \WPCheckpoint\Tests\Fixtures\Leftovers::before_run() ) ), 'no other directory made (an earlier run\'s are not this test\'s)' );
 
 		// The control for the counter: another installation's marker, read, is a clone and is saved.
 		file_put_contents( $dir . '/' . OwnerMarker::FILENAME, OwnerMarker::build( 'other-install', '/srv/other/' ) );
