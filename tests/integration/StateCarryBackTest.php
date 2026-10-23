@@ -496,32 +496,92 @@ final class StateCarryBackTest extends SwapTestCase {
 		global $wpdb;
 		$job           = $this->swapped_and_written();
 		list( $o, $m ) = $this->old_tables( $job );
-		$live          = $wpdb->base_prefix . 'options';
 		$before        = $this->own_names_in( $o, $m );
-		// A migration that left the id without AUTO_INCREMENT: a row put in gets id 0, then gives way to the next.
-		$this->assertNotFalse( $wpdb->query( "ALTER TABLE `{$o}` MODIFY option_id bigint(20) unsigned NOT NULL DEFAULT 0" ), $wpdb->last_error );
+		// A migration that left the id without AUTO_INCREMENT: a row put in gets id 0, then gives way to the next. On a
+		// network the sitemeta table, read after the options table is carried: neither is written.
+		list( $table, $live, $id ) = null === $m ? array( $o, $wpdb->base_prefix . 'options', 'option_id' ) : array( $m, $wpdb->base_prefix . 'sitemeta', 'meta_id' );
+		$type                      = (string) $wpdb->get_row( $wpdb->prepare( "SHOW COLUMNS FROM `{$table}` LIKE %s", $id ), ARRAY_A )['Type']; // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the old table.
+		$this->assertNotSame( '', $type, $wpdb->last_error );
+		$this->assertNotFalse( $wpdb->query( "ALTER TABLE `{$table}` MODIFY {$id} {$type} NOT NULL DEFAULT 0" ), $wpdb->last_error ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the old table and its id.
 		$wpdb->query( 'COMMIT' );
 		try {
 			$this->seams = array();
 			$this->cli_run( $job );
 			$this->assertContains( 'carry_back_locked', $this->seams, 'the control: the carry back began' );
-			$this->assertNotContains( 'carry_back_1', $this->seams, 'nothing was written into it' );
+			$this->assertNotContains( 'carry_back_1', $this->seams, 'nothing was written' );
 			$this->assert_nothing_missing( $job, $before, 'not AUTO_INCREMENT', false );
 			$this->assertStringContainsString( 'the site is put back all the same', Plugin::instance()->job_presenter()->log_tail( Plugin::instance()->jobs()->find( $job->id ) ), 'the failure is said' );
 		} finally {
 			// The id made AUTO_INCREMENT again wherever the table is now, for what runs after.
-			foreach ( array( $live, $o ) as $table ) {
-				if ( $table !== $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $table ) ) ) ) {
+			foreach ( array( $live, $table ) as $name ) {
+				if ( $name !== $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $name ) ) ) ) {
 					continue; // Renamed back, or not yet.
 				}
-				$column = $wpdb->get_row( "SHOW COLUMNS FROM `{$table}` LIKE 'option_id'", ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- an options table.
+				$column = $wpdb->get_row( $wpdb->prepare( "SHOW COLUMNS FROM `{$name}` LIKE %s", $id ), ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the table.
 				if ( is_array( $column ) && false === stripos( (string) $column['Extra'], 'auto_increment' ) ) {
-					$wpdb->query( "ALTER TABLE `{$table}` MODIFY option_id bigint(20) unsigned NOT NULL AUTO_INCREMENT" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- an options table.
+					$this->assertNotFalse( $wpdb->query( "ALTER TABLE `{$name}` MODIFY {$id} {$type} NOT NULL AUTO_INCREMENT" ), $wpdb->last_error ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the table and its id.
 				}
 			}
 			$wpdb->query( 'COMMIT' );
 			$this->undo( Plugin::instance()->jobs()->find( $job->id ) );
 		}
+	}
+
+	public function test_a_row_deleted_by_another_request_during_the_carry_is_not_looked_for(): void {
+		global $wpdb;
+		$job = $this->swapped_and_written( false ); // Read for update matters with transactions.
+		$this->write_live( StoredNames::DB_UPGRADE_RETRY, 'deleted meanwhile' );
+		$seen = 0;
+		$this->retype( $job, array(), self::deleting_before_the_replace( $seen ) );
+		$this->seams = array();
+		$this->cli_run( $job );
+		$this->assertSame( 1, $seen, 'the control: the row was deleted by another connection, after the carry listed it and before it replaced' );
+		$this->assertContains( 'carried_back', $this->seams, 'carried back all the same' );
+		$this->assert_put_back( $job, 'deleted meanwhile' );
+		$this->assertNull( $this->value( '', StoredNames::DB_UPGRADE_RETRY ), 'the row deleted meanwhile is not there' );
+		$this->undo( Plugin::instance()->jobs()->find( $job->id ) );
+	}
+
+	/**
+	 * A connection on which, right before the carry back's first replace, another connection deletes and commits the
+	 * live upgrade-retry rows (as another request would).
+	 *
+	 * @param int $seen Times it deleted (increased).
+	 * @return callable
+	 */
+	private static function deleting_before_the_replace( int &$seen ): callable {
+		return static function () use ( &$seen ) {
+			return new class( ImportSession::open( Credentials::from_wordpress() ), $seen ) implements \WPCheckpoint\Restore\Queries {
+				/** @var ImportSession */
+				private $db;
+				/** @var int */
+				private $seen;
+				public function __construct( $db, int &$seen ) {
+					$this->db   = $db;
+					$this->seen = &$seen;
+				}
+				public function run( string $sql ): int {
+					return $this->db->run( $sql );
+				}
+				public function rows( string $sql, array $params = array() ): array {
+					if ( 0 === $this->seen && 0 === strpos( $sql, 'REPLACE INTO' ) && false !== strpos( $sql, \WPCheckpoint\Jobs\TempTables::OLD_PREFIX ) ) {
+						++$this->seen;
+						$other = ImportSession::open( Credentials::from_wordpress() );
+						$base  = $GLOBALS['wpdb']->base_prefix;
+						$other->rows( 'DELETE FROM `' . $base . 'options` WHERE option_name = ?', array( StoredNames::DB_UPGRADE_RETRY ) );
+						if ( is_multisite() ) {
+							$other->rows( 'DELETE FROM `' . $base . 'sitemeta` WHERE meta_key = ?', array( StoredNames::DB_UPGRADE_RETRY ) );
+						}
+						$other->run( 'COMMIT' );
+						$other->close();
+					}
+					return $this->db->rows( $sql, $params );
+				}
+				public function write( string $sql, array $params ): int {
+					return $this->db->write( $sql, $params );
+				}
+			};
+		};
 	}
 
 	public function test_when_a_carried_row_is_not_seen_above_the_noted_id_nothing_is_deleted(): void {
