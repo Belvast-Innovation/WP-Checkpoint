@@ -97,6 +97,8 @@ final class FencedWritesTest extends TestCase {
 		'src/Restore/StateCarry.php'  => array(
 			array( "'DELETE FROM ' . SqlWriter::identifier( \$temp ) . ' WHERE '", self::LOCKED ),
 			array( "'INSERT INTO ' . SqlWriter::identifier( \$temp ) . ' ' . \$columns", self::LOCKED ),
+			array( "'REPLACE INTO ' . SqlWriter::identifier( \$old ) . ' ' . \$columns", self::LOCKED ),
+			array( "'DELETE FROM ' . SqlWriter::identifier( \$old ) . ' WHERE '", self::LOCKED ),
 			array( "VALUES ('\" . self::ACTIVE . \"', ?, 'yes')", self::LOCKED ),
 			array( "SET option_value = ? WHERE option_name = '\" . self::ACTIVE . \"'", self::LOCKED ),
 			array( "VALUES (?, '\" . self::ACTIVE_NETWORK . \"', ?)", self::LOCKED ),

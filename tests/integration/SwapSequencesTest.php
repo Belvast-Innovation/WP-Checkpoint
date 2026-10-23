@@ -45,6 +45,10 @@ use WPCheckpoint\Tests\Fixtures\Restore\SwapTestCase;
  *   (killed after writing it and before the step that deletes it), and no outcome leaves it in any options table of
  *   the database (the site's, or one a reverse swapped out, which a retry would swap in again): a run that takes over
  *   after the verdict was recorded deletes it before acting on the verdict.
+ * - I9: this plugin's own state, written after the kill into the options table under its live name (whichever table
+ *   that is then: the old site's, or the restored one), is there under the live name at the end, whatever the
+ *   outcome: carried into the restored tables before the swap, carried back before a put-back renames the options
+ *   table back (StateCarry::carry_back()), or left where it was written.
  *
  * Fixed: the seams in order, one sequence each (WPCHECKPOINT_SWAP_SEQUENCES more are drawn with
  * WPCHECKPOINT_SWAP_SEQUENCES_SEED). Every seam and every kind of interleaving must occur, counted where it happened.
@@ -70,7 +74,7 @@ final class SwapSequencesTest extends SwapTestCase {
 	 * (killed at the first two, the next run verifies and reverses whole; at the next two, it reads the verdict); the
 	 * rest share the rollback's names.
 	 */
-	const REVERSE = array( 'flushed', 'verified', 'verify_failed', 'self_check_removed', 'reverse_recorded', 'table_back', 'dir_back', 'dirs_back', 'restored', 'unheld', 'reverted', 'maintenance_down' );
+	const REVERSE = array( 'flushed', 'verified', 'verify_failed', 'self_check_removed', 'reverse_recorded', 'table_back', 'dir_back', 'dirs_back', 'restored', 'unheld', 'reverted', 'maintenance_down', 'carry_back_locked', 'carry_back_written', 'carried_back' );
 
 	/** The seams at which the self-check row is there (I8): written, and not deleted yet. */
 	const CHECKING = array( 'self_check_written', 'verified', 'verdict_recorded', 'verify_failed' );
@@ -106,7 +110,7 @@ final class SwapSequencesTest extends SwapTestCase {
 	const REVERSING = 'reverse_recorded';
 
 	/** Seams of a run that renames something (or is about to). */
-	const RENAMING = array( 'entered', 'maintenance', 'dir_aside', 'dir_aside_recorded', 'dir_in', 'carry_locked', 'carry_written', 'carried', 'batch_recorded', 'batch_sent', 'rollback', 'reverse_recorded', 'table_back', 'dir_back', 'dirs_back' );
+	const RENAMING = array( 'entered', 'maintenance', 'dir_aside', 'dir_aside_recorded', 'dir_in', 'carry_locked', 'carry_written', 'carried', 'batch_recorded', 'batch_sent', 'rollback', 'reverse_recorded', 'carry_back_locked', 'carry_back_written', 'carried_back', 'table_back', 'dir_back', 'dirs_back' );
 
 	/**
 	 * What happens meanwhile, given out in turn (in this order, so that every kind meets a seam where it has an
@@ -145,7 +149,7 @@ final class SwapSequencesTest extends SwapTestCase {
 	}
 
 	public function test_every_seam_and_every_interleaving_keeps_the_invariants(): void {
-		$count = max( 1, (int) ( getenv( 'WPCHECKPOINT_SWAP_SEQUENCES' ) ?: 42 ) );
+		$count = max( 1, (int) ( getenv( 'WPCHECKPOINT_SWAP_SEQUENCES' ) ?: 45 ) );
 		$seed  = (int) ( getenv( 'WPCHECKPOINT_SWAP_SEQUENCES_SEED' ) ?: 1 );
 		// A seam with its path: the rollback's and the reverse's share names.
 		$seams = array();
@@ -155,7 +159,7 @@ final class SwapSequencesTest extends SwapTestCase {
 		foreach ( self::REVERSE as $seam ) {
 			$seams[] = array( 'reverse', $seam );
 		}
-		$this->assertSame( 42, count( $seams ), 'the default count is one sequence per seam' );
+		$this->assertSame( 45, count( $seams ), 'the default count is one sequence per seam' );
 		$this->held_checks = array_fill_keys( self::AT_RENAME, 0 );
 		mt_srand( $seed );
 		$killed = array();
@@ -184,6 +188,37 @@ final class SwapSequencesTest extends SwapTestCase {
 		}
 		$this->assertGreaterThan( 0, $this->mark_checks, 'the control: I6 met held files' );
 		$this->assertGreaterThan( 0, $this->rows_seen, 'the control: I8 saw the self-check row a killed run left' );
+		$this->assertGreaterThan( 0, $this->carried_back, 'the control: I9 met sequences whose put-back carried the state back' );
+	}
+
+	/** @var int Sequences in which a run carried this plugin's state back (I9's control). */
+	private $carried_back = 0;
+
+	/**
+	 * I9: the value of this plugin's own row in the options table under its live name, or null.
+	 *
+	 * @return string|null
+	 */
+	private function own_state() {
+		global $wpdb;
+		$wpdb->query( 'COMMIT' );
+		$value = $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM `{$wpdb->base_prefix}options` WHERE option_name = %s", \WPCheckpoint\Support\StoredNames::DELETE_DATA ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the options table.
+		return is_string( $value ) ? $value : null;
+	}
+
+	/**
+	 * I9: set this plugin's own row (or remove it, for null) in the options table under its live name.
+	 *
+	 * @param string|null $value Value.
+	 * @return void
+	 */
+	private function set_own_state( $value ): void {
+		global $wpdb;
+		$wpdb->query( $wpdb->prepare( "DELETE FROM `{$wpdb->base_prefix}options` WHERE option_name = %s", \WPCheckpoint\Support\StoredNames::DELETE_DATA ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the options table.
+		if ( null !== $value ) {
+			$wpdb->query( $wpdb->prepare( "INSERT INTO `{$wpdb->base_prefix}options` (option_name, option_value, autoload) VALUES (%s, %s, 'no')", \WPCheckpoint\Support\StoredNames::DELETE_DATA, $value ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the options table.
+		}
+		$wpdb->query( 'COMMIT' );
 	}
 
 	/** @var int Killed runs that left the self-check row (I8's control). */
@@ -309,9 +344,15 @@ final class SwapSequencesTest extends SwapTestCase {
 			$removed = true;
 		}
 
+		// I9's write: this plugin's own state, written now into the options table under the live name.
+		$state = 'written after the kill: ' . $label;
+		$this->set_own_state( $state );
+		$this->assertSame( $state, $this->own_state(), $label . ': I9, the control: the state is read back where it was written' );
+
 		if ( 0 === strpos( $kind, 'elsewhere_' ) && ! $this->elsewhere( $job, $kind, $label, $kinds ) ) {
 			// Abandoned: it never runs again, and the site it held stays as it is; undone here, as at the end.
 			$this->assertSame( array(), $this->tables_with_a_self_check_row(), $label . ': I8, no self-check row once it was abandoned' );
+			$this->set_own_state( null );
 			$this->copy = '';
 			$this->undo( Plugin::instance()->jobs()->find( $job->id ) );
 			$wpdb->query( "DROP TABLE IF EXISTS `{$wpdb->prefix}swt_gone`" );
@@ -494,7 +535,7 @@ final class SwapSequencesTest extends SwapTestCase {
 			$this->assertSame( Job::CANCELLED, $done->status, $label . ': a cancel that was taken ends the job cancelled' );
 		}
 		// I4: an ended job leaves none of its files held.
-		$this->assertFalse( Maintenance::held_in( $this->abspath ), $label . ': no held file once the job ended (' . $done->status . ')' );
+		$this->assertFalse( Maintenance::held_in( $this->abspath ), $label . ': no held file once the job ended (' . $done->status . ': ' . $done->last_error . ')' );
 		$this->assertSame( array(), $this->tables_with_a_self_check_row(), $label . ': I8, no self-check row in any options table once the job ended (' . $done->status . ')' );
 		$this->marked( $job, $label . ' (ended)' );
 		if ( '' !== $this->copy ) {
@@ -517,6 +558,12 @@ final class SwapSequencesTest extends SwapTestCase {
 		} elseif ( ! $restored ) {
 			$this->assertSame( $before, $site, $label . ': put back as it was' );
 		}
+		// I9: this plugin's state written after the kill is under the live name, whatever the outcome.
+		$this->assertSame( $state, $this->own_state(), $label . ': I9, this plugin\'s state written after the kill is kept (' . $done->status . ')' );
+		if ( in_array( 'carried_back', array_merge( $passed, $runs ), true ) ) {
+			++$this->carried_back;
+		}
+		$this->set_own_state( null );
 		$this->undo( Plugin::instance()->jobs()->find( $job->id ) );
 		$wpdb->query( "DROP TABLE IF EXISTS `{$wpdb->prefix}swt_gone`" );
 		foreach ( self::NEIGHBOUR as $marker ) {

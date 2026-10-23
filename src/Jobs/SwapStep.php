@@ -872,6 +872,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		$this->hold_for_renames( $context, $file, ! empty( $cursor['out'] ) );
 		$db->run( 'SET SESSION lock_wait_timeout = ' . self::LOCK_WAIT );
 		$there = $this->there( $db, $entries['tables'] );
+		$this->carry_back( $context, $db, $entries['tables'], $there );
 		foreach ( array_reverse( $entries['tables'] ) as $entry ) {
 			$pairs = SwapRules::table_back( $entry, $there, $this->stray_table( $context, $entry['live'] ) );
 			if ( SwapPlan::TABLE_OF === $entry['kind'] && $entry['had_live'] && ! isset( $there[ $entry['stage'] ] ) && isset( $there[ $entry['live'] ] ) && ! isset( $there[ $entry['old'] ] ) ) {
@@ -933,6 +934,74 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		$context->checkpoint( $cursor, 98, __( 'The site is as it was before the restore', 'wp-checkpoint' ) );
 		$this->at( 'restored' );
 		return $this->end_back( $context, $cursor, $detail );
+	}
+
+	/**
+	 * Before anything is renamed back: this plugin's own state, written since the swap into the options table (and a
+	 * network's sitemeta) under its live name, carried into the table the swap moved aside, which is about to come back
+	 * (StateCarry::carry_back(), in its fenced transaction). Only while the options table is where the swap left it,
+	 * the restored one under the live name, the old one under its moved-aside name and nothing under the staging name
+	 * (positive evidence, read just before; with a table under the staging name too, the one under the live name is
+	 * not the restored one and is moved out of the way): a run taken up after it was renamed back finds no such pair
+	 * and carries nothing, never the other way;
+	 * the run that renamed it had carried both before its first rename. The sitemeta pair goes with it when it is
+	 * where the swap left it too.
+	 *
+	 * Putting the site back comes first: a carry that fails for a moment (TransientFailure, as the connection raises
+	 * for a lock wait, a deadlock, a row changed since its snapshot or a lost connection) is waited out, the
+	 * maintenance file held, and tried again by the next run; one that fails for any other reason is said in the
+	 * job's log (with what was thrown), and the site is put back without it: on an old table without transactions the
+	 * statements sent before the failure stay, and they never take away a row the old table had under one of this
+	 * plugin's names the carry listed in the live table and the live table still has: it stays, or the live one is
+	 * there, or both (a sitemeta table) (StateCarry::carry_back()).
+	 *
+	 * @param JobContext                                                                                          $context Context.
+	 * @param Queries                                                                                             $db      Connection.
+	 * @param array<int, array{seq: int, kind: string, live: string, stage: string, old: string, had_live: bool}> $tables  Table entries.
+	 * @param array<string, bool>                                                                                 $there   Which of their names are there.
+	 * @return void
+	 * @throws TransientFailure When the carry fails for a moment (the put-back goes on later).
+	 * @throws LockLost When the job is no longer this run's.
+	 * @throws StaleJob When the job changed meanwhile.
+	 */
+	private function carry_back( JobContext $context, Queries $db, array $tables, array $there ): void {
+		$pairs = array();
+		foreach ( $tables as $entry ) {
+			if ( SwapPlan::TABLE_OF !== $entry['kind'] || ! $entry['had_live'] || ! isset( $there[ $entry['live'] ], $there[ $entry['old'] ] ) || isset( $there[ $entry['stage'] ] ) ) {
+				continue;
+			}
+			if ( self::base_prefix() . 'options' === $entry['live'] ) {
+				$pairs['options'] = $entry;
+			}
+			if ( is_multisite() && self::base_prefix() . 'sitemeta' === $entry['live'] ) {
+				$pairs['meta'] = $entry;
+			}
+		}
+		if ( ! isset( $pairs['options'] ) ) {
+			return;
+		}
+		$meta = $pairs['meta'] ?? null;
+		try {
+			$this->state_carry( $db )->carry_back( $pairs['options']['live'], $pairs['options']['old'], null === $meta ? null : $meta['live'], null === $meta ? null : $meta['old'], $context->fence() );
+		} catch ( LockLost $e ) {
+			throw $e; // The run that takes the job over puts the site back.
+		} catch ( StaleJob $e ) {
+			throw $e;
+		} catch ( TransientFailure $e ) {
+			throw $e; // A problem of the moment: the put-back waits, its file held, and goes on.
+		} catch ( \Throwable $e ) {
+			// Nothing a retry would change: the site is put back without the carry, and that is said.
+			$context->logger()->warning(
+				'This plugin\'s own settings written since the swap were not carried back (or only some of them); the site is put back all the same',
+				array(
+					'error'  => get_class( $e ),
+					'reason' => $e->getMessage(),
+				)
+			);
+			return;
+		}
+		$context->logger()->info( 'This plugin\'s own settings were carried back into the site as it was' );
+		$this->at( 'carried_back' );
 	}
 
 	/**
@@ -1840,12 +1909,8 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 *
 	 * @param Queries $db Connection.
 	 * @return StateCarry
-	 * @throws \RuntimeException When the connection is not one the carry works on.
 	 */
 	private function state_carry( Queries $db ): StateCarry {
-		if ( ! $db instanceof ImportSession ) {
-			throw new \RuntimeException( 'The swap\'s connection cannot carry this plugin\'s state.' );
-		}
 		$plugin = isset( $this->parts['plugin'] ) ? (string) $this->parts['plugin'] : plugin_basename( WPCHECKPOINT_FILE );
 		return new StateCarry(
 			$db,
