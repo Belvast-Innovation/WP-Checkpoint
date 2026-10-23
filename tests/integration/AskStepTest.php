@@ -81,6 +81,7 @@ final class AskStepTest extends WP_UnitTestCase {
 		@rmdir( $this->root );
 		Options::delete( Schema::OPTION );
 		Options::delete( Directories::OPTION );
+		\WPCheckpoint\Tests\Fixtures\RunTables::put_back(); // The tables as the test found them, for the tests after it.
 		parent::tear_down();
 		if ( null !== $this->storage_before ) {
 			StorageDirs::remove_made_since( $this->storage_before ); // The Directories it made has its directory in wp-content.

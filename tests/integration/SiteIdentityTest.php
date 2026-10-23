@@ -60,6 +60,7 @@ final class SiteIdentityTest extends WP_UnitTestCase {
 		Options::delete( Schema::OPTION );
 		Options::delete( Directories::OPTION );
 		$wpdb->query( 'DROP TABLE IF EXISTS ' . Schema::jobs_table() );
+		\WPCheckpoint\Tests\Fixtures\RunTables::put_back(); // The tables as the test found them, for the tests after it.
 		if ( '' !== $this->root ) {
 			foreach ( glob( $this->root . '/*/locked' ) ?: array() as $locked ) {
 				chmod( $locked, 0755 );

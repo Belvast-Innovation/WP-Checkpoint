@@ -102,6 +102,7 @@ abstract class JobTestCase extends WP_UnitTestCase {
 		delete_site_transient( 'wpcheckpoint_environment' );
 		Plugin::instance()->reset_directories();
 		_set_cron_array( array() );
+		\WPCheckpoint\Tests\Fixtures\RunTables::put_back(); // The tables as the test found them, for the tests after it.
 		parent::tear_down();
 	}
 
