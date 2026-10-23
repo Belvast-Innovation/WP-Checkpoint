@@ -618,10 +618,10 @@ final class StateCarryBackTest extends SwapTestCase {
 		// A site restored from another server: the same character set, another collation (which the server refuses to
 		// compare with the live table's column).
 		$this->assertNotFalse( $wpdb->query( "ALTER TABLE `{$o}` MODIFY option_name {$column['Type']} CHARACTER SET utf8mb4 COLLATE {$other} NOT NULL DEFAULT ''" ), $wpdb->last_error ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the old options table.
-		$this->assertSame( $other, $wpdb->get_row( "SHOW FULL COLUMNS FROM `{$o}` LIKE 'option_name'", ARRAY_A )['Collation'], 'the control: the old table has another collation' ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the old options table.
-		$this->assertSame( $collation, $wpdb->get_row( "SHOW FULL COLUMNS FROM `{$live}` LIKE 'option_name'", ARRAY_A )['Collation'], 'the control: the live table has the first one' ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the live options table.
-		$wpdb->query( 'COMMIT' );
 		try {
+			$this->assertSame( $other, $wpdb->get_row( "SHOW FULL COLUMNS FROM `{$o}` LIKE 'option_name'", ARRAY_A )['Collation'], 'the control: the old table has another collation' ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the old options table.
+			$this->assertSame( $collation, $wpdb->get_row( "SHOW FULL COLUMNS FROM `{$live}` LIKE 'option_name'", ARRAY_A )['Collation'], 'the control: the live table has the first one' ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the live options table.
+			$wpdb->query( 'COMMIT' );
 			$this->seams = array();
 			$done        = $this->cli_run( $job );
 			$this->assertContains( 'carried_back', $this->seams, 'carried back (' . $done->status . ', ' . $done->last_error . ': ' . Plugin::instance()->job_presenter()->log_tail( $done ) . ')' );

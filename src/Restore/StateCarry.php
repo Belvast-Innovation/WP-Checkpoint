@@ -158,7 +158,8 @@ final class StateCarry {
 
 	/**
 	 * Carry this plugin's rows the other way, from the live tables into the old ones about to be renamed back
-	 * (carry_table_back(): no row the old table had under a name the live table has is ever taken away), both old
+	 * (carry_table_back(): no row the old table had under a name the carry listed in the live table and the live
+	 * table still has is ever taken away), both old
 	 * tables' id columns first checked to be AUTO_INCREMENT, without the self-check row
 	 * (StoredNames::SELF_CHECK), with its seams named "carry_back_…", and without touching the old table's list of
 	 * active plugins: that table is the one the site ran this plugin from until the swap. The caller runs it only
@@ -173,8 +174,9 @@ final class StateCarry {
 	 * @throws \WPCheckpoint\Jobs\LockLost When the job is no longer this run's: nothing is written.
 	 * @throws \RuntimeException When an old table's id column is not AUTO_INCREMENT: nothing is written.
 	 * @throws \Throwable Whatever else stops it, after the transaction is rolled back (on a table without
-	 *                    transactions the statements sent before stay: a row the old table had under a name the live
-	 *                    table has stays, or the live one is there, or both).
+	 *                    transactions the statements sent before stay: a row the old table had under a name the carry
+	 *                    listed in the live table and the live table still has stays, or the live one is there, or
+	 *                    both).
 	 */
 	public function carry_back( string $live_options, string $old_options, $live_meta, $old_meta, array $fence ): void {
 		$this->carry_between( $live_options, $old_options, $live_meta, $old_meta, $fence, 'carry_back', true );
