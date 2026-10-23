@@ -639,7 +639,7 @@ final class StorageTest extends WP_UnitTestCase {
 		$this->assertSame( $before, Directories::load_state() );
 		$this->assertSame( $saved, $saves(), 'nothing saved' );
 		$this->assertSame( $files, $this->snapshot( $dir ) );
-		$this->assertSame( array( $dir ), glob( dirname( $dir ) . '/' . Directories::DIR_PREFIX . '*' ), 'no other directory made' );
+		$this->assertSame( array( $dir ), array_values( array_diff( glob( dirname( $dir ) . '/' . Directories::DIR_PREFIX . '*' ) ?: array(), $this->storage_before ) ), 'no other directory made (an earlier run\'s are not this test\'s)' );
 
 		// The control for the counter: another installation's marker, read, is a clone and is saved.
 		file_put_contents( $dir . '/' . OwnerMarker::FILENAME, OwnerMarker::build( 'other-install', '/srv/other/' ) );
