@@ -143,26 +143,27 @@ final class StateCarry {
 	 * @throws \Throwable Whatever else stops it, after the transaction is rolled back.
 	 */
 	public function carry( string $live_options, string $temp_options, $live_meta, $temp_meta, array $fence ): void {
-		$this->carry_between( $live_options, $temp_options, $live_meta, $temp_meta, $fence, 'carry', array() );
+		$this->carry_between( $live_options, $temp_options, $live_meta, $temp_meta, $fence, 'carry', array(), true );
 	}
 
 	/**
 	 * Carry this plugin's rows the other way, from the live tables into the old ones about to be renamed back, and
 	 * keep it active there: as carry(), but without the self-check row (StoredNames::SELF_CHECK), with its seams
-	 * named "carry_back_…". The caller runs it only while both tables are where the swap left them.
+	 * named "carry_back_…", and an old list of active plugins that cannot be read is left as it is (the rows are
+	 * carried all the same; false is returned) rather than refused: the site is put back whatever its list says. The
+	 * caller runs it only while both tables are where the swap left them.
 	 *
 	 * @param string                                       $live_options Live options table (the restored site's).
 	 * @param string                                       $old_options  The options table the swap moved aside.
 	 * @param string|null                                  $live_meta    Live sitemeta table (multisite), null when not carried.
 	 * @param string|null                                  $old_meta     The sitemeta table the swap moved aside, null when not carried.
 	 * @param array{table: string, id: int, token: string} $fence        The job row and the run's token.
-	 * @return void
-	 * @throws Refused When the old table's list of active plugins cannot be read.
+	 * @return bool Whether this plugin is in the old table's list of active plugins (false: that list cannot be read).
 	 * @throws \WPCheckpoint\Jobs\LockLost When the job is no longer this run's: nothing is written.
 	 * @throws \Throwable Whatever else stops it, after the transaction is rolled back.
 	 */
-	public function carry_back( string $live_options, string $old_options, $live_meta, $old_meta, array $fence ): void {
-		$this->carry_between( $live_options, $old_options, $live_meta, $old_meta, $fence, 'carry_back', array( StoredNames::SELF_CHECK ) );
+	public function carry_back( string $live_options, string $old_options, $live_meta, $old_meta, array $fence ): bool {
+		return $this->carry_between( $live_options, $old_options, $live_meta, $old_meta, $fence, 'carry_back', array( StoredNames::SELF_CHECK ), false );
 	}
 
 	/**
@@ -175,24 +176,27 @@ final class StateCarry {
 	 * @param array{table: string, id: int, token: string} $fence        The job row and the run's token.
 	 * @param string                                       $seams        The seams' prefix ("carry", "carry_back").
 	 * @param string[]                                     $except       Own names not carried.
-	 * @return void
+	 * @param bool                                         $strict       Whether a list of active plugins that cannot be read
+	 *                                                                   is refused (true) or left as it is (false).
+	 * @return bool Whether this plugin is in the written table's list of active plugins.
 	 */
-	private function carry_between( string $from_options, string $to_options, $from_meta, $to_meta, array $fence, string $seams, array $except ): void {
-		JobFence::within(
+	private function carry_between( string $from_options, string $to_options, $from_meta, $to_meta, array $fence, string $seams, array $except, bool $strict ): bool {
+		return (bool) JobFence::within(
 			$this->db,
 			$fence,
-			function () use ( $from_options, $to_options, $from_meta, $to_meta, $seams, $except ): void {
+			function () use ( $from_options, $to_options, $from_meta, $to_meta, $seams, $except, $strict ): bool {
 				$this->seams = $seams;
 				$this->at( $seams . '_locked' );
 				$this->statements = 0;
 				$this->carry_table( $from_options, $to_options, false, array(), '(option_name, option_value, autoload) SELECT option_name, option_value, autoload', $except );
 				if ( null !== $from_meta && null !== $to_meta ) {
 					$this->carry_table( $from_meta, $to_meta, true, array( (string) $this->network ), '(site_id, meta_key, meta_value) SELECT site_id, meta_key, meta_value', $except );
-					$this->activate_network( $to_meta );
+					$active = $this->activate_network( $to_meta, $strict );
 				} else {
-					$this->activate( $to_options );
+					$active = $this->activate( $to_options, $strict );
 				}
 				$this->at( $seams . '_written' );
+				return $active;
 			}
 		);
 	}
@@ -337,50 +341,60 @@ final class StateCarry {
 	 * Put this plugin into active_plugins of the temporary options table.
 	 *
 	 * @param string $temp_options Temporary options table.
-	 * @return void
-	 * @throws Refused When the list cannot be read.
+	 * @param bool   $strict       Whether a list that cannot be read is refused, or left as it is (false returned).
+	 * @return bool Whether this plugin is in the list.
+	 * @throws Refused When the list cannot be read and $strict.
 	 */
-	private function activate( string $temp_options ): void {
+	private function activate( string $temp_options, bool $strict ): bool {
 		JobFence::assert_locked( $this->db );
 		$rows = $this->db->rows( 'SELECT option_value FROM ' . SqlWriter::identifier( $temp_options ) . " WHERE option_name = '" . self::ACTIVE . "'" );
 		if ( array() === $rows ) {
 			$this->db->rows( 'INSERT INTO ' . SqlWriter::identifier( $temp_options ) . " (option_name, option_value, autoload) VALUES ('" . self::ACTIVE . "', ?, 'yes')", array( PluginList::write( array( $this->plugin ) ) ) );
-			return;
+			return true;
 		}
 		$list = PluginList::read( (string) $rows[0][0] );
 		if ( null === $list ) {
+			if ( ! $strict ) {
+				return false;
+			}
 			throw new Refused( 'The backup\'s list of active plugins (active_plugins) is not one WordPress wrote; the restore does not guess which plugins the restored site runs.' );
 		}
 		if ( in_array( $this->plugin, $list, true ) ) {
-			return;
+			return true;
 		}
 		$list[] = $this->plugin;
 		$this->db->rows( 'UPDATE ' . SqlWriter::identifier( $temp_options ) . " SET option_value = ? WHERE option_name = '" . self::ACTIVE . "'", array( PluginList::write( array_values( $list ) ) ) );
+		return true;
 	}
 
 	/**
 	 * Put this plugin into active_sitewide_plugins of the temporary sitemeta table.
 	 *
 	 * @param string $temp_meta Temporary sitemeta table.
-	 * @return void
-	 * @throws Refused When the list cannot be read.
+	 * @param bool   $strict    Whether a list that cannot be read is refused, or left as it is (false returned).
+	 * @return bool Whether this plugin is in the list.
+	 * @throws Refused When the list cannot be read and $strict.
 	 */
-	private function activate_network( string $temp_meta ): void {
+	private function activate_network( string $temp_meta, bool $strict ): bool {
 		JobFence::assert_locked( $this->db );
 		$rows = $this->db->rows( 'SELECT meta_value FROM ' . SqlWriter::identifier( $temp_meta ) . " WHERE site_id = ? AND meta_key = '" . self::ACTIVE_NETWORK . "'", array( (string) $this->network ) );
 		if ( array() === $rows ) {
 			$this->db->rows( 'INSERT INTO ' . SqlWriter::identifier( $temp_meta ) . " (site_id, meta_key, meta_value) VALUES (?, '" . self::ACTIVE_NETWORK . "', ?)", array( (string) $this->network, PluginList::write( array( $this->plugin => time() ) ) ) );
-			return;
+			return true;
 		}
 		$list = PluginList::read( (string) $rows[0][0] );
 		if ( null === $list ) {
+			if ( ! $strict ) {
+				return false;
+			}
 			throw new Refused( 'The backup\'s list of network-active plugins (active_sitewide_plugins) is not one WordPress wrote; the restore does not guess which plugins the restored network runs.' );
 		}
 		if ( array_key_exists( $this->plugin, $list ) ) {
-			return;
+			return true;
 		}
 		$list[ $this->plugin ] = time();
 		$this->db->rows( 'UPDATE ' . SqlWriter::identifier( $temp_meta ) . " SET meta_value = ? WHERE site_id = ? AND meta_key = '" . self::ACTIVE_NETWORK . "'", array( PluginList::write( $list ), (string) $this->network ) );
+		return true;
 	}
 
 	/**

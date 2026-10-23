@@ -945,9 +945,9 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * the run that renamed it had carried both before its first rename. The sitemeta pair goes with it when it is
 	 * where the swap left it too.
 	 *
-	 * Putting the site back comes first: a carry that can never pass (the old table's list of active plugins cannot be
-	 * read) is skipped and said in the job's log, and the site is put back all the same; one that fails for a moment
-	 * is waited out, the maintenance file held, and tried again by the next run.
+	 * Putting the site back comes first: an old list of active plugins that cannot be read does not stop it (the rows
+	 * are carried, this plugin is not put into that list, and that is said in the job's log); a carry that fails for a
+	 * moment is waited out, the maintenance file held, and tried again by the next run.
 	 *
 	 * @param JobContext                                                                                          $context Context.
 	 * @param Queries                                                                                             $db      Connection.
@@ -976,21 +976,19 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		}
 		$meta = $pairs['meta'] ?? null;
 		try {
-			$this->state_carry( $db )->carry_back( $pairs['options']['live'], $pairs['options']['old'], null === $meta ? null : $meta['live'], null === $meta ? null : $meta['old'], $context->fence() );
+			$active = $this->state_carry( $db )->carry_back( $pairs['options']['live'], $pairs['options']['old'], null === $meta ? null : $meta['live'], null === $meta ? null : $meta['old'], $context->fence() );
 		} catch ( LockLost $e ) {
 			throw $e; // The run that takes the job over puts the site back.
 		} catch ( StaleJob $e ) {
 			throw $e;
-		} catch ( \WPCheckpoint\Restore\Refused $e ) {
-			// The old table's list of active plugins cannot be read: no carry would ever pass. Putting the site back
-			// comes first; the state written since the swap is not carried (the transaction wrote nothing), and said.
-			$context->logger()->warning( 'This plugin\'s own settings written since the swap were not carried back; the site is put back all the same', array( 'reason' => $e->getMessage() ) );
-			return;
 		} catch ( \Throwable $e ) {
 			// A problem of the moment (the transaction wrote nothing): the put-back waits, its file held, and goes on.
 			throw new TransientFailure( 'This plugin\'s own settings could not be carried back into the site as it was yet: ' . $e->getMessage() );
 		}
 		$context->logger()->info( 'This plugin\'s own settings were carried back into the site as it was' );
+		if ( ! $active ) {
+			$context->logger()->warning( 'The site as it was has a list of active plugins that WordPress did not write: this plugin was not put into it; the site is put back all the same' );
+		}
 		$this->at( 'carried_back' );
 	}
 
