@@ -121,6 +121,36 @@ final class StateCarryBackTest extends SwapTestCase {
 	}
 
 	/**
+	 * A table's engine, or '' when it is not there.
+	 *
+	 * @param string $table Table.
+	 * @return string
+	 */
+	private function engine( string $table ): string {
+		global $wpdb;
+		$wpdb->query( 'COMMIT' );
+		return (string) $wpdb->get_var( $wpdb->prepare( "SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND TABLE_TYPE = 'BASE TABLE'", $table ) );
+	}
+
+	/**
+	 * The live options table (and on a network the sitemeta table) made InnoDB again: a put-back renames an old table
+	 * a round made MyISAM back under the live name, which the next round would back up and swap, and later tests
+	 * would run on.
+	 *
+	 * @return void
+	 */
+	private function innodb_live(): void {
+		global $wpdb;
+		foreach ( is_multisite() ? array( 'options', 'sitemeta' ) : array( 'options' ) as $key ) {
+			$table = $wpdb->base_prefix . $key;
+			if ( 'InnoDB' !== $this->engine( $table ) ) {
+				$this->assertNotFalse( $wpdb->query( "ALTER TABLE `{$table}` ENGINE=InnoDB" ), $wpdb->last_error ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- a live table.
+			}
+			$this->assertSame( 'InnoDB', $this->engine( $table ), 'the control: the live ' . $key . ' table is InnoDB' );
+		}
+	}
+
+	/**
 	 * This plugin's keys that are in the live sitemeta more than once (none on a single site).
 	 *
 	 * @return string[]
@@ -162,6 +192,7 @@ final class StateCarryBackTest extends SwapTestCase {
 		global $wpdb;
 		$this->forget_state(); // What an earlier round carried back is not this round's.
 		$this->one_row_each();
+		$this->innodb_live();
 		$this->swap_parts['batch']  = 1;
 		$this->verdicts             = array( 'home', true, true, true, true, true, true, true );
 		$this->swap_parts['verify'] = $this->verdicts();
@@ -180,6 +211,7 @@ final class StateCarryBackTest extends SwapTestCase {
 		if ( $myisam ) {
 			$this->assertNotFalse( $wpdb->query( "ALTER TABLE `{$old}` ENGINE=MyISAM" ), $wpdb->last_error );
 		}
+		$this->assertSame( $myisam ? 'MyISAM' : 'InnoDB', $this->engine( $old ), 'the control: the old options table\'s engine' );
 		return $job;
 	}
 
@@ -530,6 +562,7 @@ final class StateCarryBackTest extends SwapTestCase {
 	public function test_a_row_deleted_by_another_request_during_the_carry_is_not_looked_for(): void {
 		global $wpdb;
 		$job = $this->swapped_and_written( false ); // Read for update matters with transactions.
+		$this->assertSame( 'InnoDB', $this->engine( $wpdb->base_prefix . 'options' ), 'the control: the live options table has transactions (a snapshot)' );
 		$this->write_live( StoredNames::DB_UPGRADE_RETRY, 'deleted meanwhile' );
 		$seen = 0;
 		$this->retype( $job, array(), self::deleting_before_the_replace( $seen ) );
@@ -722,7 +755,9 @@ final class StateCarryBackTest extends SwapTestCase {
 
 	public function tear_down(): void {
 		parent::tear_down();
-		// After the shared tear-down put the site back: the row is not left behind in whichever table is live then.
+		// After the shared tear-down put the site back: the row is not left behind in whichever table is live then, nor
+		// a MyISAM table for what runs after.
 		$this->forget_state();
+		$this->innodb_live();
 	}
 }
