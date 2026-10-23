@@ -389,6 +389,38 @@ final class StateCarryBackTest extends SwapTestCase {
 		$this->undo( Plugin::instance()->jobs()->find( $job->id ) );
 	}
 
+	public function test_a_row_of_the_plugin_deleted_since_the_swap_does_not_come_back(): void {
+		global $wpdb;
+		$job    = $this->swapped_and_written();
+		$tables = array( 'options' => array( 'option_name', '' ) );
+		if ( is_multisite() ) {
+			$tables['sitemeta'] = array( 'meta_key', $wpdb->prepare( ' AND site_id = %d', get_current_network_id() ) );
+		}
+		// The old site had a row the plugin deleted since the swap (an upgrade retry that was cleared): in the old
+		// tables, not in the live ones.
+		foreach ( $tables as $key => $how ) {
+			$live = $wpdb->base_prefix . $key;
+			$old  = (string) $this->plan_entry( $job, $key )['old'];
+			$wpdb->query( $wpdb->prepare( "DELETE FROM `{$live}` WHERE {$how[0]} = %s{$how[1]}", StoredNames::DB_UPGRADE_RETRY ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- a carried table and its column.
+			if ( 'options' === $key ) {
+				$wpdb->query( $wpdb->prepare( "INSERT INTO `{$old}` (option_name, option_value, autoload) VALUES (%s, 'from before the swap', 'no')", StoredNames::DB_UPGRADE_RETRY ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the old options table.
+			} else {
+				$wpdb->query( $wpdb->prepare( "INSERT INTO `{$old}` (site_id, meta_key, meta_value) VALUES (%d, %s, 'from before the swap')", get_current_network_id(), StoredNames::DB_UPGRADE_RETRY ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the old sitemeta table.
+			}
+		}
+		$wpdb->query( 'COMMIT' );
+		$this->assertSame( 'from before the swap', $this->value( (string) $this->plan_entry( $job, 'options' )['old'], StoredNames::DB_UPGRADE_RETRY ), 'the control: the old table has it' );
+		$this->seams = array();
+		$this->cli_run( $job );
+		$this->assertContains( 'carried_back', $this->seams, 'the control: it carried back' );
+		$this->assert_put_back( $job, 'deleted since the swap' );
+		$this->assertNull( $this->value( '', StoredNames::DB_UPGRADE_RETRY ), 'the row deleted since the swap is not back' );
+		if ( is_multisite() ) {
+			$this->assertNull( $this->meta( '', StoredNames::DB_UPGRADE_RETRY ), 'nor in the network\'s sitemeta' );
+		}
+		$this->undo( Plugin::instance()->jobs()->find( $job->id ) );
+	}
+
 	public function test_an_old_list_of_active_plugins_that_cannot_be_read_is_left_as_it_is_and_the_rows_are_carried(): void {
 		global $wpdb;
 		$job    = $this->swapped_and_written();
