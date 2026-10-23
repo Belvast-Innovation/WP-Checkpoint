@@ -613,7 +613,8 @@ final class StateCarryBackTest extends SwapTestCase {
 		$collation = (string) $column['Collation'];
 		$this->assertSame( 0, strpos( $collation, 'utf8mb4_' ), 'the control: a utf8mb4 column (' . $collation . ')' );
 		$this->assertSame( '', (string) $column['Default'], 'the control: its default' );
-		$other = 'utf8mb4_bin' === $collation ? 'utf8mb4_general_ci' : 'utf8mb4_bin';
+		// Not a _bin collation: next to one, the server compares by it instead of refusing.
+		$other = 'utf8mb4_general_ci' === $collation ? 'utf8mb4_unicode_ci' : 'utf8mb4_general_ci';
 		// A site restored from another server: the same character set, another collation (which the server refuses to
 		// compare with the live table's column).
 		$this->assertNotFalse( $wpdb->query( "ALTER TABLE `{$o}` MODIFY option_name {$column['Type']} CHARACTER SET utf8mb4 COLLATE {$other} NOT NULL DEFAULT ''" ), $wpdb->last_error ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the old options table.
