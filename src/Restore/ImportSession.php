@@ -57,9 +57,12 @@ final class ImportSession implements Queries {
 
 
 	/**
-	 * Error numbers after which the same statement may succeed later (the exception's code is the number).
+	 * Error numbers after which the same statement may succeed later (the exception's code is the number). 1020:
+	 * MariaDB's snapshot isolation (innodb_snapshot_isolation, on by default from 11.6): a row read for update or
+	 * written was changed by another transaction since this one's snapshot; tried again in a new transaction it reads
+	 * the row as it is then, as after a deadlock (1213).
 	 */
-	const TRANSIENT_ERRNOS = array( 1040, 1053, 1205, 1213, 2002, 2003, 2006, 2013 );
+	const TRANSIENT_ERRNOS = array( 1020, 1040, 1053, 1205, 1213, 2002, 2003, 2006, 2013 );
 
 	/**
 	 * Connection.
