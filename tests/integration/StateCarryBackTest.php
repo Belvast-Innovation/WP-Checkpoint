@@ -585,6 +585,62 @@ final class StateCarryBackTest extends SwapTestCase {
 		$this->undo( Plugin::instance()->jobs()->find( $job->id ) );
 	}
 
+	public function test_without_snapshot_isolation_a_row_deleted_during_the_carry_is_not_looked_for(): void {
+		global $wpdb;
+		$job = $this->swapped_and_written( false );
+		$this->assertSame( 'InnoDB', $this->engine( $wpdb->base_prefix . 'options' ), 'the control: the live options table has transactions (a snapshot)' );
+		$this->write_live( StoredNames::DB_UPGRADE_RETRY, 'deleted meanwhile' );
+		$seen = 0;
+		$this->retype( $job, array(), self::deleting_before_the_replace( $seen, false ) );
+		// The replace's locking read does not find the row: not carried, not looked for, and carried back in this run.
+		$this->seams = array();
+		$done        = $this->cli_run( $job );
+		$this->assertSame( 1, $seen, 'the control: the row was deleted by another connection, after the carry listed it and before it replaced' );
+		$this->assertContains( 'carried_back', $this->seams, 'carried back in the same run (' . $done->status . ', ' . $done->last_error . ': ' . Plugin::instance()->job_presenter()->log_tail( $done ) . ')' );
+		$this->assert_put_back( $job, 'deleted meanwhile, no snapshot isolation' );
+		$this->assertNull( $this->value( '', StoredNames::DB_UPGRADE_RETRY ), 'the row deleted meanwhile is not there' );
+		$this->undo( Plugin::instance()->jobs()->find( $job->id ) );
+	}
+
+	public function test_an_old_table_of_another_collation_is_carried_into(): void {
+		global $wpdb;
+		$job           = $this->swapped_and_written();
+		list( $o, $m ) = $this->old_tables( $job );
+		$live          = $wpdb->base_prefix . 'options';
+		$before        = $this->own_names_in( $o, $m );
+		$column        = $wpdb->get_row( "SHOW FULL COLUMNS FROM `{$o}` LIKE 'option_name'", ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the old options table.
+		$this->assertIsArray( $column, $wpdb->last_error );
+		$collation = (string) $column['Collation'];
+		$this->assertSame( 0, strpos( $collation, 'utf8mb4_' ), 'the control: a utf8mb4 column (' . $collation . ')' );
+		$this->assertSame( '', (string) $column['Default'], 'the control: its default' );
+		$other = 'utf8mb4_bin' === $collation ? 'utf8mb4_general_ci' : 'utf8mb4_bin';
+		// A site restored from another server: the same character set, another collation (which the server refuses to
+		// compare with the live table's column).
+		$this->assertNotFalse( $wpdb->query( "ALTER TABLE `{$o}` MODIFY option_name {$column['Type']} CHARACTER SET utf8mb4 COLLATE {$other} NOT NULL DEFAULT ''" ), $wpdb->last_error ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the old options table.
+		$this->assertSame( $other, $wpdb->get_row( "SHOW FULL COLUMNS FROM `{$o}` LIKE 'option_name'", ARRAY_A )['Collation'], 'the control: the old table has another collation' ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the old options table.
+		$this->assertSame( $collation, $wpdb->get_row( "SHOW FULL COLUMNS FROM `{$live}` LIKE 'option_name'", ARRAY_A )['Collation'], 'the control: the live table has the first one' ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the live options table.
+		$wpdb->query( 'COMMIT' );
+		try {
+			$this->seams = array();
+			$done        = $this->cli_run( $job );
+			$this->assertContains( 'carried_back', $this->seams, 'carried back (' . $done->status . ', ' . $done->last_error . ': ' . Plugin::instance()->job_presenter()->log_tail( $done ) . ')' );
+			$this->assert_nothing_missing( $job, $before, 'another collation', true );
+		} finally {
+			// The collation put back wherever the table is now, for what runs after.
+			foreach ( array( $live, $o ) as $name ) {
+				if ( $name !== $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $name ) ) ) ) {
+					continue; // Renamed back, or not yet.
+				}
+				$now = $wpdb->get_row( "SHOW FULL COLUMNS FROM `{$name}` LIKE 'option_name'", ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- an options table.
+				if ( is_array( $now ) && $collation !== $now['Collation'] ) {
+					$this->assertNotFalse( $wpdb->query( "ALTER TABLE `{$name}` MODIFY option_name {$column['Type']} CHARACTER SET utf8mb4 COLLATE {$collation} NOT NULL DEFAULT ''" ), $wpdb->last_error ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- an options table.
+				}
+			}
+			$wpdb->query( 'COMMIT' );
+			$this->undo( Plugin::instance()->jobs()->find( $job->id ) );
+		}
+	}
+
 	public function test_a_row_changed_since_the_snapshot_is_a_failure_of_the_moment(): void {
 		global $wpdb;
 		$this->innodb_live();
@@ -624,12 +680,18 @@ final class StateCarryBackTest extends SwapTestCase {
 	 * A connection on which, right before the carry back's first replace, another connection deletes and commits the
 	 * live upgrade-retry rows (as another request would).
 	 *
-	 * @param int $seen Times it deleted (increased).
+	 * @param int  $seen     Times it deleted (increased).
+	 * @param bool $isolated Whether the carry's connection keeps the server's snapshot isolation (MariaDB from 11.6),
+	 *                       or reads as a server without it (MySQL, MariaDB before 11.6).
 	 * @return callable
 	 */
-	private static function deleting_before_the_replace( int &$seen ): callable {
-		return static function () use ( &$seen ) {
-			return new class( ImportSession::open( Credentials::from_wordpress() ), $seen ) implements \WPCheckpoint\Restore\Queries {
+	private static function deleting_before_the_replace( int &$seen, bool $isolated = true ): callable {
+		return static function () use ( &$seen, $isolated ) {
+			$db = ImportSession::open( Credentials::from_wordpress() );
+			if ( ! $isolated && array() !== $db->rows( "SHOW VARIABLES LIKE 'innodb_snapshot_isolation'" ) ) {
+				$db->run( 'SET SESSION innodb_snapshot_isolation = OFF' ); // As a server without it reads.
+			}
+			return new class( $db, $seen ) implements \WPCheckpoint\Restore\Queries {
 				/** @var ImportSession */
 				private $db;
 				/** @var int */
