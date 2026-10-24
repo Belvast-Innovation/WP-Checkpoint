@@ -38,6 +38,7 @@ final class SiteIdentityTest extends WP_UnitTestCase {
 
 	public function set_up(): void {
 		parent::set_up();
+		\WPCheckpoint\Tests\Fixtures\RunTables::note(); // The run tables as the test finds them, put back at its end.
 		$this->storage_before = StorageDirs::listing();
 		global $wpdb;
 		remove_filter( 'query', array( $this, '_create_temporary_tables' ) );
@@ -60,6 +61,7 @@ final class SiteIdentityTest extends WP_UnitTestCase {
 		Options::delete( Schema::OPTION );
 		Options::delete( Directories::OPTION );
 		$wpdb->query( 'DROP TABLE IF EXISTS ' . Schema::jobs_table() );
+		\WPCheckpoint\Tests\Fixtures\RunTables::put_back(); // The tables as the test found them, for the tests after it.
 		if ( '' !== $this->root ) {
 			foreach ( glob( $this->root . '/*/locked' ) ?: array() as $locked ) {
 				chmod( $locked, 0755 );

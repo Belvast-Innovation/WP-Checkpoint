@@ -26,6 +26,7 @@ final class EnvironmentTest extends WP_UnitTestCase {
 
 	public function set_up(): void {
 		parent::set_up();
+		\WPCheckpoint\Tests\Fixtures\RunTables::note(); // The run tables as the test finds them, put back at its end.
 		$this->storage_before = StorageDirs::listing();
 		Options::delete( Directories::OPTION );
 		Environment::invalidate();
@@ -48,6 +49,7 @@ final class EnvironmentTest extends WP_UnitTestCase {
 		delete_site_transient( 'wpcheckpoint_lock_recheck' );
 		delete_site_transient( 'wpcheckpoint_lock_verify' );
 		remove_all_filters( 'pre_http_request' );
+		\WPCheckpoint\Tests\Fixtures\RunTables::put_back(); // The tables as the test found them, for the tests after it.
 		parent::tear_down();
 		if ( null !== $this->storage_before ) {
 			StorageDirs::remove_made_since( $this->storage_before ); // The environment check makes the plugin's storage directory.

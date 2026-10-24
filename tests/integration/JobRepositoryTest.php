@@ -46,6 +46,7 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 
 	public function set_up(): void {
 		parent::set_up();
+		\WPCheckpoint\Tests\Fixtures\RunTables::note(); // The run tables as the test finds them, put back at its end.
 		global $wpdb;
 		// The core test case rewrites CREATE TABLE into CREATE TEMPORARY TABLE, which
 		// SHOW TABLES cannot see; the plugin's own table is created for real and dropped again.
@@ -87,6 +88,7 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 		@rmdir( $this->root );
 		Options::delete( Schema::OPTION );
 		Options::delete( Directories::OPTION );
+		\WPCheckpoint\Tests\Fixtures\RunTables::put_back(); // What a test's uninstall dropped, for the tests after it.
 		parent::tear_down();
 	}
 
