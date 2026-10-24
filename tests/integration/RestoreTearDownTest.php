@@ -51,8 +51,10 @@ final class RestoreTearDownTest extends RestoreTestCase {
 	}
 
 	/**
-	 * Runs after the test above (declaration order), not depending on it: a failure there (the leftover check's
-	 * too) must not skip the neighbour's assertion here.
+	 * Runs after the test above, which it depends on so that a run in random order (the daily random-order run)
+	 * keeps that order: a failure there skips this one, and the failure there is what the run reports.
+	 *
+	 * @depends test_a_test_makes_tables_of_its_own
 	 */
 	public function test_its_tear_down_dropped_them_and_left_the_one_that_was_there_before(): void {
 		foreach ( self::OWN as $table ) {

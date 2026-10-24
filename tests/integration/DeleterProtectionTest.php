@@ -5,12 +5,33 @@ namespace WPCheckpoint\Tests\Integration;
 use WP_UnitTestCase;
 use WPCheckpoint\Plugin;
 use WPCheckpoint\Support\Deleter;
+use WPCheckpoint\Tests\Fixtures\StorageDirs;
 
 /**
  * The real WordPress directories, asked about through Deleter::refusal() only (it deletes nothing): the
  * Deleter's own tests work in a sandbox with stand-ins for them (DeleterGuardTest).
  */
 final class DeleterProtectionTest extends WP_UnitTestCase {
+
+	/** @var string[]|null The storage directories in wp-content when the test started (StorageDirs); null before set_up(). */
+	private $storage_before = null;
+
+	public function set_up(): void {
+		parent::set_up();
+		$this->storage_before = StorageDirs::listing();
+		// The storage directory this test needs, made by itself (not one an earlier test happened to make), and the
+		// plugin's cached directories with it; tear_down() removes it when the test made it.
+		Plugin::instance()->reset_directories();
+		$this->assertNotSame( '', Plugin::instance()->directories()->base(), 'the control: the storage directory is there' );
+	}
+
+	public function tear_down(): void {
+		parent::tear_down();
+		Plugin::instance()->reset_directories();
+		if ( null !== $this->storage_before ) {
+			StorageDirs::remove_made_since( $this->storage_before );
+		}
+	}
 
 	/**
 	 * @return array<string, array{0: string, 1: string}>

@@ -5,6 +5,7 @@ namespace WPCheckpoint\Tests\Integration;
 use WP_UnitTestCase;
 use WPCheckpoint\Plugin;
 use WPCheckpoint\Support\Uninstaller;
+use WPCheckpoint\Tests\Fixtures\StorageDirs;
 
 /**
  * The housekeeping that deletes (reclaim and purge, storage switching, uninstall) goes on when the Deleter refuses a
@@ -13,6 +14,9 @@ use WPCheckpoint\Support\Uninstaller;
  * could be deleted even if the guard failed (the working directory is not written to).
  */
 final class DeleterRefusalHandlingTest extends WP_UnitTestCase {
+
+	/** @var string[]|null The storage directories in wp-content when the test started (StorageDirs); null before set_up(). */
+	private $storage_before = null;
 
 	/** @var string */
 	private $sandbox = '';
@@ -25,6 +29,11 @@ final class DeleterRefusalHandlingTest extends WP_UnitTestCase {
 
 	public function set_up(): void {
 		parent::set_up();
+		$this->storage_before = StorageDirs::listing();
+		// The storage directory this test needs, made by itself (not one an earlier test happened to make), and the
+		// plugin's cached directories with it; tear_down() removes it when the test made it.
+		Plugin::instance()->reset_directories();
+		$this->assertNotSame( '', Plugin::instance()->directories()->base(), 'the control: the storage directory is there' );
 		$this->sandbox = sys_get_temp_dir() . '/wpc-refusal-' . bin2hex( random_bytes( 4 ) );
 		mkdir( $this->sandbox );
 		$this->php_log = $this->sandbox . '.log';
@@ -42,6 +51,10 @@ final class DeleterRefusalHandlingTest extends WP_UnitTestCase {
 			@rmdir( $this->sandbox );
 		}
 		parent::tear_down();
+		Plugin::instance()->reset_directories();
+		if ( null !== $this->storage_before ) {
+			StorageDirs::remove_made_since( $this->storage_before );
+		}
 	}
 
 	/**

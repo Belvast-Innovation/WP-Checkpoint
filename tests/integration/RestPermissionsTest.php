@@ -15,9 +15,14 @@ namespace WPCheckpoint\Tests\Integration;
 
 use WP_REST_Request;
 use WP_UnitTestCase;
+use WPCheckpoint\Plugin;
 use WPCheckpoint\Rest\Controller;
+use WPCheckpoint\Tests\Fixtures\StorageDirs;
 
 final class RestPermissionsTest extends WP_UnitTestCase {
+
+	/** @var string[]|null The storage directories in wp-content when the test started (StorageDirs); null before set_up(). */
+	private $storage_before = null;
 
 	/**
 	 * Route pattern (as returned by WP_REST_Server::get_routes()) => example.
@@ -117,9 +122,22 @@ final class RestPermissionsTest extends WP_UnitTestCase {
 
 	public function set_up(): void {
 		parent::set_up();
+		$this->storage_before = StorageDirs::listing();
+		// The storage directory this test needs, made by itself (not one an earlier test happened to make), and the
+		// plugin's cached directories with it; tear_down() removes it when the test made it.
+		Plugin::instance()->reset_directories();
+		$this->assertNotSame( '', Plugin::instance()->directories()->base(), 'the control: the storage directory is there' );
 		global $wp_rest_server;
 		$wp_rest_server = null;
 		rest_get_server();
+	}
+
+	public function tear_down(): void {
+		parent::tear_down();
+		Plugin::instance()->reset_directories();
+		if ( null !== $this->storage_before ) {
+			StorageDirs::remove_made_since( $this->storage_before );
+		}
 	}
 
 	/**
