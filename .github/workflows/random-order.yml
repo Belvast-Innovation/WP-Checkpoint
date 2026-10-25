@@ -1,0 +1,88 @@
+name: Integration in random order
+
+# The integration suite in an order of its own once a day: a test that passes only after another one (a storage
+# directory, a table, an option an earlier test left) fails here. The seed is printed and written to the run's
+# summary; started by hand with that seed, the run repeats the same order.
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: Seed of the order (empty for a new one)
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  random-order:
+    name: Integration in random order (${{ matrix.site }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        site: ['single site', 'multisite']
+    defaults:
+      run:
+        working-directory: wp-checkpoint
+    steps:
+      # wp-env mounts the plugin under its directory name, so it must be "wp-checkpoint".
+      - uses: actions/checkout@v4
+        with:
+          path: wp-checkpoint
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: none
+          tools: composer:v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: wp-checkpoint/package-lock.json
+
+      - name: Cache Composer packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.composer/cache
+          key: composer-${{ runner.os }}-8.3-${{ hashFiles('wp-checkpoint/composer.lock') }}
+          restore-keys: composer-${{ runner.os }}-8.3-
+
+      - name: Choose the seed
+        id: seed
+        env:
+          GIVEN: ${{ inputs.seed }}
+        run: |
+          seed="${GIVEN:-$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')}"
+          case "$seed" in
+            '' | *[!0-9]*) echo "Not a seed (digits only): $seed"; exit 1 ;;
+          esac
+          echo "seed=$seed" >> "$GITHUB_OUTPUT"
+          echo "Random order seed: $seed (start this workflow by hand with it to repeat the order)" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # vendor/ is bind-mounted into the wp-env containers, so installing on the host is enough.
+      - run: composer install --no-interaction --no-progress --prefer-dist
+      - run: npm ci
+      - run: npx wp-env start
+
+      - name: Run the integration suite in that order
+        env:
+          SEED: ${{ steps.seed.outputs.seed }}
+          MULTISITE: ${{ matrix.site == 'multisite' && '1' || '0' }}
+        run: npx wp-env run tests-cli --env-cwd=wp-content/plugins/wp-checkpoint sh -c "WP_TESTS_MULTISITE=$MULTISITE WPCHECKPOINT_TEST_LOOPBACK_HOST=http://tests-wordpress sh bin/test-integration.sh --order-by=random --random-order-seed=$SEED"
+
+      - name: Say the seed again on failure
+        if: failure()
+        env:
+          SEED: ${{ steps.seed.outputs.seed }}
+        run: |
+          echo "Failed in the order of seed $SEED: start this workflow by hand with that seed to repeat it." | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Show wp-env logs on failure
+        if: failure()
+        run: npx wp-env logs tests --watch=false
