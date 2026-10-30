@@ -187,7 +187,15 @@ final class UndoTest extends SwapTestCase {
 		// A job that holds the site.
 		$holder = $this->other( array( 'type' => 'export', 'status' => Job::RUNNING, 'site_state' => Job::SITE_CHANGING, 'storage_token' => $job->storage_token ) );
 		$this->assertStringContainsString( 'Job ' . $holder . ' holds the site', $ok()['message'] );
-		$this->set( $holder, array( 'status' => Job::COMPLETED ) );
+		// Ended as a job that changed the site ends without holding it: recorded untouched again (no job completes while
+		// it is changing the site; one left changing with no commit time is refused below as a swap of unknown order).
+		$this->set(
+			$holder,
+			array(
+				'status'     => Job::COMPLETED,
+				'site_state' => Job::SITE_UNTOUCHED,
+			)
+		);
 		$this->assertTrue( $ok()['ok'], 'once it has ended' );
 
 		// Another restore under way.
