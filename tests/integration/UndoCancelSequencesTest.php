@@ -183,6 +183,7 @@ final class UndoCancelSequencesTest extends JobTestCase {
 					switch ( $out['outcome'] ) {
 						case 'undo_given_up': // C1.
 							$this->assertSame( Job::SITE_SWAPPED, $now->site_state, $label );
+							$this->assertSame( array(), $now->unreadable_columns, $label . ': a row that can be read (an unreadable cursor reads as none)' );
 							$this->assertFalse( SwapStep::undoing( $now->cursor ), $label . ': at no position of an undo' );
 							break;
 						case 'undo_requested': // C1.
