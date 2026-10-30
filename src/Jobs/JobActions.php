@@ -431,25 +431,37 @@ final class JobActions {
 	}
 
 	/**
-	 * What a cancel of an undo that wrote nothing found (JobActions::cancel()), by the row as it is now: "undo_requested"
-	 * (still at its first position with a cancel request recorded: it gives itself up), "undo_given_up" (given up
-	 * before it changed the site, the restore completed with the restored site in place), "undo_ended" (the undo ended:
-	 * the site is as it was before the restore) or "undoing" (it is changing the site, or anything else: refused).
+	 * What a cancel of an undo that wrote nothing says, decided by the row as it is now and by nothing else (the
+	 * invariants C1–C5 of ARCHITECTURE "4c-C2": whatever ran meanwhile, the answer is true of the row): "elsewhere" or
+	 * "abandoned" (not this installation's to cancel now); "undo_ended" (undone); "undoing" (changing the site, or
+	 * asking how to go on, where answering keep gives it up: refused); "undo_requested" (at its first position, swapped,
+	 * a request recorded: it gives itself up); "undo_given_up" (swapped and at no position of an undo: it will not
+	 * change the site); null when it can be none of these (at its first position with no request: a new claim
+	 * meanwhile, say), which the caller says as a job that changed meanwhile.
 	 *
 	 * @param Job $job The job as read after the cancel.
-	 * @return string
+	 * @return string|null
 	 */
-	private static function undo_cancel_state( Job $job ): string {
-		if ( Job::SITE_SWAPPED === $job->site_state && 'undo' === ( $job->cursor['phase'] ?? '' ) && 0 !== $job->cancel_requested ) {
-			return 'undo_requested';
+	private function undo_cancel_state( Job $job ) {
+		if ( Job::SITE_UNTOUCHED !== $job->site_state && ! $this->repository->manages( $job ) ) {
+			return 'elsewhere';
 		}
-		if ( Job::SITE_SWAPPED === $job->site_state && Job::COMPLETED === $job->status && ! SwapStep::undoing( $job->cursor ) ) {
-			return 'undo_given_up';
+		if ( Job::REASON_ABANDONED === $job->failure_reason ) {
+			return 'abandoned';
 		}
 		if ( Job::UNDONE === $job->status ) {
 			return 'undo_ended';
 		}
-		return 'undoing';
+		if ( Job::SITE_CHANGING === $job->site_state ) {
+			return 'undoing';
+		}
+		if ( Job::SITE_SWAPPED !== $job->site_state ) {
+			return null;
+		}
+		if ( 'undo' === ( $job->cursor['phase'] ?? '' ) ) {
+			return 0 !== $job->cancel_requested ? 'undo_requested' : null;
+		}
+		return SwapStep::undoing( $job->cursor ) ? 'undoing' : 'undo_given_up';
 	}
 
 	/**
@@ -1287,19 +1299,26 @@ final class JobActions {
 		if ( SwapStep::undoing( $job->cursor ) && Job::SITE_UNTOUCHED !== $job->site_state ) {
 			// An undo is given up only before it changes the site (2026-10-30): then the restored site stays, the job
 			// completed again; once it changed anything it finishes, and the cancel is refused. Never accepted and not done.
-			$reason = 'undoing';
+			$wrote = '';
 			if ( 'undo' === ( $job->cursor['phase'] ?? '' ) ) {
 				try {
-					$reason = 'given_up' === $this->repository->cancel_undo( $job ) ? 'undo_given_up' : 'undo_requested';
+					$wrote = $this->repository->cancel_undo( $job );
 				} catch ( StaleJob $e ) {
-					// Not written: said as what the row is now (a request already there, the undo given up meanwhile by
-					// its run or another cancel, ended, or started changing the site), never as a refusal it is not.
-					$reason = self::undo_cancel_state( $this->repository->find( $id ) ?? $job );
+					$wrote = ''; // Nothing written: said as what the row is now.
 				}
 			}
 			$now = $this->repository->find( $id ) ?? $job;
-			if ( 'undo_given_up' === $reason ) {
+			if ( 'given_up' === $wrote ) {
+				$reason = 'undo_given_up';
 				$this->runner->note( $now, Logger::WARNING, 'The undo was cancelled before it changed the site: the restored site stays' );
+			} elseif ( 'requested' === $wrote ) {
+				$reason = 'undo_requested';
+			} else {
+				$reason = $this->undo_cancel_state( $now );
+				if ( null === $reason ) {
+					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+					throw new StaleJob( sprintf( 'Job %d changed meanwhile; nothing was cancelled.', $id ) );
+				}
 			}
 			return array(
 				'job'     => $now,
