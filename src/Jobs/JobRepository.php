@@ -1413,9 +1413,11 @@ final class JobRepository {
 	/**
 	 * Give up an undo that has not changed the site yet, at a cancel (JobActions::cancel()): with no run holding the job,
 	 * at once, in one statement on the row as read (still at the undo's first position, SwapStep::undo_cursor(), the
-	 * site swapped, managed here, no live lock): completed again, its cursor emptied, the restored site in place; with a
-	 * run holding it, a cancel request on the same conditions, which that run sees before it changes the site
-	 * (save_progress(): the write that starts changing it requires no request). Returns "given_up" or "requested".
+	 * site swapped, managed here, no live lock; queued, running, or failed there, as a run that stopped before it changed
+	 * anything leaves it): completed again, its cursor emptied, no failure kept, the restored site in place, and the lock
+	 * file of a run that died removed; with a run holding it, a cancel request on the same conditions (queued or
+	 * running), which that run sees before it changes the site (save_progress(): the write that starts changing it
+	 * requires no request). Returns "given_up" or "requested".
 	 *
 	 * @param Job $job Job, as read.
 	 * @return string
@@ -1424,13 +1426,14 @@ final class JobRepository {
 	public function cancel_undo( Job $job ): string {
 		global $wpdb;
 		$now   = $this->now();
-		$where = $wpdb->prepare( ' WHERE id = %d AND step = %s AND site_state = %d AND status IN (%s, %s) AND cursor_json LIKE %s AND ', $job->id, SwapStep::ID, Job::SITE_SWAPPED, Job::QUEUED, Job::RUNNING, '{"phase":"undo",%' ) . Job::MANAGING_SQL . ' IN (' . self::held_sql( $this->held_tokens() ) . ')';
+		$where = $wpdb->prepare( ' WHERE id = %d AND step = %s AND site_state = %d AND cursor_json LIKE %s AND ', $job->id, SwapStep::ID, Job::SITE_SWAPPED, '{"phase":"undo",%' ) . Job::MANAGING_SQL . ' IN (' . self::held_sql( $this->held_tokens() ) . ')';
 		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- plugin table name from the prefix, a constant and prepared values; the WHERE clause is the compare-and-set.
-		$given = $wpdb->query( $wpdb->prepare( 'UPDATE ' . self::table() . " SET status = %s, cursor_json = '[]', cancel_requested = 0, finished_at = %d, updated_at = %d, progress_message = %s, lock_token = '', locked_until = 0", Job::COMPLETED, $now, $now, self::fit_message( __( 'The undo was cancelled before it changed the site: the restored site stays.', 'wp-checkpoint' ) ) ) . $where . $wpdb->prepare( " AND (lock_token = '' OR locked_until < %d)", $now ) );
+		$given = $wpdb->query( $wpdb->prepare( 'UPDATE ' . self::table() . " SET status = %s, cursor_json = '[]', cancel_requested = 0, failure_kind = '', last_error = '', finished_at = %d, updated_at = %d, progress_message = %s, lock_token = '', locked_until = 0", Job::COMPLETED, $now, $now, self::fit_message( __( 'The undo was cancelled before it changed the site: the restored site stays.', 'wp-checkpoint' ) ) ) . $where . $wpdb->prepare( " AND status IN (%s, %s, %s) AND (lock_token = '' OR locked_until < %d)", Job::QUEUED, Job::RUNNING, Job::FAILED, $now ) );
 		if ( 1 === (int) $given ) {
+			$this->remove_lock_file( $job ); // A run that died leaves its lock file; no run holds the job now.
 			return 'given_up';
 		}
-		$asked = $wpdb->query( $wpdb->prepare( 'UPDATE ' . self::table() . ' SET cancel_requested = %d, updated_at = %d', $now, $now ) . $where . ' AND cancel_requested = 0' );
+		$asked = $wpdb->query( $wpdb->prepare( 'UPDATE ' . self::table() . ' SET cancel_requested = %d, updated_at = %d', $now, $now ) . $where . $wpdb->prepare( ' AND status IN (%s, %s) AND cancel_requested = 0', Job::QUEUED, Job::RUNNING ) );
 		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared
 		if ( 1 === (int) $asked ) {
 			return 'requested';

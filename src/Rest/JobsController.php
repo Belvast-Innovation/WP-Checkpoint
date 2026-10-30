@@ -248,12 +248,17 @@ final class JobsController extends Controller {
 		if ( null === $outcome ) {
 			return $this->not_found();
 		}
-		if ( in_array( $outcome['reason'], array( 'swapped', 'elsewhere', 'abandoned', 'undoing' ), true ) ) {
+		if ( in_array( $outcome['reason'], array( 'swapped', 'elsewhere', 'abandoned', 'undoing', 'undo_ended' ), true ) ) {
 			return $this->conflict( self::cancel_message( $outcome['reason'] ) );
 		}
+		$results = array(
+			'requested'      => 'requested',
+			'undo_requested' => 'requested',
+			'undo_given_up'  => 'undo_given_up',
+		);
 		return $this->respond(
 			array(
-				'result'  => 'requested' === $outcome['reason'] ? 'requested' : 'cancelled',
+				'result'  => $results[ $outcome['reason'] ] ?? 'cancelled',
 				'cleaned' => $outcome['cleaned'],
 				'message' => self::cancel_message( $outcome['reason'] ),
 				'job'     => $this->presenter->present( $outcome['job'] ),
@@ -376,7 +381,9 @@ final class JobsController extends Controller {
 			case 'swapped':
 				return __( 'The restored site is in place: cancelling the job cannot change it back.', 'wp-checkpoint' );
 			case 'undo_given_up':
-				return __( 'The undo was cancelled before it changed the site: the restored site stays, and the restore is completed as before.', 'wp-checkpoint' );
+				return __( 'The undo was given up before it changed the site: the restored site stays, and the restore is completed as before.', 'wp-checkpoint' );
+			case 'undo_ended':
+				return __( 'The undo has ended: the site is as it was before the restore. There is nothing left to cancel.', 'wp-checkpoint' );
 			case 'undo_requested':
 				return __( 'The undo is running and has not changed the site yet: it is given up before it does, and the restored site stays.', 'wp-checkpoint' );
 			case 'undoing':

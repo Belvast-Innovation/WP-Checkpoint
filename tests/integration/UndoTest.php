@@ -756,6 +756,187 @@ final class UndoTest extends SwapTestCase {
 		return array( Plugin::instance()->jobs()->find( $job->id ), $after );
 	}
 
+	/**
+	 * Cancel through the job actions, with $meanwhile run on another connection right before the first statement that
+	 * would give the undo up (between the cancel's read of the row and its write).
+	 *
+	 * @param int           $id        Job id.
+	 * @param callable|null $meanwhile function( \wpdb $other ): void.
+	 * @return array{job: Job, cleaned: bool, reason: string}
+	 */
+	private function cancel_with( int $id, $meanwhile = null ): array {
+		$ran    = false;
+		$filter = static function ( $query ) use ( &$ran, $meanwhile ) {
+			if ( ! $ran && null !== $meanwhile && false !== strpos( (string) $query, 'cursor_json LIKE' ) ) {
+				$ran   = true;
+				$other = new \wpdb( DB_USER, DB_PASSWORD, DB_NAME, DB_HOST );
+				call_user_func( $meanwhile, $other );
+				$other->close();
+			}
+			return $query;
+		};
+		add_filter( 'query', $filter );
+		try {
+			$out = $this->autocommit(
+				static function () use ( $id ) {
+					return Plugin::instance()->job_actions()->cancel( $id );
+				}
+			);
+		} finally {
+			remove_filter( 'query', $filter );
+		}
+		if ( null !== $meanwhile ) {
+			$this->assertTrue( $ran, 'the control: the other connection changed the row right before the cancel\'s write' );
+		}
+		return $out;
+	}
+
+	public function test_a_second_cancel_of_an_undo_a_run_holds_is_said_as_requested_not_refused(): void {
+		list( $job ) = $this->claimed();
+		$this->set(
+			$job->id,
+			array(
+				'lock_token'   => 'held-by-a-run',
+				'locked_until' => time() + 300,
+			)
+		);
+		$this->assertSame( 'undo_requested', $this->cancel_with( $job->id )['reason'] );
+		$this->assertSame( 'undo_requested', $this->cancel_with( $job->id )['reason'], 'the request is there: still a request, not "it is changing the site"' );
+		$this->set(
+			$job->id,
+			array(
+				'lock_token'   => '',
+				'locked_until' => 0,
+			)
+		);
+		$this->assertSame( Job::COMPLETED, $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) )->status, 'and it gives itself up' );
+	}
+
+	public function test_a_cancel_whose_undo_changed_meanwhile_is_said_as_what_the_row_is_now(): void {
+		$table = JobRepository::table();
+		$cases = array(
+			'given up by its run'       => array(
+				static function ( \wpdb $other ) use ( $table ): callable {
+					return static function ( int $id ) use ( $other, $table ): void {
+						$other->query( $other->prepare( "UPDATE {$table} SET status = %s, cursor_json = '[]' WHERE id = %d", Job::COMPLETED, $id ) );
+					};
+				},
+				'undo_given_up',
+			),
+			'ended'                     => array(
+				static function ( \wpdb $other ) use ( $table ): callable {
+					return static function ( int $id ) use ( $other, $table ): void {
+						$other->query( $other->prepare( "UPDATE {$table} SET status = %s, site_state = %d, cursor_json = %s WHERE id = %d", Job::UNDONE, Job::SITE_UNTOUCHED, wp_json_encode( array( 'phase' => 'reverted', 'reason' => SwapStep::ASKED, 'out' => true ) ), $id ) );
+					};
+				},
+				'undo_ended',
+			),
+			'started changing the site' => array(
+				static function ( \wpdb $other ) use ( $table ): callable {
+					return static function ( int $id ) use ( $other, $table ): void {
+						$other->query( $other->prepare( "UPDATE {$table} SET site_state = %d, cursor_json = %s WHERE id = %d", Job::SITE_CHANGING, wp_json_encode( array( 'phase' => 'reverse', 'reason' => SwapStep::ASKED, 'out' => true ) ), $id ) );
+					};
+				},
+				'undoing',
+			),
+		);
+		foreach ( $cases as $case => $how ) {
+			$this->tear_down_swap();
+			$this->set_up_swap();
+			list( $job ) = $this->claimed();
+			$change      = null;
+			$out         = $this->cancel_with(
+				$job->id,
+				static function ( \wpdb $other ) use ( $how, $job, &$change ): void {
+					$change = $how[0]( $other );
+					$change( $job->id );
+				}
+			);
+			$this->assertSame( $how[1], $out['reason'], $case );
+			$this->assertSame( 0, Plugin::instance()->jobs()->find( $job->id )->cancel_requested, $case . ': nothing written by the cancel' );
+			// Back to what the tear-down puts away: the site as the undo was claimed (nothing of it was changed here).
+			$this->set(
+				$job->id,
+				array(
+					'status'      => Job::COMPLETED,
+					'site_state'  => Job::SITE_SWAPPED,
+					'cursor_json' => '[]',
+				)
+			);
+		}
+	}
+
+	public function test_an_undo_that_failed_before_it_changed_the_site_is_given_up_by_a_cancel(): void {
+		list( $job, $after ) = $this->claimed();
+		$this->set(
+			$job->id,
+			array(
+				'status'       => Job::FAILED,
+				'failure_kind' => Job::stamp_failure( Job::FAILURE_TEMPORARY, time() ),
+				'last_error'   => 'The database server went away.',
+				'finished_at'  => time(),
+			)
+		);
+		$out = $this->cancel_with( $job->id );
+		$this->assertSame( 'undo_given_up', $out['reason'] );
+		$now = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertSame( Job::COMPLETED, $now->status );
+		$this->assertSame( '', $now->last_error, 'no failure kept' );
+		$this->assertSame( '', $now->failure_kind );
+		$this->assertSame( $after, $this->site() );
+	}
+
+	public function test_an_undo_given_up_at_once_takes_the_lock_file_of_a_run_that_died_with_it(): void {
+		list( $job ) = $this->claimed();
+		$base = Plugin::instance()->jobs()->files_base( $job );
+		$this->set(
+			$job->id,
+			array(
+				'lock_token'   => 'a-run-that-died',
+				'locked_until' => time() - 60,
+			)
+		);
+		$this->assertTrue( \WPCheckpoint\Jobs\LockFile::write( $base, $job->id, 'a-run-that-died', time() - 60 ) );
+		clearstatcache();
+		$this->assertFileExists( \WPCheckpoint\Jobs\LockFile::path( $base, $job->id ), 'the control: the lock file is there' );
+		$this->assertSame( 'undo_given_up', $this->cancel_with( $job->id )['reason'] );
+		clearstatcache();
+		$this->assertFileDoesNotExist( \WPCheckpoint\Jobs\LockFile::path( $base, $job->id ) );
+	}
+
+	public function test_the_rest_cancel_of_an_undo_says_what_happened(): void {
+		list( $job ) = $this->claimed();
+		$this->autocommit(
+			function () use ( $job ): void {
+				$response = $this->rest( 'POST', 'jobs/' . $job->id . '/cancel' );
+				$this->assertSame( 200, $response->get_status() );
+				$this->assertSame( 'undo_given_up', $response->get_data()['result'] ?? null );
+			}
+		);
+		$this->assertSame( Job::COMPLETED, Plugin::instance()->jobs()->find( $job->id )->status );
+		list( $second ) = $this->claimed_again( $job );
+		$this->killed_at( $second, 'table_back', 1 );
+		$this->autocommit(
+			function () use ( $second ): void {
+				$response = $this->rest( 'POST', 'jobs/' . $second->id . '/cancel' );
+				$this->assertSame( 409, $response->get_status(), 'refused once the undo changed the site' );
+			}
+		);
+		$this->assertSame( Job::UNDONE, $this->cli_run( Plugin::instance()->jobs()->find( $second->id ) )->status );
+	}
+
+	/**
+	 * The same restore claimed for an undo again (after an earlier undo was given up).
+	 *
+	 * @return array{0: Job}
+	 */
+	private function claimed_again( Job $job ): array {
+		$told = $this->actions()->undo( $job->id, '' );
+		$this->assertTrue( $told['ok'], $told['message'] );
+		$this->assertTrue( $this->actions()->undo( $job->id, $told['code'] )['ok'] );
+		return array( Plugin::instance()->jobs()->find( $job->id ) );
+	}
+
 	public function test_a_cancel_before_the_undo_changed_the_site_gives_it_up_at_once(): void {
 		list( $job, $after ) = $this->claimed();
 		$out = Plugin::instance()->job_actions()->cancel( $job->id );

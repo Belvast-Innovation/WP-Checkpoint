@@ -431,6 +431,28 @@ final class JobActions {
 	}
 
 	/**
+	 * What a cancel of an undo that wrote nothing found (JobActions::cancel()), by the row as it is now: "undo_requested"
+	 * (still at its first position with a cancel request recorded: it gives itself up), "undo_given_up" (given up
+	 * before it changed the site, the restore completed with the restored site in place), "undo_ended" (the undo ended:
+	 * the site is as it was before the restore) or "undoing" (it is changing the site, or anything else: refused).
+	 *
+	 * @param Job $job The job as read after the cancel.
+	 * @return string
+	 */
+	private static function undo_cancel_state( Job $job ): string {
+		if ( Job::SITE_SWAPPED === $job->site_state && 'undo' === ( $job->cursor['phase'] ?? '' ) && 0 !== $job->cancel_requested ) {
+			return 'undo_requested';
+		}
+		if ( Job::SITE_SWAPPED === $job->site_state && Job::COMPLETED === $job->status && ! SwapStep::undoing( $job->cursor ) ) {
+			return 'undo_given_up';
+		}
+		if ( Job::UNDONE === $job->status ) {
+			return 'undo_ended';
+		}
+		return 'undoing';
+	}
+
+	/**
 	 * The checks of an undo.
 	 *
 	 * @param Undo|null $undo Checks (tests), or null for the site's own.
@@ -1235,8 +1257,9 @@ final class JobActions {
 	 *                                                            was given up: the job is completed again, the restored
 	 *                                                            site in place), "undo_requested" (such an undo is
 	 *                                                            running: it gives itself up before it changes the
-	 *                                                            site) or "undoing" (refused: the undo has started
-	 *                                                            changing the site and finishes).
+	 *                                                            site), "undo_ended" (refused: the undo has ended) or
+	 *                                                            "undoing" (refused: the undo has started changing the
+	 *                                                            site and finishes).
 	 * @throws InvalidTransition When the job is already finished.
 	 * @throws StaleJob When the job changed meanwhile.
 	 */
@@ -1269,7 +1292,9 @@ final class JobActions {
 				try {
 					$reason = 'given_up' === $this->repository->cancel_undo( $job ) ? 'undo_given_up' : 'undo_requested';
 				} catch ( StaleJob $e ) {
-					$reason = 'undoing'; // It started changing the site meanwhile (or ended): refused, as from here on.
+					// Not written: said as what the row is now (a request already there, the undo given up meanwhile by
+					// its run or another cancel, ended, or started changing the site), never as a refusal it is not.
+					$reason = self::undo_cancel_state( $this->repository->find( $id ) ?? $job );
 				}
 			}
 			$now = $this->repository->find( $id ) ?? $job;
