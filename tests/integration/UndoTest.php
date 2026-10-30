@@ -349,6 +349,14 @@ final class UndoTest extends SwapTestCase {
 		$this->assertGreaterThan( 0, $expired->work_expired_at );
 		$this->assertSame( Job::UNDONE, $expired->status, 'still undone' );
 		$this->assertSame( array(), $staged(), 'the restored copy was reclaimed' );
+
+		// What a reclaim left of it (a deletion that failed) is an orphan of an expired undone job: the reaper takes it.
+		$work = Residue::work_dir( $jobs->files_base( $expired ), $job->id );
+		mkdir( $work, 0755, true );
+		file_put_contents( $work . '/left.txt', 'left' );
+		$jobs->reap();
+		clearstatcache();
+		$this->assertDirectoryDoesNotExist( $work, 'reaped' );
 	}
 
 	/**
