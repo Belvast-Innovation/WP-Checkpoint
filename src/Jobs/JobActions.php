@@ -123,6 +123,13 @@ final class JobActions {
 	private $held;
 
 	/**
+	 * The checks of an undo and a redo (built on first use; tests inject one).
+	 *
+	 * @var Undo|null
+	 */
+	private $undo = null;
+
+	/**
 	 * Constructor.
 	 *
 	 * @param JobRepository $repository Repository.
@@ -421,6 +428,149 @@ final class JobActions {
 		// them, are what that site needs to roll the restore back, if this database is shared with it after all.
 		/* translators: 1: job id, 2: the WordPress directory the job's plan records */
 		return self::outcome( true, sprintf( __( 'Job %1$d was abandoned: it never runs again from this installation. Its tables are kept, the ones its swap moved aside (named wcpold…) among them, and nothing at the paths its plan records is touched. If this database is shared with the site at %2$s after all, that site stays half swapped. While an abandoned restore exists, uninstalling WP Checkpoint leaves everything in place: nothing cleans one up yet.', 'wp-checkpoint' ), $job->id, $held['assessment']['recorded'] ) );
+	}
+
+	/**
+	 * The checks of an undo and a redo.
+	 *
+	 * @param Undo|null $undo Checks (tests), or null for the site's own.
+	 * @return Undo
+	 */
+	public function undo_gate( ?Undo $undo = null ): Undo {
+		if ( null !== $undo ) {
+			$this->undo = $undo;
+		}
+		if ( null === $this->undo ) {
+			$this->undo = new Undo( $this->repository );
+		}
+		return $this->undo;
+	}
+
+	/**
+	 * Undo a completed restore (wp wpcheckpoint job undo): without a confirmation code, what it would drop and the
+	 * code; with the code, the job queued again at its own reverse (Undo, JobRepository::reopen()), to be run by
+	 * WP-CLI. Every check is read once, and again under the start lock right before the job is claimed.
+	 *
+	 * @param int    $id      Job id.
+	 * @param string $confirm The confirmation code, or '' to be told it.
+	 * @return array{ok: bool, message: string, confirmed: bool, code: string, lines: string[]}
+	 * @throws JobsUnavailable When the jobs table is not usable, or the start lock is busy.
+	 */
+	public function undo( int $id, string $confirm ): array {
+		return $this->reopen( Undo::UNDO, $id, $confirm );
+	}
+
+	/**
+	 * Swap an undone restore's copy back in (wp wpcheckpoint job redo), by the same rules as undo(): the job queued
+	 * again at the final check, which checks the site again before the swap.
+	 *
+	 * @param int    $id      Job id.
+	 * @param string $confirm The confirmation code, or '' to be told it.
+	 * @return array{ok: bool, message: string, confirmed: bool, code: string, lines: string[]}
+	 * @throws JobsUnavailable When the jobs table is not usable, or the start lock is busy.
+	 */
+	public function redo( int $id, string $confirm ): array {
+		return $this->reopen( Undo::REDO, $id, $confirm );
+	}
+
+	/**
+	 * The body of undo() and redo().
+	 *
+	 * @param string $action  Undo::UNDO or Undo::REDO.
+	 * @param int    $id      Job id.
+	 * @param string $confirm The confirmation code, or ''.
+	 * @return array{ok: bool, message: string, confirmed: bool, code: string, lines: string[]}
+	 * @throws JobsUnavailable When the jobs table is not usable, or the start lock is busy.
+	 */
+	private function reopen( string $action, int $id, string $confirm ): array {
+		$refuse = static function ( string $why ): array {
+			return array(
+				'ok'        => false,
+				'message'   => $why,
+				'confirmed' => false,
+				'code'      => '',
+				'lines'     => array(),
+			);
+		};
+		$this->usable( $id );
+		$gate = $this->undo_gate();
+		$seen = $gate->assess( $action, $id );
+		if ( ! $seen['ok'] || null === $seen['job'] ) {
+			return $refuse( $seen['why'] );
+		}
+		$redo  = Undo::REDO === $action;
+		$lines = Undo::lost_lines( $seen['lost'], $seen['since'] );
+		if ( $redo ) {
+			/* translators: 1: days, 2: date and time (UTC) the restored copy is removed after */
+			$lines[] = sprintf( __( 'The restored copy is kept for %1$d days after the undo: it can be swapped back in until %2$s UTC.', 'wp-checkpoint' ), (int) ( JobRepository::WORK_RETENTION_SECONDS / 86400 ), gmdate( 'Y-m-d H:i', $seen['since'] + JobRepository::WORK_RETENTION_SECONDS ) );
+		} else {
+			/* translators: %d: days */
+			$lines[] = sprintf( __( 'The restored site is kept for %d days after the undo, and can be swapped back in with wp wpcheckpoint job redo until then.', 'wp-checkpoint' ), (int) ( JobRepository::WORK_RETENTION_SECONDS / 86400 ) );
+		}
+		if ( '' === $confirm ) {
+			return array(
+				'ok'        => true,
+				'message'   => $redo
+					/* translators: 1: job id, 2: confirmation code */
+					? sprintf( __( 'Nothing was changed. To swap the restored copy of restore job %1$d back in, run: wp wpcheckpoint job redo %1$d --confirm=%2$s', 'wp-checkpoint' ), $id, $seen['code'] )
+					/* translators: 1: job id, 2: confirmation code */
+					: sprintf( __( 'Nothing was changed. To undo restore job %1$d, run: wp wpcheckpoint job undo %1$d --confirm=%2$s', 'wp-checkpoint' ), $id, $seen['code'] ),
+				'confirmed' => false,
+				'code'      => $seen['code'],
+				'lines'     => $lines,
+			);
+		}
+		$changed = __( 'The confirmation code does not match: the restore or its plan changed since it was given, or it is another job\'s. Nothing was changed; run the command without --confirm to see what it would do now.', 'wp-checkpoint' );
+		if ( ! hash_equals( $seen['code'], $confirm ) ) {
+			return $refuse( $changed );
+		}
+		if ( ! $this->repository->lock_starts() ) {
+			throw new JobsUnavailable( 'Another job is being started right now; try again in a moment.' );
+		}
+		try {
+			// Read again under the lock: a job that started, swapped or changed meanwhile is seen here.
+			$again = $gate->assess( $action, $id );
+			if ( ! $again['ok'] || null === $again['job'] ) {
+				return $refuse( $again['why'] );
+			}
+			if ( ! hash_equals( $again['code'], $confirm ) ) {
+				return $refuse( $changed );
+			}
+			$job    = $again['job'];
+			$others = array_values(
+				array_filter(
+					$this->active(),
+					static function ( Job $other ) use ( $job ): bool {
+						return $other->id !== $job->id;
+					}
+				)
+			);
+			$reason = JobConflicts::conflict( $job->type, $job->options, $others );
+			if ( '' !== $reason ) {
+				return $refuse( $reason );
+			}
+			$this->cancel_yielding();
+			try {
+				if ( $redo ) {
+					$from = $job->cursor[ JobRepository::RETRY_FROM_KEY ] ?? '';
+					$job  = $this->repository->reopen( $job, $action, is_string( $from ) && '' !== $from ? $from : SwapCheckStep::ID, array(), __( 'Swapping the restored copy back in', 'wp-checkpoint' ), $job->managing_token() );
+				} else {
+					$job = $this->repository->reopen( $job, $action, SwapStep::ID, SwapStep::undo_cursor( $again['attempt'], $job->site_mark ), __( 'Putting the site back as it was', 'wp-checkpoint' ), $job->managing_token() );
+				}
+			} catch ( StaleJob $e ) {
+				return $refuse( __( 'The job changed meanwhile, or a run holds it; nothing was changed. Try again.', 'wp-checkpoint' ) );
+			}
+		} finally {
+			$this->repository->unlock_starts();
+		}
+		$this->runner->note( $job, Logger::WARNING, $redo ? 'The restored copy is swapped back in, as asked from WP-CLI (wp wpcheckpoint job redo)' : 'The restore is undone, as asked from WP-CLI (wp wpcheckpoint job undo)', array( 'since' => gmdate( 'Y-m-d H:i:s', $seen['since'] ) ) );
+		return array(
+			'ok'        => true,
+			'message'   => $redo ? __( 'The restored copy is being swapped back in.', 'wp-checkpoint' ) : __( 'The restore is being undone.', 'wp-checkpoint' ),
+			'confirmed' => true,
+			'code'      => $confirm,
+			'lines'     => $lines,
+		);
 	}
 
 	/**

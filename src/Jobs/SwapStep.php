@@ -137,12 +137,14 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	const STOPPED     = 'stopped';
 	const REVERSED    = 'reversed';
 	const UNDONE      = 'undone';
+	const ASKED       = 'asked';
 	const REASONS     = array(
 		self::INTERRUPTED => 'The swap was interrupted before it was complete.',
 		self::INCOMPLETE  => 'After the renames, not every table of the plan was in its place.',
 		self::STOPPED     => 'The swap stopped (the job log says why).',
 		self::REVERSED    => 'A check of the restored site found it broken: the site was put back as it was before the restore.',
 		self::UNDONE      => 'The restored site could not be checked, and the swap was undone as chosen: the site was put back as it was before the restore.',
+		self::ASKED       => 'The restore was undone as asked (wp wpcheckpoint job undo): the site was put back as it was before the restore.',
 	);
 
 	/**
@@ -1034,7 +1036,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		}
 		$this->take_down( $context, $cursor );
 		$this->at( 'maintenance_down' );
-		return $this->ended( $context, '' !== $detail ? $detail : $reason, (string) ( $cursor['check'] ?? '' ), self::UNDONE === $reason && ! empty( $cursor['out'] ) );
+		return $this->ended( $context, '' !== $detail ? $detail : $reason, (string) ( $cursor['check'] ?? '' ), in_array( $reason, array( self::UNDONE, self::ASKED ), true ) && ! empty( $cursor['out'] ) );
 	}
 
 	/**
@@ -1069,6 +1071,27 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		} catch ( \Throwable $e ) {
 			throw new TransientFailure( 'The maintenance file could not be held before the rollback: ' . $e->getMessage() );
 		}
+	}
+
+	/**
+	 * The cursor a completed restore is undone from (wp wpcheckpoint job undo, JobActions::undo()): its reverse, as
+	 * reverse() records it after the site was let out, with the reason ASKED. The next run holds the maintenance file
+	 * again before the first rename back (waiting out anyone else's), carries this plugin's state back, and puts the
+	 * site back by the plan; the job ends undone (ended()).
+	 *
+	 * @param int    $attempt The plan's attempt the swap was made by.
+	 * @param string $mark    The job's maintenance file mark (Job::$site_mark).
+	 * @return array<string, mixed>
+	 */
+	public static function undo_cursor( int $attempt, string $mark ): array {
+		return array(
+			'phase'   => 'reverse',
+			'attempt' => $attempt,
+			'mark'    => $mark,
+			'reason'  => self::ASKED,
+			'check'   => '',
+			'out'     => true,
+		);
 	}
 
 	/**

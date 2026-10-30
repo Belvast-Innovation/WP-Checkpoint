@@ -679,6 +679,84 @@ final class JobRepository {
 	}
 
 	/**
+	 * The id of a job that committed a swap after this one (a later committed_at, or the same second and a higher id),
+	 * whichever installation manages it, or null when there is none.
+	 *
+	 * @param Job $job Job.
+	 * @return int|null
+	 * @throws \RuntimeException When the jobs could not be read (no answer is not "none").
+	 */
+	public function later_commit( Job $job ) {
+		global $wpdb;
+		$wpdb->last_error = '';
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- plugin table name from the prefix.
+		$rows = $wpdb->get_col( $wpdb->prepare( 'SELECT id FROM ' . self::table() . ' WHERE id <> %d AND committed_at > 0 AND ( committed_at > %d OR ( committed_at = %d AND id > %d ) ) ORDER BY committed_at DESC, id DESC LIMIT 1', $job->id, $job->committed_at, $job->committed_at, $job->id ) );
+		if ( ! is_array( $rows ) || '' !== self::db_error() ) {
+			throw new \RuntimeException( 'The jobs could not be read.' );
+		}
+		return array() === $rows ? null : (int) $rows[0];
+	}
+
+	/**
+	 * Queue a completed restore again to undo its swap (Undo::UNDO), or an undone one to swap it back in (Undo::REDO),
+	 * in one statement on the row as read: the status and site state the action starts from, the times it was
+	 * measured by (committed_at, finished_at), no live lock, managed by $token, and for a redo its work not reclaimed
+	 * and the undo no more than WORK_RETENTION_SECONDS ago (expire_work() takes the row only while it is undone: one
+	 * of the two writes wins). An undo starts the swap step at $cursor (its reverse); a redo starts at $step from an
+	 * empty cursor, without the answers given so far, as a retry from a named step does.
+	 *
+	 * @param Job                  $job     Job, as read.
+	 * @param string               $action  Undo::UNDO or Undo::REDO.
+	 * @param string               $step    The step it starts at.
+	 * @param array<string, mixed> $cursor  Its cursor (an undo's; empty for a redo).
+	 * @param string               $message Progress message.
+	 * @param string               $token   The storage token of this installation (it must manage the job).
+	 * @return Job The row as now stored.
+	 * @throws StaleJob When the row is no longer the job as read, a run holds it, or the window closed meanwhile.
+	 * @throws \RuntimeException When the cursor or the options cannot be encoded.
+	 */
+	public function reopen( Job $job, string $action, string $step, array $cursor, string $message, string $token ): Job {
+		global $wpdb;
+		self::assert_cursor_has_no_secrets( $cursor );
+		$options = $job->options;
+		if ( Undo::REDO === $action ) {
+			unset( $options['answers'] );
+		}
+		$cursor_json  = wp_json_encode( $cursor );
+		$options_json = wp_json_encode( $options );
+		if ( false === $cursor_json || false === $options_json ) {
+			throw new \RuntimeException( sprintf( 'Job %d: its cursor or options cannot be written.', $job->id ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+		}
+		$now   = $this->now();
+		$redo  = Undo::REDO === $action;
+		$where = $redo
+			? $wpdb->prepare( 'status = %s AND site_state = %d AND work_expired_at = 0 AND finished_at = %d AND finished_at >= %d', Job::UNDONE, Job::SITE_UNTOUCHED, (int) $job->finished_at, $now - self::WORK_RETENTION_SECONDS )
+			: $wpdb->prepare( 'status = %s AND site_state = %d AND committed_at = %d AND committed_at > 0 AND finished_at = %d', Job::COMPLETED, Job::SITE_SWAPPED, (int) $job->committed_at, (int) $job->finished_at );
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- plugin table name from the prefix; the WHERE clause is the compare-and-set.
+		$affected = $wpdb->query(
+			$wpdb->prepare(
+				'UPDATE ' . self::table() . ' SET status = %s, step = %s, cursor_json = %s, options_json = %s, progress_message = %s, last_error = \'\', failure_kind = \'\', finished_at = 0, takeovers = 0, takeover_mark = \'\', cron_deferrals = 0, cancel_requested = 0, updated_at = %d WHERE id = %d AND ' . $where . ' AND (lock_token = \'\' OR locked_until < %d) AND ' . Job::MANAGING_SQL . ' = %s',
+				Job::QUEUED,
+				$step,
+				$cursor_json,
+				$options_json,
+				self::fit_message( $message ),
+				$now,
+				$job->id,
+				$now,
+				$token
+			)
+		);
+		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared
+		$row = $this->find( $job->id );
+		if ( 1 !== (int) $affected || null === $row ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+			throw new StaleJob( sprintf( 'Job %d changed meanwhile, or a run holds it; nothing was changed.', $job->id ) );
+		}
+		return $row;
+	}
+
+	/**
 	 * What of a job this installation may reclaim, by the evidence it has (the one rule for reclaim_work(), the
 	 * reaper's pass over jobs taken over, and uninstall): RECLAIM_NONE when another installation manages it (it is
 	 * not this one's to touch), and when it was abandoned (its tables, the ones its swap moved aside among them, hold
