@@ -539,7 +539,7 @@ final class JobCommand {
 	 */
 	public static function cancel_verdict( string $reason ): array {
 		return array(
-			'error'   => in_array( $reason, array( 'swapped', 'elsewhere', 'abandoned' ), true ),
+			'error'   => in_array( $reason, array( 'swapped', 'elsewhere', 'abandoned', 'undoing' ), true ),
 			'message' => \WPCheckpoint\Rest\JobsController::cancel_message( $reason ),
 		);
 	}

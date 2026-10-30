@@ -721,9 +721,9 @@ final class JobRepository {
 	 * Queue a completed restore again to undo its swap (wp wpcheckpoint job undo, JobActions::undo()), in one statement
 	 * on the row as read: completed, the site swapped, committed_at and finished_at as read, no live lock, still managed
 	 * by $token (the token that managed it as read: whether that is this installation's is the caller's check, Undo,
-	 * made again under the start lock). The swap step starts again at $cursor (SwapStep::undo_cursor(): its reverse),
-	 * recorded as changing the site in the same statement (HoldsSite: the row never shows a cursor of one state and a
-	 * site state of another), without an answer given to an earlier undo's question about its carry back
+	 * made again under the start lock). The swap step starts again at $cursor (SwapStep::undo_cursor(): "undo", a
+	 * position of the swapped site: nothing is changed yet, so the site state stays swapped and a cancel can still give
+	 * the undo up), without an answer given to an earlier undo's question about its carry back
 	 * (SwapStep::CARRY_QUESTION: each undo asks its own).
 	 *
 	 * @param Job                  $job     Job, as read.
@@ -751,9 +751,8 @@ final class JobRepository {
 		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- plugin table name from the prefix; the WHERE clause is the compare-and-set.
 		$affected = $wpdb->query(
 			$wpdb->prepare(
-				'UPDATE ' . self::table() . ' SET status = %s, site_state = %d, step = %s, cursor_json = %s, options_json = %s, progress_message = %s, last_error = \'\', failure_kind = \'\', finished_at = 0, takeovers = 0, takeover_mark = \'\', cron_deferrals = 0, cancel_requested = 0, updated_at = %d WHERE id = %d AND status = %s AND site_state = %d AND committed_at = %d AND committed_at > 0 AND finished_at = %d AND (lock_token = \'\' OR locked_until < %d) AND ' . Job::MANAGING_SQL . ' = %s',
+				'UPDATE ' . self::table() . ' SET status = %s, step = %s, cursor_json = %s, options_json = %s, progress_message = %s, last_error = \'\', failure_kind = \'\', finished_at = 0, takeovers = 0, takeover_mark = \'\', cron_deferrals = 0, cancel_requested = 0, updated_at = %d WHERE id = %d AND status = %s AND site_state = %d AND committed_at = %d AND committed_at > 0 AND finished_at = %d AND (lock_token = \'\' OR locked_until < %d) AND ' . Job::MANAGING_SQL . ' = %s',
 				Job::QUEUED,
-				Job::SITE_CHANGING,
 				SwapStep::ID,
 				$cursor_json,
 				$options_json,
@@ -1412,6 +1411,35 @@ final class JobRepository {
 	}
 
 	/**
+	 * Give up an undo that has not changed the site yet, at a cancel (JobActions::cancel()): with no run holding the job,
+	 * at once, in one statement on the row as read (still at the undo's first position, SwapStep::undo_cursor(), the
+	 * site swapped, managed here, no live lock): completed again, its cursor emptied, the restored site in place; with a
+	 * run holding it, a cancel request on the same conditions, which that run sees before it changes the site
+	 * (save_progress(): the write that starts changing it requires no request). Returns "given_up" or "requested".
+	 *
+	 * @param Job $job Job, as read.
+	 * @return string
+	 * @throws StaleJob When the job is no longer an undo that has not changed the site.
+	 */
+	public function cancel_undo( Job $job ): string {
+		global $wpdb;
+		$now   = $this->now();
+		$where = $wpdb->prepare( ' WHERE id = %d AND step = %s AND site_state = %d AND status IN (%s, %s) AND cursor_json LIKE %s AND ', $job->id, SwapStep::ID, Job::SITE_SWAPPED, Job::QUEUED, Job::RUNNING, '{"phase":"undo",%' ) . Job::MANAGING_SQL . ' IN (' . self::held_sql( $this->held_tokens() ) . ')';
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- plugin table name from the prefix, a constant and prepared values; the WHERE clause is the compare-and-set.
+		$given = $wpdb->query( $wpdb->prepare( 'UPDATE ' . self::table() . " SET status = %s, cursor_json = '[]', cancel_requested = 0, finished_at = %d, updated_at = %d, progress_message = %s, lock_token = '', locked_until = 0", Job::COMPLETED, $now, $now, self::fit_message( __( 'The undo was cancelled before it changed the site: the restored site stays.', 'wp-checkpoint' ) ) ) . $where . $wpdb->prepare( " AND (lock_token = '' OR locked_until < %d)", $now ) );
+		if ( 1 === (int) $given ) {
+			return 'given_up';
+		}
+		$asked = $wpdb->query( $wpdb->prepare( 'UPDATE ' . self::table() . ' SET cancel_requested = %d, updated_at = %d', $now, $now ) . $where . ' AND cancel_requested = 0' );
+		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared
+		if ( 1 === (int) $asked ) {
+			return 'requested';
+		}
+		// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+		throw new StaleJob( sprintf( 'Job %d is no longer an undo that has not changed the site.', $job->id ) );
+	}
+
+	/**
 	 * Take the lock in order to cancel: the same compare-and-set as acquire()
 	 * (nobody else is working on the job once it succeeds), but the job is
 	 * not started: attempts, started_at, the status and the lock file stay as
@@ -1613,30 +1641,37 @@ final class JobRepository {
 			}
 			if ( Job::SITE_SWAPPED === (int) $site_state ) {
 				// The swap is complete: a cancel requested while it was under way can no longer act, and must not act
-				// on whatever changes the site later (an undo). What is cleared is read just before, for the caller to
-				// say so (a request that lands between this read and the write is cleared without that note).
-				$pending                  = max( (int) $job->cancel_requested, (int) $wpdb->get_var( $wpdb->prepare( 'SELECT cancel_requested FROM ' . self::table() . ' WHERE id = %d', $job->id ) ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- plugin table name from the prefix; the row as it is now.
+				// on whatever changes the site later (an undo). When the swap was just made, what is cleared is read
+				// just before, for the caller to say so (a request that lands between this read and the write is
+				// cleared without that note); written again while swapped (an undo given up before it changed the site,
+				// as a cancel asked) it is cleared and nothing is said.
+				if ( Job::SITE_SWAPPED !== $job->site_state ) {
+					$pending = max( (int) $job->cancel_requested, (int) $wpdb->get_var( $wpdb->prepare( 'SELECT cancel_requested FROM ' . self::table() . ' WHERE id = %d', $job->id ) ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- plugin table name from the prefix; the row as it is now.
+				}
 				$data['cancel_requested'] = 0;
 				$formats[]                = '%d';
 			}
 		}
 		$entering = null !== $site_state && Job::SITE_UNTOUCHED !== (int) $site_state && Job::SITE_UNTOUCHED === $job->site_state;
+		$undoing  = null !== $site_state && Job::SITE_CHANGING === (int) $site_state && Job::SITE_SWAPPED === $job->site_state;
 		if ( $entering ) {
 			// The site is about to be changed: the job's row and the uninstall fence's row in one statement, on the
 			// condition that the fence is open (UninstallFence: both sides write that row, so they cannot interleave).
 			$affected = $wpdb->query( self::entering_sql( $job->id, $token, $data, $formats, $now ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- prepared by entering_sql().
 		} else {
-			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin table; the WHERE on lock_token is the fence.
-			$affected = $wpdb->update(
-				self::table(),
-				$data,
-				array(
-					'id'         => $job->id,
-					'lock_token' => $token,
-				),
-				$formats,
-				array( '%d', '%s' )
+			$where         = array(
+				'id'         => $job->id,
+				'lock_token' => $token,
 			);
+			$where_formats = array( '%d', '%s' );
+			if ( $undoing ) {
+				// An undo starts changing the site only with no cancel requested (JobActions::cancel() gives it up until
+				// then): the two meet on this row, and only one wins.
+				$where['cancel_requested'] = 0;
+				$where_formats[]           = '%d';
+			}
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin table; the WHERE on lock_token is the fence.
+			$affected = $wpdb->update( self::table(), $data, $where, $formats, $where_formats );
 		}
 		if ( false === $affected && $entering && UninstallFence::absent() ) {
 			// The fence table is positively not there (dropped by an uninstall sharing this database, a schema not yet
@@ -1659,6 +1694,11 @@ final class JobRepository {
 		if ( 1 !== (int) $affected && ! $entering && ! $this->holds_lock( $job->id, $token ) ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
 			throw new StaleJob( sprintf( 'Job %d is no longer locked by this driver.', $job->id ) );
+		}
+		if ( $undoing && 0 === (int) $affected ) {
+			// Still this run's: the row held a cancel request, and nothing was written.
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+			throw new UndoCancelled( sprintf( 'Job %d: a cancel was requested before the undo changed the site.', $job->id ) );
 		}
 		$job->step             = $step;
 		$job->cursor           = $cursor;
@@ -2183,7 +2223,11 @@ final class JobRepository {
 		foreach ( $this->list_jobs( array( Job::PAUSED ), 500 ) as $job ) {
 			// Questions that cannot be read are read as none (awaiting_answer() false); the job still waits for an answer.
 			$waiting = $job->awaiting_answer() || in_array( 'questions_json', $job->unreadable_columns, true );
-			if ( ! $waiting || $job->updated_at + self::WORK_RETENTION_SECONDS > $now ) {
+			// The question about an undo's carry back is due at the end of the time the restore can be undone in (it
+			// says so); any other after the retention period from when it was asked.
+			$carry = in_array( SwapStep::CARRY_QUESTION, array_column( $job->questions, 'id' ), true );
+			$due   = $carry ? $job->committed_at + Undo::WINDOW_SECONDS : $job->updated_at + self::WORK_RETENTION_SECONDS;
+			if ( ! $waiting || $due > $now ) {
 				continue;
 			}
 			if ( $this->holds_site( $job ) ) {
@@ -2223,7 +2267,7 @@ final class JobRepository {
 		} elseif ( in_array( SwapStep::CARRY_QUESTION, $asked, true ) ) {
 			$question = SwapStep::CARRY_QUESTION;
 			/* translators: %d: job id */
-			$message = sprintf( __( 'No answer within 7 days: the undo was given up and the restored site kept. Run wp wpcheckpoint job run %d to finish.', 'wp-checkpoint' ), $job->id );
+			$message = sprintf( __( 'No answer by the deadline: the undo is given up and the restored site kept. Run wp wpcheckpoint job run %d to finish.', 'wp-checkpoint' ), $job->id );
 		} else {
 			return;
 		}

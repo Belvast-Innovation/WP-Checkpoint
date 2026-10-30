@@ -196,7 +196,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * Phases in which the site is being changed (or put back), and in which it is swapped.
 	 */
 	const CHANGING = array( 'enter', 'dirs', 'carry', 'rename', 'rollback', 'reverse', 'restored' );
-	const SWAPPED  = array( 'committed', 'done', 'carry_ask' );
+	const SWAPPED  = array( 'committed', 'done', 'carry_ask', 'undo' );
 
 	/**
 	 * Returns the connection: function(): Queries.
@@ -351,6 +351,9 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 				// before), and the restore starts over at its preflight.
 				$this->take_down( $context, $cursor );
 				throw new RetryFrom( self::REJUDGED . ' ' . self::STOOD_DOWN, RestorePreflightStep::ID );
+			}
+			if ( 'undo' === $phase ) {
+				return $this->start_undo( $context, $db, $cursor );
 			}
 			if ( 'carry_ask' === $phase ) {
 				return $this->carry_asked( $context, $db, $cursor );
@@ -1150,11 +1153,18 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	private function carry_asked( JobContext $context, Queries $db, array $cursor ): StepResult {
 		$answer = $context->options()['answers'][ self::CARRY_QUESTION ] ?? null;
 		$at     = $context->job()->committed_at;
-		if ( self::PUT_BACK === $answer && ( $at <= 0 || $this->now() > $at + Undo::WINDOW_SECONDS ) ) {
-			// Answered after the time an undo is allowed in (the question waits): what the undo said it drops was counted
-			// then, and it is no longer an undo the plugin makes. The restored site stays.
-			$context->logger()->warning( 'The answer to put the site back came after the time a restore can be undone in; the undo is given up and the restored site stays' );
+		$why    = '';
+		if ( ! self::within_window( $at, $this->now() ) ) {
+			// The deadline (the end of the time the restore can be undone in) passed: what the undo said it drops was
+			// counted before, and it is no longer an undo the plugin makes. The restored site stays, whatever was answered.
+			$deadline = array( 'deadline' => gmdate( 'Y-m-d H:i', $at + Undo::WINDOW_SECONDS ) . ' UTC' );
+			if ( self::PUT_BACK === $answer ) {
+				$context->logger()->warning( 'The answer to put the site back came after the deadline; the undo is given up and the restored site kept, as the deadline passed', $deadline );
+			} else {
+				$context->logger()->warning( 'The deadline to answer passed; the undo is given up and the restored site kept, as the question said', $deadline );
+			}
 			$answer = RestoreJob::KEEP;
+			$why    = 'deadline';
 		}
 		if ( self::PUT_BACK === $answer ) {
 			$cursor = array(
@@ -1170,7 +1180,9 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			throw $this->roll_back( $context, $db, $cursor, (string) $cursor['reason'] );
 		}
 		if ( RestoreJob::KEEP === $answer ) {
-			$context->logger()->warning( 'The undo was given up as chosen: the restored site stays' );
+			if ( '' === $why ) {
+				$context->logger()->warning( 'The undo was given up as the administrator chose: the restored site stays' );
+			}
 			$cursor = array(
 				'phase'   => 'committed',
 				'attempt' => $cursor['attempt'],
@@ -1362,10 +1374,12 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	}
 
 	/**
-	 * The cursor a completed restore is undone from (wp wpcheckpoint job undo, JobActions::undo()): its reverse, as
-	 * reverse() records it after the site was let out, with the reason ASKED. The next run holds the maintenance file
-	 * again before the first rename back (waiting out anyone else's), carries this plugin's state back, and puts the
-	 * site back by the plan; the job ends undone (ended()).
+	 * The cursor a completed restore is undone from (wp wpcheckpoint job undo, JobActions::undo()): "undo", a position
+	 * of the swapped site (nothing changed yet), with what its reverse needs (as reverse() records it after the site
+	 * was let out, with the reason ASKED). The next run checks once more before it changes anything (start_undo()),
+	 * then holds the maintenance file (waiting out anyone else's), carries this plugin's state back, and puts the site
+	 * back by the plan; the job ends undone (ended()). Its JSON begins with the phase (JobRepository::cancel_undo()
+	 * finds an undo that has not started by it).
 	 *
 	 * @param int    $attempt The plan's attempt the swap was made by.
 	 * @param string $mark    The job's maintenance file mark (Job::$site_mark).
@@ -1373,13 +1387,91 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 */
 	public static function undo_cursor( int $attempt, string $mark ): array {
 		return array(
-			'phase'   => 'reverse',
+			'phase'   => 'undo',
 			'attempt' => $attempt,
 			'mark'    => $mark,
 			'reason'  => self::ASKED,
 			'check'   => '',
 			'out'     => true,
 		);
+	}
+
+	/**
+	 * Right before an undo first changes the site (its maintenance file not held yet): a cancel requested since the
+	 * claim, or the time a restore can be undone in run out (Undo::WINDOW_SECONDS from its commit), gives it up
+	 * (give_up_undo()); otherwise the reverse is recorded (the site state becomes changing, in a write that requires no
+	 * cancel requested: JobRepository::save_progress()), then the site is put back (roll_back()).
+	 *
+	 * @param JobContext           $context Context.
+	 * @param Queries              $db      Connection.
+	 * @param array<string, mixed> $cursor  Cursor ("undo").
+	 * @return StepResult
+	 * @throws \RuntimeException What ends the job once the site is put back (ended()).
+	 */
+	private function start_undo( JobContext $context, Queries $db, array $cursor ): StepResult {
+		$job = $context->job();
+		if ( 0 !== $job->cancel_requested ) {
+			return $this->give_up_undo( $context, $cursor, 'The undo was cancelled before it changed the site: the restored site stays', __( 'The undo was cancelled before it changed the site: the restored site stays.', 'wp-checkpoint' ) );
+		}
+		if ( ! self::within_window( $job->committed_at, $this->now() ) ) {
+			return $this->give_up_undo( $context, $cursor, 'The time a restore can be undone in ran out before the undo changed the site: the restored site stays', __( 'The time this restore could be undone in ran out before the undo changed the site: the restored site stays.', 'wp-checkpoint' ) );
+		}
+		$this->at( 'undo_starting' );
+		$cursor['phase'] = 'reverse';
+		try {
+			$context->checkpoint( $cursor, 88, __( 'Putting the site back as it was', 'wp-checkpoint' ) );
+		} catch ( UndoCancelled $e ) {
+			$cursor['phase'] = 'undo';
+			return $this->give_up_undo( $context, $cursor, 'The undo was cancelled before it changed the site: the restored site stays', __( 'The undo was cancelled before it changed the site: the restored site stays.', 'wp-checkpoint' ) );
+		}
+		$this->at( 'undo_started' );
+		throw $this->roll_back( $context, $db, $cursor, (string) ( $cursor['reason'] ?? self::ASKED ) );
+	}
+
+	/**
+	 * Give an undo up before it changed the site: recorded as done (the site swapped, as it has been; a cancel request
+	 * cleared with it), its maintenance file down if a run left one, and the job completed again.
+	 *
+	 * @param JobContext           $context Context.
+	 * @param array<string, mixed> $cursor  Cursor ("undo").
+	 * @param string               $log     What the log says.
+	 * @param string               $text    What the job says at its end.
+	 * @return StepResult
+	 */
+	private function give_up_undo( JobContext $context, array $cursor, string $log, string $text ): StepResult {
+		$context->logger()->warning( $log );
+		$cursor = array(
+			'phase'   => 'done',
+			'attempt' => $cursor['attempt'],
+			'mark'    => $cursor['mark'] ?? '',
+		);
+		$context->checkpoint( $cursor, 100, $text );
+		$this->at( 'undo_not_started' );
+		$this->take_down( $context, $cursor );
+		return StepResult::done( $text );
+	}
+
+	/**
+	 * Whether a swap committed at $committed_at may still be undone at $now.
+	 *
+	 * @param int $committed_at Job::$committed_at.
+	 * @param int $now          Unix time.
+	 * @return bool
+	 */
+	public static function within_window( int $committed_at, int $now ): bool {
+		return $committed_at > 0 && $now <= $committed_at + Undo::WINDOW_SECONDS;
+	}
+
+	/**
+	 * Whether a cursor is an undo after the restored site was let out (wp wpcheckpoint job undo, or an undo answered
+	 * after the release), at any position: "undo" before it changed the site, or a reverse, a question about its
+	 * carry back, or its end. A cancel gives up the first (JobRepository::cancel_undo()) and is refused for the rest.
+	 *
+	 * @param array<string, mixed> $cursor The job's cursor.
+	 * @return bool
+	 */
+	public static function undoing( array $cursor ): bool {
+		return 'undo' === ( $cursor['phase'] ?? '' ) || self::undone( $cursor );
 	}
 
 	/**

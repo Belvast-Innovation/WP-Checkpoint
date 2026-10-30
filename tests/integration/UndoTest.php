@@ -138,8 +138,8 @@ final class UndoTest extends SwapTestCase {
 		$queued = Plugin::instance()->jobs()->find( $job->id );
 		$this->assertSame( Job::QUEUED, $queued->status );
 		$this->assertSame( SwapStep::ID, $queued->step );
-		$this->assertSame( Job::SITE_CHANGING, $queued->site_state, 'recorded as changing the site with the reverse it is at' );
-		$this->assertSame( 'reverse', $queued->cursor['phase'] ?? '' );
+		$this->assertSame( Job::SITE_SWAPPED, $queued->site_state, 'nothing changed yet: still swapped, at the undo\'s first position' );
+		$this->assertSame( 'undo', $queued->cursor['phase'] ?? '' );
 		$this->assertSame( SwapStep::ASKED, $queued->cursor['reason'] ?? '' );
 		$this->assertTrue( $queued->cursor['out'] ?? false );
 		$this->assertSame( array( $job->id ), Plugin::instance()->jobs()->holding_site(), 'it holds the site from the claim on' );
@@ -476,6 +476,7 @@ final class UndoTest extends SwapTestCase {
 		$this->assertSame( Job::SITE_SWAPPED, $kept->site_state );
 		$this->assertSame( $at, $kept->committed_at, 'the time it was committed is unchanged' );
 		$this->assertContains( 'undo_given_up', $this->seams );
+		$this->assertStringContainsString( 'given up as the administrator chose', Plugin::instance()->job_presenter()->log_tail( $kept ) );
 		$this->assertSame( $after, $this->site(), 'the restored site stays, its maintenance file down' );
 		$this->assertSame( 'written since the restore', $this->state(), 'and its state' );
 		$this->assertSame( array(), Plugin::instance()->jobs()->holding_site() );
@@ -740,30 +741,135 @@ final class UndoTest extends SwapTestCase {
 		$this->assertSame( Job::COMPLETED, Plugin::instance()->jobs()->find( $job->id )->status, 'not claimed' );
 	}
 
-	public function test_a_cancel_requested_while_an_undo_puts_the_site_back_does_not_turn_it_into_a_cancel(): void {
-		$before = $this->site();
-		$job    = $this->completed();
-		$told   = $this->actions()->undo( $job->id, '' );
+	/**
+	 * A completed restore claimed for an undo, not run yet.
+	 *
+	 * @return array{0: Job, 1: array<string, mixed>} The job, the site as restored.
+	 */
+	private function claimed(): array {
+		$job   = $this->completed();
+		$after = $this->site();
+		$this->retype( $job );
+		$told = $this->actions()->undo( $job->id, '' );
 		$this->assertTrue( $this->actions()->undo( $job->id, $told['code'] )['ok'] );
-		$this->set( $job->id, array( 'cancel_requested' => time() ) );
-		$done = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
-		$this->assertSame( Job::UNDONE, $done->status, 'undone, as it is' );
+		return array( Plugin::instance()->jobs()->find( $job->id ), $after );
+	}
+
+	public function test_a_cancel_before_the_undo_changed_the_site_gives_it_up_at_once(): void {
+		list( $job, $after ) = $this->claimed();
+		$out = Plugin::instance()->job_actions()->cancel( $job->id );
+		$this->assertSame( 'undo_given_up', $out['reason'] );
+		$now = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertSame( Job::COMPLETED, $now->status, 'the restore completed again' );
+		$this->assertSame( Job::SITE_SWAPPED, $now->site_state );
+		$this->assertSame( 0, $now->cancel_requested );
+		$this->assertSame( $job->committed_at, $now->committed_at );
+		$this->assertSame( $after, $this->site(), 'the site untouched' );
+		$this->assertTrue( $this->actions()->undo( $job->id, '' )['ok'], 'and it can be undone again' );
+	}
+
+	public function test_a_cancel_while_a_run_holds_the_undo_before_it_changed_the_site_is_seen_by_that_run(): void {
+		list( $job, $after ) = $this->claimed();
+		// A run holds it (its lease live): the cancel is a request, which the run sees before it changes anything.
+		$this->set(
+			$job->id,
+			array(
+				'lock_token'   => 'held-by-a-run',
+				'locked_until' => time() + 300,
+			)
+		);
+		$out = Plugin::instance()->job_actions()->cancel( $job->id );
+		$this->assertSame( 'undo_requested', $out['reason'] );
+		$this->assertGreaterThan( 0, Plugin::instance()->jobs()->find( $job->id )->cancel_requested );
+		$this->set(
+			$job->id,
+			array(
+				'lock_token'   => '',
+				'locked_until' => 0,
+			)
+		);
+		$this->seams = array();
+		$done        = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( Job::COMPLETED, $done->status );
+		$this->assertSame( 0, $done->cancel_requested );
+		$this->assertContains( 'undo_not_started', $this->seams );
+		$this->assertNotContains( 'undo_started', $this->seams, 'it never started changing the site' );
+		$this->assertSame( $after, $this->site() );
+		$log = Plugin::instance()->job_presenter()->log_tail( $done );
+		$this->assertStringContainsString( 'cancelled before it changed the site', $log );
+		$this->assertStringNotContainsString( 'the swap was complete before it could act', $log, 'not said as a cancel that came too late' );
+	}
+
+	public function test_a_cancel_that_lands_right_before_the_undo_starts_changing_the_site_wins(): void {
+		list( $job, $after ) = $this->claimed();
+		// Between the run's read of the row and its write that starts the change.
+		$this->swap_parts['at'] = function ( string $point ) use ( $job ): void {
+			$this->seams[] = $point;
+			if ( 'undo_starting' === $point ) {
+				$this->set( $job->id, array( 'cancel_requested' => time() ) );
+			}
+		};
+		$this->retype( $job );
+		$this->seams = array();
+		$done        = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertContains( 'undo_starting', $this->seams, 'the control: the request landed there' );
+		$this->assertNotContains( 'undo_started', $this->seams );
+		$this->assertSame( Job::COMPLETED, $done->status, 'given up, not undone' );
+		$this->assertSame( $after, $this->site() );
+	}
+
+	public function test_a_cancel_after_the_undo_changed_the_site_is_refused_and_the_undo_finishes(): void {
+		$before          = $this->site();
+		list( $job )     = $this->claimed();
+		$this->killed_at( $job, 'table_back', 1 );
+		$changing = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertSame( Job::SITE_CHANGING, $changing->site_state, 'the control: the undo changed the site' );
+		$out = Plugin::instance()->job_actions()->cancel( $job->id );
+		$this->assertSame( 'undoing', $out['reason'] );
+		$this->assertSame( 0, Plugin::instance()->jobs()->find( $job->id )->cancel_requested, 'nothing recorded' );
+		$this->assertStringContainsString( 'finishes putting the site back', \WPCheckpoint\Rest\JobsController::cancel_message( 'undoing' ) );
+		$this->assertSame( Job::UNDONE, $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) )->status );
 		$this->assertSame( $before, $this->site() );
 	}
 
-	public function test_an_unanswered_question_about_the_carry_back_gives_the_undo_up_after_7_days(): void {
+	public function test_an_undo_whose_window_closed_after_it_was_claimed_is_given_up_before_it_changes_the_site(): void {
+		list( $job, $after ) = $this->claimed();
+		$this->set( $job->id, array( 'committed_at' => time() - Undo::WINDOW_SECONDS - 60 ) );
+		$this->seams = array();
+		$done        = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( Job::COMPLETED, $done->status );
+		$this->assertNotContains( 'undo_started', $this->seams );
+		$this->assertSame( $after, $this->site(), 'nothing put back' );
+		$this->assertStringContainsString( 'ran out before the undo changed the site', Plugin::instance()->job_presenter()->log_tail( $done ) );
+	}
+
+	public function test_an_unanswered_question_about_the_carry_back_is_given_up_at_its_deadline(): void {
 		list( $job, , $after ) = $this->asked_about_the_carry();
+		// Asked long ago, the deadline not reached: left.
 		$this->set( $job->id, array( 'updated_at' => time() - JobRepository::WORK_RETENTION_SECONDS - 60 ) );
+		Plugin::instance()->jobs()->reap();
+		$this->assertSame( array(), (array) ( Plugin::instance()->jobs()->find( $job->id )->options['answers'] ?? array() ), 'not answered before its deadline' );
+		// The deadline (from the commit) passed, however recently it was asked.
+		$this->set(
+			$job->id,
+			array(
+				'committed_at' => time() - Undo::WINDOW_SECONDS - 60,
+				'updated_at'   => time(),
+			)
+		);
 		Plugin::instance()->jobs()->reap();
 		$answered = Plugin::instance()->jobs()->find( $job->id );
 		$this->assertSame( RestoreJob::KEEP, $answered->options['answers'][ SwapStep::CARRY_QUESTION ] ?? null, 'answered "keep"' );
-		$this->assertStringContainsString( 'the undo was given up', $answered->progress_message );
+		$this->assertStringContainsString( 'No answer by the deadline', $answered->progress_message );
 		$kept = $this->cli_run( $answered );
 		$this->assertSame( Job::COMPLETED, $kept->status );
 		$this->assertSame( $after, $this->site(), 'the restored site stays' );
+		$log = Plugin::instance()->job_presenter()->log_tail( $kept );
+		$this->assertStringContainsString( 'The deadline to answer passed', $log );
+		$this->assertStringNotContainsString( 'as the administrator chose', $log );
 	}
 
-	public function test_putting_back_answered_after_the_undo_window_keeps_the_restored_site(): void {
+	public function test_putting_back_answered_after_the_deadline_keeps_the_restored_site_and_says_why(): void {
 		list( $job, , $after ) = $this->asked_about_the_carry();
 		$this->set( $job->id, array( 'committed_at' => time() - Undo::WINDOW_SECONDS - 60 ) );
 		Plugin::instance()->job_actions()->answer( $job->id, array( SwapStep::CARRY_QUESTION => SwapStep::PUT_BACK ) );
@@ -771,7 +877,68 @@ final class UndoTest extends SwapTestCase {
 		$this->assertSame( Job::COMPLETED, $kept->status );
 		$this->assertNotContains( 'table_back', $this->seams, 'nothing was put back' );
 		$this->assertSame( $after, $this->site() );
-		$this->assertStringContainsString( 'came after the time a restore can be undone in', Plugin::instance()->job_presenter()->log_tail( $kept ) );
+		$log = Plugin::instance()->job_presenter()->log_tail( $kept );
+		$this->assertStringContainsString( 'came after the deadline', $log );
+		$this->assertStringNotContainsString( 'as the administrator chose', $log );
+	}
+
+	public function test_the_carry_question_names_its_deadline(): void {
+		list( $job ) = $this->asked_about_the_carry();
+		$text = QuestionText::for_job( $job, Plugin::instance()->directories(), 'strval' );
+		$this->assertStringContainsString( 'Answer by ' . gmdate( 'Y-m-d H:i', $job->committed_at + Undo::WINDOW_SECONDS ) . ' UTC', $text[0]['text'] );
+		$this->assertStringNotContainsString( '7 days', $text[0]['text'] );
+	}
+
+	public function test_restores_are_undone_from_the_latest_back(): void {
+		$before = $this->site();
+		$first  = $this->completed();
+		$middle = $this->site();
+		$second = $this->restore_again();
+		$this->assertGreaterThanOrEqual( $first->committed_at, $second->committed_at );
+		$this->assertStringContainsString( 'Restore job ' . $second->id . ' swapped the site after restore job ' . $first->id, $this->actions()->undo( $first->id, '' )['message'], 'the earlier one first: refused' );
+		$this->assertSame( Job::UNDONE, $this->undone( $second )->status, 'the later one first' );
+		$this->assertSame( $middle, $this->site(), 'the site as the first restore left it' );
+		$this->assertSame( 0, Plugin::instance()->jobs()->find( $second->id )->committed_at, 'its swap stands no more' );
+		$this->assertSame( Job::UNDONE, $this->undone( Plugin::instance()->jobs()->find( $first->id ) )->status, 'then the earlier one' );
+		$this->assertSame( $before, $this->site(), 'the site as it was before both' );
+	}
+
+	/**
+	 * A second restore of the site as it is now (after completed()): its tables and files backed up as they are, then
+	 * restored and run to its end, so that undoing it puts back exactly what the first restore left.
+	 *
+	 * @return Job
+	 */
+	private function restore_again(): Job {
+		global $wpdb;
+		$tables  = self::live_tables();
+		$base    = $this->backup( $tables, null, null, array( 'files' => self::backup_files() ) );
+		$exclude = array_values( array_diff( $tables, array_merge( array( $wpdb->prefix . 'swt_keep', $wpdb->prefix . 'swt_new' ), self::site_tables() ) ) );
+		$jobs    = Plugin::instance()->jobs();
+		$job     = $jobs->create(
+			$this->type,
+			self::$admin_id,
+			array(),
+			array(
+				'base'           => $base,
+				'exclude_tables' => $exclude,
+			)
+		);
+		$runner  = Plugin::instance()->runner();
+		for ( $i = 0; $i < 500; $i++ ) {
+			$result = $this->autocommit(
+				static function () use ( $runner, $job ): \WPCheckpoint\Jobs\TickResult {
+					return $runner->tick( $job->id, microtime( true ) );
+				}
+			);
+			$now    = $jobs->find( $job->id );
+			if ( \WPCheckpoint\Jobs\TickResult::CLI === $result->status || ! in_array( $now->status, array( Job::QUEUED, Job::RUNNING ), true ) ) {
+				break;
+			}
+		}
+		$done = $this->cli_run( $jobs->find( $job->id ) );
+		$this->assertSame( Job::COMPLETED, $done->status, 'the second restore: ' . $done->last_error );
+		return $done;
 	}
 
 	public function test_the_carry_question_is_shown_when_the_names_could_not_be_read(): void {

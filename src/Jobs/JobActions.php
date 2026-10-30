@@ -1230,7 +1230,13 @@ final class JobActions {
 	 *                                                            "elsewhere" (refused: it holds the site and another
 	 *                                                            installation manages it, JobRepository::manages()) or
 	 *                                                            "abandoned" (refused: a cancel request would turn a
-	 *                                                            later take-over's "continue" into a rollback).
+	 *                                                            later take-over's "continue" into a rollback),
+	 *                                                            "undo_given_up" (an undo that had not changed the site
+	 *                                                            was given up: the job is completed again, the restored
+	 *                                                            site in place), "undo_requested" (such an undo is
+	 *                                                            running: it gives itself up before it changes the
+	 *                                                            site) or "undoing" (refused: the undo has started
+	 *                                                            changing the site and finishes).
 	 * @throws InvalidTransition When the job is already finished.
 	 * @throws StaleJob When the job changed meanwhile.
 	 */
@@ -1253,6 +1259,27 @@ final class JobActions {
 				'job'     => $job,
 				'cleaned' => false,
 				'reason'  => 'elsewhere',
+			);
+		}
+		if ( SwapStep::undoing( $job->cursor ) && Job::SITE_UNTOUCHED !== $job->site_state ) {
+			// An undo is given up only before it changes the site (2026-10-30): then the restored site stays, the job
+			// completed again; once it changed anything it finishes, and the cancel is refused. Never accepted and not done.
+			$reason = 'undoing';
+			if ( 'undo' === ( $job->cursor['phase'] ?? '' ) ) {
+				try {
+					$reason = 'given_up' === $this->repository->cancel_undo( $job ) ? 'undo_given_up' : 'undo_requested';
+				} catch ( StaleJob $e ) {
+					$reason = 'undoing'; // It started changing the site meanwhile (or ended): refused, as from here on.
+				}
+			}
+			$now = $this->repository->find( $id ) ?? $job;
+			if ( 'undo_given_up' === $reason ) {
+				$this->runner->note( $now, Logger::WARNING, 'The undo was cancelled before it changed the site: the restored site stays' );
+			}
+			return array(
+				'job'     => $now,
+				'cleaned' => false,
+				'reason'  => $reason,
 			);
 		}
 		if ( Job::SITE_CHANGING === $job->site_state ) {

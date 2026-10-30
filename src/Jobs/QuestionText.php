@@ -89,7 +89,7 @@ final class QuestionText {
 				'id'      => $id,
 				'kind'    => (string) ( $question['kind'] ?? '' ),
 				'choices' => array_map( 'strval', (array) ( $question['choices'] ?? array() ) ),
-				'text'    => (string) call_user_func( $clean, SwapStep::UNVERIFIED_KIND === $kind ? self::unverified( $job ) : ( SwapStep::CARRY_KIND === $kind ? self::carry( $question, $carry ) : self::describe( $id, $question, $findings, $shown ) ) ),
+				'text'    => (string) call_user_func( $clean, SwapStep::UNVERIFIED_KIND === $kind ? self::unverified( $job ) : ( SwapStep::CARRY_KIND === $kind ? self::carry( $job, $question, $carry ) : self::describe( $id, $question, $findings, $shown ) ) ),
 				'listed'  => array_map(
 					static function ( string $p ) use ( $clean ): string {
 						return (string) call_user_func( $clean, $p );
@@ -140,13 +140,15 @@ final class QuestionText {
 	}
 
 	/**
-	 * The question of an undo whose carry back failed: what failed, what each answer does, and what is lost.
+	 * The question of an undo whose carry back failed: what failed, what each answer does, what is lost, and until when
+	 * it can be answered (the end of the time the restore can be undone in, from its commit: Undo::WINDOW_SECONDS).
 	 *
+	 * @param Job                                              $job      The job.
 	 * @param array<string, mixed>                             $question The question.
 	 * @param array{reason: string, names: string[]|null}|null $carry    carry_file().
 	 * @return string
 	 */
-	private static function carry( array $question, $carry ): string {
+	private static function carry( Job $job, array $question, $carry ): string {
 		$count = (int) ( $question['count'] ?? 0 );
 		$why   = null === $carry || '' === $carry['reason'] ? __( 'the job log says why', 'wp-checkpoint' ) : $carry['reason'];
 		$lost  = null === $carry || null === $carry['names']
@@ -154,10 +156,11 @@ final class QuestionText {
 			/* translators: %d: number of settings */
 			: sprintf( _n( '%d setting of WP Checkpoint written since the restore would be lost (listed below)', '%d settings of WP Checkpoint written since the restore would be lost (listed below)', $count, 'wp-checkpoint' ), $count );
 		return sprintf(
-			/* translators: 1: why the carry failed, 2: what would be lost */
-			__( 'The undo could not carry WP Checkpoint\'s own settings back into the site as it was before the restore (%1$s); nothing was put back yet, and the restored site is open to visitors as it was. Put the site back anyway: as the undo said, everything written on the site since the restore is dropped, and %2$s, among them may be where its backups are stored and how it recognises this site, so it may start a new storage directory and no longer list the backups it made. Or keep the restored site and give the undo up. Unanswered for 7 days, the undo is given up.', 'wp-checkpoint' ),
+			/* translators: 1: why the carry failed, 2: what would be lost, 3: date and time (UTC) */
+			__( 'The undo could not carry WP Checkpoint\'s own settings back into the site as it was before the restore (%1$s); nothing was put back yet, and the restored site is open to visitors as it was. Put the site back anyway: as the undo said, everything written on the site since the restore is dropped, and %2$s, among them may be where its backups are stored and how it recognises this site, so it may start a new storage directory and no longer list the backups it made. Or keep the restored site and give the undo up. Answer by %3$s UTC: after that the undo is given up and the restored site kept, whatever the answer.', 'wp-checkpoint' ),
 			$why,
-			$lost
+			$lost,
+			gmdate( 'Y-m-d H:i', $job->committed_at + Undo::WINDOW_SECONDS )
 		);
 	}
 

@@ -248,7 +248,7 @@ final class JobsController extends Controller {
 		if ( null === $outcome ) {
 			return $this->not_found();
 		}
-		if ( in_array( $outcome['reason'], array( 'swapped', 'elsewhere', 'abandoned' ), true ) ) {
+		if ( in_array( $outcome['reason'], array( 'swapped', 'elsewhere', 'abandoned', 'undoing' ), true ) ) {
 			return $this->conflict( self::cancel_message( $outcome['reason'] ) );
 		}
 		return $this->respond(
@@ -375,6 +375,12 @@ final class JobsController extends Controller {
 				return __( 'The restore is changing the site. It puts the site back as it was, then the job is cancelled; that happens when the restore runs again in WP-CLI (wp wpcheckpoint job run, after wp wpcheckpoint job retry if it failed).', 'wp-checkpoint' );
 			case 'swapped':
 				return __( 'The restored site is in place: cancelling the job cannot change it back.', 'wp-checkpoint' );
+			case 'undo_given_up':
+				return __( 'The undo was cancelled before it changed the site: the restored site stays, and the restore is completed as before.', 'wp-checkpoint' );
+			case 'undo_requested':
+				return __( 'The undo is running and has not changed the site yet: it is given up before it does, and the restored site stays.', 'wp-checkpoint' );
+			case 'undoing':
+				return __( 'The undo has started changing the site: it is not cancelled, and finishes putting the site back as it was before the restore. While it asks how to go on, answer keep to give it up.', 'wp-checkpoint' );
 			case 'elsewhere':
 				return __( 'This restore holds the site changed and is managed by another installation of WP Checkpoint (the site\'s identity changed since it started); it is not cancelled from here. wp wpcheckpoint job status shows what can be done.', 'wp-checkpoint' );
 			case 'abandoned':
