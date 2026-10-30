@@ -340,6 +340,14 @@ final class Job {
 	public $site_mark = '';
 
 	/**
+	 * Unix time the job's swap was last committed (site_state became SITE_SWAPPED), written in the statement that
+	 * records it (JobRepository::save_progress()); 0 when it never was, or the row predates the column.
+	 *
+	 * @var int
+	 */
+	public $committed_at = 0;
+
+	/**
 	 * Log file path relative to the storage base directory, e.g. "logs/job-3-ab12cd34.log".
 	 *
 	 * @var string

@@ -1499,6 +1499,13 @@ final class JobRepository {
 		if ( null !== $site_state ) {
 			$data['site_state'] = (int) $site_state;
 			$formats[]          = '%d';
+			$committing = Job::SITE_SWAPPED === (int) $site_state && Job::SITE_SWAPPED !== $job->site_state;
+			if ( $committing ) {
+				// When the swap was committed, in the statement that records it (an undo is measured from it). The row
+				// as read under this run's lock is what $job says, so a run that writes the state again does not move it.
+				$data['committed_at'] = $now;
+				$formats[]            = '%d';
+			}
 			if ( Job::SITE_SWAPPED === (int) $site_state ) {
 				// The swap is complete: a cancel requested while it was under way can no longer act, and must not act
 				// on whatever changes the site later (an undo). What is cleared is read just before, for the caller to
@@ -1561,6 +1568,9 @@ final class JobRepository {
 			$job->site_mark = (string) $site_mark;
 		}
 		if ( null !== $site_state ) {
+			if ( isset( $data['committed_at'] ) ) {
+				$job->committed_at = $now;
+			}
 			$job->site_state = (int) $site_state;
 			if ( Job::SITE_SWAPPED === $job->site_state ) {
 				$job->cancel_requested = 0;
