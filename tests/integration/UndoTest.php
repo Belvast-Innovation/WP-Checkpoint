@@ -442,7 +442,10 @@ final class UndoTest extends SwapTestCase {
 		$text = QuestionText::for_job( $paused, Plugin::instance()->directories(), 'strval' );
 		$this->assertStringContainsString( 'could not carry WP Checkpoint\'s own settings back', $text[0]['text'] );
 		$this->assertStringContainsString( 'Table is marked as crashed', $text[0]['text'], 'why' );
-		$this->assertContains( StoredNames::DELETE_DATA, $text[0]['listed'], 'the rows that would be lost are listed' );
+		$file = \WPCheckpoint\Jobs\ExportPlan::read( $this->work( $paused ), RestoreFiles::CARRY_BACK );
+		$this->assertContains( StoredNames::DELETE_DATA, $file['names'], 'the rows that would be lost, in the work file' );
+		$this->assertSame( count( $file['names'] ), (int) $paused->questions[0]['count'] );
+		$this->assertSame( array_slice( $file['names'], 0, QuestionText::MAX_LISTED ), $text[0]['listed'], 'the first of them listed with the question' );
 		return array( $paused, $before, $after, $at );
 	}
 
