@@ -1499,7 +1499,7 @@ final class JobRepository {
 		if ( null !== $site_state ) {
 			$data['site_state'] = (int) $site_state;
 			$formats[]          = '%d';
-			$committing = Job::SITE_SWAPPED === (int) $site_state && Job::SITE_SWAPPED !== $job->site_state;
+			$committing         = Job::SITE_SWAPPED === (int) $site_state && Job::SITE_SWAPPED !== $job->site_state;
 			if ( $committing ) {
 				// When the swap was committed, in the statement that records it (an undo is measured from it). The row
 				// as read under this run's lock is what $job says, so a run that writes the state again does not move it.
