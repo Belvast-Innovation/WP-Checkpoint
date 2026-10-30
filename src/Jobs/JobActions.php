@@ -433,17 +433,21 @@ final class JobActions {
 	/**
 	 * What a cancel of an undo that wrote nothing says, decided by the row as it is now and by nothing else (the
 	 * invariants C1–C5 of ARCHITECTURE "4c-C2": whatever ran meanwhile, the answer is true of the row): "elsewhere" or
-	 * "abandoned" (not this installation's to cancel now); "undo_ended" (undone); "undoing" (changing the site, or
-	 * asking how to go on, where answering keep gives it up: refused); "undo_requested" (at its first position, swapped,
+	 * "abandoned" (not this installation's to cancel now); "undo_ended" (undone); "undoing" (changing the site, asking
+	 * how to go on, where answering keep gives it up, or put back and taking its maintenance file down: refused, and
+	 * never ended cancelled, which would reclaim the restored copy); "undo_requested" (at its first position, swapped,
 	 * a request recorded: it gives itself up); "undo_given_up" (swapped and at no position of an undo: it will not
 	 * change the site); null when it can be none of these (at its first position with no request: a new claim
-	 * meanwhile, say), which the caller says as a job that changed meanwhile.
+	 * meanwhile, say; or a row that cannot be read), which the caller says as a job that changed meanwhile.
 	 *
 	 * @param Job $job The job as read after the cancel.
 	 * @return string|null
 	 */
 	private function undo_cancel_state( Job $job ) {
-		if ( Job::SITE_UNTOUCHED !== $job->site_state && ! $this->repository->manages( $job ) ) {
+		if ( array() !== $job->unreadable_columns ) {
+			return null; // What it is cannot be read.
+		}
+		if ( ! $this->repository->manages( $job ) ) {
 			return 'elsewhere';
 		}
 		if ( Job::REASON_ABANDONED === $job->failure_reason ) {
@@ -455,8 +459,9 @@ final class JobActions {
 		if ( Job::SITE_CHANGING === $job->site_state ) {
 			return 'undoing';
 		}
-		if ( Job::SITE_SWAPPED !== $job->site_state ) {
-			return null;
+		if ( Job::SITE_UNTOUCHED === $job->site_state ) {
+			// Put back by an undo that still takes its maintenance file down (it ends undone), or anything else: unknown.
+			return SwapStep::undoing( $job->cursor ) ? 'undoing' : null;
 		}
 		if ( 'undo' === ( $job->cursor['phase'] ?? '' ) ) {
 			return 0 !== $job->cancel_requested ? 'undo_requested' : null;
@@ -1296,7 +1301,9 @@ final class JobActions {
 				'reason'  => 'elsewhere',
 			);
 		}
-		if ( SwapStep::undoing( $job->cursor ) && Job::SITE_UNTOUCHED !== $job->site_state ) {
+		if ( SwapStep::undoing( $job->cursor ) && ! in_array( $job->status, array( Job::COMPLETED, Job::CANCELLED, Job::UNDONE ), true ) ) {
+			// Every position of an undo, its last ones too (put back, its maintenance file still to come down: the site
+			// recorded as untouched): a plain cancel there would end it cancelled and reclaim the restored copy.
 			// An undo is given up only before it changes the site (2026-10-30): then the restored site stays, the job
 			// completed again; once it changed anything it finishes, and the cancel is refused. Never accepted and not done.
 			$wrote = '';
@@ -1307,7 +1314,10 @@ final class JobActions {
 					$wrote = ''; // Nothing written: said as what the row is now.
 				}
 			}
-			$now = $this->repository->find( $id ) ?? $job;
+			$now = $this->repository->find( $id );
+			if ( null === $now ) {
+				return null; // Gone meanwhile: no such job.
+			}
 			if ( 'given_up' === $wrote ) {
 				$reason = 'undo_given_up';
 				$this->runner->note( $now, Logger::WARNING, 'The undo was cancelled before it changed the site: the restored site stays' );

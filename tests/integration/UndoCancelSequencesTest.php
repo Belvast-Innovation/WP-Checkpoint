@@ -22,6 +22,9 @@ use WPCheckpoint\Tests\Fixtures\Jobs\JobTestCase;
  * - C3: when it can be none of these, the cancel says the job changed meanwhile (StaleJob) and wrote nothing.
  * - C4: an abandon written meanwhile is not overwritten.
  * - C5: a request is written only on a row at the undo's first position, swapped.
+ * - C6: no cancel ends an undo that changed the site as cancelled (which would reclaim the restored copy): after
+ *   every case a second cancel is made, as REST makes one after a job that changed meanwhile.
+ * - The "cancelled" note goes into the job's log only when this cancel's own write gave the undo up.
  *
  * The undo's row is made directly (no restore runs): what is tested is the cancel's decision on the row. Counts of
  * every starting state, event, point and outcome are the controls.
@@ -32,7 +35,7 @@ final class UndoCancelSequencesTest extends JobTestCase {
 	const STARTS = array( 'queued', 'running', 'failed', 'expired' );
 
 	/** What another process writes meanwhile. */
-	const EVENTS = array( 'none', 'giving_up', 'given_up', 'changing', 'ended', 'requested', 'abandoned', 'reclaimed', 'locked', 'failed' );
+	const EVENTS = array( 'none', 'giving_up', 'given_up', 'changing', 'asking', 'reverted', 'ended', 'requested', 'abandoned', 'reclaimed', 'locked', 'failed', 'elsewhere', 'unreadable' );
 
 	/** Before which of the cancel's writes (1: the give-up, 2: the request). */
 	const POINTS = array( 1, 2 );
@@ -93,14 +96,27 @@ final class UndoCancelSequencesTest extends JobTestCase {
 			case 'changing': // The run's write that starts changing the site.
 				$other->query( $other->prepare( "UPDATE {$table} SET site_state = %d, cursor_json = %s WHERE id = %d AND cancel_requested = 0", Job::SITE_CHANGING, wp_json_encode( array( 'phase' => 'reverse' ) + $undo ), $id ) );
 				break;
+			case 'asking': // The undo asks how to go on after its carry back failed (site swapped, nothing put back).
+				$other->query( $other->prepare( "UPDATE {$table} SET cursor_json = %s WHERE id = %d", wp_json_encode( array( 'phase' => 'carry_ask' ) + $undo ), $id ) );
+				break;
+			case 'reverted': // Put back, its maintenance file still to come down (the site recorded as untouched).
+				$other->query( $other->prepare( "UPDATE {$table} SET site_state = %d, committed_at = 0, cursor_json = %s WHERE id = %d", Job::SITE_UNTOUCHED, wp_json_encode( array( 'phase' => 'reverted' ) + $undo ), $id ) );
+				break;
+			case 'elsewhere': // Taken over by another installation.
+				$other->query( $other->prepare( "UPDATE {$table} SET held_by = %s WHERE id = %d", 'another0another0another0another0', $id ) );
+				break;
+			case 'unreadable': // A cursor this code did not write.
+				$other->query( $other->prepare( "UPDATE {$table} SET cursor_json = %s WHERE id = %d", '{not json', $id ) );
+				break;
 			case 'ended': // The undo ran to its end.
 				$other->query( $other->prepare( "UPDATE {$table} SET status = %s, site_state = %d, committed_at = 0, cursor_json = %s, lock_token = '', locked_until = 0 WHERE id = %d", Job::UNDONE, Job::SITE_UNTOUCHED, wp_json_encode( array( 'phase' => 'reverted' ) + $undo ), $id ) );
 				break;
 			case 'requested': // Another cancel's request.
 				$other->query( $other->prepare( "UPDATE {$table} SET cancel_requested = %d WHERE id = %d AND cancel_requested = 0", $now, $id ) );
 				break;
-			case 'abandoned': // wp wpcheckpoint job abandon (JobRepository::abandon_held()): finished_at moves past the one read.
-				$at = $now + 5;
+			case 'abandoned': // wp wpcheckpoint job abandon (JobRepository::abandon_held()): max( now, finished_at + 1 ).
+				$read = (int) $other->get_var( $other->prepare( "SELECT finished_at FROM {$table} WHERE id = %d", $id ) );
+				$at   = max( $now, $read + 1 );
 				$other->query( $other->prepare( "UPDATE {$table} SET status = %s, failure_kind = %s, finished_at = %d, lock_token = '', locked_until = 0 WHERE id = %d", Job::FAILED, Job::stamp_failure( Job::FAILURE_FINAL . ':' . Job::REASON_ABANDONED, $at ), $at, $id ) );
 				break;
 			case 'reclaimed': // Given up, then claimed for an undo anew.
@@ -175,13 +191,16 @@ final class UndoCancelSequencesTest extends JobTestCase {
 							$this->assertGreaterThan( 0, $now->cancel_requested, $label );
 							break;
 						case 'undoing': // C2.
-							$this->assertTrue( Job::SITE_CHANGING === $now->site_state || ( Job::SITE_SWAPPED === $now->site_state && SwapStep::undoing( $now->cursor ) && 'undo' !== $phase ), $label . ': changing the site, or asking' );
+							$this->assertTrue( Job::SITE_CHANGING === $now->site_state || ( Job::SITE_SWAPPED === $now->site_state && SwapStep::undoing( $now->cursor ) && 'undo' !== $phase ) || ( Job::SITE_UNTOUCHED === $now->site_state && SwapStep::undoing( $now->cursor ) && Job::UNDONE !== $now->status ), $label . ': changing the site, asking, or put back and ending' );
+							break;
+						case 'elsewhere':
+							$this->assertFalse( Plugin::instance()->jobs()->manages( $now ), $label );
 							break;
 						case 'undo_ended': // C2.
 							$this->assertSame( Job::UNDONE, $now->status, $label );
 							break;
 						case 'changed': // C3.
-							$this->assertSame( 'undo', $phase, $label );
+							$this->assertTrue( ( 'undo' === $phase && 0 === $now->cancel_requested ) || array() !== $now->unreadable_columns, $label . ': at the first position with no request, or not readable' );
 							$this->assertSame( 0, $now->cancel_requested, $label . ': nothing written' );
 							break;
 						case 'abandoned':
@@ -200,6 +219,28 @@ final class UndoCancelSequencesTest extends JobTestCase {
 					}
 					if ( 'none' !== $event ) {
 						$this->assertTrue( $out['ran'] || 2 === $point, $label . ': the event was written before the first write' );
+					}
+					$note = false !== strpos( Plugin::instance()->job_presenter()->log_tail( $now ), 'The undo was cancelled before it changed the site' );
+					if ( $out['ran'] && 1 === $point && in_array( $event, array( 'giving_up', 'given_up', 'changing', 'reverted', 'ended' ), true ) ) {
+						$this->assertFalse( $note, $label . ': no cancel note when this cancel wrote nothing' );
+					}
+					if ( 'undo_given_up' === $out['outcome'] && ! $out['ran'] ) {
+						$this->assertTrue( $note, $label . ': the control: the note, when this cancel gave it up' );
+					}
+					// C6: a second cancel, as REST makes after "changed meanwhile".
+					$undoing = SwapStep::undoing( $now->cursor ) || Job::UNDONE === $now->status;
+					$this->autocommit(
+						static function () use ( $job ): void {
+							try {
+								Plugin::instance()->job_actions()->cancel( $job->id );
+							} catch ( \RuntimeException | \LogicException $e ) {
+								unset( $e ); // Refused, changed, or already finished: what counts is what the row is after it.
+							}
+						}
+					);
+					$after = Plugin::instance()->jobs()->find( $job->id );
+					if ( $undoing && Job::SITE_SWAPPED !== $now->site_state ) {
+						$this->assertNotSame( Job::CANCELLED, $after->status, $label . ': an undo that changed the site is never ended cancelled' );
 					}
 					$counts[ 'start ' . $start ]     = ( $counts[ 'start ' . $start ] ?? 0 ) + 1;
 					$counts[ 'outcome ' . $out['outcome'] ] = ( $counts[ 'outcome ' . $out['outcome'] ] ?? 0 ) + 1;
@@ -222,7 +263,7 @@ final class UndoCancelSequencesTest extends JobTestCase {
 				$this->assertGreaterThan( 0, $counts[ 'event ' . $event . ' at 2' ] ?? 0, $event . ' before the second write' );
 			}
 		}
-		foreach ( array( 'undo_given_up', 'undo_requested', 'undoing', 'undo_ended', 'changed', 'abandoned' ) as $outcome ) {
+		foreach ( array( 'undo_given_up', 'undo_requested', 'undoing', 'undo_ended', 'changed', 'abandoned', 'elsewhere' ) as $outcome ) {
 			$this->assertGreaterThan( 0, $counts[ 'outcome ' . $outcome ] ?? 0, 'the control: some cancel said ' . $outcome );
 		}
 	}
