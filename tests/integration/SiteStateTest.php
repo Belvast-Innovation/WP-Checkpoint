@@ -331,7 +331,7 @@ final class SiteStateTest extends WP_UnitTestCase {
 		$this->assertSame( Job::SITE_UNTOUCHED, $this->repo->find( $plain->id )->site_state );
 	}
 
-	public function test_the_commit_time_is_written_when_the_site_becomes_swapped_and_only_then(): void {
+	public function test_the_commit_time_is_written_when_a_swap_is_committed_and_cleared_when_the_site_is_untouched(): void {
 		$seen  = array();
 		$start = (int) floor( $this->now );
 		$this->register(
@@ -340,7 +340,7 @@ final class SiteStateTest extends WP_UnitTestCase {
 				new HoldingStep(
 					'swap',
 					function ( JobContext $ctx ) use ( &$seen ): StepResult {
-						$states = array( Job::SITE_CHANGING, Job::SITE_SWAPPED, Job::SITE_SWAPPED, Job::SITE_CHANGING, Job::SITE_UNTOUCHED, Job::SITE_CHANGING, Job::SITE_SWAPPED );
+						$states = array( Job::SITE_CHANGING, Job::SITE_SWAPPED, Job::SITE_SWAPPED, Job::SITE_CHANGING, Job::SITE_SWAPPED, Job::SITE_CHANGING, Job::SITE_UNTOUCHED, Job::SITE_CHANGING, Job::SITE_SWAPPED );
 						foreach ( $states as $n => $state ) {
 							$this->now += 10;
 							$ctx->checkpoint(
@@ -360,8 +360,8 @@ final class SiteStateTest extends WP_UnitTestCase {
 		$job = $this->repo->create( 'commit' );
 		$this->runner( true )->tick( $job->id, $this->now );
 		$first  = $start + 20;
-		$second = $start + 70;
-		$this->assertSame( array( 0, $first, $first, $first, $first, $first, $second ), $seen, 'written with the swapped state, kept while it stays or is put back, written anew by the next commit' );
+		$second = $start + 90;
+		$this->assertSame( array( 0, $first, $first, $first, $first, $first, 0, 0, $second ), $seen, 'written with the swapped state; kept while it stays, or is changed and swapped again without being put back; cleared once the site is untouched; written anew by the next commit' );
 		$this->assertSame( $second, $this->repo->find( $job->id )->committed_at, 'read back' );
 	}
 

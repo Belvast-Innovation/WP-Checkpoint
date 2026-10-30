@@ -5,11 +5,15 @@ namespace WPCheckpoint\Tests\Integration;
 use WPCheckpoint\Jobs\InvalidTransition;
 use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\JobRepository;
+use WPCheckpoint\Jobs\QuestionText;
+use WPCheckpoint\Jobs\RestoreJob;
 use WPCheckpoint\Jobs\Residue;
 use WPCheckpoint\Jobs\SwapStep;
 use WPCheckpoint\Jobs\Undo;
 use WPCheckpoint\Plugin;
 use WPCheckpoint\Restore\RestoreFiles;
+use WPCheckpoint\Restore\SelfCheck;
+use WPCheckpoint\Support\StoredNames;
 use WPCheckpoint\Support\Schema;
 use WPCheckpoint\Tests\Fixtures\Restore\SwapTestCase;
 
@@ -139,8 +143,13 @@ final class UndoTest extends SwapTestCase {
 		$this->assertTrue( $queued->cursor['out'] ?? false );
 		$this->assertSame( array( $job->id ), Plugin::instance()->jobs()->holding_site(), 'it holds the site from the claim on' );
 
-		$done = $this->cli_run( $queued );
+		$this->seams = array();
+		$done        = $this->cli_run( $queued );
 		$this->assertSame( Job::UNDONE, $done->status, (string) $done->last_error . ' ' . $done->progress_message );
+		$this->assertContains( 'carried_back', $this->seams, 'the plugin\'s own state was carried back' );
+		$this->assertNotContains( 'carry_asked', $this->seams, 'nothing asked when the carry back succeeds' );
+		$this->assertContains( 'undo_checked', $this->seams, 'the site was checked after the undo' );
+		$this->assertSame( 0, $done->committed_at, 'no swap of it stands any more' );
 		$this->assertSame( Job::SITE_UNTOUCHED, $done->site_state );
 		$this->assertSame( '', $done->last_error );
 		$this->assertStringContainsString( 'The restore was undone', $done->progress_message );
@@ -340,5 +349,162 @@ final class UndoTest extends SwapTestCase {
 		$this->assertGreaterThan( 0, $expired->work_expired_at );
 		$this->assertSame( Job::UNDONE, $expired->status, 'still undone' );
 		$this->assertSame( array(), $staged(), 'the restored copy was reclaimed' );
+	}
+
+	/**
+	 * The swap's crash seams recorded, and the carry back failing once (not for a moment) at its start.
+	 *
+	 * @param Job $job Job.
+	 */
+	private function carry_fails_once( Job $job ): void {
+		$thrown                 = false;
+		$this->swap_parts['at'] = function ( string $point ) use ( &$thrown ): void {
+			$this->seams[] = $point;
+			if ( 'carry_back_locked' === $point && ! $thrown ) {
+				$thrown = true;
+				throw new \RuntimeException( 'Table is marked as crashed and should be repaired' );
+			}
+		};
+		$this->retype( $job );
+		$this->seams = array();
+	}
+
+	/**
+	 * A row of this plugin's own state written on the restored site since the swap.
+	 */
+	private function write_state( string $value ): void {
+		global $wpdb;
+		$table = $wpdb->base_prefix . 'options';
+		$wpdb->query( $wpdb->prepare( "DELETE FROM `{$table}` WHERE option_name = %s", StoredNames::DELETE_DATA ) );
+		$wpdb->query( $wpdb->prepare( "INSERT INTO `{$table}` (option_name, option_value, autoload) VALUES (%s, %s, 'no')", StoredNames::DELETE_DATA, $value ) );
+		$wpdb->query( 'COMMIT' );
+	}
+
+	private function state(): ?string {
+		global $wpdb;
+		$wpdb->query( 'COMMIT' );
+		$value = $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM `{$wpdb->base_prefix}options` WHERE option_name = %s", StoredNames::DELETE_DATA ) );
+		return null === $value ? null : (string) $value;
+	}
+
+	/**
+	 * An undo whose carry back fails: claimed and run until it asks.
+	 *
+	 * @return array{0: Job, 1: array<string, mixed>, 2: array<string, mixed>, 3: int} The job as asked, the site before the restore, after it, and when the swap was committed.
+	 */
+	private function asked_about_the_carry(): array {
+		$before = $this->site();
+		$job    = $this->completed();
+		$after  = $this->site();
+		$at     = $job->committed_at;
+		$this->write_state( 'written since the restore' );
+		$this->carry_fails_once( $job );
+		$told = $this->actions()->undo( $job->id, '' );
+		$this->assertTrue( $this->actions()->undo( $job->id, $told['code'] )['ok'] );
+		$paused = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( Job::PAUSED, $paused->status, (string) $paused->last_error . ' ' . $paused->progress_message );
+		$this->assertTrue( $paused->awaiting_answer() );
+		$this->assertSame( SwapStep::CARRY_QUESTION, $paused->questions[0]['id'] ?? '' );
+		$this->assertSame( array( SwapStep::PUT_BACK, RestoreJob::KEEP ), $paused->questions[0]['choices'] ?? null, 'no default: both ways, nothing else' );
+		$this->assertGreaterThan( 0, (int) ( $paused->questions[0]['count'] ?? 0 ) );
+		$this->assertContains( 'carry_back_locked', $this->seams, 'the control: the carry back began' );
+		$this->assertNotContains( 'carried_back', $this->seams );
+		$this->assertNotContains( 'table_back', $this->seams, 'nothing was put back' );
+		$this->assertSame( Job::SITE_SWAPPED, $paused->site_state, 'the restored site is in place' );
+		$this->assertSame( $after, $this->site(), 'as it was, its maintenance file down while the question waits' );
+		$this->assertSame( array( $job->id ), Plugin::instance()->jobs()->holding_site(), 'it holds the site while it asks' );
+		$text = QuestionText::for_job( $paused, Plugin::instance()->directories(), 'strval' );
+		$this->assertStringContainsString( 'could not carry WP Checkpoint\'s own settings back', $text[0]['text'] );
+		$this->assertStringContainsString( 'Table is marked as crashed', $text[0]['text'], 'why' );
+		$this->assertContains( StoredNames::DELETE_DATA, $text[0]['listed'], 'the rows that would be lost are listed' );
+		return array( $paused, $before, $after, $at );
+	}
+
+	public function test_an_undo_whose_carry_back_fails_asks_and_put_back_drops_the_plugins_state_written_since(): void {
+		list( $job, $before ) = $this->asked_about_the_carry();
+		Plugin::instance()->job_actions()->answer( $job->id, array( SwapStep::CARRY_QUESTION => SwapStep::PUT_BACK ) );
+		$done = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( Job::UNDONE, $done->status, (string) $done->last_error );
+		$this->assertContains( 'table_back', $this->seams, 'put back' );
+		$this->assertSame( $before, $this->site(), 'the site as it was before the restore' );
+		$this->assertNotSame( 'written since the restore', $this->state(), 'the plugin\'s state written since was not carried back, as chosen' );
+		$this->assertStringContainsString( 'were not carried back, as chosen', Plugin::instance()->job_presenter()->log_tail( $done ) );
+	}
+
+	public function test_an_undo_whose_carry_back_fails_asks_and_keep_leaves_the_restored_site_and_a_later_undo_asks_anew(): void {
+		list( $job, , $after, $at ) = $this->asked_about_the_carry();
+		Plugin::instance()->job_actions()->answer( $job->id, array( SwapStep::CARRY_QUESTION => RestoreJob::KEEP ) );
+		$kept = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( Job::COMPLETED, $kept->status, (string) $kept->last_error );
+		$this->assertSame( Job::SITE_SWAPPED, $kept->site_state );
+		$this->assertSame( $at, $kept->committed_at, 'the time it was committed is unchanged' );
+		$this->assertContains( 'undo_given_up', $this->seams );
+		$this->assertSame( $after, $this->site(), 'the restored site stays, its maintenance file down' );
+		$this->assertSame( 'written since the restore', $this->state(), 'and its state' );
+		$this->assertSame( array(), Plugin::instance()->jobs()->holding_site() );
+
+		// A later undo asks its own question: the earlier answer is not taken for it.
+		$told = $this->actions()->undo( $job->id, '' );
+		$this->assertTrue( $told['ok'], $told['message'] );
+		$this->assertTrue( $this->actions()->undo( $job->id, $told['code'] )['ok'] );
+		$this->assertArrayNotHasKey( SwapStep::CARRY_QUESTION, (array) ( Plugin::instance()->jobs()->find( $job->id )->options['answers'] ?? array() ) );
+		$this->carry_fails_once( $job );
+		$again = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( Job::PAUSED, $again->status, 'asked again, not answered by the earlier "keep"' );
+		Plugin::instance()->job_actions()->answer( $job->id, array( SwapStep::CARRY_QUESTION => SwapStep::PUT_BACK ) );
+		$this->assertSame( Job::UNDONE, $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) )->status );
+	}
+
+	public function test_a_check_of_the_site_that_fails_after_the_undo_is_said_and_the_site_let_out_all_the_same(): void {
+		global $wpdb;
+		$before = $this->site();
+		$job    = $this->completed();
+		$this->retype( $job, array( 'verify' => static function (): string { return 'home'; } ) );
+		$told = $this->actions()->undo( $job->id, '' );
+		$this->assertTrue( $this->actions()->undo( $job->id, $told['code'] )['ok'] );
+		$this->seams = array();
+		$done        = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( Job::UNDONE, $done->status, 'undone all the same: no question, no reverse' );
+		$this->assertContains( 'undo_checked', $this->seams );
+		$this->assertStringContainsString( 'the site\'s check then failed: the home page did not answer as a WordPress site', $done->progress_message );
+		$this->assertStringContainsString( 'did not pass its check; it is let out all the same', Plugin::instance()->job_presenter()->log_tail( $done ) );
+		$this->assertSame( $before, $this->site(), 'the site as it was before the restore, its maintenance file down' );
+		$wpdb->query( 'COMMIT' );
+		$this->assertNull( $wpdb->get_var( $wpdb->prepare( 'SELECT option_value FROM ' . SelfCheck::table( $wpdb->base_prefix ) . ' WHERE option_name = %s', StoredNames::SELF_CHECK ) ), 'the self-check row is gone' );
+		$this->assertNotContains( 'table_back', array_slice( $this->seams, (int) array_search( 'undo_checked', $this->seams, true ) ), 'nothing swapped after the check' );
+	}
+
+	public function test_a_check_after_the_undo_that_cannot_tell_is_made_again_after_waits_then_said(): void {
+		$job = $this->completed();
+		$this->retype(
+			$job,
+			array(
+				'verify' => static function (): array {
+					return array(
+						'verdict' => 'unknown',
+						'check'   => 'home',
+						'why'     => 'none',
+						'status'  => 0,
+					);
+				},
+			)
+		);
+		$told = $this->actions()->undo( $job->id, '' );
+		$this->assertTrue( $this->actions()->undo( $job->id, $told['code'] )['ok'] );
+		$waits = array();
+		$done  = null;
+		for ( $i = 0; $i < 30; $i++ ) {
+			$result = $this->cli_tick( $job );
+			if ( \WPCheckpoint\Jobs\TickResult::WAITING === $result->status ) {
+				$waits[] = $result->retry_after;
+			}
+			$done = Plugin::instance()->jobs()->find( $job->id );
+			if ( ! in_array( $done->status, array( Job::QUEUED, Job::RUNNING ), true ) ) {
+				break;
+			}
+		}
+		$this->assertSame( Job::UNDONE, $done->status );
+		$this->assertSame( SwapStep::CHECK_WAITS, $waits, 'checked again after each wait' );
+		$this->assertStringContainsString( 'the site could not be checked: the home page did not answer', $done->progress_message );
 	}
 }

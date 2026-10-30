@@ -81,11 +81,15 @@ final class QuestionText {
 			if ( LinkedTargets::KIND === $kind && '' !== $work ) {
 				$listed = self::linked( $id, $work, $clean );
 			}
+			$carry = SwapStep::CARRY_KIND === $kind ? self::carry_file( $work ) : null;
+			if ( null !== $carry ) {
+				$listed = array_slice( $carry['names'], 0, self::MAX_LISTED );
+			}
 			$out[] = array(
 				'id'      => $id,
 				'kind'    => (string) ( $question['kind'] ?? '' ),
 				'choices' => array_map( 'strval', (array) ( $question['choices'] ?? array() ) ),
-				'text'    => (string) call_user_func( $clean, SwapStep::UNVERIFIED_KIND === $kind ? self::unverified( $job ) : self::describe( $id, $question, $findings, $shown ) ),
+				'text'    => (string) call_user_func( $clean, SwapStep::UNVERIFIED_KIND === $kind ? self::unverified( $job ) : ( SwapStep::CARRY_KIND === $kind ? self::carry( $question, $carry ) : self::describe( $id, $question, $findings, $shown ) ) ),
 				'listed'  => array_map(
 					static function ( string $p ) use ( $clean ): string {
 						return (string) call_user_func( $clean, $p );
@@ -109,6 +113,51 @@ final class QuestionText {
 			/* translators: %s: what the checks found */
 			__( 'The restored site could not be checked after the swap: %s. It is open to visitors now. Keep it, or undo the restore: undoing puts the site back as it was before the restore, and everything written on the site since the swap (orders, comments, edits, new users) is lost.', 'wp-checkpoint' ),
 			SwapStep::unchecked_text( isset( $job->cursor['unverified'] ) && is_array( $job->cursor['unverified'] ) ? $job->cursor['unverified'] : array() )
+		);
+	}
+
+	/**
+	 * What the swap wrote before it asked about a carry back that failed (RestoreFiles::CARRY_BACK): why, and the names
+	 * of the rows that would not be carried back (null when they could not be read); null when the file is not there
+	 * or cannot be read.
+	 *
+	 * @param string $work The job's work directory ('' when it is not this storage directory's).
+	 * @return array{reason: string, names: string[]|null}|null
+	 */
+	private static function carry_file( string $work ) {
+		if ( '' === $work || ! ExportPlan::exists( $work, RestoreFiles::CARRY_BACK ) ) {
+			return null;
+		}
+		try {
+			$read = ExportPlan::read( $work, RestoreFiles::CARRY_BACK );
+		} catch ( \RuntimeException $e ) {
+			return null;
+		}
+		return array(
+			'reason' => is_string( $read['reason'] ?? null ) ? $read['reason'] : '',
+			'names'  => is_array( $read['names'] ?? null ) ? array_values( array_filter( $read['names'], 'is_string' ) ) : null,
+		);
+	}
+
+	/**
+	 * The question of an undo whose carry back failed: what failed, what each answer does, and what is lost.
+	 *
+	 * @param array<string, mixed>                             $question The question.
+	 * @param array{reason: string, names: string[]|null}|null $carry    carry_file().
+	 * @return string
+	 */
+	private static function carry( array $question, $carry ): string {
+		$count = (int) ( $question['count'] ?? 0 );
+		$why   = null === $carry || '' === $carry['reason'] ? __( 'the job log says why', 'wp-checkpoint' ) : $carry['reason'];
+		$lost  = null === $carry || null === $carry['names']
+			? __( 'which of WP Checkpoint\'s own settings would be lost could not be read', 'wp-checkpoint' )
+			/* translators: %d: number of settings */
+			: sprintf( _n( '%d setting of WP Checkpoint written since the restore would be lost (listed below)', '%d settings of WP Checkpoint written since the restore would be lost (listed below)', $count, 'wp-checkpoint' ), $count );
+		return sprintf(
+			/* translators: 1: why the carry failed, 2: what would be lost */
+			__( 'The undo could not carry WP Checkpoint\'s own settings back into the site as it was before the restore (%1$s); nothing was put back yet, and the restored site is open to visitors as it was. Put the site back anyway: %2$s, among them may be where its backups are stored and how it recognises this site, so it may start a new storage directory and no longer list the backups it made. Or keep the restored site and give the undo up.', 'wp-checkpoint' ),
+			$why,
+			$lost
 		);
 	}
 

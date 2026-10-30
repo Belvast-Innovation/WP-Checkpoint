@@ -700,7 +700,8 @@ final class JobRepository {
 	/**
 	 * Queue a completed restore again to undo its swap (wp wpcheckpoint job undo, JobActions::undo()), in one statement
 	 * on the row as read: completed, the site swapped, committed_at and finished_at as read, no live lock, managed by
-	 * $token. The swap step starts again at $cursor (SwapStep::undo_cursor(): its reverse).
+	 * $token. The swap step starts again at $cursor (SwapStep::undo_cursor(): its reverse), without an answer given
+	 * to an earlier undo's question about its carry back (SwapStep::CARRY_QUESTION: each undo asks its own).
 	 *
 	 * @param Job                  $job     Job, as read.
 	 * @param array<string, mixed> $cursor  The swap step's cursor.
@@ -713,18 +714,25 @@ final class JobRepository {
 	public function reopen_for_undo( Job $job, array $cursor, string $message, string $token ): Job {
 		global $wpdb;
 		self::assert_cursor_has_no_secrets( $cursor );
-		$cursor_json = wp_json_encode( $cursor );
-		if ( false === $cursor_json ) {
-			throw new \RuntimeException( sprintf( 'Job %d: its cursor cannot be written.', $job->id ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+		$options = $job->options;
+		unset( $options['answers'][ SwapStep::CARRY_QUESTION ] );
+		if ( isset( $options['answers'] ) && array() === $options['answers'] ) {
+			unset( $options['answers'] );
+		}
+		$cursor_json  = wp_json_encode( $cursor );
+		$options_json = wp_json_encode( $options );
+		if ( false === $cursor_json || false === $options_json ) {
+			throw new \RuntimeException( sprintf( 'Job %d: its cursor or options cannot be written.', $job->id ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
 		}
 		$now = $this->now();
 		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- plugin table name from the prefix; the WHERE clause is the compare-and-set.
 		$affected = $wpdb->query(
 			$wpdb->prepare(
-				'UPDATE ' . self::table() . ' SET status = %s, step = %s, cursor_json = %s, progress_message = %s, last_error = \'\', failure_kind = \'\', finished_at = 0, takeovers = 0, takeover_mark = \'\', cron_deferrals = 0, cancel_requested = 0, updated_at = %d WHERE id = %d AND status = %s AND site_state = %d AND committed_at = %d AND committed_at > 0 AND finished_at = %d AND (lock_token = \'\' OR locked_until < %d) AND ' . Job::MANAGING_SQL . ' = %s',
+				'UPDATE ' . self::table() . ' SET status = %s, step = %s, cursor_json = %s, options_json = %s, progress_message = %s, last_error = \'\', failure_kind = \'\', finished_at = 0, takeovers = 0, takeover_mark = \'\', cron_deferrals = 0, cancel_requested = 0, updated_at = %d WHERE id = %d AND status = %s AND site_state = %d AND committed_at = %d AND committed_at > 0 AND finished_at = %d AND (lock_token = \'\' OR locked_until < %d) AND ' . Job::MANAGING_SQL . ' = %s',
 				Job::QUEUED,
 				SwapStep::ID,
 				$cursor_json,
+				$options_json,
 				self::fit_message( $message ),
 				$now,
 				$job->id,
@@ -1567,11 +1575,16 @@ final class JobRepository {
 		if ( null !== $site_state ) {
 			$data['site_state'] = (int) $site_state;
 			$formats[]          = '%d';
-			$committing         = Job::SITE_SWAPPED === (int) $site_state && Job::SITE_SWAPPED !== $job->site_state;
-			if ( $committing ) {
-				// When the swap was committed, in the statement that records it (an undo is measured from it). The row
-				// as read under this run's lock is what $job says, so a run that writes the state again does not move it.
+			if ( Job::SITE_SWAPPED === (int) $site_state && 0 === $job->committed_at ) {
+				// When the swap was committed, in the statement that records it (an undo is measured from it); only
+				// while none is recorded (the row as read under this run's lock is what $job says): a run that writes
+				// the state again, or an undo given up before anything was put back (the site swapped all along), does
+				// not move it.
 				$data['committed_at'] = $now;
+				$formats[]            = '%d';
+			} elseif ( Job::SITE_UNTOUCHED === (int) $site_state && 0 !== $job->committed_at ) {
+				// The swap is undone or rolled back: no swap of this job stands any more, and the next one is new.
+				$data['committed_at'] = 0;
 				$formats[]            = '%d';
 			}
 			if ( Job::SITE_SWAPPED === (int) $site_state ) {
@@ -1637,7 +1650,7 @@ final class JobRepository {
 		}
 		if ( null !== $site_state ) {
 			if ( isset( $data['committed_at'] ) ) {
-				$job->committed_at = $now;
+				$job->committed_at = (int) $data['committed_at'];
 			}
 			$job->site_state = (int) $site_state;
 			if ( Job::SITE_SWAPPED === $job->site_state ) {
