@@ -16,6 +16,7 @@ use WPCheckpoint\Restore\SelfCheck;
 use WPCheckpoint\Support\StoredNames;
 use WPCheckpoint\Support\Schema;
 use WPCheckpoint\Tests\Fixtures\Restore\SwapTestCase;
+use WPCheckpoint\Tests\Fixtures\Sandbox;
 
 /**
  * wp wpcheckpoint job undo (JobActions::undo(), Jobs\Undo): a completed restore is undone by its own reverse after a
@@ -798,6 +799,147 @@ final class UndoTest extends SwapTestCase {
 		$log = Plugin::instance()->job_presenter()->log_tail( $done );
 		$this->assertStringContainsString( 'cancelled before it changed the site', $log );
 		$this->assertStringNotContainsString( 'the swap was complete before it could act', $log, 'not said as a cancel that came too late' );
+	}
+
+	/**
+	 * Another connection, in a process of its own: it runs $sql in a transaction, says how many rows it changed, and
+	 * commits $seconds later. Returns once the statement ran (not committed yet).
+	 *
+	 * @param string $sql     Statement.
+	 * @param float  $seconds How long it holds the transaction open.
+	 * @return array{process: resource, dir: string, affected: int}
+	 */
+	private function hold_row( string $sql, float $seconds ): array {
+		$dir  = Sandbox::make( 'undo-race' );
+		$flag = $dir . '/ran';
+		file_put_contents(
+			$dir . '/child.php',
+			'<?php' . "\n" .
+			'$c = json_decode( file_get_contents( $argv[1] ), true );' . "\n" .
+			'$db = mysqli_init();' . "\n" .
+			'mysqli_real_connect( $db, $c["host"], $c["user"], $c["password"], $c["name"], $c["port"] );' . "\n" .
+			'mysqli_query( $db, "START TRANSACTION" );' . "\n" .
+			'mysqli_query( $db, $c["sql"] );' . "\n" .
+			'file_put_contents( $c["flag"], (string) mysqli_affected_rows( $db ) );' . "\n" .
+			'usleep( (int) $c["hold"] );' . "\n" .
+			'mysqli_query( $db, "COMMIT" );' . "\n"
+		);
+		$host = explode( ':', DB_HOST );
+		file_put_contents(
+			$dir . '/config.json',
+			(string) wp_json_encode(
+				array(
+					'host'     => $host[0],
+					'port'     => isset( $host[1] ) && is_numeric( $host[1] ) ? (int) $host[1] : 3306,
+					'user'     => DB_USER,
+					'password' => DB_PASSWORD,
+					'name'     => DB_NAME,
+					'sql'      => $sql,
+					'flag'     => $flag,
+					'hold'     => (int) ( $seconds * 1000000 ),
+				)
+			)
+		);
+		$process = proc_open( array( PHP_BINARY, $dir . '/child.php', $dir . '/config.json' ), array(), $pipes );
+		$this->assertIsResource( $process );
+		for ( $i = 0; $i < 100 && ! is_file( $flag ); $i++ ) {
+			usleep( 50000 );
+		}
+		clearstatcache( true, $flag );
+		return array(
+			'process'  => $process,
+			'dir'      => $dir,
+			'affected' => (int) @file_get_contents( $flag ), // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a test; 0 when it did not run.
+		);
+	}
+
+	/**
+	 * Wait for the other process and remove its sandbox.
+	 *
+	 * @param array{process: resource, dir: string, affected: int}|null $held hold_row().
+	 */
+	private function let_go( $held ): void {
+		if ( null === $held ) {
+			return;
+		}
+		if ( is_resource( $held['process'] ) ) {
+			proc_close( $held['process'] );
+		}
+		Sandbox::remove( $held['dir'] );
+	}
+
+	public function test_a_cancel_not_committed_yet_holds_the_undos_first_change_back_and_the_undo_then_gives_up(): void {
+		global $wpdb;
+		list( $job, $after ) = $this->claimed();
+		// The cancel request, as JobRepository::cancel_undo() writes it with a run holding the job: on the job's row, in
+		// another connection's transaction that commits two and a half seconds later.
+		$request = $wpdb->prepare( 'UPDATE ' . JobRepository::table() . ' SET cancel_requested = %d WHERE id = %d AND cancel_requested = 0', time(), $job->id );
+		$held    = null;
+		$from    = 0.0;
+		$waited  = -1.0;
+		$this->swap_parts['at'] = function ( string $point ) use ( &$held, &$from, &$waited, $request ): void {
+			$this->seams[] = $point;
+			if ( 'undo_starting' === $point && null === $held ) {
+				$held = $this->hold_row( $request, 2.5 ); // Right before the write that starts changing the site.
+				$from = microtime( true );
+			}
+			if ( 'undo_not_started' === $point && $waited < 0 ) {
+				$waited = microtime( true ) - $from;
+			}
+		};
+		$this->retype( $job );
+		$this->seams = array();
+		try {
+			$done = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
+			$this->assertNotNull( $held, 'the control: the other connection ran at the seam' );
+			$this->assertSame( 1, $held['affected'], 'the control: its request was written, not committed yet' );
+		} finally {
+			$this->let_go( $held );
+		}
+		$this->assertGreaterThanOrEqual( 1.0, $waited, 'the undo\'s write waited for the other transaction' );
+		$this->assertNotContains( 'undo_started', $this->seams, 'and then did not start changing the site' );
+		$this->assertSame( Job::COMPLETED, $done->status, 'given up' );
+		$this->assertSame( Job::SITE_SWAPPED, $done->site_state );
+		$this->assertSame( 0, $done->cancel_requested );
+		$this->assertSame( $after, $this->site(), 'the site untouched' );
+	}
+
+	public function test_an_undo_whose_first_change_is_not_committed_yet_holds_a_cancel_back_which_is_then_refused(): void {
+		global $wpdb;
+		list( $job ) = $this->claimed();
+		$cursor      = array( 'phase' => 'reverse' ) + SwapStep::undo_cursor( 1, $job->site_mark );
+		// The undo's first change, as JobRepository::save_progress() writes it: the site state changing, on the condition
+		// that no cancel is requested; in another connection's transaction that commits two and a half seconds later.
+		$start = $wpdb->prepare( 'UPDATE ' . JobRepository::table() . ' SET site_state = %d, cursor_json = %s WHERE id = %d AND cancel_requested = 0', Job::SITE_CHANGING, wp_json_encode( $cursor ), $job->id );
+		$held  = null;
+		$wpdb->query( 'COMMIT' ); // The claim, written by this connection: the other one must not wait on it.
+		try {
+			$held = $this->hold_row( $start, 2.5 );
+			$this->assertSame( 1, $held['affected'], 'the control: the undo\'s write ran, not committed yet' );
+			$from = microtime( true );
+			$out  = $this->autocommit(
+				static function () use ( $job ) {
+					return Plugin::instance()->job_actions()->cancel( $job->id );
+				}
+			);
+			$waited = microtime( true ) - $from;
+		} finally {
+			$this->let_go( $held );
+		}
+		$this->assertGreaterThanOrEqual( 1.0, $waited, 'the cancel waited for the other transaction' );
+		$this->assertSame( 'undoing', $out['reason'], 'and was refused once it committed' );
+		$now = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertSame( 0, $now->cancel_requested, 'nothing recorded' );
+		$this->assertSame( Job::SITE_CHANGING, $now->site_state );
+		$this->assertSame( Job::QUEUED, $now->status );
+		// Put the row back as it was claimed, for the tear-down (nothing of the site was changed).
+		$this->set(
+			$job->id,
+			array(
+				'site_state'  => Job::SITE_SWAPPED,
+				'cursor_json' => wp_json_encode( SwapStep::undo_cursor( 1, $job->site_mark ) ),
+			)
+		);
 	}
 
 	public function test_a_cancel_that_lands_right_before_the_undo_starts_changing_the_site_wins(): void {
