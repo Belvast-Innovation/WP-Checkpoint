@@ -13,6 +13,7 @@ use WPCheckpoint\Restore\SelfCheck;
 use WPCheckpoint\Rest\Controller;
 use WPCheckpoint\Rest\SelfCheckController;
 use WPCheckpoint\Support\StoredNames;
+use WPCheckpoint\Tests\Fixtures\StorageDirs;
 
 /**
  * The self-check route (Rest\SelfCheckController): registered only for a request to it while a restore that holds
@@ -35,6 +36,9 @@ final class SelfCheckRouteTest extends WP_UnitTestCase {
 	/** @var mixed What the request's REST route was before the test. */
 	private $route_before = null;
 
+	/** @var string[]|null The storage directories in wp-content when the test started (StorageDirs); null before set_up(). */
+	private $storage_before = null;
+
 	public static function wpSetUpBeforeClass( $factory ): void {
 		self::$subscriber = $factory->user->create( array( 'role' => 'subscriber' ) );
 		self::$admin      = $factory->user->create( array( 'role' => 'administrator' ) );
@@ -46,6 +50,10 @@ final class SelfCheckRouteTest extends WP_UnitTestCase {
 	public function set_up(): void {
 		parent::set_up();
 		$this->route_before = $GLOBALS['wp']->query_vars['rest_route'] ?? null;
+		// The jobs this test makes resolve the storage directory: one it makes (its stored state rolled back with the
+		// test's transaction) goes with it, whichever test ran before.
+		$this->storage_before = StorageDirs::listing();
+		Plugin::instance()->reset_directories();
 	}
 
 	public function tear_down(): void {
@@ -56,6 +64,10 @@ final class SelfCheckRouteTest extends WP_UnitTestCase {
 		}
 		$GLOBALS['wp_rest_server'] = null;
 		parent::tear_down();
+		Plugin::instance()->reset_directories();
+		if ( null !== $this->storage_before ) {
+			StorageDirs::remove_made_since( $this->storage_before );
+		}
 	}
 
 	/**

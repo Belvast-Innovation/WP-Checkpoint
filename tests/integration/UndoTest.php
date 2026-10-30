@@ -626,4 +626,59 @@ final class UndoTest extends SwapTestCase {
 		}
 		$this->fail( 'the control: the plan has the options table' );
 	}
+
+	public function test_an_undo_taken_up_after_a_table_was_put_back_does_not_ask_when_its_carry_back_fails(): void {
+		global $wpdb;
+		$before = $this->site();
+		$job    = $this->completed();
+		$this->retype( $job );
+		$told = $this->actions()->undo( $job->id, '' );
+		$this->assertTrue( $this->actions()->undo( $job->id, $told['code'] )['ok'] );
+		$old = $this->old_options( $job );
+		$this->killed_at( Plugin::instance()->jobs()->find( $job->id ), 'table_back', 1 );
+		$wpdb->query( 'COMMIT' );
+		$this->assertNotEmpty( $wpdb->get_col( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $old ) ) ), 'the control: a table was put back, the options table not yet (its carry back is tried again)' );
+		$this->break_old_options( $job );
+		$this->seams = array();
+		$done        = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( Job::UNDONE, $done->status, 'not asked: part of the site was put back already' );
+		$this->assertContains( 'carry_back_locked', $this->seams, 'the control: the carry back was tried' );
+		$this->assertNotContains( 'carry_asked', $this->seams );
+		$this->assertStringContainsString( 'the site is put back all the same', Plugin::instance()->job_presenter()->log_tail( $done ) );
+		$this->mend_old_options_live();
+		$this->assertSame( $before, $this->site() );
+	}
+
+	/**
+	 * The options table the undo put back, its id made AUTO_INCREMENT again (break_old_options() made it not).
+	 */
+	private function mend_old_options_live(): void {
+		global $wpdb;
+		$this->assertNotFalse( $wpdb->query( "ALTER TABLE `{$wpdb->base_prefix}options` MODIFY option_id bigint(20) unsigned NOT NULL AUTO_INCREMENT" ), $wpdb->last_error );
+	}
+
+	public function test_an_undo_taken_up_after_its_check_was_recorded_does_not_check_again(): void {
+		$job    = $this->completed();
+		$checks = 0;
+		$this->retype(
+			$job,
+			array(
+				'verify' => static function () use ( &$checks ): bool {
+					++$checks;
+					return true;
+				},
+			)
+		);
+		$this->swap_parts['verify'] = static function (): bool {
+			return true;
+		};
+		$this->trace = $this->sandbox . '/trace';
+		$told        = $this->actions()->undo( $job->id, '' );
+		$this->assertTrue( $this->actions()->undo( $job->id, $told['code'] )['ok'] );
+		$this->killed_at( Plugin::instance()->jobs()->find( $job->id ), 'undo_verdict_recorded' );
+		$this->assertContains( 'undo_checked', array_filter( explode( "\n", (string) file_get_contents( $this->trace ) ) ), 'the control: the killed run checked' );
+		$done = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( Job::UNDONE, $done->status );
+		$this->assertSame( 0, $checks, 'the recorded verdict stands: not checked again' );
+	}
 }
