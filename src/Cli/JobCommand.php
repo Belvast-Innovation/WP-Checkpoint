@@ -199,8 +199,8 @@ final class JobCommand {
 	 *
 	 * Everything written on the site since the restore is dropped. Without --confirm nothing is changed: it says what
 	 * would be dropped and gives the confirmation code. A restore can be undone for 7 days after it was made, while no
-	 * other job holds the site and no restore was made after it. The restored site is kept for 7 days after the undo
-	 * (wp wpcheckpoint job redo swaps it back in).
+	 * other job holds the site and no restore was made after it. The restored site is kept for 7 days after the undo,
+	 * then removed.
 	 *
 	 * ## OPTIONS
 	 *
@@ -221,57 +221,23 @@ final class JobCommand {
 	public function undo( array $args, array $assoc_args ): void {
 		Unexpected::guard(
 			function () use ( $args, $assoc_args ): void {
-				$this->reopen_body( false, $args, $assoc_args );
+				$this->undo_body( $args, $assoc_args );
 			},
 			array( $this->presenter, 'clean' )
 		);
 	}
 
 	/**
-	 * Swap the restored copy of an undone restore back in.
-	 *
-	 * Everything written on the site since the undo is dropped. Without --confirm nothing is changed: it says what
-	 * would be dropped and gives the confirmation code. Possible for 7 days after the undo (then the restored copy is
-	 * removed), while no other job holds the site and no restore was made after it. The site is checked again before
-	 * the swap, as in any restore.
-	 *
-	 * ## OPTIONS
-	 *
-	 * <id>
-	 * : Job id of the restore.
-	 *
-	 * [--confirm=<code>]
-	 * : The confirmation code the command gives without it.
-	 *
-	 * ## EXIT CODES
-	 *
-	 * As "job run" once it started (0 when the swap is made); 1 when it was refused or not confirmed.
+	 * The body of undo(): what would be dropped and the code, or the job claimed and run to its end.
 	 *
 	 * @param string[]             $args       Positional arguments.
 	 * @param array<string, mixed> $assoc_args Options.
 	 * @return void
 	 */
-	public function redo( array $args, array $assoc_args ): void {
-		Unexpected::guard(
-			function () use ( $args, $assoc_args ): void {
-				$this->reopen_body( true, $args, $assoc_args );
-			},
-			array( $this->presenter, 'clean' )
-		);
-	}
-
-	/**
-	 * The body of undo() and redo(): what would be dropped and the code, or the job claimed and run to its end.
-	 *
-	 * @param bool                 $redo       Whether it is a redo.
-	 * @param string[]             $args       Positional arguments.
-	 * @param array<string, mixed> $assoc_args Options.
-	 * @return void
-	 */
-	private function reopen_body( bool $redo, array $args, array $assoc_args ): void {
+	private function undo_body( array $args, array $assoc_args ): void {
 		$id = (int) $args[0];
 		try {
-			$outcome = $redo ? $this->actions->redo( $id, (string) ( $assoc_args['confirm'] ?? '' ) ) : $this->actions->undo( $id, (string) ( $assoc_args['confirm'] ?? '' ) );
+			$outcome = $this->actions->undo( $id, (string) ( $assoc_args['confirm'] ?? '' ) );
 		} catch ( JobsUnavailable $e ) {
 			WP_CLI::error( $this->presenter->clean( $e->getMessage() ) );
 		}

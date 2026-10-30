@@ -6,7 +6,6 @@ use WPCheckpoint\Jobs\InvalidTransition;
 use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\JobRepository;
 use WPCheckpoint\Jobs\Residue;
-use WPCheckpoint\Jobs\SwapCheckStep;
 use WPCheckpoint\Jobs\SwapStep;
 use WPCheckpoint\Jobs\Undo;
 use WPCheckpoint\Plugin;
@@ -15,10 +14,10 @@ use WPCheckpoint\Support\Schema;
 use WPCheckpoint\Tests\Fixtures\Restore\SwapTestCase;
 
 /**
- * wp wpcheckpoint job undo and job redo (JobActions::undo(), redo(), Jobs\Undo): a completed restore is undone by its
- * own reverse after a confirmation code that says what is dropped, and ends undone (not failed: no Retry); its
- * restored copy is swapped back in by redo, with a confirmation of its own, for 7 days. Every refusal has its control:
- * the same case without the obstacle goes through.
+ * wp wpcheckpoint job undo (JobActions::undo(), Jobs\Undo): a completed restore is undone by its own reverse after a
+ * confirmation code that says what is dropped, and ends undone (not failed: no Retry anywhere); its restored copy is
+ * kept for 7 days after the undo, then reclaimed. Every refusal has its control: the same case without the obstacle
+ * goes through.
  */
 final class UndoTest extends SwapTestCase {
 
@@ -121,7 +120,7 @@ final class UndoTest extends SwapTestCase {
 		$this->assertMatchesRegularExpression( '/\A[0-9a-f]{16}\z/', $told['code'] );
 		$this->assertStringContainsString( '--confirm=' . $told['code'], $told['message'] );
 		$this->assertStringContainsString( 'Everything written on the site since', implode( "\n", $told['lines'] ) );
-		$this->assertStringContainsString( 'job redo', implode( "\n", $told['lines'] ), 'says that it can be swapped back in' );
+		$this->assertStringContainsString( 'kept for 7 days after the undo', implode( "\n", $told['lines'] ), 'says how long the restored site is kept' );
 		$this->assertSame( $after, $this->site(), 'nothing changed' );
 		$this->assertSame( Job::COMPLETED, Plugin::instance()->jobs()->find( $job->id )->status );
 
@@ -146,13 +145,12 @@ final class UndoTest extends SwapTestCase {
 		$this->assertSame( '', $done->last_error );
 		$this->assertStringContainsString( 'The restore was undone', $done->progress_message );
 		$this->assertFalse( $done->retry_useful() );
-		$this->assertTrue( $done->can_redo() );
+		$this->assertTrue( $done->is_terminal() );
 		$this->assertSame( $before, $this->site(), 'the site as it was before the restore' );
 		$this->assertSame( array(), Plugin::instance()->jobs()->holding_site() );
-		$this->assertSame( SwapCheckStep::ID, $done->cursor[ JobRepository::RETRY_FROM_KEY ] ?? '', 'a redo starts at the final check' );
 	}
 
-	public function test_an_undone_restore_is_not_retried_anywhere_and_says_how_to_redo_it(): void {
+	public function test_an_undone_restore_is_not_retried_anywhere_and_says_how_long_its_copy_is_kept(): void {
 		$job  = $this->completed();
 		$done = $this->undone( $job );
 		$this->assertSame( Job::UNDONE, $done->status );
@@ -160,44 +158,16 @@ final class UndoTest extends SwapTestCase {
 			Plugin::instance()->job_actions()->retry( $job->id );
 			$this->fail( 'retried' );
 		} catch ( InvalidTransition $e ) {
-			$this->assertStringContainsString( 'only a redo', $e->getMessage() );
+			$this->assertStringContainsString( 'was undone', $e->getMessage() );
 		}
 		$this->assertSame( Job::UNDONE, Plugin::instance()->jobs()->find( $job->id )->status );
 		$response = $this->rest( 'POST', 'jobs/' . $job->id . '/retry' );
 		$this->assertSame( 409, $response->get_status() );
-		$this->assertStringContainsString( 'wp wpcheckpoint job redo ' . $job->id, (string) ( $response->get_data()['message'] ?? '' ) );
+		$this->assertStringContainsString( 'Swapping the restored copy back in comes in a later version; the restored copy is kept until 7 days after the undo.', (string) ( $response->get_data()['message'] ?? '' ) );
 		$this->assertSame( Job::UNDONE, Plugin::instance()->jobs()->find( $job->id )->status, 'still undone' );
 	}
 
-	public function test_the_undone_restore_is_swapped_back_in_by_redo_once_confirmed(): void {
-		$before = $this->site();
-		$job    = $this->completed();
-		$done   = $this->undone( $job );
-		$this->assertSame( $before, $this->site() );
-
-		$told = $this->actions()->redo( $job->id, '' );
-		$this->assertTrue( $told['ok'], $told['message'] );
-		$this->assertFalse( $told['confirmed'] );
-		$this->assertStringContainsString( 'job redo ' . $job->id . ' --confirm=' . $told['code'], $told['message'] );
-		$this->assertStringContainsString( 'kept for 7 days after the undo', implode( "\n", $told['lines'] ) );
-		$this->assertNotSame( $this->actions()->undo( $job->id, '' )['code'], $told['code'] );
-		$this->assertSame( $before, $this->site(), 'nothing changed' );
-
-		$this->assertFalse( $this->actions()->redo( $job->id, str_repeat( 'a', 16 ) )['ok'], 'a wrong code' );
-		$claimed = $this->actions()->redo( $job->id, $told['code'] );
-		$this->assertTrue( $claimed['ok'], $claimed['message'] );
-		$queued = Plugin::instance()->jobs()->find( $job->id );
-		$this->assertSame( Job::QUEUED, $queued->status );
-		$this->assertSame( SwapCheckStep::ID, $queued->step );
-		$this->assertSame( array(), $queued->cursor );
-
-		$again = $this->cli_run( $queued );
-		$this->assertSame( Job::COMPLETED, $again->status, (string) $again->last_error );
-		$this->assertRestored( $before );
-		$this->assertGreaterThanOrEqual( $done->committed_at, $again->committed_at, 'committed again' );
-	}
-
-	public function test_undo_and_redo_are_refused_with_the_reason_while_another_job_is_in_the_way(): void {
+	public function test_undo_is_refused_with_the_reason_while_another_job_is_in_the_way(): void {
 		$job = $this->completed();
 		$ok  = function () use ( $job ): array {
 			return $this->actions()->undo( $job->id, '' );
@@ -335,25 +305,17 @@ final class UndoTest extends SwapTestCase {
 		$this->assertSame( $before, $this->site(), 'put back after the cleanup' );
 	}
 
-	public function test_redo_is_possible_for_7_days_after_the_undo_and_the_restored_copy_is_reclaimed_after(): void {
+	public function test_the_restored_copy_is_kept_for_7_days_after_the_undo_and_reclaimed_after(): void {
 		global $wpdb;
-		$job  = $this->completed();
-		$done = $this->undone( $job );
-		$jobs = Plugin::instance()->jobs();
-		$ok   = function () use ( $job ): array {
-			return $this->actions()->redo( $job->id, '' );
+		$job    = $this->completed();
+		$done   = $this->undone( $job );
+		$jobs   = Plugin::instance()->jobs();
+		$staged = function () use ( $wpdb, $job ): array {
+			return (array) $wpdb->get_col( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( \WPCheckpoint\Jobs\TempTables::job_prefix( $job->storage_token, $job->id ) ) . '%' ) );
 		};
-		$as_restore = function ( callable $read ) use ( $job ) {
-			$this->set( $job->id, array( 'type' => \WPCheckpoint\Jobs\RestoreJob::ID ) ); // What the query looks for.
-			try {
-				return $read();
-			} finally {
-				$this->set( $job->id, array( 'type' => $this->type ) );
-			}
-		};
-		$this->assertTrue( $as_restore( array( JobRepository::class, 'restore_in_progress' ) ), 'an undone restore with its copy kept holds automatic updates of the plugin back, as a failed one does' );
+		$this->assertNotSame( array(), $staged(), 'the control: the restored copy is under its staging names' );
 
-		// A cleanup a minute short of 7 days after the undo leaves the copy.
+		// A cleanup a minute short of 7 days after the undo leaves it.
 		$late = new JobRepository(
 			Plugin::instance()->directories(),
 			null,
@@ -362,19 +324,21 @@ final class UndoTest extends SwapTestCase {
 			}
 		);
 		$this->assertSame( 0, $late->expire_work() );
-		$this->assertTrue( $ok()['ok'], 'the control: within 7 days' );
-		$staged = (array) $wpdb->get_col( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( \WPCheckpoint\Jobs\TempTables::job_prefix( $job->storage_token, $job->id ) ) . '%' ) );
-		$this->assertNotSame( array(), $staged, 'the control: the restored copy is under its staging names' );
+		$this->assertSame( 0, $jobs->find( $job->id )->work_expired_at );
+		$this->assertNotSame( array(), $staged(), 'kept' );
 
-		// The undo more than 7 days ago: refused before the cleanup ran, and the cleanup reclaims the copy.
-		$this->set( $job->id, array( 'finished_at' => time() - JobRepository::WORK_RETENTION_SECONDS - 60 ) );
-		$this->assertStringContainsString( 'can no longer be swapped back in', $ok()['message'] );
-		$this->assertGreaterThanOrEqual( 1, Plugin::instance()->jobs()->expire_work() );
+		// 7 days after the undo the cleanup reclaims it; the job stays undone.
+		$after = new JobRepository(
+			Plugin::instance()->directories(),
+			null,
+			static function () use ( $done ): int {
+				return $done->finished_at + JobRepository::WORK_RETENTION_SECONDS + 60;
+			}
+		);
+		$this->assertGreaterThanOrEqual( 1, $after->expire_work() );
 		$expired = $jobs->find( $job->id );
 		$this->assertGreaterThan( 0, $expired->work_expired_at );
 		$this->assertSame( Job::UNDONE, $expired->status, 'still undone' );
-		$this->assertSame( array(), (array) $wpdb->get_col( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( \WPCheckpoint\Jobs\TempTables::job_prefix( $job->storage_token, $job->id ) ) . '%' ) ), 'the restored copy was reclaimed' );
-		$this->assertStringContainsString( 'can no longer be swapped back in', $ok()['message'] );
-		$this->assertFalse( $as_restore( array( JobRepository::class, 'restore_in_progress' ) ), 'once its copy is reclaimed, no longer' );
+		$this->assertSame( array(), $staged(), 'the restored copy was reclaimed' );
 	}
 }

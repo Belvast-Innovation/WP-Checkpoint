@@ -1095,9 +1095,8 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	}
 
 	/**
-	 * What ends a job whose swap was rolled back: cancelled when that was asked for; undone (Undone, a redo starting
-	 * at the final check) when it was undone after the restored site was let out; otherwise failed with a retry
-	 * starting at the final check.
+	 * What ends a job whose swap was rolled back: cancelled when that was asked for; undone (Undone) when it was undone
+	 * after the restored site was let out; otherwise failed with a retry starting at the final check.
 	 *
 	 * @param JobContext $context Context.
 	 * @param string     $reason  Why it was rolled back.
@@ -1111,12 +1110,12 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		}
 		$text = self::REASONS[ $reason ] ?? $reason;
 		if ( $undone ) {
-			// What was written on the restored site since it was let out went with it: a redo says that again and asks
-			// for its own confirmation (wp wpcheckpoint job redo), and nothing offers it as a retry.
+			// What was written on the restored site since it was let out went with it, so nothing offers it as a retry:
+			// a retry from the final check would also fail (the copy is no longer what the import left).
 			// The message stays short (the job's progress message holds it); the reason is in the log (reverse()).
 			$context->logger()->info( 'The restore was undone', array( 'reason' => $text ) );
 			/* translators: %d: days the restored copy is kept */
-			return new Undone( sprintf( __( 'The restore was undone: the site is as it was before it. The restored copy is kept for %d days (wp wpcheckpoint job redo).', 'wp-checkpoint' ), (int) ( JobRepository::WORK_RETENTION_SECONDS / 86400 ) ), SwapCheckStep::ID );
+			return new Undone( sprintf( __( 'The restore was undone: the site is as it was before it. The restored copy is kept for %d days after the undo.', 'wp-checkpoint' ), (int) ( JobRepository::WORK_RETENTION_SECONDS / 86400 ) ) );
 		}
 		if ( self::REVERSED === $reason || self::UNDONE === $reason ) {
 			// The restored copy is kept under its temporary names, next to the site, for a retry (the engine reclaims

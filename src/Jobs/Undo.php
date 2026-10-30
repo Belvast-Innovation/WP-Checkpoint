@@ -20,26 +20,22 @@ use WPCheckpoint\Support\Paths;
 defined( 'ABSPATH' ) || exit;
 
 /**
- * The checks of wp wpcheckpoint job undo and job redo, read once before the confirmation code is given and again under
- * the start lock right before the job is claimed (JobActions::undo(), JobActions::redo()): every refusal says why.
+ * The checks of wp wpcheckpoint job undo, read once before the confirmation code is given and again under the start
+ * lock right before the job is claimed (JobActions::undo()): every refusal says why.
  *
- * Undo: a restore, completed, its swap committed (site_state SITE_SWAPPED, committed_at recorded) no more than
- * WINDOW_SECONDS ago; redo: a restore undone (Job::UNDONE) no more than JobRepository::WORK_RETENTION_SECONDS ago and
- * its work not reclaimed. Both: managed by this installation; no job holds the site and no other restore is under way;
- * no job in the jobs table committed a swap after this one, whichever installation manages it (a restore of another
- * installation sharing this database changes the same tables); its work directory here, its swap plan whole and
- * written for this WordPress directory and table prefix; and every table and directory of the plan where the swap
- * left it (undo) or where the undo left it (redo), by positive evidence: what cannot be read refuses.
+ * A restore, completed, its swap committed (site_state SITE_SWAPPED, committed_at recorded) no more than
+ * WINDOW_SECONDS ago, with its maintenance mark recorded; managed by this installation; no job holds the site and no
+ * other restore is under way; no job in the jobs table committed a swap after this one, whichever installation manages
+ * it (a restore of another installation sharing this database changes the same tables); its work directory here, its
+ * swap plan whole and written for this WordPress directory and table prefix; and every table and directory of the plan
+ * where the swap left it, by positive evidence: what cannot be read refuses.
  *
- * The confirmation code binds the action, the job, its storage token, its plan (the attempt and every entry) and the
- * time the swap was committed (undo) or undone (redo): any of them changed, the code no longer holds. What would be
- * dropped is counted from the live tables of the plan by kind (comments, content, orders, uploads, users) since that
- * time; a count that cannot be read is null ("could not be counted"), never 0.
+ * The confirmation code binds the job, its storage token, its plan (the attempt and every entry) and the time the swap
+ * was committed: any of them changed, the code no longer holds. What would be dropped is counted from the live tables
+ * of the plan by kind (comments, content, orders, uploads, users) since that time; a count that cannot be read is
+ * null ("could not be counted"), never 0.
  */
 final class Undo {
-
-	const UNDO = 'undo';
-	const REDO = 'redo';
 
 	/**
 	 * How long after its swap was committed a restore may be undone (the same 7 days as a failed job's work).
@@ -121,13 +117,12 @@ final class Undo {
 	}
 
 	/**
-	 * Whether the job may be undone (UNDO) or swapped back in (REDO), and if so its code and what would be dropped.
+	 * Whether the job may be undone, and if so its code and what would be dropped.
 	 *
-	 * @param string $action UNDO or REDO.
-	 * @param int    $id     Job id.
+	 * @param int $id Job id.
 	 * @return array{ok: bool, why: string, job: Job|null, attempt: int, code: string, since: int, lost: array<string, int|null>}
 	 */
-	public function assess( string $action, int $id ): array {
+	public function assess( int $id ): array {
 		$out = array(
 			'ok'      => false,
 			'why'     => '',
@@ -147,7 +142,7 @@ final class Undo {
 			return $out;
 		}
 		$out['job'] = $job;
-		$why        = self::REDO === $action ? $this->not_redoable( $job ) : $this->not_undoable( $job );
+		$why        = $this->not_undoable( $job );
 		if ( '' === $why ) {
 			$why = $this->not_alone( $job );
 		}
@@ -167,16 +162,16 @@ final class Undo {
 				$out['why'] = $plan;
 				return $out;
 			}
-			$why = $this->not_in_place( $action, $plan['entries'], $db );
+			$why = $this->not_in_place( $plan['entries'], $db );
 			if ( '' !== $why ) {
 				$out['why'] = $why;
 				return $out;
 			}
-			$since          = self::REDO === $action ? $job->finished_at : $job->committed_at;
+			$since          = $job->committed_at;
 			$out['ok']      = true;
 			$out['attempt'] = $plan['attempt'];
 			$out['since']   = $since;
-			$out['code']    = self::code( $action, $job, $plan['attempt'], $plan['entries'], $since );
+			$out['code']    = self::code( $job, $plan['attempt'], $plan['entries'], $since );
 			$out['lost']    = $this->lost( $plan['entries'], $since, $db );
 			return $out;
 		} finally {
@@ -187,22 +182,21 @@ final class Undo {
 	}
 
 	/**
-	 * The confirmation code: the action, the job, its storage token, the plan's attempt and entries, and the time the
-	 * code is measured from (committed or undone).
+	 * The confirmation code: the job, its storage token, the plan's attempt and entries, and the time the swap was
+	 * committed.
 	 *
-	 * @param string                                                                                              $action  UNDO or REDO.
 	 * @param Job                                                                                                 $job     Job.
 	 * @param int                                                                                                 $attempt The plan's attempt.
 	 * @param array<int, array{seq: int, kind: string, live: string, stage: string, old: string, had_live: bool}> $entries The plan's entries.
-	 * @param int                                                                                                 $since   Committed or undone at.
+	 * @param int                                                                                                 $since   Committed at.
 	 * @return string
 	 */
-	public static function code( string $action, Job $job, int $attempt, array $entries, int $since ): string {
+	public static function code( Job $job, int $attempt, array $entries, int $since ): string {
 		$plan = array();
 		foreach ( $entries as $entry ) {
 			$plan[] = implode( "\0", array( (string) $entry['seq'], $entry['kind'], $entry['live'], $entry['stage'], $entry['old'], $entry['had_live'] ? '1' : '0' ) );
 		}
-		return substr( hash( 'sha256', implode( "\n", array( 'wpcheckpoint-' . $action, (string) $job->id, $job->storage_token, (string) $attempt, (string) $since, implode( "\n", $plan ) ) ) ), 0, 16 );
+		return substr( hash( 'sha256', implode( "\n", array( 'wpcheckpoint-undo', (string) $job->id, $job->storage_token, (string) $attempt, (string) $since, implode( "\n", $plan ) ) ) ), 0, 16 );
 	}
 
 	/**
@@ -217,7 +211,7 @@ final class Undo {
 		}
 		if ( Job::UNDONE === $job->status ) {
 			/* translators: %d: job id */
-			return sprintf( __( 'Restore job %1$d was undone already. To swap the restored copy back in: wp wpcheckpoint job redo %1$d', 'wp-checkpoint' ), $job->id );
+			return sprintf( __( 'Restore job %d was undone already.', 'wp-checkpoint' ), $job->id );
 		}
 		if ( Job::COMPLETED !== $job->status || Job::SITE_SWAPPED !== $job->site_state ) {
 			/* translators: 1: job id, 2: status */
@@ -239,24 +233,6 @@ final class Undo {
 	}
 
 	/**
-	 * Why an undone job cannot be swapped back in by its own state ('' when it can, so far).
-	 *
-	 * @param Job $job Job.
-	 * @return string
-	 */
-	private function not_redoable( Job $job ): string {
-		if ( ! in_array( $job->type, $this->restores, true ) || Job::UNDONE !== $job->status || Job::SITE_UNTOUCHED !== $job->site_state ) {
-			/* translators: 1: job id, 2: status */
-			return sprintf( __( 'Job %1$d is %2$s: only a restore that was undone can be swapped back in.', 'wp-checkpoint' ), $job->id, $job->status );
-		}
-		if ( $job->work_expired_at > 0 || $job->finished_at <= 0 || $this->now() > $job->finished_at + JobRepository::WORK_RETENTION_SECONDS ) {
-			/* translators: 1: job id, 2: days */
-			return sprintf( __( 'Restore job %1$d can no longer be swapped back in: its restored copy is kept for %2$d days after the undo, and that time is over (the copy is removed, or about to be). Restore the backup again instead.', 'wp-checkpoint' ), $job->id, (int) ( JobRepository::WORK_RETENTION_SECONDS / 86400 ) );
-		}
-		return '';
-	}
-
-	/**
 	 * Why the job is not the one to act on now: managed elsewhere, another job holds the site or is a restore under
 	 * way, a later swap, its work elsewhere ('' when none).
 	 *
@@ -266,7 +242,7 @@ final class Undo {
 	private function not_alone( Job $job ): string {
 		if ( ! $this->repository->manages( $job ) ) {
 			/* translators: %d: job id */
-			return sprintf( __( 'Restore job %d is managed by another installation of WP Checkpoint: it is undone or swapped back in only from there.', 'wp-checkpoint' ), $job->id );
+			return sprintf( __( 'Restore job %d is managed by another installation of WP Checkpoint: it is undone only from there.', 'wp-checkpoint' ), $job->id );
 		}
 		try {
 			$holding = array_values( array_diff( $this->repository->holding_site(), array( $job->id ) ) );
@@ -277,12 +253,12 @@ final class Undo {
 		}
 		if ( array() !== $holding ) {
 			/* translators: %d: job id */
-			return sprintf( __( 'Job %d holds the site: nothing is undone or swapped back in until it has ended (wp wpcheckpoint job status shows where it is).', 'wp-checkpoint' ), $holding[0] );
+			return sprintf( __( 'Job %d holds the site: nothing is undone until it has ended (wp wpcheckpoint job status shows where it is).', 'wp-checkpoint' ), $holding[0] );
 		}
 		foreach ( $active as $other ) {
 			if ( $other->id !== $job->id && in_array( $other->type, $this->restores, true ) ) {
 				/* translators: %d: job id */
-				return sprintf( __( 'Restore job %d is under way: nothing is undone or swapped back in until it has ended.', 'wp-checkpoint' ), $other->id );
+				return sprintf( __( 'Restore job %d is under way: nothing is undone until it has ended.', 'wp-checkpoint' ), $other->id );
 			}
 		}
 		if ( null !== $later ) {
@@ -343,14 +319,13 @@ final class Undo {
 	}
 
 	/**
-	 * Why a table or directory of the plan is not where the swap (undo) or the undo (redo) left it ('' when all are).
+	 * Why a table or directory of the plan is not where the swap left it ('' when all are).
 	 *
-	 * @param string                                                                                              $action  UNDO or REDO.
 	 * @param array<int, array{seq: int, kind: string, live: string, stage: string, old: string, had_live: bool}> $entries Entries.
 	 * @param Queries                                                                                             $db      Connection.
 	 * @return string
 	 */
-	private function not_in_place( string $action, array $entries, Queries $db ): string {
+	private function not_in_place( array $entries, Queries $db ): string {
 		$tables = array();
 		$dirs   = array();
 		foreach ( $entries as $entry ) {
@@ -372,9 +347,8 @@ final class Undo {
 		} catch ( \RuntimeException $e ) {
 			return __( 'Which of the restore\'s tables are there cannot be read now; nothing was changed. Try again.', 'wp-checkpoint' );
 		}
-		$want = self::REDO === $action ? SwapRules::BEFORE : SwapRules::AFTER;
 		foreach ( $tables as $entry ) {
-			if ( SwapRules::table_state( $entry, $there ) !== $want ) {
+			if ( SwapRules::table_state( $entry, $there ) !== SwapRules::AFTER ) {
 				/* translators: %s: table name */
 				return sprintf( __( 'The table %s is not where the restore left it, so the site cannot be put back by its plan: nothing was changed.', 'wp-checkpoint' ), $entry['live'] );
 			}
@@ -387,9 +361,7 @@ final class Undo {
 				/* translators: %s: directory */
 				return sprintf( __( 'Whether %s is where the restore left it cannot be told now; nothing was changed. Try again.', 'wp-checkpoint' ), $entry['live'] );
 			}
-			$after  = $l && ! $s && $o === $entry['had_live'];
-			$before = $s && ! $o && $l === $entry['had_live'];
-			if ( ( self::REDO === $action && ! $before ) || ( self::UNDO === $action && ! $after ) ) {
+			if ( ! ( $l && ! $s && $o === $entry['had_live'] ) ) {
 				/* translators: %s: directory */
 				return sprintf( __( 'The directory %s is not where the restore left it, so the site cannot be put back by its plan: nothing was changed.', 'wp-checkpoint' ), $entry['live'] );
 			}

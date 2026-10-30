@@ -449,6 +449,17 @@ final class Runner {
 			} catch ( Stopped $e ) {
 				// The answers that stopped it go with the failure: a retry asks those questions again.
 				return $this->fail( $job, $token, $logger, sprintf( 'Step "%s": %s', $step_id, $this->describe( $e ) ), '', '', $e->questions() );
+			} catch ( Undone $e ) {
+				if ( Job::SITE_UNTOUCHED !== $job->site_state ) {
+					// The site is not recorded as put back: not an end, failed as any other failure (the retry goes on
+					// putting it back).
+					$logger->error( 'A step ended the job as undone while it holds the site changed' );
+					return $this->fail( $job, $token, $logger, sprintf( 'Step "%s": %s', $step_id, $this->describe( $e ) ) );
+				}
+				// Not a failure: undone, as the administrator chose.
+				$logger->info( 'The restore was undone' );
+				$this->transition( $job, $token, Job::UNDONE, $e->getMessage() );
+				return new TickResult( TickResult::FINISHED, -1, $job, $this->redactor->redact( $e->getMessage() ) );
 			} catch ( RetryFrom $e ) {
 				if ( Job::SITE_UNTOUCHED !== $job->site_state ) {
 					// A retry from an earlier step would drop the cursor that knows how to put the site back: failed as
@@ -456,7 +467,7 @@ final class Runner {
 					$logger->error( 'A step named a step to retry from while the job holds the site changed', array( 'retry_from' => $e->step() ) );
 					return $this->fail( $job, $token, $logger, sprintf( 'Step "%s": %s', $step_id, $this->describe( $e ) ) );
 				}
-				if ( ! $e instanceof Undone && '' !== $job->held_by && '' === $this->repository->files_base( $job ) ) {
+				if ( '' !== $job->held_by && '' === $this->repository->files_base( $job ) ) {
 					// Taken over from another installation (held_by), its files in the storage directory it was started
 					// with: a retry from here could not read them. Final, and said so.
 					$logger->error( 'A job taken over from another installation would retry from files that are not here', array( 'retry_from' => $e->step() ) );
@@ -467,12 +478,6 @@ final class Runner {
 					// Not a step of this job at or before this one: failed as any other failure, the retry continues here.
 					$logger->error( 'The step named a step to retry from that is not this one or one before it', array( 'retry_from' => $e->step() ) );
 					return $this->fail( $job, $token, $logger, sprintf( 'Step "%s": %s', $step_id, $this->describe( $e ) ) );
-				}
-				if ( $e instanceof Undone ) {
-					// Not a failure: undone, as the administrator chose; a redo starts at the named step.
-					$logger->info( 'The restore was undone', array( 'redo_from' => $e->step() ) );
-					$this->transition( $job, $token, Job::UNDONE, $e->getMessage(), '', $e->step() );
-					return new TickResult( TickResult::FINISHED, -1, $job, $this->redactor->redact( $e->getMessage() ) );
 				}
 				$logger->info( 'A retry starts at an earlier step', array( 'retry_from' => $e->step() ) );
 				return $this->fail( $job, $token, $logger, sprintf( 'Step "%s": %s', $step_id, $this->describe( $e ) ), '', $e->step() );

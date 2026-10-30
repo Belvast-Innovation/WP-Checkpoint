@@ -187,8 +187,7 @@ final class SwapUncheckedTest extends SwapTestCase {
 	}
 
 	/**
-	 * An undo after the site was let out ends the job undone, not failed: no error, no kind of failure, no Retry, and
-	 * a redo possible while the restored copy is kept.
+	 * An undo after the site was let out ends the job undone, not failed: no error, no kind of failure, no Retry.
 	 */
 	private function assertUndone( Job $done ): void {
 		$this->assertSame( Job::UNDONE, $done->status );
@@ -197,7 +196,7 @@ final class SwapUncheckedTest extends SwapTestCase {
 		$this->assertSame( '', $done->failure_kind );
 		$this->assertFalse( $done->can_retry() );
 		$this->assertFalse( $done->retry_useful() );
-		$this->assertTrue( $done->can_redo() );
+		$this->assertTrue( $done->is_terminal() );
 		$this->assertGreaterThan( 0, $done->finished_at );
 		$this->assertSame( Job::UNDONE, Plugin::instance()->jobs()->find( $done->id )->status, 'read back' );
 		$data = Plugin::instance()->job_presenter()->present( $done, false );
