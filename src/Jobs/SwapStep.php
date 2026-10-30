@@ -1397,10 +1397,11 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	}
 
 	/**
-	 * Right before an undo first changes the site (its maintenance file not held yet): a cancel requested since the
-	 * claim, or the time a restore can be undone in run out (Undo::WINDOW_SECONDS from its commit), gives it up
-	 * (give_up_undo()); otherwise the reverse is recorded (the site state becomes changing, in a write that requires no
-	 * cancel requested: JobRepository::save_progress()), then the site is put back (roll_back()).
+	 * Right before an undo first changes the site (its maintenance file not held yet): the time a restore can be undone
+	 * in run out (Undo::WINDOW_SECONDS from its commit) gives it up (give_up_undo()); otherwise the reverse is recorded:
+	 * the site state becomes changing in a write that requires no cancel requested (JobRepository::save_progress(), the
+	 * one place a cancel is weighed against the undo: it and the request meet on the job's row), and a cancel requested
+	 * since the claim gives the undo up there (UndoCancelled); then the site is put back (roll_back()).
 	 *
 	 * @param JobContext           $context Context.
 	 * @param Queries              $db      Connection.
@@ -1410,9 +1411,6 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 */
 	private function start_undo( JobContext $context, Queries $db, array $cursor ): StepResult {
 		$job = $context->job();
-		if ( 0 !== $job->cancel_requested ) {
-			return $this->give_up_undo( $context, $cursor, 'The undo was cancelled before it changed the site: the restored site stays', __( 'The undo was cancelled before it changed the site: the restored site stays.', 'wp-checkpoint' ) );
-		}
 		if ( ! self::within_window( $job->committed_at, $this->now() ) ) {
 			return $this->give_up_undo( $context, $cursor, 'The time a restore can be undone in ran out before the undo changed the site: the restored site stays', __( 'The time this restore could be undone in ran out before the undo changed the site: the restored site stays.', 'wp-checkpoint' ) );
 		}
