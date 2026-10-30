@@ -281,6 +281,9 @@ final class JobsController extends Controller {
 			return $this->conflict( $this->presenter->clean( $e->getMessage() ) );
 		} catch ( InvalidTransition $e ) {
 			$current = $this->actions->find( $id );
+			if ( null !== $current && Job::UNDONE === $current->status ) {
+				return $this->conflict( JobPresenter::undone_note( $current->id ) );
+			}
 			if ( null !== $current && Job::REASON_ABANDONED === $current->failure_reason ) {
 				return $this->conflict( JobPresenter::abandoned_note( $this->actions->abandoned_here( $current ) ) );
 			}

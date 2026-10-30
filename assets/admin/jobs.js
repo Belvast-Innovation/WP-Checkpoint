@@ -26,7 +26,7 @@
 	var POLL_MS = 2000;
 	var WATCHDOG_MS = 15000;
 	var WATCHDOG_MAX_FIRES = 2;
-	var TERMINAL = [ 'completed', 'failed', 'cancelled' ];
+	var TERMINAL = [ 'completed', 'failed', 'cancelled', 'undone' ];
 
 	var DISMISSED_KEY = 'wpcheckpoint-dismissed-jobs';
 

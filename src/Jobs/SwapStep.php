@@ -925,12 +925,16 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		// cannot be flushed now is waited out: the site is back, and the maintenance file stays held until then.
 		$this->flush( $context );
 		// Recorded as put back while the file is still held: from here on nothing is renamed, whatever is found later.
+		$out    = ! empty( $cursor['out'] );
 		$cursor = array(
 			'phase'  => 'restored',
 			'mark'   => $cursor['mark'] ?? '',
 			'reason' => (string) ( $cursor['reason'] ?? $reason ),
 			'check'  => (string) ( $cursor['check'] ?? '' ),
 		);
+		if ( $out ) {
+			$cursor['out'] = true; // Kept to the end: an undo after the site was let out ends the job as undone (ended()).
+		}
 		$context->checkpoint( $cursor, 98, __( 'The site is as it was before the restore', 'wp-checkpoint' ) );
 		$this->at( 'restored' );
 		return $this->end_back( $context, $cursor, $detail );
@@ -1024,13 +1028,13 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 				'mark'   => $cursor['mark'] ?? '',
 				'reason' => $reason,
 				'check'  => (string) ( $cursor['check'] ?? '' ),
-			);
+			) + ( empty( $cursor['out'] ) ? array() : array( 'out' => true ) );
 			$context->checkpoint( $cursor, 100, __( 'The site is as it was before the restore', 'wp-checkpoint' ) );
 			$this->at( 'reverted' );
 		}
 		$this->take_down( $context, $cursor );
 		$this->at( 'maintenance_down' );
-		return $this->ended( $context, '' !== $detail ? $detail : $reason, (string) ( $cursor['check'] ?? '' ) );
+		return $this->ended( $context, '' !== $detail ? $detail : $reason, (string) ( $cursor['check'] ?? '' ), self::UNDONE === $reason && ! empty( $cursor['out'] ) );
 	}
 
 	/**
@@ -1068,19 +1072,29 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	}
 
 	/**
-	 * What ends a job whose swap was rolled back: cancelled when that was asked for, otherwise failed with a retry
+	 * What ends a job whose swap was rolled back: cancelled when that was asked for; undone (Undone, a redo starting
+	 * at the final check) when it was undone after the restored site was let out; otherwise failed with a retry
 	 * starting at the final check.
 	 *
 	 * @param JobContext $context Context.
 	 * @param string     $reason  Why it was rolled back.
 	 * @param string     $check   The check that failed (an id of CHECKS), when it was reversed for one.
-	 * @return \RuntimeException Cancelled or RetryFrom.
+	 * @param bool       $undone  Whether it was undone after the restored site was let out.
+	 * @return \RuntimeException Cancelled, Undone or RetryFrom.
 	 */
-	private function ended( JobContext $context, string $reason, string $check = '' ): \RuntimeException {
+	private function ended( JobContext $context, string $reason, string $check = '', bool $undone = false ): \RuntimeException {
 		if ( 0 !== $context->job()->cancel_requested ) {
 			return new Cancelled( 'The restore was cancelled; the site is as it was before it.' );
 		}
 		$text = self::REASONS[ $reason ] ?? $reason;
+		if ( $undone ) {
+			// What was written on the restored site since it was let out went with it: a redo says that again and asks
+			// for its own confirmation (wp wpcheckpoint job redo), and nothing offers it as a retry.
+			// The message stays short (the job's progress message holds it); the reason is in the log (reverse()).
+			$context->logger()->info( 'The restore was undone', array( 'reason' => $text ) );
+			/* translators: %d: days the restored copy is kept */
+			return new Undone( sprintf( __( 'The restore was undone: the site is as it was before it. The restored copy is kept for %d days (wp wpcheckpoint job redo).', 'wp-checkpoint' ), (int) ( JobRepository::WORK_RETENTION_SECONDS / 86400 ) ), SwapCheckStep::ID );
+		}
 		if ( self::REVERSED === $reason || self::UNDONE === $reason ) {
 			// The restored copy is kept under its temporary names, next to the site, for a retry (the engine reclaims
 			// it with the failed job's work after WORK_RETENTION_SECONDS); the retry checks and swaps again.

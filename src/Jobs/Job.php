@@ -27,6 +27,16 @@ final class Job {
 	const CANCELLED = 'cancelled';
 
 	/**
+	 * A restore whose swap was undone after the restored site was let out (Jobs\SwapStep: an undo answered after the
+	 * release, or wp wpcheckpoint job undo): the site is as it was before the restore, and the restored copy is kept
+	 * under its staging names for WORK_RETENTION_SECONDS. Not a failure: nothing offers Retry for it (can_retry() is
+	 * for failed jobs), and only wp wpcheckpoint job redo, with its own confirmation, queues it again
+	 * (JobRepository::redo()): writes made since the undo would go with a swap back. A swap reversed before the site
+	 * was let out fails as before (nothing was written meanwhile).
+	 */
+	const UNDONE = 'undone';
+
+	/**
 	 * What a job has done to the site (site_state).
 	 */
 	const SITE_UNTOUCHED = 0;
@@ -195,15 +205,26 @@ final class Job {
 	}
 
 	/**
+	 * Whether the job's restored copy may still be swapped back in (wp wpcheckpoint job redo): undone, and its work
+	 * (the restored copy under its staging names) not reclaimed yet. JobRepository::redo() checks the rest.
+	 *
+	 * @return bool
+	 */
+	public function can_redo(): bool {
+		return self::UNDONE === $this->status && 0 === $this->work_expired_at;
+	}
+
+	/**
 	 * Allowed transitions: from => [to, ...].
 	 *
 	 * @var array<string, string[]>
 	 */
 	const TRANSITIONS = array(
 		self::QUEUED    => array( self::RUNNING, self::FAILED, self::CANCELLED ),
-		self::RUNNING   => array( self::COMPLETED, self::FAILED, self::PAUSED, self::CANCELLED ),
+		self::RUNNING   => array( self::COMPLETED, self::FAILED, self::PAUSED, self::CANCELLED, self::UNDONE ),
 		self::PAUSED    => array( self::RUNNING, self::FAILED, self::CANCELLED ), // failed: given up unanswered, or bound to a replaced storage directory.
 		self::FAILED    => array( self::QUEUED ),
+		self::UNDONE    => array( self::QUEUED ), // Only through JobRepository::redo(): transition() refuses it.
 		self::COMPLETED => array(),
 		self::CANCELLED => array(),
 	);

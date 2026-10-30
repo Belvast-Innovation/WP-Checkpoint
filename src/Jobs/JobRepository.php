@@ -66,6 +66,7 @@ final class JobRepository {
 		Job::COMPLETED => 2592000, // 30 days
 		Job::CANCELLED => 2592000,
 		Job::FAILED    => 7776000, // 90 days
+		Job::UNDONE    => 7776000, // As a failure: its work goes after WORK_RETENTION_SECONDS (expire_work()).
 	);
 	const MAX_ROWS          = 1000;
 	const REAP_THROTTLE     = 600;
@@ -864,7 +865,8 @@ final class JobRepository {
 	}
 
 	/**
-	 * Whether a restore is in progress: queued, running or paused, or failed with its work kept (a final failure too):
+	 * Whether a restore is in progress: queued, running or paused, or failed with its work kept (a final failure too),
+	 * or undone with its restored copy kept (a redo would swap it in, as a retry would):
 	 * true, false, or null when the jobs table could not be read (only the server's answer that there is no such
 	 * table means none).
 	 *
@@ -872,7 +874,7 @@ final class JobRepository {
 	 */
 	public static function restore_in_progress() {
 		global $wpdb;
-		$rows = self::read_rows( $wpdb->prepare( 'SELECT id FROM ' . self::table() . ' WHERE type = %s AND ( status IN (%s, %s, %s) OR ( status = %s AND work_expired_at = 0 ) ) LIMIT 1', RestoreJob::ID, Job::QUEUED, Job::RUNNING, Job::PAUSED, Job::FAILED ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- table name from the prefix and a constant.
+		$rows = self::read_rows( $wpdb->prepare( 'SELECT id FROM ' . self::table() . ' WHERE type = %s AND ( status IN (%s, %s, %s) OR ( status IN (%s, %s) AND work_expired_at = 0 ) ) LIMIT 1', RestoreJob::ID, Job::QUEUED, Job::RUNNING, Job::PAUSED, Job::FAILED, Job::UNDONE ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- table name from the prefix and a constant.
 		if ( null !== $rows ) {
 			return array() !== $rows;
 		}
@@ -1843,6 +1845,10 @@ final class JobRepository {
 	 * @throws InvalidTransition When it cannot be retried.
 	 */
 	public function check_retry( Job $job ): void {
+		if ( Job::UNDONE === $job->status ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+			throw new InvalidTransition( sprintf( 'Job %d was undone: only a redo, with its own confirmation, queues it again.', $job->id ) );
+		}
 		if ( array() !== $job->unreadable_columns ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
 			throw new InvalidTransition( sprintf( 'Job %1$d: %2$s; it is not run again until its row is repaired.', $job->id, self::unreadable_text( $job->unreadable_columns ) ) );
@@ -1893,6 +1899,10 @@ final class JobRepository {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
 			throw new InvalidTransition( sprintf( 'Job %d: leaving running for %s requires the lock token.', $job->id, $to ) );
 		}
+		if ( Job::UNDONE === $job->status ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+			throw new InvalidTransition( sprintf( 'Job %d was undone: only a redo, with its own confirmation, queues it again.', $job->id ) );
+		}
 		if ( Job::QUEUED === $to && Job::FAILED === $job->status ) {
 			$this->check_retry( $job );
 		}
@@ -1901,9 +1911,9 @@ final class JobRepository {
 		if ( '' === $retry_from && array() === $forget ) {
 			return $this->write_transition( $job, $to, $error, $token, array(), array(), $failure );
 		}
-		if ( Job::FAILED !== $to ) {
+		if ( Job::FAILED !== $to && ! ( Job::UNDONE === $to && array() === $forget ) ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
-			throw new InvalidTransition( sprintf( 'Job %d: only a failure names a step to retry from or an answer to forget.', $job->id ) );
+			throw new InvalidTransition( sprintf( 'Job %d: only a failure names a step to retry from or an answer to forget (an undo, the step a redo starts at).', $job->id ) );
 		}
 		$extra   = array();
 		$cursor  = null;
@@ -2193,7 +2203,7 @@ final class JobRepository {
 			if ( self::RECLAIM_NONE === $scope || $job->is_locked( $now ) ) {
 				continue;
 			}
-			$ended = Job::CANCELLED === $job->status || ( Job::FAILED === $job->status && ( $job->work_expired_at > 0 || '' === $this->files_base( $job ) ) );
+			$ended = Job::CANCELLED === $job->status || ( in_array( $job->status, array( Job::FAILED, Job::UNDONE ), true ) && ( $job->work_expired_at > 0 || '' === $this->files_base( $job ) ) );
 			if ( ! ( Job::SITE_UNTOUCHED === $job->site_state && $ended ) ) {
 				continue;
 			}
@@ -2356,7 +2366,7 @@ final class JobRepository {
 
 	/**
 	 * Whether the work of a job id may be reclaimed: no such job, a
-	 * completed or cancelled one, a failed one past its work retention, or
+	 * completed or cancelled one, a failed or undone one past its work retention, or
 	 * one bound to another storage directory; never one that holds the site
 	 * changed (Job::$site_state), whatever its status or storage directory:
 	 * its staging roots hold the site as it was.
@@ -2383,7 +2393,7 @@ final class JobRepository {
 		if ( in_array( $job->status, array( Job::COMPLETED, Job::CANCELLED ), true ) ) {
 			return true;
 		}
-		return Job::FAILED === $job->status && $job->work_expired_at > 0;
+		return in_array( $job->status, array( Job::FAILED, Job::UNDONE ), true ) && $job->work_expired_at > 0;
 	}
 
 	/**
@@ -2603,7 +2613,7 @@ final class JobRepository {
 		$over  = $total - count( $victims ) - self::MAX_ROWS;
 		if ( $over > 0 ) {
 			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix.
-			$rows = $wpdb->get_results( $wpdb->prepare( "SELECT * FROM {$table} WHERE status IN (%s, %s, %s) AND site_state = 0 ORDER BY created_at ASC, id ASC LIMIT %d", Job::COMPLETED, Job::CANCELLED, Job::FAILED, $over + count( $victims ) ), ARRAY_A );
+			$rows = $wpdb->get_results( $wpdb->prepare( "SELECT * FROM {$table} WHERE status IN (%s, %s, %s, %s) AND site_state = 0 ORDER BY created_at ASC, id ASC LIMIT %d", Job::COMPLETED, Job::CANCELLED, Job::FAILED, Job::UNDONE, $over + count( $victims ) ), ARRAY_A );
 			foreach ( is_array( $rows ) ? $rows : array() as $row ) {
 				if ( count( $victims ) >= $total - self::MAX_ROWS ) {
 					break;
@@ -2683,7 +2693,8 @@ final class JobRepository {
 	}
 
 	/**
-	 * Reclaim the work files of failed jobs older than WORK_RETENTION_SECONDS.
+	 * Reclaim the work files of failed jobs older than WORK_RETENTION_SECONDS, and of undone ones (Job::UNDONE: their
+	 * restored copy, which a redo would swap back in) by the same rule.
 	 *
 	 * @return int Jobs whose work was expired in this pass.
 	 */
@@ -2692,17 +2703,17 @@ final class JobRepository {
 		$now   = $this->now();
 		$table = $wpdb->base_prefix . Schema::JOBS_TABLE;
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix.
-		$rows  = $wpdb->get_results( $wpdb->prepare( "SELECT * FROM {$table} WHERE status = %s AND work_expired_at = 0 AND site_state = 0 AND finished_at > 0 AND finished_at < %d LIMIT 100", Job::FAILED, $now - self::WORK_RETENTION_SECONDS ), ARRAY_A );
+		$rows  = $wpdb->get_results( $wpdb->prepare( "SELECT * FROM {$table} WHERE status IN (%s, %s) AND work_expired_at = 0 AND site_state = 0 AND finished_at > 0 AND finished_at < %d LIMIT 100", Job::FAILED, Job::UNDONE, $now - self::WORK_RETENTION_SECONDS ), ARRAY_A );
 		$count = 0;
 		foreach ( is_array( $rows ) ? $rows : array() as $row ) {
 			$job = self::hydrate( $row );
-			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin table; the WHERE keeps a concurrent retry from being undone.
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin table; the WHERE keeps a concurrent retry (or redo) from being undone.
 			$affected = $wpdb->update(
 				$table,
 				array( 'work_expired_at' => $now ),
 				array(
 					'id'              => $job->id,
-					'status'          => Job::FAILED,
+					'status'          => $job->status,
 					'work_expired_at' => 0,
 					'site_state'      => Job::SITE_UNTOUCHED,
 				),
@@ -2814,10 +2825,10 @@ final class JobRepository {
 			'status'     => $to,
 			'updated_at' => $now,
 		);
-		if ( in_array( $to, array( Job::COMPLETED, Job::FAILED, Job::CANCELLED ), true ) ) {
+		if ( in_array( $to, array( Job::COMPLETED, Job::FAILED, Job::CANCELLED, Job::UNDONE ), true ) ) {
 			$data['finished_at'] = $now;
 		}
-		if ( in_array( $to, array( Job::COMPLETED, Job::FAILED, Job::CANCELLED, Job::PAUSED ), true ) ) {
+		if ( in_array( $to, array( Job::COMPLETED, Job::FAILED, Job::CANCELLED, Job::PAUSED, Job::UNDONE ), true ) ) {
 			// Nobody works on the job any more; a paused job is acquired again after it resumes.
 			$data['lock_token']   = '';
 			$data['locked_until'] = 0;
@@ -2827,6 +2838,12 @@ final class JobRepository {
 			// Stamped with the failure it belongs to (Job::read_failure_kind()): code that does not know the column
 			// retries and fails the job again without touching it, and the old kind must not speak for the new failure.
 			$data['failure_kind'] = Job::stamp_failure( $failure, $now );
+		}
+		if ( Job::UNDONE === $to ) {
+			// Not a failure: what happened is said as the job's progress message, and no error or kind of failure stays.
+			$data['progress_message'] = self::fit_message( $this->redactor->redact( $error ) );
+			$data['last_error']       = '';
+			$data['failure_kind']     = '';
 		}
 		$restart = null;
 		if ( Job::QUEUED === $to ) {
@@ -2840,7 +2857,7 @@ final class JobRepository {
 				// cancels. Of any other, it was for a run that is over.
 				$data['cancel_requested'] = 0;
 			}
-			$named = Job::FAILED === $from && isset( $job->cursor[ self::RETRY_FROM_KEY ] ) ? $job->cursor[ self::RETRY_FROM_KEY ] : null;
+			$named = in_array( $from, array( Job::FAILED, Job::UNDONE ), true ) && isset( $job->cursor[ self::RETRY_FROM_KEY ] ) ? $job->cursor[ self::RETRY_FROM_KEY ] : null;
 			if ( is_string( $named ) && '' !== $named ) {
 				// The failed step named where a retry starts (RetryFrom): that step, from its start, in this same write;
 				// without the answers given so far, which were about what the steps found then (a step never asks
@@ -2875,7 +2892,7 @@ final class JobRepository {
 			'status' => $from,
 		);
 		$where_formats = array( '%d', '%s' );
-		if ( Job::QUEUED === $to && Job::FAILED === $from ) {
+		if ( Job::QUEUED === $to && in_array( $from, array( Job::FAILED, Job::UNDONE ), true ) ) {
 			// The in-memory can_retry() check races with expire_work(): the row is the authority. And the step a retry
 			// starts at comes from the job as read: the row must still be that failure (not another retry's, run and
 			// failed again meanwhile; a failure within the same second is not told apart).
@@ -2914,7 +2931,7 @@ final class JobRepository {
 		$stored              = (string) $job->failure_kind;
 		$job->failure_kind   = Job::read_failure_kind( $stored, (int) $job->finished_at );
 		$job->failure_reason = Job::read_failure_reason( $stored, (int) $job->finished_at );
-		if ( in_array( $to, array( Job::COMPLETED, Job::FAILED, Job::CANCELLED ), true ) ) {
+		if ( in_array( $to, array( Job::COMPLETED, Job::FAILED, Job::CANCELLED, Job::UNDONE ), true ) ) {
 			$this->remove_lock_file( $job );
 		}
 		return $job;

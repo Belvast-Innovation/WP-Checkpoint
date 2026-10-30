@@ -1290,6 +1290,9 @@ final class JobActions {
 			if ( null === $job ) {
 				return null;
 			}
+			if ( Job::UNDONE === $job->status ) {
+				$this->repository->check_retry( $job ); // Refuses it: an undone job is never retried, only redone.
+			}
 			( clone $job )->transition( Job::QUEUED );
 			$this->repository->check_retry( $job );
 			// A job that holds the site is retried to put it right; any other waits until none does, as a new one.

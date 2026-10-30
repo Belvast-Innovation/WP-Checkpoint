@@ -498,6 +498,9 @@ final class JobCommand {
 			WP_CLI::error( $this->presenter->clean( $e->getMessage() ) );
 		} catch ( InvalidTransition $e ) {
 			$current = $this->actions->find( (int) $args[0] );
+			if ( null !== $current && Job::UNDONE === $current->status ) {
+				WP_CLI::error( JobPresenter::undone_note( $current->id ) );
+			}
 			if ( null !== $current && Job::REASON_ABANDONED === $current->failure_reason ) {
 				WP_CLI::error( JobPresenter::abandoned_note( $this->actions->abandoned_here( $current ) ) );
 			}

@@ -191,6 +191,18 @@ final class JobPresenter {
 	}
 
 	/**
+	 * Why an undone restore is not retried: swapping it back in drops what was written since the undo, so only WP-CLI
+	 * does it, with a confirmation of its own.
+	 *
+	 * @param int $id Job id.
+	 * @return string
+	 */
+	public static function undone_note( int $id ): string {
+		/* translators: %d: job id */
+		return sprintf( __( 'This restore was undone; it is not retried. To swap the restored copy back in, which drops what was written on the site since the undo, run wp wpcheckpoint job redo %d: it says what would be lost and asks for a confirmation.', 'wp-checkpoint' ), $id );
+	}
+
+	/**
 	 * The job's state in words: a job that waits for an answer is not
 	 * "paused" to the person who has to give it.
 	 *
@@ -211,6 +223,8 @@ final class JobPresenter {
 				return __( 'Failed', 'wp-checkpoint' );
 			case Job::CANCELLED:
 				return __( 'Cancelled', 'wp-checkpoint' );
+			case Job::UNDONE:
+				return __( 'Undone', 'wp-checkpoint' );
 		}
 		return $job->status;
 	}
