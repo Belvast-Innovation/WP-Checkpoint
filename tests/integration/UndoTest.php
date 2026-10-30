@@ -884,6 +884,9 @@ final class UndoTest extends SwapTestCase {
 
 	public function test_the_carry_question_names_its_deadline(): void {
 		list( $job ) = $this->asked_about_the_carry();
+		// Committed two days ago: the deadline is five days from now, not seven (it counts from the commit).
+		$this->set( $job->id, array( 'committed_at' => time() - 2 * 86400 ) );
+		$job  = Plugin::instance()->jobs()->find( $job->id );
 		$text = QuestionText::for_job( $job, Plugin::instance()->directories(), 'strval' );
 		$this->assertStringContainsString( 'Answer by ' . gmdate( 'Y-m-d H:i', $job->committed_at + Undo::WINDOW_SECONDS ) . ' UTC', $text[0]['text'] );
 		$this->assertStringNotContainsString( '7 days', $text[0]['text'] );
