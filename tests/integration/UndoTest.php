@@ -507,4 +507,115 @@ final class UndoTest extends SwapTestCase {
 		$this->assertSame( SwapStep::CHECK_WAITS, $waits, 'checked again after each wait' );
 		$this->assertStringContainsString( 'the site could not be checked: the home page did not answer', $done->progress_message );
 	}
+
+	/**
+	 * Whether a maintenance file (or its data file) of the sandboxed site is there, and the self-check row.
+	 *
+	 * @return array{maintenance: bool, self_check: bool}
+	 */
+	private function leftovers(): array {
+		global $wpdb;
+		$wpdb->query( 'COMMIT' );
+		return array(
+			'maintenance' => array() !== $this->maintenance_files(),
+			'self_check'  => null !== $wpdb->get_var( $wpdb->prepare( 'SELECT option_value FROM ' . SelfCheck::table( $wpdb->base_prefix ) . ' WHERE option_name = %s', StoredNames::SELF_CHECK ) ),
+		);
+	}
+
+	public function test_an_undo_killed_at_any_seam_is_finished_by_the_next_run(): void {
+		// Every seam an undo passes, with how often, from one that runs whole.
+		$job = $this->completed();
+		$this->write_state( 'written since the restore' );
+		$this->retype( $job );
+		$told = $this->actions()->undo( $job->id, '' );
+		$this->assertTrue( $this->actions()->undo( $job->id, $told['code'] )['ok'] );
+		$this->seams = array();
+		$this->assertSame( Job::UNDONE, $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) )->status );
+		$cases = array();
+		$count = array();
+		foreach ( $this->seams as $seam ) {
+			$count[ $seam ] = ( $count[ $seam ] ?? 0 ) + 1;
+			$cases[]        = array( $seam, $count[ $seam ] );
+		}
+		foreach ( array( 'carry_back_locked', 'carried_back', 'table_back', 'dir_back', 'restored', 'undo_check_written', 'undo_checked', 'undo_verdict_recorded', 'undo_self_check_removed', 'unheld', 'reverted', 'maintenance_down' ) as $seam ) {
+			$this->assertArrayHasKey( $seam, $count, 'the control: an undo passes ' . $seam );
+		}
+		$this->assertGreaterThan( 15, count( $cases ) );
+
+		foreach ( $cases as $case ) {
+			list( $seam, $nth ) = $case;
+			$label = $seam . ' #' . $nth;
+			$this->tear_down_swap();
+			$this->set_up_swap();
+			$before = $this->site();
+			$job    = $this->completed();
+			$this->write_state( 'written since the restore' );
+			$this->retype( $job );
+			$told = $this->actions()->undo( $job->id, '' );
+			$this->assertTrue( $this->actions()->undo( $job->id, $told['code'] )['ok'], $label );
+			$this->killed_at( Plugin::instance()->jobs()->find( $job->id ), $seam, $nth );
+			$done = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
+			$this->assertSame( Job::UNDONE, $done->status, $label . ': ' . $done->last_error . ' ' . $done->progress_message );
+			$this->assertSame( Job::SITE_UNTOUCHED, $done->site_state, $label );
+			$this->assertSame( $before, $this->site(), $label . ': the site as it was before the restore, whole' );
+			$this->assertSame( 'written since the restore', $this->state(), $label . ': the plugin\'s own state carried back' );
+			$this->assertSame(
+				array(
+					'maintenance' => false,
+					'self_check'  => false,
+				),
+				$this->leftovers(),
+				$label . ': no maintenance file, no self-check row'
+			);
+			$this->assertSame( array(), Plugin::instance()->jobs()->holding_site(), $label );
+		}
+	}
+
+	public function test_an_undo_killed_while_it_asks_about_its_carry_back_asks_again_with_the_site_let_out(): void {
+		foreach ( array( 'carry_ask_recorded', 'carry_asked' ) as $seam ) {
+			$this->tear_down_swap();
+			$this->set_up_swap();
+			$job   = $this->completed();
+			$after = $this->site();
+			$this->retype( $job );
+			$told = $this->actions()->undo( $job->id, '' );
+			$this->assertTrue( $this->actions()->undo( $job->id, $told['code'] )['ok'] );
+			// The carry back fails in the child too: an old options table whose id is not AUTO_INCREMENT is refused.
+			$this->break_old_options( $job );
+			$this->killed_at( Plugin::instance()->jobs()->find( $job->id ), $seam );
+			$asked = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
+			$this->assertSame( Job::PAUSED, $asked->status, $seam . ': ' . $asked->last_error );
+			$this->assertSame( SwapStep::CARRY_QUESTION, $asked->questions[0]['id'] ?? '', $seam );
+			$this->assertSame( $after, $this->site(), $seam . ': the restored site, let out' );
+			$this->mend_old_options( $job );
+			Plugin::instance()->job_actions()->answer( $job->id, array( SwapStep::CARRY_QUESTION => SwapStep::PUT_BACK ) );
+			$this->assertSame( Job::UNDONE, $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) )->status, $seam );
+		}
+	}
+
+	/**
+	 * The old options table's id no longer AUTO_INCREMENT: the carry back refuses it before it writes (not a failure
+	 * of the moment), in this process and in a child alike.
+	 */
+	private function break_old_options( Job $job ): void {
+		global $wpdb;
+		$old = $this->old_options( $job );
+		$this->assertNotFalse( $wpdb->query( "ALTER TABLE `{$old}` MODIFY option_id bigint(20) unsigned NOT NULL" ), $wpdb->last_error );
+	}
+
+	private function mend_old_options( Job $job ): void {
+		global $wpdb;
+		$old = $this->old_options( $job );
+		$this->assertNotFalse( $wpdb->query( "ALTER TABLE `{$old}` MODIFY option_id bigint(20) unsigned NOT NULL AUTO_INCREMENT" ), $wpdb->last_error );
+	}
+
+	private function old_options( Job $job ): string {
+		global $wpdb;
+		foreach ( $this->plan_of( $job )['tables'] as $entry ) {
+			if ( \WPCheckpoint\Restore\SwapPlan::TABLE_OF === $entry['kind'] && $wpdb->base_prefix . 'options' === $entry['live'] ) {
+				return (string) $entry['old'];
+			}
+		}
+		$this->fail( 'the control: the plan has the options table' );
+	}
 }
