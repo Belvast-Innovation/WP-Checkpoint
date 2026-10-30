@@ -883,8 +883,8 @@ final class UndoTest extends SwapTestCase {
 				$held = $this->hold_row( $request, 2.5 ); // Right before the write that starts changing the site.
 				$from = microtime( true );
 			}
-			if ( 'undo_not_started' === $point && $waited < 0 ) {
-				$waited = microtime( true ) - $from;
+			if ( in_array( $point, array( 'undo_not_started', 'undo_started' ), true ) && $waited < 0 ) {
+				$waited = microtime( true ) - $from; // Whichever way the write went.
 			}
 		};
 		$this->retype( $job );
