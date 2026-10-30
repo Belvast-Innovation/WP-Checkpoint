@@ -26,7 +26,8 @@ defined( 'ABSPATH' ) || exit;
  * A restore, completed, its swap committed (site_state SITE_SWAPPED, committed_at recorded) no more than
  * WINDOW_SECONDS ago, with its maintenance mark recorded; managed by this installation; no job holds the site and no
  * other restore is under way; no job in the jobs table committed a swap after this one, whichever installation manages
- * it (a restore of another installation sharing this database changes the same tables); its work directory here, its
+ * it (a restore of another installation sharing this database changes the same tables), and none holds the site
+ * swapped without a commit time unless it ended before this one was committed (its order cannot be told); its work directory here, its
  * swap plan whole and written for this WordPress directory and table prefix; and every table and directory of the plan
  * where the swap left it, by positive evidence: what cannot be read refuses.
  *
@@ -248,6 +249,7 @@ final class Undo {
 			$holding = array_values( array_diff( $this->repository->holding_site(), array( $job->id ) ) );
 			$active  = $this->repository->list_jobs( array( Job::QUEUED, Job::RUNNING, Job::PAUSED ), 500 );
 			$later   = $this->repository->later_commit( $job );
+			$unknown = null === $later ? $this->repository->unordered_swap( $job ) : null;
 		} catch ( \RuntimeException $e ) {
 			return __( 'The jobs could not be read, so whether another job is in the way cannot be told; nothing was changed. Try again.', 'wp-checkpoint' );
 		}
@@ -264,6 +266,10 @@ final class Undo {
 		if ( null !== $later ) {
 			/* translators: 1: job id, 2: the later job's id */
 			return sprintf( __( 'Restore job %2$d swapped the site after restore job %1$d (whichever installation of WP Checkpoint ran it): going back to before %1$d would drop that restore and everything written since. It is not done.', 'wp-checkpoint' ), $job->id, $later );
+		}
+		if ( null !== $unknown ) {
+			/* translators: 1: job id, 2: the other job's id */
+			return sprintf( __( 'Job %2$d holds the site swapped but recorded no time of its swap (made by an earlier version of WP Checkpoint, here or by an installation sharing this database), and it did not end before restore job %1$d was made: whether it came after cannot be told, and going back to before %1$d could drop it. It is not done.', 'wp-checkpoint' ), $job->id, $unknown );
 		}
 		if ( '' === $this->repository->files_base( $job ) ) {
 			/* translators: %d: job id */

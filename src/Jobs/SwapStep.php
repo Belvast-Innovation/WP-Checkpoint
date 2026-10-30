@@ -1149,6 +1149,13 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 */
 	private function carry_asked( JobContext $context, Queries $db, array $cursor ): StepResult {
 		$answer = $context->options()['answers'][ self::CARRY_QUESTION ] ?? null;
+		$at     = $context->job()->committed_at;
+		if ( self::PUT_BACK === $answer && ( $at <= 0 || $this->now() > $at + Undo::WINDOW_SECONDS ) ) {
+			// Answered after the time an undo is allowed in (the question waits): what the undo said it drops was counted
+			// then, and it is no longer an undo the plugin makes. The restored site stays.
+			$context->logger()->warning( 'The answer to put the site back came after the time a restore can be undone in; the undo is given up and the restored site stays' );
+			$answer = RestoreJob::KEEP;
+		}
 		if ( self::PUT_BACK === $answer ) {
 			$cursor = array(
 				'phase'   => 'reverse',
@@ -1387,7 +1394,8 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @return \RuntimeException Cancelled, Undone or RetryFrom.
 	 */
 	private function ended( JobContext $context, string $reason, string $check = '', bool $undone = false, array $cursor = array() ): \RuntimeException {
-		if ( 0 !== $context->job()->cancel_requested ) {
+		if ( 0 !== $context->job()->cancel_requested && ! $undone ) {
+			// An undo's put-back is not stopped by a cancel requested while it runs: it ends as the undo it is.
 			return new Cancelled( 'The restore was cancelled; the site is as it was before it.' );
 		}
 		$text = self::REASONS[ $reason ] ?? $reason;

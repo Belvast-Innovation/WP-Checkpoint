@@ -83,7 +83,7 @@ final class QuestionText {
 			}
 			$carry = SwapStep::CARRY_KIND === $kind ? self::carry_file( $work ) : null;
 			if ( null !== $carry ) {
-				$listed = array_slice( $carry['names'], 0, self::MAX_LISTED );
+				$listed = null === $carry['names'] ? array() : array_slice( $carry['names'], 0, self::MAX_LISTED );
 			}
 			$out[] = array(
 				'id'      => $id,
@@ -155,7 +155,7 @@ final class QuestionText {
 			: sprintf( _n( '%d setting of WP Checkpoint written since the restore would be lost (listed below)', '%d settings of WP Checkpoint written since the restore would be lost (listed below)', $count, 'wp-checkpoint' ), $count );
 		return sprintf(
 			/* translators: 1: why the carry failed, 2: what would be lost */
-			__( 'The undo could not carry WP Checkpoint\'s own settings back into the site as it was before the restore (%1$s); nothing was put back yet, and the restored site is open to visitors as it was. Put the site back anyway: %2$s, among them may be where its backups are stored and how it recognises this site, so it may start a new storage directory and no longer list the backups it made. Or keep the restored site and give the undo up.', 'wp-checkpoint' ),
+			__( 'The undo could not carry WP Checkpoint\'s own settings back into the site as it was before the restore (%1$s); nothing was put back yet, and the restored site is open to visitors as it was. Put the site back anyway: as the undo said, everything written on the site since the restore is dropped, and %2$s, among them may be where its backups are stored and how it recognises this site, so it may start a new storage directory and no longer list the backups it made. Or keep the restored site and give the undo up. Unanswered for 7 days, the undo is given up.', 'wp-checkpoint' ),
 			$why,
 			$lost
 		);

@@ -698,15 +698,38 @@ final class JobRepository {
 	}
 
 	/**
+	 * The id of a job other than this one that holds the site changed with no commit time recorded (a swap made by a
+	 * version before committed_at, here or by an installation sharing this database) and that did not end before this
+	 * one's swap was committed: whether its swap came after this one's cannot be told. Null when there is none.
+	 *
+	 * @param Job $job Job (its committed_at recorded).
+	 * @return int|null
+	 * @throws \RuntimeException When the jobs could not be read.
+	 */
+	public function unordered_swap( Job $job ) {
+		global $wpdb;
+		$wpdb->last_error = '';
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- plugin table name from the prefix.
+		$rows = $wpdb->get_col( $wpdb->prepare( 'SELECT id FROM ' . self::table() . ' WHERE id <> %d AND site_state <> %d AND committed_at = 0 AND NOT ( finished_at > 0 AND finished_at < %d ) ORDER BY id DESC LIMIT 1', $job->id, Job::SITE_UNTOUCHED, $job->committed_at ) );
+		if ( ! is_array( $rows ) || '' !== self::db_error() ) {
+			throw new \RuntimeException( 'The jobs could not be read.' );
+		}
+		return array() === $rows ? null : (int) $rows[0];
+	}
+
+	/**
 	 * Queue a completed restore again to undo its swap (wp wpcheckpoint job undo, JobActions::undo()), in one statement
-	 * on the row as read: completed, the site swapped, committed_at and finished_at as read, no live lock, managed by
-	 * $token. The swap step starts again at $cursor (SwapStep::undo_cursor(): its reverse), without an answer given
-	 * to an earlier undo's question about its carry back (SwapStep::CARRY_QUESTION: each undo asks its own).
+	 * on the row as read: completed, the site swapped, committed_at and finished_at as read, no live lock, still managed
+	 * by $token (the token that managed it as read: whether that is this installation's is the caller's check, Undo,
+	 * made again under the start lock). The swap step starts again at $cursor (SwapStep::undo_cursor(): its reverse),
+	 * recorded as changing the site in the same statement (HoldsSite: the row never shows a cursor of one state and a
+	 * site state of another), without an answer given to an earlier undo's question about its carry back
+	 * (SwapStep::CARRY_QUESTION: each undo asks its own).
 	 *
 	 * @param Job                  $job     Job, as read.
 	 * @param array<string, mixed> $cursor  The swap step's cursor.
 	 * @param string               $message Progress message.
-	 * @param string               $token   The storage token of this installation (it must manage the job).
+	 * @param string               $token   The token that managed the job as read.
 	 * @return Job The row as now stored.
 	 * @throws StaleJob When the row is no longer the job as read, or a run holds it.
 	 * @throws \RuntimeException When the cursor cannot be encoded.
@@ -728,8 +751,9 @@ final class JobRepository {
 		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- plugin table name from the prefix; the WHERE clause is the compare-and-set.
 		$affected = $wpdb->query(
 			$wpdb->prepare(
-				'UPDATE ' . self::table() . ' SET status = %s, step = %s, cursor_json = %s, options_json = %s, progress_message = %s, last_error = \'\', failure_kind = \'\', finished_at = 0, takeovers = 0, takeover_mark = \'\', cron_deferrals = 0, cancel_requested = 0, updated_at = %d WHERE id = %d AND status = %s AND site_state = %d AND committed_at = %d AND committed_at > 0 AND finished_at = %d AND (lock_token = \'\' OR locked_until < %d) AND ' . Job::MANAGING_SQL . ' = %s',
+				'UPDATE ' . self::table() . ' SET status = %s, site_state = %d, step = %s, cursor_json = %s, options_json = %s, progress_message = %s, last_error = \'\', failure_kind = \'\', finished_at = 0, takeovers = 0, takeover_mark = \'\', cron_deferrals = 0, cancel_requested = 0, updated_at = %d WHERE id = %d AND status = %s AND site_state = %d AND committed_at = %d AND committed_at > 0 AND finished_at = %d AND (lock_token = \'\' OR locked_until < %d) AND ' . Job::MANAGING_SQL . ' = %s',
 				Job::QUEUED,
+				Job::SITE_CHANGING,
 				SwapStep::ID,
 				$cursor_json,
 				$options_json,
@@ -2183,23 +2207,28 @@ final class JobRepository {
 
 	/**
 	 * Answer "keep" for a restore that holds the site and was not answered whether to keep its restored site, which
-	 * could not be checked; its progress message says how its last steps are run. Any other question of such a job
-	 * stays unanswered (none is asked once the site is changed), and nothing else is done to it.
+	 * could not be checked, or whether to put the site back without carrying this plugin's own state back on an undo
+	 * (SwapStep::CARRY_QUESTION: the undo is given up, the restored site stays); its progress message says how its
+	 * last steps are run. Any other question of such a job stays unanswered, and nothing else is done to it.
 	 *
 	 * @param Job $job Paused job that holds the site.
 	 * @return void
 	 */
 	private function keep_unanswered( Job $job ): void {
-		if ( ! in_array( SwapStep::UNVERIFIED_QUESTION, array_column( $job->questions, 'id' ), true ) ) {
+		$asked = array_column( $job->questions, 'id' );
+		if ( in_array( SwapStep::UNVERIFIED_QUESTION, $asked, true ) ) {
+			$question = SwapStep::UNVERIFIED_QUESTION;
+			/* translators: %d: job id */
+			$message = sprintf( __( 'No answer within 7 days: the restored site, which could not be checked, was kept. Run wp wpcheckpoint job run %d to finish the restore.', 'wp-checkpoint' ), $job->id );
+		} elseif ( in_array( SwapStep::CARRY_QUESTION, $asked, true ) ) {
+			$question = SwapStep::CARRY_QUESTION;
+			/* translators: %d: job id */
+			$message = sprintf( __( 'No answer within 7 days: the undo was given up and the restored site kept. Run wp wpcheckpoint job run %d to finish.', 'wp-checkpoint' ), $job->id );
+		} else {
 			return;
 		}
 		try {
-			$this->answer(
-				$job,
-				array( SwapStep::UNVERIFIED_QUESTION => RestoreJob::KEEP ),
-				/* translators: %d: job id */
-				sprintf( __( 'No answer within 7 days: the restored site, which could not be checked, was kept. Run wp wpcheckpoint job run %d to finish the restore.', 'wp-checkpoint' ), $job->id )
-			);
+			$this->answer( $job, array( $question => RestoreJob::KEEP ), $message );
 		} catch ( \RuntimeException | \LogicException $e ) {
 			return; // Answered, cancelled or run meanwhile (StaleJob, InvalidTransition): the next pass reads it again.
 		}
