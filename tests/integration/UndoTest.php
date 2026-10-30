@@ -681,4 +681,33 @@ final class UndoTest extends SwapTestCase {
 		$this->assertSame( Job::UNDONE, $done->status );
 		$this->assertSame( 0, $checks, 'the recorded verdict stands: not checked again' );
 	}
+
+	public function test_a_job_that_holds_the_site_by_the_time_the_undo_is_claimed_is_seen_under_the_start_lock(): void {
+		$job   = $this->completed();
+		$told  = $this->actions()->undo( $job->id, '' );
+		$reads = 0;
+		$holder = 0;
+		// The checks read the clock once each time they run: the second time is under the start lock, right before the
+		// claim. Another job comes to hold the site just then.
+		Plugin::instance()->job_actions()->undo_gate(
+			new Undo(
+				Plugin::instance()->jobs(),
+				array(
+					'abspath'       => $this->abspath,
+					'restore_types' => array( $this->type ),
+					'now'           => function () use ( &$reads, &$holder, $job ): int {
+						if ( 2 === ++$reads ) {
+							$holder = $this->other( array( 'type' => 'export', 'status' => Job::RUNNING, 'site_state' => Job::SITE_CHANGING, 'storage_token' => $job->storage_token ) );
+						}
+						return time();
+					},
+				)
+			)
+		);
+		$refused = Plugin::instance()->job_actions()->undo( $job->id, $told['code'] );
+		$this->assertSame( 2, $reads, 'the control: the checks ran twice' );
+		$this->assertFalse( $refused['ok'] );
+		$this->assertStringContainsString( 'Job ' . $holder . ' holds the site', $refused['message'] );
+		$this->assertSame( Job::COMPLETED, Plugin::instance()->jobs()->find( $job->id )->status, 'not claimed' );
+	}
 }
