@@ -1301,9 +1301,11 @@ final class JobActions {
 				'reason'  => 'elsewhere',
 			);
 		}
-		if ( SwapStep::undoing( $job->cursor ) && ! in_array( $job->status, array( Job::COMPLETED, Job::CANCELLED, Job::UNDONE ), true ) ) {
+		$unread = SwapStep::ID === $job->step && in_array( 'cursor_json', $job->unreadable_columns, true );
+		if ( ( SwapStep::undoing( $job->cursor ) || $unread ) && ! in_array( $job->status, array( Job::COMPLETED, Job::CANCELLED, Job::UNDONE ), true ) ) {
 			// Every position of an undo, its last ones too (put back, its maintenance file still to come down: the site
-			// recorded as untouched): a plain cancel there would end it cancelled and reclaim the restored copy.
+			// recorded as untouched): a plain cancel there would end it cancelled and reclaim the restored copy. A swap
+			// whose cursor cannot be read may be one of them: it is not cancelled on a guess (undo_cancel_state(): null).
 			// An undo is given up only before it changes the site (2026-10-30): then the restored site stays, the job
 			// completed again; once it changed anything it finishes, and the cancel is refused. Never accepted and not done.
 			$wrote = '';

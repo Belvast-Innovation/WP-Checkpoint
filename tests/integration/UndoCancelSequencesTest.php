@@ -35,7 +35,7 @@ final class UndoCancelSequencesTest extends JobTestCase {
 	const STARTS = array( 'queued', 'running', 'failed', 'expired' );
 
 	/** What another process writes meanwhile. */
-	const EVENTS = array( 'none', 'giving_up', 'given_up', 'changing', 'asking', 'reverted', 'ended', 'requested', 'abandoned', 'reclaimed', 'locked', 'failed', 'elsewhere', 'unreadable' );
+	const EVENTS = array( 'none', 'giving_up', 'given_up', 'changing', 'asking', 'reverted', 'ended', 'requested', 'abandoned', 'reclaimed', 'locked', 'failed', 'elsewhere', 'unreadable', 'reverted_unreadable', 'deleted' );
 
 	/** Before which of the cancel's writes (1: the give-up, 2: the request). */
 	const POINTS = array( 1, 2 );
@@ -108,6 +108,12 @@ final class UndoCancelSequencesTest extends JobTestCase {
 			case 'unreadable': // A cursor this code did not write.
 				$other->query( $other->prepare( "UPDATE {$table} SET cursor_json = %s WHERE id = %d", '{not json', $id ) );
 				break;
+			case 'reverted_unreadable': // Put back and ending, its cursor no longer readable.
+				$other->query( $other->prepare( "UPDATE {$table} SET site_state = %d, committed_at = 0, cursor_json = %s WHERE id = %d", Job::SITE_UNTOUCHED, '{not json', $id ) );
+				break;
+			case 'deleted': // The row deleted (a purge, an uninstall).
+				$other->query( $other->prepare( "DELETE FROM {$table} WHERE id = %d", $id ) );
+				break;
 			case 'ended': // The undo ran to its end.
 				$other->query( $other->prepare( "UPDATE {$table} SET status = %s, site_state = %d, committed_at = 0, cursor_json = %s, lock_token = '', locked_until = 0 WHERE id = %d", Job::UNDONE, Job::SITE_UNTOUCHED, wp_json_encode( array( 'phase' => 'reverted' ) + $undo ), $id ) );
 				break;
@@ -153,7 +159,8 @@ final class UndoCancelSequencesTest extends JobTestCase {
 			$outcome = $this->autocommit(
 				static function () use ( $job ): string {
 					try {
-						return Plugin::instance()->job_actions()->cancel( $job->id )['reason'];
+						$out = Plugin::instance()->job_actions()->cancel( $job->id );
+						return null === $out ? 'gone' : $out['reason'];
 					} catch ( StaleJob $e ) {
 						return 'changed';
 					}
@@ -168,6 +175,31 @@ final class UndoCancelSequencesTest extends JobTestCase {
 		);
 	}
 
+	/**
+	 * A second cancel, as REST makes one: its reason, or the exception's short class name.
+	 */
+	private function cancel_again( int $id ): string {
+		return $this->autocommit(
+			static function () use ( $id ): string {
+				try {
+					$out = Plugin::instance()->job_actions()->cancel( $id );
+					return null === $out ? 'gone' : $out['reason'];
+				} catch ( \RuntimeException | \LogicException $e ) {
+					return ( new \ReflectionClass( $e ) )->getShortName();
+				}
+			}
+		);
+	}
+
+	public function test_the_second_cancel_ends_a_job_that_is_not_an_undo_cancelled(): void {
+		global $wpdb;
+		// The control of C6's check: the same second cancel does end a row at site state untouched that is not an undo.
+		$job = Plugin::instance()->jobs()->create( 'export', self::$admin_id );
+		$wpdb->query( 'COMMIT' );
+		$this->assertSame( 'cleaned', $this->cancel_again( $job->id ) );
+		$this->assertSame( Job::CANCELLED, Plugin::instance()->jobs()->find( $job->id )->status );
+	}
+
 	public function test_what_a_cancel_of_an_undo_says_is_true_of_the_row_whatever_happened_meanwhile(): void {
 		global $wpdb;
 		$counts = array();
@@ -179,6 +211,14 @@ final class UndoCancelSequencesTest extends JobTestCase {
 					$out   = $this->cancel( $job, $event, $point );
 					$now   = Plugin::instance()->jobs()->find( $job->id );
 					$wpdb->query( 'COMMIT' );
+					if ( 'gone' === $out['outcome'] || null === $now ) {
+						$this->assertNull( $now, $label . ': "no such job" only for a row that is gone' );
+						$this->assertSame( 'gone', $out['outcome'], $label . ': a row that is gone is said as no such job' );
+						$counts[ 'start ' . $start ]   = ( $counts[ 'start ' . $start ] ?? 0 ) + 1;
+						$counts['outcome gone']         = ( $counts['outcome gone'] ?? 0 ) + 1;
+						$counts[ 'event ' . $event . ' at ' . $point ] = ( $counts[ 'event ' . $event . ' at ' . $point ] ?? 0 ) + ( $out['ran'] ? 1 : 0 );
+						continue;
+					}
 					$phase = (string) ( $now->cursor['phase'] ?? '' );
 					switch ( $out['outcome'] ) {
 						case 'undo_given_up': // C1.
@@ -230,18 +270,17 @@ final class UndoCancelSequencesTest extends JobTestCase {
 					}
 					// C6: a second cancel, as REST makes after "changed meanwhile".
 					$undoing = SwapStep::undoing( $now->cursor ) || Job::UNDONE === $now->status;
-					$this->autocommit(
-						static function () use ( $job ): void {
-							try {
-								Plugin::instance()->job_actions()->cancel( $job->id );
-							} catch ( \RuntimeException | \LogicException $e ) {
-								unset( $e ); // Refused, changed, or already finished: what counts is what the row is after it.
-							}
-						}
-					);
-					$after = Plugin::instance()->jobs()->find( $job->id );
+					$second  = $this->cancel_again( $job->id );
+					$after   = Plugin::instance()->jobs()->find( $job->id );
+					if ( 'reverted_unreadable' === $event && $out['ran'] ) {
+						$this->assertNotSame( Job::CANCELLED, $now->status, $label . ': a swap whose cursor cannot be read is not cancelled on a guess' );
+						$this->assertNotSame( Job::CANCELLED, $after->status, $label . ': not by a second cancel either' );
+					}
 					if ( $undoing && Job::SITE_SWAPPED !== $now->site_state ) {
 						$this->assertNotSame( Job::CANCELLED, $after->status, $label . ': an undo that changed the site is never ended cancelled' );
+						if ( Job::UNDONE !== $now->status ) {
+							$this->assertSame( 'undoing', $second, $label . ': and the second cancel says it must finish' );
+						}
 					}
 					$counts[ 'start ' . $start ]     = ( $counts[ 'start ' . $start ] ?? 0 ) + 1;
 					$counts[ 'outcome ' . $out['outcome'] ] = ( $counts[ 'outcome ' . $out['outcome'] ] ?? 0 ) + 1;
@@ -264,7 +303,7 @@ final class UndoCancelSequencesTest extends JobTestCase {
 				$this->assertGreaterThan( 0, $counts[ 'event ' . $event . ' at 2' ] ?? 0, $event . ' before the second write' );
 			}
 		}
-		foreach ( array( 'undo_given_up', 'undo_requested', 'undoing', 'undo_ended', 'changed', 'abandoned', 'elsewhere' ) as $outcome ) {
+		foreach ( array( 'undo_given_up', 'undo_requested', 'undoing', 'undo_ended', 'changed', 'abandoned', 'elsewhere', 'gone' ) as $outcome ) {
 			$this->assertGreaterThan( 0, $counts[ 'outcome ' . $outcome ] ?? 0, 'the control: some cancel said ' . $outcome );
 		}
 	}
