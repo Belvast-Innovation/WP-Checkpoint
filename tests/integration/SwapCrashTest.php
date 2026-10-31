@@ -273,6 +273,39 @@ final class SwapCrashTest extends SwapTestCase {
 		$this->assertPutBack( $done, $before, 'K10' );
 	}
 
+	/**
+	 * The killed run's lease lapses by the jobs' clock (JobRepository::now(): the database's, through an offset read
+	 * once and rounded to whole seconds), not this process's: with the offset at -1, as when the two reads fall either
+	 * side of a second, a lease written as this process's time() - 1 at the start of a second would still be live for
+	 * every tick of that second, and the job would stay "busy".
+	 */
+	public function test_k10_half_of_a_batch_with_the_jobs_clock_a_second_behind_this_process(): void {
+		global $wpdb;
+		$jobs   = Plugin::instance()->jobs();
+		$offset = new \ReflectionProperty( JobRepository::class, 'db_offset' );
+		$offset->setAccessible( true );
+		$was    = $offset->getValue( $jobs );
+		$job    = $this->at_swap();
+		$before = $this->site();
+		$plan   = $this->plan_of( $job );
+		$offset->setValue( $jobs, -1 );
+		try {
+			$this->before_lapse = static function (): void {
+				while ( microtime( true ) - floor( microtime( true ) ) > 0.02 ) {
+					usleep( 500 ); // The start of a second: the ticks that follow fall in it.
+				}
+			};
+			$this->killed_at( $job, 'batch_recorded', 1 );
+			$this->assertSame( -1, $offset->getValue( $jobs ), 'the control: the jobs\' clock is still a second behind this process\'s' );
+			$first = $plan['tables'][0];
+			$wpdb->query( "RENAME TABLE `{$first['live']}` TO `{$first['old']}`, `{$first['stage']}` TO `{$first['live']}`" );
+			$done = $this->cli_run( $job );
+		} finally {
+			$offset->setValue( $jobs, $was );
+		}
+		$this->assertPutBack( $done, $before, 'K10 with the clock a second behind' );
+	}
+
 	public function test_k10_prime_a_listing_that_cannot_be_read_is_waited_out_then_decided(): void {
 		$job    = $this->at_swap();
 		$before = $this->site();
@@ -381,8 +414,8 @@ final class SwapCrashTest extends SwapTestCase {
 					if ( 'dir_in' === $point && ! $taken ) {
 						global $wpdb;
 						$taken = true;
-						// Another run took the job over (its lease ran out): a new token.
-						$wpdb->query( $wpdb->prepare( 'UPDATE ' . JobRepository::table() . ' SET lock_token = %s, locked_until = %d WHERE id = %d', 'someone-else', time() - 1, $job->id ) );
+						// Another run took the job over (its lease ran out, by the clock the jobs judge it by): a new token.
+						$wpdb->query( $wpdb->prepare( 'UPDATE ' . JobRepository::table() . ' SET lock_token = %s, locked_until = %d WHERE id = %d', 'someone-else', Plugin::instance()->jobs()->now() - 1, $job->id ) );
 					}
 				},
 			)

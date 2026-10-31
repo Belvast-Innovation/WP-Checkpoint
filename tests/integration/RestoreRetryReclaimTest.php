@@ -394,8 +394,8 @@ final class RestoreRetryReclaimTest extends SwapTestCase {
 			}
 			$this->assertSame( $n, $seen, "the control: the run reached deletion {$n}" );
 			$this->assertSame( TickResult::LOST, $result->status, "stopped before deletion {$n}" );
-			// The lease of the stopped run lapses; the next run takes over without the seam.
-			$GLOBALS['wpdb']->query( $GLOBALS['wpdb']->prepare( 'UPDATE ' . JobRepository::table() . ' SET locked_until = %d WHERE id = %d', time() - 1, $job->id ) );
+			// The lease of the stopped run lapses (by the clock the jobs judge it by); the next run takes over without the seam.
+			$GLOBALS['wpdb']->query( $GLOBALS['wpdb']->prepare( 'UPDATE ' . JobRepository::table() . ' SET locked_until = %d WHERE id = %d', Plugin::instance()->jobs()->now() - 1, $job->id ) );
 			$GLOBALS['wpdb']->query( 'COMMIT' );
 			$this->preflight_parts = array();
 			$this->retype( $job );

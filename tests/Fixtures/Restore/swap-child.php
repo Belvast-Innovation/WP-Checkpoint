@@ -93,7 +93,8 @@ $runner = new \WPCheckpoint\Jobs\Runner(
 	new \WPCheckpoint\Support\Redactor( \WPCheckpoint\Support\Redactor::installation_secrets() ),
 	array( 'cli' => true )
 );
-fwrite( STDOUT, "WPCHECKPOINT-CHILD-READY\n" );
+// This run's database connection, for the parent's diagnostics of what a killed run left on the server.
+fwrite( STDOUT, 'WPCHECKPOINT-CHILD-READY connection ' . (int) $GLOBALS['wpdb']->get_var( 'SELECT CONNECTION_ID()' ) . "\n" );
 $result = $runner->tick( (int) $config['job'], microtime( true ) );
 fwrite( STDOUT, 'WPCHECKPOINT-CHILD-DONE ' . $result->status . ' ' . $result->message . "\n" );
 exit( 0 );

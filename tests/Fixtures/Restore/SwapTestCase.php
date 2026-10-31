@@ -102,6 +102,15 @@ abstract class SwapTestCase extends RestoreTestCase {
 	 */
 	protected $storage = array();
 
+	/** @var string[] The lock statements (JobRepository::acquire()) the last cli_run() sent, in order. */
+	private $acquires = array();
+
+	/** @var array<int, array<string, mixed>> What each killed_at() saw right after the kill, for stuck(). */
+	private $kills = array();
+
+	/** @var callable|null Called by killed_at() right before it lets the killed run's lease lapse. */
+	protected $before_lapse = null;
+
 	/**
 	 * The installation the test's restore runs under (see $storage), a fresh instance.
 	 *
@@ -423,21 +432,37 @@ abstract class SwapTestCase extends RestoreTestCase {
 	 * @return Job
 	 */
 	protected function cli_run( Job $job, int $max = 50 ): Job {
-		$seen = array();
-		for ( $i = 0; $i < $max; $i++ ) {
-			$result = $this->cli_tick( $job );
-			$seen[] = $result->status . ( '' !== (string) $result->message ? ': ' . $result->message : '' );
-			$now    = Plugin::instance()->jobs()->find( $job->id );
-			if ( ! in_array( $now->status, array( Job::QUEUED, Job::RUNNING ), true ) || TickResult::WAITING === $result->status ) {
-				return $now;
+		$seen           = array();
+		$this->acquires = array();
+		// The lock statements as sent, values and all: stuck() takes their WHERE apart.
+		$capture = function ( $sql ) {
+			if ( is_string( $sql ) && false !== strpos( $sql, ' SET takeovers = IF(' ) ) {
+				$this->acquires[] = $sql;
 			}
+			return $sql;
+		};
+		add_filter( 'query', $capture );
+		try {
+			for ( $i = 0; $i < $max; $i++ ) {
+				$result = $this->cli_tick( $job );
+				$seen[] = $result->status . ( '' !== (string) $result->message ? ': ' . $result->message : '' );
+				$now    = Plugin::instance()->jobs()->find( $job->id );
+				if ( ! in_array( $now->status, array( Job::QUEUED, Job::RUNNING ), true ) || TickResult::WAITING === $result->status ) {
+					return $now;
+				}
+			}
+		} finally {
+			remove_filter( 'query', $capture );
 		}
 		$this->fail( "the swap did not end\n" . $this->stuck( $job, $seen ) );
 	}
 
 	/**
 	 * What a job that did not end was left as: what the ticks returned, its row, the uninstall fence, the maintenance
-	 * file, the lock files and the schema's record (for a failure that does not show up again on a rerun).
+	 * file, the lock files and the schema's record (for a failure that does not show up again on a rerun); the lock's
+	 * side of it: the clocks the lease is judged by, the tokens this installation holds against the token that manages
+	 * the job, the last lock statement's WHERE with whether each of its conditions holds for the row now, and the
+	 * server's connections, open transactions and locks, here and right after each killed run (killed_at()).
 	 *
 	 * @param Job      $job  Job.
 	 * @param string[] $seen What each tick returned, in order.
@@ -474,8 +499,172 @@ abstract class SwapTestCase extends RestoreTestCase {
 				'lock files'  => $locks,
 				'schema'      => \WPCheckpoint\Support\Options::get( \WPCheckpoint\Support\Schema::OPTION, null ),
 				'schema retry' => \WPCheckpoint\Support\Options::get( \WPCheckpoint\Support\Schema::RETRY_OPTION, null ),
+				'clocks'      => self::clocks(),
+				'tokens'      => self::tokens( is_array( $row ) ? $row : array() ),
+				'lock statements' => count( $this->acquires ),
+				'last lock statement' => array() === $this->acquires ? 'none sent' : self::conditions( (string) end( $this->acquires ), $job->id ),
+				'connections' => self::connections(),
+				'killed runs' => $this->kills,
 			),
 			true
+		);
+	}
+
+	/**
+	 * The clocks a lease is judged by: this process's, the jobs repository's (the database's clock through the offset
+	 * it read once, JobRepository::now()), the offset and whether a clock was injected, and the database's own.
+	 *
+	 * @return array<string, mixed>
+	 */
+	protected static function clocks(): array {
+		global $wpdb;
+		$jobs  = Plugin::instance()->jobs();
+		$read  = static function ( string $name ) use ( $jobs ) {
+			$property = new \ReflectionProperty( JobRepository::class, $name );
+			$property->setAccessible( true );
+			return $property->getValue( $jobs );
+		};
+		$php   = time();
+		$their = $jobs->now();
+		return array(
+			'php time()'                => $php,
+			'repository now()'          => $their,
+			'repository offset'         => $read( 'db_offset' ),
+			'repository clock injected' => null !== $read( 'clock' ),
+			'database UNIX_TIMESTAMP()' => $wpdb->get_var( 'SELECT UNIX_TIMESTAMP()' ),
+		);
+	}
+
+	/**
+	 * The tokens this installation holds a job by (JobRepository::held_tokens(), the plugin's repository, which the
+	 * WP-CLI ticks use) and the token that manages the job (Job::MANAGING_SQL on the row).
+	 *
+	 * @param array<string, mixed> $row The job's row.
+	 * @return array<string, mixed>
+	 */
+	protected static function tokens( array $row ): array {
+		$held = new \ReflectionMethod( JobRepository::class, 'held_tokens' );
+		$held->setAccessible( true );
+		$tokens   = (array) $held->invoke( Plugin::instance()->jobs() );
+		$state    = Plugin::instance()->directories()->state();
+		$managing = '' !== (string) ( $row['held_by'] ?? '' ) ? (string) $row['held_by'] : (string) ( $row['storage_token'] ?? '' );
+		return array(
+			'held'                => $tokens,
+			'state token'         => $state['token'] ?? null,
+			'state past tokens'   => $state['past_tokens'] ?? null,
+			'state copied tokens' => $state['copied_tokens'] ?? null,
+			'managing (row)'      => $managing,
+			'managing is held'    => in_array( $managing, $tokens, true ),
+		);
+	}
+
+	/**
+	 * A lock statement's WHERE split at its top-level ANDs, each with whether it holds for the job's row now (1 or 0;
+	 * null when the row is gone), and what Job::MANAGING_SQL gives on the row.
+	 *
+	 * @param string $statement The statement as sent.
+	 * @param int    $id        Job id.
+	 * @return array<string, mixed>
+	 */
+	protected static function conditions( string $statement, int $id ): array {
+		global $wpdb;
+		$at = strpos( $statement, ' WHERE ' );
+		if ( false === $at ) {
+			return array( 'statement' => $statement, 'where' => 'not found' );
+		}
+		$where = substr( $statement, $at + 7 );
+		$parts = array();
+		$depth = 0;
+		$quote = false;
+		$start = 0;
+		$len   = strlen( $where );
+		for ( $i = 0; $i < $len; $i++ ) {
+			$c = $where[ $i ];
+			if ( $quote ) {
+				if ( '\\' === $c ) {
+					++$i;
+				} elseif ( "'" === $c ) {
+					$quote = false;
+				}
+				continue;
+			}
+			if ( "'" === $c ) {
+				$quote = true;
+			} elseif ( '(' === $c ) {
+				++$depth;
+			} elseif ( ')' === $c ) {
+				--$depth;
+			} elseif ( 0 === $depth && ' AND ' === substr( $where, $i, 5 ) ) {
+				$parts[] = trim( substr( $where, $start, $i - $start ) );
+				$start   = $i + 5;
+				$i      += 4;
+			}
+		}
+		$parts[] = trim( substr( $where, $start ) );
+		$table   = JobRepository::table();
+		$out     = array();
+		$quiet   = $wpdb->suppress_errors( true );
+		foreach ( $parts as $part ) {
+			$value = $wpdb->get_var( "SELECT ({$part}) FROM {$table} WHERE id = " . (int) $id ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the statement's own condition, test diagnostics.
+			$out[] = array(
+				'condition' => $part,
+				'holds'     => '' !== $wpdb->last_error ? 'unreadable: ' . $wpdb->last_error : $value,
+			);
+		}
+		$managing = $wpdb->get_var( 'SELECT ' . Job::MANAGING_SQL . " FROM {$table} WHERE id = " . (int) $id ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- a constant, test diagnostics.
+		$wpdb->suppress_errors( $quiet );
+		return array(
+			'where'                => $where,
+			'conditions'           => $out,
+			'MANAGING_SQL on row'  => $managing,
+		);
+	}
+
+	/**
+	 * The database server's view of its connections: this one, every connection with its command, time and statement,
+	 * the open InnoDB transactions, the locks the server lists (performance_schema.data_locks on MySQL 8; MariaDB's and
+	 * MySQL 5.7's INNODB_LOCKS list only locks someone waits for), the metadata locks where listed, and the transactions
+	 * part of the InnoDB status. What the server or the user cannot show is said as such.
+	 *
+	 * @return array<string, mixed>
+	 */
+	protected static function connections(): array {
+		global $wpdb;
+		$read  = static function ( string $sql ) use ( $wpdb ) {
+			$quiet = $wpdb->suppress_errors( true );
+			$rows  = $wpdb->get_results( $sql, ARRAY_A );
+			$error = $wpdb->last_error;
+			$wpdb->suppress_errors( $quiet );
+			return '' !== $error ? 'unavailable: ' . $error : $rows;
+		};
+		$locks = $read( 'SELECT t.PROCESSLIST_ID, l.ENGINE_TRANSACTION_ID, l.OBJECT_NAME, l.INDEX_NAME, l.LOCK_TYPE, l.LOCK_MODE, l.LOCK_STATUS, l.LOCK_DATA FROM performance_schema.data_locks l LEFT JOIN performance_schema.threads t ON t.THREAD_ID = l.THREAD_ID' );
+		if ( ! is_array( $locks ) ) {
+			$locks = array(
+				'data_locks'   => $locks,
+				'INNODB_LOCKS' => $read( 'SELECT * FROM information_schema.INNODB_LOCKS' ),
+			);
+		}
+		$metadata = $read( 'SELECT * FROM information_schema.METADATA_LOCK_INFO' );
+		if ( ! is_array( $metadata ) ) {
+			$metadata = array(
+				'METADATA_LOCK_INFO' => $metadata,
+				'metadata_locks'     => $read( "SELECT m.OBJECT_TYPE, m.OBJECT_SCHEMA, m.OBJECT_NAME, m.LOCK_TYPE, m.LOCK_DURATION, m.LOCK_STATUS, t.PROCESSLIST_ID FROM performance_schema.metadata_locks m LEFT JOIN performance_schema.threads t ON t.THREAD_ID = m.OWNER_THREAD_ID WHERE m.OBJECT_SCHEMA = DATABASE()" ),
+			);
+		}
+		$status = $read( 'SHOW ENGINE INNODB STATUS' );
+		if ( is_array( $status ) && isset( $status[0]['Status'] ) ) {
+			$text   = (string) $status[0]['Status'];
+			$from   = strpos( $text, "\nTRANSACTIONS\n" );
+			$to     = false === $from ? false : strpos( $text, "\n--------\nFILE I/O", $from );
+			$status = false === $from ? 'no TRANSACTIONS part' : substr( $text, $from, min( 4000, ( false === $to ? strlen( $text ) : $to ) - $from ) );
+		}
+		return array(
+			'this connection' => $wpdb->get_var( 'SELECT CONNECTION_ID()' ),
+			'processlist'     => $read( 'SELECT ID, USER, HOST, DB, COMMAND, TIME, STATE, LEFT(INFO, 300) AS INFO FROM information_schema.PROCESSLIST ORDER BY ID' ),
+			'innodb_trx'      => $read( 'SELECT trx_id, trx_state, trx_started, trx_mysql_thread_id, LEFT(trx_query, 300) AS trx_query, trx_operation_state, trx_tables_locked, trx_lock_structs, trx_rows_locked, trx_rows_modified FROM information_schema.INNODB_TRX' ),
+			'locks'           => $locks,
+			'metadata locks'  => $metadata,
+			'innodb status'   => $status,
 		);
 	}
 
@@ -545,14 +734,45 @@ abstract class SwapTestCase extends RestoreTestCase {
 		);
 		$output = array();
 		$status = 0;
+		$before = array_map( 'intval', (array) $GLOBALS['wpdb']->get_col( 'SELECT ID FROM information_schema.PROCESSLIST' ) );
 		exec( escapeshellarg( PHP_BINARY ) . ' ' . escapeshellarg( __DIR__ . '/swap-child.php' ) . ' ' . escapeshellarg( $config ) . ' 2>&1', $output, $status );
-		$text = implode( "\n", $output );
+		// What the killed run left on the server, right away: the connections it opened that are still there (its own
+		// connection by the id it said), and every open transaction and lock (stuck() shows it if the job then sticks).
+		$left  = self::connections();
+		$text  = implode( "\n", $output );
+		$child = preg_match( '/WPCHECKPOINT-CHILD-READY connection (\d+)/', $text, $m ) ? (int) $m[1] : null;
+		$still = is_array( $left['processlist'] ) ? array_values(
+			array_filter(
+				$left['processlist'],
+				static function ( array $row ) use ( $before ): bool {
+					return ! in_array( (int) $row['ID'], $before, true );
+				}
+			)
+		) : $left['processlist'];
 		$this->assertStringContainsString( 'WPCHECKPOINT-CHILD-READY', $text, 'the child ran the tick: ' . $text );
 		$this->assertStringNotContainsString( 'WPCHECKPOINT-CHILD-DONE', $text, 'the child was killed at ' . $seam . ' #' . $nth . ', not done: ' . $text );
 		// Signal 9: reported as 9 by PHP's exec() here, as 128 + 9 by a shell in between.
 		$this->assertContains( $status, array( 9, 137 ), 'killed by SIGKILL: ' . $text );
 		// The lease of the killed run is still there: as after a real crash, the next run takes over once it ran out.
-		$GLOBALS['wpdb']->query( $GLOBALS['wpdb']->prepare( 'UPDATE ' . \WPCheckpoint\Jobs\JobRepository::table() . ' SET locked_until = %d WHERE id = %d', time() - 1, $job->id ) );
+		// Ran out by the clock the jobs judge it by (JobRepository::now(), the database's): this process's clock may be
+		// a second ahead of it (the offset is read once and rounds to whole seconds).
+		if ( null !== $this->before_lapse ) {
+			call_user_func( $this->before_lapse );
+		}
+		$set     = Plugin::instance()->jobs()->now() - 1;
+		$started = microtime( true );
+		$GLOBALS['wpdb']->query( $GLOBALS['wpdb']->prepare( 'UPDATE ' . \WPCheckpoint\Jobs\JobRepository::table() . ' SET locked_until = %d WHERE id = %d', $set, $job->id ) );
+		$this->kills[] = array(
+			'seam'                         => $seam . ' #' . $nth,
+			'child connection'             => $child,
+			'connections opened since'     => $still,
+			'child connection still there' => is_array( $still ) && null !== $child ? in_array( $child, array_map( 'intval', array_column( $still, 'ID' ) ), true ) : 'unknown',
+			'server right after the kill'  => $left,
+			'lease set to'                 => $set,
+			'lease update rows'            => $GLOBALS['wpdb']->rows_affected,
+			'lease update seconds'         => round( microtime( true ) - $started, 3 ),
+			'clocks after the lease update' => self::clocks(),
+		);
 		// The killed run took the next verdict only if it got as far as checking: its trace says, so a test that
 		// gives verdicts must trace the child.
 		if ( isset( $this->swap_parts['verify'] ) ) {

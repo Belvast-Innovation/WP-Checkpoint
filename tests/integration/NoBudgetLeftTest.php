@@ -31,7 +31,6 @@ use WPCheckpoint\Plugin;
 use WPCheckpoint\Support\Deleter;
 use WPCheckpoint\Support\Redactor;
 use WPCheckpoint\Tests\Fixtures\Jobs\JobTestCase;
-use WPCheckpoint\Tests\Fixtures\Restore\PluginCopy;
 
 /**
  * The first unit of a tick always runs: every tick below starts with its
@@ -137,31 +136,9 @@ final class NoBudgetLeftTest extends JobTestCase {
 	}
 
 	public function test_a_restore_moves_on_in_every_tick_with_no_time_left(): void {
-		$base  = $this->export();
-		$copy  = PluginCopy::make();
-		$steps = \WPCheckpoint\Tests\Fixtures\Restore\RestoreTestCase::up_to_check( Plugin::instance()->job_types()->get( RestoreJob::ID )->steps() );
-		foreach ( $steps as $i => $step ) {
-			if ( FileStagingStep::ID === $step->id() ) {
-				// A small stand-in for the running plugin copy (a development checkout is hundreds of megabytes).
-				$steps[ $i ] = new FileStagingStep(
-					array(
-						'plugin_dir'  => $copy,
-						'plugin_main' => $copy . '/wp-checkpoint.php',
-					)
-				);
-			}
-			if ( SwapCheckStep::ID === $step->id() ) {
-				$steps[ $i ] = new SwapCheckStep(
-					null,
-					array(
-						'plugin_dir'  => $copy,
-						'plugin_main' => $copy . '/wp-checkpoint.php',
-						'version'     => PluginCopy::VERSION,
-					)
-				);
-			}
-		}
-		$this->register( RestoreJob::ID, $steps );
+		$base = $this->export();
+		// The running plugin copy the restore reads is the test's stand-in (PluginStandIn).
+		$this->register( RestoreJob::ID, \WPCheckpoint\Tests\Fixtures\Restore\RestoreTestCase::up_to_check( Plugin::instance()->job_types()->get( RestoreJob::ID )->steps() ) );
 		$job = Plugin::instance()->jobs()->create( RestoreJob::ID, self::$admin_id, array(), array( 'base' => $base ) );
 		try {
 			list( $job, $ticks, $ran ) = $this->run_with_no_time_left( $job );
@@ -176,7 +153,6 @@ final class NoBudgetLeftTest extends JobTestCase {
 			for ( $i = 0; $i < 10 && ! Plugin::instance()->jobs()->reclaim_work( Plugin::instance()->jobs()->find( $job->id ) ); $i++ ) {
 				continue;
 			}
-			PluginCopy::remove( $copy );
 		}
 	}
 }

@@ -331,8 +331,8 @@ final class SchemaColumnsTest extends JobTestCase {
 		$result = Plugin::instance()->job_actions()->tick( $id, JobActions::NO_TIME_LEFT );
 		$this->assertSame( 'busy', $result->status );
 		$this->assertSame( Job::RUNNING, Plugin::instance()->jobs()->find( $id )->status );
-		// The control: without the live lease, the same tick fails it.
-		$wpdb->update( Schema::jobs_table(), array( 'locked_until' => time() - 1 ), array( 'id' => $id ) );
+		// The control: without the live lease (by the clock the jobs judge it by), the same tick fails it.
+		$wpdb->update( Schema::jobs_table(), array( 'locked_until' => Plugin::instance()->jobs()->now() - 1 ), array( 'id' => $id ) );
 		Plugin::instance()->job_actions()->tick( $id, JobActions::NO_TIME_LEFT );
 		$this->assertSame( Job::FAILED, Plugin::instance()->jobs()->find( $id )->status );
 	}

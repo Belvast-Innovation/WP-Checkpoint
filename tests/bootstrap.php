@@ -126,6 +126,9 @@ function wpcheckpoint_bootstrap_integration() {
 		\WPCheckpoint\Support\Deleter::allow( get_temp_dir(), false );
 	}
 
+	// The restores the tests run read a small stand-in for the running plugin, not the mounted working copy.
+	\WPCheckpoint\Tests\Fixtures\Restore\PluginStandIn::install();
+
 	// A run killed with SIGKILL could not remove its probe directory; bin/test-integration.sh names that run as it
 	// takes the lock over, and the directory goes now.
 	$stale = \WPCheckpoint\Tests\Fixtures\ProbeDir::remove_stale( WP_CONTENT_DIR, (string) getenv( 'WPCHECKPOINT_TEST_STALE_RUN_ID' ) );

@@ -114,6 +114,7 @@ final class IntegrationScriptTest extends TestCase {
 			'the configuration in full; output paths and an existing test path from the plugin\'s directory; option values (a group named like a directory) and the rest as given'
 		);
 		$this->assertSame( array(), $this->work_dirs(), 'the empty directory is removed after the run' );
+		$this->assertMatchesRegularExpression( '/The plugin directory holds [0-9]+ entries; a restore takes at most [0-9]+ in its copy of the running plugin\./', $run['stderr'], 'the plugin directory\'s entries counted before the run' );
 	}
 
 	public function test_a_maintenance_file_in_the_test_site_stops_the_run_before_phpunit(): void {
@@ -380,6 +381,7 @@ final class IntegrationScriptTest extends TestCase {
 		copy( dirname( __DIR__, 3 ) . '/bin/test-integration.sh', $this->sandbox . '/plugin/bin/test-integration.sh' );
 		mkdir( $this->sandbox . '/plugin/tests/Fixtures' );
 		copy( dirname( __DIR__, 2 ) . '/Fixtures/maintenance-precheck.php', $this->sandbox . '/plugin/tests/Fixtures/maintenance-precheck.php' ); // The check before PHPUnit.
+		copy( dirname( __DIR__, 2 ) . '/Fixtures/plugin-entries.php', $this->sandbox . '/plugin/tests/Fixtures/plugin-entries.php' ); // And the count.
 		file_put_contents( $this->sandbox . '/plugin/phpunit.xml.dist', '<phpunit/>' );
 		file_put_contents( $this->sandbox . '/plugin/src/Code.php', '<?php // the code' );
 		file_put_contents( $this->sandbox . '/plugin/tests/CodeTest.php', '<?php // its test' );
