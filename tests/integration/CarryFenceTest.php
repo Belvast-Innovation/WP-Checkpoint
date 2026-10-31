@@ -80,7 +80,7 @@ final class CarryFenceTest extends SwapTestCase {
 				$wpdb->query( 'SET SESSION innodb_lock_wait_timeout = ' . $wait );
 				$quiet = $wpdb->suppress_errors( true ); // A lock wait that runs out is the expected answer here.
 				try {
-					$wpdb->query( $wpdb->prepare( 'UPDATE ' . JobRepository::table() . ' SET locked_until = %d WHERE id = %d', time() - 1, $job->id ) );
+					$wpdb->query( $wpdb->prepare( 'UPDATE ' . JobRepository::table() . ' SET locked_until = %d WHERE id = %d', $jobs->now() - 1, $job->id ) ); // By the clock acquire() judges it by.
 					return $jobs->acquire( $job->id );
 				} finally {
 					$wpdb->suppress_errors( $quiet );

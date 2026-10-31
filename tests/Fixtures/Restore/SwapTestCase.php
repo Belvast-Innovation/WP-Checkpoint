@@ -108,6 +108,9 @@ abstract class SwapTestCase extends RestoreTestCase {
 	/** @var array<int, array<string, mixed>> What each killed_at() saw right after the kill, for stuck(). */
 	private $kills = array();
 
+	/** @var callable|null Called by killed_at() right before it lets the killed run's lease lapse. */
+	protected $before_lapse = null;
+
 	/**
 	 * The installation the test's restore runs under (see $storage), a fresh instance.
 	 *
@@ -751,7 +754,12 @@ abstract class SwapTestCase extends RestoreTestCase {
 		// Signal 9: reported as 9 by PHP's exec() here, as 128 + 9 by a shell in between.
 		$this->assertContains( $status, array( 9, 137 ), 'killed by SIGKILL: ' . $text );
 		// The lease of the killed run is still there: as after a real crash, the next run takes over once it ran out.
-		$set     = time() - 1;
+		// Ran out by the clock the jobs judge it by (JobRepository::now(), the database's): this process's clock may be
+		// a second ahead of it (the offset is read once and rounds to whole seconds).
+		if ( null !== $this->before_lapse ) {
+			call_user_func( $this->before_lapse );
+		}
+		$set     = Plugin::instance()->jobs()->now() - 1;
 		$started = microtime( true );
 		$GLOBALS['wpdb']->query( $GLOBALS['wpdb']->prepare( 'UPDATE ' . \WPCheckpoint\Jobs\JobRepository::table() . ' SET locked_until = %d WHERE id = %d', $set, $job->id ) );
 		$this->kills[] = array(
