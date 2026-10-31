@@ -472,7 +472,7 @@ final class PutBackTest extends SwapTestCase {
 		try {
 			Plugin::instance()->job_actions()->answer( $job->id, array( SwapStep::CARRY_QUESTION => RestoreJob::KEEP ) );
 			$this->fail( 'a job managed elsewhere is not given up from here' );
-		} catch ( InvalidTransition $e ) {
+		} catch ( \WPCheckpoint\Jobs\PutBackNotKept $e ) {
 			$this->assertStringContainsString( 'managed by another installation', $e->getMessage() );
 		}
 		$this->set( $job->id, array( 'held_by' => '' ) );
@@ -496,11 +496,44 @@ final class PutBackTest extends SwapTestCase {
 		try {
 			Plugin::instance()->job_actions()->answer( $job->id, array( SwapStep::CARRY_QUESTION => RestoreJob::KEEP ) );
 			$this->fail( 'a changed record is not used' );
-		} catch ( InvalidTransition $e ) {
+		} catch ( \WPCheckpoint\Jobs\PutBackNotKept $e ) {
 			$this->assertStringContainsString( 'cannot be read back', $e->getMessage() );
 		}
 		$this->assertTrue( Plugin::instance()->jobs()->find( $job->id )->awaiting_answer(), 'still asked' );
 		file_put_contents( $file, $bytes );
+
+		// From the page (REST): a refused keep and a write the database refuses are answered as errors, nothing changed.
+		wp_set_current_user( self::$admin_id );
+		$rest = static function ( int $id ): \WP_REST_Response {
+			$request = new \WP_REST_Request( 'POST', '/wp-checkpoint/v1/jobs/' . $id . '/answer' );
+			$request->set_param( 'answers', array( SwapStep::CARRY_QUESTION => RestoreJob::KEEP ) );
+			return rest_do_request( $request );
+		};
+		$file = $this->evidence( Plugin::instance()->jobs()->find( $job->id ) ) . '/cursor_json';
+		file_put_contents( $file, $bytes . ' ' );
+		$refused = $rest( $job->id );
+		file_put_contents( $file, $bytes );
+		$this->assertSame( 409, $refused->get_status() );
+		$this->assertStringContainsString( 'The put-back could not be given up', (string) ( $refused->get_data()['message'] ?? '' ) );
+		$failing = false;
+		$break   = static function ( $sql ) use ( &$failing ) {
+			if ( is_string( $sql ) && false !== strpos( $sql, 'UNHEX(' ) && 0 === strpos( $sql, 'UPDATE ' ) ) {
+				$failing = true;
+				return 'UPDATE wpcheckpoint_no_such_table SET x = 1';
+			}
+			return $sql;
+		};
+		add_filter( 'query', $break );
+		try {
+			$quiet = $GLOBALS['wpdb']->suppress_errors( true );
+			$written = $rest( $job->id );
+			$GLOBALS['wpdb']->suppress_errors( $quiet );
+		} finally {
+			remove_filter( 'query', $break );
+		}
+		$this->assertTrue( $failing, 'the control: the keep\'s write was sent, and refused' );
+		$this->assertSame( 409, $written->get_status(), 'said as an error, not a fatal one' );
+		$this->assertTrue( Plugin::instance()->jobs()->find( $job->id )->awaiting_answer(), 'still asked' );
 
 		Plugin::instance()->job_actions()->answer( $job->id, array( SwapStep::CARRY_QUESTION => RestoreJob::KEEP ) );
 		$back = Plugin::instance()->jobs()->put_back_raw( $job->id );

@@ -1555,6 +1555,7 @@ final class JobActions {
 	 * @throws \InvalidArgumentException When an answer carries a secret.
 	 * @throws StaleJob When the job changed meanwhile.
 	 * @throws JobsUnavailable When the job table lacks columns the answer writes.
+	 * @throws PutBackNotKept When a put-back's question answered "keep" cannot put the job back as it was.
 	 */
 	public function answer( int $id, array $answers ) {
 		$job = $this->usable( $id );

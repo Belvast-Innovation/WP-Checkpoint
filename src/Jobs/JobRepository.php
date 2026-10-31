@@ -943,14 +943,15 @@ final class JobRepository {
 	 *
 	 * @param Job $job The job, paused at a put-back's question.
 	 * @return Job The row as now stored.
-	 * @throws InvalidTransition When what the claim wrote over cannot be read back whole, or is not where it was kept.
+	 * @throws PutBackNotKept When another installation manages the job, what the claim wrote over cannot be read back
+	 *                        whole, or the database refused the statement.
 	 * @throws StaleJob When the row changed meanwhile.
 	 */
 	public function give_up_put_back( Job $job ): Job {
 		global $wpdb;
 		if ( ! $this->manages( $job ) ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
-			throw new InvalidTransition( sprintf( 'Job %d is managed by another installation: its put-back is not given up from here; nothing is answered.', $job->id ) );
+			throw new PutBackNotKept( sprintf( 'Job %d is managed by another installation: its put-back is not given up from here; nothing is answered.', $job->id ) );
 		}
 		$base = $this->files_base( $job );
 		try {
@@ -961,7 +962,7 @@ final class JobRepository {
 			$now  = $this->put_back_raw( $job->id );
 		} catch ( \RuntimeException $e ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
-			throw new InvalidTransition( sprintf( 'Job %1$d: what the put-back wrote over cannot be read back (%2$s), so the job cannot be put back as it was; nothing is answered.', $job->id, $e->getMessage() ) );
+			throw new PutBackNotKept( sprintf( 'Job %1$d: what the put-back wrote over cannot be read back (%2$s), so the job cannot be put back as it was; nothing is answered.', $job->id, $e->getMessage() ) );
 		}
 		if ( null === $now ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
@@ -995,7 +996,7 @@ final class JobRepository {
 		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		if ( false === $affected ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
-			throw new \RuntimeException( sprintf( 'Job %d: the job could not be written (the database refused the statement); nothing is answered.', $job->id ) );
+			throw new PutBackNotKept( sprintf( 'Job %d: the job could not be written (the database refused the statement); nothing is answered.', $job->id ) );
 		}
 		$row = $this->find( $job->id );
 		if ( 1 !== (int) $affected || null === $row ) {
@@ -2120,6 +2121,7 @@ final class JobRepository {
 	 * @throws InvalidTransition When the job is not waiting for an answer.
 	 * @throws \InvalidArgumentException When the answers are not well-formed or carry a secret.
 	 * @throws StaleJob When the job changed meanwhile.
+	 * @throws PutBackNotKept When a put-back's question answered "keep" cannot put the job back as it was.
 	 */
 	public function answer( Job $job, array $answers, $message = null ): Job {
 		global $wpdb;
