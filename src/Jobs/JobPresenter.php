@@ -423,7 +423,7 @@ final class JobPresenter {
 			'updated_at'   => $job->updated_at,
 			'finished_at'  => $job->finished_at,
 			'last_error'   => $this->clean( $job->last_error, $extra ),
-			'retryable'    => $job->can_retry() && array() === $job->unreadable_columns, // check_retry() refuses one.
+			'retryable'    => $job->can_retry() && array() === $job->unreadable_columns && ! isset( $job->options[ JobRepository::OPTIONS_RESET ] ), // check_retry() refuses these.
 			'retry_useful' => $job->retry_useful(),
 			'failure_kind' => $job->failure_kind,
 			'error_detail' => $this->clean( self::error_detail( $job->last_error ), $extra ),

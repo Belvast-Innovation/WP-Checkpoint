@@ -173,7 +173,7 @@ final class Undo {
 			$out['attempt'] = $plan['attempt'];
 			$out['since']   = $since;
 			$out['code']    = self::code( $job, $plan['attempt'], $plan['entries'], $since );
-			$out['lost']    = $this->lost( $plan['entries'], $since, $db );
+			$out['lost']    = self::lost( $plan['entries'], $since, $db );
 			return $out;
 		} finally {
 			if ( $db instanceof ImportSession ) {
@@ -398,7 +398,7 @@ final class Undo {
 	 * @param Queries                                                                                             $db      Connection.
 	 * @return array<string, int|null>
 	 */
-	private function lost( array $entries, int $since, Queries $db ): array {
+	public static function lost( array $entries, int $since, Queries $db ): array {
 		$at      = gmdate( 'Y-m-d H:i:s', $since );
 		$orders  = "'" . implode( "', '", self::ORDER_TYPES ) . "'";
 		$queries = array();

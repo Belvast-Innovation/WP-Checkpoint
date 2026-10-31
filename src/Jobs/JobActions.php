@@ -135,6 +135,13 @@ final class JobActions {
 	private $undo = null;
 
 	/**
+	 * The checks of a put-back (built on first use; tests inject one).
+	 *
+	 * @var PutBack|null
+	 */
+	private $put_back = null;
+
+	/**
 	 * Constructor.
 	 *
 	 * @param JobRepository $repository Repository.
@@ -584,6 +591,118 @@ final class JobActions {
 			'confirmed' => true,
 			'code'      => $confirm,
 			'lines'     => $lines,
+		);
+	}
+
+	/**
+	 * The checks of a put-back.
+	 *
+	 * @param PutBack|null $put_back Checks (tests), or null for the site's own.
+	 * @return PutBack
+	 */
+	public function put_back_gate( ?PutBack $put_back = null ): PutBack {
+		if ( null !== $put_back ) {
+			$this->put_back = $put_back;
+		}
+		if ( null === $this->put_back ) {
+			$this->put_back = new PutBack( $this->repository );
+		}
+		return $this->put_back;
+	}
+
+	/**
+	 * Put a stuck restore that holds the site back (wp wpcheckpoint job put-back): without a confirmation code, what it
+	 * would do and the code; with the code, the job claimed for its own rollback (a swap half made: it ends cancelled)
+	 * or reverse (a swap committed: it ends undone), to be run by WP-CLI. Every check is read once, and again under the
+	 * start lock right before the claim. Before the claim, what it writes over in the job's row is kept byte for byte
+	 * next to the job's log (PutBackEvidence), and the claim writes only while the row still holds exactly that
+	 * (JobRepository::claim_put_back()): changed in between, nothing is written. Options that cannot be read are reset
+	 * by the claim (JobRepository::OPTIONS_RESET); readable ones are left as they are.
+	 *
+	 * @param int    $id      Job id.
+	 * @param string $confirm The confirmation code, or '' to be told it.
+	 * @return array{ok: bool, message: string, confirmed: bool, code: string, lines: string[]}
+	 * @throws JobsUnavailable When the jobs table is not usable, or the start lock is busy.
+	 */
+	public function put_back( int $id, string $confirm ): array {
+		$refuse = static function ( string $why, array $lines = array() ): array {
+			return array(
+				'ok'        => false,
+				'message'   => $why,
+				'confirmed' => false,
+				'code'      => '',
+				'lines'     => $lines,
+			);
+		};
+		$this->usable( $id );
+		$gate = $this->put_back_gate();
+		$seen = $gate->assess( $id );
+		if ( ! $seen['ok'] || null === $seen['job'] ) {
+			return $refuse( $seen['why'], $seen['evidence'] );
+		}
+		if ( '' === $confirm ) {
+			return array(
+				'ok'        => true,
+				/* translators: 1: job id, 2: confirmation code */
+				'message'   => sprintf( __( 'Nothing was changed. To put restore job %1$d back, run: wp wpcheckpoint job put-back %1$d --confirm=%2$s', 'wp-checkpoint' ), $id, $seen['code'] ),
+				'confirmed' => false,
+				'code'      => $seen['code'],
+				'lines'     => $seen['lines'],
+			);
+		}
+		$changed = __( 'The confirmation code does not match: the restore or its plan changed since it was given, or it is another job\'s. Nothing was changed; run the command without --confirm to see what it would do now.', 'wp-checkpoint' );
+		if ( ! hash_equals( $seen['code'], $confirm ) ) {
+			return $refuse( $changed );
+		}
+		if ( ! $this->repository->lock_starts() ) {
+			throw new JobsUnavailable( 'Another job is being started right now; try again in a moment.' );
+		}
+		try {
+			// Read again under the lock: a run that took the job, or a row that changed, meanwhile is seen here.
+			$again = $gate->assess( $id );
+			if ( ! $again['ok'] || null === $again['job'] ) {
+				return $refuse( $again['why'], $again['evidence'] );
+			}
+			if ( ! hash_equals( $again['code'], $confirm ) ) {
+				return $refuse( $changed );
+			}
+			$job  = $again['job'];
+			$base = $this->repository->files_base( $job );
+			if ( '' === $base ) {
+				return $refuse( __( 'The restore\'s storage directory is not this one, so what the put-back writes over in its row cannot be kept next to its log: nothing was changed.', 'wp-checkpoint' ) );
+			}
+			try {
+				$kept = PutBackEvidence::write( $base, $job->id, $again['raw'], $this->repository->now() );
+			} catch ( \RuntimeException $e ) {
+				return $refuse( __( 'What the put-back writes over in the job\'s row could not be kept next to its log: nothing was changed.', 'wp-checkpoint' ) );
+			}
+			$reset  = in_array( 'options_json', $job->unreadable_columns, true );
+			$cursor = SwapStep::put_back_cursor( $again['committed'], $again['attempt'], $job->site_mark, $kept['dir'], $kept['sum'] );
+			try {
+				$claimed = $this->repository->claim_put_back( $job, $again['raw'], $cursor, $reset, __( 'Putting the site back as it was', 'wp-checkpoint' ), $job->managing_token() );
+			} catch ( StaleJob $e ) {
+				return $refuse( __( 'The job changed meanwhile, or a run holds it; nothing was changed. Try again.', 'wp-checkpoint' ) );
+			}
+		} finally {
+			$this->repository->unlock_starts();
+		}
+		$this->runner->note(
+			$claimed,
+			Logger::WARNING,
+			'The site is put back, as asked from WP-CLI (wp wpcheckpoint job put-back)',
+			array(
+				'swap'          => $again['committed'] ? 'committed (the restore ends undone)' : 'half made (the restore ends cancelled)',
+				'kept'          => $kept['dir'],
+				'unreadable'    => implode( ', ', $job->unreadable_columns ),
+				'options reset' => $reset ? 'yes' : 'no',
+			)
+		);
+		return array(
+			'ok'        => true,
+			'message'   => __( 'The site is being put back.', 'wp-checkpoint' ),
+			'confirmed' => true,
+			'code'      => $confirm,
+			'lines'     => $seen['lines'],
 		);
 	}
 
@@ -1440,7 +1559,12 @@ final class JobActions {
 		if ( null === $job ) {
 			return null;
 		}
-		$answered = $this->repository->answer( $job, $answers );
+		$giving_up = 'carry_ask' === ( $job->cursor['phase'] ?? '' ) && SwapStep::putting_back( $job->cursor ) && RestoreJob::KEEP === ( $answers[ SwapStep::CARRY_QUESTION ] ?? null );
+		$answered  = $this->repository->answer( $job, $answers );
+		if ( $giving_up ) {
+			$this->runner->note( $answered, Logger::WARNING, 'The put-back was given up as the administrator chose: the job is as it was before it, still holding the site', array( 'kept' => (string) ( $job->cursor['evidence'] ?? '' ) ) );
+			return $answered; // It is run the way it was before (wp wpcheckpoint job status says how), nothing scheduled here.
+		}
 		Loopback::schedule( $id, Loopback::FALLBACK_SECONDS ); // Answered and the page closed: the job still goes on.
 		return $answered;
 	}

@@ -443,7 +443,7 @@ final class Runner {
 				}
 				// The step undid what it did to the site after a cancel was requested: cancelled as with the lock.
 				$logger->info( 'The job is cancelled as requested', array( 'step' => $step_id ) );
-				$this->transition( $job, $token, Job::CANCELLED, '' );
+				$this->transition( $job, $token, Job::CANCELLED, $e->said ? $e->getMessage() : '' );
 				$this->cleanup( $job );
 				return new TickResult( TickResult::FINISHED, -1, $job, $this->redactor->redact( $e->getMessage() ) );
 			} catch ( Stopped $e ) {

@@ -256,6 +256,70 @@ final class JobCommand {
 	}
 
 	/**
+	 * Put the site back as it was before a restore that is stuck while it holds the site, from the restore's swap plan
+	 * and what is there, in maintenance mode while that is done.
+	 *
+	 * A swap that was half made is rolled back and the restore cancelled. A swap that was made is reversed as an undo:
+	 * everything written on the site since is dropped, and the restore ends undone (the restored site is kept for 7
+	 * days). Neither the job's position nor its options are needed. Without --confirm nothing is changed: it says what
+	 * it would do and gives the confirmation code.
+	 *
+	 * ## OPTIONS
+	 *
+	 * <id>
+	 * : Job id of the restore.
+	 *
+	 * [--confirm=<code>]
+	 * : The confirmation code the command gives without it.
+	 *
+	 * ## EXIT CODES
+	 *
+	 * As "job run" once the put-back started: 0 when a swap that was made was put back (the restore ended undone), 2
+	 * when one half made was (the restore ended cancelled, as a put-back of it does); 1 when it was refused or not
+	 * confirmed.
+	 *
+	 * @subcommand put-back
+	 *
+	 * @param string[]             $args       Positional arguments.
+	 * @param array<string, mixed> $assoc_args Options.
+	 * @return void
+	 */
+	public function put_back( array $args, array $assoc_args ): void {
+		Unexpected::guard(
+			function () use ( $args, $assoc_args ): void {
+				$this->put_back_body( $args, $assoc_args );
+			},
+			array( $this->presenter, 'clean' )
+		);
+	}
+
+	/**
+	 * The body of put_back(): what it would do and the code (or why not, with what can be read), or the job claimed and
+	 * run to its end.
+	 *
+	 * @param string[]             $args       Positional arguments.
+	 * @param array<string, mixed> $assoc_args Options.
+	 * @return void
+	 */
+	private function put_back_body( array $args, array $assoc_args ): void {
+		$id = (int) $args[0];
+		try {
+			$outcome = $this->actions->put_back( $id, (string) ( $assoc_args['confirm'] ?? '' ) );
+		} catch ( JobsUnavailable $e ) {
+			WP_CLI::error( $this->presenter->clean( $e->getMessage() ) );
+		}
+		if ( ! $outcome['confirmed'] ) {
+			foreach ( $outcome['lines'] as $line ) {
+				WP_CLI::line( $this->presenter->clean( $line ) );
+			}
+			WP_CLI::error( $this->presenter->clean( $outcome['message'] ) );
+		}
+		WP_CLI::line( $this->presenter->clean( $outcome['message'] ) );
+		$code = ( new RunLoop( $this->actions, $this->presenter, 'sleep', array( 'WP_CLI', 'line' ) ) )->run( $id, true );
+		WP_CLI::halt( $code );
+	}
+
+	/**
 	 * Take over a restore that holds the site changed and is managed by another installation, when it is this site's
 	 * as far as can be told (wp wpcheckpoint job status shows the command with its code).
 	 *

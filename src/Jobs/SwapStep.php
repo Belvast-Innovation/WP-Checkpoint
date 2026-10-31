@@ -132,19 +132,21 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * Why a swap was rolled back, as its cursor keeps it (a code: the cursor holds identifiers and positions, not
 	 * texts with paths), and what the job's error says of it in a later tick.
 	 */
-	const INTERRUPTED = 'interrupted';
-	const INCOMPLETE  = 'incomplete';
-	const STOPPED     = 'stopped';
-	const REVERSED    = 'reversed';
-	const UNDONE      = 'undone';
-	const ASKED       = 'asked';
-	const REASONS     = array(
-		self::INTERRUPTED => 'The swap was interrupted before it was complete.',
-		self::INCOMPLETE  => 'After the renames, not every table of the plan was in its place.',
-		self::STOPPED     => 'The swap stopped (the job log says why).',
-		self::REVERSED    => 'A check of the restored site found it broken: the site was put back as it was before the restore.',
-		self::UNDONE      => 'The restored site could not be checked, and the swap was undone as chosen: the site was put back as it was before the restore.',
-		self::ASKED       => 'The restore was undone as asked (wp wpcheckpoint job undo): the site was put back as it was before the restore.',
+	const INTERRUPTED     = 'interrupted';
+	const INCOMPLETE      = 'incomplete';
+	const STOPPED         = 'stopped';
+	const REVERSED        = 'reversed';
+	const UNDONE          = 'undone';
+	const ASKED           = 'asked';
+	const PUT_BACK_REASON = 'putback';
+	const REASONS         = array(
+		self::INTERRUPTED     => 'The swap was interrupted before it was complete.',
+		self::INCOMPLETE      => 'After the renames, not every table of the plan was in its place.',
+		self::STOPPED         => 'The swap stopped (the job log says why).',
+		self::REVERSED        => 'A check of the restored site found it broken: the site was put back as it was before the restore.',
+		self::UNDONE          => 'The restored site could not be checked, and the swap was undone as chosen: the site was put back as it was before the restore.',
+		self::ASKED           => 'The restore was undone as asked (wp wpcheckpoint job undo): the site was put back as it was before the restore.',
+		self::PUT_BACK_REASON => 'The site was put back as it was before the restore, as asked (wp wpcheckpoint job put-back).',
 	);
 
 	/**
@@ -1099,7 +1101,8 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			'reason'  => (string) ( $cursor['reason'] ?? self::ASKED ),
 			'check'   => (string) ( $cursor['check'] ?? '' ),
 			'out'     => true,
-		);
+		) + array_intersect_key( $cursor, array_flip( array( 'evidence', 'evidence_sum' ) ) ); // A put-back's: keep puts the job back from it.
+
 		$context->checkpoint( $cursor, 88, __( 'Waiting for your decision on 1 question', 'wp-checkpoint' ) );
 		$this->at( 'carry_ask_recorded' );
 		$context->logger()->warning(
@@ -1154,7 +1157,16 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		$answer = $context->options()['answers'][ self::CARRY_QUESTION ] ?? null;
 		$at     = $context->job()->committed_at;
 		$why    = '';
-		if ( ! self::within_window( $at, $this->now() ) ) {
+		if ( self::putting_back( $cursor ) ) {
+			// A put-back's question has no deadline: it waits for an answer, the job holding the site meanwhile. Keep is
+			// never this restore's completion (nothing after its commit was done for real): the answer itself puts the
+			// job back as it was before the put-back (JobRepository::answer()); one that reached the step another way is
+			// not acted on, and the question is asked again.
+			if ( RestoreJob::KEEP === $answer ) {
+				$context->logger()->warning( 'An answer to keep the restored site reached the put-back without putting the job back as it was; the question is asked again' );
+				$answer = null;
+			}
+		} elseif ( ! self::within_window( $at, $this->now() ) ) {
 			// The deadline (the end of the time the restore can be undone in) passed: what the undo said it drops was
 			// counted before, and it is no longer an undo the plugin makes. The restored site stays, whatever was answered.
 			$deadline = array( 'deadline' => gmdate( 'Y-m-d H:i', $at + Undo::WINDOW_SECONDS ) . ' UTC' );
@@ -1220,7 +1232,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		$reason = (string) ( $cursor['reason'] ?? self::INTERRUPTED );
 		$undone = self::undone( $cursor );
 		if ( 'restored' === ( $cursor['phase'] ?? '' ) ) {
-			if ( $undone ) {
+			if ( self::checked_back( $cursor ) ) {
 				$cursor = $this->check_undone( $context, $db, $cursor );
 			}
 			$this->release( $context, $this->maintenance( $cursor ) );
@@ -1247,7 +1259,29 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @return bool
 	 */
 	private static function undone( array $cursor ): bool {
-		return in_array( (string) ( $cursor['reason'] ?? '' ), array( self::UNDONE, self::ASKED ), true ) && ! empty( $cursor['out'] );
+		return in_array( (string) ( $cursor['reason'] ?? '' ), array( self::UNDONE, self::ASKED, self::PUT_BACK_REASON ), true ) && ! empty( $cursor['out'] );
+	}
+
+	/**
+	 * Whether a rollback's cursor is a put-back (wp wpcheckpoint job put-back, JobActions::put_back()): of a swap that was
+	 * committed ("out": it ends undone, as an undo) or of one that was half made (it ends cancelled).
+	 *
+	 * @param array<string, mixed> $cursor Cursor.
+	 * @return bool
+	 */
+	public static function putting_back( array $cursor ): bool {
+		return self::PUT_BACK_REASON === (string) ( $cursor['reason'] ?? '' );
+	}
+
+	/**
+	 * Whether the site, once put back by this rollback, is checked before it is let out (check_undone()): after an undo
+	 * the site was let out from, and after any put-back.
+	 *
+	 * @param array<string, mixed> $cursor Cursor.
+	 * @return bool
+	 */
+	private static function checked_back( array $cursor ): bool {
+		return self::undone( $cursor ) || self::putting_back( $cursor );
 	}
 
 	/**
@@ -1319,7 +1353,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @return bool
 	 */
 	public static function checks_undone( array $cursor ): bool {
-		return 'restored' === ( $cursor['phase'] ?? '' ) && self::undone( $cursor ) && ! isset( $cursor['after_undo'] );
+		return 'restored' === ( $cursor['phase'] ?? '' ) && self::checked_back( $cursor ) && ! isset( $cursor['after_undo'] );
 	}
 
 	/**
@@ -1394,6 +1428,37 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			'check'   => '',
 			'out'     => true,
 		);
+	}
+
+	/**
+	 * The cursor a put-back claims a stuck restore with (wp wpcheckpoint job put-back, JobActions::put_back()), made from
+	 * the plan and the job row only: a swap that was committed ($committed) is reversed as an undo after the site was let
+	 * out ("reverse", "out": its maintenance file waits for anyone else's, its own state is carried back, it ends
+	 * undone); one that was half made is rolled back ("rollback": it ends cancelled, the claim recording the cancel). The
+	 * evidence directory (PutBackEvidence) holds what the claim wrote over: an answer to keep the restored site puts the
+	 * job back from it.
+	 *
+	 * @param bool   $committed Whether the swap was committed (the row's site state is swapped).
+	 * @param int    $attempt   The plan's attempt.
+	 * @param string $mark      The job's maintenance file mark (Job::$site_mark).
+	 * @param string $evidence  The evidence directory, relative to the storage directory.
+	 * @param string $sum       SHA-256 of its manifest.
+	 * @return array<string, mixed>
+	 */
+	public static function put_back_cursor( bool $committed, int $attempt, string $mark, string $evidence, string $sum ): array {
+		$cursor = array(
+			'phase'        => $committed ? 'reverse' : 'rollback',
+			'attempt'      => $attempt,
+			'mark'         => $mark,
+			'reason'       => self::PUT_BACK_REASON,
+			'check'        => '',
+			'evidence'     => $evidence,
+			'evidence_sum' => $sum,
+		);
+		if ( $committed ) {
+			$cursor['out'] = true;
+		}
+		return $cursor;
 	}
 
 	/**
@@ -1484,6 +1549,22 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @return \RuntimeException Cancelled, Undone or RetryFrom.
 	 */
 	private function ended( JobContext $context, string $reason, string $check = '', bool $undone = false, array $cursor = array() ): \RuntimeException {
+		$found = self::after_undo_text( $cursor );
+		if ( self::putting_back( $cursor ) && ! $undone ) {
+			// A put-back of a swap that was half made ends cancelled (its claim recorded the cancel); what the check of
+			// the site as put back found is said with it.
+			$context->logger()->info( 'The site was put back as asked (wp wpcheckpoint job put-back); the restore is cancelled' );
+			if ( '' !== $found ) {
+				return Cancelled::said(
+					sprintf(
+						/* translators: %s: what the check found */
+						SiteCheck::FAILED === ( $cursor['after_undo'] ?? '' ) ? __( 'The site was put back and the restore cancelled, but the site\'s check then failed: %s.', 'wp-checkpoint' ) : __( 'The site was put back and the restore cancelled, but the site could not be checked: %s.', 'wp-checkpoint' ),
+						$found
+					)
+				);
+			}
+			return Cancelled::said( __( 'The site was put back as it was before the restore, and the restore cancelled.', 'wp-checkpoint' ) );
+		}
 		if ( 0 !== $context->job()->cancel_requested && ! $undone ) {
 			// An undo's put-back is not stopped by a cancel requested while it runs: it ends as the undo it is.
 			return new Cancelled( 'The restore was cancelled; the site is as it was before it.' );
@@ -1494,7 +1575,21 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			// a retry from the final check would also fail (the copy is no longer what the import left).
 			// The message stays short (the job's progress message holds it); the reason is in the log (reverse()).
 			$context->logger()->info( 'The restore was undone', array( 'reason' => $text ) );
-			$found = self::after_undo_text( $cursor );
+			$days = (int) ( JobRepository::WORK_RETENTION_SECONDS / 86400 );
+			if ( self::putting_back( $cursor ) ) {
+				if ( '' !== $found ) {
+					return new Undone(
+						sprintf(
+							/* translators: 1: what the check found, 2: days the restored copy is kept */
+							SiteCheck::FAILED === ( $cursor['after_undo'] ?? '' ) ? __( 'The site was put back, but its check then failed: %1$s. Restored copy kept %2$d days.', 'wp-checkpoint' ) : __( 'The site was put back, but it could not be checked: %1$s. Restored copy kept %2$d days.', 'wp-checkpoint' ),
+							$found,
+							$days
+						)
+					);
+				}
+				/* translators: %d: days the restored copy is kept */
+				return new Undone( sprintf( __( 'The site was put back as it was before the restore. The restored copy is kept for %d days.', 'wp-checkpoint' ), $days ) );
+			}
 			if ( '' !== $found ) {
 				// Said where the job's end is read (the progress message holds 191 characters: the log has the rest).
 				return new Undone(
@@ -1502,12 +1597,12 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 						/* translators: 1: what the check found, 2: days the restored copy is kept */
 						SiteCheck::FAILED === ( $cursor['after_undo'] ?? '' ) ? __( 'The restore was undone, but the site\'s check then failed: %1$s. Restored copy kept %2$d days.', 'wp-checkpoint' ) : __( 'The restore was undone, but the site could not be checked: %1$s. Restored copy kept %2$d days.', 'wp-checkpoint' ),
 						$found,
-						(int) ( JobRepository::WORK_RETENTION_SECONDS / 86400 )
+						$days
 					)
 				);
 			}
 			/* translators: %d: days the restored copy is kept */
-			return new Undone( sprintf( __( 'The restore was undone: the site is as it was before it. The restored copy is kept for %d days after the undo.', 'wp-checkpoint' ), (int) ( JobRepository::WORK_RETENTION_SECONDS / 86400 ) ) );
+			return new Undone( sprintf( __( 'The restore was undone: the site is as it was before it. The restored copy is kept for %d days after the undo.', 'wp-checkpoint' ), $days ) );
 		}
 		if ( self::REVERSED === $reason || self::UNDONE === $reason ) {
 			// The restored copy is kept under its temporary names, next to the site, for a retry (the engine reclaims
