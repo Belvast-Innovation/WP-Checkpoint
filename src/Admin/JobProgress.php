@@ -122,6 +122,8 @@ final class JobProgress {
 				return __( 'Failed', 'wp-checkpoint' );
 			case Job::CANCELLED:
 				return __( 'Cancelled', 'wp-checkpoint' );
+			case Job::UNDONE:
+				return __( 'Undone', 'wp-checkpoint' );
 		}
 		return $status;
 	}
@@ -139,6 +141,7 @@ final class JobProgress {
 			'completed'       => self::status_label( Job::COMPLETED ),
 			'failed'          => self::status_label( Job::FAILED ),
 			'cancelled'       => self::status_label( Job::CANCELLED ),
+			'undone'          => self::status_label( Job::UNDONE ),
 			'session_expired' => __( 'Your session expired. Reload the page to continue.', 'wp-checkpoint' ),
 			'request_failed'  => __( 'The request failed; retrying.', 'wp-checkpoint' ),
 			'busy'            => __( 'Another process is working on this job.', 'wp-checkpoint' ),

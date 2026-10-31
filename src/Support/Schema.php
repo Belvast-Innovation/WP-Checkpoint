@@ -24,7 +24,7 @@ defined( 'ABSPATH' ) || exit;
 final class Schema {
 
 	const OPTION  = StoredNames::DB_VERSION;
-	const CURRENT = 14;
+	const CURRENT = 15;
 
 	/**
 	 * Jobs table name without the prefix.
@@ -69,6 +69,7 @@ final class Schema {
 		'cancel_requested' => 'bigint(20) unsigned NOT NULL DEFAULT 0',
 		'held_by'          => "varchar(32) NOT NULL DEFAULT ''",
 		'site_mark'        => "varchar(64) NOT NULL DEFAULT ''",
+		'committed_at'     => 'bigint(20) unsigned NOT NULL DEFAULT 0',
 	);
 
 	/**
@@ -548,6 +549,11 @@ final class Schema {
 				// table as before, so min_compatible stays 1.
 				self::create_jobs_table();
 				self::jobs_table_innodb();
+				return 1;
+			case 15:
+				// Adds committed_at (0): when a restore's swap was last committed, which an undo is measured from. Older
+				// code neither reads nor writes it, so min_compatible stays 1.
+				self::create_jobs_table();
 				return 1;
 			case 10:
 				// Adds held_by (''); older code ignores it, so min_compatible stays 1. What older code does with the rows

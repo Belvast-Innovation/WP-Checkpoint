@@ -65,6 +65,9 @@ defined( 'ABSPATH' ) || exit;
  * - RECLAIM: what an earlier attempt of the restore recorded that a new one
  *   does not use (its temporary tables and staging roots), written whole by
  *   the preflight before anything on it is deleted (PreviousAttempt).
+ * - CARRY_BACK: why this plugin's own state could not be carried back on an
+ *   undo, and the names of its rows that would not be, written whole by the
+ *   swap before it asks how to go on; the question names this file.
  */
 final class RestoreFiles {
 
@@ -95,6 +98,8 @@ final class RestoreFiles {
 	const RECLAIM = 'restore-reclaim.json';
 
 	const LINKED = 'restore-linked-targets.json';
+
+	const CARRY_BACK = 'restore-carry-back.json';
 
 	/**
 	 * A file or directory of the work directory.

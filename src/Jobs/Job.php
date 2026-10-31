@@ -27,6 +27,15 @@ final class Job {
 	const CANCELLED = 'cancelled';
 
 	/**
+	 * A restore whose swap was undone after the restored site was let out (Jobs\SwapStep: an undo answered after the
+	 * release, or wp wpcheckpoint job undo): the site is as it was before the restore, and the restored copy is kept
+	 * under its staging names for WORK_RETENTION_SECONDS (JobRepository::expire_work()). Not a failure, and an end:
+	 * nothing offers Retry for it (can_retry() is for failed jobs) and nothing queues it again. A swap reversed before
+	 * the site was let out fails as before (nothing was written meanwhile, so its Retry drops nothing).
+	 */
+	const UNDONE = 'undone';
+
+	/**
 	 * What a job has done to the site (site_state).
 	 */
 	const SITE_UNTOUCHED = 0;
@@ -201,9 +210,10 @@ final class Job {
 	 */
 	const TRANSITIONS = array(
 		self::QUEUED    => array( self::RUNNING, self::FAILED, self::CANCELLED ),
-		self::RUNNING   => array( self::COMPLETED, self::FAILED, self::PAUSED, self::CANCELLED ),
+		self::RUNNING   => array( self::COMPLETED, self::FAILED, self::PAUSED, self::CANCELLED, self::UNDONE ),
 		self::PAUSED    => array( self::RUNNING, self::FAILED, self::CANCELLED ), // failed: given up unanswered, or bound to a replaced storage directory.
 		self::FAILED    => array( self::QUEUED ),
+		self::UNDONE    => array(),
 		self::COMPLETED => array(),
 		self::CANCELLED => array(),
 	);
@@ -338,6 +348,14 @@ final class Job {
 	 * @var string
 	 */
 	public $site_mark = '';
+
+	/**
+	 * Unix time the job's swap was last committed (site_state became SITE_SWAPPED), written in the statement that
+	 * records it (JobRepository::save_progress()); 0 when it never was, or the row predates the column.
+	 *
+	 * @var int
+	 */
+	public $committed_at = 0;
 
 	/**
 	 * Log file path relative to the storage base directory, e.g. "logs/job-3-ab12cd34.log".

@@ -7,11 +7,13 @@ use WP_UnitTestCase;
 use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\JobRepository;
 use WPCheckpoint\Jobs\RestoreJob;
+use WPCheckpoint\Jobs\SwapStep;
 use WPCheckpoint\Plugin;
 use WPCheckpoint\Restore\SelfCheck;
 use WPCheckpoint\Rest\Controller;
 use WPCheckpoint\Rest\SelfCheckController;
 use WPCheckpoint\Support\StoredNames;
+use WPCheckpoint\Tests\Fixtures\StorageDirs;
 
 /**
  * The self-check route (Rest\SelfCheckController): registered only for a request to it while a restore that holds
@@ -34,6 +36,9 @@ final class SelfCheckRouteTest extends WP_UnitTestCase {
 	/** @var mixed What the request's REST route was before the test. */
 	private $route_before = null;
 
+	/** @var string[]|null The storage directories in wp-content when the test started (StorageDirs); null before set_up(). */
+	private $storage_before = null;
+
 	public static function wpSetUpBeforeClass( $factory ): void {
 		self::$subscriber = $factory->user->create( array( 'role' => 'subscriber' ) );
 		self::$admin      = $factory->user->create( array( 'role' => 'administrator' ) );
@@ -45,6 +50,10 @@ final class SelfCheckRouteTest extends WP_UnitTestCase {
 	public function set_up(): void {
 		parent::set_up();
 		$this->route_before = $GLOBALS['wp']->query_vars['rest_route'] ?? null;
+		// The jobs this test makes resolve the storage directory: one it makes (its stored state rolled back with the
+		// test's transaction) goes with it, whichever test ran before.
+		$this->storage_before = StorageDirs::listing();
+		Plugin::instance()->reset_directories();
 	}
 
 	public function tear_down(): void {
@@ -55,6 +64,10 @@ final class SelfCheckRouteTest extends WP_UnitTestCase {
 		}
 		$GLOBALS['wp_rest_server'] = null;
 		parent::tear_down();
+		Plugin::instance()->reset_directories();
+		if ( null !== $this->storage_before ) {
+			StorageDirs::remove_made_since( $this->storage_before );
+		}
 	}
 
 	/**
@@ -181,6 +194,59 @@ final class SelfCheckRouteTest extends WP_UnitTestCase {
 			} finally {
 				restore_current_blog();
 			}
+		}
+	}
+
+	public function test_the_route_is_registered_while_the_site_put_back_by_an_undo_is_checked_and_not_otherwise_while_it_changes(): void {
+		global $wpdb;
+		$undo = array(
+			'phase'  => 'restored',
+			'mark'   => 'm',
+			'reason' => SwapStep::ASKED,
+			'check'  => '',
+			'out'    => true,
+		);
+		$job  = $this->checking(
+			array(
+				'site_state'  => Job::SITE_CHANGING,
+				'cursor_json' => wp_json_encode( $undo ),
+			)
+		);
+		$this->assertContains( SelfCheck::PATH, $this->routes_for( SelfCheck::PATH ), 'the site put back by an undo, checked behind the held file' );
+		$answered = array( 'reason' => SwapStep::UNDONE ) + $undo;
+		foreach ( array(
+			'an undo answered after the release' => array( $answered, true ),
+			'not let out (a reverse after a failed check)' => array( array( 'out' => false ) + $undo, false ),
+			'a reverse after a failed check'     => array( array( 'reason' => SwapStep::REVERSED ) + $undo, false ),
+			'a rollback'                         => array( array( 'reason' => SwapStep::INTERRUPTED ) + $undo, false ),
+			'its verdict recorded'               => array( $undo + array( 'after_undo' => 'passed' ), false ),
+			'still being put back'               => array( array( 'phase' => 'reverse' ) + $undo, false ),
+			'recorded as untouched'              => array( array( 'phase' => 'reverted' ) + $undo, false ),
+		) as $case => $how ) {
+			$wpdb->update( JobRepository::table(), array( 'cursor_json' => wp_json_encode( $how[0] ) ), array( 'id' => $job->id ) );
+			if ( $how[1] ) {
+				$this->assertContains( SelfCheck::PATH, $this->routes_for( SelfCheck::PATH ), $case );
+			} else {
+				$this->assertNotContains( SelfCheck::PATH, $this->routes_for( SelfCheck::PATH ), $case );
+			}
+		}
+		$wpdb->update( JobRepository::table(), array( 'cursor_json' => wp_json_encode( $undo ) ), array( 'id' => $job->id ) );
+		$this->assertContains( SelfCheck::PATH, $this->routes_for( SelfCheck::PATH ), 'the control, put back' );
+		foreach ( array(
+			'the site recorded as untouched' => array( 'site_state' => Job::SITE_UNTOUCHED ),
+			'the job paused'                 => array( 'status' => Job::PAUSED ),
+		) as $case => $columns ) {
+			$wpdb->update( JobRepository::table(), $columns, array( 'id' => $job->id ) );
+			$this->assertNotContains( SelfCheck::PATH, $this->routes_for( SelfCheck::PATH ), $case );
+			$wpdb->update(
+				JobRepository::table(),
+				array(
+					'status'     => Job::RUNNING,
+					'site_state' => Job::SITE_CHANGING,
+				),
+				array( 'id' => $job->id )
+			);
+			$this->assertContains( SelfCheck::PATH, $this->routes_for( SelfCheck::PATH ), $case . ': the control, put back' );
 		}
 	}
 

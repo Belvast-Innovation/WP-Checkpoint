@@ -449,6 +449,17 @@ final class Runner {
 			} catch ( Stopped $e ) {
 				// The answers that stopped it go with the failure: a retry asks those questions again.
 				return $this->fail( $job, $token, $logger, sprintf( 'Step "%s": %s', $step_id, $this->describe( $e ) ), '', '', $e->questions() );
+			} catch ( Undone $e ) {
+				if ( Job::SITE_UNTOUCHED !== $job->site_state ) {
+					// The site is not recorded as put back: not an end, failed as any other failure (the retry goes on
+					// putting it back).
+					$logger->error( 'A step ended the job as undone while it holds the site changed' );
+					return $this->fail( $job, $token, $logger, sprintf( 'Step "%s": %s', $step_id, $this->describe( $e ) ) );
+				}
+				// Not a failure: undone, as the administrator chose.
+				$logger->info( 'The restore was undone' );
+				$this->transition( $job, $token, Job::UNDONE, $e->getMessage() );
+				return new TickResult( TickResult::FINISHED, -1, $job, $this->redactor->redact( $e->getMessage() ) );
 			} catch ( RetryFrom $e ) {
 				if ( Job::SITE_UNTOUCHED !== $job->site_state ) {
 					// A retry from an earlier step would drop the cursor that knows how to put the site back: failed as

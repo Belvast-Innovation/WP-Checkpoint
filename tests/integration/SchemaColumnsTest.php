@@ -131,6 +131,35 @@ final class SchemaColumnsTest extends JobTestCase {
 		$this->assertNotFalse( $wpdb->query( "ALTER TABLE {$table} ENGINE=InnoDB" ), 'the jobs table could not be put back to InnoDB; every later restore test would fail at its platform check: ' . $wpdb->last_error );
 	}
 
+	public function test_version_15_adds_the_commit_time_and_a_swap_committed_before_reads_as_none(): void {
+		global $wpdb;
+		$table = Schema::jobs_table();
+		self::drop_column( 'committed_at' );
+		$wpdb->insert(
+			$table,
+			array(
+				'type'       => 'restore',
+				'status'     => Job::COMPLETED,
+				'site_state' => Job::SITE_SWAPPED,
+			)
+		);
+		$id = (int) $wpdb->insert_id;
+		try {
+			Options::set( Schema::OPTION, array( 'version' => 14, 'min_compatible' => 1 ) );
+			$result = Schema::ensure();
+			$this->assertSame( 'migrated', $result['action'], wp_json_encode( $result ) );
+			$this->assertSame( 15, Options::get( Schema::OPTION )['version'] );
+			$this->assertSame( 1, Options::get( Schema::OPTION )['min_compatible'], 'older code neither reads nor writes it' );
+			$this->assertContains( 'committed_at', $wpdb->get_col( "SHOW COLUMNS FROM {$table}" ) );
+			$job = Plugin::instance()->jobs()->find( $id );
+			$this->assertSame( Job::SITE_SWAPPED, $job->site_state, 'the control: the row is the swapped one' );
+			$this->assertSame( 0, $job->committed_at, 'a swap committed before the column has no time (an undo refuses it)' );
+			$this->assertSame( array(), $job->missing_columns );
+		} finally {
+			$wpdb->delete( $table, array( 'id' => $id ) ); // The DDL committed the row: a completed restore later tests would see.
+		}
+	}
+
 	public function test_the_jobs_table_of_an_earlier_version_is_made_innodb_on_upgrade(): void {
 		try {
 			// A table an earlier version made under the server's default engine, here MyISAM: a run could not lock its row.
@@ -138,7 +167,7 @@ final class SchemaColumnsTest extends JobTestCase {
 			Options::set( Schema::OPTION, array( 'version' => 13, 'min_compatible' => 1 ) );
 			$result = Schema::ensure();
 			$this->assertSame( 'migrated', $result['action'], wp_json_encode( $result ) );
-			$this->assertSame( 14, Options::get( Schema::OPTION )['version'] );
+			$this->assertSame( Schema::CURRENT, Options::get( Schema::OPTION )['version'] );
 			$this->assertSame( 'innodb', $this->engine(), 'version 14 pins the engine' );
 			$this->assertSame( 'none', Schema::ensure()['action'], 'and once more does nothing' );
 		} finally {
@@ -159,7 +188,7 @@ final class SchemaColumnsTest extends JobTestCase {
 			try {
 				$result = $this->ensure();
 				$this->assertSame( 'migrated', $result['action'], wp_json_encode( $result ) );
-				$this->assertSame( 14, Options::get( Schema::OPTION )['version'], 'recorded: the columns are there' );
+				$this->assertSame( Schema::CURRENT, Options::get( Schema::OPTION )['version'], 'recorded: the columns are there' );
 				$this->assertSame( 'myisam', $this->engine(), 'the control: the ALTER was refused' );
 				$this->assertSame( 'none', $this->ensure()['action'], 'a plain request reports nothing' );
 				$this->assertSame( 'none', Schema::ensure( true )['action'], 'a verifying one neither (the engine is not a schema problem)' );
