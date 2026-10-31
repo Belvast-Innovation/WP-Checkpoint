@@ -459,6 +459,12 @@ final class PutBackTest extends SwapTestCase {
 		$this->assertSame( Job::PAUSED, $still->status, 'not given up' );
 		$this->assertTrue( $still->awaiting_answer(), 'not answered' );
 		$this->assertSame( array(), (array) ( $still->options['answers'] ?? array() ) );
+		// Nor does a run of it: it asks again, it does not end the restore (no deadline in the step either).
+		$this->retype( $still );
+		$again = $this->cli_run( $still );
+		$this->assertSame( Job::PAUSED, $again->status, 'a run after the wait asks again' );
+		$this->assertSame( SwapStep::CARRY_QUESTION, $again->questions[0]['id'] ?? '' );
+		$this->assertSame( Job::SITE_SWAPPED, $again->site_state );
 
 		// A record that was changed is refused, the question kept.
 		$file  = $this->evidence( $still ) . '/cursor_json';
