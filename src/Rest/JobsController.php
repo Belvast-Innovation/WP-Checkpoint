@@ -248,12 +248,17 @@ final class JobsController extends Controller {
 		if ( null === $outcome ) {
 			return $this->not_found();
 		}
-		if ( in_array( $outcome['reason'], array( 'swapped', 'elsewhere', 'abandoned' ), true ) ) {
+		if ( in_array( $outcome['reason'], JobActions::CANCEL_REFUSED, true ) ) {
 			return $this->conflict( self::cancel_message( $outcome['reason'] ) );
 		}
+		$results = array(
+			'requested'      => 'requested',
+			'undo_requested' => 'requested',
+			'undo_given_up'  => 'undo_given_up',
+		);
 		return $this->respond(
 			array(
-				'result'  => 'requested' === $outcome['reason'] ? 'requested' : 'cancelled',
+				'result'  => $results[ $outcome['reason'] ] ?? 'cancelled',
 				'cleaned' => $outcome['cleaned'],
 				'message' => self::cancel_message( $outcome['reason'] ),
 				'job'     => $this->presenter->present( $outcome['job'] ),
@@ -281,6 +286,9 @@ final class JobsController extends Controller {
 			return $this->conflict( $this->presenter->clean( $e->getMessage() ) );
 		} catch ( InvalidTransition $e ) {
 			$current = $this->actions->find( $id );
+			if ( null !== $current && Job::UNDONE === $current->status ) {
+				return $this->conflict( JobPresenter::undone_note( $current->id ) );
+			}
 			if ( null !== $current && Job::REASON_ABANDONED === $current->failure_reason ) {
 				return $this->conflict( JobPresenter::abandoned_note( $this->actions->abandoned_here( $current ) ) );
 			}
@@ -359,7 +367,7 @@ final class JobsController extends Controller {
 	/**
 	 * Message for a cancel outcome.
 	 *
-	 * @param string $reason cleaned, holder, unavailable, requested, swapped, elsewhere or abandoned.
+	 * @param string $reason A reason of JobActions::cancel().
 	 * @return string
 	 */
 	public static function cancel_message( string $reason ): string {
@@ -372,6 +380,20 @@ final class JobsController extends Controller {
 				return __( 'The restore is changing the site. It puts the site back as it was, then the job is cancelled; that happens when the restore runs again in WP-CLI (wp wpcheckpoint job run, after wp wpcheckpoint job retry if it failed).', 'wp-checkpoint' );
 			case 'swapped':
 				return __( 'The restored site is in place: cancelling the job cannot change it back.', 'wp-checkpoint' );
+			case 'undo_given_up':
+				return __( 'The undo was given up before it changed the site: the restored site stays, and the restore is completed as before.', 'wp-checkpoint' );
+			case 'undo_ended':
+				return __( 'The undo has ended: the site is as it was before the restore. There is nothing left to cancel.', 'wp-checkpoint' );
+			case 'undo_requested':
+				return __( 'The undo is running and has not changed the site yet: it is given up before it does, and the restored site stays.', 'wp-checkpoint' );
+			case 'undoing':
+				return __( 'The undo has started changing the site: it is not cancelled, and finishes putting the site back as it was before the restore. While it asks how to go on, answer keep to give it up.', 'wp-checkpoint' );
+			case 'undo_failed':
+				return __( 'The undo stopped with an error after it began: it is not cancelled, and it does not go on by itself. Retry it in WP-CLI (wp wpcheckpoint job retry, then wp wpcheckpoint job run): it goes on from where it stopped, putting the site back as it was before the restore.', 'wp-checkpoint' );
+			case 'undo_expired':
+				return __( 'The undo stopped with an error after it began, and its work was removed 7 days later: it is not cancelled, and it can no longer be retried. wp wpcheckpoint job status shows where it stopped.', 'wp-checkpoint' );
+			case 'managed_elsewhere':
+				return __( 'This restore is managed by another installation of WP Checkpoint (the site\'s identity changed since it started); it is not cancelled from here. wp wpcheckpoint job status shows what can be done.', 'wp-checkpoint' );
 			case 'elsewhere':
 				return __( 'This restore holds the site changed and is managed by another installation of WP Checkpoint (the site\'s identity changed since it started); it is not cancelled from here. wp wpcheckpoint job status shows what can be done.', 'wp-checkpoint' );
 			case 'abandoned':

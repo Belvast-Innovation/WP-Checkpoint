@@ -81,6 +81,11 @@ final class JobActions {
 	const LEFT_STAYS = 'stays';
 
 	/**
+	 * The reasons of cancel() that refuse: nothing was cancelled or requested (REST answers a conflict, WP-CLI an error).
+	 */
+	const CANCEL_REFUSED = array( 'swapped', 'elsewhere', 'managed_elsewhere', 'abandoned', 'undoing', 'undo_failed', 'undo_expired', 'undo_ended' );
+
+	/**
 	 * Repository.
 	 *
 	 * @var JobRepository
@@ -121,6 +126,13 @@ final class JobActions {
 	 * @var HeldSite
 	 */
 	private $held;
+
+	/**
+	 * The checks of an undo (built on first use; tests inject one).
+	 *
+	 * @var Undo|null
+	 */
+	private $undo = null;
 
 	/**
 	 * Constructor.
@@ -421,6 +433,158 @@ final class JobActions {
 		// them, are what that site needs to roll the restore back, if this database is shared with it after all.
 		/* translators: 1: job id, 2: the WordPress directory the job's plan records */
 		return self::outcome( true, sprintf( __( 'Job %1$d was abandoned: it never runs again from this installation. Its tables are kept, the ones its swap moved aside (named wcpold…) among them, and nothing at the paths its plan records is touched. If this database is shared with the site at %2$s after all, that site stays half swapped. While an abandoned restore exists, uninstalling WP Checkpoint leaves everything in place: nothing cleans one up yet.', 'wp-checkpoint' ), $job->id, $held['assessment']['recorded'] ) );
+	}
+
+	/**
+	 * What a cancel of an undo that wrote nothing says, decided by the row as it is now and by nothing else (the
+	 * invariants C1–C5 of ARCHITECTURE "4c-C2": whatever ran meanwhile, the answer is true of the row): "elsewhere"
+	 * (holding the site changed) or "managed_elsewhere" (the site recorded as untouched), or "abandoned" (not this
+	 * installation's to cancel now); "undo_ended" (undone); "undoing" (changing the site, asking how to go on, where
+	 * answering keep gives it up, or put back and taking its maintenance file down: refused, and never ended
+	 * cancelled, which would reclaim the restored copy), or "undo_failed" for the same positions on a failed row (it
+	 * goes on only once retried), "undo_expired" on one whose work was reclaimed (it cannot be); "undo_requested" (at its first position, swapped,
+	 * a request recorded: it gives itself up); "undo_given_up" (swapped and at no position of an undo: it will not
+	 * change the site); null when it can be none of these (at its first position with no request: a new claim
+	 * meanwhile, say; or a row that cannot be read), which the caller says as a job that changed meanwhile.
+	 *
+	 * @param Job $job The job as read after the cancel.
+	 * @return string|null
+	 */
+	private function undo_cancel_state( Job $job ) {
+		if ( array() !== $job->unreadable_columns ) {
+			return null; // What it is cannot be read.
+		}
+		if ( ! $this->repository->manages( $job ) ) {
+			return Job::SITE_UNTOUCHED === $job->site_state ? 'managed_elsewhere' : 'elsewhere';
+		}
+		if ( Job::REASON_ABANDONED === $job->failure_reason ) {
+			return 'abandoned';
+		}
+		if ( Job::UNDONE === $job->status ) {
+			return 'undo_ended';
+		}
+		// A failed undo does not go on by itself: it is retried first, while it can be (its work not reclaimed yet).
+		$undoing = 'undoing';
+		if ( Job::FAILED === $job->status ) {
+			$undoing = $job->can_retry() ? 'undo_failed' : 'undo_expired';
+		}
+		if ( Job::SITE_CHANGING === $job->site_state ) {
+			return $undoing;
+		}
+		if ( Job::SITE_UNTOUCHED === $job->site_state ) {
+			// Put back by an undo that still takes its maintenance file down (it ends undone), or anything else: unknown.
+			return SwapStep::undoing( $job->cursor ) ? $undoing : null;
+		}
+		if ( 'undo' === ( $job->cursor['phase'] ?? '' ) ) {
+			return 0 !== $job->cancel_requested ? 'undo_requested' : null;
+		}
+		return SwapStep::undoing( $job->cursor ) ? $undoing : 'undo_given_up';
+	}
+
+	/**
+	 * The checks of an undo.
+	 *
+	 * @param Undo|null $undo Checks (tests), or null for the site's own.
+	 * @return Undo
+	 */
+	public function undo_gate( ?Undo $undo = null ): Undo {
+		if ( null !== $undo ) {
+			$this->undo = $undo;
+		}
+		if ( null === $this->undo ) {
+			$this->undo = new Undo( $this->repository );
+		}
+		return $this->undo;
+	}
+
+	/**
+	 * Undo a completed restore (wp wpcheckpoint job undo): without a confirmation code, what it would drop and the
+	 * code; with the code, the job queued again at its own reverse (Undo, JobRepository::reopen_for_undo()), to be run
+	 * by WP-CLI. Every check is read once, and again under the start lock right before the job is claimed.
+	 *
+	 * @param int    $id      Job id.
+	 * @param string $confirm The confirmation code, or '' to be told it.
+	 * @return array{ok: bool, message: string, confirmed: bool, code: string, lines: string[]}
+	 * @throws JobsUnavailable When the jobs table is not usable, or the start lock is busy.
+	 */
+	public function undo( int $id, string $confirm ): array {
+		$refuse = static function ( string $why ): array {
+			return array(
+				'ok'        => false,
+				'message'   => $why,
+				'confirmed' => false,
+				'code'      => '',
+				'lines'     => array(),
+			);
+		};
+		$this->usable( $id );
+		$gate = $this->undo_gate();
+		$seen = $gate->assess( $id );
+		if ( ! $seen['ok'] || null === $seen['job'] ) {
+			return $refuse( $seen['why'] );
+		}
+		$lines   = Undo::lost_lines( $seen['lost'], $seen['since'] );
+		$lines[] = sprintf(
+			/* translators: %d: days */
+			__( 'The restored site is kept for %d days after the undo, then removed; swapping it back in is not possible in this version.', 'wp-checkpoint' ),
+			(int) ( JobRepository::WORK_RETENTION_SECONDS / 86400 )
+		);
+		if ( '' === $confirm ) {
+			return array(
+				'ok'        => true,
+				/* translators: 1: job id, 2: confirmation code */
+				'message'   => sprintf( __( 'Nothing was changed. To undo restore job %1$d, run: wp wpcheckpoint job undo %1$d --confirm=%2$s', 'wp-checkpoint' ), $id, $seen['code'] ),
+				'confirmed' => false,
+				'code'      => $seen['code'],
+				'lines'     => $lines,
+			);
+		}
+		$changed = __( 'The confirmation code does not match: the restore or its plan changed since it was given, or it is another job\'s. Nothing was changed; run the command without --confirm to see what it would do now.', 'wp-checkpoint' );
+		if ( ! hash_equals( $seen['code'], $confirm ) ) {
+			return $refuse( $changed );
+		}
+		if ( ! $this->repository->lock_starts() ) {
+			throw new JobsUnavailable( 'Another job is being started right now; try again in a moment.' );
+		}
+		try {
+			// Read again under the lock: a job that started, swapped or changed meanwhile is seen here.
+			$again = $gate->assess( $id );
+			if ( ! $again['ok'] || null === $again['job'] ) {
+				return $refuse( $again['why'] );
+			}
+			if ( ! hash_equals( $again['code'], $confirm ) ) {
+				return $refuse( $changed );
+			}
+			$job    = $again['job'];
+			$others = array_values(
+				array_filter(
+					$this->active(),
+					static function ( Job $other ) use ( $job ): bool {
+						return $other->id !== $job->id;
+					}
+				)
+			);
+			$reason = JobConflicts::conflict( $job->type, $job->options, $others );
+			if ( '' !== $reason ) {
+				return $refuse( $reason );
+			}
+			$this->cancel_yielding();
+			try {
+				$job = $this->repository->reopen_for_undo( $job, SwapStep::undo_cursor( $again['attempt'], $job->site_mark ), __( 'Putting the site back as it was', 'wp-checkpoint' ), $job->managing_token() );
+			} catch ( StaleJob $e ) {
+				return $refuse( __( 'The job changed meanwhile, or a run holds it; nothing was changed. Try again.', 'wp-checkpoint' ) );
+			}
+		} finally {
+			$this->repository->unlock_starts();
+		}
+		$this->runner->note( $job, Logger::WARNING, 'The restore is undone, as asked from WP-CLI (wp wpcheckpoint job undo)', array( 'since' => gmdate( 'Y-m-d H:i:s', $seen['since'] ) ) );
+		return array(
+			'ok'        => true,
+			'message'   => __( 'The restore is being undone.', 'wp-checkpoint' ),
+			'confirmed' => true,
+			'code'      => $confirm,
+			'lines'     => $lines,
+		);
 	}
 
 	/**
@@ -1117,7 +1281,19 @@ final class JobActions {
 	 *                                                            "elsewhere" (refused: it holds the site and another
 	 *                                                            installation manages it, JobRepository::manages()) or
 	 *                                                            "abandoned" (refused: a cancel request would turn a
-	 *                                                            later take-over's "continue" into a rollback).
+	 *                                                            later take-over's "continue" into a rollback),
+	 *                                                            "undo_given_up" (an undo that had not changed the site
+	 *                                                            was given up: the job is completed again, the restored
+	 *                                                            site in place), "undo_requested" (such an undo is
+	 *                                                            running: it gives itself up before it changes the
+	 *                                                            site), "undo_ended" (refused: the undo has ended),
+	 *                                                            "undoing" (refused: the undo has started changing the
+	 *                                                            site and finishes), "undo_failed" (refused: the same,
+	 *                                                            on a failed row: it goes on once retried),
+	 *                                                            "undo_expired" (refused: the same, its work reclaimed:
+	 *                                                            it can no longer be retried) or
+	 *                                                            "managed_elsewhere" (refused: as "elsewhere", for a
+	 *                                                            row whose site is recorded as untouched).
 	 * @throws InvalidTransition When the job is already finished.
 	 * @throws StaleJob When the job changed meanwhile.
 	 */
@@ -1140,6 +1316,43 @@ final class JobActions {
 				'job'     => $job,
 				'cleaned' => false,
 				'reason'  => 'elsewhere',
+			);
+		}
+		$unread = SwapStep::ID === $job->step && in_array( 'cursor_json', $job->unreadable_columns, true );
+		if ( ( SwapStep::undoing( $job->cursor ) || $unread ) && ! in_array( $job->status, array( Job::COMPLETED, Job::CANCELLED, Job::UNDONE ), true ) ) {
+			// Every position of an undo, its last ones too (put back, its maintenance file still to come down: the site
+			// recorded as untouched): a plain cancel there would end it cancelled and reclaim the restored copy. A swap
+			// whose cursor cannot be read may be one of them: it is not cancelled on a guess (undo_cancel_state(): null).
+			// An undo is given up only before it changes the site (2026-10-30): then the restored site stays, the job
+			// completed again; once it changed anything it finishes, and the cancel is refused. Never accepted and not done.
+			$wrote = '';
+			if ( 'undo' === ( $job->cursor['phase'] ?? '' ) ) {
+				try {
+					$wrote = $this->repository->cancel_undo( $job );
+				} catch ( StaleJob $e ) {
+					$wrote = ''; // Nothing written: said as what the row is now.
+				}
+			}
+			$now = $this->repository->find( $id );
+			if ( null === $now ) {
+				return null; // Gone meanwhile: no such job.
+			}
+			if ( 'given_up' === $wrote ) {
+				$reason = 'undo_given_up';
+				$this->runner->note( $now, Logger::WARNING, 'The undo was cancelled before it changed the site: the restored site stays' );
+			} elseif ( 'requested' === $wrote ) {
+				$reason = 'undo_requested';
+			} else {
+				$reason = $this->undo_cancel_state( $now );
+				if ( null === $reason ) {
+					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+					throw new StaleJob( sprintf( 'Job %d changed meanwhile; nothing was cancelled.', $id ) );
+				}
+			}
+			return array(
+				'job'     => $now,
+				'cleaned' => false,
+				'reason'  => $reason,
 			);
 		}
 		if ( Job::SITE_CHANGING === $job->site_state ) {
@@ -1289,6 +1502,9 @@ final class JobActions {
 			$job = $this->repository->find( $id );
 			if ( null === $job ) {
 				return null;
+			}
+			if ( Job::UNDONE === $job->status ) {
+				$this->repository->check_retry( $job ); // Refuses it: an undone job is never retried.
 			}
 			( clone $job )->transition( Job::QUEUED );
 			$this->repository->check_retry( $job );

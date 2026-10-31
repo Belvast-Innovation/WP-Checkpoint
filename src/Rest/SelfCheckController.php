@@ -14,6 +14,7 @@ use WP_REST_Server;
 use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\JobRepository;
 use WPCheckpoint\Jobs\RestoreJob;
+use WPCheckpoint\Jobs\SwapStep;
 use WPCheckpoint\Restore\SelfCheck;
 
 defined( 'ABSPATH' ) || exit;
@@ -79,7 +80,9 @@ final class SelfCheckController extends Controller {
 
 	/**
 	 * Whether the route is to be registered: this request's REST route is the route's, on the main site, and a
-	 * restore that holds the site swapped and is queued or running wrote the self-check row.
+	 * restore that is queued or running wrote the self-check row while it holds the site swapped (the restored site's
+	 * check), or while it holds the site put back by an undo after the restored site was let out, behind its held
+	 * maintenance file (SwapStep::check_undone(): the cursor at "restored", undone).
 	 *
 	 * @return bool
 	 */
@@ -93,7 +96,10 @@ final class SelfCheckController extends Controller {
 			return false;
 		}
 		$job = $this->jobs->find( $row['job'] );
-		return null !== $job && RestoreJob::ID === $job->type && Job::SITE_SWAPPED === $job->site_state && in_array( $job->status, array( Job::QUEUED, Job::RUNNING ), true );
+		if ( null === $job || RestoreJob::ID !== $job->type || ! in_array( $job->status, array( Job::QUEUED, Job::RUNNING ), true ) ) {
+			return false;
+		}
+		return Job::SITE_SWAPPED === $job->site_state || ( Job::SITE_CHANGING === $job->site_state && SwapStep::checks_undone( $job->cursor ) );
 	}
 
 	/**

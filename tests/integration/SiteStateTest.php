@@ -331,6 +331,40 @@ final class SiteStateTest extends WP_UnitTestCase {
 		$this->assertSame( Job::SITE_UNTOUCHED, $this->repo->find( $plain->id )->site_state );
 	}
 
+	public function test_the_commit_time_is_written_when_a_swap_is_committed_and_cleared_when_the_site_is_untouched(): void {
+		$seen  = array();
+		$start = (int) floor( $this->now );
+		$this->register(
+			'commit',
+			array(
+				new HoldingStep(
+					'swap',
+					function ( JobContext $ctx ) use ( &$seen ): StepResult {
+						$states = array( Job::SITE_CHANGING, Job::SITE_SWAPPED, Job::SITE_SWAPPED, Job::SITE_CHANGING, Job::SITE_SWAPPED, Job::SITE_CHANGING, Job::SITE_UNTOUCHED, Job::SITE_CHANGING, Job::SITE_SWAPPED );
+						foreach ( $states as $n => $state ) {
+							$this->now += 10;
+							$ctx->checkpoint(
+								array(
+									'n'    => $n,
+									'site' => $state,
+								),
+								10 + $n
+							);
+							$seen[] = (int) $this->row( $ctx->job()->id )['committed_at'];
+						}
+						return StepResult::done( 'swapped' );
+					}
+				),
+			)
+		);
+		$job = $this->repo->create( 'commit' );
+		$this->runner( true )->tick( $job->id, $this->now );
+		$first  = $start + 20;
+		$second = $start + 90;
+		$this->assertSame( array( 0, $first, $first, $first, $first, $first, 0, 0, $second ), $seen, 'written with the swapped state; kept while it stays, or is changed and swapped again without being put back; cleared once the site is untouched; written anew by the next commit' );
+		$this->assertSame( $second, $this->repo->find( $job->id )->committed_at, 'read back' );
+	}
+
 	/**
 	 * This installation's storage in a custom directory (WPCHECKPOINT_STORAGE_DIR) of the stand-in site.
 	 */
@@ -956,6 +990,7 @@ final class SiteStateTest extends WP_UnitTestCase {
 			'the table cannot be listed'   => array( 'SHOW TABLES LIKE', false ),
 			'the columns cannot be listed' => array( "LIKE 'site_state'", false ),
 			'the count cannot be read'     => array( 'WHERE site_state <> 0', false ),
+			'the undos cannot be read'     => array( 'WHERE site_state = 0 AND step', false ),
 			'the listing never runs'       => array( 'SHOW TABLES LIKE', true ),
 		);
 	}

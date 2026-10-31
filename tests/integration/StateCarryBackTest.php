@@ -832,7 +832,10 @@ final class StateCarryBackTest extends SwapTestCase {
 		$this->assertSame( 0, $fails, 'the control: the carry back failed' );
 		$this->assertNotContains( 'carried_back', $this->seams, 'not carried' );
 		$this->assert_put_back( $job, 'failed otherwise', false );
-		$this->assertStringContainsString( 'the site is put back all the same', Plugin::instance()->job_presenter()->log_tail( Plugin::instance()->jobs()->find( $job->id ) ) );
+		$log = Plugin::instance()->job_presenter()->log_tail( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertStringContainsString( 'the site is put back all the same', $log );
+		$this->assertMatchesRegularExpression( '/"names":\[[^\]]*"' . preg_quote( StoredNames::DELETE_DATA, '/' ) . '"/', $log, 'the warning names the rows not carried back' );
+		$this->assertStringNotContainsString( 'undo asks', $log, 'not let out before: put back without asking' );
 		$this->undo( Plugin::instance()->jobs()->find( $job->id ) );
 	}
 

@@ -195,6 +195,67 @@ final class JobCommand {
 	}
 
 	/**
+	 * Undo a restore that completed: the site is put back as it was before it, in maintenance mode while that is done.
+	 *
+	 * Everything written on the site since the restore is dropped. Without --confirm nothing is changed: it says what
+	 * would be dropped and gives the confirmation code. A restore can be undone for 7 days after it was made, while no
+	 * other job holds the site and no restore was made after it. The restored site is kept for 7 days after the undo,
+	 * then removed.
+	 *
+	 * ## OPTIONS
+	 *
+	 * <id>
+	 * : Job id of the restore.
+	 *
+	 * [--confirm=<code>]
+	 * : The confirmation code the command gives without it.
+	 *
+	 * ## EXIT CODES
+	 *
+	 * As "job run" once the undo started (0 when it is undone); 1 when it was refused or not confirmed.
+	 *
+	 * @param string[]             $args       Positional arguments.
+	 * @param array<string, mixed> $assoc_args Options.
+	 * @return void
+	 */
+	public function undo( array $args, array $assoc_args ): void {
+		Unexpected::guard(
+			function () use ( $args, $assoc_args ): void {
+				$this->undo_body( $args, $assoc_args );
+			},
+			array( $this->presenter, 'clean' )
+		);
+	}
+
+	/**
+	 * The body of undo(): what would be dropped and the code, or the job claimed and run to its end.
+	 *
+	 * @param string[]             $args       Positional arguments.
+	 * @param array<string, mixed> $assoc_args Options.
+	 * @return void
+	 */
+	private function undo_body( array $args, array $assoc_args ): void {
+		$id = (int) $args[0];
+		try {
+			$outcome = $this->actions->undo( $id, (string) ( $assoc_args['confirm'] ?? '' ) );
+		} catch ( JobsUnavailable $e ) {
+			WP_CLI::error( $this->presenter->clean( $e->getMessage() ) );
+		}
+		if ( ! $outcome['ok'] ) {
+			WP_CLI::error( $this->presenter->clean( $outcome['message'] ) );
+		}
+		if ( ! $outcome['confirmed'] ) {
+			foreach ( $outcome['lines'] as $line ) {
+				WP_CLI::line( $this->presenter->clean( $line ) );
+			}
+			WP_CLI::error( $this->presenter->clean( $outcome['message'] ) );
+		}
+		WP_CLI::line( $this->presenter->clean( $outcome['message'] ) );
+		$code = ( new RunLoop( $this->actions, $this->presenter, 'sleep', array( 'WP_CLI', 'line' ) ) )->run( $id, true );
+		WP_CLI::halt( $code );
+	}
+
+	/**
 	 * Take over a restore that holds the site changed and is managed by another installation, when it is this site's
 	 * as far as can be told (wp wpcheckpoint job status shows the command with its code).
 	 *
@@ -469,16 +530,16 @@ final class JobCommand {
 	}
 
 	/**
-	 * What the cancel command says for an outcome (JobActions::cancel()): refused when the restored site is in place
-	 * ("swapped"), another installation manages the job ("elsewhere") or it was abandoned ("abandoned"), all errors;
-	 * otherwise what was done or requested.
+	 * What the cancel command says for an outcome (JobActions::cancel()): an error for every reason that refuses
+	 * (JobActions::CANCEL_REFUSED: the restored site is in place, another installation manages the job, it was
+	 * abandoned, or an undo that changed the site or has ended); otherwise what was done or requested.
 	 *
 	 * @param string $reason The outcome's reason.
 	 * @return array{error: bool, message: string}
 	 */
 	public static function cancel_verdict( string $reason ): array {
 		return array(
-			'error'   => in_array( $reason, array( 'swapped', 'elsewhere', 'abandoned' ), true ),
+			'error'   => in_array( $reason, \WPCheckpoint\Jobs\JobActions::CANCEL_REFUSED, true ),
 			'message' => \WPCheckpoint\Rest\JobsController::cancel_message( $reason ),
 		);
 	}
@@ -498,6 +559,9 @@ final class JobCommand {
 			WP_CLI::error( $this->presenter->clean( $e->getMessage() ) );
 		} catch ( InvalidTransition $e ) {
 			$current = $this->actions->find( (int) $args[0] );
+			if ( null !== $current && Job::UNDONE === $current->status ) {
+				WP_CLI::error( JobPresenter::undone_note( $current->id ) );
+			}
 			if ( null !== $current && Job::REASON_ABANDONED === $current->failure_reason ) {
 				WP_CLI::error( JobPresenter::abandoned_note( $this->actions->abandoned_here( $current ) ) );
 			}

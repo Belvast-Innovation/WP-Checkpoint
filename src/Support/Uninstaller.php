@@ -82,10 +82,11 @@ final class Uninstaller {
 		self::clear_transient_state();
 		self::at( 'check' );
 		$held = self::holding();
-		if ( null === $held || 0 !== $held['all'] ) {
+		if ( ! self::clear( $held ) ) {
 			// A restore holds the site changed (its swap under way, or the site as it was kept for an undo), or was
-			// abandoned: no job is cancelled, and its staging roots, old tables, job row and storage stay, whatever the
-			// user chose; the reason is logged. A count that cannot be read keeps them too.
+			// abandoned, or an undo keeps the restored site it replaced: no job is cancelled, and its staging roots, old
+			// tables, job row and storage stay, whatever the user chose; the reason is logged. A count that cannot be
+			// read keeps them too.
 			error_log( self::held_back( $held ) ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- uninstall has no screen to say it on.
 			return;
 		}
@@ -298,7 +299,7 @@ final class Uninstaller {
 	private static function held_meanwhile( string $by, array $removed ): bool {
 		self::at( 'check' );
 		$held = self::holding();
-		if ( null !== $held && 0 === $held['all'] ) {
+		if ( self::clear( $held ) ) {
 			if ( '' === $by ) {
 				return false;
 			}
@@ -317,6 +318,17 @@ final class Uninstaller {
 	}
 
 	/**
+	 * Whether nothing in holding() keeps the uninstall from going on: it could be read, no job holds the site changed,
+	 * and no undo keeps the restored site it replaced.
+	 *
+	 * @param array{all: int, abandoned: int, kept: int[], undo: array<int, array{id: int, until: int, how: string}>}|null $held holding().
+	 * @return bool
+	 */
+	private static function clear( $held ): bool {
+		return null !== $held && 0 === $held['all'] && array() === $held['undo'];
+	}
+
+	/**
 	 * How many jobs hold the site changed (Job::$site_state), or null when that cannot be read (holding()).
 	 *
 	 * @return int|null
@@ -330,13 +342,20 @@ final class Uninstaller {
 	 * Why the uninstall stopped (logged: uninstall has no screen), from holding(), and what it had done before it
 	 * found that (nothing, when it found it at the start): only what was left is said to be left.
 	 *
-	 * @param array{all: int, abandoned: int, kept?: int[]}|null $held    holding().
-	 * @param string[]                                           $removed What it had done, in order (run()).
+	 * @param array{all: int, abandoned: int, kept?: int[], undo?: array<int, array{id: int, until: int, how: string}>}|null $held    holding().
+	 * @param string[]                                                                                                       $removed What it had done, in order (run()).
 	 * @return string
 	 */
 	public static function held_back( $held, array $removed = array() ): string {
 		$then = 'Reinstall WP Checkpoint to finish or undo the restore.';
-		if ( null === $held ) {
+		$so   = 'so the site can still be put back';
+		if ( null !== $held && 0 === $held['all'] && array() !== ( $held['undo'] ?? array() ) ) {
+			// Only undos keep it: the restored site each replaced is site data (what visitors wrote on it while it was
+			// live), kept for WORK_RETENTION_SECONDS after the undo ended; deleting it is the cleanup's, after that.
+			$why  = implode( '; ', array_map( array( self::class, 'undo_kept' ), $held['undo'] ) );
+			$so   = 'so what visitors wrote on the restored site is not deleted';
+			$then = 'To remove everything, reinstall WP Checkpoint and uninstall it again once that time has passed: WP Checkpoint\'s cleanup removes the restored site then.';
+		} elseif ( null === $held ) {
 			$why = 'it could not tell whether a restore holds the site changed';
 		} elseif ( $held['abandoned'] > 0 ) {
 			$why  = sprintf( 'a restore was abandoned (%d of the %d that hold a site changed): an abandoned restore keeps its tables, which the site it was started on may need to be put back if this database is shared with it', $held['abandoned'], $held['all'] );
@@ -348,10 +367,43 @@ final class Uninstaller {
 			}
 		}
 		if ( array() === $removed ) {
-			return sprintf( 'WP Checkpoint was uninstalled while %1$s; its staging next to the site, its tables and its storage directory were left in place so the site can still be put back. %2$s', $why, $then );
+			return sprintf( 'WP Checkpoint was uninstalled while %1$s; its staging next to the site, its tables and its storage directory were left in place %2$s. %3$s', $why, $so, $then );
 		}
 		/* The uninstall found it only after it had begun: what it had done, and what it left. */
 		return sprintf( 'WP Checkpoint was being uninstalled when %1$s, after it had %2$s; it stopped there and left %3$s in place. %4$s', $why, implode( ', ', $removed ), implode( ', ', self::left( $removed ) ), $then );
+	}
+
+	/**
+	 * Why one undo keeps the uninstall from going on (held_back()), with the time its restored site is kept until.
+	 *
+	 * @param array{id: int, until: int, how: string} $undo An entry of holding()'s "undo".
+	 * @return string
+	 */
+	private static function undo_kept( array $undo ): string {
+		$until = $undo['until'] > 0 ? gmdate( 'Y-m-d H:i', $undo['until'] ) . ' UTC' : '7 days after the undo ends';
+		switch ( $undo['how'] ) {
+			case 'undone':
+				$what = sprintf( 'restore job %d was undone', $undo['id'] );
+				break;
+			case 'failed':
+				$what = sprintf( 'an undo of restore job %d stopped with an error after it put the site back', $undo['id'] );
+				break;
+			case 'unknown':
+				$what = sprintf( 'restore job %d may be an undo that put the site back (its position cannot be read)', $undo['id'] );
+				break;
+			default:
+				$what = sprintf( 'an undo of restore job %d put the site back and has not ended', $undo['id'] );
+		}
+		$said = sprintf( '%1$s, and the restored site it replaced, with what visitors wrote on it while it was live, is kept until %2$s', $what, $until );
+		if ( 'unknown' === $undo['how'] ) {
+			// No time to wait for: what it is has to be looked at.
+			return $said . sprintf( ' (after a reinstall, wp wpcheckpoint job status %d shows what it is)', $undo['id'] );
+		}
+		if ( 0 === $undo['until'] ) {
+			// Nothing moves it on while WP Checkpoint is not active.
+			return $said . sprintf( ' (it goes on only when it runs: after a reinstall, wp wpcheckpoint job run %d)', $undo['id'] );
+		}
+		return $said;
 	}
 
 	/**
@@ -383,8 +435,21 @@ final class Uninstaller {
 	 * stored state may have been written by another installation sharing this database), and one abandoned from
 	 * elsewhere may have left this site half swapped, its staging what the site was.
 	 *
-	 * @return array{all: int, abandoned: int, kept: int[]}|null kept: restores whose restored site was kept, their last
-	 *                                                         steps left.
+	 * Undos that put the site back keep the restored site they replaced (site data: what visitors wrote on it while it
+	 * was live) as long as a completed restore keeps the site it replaced: they are listed in "undo" (site state
+	 * untouched, so not in "all"), each with the time it is kept until: an undone one or a failed one until its work
+	 * expires (JobRepository::expire_work(), WORK_RETENTION_SECONDS after it ended), one still going on with none yet
+	 * (0), and a swap whose position cannot be read, which may be one of them, likewise.
+	 *
+	 * None of them appears during an uninstall but one way: they come from jobs that held the site changed, which keep
+	 * the uninstall from starting, and no swap enters the site through the closed fence. The way: a failed undo past
+	 * its time, its work not reclaimed yet (no cleanup ran since), is not listed; retried meanwhile (by an installation
+	 * sharing this database: here WP Checkpoint is not active), it goes on with no time, and the read before the next
+	 * step (held_meanwhile()) stops the uninstall, or, past the last read, its restored site was past its time anyway.
+	 *
+	 * @return array{all: int, abandoned: int, kept: int[], undo: array<int, array{id: int, until: int, how: string}>}|null
+	 *         kept: restores whose restored site was kept, their last steps left; undo: how ("undone", "undoing",
+	 *         "failed" or "unknown").
 	 */
 	public static function holding() {
 		global $wpdb;
@@ -402,6 +467,7 @@ final class Uninstaller {
 				'all'       => 0,
 				'abandoned' => 0,
 				'kept'      => array(),
+				'undo'      => array(),
 			);
 		}
 		self::expect();
@@ -414,13 +480,43 @@ final class Uninstaller {
 				'all'       => 0,
 				'abandoned' => 0,
 				'kept'      => array(),
+				'undo'      => array(),
 			);
 		}
 		self::expect();
 		$rows = $wpdb->get_results( "SELECT failure_kind, finished_at, id, status, questions_json, options_json FROM {$table} WHERE site_state <> 0", ARRAY_N );
-		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		if ( self::failed() || ! is_array( $rows ) ) {
 			return null;
+		}
+		self::expect();
+		$swaps = $wpdb->get_results( $wpdb->prepare( "SELECT id, status, finished_at, cursor_json FROM {$table} WHERE site_state = 0 AND step = %s AND ((status IN (%s, %s) AND work_expired_at = 0) OR status IN (%s, %s, %s))", \WPCheckpoint\Jobs\SwapStep::ID, Job::UNDONE, Job::FAILED, Job::QUEUED, Job::RUNNING, Job::PAUSED ), ARRAY_N );
+		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		if ( self::failed() || ! is_array( $swaps ) ) {
+			return null;
+		}
+		$undo = array();
+		$now  = time();
+		foreach ( $swaps as $swap ) {
+			$cursor = json_decode( (string) $swap[3], true );
+			if ( Job::UNDONE === (string) $swap[1] ) {
+				$how = 'undone';
+			} elseif ( ! is_array( $cursor ) ) {
+				$how = 'unknown'; // It may be an undo: kept, the safe direction.
+			} elseif ( \WPCheckpoint\Jobs\SwapStep::undoing( $cursor ) ) {
+				$how = Job::FAILED === (string) $swap[1] ? 'failed' : 'undoing';
+			} else {
+				continue; // A swap rolled back: its staging is a copy of the backup, not what visitors wrote.
+			}
+			// Ended (undone, failed): kept until its work expires, which reclaims the restored site; going on: until 7
+			// days after it ends. Past that time the uninstall goes on as for any job that ended.
+			$until = in_array( (string) $swap[1], array( Job::UNDONE, Job::FAILED ), true ) ? (int) $swap[2] + \WPCheckpoint\Jobs\JobRepository::WORK_RETENTION_SECONDS : 0;
+			if ( 0 === $until || $now < $until ) {
+				$undo[] = array(
+					'id'    => (int) $swap[0],
+					'until' => $until,
+					'how'   => $how,
+				);
+			}
 		}
 		$abandoned = 0;
 		$kept      = array();
@@ -439,6 +535,7 @@ final class Uninstaller {
 			'all'       => count( $rows ),
 			'abandoned' => $abandoned,
 			'kept'      => $kept,
+			'undo'      => $undo,
 		);
 	}
 
