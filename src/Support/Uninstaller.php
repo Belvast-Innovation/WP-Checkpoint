@@ -385,13 +385,25 @@ final class Uninstaller {
 			case 'undone':
 				$what = sprintf( 'restore job %d was undone', $undo['id'] );
 				break;
+			case 'failed':
+				$what = sprintf( 'an undo of restore job %d stopped with an error after it put the site back', $undo['id'] );
+				break;
 			case 'unknown':
 				$what = sprintf( 'restore job %d may be an undo that put the site back (its position cannot be read)', $undo['id'] );
 				break;
 			default:
 				$what = sprintf( 'an undo of restore job %d put the site back and has not ended', $undo['id'] );
 		}
-		return sprintf( '%1$s, and the restored site it replaced, with what visitors wrote on it while it was live, is kept until %2$s', $what, $until );
+		$said = sprintf( '%1$s, and the restored site it replaced, with what visitors wrote on it while it was live, is kept until %2$s', $what, $until );
+		if ( 'unknown' === $undo['how'] ) {
+			// No time to wait for: what it is has to be looked at.
+			return $said . sprintf( ' (after a reinstall, wp wpcheckpoint job status %d shows what it is)', $undo['id'] );
+		}
+		if ( 0 === $undo['until'] ) {
+			// Nothing moves it on while WP Checkpoint is not active.
+			return $said . sprintf( ' (it goes on only when it runs: after a reinstall, wp wpcheckpoint job run %d)', $undo['id'] );
+		}
+		return $said;
 	}
 
 	/**
@@ -429,9 +441,15 @@ final class Uninstaller {
 	 * expires (JobRepository::expire_work(), WORK_RETENTION_SECONDS after it ended), one still going on with none yet
 	 * (0), and a swap whose position cannot be read, which may be one of them, likewise.
 	 *
+	 * None of them appears during an uninstall but one way: they come from jobs that held the site changed, which keep
+	 * the uninstall from starting, and no swap enters the site through the closed fence. The way: a failed undo past
+	 * its time, its work not reclaimed yet (no cleanup ran since), is not listed; retried meanwhile (by an installation
+	 * sharing this database: here WP Checkpoint is not active), it goes on with no time, and the read before the next
+	 * step (held_meanwhile()) stops the uninstall, or, past the last read, its restored site was past its time anyway.
+	 *
 	 * @return array{all: int, abandoned: int, kept: int[], undo: array<int, array{id: int, until: int, how: string}>}|null
-	 *         kept: restores whose restored site was kept, their last steps left; undo: how ("undone", "undoing" or
-	 *         "unknown").
+	 *         kept: restores whose restored site was kept, their last steps left; undo: how ("undone", "undoing",
+	 *         "failed" or "unknown").
 	 */
 	public static function holding() {
 		global $wpdb;
@@ -471,7 +489,7 @@ final class Uninstaller {
 			return null;
 		}
 		self::expect();
-		$swaps = $wpdb->get_results( $wpdb->prepare( "SELECT id, status, finished_at, cursor_json FROM {$table} WHERE site_state = 0 AND step = %s AND ((status = %s AND work_expired_at = 0) OR status IN (%s, %s, %s, %s))", \WPCheckpoint\Jobs\SwapStep::ID, Job::UNDONE, Job::QUEUED, Job::RUNNING, Job::PAUSED, Job::FAILED ), ARRAY_N );
+		$swaps = $wpdb->get_results( $wpdb->prepare( "SELECT id, status, finished_at, cursor_json FROM {$table} WHERE site_state = 0 AND step = %s AND ((status IN (%s, %s) AND work_expired_at = 0) OR status IN (%s, %s, %s))", \WPCheckpoint\Jobs\SwapStep::ID, Job::UNDONE, Job::FAILED, Job::QUEUED, Job::RUNNING, Job::PAUSED ), ARRAY_N );
 		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		if ( self::failed() || ! is_array( $swaps ) ) {
 			return null;
@@ -485,7 +503,7 @@ final class Uninstaller {
 			} elseif ( ! is_array( $cursor ) ) {
 				$how = 'unknown'; // It may be an undo: kept, the safe direction.
 			} elseif ( \WPCheckpoint\Jobs\SwapStep::undoing( $cursor ) ) {
-				$how = 'undoing';
+				$how = Job::FAILED === (string) $swap[1] ? 'failed' : 'undoing';
 			} else {
 				continue; // A swap rolled back: its staging is a copy of the backup, not what visitors wrote.
 			}

@@ -93,7 +93,7 @@ final class MaintenancePrecheckTest extends TestCase {
 		$out = $this->check( array( 'WP_PHPUNIT__TESTS_CONFIG' => $this->sandbox . '/none.php' ) );
 		$this->assertSame( 0, $out['code'] );
 		$this->assertSame( '', $out['stderr'] );
-		$this->assertSame( 1, $this->check()['code'], 'the control: with it, the same file is found' );
+		$this->assertSame( 76, $this->check()['code'], 'the control: with it, the same file is found' );
 	}
 
 	public function test_the_files_are_listed_and_left_and_the_run_starts_without_the_maintenance_file(): void {
@@ -114,7 +114,7 @@ final class MaintenancePrecheckTest extends TestCase {
 	public function test_a_maintenance_file_is_listed_left_and_stops_the_run(): void {
 		file_put_contents( $this->sandbox . '/site/.maintenance', Maintenance::CODE );
 		$out = $this->check();
-		$this->assertSame( 1, $out['code'] );
+		$this->assertSame( 76, $out['code'] );
 		$this->assertStringContainsString( ExpectedPath::slashed( $this->sandbox, 'site', '.maintenance' ) . ' (this plugin\'s)', $out['stderr'] );
 		$this->assertStringContainsString( 'The run does not start', $out['stderr'] );
 		clearstatcache();
@@ -122,7 +122,7 @@ final class MaintenancePrecheckTest extends TestCase {
 
 		file_put_contents( $this->sandbox . '/site/.maintenance', '<?php $upgrading = time();' );
 		$out = $this->check();
-		$this->assertSame( 1, $out['code'] );
+		$this->assertSame( 76, $out['code'] );
 		$this->assertStringContainsString( ExpectedPath::slashed( $this->sandbox, 'site', '.maintenance' ) . ' (not this plugin\'s)', $out['stderr'], 'someone else\'s is said so' );
 	}
 
@@ -130,7 +130,7 @@ final class MaintenancePrecheckTest extends TestCase {
 		file_put_contents( $this->sandbox . '/site/.maintenance', Maintenance::CODE );
 		file_put_contents( $this->sandbox . '/site/.wpcheckpoint-maintenance.php', $this->data_file() );
 		$out = $this->check( array( 'WPCHECKPOINT_TEST_MAINTENANCE_REMOVE' => '1' ) );
-		$this->assertSame( 1, $out['code'] );
+		$this->assertSame( 76, $out['code'] );
 		$this->assertMatchesRegularExpression( '/Nothing was removed: (the tests database could not be reached|mysqli is not available)/', $out['stderr'] );
 		$this->assertStringNotContainsString( 'Listed only', $out['stderr'], 'the control: asked to remove' );
 		clearstatcache();
@@ -138,12 +138,52 @@ final class MaintenancePrecheckTest extends TestCase {
 		$this->assertFileExists( $this->sandbox . '/site/.wpcheckpoint-maintenance.php' );
 	}
 
+	public function test_the_removal_it_makes_once_its_checks_pass_takes_this_plugins_files_only(): void {
+		// What the check runs once ABSPATH and the database are confirmed (RealAbspath::clear() on each listed path),
+		// in a process of its own whose ABSPATH is the stand-in directory: the database cannot be confirmed here.
+		file_put_contents( $this->sandbox . '/site/.wpcheckpoint-maintenance.php', $this->data_file() );
+		file_put_contents( $this->sandbox . '/site/.maintenance.0123456789abcdef.tmp', 'partial' );
+		file_put_contents( $this->sandbox . '/site/.maintenance', '<?php $upgrading = time();' );
+		file_put_contents( $this->sandbox . '/clear.php', '<?php require ' . var_export( dirname( __DIR__, 3 ) . '/vendor/autoload.php', true ) . '; define( "ABSPATH", ' . var_export( $this->sandbox . '/site/', true ) . ' ); foreach ( \WPCheckpoint\Tests\Fixtures\RealAbspath::listing() as $p ) { \WPCheckpoint\Tests\Fixtures\RealAbspath::clear( $p ); }' );
+		$stderr = $this->clear();
+		clearstatcache();
+		$this->assertFileDoesNotExist( $this->sandbox . '/site/.wpcheckpoint-maintenance.php', 'this plugin\'s data file goes' );
+		$this->assertFileDoesNotExist( $this->sandbox . '/site/.maintenance.0123456789abcdef.tmp', 'and a temporary name' );
+		$this->assertFileExists( $this->sandbox . '/site/.maintenance', 'someone else\'s stays' );
+		$this->assertStringContainsString( 'not this plugin\'s', $stderr, 'and is said' );
+
+		// A link with this plugin's contents is not deleted, nor what it points to; the refusal is said, not thrown.
+		file_put_contents( $this->sandbox . '/data.txt', $this->data_file() );
+		symlink( $this->sandbox . '/data.txt', $this->sandbox . '/site/.wpcheckpoint-maintenance.php' );
+		$stderr = $this->clear();
+		clearstatcache();
+		$this->assertTrue( is_link( $this->sandbox . '/site/.wpcheckpoint-maintenance.php' ) );
+		$this->assertFileExists( $this->sandbox . '/data.txt' );
+		$this->assertStringContainsString( 'it is not a regular file', $stderr );
+		$this->assertStringNotContainsString( 'Fatal', $stderr );
+	}
+
+	/**
+	 * Run the removal step (clear.php in the sandbox): its standard error, after asserting it ended normally.
+	 */
+	private function clear(): string {
+		$pipes   = array();
+		$process = proc_open( array( PHP_BINARY, $this->sandbox . '/clear.php' ), array( 1 => array( 'pipe', 'w' ), 2 => array( 'pipe', 'w' ) ), $pipes, $this->sandbox, array( 'PATH' => (string) getenv( 'PATH' ) ) );
+		$this->assertIsResource( $process );
+		stream_get_contents( $pipes[1] );
+		$stderr = (string) stream_get_contents( $pipes[2] );
+		fclose( $pipes[1] );
+		fclose( $pipes[2] );
+		$this->assertSame( 0, proc_close( $process ), $stderr );
+		return $stderr;
+	}
+
 	public function test_asked_to_remove_it_removes_nothing_where_abspath_is_not_a_wordpress_directory(): void {
 		mkdir( $this->sandbox . '/bare' );
 		file_put_contents( $this->sandbox . '/bare/.maintenance', Maintenance::CODE );
 		$this->config( $this->sandbox . '/bare/' );
 		$out = $this->check( array( 'WPCHECKPOINT_TEST_MAINTENANCE_REMOVE' => '1' ) );
-		$this->assertSame( 1, $out['code'] );
+		$this->assertSame( 76, $out['code'] );
 		$this->assertStringContainsString( 'Nothing was removed: ABSPATH is not a WordPress directory.', $out['stderr'] );
 		clearstatcache();
 		$this->assertFileExists( $this->sandbox . '/bare/.maintenance' );

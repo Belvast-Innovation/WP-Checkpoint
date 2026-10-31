@@ -10,6 +10,7 @@ namespace WPCheckpoint\Tests\Fixtures;
 use PHPUnit\Framework\Assert;
 use WPCheckpoint\Restore\Maintenance;
 use WPCheckpoint\Support\Deleter;
+use WPCheckpoint\Support\DeletionRefused;
 
 /**
  * WordPress reads ABSPATH/.maintenance only, the maintenance code reads the data file next to it, and the web server
@@ -108,7 +109,12 @@ final class RealAbspath {
 			fwrite( STDERR, "\nA maintenance file that is not this plugin's (or not in the test site's WordPress directory) was left in place: {$path}\n" );
 			return;
 		}
-		Deleter::delete_maintenance_file( dirname( $path ), $name );
+		try {
+			Deleter::delete_maintenance_file( dirname( $path ), $name );
+		} catch ( DeletionRefused $e ) {
+			// Not a regular file (a link, a directory), or not in the WordPress directory: said, and left.
+			fwrite( STDERR, "\n" . $e->getMessage() . "\n" );
+		}
 	}
 
 	/**

@@ -390,6 +390,8 @@ final class JobsController extends Controller {
 				return __( 'The undo has started changing the site: it is not cancelled, and finishes putting the site back as it was before the restore. While it asks how to go on, answer keep to give it up.', 'wp-checkpoint' );
 			case 'undo_failed':
 				return __( 'The undo stopped with an error after it began: it is not cancelled, and it does not go on by itself. Retry it in WP-CLI (wp wpcheckpoint job retry, then wp wpcheckpoint job run): it goes on from where it stopped, putting the site back as it was before the restore.', 'wp-checkpoint' );
+			case 'undo_expired':
+				return __( 'The undo stopped with an error after it began, and its work was removed 7 days later: it is not cancelled, and it can no longer be retried. wp wpcheckpoint job status shows where it stopped.', 'wp-checkpoint' );
 			case 'managed_elsewhere':
 				return __( 'This restore is managed by another installation of WP Checkpoint (the site\'s identity changed since it started); it is not cancelled from here. wp wpcheckpoint job status shows what can be done.', 'wp-checkpoint' );
 			case 'elsewhere':

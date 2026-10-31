@@ -14,7 +14,7 @@
  * the database the configuration names, and the one the server says the connection uses, are wp-env's tests database
  * on its server (Leftovers::database_refusal()); otherwise nothing is removed and the reason is said.
  *
- * Exit status: 1 when .maintenance is still there afterwards (the run would only meet the maintenance page), else 0.
+ * Exit status: 76 when .maintenance is still there afterwards (the run would only meet the maintenance page), else 0.
  * Without the tests configuration (WP_PHPUNIT__TESTS_CONFIG, or wp-tests-config.php in WP_TESTS_DIR or
  * WP_PHPUNIT__DIR) nothing is checked: the bootstrap says the test library is missing.
  *
@@ -97,6 +97,6 @@ if ( '1' !== getenv( 'WPCHECKPOINT_TEST_MAINTENANCE_REMOVE' ) ) {
 clearstatcache();
 if ( file_exists( rtrim( ABSPATH, '/' ) . '/' . Maintenance::FILE ) ) {
 	fwrite( STDERR, "The run does not start: with .maintenance in the test site's WordPress directory, WordPress answers the run's own start with its maintenance page.\n" );
-	exit( 1 );
+	exit( 76 );
 }
 exit( 0 );

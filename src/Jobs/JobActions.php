@@ -83,7 +83,7 @@ final class JobActions {
 	/**
 	 * The reasons of cancel() that refuse: nothing was cancelled or requested (REST answers a conflict, WP-CLI an error).
 	 */
-	const CANCEL_REFUSED = array( 'swapped', 'elsewhere', 'managed_elsewhere', 'abandoned', 'undoing', 'undo_failed', 'undo_ended' );
+	const CANCEL_REFUSED = array( 'swapped', 'elsewhere', 'managed_elsewhere', 'abandoned', 'undoing', 'undo_failed', 'undo_expired', 'undo_ended' );
 
 	/**
 	 * Repository.
@@ -442,7 +442,7 @@ final class JobActions {
 	 * installation's to cancel now); "undo_ended" (undone); "undoing" (changing the site, asking how to go on, where
 	 * answering keep gives it up, or put back and taking its maintenance file down: refused, and never ended
 	 * cancelled, which would reclaim the restored copy), or "undo_failed" for the same positions on a failed row (it
-	 * goes on only once retried); "undo_requested" (at its first position, swapped,
+	 * goes on only once retried), "undo_expired" on one whose work was reclaimed (it cannot be); "undo_requested" (at its first position, swapped,
 	 * a request recorded: it gives itself up); "undo_given_up" (swapped and at no position of an undo: it will not
 	 * change the site); null when it can be none of these (at its first position with no request: a new claim
 	 * meanwhile, say; or a row that cannot be read), which the caller says as a job that changed meanwhile.
@@ -463,8 +463,11 @@ final class JobActions {
 		if ( Job::UNDONE === $job->status ) {
 			return 'undo_ended';
 		}
-		// A failed undo does not go on by itself: it is retried first.
-		$undoing = Job::FAILED === $job->status ? 'undo_failed' : 'undoing';
+		// A failed undo does not go on by itself: it is retried first, while it can be (its work not reclaimed yet).
+		$undoing = 'undoing';
+		if ( Job::FAILED === $job->status ) {
+			$undoing = $job->can_retry() ? 'undo_failed' : 'undo_expired';
+		}
 		if ( Job::SITE_CHANGING === $job->site_state ) {
 			return $undoing;
 		}
@@ -1286,7 +1289,9 @@ final class JobActions {
 	 *                                                            site), "undo_ended" (refused: the undo has ended),
 	 *                                                            "undoing" (refused: the undo has started changing the
 	 *                                                            site and finishes), "undo_failed" (refused: the same,
-	 *                                                            on a failed row: it goes on once retried) or
+	 *                                                            on a failed row: it goes on once retried),
+	 *                                                            "undo_expired" (refused: the same, its work reclaimed:
+	 *                                                            it can no longer be retried) or
 	 *                                                            "managed_elsewhere" (refused: as "elsewhere", for a
 	 *                                                            row whose site is recorded as untouched).
 	 * @throws InvalidTransition When the job is already finished.

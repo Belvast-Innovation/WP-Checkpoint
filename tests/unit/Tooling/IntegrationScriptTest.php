@@ -137,7 +137,7 @@ final class IntegrationScriptTest extends TestCase {
 		$stderr = (string) stream_get_contents( $pipes[2] );
 		fclose( $pipes[1] );
 		fclose( $pipes[2] );
-		$this->assertSame( 1, proc_close( $process ), $stderr );
+		$this->assertSame( 76, proc_close( $process ), $stderr );
 		$this->assertStringContainsString( 'The run does not start', $stderr );
 		$this->assertFileDoesNotExist( $this->sandbox . '/call.json', 'PHPUnit was not called' );
 		$this->assertSame( array(), $this->work_dirs(), 'and the run\'s directory went' );
