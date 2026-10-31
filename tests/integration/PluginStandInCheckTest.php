@@ -69,11 +69,22 @@ final class PluginStandInCheckTest extends WP_UnitTestCase {
 
 	public function test_a_tests_own_registry_and_its_own_steps_get_it_too(): void {
 		$types = new JobTypes();
-		$types->add( new FixtureJobType( 'stand-in-own', array( new RestoreFilesPreflightStep(), new FileStagingStep( array( 'read' => 'kept' ) ) ) ) );
+		$types->add( new FixtureJobType( 'stand-in-own', array( new RestoreFilesPreflightStep(), new FileStagingStep( array( 'read' => 'kept' ) ), new SwapCheckStep( null, array( 'version' => '1.0.0-other' ) ) ) ) );
 		$steps = $types->get( 'stand-in-own' )->steps();
 		$this->assertSame( PluginStandIn::dir(), self::parts( $steps[0] )['plugin_dir'] ?? null );
 		$this->assertSame( PluginStandIn::dir(), self::parts( $steps[1] )['plugin_dir'] ?? null );
 		$this->assertSame( 'kept', self::parts( $steps[1] )['read'] ?? null, 'the test\'s own parts stay' );
+		$this->assertSame( PluginStandIn::dir(), self::parts( $steps[2] )['plugin_dir'] ?? null );
+		$this->assertSame( '1.0.0-other', self::parts( $steps[2] )['version'] ?? null, 'and a version of its own' );
+	}
+
+	public function test_a_type_without_those_steps_is_handed_out_as_it_is(): void {
+		$types = new JobTypes();
+		$plain = new FixtureJobType( 'stand-in-none', array( new \WPCheckpoint\Tests\Fixtures\Jobs\ClosureStep( 'x', static function () {} ) ) );
+		$types->add( $plain );
+		$types->add( new FixtureJobType( 'stand-in-some', array( new RestoreFilesPreflightStep() ) ) );
+		$this->assertSame( $plain, $types->get( 'stand-in-none' ) );
+		$this->assertInstanceOf( \WPCheckpoint\Tests\Fixtures\Restore\PluginStandInType::class, $types->get( 'stand-in-some' ), 'the control: one with them is wrapped' );
 	}
 
 	public function test_a_directory_a_test_gave_stays_and_an_earlier_tests_stand_in_is_replaced(): void {

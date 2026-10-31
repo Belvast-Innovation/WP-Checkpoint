@@ -27,7 +27,7 @@ final class PluginStandInUsageTest extends TestCase {
 	/** Files that give a step a plugin directory of their own: path => [count, why]. */
 	const KEYS = array(
 		'integration/RestoreFilesPreflightTest.php' => array( 6, 'synthetic plugin trees of a set size and count: the preflight\'s space and entry limits' ),
-		'integration/PluginStandInCheckTest.php'    => array( 11, 'the controls of PluginStandIn itself: reads the parts it gave, gives a synthetic and the real directory' ),
+		'integration/PluginStandInCheckTest.php'    => array( 12, 'the controls of PluginStandIn itself: reads the parts it gave, gives a synthetic and the real directory' ),
 	);
 
 	/** The classes that declare USES_REAL_PLUGIN_DIR. */

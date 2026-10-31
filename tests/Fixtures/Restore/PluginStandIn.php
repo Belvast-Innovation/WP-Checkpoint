@@ -24,11 +24,12 @@ use WPCheckpoint\Tests\Fixtures\LeftoversStandIn;
  * WPCHECKPOINT_FILE, WPCHECKPOINT_VERSION). On the test site that is the mounted working copy, with its development
  * directories (node_modules, vendor, .git, build): a test's outcome would depend on how big the working copy is (past
  * RestoreFilesPreflightStep::MAX_PLUGIN_ENTRIES every restore fails its preflight). So every job type the plugin's
- * registries give (the filter wpcheckpoint_job_types, which every JobTypes applies: the plugin's, and a test's own) is
- * wrapped here, and each of those three steps it gives, without those parts, gets them from a small PluginCopy made for
- * the test (dir()), one per test, removed at its end. A step a test gave a plugin directory of its own (a synthetic tree)
- * keeps it; one given the real running directory fails the test, named, unless its class declares, with the reason, the
- * constant USES_REAL_PLUGIN_DIR.
+ * registries give (the filter wpcheckpoint_job_types, which every JobTypes applies: the plugin's, and a test's own) whose
+ * steps include one of those three (by its id; every other type is handed out as it is) is wrapped here, and each of
+ * those three steps it gives without a plugin directory gets one from a small PluginCopy made for the test (dir()), one
+ * per test, removed at its end, with its main file and version where the test set none of its own. A step a test gave a
+ * plugin directory of its own (a synthetic tree) keeps it; one given the real running directory fails the test, named,
+ * unless its class declares, with the reason, the constant USES_REAL_PLUGIN_DIR.
  *
  * What it does not cover: a step run other than through a registry (the tests run none; PluginStandInUsageTest scans
  * for it), and a restore run by another process (the web server, a WP-CLI process: they load the plugin as installed;
@@ -46,6 +47,9 @@ final class PluginStandIn implements TestListener {
 
 	/** The steps that read the running plugin. */
 	const STEPS = array( RestoreFilesPreflightStep::class, FileStagingStep::class, SwapCheckStep::class );
+
+	/** Their ids: a type with none of them is handed out as it is. */
+	const STEP_IDS = array( RestoreFilesPreflightStep::ID, FileStagingStep::ID, SwapCheckStep::ID );
 
 	/** @var string This test's copy, '' before one is made. */
 	private static $dir = '';
@@ -83,7 +87,7 @@ final class PluginStandIn implements TestListener {
 	}
 
 	/**
-	 * The filter: each type wrapped once.
+	 * The filter: each type with one of the steps wrapped, once.
 	 *
 	 * @param mixed $types Types keyed by id.
 	 * @return mixed
@@ -93,7 +97,7 @@ final class PluginStandIn implements TestListener {
 			return $types;
 		}
 		foreach ( $types as $id => $type ) {
-			if ( $type instanceof JobType && ! $type instanceof PluginStandInType ) {
+			if ( $type instanceof JobType && ! $type instanceof PluginStandInType && array() !== array_intersect( self::STEP_IDS, $type->step_ids() ) ) {
 				$types[ $id ] = new PluginStandInType( $type );
 			}
 		}
@@ -122,10 +126,14 @@ final class PluginStandIn implements TestListener {
 			}
 			return;
 		}
-		$dir                  = self::dir();
-		$parts['plugin_dir']  = $dir;
-		$parts['plugin_main'] = $dir . '/wp-checkpoint.php';
-		if ( SwapCheckStep::class === get_class( $step ) ) {
+		$dir                 = self::dir();
+		$parts['plugin_dir'] = $dir;
+		// A main file or version the test set stays (a version other than the one staged, say); one in an earlier
+		// test's copy does not.
+		if ( ! isset( $parts['plugin_main'] ) || isset( self::$issued[ dirname( (string) $parts['plugin_main'] ) ] ) ) {
+			$parts['plugin_main'] = $dir . '/wp-checkpoint.php';
+		}
+		if ( SwapCheckStep::class === get_class( $step ) && ! isset( $parts['version'] ) ) {
 			$parts['version'] = PluginCopy::VERSION;
 		}
 		$property->setValue( $step, $parts );
