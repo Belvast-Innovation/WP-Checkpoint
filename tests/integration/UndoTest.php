@@ -458,7 +458,7 @@ final class UndoTest extends SwapTestCase {
 			)
 		);
 		$this->assertSame( array( array( 'id' => $job->id, 'until' => $at + JobRepository::WORK_RETENTION_SECONDS, 'how' => 'failed' ) ), \WPCheckpoint\Support\Uninstaller::holding()['undo'] );
-		$this->assertStringContainsString( sprintf( 'an undo of restore job %d stopped with an error after it put the site back, and the restored site it replaced, with what visitors wrote on it while it was live, is kept until %s UTC.', $job->id, gmdate( 'Y-m-d H:i', $at + JobRepository::WORK_RETENTION_SECONDS ) ), \WPCheckpoint\Support\Uninstaller::held_back( \WPCheckpoint\Support\Uninstaller::holding() ) );
+		$this->assertStringContainsString( sprintf( 'an undo of restore job %d stopped with an error after it put the site back, and the restored site it replaced, with what visitors wrote on it while it was live, is kept until %s UTC;', $job->id, gmdate( 'Y-m-d H:i', $at + JobRepository::WORK_RETENTION_SECONDS ) ), \WPCheckpoint\Support\Uninstaller::held_back( \WPCheckpoint\Support\Uninstaller::holding() ) );
 		$this->set( $job->id, array( 'work_expired_at' => time() ) );
 		$this->assertSame( array(), \WPCheckpoint\Support\Uninstaller::holding()['undo'], 'its work reclaimed: not kept' );
 		$this->set( $job->id, array( 'work_expired_at' => 0, 'finished_at' => time() - JobRepository::WORK_RETENTION_SECONDS - 60 ) );
