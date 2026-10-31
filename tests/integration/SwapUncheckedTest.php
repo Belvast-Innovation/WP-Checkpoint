@@ -133,8 +133,7 @@ final class SwapUncheckedTest extends SwapTestCase {
 		$this->retype( $job );
 		Plugin::instance()->job_actions()->answer( $job->id, array( SwapStep::UNVERIFIED_QUESTION => 'undo' ) );
 		$done = $this->through( $job );
-		$this->assertSame( Job::FAILED, $done->status );
-		$this->assertStringContainsString( 'could not be checked, and the swap was undone as chosen', (string) $done->last_error );
+		$this->assertUndone( $done );
 		$this->assertNotSame( array(), $held, 'the control: tables were put back' );
 		$this->assertSame( array( true ), array_unique( $held ), 'held again before the first rename back' );
 		$this->assertSame( $before, $this->site(), 'the site as it was' );
@@ -183,9 +182,29 @@ final class SwapUncheckedTest extends SwapTestCase {
 		$this->assertSame( TickResult::WAITING, $result->status, 'a later run waits too: ' . $result->message );
 		$this->remove_maintenance();
 		$done = $this->through( $job );
-		$this->assertSame( Job::FAILED, $done->status );
-		$this->assertStringContainsString( 'the swap was undone as chosen', (string) $done->last_error );
+		$this->assertUndone( $done );
 		$this->assertSame( $before, $this->site(), 'once it is gone, put back' );
+	}
+
+	/**
+	 * An undo after the site was let out ends the job undone, not failed: no error, no kind of failure, no Retry.
+	 */
+	private function assertUndone( Job $done ): void {
+		$this->assertSame( Job::UNDONE, $done->status );
+		$this->assertStringContainsString( 'The restore was undone', $done->progress_message );
+		$this->assertSame( '', $done->last_error );
+		$this->assertSame( '', $done->failure_kind );
+		$this->assertFalse( $done->can_retry() );
+		$this->assertFalse( $done->retry_useful() );
+		$this->assertTrue( $done->is_terminal() );
+		$this->assertGreaterThan( 0, $done->finished_at );
+		$this->assertSame( Job::UNDONE, Plugin::instance()->jobs()->find( $done->id )->status, 'read back' );
+		$data = Plugin::instance()->job_presenter()->present( $done, false );
+		$this->assertSame( 'Undone', $data['status_text'] );
+		$this->assertSame( '', $data['failure_text'] );
+		$this->assertFalse( $data['retry_useful'] );
+		$this->assertFalse( $data['retryable'] );
+		$this->assertSame( 'progress', \WPCheckpoint\Admin\JobProgress::state( $data ), 'not shown as a failure' );
 	}
 
 	public function test_a_cancel_after_the_site_was_put_back_takes_its_own_bare_file_down(): void {
@@ -237,8 +256,9 @@ final class SwapUncheckedTest extends SwapTestCase {
 		};
 		$this->retype( $job );
 		$done = $this->through( $job );
-		$this->assertSame( Job::FAILED, $done->status );
+		$this->assertSame( Job::FAILED, $done->status, 'never let out: a failure as before, not undone' );
 		$this->assertStringContainsString( 'could not be checked, and the swap was undone as chosen', (string) $done->last_error );
+		$this->assertTrue( $done->retry_useful(), 'Retry is offered: nothing was written on the restored site' );
 		$this->assertNotContains( 'unheld_commit', $this->seams, 'never let out' );
 		$this->assertNotContains( 'asked', $this->seams );
 		$this->assertContains( 'self_check_removed', $this->seams, 'the control: the seams are seen' );

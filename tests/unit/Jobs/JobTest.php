@@ -11,10 +11,11 @@ final class JobTest extends TestCase {
 	public function test_every_status_pair_is_classified(): void {
 		$allowed = array(
 			'queued->running', 'queued->failed', 'queued->cancelled',
-			'running->completed', 'running->failed', 'running->paused', 'running->cancelled',
+			'running->completed', 'running->failed', 'running->paused', 'running->cancelled', 'running->undone',
 			'paused->running', 'paused->failed', 'paused->cancelled',
 			'failed->queued',
 		);
+		$this->assertContains( Job::UNDONE, Job::statuses(), 'the control: undone is among the statuses' );
 		foreach ( Job::statuses() as $from ) {
 			foreach ( Job::statuses() as $to ) {
 				$expected = in_array( $from . '->' . $to, $allowed, true );
@@ -41,7 +42,7 @@ final class JobTest extends TestCase {
 	}
 
 	public function test_terminal_statuses(): void {
-		foreach ( array( Job::COMPLETED, Job::CANCELLED ) as $status ) {
+		foreach ( array( Job::COMPLETED, Job::CANCELLED, Job::UNDONE ) as $status ) {
 			$job         = new Job();
 			$job->status = $status;
 			$this->assertTrue( $job->is_terminal(), $status );

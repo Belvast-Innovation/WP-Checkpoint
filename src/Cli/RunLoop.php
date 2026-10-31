@@ -174,6 +174,8 @@ final class RunLoop {
 				return self::EXIT_FAILED;
 			case Job::CANCELLED:
 				return self::EXIT_CANCELLED;
+			case Job::UNDONE:
+				return self::EXIT_COMPLETED; // Undone as asked: not a failure.
 			default:
 				return self::EXIT_WAITING;
 		}
