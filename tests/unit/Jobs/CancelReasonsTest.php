@@ -18,13 +18,15 @@ final class CancelReasonsTest extends TestCase {
 
 	/**
 	 * The reasons written in a source: as the value of "reason" in cancel(), assigned to $reason, or returned (or
-	 * assigned to $undoing) in undo_cancel_state().
+	 * assigned to $undoing) in undo_cancel_state(). Line endings are made "\n" first: a checkout on Windows has "\r\n",
+	 * and a function's end would not be found.
 	 *
 	 * @param string $source The source of JobActions.
 	 * @return string[]
 	 */
 	public static function reasons( string $source ): array {
-		$found = array();
+		$source = str_replace( "\r\n", "\n", $source );
+		$found  = array();
 		$this_body = static function ( string $head ) use ( $source ): string {
 			$start = strpos( $source, $head );
 			if ( false === $start ) {
@@ -63,7 +65,10 @@ final class CancelReasonsTest extends TestCase {
 
 	public function test_a_reason_in_neither_list_is_found(): void {
 		$source = "\tpublic function cancel( int \$id ) {\n\t\treturn array( 'reason'  => 'brand_new' );\n\t}\n"
-			. "\tprivate function undo_cancel_state( Job \$job ) {\n\t\treturn \$x ? 'other_new' : null;\n\t}\n";
+			. "\tprivate function undo_cancel_state( Job \$job ) {\n\t\treturn \$x ? 'other_new' : null;\n\t}\n"
+			. "\tprivate function after() {\n\t\t\$reason = 'not_a_cancel';\n\t\treturn 'nor_this';\n\t}\n";
 		$this->assertSame( array( 'brand_new', 'other_new' ), self::reasons( $source ) );
+		// The same with Windows line endings: each function still ends where it does.
+		$this->assertSame( array( 'brand_new', 'other_new' ), self::reasons( str_replace( "\n", "\r\n", $source ) ) );
 	}
 }
