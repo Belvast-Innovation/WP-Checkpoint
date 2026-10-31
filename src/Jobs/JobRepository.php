@@ -838,7 +838,7 @@ final class JobRepository {
 		}
 		foreach ( PutBackEvidence::COLUMNS as $column ) {
 			$value          = $rows[0][ $i++ ];
-			$out[ $column ] = in_array( $column, PutBackEvidence::INTEGERS, true ) ? (int) $value : (string) $value;
+			$out[ $column ] = null === $value ? null : ( in_array( $column, PutBackEvidence::INTEGERS, true ) ? (int) $value : (string) $value ); // A NULL stays NULL.
 		}
 		return $out;
 	}
@@ -856,6 +856,10 @@ final class JobRepository {
 			$where[] = null === $raw[ $column ] ? "{$column} IS NULL" : $wpdb->prepare( "SHA2(CAST({$column} AS BINARY), 256) = %s", hash( 'sha256', (string) $raw[ $column ] ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- constant column names.
 		}
 		foreach ( PutBackEvidence::COLUMNS as $column ) {
+			if ( null === $raw[ $column ] ) {
+				$where[] = "{$column} IS NULL";
+				continue;
+			}
 			$where[] = in_array( $column, PutBackEvidence::INTEGERS, true ) ? $wpdb->prepare( "{$column} = %d", (int) $raw[ $column ] ) : $wpdb->prepare( "CAST({$column} AS BINARY) = CAST(%s AS BINARY)", (string) $raw[ $column ] ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- constant column names.
 		}
 		return implode( ' AND ', $where );
@@ -890,30 +894,29 @@ final class JobRepository {
 		if ( false === $cursor_json ) {
 			throw new \RuntimeException( sprintf( 'Job %d: its cursor cannot be written.', $job->id ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
 		}
-		$now     = $this->now();
-		$options = '';
-		if ( $reset_options ) {
-			$options = $wpdb->prepare( ', options_json = %s', (string) wp_json_encode( array( self::OPTIONS_RESET => $now ) ) );
-		}
+		$now       = $this->now();
 		$committed = 'reverse' === ( $cursor['phase'] ?? '' );
-		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix; the WHERE clause is the compare-and-set, its parts prepared.
-		$affected = $wpdb->query(
-			$wpdb->prepare(
-				'UPDATE ' . self::table() . ' SET status = %s, step = %s, site_state = %d, cursor_json = %s, questions_json = NULL, progress_message = %s, last_error = \'\', failure_kind = \'\', finished_at = 0, takeovers = 0, takeover_mark = \'\', cron_deferrals = 0, cancel_requested = %d, lock_token = \'\', locked_until = 0, updated_at = %d' . $options . ' WHERE id = %d AND site_state <> %d AND (lock_token = \'\' OR locked_until < %d) AND CAST(site_mark AS BINARY) = CAST(%s AS BINARY) AND site_mark <> \'\' AND ' . Job::MANAGING_SQL . ' = %s AND ' . self::holds_raw( $raw ),
-				Job::QUEUED,
-				SwapStep::ID,
-				Job::SITE_CHANGING,
-				$cursor_json,
-				self::fit_message( $message ),
-				$committed ? 0 : $now,
-				$now,
-				$job->id,
-				Job::SITE_UNTOUCHED,
-				$now,
-				$job->site_mark,
-				$token
-			)
+		$options   = $reset_options ? $wpdb->prepare( ', options_json = %s', (string) wp_json_encode( array( self::OPTIONS_RESET => $now ) ) ) : '';
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix; the WHERE clause is the compare-and-set, each part prepared once (a value may hold "%").
+		$head     = $wpdb->prepare(
+			'UPDATE ' . self::table() . ' SET status = %s, step = %s, site_state = %d, cursor_json = %s, questions_json = NULL, progress_message = %s, last_error = \'\', failure_kind = \'\', finished_at = 0, takeovers = 0, takeover_mark = \'\', cron_deferrals = 0, cancel_requested = %d, lock_token = \'\', locked_until = 0, updated_at = %d',
+			Job::QUEUED,
+			SwapStep::ID,
+			Job::SITE_CHANGING,
+			$cursor_json,
+			self::fit_message( $message ),
+			$committed ? 0 : $now,
+			$now
 		);
+		$where    = $wpdb->prepare(
+			' WHERE id = %d AND site_state <> %d AND (lock_token = \'\' OR locked_until < %d) AND CAST(site_mark AS BINARY) = CAST(%s AS BINARY) AND site_mark <> \'\' AND ' . Job::MANAGING_SQL . ' = %s AND ',
+			$job->id,
+			Job::SITE_UNTOUCHED,
+			$now,
+			$job->site_mark,
+			$token
+		);
+		$affected = $wpdb->query( $head . $options . $where . self::holds_raw( $raw ) );
 		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		$row = $this->find( $job->id );
 		if ( 1 !== (int) $affected || null === $row ) {
@@ -957,20 +960,16 @@ final class JobRepository {
 			$set[] = null === $kept[ $column ] ? "{$column} = NULL" : $wpdb->prepare( "{$column} = UNHEX(%s)", bin2hex( (string) $kept[ $column ] ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- constant column names.
 		}
 		foreach ( PutBackEvidence::COLUMNS as $column ) {
+			if ( null === $kept[ $column ] ) {
+				$set[] = "{$column} = NULL";
+				continue;
+			}
 			$set[] = in_array( $column, PutBackEvidence::INTEGERS, true ) ? $wpdb->prepare( "{$column} = %d", (int) $kept[ $column ] ) : $wpdb->prepare( "{$column} = %s", (string) $kept[ $column ] ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- constant column names.
 		}
 		$stamp = $this->now();
-		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix; the parts prepared above.
-		$affected = $wpdb->query(
-			$wpdb->prepare(
-				'UPDATE ' . self::table() . ' SET ' . implode( ', ', $set ) . ', updated_at = %d WHERE id = %d AND status = %s AND site_state = %d AND (lock_token = \'\' OR locked_until < %d) AND ' . self::holds_raw( $now ),
-				$stamp,
-				$job->id,
-				Job::PAUSED,
-				Job::SITE_SWAPPED,
-				$stamp
-			)
-		);
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix; each part prepared once (a value may hold "%").
+		$tail     = $wpdb->prepare( ', updated_at = %d WHERE id = %d AND status = %s AND site_state = %d AND (lock_token = \'\' OR locked_until < %d) AND ', $stamp, $job->id, Job::PAUSED, Job::SITE_SWAPPED, $stamp );
+		$affected = $wpdb->query( 'UPDATE ' . self::table() . ' SET ' . implode( ', ', $set ) . $tail . self::holds_raw( $now ) );
 		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		$row = $this->find( $job->id );
 		if ( 1 !== (int) $affected || null === $row ) {
