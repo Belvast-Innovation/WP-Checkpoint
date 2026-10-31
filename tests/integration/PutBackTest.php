@@ -459,12 +459,35 @@ final class PutBackTest extends SwapTestCase {
 		$this->assertSame( Job::PAUSED, $still->status, 'not given up' );
 		$this->assertTrue( $still->awaiting_answer(), 'not answered' );
 		$this->assertSame( array(), (array) ( $still->options['answers'] ?? array() ) );
-		// Nor does a run of it: it asks again, it does not end the restore (no deadline in the step either).
+		// Nor does a driver: a job that waits for an answer is not run (the step's own lack of a deadline is tested by
+		// answering late, in the test after this one).
 		$this->retype( $still );
 		$again = $this->cli_run( $still );
-		$this->assertSame( Job::PAUSED, $again->status, 'a run after the wait asks again' );
+		$this->assertSame( Job::PAUSED, $again->status, 'still asked after the wait' );
 		$this->assertSame( SwapStep::CARRY_QUESTION, $again->questions[0]['id'] ?? '' );
 		$this->assertSame( Job::SITE_SWAPPED, $again->site_state );
+
+		// Managed by another installation (taken over meanwhile): not given up from here.
+		$this->set( $job->id, array( 'held_by' => 'aaaaaaaaaaaa' ) );
+		try {
+			Plugin::instance()->job_actions()->answer( $job->id, array( SwapStep::CARRY_QUESTION => RestoreJob::KEEP ) );
+			$this->fail( 'a job managed elsewhere is not given up from here' );
+		} catch ( InvalidTransition $e ) {
+			$this->assertStringContainsString( 'managed by another installation', $e->getMessage() );
+		}
+		$this->set( $job->id, array( 'held_by' => '' ) );
+
+		// The record of another put-back than the one answered (a later claim meanwhile): not used.
+		$answered = Plugin::instance()->jobs()->find( $job->id );
+		$later    = array( 'evidence' => 'logs/job-' . $job->id . '-putback-20990101000000-0000abcd' ) + $answered->cursor;
+		$this->set( $job->id, array( 'cursor_json' => wp_json_encode( $later ) ) );
+		try {
+			Plugin::instance()->jobs()->give_up_put_back( $answered );
+			$this->fail( 'an answer to an earlier put-back does not give up a later one' );
+		} catch ( \WPCheckpoint\Jobs\StaleJob $e ) {
+			$this->assertStringContainsString( 'changed while it was being answered', $e->getMessage() );
+		}
+		$this->set( $job->id, array( 'cursor_json' => wp_json_encode( $answered->cursor ) ) );
 
 		// A record that was changed is refused, the question kept.
 		$file  = $this->evidence( $still ) . '/cursor_json';
@@ -481,7 +504,9 @@ final class PutBackTest extends SwapTestCase {
 
 		Plugin::instance()->job_actions()->answer( $job->id, array( SwapStep::CARRY_QUESTION => RestoreJob::KEEP ) );
 		$back = Plugin::instance()->jobs()->put_back_raw( $job->id );
-		$this->assertSame( $raw, $back, 'every column the claim wrote over is as it was before the put-back' );
+		$this->assertNotSame( '', $raw['lock_token'], 'the control: the stuck row held the expired token of the run that died' );
+		$this->assertSame( array_replace( $raw, array( 'lock_token' => '', 'locked_until' => 0 ) ), $back, 'every column the claim wrote over is as it was before the put-back, but the lock' );
+		$this->assertFalse( Plugin::instance()->jobs()->heartbeat( Plugin::instance()->jobs()->find( $job->id ), (string) $raw['lock_token'] ), 'the run that died does not get the job back with its old token' );
 		$kept = Plugin::instance()->jobs()->find( $job->id );
 		$this->assertNotSame( Job::COMPLETED, $kept->status, 'never completed' );
 		$this->assertSame( Job::SITE_SWAPPED, $kept->site_state );
@@ -497,6 +522,8 @@ final class PutBackTest extends SwapTestCase {
 
 	public function test_a_put_backs_question_answered_put_back_drops_the_plugins_state_and_ends_undone(): void {
 		list( $job, , $before ) = $this->asked();
+		// Answered long after the swap (an undo's question would be past its deadline and kept): put back all the same.
+		$this->set( $job->id, array( 'committed_at' => time() - 30 * 86400 ) );
 		Plugin::instance()->job_actions()->answer( $job->id, array( SwapStep::CARRY_QUESTION => SwapStep::PUT_BACK ) );
 		list( $done ) = $this->run_out( Plugin::instance()->jobs()->find( $job->id ) );
 		$this->assertSame( Job::UNDONE, $done->status, $done->last_error . ' ' . $done->progress_message );

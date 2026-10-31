@@ -682,6 +682,8 @@ final class JobActions {
 				$claimed = $this->repository->claim_put_back( $job, $again['raw'], $cursor, $reset, __( 'Putting the site back as it was', 'wp-checkpoint' ), $job->managing_token() );
 			} catch ( StaleJob $e ) {
 				return $refuse( __( 'The job changed meanwhile, or a run holds it; nothing was changed. Try again.', 'wp-checkpoint' ) );
+			} catch ( \RuntimeException $e ) {
+				return $refuse( __( 'The job could not be claimed: the database refused the statement. Nothing was changed.', 'wp-checkpoint' ) );
 			}
 		} finally {
 			$this->repository->unlock_starts();

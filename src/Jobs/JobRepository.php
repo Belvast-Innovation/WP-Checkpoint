@@ -918,6 +918,10 @@ final class JobRepository {
 		);
 		$affected = $wpdb->query( $head . $options . $where . self::holds_raw( $raw ) );
 		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		if ( false === $affected ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+			throw new \RuntimeException( sprintf( 'Job %d could not be claimed: the database refused the statement. Nothing was changed.', $job->id ) );
+		}
 		$row = $this->find( $job->id );
 		if ( 1 !== (int) $affected || null === $row ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
@@ -930,8 +934,12 @@ final class JobRepository {
 	 * Give a put-back up at its question about the carry back, answered "keep" (SwapStep::CARRY_QUESTION): the job goes
 	 * back to what it was before the put-back's claim, every column the claim wrote over written back from the evidence
 	 * directory (checked against the sums the claim's cursor and its manifest hold), in one statement on the row as it
-	 * stands now: paused at that question, the site swapped (nothing was put back), no live lock. It still holds the
-	 * site and still needs a way on; it is never completed (nothing after its commit was done for real).
+	 * stands now: paused at that question with this put-back's cursor (its evidence directory and sum as answered: a
+	 * later put-back's question is not given up from an earlier one's record), the site swapped (nothing was put back),
+	 * no live lock, still managed by this installation. It still holds the site and still needs a way on; it is never
+	 * completed (nothing after its commit was done for real). The lock is the one column not written back: the claim
+	 * found no live lock, and the expired token of a run that stalled is not handed back to it (the token is the fence:
+	 * heartbeat(), save_progress() and release() look at it alone).
 	 *
 	 * @param Job $job The job, paused at a put-back's question.
 	 * @return Job The row as now stored.
@@ -940,6 +948,10 @@ final class JobRepository {
 	 */
 	public function give_up_put_back( Job $job ): Job {
 		global $wpdb;
+		if ( ! $this->manages( $job ) ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+			throw new InvalidTransition( sprintf( 'Job %d is managed by another installation: its put-back is not given up from here; nothing is answered.', $job->id ) );
+		}
 		$base = $this->files_base( $job );
 		try {
 			if ( '' === $base ) {
@@ -955,22 +967,36 @@ final class JobRepository {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
 			throw new StaleJob( sprintf( 'Job %d is gone.', $job->id ) );
 		}
+		$cursor = null === $now['cursor_json'] ? null : json_decode( (string) $now['cursor_json'], true );
+		if ( ! is_array( $cursor ) || ( $cursor['evidence'] ?? null ) !== ( $job->cursor['evidence'] ?? '' ) || ( $cursor['evidence_sum'] ?? null ) !== ( $job->cursor['evidence_sum'] ?? '' ) ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+			throw new StaleJob( sprintf( 'Job %d changed while it was being answered.', $job->id ) );
+		}
 		$set = array();
 		foreach ( PutBackEvidence::FILES as $column ) {
 			$set[] = null === $kept[ $column ] ? "{$column} = NULL" : $wpdb->prepare( "{$column} = UNHEX(%s)", bin2hex( (string) $kept[ $column ] ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- constant column names.
 		}
 		foreach ( PutBackEvidence::COLUMNS as $column ) {
+			if ( in_array( $column, array( 'lock_token', 'locked_until' ), true ) ) {
+				continue; // Not handed back to a run that stalled (see above).
+			}
 			if ( null === $kept[ $column ] ) {
 				$set[] = "{$column} = NULL";
 				continue;
 			}
 			$set[] = in_array( $column, PutBackEvidence::INTEGERS, true ) ? $wpdb->prepare( "{$column} = %d", (int) $kept[ $column ] ) : $wpdb->prepare( "{$column} = %s", (string) $kept[ $column ] ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- constant column names.
 		}
+		$set[] = "lock_token = ''";
+		$set[] = 'locked_until = 0';
 		$stamp = $this->now();
 		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix; each part prepared once (a value may hold "%").
-		$tail     = $wpdb->prepare( ', updated_at = %d WHERE id = %d AND status = %s AND site_state = %d AND (lock_token = \'\' OR locked_until < %d) AND ', $stamp, $job->id, Job::PAUSED, Job::SITE_SWAPPED, $stamp );
+		$tail     = $wpdb->prepare( ', updated_at = %d WHERE id = %d AND status = %s AND site_state = %d AND (lock_token = \'\' OR locked_until < %d) AND ' . Job::MANAGING_SQL . ' = %s AND ', $stamp, $job->id, Job::PAUSED, Job::SITE_SWAPPED, $stamp, $job->managing_token() );
 		$affected = $wpdb->query( 'UPDATE ' . self::table() . ' SET ' . implode( ', ', $set ) . $tail . self::holds_raw( $now ) );
 		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		if ( false === $affected ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+			throw new \RuntimeException( sprintf( 'Job %d: the job could not be written (the database refused the statement); nothing is answered.', $job->id ) );
+		}
 		$row = $this->find( $job->id );
 		if ( 1 !== (int) $affected || null === $row ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
