@@ -990,6 +990,7 @@ final class SiteStateTest extends WP_UnitTestCase {
 			'the table cannot be listed'   => array( 'SHOW TABLES LIKE', false ),
 			'the columns cannot be listed' => array( "LIKE 'site_state'", false ),
 			'the count cannot be read'     => array( 'WHERE site_state <> 0', false ),
+			'the undos cannot be read'     => array( 'WHERE site_state = 0 AND step', false ),
 			'the listing never runs'       => array( 'SHOW TABLES LIKE', true ),
 		);
 	}

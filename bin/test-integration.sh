@@ -24,6 +24,12 @@
 # that the code is ready, which takes a run at the defaults on the head commit (a larger count is extra coverage only).
 # The exit status does not change.
 #
+# Before PHPUnit, with the lock held, tests/Fixtures/maintenance-precheck.php says the restore's maintenance files in
+# the test site's WordPress directory (a run stopped while a test held one leaves it; a held .maintenance stops the
+# suite's own start at WordPress's maintenance page). It lists only; WPCHECKPOINT_TEST_MAINTENANCE_REMOVE=1 removes
+# this plugin's, on wp-env's test site only. With .maintenance still there the run does not start (status 76; any
+# other failure of the check, status 1).
+#
 # One run at a time: runs share the tests database, and a second one's start (the core test library reinstalls the
 # tables; the leftover check removes an earlier run's) breaks the first. The lock is a flock() on
 # /tmp/wpcheckpoint-integration.lock in the container every run executes in, taken on a descriptor PHPUnit inherits:
@@ -204,6 +210,15 @@ for arg in "$@"; do
 	fi
 	ARGS="$ARGS '$(printf '%s' "$arg" | sed "s/'/'\\\\''/g")'"
 done
+
+php "$PLUGIN/tests/Fixtures/maintenance-precheck.php"
+PRECHECK=$?
+if [ "$PRECHECK" -eq 76 ]; then
+	exit 76
+elif [ "$PRECHECK" -ne 0 ]; then
+	echo "The check of the test site's maintenance files failed (status $PRECHECK); the run does not start." >&2
+	exit 1
+fi
 
 cd "$WORK/cwd" || exit 1
 eval "set -- $ARGS"
