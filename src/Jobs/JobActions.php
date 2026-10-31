@@ -81,6 +81,11 @@ final class JobActions {
 	const LEFT_STAYS = 'stays';
 
 	/**
+	 * The reasons of cancel() that refuse: nothing was cancelled or requested (REST answers a conflict, WP-CLI an error).
+	 */
+	const CANCEL_REFUSED = array( 'swapped', 'elsewhere', 'managed_elsewhere', 'abandoned', 'undoing', 'undo_failed', 'undo_ended' );
+
+	/**
 	 * Repository.
 	 *
 	 * @var JobRepository
@@ -432,10 +437,12 @@ final class JobActions {
 
 	/**
 	 * What a cancel of an undo that wrote nothing says, decided by the row as it is now and by nothing else (the
-	 * invariants C1–C5 of ARCHITECTURE "4c-C2": whatever ran meanwhile, the answer is true of the row): "elsewhere" or
-	 * "abandoned" (not this installation's to cancel now); "undo_ended" (undone); "undoing" (changing the site, asking
-	 * how to go on, where answering keep gives it up, or put back and taking its maintenance file down: refused, and
-	 * never ended cancelled, which would reclaim the restored copy); "undo_requested" (at its first position, swapped,
+	 * invariants C1–C5 of ARCHITECTURE "4c-C2": whatever ran meanwhile, the answer is true of the row): "elsewhere"
+	 * (holding the site changed) or "managed_elsewhere" (the site recorded as untouched), or "abandoned" (not this
+	 * installation's to cancel now); "undo_ended" (undone); "undoing" (changing the site, asking how to go on, where
+	 * answering keep gives it up, or put back and taking its maintenance file down: refused, and never ended
+	 * cancelled, which would reclaim the restored copy), or "undo_failed" for the same positions on a failed row (it
+	 * goes on only once retried); "undo_requested" (at its first position, swapped,
 	 * a request recorded: it gives itself up); "undo_given_up" (swapped and at no position of an undo: it will not
 	 * change the site); null when it can be none of these (at its first position with no request: a new claim
 	 * meanwhile, say; or a row that cannot be read), which the caller says as a job that changed meanwhile.
@@ -448,7 +455,7 @@ final class JobActions {
 			return null; // What it is cannot be read.
 		}
 		if ( ! $this->repository->manages( $job ) ) {
-			return 'elsewhere';
+			return Job::SITE_UNTOUCHED === $job->site_state ? 'managed_elsewhere' : 'elsewhere';
 		}
 		if ( Job::REASON_ABANDONED === $job->failure_reason ) {
 			return 'abandoned';
@@ -456,17 +463,19 @@ final class JobActions {
 		if ( Job::UNDONE === $job->status ) {
 			return 'undo_ended';
 		}
+		// A failed undo does not go on by itself: it is retried first.
+		$undoing = Job::FAILED === $job->status ? 'undo_failed' : 'undoing';
 		if ( Job::SITE_CHANGING === $job->site_state ) {
-			return 'undoing';
+			return $undoing;
 		}
 		if ( Job::SITE_UNTOUCHED === $job->site_state ) {
 			// Put back by an undo that still takes its maintenance file down (it ends undone), or anything else: unknown.
-			return SwapStep::undoing( $job->cursor ) ? 'undoing' : null;
+			return SwapStep::undoing( $job->cursor ) ? $undoing : null;
 		}
 		if ( 'undo' === ( $job->cursor['phase'] ?? '' ) ) {
 			return 0 !== $job->cancel_requested ? 'undo_requested' : null;
 		}
-		return SwapStep::undoing( $job->cursor ) ? 'undoing' : 'undo_given_up';
+		return SwapStep::undoing( $job->cursor ) ? $undoing : 'undo_given_up';
 	}
 
 	/**
@@ -1274,9 +1283,12 @@ final class JobActions {
 	 *                                                            was given up: the job is completed again, the restored
 	 *                                                            site in place), "undo_requested" (such an undo is
 	 *                                                            running: it gives itself up before it changes the
-	 *                                                            site), "undo_ended" (refused: the undo has ended) or
+	 *                                                            site), "undo_ended" (refused: the undo has ended),
 	 *                                                            "undoing" (refused: the undo has started changing the
-	 *                                                            site and finishes).
+	 *                                                            site and finishes), "undo_failed" (refused: the same,
+	 *                                                            on a failed row: it goes on once retried) or
+	 *                                                            "managed_elsewhere" (refused: as "elsewhere", for a
+	 *                                                            row whose site is recorded as untouched).
 	 * @throws InvalidTransition When the job is already finished.
 	 * @throws StaleJob When the job changed meanwhile.
 	 */

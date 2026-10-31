@@ -116,6 +116,38 @@ final class IntegrationScriptTest extends TestCase {
 		$this->assertSame( array(), $this->work_dirs(), 'the empty directory is removed after the run' );
 	}
 
+	public function test_a_maintenance_file_in_the_test_site_stops_the_run_before_phpunit(): void {
+		mkdir( $this->sandbox . '/site' );
+		file_put_contents( $this->sandbox . '/site/wp-settings.php', '<?php' );
+		file_put_contents( $this->sandbox . '/site/.maintenance', \WPCheckpoint\Restore\Maintenance::CODE );
+		file_put_contents( $this->sandbox . '/wp-tests-config.php', '<?php define( "ABSPATH", ' . var_export( $this->sandbox . '/site/', true ) . ' ); define( "DB_NAME", "x" ); define( "DB_USER", "x" ); define( "DB_PASSWORD", "x" ); define( "DB_HOST", "127.0.0.1:1" );' );
+		$env     = array(
+			'PATH'                      => (string) getenv( 'PATH' ),
+			'TMPDIR'                    => $this->sandbox . '/tmp',
+			'WPCHECKPOINT_TEST_PHPUNIT' => $this->sandbox . '/phpunit',
+			'FAKE_RECORD'               => $this->sandbox . '/call.json',
+			'FAKE_EXIT'                 => '0',
+			'WPCHECKPOINT_TEST_LOCK'    => $this->sandbox . '/run.lock',
+			'WP_PHPUNIT__TESTS_CONFIG'  => $this->sandbox . '/wp-tests-config.php',
+		);
+		$pipes   = array();
+		$process = proc_open( array( 'sh', dirname( __DIR__, 3 ) . '/bin/test-integration.sh' ), array( 1 => array( 'pipe', 'w' ), 2 => array( 'pipe', 'w' ) ), $pipes, $this->sandbox, $env );
+		$this->assertIsResource( $process );
+		stream_get_contents( $pipes[1] );
+		$stderr = (string) stream_get_contents( $pipes[2] );
+		fclose( $pipes[1] );
+		fclose( $pipes[2] );
+		$this->assertSame( 1, proc_close( $process ), $stderr );
+		$this->assertStringContainsString( 'The run does not start', $stderr );
+		$this->assertFileDoesNotExist( $this->sandbox . '/call.json', 'PHPUnit was not called' );
+		$this->assertSame( array(), $this->work_dirs(), 'and the run\'s directory went' );
+
+		Sandbox::remove( $this->sandbox . '/site/.maintenance' );
+		$run = $this->run_script( array(), array( 'WP_PHPUNIT__TESTS_CONFIG' => $this->sandbox . '/wp-tests-config.php' ) );
+		$this->assertSame( 0, $run['code'], 'the control: without it the run starts' );
+		$this->assertStringContainsString( 'No maintenance file in the test site\'s WordPress directory', $run['stderr'] );
+	}
+
 	public function test_the_runs_temporary_directory_goes_with_it_and_fails_nothing(): void {
 		$run = $this->run_script( array(), array( 'FAKE_TEMP' => '1' ) );
 		$this->assertSame( 0, $run['code'], 'the leftover check, not the script, judges what tests leave there: ' . $run['stderr'] );
@@ -346,6 +378,8 @@ final class IntegrationScriptTest extends TestCase {
 			mkdir( $this->sandbox . '/plugin/' . $dir, 0755, true );
 		}
 		copy( dirname( __DIR__, 3 ) . '/bin/test-integration.sh', $this->sandbox . '/plugin/bin/test-integration.sh' );
+		mkdir( $this->sandbox . '/plugin/tests/Fixtures' );
+		copy( dirname( __DIR__, 2 ) . '/Fixtures/maintenance-precheck.php', $this->sandbox . '/plugin/tests/Fixtures/maintenance-precheck.php' ); // The check before PHPUnit.
 		file_put_contents( $this->sandbox . '/plugin/phpunit.xml.dist', '<phpunit/>' );
 		file_put_contents( $this->sandbox . '/plugin/src/Code.php', '<?php // the code' );
 		file_put_contents( $this->sandbox . '/plugin/tests/CodeTest.php', '<?php // its test' );

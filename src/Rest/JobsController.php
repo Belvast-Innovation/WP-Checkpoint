@@ -248,7 +248,7 @@ final class JobsController extends Controller {
 		if ( null === $outcome ) {
 			return $this->not_found();
 		}
-		if ( in_array( $outcome['reason'], array( 'swapped', 'elsewhere', 'abandoned', 'undoing', 'undo_ended' ), true ) ) {
+		if ( in_array( $outcome['reason'], JobActions::CANCEL_REFUSED, true ) ) {
 			return $this->conflict( self::cancel_message( $outcome['reason'] ) );
 		}
 		$results = array(
@@ -367,7 +367,7 @@ final class JobsController extends Controller {
 	/**
 	 * Message for a cancel outcome.
 	 *
-	 * @param string $reason cleaned, holder, unavailable, requested, swapped, elsewhere or abandoned.
+	 * @param string $reason A reason of JobActions::cancel().
 	 * @return string
 	 */
 	public static function cancel_message( string $reason ): string {
@@ -388,6 +388,10 @@ final class JobsController extends Controller {
 				return __( 'The undo is running and has not changed the site yet: it is given up before it does, and the restored site stays.', 'wp-checkpoint' );
 			case 'undoing':
 				return __( 'The undo has started changing the site: it is not cancelled, and finishes putting the site back as it was before the restore. While it asks how to go on, answer keep to give it up.', 'wp-checkpoint' );
+			case 'undo_failed':
+				return __( 'The undo stopped with an error after it began: it is not cancelled, and it does not go on by itself. Retry it in WP-CLI (wp wpcheckpoint job retry, then wp wpcheckpoint job run): it goes on from where it stopped, putting the site back as it was before the restore.', 'wp-checkpoint' );
+			case 'managed_elsewhere':
+				return __( 'This restore is managed by another installation of WP Checkpoint (the site\'s identity changed since it started); it is not cancelled from here. wp wpcheckpoint job status shows what can be done.', 'wp-checkpoint' );
 			case 'elsewhere':
 				return __( 'This restore holds the site changed and is managed by another installation of WP Checkpoint (the site\'s identity changed since it started); it is not cancelled from here. wp wpcheckpoint job status shows what can be done.', 'wp-checkpoint' );
 			case 'abandoned':

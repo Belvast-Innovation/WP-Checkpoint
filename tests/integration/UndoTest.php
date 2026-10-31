@@ -341,6 +341,127 @@ final class UndoTest extends SwapTestCase {
 		$this->assertSame( $before, $this->site(), 'put back after the cleanup' );
 	}
 
+	/**
+	 * Uninstall WP Checkpoint with its data deleted, stopped before its first step that removes anything (the seam
+	 * throws there, so a test that is wrong deletes nothing): the points it reached, and what it logged.
+	 *
+	 * @return array{points: string[], log: string}
+	 */
+	private function uninstall_until_it_removes(): array {
+		$points   = array();
+		$property = new \ReflectionProperty( \WPCheckpoint\Support\Uninstaller::class, 'at' );
+		$property->setAccessible( true );
+		$property->setValue(
+			null,
+			static function ( string $point ) use ( &$points ): void {
+				$points[] = $point;
+				if ( 0 === strpos( $point, 'unit:' ) ) {
+					throw new \DomainException( 'stopped before it removes anything' );
+				}
+			}
+		);
+		$log = $this->sandbox . '/php-error.log';
+		$was = ini_get( 'error_log' );
+		ini_set( 'error_log', $log );
+		\WPCheckpoint\Support\UninstallSetting::save( true );
+		try {
+			\WPCheckpoint\Support\Uninstaller::run();
+		} catch ( \DomainException $e ) {
+			$points[] = 'stopped';
+		} finally {
+			$property->setValue( null, null );
+			ini_set( 'error_log', (string) $was );
+			\WPCheckpoint\Support\UninstallSetting::save( false );
+		}
+		clearstatcache();
+		return array(
+			'points' => $points,
+			'log'    => is_file( $log ) ? (string) file_get_contents( $log ) : '',
+		);
+	}
+
+	public function test_an_uninstall_keeps_everything_while_an_undone_restore_keeps_its_restored_site_and_goes_on_after(): void {
+		global $wpdb;
+		$job    = $this->completed();
+		$done   = $this->undone( $job );
+		$staged = function () use ( $wpdb, $job ): array {
+			return (array) $wpdb->get_col( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( \WPCheckpoint\Jobs\TempTables::job_prefix( $job->storage_token, $job->id ) ) . '%' ) );
+		};
+		$kept   = $staged();
+		$this->assertNotSame( array(), $kept, 'the control: the restored copy is under its staging names' );
+		$this->assertSame( Job::SITE_UNTOUCHED, $done->site_state, 'the control: it holds no site' );
+		$until = $done->finished_at + JobRepository::WORK_RETENTION_SECONDS;
+
+		$held = \WPCheckpoint\Support\Uninstaller::holding();
+		$this->assertSame( 0, $held['all'] );
+		$this->assertSame( array( array( 'id' => $job->id, 'until' => $until, 'how' => 'undone' ) ), $held['undo'] );
+		$out = $this->uninstall_until_it_removes();
+		$this->assertNotContains( 'stopped', $out['points'], 'it stops before any step that removes something' );
+		$this->assertSame( array(), preg_grep( '/^unit:/', $out['points'] ) );
+		$this->assertContains( 'check', $out['points'], 'the control: the uninstall ran and read' );
+		$this->assertStringContainsString( sprintf( 'restore job %d was undone, and the restored site it replaced, with what visitors wrote on it while it was live, is kept until %s UTC', $job->id, gmdate( 'Y-m-d H:i', $until ) ), $out['log'], 'why, and until when' );
+		$this->assertStringContainsString( 'left in place so what visitors wrote on the restored site is not deleted', $out['log'] );
+		$this->assertSame( $kept, $staged(), 'the restored copy stays' );
+		$this->assertSame( Job::UNDONE, Plugin::instance()->jobs()->find( $job->id )->status );
+
+		// 7 days after the undo it is no longer kept: the uninstall goes on (to its first step, where the test stops it).
+		$this->set( $job->id, array( 'finished_at' => time() - JobRepository::WORK_RETENTION_SECONDS - 60 ) );
+		$this->assertSame( array(), \WPCheckpoint\Support\Uninstaller::holding()['undo'] );
+		$out = $this->uninstall_until_it_removes();
+		$this->assertContains( 'unit:cancel', $out['points'], 'the uninstall goes on' );
+		$this->assertStringNotContainsString( 'was undone', $out['log'] );
+		// The same once its work expired, whatever the time.
+		$this->set( $job->id, array( 'finished_at' => time(), 'work_expired_at' => time() ) );
+		$this->assertSame( array(), \WPCheckpoint\Support\Uninstaller::holding()['undo'], 'reclaimed: nothing kept' );
+	}
+
+	public function test_an_uninstall_keeps_everything_while_an_undo_that_put_the_site_back_has_not_ended(): void {
+		list( $job ) = $this->claimed();
+		$reverted    = wp_json_encode( array( 'phase' => 'reverted' ) + SwapStep::undo_cursor( 1, 'mark' ) );
+		$this->set(
+			$job->id,
+			array(
+				'site_state'   => Job::SITE_UNTOUCHED,
+				'committed_at' => 0,
+				'cursor_json'  => $reverted,
+			)
+		);
+		$this->assertSame( array( array( 'id' => $job->id, 'until' => 0, 'how' => 'undoing' ) ), \WPCheckpoint\Support\Uninstaller::holding()['undo'] );
+		$out = $this->uninstall_until_it_removes();
+		$this->assertSame( array(), preg_grep( '/^unit:/', $out['points'] ), 'it stops before it cancels anything' );
+		$this->assertStringContainsString( sprintf( 'an undo of restore job %d put the site back and has not ended, and the restored site it replaced, with what visitors wrote on it while it was live, is kept until 7 days after the undo ends', $job->id ), $out['log'] );
+		$this->assertSame( Job::QUEUED, Plugin::instance()->jobs()->find( $job->id )->status, 'not cancelled' );
+
+		// Failed there: kept until 7 days after it failed (when the cleanup reclaims a failed job's work).
+		$at = time() - 60;
+		$this->set(
+			$job->id,
+			array(
+				'status'       => Job::FAILED,
+				'finished_at'  => $at,
+				'failure_kind' => Job::stamp_failure( Job::FAILURE_TEMPORARY, $at ),
+			)
+		);
+		$this->assertSame( array( array( 'id' => $job->id, 'until' => $at + JobRepository::WORK_RETENTION_SECONDS, 'how' => 'undoing' ) ), \WPCheckpoint\Support\Uninstaller::holding()['undo'] );
+		$this->set( $job->id, array( 'finished_at' => time() - JobRepository::WORK_RETENTION_SECONDS - 60 ) );
+		$this->assertSame( array(), \WPCheckpoint\Support\Uninstaller::holding()['undo'], 'past it: not kept' );
+
+		// A swap whose position cannot be read may be such an undo: kept. One rolled back (not an undo) is not.
+		$this->set(
+			$job->id,
+			array(
+				'status'      => Job::QUEUED,
+				'finished_at' => 0,
+				'cursor_json' => '{not json',
+			)
+		);
+		$this->assertSame( array( array( 'id' => $job->id, 'until' => 0, 'how' => 'unknown' ) ), \WPCheckpoint\Support\Uninstaller::holding()['undo'] );
+		$this->set( $job->id, array( 'cursor_json' => wp_json_encode( array( 'phase' => 'reverted', 'attempt' => 1, 'mark' => 'mark' ) ) ) );
+		$this->assertSame( array(), \WPCheckpoint\Support\Uninstaller::holding()['undo'], 'the control: a swap rolled back keeps nothing of visitors\'' );
+		$out = $this->uninstall_until_it_removes();
+		$this->assertContains( 'unit:cancel', $out['points'], 'and the uninstall goes on' );
+	}
+
 	public function test_the_restored_copy_is_kept_for_7_days_after_the_undo_and_reclaimed_after(): void {
 		global $wpdb;
 		$job    = $this->completed();
@@ -1153,6 +1274,66 @@ final class UndoTest extends SwapTestCase {
 		$this->assertStringContainsString( 'finishes putting the site back', \WPCheckpoint\Rest\JobsController::cancel_message( 'undoing' ) );
 		$this->assertSame( Job::UNDONE, $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) )->status );
 		$this->assertSame( $before, $this->site() );
+	}
+
+	public function test_a_cancel_of_a_failed_undo_that_changed_the_site_says_it_goes_on_once_retried(): void {
+		$before      = $this->site();
+		list( $job ) = $this->claimed();
+		$this->killed_at( $job, 'table_back', 1 );
+		$this->set(
+			$job->id,
+			array(
+				'status'       => Job::FAILED,
+				'failure_kind' => Job::stamp_failure( Job::FAILURE_TEMPORARY, time() ),
+				'last_error'   => 'The database server went away.',
+				'finished_at'  => time(),
+				'lock_token'   => '',
+				'locked_until' => 0,
+			)
+		);
+		$this->assertSame( Job::SITE_CHANGING, Plugin::instance()->jobs()->find( $job->id )->site_state, 'the control: the undo changed the site' );
+		$out = Plugin::instance()->job_actions()->cancel( $job->id );
+		$this->assertSame( 'undo_failed', $out['reason'] );
+		$said = \WPCheckpoint\Rest\JobsController::cancel_message( 'undo_failed' );
+		$this->assertStringNotContainsString( 'finishes', $said, 'a failed undo does not finish by itself' );
+		$this->assertStringNotContainsString( 'answer keep', $said );
+		$this->assertStringContainsString( 'wp wpcheckpoint job retry', $said );
+		$this->assertStringContainsString( 'finishes putting the site back', \WPCheckpoint\Rest\JobsController::cancel_message( 'undoing' ), 'the control: the running undo is said to finish' );
+		$this->assertTrue( \WPCheckpoint\Cli\JobCommand::cancel_verdict( 'undo_failed' )['error'], 'refused' );
+		$now = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertSame( Job::FAILED, $now->status, 'not cancelled' );
+		$this->assertSame( 0, $now->cancel_requested, 'nothing recorded' );
+		// What it says is what happens: retried, it goes on and puts the site back.
+		$this->assertSame( Job::QUEUED, $this->actions()->retry( $job->id )->status );
+		$this->assertSame( Job::UNDONE, $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) )->status );
+		$this->assertSame( $before, $this->site() );
+	}
+
+	public function test_a_cancel_of_an_undo_put_back_and_managed_elsewhere_does_not_say_it_holds_the_site(): void {
+		list( $job ) = $this->claimed();
+		$this->set(
+			$job->id,
+			array(
+				'site_state'   => Job::SITE_UNTOUCHED,
+				'committed_at' => 0,
+				'cursor_json'  => wp_json_encode( array( 'phase' => 'reverted' ) + SwapStep::undo_cursor( 1, 'mark' ) ),
+				'held_by'      => 'another0another0another0another0',
+			)
+		);
+		$out = Plugin::instance()->job_actions()->cancel( $job->id );
+		$this->assertSame( 'managed_elsewhere', $out['reason'] );
+		$this->assertStringNotContainsString( 'holds the site', \WPCheckpoint\Rest\JobsController::cancel_message( 'managed_elsewhere' ) );
+		$this->assertStringContainsString( 'holds the site changed', \WPCheckpoint\Rest\JobsController::cancel_message( 'elsewhere' ), 'the control: a row holding the site is said so' );
+		$this->assertTrue( \WPCheckpoint\Cli\JobCommand::cancel_verdict( 'managed_elsewhere' )['error'], 'refused' );
+		$this->assertNotSame( Job::CANCELLED, Plugin::instance()->jobs()->find( $job->id )->status );
+	}
+
+	public function test_every_reason_a_cancel_refuses_with_is_a_conflict_in_rest_and_an_error_in_wp_cli(): void {
+		foreach ( \WPCheckpoint\Jobs\JobActions::CANCEL_REFUSED as $reason ) {
+			$this->assertTrue( \WPCheckpoint\Cli\JobCommand::cancel_verdict( $reason )['error'], $reason );
+			$this->assertNotSame( \WPCheckpoint\Rest\JobsController::cancel_message( 'cleaned' ), \WPCheckpoint\Rest\JobsController::cancel_message( $reason ), $reason . ': its own words, not "cancelled"' );
+		}
+		$this->assertFalse( \WPCheckpoint\Cli\JobCommand::cancel_verdict( 'undo_given_up' )['error'], 'the control: a cancel that gave the undo up is a success' );
 	}
 
 	public function test_an_undo_whose_window_closed_after_it_was_claimed_is_given_up_before_it_changes_the_site(): void {

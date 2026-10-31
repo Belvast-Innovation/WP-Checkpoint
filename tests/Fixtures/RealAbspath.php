@@ -104,17 +104,29 @@ final class RealAbspath {
 	 */
 	public static function clear( string $path ): void {
 		$name = basename( $path );
-		$text = (string) @file_get_contents( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a test fixture.
-		$ours = in_array( $name, self::NAMES, true )
-			? ( Maintenance::FILE === $name
-				? ( Maintenance::CODE === $text || 1 === preg_match( Maintenance::LEGACY_FORM, $text ) )
-				: 1 === preg_match( Maintenance::DATA_FORM, $text ) )
-			: true; // A temporary name: only AtomicFile makes those.
-		if ( ! $ours || '' !== self::refusal() ) {
+		if ( ! self::ours( $path ) || '' !== self::refusal() ) {
 			fwrite( STDERR, "\nA maintenance file that is not this plugin's (or not in the test site's WordPress directory) was left in place: {$path}\n" );
 			return;
 		}
 		Deleter::delete_maintenance_file( dirname( $path ), $name );
+	}
+
+	/**
+	 * Whether a path listing() gave is a file this plugin writes: the maintenance code (or its earlier form), a data
+	 * file in its form, or a temporary name (only AtomicFile makes those).
+	 *
+	 * @param string $path A path listing() gave.
+	 * @return bool
+	 */
+	public static function ours( string $path ): bool {
+		$name = basename( $path );
+		if ( ! in_array( $name, self::NAMES, true ) ) {
+			return true;
+		}
+		$text = (string) @file_get_contents( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a test fixture.
+		return Maintenance::FILE === $name
+			? ( Maintenance::CODE === $text || 1 === preg_match( Maintenance::LEGACY_FORM, $text ) )
+			: 1 === preg_match( Maintenance::DATA_FORM, $text );
 	}
 
 	/**
@@ -135,7 +147,7 @@ final class RealAbspath {
 	 *
 	 * @return string
 	 */
-	private static function refusal(): string {
+	public static function refusal(): string {
 		$abspath = defined( 'ABSPATH' ) ? realpath( ABSPATH ) : false;
 		if ( false === $abspath ) {
 			return 'ABSPATH does not resolve.';
