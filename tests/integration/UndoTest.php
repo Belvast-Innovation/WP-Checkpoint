@@ -360,7 +360,7 @@ final class UndoTest extends SwapTestCase {
 				}
 			}
 		);
-		$log = $this->sandbox . '/php-error.log';
+		$log = $this->sandbox . '/php-error-' . bin2hex( random_bytes( 4 ) ) . '.log'; // This call's lines only.
 		$was = ini_get( 'error_log' );
 		ini_set( 'error_log', $log );
 		\WPCheckpoint\Support\UninstallSetting::save( true );
