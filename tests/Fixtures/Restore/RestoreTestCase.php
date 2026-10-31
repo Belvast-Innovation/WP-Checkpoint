@@ -5,8 +5,6 @@ namespace WPCheckpoint\Tests\Fixtures\Restore;
 use WPCheckpoint\Archive\ZipReader;
 use WPCheckpoint\Database\TableExporter;
 use WPCheckpoint\Database\WpdbConnection;
-use WPCheckpoint\Jobs\FileStagingStep;
-use WPCheckpoint\Jobs\SwapCheckStep;
 use WPCheckpoint\Jobs\SwapStep;
 use WPCheckpoint\Jobs\Budget;
 use WPCheckpoint\Jobs\Job;
@@ -40,7 +38,7 @@ abstract class RestoreTestCase extends JobTestCase {
 	/** @var float */
 	protected $now = 1_800_000_000.0;
 
-	/** @var string The stand-in for the running copy of this plugin (PluginCopy). */
+	/** @var string The stand-in for the running copy of this plugin the test's restores read (PluginStandIn::dir()). */
 	protected $plugin_copy = '';
 
 	/** @var string[]|null The restore's tables ("wcptmp", "wcpold") there before the test; null before set_up(). */
@@ -49,16 +47,10 @@ abstract class RestoreTestCase extends JobTestCase {
 	public function set_up(): void {
 		parent::set_up();
 		$this->run_tables_before = Leftovers::tables();
-		// The restore as it is, with a small stand-in for the running plugin copy it stages.
-		$this->plugin_copy = PluginCopy::make();
+		// The restore as it is; the running plugin copy it reads and stages is this test's stand-in (PluginStandIn).
+		$this->plugin_copy = PluginStandIn::dir();
 		$steps             = Plugin::instance()->job_types()->get( RestoreJob::ID )->steps();
 		foreach ( $steps as $i => $step ) {
-			if ( FileStagingStep::ID === $step->id() ) {
-				$steps[ $i ] = new FileStagingStep( $this->staging_parts() );
-			}
-			if ( SwapCheckStep::ID === $step->id() ) {
-				$steps[ $i ] = new SwapCheckStep( null, $this->check_parts() );
-			}
 			if ( SwapStep::ID === $step->id() ) {
 				// Up to the final check: the swap renames the site's own tables and directories, and its tests set it
 				// up in a sandbox of their own (SwapTestCase).
@@ -69,24 +61,24 @@ abstract class RestoreTestCase extends JobTestCase {
 	}
 
 	/**
-	 * The parts every test's staging step has (a test may add its own).
+	 * The parts of a staging step a test makes: its own. The stand-in for the running plugin (its directory, main file)
+	 * is given to the step when a registry hands it out (PluginStandIn), as to the registered restore's.
 	 *
+	 * @param array<string, mixed> $more The test's parts.
 	 * @return array<string, mixed>
 	 */
 	protected function staging_parts( array $more = array() ): array {
-		return $more + array(
-			'plugin_dir'  => $this->plugin_copy,
-			'plugin_main' => $this->plugin_copy . '/wp-checkpoint.php',
-		);
+		return $more;
 	}
 
 	/**
-	 * The parts every test's final check has: the same stand-in for the running plugin, and its version.
+	 * The parts of a final check a test makes: its own; the stand-in and its version come as for staging_parts().
 	 *
+	 * @param array<string, mixed> $more The test's parts.
 	 * @return array<string, mixed>
 	 */
 	protected function check_parts( array $more = array() ): array {
-		return $more + $this->staging_parts() + array( 'version' => PluginCopy::VERSION );
+		return $more;
 	}
 
 	/**
@@ -117,10 +109,7 @@ abstract class RestoreTestCase extends JobTestCase {
 			}
 		}
 		$wpdb->query( 'SET FOREIGN_KEY_CHECKS=1' );
-		$this->release_backups();
-		if ( '' !== $this->plugin_copy ) { // Not set when set_up() stopped early.
-			PluginCopy::remove( $this->plugin_copy );
-		}
+		$this->release_backups(); // The stand-in for the running plugin goes at the test's end (PluginStandIn).
 		// The staging a completed restore leaves for the swap (and a failed one for its retry): not left behind a test.
 		foreach ( Residue::scan_site( Residue::site_dirs( ScanRoots::site_directories() ), Directories::own_tokens() ) as $entry ) {
 			Deleter::delete_tree( $entry['parent'], $entry['path'] );

@@ -21,7 +21,6 @@ use WPCheckpoint\Standalone\Credentials;
 use WPCheckpoint\Support\AutoUpdateHold;
 use WPCheckpoint\Support\Options;
 use WPCheckpoint\Support\Redactor;
-use WPCheckpoint\Tests\Fixtures\Restore\PluginCopy;
 use WPCheckpoint\Tests\Fixtures\Restore\RestoreTestCase;
 
 /**
@@ -942,7 +941,6 @@ final class SwapCheckTest extends RestoreTestCase {
 		$this->assertSame( $plan, $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $plan ) ), 'created by the migration' );
 		$this->assertGreaterThanOrEqual( 8, \WPCheckpoint\Support\Schema::CURRENT, 'the plan table came with version 8' );
 		$this->assertStringContainsString( 'CREATE TABLE IF NOT EXISTS', SwapPlan::create_sql( $plan ) );
-		$this->assertSame( PluginCopy::VERSION, $this->check_parts()['version'] );
 	}
 
 	public function test_a_jobs_plan_goes_with_its_work(): void {

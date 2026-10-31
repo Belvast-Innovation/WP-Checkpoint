@@ -27,6 +27,9 @@
 		</testsuite>
 	</testsuites>
 	<listeners>
+		<!-- The integration suite: each test's stand-in for the running plugin, which its restores read, removed at its
+		     end, before the leftover check looks (tests/Fixtures/Restore/PluginStandIn.php). -->
+		<listener class="WPCheckpoint\Tests\Fixtures\Restore\PluginStandIn"/>
 		<!-- The integration suite: a test that leaves the restore's tables or temporary entries behind fails, and the
 		     run ends with none (tests/Fixtures/Leftovers.php). Does nothing in the unit suite. -->
 		<listener class="WPCheckpoint\Tests\Fixtures\Leftovers"/>

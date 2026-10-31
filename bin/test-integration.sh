@@ -26,9 +26,12 @@
 #
 # Before PHPUnit, with the lock held, tests/Fixtures/maintenance-precheck.php says the restore's maintenance files in
 # the test site's WordPress directory (a run stopped while a test held one leaves it; a held .maintenance stops the
-# suite's own start at WordPress's maintenance page). It lists only; WPCHECKPOINT_TEST_MAINTENANCE_REMOVE=1 removes
-# this plugin's, on wp-env's test site only. With .maintenance still there the run does not start (status 76; any
-# other failure of the check, status 1).
+# suite's own start at WordPress's maintenance page), and removes this plugin's, on wp-env's test site only
+# (WPCHECKPOINT_TEST_MAINTENANCE_REMOVE=0 lists only). With .maintenance still there the run does not start (status 76;
+# any other failure of the check, status 1). Then tests/Fixtures/plugin-entries.php counts the entries of this plugin's
+# directory, as the restore counts its own copy, and warns when they come near the restore's limit: the suite's
+# restores read a stand-in (tests/Fixtures/Restore/PluginStandIn.php), but the test of the count on the real directory
+# fails past it.
 #
 # One run at a time: runs share the tests database, and a second one's start (the core test library reinstalls the
 # tables; the leftover check removes an earlier run's) breaks the first. The lock is a flock() on
@@ -219,6 +222,7 @@ elif [ "$PRECHECK" -ne 0 ]; then
 	echo "The check of the test site's maintenance files failed (status $PRECHECK); the run does not start." >&2
 	exit 1
 fi
+php "$PLUGIN/tests/Fixtures/plugin-entries.php" "$PLUGIN"
 
 cd "$WORK/cwd" || exit 1
 eval "set -- $ARGS"

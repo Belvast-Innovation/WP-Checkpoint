@@ -8,11 +8,11 @@
  * all. A run stopped while a test held the file (SwapMaintenanceModeTest and the other classes RealAbspath names)
  * leaves it there.
  *
- * Removing them here is new deletion logic, so by default this lists only and removes nothing:
- * WPCHECKPOINT_TEST_MAINTENANCE_REMOVE=1 removes what is this plugin's (RealAbspath::clear(); anything else is said and
- * left), and only on wp-env's test site: ABSPATH is the test site's WordPress directory (RealAbspath::refusal()) and
- * the database the configuration names, and the one the server says the connection uses, are wp-env's tests database
- * on its server (Leftovers::database_refusal()); otherwise nothing is removed and the reason is said.
+ * What is this plugin's is removed (RealAbspath::clear(); anything else is said and left), and only on wp-env's test
+ * site: ABSPATH is the test site's WordPress directory (RealAbspath::refusal()) and the database the configuration
+ * names, and the one the server says the connection uses, are wp-env's tests database on its server
+ * (Leftovers::database_refusal()); otherwise nothing is removed and the reason is said. WPCHECKPOINT_TEST_MAINTENANCE_REMOVE
+ * (default 1; it listed only by default until it was tried on the test site) set to 0 lists only and removes nothing.
  *
  * Exit status: 76 when .maintenance is still there afterwards (the run would only meet the maintenance page), else 0.
  * Without the tests configuration (WP_PHPUNIT__TESTS_CONFIG, or wp-tests-config.php in WP_TESTS_DIR or
@@ -79,8 +79,8 @@ foreach ( $wpcheckpoint_found as $wpcheckpoint_path ) {
 }
 fwrite( STDERR, "Maintenance files in the test site's WordPress directory before the run:\n" . implode( "\n", $wpcheckpoint_lines ) . "\n" );
 
-if ( '1' !== getenv( 'WPCHECKPOINT_TEST_MAINTENANCE_REMOVE' ) ) {
-	fwrite( STDERR, "Listed only; nothing was removed (WPCHECKPOINT_TEST_MAINTENANCE_REMOVE=1 removes this plugin's, on wp-env's test site only).\n" );
+if ( '0' === getenv( 'WPCHECKPOINT_TEST_MAINTENANCE_REMOVE' ) ) {
+	fwrite( STDERR, "Listed only; nothing was removed (WPCHECKPOINT_TEST_MAINTENANCE_REMOVE=0).\n" );
 } else {
 	$wpcheckpoint_refusal = wpcheckpoint_precheck_refusal();
 	if ( '' !== $wpcheckpoint_refusal ) {

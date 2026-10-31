@@ -9,9 +9,9 @@ use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 /**
  * tests/Fixtures/maintenance-precheck.php, run as bin/test-integration.sh runs it, on a stand-in WordPress directory
- * named by a tests configuration of the test's own: it says what is there, removes nothing unless asked, and only on
- * wp-env's test site when asked (here the database cannot be confirmed, so nothing is removed), and stops the run
- * while .maintenance is there.
+ * named by a tests configuration of the test's own: it says what is there, removes this plugin's (unless
+ * WPCHECKPOINT_TEST_MAINTENANCE_REMOVE=0) and only on wp-env's test site (here the database cannot be confirmed, so
+ * nothing is removed), and stops the run while .maintenance is there.
  */
 final class MaintenancePrecheckTest extends TestCase {
 
@@ -96,11 +96,11 @@ final class MaintenancePrecheckTest extends TestCase {
 		$this->assertSame( 76, $this->check()['code'], 'the control: with it, the same file is found' );
 	}
 
-	public function test_the_files_are_listed_and_left_and_the_run_starts_without_the_maintenance_file(): void {
+	public function test_asked_to_list_only_the_files_are_listed_and_left_and_the_run_starts_without_the_maintenance_file(): void {
 		file_put_contents( $this->sandbox . '/site/.wpcheckpoint-maintenance.php', $this->data_file() );
 		file_put_contents( $this->sandbox . '/site/.maintenance.0123456789abcdef.tmp', 'partial' );
 		file_put_contents( $this->sandbox . '/site/unrelated.txt', 'x' );
-		$out = $this->check();
+		$out = $this->check( array( 'WPCHECKPOINT_TEST_MAINTENANCE_REMOVE' => '0' ) );
 		$this->assertSame( 0, $out['code'], $out['stderr'] );
 		$this->assertStringContainsString( ExpectedPath::slashed( $this->sandbox, 'site', '.wpcheckpoint-maintenance.php' ) . ' (this plugin\'s)', $out['stderr'] );
 		$this->assertStringContainsString( ExpectedPath::slashed( $this->sandbox, 'site', '.maintenance.0123456789abcdef.tmp' ) . ' (this plugin\'s)', $out['stderr'] );
@@ -109,6 +109,19 @@ final class MaintenancePrecheckTest extends TestCase {
 		clearstatcache();
 		$this->assertFileExists( $this->sandbox . '/site/.wpcheckpoint-maintenance.php' );
 		$this->assertFileExists( $this->sandbox . '/site/.maintenance.0123456789abcdef.tmp' );
+	}
+
+	public function test_by_default_it_goes_on_to_remove_once_its_checks_pass(): void {
+		// Unasked, it goes to the checks before removing (here the database is not wp-env's, so nothing goes).
+		file_put_contents( $this->sandbox . '/site/.wpcheckpoint-maintenance.php', $this->data_file() );
+		$out = $this->check();
+		$this->assertSame( 0, $out['code'], $out['stderr'] );
+		$this->assertMatchesRegularExpression( '/Nothing was removed: (the tests database could not be reached|mysqli is not available)/', $out['stderr'] );
+		$this->assertStringNotContainsString( 'Listed only', $out['stderr'] );
+		clearstatcache();
+		$this->assertFileExists( $this->sandbox . '/site/.wpcheckpoint-maintenance.php' );
+		// The control: 1 says the same as no value.
+		$this->assertSame( $out['stderr'], $this->check( array( 'WPCHECKPOINT_TEST_MAINTENANCE_REMOVE' => '1' ) )['stderr'] );
 	}
 
 	public function test_a_maintenance_file_is_listed_left_and_stops_the_run(): void {
