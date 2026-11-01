@@ -79,7 +79,7 @@ foreach ( $wpcheckpoint_found as $wpcheckpoint_path ) {
 }
 fwrite( STDERR, "Maintenance files in the test site's WordPress directory before the run:\n" . implode( "\n", $wpcheckpoint_lines ) . "\n" );
 
-if ( '0' === getenv( 'WPCHECKPOINT_TEST_MAINTENANCE_REMOVE' ) ) {
+if ( '0' === getenv( Leftovers::REMOVE_MAINTENANCE ) ) {
 	fwrite( STDERR, "Listed only; nothing was removed (WPCHECKPOINT_TEST_MAINTENANCE_REMOVE=0).\n" );
 } else {
 	$wpcheckpoint_refusal = wpcheckpoint_precheck_refusal();

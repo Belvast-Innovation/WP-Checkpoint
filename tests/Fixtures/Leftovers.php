@@ -21,10 +21,12 @@ use PHPUnit\Framework\TestSuite;
  * left at its end. What an earlier run left is reported when the run starts: its tables are removed (the tests database
  * is taken to be this run's while it runs), the restore's and every other table that is neither WordPress's (the main
  * site's and every site's of a network) nor this plugin's own (a test's fixture table, swt_* among them, left by a run
- * that was killed); its storage directories in the test site's wp-content are listed, and removed only when
- * REMOVE_STORAGE says so and the connection is to wp-env's tests database (database_refusal()); anything else is left
- * alone. The storage directories an earlier run left that are still there are kept as they are through the run: a
- * test (or a class) after which one is gone removed what it did not create, and fails, named.
+ * that was killed); its maintenance files in ABSPATH (this plugin's only: RealAbspath::clear()) and its storage
+ * directories in the test site's wp-content are named, then removed when the connection is to wp-env's tests database
+ * (database_refusal(); otherwise they are left and the reason is said), unless REMOVE_MAINTENANCE or REMOVE_STORAGE is
+ * 0, which lists them only; anything else is left alone. The storage directories an earlier run left that are still
+ * there are kept as they are through the run: a test (or a class) after which one is gone removed what it did not
+ * create, and fails, named.
  *
  * The temporary directory is looked at only when it is the run's own (bin/test-integration.sh gives each run one and
  * names it in WPCHECKPOINT_TEST_RUN_TMP): in a directory other runs share, their entries would be blamed on this
@@ -47,12 +49,15 @@ final class Leftovers implements TestListener {
 	const TEMP_PREFIXES = array( 'wpc-', 'wpcheckpoint-', 'wp-checkpoint-' );
 
 	/**
-	 * The environment variable that has the storage directories an earlier run left removed as the run starts: "1"
-	 * removes them (each named first, on wp-env's tests database only); unset or anything else, the default, lists
-	 * them only. At the start of a run the tests database was just installed again, so no stored state names any of
-	 * them (StorageDirs::listing() leaves out the one that does).
+	 * The environment variables for what an earlier run left in the test site's files, as the run starts: "0" lists
+	 * them only; unset or anything else, the default, names them and then removes them, on wp-env's tests database
+	 * only. REMOVE_MAINTENANCE is the swap's maintenance files in ABSPATH (also read by the check before PHPUnit,
+	 * maintenance-precheck.php), REMOVE_STORAGE the storage directories in wp-content: at the start of a run the tests
+	 * database was just installed again, so no stored state names any of them (StorageDirs::listing() leaves out the
+	 * one that does).
 	 */
-	const REMOVE_STORAGE = 'WPCHECKPOINT_TEST_REMOVE_STORAGE';
+	const REMOVE_MAINTENANCE = 'WPCHECKPOINT_TEST_MAINTENANCE_REMOVE';
+	const REMOVE_STORAGE     = 'WPCHECKPOINT_TEST_REMOVE_STORAGE';
 
 	/**
 	 * The test the registered listener is watching now ("Class::method"), '' when none: the control that the check
@@ -298,45 +303,59 @@ final class Leftovers implements TestListener {
 				array_filter(
 					$now,
 					static function ( string $item ): bool {
-						// Also the swap's maintenance file: removal() deletes only this plugin's (a held one would keep
-						// the test site in maintenance for the whole run), and reports anything else.
-						return 0 === strpos( $item, 'table:' ) || 0 === strpos( $item, 'site' ) || 0 === strpos( $item, 'maintenance:' );
+						return 0 === strpos( $item, 'table:' ) || 0 === strpos( $item, 'site' );
 					}
 				)
 			);
-			// The storage directories: listed only, unless REMOVE_STORAGE says to remove them and the database is wp-env's
-			// tests database (the test site's wp-content is then the one the tests write to).
-			$storage = array_values(
-				array_filter(
-					$now,
-					static function ( string $item ): bool {
-						return 0 === strpos( $item, 'storage:' );
-					}
-				)
+			// The test site's files: the swap's maintenance files (removal() deletes only this plugin's, and reports
+			// anything else; a held one would keep the test site in maintenance for the whole run) and the storage
+			// directories. Removed on wp-env's tests database only (the test site's files are then the ones the tests
+			// write to), unless their variable is 0.
+			$parts   = array( 'tables removed' );
+			$taken   = array();
+			$refusal = null;
+			$kinds   = array(
+				'maintenance:' => array( self::REMOVE_MAINTENANCE, 'maintenance files' ),
+				'storage:'     => array( self::REMOVE_STORAGE, 'storage directories' ),
 			);
-			$refusal = '';
-			$removal = '1' === (string) getenv( self::REMOVE_STORAGE );
-			if ( $removal && array() !== $storage ) {
-				$refusal = $this->database_refused();
+			foreach ( $kinds as $prefix => $kind ) {
+				$items = array_values(
+					array_filter(
+						$now,
+						static function ( string $item ) use ( $prefix ): bool {
+							return 0 === strpos( $item, $prefix );
+						}
+					)
+				);
+				if ( array() === $items ) {
+					continue;
+				}
+				if ( '0' === (string) getenv( $kind[0] ) ) {
+					$parts[] = $kind[1] . ' listed only (' . $kind[0] . '=0)';
+					continue;
+				}
+				if ( null === $refusal ) {
+					$refusal = $this->database_refused();
+				}
+				if ( '' !== $refusal ) {
+					$parts[] = $kind[1] . ' left: ' . $refusal;
+					continue;
+				}
+				$parts[] = $kind[1] . ' removed';
+				$taken   = array_merge( $taken, $items );
 			}
-			if ( ! $removal ) {
-				$dirs = 'storage directories listed only (' . self::REMOVE_STORAGE . '=1 removes them)';
-			} elseif ( '' !== $refusal ) {
-				$dirs = 'storage directories left: ' . $refusal;
-			} else {
-				$dirs   = 'storage directories removed';
-				$tables = array_merge( $tables, $storage );
-			}
-			$stale = (string) getenv( 'WPCHECKPOINT_TEST_STALE_RUN_ID' );
-			$which = '' === $stale ? 'an earlier run' : 'an earlier run (' . $stale . ', which ended without releasing the lock)';
-			$this->say( "\nLeft by {$which} (tables removed, {$dirs}, anything else left alone):\n  " . implode( "\n  ", $now ) . "\n" );
+			$parts[] = 'anything else left alone';
+			$stale   = (string) getenv( 'WPCHECKPOINT_TEST_STALE_RUN_ID' );
+			$which   = '' === $stale ? 'an earlier run' : 'an earlier run (' . $stale . ', which ended without releasing the lock)';
+			$this->say( "\nLeft by {$which} (" . implode( '; ', $parts ) . "):\n  " . implode( "\n  ", $now ) . "\n" );
+			$tables = array_merge( $tables, $taken );
 			if ( array() !== $tables ) {
 				$this->remove( $tables );
 				$now = (array) $this->now();
 			}
-			$still = $removal && '' === $refusal ? array_values( array_intersect( $storage, $now ) ) : array();
+			$still = array_values( array_intersect( $taken, $now ) );
 			if ( array() !== $still ) {
-				$this->say( "\nStorage directories still there after their removal (kept through the run):\n  " . implode( "\n  ", $still ) . "\n" );
+				$this->say( "\nStill there after their removal (storage directories are kept through the run):\n  " . implode( "\n  ", $still ) . "\n" );
 			}
 		}
 		if ( array() === $this->suites ) {
