@@ -4,6 +4,7 @@ namespace WPCheckpoint\Tests\Unit\Tooling;
 
 use WPCheckpoint\Restore\Maintenance;
 use WPCheckpoint\Tests\Fixtures\ExpectedPath;
+use WPCheckpoint\Tests\Fixtures\RealAbspath;
 use WPCheckpoint\Tests\Fixtures\Sandbox;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
@@ -189,6 +190,55 @@ final class MaintenancePrecheckTest extends TestCase {
 		fclose( $pipes[2] );
 		$this->assertSame( 0, proc_close( $process ), $stderr );
 		return $stderr;
+	}
+
+	public function test_a_tests_marked_file_is_said_so_and_left_where_nothing_may_be_removed(): void {
+		file_put_contents( $this->sandbox . '/site/.maintenance', RealAbspath::fixture( '<?php $upgrading = 1;' ) );
+		file_put_contents( $this->sandbox . '/site/.wpcheckpoint-maintenance.php', "someone else's // WP Checkpoint test fixture\n" );
+		$out = $this->check();
+		$this->assertSame( 76, $out['code'], 'the database is not confirmed here: nothing goes, and .maintenance stops the run' );
+		$this->assertStringContainsString( ExpectedPath::slashed( $this->sandbox, 'site', '.maintenance' ) . ' (a test\'s fixture)', $out['stderr'] );
+		$this->assertStringContainsString( ExpectedPath::slashed( $this->sandbox, 'site', '.wpcheckpoint-maintenance.php' ) . ' (not this plugin\'s)', $out['stderr'], 'the mark inside a line is no mark' );
+		clearstatcache();
+		$this->assertFileExists( $this->sandbox . '/site/.maintenance' );
+	}
+
+	public function test_before_a_run_a_tests_marked_file_is_removed_and_one_without_the_mark_is_left(): void {
+		$marked = RealAbspath::fixture( '<?php $upgrading = 1; // an update' );
+		$this->assertStringEndsWith( "\n" . RealAbspath::FIXTURE_MARK . "\n", $marked );
+		file_put_contents( $this->sandbox . '/site/.maintenance', $marked );
+		file_put_contents( $this->sandbox . '/site/.wpcheckpoint-maintenance.php', RealAbspath::fixture( "someone else's\n" ) );
+
+		// During the run (clear(), as the leftover check after every test): someone else's, both left.
+		$this->clear_script( 'clear' );
+		$stderr = $this->clear();
+		clearstatcache();
+		$this->assertFileExists( $this->sandbox . '/site/.maintenance', 'a marked file is left during the run' );
+		$this->assertFileExists( $this->sandbox . '/site/.wpcheckpoint-maintenance.php' );
+		$this->assertStringContainsString( 'not this plugin\'s', $stderr );
+
+		// Before a run: both go.
+		$this->clear_script( 'clear_before_run' );
+		$this->clear();
+		clearstatcache();
+		$this->assertFileDoesNotExist( $this->sandbox . '/site/.maintenance', 'a marked .maintenance goes before a run' );
+		$this->assertFileDoesNotExist( $this->sandbox . '/site/.wpcheckpoint-maintenance.php', 'and a marked data file' );
+
+		// Without the mark, or with it inside a line: left before a run too, and said.
+		foreach ( array( '<?php $upgrading = time();', '<?php $upgrading = 1; // WP Checkpoint test fixture' ) as $contents ) {
+			file_put_contents( $this->sandbox . '/site/.maintenance', $contents );
+			$stderr = $this->clear();
+			clearstatcache();
+			$this->assertFileExists( $this->sandbox . '/site/.maintenance', 'not marked: left' );
+			$this->assertStringContainsString( 'not this plugin\'s', $stderr );
+		}
+	}
+
+	/**
+	 * clear.php in the sandbox: RealAbspath::$method() on each path listed, with the stand-in directory as ABSPATH.
+	 */
+	private function clear_script( string $method ): void {
+		file_put_contents( $this->sandbox . '/clear.php', '<?php require ' . var_export( dirname( __DIR__, 3 ) . '/vendor/autoload.php', true ) . '; define( "ABSPATH", ' . var_export( $this->sandbox . '/site/', true ) . ' ); foreach ( \WPCheckpoint\Tests\Fixtures\RealAbspath::listing() as $p ) { \WPCheckpoint\Tests\Fixtures\RealAbspath::' . $method . '( $p ); }' );
 	}
 
 	public function test_asked_to_remove_it_removes_nothing_where_abspath_is_not_a_wordpress_directory(): void {

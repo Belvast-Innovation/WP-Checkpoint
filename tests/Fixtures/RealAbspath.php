@@ -23,6 +23,11 @@ use WPCheckpoint\Support\DeletionRefused;
  * 3. listing() and clear(), which the leftover check (Leftovers) calls after every test and at the start and end of
  *    the run: what is left is reported, and only what this plugin writes is removed (the code, a data file of its form,
  *    a single file with a restore's mark, a temporary name of either), through the Deleter.
+ *
+ * A file a test writes as someone else's (fixture(): it carries FIXTURE_MARK on a line of its own) is someone else's
+ * to everything during the run; only the check before a run (maintenance-precheck.php, clear_before_run()) takes it
+ * as a test's leftover and removes it: a run killed while such a test held it would otherwise leave a .maintenance
+ * that stops every later run. A file without the mark is still left, and still stops the run.
  */
 final class RealAbspath {
 
@@ -30,6 +35,36 @@ final class RealAbspath {
 	 * The files: the maintenance file and its data file.
 	 */
 	const NAMES = array( Maintenance::FILE, Maintenance::DATA );
+
+	/**
+	 * The line a test's own "someone else's" maintenance file carries (fixture()).
+	 */
+	const FIXTURE_MARK = '// WP Checkpoint test fixture';
+
+	/**
+	 * Contents for a file a test writes as someone else's: the contents, then FIXTURE_MARK on a line of its own.
+	 *
+	 * @param string $contents Contents (a PHP file's ends in a line of PHP, so the mark is a comment there).
+	 * @return string
+	 */
+	public static function fixture( string $contents ): string {
+		return rtrim( $contents, "\n" ) . "\n" . self::FIXTURE_MARK . "\n";
+	}
+
+	/**
+	 * Whether a path listing() gave is a test's "someone else's" file: one of the two names, with FIXTURE_MARK on a
+	 * line of its own.
+	 *
+	 * @param string $path A path listing() gave.
+	 * @return bool
+	 */
+	public static function marked( string $path ): bool {
+		if ( ! in_array( basename( $path ), self::NAMES, true ) ) {
+			return false;
+		}
+		$text = (string) @file_get_contents( $path, false, null, 0, 65536 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a test fixture.
+		return 1 === preg_match( '/^' . preg_quote( self::FIXTURE_MARK, '/' ) . '\r?$/m', $text );
+	}
 
 	/**
 	 * Claim the real ABSPATH for a test: safeguards 1 and 2.
@@ -104,8 +139,31 @@ final class RealAbspath {
 	 * @return void
 	 */
 	public static function clear( string $path ): void {
+		self::clear_taking( $path, false );
+	}
+
+	/**
+	 * Before a run (maintenance-precheck.php): as clear(), and a test's "someone else's" file (marked()) is removed
+	 * too, as the leftover of a run killed while that test held it.
+	 *
+	 * @param string $path A path listing() gave.
+	 * @return void
+	 */
+	public static function clear_before_run( string $path ): void {
+		self::clear_taking( $path, true );
+	}
+
+	/**
+	 * Remove what listing() found that this plugin writes (and, with $fixtures, a test's marked file); report the
+	 * rest and leave it.
+	 *
+	 * @param string $path     A path listing() gave.
+	 * @param bool   $fixtures Whether a test's marked file goes too.
+	 * @return void
+	 */
+	private static function clear_taking( string $path, bool $fixtures ): void {
 		$name = basename( $path );
-		if ( ! self::ours( $path ) || '' !== self::refusal() ) {
+		if ( ! ( self::ours( $path ) || ( $fixtures && self::marked( $path ) ) ) || '' !== self::refusal() ) {
 			fwrite( STDERR, "\nA maintenance file that is not this plugin's (or not in the test site's WordPress directory) was left in place: {$path}\n" );
 			return;
 		}

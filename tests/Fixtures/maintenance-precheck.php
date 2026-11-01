@@ -8,8 +8,10 @@
  * all. A run stopped while a test held the file (SwapMaintenanceModeTest and the other classes RealAbspath names)
  * leaves it there.
  *
- * What is this plugin's is removed (RealAbspath::clear(); anything else is said and left), and only on wp-env's test
- * site: ABSPATH is the test site's WordPress directory (RealAbspath::refusal()) and the database the configuration
+ * What is this plugin's is removed, and so is a test's own "someone else's" file (it carries RealAbspath::FIXTURE_MARK:
+ * the leftover of a run killed while that test held it); anything else is said and left (RealAbspath::clear_before_run()).
+ * Removal happens only on wp-env's test site: ABSPATH is the test site's WordPress directory (RealAbspath::refusal()) and
+ * the database the configuration
  * names, and the one the server says the connection uses, are wp-env's tests database on its server
  * (Leftovers::database_refusal()); otherwise nothing is removed and the reason is said. WPCHECKPOINT_TEST_MAINTENANCE_REMOVE
  * (default 1; it listed only by default until it was tried on the test site) set to 0 lists only and removes nothing.
@@ -75,7 +77,7 @@ function wpcheckpoint_precheck_refusal(): string {
 
 $wpcheckpoint_lines = array();
 foreach ( $wpcheckpoint_found as $wpcheckpoint_path ) {
-	$wpcheckpoint_lines[] = '  ' . $wpcheckpoint_path . ( RealAbspath::ours( $wpcheckpoint_path ) ? ' (this plugin\'s)' : ' (not this plugin\'s)' );
+	$wpcheckpoint_lines[] = '  ' . $wpcheckpoint_path . ( RealAbspath::ours( $wpcheckpoint_path ) ? ' (this plugin\'s)' : ( RealAbspath::marked( $wpcheckpoint_path ) ? ' (a test\'s fixture)' : ' (not this plugin\'s)' ) );
 }
 fwrite( STDERR, "Maintenance files in the test site's WordPress directory before the run:\n" . implode( "\n", $wpcheckpoint_lines ) . "\n" );
 
@@ -87,7 +89,7 @@ if ( '0' === getenv( Leftovers::REMOVE_MAINTENANCE ) ) {
 		fwrite( STDERR, 'Nothing was removed: ' . rtrim( $wpcheckpoint_refusal, '.' ) . ".\n" );
 	} else {
 		foreach ( $wpcheckpoint_found as $wpcheckpoint_path ) {
-			RealAbspath::clear( $wpcheckpoint_path ); // This plugin's only; anything else is said and left.
+			RealAbspath::clear_before_run( $wpcheckpoint_path ); // This plugin's and a test's marked file; anything else is said and left.
 		}
 		$wpcheckpoint_left = RealAbspath::listing();
 		fwrite( STDERR, array() === $wpcheckpoint_left ? "Removed.\n" : "Left in place:\n  " . implode( "\n  ", $wpcheckpoint_left ) . "\n" );
