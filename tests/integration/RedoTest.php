@@ -827,9 +827,31 @@ final class RedoTest extends SwapTestCase {
 		$done = $this->jobs()->find( $job->id );
 		$this->assertSame( Job::UNDONE, $done->status );
 		$this->assertStringContainsString( 'It was cancelled', $done->progress_message );
+		$this->assertNotContains( 'redo_checking', $this->seams, 'seen by the next run before anything else (a run that waits sees it too)' );
+		$this->assertSame( $before, $this->site() );
+
+		// A request that lands while the run checks: the write that records "enter" sees it.
+		$id                     = $job->id;
+		$this->swap_parts['at'] = function ( string $point ) use ( $id ): void {
+			$this->seams[] = $point;
+			if ( 'redo_checking' === $point ) {
+				$this->set( $id, array( 'cancel_requested' => time() ) );
+			}
+		};
+		$this->retype( $done );
+		$this->claim( $done );
+		$this->seams = array();
+		$this->assertSame( RunLoop::EXIT_CANCELLED, $this->loop_code( $this->jobs()->find( $job->id ) ) );
+		$done = $this->jobs()->find( $job->id );
+		$this->assertSame( Job::UNDONE, $done->status );
+		$this->assertStringContainsString( 'It was cancelled', $done->progress_message );
 		$this->assertContains( 'redo_checking', $this->seams, 'the control: the run went as far as its checks' );
 		$this->assertNotContains( 'entered', $this->seams, 'and recorded no "enter"' );
 		$this->assertSame( $before, $this->site() );
+		$this->swap_parts['at'] = function ( string $point ): void {
+			$this->seams[] = $point;
+		};
+		$this->retype( $done );
 
 		// After it changed the site: refused, and it goes on.
 		$this->claim( $done );
@@ -916,6 +938,65 @@ final class RedoTest extends SwapTestCase {
 		$this->assertSame( Job::COMPLETED, $done->status, $done->last_error . ' ' . $done->progress_message );
 		$this->assertContains( 'redo_checking', $this->seams, 'every check of a redo made' );
 		$this->assertSame( $restored, $this->site() );
+	}
+
+	/**
+	 * As a run finds a job that died between recording its asking position and writing the question (two writes).
+	 */
+	private function died_before_the_question( int $id ): void {
+		global $wpdb;
+		$wpdb->query( $wpdb->prepare( 'UPDATE ' . JobRepository::table() . " SET status = %s, questions_json = NULL WHERE id = %d", Job::QUEUED, $id ) );
+		$wpdb->query( 'COMMIT' );
+	}
+
+	public function test_an_answer_given_to_an_earlier_asking_is_not_taken_for_a_new_one(): void {
+		$before = $this->site();
+		$job    = $this->completed();
+		$fail   = array( 'verify' => static function (): string { return 'home'; } );
+		// The first undo asks; answered "redo", the restored copy goes back in.
+		$this->retype( $job, $fail );
+		$told = $this->actions()->undo( $job->id, '' );
+		$this->assertTrue( $this->actions()->undo( $job->id, $told['code'] )['ok'] );
+		$this->assertSame( RunLoop::EXIT_PAUSED, $this->loop_code( $this->jobs()->find( $job->id ) ) );
+		$this->retype( $job );
+		$this->actions();
+		Plugin::instance()->job_actions()->answer( $job->id, array( SwapStep::AFTER_UNDO_QUESTION => SwapStep::REDO ) );
+		$this->assertSame( RunLoop::EXIT_COMPLETED, $this->loop_code( $this->jobs()->find( $job->id ) ) );
+		$this->assertSame( SwapStep::REDO, $this->jobs()->find( $job->id )->options['answers'][ SwapStep::AFTER_UNDO_QUESTION ] ?? null, 'the control: the old answer is still in the options' );
+		// The second undo asks too, and dies before the question is written: the old "redo" is not taken for it.
+		$this->retype( $job, $fail );
+		$told = $this->actions()->undo( $job->id, '' );
+		$this->assertTrue( $this->actions()->undo( $job->id, $told['code'] )['ok'] );
+		$this->assertSame( RunLoop::EXIT_PAUSED, $this->loop_code( $this->jobs()->find( $job->id ) ) );
+		$this->died_before_the_question( $job->id );
+		$this->seams = array();
+		$this->assertSame( RunLoop::EXIT_PAUSED, $this->loop_code( $this->jobs()->find( $job->id ) ), 'asked again' );
+		$asked = $this->jobs()->find( $job->id );
+		$this->assertSame( SwapStep::AFTER_UNDO_QUESTION, $asked->questions[0]['id'] ?? '' );
+		$this->assertNotContains( 'redo_checking', $this->seams, 'no redo started' );
+		$this->assertSame( $before, $this->site(), 'the site as the undo put it back' );
+
+		// The same within one redo: an answer voided because the rows changed, then a run that dies before it asks again.
+		Plugin::instance()->job_actions()->answer( $job->id, array( SwapStep::AFTER_UNDO_QUESTION => RestoreJob::KEEP ) );
+		$this->set( $job->id, array( 'finished_at' => $this->jobs()->find( $job->id )->finished_at - 120 ) );
+		$this->write_state( 'written since the undo' );
+		$this->carry_fails( $job );
+		$this->claim( $this->jobs()->find( $job->id ) );
+		$this->assertSame( RunLoop::EXIT_PAUSED, $this->loop_code( $this->jobs()->find( $job->id ) ) );
+		// The rows that would be lost change: this one comes, or goes.
+		if ( in_array( StoredNames::UNINSTALL_NOTICE, (array) ExportPlan::read( $this->work( $job ), RestoreFiles::REDO_CARRY )['names'], true ) ) {
+			$this->drop_state( StoredNames::UNINSTALL_NOTICE );
+		} else {
+			$this->write_state( 'another row', StoredNames::UNINSTALL_NOTICE );
+		}
+		Plugin::instance()->job_actions()->answer( $job->id, array( SwapStep::REDO_CARRY_QUESTION => SwapStep::REDO ) );
+		$this->assertSame( RunLoop::EXIT_PAUSED, $this->loop_code( $this->jobs()->find( $job->id ) ), 'the control: voided, asked again' );
+		$this->died_before_the_question( $job->id );
+		$this->seams = array();
+		$this->assertSame( RunLoop::EXIT_PAUSED, $this->loop_code( $this->jobs()->find( $job->id ) ), 'asked again, not swapped in by the voided answer' );
+		$this->assertNotContains( 'dir_aside', $this->seams );
+		$this->assertSame( SwapStep::REDO_CARRY_QUESTION, $this->jobs()->find( $job->id )->questions[0]['id'] ?? '' );
+		$this->assertSame( $before, $this->site() );
 	}
 
 	public function test_an_undos_question_unanswered_by_the_deadline_keeps_the_site(): void {

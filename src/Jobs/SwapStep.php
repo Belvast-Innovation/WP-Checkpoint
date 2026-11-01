@@ -1035,6 +1035,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			'attempt'   => $cursor['attempt'],
 			'mark'      => $cursor['mark'],
 			'undone_at' => self::redo_at( $cursor ),
+			'ask'       => $this->random(), // This asking: an answer counts only when it was given to it (answered()).
 		);
 		$context->checkpoint( $cursor, 20, __( 'Waiting for your decision on 1 question', 'wp-checkpoint' ) );
 		$this->at( 'redo_ask_recorded' );
@@ -2037,6 +2038,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			'reason'    => (string) ( $cursor['reason'] ?? self::ASKED ),
 			'check'     => (string) ( $cursor['check'] ?? '' ),
 			'undone_at' => $this->now(),
+			'ask'       => $this->random(), // This asking: an answer counts only when it was given to it (answered()).
 		) + array_intersect_key( $cursor, array_flip( array( 'out', 'after_undo', 'after_undo_found' ) ) );
 		$context->checkpoint( $cursor, 100, __( 'Waiting for your decision on 1 question', 'wp-checkpoint' ) );
 		$this->at( 'undone_ask_recorded' );
@@ -2078,7 +2080,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @throws Undone When the site is kept.
 	 */
 	private function undone_asked( JobContext $context, Queries $db, array $cursor ): StepResult {
-		$answer = $context->options()['answers'][ self::AFTER_UNDO_QUESTION ] ?? null;
+		$answer = self::answered( $context, $cursor, self::AFTER_UNDO_QUESTION );
 		$at     = (int) ( $cursor['undone_at'] ?? 0 );
 		if ( RestoreJob::KEEP === $answer ) {
 			$context->logger()->warning( 'The site as put back by the undo was kept, as chosen' );
@@ -2114,6 +2116,12 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @throws Undone When it is given up.
 	 */
 	private function redo( JobContext $context, Queries $db, array $cursor ): StepResult {
+		if ( 0 !== $context->job()->cancel_requested ) {
+			// Asked for while a run held it (JobRepository::cancel_redo()): seen by every run before it changes the site,
+			// not only by the write that records "enter" (a run that waits for someone else's maintenance file would
+			// otherwise wait on).
+			throw $this->give_up_redo( $context, $cursor, __( 'It was cancelled.', 'wp-checkpoint' ) );
+		}
 		$why = $this->redo_check( $context, $db, $cursor );
 		if ( '' !== $why ) {
 			throw $this->give_up_redo( $context, $cursor, $why );
@@ -2188,7 +2196,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @throws Undone When it is given up.
 	 */
 	private function redo_asked( JobContext $context, Queries $db, array $cursor ): StepResult {
-		$answer = $context->options()['answers'][ self::REDO_CARRY_QUESTION ] ?? null;
+		$answer = self::answered( $context, $cursor, self::REDO_CARRY_QUESTION );
 		if ( RestoreJob::KEEP === $answer ) {
 			throw $this->give_up_redo( $context, $cursor, __( 'It was given up as chosen.', 'wp-checkpoint' ) );
 		}
@@ -2199,6 +2207,28 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		$cursor['carry'] = 'skip';
 		$context->checkpoint( $cursor, 5, __( 'Getting ready to swap the restored copy back in', 'wp-checkpoint' ) );
 		return $this->redo( $context, $db, $cursor );
+	}
+
+	/**
+	 * The answer to a redo's question or an undo's question about the site it put back, when it was given to the asking
+	 * the cursor records ("ask"; JobRepository::answer() records which asking an answer was given to, in its write): an
+	 * answer left from an earlier asking (an earlier undo of the same job, or an answer voided because the rows it was
+	 * about changed) is not taken for a new one, even by a run that finds the position recorded and the question not
+	 * written yet (the two are separate writes). Null when there is none for this asking.
+	 *
+	 * @param JobContext           $context Context.
+	 * @param array<string, mixed> $cursor  Cursor ("undone_ask", "redo_ask").
+	 * @param string               $id      The question.
+	 * @return mixed
+	 */
+	private static function answered( JobContext $context, array $cursor, string $id ) {
+		$options = $context->options();
+		$ask     = (string) ( $cursor['ask'] ?? '' );
+		$given   = (string) ( $options[ JobRepository::ANSWERED ][ $id ] ?? '' );
+		if ( '' === $ask || $given !== $ask ) {
+			return null;
+		}
+		return $options['answers'][ $id ] ?? null;
 	}
 
 	/**

@@ -66,6 +66,13 @@ final class JobRepository {
 	 */
 	const OPTIONS_RESET = 'reset_by_put_back';
 
+	/**
+	 * Which asking of a question an answer was given to (options key: question id => the asking cursor's "ask"), for
+	 * the questions a step asks again at the same position (SwapStep's redo and after-undo questions): written with the
+	 * answer, so a stale answer is never taken for a new asking.
+	 */
+	const ANSWERED = 'answered';
+
 	const LOCK_SECONDS      = 120;
 	const BACKOFF_SECONDS   = array( 5, 15, 60, 300 );
 	const STALL_SECONDS     = 86400;
@@ -2342,6 +2349,12 @@ final class JobRepository {
 		if ( 'undone_ask' === $phase ) {
 			// Swapped back in from here (SwapStep): what the swap and the undo were answered is asked anew by the redo.
 			$options = self::without_answers( $options, SwapStep::REDO_FORGETS );
+		}
+		if ( in_array( $phase, array( 'undone_ask', 'redo_ask' ), true ) && is_string( $job->cursor['ask'] ?? null ) ) {
+			// Which asking these answers were given to: the step takes them for that asking only (SwapStep::answered()).
+			foreach ( array_keys( $answers ) as $id ) {
+				$options[ self::ANSWERED ][ $id ] = $job->cursor['ask'];
+			}
 		}
 		$previous           = isset( $options['answers'] ) && is_array( $options['answers'] ) ? $options['answers'] : array();
 		$options['answers'] = array_replace( $previous, $answers );
