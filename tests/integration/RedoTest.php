@@ -957,6 +957,9 @@ final class RedoTest extends SwapTestCase {
 			$label              = $seam . ' #' . $nth;
 			$this->tear_down_swap();
 			$this->set_up_swap();
+			// The earlier cases' swaps were put back by the tear-down: their jobs no longer stand as commits.
+			$GLOBALS['wpdb']->query( 'UPDATE ' . JobRepository::table() . ' SET committed_at = 0, site_state = 0' );
+			$GLOBALS['wpdb']->query( 'COMMIT' );
 			list( $job, $before, $restored ) = $this->undone_restore();
 			$at                              = $job->finished_at;
 			$this->write_state( 'written since the undo' );
