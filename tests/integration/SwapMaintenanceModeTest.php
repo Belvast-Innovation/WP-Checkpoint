@@ -144,8 +144,9 @@ final class SwapMaintenanceModeTest extends SwapTestCase {
 		$this->assertSame( 'reverted', Plugin::instance()->jobs()->find( $job->id )->cursor['phase'] );
 		$this->assertTrue( $this->maintenance_mode() );
 		// Someone else's file in its place (an update started meanwhile). A time already past: WordPress ignores it,
-		// so a failure below cannot leave the test site in maintenance mode.
-		$someone = "<?php \$upgrading = " . ( time() - 3600 ) . "; // an update\n";
+		// so a failure below cannot leave the test site in maintenance mode. Marked as a test's (the check before a run
+		// removes it, should the run be killed before the finally below), and someone else's to everything in the run.
+		$someone = RealAbspath::fixture( "<?php \$upgrading = " . ( time() - 3600 ) . "; // an update\n" );
 		RealAbspath::write( Maintenance::FILE, $someone );
 		try {
 			Plugin::instance()->job_actions()->cancel( $job->id );
@@ -199,9 +200,10 @@ final class SwapMaintenanceModeTest extends SwapTestCase {
 			foreach ( $items as $item ) {
 				$this->assertNotContains( $item, Leftovers::listing(), 'the control: not listed once gone' );
 			}
-			RealAbspath::write( Maintenance::DATA, "someone else's\n" );
+			$someone = RealAbspath::fixture( "someone else's\n" ); // Marked as a test's: see the test above.
+			RealAbspath::write( Maintenance::DATA, $someone );
 			Leftovers::removal( array( $items[1] ) );
-			$this->assertSame( array( Maintenance::DATA => "someone else's\n" ), RealAbspath::contents(), 'a data file not of its form: left' );
+			$this->assertSame( array( Maintenance::DATA => $someone ), RealAbspath::contents(), 'a data file not of its form: left' );
 		} finally {
 			$ours->remove(); // Whatever failed above: the files this test wrote do not stay.
 			foreach ( RealAbspath::listing() as $left ) {
