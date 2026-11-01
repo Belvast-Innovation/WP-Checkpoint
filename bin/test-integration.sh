@@ -42,6 +42,8 @@
 # run's probe directory (tests/Fixtures/ProbeDir.php) is removed as the next one starts, and the tables it left are
 # listed and dropped as the suite starts (tests/Fixtures/Leftovers.php: every table neither WordPress's nor the
 # plugin's, fixture tables such as swt_* among them) (WPCHECKPOINT_TEST_STALE_RUN_ID;
+# the storage directories an earlier run left in the test site's wp-content are listed there as well, and removed only
+# with WPCHECKPOINT_TEST_REMOVE_STORAGE=1, on wp-env's tests database;
 # this run's own ID is WPCHECKPOINT_TEST_RUN_ID). Refused, the script exits with status 75. On any exit, a signal included, the lock is released and the run's directory cleaned up.
 # (WPCHECKPOINT_TEST_PHPUNIT and WPCHECKPOINT_TEST_LOCK name another PHPUnit and another lock, for this script's own
 # test.)

@@ -21,8 +21,10 @@ use PHPUnit\Framework\TestSuite;
  * left at its end. What an earlier run left is reported when the run starts: its tables are removed (the tests database
  * is taken to be this run's while it runs), the restore's and every other table that is neither WordPress's (the main
  * site's and every site's of a network) nor this plugin's own (a test's fixture table, swt_* among them, left by a run
- * that was killed); anything else is left alone. The storage directories an earlier run left are kept as they are
- * through the run: a test (or a class) after which one is gone removed what it did not create, and fails, named.
+ * that was killed); its storage directories in the test site's wp-content are listed, and removed only when
+ * REMOVE_STORAGE says so and the connection is to wp-env's tests database (database_refusal()); anything else is left
+ * alone. The storage directories an earlier run left that are still there are kept as they are through the run: a
+ * test (or a class) after which one is gone removed what it did not create, and fails, named.
  *
  * The temporary directory is looked at only when it is the run's own (bin/test-integration.sh gives each run one and
  * names it in WPCHECKPOINT_TEST_RUN_TMP): in a directory other runs share, their entries would be blamed on this
@@ -43,6 +45,14 @@ final class Leftovers implements TestListener {
 
 	/** The temporary directory's entries looked for, by their start. */
 	const TEMP_PREFIXES = array( 'wpc-', 'wpcheckpoint-', 'wp-checkpoint-' );
+
+	/**
+	 * The environment variable that has the storage directories an earlier run left removed as the run starts: "1"
+	 * removes them (each named first, on wp-env's tests database only); unset or anything else, the default, lists
+	 * them only. At the start of a run the tests database was just installed again, so no stored state names any of
+	 * them (StorageDirs::listing() leaves out the one that does).
+	 */
+	const REMOVE_STORAGE = 'WPCHECKPOINT_TEST_REMOVE_STORAGE';
 
 	/**
 	 * The test the registered listener is watching now ("Class::method"), '' when none: the control that the check
@@ -84,6 +94,14 @@ final class Leftovers implements TestListener {
 	 */
 	private $strays;
 
+	/**
+	 * Says why the database is not wp-env's tests database, '' when it is: function(): string. When it is not given,
+	 * database_refusal() on the connection (and '' for a listener given its lister, whose remover is the test's).
+	 *
+	 * @var callable|null
+	 */
+	private $database;
+
 	/** @var bool Whether the lister and remover were given (a test of this class). */
 	private $given;
 
@@ -121,13 +139,46 @@ final class Leftovers implements TestListener {
 	 * @param callable|null $notice  function( string ): void; standard error when null.
 	 * @param callable|null $strays  function(): string[]; the tests database's other tables when null (and the lister
 	 *                               is not given).
+	 * @param callable|null $database function(): string; why the database is not wp-env's tests database ('' when it
+	 *                                is); database_refusal() on the connection when null.
 	 */
-	public function __construct( $lister = null, $remover = null, $notice = null, $strays = null ) {
-		$this->lister  = $lister;
-		$this->remover = $remover;
-		$this->notice  = $notice;
-		$this->strays  = $strays;
-		$this->given   = null !== $lister;
+	public function __construct( $lister = null, $remover = null, $notice = null, $strays = null, $database = null ) {
+		$this->lister   = $lister;
+		$this->remover  = $remover;
+		$this->notice   = $notice;
+		$this->strays   = $strays;
+		$this->database = $database;
+		$this->given    = null !== $lister;
+	}
+
+	/**
+	 * Why the database is not wp-env's tests database, '' when it is.
+	 *
+	 * @return string
+	 */
+	private function database_refused(): string {
+		if ( null !== $this->database ) {
+			return (string) call_user_func( $this->database );
+		}
+		if ( $this->given ) {
+			return '';
+		}
+		global $wpdb;
+		return self::database_refusal( (string) $wpdb->dbname, (string) $wpdb->get_var( 'SELECT DATABASE()' ), (string) $wpdb->dbhost );
+	}
+
+	/**
+	 * Write a notice.
+	 *
+	 * @param string $text Text.
+	 * @return void
+	 */
+	private function say( string $text ): void {
+		if ( null !== $this->notice ) {
+			call_user_func( $this->notice, $text );
+		} else {
+			fwrite( STDERR, $text );
+		}
 	}
 
 	/**
@@ -253,17 +304,39 @@ final class Leftovers implements TestListener {
 					}
 				)
 			);
-			$stale  = (string) getenv( 'WPCHECKPOINT_TEST_STALE_RUN_ID' );
-			$which  = '' === $stale ? 'an earlier run' : 'an earlier run (' . $stale . ', which ended without releasing the lock)';
-			$text   = "\nLeft by {$which} (tables removed, anything else left alone):\n  " . implode( "\n  ", $now ) . "\n";
-			if ( null !== $this->notice ) {
-				call_user_func( $this->notice, $text );
-			} else {
-				fwrite( STDERR, $text );
+			// The storage directories: listed only, unless REMOVE_STORAGE says to remove them and the database is wp-env's
+			// tests database (the test site's wp-content is then the one the tests write to).
+			$storage = array_values(
+				array_filter(
+					$now,
+					static function ( string $item ): bool {
+						return 0 === strpos( $item, 'storage:' );
+					}
+				)
+			);
+			$refusal = '';
+			$removal = '1' === (string) getenv( self::REMOVE_STORAGE );
+			if ( $removal && array() !== $storage ) {
+				$refusal = $this->database_refused();
 			}
+			if ( ! $removal ) {
+				$dirs = 'storage directories listed only (' . self::REMOVE_STORAGE . '=1 removes them)';
+			} elseif ( '' !== $refusal ) {
+				$dirs = 'storage directories left: ' . $refusal;
+			} else {
+				$dirs   = 'storage directories removed';
+				$tables = array_merge( $tables, $storage );
+			}
+			$stale = (string) getenv( 'WPCHECKPOINT_TEST_STALE_RUN_ID' );
+			$which = '' === $stale ? 'an earlier run' : 'an earlier run (' . $stale . ', which ended without releasing the lock)';
+			$this->say( "\nLeft by {$which} (tables removed, {$dirs}, anything else left alone):\n  " . implode( "\n  ", $now ) . "\n" );
 			if ( array() !== $tables ) {
 				$this->remove( $tables );
 				$now = (array) $this->now();
+			}
+			$still = $removal && '' === $refusal ? array_values( array_intersect( $storage, $now ) ) : array();
+			if ( array() !== $still ) {
+				$this->say( "\nStorage directories still there after their removal (kept through the run):\n  " . implode( "\n  ", $still ) . "\n" );
 			}
 		}
 		if ( array() === $this->suites ) {
