@@ -82,11 +82,22 @@ $offset       = (int) ( $config['offset'] ?? 0 );
 $parts['now'] = static function () use ( $offset ): int {
 	return time() + $offset;
 };
+// The installation the test's restore runs under (SwapTestCase::$storage): its jobs, with its token; else the plugin's.
+$jobs = array() === (array) ( $config['storage'] ?? array() ) ? \WPCheckpoint\Plugin::instance()->jobs() : new \WPCheckpoint\Jobs\JobRepository( new \WPCheckpoint\Support\Directories( (array) $config['storage'] ) );
+if ( '' !== (string) ( $config['redo'] ?? '' ) ) {
+	// A redo's checks of the sandbox's site, as the parent's (SwapTestCase::redo_checks()): the version is the stand-in's.
+	$parts['redo'] = new \WPCheckpoint\Jobs\Redo(
+		$jobs,
+		array(
+			'abspath'       => (string) $config['abspath'],
+			'restore_types' => array( (string) $config['type'] ),
+			'plugin'        => array( 'version' => (string) $config['redo'] ),
+		)
+	);
+}
 \WPCheckpoint\Plugin::instance()->job_types()->add( new \WPCheckpoint\Tests\Fixtures\Jobs\FixtureJobType( (string) $config['type'], array( new \WPCheckpoint\Jobs\SwapStep( null, $parts ) ) ) );
 wp_set_current_user( (int) $config['admin'] );
 
-// The installation the test's restore runs under (SwapTestCase::$storage): its jobs, with its token; else the plugin's.
-$jobs   = array() === (array) ( $config['storage'] ?? array() ) ? \WPCheckpoint\Plugin::instance()->jobs() : new \WPCheckpoint\Jobs\JobRepository( new \WPCheckpoint\Support\Directories( (array) $config['storage'] ) );
 $runner = new \WPCheckpoint\Jobs\Runner(
 	$jobs,
 	\WPCheckpoint\Plugin::instance()->job_types(),

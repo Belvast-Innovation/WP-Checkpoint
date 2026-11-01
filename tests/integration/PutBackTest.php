@@ -55,6 +55,7 @@ final class PutBackTest extends SwapTestCase {
 		}
 		$this->rows = array();
 		Plugin::instance()->job_actions()->put_back_gate( new PutBack( Plugin::instance()->jobs() ) );
+		Plugin::instance()->job_actions()->redo_gate( new \WPCheckpoint\Jobs\Redo( Plugin::instance()->jobs() ) );
 		parent::tear_down();
 	}
 
@@ -249,6 +250,38 @@ final class PutBackTest extends SwapTestCase {
 		$this->assertStringContainsString( 'put back as it was before the restore', $done->progress_message );
 		$this->assertFalse( $done->can_retry(), 'an undone restore is not run again' );
 		$this->assertNothingLeft( 'undone' );
+	}
+
+	public function test_a_committed_swap_put_back_is_swapped_back_in_by_a_redo_unless_its_options_were_reset(): void {
+		foreach ( array( 'options', 'reset' ) as $case ) {
+			$this->tear_down_swap();
+			$this->set_up_swap();
+			list( $job, $before ) = $this->committed();
+			$restored             = array( 'maintenance' => false ) + $this->site();
+			if ( 'reset' === $case ) {
+				$this->set( $job->id, array( 'options_json' => 'not json' ) );
+			}
+			$this->claim( Plugin::instance()->jobs()->find( $job->id ) );
+			list( $done ) = $this->run_out( Plugin::instance()->jobs()->find( $job->id ) );
+			$this->assertSame( Job::UNDONE, $done->status, $case . ': ' . $done->last_error );
+			$this->assertSame( $before, $this->site(), $case );
+			$actions = Plugin::instance()->job_actions();
+			$actions->redo_gate( $this->redo_checks() );
+			$told = $actions->redo( $job->id, '' );
+			if ( 'reset' === $case ) {
+				$this->assertFalse( $told['ok'], 'options reset by the put-back: refused' );
+				$this->assertStringContainsString( 'were reset when it was put back', $told['message'] );
+				$this->assertSame( Job::UNDONE, Plugin::instance()->jobs()->find( $job->id )->status );
+				continue;
+			}
+			$this->assertTrue( $told['ok'], $told['message'] );
+			$this->assertTrue( $actions->redo( $job->id, $told['code'] )['ok'] );
+			$this->assertSame( RunLoop::EXIT_COMPLETED, $this->loop_code( Plugin::instance()->jobs()->find( $job->id ) ), $case );
+			$this->assertSame( Job::COMPLETED, Plugin::instance()->jobs()->find( $job->id )->status, $case );
+			$this->assertSame( $restored['files'], $this->site()['files'], $case . ': the restored site back in' );
+			$this->assertSame( $restored['tables'], $this->site()['tables'], $case );
+			$this->assertNothingLeft( $case );
+		}
 	}
 
 	public function test_with_its_cursor_and_options_unreadable_a_restore_is_put_back_all_the_same(): void {
