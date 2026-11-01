@@ -118,7 +118,9 @@ final class RedoTest extends SwapTestCase {
 		$this->retype( $job );
 		$done = $this->undone( $job );
 		$this->assertSame( $before, $this->site(), 'the control: undone' );
-		return array( $done, $before, $restored );
+		// Undone two minutes ago: a redo that ends now and wrote the time of its end instead of the undo's is told apart.
+		$this->set( $done->id, array( 'finished_at' => $done->finished_at - 120 ) );
+		return array( $this->jobs()->find( $done->id ), $before, $restored );
 	}
 
 	/**
@@ -298,6 +300,46 @@ final class RedoTest extends SwapTestCase {
 		$this->assertSame( RunLoop::EXIT_COMPLETED, $this->loop_code( $this->jobs()->find( $job->id ) ) );
 		$this->assertSame( Job::COMPLETED, $this->jobs()->find( $job->id )->status );
 		$this->assertSame( $restored, $this->site() );
+	}
+
+	public function test_the_claim_is_written_only_on_the_undone_job_as_read(): void {
+		list( $job ) = $this->undone_restore();
+		$cursor      = SwapStep::redo_cursor( 1, $job->site_mark, $job->finished_at );
+		$token       = $job->managing_token();
+		$cases       = array(
+			'finished_at'     => array( array( 'finished_at' => $job->finished_at - 1 ), array( 'finished_at' => $job->finished_at ) ),
+			'status'          => array( array( 'status' => Job::FAILED ), array( 'status' => Job::UNDONE ) ),
+			'step'            => array( array( 'step' => \WPCheckpoint\Jobs\SwapCheckStep::ID ), array( 'step' => SwapStep::ID ) ),
+			'site_state'      => array( array( 'site_state' => Job::SITE_SWAPPED ), array( 'site_state' => Job::SITE_UNTOUCHED ) ),
+			'committed_at'    => array( array( 'committed_at' => 5 ), array( 'committed_at' => 0 ) ),
+			'work_expired_at' => array( array( 'work_expired_at' => 5 ), array( 'work_expired_at' => 0 ) ),
+			'options reset'   => array( array( 'options_json' => (string) wp_json_encode( array( JobRepository::OPTIONS_RESET => 5 ) ) ), array( 'options_json' => (string) wp_json_encode( $job->options ) ) ),
+			'lock'            => array(
+				array(
+					'lock_token'   => 'a-run',
+					'locked_until' => time() + 600,
+				),
+				array(
+					'lock_token'   => '',
+					'locked_until' => 0,
+				),
+			),
+			'managed'         => array( array( 'held_by' => str_repeat( 'e', 32 ) ), array( 'held_by' => '' ) ),
+		);
+		foreach ( $cases as $case => list( $broken, $mended ) ) {
+			$this->set( $job->id, $broken );
+			$was = $this->row( $job->id );
+			try {
+				$this->jobs()->reopen_for_redo( $job, $cursor, 'claimed', $token );
+				$this->fail( $case . ': claimed a row that is not the job as read' );
+			} catch ( StaleJob $e ) {
+				$this->assertSame( $was, $this->row( $job->id ), $case . ': nothing written' );
+			}
+			$this->set( $job->id, $mended );
+		}
+		$claimed = $this->jobs()->reopen_for_redo( $job, $cursor, 'claimed', $token );
+		$this->assertSame( Job::QUEUED, $claimed->status, 'the control' );
+		$this->assertSame( $cursor, $claimed->cursor );
 	}
 
 	public function test_redo_is_refused_with_the_reason_while_another_job_is_in_the_way_and_changes_nothing(): void {
@@ -859,7 +901,15 @@ final class RedoTest extends SwapTestCase {
 		// The redo after it checks the restored site as a swap does: passed this time.
 		$this->retype( $asked );
 		$this->actions(); // The redo's checks for this site.
-		Plugin::instance()->job_actions()->answer( $job->id, array( SwapStep::AFTER_UNDO_QUESTION => SwapStep::REDO ) );
+		// Answers the swap and the undo had (the restored site's own question among them) are not taken for the redo's.
+		$options            = $asked->options;
+		$options['answers'] = array(
+			SwapStep::UNVERIFIED_QUESTION => RestoreJob::UNDO,
+			SwapStep::CARRY_QUESTION      => SwapStep::PUT_BACK,
+		);
+		$this->set( $job->id, array( 'options_json' => (string) wp_json_encode( $options ) ) );
+		$answered = Plugin::instance()->job_actions()->answer( $job->id, array( SwapStep::AFTER_UNDO_QUESTION => SwapStep::REDO ) );
+		$this->assertSame( array( SwapStep::AFTER_UNDO_QUESTION => SwapStep::REDO ), $answered->options['answers'], 'the earlier answers gone, in the same write' );
 		$this->seams = array();
 		$this->assertSame( RunLoop::EXIT_COMPLETED, $this->loop_code( $this->jobs()->find( $job->id ) ) );
 		$done = $this->jobs()->find( $job->id );
