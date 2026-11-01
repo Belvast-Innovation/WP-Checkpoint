@@ -83,7 +83,7 @@ final class JobActions {
 	/**
 	 * The reasons of cancel() that refuse: nothing was cancelled or requested (REST answers a conflict, WP-CLI an error).
 	 */
-	const CANCEL_REFUSED = array( 'swapped', 'elsewhere', 'managed_elsewhere', 'abandoned', 'undoing', 'undo_failed', 'undo_expired', 'undo_ended' );
+	const CANCEL_REFUSED = array( 'swapped', 'elsewhere', 'managed_elsewhere', 'abandoned', 'undoing', 'undo_failed', 'undo_expired', 'undo_ended', 'undo_asks', 'redoing' );
 
 	/**
 	 * Repository.
@@ -133,6 +133,13 @@ final class JobActions {
 	 * @var Undo|null
 	 */
 	private $undo = null;
+
+	/**
+	 * The checks of a redo (built on first use; tests inject one).
+	 *
+	 * @var Redo|null
+	 */
+	private $redo = null;
 
 	/**
 	 * The checks of a put-back (built on first use; tests inject one).
@@ -470,6 +477,9 @@ final class JobActions {
 		if ( Job::UNDONE === $job->status ) {
 			return 'undo_ended';
 		}
+		if ( 'undone_ask' === ( $job->cursor['phase'] ?? '' ) && Job::SITE_UNTOUCHED === $job->site_state ) {
+			return 'undo_asks'; // Put back and open: it ends at the answer (keep, or swap the restored copy back in).
+		}
 		// A failed undo does not go on by itself: it is retried first, while it can be (its work not reclaimed yet).
 		$undoing = 'undoing';
 		if ( Job::FAILED === $job->status ) {
@@ -532,9 +542,10 @@ final class JobActions {
 		}
 		$lines   = Undo::lost_lines( $seen['lost'], $seen['since'] );
 		$lines[] = sprintf(
-			/* translators: %d: days */
-			__( 'The restored site is kept for %d days after the undo, then removed; swapping it back in is not possible in this version.', 'wp-checkpoint' ),
-			(int) ( JobRepository::WORK_RETENTION_SECONDS / 86400 )
+			/* translators: 1: days, 2: job id */
+			__( 'The restored site is kept for %1$d days after the undo, then removed; until then it can be swapped back in (wp wpcheckpoint job redo %2$d).', 'wp-checkpoint' ),
+			(int) ( JobRepository::WORK_RETENTION_SECONDS / 86400 ),
+			$id
 		);
 		if ( '' === $confirm ) {
 			return array(
@@ -588,6 +599,112 @@ final class JobActions {
 		return array(
 			'ok'        => true,
 			'message'   => __( 'The restore is being undone.', 'wp-checkpoint' ),
+			'confirmed' => true,
+			'code'      => $confirm,
+			'lines'     => $lines,
+		);
+	}
+
+	/**
+	 * The checks of a redo.
+	 *
+	 * @param Redo|null $redo Checks (tests), or null for the site's own.
+	 * @return Redo
+	 */
+	public function redo_gate( ?Redo $redo = null ): Redo {
+		if ( null !== $redo ) {
+			$this->redo = $redo;
+		}
+		if ( null === $this->redo ) {
+			$this->redo = new Redo( $this->repository );
+		}
+		return $this->redo;
+	}
+
+	/**
+	 * Swap an undone restore back in (wp wpcheckpoint job redo): without a confirmation code, what it would drop and the
+	 * code; with the code, the job queued again at its own redo (Redo, JobRepository::reopen_for_redo()), to be run by
+	 * WP-CLI. Every check is read once, and again under the start lock right before the job is claimed.
+	 *
+	 * @param int    $id      Job id.
+	 * @param string $confirm The confirmation code, or '' to be told it.
+	 * @return array{ok: bool, message: string, confirmed: bool, code: string, lines: string[]}
+	 * @throws JobsUnavailable When the jobs table is not usable, or the start lock is busy.
+	 */
+	public function redo( int $id, string $confirm ): array {
+		$refuse = static function ( string $why ): array {
+			return array(
+				'ok'        => false,
+				'message'   => $why,
+				'confirmed' => false,
+				'code'      => '',
+				'lines'     => array(),
+			);
+		};
+		$this->usable( $id );
+		$gate = $this->redo_gate();
+		$seen = $gate->assess( $id );
+		if ( ! $seen['ok'] || null === $seen['job'] ) {
+			return $refuse( $seen['why'] );
+		}
+		$lines   = Undo::lost_lines( $seen['lost'], $seen['since'] );
+		$lines[] = sprintf(
+			/* translators: %d: days */
+			__( 'The site as it is now (as the undo left it) is kept for %d days after the restored copy is swapped back in; until then the restore can be undone again.', 'wp-checkpoint' ),
+			(int) ( Undo::WINDOW_SECONDS / 86400 )
+		);
+		if ( '' === $confirm ) {
+			return array(
+				'ok'        => true,
+				/* translators: 1: job id, 2: confirmation code */
+				'message'   => sprintf( __( 'Nothing was changed. To swap restore job %1$d back in, run: wp wpcheckpoint job redo %1$d --confirm=%2$s', 'wp-checkpoint' ), $id, $seen['code'] ),
+				'confirmed' => false,
+				'code'      => $seen['code'],
+				'lines'     => $lines,
+			);
+		}
+		$changed = __( 'The confirmation code does not match: the restore or its plan changed since it was given, or it is another job\'s. Nothing was changed; run the command without --confirm to see what it would do now.', 'wp-checkpoint' );
+		if ( ! hash_equals( $seen['code'], $confirm ) ) {
+			return $refuse( $changed );
+		}
+		if ( ! $this->repository->lock_starts() ) {
+			throw new JobsUnavailable( 'Another job is being started right now; try again in a moment.' );
+		}
+		try {
+			// Read again under the lock: a job that started, swapped or changed meanwhile is seen here.
+			$again = $gate->assess( $id );
+			if ( ! $again['ok'] || null === $again['job'] ) {
+				return $refuse( $again['why'] );
+			}
+			if ( ! hash_equals( $again['code'], $confirm ) ) {
+				return $refuse( $changed );
+			}
+			$job    = $again['job'];
+			$others = array_values(
+				array_filter(
+					$this->active(),
+					static function ( Job $other ) use ( $job ): bool {
+						return $other->id !== $job->id;
+					}
+				)
+			);
+			$reason = JobConflicts::conflict( $job->type, $job->options, $others );
+			if ( '' !== $reason ) {
+				return $refuse( $reason );
+			}
+			$this->cancel_yielding();
+			try {
+				$job = $this->repository->reopen_for_redo( $job, SwapStep::redo_cursor( $again['attempt'], $job->site_mark, $again['since'] ), __( 'Getting ready to swap the restored copy back in', 'wp-checkpoint' ), $job->managing_token() );
+			} catch ( StaleJob $e ) {
+				return $refuse( __( 'The job changed meanwhile, or a run holds it; nothing was changed. Try again.', 'wp-checkpoint' ) );
+			}
+		} finally {
+			$this->repository->unlock_starts();
+		}
+		$this->runner->note( $job, Logger::WARNING, 'The restored copy is swapped back in, as asked from WP-CLI (wp wpcheckpoint job redo)', array( 'since' => gmdate( 'Y-m-d H:i:s', $seen['since'] ) ) );
+		return array(
+			'ok'        => true,
+			'message'   => __( 'The restored copy is being swapped back in.', 'wp-checkpoint' ),
 			'confirmed' => true,
 			'code'      => $confirm,
 			'lines'     => $lines,
@@ -1412,7 +1529,13 @@ final class JobActions {
 	 *                                                            site and finishes), "undo_failed" (refused: the same,
 	 *                                                            on a failed row: it goes on once retried),
 	 *                                                            "undo_expired" (refused: the same, its work reclaimed:
-	 *                                                            it can no longer be retried) or
+	 *                                                            it can no longer be retried), "undo_asks" (refused:
+	 *                                                            the undo put the site back and asks whether to keep
+	 *                                                            it), "redo_given_up" (a redo that had not changed the
+	 *                                                            site was given up: undone again), "redo_requested"
+	 *                                                            (such a redo is running: it gives itself up before it
+	 *                                                            changes the site), "redoing" (refused: the redo has
+	 *                                                            started changing the site) or
 	 *                                                            "managed_elsewhere" (refused: as "elsewhere", for a
 	 *                                                            row whose site is recorded as untouched).
 	 * @throws InvalidTransition When the job is already finished.
@@ -1437,6 +1560,36 @@ final class JobActions {
 				'job'     => $job,
 				'cleaned' => false,
 				'reason'  => 'elsewhere',
+			);
+		}
+		if ( SwapStep::ID === $job->step && SwapStep::redo_at( $job->cursor ) > 0 && ! in_array( $job->status, array( Job::COMPLETED, Job::CANCELLED, Job::UNDONE ), true ) ) {
+			// A redo: given up before it changes the site (the site stays as the undo left it, the job undone again);
+			// once it changed anything it finishes, or puts the site back as the undo left it, and the cancel is refused.
+			// A plain cancel would end it cancelled and reclaim the restored copy.
+			$wrote = '';
+			if ( in_array( (string) ( $job->cursor['phase'] ?? '' ), array( 'redo', 'redo_ask' ), true ) ) {
+				try {
+					$wrote = $this->repository->cancel_redo( $job );
+				} catch ( StaleJob $e ) {
+					$wrote = ''; // Nothing written: said as what the row is now.
+				}
+			}
+			$now = $this->repository->find( $id );
+			if ( null === $now ) {
+				return null;
+			}
+			if ( 'given_up' === $wrote ) {
+				$reason = 'redo_given_up';
+				$this->runner->note( $now, Logger::WARNING, 'The redo was cancelled before it changed the site: the site stays as the undo left it' );
+			} elseif ( 'requested' === $wrote ) {
+				$reason = 'redo_requested';
+			} else {
+				$reason = Job::UNDONE === $now->status ? 'undo_ended' : 'redoing';
+			}
+			return array(
+				'job'     => $now,
+				'cleaned' => false,
+				'reason'  => $reason,
 			);
 		}
 		$unread = SwapStep::ID === $job->step && in_array( 'cursor_json', $job->unreadable_columns, true );
@@ -1567,6 +1720,12 @@ final class JobActions {
 		if ( $giving_up ) {
 			$this->runner->note( $answered, Logger::WARNING, 'The put-back was given up as the administrator chose: the job is as it was before it, still holding the site', array( 'kept' => (string) ( $job->cursor['evidence'] ?? '' ) ) );
 			return $answered; // It is run the way it was before (wp wpcheckpoint job status says how), nothing scheduled here.
+		}
+		if ( Job::UNDONE === $answered->status ) {
+			// Ended at the answer (JobRepository::settle_undone()): a redo given up, or the site an undo put back kept.
+			$redo = 'redo_ask' === ( $job->cursor['phase'] ?? '' );
+			$this->runner->note( $answered, Logger::WARNING, $redo ? 'The redo was given up as the administrator chose: the site stays as the undo left it' : 'The site as put back by the undo was kept, as the administrator chose' );
+			return $answered;
 		}
 		Loopback::schedule( $id, Loopback::FALLBACK_SECONDS ); // Answered and the page closed: the job still goes on.
 		return $answered;

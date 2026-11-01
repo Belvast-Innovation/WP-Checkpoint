@@ -68,6 +68,12 @@ defined( 'ABSPATH' ) || exit;
  * - CARRY_BACK: why this plugin's own state could not be carried back on an
  *   undo, and the names of its rows that would not be, written whole by the
  *   swap before it asks how to go on; the question names this file.
+ * - REDO_CARRY: the same for a redo, which carries this plugin's state into
+ *   the restored copy before it renames anything; written again with the rows
+ *   read anew when they changed since the question was asked.
+ * - AFTER_UNDO: what the check of the site an undo put back found when it
+ *   failed or could not tell, written whole by the swap before it asks whether
+ *   to keep that site; the question names this file.
  */
 final class RestoreFiles {
 
@@ -100,6 +106,8 @@ final class RestoreFiles {
 	const LINKED = 'restore-linked-targets.json';
 
 	const CARRY_BACK = 'restore-carry-back.json';
+	const REDO_CARRY = 'restore-redo-carry.json';
+	const AFTER_UNDO = 'restore-after-undo.json';
 
 	/**
 	 * A file or directory of the work directory.

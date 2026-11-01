@@ -391,6 +391,9 @@ final class Uninstaller {
 			case 'unknown':
 				$what = sprintf( 'restore job %d may be an undo that put the site back (its position cannot be read)', $undo['id'] );
 				break;
+			case 'redoing':
+				$what = sprintf( 'restore job %d was undone and is being swapped back in (wp wpcheckpoint job redo), or asks how to go on', $undo['id'] );
+				break;
 			default:
 				$what = sprintf( 'an undo of restore job %d put the site back and has not ended', $undo['id'] );
 		}
@@ -439,7 +442,8 @@ final class Uninstaller {
 	 * was live) as long as a completed restore keeps the site it replaced: they are listed in "undo" (site state
 	 * untouched, so not in "all"), each with the time it is kept until: an undone one or a failed one until its work
 	 * expires (JobRepository::expire_work(), WORK_RETENTION_SECONDS after it ended), one still going on with none yet
-	 * (0), and a swap whose position cannot be read, which may be one of them, likewise.
+	 * (0), a redo of one (it swaps that restored site back in, or asks how to go on) likewise, and a swap whose
+	 * position cannot be read, which may be one of them, likewise.
 	 *
 	 * None of them appears during an uninstall but one way: they come from jobs that held the site changed, which keep
 	 * the uninstall from starting, and no swap enters the site through the closed fence. The way: a failed undo past
@@ -449,7 +453,7 @@ final class Uninstaller {
 	 *
 	 * @return array{all: int, abandoned: int, kept: int[], undo: array<int, array{id: int, until: int, how: string}>}|null
 	 *         kept: restores whose restored site was kept, their last steps left; undo: how ("undone", "undoing",
-	 *         "failed" or "unknown").
+	 *         "failed", "redoing" or "unknown").
 	 */
 	public static function holding() {
 		global $wpdb;
@@ -504,6 +508,8 @@ final class Uninstaller {
 				$how = 'unknown'; // It may be an undo: kept, the safe direction.
 			} elseif ( \WPCheckpoint\Jobs\SwapStep::undoing( $cursor ) ) {
 				$how = Job::FAILED === (string) $swap[1] ? 'failed' : 'undoing';
+			} elseif ( \WPCheckpoint\Jobs\SwapStep::redo_at( $cursor ) > 0 ) {
+				$how = 'redoing'; // A redo put back, or before it changed the site: the restored copy is what it swaps in.
 			} else {
 				continue; // A swap rolled back: its staging is a copy of the backup, not what visitors wrote.
 			}

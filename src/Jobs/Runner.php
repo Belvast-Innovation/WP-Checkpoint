@@ -456,9 +456,10 @@ final class Runner {
 					$logger->error( 'A step ended the job as undone while it holds the site changed' );
 					return $this->fail( $job, $token, $logger, sprintf( 'Step "%s": %s', $step_id, $this->describe( $e ) ) );
 				}
-				// Not a failure: undone, as the administrator chose.
+				// Not a failure: undone, as the administrator chose (or back to undone, as of its undo, after a redo that
+				// did not stand: Undone::back()).
 				$logger->info( 'The restore was undone' );
-				$this->transition( $job, $token, Job::UNDONE, $e->getMessage() );
+				$this->transition( $job, $token, Job::UNDONE, $e->getMessage(), '', '', array(), $e->at() );
 				return new TickResult( TickResult::FINISHED, -1, $job, $this->redactor->redact( $e->getMessage() ) );
 			} catch ( RetryFrom $e ) {
 				if ( Job::SITE_UNTOUCHED !== $job->site_state ) {
@@ -976,12 +977,13 @@ final class Runner {
 	 * @param string   $failure Kind of a failure (Job::FAILURE_*).
 	 * @param string   $retry_from Id of the step a retry of a failed job starts at ('' for none).
 	 * @param string[] $forget   Ids of questions whose answers a failure removes.
+	 * @param int      $at       For undone: the finished_at to write (Undone::at(); 0 for now).
 	 * @return void
 	 * @throws LockLost When the write refused.
 	 */
-	private function transition( Job $job, string $token, string $to, string $error, string $failure = '', string $retry_from = '', array $forget = array() ): void {
+	private function transition( Job $job, string $token, string $to, string $error, string $failure = '', string $retry_from = '', array $forget = array(), int $at = 0 ): void {
 		try {
-			$this->repository->transition( $job, $to, $error, $token, $failure, $retry_from, $forget );
+			$this->repository->transition( $job, $to, $error, $token, $failure, $retry_from, $forget, $at );
 		} catch ( StaleJob $e ) {
 			throw new LockLost( $e->getMessage(), 0, $e ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
 		}

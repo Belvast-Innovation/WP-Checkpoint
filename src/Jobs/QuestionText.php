@@ -11,6 +11,7 @@ use WPCheckpoint\Restore\LinkedTargets;
 use WPCheckpoint\Restore\IncomingQuestions;
 use WPCheckpoint\Restore\IncomingTables;
 use WPCheckpoint\Restore\RestoreFiles;
+use WPCheckpoint\Restore\SiteCheck;
 use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Support\Paths;
 
@@ -81,15 +82,34 @@ final class QuestionText {
 			if ( LinkedTargets::KIND === $kind && '' !== $work ) {
 				$listed = self::linked( $id, $work, $clean );
 			}
-			$carry = SwapStep::CARRY_KIND === $kind ? self::carry_file( $work ) : null;
+			$carry = null;
+			if ( SwapStep::CARRY_KIND === $kind || SwapStep::REDO_CARRY_KIND === $kind ) {
+				$carry = self::carry_file( $work, SwapStep::CARRY_KIND === $kind ? RestoreFiles::CARRY_BACK : RestoreFiles::REDO_CARRY );
+			}
 			if ( null !== $carry ) {
 				$listed = null === $carry['names'] ? array() : array_slice( $carry['names'], 0, self::MAX_LISTED );
+			}
+			switch ( $kind ) {
+				case SwapStep::UNVERIFIED_KIND:
+					$text = self::unverified( $job );
+					break;
+				case SwapStep::CARRY_KIND:
+					$text = self::carry( $job, $question, $carry );
+					break;
+				case SwapStep::REDO_CARRY_KIND:
+					$text = self::redo_carry( $job, $question, $carry );
+					break;
+				case SwapStep::AFTER_UNDO_KIND:
+					$text = self::after_undo( $job, $work );
+					break;
+				default:
+					$text = self::describe( $id, $question, $findings, $shown );
 			}
 			$out[] = array(
 				'id'      => $id,
 				'kind'    => (string) ( $question['kind'] ?? '' ),
 				'choices' => array_map( 'strval', (array) ( $question['choices'] ?? array() ) ),
-				'text'    => (string) call_user_func( $clean, SwapStep::UNVERIFIED_KIND === $kind ? self::unverified( $job ) : ( SwapStep::CARRY_KIND === $kind ? self::carry( $job, $question, $carry ) : self::describe( $id, $question, $findings, $shown ) ) ),
+				'text'    => (string) call_user_func( $clean, $text ),
 				'listed'  => array_map(
 					static function ( string $p ) use ( $clean ): string {
 						return (string) call_user_func( $clean, $p );
@@ -117,19 +137,20 @@ final class QuestionText {
 	}
 
 	/**
-	 * What the swap wrote before it asked about a carry back that failed (RestoreFiles::CARRY_BACK): why, and the names
-	 * of the rows that would not be carried back (null when they could not be read); null when the file is not there
-	 * or cannot be read.
+	 * What the swap wrote before it asked about a carry that failed (RestoreFiles::CARRY_BACK on an undo,
+	 * RestoreFiles::REDO_CARRY on a redo): why, and the names of the rows that would not be carried (null when they
+	 * could not be read); null when the file is not there or cannot be read.
 	 *
 	 * @param string $work The job's work directory ('' when it is not this storage directory's).
+	 * @param string $name The file.
 	 * @return array{reason: string, names: string[]|null}|null
 	 */
-	private static function carry_file( string $work ) {
-		if ( '' === $work || ! ExportPlan::exists( $work, RestoreFiles::CARRY_BACK ) ) {
+	private static function carry_file( string $work, string $name ) {
+		if ( '' === $work || ! ExportPlan::exists( $work, $name ) ) {
 			return null;
 		}
 		try {
-			$read = ExportPlan::read( $work, RestoreFiles::CARRY_BACK );
+			$read = ExportPlan::read( $work, $name );
 		} catch ( \RuntimeException $e ) {
 			return null;
 		}
@@ -161,6 +182,61 @@ final class QuestionText {
 			$why,
 			$lost,
 			gmdate( 'Y-m-d H:i', $job->committed_at + Undo::WINDOW_SECONDS )
+		);
+	}
+
+	/**
+	 * The question of a redo whose carry of WP Checkpoint's own settings into the restored copy failed: what failed,
+	 * what each answer does, what is lost, and until when it can be answered (the end of the time a redo can be made in,
+	 * from the undo: Undo::WINDOW_SECONDS).
+	 *
+	 * @param Job                                              $job      The job.
+	 * @param array<string, mixed>                             $question The question.
+	 * @param array{reason: string, names: string[]|null}|null $carry    carry_file().
+	 * @return string
+	 */
+	private static function redo_carry( Job $job, array $question, $carry ): string {
+		$count = (int) ( $question['count'] ?? 0 );
+		$why   = null === $carry || '' === $carry['reason'] ? __( 'the job log says why', 'wp-checkpoint' ) : $carry['reason'];
+		$lost  = null === $carry || null === $carry['names']
+			? __( 'which of WP Checkpoint\'s own settings would be lost could not be read', 'wp-checkpoint' )
+			/* translators: %d: number of settings */
+			: sprintf( _n( '%d setting of WP Checkpoint written since the undo would be lost (listed below)', '%d settings of WP Checkpoint written since the undo would be lost (listed below)', $count, 'wp-checkpoint' ), $count );
+		return sprintf(
+			/* translators: 1: why the carry failed, 2: what would be lost, 3: date and time (UTC) */
+			__( 'The redo could not carry WP Checkpoint\'s own settings into the restored copy (%1$s); nothing was swapped yet, and the site is open as the undo left it. Swap the restored copy back in anyway: as the redo said, everything written on the site since the undo is dropped, and %2$s, among them may be where its backups are stored and how it recognises this site. If the settings that would be lost have changed by the time the redo goes on, the answer is void and this is asked again with them. Or give the redo up. Answer by %3$s UTC: after that the redo is given up, whatever the answer.', 'wp-checkpoint' ),
+			$why,
+			$lost,
+			gmdate( 'Y-m-d H:i', (int) ( $job->cursor['undone_at'] ?? 0 ) + Undo::WINDOW_SECONDS )
+		);
+	}
+
+	/**
+	 * The question of an undo whose site, as put back, failed its check or could not be checked: what was found
+	 * (RestoreFiles::AFTER_UNDO), what each answer does, and until when it can be answered.
+	 *
+	 * @param Job    $job  The job.
+	 * @param string $work The job's work directory ('' when it is not this storage directory's).
+	 * @return string
+	 */
+	private static function after_undo( Job $job, string $work ): string {
+		$found = '';
+		if ( '' !== $work && ExportPlan::exists( $work, RestoreFiles::AFTER_UNDO ) ) {
+			try {
+				$read  = ExportPlan::read( $work, RestoreFiles::AFTER_UNDO );
+				$found = is_string( $read['found'] ?? null ) ? $read['found'] : '';
+			} catch ( \RuntimeException $e ) {
+				$found = '';
+			}
+		}
+		/* translators: 1: what the check found, 2: date and time (UTC) */
+		$failed = __( 'The undo put the site back as it was before the restore, but the site\'s check then failed (%1$s). The site is open now: look at it before you answer. Keep it, or swap the restored copy back in: that drops everything written on the site since the undo, and runs every check of a redo first. Answer by %2$s UTC: after that the site is kept.', 'wp-checkpoint' );
+		/* translators: 1: what the check found, 2: date and time (UTC) */
+		$unsure = __( 'The undo put the site back as it was before the restore, but the site could not be checked (%1$s). The site is open now: look at it before you answer. Keep it, or swap the restored copy back in: that drops everything written on the site since the undo, and runs every check of a redo first. Answer by %2$s UTC: after that the site is kept.', 'wp-checkpoint' );
+		return sprintf(
+			SiteCheck::FAILED === ( $job->cursor['after_undo'] ?? '' ) ? $failed : $unsure,
+			'' === $found ? __( 'the job log says what was found', 'wp-checkpoint' ) : $found,
+			gmdate( 'Y-m-d H:i', (int) ( $job->cursor['undone_at'] ?? 0 ) + Undo::WINDOW_SECONDS )
 		);
 	}
 

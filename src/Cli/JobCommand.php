@@ -76,7 +76,10 @@ final class JobCommand {
 	 * 6 the job asks a question (see "job answer"); for a backup, 7 it completed but the backup cannot be
 	 * confirmed (no longer in backups/, or not identifiable any more); for a restore, 8 the site was put back (it
 	 * ended undone, or cancelled by "job put-back") but the site as put back then failed its check or could not be
-	 * checked (what was found is in "job status").
+	 * checked (what was found is in "job status"); 9 the restored copy was swapped back in ("job redo") but the site
+	 * then failed its check, or could not be checked and the restore's policy is to undo, and the site was put back as
+	 * the undo left it. A redo that is given up before it changed the site exits 2; one that stopped and was rolled
+	 * back, 1.
 	 *
 	 * A backup is driven as "wp wpcheckpoint export" drives it: its questions
 	 * are asked on a terminal, and the backup's file name is printed at the end.
@@ -202,7 +205,7 @@ final class JobCommand {
 	 * Everything written on the site since the restore is dropped. Without --confirm nothing is changed: it says what
 	 * would be dropped and gives the confirmation code. A restore can be undone for 7 days after it was made, while no
 	 * other job holds the site and no restore was made after it. The restored site is kept for 7 days after the undo,
-	 * then removed.
+	 * then removed; until then it can be swapped back in ("job redo").
 	 *
 	 * ## OPTIONS
 	 *
@@ -214,9 +217,10 @@ final class JobCommand {
 	 *
 	 * ## EXIT CODES
 	 *
-	 * As "job run" once the undo started: 0 when it is undone, 8 when it is undone but the site as put back then
-	 * failed its check or could not be checked (what was found is said, and in "job status"); 1 when it was refused or
-	 * not confirmed.
+	 * As "job run" once the undo started: 0 when it is undone; 6 when it is undone but the site as put back then
+	 * failed its check or could not be checked: the site is open, and the undo asks whether to keep it or swap the
+	 * restored copy back in (wp wpcheckpoint job answer; after "keep", "job run" exits 8); 1 when it was refused or not
+	 * confirmed.
 	 *
 	 * @param string[]             $args       Positional arguments.
 	 * @param array<string, mixed> $assoc_args Options.
@@ -242,6 +246,75 @@ final class JobCommand {
 		$id = (int) $args[0];
 		try {
 			$outcome = $this->actions->undo( $id, (string) ( $assoc_args['confirm'] ?? '' ) );
+		} catch ( JobsUnavailable $e ) {
+			WP_CLI::error( $this->presenter->clean( $e->getMessage() ) );
+		}
+		if ( ! $outcome['ok'] ) {
+			WP_CLI::error( $this->presenter->clean( $outcome['message'] ) );
+		}
+		if ( ! $outcome['confirmed'] ) {
+			foreach ( $outcome['lines'] as $line ) {
+				WP_CLI::line( $this->presenter->clean( $line ) );
+			}
+			WP_CLI::error( $this->presenter->clean( $outcome['message'] ) );
+		}
+		WP_CLI::line( $this->presenter->clean( $outcome['message'] ) );
+		$code = ( new RunLoop( $this->actions, $this->presenter, 'sleep', array( 'WP_CLI', 'line' ) ) )->run( $id, true );
+		WP_CLI::halt( $code );
+	}
+
+	/**
+	 * Swap the restored copy of an undone restore back in: the site becomes the restored site again, in maintenance
+	 * mode while that is done.
+	 *
+	 * Everything written on the site since the undo is dropped. Without --confirm nothing is changed: it says what
+	 * would be dropped and gives the confirmation code. A restore can be swapped back in for 7 days after it was
+	 * undone, while no other job holds the site, no restore was made after the undo, every table and directory of its
+	 * plan is where the undo left it, no table of the site's was made since that the restore would have moved away,
+	 * and the restored plugins hold the version of WP Checkpoint that runs. The site as the undo left it is kept for 7
+	 * days, and the restore can be undone again.
+	 *
+	 * ## OPTIONS
+	 *
+	 * <id>
+	 * : Job id of the restore.
+	 *
+	 * [--confirm=<code>]
+	 * : The confirmation code the command gives without it.
+	 *
+	 * ## EXIT CODES
+	 *
+	 * 0 when the restored copy is back in place and passed its check; 2 when the redo was given up before it changed
+	 * the site (a check did not hold any more, it was cancelled, or its question was answered to give it up); 6 when
+	 * it asks how to go on (WP Checkpoint's own settings could not be carried into the restored copy: answer with
+	 * wp wpcheckpoint job answer, then run the job); 9 when the restored copy was swapped in but the site then failed
+	 * its check (or could not be checked and the restore's policy is to undo), and the site was put back as the undo
+	 * left it; 1 when it was refused or not confirmed, or stopped and was put back as the undo left it.
+	 *
+	 * @param string[]             $args       Positional arguments.
+	 * @param array<string, mixed> $assoc_args Options.
+	 * @return void
+	 */
+	public function redo( array $args, array $assoc_args ): void {
+		Unexpected::guard(
+			function () use ( $args, $assoc_args ): void {
+				$this->redo_body( $args, $assoc_args );
+			},
+			array( $this->presenter, 'clean' )
+		);
+	}
+
+	/**
+	 * The body of redo(): what would be dropped and the code, or the job claimed and run to its end.
+	 *
+	 * @param string[]             $args       Positional arguments.
+	 * @param array<string, mixed> $assoc_args Options.
+	 * @return void
+	 */
+	private function redo_body( array $args, array $assoc_args ): void {
+		$id = (int) $args[0];
+		try {
+			$outcome = $this->actions->redo( $id, (string) ( $assoc_args['confirm'] ?? '' ) );
 		} catch ( JobsUnavailable $e ) {
 			WP_CLI::error( $this->presenter->clean( $e->getMessage() ) );
 		}

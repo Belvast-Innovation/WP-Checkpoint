@@ -22,14 +22,15 @@ defined( 'ABSPATH' ) || exit;
  */
 final class RunLoop {
 
-	const EXIT_COMPLETED = 0;
-	const EXIT_FAILED    = 1;
-	const EXIT_CANCELLED = 2;
-	const EXIT_LOST      = 3;
-	const EXIT_WAITING   = 4; // Left waiting / blocked without --wait, paused, or missing.
-	const EXIT_BUSY      = 5; // Another driver kept the lock.
-	const EXIT_PAUSED    = 6; // The job asks a question; answer it (wp wpcheckpoint job answer) and run again.
-	const EXIT_UNCHECKED = 8; // Put back (undone, or cancelled by a put-back), but the site then failed its check or could not be checked.
+	const EXIT_COMPLETED     = 0;
+	const EXIT_FAILED        = 1;
+	const EXIT_CANCELLED     = 2;
+	const EXIT_LOST          = 3;
+	const EXIT_WAITING       = 4; // Left waiting / blocked without --wait, paused, or missing.
+	const EXIT_BUSY          = 5; // Another driver kept the lock.
+	const EXIT_PAUSED        = 6; // The job asks a question; answer it (wp wpcheckpoint job answer) and run again.
+	const EXIT_UNCHECKED     = 8; // Put back (undone, or cancelled by a put-back), but the site then failed its check or could not be checked.
+	const EXIT_REDO_REVERSED = 9; // Swapped back in (job redo), but the site then failed its check (or could not be checked, the policy undo): the site is as the undo left it.
 
 	const MAX_BUSY = 60;
 
@@ -168,6 +169,14 @@ final class RunLoop {
 	private function exit_code_for( $job ): int {
 		if ( ! $job instanceof Job ) {
 			return self::EXIT_WAITING;
+		}
+		switch ( SwapStep::redo_outcome( $job ) ) {
+			case SwapStep::REDO_GIVEN_UP:
+				return self::EXIT_CANCELLED; // Given up before it changed the site: as a cancel, nothing changed.
+			case SwapStep::REDO_REVERSED:
+				return self::EXIT_REDO_REVERSED;
+			case SwapStep::REDO_ROLLED_BACK:
+				return self::EXIT_FAILED; // Stopped and put back: an error, said in the job's message.
 		}
 		if ( SwapStep::back_unchecked( $job ) ) {
 			return self::EXIT_UNCHECKED;
