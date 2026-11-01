@@ -74,7 +74,9 @@ final class JobCommand {
 	 *
 	 * 0 completed, 1 failed, 2 cancelled, 3 lock lost, 4 left waiting, 5 another driver holds the job,
 	 * 6 the job asks a question (see "job answer"); for a backup, 7 it completed but the backup cannot be
-	 * confirmed (no longer in backups/, or not identifiable any more).
+	 * confirmed (no longer in backups/, or not identifiable any more); for a restore, 8 the site was put back (it
+	 * ended undone, or cancelled by "job put-back") but the site as put back then failed its check or could not be
+	 * checked (what was found is in "job status").
 	 *
 	 * A backup is driven as "wp wpcheckpoint export" drives it: its questions
 	 * are asked on a terminal, and the backup's file name is printed at the end.
@@ -212,7 +214,9 @@ final class JobCommand {
 	 *
 	 * ## EXIT CODES
 	 *
-	 * As "job run" once the undo started (0 when it is undone); 1 when it was refused or not confirmed.
+	 * As "job run" once the undo started: 0 when it is undone, 8 when it is undone but the site as put back then
+	 * failed its check or could not be checked (what was found is said, and in "job status"); 1 when it was refused or
+	 * not confirmed.
 	 *
 	 * @param string[]             $args       Positional arguments.
 	 * @param array<string, mixed> $assoc_args Options.
@@ -275,8 +279,9 @@ final class JobCommand {
 	 * ## EXIT CODES
 	 *
 	 * As "job run" once the put-back started: 0 when a swap that was made was put back (the restore ended undone), 2
-	 * when one half made was (the restore ended cancelled, as a put-back of it does); 1 when it was refused or not
-	 * confirmed.
+	 * when one half made was (the restore ended cancelled, as a put-back of it does); 8 when either was put back but
+	 * the site as put back then failed its check or could not be checked (what was found is said, and in "job
+	 * status"); 1 when it was refused or not confirmed.
 	 *
 	 * @subcommand put-back
 	 *

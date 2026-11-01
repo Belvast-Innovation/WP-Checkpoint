@@ -1285,6 +1285,21 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	}
 
 	/**
+	 * Whether a job ended with the site put back (undone, or cancelled by a put-back) but the site as put back did
+	 * not pass its check, or could not be checked: what its cursor at the end holds (check_undone(), end_back()). A
+	 * cursor that should hold the verdict and does not counts as not checked.
+	 *
+	 * @param Job $job Job, as read from its row.
+	 * @return bool
+	 */
+	public static function back_unchecked( Job $job ): bool {
+		if ( self::ID !== $job->step || ! in_array( $job->status, array( Job::UNDONE, Job::CANCELLED ), true ) ) {
+			return false;
+		}
+		return self::checked_back( $job->cursor ) && SiteCheck::PASSED !== ( $job->cursor['after_undo'] ?? '' );
+	}
+
+	/**
 	 * After an undo the site was let out from, the site as put back is checked, behind the held file, as a restored
 	 * site is (the self-check row in the options table now in place, the maintenance file letting this run's requests
 	 * through, Restore\SiteCheck; what could not be told checked again after the waits of CHECK_WAITS, at most
