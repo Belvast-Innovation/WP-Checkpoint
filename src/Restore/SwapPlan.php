@@ -236,6 +236,25 @@ final class SwapPlan {
 	}
 
 	/**
+	 * The job's attempts as the table holds them, highest first: how many entries each has and whether it has its
+	 * COMPLETE row (what the plan is, read without the job's cursor: wp wpcheckpoint job put-back).
+	 *
+	 * @param int $job_id Job id.
+	 * @return array<int, array{attempt: int, rows: int, complete: bool}>
+	 */
+	public function attempts( int $job_id ): array {
+		$out = array();
+		foreach ( $this->db->rows( 'SELECT attempt, SUM(kind <> ?), SUM(kind = ?) FROM ' . SqlWriter::identifier( $this->name ) . ' WHERE job_id = ? GROUP BY attempt ORDER BY attempt DESC', array( self::COMPLETE, self::COMPLETE, (string) $job_id ) ) as $row ) {
+			$out[] = array(
+				'attempt'  => (int) $row[0],
+				'rows'     => (int) $row[1],
+				'complete' => (int) $row[2] > 0,
+			);
+		}
+		return $out;
+	}
+
+	/**
 	 * Entries of an attempt in sequence order, after a sequence number (a page).
 	 *
 	 * @param int $job_id  Job id.

@@ -216,6 +216,10 @@ final class SelfCheckRouteTest extends WP_UnitTestCase {
 		$answered = array( 'reason' => SwapStep::UNDONE ) + $undo;
 		foreach ( array(
 			'an undo answered after the release' => array( $answered, true ),
+			'a put-back of a committed swap'     => array( array( 'reason' => SwapStep::PUT_BACK_REASON ) + $undo, true ),
+			'a put-back of a swap half made'     => array( array( 'reason' => SwapStep::PUT_BACK_REASON, 'out' => false ) + $undo, true ),
+			'a put-back, its verdict recorded'   => array( array( 'reason' => SwapStep::PUT_BACK_REASON, 'after_undo' => 'failed' ) + $undo, false ),
+			'a put-back still being put back'    => array( array( 'reason' => SwapStep::PUT_BACK_REASON, 'phase' => 'rollback' ) + $undo, false ),
 			'not let out (a reverse after a failed check)' => array( array( 'out' => false ) + $undo, false ),
 			'a reverse after a failed check'     => array( array( 'reason' => SwapStep::REVERSED ) + $undo, false ),
 			'a rollback'                         => array( array( 'reason' => SwapStep::INTERRUPTED ) + $undo, false ),

@@ -59,6 +59,13 @@ final class JobRepository {
 	 */
 	const RETRY_FROM_KEY = JobContext::RESERVED_PREFIX . '_retry_from';
 
+	/**
+	 * The options a put-back writes over options that cannot be read (claim_put_back()): the key says when; the
+	 * options as they were are in the put-back's evidence directory. Nothing that needs the job's own options runs it
+	 * again (check_retry()).
+	 */
+	const OPTIONS_RESET = 'reset_by_put_back';
+
 	const LOCK_SECONDS      = 120;
 	const BACKOFF_SECONDS   = array( 5, 15, 60, 300 );
 	const STALL_SECONDS     = 86400;
@@ -772,6 +779,229 @@ final class JobRepository {
 		if ( 1 !== (int) $affected || null === $row ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
 			throw new StaleJob( sprintf( 'Job %d changed meanwhile, or a run holds it; nothing was changed.', $job->id ) );
+		}
+		return $row;
+	}
+
+	/**
+	 * The values a put-back's claim writes over, as the row holds them (PutBackEvidence): the JSON columns as their
+	 * bytes (read through HEX(): no character set conversion; null for NULL), the other columns as read. Null when the
+	 * row is not there.
+	 *
+	 * @param int $id Job id.
+	 * @return array<string, mixed>|null
+	 * @throws \RuntimeException When the row cannot be read, or holds a JSON column larger than this plugin writes
+	 *                           (PutBackEvidence::MAX_BYTES).
+	 */
+	public function put_back_raw( int $id ) {
+		global $wpdb;
+		$table   = self::table();
+		$lengths = array();
+		foreach ( PutBackEvidence::FILES as $column ) {
+			$lengths[] = "LENGTH(CAST({$column} AS BINARY))";
+		}
+		$rows = self::read_rows( $wpdb->prepare( 'SELECT ' . implode( ', ', $lengths ) . " FROM {$table} WHERE id = %d", $id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared,WordPress.DB.PreparedSQL.NotPrepared -- plugin table name from the prefix, constant column names.
+		if ( null === $rows ) {
+			throw new \RuntimeException( 'The job could not be read.' );
+		}
+		if ( array() === $rows ) {
+			return null;
+		}
+		foreach ( PutBackEvidence::FILES as $i => $column ) {
+			if ( null !== $rows[0][ $i ] && (int) $rows[0][ $i ] > PutBackEvidence::MAX_BYTES ) {
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+				throw new \RuntimeException( sprintf( 'Job %1$d: its %2$s holds %3$d bytes, far more than this plugin writes into a job\'s row: something else changed it. Nothing was changed; look at the row before you go on.', $id, $column, (int) $rows[0][ $i ] ) );
+			}
+		}
+		$select = array();
+		foreach ( PutBackEvidence::FILES as $column ) {
+			$select[] = "HEX({$column})";
+			$select[] = "{$column} IS NULL";
+		}
+		foreach ( PutBackEvidence::COLUMNS as $column ) {
+			$select[] = $column;
+		}
+		$rows = self::read_rows( $wpdb->prepare( 'SELECT ' . implode( ', ', $select ) . " FROM {$table} WHERE id = %d", $id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared,WordPress.DB.PreparedSQL.NotPrepared -- plugin table name from the prefix, constant column names.
+		if ( null === $rows ) {
+			throw new \RuntimeException( 'The job could not be read.' );
+		}
+		if ( array() === $rows ) {
+			return null;
+		}
+		$out = array();
+		$i   = 0;
+		foreach ( PutBackEvidence::FILES as $column ) {
+			$hex            = (string) $rows[0][ $i ];
+			$null           = '1' === (string) $rows[0][ $i + 1 ];
+			$i             += 2;
+			$out[ $column ] = $null ? null : (string) hex2bin( $hex );
+		}
+		foreach ( PutBackEvidence::COLUMNS as $column ) {
+			$value          = $rows[0][ $i++ ];
+			$out[ $column ] = null === $value ? null : ( in_array( $column, PutBackEvidence::INTEGERS, true ) ? (int) $value : (string) $value ); // A NULL stays NULL.
+		}
+		return $out;
+	}
+
+	/**
+	 * The conditions that the row still holds $raw (put_back_raw()), byte for byte.
+	 *
+	 * @param array<string, mixed> $raw Values as read.
+	 * @return string SQL, prepared.
+	 */
+	private static function holds_raw( array $raw ): string {
+		global $wpdb;
+		$where = array();
+		foreach ( PutBackEvidence::FILES as $column ) {
+			$where[] = null === $raw[ $column ] ? "{$column} IS NULL" : $wpdb->prepare( "SHA2(CAST({$column} AS BINARY), 256) = %s", hash( 'sha256', (string) $raw[ $column ] ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- constant column names.
+		}
+		foreach ( PutBackEvidence::COLUMNS as $column ) {
+			if ( null === $raw[ $column ] ) {
+				$where[] = "{$column} IS NULL";
+				continue;
+			}
+			$where[] = in_array( $column, PutBackEvidence::INTEGERS, true ) ? $wpdb->prepare( "{$column} = %d", (int) $raw[ $column ] ) : $wpdb->prepare( "CAST({$column} AS BINARY) = CAST(%s AS BINARY)", (string) $raw[ $column ] ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- constant column names.
+		}
+		return implode( ' AND ', $where );
+	}
+
+	/**
+	 * Claim a stuck restore for a put-back (wp wpcheckpoint job put-back, JobActions::put_back()), in one statement on
+	 * the row as read: every column it writes over still holds what $raw says (put_back_raw(), kept in the evidence
+	 * directory before this), the maintenance mark as read, no live lock, still managed by $token (whether that is this
+	 * installation's is the caller's check, made again under the start lock). Anything of it changed between the read
+	 * and this write, nothing is written (StaleJob).
+	 *
+	 * It writes: queued at the swap step with $cursor (SwapStep::put_back_cursor()), the site state changing, no error,
+	 * questions or counts; a cancel recorded for a swap that was half made (it ends cancelled: Runner takes a Cancelled
+	 * only with a cancel recorded); and, when the options cannot be read ($reset_options), options that say they were
+	 * reset (OPTIONS_RESET: nothing that needs the job's own options runs it again, check_retry()).
+	 *
+	 * @param Job                  $job           Job, as read.
+	 * @param array<string, mixed> $raw           What the claim writes over, as read and kept.
+	 * @param array<string, mixed> $cursor        The swap step's cursor.
+	 * @param bool                 $reset_options Whether the options cannot be read, and are reset.
+	 * @param string               $message       Progress message.
+	 * @param string               $token         The token that managed the job as read.
+	 * @return Job The row as now stored.
+	 * @throws StaleJob When the row is no longer as read, or a run holds it.
+	 * @throws \RuntimeException When the cursor cannot be encoded.
+	 */
+	public function claim_put_back( Job $job, array $raw, array $cursor, bool $reset_options, string $message, string $token ): Job {
+		global $wpdb;
+		self::assert_cursor_has_no_secrets( $cursor );
+		$cursor_json = wp_json_encode( $cursor );
+		if ( false === $cursor_json ) {
+			throw new \RuntimeException( sprintf( 'Job %d: its cursor cannot be written.', $job->id ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+		}
+		$now       = $this->now();
+		$committed = 'reverse' === ( $cursor['phase'] ?? '' );
+		$options   = $reset_options ? $wpdb->prepare( ', options_json = %s', (string) wp_json_encode( array( self::OPTIONS_RESET => $now ) ) ) : '';
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix; the WHERE clause is the compare-and-set, each part prepared once (a value may hold "%").
+		$head     = $wpdb->prepare(
+			'UPDATE ' . self::table() . ' SET status = %s, step = %s, site_state = %d, cursor_json = %s, questions_json = NULL, progress_message = %s, last_error = \'\', failure_kind = \'\', finished_at = 0, takeovers = 0, takeover_mark = \'\', cron_deferrals = 0, cancel_requested = %d, lock_token = \'\', locked_until = 0, updated_at = %d',
+			Job::QUEUED,
+			SwapStep::ID,
+			Job::SITE_CHANGING,
+			$cursor_json,
+			self::fit_message( $message ),
+			$committed ? 0 : $now,
+			$now
+		);
+		$where    = $wpdb->prepare(
+			' WHERE id = %d AND site_state <> %d AND (lock_token = \'\' OR locked_until < %d) AND CAST(site_mark AS BINARY) = CAST(%s AS BINARY) AND site_mark <> \'\' AND ' . Job::MANAGING_SQL . ' = %s AND ',
+			$job->id,
+			Job::SITE_UNTOUCHED,
+			$now,
+			$job->site_mark,
+			$token
+		);
+		$affected = $wpdb->query( $head . $options . $where . self::holds_raw( $raw ) );
+		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		if ( false === $affected ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+			throw new \RuntimeException( sprintf( 'Job %d could not be claimed: the database refused the statement. Nothing was changed.', $job->id ) );
+		}
+		$row = $this->find( $job->id );
+		if ( 1 !== (int) $affected || null === $row ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+			throw new StaleJob( sprintf( 'Job %d changed meanwhile, or a run holds it; nothing was changed.', $job->id ) );
+		}
+		return $row;
+	}
+
+	/**
+	 * Give a put-back up at its question about the carry back, answered "keep" (SwapStep::CARRY_QUESTION): the job goes
+	 * back to what it was before the put-back's claim, every column the claim wrote over written back from the evidence
+	 * directory (checked against the sums the claim's cursor and its manifest hold), in one statement on the row as it
+	 * stands now: paused at that question with this put-back's cursor (its evidence directory and sum as answered: a
+	 * later put-back's question is not given up from an earlier one's record), the site swapped (nothing was put back),
+	 * no live lock, still managed by this installation. It still holds the site and still needs a way on; it is never
+	 * completed (nothing after its commit was done for real). The lock is the one column not written back: the claim
+	 * found no live lock, and the expired token of a run that stalled is not handed back to it (the token is the fence:
+	 * heartbeat(), save_progress() and release() look at it alone).
+	 *
+	 * @param Job $job The job, paused at a put-back's question.
+	 * @return Job The row as now stored.
+	 * @throws PutBackNotKept When another installation manages the job, what the claim wrote over cannot be read back
+	 *                        whole, or the database refused the statement.
+	 * @throws StaleJob When the row changed meanwhile.
+	 */
+	public function give_up_put_back( Job $job ): Job {
+		global $wpdb;
+		if ( ! $this->manages( $job ) ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+			throw new PutBackNotKept( sprintf( 'Job %d is managed by another installation: its put-back is not given up from here; nothing is answered.', $job->id ) );
+		}
+		$base = $this->files_base( $job );
+		try {
+			if ( '' === $base ) {
+				throw new \RuntimeException( 'The job\'s storage directory is not this one.' );
+			}
+			$kept = PutBackEvidence::read( $base, $job->id, (string) ( $job->cursor['evidence'] ?? '' ), (string) ( $job->cursor['evidence_sum'] ?? '' ) );
+			$now  = $this->put_back_raw( $job->id );
+		} catch ( \RuntimeException $e ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+			throw new PutBackNotKept( sprintf( 'Job %1$d: what the put-back wrote over cannot be read back (%2$s), so the job cannot be put back as it was; nothing is answered.', $job->id, $e->getMessage() ) );
+		}
+		if ( null === $now ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+			throw new StaleJob( sprintf( 'Job %d is gone.', $job->id ) );
+		}
+		$cursor = null === $now['cursor_json'] ? null : json_decode( (string) $now['cursor_json'], true );
+		if ( ! is_array( $cursor ) || ( $cursor['evidence'] ?? null ) !== ( $job->cursor['evidence'] ?? '' ) || ( $cursor['evidence_sum'] ?? null ) !== ( $job->cursor['evidence_sum'] ?? '' ) ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+			throw new StaleJob( sprintf( 'Job %d changed while it was being answered.', $job->id ) );
+		}
+		$set = array();
+		foreach ( PutBackEvidence::FILES as $column ) {
+			$set[] = null === $kept[ $column ] ? "{$column} = NULL" : $wpdb->prepare( "{$column} = UNHEX(%s)", bin2hex( (string) $kept[ $column ] ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- constant column names.
+		}
+		foreach ( PutBackEvidence::COLUMNS as $column ) {
+			if ( in_array( $column, array( 'lock_token', 'locked_until' ), true ) ) {
+				continue; // Not handed back to a run that stalled (see above).
+			}
+			if ( null === $kept[ $column ] ) {
+				$set[] = "{$column} = NULL";
+				continue;
+			}
+			$set[] = in_array( $column, PutBackEvidence::INTEGERS, true ) ? $wpdb->prepare( "{$column} = %d", (int) $kept[ $column ] ) : $wpdb->prepare( "{$column} = %s", (string) $kept[ $column ] ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- constant column names.
+		}
+		$set[] = "lock_token = ''";
+		$set[] = 'locked_until = 0';
+		$stamp = $this->now();
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix; each part prepared once (a value may hold "%").
+		$tail     = $wpdb->prepare( ', updated_at = %d WHERE id = %d AND status = %s AND site_state = %d AND (lock_token = \'\' OR locked_until < %d) AND ' . Job::MANAGING_SQL . ' = %s AND ', $stamp, $job->id, Job::PAUSED, Job::SITE_SWAPPED, $stamp, $job->managing_token() );
+		$affected = $wpdb->query( 'UPDATE ' . self::table() . ' SET ' . implode( ', ', $set ) . $tail . self::holds_raw( $now ) );
+		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		if ( false === $affected ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+			throw new PutBackNotKept( sprintf( 'Job %d: the job could not be written (the database refused the statement); nothing is answered.', $job->id ) );
+		}
+		$row = $this->find( $job->id );
+		if ( 1 !== (int) $affected || null === $row ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+			throw new StaleJob( sprintf( 'Job %d changed while it was being answered.', $job->id ) );
 		}
 		return $row;
 	}
@@ -1891,6 +2121,7 @@ final class JobRepository {
 	 * @throws InvalidTransition When the job is not waiting for an answer.
 	 * @throws \InvalidArgumentException When the answers are not well-formed or carry a secret.
 	 * @throws StaleJob When the job changed meanwhile.
+	 * @throws PutBackNotKept When a put-back's question answered "keep" cannot put the job back as it was.
 	 */
 	public function answer( Job $job, array $answers, $message = null ): Job {
 		global $wpdb;
@@ -1903,7 +2134,11 @@ final class JobRepository {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
 			throw new InvalidTransition( sprintf( 'Job %d is not waiting for an answer.', $job->id ) );
 		}
-		$answers            = self::validate_answers( $answers, $job->questions );
+		$answers = self::validate_answers( $answers, $job->questions );
+		if ( 'carry_ask' === ( $job->cursor['phase'] ?? '' ) && SwapStep::putting_back( $job->cursor ) && RestoreJob::KEEP === ( $answers[ SwapStep::CARRY_QUESTION ] ?? null ) ) {
+			// A put-back given up: the job goes back to what it was before the put-back, never on to its completion.
+			return $this->give_up_put_back( $job );
+		}
 		$options            = $job->options;
 		$previous           = isset( $options['answers'] ) && is_array( $options['answers'] ) ? $options['answers'] : array();
 		$options['answers'] = array_replace( $previous, $answers );
@@ -2000,6 +2235,10 @@ final class JobRepository {
 		if ( array() !== $job->unreadable_columns ) {
 			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
 			throw new InvalidTransition( sprintf( 'Job %1$d: %2$s; it is not run again until its row is repaired.', $job->id, self::unreadable_text( $job->unreadable_columns ) ) );
+		}
+		if ( isset( $job->options[ self::OPTIONS_RESET ] ) ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+			throw new InvalidTransition( sprintf( 'Job %d: its options could not be read and were reset by wp wpcheckpoint job put-back (they are kept as they were next to its log); it is not run again without them.', $job->id ) );
 		}
 		if ( Job::REASON_ABANDONED === $job->failure_reason ) {
 			// From here, never again. From another installation, only once this one took it over (take_over() lifts
@@ -2227,6 +2466,9 @@ final class JobRepository {
 		// (the window an undo has) it is kept, as the question allows; its last steps wait for WP-CLI (SwapStep).
 		foreach ( $this->list_jobs( array( Job::PAUSED ), 500 ) as $job ) {
 			// Questions that cannot be read are read as none (awaiting_answer() false); the job still waits for an answer.
+			if ( SwapStep::putting_back( $job->cursor ) ) {
+				continue; // A put-back's question has no deadline: nothing gives it up or answers it but the administrator.
+			}
 			$waiting = $job->awaiting_answer() || in_array( 'questions_json', $job->unreadable_columns, true );
 			// The question about an undo's carry back is due at the end of the time the restore can be undone in (it
 			// says so); any other after the retention period from when it was asked.
@@ -2443,6 +2685,19 @@ final class JobRepository {
 				continue; // What the swap's rollback moved aside is someone's; it stays (logged when it was moved).
 			}
 			$result  = $this->delete_tree( $entry['parent'], $entry['path'], $budget );
+			$budget -= $result['deleted'] + count( $result['failed'] );
+			$this->report_reclaim( $entry['kind'] . ' of job ' . $entry['id'], $result );
+		}
+		// What a put-back wrote over, of a job whose row is positively gone (the jobs table read, no row of that id).
+		foreach ( Residue::scan_evidence( $base ) as $entry ) {
+			if ( $budget <= 0 ) {
+				return;
+			}
+			$rows = self::read_rows( $GLOBALS['wpdb']->prepare( 'SELECT id FROM ' . self::table() . ' WHERE id = %d', $entry['id'] ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- plugin table name from the prefix.
+			if ( null === $rows || array() !== $rows ) {
+				continue; // The row is there, or whether it is cannot be told: kept.
+			}
+			$result  = $this->delete_tree( $base . DIRECTORY_SEPARATOR . 'logs', $entry['path'], $budget );
 			$budget -= $result['deleted'] + count( $result['failed'] );
 			$this->report_reclaim( $entry['kind'] . ' of job ' . $entry['id'], $result );
 		}
@@ -2996,6 +3251,10 @@ final class JobRepository {
 			// retries and fails the job again without touching it, and the old kind must not speak for the new failure.
 			$data['failure_kind'] = Job::stamp_failure( $failure, $now );
 		}
+		if ( Job::CANCELLED === $to && '' !== $error ) {
+			// A cancel that says how it ended (a put-back's, Cancelled::said()): its progress message, not an error.
+			$data['progress_message'] = self::fit_message( $this->redactor->redact( $error ) );
+		}
 		if ( Job::UNDONE === $to ) {
 			// Not a failure: what happened is said as the job's progress message, and no error or kind of failure stays.
 			$data['progress_message'] = self::fit_message( $this->redactor->redact( $error ) );
@@ -3198,6 +3457,12 @@ final class JobRepository {
 			$file = $base . DIRECTORY_SEPARATOR . str_replace( '/', DIRECTORY_SEPARATOR, $job->log_path );
 			if ( is_file( $file ) ) {
 				$this->delete_tree( $base . DIRECTORY_SEPARATOR . 'logs', $file );
+			}
+		}
+		// What its put-backs wrote over (PutBackEvidence) goes with the row.
+		foreach ( Residue::scan_evidence( $base ) as $entry ) {
+			if ( $entry['id'] === $job->id ) {
+				$this->delete_tree( $base . DIRECTORY_SEPARATOR . 'logs', $entry['path'] );
 			}
 		}
 	}

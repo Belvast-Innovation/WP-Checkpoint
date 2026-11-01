@@ -18,6 +18,7 @@ use WPCheckpoint\Jobs\JobConflict;
 use WPCheckpoint\Jobs\JobPresenter;
 use WPCheckpoint\Jobs\JobsUnavailable;
 use WPCheckpoint\Jobs\QuestionText;
+use WPCheckpoint\Jobs\PutBackNotKept;
 use WPCheckpoint\Jobs\StaleJob;
 use WPCheckpoint\Jobs\TickResult;
 use WPCheckpoint\Support\Directories;
@@ -351,6 +352,10 @@ final class JobsController extends Controller {
 			return $this->conflict( __( 'This job is not waiting for an answer.', 'wp-checkpoint' ) );
 		} catch ( StaleJob $e ) {
 			return $this->conflict( __( 'The job changed meanwhile; reload and try again.', 'wp-checkpoint' ) );
+		} catch ( PutBackNotKept $e ) {
+			return $this->conflict( __( 'The put-back could not be given up: the job could not be put back as it was before it (wp wpcheckpoint job status and its log say why). Nothing was changed; the question stands.', 'wp-checkpoint' ) );
+		} catch ( \RuntimeException $e ) {
+			return new WP_Error( 'wpcheckpoint_jobs_unavailable', __( 'The answer could not be written. Nothing was changed; try again.', 'wp-checkpoint' ), array( 'status' => 503 ) );
 		}
 		if ( null === $job ) {
 			return $this->not_found();

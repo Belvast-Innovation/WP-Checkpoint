@@ -69,6 +69,11 @@ use WPCheckpoint\Support\Paths;
  *   (TempTables::stray()): someone else's, created under a name the old
  *   site's table had to go back to. Never an orphan: it is reported, and
  *   left for the administrator.
+ * - put_back_evidence: logs/job-<id>-putback-<time>-<hex>/ of a put-back
+ *   (PutBackEvidence: what its claim wrote over in the job's row). It goes
+ *   with the job's row (JobRepository::delete_files_of()); an orphan when
+ *   the row is positively gone (the jobs table read, no row of that id)
+ *   (scan_evidence()).
  *
  * Only entries whose name carries one of this installation's storage
  * tokens are ever listed (scan_site(), Directories::own_tokens()); another
@@ -92,7 +97,9 @@ final class Residue {
 	const MAINTENANCE_DATA = 'maintenance_data';
 	const STRAY_TABLE      = 'stray_table';
 
-	const KINDS = array( self::WORK_DIR, self::TEMP_TABLE, self::VERIFY_DIR, self::STRAY, self::STAGE_DIR, self::PROBE, self::MAINTENANCE_TMP, self::MAINTENANCE_DATA, self::STRAY_TABLE );
+	const PUT_BACK_EVIDENCE = 'put_back_evidence';
+
+	const KINDS = array( self::WORK_DIR, self::TEMP_TABLE, self::VERIFY_DIR, self::STRAY, self::STAGE_DIR, self::PROBE, self::MAINTENANCE_TMP, self::MAINTENANCE_DATA, self::STRAY_TABLE, self::PUT_BACK_EVIDENCE );
 
 	/**
 	 * The directory in a staging root where the swap's rollback moves what is in its way.
@@ -376,6 +383,29 @@ final class Residue {
 			default:
 				return false;
 		}
+	}
+
+	/**
+	 * The put-backs' evidence directories under a storage directory's logs/ (PUT_BACK_EVIDENCE), each with its job id.
+	 *
+	 * @param string $base Storage directory.
+	 * @return array<int, array{kind: string, path: string, id: int, mtime: int}>
+	 */
+	public static function scan_evidence( string $base ): array {
+		$logs = rtrim( $base, '/\\' ) . DIRECTORY_SEPARATOR . 'logs';
+		if ( '' === $base || ! is_dir( $logs ) ) {
+			return array();
+		}
+		$entries = @scandir( $logs ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- an unreadable logs/ is simply nothing to reap.
+		$out     = array();
+		foreach ( is_array( $entries ) ? $entries : array() as $name ) {
+			$id   = PutBackEvidence::job_id_of( $name );
+			$path = $logs . DIRECTORY_SEPARATOR . $name;
+			if ( $id > 0 && is_dir( $path ) && ! is_link( $path ) ) {
+				$out[] = self::entry( self::PUT_BACK_EVIDENCE, $path, $id, (int) @filemtime( $path ) ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- its age is not used.
+			}
+		}
+		return $out;
 	}
 
 	/**

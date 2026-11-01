@@ -18,4 +18,24 @@ defined( 'ABSPATH' ) || exit;
  * changed, and the run then ends as one that lost its lock.
  */
 class Cancelled extends \RuntimeException {
+
+	/**
+	 * Whether the message is what the job says at its end (its progress message), not only this tick's: a put-back's
+	 * end, with what the check of the site as put back found (SwapStep::ended()).
+	 *
+	 * @var bool
+	 */
+	public $said = false;
+
+	/**
+	 * A cancel whose message the job keeps.
+	 *
+	 * @param string $message What the job says at its end.
+	 * @return self
+	 */
+	public static function said( string $message ): self {
+		$e       = new self( $message );
+		$e->said = true;
+		return $e;
+	}
 }
