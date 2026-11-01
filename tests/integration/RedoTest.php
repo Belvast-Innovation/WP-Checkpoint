@@ -265,8 +265,8 @@ final class RedoTest extends SwapTestCase {
 		$this->assertSame( Job::SITE_SWAPPED, $done->site_state );
 		$this->assertGreaterThan( 0, $done->committed_at, 'a new commit time: the undo window counts from it' );
 		$this->assertContains( 'redo_carried', $this->seams, 'the plugin\'s state was carried into the restored copy' );
-		$this->assertLessThan( array_search( 'dir_in', $this->seams, true ), array_search( 'redo_carried', $this->seams, true ), 'before anything was renamed' );
-		$this->assertNotContains( 'carry', array_slice( $this->seams, (int) array_search( 'redo_carried', $this->seams, true ) ), 'and only then' );
+		$this->assertLessThan( array_search( 'dir_aside', $this->seams, true ), array_search( 'redo_carried', $this->seams, true ), 'before anything was renamed' );
+		$this->assertSame( 1, count( array_keys( $this->seams, 'carry_locked', true ) ), 'and only then' );
 		$this->assertSame( $restored, $this->site(), 'the restored site, as it was before the undo' );
 		$this->assertSame( 'written since the undo', $this->state(), 'with this plugin\'s state of now' );
 		$this->assertSame( array(), Plugin::instance()->jobs()->holding_site() );
@@ -716,7 +716,7 @@ final class RedoTest extends SwapTestCase {
 			$job,
 			array(
 				'rename' => static function ( string $from, string $to ) use ( &$renames ): bool {
-					return ++$renames < 3 ? rename( $from, $to ) : false; // phpcs:ignore WordPress.WP.AlternativeFunctions.rename_rename -- a sandbox.
+					return 3 === ++$renames ? false : rename( $from, $to ); // phpcs:ignore WordPress.WP.AlternativeFunctions.rename_rename -- a sandbox; the third fails, once.
 				},
 			)
 		);
@@ -728,6 +728,7 @@ final class RedoTest extends SwapTestCase {
 		$this->assertStringContainsString( 'The redo stopped and was rolled back', $done->progress_message );
 		$this->assertSame( $before, $this->site(), 'put back as the undo left it' );
 		$this->assertSame( array(), $this->maintenance_files() );
+		$this->assertGreaterThan( 3, $renames, 'the control: the third rename failed, and the rollback renamed back' );
 	}
 
 	public function test_a_redo_given_up_by_its_check_before_it_changed_the_site_exits_2_and_can_be_made_again(): void {
