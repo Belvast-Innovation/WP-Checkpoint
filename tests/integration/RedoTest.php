@@ -355,7 +355,7 @@ final class RedoTest extends SwapTestCase {
 					'step'       => SwapStep::ID,
 					'site_state' => Job::SITE_CHANGING,
 				),
-				'holds the site',
+				'holds the site: nothing is swapped back in until it has ended',
 			),
 			'restore'   => array(
 				array(
@@ -447,12 +447,23 @@ final class RedoTest extends SwapTestCase {
 		$dir = $plan['dirs'][0];
 		$this->assertNotNull( $table );
 		$cases = array(
+			// The restored table under its moved-aside name: the plan's state after a swap, not before one.
 			'table' => array(
 				function () use ( $wpdb, $table ): void {
 					$wpdb->query( "RENAME TABLE `{$table['stage']}` TO `{$table['old']}`" );
 				},
 				function () use ( $wpdb, $table ): void {
 					$wpdb->query( "RENAME TABLE `{$table['old']}` TO `{$table['stage']}`" );
+				},
+				'is not where the undo left it',
+			),
+			// The restored table gone from all of the plan's names: neither state.
+			'table gone' => array(
+				function () use ( $wpdb, $table ): void {
+					$wpdb->query( "RENAME TABLE `{$table['stage']}` TO `{$table['stage']}x`" );
+				},
+				function () use ( $wpdb, $table ): void {
+					$wpdb->query( "RENAME TABLE `{$table['stage']}x` TO `{$table['stage']}`" );
 				},
 				'is not where the undo left it',
 			),
