@@ -2,6 +2,7 @@
 
 namespace WPCheckpoint\Tests\Integration;
 
+use WPCheckpoint\Cli\RunLoop;
 use WPCheckpoint\Jobs\InvalidTransition;
 use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\JobRepository;
@@ -685,6 +686,38 @@ final class UndoTest extends SwapTestCase {
 		$this->assertSame( Job::UNDONE, $done->status );
 		$this->assertSame( SwapStep::CHECK_WAITS, $waits, 'checked again after each wait' );
 		$this->assertStringContainsString( 'the site could not be checked: the home page did not answer', $done->progress_message );
+	}
+
+	public function test_the_exit_code_of_an_undo_says_whether_the_site_as_put_back_passed_its_check(): void {
+		$codes = array();
+		foreach ( self::checks_after() as $verdict => $verify ) {
+			$this->tear_down_swap();
+			$this->set_up_swap();
+			$job = $this->completed();
+			$this->retype( $job, array( 'verify' => $verify ) );
+			$told = $this->actions()->undo( $job->id, '' );
+			$this->assertTrue( $this->actions()->undo( $job->id, $told['code'] )['ok'], $verdict );
+			$lines = array();
+			$code  = $this->loop_code( Plugin::instance()->jobs()->find( $job->id ), $lines );
+			$done  = Plugin::instance()->jobs()->find( $job->id );
+			$this->assertSame( Job::UNDONE, $done->status, $verdict . ': undone all the same' );
+			$said  = array(
+				'passed'  => 'The restore was undone: the site is as it was before it.',
+				'failed'  => 'the site\'s check then failed: the home page did not answer',
+				'unknown' => 'the site could not be checked: the home page did not answer',
+			);
+			$this->assertStringContainsString( $said[ $verdict ], $done->progress_message, $verdict );
+			$codes[ $verdict ] = $code;
+			$this->assertNotEmpty( $lines, $verdict . ': the loop printed its ticks' );
+		}
+		$this->assertSame(
+			array(
+				'passed'  => RunLoop::EXIT_COMPLETED,
+				'failed'  => RunLoop::EXIT_UNCHECKED,
+				'unknown' => RunLoop::EXIT_UNCHECKED,
+			),
+			$codes
+		);
 	}
 
 	/**

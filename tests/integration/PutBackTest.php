@@ -4,6 +4,7 @@ namespace WPCheckpoint\Tests\Integration;
 
 use WPCheckpoint\Admin\LogDownload;
 use WPCheckpoint\Cli\JobCommand;
+use WPCheckpoint\Cli\RunLoop;
 use WPCheckpoint\Jobs\InvalidTransition;
 use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\JobRepository;
@@ -617,6 +618,47 @@ final class PutBackTest extends SwapTestCase {
 			$this->assertSame( $before, $this->site(), $case );
 			$this->assertNothingLeft( $case );
 		}
+	}
+
+	public function test_the_exit_code_of_a_put_back_says_whether_the_site_as_put_back_passed_its_check(): void {
+		$codes = array();
+		foreach ( array( 'half', 'committed' ) as $case ) {
+			foreach ( self::checks_after() as $verdict => $verify ) {
+				$this->tear_down_swap();
+				$this->set_up_swap();
+				list( $job, $before ) = 'half' === $case ? $this->half() : $this->committed();
+				$this->retype( $job, array( 'verify' => $verify ) );
+				$this->claim( $job );
+				$lines = array();
+				$code  = $this->loop_code( Plugin::instance()->jobs()->find( $job->id ), $lines );
+				$done  = Plugin::instance()->jobs()->find( $job->id );
+				$this->assertSame( 'half' === $case ? Job::CANCELLED : Job::UNDONE, $done->status, $case . ', ' . $verdict . ': ended as it would' );
+				$said = array(
+					'passed'  => 'half' === $case ? 'The site was put back as it was before the restore, and the restore cancelled.' : 'The site was put back as it was before the restore.',
+					'failed'  => 'check then failed: the home page did not answer',
+					'unknown' => 'could not be checked: the home page did not answer',
+				);
+				$this->assertStringContainsString( $said[ $verdict ], $done->progress_message, $case . ', ' . $verdict );
+				$this->assertNotEmpty( $lines, $case . ', ' . $verdict . ': the loop printed its ticks' );
+				$this->assertSame( $before, $this->site(), $case . ', ' . $verdict );
+				$codes[ $case ][ $verdict ] = $code;
+			}
+		}
+		$this->assertSame(
+			array(
+				'half'      => array(
+					'passed'  => RunLoop::EXIT_CANCELLED,
+					'failed'  => RunLoop::EXIT_UNCHECKED,
+					'unknown' => RunLoop::EXIT_UNCHECKED,
+				),
+				'committed' => array(
+					'passed'  => RunLoop::EXIT_COMPLETED,
+					'failed'  => RunLoop::EXIT_UNCHECKED,
+					'unknown' => RunLoop::EXIT_UNCHECKED,
+				),
+			),
+			$codes
+		);
 	}
 
 	public function test_a_put_back_killed_at_any_seam_is_finished_by_the_next_run(): void {

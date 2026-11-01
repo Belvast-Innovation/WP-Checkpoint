@@ -3,9 +3,12 @@
 namespace WPCheckpoint\Tests\Fixtures\Restore;
 
 use WPCheckpoint\Files\ScanRoots;
+use WPCheckpoint\Cli\RunLoop;
 use WPCheckpoint\Jobs\Budget;
 use WPCheckpoint\Jobs\FileStagingStep;
 use WPCheckpoint\Jobs\Job;
+use WPCheckpoint\Jobs\JobActions;
+use WPCheckpoint\Jobs\Loopback;
 use WPCheckpoint\Jobs\RestoreFilesPreflightStep;
 use WPCheckpoint\Jobs\RestoreJob;
 use WPCheckpoint\Jobs\Runner;
@@ -419,6 +422,67 @@ abstract class SwapTestCase extends RestoreTestCase {
 		return $this->autocommit(
 			static function () use ( $runner, $job ): TickResult {
 				return $runner->tick( $job->id, microtime( true ) );
+			}
+		);
+	}
+
+	/**
+	 * The swap's "verify" part for each result of the check of the site as put back by an undo or a put-back: it
+	 * passed, it failed, it could not tell (every try).
+	 *
+	 * @return array<string, callable>
+	 */
+	protected static function checks_after(): array {
+		return array(
+			'passed'  => static function (): bool {
+				return true;
+			},
+			'failed'  => static function (): string {
+				return 'home';
+			},
+			'unknown' => static function (): array {
+				return array(
+					'verdict' => 'unknown',
+					'check'   => 'home',
+					'why'     => 'none',
+					'status'  => 0,
+				);
+			},
+		);
+	}
+
+	/**
+	 * The job driven to its end as "wp wpcheckpoint job undo", "job put-back" and "job run" drive it (RunLoop, with
+	 * --wait; its waits not slept), in this process.
+	 *
+	 * @param Job      $job   Job.
+	 * @param string[] $lines What the loop printed.
+	 * @return int The exit code.
+	 */
+	protected function loop_code( Job $job, array &$lines = array() ): int {
+		$runner  = new Runner(
+			Plugin::instance()->jobs(),
+			Plugin::instance()->job_types(),
+			new Redactor( Redactor::installation_secrets() ),
+			array( 'cli' => true )
+		);
+		$actions = new JobActions( Plugin::instance()->jobs(), $runner, new Loopback( true, static function (): void {} ) );
+		$waits   = 0;
+		$loop    = new RunLoop(
+			$actions,
+			Plugin::instance()->job_presenter(),
+			function () use ( &$waits ): void {
+				if ( ++$waits > 50 ) {
+					$this->fail( 'the job did not end: still waiting after 50 waits' );
+				}
+			},
+			static function ( string $line ) use ( &$lines ): void {
+				$lines[] = $line;
+			}
+		);
+		return $this->autocommit(
+			static function () use ( $loop, $job ): int {
+				return $loop->run( $job->id, true );
 			}
 		);
 	}

@@ -11,6 +11,7 @@ use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\JobActions;
 use WPCheckpoint\Jobs\JobPresenter;
 use WPCheckpoint\Jobs\Loopback;
+use WPCheckpoint\Jobs\SwapStep;
 use WPCheckpoint\Jobs\TickResult;
 
 defined( 'ABSPATH' ) || exit;
@@ -28,6 +29,7 @@ final class RunLoop {
 	const EXIT_WAITING   = 4; // Left waiting / blocked without --wait, paused, or missing.
 	const EXIT_BUSY      = 5; // Another driver kept the lock.
 	const EXIT_PAUSED    = 6; // The job asks a question; answer it (wp wpcheckpoint job answer) and run again.
+	const EXIT_UNCHECKED = 8; // Put back (undone, or cancelled by a put-back), but the site then failed its check or could not be checked.
 
 	const MAX_BUSY = 60;
 
@@ -158,14 +160,17 @@ final class RunLoop {
 	}
 
 	/**
-	 * Exit code for a job that was already finished when the loop started.
+	 * Exit code for a job that ended, in this loop or before it started.
 	 *
-	 * @param Job|null $job Job.
+	 * @param Job|null $job Job, as it ended (what the site's check after a put-back found is in its cursor).
 	 * @return int
 	 */
 	private function exit_code_for( $job ): int {
 		if ( ! $job instanceof Job ) {
 			return self::EXIT_WAITING;
+		}
+		if ( SwapStep::back_unchecked( $job ) ) {
+			return self::EXIT_UNCHECKED;
 		}
 		switch ( $job->status ) {
 			case Job::COMPLETED:

@@ -109,8 +109,15 @@ final class LeftoversTest extends TestCase {
 		$class       = new TestSuite( 'SomeTest' );
 		$earlier     = array( 'storage:/srv/site/wp-content/wp-checkpoint-0123456789ab', 'storage:/srv/site/wp-content/wp-checkpoint-stage-0123456789ab-1-x' );
 		$this->there = $earlier;
-		$listener->startTestSuite( $root );
-		$this->assertSame( $earlier, $this->there, 'the control: an earlier run\'s storage directories are left alone at the start' );
+		// Still there after the start: listed only (or they would not go).
+		$before = getenv( Leftovers::REMOVE_STORAGE );
+		putenv( Leftovers::REMOVE_STORAGE . '=0' );
+		try {
+			$listener->startTestSuite( $root );
+		} finally {
+			putenv( false === $before ? Leftovers::REMOVE_STORAGE : Leftovers::REMOVE_STORAGE . '=' . $before );
+		}
+		$this->assertSame( $earlier, $this->there, 'the control: an earlier run\'s storage directories listed only are left alone at the start' );
 		$listener->startTestSuite( $class );
 
 		$own = self::probe( $result, 'test_own' );
@@ -143,6 +150,105 @@ final class LeftoversTest extends TestCase {
 		$this->assertStringContainsString( 'stage-0123456789ab', $result->failures()[1]->exceptionMessage() );
 		$listener->endTestSuite( $root );
 		$this->assertSame( 2, $result->failureCount() );
+	}
+
+	/**
+	 * The start of a run with this much there, the environment as given (a variable given as null is unset) and the
+	 * database said to be wp-env's tests database or not; $stuck is not removed by the remover.
+	 *
+	 * @param string[]                  $there   What is there.
+	 * @param array<string, string|null> $env     REMOVE_MAINTENANCE and REMOVE_STORAGE.
+	 * @param string                    $refusal Why the database is not the tests database ('' when it is).
+	 * @param string[]                  $stuck   What the remover fails to remove.
+	 * @return void
+	 */
+	private function start( array $there, array $env, string $refusal = '', array $stuck = array() ): void {
+		$this->there   = $there;
+		$this->removed = array();
+		$this->notices = array();
+		$listener      = new Leftovers(
+			function (): array {
+				return $this->there;
+			},
+			function ( array $items ) use ( $stuck ): void {
+				$this->removed = array_merge( $this->removed, $items );
+				$this->there   = array_values( array_diff( $this->there, array_diff( $items, $stuck ) ) );
+			},
+			function ( string $text ): void {
+				$this->notices[] = $text;
+			},
+			static function (): array {
+				return array();
+			},
+			static function () use ( $refusal ): string {
+				return $refusal;
+			}
+		);
+		$before = array();
+		foreach ( array( Leftovers::REMOVE_MAINTENANCE, Leftovers::REMOVE_STORAGE ) as $name ) {
+			$before[ $name ] = getenv( $name );
+			$value           = $env[ $name ] ?? null;
+			putenv( null === $value ? $name : $name . '=' . $value );
+		}
+		try {
+			$listener->startTestSuite( new TestSuite( 'root' ) );
+		} finally {
+			foreach ( $before as $name => $value ) {
+				putenv( false === $value ? $name : $name . '=' . $value );
+			}
+		}
+	}
+
+	public function test_an_earlier_runs_maintenance_files_and_storage_directories_are_removed_on_the_tests_database_unless_0_lists_them(): void {
+		$file  = 'maintenance:/srv/site/.maintenance';
+		$dirs  = array( 'storage:/srv/site/wp-content/wp-checkpoint-0123456789ab', 'storage:/srv/site/wp-content/wp-checkpoint-ba9876543210' );
+		$there = array_merge( array( $file ), $dirs, array( 'temp:/tmp/wpc-plugin-00000000' ) );
+		$kinds = array(
+			Leftovers::REMOVE_MAINTENANCE => array( array( $file ), 'maintenance files' ),
+			Leftovers::REMOVE_STORAGE     => array( $dirs, 'storage directories' ),
+		);
+
+		// The default, or any value but 0: named first, then removed (the control that the removal is seen).
+		foreach ( array( null, '', '1', 'yes' ) as $value ) {
+			$label = var_export( $value, true ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_var_export -- test label.
+			$this->start(
+				$there,
+				array(
+					Leftovers::REMOVE_MAINTENANCE => $value,
+					Leftovers::REMOVE_STORAGE     => $value,
+				)
+			);
+			$this->assertSame( array_merge( array( $file ), $dirs ), $this->removed, $label . ': removed' );
+			$this->assertSame( array( 'temp:/tmp/wpc-plugin-00000000' ), $this->there, $label . ': the control: another run\'s temporary entry stays' );
+			$this->assertCount( 1, $this->notices, $label . ': nothing still there to say' );
+			$this->assertStringContainsString( 'maintenance files removed; storage directories removed', $this->notices[0], $label );
+			$this->assertStringContainsString( "{$file}\n  {$dirs[0]}\n  {$dirs[1]}", $this->notices[0], $label . ': each named' );
+		}
+
+		// 0 lists that kind only; the other is removed all the same.
+		foreach ( $kinds as $name => $kind ) {
+			$this->start( $there, array( $name => '0' ) );
+			$other = $kinds[ Leftovers::REMOVE_MAINTENANCE === $name ? Leftovers::REMOVE_STORAGE : Leftovers::REMOVE_MAINTENANCE ];
+			$this->assertSame( $other[0], $this->removed, $name . '=0: only the other kind removed' );
+			$this->assertSame( array_merge( $kind[0], array( 'temp:/tmp/wpc-plugin-00000000' ) ), $this->there, $name . '=0' );
+			$this->assertStringContainsString( $kind[1] . ' listed only (' . $name . '=0)', $this->notices[0], $name );
+			$this->assertStringContainsString( $other[1] . ' removed', $this->notices[0], $name );
+			$this->assertStringContainsString( $kind[0][0], $this->notices[0], $name . ': named' );
+		}
+
+		// On another database: both left, and why.
+		$this->start( $there, array(), 'the connection is to the database "wordpress", not to wp-env\'s tests database "tests-wordpress"' );
+		$this->assertSame( array(), $this->removed, 'not the tests database: nothing removed' );
+		$this->assertSame( $there, $this->there );
+		$this->assertStringContainsString( 'maintenance files left: the connection is to the database "wordpress"', $this->notices[0] );
+		$this->assertStringContainsString( 'storage directories left: the connection is to the database "wordpress"', $this->notices[0] );
+
+		// Something still there after its removal (another's maintenance file, a directory that would not go): said.
+		$this->start( $there, array(), '', array( $file, $dirs[1] ) );
+		$this->assertSame( array_merge( array( $file ), $dirs ), $this->removed );
+		$this->assertCount( 2, $this->notices );
+		$this->assertStringContainsString( "Still there after their removal (storage directories are kept through the run):\n  {$file}\n  {$dirs[1]}", $this->notices[1] );
+		$this->assertStringNotContainsString( 'wp-checkpoint-0123456789ab', $this->notices[1], 'only what is still there' );
 	}
 
 	public function test_an_earlier_runs_maintenance_file_goes_at_the_start_like_its_tables(): void {
