@@ -1289,7 +1289,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * not pass its check, or could not be checked: what its cursor at the end holds (check_undone(), end_back()). A
 	 * cursor that should hold the verdict and does not counts as not checked.
 	 *
-	 * @param Job $job Job, as read from its row.
+	 * @param Job $job Job, as it ended.
 	 * @return bool
 	 */
 	public static function back_unchecked( Job $job ): bool {

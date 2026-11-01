@@ -150,9 +150,7 @@ final class RunLoop {
 					if ( TickResult::LOST === $result->status ) {
 						return null !== $result->job && Job::CANCELLED === $result->job->status ? self::EXIT_CANCELLED : self::EXIT_LOST;
 					}
-					// Read again: the row holds what the site's check after a put-back found (in the cursor at its end).
-					$now = null === $result->job ? null : $this->actions->find( $result->job->id );
-					return $this->exit_code_for( $now instanceof Job ? $now : $result->job );
+					return $this->exit_code_for( $result->job );
 				case TickResult::MISSING:
 				default:
 					$this->say( 'No such job.' );
@@ -164,8 +162,7 @@ final class RunLoop {
 	/**
 	 * Exit code for a job that ended, in this loop or before it started.
 	 *
-	 * @param Job|null $job Job, as read from its row once it ended (what the site's check after a put-back found is in
-	 *                      its cursor).
+	 * @param Job|null $job Job, as it ended (what the site's check after a put-back found is in its cursor).
 	 * @return int
 	 */
 	private function exit_code_for( $job ): int {
