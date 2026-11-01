@@ -805,7 +805,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 *
 	 * A redo (redo_at(): its cursor holds the time of the undo it sets out from) goes the same way with three
 	 * differences: the write that records "enter" requires no cancel requested (JobRepository::save_progress(): a cancel
-	 * gives it up there, RedoCancelled); the backup's tables are not judged again (the copy was the live site); and this
+	 * that landed after the run's start, which redo() checks, gives it up there, RedoCancelled); the backup's tables are not judged again (the copy was the live site); and this
 	 * plugin's state is carried before anything is renamed (carry_in(): a carry that fails leaves nothing to put back).
 	 * What stops a redo before "enter" gives it up (give_up_redo()), the site as the undo left it.
 	 *

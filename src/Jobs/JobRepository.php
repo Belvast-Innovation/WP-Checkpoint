@@ -935,8 +935,9 @@ final class JobRepository {
 	/**
 	 * Give up a redo that has not changed the site yet, at a cancel (JobActions::cancel()): with no run holding the job,
 	 * at once (settle_undone(): undone again, as of its undo); with a run holding it, a cancel request on the same row
-	 * while it is still at "redo" and queued or running, which that run sees in the write that would start changing the
-	 * site (save_progress(): it requires no request, RedoCancelled). Returns "given_up" or "requested".
+	 * while it is still at "redo" and queued or running, which every run sees when it starts at "redo" (SwapStep::redo())
+	 * and, for one that lands later, in the write that would start changing the site (save_progress(): it requires no
+	 * request, RedoCancelled). Returns "given_up" or "requested".
 	 *
 	 * @param Job $job Job, as read.
 	 * @return string
