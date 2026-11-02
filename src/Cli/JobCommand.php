@@ -285,11 +285,13 @@ final class JobCommand {
 	 * ## EXIT CODES
 	 *
 	 * 0 when the restored copy is back in place and passed its check; 2 when the redo was given up before it changed
-	 * the site (a check did not hold any more, it was cancelled, or its question was answered to give it up); 6 when
+	 * the site (a check did not hold any more, also once more with the maintenance file up, it was cancelled, or its
+	 * question was answered to give it up); 6 when
 	 * it asks how to go on (WP Checkpoint's own settings could not be carried into the restored copy: answer with
 	 * wp wpcheckpoint job answer, then run the job); 9 when the restored copy was swapped in but the site then failed
 	 * its check (or could not be checked and the restore's policy is to undo), and the site was put back as the undo
-	 * left it; 1 when it was refused or not confirmed, or stopped and was put back as the undo left it.
+	 * left it; 1 when it was refused or not confirmed, or stopped and was put back as the undo left it (WP
+	 * Checkpoint's own settings could not be carried, failing for a moment through every try, for one).
 	 *
 	 * @param string[]             $args       Positional arguments.
 	 * @param array<string, mixed> $assoc_args Options.
@@ -336,10 +338,12 @@ final class JobCommand {
 	 * Put the site back as it was before a restore that is stuck while it holds the site, from the restore's swap plan
 	 * and what is there, in maintenance mode while that is done.
 	 *
-	 * A swap that was half made is rolled back and the restore cancelled. A swap that was made is reversed as an undo:
-	 * everything written on the site since is dropped, and the restore ends undone (the restored site is kept for 7
-	 * days). Neither the job's position nor its options are needed. Without --confirm nothing is changed: it says what
-	 * it would do and gives the confirmation code.
+	 * A swap that was half made is rolled back and the restore cancelled; a redo (job redo) half made is rolled back
+	 * and the restore is undone again as of its undo, its restored copy kept as before; and when the job's position
+	 * cannot be read (it may have been a redo), the restore is cancelled with its restored copy kept for 7 days. A swap
+	 * that was made is reversed as an undo: everything written on the site since is dropped, and the restore ends
+	 * undone (the restored site is kept for 7 days). Neither the job's position nor its options are needed. Without
+	 * --confirm nothing is changed: it says what it would do and gives the confirmation code.
 	 *
 	 * ## OPTIONS
 	 *
@@ -351,8 +355,9 @@ final class JobCommand {
 	 *
 	 * ## EXIT CODES
 	 *
-	 * As "job run" once the put-back started: 0 when a swap that was made was put back (the restore ended undone), 2
-	 * when one half made was (the restore ended cancelled, as a put-back of it does); 8 when either was put back but
+	 * As "job run" once the put-back started: 0 when a swap that was made, or a redo half made, was put back (the
+	 * restore ended undone), 2 when another swap half made was (the restore ended cancelled, as a put-back of it does);
+	 * 8 when any of them was put back but
 	 * the site as put back then failed its check or could not be checked (what was found is said, and in "job
 	 * status"); 1 when it was refused or not confirmed.
 	 *

@@ -444,6 +444,12 @@ final class Runner {
 				// The step undid what it did to the site after a cancel was requested: cancelled as with the lock.
 				$logger->info( 'The job is cancelled as requested', array( 'step' => $step_id ) );
 				$this->transition( $job, $token, Job::CANCELLED, $e->said ? $e->getMessage() : '' );
+				if ( $e->keep_work ) {
+					// A put-back's cancel that keeps the restored copy (SwapStep::keeps_work()): reclaimed with the work of
+					// failed jobs, after JobRepository::WORK_RETENTION_SECONDS (expire_work()).
+					$logger->info( 'The restored copy is kept', array( 'days' => (int) ( JobRepository::WORK_RETENTION_SECONDS / 86400 ) ) );
+					return new TickResult( TickResult::FINISHED, -1, $job, $this->redactor->redact( $e->getMessage() ) );
+				}
 				$this->cleanup( $job );
 				return new TickResult( TickResult::FINISHED, -1, $job, $this->redactor->redact( $e->getMessage() ) );
 			} catch ( Stopped $e ) {

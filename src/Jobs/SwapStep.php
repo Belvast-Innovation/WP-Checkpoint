@@ -119,13 +119,18 @@ defined( 'ABSPATH' ) || exit;
  * it waits (Redo::again()) and gets ready as a swap does (ready()), skipping
  * what only holds for a copy just imported (the counts, the judgement);
  * then "enter" (recorded only with no cancel requested), the maintenance
- * file, this plugin's state carried into the restored copy before anything
- * is renamed (carry_in(): when that fails, the file comes down and it asks,
- * "redo_ask"), the directories and the tables as a swap, and from
- * "committed" on a swap's end; a check that fails swaps it back out. A redo
- * that does not stand ends undone again as of the undo it set out from
- * (Undone::back()): given up before "enter", reversed after its check, or
- * rolled back after it stopped. An undo whose site as put back fails its
+ * file, where the plan's entries are and the tables made since checked once
+ * more with the file up (Redo::still_in_place(): when that does not hold, the
+ * file comes down and the redo is given up, "redo_stopped"), this plugin's
+ * state carried into the restored copy before anything is renamed
+ * (carry_in(): a failure of the moment is tried again in the same run, then
+ * rolled back; any other failure takes the file down and asks, "redo_ask"),
+ * the directories and the tables as a swap, and from "committed" on a swap's
+ * end; a check that fails swaps it back out. A redo that does not stand ends
+ * undone again as of the undo it set out from (Undone::back()): given up
+ * before "enter" (or at "redo_stopped"), reversed after its check, rolled
+ * back after it stopped, or put back (wp wpcheckpoint job put-back) while it
+ * was half made. An undo whose site as put back fails its
  * check, or cannot be checked, asks with the site open whether to keep it
  * or swap the restored copy back in ("undone_ask", ask_after_undo()).
  */
@@ -138,6 +143,12 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 */
 	const LOCK_WAIT = 5;
 	const RETRIES   = array( 1, 3, 6 );
+
+	/**
+	 * The waits between the tries of a redo's carry that failed for a moment (carry_in()), all in one run: after the
+	 * last, the redo is rolled back (2026-11-02: it does not wait across runs with the site in maintenance mode).
+	 */
+	const CARRY_RETRIES = array( 1, 3 );
 
 	/**
 	 * Names per listing statement, plan entries per read.
@@ -220,6 +231,17 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	const REDO_GIVEN_UP    = 'given_up';
 	const REDO_REVERSED    = 'reversed';
 	const REDO_ROLLED_BACK = 'rolled_back';
+
+	/**
+	 * The positions of a redo where the site is untouched (before_redo()).
+	 */
+	const BEFORE_REDO = array( 'redo', 'redo_ask', 'redo_stopped', 'undone_ask' );
+
+	/**
+	 * What the cursor of a restore cancelled by a put-back that keeps its restored copy holds (keeps_work()), as its
+	 * stored JSON spells it: the jobs table finds such rows by it (JobRepository::expire_work()).
+	 */
+	const KEEP_WORK_SQL = '"keep_work":true';
 
 	/**
 	 * The checks of the restored site a failed verdict names (the cursor keeps the id): what 4c-B checks, and what
@@ -349,30 +371,33 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	}
 
 	/**
-	 * Whether a cursor is a redo before it changed the site ("redo", "redo_ask") or an undo's question about the site it
-	 * put back ("undone_ask"): the site is untouched there, and the job ends undone, never failed, once the time a redo
-	 * can be made in runs out (JobRepository::reap()).
+	 * Whether a cursor is a redo before it changed the site ("redo", "redo_ask"), one given up after its maintenance
+	 * file was up ("redo_stopped": the file down again), or an undo's question about the site it put back
+	 * ("undone_ask"): the site is untouched there, and the job, queued, running, paused or failed, ends undone, never
+	 * failed for good, once the time a redo can be made in runs out (JobRepository::reap()).
 	 *
 	 * @param array<string, mixed> $cursor Cursor.
 	 * @return bool
 	 */
 	public static function before_redo( array $cursor ): bool {
-		return in_array( (string) ( $cursor['phase'] ?? '' ), array( 'redo', 'redo_ask', 'undone_ask' ), true ) && (int) ( $cursor['undone_at'] ?? 0 ) > 0;
+		return in_array( (string) ( $cursor['phase'] ?? '' ), self::BEFORE_REDO, true ) && (int) ( $cursor['undone_at'] ?? 0 ) > 0;
 	}
 
 	/**
 	 * How a restore that is undone again after a redo ended, by its cursor at the end: REDO_GIVEN_UP (before it changed
-	 * the site), REDO_REVERSED (swapped back out after its check found the site broken, or could not tell and the
-	 * restore's policy said undo), REDO_ROLLED_BACK (stopped or interrupted, put back); '' for any other job.
+	 * the site, or with only its maintenance file up), REDO_REVERSED (swapped back out after its check found the site
+	 * broken, or could not tell and the restore's policy said undo), REDO_ROLLED_BACK (stopped or interrupted, put
+	 * back); '' for any other job, and for a redo put back as asked (wp wpcheckpoint job put-back: it ends as a
+	 * put-back does).
 	 *
 	 * @param Job $job Job, as it ended.
 	 * @return string
 	 */
 	public static function redo_outcome( Job $job ): string {
-		if ( self::ID !== $job->step || Job::UNDONE !== $job->status || self::redo_at( $job->cursor ) <= 0 ) {
+		if ( self::ID !== $job->step || Job::UNDONE !== $job->status || self::redo_at( $job->cursor ) <= 0 || self::putting_back( $job->cursor ) ) {
 			return '';
 		}
-		if ( in_array( (string) ( $job->cursor['phase'] ?? '' ), array( 'redo', 'redo_ask' ), true ) ) {
+		if ( in_array( (string) ( $job->cursor['phase'] ?? '' ), array( 'redo', 'redo_ask', 'redo_stopped' ), true ) ) {
 			return self::REDO_GIVEN_UP;
 		}
 		return in_array( (string) ( $job->cursor['reason'] ?? '' ), array( self::REVERSED, self::UNDONE ), true ) ? self::REDO_REVERSED : self::REDO_ROLLED_BACK;
@@ -455,10 +480,6 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 				}
 				return $this->swap( $context, $db, $cursor );
 			}
-			if ( 'carry' === $phase && self::redo_at( $cursor ) > 0 && ! empty( $cursor['again'] ) ) {
-				// A redo's carry that failed for a moment (carry_in()), nothing renamed yet: tried again, the file held.
-				return $this->swap( $context, $db, $cursor );
-			}
 			if ( in_array( $phase, array( 'enter', 'dirs', 'carry' ), true ) ) {
 				throw $this->roll_back( $context, $db, $cursor, self::INTERRUPTED );
 			}
@@ -490,6 +511,12 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			}
 			if ( 'redo_ask' === $phase ) {
 				return $this->redo_asked( $context, $db, $cursor );
+			}
+			if ( 'redo_stopped' === $phase ) {
+				// Given up with its maintenance file up (stop_redo()), recorded as untouched: the file comes down (again, if
+				// a run died before), and the job ends as given up.
+				$this->take_down( $context, $cursor );
+				throw $this->give_up_redo( $context, $cursor, __( 'Where the restore\'s tables and directories are, or the tables made since the undo, did not hold once the maintenance file was up.', 'wp-checkpoint' ) );
 			}
 			if ( 'undone_ask' === $phase ) {
 				return $this->undone_asked( $context, $db, $cursor );
@@ -803,21 +830,22 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * The swap, in this tick: the directories, this plugin's state, the tables; rolled back in this tick when
 	 * anything stops it before it is made.
 	 *
-	 * A redo (redo_at(): its cursor holds the time of the undo it sets out from) goes the same way with three
+	 * A redo (redo_at(): its cursor holds the time of the undo it sets out from) goes the same way with four
 	 * differences: the write that records "enter" requires no cancel requested (JobRepository::save_progress(): a cancel
-	 * that landed after the run's start, which redo() checks, gives it up there, RedoCancelled); the backup's tables are not judged again (the copy was the live site); and this
-	 * plugin's state is carried before anything is renamed (carry_in(): a carry that fails leaves nothing to put back).
-	 * What stops a redo before "enter" gives it up (give_up_redo()), the site as the undo left it.
+	 * that landed after the run's start, which redo() checks, gives it up there, RedoCancelled); the backup's tables are
+	 * not judged again (the copy was the live site); with the maintenance file up, where the plan's entries are and the
+	 * tables made since are checked once more (Redo::still_in_place(); not holding, it is given up: stop_redo()); and
+	 * this plugin's state is carried before anything is renamed (carry_in(): a carry that fails leaves nothing to put
+	 * back). What stops a redo before "enter" gives it up (give_up_redo()), the site as the undo left it.
 	 *
 	 * @param JobContext           $context Context.
 	 * @param Queries              $db      Connection.
-	 * @param array<string, mixed> $cursor  Cursor ("ready", "redo"; or a redo's "carry" to try again).
+	 * @param array<string, mixed> $cursor  Cursor ("ready", "redo").
 	 * @return StepResult
 	 * @throws \RuntimeException When the old directories' places cannot be made (nothing changed yet).
 	 */
 	private function swap( JobContext $context, Queries $db, array $cursor ): StepResult {
-		$redo   = self::redo_at( $cursor );
-		$resume = 'carry' === ( $cursor['phase'] ?? '' );
+		$redo = self::redo_at( $cursor );
 		try {
 			$entries = $this->entries( $context, $db, $cursor );
 			foreach ( $entries['dirs'] as $entry ) {
@@ -834,35 +862,34 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		} catch ( TransientFailure $e ) {
 			throw $e;
 		} catch ( \RuntimeException $e ) {
-			if ( $redo <= 0 || $resume ) {
+			if ( $redo <= 0 ) {
 				throw $e;
 			}
 			throw $this->give_up_redo( $context, $cursor, $e->getMessage() );
 		}
-		$file = $this->maintenance( $cursor );
-		$base = array(
+		$file   = $this->maintenance( $cursor );
+		$base   = array(
 			'attempt' => $cursor['attempt'],
 			'mark'    => $cursor['mark'],
 		) + self::redo_keys( $cursor ) + array_intersect_key( $cursor, array( 'carry' => true ) );
-		if ( ! $resume ) {
-			$cursor = array( 'phase' => 'enter' ) + $base;
-			try {
-				$context->checkpoint( $cursor, 20, __( 'Swapping in the restored site', 'wp-checkpoint' ) );
-			} catch ( RedoCancelled $e ) {
-				throw $this->give_up_redo( $context, $cursor, __( 'It was cancelled.', 'wp-checkpoint' ) );
-			}
+		$cursor = array( 'phase' => 'enter' ) + $base;
+		try {
+			$context->checkpoint( $cursor, 20, __( 'Swapping in the restored site', 'wp-checkpoint' ) );
+		} catch ( RedoCancelled $e ) {
+			throw $this->give_up_redo( $context, $cursor, __( 'It was cancelled.', 'wp-checkpoint' ) );
 		}
 		$mark = $cursor['mark'];
 		try {
 			$guard = null;
-			if ( $resume ) {
-				$file->hold( array( $context, 'confirm_lease' ) );
-			} else {
-				$this->at( 'entered' );
-				$file->put( $this->now(), array( $context, 'confirm_lease' ) );
-				$this->at( 'maintenance' );
-			}
+			$this->at( 'entered' );
+			$file->put( $this->now(), array( $context, 'confirm_lease' ) );
+			$this->at( 'maintenance' );
 			if ( $redo > 0 ) {
+				$why = $this->redo_gate()->still_in_place( $context->job(), array_merge( $entries['tables'], $entries['dirs'] ), $db );
+				if ( '' !== $why ) {
+					throw $this->stop_redo( $context, $cursor, $why );
+				}
+				$this->at( 'redo_rechecked' );
 				$guard = $this->carry_in( $context, $db, $base, $carry, $file );
 			} else {
 				// Once more before the first rename, the live tables only (the usermeta table was walked in this attempt's
@@ -914,6 +941,8 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			throw $e;
 		} catch ( SwapPause $e ) {
 			throw $e; // A redo asks how to go on after its carry failed (carry_in()): nothing was renamed.
+		} catch ( Undone $e ) {
+			throw $e; // A redo given up with its file up (stop_redo()): the file down, the site recorded as untouched.
 		} catch ( IncomingChanged $e ) {
 			// Nothing renamed, the maintenance file the only change: it comes down first, then the site is recorded as
 			// untouched (a run that dies between the two finds the site entering and puts it back; one that dies after
@@ -929,9 +958,6 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			$this->at( 'judge_recorded' );
 			throw new RetryFrom( self::REJUDGED . ' ' . self::STOOD_DOWN, RestorePreflightStep::ID );
 		} catch ( \Throwable $e ) {
-			if ( $e instanceof TransientFailure && $redo > 0 && ! empty( $context->cursor()['again'] ) && 'carry' === ( $context->cursor()['phase'] ?? '' ) ) {
-				throw $e; // A redo's carry that failed for a moment: tried again by the next run, the file held (carry_in()).
-			}
 			$context->logger()->warning( 'The swap stopped', array( 'error' => $e->getMessage() ) );
 			throw $this->roll_back( $context, $db, $cursor, self::STOPPED, self::reason( $e ) );
 		}
@@ -947,9 +973,11 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	/**
 	 * A redo's carry of this plugin's own state, the maintenance file held and nothing renamed yet ("carry"): the live
 	 * options (and a network's sitemeta) carried into the restored copy (StateCarry::carry()), so that the swap back in
-	 * keeps what the plugin wrote since the undo. A failure of the moment (TransientFailure) is recorded ("again") and
-	 * thrown: the Runner waits and the next run tries the carry again, the file held (a run that died here instead is
-	 * rolled back). Any other failure asks how to go on (ask_redo_carry()).
+	 * keeps what the plugin wrote since the undo. A failure of the moment (TransientFailure) is tried again in this run
+	 * after the waits of CARRY_RETRIES, the lease confirmed and the file held before each try; still failing, it is
+	 * thrown as a failure that stops the swap (swap() rolls it back: undone again as of the undo, nothing renamed). It
+	 * never waits across runs with the site in maintenance mode (2026-11-02). Any other failure asks how to go on
+	 * (ask_redo_carry()).
 	 *
 	 * Answered to go on without it ("carry" is "skip"): nothing is carried, after the rows that would be lost are read
 	 * again and found to be the ones the question listed (the file held, they no longer change); other rows, and the
@@ -962,10 +990,10 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @param Maintenance                                                                                            $file    The maintenance file.
 	 * @return StateCarry|null The carry, for the first rename (StateCarry::guard()), when the options are replaced.
 	 * @throws SwapPause When it asks.
-	 * @throws TransientFailure When the carry failed for a moment.
+	 * @throws \RuntimeException When the carry still failed for a moment after every try.
 	 */
 	private function carry_in( JobContext $context, Queries $db, array $base, $carry, Maintenance $file ) {
-		$cursor = array( 'phase' => 'carry' ) + $base + array_intersect_key( $context->cursor(), array( 'again' => true ) );
+		$cursor = array( 'phase' => 'carry' ) + $base;
 		$context->checkpoint( $cursor, 30, __( 'Carrying this plugin\'s own settings into the restored site', 'wp-checkpoint' ) );
 		$file->hold( array( $context, 'confirm_lease' ) );
 		if ( null === $carry ) {
@@ -988,18 +1016,28 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			$context->logger()->warning( 'This plugin\'s own settings written since the undo were not carried into the restored copy, as chosen', array( 'names' => $names ) );
 			return $guard;
 		}
-		try {
-			$guard->carry( $carry['live_options'], $carry['temp_options'], $carry['live_meta'], $carry['temp_meta'], $context->fence() );
-		} catch ( LockLost $e ) {
-			throw $e;
-		} catch ( StaleJob $e ) {
-			throw $e;
-		} catch ( TransientFailure $e ) {
-			$cursor['again'] = 1;
-			$context->checkpoint( $cursor, 30, __( 'Carrying this plugin\'s own settings into the restored site', 'wp-checkpoint' ) );
-			throw $e;
-		} catch ( \Throwable $e ) {
-			throw new SwapPause( $this->ask_redo_carry( $context, $cursor, get_class( $e ) . ': ' . $e->getMessage(), $this->carried_names( $db, $carry['live_options'], $carry['live_meta'] ) ) );
+		$tries = 0;
+		while ( true ) {
+			try {
+				$guard->carry( $carry['live_options'], $carry['temp_options'], $carry['live_meta'], $carry['temp_meta'], $context->fence() );
+				break;
+			} catch ( LockLost $e ) {
+				throw $e;
+			} catch ( StaleJob $e ) {
+				throw $e;
+			} catch ( TransientFailure $e ) {
+				if ( $tries >= count( self::CARRY_RETRIES ) ) {
+					$context->logger()->warning( 'This plugin\'s own settings could not be carried into the restored copy, failing for a moment every time', array( 'tries' => $tries + 1 ) );
+					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- the job's error, through the Runner's redaction.
+					throw new \RuntimeException( sprintf( 'This plugin\'s own settings could not be carried into the restored copy through %1$d tries: %2$s', $tries + 1, $e->getMessage() ) );
+				}
+				$this->sleep( self::CARRY_RETRIES[ $tries ] );
+				++$tries;
+				$this->at( 'redo_carry_retry' );
+				$file->hold( array( $context, 'confirm_lease' ) );
+			} catch ( \Throwable $e ) {
+				throw new SwapPause( $this->ask_redo_carry( $context, $cursor, get_class( $e ) . ': ' . $e->getMessage(), $this->carried_names( $db, $carry['live_options'], $carry['live_meta'] ) ) );
+			}
 		}
 		$this->at( 'redo_carried' );
 		$context->logger()->info( 'This plugin\'s own settings were carried into the restored copy' );
@@ -1273,7 +1311,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			'mark'   => $cursor['mark'] ?? '',
 			'reason' => (string) ( $cursor['reason'] ?? $reason ),
 			'check'  => (string) ( $cursor['check'] ?? '' ),
-		) + self::redo_keys( $cursor );
+		) + self::redo_keys( $cursor ) + array_intersect_key( $cursor, array( 'keep_work' => true ) );
 		if ( $out ) {
 			$cursor['out'] = true; // Kept to the end: an undo after the site was let out ends the job as undone (ended()).
 		}
@@ -1562,7 +1600,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 				'mark'   => $cursor['mark'] ?? '',
 				'reason' => $reason,
 				'check'  => (string) ( $cursor['check'] ?? '' ),
-			) + array_intersect_key( $cursor, array_flip( array( 'out', 'after_undo', 'after_undo_found', 'undone_at' ) ) );
+			) + array_intersect_key( $cursor, array_flip( array( 'out', 'after_undo', 'after_undo_found', 'undone_at', 'keep_work' ) ) );
 			$context->checkpoint( $cursor, 100, __( 'The site is as it was before the restore', 'wp-checkpoint' ) );
 			$this->at( 'reverted' );
 		}
@@ -1595,6 +1633,19 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 */
 	public static function putting_back( array $cursor ): bool {
 		return self::PUT_BACK_REASON === (string) ( $cursor['reason'] ?? '' );
+	}
+
+	/**
+	 * Whether a restore cancelled by a put-back keeps its restored copy for JobRepository::WORK_RETENTION_SECONDS (from
+	 * its end) before it is reclaimed: the cursor the put-back's claim wrote over could not be read, so the swap it put
+	 * back may have been a redo's (put_back_cursor(): "keep_work"). Read from the cursor the job ended with; the jobs
+	 * table finds such rows by KEEP_WORK_SQL.
+	 *
+	 * @param Job $job Job.
+	 * @return bool
+	 */
+	public static function keeps_work( Job $job ): bool {
+		return self::ID === $job->step && Job::CANCELLED === $job->status && self::putting_back( $job->cursor ) && true === ( $job->cursor['keep_work'] ?? null );
 	}
 
 	/**
@@ -1777,14 +1828,22 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * evidence directory (PutBackEvidence) holds what the claim wrote over: an answer to keep the restored site puts the
 	 * job back from it.
 	 *
+	 * Of a swap half made, two more cases (2026-11-02): a redo's (the cursor the claim writes over held the time of the
+	 * undo it set out from, $undone_at) ends undone again as of that undo, its restored copy kept as an undone
+	 * restore's, and no cancel recorded; one whose cursor could not be read ($keep: it may have been a redo) ends
+	 * cancelled with its restored copy kept for JobRepository::WORK_RETENTION_SECONDS before it is reclaimed
+	 * ("keep_work", keeps_work()).
+	 *
 	 * @param bool   $committed Whether the swap was committed (the row's site state is swapped).
 	 * @param int    $attempt   The plan's attempt.
 	 * @param string $mark      The job's maintenance file mark (Job::$site_mark).
 	 * @param string $evidence  The evidence directory, relative to the storage directory.
 	 * @param string $sum       SHA-256 of its manifest.
+	 * @param int    $undone_at A half-made redo's time of the undo, or 0.
+	 * @param bool   $keep      Whether the half-made swap's cursor could not be read.
 	 * @return array<string, mixed>
 	 */
-	public static function put_back_cursor( bool $committed, int $attempt, string $mark, string $evidence, string $sum ): array {
+	public static function put_back_cursor( bool $committed, int $attempt, string $mark, string $evidence, string $sum, int $undone_at = 0, bool $keep = false ): array {
 		$cursor = array(
 			'phase'        => $committed ? 'reverse' : 'rollback',
 			'attempt'      => $attempt,
@@ -1796,6 +1855,10 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		);
 		if ( $committed ) {
 			$cursor['out'] = true;
+		} elseif ( $undone_at > 0 ) {
+			$cursor['undone_at'] = $undone_at;
+		} elseif ( $keep ) {
+			$cursor['keep_work'] = true;
 		}
 		return $cursor;
 	}
@@ -1898,8 +1961,23 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		$found = self::after_undo_text( $cursor );
 		if ( self::putting_back( $cursor ) && ! $undone ) {
 			// A put-back of a swap that was half made ends cancelled (its claim recorded the cancel); what the check of
-			// the site as put back found is said with it.
-			$context->logger()->info( 'The site was put back as asked (wp wpcheckpoint job put-back); the restore is cancelled' );
+			// the site as put back found is said with it. One whose cursor could not be read keeps its restored copy.
+			$context->logger()->info( 'The site was put back as asked (wp wpcheckpoint job put-back); the restore is cancelled', array( 'restored copy' => ! empty( $cursor['keep_work'] ) ? 'kept' : 'removed' ) );
+			if ( ! empty( $cursor['keep_work'] ) ) {
+				$days = (int) ( JobRepository::WORK_RETENTION_SECONDS / 86400 );
+				if ( '' !== $found ) {
+					return Cancelled::kept(
+						sprintf(
+							/* translators: 1: what the check found, 2: days the restored copy is kept */
+							SiteCheck::FAILED === ( $cursor['after_undo'] ?? '' ) ? __( 'The site was put back and the restore cancelled, but its check then failed: %1$s. Restored copy kept %2$d days.', 'wp-checkpoint' ) : __( 'The site was put back and the restore cancelled, but it could not be checked: %1$s. Restored copy kept %2$d days.', 'wp-checkpoint' ),
+							$found,
+							$days
+						)
+					);
+				}
+				/* translators: %d: days the restored copy is kept */
+				return Cancelled::kept( sprintf( __( 'The site was put back as it was before the restore, and the restore cancelled. Whether it was a redo could not be told, so its restored copy is kept for %d days.', 'wp-checkpoint' ), $days ) );
+			}
 			if ( '' !== $found ) {
 				return Cancelled::said(
 					sprintf(
@@ -1983,6 +2061,23 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 */
 	private function redo_ended( JobContext $context, string $reason, string $check, int $at, array $cursor ): Undone {
 		$why = (string) ( $cursor['reason'] ?? '' );
+		if ( self::putting_back( $cursor ) ) {
+			// Put back as asked while it was half made: undone again as of the undo, its restored copy kept as before
+			// (never cancelled: that would reclaim the copy, the only one of what was written on the restored site).
+			$context->logger()->warning( 'The redo was put back as asked (wp wpcheckpoint job put-back): the site is as the undo left it' );
+			$found = self::after_undo_text( $cursor );
+			if ( '' !== $found ) {
+				return Undone::back(
+					sprintf(
+						/* translators: %s: what the check found */
+						SiteCheck::FAILED === ( $cursor['after_undo'] ?? '' ) ? __( 'The redo was put back as the undo left it, but the site\'s check then failed: %s.', 'wp-checkpoint' ) : __( 'The redo was put back as the undo left it, but the site could not be checked: %s.', 'wp-checkpoint' ),
+						$found
+					),
+					$at
+				);
+			}
+			return Undone::back( __( 'The redo was put back as asked: the site is as the undo left it, and its restored copy is kept as before.', 'wp-checkpoint' ), $at );
+		}
 		if ( self::REVERSED === $why ) {
 			$what = isset( self::CHECKS[ $check ] ) ? self::CHECKS[ $check ] : self::CHECKS['unknown'];
 			$context->logger()->warning( 'The redo was swapped back out: a check of the site after it found it broken', array( 'check' => $what ) );
@@ -2181,6 +2276,34 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		$context->logger()->warning( 'The redo was given up before it changed the site', array( 'reason' => $why ) );
 		/* translators: %s: why */
 		return Undone::back( sprintf( __( 'The redo did not go on: %s The site stays as the undo left it.', 'wp-checkpoint' ), $why ), self::redo_at( $cursor ) );
+	}
+
+	/**
+	 * Give a redo up after its maintenance file was put up and before anything was renamed, when where the plan's
+	 * entries are or the tables made since no longer hold (Redo::still_in_place()): the file taken down first, then the
+	 * site recorded as untouched ("redo_stopped"), then the end (give_up_redo()). A run that dies between the two finds
+	 * "enter" and rolls back (nothing to put back: it ends as a redo rolled back); one that dies after takes the file
+	 * down again and gives up the same (run()).
+	 *
+	 * @param JobContext           $context Context.
+	 * @param array<string, mixed> $cursor  Cursor ("enter").
+	 * @param string               $why     Why.
+	 * @return Undone
+	 * @throws TransientFailure When the file cannot be taken down yet (swap() then rolls back).
+	 */
+	private function stop_redo( JobContext $context, array $cursor, string $why ): Undone {
+		$context->logger()->warning( 'Checked once more with the maintenance file up, the redo no longer holds; it is given up', array( 'reason' => $why ) );
+		$this->take_down( $context, $cursor );
+		$this->at( 'redo_stop_down' );
+		$cursor = array(
+			'phase'     => 'redo_stopped',
+			'attempt'   => $cursor['attempt'],
+			'mark'      => $cursor['mark'],
+			'undone_at' => self::redo_at( $cursor ),
+		);
+		$context->checkpoint( $cursor, 20, __( 'The redo stopped before it changed the site', 'wp-checkpoint' ) );
+		$this->at( 'redo_stop_recorded' );
+		return $this->give_up_redo( $context, $cursor, $why );
 	}
 
 	/**

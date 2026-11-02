@@ -21,7 +21,8 @@ defined( 'ABSPATH' ) || exit;
 /**
  * The checks of wp wpcheckpoint job redo, read once before the confirmation code is given and again under the start
  * lock right before the job is claimed (JobActions::redo()), and the ones that can change meanwhile once more by the
- * swap step right before it changes the site (again()): every refusal says why.
+ * swap step right before it changes the site (again()), where the plan's entries are and the tables made since once
+ * more with its maintenance file up (still_in_place()): every refusal says why.
  *
  * A restore, undone at its swap step (wp wpcheckpoint job undo, an undo answered after the release, or a put-back of a
  * swap that was committed) no more than Undo::WINDOW_SECONDS ago, with its work here and not reclaimed, its maintenance
@@ -212,6 +213,22 @@ final class Redo {
 		$out['attempt'] = $plan['attempt'];
 		$out['entries'] = $plan['entries'];
 		return $out;
+	}
+
+	/**
+	 * ⑦ and ⑧ once more, by the swap step of a redo once its maintenance file is up and before anything is renamed:
+	 * every entry of the plan where the undo left it, and no table of this site's made since that the plan would not
+	 * move away ('' when both hold). Read with the file up, they no longer change through visitors' requests; what was
+	 * made between again() and the file is seen here.
+	 *
+	 * @param Job                                                                                                 $job     Job.
+	 * @param array<int, array{seq: int, kind: string, live: string, stage: string, old: string, had_live: bool}> $entries The plan's entries.
+	 * @param Queries                                                                                             $db      Connection.
+	 * @return string
+	 */
+	public function still_in_place( Job $job, array $entries, Queries $db ): string {
+		$why = $this->not_in_place( $entries, $db );
+		return '' !== $why ? $why : $this->made_since( $job, $entries, $db );
 	}
 
 	/**
@@ -432,7 +449,7 @@ final class Redo {
 			$named .= ' ' . sprintf( __( 'and %d more', 'wp-checkpoint' ), count( $new ) - self::MAX_NAMED );
 		}
 		/* translators: %s: table names */
-		return sprintf( __( 'This site has tables that its restore would have moved away and that are not in its plan (made since, by a plugin for example): %s. Swapping the restored copy back in would leave them next to it, so it is not done; nothing was changed.', 'wp-checkpoint' ), $named );
+		return sprintf( __( 'This site has tables that its restore would have moved away and that are not in its plan (made since, by a plugin for example): %s. Swapping the restored copy back in would leave them next to it, so it is not done; nothing was changed. Such a table may have been made by the restored site while it was live, before the undo: if it belongs to the restored site, move it aside or rename it first, then run the redo again.', 'wp-checkpoint' ), $named );
 	}
 
 	/**

@@ -394,6 +394,9 @@ final class Uninstaller {
 			case 'redoing':
 				$what = sprintf( 'restore job %d was undone and is being swapped back in (wp wpcheckpoint job redo), or asks how to go on', $undo['id'] );
 				break;
+			case 'kept':
+				$what = sprintf( 'restore job %d was put back and cancelled while its position could not be read, so it may have been a redo of an undone restore', $undo['id'] );
+				break;
 			default:
 				$what = sprintf( 'an undo of restore job %d put the site back and has not ended', $undo['id'] );
 		}
@@ -443,7 +446,9 @@ final class Uninstaller {
 	 * untouched, so not in "all"), each with the time it is kept until: an undone one or a failed one until its work
 	 * expires (JobRepository::expire_work(), WORK_RETENTION_SECONDS after it ended), one still going on with none yet
 	 * (0), a redo of one (it swaps that restored site back in, or asks how to go on) likewise, and a swap whose
-	 * position cannot be read, which may be one of them, likewise.
+	 * position cannot be read, which may be one of them, likewise; and a restore cancelled by a put-back that keeps its
+	 * restored copy (its position could not be read, so it may have been a redo: SwapStep::keeps_work()), until its
+	 * work expires.
 	 *
 	 * None of them appears during an uninstall but one way: they come from jobs that held the site changed, which keep
 	 * the uninstall from starting, and no swap enters the site through the closed fence. The way: a failed undo past
@@ -453,7 +458,7 @@ final class Uninstaller {
 	 *
 	 * @return array{all: int, abandoned: int, kept: int[], undo: array<int, array{id: int, until: int, how: string}>}|null
 	 *         kept: restores whose restored site was kept, their last steps left; undo: how ("undone", "undoing",
-	 *         "failed", "redoing" or "unknown").
+	 *         "failed", "redoing", "unknown" or "kept").
 	 */
 	public static function holding() {
 		global $wpdb;
@@ -493,7 +498,7 @@ final class Uninstaller {
 			return null;
 		}
 		self::expect();
-		$swaps = $wpdb->get_results( $wpdb->prepare( "SELECT id, status, finished_at, cursor_json FROM {$table} WHERE site_state = 0 AND step = %s AND ((status IN (%s, %s) AND work_expired_at = 0) OR status IN (%s, %s, %s))", \WPCheckpoint\Jobs\SwapStep::ID, Job::UNDONE, Job::FAILED, Job::QUEUED, Job::RUNNING, Job::PAUSED ), ARRAY_N );
+		$swaps = $wpdb->get_results( $wpdb->prepare( "SELECT id, status, finished_at, cursor_json FROM {$table} WHERE site_state = 0 AND step = %s AND ((status IN (%s, %s, %s) AND work_expired_at = 0) OR status IN (%s, %s, %s))", \WPCheckpoint\Jobs\SwapStep::ID, Job::UNDONE, Job::FAILED, Job::CANCELLED, Job::QUEUED, Job::RUNNING, Job::PAUSED ), ARRAY_N );
 		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		if ( self::failed() || ! is_array( $swaps ) ) {
 			return null;
@@ -502,7 +507,12 @@ final class Uninstaller {
 		$now  = time();
 		foreach ( $swaps as $swap ) {
 			$cursor = json_decode( (string) $swap[3], true );
-			if ( Job::UNDONE === (string) $swap[1] ) {
+			if ( Job::CANCELLED === (string) $swap[1] ) {
+				if ( ! is_array( $cursor ) || ! \WPCheckpoint\Jobs\SwapStep::putting_back( $cursor ) || true !== ( $cursor['keep_work'] ?? null ) ) {
+					continue; // Cancelled: its work went at its cancel (SwapStep::keeps_work() is the one exception).
+				}
+				$how = 'kept';
+			} elseif ( Job::UNDONE === (string) $swap[1] ) {
 				$how = 'undone';
 			} elseif ( ! is_array( $cursor ) ) {
 				$how = 'unknown'; // It may be an undo: kept, the safe direction.
@@ -515,7 +525,7 @@ final class Uninstaller {
 			}
 			// Ended (undone, failed): kept until its work expires, which reclaims the restored site; going on: until 7
 			// days after it ends. Past that time the uninstall goes on as for any job that ended.
-			$until = in_array( (string) $swap[1], array( Job::UNDONE, Job::FAILED ), true ) ? (int) $swap[2] + \WPCheckpoint\Jobs\JobRepository::WORK_RETENTION_SECONDS : 0;
+			$until = in_array( (string) $swap[1], array( Job::UNDONE, Job::FAILED, Job::CANCELLED ), true ) ? (int) $swap[2] + \WPCheckpoint\Jobs\JobRepository::WORK_RETENTION_SECONDS : 0;
 			if ( 0 === $until || $now < $until ) {
 				$undo[] = array(
 					'id'    => (int) $swap[0],

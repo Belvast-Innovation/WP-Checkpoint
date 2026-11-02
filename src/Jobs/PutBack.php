@@ -24,18 +24,22 @@ defined( 'ABSPATH' ) || exit;
  * A restore that holds the site (site_state changing or swapped) and has not ended, at its swap step, with its
  * maintenance mark recorded; managed by this installation; no live run holds it, no other job holds the site and no
  * other restore is under way; and its swap plan whole in the plan table, written for this WordPress directory and
- * table prefix. What it rests on is the plan, what is there, and the row's maintenance mark: neither the job's cursor
- * nor its options are read (either may be what keeps the job stuck). The plan's attempt is the highest the table holds
- * with its COMPLETE row (a job that holds the site never writes another: the final check is not run again while it
- * does). Which way: a swap that was half made (changing) is rolled back and the restore cancelled; one that was
- * committed (swapped) is reversed as an undo, and the restore ends undone.
+ * table prefix. What it rests on is the plan, what is there, and the row's maintenance mark: the job's options are not
+ * read, and its cursor only for how a swap half made ends (half_way(); a cursor that cannot be read is not a reason
+ * to refuse: either may be what keeps the job stuck). The plan's attempt is the highest the table holds with its
+ * COMPLETE row (a job that holds the site never writes another: the final check is not run again while it does).
+ * Which way: a swap that was half made (changing) is rolled back and the restore cancelled, except that a redo's ends
+ * undone again as of its undo, its restored copy kept, and one whose cursor cannot be read is cancelled with its
+ * restored copy kept for JobRepository::WORK_RETENTION_SECONDS (2026-11-02: it may have been a redo's, and its copy
+ * the only one of what was written on the restored site); one that was committed (swapped) is reversed as an undo,
+ * and the restore ends undone.
  *
  * A plan that cannot be read is not guessed at: the site is in a state that needs a person, the job keeps holding it,
  * and what can be read is listed (the plan table's rows of the job by attempt, the job's tables by their names, and
  * which of the readable entries' live names are there).
  *
  * The confirmation code binds the job, its storage token, the plan (the attempt and every entry), the site state, the
- * maintenance mark and the time the swap was committed.
+ * maintenance mark, the time the swap was committed and how a swap half made ends (half_way()).
  */
 final class PutBack {
 
@@ -154,7 +158,7 @@ final class PutBack {
 			$out['attempt']   = $plan['attempt'];
 			$out['raw']       = $raw;
 			$out['code']      = self::code( $job, $plan['attempt'], $plan['entries'] );
-			$out['lines']     = $committed ? $this->committed_lines( $job, $plan['entries'], $db ) : self::half_lines();
+			$out['lines']     = $committed ? $this->committed_lines( $job, $plan['entries'], $db ) : self::half_lines( self::half_way( $job ) );
 			return $out;
 		} finally {
 			if ( $db instanceof ImportSession ) {
@@ -177,7 +181,37 @@ final class PutBack {
 		foreach ( $entries as $entry ) {
 			$plan[] = implode( "\0", array( (string) $entry['seq'], $entry['kind'], $entry['live'], $entry['stage'], $entry['old'], $entry['had_live'] ? '1' : '0' ) );
 		}
-		return substr( hash( 'sha256', implode( "\n", array( 'wpcheckpoint-put-back', (string) $job->id, $job->storage_token, (string) $attempt, (string) $job->site_state, $job->site_mark, (string) $job->committed_at, implode( "\n", $plan ) ) ) ), 0, 16 );
+		$way = self::half_way( $job );
+		return substr( hash( 'sha256', implode( "\n", array( 'wpcheckpoint-put-back', (string) $job->id, $job->storage_token, (string) $attempt, (string) $job->site_state, $job->site_mark, (string) $job->committed_at, (string) $way['redo'], $way['keep'] ? 'keep' : '', implode( "\n", $plan ) ) ) ), 0, 16 );
+	}
+
+	/**
+	 * How a put-back of the job ends when its swap was half made, by the cursor its claim writes over: "redo", the time
+	 * of the undo a redo set out from (SwapStep::redo_at(); it ends undone again as of it); "keep", whether its restored
+	 * copy is kept when it ends cancelled (the cursor cannot be read, or is an earlier put-back's that kept it). Neither
+	 * for a swap that was committed (it ends undone, as an undo of now).
+	 *
+	 * @param Job $job Job.
+	 * @return array{redo: int, keep: bool}
+	 */
+	public static function half_way( Job $job ): array {
+		if ( Job::SITE_SWAPPED === $job->site_state ) {
+			return array(
+				'redo' => 0,
+				'keep' => false,
+			);
+		}
+		if ( in_array( 'cursor_json', $job->unreadable_columns, true ) ) {
+			return array(
+				'redo' => 0,
+				'keep' => true,
+			);
+		}
+		$redo = SwapStep::redo_at( $job->cursor );
+		return array(
+			'redo' => $redo,
+			'keep' => $redo <= 0 && true === ( $job->cursor['keep_work'] ?? null ),
+		);
 	}
 
 	/**
@@ -377,11 +411,25 @@ final class PutBack {
 	}
 
 	/**
-	 * What a put-back of a swap that was half made does.
+	 * What a put-back of a swap that was half made does (half_way()).
 	 *
+	 * @param array{redo: int, keep: bool} $way How it ends.
 	 * @return string[]
 	 */
-	private static function half_lines(): array {
+	private static function half_lines( array $way ): array {
+		$days = (int) ( JobRepository::WORK_RETENTION_SECONDS / 86400 );
+		if ( $way['redo'] > 0 ) {
+			return array(
+				/* translators: 1: date and time of the undo (UTC), 2: days */
+				sprintf( __( 'The redo (swapping the restored copy back in) was not complete: the site is put back as the undo of %1$s UTC left it, and the restore is undone again as of that undo. Its restored copy is kept as before: %2$d days from the undo.', 'wp-checkpoint' ), gmdate( 'Y-m-d H:i', $way['redo'] ), $days ),
+			);
+		}
+		if ( $way['keep'] ) {
+			return array(
+				/* translators: %d: days */
+				sprintf( __( 'The swap was not complete: the site is put back as it was before the restore, and the restore is cancelled. Its position cannot be read, so whether it was a redo cannot be told: its restored copy is kept for %d days, then removed.', 'wp-checkpoint' ), $days ),
+			);
+		}
 		return array(
 			__( 'The swap was not complete: the site is put back as it was before the restore, and the restore is cancelled. Its restored copy is removed with it.', 'wp-checkpoint' ),
 		);
