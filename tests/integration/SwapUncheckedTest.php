@@ -130,6 +130,10 @@ final class SwapUncheckedTest extends SwapTestCase {
 				$held[] = Maintenance::held_in( $this->abspath );
 			}
 		};
+		// The site as put back passes its check (one that does not asks whether to keep it: RedoTest).
+		$this->swap_parts['verify'] = static function (): bool {
+			return true;
+		};
 		$this->retype( $job );
 		Plugin::instance()->job_actions()->answer( $job->id, array( SwapStep::UNVERIFIED_QUESTION => 'undo' ) );
 		$done = $this->through( $job );
@@ -171,6 +175,10 @@ final class SwapUncheckedTest extends SwapTestCase {
 				$this->remove_maintenance(); // An update takes the held file down and puts up its own.
 				file_put_contents( $this->abspath . '/.maintenance', $update );
 			}
+		};
+		// The site as put back passes its check (one that does not asks whether to keep it: RedoTest).
+		$this->swap_parts['verify'] = static function (): bool {
+			return true;
 		};
 		$this->retype( $job );
 		$result = $this->cli_tick( $job );
