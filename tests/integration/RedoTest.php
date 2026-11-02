@@ -7,8 +7,10 @@ use WPCheckpoint\Jobs\ExportPlan;
 use WPCheckpoint\Jobs\InvalidTransition;
 use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\JobRepository;
+use WPCheckpoint\Jobs\PutBack;
 use WPCheckpoint\Jobs\QuestionText;
 use WPCheckpoint\Jobs\Redo;
+use WPCheckpoint\Jobs\Residue;
 use WPCheckpoint\Jobs\RestoreJob;
 use WPCheckpoint\Jobs\StaleJob;
 use WPCheckpoint\Jobs\SwapStep;
@@ -16,6 +18,7 @@ use WPCheckpoint\Jobs\TransientFailure;
 use WPCheckpoint\Jobs\Undo;
 use WPCheckpoint\Plugin;
 use WPCheckpoint\Restore\RestoreFiles;
+use WPCheckpoint\Support\Deleter;
 use WPCheckpoint\Support\Schema;
 use WPCheckpoint\Support\StoredNames;
 use WPCheckpoint\Support\Uninstaller;
@@ -35,15 +38,28 @@ final class RedoTest extends SwapTestCase {
 	/** @var array<string, string|null> This plugin's rows the test writes, as they were before it (null: none). */
 	private $states = array();
 
+	/** @var string[] Put-back evidence directories there before the test (the test removes the ones it made). */
+	private $evidence_before = array();
+
 	public function set_up(): void {
 		parent::set_up();
 		foreach ( array( StoredNames::DELETE_DATA, StoredNames::UNINSTALL_NOTICE ) as $name ) {
 			$this->states[ $name ] = $this->state( $name );
 		}
+		$this->evidence_before = array_column( Residue::scan_evidence( Plugin::instance()->directories()->base() ), 'path' );
 	}
 
 	public function tear_down(): void {
 		global $wpdb;
+		$base = Plugin::instance()->directories()->base();
+		if ( '' !== $base ) {
+			foreach ( Residue::scan_evidence( $base ) as $entry ) {
+				if ( ! in_array( $entry['path'], $this->evidence_before, true ) ) {
+					Deleter::delete_tree( $base . DIRECTORY_SEPARATOR . 'logs', $entry['path'] );
+				}
+			}
+		}
+		Plugin::instance()->job_actions()->put_back_gate( new PutBack( Plugin::instance()->jobs() ) );
 		foreach ( $this->rows as $id ) {
 			$wpdb->delete( Schema::jobs_table(), array( 'id' => $id ) );
 		}
@@ -78,6 +94,15 @@ final class RedoTest extends SwapTestCase {
 			)
 		);
 		$actions->redo_gate( $this->redo_checks( '', $version ) );
+		$actions->put_back_gate(
+			new PutBack(
+				Plugin::instance()->jobs(),
+				array(
+					'abspath'       => $this->abspath,
+					'restore_types' => array( $this->type ),
+				)
+			)
+		);
 		return $actions;
 	}
 
@@ -184,10 +209,18 @@ final class RedoTest extends SwapTestCase {
 		$wpdb->query( 'COMMIT' );
 	}
 
+	/** @var int[] The waits the swap step asked for (carry_fails()). */
+	private $slept = array();
+
 	/**
-	 * The swap's carry of this plugin's state into the restored copy fails at its start: once, or every time.
+	 * The swap's carry of this plugin's state into the restored copy fails at its start: once, or every time; for a
+	 * moment (TransientFailure) or not. The waits the step asks for are recorded in $slept.
 	 */
 	private function carry_fails( Job $job, bool $always = false, bool $moment = false ): void {
+		$this->slept               = array();
+		$this->swap_parts['sleep'] = function ( int $seconds ): void {
+			$this->slept[] = $seconds;
+		};
 		$thrown                 = false;
 		$this->swap_parts['at'] = function ( string $point ) use ( &$thrown, $always, $moment ): void {
 			$this->seams[] = $point;
@@ -509,6 +542,7 @@ final class RedoTest extends SwapTestCase {
 		$why = $this->refusal( $job );
 		$this->assertStringContainsString( 'its restore would have moved away and that are not in its plan', $why );
 		$this->assertStringContainsString( $made[0], $why );
+		$this->assertStringContainsString( 'may have been made by the restored site while it was live, before the undo: if it belongs to the restored site, move it aside or rename it first, then run the redo again', $why, 'why it may be there, and the way on' );
 		foreach ( array_slice( $made, 1 ) as $name ) {
 			$this->create( $name, '(id INT) ENGINE=InnoDB' );
 		}
@@ -666,22 +700,48 @@ final class RedoTest extends SwapTestCase {
 		$this->assertSame( $restored, $this->site() );
 	}
 
-	public function test_a_carry_that_fails_for_a_moment_is_tried_again_with_the_file_held(): void {
+	public function test_a_carry_that_fails_for_a_moment_is_tried_again_in_the_same_run(): void {
 		list( $job, , $restored ) = $this->undone_restore();
 		$this->write_state( 'written since the undo' );
 		$this->carry_fails( $job, false, true );
 		$this->claim( $job );
-		$waited = $this->cli_run( $this->jobs()->find( $job->id ) );
-		$this->assertSame( 'carry', $waited->cursor['phase'] ?? '', 'waits at its carry' );
-		$this->assertSame( 1, $waited->cursor['again'] ?? null );
-		$this->assertSame( Job::SITE_CHANGING, $waited->site_state );
-		$this->assertNotSame( array(), $this->maintenance_files(), 'the file held meanwhile' );
-		$this->assertNotContains( 'dir_aside', $this->seams );
-		$this->set( $job->id, array( 'locked_until' => 0 ) );
-		$done = $this->cli_run( $this->jobs()->find( $job->id ) );
+		$lines = array();
+		$this->assertSame( RunLoop::EXIT_COMPLETED, $this->loop_code( $this->jobs()->find( $job->id ), $lines ), implode( "\n", $lines ) );
+		$done = $this->jobs()->find( $job->id );
 		$this->assertSame( Job::COMPLETED, $done->status, $done->last_error );
+		$counts = array_count_values( $this->seams );
+		$this->assertSame( 2, $counts['carry_locked'] ?? 0, 'the carry tried twice' );
+		$this->assertSame( 1, $counts['redo_carry_retry'] ?? 0 );
+		$this->assertSame( 1, $counts['entered'] ?? 0, 'in the run that entered: no other run, no wait between runs' );
+		$this->assertSame( array( SwapStep::CARRY_RETRIES[0] ), $this->slept );
 		$this->assertSame( $restored, $this->site() );
 		$this->assertSame( 'written since the undo', $this->state(), 'carried the second time' );
+	}
+
+	public function test_a_carry_that_keeps_failing_for_a_moment_is_rolled_back_in_the_same_run_and_exits_1(): void {
+		list( $job, $before ) = $this->undone_restore();
+		$at                   = $job->finished_at;
+		$this->write_state( 'written since the undo' );
+		$this->carry_fails( $job, true, true );
+		$this->claim( $job );
+		$lines = array();
+		$this->assertSame( RunLoop::EXIT_FAILED, $this->loop_code( $this->jobs()->find( $job->id ), $lines ), implode( "\n", $lines ) );
+		$done = $this->jobs()->find( $job->id );
+		$this->assertSame( Job::UNDONE, $done->status, 'rolled back: undone again, not left waiting in maintenance mode: ' . $done->last_error );
+		$this->assertSame( $at, $done->finished_at, 'as of the undo' );
+		$this->assertSame( 0, $done->work_expired_at, 'its restored copy kept' );
+		$this->assertStringContainsString( 'The redo stopped and was rolled back', $done->progress_message );
+		$counts = array_count_values( $this->seams );
+		$this->assertSame( 1 + count( SwapStep::CARRY_RETRIES ), $counts['carry_locked'] ?? 0, 'every try' );
+		$this->assertSame( 1, $counts['entered'] ?? 0, 'all in the run that entered' );
+		$this->assertSame( SwapStep::CARRY_RETRIES, $this->slept );
+		$this->assertNotContains( 'dir_aside', $this->seams, 'nothing renamed' );
+		$this->assertStringContainsString( 'could not be carried into the restored copy through 3 tries', Plugin::instance()->job_presenter()->log_tail( $done ) );
+		$this->assertSame( $before, $this->site(), 'as the undo left it' );
+		$this->assertSame( 'written since the undo', $this->state(), 'the plugin\'s state of now stays' );
+		$this->assertSame( array(), $this->maintenance_files() );
+		$this->assertSame( array(), Plugin::instance()->jobs()->holding_site() );
+		$this->assertSame( '', $this->refusal( $done ), 'it can be redone again' );
 	}
 
 	public function test_a_redo_question_unanswered_by_the_deadline_ends_undone_and_is_not_failed(): void {
@@ -1027,6 +1087,227 @@ final class RedoTest extends SwapTestCase {
 		$this->assertSame( $before, $this->site() );
 	}
 
+	public function test_with_its_maintenance_file_up_a_redo_checks_again_and_gives_up_when_that_no_longer_holds(): void {
+		global $wpdb;
+		list( $job, $before, $restored ) = $this->undone_restore();
+		$at                              = $job->finished_at;
+		$table                           = null;
+		foreach ( $this->plan_of( $job )['tables'] as $entry ) {
+			if ( $wpdb->prefix . 'swt_keep' === $entry['live'] ) {
+				$table = $entry;
+			}
+		}
+		$this->assertNotNull( $table );
+		$made  = $wpdb->prefix . 'swt_made_up';
+		$cases = array(
+			// ⑧: a table of this site's made between the checks and the file.
+			'made since' => array(
+				function () use ( $made ): void {
+					$this->create( $made, '(id INT) ENGINE=InnoDB' );
+				},
+				function () use ( $wpdb, $made ): void {
+					$wpdb->query( "DROP TABLE `{$made}`" );
+				},
+				$made,
+			),
+			// ⑦: an entry of the plan moved meanwhile.
+			'not in place' => array(
+				function () use ( $wpdb, $table ): void {
+					$wpdb->query( "RENAME TABLE `{$table['stage']}` TO `{$table['stage']}x`" );
+				},
+				function () use ( $wpdb, $table ): void {
+					$wpdb->query( "RENAME TABLE `{$table['stage']}x` TO `{$table['stage']}`" );
+				},
+				'is not where the undo left it',
+			),
+		);
+		foreach ( $cases as $case => list( $break, $mend, $said ) ) {
+			$this->swap_parts['at'] = function ( string $point ) use ( $break ): void {
+				$this->seams[] = $point;
+				if ( 'maintenance' === $point ) {
+					$break(); // With the file up: what the checks before it saw no longer holds.
+				}
+			};
+			$this->retype( $this->jobs()->find( $job->id ) );
+			$this->claim( $this->jobs()->find( $job->id ) );
+			$this->seams = array();
+			$lines       = array();
+			$this->assertSame( RunLoop::EXIT_CANCELLED, $this->loop_code( $this->jobs()->find( $job->id ), $lines ), $case . ': given up: ' . implode( "\n", $lines ) );
+			$done = $this->jobs()->find( $job->id );
+			$this->assertSame( Job::UNDONE, $done->status, $case );
+			$this->assertSame( $at, $done->finished_at, $case . ': as of the undo' );
+			$this->assertSame( 'redo_stopped', $done->cursor['phase'] ?? '', $case );
+			$this->assertStringContainsString( 'The redo did not go on', $done->progress_message, $case );
+			$this->assertStringContainsString( $said, $done->progress_message, $case );
+			$this->assertContains( 'redo_checking', $this->seams, $case . ': the control: the checks before the file held' );
+			$this->assertContains( 'maintenance', $this->seams, $case . ': the control: the file was up' );
+			$this->assertNotContains( 'redo_rechecked', $this->seams, $case );
+			$this->assertNotContains( 'carry_locked', $this->seams, $case . ': nothing carried' );
+			$this->assertNotContains( 'dir_aside', $this->seams, $case . ': nothing renamed' );
+			$this->assertLessThan( array_search( 'redo_stop_recorded', $this->seams, true ), array_search( 'redo_stop_down', $this->seams, true ), $case . ': the file down before the position said untouched' );
+			$this->assertSame( array(), $this->maintenance_files(), $case . ': the file taken down' );
+			$this->assertSame( array(), Plugin::instance()->jobs()->holding_site(), $case );
+			$mend();
+			$this->assertSame( $before, $this->site(), $case . ': as the undo left it' );
+		}
+		// The control: the same run, nothing changed with the file up, goes through the check and on.
+		$this->swap_parts['at'] = function ( string $point ): void {
+			$this->seams[] = $point;
+		};
+		$this->retype( $this->jobs()->find( $job->id ) );
+		$this->claim( $this->jobs()->find( $job->id ) );
+		$this->seams = array();
+		$this->assertSame( RunLoop::EXIT_COMPLETED, $this->loop_code( $this->jobs()->find( $job->id ) ) );
+		$this->assertContains( 'redo_rechecked', $this->seams );
+		$this->assertSame( $restored, $this->site() );
+	}
+
+	public function test_a_redo_given_up_with_its_file_up_and_killed_between_its_two_steps_is_finished_by_the_next_run(): void {
+		global $wpdb;
+		list( $job, $before ) = $this->undone_restore();
+		$at                   = $job->finished_at;
+		$made                 = $wpdb->prefix . 'swt_made_up';
+		// The killed run: the file down, "enter" still recorded (rolled back: nothing to put back); then "redo_stopped"
+		// recorded (the file down again, given up).
+		foreach ( array( 'redo_stop_down' => RunLoop::EXIT_FAILED, 'redo_stop_recorded' => RunLoop::EXIT_CANCELLED ) as $seam => $exit ) {
+			$this->child_sql = array(
+				'seam' => 'maintenance',
+				'sql'  => array( "CREATE TABLE IF NOT EXISTS `{$made}` (id INT) ENGINE=InnoDB" ),
+			);
+			$this->retype( $this->jobs()->find( $job->id ) );
+			$this->claim( $this->jobs()->find( $job->id ) );
+			$this->killed_at( $this->jobs()->find( $job->id ), $seam );
+			$killed = $this->jobs()->find( $job->id );
+			$this->assertSame( 'redo_stop_down' === $seam ? 'enter' : 'redo_stopped', $killed->cursor['phase'] ?? '', $seam . ': the control: killed where meant' );
+			$wpdb->query( "DROP TABLE IF EXISTS `{$made}`" );
+			$this->child_sql = array();
+			$lines           = array();
+			$this->assertSame( $exit, $this->loop_code( $killed, $lines ), $seam . ': ' . implode( "\n", $lines ) );
+			$done = $this->jobs()->find( $job->id );
+			$this->assertSame( Job::UNDONE, $done->status, $seam . ': ' . $done->last_error . ' ' . $done->progress_message );
+			$this->assertSame( $at, $done->finished_at, $seam . ': as of the undo' );
+			$this->assertSame( $before, $this->site(), $seam );
+			$this->assertSame( array(), $this->maintenance_files(), $seam );
+			$this->assertSame( array(), Plugin::instance()->jobs()->holding_site(), $seam );
+		}
+	}
+
+	public function test_a_redo_that_failed_before_it_changed_the_site_ends_undone_at_its_deadline(): void {
+		list( $job ) = $this->undone_restore();
+		$this->claim( $job );
+		// A failure where the site is untouched ("redo": a failure of the moment that used up its retries, say).
+		$this->set(
+			$job->id,
+			array(
+				'status'      => Job::FAILED,
+				'finished_at' => time() - 60,
+				'last_error'  => 'Step "restore_swap": the database went away.',
+			)
+		);
+		$failed = $this->jobs()->find( $job->id );
+		$this->assertSame( 'redo', $failed->cursor['phase'] ?? '' );
+		$this->jobs()->reap();
+		$this->assertSame( Job::FAILED, $this->jobs()->find( $job->id )->status, 'the control: not before the deadline' );
+		$past = time() - Undo::WINDOW_SECONDS - 10;
+		$this->set_cursor_time( $job->id, $past );
+		$this->jobs()->reap();
+		$done = $this->jobs()->find( $job->id );
+		$this->assertSame( Job::UNDONE, $done->status, 'undone as of its undo, not left failed' );
+		$this->assertSame( $past, $done->finished_at );
+		$this->assertSame( '', $done->last_error );
+		$this->assertSame( 0, $done->work_expired_at, 'its restored copy kept as long as an undone restore\'s' );
+	}
+
+	public function test_answering_redo_clears_a_cancel_request_left_from_before(): void {
+		// At the redo's own question.
+		list( $job, , $restored ) = $this->asked_about_the_carry();
+		$this->set( $job->id, array( 'cancel_requested' => time() - 30 ) ); // Left by a take-over's rollback, say.
+		$this->assertGreaterThan( 0, $this->jobs()->find( $job->id )->cancel_requested, 'the control: a request left on the row' );
+		$answered = Plugin::instance()->job_actions()->answer( $job->id, array( SwapStep::REDO_CARRY_QUESTION => SwapStep::REDO ) );
+		$this->assertSame( 0, $answered->cancel_requested );
+		$this->assertSame( 0, $this->jobs()->find( $job->id )->cancel_requested, 'in the answer\'s write' );
+		$this->assertSame( RunLoop::EXIT_COMPLETED, $this->loop_code( $this->jobs()->find( $job->id ) ), 'swapped back in, not given up' );
+		$this->assertSame( $restored, $this->site() );
+
+		// At an undo's question about the site it put back.
+		$this->retype( $this->jobs()->find( $job->id ), array( 'verify' => static function (): string { return 'home'; } ) );
+		$told = $this->actions()->undo( $job->id, '' );
+		$this->assertTrue( $this->actions()->undo( $job->id, $told['code'] )['ok'] );
+		$this->assertSame( RunLoop::EXIT_PAUSED, $this->loop_code( $this->jobs()->find( $job->id ) ) );
+		$this->retype( $this->jobs()->find( $job->id ) );
+		$this->actions();
+		$this->set( $job->id, array( 'cancel_requested' => time() - 30 ) );
+		$this->assertGreaterThan( 0, $this->jobs()->find( $job->id )->cancel_requested, 'the control: a request left on the row' );
+		$this->jobs()->answer( $this->jobs()->find( $job->id ), array( SwapStep::AFTER_UNDO_QUESTION => SwapStep::REDO ) );
+		$this->assertSame( 0, $this->jobs()->find( $job->id )->cancel_requested );
+		$this->assertSame( RunLoop::EXIT_COMPLETED, $this->loop_code( $this->jobs()->find( $job->id ) ) );
+		$this->assertSame( $restored, $this->site() );
+	}
+
+	/**
+	 * A redo claimed and killed after it moved the first directory aside: half made.
+	 *
+	 * @return array{0: Job, 1: array<string, mixed>, 2: array<string, mixed>, 3: int} The job, the site as the undo left it, the restored site, the time of the undo.
+	 */
+	private function half_redo(): array {
+		list( $job, $before, $restored ) = $this->undone_restore();
+		$at                              = $job->finished_at;
+		$this->retype( $job );
+		$this->claim( $job );
+		$this->killed_at( $this->jobs()->find( $job->id ), 'dir_aside' );
+		$half = $this->jobs()->find( $job->id );
+		$this->assertSame( Job::SITE_CHANGING, $half->site_state, 'the control: half made' );
+		$this->assertSame( $at, SwapStep::redo_at( $half->cursor ), 'the control: a redo\'s cursor' );
+		return array( $half, $before, $restored, $at );
+	}
+
+	public function test_a_redo_half_made_and_put_back_ends_undone_as_of_its_undo_with_its_restored_copy_kept(): void {
+		list( $job, $before, $restored, $at ) = $this->half_redo();
+		$told                                = $this->actions()->put_back( $job->id, '' );
+		$this->assertTrue( $told['ok'], $told['message'] );
+		$this->assertStringContainsString( 'the restore is undone again as of that undo', implode( "\n", $told['lines'] ) );
+		$this->assertStringContainsString( gmdate( 'Y-m-d H:i', $at ), implode( "\n", $told['lines'] ) );
+		$this->assertTrue( $this->actions()->put_back( $job->id, $told['code'] )['ok'] );
+		$claimed = $this->jobs()->find( $job->id );
+		$this->assertSame( $at, $claimed->cursor['undone_at'] ?? null );
+		$this->assertSame( 0, $claimed->cancel_requested, 'no cancel recorded: it ends undone' );
+		$lines = array();
+		$this->assertSame( RunLoop::EXIT_COMPLETED, $this->loop_code( $claimed, $lines ), implode( "\n", $lines ) );
+		$done = $this->jobs()->find( $job->id );
+		$this->assertSame( Job::UNDONE, $done->status, 'not cancelled: ' . $done->last_error . ' ' . $done->progress_message );
+		$this->assertSame( $at, $done->finished_at, 'as of the undo' );
+		$this->assertSame( 0, $done->committed_at );
+		$this->assertSame( 0, $done->work_expired_at );
+		$this->assertStringContainsString( 'The redo was put back as asked', $done->progress_message );
+		$this->assertSame( $before, $this->site(), 'as the undo left it' );
+		$this->assertSame( array(), $this->maintenance_files() );
+		$this->assertDirectoryExists( $this->work( $done ), 'its work kept' );
+		// Its restored copy is still there, whole: swapped back in by another redo.
+		$this->claim( $done );
+		$this->assertSame( RunLoop::EXIT_COMPLETED, $this->loop_code( $this->jobs()->find( $job->id ) ) );
+		$this->assertSame( $restored, $this->site() );
+	}
+
+	public function test_a_redo_put_back_killed_once_it_is_put_back_is_finished_undone_by_the_next_run(): void {
+		foreach ( array( 'restored', 'reverted' ) as $seam ) {
+			$this->tear_down_swap();
+			$this->set_up_swap();
+			$GLOBALS['wpdb']->query( 'UPDATE ' . JobRepository::table() . ' SET committed_at = 0, site_state = 0' );
+			$GLOBALS['wpdb']->query( 'COMMIT' );
+			list( $job, $before, , $at ) = $this->half_redo();
+			$told                        = $this->actions()->put_back( $job->id, '' );
+			$this->assertTrue( $this->actions()->put_back( $job->id, $told['code'] )['ok'], $seam );
+			$this->killed_at( $this->jobs()->find( $job->id ), $seam );
+			$this->assertSame( $at, SwapStep::redo_at( $this->jobs()->find( $job->id )->cursor ), $seam . ': the time of the undo kept on the cursor' );
+			$this->assertSame( RunLoop::EXIT_COMPLETED, $this->loop_code( $this->jobs()->find( $job->id ) ), $seam );
+			$done = $this->jobs()->find( $job->id );
+			$this->assertSame( Job::UNDONE, $done->status, $seam . ': ' . $done->last_error . ' ' . $done->progress_message );
+			$this->assertSame( $at, $done->finished_at, $seam );
+			$this->assertSame( $before, $this->site(), $seam );
+			$this->assertSame( array(), $this->maintenance_files(), $seam );
+		}
+	}
+
 	public function test_a_redo_killed_at_any_seam_is_finished_by_the_next_run(): void {
 		// Every seam a redo passes, with how often, from one that runs whole.
 		list( $job ) = $this->undone_restore();
@@ -1041,7 +1322,7 @@ final class RedoTest extends SwapTestCase {
 			$count[ $seam ] = ( $count[ $seam ] ?? 0 ) + 1;
 			$cases[]        = array( $seam, $count[ $seam ] );
 		}
-		foreach ( array( 'redo_checking', 'entered', 'maintenance', 'carry_locked', 'redo_carried', 'dir_aside', 'dir_in', 'batch_sent', 'committed', 'verified', 'done_recorded' ) as $seam ) {
+		foreach ( array( 'redo_checking', 'entered', 'maintenance', 'redo_rechecked', 'carry_locked', 'redo_carried', 'dir_aside', 'dir_in', 'batch_sent', 'committed', 'verified', 'done_recorded' ) as $seam ) {
 			$this->assertArrayHasKey( $seam, $count, 'the control: a redo passes ' . $seam );
 		}
 		foreach ( $cases as $case ) {
