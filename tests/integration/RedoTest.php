@@ -1216,6 +1216,19 @@ final class RedoTest extends SwapTestCase {
 		$this->assertSame( $past, $done->finished_at );
 		$this->assertSame( '', $done->last_error );
 		$this->assertSame( 0, $done->work_expired_at, 'its restored copy kept as long as an undone restore\'s' );
+
+		// Its work expired by the purge before the pass that settles it (the two times are the same length): settled all the same.
+		$this->set(
+			$job->id,
+			array(
+				'status'          => Job::FAILED,
+				'finished_at'     => time() - 60,
+				'work_expired_at' => time() - 30,
+			)
+		);
+		$this->assertSame( 'redo', $this->jobs()->find( $job->id )->cursor['phase'] ?? '', 'the control: failed at "redo" again' );
+		$this->jobs()->reap();
+		$this->assertSame( Job::UNDONE, $this->jobs()->find( $job->id )->status, 'not left failed' );
 	}
 
 	public function test_answering_redo_clears_a_cancel_request_left_from_before(): void {

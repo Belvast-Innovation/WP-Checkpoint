@@ -28,13 +28,6 @@ class Cancelled extends \RuntimeException {
 	public $said = false;
 
 	/**
-	 * Whether the job's work is kept at the cancel (kept()).
-	 *
-	 * @var bool
-	 */
-	public $keep_work = false;
-
-	/**
 	 * A cancel whose message the job keeps.
 	 *
 	 * @param string $message What the job says at its end.
@@ -47,15 +40,13 @@ class Cancelled extends \RuntimeException {
 	}
 
 	/**
-	 * A put-back's cancel that keeps the restored copy (SwapStep::keeps_work()): the Runner does not reclaim the job's
-	 * work at the cancel; it goes after JobRepository::WORK_RETENTION_SECONDS, as a failed job's.
+	 * A put-back's cancel that keeps the restored copy (SwapStep::keeps_work(), read from the cursor the job ends with:
+	 * Runner::cleanup() leaves its work, which goes after JobRepository::WORK_RETENTION_SECONDS, as a failed job's).
 	 *
 	 * @param string $message What the job says at its end.
 	 * @return self
 	 */
 	public static function kept( string $message ): self {
-		$e            = self::said( $message );
-		$e->keep_work = true;
-		return $e;
+		return self::said( $message );
 	}
 }

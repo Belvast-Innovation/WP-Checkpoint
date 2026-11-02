@@ -507,11 +507,11 @@ final class Uninstaller {
 		$now  = time();
 		foreach ( $swaps as $swap ) {
 			$cursor = json_decode( (string) $swap[3], true );
-			if ( Job::CANCELLED === (string) $swap[1] ) {
-				if ( ! is_array( $cursor ) || ! \WPCheckpoint\Jobs\SwapStep::putting_back( $cursor ) || true !== ( $cursor['keep_work'] ?? null ) ) {
-					continue; // Cancelled: its work went at its cancel (SwapStep::keeps_work() is the one exception).
-				}
-				$how = 'kept';
+			$keeps  = is_array( $cursor ) && \WPCheckpoint\Jobs\SwapStep::putting_back( $cursor ) && true === ( $cursor['keep_work'] ?? null );
+			if ( $keeps ) {
+				$how = 'kept'; // Cancelled or about to be (SwapStep::keeps_work()): its restored copy is kept as an undone one's.
+			} elseif ( Job::CANCELLED === (string) $swap[1] ) {
+				continue; // Cancelled: its work went at its cancel.
 			} elseif ( Job::UNDONE === (string) $swap[1] ) {
 				$how = 'undone';
 			} elseif ( ! is_array( $cursor ) ) {

@@ -444,13 +444,7 @@ final class Runner {
 				// The step undid what it did to the site after a cancel was requested: cancelled as with the lock.
 				$logger->info( 'The job is cancelled as requested', array( 'step' => $step_id ) );
 				$this->transition( $job, $token, Job::CANCELLED, $e->said ? $e->getMessage() : '' );
-				if ( $e->keep_work ) {
-					// A put-back's cancel that keeps the restored copy (SwapStep::keeps_work()): reclaimed with the work of
-					// failed jobs, after JobRepository::WORK_RETENTION_SECONDS (expire_work()).
-					$logger->info( 'The restored copy is kept', array( 'days' => (int) ( JobRepository::WORK_RETENTION_SECONDS / 86400 ) ) );
-					return new TickResult( TickResult::FINISHED, -1, $job, $this->redactor->redact( $e->getMessage() ) );
-				}
-				$this->cleanup( $job );
+				$this->cleanup( $job ); // Not a put-back's that keeps the restored copy (Cancelled::kept(), cleanup()).
 				return new TickResult( TickResult::FINISHED, -1, $job, $this->redactor->redact( $e->getMessage() ) );
 			} catch ( Stopped $e ) {
 				// The answers that stopped it go with the failure: a retry asks those questions again.
@@ -618,10 +612,20 @@ final class Runner {
 	 * temporary tables itself (JobRepository::reclaim_work()), whatever the
 	 * steps missed.
 	 *
+	 * Not for a restore cancelled by a put-back that keeps its restored copy
+	 * (SwapStep::keeps_work()), whichever way it was cancelled (its own step,
+	 * a cancel taken with the lock, a driver that lost the lock to it): its
+	 * work goes after JobRepository::WORK_RETENTION_SECONDS, as a failed
+	 * job's (JobRepository::expire_work()).
+	 *
 	 * @param Job $job Cancelled job.
 	 * @return int Steps cleaned.
 	 */
 	public function cleanup( Job $job ): int {
+		if ( SwapStep::keeps_work( $job ) ) {
+			$this->logger_for( $job )->info( 'The restored copy is kept', array( 'days' => (int) ( JobRepository::WORK_RETENTION_SECONDS / 86400 ) ) );
+			return 0;
+		}
 		$type = $this->types->get( $job->type );
 		if ( null === $type ) {
 			return 0;

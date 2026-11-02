@@ -398,6 +398,34 @@ final class PutBackTest extends SwapTestCase {
 		);
 	}
 
+	public function test_a_put_back_that_keeps_its_restored_copy_keeps_it_through_a_cancel_and_an_uninstall_before_its_end(): void {
+		list( $job ) = $this->half();
+		$this->set( $job->id, array( 'cursor_json' => '{"phase":"dirs","undone_at":' ) );
+		$this->claim( Plugin::instance()->jobs()->find( $job->id ) );
+		// Put back, recorded untouched, and stopped before its end (its maintenance file not down yet).
+		$this->killed_at( Plugin::instance()->jobs()->find( $job->id ), 'reverted' );
+		$stopped = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertSame( 'reverted', $stopped->cursor['phase'] ?? '', 'the control: stopped where meant' );
+		$this->assertSame( Job::SITE_UNTOUCHED, $stopped->site_state );
+		$this->assertTrue( $stopped->cursor['keep_work'] ?? false );
+		$kept = $this->restored_copy( $stopped );
+		$this->assertNotSame( array(), $kept['tables'], 'the control: the restored copy is there' );
+		// An uninstall now keeps it, though the job has not ended.
+		$this->assertSame( 'kept', array_column( \WPCheckpoint\Support\Uninstaller::holding()['undo'], 'how', 'id' )[ $job->id ] ?? '' );
+		// A cancel taken with the lock: the job cancelled, its restored copy left as the put-back's own end leaves it.
+		$out = Plugin::instance()->job_actions()->cancel( $job->id );
+		$this->assertSame( 'cleaned', $out['reason'], 'the control: the cancel took the job and ran the cleanup' );
+		$done = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertSame( Job::CANCELLED, $done->status );
+		$this->assertTrue( SwapStep::keeps_work( $done ) );
+		$this->assertSame( $kept, $this->restored_copy( $done ), 'kept through the cancel\'s cleanup' );
+		$this->remove_maintenance();
+		// Its time over: reclaimed.
+		$this->set( $job->id, array( 'finished_at' => time() - JobRepository::WORK_RETENTION_SECONDS - 60 ) );
+		Plugin::instance()->jobs()->expire_work();
+		$this->assertSame( array(), $this->restored_copy( Plugin::instance()->jobs()->find( $job->id ) )['tables'] );
+	}
+
 	public function test_a_row_changed_between_the_read_and_the_claim_is_not_written_over(): void {
 		global $wpdb;
 		$table = Schema::jobs_table();
