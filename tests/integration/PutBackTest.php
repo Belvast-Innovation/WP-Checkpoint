@@ -56,6 +56,7 @@ final class PutBackTest extends SwapTestCase {
 		$this->rows = array();
 		Plugin::instance()->job_actions()->put_back_gate( new PutBack( Plugin::instance()->jobs() ) );
 		Plugin::instance()->job_actions()->redo_gate( new \WPCheckpoint\Jobs\Redo( Plugin::instance()->jobs() ) );
+		Plugin::instance()->job_actions()->undo_gate( new \WPCheckpoint\Jobs\Undo( Plugin::instance()->jobs() ) );
 		parent::tear_down();
 	}
 
@@ -312,6 +313,121 @@ final class PutBackTest extends SwapTestCase {
 			$this->assertSame( $restored['tables'], $this->site()['tables'], $case );
 			$this->assertNothingLeft( $case );
 		}
+	}
+
+	/**
+	 * An undo half made: a restore run to its end, then undone (wp wpcheckpoint job undo, case "undo") or put back as a
+	 * committed swap (case "put-back"), and killed once the first table was put back.
+	 *
+	 * @param string $case "undo" or "put-back".
+	 * @return array{0: Job, 1: array<string, mixed>, 2: array<string, mixed>} The job, the site before the restore, the restored site.
+	 */
+	private function half_undo( string $case ): array {
+		if ( 'undo' === $case ) {
+			$job    = $this->at_swap();
+			$before = $this->site();
+			$done   = $this->cli_run( $job );
+			$this->assertSame( Job::COMPLETED, $done->status, (string) $done->last_error );
+			$restored = $this->site();
+			$actions  = Plugin::instance()->job_actions();
+			$actions->undo_gate(
+				new \WPCheckpoint\Jobs\Undo(
+					Plugin::instance()->jobs(),
+					array(
+						'abspath'       => $this->abspath,
+						'restore_types' => array( $this->type ),
+					)
+				)
+			);
+			$told = $actions->undo( $job->id, '' );
+			$this->assertTrue( $told['ok'], $told['message'] );
+			$this->assertTrue( $actions->undo( $job->id, $told['code'] )['ok'] );
+		} else {
+			list( $job, $before ) = $this->committed();
+			$restored             = $this->site();
+			$this->claim( Plugin::instance()->jobs()->find( $job->id ) );
+		}
+		$this->killed_at( Plugin::instance()->jobs()->find( $job->id ), 'table_back', 1 );
+		$half = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertSame( Job::SITE_CHANGING, $half->site_state, $case . ': the control: half made' );
+		$this->assertTrue( SwapStep::undoing( $half->cursor ), $case . ': the control: an undo\'s cursor' );
+		$this->assertSame( 0, SwapStep::redo_at( $half->cursor ), $case . ': the control: no redo\'s' );
+		$this->assertNotSame( $before['tables'], $this->site()['tables'], $case . ': the control: not all put back' );
+		return array( $half, $before, $restored );
+	}
+
+	public function test_an_undo_half_made_and_put_back_ends_undone_as_of_now_with_its_restored_copy_kept(): void {
+		foreach ( array( 'undo', 'put-back' ) as $case ) {
+			$this->tear_down_swap();
+			$this->set_up_swap();
+			list( $job, $before, $restored ) = $this->half_undo( $case );
+			$told                            = $this->actions()->put_back( $job->id, '' );
+			$this->assertTrue( $told['ok'], $case . ': ' . $told['message'] );
+			$this->assertStringContainsString( 'The undo (or an earlier put-back of the restore) was not complete', implode( "\n", $told['lines'] ), $case );
+			$this->assertStringContainsString( 'the restore ends undone', implode( "\n", $told['lines'] ), $case );
+			$this->assertStringContainsString( 'kept for 7 days', implode( "\n", $told['lines'] ), $case );
+			// The code binds how it ends: the row's cursor made no undo's, the code given is refused and nothing changes.
+			$raw   = Plugin::instance()->jobs()->put_back_raw( $job->id );
+			$other = $job->cursor;
+			unset( $other['out'] );
+			$this->set( $job->id, array( 'cursor_json' => wp_json_encode( $other ) ) );
+			$again = $this->actions()->put_back( $job->id, '' );
+			$this->assertTrue( $again['ok'], $case . ': ' . $again['message'] );
+			$this->assertStringContainsString( 'the restore is cancelled', implode( "\n", $again['lines'] ), $case . ': the control: no undo\'s now' );
+			$this->assertNotSame( $told['code'], $again['code'], $case );
+			$wrong = $this->actions()->put_back( $job->id, $told['code'] );
+			$this->assertFalse( $wrong['ok'], $case );
+			$this->assertStringContainsString( 'does not match', $wrong['message'], $case );
+			$this->set( $job->id, array( 'cursor_json' => $raw['cursor_json'] ) );
+			$this->assertSame( $raw, Plugin::instance()->jobs()->put_back_raw( $job->id ), $case . ': the row as it was' );
+			$start = time();
+			$this->claim( $job );
+			$claimed = Plugin::instance()->jobs()->find( $job->id );
+			$this->assertSame( SwapStep::PUT_BACK_REASON, $claimed->cursor['reason'] ?? '', $case );
+			$this->assertSame( 'reverse', $claimed->cursor['phase'] ?? '', $case . ': reversed as the undo (job status says so)' );
+			$this->assertTrue( $claimed->cursor['out'] ?? false, $case );
+			$this->assertSame( 0, $claimed->cancel_requested, $case . ': no cancel recorded: it ends undone' );
+
+			$lines = array();
+			$this->assertSame( RunLoop::EXIT_COMPLETED, $this->loop_code( $claimed, $lines ), $case . ': ' . implode( "\n", $lines ) );
+			$done = Plugin::instance()->jobs()->find( $job->id );
+			$this->assertSame( Job::UNDONE, $done->status, $case . ': not cancelled: ' . $done->last_error . ' ' . $done->progress_message );
+			$this->assertGreaterThanOrEqual( $start, $done->finished_at, $case . ': undone as of now' );
+			$this->assertSame( 0, $done->work_expired_at, $case );
+			$this->assertStringContainsString( 'The restored copy is kept for 7 days', $done->progress_message, $case );
+			$this->assertSame( $before, $this->site(), $case . ': the site as it was before the restore' );
+			$this->assertNothingLeft( $case );
+			$kept = $this->restored_copy( $done );
+			$this->assertNotSame( array(), $kept['tables'], $case . ': its restored copy kept' );
+			$this->assertTrue( $kept['work'], $case );
+			// Kept whole: swapped back in by a redo.
+			$actions = Plugin::instance()->job_actions();
+			$actions->redo_gate( $this->redo_checks() );
+			$redo = $actions->redo( $job->id, '' );
+			$this->assertTrue( $redo['ok'], $case . ': ' . $redo['message'] );
+			$this->assertTrue( $actions->redo( $job->id, $redo['code'] )['ok'], $case );
+			$this->assertSame( RunLoop::EXIT_COMPLETED, $this->loop_code( Plugin::instance()->jobs()->find( $job->id ) ), $case );
+			$this->assertSame( $restored['files'], $this->site()['files'], $case . ': the restored site back in' );
+			$this->assertSame( $restored['tables'], $this->site()['tables'], $case );
+			$this->assertNothingLeft( $case . ': redone' );
+		}
+	}
+
+	public function test_a_put_back_of_a_swap_half_made_stuck_itself_is_put_back_again_and_still_cancelled(): void {
+		list( $job, $before ) = $this->half();
+		$this->claim( $job );
+		$this->killed_at( Plugin::instance()->jobs()->find( $job->id ), 'table_back', 1 );
+		$stuck = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertSame( Job::SITE_CHANGING, $stuck->site_state, 'the control: the put-back half made' );
+		$this->assertFalse( SwapStep::undoing( $stuck->cursor ), 'no undo\'s: the swap it put back was never made' );
+		$told = $this->actions()->put_back( $job->id, '' );
+		$this->assertTrue( $told['ok'], $told['message'] );
+		$this->assertStringContainsString( 'Its restored copy is removed with it', implode( "\n", $told['lines'] ) );
+		$this->claim( $stuck );
+		list( $done ) = $this->run_out( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( Job::CANCELLED, $done->status, $done->last_error . ' ' . $done->progress_message );
+		$this->assertSame( $before, $this->site() );
+		$this->assertNothingLeft( 'cancelled' );
 	}
 
 	public function test_with_its_cursor_and_options_unreadable_a_restore_is_put_back_all_the_same(): void {
