@@ -29,8 +29,9 @@ defined( 'ABSPATH' ) || exit;
  * to refuse: either may be what keeps the job stuck). The plan's attempt is the highest the table holds with its
  * COMPLETE row (a job that holds the site never writes another: the final check is not run again while it does).
  * Which way: a swap that was half made (changing) is rolled back and the restore cancelled, except that a redo's ends
- * undone again as of its undo, its restored copy kept; an undo's (the restored site was let out before it) ends
- * undone as of the put-back, its restored copy kept as an undone restore's; and one whose cursor cannot be read is
+ * undone again as of its undo, its restored copy kept; one at an undo's position (an undo after the restored site
+ * was let out, or an earlier put-back of a committed swap) ends undone as of the put-back, its restored copy kept as
+ * an undone restore's; and one whose cursor cannot be read is
  * cancelled with its restored copy kept for JobRepository::WORK_RETENTION_SECONDS (2026-11-02: it may have been a
  * redo's or an undo's, and its copy the only one of what was written on the restored site); one that was committed
  * (swapped) is reversed as an undo, and the restore ends undone.
@@ -188,9 +189,9 @@ final class PutBack {
 
 	/**
 	 * How a put-back of the job ends when its swap was half made, by the cursor its claim writes over: "redo", the time
-	 * of the undo a redo set out from (SwapStep::redo_at(); it ends undone again as of it); "undo", whether it is an
-	 * undo after the restored site was let out (SwapStep::undoing(), and no redo's: it ends undone as of the put-back,
-	 * as the undo would have); "keep", whether its restored copy is kept when it ends cancelled (the cursor cannot be
+	 * of the undo a redo set out from (SwapStep::redo_at(); it ends undone again as of it); "undo", whether it is at an
+	 * undo's position (SwapStep::undoing(): an undo after the restored site was let out, or an earlier put-back of a
+	 * committed swap; and no redo's): it ends undone as of the put-back, as the undo would have; "keep", whether its restored copy is kept when it ends cancelled (the cursor cannot be
 	 * read, or is an earlier put-back's that kept it). None for a swap that was committed (it ends undone, as an undo
 	 * of now).
 	 *
@@ -434,7 +435,7 @@ final class PutBack {
 		if ( $way['undo'] ) {
 			return array(
 				/* translators: %d: days */
-				sprintf( __( 'The undo was not complete: the site is put back as it was before the restore, and the restore ends undone, as of this put-back. Its restored copy is kept for %d days from then, as an undo keeps it.', 'wp-checkpoint' ), $days ),
+				sprintf( __( 'The undo (or an earlier put-back of the restore) was not complete: the site is put back as it was before the restore, and the restore ends undone, as of this put-back. Its restored copy is kept for %d days from then, as an undo keeps it.', 'wp-checkpoint' ), $days ),
 			);
 		}
 		if ( $way['keep'] ) {

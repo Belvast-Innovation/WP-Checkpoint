@@ -730,7 +730,8 @@ final class JobActions {
 	/**
 	 * Put a stuck restore that holds the site back (wp wpcheckpoint job put-back): without a confirmation code, what it
 	 * would do and the code; with the code, the job claimed for its own rollback (a swap half made: it ends cancelled,
-	 * a redo's undone again as of its undo, an undo's undone as of now; PutBack::half_way()) or reverse (a swap committed: it ends undone), to be
+	 * a redo's undone again as of its undo; PutBack::half_way()) or reverse (an undo's half made: it ends undone as of
+	 * now) (a swap committed: it ends undone), to be
 	 * run by WP-CLI. Every check is read once, and again under the
 	 * start lock right before the claim. Before the claim, what it writes over in the job's row is kept byte for byte
 	 * next to the job's log (PutBackEvidence), and the claim writes only while the row still holds exactly that

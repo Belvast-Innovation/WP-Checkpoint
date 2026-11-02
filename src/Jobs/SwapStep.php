@@ -1831,9 +1831,9 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 *
 	 * Of a swap half made, three more cases (2026-11-02): a redo's (the cursor the claim writes over held the time of the
 	 * undo it set out from, $undone_at) ends undone again as of that undo, its restored copy kept as an undone
-	 * restore's, and no cancel recorded; an undo's after the restored site was let out ($undo, undoing()) is rolled
-	 * back as that undo ("out"): it ends undone as of now, its restored copy kept as an undone restore's, and no
-	 * cancel recorded; one whose cursor could not be read ($keep: it may have been a redo) ends cancelled with its
+	 * restore's, and no cancel recorded; one at an undo's position ($undo, undoing(): an undo after the restored site
+	 * was let out, or an earlier put-back of a committed swap) is reversed as that undo ("reverse", "out"): it ends
+	 * undone as of now, its restored copy kept as an undone restore's, and no cancel recorded; one whose cursor could not be read ($keep: it may have been a redo) ends cancelled with its
 	 * restored copy kept for JobRepository::WORK_RETENTION_SECONDS before it is reclaimed ("keep_work", keeps_work()).
 	 *
 	 * @param bool   $committed Whether the swap was committed (the row's site state is swapped).
@@ -1848,7 +1848,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 */
 	public static function put_back_cursor( bool $committed, int $attempt, string $mark, string $evidence, string $sum, int $undone_at = 0, bool $keep = false, bool $undo = false ): array {
 		$cursor = array(
-			'phase'        => $committed ? 'reverse' : 'rollback',
+			'phase'        => $committed || ( $undo && $undone_at <= 0 ) ? 'reverse' : 'rollback',
 			'attempt'      => $attempt,
 			'mark'         => $mark,
 			'reason'       => self::PUT_BACK_REASON,

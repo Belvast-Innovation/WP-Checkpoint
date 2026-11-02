@@ -384,10 +384,13 @@ final class PutBackTest extends SwapTestCase {
 			$this->claim( $job );
 			$claimed = Plugin::instance()->jobs()->find( $job->id );
 			$this->assertSame( SwapStep::PUT_BACK_REASON, $claimed->cursor['reason'] ?? '', $case );
+			$this->assertSame( 'reverse', $claimed->cursor['phase'] ?? '', $case . ': reversed as the undo (job status says so)' );
 			$this->assertTrue( $claimed->cursor['out'] ?? false, $case );
 			$this->assertSame( 0, $claimed->cancel_requested, $case . ': no cancel recorded: it ends undone' );
 
-			list( $done ) = $this->run_out( $claimed );
+			$lines = array();
+			$this->assertSame( RunLoop::EXIT_COMPLETED, $this->loop_code( $claimed, $lines ), $case . ': ' . implode( "\n", $lines ) );
+			$done = Plugin::instance()->jobs()->find( $job->id );
 			$this->assertSame( Job::UNDONE, $done->status, $case . ': not cancelled: ' . $done->last_error . ' ' . $done->progress_message );
 			$this->assertGreaterThanOrEqual( $start, $done->finished_at, $case . ': undone as of now' );
 			$this->assertSame( 0, $done->work_expired_at, $case );
@@ -408,6 +411,23 @@ final class PutBackTest extends SwapTestCase {
 			$this->assertSame( $restored['tables'], $this->site()['tables'], $case );
 			$this->assertNothingLeft( $case . ': redone' );
 		}
+	}
+
+	public function test_a_put_back_of_a_swap_half_made_stuck_itself_is_put_back_again_and_still_cancelled(): void {
+		list( $job, $before ) = $this->half();
+		$this->claim( $job );
+		$this->killed_at( Plugin::instance()->jobs()->find( $job->id ), 'table_back', 1 );
+		$stuck = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertSame( Job::SITE_CHANGING, $stuck->site_state, 'the control: the put-back half made' );
+		$this->assertFalse( SwapStep::undoing( $stuck->cursor ), 'no undo\'s: the swap it put back was never made' );
+		$told = $this->actions()->put_back( $job->id, '' );
+		$this->assertTrue( $told['ok'], $told['message'] );
+		$this->assertStringContainsString( 'Its restored copy is removed with it', implode( "\n", $told['lines'] ) );
+		$this->claim( $stuck );
+		list( $done ) = $this->run_out( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( Job::CANCELLED, $done->status, $done->last_error . ' ' . $done->progress_message );
+		$this->assertSame( $before, $this->site() );
+		$this->assertNothingLeft( 'cancelled' );
 	}
 
 	public function test_with_its_cursor_and_options_unreadable_a_restore_is_put_back_all_the_same(): void {

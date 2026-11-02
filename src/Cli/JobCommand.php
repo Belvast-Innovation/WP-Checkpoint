@@ -339,8 +339,8 @@ final class JobCommand {
 	 * and what is there, in maintenance mode while that is done.
 	 *
 	 * A swap that was half made is rolled back and the restore cancelled; a redo (job redo) half made is rolled back
-	 * and the restore is undone again as of its undo, its restored copy kept as before; an undo (job undo) half made is
-	 * rolled back as that undo, and the restore ends undone as of the put-back (the restored site is kept for 7 days);
+	 * and the restore is undone again as of its undo, its restored copy kept as before; an undo (job undo, or an earlier
+	 * put-back of a swap that was made) half made is reversed as that undo, and the restore ends undone as of the put-back (the restored site is kept for 7 days);
 	 * and when the job's position
 	 * cannot be read (it may have been a redo), the restore is cancelled with its restored copy kept for 7 days. A swap
 	 * that was made is reversed as an undo: everything written on the site since is dropped, and the restore ends
