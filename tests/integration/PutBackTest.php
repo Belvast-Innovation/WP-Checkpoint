@@ -419,7 +419,7 @@ final class PutBackTest extends SwapTestCase {
 		$this->assertSame( Job::CANCELLED, $done->status );
 		$this->assertTrue( SwapStep::keeps_work( $done ) );
 		$this->assertSame( $kept, $this->restored_copy( $done ), 'kept through the cancel\'s cleanup' );
-		$this->remove_maintenance();
+		$this->assertSame( array(), $this->maintenance_files(), 'the steps\' cleanup ran: its maintenance file taken down' );
 		// Its time over: reclaimed.
 		$this->set( $job->id, array( 'finished_at' => time() - JobRepository::WORK_RETENTION_SECONDS - 60 ) );
 		Plugin::instance()->jobs()->expire_work();

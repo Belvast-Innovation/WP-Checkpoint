@@ -2749,7 +2749,8 @@ final class JobRepository {
 	/**
 	 * Failed restores at a position of a redo where the site is untouched (SwapStep::BEFORE_REDO), whether their work
 	 * was reclaimed or not (the purge may expire a failed job's work before the pass that settles it at its deadline,
-	 * the two days being the same length): at most 100 a pass, the oldest first.
+	 * the two days being the same length), managed here (settle_undone() writes no other): at most 100 a pass, the
+	 * oldest first.
 	 *
 	 * @return Job[]
 	 */
@@ -2762,7 +2763,7 @@ final class JobRepository {
 			$args[]  = '{"phase":' . $wpdb->esc_like( (string) wp_json_encode( $phase ) ) . ',%';
 		}
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.PreparedSQL.InterpolatedNotPrepared,WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber -- plugin table name from the prefix and one placeholder per phase; the values prepared.
-		$rows = $wpdb->get_results( $wpdb->prepare( 'SELECT * FROM ' . self::table() . ' WHERE status = %s AND step = %s AND site_state = %d AND (' . implode( ' OR ', $likes ) . ') ORDER BY finished_at ASC, id ASC LIMIT 100', $args ), ARRAY_A );
+		$rows = $wpdb->get_results( $wpdb->prepare( 'SELECT * FROM ' . self::table() . ' WHERE status = %s AND step = %s AND site_state = %d AND (' . implode( ' OR ', $likes ) . ')', $args ) . ' AND ' . Job::MANAGING_SQL . ' IN (' . self::held_sql( $this->held_tokens() ) . ') ORDER BY finished_at ASC, id ASC LIMIT 100', ARRAY_A );
 		$out  = array();
 		foreach ( is_array( $rows ) ? $rows : array() as $row ) {
 			$out[] = self::hydrate( $row );

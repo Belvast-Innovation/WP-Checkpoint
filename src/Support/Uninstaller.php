@@ -395,7 +395,7 @@ final class Uninstaller {
 				$what = sprintf( 'restore job %d was undone and is being swapped back in (wp wpcheckpoint job redo), or asks how to go on', $undo['id'] );
 				break;
 			case 'kept':
-				$what = sprintf( 'restore job %d was put back and cancelled while its position could not be read, so it may have been a redo of an undone restore', $undo['id'] );
+				$what = sprintf( 'restore job %d is being put back, or was, and cancelled while its position could not be read, so it may have been a redo of an undone restore', $undo['id'] );
 				break;
 			default:
 				$what = sprintf( 'an undo of restore job %d put the site back and has not ended', $undo['id'] );
@@ -446,9 +446,9 @@ final class Uninstaller {
 	 * untouched, so not in "all"), each with the time it is kept until: an undone one or a failed one until its work
 	 * expires (JobRepository::expire_work(), WORK_RETENTION_SECONDS after it ended), one still going on with none yet
 	 * (0), a redo of one (it swaps that restored site back in, or asks how to go on) likewise, and a swap whose
-	 * position cannot be read, which may be one of them, likewise; and a restore cancelled by a put-back that keeps its
-	 * restored copy (its position could not be read, so it may have been a redo: SwapStep::keeps_work()), until its
-	 * work expires.
+	 * position cannot be read, which may be one of them, likewise; and a put-back that keeps its restored copy (its
+	 * position could not be read, so it may have been a redo: SwapStep::keeps_work()): cancelled or failed, until its
+	 * work expires; still going on, with no time yet.
 	 *
 	 * None of them appears during an uninstall but one way: they come from jobs that held the site changed, which keep
 	 * the uninstall from starting, and no swap enters the site through the closed fence. The way: a failed undo past
