@@ -55,6 +55,7 @@ final class PutBackTest extends SwapTestCase {
 		}
 		$this->rows = array();
 		Plugin::instance()->job_actions()->put_back_gate( new PutBack( Plugin::instance()->jobs() ) );
+		Plugin::instance()->job_actions()->redo_gate( new \WPCheckpoint\Jobs\Redo( Plugin::instance()->jobs() ) );
 		parent::tear_down();
 	}
 
@@ -182,6 +183,24 @@ final class PutBackTest extends SwapTestCase {
 	}
 
 	/**
+	 * The job's restored copy: its tables under the staging names (TempTables), and whether its work directory is there.
+	 *
+	 * @param Job $job Job.
+	 * @return array{tables: string[], work: bool}
+	 */
+	private function restored_copy( Job $job ): array {
+		global $wpdb;
+		$wpdb->query( 'COMMIT' );
+		$prefix = \WPCheckpoint\Jobs\TempTables::job_prefix( $job->storage_token, $job->id );
+		$tables = (array) $wpdb->get_col( $wpdb->prepare( 'SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND LEFT(TABLE_NAME, %d) = %s', strlen( $prefix ), $prefix ) );
+		clearstatcache();
+		return array(
+			'tables' => $tables,
+			'work'   => is_dir( $this->work( $job ) ),
+		);
+	}
+
+	/**
 	 * The maintenance file and the self-check row are gone, and no job holds the site.
 	 *
 	 * @param string $why Label.
@@ -195,6 +214,8 @@ final class PutBackTest extends SwapTestCase {
 		list( $job, $before ) = $this->half();
 		$raw                  = Plugin::instance()->jobs()->put_back_raw( $job->id );
 		$half                 = $this->site();
+		$this->assertNotSame( array(), $this->restored_copy( $job )['tables'], 'the control: the restored copy is there' );
+		$this->assertTrue( $this->restored_copy( $job )['work'], 'the control: its work directory too' );
 
 		$told = $this->actions()->put_back( $job->id, '' );
 		$this->assertTrue( $told['ok'], $told['message'] );
@@ -202,6 +223,7 @@ final class PutBackTest extends SwapTestCase {
 		$this->assertMatchesRegularExpression( '/\A[0-9a-f]{16}\z/', $told['code'] );
 		$this->assertStringContainsString( 'put-back ' . $job->id . ' --confirm=' . $told['code'], $told['message'] );
 		$this->assertStringContainsString( 'the restore is cancelled', implode( "\n", $told['lines'] ) );
+		$this->assertStringContainsString( 'Its restored copy is removed with it', implode( "\n", $told['lines'] ) );
 		$this->assertSame( $half, $this->site(), 'nothing changed' );
 		$this->assertSame( $raw, Plugin::instance()->jobs()->put_back_raw( $job->id ), 'the row as it was' );
 
@@ -229,6 +251,15 @@ final class PutBackTest extends SwapTestCase {
 		$this->assertStringContainsString( 'put back', $said, 'the command says it' );
 		$this->assertNothingLeft( 'cancelled' );
 		$this->assertDirectoryExists( $dir, 'what the claim wrote over stays (the cancel reclaims the work directory only)' );
+		$this->assertSame(
+			array(
+				'tables' => array(),
+				'work'   => false,
+			),
+			$this->restored_copy( $done ),
+			'its cursor was read and is no redo\'s: the restored copy goes at the cancel'
+		);
+		$this->assertArrayNotHasKey( 'keep_work', $done->cursor );
 	}
 
 	public function test_a_committed_swap_is_put_back_as_an_undo_and_the_restore_ends_undone(): void {
@@ -249,6 +280,38 @@ final class PutBackTest extends SwapTestCase {
 		$this->assertStringContainsString( 'put back as it was before the restore', $done->progress_message );
 		$this->assertFalse( $done->can_retry(), 'an undone restore is not run again' );
 		$this->assertNothingLeft( 'undone' );
+	}
+
+	public function test_a_committed_swap_put_back_is_swapped_back_in_by_a_redo_unless_its_options_were_reset(): void {
+		foreach ( array( 'options', 'reset' ) as $case ) {
+			$this->tear_down_swap();
+			$this->set_up_swap();
+			list( $job, $before ) = $this->committed();
+			$restored             = array( 'maintenance' => false ) + $this->site();
+			if ( 'reset' === $case ) {
+				$this->set( $job->id, array( 'options_json' => 'not json' ) );
+			}
+			$this->claim( Plugin::instance()->jobs()->find( $job->id ) );
+			list( $done ) = $this->run_out( Plugin::instance()->jobs()->find( $job->id ) );
+			$this->assertSame( Job::UNDONE, $done->status, $case . ': ' . $done->last_error );
+			$this->assertSame( $before, $this->site(), $case );
+			$actions = Plugin::instance()->job_actions();
+			$actions->redo_gate( $this->redo_checks() );
+			$told = $actions->redo( $job->id, '' );
+			if ( 'reset' === $case ) {
+				$this->assertFalse( $told['ok'], 'options reset by the put-back: refused' );
+				$this->assertStringContainsString( 'were reset when it was put back', $told['message'] );
+				$this->assertSame( Job::UNDONE, Plugin::instance()->jobs()->find( $job->id )->status );
+				continue;
+			}
+			$this->assertTrue( $told['ok'], $told['message'] );
+			$this->assertTrue( $actions->redo( $job->id, $told['code'] )['ok'] );
+			$this->assertSame( RunLoop::EXIT_COMPLETED, $this->loop_code( Plugin::instance()->jobs()->find( $job->id ) ), $case );
+			$this->assertSame( Job::COMPLETED, Plugin::instance()->jobs()->find( $job->id )->status, $case );
+			$this->assertSame( $restored['files'], $this->site()['files'], $case . ': the restored site back in' );
+			$this->assertSame( $restored['tables'], $this->site()['tables'], $case );
+			$this->assertNothingLeft( $case );
+		}
 	}
 
 	public function test_with_its_cursor_and_options_unreadable_a_restore_is_put_back_all_the_same(): void {
@@ -282,6 +345,86 @@ final class PutBackTest extends SwapTestCase {
 			$this->assertSame( $before, $this->site(), $case . ': the site as it was before the restore' );
 			$this->assertNothingLeft( $case );
 		}
+	}
+
+	public function test_a_swap_half_made_whose_cursor_cannot_be_read_is_cancelled_with_its_restored_copy_kept_for_7_days(): void {
+		list( $job, $before ) = $this->half();
+		$this->set( $job->id, array( 'cursor_json' => '{"phase":"dirs","undone_at":' ) ); // Cut short: a redo's, or not.
+		$read = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertContains( 'cursor_json', $read->unreadable_columns, 'the control: it cannot be read' );
+		$told = $this->actions()->put_back( $job->id, '' );
+		$this->assertTrue( $told['ok'], $told['message'] );
+		$this->assertStringContainsString( 'whether it was a redo cannot be told: its restored copy is kept for 7 days, then removed', implode( "\n", $told['lines'] ) );
+		$this->claim( $read );
+		$claimed = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertTrue( $claimed->cursor['keep_work'] ?? false );
+		$this->assertGreaterThan( 0, $claimed->cancel_requested, 'it ends cancelled' );
+		// Killed once it is put back: the next run ends it the same (the cursor carries what to keep).
+		$this->killed_at( $claimed, 'restored' );
+		list( $done ) = $this->run_out( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( Job::CANCELLED, $done->status, $done->last_error . ' ' . $done->progress_message );
+		$this->assertTrue( SwapStep::keeps_work( $done ) );
+		$this->assertStringContainsString( 'Whether it was a redo could not be told, so its restored copy is kept for 7 days', $done->progress_message );
+		$this->assertSame( $before, $this->site() );
+		$this->assertNothingLeft( 'cancelled' );
+		$kept = $this->restored_copy( $done );
+		$this->assertNotSame( array(), $kept['tables'], 'its restored copy kept' );
+		$this->assertTrue( $kept['work'] );
+		$this->assertContains(
+			array(
+				'id'    => $job->id,
+				'until' => $done->finished_at + JobRepository::WORK_RETENTION_SECONDS,
+				'how'   => 'kept',
+			),
+			\WPCheckpoint\Support\Uninstaller::holding()['undo'],
+			'an uninstall keeps it too'
+		);
+		// Not an orphan to the residue rules while it is kept.
+		Plugin::instance()->jobs()->reap();
+		$this->assertSame( $kept, $this->restored_copy( $done ), 'kept through a reap' );
+		Plugin::instance()->jobs()->expire_work();
+		$this->assertSame( $kept, $this->restored_copy( $done ), 'and through the expiry, before its time' );
+		// Its time over: reclaimed as a failed job's work.
+		$this->set( $job->id, array( 'finished_at' => time() - JobRepository::WORK_RETENTION_SECONDS - 60 ) );
+		Plugin::instance()->jobs()->expire_work();
+		$gone = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertGreaterThan( 0, $gone->work_expired_at );
+		$this->assertSame(
+			array(
+				'tables' => array(),
+				'work'   => false,
+			),
+			$this->restored_copy( $gone )
+		);
+	}
+
+	public function test_a_put_back_that_keeps_its_restored_copy_keeps_it_through_a_cancel_and_an_uninstall_before_its_end(): void {
+		list( $job ) = $this->half();
+		$this->set( $job->id, array( 'cursor_json' => '{"phase":"dirs","undone_at":' ) );
+		$this->claim( Plugin::instance()->jobs()->find( $job->id ) );
+		// Put back, recorded untouched, and stopped before its end (its maintenance file not down yet).
+		$this->killed_at( Plugin::instance()->jobs()->find( $job->id ), 'reverted' );
+		$stopped = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertSame( 'reverted', $stopped->cursor['phase'] ?? '', 'the control: stopped where meant' );
+		$this->assertSame( Job::SITE_UNTOUCHED, $stopped->site_state );
+		$this->assertTrue( $stopped->cursor['keep_work'] ?? false );
+		$this->assertNotSame( array(), $this->maintenance_files(), 'the control: its maintenance file still up' );
+		$kept = $this->restored_copy( $stopped );
+		$this->assertNotSame( array(), $kept['tables'], 'the control: the restored copy is there' );
+		// An uninstall now keeps it, though the job has not ended.
+		$this->assertSame( 'kept', array_column( \WPCheckpoint\Support\Uninstaller::holding()['undo'], 'how', 'id' )[ $job->id ] ?? '' );
+		// A cancel taken with the lock: the job cancelled, its restored copy left as the put-back's own end leaves it.
+		$out = Plugin::instance()->job_actions()->cancel( $job->id );
+		$this->assertSame( 'cleaned', $out['reason'], 'the control: the cancel took the job and ran the cleanup' );
+		$done = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertSame( Job::CANCELLED, $done->status );
+		$this->assertTrue( SwapStep::keeps_work( $done ) );
+		$this->assertSame( $kept, $this->restored_copy( $done ), 'kept through the cancel\'s cleanup' );
+		$this->assertSame( array(), $this->maintenance_files(), 'the steps\' cleanup ran: its maintenance file taken down' );
+		// Its time over: reclaimed.
+		$this->set( $job->id, array( 'finished_at' => time() - JobRepository::WORK_RETENTION_SECONDS - 60 ) );
+		Plugin::instance()->jobs()->expire_work();
+		$this->assertSame( array(), $this->restored_copy( Plugin::instance()->jobs()->find( $job->id ) )['tables'] );
 	}
 
 	public function test_a_row_changed_between_the_read_and_the_claim_is_not_written_over(): void {

@@ -444,7 +444,7 @@ final class Runner {
 				// The step undid what it did to the site after a cancel was requested: cancelled as with the lock.
 				$logger->info( 'The job is cancelled as requested', array( 'step' => $step_id ) );
 				$this->transition( $job, $token, Job::CANCELLED, $e->said ? $e->getMessage() : '' );
-				$this->cleanup( $job );
+				$this->cleanup( $job ); // Not a put-back's that keeps the restored copy (Cancelled::kept(), cleanup()).
 				return new TickResult( TickResult::FINISHED, -1, $job, $this->redactor->redact( $e->getMessage() ) );
 			} catch ( Stopped $e ) {
 				// The answers that stopped it go with the failure: a retry asks those questions again.
@@ -456,9 +456,10 @@ final class Runner {
 					$logger->error( 'A step ended the job as undone while it holds the site changed' );
 					return $this->fail( $job, $token, $logger, sprintf( 'Step "%s": %s', $step_id, $this->describe( $e ) ) );
 				}
-				// Not a failure: undone, as the administrator chose.
+				// Not a failure: undone, as the administrator chose (or back to undone, as of its undo, after a redo that
+				// did not stand: Undone::back()).
 				$logger->info( 'The restore was undone' );
-				$this->transition( $job, $token, Job::UNDONE, $e->getMessage() );
+				$this->transition( $job, $token, Job::UNDONE, $e->getMessage(), '', '', array(), $e->at() );
 				return new TickResult( TickResult::FINISHED, -1, $job, $this->redactor->redact( $e->getMessage() ) );
 			} catch ( RetryFrom $e ) {
 				if ( Job::SITE_UNTOUCHED !== $job->site_state ) {
@@ -611,6 +612,14 @@ final class Runner {
 	 * temporary tables itself (JobRepository::reclaim_work()), whatever the
 	 * steps missed.
 	 *
+	 * For a restore cancelled by a put-back that keeps its restored copy
+	 * (SwapStep::keeps_work()), whichever way it was cancelled (its own step,
+	 * a cancel taken with the lock, a driver that lost the lock to it), the
+	 * steps' cleanup runs (the swap's takes its maintenance file down) and the
+	 * engine's reclaim does not: its work goes after
+	 * JobRepository::WORK_RETENTION_SECONDS, as a failed job's
+	 * (JobRepository::expire_work()).
+	 *
 	 * @param Job $job Cancelled job.
 	 * @return int Steps cleaned.
 	 */
@@ -654,7 +663,11 @@ final class Runner {
 				break;
 			}
 		}
-		$this->repository->reclaim_work( $job );
+		if ( SwapStep::keeps_work( $job ) ) {
+			$logger->info( 'The restored copy is kept', array( 'days' => (int) ( JobRepository::WORK_RETENTION_SECONDS / 86400 ) ) );
+		} else {
+			$this->repository->reclaim_work( $job );
+		}
 		$logger->info( 'Cleanup finished', array( 'steps' => $cleaned ) );
 		return $cleaned;
 	}
@@ -976,12 +989,13 @@ final class Runner {
 	 * @param string   $failure Kind of a failure (Job::FAILURE_*).
 	 * @param string   $retry_from Id of the step a retry of a failed job starts at ('' for none).
 	 * @param string[] $forget   Ids of questions whose answers a failure removes.
+	 * @param int      $at       For undone: the finished_at to write (Undone::at(); 0 for now).
 	 * @return void
 	 * @throws LockLost When the write refused.
 	 */
-	private function transition( Job $job, string $token, string $to, string $error, string $failure = '', string $retry_from = '', array $forget = array() ): void {
+	private function transition( Job $job, string $token, string $to, string $error, string $failure = '', string $retry_from = '', array $forget = array(), int $at = 0 ): void {
 		try {
-			$this->repository->transition( $job, $to, $error, $token, $failure, $retry_from, $forget );
+			$this->repository->transition( $job, $to, $error, $token, $failure, $retry_from, $forget, $at );
 		} catch ( StaleJob $e ) {
 			throw new LockLost( $e->getMessage(), 0, $e ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
 		}

@@ -14,7 +14,7 @@ use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 final class CancelReasonsTest extends TestCase {
 
 	/** The reasons of a cancel that did something: cancelled, cleaned up, or requested. */
-	const ACCEPTED = array( 'cleaned', 'holder', 'unavailable', 'requested', 'undo_given_up', 'undo_requested' );
+	const ACCEPTED = array( 'cleaned', 'holder', 'unavailable', 'requested', 'undo_given_up', 'undo_requested', 'redo_given_up', 'redo_requested' );
 
 	/**
 	 * The reasons written in a source: as the value of "reason" in cancel(), assigned to $reason, or returned (or

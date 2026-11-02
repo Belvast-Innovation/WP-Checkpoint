@@ -191,15 +191,16 @@ final class JobPresenter {
 	}
 
 	/**
-	 * Why an undone restore is not retried: a retry would swap the restored copy back in and drop what was written
-	 * since the undo, and it could not even do that (the copy is no longer what the import left).
+	 * Why an undone restore is not retried: a retry would start over at the final check, which the restored copy no
+	 * longer passes (it is no longer what the import left). Swapping it back in is its own command, which says what it
+	 * drops and asks for a confirmation code (Redo).
 	 *
 	 * @param int $id Job id.
 	 * @return string
 	 */
 	public static function undone_note( int $id ): string {
 		/* translators: 1: job id, 2: days */
-		return sprintf( __( 'Restore job %1$d was undone; it is not retried. Swapping the restored copy back in comes in a later version; the restored copy is kept until %2$d days after the undo.', 'wp-checkpoint' ), $id, (int) ( JobRepository::WORK_RETENTION_SECONDS / 86400 ) );
+		return sprintf( __( 'Restore job %1$d was undone; it is not retried. The restored copy is kept until %2$d days after the undo, and until then it can be swapped back in with wp wpcheckpoint job redo %1$d.', 'wp-checkpoint' ), $id, (int) ( JobRepository::WORK_RETENTION_SECONDS / 86400 ) );
 	}
 
 	/**

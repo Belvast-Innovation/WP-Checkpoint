@@ -8,6 +8,7 @@ use WPCheckpoint\Jobs\Budget;
 use WPCheckpoint\Jobs\FileStagingStep;
 use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\JobActions;
+use WPCheckpoint\Jobs\Redo;
 use WPCheckpoint\Jobs\Loopback;
 use WPCheckpoint\Jobs\RestoreFilesPreflightStep;
 use WPCheckpoint\Jobs\RestoreJob;
@@ -301,15 +302,38 @@ abstract class SwapTestCase extends RestoreTestCase {
 			}
 		}
 		// The test case's restore type ends at the final check (RestoreTestCase); the swap comes after it.
+		$type  = 'restore_swap_' . bin2hex( random_bytes( 3 ) );
 		$parts = $more + $this->swap_parts;
 		if ( ! $this->real_checks && ! isset( $parts['verify'] ) && ! isset( $parts['http'] ) ) {
 			$parts['verify'] = static function (): bool {
 				return true; // The restored site's checks stood in for: passed.
 			};
 		}
-		$steps[] = new SwapStep( $connect, $parts );
-		$this->type = 'restore_swap_' . bin2hex( random_bytes( 3 ) );
+		if ( ! isset( $parts['redo'] ) ) {
+			$parts['redo'] = $this->redo_checks( $type ); // A redo's checks of this sandbox's site.
+		}
+		$steps[]    = new SwapStep( $connect, $parts );
+		$this->type = $type;
 		$this->register( $this->type, $steps );
+	}
+
+	/**
+	 * The checks of a redo (Jobs\Redo) for the sandbox's site: its WordPress directory, the restore type, this plugin
+	 * as its stand-in copy has it (PluginStandIn: a copy of version PluginCopy::VERSION is what the restore staged).
+	 *
+	 * @param string $type    The restore type ('' for the test's).
+	 * @param string $version The version of the running plugin the checks hold the restored copy to.
+	 * @return Redo
+	 */
+	protected function redo_checks( string $type = '', string $version = PluginCopy::VERSION ): Redo {
+		return new Redo(
+			$this->installation_jobs(),
+			array(
+				'abspath'       => $this->abspath,
+				'restore_types' => array( '' === $type ? $this->type : $type ),
+				'plugin'        => array( 'version' => $version ),
+			)
+		);
 	}
 
 	/**
@@ -793,6 +817,7 @@ abstract class SwapTestCase extends RestoreTestCase {
 					'sql_at'  => $this->child_sql,
 					'admin'   => self::$admin_id,
 					'storage' => $this->storage,
+					'redo'    => PluginCopy::VERSION,
 				)
 			)
 		);

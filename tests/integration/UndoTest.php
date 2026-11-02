@@ -175,7 +175,7 @@ final class UndoTest extends SwapTestCase {
 		$this->assertSame( Job::UNDONE, Plugin::instance()->jobs()->find( $job->id )->status );
 		$response = $this->rest( 'POST', 'jobs/' . $job->id . '/retry' );
 		$this->assertSame( 409, $response->get_status() );
-		$this->assertStringContainsString( 'Swapping the restored copy back in comes in a later version; the restored copy is kept until 7 days after the undo.', (string) ( $response->get_data()['message'] ?? '' ) );
+		$this->assertStringContainsString( 'The restored copy is kept until 7 days after the undo, and until then it can be swapped back in with wp wpcheckpoint job redo ' . $job->id . '.', (string) ( $response->get_data()['message'] ?? '' ) );
 		$this->assertSame( Job::UNDONE, Plugin::instance()->jobs()->find( $job->id )->status, 'still undone' );
 	}
 
@@ -635,7 +635,7 @@ final class UndoTest extends SwapTestCase {
 		$this->assertSame( Job::UNDONE, $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) )->status );
 	}
 
-	public function test_a_check_of_the_site_that_fails_after_the_undo_is_said_and_the_site_let_out_all_the_same(): void {
+	public function test_a_check_of_the_site_that_fails_after_the_undo_lets_the_site_out_and_then_asks_whether_to_keep_it(): void {
 		global $wpdb;
 		$before = $this->site();
 		$job    = $this->completed();
@@ -643,9 +643,14 @@ final class UndoTest extends SwapTestCase {
 		$told = $this->actions()->undo( $job->id, '' );
 		$this->assertTrue( $this->actions()->undo( $job->id, $told['code'] )['ok'] );
 		$this->seams = array();
-		$done        = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
-		$this->assertSame( Job::UNDONE, $done->status, 'undone all the same: no question, no reverse' );
+		$asked       = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( Job::PAUSED, $asked->status, 'asked, with the site let out: no reverse' );
+		$this->assertSame( SwapStep::AFTER_UNDO_QUESTION, $asked->questions[0]['id'] ?? '' );
+		$this->assertSame( Job::SITE_UNTOUCHED, $asked->site_state );
 		$this->assertContains( 'undo_checked', $this->seams );
+		$this->assertSame( 'the home page did not answer as a WordPress site', \WPCheckpoint\Jobs\ExportPlan::read( $this->work( $asked ), RestoreFiles::AFTER_UNDO )['found'] );
+		$done = Plugin::instance()->job_actions()->answer( $job->id, array( SwapStep::AFTER_UNDO_QUESTION => RestoreJob::KEEP ) );
+		$this->assertSame( Job::UNDONE, $done->status, 'kept at the answer' );
 		$this->assertStringContainsString( 'the site\'s check then failed: the home page did not answer as a WordPress site', $done->progress_message );
 		$this->assertStringContainsString( 'did not pass its check; it is let out all the same', Plugin::instance()->job_presenter()->log_tail( $done ) );
 		$this->assertSame( $before, $this->site(), 'the site as it was before the restore, its maintenance file down' );
@@ -683,9 +688,12 @@ final class UndoTest extends SwapTestCase {
 				break;
 			}
 		}
-		$this->assertSame( Job::UNDONE, $done->status );
+		$this->assertSame( Job::PAUSED, $done->status, 'then asked, as for a check that failed' );
+		$this->assertSame( SwapStep::AFTER_UNDO_QUESTION, $done->questions[0]['id'] ?? '' );
 		$this->assertSame( SwapStep::CHECK_WAITS, $waits, 'checked again after each wait' );
-		$this->assertStringContainsString( 'the site could not be checked: the home page did not answer', $done->progress_message );
+		$this->assertStringContainsString( 'the home page did not answer', \WPCheckpoint\Jobs\ExportPlan::read( $this->work( $done ), RestoreFiles::AFTER_UNDO )['found'] );
+		$kept = Plugin::instance()->job_actions()->answer( $job->id, array( SwapStep::AFTER_UNDO_QUESTION => RestoreJob::KEEP ) );
+		$this->assertStringContainsString( 'the site could not be checked: the home page did not answer', $kept->progress_message );
 	}
 
 	public function test_the_exit_code_of_an_undo_says_whether_the_site_as_put_back_passed_its_check(): void {
@@ -699,7 +707,13 @@ final class UndoTest extends SwapTestCase {
 			$this->assertTrue( $this->actions()->undo( $job->id, $told['code'] )['ok'], $verdict );
 			$lines = array();
 			$code  = $this->loop_code( Plugin::instance()->jobs()->find( $job->id ), $lines );
-			$done  = Plugin::instance()->jobs()->find( $job->id );
+			$codes[ $verdict . ' (job undo)' ] = $code;
+			if ( 'passed' !== $verdict ) {
+				// Asked with the site let out; kept, "job run" says what the check found.
+				Plugin::instance()->job_actions()->answer( $job->id, array( SwapStep::AFTER_UNDO_QUESTION => RestoreJob::KEEP ) );
+				$code = $this->loop_code( Plugin::instance()->jobs()->find( $job->id ), $lines );
+			}
+			$done = Plugin::instance()->jobs()->find( $job->id );
 			$this->assertSame( Job::UNDONE, $done->status, $verdict . ': undone all the same' );
 			$said  = array(
 				'passed'  => 'The restore was undone: the site is as it was before it.',
@@ -712,9 +726,12 @@ final class UndoTest extends SwapTestCase {
 		}
 		$this->assertSame(
 			array(
-				'passed'  => RunLoop::EXIT_COMPLETED,
-				'failed'  => RunLoop::EXIT_UNCHECKED,
-				'unknown' => RunLoop::EXIT_UNCHECKED,
+				'passed (job undo)'  => RunLoop::EXIT_COMPLETED,
+				'passed'             => RunLoop::EXIT_COMPLETED,
+				'failed (job undo)'  => RunLoop::EXIT_PAUSED,
+				'failed'             => RunLoop::EXIT_UNCHECKED,
+				'unknown (job undo)' => RunLoop::EXIT_PAUSED,
+				'unknown'            => RunLoop::EXIT_UNCHECKED,
 			),
 			$codes
 		);
