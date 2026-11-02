@@ -363,7 +363,7 @@ final class PutBackTest extends SwapTestCase {
 			list( $job, $before, $restored ) = $this->half_undo( $case );
 			$told                            = $this->actions()->put_back( $job->id, '' );
 			$this->assertTrue( $told['ok'], $case . ': ' . $told['message'] );
-			$this->assertStringContainsString( 'The undo was not complete', implode( "\n", $told['lines'] ), $case );
+			$this->assertStringContainsString( 'The undo (or an earlier put-back of the restore) was not complete', implode( "\n", $told['lines'] ), $case );
 			$this->assertStringContainsString( 'the restore ends undone', implode( "\n", $told['lines'] ), $case );
 			$this->assertStringContainsString( 'kept for 7 days', implode( "\n", $told['lines'] ), $case );
 			// The code binds how it ends: the row's cursor made no undo's, the code given is refused and nothing changes.
