@@ -366,6 +366,20 @@ final class PutBackTest extends SwapTestCase {
 			$this->assertStringContainsString( 'The undo was not complete', implode( "\n", $told['lines'] ), $case );
 			$this->assertStringContainsString( 'the restore ends undone', implode( "\n", $told['lines'] ), $case );
 			$this->assertStringContainsString( 'kept for 7 days', implode( "\n", $told['lines'] ), $case );
+			// The code binds how it ends: the row's cursor made no undo's, the code given is refused and nothing changes.
+			$raw   = Plugin::instance()->jobs()->put_back_raw( $job->id );
+			$other = $job->cursor;
+			unset( $other['out'] );
+			$this->set( $job->id, array( 'cursor_json' => wp_json_encode( $other ) ) );
+			$again = $this->actions()->put_back( $job->id, '' );
+			$this->assertTrue( $again['ok'], $case . ': ' . $again['message'] );
+			$this->assertStringContainsString( 'the restore is cancelled', implode( "\n", $again['lines'] ), $case . ': the control: no undo\'s now' );
+			$this->assertNotSame( $told['code'], $again['code'], $case );
+			$wrong = $this->actions()->put_back( $job->id, $told['code'] );
+			$this->assertFalse( $wrong['ok'], $case );
+			$this->assertStringContainsString( 'does not match', $wrong['message'], $case );
+			$this->set( $job->id, array( 'cursor_json' => $raw['cursor_json'] ) );
+			$this->assertSame( $raw, Plugin::instance()->jobs()->put_back_raw( $job->id ), $case . ': the row as it was' );
 			$start = time();
 			$this->claim( $job );
 			$claimed = Plugin::instance()->jobs()->find( $job->id );
