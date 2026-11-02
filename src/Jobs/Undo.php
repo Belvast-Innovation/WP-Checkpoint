@@ -1,6 +1,6 @@
 <?php
 /**
- * Whether a completed restore may be undone, or an undone one swapped back in, and what either would drop.
+ * Whether a completed restore may be undone, and what it would drop.
  *
  * @package WPCheckpoint
  */
@@ -286,7 +286,7 @@ final class Undo {
 	 * @param Queries $db  Connection.
 	 * @return array{attempt: int, entries: array<int, array{seq: int, kind: string, live: string, stage: string, old: string, had_live: bool}>}|string
 	 */
-	private function plan( Job $job, Queries $db ) {
+	public function plan( Job $job, Queries $db ) {
 		$cannot = __( 'The restore\'s plan cannot be read whole, so what the swap changed cannot be told: nothing was changed.', 'wp-checkpoint' );
 		try {
 			$file = ExportPlan::read( Residue::work_dir( $this->repository->files_base( $job ), $job->id ), RestoreFiles::SWAP_PLAN );
@@ -381,7 +381,7 @@ final class Undo {
 	 * @param string $path Path.
 	 * @return bool|null
 	 */
-	private static function exists( string $path ) {
+	public static function exists( string $path ) {
 		clearstatcache( true, $path );
 		if ( false !== @lstat( $path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a path that is not there is the answer.
 			return true;

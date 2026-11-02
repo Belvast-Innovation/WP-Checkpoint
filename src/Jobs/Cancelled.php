@@ -38,4 +38,15 @@ class Cancelled extends \RuntimeException {
 		$e->said = true;
 		return $e;
 	}
+
+	/**
+	 * A put-back's cancel that keeps the restored copy (SwapStep::keeps_work(), read from the cursor the job ends with:
+	 * Runner::cleanup() leaves its work, which goes after JobRepository::WORK_RETENTION_SECONDS, as a failed job's).
+	 *
+	 * @param string $message What the job says at its end.
+	 * @return self
+	 */
+	public static function kept( string $message ): self {
+		return self::said( $message );
+	}
 }

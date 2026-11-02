@@ -68,16 +68,18 @@ final class UninstallFence {
 	 * @param string   $fence   The fence table.
 	 * @param string[] $columns Columns of the job's row.
 	 * @param string[] $formats Their formats (%s, %d), in the same order.
+	 * @param bool     $uncancelled Whether the job's row must also hold no cancel request (a redo's first change of
+	 *                              the site: a cancel requested before it gives the redo up, JobRepository::cancel_redo()).
 	 * @return string
 	 */
-	public static function entering_template( string $jobs, string $fence, array $columns, array $formats ): string {
+	public static function entering_template( string $jobs, string $fence, array $columns, array $formats, bool $uncancelled = false ): string {
 		$set = array();
 		foreach ( array_values( $columns ) as $i => $column ) {
 			$set[] = 'j.`' . str_replace( '`', '', $column ) . '` = ' . ( $formats[ $i ] ?? '%s' );
 		}
 		$set[] = 'f.entries = f.entries + 1';
 		$set[] = 'f.entered_at = %d';
-		return 'UPDATE ' . SqlWriter::identifier( $jobs ) . ' AS j INNER JOIN ' . SqlWriter::identifier( $fence ) . ' AS f ON f.id = %d AND f.state = %s SET ' . implode( ', ', $set ) . ' WHERE j.id = %d AND j.lock_token = %s';
+		return 'UPDATE ' . SqlWriter::identifier( $jobs ) . ' AS j INNER JOIN ' . SqlWriter::identifier( $fence ) . ' AS f ON f.id = %d AND f.state = %s SET ' . implode( ', ', $set ) . ' WHERE j.id = %d AND j.lock_token = %s' . ( $uncancelled ? ' AND j.cancel_requested = 0' : '' );
 	}
 
 	/**
