@@ -29,10 +29,11 @@ defined( 'ABSPATH' ) || exit;
  * to refuse: either may be what keeps the job stuck). The plan's attempt is the highest the table holds with its
  * COMPLETE row (a job that holds the site never writes another: the final check is not run again while it does).
  * Which way: a swap that was half made (changing) is rolled back and the restore cancelled, except that a redo's ends
- * undone again as of its undo, its restored copy kept, and one whose cursor cannot be read is cancelled with its
- * restored copy kept for JobRepository::WORK_RETENTION_SECONDS (2026-11-02: it may have been a redo's, and its copy
- * the only one of what was written on the restored site); one that was committed (swapped) is reversed as an undo,
- * and the restore ends undone.
+ * undone again as of its undo, its restored copy kept; an undo's (the restored site was let out before it) ends
+ * undone as of the put-back, its restored copy kept as an undone restore's; and one whose cursor cannot be read is
+ * cancelled with its restored copy kept for JobRepository::WORK_RETENTION_SECONDS (2026-11-02: it may have been a
+ * redo's or an undo's, and its copy the only one of what was written on the restored site); one that was committed
+ * (swapped) is reversed as an undo, and the restore ends undone.
  *
  * A plan that cannot be read is not guessed at: the site is in a state that needs a person, the job keeps holding it,
  * and what can be read is listed (the plan table's rows of the job by attempt, the job's tables by their names, and
@@ -182,35 +183,41 @@ final class PutBack {
 			$plan[] = implode( "\0", array( (string) $entry['seq'], $entry['kind'], $entry['live'], $entry['stage'], $entry['old'], $entry['had_live'] ? '1' : '0' ) );
 		}
 		$way = self::half_way( $job );
-		return substr( hash( 'sha256', implode( "\n", array( 'wpcheckpoint-put-back', (string) $job->id, $job->storage_token, (string) $attempt, (string) $job->site_state, $job->site_mark, (string) $job->committed_at, (string) $way['redo'], $way['keep'] ? 'keep' : '', implode( "\n", $plan ) ) ) ), 0, 16 );
+		return substr( hash( 'sha256', implode( "\n", array( 'wpcheckpoint-put-back', (string) $job->id, $job->storage_token, (string) $attempt, (string) $job->site_state, $job->site_mark, (string) $job->committed_at, (string) $way['redo'], $way['keep'] ? 'keep' : '', $way['undo'] ? 'undo' : '', implode( "\n", $plan ) ) ) ), 0, 16 );
 	}
 
 	/**
 	 * How a put-back of the job ends when its swap was half made, by the cursor its claim writes over: "redo", the time
-	 * of the undo a redo set out from (SwapStep::redo_at(); it ends undone again as of it); "keep", whether its restored
-	 * copy is kept when it ends cancelled (the cursor cannot be read, or is an earlier put-back's that kept it). Neither
-	 * for a swap that was committed (it ends undone, as an undo of now).
+	 * of the undo a redo set out from (SwapStep::redo_at(); it ends undone again as of it); "undo", whether it is an
+	 * undo after the restored site was let out (SwapStep::undoing(), and no redo's: it ends undone as of the put-back,
+	 * as the undo would have); "keep", whether its restored copy is kept when it ends cancelled (the cursor cannot be
+	 * read, or is an earlier put-back's that kept it). None for a swap that was committed (it ends undone, as an undo
+	 * of now).
 	 *
 	 * @param Job $job Job.
-	 * @return array{redo: int, keep: bool}
+	 * @return array{redo: int, keep: bool, undo: bool}
 	 */
 	public static function half_way( Job $job ): array {
 		if ( Job::SITE_SWAPPED === $job->site_state ) {
 			return array(
 				'redo' => 0,
 				'keep' => false,
+				'undo' => false,
 			);
 		}
 		if ( in_array( 'cursor_json', $job->unreadable_columns, true ) ) {
 			return array(
 				'redo' => 0,
 				'keep' => true,
+				'undo' => false,
 			);
 		}
 		$redo = SwapStep::redo_at( $job->cursor );
+		$undo = $redo <= 0 && SwapStep::undoing( $job->cursor );
 		return array(
 			'redo' => $redo,
-			'keep' => $redo <= 0 && true === ( $job->cursor['keep_work'] ?? null ),
+			'keep' => $redo <= 0 && ! $undo && true === ( $job->cursor['keep_work'] ?? null ),
+			'undo' => $undo,
 		);
 	}
 
@@ -413,7 +420,7 @@ final class PutBack {
 	/**
 	 * What a put-back of a swap that was half made does (half_way()).
 	 *
-	 * @param array{redo: int, keep: bool} $way How it ends.
+	 * @param array{redo: int, keep: bool, undo: bool} $way How it ends.
 	 * @return string[]
 	 */
 	private static function half_lines( array $way ): array {
@@ -422,6 +429,12 @@ final class PutBack {
 			return array(
 				/* translators: 1: date and time of the undo (UTC), 2: days */
 				sprintf( __( 'The redo (swapping the restored copy back in) was not complete: the site is put back as the undo of %1$s UTC left it, and the restore is undone again as of that undo. Its restored copy is kept as before: %2$d days from the undo.', 'wp-checkpoint' ), gmdate( 'Y-m-d H:i', $way['redo'] ), $days ),
+			);
+		}
+		if ( $way['undo'] ) {
+			return array(
+				/* translators: %d: days */
+				sprintf( __( 'The undo was not complete: the site is put back as it was before the restore, and the restore ends undone, as of this put-back. Its restored copy is kept for %d days from then, as an undo keeps it.', 'wp-checkpoint' ), $days ),
 			);
 		}
 		if ( $way['keep'] ) {

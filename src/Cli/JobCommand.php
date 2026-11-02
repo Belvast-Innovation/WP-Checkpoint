@@ -339,7 +339,9 @@ final class JobCommand {
 	 * and what is there, in maintenance mode while that is done.
 	 *
 	 * A swap that was half made is rolled back and the restore cancelled; a redo (job redo) half made is rolled back
-	 * and the restore is undone again as of its undo, its restored copy kept as before; and when the job's position
+	 * and the restore is undone again as of its undo, its restored copy kept as before; an undo (job undo) half made is
+	 * rolled back as that undo, and the restore ends undone as of the put-back (the restored site is kept for 7 days);
+	 * and when the job's position
 	 * cannot be read (it may have been a redo), the restore is cancelled with its restored copy kept for 7 days. A swap
 	 * that was made is reversed as an undo: everything written on the site since is dropped, and the restore ends
 	 * undone (the restored site is kept for 7 days). Neither the job's position nor its options are needed. Without
@@ -355,7 +357,7 @@ final class JobCommand {
 	 *
 	 * ## EXIT CODES
 	 *
-	 * As "job run" once the put-back started: 0 when a swap that was made, or a redo half made, was put back (the
+	 * As "job run" once the put-back started: 0 when a swap that was made, or an undo or a redo half made, was put back (the
 	 * restore ended undone), 2 when another swap half made was (the restore ended cancelled, as a put-back of it does);
 	 * 8 when any of them was put back but
 	 * the site as put back then failed its check or could not be checked (what was found is said, and in "job

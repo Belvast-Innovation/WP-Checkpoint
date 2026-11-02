@@ -1626,7 +1626,8 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 
 	/**
 	 * Whether a rollback's cursor is a put-back (wp wpcheckpoint job put-back, JobActions::put_back()): of a swap that was
-	 * committed ("out": it ends undone, as an undo) or of one that was half made (it ends cancelled).
+	 * committed or of an undo half made ("out": it ends undone, as an undo) or of another that was half made (it ends
+	 * cancelled, or undone as of its undo for a redo's).
 	 *
 	 * @param array<string, mixed> $cursor Cursor.
 	 * @return bool
@@ -1828,11 +1829,12 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * evidence directory (PutBackEvidence) holds what the claim wrote over: an answer to keep the restored site puts the
 	 * job back from it.
 	 *
-	 * Of a swap half made, two more cases (2026-11-02): a redo's (the cursor the claim writes over held the time of the
+	 * Of a swap half made, three more cases (2026-11-02): a redo's (the cursor the claim writes over held the time of the
 	 * undo it set out from, $undone_at) ends undone again as of that undo, its restored copy kept as an undone
-	 * restore's, and no cancel recorded; one whose cursor could not be read ($keep: it may have been a redo) ends
-	 * cancelled with its restored copy kept for JobRepository::WORK_RETENTION_SECONDS before it is reclaimed
-	 * ("keep_work", keeps_work()).
+	 * restore's, and no cancel recorded; an undo's after the restored site was let out ($undo, undoing()) is rolled
+	 * back as that undo ("out"): it ends undone as of now, its restored copy kept as an undone restore's, and no
+	 * cancel recorded; one whose cursor could not be read ($keep: it may have been a redo) ends cancelled with its
+	 * restored copy kept for JobRepository::WORK_RETENTION_SECONDS before it is reclaimed ("keep_work", keeps_work()).
 	 *
 	 * @param bool   $committed Whether the swap was committed (the row's site state is swapped).
 	 * @param int    $attempt   The plan's attempt.
@@ -1841,9 +1843,10 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @param string $sum       SHA-256 of its manifest.
 	 * @param int    $undone_at A half-made redo's time of the undo, or 0.
 	 * @param bool   $keep      Whether the half-made swap's cursor could not be read.
+	 * @param bool   $undo      Whether the half-made swap is an undo's after the restored site was let out.
 	 * @return array<string, mixed>
 	 */
-	public static function put_back_cursor( bool $committed, int $attempt, string $mark, string $evidence, string $sum, int $undone_at = 0, bool $keep = false ): array {
+	public static function put_back_cursor( bool $committed, int $attempt, string $mark, string $evidence, string $sum, int $undone_at = 0, bool $keep = false, bool $undo = false ): array {
 		$cursor = array(
 			'phase'        => $committed ? 'reverse' : 'rollback',
 			'attempt'      => $attempt,
@@ -1853,7 +1856,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			'evidence'     => $evidence,
 			'evidence_sum' => $sum,
 		);
-		if ( $committed ) {
+		if ( $committed || ( $undo && $undone_at <= 0 ) ) {
 			$cursor['out'] = true;
 		} elseif ( $undone_at > 0 ) {
 			$cursor['undone_at'] = $undone_at;
