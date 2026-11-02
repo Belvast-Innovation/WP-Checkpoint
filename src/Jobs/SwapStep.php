@@ -513,8 +513,8 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 				return $this->redo_asked( $context, $db, $cursor );
 			}
 			if ( 'redo_stopped' === $phase ) {
-				// Given up with its maintenance file up (stop_redo()), recorded as untouched: the file comes down (again, if
-				// a run died before), and the job ends as given up.
+				// Given up with its maintenance file up (stop_redo()), recorded as untouched once the file was down: taking
+				// it down again finds it gone (or this job's file put back by hand), and the job ends as given up.
 				$this->take_down( $context, $cursor );
 				throw $this->give_up_redo( $context, $cursor, __( 'Where the restore\'s tables and directories are, or the tables made since the undo, did not hold once the maintenance file was up.', 'wp-checkpoint' ) );
 			}
