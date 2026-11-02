@@ -380,7 +380,7 @@ final class Uninstaller {
 	 * @return string
 	 */
 	private static function undo_kept( array $undo ): string {
-		$until = $undo['until'] > 0 ? gmdate( 'Y-m-d H:i', $undo['until'] ) . ' UTC' : '7 days after the undo ends';
+		$until = $undo['until'] > 0 ? gmdate( 'Y-m-d H:i', $undo['until'] ) . ' UTC' : ( 'kept' === $undo['how'] ? '7 days after the put-back ends' : '7 days after the undo ends' );
 		switch ( $undo['how'] ) {
 			case 'undone':
 				$what = sprintf( 'restore job %d was undone', $undo['id'] );
@@ -395,7 +395,7 @@ final class Uninstaller {
 				$what = sprintf( 'restore job %d was undone and is being swapped back in (wp wpcheckpoint job redo), or asks how to go on', $undo['id'] );
 				break;
 			case 'kept':
-				$what = sprintf( 'restore job %d is being put back, or was, and cancelled while its position could not be read, so it may have been a redo of an undone restore', $undo['id'] );
+				$what = sprintf( 'restore job %d was put back, or is being put back, after its position could not be read, so it may have been a redo of an undone restore', $undo['id'] );
 				break;
 			default:
 				$what = sprintf( 'an undo of restore job %d put the site back and has not ended', $undo['id'] );

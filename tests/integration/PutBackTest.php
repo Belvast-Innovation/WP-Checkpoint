@@ -408,6 +408,7 @@ final class PutBackTest extends SwapTestCase {
 		$this->assertSame( 'reverted', $stopped->cursor['phase'] ?? '', 'the control: stopped where meant' );
 		$this->assertSame( Job::SITE_UNTOUCHED, $stopped->site_state );
 		$this->assertTrue( $stopped->cursor['keep_work'] ?? false );
+		$this->assertNotSame( array(), $this->maintenance_files(), 'the control: its maintenance file still up' );
 		$kept = $this->restored_copy( $stopped );
 		$this->assertNotSame( array(), $kept['tables'], 'the control: the restored copy is there' );
 		// An uninstall now keeps it, though the job has not ended.

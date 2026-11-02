@@ -1229,6 +1229,42 @@ final class RedoTest extends SwapTestCase {
 		$this->assertSame( 'redo', $this->jobs()->find( $job->id )->cursor['phase'] ?? '', 'the control: failed at "redo" again' );
 		$this->jobs()->reap();
 		$this->assertSame( Job::UNDONE, $this->jobs()->find( $job->id )->status, 'not left failed' );
+
+		// A hundred older failed redos managed by another installation (a copied database, say), which nothing here can
+		// settle, do not keep this one from its deadline.
+		$cursor = (string) wp_json_encode(
+			array(
+				'phase'     => 'redo',
+				'attempt'   => 1,
+				'mark'      => 'elsewhere',
+				'undone_at' => $past,
+			)
+		);
+		for ( $i = 0; $i < 100; $i++ ) {
+			$this->other(
+				array(
+					'type'          => $this->type,
+					'status'        => Job::FAILED,
+					'step'          => SwapStep::ID,
+					'site_state'    => Job::SITE_UNTOUCHED,
+					'cursor_json'   => $cursor,
+					'storage_token' => 'another-installation',
+					'finished_at'   => time() - 7200,
+				)
+			);
+		}
+		$this->set(
+			$job->id,
+			array(
+				'status'          => Job::FAILED,
+				'finished_at'     => time() - 60,
+				'work_expired_at' => 0,
+			)
+		);
+		$this->set_cursor_time( $job->id, $past );
+		$this->jobs()->reap();
+		$this->assertSame( Job::UNDONE, $this->jobs()->find( $job->id )->status, 'settled past the others' );
+		$this->assertSame( Job::FAILED, $this->jobs()->find( end( $this->rows ) )->status, 'the control: theirs are not this installation\'s to settle' );
 	}
 
 	public function test_answering_redo_clears_a_cancel_request_left_from_before(): void {
