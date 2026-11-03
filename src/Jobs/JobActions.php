@@ -186,7 +186,11 @@ final class JobActions {
 	/**
 	 * Let this installation manage a job that holds the site and is this site's (HeldSite::SITE): wp wpcheckpoint job
 	 * rebind. Refused unless the code confirms it (HeldSite::code()) and, while the direction is not recorded, $then
-	 * says "continue" or "rollback"; once it is recorded, $then is refused (the job only finishes).
+	 * says "continue" or "rollback"; once it is recorded, $then is refused (the job only finishes). A put-back under way
+	 * that ends cancelled (SwapStep::put_back_cancels()) is going one way already: "continue" is refused, as it would
+	 * clear the cancel the put-back ends with; "rollback" keeps it and lets it finish as it would have. A put-back that
+	 * ends undone (an undo's or a redo's) does not rest on the cancel: it takes "continue", and "rollback" too while
+	 * the site is changing (JobRepository::take_over() takes a rollback only then; not at its carry back question).
 	 *
 	 * @param int    $id      Job id.
 	 * @param string $confirm The confirmation code.
@@ -215,6 +219,10 @@ final class JobActions {
 		}
 		if ( '' === $see['direction'] && ! in_array( $then, array( 'continue', 'rollback' ), true ) ) {
 			return self::outcome( false, __( 'Say what the restore does once taken over: --then=continue (it goes on as after any interruption: a swap cut off half way is put back first, then it can be retried) or --then=rollback (it puts the site back as it was and is cancelled). A swap that made every rename before it was interrupted finishes either way: wp wpcheckpoint job status says which applies.', 'wp-checkpoint' ) );
+		}
+		if ( 'continue' === $then && SwapStep::put_back_cancels( $job->cursor ) ) {
+			/* translators: %d: job id */
+			return self::outcome( false, sprintf( __( 'Restore job %d is being put back (wp wpcheckpoint job put-back): it goes that way to its end, so --then=continue is refused. Take it over with --then=rollback: the put-back goes on and ends as it would have.', 'wp-checkpoint' ), $job->id ) );
 		}
 		try {
 			$job = $this->repository->take_over( $job, $then );

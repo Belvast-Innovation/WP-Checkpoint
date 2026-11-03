@@ -1637,6 +1637,19 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	}
 
 	/**
+	 * Whether a put-back's cursor ends the job cancelled: one of a swap half made that is neither an undo's ("out") nor
+	 * a redo's (redo_at()). Its end rests on the cancel its claim recorded (JobRepository::claim_put_back(); Runner
+	 * takes a Cancelled only with a cancel recorded), so nothing may clear that cancel while it goes on
+	 * (JobActions::rebind() refuses --then=continue).
+	 *
+	 * @param array<string, mixed> $cursor Cursor.
+	 * @return bool
+	 */
+	public static function put_back_cancels( array $cursor ): bool {
+		return self::putting_back( $cursor ) && empty( $cursor['out'] ) && self::redo_at( $cursor ) <= 0;
+	}
+
+	/**
 	 * Whether a restore cancelled by a put-back keeps its restored copy for JobRepository::WORK_RETENTION_SECONDS (from
 	 * its end) before it is reclaimed: the cursor the put-back's claim wrote over could not be read, so the swap it put
 	 * back may have been a redo's (put_back_cursor(): "keep_work"). Read from the cursor the job ended with; the jobs
