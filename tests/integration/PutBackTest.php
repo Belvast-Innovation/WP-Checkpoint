@@ -492,7 +492,8 @@ final class PutBackTest extends SwapTestCase {
 		$this->assertSame( '', $held['assessment']['direction'], 'the control: no direction the take-over reads as recorded' );
 		$said = implode( "\n", \WPCheckpoint\Jobs\JobPresenter::held_lines( $held['job'], $held['assessment'] ) );
 		$this->assertStringContainsString( '--then=continue', $said, $said );
-		$this->assertStringNotContainsString( 'being put back', $said, $said );
+		$this->assertStringContainsString( 'the restore ends undone', $said, $said );
+		$this->assertStringNotContainsString( '--then=rollback', $said, 'not offered: a take-over takes a rollback only while the site is changing: ' . $said );
 		$yes = $here->rebind( $job->id, $code, 'continue' );
 		$this->assertTrue( $yes['ok'], $yes['message'] );
 		$this->assertTrue( Plugin::instance()->jobs()->manages( Plugin::instance()->jobs()->find( $job->id ) ), 'taken over' );

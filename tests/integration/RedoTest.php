@@ -1363,7 +1363,10 @@ final class RedoTest extends SwapTestCase {
 		$held = $here->held_elsewhere( $job->id );
 		$this->assertNotNull( $held );
 		$this->assertSame( '', $held['assessment']['direction'] );
-		$this->assertStringContainsString( '--then=continue', implode( "\n", \WPCheckpoint\Jobs\JobPresenter::held_lines( $held['job'], $held['assessment'] ) ), 'it ends undone whatever is chosen: both are offered' );
+		$said = implode( "\n", \WPCheckpoint\Jobs\JobPresenter::held_lines( $held['job'], $held['assessment'] ) );
+		$this->assertStringContainsString( '--then=continue', $said, 'it ends undone whatever is chosen: both are offered' );
+		$this->assertStringContainsString( '--then=rollback', $said, $said );
+		$this->assertStringContainsString( 'the restore ends undone', $said, $said );
 		$yes = $here->rebind( $job->id, \WPCheckpoint\Jobs\HeldSite::code( \WPCheckpoint\Jobs\HeldSite::REBIND, $held['job'], '' ), 'continue' );
 		$this->assertTrue( $yes['ok'], $yes['message'] );
 		$this->assertSame( RunLoop::EXIT_COMPLETED, $this->loop_code( $this->jobs()->find( $job->id ) ) );

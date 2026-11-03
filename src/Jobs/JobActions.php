@@ -189,7 +189,8 @@ final class JobActions {
 	 * says "continue" or "rollback"; once it is recorded, $then is refused (the job only finishes). A put-back under way
 	 * that ends cancelled (SwapStep::put_back_cancels()) is going one way already: "continue" is refused, as it would
 	 * clear the cancel the put-back ends with; "rollback" keeps it and lets it finish as it would have. A put-back that
-	 * ends undone (an undo's or a redo's) does not rest on the cancel, and takes either.
+	 * ends undone (an undo's or a redo's) does not rest on the cancel: it takes "continue", and "rollback" too while
+	 * the site is changing (JobRepository::take_over() takes a rollback only then; not at its carry back question).
 	 *
 	 * @param int    $id      Job id.
 	 * @param string $confirm The confirmation code.
