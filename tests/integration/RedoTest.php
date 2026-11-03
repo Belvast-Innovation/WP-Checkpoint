@@ -1341,7 +1341,7 @@ final class RedoTest extends SwapTestCase {
 		list( $job, $before, , $at ) = $this->half_redo();
 		$told                        = $this->actions()->put_back( $job->id, '' );
 		$this->assertTrue( $this->actions()->put_back( $job->id, $told['code'] )['ok'] );
-		$this->killed_at( $this->jobs()->find( $job->id ), 'table_back' );
+		$this->killed_at( $this->jobs()->find( $job->id ), 'dir_back' );
 		$stuck = $this->jobs()->find( $job->id );
 		$this->assertTrue( SwapStep::putting_back( $stuck->cursor ), 'the control: a put-back under way' );
 		$this->assertSame( $at, SwapStep::redo_at( $stuck->cursor ), 'the control: a redo\'s' );
