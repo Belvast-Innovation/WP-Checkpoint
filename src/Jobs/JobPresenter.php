@@ -148,7 +148,7 @@ final class JobPresenter {
 				$finished = __( 'The swap made every rename before it was interrupted: the restore finishes, and the restored site stays. It is not put back.', 'wp-checkpoint' );
 				$lines[]  = '  wp wpcheckpoint job rebind ' . $id . ' --confirm=' . $code . ' --then=continue  ' . $finished;
 				$lines[]  = '  wp wpcheckpoint job rebind ' . $id . ' --confirm=' . $code . ' --then=rollback  ' . $finished;
-			} elseif ( '' === $see['direction'] && SwapStep::putting_back( $job->cursor ) ) {
+			} elseif ( '' === $see['direction'] && SwapStep::put_back_cancels( $job->cursor ) ) {
 				// Being put back: it goes that way to its end (JobActions::rebind() refuses --then=continue).
 				$lines[] = '  wp wpcheckpoint job rebind ' . $id . ' --confirm=' . $code . ' --then=rollback  ' . __( 'The restore is being put back (wp wpcheckpoint job put-back): the put-back goes on and ends as it would have; it is not taken over to continue otherwise.', 'wp-checkpoint' );
 			} elseif ( '' === $see['direction'] ) {

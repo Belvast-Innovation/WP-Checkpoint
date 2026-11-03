@@ -484,6 +484,25 @@ final class PutBackTest extends SwapTestCase {
 		$this->assertNothingLeft( 'put back' );
 	}
 
+	public function test_a_put_back_asking_about_its_carry_back_is_taken_over_with_then_continue_and_ends_undone(): void {
+		list( $job, , $before ) = $this->asked();
+		$this->assertTrue( SwapStep::putting_back( $job->cursor ), 'the control: a put-back' );
+		$this->assertTrue( $job->cursor['out'] ?? false, 'the control: one that ends undone' );
+		list( $here, $held, $code ) = $this->held_elsewhere( $job );
+		$this->assertSame( '', $held['assessment']['direction'], 'the control: no direction the take-over reads as recorded' );
+		$said = implode( "\n", \WPCheckpoint\Jobs\JobPresenter::held_lines( $held['job'], $held['assessment'] ) );
+		$this->assertStringContainsString( '--then=continue', $said, $said );
+		$this->assertStringNotContainsString( 'being put back', $said, $said );
+		$yes = $here->rebind( $job->id, $code, 'continue' );
+		$this->assertTrue( $yes['ok'], $yes['message'] );
+		$this->assertTrue( Plugin::instance()->jobs()->manages( Plugin::instance()->jobs()->find( $job->id ) ), 'taken over' );
+		Plugin::instance()->job_actions()->answer( $job->id, array( SwapStep::CARRY_QUESTION => SwapStep::PUT_BACK ) );
+		list( $done ) = $this->run_out( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( Job::UNDONE, $done->status, $done->last_error . ' ' . $done->progress_message );
+		$this->assertSame( $before, $this->site() );
+		$this->assertNothingLeft( 'answered' );
+	}
+
 	public function test_a_swap_half_made_and_not_put_back_is_taken_over_with_then_continue_as_before(): void {
 		list( $job, $before ) = $this->half();
 		$this->assertFalse( SwapStep::putting_back( $job->cursor ), 'the control: no put-back' );
