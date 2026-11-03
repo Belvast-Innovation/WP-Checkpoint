@@ -575,11 +575,23 @@ final class PutBackTest extends SwapTestCase {
 		};
 		$this->assertStringContainsString( 'could not carry WP Checkpoint\'s own settings back', $shown( $job ), 'the control: the question is read' );
 		$this->assertStringNotContainsString( 'Here only "put back" can be answered', $shown( $job ), 'the control: keep can be answered from its own storage directory' );
-		// Taken over here from another storage directory: what the put-back wrote over is kept there.
-		list( $here, $held, $code ) = $this->held_elsewhere( $job );
-		$this->assertTrue( $here->rebind( $job->id, $code, 'continue' )['ok'] );
+		// Managed by another installation, from another storage directory: neither answer is offered from here.
+		list( $here ) = $this->held_elsewhere( $job );
 		$this->set( $job->id, array( 'storage_path' => $this->sandbox . '/another-storage-directory' ) );
 		try {
+			$away = Plugin::instance()->jobs()->find( $job->id );
+			$this->assertFalse( Plugin::instance()->jobs()->manages( $away ), 'the control: managed elsewhere' );
+			$this->assertStringContainsString( 'managed by another installation of WP Checkpoint: it is answered there, or taken over here first with wp wpcheckpoint job rebind ' . $job->id, $shown( $away ) );
+			$this->assertStringNotContainsString( 'Here only "put back" can be answered', $shown( $away ), 'no answer offered that is not taken' );
+			try {
+				Plugin::instance()->job_actions()->answer( $job->id, array( SwapStep::CARRY_QUESTION => RestoreJob::KEEP ) );
+				$this->fail( 'keep is refused while it is managed elsewhere' );
+			} catch ( \WPCheckpoint\Jobs\PutBackNotKept $e ) {
+				$this->assertStringContainsString( 'managed by another installation', $e->getMessage() );
+			}
+			// Taken over here: what the put-back wrote over is kept in that other storage directory.
+			$code = \WPCheckpoint\Jobs\HeldSite::code( \WPCheckpoint\Jobs\HeldSite::REBIND, $away, '' );
+			$this->assertTrue( $here->rebind( $job->id, $code, 'continue' )['ok'] );
 			$this->refused_keep_from_elsewhere( $job, $shown );
 		} finally {
 			$this->set( $job->id, array( 'storage_path' => $job->storage_path ) ); // Its own again, for the cleanup at the end.
