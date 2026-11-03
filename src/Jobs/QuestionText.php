@@ -95,6 +95,10 @@ final class QuestionText {
 					break;
 				case SwapStep::CARRY_KIND:
 					$text = self::carry( $job, $question, $carry );
+					if ( SwapStep::putting_back( $job->cursor ) && '' === $work ) {
+						// Taken over from another storage directory: what keep needs is there (JobRepository::not_kept_here()).
+						$text .= ' ' . __( 'Here only "put back" can be answered: what the put-back wrote over is kept in another storage directory, so keep cannot put the job back as it was from here.', 'wp-checkpoint' );
+					}
 					break;
 				case SwapStep::REDO_CARRY_KIND:
 					$text = self::redo_carry( $job, $question, $carry );

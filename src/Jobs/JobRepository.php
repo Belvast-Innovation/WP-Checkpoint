@@ -1120,6 +1120,27 @@ final class JobRepository {
 	}
 
 	/**
+	 * Why a put-back's question about its carry back cannot be answered "keep" from here ('' when it can be tried):
+	 * the job is managed by another installation, or what the claim wrote over (PutBackEvidence) is kept in another
+	 * storage directory than this one (the job was taken over here from it): only "put back" can be answered then.
+	 * Read before anything is written (JobActions::answer(), give_up_put_back()).
+	 *
+	 * @param Job $job Job.
+	 * @return string
+	 */
+	public function not_kept_here( Job $job ): string {
+		if ( ! $this->manages( $job ) ) {
+			/* translators: %d: job id */
+			return sprintf( __( 'Job %d is managed by another installation: its put-back is not given up from here; nothing is answered.', 'wp-checkpoint' ), $job->id );
+		}
+		if ( '' === $this->files_base( $job ) ) {
+			/* translators: %d: job id */
+			return sprintf( __( 'Job %d cannot be put back as it was before its put-back from here: what the put-back wrote over is kept in another storage directory (the one the job was managed from before it was taken over here). Nothing is answered. Only "put_back" can be answered here: the site is put back without WP Checkpoint\'s own settings written since the swap.', 'wp-checkpoint' ), $job->id );
+		}
+		return '';
+	}
+
+	/**
 	 * Give a put-back up at its question about the carry back, answered "keep" (SwapStep::CARRY_QUESTION): the job goes
 	 * back to what it was before the put-back's claim, every column the claim wrote over written back from the evidence
 	 * directory (checked against the sums the claim's cursor and its manifest hold), in one statement on the row as it
@@ -1138,15 +1159,12 @@ final class JobRepository {
 	 */
 	public function give_up_put_back( Job $job ): Job {
 		global $wpdb;
-		if ( ! $this->manages( $job ) ) {
-			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
-			throw new PutBackNotKept( sprintf( 'Job %d is managed by another installation: its put-back is not given up from here; nothing is answered.', $job->id ) );
+		$why = $this->not_kept_here( $job );
+		if ( '' !== $why ) {
+			throw new PutBackNotKept( $why ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- escaped where it is said.
 		}
 		$base = $this->files_base( $job );
 		try {
-			if ( '' === $base ) {
-				throw new \RuntimeException( 'The job\'s storage directory is not this one.' );
-			}
 			$kept = PutBackEvidence::read( $base, $job->id, (string) ( $job->cursor['evidence'] ?? '' ), (string) ( $job->cursor['evidence_sum'] ?? '' ) );
 			$now  = $this->put_back_raw( $job->id );
 		} catch ( \RuntimeException $e ) {
