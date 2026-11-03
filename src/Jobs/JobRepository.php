@@ -469,7 +469,17 @@ final class JobRepository {
 	 * @return string[]
 	 */
 	private function held_tokens(): array {
-		$state  = $this->directories->state(); // Resolved for this request.
+		return self::tokens_held( $this->directories );
+	}
+
+	/**
+	 * The tokens held_tokens() gives, for the given directories.
+	 *
+	 * @param Directories $directories Storage directories, resolved for this request.
+	 * @return string[]
+	 */
+	private static function tokens_held( Directories $directories ): array {
+		$state  = $directories->state(); // Resolved for this request.
 		$tokens = array_merge( array( (string) $state['token'] ), (array) $state['past_tokens'] );
 		$copied = (array) $state['copied_tokens'];
 		return array_values(
@@ -491,7 +501,19 @@ final class JobRepository {
 	 * @return bool
 	 */
 	public function manages( Job $job ): bool {
-		return in_array( $job->managing_token(), $this->held_tokens(), true );
+		return self::managed_with( $job, $this->directories );
+	}
+
+	/**
+	 * Whether this installation manages the job (manages()), for a caller that has the storage directories and not
+	 * the repository (QuestionText).
+	 *
+	 * @param Job         $job         Job.
+	 * @param Directories $directories Storage directories, resolved for this request.
+	 * @return bool
+	 */
+	public static function managed_with( Job $job, Directories $directories ): bool {
+		return in_array( $job->managing_token(), self::tokens_held( $directories ), true );
 	}
 
 	/**

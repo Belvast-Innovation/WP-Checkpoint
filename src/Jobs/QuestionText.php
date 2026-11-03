@@ -95,7 +95,11 @@ final class QuestionText {
 					break;
 				case SwapStep::CARRY_KIND:
 					$text = self::carry( $job, $question, $carry );
-					if ( SwapStep::putting_back( $job->cursor ) && '' === $work ) {
+					if ( SwapStep::putting_back( $job->cursor ) && ! JobRepository::managed_with( $job, $directories ) ) {
+						// Neither answer is taken from here (JobRepository::not_kept_here(), and the job is not run here).
+						/* translators: %d: job id */
+						$text .= ' ' . sprintf( __( 'This job is managed by another installation of WP Checkpoint: it is answered there, or taken over here first with wp wpcheckpoint job rebind %d (wp wpcheckpoint job status says how).', 'wp-checkpoint' ), $job->id );
+					} elseif ( SwapStep::putting_back( $job->cursor ) && '' === $work ) {
 						// Taken over from another storage directory: what keep needs is there (JobRepository::not_kept_here()).
 						$text .= ' ' . __( 'Here only "put back" can be answered: what the put-back wrote over is kept in another storage directory, so keep cannot put the job back as it was from here.', 'wp-checkpoint' );
 					}
