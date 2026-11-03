@@ -239,6 +239,7 @@ final class PutBackTest extends SwapTestCase {
 		$this->assertSame( 'rollback', $claimed->cursor['phase'] ?? '' );
 		$this->assertSame( SwapStep::PUT_BACK_REASON, $claimed->cursor['reason'] ?? '' );
 		$this->assertGreaterThan( 0, $claimed->cancel_requested, 'its end is a cancel' );
+		$this->assertSame( SwapStep::PUT_BACK_ENDS_CANCELLED, $claimed->cursor['ends'] ?? null, 'its end recorded by the claim' );
 		$this->assertSame( $job->options, $claimed->options, 'readable options are left as they are' );
 		$dir = $this->evidence( $claimed );
 		$this->assertSame( $raw['cursor_json'], file_get_contents( $dir . '/cursor_json' ), 'the cursor as the row held it, byte for byte' );
@@ -247,6 +248,7 @@ final class PutBackTest extends SwapTestCase {
 		list( $done, $said ) = $this->run_out( $claimed );
 		$this->assertSame( Job::CANCELLED, $done->status, $done->last_error . ' ' . $done->progress_message );
 		$this->assertSame( Job::SITE_UNTOUCHED, $done->site_state );
+		$this->assertSame( SwapStep::PUT_BACK_ENDS_CANCELLED, $done->cursor['ends'] ?? null, 'its recorded end kept to the end' );
 		$this->assertSame( $before, $this->site(), 'the site as it was before the restore' );
 		$this->assertStringContainsString( 'put back as it was before the restore, and the restore cancelled', $done->progress_message );
 		$this->assertStringContainsString( 'put back', $said, 'the command says it' );
@@ -274,9 +276,11 @@ final class PutBackTest extends SwapTestCase {
 		$this->assertSame( 'reverse', $claimed->cursor['phase'] ?? '' );
 		$this->assertTrue( $claimed->cursor['out'] ?? false );
 		$this->assertSame( 0, $claimed->cancel_requested );
+		$this->assertSame( SwapStep::PUT_BACK_ENDS_UNDONE, $claimed->cursor['ends'] ?? null, 'its end recorded by the claim' );
 
 		list( $done ) = $this->run_out( $claimed );
 		$this->assertSame( Job::UNDONE, $done->status, $done->last_error . ' ' . $done->progress_message );
+		$this->assertSame( SwapStep::PUT_BACK_ENDS_UNDONE, $done->cursor['ends'] ?? null, 'kept to the end' );
 		$this->assertSame( $before, $this->site(), 'the site as it was before the restore' );
 		$this->assertStringContainsString( 'put back as it was before the restore', $done->progress_message );
 		$this->assertFalse( $done->can_retry(), 'an undone restore is not run again' );
@@ -544,6 +548,7 @@ final class PutBackTest extends SwapTestCase {
 		$this->assertSame( Job::SITE_UNTOUCHED, $failed->site_state, 'the control: the site was put back first' );
 		$this->assertSame( 'reverted', $failed->cursor['phase'] ?? '' );
 		$this->assertTrue( SwapStep::putting_back( $failed->cursor ) );
+		$this->assertSame( SwapStep::PUT_BACK_ENDS_CANCELLED, $failed->cursor['ends'] ?? null, 'its end as the claim recorded it, kept to here' );
 		// Retried: the file comes down now, and the put-back ends as it would have.
 		// Each run's end, retried after each failure (up to three): one run, cancelled.
 		$fail  = false;
@@ -560,6 +565,36 @@ final class PutBackTest extends SwapTestCase {
 		$this->assertSame( array( Job::CANCELLED ), $ended, 'it ends as its put-back does, at the first run after the retry' );
 		$this->assertSame( $before, $this->site() );
 		$this->assertNothingLeft( 'cancelled' );
+	}
+
+	public function test_a_put_back_taken_over_from_another_storage_directory_refuses_keep_at_its_question_and_says_put_back(): void {
+		list( $job ) = $this->asked();
+		$shown       = static function ( Job $job ): string {
+			return implode( "\n", array_column( QuestionText::for_job( $job, Plugin::instance()->directories(), 'strval' ), 'text' ) );
+		};
+		$this->assertStringContainsString( 'could not carry WP Checkpoint\'s own settings back', $shown( $job ), 'the control: the question is read' );
+		$this->assertStringNotContainsString( 'Here only "put back" can be answered', $shown( $job ), 'the control: keep can be answered from its own storage directory' );
+		// Taken over here from another storage directory: what the put-back wrote over is kept there.
+		list( $here, $held, $code ) = $this->held_elsewhere( $job );
+		$this->assertTrue( $here->rebind( $job->id, $code, 'continue' )['ok'] );
+		$this->set( $job->id, array( 'storage_path' => $this->sandbox . '/another-storage-directory' ) );
+		$moved = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertTrue( Plugin::instance()->jobs()->manages( $moved ), 'the control: managed here' );
+		$this->assertSame( '', Plugin::instance()->jobs()->files_base( $moved ), 'the control: its files are not here' );
+		$this->assertStringContainsString( 'Here only "put back" can be answered', $shown( $moved ), 'the question says it before anything is chosen' );
+		$raw = Plugin::instance()->jobs()->put_back_raw( $job->id );
+		try {
+			Plugin::instance()->job_actions()->answer( $job->id, array( SwapStep::CARRY_QUESTION => RestoreJob::KEEP ) );
+			$this->fail( 'keep is refused' );
+		} catch ( \WPCheckpoint\Jobs\PutBackNotKept $e ) {
+			$this->assertStringContainsString( 'kept in another storage directory', $e->getMessage() );
+			$this->assertStringContainsString( 'Only "put_back" can be answered here', $e->getMessage() );
+		}
+		$this->assertSame( $raw, Plugin::instance()->jobs()->put_back_raw( $job->id ), 'nothing answered, nothing changed' );
+		$this->assertSame( SwapStep::CARRY_QUESTION, Plugin::instance()->jobs()->find( $job->id )->questions[0]['id'] ?? '', 'the question stands' );
+		$answered = Plugin::instance()->job_actions()->answer( $job->id, array( SwapStep::CARRY_QUESTION => SwapStep::PUT_BACK ) );
+		$this->assertSame( SwapStep::PUT_BACK, $answered->options['answers'][ SwapStep::CARRY_QUESTION ] ?? null, 'put back is answered' );
+		$this->set( $job->id, array( 'storage_path' => $job->storage_path ) ); // Its own again, for the cleanup at the end.
 	}
 
 	public function test_with_its_cursor_and_options_unreadable_a_restore_is_put_back_all_the_same(): void {
@@ -952,6 +987,7 @@ final class PutBackTest extends SwapTestCase {
 		Plugin::instance()->job_actions()->answer( $job->id, array( SwapStep::CARRY_QUESTION => SwapStep::PUT_BACK ) );
 		list( $done ) = $this->run_out( Plugin::instance()->jobs()->find( $job->id ) );
 		$this->assertSame( Job::UNDONE, $done->status, $done->last_error . ' ' . $done->progress_message );
+		$this->assertSame( SwapStep::PUT_BACK_ENDS_UNDONE, $done->cursor['ends'] ?? null, 'its recorded end kept through the question and the answer' );
 		$this->assertSame( $before, $this->site() );
 		$this->assertStringContainsString( 'were not carried back, as chosen', Plugin::instance()->job_presenter()->log_tail( $done ) );
 		$this->assertNothingLeft( 'answered' );
