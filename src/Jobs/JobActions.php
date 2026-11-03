@@ -730,7 +730,8 @@ final class JobActions {
 	/**
 	 * Put a stuck restore that holds the site back (wp wpcheckpoint job put-back): without a confirmation code, what it
 	 * would do and the code; with the code, the job claimed for its own rollback (a swap half made: it ends cancelled,
-	 * or a redo's undone again as of its undo; PutBack::half_way()) or reverse (a swap committed: it ends undone), to be
+	 * a redo's undone again as of its undo; PutBack::half_way()) or reverse (an undo's half made: it ends undone as of
+	 * now) (a swap committed: it ends undone), to be
 	 * run by WP-CLI. Every check is read once, and again under the
 	 * start lock right before the claim. Before the claim, what it writes over in the job's row is kept byte for byte
 	 * next to the job's log (PutBackEvidence), and the claim writes only while the row still holds exactly that
@@ -796,7 +797,7 @@ final class JobActions {
 			}
 			$reset  = in_array( 'options_json', $job->unreadable_columns, true );
 			$way    = PutBack::half_way( $job );
-			$cursor = SwapStep::put_back_cursor( $again['committed'], $again['attempt'], $job->site_mark, $kept['dir'], $kept['sum'], $way['redo'], $way['keep'] );
+			$cursor = SwapStep::put_back_cursor( $again['committed'], $again['attempt'], $job->site_mark, $kept['dir'], $kept['sum'], $way['redo'], $way['keep'], $way['undo'] );
 			try {
 				$claimed = $this->repository->claim_put_back( $job, $again['raw'], $cursor, $reset, __( 'Putting the site back as it was', 'wp-checkpoint' ), $job->managing_token() );
 			} catch ( StaleJob $e ) {
@@ -812,7 +813,7 @@ final class JobActions {
 			Logger::WARNING,
 			'The site is put back, as asked from WP-CLI (wp wpcheckpoint job put-back)',
 			array(
-				'swap'          => $again['committed'] ? 'committed (the restore ends undone)' : ( $way['redo'] > 0 ? 'a redo half made (the restore ends undone as of its undo, its restored copy kept)' : ( $way['keep'] ? 'half made, its position unreadable (the restore ends cancelled, its restored copy kept)' : 'half made (the restore ends cancelled)' ) ),
+				'swap'          => $again['committed'] ? 'committed (the restore ends undone)' : ( $way['redo'] > 0 ? 'a redo half made (the restore ends undone as of its undo, its restored copy kept)' : ( $way['undo'] ? 'an undo half made (the restore ends undone as of now, its restored copy kept)' : ( $way['keep'] ? 'half made, its position unreadable (the restore ends cancelled, its restored copy kept)' : 'half made (the restore ends cancelled)' ) ) ),
 				'kept'          => $kept['dir'],
 				'unreadable'    => implode( ', ', $job->unreadable_columns ),
 				'options reset' => $reset ? 'yes' : 'no',
