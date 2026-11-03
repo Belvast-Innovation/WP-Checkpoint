@@ -1727,14 +1727,7 @@ final class JobActions {
 			return null;
 		}
 		$giving_up = 'carry_ask' === ( $job->cursor['phase'] ?? '' ) && SwapStep::putting_back( $job->cursor ) && RestoreJob::KEEP === ( $answers[ SwapStep::CARRY_QUESTION ] ?? null );
-		if ( $giving_up ) {
-			// Refused before anything is written when it cannot be done from here (not after it was chosen).
-			$why = $this->repository->not_kept_here( $job );
-			if ( '' !== $why ) {
-				throw new PutBackNotKept( $why ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- escaped where it is said.
-			}
-		}
-		$answered = $this->repository->answer( $job, $answers );
+		$answered  = $this->repository->answer( $job, $answers ); // Keep that cannot be done from here is refused before anything is written (JobRepository::not_kept_here()).
 		if ( $giving_up ) {
 			$this->runner->note( $answered, Logger::WARNING, 'The put-back was given up as the administrator chose: the job is as it was before it, still holding the site', array( 'kept' => (string) ( $job->cursor['evidence'] ?? '' ) ) );
 			return $answered; // It is run the way it was before (wp wpcheckpoint job status says how), nothing scheduled here.

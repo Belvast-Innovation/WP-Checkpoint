@@ -1123,7 +1123,7 @@ final class JobRepository {
 	 * Why a put-back's question about its carry back cannot be answered "keep" from here ('' when it can be tried):
 	 * the job is managed by another installation, or what the claim wrote over (PutBackEvidence) is kept in another
 	 * storage directory than this one (the job was taken over here from it): only "put back" can be answered then.
-	 * Read before anything is written (JobActions::answer(), give_up_put_back()).
+	 * Read before anything is written (give_up_put_back(), which answer() calls right after the answers are checked).
 	 *
 	 * @param Job $job Job.
 	 * @return string
