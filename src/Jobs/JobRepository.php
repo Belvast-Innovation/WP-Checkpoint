@@ -1061,10 +1061,9 @@ final class JobRepository {
 	 * and this write, nothing is written (StaleJob).
 	 *
 	 * It writes: queued at the swap step with $cursor (SwapStep::put_back_cursor()), the site state changing, no error,
-	 * questions or counts; a cancel recorded for a swap that was half made (it ends cancelled: Runner takes a Cancelled
-	 * only with a cancel recorded), none for a redo's (it ends undone as of its undo: SwapStep::redo_at() of $cursor)
-	 * nor for one that ends undone as an undo ($cursor "out": a committed swap, or an undo half made), and none left
-	 * from before; and, when the options cannot be read ($reset_options), options that say they were
+	 * questions or counts; a cancel recorded for one that ends cancelled (SwapStep::put_back_cancels() of $cursor, which
+	 * holds that end in this same write, "ends": the end is decided by it, the cancel is a second layer), none for one
+	 * that ends undone (a redo's, as of its undo; a committed swap's or an undo's, "out"), and none left from before; and, when the options cannot be read ($reset_options), options that say they were
 	 * reset (OPTIONS_RESET: nothing that needs the job's own options runs it again, check_retry()).
 	 *
 	 * @param Job                  $job           Job, as read.
@@ -1085,8 +1084,7 @@ final class JobRepository {
 			throw new \RuntimeException( sprintf( 'Job %d: its cursor cannot be written.', $job->id ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
 		}
 		$now     = $this->now();
-		$undone  = ! empty( $cursor['out'] ) || SwapStep::redo_at( $cursor ) > 0;
-		$cancel  = $undone ? 0 : $now;
+		$cancel  = SwapStep::put_back_cancels( $cursor ) ? $now : 0;
 		$options = $reset_options ? $wpdb->prepare( ', options_json = %s', (string) wp_json_encode( array( self::OPTIONS_RESET => $now ) ) ) : '';
 		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix; the WHERE clause is the compare-and-set, each part prepared once (a value may hold "%").
 		$head     = $wpdb->prepare(

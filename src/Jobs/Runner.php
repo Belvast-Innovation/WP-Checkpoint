@@ -437,8 +437,10 @@ final class Runner {
 				$this->release( $job, $token );
 				return new TickResult( TickResult::WAITING, $wait, $job, $message );
 			} catch ( Cancelled $e ) {
-				if ( Job::SITE_UNTOUCHED !== $job->site_state || 0 === $job->cancel_requested ) {
-					// Not a step's end of a requested cancel with the site back as it was: failed, the lock with it.
+				if ( Job::SITE_UNTOUCHED !== $job->site_state || ( 0 === $job->cancel_requested && ! $e->put_back ) ) {
+					// Not a step's end of a requested cancel (or of a put-back that ends cancelled, as its cursor records,
+					// whatever a retry or a take-over did to the request) with the site back as it was: failed, the lock
+					// with it.
 					return $this->fail( $job, $token, $logger, sprintf( 'Step "%s" ended the job as cancelled while %s.', $step_id, 0 === $job->cancel_requested ? 'no cancel was requested' : 'it still holds the site changed' ) );
 				}
 				// The step undid what it did to the site after a cancel was requested: cancelled as with the lock.
