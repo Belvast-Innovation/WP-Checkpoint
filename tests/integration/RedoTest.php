@@ -1337,6 +1337,42 @@ final class RedoTest extends SwapTestCase {
 		$this->assertSame( $restored, $this->site() );
 	}
 
+	public function test_a_redo_half_made_put_back_and_taken_over_from_another_installation_takes_then_continue_and_ends_undone(): void {
+		list( $job, $before, , $at ) = $this->half_redo();
+		$told                        = $this->actions()->put_back( $job->id, '' );
+		$this->assertTrue( $this->actions()->put_back( $job->id, $told['code'] )['ok'] );
+		$this->killed_at( $this->jobs()->find( $job->id ), 'table_back' );
+		$stuck = $this->jobs()->find( $job->id );
+		$this->assertTrue( SwapStep::putting_back( $stuck->cursor ), 'the control: a put-back under way' );
+		$this->assertSame( $at, SwapStep::redo_at( $stuck->cursor ), 'the control: a redo\'s' );
+		$this->assertSame( Job::SITE_CHANGING, $stuck->site_state );
+		$this->set( $job->id, array( 'held_by' => 'ffffffffffff' ) );
+		$here = new \WPCheckpoint\Jobs\JobActions(
+			Plugin::instance()->jobs(),
+			Plugin::instance()->runner(),
+			new \WPCheckpoint\Jobs\Loopback( false ),
+			new \WPCheckpoint\Jobs\HeldSite(
+				array(
+					'abspath'   => $this->abspath,
+					'site_dirs' => function (): array {
+						return $this->dirs;
+					},
+				)
+			)
+		);
+		$held = $here->held_elsewhere( $job->id );
+		$this->assertNotNull( $held );
+		$this->assertSame( '', $held['assessment']['direction'] );
+		$this->assertStringContainsString( '--then=continue', implode( "\n", \WPCheckpoint\Jobs\JobPresenter::held_lines( $held['job'], $held['assessment'] ) ), 'it ends undone whatever is chosen: both are offered' );
+		$yes = $here->rebind( $job->id, \WPCheckpoint\Jobs\HeldSite::code( \WPCheckpoint\Jobs\HeldSite::REBIND, $held['job'], '' ), 'continue' );
+		$this->assertTrue( $yes['ok'], $yes['message'] );
+		$this->assertSame( RunLoop::EXIT_COMPLETED, $this->loop_code( $this->jobs()->find( $job->id ) ) );
+		$done = $this->jobs()->find( $job->id );
+		$this->assertSame( Job::UNDONE, $done->status, $done->last_error . ' ' . $done->progress_message );
+		$this->assertSame( $at, $done->finished_at, 'as of the undo' );
+		$this->assertSame( $before, $this->site() );
+	}
+
 	public function test_a_redo_put_back_killed_once_it_is_put_back_is_finished_undone_by_the_next_run(): void {
 		foreach ( array( 'restored', 'reverted' ) as $seam ) {
 			$this->tear_down_swap();
