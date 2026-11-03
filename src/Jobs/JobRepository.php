@@ -1135,7 +1135,7 @@ final class JobRepository {
 		}
 		if ( '' === $this->files_base( $job ) ) {
 			/* translators: %d: job id */
-			return sprintf( __( 'Job %d cannot be put back as it was before its put-back from here: what the put-back wrote over is kept in another storage directory (the one the job was managed from before it was taken over here). Nothing is answered. Only "put_back" can be answered here: the site is put back without WP Checkpoint\'s own settings written since the swap.', 'wp-checkpoint' ), $job->id );
+			return sprintf( __( 'Job %d cannot be put back as it was before its put-back from here: what the put-back wrote over is kept in another storage directory (the one the job was managed from before it was taken over here). Only put back ("put_back") can be answered here: the site is put back without WP Checkpoint\'s own settings written since the swap.', 'wp-checkpoint' ), $job->id );
 		}
 		return '';
 	}

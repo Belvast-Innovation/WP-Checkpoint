@@ -443,10 +443,11 @@ final class Runner {
 					// with it.
 					return $this->fail( $job, $token, $logger, sprintf( 'Step "%s" ended the job as cancelled while %s.', $step_id, 0 === $job->cancel_requested ? 'no cancel was requested' : 'it still holds the site changed' ) );
 				}
-				// The step undid what it did to the site after a cancel was requested: cancelled as with the lock.
-				$logger->info( 'The job is cancelled as requested', array( 'step' => $step_id ) );
+				// The step undid what it did to the site after a cancel was requested (or a put-back ended as its claim
+				// recorded): cancelled as with the lock.
+				$logger->info( $e->put_back ? 'The job is cancelled, as its put-back recorded' : 'The job is cancelled as requested', array( 'step' => $step_id ) );
 				$this->transition( $job, $token, Job::CANCELLED, $e->said ? $e->getMessage() : '' );
-				$this->cleanup( $job ); // Not a put-back's that keeps the restored copy (Cancelled::kept(), cleanup()).
+				$this->cleanup( $job ); // Not a put-back's that keeps the restored copy (SwapStep::keeps_work(), cleanup()).
 				return new TickResult( TickResult::FINISHED, -1, $job, $this->redactor->redact( $e->getMessage() ) );
 			} catch ( Stopped $e ) {
 				// The answers that stopped it go with the failure: a retry asks those questions again.

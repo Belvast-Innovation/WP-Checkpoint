@@ -556,6 +556,7 @@ final class PutBackTest extends SwapTestCase {
 		for ( $round = 1; $round <= 3; $round++ ) {
 			Plugin::instance()->job_actions()->retry( $job->id );
 			$this->assertSame( Job::QUEUED, Plugin::instance()->jobs()->find( $job->id )->status, 'round ' . $round . ': retried' );
+			$this->assertSame( 0, Plugin::instance()->jobs()->find( $job->id )->cancel_requested, 'round ' . $round . ': the control: the retry cleared the cancel request' );
 			list( $done ) = $this->run_out( Plugin::instance()->jobs()->find( $job->id ) );
 			$ended[]      = $done->status . ( Job::FAILED === $done->status ? ': ' . $done->last_error : '' );
 			if ( Job::FAILED !== $done->status ) {
@@ -578,6 +579,20 @@ final class PutBackTest extends SwapTestCase {
 		list( $here, $held, $code ) = $this->held_elsewhere( $job );
 		$this->assertTrue( $here->rebind( $job->id, $code, 'continue' )['ok'] );
 		$this->set( $job->id, array( 'storage_path' => $this->sandbox . '/another-storage-directory' ) );
+		try {
+			$this->refused_keep_from_elsewhere( $job, $shown );
+		} finally {
+			$this->set( $job->id, array( 'storage_path' => $job->storage_path ) ); // Its own again, for the cleanup at the end.
+		}
+	}
+
+	/**
+	 * The put-back's question, its files in another storage directory: keep refused with why, put back answered.
+	 *
+	 * @param Job      $job   The job as asked, from its own storage directory.
+	 * @param callable $shown What its question says.
+	 */
+	private function refused_keep_from_elsewhere( Job $job, callable $shown ): void {
 		$moved = Plugin::instance()->jobs()->find( $job->id );
 		$this->assertTrue( Plugin::instance()->jobs()->manages( $moved ), 'the control: managed here' );
 		$this->assertSame( '', Plugin::instance()->jobs()->files_base( $moved ), 'the control: its files are not here' );
@@ -588,13 +603,24 @@ final class PutBackTest extends SwapTestCase {
 			$this->fail( 'keep is refused' );
 		} catch ( \WPCheckpoint\Jobs\PutBackNotKept $e ) {
 			$this->assertStringContainsString( 'kept in another storage directory', $e->getMessage() );
-			$this->assertStringContainsString( 'Only "put_back" can be answered here', $e->getMessage() );
+			$this->assertStringContainsString( 'Only put back ("put_back") can be answered here', $e->getMessage() );
 		}
 		$this->assertSame( $raw, Plugin::instance()->jobs()->put_back_raw( $job->id ), 'nothing answered, nothing changed' );
+		// From the page (REST): the same reason, with no host or path of the site in it.
+		wp_set_current_user( self::$admin_id );
+		$request = new \WP_REST_Request( 'POST', '/wp-checkpoint/v1/jobs/' . $job->id . '/answer' );
+		$request->set_param( 'answers', array( SwapStep::CARRY_QUESTION => RestoreJob::KEEP ) );
+		$response = rest_do_request( $request );
+		$said     = (string) ( $response->get_data()['message'] ?? '' );
+		$this->assertSame( 409, $response->get_status(), $said );
+		$this->assertStringContainsString( 'kept in another storage directory', $said, 'the reason is said' );
+		$this->assertStringNotContainsString( (string) wp_parse_url( home_url(), PHP_URL_HOST ), $said, 'no host' );
+		$this->assertStringNotContainsString( ABSPATH, $said, 'no path' );
+		$this->assertStringNotContainsString( $moved->storage_path, $said, 'no storage path' );
+		$this->assertSame( $raw, Plugin::instance()->jobs()->put_back_raw( $job->id ), 'nothing changed from the page either' );
 		$this->assertSame( SwapStep::CARRY_QUESTION, Plugin::instance()->jobs()->find( $job->id )->questions[0]['id'] ?? '', 'the question stands' );
 		$answered = Plugin::instance()->job_actions()->answer( $job->id, array( SwapStep::CARRY_QUESTION => SwapStep::PUT_BACK ) );
 		$this->assertSame( SwapStep::PUT_BACK, $answered->options['answers'][ SwapStep::CARRY_QUESTION ] ?? null, 'put back is answered' );
-		$this->set( $job->id, array( 'storage_path' => $job->storage_path ) ); // Its own again, for the cleanup at the end.
 	}
 
 	public function test_with_its_cursor_and_options_unreadable_a_restore_is_put_back_all_the_same(): void {
