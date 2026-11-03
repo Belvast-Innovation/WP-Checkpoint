@@ -430,6 +430,76 @@ final class PutBackTest extends SwapTestCase {
 		$this->assertNothingLeft( 'cancelled' );
 	}
 
+	/**
+	 * The job made managed by another installation, and this site's job actions to take it over with.
+	 *
+	 * @param Job $job Job.
+	 * @return array{0: \WPCheckpoint\Jobs\JobActions, 1: array{job: Job, assessment: array<string, mixed>}, 2: string} The actions, what they see, the rebind code.
+	 */
+	private function held_elsewhere( Job $job ): array {
+		$this->set( $job->id, array( 'held_by' => 'ffffffffffff' ) );
+		$here = new \WPCheckpoint\Jobs\JobActions(
+			Plugin::instance()->jobs(),
+			Plugin::instance()->runner(),
+			new \WPCheckpoint\Jobs\Loopback( false ),
+			new \WPCheckpoint\Jobs\HeldSite(
+				array(
+					'abspath'   => $this->abspath,
+					'site_dirs' => function (): array {
+						return $this->dirs;
+					},
+				)
+			)
+		);
+		$held = $here->held_elsewhere( $job->id );
+		$this->assertNotNull( $held );
+		$this->assertSame( \WPCheckpoint\Jobs\HeldSite::SITE, $held['assessment']['branch'], $held['assessment']['why'] );
+		return array( $here, $held, \WPCheckpoint\Jobs\HeldSite::code( \WPCheckpoint\Jobs\HeldSite::REBIND, $held['job'], '' ) );
+	}
+
+	public function test_a_put_back_taken_over_from_another_installation_refuses_then_continue_and_finishes_as_a_put_back(): void {
+		list( $job, $before ) = $this->half();
+		$this->claim( $job );
+		$this->killed_at( Plugin::instance()->jobs()->find( $job->id ), 'table_back', 1 );
+		$stuck = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertTrue( SwapStep::putting_back( $stuck->cursor ), 'the control: a put-back under way' );
+		$this->assertSame( Job::SITE_CHANGING, $stuck->site_state, 'the control: half put back' );
+		list( $here, $held, $code ) = $this->held_elsewhere( $stuck );
+		$this->assertSame( '', $held['assessment']['direction'], 'the control: no direction the take-over reads as recorded' );
+		$said = implode( "\n", \WPCheckpoint\Jobs\JobPresenter::held_lines( $held['job'], $held['assessment'] ) );
+		$this->assertStringContainsString( '--then=rollback', $said, 'what the operator is told: ' . $said );
+		$this->assertStringNotContainsString( '--then=continue', $said, $said );
+		$this->assertStringContainsString( 'being put back', $said, $said );
+		$raw = Plugin::instance()->jobs()->put_back_raw( $job->id );
+		$no  = $here->rebind( $job->id, $code, 'continue' );
+		$this->assertFalse( $no['ok'], '--then=continue is refused for a put-back' );
+		$this->assertStringContainsString( 'being put back', $no['message'] );
+		$this->assertSame( $raw, Plugin::instance()->jobs()->put_back_raw( $job->id ), 'nothing changed' );
+		$this->assertFalse( Plugin::instance()->jobs()->manages( Plugin::instance()->jobs()->find( $job->id ) ), 'not taken over' );
+		$yes = $here->rebind( $job->id, $code, 'rollback' );
+		$this->assertTrue( $yes['ok'], $yes['message'] );
+		list( $done ) = $this->run_out( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( Job::CANCELLED, $done->status, 'it ends as its put-back does: ' . $done->last_error . ' ' . $done->progress_message );
+		$this->assertSame( $before, $this->site() );
+		$this->assertNothingLeft( 'put back' );
+	}
+
+	public function test_a_swap_half_made_and_not_put_back_is_taken_over_with_then_continue_as_before(): void {
+		list( $job, $before ) = $this->half();
+		$this->assertFalse( SwapStep::putting_back( $job->cursor ), 'the control: no put-back' );
+		list( $here, $held, $code ) = $this->held_elsewhere( $job );
+		$this->assertSame( '', $held['assessment']['direction'] );
+		$this->assertStringContainsString( '--then=continue', implode( "\n", \WPCheckpoint\Jobs\JobPresenter::held_lines( $held['job'], $held['assessment'] ) ) );
+		$yes = $here->rebind( $job->id, $code, 'continue' );
+		$this->assertTrue( $yes['ok'], $yes['message'] );
+		$this->assertSame( 0, Plugin::instance()->jobs()->find( $job->id )->cancel_requested );
+		$this->assertTrue( Plugin::instance()->jobs()->manages( Plugin::instance()->jobs()->find( $job->id ) ), 'taken over' );
+		$done = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( Job::FAILED, $done->status, 'rolled back as after any interruption: ' . $done->last_error );
+		$this->assertSame( $before, $this->site() );
+		$this->assertNothingLeft( 'rolled back' );
+	}
+
 	public function test_with_its_cursor_and_options_unreadable_a_restore_is_put_back_all_the_same(): void {
 		foreach ( array( 'half', 'committed' ) as $case ) {
 			$this->tear_down_swap();
