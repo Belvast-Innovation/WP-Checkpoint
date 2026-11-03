@@ -520,6 +520,48 @@ final class PutBackTest extends SwapTestCase {
 		$this->assertNothingLeft( 'rolled back' );
 	}
 
+	public function test_a_put_back_that_ends_cancelled_still_does_after_its_tries_ran_out_and_a_retry(): void {
+		list( $job, $before ) = $this->half();
+		$this->claim( $job );
+		// Put back and recorded untouched, its maintenance file cannot be taken down until the tries run out.
+		$fail  = true;
+		$tries = 0;
+		$this->retype(
+			$job,
+			array(
+				'remove' => static function ( \WPCheckpoint\Restore\Maintenance $file, callable $confirm ) use ( &$fail, &$tries ): bool {
+					++$tries;
+					return $fail ? false : $file->remove( $confirm );
+				},
+			)
+		);
+		for ( $i = 0; $i <= \WPCheckpoint\Jobs\Runner::MAX_RETRIES; $i++ ) {
+			$this->cli_tick( Plugin::instance()->jobs()->find( $job->id ) );
+		}
+		$failed = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertSame( Job::FAILED, $failed->status, 'the control: the tries ran out' );
+		$this->assertGreaterThan( \WPCheckpoint\Jobs\Runner::MAX_RETRIES, $tries, 'the control: the file was tried each time' );
+		$this->assertSame( Job::SITE_UNTOUCHED, $failed->site_state, 'the control: the site was put back first' );
+		$this->assertSame( 'reverted', $failed->cursor['phase'] ?? '' );
+		$this->assertTrue( SwapStep::putting_back( $failed->cursor ) );
+		// Retried: the file comes down now, and the put-back ends as it would have.
+		// Each run's end, retried after each failure (up to three): one run, cancelled.
+		$fail  = false;
+		$ended = array();
+		for ( $round = 1; $round <= 3; $round++ ) {
+			Plugin::instance()->job_actions()->retry( $job->id );
+			$this->assertSame( Job::QUEUED, Plugin::instance()->jobs()->find( $job->id )->status, 'round ' . $round . ': retried' );
+			list( $done ) = $this->run_out( Plugin::instance()->jobs()->find( $job->id ) );
+			$ended[]      = $done->status . ( Job::FAILED === $done->status ? ': ' . $done->last_error : '' );
+			if ( Job::FAILED !== $done->status ) {
+				break;
+			}
+		}
+		$this->assertSame( array( Job::CANCELLED ), $ended, 'it ends as its put-back does, at the first run after the retry' );
+		$this->assertSame( $before, $this->site() );
+		$this->assertNothingLeft( 'cancelled' );
+	}
+
 	public function test_with_its_cursor_and_options_unreadable_a_restore_is_put_back_all_the_same(): void {
 		foreach ( array( 'half', 'committed' ) as $case ) {
 			$this->tear_down_swap();
