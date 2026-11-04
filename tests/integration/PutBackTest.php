@@ -514,6 +514,7 @@ final class PutBackTest extends SwapTestCase {
 		list( $here, $held, $code ) = $this->held_elsewhere( $job );
 		$this->assertSame( '', $held['assessment']['direction'] );
 		$this->assertStringContainsString( '--then=continue', implode( "\n", \WPCheckpoint\Jobs\JobPresenter::held_lines( $held['job'], $held['assessment'] ) ) );
+		$this->assertStringContainsString( '--then=rollback', implode( "\n", \WPCheckpoint\Jobs\JobPresenter::held_lines( $held['job'], $held['assessment'] ) ), 'a swap half made: a rollback is offered' );
 		$yes = $here->rebind( $job->id, $code, 'continue' );
 		$this->assertTrue( $yes['ok'], $yes['message'] );
 		$this->assertSame( 0, Plugin::instance()->jobs()->find( $job->id )->cancel_requested );

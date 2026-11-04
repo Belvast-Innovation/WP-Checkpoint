@@ -419,7 +419,8 @@ final class JobCommand {
 	 *
 	 * [--then=<what>]
 	 * : While the restore has not recorded its direction: continue (it goes on as after any interruption: a swap cut
-	 * off half way is put back first, then it can be retried) or rollback (it puts the site back and is cancelled).
+	 * off half way is put back first, then it can be retried) or rollback (it puts the site back and is cancelled;
+	 * only while the swap is half made: a restore that holds the site swapped takes continue).
 	 * A swap that made every rename before it was interrupted finishes either way, and the restored site stays; a
 	 * restore being put back (job put-back) to end cancelled takes only rollback, and the put-back ends as it would have:
 	 * wp wpcheckpoint job status says which applies.

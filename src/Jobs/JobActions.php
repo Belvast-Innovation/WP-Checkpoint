@@ -190,8 +190,9 @@ final class JobActions {
 	 * that ends cancelled (SwapStep::put_back_cancels(), as its claim recorded) is going one way already: "continue",
 	 * which says the restore goes on, is refused; "rollback" lets it finish as it would have (its end is what its
 	 * cursor records, whatever the cancel request says). A put-back that ends undone (an undo's or a redo's) takes
-	 * "continue", and "rollback" too while the site is changing (JobRepository::take_over() takes a rollback only
-	 * then; not at its carry back question).
+	 * "continue", and "rollback" too while the site is changing. Any job takes "rollback" only while the site is
+	 * changing (JobRepository::take_over()): one that holds it swapped (an undo asking about its carry back, or not
+	 * started yet) is refused here with that reason, not left to the take-over's statement.
 	 *
 	 * @param int    $id      Job id.
 	 * @param string $confirm The confirmation code.
@@ -220,6 +221,10 @@ final class JobActions {
 		}
 		if ( '' === $see['direction'] && ! in_array( $then, array( 'continue', 'rollback' ), true ) ) {
 			return self::outcome( false, __( 'Say what the restore does once taken over: --then=continue (it goes on as after any interruption: a swap cut off half way is put back first, then it can be retried) or --then=rollback (it puts the site back as it was and is cancelled). A swap that made every rename before it was interrupted finishes either way: wp wpcheckpoint job status says which applies.', 'wp-checkpoint' ) );
+		}
+		if ( 'rollback' === $then && Job::SITE_CHANGING !== $job->site_state ) {
+			/* translators: %d: job id */
+			return self::outcome( false, sprintf( __( 'Restore job %d holds the site swapped, not half changed: it is not taken over to be rolled back (wp wpcheckpoint job status says what it waits for). Take it over with --then=continue.', 'wp-checkpoint' ), $job->id ) );
 		}
 		if ( 'continue' === $then && SwapStep::put_back_cancels( $job->cursor ) ) {
 			/* translators: %d: job id */
