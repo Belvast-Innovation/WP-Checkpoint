@@ -164,7 +164,10 @@ final class JobPresenter {
 					? ' ' . __( 'Whether the swap made every rename before it was interrupted cannot be read now; if it did, the restore finishes instead, and the restored site stays.', 'wp-checkpoint' )
 					: '';
 				$lines[] = '  wp wpcheckpoint job rebind ' . $id . ' --confirm=' . $code . ' --then=continue  ' . __( 'The restore goes on as after any interruption (a swap cut off half way is put back first; then it can be retried).', 'wp-checkpoint' ) . $unknown;
-				$lines[] = '  wp wpcheckpoint job rebind ' . $id . ' --confirm=' . $code . ' --then=rollback  ' . __( 'The restore puts the site back as it was and is cancelled.', 'wp-checkpoint' ) . $unknown;
+				if ( Job::SITE_CHANGING === $job->site_state ) {
+					// A rollback is taken over only while the site is changing (JobRepository::take_over(), JobActions::rebind()).
+					$lines[] = '  wp wpcheckpoint job rebind ' . $id . ' --confirm=' . $code . ' --then=rollback  ' . __( 'The restore puts the site back as it was and is cancelled.', 'wp-checkpoint' ) . $unknown;
+				}
 			} else {
 				$lines[] = '  wp wpcheckpoint job rebind ' . $id . ' --confirm=' . $code . '  ' . __( 'The restore recorded its direction; it only finishes.', 'wp-checkpoint' );
 			}
