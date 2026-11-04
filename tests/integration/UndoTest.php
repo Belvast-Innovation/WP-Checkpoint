@@ -610,6 +610,44 @@ final class UndoTest extends SwapTestCase {
 		$this->assertStringContainsString( 'were not carried back, as chosen', Plugin::instance()->job_presenter()->log_tail( $done ) );
 	}
 
+	public function test_an_undo_asking_about_its_carry_back_held_elsewhere_is_taken_over_only_to_continue(): void {
+		list( $job, $before ) = $this->asked_about_the_carry();
+		$this->assertSame( Job::SITE_SWAPPED, $job->site_state, 'the control: nothing put back yet' );
+		$this->assertFalse( SwapStep::putting_back( $job->cursor ), 'the control: an undo, not a put-back' );
+		$this->set( $job->id, array( 'held_by' => 'ffffffffffff' ) );
+		$here = new \WPCheckpoint\Jobs\JobActions(
+			Plugin::instance()->jobs(),
+			Plugin::instance()->runner(),
+			new \WPCheckpoint\Jobs\Loopback( false ),
+			new \WPCheckpoint\Jobs\HeldSite(
+				array(
+					'abspath'   => $this->abspath,
+					'site_dirs' => function (): array {
+						return $this->dirs;
+					},
+				)
+			)
+		);
+		$held = $here->held_elsewhere( $job->id );
+		$this->assertNotNull( $held );
+		$this->assertSame( \WPCheckpoint\Jobs\HeldSite::SITE, $held['assessment']['branch'], $held['assessment']['why'] );
+		$this->assertSame( '', $held['assessment']['direction'], 'the control: no direction the take-over reads as recorded' );
+		$said = implode( "\n", \WPCheckpoint\Jobs\JobPresenter::held_lines( $held['job'], $held['assessment'] ) );
+		$this->assertStringContainsString( '--then=continue', $said, $said );
+		$this->assertStringNotContainsString( '--then=rollback', $said, 'a rollback is not taken over while the site is swapped: not offered' );
+		$code = \WPCheckpoint\Jobs\HeldSite::code( \WPCheckpoint\Jobs\HeldSite::REBIND, $held['job'], '' );
+		$no   = $here->rebind( $job->id, $code, 'rollback' );
+		$this->assertFalse( $no['ok'] );
+		$this->assertStringContainsString( 'holds the site swapped, not half changed', $no['message'], 'refused with why, not as a change meanwhile' );
+		$this->assertFalse( Plugin::instance()->jobs()->manages( Plugin::instance()->jobs()->find( $job->id ) ), 'not taken over' );
+		$yes = $here->rebind( $job->id, $code, 'continue' );
+		$this->assertTrue( $yes['ok'], $yes['message'] );
+		Plugin::instance()->job_actions()->answer( $job->id, array( SwapStep::CARRY_QUESTION => SwapStep::PUT_BACK ) );
+		$done = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( Job::UNDONE, $done->status, (string) $done->last_error );
+		$this->assertSame( $before, $this->site() );
+	}
+
 	public function test_an_undo_whose_carry_back_fails_asks_and_keep_leaves_the_restored_site_and_a_later_undo_asks_anew(): void {
 		list( $job, , $after, $at ) = $this->asked_about_the_carry();
 		Plugin::instance()->job_actions()->answer( $job->id, array( SwapStep::CARRY_QUESTION => RestoreJob::KEEP ) );
