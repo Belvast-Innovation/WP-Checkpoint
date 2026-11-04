@@ -187,10 +187,11 @@ final class JobActions {
 	 * Let this installation manage a job that holds the site and is this site's (HeldSite::SITE): wp wpcheckpoint job
 	 * rebind. Refused unless the code confirms it (HeldSite::code()) and, while the direction is not recorded, $then
 	 * says "continue" or "rollback"; once it is recorded, $then is refused (the job only finishes). A put-back under way
-	 * that ends cancelled (SwapStep::put_back_cancels()) is going one way already: "continue" is refused, as it would
-	 * clear the cancel the put-back ends with; "rollback" keeps it and lets it finish as it would have. A put-back that
-	 * ends undone (an undo's or a redo's) does not rest on the cancel: it takes "continue", and "rollback" too while
-	 * the site is changing (JobRepository::take_over() takes a rollback only then; not at its carry back question).
+	 * that ends cancelled (SwapStep::put_back_cancels(), as its claim recorded) is going one way already: "continue",
+	 * which says the restore goes on, is refused; "rollback" lets it finish as it would have (its end is what its
+	 * cursor records, whatever the cancel request says). A put-back that ends undone (an undo's or a redo's) takes
+	 * "continue", and "rollback" too while the site is changing (JobRepository::take_over() takes a rollback only
+	 * then; not at its carry back question).
 	 *
 	 * @param int    $id      Job id.
 	 * @param string $confirm The confirmation code.
@@ -1727,7 +1728,7 @@ final class JobActions {
 			return null;
 		}
 		$giving_up = 'carry_ask' === ( $job->cursor['phase'] ?? '' ) && SwapStep::putting_back( $job->cursor ) && RestoreJob::KEEP === ( $answers[ SwapStep::CARRY_QUESTION ] ?? null );
-		$answered  = $this->repository->answer( $job, $answers );
+		$answered  = $this->repository->answer( $job, $answers ); // Keep that cannot be done from here is refused before anything is written (JobRepository::not_kept_here()).
 		if ( $giving_up ) {
 			$this->runner->note( $answered, Logger::WARNING, 'The put-back was given up as the administrator chose: the job is as it was before it, still holding the site', array( 'kept' => (string) ( $job->cursor['evidence'] ?? '' ) ) );
 			return $answered; // It is run the way it was before (wp wpcheckpoint job status says how), nothing scheduled here.

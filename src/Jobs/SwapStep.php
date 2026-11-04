@@ -166,7 +166,20 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	const UNDONE          = 'undone';
 	const ASKED           = 'asked';
 	const PUT_BACK_REASON = 'putback';
-	const REASONS         = array(
+
+	/**
+	 * How a put-back ends, recorded in its cursor ("ends") by the claim's own write (put_back_cursor()) and kept to its
+	 * end: cancelled, or undone. Once recorded, whether it ends cancelled is read from it and from nothing else
+	 * (put_back_cancels(), the first thing ended() asks); one that ends undone does so as the undo or the redo it put
+	 * back ("out", or the time of the undo a redo set out from), as its claim wrote it.
+	 */
+	const PUT_BACK_ENDS_CANCELLED = 'cancelled';
+
+	/**
+	 * See PUT_BACK_ENDS_CANCELLED.
+	 */
+	const PUT_BACK_ENDS_UNDONE = 'undone';
+	const REASONS              = array(
 		self::INTERRUPTED     => 'The swap was interrupted before it was complete.',
 		self::INCOMPLETE      => 'After the renames, not every table of the plan was in its place.',
 		self::STOPPED         => 'The swap stopped (the job log says why).',
@@ -1311,7 +1324,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			'mark'   => $cursor['mark'] ?? '',
 			'reason' => (string) ( $cursor['reason'] ?? $reason ),
 			'check'  => (string) ( $cursor['check'] ?? '' ),
-		) + self::redo_keys( $cursor ) + array_intersect_key( $cursor, array( 'keep_work' => true ) );
+		) + self::redo_keys( $cursor ) + array_intersect_key( $cursor, array_flip( array( 'keep_work', 'ends' ) ) );
 		if ( $out ) {
 			$cursor['out'] = true; // Kept to the end: an undo after the site was let out ends the job as undone (ended()).
 		}
@@ -1459,7 +1472,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			'reason'  => (string) ( $cursor['reason'] ?? self::ASKED ),
 			'check'   => (string) ( $cursor['check'] ?? '' ),
 			'out'     => true,
-		) + array_intersect_key( $cursor, array_flip( array( 'evidence', 'evidence_sum' ) ) ); // A put-back's: keep puts the job back from it.
+		) + array_intersect_key( $cursor, array_flip( array( 'evidence', 'evidence_sum', 'ends' ) ) ); // A put-back's: keep puts the job back from it.
 
 		$context->checkpoint( $cursor, 88, __( 'Waiting for your decision on 1 question', 'wp-checkpoint' ) );
 		$this->at( 'carry_ask_recorded' );
@@ -1545,7 +1558,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 				'check'   => (string) ( $cursor['check'] ?? '' ),
 				'out'     => true,
 				'carry'   => 'skip',
-			);
+			) + array_intersect_key( $cursor, array( 'ends' => true ) );
 			$context->checkpoint( $cursor, 88, __( 'Putting the site back as it was', 'wp-checkpoint' ) );
 			throw $this->roll_back( $context, $db, $cursor, (string) $cursor['reason'] );
 		}
@@ -1600,7 +1613,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 				'mark'   => $cursor['mark'] ?? '',
 				'reason' => $reason,
 				'check'  => (string) ( $cursor['check'] ?? '' ),
-			) + array_intersect_key( $cursor, array_flip( array( 'out', 'after_undo', 'after_undo_found', 'undone_at', 'keep_work' ) ) );
+			) + array_intersect_key( $cursor, array_flip( array( 'out', 'after_undo', 'after_undo_found', 'undone_at', 'keep_work', 'ends' ) ) );
 			$context->checkpoint( $cursor, 100, __( 'The site is as it was before the restore', 'wp-checkpoint' ) );
 			$this->at( 'reverted' );
 		}
@@ -1637,16 +1650,24 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	}
 
 	/**
-	 * Whether a put-back's cursor ends the job cancelled: one of a swap half made that is neither an undo's ("out") nor
-	 * a redo's (redo_at()). Its end rests on the cancel its claim recorded (JobRepository::claim_put_back(); Runner
-	 * takes a Cancelled only with a cancel recorded), so nothing may clear that cancel while it goes on
-	 * (JobActions::rebind() refuses --then=continue).
+	 * Whether a put-back's cursor ends the job cancelled: as its claim recorded it ("ends", put_back_cursor()), or, in
+	 * a cursor a claim wrote before that was recorded, one of a swap half made that is neither an undo's ("out") nor a
+	 * redo's (redo_at()). The end is decided by this, not by the cancel request: a put-back that ends cancelled says
+	 * so to the Runner (Cancelled::by_put_back()), which takes it with no cancel recorded, as after a retry or a
+	 * take-over cleared it (JobActions::rebind() refuses --then=continue for it all the same).
 	 *
 	 * @param array<string, mixed> $cursor Cursor.
 	 * @return bool
 	 */
 	public static function put_back_cancels( array $cursor ): bool {
-		return self::putting_back( $cursor ) && empty( $cursor['out'] ) && self::redo_at( $cursor ) <= 0;
+		if ( ! self::putting_back( $cursor ) ) {
+			return false;
+		}
+		$ends = $cursor['ends'] ?? null;
+		if ( self::PUT_BACK_ENDS_CANCELLED === $ends || self::PUT_BACK_ENDS_UNDONE === $ends ) {
+			return self::PUT_BACK_ENDS_CANCELLED === $ends;
+		}
+		return empty( $cursor['out'] ) && self::redo_at( $cursor ) <= 0;
 	}
 
 	/**
@@ -1848,6 +1869,8 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * was let out, or an earlier put-back of a committed swap) is reversed as that undo ("reverse", "out"): it ends
 	 * undone as of now, its restored copy kept as an undone restore's, and no cancel recorded; one whose cursor could not be read ($keep: it may have been a redo) ends cancelled with its
 	 * restored copy kept for JobRepository::WORK_RETENTION_SECONDS before it is reclaimed ("keep_work", keeps_work()).
+	 * How it ends is recorded with it ("ends": PUT_BACK_ENDS_CANCELLED or PUT_BACK_ENDS_UNDONE), in the claim's write,
+	 * and kept to its end (put_back_cancels()).
 	 *
 	 * @param bool   $committed Whether the swap was committed (the row's site state is swapped).
 	 * @param int    $attempt   The plan's attempt.
@@ -1876,6 +1899,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		} elseif ( $keep ) {
 			$cursor['keep_work'] = true;
 		}
+		$cursor['ends'] = self::put_back_cancels( $cursor ) ? self::PUT_BACK_ENDS_CANCELLED : self::PUT_BACK_ENDS_UNDONE;
 		return $cursor;
 	}
 
@@ -1967,22 +1991,16 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @return \RuntimeException Cancelled, Undone or RetryFrom.
 	 */
 	private function ended( JobContext $context, string $reason, string $check = '', bool $undone = false, array $cursor = array() ): \RuntimeException {
-		$redo = self::redo_at( $cursor );
-		if ( $redo > 0 ) {
-			// A redo that did not stand: undone again, as of the undo it set out from (never cancelled: a cancel is refused
-			// once a redo changes the site; never failed: a retry would start from the final check, and the restored copy
-			// is no longer what the import left).
-			return $this->redo_ended( $context, $reason, $check, $redo, $cursor );
-		}
 		$found = self::after_undo_text( $cursor );
-		if ( self::putting_back( $cursor ) && ! $undone ) {
-			// A put-back of a swap that was half made ends cancelled (its claim recorded the cancel); what the check of
-			// the site as put back found is said with it. One whose cursor could not be read keeps its restored copy.
+		if ( self::put_back_cancels( $cursor ) ) {
+			// A put-back that ends cancelled (as its claim recorded in the cursor, whatever the cancel request says now);
+			// what the check of the site as put back found is said with it. One whose cursor could not be read keeps its
+			// restored copy.
 			$context->logger()->info( 'The site was put back as asked (wp wpcheckpoint job put-back); the restore is cancelled', array( 'restored copy' => ! empty( $cursor['keep_work'] ) ? 'kept' : 'removed' ) );
 			if ( ! empty( $cursor['keep_work'] ) ) {
 				$days = (int) ( JobRepository::WORK_RETENTION_SECONDS / 86400 );
 				if ( '' !== $found ) {
-					return Cancelled::kept(
+					return Cancelled::by_put_back(
 						sprintf(
 							/* translators: 1: what the check found, 2: days the restored copy is kept */
 							SiteCheck::FAILED === ( $cursor['after_undo'] ?? '' ) ? __( 'The site was put back and the restore cancelled, but its check then failed: %1$s. Restored copy kept %2$d days.', 'wp-checkpoint' ) : __( 'The site was put back and the restore cancelled, but it could not be checked: %1$s. Restored copy kept %2$d days.', 'wp-checkpoint' ),
@@ -1992,10 +2010,10 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 					);
 				}
 				/* translators: %d: days the restored copy is kept */
-				return Cancelled::kept( sprintf( __( 'The site was put back as it was before the restore, and the restore cancelled. Whether it was a redo could not be told, so its restored copy is kept for %d days.', 'wp-checkpoint' ), $days ) );
+				return Cancelled::by_put_back( sprintf( __( 'The site was put back as it was before the restore, and the restore cancelled. Whether it was a redo could not be told, so its restored copy is kept for %d days.', 'wp-checkpoint' ), $days ) );
 			}
 			if ( '' !== $found ) {
-				return Cancelled::said(
+				return Cancelled::by_put_back(
 					sprintf(
 						/* translators: %s: what the check found */
 						SiteCheck::FAILED === ( $cursor['after_undo'] ?? '' ) ? __( 'The site was put back and the restore cancelled, but the site\'s check then failed: %s.', 'wp-checkpoint' ) : __( 'The site was put back and the restore cancelled, but the site could not be checked: %s.', 'wp-checkpoint' ),
@@ -2003,7 +2021,14 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 					)
 				);
 			}
-			return Cancelled::said( __( 'The site was put back as it was before the restore, and the restore cancelled.', 'wp-checkpoint' ) );
+			return Cancelled::by_put_back( __( 'The site was put back as it was before the restore, and the restore cancelled.', 'wp-checkpoint' ) );
+		}
+		$redo = self::redo_at( $cursor );
+		if ( $redo > 0 ) {
+			// A redo that did not stand: undone again, as of the undo it set out from (never cancelled: a cancel is refused
+			// once a redo changes the site; never failed: a retry would start from the final check, and the restored copy
+			// is no longer what the import left).
+			return $this->redo_ended( $context, $reason, $check, $redo, $cursor );
 		}
 		if ( 0 !== $context->job()->cancel_requested && ! $undone ) {
 			// An undo's put-back is not stopped by a cancel requested while it runs: it ends as the undo it is.

@@ -469,7 +469,17 @@ final class JobRepository {
 	 * @return string[]
 	 */
 	private function held_tokens(): array {
-		$state  = $this->directories->state(); // Resolved for this request.
+		return self::tokens_held( $this->directories );
+	}
+
+	/**
+	 * The tokens held_tokens() gives, for the given directories.
+	 *
+	 * @param Directories $directories Storage directories, resolved for this request.
+	 * @return string[]
+	 */
+	private static function tokens_held( Directories $directories ): array {
+		$state  = $directories->state(); // Resolved for this request.
 		$tokens = array_merge( array( (string) $state['token'] ), (array) $state['past_tokens'] );
 		$copied = (array) $state['copied_tokens'];
 		return array_values(
@@ -491,7 +501,19 @@ final class JobRepository {
 	 * @return bool
 	 */
 	public function manages( Job $job ): bool {
-		return in_array( $job->managing_token(), $this->held_tokens(), true );
+		return self::managed_with( $job, $this->directories );
+	}
+
+	/**
+	 * Whether this installation manages the job (manages()), for a caller that has the storage directories and not
+	 * the repository (QuestionText).
+	 *
+	 * @param Job         $job         Job.
+	 * @param Directories $directories Storage directories, resolved for this request.
+	 * @return bool
+	 */
+	public static function managed_with( Job $job, Directories $directories ): bool {
+		return in_array( $job->managing_token(), self::tokens_held( $directories ), true );
 	}
 
 	/**
@@ -1061,10 +1083,9 @@ final class JobRepository {
 	 * and this write, nothing is written (StaleJob).
 	 *
 	 * It writes: queued at the swap step with $cursor (SwapStep::put_back_cursor()), the site state changing, no error,
-	 * questions or counts; a cancel recorded for a swap that was half made (it ends cancelled: Runner takes a Cancelled
-	 * only with a cancel recorded), none for a redo's (it ends undone as of its undo: SwapStep::redo_at() of $cursor)
-	 * nor for one that ends undone as an undo ($cursor "out": a committed swap, or an undo half made), and none left
-	 * from before; and, when the options cannot be read ($reset_options), options that say they were
+	 * questions or counts; a cancel recorded for one that ends cancelled (SwapStep::put_back_cancels() of $cursor, which
+	 * holds that end in this same write, "ends": the end is decided by it, the cancel is a second layer), none for one
+	 * that ends undone (a redo's, as of its undo; a committed swap's or an undo's, "out"), and none left from before; and, when the options cannot be read ($reset_options), options that say they were
 	 * reset (OPTIONS_RESET: nothing that needs the job's own options runs it again, check_retry()).
 	 *
 	 * @param Job                  $job           Job, as read.
@@ -1085,8 +1106,7 @@ final class JobRepository {
 			throw new \RuntimeException( sprintf( 'Job %d: its cursor cannot be written.', $job->id ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
 		}
 		$now     = $this->now();
-		$undone  = ! empty( $cursor['out'] ) || SwapStep::redo_at( $cursor ) > 0;
-		$cancel  = $undone ? 0 : $now;
+		$cancel  = SwapStep::put_back_cancels( $cursor ) ? $now : 0;
 		$options = $reset_options ? $wpdb->prepare( ', options_json = %s', (string) wp_json_encode( array( self::OPTIONS_RESET => $now ) ) ) : '';
 		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin table name from the prefix; the WHERE clause is the compare-and-set, each part prepared once (a value may hold "%").
 		$head     = $wpdb->prepare(
@@ -1122,6 +1142,27 @@ final class JobRepository {
 	}
 
 	/**
+	 * Why a put-back's question about its carry back cannot be answered "keep" from here ('' when it can be tried):
+	 * the job is managed by another installation, or what the claim wrote over (PutBackEvidence) is kept in another
+	 * storage directory than this one (the job was taken over here from it): only "put back" can be answered then.
+	 * Read before anything is written (give_up_put_back(), which answer() calls right after the answers are checked).
+	 *
+	 * @param Job $job Job.
+	 * @return string
+	 */
+	public function not_kept_here( Job $job ): string {
+		if ( ! $this->manages( $job ) ) {
+			/* translators: %d: job id */
+			return sprintf( __( 'Job %d is managed by another installation: its put-back is not given up from here; nothing is answered.', 'wp-checkpoint' ), $job->id );
+		}
+		if ( '' === $this->files_base( $job ) ) {
+			/* translators: %d: job id */
+			return sprintf( __( 'Job %d cannot be put back as it was before its put-back from here: what the put-back wrote over is kept in another storage directory (the one the job was managed from before it was taken over here). Only put back ("put_back") can be answered here: the site is put back without WP Checkpoint\'s own settings written since the swap.', 'wp-checkpoint' ), $job->id );
+		}
+		return '';
+	}
+
+	/**
 	 * Give a put-back up at its question about the carry back, answered "keep" (SwapStep::CARRY_QUESTION): the job goes
 	 * back to what it was before the put-back's claim, every column the claim wrote over written back from the evidence
 	 * directory (checked against the sums the claim's cursor and its manifest hold), in one statement on the row as it
@@ -1140,15 +1181,12 @@ final class JobRepository {
 	 */
 	public function give_up_put_back( Job $job ): Job {
 		global $wpdb;
-		if ( ! $this->manages( $job ) ) {
-			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
-			throw new PutBackNotKept( sprintf( 'Job %d is managed by another installation: its put-back is not given up from here; nothing is answered.', $job->id ) );
+		$why = $this->not_kept_here( $job );
+		if ( '' !== $why ) {
+			throw new PutBackNotKept( $why ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- escaped where it is said.
 		}
 		$base = $this->files_base( $job );
 		try {
-			if ( '' === $base ) {
-				throw new \RuntimeException( 'The job\'s storage directory is not this one.' );
-			}
 			$kept = PutBackEvidence::read( $base, $job->id, (string) ( $job->cursor['evidence'] ?? '' ), (string) ( $job->cursor['evidence_sum'] ?? '' ) );
 			$now  = $this->put_back_raw( $job->id );
 		} catch ( \RuntimeException $e ) {

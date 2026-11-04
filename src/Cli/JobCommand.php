@@ -15,6 +15,7 @@ use WPCheckpoint\Jobs\JobActions;
 use WPCheckpoint\Jobs\JobConflict;
 use WPCheckpoint\Jobs\JobPresenter;
 use WPCheckpoint\Jobs\JobsUnavailable;
+use WPCheckpoint\Jobs\PutBackNotKept;
 use WPCheckpoint\Jobs\StaleJob;
 use WPCheckpoint\Support\Directories;
 
@@ -749,6 +750,8 @@ final class JobCommand {
 			WP_CLI::error( 'Answers must not contain credentials.' );
 		} catch ( StaleJob $e ) {
 			WP_CLI::error( 'The job changed meanwhile; try again.' );
+		} catch ( PutBackNotKept $e ) {
+			WP_CLI::error( $this->presenter->clean( $e->getMessage() ) );
 		}
 		if ( null === $job ) {
 			WP_CLI::error( 'No such job.' );
