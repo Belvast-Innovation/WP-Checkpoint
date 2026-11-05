@@ -263,7 +263,7 @@ final class SwapRollbackUnitsTest extends SwapTestCase {
 	}
 
 	public function test_a_try_the_time_left_does_not_cover_with_its_wait_is_left_to_the_next_tick(): void {
-		list( $job, $before ) = $this->half();
+		list( $job, $before ) = $this->half( 1 + count( self::site_tables() ) ); // A table of the test's renamed after the site's.
 		$slept = array();
 		$this->retype(
 			$job,
@@ -311,7 +311,7 @@ final class SwapRollbackUnitsTest extends SwapTestCase {
 	}
 
 	public function test_a_rollback_killed_after_a_try_waited_out_the_lock_goes_on_from_the_tries_recorded(): void {
-		list( $job, $before ) = $this->half();
+		list( $job, $before ) = $this->half( 1 + count( self::site_tables() ) ); // A table of the test's renamed after the site's.
 		$this->retype(
 			$job,
 			array(
@@ -338,7 +338,7 @@ final class SwapRollbackUnitsTest extends SwapTestCase {
 	}
 
 	public function test_a_rollback_whose_tries_all_wait_out_the_lock_fails_as_the_database_busy_still_holding_the_site(): void {
-		list( $job, $before ) = $this->half();
+		list( $job, $before ) = $this->half( 1 + count( self::site_tables() ) ); // A table of the test's renamed after the site's.
 		$this->retype(
 			$job,
 			array(
