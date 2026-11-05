@@ -225,7 +225,8 @@ final class SwapRollbackUnitsTest extends SwapTestCase {
 
 	/**
 	 * Another connection that holds the tables the swap moved aside (the old names: only the entries it renamed have
-	 * them), so every RENAME of the rollback waits for the lock; null when there are none.
+	 * them), but the options and sitemeta tables the carry back writes first, so a RENAME of the rollback waits for the
+	 * lock.
 	 *
 	 * @param Job $job The job.
 	 * @return \WPCheckpoint\Restore\ImportSession
@@ -235,7 +236,16 @@ final class SwapRollbackUnitsTest extends SwapTestCase {
 		$wpdb->query( 'COMMIT' );
 		$prefix = \WPCheckpoint\Jobs\TempTables::OLD_PREFIX . substr( \WPCheckpoint\Jobs\TempTables::job_prefix( $job->storage_token, $job->id ), strlen( \WPCheckpoint\Jobs\TempTables::PREFIX ) );
 		$tables = (array) $wpdb->get_col( $wpdb->prepare( 'SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND LEFT(TABLE_NAME, %d) = %s', strlen( $prefix ), $prefix ) );
-		$this->assertNotSame( array(), $tables, 'the control: tables moved aside by the swap' );
+		// Not the options and sitemeta tables: the carry back writes them before anything is renamed back.
+		$tables = array_values(
+			array_filter(
+				$tables,
+				static function ( string $table ): bool {
+					return 1 !== preg_match( '/(options|sitemeta)\z/', $table );
+				}
+			)
+		);
+		$this->assertNotSame( array(), $tables, 'the control: tables moved aside by the swap, other than the ones the carry back writes' );
 		$other = \WPCheckpoint\Restore\ImportSession::open( \WPCheckpoint\Standalone\Credentials::from_wordpress() );
 		$other->run( 'LOCK TABLES ' . implode( ', ', array_map( static function ( string $t ): string { return '`' . $t . '` READ'; }, $tables ) ) );
 		return $other;
