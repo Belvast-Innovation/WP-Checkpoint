@@ -337,6 +337,40 @@ final class SwapRollbackUnitsTest extends SwapTestCase {
 		$this->assertSame( array(), $this->maintenance_files() );
 	}
 
+	public function test_what_is_owed_before_a_try_is_never_more_than_the_longest_wait_between_tries(): void {
+		global $wpdb;
+		list( $job, $before ) = $this->half( 1 + count( self::site_tables() ) ); // A table of the test's renamed after the site's.
+		$slept                = array();
+		$this->retype(
+			$job,
+			array(
+				'sleep' => static function ( int $seconds ) use ( &$slept ): void {
+					$slept[] = $seconds;
+				},
+			)
+		);
+		$other = $this->lock_moved_aside( $job );
+		try {
+			$this->killed_at( Plugin::instance()->jobs()->find( $job->id ), 'back_busy', 1 );
+		} finally {
+			$other->run( 'UNLOCK TABLES' );
+			$other->close();
+		}
+		// The clock went back an hour after the try was recorded: the next try is owed an hour as the cursor has it.
+		$table  = \WPCheckpoint\Jobs\JobRepository::table();
+		$cursor = json_decode( (string) $wpdb->get_var( $wpdb->prepare( "SELECT cursor_json FROM {$table} WHERE id = %d", $job->id ) ), true ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the jobs table.
+		$this->assertSame( 1, $cursor['busy'] ?? null, 'the control: a try recorded' );
+		$cursor['busy_after'] = time() + 3600;
+		$wpdb->query( $wpdb->prepare( "UPDATE {$table} SET cursor_json = %s WHERE id = %d", wp_json_encode( $cursor ), $job->id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the jobs table.
+		$wpdb->query( 'COMMIT' );
+		$this->cli_tick_with_no_time_left( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( array( max( \WPCheckpoint\Jobs\SwapStep::RETRIES ) ), $slept, 'waited the longest wait between tries, not the hour' );
+		$this->assertArrayNotHasKey( 'busy', Plugin::instance()->jobs()->find( $job->id )->cursor, 'the try went through' );
+		$done = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( Job::FAILED, $done->status, (string) $done->last_error );
+		$this->assertSame( $before, $this->site() );
+	}
+
 	public function test_a_rollback_whose_tries_all_wait_out_the_lock_fails_as_the_database_busy_still_holding_the_site(): void {
 		list( $job, $before ) = $this->half( 1 + count( self::site_tables() ) ); // A table of the test's renamed after the site's.
 		$this->retype(
