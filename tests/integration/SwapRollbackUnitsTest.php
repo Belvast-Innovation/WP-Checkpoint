@@ -310,12 +310,15 @@ final class SwapRollbackUnitsTest extends SwapTestCase {
 		$other = $this->lock_moved_aside( $job );
 		try {
 			$this->killed_at( Plugin::instance()->jobs()->find( $job->id ), 'back_busy', 1 );
+			$this->assertSame( 1, Plugin::instance()->jobs()->find( $job->id )->cursor['busy'] ?? null, 'the failed try recorded before the kill' );
+			// The next run, the lock still held: its first unit is the second try, not a first one.
+			$this->cli_tick_with_no_time_left( Plugin::instance()->jobs()->find( $job->id ) );
 		} finally {
 			$other->run( 'UNLOCK TABLES' );
 			$other->close();
 		}
 		$killed = Plugin::instance()->jobs()->find( $job->id );
-		$this->assertSame( 1, $killed->cursor['busy'] ?? null, 'the failed try recorded before the kill' );
+		$this->assertSame( 2, $killed->cursor['busy'] ?? null, 'counted on from the tries recorded' );
 		$this->assertNotSame( $before, $this->site(), 'the control: not put back yet' );
 		$done = $this->cli_run( $killed );
 		$this->assertSame( Job::FAILED, $done->status, (string) $done->last_error );
@@ -333,19 +336,22 @@ final class SwapRollbackUnitsTest extends SwapTestCase {
 		);
 		$other = $this->lock_moved_aside( $job );
 		try {
-			$this->seams = array();
-			$done        = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
+			foreach ( array( 'the first run', 'a retry, the lock still held' ) as $which ) {
+				$this->seams = array();
+				$done        = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
+				$this->assertSame( count( \WPCheckpoint\Jobs\SwapStep::RETRIES ), count( array_keys( $this->seams, 'back_busy', true ) ), $which . ': every try but the last recorded, as many as a forward RENAME gets: ' . implode( ' ', $this->seams ) );
+				$this->assertSame( Job::FAILED, $done->status, $which );
+				$this->assertStringContainsString( 'The database is busy', (string) $done->last_error, $which );
+				$this->assertSame( Job::SITE_CHANGING, $done->site_state, $which . ': the site still held: a retry puts it back' );
+				$this->assertArrayNotHasKey( 'busy', $done->cursor, $which . ': the tries are the run\'s, not kept for a retry' );
+				$this->assertNotSame( array(), $this->maintenance_files(), $which );
+				Plugin::instance()->job_actions()->retry( $job->id );
+			}
 		} finally {
 			$other->run( 'UNLOCK TABLES' );
 			$other->close();
 		}
-		$this->assertSame( 1 + count( \WPCheckpoint\Jobs\SwapStep::RETRIES ), count( array_keys( $this->seams, 'back_busy', true ) ) + 1, 'every try but the last recorded, as many as a forward RENAME gets: ' . implode( ' ', $this->seams ) );
-		$this->assertSame( Job::FAILED, $done->status );
-		$this->assertStringContainsString( 'The database is busy', (string) $done->last_error );
-		$this->assertSame( Job::SITE_CHANGING, $done->site_state, 'the site still held: a retry puts it back' );
-		$this->assertNotSame( array(), $this->maintenance_files() );
-		// The control: retried with the lock gone, it is put back.
-		Plugin::instance()->job_actions()->retry( $job->id );
+		// The control: retried with the lock gone (retried at the end of the loop), it is put back.
 		$back = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
 		$this->assertSame( Job::FAILED, $back->status, (string) $back->last_error );
 		$this->assertSame( $before, $this->site() );

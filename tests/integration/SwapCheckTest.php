@@ -451,11 +451,12 @@ final class SwapCheckTest extends RestoreTestCase {
 			$row     = Plugin::instance()->jobs()->find( $job->id );
 			$marks[] = array( $row->takeovers, $row->takeover_mark );
 			if ( 1 === $round ) {
-				$at = wp_json_encode( $row->cursor );
-				for ( $i = 0; $i < 500 && wp_json_encode( Plugin::instance()->jobs()->find( $job->id )->cursor ) === $at; $i++ ) {
+				// Its position: the step's cursor, not the runner's own keys (counts, unit times) that change without it.
+				$at = wp_json_encode( \WPCheckpoint\Jobs\JobContext::strip_reserved( $row->cursor ) );
+				for ( $i = 0; $i < 500 && wp_json_encode( \WPCheckpoint\Jobs\JobContext::strip_reserved( Plugin::instance()->jobs()->find( $job->id )->cursor ) ) === $at; $i++ ) {
 					$runner->tick( $job->id, $this->now );
 				}
-				$this->assertNotSame( $at, wp_json_encode( Plugin::instance()->jobs()->find( $job->id )->cursor ), 'the control: the job moved on' );
+				$this->assertNotSame( $at, wp_json_encode( \WPCheckpoint\Jobs\JobContext::strip_reserved( Plugin::instance()->jobs()->find( $job->id )->cursor ) ), 'the control: the job moved on' );
 				$armed = true;
 			}
 		}
