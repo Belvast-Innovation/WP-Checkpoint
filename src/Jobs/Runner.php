@@ -415,6 +415,7 @@ final class Runner {
 				$token
 			);
 
+			$units_before = $units->count();
 			try {
 				$result = $step->run( $context );
 				$held   = self::site_state_of( $step, $result->cursor ); // Checked here: a value out of range fails the job.
@@ -600,9 +601,9 @@ final class Runner {
 			// Progress: compared with the cursor before run(), so checkpoints made during the run count.
 			$after   = wp_json_encode( JobContext::strip_reserved( $result->cursor ) );
 			$percent = self::overall( $index, $count, $result->percent );
-			if ( $before === $after && $units->declined() ) {
-				// Told no before its first unit in this run (TickUnits): the tick ends here, as when its budget is spent;
-				// not a run without progress (the next tick's first unit goes).
+			if ( $before === $after && $units->declined() && $units->count() === $units_before ) {
+				// Told no before any unit in this run (TickUnits): the tick ends here, as when its budget is spent; not a
+				// run without progress (the next tick's first unit goes). A run that did a unit and moved nothing is one.
 				return $this->pause( $job, $token, $logger, JobContext::STOP_UNIT );
 			}
 			if ( $before === $after ) {

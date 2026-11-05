@@ -15,10 +15,11 @@ defined( 'ABSPATH' ) || exit;
  * whether a unit started in the tick, the slowest time of each kind of unit, and whether a unit was declined.
  *
  * The first unit of the tick starts whatever the budget: a tick that did nothing would make no progress. Any other
- * starts only while the budget is not spent and the time left covers the slowest of its kind with MARGIN; a kind
- * never measured (no time of it in this tick or an earlier one) does not start: the tick ends, and the next tick's
- * first unit measures it. The slowest times are kept across ticks (Runner: in the cursor's reserved keys), so a
- * tick judges by what earlier ticks saw.
+ * starts only while the budget is not spent and the time left covers the estimate of its kind with MARGIN: the
+ * slowest of it in this tick, or in the last tick that ran one, whichever is slower. A kind never measured (no time
+ * of it in this tick or kept from an earlier one) does not start: the tick ends, and the next tick's first unit
+ * measures it. What is kept for the next tick (Runner: in the cursor's reserved keys) is each kind's slowest in the
+ * last tick that ran one, not the slowest ever: one slow unit weighs on the next tick, not on every tick after it.
  */
 final class TickUnits {
 
@@ -52,11 +53,25 @@ final class TickUnits {
 	private $declined = false;
 
 	/**
-	 * Kind => the slowest time of it, in seconds (this tick's and earlier ticks').
+	 * Kind => the slowest time of it in the last tick that ran one, as earlier ticks kept it, in seconds.
+	 *
+	 * @var array<string, float>
+	 */
+	private $kept = array();
+
+	/**
+	 * Kind => the slowest time of it in this tick, in seconds.
 	 *
 	 * @var array<string, float>
 	 */
 	private $slowest = array();
+
+	/**
+	 * Units started in this tick (may_start() said yes, or begun()).
+	 *
+	 * @var int
+	 */
+	private $count = 0;
 
 	/**
 	 * Constructor.
@@ -69,10 +84,10 @@ final class TickUnits {
 		}
 		foreach ( $estimates as $kind => $seconds ) {
 			if ( is_string( $kind ) && 1 === preg_match( self::KIND, $kind ) && ( is_int( $seconds ) || is_float( $seconds ) ) && is_finite( (float) $seconds ) && $seconds >= 0 ) {
-				$this->slowest[ $kind ] = (float) $seconds;
+				$this->kept[ $kind ] = (float) $seconds;
 			}
 		}
-		$this->slowest = array_slice( $this->slowest, -self::MAX_KINDS, null, true );
+		$this->kept = array_slice( $this->kept, -self::MAX_KINDS, null, true );
 	}
 
 	/**
@@ -85,14 +100,39 @@ final class TickUnits {
 	public function may_start( string $kind, JobContext $context ): bool {
 		if ( ! $this->started ) {
 			$this->started = true;
+			++$this->count;
 			return true;
 		}
-		$slowest = $this->slowest[ $kind ] ?? null;
-		if ( null === $slowest || $context->should_stop() || $context->remaining_seconds() < $slowest * self::MARGIN ) {
+		$estimate = $this->estimate( $kind );
+		if ( null === $estimate || $context->should_stop() || $context->remaining_seconds() < $estimate * self::MARGIN ) {
 			$this->declined = true;
 			return false;
 		}
+		++$this->count;
 		return true;
+	}
+
+	/**
+	 * The estimate of a kind: the slower of this tick's slowest and the one kept from the last tick that ran one;
+	 * null when it was never measured.
+	 *
+	 * @param string $kind Kind of unit.
+	 * @return float|null
+	 */
+	private function estimate( string $kind ) {
+		if ( ! isset( $this->slowest[ $kind ] ) && ! isset( $this->kept[ $kind ] ) ) {
+			return null;
+		}
+		return max( $this->slowest[ $kind ] ?? 0.0, $this->kept[ $kind ] ?? 0.0 );
+	}
+
+	/**
+	 * Units started in this tick so far (the Runner compares it around a run).
+	 *
+	 * @return int
+	 */
+	public function count(): int {
+		return $this->count;
 	}
 
 	/**
@@ -103,6 +143,7 @@ final class TickUnits {
 	 */
 	public function begun(): void {
 		$this->started = true;
+		++$this->count;
 	}
 
 	/**
@@ -117,13 +158,11 @@ final class TickUnits {
 		if ( 1 !== preg_match( self::KIND, $kind ) || ! is_finite( $seconds ) ) {
 			return;
 		}
-		$seconds = max( 0.0, $seconds );
+		$seconds = round( max( 0.0, $seconds ), 4 );
 		if ( isset( $this->slowest[ $kind ] ) && $this->slowest[ $kind ] >= $seconds ) {
 			return;
 		}
-		unset( $this->slowest[ $kind ] );
-		$this->slowest[ $kind ] = round( $seconds, 4 );
-		$this->slowest          = array_slice( $this->slowest, -self::MAX_KINDS, null, true );
+		$this->slowest[ $kind ] = $seconds;
 	}
 
 	/**
@@ -136,11 +175,13 @@ final class TickUnits {
 	}
 
 	/**
-	 * What to keep for the next tick: kind => the slowest time of it.
+	 * What to keep for the next tick: kind => its slowest in the last tick that ran one (this tick's for the kinds it
+	 * ran, what was kept for the others), the kinds this tick ran last; at most MAX_KINDS.
 	 *
 	 * @return array<string, float>
 	 */
 	public function estimates(): array {
-		return $this->slowest;
+		$out = array_diff_key( $this->kept, $this->slowest ) + $this->slowest;
+		return array_slice( $out, -self::MAX_KINDS, null, true );
 	}
 }
