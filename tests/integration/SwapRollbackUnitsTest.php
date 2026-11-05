@@ -126,6 +126,61 @@ final class SwapRollbackUnitsTest extends SwapTestCase {
 		$this->assertTrue( $done->retry_useful(), 'a retry from the final check, as after any rollback' );
 	}
 
+	public function test_a_later_unit_does_not_start_when_the_time_left_does_not_cover_the_slowest_so_far(): void {
+		list( $job, $before ) = $this->half();
+		// Each directory put back takes 3 seconds; the run starts with 5 seconds of its budget left.
+		$this->retype(
+			$job,
+			array(
+				'rename' => static function ( string $from, string $to ): bool {
+					sleep( 3 );
+					return rename( $from, $to );
+				},
+			)
+		);
+		$runner      = new Runner(
+			Plugin::instance()->jobs(),
+			Plugin::instance()->job_types(),
+			new Redactor( Redactor::installation_secrets() ),
+			array(
+				'cli'    => true,
+				'budget' => new Budget( 20, 32 * 1048576, false ),
+			)
+		);
+		$this->seams = array();
+		$result      = $this->autocommit(
+			static function () use ( $runner, $job ): TickResult {
+				return $runner->tick( $job->id, microtime( true ) - 15 );
+			}
+		);
+		$this->assertSame( TickResult::MORE, $result->status, $result->message );
+		$this->assertSame( 1, $this->dir_units(), 'one slow directory, then about 2 seconds left: less than the slowest unit with its margin, so no other starts: ' . implode( ' ', $this->seams ) );
+		$this->assertContains( 'back_paused', $this->seams );
+		// The control: there was another directory to put back, and the next runs put it back.
+		$this->seams = array();
+		$done        = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertGreaterThanOrEqual( 1, $this->dir_units(), 'the control: more directories were left' );
+		$this->assertSame( Job::FAILED, $done->status, (string) $done->last_error );
+		$this->assertSame( $before, $this->site() );
+	}
+
+	/**
+	 * How many directory entries the rollback put back (each entry's renames one unit).
+	 *
+	 * @return int
+	 */
+	private function dir_units(): int {
+		$units = 0;
+		$dir   = false;
+		foreach ( $this->seams as $seam ) {
+			if ( 'dir_back' === $seam && ! $dir ) {
+				++$units;
+			}
+			$dir = 'dir_back' === $seam;
+		}
+		return $units;
+	}
+
 	public function test_with_time_left_a_rollback_ends_in_one_run(): void {
 		list( $job, $before ) = $this->half();
 		$this->seams          = array();
