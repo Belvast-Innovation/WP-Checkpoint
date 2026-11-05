@@ -162,6 +162,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	const INTERRUPTED     = 'interrupted';
 	const INCOMPLETE      = 'incomplete';
 	const STOPPED         = 'stopped';
+	const BUSY            = 'busy';
 	const REVERSED        = 'reversed';
 	const UNDONE          = 'undone';
 	const ASKED           = 'asked';
@@ -183,6 +184,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		self::INTERRUPTED     => 'The swap was interrupted before it was complete.',
 		self::INCOMPLETE      => 'After the renames, not every table of the plan was in its place.',
 		self::STOPPED         => 'The swap stopped (the job log says why).',
+		self::BUSY            => 'The database is busy: the tables stayed locked by other work through every try.',
 		self::REVERSED        => 'A check of the restored site found it broken: the site was put back as it was before the restore.',
 		self::UNDONE          => 'The restored site could not be checked, and the swap was undone as chosen: the site was put back as it was before the restore.',
 		self::ASKED           => 'The restore was undone as asked (wp wpcheckpoint job undo): the site was put back as it was before the restore.',
@@ -308,6 +310,20 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @var array<string, mixed>
 	 */
 	private $parts;
+
+	/**
+	 * The rollback's units in this tick (unit_back()): the tick is told by its lock token (the Runner runs the step
+	 * again within a tick while its budget lasts, each run with a context of its own); whether a unit ran in it, and
+	 * the slowest so far. The first unit of a tick goes whatever the budget; a later one, in any run of the tick, only
+	 * while the time left covers the slowest with SwapCheckStep::MARGIN.
+	 *
+	 * @var array{token: string, ran: bool, slowest: float}
+	 */
+	private $back_tick = array(
+		'token'   => '',
+		'ran'     => false,
+		'slowest' => 0.0,
+	);
 
 	/**
 	 * Constructor.
@@ -972,7 +988,9 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			throw new RetryFrom( self::REJUDGED . ' ' . self::STOOD_DOWN, RestorePreflightStep::ID );
 		} catch ( \Throwable $e ) {
 			$context->logger()->warning( 'The swap stopped', array( 'error' => $e->getMessage() ) );
-			throw $this->roll_back( $context, $db, $cursor, self::STOPPED, self::reason( $e ) );
+			// The reason goes with the rollback's cursor, its words only with this run: a rollback in more than one run
+			// (roll_back()) ends with the reason's text, so the tables' lock is a reason of its own.
+			throw $this->roll_back( $context, $db, $cursor, $e instanceof TablesBusy ? self::BUSY : self::STOPPED, self::reason( $e ) );
 		}
 		// Made only by the evidence: a listing that cannot be read is waited out, and the next tick decides from
 		// what is there then (the cursor says the renames were under way).
@@ -1209,7 +1227,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @param Queries    $db      Connection.
 	 * @param string     $sql     Statement.
 	 * @return void
-	 * @throws \RuntimeException When the tables stayed locked through every retry.
+	 * @throws TablesBusy When the tables stayed locked through every retry.
 	 */
 	private function send( JobContext $context, Queries $db, string $sql ): void {
 		$tries = 0;
@@ -1223,7 +1241,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 					throw $e;
 				}
 				if ( $tries >= count( self::RETRIES ) ) {
-					throw new \RuntimeException( sprintf( 'The database is busy: the tables stayed locked by other work through %d tries.', $tries + 1 ) );
+					throw new TablesBusy( sprintf( 'The database is busy: the tables stayed locked by other work through %d tries.', $tries + 1 ) );
 				}
 				$this->sleep( self::RETRIES[ $tries ] );
 				++$tries;
@@ -1232,9 +1250,55 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	}
 
 	/**
+	 * Before a unit of a rollback (roll_back()): the first of the tick goes; a later one ($back_tick) only while the
+	 * budget is not spent and the time left covers the slowest unit so far with SwapCheckStep::MARGIN. Otherwise the
+	 * run stops here: the cursor counts the units done ("back", so the run is seen to have made progress) and the step
+	 * returns progress (SwapPause); the next run takes the rollback up again from what is there. A unit slower than
+	 * the whole budget does not fail the job, as it would elsewhere: the site is being put back, and the next run goes
+	 * on with the next unit.
+	 *
+	 * @param JobContext           $context Context.
+	 * @param array<string, mixed> $cursor  The rollback's cursor.
+	 * @param array{units: int}    $back    This run's units.
+	 * @return float When the unit started (JobContext::elapsed()).
+	 * @throws SwapPause When the run stops before the unit.
+	 */
+	private function unit_back( JobContext $context, array $cursor, array $back ): float {
+		$token = $context->lock_token();
+		if ( $token !== $this->back_tick['token'] ) {
+			$this->back_tick = array(
+				'token'   => $token,
+				'ran'     => false,
+				'slowest' => 0.0,
+			);
+		}
+		if ( $this->back_tick['ran'] && ( $context->should_stop() || $context->remaining_seconds() < $this->back_tick['slowest'] * SwapCheckStep::MARGIN ) ) {
+			$cursor['back'] = (int) ( $cursor['back'] ?? 0 ) + $back['units'];
+			$this->at( 'back_paused' );
+			throw new SwapPause( StepResult::progress( $cursor, 95, __( 'Putting the site back as it was', 'wp-checkpoint' ) ) );
+		}
+		$this->back_tick['ran'] = true;
+		return $context->elapsed();
+	}
+
+	/**
+	 * After a unit of a rollback: counted for this run, and its time taken into the tick's slowest.
+	 *
+	 * @param JobContext        $context Context.
+	 * @param array{units: int} $back    This run's units.
+	 * @param float             $started When it started.
+	 * @return void
+	 */
+	private function unit_done( JobContext $context, array &$back, float $started ): void {
+		++$back['units'];
+		$this->back_tick['slowest'] = max( $this->back_tick['slowest'], $context->elapsed() - $started );
+	}
+
+	/**
 	 * Put the site back from what is there: the tables, then the directories, in reverse plan order; the
 	 * maintenance file taken down; then the job ends (failed, a retry starting at the final check; or
-	 * cancelled).
+	 * cancelled). In bounded units (unit_back()): a run whose budget is spent stops between two and returns progress,
+	 * and the next run (WP-CLI's: the swap step is CliOnly) goes on from what is there.
 	 *
 	 * @param JobContext           $context Context.
 	 * @param Queries              $db      Connection.
@@ -1243,6 +1307,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @param string               $detail  Why in words, for this tick's error (another tick says the reason's text).
 	 * @return \RuntimeException What ends the job, for the caller to throw (ended()).
 	 * @throws TransientFailure When what is there cannot be told (the rollback goes on later).
+	 * @throws SwapPause When the run stops between two units (the step returns progress).
 	 */
 	private function roll_back( JobContext $context, Queries $db, array $cursor, string $reason, string $detail = '' ): \RuntimeException {
 		if ( ! isset( self::REASONS[ $reason ] ) ) {
@@ -1266,6 +1331,11 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		$db->run( 'SET SESSION lock_wait_timeout = ' . self::LOCK_WAIT );
 		$there = $this->there( $db, $entries['tables'] );
 		$this->carry_back( $context, $db, $entries['tables'], $there, $cursor );
+		// One unit is one entry's renames (one RENAME statement, or one directory entry's renames): between units, a
+		// run whose budget is spent stops (unit_back()); the next goes on from what is there, as after a crash. The
+		// first unit of a tick always goes; after it, a unit starts only while the time left covers the slowest one so
+		// far with a margin (it may wait out a lock).
+		$back = array( 'units' => 0 );
 		foreach ( array_reverse( $entries['tables'] ) as $entry ) {
 			$pairs = SwapRules::table_back( $entry, $there, $this->stray_table( $context, $entry['live'] ) );
 			if ( SwapPlan::TABLE_OF === $entry['kind'] && $entry['had_live'] && ! isset( $there[ $entry['stage'] ] ) && isset( $there[ $entry['live'] ] ) && ! isset( $there[ $entry['old'] ] ) ) {
@@ -1276,7 +1346,9 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			if ( array() === $pairs ) {
 				continue;
 			}
+			$started = $this->unit_back( $context, $cursor, $back );
 			$this->send( $context, $db, SwapRules::rename_sql( $pairs ) );
+			$this->unit_done( $context, $back, $started );
 			foreach ( $pairs as $pair ) {
 				unset( $there[ $pair[0] ] );
 				$there[ $pair[1] ] = true;
@@ -1294,6 +1366,10 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		}
 		foreach ( array_reverse( $entries['dirs'] ) as $entry ) {
 			$pairs = SwapRules::dir_back( $entry, $this->exists( $entry['live'] ), $this->exists( $entry['stage'] ), $this->exists( $entry['old'] ), $this->stray_dir( $entry ) );
+			if ( array() === $pairs ) {
+				continue;
+			}
+			$started = $this->unit_back( $context, $cursor, $back );
 			foreach ( $pairs as $pair ) {
 				if ( $pair[1] !== $entry['stage'] && $pair[1] !== $entry['live'] ) {
 					$parent = dirname( $pair[1] );
@@ -1312,6 +1388,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 				$this->rename_back( $context, $pair[0], $pair[1] );
 				$this->at( 'dir_back' );
 			}
+			$this->unit_done( $context, $back, $started );
 		}
 		$this->at( 'dirs_back' );
 		// What requests cached of the half-swapped site (a persistent cache outlives this process). A cache that
