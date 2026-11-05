@@ -162,6 +162,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	const INTERRUPTED     = 'interrupted';
 	const INCOMPLETE      = 'incomplete';
 	const STOPPED         = 'stopped';
+	const BUSY            = 'busy';
 	const REVERSED        = 'reversed';
 	const UNDONE          = 'undone';
 	const ASKED           = 'asked';
@@ -183,6 +184,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		self::INTERRUPTED     => 'The swap was interrupted before it was complete.',
 		self::INCOMPLETE      => 'After the renames, not every table of the plan was in its place.',
 		self::STOPPED         => 'The swap stopped (the job log says why).',
+		self::BUSY            => 'The database is busy: the tables stayed locked by other work through every try.',
 		self::REVERSED        => 'A check of the restored site found it broken: the site was put back as it was before the restore.',
 		self::UNDONE          => 'The restored site could not be checked, and the swap was undone as chosen: the site was put back as it was before the restore.',
 		self::ASKED           => 'The restore was undone as asked (wp wpcheckpoint job undo): the site was put back as it was before the restore.',
@@ -972,7 +974,9 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			throw new RetryFrom( self::REJUDGED . ' ' . self::STOOD_DOWN, RestorePreflightStep::ID );
 		} catch ( \Throwable $e ) {
 			$context->logger()->warning( 'The swap stopped', array( 'error' => $e->getMessage() ) );
-			throw $this->roll_back( $context, $db, $cursor, self::STOPPED, self::reason( $e ) );
+			// The reason goes with the rollback's cursor, its words only with this run: a rollback in more than one run
+			// (roll_back()) ends with the reason's text, so the tables' lock is a reason of its own.
+			throw $this->roll_back( $context, $db, $cursor, $e instanceof TablesBusy ? self::BUSY : self::STOPPED, self::reason( $e ) );
 		}
 		// Made only by the evidence: a listing that cannot be read is waited out, and the next tick decides from
 		// what is there then (the cursor says the renames were under way).
@@ -1209,7 +1213,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @param Queries    $db      Connection.
 	 * @param string     $sql     Statement.
 	 * @return void
-	 * @throws \RuntimeException When the tables stayed locked through every retry.
+	 * @throws TablesBusy When the tables stayed locked through every retry.
 	 */
 	private function send( JobContext $context, Queries $db, string $sql ): void {
 		$tries = 0;
@@ -1223,7 +1227,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 					throw $e;
 				}
 				if ( $tries >= count( self::RETRIES ) ) {
-					throw new \RuntimeException( sprintf( 'The database is busy: the tables stayed locked by other work through %d tries.', $tries + 1 ) );
+					throw new TablesBusy( sprintf( 'The database is busy: the tables stayed locked by other work through %d tries.', $tries + 1 ) );
 				}
 				$this->sleep( self::RETRIES[ $tries ] );
 				++$tries;
