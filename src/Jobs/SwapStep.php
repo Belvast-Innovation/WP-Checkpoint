@@ -1253,7 +1253,9 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * Before a unit of a rollback (roll_back()): the first of the tick goes; a later one ($back_tick) only while the
 	 * budget is not spent and the time left covers the slowest unit so far with SwapCheckStep::MARGIN. Otherwise the
 	 * run stops here: the cursor counts the units done ("back", so the run is seen to have made progress) and the step
-	 * returns progress (SwapPause); the next run takes the rollback up again from what is there.
+	 * returns progress (SwapPause); the next run takes the rollback up again from what is there. A unit slower than
+	 * the whole budget does not fail the job, as it would elsewhere: the site is being put back, and the next run goes
+	 * on with the next unit.
 	 *
 	 * @param JobContext           $context Context.
 	 * @param array<string, mixed> $cursor  The rollback's cursor.
