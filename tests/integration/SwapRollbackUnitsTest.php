@@ -128,12 +128,17 @@ final class SwapRollbackUnitsTest extends SwapTestCase {
 
 	public function test_a_later_unit_does_not_start_when_the_time_left_does_not_cover_the_slowest_so_far(): void {
 		list( $job, $before ) = $this->half();
-		// Each directory put back takes 3 seconds; the run starts with 5 seconds of its budget left.
+		// The first directory put back takes 2 seconds, the rest none; the run starts with 4 seconds of its budget
+		// left. After that unit about 2 seconds are left: the budget is not spent (should_stop() is false), but less
+		// than the slowest unit with its margin (3 seconds), so no other unit starts.
+		$calls = 0;
 		$this->retype(
 			$job,
 			array(
-				'rename' => static function ( string $from, string $to ): bool {
-					sleep( 3 );
+				'rename' => static function ( string $from, string $to ) use ( &$calls ): bool {
+					if ( 0 === $calls++ ) {
+						sleep( 2 );
+					}
 					return rename( $from, $to );
 				},
 			)
@@ -150,11 +155,12 @@ final class SwapRollbackUnitsTest extends SwapTestCase {
 		$this->seams = array();
 		$result      = $this->autocommit(
 			static function () use ( $runner, $job ): TickResult {
-				return $runner->tick( $job->id, microtime( true ) - 15 );
+				return $runner->tick( $job->id, microtime( true ) - 16 );
 			}
 		);
 		$this->assertSame( TickResult::MORE, $result->status, $result->message );
 		$this->assertSame( 1, $this->dir_units(), 'one slow directory, then about 2 seconds left: less than the slowest unit with its margin, so no other starts: ' . implode( ' ', $this->seams ) );
+		$this->assertSame( 1, $calls > 0 ? 1 : 0, 'the control: the slow rename ran' );
 		$this->assertContains( 'back_paused', $this->seams );
 		// The control: there was another directory to put back, and the next runs put it back.
 		$this->seams = array();
