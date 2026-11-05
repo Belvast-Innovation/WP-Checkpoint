@@ -436,18 +436,22 @@ final class SwapCheckTest extends RestoreTestCase {
 			)
 		);
 		$job    = Plugin::instance()->jobs()->create( $type, self::$admin_id, array(), array( 'base' => $this->base() ) );
-		$runner = $this->small_runner(); // A tick of a unit or two: the job moves on between the kills.
+		$runner = $this->small_runner(); // Short ticks: the job moves on between the kills.
 		$marks  = array();
+		// Each kill is followed by a take-over, whichever tick it came in (a take-over's own tick may be killed again,
+		// however many units a tick does): one mark per take-over.
 		for ( $i = 0; $i < 500 && $kills < 2; $i++ ) {
 			$before = $kills;
 			$runner->tick( $job->id, $this->now );
-			if ( $kills > $before ) {
+			while ( $kills > $before && count( $marks ) < 4 ) {
+				$before = $kills;
 				$wpdb->query( $wpdb->prepare( 'UPDATE ' . JobRepository::table() . ' SET locked_until = 1 WHERE id = %d', $job->id ) );
 				$runner->tick( $job->id, $this->now ); // Takes the job over.
 				$row     = Plugin::instance()->jobs()->find( $job->id );
 				$marks[] = array( $row->takeovers, $row->takeover_mark );
 			}
 		}
+		$this->assertCount( 2, $marks, 'the control: one take-over after each kill' );
 		$this->assertSame( 2, $kills, 'the control: the staging run was killed twice' );
 		$this->assertSame( 1, $marks[1][0], 'the control: the second takeover found the job moved on, so its count starts over' );
 		$this->assertNotSame( $marks[0][1], $marks[1][1], 'the control: at another position' );
