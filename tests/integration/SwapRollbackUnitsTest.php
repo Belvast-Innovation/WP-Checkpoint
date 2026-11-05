@@ -187,6 +187,42 @@ final class SwapRollbackUnitsTest extends SwapTestCase {
 		return $units;
 	}
 
+	public function test_a_rollback_after_locked_tables_that_takes_more_than_one_run_ends_saying_the_database_was_busy(): void {
+		global $wpdb;
+		$job    = $this->at_swap();
+		$before = $this->site();
+		$this->swap_parts['sleep'] = static function ( int $seconds ): void {}; // The waits between the tries: none.
+		$this->register_type();
+		$wpdb->query( $wpdb->prepare( 'UPDATE ' . \WPCheckpoint\Jobs\JobRepository::table() . ' SET type = %s WHERE id = %d', $this->type, $job->id ) );
+		// Another connection holds a lock on a live table the swap renames, until the swap gave up and is rolling back.
+		$other = \WPCheckpoint\Restore\ImportSession::open( \WPCheckpoint\Standalone\Credentials::from_wordpress() );
+		$other->run( 'LOCK TABLES `' . $wpdb->prefix . 'swt_keep` READ' );
+		try {
+			for ( $i = 0; $i < 30; $i++ ) {
+				$this->cli_tick_with_no_time_left( Plugin::instance()->jobs()->find( $job->id ) );
+				$now = Plugin::instance()->jobs()->find( $job->id );
+				if ( 'rollback' === ( $now->cursor['phase'] ?? '' ) || ! in_array( $now->status, array( Job::QUEUED, Job::RUNNING ), true ) ) {
+					break;
+				}
+			}
+		} finally {
+			$other->run( 'UNLOCK TABLES' );
+			$other->close();
+		}
+		$this->assertSame( 'rollback', $now->cursor['phase'] ?? '', 'the control: rolling back, not ended in that run: ' . $now->status . ' ' . $now->last_error );
+		$this->assertSame( \WPCheckpoint\Jobs\SwapStep::BUSY, $now->cursor['reason'] ?? '', 'why, kept with the rollback' );
+		$runs = 0;
+		while ( in_array( $now->status, array( Job::QUEUED, Job::RUNNING ), true ) && $runs < 30 ) {
+			$this->cli_tick_with_no_time_left( $now );
+			$now = Plugin::instance()->jobs()->find( $job->id );
+			++$runs;
+		}
+		$this->assertGreaterThanOrEqual( 1, $runs, 'the control: finished by a later run' );
+		$this->assertSame( Job::FAILED, $now->status );
+		$this->assertStringContainsString( 'The database is busy', (string) $now->last_error, 'said by the run that finished it' );
+		$this->assertSame( $before, $this->site() );
+	}
+
 	public function test_with_time_left_a_rollback_ends_in_one_run(): void {
 		list( $job, $before ) = $this->half();
 		$this->seams          = array();
