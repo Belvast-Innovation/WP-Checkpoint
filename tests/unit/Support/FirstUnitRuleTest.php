@@ -6,7 +6,12 @@ use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 /**
  * The first unit of a tick (or of a bounded call) always runs, whatever the
- * budget says: a loop that checks its budget before doing anything makes no
+ * budget says. In a tick that is the first unit of the whole tick, whichever
+ * step runs it: the Runner runs a step again within a tick, and moves on to
+ * the next, and every one of those runs asks JobContext::may_start_unit()
+ * (TickUnits), which lets only the tick's first unit go without looking at
+ * the time left; no other file judges the time left by a unit's time (the
+ * second test here). a loop that checks its budget before doing anything makes no
  * progress on a host where something before it used the time up, and the
  * job is then failed for making no progress, or a reclaim never gets
  * anywhere. Three fixes in a row brought that back (the last one: the time
@@ -33,7 +38,7 @@ final class FirstUnitRuleTest extends TestCase {
 	/**
 	 * What counts as looping on a budget.
 	 */
-	const BUDGET_LOOP = '/->should_stop\(|->remaining_seconds\(|\)\s*-\s*\$started\s*[<>]|microtime\(\s*true\s*\)\s*-\s*(?:\$\w*start\w*|[\w:>-]*started_at\(\))\s*[<>]/';
+	const BUDGET_LOOP = '/->should_stop\(|->remaining_seconds\(|->may_start_unit\(|\)\s*-\s*\$started\s*[<>]|microtime\(\s*true\s*\)\s*-\s*(?:\$\w*start\w*|[\w:>-]*started_at\(\))\s*[<>]/';
 
 	/**
 	 * Files that stop before a first unit on purpose: file => why.
@@ -65,7 +70,18 @@ final class FirstUnitRuleTest extends TestCase {
 		'src/Jobs/DatabaseImportStep.php'   => 'tests/integration/NoBudgetLeftTest.php::test_a_restore_moves_on_in_every_tick_with_no_time_left',
 		'src/Jobs/TempTableDropper.php'     => 'tests/integration/JobRepositoryTest.php::test_the_first_drop_of_a_call_runs_even_when_the_time_is_already_up',
 		'src/Support/Schema.php'            => 'tests/integration/JobRepositoryTest.php::test_uninstall_runs_one_call_even_when_its_time_is_already_up',
+		'src/Jobs/TickUnits.php'            => 'tests/integration/RunnerTest.php::test_a_second_run_of_a_step_in_a_tick_does_not_start_a_unit_that_would_not_fit',
 	);
+
+	/**
+	 * Judging the time left by the time of a unit: only TickUnits does it (JobContext::may_start_unit()).
+	 */
+	const UNIT_JUDGE = '/->remaining_seconds\(\)\s*</';
+
+	/**
+	 * The file that may judge so.
+	 */
+	const UNIT_JUDGES = array( 'src/Jobs/TickUnits.php' );
 
 	private static function root(): string {
 		return dirname( __DIR__, 3 );
@@ -117,11 +133,39 @@ final class FirstUnitRuleTest extends TestCase {
 		}
 	}
 
+	public function test_only_the_tick_judges_the_time_left_by_a_unit(): void {
+		$root  = self::root();
+		$found = array();
+		$it    = new \RecursiveIteratorIterator( new \RecursiveDirectoryIterator( $root . '/src', \FilesystemIterator::SKIP_DOTS ) );
+		foreach ( $it as $file ) {
+			if ( 'php' === $file->getExtension() && 1 === preg_match( self::UNIT_JUDGE, self::code( (string) file_get_contents( $file->getPathname() ) ) ) ) {
+				$found[] = str_replace( '\\', '/', substr( $file->getPathname(), strlen( $root ) + 1 ) );
+			}
+		}
+		sort( $found );
+		$this->assertSame( self::UNIT_JUDGES, $found, 'a step that judges the time left by a unit\'s time itself does it per run, not per tick: ask JobContext::may_start_unit()' );
+		// The scan finds what it looks for, and not what it does not.
+		foreach ( array(
+			'if ( ! $first && $context->remaining_seconds() < $slowest * self::MARGIN ) {',
+			'if ( $context->remaining_seconds()<$last * 1.5 ) {',
+		) as $code ) {
+			$this->assertSame( 1, preg_match( self::UNIT_JUDGE, $code ), $code );
+		}
+		foreach ( array(
+			'while ( $context->remaining_seconds() > 1 ) {',
+			'return max( 0.0, $this->budget->seconds - $this->elapsed() );',
+			self::code( "<?php\n// \$context->remaining_seconds() < \$slowest\n\$a = 1;" ),
+		) as $code ) {
+			$this->assertSame( 0, preg_match( self::UNIT_JUDGE, $code ), $code );
+		}
+	}
+
 	public function test_the_scan_finds_what_it_looks_for(): void {
 		foreach ( array(
 			'if ( $context->should_stop() ) {',
 			'while ( $context->remaining_seconds() > 1 ) {',
 			'if ( microtime( true ) - $started >= self::LIMIT ) {',
+			'if ( ! $context->may_start_unit( self::UNIT ) ) {',
 			'while ( (float) call_user_func( $clock ) - $started < self::MAX_SECONDS ) {',
 		) as $code ) {
 			$this->assertSame( 1, preg_match( self::BUDGET_LOOP, $code ), $code );

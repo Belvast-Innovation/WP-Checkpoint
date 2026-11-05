@@ -13,6 +13,7 @@ use WPCheckpoint\Jobs\Runner;
 use WPCheckpoint\Jobs\StepResult;
 use WPCheckpoint\Jobs\TableChanged;
 use WPCheckpoint\Jobs\TickResult;
+use WPCheckpoint\Jobs\TickUnits;
 use WPCheckpoint\Jobs\WorkLost;
 use WPCheckpoint\Jobs\TransientFailure;
 use WPCheckpoint\Support\Deleter;
@@ -140,6 +141,141 @@ final class RunnerTest extends WP_UnitTestCase {
 			}
 			return StepResult::done( 'all ' . $units );
 		} );
+	}
+
+	/**
+	 * A step that times its units (JobContext::may_start_unit(), unit_took()) on the fake clock: unit n takes
+	 * $cost( n ) seconds; a run returns progress after $per_run units, or when a unit is declined. $ran records each
+	 * run ("run") and each unit ("id:n").
+	 *
+	 * @param string   $id      Step id.
+	 * @param string   $kind    Kind of its units.
+	 * @param int      $units   Units in total.
+	 * @param callable $cost    function( int $n ): float.
+	 * @param int      $per_run Units a run does at most.
+	 * @param string[] $ran     What ran (by reference).
+	 * @return ClosureStep
+	 */
+	private function timed_step( string $id, string $kind, int $units, callable $cost, int $per_run, array &$ran ): ClosureStep {
+		return new ClosureStep(
+			$id,
+			function ( JobContext $ctx ) use ( $id, $kind, $units, $cost, $per_run, &$ran ): StepResult {
+				$n     = (int) ( $ctx->cursor()['n'] ?? 0 );
+				$here  = 0;
+				$ran[] = 'run';
+				while ( $n < $units ) {
+					if ( $here >= $per_run || ! $ctx->may_start_unit( $kind ) ) {
+						return StepResult::progress( array( 'n' => $n ), 50 );
+					}
+					$started = $ctx->elapsed();
+					++$n;
+					++$here;
+					$this->now += $cost( $n );
+					$ran[]      = $id . ':' . $n;
+					$ctx->unit_took( $kind, $ctx->elapsed() - $started );
+				}
+				return StepResult::done( 'done' );
+			}
+		);
+	}
+
+	/**
+	 * The Runner's own state of the job (the cursor's reserved key).
+	 *
+	 * @param int $id Job id.
+	 * @return array<string, mixed>
+	 */
+	private function runner_state( int $id ): array {
+		$cursor = $this->repo->find( $id )->cursor;
+		return is_array( $cursor[ Runner::RESERVED_KEY ] ?? null ) ? $cursor[ Runner::RESERVED_KEY ] : array();
+	}
+
+	public function test_a_second_run_of_a_step_in_a_tick_does_not_start_a_unit_that_would_not_fit(): void {
+		// Units of 9 seconds under a 20-second budget, a run doing one: after the first, 11 seconds are left, less than
+		// 9 times TickUnits::MARGIN. The Runner runs the step again (its budget is not spent); that run's first unit is
+		// not the tick's first, so it does not start, and the tick ends.
+		$ran = array();
+		$this->register(
+			'timed',
+			array(
+				$this->timed_step(
+					'slow',
+					'test.slow',
+					5,
+					static function (): float {
+						return 9.0;
+					},
+					1,
+					$ran
+				),
+			)
+		);
+		$job    = $this->repo->create( 'timed' );
+		$result = $this->runner( 20 )->tick( $job->id, $this->now );
+		$this->assertSame( TickResult::MORE, $result->status, $result->message );
+		$this->assertSame( array( 'run', 'slow:1', 'run' ), $ran, 'run again in the tick, which started no unit, and not run a third time' );
+		$this->assertSame( 1, $this->repo->find( $job->id )->cursor['n'] ?? null );
+		$state = $this->runner_state( $job->id );
+		$this->assertSame( 0, (int) ( $state['no_progress'] ?? -1 ), 'the run told no is not a run without progress' );
+		$this->assertSame( 9.0, (float) ( $state[ Runner::UNITS_KEY ]['test.slow'] ?? 0.0 ), 'its time kept for the next tick' );
+		// The next tick's first unit goes, whatever the estimate.
+		$ran    = array();
+		$result = $this->runner( 20 )->tick( $job->id, $this->now );
+		$this->assertSame( array( 'run', 'slow:2', 'run' ), $ran );
+	}
+
+	public function test_a_kind_never_measured_does_not_start_second_in_a_tick_and_starts_first_in_the_next(): void {
+		$ran = array();
+		$one = static function (): float {
+			return 1.0;
+		};
+		$this->register(
+			'two',
+			array(
+				$this->timed_step( 'first', 'test.first', 1, $one, 10, $ran ),
+				$this->timed_step( 'second', 'test.second', 3, $one, 10, $ran ),
+			)
+		);
+		$job    = $this->repo->create( 'two' );
+		$result = $this->runner( 20 )->tick( $job->id, $this->now );
+		$this->assertSame( TickResult::MORE, $result->status, $result->message );
+		$this->assertSame( array( 'run', 'first:1', 'run' ), $ran, 'the second step\'s kind was never measured: it did not start, with 18 seconds left' );
+		$this->assertSame( 'second', $this->repo->find( $job->id )->step );
+		$this->assertSame( 0, (int) ( $this->runner_state( $job->id )['no_progress'] ?? -1 ) );
+		$ran    = array();
+		$result = $this->runner( 20 )->tick( $job->id, $this->now );
+		$this->assertSame( TickResult::COMPLETED, $result->status, $result->message );
+		$this->assertSame( array( 'run', 'second:1', 'second:2', 'second:3' ), $ran, 'the next tick\'s first unit measured it, and the rest followed' );
+	}
+
+	public function test_a_tick_judges_a_kind_by_the_slowest_of_it_in_earlier_ticks(): void {
+		// The first unit takes 9 seconds, every other 2. A 20-second budget: 13.5 seconds (9 times TickUnits::MARGIN)
+		// must be left to start one.
+		$ran = array();
+		$this->register(
+			'est',
+			array(
+				$this->timed_step(
+					'kind',
+					'test.kind',
+					20,
+					static function ( int $n ): float {
+						return 1 === $n ? 9.0 : 2.0;
+					},
+					100,
+					$ran
+				),
+			)
+		);
+		$job = $this->repo->create( 'est' );
+		$this->runner( 20 )->tick( $job->id, $this->now );
+		$this->assertSame( array( 'run', 'kind:1' ), $ran, 'the first tick: 11 seconds left after the slow one, and the step not run again' );
+		$ran = array();
+		$this->runner( 20 )->tick( $job->id, $this->now );
+		// Units 2 to 5 take 8 seconds; then 12 are left, under the 13.5 the earlier tick's 9 seconds ask for (this
+		// tick's own slowest, 2 seconds, would have let units start until 3 were left).
+		$this->assertSame( array( 'run', 'kind:2', 'kind:3', 'kind:4', 'kind:5' ), $ran );
+		$this->assertSame( 1.5, TickUnits::MARGIN, 'the control: the margin these numbers assume' );
 	}
 
 	/**
