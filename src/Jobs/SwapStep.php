@@ -1241,7 +1241,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 
 	/**
 	 * Before a unit of a rollback (roll_back()): JobContext::may_start_unit() decides (the first unit of the tick goes;
-	 * a later one only while the time left covers the slowest rollback unit, of this tick or an earlier one, with its
+	 * a later one only while the time left covers the slowest rollback unit, of this tick or the last tick that ran one, with its
 	 * margin). Otherwise the run stops here: the cursor counts the units done ("back", so the run is seen to have made progress) and the step
 	 * returns progress (SwapPause); the next run takes the rollback up again from what is there. A unit slower than
 	 * the whole budget does not fail the job, as it would elsewhere: the site is being put back, and the next run goes

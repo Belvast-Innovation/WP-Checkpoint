@@ -229,10 +229,10 @@ final class PackStep implements Step {
 				$bytes   = $this->unit( $context, $work, $active, $roots, $exclusions, $packer, $cursor );
 				$cost    = $context->elapsed() - $started;
 				$since  += $bytes;
-				// Only a unit that moved bytes says what the next one will cost: a file boundary, a phase switch, a seal
-				// or a new volume is told as costing nothing (so a run of them is not a kind never measured, and none of
-				// them raises the measure of a chunk).
-				$context->unit_took( self::UNIT, $bytes > 0 ? $cost : 0.0 );
+				// Only a unit that moved bytes, or read a chunk it then restarted, says what the next one will cost: a file
+				// boundary, a phase switch, a seal or a new volume is told as costing nothing (so a run of them is not a
+				// kind never measured, and none of them raises the measure of a chunk).
+				$context->unit_took( self::UNIT, $bytes > 0 || ! empty( $cursor['restarted'] ) ? $cost : 0.0 );
 				if ( $bytes > 0 ) {
 					if ( $cost > $budget ) {
 						throw new \RuntimeException( sprintf( 'Disk throughput is too low for a backup here: one %d MB chunk took %d seconds, more than the %d-second time budget of a single run.', (int) ( $this->chunk_bytes / 1048576 ), (int) ceil( $cost ), $budget ) );

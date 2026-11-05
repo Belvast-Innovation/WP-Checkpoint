@@ -603,7 +603,8 @@ final class Runner {
 			$percent = self::overall( $index, $count, $result->percent );
 			if ( $before === $after && $units->declined() && $units->count() === $units_before ) {
 				// Told no before any unit in this run (TickUnits): the tick ends here, as when its budget is spent; not a
-				// run without progress (the next tick's first unit goes). A run that did a unit and moved nothing is one.
+				// run without progress (the next tick's first unit goes). A run in which may_start_unit() let a unit go and
+				// that moved nothing is one.
 				return $this->pause( $job, $token, $logger, JobContext::STOP_UNIT );
 			}
 			if ( $before === $after ) {

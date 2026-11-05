@@ -41,7 +41,8 @@ defined( 'ABSPATH' ) || exit;
  * A unit's duration depends on the disk (up to 256 MiB of a volume at full
  * depth): a unit starts as JobContext::may_start_unit() says (the first
  * unit of a tick always; another only while the time left covers the
- * slowest of its kind, of this tick or an earlier one, 1.5 times), and a
+ * slowest of its kind, of this tick or the last tick that ran one, 1.5
+ * times), and a
  * unit slower than the whole budget fails with the reason.
  */
 final class VerifyStep implements Step {

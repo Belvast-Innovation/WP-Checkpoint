@@ -62,7 +62,7 @@ defined( 'ABSPATH' ) || exit;
  * The time a statement takes depends on the database: a statement starts
  * as JobContext::may_start_unit() says (the first unit of a tick always;
  * another only while the time left covers the slowest statement, of this
- * tick or an earlier one, 1.5 times), and a statement slower than the
+ * tick or the last tick that ran one, 1.5 times), and a statement slower than the
  * whole budget ends the job with the reason.
  *
  * After a table's last chunk, the rows it received must be the rows the

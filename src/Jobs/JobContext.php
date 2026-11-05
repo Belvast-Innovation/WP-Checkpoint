@@ -184,8 +184,8 @@ final class JobContext {
 
 	/**
 	 * Whether a unit of this kind may start now: the first unit of the tick always (whichever step runs it); any
-	 * other while the budget is not spent and the time left covers the slowest of its kind, in this tick or an
-	 * earlier one, with TickUnits::MARGIN; a kind never measured waits for the next tick's first unit. A step asks
+	 * other while the budget is not spent and the time left covers the slowest of its kind, in this tick or in the
+	 * last tick that ran one, with TickUnits::MARGIN; a kind never measured waits for the next tick's first unit. A step asks
 	 * this before each unit it times, and tells unit_took() what the unit took; when it is told no, it returns
 	 * progress, and the Runner ends the tick. The only place a step judges the time left by the time of a unit.
 	 *
@@ -198,7 +198,7 @@ final class JobContext {
 	}
 
 	/**
-	 * What a unit of this kind took (its time counts for the next one of its kind, in this tick and later ones). Also
+	 * What a unit of this kind took (its time counts for the next one of its kind, in this tick and the next). Also
 	 * for a unit no may_start_unit() was asked about (a phase that only stops on a spent budget): once one ran, no
 	 * later unit of the tick is its first.
 	 *

@@ -24,7 +24,7 @@ defined( 'ABSPATH' ) || exit;
 final class TickUnits {
 
 	/**
-	 * The time left must cover the slowest unit of its kind times this.
+	 * The time left must cover the estimate of a unit's kind (estimate()) times this.
 	 */
 	const MARGIN = 1.5;
 
@@ -147,7 +147,8 @@ final class TickUnits {
 	}
 
 	/**
-	 * A unit of this kind took this long (and a unit ran in this tick: begun()).
+	 * A unit of this kind took this long. Marks the tick as started (what comes after is not its first unit), but is
+	 * not counted (count()): a unit is counted when may_start() let it go, or by begun().
 	 *
 	 * @param string $kind    Kind of unit.
 	 * @param float  $seconds Its time.
@@ -181,7 +182,15 @@ final class TickUnits {
 	 * @return array<string, float>
 	 */
 	public function estimates(): array {
-		$out = array_diff_key( $this->kept, $this->slowest ) + $this->slowest;
+		// A kind whose slowest this tick was nothing (units that cost nothing: PackStep's boundaries) keeps what was kept.
+		$ran = array_filter(
+			$this->slowest,
+			function ( float $seconds, string $kind ): bool {
+				return $seconds > 0.0 || ! isset( $this->kept[ $kind ] );
+			},
+			ARRAY_FILTER_USE_BOTH
+		);
+		$out = array_diff_key( $this->kept, $ran ) + $ran;
 		return array_slice( $out, -self::MAX_KINDS, null, true );
 	}
 }

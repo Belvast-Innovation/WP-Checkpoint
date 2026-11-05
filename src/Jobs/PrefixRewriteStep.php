@@ -82,7 +82,7 @@ defined( 'ABSPATH' ) || exit;
  * a run that lost the job changes nothing once a newer run has claimed it.
  * A unit starts as JobContext::may_start_unit() says (the first unit of a
  * tick always; another only while the time left covers the slowest of its
- * kind, of this tick or an earlier one, 1.5 times), and a unit slower than
+ * kind, of this tick or the last tick that ran one, 1.5 times), and a unit slower than
  * the whole budget ends the job with the reason.
  *
  * None of these names is one StateCarry writes before the swap: it carries
