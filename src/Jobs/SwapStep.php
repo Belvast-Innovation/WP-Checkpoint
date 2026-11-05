@@ -169,6 +169,13 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	const PUT_BACK_REASON = 'putback';
 
 	/**
+	 * Kinds of its units, for JobContext::may_start_unit(): a unit of the recount before the swap, a unit of a rollback
+	 * (one entry's renames).
+	 */
+	const UNIT_RECOUNT = 'restore_swap.recount';
+	const UNIT_BACK    = 'restore_swap.back';
+
+	/**
 	 * How a put-back ends, recorded in its cursor ("ends") by the claim's own write (put_back_cursor()) and kept to its
 	 * end: cancelled, or undone. Once recorded, whether it ends cancelled is read from it and from nothing else
 	 * (put_back_cancels(), the first thing ended() asks); one that ends undone does so as the undo or the redo it put
@@ -310,20 +317,6 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @var array<string, mixed>
 	 */
 	private $parts;
-
-	/**
-	 * The rollback's units in this tick (unit_back()): the tick is told by its lock token (the Runner runs the step
-	 * again within a tick while its budget lasts, each run with a context of its own); whether a unit ran in it, and
-	 * the slowest so far. The first unit of a tick goes whatever the budget; a later one, in any run of the tick, only
-	 * while the time left covers the slowest with SwapCheckStep::MARGIN.
-	 *
-	 * @var array{token: string, ran: bool, slowest: float}
-	 */
-	private $back_tick = array(
-		'token'   => '',
-		'ran'     => false,
-		'slowest' => 0.0,
-	);
 
 	/**
 	 * Constructor.
@@ -733,13 +726,10 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			StateCarry::counted( self::base_prefix(), is_multisite() ? get_current_network_id() : 0 ),
 			$context->fence()
 		);
-		$first   = true;
-		$slowest = 0.0;
 		while ( true ) {
-			if ( ! $first && ( $context->should_stop() || $context->remaining_seconds() < $slowest * SwapCheckStep::MARGIN ) ) {
+			if ( ! $context->may_start_unit( self::UNIT_RECOUNT ) ) {
 				return $cursor;
 			}
-			$first   = false;
 			$started = $context->elapsed();
 			$unit    = $counter->unit(
 				array(
@@ -749,7 +739,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 				),
 				false
 			);
-			$slowest = max( $slowest, $context->elapsed() - $started );
+			$context->unit_took( self::UNIT_RECOUNT, $context->elapsed() - $started );
 			if ( $unit['done'] ) {
 				return array(
 					'phase'   => 'ready',
@@ -1250,9 +1240,9 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	}
 
 	/**
-	 * Before a unit of a rollback (roll_back()): the first of the tick goes; a later one ($back_tick) only while the
-	 * budget is not spent and the time left covers the slowest unit so far with SwapCheckStep::MARGIN. Otherwise the
-	 * run stops here: the cursor counts the units done ("back", so the run is seen to have made progress) and the step
+	 * Before a unit of a rollback (roll_back()): JobContext::may_start_unit() decides (the first unit of the tick goes;
+	 * a later one only while the time left covers the slowest rollback unit, of this tick or an earlier one, with its
+	 * margin). Otherwise the run stops here: the cursor counts the units done ("back", so the run is seen to have made progress) and the step
 	 * returns progress (SwapPause); the next run takes the rollback up again from what is there. A unit slower than
 	 * the whole budget does not fail the job, as it would elsewhere: the site is being put back, and the next run goes
 	 * on with the next unit.
@@ -1264,25 +1254,16 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @throws SwapPause When the run stops before the unit.
 	 */
 	private function unit_back( JobContext $context, array $cursor, array $back ): float {
-		$token = $context->lock_token();
-		if ( $token !== $this->back_tick['token'] ) {
-			$this->back_tick = array(
-				'token'   => $token,
-				'ran'     => false,
-				'slowest' => 0.0,
-			);
-		}
-		if ( $this->back_tick['ran'] && ( $context->should_stop() || $context->remaining_seconds() < $this->back_tick['slowest'] * SwapCheckStep::MARGIN ) ) {
+		if ( ! $context->may_start_unit( self::UNIT_BACK ) ) {
 			$cursor['back'] = (int) ( $cursor['back'] ?? 0 ) + $back['units'];
 			$this->at( 'back_paused' );
 			throw new SwapPause( StepResult::progress( $cursor, 95, __( 'Putting the site back as it was', 'wp-checkpoint' ) ) );
 		}
-		$this->back_tick['ran'] = true;
 		return $context->elapsed();
 	}
 
 	/**
-	 * After a unit of a rollback: counted for this run, and its time taken into the tick's slowest.
+	 * After a unit of a rollback: counted for this run, and its time told (JobContext::unit_took()).
 	 *
 	 * @param JobContext        $context Context.
 	 * @param array{units: int} $back    This run's units.
@@ -1291,7 +1272,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 */
 	private function unit_done( JobContext $context, array &$back, float $started ): void {
 		++$back['units'];
-		$this->back_tick['slowest'] = max( $this->back_tick['slowest'], $context->elapsed() - $started );
+		$context->unit_took( self::UNIT_BACK, $context->elapsed() - $started );
 	}
 
 	/**

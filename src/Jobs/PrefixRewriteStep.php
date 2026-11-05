@@ -80,9 +80,10 @@ defined( 'ABSPATH' ) || exit;
  * requires that row to still name this run, and the claim is confirmed
  * again before a report is written and before a group counts as done, so
  * a run that lost the job changes nothing once a newer run has claimed it.
- * The first unit of a tick always runs; the tick ends when the time left is
- * under 1.5 times the slowest unit so far, and a unit slower than the whole
- * budget ends the job with the reason.
+ * A unit starts as JobContext::may_start_unit() says (the first unit of a
+ * tick always; another only while the time left covers the slowest of its
+ * kind, of this tick or an earlier one, 1.5 times), and a unit slower than
+ * the whole budget ends the job with the reason.
  *
  * None of these names is one StateCarry writes before the swap: it carries
  * only the exact names of Support\StoredNames, none of which ends in
@@ -90,8 +91,9 @@ defined( 'ABSPATH' ) || exit;
  */
 final class PrefixRewriteStep implements Step {
 
-	const ID     = 'restore_prefix';
-	const MARGIN = 1.5;
+	const ID        = 'restore_prefix';
+	const UNIT      = 'restore_prefix.unit'; // The kind of its unit, for JobContext::may_start_unit().
+	const UNIT_PLAN = 'restore_prefix.plan'; // The plan unit's kind.
 
 	/**
 	 * The rewrite's row in the restore's ledger (the imported tables are numbered from 0).
@@ -200,7 +202,6 @@ final class PrefixRewriteStep implements Step {
 		$db     = call_user_func( $this->connect );
 		$keys   = new PrefixKeys( $from, $to, 'wcp-' . $context->job()->id . '-' . $loaded['random'] . ':' );
 		$tables = self::tables( $plan );
-		$first  = true;
 		try {
 			$token              = bin2hex( random_bytes( 16 ) );
 			$this->ledger_table = TempTables::ledger( $context->job()->storage_token, $context->job()->id, (string) $loaded['random'] );
@@ -217,22 +218,24 @@ final class PrefixRewriteStep implements Step {
 				'tables' => $tables,
 			);
 			if ( 'plan' === $cursor['phase'] ) {
-				$cursor = $this->plan( $context, $run );
+				if ( ! $context->may_start_unit( self::UNIT_PLAN ) ) {
+					return StepResult::progress( $cursor, 68, __( 'Renaming for this site\'s table prefix', 'wp-checkpoint' ) );
+				}
+				$started = $context->elapsed();
+				$cursor  = $this->plan( $context, $run );
+				$context->unit_took( self::UNIT_PLAN, $context->elapsed() - $started );
 				$context->checkpoint( $cursor, 68, __( 'Renaming for this site\'s table prefix', 'wp-checkpoint' ) );
-				$first = false;
 			}
-			$slowest = 0.0;
-			$budget  = (float) $context->budget()->seconds;
+			$budget = (float) $context->budget()->seconds;
 			while ( 'done' !== $cursor['phase'] ) {
-				if ( ! $first && ( $context->should_stop() || $context->remaining_seconds() < $slowest * self::MARGIN ) ) {
+				if ( ! $context->may_start_unit( self::UNIT ) ) {
 					return StepResult::progress( $cursor, 69, __( 'Renaming for this site\'s table prefix', 'wp-checkpoint' ) );
 				}
-				$first   = false;
 				$started = $context->elapsed();
 				$was     = $cursor['phase'];
 				$cursor  = $this->unit( $context, $cursor, $run );
 				$cost    = $context->elapsed() - $started;
-				$slowest = max( $slowest, $cost );
+				$context->unit_took( self::UNIT, $cost );
 				if ( $cost > $budget ) {
 					throw new \RuntimeException( sprintf( 'Renaming the rows named after the table prefix is too slow on this database: one unit of work took %1$d seconds, more than the %2$d-second time budget of a single run.', (int) ceil( $cost ), (int) $budget ) );
 				}

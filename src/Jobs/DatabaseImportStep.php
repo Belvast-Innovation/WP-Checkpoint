@@ -59,9 +59,10 @@ defined( 'ABSPATH' ) || exit;
  * commit), so a tick that ran statements moves the cursor and is not taken
  * for one without progress.
  *
- * The time a statement takes depends on the database: the first statement
- * of a tick always runs, the tick ends when the time left is under 1.5
- * times the slowest statement so far, and a statement slower than the
+ * The time a statement takes depends on the database: a statement starts
+ * as JobContext::may_start_unit() says (the first unit of a tick always;
+ * another only while the time left covers the slowest statement, of this
+ * tick or an earlier one, 1.5 times), and a statement slower than the
  * whole budget ends the job with the reason.
  *
  * After a table's last chunk, the rows it received must be the rows the
@@ -72,8 +73,8 @@ defined( 'ABSPATH' ) || exit;
  */
 final class DatabaseImportStep implements Step {
 
-	const ID     = 'restore_database';
-	const MARGIN = 1.5;
+	const ID   = 'restore_database';
+	const UNIT = 'restore_database.statement'; // The kind of its unit (one statement, DROP with its CREATE), for JobContext::may_start_unit().
 
 	/**
 	 * Times a table without transactions may be imported again from its first chunk before the job fails.
@@ -170,8 +171,6 @@ final class DatabaseImportStep implements Step {
 		$defined      = array();
 		$collated     = array();
 		$this->marked = array();
-		$slowest      = 0.0;
-		$first        = true;
 		try {
 			// Each tick is a run of its own: it claims each table it works on, and a run that claimed after it wins.
 			$ledger = new Ledger( $db, TempTables::ledger( $context->job()->storage_token, $context->job()->id, $plan['random'] ), bin2hex( random_bytes( 16 ) ) );
@@ -229,7 +228,7 @@ final class DatabaseImportStep implements Step {
 					$collated[ $table['number'] ]
 				);
 				try {
-					$outcome = $this->import_chunk( $context, $db, $ledger, $target, $file, (int) $cursor['current']['c'], $counted, $slowest, $first, $cursor, $plan['plan'], $site_set, (string) ( $defined[ $table['number'] ]['auto_increment'] ?? '' ) );
+					$outcome = $this->import_chunk( $context, $db, $ledger, $target, $file, (int) $cursor['current']['c'], $counted, $cursor, $plan['plan'], $site_set, (string) ( $defined[ $table['number'] ]['auto_increment'] ?? '' ) );
 				} catch ( StatementFailed $e ) {
 					// Which table: the database's own message names none, or (for the errors that carry row data) is
 					// not kept at all (ImportSession::error()).
@@ -280,8 +279,6 @@ final class DatabaseImportStep implements Step {
 	 * @param string               $file    The extracted chunk.
 	 * @param int                  $chunk   Chunk number.
 	 * @param array<int, bool>     $counted Tables whose row count was checked in this tick (updated).
-	 * @param float                $slowest Slowest statement so far (updated).
-	 * @param bool                 $first   Whether no statement ran yet in this tick (updated).
 	 * @param array<string, mixed> $cursor  Cursor (its chunk's pos follows the ledger, so a tick that moves the ledger moves the cursor).
 	 * @param TablePlan            $plan    Plan.
 	 * @param string               $session_charset The site's character set, the session's before the chunk's preamble.
@@ -292,7 +289,7 @@ final class DatabaseImportStep implements Step {
 	 * @throws ClaimLost When another run claimed the table (retried after the back-off).
 	 * @throws \RuntimeException When one statement takes longer than the whole time budget.
 	 */
-	private function import_chunk( JobContext $context, ImportSession $db, Ledger $ledger, ImportTarget $target, string $file, int $chunk, array &$counted, float &$slowest, bool &$first, array &$cursor, TablePlan $plan, string $session_charset, string $auto_increment ): string {
+	private function import_chunk( JobContext $context, ImportSession $db, Ledger $ledger, ImportTarget $target, string $file, int $chunk, array &$counted, array &$cursor, TablePlan $plan, string $session_charset, string $auto_increment ): string {
 		$number = $target->number;
 		// The claim decides who may change this table from now on: only while this run still holds the job.
 		$this->crash( 'claiming', $target->table, $chunk );
@@ -368,26 +365,31 @@ final class DatabaseImportStep implements Step {
 		$open     = false;
 		$bytes    = 0;
 		$budget   = (float) $context->budget()->seconds;
+		$dropped  = false; // A DROP ran: the CREATE after it is the rest of the same unit.
+		$started  = $context->elapsed(); // When the unit under way started (set again before each unit).
 		try {
 			while ( true ) {
-				if ( ! $first && $context->remaining_seconds() < $slowest * self::MARGIN ) {
-					$this->flush( $db, $ledger, $target->table, $number, $chunk, $at_chunk, $at_pos, $end, $rows, $open, null !== $state );
-					$cursor['current']['pos'] = $end;
-					return 'stopped';
-				}
 				$statement = $reader->next();
 				if ( null === $statement ) {
 					break;
 				}
 				if ( Statement::SET === $statement->kind ) {
-					// Not a unit of work: it moves no recorded position (a resumed chunk runs the preamble again), so
-					// it does not end a tick's first unit; a tick that stopped after it and nothing else would end
-					// where it began and count as no progress. A later check may end a tick after a SET: that tick
-					// has made progress already.
+					// Not a unit of work: it moves no recorded position (a resumed chunk runs the preamble again), so it
+					// is not what a tick's first unit is (JobContext::may_start_unit() is asked only before a unit: a
+					// SET that took the tick's first unit would leave every tick ending where it began).
 					$this->run_set( $db, $statement );
 					continue;
 				}
-				$started = $context->elapsed();
+				if ( ! $dropped ) {
+					// A unit starts here (DROP and the CREATE after it are one): asked before it, after it was read; a
+					// stop leaves it to the next tick, which reads it again from the recorded position.
+					if ( ! $context->may_start_unit( self::UNIT ) ) {
+						$this->flush( $db, $ledger, $target->table, $number, $chunk, $at_chunk, $at_pos, $end, $rows, $open, null !== $state );
+						$cursor['current']['pos'] = $end;
+						return 'stopped';
+					}
+					$started = $context->elapsed();
+				}
 				if ( Statement::DROP === $statement->kind || Statement::CREATE === $statement->kind ) {
 					if ( null !== $state ) {
 						throw new Refused( sprintf( 'Table %s, chunk %d: the table is dropped or created again after its rows began.', $target->table, $chunk ) );
@@ -399,9 +401,11 @@ final class DatabaseImportStep implements Step {
 					if ( Statement::DROP === $statement->kind ) {
 						// Not a unit either: until CREATE TABLE is recorded nothing is, and a replay runs DROP again.
 						// DROP and the CREATE after it form one unit, ended by the ledger's record of the CREATE.
+						$dropped = true;
 						continue;
 					}
-					$engine = JobFence::engine_of( $db, $target->temporary );
+					$dropped = false;
+					$engine  = JobFence::engine_of( $db, $target->temporary );
 					$this->warn_shortened( $context, $target, $statement );
 					$ledger->created( $number, $statement->end, in_array( (string) $engine, self::TRANSACTIONAL, true ), self::constraints_json( $statement ) );
 					$this->crash( 'commit', $target->table, $chunk );
@@ -422,9 +426,8 @@ final class DatabaseImportStep implements Step {
 				}
 				$end = $statement->end; // Never inside the preamble, which a resumed chunk runs again from its head.
 				$this->crash( 'statement', $target->table, $chunk );
-				$cost    = $context->elapsed() - $started;
-				$first   = false;
-				$slowest = max( $slowest, $cost );
+				$cost = $context->elapsed() - $started;
+				$context->unit_took( self::UNIT, $cost );
 				if ( $cost > $budget ) {
 					throw new \RuntimeException( sprintf( 'The database is too slow on this server: one statement of the table %1$s took %2$d seconds, more than the %3$d-second time budget of a single run.', $target->table, (int) ceil( $cost ), (int) $budget ) );
 				}

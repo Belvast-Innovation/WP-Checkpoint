@@ -67,10 +67,10 @@ final class PackStep implements Step {
 	const MAX_LISTED   = 50;
 
 	/**
-	 * A unit must fit the time left with this much room, measured on the
-	 * last chunk of the same tick.
+	 * The kind of its unit (a chunk, a file boundary or a phase switch), for
+	 * JobContext::may_start_unit().
 	 */
-	const TIME_MARGIN = 1.5;
+	const UNIT = 'pack.unit';
 
 	/**
 	 * The prefixes of the roots the scan listed files under (its root_ids), for this tick; null when the scan
@@ -216,13 +216,11 @@ final class PackStep implements Step {
 		$this->scanned_prefixes = null === $root_ids ? null : array_map( 'strval', array_keys( $root_ids ) );
 		$exclusions             = new Exclusions( $active['exclusions'], array() );
 		$since                  = 0;
-		$last                   = 0.0;
-		$first                  = true;
 		$budget                 = $context->budget()->seconds;
 
 		try {
 			while ( 'done' !== $cursor['phase'] ) {
-				if ( ! $first && $context->remaining_seconds() < $last * self::TIME_MARGIN ) {
+				if ( ! $context->may_start_unit( self::UNIT ) ) {
 					// The next chunk would not fit what is left: end the tick here rather than mid-chunk.
 					$context->checkpoint( $this->store( $cursor, $packer ), $this->percent( $cursor ), $this->message( $cursor ) );
 					return StepResult::progress( $this->store( $cursor, $packer ), $this->percent( $cursor ), $this->message( $cursor ) );
@@ -230,12 +228,11 @@ final class PackStep implements Step {
 				$started = $context->elapsed();
 				$bytes   = $this->unit( $context, $work, $active, $roots, $exclusions, $packer, $cursor );
 				$cost    = $context->elapsed() - $started;
-				$first   = false;
 				$since  += $bytes;
+				// Every unit's time is told (the slowest of the kind rules, so a file boundary or a phase switch, which
+				// costs next to nothing, never lowers the measure; told, a run of them is not a kind never measured).
+				$context->unit_took( self::UNIT, $cost );
 				if ( $bytes > 0 ) {
-					// Only a unit that moved bytes says what the next one will cost; a file boundary or a phase
-					// switch costs nothing and must not reset the measure. The slowest unit of this tick rules.
-					$last = max( $last, $cost );
 					if ( $cost > $budget ) {
 						throw new \RuntimeException( sprintf( 'Disk throughput is too low for a backup here: one %d MB chunk took %d seconds, more than the %d-second time budget of a single run.', (int) ( $this->chunk_bytes / 1048576 ), (int) ceil( $cost ), $budget ) );
 					}

@@ -93,8 +93,8 @@ defined( 'ABSPATH' ) || exit;
  */
 final class SwapCheckStep implements Step {
 
-	const ID     = 'restore_swap_check';
-	const MARGIN = 1.5;
+	const ID   = 'restore_swap_check';
+	const UNIT = 'restore_swap_check.unit'; // The kind of its unit, for JobContext::may_start_unit().
 
 	/**
 	 * What a run that lost the job can write past its last checkpoint: the checkpoint pace's bytes, and the one
@@ -195,7 +195,6 @@ final class SwapCheckStep implements Step {
 		$loaded = RestorePreflightStep::load_plan( $work );
 		$cursor = array_merge( array( 'phase' => 'claim' ), $context->cursor() );
 		$db     = call_user_func( $this->connect );
-		$first  = true;
 		try {
 			// TIMESTAMP keys in UTC: in a time zone with daylight saving time, an hour repeats in local time and a key
 			// read as text would convert back to an earlier instant.
@@ -223,19 +222,17 @@ final class SwapCheckStep implements Step {
 				StateCarry::counted( self::base_prefix(), is_multisite() ? get_current_network_id() : 0 ),
 				$context->fence()
 			);
-			$slowest        = 0.0;
 			$budget         = (float) $context->budget()->seconds;
 			while ( 'done' !== $cursor['phase'] ) {
-				if ( ! $first && ( $context->should_stop() || $context->remaining_seconds() < $slowest * self::MARGIN ) ) {
+				if ( ! $context->may_start_unit( self::UNIT ) ) {
 					return StepResult::progress( $cursor, 92, __( 'Checking the restore before the swap', 'wp-checkpoint' ) );
 				}
-				$first   = false;
 				$was     = $cursor['phase'];
 				$started = $context->elapsed();
 				$unit    = $this->unit( $context, $cursor, $run );
 				$cursor  = $unit['cursor'];
 				$cost    = $context->elapsed() - $started;
-				$slowest = max( $slowest, $cost );
+				$context->unit_took( self::UNIT, $cost );
 				if ( $cost > $budget && ! ( $unit['unbounded'] && $context->is_cli() ) ) {
 					throw new \RuntimeException(
 						$unit['unbounded']

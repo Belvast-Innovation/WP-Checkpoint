@@ -153,6 +153,19 @@ final class Runner {
 	private $clean;
 
 	/**
+	 * The units of the tick under way (TickUnits) and the job it is for: kept with the job's cursor by persist()
+	 * (UNITS_KEY), so the next tick judges by what this one measured.
+	 *
+	 * @var array{job: int, units: TickUnits}|null
+	 */
+	private $tick_units = null;
+
+	/**
+	 * Under the runner's reserved key of the cursor: the slowest time of each kind of unit (TickUnits::estimates()).
+	 */
+	const UNITS_KEY = 'units';
+
+	/**
 	 * Constructor.
 	 *
 	 * @param JobRepository        $repository Repository.
@@ -349,6 +362,13 @@ final class Runner {
 			return $this->fail( $job, $token, $logger, sprintf( 'Job type "%s" has no steps.', $job->type ) );
 		}
 		$ids = array_keys( $steps );
+		// One record of units for every run of a step in this tick, with what earlier ticks measured.
+		$reserved         = $job->cursor[ self::RESERVED_KEY ] ?? null;
+		$units            = new TickUnits( is_array( $reserved ) ? ( $reserved[ self::UNITS_KEY ] ?? array() ) : array() );
+		$this->tick_units = array(
+			'job'   => $job->id,
+			'units' => $units,
+		);
 
 		$logger->info(
 			'Tick started',
@@ -508,6 +528,7 @@ final class Runner {
 			}
 
 			if ( StepResult::DONE === $result->kind ) {
+				$units->begun(); // What the next step does in this tick is not the tick's first unit.
 				$logger->info( 'Step done', array( 'step' => $step_id ) );
 				$state = $this->reset( $state );
 				if ( Job::SITE_CHANGING === $job->site_state ) {
@@ -579,6 +600,11 @@ final class Runner {
 			// Progress: compared with the cursor before run(), so checkpoints made during the run count.
 			$after   = wp_json_encode( JobContext::strip_reserved( $result->cursor ) );
 			$percent = self::overall( $index, $count, $result->percent );
+			if ( $before === $after && $units->declined() ) {
+				// Told no before its first unit in this run (TickUnits): the tick ends here, as when its budget is spent;
+				// not a run without progress (the next tick's first unit goes).
+				return $this->pause( $job, $token, $logger, JobContext::STOP_UNIT );
+			}
 			if ( $before === $after ) {
 				$state['no_progress'] = (int) $state['no_progress'] + 1;
 				if ( $state['no_progress'] >= self::MAX_NO_PROGRESS ) {
@@ -596,10 +622,15 @@ final class Runner {
 				return new TickResult( TickResult::MORE, 0, $job, $result->message );
 			}
 			$state = $this->reset( $state );
+			$units->begun(); // The cursor moved: another run of the step in this tick does not start with the tick's first unit.
 			$this->persist( $job, $token, $step_id, $result->cursor, $state, $percent, $result->message, true, $held, $mark );
 			$this->maybe_heartbeat( $job, $token );
 			if ( $context->should_stop() ) {
 				return $this->pause( $job, $token, $logger, $context->stop_reason() );
+			}
+			if ( $units->declined() ) {
+				// The step stopped before a unit that would not fit the time left: the tick ends, not another run of it.
+				return $this->pause( $job, $token, $logger, JobContext::STOP_UNIT );
 			}
 		}
 	}
@@ -861,7 +892,8 @@ final class Runner {
 			$lease,
 			array( 'cli' => $this->cli ),
 			$record,
-			$token
+			$token,
+			'' !== $token && null !== $this->tick_units && $job->id === $this->tick_units['job'] ? $this->tick_units['units'] : null
 		);
 	}
 
@@ -948,6 +980,9 @@ final class Runner {
 	private function persist( Job $job, string $token, string $step, array $cursor, array $state, int $percent, string $message, bool $advanced, $site_state = null, $site_mark = null ): void {
 		$cursor                       = JobContext::strip_reserved( $cursor );
 		$cursor[ self::RESERVED_KEY ] = $state;
+		if ( null !== $this->tick_units && $job->id === $this->tick_units['job'] && array() !== $this->tick_units['units']->estimates() ) {
+			$cursor[ self::RESERVED_KEY ][ self::UNITS_KEY ] = $this->tick_units['units']->estimates();
+		}
 		if ( null !== $this->on_persist ) {
 			// Test seam: a replay test throws LockLost here to simulate a process that died after the disk
 			// changed and before this cursor was written; nothing else is written after LockLost.

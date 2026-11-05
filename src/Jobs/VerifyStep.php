@@ -39,9 +39,10 @@ defined( 'ABSPATH' ) || exit;
  * lose volumes to another backup's delete.
  *
  * A unit's duration depends on the disk (up to 256 MiB of a volume at full
- * depth): the first unit of a tick always runs, then the tick ends when
- * the time left is under 1.5 times the slowest unit so far, and a unit
- * slower than the whole budget fails with the reason.
+ * depth): a unit starts as JobContext::may_start_unit() says (the first
+ * unit of a tick always; another only while the time left covers the
+ * slowest of its kind, of this tick or an earlier one, 1.5 times), and a
+ * unit slower than the whole budget fails with the reason.
  */
 final class VerifyStep implements Step {
 
@@ -50,9 +51,9 @@ final class VerifyStep implements Step {
 	const RECORD_TEMP = 'verify.record.json';
 
 	/**
-	 * Slowest unit times this must fit in what is left of the budget.
+	 * The kind of its unit (one step of the verifier), for JobContext::may_start_unit().
 	 */
-	const TIME_MARGIN = 1.5;
+	const UNIT = 'verify.step';
 
 	/**
 	 * Returns the backups directory: function(): string.
@@ -178,10 +179,8 @@ final class VerifyStep implements Step {
 		}
 		$verifier = ArchiveVerifier::open( $manifest, $dir, $depth, is_array( $cursor['verifier'] ) ? $cursor['verifier'] : array() );
 		$budget   = (float) $context->budget()->seconds;
-		$first    = true;
-		$slowest  = 0.0;
 		while ( true ) {
-			if ( ! $first && $context->remaining_seconds() < $slowest * self::TIME_MARGIN ) {
+			if ( ! $context->may_start_unit( self::UNIT ) ) {
 				// The next unit would not fit what is left: end the tick here rather than be cut off mid-unit.
 				$context->checkpoint( $cursor, self::percent( $verifier ), __( 'Verifying the backup', 'wp-checkpoint' ) );
 				return StepResult::progress( $cursor, self::percent( $verifier ), __( 'Verifying the backup', 'wp-checkpoint' ) );
@@ -189,9 +188,8 @@ final class VerifyStep implements Step {
 			$started            = $context->elapsed();
 			$more               = $verifier->step();
 			$cost               = $context->elapsed() - $started;
-			$first              = false;
-			$slowest            = max( $slowest, $cost );
 			$cursor['verifier'] = $verifier->state();
+			$context->unit_took( self::UNIT, $cost );
 			if ( $cost > $budget ) {
 				throw new \RuntimeException( sprintf( 'Reading this backup is too slow on this server: one step of the check took %d seconds, more than the %d-second time budget of a single run.', (int) ceil( $cost ), (int) $budget ) );
 			}
