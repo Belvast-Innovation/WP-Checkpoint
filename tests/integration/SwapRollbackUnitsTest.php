@@ -18,8 +18,9 @@ use WPCheckpoint\Tests\Fixtures\Restore\SwapTestCase;
 final class SwapRollbackUnitsTest extends SwapTestCase {
 
 	/**
-	 * A restore killed once two of its table batches were renamed (every entry a batch of its own): its rollback has
-	 * the directories and two table entries to put back.
+	 * A restore killed once some of its table batches were renamed (every entry a batch of its own; two by default,
+	 * which on a network are the options and sitemeta): its rollback has the directories and those table entries to
+	 * put back.
 	 *
 	 * @param int $batches Table batches renamed before the kill.
 	 * @return array{0: Job, 1: array<string, mixed>} The job, the site before the restore.

@@ -1275,7 +1275,8 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * wait and the try, else in a later one. Tries recorded for another entry are not this one's: it starts its own
 	 * (so a run killed after an entry went through never hands its count to the next). Tries spent (as many as send()
 	 * makes), they are cleared, checkpointed, and the rollback fails as the database being busy, the site held: a
-	 * retry, or a run that takes the job over, starts its own tries.
+	 * retry of the job, or a run that takes it over after the tries were spent, starts its own tries (a run that takes
+	 * it over while tries remain goes on from those recorded).
 	 *
 	 * @param JobContext           $context Context.
 	 * @param Queries              $db      Connection.
