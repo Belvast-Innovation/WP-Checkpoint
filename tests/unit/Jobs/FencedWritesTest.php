@@ -87,6 +87,7 @@ final class FencedWritesTest extends TestCase {
 	const WRITES = array(
 		'src/Jobs/SwapStep.php'       => array(
 			array( '$db->run( $sql );', self::EXCEPTION, 'RENAME TABLE is DDL and carries no condition: a lease check right before it (send()); the window between the two is known (ARCHITECTURE).' ),
+			array( '$db->run( $rename );', self::EXCEPTION, 'RENAME TABLE of a rollback, one try a unit (send_back()): DDL with no condition, a lease check right before it, as send().' ),
 			array( "'DELETE FROM ' . SqlWriter::identifier( \$entry['live'] )", self::EXCEPTION, 'After the swap is made: idempotent, the same row the new holder deletes, right after a lease check.' ),
 			array( "'INSERT INTO ' . SqlWriter::identifier( self::base_prefix() . 'options' )", self::EXCEPTION, 'After the swap is made: an upsert of the after-swap mark, the same the new holder writes, right after a lease check.' ),
 		),

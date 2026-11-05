@@ -95,16 +95,20 @@ final class TickUnits {
 	 *
 	 * @param string     $kind    Kind of unit.
 	 * @param JobContext $context The run's context (its budget and clock).
+	 * @param float|null $bound   What a unit of this kind takes at most, known beforehand: the estimate while the
+	 *                            kind was never measured (a kind with no bound waits for a tick's first unit).
+	 * @param float      $wait    Seconds the unit waits before it starts (a wait owed between two tries): the time
+	 *                            left must cover it too.
 	 * @return bool
 	 */
-	public function may_start( string $kind, JobContext $context ): bool {
+	public function may_start( string $kind, JobContext $context, ?float $bound = null, float $wait = 0.0 ): bool {
 		if ( ! $this->started ) {
 			$this->started = true;
 			++$this->count;
 			return true;
 		}
-		$estimate = $this->estimate( $kind );
-		if ( null === $estimate || $context->should_stop() || $context->remaining_seconds() < $estimate * self::MARGIN ) {
+		$estimate = $this->estimate( $kind ) ?? $bound;
+		if ( null === $estimate || $context->should_stop() || $context->remaining_seconds() < max( 0.0, $wait ) + $estimate * self::MARGIN ) {
 			$this->declined = true;
 			return false;
 		}

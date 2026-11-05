@@ -189,12 +189,14 @@ final class JobContext {
 	 * this before each unit it times, and tells unit_took() what the unit took; when it is told no, it returns
 	 * progress, and the Runner ends the tick. The only place a step judges the time left by the time of a unit.
 	 *
-	 * @param string $kind Kind of unit (TickUnits::KIND), named by the step.
+	 * @param string     $kind  Kind of unit (TickUnits::KIND), named by the step.
+	 * @param float|null $bound What a unit of the kind takes at most, known beforehand (TickUnits::may_start()).
+	 * @param float      $wait  Seconds the unit waits before it starts (TickUnits::may_start()).
 	 * @return bool
 	 * @throws LockLost When the lease is gone (should_stop() renews it); the step must not catch it.
 	 */
-	public function may_start_unit( string $kind ): bool {
-		return $this->units->may_start( $kind, $this );
+	public function may_start_unit( string $kind, ?float $bound = null, float $wait = 0.0 ): bool {
+		return $this->units->may_start( $kind, $this, $bound, $wait );
 	}
 
 	/**

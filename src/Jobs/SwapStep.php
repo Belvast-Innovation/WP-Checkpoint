@@ -1247,19 +1247,71 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * the whole budget does not fail the job, as it would elsewhere: the site is being put back, and the next run goes
 	 * on with the next unit.
 	 *
+	 * A rollback unit takes at most LOCK_WAIT (one try of a RENAME: send_back(); a directory's renames wait for no
+	 * lock), which is its estimate while the kind was never measured; a wait owed before it ($wait, between two tries)
+	 * must fit the time left too.
+	 *
 	 * @param JobContext           $context Context.
 	 * @param array<string, mixed> $cursor  The rollback's cursor.
 	 * @param array{units: int}    $back    This run's units.
+	 * @param float                $wait    Seconds owed before the unit starts.
 	 * @return float When the unit started (JobContext::elapsed()).
 	 * @throws SwapPause When the run stops before the unit.
 	 */
-	private function unit_back( JobContext $context, array $cursor, array $back ): float {
-		if ( ! $context->may_start_unit( self::UNIT_BACK ) ) {
+	private function unit_back( JobContext $context, array $cursor, array $back, float $wait = 0.0 ): float {
+		if ( ! $context->may_start_unit( self::UNIT_BACK, (float) self::LOCK_WAIT, $wait ) ) {
 			$cursor['back'] = (int) ( $cursor['back'] ?? 0 ) + $back['units'];
 			$this->at( 'back_paused' );
 			throw new SwapPause( StepResult::progress( $cursor, 95, __( 'Putting the site back as it was', 'wp-checkpoint' ) ) );
 		}
 		return $context->elapsed();
+	}
+
+	/**
+	 * One entry's RENAME of a rollback, one try a unit (unit_back(): at most LOCK_WAIT, the session's lock wait). A try
+	 * that waited out the lock renames nothing; the cursor records the tries ("busy") and when the next may start
+	 * ("busy_after", after the wait of SwapStep::RETRIES), checkpointed; the next try is a unit of its own, in this
+	 * tick when the time left covers the wait and the try, else in a later one. Tries spent (as many as send() makes),
+	 * the rollback fails as the database being busy, the site held, for a retry.
+	 *
+	 * @param JobContext           $context Context.
+	 * @param Queries              $db      Connection.
+	 * @param string               $rename  The entry's RENAME statement.
+	 * @param array<string, mixed> $cursor  The rollback's cursor (its tries, by reference).
+	 * @param array{units: int}    $back    This run's units (by reference).
+	 * @return void
+	 * @throws SwapPause When the run stops before a try.
+	 * @throws TablesBusy When the tables stayed locked through every try.
+	 * @throws TransientFailure When the RENAME failed for a moment otherwise (the rollback goes on later).
+	 */
+	private function send_back( JobContext $context, Queries $db, string $rename, array &$cursor, array &$back ): void {
+		while ( true ) {
+			$owed    = max( 0, (int) ( $cursor['busy_after'] ?? 0 ) - $this->now() );
+			$started = $this->unit_back( $context, $cursor, $back, (float) $owed );
+			if ( $owed > 0 ) {
+				$this->sleep( $owed );
+			}
+			try {
+				$context->confirm_lease();
+				$db->run( $rename );
+				$this->unit_done( $context, $back, $started );
+				unset( $cursor['busy'], $cursor['busy_after'] );
+				return;
+			} catch ( TransientFailure $e ) {
+				if ( 1205 !== $e->getCode() ) {
+					throw $e;
+				}
+				$this->unit_done( $context, $back, $started );
+				$tries = (int) ( $cursor['busy'] ?? 0 ) + 1;
+				if ( $tries > count( self::RETRIES ) ) {
+					throw new TablesBusy( sprintf( 'The database is busy: the tables stayed locked by other work through %d tries.', $tries ) );
+				}
+				$cursor['busy']       = $tries;
+				$cursor['busy_after'] = $this->now() + self::RETRIES[ $tries - 1 ];
+				$context->checkpoint( $cursor, 95, __( 'Putting the site back as it was', 'wp-checkpoint' ) );
+				$this->at( 'back_busy' );
+			}
+		}
 	}
 
 	/**
@@ -1327,9 +1379,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			if ( array() === $pairs ) {
 				continue;
 			}
-			$started = $this->unit_back( $context, $cursor, $back );
-			$this->send( $context, $db, SwapRules::rename_sql( $pairs ) );
-			$this->unit_done( $context, $back, $started );
+			$this->send_back( $context, $db, SwapRules::rename_sql( $pairs ), $cursor, $back );
 			foreach ( $pairs as $pair ) {
 				unset( $there[ $pair[0] ] );
 				$there[ $pair[1] ] = true;
