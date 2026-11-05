@@ -7,21 +7,28 @@ use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 /**
  * What TickUnits keeps across ticks (estimates(), read back from the cursor): only kinds it names and times it can
- * use, at most MAX_KINDS, each the slowest seen.
+ * use, at most MAX_KINDS, each its slowest in the last tick that ran one.
  */
 final class TickUnitsTest extends TestCase {
 
-	public function test_it_keeps_the_slowest_of_each_kind(): void {
-		$units = new TickUnits( array( 'a.unit' => 2.0 ) );
+	public function test_it_keeps_each_kinds_slowest_of_the_last_tick_that_ran_one(): void {
+		$units = new TickUnits(
+			array(
+				'a.unit' => 9.0,
+				'c.unit' => 4.0,
+			)
+		);
 		$units->took( 'a.unit', 1.0 );
 		$units->took( 'b.unit', 0.5 );
-		$units->took( 'a.unit', 3.25 );
+		$units->took( 'a.unit', 2.25 );
 		$this->assertSame(
 			array(
+				'c.unit' => 4.0,
+				'a.unit' => 2.25,
 				'b.unit' => 0.5,
-				'a.unit' => 3.25,
 			),
-			$units->estimates()
+			$units->estimates(),
+			'a kind this tick ran: its slowest of this tick, not the 9 seconds kept (one slow unit weighs on the next tick only); a kind it did not run: as kept'
 		);
 	}
 

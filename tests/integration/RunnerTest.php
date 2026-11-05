@@ -276,6 +276,82 @@ final class RunnerTest extends WP_UnitTestCase {
 		// tick's own slowest, 2 seconds, would have let units start until 3 were left).
 		$this->assertSame( array( 'run', 'kind:2', 'kind:3', 'kind:4', 'kind:5' ), $ran );
 		$this->assertSame( 1.5, TickUnits::MARGIN, 'the control: the margin these numbers assume' );
+		// The next tick judges by the slowest of the last tick that ran one (2 seconds), not by the 9 seconds of the
+		// one before: units start while 3 seconds are left, nine of them (18 seconds).
+		$ran = array();
+		$this->runner( 20 )->tick( $job->id, $this->now );
+		$this->assertSame( array( 'run', 'kind:6', 'kind:7', 'kind:8', 'kind:9', 'kind:10', 'kind:11', 'kind:12', 'kind:13', 'kind:14' ), $ran, 'one slow unit weighed on the next tick, not on every tick after it' );
+	}
+
+	/**
+	 * A step that moves its cursor with no unit it times: a ready checkpoint, an untimed phase. $then returns what
+	 * its second run returns.
+	 *
+	 * @param string   $id   Step id.
+	 * @param string[] $ran  What ran (by reference).
+	 * @param bool     $done Whether its first run ends the step (else it moves its cursor and returns progress).
+	 * @return ClosureStep
+	 */
+	private function untimed_step( string $id, array &$ran, bool $done ): ClosureStep {
+		return new ClosureStep(
+			$id,
+			function ( JobContext $ctx ) use ( $id, &$ran, $done ): StepResult {
+				$ran[]      = $id;
+				$this->now += 1.0;
+				if ( $done ) {
+					return StepResult::done( 'done' );
+				}
+				$n = (int) ( $ctx->cursor()['n'] ?? 0 );
+				if ( 0 === $n ) {
+					return StepResult::progress( array( 'n' => 1 ), 10 );
+				}
+				// Its second run in the tick: a timed unit, after work this tick did without one.
+				if ( ! $ctx->may_start_unit( 'test.after' ) ) {
+					return StepResult::progress( array( 'n' => 1 ), 10 );
+				}
+				$ran[] = $id . ':unit';
+				$ctx->unit_took( 'test.after', 1.0 );
+				return StepResult::done( 'done' );
+			}
+		);
+	}
+
+	public function test_work_a_tick_did_without_a_timed_unit_makes_the_next_unit_not_its_first(): void {
+		// After a run that moved the cursor (the Runner runs the step again)...
+		$ran = array();
+		$this->register( 'moved', array( $this->untimed_step( 'plain', $ran, false ) ) );
+		$job = $this->repo->create( 'moved' );
+		$this->runner( 20 )->tick( $job->id, $this->now );
+		$this->assertSame( array( 'plain', 'plain' ), $ran, 'its second run asked about a kind never measured, not the tick\'s first unit: it did not start' );
+		// ...and after a step that ended (the Runner moves on to the next).
+		$ran = array();
+		$one = static function (): float {
+			return 1.0;
+		};
+		$this->register( 'ended', array( $this->untimed_step( 'before', $ran, true ), $this->timed_step( 'after', 'test.after2', 2, $one, 10, $ran ) ) );
+		$job = $this->repo->create( 'ended' );
+		$this->runner( 20 )->tick( $job->id, $this->now );
+		$this->assertSame( array( 'before', 'run' ), $ran, 'the next step\'s unit is not the tick\'s first: a kind never measured, it did not start' );
+		// The control: as a tick's first unit it goes.
+		$ran = array();
+		$this->runner( 20 )->tick( $job->id, $this->now );
+		$this->assertSame( array( 'run', 'after:1', 'after:2' ), $ran );
+	}
+
+	public function test_with_no_time_left_a_ticks_first_unit_still_goes_and_no_other(): void {
+		// A tick started an hour ago: TickUnits lets its first unit go, whatever the budget, and no other.
+		$ran = array();
+		$one = static function (): float {
+			return 1.0;
+		};
+		$this->register( 'late', array( $this->timed_step( 'unit', 'test.late', 3, $one, 10, $ran ) ) );
+		$job = $this->repo->create( 'late' );
+		foreach ( array( 1, 2, 3 ) as $n ) {
+			$ran = array();
+			$this->runner( 20 )->tick( $job->id, $this->now - 3600 );
+			$this->assertSame( array( 'run', 'unit:' . $n ), $ran, "tick {$n}: its first unit, no other" );
+		}
+		$this->assertSame( Job::COMPLETED, $this->repo->find( $job->id )->status );
 	}
 
 	/**
