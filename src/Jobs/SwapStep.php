@@ -312,6 +312,20 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	private $parts;
 
 	/**
+	 * The rollback's units in this tick (unit_back()): the tick is told by its lock token (the Runner runs the step
+	 * again within a tick while its budget lasts, each run with a context of its own); whether a unit ran in it, and
+	 * the slowest so far. The first unit of a tick goes whatever the budget; a later one, in any run of the tick, only
+	 * while the time left covers the slowest with SwapCheckStep::MARGIN.
+	 *
+	 * @var array{token: string, ran: bool, slowest: float}
+	 */
+	private $back_tick = array(
+		'token'   => '',
+		'ran'     => false,
+		'slowest' => 0.0,
+	);
+
+	/**
 	 * Constructor.
 	 *
 	 * @param callable|null        $connect function(): Queries (tests); the site's own settings by default.
@@ -1236,38 +1250,46 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	}
 
 	/**
-	 * Before a unit of a rollback (roll_back()): the first of a run goes; a later one only while the budget is not
-	 * spent and the time left covers the slowest unit so far with SwapCheckStep::MARGIN. Otherwise the run stops
-	 * here: the cursor counts the units done ("back", so the run is seen to have made progress) and the step returns
-	 * progress (SwapPause); the next run takes the rollback up again from what is there.
+	 * Before a unit of a rollback (roll_back()): the first of the tick goes; a later one ($back_tick) only while the
+	 * budget is not spent and the time left covers the slowest unit so far with SwapCheckStep::MARGIN. Otherwise the
+	 * run stops here: the cursor counts the units done ("back", so the run is seen to have made progress) and the step
+	 * returns progress (SwapPause); the next run takes the rollback up again from what is there.
 	 *
-	 * @param JobContext                                     $context Context.
-	 * @param array<string, mixed>                           $cursor  The rollback's cursor.
-	 * @param array{first: bool, slowest: float, units: int} $back    This run's units.
+	 * @param JobContext           $context Context.
+	 * @param array<string, mixed> $cursor  The rollback's cursor.
+	 * @param array{units: int}    $back    This run's units.
 	 * @return float When the unit started (JobContext::elapsed()).
 	 * @throws SwapPause When the run stops before the unit.
 	 */
-	private function unit_back( JobContext $context, array $cursor, array &$back ): float {
-		if ( ! $back['first'] && ( $context->should_stop() || $context->remaining_seconds() < $back['slowest'] * SwapCheckStep::MARGIN ) ) {
+	private function unit_back( JobContext $context, array $cursor, array $back ): float {
+		$token = $context->lock_token();
+		if ( $token !== $this->back_tick['token'] ) {
+			$this->back_tick = array(
+				'token'   => $token,
+				'ran'     => false,
+				'slowest' => 0.0,
+			);
+		}
+		if ( $this->back_tick['ran'] && ( $context->should_stop() || $context->remaining_seconds() < $this->back_tick['slowest'] * SwapCheckStep::MARGIN ) ) {
 			$cursor['back'] = (int) ( $cursor['back'] ?? 0 ) + $back['units'];
 			$this->at( 'back_paused' );
 			throw new SwapPause( StepResult::progress( $cursor, 95, __( 'Putting the site back as it was', 'wp-checkpoint' ) ) );
 		}
-		$back['first'] = false;
+		$this->back_tick['ran'] = true;
 		return $context->elapsed();
 	}
 
 	/**
-	 * After a unit of a rollback: counted, and its time taken into the slowest.
+	 * After a unit of a rollback: counted for this run, and its time taken into the tick's slowest.
 	 *
-	 * @param JobContext                                     $context Context.
-	 * @param array{first: bool, slowest: float, units: int} $back    This run's units.
-	 * @param float                                          $started When it started.
+	 * @param JobContext        $context Context.
+	 * @param array{units: int} $back    This run's units.
+	 * @param float             $started When it started.
 	 * @return void
 	 */
-	private static function unit_done( JobContext $context, array &$back, float $started ): void {
+	private function unit_done( JobContext $context, array &$back, float $started ): void {
 		++$back['units'];
-		$back['slowest'] = max( $back['slowest'], $context->elapsed() - $started );
+		$this->back_tick['slowest'] = max( $this->back_tick['slowest'], $context->elapsed() - $started );
 	}
 
 	/**
@@ -1308,14 +1330,10 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		$there = $this->there( $db, $entries['tables'] );
 		$this->carry_back( $context, $db, $entries['tables'], $there, $cursor );
 		// One unit is one entry's renames (one RENAME statement, or one directory entry's renames): between units, a
-		// run whose budget is spent stops (pause_back()); the next goes on from what is there, as after a crash. The
-		// first unit of a run always goes; after it, a unit starts only while the time left covers the slowest one so
+		// run whose budget is spent stops (unit_back()); the next goes on from what is there, as after a crash. The
+		// first unit of a tick always goes; after it, a unit starts only while the time left covers the slowest one so
 		// far with a margin (it may wait out a lock).
-		$back = array(
-			'first'   => true,
-			'slowest' => 0.0,
-			'units'   => 0,
-		);
+		$back = array( 'units' => 0 );
 		foreach ( array_reverse( $entries['tables'] ) as $entry ) {
 			$pairs = SwapRules::table_back( $entry, $there, $this->stray_table( $context, $entry['live'] ) );
 			if ( SwapPlan::TABLE_OF === $entry['kind'] && $entry['had_live'] && ! isset( $there[ $entry['stage'] ] ) && isset( $there[ $entry['live'] ] ) && ! isset( $there[ $entry['old'] ] ) ) {
@@ -1328,7 +1346,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			}
 			$started = $this->unit_back( $context, $cursor, $back );
 			$this->send( $context, $db, SwapRules::rename_sql( $pairs ) );
-			self::unit_done( $context, $back, $started );
+			$this->unit_done( $context, $back, $started );
 			foreach ( $pairs as $pair ) {
 				unset( $there[ $pair[0] ] );
 				$there[ $pair[1] ] = true;
@@ -1368,7 +1386,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 				$this->rename_back( $context, $pair[0], $pair[1] );
 				$this->at( 'dir_back' );
 			}
-			self::unit_done( $context, $back, $started );
+			$this->unit_done( $context, $back, $started );
 		}
 		$this->at( 'dirs_back' );
 		// What requests cached of the half-swapped site (a persistent cache outlives this process). A cache that
