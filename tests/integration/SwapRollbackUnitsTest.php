@@ -229,11 +229,13 @@ final class SwapRollbackUnitsTest extends SwapTestCase {
 	 * them), but the options and sitemeta tables the carry back writes first, so a RENAME of the rollback waits for the
 	 * lock.
 	 *
-	 * @param Job $job   The job.
-	 * @param int $least Tables it must find to lock (the control).
+	 * @param Job  $job   The job.
+	 * @param int  $least Tables it must find to lock (the control).
+	 * @param bool $live  Also the test's own tables under their live names (the entries that rename those first, or
+	 *                    only those, such as a table only the backup has: its RENAME waits too).
 	 * @return \WPCheckpoint\Restore\ImportSession
 	 */
-	private function lock_moved_aside( Job $job, int $least = 1 ): \WPCheckpoint\Restore\ImportSession {
+	private function lock_moved_aside( Job $job, int $least = 1, bool $live = false ): \WPCheckpoint\Restore\ImportSession {
 		global $wpdb;
 		$wpdb->query( 'COMMIT' );
 		$prefix = \WPCheckpoint\Jobs\TempTables::OLD_PREFIX . substr( \WPCheckpoint\Jobs\TempTables::job_prefix( $job->storage_token, $job->id ), strlen( \WPCheckpoint\Jobs\TempTables::PREFIX ) );
@@ -247,6 +249,13 @@ final class SwapRollbackUnitsTest extends SwapTestCase {
 				}
 			)
 		);
+		if ( $live ) {
+			foreach ( array( 'swt_keep', 'swt_new', 'swt_gone' ) as $name ) {
+				if ( (string) $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $wpdb->prefix . $name ) ) ) !== '' ) {
+					$tables[] = $wpdb->prefix . $name;
+				}
+			}
+		}
 		$this->assertGreaterThanOrEqual( $least, count( $tables ), 'the control: tables moved aside by the swap, other than the ones the carry back writes' );
 		$other = \WPCheckpoint\Restore\ImportSession::open( \WPCheckpoint\Standalone\Credentials::from_wordpress() );
 		$other->run( 'LOCK TABLES ' . implode( ', ', array_map( static function ( string $t ): string { return '`' . $t . '` READ'; }, $tables ) ) );
@@ -360,14 +369,16 @@ final class SwapRollbackUnitsTest extends SwapTestCase {
 	}
 
 	public function test_tries_recorded_for_one_entry_are_not_the_next_ones(): void {
-		list( $job, $before ) = $this->half( 3 );
+		// Every table entry renamed (the test's three and the site's options, and sitemeta on a network): the rollback
+		// puts back more than one of the test's tables, each locked below under whichever name it renames first.
+		list( $job, $before ) = $this->half( 3 + count( self::site_tables() ) );
 		$this->retype(
 			$job,
 			array(
 				'sleep' => static function ( int $seconds ): void {},
 			)
 		);
-		$other = $this->lock_moved_aside( $job, 2 );
+		$other = $this->lock_moved_aside( $job, 2, true );
 		try {
 			$this->killed_at( Plugin::instance()->jobs()->find( $job->id ), 'back_busy', 1 );
 		} finally {
@@ -381,7 +392,7 @@ final class SwapRollbackUnitsTest extends SwapTestCase {
 		$stored = Plugin::instance()->jobs()->find( $job->id )->cursor;
 		$this->assertSame( $first['busy_for'] ?? null, $stored['busy_for'] ?? null, 'the control: the first entry\'s count is what is stored' );
 		// The next entry, locked: its first try is its own first, not the second of the first entry's.
-		$other = $this->lock_moved_aside( $job );
+		$other = $this->lock_moved_aside( $job, 2, true );
 		try {
 			$this->cli_tick_with_no_time_left( Plugin::instance()->jobs()->find( $job->id ) );
 		} finally {
