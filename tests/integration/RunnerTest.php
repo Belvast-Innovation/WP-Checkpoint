@@ -338,6 +338,36 @@ final class RunnerTest extends WP_UnitTestCase {
 		$this->assertSame( array( 'run', 'after:1', 'after:2' ), $ran );
 	}
 
+	public function test_a_run_that_did_a_unit_and_moved_nothing_is_a_run_without_progress_though_then_told_no(): void {
+		// A unit of 15 seconds that moves nothing, then the next is told no (5 seconds left): that run made no
+		// progress, as before the tick kept its units; only a run told no before any unit is not counted.
+		$runs = 0;
+		$this->register(
+			'stuck',
+			array(
+				new ClosureStep(
+					'stuck',
+					function ( JobContext $ctx ) use ( &$runs ): StepResult {
+						++$runs;
+						while ( $ctx->may_start_unit( 'test.stuck' ) ) {
+							$started    = $ctx->elapsed();
+							$this->now += 15.0;
+							$ctx->unit_took( 'test.stuck', $ctx->elapsed() - $started );
+						}
+						return StepResult::progress( array( 'n' => 0 ), 10 );
+					}
+				),
+			)
+		);
+		$job = $this->repo->create( 'stuck' );
+		$this->runner( 20 )->tick( $job->id, $this->now );
+		$this->assertSame( 1, $runs );
+		$this->assertSame( 1, (int) ( $this->runner_state( $job->id )['no_progress'] ?? -1 ), 'counted' );
+		$this->runner( 20 )->tick( $job->id, $this->now );
+		$this->runner( 20 )->tick( $job->id, $this->now );
+		$this->assertSame( Job::FAILED, $this->repo->find( $job->id )->status, 'three runs without progress fail it, as before' );
+	}
+
 	public function test_with_no_time_left_a_ticks_first_unit_still_goes_and_no_other(): void {
 		// A tick started an hour ago: TickUnits lets its first unit go, whatever the budget, and no other.
 		$ran = array();
