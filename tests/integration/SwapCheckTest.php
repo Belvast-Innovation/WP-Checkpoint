@@ -415,17 +415,19 @@ final class SwapCheckTest extends RestoreTestCase {
 
 	public function test_two_takeovers_at_different_positions_are_both_recorded(): void {
 		global $wpdb;
-		$pieces = 0;
-		$kills  = 0;
-		$type   = 'swap_check_twice_' . bin2hex( random_bytes( 3 ) );
+		$armed = true;
+		$kills = 0;
+		$type  = 'swap_check_twice_' . bin2hex( random_bytes( 3 ) );
 		$this->register(
 			$type,
 			self::restore_steps_with(
 				new FileStagingStep(
 					$this->staging_parts(
 						array(
-							'at' => static function ( string $point ) use ( &$pieces, &$kills ): void {
-								if ( 'piece' === $point && in_array( ++$pieces, array( 1, 3 ), true ) ) {
+							// The next piece is killed when armed: the second kill is armed only once the job moved on.
+							'at' => static function ( string $point ) use ( &$armed, &$kills ): void {
+								if ( 'piece' === $point && $armed ) {
+									$armed = false;
 									++$kills;
 									throw new \WPCheckpoint\Jobs\LockLost( 'killed by the server (simulated)' );
 								}
@@ -436,22 +438,27 @@ final class SwapCheckTest extends RestoreTestCase {
 			)
 		);
 		$job    = Plugin::instance()->jobs()->create( $type, self::$admin_id, array(), array( 'base' => $this->base() ) );
-		$runner = $this->small_runner(); // Short ticks: the job moves on between the kills.
+		$runner = $this->small_runner();
 		$marks  = array();
-		// Each kill is followed by a take-over, whichever tick it came in (a take-over's own tick may be killed again,
-		// however many units a tick does): one mark per take-over.
-		for ( $i = 0; $i < 500 && $kills < 2; $i++ ) {
-			$before = $kills;
-			$runner->tick( $job->id, $this->now );
-			while ( $kills > $before && count( $marks ) < 4 ) {
-				$before = $kills;
-				$wpdb->query( $wpdb->prepare( 'UPDATE ' . JobRepository::table() . ' SET locked_until = 1 WHERE id = %d', $job->id ) );
-				$runner->tick( $job->id, $this->now ); // Takes the job over.
-				$row     = Plugin::instance()->jobs()->find( $job->id );
-				$marks[] = array( $row->takeovers, $row->takeover_mark );
+		// However many units a tick does: tick until a kill; take the job over; tick until its recorded position moved
+		// on from where it was taken over; arm the second kill; take it over again.
+		for ( $round = 1; $round <= 2; $round++ ) {
+			for ( $i = 0; $i < 500 && $kills < $round; $i++ ) {
+				$runner->tick( $job->id, $this->now );
+			}
+			$wpdb->query( $wpdb->prepare( 'UPDATE ' . JobRepository::table() . ' SET locked_until = 1 WHERE id = %d', $job->id ) );
+			$runner->tick( $job->id, $this->now ); // Takes the job over.
+			$row     = Plugin::instance()->jobs()->find( $job->id );
+			$marks[] = array( $row->takeovers, $row->takeover_mark );
+			if ( 1 === $round ) {
+				$at = wp_json_encode( $row->cursor );
+				for ( $i = 0; $i < 500 && wp_json_encode( Plugin::instance()->jobs()->find( $job->id )->cursor ) === $at; $i++ ) {
+					$runner->tick( $job->id, $this->now );
+				}
+				$this->assertNotSame( $at, wp_json_encode( Plugin::instance()->jobs()->find( $job->id )->cursor ), 'the control: the job moved on' );
+				$armed = true;
 			}
 		}
-		$this->assertCount( 2, $marks, 'the control: one take-over after each kill' );
 		$this->assertSame( 2, $kills, 'the control: the staging run was killed twice' );
 		$this->assertSame( 1, $marks[1][0], 'the control: the second takeover found the job moved on, so its count starts over' );
 		$this->assertNotSame( $marks[0][1], $marks[1][1], 'the control: at another position' );
