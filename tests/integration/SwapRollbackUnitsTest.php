@@ -369,9 +369,10 @@ final class SwapRollbackUnitsTest extends SwapTestCase {
 	}
 
 	public function test_tries_recorded_for_one_entry_are_not_the_next_ones(): void {
-		// Every table entry renamed (the test's three and the site's options, and sitemeta on a network): the rollback
-		// puts back more than one of the test's tables, each locked below under whichever name it renames first.
-		list( $job, $before ) = $this->half( 3 + count( self::site_tables() ) );
+		// Every table entry renamed but the last (the test's three and the site's options, and sitemeta on a network;
+		// with all of them renamed a run after the kill goes forward): the rollback puts back more than one of the
+		// test's tables, each locked below under whichever name it renames first.
+		list( $job, $before ) = $this->half( 2 + count( self::site_tables() ) );
 		$this->retype(
 			$job,
 			array(
