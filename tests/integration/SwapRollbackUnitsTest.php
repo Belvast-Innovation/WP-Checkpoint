@@ -323,6 +323,34 @@ final class SwapRollbackUnitsTest extends SwapTestCase {
 		$this->assertSame( array(), $this->maintenance_files() );
 	}
 
+	public function test_a_rollback_whose_tries_all_wait_out_the_lock_fails_as_the_database_busy_still_holding_the_site(): void {
+		list( $job, $before ) = $this->half();
+		$this->retype(
+			$job,
+			array(
+				'sleep' => static function ( int $seconds ): void {},
+			)
+		);
+		$other = $this->lock_moved_aside( $job );
+		try {
+			$this->seams = array();
+			$done        = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
+		} finally {
+			$other->run( 'UNLOCK TABLES' );
+			$other->close();
+		}
+		$this->assertSame( 1 + count( \WPCheckpoint\Jobs\SwapStep::RETRIES ), count( array_keys( $this->seams, 'back_busy', true ) ) + 1, 'every try but the last recorded, as many as a forward RENAME gets: ' . implode( ' ', $this->seams ) );
+		$this->assertSame( Job::FAILED, $done->status );
+		$this->assertStringContainsString( 'The database is busy', (string) $done->last_error );
+		$this->assertSame( Job::SITE_CHANGING, $done->site_state, 'the site still held: a retry puts it back' );
+		$this->assertNotSame( array(), $this->maintenance_files() );
+		// The control: retried with the lock gone, it is put back.
+		Plugin::instance()->job_actions()->retry( $job->id );
+		$back = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( Job::FAILED, $back->status, (string) $back->last_error );
+		$this->assertSame( $before, $this->site() );
+	}
+
 	public function test_with_time_left_a_rollback_ends_in_one_run(): void {
 		list( $job, $before ) = $this->half();
 		$this->seams          = array();
