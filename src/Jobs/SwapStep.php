@@ -1269,14 +1269,18 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 
 	/**
 	 * One entry's RENAME of a rollback, one try a unit (unit_back(): at most LOCK_WAIT, the session's lock wait). A try
-	 * that waited out the lock renames nothing; the cursor records the tries ("busy") and when the next may start
-	 * ("busy_after", after the wait of SwapStep::RETRIES), checkpointed; the next try is a unit of its own, in this
-	 * tick when the time left covers the wait and the try, else in a later one. Tries spent (as many as send() makes),
-	 * the rollback fails as the database being busy, the site held, for a retry.
+	 * that waited out the lock renames nothing; the cursor records the tries ("busy"), the entry they are of
+	 * ("busy_for", its plan sequence number) and when the next may start ("busy_after", after the wait of
+	 * SwapStep::RETRIES), checkpointed; the next try is a unit of its own, in this tick when the time left covers the
+	 * wait and the try, else in a later one. Tries recorded for another entry are not this one's: it starts its own
+	 * (so a run killed after an entry went through never hands its count to the next). Tries spent (as many as send()
+	 * makes), they are cleared, checkpointed, and the rollback fails as the database being busy, the site held: a
+	 * retry, or a run that takes the job over, starts its own tries.
 	 *
 	 * @param JobContext           $context Context.
 	 * @param Queries              $db      Connection.
 	 * @param string               $rename  The entry's RENAME statement.
+	 * @param int                  $seq     The entry's plan sequence number.
 	 * @param array<string, mixed> $cursor  The rollback's cursor (its tries, by reference).
 	 * @param array{units: int}    $back    This run's units (by reference).
 	 * @return void
@@ -1284,7 +1288,10 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @throws TablesBusy When the tables stayed locked through every try.
 	 * @throws TransientFailure When the RENAME failed for a moment otherwise (the rollback goes on later).
 	 */
-	private function send_back( JobContext $context, Queries $db, string $rename, array &$cursor, array &$back ): void {
+	private function send_back( JobContext $context, Queries $db, string $rename, int $seq, array &$cursor, array &$back ): void {
+		if ( ! isset( $cursor['busy_for'] ) || $seq !== (int) $cursor['busy_for'] ) {
+			unset( $cursor['busy'], $cursor['busy_after'], $cursor['busy_for'] ); // Another entry's tries, or none.
+		}
 		while ( true ) {
 			// What is owed is never more than the longest wait between tries (a clock that went back would make it more).
 			$owed = min( max( self::RETRIES ), max( 0, (int) ( $cursor['busy_after'] ?? 0 ) - $this->now() ) );
@@ -1297,11 +1304,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 				$context->confirm_lease();
 				$db->run( $rename );
 				$this->unit_done( $context, $back, $started );
-				if ( isset( $cursor['busy'] ) ) {
-					// Tries of this entry are not the next entry's: cleared, and checkpointed so a kill keeps it cleared.
-					unset( $cursor['busy'], $cursor['busy_after'] );
-					$context->checkpoint( $cursor, 95, __( 'Putting the site back as it was', 'wp-checkpoint' ) );
-				}
+				unset( $cursor['busy'], $cursor['busy_after'], $cursor['busy_for'] ); // As stored, they name this entry: not the next one's.
 				return;
 			} catch ( TransientFailure $e ) {
 				if ( 1205 !== $e->getCode() ) {
@@ -1311,11 +1314,12 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 				$tries = (int) ( $cursor['busy'] ?? 0 ) + 1;
 				if ( $tries > count( self::RETRIES ) ) {
 					// The tries are this run's: a retry of the job starts its own (the cursor is kept for it).
-					unset( $cursor['busy'], $cursor['busy_after'] );
+					unset( $cursor['busy'], $cursor['busy_after'], $cursor['busy_for'] );
 					$context->checkpoint( $cursor, 95, __( 'Putting the site back as it was', 'wp-checkpoint' ) );
 					throw new TablesBusy( sprintf( 'The database is busy: the tables stayed locked by other work through %d tries.', $tries ) );
 				}
 				$cursor['busy']       = $tries;
+				$cursor['busy_for']   = $seq;
 				$cursor['busy_after'] = $this->now() + self::RETRIES[ $tries - 1 ];
 				$context->checkpoint( $cursor, 95, __( 'Putting the site back as it was', 'wp-checkpoint' ) );
 				$this->at( 'back_busy' );
@@ -1388,7 +1392,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			if ( array() === $pairs ) {
 				continue;
 			}
-			$this->send_back( $context, $db, SwapRules::rename_sql( $pairs ), $cursor, $back );
+			$this->send_back( $context, $db, SwapRules::rename_sql( $pairs ), (int) $entry['seq'], $cursor, $back );
 			foreach ( $pairs as $pair ) {
 				unset( $there[ $pair[0] ] );
 				$there[ $pair[1] ] = true;

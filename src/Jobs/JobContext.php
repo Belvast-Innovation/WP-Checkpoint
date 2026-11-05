@@ -185,7 +185,8 @@ final class JobContext {
 	/**
 	 * Whether a unit of this kind may start now: the first unit of the tick always (whichever step runs it); any
 	 * other while the budget is not spent and the time left covers the slowest of its kind, in this tick or in the
-	 * last tick that ran one, with TickUnits::MARGIN; a kind never measured waits for the next tick's first unit, unless $bound is given (then that is its estimate). A step asks
+	 * last tick that ran one, with TickUnits::MARGIN; a kind never measured waits for the next tick's first unit,
+	 * unless $bound is given (then that is its estimate). A step asks
 	 * this before each unit it times, and tells unit_took() what the unit took; when it is told no, it returns
 	 * progress, and the Runner ends the tick. The only place a step judges the time left by the time of a unit.
 	 *
