@@ -1247,8 +1247,8 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * the whole budget does not fail the job, as it would elsewhere: the site is being put back, and the next run goes
 	 * on with the next unit.
 	 *
-	 * A rollback unit takes at most LOCK_WAIT (one try of a RENAME: send_back(); a directory's renames wait for no
-	 * lock), which is its estimate while the kind was never measured; a wait owed before it ($wait, between two tries)
+	 * A try of a rollback's RENAME takes at most LOCK_WAIT (send_back()); that is the kind's estimate while it was
+	 * never measured (a directory's renames wait for no lock, though nothing bounds them); a wait owed before it ($wait, between two tries)
 	 * must fit the time left too.
 	 *
 	 * @param JobContext           $context Context.
@@ -1286,16 +1286,22 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 */
 	private function send_back( JobContext $context, Queries $db, string $rename, array &$cursor, array &$back ): void {
 		while ( true ) {
-			$owed    = max( 0, (int) ( $cursor['busy_after'] ?? 0 ) - $this->now() );
-			$started = $this->unit_back( $context, $cursor, $back, (float) $owed );
+			// What is owed is never more than the longest wait between tries (a clock that went back would make it more).
+			$owed = min( max( self::RETRIES ), max( 0, (int) ( $cursor['busy_after'] ?? 0 ) - $this->now() ) );
+			$this->unit_back( $context, $cursor, $back, (float) $owed );
 			if ( $owed > 0 ) {
 				$this->sleep( $owed );
 			}
+			$started = $context->elapsed(); // The try's own time, not the wait before it (counted apart).
 			try {
 				$context->confirm_lease();
 				$db->run( $rename );
 				$this->unit_done( $context, $back, $started );
-				unset( $cursor['busy'], $cursor['busy_after'] );
+				if ( isset( $cursor['busy'] ) ) {
+					// Tries of this entry are not the next entry's: cleared, and checkpointed so a kill keeps it cleared.
+					unset( $cursor['busy'], $cursor['busy_after'] );
+					$context->checkpoint( $cursor, 95, __( 'Putting the site back as it was', 'wp-checkpoint' ) );
+				}
 				return;
 			} catch ( TransientFailure $e ) {
 				if ( 1205 !== $e->getCode() ) {
@@ -1304,6 +1310,9 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 				$this->unit_done( $context, $back, $started );
 				$tries = (int) ( $cursor['busy'] ?? 0 ) + 1;
 				if ( $tries > count( self::RETRIES ) ) {
+					// The tries are this run's: a retry of the job starts its own (the cursor is kept for it).
+					unset( $cursor['busy'], $cursor['busy_after'] );
+					$context->checkpoint( $cursor, 95, __( 'Putting the site back as it was', 'wp-checkpoint' ) );
 					throw new TablesBusy( sprintf( 'The database is busy: the tables stayed locked by other work through %d tries.', $tries ) );
 				}
 				$cursor['busy']       = $tries;

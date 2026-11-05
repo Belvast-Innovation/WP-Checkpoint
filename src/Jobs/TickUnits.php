@@ -17,7 +17,8 @@ defined( 'ABSPATH' ) || exit;
  * The first unit of the tick starts whatever the budget: a tick that did nothing would make no progress. Any other
  * starts only while the budget is not spent and the time left covers the estimate of its kind with MARGIN: the
  * slowest of it in this tick, or in the last tick that ran one, whichever is slower. A kind never measured (no time
- * of it in this tick or kept from an earlier one) does not start: the tick ends, and the next tick's first unit
+ * of it in this tick or kept from an earlier one) does not start, unless the step knows beforehand what a unit of it
+ * takes at most (may_start()'s bound: that is its estimate then): the tick ends, and the next tick's first unit
  * measures it. What is kept for the next tick (Runner: in the cursor's reserved keys) is each kind's slowest in the
  * last tick that ran one, not the slowest ever: one slow unit weighs on the next tick, not on every tick after it.
  */
