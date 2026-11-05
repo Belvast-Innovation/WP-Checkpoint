@@ -21,14 +21,15 @@ final class SwapRollbackUnitsTest extends SwapTestCase {
 	 * A restore killed once two of its table batches were renamed (every entry a batch of its own): its rollback has
 	 * the directories and two table entries to put back.
 	 *
+	 * @param int $batches Table batches renamed before the kill.
 	 * @return array{0: Job, 1: array<string, mixed>} The job, the site before the restore.
 	 */
-	private function half(): array {
+	private function half( int $batches = 2 ): array {
 		$this->swap_parts['batch'] = 1;
 		$this->register_type();
 		$job    = $this->at_swap();
 		$before = $this->site();
-		$this->killed_at( $job, 'batch_sent', 2 );
+		$this->killed_at( $job, 'batch_sent', $batches );
 		$half = Plugin::instance()->jobs()->find( $job->id );
 		$this->assertSame( Job::SITE_CHANGING, $half->site_state, 'the control: the swap half made' );
 		$this->assertNotSame( $before, $this->site(), 'the control: renamed' );
@@ -228,10 +229,11 @@ final class SwapRollbackUnitsTest extends SwapTestCase {
 	 * them), but the options and sitemeta tables the carry back writes first, so a RENAME of the rollback waits for the
 	 * lock.
 	 *
-	 * @param Job $job The job.
+	 * @param Job $job   The job.
+	 * @param int $least Tables it must find to lock (the control).
 	 * @return \WPCheckpoint\Restore\ImportSession
 	 */
-	private function lock_moved_aside( Job $job ): \WPCheckpoint\Restore\ImportSession {
+	private function lock_moved_aside( Job $job, int $least = 1 ): \WPCheckpoint\Restore\ImportSession {
 		global $wpdb;
 		$wpdb->query( 'COMMIT' );
 		$prefix = \WPCheckpoint\Jobs\TempTables::OLD_PREFIX . substr( \WPCheckpoint\Jobs\TempTables::job_prefix( $job->storage_token, $job->id ), strlen( \WPCheckpoint\Jobs\TempTables::PREFIX ) );
@@ -245,7 +247,7 @@ final class SwapRollbackUnitsTest extends SwapTestCase {
 				}
 			)
 		);
-		$this->assertNotSame( array(), $tables, 'the control: tables moved aside by the swap, other than the ones the carry back writes' );
+		$this->assertGreaterThanOrEqual( $least, count( $tables ), 'the control: tables moved aside by the swap, other than the ones the carry back writes' );
 		$other = \WPCheckpoint\Restore\ImportSession::open( \WPCheckpoint\Standalone\Credentials::from_wordpress() );
 		$other->run( 'LOCK TABLES ' . implode( ', ', array_map( static function ( string $t ): string { return '`' . $t . '` READ'; }, $tables ) ) );
 		return $other;
@@ -354,6 +356,43 @@ final class SwapRollbackUnitsTest extends SwapTestCase {
 		// The control: retried with the lock gone (retried at the end of the loop), it is put back.
 		$back = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
 		$this->assertSame( Job::FAILED, $back->status, (string) $back->last_error );
+		$this->assertSame( $before, $this->site() );
+	}
+
+	public function test_tries_recorded_for_one_entry_are_not_the_next_ones(): void {
+		list( $job, $before ) = $this->half( 3 );
+		$this->retype(
+			$job,
+			array(
+				'sleep' => static function ( int $seconds ): void {},
+			)
+		);
+		$other = $this->lock_moved_aside( $job, 2 );
+		try {
+			$this->killed_at( Plugin::instance()->jobs()->find( $job->id ), 'back_busy', 1 );
+		} finally {
+			$other->run( 'UNLOCK TABLES' );
+			$other->close();
+		}
+		$first = Plugin::instance()->jobs()->find( $job->id )->cursor;
+		$this->assertSame( 1, $first['busy'] ?? null, 'the control: a try of the first entry recorded' );
+		// That entry goes through, and the run is killed before anything else is stored: its count stays stored.
+		$this->killed_at( Plugin::instance()->jobs()->find( $job->id ), 'table_back', 1 );
+		$stored = Plugin::instance()->jobs()->find( $job->id )->cursor;
+		$this->assertSame( $first['busy_for'] ?? null, $stored['busy_for'] ?? null, 'the control: the first entry\'s count is what is stored' );
+		// The next entry, locked: its first try is its own first, not the second of the first entry's.
+		$other = $this->lock_moved_aside( $job );
+		try {
+			$this->cli_tick_with_no_time_left( Plugin::instance()->jobs()->find( $job->id ) );
+		} finally {
+			$other->run( 'UNLOCK TABLES' );
+			$other->close();
+		}
+		$next = Plugin::instance()->jobs()->find( $job->id )->cursor;
+		$this->assertSame( 1, $next['busy'] ?? null, 'counted from its own first try' );
+		$this->assertNotSame( $first['busy_for'] ?? null, $next['busy_for'] ?? null, 'of the next entry' );
+		$done = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( Job::FAILED, $done->status, (string) $done->last_error );
 		$this->assertSame( $before, $this->site() );
 	}
 
