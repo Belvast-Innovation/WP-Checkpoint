@@ -354,7 +354,7 @@ final class RunnerTest extends WP_UnitTestCase {
 							$this->now += 15.0;
 							$ctx->unit_took( 'test.stuck', $ctx->elapsed() - $started );
 						}
-						return StepResult::progress( array( 'n' => 0 ), 10 );
+						return StepResult::progress( $ctx->cursor(), 10 ); // Its cursor as it was given.
 					}
 				),
 			)
