@@ -32,6 +32,22 @@ final class TickUnitsTest extends TestCase {
 		);
 	}
 
+	public function test_a_tick_whose_units_of_a_kind_cost_nothing_keeps_what_was_kept(): void {
+		$units = new TickUnits( array( 'pack.unit' => 12.0 ) );
+		$units->took( 'pack.unit', 0.0 ); // A file boundary, a seal: told as costing nothing (PackStep).
+		$units->took( 'new.unit', 0.0 );
+		$this->assertSame(
+			array(
+				'pack.unit' => 12.0,
+				'new.unit'  => 0.0,
+			),
+			$units->estimates(),
+			'nothing measured this tick but nothing: the 12 seconds kept stay; a kind with nothing kept is measured at 0'
+		);
+		$units->took( 'pack.unit', 3.0 );
+		$this->assertSame( 3.0, $units->estimates()['pack.unit'], 'measured this tick: replaced' );
+	}
+
 	public function test_what_it_reads_back_is_only_what_it_can_use(): void {
 		$units = new TickUnits(
 			array(

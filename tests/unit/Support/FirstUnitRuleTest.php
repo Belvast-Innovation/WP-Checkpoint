@@ -17,7 +17,9 @@ use Yoast\PHPUnitPolyfills\TestCases\TestCase;
  * and every one of those runs asks JobContext::may_start_unit() (TickUnits),
  * which lets only the tick's first unit go without looking at the time left.
  * No other file reads the time left (the second test here): one that did
- * would judge per run, not per tick.
+ * would judge per run, not per tick. Known limit: the scan looks for
+ * ->remaining_seconds( only; a step that worked the time left out of its
+ * budget and elapsed() itself would get past it.
  *
  * So every file in src/ that loops on a budget (asks should_stop() or
  * remaining_seconds(), or compares the time since it started with a

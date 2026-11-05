@@ -283,6 +283,33 @@ final class RunnerTest extends WP_UnitTestCase {
 		$this->assertSame( array( 'run', 'kind:6', 'kind:7', 'kind:8', 'kind:9', 'kind:10', 'kind:11', 'kind:12', 'kind:13', 'kind:14' ), $ran, 'one slow unit weighed on the next tick, not on every tick after it' );
 	}
 
+	public function test_a_tick_judges_by_its_own_slowest_when_it_is_slower_than_the_one_kept(): void {
+		// Units of 2 seconds, but the tenth takes 9. The first tick runs nine (while 3 seconds are left) and keeps 2.
+		$ran = array();
+		$this->register(
+			'own',
+			array(
+				$this->timed_step(
+					'kind',
+					'test.own',
+					20,
+					static function ( int $n ): float {
+						return 10 === $n ? 9.0 : 2.0;
+					},
+					100,
+					$ran
+				),
+			)
+		);
+		$job = $this->repo->create( 'own' );
+		$this->runner( 20 )->tick( $job->id, $this->now );
+		$this->assertCount( 10, $ran, 'the control: nine units in the first tick: ' . implode( ' ', $ran ) );
+		// The next tick's first unit takes 9 seconds: 11 are left, under 13.5. Kept, 2 seconds would have let it go on.
+		$ran = array();
+		$this->runner( 20 )->tick( $job->id, $this->now );
+		$this->assertSame( array( 'run', 'kind:10' ), $ran );
+	}
+
 	/**
 	 * A step that moves its cursor with no unit it times: a ready checkpoint, an untimed phase. $then returns what
 	 * its second run returns.
