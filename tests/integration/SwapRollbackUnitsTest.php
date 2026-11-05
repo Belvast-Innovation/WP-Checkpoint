@@ -223,6 +223,96 @@ final class SwapRollbackUnitsTest extends SwapTestCase {
 		$this->assertSame( $before, $this->site() );
 	}
 
+	/**
+	 * Another connection that holds the tables the swap moved aside (the old names: only the entries it renamed have
+	 * them), so every RENAME of the rollback waits for the lock; null when there are none.
+	 *
+	 * @param Job $job The job.
+	 * @return \WPCheckpoint\Restore\ImportSession
+	 */
+	private function lock_moved_aside( Job $job ): \WPCheckpoint\Restore\ImportSession {
+		global $wpdb;
+		$wpdb->query( 'COMMIT' );
+		$prefix = \WPCheckpoint\Jobs\TempTables::OLD_PREFIX . substr( \WPCheckpoint\Jobs\TempTables::job_prefix( $job->storage_token, $job->id ), strlen( \WPCheckpoint\Jobs\TempTables::PREFIX ) );
+		$tables = (array) $wpdb->get_col( $wpdb->prepare( 'SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND LEFT(TABLE_NAME, %d) = %s', strlen( $prefix ), $prefix ) );
+		$this->assertNotSame( array(), $tables, 'the control: tables moved aside by the swap' );
+		$other = \WPCheckpoint\Restore\ImportSession::open( \WPCheckpoint\Standalone\Credentials::from_wordpress() );
+		$other->run( 'LOCK TABLES ' . implode( ', ', array_map( static function ( string $t ): string { return '`' . $t . '` READ'; }, $tables ) ) );
+		return $other;
+	}
+
+	public function test_a_try_the_time_left_does_not_cover_with_its_wait_is_left_to_the_next_tick(): void {
+		list( $job, $before ) = $this->half();
+		$slept = array();
+		$this->retype(
+			$job,
+			array(
+				'sleep' => static function ( int $seconds ) use ( &$slept ): void {
+					$slept[] = $seconds; // Waited without the time passing: what was decided before it is what counts.
+				},
+			)
+		);
+		$other       = $this->lock_moved_aside( $job );
+		$this->seams = array();
+		try {
+			// 18 seconds left: the first try waits out the lock (5 seconds); 13 left covers the wait of 1 and a try
+			// (7.5 with its margin), so it waits and tries again (5 more); 8 left do not cover the wait of 3 and a try.
+			$runner = new Runner(
+				Plugin::instance()->jobs(),
+				Plugin::instance()->job_types(),
+				new Redactor( Redactor::installation_secrets() ),
+				array(
+					'cli'    => true,
+					'budget' => new Budget( 20, 32 * 1048576, false ),
+				)
+			);
+			$result = $this->autocommit(
+				static function () use ( $runner, $job ): TickResult {
+					return $runner->tick( $job->id, microtime( true ) - 2 );
+				}
+			);
+		} finally {
+			$other->run( 'UNLOCK TABLES' );
+			$other->close();
+		}
+		$this->assertSame( TickResult::MORE, $result->status, $result->message );
+		$this->assertSame( 2, count( array_keys( $this->seams, 'back_busy', true ) ), 'two tries, each waiting out the lock: ' . implode( ' ', $this->seams ) );
+		$this->assertSame( array( 1 ), $slept, 'waited before the second try, not before a third: left to the next tick' );
+		$now = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertSame( 2, $now->cursor['busy'] ?? null, 'the tries recorded' );
+		$this->assertGreaterThan( 0, (int) ( $now->cursor['busy_after'] ?? 0 ) );
+		$this->assertNotSame( $before, $this->site(), 'the control: not put back yet' );
+		// The lock gone, the next tick's first unit waits what is owed, tries and goes on.
+		$done = $this->cli_run( $now );
+		$this->assertSame( Job::FAILED, $done->status, (string) $done->last_error );
+		$this->assertSame( $before, $this->site() );
+		$this->assertSame( array(), $this->maintenance_files() );
+	}
+
+	public function test_a_rollback_killed_after_a_try_waited_out_the_lock_goes_on_from_the_tries_recorded(): void {
+		list( $job, $before ) = $this->half();
+		$this->retype(
+			$job,
+			array(
+				'sleep' => static function ( int $seconds ): void {},
+			)
+		);
+		$other = $this->lock_moved_aside( $job );
+		try {
+			$this->killed_at( Plugin::instance()->jobs()->find( $job->id ), 'back_busy', 1 );
+		} finally {
+			$other->run( 'UNLOCK TABLES' );
+			$other->close();
+		}
+		$killed = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertSame( 1, $killed->cursor['busy'] ?? null, 'the failed try recorded before the kill' );
+		$this->assertNotSame( $before, $this->site(), 'the control: not put back yet' );
+		$done = $this->cli_run( $killed );
+		$this->assertSame( Job::FAILED, $done->status, (string) $done->last_error );
+		$this->assertSame( $before, $this->site(), 'put back by the next run' );
+		$this->assertSame( array(), $this->maintenance_files() );
+	}
+
 	public function test_with_time_left_a_rollback_ends_in_one_run(): void {
 		list( $job, $before ) = $this->half();
 		$this->seams          = array();
