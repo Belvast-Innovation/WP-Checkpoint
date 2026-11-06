@@ -264,6 +264,39 @@ final class RunnerLeaveTest extends WP_UnitTestCase {
 	}
 
 	/**
+	 * The methods that come after the failure is written on the path of a table that lacks columns (the job's note).
+	 *
+	 * @return array<string, array{0: string}>
+	 */
+	public function after_the_columns_failure(): array {
+		return array(
+			'owns_files_of' => array( 'owns_files_of' ),
+			'log_event'     => array( 'log_event' ),
+		);
+	}
+
+	/**
+	 * @dataProvider after_the_columns_failure
+	 *
+	 * @param string $method A method the storage cannot do here, which that path calls after a write.
+	 */
+	public function test_a_table_that_lacks_columns_is_left_as_it_is_when_its_note_cannot_be_written( string $method ): void {
+		$set = 'log_event' === $method ? array( 'storage_path' => $this->root . '/elsewhere' ) : array();
+		// The control: with every method there, the path writes the failure and reaches the method after it.
+		$all     = new RestrictedRepository( $this->repo, '' );
+		$control = $this->job( new ClosureStep( 'stage', array( $this, 'must_not_run' ) ), $set );
+		$this->runner( true, $all )->tick( $control->id, null, array( 'blocked_count' ) );
+		$this->assertGreaterThan( 0, $all->calls['fail_for_missing_columns'] ?? 0, 'the control: the failure is written' );
+		$this->assertGreaterThan( 0, $all->calls[ $method ] ?? 0, 'the control: ' . $method . ' is reached after it' );
+
+		$job    = $this->job( new ClosureStep( 'stage', array( $this, 'must_not_run' ) ), $set );
+		$before = $this->row( $job->id );
+		$result = $this->runner( true, new RestrictedRepository( $this->repo, $method ) )->tick( $job->id, null, array( 'blocked_count' ) );
+		$this->assertSame( TickResult::LEFT, $result->status, $result->message );
+		$this->assertSame( $before, $this->row( $job->id ), 'the failure is not written when what follows it cannot be done' );
+	}
+
+	/**
 	 * A job a tick takes to the method, and the schema problems to pass the tick.
 	 *
 	 * @param string $method Method.
