@@ -620,6 +620,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @throws RetryFrom When the plan is not there whole (the check writes it again).
 	 */
 	private function start( JobContext $context, Queries $db ): array {
+		$this->cli_only( 'start' );
 		$work = $context->work_path();
 		try {
 			$file = ExportPlan::read( $work, RestoreFiles::SWAP_PLAN );
@@ -654,6 +655,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @throws RetryFrom When the judgement differs, or the preflight recorded none (the restore starts over there).
 	 */
 	private function judge( JobContext $context, array $cursor ): array {
+		$this->cli_only( 'judge' );
 		$work     = $context->work_path();
 		$recorded = RestorePreflightStep::judged( $work );
 		if ( null === $recorded ) {
@@ -722,6 +724,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @throws WorkLost When a table holds other rows than the import recorded.
 	 */
 	private function recount( JobContext $context, Queries $db, array $cursor ): array {
+		$this->cli_only( 'recount' );
 		$work    = $context->work_path();
 		$loaded  = RestorePreflightStep::load_plan( $work );
 		$ledger  = new Ledger( $db, TempTables::ledger( $context->job()->storage_token, $context->job()->id, (string) $loaded['random'] ), bin2hex( random_bytes( 16 ) ) );
@@ -779,6 +782,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @throws \RuntimeException When this process keeps a time limit.
 	 */
 	private function ready( JobContext $context, Queries $db, array $cursor ): ?StepResult {
+		$this->cli_only( 'ready' );
 		HostFunctions::set_time_limit( 0 );
 		$limit = isset( $this->parts['limit'] ) ? call_user_func( $this->parts['limit'] ) : ini_get( 'max_execution_time' );
 		if ( '0' !== (string) $limit ) {
@@ -875,6 +879,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @throws \RuntimeException When the old directories' places cannot be made (nothing changed yet).
 	 */
 	private function swap( JobContext $context, Queries $db, array $cursor ): StepResult {
+		$this->cli_only( 'swap' );
 		$redo = self::redo_at( $cursor );
 		try {
 			$entries = $this->entries( $context, $db, $cursor );
@@ -1025,6 +1030,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @throws \RuntimeException When the carry still failed for a moment after every try.
 	 */
 	private function carry_in( JobContext $context, Queries $db, array $base, $carry, Maintenance $file ) {
+		$this->cli_only( 'carry_in' );
 		$cursor = array( 'phase' => 'carry' ) + $base;
 		$context->checkpoint( $cursor, 30, __( 'Carrying this plugin\'s own settings into the restored site', 'wp-checkpoint' ) );
 		$file->hold( array( $context, 'confirm_lease' ) );
@@ -1090,6 +1096,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @return StepResult
 	 */
 	private function ask_redo_carry( JobContext $context, array $cursor, string $why, $names ): StepResult {
+		$this->cli_only( 'ask_redo_carry' );
 		ExportPlan::write(
 			$context->work_path(),
 			RestoreFiles::REDO_CARRY,
@@ -1172,6 +1179,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @return StepResult
 	 */
 	private function commit( JobContext $context, Queries $db, array $cursor ): StepResult {
+		$this->cli_only( 'commit' );
 		$cursor = array(
 			'phase'   => 'committed',
 			'attempt' => $cursor['attempt'],
@@ -1195,6 +1203,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @return void
 	 */
 	private function rename_tables( JobContext $context, Queries $db, array &$cursor, array $tables, $guard, $carry ): void {
+		$this->cli_only( 'rename_tables' );
 		$db->run( 'SET SESSION lock_wait_timeout = ' . self::LOCK_WAIT );
 		$batches = SwapRules::batches( $tables, isset( $this->parts['batch'] ) ? (int) $this->parts['batch'] : SwapRules::limit( $this->packet( $db ) ) );
 		$file    = $this->maintenance( $cursor );
@@ -1231,6 +1240,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @throws TablesBusy When the tables stayed locked through every retry.
 	 */
 	private function send( JobContext $context, Queries $db, string $sql ): void {
+		$this->cli_only( 'send' );
 		$tries = 0;
 		while ( true ) {
 			try {
@@ -1590,6 +1600,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @return StepResult
 	 */
 	private function ask_carry( JobContext $context, array $cursor, \Throwable $failure, $names ): StepResult {
+		$this->cli_only( 'ask_carry' );
 		ExportPlan::write(
 			$context->work_path(),
 			RestoreFiles::CARRY_BACK,
@@ -1658,6 +1669,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @throws \RuntimeException What ends the job after the site is put back (ended()).
 	 */
 	private function carry_asked( JobContext $context, Queries $db, array $cursor ): StepResult {
+		$this->cli_only( 'carry_asked' );
 		$answer = $context->options()['answers'][ self::CARRY_QUESTION ] ?? null;
 		$at     = $context->job()->committed_at;
 		$why    = '';
@@ -1861,6 +1873,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @throws SwapPause When the site is checked again after a wait.
 	 */
 	private function check_undone( JobContext $context, Queries $db, array $cursor ): array {
+		$this->cli_only( 'check_undone' );
 		$file = $this->maintenance( $cursor );
 		if ( ! isset( $cursor['after_undo'] ) ) {
 			$key   = SelfCheck::random();
@@ -2050,6 +2063,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @throws \RuntimeException What ends the job once the site is put back (ended()).
 	 */
 	private function start_undo( JobContext $context, Queries $db, array $cursor ): StepResult {
+		$this->cli_only( 'start_undo' );
 		$job = $context->job();
 		if ( ! self::within_window( $job->committed_at, $this->now() ) ) {
 			return $this->give_up_undo( $context, $cursor, 'The time a restore can be undone in ran out before the undo changed the site: the restored site stays', __( 'The time this restore could be undone in ran out before the undo changed the site: the restored site stays.', 'wp-checkpoint' ) );
@@ -2077,6 +2091,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @return StepResult
 	 */
 	private function give_up_undo( JobContext $context, array $cursor, string $log, string $text ): StepResult {
+		$this->cli_only( 'give_up_undo' );
 		$context->logger()->warning( $log );
 		$cursor = array(
 			'phase'   => 'done',
@@ -2126,35 +2141,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	private function ended( JobContext $context, string $reason, string $check = '', bool $undone = false, array $cursor = array() ): \RuntimeException {
 		$found = self::after_undo_text( $cursor );
 		if ( self::put_back_cancels( $cursor ) ) {
-			// A put-back that ends cancelled (as its claim recorded in the cursor, whatever the cancel request says now);
-			// what the check of the site as put back found is said with it. One whose cursor could not be read keeps its
-			// restored copy.
-			$context->logger()->info( 'The site was put back as asked (wp wpcheckpoint job put-back); the restore is cancelled', array( 'restored copy' => ! empty( $cursor['keep_work'] ) ? 'kept' : 'removed' ) );
-			if ( ! empty( $cursor['keep_work'] ) ) {
-				$days = (int) ( JobRepository::WORK_RETENTION_SECONDS / 86400 );
-				if ( '' !== $found ) {
-					return Cancelled::by_put_back(
-						sprintf(
-							/* translators: 1: what the check found, 2: days the restored copy is kept */
-							SiteCheck::FAILED === ( $cursor['after_undo'] ?? '' ) ? __( 'The site was put back and the restore cancelled, but its check then failed: %1$s. Restored copy kept %2$d days.', 'wp-checkpoint' ) : __( 'The site was put back and the restore cancelled, but it could not be checked: %1$s. Restored copy kept %2$d days.', 'wp-checkpoint' ),
-							$found,
-							$days
-						)
-					);
-				}
-				/* translators: %d: days the restored copy is kept */
-				return Cancelled::by_put_back( sprintf( __( 'The site was put back as it was before the restore, and the restore cancelled. Whether it was a redo could not be told, so its restored copy is kept for %d days.', 'wp-checkpoint' ), $days ) );
-			}
-			if ( '' !== $found ) {
-				return Cancelled::by_put_back(
-					sprintf(
-						/* translators: %s: what the check found */
-						SiteCheck::FAILED === ( $cursor['after_undo'] ?? '' ) ? __( 'The site was put back and the restore cancelled, but the site\'s check then failed: %s.', 'wp-checkpoint' ) : __( 'The site was put back and the restore cancelled, but the site could not be checked: %s.', 'wp-checkpoint' ),
-						$found
-					)
-				);
-			}
-			return Cancelled::by_put_back( __( 'The site was put back as it was before the restore, and the restore cancelled.', 'wp-checkpoint' ) );
+			return $this->put_back_ended( $context, $cursor, $found );
 		}
 		$redo = self::redo_at( $cursor );
 		if ( $redo > 0 ) {
@@ -2169,34 +2156,102 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		}
 		$text = self::REASONS[ $reason ] ?? $reason;
 		if ( $undone ) {
-			// What was written on the restored site since it was let out went with it, so nothing offers it as a retry:
-			// a retry from the final check would also fail (the copy is no longer what the import left).
-			// The message stays short (the job's progress message holds it); the reason is in the log (reverse()).
-			$context->logger()->info( 'The restore was undone', array( 'reason' => $text ) );
-			$days = (int) ( JobRepository::WORK_RETENTION_SECONDS / 86400 );
-			if ( self::putting_back( $cursor ) ) {
-				if ( '' !== $found ) {
-					return new Undone(
-						sprintf(
-							/* translators: 1: what the check found, 2: days the restored copy is kept */
-							SiteCheck::FAILED === ( $cursor['after_undo'] ?? '' ) ? __( 'The site was put back, but its check then failed: %1$s. Restored copy kept %2$d days.', 'wp-checkpoint' ) : __( 'The site was put back, but it could not be checked: %1$s. Restored copy kept %2$d days.', 'wp-checkpoint' ),
-							$found,
-							$days
-						)
-					);
-				}
-				/* translators: %d: days the restored copy is kept */
-				return new Undone( sprintf( __( 'The site was put back as it was before the restore. The restored copy is kept for %d days.', 'wp-checkpoint' ), $days ) );
-			}
-			return new Undone( self::undone_text( $cursor ) );
+			return $this->undone_ended( $context, $text, $cursor, $found );
 		}
 		if ( self::REVERSED === $reason || self::UNDONE === $reason ) {
 			// The restored copy is kept under its temporary names, next to the site, for a retry (the engine reclaims
 			// it with the failed job's work after WORK_RETENTION_SECONDS); the retry checks and swaps again.
 			$what = '' !== $check && isset( self::CHECKS[ $check ] ) ? ' What failed: ' . self::CHECKS[ $check ] . '.' : '';
-			return new RetryFrom( trim( $text . $what . ' The swap was reversed; the restored copy is kept for a retry, which checks the site again.' ), SwapCheckStep::ID );
+			return new RetryFrom( trim( $text . $what . ' The swap was reversed; the restored copy is kept for a retry, which checks the site again.' . $this->visitor() ), SwapCheckStep::ID );
 		}
-		return new RetryFrom( trim( $text . ' The swap was rolled back: the site is as it was before the restore.' ), SwapCheckStep::ID );
+		return new RetryFrom( trim( $text . ' The swap was rolled back: the site is as it was before the restore.' . $this->visitor() ), SwapCheckStep::ID );
+	}
+
+	/**
+	 * What ends a put-back that ends cancelled, as its claim recorded (ended()). Only in WordPress: a run made without
+	 * it never takes on a put-back (RollbackEligibility).
+	 *
+	 * @param JobContext           $context Context.
+	 * @param array<string, mixed> $cursor  The put-back's last cursor.
+	 * @param string               $found   What the check of the site as put back found ('' when it passed).
+	 * @return \RuntimeException
+	 * @throws SwapPause With StepResult::leave() in a run made without WordPress.
+	 */
+	private function put_back_ended( JobContext $context, array $cursor, string $found ): \RuntimeException {
+		$this->cli_only( 'put_back_ended' );
+		// A put-back that ends cancelled (as its claim recorded in the cursor, whatever the cancel request says now);
+		// what the check of the site as put back found is said with it. One whose cursor could not be read keeps its
+		// restored copy.
+		$context->logger()->info( 'The site was put back as asked (wp wpcheckpoint job put-back); the restore is cancelled', array( 'restored copy' => ! empty( $cursor['keep_work'] ) ? 'kept' : 'removed' ) );
+		if ( ! empty( $cursor['keep_work'] ) ) {
+			$days = (int) ( JobRepository::WORK_RETENTION_SECONDS / 86400 );
+			if ( '' !== $found ) {
+				return Cancelled::by_put_back(
+					sprintf(
+						/* translators: 1: what the check found, 2: days the restored copy is kept */
+						SiteCheck::FAILED === ( $cursor['after_undo'] ?? '' ) ? __( 'The site was put back and the restore cancelled, but its check then failed: %1$s. Restored copy kept %2$d days.', 'wp-checkpoint' ) : __( 'The site was put back and the restore cancelled, but it could not be checked: %1$s. Restored copy kept %2$d days.', 'wp-checkpoint' ),
+						$found,
+						$days
+					)
+				);
+			}
+			/* translators: %d: days the restored copy is kept */
+			return Cancelled::by_put_back( sprintf( __( 'The site was put back as it was before the restore, and the restore cancelled. Whether it was a redo could not be told, so its restored copy is kept for %d days.', 'wp-checkpoint' ), $days ) );
+		}
+		if ( '' !== $found ) {
+			return Cancelled::by_put_back(
+				sprintf(
+					/* translators: %s: what the check found */
+					SiteCheck::FAILED === ( $cursor['after_undo'] ?? '' ) ? __( 'The site was put back and the restore cancelled, but the site\'s check then failed: %s.', 'wp-checkpoint' ) : __( 'The site was put back and the restore cancelled, but the site could not be checked: %s.', 'wp-checkpoint' ),
+					$found
+				)
+			);
+		}
+		return Cancelled::by_put_back( __( 'The site was put back as it was before the restore, and the restore cancelled.', 'wp-checkpoint' ) );
+	}
+
+	/**
+	 * What ends an undo after the restored site was let out (ended()). Only in WordPress: a run made without it never
+	 * takes on a cursor with "out" (RollbackEligibility).
+	 *
+	 * @param JobContext           $context Context.
+	 * @param string               $text    Why it was rolled back, in words.
+	 * @param array<string, mixed> $cursor  The undo's last cursor.
+	 * @param string               $found   What the check of the site as put back found ('' when it passed).
+	 * @return \RuntimeException
+	 * @throws SwapPause With StepResult::leave() in a run made without WordPress.
+	 */
+	private function undone_ended( JobContext $context, string $text, array $cursor, string $found ): \RuntimeException {
+		$this->cli_only( 'undone_ended' );
+		// What was written on the restored site since it was let out went with it, so nothing offers it as a retry:
+		// a retry from the final check would also fail (the copy is no longer what the import left).
+		// The message stays short (the job's progress message holds it); the reason is in the log (reverse()).
+		$context->logger()->info( 'The restore was undone', array( 'reason' => $text ) );
+		$days = (int) ( JobRepository::WORK_RETENTION_SECONDS / 86400 );
+		if ( self::putting_back( $cursor ) ) {
+			if ( '' !== $found ) {
+				return new Undone(
+					sprintf(
+						/* translators: 1: what the check found, 2: days the restored copy is kept */
+						SiteCheck::FAILED === ( $cursor['after_undo'] ?? '' ) ? __( 'The site was put back, but its check then failed: %1$s. Restored copy kept %2$d days.', 'wp-checkpoint' ) : __( 'The site was put back, but it could not be checked: %1$s. Restored copy kept %2$d days.', 'wp-checkpoint' ),
+						$found,
+						$days
+					)
+				);
+			}
+			/* translators: %d: days the restored copy is kept */
+			return new Undone( sprintf( __( 'The site was put back as it was before the restore. The restored copy is kept for %d days.', 'wp-checkpoint' ), $days ) );
+		}
+		return new Undone( self::undone_text( $cursor ) );
+	}
+
+	/**
+	 * The sentence a run made without WordPress adds to how the job ended: a visitor's request put the site back.
+	 *
+	 * @return string
+	 */
+	private function visitor(): string {
+		return $this->host->web() ? ' A visitor\'s request put the site back, as no WP-CLI run went on with the swap.' : '';
 	}
 
 	/**
@@ -2234,6 +2289,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @return Undone
 	 */
 	private function redo_ended( JobContext $context, string $reason, string $check, int $at, array $cursor ): Undone {
+		$this->cli_only( 'redo_ended' );
 		$why = (string) ( $cursor['reason'] ?? '' );
 		if ( self::putting_back( $cursor ) ) {
 			// Put back as asked while it was half made: undone again as of the undo, its restored copy kept as before
@@ -2292,6 +2348,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @return StepResult
 	 */
 	private function ask_after_undo( JobContext $context, array $cursor ): StepResult {
+		$this->cli_only( 'ask_after_undo' );
 		$found = self::after_undo_text( $cursor );
 		ExportPlan::write(
 			$context->work_path(),
@@ -2349,6 +2406,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @throws Undone When the site is kept.
 	 */
 	private function undone_asked( JobContext $context, Queries $db, array $cursor ): StepResult {
+		$this->cli_only( 'undone_asked' );
 		$answer = self::answered( $context, $cursor, self::AFTER_UNDO_QUESTION );
 		$at     = (int) ( $cursor['undone_at'] ?? 0 );
 		if ( RestoreJob::KEEP === $answer ) {
@@ -2385,6 +2443,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @throws Undone When it is given up.
 	 */
 	private function redo( JobContext $context, Queries $db, array $cursor ): StepResult {
+		$this->cli_only( 'redo' );
 		if ( 0 !== $context->job()->cancel_requested ) {
 			// Asked for while a run held it (JobRepository::cancel_redo()): seen by every run before it changes the site,
 			// not only by the write that records "enter" (a run that waits for someone else's maintenance file would
@@ -2421,6 +2480,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @return string
 	 */
 	private function redo_check( JobContext $context, Queries $db, array $cursor ): string {
+		$this->cli_only( 'redo_check' );
 		$at = self::redo_at( $cursor );
 		if ( ! Redo::within_window( $at, $this->now() ) ) {
 			/* translators: 1: days, 2: date and time of the undo (UTC) */
@@ -2447,6 +2507,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @return Undone
 	 */
 	private function give_up_redo( JobContext $context, array $cursor, string $why ): Undone {
+		$this->cli_only( 'give_up_redo' );
 		$context->logger()->warning( 'The redo was given up before it changed the site', array( 'reason' => $why ) );
 		/* translators: %s: why */
 		return Undone::back( sprintf( __( 'The redo did not go on: %s The site stays as the undo left it.', 'wp-checkpoint' ), $why ), self::redo_at( $cursor ) );
@@ -2466,6 +2527,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @throws TransientFailure When the file cannot be taken down yet (swap() then rolls back).
 	 */
 	private function stop_redo( JobContext $context, array $cursor, string $why ): Undone {
+		$this->cli_only( 'stop_redo' );
 		$context->logger()->warning( 'Checked once more with the maintenance file up, the redo no longer holds; it is given up', array( 'reason' => $why ) );
 		$this->take_down( $context, $cursor );
 		$this->at( 'redo_stop_down' );
@@ -2493,6 +2555,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @throws Undone When it is given up.
 	 */
 	private function redo_asked( JobContext $context, Queries $db, array $cursor ): StepResult {
+		$this->cli_only( 'redo_asked' );
 		$answer = self::answered( $context, $cursor, self::REDO_CARRY_QUESTION );
 		if ( RestoreJob::KEEP === $answer ) {
 			throw $this->give_up_redo( $context, $cursor, __( 'It was given up as chosen.', 'wp-checkpoint' ) );
@@ -2599,6 +2662,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @throws \RuntimeException When the position is not one this version wrote (not FINAL: the job holds the site).
 	 */
 	private function after( JobContext $context, Queries $db, array $cursor ): StepResult {
+		$this->cli_only( 'after' );
 		$entries = null;
 		while ( true ) {
 			switch ( (string) ( $cursor['post'] ?? '' ) ) {
@@ -3050,6 +3114,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @return array{verdict: string, check: string, why: string, status: int}
 	 */
 	private function check_site( JobContext $context, Queries $db, string $key, string $nonce ): array {
+		$this->cli_only( 'check_site' );
 		if ( isset( $this->parts['verify'] ) ) {
 			$said = call_user_func(
 				$this->parts['verify'],
@@ -3276,6 +3341,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @throws LockLost When the lease is gone (and StaleJob).
 	 */
 	private function let_through( JobContext $context, Maintenance $file, string $pass_hash ): void {
+		$this->cli_only( 'let_through' );
 		try {
 			$file->hold( array( $context, 'confirm_lease' ), $pass_hash );
 		} catch ( LockLost $e ) {
@@ -3550,6 +3616,21 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			);
 		}
 		return StepResult::done( $text );
+	}
+
+	/**
+	 * In a run made without WordPress (SwapHost::web()), every way into a part of the swap that is not putting the site
+	 * back (going forward, an undo, a redo, a question, the checks of the site) leaves the job to WP-CLI here, before it
+	 * writes anything: its first statement. In WordPress, nothing.
+	 *
+	 * @param string $what Which part.
+	 * @return void
+	 * @throws SwapPause With StepResult::leave() in a run made without WordPress.
+	 */
+	private function cli_only( string $what ): void {
+		if ( $this->host->web() ) {
+			throw new SwapPause( StepResult::leave( sprintf( 'Only WP-CLI goes on with this part of the swap (%s).', $what ) ) );
+		}
 	}
 
 	/**
