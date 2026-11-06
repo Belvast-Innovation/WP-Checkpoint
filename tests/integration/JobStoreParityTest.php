@@ -13,7 +13,6 @@ use WPCheckpoint\Jobs\UpdateSql;
 use WPCheckpoint\Jobs\WpdbExecutor;
 use WPCheckpoint\Restore\ImportSession;
 use WPCheckpoint\Standalone\Credentials;
-use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Support\Options;
 use WPCheckpoint\Support\Schema;
 use WPCheckpoint\Tests\Fixtures\StorageDirs;
@@ -48,11 +47,8 @@ final class JobStoreParityTest extends WP_UnitTestCase {
 		if ( null !== $this->session ) {
 			$this->session->close();
 		}
-		$wpdb->query( 'COMMIT' );
-		$wpdb->query( 'SET autocommit = 0' );
-		$wpdb->query( 'DROP TABLE IF EXISTS ' . Schema::jobs_table() );
+		$wpdb->query( 'DROP TABLE IF EXISTS ' . Schema::jobs_table() ); // With the row the other connection committed.
 		Options::delete( Schema::OPTION );
-		Options::delete( Directories::OPTION );
 		\WPCheckpoint\Tests\Fixtures\RunTables::put_back();
 		parent::tear_down();
 		if ( null !== $this->storage_before ) {
@@ -120,44 +116,66 @@ final class JobStoreParityTest extends WP_UnitTestCase {
 		$store->write_transition( $store->find( $id ), Job::QUEUED, '', '', array(), array(), '', 0, '__retry_from' );
 	}
 
+	/**
+	 * A queued job's row, as JobRepository::create() writes one, through this executor (each run of the test touches
+	 * only its own row: the one wpdb writes stays in the test's transaction, the other connection commits its own).
+	 *
+	 * @param StoreExecutor $db    Executor.
+	 * @param string        $token Storage token.
+	 * @return int Its id.
+	 */
+	private function insert( StoreExecutor $db, string $token ): int {
+		$marker = 'parity-' . bin2hex( random_bytes( 4 ) );
+		$this->assertSame(
+			1,
+			$db->execute(
+				'INSERT INTO ' . Schema::jobs_table() . ' (site_id, type, status, cursor_json, options_json, storage_token, storage_path, owner_user, created_at, updated_at, progress_at, log_path) VALUES (%d, %s, %s, %s, %s, %s, %s, %d, %d, %d, %d, %s)',
+				array( 1, 'parity', Job::QUEUED, '{"at":1}', '{"policy":[]}', $token, '', 0, 1800000000, 1800000000, 1800000000, $marker )
+			)
+		);
+		// Read through the connection that wrote it: wpdb's transaction reads a snapshot that may predate the other's row.
+		$rows = $db->select( 'SELECT id FROM ' . Schema::jobs_table() . ' WHERE log_path = %s', array( $marker ) );
+		return (int) ( $rows[0]['id'] ?? 0 );
+	}
+
 	public function test_both_executors_leave_the_same_row(): void {
 		global $wpdb;
-		$dirs  = new Directories( array( 'is_web_request' => false ) );
-		$repo  = new JobRepository( $dirs );
-		$a     = $repo->create( 'parity', 0, array( 'at' => 1 ), array( 'policy' => array() ) );
-		$b     = $repo->create( 'parity', 0, array( 'at' => 1 ), array( 'policy' => array() ) );
-		$token = (string) $dirs->state()['token'];
-		$wpdb->query( 'COMMIT' );
-		$wpdb->query( 'SET autocommit = 1' );
+		$token         = 'aaaaaaaaaaaa';
 		$this->session = ImportSession::open( Credentials::from_wordpress() );
+		$wpdb_db       = new WpdbExecutor();
+		$session_db    = new SessionExecutor( $this->session );
+		$a             = $this->insert( $wpdb_db, $token );
+		$b             = $this->insert( $session_db, $token );
+		$this->assertGreaterThan( 0, $a );
+		$this->assertGreaterThan( 0, $b, 'the control: the other connection\'s row is seen' );
 
 		$now = 1800000000;
-		$this->sequence( self::store( new WpdbExecutor(), $now ), $a->id, $now, $token );
+		$this->sequence( self::store( $wpdb_db, $now ), $a, $now, $token );
 		$now = 1800000000;
-		$this->sequence( self::store( new SessionExecutor( $this->session ), $now ), $b->id, $now, $token );
+		$this->sequence( self::store( $session_db, $now ), $b, $now, $token );
 
 		$rows = array();
-		foreach ( array( $a->id, $b->id ) as $id ) {
-			$row = (array) $wpdb->get_row( $wpdb->prepare( 'SELECT * FROM ' . Schema::jobs_table() . ' WHERE id = %d', $id ), ARRAY_A );
-			unset( $row['id'], $row['created_at'], $row['log_path'] );
+		foreach ( array( array( $wpdb_db, $a ), array( $session_db, $b ) ) as $read ) {
+			$row = (array) ( $read[0]->select( 'SELECT * FROM ' . Schema::jobs_table() . ' WHERE id = %d', array( $read[1] ) )[0] ?? array() );
+			unset( $row['id'], $row['log_path'] );
 			$rows[] = $row;
 		}
 		$this->assertNotSame( array(), $rows[0], 'the control: the rows are read' );
 		$this->assertSame( Job::QUEUED, $rows[0]['status'], 'the control: the sequence ran to its end' );
 		$this->assertStringContainsString( '"tables":3', (string) $rows[0]['options_json'], 'the control: the record was written' );
 		$this->assertSame( $rows[0], $rows[1], 'column by column' );
-		// The one read path: the row read through either executor hydrates to the same job.
-		$by_wpdb    = self::store( new WpdbExecutor(), $now )->find( $a->id );
-		$by_session = self::store( new SessionExecutor( $this->session ), $now )->find( $a->id );
-		$by_wpdb->created_at    = 0;
-		$by_session->created_at = 0;
+		// The one read path: each row read through its executor hydrates to the same job (but its id and log).
+		$by_wpdb              = self::store( $wpdb_db, $now )->find( $a );
+		$by_session           = self::store( $session_db, $now )->find( $b );
+		$by_session->id       = $by_wpdb->id;
+		$by_session->log_path = $by_wpdb->log_path;
 		$this->assertEquals( $by_wpdb, $by_session );
 	}
 
 	public function test_an_update_in_the_stores_form_is_the_statement_wpdb_update_sends(): void {
 		global $wpdb;
-		$repo = new JobRepository( new Directories( array( 'is_web_request' => false ) ) );
-		$job  = $repo->create( 'parity', 0 );
+		$job     = new Job();
+		$job->id = $this->insert( new WpdbExecutor(), 'aaaaaaaaaaaa' );
 		$data = array(
 			'step'             => 'stage',
 			'cursor_json'      => '{"a":"100% \'q\'"}',
