@@ -406,6 +406,11 @@ final class Runner {
 				)
 			);
 			if ( $job->takeovers >= self::MAX_TAKEOVERS ) {
+				if ( $this->web ) {
+					// A failed job cannot be taken again, and one that holds the site would leave it held for good: a run
+					// without WordPress leaves it as it is, for WP-CLI, and says why.
+					return $this->left( $job->id, self::takeover_message( $job ) );
+				}
 				try {
 					return $this->fail( $job, $token, $logger, self::takeover_message( $job ) );
 				} catch ( LockLost $lost ) {
@@ -716,7 +721,7 @@ final class Runner {
 			if ( StepResult::ASK === $result->kind ) {
 				// Not progress (the counters and the stall timestamp stay), not a wait: the job pauses until a
 				// person answers, and no driver follows up. The same step runs again after the answer.
-				$this->needs( 'pause_for_answer' ); // After the cursor is written.
+				$this->needs( 'pause_for_answer' ); // Before the cursor is written.
 				$logger->info(
 					'Step asks for a decision',
 					array(
