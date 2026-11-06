@@ -102,6 +102,7 @@ final class JobStoreParityTest extends WP_UnitTestCase {
 		$job = $store->find( $id );
 		$now += 10;
 		$this->assertNotNull( $store->heartbeat( $job, 'token-one', 120 ) );
+		$this->assertNotNull( $store->heartbeat( $job, 'token-one', 120 ), 'in the same second: no row changed, the lock read back (holds_lock())' );
 		$store->save_record( $job, 'token-one', 'tables', 3 );
 		$now += 5;
 		$store->save_progress( $job, 'token-one', 'stage', array( 'phase' => 'rollback', 'name' => '中文/表', 'deep' => array( 'a' => array( 1, 2 ) ) ), 40, 'Putting the site back as it was' );

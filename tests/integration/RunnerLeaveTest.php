@@ -211,6 +211,41 @@ final class RunnerLeaveTest extends WP_UnitTestCase {
 		$this->assertNotSame( $before, $this->row( $job->id ), 'what the comparison above would see' );
 	}
 
+	public function test_a_queued_job_that_is_left_keeps_what_the_claim_wrote_and_nothing_else(): void {
+		$job    = $this->job(
+			new ClosureStep(
+				'stage',
+				static function (): StepResult {
+					return StepResult::leave( 'Only WP-CLI can do what is left.' );
+				}
+			),
+			array(
+				'status'     => Job::QUEUED,
+				'attempts'   => 0,
+				'started_at' => 0,
+			)
+		);
+		$before = $this->row( $job->id );
+		$this->assertSame( TickResult::LEFT, $this->runner( true )->tick( $job->id )->status );
+		$after = $this->row( $job->id );
+		$this->assertSame( array( 'status', 'attempts', 'started_at' ), array_keys( array_diff_assoc( $after, $before ) ), 'but the lease, only what the claim writes of a queued job' );
+		$this->assertSame( Job::RUNNING, $after['status'] );
+		$this->assertSame( '', $this->repo->find( $job->id )->lock_token, 'let go' );
+	}
+
+	public function test_a_row_unreadable_after_the_claim_is_let_go_when_it_cannot_be_failed_here(): void {
+		$job  = $this->job( new ClosureStep( 'stage', array( $this, 'must_not_run' ) ) );
+		$repo = new RestrictedRepository( $this->repo, 'owns_files_of' );
+
+		$repo->unreadable_after_claim = true;
+
+		$before = $this->row( $job->id );
+		$result = $this->runner( true, $repo )->tick( $job->id );
+		$this->assertSame( TickResult::LEFT, $result->status, $result->message );
+		$this->assertSame( '', $this->repo->find( $job->id )->lock_token, 'the claim let go, not left to lapse' );
+		$this->assertSame( $before, $this->row( $job->id ), 'nothing else written' );
+	}
+
 	public function test_in_wordpress_a_step_that_leaves_fails_the_job(): void {
 		$job    = $this->job(
 			new ClosureStep(
@@ -328,17 +363,6 @@ final class RunnerLeaveTest extends WP_UnitTestCase {
 					),
 					array(),
 				);
-			case 'transition':
-				return array(
-					$this->job(
-						$plain(
-							static function (): StepResult {
-								throw new \RuntimeException( 'It broke.' );
-							}
-						)
-					),
-					array(),
-				);
 			case 'save_record':
 				return array(
 					$this->job(
@@ -416,6 +440,9 @@ final class RestrictedRepository implements RunnerRepository {
 	/** @var array<string, int> */
 	public $calls = array();
 
+	/** @var bool Whether the job the claim takes reads as unreadable (its row changed between the first read and the claim). */
+	public $unreadable_after_claim = false;
+
 	public function __construct( JobRepository $inner, string $refused ) {
 		$this->inner   = $inner;
 		$this->refused = $refused;
@@ -461,7 +488,11 @@ final class RestrictedRepository implements RunnerRepository {
 	}
 
 	public function acquire( int $id, int $lease = JobRepository::LOCK_SECONDS ) {
-		return $this->inner->acquire( $id, $lease );
+		$held = $this->inner->acquire( $id, $lease );
+		if ( null !== $held && $this->unreadable_after_claim ) {
+			$held['job']->unreadable_columns = array( 'cursor_json' );
+		}
+		return $held;
 	}
 
 	public function heartbeat( Job $job, string $token, int $lease = JobRepository::LOCK_SECONDS ): bool {
