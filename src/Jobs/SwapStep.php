@@ -170,6 +170,17 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	const ABANDONED       = 'abandoned';
 
 	/**
+	 * Under the job's recorded facts (JobContext::record()): the network's id, recorded when the swap starts on a
+	 * network.
+	 */
+	const NETWORK_RECORD = 'network_id';
+
+	/**
+	 * In a rollback's cursor: nothing was swapped when it was turned back (decided only then; roll_back()).
+	 */
+	const NOTHING_SWAPPED = 'nothing_swapped';
+
+	/**
 	 * Kinds of its units, for JobContext::may_start_unit(): a unit of the recount before the swap, a unit of a rollback
 	 * (one entry's renames).
 	 */
@@ -488,6 +499,11 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			if ( 'start' === $phase ) {
 				$cursor = $this->start( $context, $db );
 				$context->checkpoint( $cursor, 3, __( 'Judging the backup\'s tables once more before the swap', 'wp-checkpoint' ) );
+				if ( $this->host->multisite() ) {
+					// For a run made without WordPress, which cannot tell the network (StateCarry's): kept in the options,
+					// which outlive every cursor of the swap and a retry.
+					$context->record( self::NETWORK_RECORD, $this->host->network_id() );
+				}
 				$phase = 'judge';
 			}
 			if ( 'judge' === $phase ) {
@@ -581,6 +597,91 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 				$db->close();
 			}
 		}
+	}
+
+	/**
+	 * The swap where a run is made without WordPress (WebSwapStep): only putting the site back, for what
+	 * RollbackEligibility takes on, from where the cursor stands, as run() does it; anything else is left to WP-CLI.
+	 * The decision to put the site back, and its reason, is written before anything is renamed (roll_back(),
+	 * reverse()): a WP-CLI run that comes after goes on putting it back, not forward.
+	 *
+	 * @param JobContext $context Context.
+	 * @return StepResult
+	 * @throws \RuntimeException What ends the job (RetryFrom, Cancelled), as from run().
+	 */
+	public function put_back_here( JobContext $context ): StepResult {
+		$cursor              = $context->cursor();
+		list( $do, $reason ) = RollbackEligibility::judge( $cursor, $this->unverified_choice( $context, false ) );
+		if ( RollbackEligibility::LEAVE === $do || ! $this->host->web() ) {
+			return StepResult::leave( 'Only WP-CLI goes on with this swap.' );
+		}
+		$db = call_user_func( $this->connect );
+		try {
+			if ( RollbackEligibility::ROLL_BACK === $do ) {
+				if ( '' === $reason ) {
+					// From rename: every rename gone through is not a commit until it is recorded; a swap left there
+					// for the grace period was abandoned, and is put back as one.
+					$entries = $this->entries( $context, $db, $cursor );
+					$reason  = SwapRules::committed( $entries['tables'], $this->there( $db, $entries['tables'] ) ) ? self::ABANDONED : self::INTERRUPTED;
+				}
+				throw $this->roll_back( $context, $db, $cursor, $reason );
+			}
+			if ( RollbackEligibility::REVERSE === $do ) {
+				throw $this->reverse( $context, $db, $cursor, $reason, self::REVERSED === $reason ? (string) ( $cursor['check'] ?? '' ) : '' );
+			}
+			if ( RollbackEligibility::GO_ON === $do ) {
+				throw $this->roll_back( $context, $db, $cursor, (string) ( $cursor['reason'] ?? '' ) );
+			}
+			throw $this->end_back( $context, $db, $cursor, '' );
+		} catch ( SwapPause $question ) {
+			return $question->result();
+		} finally {
+			if ( $db instanceof ImportSession ) {
+				$db->close();
+			}
+		}
+	}
+
+	/**
+	 * Whether the units of a rollback would rename nothing: every table and directory entry where the swap found it
+	 * (SwapRules::table_back() and dir_back() empty for each, the units' own rules).
+	 *
+	 * @param JobContext           $context Context.
+	 * @param Queries              $db      Connection.
+	 * @param array<string, mixed> $cursor  The cursor being turned back.
+	 * @return bool
+	 */
+	private function nothing_to_put_back( JobContext $context, Queries $db, array $cursor ): bool {
+		$entries = $this->entries( $context, $db, $cursor );
+		$there   = $this->there( $db, $entries['tables'] );
+		foreach ( $entries['tables'] as $entry ) {
+			if ( array() !== SwapRules::table_back( $entry, $there, $this->stray_table( $context, $entry['live'] ) ) ) {
+				return false;
+			}
+		}
+		foreach ( $entries['dirs'] as $entry ) {
+			if ( array() !== SwapRules::dir_back( $entry, $this->exists( $entry['live'] ), $this->exists( $entry['stage'] ), $this->exists( $entry['old'] ), $this->stray_dir( $entry ) ) ) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	/**
+	 * A unit of a rollback found something to rename while the cursor says nothing was swapped: the record and what is
+	 * there disagree, so the record goes (checkpointed at once, said in the log); the flush is not skipped.
+	 *
+	 * @param JobContext           $context Context.
+	 * @param array<string, mixed> $cursor  The rollback's cursor (by reference).
+	 * @return void
+	 */
+	private function contradicts_nothing_swapped( JobContext $context, array &$cursor ): void {
+		if ( empty( $cursor[ self::NOTHING_SWAPPED ] ) ) {
+			return;
+		}
+		unset( $cursor[ self::NOTHING_SWAPPED ] );
+		$context->checkpoint( $cursor, 90, $this->host->putting_back() );
+		$context->logger()->warning( 'The rollback was recorded as having nothing to put back, but a unit found something to rename: the record is dropped, and the object cache will be flushed' );
 	}
 
 	/**
@@ -1381,14 +1482,22 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		if ( ! isset( self::REASONS[ $reason ] ) ) {
 			$reason = self::INTERRUPTED;
 		}
-		HostFunctions::set_time_limit( 0 );
+		if ( ! $this->host->web() ) {
+			HostFunctions::set_time_limit( 0 ); // A run without WordPress keeps its request's limits (its budget is its own).
+		}
 		if ( ! in_array( $cursor['phase'] ?? '', array( 'rollback', 'reverse' ), true ) ) {
-			$cursor = array(
+			$nothing = $this->host->web() && in_array( $cursor['phase'] ?? '', array( 'enter', 'dirs' ), true ) && $this->nothing_to_put_back( $context, $db, $cursor );
+			$cursor  = array(
 				'phase'   => 'rollback',
 				'attempt' => $cursor['attempt'],
 				'mark'    => $cursor['mark'] ?? '',
 				'reason'  => $reason,
 			) + self::redo_keys( $cursor );
+			if ( $nothing ) {
+				// Decided here only, with the direction, from what the units would rename: nothing (the swap stopped before
+				// its first rename). Never written later: what is there then cannot tell "never swapped" from "put back".
+				$cursor[ self::NOTHING_SWAPPED ] = true;
+			}
 			$context->checkpoint( $cursor, 90, $this->host->putting_back() );
 			$context->logger()->warning( 'The swap is rolled back', array( 'reason' => self::REASONS[ $reason ] ) );
 		}
@@ -1414,6 +1523,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			if ( array() === $pairs ) {
 				continue;
 			}
+			$this->contradicts_nothing_swapped( $context, $cursor );
 			$this->send_back( $context, $db, SwapRules::rename_sql( $pairs ), (int) $entry['seq'], $cursor, $back );
 			foreach ( $pairs as $pair ) {
 				unset( $there[ $pair[0] ] );
@@ -1435,6 +1545,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			if ( array() === $pairs ) {
 				continue;
 			}
+			$this->contradicts_nothing_swapped( $context, $cursor );
 			$started = $this->unit_back( $context, $cursor, $back );
 			foreach ( $pairs as $pair ) {
 				if ( $pair[1] !== $entry['stage'] && $pair[1] !== $entry['live'] ) {
@@ -1459,7 +1570,16 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		$this->at( 'dirs_back' );
 		// What requests cached of the half-swapped site (a persistent cache outlives this process). A cache that
 		// cannot be flushed now is waited out: the site is back, and the maintenance file stays held until then.
-		$this->flush( $context );
+		if ( ! $this->host->can_flush() && ! isset( $this->parts['flush'] ) ) {
+			if ( empty( $cursor[ self::NOTHING_SWAPPED ] ) ) {
+				// Here the cache cannot be flushed (a run without WordPress): stopped before the flush, the file held and
+				// nothing recorded, for WP-CLI to flush and end it.
+				throw new SwapPause( StepResult::leave( 'The site is put back, but its object cache can only be flushed by WP-CLI: the maintenance file stays until then.' ) );
+			}
+			$context->logger()->info( 'Nothing of the restored site was swapped in: the object cache is not flushed' );
+		} else {
+			$this->flush( $context );
+		}
 		// Recorded as put back while the file is still held: from here on nothing is renamed, whatever is found later.
 		$out    = ! empty( $cursor['out'] );
 		$cursor = array(
