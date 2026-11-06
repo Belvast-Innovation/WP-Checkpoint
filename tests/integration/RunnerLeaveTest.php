@@ -202,7 +202,8 @@ final class RunnerLeaveTest extends WP_UnitTestCase {
 		$job    = $this->job(
 			new ClosureStep(
 				'stage',
-				static function ( JobContext $ctx ): StepResult {
+				function ( JobContext $ctx ): StepResult {
+					$this->now += 30; // Past the 20 seconds of the budget: the tick ends after this run.
 					return StepResult::progress( array( 'at' => (int) ( $ctx->cursor()['at'] ?? 0 ) + 1 ), 10 );
 				}
 			)
