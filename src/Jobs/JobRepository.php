@@ -51,7 +51,7 @@ defined( 'ABSPATH' ) || exit;
  * writes only run after acquire() found the row. The reaper does not rely
  * on that null: find_for_reclaim() treats a missing table as unsafe.
  */
-final class JobRepository {
+final class JobRepository implements RunnerRepository {
 
 	/**
 	 * Reserved cursor key of a failed job: the step a retry starts at (RetryFrom). Runner-reserved (the prefix), so
@@ -152,6 +152,16 @@ final class JobRepository {
 		$this->directories = $directories;
 		$this->redactor    = $redactor instanceof Redactor ? $redactor : new Redactor( Redactor::installation_secrets() );
 		$this->clock       = is_callable( $clock ) ? $clock : null;
+	}
+
+	/**
+	 * Whether this storage can do one of its methods here (RunnerRepository::can()): in WordPress, all of them.
+	 *
+	 * @param string $method A method of RunnerRepository.
+	 * @return bool
+	 */
+	public function can( string $method ): bool {
+		return true;
 	}
 
 	/**
