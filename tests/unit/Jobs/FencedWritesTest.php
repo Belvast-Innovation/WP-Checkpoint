@@ -64,8 +64,8 @@ final class FencedWritesTest extends TestCase {
 	const ALLOWED         = '/^' . self::SQL_GAP . '(?:SELECT|SHOW|DELETE|INSERT|UPDATE|REPLACE)\b/iu';
 	const NOT_A_WRITE     = '/^' . self::SQL_GAP . '(?:SET SESSION|START TRANSACTION|COMMIT|ROLLBACK|SELECT)\b/iu';
 
-	/** The methods that run a statement: on a Queries connection (and query() on any), and those $wpdb builds DML with. */
-	const METHODS    = array( 'write', 'run', 'rows', 'query', 'update', 'insert', 'delete', 'replace' );
+	/** The methods that run a statement: on a Queries connection (and query() on any), JobStore's executor's execute(), and those $wpdb builds DML with. */
+	const METHODS    = array( 'write', 'run', 'rows', 'query', 'execute', 'update', 'insert', 'delete', 'replace' );
 	const BUILDS_DML = array( 'update', 'insert', 'delete', 'replace' );
 
 	const NOT_ALLOWED = 'inside a fenced transaction, a call that is not an allowed one: on the fenced connection (the one given to within(), or asserted on), by write(), run(), rows() or query(), a literal beginning with SELECT / SHOW / DELETE / INSERT / UPDATE / REPLACE (anything else, DDL, LOCK TABLES, COMMIT, FLUSH, a statement built at run time, may end the transaction and release the job row, and nothing after it is fenced); a call on any other receiver (WordPress\'s $wpdb however reached, another object, a receiver that cannot be read) is not on the fenced connection at all, so it is no fenced write';
@@ -129,6 +129,15 @@ final class FencedWritesTest extends TestCase {
 			array( "'DELETE FROM ' . SqlWriter::identifier( \$table ) . ' WHERE option_name IN (?)'", self::LOCKED ),
 		),
 		'src/Jobs/TempTableCount.php' => array(),
+		'src/Jobs/JobStore.php'       => array(
+			array( '$this->db->execute( $this->claim_template( $managing ), $params );', self::EXCEPTION, 'The claim: a compare-and-set whose WHERE takes the job only when no live lease holds it (lock_token = \'\' OR locked_until < now, claim_template()); the lease it writes is the condition of every later write of the run.' ),
+			array( 'SET locked_until = %d, updated_at = %d WHERE id = %d AND lock_token = %s', self::CONDITIONED ),
+			array( "SET lock_token = '', locked_until = 0, updated_at = %d WHERE id = %d AND lock_token = %s", self::CONDITIONED ),
+			array( 'SET options_json = %s, updated_at = %d WHERE id = %d AND lock_token = %s', self::CONDITIONED ),
+			array( 'UninstallFence::entering_template(', self::EXCEPTION, 'Entering the site: one multi-table UPDATE of the job\'s row and the uninstall fence\'s row, its WHERE on the run\'s lock token (UninstallFence::entering_template()); built there, so its text is not here.' ),
+			array( '$this->db->update( $this->table, $data, $formats, $where, $where_formats );', self::EXCEPTION, 'A checkpoint (save_progress()): $where holds the run\'s lock_token (and no cancel request for an undo); wpdb::update() and UpdateSql build the statement from it, so its text does not name the column.' ),
+			array( '$this->db->update( $this->table, $data, $formats, $guard, $guard_formats );', self::EXCEPTION, 'A transition (write_transition()): on the status as read, and on the run\'s lock_token when a run writes it; one written with no token (a cancel, a failure from outside) only on a job whose site is untouched. Built by wpdb::update() and UpdateSql from $guard.' ),
+		),
 		'src/Restore/JobFence.php'    => array(),
 	);
 
@@ -665,8 +674,8 @@ final class FencedWritesTest extends TestCase {
 		if ( in_array( $call['method'], self::BUILDS_DML, true ) ) {
 			return true;
 		}
-		if ( 'write' === $call['method'] ) {
-			return true;
+		if ( 'write' === $call['method'] || 'execute' === $call['method'] ) {
+			return true; // StoreExecutor::execute() runs a statement that changes rows, as Queries::write().
 		}
 		if ( 'run' === $call['method'] || 'query' === $call['method'] ) {
 			return ! self::begins( self::NOT_A_WRITE, $call['literal'] );

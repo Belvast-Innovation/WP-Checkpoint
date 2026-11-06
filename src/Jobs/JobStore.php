@@ -566,32 +566,32 @@ final class JobStore {
 			$formats[] = isset( $extra_formats[ $i ] ) ? $extra_formats[ $i ] : '%s';
 		}
 		$data          = array_merge( $data, $extra );
-		$where         = array(
+		$guard         = array(
 			'id'     => $job->id,
 			'status' => $from,
 		);
-		$where_formats = array( '%d', '%s' );
+		$guard_formats = array( '%d', '%s' );
 		if ( Job::QUEUED === $to && Job::FAILED === $from ) {
 			// The in-memory can_retry() check races with expire_work(): the row is the authority. And the step a retry
 			// starts at comes from the job as read: the row must still be that failure (not another retry's, run and
 			// failed again meanwhile; a failure within the same second is not told apart).
-			$where['work_expired_at'] = 0;
-			$where['finished_at']     = (int) $job->finished_at;
-			$where_formats[]          = '%d';
-			$where_formats[]          = '%d';
+			$guard['work_expired_at'] = 0;
+			$guard['finished_at']     = (int) $job->finished_at;
+			$guard_formats[]          = '%d';
+			$guard_formats[]          = '%d';
 		}
 		if ( '' !== $token ) {
-			$where['lock_token'] = $token;
-			$where_formats[]     = '%s';
+			$guard['lock_token'] = $token;
+			$guard_formats[]     = '%s';
 		}
 		if ( Job::CANCELLED === $to || ( '' === $token && Job::FAILED === $to ) ) {
 			// A job that holds the site changed is cancelled only by its own step once the site is back
 			// (Cancelled), and failed only by the run that holds it: never from outside, and never by a cancel
 			// that took an expired lock. The row is the authority: the run may have written the state just now.
-			$where['site_state'] = Job::SITE_UNTOUCHED;
-			$where_formats[]     = '%d';
+			$guard['site_state'] = Job::SITE_UNTOUCHED;
+			$guard_formats[]     = '%d';
 		}
-		$affected = $this->db->update( $this->table, $data, $formats, $where, $where_formats );
+		$affected = $this->db->update( $this->table, $data, $formats, $guard, $guard_formats );
 		if ( 1 !== (int) $affected ) {
 			throw new StaleJob( sprintf( 'Job %d is no longer %s.', $job->id, $from ) );
 		}

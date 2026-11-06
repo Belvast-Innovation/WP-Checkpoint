@@ -17,6 +17,12 @@ defined( 'ABSPATH' ) || exit;
 interface RunnerRepository {
 
 	/**
+	 * What every storage that runs jobs does: can() is not asked of these (a run takes, keeps, writes and lets go of
+	 * its job with them, on every path); any other method may be one a storage cannot do here.
+	 */
+	const BASIC = array( 'now', 'find', 'gate', 'acquire', 'heartbeat', 'release', 'save_progress' );
+
+	/**
 	 * Whether this storage can do one of its methods where it runs. The Runner asks before the first write of a path
 	 * that calls a method after a write (pausing for an answer after the cursor, the cleanup after a cancel), so that
 	 * a method it cannot do is never reached with the row half written; a method that is the first write of its path
