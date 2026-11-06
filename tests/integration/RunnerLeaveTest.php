@@ -332,19 +332,19 @@ final class RunnerLeaveTest extends WP_UnitTestCase {
 					array(),
 				);
 			case 'fail_for_missing_columns':
-				return array( $this->job( $plain( array( $this, 'never' ) ) ), array( 'blocked_count' ) );
+				return array( $this->job( $plain( array( $this, 'must_not_run' ) ) ), array( 'blocked_count' ) );
 			case 'reset_cron_deferrals':
-				return array( $this->job( $plain( array( $this, 'never' ) ), array( 'cron_deferrals' => 1 ) ), array() );
+				return array( $this->job( $plain( array( $this, 'must_not_run' ) ), array( 'cron_deferrals' => 1 ) ), array() );
 			case 'record_blocked':
 				// Bound to another storage directory: the gate refuses it, and counts the refusal.
-				return array( $this->job( $plain( array( $this, 'never' ) ), array( 'storage_token' => 'dddddddddddd' ) ), array() );
+				return array( $this->job( $plain( array( $this, 'must_not_run' ) ), array( 'storage_token' => 'dddddddddddd' ) ), array() );
 			case 'note_held_back':
-				return array( $this->job( $plain( array( $this, 'never' ) ), array( 'cursor_json' => '{not json', 'site_state' => Job::SITE_CHANGING ) ), array() );
+				return array( $this->job( $plain( array( $this, 'must_not_run' ) ), array( 'cursor_json' => '{not json', 'site_state' => Job::SITE_CHANGING ) ), array() );
 			case 'log_event':
-				return array( $this->job( $plain( array( $this, 'never' ) ), array( 'cursor_json' => '{not json', 'storage_path' => $this->root . '/elsewhere' ) ), array() );
+				return array( $this->job( $plain( array( $this, 'must_not_run' ) ), array( 'cursor_json' => '{not json', 'storage_path' => $this->root . '/elsewhere' ) ), array() );
 			case 'fail_unreadable':
 			case 'owns_files_of':
-				return array( $this->job( $plain( array( $this, 'never' ) ), array( 'cursor_json' => '{not json' ) ), array() );
+				return array( $this->job( $plain( array( $this, 'must_not_run' ) ), array( 'cursor_json' => '{not json' ) ), array() );
 		}
 		$this->fail( 'No job reaches ' . $method . ': add one here.' );
 	}
@@ -354,7 +354,7 @@ final class RunnerLeaveTest extends WP_UnitTestCase {
 	 *
 	 * @return StepResult
 	 */
-	public function never(): StepResult {
+	public function must_not_run(): StepResult {
 		$this->fail( 'The step ran.' );
 	}
 }
