@@ -167,6 +167,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	const UNDONE          = 'undone';
 	const ASKED           = 'asked';
 	const PUT_BACK_REASON = 'putback';
+	const ABANDONED       = 'abandoned';
 
 	/**
 	 * Kinds of its units, for JobContext::may_start_unit(): a unit of the recount before the swap, a unit of a rollback
@@ -196,6 +197,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		self::UNDONE          => 'The restored site could not be checked, and the swap was undone as chosen: the site was put back as it was before the restore.',
 		self::ASKED           => 'The restore was undone as asked (wp wpcheckpoint job undo): the site was put back as it was before the restore.',
 		self::PUT_BACK_REASON => 'The site was put back as it was before the restore, as asked (wp wpcheckpoint job put-back).',
+		self::ABANDONED       => 'No WP-CLI run went on with the swap for ten minutes: a visitor\'s request put the site back as it was before the restore.',
 	);
 
 	/**
