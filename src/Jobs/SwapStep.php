@@ -321,13 +321,22 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	private $parts;
 
 	/**
+	 * What the swap takes from the site it runs on (SwapHost): WordPress's by default.
+	 *
+	 * @var SwapHost
+	 */
+	private $host;
+
+	/**
 	 * Constructor.
 	 *
 	 * @param callable|null        $connect function(): Queries (tests); the site's own settings by default.
 	 * @param array<string, mixed> $parts   See $parts.
+	 * @param SwapHost|null        $host    What the swap takes from the site (a run made without WordPress gives its own).
 	 */
-	public function __construct( $connect = null, array $parts = array() ) {
+	public function __construct( $connect = null, array $parts = array(), $host = null ) {
 		$this->parts   = $parts;
+		$this->host    = $host instanceof SwapHost ? $host : SwapHost::of_wordpress();
 		$this->connect = is_callable( $connect ) ? $connect : static function (): Queries {
 			try {
 				$credentials = Credentials::from_wordpress();
@@ -619,7 +628,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		}
 		$attempt = (int) ( $file['attempt'] ?? 0 );
 		$count   = (int) ( $file['entries'] ?? -1 );
-		$plan    = new SwapPlan( $db, self::base_prefix() . SwapPlan::TABLE );
+		$plan    = new SwapPlan( $db, $this->base_prefix() . SwapPlan::TABLE );
 		if ( $attempt < 1 || $plan->complete_count( $context->job()->id, $attempt ) !== $count ) {
 			throw new RetryFrom( 'The swap\'s plan is not complete as the final check recorded it; the final check writes it again.', SwapCheckStep::ID );
 		}
@@ -725,7 +734,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			function ( string $point ): void {
 				$this->at( 'recount_' . $point );
 			},
-			StateCarry::counted( self::base_prefix(), is_multisite() ? get_current_network_id() : 0 ),
+			StateCarry::counted( $this->base_prefix(), $this->host->network_id() ),
 			$context->fence()
 		);
 		while ( true ) {
@@ -1264,7 +1273,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		if ( ! $context->may_start_unit( self::UNIT_BACK, (float) self::LOCK_WAIT, $wait ) ) {
 			$cursor['back'] = (int) ( $cursor['back'] ?? 0 ) + $back['units'];
 			$this->at( 'back_paused' );
-			throw new SwapPause( StepResult::progress( $cursor, 95, __( 'Putting the site back as it was', 'wp-checkpoint' ) ) );
+			throw new SwapPause( StepResult::progress( $cursor, 95, $this->host->putting_back() ) );
 		}
 		return $context->elapsed();
 	}
@@ -1318,13 +1327,13 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 				if ( $tries > count( self::RETRIES ) ) {
 					// The tries are this run's: a retry of the job starts its own (the cursor is kept for it).
 					unset( $cursor['busy'], $cursor['busy_after'], $cursor['busy_for'] );
-					$context->checkpoint( $cursor, 95, __( 'Putting the site back as it was', 'wp-checkpoint' ) );
+					$context->checkpoint( $cursor, 95, $this->host->putting_back() );
 					throw new TablesBusy( sprintf( 'The database is busy: the tables stayed locked by other work through %d tries.', $tries ) );
 				}
 				$cursor['busy']       = $tries;
 				$cursor['busy_for']   = $seq;
 				$cursor['busy_after'] = $this->now() + self::RETRIES[ $tries - 1 ];
-				$context->checkpoint( $cursor, 95, __( 'Putting the site back as it was', 'wp-checkpoint' ) );
+				$context->checkpoint( $cursor, 95, $this->host->putting_back() );
 				$this->at( 'back_busy' );
 			}
 		}
@@ -1370,7 +1379,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 				'mark'    => $cursor['mark'] ?? '',
 				'reason'  => $reason,
 			) + self::redo_keys( $cursor );
-			$context->checkpoint( $cursor, 90, __( 'Putting the site back as it was', 'wp-checkpoint' ) );
+			$context->checkpoint( $cursor, 90, $this->host->putting_back() );
 			$context->logger()->warning( 'The swap is rolled back', array( 'reason' => self::REASONS[ $reason ] ) );
 		}
 		$this->at( 'rollback' );
@@ -1452,7 +1461,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		if ( $out ) {
 			$cursor['out'] = true; // Kept to the end: an undo after the site was let out ends the job as undone (ended()).
 		}
-		$context->checkpoint( $cursor, 98, __( 'The site is as it was before the restore', 'wp-checkpoint' ) );
+		$context->checkpoint( $cursor, 98, $this->host->as_before() );
 		$this->at( 'restored' );
 		return $this->end_back( $context, $db, $cursor, $detail );
 	}
@@ -1497,10 +1506,10 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			if ( SwapPlan::TABLE_OF !== $entry['kind'] || ! $entry['had_live'] || ! isset( $there[ $entry['live'] ], $there[ $entry['old'] ] ) || isset( $there[ $entry['stage'] ] ) ) {
 				continue;
 			}
-			if ( self::base_prefix() . 'options' === $entry['live'] ) {
+			if ( $this->base_prefix() . 'options' === $entry['live'] ) {
 				$pairs['options'] = $entry;
 			}
-			if ( is_multisite() && self::base_prefix() . 'sitemeta' === $entry['live'] ) {
+			if ( $this->host->multisite() && $this->base_prefix() . 'sitemeta' === $entry['live'] ) {
 				$pairs['meta'] = $entry;
 			}
 		}
@@ -1558,7 +1567,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		try {
 			$names = array_diff( StateCarry::own_names( $db, $options, false, array() ), array( StateCarry::ACTIVE, StoredNames::SELF_CHECK ) );
 			if ( null !== $meta ) {
-				$names = array_merge( $names, array_diff( StateCarry::own_names( $db, $meta, true, array( (string) ( is_multisite() ? get_current_network_id() : 0 ) ) ), array( StateCarry::ACTIVE_NETWORK ) ) );
+				$names = array_merge( $names, array_diff( StateCarry::own_names( $db, $meta, true, array( (string) ( $this->host->network_id() ) ) ), array( StateCarry::ACTIVE_NETWORK ) ) );
 			}
 		} catch ( \RuntimeException $e ) {
 			return null;
@@ -1683,7 +1692,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 				'out'     => true,
 				'carry'   => 'skip',
 			) + array_intersect_key( $cursor, array( 'ends' => true ) );
-			$context->checkpoint( $cursor, 88, __( 'Putting the site back as it was', 'wp-checkpoint' ) );
+			$context->checkpoint( $cursor, 88, $this->host->putting_back() );
 			throw $this->roll_back( $context, $db, $cursor, (string) $cursor['reason'] );
 		}
 		if ( RestoreJob::KEEP === $answer ) {
@@ -1738,7 +1747,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 				'reason' => $reason,
 				'check'  => (string) ( $cursor['check'] ?? '' ),
 			) + array_intersect_key( $cursor, array_flip( array( 'out', 'after_undo', 'after_undo_found', 'undone_at', 'keep_work', 'ends' ) ) );
-			$context->checkpoint( $cursor, 100, __( 'The site is as it was before the restore', 'wp-checkpoint' ) );
+			$context->checkpoint( $cursor, 100, $this->host->as_before() );
 			$this->at( 'reverted' );
 		}
 		$this->take_down( $context, $cursor );
@@ -1857,7 +1866,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			$key   = SelfCheck::random();
 			$nonce = SelfCheck::random();
 			$fence = $context->fence();
-			SelfCheck::put( $db, $fence, SelfCheck::table( self::base_prefix() ), SelfCheck::value( $fence['id'], $nonce, hash( 'sha256', $key ) ) );
+			SelfCheck::put( $db, $fence, SelfCheck::table( $this->base_prefix() ), SelfCheck::value( $fence['id'], $nonce, hash( 'sha256', $key ) ) );
 			$this->let_through( $context, $file, hash( 'sha256', $key ) );
 			$this->at( 'undo_check_written' );
 			$found = $this->check_site( $context, $db, $key, $nonce );
@@ -1889,7 +1898,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			}
 		}
 		$this->refresh( $context, $file, true );
-		SelfCheck::remove( $db, $context->fence(), SelfCheck::table( self::base_prefix() ) );
+		SelfCheck::remove( $db, $context->fence(), SelfCheck::table( $this->base_prefix() ) );
 		$this->at( 'undo_self_check_removed' );
 		return $cursor;
 	}
@@ -2048,7 +2057,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		$this->at( 'undo_starting' );
 		$cursor['phase'] = 'reverse';
 		try {
-			$context->checkpoint( $cursor, 88, __( 'Putting the site back as it was', 'wp-checkpoint' ) );
+			$context->checkpoint( $cursor, 88, $this->host->putting_back() );
 		} catch ( UndoCancelled $e ) {
 			$cursor['phase'] = 'undo';
 			return $this->give_up_undo( $context, $cursor, 'The undo was cancelled before it changed the site: the restored site stays', __( 'The undo was cancelled before it changed the site: the restored site stays.', 'wp-checkpoint' ) );
@@ -2566,7 +2575,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		if ( $out ) {
 			$cursor['out'] = true;
 		}
-		$context->checkpoint( $cursor, 88, __( 'Putting the site back as it was', 'wp-checkpoint' ) );
+		$context->checkpoint( $cursor, 88, $this->host->putting_back() );
 		$context->logger()->warning(
 			'The swap is reversed after it was made',
 			array(
@@ -2615,7 +2624,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 						$key   = SelfCheck::random();
 						$nonce = SelfCheck::random();
 						$fence = $context->fence();
-						SelfCheck::put( $db, $fence, SelfCheck::table( self::base_prefix() ), SelfCheck::value( $fence['id'], $nonce, hash( 'sha256', $key ) ) );
+						SelfCheck::put( $db, $fence, SelfCheck::table( $this->base_prefix() ), SelfCheck::value( $fence['id'], $nonce, hash( 'sha256', $key ) ) );
 						$this->let_through( $context, $this->maintenance( $cursor ), hash( 'sha256', $key ) );
 						$this->at( 'self_check_written' );
 						$found = $this->check_site( $context, $db, $key, $nonce );
@@ -2655,7 +2664,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 					// is done), so that no outcome leaves it in the site's options table. The maintenance file stops
 					// letting the checks through first (held, with no pass).
 					$this->refresh( $context, $this->maintenance( $cursor ), true );
-					SelfCheck::remove( $db, $context->fence(), SelfCheck::table( self::base_prefix() ) );
+					SelfCheck::remove( $db, $context->fence(), SelfCheck::table( $this->base_prefix() ) );
 					$this->at( 'self_check_removed' );
 					if ( SiteCheck::FAILED === ( $cursor['verdict'] ?? '' ) ) {
 						throw $this->reverse( $context, $db, $cursor, self::REVERSED, (string) ( $cursor['check'] ?? '' ) );
@@ -2681,7 +2690,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 					$entries = $entries ?? $this->entries( $context, $db, $cursor );
 					$this->refresh( $context, $this->maintenance( $cursor ), false );
 					foreach ( $entries['tables'] as $entry ) {
-						if ( SwapPlan::TABLE_OF === $entry['kind'] && self::is_options( $entry['live'] ) ) {
+						if ( SwapPlan::TABLE_OF === $entry['kind'] && $this->is_options( $entry['live'] ) ) {
 							$context->confirm_lease();
 							$db->write( 'DELETE FROM ' . SqlWriter::identifier( $entry['live'] ) . ' WHERE option_name = ?', array( 'rewrite_rules' ) );
 						}
@@ -2695,7 +2704,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 					$this->refresh( $context, $this->maintenance( $cursor ), false );
 					$context->confirm_lease();
 					$db->write(
-						'INSERT INTO ' . SqlWriter::identifier( self::base_prefix() . 'options' ) . ' (option_name, option_value, autoload) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE option_value = VALUES(option_value)',
+						'INSERT INTO ' . SqlWriter::identifier( $this->base_prefix() . 'options' ) . ' (option_name, option_value, autoload) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE option_value = VALUES(option_value)',
 						array( StoredNames::AFTER_SWAP, (string) $this->now(), 'yes' )
 					);
 					$this->at( 'cron' );
@@ -2791,7 +2800,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		if ( array() === $entries['site'] ) {
 			throw new SiteChanged( 'The swap\'s plan was written by an earlier version of WP Checkpoint, which did not record the site it was written for. The swap was refused before it changed anything, and its plan is kept as it was written. Start the restore again.' );
 		}
-		if ( 1 !== count( $entries['site'] ) || 0 !== ( $site['seq'] ?? -1 ) || false === $real || rtrim( Paths::normalize( (string) $real ), '/' ) !== $site['live'] || self::base_prefix() !== $site['stage'] ) {
+		if ( 1 !== count( $entries['site'] ) || 0 !== ( $site['seq'] ?? -1 ) || false === $real || rtrim( Paths::normalize( (string) $real ), '/' ) !== $site['live'] || $this->base_prefix() !== $site['stage'] ) {
 			throw new SiteChanged( 'The swap\'s plan was written for a WordPress directory or table prefix other than this site\'s now. The swap was refused before it changed anything, and its plan is kept as it was written. Start the restore again.' );
 		}
 		foreach ( $entries['dirs'] as $entry ) {
@@ -2846,7 +2855,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 *                           that holds the site changed must keep its retry, which goes on putting it back).
 	 */
 	private function entries( JobContext $context, Queries $db, array $cursor ): array {
-		$plan    = new SwapPlan( $db, self::base_prefix() . SwapPlan::TABLE );
+		$plan    = new SwapPlan( $db, $this->base_prefix() . SwapPlan::TABLE );
 		$job     = $context->job()->id;
 		$attempt = (int) ( $cursor['attempt'] ?? 0 );
 		$count   = $plan->complete_count( $job, $attempt );
@@ -3102,7 +3111,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		if ( isset( $this->parts['urls'] ) ) {
 			return (array) call_user_func( $this->parts['urls'] );
 		}
-		$table = SqlWriter::identifier( self::base_prefix() . 'options' );
+		$table = SqlWriter::identifier( $this->base_prefix() . 'options' );
 		$read  = static function ( string $name ) use ( $db, $table ): string {
 			$rows = $db->rows( 'SELECT option_value FROM ' . $table . ' WHERE option_name = ?', array( $name ) );
 			return (string) ( $rows[0][0] ?? '' );
@@ -3324,10 +3333,10 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			if ( SwapPlan::TABLE_OF !== $entry['kind'] ) {
 				continue;
 			}
-			if ( self::base_prefix() . 'options' === $entry['live'] ) {
+			if ( $this->base_prefix() . 'options' === $entry['live'] ) {
 				$options = $entry;
 			}
-			if ( is_multisite() && self::base_prefix() . 'sitemeta' === $entry['live'] ) {
+			if ( $this->host->multisite() && $this->base_prefix() . 'sitemeta' === $entry['live'] ) {
 				$meta = $entry;
 			}
 		}
@@ -3352,11 +3361,11 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @return StateCarry
 	 */
 	private function state_carry( Queries $db ): StateCarry {
-		$plugin = isset( $this->parts['plugin'] ) ? (string) $this->parts['plugin'] : plugin_basename( WPCHECKPOINT_FILE );
+		$plugin = isset( $this->parts['plugin'] ) ? (string) $this->parts['plugin'] : $this->host->plugin();
 		return new StateCarry(
 			$db,
 			$plugin,
-			is_multisite() ? get_current_network_id() : 0,
+			$this->host->network_id(),
 			function ( string $point ): void {
 				$this->at( $point );
 			}
@@ -3412,8 +3421,8 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @param string $name Table name.
 	 * @return bool
 	 */
-	private static function is_options( string $name ): bool {
-		return 1 === preg_match( '/\A' . preg_quote( self::base_prefix(), '/' ) . '(?:[1-9][0-9]*_)?options\z/', $name );
+	private function is_options( string $name ): bool {
+		return 1 === preg_match( '/\A' . preg_quote( $this->base_prefix(), '/' ) . '(?:[1-9][0-9]*_)?options\z/', $name );
 	}
 
 	/**
@@ -3439,7 +3448,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 */
 	private function flush( JobContext $context ): void {
 		try {
-			$flushed = isset( $this->parts['flush'] ) ? call_user_func( $this->parts['flush'] ) : wp_cache_flush();
+			$flushed = isset( $this->parts['flush'] ) ? call_user_func( $this->parts['flush'] ) : $this->host->flush();
 		} catch ( LockLost $e ) {
 			throw $e;
 		} catch ( StaleJob $e ) {
@@ -3518,9 +3527,8 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 *
 	 * @return string
 	 */
-	private static function base_prefix(): string {
-		global $wpdb;
-		return (string) $wpdb->base_prefix;
+	private function base_prefix(): string {
+		return $this->host->base_prefix();
 	}
 
 	/**
