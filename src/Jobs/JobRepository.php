@@ -7,7 +7,6 @@
 
 namespace WPCheckpoint\Jobs;
 
-use WPCheckpoint\Support\Utf8;
 use WPCheckpoint\Files\ScanRoots;
 use WPCheckpoint\Support\Deleter;
 use WPCheckpoint\Support\DeletionRefused;
@@ -85,7 +84,7 @@ final class JobRepository implements RunnerRepository {
 	const MAX_ROWS          = 1000;
 	const REAP_THROTTLE     = 600;
 	const PURGE_THROTTLE    = 86400;
-	const SECRET_MIN_LENGTH = 4;
+	const SECRET_MIN_LENGTH = CursorSecrets::MIN_LENGTH;
 	/**
 	 * A failed job keeps its work files this long after failing so it can
 	 * be retried; the row itself stays for RETENTION_SECONDS[failed].
@@ -2067,14 +2066,8 @@ final class JobRepository implements RunnerRepository {
 	 */
 	private static function fit_message( string $message ): string {
 		global $wpdb;
-		$message = Utf8::scrub( $message );
-		if ( mb_strlen( $message, 'UTF-8' ) > 191 ) {
-			// Cut at a word's end: a path, a host or a secret cut in two would no longer be recognised by the masks
-			// the text passes through on its way out, and its first part would show.
-			$cut     = preg_replace( '/\s+\S*\z/u', '', mb_substr( $message, 0, 192, 'UTF-8' ) );
-			$message = is_string( $cut ) && mb_strlen( $cut, 'UTF-8' ) <= 191 ? rtrim( $cut ) : '';
-		}
-		$stored = $wpdb->strip_invalid_text_for_column( self::table(), 'progress_message', $message );
+		$message = JobStore::cut_message( $message );
+		$stored  = $wpdb->strip_invalid_text_for_column( self::table(), 'progress_message', $message );
 		return is_string( $stored ) ? $stored : '';
 	}
 
@@ -3351,21 +3344,7 @@ final class JobRepository implements RunnerRepository {
 	 * @throws \InvalidArgumentException When a known secret appears in it.
 	 */
 	public static function assert_cursor_has_no_secrets( array $cursor, $secrets = null ): void {
-		$json = wp_json_encode( $cursor );
-		if ( ! is_string( $json ) ) {
-			throw new \InvalidArgumentException( 'Cursor cannot be encoded.' );
-		}
-		$user = defined( 'DB_USER' ) && is_string( DB_USER ) ? DB_USER : '';
-		foreach ( is_array( $secrets ) ? $secrets : Redactor::installation_secrets() as $secret ) {
-			if ( ! is_string( $secret ) || strlen( $secret ) < self::SECRET_MIN_LENGTH || ( '' !== $user && $secret === $user ) ) {
-				continue;
-			}
-			foreach ( Redactor::forms( $secret ) as $form ) {
-				if ( strlen( $form ) >= self::SECRET_MIN_LENGTH && false !== strpos( $json, $form ) ) {
-					throw new \InvalidArgumentException( 'Cursor must not contain credentials.' );
-				}
-			}
-		}
+		CursorSecrets::assert_none( wp_json_encode( $cursor ), $secrets );
 	}
 
 	/**

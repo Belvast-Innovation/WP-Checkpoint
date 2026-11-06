@@ -8,6 +8,7 @@
 namespace WPCheckpoint\Jobs;
 
 use WPCheckpoint\Support\Schema;
+use WPCheckpoint\Support\Utf8;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -111,6 +112,24 @@ final class JobStore {
 		$this->fit          = $fit;
 		$this->no_secrets   = $no_secrets;
 		$this->fence_absent = $fence_absent;
+	}
+
+	/**
+	 * A progress message cut to the 191 characters of its column (varchar(191)), at a word's end: a path, a host or a
+	 * secret cut in two would no longer be recognised by the masks the text passes through on its way out, and its
+	 * first part would show. What the column's character set cannot store is the caller's (wpdb strips it in
+	 * WordPress: JobRepository::fit_message()).
+	 *
+	 * @param string $message Message.
+	 * @return string
+	 */
+	public static function cut_message( string $message ): string {
+		$message = Utf8::scrub( $message );
+		if ( mb_strlen( $message, 'UTF-8' ) > 191 ) {
+			$cut     = preg_replace( '/\s+\S*\z/u', '', mb_substr( $message, 0, 192, 'UTF-8' ) );
+			$message = is_string( $cut ) && mb_strlen( $cut, 'UTF-8' ) <= 191 ? rtrim( $cut ) : '';
+		}
+		return $message;
 	}
 
 	/**
