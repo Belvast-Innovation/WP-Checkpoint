@@ -693,6 +693,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 *
 	 * @param JobContext $context Context.
 	 * @return void
+	 * @throws NotHere When a run without WordPress cannot go on here (rethrown unchanged).
 	 */
 	public function cleanup( JobContext $context ): void {
 		$cursor = $context->job()->cursor;
@@ -707,6 +708,8 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			if ( ( $own || Maintenance::BARE !== $file->state() ) && ! $file->remove() ) {
 				$context->logger()->warning( 'The restore\'s maintenance file could not be taken down' );
 			}
+		} catch ( NotHere $e ) {
+			throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged: a run without WordPress leaves the job as it is (Runner).
 		} catch ( \Throwable $e ) {
 			$context->logger()->warning( 'The restore\'s maintenance file could not be taken down', array( 'error' => $e->getMessage() ) );
 		}
@@ -725,6 +728,8 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		$work = $context->work_path();
 		try {
 			$file = ExportPlan::read( $work, RestoreFiles::SWAP_PLAN );
+		} catch ( NotHere $e ) {
+			throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged: a run without WordPress leaves the job as it is (Runner).
 		} catch ( \RuntimeException $e ) {
 			throw new RetryFrom( 'The swap\'s plan is not in the work directory; the final check writes it again.', SwapCheckStep::ID );
 		}
@@ -997,6 +1002,8 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			throw $e;
 		} catch ( TransientFailure $e ) {
 			throw $e;
+		} catch ( NotHere $e ) {
+			throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged: a run without WordPress leaves the job as it is (Runner).
 		} catch ( \RuntimeException $e ) {
 			if ( $redo <= 0 ) {
 				throw $e;
@@ -1093,6 +1100,8 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			$context->checkpoint( $cursor, 20, __( 'The swap stopped before it changed the site', 'wp-checkpoint' ) );
 			$this->at( 'judge_recorded' );
 			throw new RetryFrom( self::REJUDGED . ' ' . self::STOOD_DOWN, RestorePreflightStep::ID );
+		} catch ( NotHere $e ) {
+			throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged: a run without WordPress leaves the job as it is (Runner).
 		} catch ( \Throwable $e ) {
 			$context->logger()->warning( 'The swap stopped', array( 'error' => $e->getMessage() ) );
 			// The reason goes with the rollback's cursor, its words only with this run: a rollback in more than one run
@@ -1174,6 +1183,8 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 				++$tries;
 				$this->at( 'redo_carry_retry' );
 				$file->hold( array( $context, 'confirm_lease' ) );
+			} catch ( NotHere $e ) {
+				throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged: a run without WordPress leaves the job as it is (Runner).
 			} catch ( \Throwable $e ) {
 				throw new SwapPause( $this->ask_redo_carry( $context, $cursor, get_class( $e ) . ': ' . $e->getMessage(), $this->carried_names( $db, $carry['live_options'], $carry['live_meta'] ) ) );
 			}
@@ -1264,6 +1275,8 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	private function redo_carry_names( JobContext $context ) {
 		try {
 			$read = ExportPlan::read( $context->work_path(), RestoreFiles::REDO_CARRY );
+		} catch ( NotHere $e ) {
+			throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged: a run without WordPress leaves the job as it is (Runner).
 		} catch ( \RuntimeException $e ) {
 			throw new TransientFailure( 'What the redo\'s question listed cannot be read now: ' . $e->getMessage() );
 		}
@@ -1660,6 +1673,8 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			throw $e;
 		} catch ( TransientFailure $e ) {
 			throw $e; // A problem of the moment: the put-back waits, its file held, and goes on.
+		} catch ( NotHere $e ) {
+			throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged: a run without WordPress leaves the job as it is (Runner).
 		} catch ( \Throwable $e ) {
 			$names = $this->carried_names( $db, $pairs['options']['live'], null === $meta ? null : $meta['live'] );
 			if ( ! empty( $cursor['out'] ) && SwapRules::committed( $tables, $there ) ) {
@@ -1692,6 +1707,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @param string      $options The live options table.
 	 * @param string|null $meta    The live sitemeta table, or null.
 	 * @return string[]|null
+	 * @throws NotHere When a run without WordPress cannot go on here (rethrown unchanged).
 	 */
 	private function carried_names( Queries $db, string $options, $meta ) {
 		try {
@@ -1699,6 +1715,8 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			if ( null !== $meta ) {
 				$names = array_merge( $names, array_diff( StateCarry::own_names( $db, $meta, true, array( (string) ( $this->host->network_id() ) ) ), array( StateCarry::ACTIVE_NETWORK ) ) );
 			}
+		} catch ( NotHere $e ) {
+			throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged: a run without WordPress leaves the job as it is (Runner).
 		} catch ( \RuntimeException $e ) {
 			return null;
 		}
@@ -1787,6 +1805,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @param array<string, mixed> $cursor  Cursor ("carry_ask").
 	 * @return StepResult
 	 * @throws \RuntimeException What ends the job after the site is put back (ended()).
+	 * @throws NotHere When a run without WordPress cannot go on here (rethrown unchanged).
 	 */
 	private function carry_asked( JobContext $context, Queries $db, array $cursor ): StepResult {
 		$this->cli_only( 'carry_asked' );
@@ -1845,6 +1864,8 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		try {
 			$read  = ExportPlan::read( $context->work_path(), RestoreFiles::CARRY_BACK );
 			$names = is_array( $read['names'] ?? null ) ? array_map( 'strval', $read['names'] ) : null;
+		} catch ( NotHere $e ) {
+			throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged: a run without WordPress leaves the job as it is (Runner).
 		} catch ( \RuntimeException $e ) {
 			$names = null; // The question stands without its list.
 		}
@@ -2093,6 +2114,8 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			throw $e;
 		} catch ( StaleJob $e ) {
 			throw $e;
+		} catch ( NotHere $e ) {
+			throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged: a run without WordPress leaves the job as it is (Runner).
 		} catch ( \Throwable $e ) {
 			throw new TransientFailure( 'The maintenance file could not be held before the rollback: ' . $e->getMessage() );
 		}
@@ -2540,6 +2563,8 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		$context->logger()->warning( 'The restored copy is swapped back in, as answered after the undo' );
 		try {
 			$attempt = (int) ( ExportPlan::read( $context->work_path(), RestoreFiles::SWAP_PLAN )['attempt'] ?? 0 );
+		} catch ( NotHere $e ) {
+			throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged: a run without WordPress leaves the job as it is (Runner).
 		} catch ( \RuntimeException $e ) {
 			$attempt = 0; // The redo's own check says that the plan cannot be read.
 		}
@@ -2582,6 +2607,8 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			throw $e;
 		} catch ( TransientFailure $e ) {
 			throw $e;
+		} catch ( NotHere $e ) {
+			throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged: a run without WordPress leaves the job as it is (Runner).
 		} catch ( \RuntimeException $e ) {
 			throw $this->give_up_redo( $context, $cursor, $e->getMessage() );
 		}
@@ -3086,6 +3113,8 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		foreach ( array_chunk( SwapRules::names( $entries ), self::PAGE ) as $names ) {
 			try {
 				$rows = $db->rows( 'SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN (' . implode( ', ', array_fill( 0, count( $names ), '?' ) ) . ')', $names );
+			} catch ( NotHere $e ) {
+				throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged: a run without WordPress leaves the job as it is (Runner).
 			} catch ( \RuntimeException $e ) {
 				throw new TransientFailure( 'Which of the restore\'s tables are there cannot be read now: ' . $e->getMessage() );
 			}
@@ -3218,6 +3247,8 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			throw $e;
 		} catch ( StaleJob $e ) {
 			throw $e;
+		} catch ( NotHere $e ) {
+			throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged: a run without WordPress leaves the job as it is (Runner).
 		} catch ( \Throwable $e ) {
 			$context->logger()->warning( $held ? 'The maintenance file could not be kept up during the rollback' : 'The maintenance file could not be refreshed after the swap was made', array( 'error' => $e->getMessage() ) );
 		}
@@ -3291,6 +3322,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 *
 	 * @param Queries $db Connection.
 	 * @return array{home: string, login: string, self: string}|null
+	 * @throws NotHere When a run without WordPress cannot go on here (rethrown unchanged).
 	 */
 	private function check_urls( Queries $db ) {
 		if ( isset( $this->parts['urls'] ) ) {
@@ -3303,6 +3335,8 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		};
 		try {
 			return self::addresses( defined( 'WP_HOME' ) ? (string) get_option( 'home' ) : null, defined( 'WP_SITEURL' ) ? (string) get_option( 'siteurl' ) : null, $read, substr( SelfCheck::random(), 0, 16 ) );
+		} catch ( NotHere $e ) {
+			throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged: a run without WordPress leaves the job as it is (Runner).
 		} catch ( \RuntimeException $e ) {
 			return null;
 		}
@@ -3468,6 +3502,8 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			throw $e;
 		} catch ( StaleJob $e ) {
 			throw $e;
+		} catch ( NotHere $e ) {
+			throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged: a run without WordPress leaves the job as it is (Runner).
 		} catch ( \Throwable $e ) {
 			$context->logger()->warning( 'The maintenance file could not be made to let the checks through', array( 'error' => $e->getMessage() ) );
 		}
@@ -3500,6 +3536,8 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			throw $e;
 		} catch ( StaleJob $e ) {
 			throw $e;
+		} catch ( NotHere $e ) {
+			throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged: a run without WordPress leaves the job as it is (Runner).
 		} catch ( \Throwable $e ) {
 			throw new TransientFailure( 'The maintenance file could not be let go yet: ' . $e->getMessage() );
 		}
@@ -3639,6 +3677,8 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			throw $e;
 		} catch ( StaleJob $e ) {
 			throw $e;
+		} catch ( NotHere $e ) {
+			throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged: a run without WordPress leaves the job as it is (Runner).
 		} catch ( \Throwable $e ) {
 			// The site is whole at every flush; what it may serve from the cache is waited out, not given up on.
 			throw new TransientFailure( 'The object cache could not be flushed (the site shows the maintenance page until it is): ' . $e->getMessage() . ' If this goes on, get the object cache (its drop-in or its server) working, then retry the job.' );

@@ -206,6 +206,7 @@ final class WebJobs implements RunnerRepository {
 	 *
 	 * @param Job $job Job.
 	 * @return array{live: string, stage: string, attempt: int}|null
+	 * @throws NotHere When a run without WordPress cannot go on here (rethrown unchanged).
 	 */
 	private function site_entry( Job $job ) {
 		try {
@@ -216,6 +217,8 @@ final class WebJobs implements RunnerRepository {
 				$attempt  = isset( $attempts[0]['attempt'] ) ? (int) $attempts[0]['attempt'] : 0;
 			}
 			$first = $attempt > 0 ? $plan->read( $job->id, $attempt, -1, 1 ) : array();
+		} catch ( NotHere $e ) {
+			throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged: a run without WordPress leaves the job as it is (Runner).
 		} catch ( \RuntimeException $e ) {
 			return null;
 		}
