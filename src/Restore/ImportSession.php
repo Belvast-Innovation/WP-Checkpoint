@@ -193,6 +193,39 @@ final class ImportSession implements Queries {
 	}
 
 	/**
+	 * Rows of a query as rows() reads them, each column name => value (a string, or null), as wpdb's get_results()
+	 * with ARRAY_A gives them (Jobs\SessionExecutor: the job's row is read by name, through the one hydration).
+	 *
+	 * @param string   $sql    SQL with ? placeholders (none elsewhere in the text).
+	 * @param string[] $params Values.
+	 * @return array<int, array<string, string|null>>
+	 * @throws \InvalidArgumentException When the placeholder count does not match.
+	 * @throws TransientFailure When the server may answer later.
+	 * @throws StatementFailed When the server refuses it.
+	 */
+	public function named_rows( string $sql, array $params = array() ): array {
+		$parts = self::placeholders( $sql, $params );
+		return $this->quietly(
+			function () use ( $parts, $params ): array {
+				$result = mysqli_query( $this->mysqli, $this->bind( $parts, $params ) );
+				if ( false === $result ) {
+					throw $this->error();
+				}
+				$rows = array();
+				if ( $result instanceof \mysqli_result ) {
+					$row = mysqli_fetch_assoc( $result );
+					while ( is_array( $row ) ) {
+						$rows[] = $row;
+						$row    = mysqli_fetch_assoc( $result );
+					}
+					mysqli_free_result( $result );
+				}
+				return $rows;
+			}
+		);
+	}
+
+	/**
 	 * Run one statement that changes rows, with values in place of "?" (as rows()).
 	 *
 	 * @param string   $sql    SQL with ? placeholders (none elsewhere in the text).

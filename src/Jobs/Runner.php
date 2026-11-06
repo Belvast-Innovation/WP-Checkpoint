@@ -70,9 +70,45 @@ final class Runner {
 	/**
 	 * Repository.
 	 *
-	 * @var JobRepository
+	 * @var RunnerRepository
 	 */
 	private $repository;
+
+	/**
+	 * The Runner's own texts, translated in WordPress (RunnerTexts).
+	 *
+	 * @var RunnerTexts
+	 */
+	private $texts;
+
+	/**
+	 * Encodes a cursor to compare it: function( mixed ): string|false (wp_json_encode() in WordPress).
+	 *
+	 * @var callable
+	 */
+	private $encode;
+
+	/**
+	 * Whether this run is made without WordPress: a step may leave the job to WP-CLI (StepResult::LEAVE), and a
+	 * storage method it cannot do here (NotHere) leaves it as it is too, never failed.
+	 *
+	 * @var bool
+	 */
+	private $web;
+
+	/**
+	 * Told why a run left its job to WP-CLI: function( Job|null $job, string $reason ): void, or null.
+	 *
+	 * @var callable|null
+	 */
+	private $on_left;
+
+	/**
+	 * The run that holds a job's lock in this tick ({job, token}), for a run that has to let it go (left()).
+	 *
+	 * @var array{job: Job, token: string}|null
+	 */
+	private $holding = null;
 
 	/**
 	 * Job types.
@@ -168,12 +204,12 @@ final class Runner {
 	/**
 	 * Constructor.
 	 *
-	 * @param JobRepository        $repository Repository.
+	 * @param RunnerRepository     $repository Repository.
 	 * @param JobTypes             $types      Job types.
 	 * @param Redactor             $redactor   Redactor.
-	 * @param array<string, mixed> $options    clock (callable: float), memory (callable: int), budget (Budget|callable), lease (int), memory_limit (int bytes), paths (placeholder => path), cli (bool: whether this process is WP-CLI; by default whether WP_CLI is defined and true), clean (callable: string => string; by default the plugin's JobPresenter::clean()).
+	 * @param array<string, mixed> $options    clock (callable: float), memory (callable: int), budget (Budget|callable), lease (int), memory_limit (int bytes), paths (placeholder => path), cli (bool: whether this process is WP-CLI; by default whether WP_CLI is defined and true), clean (callable: string => string; by default the plugin's JobPresenter::clean()), texts (RunnerTexts; by default translated), encode (callable: mixed => string|false; by default wp_json_encode()), hr_to_bytes (callable: string => int, how memory_limit is read when it is not given; by default wp_convert_hr_to_bytes()), web (bool: a run made without WordPress, see $web; by default false), on_left (callable: Job|null, string => void).
 	 */
-	public function __construct( JobRepository $repository, JobTypes $types, Redactor $redactor, array $options = array() ) {
+	public function __construct( RunnerRepository $repository, JobTypes $types, Redactor $redactor, array $options = array() ) {
 		$this->cli        = isset( $options['cli'] ) ? (bool) $options['cli'] : ( defined( 'WP_CLI' ) && constant( 'WP_CLI' ) );
 		$this->repository = $repository;
 		$this->types      = $types;
@@ -189,7 +225,8 @@ final class Runner {
 		if ( array_key_exists( 'memory_limit', $options ) ) {
 			$this->memory_limit = (int) $options['memory_limit'];
 		} else {
-			$this->memory_limit = (int) wp_convert_hr_to_bytes( (string) ini_get( 'memory_limit' ) );
+			$hr_to_bytes        = isset( $options['hr_to_bytes'] ) && is_callable( $options['hr_to_bytes'] ) ? $options['hr_to_bytes'] : 'wp_convert_hr_to_bytes';
+			$this->memory_limit = (int) call_user_func( $hr_to_bytes, (string) ini_get( 'memory_limit' ) );
 		}
 		$this->on_persist = isset( $options['on_persist'] ) && is_callable( $options['on_persist'] ) ? $options['on_persist'] : null;
 		$this->paths      = isset( $options['paths'] ) && is_array( $options['paths'] ) ? $options['paths'] : array(
@@ -199,6 +236,10 @@ final class Runner {
 		$this->clean      = isset( $options['clean'] ) && is_callable( $options['clean'] ) ? $options['clean'] : static function ( string $text ): string {
 			return Plugin::instance()->job_presenter()->clean( $text );
 		};
+		$this->texts      = isset( $options['texts'] ) && $options['texts'] instanceof RunnerTexts ? $options['texts'] : new RunnerTexts();
+		$this->encode     = isset( $options['encode'] ) && is_callable( $options['encode'] ) ? $options['encode'] : 'wp_json_encode';
+		$this->web        = ! empty( $options['web'] );
+		$this->on_left    = isset( $options['on_left'] ) && is_callable( $options['on_left'] ) ? $options['on_left'] : null;
 	}
 
 	/**
@@ -213,6 +254,72 @@ final class Runner {
 	 * @return TickResult
 	 */
 	public function tick( int $job_id, $started_at = null, array $schema = array() ): TickResult {
+		$this->holding = null;
+		try {
+			return $this->tick_once( $job_id, $started_at, $schema );
+		} catch ( NotHere $e ) {
+			// The storage cannot do what this path needs here (RunnerRepository::can()); nothing of it was written.
+			return $this->left( $job_id, $e->getMessage() );
+		} finally {
+			$this->holding = null;
+		}
+	}
+
+	/**
+	 * Let the job go and leave it as it is, for WP-CLI (TickResult::LEFT): a step that can go no further here
+	 * (StepResult::LEAVE) or a storage method this run cannot do (NotHere). The lease is released (a lease that cannot
+	 * be released lapses on its own); nothing is counted against the job and no failure is written. Of what the claim
+	 * wrote (JobStore::claim()), the rest stays: for a job that was queued its status, attempts and start, for one
+	 * taken over its takeover count and mark, and stale questions cleared.
+	 *
+	 * @param int    $job_id Job id.
+	 * @param string $reason Why.
+	 * @return TickResult
+	 */
+	private function left( int $job_id, string $reason ): TickResult {
+		$job = null;
+		if ( null !== $this->holding ) {
+			$job = $this->holding['job'];
+			try {
+				$this->repository->release( $job, $this->holding['token'] );
+			} catch ( \Throwable $e ) {
+				unset( $e ); // The lease lapses on its own.
+			}
+			$this->holding = null;
+		}
+		$now = $this->repository->find( $job_id );
+		if ( null !== $this->on_left ) {
+			call_user_func( $this->on_left, null !== $now ? $now : $job, $reason );
+		}
+		return new TickResult( TickResult::LEFT, -1, null !== $now ? $now : $job, $reason );
+	}
+
+	/**
+	 * Before the first write of a path that calls these storage methods after it: refuse the path here, with nothing
+	 * written, when the storage cannot do one of them (RunnerRepository::can()).
+	 *
+	 * @param string ...$methods Methods of RunnerRepository.
+	 * @return void
+	 * @throws NotHere When one of them cannot be done here.
+	 */
+	private function needs( string ...$methods ): void {
+		foreach ( $methods as $method ) {
+			if ( ! $this->repository->can( $method ) ) {
+				throw new NotHere( sprintf( 'This run cannot do %s here.', $method ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message: a method name.
+			}
+		}
+	}
+
+	/**
+	 * One tick (tick()).
+	 *
+	 * @param int        $job_id     Job id.
+	 * @param float|null $started_at When the budget started.
+	 * @param string[]   $schema     What Schema::ensure() found the job table lacks.
+	 * @return TickResult
+	 * @throws NotHere When the storage cannot do what a path needs here.
+	 */
+	private function tick_once( int $job_id, $started_at, array $schema ): TickResult {
 		$job = $this->repository->find( $job_id );
 		if ( null === $job ) {
 			return new TickResult( TickResult::MISSING, -1, null );
@@ -224,19 +331,22 @@ final class Runner {
 		if ( array() !== $problems ) {
 			// The table lacks columns this code writes and reads, or holds them narrower: a later write would
 			// fail, or a default would stand in for a value. Failed with the reason, before anything else.
+			$this->needs( 'fail_for_missing_columns', 'note_held_back', 'owns_files_of', 'log_event' );
 			return $this->fail_for_missing_columns( $job, $problems );
 		}
 		if ( array() !== $job->unreadable_columns ) {
 			// Its cursor, options or questions cannot be read: no step runs on an empty stand-in (a step that ends on an
 			// empty cursor, a restart from the first unit). Failed with the reason, before anything else.
+			$this->needs( 'fail_unreadable', 'note_held_back', 'owns_files_of', 'log_event' );
 			return $this->fail_unreadable( $job );
 		}
 		if ( ! $this->cli && ! $job->awaiting_answer() && $this->at_cli_only_step( $job ) ) {
 			// Before anything writes the row (the gate, the lock, the cron count): nothing is counted, no driver follows up.
 			// A job waiting for an answer says so first: the answer is given anywhere, the step then runs in WP-CLI.
-			return new TickResult( TickResult::CLI, -1, $job, self::cli_message( $job ) );
+			return new TickResult( TickResult::CLI, -1, $job, $this->cli_message( $job ) );
 		}
 		if ( $job->cron_deferrals > 0 ) {
+			$this->needs( 'reset_cron_deferrals', 'record_blocked' ); // The gate's refusal is written after it.
 			// The job has reached the Runner: whatever this tick does (runs, waits, is refused by the gate), it is
 			// no longer one that late cron requests keep from running (Job::$cron_deferrals).
 			$this->repository->reset_cron_deferrals( $job->id );
@@ -260,25 +370,31 @@ final class Runner {
 				return new TickResult( TickResult::MISSING, -1, null );
 			}
 			if ( $job->awaiting_answer() ) {
-				return new TickResult( TickResult::PAUSED, -1, $job, __( 'The job is waiting for your decision.', 'wp-checkpoint' ) );
+				return new TickResult( TickResult::PAUSED, -1, $job, $this->texts->waiting() );
 			}
 			if ( ! in_array( $job->status, array( Job::QUEUED, Job::RUNNING, Job::PAUSED ), true ) ) {
 				return new TickResult( TickResult::FINISHED, -1, $job );
 			}
-			return new TickResult( TickResult::BUSY, self::BUSY_RETRY_SECONDS, $job, __( 'Another process is working on this job.', 'wp-checkpoint' ) );
+			return new TickResult( TickResult::BUSY, self::BUSY_RETRY_SECONDS, $job, $this->texts->busy() );
 		}
 
+		$this->holding = array(
+			'job'   => $held['job'],
+			'token' => $held['token'],
+		); // From here on a run that is left lets the job go (left()).
 		if ( array() !== $held['job']->unreadable_columns ) {
 			// The row as the lock read it (it may have changed since the first read): the same as before the lock.
+			$this->needs( 'fail_unreadable', 'note_held_back', 'owns_files_of', 'log_event' );
 			try {
 				$this->release( $held['job'], $held['token'] );
 			} catch ( LockLost $lost ) {
-				return new TickResult( TickResult::LOST, 0, $this->repository->find( $job_id ), __( 'The job was cancelled or taken over by another process.', 'wp-checkpoint' ) );
+				return new TickResult( TickResult::LOST, 0, $this->repository->find( $job_id ), $this->texts->lost() );
 			}
 			return $this->fail_unreadable( $held['job'] );
 		}
-		$job    = $held['job'];
-		$token  = $held['token'];
+		$job   = $held['job'];
+		$token = $held['token'];
+
 		$start  = is_numeric( $started_at ) ? (float) $started_at : $this->now();
 		$logger = $this->logger_for( $job );
 		if ( ! empty( $held['taken_over'] ) ) {
@@ -293,7 +409,7 @@ final class Runner {
 				try {
 					return $this->fail( $job, $token, $logger, self::takeover_message( $job ) );
 				} catch ( LockLost $lost ) {
-					return new TickResult( TickResult::LOST, 0, $this->repository->find( $job_id ), __( 'The job was cancelled or taken over by another process.', 'wp-checkpoint' ) );
+					return new TickResult( TickResult::LOST, 0, $this->repository->find( $job_id ), $this->texts->lost() );
 				}
 			}
 		}
@@ -309,7 +425,7 @@ final class Runner {
 			try {
 				return $this->fail( $job, $token, $logger, $e->getMessage() );
 			} catch ( LockLost $lost ) {
-				return new TickResult( TickResult::LOST, 0, $this->repository->find( $job_id ), __( 'The job was cancelled or taken over by another process.', 'wp-checkpoint' ) );
+				return new TickResult( TickResult::LOST, 0, $this->repository->find( $job_id ), $this->texts->lost() );
 			}
 		}
 
@@ -328,10 +444,10 @@ final class Runner {
 		} catch ( LockLost $e ) {
 			if ( $e->getPrevious() instanceof WriteRefused ) {
 				$logger->warning( 'The database refused to write the progress; stopping without further writes', array( 'error' => $this->describe( $e ) ) );
-				return new TickResult( TickResult::LOST, 0, $this->repository->find( $job_id ), __( 'The database refused to save the job\'s progress, so the job stopped where it was saved last. It goes on from there when it runs again, once the lock of this run has lapsed.', 'wp-checkpoint' ) );
+				return new TickResult( TickResult::LOST, 0, $this->repository->find( $job_id ), $this->texts->refused() );
 			}
 			$logger->warning( 'Lock lost; stopping without further writes', array( 'error' => $this->describe( $e ) ) );
-			return new TickResult( TickResult::LOST, 0, $this->repository->find( $job_id ), __( 'The job was cancelled or taken over by another process.', 'wp-checkpoint' ) );
+			return new TickResult( TickResult::LOST, 0, $this->repository->find( $job_id ), $this->texts->lost() );
 		}
 	}
 
@@ -346,6 +462,7 @@ final class Runner {
 	 * @return TickResult
 	 * @throws LockLost When a fenced write refused; nothing is written afterwards.
 	 * @throws FenceClosed When a write after a step returned would enter the site with the uninstall fence closed.
+	 * @throws NotHere When the storage cannot do what a path needs here (tick() leaves the job as it is).
 	 */
 	private function run_steps( Job $job, string $token, Logger $logger, Budget $budget, float $start ): TickResult {
 		$type = $this->types->get( $job->type );
@@ -390,12 +507,12 @@ final class Runner {
 			if ( ! $this->cli && $step instanceof CliOnly ) {
 				// Moved on to it in this tick: the step before it is recorded as done.
 				$this->release( $job, $token );
-				return new TickResult( TickResult::CLI, -1, $job, self::cli_message( $job ) );
+				return new TickResult( TickResult::CLI, -1, $job, $this->cli_message( $job ) );
 			}
 			$index  = (int) array_search( $step_id, $ids, true );
 			$count  = count( $ids );
 			$state  = $this->state_of( $job->cursor );
-			$before = wp_json_encode( JobContext::strip_reserved( $job->cursor ) );
+			$before = call_user_func( $this->encode, JobContext::strip_reserved( $job->cursor ) );
 
 			$context = $this->context(
 				$job,
@@ -405,7 +522,7 @@ final class Runner {
 				$start,
 				function ( array $cursor, int $percent, string $message ) use ( &$job, $token, $step_id, $step, $index, $count, &$state ) {
 					// A checkpoint is progress only when the cursor moved; an identical one keeps the counters and the stall timestamp.
-					$advanced = wp_json_encode( JobContext::strip_reserved( $job->cursor ) ) !== wp_json_encode( JobContext::strip_reserved( $cursor ) );
+					$advanced = call_user_func( $this->encode, JobContext::strip_reserved( $job->cursor ) ) !== call_user_func( $this->encode, JobContext::strip_reserved( $cursor ) );
 					if ( $advanced ) {
 						$state = $this->reset( $state );
 					}
@@ -422,6 +539,8 @@ final class Runner {
 				$mark   = self::site_mark_of( $step, $result->cursor );
 			} catch ( LockLost $e ) {
 				throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged.
+			} catch ( NotHere $e ) {
+				throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged: the job is left as it is (tick()).
 			} catch ( StaleJob $e ) {
 				throw new LockLost( $e->getMessage(), 0, $e ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
 			} catch ( FenceClosed $e ) {
@@ -458,6 +577,7 @@ final class Runner {
 				$this->release( $job, $token );
 				return new TickResult( TickResult::WAITING, $wait, $job, $message );
 			} catch ( Cancelled $e ) {
+				$this->needs( 'reclaim_work' ); // The cleanup after the cancel reclaims the job's work.
 				if ( Job::SITE_UNTOUCHED !== $job->site_state || ( 0 === $job->cancel_requested && ! $e->put_back ) ) {
 					// Not a step's end of a requested cancel (or of a put-back that ends cancelled, as its cursor records,
 					// whatever a retry or a take-over did to the request) with the site back as it was: failed, the lock
@@ -496,7 +616,7 @@ final class Runner {
 					// Taken over from another installation (held_by), its files in the storage directory it was started
 					// with: a retry from here could not read them. Final, and said so.
 					$logger->error( 'A job taken over from another installation would retry from files that are not here', array( 'retry_from' => $e->step() ) );
-					return $this->fail( $job, $token, $logger, sprintf( 'Step "%1$s": %2$s %3$s', $step_id, $this->describe( $e ), __( 'This restore was taken over from another installation of WP Checkpoint, and its files are in the storage directory it was started with, not here: the site stays as it is. Start the restore again from here.', 'wp-checkpoint' ) ), Job::FAILURE_FINAL );
+					return $this->fail( $job, $token, $logger, sprintf( 'Step "%1$s": %2$s %3$s', $step_id, $this->describe( $e ), $this->texts->files_elsewhere() ), Job::FAILURE_FINAL );
 				}
 				$from = array_search( $e->step(), $ids, true );
 				if ( false === $from || $from > $index ) {
@@ -526,6 +646,23 @@ final class Runner {
 				}
 				// Lost work files, and a table changed under the export, are final; anything else may pass once its cause is fixed.
 				return $this->fail( $job, $token, $logger, sprintf( 'Step "%s": %s', $step_id, $this->describe( $e ) ), self::failure_of( $e ) );
+			}
+
+			if ( StepResult::LEAVE === $result->kind ) {
+				if ( ! $this->web ) {
+					// Only a run made without WordPress leaves a job to WP-CLI; anywhere else it is the step's error.
+					return $this->fail( $job, $token, $logger, sprintf( 'Step "%s" left the job to WP-CLI, which only a run made without WordPress does.', $step_id ) );
+				}
+				// Not progress and not a failure: nothing is written but the released lease (left()), so nothing counts
+				// against the job however often it comes back here.
+				$logger->info(
+					'The job is left to WP-CLI',
+					array(
+						'step'   => $step_id,
+						'reason' => $result->message,
+					)
+				);
+				return $this->left( $job->id, $result->message );
 			}
 
 			if ( StepResult::DONE === $result->kind ) {
@@ -579,6 +716,7 @@ final class Runner {
 			if ( StepResult::ASK === $result->kind ) {
 				// Not progress (the counters and the stall timestamp stay), not a wait: the job pauses until a
 				// person answers, and no driver follows up. The same step runs again after the answer.
+				$this->needs( 'pause_for_answer' ); // After the cursor is written.
 				$logger->info(
 					'Step asks for a decision',
 					array(
@@ -599,7 +737,7 @@ final class Runner {
 			}
 
 			// Progress: compared with the cursor before run(), so checkpoints made during the run count.
-			$after   = wp_json_encode( JobContext::strip_reserved( $result->cursor ) );
+			$after   = call_user_func( $this->encode, JobContext::strip_reserved( $result->cursor ) );
 			$percent = self::overall( $index, $count, $result->percent );
 			if ( $before === $after && $units->declined() && $units->count() === $units_before ) {
 				// Told no before any unit in this run (TickUnits): the tick ends here, as when its budget is spent; not a
@@ -817,9 +955,8 @@ final class Runner {
 	 * @param Job $job Job.
 	 * @return string
 	 */
-	private static function cli_message( Job $job ): string {
-		/* translators: %d: job id */
-		return sprintf( __( 'This part of the job runs in WP-CLI only. Continue it with: wp wpcheckpoint job run %d', 'wp-checkpoint' ), $job->id );
+	private function cli_message( Job $job ): string {
+		return $this->texts->cli_only( $job->id );
 	}
 
 	/**
@@ -1104,8 +1241,7 @@ final class Runner {
 	 * @return TickResult
 	 */
 	private function fail_unreadable( Job $job ): TickResult {
-		/* translators: %s: what cannot be read of the job's row */
-		$message = sprintf( __( 'The job stopped: %s. Nothing was run, and its row is left as it is.', 'wp-checkpoint' ), JobRepository::unreadable_text( $job->unreadable_columns ) );
+		$message = $this->texts->unreadable( JobRepository::unreadable_text( $job->unreadable_columns ) );
 		$outcome = $this->repository->fail_unreadable( $job, $message ); // Not one that holds the site: FAIL_HELD.
 		if ( JobRepository::FAIL_ERROR === $outcome ) {
 			return new TickResult( TickResult::BLOCKED, JobRepository::BACKOFF_SECONDS[ count( JobRepository::BACKOFF_SECONDS ) - 1 ], $job, $this->redactor->redact( $message ) );
@@ -1122,19 +1258,19 @@ final class Runner {
 				// Not failed. A job that waits for an answer, or stands at a step only WP-CLI runs, says so as before:
 				// no driver follows either up (a blocked tick is followed up after the back-off).
 				if ( $now->awaiting_answer() ) {
-					return new TickResult( TickResult::PAUSED, -1, $now, __( 'The job is waiting for your decision.', 'wp-checkpoint' ) );
+					return new TickResult( TickResult::PAUSED, -1, $now, $this->texts->waiting() );
 				}
 				if ( ! $this->cli && $this->at_cli_only_step( $now ) ) {
-					return new TickResult( TickResult::CLI, -1, $now, self::cli_message( $now ) );
+					return new TickResult( TickResult::CLI, -1, $now, $this->cli_message( $now ) );
 				}
 				// Said as what it is, every time it is ticked; written to its log when the reason changes.
-				$said = $this->redactor->redact( $message ) . ' ' . __( 'This job holds the site changed, so it is not failed: it is not run until its row is repaired. Look at the site\'s directories and tables, and the .maintenance file in the WordPress directory, before anything else; while the job holds the site, no other job starts on it.', 'wp-checkpoint' );
+				$said = $this->redactor->redact( $message ) . ' ' . $this->texts->held_unreadable();
 				if ( $this->repository->note_held_back( $now, $said ) ) {
 					$this->note( $now, Logger::WARNING, 'The job is not run', array( 'reason' => $said ) );
 				}
 				return new TickResult( TickResult::BLOCKED, JobRepository::BACKOFF_SECONDS[ count( JobRepository::BACKOFF_SECONDS ) - 1 ], $now, $said );
 			}
-			return new TickResult( TickResult::BUSY, self::BUSY_RETRY_SECONDS, $now, __( 'Another process is working on this job.', 'wp-checkpoint' ) );
+			return new TickResult( TickResult::BUSY, self::BUSY_RETRY_SECONDS, $now, $this->texts->busy() );
 		}
 		$this->note( $job, Logger::ERROR, 'Job failed', array( 'error' => $message ) );
 		return new TickResult( TickResult::FAILED, -1, $job, $this->redactor->redact( $message ) );
@@ -1167,13 +1303,13 @@ final class Runner {
 			if ( Job::SITE_UNTOUCHED !== $now->site_state && ! $now->is_locked( time() ) ) {
 				// Not failed: a failed job no longer puts the site back. Said as what it is; written to its log when the
 				// reason changes, through columns the table has (the statement would fail on a missing one).
-				$said = $this->redactor->redact( $message ) . ' ' . __( 'This job holds the site changed, so it is not failed: it goes on once the table is repaired (deactivate and activate WP Checkpoint, or update it).', 'wp-checkpoint' );
+				$said = $this->redactor->redact( $message ) . ' ' . $this->texts->held_columns();
 				if ( array() === array_intersect( array( 'progress_message', 'status', 'site_state', 'lock_token', 'locked_until' ), $unusable ) && $this->repository->note_held_back( $now, $said ) ) {
 					$this->note( $now, Logger::WARNING, 'The job is not run', array( 'reason' => $said ) );
 				}
 				return new TickResult( TickResult::BLOCKED, JobRepository::BACKOFF_SECONDS[ count( JobRepository::BACKOFF_SECONDS ) - 1 ], $now, $said );
 			}
-			return new TickResult( TickResult::BUSY, self::BUSY_RETRY_SECONDS, $now, __( 'Another process is working on this job.', 'wp-checkpoint' ) );
+			return new TickResult( TickResult::BUSY, self::BUSY_RETRY_SECONDS, $now, $this->texts->busy() );
 		}
 		$this->note( $job, Logger::ERROR, 'Job failed', array( 'error' => $message ) );
 		return new TickResult( TickResult::FAILED, -1, $job, $this->redactor->redact( $message ) );

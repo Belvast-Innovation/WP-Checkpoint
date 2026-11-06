@@ -8,9 +8,11 @@
 namespace WPCheckpoint\Jobs;
 
 /**
- * Four outcomes: progress (cursor advanced, call again), done (next step),
+ * Five outcomes: progress (cursor advanced, call again), done (next step),
  * wait (nothing can be done right now, try again after some seconds), ask
- * (a decision is needed; the job pauses until it is answered).
+ * (a decision is needed; the job pauses until it is answered), and leave
+ * (what is left can only be done in WP-CLI; only a run made without WordPress
+ * gives it, see leave()).
  */
 final class StepResult {
 
@@ -18,6 +20,7 @@ final class StepResult {
 	const DONE     = 'done';
 	const WAIT     = 'wait';
 	const ASK      = 'ask';
+	const LEAVE    = 'leave';
 
 	/**
 	 * One of the constants.
@@ -139,5 +142,21 @@ final class StepResult {
 		$result            = new self( self::ASK, $cursor, 0, $message, 0 );
 		$result->questions = array_values( $questions );
 		return $result;
+	}
+
+	/**
+	 * What is left of the step can only be done in WP-CLI here (a run made without WordPress cannot flush the object
+	 * cache, or cannot ask): the run stops, the job is let go and left as it is, for WP-CLI. Not progress and not a
+	 * failure: no cursor is written (what the step checkpointed before stays), nothing is counted against the job
+	 * (Runner::MAX_NO_PROGRESS), and no failure is written; the lease is released (TickResult::LEFT), and the rest of
+	 * what the claim wrote stays (JobStore::claim(): a queued job's status, attempts and start; a takeover's count and
+	 * mark; stale questions cleared). Only a run
+	 * made without WordPress (the Runner's "web" option) gives it; in WP-CLI it is a step's error, and fails the job.
+	 *
+	 * @param string $message Why (English: such a run has no translations).
+	 * @return StepResult
+	 */
+	public static function leave( string $message ): StepResult {
+		return new self( self::LEAVE, array(), 0, $message, 0 );
 	}
 }

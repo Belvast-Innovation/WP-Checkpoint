@@ -24,6 +24,7 @@ final class TickResult {
 	const FINISHED  = 'finished';   // The job was already in a state that cannot be ticked.
 	const MISSING   = 'missing';
 	const CLI       = 'cli';        // The job stands at a step only WP-CLI runs (CliOnly); no other driver goes on.
+	const LEFT      = 'left';       // A run made without WordPress left the job to WP-CLI, as it was (StepResult::LEAVE, NotHere).
 
 	/**
 	 * One of the constants.
