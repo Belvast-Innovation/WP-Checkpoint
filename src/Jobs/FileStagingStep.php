@@ -87,8 +87,17 @@ defined( 'ABSPATH' ) || exit;
  */
 final class FileStagingStep implements Step {
 
-	const ID     = 'restore_stage_files';
-	const MARGIN = 1.5;
+	const ID = 'restore_stage_files';
+
+	/**
+	 * Kinds of its units, for JobContext::may_start_unit() and unit_took(): a piece of a staged file, a piece of this
+	 * plugin's copy; and the phases that only stop on a spent budget (timed, so that they count as the tick's work).
+	 */
+	const UNIT_FILES       = 'restore_stage_files.piece';
+	const UNIT_PLUGIN      = 'restore_stage_files.plugin';
+	const UNIT_ROOTS       = 'restore_stage_files.roots';
+	const UNIT_IDENTIFY    = 'restore_stage_files.identify';
+	const UNIT_PLUGIN_LIST = 'restore_stage_files.plugin_list';
 
 	/**
 	 * Index lines per unit of the identify phase ...
@@ -160,7 +169,9 @@ final class FileStagingStep implements Step {
 		$first   = true;
 		try {
 			if ( 'roots' === $cursor['phase'] ) {
-				$cursor = array( 'recorded' => $cursor['recorded'] ) + $this->roots( $context, $staging, $layout, $walk );
+				$started = $context->elapsed();
+				$cursor  = array( 'recorded' => $cursor['recorded'] ) + $this->roots( $context, $staging, $layout, $walk );
+				$context->unit_took( self::UNIT_ROOTS, $context->elapsed() - $started );
 				$context->checkpoint( $cursor, 72, __( 'Staging the files', 'wp-checkpoint' ) );
 				$first = false;
 			}
@@ -169,8 +180,10 @@ final class FileStagingStep implements Step {
 				if ( ! $first && $context->should_stop() ) {
 					return StepResult::progress( $cursor, 73, __( 'Staging the files', 'wp-checkpoint' ) );
 				}
-				$first  = false;
-				$cursor = $this->identify( $context, $cursor, $staging, $layout, $walk );
+				$first   = false;
+				$started = $context->elapsed();
+				$cursor  = $this->identify( $context, $cursor, $staging, $layout, $walk );
+				$context->unit_took( self::UNIT_IDENTIFY, $context->elapsed() - $started );
 			}
 			$result = null;
 			if ( 'files' === $cursor['phase'] ) {
@@ -184,11 +197,13 @@ final class FileStagingStep implements Step {
 				if ( ! $first && $context->should_stop() ) {
 					return StepResult::progress( $cursor, 90, __( 'Staging this plugin', 'wp-checkpoint' ) );
 				}
-				$first  = false;
-				$cursor = $this->plugin_list( $context, $cursor );
+				$first   = false;
+				$started = $context->elapsed();
+				$cursor  = $this->plugin_list( $context, $cursor );
+				$context->unit_took( self::UNIT_PLUGIN_LIST, $context->elapsed() - $started );
 			}
 			if ( 'plugin' === $cursor['phase'] ) {
-				$result = $this->plugin( $context, $cursor, $layout, $plan, $first );
+				$result = $this->plugin( $context, $cursor, $layout, $plan );
 				if ( null !== $result ) {
 					return $result;
 				}
@@ -375,7 +390,7 @@ final class FileStagingStep implements Step {
 	 * @param StagingLayout        $layout  Layout.
 	 * @param ChunkWalk            $walk    The files walk.
 	 * @param array<string, mixed> $plan    The restore's plan.
-	 * @param bool                 $first   Whether no unit ran in this tick yet.
+	 * @param bool                 $first   Whether this run did nothing yet (a spent budget stops it only after that).
 	 * @return StepResult|null
 	 * @throws BackupUnusable When a file does not match its hash and retrying cannot change it.
 	 * @throws EnvironmentFailure When the backup cannot be read or a staged file cannot be written.
@@ -389,11 +404,12 @@ final class FileStagingStep implements Step {
 		$running     = self::fold( (string) ( $stage_plan['running'] ?? '' ) );
 		$dir_mode    = StageModes::dir();
 		$file_mode   = StageModes::file();
-		$slowest     = 0.0;
 		$budget      = (float) $context->budget()->seconds;
 		$since       = 0;
 		while ( true ) {
-			if ( ! $first && ( $context->should_stop() || $context->remaining_seconds() < $slowest * self::MARGIN ) ) {
+			// Entries that are not written (not restored, special) are no unit of their own: only a spent budget stops
+			// them, once this run moved something; a unit is asked about right before it (may_start_unit()).
+			if ( ! $first && $context->should_stop() ) {
 				return StepResult::progress( $cursor, 80, __( 'Staging the files', 'wp-checkpoint' ) );
 			}
 			$first = false;
@@ -430,10 +446,13 @@ final class FileStagingStep implements Step {
 				$cursor['at']     = $chunk['next'];
 				continue;
 			}
+			if ( ! $context->may_start_unit( self::UNIT_FILES ) ) {
+				return StepResult::progress( $cursor, 80, __( 'Staging the files', 'wp-checkpoint' ) );
+			}
 			$started = $context->elapsed();
 			$written = $this->write_unit( $context, $cursor, $chunk, $layout, $target['group'], $target['relative'], $chunk_bytes, $dir_mode, $file_mode );
 			$cost    = $context->elapsed() - $started;
-			$slowest = max( $slowest, $cost );
+			$context->unit_took( self::UNIT_FILES, $cost );
 			if ( $cost > $budget ) {
 				throw new EnvironmentFailure( sprintf( 'Writing the staged files is too slow on this server: one piece of %1$d MB took %2$d seconds, more than the %3$d-second time budget of a single run.', (int) ceil( $written / 1048576 ), (int) ceil( $cost ), (int) $budget ) );
 			}
@@ -684,13 +703,12 @@ final class FileStagingStep implements Step {
 	 * @param array<string, mixed> $cursor  Cursor (updated).
 	 * @param StagingLayout        $layout  Layout.
 	 * @param array<string, mixed> $plan    The restore's plan.
-	 * @param bool                 $first   Whether no unit ran in this tick yet.
 	 * @return StepResult|null
 	 * @throws EnvironmentFailure When a file cannot be read or written.
 	 * @throws StagingChanged When the staging directory was changed.
 	 * @throws WorkLost When the list is gone.
 	 */
-	private function plugin( JobContext $context, array &$cursor, StagingLayout $layout, array $plan, bool $first ) {
+	private function plugin( JobContext $context, array &$cursor, StagingLayout $layout, array $plan ) {
 		$list = @fopen( RestoreFiles::path( $context->work_path(), RestoreFiles::PLUGIN_LIST ), 'rb' );
 		if ( false === $list ) {
 			throw new WorkLost( 'The list of this plugin\'s files is gone from the work directory.' );
@@ -701,15 +719,13 @@ final class FileStagingStep implements Step {
 		$source      = $this->plugin_dir();
 		$source_real = realpath( $source );
 		$chunk_bytes = (int) $plan['chunk_bytes'];
-		$slowest     = 0.0;
 		$budget      = (float) $context->budget()->seconds;
 		$since       = 0;
 		try {
 			while ( true ) {
-				if ( ! $first && ( $context->should_stop() || $context->remaining_seconds() < $slowest * self::MARGIN ) ) {
+				if ( ! $context->may_start_unit( self::UNIT_PLUGIN ) ) {
 					return StepResult::progress( $cursor, 92, __( 'Staging this plugin', 'wp-checkpoint' ) );
 				}
-				$first = false;
 				if ( 0 !== fseek( $list, (int) $cursor['line'] ) ) {
 					throw new WorkLost( 'The list of this plugin\'s files is shorter than recorded.' );
 				}
@@ -768,8 +784,8 @@ final class FileStagingStep implements Step {
 					$cursor['line'] = (int) $cursor['line'] + strlen( $text );
 					$cursor['done'] = 0;
 				}
-				$cost    = $context->elapsed() - $started;
-				$slowest = max( $slowest, $cost );
+				$cost = $context->elapsed() - $started;
+				$context->unit_took( self::UNIT_PLUGIN, $cost );
 				if ( $cost > $budget ) {
 					throw new EnvironmentFailure( sprintf( 'Writing the staged files is too slow on this server: one piece of %1$d MB took %2$d seconds, more than the %3$d-second time budget of a single run.', (int) ceil( $length / 1048576 ), (int) ceil( $cost ), (int) $budget ) );
 				}

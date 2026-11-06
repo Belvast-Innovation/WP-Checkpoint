@@ -18,17 +18,19 @@ use WPCheckpoint\Tests\Fixtures\Restore\SwapTestCase;
 final class SwapRollbackUnitsTest extends SwapTestCase {
 
 	/**
-	 * A restore killed once two of its table batches were renamed (every entry a batch of its own): its rollback has
-	 * the directories and two table entries to put back.
+	 * A restore killed once some of its table batches were renamed (every entry a batch of its own; two by default,
+	 * which on a network are the options and sitemeta): its rollback has the directories and those table entries to
+	 * put back.
 	 *
+	 * @param int $batches Table batches renamed before the kill.
 	 * @return array{0: Job, 1: array<string, mixed>} The job, the site before the restore.
 	 */
-	private function half(): array {
+	private function half( int $batches = 2 ): array {
 		$this->swap_parts['batch'] = 1;
 		$this->register_type();
 		$job    = $this->at_swap();
 		$before = $this->site();
-		$this->killed_at( $job, 'batch_sent', 2 );
+		$this->killed_at( $job, 'batch_sent', $batches );
 		$half = Plugin::instance()->jobs()->find( $job->id );
 		$this->assertSame( Job::SITE_CHANGING, $half->site_state, 'the control: the swap half made' );
 		$this->assertNotSame( $before, $this->site(), 'the control: renamed' );
@@ -220,6 +222,224 @@ final class SwapRollbackUnitsTest extends SwapTestCase {
 		$this->assertGreaterThanOrEqual( 1, $runs, 'the control: finished by a later run' );
 		$this->assertSame( Job::FAILED, $now->status );
 		$this->assertStringContainsString( 'The database is busy', (string) $now->last_error, 'said by the run that finished it' );
+		$this->assertSame( $before, $this->site() );
+	}
+
+	/**
+	 * Another connection that holds the tables the swap moved aside (the old names: only the entries it renamed have
+	 * them), but the options and sitemeta tables the carry back writes first, so a RENAME of the rollback waits for the
+	 * lock.
+	 *
+	 * @param Job  $job   The job.
+	 * @param int  $least Tables it must find to lock (the control).
+	 * @param bool $live  Also the test's own tables under their live names (the entries that rename those first, or
+	 *                    only those, such as a table only the backup has: its RENAME waits too).
+	 * @return \WPCheckpoint\Restore\ImportSession
+	 */
+	private function lock_moved_aside( Job $job, int $least = 1, bool $live = false ): \WPCheckpoint\Restore\ImportSession {
+		global $wpdb;
+		$wpdb->query( 'COMMIT' );
+		$prefix = \WPCheckpoint\Jobs\TempTables::OLD_PREFIX . substr( \WPCheckpoint\Jobs\TempTables::job_prefix( $job->storage_token, $job->id ), strlen( \WPCheckpoint\Jobs\TempTables::PREFIX ) );
+		$tables = (array) $wpdb->get_col( $wpdb->prepare( 'SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND LEFT(TABLE_NAME, %d) = %s', strlen( $prefix ), $prefix ) );
+		// Not the options and sitemeta tables: the carry back writes them before anything is renamed back.
+		$tables = array_values(
+			array_filter(
+				$tables,
+				static function ( string $table ): bool {
+					return 1 !== preg_match( '/(options|sitemeta)\z/', $table );
+				}
+			)
+		);
+		if ( $live ) {
+			foreach ( array( 'swt_keep', 'swt_new', 'swt_gone' ) as $name ) {
+				if ( (string) $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $wpdb->prefix . $name ) ) ) !== '' ) {
+					$tables[] = $wpdb->prefix . $name;
+				}
+			}
+		}
+		$this->assertGreaterThanOrEqual( $least, count( $tables ), 'the control: tables moved aside by the swap, other than the ones the carry back writes' );
+		$other = \WPCheckpoint\Restore\ImportSession::open( \WPCheckpoint\Standalone\Credentials::from_wordpress() );
+		$other->run( 'LOCK TABLES ' . implode( ', ', array_map( static function ( string $t ): string { return '`' . $t . '` READ'; }, $tables ) ) );
+		return $other;
+	}
+
+	public function test_a_try_the_time_left_does_not_cover_with_its_wait_is_left_to_the_next_tick(): void {
+		list( $job, $before ) = $this->half( 1 + count( self::site_tables() ) ); // A table of the test's renamed after the site's.
+		$slept = array();
+		$this->retype(
+			$job,
+			array(
+				'sleep' => static function ( int $seconds ) use ( &$slept ): void {
+					$slept[] = $seconds; // Waited without the time passing: what was decided before it is what counts.
+				},
+			)
+		);
+		$other       = $this->lock_moved_aside( $job );
+		$this->seams = array();
+		try {
+			// 18 seconds left: the first try waits out the lock (5 seconds); 13 left covers the wait of 1 and a try
+			// (7.5 with its margin), so it waits and tries again (5 more); 8 left do not cover the wait of 3 and a try.
+			$runner = new Runner(
+				Plugin::instance()->jobs(),
+				Plugin::instance()->job_types(),
+				new Redactor( Redactor::installation_secrets() ),
+				array(
+					'cli'    => true,
+					'budget' => new Budget( 20, 32 * 1048576, false ),
+				)
+			);
+			$result = $this->autocommit(
+				static function () use ( $runner, $job ): TickResult {
+					return $runner->tick( $job->id, microtime( true ) - 2 );
+				}
+			);
+		} finally {
+			$other->run( 'UNLOCK TABLES' );
+			$other->close();
+		}
+		$this->assertSame( TickResult::MORE, $result->status, $result->message );
+		$this->assertSame( 2, count( array_keys( $this->seams, 'back_busy', true ) ), 'two tries, each waiting out the lock: ' . implode( ' ', $this->seams ) );
+		$this->assertSame( array( 1 ), $slept, 'waited before the second try, not before a third: left to the next tick' );
+		$now = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertSame( 2, $now->cursor['busy'] ?? null, 'the tries recorded' );
+		$this->assertGreaterThan( 0, (int) ( $now->cursor['busy_after'] ?? 0 ) );
+		$this->assertNotSame( $before, $this->site(), 'the control: not put back yet' );
+		// The lock gone, the next tick's first unit waits what is owed, tries and goes on.
+		$done = $this->cli_run( $now );
+		$this->assertSame( Job::FAILED, $done->status, (string) $done->last_error );
+		$this->assertSame( $before, $this->site() );
+		$this->assertSame( array(), $this->maintenance_files() );
+	}
+
+	public function test_a_rollback_killed_after_a_try_waited_out_the_lock_goes_on_from_the_tries_recorded(): void {
+		list( $job, $before ) = $this->half( 1 + count( self::site_tables() ) ); // A table of the test's renamed after the site's.
+		$this->retype(
+			$job,
+			array(
+				'sleep' => static function ( int $seconds ): void {},
+			)
+		);
+		$other = $this->lock_moved_aside( $job );
+		try {
+			$this->killed_at( Plugin::instance()->jobs()->find( $job->id ), 'back_busy', 1 );
+			$this->assertSame( 1, Plugin::instance()->jobs()->find( $job->id )->cursor['busy'] ?? null, 'the failed try recorded before the kill' );
+			// The next run, the lock still held: its first unit is the second try, not a first one.
+			$this->cli_tick_with_no_time_left( Plugin::instance()->jobs()->find( $job->id ) );
+		} finally {
+			$other->run( 'UNLOCK TABLES' );
+			$other->close();
+		}
+		$killed = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertSame( 2, $killed->cursor['busy'] ?? null, 'counted on from the tries recorded' );
+		$this->assertNotSame( $before, $this->site(), 'the control: not put back yet' );
+		$done = $this->cli_run( $killed );
+		$this->assertSame( Job::FAILED, $done->status, (string) $done->last_error );
+		$this->assertSame( $before, $this->site(), 'put back by the next run' );
+		$this->assertSame( array(), $this->maintenance_files() );
+	}
+
+	public function test_what_is_owed_before_a_try_is_never_more_than_the_longest_wait_between_tries(): void {
+		global $wpdb;
+		list( $job, $before ) = $this->half( 1 + count( self::site_tables() ) ); // A table of the test's renamed after the site's.
+		$slept                = array();
+		$this->retype(
+			$job,
+			array(
+				'sleep' => static function ( int $seconds ) use ( &$slept ): void {
+					$slept[] = $seconds;
+				},
+			)
+		);
+		$other = $this->lock_moved_aside( $job );
+		try {
+			$this->killed_at( Plugin::instance()->jobs()->find( $job->id ), 'back_busy', 1 );
+		} finally {
+			$other->run( 'UNLOCK TABLES' );
+			$other->close();
+		}
+		// The clock went back an hour after the try was recorded: the next try is owed an hour as the cursor has it.
+		$table  = \WPCheckpoint\Jobs\JobRepository::table();
+		$cursor = json_decode( (string) $wpdb->get_var( $wpdb->prepare( "SELECT cursor_json FROM {$table} WHERE id = %d", $job->id ) ), true ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the jobs table.
+		$this->assertSame( 1, $cursor['busy'] ?? null, 'the control: a try recorded' );
+		$cursor['busy_after'] = time() + 3600;
+		$wpdb->query( $wpdb->prepare( "UPDATE {$table} SET cursor_json = %s WHERE id = %d", wp_json_encode( $cursor ), $job->id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the jobs table.
+		$wpdb->query( 'COMMIT' );
+		$this->cli_tick_with_no_time_left( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( array( max( \WPCheckpoint\Jobs\SwapStep::RETRIES ) ), $slept, 'waited the longest wait between tries, not the hour' );
+		$this->assertArrayNotHasKey( 'busy', Plugin::instance()->jobs()->find( $job->id )->cursor, 'the try went through' );
+		$done = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( Job::FAILED, $done->status, (string) $done->last_error );
+		$this->assertSame( $before, $this->site() );
+	}
+
+	public function test_a_rollback_whose_tries_all_wait_out_the_lock_fails_as_the_database_busy_still_holding_the_site(): void {
+		list( $job, $before ) = $this->half( 1 + count( self::site_tables() ) ); // A table of the test's renamed after the site's.
+		$this->retype(
+			$job,
+			array(
+				'sleep' => static function ( int $seconds ): void {},
+			)
+		);
+		$other = $this->lock_moved_aside( $job );
+		try {
+			foreach ( array( 'the first run', 'a retry, the lock still held' ) as $which ) {
+				$this->seams = array();
+				$done        = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
+				$this->assertSame( count( \WPCheckpoint\Jobs\SwapStep::RETRIES ), count( array_keys( $this->seams, 'back_busy', true ) ), $which . ': every try but the last recorded, as many as a forward RENAME gets: ' . implode( ' ', $this->seams ) );
+				$this->assertSame( Job::FAILED, $done->status, $which );
+				$this->assertStringContainsString( 'The database is busy', (string) $done->last_error, $which );
+				$this->assertSame( Job::SITE_CHANGING, $done->site_state, $which . ': the site still held: a retry puts it back' );
+				$this->assertArrayNotHasKey( 'busy', $done->cursor, $which . ': the tries are the run\'s, not kept for a retry' );
+				$this->assertNotSame( array(), $this->maintenance_files(), $which );
+				Plugin::instance()->job_actions()->retry( $job->id );
+			}
+		} finally {
+			$other->run( 'UNLOCK TABLES' );
+			$other->close();
+		}
+		// The control: retried with the lock gone (retried at the end of the loop), it is put back.
+		$back = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( Job::FAILED, $back->status, (string) $back->last_error );
+		$this->assertSame( $before, $this->site() );
+	}
+
+	public function test_tries_recorded_for_one_entry_are_not_the_next_ones(): void {
+		// Every table entry renamed but the last (the test's three and the site's options, and sitemeta on a network;
+		// with all of them renamed a run after the kill goes forward): the rollback puts back more than one of the
+		// test's tables, each locked below under whichever name it renames first.
+		list( $job, $before ) = $this->half( 2 + count( self::site_tables() ) );
+		$this->retype(
+			$job,
+			array(
+				'sleep' => static function ( int $seconds ): void {},
+			)
+		);
+		$other = $this->lock_moved_aside( $job, 2, true );
+		try {
+			$this->killed_at( Plugin::instance()->jobs()->find( $job->id ), 'back_busy', 1 );
+		} finally {
+			$other->run( 'UNLOCK TABLES' );
+			$other->close();
+		}
+		$first = Plugin::instance()->jobs()->find( $job->id )->cursor;
+		$this->assertSame( 1, $first['busy'] ?? null, 'the control: a try of the first entry recorded' );
+		// That entry goes through, and the run is killed before anything else is stored: its count stays stored.
+		$this->killed_at( Plugin::instance()->jobs()->find( $job->id ), 'table_back', 1 );
+		$stored = Plugin::instance()->jobs()->find( $job->id )->cursor;
+		$this->assertSame( $first['busy_for'] ?? null, $stored['busy_for'] ?? null, 'the control: the first entry\'s count is what is stored' );
+		// The next entry, locked: its first try is its own first, not the second of the first entry's.
+		$other = $this->lock_moved_aside( $job, 2, true );
+		try {
+			$this->cli_tick_with_no_time_left( Plugin::instance()->jobs()->find( $job->id ) );
+		} finally {
+			$other->run( 'UNLOCK TABLES' );
+			$other->close();
+		}
+		$next = Plugin::instance()->jobs()->find( $job->id )->cursor;
+		$this->assertSame( 1, $next['busy'] ?? null, 'counted from its own first try' );
+		$this->assertNotSame( $first['busy_for'] ?? null, $next['busy_for'] ?? null, 'of the next entry' );
+		$done = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( Job::FAILED, $done->status, (string) $done->last_error );
 		$this->assertSame( $before, $this->site() );
 	}
 

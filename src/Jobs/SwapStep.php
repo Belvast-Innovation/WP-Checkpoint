@@ -169,6 +169,13 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	const PUT_BACK_REASON = 'putback';
 
 	/**
+	 * Kinds of its units, for JobContext::may_start_unit(): a unit of the recount before the swap, a unit of a rollback
+	 * (one entry's renames).
+	 */
+	const UNIT_RECOUNT = 'restore_swap.recount';
+	const UNIT_BACK    = 'restore_swap.back';
+
+	/**
 	 * How a put-back ends, recorded in its cursor ("ends") by the claim's own write (put_back_cursor()) and kept to its
 	 * end: cancelled, or undone. Once recorded, whether it ends cancelled is read from it and from nothing else
 	 * (put_back_cancels(), the first thing ended() asks); one that ends undone does so as the undo or the redo it put
@@ -310,20 +317,6 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @var array<string, mixed>
 	 */
 	private $parts;
-
-	/**
-	 * The rollback's units in this tick (unit_back()): the tick is told by its lock token (the Runner runs the step
-	 * again within a tick while its budget lasts, each run with a context of its own); whether a unit ran in it, and
-	 * the slowest so far. The first unit of a tick goes whatever the budget; a later one, in any run of the tick, only
-	 * while the time left covers the slowest with SwapCheckStep::MARGIN.
-	 *
-	 * @var array{token: string, ran: bool, slowest: float}
-	 */
-	private $back_tick = array(
-		'token'   => '',
-		'ran'     => false,
-		'slowest' => 0.0,
-	);
 
 	/**
 	 * Constructor.
@@ -733,13 +726,10 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			StateCarry::counted( self::base_prefix(), is_multisite() ? get_current_network_id() : 0 ),
 			$context->fence()
 		);
-		$first   = true;
-		$slowest = 0.0;
 		while ( true ) {
-			if ( ! $first && ( $context->should_stop() || $context->remaining_seconds() < $slowest * SwapCheckStep::MARGIN ) ) {
+			if ( ! $context->may_start_unit( self::UNIT_RECOUNT ) ) {
 				return $cursor;
 			}
-			$first   = false;
 			$started = $context->elapsed();
 			$unit    = $counter->unit(
 				array(
@@ -749,7 +739,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 				),
 				false
 			);
-			$slowest = max( $slowest, $context->elapsed() - $started );
+			$context->unit_took( self::UNIT_RECOUNT, $context->elapsed() - $started );
 			if ( $unit['done'] ) {
 				return array(
 					'phase'   => 'ready',
@@ -1250,39 +1240,96 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	}
 
 	/**
-	 * Before a unit of a rollback (roll_back()): the first of the tick goes; a later one ($back_tick) only while the
-	 * budget is not spent and the time left covers the slowest unit so far with SwapCheckStep::MARGIN. Otherwise the
-	 * run stops here: the cursor counts the units done ("back", so the run is seen to have made progress) and the step
+	 * Before a unit of a rollback (roll_back()): JobContext::may_start_unit() decides (the first unit of the tick goes;
+	 * a later one only while the time left covers the slowest rollback unit, of this tick or the last tick that ran one, with its
+	 * margin). Otherwise the run stops here: the cursor counts the units done ("back", so the run is seen to have made progress) and the step
 	 * returns progress (SwapPause); the next run takes the rollback up again from what is there. A unit slower than
 	 * the whole budget does not fail the job, as it would elsewhere: the site is being put back, and the next run goes
 	 * on with the next unit.
 	 *
+	 * A try of a rollback's RENAME takes at most LOCK_WAIT (send_back()); that is the kind's estimate while it was
+	 * never measured (a directory's renames wait for no lock, though nothing bounds them); a wait owed before it ($wait, between two tries)
+	 * must fit the time left too.
+	 *
 	 * @param JobContext           $context Context.
 	 * @param array<string, mixed> $cursor  The rollback's cursor.
 	 * @param array{units: int}    $back    This run's units.
+	 * @param float                $wait    Seconds owed before the unit starts.
 	 * @return float When the unit started (JobContext::elapsed()).
 	 * @throws SwapPause When the run stops before the unit.
 	 */
-	private function unit_back( JobContext $context, array $cursor, array $back ): float {
-		$token = $context->lock_token();
-		if ( $token !== $this->back_tick['token'] ) {
-			$this->back_tick = array(
-				'token'   => $token,
-				'ran'     => false,
-				'slowest' => 0.0,
-			);
-		}
-		if ( $this->back_tick['ran'] && ( $context->should_stop() || $context->remaining_seconds() < $this->back_tick['slowest'] * SwapCheckStep::MARGIN ) ) {
+	private function unit_back( JobContext $context, array $cursor, array $back, float $wait = 0.0 ): float {
+		if ( ! $context->may_start_unit( self::UNIT_BACK, (float) self::LOCK_WAIT, $wait ) ) {
 			$cursor['back'] = (int) ( $cursor['back'] ?? 0 ) + $back['units'];
 			$this->at( 'back_paused' );
 			throw new SwapPause( StepResult::progress( $cursor, 95, __( 'Putting the site back as it was', 'wp-checkpoint' ) ) );
 		}
-		$this->back_tick['ran'] = true;
 		return $context->elapsed();
 	}
 
 	/**
-	 * After a unit of a rollback: counted for this run, and its time taken into the tick's slowest.
+	 * One entry's RENAME of a rollback, one try a unit (unit_back(): at most LOCK_WAIT, the session's lock wait). A try
+	 * that waited out the lock renames nothing; the cursor records the tries ("busy"), the entry they are of
+	 * ("busy_for", its plan sequence number) and when the next may start ("busy_after", after the wait of
+	 * SwapStep::RETRIES), checkpointed; the next try is a unit of its own, in this tick when the time left covers the
+	 * wait and the try, else in a later one. Tries recorded for another entry are not this one's: it starts its own
+	 * (so a run killed after an entry went through never hands its count to the next). Tries spent (as many as send()
+	 * makes), they are cleared, checkpointed, and the rollback fails as the database being busy, the site held: a
+	 * retry of the job, or a run that takes it over after the tries were spent, starts its own tries (a run that takes
+	 * it over while tries remain goes on from those recorded).
+	 *
+	 * @param JobContext           $context Context.
+	 * @param Queries              $db      Connection.
+	 * @param string               $rename  The entry's RENAME statement.
+	 * @param int                  $seq     The entry's plan sequence number.
+	 * @param array<string, mixed> $cursor  The rollback's cursor (its tries, by reference).
+	 * @param array{units: int}    $back    This run's units (by reference).
+	 * @return void
+	 * @throws SwapPause When the run stops before a try.
+	 * @throws TablesBusy When the tables stayed locked through every try.
+	 * @throws TransientFailure When the RENAME failed for a moment otherwise (the rollback goes on later).
+	 */
+	private function send_back( JobContext $context, Queries $db, string $rename, int $seq, array &$cursor, array &$back ): void {
+		if ( ! isset( $cursor['busy_for'] ) || $seq !== (int) $cursor['busy_for'] ) {
+			unset( $cursor['busy'], $cursor['busy_after'], $cursor['busy_for'] ); // Another entry's tries, or none.
+		}
+		while ( true ) {
+			// What is owed is never more than the longest wait between tries (a clock that went back would make it more).
+			$owed = min( max( self::RETRIES ), max( 0, (int) ( $cursor['busy_after'] ?? 0 ) - $this->now() ) );
+			$this->unit_back( $context, $cursor, $back, (float) $owed );
+			if ( $owed > 0 ) {
+				$this->sleep( $owed );
+			}
+			$started = $context->elapsed(); // The try's own time, not the wait before it (counted apart).
+			try {
+				$context->confirm_lease();
+				$db->run( $rename );
+				$this->unit_done( $context, $back, $started );
+				unset( $cursor['busy'], $cursor['busy_after'], $cursor['busy_for'] ); // As stored, they name this entry: not the next one's.
+				return;
+			} catch ( TransientFailure $e ) {
+				if ( 1205 !== $e->getCode() ) {
+					throw $e;
+				}
+				$this->unit_done( $context, $back, $started );
+				$tries = (int) ( $cursor['busy'] ?? 0 ) + 1;
+				if ( $tries > count( self::RETRIES ) ) {
+					// The tries are this run's: a retry of the job starts its own (the cursor is kept for it).
+					unset( $cursor['busy'], $cursor['busy_after'], $cursor['busy_for'] );
+					$context->checkpoint( $cursor, 95, __( 'Putting the site back as it was', 'wp-checkpoint' ) );
+					throw new TablesBusy( sprintf( 'The database is busy: the tables stayed locked by other work through %d tries.', $tries ) );
+				}
+				$cursor['busy']       = $tries;
+				$cursor['busy_for']   = $seq;
+				$cursor['busy_after'] = $this->now() + self::RETRIES[ $tries - 1 ];
+				$context->checkpoint( $cursor, 95, __( 'Putting the site back as it was', 'wp-checkpoint' ) );
+				$this->at( 'back_busy' );
+			}
+		}
+	}
+
+	/**
+	 * After a unit of a rollback: counted for this run, and its time told (JobContext::unit_took()).
 	 *
 	 * @param JobContext        $context Context.
 	 * @param array{units: int} $back    This run's units.
@@ -1291,7 +1338,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 */
 	private function unit_done( JobContext $context, array &$back, float $started ): void {
 		++$back['units'];
-		$this->back_tick['slowest'] = max( $this->back_tick['slowest'], $context->elapsed() - $started );
+		$context->unit_took( self::UNIT_BACK, $context->elapsed() - $started );
 	}
 
 	/**
@@ -1346,9 +1393,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			if ( array() === $pairs ) {
 				continue;
 			}
-			$started = $this->unit_back( $context, $cursor, $back );
-			$this->send( $context, $db, SwapRules::rename_sql( $pairs ) );
-			$this->unit_done( $context, $back, $started );
+			$this->send_back( $context, $db, SwapRules::rename_sql( $pairs ), (int) $entry['seq'], $cursor, $back );
 			foreach ( $pairs as $pair ) {
 				unset( $there[ $pair[0] ] );
 				$there[ $pair[1] ] = true;

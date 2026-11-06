@@ -29,6 +29,7 @@ final class JobContext {
 
 	const STOP_TIME   = 'time';
 	const STOP_MEMORY = 'memory';
+	const STOP_UNIT   = 'unit'; // The next unit would not fit the time left (may_start_unit()); the Runner ends the tick.
 
 	/**
 	 * Checkpoint rhythm: persist the cursor after this many seconds or this
@@ -153,8 +154,9 @@ final class JobContext {
 	 * @param array<string, bool>  $facts           What the Runner knows about this run: cli (see is_cli()).
 	 * @param callable|null        $record          function( string $key, mixed $value ): void; throws LockLost when the lease is gone (see record()).
 	 * @param string               $token           The run's lock token ('' outside a run: lock_token() then refuses).
+	 * @param TickUnits|null       $units           The tick's units, shared by every run in it (Runner); a tick of its own when null.
 	 */
-	public function __construct( Job $job, array $cursor, Budget $budget, Logger $logger, callable $clock, callable $memory, float $started_at, int $memory_limit, $checkpoint = null, $lease = null, array $facts = array(), $record = null, string $token = '' ) {
+	public function __construct( Job $job, array $cursor, Budget $budget, Logger $logger, callable $clock, callable $memory, float $started_at, int $memory_limit, $checkpoint = null, $lease = null, array $facts = array(), $record = null, string $token = '', $units = null ) {
 		$this->job             = $job;
 		$this->cursor          = self::strip_reserved( $cursor );
 		$this->budget          = $budget;
@@ -170,6 +172,45 @@ final class JobContext {
 		$this->cli             = ! empty( $facts['cli'] );
 		$this->record          = is_callable( $record ) ? $record : null;
 		$this->token           = $token;
+		$this->units           = $units instanceof TickUnits ? $units : new TickUnits();
+	}
+
+	/**
+	 * The tick's units (may_start_unit()).
+	 *
+	 * @var TickUnits
+	 */
+	private $units;
+
+	/**
+	 * Whether a unit of this kind may start now: the first unit of the tick always (whichever step runs it); any
+	 * other while the budget is not spent and the time left covers the slowest of its kind, in this tick or in the
+	 * last tick that ran one, with TickUnits::MARGIN; a kind never measured waits for the next tick's first unit,
+	 * unless $bound is given (then that is its estimate). A step asks
+	 * this before each unit it times, and tells unit_took() what the unit took; when it is told no, it returns
+	 * progress, and the Runner ends the tick. The only place a step judges the time left by the time of a unit.
+	 *
+	 * @param string     $kind  Kind of unit (TickUnits::KIND), named by the step.
+	 * @param float|null $bound What a unit of the kind takes at most, known beforehand (TickUnits::may_start()).
+	 * @param float      $wait  Seconds the unit waits before it starts (TickUnits::may_start()).
+	 * @return bool
+	 * @throws LockLost When the lease is gone (should_stop() renews it); the step must not catch it.
+	 */
+	public function may_start_unit( string $kind, ?float $bound = null, float $wait = 0.0 ): bool {
+		return $this->units->may_start( $kind, $this, $bound, $wait );
+	}
+
+	/**
+	 * What a unit of this kind took (its time counts for the next one of its kind, in this tick and the next). Also
+	 * for a unit no may_start_unit() was asked about (a phase that only stops on a spent budget): once one ran, no
+	 * later unit of the tick is its first.
+	 *
+	 * @param string $kind    Kind of unit.
+	 * @param float  $seconds Its time (elapsed() after it minus elapsed() before it).
+	 * @return void
+	 */
+	public function unit_took( string $kind, float $seconds ): void {
+		$this->units->took( $kind, $seconds );
 	}
 
 	/**

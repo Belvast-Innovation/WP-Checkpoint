@@ -12,6 +12,15 @@ use Yoast\PHPUnitPolyfills\TestCases\TestCase;
  * anywhere. Three fixes in a row brought that back (the last one: the time
  * bound of the temporary table reclaim).
  *
+ * In a tick that is the first unit of the whole tick, whichever step runs
+ * it: the Runner runs a step again within a tick, and moves on to the next,
+ * and every one of those runs asks JobContext::may_start_unit() (TickUnits),
+ * which lets only the tick's first unit go without looking at the time left.
+ * No other file reads the time left (the second test here): one that did
+ * would judge per run, not per tick. Known limit: the scan looks for
+ * ->remaining_seconds( only; a step that worked the time left out of its
+ * budget and elapsed() itself would get past it.
+ *
  * So every file in src/ that loops on a budget (asks should_stop() or
  * remaining_seconds(), or compares the time since it started with a
  * bound; comments do not count) must be listed here with the test that runs
@@ -33,7 +42,7 @@ final class FirstUnitRuleTest extends TestCase {
 	/**
 	 * What counts as looping on a budget.
 	 */
-	const BUDGET_LOOP = '/->should_stop\(|->remaining_seconds\(|\)\s*-\s*\$started\s*[<>]|microtime\(\s*true\s*\)\s*-\s*(?:\$\w*start\w*|[\w:>-]*started_at\(\))\s*[<>]/';
+	const BUDGET_LOOP = '/->should_stop\(|->remaining_seconds\(|->may_start_unit\(|\)\s*-\s*\$started\s*[<>]|microtime\(\s*true\s*\)\s*-\s*(?:\$\w*start\w*|[\w:>-]*started_at\(\))\s*[<>]/';
 
 	/**
 	 * Files that stop before a first unit on purpose: file => why.
@@ -65,7 +74,19 @@ final class FirstUnitRuleTest extends TestCase {
 		'src/Jobs/DatabaseImportStep.php'   => 'tests/integration/NoBudgetLeftTest.php::test_a_restore_moves_on_in_every_tick_with_no_time_left',
 		'src/Jobs/TempTableDropper.php'     => 'tests/integration/JobRepositoryTest.php::test_the_first_drop_of_a_call_runs_even_when_the_time_is_already_up',
 		'src/Support/Schema.php'            => 'tests/integration/JobRepositoryTest.php::test_uninstall_runs_one_call_even_when_its_time_is_already_up',
+		'src/Jobs/TickUnits.php'            => 'tests/integration/RunnerTest.php::test_with_no_time_left_a_ticks_first_unit_still_goes_and_no_other',
 	);
+
+	/**
+	 * Reading the time left, which a step would compare with a unit's time: only TickUnits does it
+	 * (JobContext::may_start_unit()); a step that reads it itself judges per run, not per tick.
+	 */
+	const UNIT_JUDGE = '/->remaining_seconds\(/';
+
+	/**
+	 * The file that may judge so.
+	 */
+	const UNIT_JUDGES = array( 'src/Jobs/TickUnits.php' );
 
 	private static function root(): string {
 		return dirname( __DIR__, 3 );
@@ -117,11 +138,40 @@ final class FirstUnitRuleTest extends TestCase {
 		}
 	}
 
+	public function test_only_the_tick_judges_the_time_left_by_a_unit(): void {
+		$root  = self::root();
+		$found = array();
+		$it    = new \RecursiveIteratorIterator( new \RecursiveDirectoryIterator( $root . '/src', \FilesystemIterator::SKIP_DOTS ) );
+		foreach ( $it as $file ) {
+			if ( 'php' === $file->getExtension() && 1 === preg_match( self::UNIT_JUDGE, self::code( (string) file_get_contents( $file->getPathname() ) ) ) ) {
+				$found[] = str_replace( '\\', '/', substr( $file->getPathname(), strlen( $root ) + 1 ) );
+			}
+		}
+		sort( $found );
+		$this->assertSame( self::UNIT_JUDGES, $found, 'a step that reads the time left itself judges per run, not per tick: ask JobContext::may_start_unit()' );
+		// The scan finds what it looks for, and not what it does not.
+		foreach ( array(
+			'if ( ! $first && $context->remaining_seconds() < $slowest * self::MARGIN ) {',
+			'if ( $slowest * 1.5 > $ctx->remaining_seconds() ) {',
+			'$left = $context->remaining_seconds();',
+		) as $code ) {
+			$this->assertSame( 1, preg_match( self::UNIT_JUDGE, $code ), $code );
+		}
+		foreach ( array(
+			'public function remaining_seconds(): float {',
+			'return max( 0.0, $this->budget->seconds - $this->elapsed() );',
+			self::code( "<?php\n// \$context->remaining_seconds() < \$slowest\n\$a = 1;" ),
+		) as $code ) {
+			$this->assertSame( 0, preg_match( self::UNIT_JUDGE, $code ), $code );
+		}
+	}
+
 	public function test_the_scan_finds_what_it_looks_for(): void {
 		foreach ( array(
 			'if ( $context->should_stop() ) {',
 			'while ( $context->remaining_seconds() > 1 ) {',
 			'if ( microtime( true ) - $started >= self::LIMIT ) {',
+			'if ( ! $context->may_start_unit( self::UNIT ) ) {',
 			'while ( (float) call_user_func( $clock ) - $started < self::MAX_SECONDS ) {',
 		) as $code ) {
 			$this->assertSame( 1, preg_match( self::BUDGET_LOOP, $code ), $code );
