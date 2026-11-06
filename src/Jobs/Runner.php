@@ -268,8 +268,9 @@ final class Runner {
 	/**
 	 * Let the job go and leave it as it is, for WP-CLI (TickResult::LEFT): a step that can go no further here
 	 * (StepResult::LEAVE) or a storage method this run cannot do (NotHere). The lease is released (a lease that cannot
-	 * be released lapses on its own); nothing is counted against the job and no failure is written. What the claim
-	 * wrote stays: the lease, and for a job that was queued its status, attempts and start (JobStore::claim()).
+	 * be released lapses on its own); nothing is counted against the job and no failure is written. Of what the claim
+	 * wrote (JobStore::claim()), the rest stays: for a job that was queued its status, attempts and start, for one
+	 * taken over its takeover count and mark, and stale questions cleared.
 	 *
 	 * @param int    $job_id Job id.
 	 * @param string $reason Why.

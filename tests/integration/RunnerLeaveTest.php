@@ -25,9 +25,10 @@ use WPCheckpoint\Tests\Fixtures\StorageDirs;
 
 /**
  * A run made without WordPress (the Runner's "web" option) leaves a job to WP-CLI as it is: a step that can go no
- * further there (StepResult::LEAVE), or a storage method it cannot do (RunnerRepository::can(), NotHere). Only the
- * lease is released: nothing is counted against the job, no failure is written, the row is as it was but for the
- * lease, however often it comes back. In WordPress a step that leaves is an error, and fails the job.
+ * further there (StepResult::LEAVE), or a storage method it cannot do (RunnerRepository::can(), NotHere). The lease is
+ * released: nothing is counted against the job, no failure is written, the row is as it was but for what the claim
+ * wrote (the lease; for a queued job its status, attempts and start), however often it comes back. In WordPress a step
+ * that leaves is an error, and fails the job.
  */
 final class RunnerLeaveTest extends WP_UnitTestCase {
 
@@ -518,7 +519,6 @@ final class RestrictedRepository implements RunnerRepository {
 	}
 
 	public function transition( Job $job, string $to, string $error = '', string $token = '', string $failure = '', string $retry_from = '', array $forget = array(), int $at = 0 ): Job {
-		$this->call( __FUNCTION__ );
 		return $this->inner->transition( $job, $to, $error, $token, $failure, $retry_from, $forget, $at );
 	}
 

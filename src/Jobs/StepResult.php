@@ -148,8 +148,9 @@ final class StepResult {
 	 * What is left of the step can only be done in WP-CLI here (a run made without WordPress cannot flush the object
 	 * cache, or cannot ask): the run stops, the job is let go and left as it is, for WP-CLI. Not progress and not a
 	 * failure: no cursor is written (what the step checkpointed before stays), nothing is counted against the job
-	 * (Runner::MAX_NO_PROGRESS), and no failure is written; the lease is released (TickResult::LEFT), and what the claim
-	 * wrote stays (for a job that was queued, its status, attempts and start too). Only a run
+	 * (Runner::MAX_NO_PROGRESS), and no failure is written; the lease is released (TickResult::LEFT), and the rest of
+	 * what the claim wrote stays (JobStore::claim(): a queued job's status, attempts and start; a takeover's count and
+	 * mark; stale questions cleared). Only a run
 	 * made without WordPress (the Runner's "web" option) gives it; in WP-CLI it is a step's error, and fails the job.
 	 *
 	 * @param string $message Why (English: such a run has no translations).
