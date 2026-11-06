@@ -15,7 +15,6 @@ use WPCheckpoint\Jobs\Runner;
 use WPCheckpoint\Jobs\RunnerRepository;
 use WPCheckpoint\Jobs\StepResult;
 use WPCheckpoint\Jobs\TickResult;
-use WPCheckpoint\Support\Deleter;
 use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Support\Options;
 use WPCheckpoint\Support\Redactor;
@@ -79,8 +78,7 @@ final class RunnerLeaveTest extends WP_UnitTestCase {
 		global $wpdb;
 		$wpdb->query( 'DROP TABLE IF EXISTS ' . Schema::jobs_table() );
 		if ( '' !== $this->root ) {
-			Deleter::empty_directory( $this->root );
-			@rmdir( $this->root );
+			\WPCheckpoint\Tests\Fixtures\Sandbox::remove( $this->root );
 		}
 		Options::delete( Schema::OPTION );
 		Options::delete( Directories::OPTION );
