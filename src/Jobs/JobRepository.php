@@ -2409,59 +2409,22 @@ final class JobRepository implements RunnerRepository {
 	 * @throws \RuntimeException When the cursor with the step to retry from, or the options, cannot be encoded.
 	 */
 	public function transition( Job $job, string $to, string $error = '', string $token = '', string $failure = '', string $retry_from = '', array $forget = array(), int $at = 0 ): Job {
-		if ( '' === $token && Job::RUNNING === $job->status && Job::CANCELLED !== $to ) {
-			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
-			throw new InvalidTransition( sprintf( 'Job %d: leaving running for %s requires the lock token.', $job->id, $to ) );
-		}
-		if ( Job::UNDONE === $job->status ) {
-			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
-			throw new InvalidTransition( sprintf( 'Job %d was undone: an undone restore is not run again.', $job->id ) );
-		}
-		if ( Job::QUEUED === $to && Job::FAILED === $job->status ) {
-			$this->check_retry( $job );
-		}
-		$answers = isset( $job->options['answers'] ) && is_array( $job->options['answers'] ) ? $job->options['answers'] : array();
-		$forget  = array_values( array_intersect( array_map( 'strval', $forget ), array_map( 'strval', array_keys( $answers ) ) ) );
-		if ( '' === $retry_from && array() === $forget ) {
-			return $this->write_transition( $job, $to, $error, $token, array(), array(), $failure, $at );
-		}
-		if ( Job::FAILED !== $to ) {
-			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
-			throw new InvalidTransition( sprintf( 'Job %d: only a failure names a step to retry from or an answer to forget.', $job->id ) );
-		}
-		$extra   = array();
-		$cursor  = null;
-		$options = null;
-		if ( '' !== $retry_from ) {
-			$cursor                         = $job->cursor;
-			$cursor[ self::RETRY_FROM_KEY ] = $retry_from;
-			self::assert_cursor_has_no_secrets( $cursor );
-			$json = wp_json_encode( $cursor );
-			if ( false === $json ) {
-				throw new \RuntimeException( sprintf( 'Job %d: its cursor cannot be written.', $job->id ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+		$job = $this->store()->transition(
+			$job,
+			$to,
+			$error,
+			$token,
+			$failure,
+			$retry_from,
+			$forget,
+			$at,
+			self::RETRY_FROM_KEY,
+			function ( Job $failed ): void {
+				$this->check_retry( $failed );
 			}
-			$extra['cursor_json'] = $json;
-		}
-		if ( array() !== $forget ) {
-			$options = $job->options;
-			foreach ( $forget as $question ) {
-				unset( $options['answers'][ $question ] );
-			}
-			if ( array() === $options['answers'] ) {
-				unset( $options['answers'] );
-			}
-			$json = wp_json_encode( $options );
-			if ( false === $json ) {
-				throw new \RuntimeException( sprintf( 'Job %d: its options cannot be written.', $job->id ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
-			}
-			$extra['options_json'] = $json;
-		}
-		$job = $this->write_transition( $job, $to, $error, $token, $extra, array_fill( 0, count( $extra ), '%s' ), $failure );
-		if ( null !== $cursor ) {
-			$job->cursor = $cursor;
-		}
-		if ( null !== $options ) {
-			$job->options = $options;
+		);
+		if ( in_array( $to, array( Job::COMPLETED, Job::FAILED, Job::CANCELLED, Job::UNDONE ), true ) ) {
+			$this->remove_lock_file( $job );
 		}
 		return $job;
 	}
