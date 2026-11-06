@@ -267,8 +267,9 @@ final class Runner {
 
 	/**
 	 * Let the job go and leave it as it is, for WP-CLI (TickResult::LEFT): a step that can go no further here
-	 * (StepResult::LEAVE) or a storage method this run cannot do (NotHere). Only the lease is released (a lease that
-	 * cannot be released lapses on its own); nothing is counted against the job and no failure is written.
+	 * (StepResult::LEAVE) or a storage method this run cannot do (NotHere). The lease is released (a lease that cannot
+	 * be released lapses on its own); nothing is counted against the job and no failure is written. What the claim
+	 * wrote stays: the lease, and for a job that was queued its status, attempts and start (JobStore::claim()).
 	 *
 	 * @param int    $job_id Job id.
 	 * @param string $reason Why.
@@ -376,6 +377,10 @@ final class Runner {
 			return new TickResult( TickResult::BUSY, self::BUSY_RETRY_SECONDS, $job, $this->texts->busy() );
 		}
 
+		$this->holding = array(
+			'job'   => $held['job'],
+			'token' => $held['token'],
+		); // From here on a run that is left lets the job go (left()).
 		if ( array() !== $held['job']->unreadable_columns ) {
 			// The row as the lock read it (it may have changed since the first read): the same as before the lock.
 			$this->needs( 'fail_unreadable', 'note_held_back', 'owns_files_of', 'log_event' );
@@ -386,12 +391,8 @@ final class Runner {
 			}
 			return $this->fail_unreadable( $held['job'] );
 		}
-		$job           = $held['job'];
-		$token         = $held['token'];
-		$this->holding = array(
-			'job'   => $job,
-			'token' => $token,
-		);
+		$job   = $held['job'];
+		$token = $held['token'];
 
 		$start  = is_numeric( $started_at ) ? (float) $started_at : $this->now();
 		$logger = $this->logger_for( $job );
@@ -575,7 +576,7 @@ final class Runner {
 				$this->release( $job, $token );
 				return new TickResult( TickResult::WAITING, $wait, $job, $message );
 			} catch ( Cancelled $e ) {
-				$this->needs( 'transition', 'reclaim_work' ); // The cleanup after the cancel reclaims the job's work.
+				$this->needs( 'reclaim_work' ); // The cleanup after the cancel reclaims the job's work.
 				if ( Job::SITE_UNTOUCHED !== $job->site_state || ( 0 === $job->cancel_requested && ! $e->put_back ) ) {
 					// Not a step's end of a requested cancel (or of a put-back that ends cancelled, as its cursor records,
 					// whatever a retry or a take-over did to the request) with the site back as it was: failed, the lock

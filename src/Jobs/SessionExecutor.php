@@ -14,7 +14,10 @@ defined( 'ABSPATH' ) || exit;
 /**
  * The same templates as WpdbExecutor sends, converted for a connection that binds "?" (Placeholders), sent through
  * Restore\ImportSession; an update in the form wpdb::update() gives it (UpdateSql), without wpdb's checks of each value
- * against its column (the values a run without WordPress writes are its own: identifiers and fixed texts). A statement
+ * against its column. Known limit: the session is not strict (sql_mode NO_AUTO_VALUE_ON_ZERO only), so a value too
+ * long for its column, or one its character set cannot hold, is cut where wpdb would refuse the whole statement; a
+ * run without WordPress must fit what it writes itself (a progress message is fitted by the store's injected fit; an
+ * error, redacted, is not cut to its column here). A statement
  * the connection refuses, or one it says may pass later, is null (as wpdb's false); a template in a form Placeholders
  * refuses is an error of this code, and is thrown.
  */

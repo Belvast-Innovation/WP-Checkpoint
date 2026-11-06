@@ -17,10 +17,11 @@ defined( 'ABSPATH' ) || exit;
 interface RunnerRepository {
 
 	/**
-	 * What every storage that runs jobs does: can() is not asked of these (a run takes, keeps, writes and lets go of
-	 * its job with them, on every path); any other method may be one a storage cannot do here.
+	 * What every storage that runs jobs does: can() is not asked of these (a run takes, keeps, writes, ends and lets go
+	 * of its job with them, on every path: a transition follows a written cursor when the last step is done, or when a
+	 * step's questions are refused); any other method may be one a storage cannot do here.
 	 */
-	const BASIC = array( 'now', 'find', 'gate', 'acquire', 'heartbeat', 'release', 'save_progress' );
+	const BASIC = array( 'now', 'find', 'gate', 'acquire', 'heartbeat', 'release', 'save_progress', 'transition' );
 
 	/**
 	 * Whether this storage can do one of its methods where it runs. The Runner asks before the first write of a path
