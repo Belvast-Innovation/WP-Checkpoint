@@ -337,8 +337,18 @@ final class RunnerLeaveTest extends WP_UnitTestCase {
 			case 'reset_cron_deferrals':
 				return array( $this->job( $plain( array( $this, 'must_not_run' ) ), array( 'cron_deferrals' => 1 ) ), array() );
 			case 'record_blocked':
-				// Bound to another storage directory: the gate refuses it, and counts the refusal.
-				return array( $this->job( $plain( array( $this, 'must_not_run' ) ), array( 'storage_token' => 'dddddddddddd' ) ), array() );
+				// Bound to another storage directory: the gate refuses it, and counts the refusal; with late cron requests
+				// counted, which the tick clears before the gate (so the refusal is written after a write).
+				return array(
+					$this->job(
+						$plain( array( $this, 'must_not_run' ) ),
+						array(
+							'storage_token'  => 'dddddddddddd',
+							'cron_deferrals' => 1,
+						)
+					),
+					array(),
+				);
 			case 'note_held_back':
 				return array( $this->job( $plain( array( $this, 'must_not_run' ) ), array( 'cursor_json' => '{not json', 'site_state' => Job::SITE_CHANGING ) ), array() );
 			case 'log_event':
