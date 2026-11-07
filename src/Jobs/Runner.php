@@ -438,6 +438,10 @@ final class Runner {
 					return new TickResult( TickResult::LOST, 0, $this->repository->find( $job_id ), $this->texts->lost() );
 				}
 			}
+		} elseif ( $this->web && ! empty( $held['at_limit'] ) ) {
+			// Left at the limit before (its lease let go, so this claim counted nothing): still where it was taken over
+			// too often, it stays WP-CLI's until it moves on.
+			return $this->left( $job->id, self::takeover_message( $job ) );
 		}
 		if ( ! empty( $held['healed'] ) ) {
 			// Recorded, not hidden: the questions of a pause that never completed (or of a job failed while

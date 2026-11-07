@@ -7,6 +7,7 @@
 
 namespace WPCheckpoint\Jobs;
 
+use WPCheckpoint\Database\SqlWriter;
 use WPCheckpoint\Restore\ImportSession;
 use WPCheckpoint\Restore\Maintenance;
 use WPCheckpoint\Restore\SwapPlan;
@@ -303,7 +304,20 @@ final class WebJobs implements RunnerRepository {
 			'token'      => $token,
 			'healed'     => array() !== $job->questions,
 			'taken_over' => $held->takeovers !== $job->takeovers || $held->takeover_mark !== $job->takeover_mark,
+			'at_limit'   => $held->takeovers >= Runner::MAX_TAKEOVERS && $this->at_takeover_mark( $id ),
 		);
+	}
+
+	/**
+	 * Whether the job stands where its takeovers were counted: its mark is its position now (the claim's own MD5 of
+	 * step and cursor, JobStore::claim_template()). Read only when the count is at the limit.
+	 *
+	 * @param int $id Job id.
+	 * @return bool
+	 */
+	private function at_takeover_mark( int $id ): bool {
+		$rows = $this->session->rows( 'SELECT takeover_mark = MD5(CONCAT(step, \'|\', COALESCE(cursor_json, \'\'))) FROM ' . SqlWriter::identifier( $this->jobs_table() ) . ' WHERE id = ?', array( (string) $id ) );
+		return '1' === (string) ( $rows[0][0] ?? '' );
 	}
 
 	/**

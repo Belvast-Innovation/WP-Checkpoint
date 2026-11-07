@@ -140,6 +140,11 @@ final class WebRun {
 				$this->note( sprintf( 'Job %d is not taken on here: the swap did not record its network.', $job_id ) );
 				return new TickResult( TickResult::LEFT, -1, $job, 'The swap did not record its network.' );
 			}
+			if ( ! $this->multisite && null !== $network ) {
+				// Recorded on a network, run as a single site: the carry back would leave the network's sitemeta out.
+				$this->note( sprintf( 'Job %d is not taken on here: the swap was made on a network.', $job_id ) );
+				return new TickResult( TickResult::LEFT, -1, $job, 'The swap was made on a network.' );
+			}
 			return $this->runner( $jobs, is_int( $network ) ? $network : 0 )->tick( $job_id, $started_at );
 		} finally {
 			$session->close();

@@ -14,14 +14,17 @@ defined( 'ABSPATH' ) || exit;
 /**
  * Another connection's statements, each sent only while time is left before the deadline, and with the session's
  * lock waits (innodb_lock_wait_timeout for rows, lock_wait_timeout for metadata) set just before it to the whole
- * seconds left, at least one: however many statements wait for locks, together they wait no later than the deadline
- * (and its last second). With less than a second left a statement is not sent: it fails as a lock wait that timed
- * out would (TransientFailure, 1205), so that the caller takes it as the database being busy. Statements that wait
+ * seconds left, at least one: each lock wait a statement makes is bounded by what was left when it was sent. That is
+ * not a hard bound on the whole: the server applies each setting to every single wait, and one statement may wait
+ * more than once (a REPLACE ... SELECT for rows of two tables, a metadata lock and then rows), so a statement can end
+ * past the deadline, by as many waits again as it made. With less than a second left a statement is not sent: it
+ * fails as a lock wait that timed out would (TransientFailure, 1205), so that the caller takes it as the database
+ * being busy. Statements that wait
  * for no lock pass as they are: SET, SELECT @@…, START TRANSACTION, COMMIT, ROLLBACK. The session's waits are left as
  * the last statement set them: the caller puts them back.
  *
- * What a carry back sends in a run made without WordPress (SwapStep): its unit is bounded by SwapStep::LOCK_WAIT
- * whatever the number of its statements. Pure PHP.
+ * What a carry back sends in a run made without WordPress (SwapStep): without it, each of its statements would wait
+ * up to the session's own waits (InnoDB's default is fifty seconds), whatever their number. Pure PHP.
  */
 final class DeadlineQueries implements Queries {
 

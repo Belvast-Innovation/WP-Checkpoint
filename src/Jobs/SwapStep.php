@@ -506,12 +506,13 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			$phase = (string) ( $cursor['phase'] ?? 'start' );
 			if ( 'start' === $phase ) {
 				$cursor = $this->start( $context, $db );
-				$context->checkpoint( $cursor, 3, __( 'Judging the backup\'s tables once more before the swap', 'wp-checkpoint' ) );
 				if ( $this->host->multisite() ) {
 					// For a run made without WordPress, which cannot tell the network (StateCarry's): kept in the options,
-					// which outlive every cursor of the swap and a retry.
+					// which outlive every cursor of the swap and a retry. Recorded before the checkpoint that moves on to
+					// judge: a run that dies between the two starts again and records the same value again.
 					$context->record( self::NETWORK_RECORD, $this->host->network_id() );
 				}
+				$context->checkpoint( $cursor, 3, __( 'Judging the backup\'s tables once more before the swap', 'wp-checkpoint' ) );
 				$phase = 'judge';
 			}
 			if ( 'judge' === $phase ) {
@@ -1720,9 +1721,10 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	}
 
 	/**
-	 * The carry back in a run made without WordPress: a unit (UNIT_CARRY, at most LOCK_WAIT), its statements bounded
-	 * by one deadline LOCK_WAIT after the try starts (DeadlineQueries: each sent only with a second left, the session's
-	 * lock waits set to the seconds left), however many it sends. A try that times out, or has no second left for a
+	 * The carry back in a run made without WordPress: a unit (UNIT_CARRY, estimated at LOCK_WAIT), its statements held
+	 * to one deadline LOCK_WAIT after the try starts (DeadlineQueries: each sent only with a second left, each of its
+	 * lock waits bounded by the seconds left when it was sent; a statement that waits more than once can end past the
+	 * deadline, see there), however many it sends; a wait owed before the try is not in it. A try that times out, or has no second left for a
 	 * statement, is rolled back whole (JobFence::within()) and counted as send_back() counts a rename's ("busy",
 	 * "busy_after", and "busy_for" CARRY_SEQ), checkpointed; the next try is a unit of its own, now or in a later run;
 	 * tries spent, the rollback fails as the database being busy (TablesBusy), the site held. Never put back without
@@ -1781,11 +1783,32 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 				$context->checkpoint( $cursor, 95, $this->host->putting_back() );
 				$this->at( 'carry_back_busy' );
 			} finally {
-				if ( $wait > 0 ) {
-					$db->run( 'SET SESSION innodb_lock_wait_timeout = ' . $wait );
-				}
-				$db->run( 'SET SESSION lock_wait_timeout = ' . self::LOCK_WAIT );
+				$this->put_waits_back( $db, $wait );
 			}
+		}
+	}
+
+	/**
+	 * The session's lock waits as they were before a try of the carry back (lock_wait_timeout: LOCK_WAIT, as roll_back()
+	 * set it). A failure to set them is not let out: it would replace the failure of the try, if there was one (a 1205
+	 * made into another error would put the site back without the carry), and on a connection that cannot take a SET
+	 * the next statement fails all the same.
+	 *
+	 * @param Queries $db   Connection.
+	 * @param int     $wait innodb_lock_wait_timeout before the try (0: unknown, left alone).
+	 * @return void
+	 * @throws NotHere When a run without WordPress cannot go on here (rethrown unchanged).
+	 */
+	private function put_waits_back( Queries $db, int $wait ): void {
+		try {
+			if ( $wait > 0 ) {
+				$db->run( 'SET SESSION innodb_lock_wait_timeout = ' . $wait );
+			}
+			$db->run( 'SET SESSION lock_wait_timeout = ' . self::LOCK_WAIT );
+		} catch ( NotHere $e ) {
+			throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged: a run without WordPress leaves the job as it is (Runner).
+		} catch ( \Throwable $e ) {
+			unset( $e ); // See above: the next statement on this connection says it.
 		}
 	}
 

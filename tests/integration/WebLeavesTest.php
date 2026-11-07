@@ -51,6 +51,50 @@ final class WebLeavesTest extends SwapTestCase {
 		$this->assertNotSame( Job::FAILED, $after['status'] );
 		$this->assertSame( '', $after['lock_token'], 'the lease let go' );
 		$this->assertNotSame( array(), $this->maintenance_files(), 'the site still held' );
+
+		// The next run finds the lease let go (its claim counts nothing): still where it was taken over too often, it is
+		// left again, the row as it was but its lease.
+		$left_at = self::row( $job->id );
+		$again   = $this->tick_without_wordpress( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( TickResult::LEFT, $again->status, 'still WP-CLI\'s: ' . $again->message );
+		$this->assertSame( array(), $this->seams, 'nothing of the swap ran' );
+		$lease = array_flip( array( 'lock_token', 'locked_until', 'updated_at' ) );
+		$this->assertSame( array_diff_key( $left_at, $lease ), array_diff_key( self::row( $job->id ), $lease ) );
+
+		// The control: once it stands elsewhere (its mark no longer its position), a run takes it on.
+		$wpdb->query( $wpdb->prepare( 'UPDATE ' . JobRepository::table() . " SET takeover_mark = 'moved' WHERE id = %d", $job->id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the jobs table.
+		$wpdb->query( 'COMMIT' );
+		$moved = $this->tick_without_wordpress( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertNotSame( array(), $this->seams, 'taken on: ' . $moved->status . ' ' . $moved->message );
+	}
+
+	public function test_a_swap_recorded_on_a_network_is_not_taken_on_by_a_run_as_a_single_site(): void {
+		global $wpdb;
+		if ( is_multisite() ) {
+			$this->markTestSkipped( 'A single site\'s run: on a network the run is one, and the record the swap made is its own.' );
+		}
+		$this->swap_parts['batch'] = 1;
+		$this->register_type();
+		$job = $this->at_swap();
+		$this->killed_at( $job, 'batch_sent', 1 );
+		$row     = self::row( $job->id );
+		$options = json_decode( (string) $row['options_json'], true );
+		$options['recorded'][ SwapStep::NETWORK_RECORD ] = 1;
+		$wpdb->update( JobRepository::table(), array( 'options_json' => wp_json_encode( $options ) ), array( 'id' => $job->id ) );
+		$wpdb->query( 'COMMIT' );
+		$before      = self::row( $job->id );
+		$this->seams = array();
+		$result      = $this->tick_without_wordpress( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( TickResult::LEFT, $result->status, $result->message );
+		$this->assertStringContainsString( 'made on a network', implode( ' | ', $this->web_notes ) );
+		$this->assertSame( $before, self::row( $job->id ), 'nothing written' );
+		$this->assertSame( array(), $this->seams );
+		// The control: without the record the same run takes it on.
+		unset( $options['recorded'][ SwapStep::NETWORK_RECORD ] );
+		$wpdb->update( JobRepository::table(), array( 'options_json' => wp_json_encode( $options ) ), array( 'id' => $job->id ) );
+		$wpdb->query( 'COMMIT' );
+		$this->tick_without_wordpress( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertNotSame( array(), $this->seams, 'taken on without the record' );
 	}
 
 	public function test_where_wp_cli_would_ask_a_run_without_wordpress_never_writes_a_question(): void {

@@ -81,11 +81,13 @@ interface RunnerRepository {
 	public function reset_cron_deferrals( int $id ): void;
 
 	/**
-	 * Take a job: one compare-and-set.
+	 * Take a job: one compare-and-set. A storage may say "at_limit": the job stands where it was taken over
+	 * Runner::MAX_TAKEOVERS times (its count, and its mark is the position now) though this claim took no lease over
+	 * (WebJobs: after a run without WordPress left it at the limit and let its lease go).
 	 *
 	 * @param int $id    Job id.
 	 * @param int $lease Lock duration in seconds.
-	 * @return array{job: Job, token: string, healed: bool, taken_over: bool}|null
+	 * @return array{job: Job, token: string, healed: bool, taken_over: bool, at_limit?: bool}|null
 	 */
 	public function acquire( int $id, int $lease = JobRepository::LOCK_SECONDS );
 
