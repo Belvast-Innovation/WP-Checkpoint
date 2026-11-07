@@ -290,7 +290,9 @@ final class Runner {
 
 	/**
 	 * Let the job go and leave it as it is, for WP-CLI (TickResult::LEFT): a step that can go no further here
-	 * (StepResult::LEAVE) or a storage method this run cannot do (NotHere). The lease is released (a lease that cannot
+	 * (StepResult::LEAVE), a storage method this run cannot do (NotHere), a job taken over too often at its position,
+	 * or, holding the site, a TransientFailure through every retry (the caller marks the last two held up where
+	 * StepResult::held_up() or the retries say so). The lease is released (a lease that cannot
 	 * be released lapses on its own); nothing is counted against the job and no failure is written. Of what the claim
 	 * wrote (JobStore::claim()), the rest stays: for a job that was queued its status, attempts and start, for one
 	 * taken over its takeover count and mark, and stale questions cleared.
@@ -590,9 +592,10 @@ final class Runner {
 				$state['retries'] = (int) $state['retries'] + 1;
 				$message          = $this->describe( $e );
 				if ( $state['retries'] > self::MAX_RETRIES ) {
-					if ( $this->web ) {
+					if ( $this->web && Job::SITE_UNTOUCHED !== $job->site_state ) {
 						// Failed, a job that holds the site would hold it until WP-CLI retries it: a run without WordPress leaves
-						// it as it is (the retries as last written), held up, and the next comes later (WebPace).
+						// it as it is (the retries as last written), held up, and the next comes later (WebPace). WP-CLI goes
+						// on from the retries as written: one more failure and it fails the job, for a retry with all of them.
 						$logger->warning(
 							'Step failed after every retry; left to WP-CLI, held up',
 							array(
@@ -601,7 +604,7 @@ final class Runner {
 								'error'   => $message,
 							)
 						);
-						$left          = $this->left( $job->id, sprintf( 'Step "%s" failed %d times: %s', $step_id, $state['retries'], $message ) );
+						$left          = $this->left( $job->id, $this->redactor->redact( sprintf( 'Step "%s" failed %d times: %s', $step_id, $state['retries'], $message ) ) );
 						$left->held_up = true;
 						return $left;
 					}

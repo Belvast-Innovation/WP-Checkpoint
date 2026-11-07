@@ -82,4 +82,23 @@ final class WebPaceTest extends TestCase {
 		$this->expectException( TransientFailure::class );
 		self::web_run( new MemoryPace() )->tick( 7 );
 	}
+
+	public function test_a_held_up_run_waits_longer_busy_says_nothing_and_anything_else_starts_over(): void {
+		$pace = new MemoryPace();
+		$run  = self::web_run( $pace );
+		$held = static function (): TickResult {
+			$result          = new TickResult( TickResult::LEFT, -1, null, 'busy' );
+			$result->held_up = true;
+			return $result;
+		};
+		$this->assertSame( 5, $run->paced( 7, $held(), 1000 )->retry_after );
+		$this->assertSame( 30, $run->paced( 7, $held(), 1000 )->retry_after );
+		$run->paced( 7, new TickResult( TickResult::BUSY, 5, null ), 1000 );
+		$this->assertSame( 120, $run->paced( 7, $held(), 1000 )->retry_after, 'BUSY kept the count' );
+		$run->paced( 7, new TickResult( TickResult::LEFT, -1, null, 'not held up' ), 1000 );
+		$this->assertSame( 0, $pace->wait( 7, 1000 ), 'a run that got through started it over' );
+		$this->assertSame( 5, $run->paced( 7, $held(), 1000 )->retry_after );
+		$run->paced( 7, new TickResult( TickResult::MORE, 0, null ), 1000 );
+		$this->assertSame( 0, $pace->wait( 7, 1000 ) );
+	}
 }

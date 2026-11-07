@@ -292,6 +292,7 @@ final class WebRollbackTest extends SwapTestCase {
 			$this->seams = array();
 			// The carry back is a unit of its own first: the rename may come in the next run.
 			for ( $i = 0; $i < 3; $i++ ) {
+				$was    = self::row( $job->id );
 				$result = $this->tick_without_wordpress( Plugin::instance()->jobs()->find( $job->id ) );
 				if ( TickResult::MORE !== $result->status ) {
 					break;
@@ -304,7 +305,10 @@ final class WebRollbackTest extends SwapTestCase {
 		$now = Plugin::instance()->jobs()->find( $job->id );
 		$this->assertSame( TickResult::LEFT, $result->status, $result->message . ' ' . $now->last_error );
 		$this->assertTrue( $result->held_up );
+		$this->assertContains( 'rollback', $this->seams, 'the control: the seams are recorded' );
 		$this->assertNotContains( 'table_back', $this->seams, 'nothing renamed' );
+		$claim = array_flip( array( 'lock_token', 'locked_until', 'updated_at', 'takeovers', 'takeover_mark' ) );
+		$this->assertSame( array_diff_key( $was, $claim ), array_diff_key( self::row( $job->id ), $claim ), 'the last run wrote nothing but the lease' );
 		$this->assertNotSame( Job::FAILED, $now->status );
 		$this->assertSame( count( SwapStep::RETRIES ), $now->cursor['busy'] ?? null, 'the tries as last checkpointed' );
 		$this->assertStringContainsString( '"busy_for":' . (int) $entry['seq'], Plugin::instance()->job_presenter()->log_tail( $now ) );

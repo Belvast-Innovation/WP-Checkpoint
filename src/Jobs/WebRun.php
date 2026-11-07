@@ -143,12 +143,24 @@ final class WebRun {
 			// Held up before: not tried again yet (nothing is opened, read or written).
 			return new TickResult( TickResult::WAITING, $wait, null, sprintf( 'Job %d was held up: the next try is in %d seconds.', $job_id, $wait ) );
 		}
-		$result = $this->tick_now( $job_id, $started_at );
+		return $this->paced( $job_id, $this->tick_now( $job_id, $started_at ), time() );
+	}
+
+	/**
+	 * What a tick's result does to the pace: held up, the next wait is longer (and the result says it); BUSY (another run
+	 * holds the job) says nothing of it; anything else starts it over.
+	 *
+	 * @param int        $job_id Job id.
+	 * @param TickResult $result The tick's result.
+	 * @param int        $now    Unix time.
+	 * @return TickResult
+	 */
+	public function paced( int $job_id, TickResult $result, int $now ): TickResult {
 		if ( TickResult::LEFT === $result->status && $result->held_up ) {
-			$result->retry_after = $this->pace->held_up( $job_id, time() );
+			$result->retry_after = $this->pace->held_up( $job_id, $now );
 			$this->note( sprintf( 'Job %d is held up (%s); the next try is in %d seconds.', $job_id, $result->message, $result->retry_after ) );
 		} elseif ( TickResult::BUSY !== $result->status ) {
-			$this->pace->cleared( $job_id ); // Got through (another run holding the job says nothing of it).
+			$this->pace->cleared( $job_id );
 		}
 		return $result;
 	}

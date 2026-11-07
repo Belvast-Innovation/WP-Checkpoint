@@ -1420,9 +1420,10 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * SwapStep::RETRIES), checkpointed; the next try is a unit of its own, in this tick when the time left covers the
 	 * wait and the try, else in a later one. Tries recorded for another entry are not this one's: it starts its own
 	 * (so a run killed after an entry went through never hands its count to the next). Tries spent (as many as send()
-	 * makes), they are cleared, checkpointed, and the rollback fails as the database being busy, the site held: a
-	 * retry of the job, or a run that takes it over after the tries were spent, starts its own tries (a run that takes
-	 * it over while tries remain goes on from those recorded).
+	 * makes): in WP-CLI they are cleared, checkpointed, and the rollback fails as the database being busy, the site
+	 * held, and a retry of the job, or a run that takes it over after the tries were spent, starts its own tries (a run
+	 * that takes it over while tries remain goes on from those recorded); in a run without WordPress the job is left
+	 * as it is, held up (held_up()), the tries as recorded.
 	 *
 	 * @param JobContext           $context Context.
 	 * @param Queries              $db      Connection.

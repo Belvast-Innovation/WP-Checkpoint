@@ -42,7 +42,8 @@ interface WebPace {
 	public function held_up( int $job_id, int $now ): int;
 
 	/**
-	 * A run got through (anything but held up): the pace starts over.
+	 * A run got through (anything but held up; WebRun does not call it when another run held the job, BUSY): the pace
+	 * starts over.
 	 *
 	 * @param int $job_id Job id.
 	 * @return void
