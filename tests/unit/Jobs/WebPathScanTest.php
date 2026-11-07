@@ -16,6 +16,7 @@ use WPCheckpoint\Jobs\WebRun;
 use WPCheckpoint\Restore\ImportSession;
 use WPCheckpoint\Standalone\Credentials;
 use WPCheckpoint\Support\Redactor;
+use WPCheckpoint\Support\TextMask;
 use WPCheckpoint\Tests\Fixtures\WebPathScanner;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
@@ -296,20 +297,38 @@ final class WebPathScanTest extends TestCase {
 		$swap = self::prop( $all[ RestoreJob::ID ], 'swap' );
 		$swap = $swap instanceof SwapStep ? $swap : self::prop( $swap, 'swap' ); // WebSwapStep's.
 		$this->assertInstanceOf( SwapStep::class, $swap );
-		$this->assertTrue( self::prop( $swap, 'host' )->web() );
+		// The six of of_wordpress() (ALLOWED): the host is made without WordPress and gives WebRun's values; the
+		// object cache's flush only when WebRun is given one.
+		$host = self::prop( $swap, 'host' );
+		$this->assertTrue( $host->web() );
+		$this->assertSame( 'site9_', $host->base_prefix() );
+		$this->assertFalse( $host->multisite() );
+		$this->assertSame( 0, $host->network_id() );
+		$this->assertSame( 'wp-checkpoint/wp-checkpoint.php', $host->plugin() );
+		$this->assertFalse( $host->can_flush(), 'WebRun was given no flush' );
+		// The two texts of SwapHost (ALLOWED): English, __() not called (it is not defined here).
+		$this->assertSame( 'Putting the site back as it was', $host->putting_back() );
+		$this->assertSame( 'The site is as it was before the restore', $host->as_before() );
 		$this->assertSame( array(), self::prop( $swap, 'parts' ) );
 		$this->assertInstanceOf( \Closure::class, self::prop( $swap, 'connect' ) );
 
 		// The Runner's defaults of WordPress's (cut) and its other callables (registered).
+		// CUTS: the defaults are array callables of the Runner's and TextMask's; WebRun's are closures, which work here.
 		foreach ( array( 'clean', 'php_log', 'mask', 'on_left' ) as $given ) {
 			$this->assertInstanceOf( \Closure::class, self::prop( $runner, $given ), $given );
 		}
-		$this->assertInstanceOf( Budget::class, self::prop( $runner, 'budget' ), 'a Budget: neither a callable budget nor probe is called' );
+		$this->assertSame( 'at {abspath}/x', call_user_func( self::prop( $runner, 'clean' ), 'at ' . rtrim( ABSPATH, '/\\' ) . '/x' ) );
+		$this->assertInstanceOf( TextMask::class, call_user_func( self::prop( $runner, 'mask' ), new Redactor(), array() ) );
+		$budget = self::prop( $runner, 'budget' );
+		$this->assertInstanceOf( Budget::class, $budget, 'a Budget: neither a callable budget nor probe is called' );
+		$this->assertSame( (float) WebRun::BUDGET_SECONDS, (float) $budget->seconds );
 		$this->assertSame( array( PlainJson::class, 'encode' ), self::prop( $runner, 'encode' ) );
 		$this->assertNull( self::prop( $runner, 'on_persist' ) );
 		$this->assertSame( WebRun::bytes( (string) ini_get( 'memory_limit' ) ), self::prop( $runner, 'memory_limit' ), 'given: hr_to_bytes is not called' );
 		$this->assertSame( array( '{abspath}', '{wp-content}' ), array_keys( self::prop( $runner, 'paths' ) ), 'given: the default (WP_CONTENT_DIR) is not read' );
+		// RunnerTexts( false ) (ALLOWED): untranslated, __() not called (it is not defined here).
 		$this->assertFalse( self::prop( self::prop( $runner, 'texts' ), 'translate' ) );
+		$this->assertSame( 'The job is waiting for your decision.', self::prop( $runner, 'texts' )->waiting() );
 		$this->assertTrue( self::prop( $runner, 'web' ) );
 		$this->assertFalse( self::prop( $runner, 'cli' ) );
 

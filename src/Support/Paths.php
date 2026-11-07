@@ -240,8 +240,9 @@ final class Paths {
 	/**
 	 * Normalise directory separators the way wp_normalize_path() does.
 	 *
-	 * Uses core when loaded; the fallback mirrors it so the class stays usable
-	 * in pure PHP unit tests and in uninstall.php.
+	 * Uses core when loaded; otherwise as_wordpress(), which gives the same bytes, so the class stays usable in pure
+	 * PHP unit tests, in uninstall.php and in a run made without WordPress (whose paths are compared with those a
+	 * WP-CLI run recorded through core).
 	 *
 	 * @param string $path Path to normalise.
 	 * @return string
@@ -250,13 +251,32 @@ final class Paths {
 		if ( function_exists( 'wp_normalize_path' ) ) {
 			return wp_normalize_path( $path );
 		}
+		return self::as_wordpress( $path );
+	}
 
+	/**
+	 * What wp_normalize_path() gives, step for step (as read in WordPress 7.1.4, whose only other step is a cache): a
+	 * stream wrapper PHP has registered (wp_is_stream(): the part before "://" among stream_get_wrappers()) is kept
+	 * as it is, with its "://"; in the rest, backslashes become slashes, runs of slashes become one except at the very
+	 * start (a network share's "//"), and a Windows drive letter is upper-cased. Nothing else: ".." stays, a trailing
+	 * slash stays. Integration test PathsNormalizeTest compares it with the core the suite runs on, byte for byte.
+	 *
+	 * @param string $path Path to normalise.
+	 * @return string
+	 */
+	public static function as_wordpress( string $path ): string {
+		$wrapper   = '';
+		$separator = strpos( $path, '://' );
+		if ( false !== $separator && in_array( substr( $path, 0, $separator ), stream_get_wrappers(), true ) ) {
+			list( $wrapper, $path ) = explode( '://', $path, 2 );
+			$wrapper               .= '://';
+		}
 		$path = str_replace( '\\', '/', $path );
-		$path = (string) preg_replace( '|(?<=.)/+|', '/', $path );
+		$path = (string) preg_replace( '|(?<=.)/+|', '/', $path ); // As core: a failure gives '' there too.
 		if ( ':' === substr( $path, 1, 1 ) ) {
 			$path = ucfirst( $path );
 		}
-		return $path;
+		return $wrapper . $path;
 	}
 
 	/**
