@@ -52,16 +52,21 @@ final class SwapStepWaitsBackTest extends TestCase {
 	 *
 	 * @param Queries $db   Connection.
 	 * @param int     $wait The wait before.
+	 * @param bool    $control Whether to write a line of the test's own to the log first (the control that it is read).
 	 * @return string What the job's log says.
 	 */
-	private static function put_back( Queries $db, int $wait ): string {
+	private static function put_back( Queries $db, int $wait, bool $control = false ): string {
 		$method = new \ReflectionMethod( SwapStep::class, 'put_waits_back' );
 		$method->setAccessible( true );
 		$work = new WorkContext( 'wpc-waits-back-' );
 		try {
-			$method->invoke( new SwapStep( null, array(), SwapHost::without_wordpress( 'wp_', false, 0, 'wp-checkpoint/wp-checkpoint.php' ) ), $work->context(), $db, $wait );
+			$context = $work->context();
+			if ( $control ) {
+				$context->logger()->info( 'the control' );
+			}
+			$method->invoke( new SwapStep( null, array(), SwapHost::without_wordpress( 'wp_', false, 0, 'wp-checkpoint/wp-checkpoint.php' ) ), $context, $db, $wait );
 			clearstatcache();
-			return is_file( $work->root . '/logs/job.log' ) ? (string) file_get_contents( $work->root . '/logs/job.log' ) : '';
+			return is_file( $work->root . '/logs/job.log' ) ? $work->log() : '';
 		} finally {
 			$work->remove();
 		}
@@ -69,7 +74,8 @@ final class SwapStepWaitsBackTest extends TestCase {
 
 	public function test_the_waits_are_put_back(): void {
 		$sent = array();
-		$log  = self::put_back( self::connection( null, $sent ), 50 );
+		$log  = self::put_back( self::connection( null, $sent ), 50, true );
+		$this->assertStringContainsString( 'the control', $log, 'the control: the job\'s log is read' );
 		$this->assertStringNotContainsString( 'could not be put back', $log );
 		$this->assertSame( array( 'SET SESSION innodb_lock_wait_timeout = 50', 'SET SESSION lock_wait_timeout = ' . SwapStep::LOCK_WAIT ), $sent );
 	}
@@ -79,7 +85,8 @@ final class SwapStepWaitsBackTest extends TestCase {
 		$log = self::put_back( self::connection( new \RuntimeException( 'Gone away' ), $sent ), 50 );
 		$this->assertSame( 2, substr_count( $log, 'A lock wait of the session could not be put back' ), 'each failure logged: ' . $log );
 		$this->assertStringContainsString( 'innodb_lock_wait_timeout', $log );
-		$this->assertStringNotContainsString( 'Gone away', $log, 'the class, not the message' );
+		$this->assertStringContainsString( 'RuntimeException', $log, 'the class' );
+		$this->assertStringNotContainsString( 'Gone away', $log, 'not the message' );
 		$this->assertSame( array( 'SET SESSION innodb_lock_wait_timeout = 50', 'SET SESSION lock_wait_timeout = ' . SwapStep::LOCK_WAIT ), $sent, 'each tried, the second after the first failed' );
 	}
 
