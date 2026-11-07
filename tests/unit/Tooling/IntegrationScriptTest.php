@@ -66,9 +66,13 @@ final class IntegrationScriptTest extends TestCase {
 				'FAKE_RECORD'               => $this->sandbox . '/call.json',
 				'FAKE_EXIT'                 => '0',
 				'WPCHECKPOINT_TEST_LOCK'    => $this->sandbox . '/run.lock',
+				'WPCHECKPOINT_TEST_OUTPUT_DIR' => $this->sandbox . '/output',
 			),
 			$extra
 		);
+		if ( ! is_dir( $this->sandbox . '/output' ) ) {
+			mkdir( $this->sandbox . '/output' );
+		}
 		$pipes   = array();
 		$process = proc_open( array_merge( array( 'sh', $script ), $args ), array( 1 => array( 'pipe', 'w' ), 2 => array( 'pipe', 'w' ) ), $pipes, $relative ? dirname( __DIR__, 3 ) : $this->sandbox, $env );
 		$this->assertIsResource( $process );
@@ -97,6 +101,27 @@ final class IntegrationScriptTest extends TestCase {
 		} ) );
 	}
 
+	public function test_a_relative_output_with_no_test_output_directory_stops_the_run(): void {
+		$env     = array(
+			'PATH'                         => (string) getenv( 'PATH' ),
+			'TMPDIR'                       => $this->sandbox . '/tmp',
+			'WPCHECKPOINT_TEST_PHPUNIT'    => $this->sandbox . '/phpunit',
+			'FAKE_RECORD'                  => $this->sandbox . '/call.json',
+			'FAKE_EXIT'                    => '0',
+			'WPCHECKPOINT_TEST_LOCK'       => $this->sandbox . '/run.lock',
+			'WPCHECKPOINT_TEST_OUTPUT_DIR' => $this->sandbox . '/not-there',
+		);
+		$pipes   = array();
+		$process = proc_open( array( 'sh', dirname( __DIR__, 3 ) . '/bin/test-integration.sh', '--log-junit', 'junit.xml' ), array( 1 => array( 'pipe', 'w' ), 2 => array( 'pipe', 'w' ) ), $pipes, $this->sandbox, $env );
+		stream_get_contents( $pipes[1] );
+		$stderr = (string) stream_get_contents( $pipes[2] );
+		$this->assertSame( 1, proc_close( $process ), $stderr );
+		$this->assertStringContainsString( 'which is not there', $stderr );
+		$this->assertFileDoesNotExist( $this->sandbox . '/call.json', 'PHPUnit was not called' );
+		$run = $this->run_script( array( '--log-junit', '/abs/junit.xml' ), array( 'WPCHECKPOINT_TEST_OUTPUT_DIR' => $this->sandbox . '/not-there' ) );
+		$this->assertSame( 0, $run['code'], 'the control: an absolute output needs no such directory: ' . $run['stderr'] );
+	}
+
 	public function test_the_suite_runs_from_a_directory_of_its_own_with_the_configuration_in_full(): void {
 		$plugin = (string) realpath( dirname( __DIR__, 3 ) );
 		$run    = $this->run_script( array( '--log-junit', 'build/junit-integration.xml', '--filter', "a b'c \"d\"", '--log-junit=build/second.xml', '--log-junit=/abs/third.xml', '--testdox-text=build/dox.txt', '--group', 'tests', 'tests/integration', 'no/such/path', '--bootstrap=tests/bootstrap.php', '--whitelist', 'build/not-there' ) );
@@ -109,12 +134,47 @@ final class IntegrationScriptTest extends TestCase {
 		$this->assertSame( $run['call']['tmpdir'], $run['call']['run_tmp'], 'named for the leftover check' );
 		$this->assertSame( 'integration', $run['call']['suite'] );
 		$this->assertSame(
-			array( '-c', ExpectedPath::slashed( $plugin, 'phpunit.xml.dist' ), '--testsuite', 'integration', '--log-junit', ExpectedPath::slashed( $plugin, 'build/junit-integration.xml' ), '--filter', "a b'c \"d\"", '--log-junit=' . ExpectedPath::slashed( $plugin, 'build/second.xml' ), '--log-junit=/abs/third.xml', '--testdox-text=' . ExpectedPath::slashed( $plugin, 'build/dox.txt' ), '--group', 'tests', ExpectedPath::slashed( $plugin, 'tests/integration' ), 'no/such/path', '--bootstrap=' . ExpectedPath::slashed( $plugin, 'tests/bootstrap.php' ), '--whitelist', ExpectedPath::slashed( $plugin, 'build/not-there' ) ),
+			array( '-c', ExpectedPath::slashed( $plugin, 'phpunit.xml.dist' ), '--testsuite', 'integration', '--log-junit', ExpectedPath::slashed( $this->sandbox, 'output/build/junit-integration.xml' ), '--filter', "a b'c \"d\"", '--log-junit=' . ExpectedPath::slashed( $this->sandbox, 'output/build/second.xml' ), '--log-junit=/abs/third.xml', '--testdox-text=' . ExpectedPath::slashed( $this->sandbox, 'output/build/dox.txt' ), '--group', 'tests', ExpectedPath::slashed( $plugin, 'tests/integration' ), 'no/such/path', '--bootstrap=' . ExpectedPath::slashed( $plugin, 'tests/bootstrap.php' ), '--whitelist', ExpectedPath::slashed( $plugin, 'build/not-there' ) ),
 			$run['call']['argv'],
-			'the configuration in full; output paths and an existing test path from the plugin\'s directory; option values (a group named like a directory) and the rest as given'
+			'the configuration in full; output paths from the test output directory, inputs and an existing test path from the plugin\'s directory; option values (a group named like a directory) and the rest as given'
 		);
 		$this->assertSame( array(), $this->work_dirs(), 'the empty directory is removed after the run' );
 		$this->assertMatchesRegularExpression( '/The plugin directory holds [0-9]+ entries; a restore takes at most [0-9]+ in its copy of the running plugin\./', $run['stderr'], 'the plugin directory\'s entries counted before the run' );
+	}
+
+	public function test_an_entry_an_earlier_run_left_in_the_uploads_directory_stops_the_run_before_phpunit(): void {
+		mkdir( $this->sandbox . '/site/wp-content/uploads/someone', 0755, true );
+		file_put_contents( $this->sandbox . '/site/wp-settings.php', '<?php' );
+		file_put_contents( $this->sandbox . '/wp-tests-config.php', '<?php define( "ABSPATH", ' . var_export( $this->sandbox . '/site/', true ) . ' ); define( "DB_NAME", "x" ); define( "DB_USER", "x" ); define( "DB_PASSWORD", "x" ); define( "DB_HOST", "127.0.0.1:1" );' );
+		$env = array(
+			'PATH'                      => (string) getenv( 'PATH' ),
+			'TMPDIR'                    => $this->sandbox . '/tmp',
+			'WPCHECKPOINT_TEST_PHPUNIT' => $this->sandbox . '/phpunit',
+			'FAKE_RECORD'               => $this->sandbox . '/call.json',
+			'FAKE_EXIT'                 => '0',
+			'WPCHECKPOINT_TEST_LOCK'    => $this->sandbox . '/run.lock',
+			'WP_PHPUNIT__TESTS_CONFIG'  => $this->sandbox . '/wp-tests-config.php',
+		);
+		$run = function () use ( $env ): array {
+			$pipes   = array();
+			$process = proc_open( array( 'sh', dirname( __DIR__, 3 ) . '/bin/test-integration.sh' ), array( 1 => array( 'pipe', 'w' ), 2 => array( 'pipe', 'w' ) ), $pipes, $this->sandbox, $env );
+			$this->assertIsResource( $process );
+			stream_get_contents( $pipes[1] );
+			$stderr = (string) stream_get_contents( $pipes[2] );
+			fclose( $pipes[1] );
+			fclose( $pipes[2] );
+			return array( proc_close( $process ), $stderr );
+		};
+		list( $code, $stderr ) = $run();
+		$this->assertSame( 0, $code, 'the control: an entry no test makes does not stop it: ' . $stderr );
+		$this->assertFileExists( $this->sandbox . '/call.json', 'the control: PHPUnit was called' );
+		file_put_contents( $this->sandbox . '/call.json', '' ); // Read: called again or not.
+		mkdir( $this->sandbox . '/site/wp-content/uploads/wpcreplay-uploads' );
+		list( $code, $stderr ) = $run();
+		$this->assertSame( 77, $code, $stderr );
+		$this->assertStringContainsString( 'wpcreplay-uploads', $stderr );
+		$this->assertStringContainsString( 'the run does not start', $stderr );
+		$this->assertSame( '', (string) file_get_contents( $this->sandbox . '/call.json' ), 'PHPUnit was not called' );
 	}
 
 	public function test_a_maintenance_file_in_the_test_site_stops_the_run_before_phpunit(): void {
@@ -382,6 +442,7 @@ final class IntegrationScriptTest extends TestCase {
 		mkdir( $this->sandbox . '/plugin/tests/Fixtures' );
 		copy( dirname( __DIR__, 2 ) . '/Fixtures/maintenance-precheck.php', $this->sandbox . '/plugin/tests/Fixtures/maintenance-precheck.php' ); // The check before PHPUnit.
 		copy( dirname( __DIR__, 2 ) . '/Fixtures/plugin-entries.php', $this->sandbox . '/plugin/tests/Fixtures/plugin-entries.php' ); // And the count.
+		copy( dirname( __DIR__, 2 ) . '/Fixtures/leftovers-precheck.php', $this->sandbox . '/plugin/tests/Fixtures/leftovers-precheck.php' ); // And what an earlier run left.
 		file_put_contents( $this->sandbox . '/plugin/phpunit.xml.dist', '<phpunit/>' );
 		file_put_contents( $this->sandbox . '/plugin/src/Code.php', '<?php // the code' );
 		file_put_contents( $this->sandbox . '/plugin/tests/CodeTest.php', '<?php // its test' );

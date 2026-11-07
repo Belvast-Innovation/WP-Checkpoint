@@ -396,6 +396,39 @@ final class LeftoversTest extends TestCase {
 		$this->assertSame( 0.1, $result->time(), 'the stand-ins and failures add no time' );
 	}
 
+	public function test_an_uploads_entry_a_test_or_a_class_leaves_fails_it_and_is_removed(): void {
+		$result      = new TestResult();
+		$listener    = $this->listener();
+		$root        = new TestSuite( 'root' );
+		$class       = new TestSuite( 'UploadsClassTest' );
+		$this->there = array( 'uploads:/w/uploads/someone' ); // There before the run: not a test's.
+		$listener->startTestSuite( $root );
+		$listener->startTestSuite( $class );
+		$this->there[] = 'uploads:/w/uploads/wpcexport-class'; // The class's set-up.
+		$clean         = self::probe( $result, 'test_clean' );
+		$listener->startTest( $clean );
+		$listener->endTest( $clean, 0.1 );
+		$this->assertSame( 0, $result->failureCount(), 'the control: a test that leaves nothing passes' );
+		$leaky = self::probe( $result, 'test_leaky' );
+		$listener->startTest( $leaky );
+		$this->there[] = 'uploads:/w/uploads/wpcreplay-uploads';
+		$this->there[] = 'content:/w/wpc-uploads-abc';
+		$this->there[] = 'mu-plugins:/w/mu-plugins/wp-checkpoint-probe-x.php';
+		$listener->endTest( $leaky, 0.1 );
+		$this->assertSame( 1, $result->failureCount() );
+		$this->assertStringContainsString( 'wpcreplay-uploads', $result->failures()[0]->exceptionMessage() );
+		$this->assertStringContainsString( 'wpc-uploads-abc', $result->failures()[0]->exceptionMessage() );
+		$this->assertStringContainsString( 'wp-checkpoint-probe-x.php', $result->failures()[0]->exceptionMessage() );
+		$this->assertContains( 'uploads:/w/uploads/wpcreplay-uploads', $this->removed );
+		$listener->endTestSuite( $class );
+		$this->assertSame( 2, $result->failureCount() );
+		$this->assertSame( 'leftovers of UploadsClassTest', $result->failures()[1]->failedTest()->getName() );
+		$this->assertStringContainsString( 'wpcexport-class', $result->failures()[1]->exceptionMessage() );
+		$this->assertStringNotContainsString( 'someone', $result->failures()[1]->exceptionMessage(), 'not what was there before' );
+		$listener->endTestSuite( $root );
+		$this->assertSame( 2, $result->failureCount() );
+	}
+
 	public function test_a_class_and_the_run_are_recorded_in_the_junit_log(): void {
 		$this->sandbox = Sandbox::make( 'leftovers-junit' );
 		$file          = $this->sandbox . '/junit.xml';

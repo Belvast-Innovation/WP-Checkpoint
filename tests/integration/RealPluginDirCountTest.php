@@ -29,9 +29,10 @@ final class RealPluginDirCountTest extends WP_UnitTestCase {
 	}
 
 	/**
-	 * Counted independently: every entry (a link counted, not followed), the bytes and the sorted paths of the files.
+	 * Counted independently: every entry (a link counted, not followed), the bytes and the sorted paths of the files,
+	 * and the entries under each top-level entry (itself among them).
 	 *
-	 * @return array{entries: int, bytes: float, files: string[], links: int}
+	 * @return array{entries: int, bytes: float, files: string[], links: int, by_top: array<string, int>}
 	 */
 	private static function independent(): array {
 		$root  = self::root();
@@ -40,6 +41,7 @@ final class RealPluginDirCountTest extends WP_UnitTestCase {
 			'bytes'   => 0.0,
 			'files'   => array(),
 			'links'   => 0,
+			'by_top'  => array(),
 		);
 		$items = new \RecursiveIteratorIterator(
 			new \RecursiveDirectoryIterator( $root, \FilesystemIterator::SKIP_DOTS ),
@@ -48,6 +50,8 @@ final class RealPluginDirCountTest extends WP_UnitTestCase {
 		);
 		foreach ( $items as $path => $item ) {
 			++$out['entries'];
+			$top                    = explode( '/', str_replace( '\\', '/', substr( (string) $path, strlen( $root ) + 1 ) ), 2 )[0];
+			$out['by_top'][ $top ] = ( $out['by_top'][ $top ] ?? 0 ) + 1;
 			if ( $item->isLink() ) {
 				++$out['links'];
 				continue;
@@ -61,8 +65,25 @@ final class RealPluginDirCountTest extends WP_UnitTestCase {
 		return $out;
 	}
 
+	/**
+	 * The largest top-level entries by the entries under them, for a message: "node_modules 7525, vendor 5861, …".
+	 *
+	 * @param array<string, int> $by_top Top-level entry => entries.
+	 * @param int                $most   How many.
+	 * @return string
+	 */
+	private static function largest( array $by_top, int $most = 5 ): string {
+		arsort( $by_top );
+		$parts = array();
+		foreach ( array_slice( $by_top, 0, $most, true ) as $name => $entries ) {
+			$parts[] = $name . ' ' . $entries;
+		}
+		return implode( ', ', $parts );
+	}
+
 	public function test_the_restores_walks_of_the_running_plugin_match_an_independent_count(): void {
 		$counted = self::independent();
+		$this->assertSame( $counted['entries'], array_sum( $counted['by_top'] ), 'the control: every entry is under a top-level one' );
 		// The controls: the independent count sees the plugin itself, and directories besides files.
 		$this->assertContains( 'wp-checkpoint.php', $counted['files'] );
 		$this->assertContains( 'src/Jobs/RestoreFilesPreflightStep.php', $counted['files'] );
@@ -70,7 +91,7 @@ final class RealPluginDirCountTest extends WP_UnitTestCase {
 		$this->assertLessThanOrEqual(
 			RestoreFilesPreflightStep::MAX_PLUGIN_ENTRIES,
 			$counted['entries'],
-			sprintf( 'The running plugin directory (%s) holds %d entries, past the restore\'s limit for its own copy: the walks below would refuse it. On the test site it is the working copy: its node_modules, vendor, .git and build count too.', self::root(), $counted['entries'] )
+			sprintf( 'The running plugin directory (%s) holds %d entries, past the restore\'s limit for its own copy: the walks below would refuse it. On the test site it is the working copy, development files and all; the largest: %s.', self::root(), $counted['entries'], self::largest( $counted['by_top'] ) )
 		);
 
 		$bytes = new \ReflectionMethod( RestoreFilesPreflightStep::class, 'plugin_bytes' );

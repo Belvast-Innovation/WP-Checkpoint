@@ -207,4 +207,89 @@ final class LeftoversCheckTest extends WP_UnitTestCase {
 		$this->assertDirectoryDoesNotExist( $dir );
 		$this->assertDirectoryDoesNotExist( $stored );
 	}
+
+	public function test_it_sees_an_entry_of_the_uploads_directory_and_removes_it_only_under_a_tests_name(): void {
+		$dir    = \WPCheckpoint\Tests\Fixtures\UploadsLeftovers::dir();
+		$tests  = $dir . '/wpcexport-leftovercheck';
+		$others = $dir . '/leftovercheck-someone';
+		try {
+			$this->assertTrue( mkdir( $tests . '/a', 0755, true ) );
+			file_put_contents( $tests . '/a/f.txt', 'x' );
+			$this->assertTrue( mkdir( $others ) );
+			$items = Leftovers::listing();
+			$this->assertContains( 'uploads:' . $tests, $items );
+			$this->assertContains( 'uploads:' . $others, $items, 'listed too: any entry but WordPress\'s own' );
+			Leftovers::removal( array( 'uploads:' . $tests, 'uploads:' . $others ) );
+			clearstatcache();
+			$this->assertDirectoryDoesNotExist( $tests, 'under a test\'s name: removed' );
+			$this->assertDirectoryExists( $others, 'under no test\'s name: left alone' );
+		} finally {
+			\WPCheckpoint\Support\Deleter::allow( $others );
+			\WPCheckpoint\Support\Deleter::delete_tree( $dir, $others );
+			if ( is_dir( $tests ) ) {
+				\WPCheckpoint\Support\Deleter::allow( $tests );
+				\WPCheckpoint\Support\Deleter::delete_tree( $dir, $tests );
+			}
+		}
+	}
+
+	public function test_it_sees_an_entry_of_wp_content_and_of_the_must_use_plugins_and_removes_only_a_tests(): void {
+		$content = \WPCheckpoint\Tests\Fixtures\ContentLeftovers::dir();
+		$mu      = \WPCheckpoint\Tests\Fixtures\ContentLeftovers::mu_dir();
+		$groups  = array();
+		foreach ( \WPCheckpoint\Restore\StagingLayout::GROUPS as $group ) {
+			$groups[ $group ] = $content . '/' . $group;
+		}
+		$probe   = $mu . '/' . ( new \WPCheckpoint\Restore\StagingLayout( $groups, 'abcdef012345', 7, str_repeat( 'a', 32 ) ) )->probe_name( '.php' );
+		$made    = array(
+			'tests'      => $content . '/wpc-leftovercheck-' . bin2hex( random_bytes( 3 ) ),
+			'someone'    => $content . '/leftovercheck-someone',
+			'probe'      => $probe,
+			'mu-someone' => $mu . '/leftovercheck-someone.php',
+		);
+		$had_mu  = is_dir( $mu );
+		try {
+			$this->assertTrue( mkdir( $made['tests'] . '/a', 0755, true ) );
+			$this->assertTrue( mkdir( $made['someone'] ) );
+			if ( ! $had_mu ) {
+				mkdir( $mu );
+			}
+			file_put_contents( $made['probe'], '<?php' );
+			file_put_contents( $made['mu-someone'], '<?php' );
+			$items = Leftovers::listing();
+			foreach ( array( 'tests', 'someone' ) as $key ) {
+				$this->assertContains( 'content:' . $made[ $key ], $items, $key );
+			}
+			foreach ( array( 'probe', 'mu-someone' ) as $key ) {
+				$this->assertContains( 'mu-plugins:' . $made[ $key ], $items, $key );
+			}
+			Leftovers::removal( array( 'content:' . $made['tests'], 'content:' . $made['someone'], 'mu-plugins:' . $made['probe'], 'mu-plugins:' . $made['mu-someone'] ) );
+			clearstatcache();
+			$this->assertFileDoesNotExist( $made['tests'], 'a test\'s wpc-* directory: removed' );
+			$this->assertFileDoesNotExist( $made['probe'], 'a loader probe: removed' );
+			$this->assertFileExists( $made['someone'], 'under no test\'s name: left alone' );
+			$this->assertFileExists( $made['mu-someone'], 'not a probe: left alone' );
+		} finally {
+			foreach ( array( 'someone' => $content, 'mu-someone' => $mu, 'tests' => $content, 'probe' => $mu ) as $key => $dir ) {
+				if ( file_exists( $made[ $key ] ) ) {
+					\WPCheckpoint\Support\Deleter::allow( $made[ $key ] );
+					\WPCheckpoint\Support\Deleter::delete_tree( $dir, $made[ $key ] );
+				}
+			}
+		}
+	}
+
+	public function test_every_wp_content_entry_registered_by_name_is_there(): void {
+		$content = \WPCheckpoint\Tests\Fixtures\ContentLeftovers::dir();
+		foreach ( array_keys( \WPCheckpoint\Tests\Fixtures\ContentLeftovers::OWN ) as $name ) {
+			if ( isset( \WPCheckpoint\Tests\Fixtures\ContentLeftovers::MAY_BE_ABSENT[ $name ] ) ) {
+				continue;
+			}
+			$this->assertFileExists( $content . '/' . $name, 'a registration that names nothing in the test site\'s wp-content is out of date: ' . $name );
+		}
+		foreach ( array_keys( \WPCheckpoint\Tests\Fixtures\ContentLeftovers::MAY_BE_ABSENT ) as $name ) {
+			$this->assertArrayHasKey( $name, \WPCheckpoint\Tests\Fixtures\ContentLeftovers::OWN, 'what may be absent is registered: ' . $name );
+		}
+		$this->assertSame( array(), \WPCheckpoint\Tests\Fixtures\ContentLeftovers::entries( $content ), 'and nothing else is there now' );
+	}
 }

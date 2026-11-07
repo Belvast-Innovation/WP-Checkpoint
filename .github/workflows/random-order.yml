@@ -68,6 +68,9 @@ jobs:
       # vendor/ is bind-mounted into the wp-env containers, so installing on the host is enough.
       - run: composer install --no-interaction --no-progress --prefer-dist
       - run: npm ci
+      # The test output directory beside the repository, which .wp-env.json maps into the containers: made before wp-env
+      # starts, so that Docker does not make it as root.
+      - run: mkdir -p ../wp-checkpoint-test-output
       - run: npx wp-env start
 
       - name: Run the integration suite in that order
