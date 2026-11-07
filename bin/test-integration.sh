@@ -28,7 +28,9 @@
 # the test site's WordPress directory (a run stopped while a test held one leaves it; a held .maintenance stops the
 # suite's own start at WordPress's maintenance page), and removes this plugin's, on wp-env's test site only
 # (WPCHECKPOINT_TEST_MAINTENANCE_REMOVE=0 lists only). With .maintenance still there the run does not start (status 76;
-# any other failure of the check, status 1). Then tests/Fixtures/plugin-entries.php counts the entries of this plugin's
+# any other failure of the check, status 1). Then tests/Fixtures/uploads-precheck.php lists the entries of the test
+# site's uploads directory under a name the tests make there (read from the tests): an earlier run left them, and the
+# run does not start (status 77) until they are removed. Then tests/Fixtures/plugin-entries.php counts the entries of this plugin's
 # directory, as the restore counts its own copy, and warns when they come near the restore's limit: the suite's
 # restores read a stand-in (tests/Fixtures/Restore/PluginStandIn.php), but the test of the count on the real directory
 # fails past it.
@@ -223,6 +225,14 @@ if [ "$PRECHECK" -eq 76 ]; then
 	exit 76
 elif [ "$PRECHECK" -ne 0 ]; then
 	echo "The check of the test site's maintenance files failed (status $PRECHECK); the run does not start." >&2
+	exit 1
+fi
+php "$PLUGIN/tests/Fixtures/uploads-precheck.php"
+PRECHECK=$?
+if [ "$PRECHECK" -eq 77 ]; then
+	exit 77
+elif [ "$PRECHECK" -ne 0 ]; then
+	echo "The check of the test site's uploads directory failed (status $PRECHECK); the run does not start." >&2
 	exit 1
 fi
 php "$PLUGIN/tests/Fixtures/plugin-entries.php" "$PLUGIN"

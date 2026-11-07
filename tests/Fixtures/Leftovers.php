@@ -15,8 +15,10 @@ use PHPUnit\Framework\TestSuite;
  * a network's sites other than the main one (their rows in the sites table, and every table of a site's prefix,
  * "{prefix}{id}_", whether its row is there or not: a test that creates a site with real tables commits it), the swap's
  * maintenance file (and its temporary names) in ABSPATH, storage directories in the test site's
- * wp-content (wp-checkpoint-*, other than the one the stored state names), and this plugin's and its tests' entries in
- * the run's own temporary directory. A test that leaves one fails, named, and what it left is removed so the next test
+ * wp-content (wp-checkpoint-*, other than the one the stored state names), the top-level entries of the test site's
+ * uploads directory but WordPress's own (UploadsLeftovers: an entry an earlier run left under a test's name stops the
+ * run before PHPUnit, uploads-precheck.php), and this plugin's and its tests' entries in the run's own temporary
+ * directory. A test that leaves one fails, named, and what it left is removed so the next test
  * starts clean; a test class that leaves one in its class-level set-up fails as a class; and the run fails when any is
  * left at its end. What an earlier run left is reported when the run starts: its tables are removed (the tests database
  * is taken to be this run's while it runs), the restore's and every other table that is neither WordPress's (the main
@@ -545,6 +547,11 @@ final class Leftovers implements TestListener {
 		foreach ( StorageDirs::listing() as $dir ) {
 			$items[] = 'storage:' . $dir;
 		}
+		// The uploads directory's top-level entries but WordPress's own: one a test or a class makes and leaves (an
+		// export test's files).
+		foreach ( UploadsLeftovers::entries( UploadsLeftovers::dir() ) as $path ) {
+			$items[] = 'uploads:' . $path;
+		}
 		sort( $items );
 		return $items;
 	}
@@ -756,6 +763,8 @@ final class Leftovers implements TestListener {
 				clean_blog_cache( $id );
 			} elseif ( 0 === strpos( $item, 'maintenance:' ) ) {
 				RealAbspath::clear( substr( $item, 12 ) ); // Only what this plugin writes; anything else is reported.
+			} elseif ( 0 === strpos( $item, 'uploads:' ) ) {
+				UploadsLeftovers::remove( substr( $item, 8 ) ); // Under a test's name only; anything else is said.
 			} elseif ( 0 === strpos( $item, 'storage:' ) ) {
 				StorageDirs::remove( array( substr( $item, 8 ) ) ); // A storage directory a test left in the site's wp-content.
 			} elseif ( 0 === strpos( $item, 'temp:' ) ) {

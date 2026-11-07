@@ -207,4 +207,29 @@ final class LeftoversCheckTest extends WP_UnitTestCase {
 		$this->assertDirectoryDoesNotExist( $dir );
 		$this->assertDirectoryDoesNotExist( $stored );
 	}
+
+	public function test_it_sees_an_entry_of_the_uploads_directory_and_removes_it_only_under_a_tests_name(): void {
+		$dir    = \WPCheckpoint\Tests\Fixtures\UploadsLeftovers::dir();
+		$tests  = $dir . '/wpcexport-leftovercheck';
+		$others = $dir . '/leftovercheck-someone';
+		try {
+			$this->assertTrue( mkdir( $tests . '/a', 0755, true ) );
+			file_put_contents( $tests . '/a/f.txt', 'x' );
+			$this->assertTrue( mkdir( $others ) );
+			$items = Leftovers::listing();
+			$this->assertContains( 'uploads:' . $tests, $items );
+			$this->assertContains( 'uploads:' . $others, $items, 'listed too: any entry but WordPress\'s own' );
+			Leftovers::removal( array( 'uploads:' . $tests, 'uploads:' . $others ) );
+			clearstatcache();
+			$this->assertDirectoryDoesNotExist( $tests, 'under a test\'s name: removed' );
+			$this->assertDirectoryExists( $others, 'under no test\'s name: left alone' );
+		} finally {
+			\WPCheckpoint\Support\Deleter::allow( $others );
+			\WPCheckpoint\Support\Deleter::delete_tree( $dir, $others );
+			if ( is_dir( $tests ) ) {
+				\WPCheckpoint\Support\Deleter::allow( $tests );
+				\WPCheckpoint\Support\Deleter::delete_tree( $dir, $tests );
+			}
+		}
+	}
 }
