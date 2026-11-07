@@ -290,7 +290,13 @@ final class WebRollbackTest extends SwapTestCase {
 		$other->run( 'LOCK TABLES `' . $entry['old'] . '` READ' );
 		try {
 			$this->seams = array();
-			$result      = $this->tick_without_wordpress( Plugin::instance()->jobs()->find( $job->id ) );
+			// The carry back is a unit of its own first: the rename may come in the next run.
+			for ( $i = 0; $i < 3; $i++ ) {
+				$result = $this->tick_without_wordpress( Plugin::instance()->jobs()->find( $job->id ) );
+				if ( TickResult::MORE !== $result->status ) {
+					break;
+				}
+			}
 		} finally {
 			$other->run( 'UNLOCK TABLES' );
 			$other->close();
