@@ -220,8 +220,28 @@ final class WebPathScanner {
 	 */
 	public static function internal( string $name ): bool {
 		$name = ltrim( $name, '\\' );
+		if ( in_array( strtolower( $name ), self::LATER_PHP, true ) ) {
+			return true;
+		}
+		foreach ( self::EXTENSIONS as $prefix ) {
+			if ( 0 === stripos( $name, $prefix . '_' ) ) {
+				return true;
+			}
+		}
 		return function_exists( $name ) && ( new \ReflectionFunction( $name ) )->isInternal();
 	}
+
+	/**
+	 * PHP's core functions added after PHP 7.4, the oldest PHP this plugin runs on: PHP's own wherever the scan runs
+	 * (on 7.4 they are not defined, and a call to one is behind function_exists()).
+	 */
+	const LATER_PHP = array( 'fsync', 'fdatasync', 'str_contains', 'str_starts_with', 'str_ends_with', 'array_is_list', 'get_debug_type', 'get_resource_id', 'fdiv', 'preg_last_error_msg', 'array_find', 'array_find_key', 'array_any', 'array_all' );
+
+	/**
+	 * PHP's extensions whose functions ("mysqli_…") and constants ("MYSQLI_…") are PHP's own whether or not the PHP the
+	 * scan runs on has the extension loaded (Windows' runners have no mysqli; a PHP run without its php.ini has neither).
+	 */
+	const EXTENSIONS = array( 'mysqli', 'opcache' );
 
 	/**
 	 * The methods a method calls, as Class::method.
@@ -1150,6 +1170,11 @@ final class WebPathScanner {
 			}
 			if ( isset( $internal[ $name ] ) ) {
 				continue;
+			}
+			foreach ( self::EXTENSIONS as $prefix ) {
+				if ( 0 === strpos( $name, strtoupper( $prefix ) . '_' ) ) {
+					continue 2;
+				}
 			}
 			$m['constants'][] = $name;
 		}

@@ -242,4 +242,15 @@ final class WebPathScannerTest extends TestCase {
 		$this->assertContains( 'Ctl\Root: code outside the class', self::problems( array( 'Ctl\Root' => "<?php\nnamespace Ctl;\nrequire 'x.php';\nclass Root { public function go() {} }\n" ) ) );
 		$this->assertSame( array(), self::problems( array( 'Ctl\Root' => "<?php\nnamespace Ctl;\ndefined( 'ABSPATH' ) || exit;\nfinal class Root { public function go() {} }\n" ) ) );
 	}
+
+	public function test_php_own_is_php_own_wherever_the_scan_runs(): void {
+		$problems = self::problems(
+			array(
+				'Ctl\Root' => "<?php\nnamespace Ctl;\nclass Root { public function go( \$h ) { fsync( \$h ); str_contains( 'a', 'b' ); mysqli_report( MYSQLI_REPORT_OFF ); mysqli_query( \$h, 'SELECT 1' ); wp_die(); return MYSQLI_OPT_READ_TIMEOUT; } }\n",
+			)
+		);
+		$this->assertContains( 'Ctl\Root:go(): calls wp_die()', $problems, 'the control: a WordPress call is found' );
+		$this->assertSame( array( 'Ctl\Root:go(): calls wp_die()' ), $problems, 'functions added after PHP 7.4 and an extension not loaded here are PHP\'s: ' . implode( "\n", $problems ) );
+		$this->assertFalse( \WPCheckpoint\Tests\Fixtures\WebPathScanner::internal( 'wp_mysqli_like' ), 'only the prefix of the extension, at the start' );
+	}
 }
