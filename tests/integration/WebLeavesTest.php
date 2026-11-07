@@ -159,7 +159,9 @@ final class WebLeavesTest extends SwapTestCase {
 		$wpdb->query( $wpdb->prepare( 'UPDATE ' . JobRepository::table() . " SET takeovers = %d, takeover_mark = MD5(CONCAT(step, '|', COALESCE(cursor_json, ''))) WHERE id = %d", Runner::MAX_TAKEOVERS - 1, $job->id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the jobs table.
 		$wpdb->query( 'COMMIT' );
 		foreach ( array( 'reaching the limit', 'at the limit' ) as $which ) {
-			$this->assertSame( TickResult::LEFT, $this->tick_without_wordpress( Plugin::instance()->jobs()->find( $job->id ) )->status, $which );
+			$left = $this->tick_without_wordpress( Plugin::instance()->jobs()->find( $job->id ) );
+			$this->assertSame( TickResult::LEFT, $left->status, $which );
+			$this->assertStringContainsString( 'times in a row without finishing', (string) $left->message, $which . ': for the takeovers' );
 		}
 		$this->seams = array();
 		$result      = $this->cli_tick( Plugin::instance()->jobs()->find( $job->id ) );
@@ -170,13 +172,33 @@ final class WebLeavesTest extends SwapTestCase {
 	}
 
 	public function test_on_a_network_the_network_is_recorded_before_the_swap_moves_on_to_judging(): void {
+		global $wpdb;
 		if ( ! is_multisite() ) {
 			$this->markTestSkipped( 'The network is recorded on a network only.' );
 		}
-		$job = $this->at_swap();
-		$this->killed_at( $job, 'started' ); // Right after the checkpoint that moves on to judging.
-		$now = Plugin::instance()->jobs()->find( $job->id );
-		$this->assertNotSame( 'start', $now->cursor['phase'] ?? 'start', 'the control: moved on from start' );
-		$this->assertSame( get_current_network_id(), $now->options['recorded'][ SwapStep::NETWORK_RECORD ] ?? null, 'recorded before it' );
+		$job    = $this->at_swap();
+		$table  = JobRepository::table();
+		$writes = array();
+		// The job row's writes as WP-CLI sends them (its storage goes through $wpdb): which comes first, the record or
+		// the cursor that moves on to judging. A run that dies between the two must find the record, or start again.
+		$watch = static function ( $sql ) use ( $table, &$writes ) {
+			if ( is_string( $sql ) && 0 === strpos( ltrim( $sql ), 'UPDATE' ) && false !== strpos( $sql, $table ) ) {
+				if ( false !== strpos( $sql, SwapStep::NETWORK_RECORD ) ) {
+					$writes[] = 'record';
+				} elseif ( false !== strpos( $sql, '\\"phase\\":\\"judge\\"' ) || false !== strpos( $sql, '"phase":"judge"' ) ) {
+					$writes[] = 'judge';
+				}
+			}
+			return $sql;
+		};
+		add_filter( 'query', $watch );
+		try {
+			$this->cli_tick( $job );
+		} finally {
+			remove_filter( 'query', $watch );
+		}
+		$this->assertContains( 'judge', $writes, 'the control: the cursor moving on to judging was seen' );
+		$this->assertContains( 'record', $writes, 'the control: the record was seen' );
+		$this->assertLessThan( array_search( 'judge', $writes, true ), array_search( 'record', $writes, true ), 'recorded before the swap moves on: ' . implode( ', ', $writes ) );
 	}
 }

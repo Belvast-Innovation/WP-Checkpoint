@@ -292,7 +292,8 @@ final class WebJobs implements RunnerRepository {
 		}
 		// Read before the claim, so that a failure to read it leaves no lease behind: a claim that counts no takeover
 		// changes neither the count, the mark, the step nor the cursor (and one that counts one is taken_over, which the
-		// Runner asks first).
+		// Runner asks first). Another run in between (claiming the free lease, moving on, letting it go) can only leave it
+		// true when it no longer is: this run is left once more, and the next reads the position moved.
 		$at_limit = $job->takeovers >= Runner::MAX_TAKEOVERS && $this->at_takeover_mark( $id );
 		$token    = bin2hex( random_bytes( 16 ) );
 		if ( ! $this->store->claim( $id, $token, $lease, 'site_state <> 0 AND ' . Job::MANAGING_SQL . ' = %s AND site_mark = %s', array( $job->managing_token(), $job->site_mark ) ) ) {

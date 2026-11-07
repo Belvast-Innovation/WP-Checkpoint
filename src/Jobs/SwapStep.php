@@ -513,7 +513,6 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 					$context->record( self::NETWORK_RECORD, $this->host->network_id() );
 				}
 				$context->checkpoint( $cursor, 3, __( 'Judging the backup\'s tables once more before the swap', 'wp-checkpoint' ) );
-				$this->at( 'started' );
 				$phase = 'judge';
 			}
 			if ( 'judge' === $phase ) {
