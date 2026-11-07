@@ -90,16 +90,25 @@ final class WebRun {
 	private $flush;
 
 	/**
+	 * Test seams: "type" (the id the restore is registered under), "parts" (the swap's parts, SwapStep). The entries of
+	 * b2 give none.
+	 *
+	 * @var array<string, mixed>
+	 */
+	private $seams;
+
+	/**
 	 * Constructor.
 	 *
-	 * @param Credentials   $credentials The database settings and the table prefix.
-	 * @param string        $abspath     The WordPress directory.
-	 * @param bool          $multisite   Whether the site is a network.
-	 * @param string        $plugin      This plugin's basename.
-	 * @param callable      $note        function( string $line ): void.
-	 * @param callable|null $flush       function(): mixed, or null.
+	 * @param Credentials          $credentials The database settings and the table prefix.
+	 * @param string               $abspath     The WordPress directory.
+	 * @param bool                 $multisite   Whether the site is a network.
+	 * @param string               $plugin      This plugin's basename.
+	 * @param callable             $note        function( string $line ): void.
+	 * @param callable|null        $flush       function(): mixed, or null.
+	 * @param array<string, mixed> $seams Test seams ("type", "parts"); none outside the tests.
 	 */
-	public function __construct( Credentials $credentials, string $abspath, bool $multisite, string $plugin, callable $note, $flush = null ) {
+	public function __construct( Credentials $credentials, string $abspath, bool $multisite, string $plugin, callable $note, $flush = null, array $seams = array() ) {
 		$this->credentials = $credentials;
 		$this->prefix      = $credentials->get( 'prefix' );
 		$this->abspath     = $abspath;
@@ -107,6 +116,7 @@ final class WebRun {
 		$this->plugin      = $plugin;
 		$this->note        = $note;
 		$this->flush       = is_callable( $flush ) ? $flush : null;
+		$this->seams       = $seams;
 	}
 
 	/**
@@ -149,11 +159,11 @@ final class WebRun {
 			static function () use ( $credentials ): ImportSession {
 				return ImportSession::open( $credentials );
 			},
-			array(),
+			isset( $this->seams['parts'] ) && is_array( $this->seams['parts'] ) ? $this->seams['parts'] : array(),
 			SwapHost::without_wordpress( $this->prefix, $this->multisite, $network, $this->plugin, $this->flush )
 		);
 		$types       = new JobTypes( false );
-		$types->add( new WebRestoreJob( $swap ) );
+		$types->add( new WebRestoreJob( $swap, isset( $this->seams['type'] ) && is_string( $this->seams['type'] ) ? $this->seams['type'] : RestoreJob::ID ) );
 		$redactor = new Redactor( Redactor::installation_secrets() );
 		$paths    = array(
 			'{abspath}'    => rtrim( $this->abspath, '/\\' ),

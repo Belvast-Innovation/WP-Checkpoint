@@ -45,7 +45,7 @@ final class WebPathScanTest extends TestCase {
 	const BINDINGS = array(
 		'WPCheckpoint\Jobs\RunnerRepository' => array( 'WPCheckpoint\Jobs\WebJobs' ),
 		'WPCheckpoint\Jobs\StoreExecutor'    => array( 'WPCheckpoint\Jobs\SessionExecutor' ),
-		'WPCheckpoint\Restore\Queries'       => array( 'WPCheckpoint\Restore\ImportSession' ),
+		'WPCheckpoint\Restore\Queries'       => array( 'WPCheckpoint\Restore\ImportSession', 'WPCheckpoint\Restore\DeadlineQueries' ),
 		'WPCheckpoint\Jobs\Step'             => array( 'WPCheckpoint\Jobs\LeaveStep', 'WPCheckpoint\Jobs\WebSwapStep' ),
 		'WPCheckpoint\Jobs\JobType'          => array( 'WPCheckpoint\Jobs\WebRestoreJob' ),
 	);
@@ -86,7 +86,8 @@ final class WebPathScanTest extends TestCase {
 		'src/Jobs/JobContext.php:should_stop'      => array( 'WPCheckpoint\Jobs\Runner::context' ),
 		'src/Jobs/JobContext.php:confirm_lease'    => array( 'WPCheckpoint\Jobs\Runner::context' ),
 		'src/Jobs/JobContext.php:checkpoint'       => array( 'WPCheckpoint\Jobs\Runner::run_steps', 'WPCheckpoint\Jobs\Runner::__construct' ),
-		// SwapStep: its connect is WebRun's closure; its parts (test seams) WebRun gives none of.
+		// SwapStep: its connect is WebRun's closure; its parts (test seams) WebRun gives none of unless a test gives them
+		// through WebRun's own seams (the entries of b2 give none; the assembly test checks the default).
 		'src/Jobs/SwapStep.php:put_back_here'      => array( 'WPCheckpoint\Jobs\WebRun::runner' ),
 		'src/Jobs/SwapStep.php:at'                 => array(),
 		'src/Jobs/SwapStep.php:flush'              => array(),
@@ -114,6 +115,8 @@ final class WebPathScanTest extends TestCase {
 		'src/Jobs/JobStore.php:save_progress'      => array( 'WPCheckpoint\Jobs\WebJobs::__construct', 'WPCheckpoint\Jobs\PlainJson::encode', 'WPCheckpoint\Jobs\JobStore::cut_message' ),
 		'src/Jobs/JobStore.php:transition'         => array( 'WPCheckpoint\Jobs\WebJobs::__construct', 'WPCheckpoint\Jobs\PlainJson::encode' ), // No retry_check: WebJobs gives none (and refuses a retry).
 		'src/Jobs/JobStore.php:write_transition'   => array( 'WPCheckpoint\Support\Redactor::redact', 'WPCheckpoint\Jobs\JobStore::cut_message', 'WPCheckpoint\Jobs\PlainJson::encode' ),
+		// DeadlineQueries: its clock is the closure SwapStep::carry_back_here() gives (JobContext::elapsed()).
+		'src/Restore/DeadlineQueries.php:bound'    => array( 'WPCheckpoint\Jobs\SwapStep::carry_back_here' ),
 		// Logger: its fallback is the closure Runner::logger_for() gives.
 		'src/Support/Logger.php:write'             => array( 'WPCheckpoint\Jobs\Runner::logger_for' ),
 		// Closures their callers in the same class give; read with those callers.
@@ -303,6 +306,7 @@ final class WebPathScanTest extends TestCase {
 			$note
 		);
 		$runner  = $run->runner( $jobs );
+		$this->assertSame( array(), self::prop( $run, 'seams' ), 'no test seams: the swap\'s parts and the type\'s id are the defaults' );
 		$this->assertSame( 'site9_', self::prop( $run, 'prefix' ), 'the prefix is the settings\' (wp-config.php\'s $table_prefix)' );
 
 		// RunnerRepository => WebJobs; StoreExecutor => SessionExecutor; Queries => ImportSession.
@@ -312,6 +316,10 @@ final class WebPathScanTest extends TestCase {
 		$this->assertInstanceOf( SessionExecutor::class, $executor );
 		$this->assertSame( $session, self::prop( $executor, 'session' ) );
 		$this->assertSame( array( SessionExecutor::class ), self::BINDINGS[ StoreExecutor::class ] );
+		// Queries => ImportSession (above) and DeadlineQueries, which the swap makes over it for a carry back without
+		// WordPress, and only there (its use is shown by the integration tests of the carry in such a run).
+		$this->assertSame( array( ImportSession::class, \WPCheckpoint\Restore\DeadlineQueries::class ), self::BINDINGS[ \WPCheckpoint\Restore\Queries::class ] );
+		$this->assertSame( 1, substr_count( (string) file_get_contents( dirname( __DIR__, 3 ) . '/src/Jobs/SwapStep.php' ), 'new DeadlineQueries(' ) );
 
 		// JobType => WebRestoreJob; Step => LeaveStep, WebSwapStep; JobTypes( false ).
 		$types = self::prop( $runner, 'types' );

@@ -25,12 +25,21 @@ final class WebRestoreJob implements JobType {
 	private $swap;
 
 	/**
+	 * Type id.
+	 *
+	 * @var string
+	 */
+	private $id;
+
+	/**
 	 * Constructor.
 	 *
 	 * @param SwapStep $swap The swap, with a SwapHost made without WordPress.
+	 * @param string   $id   Type id: the restore's (a test registers its restore under an id of its own).
 	 */
-	public function __construct( SwapStep $swap ) {
+	public function __construct( SwapStep $swap, string $id = RestoreJob::ID ) {
 		$this->swap = new WebSwapStep( $swap );
+		$this->id   = $id;
 	}
 
 	/**
@@ -39,7 +48,7 @@ final class WebRestoreJob implements JobType {
 	 * @return string
 	 */
 	public function id(): string {
-		return RestoreJob::ID;
+		return $this->id;
 	}
 
 	/**

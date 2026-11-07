@@ -10,6 +10,7 @@ namespace WPCheckpoint\Jobs;
 use WPCheckpoint\Database\SqlWriter;
 use WPCheckpoint\Database\WpdbConnection;
 use WPCheckpoint\Files\ScanRoots;
+use WPCheckpoint\Restore\DeadlineQueries;
 use WPCheckpoint\Restore\ImportSession;
 use WPCheckpoint\Restore\IncomingTables;
 use WPCheckpoint\Restore\Ledger;
@@ -182,10 +183,17 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 
 	/**
 	 * Kinds of its units, for JobContext::may_start_unit(): a unit of the recount before the swap, a unit of a rollback
-	 * (one entry's renames).
+	 * (one entry's renames), a try of a rollback's carry back in a run made without WordPress (carry_back_here()).
 	 */
 	const UNIT_RECOUNT = 'restore_swap.recount';
 	const UNIT_BACK    = 'restore_swap.back';
+	const UNIT_CARRY   = 'restore_swap.carry_back';
+
+	/**
+	 * In a rollback's cursor, "busy_for" when the tries counted are the carry back's (a plan entry's sequence number is
+	 * never negative).
+	 */
+	const CARRY_SEQ = -1;
 
 	/**
 	 * How a put-back ends, recorded in its cursor ("ends") by the claim's own write (put_back_cursor()) and kept to its
@@ -1390,11 +1398,13 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @param array<string, mixed> $cursor  The rollback's cursor.
 	 * @param array{units: int}    $back    This run's units.
 	 * @param float                $wait    Seconds owed before the unit starts.
+	 * @param string               $kind    Its kind (UNIT_BACK, UNIT_CARRY), whose estimate before it is measured is
+	 *                                      LOCK_WAIT either way.
 	 * @return float When the unit started (JobContext::elapsed()).
 	 * @throws SwapPause When the run stops before the unit.
 	 */
-	private function unit_back( JobContext $context, array $cursor, array $back, float $wait = 0.0 ): float {
-		if ( ! $context->may_start_unit( self::UNIT_BACK, (float) self::LOCK_WAIT, $wait ) ) {
+	private function unit_back( JobContext $context, array $cursor, array $back, float $wait = 0.0, string $kind = self::UNIT_BACK ): float {
+		if ( ! $context->may_start_unit( $kind, (float) self::LOCK_WAIT, $wait ) ) {
 			$cursor['back'] = (int) ( $cursor['back'] ?? 0 ) + $back['units'];
 			$this->at( 'back_paused' );
 			throw new SwapPause( StepResult::progress( $cursor, 95, $this->host->putting_back() ) );
@@ -1469,11 +1479,12 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @param JobContext        $context Context.
 	 * @param array{units: int} $back    This run's units.
 	 * @param float             $started When it started.
+	 * @param string            $kind    Its kind.
 	 * @return void
 	 */
-	private function unit_done( JobContext $context, array &$back, float $started ): void {
+	private function unit_done( JobContext $context, array &$back, float $started, string $kind = self::UNIT_BACK ): void {
 		++$back['units'];
-		$context->unit_took( self::UNIT_BACK, $context->elapsed() - $started );
+		$context->unit_took( $kind, $context->elapsed() - $started );
 	}
 
 	/**
@@ -1520,12 +1531,12 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		$this->hold_for_renames( $context, $file, ! empty( $cursor['out'] ) );
 		$db->run( 'SET SESSION lock_wait_timeout = ' . self::LOCK_WAIT );
 		$there = $this->there( $db, $entries['tables'] );
-		$this->carry_back( $context, $db, $entries['tables'], $there, $cursor );
-		// One unit is one entry's renames (one RENAME statement, or one directory entry's renames): between units, a
-		// run whose budget is spent stops (unit_back()); the next goes on from what is there, as after a crash. The
-		// first unit of a tick always goes; after it, a unit starts only while the time left covers the slowest one so
-		// far with a margin (it may wait out a lock).
+		// One unit is one entry's renames (one RENAME statement, or one directory entry's renames), and in a run made
+		// without WordPress a try of the carry back: between units, a run whose budget is spent stops (unit_back()); the
+		// next goes on from what is there, as after a crash. The first unit of a tick always goes; after it, a unit
+		// starts only while the time left covers the slowest one so far with a margin (it may wait out a lock).
 		$back = array( 'units' => 0 );
+		$this->carry_back( $context, $db, $entries['tables'], $there, $cursor, $back );
 		foreach ( array_reverse( $entries['tables'] ) as $entry ) {
 			$pairs = SwapRules::table_back( $entry, $there, $this->stray_table( $context, $entry['live'] ) );
 			if ( SwapPlan::TABLE_OF === $entry['kind'] && $entry['had_live'] && ! isset( $there[ $entry['stage'] ] ) && isset( $there[ $entry['live'] ] ) && ! isset( $there[ $entry['old'] ] ) ) {
@@ -1636,14 +1647,16 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @param Queries                                                                                             $db      Connection.
 	 * @param array<int, array{seq: int, kind: string, live: string, stage: string, old: string, had_live: bool}> $tables  Table entries.
 	 * @param array<string, bool>                                                                                 $there   Which of their names are there.
-	 * @param array<string, mixed>                                                                                $cursor  The rollback's cursor.
+	 * @param array<string, mixed>                                                                                $cursor  The rollback's cursor (in a run made without WordPress, its tries; by reference).
+	 * @param array{units: int}                                                                                   $back    This run's units (by reference).
 	 * @return void
-	 * @throws SwapPause When the undo asks how to go on.
+	 * @throws SwapPause When the undo asks how to go on, or a run without WordPress stops before a try.
 	 * @throws TransientFailure When the carry fails for a moment (the put-back goes on later).
+	 * @throws TablesBusy In a run made without WordPress, when the carry's locks stayed taken through every try.
 	 * @throws LockLost When the job is no longer this run's.
 	 * @throws StaleJob When the job changed meanwhile.
 	 */
-	private function carry_back( JobContext $context, Queries $db, array $tables, array $there, array $cursor ): void {
+	private function carry_back( JobContext $context, Queries $db, array $tables, array $there, array &$cursor, array &$back ): void {
 		$pairs = array();
 		foreach ( $tables as $entry ) {
 			if ( SwapPlan::TABLE_OF !== $entry['kind'] || ! $entry['had_live'] || ! isset( $there[ $entry['live'] ], $there[ $entry['old'] ] ) || isset( $there[ $entry['stage'] ] ) ) {
@@ -1666,11 +1679,19 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			return;
 		}
 		try {
-			$this->state_carry( $db )->carry_back( $pairs['options']['live'], $pairs['options']['old'], null === $meta ? null : $meta['live'], null === $meta ? null : $meta['old'], $context->fence() );
+			if ( $this->host->web() ) {
+				$this->carry_back_here( $context, $db, $pairs['options'], $meta, $cursor, $back );
+			} else {
+				$this->state_carry( $db )->carry_back( $pairs['options']['live'], $pairs['options']['old'], null === $meta ? null : $meta['live'], null === $meta ? null : $meta['old'], $context->fence() );
+			}
 		} catch ( LockLost $e ) {
 			throw $e; // The run that takes the job over puts the site back.
 		} catch ( StaleJob $e ) {
 			throw $e;
+		} catch ( SwapPause $e ) {
+			throw $e; // A run without WordPress stopped before a try (its budget).
+		} catch ( TablesBusy $e ) {
+			throw $e; // Its tries spent: the rollback fails as the database being busy, never goes on without the carry.
 		} catch ( TransientFailure $e ) {
 			throw $e; // A problem of the moment: the put-back waits, its file held, and goes on.
 		} catch ( NotHere $e ) {
@@ -1696,6 +1717,76 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		}
 		$context->logger()->info( 'This plugin\'s own settings were carried back into the site as it was' );
 		$this->at( 'carried_back' );
+	}
+
+	/**
+	 * The carry back in a run made without WordPress: a unit (UNIT_CARRY, at most LOCK_WAIT), its statements bounded
+	 * by one deadline LOCK_WAIT after the try starts (DeadlineQueries: each sent only with a second left, the session's
+	 * lock waits set to the seconds left), however many it sends. A try that times out, or has no second left for a
+	 * statement, is rolled back whole (JobFence::within()) and counted as send_back() counts a rename's ("busy",
+	 * "busy_after", and "busy_for" CARRY_SEQ), checkpointed; the next try is a unit of its own, now or in a later run;
+	 * tries spent, the rollback fails as the database being busy (TablesBusy), the site held. Never put back without
+	 * the carry for that. The session's waits are put back after each try (lock_wait_timeout: LOCK_WAIT, as roll_back()
+	 * set it). Any other failure is the caller's, as in WP-CLI.
+	 *
+	 * @param JobContext                            $context Context.
+	 * @param Queries                               $db      Connection.
+	 * @param array{live: string, old: string}      $options The options table's names.
+	 * @param array{live: string, old: string}|null $meta    The sitemeta table's names, or null.
+	 * @param array<string, mixed>                  $cursor  The rollback's cursor (its tries, by reference).
+	 * @param array{units: int}                     $back    This run's units (by reference).
+	 * @return void
+	 * @throws SwapPause When the run stops before a try.
+	 * @throws TablesBusy When the locks stayed taken through every try.
+	 * @throws TransientFailure When a try failed for a moment otherwise (the caller's, as in WP-CLI).
+	 */
+	private function carry_back_here( JobContext $context, Queries $db, array $options, $meta, array &$cursor, array &$back ): void {
+		if ( ! isset( $cursor['busy_for'] ) || self::CARRY_SEQ !== (int) $cursor['busy_for'] ) {
+			unset( $cursor['busy'], $cursor['busy_after'], $cursor['busy_for'] ); // A rename's tries, or none.
+		}
+		$wait = (int) ( $db->rows( 'SELECT @@SESSION.innodb_lock_wait_timeout' )[0][0] ?? 0 );
+		while ( true ) {
+			$owed = min( max( self::RETRIES ), max( 0, (int) ( $cursor['busy_after'] ?? 0 ) - $this->now() ) );
+			$this->unit_back( $context, $cursor, $back, (float) $owed, self::UNIT_CARRY );
+			if ( $owed > 0 ) {
+				$this->sleep( $owed );
+			}
+			$started = $context->elapsed();
+			$bounded = new DeadlineQueries(
+				$db,
+				static function () use ( $context ): float {
+					return $context->elapsed();
+				},
+				$started + self::LOCK_WAIT
+			);
+			try {
+				$this->state_carry( $bounded )->carry_back( $options['live'], $options['old'], null === $meta ? null : $meta['live'], null === $meta ? null : $meta['old'], $context->fence() );
+				$this->unit_done( $context, $back, $started, self::UNIT_CARRY );
+				unset( $cursor['busy'], $cursor['busy_after'], $cursor['busy_for'] );
+				return;
+			} catch ( TransientFailure $e ) {
+				if ( 1205 !== $e->getCode() ) {
+					throw $e;
+				}
+				$this->unit_done( $context, $back, $started, self::UNIT_CARRY );
+				$tries = (int) ( $cursor['busy'] ?? 0 ) + 1;
+				if ( $tries > count( self::RETRIES ) ) {
+					unset( $cursor['busy'], $cursor['busy_after'], $cursor['busy_for'] );
+					$context->checkpoint( $cursor, 95, $this->host->putting_back() );
+					throw new TablesBusy( sprintf( 'The database is busy: this plugin\'s settings could not be carried back through %d tries.', $tries ) );
+				}
+				$cursor['busy']       = $tries;
+				$cursor['busy_for']   = self::CARRY_SEQ;
+				$cursor['busy_after'] = $this->now() + self::RETRIES[ $tries - 1 ];
+				$context->checkpoint( $cursor, 95, $this->host->putting_back() );
+				$this->at( 'carry_back_busy' );
+			} finally {
+				if ( $wait > 0 ) {
+					$db->run( 'SET SESSION innodb_lock_wait_timeout = ' . $wait );
+				}
+				$db->run( 'SET SESSION lock_wait_timeout = ' . self::LOCK_WAIT );
+			}
+		}
 	}
 
 	/**
