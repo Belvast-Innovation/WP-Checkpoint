@@ -26,9 +26,32 @@ final class JobsTableTest extends TestCase {
 	}
 
 	public function test_the_fence_locks_the_table_the_runner_gives(): void {
+		$this->assertSame(
+			array(
+				'table' => 'other_wpcheckpoint_jobs',
+				'id'    => 5,
+				'token' => 'token',
+			),
+			self::context( array( 'table' => 'other_wpcheckpoint_jobs' ) )->fence()
+		);
+	}
+
+	public function test_without_a_table_the_fence_refuses_and_reads_none(): void {
+		$this->expectException( \LogicException::class );
+		$this->expectExceptionMessage( 'The jobs table was not given to this context.' );
+		self::context( array() )->fence();
+	}
+
+	/**
+	 * A context in a run (its token), with these facts.
+	 *
+	 * @param array<string, bool|string> $facts Facts.
+	 * @return JobContext
+	 */
+	private static function context( array $facts ): JobContext {
 		$job     = new Job();
 		$job->id = 5;
-		$context = new JobContext(
+		return new JobContext(
 			$job,
 			array(),
 			new Budget( 20, 32 * 1048576, false ),
@@ -43,20 +66,9 @@ final class JobsTableTest extends TestCase {
 			-1,
 			null,
 			null,
-			array(
-				'cli'   => false,
-				'table' => 'other_wpcheckpoint_jobs',
-			),
+			array_merge( array( 'cli' => false ), $facts ),
 			null,
 			'token'
-		);
-		$this->assertSame(
-			array(
-				'table' => 'other_wpcheckpoint_jobs',
-				'id'    => 5,
-				'token' => 'token',
-			),
-			$context->fence()
 		);
 	}
 }

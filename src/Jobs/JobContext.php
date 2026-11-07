@@ -132,7 +132,8 @@ final class JobContext {
 	private $checkpointed_at;
 
 	/**
-	 * The jobs table, as the Runner's storage says it (RunnerRepository::jobs_table()); '' for JobRepository's.
+	 * The jobs table, as the Runner's storage says it (RunnerRepository::jobs_table()); '' when none was given (fence()
+	 * then refuses).
 	 *
 	 * @var string
 	 */
@@ -245,14 +246,21 @@ final class JobContext {
 	 * The job row and the run's token, for a write outside the job row to be conditioned on or locked under
 	 * (Restore\JobFence).
 	 *
+	 * The table is the one the Runner gives (its storage's, RunnerRepository::jobs_table()); none is read here, so
+	 * that a run made without WordPress locks the table its own storage names.
+	 *
 	 * @return array{table: string, id: int, token: string}
-	 * @throws \LogicException Outside a run.
+	 * @throws \LogicException Outside a run, or when no table was given.
 	 */
 	public function fence(): array {
+		$token = $this->lock_token();
+		if ( '' === $this->table ) {
+			throw new \LogicException( 'The jobs table was not given to this context.' );
+		}
 		return array(
-			'table' => '' !== $this->table ? $this->table : JobRepository::table(),
+			'table' => $this->table,
 			'id'    => $this->job->id,
-			'token' => $this->lock_token(),
+			'token' => $token,
 		);
 	}
 

@@ -20,9 +20,10 @@ final class JobsTableNameTest extends WP_UnitTestCase {
 		$before  = $wpdb->base_prefix . 'wpcheckpoint_jobs'; // How the name was made before Schema::jobs_table_for().
 		$session = ImportSession::open( Credentials::from_wordpress() );
 		try {
+			// A run without WordPress takes the prefix from the settings (wp-config.php's $table_prefix, WebRun).
 			$web = new WebJobs(
 				$session,
-				(string) $wpdb->base_prefix,
+				Credentials::from_wordpress()->get( 'prefix' ),
 				ABSPATH,
 				static function ( string $line ): void {
 					unset( $line );

@@ -2282,9 +2282,8 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @return \RuntimeException Cancelled, Undone or RetryFrom.
 	 */
 	private function ended( JobContext $context, string $reason, string $check = '', bool $undone = false, array $cursor = array() ): \RuntimeException {
-		$found = self::after_undo_text( $cursor );
 		if ( self::put_back_cancels( $cursor ) ) {
-			return $this->put_back_ended( $context, $cursor, $found );
+			return $this->put_back_ended( $context, $cursor );
 		}
 		$redo = self::redo_at( $cursor );
 		if ( $redo > 0 ) {
@@ -2299,7 +2298,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		}
 		$text = self::REASONS[ $reason ] ?? $reason;
 		if ( $undone ) {
-			return $this->undone_ended( $context, $text, $cursor, $found );
+			return $this->undone_ended( $context, $text, $cursor );
 		}
 		if ( self::REVERSED === $reason || self::UNDONE === $reason ) {
 			// The restored copy is kept under its temporary names, next to the site, for a retry (the engine reclaims
@@ -2316,12 +2315,12 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 *
 	 * @param JobContext           $context Context.
 	 * @param array<string, mixed> $cursor  The put-back's last cursor.
-	 * @param string               $found   What the check of the site as put back found ('' when it passed).
 	 * @return \RuntimeException
 	 * @throws SwapPause With StepResult::leave() in a run made without WordPress.
 	 */
-	private function put_back_ended( JobContext $context, array $cursor, string $found ): \RuntimeException {
+	private function put_back_ended( JobContext $context, array $cursor ): \RuntimeException {
 		$this->cli_only( 'put_back_ended' );
+		$found = self::after_undo_text( $cursor ); // What the check of the site as put back found ('' when it passed).
 		// A put-back that ends cancelled (as its claim recorded in the cursor, whatever the cancel request says now);
 		// what the check of the site as put back found is said with it. One whose cursor could not be read keeps its
 		// restored copy.
@@ -2360,12 +2359,12 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @param JobContext           $context Context.
 	 * @param string               $text    Why it was rolled back, in words.
 	 * @param array<string, mixed> $cursor  The undo's last cursor.
-	 * @param string               $found   What the check of the site as put back found ('' when it passed).
 	 * @return \RuntimeException
 	 * @throws SwapPause With StepResult::leave() in a run made without WordPress.
 	 */
-	private function undone_ended( JobContext $context, string $text, array $cursor, string $found ): \RuntimeException {
+	private function undone_ended( JobContext $context, string $text, array $cursor ): \RuntimeException {
 		$this->cli_only( 'undone_ended' );
+		$found = self::after_undo_text( $cursor ); // What the check of the site as put back found ('' when it passed).
 		// What was written on the restored site since it was let out went with it, so nothing offers it as a retry:
 		// a retry from the final check would also fail (the copy is no longer what the import left).
 		// The message stays short (the job's progress message holds it); the reason is in the log (reverse()).
