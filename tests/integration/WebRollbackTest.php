@@ -285,7 +285,7 @@ final class WebRollbackTest extends SwapTestCase {
 			}
 		}
 		$this->assertSame( TickResult::LEFT, end( $results ), 'left after every retry: ' . implode( ', ', $results ) );
-		$this->assertGreaterThan( \WPCheckpoint\Jobs\Runner::MAX_RETRIES, count( $results ) - 1, 'the control: it waited out each retry first: ' . implode( ', ', $results ) );
+		$this->assertSame( \WPCheckpoint\Jobs\Runner::MAX_RETRIES, count( array_keys( $results, TickResult::WAITING, true ) ), 'the control: it waited out each retry first: ' . implode( ', ', $results ) );
 		$this->assertTrue( $result->held_up );
 		$now = Plugin::instance()->jobs()->find( $job->id );
 		$this->assertNotSame( Job::FAILED, $now->status, (string) $now->last_error );
