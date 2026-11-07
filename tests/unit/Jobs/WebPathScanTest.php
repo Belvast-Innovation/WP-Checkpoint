@@ -7,6 +7,7 @@ use WPCheckpoint\Jobs\JobStore;
 use WPCheckpoint\Jobs\JobType;
 use WPCheckpoint\Jobs\PlainJson;
 use WPCheckpoint\Jobs\RestoreJob;
+use WPCheckpoint\Jobs\RunnerTexts;
 use WPCheckpoint\Jobs\SessionExecutor;
 use WPCheckpoint\Jobs\Step;
 use WPCheckpoint\Jobs\StoreExecutor;
@@ -246,6 +247,36 @@ final class WebPathScanTest extends TestCase {
 	}
 
 	/**
+	 * The texts a call put through __() (the unit suite's stand-in counts them), after checking that it returned the
+	 * given text.
+	 *
+	 * @param callable $call What gives the text.
+	 * @param string   $text What it must give.
+	 * @return array<string, int>
+	 */
+	private function translated( callable $call, string $text ): array {
+		$GLOBALS['wpcheckpoint_test_translated'] = array();
+		$this->assertSame( $text, call_user_func( $call ) );
+		$seen = $GLOBALS['wpcheckpoint_test_translated'];
+		unset( $GLOBALS['wpcheckpoint_test_translated'] );
+		return $seen;
+	}
+
+	public function test_the_count_of_translated_texts_sees_a_call_of_translation(): void {
+		// The control of translated(): a text that does go through __() is seen.
+		$this->assertSame(
+			array( 'Putting the site back as it was' => 1 ),
+			$this->translated(
+				static function (): string {
+					return __( 'Putting the site back as it was', 'wp-checkpoint' );
+				},
+				'Putting the site back as it was'
+			)
+		);
+		$this->assertSame( array( 'The job is waiting for your decision.' => 1 ), $this->translated( array( new RunnerTexts( true ), 'waiting' ), 'The job is waiting for your decision.' ) );
+	}
+
+	/**
 	 * What the registries say of the assembly is what WebRun makes: each interface bound to the class given for it,
 	 * each default of WordPress's cut or allowed because WebRun gives its own, each callable registered as going where
 	 * it goes.
@@ -306,9 +337,9 @@ final class WebPathScanTest extends TestCase {
 		$this->assertSame( 0, $host->network_id() );
 		$this->assertSame( 'wp-checkpoint/wp-checkpoint.php', $host->plugin() );
 		$this->assertFalse( $host->can_flush(), 'WebRun was given no flush' );
-		// The two texts of SwapHost (ALLOWED): English, __() not called (it is not defined here).
-		$this->assertSame( 'Putting the site back as it was', $host->putting_back() );
-		$this->assertSame( 'The site is as it was before the restore', $host->as_before() );
+		// The two texts of SwapHost (ALLOWED): English, not through __() (the unit suite's stand-in counts its texts).
+		$this->assertSame( array(), $this->translated( array( $host, 'putting_back' ), 'Putting the site back as it was' ) );
+		$this->assertSame( array(), $this->translated( array( $host, 'as_before' ), 'The site is as it was before the restore' ) );
 		$this->assertSame( array(), self::prop( $swap, 'parts' ) );
 		$this->assertInstanceOf( \Closure::class, self::prop( $swap, 'connect' ) );
 
@@ -326,9 +357,10 @@ final class WebPathScanTest extends TestCase {
 		$this->assertNull( self::prop( $runner, 'on_persist' ) );
 		$this->assertSame( WebRun::bytes( (string) ini_get( 'memory_limit' ) ), self::prop( $runner, 'memory_limit' ), 'given: hr_to_bytes is not called' );
 		$this->assertSame( array( '{abspath}', '{wp-content}' ), array_keys( self::prop( $runner, 'paths' ) ), 'given: the default (WP_CONTENT_DIR) is not read' );
-		// RunnerTexts( false ) (ALLOWED): untranslated, __() not called (it is not defined here).
-		$this->assertFalse( self::prop( self::prop( $runner, 'texts' ), 'translate' ) );
-		$this->assertSame( 'The job is waiting for your decision.', self::prop( $runner, 'texts' )->waiting() );
+		// RunnerTexts( false ) (ALLOWED): untranslated, not through __().
+		$texts = self::prop( $runner, 'texts' );
+		$this->assertFalse( self::prop( $texts, 'translate' ) );
+		$this->assertSame( array(), $this->translated( array( $texts, 'waiting' ), 'The job is waiting for your decision.' ) );
 		$this->assertTrue( self::prop( $runner, 'web' ) );
 		$this->assertFalse( self::prop( $runner, 'cli' ) );
 

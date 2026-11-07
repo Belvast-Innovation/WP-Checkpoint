@@ -38,7 +38,10 @@ if ( ! defined( 'ABSPATH' ) ) {
 if ( ! function_exists( '__' ) ) {
 	/**
 	 * Translation stand-in for the unit suite: steps label their progress
-	 * with translatable strings and are otherwise pure PHP.
+	 * with translatable strings and are otherwise pure PHP. Each text it is
+	 * given is counted in $GLOBALS['wpcheckpoint_test_translated'], so that
+	 * a test can tell a text that went through __() from one that did not
+	 * (a run made without WordPress must not call it).
 	 *
 	 * @param string $text   Text.
 	 * @param string $domain Text domain (ignored).
@@ -46,6 +49,7 @@ if ( ! function_exists( '__' ) ) {
 	 */
 	function __( string $text, string $domain = 'default' ): string { // phpcs:ignore WordPress.WP.I18n.NonSingularStringLiteralText,Universal.Files.SeparateFunctionsFromOO.Mixed -- test stand-in.
 		unset( $domain );
+		$GLOBALS['wpcheckpoint_test_translated'][ $text ] = ( $GLOBALS['wpcheckpoint_test_translated'][ $text ] ?? 0 ) + 1;
 		return $text;
 	}
 
