@@ -1751,7 +1751,9 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * can end past the deadline, and a statement's own work is not bounded, see there), however many it sends; a wait
 	 * owed before the try is not in it. A try that times out, or has no second left for a
 	 * statement, is rolled back whole (JobFence::within()) and counted as send_back() counts a rename's ("busy",
-	 * "busy_after", and "busy_for" CARRY_SEQ), checkpointed; the next try is a unit of its own, now or in a later run;
+	 * "busy_after", and "busy_for" CARRY_SEQ), checkpointed (tries recorded for a rename are not the carry's: it counts
+	 * from zero and leaves them as they are, until it records a try of its own in their place); the next try is a unit
+	 * of its own, now or in a later run;
 	 * tries spent, the job is left to WP-CLI as it is, held up (held_up()), the site held. Never put back without the
 	 * carry for that. The session's waits are put back after each try (lock_wait_timeout: LOCK_WAIT, as roll_back()
 	 * set it). Any other failure is the caller's, as in WP-CLI.
@@ -1767,12 +1769,12 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @throws TransientFailure When a try failed for a moment otherwise (the caller's, as in WP-CLI).
 	 */
 	private function carry_back_here( JobContext $context, Queries $db, array $options, $meta, array &$cursor, array &$back ): void {
-		if ( ! isset( $cursor['busy_for'] ) || self::CARRY_SEQ !== (int) $cursor['busy_for'] ) {
-			unset( $cursor['busy'], $cursor['busy_after'], $cursor['busy_for'] ); // A rename's tries, or none.
-		}
+		// Only the carry's own tries count here; a rename's recorded tries are left as they are (the carry runs again at
+		// every run of the rollback, before the units, and must not start a rename's count over each time).
 		$wait = (int) ( $db->rows( 'SELECT @@SESSION.innodb_lock_wait_timeout' )[0][0] ?? 0 );
 		while ( true ) {
-			$owed = min( max( self::RETRIES ), max( 0, (int) ( $cursor['busy_after'] ?? 0 ) - $this->now() ) );
+			$own  = isset( $cursor['busy_for'] ) && self::CARRY_SEQ === (int) $cursor['busy_for'];
+			$owed = $own ? min( max( self::RETRIES ), max( 0, (int) ( $cursor['busy_after'] ?? 0 ) - $this->now() ) ) : 0;
 			$this->unit_back( $context, $cursor, $back, (float) $owed, self::UNIT_CARRY );
 			if ( $owed > 0 ) {
 				$this->sleep( $owed );
@@ -1788,14 +1790,16 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			try {
 				$this->state_carry( $bounded )->carry_back( $options['live'], $options['old'], null === $meta ? null : $meta['live'], null === $meta ? null : $meta['old'], $context->fence() );
 				$this->unit_done( $context, $back, $started, self::UNIT_CARRY );
-				unset( $cursor['busy'], $cursor['busy_after'], $cursor['busy_for'] );
+				if ( $own ) {
+					unset( $cursor['busy'], $cursor['busy_after'], $cursor['busy_for'] ); // As stored, they name the carry.
+				}
 				return;
 			} catch ( TransientFailure $e ) {
 				if ( 1205 !== $e->getCode() ) {
 					throw $e;
 				}
 				$this->unit_done( $context, $back, $started, self::UNIT_CARRY );
-				$tries = (int) ( $cursor['busy'] ?? 0 ) + 1;
+				$tries = ( $own ? (int) ( $cursor['busy'] ?? 0 ) : 0 ) + 1; // A rename's count gives way to the carry's.
 				if ( $tries > count( self::RETRIES ) ) {
 					throw $this->held_up( $context, self::CARRY_SEQ, $tries ); // Only a run without WordPress comes here.
 				}
