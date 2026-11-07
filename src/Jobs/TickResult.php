@@ -55,6 +55,14 @@ final class TickResult {
 	public $message;
 
 	/**
+	 * LEFT only: whether the run was held up (a step's StepResult::held_up(), or a TransientFailure through every retry
+	 * in a run without WordPress): the next such run comes later and later (WebPace).
+	 *
+	 * @var bool
+	 */
+	public $held_up = false;
+
+	/**
 	 * Constructor.
 	 *
 	 * @param string   $status      Status.

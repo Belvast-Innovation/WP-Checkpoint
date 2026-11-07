@@ -65,6 +65,14 @@ final class StepResult {
 	public $questions = array();
 
 	/**
+	 * LEAVE only: whether the job was left because what it waits for stayed taken through every try (a lock), so that
+	 * the next run without WordPress comes later and later (WebPace), not at once.
+	 *
+	 * @var bool
+	 */
+	public $held_up = false;
+
+	/**
 	 * Constructor.
 	 *
 	 * @param string               $kind    Kind.
@@ -158,5 +166,17 @@ final class StepResult {
 	 */
 	public static function leave( string $message ): StepResult {
 		return new self( self::LEAVE, array(), 0, $message, 0 );
+	}
+
+	/**
+	 * Leave the job as leave() does, held up: what it waits for stayed taken through every try (StepResult::$held_up).
+	 *
+	 * @param string $message Why (English).
+	 * @return StepResult
+	 */
+	public static function held_up( string $message ): StepResult {
+		$result          = new self( self::LEAVE, array(), 0, $message, 0 );
+		$result->held_up = true;
+		return $result;
 	}
 }

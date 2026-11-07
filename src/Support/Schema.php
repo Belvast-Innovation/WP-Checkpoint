@@ -113,7 +113,17 @@ final class Schema {
 	 */
 	public static function jobs_table(): string {
 		global $wpdb;
-		return $wpdb->base_prefix . self::JOBS_TABLE;
+		return self::jobs_table_for( (string) $wpdb->base_prefix );
+	}
+
+	/**
+	 * The jobs table for a table prefix: the one place its name is made (jobs_table() in WordPress, WebJobs without it).
+	 *
+	 * @param string $base_prefix The table prefix of the network (or the site).
+	 * @return string
+	 */
+	public static function jobs_table_for( string $base_prefix ): string {
+		return $base_prefix . self::JOBS_TABLE;
 	}
 
 	/**

@@ -8,6 +8,7 @@
 namespace WPCheckpoint\Jobs;
 
 use WPCheckpoint\Support\Schema;
+use WPCheckpoint\Support\Utf8;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -111,6 +112,24 @@ final class JobStore {
 		$this->fit          = $fit;
 		$this->no_secrets   = $no_secrets;
 		$this->fence_absent = $fence_absent;
+	}
+
+	/**
+	 * A progress message cut to the 191 characters of its column (varchar(191)), at a word's end: a path, a host or a
+	 * secret cut in two would no longer be recognised by the masks the text passes through on its way out, and its
+	 * first part would show. What the column's character set cannot store is the caller's (wpdb strips it in
+	 * WordPress: JobRepository::fit_message()).
+	 *
+	 * @param string $message Message.
+	 * @return string
+	 */
+	public static function cut_message( string $message ): string {
+		$message = Utf8::scrub( $message );
+		if ( mb_strlen( $message, 'UTF-8' ) > 191 ) {
+			$cut     = preg_replace( '/\s+\S*\z/u', '', mb_substr( $message, 0, 192, 'UTF-8' ) );
+			$message = is_string( $cut ) && mb_strlen( $cut, 'UTF-8' ) <= 191 ? rtrim( $cut ) : '';
+		}
+		return $message;
 	}
 
 	/**
@@ -466,6 +485,83 @@ final class JobStore {
 	private function cancel_requested( int $id ): int {
 		$rows = $this->db->select( "SELECT cancel_requested FROM {$this->table} WHERE id = %d", array( $id ) );
 		return is_array( $rows ) && isset( $rows[0]['cancel_requested'] ) ? (int) $rows[0]['cancel_requested'] : 0;
+	}
+
+	/**
+	 * Move a job to another status (JobRepository::transition(), see there): the checks, the step a retry starts at and
+	 * the answers to forget, then the write (write_transition()); without the lock file, which the caller removes when
+	 * the job ended.
+	 *
+	 * @param Job           $job         Job (updated in place on success).
+	 * @param string        $to          Target status.
+	 * @param string        $error       Error message for failed.
+	 * @param string        $token       Lock token.
+	 * @param string        $failure     Kind of failure for failed.
+	 * @param string        $retry_from  For failed: the step a retry starts at.
+	 * @param string[]      $forget      For failed: answers a retry asks again.
+	 * @param int           $at          For undone: the time it was undone at.
+	 * @param string        $retry_key   The cursor key that names the step a retry starts from.
+	 * @param callable|null $retry_check function( Job ): void, before a retry (to queued from failed); throws when it may not.
+	 * @return Job
+	 * @throws InvalidTransition When the state machine forbids the move or the token is missing.
+	 * @throws StaleJob When the row is no longer the job as read.
+	 * @throws \RuntimeException When the cursor or the options cannot be encoded.
+	 */
+	public function transition( Job $job, string $to, string $error, string $token, string $failure, string $retry_from, array $forget, int $at, string $retry_key, $retry_check = null ): Job {
+		if ( '' === $token && Job::RUNNING === $job->status && Job::CANCELLED !== $to ) {
+			throw new InvalidTransition( sprintf( 'Job %d: leaving running for %s requires the lock token.', $job->id, $to ) );
+		}
+		if ( Job::UNDONE === $job->status ) {
+			throw new InvalidTransition( sprintf( 'Job %d was undone: an undone restore is not run again.', $job->id ) );
+		}
+		if ( Job::QUEUED === $to && Job::FAILED === $job->status ) {
+			if ( is_callable( $retry_check ) ) {
+				call_user_func( $retry_check, $job );
+			}
+		}
+		$answers = isset( $job->options['answers'] ) && is_array( $job->options['answers'] ) ? $job->options['answers'] : array();
+		$forget  = array_values( array_intersect( array_map( 'strval', $forget ), array_map( 'strval', array_keys( $answers ) ) ) );
+		if ( '' === $retry_from && array() === $forget ) {
+			return $this->write_transition( $job, $to, $error, $token, array(), array(), $failure, $at, $retry_key );
+		}
+		if ( Job::FAILED !== $to ) {
+			throw new InvalidTransition( sprintf( 'Job %d: only a failure names a step to retry from or an answer to forget.', $job->id ) );
+		}
+		$extra   = array();
+		$cursor  = null;
+		$options = null;
+		if ( '' !== $retry_from ) {
+			$cursor               = $job->cursor;
+			$cursor[ $retry_key ] = $retry_from;
+			call_user_func( $this->no_secrets, $cursor );
+			$json = call_user_func( $this->encode, $cursor );
+			if ( false === $json ) {
+				throw new \RuntimeException( sprintf( 'Job %d: its cursor cannot be written.', $job->id ) );
+			}
+			$extra['cursor_json'] = $json;
+		}
+		if ( array() !== $forget ) {
+			$options = $job->options;
+			foreach ( $forget as $question ) {
+				unset( $options['answers'][ $question ] );
+			}
+			if ( array() === $options['answers'] ) {
+				unset( $options['answers'] );
+			}
+			$json = call_user_func( $this->encode, $options );
+			if ( false === $json ) {
+				throw new \RuntimeException( sprintf( 'Job %d: its options cannot be written.', $job->id ) );
+			}
+			$extra['options_json'] = $json;
+		}
+		$job = $this->write_transition( $job, $to, $error, $token, $extra, array_fill( 0, count( $extra ), '%s' ), $failure, 0, $retry_key );
+		if ( null !== $cursor ) {
+			$job->cursor = $cursor;
+		}
+		if ( null !== $options ) {
+			$job->options = $options;
+		}
+		return $job;
 	}
 
 	/**

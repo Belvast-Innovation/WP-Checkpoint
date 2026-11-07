@@ -21,7 +21,7 @@ interface RunnerRepository {
 	 * of its job with them, on every path: a transition follows a written cursor when the last step is done, or when a
 	 * step's questions are refused); any other method may be one a storage cannot do here.
 	 */
-	const BASIC = array( 'now', 'find', 'gate', 'acquire', 'heartbeat', 'release', 'save_progress', 'transition' );
+	const BASIC = array( 'now', 'jobs_table', 'find', 'gate', 'acquire', 'heartbeat', 'release', 'save_progress', 'transition' );
 
 	/**
 	 * Whether this storage can do one of its methods where it runs. The Runner asks before the first write of a path
@@ -40,6 +40,13 @@ interface RunnerRepository {
 	 * @return int
 	 */
 	public function now(): int;
+
+	/**
+	 * The jobs table (Schema::jobs_table_for()): what a step's fenced writes lock (JobContext::fence()).
+	 *
+	 * @return string
+	 */
+	public function jobs_table(): string;
 
 	/**
 	 * Load a job.
@@ -74,11 +81,13 @@ interface RunnerRepository {
 	public function reset_cron_deferrals( int $id ): void;
 
 	/**
-	 * Take a job: one compare-and-set.
+	 * Take a job: one compare-and-set. A storage may say "at_limit": the job stands where it was taken over
+	 * Runner::MAX_TAKEOVERS times (its count, and its mark is the position now) though this claim took no lease over
+	 * (WebJobs: after a run without WordPress left it at the limit and let its lease go).
 	 *
 	 * @param int $id    Job id.
 	 * @param int $lease Lock duration in seconds.
-	 * @return array{job: Job, token: string, healed: bool, taken_over: bool}|null
+	 * @return array{job: Job, token: string, healed: bool, taken_over: bool, at_limit?: bool}|null
 	 */
 	public function acquire( int $id, int $lease = JobRepository::LOCK_SECONDS );
 

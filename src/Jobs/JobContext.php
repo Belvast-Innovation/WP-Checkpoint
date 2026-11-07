@@ -132,6 +132,14 @@ final class JobContext {
 	private $checkpointed_at;
 
 	/**
+	 * The jobs table, as the Runner's storage says it (RunnerRepository::jobs_table()); '' when none was given (fence()
+	 * then refuses).
+	 *
+	 * @var string
+	 */
+	private $table = '';
+
+	/**
 	 * See is_cli().
 	 *
 	 * @var bool
@@ -141,20 +149,20 @@ final class JobContext {
 	/**
 	 * Constructor.
 	 *
-	 * @param Job                  $job             Job.
-	 * @param array<string, mixed> $cursor          Cursor (reserved keys are removed).
-	 * @param Budget               $budget          Budget.
-	 * @param Logger               $logger          Logger.
-	 * @param callable             $clock           Returns the current time (float seconds).
-	 * @param callable             $memory          Returns real memory usage in bytes.
-	 * @param float                $started_at      Start of the tick.
-	 * @param int                  $memory_limit    memory_limit in bytes; <= 0 unlimited or unknown.
-	 * @param callable|null        $checkpoint      function( array $cursor, int $percent, string $message ): void.
-	 * @param callable|null        $lease           function( bool $force ): void; throws LockLost when the lease is gone (see should_stop(), confirm_lease()).
-	 * @param array<string, bool>  $facts           What the Runner knows about this run: cli (see is_cli()).
-	 * @param callable|null        $record          function( string $key, mixed $value ): void; throws LockLost when the lease is gone (see record()).
-	 * @param string               $token           The run's lock token ('' outside a run: lock_token() then refuses).
-	 * @param TickUnits|null       $units           The tick's units, shared by every run in it (Runner); a tick of its own when null.
+	 * @param Job                        $job             Job.
+	 * @param array<string, mixed>       $cursor          Cursor (reserved keys are removed).
+	 * @param Budget                     $budget          Budget.
+	 * @param Logger                     $logger          Logger.
+	 * @param callable                   $clock           Returns the current time (float seconds).
+	 * @param callable                   $memory          Returns real memory usage in bytes.
+	 * @param float                      $started_at      Start of the tick.
+	 * @param int                        $memory_limit    memory_limit in bytes; <= 0 unlimited or unknown.
+	 * @param callable|null              $checkpoint      function( array $cursor, int $percent, string $message ): void.
+	 * @param callable|null              $lease           function( bool $force ): void; throws LockLost when the lease is gone (see should_stop(), confirm_lease()).
+	 * @param array<string, bool|string> $facts     What the Runner knows about this run: cli (see is_cli()), table (the jobs table, RunnerRepository::jobs_table()).
+	 * @param callable|null              $record          function( string $key, mixed $value ): void; throws LockLost when the lease is gone (see record()).
+	 * @param string                     $token           The run's lock token ('' outside a run: lock_token() then refuses).
+	 * @param TickUnits|null             $units           The tick's units, shared by every run in it (Runner); a tick of its own when null.
 	 */
 	public function __construct( Job $job, array $cursor, Budget $budget, Logger $logger, callable $clock, callable $memory, float $started_at, int $memory_limit, $checkpoint = null, $lease = null, array $facts = array(), $record = null, string $token = '', $units = null ) {
 		$this->job             = $job;
@@ -170,6 +178,7 @@ final class JobContext {
 		$this->checkpointed_at = $started_at;
 		$this->lease           = is_callable( $lease ) ? $lease : null;
 		$this->cli             = ! empty( $facts['cli'] );
+		$this->table           = isset( $facts['table'] ) && is_string( $facts['table'] ) ? $facts['table'] : '';
 		$this->record          = is_callable( $record ) ? $record : null;
 		$this->token           = $token;
 		$this->units           = $units instanceof TickUnits ? $units : new TickUnits();
@@ -237,14 +246,21 @@ final class JobContext {
 	 * The job row and the run's token, for a write outside the job row to be conditioned on or locked under
 	 * (Restore\JobFence).
 	 *
+	 * The table is the one the Runner gives (its storage's, RunnerRepository::jobs_table()); none is read here, so
+	 * that a run made without WordPress locks the table its own storage names.
+	 *
 	 * @return array{table: string, id: int, token: string}
-	 * @throws \LogicException Outside a run.
+	 * @throws \LogicException Outside a run, or when no table was given.
 	 */
 	public function fence(): array {
+		$token = $this->lock_token();
+		if ( '' === $this->table ) {
+			throw new \LogicException( 'The jobs table was not given to this context.' );
+		}
 		return array(
-			'table' => JobRepository::table(),
+			'table' => $this->table,
 			'id'    => $this->job->id,
-			'token' => $this->lock_token(),
+			'token' => $token,
 		);
 	}
 

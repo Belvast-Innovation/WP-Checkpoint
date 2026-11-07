@@ -15,6 +15,22 @@ defined( 'ABSPATH' ) || exit;
 final class JobTypes {
 
 	/**
+	 * Whether the types pass through the wpcheckpoint_job_types filter (in WordPress; a run without it has no filters).
+	 *
+	 * @var bool
+	 */
+	private $filtered;
+
+	/**
+	 * Constructor.
+	 *
+	 * @param bool $filtered Whether the types pass through the filter (false where WordPress is not loaded).
+	 */
+	public function __construct( bool $filtered = true ) {
+		$this->filtered = $filtered;
+	}
+
+	/**
 	 * Built-in types.
 	 *
 	 * @var JobType[]
@@ -42,7 +58,7 @@ final class JobTypes {
 		 *
 		 * @param JobType[] $types Types keyed by id.
 		 */
-		$filtered = apply_filters( 'wpcheckpoint_job_types', $this->builtin );
+		$filtered = $this->filtered ? apply_filters( 'wpcheckpoint_job_types', $this->builtin ) : $this->builtin;
 		$types    = array();
 		foreach ( (array) $filtered as $type ) {
 			if ( $type instanceof JobType && 1 === preg_match( '/^[a-z0-9_-]{1,64}$/', $type->id() ) ) {

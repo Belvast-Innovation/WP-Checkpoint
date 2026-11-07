@@ -7,7 +7,6 @@
 
 namespace WPCheckpoint\Jobs;
 
-use WPCheckpoint\Support\Utf8;
 use WPCheckpoint\Files\ScanRoots;
 use WPCheckpoint\Support\Deleter;
 use WPCheckpoint\Support\DeletionRefused;
@@ -85,7 +84,7 @@ final class JobRepository implements RunnerRepository {
 	const MAX_ROWS          = 1000;
 	const REAP_THROTTLE     = 600;
 	const PURGE_THROTTLE    = 86400;
-	const SECRET_MIN_LENGTH = 4;
+	const SECRET_MIN_LENGTH = CursorSecrets::MIN_LENGTH;
 	/**
 	 * A failed job keeps its work files this long after failing so it can
 	 * be retried; the row itself stays for RETENTION_SECONDS[failed].
@@ -261,6 +260,15 @@ final class JobRepository implements RunnerRepository {
 	 */
 	public static function table(): string {
 		return Schema::jobs_table();
+	}
+
+	/**
+	 * The jobs table (RunnerRepository::jobs_table()).
+	 *
+	 * @return string
+	 */
+	public function jobs_table(): string {
+		return self::table();
 	}
 
 	/**
@@ -2067,14 +2075,8 @@ final class JobRepository implements RunnerRepository {
 	 */
 	private static function fit_message( string $message ): string {
 		global $wpdb;
-		$message = Utf8::scrub( $message );
-		if ( mb_strlen( $message, 'UTF-8' ) > 191 ) {
-			// Cut at a word's end: a path, a host or a secret cut in two would no longer be recognised by the masks
-			// the text passes through on its way out, and its first part would show.
-			$cut     = preg_replace( '/\s+\S*\z/u', '', mb_substr( $message, 0, 192, 'UTF-8' ) );
-			$message = is_string( $cut ) && mb_strlen( $cut, 'UTF-8' ) <= 191 ? rtrim( $cut ) : '';
-		}
-		$stored = $wpdb->strip_invalid_text_for_column( self::table(), 'progress_message', $message );
+		$message = JobStore::cut_message( $message );
+		$stored  = $wpdb->strip_invalid_text_for_column( self::table(), 'progress_message', $message );
 		return is_string( $stored ) ? $stored : '';
 	}
 
@@ -2409,59 +2411,22 @@ final class JobRepository implements RunnerRepository {
 	 * @throws \RuntimeException When the cursor with the step to retry from, or the options, cannot be encoded.
 	 */
 	public function transition( Job $job, string $to, string $error = '', string $token = '', string $failure = '', string $retry_from = '', array $forget = array(), int $at = 0 ): Job {
-		if ( '' === $token && Job::RUNNING === $job->status && Job::CANCELLED !== $to ) {
-			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
-			throw new InvalidTransition( sprintf( 'Job %d: leaving running for %s requires the lock token.', $job->id, $to ) );
-		}
-		if ( Job::UNDONE === $job->status ) {
-			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
-			throw new InvalidTransition( sprintf( 'Job %d was undone: an undone restore is not run again.', $job->id ) );
-		}
-		if ( Job::QUEUED === $to && Job::FAILED === $job->status ) {
-			$this->check_retry( $job );
-		}
-		$answers = isset( $job->options['answers'] ) && is_array( $job->options['answers'] ) ? $job->options['answers'] : array();
-		$forget  = array_values( array_intersect( array_map( 'strval', $forget ), array_map( 'strval', array_keys( $answers ) ) ) );
-		if ( '' === $retry_from && array() === $forget ) {
-			return $this->write_transition( $job, $to, $error, $token, array(), array(), $failure, $at );
-		}
-		if ( Job::FAILED !== $to ) {
-			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
-			throw new InvalidTransition( sprintf( 'Job %d: only a failure names a step to retry from or an answer to forget.', $job->id ) );
-		}
-		$extra   = array();
-		$cursor  = null;
-		$options = null;
-		if ( '' !== $retry_from ) {
-			$cursor                         = $job->cursor;
-			$cursor[ self::RETRY_FROM_KEY ] = $retry_from;
-			self::assert_cursor_has_no_secrets( $cursor );
-			$json = wp_json_encode( $cursor );
-			if ( false === $json ) {
-				throw new \RuntimeException( sprintf( 'Job %d: its cursor cannot be written.', $job->id ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+		$job = $this->store()->transition(
+			$job,
+			$to,
+			$error,
+			$token,
+			$failure,
+			$retry_from,
+			$forget,
+			$at,
+			self::RETRY_FROM_KEY,
+			function ( Job $failed ): void {
+				$this->check_retry( $failed );
 			}
-			$extra['cursor_json'] = $json;
-		}
-		if ( array() !== $forget ) {
-			$options = $job->options;
-			foreach ( $forget as $question ) {
-				unset( $options['answers'][ $question ] );
-			}
-			if ( array() === $options['answers'] ) {
-				unset( $options['answers'] );
-			}
-			$json = wp_json_encode( $options );
-			if ( false === $json ) {
-				throw new \RuntimeException( sprintf( 'Job %d: its options cannot be written.', $job->id ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
-			}
-			$extra['options_json'] = $json;
-		}
-		$job = $this->write_transition( $job, $to, $error, $token, $extra, array_fill( 0, count( $extra ), '%s' ), $failure );
-		if ( null !== $cursor ) {
-			$job->cursor = $cursor;
-		}
-		if ( null !== $options ) {
-			$job->options = $options;
+		);
+		if ( in_array( $to, array( Job::COMPLETED, Job::FAILED, Job::CANCELLED, Job::UNDONE ), true ) ) {
+			$this->remove_lock_file( $job );
 		}
 		return $job;
 	}
@@ -3388,21 +3353,7 @@ final class JobRepository implements RunnerRepository {
 	 * @throws \InvalidArgumentException When a known secret appears in it.
 	 */
 	public static function assert_cursor_has_no_secrets( array $cursor, $secrets = null ): void {
-		$json = wp_json_encode( $cursor );
-		if ( ! is_string( $json ) ) {
-			throw new \InvalidArgumentException( 'Cursor cannot be encoded.' );
-		}
-		$user = defined( 'DB_USER' ) && is_string( DB_USER ) ? DB_USER : '';
-		foreach ( is_array( $secrets ) ? $secrets : Redactor::installation_secrets() as $secret ) {
-			if ( ! is_string( $secret ) || strlen( $secret ) < self::SECRET_MIN_LENGTH || ( '' !== $user && $secret === $user ) ) {
-				continue;
-			}
-			foreach ( Redactor::forms( $secret ) as $form ) {
-				if ( strlen( $form ) >= self::SECRET_MIN_LENGTH && false !== strpos( $json, $form ) ) {
-					throw new \InvalidArgumentException( 'Cursor must not contain credentials.' );
-				}
-			}
-		}
+		CursorSecrets::assert_none( wp_json_encode( $cursor ), $secrets );
 	}
 
 	/**
