@@ -65,6 +65,12 @@ final class RestoreJob implements JobType {
 	const ID = 'restore';
 
 	/**
+	 * The ids of the steps, in their order (steps() gives them so: RestoreJobStepsTest). step_ids() gives all but the
+	 * swap's; a run without WordPress takes them from here (WebRestoreJob), not from steps(), which makes every step.
+	 */
+	const STEPS = array( RestorePlatformStep::ID, RestoreVerifyStep::ID, RestorePreflightStep::ID, RestoreFilesPreflightStep::ID, DatabaseImportStep::ID, PrefixRewriteStep::ID, FileStagingStep::ID, SwapCheckStep::ID, SwapStep::ID );
+
+	/**
 	 * Most tables a restore may leave out (names of at most Manifest::MAX_TABLE_NAME bytes each).
 	 */
 	const MAX_EXCLUDED = 10000;
@@ -148,7 +154,7 @@ final class RestoreJob implements JobType {
 	 * @return string[]
 	 */
 	public function step_ids(): array {
-		return array( RestorePlatformStep::ID, RestoreVerifyStep::ID, RestorePreflightStep::ID, RestoreFilesPreflightStep::ID, DatabaseImportStep::ID, PrefixRewriteStep::ID, FileStagingStep::ID, SwapCheckStep::ID );
+		return array_slice( self::STEPS, 0, -1 );
 	}
 
 	/**

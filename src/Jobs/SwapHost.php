@@ -92,14 +92,18 @@ final class SwapHost {
 				global $wpdb;
 				return (string) $wpdb->base_prefix;
 			},
-			'is_multisite',
+			static function (): bool {
+				return is_multisite();
+			},
 			static function (): int {
 				return is_multisite() ? (int) get_current_network_id() : 0;
 			},
 			static function (): string {
 				return plugin_basename( WPCHECKPOINT_FILE );
 			},
-			'wp_cache_flush'
+			static function () {
+				return wp_cache_flush();
+			}
 		);
 	}
 

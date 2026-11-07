@@ -189,6 +189,27 @@ final class Runner {
 	private $clean;
 
 	/**
+	 * Writes a job's log line to PHP's log when its own log cannot be written: function( string $line, array $extra ): void.
+	 *
+	 * @var callable
+	 */
+	private $php_log;
+
+	/**
+	 * Makes the mask of a job's log: function( Redactor $redactor, array $extra ): TextMask.
+	 *
+	 * @var callable
+	 */
+	private $mask;
+
+	/**
+	 * The budget when none is given: function( int $memory_at_start ): Budget.
+	 *
+	 * @var callable
+	 */
+	private $probe;
+
+	/**
 	 * The units of the tick under way (TickUnits) and the job it is for: kept with the job's cursor by persist()
 	 * (UNITS_KEY), so the next tick judges by what this one measured.
 	 *
@@ -233,13 +254,15 @@ final class Runner {
 			'{abspath}'    => rtrim( ABSPATH, '/\\' ),
 			'{wp-content}' => WP_CONTENT_DIR,
 		);
-		$this->clean      = isset( $options['clean'] ) && is_callable( $options['clean'] ) ? $options['clean'] : static function ( string $text ): string {
-			return Plugin::instance()->job_presenter()->clean( $text );
-		};
-		$this->texts      = isset( $options['texts'] ) && $options['texts'] instanceof RunnerTexts ? $options['texts'] : new RunnerTexts();
-		$this->encode     = isset( $options['encode'] ) && is_callable( $options['encode'] ) ? $options['encode'] : 'wp_json_encode';
-		$this->web        = ! empty( $options['web'] );
-		$this->on_left    = isset( $options['on_left'] ) && is_callable( $options['on_left'] ) ? $options['on_left'] : null;
+		// WordPress's defaults are callables, never called here: a run without WordPress gives its own (and is read so).
+		$this->clean   = isset( $options['clean'] ) && is_callable( $options['clean'] ) ? $options['clean'] : array( self::class, 'wordpress_clean' );
+		$this->php_log = isset( $options['php_log'] ) && is_callable( $options['php_log'] ) ? $options['php_log'] : array( self::class, 'to_php_log' );
+		$this->mask    = isset( $options['mask'] ) && is_callable( $options['mask'] ) ? $options['mask'] : array( TextMask::class, 'for_installation' );
+		$this->probe   = isset( $options['probe'] ) && is_callable( $options['probe'] ) ? $options['probe'] : array( self::class, 'probed_budget' );
+		$this->texts   = isset( $options['texts'] ) && $options['texts'] instanceof RunnerTexts ? $options['texts'] : new RunnerTexts();
+		$this->encode  = isset( $options['encode'] ) && is_callable( $options['encode'] ) ? $options['encode'] : 'wp_json_encode';
+		$this->web     = ! empty( $options['web'] );
+		$this->on_left = isset( $options['on_left'] ) && is_callable( $options['on_left'] ) ? $options['on_left'] : null;
 	}
 
 	/**
@@ -331,13 +354,11 @@ final class Runner {
 		if ( array() !== $problems ) {
 			// The table lacks columns this code writes and reads, or holds them narrower: a later write would
 			// fail, or a default would stand in for a value. Failed with the reason, before anything else.
-			$this->needs( 'fail_for_missing_columns', 'note_held_back', 'owns_files_of', 'log_event' );
 			return $this->fail_for_missing_columns( $job, $problems );
 		}
 		if ( array() !== $job->unreadable_columns ) {
 			// Its cursor, options or questions cannot be read: no step runs on an empty stand-in (a step that ends on an
 			// empty cursor, a restart from the first unit). Failed with the reason, before anything else.
-			$this->needs( 'fail_unreadable', 'note_held_back', 'owns_files_of', 'log_event' );
 			return $this->fail_unreadable( $job );
 		}
 		if ( ! $this->cli && ! $job->awaiting_answer() && $this->at_cli_only_step( $job ) ) {
@@ -803,6 +824,7 @@ final class Runner {
 	 * @return int Steps cleaned.
 	 */
 	public function cleanup( Job $job ): int {
+		$this->needs( 'reclaim_work' ); // Also before the cancel's transition (run_steps()): nothing is written then.
 		$type = $this->types->get( $job->type );
 		if ( null === $type ) {
 			return 0;
@@ -877,7 +899,7 @@ final class Runner {
 				return $budget;
 			}
 		}
-		return Budget::from_probe( Environment::cached_runtime(), $memory_at_start );
+		return call_user_func( $this->probe, $memory_at_start );
 	}
 
 	/**
@@ -911,11 +933,33 @@ final class Runner {
 		// A job that holds the site changed may run with its storage directory gone: its log then goes to PHP's, through
 		// the same pipeline as any text that leaves the engine (PHP's log may be readable from the web).
 		$storage  = $job->storage_path;
-		$fallback = static function ( string $line ) use ( $storage ): void {
-			self::to_php_log( $line, '' !== $storage ? array( '{storage}' => $storage ) : array() );
+		$php_log  = $this->php_log;
+		$fallback = static function ( string $line ) use ( $storage, $php_log ): void {
+			call_user_func( $php_log, $line, '' !== $storage ? array( '{storage}' => $storage ) : array() );
 		};
-		$mask     = TextMask::for_installation( $this->redactor, '' !== $storage ? array( '{storage}' => $storage ) : array() );
+		$mask     = call_user_func( $this->mask, $this->redactor, '' !== $storage ? array( '{storage}' => $storage ) : array() );
 		return new Logger( $job->storage_path . DIRECTORY_SEPARATOR . str_replace( '/', DIRECTORY_SEPARATOR, $relative ), $mask, Logger::DEFAULT_MAX_BYTES, Job::SITE_UNTOUCHED !== $job->site_state ? $fallback : null );
+	}
+
+	/**
+	 * Text cleaned as for the screen, in WordPress (Runner's "clean" by default).
+	 *
+	 * @param string $text Text.
+	 * @return string
+	 */
+	public static function wordpress_clean( string $text ): string {
+		return Plugin::instance()->job_presenter()->clean( $text );
+	}
+
+	/**
+	 * The budget from the probed runtime, in WordPress (Runner's "probe" by default).
+	 *
+	 * @param int $memory_at_start Memory used when the tick started.
+	 * @return Budget
+	 * @throws BudgetExhausted When the limits leave too little.
+	 */
+	public static function probed_budget( int $memory_at_start ): Budget {
+		return Budget::from_probe( Environment::cached_runtime(), $memory_at_start );
 	}
 
 	/**
@@ -1034,7 +1078,10 @@ final class Runner {
 			$this->memory_limit,
 			$checkpoint,
 			$lease,
-			array( 'cli' => $this->cli ),
+			array(
+				'cli'   => $this->cli,
+				'table' => $this->repository->jobs_table(),
+			),
 			$record,
 			$token,
 			'' !== $token && null !== $this->tick_units && $job->id === $this->tick_units['job'] ? $this->tick_units['units'] : null
@@ -1246,6 +1293,7 @@ final class Runner {
 	 * @return TickResult
 	 */
 	private function fail_unreadable( Job $job ): TickResult {
+		$this->needs( 'fail_unreadable', 'note_held_back', 'owns_files_of', 'log_event' );
 		$message = $this->texts->unreadable( JobRepository::unreadable_text( $job->unreadable_columns ) );
 		$outcome = $this->repository->fail_unreadable( $job, $message ); // Not one that holds the site: FAIL_HELD.
 		if ( JobRepository::FAIL_ERROR === $outcome ) {
@@ -1289,6 +1337,7 @@ final class Runner {
 	 * @return TickResult
 	 */
 	private function fail_for_missing_columns( Job $job, array $problems ): TickResult {
+		$this->needs( 'fail_for_missing_columns', 'note_held_back', 'owns_files_of', 'log_event' );
 		$message  = Schema::problem_message( $problems );
 		$unusable = array_map( array( Schema::class, 'problem_column' ), $problems );
 		$outcome  = $this->repository->fail_for_missing_columns( $job, $message, $unusable );

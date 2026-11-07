@@ -57,7 +57,7 @@ final class WebRestoreJob implements JobType {
 	 * @return string[]
 	 */
 	public function step_ids(): array {
-		return array( RestorePlatformStep::ID, RestoreVerifyStep::ID, RestorePreflightStep::ID, RestoreFilesPreflightStep::ID, DatabaseImportStep::ID, PrefixRewriteStep::ID, FileStagingStep::ID, SwapCheckStep::ID );
+		return array_slice( RestoreJob::STEPS, 0, -1 );
 	}
 
 	/**
@@ -67,10 +67,9 @@ final class WebRestoreJob implements JobType {
 	 */
 	public function steps(): array {
 		$steps = array();
-		foreach ( $this->step_ids() as $id ) {
-			$steps[] = new LeaveStep( $id );
+		foreach ( RestoreJob::STEPS as $id ) {
+			$steps[] = SwapStep::ID === $id ? $this->swap : new LeaveStep( $id );
 		}
-		$steps[] = $this->swap;
 		return $steps;
 	}
 }

@@ -89,7 +89,7 @@ final class WebJobs implements RunnerRepository {
 		$redactor      = new Redactor( Redactor::installation_secrets() );
 		$this->store   = new JobStore(
 			new SessionExecutor( $session ),
-			$prefix . Schema::JOBS_TABLE,
+			Schema::jobs_table_for( $prefix ),
 			$prefix . UninstallFence::TABLE,
 			array( $this, 'now' ),
 			array( PlainJson::class, 'encode' ),
@@ -128,6 +128,15 @@ final class WebJobs implements RunnerRepository {
 			$this->offset = (int) $rows[0][0] - time();
 		}
 		return time() + $this->offset;
+	}
+
+	/**
+	 * The jobs table, for the table prefix (Schema::jobs_table_for()).
+	 *
+	 * @return string
+	 */
+	public function jobs_table(): string {
+		return Schema::jobs_table_for( $this->prefix );
 	}
 
 	/**

@@ -263,6 +263,15 @@ final class JobRepository implements RunnerRepository {
 	}
 
 	/**
+	 * The jobs table (RunnerRepository::jobs_table()).
+	 *
+	 * @return string
+	 */
+	public function jobs_table(): string {
+		return self::table();
+	}
+
+	/**
 	 * Create a queued job bound to the current storage directory.
 	 *
 	 * @param string               $type       Job type id.
