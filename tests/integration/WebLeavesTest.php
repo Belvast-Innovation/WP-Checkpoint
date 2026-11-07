@@ -149,4 +149,33 @@ final class WebLeavesTest extends SwapTestCase {
 			$this->assertNotSame( Job::PAUSED, $now->status, $case );
 		}
 	}
+
+	public function test_after_runs_without_wordpress_left_a_job_at_the_limit_wp_cli_takes_it_on(): void {
+		global $wpdb;
+		$this->swap_parts['batch'] = 1;
+		$this->register_type();
+		$job = $this->at_swap();
+		$this->killed_at( $job, 'batch_sent', 1 );
+		$wpdb->query( $wpdb->prepare( 'UPDATE ' . JobRepository::table() . " SET takeovers = %d, takeover_mark = MD5(CONCAT(step, '|', COALESCE(cursor_json, ''))) WHERE id = %d", Runner::MAX_TAKEOVERS - 1, $job->id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the jobs table.
+		$wpdb->query( 'COMMIT' );
+		foreach ( array( 'reaching the limit', 'at the limit' ) as $which ) {
+			$this->assertSame( TickResult::LEFT, $this->tick_without_wordpress( Plugin::instance()->jobs()->find( $job->id ) )->status, $which );
+		}
+		$this->seams = array();
+		$result      = $this->cli_tick( Plugin::instance()->jobs()->find( $job->id ) );
+		$now         = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertNotSame( array(), $this->seams, 'WP-CLI ran the swap: ' . $result->status . ' ' . $result->message );
+		$this->assertNotSame( Job::FAILED, $now->status, 'not failed for the takeovers a run without WordPress counted: ' . $now->last_error );
+	}
+
+	public function test_on_a_network_the_network_is_recorded_before_the_swap_moves_on_to_judging(): void {
+		if ( ! is_multisite() ) {
+			$this->markTestSkipped( 'The network is recorded on a network only.' );
+		}
+		$job = $this->at_swap();
+		$this->killed_at( $job, 'started' ); // Right after the checkpoint that moves on to judging.
+		$now = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertNotSame( 'start', $now->cursor['phase'] ?? 'start', 'the control: moved on from start' );
+		$this->assertSame( get_current_network_id(), $now->options['recorded'][ SwapStep::NETWORK_RECORD ] ?? null, 'recorded before it' );
+	}
 }

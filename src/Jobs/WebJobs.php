@@ -283,14 +283,18 @@ final class WebJobs implements RunnerRepository {
 	 *
 	 * @param int $id    Job id.
 	 * @param int $lease Lock duration in seconds.
-	 * @return array{job: Job, token: string, healed: bool, taken_over: bool}|null
+	 * @return array{job: Job, token: string, healed: bool, taken_over: bool, at_limit: bool}|null
 	 */
 	public function acquire( int $id, int $lease = JobRepository::LOCK_SECONDS ) {
 		$job = $this->find( $id );
 		if ( null === $job || ! in_array( $job->status, array( Job::QUEUED, Job::RUNNING, Job::PAUSED ), true ) || $job->awaiting_answer() || Job::SITE_UNTOUCHED === $job->site_state || '' !== $this->here( $job ) ) {
 			return null;
 		}
-		$token = bin2hex( random_bytes( 16 ) );
+		// Read before the claim, so that a failure to read it leaves no lease behind: a claim that counts no takeover
+		// changes neither the count, the mark, the step nor the cursor (and one that counts one is taken_over, which the
+		// Runner asks first).
+		$at_limit = $job->takeovers >= Runner::MAX_TAKEOVERS && $this->at_takeover_mark( $id );
+		$token    = bin2hex( random_bytes( 16 ) );
 		if ( ! $this->store->claim( $id, $token, $lease, 'site_state <> 0 AND ' . Job::MANAGING_SQL . ' = %s AND site_mark = %s', array( $job->managing_token(), $job->site_mark ) ) ) {
 			return null;
 		}
@@ -304,13 +308,13 @@ final class WebJobs implements RunnerRepository {
 			'token'      => $token,
 			'healed'     => array() !== $job->questions,
 			'taken_over' => $held->takeovers !== $job->takeovers || $held->takeover_mark !== $job->takeover_mark,
-			'at_limit'   => $held->takeovers >= Runner::MAX_TAKEOVERS && $this->at_takeover_mark( $id ),
+			'at_limit'   => $at_limit,
 		);
 	}
 
 	/**
 	 * Whether the job stands where its takeovers were counted: its mark is its position now (the claim's own MD5 of
-	 * step and cursor, JobStore::claim_template()). Read only when the count is at the limit.
+	 * step and cursor, JobStore::claim_template()). Read only when the count is at the limit, before the claim.
 	 *
 	 * @param int $id Job id.
 	 * @return bool

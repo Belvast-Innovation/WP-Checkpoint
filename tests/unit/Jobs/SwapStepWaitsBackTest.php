@@ -6,6 +6,7 @@ use WPCheckpoint\Jobs\NotHere;
 use WPCheckpoint\Jobs\SwapHost;
 use WPCheckpoint\Jobs\SwapStep;
 use WPCheckpoint\Restore\Queries;
+use WPCheckpoint\Tests\Fixtures\Jobs\WorkContext;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 /**
@@ -56,7 +57,12 @@ final class SwapStepWaitsBackTest extends TestCase {
 	private static function put_back( Queries $db, int $wait ): void {
 		$method = new \ReflectionMethod( SwapStep::class, 'put_waits_back' );
 		$method->setAccessible( true );
-		$method->invoke( new SwapStep( null, array(), SwapHost::without_wordpress( 'wp_', false, 0, 'wp-checkpoint/wp-checkpoint.php' ) ), $db, $wait );
+		$work = new WorkContext( 'wpc-waits-back-' );
+		try {
+			$method->invoke( new SwapStep( null, array(), SwapHost::without_wordpress( 'wp_', false, 0, 'wp-checkpoint/wp-checkpoint.php' ) ), $work->context(), $db, $wait );
+		} finally {
+			$work->remove();
+		}
 	}
 
 	public function test_the_waits_are_put_back(): void {
@@ -68,7 +74,7 @@ final class SwapStepWaitsBackTest extends TestCase {
 	public function test_a_failure_to_put_them_back_is_not_let_out(): void {
 		$sent = array();
 		self::put_back( self::connection( new \RuntimeException( 'Gone away' ), $sent ), 50 );
-		$this->assertNotSame( array(), $sent, 'the control: a statement was tried' );
+		$this->assertSame( array( 'SET SESSION innodb_lock_wait_timeout = 50', 'SET SESSION lock_wait_timeout = ' . SwapStep::LOCK_WAIT ), $sent, 'each tried, the second after the first failed' );
 	}
 
 	public function test_a_not_here_is(): void {

@@ -17,7 +17,8 @@ defined( 'ABSPATH' ) || exit;
  * seconds left, at least one: each lock wait a statement makes is bounded by what was left when it was sent. That is
  * not a hard bound on the whole: the server applies each setting to every single wait, and one statement may wait
  * more than once (a REPLACE ... SELECT for rows of two tables, a metadata lock and then rows), so a statement can end
- * past the deadline, by as many waits again as it made. With less than a second left a statement is not sent: it
+ * past the deadline, by as many waits again as it made. What a statement takes to do its work, waiting for no lock,
+ * is not bounded either (a large REPLACE ... SELECT). With less than a second left a statement is not sent: it
  * fails as a lock wait that timed out would (TransientFailure, 1205), so that the caller takes it as the database
  * being busy. Statements that wait
  * for no lock pass as they are: SET, SELECT @@…, START TRANSACTION, COMMIT, ROLLBACK. The session's waits are left as
