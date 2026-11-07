@@ -466,6 +466,11 @@ final class RestrictedRepository implements RunnerRepository {
 		return $method !== $this->refused;
 	}
 
+	public function jobs_table(): string {
+		$this->call( 'jobs_table' );
+		return $this->inner->jobs_table();
+	}
+
 	public function now(): int {
 		return $this->inner->now();
 	}
