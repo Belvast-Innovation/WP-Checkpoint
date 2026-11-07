@@ -17,6 +17,7 @@ use WPCheckpoint\Jobs\SwapCheckStep;
 use WPCheckpoint\Jobs\SwapStep;
 use WPCheckpoint\Jobs\TempTables;
 use WPCheckpoint\Jobs\TickResult;
+use WPCheckpoint\Jobs\WebRun;
 use WPCheckpoint\Plugin;
 use WPCheckpoint\Restore\ImportSession;
 use WPCheckpoint\Restore\RestoreFiles;
@@ -451,6 +452,86 @@ abstract class SwapTestCase extends RestoreTestCase {
 	}
 
 	/**
+	 * What the last run made without WordPress noted (web_tick()).
+	 *
+	 * @var string[]
+	 */
+	protected $web_notes = array();
+
+	/**
+	 * One tick of this test's restore made without WordPress: WebRun, as the entries of b2 make it (the database
+	 * settings and the table prefix from wp-config.php's values, Credentials::from_wordpress(); this sandbox's WordPress
+	 * directory), with the test's restore type and the swap's parts as its seams. $flush false: the object cache cannot
+	 * be flushed here (the parts' stand-in taken out, WebRun given none).
+	 *
+	 * @param Job                  $job     Job.
+	 * @param array<string, mixed> $more    More parts of the swap (over $this->swap_parts).
+	 * @param bool                 $flush   Whether the object cache can be flushed.
+	 * @param float|null           $started When the request started (now when null).
+	 * @param string|null          $abspath The WordPress directory the run is made in (the sandbox's when null).
+	 * @return TickResult
+	 */
+	protected function web_tick( Job $job, array $more = array(), bool $flush = true, $started = null, $abspath = null ): TickResult {
+		$parts = $more + $this->swap_parts;
+		if ( ! $flush ) {
+			unset( $parts['flush'] );
+		}
+		$this->web_notes = array();
+		$notes           = &$this->web_notes;
+		$run             = new WebRun(
+			Credentials::from_wordpress(),
+			null === $abspath ? $this->abspath : (string) $abspath,
+			is_multisite(),
+			plugin_basename( WPCHECKPOINT_FILE ),
+			static function ( string $line ) use ( &$notes ): void {
+				$notes[] = $line;
+			},
+			null,
+			array(
+				'type'  => $this->type,
+				'parts' => $parts,
+			)
+		);
+		return $this->autocommit(
+			static function () use ( $run, $job, $started ): TickResult {
+				return $run->tick( $job->id, null === $started ? microtime( true ) : (float) $started );
+			}
+		);
+	}
+
+	/**
+	 * Runs made without WordPress until the job is no longer queued or running, or a run leaves it (LEFT).
+	 *
+	 * @param Job                  $job   Job.
+	 * @param array<string, mixed> $more  More parts of the swap.
+	 * @param bool                 $flush Whether the object cache can be flushed.
+	 * @param int                  $max   Most runs.
+	 * @return array{0: Job, 1: TickResult[]} The job after, and what each run returned.
+	 */
+	protected function web_run( Job $job, array $more = array(), bool $flush = true, int $max = 40 ): array {
+		$results = array();
+		for ( $i = 0; $i < $max; $i++ ) {
+			$result    = $this->web_tick( $job, $more, $flush );
+			$results[] = $result;
+			$now       = Plugin::instance()->jobs()->find( $job->id );
+			if ( TickResult::LEFT === $result->status || ! in_array( $now->status, array( Job::QUEUED, Job::RUNNING ), true ) ) {
+				return array( $now, $results );
+			}
+		}
+		$this->fail(
+			"the runs without WordPress did not end\n" . $this->stuck(
+				$job,
+				array_map(
+					static function ( TickResult $r ): string {
+						return $r->status . ': ' . $r->message;
+					},
+					$results
+				)
+			)
+		);
+	}
+
+	/**
 	 * The swap's "verify" part for each result of the check of the site as put back by an undo or a put-back: it
 	 * passed, it failed, it could not tell (every try).
 	 *
@@ -793,7 +874,7 @@ abstract class SwapTestCase extends RestoreTestCase {
 		return null === $verdict || true === $verdict ? 'pass' : (string) $verdict;
 	}
 
-	protected function killed_at( Job $job, string $seam, int $nth = 1 ): void {
+	protected function killed_at( Job $job, string $seam, int $nth = 1, bool $web = false ): void {
 		$this->assertTrue( function_exists( 'posix_kill' ), 'the crash tests need the posix extension (a process killed for real, not exit())' );
 		$GLOBALS['wpdb']->query( 'COMMIT' );
 		$config = $this->sandbox . '/child-' . bin2hex( random_bytes( 4 ) ) . '.json';
@@ -818,6 +899,7 @@ abstract class SwapTestCase extends RestoreTestCase {
 					'admin'   => self::$admin_id,
 					'storage' => $this->storage,
 					'redo'    => PluginCopy::VERSION,
+					'web'     => $web, // A run made without WordPress (WebRun) instead of WP-CLI's.
 				)
 			)
 		);

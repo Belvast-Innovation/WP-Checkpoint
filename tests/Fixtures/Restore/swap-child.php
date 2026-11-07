@@ -98,12 +98,31 @@ if ( '' !== (string) ( $config['redo'] ?? '' ) ) {
 \WPCheckpoint\Plugin::instance()->job_types()->add( new \WPCheckpoint\Tests\Fixtures\Jobs\FixtureJobType( (string) $config['type'], array( new \WPCheckpoint\Jobs\SwapStep( null, $parts ) ) ) );
 wp_set_current_user( (int) $config['admin'] );
 
-$runner = new \WPCheckpoint\Jobs\Runner(
-	$jobs,
-	\WPCheckpoint\Plugin::instance()->job_types(),
-	new \WPCheckpoint\Support\Redactor( \WPCheckpoint\Support\Redactor::installation_secrets() ),
-	array( 'cli' => true )
-);
+if ( ! empty( $config['web'] ) ) {
+	// A run made without WordPress, as SwapTestCase::web_tick() makes it (the connection said below is WordPress's,
+	// not the run's own).
+	$runner = new \WPCheckpoint\Jobs\WebRun(
+		\WPCheckpoint\Standalone\Credentials::from_wordpress(),
+		(string) $config['abspath'],
+		is_multisite(),
+		plugin_basename( WPCHECKPOINT_FILE ),
+		static function ( string $line ): void {
+			unset( $line );
+		},
+		null,
+		array(
+			'type'  => (string) $config['type'],
+			'parts' => $parts,
+		)
+	);
+} else {
+	$runner = new \WPCheckpoint\Jobs\Runner(
+		$jobs,
+		\WPCheckpoint\Plugin::instance()->job_types(),
+		new \WPCheckpoint\Support\Redactor( \WPCheckpoint\Support\Redactor::installation_secrets() ),
+		array( 'cli' => true )
+	);
+}
 // This run's database connection, for the parent's diagnostics of what a killed run left on the server.
 fwrite( STDOUT, 'WPCHECKPOINT-CHILD-READY connection ' . (int) $GLOBALS['wpdb']->get_var( 'SELECT CONNECTION_ID()' ) . "\n" );
 $result = $runner->tick( (int) $config['job'], microtime( true ) );
