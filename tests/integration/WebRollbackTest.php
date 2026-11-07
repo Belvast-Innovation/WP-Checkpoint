@@ -28,12 +28,12 @@ final class WebRollbackTest extends SwapTestCase {
 	 *
 	 * @return array{0: Job, 1: array<string, mixed>} The job, the site before the restore.
 	 */
-	private function half(): array {
+	private function half( int $batches = 2 ): array {
 		$this->swap_parts['batch'] = 1;
 		$this->register_type();
 		$job    = $this->at_swap();
 		$before = $this->site();
-		$this->killed_at( $job, 'batch_sent', 2 );
+		$this->killed_at( $job, 'batch_sent', $batches );
 		$half = Plugin::instance()->jobs()->find( $job->id );
 		$this->assertSame( Job::SITE_CHANGING, $half->site_state, 'the control: the swap half made' );
 		$this->assertNotSame( $before, $this->site(), 'the control: renamed' );
@@ -261,6 +261,50 @@ final class WebRollbackTest extends SwapTestCase {
 		list( $done, $runs ) = $this->run_without_wordpress( Plugin::instance()->jobs()->find( $job->id ) );
 		$this->assertContains( 'carried_back', $this->seams, end( $runs )->message );
 		$this->assertSame( Job::FAILED, $done->status, 'a rollback\'s end, for a retry: ' . $done->last_error );
+		$this->assertSame( $before, $this->site() );
+	}
+
+	public function test_a_rename_back_whose_tries_are_spent_is_left_held_up_and_put_back_once_the_lock_is_gone(): void {
+		global $wpdb;
+		list( $job, $before ) = $this->half( 1 + count( self::site_tables() ) ); // A table of the test's renamed after the site's.
+		$entry                = null;
+		$wpdb->query( 'COMMIT' );
+		foreach ( $this->plan_of( $job )['tables'] as $table ) {
+			if ( 1 !== preg_match( '/(options|sitemeta)\z/', (string) $table['live'] ) && '' !== (string) $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( (string) $table['old'] ) ) ) ) {
+				$entry = $table;
+			}
+		}
+		$this->assertNotNull( $entry, 'the control: a table of the test\'s moved aside' );
+		$cursor = array(
+			'phase'      => 'rollback',
+			'attempt'    => $job->cursor['attempt'],
+			'mark'       => $job->cursor['mark'],
+			'reason'     => SwapStep::INTERRUPTED,
+			'busy'       => count( SwapStep::RETRIES ),
+			'busy_for'   => (int) $entry['seq'],
+			'busy_after' => 0,
+		);
+		$wpdb->update( JobRepository::table(), array( 'cursor_json' => wp_json_encode( $cursor ) ), array( 'id' => $job->id ) );
+		$wpdb->query( 'COMMIT' );
+		$other = ImportSession::open( Credentials::from_wordpress() );
+		$other->run( 'LOCK TABLES `' . $entry['old'] . '` READ' );
+		try {
+			$this->seams = array();
+			$result      = $this->tick_without_wordpress( Plugin::instance()->jobs()->find( $job->id ) );
+		} finally {
+			$other->run( 'UNLOCK TABLES' );
+			$other->close();
+		}
+		$now = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertSame( TickResult::LEFT, $result->status, $result->message . ' ' . $now->last_error );
+		$this->assertTrue( $result->held_up );
+		$this->assertNotContains( 'table_back', $this->seams, 'nothing renamed' );
+		$this->assertNotSame( Job::FAILED, $now->status );
+		$this->assertSame( count( SwapStep::RETRIES ), $now->cursor['busy'] ?? null, 'the tries as last checkpointed' );
+		$this->assertStringContainsString( '"busy_for":' . (int) $entry['seq'], Plugin::instance()->job_presenter()->log_tail( $now ) );
+		$this->assertTrue( Maintenance::held_in( $this->abspath ) );
+		list( $done, $runs ) = $this->run_without_wordpress( $now );
+		$this->assertSame( Job::FAILED, $done->status, end( $runs )->message . ' ' . $done->last_error );
 		$this->assertSame( $before, $this->site() );
 	}
 
