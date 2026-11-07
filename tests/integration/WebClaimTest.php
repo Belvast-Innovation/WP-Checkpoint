@@ -156,12 +156,12 @@ final class WebClaimTest extends SwapTestCase {
 		$job   = $this->killed();
 		$entry = null;
 		foreach ( $this->plan_of( $job )['dirs'] as $dir ) {
-			if ( file_exists( $dir['stage'] ) || file_exists( $dir['old'] ) ) {
+			if ( ! empty( $dir['had_live'] ) && ( file_exists( $dir['stage'] ) || file_exists( $dir['old'] ) ) ) {
 				$entry = $dir;
 				break;
 			}
 		}
-		$this->assertNotNull( $entry, 'the control: a directory of the plan under one of its names' );
+		$this->assertNotNull( $entry, 'the control: a directory of the plan the site had, under one of its names' );
 		$away = $this->sandbox . '/away-' . bin2hex( random_bytes( 3 ) );
 		mkdir( $away );
 		$moved = array();
@@ -182,5 +182,23 @@ final class WebClaimTest extends SwapTestCase {
 			},
 			'a directory of the plan'
 		);
+	}
+
+	public function test_a_directory_the_site_did_not_have_swapped_in_asks_for_no_evidence(): void {
+		$job  = $this->at_swap();
+		$plan = $this->plan_of( $job );
+		$new  = array_values(
+			array_filter(
+				$plan['dirs'],
+				static function ( array $dir ): bool {
+					return empty( $dir['had_live'] );
+				}
+			)
+		);
+		$this->assertNotSame( array(), $new, 'the control: the plan has a directory the site did not have' );
+		$this->killed_at( $job, 'dir_in', count( $plan['dirs'] ) ); // Every directory swapped in.
+		$this->assertFalse( file_exists( $new[0]['stage'] ) || file_exists( $new[0]['old'] ), 'the control: under neither of the job\'s names' );
+		$claimed = $this->tick_without_wordpress( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertNotSame( TickResult::BUSY, $claimed->status, 'claimed on the other evidence: ' . $claimed->message . ' ' . implode( ' | ', $this->web_notes ) );
 	}
 }

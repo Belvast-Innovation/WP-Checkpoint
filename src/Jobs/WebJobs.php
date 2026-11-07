@@ -176,7 +176,10 @@ final class WebJobs implements RunnerRepository {
 	 * 2. The table prefix is the one the plan records.
 	 * 3. The maintenance file here is this job's: its data file carries the job's mark.
 	 * 4. The job's storage directory is here, with the job's own files in it (its log, its lock or its work directory).
-	 * 5. Of each directory the plan swaps, the staged copy or the moved-aside one is here (their names are the job's own).
+	 * 5. Of each directory the plan swaps that the site had, the staged copy or the moved-aside one is here (their names
+	 *    are the job's own). A directory the site did not have has no moved-aside copy, and once swapped in no staged
+	 *    one either (only its live name, which is not the job's): it gives no evidence, as a plan without directories
+	 *    gives none, and is not asked for.
 	 *
 	 * @param Job $job Job.
 	 * @return string
@@ -203,7 +206,7 @@ final class WebJobs implements RunnerRepository {
 			return 'The job\'s storage directory, with its files, is not here.';
 		}
 		foreach ( $this->plan( $job, (int) $site['attempt'] ) as $entry ) {
-			if ( SwapPlan::DIR === $entry['kind'] && ! self::exists( $entry['stage'] ) && ! self::exists( $entry['old'] ) ) {
+			if ( SwapPlan::DIR === $entry['kind'] && $entry['had_live'] && ! self::exists( $entry['stage'] ) && ! self::exists( $entry['old'] ) ) {
 				return 'A directory the swap moved is not here.';
 			}
 		}
