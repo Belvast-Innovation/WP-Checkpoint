@@ -216,7 +216,7 @@ final class WebRollbackTest extends SwapTestCase {
 		$this->assertSame( $before, $this->site() );
 	}
 
-	public function test_a_carry_back_whose_tries_are_spent_fails_as_the_database_being_busy_with_the_site_held(): void {
+	public function test_a_carry_back_whose_tries_are_spent_is_left_held_up_and_put_back_once_the_locks_are_gone(): void {
 		global $wpdb;
 		list( $job, $before )   = $this->half();
 		list( $old, $old_rows ) = $this->moved_aside_options( $job );
@@ -233,25 +233,70 @@ final class WebRollbackTest extends SwapTestCase {
 		);
 		$wpdb->update( JobRepository::table(), array( 'cursor_json' => wp_json_encode( $cursor ) ), array( 'id' => $job->id ) );
 		$wpdb->query( 'COMMIT' );
+		$row   = self::row( $job->id );
 		$other = self::holding( $old );
 		try {
-			$result = $this->tick_without_wordpress( $job );
+			$this->seams = array();
+			$result      = $this->tick_without_wordpress( $job );
 		} finally {
 			$other->run( 'ROLLBACK' );
 			$other->close();
 		}
 		$now = Plugin::instance()->jobs()->find( $job->id );
-		$this->assertSame( Job::FAILED, $now->status, $result->status . ': ' . $result->message );
-		$this->assertStringContainsString( 'The database is busy', (string) $now->last_error );
-		$this->assertNotSame( Job::SITE_UNTOUCHED, $now->site_state, 'the site still held' );
-		$this->assertTrue( Maintenance::held_in( $this->abspath ) );
-		$this->assertArrayNotHasKey( 'busy', $now->cursor, 'the tries are this run\'s: a retry starts its own' );
-		$this->assertSame( $old_rows, $this->moved_aside_options( $job )[1] );
-		$this->assertStringNotContainsString( 'not carried back', Plugin::instance()->job_presenter()->log_tail( $now ) );
-		// Retried with the locks gone, WP-CLI puts it back.
-		Plugin::instance()->job_actions()->retry( $job->id );
-		$retried = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
-		$this->assertSame( $before, $this->site(), $retried->status . ' ' . $retried->last_error );
+		$this->assertContains( 'carry_back_locked', $this->seams, 'the control: the carry back made its try' );
+		$this->assertSame( TickResult::LEFT, $result->status, $result->message . ' ' . $now->last_error );
+		$this->assertTrue( $result->held_up, 'held up' );
+		$this->assertSame( \WPCheckpoint\Jobs\WebPace::SCHEDULE[0], $result->retry_after, 'the next try in the first wait' );
+		$this->assertNotSame( Job::FAILED, $now->status );
+		$claim = array_flip( array( 'lock_token', 'locked_until', 'updated_at', 'takeovers', 'takeover_mark' ) );
+		$this->assertSame( array_diff_key( $row, $claim ), array_diff_key( self::row( $job->id ), $claim ), 'the row as it was but the lease (and the claim\'s count)' );
+		$this->assertSame( $old_rows, $this->moved_aside_options( $job )[1], 'the old table as it was' );
+		$log = Plugin::instance()->job_presenter()->log_tail( $now );
+		$this->assertStringContainsString( 'left to WP-CLI, held up', $log );
+		$this->assertStringContainsString( '"busy_for":' . SwapStep::CARRY_SEQ, $log, 'the tries said in the log' );
+		$this->assertStringNotContainsString( 'not carried back', $log );
+		$this->assertTrue( Maintenance::held_in( $this->abspath ), 'the site still held' );
+		// The locks gone, the next run without WordPress carries back and puts the site back.
+		$this->seams        = array();
+		list( $done, $runs ) = $this->run_without_wordpress( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertContains( 'carried_back', $this->seams, end( $runs )->message );
+		$this->assertSame( Job::FAILED, $done->status, 'a rollback\'s end, for a retry: ' . $done->last_error );
+		$this->assertSame( $before, $this->site() );
+	}
+
+	public function test_a_transient_failure_through_every_retry_is_left_held_up_and_gone_on_with_once_it_passes(): void {
+		list( $job, $before ) = $this->half();
+		$failing             = true;
+		$parts               = array(
+			'at' => function ( string $point ) use ( &$failing ): void {
+				$this->seams[] = $point;
+				if ( $failing && 'rollback' === $point ) {
+					throw new \WPCheckpoint\Jobs\TransientFailure( 'The test\'s database went away for a moment.' );
+				}
+			},
+		);
+		$results = array();
+		for ( $i = 0; $i <= \WPCheckpoint\Jobs\Runner::MAX_RETRIES + 1; $i++ ) {
+			$was       = self::row( $job->id );
+			$result    = $this->tick_without_wordpress( Plugin::instance()->jobs()->find( $job->id ), $parts );
+			$results[] = $result->status;
+			if ( TickResult::LEFT === $result->status ) {
+				break;
+			}
+		}
+		$this->assertSame( TickResult::LEFT, end( $results ), 'left after every retry: ' . implode( ', ', $results ) );
+		$this->assertGreaterThan( \WPCheckpoint\Jobs\Runner::MAX_RETRIES, count( $results ) - 1, 'the control: it waited out each retry first: ' . implode( ', ', $results ) );
+		$this->assertTrue( $result->held_up );
+		$now = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertNotSame( Job::FAILED, $now->status, (string) $now->last_error );
+		$claim = array_flip( array( 'lock_token', 'locked_until', 'updated_at', 'takeovers', 'takeover_mark' ) );
+		$this->assertSame( array_diff_key( $was, $claim ), array_diff_key( self::row( $job->id ), $claim ), 'the last run wrote nothing but the lease' );
+		$this->assertTrue( Maintenance::held_in( $this->abspath ), 'the site still held' );
+		// It passes: the next run goes on and puts the site back.
+		$failing             = false;
+		list( $done, $runs ) = $this->run_without_wordpress( Plugin::instance()->jobs()->find( $job->id ), $parts );
+		$this->assertSame( Job::FAILED, $done->status, end( $runs )->message . ' ' . $done->last_error );
+		$this->assertSame( $before, $this->site() );
 	}
 
 	public function test_a_not_here_in_the_carry_back_leaves_the_job_to_wp_cli_with_nothing_carried_or_left_out(): void {

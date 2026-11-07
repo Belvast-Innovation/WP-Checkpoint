@@ -48,6 +48,8 @@ final class WebPathScanTest extends TestCase {
 		'WPCheckpoint\Restore\Queries'       => array( 'WPCheckpoint\Restore\ImportSession', 'WPCheckpoint\Restore\DeadlineQueries' ),
 		'WPCheckpoint\Jobs\Step'             => array( 'WPCheckpoint\Jobs\LeaveStep', 'WPCheckpoint\Jobs\WebSwapStep' ),
 		'WPCheckpoint\Jobs\JobType'          => array( 'WPCheckpoint\Jobs\WebRestoreJob' ),
+		// The pace WebRun keeps unless the entries give one (b2 binds theirs here).
+		'WPCheckpoint\Jobs\WebPace'          => array( 'WPCheckpoint\Jobs\MemoryPace' ),
 	);
 
 	/**
@@ -307,6 +309,7 @@ final class WebPathScanTest extends TestCase {
 		);
 		$runner  = $run->runner( $jobs );
 		$this->assertSame( array(), self::prop( $run, 'seams' ), 'no test seams: the swap\'s parts and the type\'s id are the defaults' );
+		$this->assertSame( self::BINDINGS[ \WPCheckpoint\Jobs\WebPace::class ], array( get_class( self::prop( $run, 'pace' ) ) ), 'WebPace => the class WebRun makes' );
 		$this->assertSame( 'site9_', self::prop( $run, 'prefix' ), 'the prefix is the settings\' (wp-config.php\'s $table_prefix)' );
 
 		// RunnerRepository => WebJobs; StoreExecutor => SessionExecutor; Queries => ImportSession.

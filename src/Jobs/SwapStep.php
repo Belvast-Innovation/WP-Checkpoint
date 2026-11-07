@@ -1432,7 +1432,8 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @param array{units: int}    $back    This run's units (by reference).
 	 * @return void
 	 * @throws SwapPause When the run stops before a try.
-	 * @throws TablesBusy When the tables stayed locked through every try.
+	 * @throws TablesBusy When the tables stayed locked through every try (WP-CLI; a run without WordPress leaves the job,
+	 *                    held up: held_up()).
 	 * @throws TransientFailure When the RENAME failed for a moment otherwise (the rollback goes on later).
 	 */
 	private function send_back( JobContext $context, Queries $db, string $rename, int $seq, array &$cursor, array &$back ): void {
@@ -1460,6 +1461,9 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 				$this->unit_done( $context, $back, $started );
 				$tries = (int) ( $cursor['busy'] ?? 0 ) + 1;
 				if ( $tries > count( self::RETRIES ) ) {
+					if ( $this->host->web() ) {
+						throw $this->held_up( $context, $seq, $tries );
+					}
 					// The tries are this run's: a retry of the job starts its own (the cursor is kept for it).
 					unset( $cursor['busy'], $cursor['busy_after'], $cursor['busy_for'] );
 					$context->checkpoint( $cursor, 95, $this->host->putting_back() );
@@ -1472,6 +1476,29 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 				$this->at( 'back_busy' );
 			}
 		}
+	}
+
+	/**
+	 * In a run made without WordPress, a rollback's tries spent (a RENAME's, or the carry back's): not failed (a failed
+	 * job holds the site until WP-CLI retries it), left to WP-CLI as it is, held up, so that the next such run comes
+	 * later (WebPace). Nothing is written: the tries stay as last checkpointed, so each later run makes one more try
+	 * (WP-CLI too, which then fails as the database being busy and clears them for its retry); the count is said in the
+	 * job's log.
+	 *
+	 * @param JobContext $context Context.
+	 * @param int        $seq     The entry the tries are of ("busy_for"; CARRY_SEQ for the carry back).
+	 * @param int        $tries   The tries, this one with them.
+	 * @return SwapPause
+	 */
+	private function held_up( JobContext $context, int $seq, int $tries ): SwapPause {
+		$context->logger()->warning(
+			'The database is busy: the tables stayed locked through every try; left to WP-CLI, held up',
+			array(
+				'busy_for' => $seq,
+				'tries'    => $tries,
+			)
+		);
+		return new SwapPause( StepResult::held_up( sprintf( 'The database is busy: the locks stayed taken through %d tries.', $tries ) ) );
 	}
 
 	/**
@@ -1653,7 +1680,6 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @return void
 	 * @throws SwapPause When the undo asks how to go on, or a run without WordPress stops before a try.
 	 * @throws TransientFailure When the carry fails for a moment (the put-back goes on later).
-	 * @throws TablesBusy In a run made without WordPress, when the carry's locks stayed taken through every try.
 	 * @throws LockLost When the job is no longer this run's.
 	 * @throws StaleJob When the job changed meanwhile.
 	 */
@@ -1691,8 +1717,6 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			throw $e;
 		} catch ( SwapPause $e ) {
 			throw $e; // A run without WordPress stopped before a try (its budget).
-		} catch ( TablesBusy $e ) {
-			throw $e; // Its tries spent: the rollback fails as the database being busy, never goes on without the carry.
 		} catch ( TransientFailure $e ) {
 			throw $e; // A problem of the moment: the put-back waits, its file held, and goes on.
 		} catch ( NotHere $e ) {
@@ -1728,8 +1752,8 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * owed before the try is not in it. A try that times out, or has no second left for a
 	 * statement, is rolled back whole (JobFence::within()) and counted as send_back() counts a rename's ("busy",
 	 * "busy_after", and "busy_for" CARRY_SEQ), checkpointed; the next try is a unit of its own, now or in a later run;
-	 * tries spent, the rollback fails as the database being busy (TablesBusy), the site held. Never put back without
-	 * the carry for that. The session's waits are put back after each try (lock_wait_timeout: LOCK_WAIT, as roll_back()
+	 * tries spent, the job is left to WP-CLI as it is, held up (held_up()), the site held. Never put back without the
+	 * carry for that. The session's waits are put back after each try (lock_wait_timeout: LOCK_WAIT, as roll_back()
 	 * set it). Any other failure is the caller's, as in WP-CLI.
 	 *
 	 * @param JobContext                            $context Context.
@@ -1739,8 +1763,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * @param array<string, mixed>                  $cursor  The rollback's cursor (its tries, by reference).
 	 * @param array{units: int}                     $back    This run's units (by reference).
 	 * @return void
-	 * @throws SwapPause When the run stops before a try.
-	 * @throws TablesBusy When the locks stayed taken through every try.
+	 * @throws SwapPause When the run stops before a try, or leaves the job held up (its tries spent).
 	 * @throws TransientFailure When a try failed for a moment otherwise (the caller's, as in WP-CLI).
 	 */
 	private function carry_back_here( JobContext $context, Queries $db, array $options, $meta, array &$cursor, array &$back ): void {
@@ -1774,9 +1797,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 				$this->unit_done( $context, $back, $started, self::UNIT_CARRY );
 				$tries = (int) ( $cursor['busy'] ?? 0 ) + 1;
 				if ( $tries > count( self::RETRIES ) ) {
-					unset( $cursor['busy'], $cursor['busy_after'], $cursor['busy_for'] );
-					$context->checkpoint( $cursor, 95, $this->host->putting_back() );
-					throw new TablesBusy( sprintf( 'The database is busy: this plugin\'s settings could not be carried back through %d tries.', $tries ) );
+					throw $this->held_up( $context, self::CARRY_SEQ, $tries ); // Only a run without WordPress comes here.
 				}
 				$cursor['busy']       = $tries;
 				$cursor['busy_for']   = self::CARRY_SEQ;

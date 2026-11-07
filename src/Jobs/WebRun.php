@@ -98,6 +98,13 @@ final class WebRun {
 	private $seams;
 
 	/**
+	 * The pace of runs held up on a job (WebPace): MemoryPace unless the entries give where it is kept.
+	 *
+	 * @var WebPace
+	 */
+	private $pace;
+
+	/**
 	 * Constructor.
 	 *
 	 * @param Credentials          $credentials The database settings and the table prefix.
@@ -107,8 +114,9 @@ final class WebRun {
 	 * @param callable             $note        function( string $line ): void.
 	 * @param callable|null        $flush       function(): mixed, or null.
 	 * @param array<string, mixed> $seams Test seams ("type", "parts"); none outside the tests.
+	 * @param WebPace|null         $pace        Where the pace of held-up runs is kept; in this object when null (MemoryPace).
 	 */
-	public function __construct( Credentials $credentials, string $abspath, bool $multisite, string $plugin, callable $note, $flush = null, array $seams = array() ) {
+	public function __construct( Credentials $credentials, string $abspath, bool $multisite, string $plugin, callable $note, $flush = null, array $seams = array(), $pace = null ) {
 		$this->credentials = $credentials;
 		$this->prefix      = $credentials->get( 'prefix' );
 		$this->abspath     = $abspath;
@@ -117,16 +125,42 @@ final class WebRun {
 		$this->note        = $note;
 		$this->flush       = is_callable( $flush ) ? $flush : null;
 		$this->seams       = $seams;
+		$this->pace        = $pace instanceof WebPace ? $pace : new MemoryPace();
 	}
 
 	/**
-	 * One tick of a job, as a run without WordPress makes it.
+	 * One tick of a job, as a run without WordPress makes it. A job such a run was held up on (TickResult::$held_up)
+	 * waits as the pace says (WebPace) before it is tried again, untouched meanwhile (WAITING, its seconds); a held-up
+	 * run makes the next wait longer, any other (but BUSY) starts it over.
 	 *
 	 * @param int        $job_id     Job id.
 	 * @param float|null $started_at When the request started (its budget counts from there).
 	 * @return TickResult
 	 */
 	public function tick( int $job_id, $started_at = null ): TickResult {
+		$wait = $this->pace->wait( $job_id, time() );
+		if ( $wait > 0 ) {
+			// Held up before: not tried again yet (nothing is opened, read or written).
+			return new TickResult( TickResult::WAITING, $wait, null, sprintf( 'Job %d was held up: the next try is in %d seconds.', $job_id, $wait ) );
+		}
+		$result = $this->tick_now( $job_id, $started_at );
+		if ( TickResult::LEFT === $result->status && $result->held_up ) {
+			$result->retry_after = $this->pace->held_up( $job_id, time() );
+			$this->note( sprintf( 'Job %d is held up (%s); the next try is in %d seconds.', $job_id, $result->message, $result->retry_after ) );
+		} elseif ( TickResult::BUSY !== $result->status ) {
+			$this->pace->cleared( $job_id ); // Got through (another run holding the job says nothing of it).
+		}
+		return $result;
+	}
+
+	/**
+	 * One tick of a job, now.
+	 *
+	 * @param int        $job_id     Job id.
+	 * @param float|null $started_at When the request started.
+	 * @return TickResult
+	 */
+	private function tick_now( int $job_id, $started_at ): TickResult {
 		$session = ImportSession::open( $this->credentials );
 		try {
 			$jobs = new WebJobs( $session, $this->prefix, $this->abspath, $this->note );

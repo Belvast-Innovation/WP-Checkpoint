@@ -186,7 +186,12 @@ final class WebClaimTest extends SwapTestCase {
 		);
 	}
 
-	public function test_a_directory_the_site_did_not_have_swapped_in_asks_for_no_evidence(): void {
+	/**
+	 * A restore killed with every directory swapped in, and the first directory of the plan the site did not have.
+	 *
+	 * @return array{0: Job, 1: array<string, mixed>}
+	 */
+	private function all_swapped_in(): array {
 		$job  = $this->at_swap();
 		$plan = $this->plan_of( $job );
 		$new  = array_values(
@@ -199,8 +204,29 @@ final class WebClaimTest extends SwapTestCase {
 		);
 		$this->assertNotSame( array(), $new, 'the control: the plan has a directory the site did not have' );
 		$this->killed_at( $job, 'dir_in', count( $plan['dirs'] ) ); // Every directory swapped in.
-		$this->assertFalse( file_exists( $new[0]['stage'] ) || file_exists( $new[0]['old'] ), 'the control: under neither of the job\'s names' );
-		$claimed = $this->tick_without_wordpress( Plugin::instance()->jobs()->find( $job->id ) );
-		$this->assertNotSame( TickResult::LEFT, $claimed->status, 'claimed on the other evidence: ' . $claimed->message . ' ' . implode( ' | ', $this->web_notes ) );
+		$this->assertFalse( file_exists( $new[0]['stage'] ), 'the control: no longer under its staged name' );
+		$this->assertTrue( file_exists( $new[0]['live'] ), 'the control: under its live name' );
+		return array( Plugin::instance()->jobs()->find( $job->id ), $new[0] );
+	}
+
+	public function test_a_directory_the_site_did_not_have_is_found_under_its_live_name_once_swapped_in(): void {
+		list( $job )  = $this->all_swapped_in();
+		$claimed      = $this->tick_without_wordpress( $job );
+		$this->assertNotSame( TickResult::LEFT, $claimed->status, 'claimed: ' . $claimed->message . ' ' . implode( ' | ', $this->web_notes ) );
+	}
+
+	public function test_a_directory_the_site_did_not_have_under_neither_its_staged_nor_its_live_name_is_not_this_site(): void {
+		list( $job, $entry ) = $this->all_swapped_in();
+		$away                = $this->sandbox . '/away-new-' . bin2hex( random_bytes( 3 ) );
+		$this->refused_until_mended(
+			$job,
+			static function () use ( $entry, $away ): void {
+				rename( $entry['live'], $away );
+			},
+			static function () use ( $entry, $away ): void {
+				rename( $away, $entry['live'] );
+			},
+			'A directory the swap moved is not here.'
+		);
 	}
 }

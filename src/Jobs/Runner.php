@@ -590,6 +590,21 @@ final class Runner {
 				$state['retries'] = (int) $state['retries'] + 1;
 				$message          = $this->describe( $e );
 				if ( $state['retries'] > self::MAX_RETRIES ) {
+					if ( $this->web ) {
+						// Failed, a job that holds the site would hold it until WP-CLI retries it: a run without WordPress leaves
+						// it as it is (the retries as last written), held up, and the next comes later (WebPace).
+						$logger->warning(
+							'Step failed after every retry; left to WP-CLI, held up',
+							array(
+								'step'    => $step_id,
+								'attempt' => $state['retries'],
+								'error'   => $message,
+							)
+						);
+						$left          = $this->left( $job->id, sprintf( 'Step "%s" failed %d times: %s', $step_id, $state['retries'], $message ) );
+						$left->held_up = true;
+						return $left;
+					}
 					// A problem of the moment that outlasted the back-off (a full disk, the database away): retrying may help.
 					return $this->fail( $job, $token, $logger, sprintf( 'Step "%s" failed %d times: %s', $step_id, $state['retries'], $message ), Job::FAILURE_TEMPORARY );
 				}
@@ -688,11 +703,14 @@ final class Runner {
 				$logger->info(
 					'The job is left to WP-CLI',
 					array(
-						'step'   => $step_id,
-						'reason' => $result->message,
+						'step'    => $step_id,
+						'reason'  => $result->message,
+						'held_up' => $result->held_up,
 					)
 				);
-				return $this->left( $job->id, $result->message );
+				$left          = $this->left( $job->id, $result->message );
+				$left->held_up = $result->held_up;
+				return $left;
 			}
 
 			if ( StepResult::DONE === $result->kind ) {
