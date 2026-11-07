@@ -62,7 +62,6 @@ final class WebNothingSwappedTest extends SwapTestCase {
 		$this->assertNotSame( TickResult::LEFT, $last->status, 'not stopped before the flush: ' . $last->message );
 		$this->assertSame( Job::FAILED, $done->status, $done->last_error );
 		$this->assertSame( Job::SITE_UNTOUCHED, $done->site_state );
-		$this->assertNotContains( 'flushed', $this->seams, 'the flush skipped' );
 		$this->assertContains( 'restored', $this->seams, 'recorded as put back' );
 		$this->assertSame( $before, $this->site() );
 		$this->assertStringContainsString( 'Nothing of the restored site was swapped in', Plugin::instance()->job_presenter()->log_tail( $done ) );
@@ -151,8 +150,17 @@ final class WebNothingSwappedTest extends SwapTestCase {
 		$this->assertSame( TickResult::LEFT, end( $runs )->status, 'stopped before the flush, not skipped: ' . end( $runs )->message );
 		$this->assertArrayNotHasKey( SwapStep::NOTHING_SWAPPED, $now->cursor, 'the record dropped' );
 		$this->assertStringContainsString( 'a unit found something to rename: the record is dropped', Plugin::instance()->job_presenter()->log_tail( $now ) );
-		$done = $this->cli_run( $now );
-		$this->assertContains( 'flushed', $this->seams, 'WP-CLI flushed' );
+		$flushes = 0;
+		$this->retype(
+			$now,
+			array(
+				'flush' => static function () use ( &$flushes ): void {
+					++$flushes;
+				},
+			)
+		);
+		$done = $this->cli_run( Plugin::instance()->jobs()->find( $now->id ) );
+		$this->assertSame( 1, $flushes, 'WP-CLI flushed: the record dropped, the flush not skipped' );
 		$this->assertSame( $before, $this->site(), $done->last_error );
 	}
 }

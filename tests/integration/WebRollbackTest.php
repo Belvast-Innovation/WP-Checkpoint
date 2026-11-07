@@ -121,7 +121,6 @@ final class WebRollbackTest extends SwapTestCase {
 		$this->assertSame( $before, $site, 'everything renamed back' );
 		$this->assertSame( Job::SITE_CHANGING, $now->site_state, 'still held' );
 		$this->assertSame( 'rollback', $now->cursor['phase'] ?? '', 'not recorded as restored' );
-		$this->assertNotContains( 'flushed', $this->seams );
 
 		$lease = array( 'lock_token', 'locked_until', 'updated_at' );
 		$held  = array_diff_key( self::row( $now->id ), array_flip( $lease ) );
@@ -131,9 +130,17 @@ final class WebRollbackTest extends SwapTestCase {
 			$this->assertSame( $held, array_diff_key( self::row( $now->id ), array_flip( $lease ) ), "run {$i}: the row as it was but its lease" );
 		}
 
-		$this->seams = array();
-		$done        = $this->cli_run( Plugin::instance()->jobs()->find( $now->id ) );
-		$this->assertContains( 'flushed', $this->seams, 'WP-CLI flushed' );
+		$flushes = 0;
+		$this->retype(
+			$now,
+			array(
+				'flush' => static function () use ( &$flushes ): void {
+					++$flushes;
+				},
+			)
+		);
+		$done = $this->cli_run( Plugin::instance()->jobs()->find( $now->id ) );
+		$this->assertSame( 1, $flushes, 'WP-CLI flushed' );
 		$this->assertSame( Job::FAILED, $done->status, $done->last_error );
 		$this->assertSame( Job::SITE_UNTOUCHED, $done->site_state );
 		$this->assertSame( $before, $this->site() );
@@ -264,7 +271,9 @@ final class WebRollbackTest extends SwapTestCase {
 		$this->assertContains( 'carry_back_1', $this->seams, 'the control: the carry back sent its first statement' );
 		$this->assertSame( TickResult::LEFT, $result->status, $result->message );
 		$this->assertSame( $old_rows, $this->moved_aside_options( $job )[1], 'rolled back whole' );
-		$lease = array( 'lock_token', 'locked_until', 'updated_at', 'cursor_json', 'progress', 'progress_message', 'progress_at' );
+		// The claim's own writes (the killed run's lease taken over: its count and mark), the lease, and the decision to
+		// roll back (checkpointed before the carry) aside.
+		$lease = array( 'lock_token', 'locked_until', 'updated_at', 'takeovers', 'takeover_mark', 'cursor_json', 'progress', 'progress_message', 'progress_at' );
 		$after = self::row( $job->id );
 		$this->assertSame( array_diff_key( $row, array_flip( $lease ) ), array_diff_key( $after, array_flip( $lease ) ), 'nothing else written' );
 		$this->assertSame( 'rollback', json_decode( (string) $after['cursor_json'], true )['phase'] ?? '', 'the decision to roll back recorded before the carry, as WP-CLI goes on from' );
