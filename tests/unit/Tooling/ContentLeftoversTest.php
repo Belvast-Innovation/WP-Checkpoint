@@ -37,7 +37,7 @@ final class ContentLeftoversTest extends TestCase {
 	}
 
 	public function test_every_registered_name_says_why(): void {
-		foreach ( array_merge( ContentLeftovers::OWN, ContentLeftovers::OWN_PREFIXES ) as $name => $why ) {
+		foreach ( array_merge( ContentLeftovers::OWN, ContentLeftovers::OWN_PREFIXES, ContentLeftovers::MAY_BE_ABSENT ) as $name => $why ) {
 			$this->assertNotSame( '', trim( (string) $why ), (string) $name );
 		}
 		$this->assertArrayHasKey( Directories::DIR_PREFIX, ContentLeftovers::OWN_PREFIXES );

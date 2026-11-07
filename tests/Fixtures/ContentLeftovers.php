@@ -15,7 +15,7 @@ use WPCheckpoint\Support\Directories;
  * Restore\LoaderProbe, and removes it). Before a run (leftovers-precheck.php) a loader probe still in the must-use
  * plugins directory stops it: a run stopped part way left it, and with it there the test site loads it as a must-use
  * plugin. The registered names are checked to be there (an integration test): a registration that names nothing
- * there is out of date.
+ * there is out of date, but for those a test site may not have yet (MAY_BE_ABSENT, each with why).
  */
 final class ContentLeftovers {
 
@@ -29,6 +29,14 @@ final class ContentLeftovers {
 		'upgrade'    => 'WordPress\'s',
 		'uploads'    => 'checked on its own (UploadsLeftovers)',
 		'mu-plugins' => 'checked on its own (mu_entries())',
+	);
+
+	/**
+	 * Of OWN, the entries a test site may not have, with why (the check that every registered name is there leaves them
+	 * out: whether they are out of date cannot be told from a site that never made them).
+	 */
+	const MAY_BE_ABSENT = array(
+		'upgrade' => 'WordPress makes it the first time it downloads a package: a new test site (CI\'s) has none',
 	);
 
 	/**

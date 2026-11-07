@@ -282,7 +282,13 @@ final class LeftoversCheckTest extends WP_UnitTestCase {
 	public function test_every_wp_content_entry_registered_by_name_is_there(): void {
 		$content = \WPCheckpoint\Tests\Fixtures\ContentLeftovers::dir();
 		foreach ( array_keys( \WPCheckpoint\Tests\Fixtures\ContentLeftovers::OWN ) as $name ) {
+			if ( isset( \WPCheckpoint\Tests\Fixtures\ContentLeftovers::MAY_BE_ABSENT[ $name ] ) ) {
+				continue;
+			}
 			$this->assertFileExists( $content . '/' . $name, 'a registration that names nothing in the test site\'s wp-content is out of date: ' . $name );
+		}
+		foreach ( array_keys( \WPCheckpoint\Tests\Fixtures\ContentLeftovers::MAY_BE_ABSENT ) as $name ) {
+			$this->assertArrayHasKey( $name, \WPCheckpoint\Tests\Fixtures\ContentLeftovers::OWN, 'what may be absent is registered: ' . $name );
 		}
 		$this->assertSame( array(), \WPCheckpoint\Tests\Fixtures\ContentLeftovers::entries( $content ), 'and nothing else is there now' );
 	}
