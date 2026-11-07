@@ -17,7 +17,9 @@ use PHPUnit\Framework\TestSuite;
  * maintenance file (and its temporary names) in ABSPATH, storage directories in the test site's
  * wp-content (wp-checkpoint-*, other than the one the stored state names), the top-level entries of the test site's
  * uploads directory but WordPress's own (UploadsLeftovers: an entry an earlier run left under a test's name stops the
- * run before PHPUnit, uploads-precheck.php), and this plugin's and its tests' entries in the run's own temporary
+ * run before PHPUnit, leftovers-precheck.php), the test site's wp-content and must-use plugins directories' top-level
+ * entries but the ones registered (ContentLeftovers: a loader probe left in the must-use plugins directory stops the
+ * run as well), and this plugin's and its tests' entries in the run's own temporary
  * directory. A test that leaves one fails, named, and what it left is removed so the next test
  * starts clean; a test class that leaves one in its class-level set-up fails as a class; and the run fails when any is
  * left at its end. What an earlier run left is reported when the run starts: its tables are removed (the tests database
@@ -552,6 +554,14 @@ final class Leftovers implements TestListener {
 		foreach ( UploadsLeftovers::entries( UploadsLeftovers::dir() ) as $path ) {
 			$items[] = 'uploads:' . $path;
 		}
+		// wp-content's top-level entries but the registered ones (a test's wpc-* directory), and the must-use plugins
+		// directory's (a restore's loader probe).
+		foreach ( ContentLeftovers::entries( ContentLeftovers::dir() ) as $path ) {
+			$items[] = 'content:' . $path;
+		}
+		foreach ( ContentLeftovers::mu_entries( ContentLeftovers::mu_dir() ) as $path ) {
+			$items[] = 'mu-plugins:' . $path;
+		}
 		sort( $items );
 		return $items;
 	}
@@ -763,6 +773,10 @@ final class Leftovers implements TestListener {
 				clean_blog_cache( $id );
 			} elseif ( 0 === strpos( $item, 'maintenance:' ) ) {
 				RealAbspath::clear( substr( $item, 12 ) ); // Only what this plugin writes; anything else is reported.
+			} elseif ( 0 === strpos( $item, 'content:' ) ) {
+				ContentLeftovers::remove( substr( $item, 8 ), false ); // A test's wpc-* entry only; anything else is said.
+			} elseif ( 0 === strpos( $item, 'mu-plugins:' ) ) {
+				ContentLeftovers::remove( substr( $item, 11 ), true ); // A loader probe only; anything else is said.
 			} elseif ( 0 === strpos( $item, 'uploads:' ) ) {
 				UploadsLeftovers::remove( substr( $item, 8 ) ); // Under a test's name only; anything else is said.
 			} elseif ( 0 === strpos( $item, 'storage:' ) ) {

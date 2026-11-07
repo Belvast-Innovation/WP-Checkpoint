@@ -9,7 +9,7 @@ use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 /**
  * The names the tests make in the uploads directory are read from their code; an entry under one of them stops a run
- * before it starts (uploads-precheck.php, status 77), listed; the entries the leftover check compares are the uploads
+ * before it starts (leftovers-precheck.php, status 77), listed; the entries the leftover check compares are the uploads
  * directory's top-level ones but WordPress's own.
  */
 final class UploadsLeftoversTest extends TestCase {
@@ -33,17 +33,58 @@ final class UploadsLeftoversTest extends TestCase {
 		parent::tear_down();
 	}
 
-	public function test_the_names_are_read_from_the_tests(): void {
-		$names = UploadsLeftovers::names();
-		foreach ( array( 'wpccron', 'wpcexport', 'wpcnobudget', 'wpcpipe-uploads', 'wpcptest-preflight', 'wpcreplay-uploads' ) as $known ) {
-			$this->assertContains( $known, $names, 'a name a test makes in the uploads directory, when written' );
+	/**
+	 * The names the tests make in the uploads directory now: a test that makes a new one changes this list too.
+	 */
+	const NAMES = array( 'wpccron', 'wpcexport', 'wpcnobudget', 'wpcpipe-uploads', 'wpcptest-preflight', 'wpcreplay-uploads' );
+
+	public function test_the_names_are_read_from_the_tests_code(): void {
+		$this->assertSame( self::NAMES, UploadsLeftovers::names() );
+	}
+
+	/**
+	 * A tree of tests of its own, one file.
+	 *
+	 * @param string $code The file's code.
+	 * @return string The tree.
+	 */
+	private function tree( string $code ): string {
+		$root = $this->sandbox . '/tree-' . bin2hex( random_bytes( 3 ) );
+		mkdir( $root . '/tests/integration', 0755, true );
+		file_put_contents( $root . '/tests/integration/AnyTest.php', $code );
+		return $root;
+	}
+
+	public function test_a_name_in_a_comment_is_not_read_and_one_in_code_is(): void {
+		$commented = $this->tree( "<?php\n// \$x = wp_upload_dir()['basedir'] . '/wpcincomment';\n/** wp_upload_dir()['basedir'] . '/wpcindoc' */\n\$s = \"wp_upload_dir()['basedir'] . '/wpcinstring'\";\n" );
+		$this->assertSame( array(), UploadsLeftovers::names( $commented, array() ) );
+		$coded = $this->tree( "<?php\n\$x = wp_upload_dir( null, false )[ 'basedir' ] . '/wpcincode-dir';\n" );
+		$this->assertSame( array( 'wpcincode-dir' ), UploadsLeftovers::names( $coded, array() ), 'the control: in code it is read' );
+	}
+
+	public function test_a_use_it_cannot_read_fails_it_unless_registered(): void {
+		foreach ( array(
+			'a variable'           => "\$d = wp_upload_dir()['basedir'] . \$name;",
+			'double quotes'        => "\$d = wp_upload_dir()['basedir'] . \"/wpcquoted\";",
+			'trailingslashit'      => "\$d = trailingslashit( wp_upload_dir()['basedir'] ) . 'wpcslash';",
+			'another key'          => "\$d = wp_upload_dir()['path'] . '/wpcpath';",
+			'the directory itself' => "\$d = wp_upload_dir()['basedir'];",
+		) as $what => $line ) {
+			$root = $this->tree( "<?php\n" . $line . "\n" );
+			try {
+				UploadsLeftovers::names( $root, array() );
+				$this->fail( $what . ': not refused' );
+			} catch ( \LogicException $e ) {
+				$this->assertStringContainsString( 'tests/integration/AnyTest.php: 1 use(s)', $e->getMessage(), $what );
+			}
+			$this->assertSame( array(), UploadsLeftovers::names( $root, array( 'tests/integration/AnyTest.php' => array( 1, 'the test\'s' ) ) ), $what . ': registered, it passes' );
 		}
-		// The control of the reading: a tree of its own gives its own names, and none from a file without one.
-		mkdir( $this->sandbox . '/tests/integration', 0755, true );
-		mkdir( $this->sandbox . '/tests/Fixtures', 0755, true );
-		file_put_contents( $this->sandbox . '/tests/integration/AnyTest.php', "<?php\n\$x = wp_upload_dir( null, false )['basedir'] . '/wpcmine-dir';\n\$y = wp_upload_dir()[ 'basedir' ] . '/other';\n" );
-		file_put_contents( $this->sandbox . '/tests/Fixtures/None.php', "<?php\n\$z = WP_CONTENT_DIR . '/notuploads';\n" );
-		$this->assertSame( array( 'other', 'wpcmine-dir' ), UploadsLeftovers::names( $this->sandbox ) );
+		try {
+			UploadsLeftovers::names( $this->tree( "<?php\n" ), array( 'tests/integration/AnyTest.php' => array( 1, 'gone' ) ) );
+			$this->fail( 'an out-of-date registration not refused' );
+		} catch ( \LogicException $e ) {
+			$this->assertStringContainsString( 'registration out of date', $e->getMessage() );
+		}
 	}
 
 	public function test_the_entries_leave_out_wordpresss_own(): void {
@@ -67,7 +108,7 @@ final class UploadsLeftoversTest extends TestCase {
 	private static function precheck( string $dir ): array {
 		$pipes   = array();
 		$process = proc_open(
-			array( PHP_BINARY, dirname( __DIR__, 2 ) . '/Fixtures/uploads-precheck.php', $dir ),
+			array( PHP_BINARY, dirname( __DIR__, 2 ) . '/Fixtures/leftovers-precheck.php', $dir, $dir . '/no-mu-plugins' ),
 			array(
 				1 => array( 'pipe', 'w' ),
 				2 => array( 'pipe', 'w' ),

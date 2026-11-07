@@ -412,9 +412,13 @@ final class LeftoversTest extends TestCase {
 		$leaky = self::probe( $result, 'test_leaky' );
 		$listener->startTest( $leaky );
 		$this->there[] = 'uploads:/w/uploads/wpcreplay-uploads';
+		$this->there[] = 'content:/w/wpc-uploads-abc';
+		$this->there[] = 'mu-plugins:/w/mu-plugins/wp-checkpoint-probe-x.php';
 		$listener->endTest( $leaky, 0.1 );
 		$this->assertSame( 1, $result->failureCount() );
 		$this->assertStringContainsString( 'wpcreplay-uploads', $result->failures()[0]->exceptionMessage() );
+		$this->assertStringContainsString( 'wpc-uploads-abc', $result->failures()[0]->exceptionMessage() );
+		$this->assertStringContainsString( 'wp-checkpoint-probe-x.php', $result->failures()[0]->exceptionMessage() );
 		$this->assertContains( 'uploads:/w/uploads/wpcreplay-uploads', $this->removed );
 		$listener->endTestSuite( $class );
 		$this->assertSame( 2, $result->failureCount() );

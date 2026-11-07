@@ -6,7 +6,8 @@
  *   npx wp-env run tests-cli --env-cwd=wp-content/plugins/wp-checkpoint wp eval-file tests/acceptance/manual-restore/build.php
  *
  * It adds test content to the site (files in the uploads, rows and a table in the database), exports the site with the
- * plugin's own export steps, and writes into build/manual-restore/:
+ * plugin's own export steps, and writes into the test output directory's manual-restore/ (../wp-checkpoint-test-output beside the
+ * repository, which .wp-env.json maps into the containers):
  *   archive/      the volumes and the standalone manifest, as the plugin stores them;
  *   source.json   the fingerprint of the original: every exported table and every uploads file;
  *   tables.json   the names of the exported tables (restore.sh fingerprints the same ones).
@@ -45,13 +46,13 @@ function wpc_manual_fail( string $message ): void {
 }
 
 global $wpdb;
-$out     = dirname( __DIR__, 3 ) . '/build/manual-restore';
+$out     = ABSPATH . 'wpcheckpoint-test-output/manual-restore'; // The test output directory (.wp-env.json maps it beside the repository).
 $uploads = wp_upload_dir( null, false )['basedir'];
 $content = $uploads . '/wpc-manual-restore';
 $table   = $wpdb->prefix . 'wpc_manual';
 
 if ( file_exists( $out ) ) {
-	wpc_manual_fail( "{$out} exists from an earlier run. Remove it first (rm -r build/manual-restore)." );
+	wpc_manual_fail( "{$out} exists from an earlier run. Remove it first (rm -r ../wp-checkpoint-test-output/manual-restore, beside the repository)." );
 }
 if ( file_exists( $content ) || $table === $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) ) ) {
 	wpc_manual_fail( "the test content of an earlier run is still in the site. Remove {$content} and the table {$table} first." );

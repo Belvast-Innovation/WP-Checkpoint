@@ -39,11 +39,11 @@ jobs:
           WPCHECKPOINT_TEST_SUITE: unit
           WPCHECKPOINT_LAYOUTS: ${{ inputs.layouts }}
           WPCHECKPOINT_LAYOUTS_SEED: ${{ inputs.seed }}
-        run: php vendor/bin/phpunit --testsuite unit --filter ScanLayoutsTest --log-junit build/junit-layouts.xml
+        run: php vendor/bin/phpunit --testsuite unit --filter ScanLayoutsTest --log-junit ${{ runner.temp }}/junit-layouts.xml
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: junit-layouts
-          path: build/junit-layouts.xml
+          path: ${{ runner.temp }}/junit-layouts.xml
           if-no-files-found: ignore

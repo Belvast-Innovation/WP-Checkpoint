@@ -8,14 +8,18 @@
  * Run from the repository (any directory in it). The spec:
  *
  *   {
- *     "command": "a shell command that runs the tests; {junit} is replaced by the JUnit log it must write",
+ *     "command": "a shell command that runs the tests; {junit} is replaced by the JUnit log it must write (or {junit_name}, see below)",
  *     "mutations": [ { "name": "short-name", "file": "src/…", "old": "text found exactly once", "new": "its replacement" } ]
  *   }
  *
- * The command runs from the repository's top directory with MUTATION set to the mutation's name; {junit} is
- * build/junit-mut-<name>.xml there (build/ is ignored by git). Without "command", the integration suite is run through
- * wp-env with "filter" (a PHPUnit --filter), the ports from WP_ENV_PORT and WP_ENV_TESTS_PORT. Names after the spec run
- * only those mutations.
+ * The command runs from the repository's top directory with MUTATION set to the mutation's name. Its outputs go to the
+ * test output directory, outside the repository (whose entries a restore copies): WPCHECKPOINT_TEST_OUTPUT, by default
+ * wp-checkpoint-test-output beside the repository, which .wp-env.json maps into the test containers (made when it is
+ * not there). {junit} is junit-mut-<name>.xml there, as an absolute path (a command run here); {junit_name} is that name
+ * alone, for a command that runs the integration suite in wp-env, whose bin/test-integration.sh puts a relative output in
+ * the same directory as the containers see it. Without "command", the integration suite is run through wp-env
+ * (bin/wp-env-run.sh, which tries again when wp-env did not start) with "filter" (a PHPUnit --filter), the ports from
+ * WP_ENV_PORT and WP_ENV_TESTS_PORT. Names after the spec run only those mutations.
  *
  * Refuses to start unless the working tree is clean (git status --porcelain prints nothing): commit the code first, so
  * that what each mutation is measured against is a commit, and so that nothing but the mutation is ever written. A
@@ -23,8 +27,8 @@
  * from git, which would throw away whatever the file held that was not committed. A mutation whose text is not found
  * exactly once, or whose file does not pass php -l, is not run. The tree must be clean again at the end.
  *
- * The command's standard output and standard error are kept apart in build/mutate-<name>.stdout.txt and
- * build/mutate-<name>.stderr.txt; for every result but caught (no log, survived) its exit status and both outputs,
+ * The command's standard output and standard error are kept apart in mutate-<name>.stdout.txt and
+ * mutate-<name>.stderr.txt in the test output directory; for every result but caught (no log, survived) its exit status and both outputs,
  * whole, are printed right after it ran, so that no result is left without its cause.
  *
  * Exit status: 0 when every mutation was caught (a failure or error in the log); 1 when one survived, was not run, or
@@ -173,14 +177,19 @@ if ( '' !== $dirty ) {
 	wcpm_stop( "The working tree is not clean; commit (or set aside) these first, so that mutations are measured against a commit and nothing but the mutation is written:\n" . $dirty, 2 );
 }
 $command = isset( $spec['command'] ) ? (string) $spec['command'] : sprintf(
-	"WP_ENV_PORT=%s WP_ENV_TESTS_PORT=%s npx wp-env run tests-cli --env-cwd=wp-content/plugins/wp-checkpoint sh -c %s",
+	"WP_ENV_PORT=%s WP_ENV_TESTS_PORT=%s bin/wp-env-run.sh tests-cli --env-cwd=wp-content/plugins/wp-checkpoint sh -c %s",
 	escapeshellarg( (string) ( getenv( 'WP_ENV_PORT' ) ?: '8888' ) ),
 	escapeshellarg( (string) ( getenv( 'WP_ENV_TESTS_PORT' ) ?: '8889' ) ),
-	escapeshellarg( 'WPCHECKPOINT_TEST_LOOPBACK_HOST=http://tests-wordpress sh bin/test-integration.sh --log-junit {junit} --filter ' . escapeshellarg( (string) ( $spec['filter'] ?? '' ) ) )
+	escapeshellarg( 'WPCHECKPOINT_TEST_LOOPBACK_HOST=http://tests-wordpress sh bin/test-integration.sh --log-junit {junit_name} --filter ' . escapeshellarg( (string) ( $spec['filter'] ?? '' ) ) )
 );
-if ( false === strpos( $command, '{junit}' ) ) {
-	wcpm_stop( 'The command must write a JUnit log where {junit} says.', 2 );
+if ( false === strpos( $command, '{junit}' ) && false === strpos( $command, '{junit_name}' ) ) {
+	wcpm_stop( 'The command must write a JUnit log where {junit} (or {junit_name}) says.', 2 );
 }
+$output = (string) ( getenv( 'WPCHECKPOINT_TEST_OUTPUT' ) ?: dirname( $top ) . '/wp-checkpoint-test-output' );
+if ( ! is_dir( $output ) && ! mkdir( $output, 0755, true ) && ! is_dir( $output ) ) {
+	wcpm_stop( 'The test output directory ' . $output . ' could not be made.', 2 );
+}
+$output = (string) realpath( $output );
 
 // The one file mutated at a time, and its content before: written back on any way out (an exit, a fatal error, a
 // signal where pcntl is there).
@@ -242,18 +251,16 @@ foreach ( $spec['mutations'] as $mutation ) {
 				continue;
 			}
 		}
-		$junit = 'build/junit-mut-' . $name . '.xml';
-		if ( ! is_dir( $top . '/build' ) ) {
-			mkdir( $top . '/build', 0755, true );
-		}
-		if ( is_file( $top . '/' . $junit ) ) {
-			file_put_contents( $top . '/' . $junit, '' ); // An earlier run's log is not this one's result.
+		$junit_name = 'junit-mut-' . $name . '.xml';
+		$junit      = $output . '/' . $junit_name;
+		if ( is_file( $junit ) ) {
+			file_put_contents( $junit, '' ); // An earlier run's log is not this one's result.
 		}
 		wcpm_say( '== ' . $name . ' (' . (string) $mutation['file'] . ')' );
-		$out        = 'build/mutate-' . $name . '.stdout.txt';
-		$err        = 'build/mutate-' . $name . '.stderr.txt';
-		$run_status = wcpm_run_apart( 'MUTATION=' . escapeshellarg( $name ) . ' ' . str_replace( '{junit}', $junit, $command ), $top . '/' . $out, $top . '/' . $err );
-		$failures   = null === $run_status ? null : wcpm_failures( $top . '/' . $junit );
+		$out        = $output . '/mutate-' . $name . '.stdout.txt';
+		$err        = $output . '/mutate-' . $name . '.stderr.txt';
+		$run_status = wcpm_run_apart( 'MUTATION=' . escapeshellarg( $name ) . ' ' . str_replace( array( '{junit_name}', '{junit}' ), array( $junit_name, $junit ), $command ), $out, $err );
+		$failures   = null === $run_status ? null : wcpm_failures( $junit );
 		$kept       = '; its output is printed above and kept in ' . $out . ' and ' . $err;
 		if ( null === $run_status ) {
 			$results[ $name ] = 'no result: the command could not be started' . $kept;

@@ -61,14 +61,14 @@ jobs:
           tools: composer:v2
 
       - run: composer install --no-interaction --no-progress --prefer-dist
-      - run: php vendor/bin/phpunit --testsuite unit-windows-${{ matrix.part }} --log-junit build/junit-unit-windows-${{ matrix.part }}.xml
+      - run: php vendor/bin/phpunit --testsuite unit-windows-${{ matrix.part }} --log-junit ${{ runner.temp }}/junit-unit-windows-${{ matrix.part }}.xml
 
       # Each test's time on Windows: what the split into parts is based on.
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: junit-unit-windows-${{ matrix.part }}
-          path: build/junit-unit-windows-${{ matrix.part }}.xml
+          path: ${{ runner.temp }}/junit-unit-windows-${{ matrix.part }}.xml
           if-no-files-found: ignore
 
   unit-windows:
@@ -125,11 +125,11 @@ jobs:
           $old = 'return null === $back ? false : $back === $name;'
           $new = 'return null === $back ? false : ( $back === $name && false === strpos( $name, "caf" ) );'
           if (([regex]::Matches($source, [regex]::Escape($old))).Count -ne 1) { throw 'the line to mutate is not there exactly once' }
-          New-Item -ItemType Directory -Force -Path build | Out-Null
-          [IO.File]::WriteAllText('build/check-mutated.php', $source.Replace($old, $new).Replace("dirname( __DIR__, 2 )", "'" + (Get-Location).Path.Replace('\', '/') + "'"), (New-Object Text.UTF8Encoding $false))
+          $copy = Join-Path $env:RUNNER_TEMP 'check-mutated.php'
+          [IO.File]::WriteAllText($copy, $source.Replace($old, $new).Replace("dirname( __DIR__, 2 )", "'" + (Get-Location).Path.Replace('\', '/') + "'"), (New-Object Text.UTF8Encoding $false))
           $version = (& C:\Windows\System32\tar.exe --version) -join ' '
           Write-Host "tar: $version"
-          $out = & php build/check-mutated.php bsdtar 2>&1 | Out-String
+          $out = & php $copy bsdtar 2>&1 | Out-String
           Write-Host $out
           if ($version -match 'libarchive (\d+\.\d+\.\d+)' -and [version]$Matches[1] -ge [version]'3.8.6') {
             if ($LASTEXITCODE -ne 1) { throw "the mutated copy exited $LASTEXITCODE, not 1: the known-difference rule did not bite" }
@@ -182,6 +182,9 @@ jobs:
       # vendor/ is bind-mounted into the wp-env containers, so installing on the host is enough.
       - run: composer install --no-interaction --no-progress --prefer-dist
       - run: npm ci
+      # The test output directory beside the repository, which .wp-env.json maps into the containers: made before wp-env
+      # starts, so that Docker does not make it as root.
+      - run: mkdir -p ../wp-checkpoint-test-output
       - run: npx wp-env start
       - run: npm run test:integration
 
@@ -232,6 +235,9 @@ jobs:
 
       - run: composer install --no-interaction --no-progress --prefer-dist
       - run: npm ci
+      # The test output directory beside the repository, which .wp-env.json maps into the containers: made before wp-env
+      # starts, so that Docker does not make it as root.
+      - run: mkdir -p ../wp-checkpoint-test-output
       - run: npx wp-env start
 
       - name: Build the archive and the original's fingerprint
@@ -246,7 +252,7 @@ jobs:
           exit 1
 
       - name: Restore by hand and compare
-        run: bash tests/acceptance/manual-restore/restore.sh build/manual-restore 127.0.0.1 33306 root password
+        run: bash tests/acceptance/manual-restore/restore.sh ../wp-checkpoint-test-output/manual-restore 127.0.0.1 33306 root password
 
       - name: Show wp-env logs on failure
         if: failure()
@@ -285,6 +291,9 @@ jobs:
 
       - run: composer install --no-interaction --no-progress --prefer-dist
       - run: npm ci
+      # The test output directory beside the repository, which .wp-env.json maps into the containers: made before wp-env
+      # starts, so that Docker does not make it as root.
+      - run: mkdir -p ../wp-checkpoint-test-output
       - run: npx wp-env start
       - run: npm run test:integration:multisite
 

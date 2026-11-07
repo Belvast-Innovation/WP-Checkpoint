@@ -2,6 +2,7 @@
 
 namespace WPCheckpoint\Tests\Unit\Tooling;
 
+use WPCheckpoint\Tests\Fixtures\ExpectedPath;
 use WPCheckpoint\Tests\Fixtures\Sandbox;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
@@ -222,24 +223,28 @@ exit( $fail ? 1 : 0 );
 			)
 		);
 		$this->assertSame( 1, $run['code'], $run['out'] );
+		$out = $this->sandbox . '/wp-checkpoint-test-output'; // Beside the repository, outside it.
 		foreach ( array(
 			'nolog'   => 3,
 			'comment' => 0,
 		) as $name => $status ) {
+			$stdout = ExpectedPath::slashed( $out, "mutate-{$name}.stdout.txt" );
+			$stderr = ExpectedPath::slashed( $out, "mutate-{$name}.stderr.txt" );
 			$this->assertStringContainsString(
-				"-- {$name}: exit status {$status}\n-- {$name}: standard output (build/mutate-{$name}.stdout.txt):\nstand-in stdout of {$name}\nits second stdout line\n-- {$name}: standard error (build/mutate-{$name}.stderr.txt):\nstand-in stderr of {$name}\nits second stderr line\n-- {$name}: end of the output\n",
+				"-- {$name}: exit status {$status}\n-- {$name}: standard output ({$stdout}):\nstand-in stdout of {$name}\nits second stdout line\n-- {$name}: standard error ({$stderr}):\nstand-in stderr of {$name}\nits second stderr line\n-- {$name}: end of the output\n",
 				$run['out'],
 				$name . ': the exit status and both outputs whole, apart'
 			);
-			$this->assertSame( "stand-in stdout of {$name}\nits second stdout line\n", file_get_contents( $this->repo . "/build/mutate-{$name}.stdout.txt" ), $name . ': standard output kept, without standard error' );
-			$this->assertSame( "stand-in stderr of {$name}\nits second stderr line\n", file_get_contents( $this->repo . "/build/mutate-{$name}.stderr.txt" ), $name . ': standard error kept, without standard output' );
+			$this->assertSame( "stand-in stdout of {$name}\nits second stdout line\n", file_get_contents( "{$out}/mutate-{$name}.stdout.txt" ), $name . ': standard output kept, without standard error' );
+			$this->assertSame( "stand-in stderr of {$name}\nits second stderr line\n", file_get_contents( "{$out}/mutate-{$name}.stderr.txt" ), $name . ': standard error kept, without standard output' );
 		}
-		$this->assertStringContainsString( 'nolog: no result: the command left no JUnit log (exit 3); its output is printed above and kept in build/mutate-nolog.stdout.txt and build/mutate-nolog.stderr.txt', $run['out'] );
-		$this->assertStringContainsString( 'comment: SURVIVED: no test failed; its output is printed above and kept in build/mutate-comment.stdout.txt and build/mutate-comment.stderr.txt', $run['out'] );
+		$this->assertStringContainsString( 'nolog: no result: the command left no JUnit log (exit 3); its output is printed above and kept in ' . ExpectedPath::slashed( $out, 'mutate-nolog.stdout.txt' ) . ' and ' . ExpectedPath::slashed( $out, 'mutate-nolog.stderr.txt' ), $run['out'] );
+		$this->assertStringContainsString( 'comment: SURVIVED: no test failed; its output is printed above and kept in ' . ExpectedPath::slashed( $out, 'mutate-comment.stdout.txt' ) . ' and ' . ExpectedPath::slashed( $out, 'mutate-comment.stderr.txt' ), $run['out'] );
 		// A caught mutation's output is kept, not printed: the control is that the same text is in its file.
-		$this->assertStringContainsString( 'stand-in stdout of two', (string) file_get_contents( $this->repo . '/build/mutate-two.stdout.txt' ) );
+		$this->assertStringContainsString( 'stand-in stdout of two', (string) file_get_contents( $out . '/mutate-two.stdout.txt' ) );
 		$this->assertStringNotContainsString( 'stand-in stdout of two', $run['out'] );
 		$this->assertStringNotContainsString( '-- two:', $run['out'] );
-		$this->assertSame( '', $this->git( 'status --porcelain' ), 'the output files are under build/, which git ignores' );
+		$this->assertSame( '', $this->git( 'status --porcelain' ), 'the output files are outside the repository' );
+		$this->assertDirectoryDoesNotExist( $this->repo . '/build/mutate-two.stdout.txt', 'none of them in it' );
 	}
 }

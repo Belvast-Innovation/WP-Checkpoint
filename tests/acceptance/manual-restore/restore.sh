@@ -4,7 +4,7 @@
 #
 #   bash tests/acceptance/manual-restore/restore.sh <build dir> <mysql host> <port> <user> <password>
 #
-# <build dir> is build/manual-restore from build.php (archive/, source.json, tables.json). A new database is created
+# <build dir> is ../wp-checkpoint-test-output/manual-restore from build.php (archive/, source.json, tables.json). A new database is created
 # on the given server (it must be empty of it: the name is random). Tools: bash, python3, sha256sum, split, unzip,
 # mysql (client), php with mysqli (only for the comparison at the end).
 #

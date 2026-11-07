@@ -28,9 +28,10 @@
 # the test site's WordPress directory (a run stopped while a test held one leaves it; a held .maintenance stops the
 # suite's own start at WordPress's maintenance page), and removes this plugin's, on wp-env's test site only
 # (WPCHECKPOINT_TEST_MAINTENANCE_REMOVE=0 lists only). With .maintenance still there the run does not start (status 76;
-# any other failure of the check, status 1). Then tests/Fixtures/uploads-precheck.php lists the entries of the test
-# site's uploads directory under a name the tests make there (read from the tests): an earlier run left them, and the
-# run does not start (status 77) until they are removed. Then tests/Fixtures/plugin-entries.php counts the entries of this plugin's
+# any other failure of the check, status 1). Then tests/Fixtures/leftovers-precheck.php lists the entries of the
+# test site's uploads directory under a name the tests make there (read from the tests) and a restore's loader probe
+# in its must-use plugins directory: an earlier run left them, and the run does not start (status 77) until they are
+# removed. Then tests/Fixtures/plugin-entries.php counts the entries of this plugin's
 # directory, as the restore counts its own copy, and warns when they come near the restore's limit: the suite's
 # restores read a stand-in (tests/Fixtures/Restore/PluginStandIn.php), but the test of the count on the real directory
 # fails past it.
@@ -50,7 +51,14 @@
 # this run's own ID is WPCHECKPOINT_TEST_RUN_ID). Refused, the script exits with status 75. On any exit, a signal included, the lock is released and the run's directory cleaned up.
 # (WPCHECKPOINT_TEST_PHPUNIT and WPCHECKPOINT_TEST_LOCK name another PHPUnit and another lock, for this script's own
 # test.)
+#
+# Its outputs (--log-junit and the other report options) named by a relative path go to the test output directory, not
+# to the plugin's (whose entries a restore copies, and counts): WPCHECKPOINT_TEST_OUTPUT_DIR, by default the WordPress
+# directory's wpcheckpoint-test-output, which .wp-env.json maps to ../wp-checkpoint-test-output beside the plugin's
+# repository. A relative output path with no such directory stops the run (status 1). Inputs (--bootstrap, test paths)
+# are still named as from the plugin's directory.
 PLUGIN=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+OUTPUT=${WPCHECKPOINT_TEST_OUTPUT_DIR:-$PLUGIN/../../../wpcheckpoint-test-output}
 PHPUNIT=${WPCHECKPOINT_TEST_PHPUNIT:-$PLUGIN/vendor/bin/phpunit}
 CONFIG=$PLUGIN/phpunit.xml
 [ -f "$CONFIG" ] || CONFIG=$PLUGIN/phpunit.xml.dist
@@ -188,20 +196,44 @@ absolute() {
 	esac
 }
 
+# An output's path relative to the test output directory, made absolute; with no such directory, the run stops.
+output() {
+	case "$1" in
+		/*) printf '%s' "$1" ;;
+		*)
+			if [ ! -d "$OUTPUT" ]; then
+				echo "The output $1 would go to the test output directory $OUTPUT, which is not there (.wp-env.json maps ../wp-checkpoint-test-output beside the plugin's repository; WPCHECKPOINT_TEST_OUTPUT_DIR names another)." >&2
+				return 1
+			fi
+			printf '%s' "$(CDPATH='' cd -- "$OUTPUT" && pwd)/$1"
+			;;
+	esac
+}
+
 ARGS=""
-NEXT="" # What the argument before asked of this one: "path" (make it absolute) or "value" (leave it).
+NEXT="" # What the argument before asked of this one: "path" (an input: make it absolute), "output" (to the test output directory) or "value" (leave it).
 for arg in "$@"; do
 	if [ "$NEXT" = path ]; then
 		arg=$(absolute "$arg")
+		NEXT=""
+	elif [ "$NEXT" = output ]; then
+		arg=$(output "$arg") || exit 1
 		NEXT=""
 	elif [ "$NEXT" = value ]; then
 		NEXT=""
 	else
 		case "$arg" in
-			--log-*=* | --testdox-html=* | --testdox-text=* | --testdox-xml=* | --coverage-*=* | --cache-result-file=* | --bootstrap=* | --list-tests-xml=* | --dump-xdebug-filter=* | --whitelist=* | --prepend=*)
+			--log-*=* | --testdox-html=* | --testdox-text=* | --testdox-xml=* | --coverage-clover=* | --coverage-cobertura=* | --coverage-crap4j=* | --coverage-html=* | --coverage-php=* | --coverage-xml=* | --coverage-cache=* | --cache-result-file=* | --list-tests-xml=* | --dump-xdebug-filter=*)
+				value=$(output "${arg#*=}") || exit 1
+				arg="${arg%%=*}=$value"
+				;;
+			--coverage-filter=* | --bootstrap=* | --whitelist=* | --prepend=*)
 				arg="${arg%%=*}=$(absolute "${arg#*=}")"
 				;;
-			--log-* | --testdox-html | --testdox-text | --testdox-xml | --cache-result-file | --coverage-clover | --coverage-cobertura | --coverage-crap4j | --coverage-html | --coverage-php | --coverage-xml | --coverage-filter | --coverage-cache | --bootstrap | --list-tests-xml | --dump-xdebug-filter | --whitelist | --prepend)
+			--log-* | --testdox-html | --testdox-text | --testdox-xml | --cache-result-file | --coverage-clover | --coverage-cobertura | --coverage-crap4j | --coverage-html | --coverage-php | --coverage-xml | --coverage-cache | --list-tests-xml | --dump-xdebug-filter)
+				NEXT=output
+				;;
+			--coverage-filter | --bootstrap | --whitelist | --prepend)
 				NEXT=path
 				;;
 			--filter | --group | --exclude-group | --testsuite | --covers | --uses | -d | --printer | --test-suffix | --order-by | --random-order-seed | --columns | --loader | --repeat | --extensions | --testdox-group | --testdox-exclude-group | --include-path | --default-time-limit | --atleast-version | -c | --configuration)
@@ -227,12 +259,12 @@ elif [ "$PRECHECK" -ne 0 ]; then
 	echo "The check of the test site's maintenance files failed (status $PRECHECK); the run does not start." >&2
 	exit 1
 fi
-php "$PLUGIN/tests/Fixtures/uploads-precheck.php"
+php "$PLUGIN/tests/Fixtures/leftovers-precheck.php"
 PRECHECK=$?
 if [ "$PRECHECK" -eq 77 ]; then
 	exit 77
 elif [ "$PRECHECK" -ne 0 ]; then
-	echo "The check of the test site's uploads directory failed (status $PRECHECK); the run does not start." >&2
+	echo "The check of what an earlier run left in the test site's files failed (status $PRECHECK); the run does not start." >&2
 	exit 1
 fi
 php "$PLUGIN/tests/Fixtures/plugin-entries.php" "$PLUGIN"

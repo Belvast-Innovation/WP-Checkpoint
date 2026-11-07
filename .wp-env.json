@@ -6,6 +6,9 @@
   "plugins": [
     "."
   ],
+  "mappings": {
+    "wpcheckpoint-test-output": "../wp-checkpoint-test-output"
+  },
   "config": {
     "WP_DEBUG": true,
     "WP_DEBUG_LOG": true,
