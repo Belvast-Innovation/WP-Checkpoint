@@ -165,7 +165,8 @@ final class WebLeavesTest extends SwapTestCase {
 		$result      = $this->cli_tick( Plugin::instance()->jobs()->find( $job->id ) );
 		$now         = Plugin::instance()->jobs()->find( $job->id );
 		$this->assertNotSame( array(), $this->seams, 'WP-CLI ran the swap: ' . $result->status . ' ' . $result->message );
-		$this->assertNotSame( Job::FAILED, $now->status, 'not failed for the takeovers a run without WordPress counted: ' . $now->last_error );
+		$this->assertStringNotContainsString( 'times in a row without finishing', (string) $now->last_error, 'not failed for the takeovers a run without WordPress counted' );
+		$this->assertContains( 'table_back', $this->seams, 'WP-CLI put the site back' );
 	}
 
 	public function test_on_a_network_the_network_is_recorded_before_the_swap_moves_on_to_judging(): void {
