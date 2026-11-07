@@ -41,7 +41,7 @@ final class WebLeavesTest extends SwapTestCase {
 		$before      = self::row( $job->id );
 		$this->assertNotSame( '', $before['lock_token'], 'the control: the killed run\'s lease is there' );
 		$this->seams = array();
-		$result      = $this->web_tick( Plugin::instance()->jobs()->find( $job->id ) );
+		$result      = $this->tick_without_wordpress( Plugin::instance()->jobs()->find( $job->id ) );
 		$after       = self::row( $job->id );
 		$this->assertSame( TickResult::LEFT, $result->status, $result->message );
 		$this->assertSame( (string) Runner::MAX_TAKEOVERS, $after['takeovers'], 'the control: the claim counted the limit' );
@@ -96,7 +96,7 @@ final class WebLeavesTest extends SwapTestCase {
 				array( 'id' => $job->id )
 			);
 			$wpdb->query( 'COMMIT' );
-			list( $now ) = $this->web_run( Plugin::instance()->jobs()->find( $job->id ) );
+			list( $now ) = $this->run_without_wordpress( Plugin::instance()->jobs()->find( $job->id ) );
 			$row         = self::row( $job->id );
 			$written     = json_decode( (string) $row['cursor_json'], true );
 			$this->assertNotContains( $written['phase'] ?? '', $asking, $case );

@@ -95,7 +95,7 @@ final class WebRollbackTest extends SwapTestCase {
 		$this->tear_down_swap();
 		$this->set_up_swap();
 		list( $job, $before ) = $this->half();
-		list( $web, $runs )   = $this->web_run( $job );
+		list( $web, $runs )   = $this->run_without_wordpress( $job );
 		$this->assertNotSame( TickResult::LEFT, end( $runs )->status, 'not left to WP-CLI: ' . end( $runs )->message . ' ' . implode( ' | ', $this->web_notes ) );
 		$this->assertSame( $before, $this->site(), 'put back as it was before the restore' );
 		$this->assertSame( array(), $this->maintenance_files() );
@@ -111,7 +111,7 @@ final class WebRollbackTest extends SwapTestCase {
 
 	public function test_a_run_that_cannot_flush_stops_before_it_and_leaves_the_job_as_it_is_for_wp_cli(): void {
 		list( $job, $before ) = $this->half();
-		list( $now, $runs )   = $this->web_run( $job, array(), false );
+		list( $now, $runs )   = $this->run_without_wordpress( $job, array(), false );
 		$last                 = end( $runs );
 		$this->assertSame( TickResult::LEFT, $last->status, $last->message );
 		$this->assertStringContainsString( 'object cache can only be flushed by WP-CLI', $last->message );
@@ -126,7 +126,7 @@ final class WebRollbackTest extends SwapTestCase {
 		$lease = array( 'lock_token', 'locked_until', 'updated_at' );
 		$held  = array_diff_key( self::row( $now->id ), array_flip( $lease ) );
 		for ( $i = 1; $i <= Runner::MAX_NO_PROGRESS + 2; $i++ ) {
-			$again = $this->web_tick( $now, array(), false );
+			$again = $this->tick_without_wordpress( $now, array(), false );
 			$this->assertSame( TickResult::LEFT, $again->status, "run {$i}: " . $again->message );
 			$this->assertSame( $held, array_diff_key( self::row( $now->id ), array_flip( $lease ) ), "run {$i}: the row as it was but its lease" );
 		}
@@ -181,7 +181,7 @@ final class WebRollbackTest extends SwapTestCase {
 		try {
 			$this->seams = array();
 			$started     = microtime( true );
-			$result      = $this->web_tick( $job );
+			$result      = $this->tick_without_wordpress( $job );
 			$took        = microtime( true ) - $started;
 		} finally {
 			$other->run( 'ROLLBACK' );
@@ -202,7 +202,7 @@ final class WebRollbackTest extends SwapTestCase {
 		$this->assertStringNotContainsString( 'not carried back', $log, 'never put back without the carry for that' );
 
 		$this->seams        = array();
-		list( $done, $runs ) = $this->web_run( $now );
+		list( $done, $runs ) = $this->run_without_wordpress( $now );
 		$this->assertContains( 'carried_back', $this->seams, 'carried back once the locks were gone' );
 		$this->assertSame( Job::FAILED, $done->status, end( $runs )->message . ' ' . $done->last_error );
 		$this->assertArrayNotHasKey( 'busy', $done->cursor );
@@ -228,7 +228,7 @@ final class WebRollbackTest extends SwapTestCase {
 		$wpdb->query( 'COMMIT' );
 		$other = self::holding( $old );
 		try {
-			$result = $this->web_tick( $job );
+			$result = $this->tick_without_wordpress( $job );
 		} finally {
 			$other->run( 'ROLLBACK' );
 			$other->close();
@@ -260,7 +260,7 @@ final class WebRollbackTest extends SwapTestCase {
 			},
 		);
 		$this->seams = array();
-		$result      = $this->web_tick( $job, $throw );
+		$result      = $this->tick_without_wordpress( $job, $throw );
 		$this->assertContains( 'carry_back_1', $this->seams, 'the control: the carry back sent its first statement' );
 		$this->assertSame( TickResult::LEFT, $result->status, $result->message );
 		$this->assertSame( $old_rows, $this->moved_aside_options( $job )[1], 'rolled back whole' );

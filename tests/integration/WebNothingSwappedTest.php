@@ -57,7 +57,7 @@ final class WebNothingSwappedTest extends SwapTestCase {
 	 */
 	private function assert_ended_without_flush( Job $job, array $before ): void {
 		$this->seams         = array();
-		list( $done, $runs ) = $this->web_run( $job, array(), false );
+		list( $done, $runs ) = $this->run_without_wordpress( $job, array(), false );
 		$last                = end( $runs );
 		$this->assertNotSame( TickResult::LEFT, $last->status, 'not stopped before the flush: ' . $last->message );
 		$this->assertSame( Job::FAILED, $done->status, $done->last_error );
@@ -94,7 +94,7 @@ final class WebNothingSwappedTest extends SwapTestCase {
 		$before = $this->site();
 		$this->killed_at( $job, 'dir_aside' );
 		$this->seams         = array();
-		list( $now, $runs )  = $this->web_run( Plugin::instance()->jobs()->find( $job->id ), array(), false );
+		list( $now, $runs )  = $this->run_without_wordpress( Plugin::instance()->jobs()->find( $job->id ), array(), false );
 		$this->assertSame( TickResult::LEFT, end( $runs )->status, end( $runs )->message );
 		$this->assertContains( 'dir_back', $this->seams, 'the control: something was put back' );
 		$this->assertArrayNotHasKey( SwapStep::NOTHING_SWAPPED, $now->cursor );
@@ -107,14 +107,14 @@ final class WebNothingSwappedTest extends SwapTestCase {
 		$job    = $this->at_swap();
 		$before = $this->site();
 		$this->killed_at( $job, 'dir_in', 2 );
-		list( $stopped, $runs ) = $this->web_run( Plugin::instance()->jobs()->find( $job->id ), array(), false );
+		list( $stopped, $runs ) = $this->run_without_wordpress( Plugin::instance()->jobs()->find( $job->id ), array(), false );
 		$this->assertSame( TickResult::LEFT, end( $runs )->status, 'the control: renamed back, stopped before the flush' );
 		$site                = $this->site();
 		$site['maintenance'] = false;
 		$this->assertSame( $before, $site, 'the control: everything where it was (as if never swapped)' );
 		// The next run finds every unit empty: put back looks like never swapped; it does not record it.
 		$this->seams = array();
-		$again       = $this->web_tick( $stopped, array(), false );
+		$again       = $this->tick_without_wordpress( $stopped, array(), false );
 		$after       = Plugin::instance()->jobs()->find( $job->id );
 		$this->assertSame( TickResult::LEFT, $again->status, $again->message );
 		$this->assertContains( 'dirs_back', $this->seams, 'the control: it went through the units again' );
@@ -146,7 +146,7 @@ final class WebNothingSwappedTest extends SwapTestCase {
 		$this->assertNotNull( $entry, 'the control: a directory the site had' );
 		$this->assertTrue( rename( $entry['live'], $entry['old'] ) );
 		$this->seams        = array();
-		list( $now, $runs ) = $this->web_run( $job, array(), false );
+		list( $now, $runs ) = $this->run_without_wordpress( $job, array(), false );
 		$this->assertContains( 'dir_back', $this->seams, 'the control: the unit renamed it back' );
 		$this->assertSame( TickResult::LEFT, end( $runs )->status, 'stopped before the flush, not skipped: ' . end( $runs )->message );
 		$this->assertArrayNotHasKey( SwapStep::NOTHING_SWAPPED, $now->cursor, 'the record dropped' );

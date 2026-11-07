@@ -58,14 +58,14 @@ final class WebClaimTest extends SwapTestCase {
 		$GLOBALS['wpdb']->query( 'COMMIT' );
 		$broken = self::row( $job->id );
 		$this->seams = array();
-		$refused     = $this->web_tick( $job, array(), true, null, $abspath );
+		$refused     = $this->tick_without_wordpress( $job, array(), true, null, $abspath );
 		$this->assertSame( TickResult::BUSY, $refused->status, $why . ': ' . $refused->message );
 		$this->assertSame( $broken, self::row( $job->id ), $why . ': nothing written' );
 		$this->assertSame( array(), $this->seams, $why . ': nothing of the swap ran' );
 		call_user_func( $mend );
 		$GLOBALS['wpdb']->query( 'COMMIT' );
 		$this->assertSame( $before, self::row( $job->id ), 'the control: mended as it was' );
-		$claimed = $this->web_tick( $job );
+		$claimed = $this->tick_without_wordpress( $job );
 		$this->assertNotSame( TickResult::BUSY, $claimed->status, 'the control: claimed once mended: ' . $claimed->message . ' ' . implode( ' | ', $this->web_notes ) );
 		$this->assertNotSame( array(), $this->seams, 'the control: the swap ran' );
 	}
@@ -95,10 +95,10 @@ final class WebClaimTest extends SwapTestCase {
 		$this->copy_maintenance( $this->abspath, $other ); // The maintenance file holds there too: only the directory differs.
 		$job = Plugin::instance()->jobs()->find( $job->id );
 		$before = self::row( $job->id );
-		$refused = $this->web_tick( $job, array(), true, null, $other );
+		$refused = $this->tick_without_wordpress( $job, array(), true, null, $other );
 		$this->assertSame( TickResult::BUSY, $refused->status, $refused->message );
 		$this->assertSame( $before, self::row( $job->id ), 'nothing written' );
-		$claimed = $this->web_tick( $job );
+		$claimed = $this->tick_without_wordpress( $job );
 		$this->assertNotSame( TickResult::BUSY, $claimed->status, 'the control: claimed in its own directory: ' . $claimed->message );
 	}
 

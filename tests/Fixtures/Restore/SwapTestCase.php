@@ -452,7 +452,7 @@ abstract class SwapTestCase extends RestoreTestCase {
 	}
 
 	/**
-	 * What the last run made without WordPress noted (web_tick()).
+	 * What the last run made without WordPress noted (tick_without_wordpress()).
 	 *
 	 * @var string[]
 	 */
@@ -471,7 +471,7 @@ abstract class SwapTestCase extends RestoreTestCase {
 	 * @param string|null          $abspath The WordPress directory the run is made in (the sandbox's when null).
 	 * @return TickResult
 	 */
-	protected function web_tick( Job $job, array $more = array(), bool $flush = true, $started = null, $abspath = null ): TickResult {
+	protected function tick_without_wordpress( Job $job, array $more = array(), bool $flush = true, $started = null, $abspath = null ): TickResult {
 		$parts = $more + $this->swap_parts;
 		if ( ! $flush ) {
 			unset( $parts['flush'] );
@@ -508,10 +508,10 @@ abstract class SwapTestCase extends RestoreTestCase {
 	 * @param int                  $max   Most runs.
 	 * @return array{0: Job, 1: TickResult[]} The job after, and what each run returned.
 	 */
-	protected function web_run( Job $job, array $more = array(), bool $flush = true, int $max = 40 ): array {
+	protected function run_without_wordpress( Job $job, array $more = array(), bool $flush = true, int $max = 40 ): array {
 		$results = array();
 		for ( $i = 0; $i < $max; $i++ ) {
-			$result    = $this->web_tick( $job, $more, $flush );
+			$result    = $this->tick_without_wordpress( $job, $more, $flush );
 			$results[] = $result;
 			$now       = Plugin::instance()->jobs()->find( $job->id );
 			if ( TickResult::LEFT === $result->status || ! in_array( $now->status, array( Job::QUEUED, Job::RUNNING ), true ) ) {
