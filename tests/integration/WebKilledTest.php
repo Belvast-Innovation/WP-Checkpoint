@@ -28,7 +28,7 @@ final class WebKilledTest extends SwapTestCase {
 		$this->assertSame( Job::SITE_UNTOUCHED, $done->site_state );
 		$this->assertSame( $before, $this->site(), 'the site as it was before the restore, not the restored one' );
 		$this->assertSame( SwapStep::ABANDONED, $done->cursor['reason'] ?? '', 'the reason the run without WordPress wrote' );
-		$this->assertStringNotContainsString( 'visitor', (string) $done->last_error, 'WP-CLI ended it' );
+		$this->assertStringNotContainsString( 'as no WP-CLI run went on with the swap.', (string) $done->last_error, 'WP-CLI ended it (no visitor\'s sentence)' );
 	}
 
 	public function test_a_reverse_of_a_commit_killed_in_its_middle_is_gone_on_with_by_wp_cli(): void {

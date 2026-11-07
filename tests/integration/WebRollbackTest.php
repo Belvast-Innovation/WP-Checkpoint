@@ -144,7 +144,7 @@ final class WebRollbackTest extends SwapTestCase {
 		$this->assertSame( Job::FAILED, $done->status, $done->last_error );
 		$this->assertSame( Job::SITE_UNTOUCHED, $done->site_state );
 		$this->assertSame( $before, $this->site() );
-		$this->assertStringNotContainsString( 'visitor', (string) $done->last_error, 'WP-CLI ended it' );
+		$this->assertStringNotContainsString( 'as no WP-CLI run went on with the swap.', (string) $done->last_error, 'WP-CLI ended it (no visitor\'s sentence)' );
 	}
 
 	/**

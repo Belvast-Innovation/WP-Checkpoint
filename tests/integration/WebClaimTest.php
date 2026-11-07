@@ -48,7 +48,7 @@ final class WebClaimTest extends SwapTestCase {
 	 * @param Job           $job     Job.
 	 * @param callable      $break   function(): void.
 	 * @param callable      $mend    function(): void.
-	 * @param string        $why     What the evidence says (WebJobs::here()).
+	 * @param string        $why     What the evidence says (WebJobs::here(), as the run notes it).
 	 * @param string|null   $abspath The directory the run is made in.
 	 * @return void
 	 */
@@ -59,14 +59,15 @@ final class WebClaimTest extends SwapTestCase {
 		$broken = self::row( $job->id );
 		$this->seams = array();
 		$refused     = $this->tick_without_wordpress( $job, array(), true, null, $abspath );
-		$this->assertSame( TickResult::BUSY, $refused->status, $why . ': ' . $refused->message );
+		$this->assertSame( TickResult::LEFT, $refused->status, $why . ': ' . $refused->message );
+		$this->assertStringContainsString( $why, implode( ' | ', $this->web_notes ), 'refused for that evidence' );
 		$this->assertSame( $broken, self::row( $job->id ), $why . ': nothing written' );
 		$this->assertSame( array(), $this->seams, $why . ': nothing of the swap ran' );
 		call_user_func( $mend );
 		$GLOBALS['wpdb']->query( 'COMMIT' );
 		$this->assertSame( $before, self::row( $job->id ), 'the control: mended as it was' );
 		$claimed = $this->tick_without_wordpress( $job );
-		$this->assertNotSame( TickResult::BUSY, $claimed->status, 'the control: claimed once mended: ' . $claimed->message . ' ' . implode( ' | ', $this->web_notes ) );
+		$this->assertNotSame( TickResult::LEFT, $claimed->status, 'the control: claimed once mended: ' . $claimed->message . ' ' . implode( ' | ', $this->web_notes ) );
 		$this->assertNotSame( array(), $this->seams, 'the control: the swap ran' );
 	}
 
@@ -96,10 +97,11 @@ final class WebClaimTest extends SwapTestCase {
 		$job = Plugin::instance()->jobs()->find( $job->id );
 		$before = self::row( $job->id );
 		$refused = $this->tick_without_wordpress( $job, array(), true, null, $other );
-		$this->assertSame( TickResult::BUSY, $refused->status, $refused->message );
+		$this->assertSame( TickResult::LEFT, $refused->status, $refused->message );
+		$this->assertStringContainsString( 'The WordPress directory is not the one the swap was planned for.', implode( ' | ', $this->web_notes ) );
 		$this->assertSame( $before, self::row( $job->id ), 'nothing written' );
 		$claimed = $this->tick_without_wordpress( $job );
-		$this->assertNotSame( TickResult::BUSY, $claimed->status, 'the control: claimed in its own directory: ' . $claimed->message );
+		$this->assertNotSame( TickResult::LEFT, $claimed->status, 'the control: claimed in its own directory: ' . $claimed->message );
 	}
 
 	public function test_a_table_prefix_other_than_the_one_planned_is_not_this_site(): void {
@@ -113,7 +115,7 @@ final class WebClaimTest extends SwapTestCase {
 			function () use ( $job, &$was ): void {
 				$this->site_entry( $job, 'stage', $was );
 			},
-			'the prefix'
+			'The table prefix is not the one the swap was planned for.'
 		);
 	}
 
@@ -132,7 +134,7 @@ final class WebClaimTest extends SwapTestCase {
 				$this->remove_maintenance();
 				$this->copy_maintenance( $keep, $this->abspath );
 			},
-			'the maintenance file'
+			'The maintenance file here is not this job\'s.'
 		);
 	}
 
@@ -148,7 +150,7 @@ final class WebClaimTest extends SwapTestCase {
 			static function () use ( $wpdb, $job, $was ): void {
 				$wpdb->update( JobRepository::table(), array( 'storage_path' => $was ), array( 'id' => $job->id ) );
 			},
-			'the storage directory'
+			'The job\'s storage directory, with its files, is not here.'
 		);
 	}
 
@@ -180,7 +182,7 @@ final class WebClaimTest extends SwapTestCase {
 					rename( $away . '/' . $name, $path );
 				}
 			},
-			'a directory of the plan'
+			'A directory the swap moved is not here.'
 		);
 	}
 
@@ -199,6 +201,6 @@ final class WebClaimTest extends SwapTestCase {
 		$this->killed_at( $job, 'dir_in', count( $plan['dirs'] ) ); // Every directory swapped in.
 		$this->assertFalse( file_exists( $new[0]['stage'] ) || file_exists( $new[0]['old'] ), 'the control: under neither of the job\'s names' );
 		$claimed = $this->tick_without_wordpress( Plugin::instance()->jobs()->find( $job->id ) );
-		$this->assertNotSame( TickResult::BUSY, $claimed->status, 'claimed on the other evidence: ' . $claimed->message . ' ' . implode( ' | ', $this->web_notes ) );
+		$this->assertNotSame( TickResult::LEFT, $claimed->status, 'claimed on the other evidence: ' . $claimed->message . ' ' . implode( ' | ', $this->web_notes ) );
 	}
 }
