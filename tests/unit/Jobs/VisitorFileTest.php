@@ -90,6 +90,9 @@ final class VisitorFileTest extends TestCase {
 			$this->assertFileDoesNotExist( $log->path() );
 			$this->assertStringContainsString( 'before the maintenance file', (string) file_get_contents( $php_log ), 'said in PHP\'s log instead' );
 			( new Maintenance( $this->dir, self::MARK ) )->hold();
+			$this->assertFalse( $log->write( 'before the swap made it', 1800000000 ), 'not made yet: a run does not make it' );
+			$this->assertFileDoesNotExist( $log->path() );
+			RuntimeLog::create( $this->dir, self::MARK );
 			$this->assertTrue( $log->write( "one\nline", 1800000000 ) );
 			$this->assertSame( "<?php exit; ?>\n# " . self::MARK . "\n2027-01-15 08:00:00 one line\n", file_get_contents( $log->path() ) );
 			$this->assertSame( self::MARK, Maintenance::web_mark( $log->path() ) );
@@ -109,6 +112,7 @@ final class VisitorFileTest extends TestCase {
 
 	public function test_the_runtime_log_keeps_its_newer_half_past_its_limit(): void {
 		( new Maintenance( $this->dir, self::MARK ) )->hold();
+		RuntimeLog::create( $this->dir, self::MARK );
 		$log  = new RuntimeLog( $this->dir, self::MARK );
 		$line = str_repeat( 'x', 990 );
 		for ( $i = 0; $i < 200; $i++ ) {

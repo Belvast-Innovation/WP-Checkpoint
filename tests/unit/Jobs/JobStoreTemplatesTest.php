@@ -28,37 +28,24 @@ final class JobStoreTemplatesTest extends TestCase {
 	}
 
 	/**
-	 * Writes that set updated_at but are no run's, so they leave wp_run_at as it is (Job::$wp_run_at), with why. Each
-	 * must still be met (a registration that matches nothing is out of date).
-	 */
-	const NOT_A_RUN = array(
-		'transition without the lock' => 'not a run\'s write: a retry or cancel made outside a run, without the lock token (a management statement, as JobRepository\'s own)',
-	);
-
-	/**
-	 * A run in WordPress stamps wp_run_at in every write that sets updated_at (but those registered as no run's); a run
+	 * WordPress stamps wp_run_at in every write of the store that sets updated_at, a run's or a retry made outside one
+	 * (an administrator's, which a run without WordPress must not take over before the grace period is over); a run
 	 * without WordPress (its store given 0) never changes it: the column is either not set or set to GREATEST(it, 0).
 	 */
 	public function test_every_write_of_a_run_in_wordpress_stamps_wp_run_at_and_a_run_without_it_leaves_it(): void {
 		$db = new RecordingExecutor();
 		self::exercise( self::store( $db, 1800000123 ), $db );
-		$met     = array();
 		$stamped = 0;
 		foreach ( $db->writes as $write ) {
 			$set = self::assignments( $write[0], $write[1] );
 			if ( ! array_key_exists( 'updated_at', $set ) ) {
 				continue;
 			}
-			if ( ! array_key_exists( 'wp_run_at', $set ) && false === strpos( $write[0], 'lock_token' ) ) {
-				$met['transition without the lock'] = true;
-				continue;
-			}
-			$this->assertArrayHasKey( 'wp_run_at', $set, 'a run\'s write that sets updated_at stamps wp_run_at: ' . $write[0] );
+			$this->assertArrayHasKey( 'wp_run_at', $set, 'a write that sets updated_at stamps wp_run_at: ' . $write[0] );
 			$this->assertSame( 1800000123, (int) $set['wp_run_at'], $write[0] );
 			++$stamped;
 		}
-		$this->assertGreaterThanOrEqual( 8, $stamped, 'the control: the run\'s writes are seen (claims, heartbeat, record, checkpoints, transition, release)' );
-		$this->assertSame( array_keys( self::NOT_A_RUN ), array_keys( $met ), 'every registration is met, and none other' );
+		$this->assertGreaterThanOrEqual( 9, $stamped, 'the control: the writes are seen (claims, heartbeat, record, checkpoints, transitions with and without the lock, release)' );
 
 		$db = new RecordingExecutor();
 		self::exercise( self::store( $db, 0 ), $db );

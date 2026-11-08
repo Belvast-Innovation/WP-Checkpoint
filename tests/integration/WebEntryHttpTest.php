@@ -79,6 +79,7 @@ final class WebEntryHttpTest extends WP_UnitTestCase {
 		RealAbspath::write( Maintenance::RUNTIME, $built['code'] );
 		RealAbspath::write( Maintenance::VISITOR, "<?php exit; ?>\n# " . $mark . "\n{\"plugin\":\"wp-checkpoint\\/wp-checkpoint.php\"}\n" );
 		RealAbspath::touch( Maintenance::VISITOR, time() - 60 );
+		RealAbspath::write( Maintenance::LOG, "<?php exit; ?>\n# " . $mark . "\n" );
 		RealAbspath::write( Maintenance::DATA, ( new Maintenance( ABSPATH, $mark ) )->data( Maintenance::held(), Maintenance::NO_PASS, '' === $hash ? $built['hash'] : $hash ) );
 		RealAbspath::write( Maintenance::FILE, Maintenance::CODE );
 		return $built['hash'];
@@ -98,7 +99,7 @@ final class WebEntryHttpTest extends WP_UnitTestCase {
 	public function test_a_held_request_runs_the_runtime_once_in_its_time_and_ends_with_the_maintenance_page(): void {
 		$mark = Maintenance::new_mark();
 		$this->held( $mark );
-		$this->assertSame( '', self::runtime_log(), 'the control: no log before' );
+		$this->assertSame( "<?php exit; ?>\n# " . $mark . "\n", self::runtime_log(), 'the control: nothing in the log before' );
 		$before = time();
 		$first  = $this->get( '/?wpcheckpoint_nocache=' . bin2hex( random_bytes( 4 ) ) );
 		$this->assertSame( 503, $first['code'], 'the maintenance page' );

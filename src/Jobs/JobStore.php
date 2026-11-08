@@ -684,10 +684,11 @@ final class JobStore {
 		if ( Job::RUNNING === $to && 0 === $job->started_at ) {
 			$data['started_at'] = $now;
 		}
-		$run_at = '' !== $token ? $this->run_at() : 0;
+		$run_at = $this->run_at();
 		if ( $run_at > 0 ) {
-			// The write of a run in WordPress under its lock (a transition made outside a run, without the token, is not
-			// one: Job::$wp_run_at).
+			// A transition made in WordPress, under a run's lock or not: a retry made from WP-CLI (failed to queued, no
+			// lock) is the administrator's, and a run without WordPress must not take the job it queued before the grace
+			// period is over (Job::$wp_run_at).
 			$data['wp_run_at'] = max( $job->wp_run_at, $run_at ); // GREATEST(), as the other statements: never back.
 		}
 		$formats = array_fill( 0, count( $data ), '%s' );

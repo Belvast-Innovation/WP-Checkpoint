@@ -84,7 +84,7 @@ final class AtomicFile {
 		// a probe's name, or a protection file of a staging root (the root is reclaimed whole, whatever is in it).
 		$registered = null !== StagingLayout::parse( $name ) && null !== StagingLayout::parse( $name . $suffix );
 		$protection = in_array( $name, self::ROOT_FILES, true ) && 'stage' === ( StagingLayout::parse( basename( rtrim( $dir, '/\\' ) ) )['kind'] ?? '' );
-		$upgrading  = in_array( $name, array( '.maintenance', '.wpcheckpoint-maintenance.php', '.wpcheckpoint-runtime.php', '.wpcheckpoint-visitor.php' ), true ) && self::maintenance_dir( $dir );
+		$upgrading  = in_array( $name, array( '.maintenance', '.wpcheckpoint-maintenance.php', '.wpcheckpoint-runtime.php', '.wpcheckpoint-visitor.php', '.wpcheckpoint-runtime-log.php' ), true ) && self::maintenance_dir( $dir );
 		if ( '' === $name || false !== strpbrk( $name, "/\\\0" ) || ! ( $registered || $protection || $upgrading ) ) {
 			throw new \InvalidArgumentException( 'Not a file name this plugin writes.' );
 		}

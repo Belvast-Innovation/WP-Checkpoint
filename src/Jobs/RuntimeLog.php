@@ -54,6 +54,31 @@ final class RuntimeLog {
 	}
 
 	/**
+	 * Write a restore's runtime log, empty but for its header (whole or not at all): the swap does, with the visitor
+	 * file, before the maintenance file; a run only appends to it, so that a run that comes after the take-down does
+	 * not make it again.
+	 *
+	 * @param string        $dir     The WordPress directory.
+	 * @param string        $mark    The restore's mark.
+	 * @param callable|null $confirm Called right before it goes in place (the lease; throws to stop).
+	 * @return void
+	 * @throws \RuntimeException When it cannot be written.
+	 */
+	public static function create( string $dir, string $mark, $confirm = null ): void {
+		\WPCheckpoint\Support\AtomicFile::write( $dir, Maintenance::LOG, self::header( $mark ), null === $confirm ? array() : array( 'confirm' => $confirm ) );
+	}
+
+	/**
+	 * The header of a restore's log.
+	 *
+	 * @param string $mark Mark.
+	 * @return string
+	 */
+	private static function header( string $mark ): string {
+		return "<?php exit; ?>\n# " . $mark . "\n";
+	}
+
+	/**
 	 * The path.
 	 *
 	 * @return string
@@ -80,30 +105,27 @@ final class RuntimeLog {
 	}
 
 	/**
-	 * Append under the file's lock (where the file system has locks): the header first in a new file, the older half
-	 * dropped past MAX_BYTES; nothing when the file there names another restore.
+	 * Append under the file's lock (where the file system has locks), the older half dropped past MAX_BYTES; nothing
+	 * when there is no log (it is made by the swap: create()) or the file there names another restore.
 	 *
 	 * @param string $line Line.
 	 * @return bool
 	 */
 	private function append( string $line ): bool {
 		$path   = $this->path();
-		$handle = @fopen( $path, 'c+' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- the caller says it elsewhere.
+		$handle = @fopen( $path, 'r+' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- not there (made by the swap, taken down with the maintenance file): the caller says it elsewhere.
 		if ( false === $handle ) {
 			return false;
 		}
 		$busy   = 0;
 		$locked = @flock( $handle, LOCK_EX, $busy ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a file system without locks: appended without.
 		try {
-			$header = "<?php exit; ?>\n# " . $this->mark . "\n";
+			$header = self::header( $this->mark );
 			$text   = stream_get_contents( $handle );
-			if ( ! is_string( $text ) ) {
-				return false;
-			}
-			if ( '' !== $text && 0 !== strpos( $text, $header ) ) {
+			if ( ! is_string( $text ) || 0 !== strpos( $text, $header ) ) {
 				return false; // Another restore's, or not one of ours.
 			}
-			$body = '' === $text ? '' : substr( $text, strlen( $header ) );
+			$body = substr( $text, strlen( $header ) );
 			if ( strlen( $header ) + strlen( $body ) + strlen( $line ) > self::MAX_BYTES ) {
 				$keep = substr( $body, (int) ( strlen( $body ) / 2 ) );
 				$cut  = strpos( $keep, "\n" );

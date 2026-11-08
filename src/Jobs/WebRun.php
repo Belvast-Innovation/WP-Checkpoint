@@ -119,11 +119,12 @@ final class WebRun {
 	 * The site's names the masks hide: the hosts the entries give (the request's), and once the job is read those every
 	 * table of its plan holds (WebJobs::site_names()).
 	 *
-	 * @var array{hosts: string[], paths: string[]}
+	 * @var array{hosts: string[], paths: string[], coarse: bool}
 	 */
 	private $names = array(
-		'hosts' => array(),
-		'paths' => array(),
+		'hosts'  => array(),
+		'paths'  => array(),
+		'coarse' => false,
 	);
 
 	/**
@@ -151,8 +152,9 @@ final class WebRun {
 		$this->seams       = $seams;
 		$this->pace        = $pace instanceof WebPace ? $pace : new MemoryPace();
 		$this->names       = array(
-			'hosts' => array_values( array_filter( array_map( 'strval', $hosts ) ) ),
-			'paths' => array(),
+			'hosts'  => array_values( array_filter( array_map( 'strval', $hosts ) ) ),
+			'paths'  => array(),
+			'coarse' => false,
 		);
 	}
 
@@ -173,7 +175,7 @@ final class WebRun {
 			return new TickResult( TickResult::WAITING, $wait, null, sprintf( 'Job %d was held up: the next try is in %d seconds.', $job_id, $wait ) );
 		}
 		$result          = $this->paced( $job_id, $this->tick_now( $job_id, $started_at ), time() );
-		$result->message = self::clean( (string) $result->message, new Redactor( Redactor::installation_secrets() ), array( '{abspath}' => rtrim( $this->abspath, '/\\' ) ), $this->names['hosts'], $this->names['paths'] ); // As everything such a run says.
+		$result->message = self::clean( (string) $result->message, new Redactor( Redactor::installation_secrets() ), array( '{abspath}' => rtrim( $this->abspath, '/\\' ) ), $this->names['hosts'], $this->names['paths'], $this->names['coarse'] ); // As everything such a run says.
 		return $result;
 	}
 
@@ -269,8 +271,9 @@ final class WebRun {
 			}
 			$names       = $jobs->site_names( $job );
 			$this->names = array(
-				'hosts' => array_values( array_unique( array_merge( $this->names['hosts'], $names['hosts'] ) ) ),
-				'paths' => array_values( array_unique( array_merge( $this->names['paths'], $names['paths'] ) ) ),
+				'hosts'  => array_values( array_unique( array_merge( $this->names['hosts'], $names['hosts'] ) ) ),
+				'paths'  => array_values( array_unique( array_merge( $this->names['paths'], $names['paths'] ) ) ),
+				'coarse' => $names['coarse'],
 			);
 			$network     = $job->options['recorded'][ SwapStep::NETWORK_RECORD ] ?? null;
 			if ( $this->multisite && ! is_int( $network ) ) {
@@ -370,10 +373,10 @@ final class WebRun {
 				'encode'       => array( PlainJson::class, 'encode' ),
 				'paths'        => $paths,
 				'clean'        => function ( string $text ) use ( $redactor, $paths ): string {
-					return self::clean( $text, $redactor, $paths, $this->names['hosts'], $this->names['paths'] );
+					return self::clean( $text, $redactor, $paths, $this->names['hosts'], $this->names['paths'], $this->names['coarse'] );
 				},
 				'php_log'      => function ( string $line, array $extra ) use ( $redactor, $paths ): void {
-					error_log( 'WP Checkpoint: ' . self::clean( $line, $redactor, array_merge( $extra, $paths ), $this->names['hosts'], $this->names['paths'] ) ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- the job's own log cannot be written.
+					error_log( 'WP Checkpoint: ' . self::clean( $line, $redactor, array_merge( $extra, $paths ), $this->names['hosts'], $this->names['paths'], $this->names['coarse'] ) ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- the job's own log cannot be written.
 				},
 				'mask'         => function ( Redactor $mask_redactor, array $extra ) use ( $paths ): TextMask {
 					return new TextMask(
@@ -382,7 +385,7 @@ final class WebRun {
 						$this->names['hosts'],
 						array(
 							'paths'        => $this->names['paths'],
-							'coarse'       => false,
+							'coarse'       => $this->names['coarse'],
 							'network_root' => '',
 						)
 					);
@@ -403,11 +406,12 @@ final class WebRun {
 	 * @param array<string, string> $paths      Placeholder => path.
 	 * @param string[]              $hosts      The site's host names.
 	 * @param string[]              $site_paths The site's path prefixes.
+	 * @param bool                  $coarse     Whether every unknown first path segment is masked too (a large network).
 	 * @return string
 	 */
-	public static function clean( string $text, Redactor $redactor, array $paths, array $hosts = array(), array $site_paths = array() ): string {
+	public static function clean( string $text, Redactor $redactor, array $paths, array $hosts = array(), array $site_paths = array(), bool $coarse = false ): string {
 		$masked = Report::mask_paths( $redactor->redact( Utf8::scrub( $text ) ), $paths );
-		$masked = is_string( $masked ) ? Report::mask_hosts( $masked, $hosts, $site_paths ) : null;
+		$masked = is_string( $masked ) ? Report::mask_hosts( $masked, $hosts, $site_paths, $coarse ) : null;
 		return is_string( $masked ) ? $masked : 'The text could not be cleaned safely.';
 	}
 
@@ -454,6 +458,6 @@ final class WebRun {
 	 * @return void
 	 */
 	private function note( string $line ): void {
-		call_user_func( $this->note, self::clean( $line, new Redactor( Redactor::installation_secrets() ), array( '{abspath}' => rtrim( $this->abspath, '/\\' ) ), $this->names['hosts'], $this->names['paths'] ) );
+		call_user_func( $this->note, self::clean( $line, new Redactor( Redactor::installation_secrets() ), array( '{abspath}' => rtrim( $this->abspath, '/\\' ) ), $this->names['hosts'], $this->names['paths'], $this->names['coarse'] ) );
 	}
 }

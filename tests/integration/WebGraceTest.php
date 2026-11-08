@@ -134,6 +134,38 @@ final class WebGraceTest extends SwapTestCase {
 		$this->assertNotSame( array(), $this->seams );
 	}
 
+	public function test_a_retry_from_wp_cli_is_not_taken_over_before_the_grace_period_is_over(): void {
+		global $wpdb;
+		$job = $this->killed(); // Its last run in WordPress more than ten minutes ago (killed_at()).
+		$this->grace_over = false;
+		// The swap failed holding the site (its WP-CLI run gave up), long ago; the administrator retries it now from
+		// WP-CLI, which only queues it.
+		$wpdb->update(
+			JobRepository::table(),
+			array(
+				'status'       => \WPCheckpoint\Jobs\Job::FAILED,
+				'failure_kind' => \WPCheckpoint\Jobs\Job::stamp_failure( \WPCheckpoint\Jobs\Job::FAILURE_TEMPORARY, time() - 3600 ),
+				'finished_at'  => time() - 3600,
+				'lock_token'   => '',
+				'locked_until' => 0,
+			),
+			array( 'id' => $job->id )
+		);
+		$wpdb->query( 'COMMIT' );
+		$aged = (int) self::row( $job->id )['wp_run_at'];
+		$this->assertLessThan( Plugin::instance()->jobs()->now() - WebJobs::GRACE_SECONDS, $aged, 'the control: past the grace period before the retry' );
+		$queued = Plugin::instance()->job_actions()->retry( $job->id );
+		$this->assertNotNull( $queued );
+		$this->assertSame( Job::QUEUED, self::row( $job->id )['status'] );
+		$this->assertGreaterThanOrEqual( Plugin::instance()->jobs()->now() - 1, (int) self::row( $job->id )['wp_run_at'], 'the retry stamped it' );
+		$before      = self::row( $job->id );
+		$this->seams = array();
+		$waits       = $this->tick_without_wordpress( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( TickResult::BUSY, $waits->status, 'not taken: ' . $waits->message . ' ' . implode( ' | ', $this->web_notes ) );
+		$this->assertSame( $before, self::row( $job->id ), 'nothing written' );
+		$this->assertSame( array(), $this->seams );
+	}
+
 	public function test_version_16_adds_wp_run_at_and_older_code_reads_and_writes_the_table_as_before(): void {
 		global $wpdb;
 		$table = JobRepository::table();

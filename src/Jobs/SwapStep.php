@@ -3879,8 +3879,9 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 
 	/**
 	 * Before the maintenance file is first put up: the runtime that puts a half-made swap back from a visitor's request
-	 * (WebRuntime), then the visitor file (VisitorFile), each a unit of its own with a checkpoint after it that records
-	 * it in the cursor (its hash; that it is there); the maintenance file that names the runtime's hash comes after both
+	 * (WebRuntime), then the visitor file (VisitorFile) and the runtime log (RuntimeLog, empty: runs only append to it),
+	 * each a unit of its own with a checkpoint after it that records it in the cursor (its hash; that they are there);
+	 * the maintenance file that names the runtime's hash comes after both
 	 * (the data file, then CODE). In that order a run that dies between two of them leaves files that nothing runs (CODE
 	 * runs the runtime only once the data file names it, and a run without WordPress takes no job without this job's
 	 * maintenance file), and the next run, finding the swap at "enter", rolls it back, which takes them down with the
@@ -3899,6 +3900,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		$context->checkpoint( $cursor, 20, __( 'Swapping in the restored site', 'wp-checkpoint' ) );
 		$this->at( 'runtime_recorded' );
 		VisitorFile::create( $dir, $mark, isset( $this->parts['plugin'] ) ? (string) $this->parts['plugin'] : $this->host->plugin(), array( $context, 'confirm_lease' ) );
+		RuntimeLog::create( $dir, $mark, array( $context, 'confirm_lease' ) );
 		$this->at( 'visitor_written' );
 		$cursor['visitor'] = true;
 		$context->checkpoint( $cursor, 20, __( 'Swapping in the restored site', 'wp-checkpoint' ) );

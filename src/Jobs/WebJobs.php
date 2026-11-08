@@ -303,54 +303,61 @@ final class WebJobs implements RunnerRepository {
 	}
 
 	/**
-	 * The site's names as every table of the swap's plan holds them, for the masks of what such a run says (no WordPress
-	 * to ask): the hosts and paths of siteurl and home of each options table, and on a network of each site and network
-	 * row, under each name the plan gives the table (live, staged, moved aside: a restore that moved the site from
-	 * another domain holds both). A table that cannot be read at a name is passed over: what is not read is not masked
-	 * by name (the masks still hide every other URL's host).
+	 * Most rows of a network's sites (and networks) read for the masks; past it, every unknown first path segment is
+	 * masked too (Report::mask_hosts()'s coarse mode), as for a large network in WordPress.
+	 */
+	const SITE_NAMES_LIMIT = 50;
+
+	/**
+	 * The site's names as the swap's plan's tables hold them, for the masks of what such a run says (no WordPress to
+	 * ask): siteurl and home of the main site's options table, and on a network its sites and networks (at most
+	 * SITE_NAMES_LIMIT rows of each: past it, coarse), each table under every name the plan gives it (live, staged,
+	 * moved aside: a restore that moved the site from another domain holds both). Bounded: one read of the plan's rows
+	 * for those three tables, then at most three reads of each. A table that cannot be read at a name is passed over:
+	 * what is not read is not masked by name (the masks still hide every other URL's host).
 	 *
 	 * @param Job $job Job.
-	 * @return array{hosts: string[], paths: string[]}
+	 * @return array{hosts: string[], paths: string[], coarse: bool}
 	 * @throws NotHere When a run without WordPress cannot go on here (rethrown unchanged).
 	 */
 	public function site_names( Job $job ): array {
-		$hosts = array();
-		$paths = array();
-		$site  = $this->site_entry( $job );
-		if ( null === $site ) {
-			return array(
-				'hosts' => array(),
-				'paths' => array(),
-			);
+		$hosts  = array();
+		$paths  = array();
+		$coarse = false;
+		$site   = $this->site_entry( $job );
+		$tables = array(
+			$this->prefix . 'options' => 'SELECT option_value FROM %s WHERE option_name IN (\'siteurl\', \'home\')',
+			$this->prefix . 'blogs'   => 'SELECT domain, path FROM %s ORDER BY domain, path LIMIT ' . ( self::SITE_NAMES_LIMIT + 1 ),
+			$this->prefix . 'site'    => 'SELECT domain, path FROM %s ORDER BY domain, path LIMIT ' . ( self::SITE_NAMES_LIMIT + 1 ),
+		);
+		$rows   = array();
+		if ( null !== $site ) {
+			try {
+				$rows = $this->session->rows( 'SELECT live, stage, old FROM ' . SqlWriter::identifier( $this->prefix . SwapPlan::TABLE ) . ' WHERE job_id = ? AND attempt = ? AND kind = ? AND live IN (?, ?, ?)', array_merge( array( (string) $job->id, (string) $site['attempt'], SwapPlan::TABLE_OF ), array_keys( $tables ) ) );
+			} catch ( NotHere $e ) {
+				throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged.
+			} catch ( \RuntimeException $e ) {
+				$rows = array();
+			}
 		}
-		try {
-			$entries = $this->plan( $job, (int) $site['attempt'] );
-		} catch ( NotHere $e ) {
-			throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged.
-		} catch ( \RuntimeException $e ) {
-			$entries = array();
-		}
-		foreach ( $entries as $entry ) {
-			if ( SwapPlan::TABLE_OF !== $entry['kind'] ) {
+		foreach ( $rows as $entry ) {
+			$sql = $tables[ (string) $entry[0] ] ?? '';
+			if ( '' === $sql ) {
 				continue;
 			}
-			$live = $entry['live'];
-			if ( 1 === preg_match( '/\A' . preg_quote( $this->prefix, '/' ) . '(?:[0-9]+_)?options\z/', $live ) ) {
-				$sql = 'SELECT option_value FROM %s WHERE option_name IN (\'siteurl\', \'home\')';
-			} elseif ( $this->prefix . 'blogs' === $live || $this->prefix . 'site' === $live ) {
-				$sql = 'SELECT domain, path FROM %s';
-			} else {
-				continue;
-			}
-			foreach ( array_unique( array_filter( array( $live, $entry['stage'], $entry['old'] ) ) ) as $name ) {
+			foreach ( array_unique( array_filter( array( (string) $entry[0], (string) $entry[1], (string) $entry[2] ) ) ) as $name ) {
 				try {
-					$rows = $this->session->rows( sprintf( $sql, SqlWriter::identifier( $name ) ) );
+					$read = $this->session->rows( sprintf( $sql, SqlWriter::identifier( $name ) ) );
 				} catch ( NotHere $e ) {
 					throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged.
 				} catch ( \RuntimeException $e ) {
 					continue; // Not at this name now (renamed, not made yet).
 				}
-				foreach ( $rows as $row ) {
+				if ( count( $read ) > self::SITE_NAMES_LIMIT ) {
+					$coarse = true;
+					$read   = array_slice( $read, 0, self::SITE_NAMES_LIMIT );
+				}
+				foreach ( $read as $row ) {
 					if ( 2 === count( $row ) ) {
 						$hosts[] = strtolower( (string) $row[0] );
 						$paths[] = (string) $row[1];
@@ -373,8 +380,9 @@ final class WebJobs implements RunnerRepository {
 			)
 		);
 		return array(
-			'hosts' => array_values( array_unique( array_filter( $hosts ) ) ),
-			'paths' => $paths,
+			'hosts'  => array_values( array_unique( array_filter( $hosts ) ) ),
+			'paths'  => $paths,
+			'coarse' => $coarse,
 		);
 	}
 
@@ -390,9 +398,9 @@ final class WebJobs implements RunnerRepository {
 
 	/**
 	 * Take a job that holds the site, on the evidence (here()): the claim's statement, with who manages it as read,
-	 * the mark the maintenance file carries, and no write of a run in WordPress in the last GRACE_SECONDS (by the
-	 * database's clock, in the statement itself: a WP-CLI run that writes between a check and the claim would
-	 * otherwise be taken over).
+	 * the mark the maintenance file carries, and no write of a run in WordPress in the last GRACE_SECONDS: the cut-off is
+	 * read from the database's clock before (now(): local time when it cannot be read), and compared in the statement
+	 * itself, so that a WP-CLI run that writes between the two is never taken over.
 	 *
 	 * @param int $id    Job id.
 	 * @param int $lease Lock duration in seconds.

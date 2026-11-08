@@ -1,0 +1,81 @@
+<?php
+
+namespace WPCheckpoint\Tests\Unit\Jobs;
+
+use WPCheckpoint\Jobs\WebEntry;
+use WPCheckpoint\Restore\Maintenance;
+use WPCheckpoint\Tests\Fixtures\Sandbox;
+use Yoast\PHPUnitPolyfills\TestCases\TestCase;
+
+/**
+ * The entry: the request's host is a mask only when it is a domain name (a header anyone can send would otherwise
+ * hide words of the notes); nothing the run says reaches the visitor (display_errors turned off, output dropped, its
+ * error handler and output buffers gone afterwards), and a runtime of another build does nothing but say so.
+ */
+final class WebEntryTest extends TestCase {
+
+	/**
+	 * Hosts and what the entry makes of them.
+	 *
+	 * @return array<string, array{0: string, 1: string}>
+	 */
+	public function hosts(): array {
+		return array(
+			'a domain'          => array( 'Example.ORG', 'example.org' ),
+			'with its port'     => array( 'shop.example.org:8443', 'shop.example.org' ),
+			'a trailing dot'    => array( 'example.org.', 'example.org' ),
+			'a word'            => array( 'job', '' ),
+			'a number'          => array( '1', '' ),
+			'an address'        => array( '10.0.0.1', '' ),
+			'a path'            => array( 'example.org/x', '' ),
+			'nothing'           => array( '', '' ),
+			'an IPv6 address'   => array( '[::1]:80', '' ),
+			'a label too long'  => array( str_repeat( 'a', 64 ) . '.org', '' ),
+		);
+	}
+
+	/**
+	 * @dataProvider hosts
+	 */
+	public function test_the_request_host_is_a_mask_only_when_it_is_a_domain_name( string $header, string $host ): void {
+		$was                  = $_SERVER['HTTP_HOST'] ?? null;
+		$_SERVER['HTTP_HOST'] = $header;
+		try {
+			$this->assertSame( $host, WebEntry::request_host() );
+		} finally {
+			if ( null === $was ) {
+				unset( $_SERVER['HTTP_HOST'] );
+			} else {
+				$_SERVER['HTTP_HOST'] = $was;
+			}
+		}
+	}
+
+	public function test_nothing_the_run_says_reaches_the_visitor_and_it_leaves_no_handler_or_buffer(): void {
+		$dir = Sandbox::make( 'web-entry' );
+		try {
+			$mark = 'WP Checkpoint restore ' . str_repeat( 'ab', 16 );
+			( new Maintenance( $dir, $mark ) )->hold();
+			file_put_contents( $dir . '/' . Maintenance::LOG, "<?php exit; ?>\n# " . $mark . "\n" );
+			$script = $dir . '/run.php';
+			file_put_contents(
+				$script,
+				'<?php define( "ABSPATH", ' . var_export( $dir . '/', true ) . ' ); require ' . var_export( dirname( __DIR__, 3 ) . '/vendor/autoload.php', true ) . ';'
+				. ' ob_start(); $level = ob_get_level(); $_SERVER["HTTP_HOST"] = "visitor.example.org";'
+				. ' \WPCheckpoint\Jobs\WebEntry::run( ' . var_export( $dir, true ) . ', ' . var_export( $mark, true ) . ', str_repeat( "a", 64 ), str_repeat( "b", 64 ) );'
+				. ' $after = array( ini_get( "display_errors" ), ob_get_level() === $level, null === set_error_handler( null ) ); ob_end_clean(); echo json_encode( $after );'
+			);
+			$pipes   = array();
+			$process = proc_open( array( PHP_BINARY, '-d', 'display_errors=1', $script ), array( 1 => array( 'pipe', 'w' ), 2 => array( 'pipe', 'w' ) ), $pipes );
+			$out     = (string) stream_get_contents( $pipes[1] );
+			$err     = (string) stream_get_contents( $pipes[2] );
+			fclose( $pipes[1] );
+			fclose( $pipes[2] );
+			proc_close( $process );
+			$this->assertSame( array( '0', true, true ), json_decode( $out, true ), 'display_errors off, the buffers as they were, no handler left: ' . $out . $err );
+			$this->assertStringContainsString( 'The runtime here is not the one the restore wrote', implode( "\n", Maintenance::log_lines( $dir . '/' . Maintenance::LOG ) ), 'the control: it ran and said so in the log' );
+		} finally {
+			Sandbox::remove( $dir );
+		}
+	}
+}

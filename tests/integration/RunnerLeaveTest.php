@@ -50,8 +50,12 @@ final class RunnerLeaveTest extends WP_UnitTestCase {
 	/** @var float */
 	private $now = 1_800_000_000.0;
 
-	/** The columns a run that takes a job and lets it go writes (the lease). */
-	const LEASE = array( 'lock_token', 'locked_until', 'updated_at' );
+	/**
+	 * The columns a run that takes a job and lets it go writes (the lease), and wp_run_at: the storage here is
+	 * WordPress's (JobRepository), whose claim and release stamp it (a run without WordPress over WebJobs does not:
+	 * WebGraceTest).
+	 */
+	const LEASE = array( 'lock_token', 'locked_until', 'updated_at', 'wp_run_at' );
 
 	public function set_up(): void {
 		parent::set_up();

@@ -123,7 +123,8 @@ final class WebEntryCodeTest extends SwapTestCase {
 	public function test_the_swap_puts_up_the_runtime_and_the_visitor_file_with_the_maintenance_file(): void {
 		$job = $this->at_swap();
 		$this->killed_at( $job, 'dir_in' );
-		$this->assertSame( array( Maintenance::FILE, Maintenance::DATA, Maintenance::VISITOR, Maintenance::RUNTIME ), $this->swap_files() );
+		$this->assertSame( array( Maintenance::FILE, Maintenance::DATA, Maintenance::VISITOR, Maintenance::RUNTIME, Maintenance::LOG ), $this->swap_files() );
+		$this->assertSame( array(), Maintenance::log_lines( $this->abspath . '/' . Maintenance::LOG ), 'the log is made empty' );
 		$now  = Plugin::instance()->jobs()->find( $job->id );
 		$file = new Maintenance( $this->abspath, (string) $now->cursor['mark'] );
 		$code = (string) file_get_contents( $this->abspath . '/' . Maintenance::RUNTIME );

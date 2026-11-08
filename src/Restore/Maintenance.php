@@ -173,7 +173,9 @@ final class Maintenance {
 	 * version wrote stays in KNOWN_CODES. Written line by line with "\n", not as a nowdoc (see CODE_1).
 	 *
 	 * Beyond CODE_1: a request held (not let through) by a data file that names the runtime's hash (DATA_FORM's fifth
-	 * line), outside WP-CLI and outside check_code(), runs the runtime when the visitor file's time has come: under a
+	 * line), outside WP-CLI and outside check_code(), in a process running as the visitor file's owner where POSIX can
+	 * tell (not a cron of root's that loads WordPress: the files the run writes would be root's), runs the runtime when
+	 * the visitor file's time has come: under a
 	 * non-blocking lock of the visitor file where the file system has locks (only a lock someone else holds stops it:
 	 * the database lease is what lets one run in, the lock only spares the others the include), it sets that time five
 	 * seconds on (before the runtime opens any connection), defines WPCHECKPOINT_WEB_ENTRY (the runtime's first statement
@@ -198,7 +200,7 @@ final class Maintenance {
 		. '		$wpcheckpoint_visitor = __DIR__ . \'/.wpcheckpoint-visitor.php\';' . "\n"
 		. '		$wpcheckpoint_lock    = @fopen( $wpcheckpoint_visitor, \'r+\' );' . "\n"
 		. '		$wpcheckpoint_busy    = 0;' . "\n"
-		. '		if ( false !== $wpcheckpoint_lock && ( @flock( $wpcheckpoint_lock, LOCK_EX | LOCK_NB, $wpcheckpoint_busy ) || 1 !== $wpcheckpoint_busy ) ) {' . "\n"
+		. '		if ( false !== $wpcheckpoint_lock && ( ! function_exists( \'posix_geteuid\' ) || @fileowner( $wpcheckpoint_visitor ) === posix_geteuid() ) && ( @flock( $wpcheckpoint_lock, LOCK_EX | LOCK_NB, $wpcheckpoint_busy ) || 1 !== $wpcheckpoint_busy ) ) {' . "\n"
 		. '			clearstatcache( true, $wpcheckpoint_visitor );' . "\n"
 		. '			$wpcheckpoint_next = @filemtime( $wpcheckpoint_visitor );' . "\n"
 		. '			$wpcheckpoint_due  = false !== $wpcheckpoint_next && $wpcheckpoint_next <= time() && @touch( $wpcheckpoint_visitor, time() + 5 );' . "\n"

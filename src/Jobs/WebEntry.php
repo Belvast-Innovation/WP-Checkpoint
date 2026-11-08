@@ -36,12 +36,45 @@ final class WebEntry {
 	 * @return void
 	 */
 	public static function run( string $dir, string $mark, string $expected, string $said ): void {
+		// Nothing the run says reaches the visitor (a host's display_errors, before WordPress set its own): what PHP says
+		// goes to the runtime log, cleaned; any output is dropped.
+		HostFunctions::ini_set( 'display_errors', '0' );
 		$host  = self::request_host();
 		$hosts = '' === $host ? array() : array( $host );
 		$log   = new RuntimeLog( $dir, $mark );
 		$note  = static function ( string $line ) use ( $log, $dir, $hosts ): void {
 			$log->write( WebRun::clean( $line, new Redactor( Redactor::installation_secrets() ), array( '{abspath}' => rtrim( $dir, '/\\' ) ), $hosts ), time() );
 		};
+		$level = ob_get_level();
+		ob_start();
+		set_error_handler( // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_set_error_handler -- what PHP says during the run goes to the runtime log, never to the visitor.
+			static function ( int $number, string $message ) use ( $note ): bool {
+				call_user_func( $note, 'PHP said: ' . $message );
+				return true;
+			}
+		);
+		try {
+			self::go( $dir, $mark, $expected, $said, $note, $hosts );
+		} finally {
+			restore_error_handler();
+			while ( ob_get_level() > $level ) {
+				ob_end_clean();
+			}
+		}
+	}
+
+	/**
+	 * The run (run()).
+	 *
+	 * @param string   $dir      The WordPress directory.
+	 * @param string   $mark     The mark the data file names.
+	 * @param string   $expected The runtime's hash the data file names.
+	 * @param string   $said     The hash the runtime said of itself.
+	 * @param callable $note     function( string $line ): void, into the runtime log.
+	 * @param string[] $hosts    The request's host, when it is a domain name.
+	 * @return void
+	 */
+	private static function go( string $dir, string $mark, string $expected, string $said, callable $note, array $hosts ): void {
 		if ( 1 !== preg_match( '/\A[0-9a-f]{64}\z/', $expected ) || ! hash_equals( $expected, $said ) ) {
 			HostFunctions::opcache_invalidate( rtrim( $dir, '/\\' ) . DIRECTORY_SEPARATOR . Maintenance::RUNTIME );
 			$note( 'The runtime here is not the one the restore wrote (its hash is not the one the maintenance file names: an older copy may still be cached); nothing was done. WP-CLI puts the site back: wp wpcheckpoint job list shows the restore.' );
@@ -82,13 +115,15 @@ final class WebEntry {
 	}
 
 	/**
-	 * The request's host name, lowercase and without its port, '' when it is not one (masked in what the run says).
+	 * The request's host name, lowercase and without its port, '' when it is not a domain name (masked in what the run
+	 * says): at least two labels, the last of letters. A header anyone can send makes a mask, which only hides more;
+	 * one like "job" or "1" would hide words of the notes.
 	 *
 	 * @return string
 	 */
 	public static function request_host(): string {
 		$host = isset( $_SERVER['HTTP_HOST'] ) && is_string( $_SERVER['HTTP_HOST'] ) ? $_SERVER['HTTP_HOST'] : '';
-		if ( 1 !== preg_match( '/\A([A-Za-z0-9.-]{1,253})(?::[0-9]{1,5})?\z/', $host, $found ) ) {
+		if ( 1 !== preg_match( '/\A((?:[A-Za-z0-9-]{1,63}\.)+[A-Za-z]{2,63})\.?(?::[0-9]{1,5})?\z/', $host, $found ) || strlen( $found[1] ) > 253 ) {
 			return '';
 		}
 		return strtolower( $found[1] );

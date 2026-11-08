@@ -129,7 +129,8 @@ final class WebPathScanTest extends TestCase {
 		// The note: WebEntry's closure (read with WebEntry::run()), WebRun's closure for WebJobs (read with WebRun::jobs()).
 		'src/Jobs/WebRun.php:note'                 => array( 'WPCheckpoint\Jobs\WebEntry::run' ),
 		'src/Jobs/WebJobs.php:note'                => array( 'WPCheckpoint\Jobs\WebRun::jobs' ),
-		'src/Jobs/WebEntry.php:run'                => array(), // Its own closure, the note.
+		'src/Jobs/WebEntry.php:run'                => array(), // Its own closure, the error handler (which calls the note).
+		'src/Jobs/WebEntry.php:go'                 => array(), // Its own closure, the note.
 		// VisitorFile: the changes its own methods give.
 		'src/Jobs/VisitorFile.php:change'          => array( 'WPCheckpoint\Jobs\VisitorFile::held_up', 'WPCheckpoint\Jobs\VisitorFile::cleared' ),
 		// The merge of the runtime log: SwapStep's closure.
@@ -188,7 +189,7 @@ final class WebPathScanTest extends TestCase {
 		'src/Restore/JobFence.php:within:catch'                     => 'rethrows what it caught, after its ROLLBACK',
 		'src/Jobs/WebRun.php:tick_now:catch'                        => 'around connection() (ImportSession::open()), which never throws NotHere; its other catches pass a NotHere through',
 		'src/Jobs/WebRun.php:tick_mark:catch'                       => 'around connection() (ImportSession::open()), which never throws NotHere; its other catch passes a NotHere through',
-		'src/Jobs/WebEntry.php:run:catch'                           => 'around Credentials::from_wordpress(), which never throws NotHere',
+		'src/Jobs/WebEntry.php:go:catch'                            => 'around Credentials::from_wordpress(), which never throws NotHere',
 		'src/Restore/Maintenance.php:merge_log:catch'               => 'around the merge SwapStep::log_merge() gives (lines through the job\'s logger), which never throws NotHere',
 	);
 

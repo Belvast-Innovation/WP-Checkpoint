@@ -358,8 +358,9 @@ final class Job {
 	public $committed_at = 0;
 
 	/**
-	 * Unix time (the database's clock) a run in WordPress last wrote the job under its lock: its claim, heartbeat,
-	 * release, checkpoint, record or transition (JobStore, given the time by JobRepository). A run without WordPress
+	 * Unix time (the database's clock) a run in WordPress last wrote the job under its lock (its claim, heartbeat,
+	 * release, checkpoint, record or transition), or WordPress last moved it to another status (a retry from WP-CLI)
+	 * (JobStore, given the time by JobRepository). A run without WordPress
 	 * never writes it (WebJobs gives 0), and waits WebJobs::GRACE_SECONDS after it before it takes the job. 0 when no
 	 * run in WordPress wrote it since the column was added.
 	 *

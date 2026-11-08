@@ -118,7 +118,7 @@ final class Residue {
 	 * The temporary names of the maintenance file and its data file (AtomicFile: the name, a dot, 16 hex characters,
 	 * ".tmp").
 	 */
-	const MAINTENANCE_TMP_NAME = '/\A(?:\.maintenance|\.wpcheckpoint-maintenance\.php|\.wpcheckpoint-runtime\.php|\.wpcheckpoint-visitor\.php)\.[0-9a-f]{16}\.tmp\z/';
+	const MAINTENANCE_TMP_NAME = '/\A(?:\.maintenance|\.wpcheckpoint-maintenance\.php|\.wpcheckpoint-runtime\.php|\.wpcheckpoint-visitor\.php|\.wpcheckpoint-runtime-log\.php)\.[0-9a-f]{16}\.tmp\z/';
 
 	/**
 	 * The files of a run without WordPress next to the maintenance file (Restore\Maintenance::WEB_FILES).

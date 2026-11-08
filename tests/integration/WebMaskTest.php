@@ -84,4 +84,59 @@ final class WebMaskTest extends SwapTestCase {
 		}
 		$this->assertStringContainsString( '{site-host}', $raw, 'masked, not dropped' );
 	}
+
+	public function test_a_large_networks_sites_are_read_up_to_the_limit_and_the_masks_turn_coarse(): void {
+		global $wpdb;
+		if ( ! is_multisite() ) {
+			$this->markTestSkipped( 'A network\'s sites table.' );
+		}
+		$job = $this->at_swap();
+		$this->killed_at( $job, 'dir_in' );
+		$staged = null;
+		foreach ( $this->plan_of( Plugin::instance()->jobs()->find( $job->id ) )['tables'] as $table ) {
+			if ( $wpdb->base_prefix . 'blogs' === $table['live'] ) {
+				$staged = $table['stage'];
+			}
+		}
+		$this->assertNotNull( $staged, 'the control: the plan stages the sites table' );
+		for ( $i = 0; $i < \WPCheckpoint\Jobs\WebJobs::SITE_NAMES_LIMIT + 5; $i++ ) {
+			$wpdb->query( $wpdb->prepare( "INSERT INTO `{$staged}` (site_id, domain, path) VALUES (1, %s, '/')", sprintf( 'aaa%03d.example.net', $i ) ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the staged table of the test's swap.
+		}
+		$wpdb->query( 'COMMIT' );
+		$this->past_grace( $job->id );
+		$run = new WebRun(
+			Credentials::from_wordpress(),
+			$this->abspath,
+			true,
+			plugin_basename( WPCHECKPOINT_FILE ),
+			static function ( string $line ): void {
+				unset( $line );
+			},
+			null,
+			array(
+				'type'  => $this->type,
+				'parts' => array(
+					'at' => static function ( string $point ): void {
+						if ( 'rollback' === $point ) {
+							throw new TransientFailure( 'Could not reach aaa007.example.net: it failed' );
+						}
+					},
+				) + $this->swap_parts,
+			)
+		);
+		$result = $this->autocommit(
+			static function () use ( $run, $job ): TickResult {
+				return $run->tick( $job->id, microtime( true ) );
+			}
+		);
+		$names = new \ReflectionProperty( $run, 'names' );
+		$names->setAccessible( true );
+		$read = $names->getValue( $run );
+		$this->assertTrue( $read['coarse'], 'past the limit: coarse' );
+		$this->assertLessThanOrEqual( 3 * \WPCheckpoint\Jobs\WebJobs::SITE_NAMES_LIMIT + 10, count( $read['hosts'] ), 'bounded' );
+		$this->assertContains( 'aaa007.example.net', $read['hosts'], 'the first rows read' );
+		$this->assertNotContains( 'aaa054.example.net', $read['hosts'], 'not past the limit' );
+		$this->assertStringNotContainsString( 'aaa007.example.net', (string) $result->message );
+		$this->assertStringContainsString( 'it failed', (string) $result->message );
+	}
 }
