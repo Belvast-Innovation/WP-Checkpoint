@@ -106,7 +106,9 @@ final class WebEntryCodeTest extends SwapTestCase {
 	 */
 	private function runtime_log(): string {
 		$path = $this->abspath . '/' . Maintenance::LOG;
-		return ( is_file( $path ) ? (string) file_get_contents( $path ) : '(no runtime log)' ) . "\nThe last request:\n" . $this->last;
+		clearstatcache( true, $path ); // The child process may have taken it down since this process last looked.
+		$text = is_file( $path ) ? @file_get_contents( $path ) : false; // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- gone meanwhile: said as none.
+		return ( is_string( $text ) ? $text : '(no runtime log)' ) . "\nThe last request:\n" . $this->last;
 	}
 
 	/**
@@ -116,6 +118,7 @@ final class WebEntryCodeTest extends SwapTestCase {
 	 */
 	private function swap_files(): array {
 		return array_values( array_filter( array( Maintenance::FILE, Maintenance::DATA, Maintenance::VISITOR, Maintenance::RUNTIME, Maintenance::LOG ), function ( string $name ): bool {
+			clearstatcache( true, $this->abspath . '/' . $name );
 			return file_exists( $this->abspath . '/' . $name );
 		} ) );
 	}

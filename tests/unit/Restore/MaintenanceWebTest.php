@@ -166,6 +166,9 @@ final class MaintenanceWebTest extends TestCase {
 		if ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) {
 			$this->markTestSkipped( 'root reads any file' );
 		}
+		if ( 'Windows' === PHP_OS_FAMILY ) {
+			$this->markTestSkipped( 'chmod() makes a file read-only on Windows, not unreadable (and a read-only file cannot be deleted there).' );
+		}
 		( new Maintenance( $this->dir, self::MARK ) )->hold();
 		$this->web( Maintenance::LOG, self::MARK, "2026-11-08 10:00:00 four\n" );
 		chmod( $this->dir . '/' . Maintenance::LOG, 0 );

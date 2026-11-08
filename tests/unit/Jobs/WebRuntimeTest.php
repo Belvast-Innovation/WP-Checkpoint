@@ -105,6 +105,29 @@ final class WebRuntimeTest extends TestCase {
 		}
 	}
 
+	public function test_a_class_file_with_windows_line_endings_is_taken(): void {
+		mkdir( $this->sandbox . '/src/Fake', 0755, true );
+		$file = $this->sandbox . '/src/Fake/Crlf.php';
+		file_put_contents( $file, str_replace( "\n", "\r\n", "<?php\n/**\n * A file.\n */\n\nnamespace WPCheckpoint\\Fake;\n\nfinal class Crlf {\n}\n" ) );
+		$this->assertStringContainsString( "\r\n", (string) file_get_contents( $file ), 'the control: the file has Windows line endings' );
+		spl_autoload_register(
+			$load = static function ( string $class ) use ( $file ): void {
+				if ( 'WPCheckpoint\Fake\Crlf' === $class ) {
+					require $file;
+				}
+			}
+		);
+		try {
+			$built = WebRuntime::build( 'WP Checkpoint restore ' . str_repeat( 'ab', 16 ), array( 'WPCheckpoint\Fake\Crlf' ), $this->sandbox . '/src' );
+			file_put_contents( $this->sandbox . '/runtime.php', $built['code'] );
+			list( $out, $status, $err ) = $this->php( '<?php define( "WPCHECKPOINT_WEB_ENTRY", true ); $r = include ' . var_export( $this->sandbox . '/runtime.php', true ) . '; echo json_encode( array( $r, class_exists( "WPCheckpoint\\Fake\\Crlf", false ) ) );' );
+			$this->assertSame( 0, $status, $err );
+			$this->assertSame( array( $built['hash'], true ), json_decode( $out, true ) );
+		} finally {
+			spl_autoload_unregister( $load );
+		}
+	}
+
 	/**
 	 * Each of the three, outside a string.
 	 *

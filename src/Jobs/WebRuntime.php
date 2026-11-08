@@ -135,7 +135,7 @@ final class WebRuntime {
 	 */
 	private static function block( string $name, string $path ): string {
 		$source = @file_get_contents( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- a class file of this plugin; the exception says it.
-		if ( ! is_string( $source ) || 0 !== strpos( $source, "<?php\n" ) ) {
+		if ( ! is_string( $source ) || 1 !== preg_match( '/\A<\?php\r?\n/', $source, $open ) ) {
 			throw new \RuntimeException( sprintf( 'The runtime cannot read the file of %s.', $name ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- a class name.
 		}
 		$used = self::magic( $source );
@@ -143,7 +143,7 @@ final class WebRuntime {
 			throw new \RuntimeException( sprintf( 'The file of %1$s uses %2$s outside a string, which would say the runtime\'s value, not its own; the swap was not started.', $name, $used ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- a class name and a constant's.
 		}
 		$count = 0;
-		$body  = preg_replace( '/^namespace\s+([A-Za-z0-9_\\\\]+)\s*;/m', 'namespace $1 {', substr( $source, strlen( "<?php\n" ) ), 1, $count );
+		$body  = preg_replace( '/^namespace\s+([A-Za-z0-9_\\\\]+)\s*;/m', 'namespace $1 {', substr( $source, strlen( $open[0] ) ), 1, $count ); // Windows line endings too (a checkout, an upload in text mode).
 		if ( ! is_string( $body ) || 1 !== $count ) {
 			throw new \RuntimeException( sprintf( 'The file of %s is not of the form the runtime takes (one namespace statement).', $name ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- a class name.
 		}

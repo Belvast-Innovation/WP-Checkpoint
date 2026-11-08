@@ -19,7 +19,7 @@ final class WebClassesTest extends TestCase {
 		$this->assertContains( 'WPCheckpoint\Jobs\WebEntry', $loaded );
 		$this->assertContains( 'WPCheckpoint\Jobs\RunnerRepository', $loaded, 'an interface a loaded class implements' );
 		$this->assertSame( $loaded, WebClasses::ALL, 'run php bin/web-classes.php' );
-		$this->assertSame( self::source( $loaded ), (string) file_get_contents( dirname( __DIR__, 3 ) . '/src/Jobs/WebClasses.php' ), 'the file is the tool\'s, byte for byte' );
+		$this->assertSame( self::source( $loaded ), str_replace( "\r\n", "\n", (string) file_get_contents( dirname( __DIR__, 3 ) . '/src/Jobs/WebClasses.php' ) ), 'the file is the tool\'s, byte for byte (but the line endings a Windows checkout gives it)' );
 	}
 
 	/**
