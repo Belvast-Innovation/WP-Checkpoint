@@ -396,6 +396,80 @@ final class StagingResidueTest extends JobTestCase {
 		}
 	}
 
+	public function test_the_files_of_a_run_without_wordpress_are_reaped_only_once_nothing_names_them_and_no_job_that_holds_the_site_has_their_mark(): void {
+		global $wpdb;
+		$dir          = \WPCheckpoint\Tests\Fixtures\Sandbox::make( 'maintenance-web' );
+		$this->made[] = $dir;
+		$before       = Residue::replace_maintenance_dir( $dir );
+		$mark         = \WPCheckpoint\Restore\Maintenance::new_mark();
+		$names        = array( \WPCheckpoint\Restore\Maintenance::RUNTIME, \WPCheckpoint\Restore\Maintenance::VISITOR, \WPCheckpoint\Restore\Maintenance::LOG );
+		$put          = static function ( int $age ) use ( $dir, $mark, $names ): void {
+			foreach ( $names as $name ) {
+				file_put_contents( $dir . '/' . $name, "<?php exit; ?>\n# " . $mark . "\n" );
+				touch( $dir . '/' . $name, time() - $age );
+			}
+		};
+		$there        = static function () use ( $dir, $names ): array {
+			clearstatcache();
+			return array_values(
+				array_filter(
+					$names,
+					static function ( string $name ) use ( $dir ): bool {
+						return file_exists( $dir . '/' . $name );
+					}
+				)
+			);
+		};
+		try {
+			$holder = Plugin::instance()->jobs()->create( \WPCheckpoint\Jobs\RestoreJob::ID, self::$admin_id );
+			$wpdb->update(
+				\WPCheckpoint\Jobs\JobRepository::table(),
+				array(
+					'status'     => Job::FAILED,
+					'site_state' => Job::SITE_CHANGING,
+					'site_mark'  => $mark,
+				),
+				array( 'id' => $holder->id )
+			);
+			$old = Residue::VERIFY_TTL + 10;
+			// A job that holds the site has their mark: kept, however old.
+			$put( $old );
+			$this->reap();
+			$this->assertSame( $names, $there(), 'a holder\'s mark: kept' );
+			$wpdb->update( \WPCheckpoint\Jobs\JobRepository::table(), array( 'site_state' => Job::SITE_UNTOUCHED ), array( 'id' => $holder->id ) );
+			// A data file of a restore names the runtime: kept.
+			file_put_contents( $dir . '/' . \WPCheckpoint\Restore\Maintenance::DATA, ( new \WPCheckpoint\Restore\Maintenance( $dir, \WPCheckpoint\Restore\Maintenance::new_mark() ) )->data( time() - 3600 ) );
+			touch( $dir . '/' . \WPCheckpoint\Restore\Maintenance::DATA, time() - 60 );
+			$this->reap();
+			$this->assertSame( $names, $there(), 'a data file is there: kept' );
+			\WPCheckpoint\Tests\Fixtures\Sandbox::remove( $dir . '/' . \WPCheckpoint\Restore\Maintenance::DATA );
+			// The code is there: kept.
+			file_put_contents( $dir . '/.maintenance', \WPCheckpoint\Restore\Maintenance::CODE );
+			$this->reap();
+			$this->assertSame( $names, $there(), 'the code is there: kept' );
+			\WPCheckpoint\Tests\Fixtures\Sandbox::remove( $dir . '/.maintenance' );
+			// Fresh: kept.
+			$put( 60 );
+			$this->reap();
+			$this->assertSame( $names, $there(), 'fresh: kept' );
+			// The control: old, nothing names them, no holder has their mark: reaped.
+			$put( $old );
+			$this->reap();
+			$this->assertSame( array(), $there(), 'reaped' );
+			// Uninstall: removed unless the code is there.
+			$put( 60 );
+			file_put_contents( $dir . '/.maintenance', \WPCheckpoint\Restore\Maintenance::CODE );
+			update_option( Uninstaller::OPTION_DELETE_DATA, false );
+			Uninstaller::run();
+			$this->assertSame( $names, $there(), 'uninstall: the code is there, kept' );
+			\WPCheckpoint\Tests\Fixtures\Sandbox::remove( $dir . '/.maintenance' );
+			Uninstaller::run();
+			$this->assertSame( array(), $there(), 'uninstall: removed' );
+		} finally {
+			Residue::replace_maintenance_dir( $before );
+		}
+	}
+
 	public function test_the_maintenance_data_file_is_reaped_only_once_nothing_reads_it_and_no_job_that_holds_the_site_has_its_mark(): void {
 		global $wpdb;
 		$dir          = \WPCheckpoint\Tests\Fixtures\Sandbox::make( 'maintenance-data' );
