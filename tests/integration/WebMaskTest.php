@@ -92,43 +92,55 @@ final class WebMaskTest extends SwapTestCase {
 		}
 		$job = $this->at_swap();
 		$this->killed_at( $job, 'dir_in' );
-		$staged = null;
-		foreach ( $this->plan_of( Plugin::instance()->jobs()->find( $job->id ) )['tables'] as $table ) {
-			if ( $wpdb->base_prefix . 'blogs' === $table['live'] ) {
-				$staged = $table['stage'];
+		$blogs = $wpdb->base_prefix . 'blogs';
+		$ids   = array();
+		try {
+			for ( $i = 0; $i < \WPCheckpoint\Jobs\WebJobs::SITE_NAMES_LIMIT + 5; $i++ ) {
+				$wpdb->insert(
+					$blogs,
+					array(
+						'site_id'    => 1,
+						'domain'     => sprintf( 'aaa%03d.example.net', $i ),
+						'path'       => '/',
+						'registered' => '2026-01-01 00:00:00',
+						'last_updated' => '2026-01-01 00:00:00',
+					)
+				);
+				$ids[] = (int) $wpdb->insert_id;
 			}
-		}
-		$this->assertNotNull( $staged, 'the control: the plan stages the sites table' );
-		for ( $i = 0; $i < \WPCheckpoint\Jobs\WebJobs::SITE_NAMES_LIMIT + 5; $i++ ) {
-			$wpdb->query( $wpdb->prepare( "INSERT INTO `{$staged}` (site_id, domain, path) VALUES (1, %s, '/')", sprintf( 'aaa%03d.example.net', $i ) ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the staged table of the test's swap.
-		}
-		$wpdb->query( 'COMMIT' );
-		$this->past_grace( $job->id );
-		$run = new WebRun(
-			Credentials::from_wordpress(),
-			$this->abspath,
-			true,
-			plugin_basename( WPCHECKPOINT_FILE ),
-			static function ( string $line ): void {
-				unset( $line );
-			},
-			null,
-			array(
-				'type'  => $this->type,
-				'parts' => array(
-					'at' => static function ( string $point ): void {
-						if ( 'rollback' === $point ) {
-							throw new TransientFailure( 'Could not reach aaa007.example.net: it failed' );
-						}
-					},
-				) + $this->swap_parts,
-			)
-		);
-		$result = $this->autocommit(
-			static function () use ( $run, $job ): TickResult {
-				return $run->tick( $job->id, microtime( true ) );
+			$wpdb->query( 'COMMIT' );
+			$this->past_grace( $job->id );
+			$run    = new WebRun(
+				Credentials::from_wordpress(),
+				$this->abspath,
+				true,
+				plugin_basename( WPCHECKPOINT_FILE ),
+				static function ( string $line ): void {
+					unset( $line );
+				},
+				null,
+				array(
+					'type'  => $this->type,
+					'parts' => array(
+						'at' => static function ( string $point ): void {
+							if ( 'rollback' === $point ) {
+								throw new TransientFailure( 'Could not reach aaa007.example.net: it failed' );
+							}
+						},
+					) + $this->swap_parts,
+				)
+			);
+			$result = $this->autocommit(
+				static function () use ( $run, $job ): TickResult {
+					return $run->tick( $job->id, microtime( true ) );
+				}
+			);
+		} finally {
+			foreach ( $ids as $id ) {
+				$wpdb->delete( $blogs, array( 'blog_id' => $id ) ); // The test's rows only: no site of them was made.
 			}
-		);
+			$wpdb->query( 'COMMIT' );
+		}
 		$names = new \ReflectionProperty( $run, 'names' );
 		$names->setAccessible( true );
 		$read = $names->getValue( $run );

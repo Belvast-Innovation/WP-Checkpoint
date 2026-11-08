@@ -309,11 +309,12 @@ final class WebJobs implements RunnerRepository {
 	const SITE_NAMES_LIMIT = 50;
 
 	/**
-	 * The site's names as the swap's plan's tables hold them, for the masks of what such a run says (no WordPress to
-	 * ask): siteurl and home of the main site's options table, and on a network its sites and networks (at most
-	 * SITE_NAMES_LIMIT rows of each: past it, coarse), each table under every name the plan gives it (live, staged,
+	 * The site's names as its tables hold them, for the masks of what such a run says (no WordPress to ask): siteurl
+	 * and home of the main site's options table, and on a network its sites and networks (at most SITE_NAMES_LIMIT rows
+	 * of each: past it, coarse), each table at its live name and at every other name the swap's plan gives it (staged,
 	 * moved aside: a restore that moved the site from another domain holds both). Bounded: one read of the plan's rows
-	 * for those three tables, then at most three reads of each. A table that cannot be read at a name is passed over:
+	 * for those three tables, then at most three reads of each (a single site has no sites table: its reads fail and
+	 * are passed over). A table that cannot be read at a name is passed over:
 	 * what is not read is not masked by name (the masks still hide every other URL's host).
 	 *
 	 * @param Job $job Job.
@@ -340,12 +341,20 @@ final class WebJobs implements RunnerRepository {
 				$rows = array();
 			}
 		}
+		// Each table at its live name (whether or not the plan swaps it: a network's global tables may not be in the
+		// backup), and at the staged and moved-aside names the plan gives it.
+		$names = array();
+		foreach ( array_keys( $tables ) as $live ) {
+			$names[ $live ] = array( $live );
+		}
 		foreach ( $rows as $entry ) {
-			$sql = $tables[ (string) $entry[0] ] ?? '';
-			if ( '' === $sql ) {
-				continue;
+			if ( isset( $names[ (string) $entry[0] ] ) ) {
+				$names[ (string) $entry[0] ] = array_merge( $names[ (string) $entry[0] ], array( (string) $entry[1], (string) $entry[2] ) );
 			}
-			foreach ( array_unique( array_filter( array( (string) $entry[0], (string) $entry[1], (string) $entry[2] ) ) ) as $name ) {
+		}
+		foreach ( $names as $live => $each ) {
+			$sql = $tables[ $live ];
+			foreach ( array_unique( array_filter( $each ) ) as $name ) {
 				try {
 					$read = $this->session->rows( sprintf( $sql, SqlWriter::identifier( $name ) ) );
 				} catch ( NotHere $e ) {
