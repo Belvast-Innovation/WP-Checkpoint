@@ -287,6 +287,82 @@ final class WebJobs implements RunnerRepository {
 	}
 
 	/**
+	 * The site's names as every table of the swap's plan holds them, for the masks of what such a run says (no WordPress
+	 * to ask): the hosts and paths of siteurl and home of each options table, and on a network of each site and network
+	 * row, under each name the plan gives the table (live, staged, moved aside: a restore that moved the site from
+	 * another domain holds both). A table that cannot be read at a name is passed over: what is not read is not masked
+	 * by name (the masks still hide every other URL's host).
+	 *
+	 * @param Job $job Job.
+	 * @return array{hosts: string[], paths: string[]}
+	 * @throws NotHere When a run without WordPress cannot go on here (rethrown unchanged).
+	 */
+	public function site_names( Job $job ): array {
+		$hosts = array();
+		$paths = array();
+		$site  = $this->site_entry( $job );
+		if ( null === $site ) {
+			return array(
+				'hosts' => array(),
+				'paths' => array(),
+			);
+		}
+		try {
+			$entries = $this->plan( $job, (int) $site['attempt'] );
+		} catch ( NotHere $e ) {
+			throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged.
+		} catch ( \RuntimeException $e ) {
+			$entries = array();
+		}
+		foreach ( $entries as $entry ) {
+			if ( SwapPlan::TABLE_OF !== $entry['kind'] ) {
+				continue;
+			}
+			$live = $entry['live'];
+			if ( 1 === preg_match( '/\A' . preg_quote( $this->prefix, '/' ) . '(?:[0-9]+_)?options\z/', $live ) ) {
+				$sql = 'SELECT option_value FROM %s WHERE option_name IN (\'siteurl\', \'home\')';
+			} elseif ( $this->prefix . 'blogs' === $live || $this->prefix . 'site' === $live ) {
+				$sql = 'SELECT domain, path FROM %s';
+			} else {
+				continue;
+			}
+			foreach ( array_unique( array_filter( array( $live, $entry['stage'], $entry['old'] ) ) ) as $name ) {
+				try {
+					$rows = $this->session->rows( sprintf( $sql, SqlWriter::identifier( $name ) ) );
+				} catch ( NotHere $e ) {
+					throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged.
+				} catch ( \RuntimeException $e ) {
+					continue; // Not at this name now (renamed, not made yet).
+				}
+				foreach ( $rows as $row ) {
+					if ( 2 === count( $row ) ) {
+						$hosts[] = strtolower( (string) $row[0] );
+						$paths[] = (string) $row[1];
+						continue;
+					}
+					$parts = parse_url( (string) $row[0] ); // phpcs:ignore WordPress.WP.AlternativeFunctions.parse_url_parse_url -- without WordPress.
+					if ( is_array( $parts ) && isset( $parts['host'] ) ) {
+						$hosts[] = strtolower( (string) $parts['host'] );
+						$paths[] = isset( $parts['path'] ) ? (string) $parts['path'] : '';
+					}
+				}
+			}
+		}
+		$paths = array_values(
+			array_filter(
+				array_unique( $paths ),
+				static function ( string $path ): bool {
+					return '' !== trim( $path, '/' );
+				}
+			)
+		);
+		return array(
+			'hosts' => array_values( array_unique( array_filter( $hosts ) ) ),
+			'paths' => $paths,
+		);
+	}
+
+	/**
 	 * Whether something is at a path (positive evidence: lstat() answered).
 	 *
 	 * @param string $path Path.
