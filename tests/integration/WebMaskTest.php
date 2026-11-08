@@ -96,7 +96,7 @@ final class WebMaskTest extends SwapTestCase {
 		$ids   = array();
 		try {
 			for ( $i = 0; $i < \WPCheckpoint\Jobs\WebJobs::SITE_NAMES_LIMIT + 5; $i++ ) {
-				$wpdb->insert(
+				$inserted = $wpdb->insert(
 					$blogs,
 					array(
 						'site_id'    => 1,
@@ -106,7 +106,8 @@ final class WebMaskTest extends SwapTestCase {
 						'last_updated' => '2026-01-01 00:00:00',
 					)
 				);
-				$ids[] = (int) $wpdb->insert_id;
+				$this->assertSame( 1, $inserted, 'inserted: ' . $wpdb->last_error );
+				$ids[] = (int) $wpdb->insert_id; // Only an id this test made is deleted below.
 			}
 			$wpdb->query( 'COMMIT' );
 			$this->past_grace( $job->id );

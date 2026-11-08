@@ -164,6 +164,11 @@ final class WebGraceTest extends SwapTestCase {
 		$this->assertSame( TickResult::BUSY, $waits->status, 'not taken: ' . $waits->message . ' ' . implode( ' | ', $this->web_notes ) );
 		$this->assertSame( $before, self::row( $job->id ), 'nothing written' );
 		$this->assertSame( array(), $this->seams );
+		// The control: the grace period over, the same queued job is taken (it was the grace period that kept it).
+		self::ran_ago( $job->id, 660 );
+		$taken = $this->tick_without_wordpress( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertNotContains( $taken->status, array( TickResult::BUSY, TickResult::LEFT ), 'taken: ' . $taken->message . ' ' . implode( ' | ', $this->web_notes ) );
+		$this->assertNotSame( array(), $this->seams );
 	}
 
 	public function test_version_16_adds_wp_run_at_and_older_code_reads_and_writes_the_table_as_before(): void {

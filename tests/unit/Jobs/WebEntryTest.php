@@ -51,6 +51,43 @@ final class WebEntryTest extends TestCase {
 		}
 	}
 
+	public function test_what_the_run_prints_or_php_says_never_reaches_the_visitor_and_only_what_is_not_silenced_is_noted(): void {
+		$dir = Sandbox::make( 'web-entry-quietly' );
+		try {
+			$script = $dir . '/run.php';
+			$what   = 'echo "LEAKED-OUTPUT"; @fopen( "/no/such/file", "r" ); trigger_error( "an unsilenced warning", E_USER_WARNING ); $x = array(); @$x["none"];';
+			file_put_contents(
+				$script,
+				'<?php define( "ABSPATH", ' . var_export( $dir . '/', true ) . ' ); require ' . var_export( dirname( __DIR__, 3 ) . '/vendor/autoload.php', true ) . ';'
+				. ' $notes = array(); $level = ob_get_level();'
+				. ' if ( in_array( "--plain", $argv, true ) ) { ( static function () { ' . $what . ' } )(); exit( 0 ); }'
+				. ' \WPCheckpoint\Jobs\WebEntry::quietly( static function ( string $line ) use ( &$notes ): void { $notes[] = $line; }, static function () { ' . $what . ' } );'
+				. ' echo "JSON:" . json_encode( array( $notes, ini_get( "display_errors" ), ob_get_level() === $level, null === set_error_handler( null ) ) );'
+			);
+			$run = static function ( array $more ) use ( $script ): string {
+				$pipes   = array();
+				$process = proc_open( array_merge( array( PHP_BINARY, '-d', 'display_errors=1', '-d', 'error_reporting=-1', $script ), $more ), array( 1 => array( 'pipe', 'w' ), 2 => array( 'pipe', 'w' ) ), $pipes );
+				$out     = (string) stream_get_contents( $pipes[1] );
+				stream_get_contents( $pipes[2] );
+				fclose( $pipes[1] );
+				fclose( $pipes[2] );
+				proc_close( $process );
+				return $out;
+			};
+			// The control: run plainly, the same code prints and PHP says it to the visitor.
+			$plain = $run( array( '--plain' ) );
+			$this->assertStringContainsString( 'LEAKED-OUTPUT', $plain );
+			$this->assertStringContainsString( 'an unsilenced warning', $plain );
+			$quiet = $run( array() );
+			$this->assertSame( 0, strpos( $quiet, 'JSON:' ), 'nothing before what the script itself says: ' . $quiet );
+			$said = json_decode( substr( $quiet, 5 ), true );
+			$this->assertSame( array( 'PHP said: an unsilenced warning' ), $said[0], 'noted: the unsilenced warning only (the "@" ones are the code\'s own to handle)' );
+			$this->assertSame( array( '0', true, true ), array_slice( $said, 1 ), 'display_errors off, the buffers as they were, no handler left' );
+		} finally {
+			Sandbox::remove( $dir );
+		}
+	}
+
 	public function test_nothing_the_run_says_reaches_the_visitor_and_it_leaves_no_handler_or_buffer(): void {
 		$dir = Sandbox::make( 'web-entry' );
 		try {

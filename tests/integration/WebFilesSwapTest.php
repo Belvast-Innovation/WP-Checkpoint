@@ -59,8 +59,10 @@ final class WebFilesSwapTest extends SwapTestCase {
 		return array(
 			'runtime written'  => array( 'runtime_written', array( Maintenance::RUNTIME ) ),
 			'runtime recorded' => array( 'runtime_recorded', array( Maintenance::RUNTIME ) ),
-			'visitor written'  => array( 'visitor_written', array( Maintenance::VISITOR, Maintenance::RUNTIME, Maintenance::LOG ) ),
-			'visitor recorded' => array( 'visitor_recorded', array( Maintenance::VISITOR, Maintenance::RUNTIME, Maintenance::LOG ) ),
+			'visitor written'  => array( 'visitor_written', array( Maintenance::VISITOR, Maintenance::RUNTIME ) ),
+			'visitor recorded' => array( 'visitor_recorded', array( Maintenance::VISITOR, Maintenance::RUNTIME ) ),
+			'log written'      => array( 'log_written', array( Maintenance::VISITOR, Maintenance::RUNTIME, Maintenance::LOG ) ),
+			'log recorded'     => array( 'log_recorded', array( Maintenance::VISITOR, Maintenance::RUNTIME, Maintenance::LOG ) ),
 			'maintenance up'   => array( 'maintenance', array( Maintenance::FILE, Maintenance::DATA, Maintenance::VISITOR, Maintenance::RUNTIME, Maintenance::LOG ) ),
 		);
 	}

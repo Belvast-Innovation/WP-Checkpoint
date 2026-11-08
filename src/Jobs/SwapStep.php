@@ -3900,11 +3900,15 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		$context->checkpoint( $cursor, 20, __( 'Swapping in the restored site', 'wp-checkpoint' ) );
 		$this->at( 'runtime_recorded' );
 		VisitorFile::create( $dir, $mark, isset( $this->parts['plugin'] ) ? (string) $this->parts['plugin'] : $this->host->plugin(), array( $context, 'confirm_lease' ) );
-		RuntimeLog::create( $dir, $mark, array( $context, 'confirm_lease' ) );
 		$this->at( 'visitor_written' );
 		$cursor['visitor'] = true;
 		$context->checkpoint( $cursor, 20, __( 'Swapping in the restored site', 'wp-checkpoint' ) );
 		$this->at( 'visitor_recorded' );
+		RuntimeLog::create( $dir, $mark, array( $context, 'confirm_lease' ) );
+		$this->at( 'log_written' );
+		$cursor['log'] = true;
+		$context->checkpoint( $cursor, 20, __( 'Swapping in the restored site', 'wp-checkpoint' ) );
+		$this->at( 'log_recorded' );
 		return new Maintenance( $dir, $mark, $cursor['runtime'] );
 	}
 

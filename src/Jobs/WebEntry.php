@@ -36,25 +36,44 @@ final class WebEntry {
 	 * @return void
 	 */
 	public static function run( string $dir, string $mark, string $expected, string $said ): void {
-		// Nothing the run says reaches the visitor (a host's display_errors, before WordPress set its own): what PHP says
-		// goes to the runtime log, cleaned; any output is dropped.
-		HostFunctions::ini_set( 'display_errors', '0' );
 		$host  = self::request_host();
 		$hosts = '' === $host ? array() : array( $host );
 		$log   = new RuntimeLog( $dir, $mark );
 		$note  = static function ( string $line ) use ( $log, $dir, $hosts ): void {
 			$log->write( WebRun::clean( $line, new Redactor( Redactor::installation_secrets() ), array( '{abspath}' => rtrim( $dir, '/\\' ) ), $hosts ), time() );
 		};
+		self::quietly(
+			$note,
+			static function () use ( $dir, $mark, $expected, $said, $note, $hosts ): void {
+				self::go( $dir, $mark, $expected, $said, $note, $hosts );
+			}
+		);
+	}
+
+	/**
+	 * Run $what so that nothing it says reaches the visitor (a host's display_errors, before WordPress set its own):
+	 * display_errors off, any output dropped, and what PHP says meanwhile to $note (but what was silenced with "@",
+	 * which the code handles itself); the error handler and the output buffers as they were afterwards.
+	 *
+	 * @param callable $note function( string $line ): void.
+	 * @param callable $what function(): void.
+	 * @return void
+	 */
+	public static function quietly( callable $note, callable $what ): void {
+		HostFunctions::ini_set( 'display_errors', '0' );
 		$level = ob_get_level();
 		ob_start();
 		set_error_handler( // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_set_error_handler -- what PHP says during the run goes to the runtime log, never to the visitor.
 			static function ( int $number, string $message ) use ( $note ): bool {
+				if ( 0 === ( error_reporting() & $number ) ) { // phpcs:ignore WordPress.PHP.DevelopmentFunctions.prevent_path_disclosure_error_reporting,WordPress.PHP.DiscouragedPHPFunctions.runtime_configuration_error_reporting -- read, not changed: whether "@" silenced it.
+					return true; // Silenced with "@" (or not reported): the code handles it.
+				}
 				call_user_func( $note, 'PHP said: ' . $message );
 				return true;
 			}
 		);
 		try {
-			self::go( $dir, $mark, $expected, $said, $note, $hosts );
+			call_user_func( $what );
 		} finally {
 			restore_error_handler();
 			while ( ob_get_level() > $level ) {

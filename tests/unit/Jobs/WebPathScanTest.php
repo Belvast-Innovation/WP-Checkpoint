@@ -129,7 +129,7 @@ final class WebPathScanTest extends TestCase {
 		// The note: WebEntry's closure (read with WebEntry::run()), WebRun's closure for WebJobs (read with WebRun::jobs()).
 		'src/Jobs/WebRun.php:note'                 => array( 'WPCheckpoint\Jobs\WebEntry::run' ),
 		'src/Jobs/WebJobs.php:note'                => array( 'WPCheckpoint\Jobs\WebRun::jobs' ),
-		'src/Jobs/WebEntry.php:run'                => array(), // Its own closure, the error handler (which calls the note).
+		'src/Jobs/WebEntry.php:quietly'            => array( 'WPCheckpoint\Jobs\WebEntry::run' ), // The note and the run, closures of run(); its own error handler.
 		'src/Jobs/WebEntry.php:go'                 => array(), // Its own closure, the note.
 		// VisitorFile: the changes its own methods give.
 		'src/Jobs/VisitorFile.php:change'          => array( 'WPCheckpoint\Jobs\VisitorFile::held_up', 'WPCheckpoint\Jobs\VisitorFile::cleared' ),
