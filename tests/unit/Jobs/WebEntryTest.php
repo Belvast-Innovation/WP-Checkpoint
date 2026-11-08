@@ -98,7 +98,7 @@ final class WebEntryTest extends TestCase {
 		return array(
 			'an exception' => array( 'echo "LEAKED-OUTPUT"; throw new \\RuntimeException( "stopped" );', false ),
 			'a flush'      => array( 'echo "LEAKED-OUTPUT"; ob_end_flush(); ob_start();', false ),
-			'a fatal'      => array( 'echo "LEAKED-OUTPUT"; ini_set( "memory_limit", "8M" ); $x = str_repeat( "x", 64 * 1048576 );', true ),
+			'a fatal'      => array( 'echo "LEAKED-OUTPUT"; set_time_limit( 1 ); $i = 0; while ( true ) { ++$i; }', true ),
 		);
 	}
 
@@ -124,7 +124,7 @@ final class WebEntryTest extends TestCase {
 			fclose( $pipes[2] );
 			proc_close( $process );
 			$this->assertStringNotContainsString( 'LEAKED-OUTPUT', $out );
-			$this->assertStringNotContainsString( 'Allowed memory size', $out, 'nor PHP\'s message' );
+			$this->assertStringNotContainsString( 'Maximum execution time', $out, 'nor PHP\'s message' );
 			if ( $fatal ) {
 				$this->assertSame( '', $out, 'the request ended there, and gave nothing' );
 				return;
