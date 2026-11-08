@@ -180,6 +180,7 @@ final class WebPathScanTest extends TestCase {
 		'src/Jobs/SessionExecutor.php:execute:catch'                => 'around ImportSession::write(), which never throws NotHere',
 		'src/Jobs/SessionExecutor.php:select:catch'                 => 'around ImportSession::named_rows(), which never throws NotHere',
 		'src/Restore/JobFence.php:within:catch'                     => 'rethrows what it caught, after its ROLLBACK',
+		'src/Jobs/WebRun.php:tick_now:catch'                        => 'around connection() (ImportSession::open()), which never throws NotHere; its other catches pass a NotHere through',
 	);
 
 	/**

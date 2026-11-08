@@ -41,6 +41,16 @@ final class WebRun {
 	const BUDGET_BYTES = 32 * 1048576;
 
 	/**
+	 * Seconds such a run's connection attempt may take: a visitor waits for it.
+	 */
+	const CONNECT_SECONDS = 3;
+
+	/**
+	 * Seconds a read from the server may take: a statement's lock wait (SwapStep::LOCK_WAIT) and five more.
+	 */
+	const READ_SECONDS = SwapStep::LOCK_WAIT + 5;
+
+	/**
 	 * The database settings and the table prefix (wp-config.php's $table_prefix, Credentials::get( 'prefix' )).
 	 *
 	 * @var Credentials
@@ -131,7 +141,8 @@ final class WebRun {
 	/**
 	 * One tick of a job, as a run without WordPress makes it. A job such a run was held up on (TickResult::$held_up)
 	 * waits as the pace says (WebPace) before it is tried again, untouched meanwhile (WAITING, its seconds); a held-up
-	 * run makes the next wait longer, any other (but BUSY) starts it over.
+	 * run makes the next wait longer, any other (but BUSY and UNAVAILABLE) starts it over. A connection that cannot be
+	 * opened, or a job that cannot be read, is UNAVAILABLE: nothing is written, the note says why.
 	 *
 	 * @param int        $job_id     Job id.
 	 * @param float|null $started_at When the request started (its budget counts from there).
@@ -159,7 +170,7 @@ final class WebRun {
 		if ( TickResult::LEFT === $result->status && $result->held_up ) {
 			$result->retry_after = $this->pace->held_up( $job_id, $now );
 			$this->note( sprintf( 'Job %d is held up (%s); the next try is in %d seconds.', $job_id, $result->message, $result->retry_after ) );
-		} elseif ( TickResult::BUSY !== $result->status ) {
+		} elseif ( TickResult::BUSY !== $result->status && TickResult::UNAVAILABLE !== $result->status ) {
 			$this->pace->cleared( $job_id );
 		}
 		return $result;
@@ -171,14 +182,34 @@ final class WebRun {
 	 * @param int        $job_id     Job id.
 	 * @param float|null $started_at When the request started.
 	 * @return TickResult
+	 * @throws NotHere Rethrown unchanged, never taken as the database being unavailable.
 	 */
 	private function tick_now( int $job_id, $started_at ): TickResult {
-		$session = ImportSession::open( $this->credentials );
+		try {
+			$session = $this->connection();
+		} catch ( \Throwable $e ) {
+			return $this->unavailable( $job_id, 'its connection to the database could not be opened', $e );
+		}
 		try {
 			$jobs = $this->jobs( $session );
-			$job  = $jobs->find( $job_id );
+			try {
+				$job = $jobs->find( $job_id );
+			} catch ( NotHere $e ) {
+				throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged: the Runner's, never this run's to swallow.
+			} catch ( \Throwable $e ) {
+				return $this->unavailable( $job_id, 'the job could not be read', $e );
+			}
 			if ( null === $job ) {
-				return new TickResult( TickResult::MISSING, -1, null );
+				// JobStore::find() gives null for a row it could not read too: missing only on positive evidence, the row
+				// asked for again and none answered.
+				try {
+					$rows = $session->rows( 'SELECT id FROM ' . \WPCheckpoint\Database\SqlWriter::identifier( $jobs->jobs_table() ) . ' WHERE id = ?', array( (string) $job_id ) );
+				} catch ( NotHere $e ) {
+					throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged: the Runner's, never this run's to swallow.
+				} catch ( \Throwable $e ) {
+					return $this->unavailable( $job_id, 'the job could not be read', $e );
+				}
+				return array() === $rows ? new TickResult( TickResult::MISSING, -1, null ) : $this->unavailable( $job_id, 'the job could not be read', new \RuntimeException( 'Its row could not be read.' ) );
 			}
 			$network = $job->options['recorded'][ SwapStep::NETWORK_RECORD ] ?? null;
 			if ( $this->multisite && ! is_int( $network ) ) {
@@ -195,6 +226,30 @@ final class WebRun {
 		} finally {
 			$session->close();
 		}
+	}
+
+	/**
+	 * Nothing written: why, noted (the exception's message cleaned as every text of such a run).
+	 *
+	 * @param int        $job_id Job id.
+	 * @param string     $what   What could not be done.
+	 * @param \Throwable $e      Why.
+	 * @return TickResult
+	 */
+	private function unavailable( int $job_id, string $what, \Throwable $e ): TickResult {
+		$why = self::clean( $e->getMessage(), new Redactor( Redactor::installation_secrets() ), array( '{abspath}' => rtrim( $this->abspath, '/\\' ) ) );
+		$this->note( sprintf( 'Job %d is not taken on now: %s (%s). Nothing was written.', $job_id, $what, $why ) );
+		return new TickResult( TickResult::UNAVAILABLE, -1, null, sprintf( 'The database could not be used: %s.', $what ) );
+	}
+
+	/**
+	 * Such a run's own connection: CONNECT_SECONDS to connect, READ_SECONDS for each read.
+	 *
+	 * @return ImportSession
+	 * @throws TransientFailure When it cannot be opened.
+	 */
+	public function connection(): ImportSession {
+		return ImportSession::open( $this->credentials, self::CONNECT_SECONDS, self::READ_SECONDS );
 	}
 
 	/**
@@ -224,15 +279,14 @@ final class WebRun {
 	 * @return Runner
 	 */
 	public function runner( WebJobs $jobs, int $network = 0 ): Runner {
-		$credentials = $this->credentials;
-		$swap        = new SwapStep(
-			static function () use ( $credentials ): ImportSession {
-				return ImportSession::open( $credentials );
+		$swap  = new SwapStep(
+			function (): ImportSession {
+				return $this->connection();
 			},
 			isset( $this->seams['parts'] ) && is_array( $this->seams['parts'] ) ? $this->seams['parts'] : array(),
 			SwapHost::without_wordpress( $this->prefix, $this->multisite, $network, $this->plugin, $this->flush )
 		);
-		$types       = new JobTypes( false );
+		$types = new JobTypes( false );
 		$types->add( new WebRestoreJob( $swap, isset( $this->seams['type'] ) && is_string( $this->seams['type'] ) ? $this->seams['type'] : RestoreJob::ID ) );
 		$redactor = new Redactor( Redactor::installation_secrets() );
 		$paths    = array(

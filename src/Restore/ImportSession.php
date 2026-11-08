@@ -91,21 +91,46 @@ final class ImportSession implements Queries {
 	}
 
 	/**
+	 * Seconds a connection attempt, and a read from the server, may take: as given to open().
+	 *
+	 * @var array{connect: int, read: int}
+	 */
+	private $timeouts = array(
+		'connect' => Connection::CONNECT_TIMEOUT,
+		'read'    => Connection::READ_TIMEOUT,
+	);
+
+	/**
 	 * Connect and set up the session.
 	 *
 	 * @param Credentials $credentials Settings.
+	 * @param int         $connect     Seconds a connection attempt may take.
+	 * @param int         $read        Seconds a read from the server may take.
 	 * @return self
 	 * @throws TransientFailure When the database cannot be reached now.
 	 */
-	public static function open( Credentials $credentials ): self {
+	public static function open( Credentials $credentials, int $connect = Connection::CONNECT_TIMEOUT, int $read = Connection::READ_TIMEOUT ): self {
 		try {
-			$mysqli = Connection::connect( $credentials );
+			$mysqli = Connection::connect( $credentials, $connect, $read );
 		} catch ( Failure $e ) {
 			throw new TransientFailure( 'The restore could not open its own connection to the database: ' . $e->getMessage() );
 		}
-		$session = new self( $mysqli, $credentials->get( 'name' ) );
+		$session           = new self( $mysqli, $credentials->get( 'name' ) );
+		$session->timeouts = array(
+			'connect' => $connect,
+			'read'    => $read,
+		);
 		$session->run( "SET SESSION sql_mode = 'NO_AUTO_VALUE_ON_ZERO', SESSION foreign_key_checks = 0" );
 		return $session;
+	}
+
+	/**
+	 * The timeouts the session was opened with (open()).
+	 *
+	 * @return array{connect: int, read: int}
+	 */
+	public function timeouts(): array {
+		return $this->timeouts;
 	}
 
 	/**
