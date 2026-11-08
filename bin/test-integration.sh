@@ -28,7 +28,8 @@
 # the test site's WordPress directory (a run stopped while a test held one leaves it; a held .maintenance stops the
 # suite's own start at WordPress's maintenance page), and removes this plugin's, on wp-env's test site only
 # (WPCHECKPOINT_TEST_MAINTENANCE_REMOVE=0 lists only). With .maintenance still there the run does not start (status 76;
-# any other failure of the check, status 1). Then tests/Fixtures/leftovers-precheck.php lists the entries of the
+# any other failure of the check, status 1); with a file of a run without WordPress there (the runtime, the visitor
+# file, the runtime log) it does not start either and nothing is removed (status 77). Then tests/Fixtures/leftovers-precheck.php lists the entries of the
 # test site's uploads directory under a name the tests make there (read from the tests) and a restore's loader probe
 # in its must-use plugins directory: an earlier run left them, and the run does not start (status 77) until they are
 # removed. Then tests/Fixtures/plugin-entries.php counts the entries of this plugin's
@@ -253,8 +254,8 @@ done
 
 php "$PLUGIN/tests/Fixtures/maintenance-precheck.php"
 PRECHECK=$?
-if [ "$PRECHECK" -eq 76 ]; then
-	exit 76
+if [ "$PRECHECK" -eq 76 ] || [ "$PRECHECK" -eq 77 ]; then
+	exit "$PRECHECK"
 elif [ "$PRECHECK" -ne 0 ]; then
 	echo "The check of the test site's maintenance files failed (status $PRECHECK); the run does not start." >&2
 	exit 1

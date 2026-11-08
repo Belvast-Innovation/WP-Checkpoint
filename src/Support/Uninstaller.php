@@ -682,8 +682,8 @@ final class Uninstaller {
 		// maintenance file itself, which a swap only leaves while it holds the site (and then nothing is uninstalled),
 		// nor a data file it reads.
 		foreach ( Residue::scan_maintenance( Residue::maintenance_dir() ) as $entry ) {
-			if ( Residue::MAINTENANCE_DATA === $entry['kind'] && false !== Maintenance::code_in( Residue::maintenance_dir() ) ) {
-				continue;
+			if ( in_array( $entry['kind'], array( Residue::MAINTENANCE_DATA, Residue::MAINTENANCE_WEB ), true ) && false !== Maintenance::code_in( Residue::maintenance_dir() ) ) {
+				continue; // Read while a code of the plugin's is in .maintenance (the runtime and the visitor file by it too).
 			}
 			try {
 				if ( Deleter::delete_maintenance_file( Residue::maintenance_dir(), basename( $entry['path'] ), $confirm ) ) {

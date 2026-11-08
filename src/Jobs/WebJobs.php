@@ -166,6 +166,22 @@ final class WebJobs implements RunnerRepository {
 	}
 
 	/**
+	 * The job that holds the site with a maintenance file of this mark: its id, 0 when none does, -1 when more than one
+	 * row says so (not this run's to choose).
+	 *
+	 * @param string $mark The mark the data file names.
+	 * @return int
+	 * @throws \RuntimeException When the jobs cannot be read.
+	 */
+	public function held_by_mark( string $mark ): int {
+		$rows = $this->session->rows( 'SELECT id FROM ' . SqlWriter::identifier( $this->jobs_table() ) . ' WHERE site_mark = ? AND site_state <> 0 AND status IN (?, ?, ?) ORDER BY id LIMIT 2', array( $mark, Job::QUEUED, Job::RUNNING, Job::PAUSED ) );
+		if ( array() === $rows ) {
+			return 0;
+		}
+		return 1 === count( $rows ) ? (int) $rows[0][0] : -1;
+	}
+
+	/**
 	 * Whether a job may be ticked here: one that holds the site, on positive evidence that it is this site's (here()).
 	 *
 	 * @param Job $job Job.

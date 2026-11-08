@@ -16,7 +16,8 @@
  * (Leftovers::database_refusal()); otherwise nothing is removed and the reason is said. WPCHECKPOINT_TEST_MAINTENANCE_REMOVE
  * (default 1; it listed only by default until it was tried on the test site) set to 0 lists only and removes nothing.
  *
- * Exit status: 76 when .maintenance is still there afterwards (the run would only meet the maintenance page), else 0.
+ * Exit status: 77 when a file of a run without WordPress is there (RealAbspath::web_left(): listed with the rest, nothing
+ * removed); 76 when .maintenance is still there afterwards (the run would only meet the maintenance page); else 0.
  * Without the tests configuration (WP_PHPUNIT__TESTS_CONFIG, or wp-tests-config.php in WP_TESTS_DIR or
  * WP_PHPUNIT__DIR) nothing is checked: the bootstrap says the test library is missing.
  *
@@ -39,6 +40,13 @@ require dirname( __DIR__, 2 ) . '/vendor/autoload.php';
 require $wpcheckpoint_config; // Its constants only (ABSPATH, DB_*): it does not load WordPress.
 
 $wpcheckpoint_found = RealAbspath::listing();
+// A file of a run without WordPress (the runtime, the visitor file, the runtime log) stops the run, and nothing is
+// removed: a run stopped part way left it (2026-11-08, the same as the uploads check of leftovers-precheck.php).
+$wpcheckpoint_web = RealAbspath::web_left();
+if ( array() !== $wpcheckpoint_web ) {
+	fwrite( STDERR, "The test site's WordPress directory holds files of a run without WordPress an earlier run left; the run does not start and nothing was removed. Remove them first (with what else is listed):\n  " . implode( "\n  ", $wpcheckpoint_found ) . "\n" );
+	exit( 77 );
+}
 if ( array() === $wpcheckpoint_found ) {
 	fwrite( STDERR, 'No maintenance file in the test site\'s WordPress directory (' . rtrim( ABSPATH, '/' ) . ").\n" );
 	exit( 0 );

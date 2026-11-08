@@ -32,9 +32,15 @@ use WPCheckpoint\Support\DeletionRefused;
 final class RealAbspath {
 
 	/**
-	 * The files: the maintenance file and its data file.
+	 * The files: the maintenance file and its data file, and the files of a run without WordPress next to them (the
+	 * runtime, the visitor file, the runtime log: registered 2026-11-08 for WebEntryHttpTest).
 	 */
-	const NAMES = array( Maintenance::FILE, Maintenance::DATA );
+	const NAMES = array( Maintenance::FILE, Maintenance::DATA, Maintenance::RUNTIME, Maintenance::VISITOR, Maintenance::LOG );
+
+	/**
+	 * Of NAMES, the files of a run without WordPress (before a run, any of them stops it: web_left()).
+	 */
+	const WEB_NAMES = array( Maintenance::RUNTIME, Maintenance::VISITOR, Maintenance::LOG );
 
 	/**
 	 * The line a test's own "someone else's" maintenance file carries (fixture()).
@@ -87,7 +93,7 @@ final class RealAbspath {
 	 * @return void
 	 */
 	public static function write( string $name, string $contents ): void {
-		Assert::assertSame( 1, preg_match( Deleter::MAINTENANCE_NAMES, $name ), 'only the maintenance file, its data file and their temporary names are written in ABSPATH' );
+		Assert::assertSame( 1, preg_match( Deleter::MAINTENANCE_NAMES, $name ), 'only the maintenance file, its data file, the files of a run without WordPress and their temporary names are written in ABSPATH' );
 		Assert::assertNotFalse( file_put_contents( self::checked() . '/' . $name, $contents ), 'written: ' . $name );
 	}
 
@@ -130,6 +136,29 @@ final class RealAbspath {
 			}
 		}
 		return $out;
+	}
+
+	/**
+	 * The files of a run without WordPress (WEB_NAMES) and their temporary names in ABSPATH: before a run, any of them
+	 * stops it and nothing is removed (maintenance-precheck.php, status 77).
+	 *
+	 * @return string[]
+	 */
+	public static function web_left(): array {
+		return array_values(
+			array_filter(
+				self::listing(),
+				static function ( string $path ): bool {
+					$name = basename( $path );
+					foreach ( self::WEB_NAMES as $web ) {
+						if ( $web === $name || 0 === strpos( $name, $web . '.' ) ) {
+							return true;
+						}
+					}
+					return false;
+				}
+			)
+		);
 	}
 
 	/**
@@ -187,9 +216,12 @@ final class RealAbspath {
 		if ( ! in_array( $name, self::NAMES, true ) ) {
 			return true;
 		}
+		if ( in_array( $name, self::WEB_NAMES, true ) ) {
+			return '' !== Maintenance::web_mark( $path ); // It names a restore.
+		}
 		$text = (string) @file_get_contents( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a test fixture.
 		return Maintenance::FILE === $name
-			? ( Maintenance::CODE === $text || 1 === preg_match( Maintenance::LEGACY_FORM, $text ) )
+			? ( in_array( $text, Maintenance::KNOWN_CODES, true ) || 1 === preg_match( Maintenance::LEGACY_FORM, $text ) )
 			: 1 === preg_match( Maintenance::DATA_FORM, $text );
 	}
 

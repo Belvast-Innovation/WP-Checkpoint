@@ -178,6 +178,42 @@ final class WebRun {
 	}
 
 	/**
+	 * One tick of the job that holds the site with a maintenance file of this mark (WebEntry's: the data file names the
+	 * mark, not the job): MISSING when no job does, LEFT when more than one row says so, UNAVAILABLE when the jobs cannot
+	 * be read; otherwise tick().
+	 *
+	 * @param string     $mark       The mark.
+	 * @param float|null $started_at When the request started.
+	 * @return TickResult
+	 * @throws NotHere Rethrown unchanged, never taken as the database being unavailable.
+	 */
+	public function tick_mark( string $mark, $started_at = null ): TickResult {
+		try {
+			$session = $this->connection();
+		} catch ( \Throwable $e ) {
+			return $this->unavailable( 0, 'its connection to the database could not be opened', $e );
+		}
+		try {
+			$id = $this->jobs( $session )->held_by_mark( $mark );
+		} catch ( NotHere $e ) {
+			throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged: the Runner's, never this run's to swallow.
+		} catch ( \Throwable $e ) {
+			return $this->unavailable( 0, 'the jobs could not be read', $e );
+		} finally {
+			$session->close();
+		}
+		if ( 0 === $id ) {
+			$this->note( 'No job holds the site with this maintenance file; nothing was done (wp wpcheckpoint job list says which restore put it up).' );
+			return new TickResult( TickResult::MISSING, -1, null, 'No job holds the site with this maintenance file.' );
+		}
+		if ( $id < 0 ) {
+			$this->note( 'More than one job says it holds the site with this maintenance file; none is taken on here (wp wpcheckpoint job list says which).' );
+			return new TickResult( TickResult::LEFT, -1, null, 'More than one job holds the site with this maintenance file.' );
+		}
+		return $this->tick( $id, $started_at );
+	}
+
+	/**
 	 * What a tick's result does to the pace: held up, the next wait is longer (and the result says it); BUSY (another run
 	 * holds the job) says nothing of it; anything else starts it over.
 	 *
@@ -263,7 +299,7 @@ final class WebRun {
 	 */
 	private function unavailable( int $job_id, string $what, \Throwable $e ): TickResult {
 		$why = self::clean( $e->getMessage(), new Redactor( Redactor::installation_secrets() ), array( '{abspath}' => rtrim( $this->abspath, '/\\' ) ) );
-		$this->note( sprintf( 'Job %d is not taken on now: %s (%s). Nothing was written.', $job_id, $what, $why ) );
+		$this->note( sprintf( '%s is not taken on now: %s (%s). Nothing was written.', 0 === $job_id ? 'The job that holds the site' : 'Job ' . $job_id, $what, $why ) );
 		return new TickResult( TickResult::UNAVAILABLE, -1, null, sprintf( 'The database could not be used: %s.', $what ) );
 	}
 

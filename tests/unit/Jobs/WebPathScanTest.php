@@ -34,6 +34,7 @@ final class WebPathScanTest extends TestCase {
 	 * Where a run without WordPress starts: what its runtime calls.
 	 */
 	const ROOTS = array(
+		'WPCheckpoint\Jobs\WebEntry::run',
 		'WPCheckpoint\Jobs\WebRun::__construct',
 		'WPCheckpoint\Jobs\WebRun::tick',
 	);
@@ -48,8 +49,8 @@ final class WebPathScanTest extends TestCase {
 		'WPCheckpoint\Restore\Queries'       => array( 'WPCheckpoint\Restore\ImportSession', 'WPCheckpoint\Restore\DeadlineQueries' ),
 		'WPCheckpoint\Jobs\Step'             => array( 'WPCheckpoint\Jobs\LeaveStep', 'WPCheckpoint\Jobs\WebSwapStep' ),
 		'WPCheckpoint\Jobs\JobType'          => array( 'WPCheckpoint\Jobs\WebRestoreJob' ),
-		// The pace WebRun keeps unless the entries give one (b2 binds theirs here).
-		'WPCheckpoint\Jobs\WebPace'          => array( 'WPCheckpoint\Jobs\MemoryPace' ),
+		// The pace WebRun keeps unless it is given one, and the one WebEntry gives (kept in the visitor file).
+		'WPCheckpoint\Jobs\WebPace'          => array( 'WPCheckpoint\Jobs\MemoryPace', 'WPCheckpoint\Jobs\VisitorFile' ),
 	);
 
 	/**
@@ -125,9 +126,14 @@ final class WebPathScanTest extends TestCase {
 		// Closures their callers in the same class give; read with those callers.
 		'src/Restore/ImportSession.php:quietly'    => array(),
 		'src/Standalone/Connection.php:quietly'    => array(),
-		// The note: given by the entries of b2, which are read with them (not part of this run's code).
-		'src/Jobs/WebRun.php:note'                 => array(),
-		'src/Jobs/WebJobs.php:note'                => array(),
+		// The note: WebEntry's closure (read with WebEntry::run()), WebRun's closure for WebJobs (read with WebRun::jobs()).
+		'src/Jobs/WebRun.php:note'                 => array( 'WPCheckpoint\Jobs\WebEntry::run' ),
+		'src/Jobs/WebJobs.php:note'                => array( 'WPCheckpoint\Jobs\WebRun::jobs' ),
+		'src/Jobs/WebEntry.php:run'                => array(), // Its own closure, the note.
+		// VisitorFile: the changes its own methods give.
+		'src/Jobs/VisitorFile.php:change'          => array( 'WPCheckpoint\Jobs\VisitorFile::held_up', 'WPCheckpoint\Jobs\VisitorFile::cleared' ),
+		// The merge of the runtime log: SwapStep's closure.
+		'src/Restore/Maintenance.php:merge_log'    => array( 'WPCheckpoint\Jobs\SwapStep::log_merge' ),
 	);
 
 	/**
@@ -181,6 +187,9 @@ final class WebPathScanTest extends TestCase {
 		'src/Jobs/SessionExecutor.php:select:catch'                 => 'around ImportSession::named_rows(), which never throws NotHere',
 		'src/Restore/JobFence.php:within:catch'                     => 'rethrows what it caught, after its ROLLBACK',
 		'src/Jobs/WebRun.php:tick_now:catch'                        => 'around connection() (ImportSession::open()), which never throws NotHere; its other catches pass a NotHere through',
+		'src/Jobs/WebRun.php:tick_mark:catch'                       => 'around connection() (ImportSession::open()), which never throws NotHere; its other catch passes a NotHere through',
+		'src/Jobs/WebEntry.php:run:catch'                           => 'around Credentials::from_wordpress(), which never throws NotHere',
+		'src/Restore/Maintenance.php:merge_log:catch'               => 'around the merge SwapStep::log_merge() gives (lines through the job\'s logger), which never throws NotHere',
 	);
 
 	/**
@@ -311,7 +320,11 @@ final class WebPathScanTest extends TestCase {
 		$jobs    = $run->jobs( $session );
 		$runner  = $run->runner( $jobs );
 		$this->assertSame( array(), self::prop( $run, 'seams' ), 'no test seams: the swap\'s parts and the type\'s id are the defaults' );
-		$this->assertSame( self::BINDINGS[ \WPCheckpoint\Jobs\WebPace::class ], array( get_class( self::prop( $run, 'pace' ) ) ), 'WebPace => the class WebRun makes' );
+		// WebPace => the class WebRun makes when it is given none, and the one WebEntry gives it (the visitor file).
+		$this->assertSame( self::BINDINGS[ \WPCheckpoint\Jobs\WebPace::class ], array( get_class( self::prop( $run, 'pace' ) ), \WPCheckpoint\Jobs\VisitorFile::class ) );
+		$entry = (string) file_get_contents( dirname( __DIR__, 3 ) . '/src/Jobs/WebEntry.php' );
+		$this->assertSame( 1, substr_count( $entry, 'new VisitorFile(' ), 'WebEntry makes the visitor file' );
+		$this->assertSame( 1, substr_count( $entry, 'new WebRun(' ), 'and gives it to the one WebRun it makes' );
 		$this->assertSame( 'site9_', self::prop( $run, 'prefix' ), 'the prefix is the settings\' (wp-config.php\'s $table_prefix)' );
 
 		// RunnerRepository => WebJobs; StoreExecutor => SessionExecutor; Queries => ImportSession.
