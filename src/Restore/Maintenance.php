@@ -622,22 +622,36 @@ final class Maintenance {
 	 * @return string
 	 */
 	public static function web_mark( string $path ): string {
-		clearstatcache( true, $path );
-		$stat = @lstat( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a warning would name the path.
-		if ( false === $stat || 0100000 !== ( $stat['mode'] & 0170000 ) ) {
-			return '';
-		}
-		$handle = @fopen( $path, 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
-		if ( false === $handle ) {
-			return '';
-		}
-		$head = @fread( $handle, 512 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
-		@fclose( $handle ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
-		return is_string( $head ) && 1 === preg_match( self::WEB_MARK, $head, $found ) ? $found[1] : '';
+		$read = self::web_head( $path );
+		return is_string( $read ) && 1 === preg_match( self::WEB_MARK, $read, $found ) ? $found[1] : '';
 	}
 
 	/**
-	 * The files of a run without WordPress that name this restore, taken down in WEB_FILES' order.
+	 * The first 512 bytes of a file of WEB_FILES; false when it is positively not a regular file there (not there, a
+	 * link, a directory), null when it is a regular file that cannot be read.
+	 *
+	 * @param string $path Path.
+	 * @return string|false|null
+	 */
+	private static function web_head( string $path ) {
+		clearstatcache( true, $path );
+		$stat = @lstat( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a warning would name the path.
+		if ( false === $stat || 0100000 !== ( $stat['mode'] & 0170000 ) ) {
+			return false;
+		}
+		$handle = @fopen( $path, 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
+		if ( false === $handle ) {
+			return null;
+		}
+		$head = @fread( $handle, 512 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
+		@fclose( $handle ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
+		return is_string( $head ) ? $head : null;
+	}
+
+	/**
+	 * The files of a run without WordPress that name this restore, taken down in WEB_FILES' order; one that cannot be
+	 * read goes too (the names are this plugin's, and no other restore's maintenance file stands here: remove_files()
+	 * stopped before this otherwise), so that a take-down never waits on a file it cannot read.
 	 *
 	 * @param callable|null $confirm Called right before each file is deleted.
 	 * @return bool Whether none of them is there now.
@@ -647,7 +661,7 @@ final class Maintenance {
 		$gone = true;
 		foreach ( self::WEB_FILES as $name ) {
 			$path = $this->dir . DIRECTORY_SEPARATOR . $name;
-			if ( self::web_mark( $path ) !== $this->mark ) {
+			if ( null !== self::web_head( $path ) && self::web_mark( $path ) !== $this->mark ) {
 				clearstatcache( true, $path );
 				$gone = $gone && ( false === @lstat( $path ) ? Paths::positively_gone( $path ) : true ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- another restore's, or none: not this restore's to take down.
 				continue;

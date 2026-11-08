@@ -126,7 +126,7 @@ final class VisitorFile implements WebPace {
 	public function held_up( int $job_id, int $now ): int {
 		$seconds = MemoryPace::seconds( 1 );
 		$this->change(
-			function ( array $data ) use ( $job_id, $now, &$seconds ): array {
+			static function ( array $data ) use ( $job_id, $now, &$seconds ): array {
 				$held                             = (int) ( $data['pace'][ (string) $job_id ]['held'] ?? 0 ) + 1;
 				$seconds                          = MemoryPace::seconds( $held );
 				$data['pace'][ (string) $job_id ] = array(
@@ -135,7 +135,9 @@ final class VisitorFile implements WebPace {
 				);
 				return $data;
 			},
-			$now + $seconds
+			static function ( array $data ) use ( $job_id ): int {
+				return (int) ( $data['pace'][ (string) $job_id ]['until'] ?? 0 ); // The file's time: the end of the wait.
+			}
 		);
 		return $seconds;
 	}
@@ -152,7 +154,9 @@ final class VisitorFile implements WebPace {
 				unset( $data['pace'][ (string) $job_id ] );
 				return $data;
 			},
-			0
+			static function (): int {
+				return 0; // The file's time stays as it is.
+			}
 		);
 	}
 
@@ -186,10 +190,11 @@ final class VisitorFile implements WebPace {
 	 * of the contents moves it to now, which would let the maintenance file's code run the runtime before its time).
 	 *
 	 * @param callable $change function( array $data ): array.
-	 * @param int      $until  Unix time the file's time is to be at least.
+	 * @param callable $until  function( array $data ): int, of the changed data: the Unix time the file's time is to be
+	 *                         at least.
 	 * @return void
 	 */
-	private function change( callable $change, int $until ): void {
+	private function change( callable $change, callable $until ): void {
 		$path   = $this->path();
 		$handle = @fopen( $path, 'r+' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- not there: no pace to keep.
 		if ( false === $handle ) {
@@ -214,7 +219,7 @@ final class VisitorFile implements WebPace {
 				fwrite( $handle, $contents );
 				fflush( $handle );
 			}
-			@touch( $path, max( $until, false === $time ? 0 : (int) $time ) ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- not allowed: the throttle is the code's own five seconds.
+			@touch( $path, max( (int) call_user_func( $until, $data ), false === $time ? 0 : (int) $time ) ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- not allowed: the throttle is the code's own five seconds.
 		} finally {
 			if ( $locked ) {
 				@flock( $handle, LOCK_UN ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.

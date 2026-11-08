@@ -3851,7 +3851,10 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 */
 	private function take_down( JobContext $context, array $cursor ): void {
 		$file    = $this->maintenance( $cursor );
-		$confirm = array( $context, 'confirm_lease' );
+		$confirm = function () use ( $context ): void {
+			$this->at( 'take_down' ); // Right before each file goes (tests: a run killed between two of them).
+			$context->confirm_lease();
+		};
 		$removed = isset( $this->parts['remove'] ) ? (bool) call_user_func( $this->parts['remove'], $file, $confirm ) : $file->remove( $confirm, $this->log_merge( $context ) );
 		if ( ! $removed ) {
 			throw new TransientFailure( 'The maintenance file could not be taken down yet.' );
