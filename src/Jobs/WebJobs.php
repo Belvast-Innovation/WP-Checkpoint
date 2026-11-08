@@ -33,6 +33,18 @@ final class WebJobs implements RunnerRepository {
 	const CAN = array( 'files_base', 'owns_files_of', 'log_event' );
 
 	/**
+	 * Seconds after the last write of a run in WordPress (Job::$wp_run_at) before such a run takes the job: an admin
+	 * who stepped away from a WP-CLI swap finds it as they left it, not put back. In the claim's statement itself.
+	 */
+	const GRACE_SECONDS = 600;
+
+	/**
+	 * The claim's condition on who manages the job (JobStore::claim_template()): it holds the site, the managing token
+	 * and the maintenance file's mark are the ones read, and no run in WordPress wrote it since the given time.
+	 */
+	const MANAGING = 'site_state <> 0 AND ' . Job::MANAGING_SQL . ' = %s AND site_mark = %s AND wp_run_at <= %d';
+
+	/**
 	 * Connection.
 	 *
 	 * @var ImportSession
@@ -81,8 +93,10 @@ final class WebJobs implements RunnerRepository {
 	 * @param string        $prefix  The table prefix (wp-config.php's $table_prefix).
 	 * @param string        $abspath The WordPress directory.
 	 * @param callable      $note    function( string $line ): void, for what this run did not take on or could not tell.
+	 * @param callable      $run_at  function(): int, what this run's writes stamp as wp_run_at: 0 (WebRun gives it), so
+	 *                               they leave it as it is (JobStore).
 	 */
-	public function __construct( ImportSession $session, string $prefix, string $abspath, callable $note ) {
+	public function __construct( ImportSession $session, string $prefix, string $abspath, callable $note, callable $run_at ) {
 		$this->session = $session;
 		$this->prefix  = $prefix;
 		$this->abspath = $abspath;
@@ -101,7 +115,8 @@ final class WebJobs implements RunnerRepository {
 			},
 			static function (): bool {
 				return false; // Such a run never enters the site: it is never asked.
-			}
+			},
+			$run_at
 		);
 	}
 
@@ -282,8 +297,10 @@ final class WebJobs implements RunnerRepository {
 	}
 
 	/**
-	 * Take a job that holds the site, on the evidence (here()): the claim's statement, with who manages it as read
-	 * and the mark the maintenance file carries.
+	 * Take a job that holds the site, on the evidence (here()): the claim's statement, with who manages it as read,
+	 * the mark the maintenance file carries, and no write of a run in WordPress in the last GRACE_SECONDS (by the
+	 * database's clock, in the statement itself: a WP-CLI run that writes between a check and the claim would
+	 * otherwise be taken over).
 	 *
 	 * @param int $id    Job id.
 	 * @param int $lease Lock duration in seconds.
@@ -300,7 +317,7 @@ final class WebJobs implements RunnerRepository {
 		// true when it no longer is: this run is left once more, and the next reads the position moved.
 		$at_limit = $job->takeovers >= Runner::MAX_TAKEOVERS && $this->at_takeover_mark( $id );
 		$token    = bin2hex( random_bytes( 16 ) );
-		if ( ! $this->store->claim( $id, $token, $lease, 'site_state <> 0 AND ' . Job::MANAGING_SQL . ' = %s AND site_mark = %s', array( $job->managing_token(), $job->site_mark ) ) ) {
+		if ( ! $this->store->claim( $id, $token, $lease, self::MANAGING, array( $job->managing_token(), $job->site_mark, $this->now() - self::GRACE_SECONDS ) ) ) {
 			return null;
 		}
 		$held = $this->find( $id );

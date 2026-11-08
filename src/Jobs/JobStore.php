@@ -90,6 +90,14 @@ final class JobStore {
 	private $fence_absent;
 
 	/**
+	 * The time a write of a run under its lock stamps as wp_run_at: function(): int; 0 for a run without WordPress,
+	 * whose writes leave the column as it is (Job::$wp_run_at).
+	 *
+	 * @var callable
+	 */
+	private $run_at;
+
+	/**
 	 * Constructor.
 	 *
 	 * @param StoreExecutor $db           Executor.
@@ -101,8 +109,10 @@ final class JobStore {
 	 * @param callable      $fit          function( string ): string, a progress message as its column takes it.
 	 * @param callable      $no_secrets   function( array ): void, throws when a cursor holds a secret.
 	 * @param callable      $fence_absent function(): bool.
+	 * @param callable      $run_at       function(): int, the time a run's write stamps as wp_run_at (the database's
+	 *                                    clock in WordPress), 0 to leave it (a run without WordPress).
 	 */
-	public function __construct( StoreExecutor $db, string $table, string $fence, callable $now, callable $encode, callable $redact, callable $fit, callable $no_secrets, callable $fence_absent ) {
+	public function __construct( StoreExecutor $db, string $table, string $fence, callable $now, callable $encode, callable $redact, callable $fit, callable $no_secrets, callable $fence_absent, callable $run_at ) {
 		$this->db           = $db;
 		$this->table        = $table;
 		$this->fence        = $fence;
@@ -112,6 +122,16 @@ final class JobStore {
 		$this->fit          = $fit;
 		$this->no_secrets   = $no_secrets;
 		$this->fence_absent = $fence_absent;
+		$this->run_at       = $run_at;
+	}
+
+	/**
+	 * The time this store's runs stamp as wp_run_at (0: they leave it).
+	 *
+	 * @return int
+	 */
+	private function run_at(): int {
+		return max( 0, (int) call_user_func( $this->run_at ) );
 	}
 
 	/**
@@ -206,7 +226,7 @@ final class JobStore {
 	 * @return string
 	 */
 	public function claim_template( string $managing ): string {
-		return "UPDATE {$this->table} SET takeovers = IF(lock_token <> '', IF(takeover_mark = MD5(CONCAT(step, '|', COALESCE(cursor_json, ''))), takeovers + 1, 1), takeovers), takeover_mark = IF(lock_token <> '', MD5(CONCAT(step, '|', COALESCE(cursor_json, ''))), takeover_mark), attempts = IF(status = %s, attempts + 1, attempts), started_at = IF(started_at = 0, %d, started_at), status = %s, lock_token = %s, locked_until = %d, updated_at = %d, questions_json = NULL WHERE id = %d AND status IN (%s, %s, %s) AND (status <> %s OR questions_json IS NULL OR questions_json = '' OR questions_json = '[]') AND {$managing} AND (lock_token = '' OR locked_until < %d)";
+		return "UPDATE {$this->table} SET takeovers = IF(lock_token <> '', IF(takeover_mark = MD5(CONCAT(step, '|', COALESCE(cursor_json, ''))), takeovers + 1, 1), takeovers), takeover_mark = IF(lock_token <> '', MD5(CONCAT(step, '|', COALESCE(cursor_json, ''))), takeover_mark), attempts = IF(status = %s, attempts + 1, attempts), started_at = IF(started_at = 0, %d, started_at), status = %s, lock_token = %s, locked_until = %d, updated_at = %d, wp_run_at = GREATEST(wp_run_at, %d), questions_json = NULL WHERE id = %d AND status IN (%s, %s, %s) AND (status <> %s OR questions_json IS NULL OR questions_json = '' OR questions_json = '[]') AND {$managing} AND (lock_token = '' OR locked_until < %d)";
 	}
 
 	/**
@@ -222,7 +242,7 @@ final class JobStore {
 	public function claim( int $id, string $token, int $lease, string $managing, array $managing_params ): bool {
 		$now      = $this->now();
 		$params   = array_merge(
-			array( Job::QUEUED, $now, Job::RUNNING, $token, $now + $lease, $now, $id, Job::QUEUED, Job::RUNNING, Job::PAUSED, Job::PAUSED ),
+			array( Job::QUEUED, $now, Job::RUNNING, $token, $now + $lease, $now, $this->run_at(), $id, Job::QUEUED, Job::RUNNING, Job::PAUSED, Job::PAUSED ),
 			array_values( $managing_params ),
 			array( $now )
 		);
@@ -256,11 +276,12 @@ final class JobStore {
 	 */
 	public function heartbeat( Job $job, string $token, int $lease ) {
 		$until    = $this->now() + $lease;
-		$affected = $this->db->execute( "UPDATE {$this->table} SET locked_until = %d, updated_at = %d WHERE id = %d AND lock_token = %s", array( $until, $this->now(), $job->id, $token ) );
+		$affected = $this->db->execute( "UPDATE {$this->table} SET locked_until = %d, updated_at = %d, wp_run_at = GREATEST(wp_run_at, %d) WHERE id = %d AND lock_token = %s", array( $until, $this->now(), $this->run_at(), $job->id, $token ) );
 		if ( 1 !== (int) $affected && ! $this->holds_lock( $job->id, $token ) ) {
 			return null;
 		}
 		$job->locked_until = $until;
+		$job->wp_run_at    = max( $job->wp_run_at, $this->run_at() );
 		return $until;
 	}
 
@@ -272,12 +293,13 @@ final class JobStore {
 	 * @return bool Whether this run still held it.
 	 */
 	public function release( Job $job, string $token ): bool {
-		$affected = $this->db->execute( "UPDATE {$this->table} SET lock_token = '', locked_until = 0, updated_at = %d WHERE id = %d AND lock_token = %s", array( $this->now(), $job->id, $token ) );
+		$affected = $this->db->execute( "UPDATE {$this->table} SET lock_token = '', locked_until = 0, updated_at = %d, wp_run_at = GREATEST(wp_run_at, %d) WHERE id = %d AND lock_token = %s", array( $this->now(), $this->run_at(), $job->id, $token ) );
 		if ( 1 !== (int) $affected ) {
 			return false;
 		}
 		$job->lock_token   = '';
 		$job->locked_until = 0;
+		$job->wp_run_at    = max( $job->wp_run_at, $this->run_at() );
 		return true;
 	}
 
@@ -310,11 +332,12 @@ final class JobStore {
 		if ( false === $json ) {
 			throw new \RuntimeException( sprintf( 'Job %d: its options cannot be written.', $job->id ) );
 		}
-		$affected = $this->db->execute( "UPDATE {$this->table} SET options_json = %s, updated_at = %d WHERE id = %d AND lock_token = %s", array( $json, $this->now(), $job->id, $token ) );
+		$affected = $this->db->execute( "UPDATE {$this->table} SET options_json = %s, updated_at = %d, wp_run_at = GREATEST(wp_run_at, %d) WHERE id = %d AND lock_token = %s", array( $json, $this->now(), $this->run_at(), $job->id, $token ) );
 		if ( 1 !== (int) $affected && ! $this->holds_lock( $job->id, $token ) ) {
 			throw new StaleJob( sprintf( 'Job %d: the lock is no longer held; the record was not written.', $job->id ) );
 		}
-		$job->options = $options;
+		$job->options   = $options;
+		$job->wp_run_at = max( $job->wp_run_at, $this->run_at() );
 	}
 
 	/**
@@ -349,6 +372,12 @@ final class JobStore {
 			'updated_at'       => $now,
 		);
 		$formats  = array( '%s', '%s', '%d', '%s', '%d' );
+		$run_at   = $this->run_at();
+		if ( $run_at > 0 ) {
+			// A run in WordPress: when it last wrote the job (a run without WordPress leaves the column as it is).
+			$data['wp_run_at'] = max( $job->wp_run_at, $run_at ); // GREATEST(), as the other statements: never back.
+			$formats[]         = '%d';
+		}
 		if ( $advanced ) {
 			$data['progress_at']   = $now;
 			$data['blocked_count'] = 0;
@@ -444,6 +473,9 @@ final class JobStore {
 		$job->progress         = $progress;
 		$job->progress_message = $message;
 		$job->updated_at       = $now;
+		if ( $run_at > 0 ) {
+			$job->wp_run_at = (int) $data['wp_run_at'];
+		}
 		if ( $advanced ) {
 			$job->progress_at   = $now;
 			$job->blocked_count = 0;
@@ -652,9 +684,15 @@ final class JobStore {
 		if ( Job::RUNNING === $to && 0 === $job->started_at ) {
 			$data['started_at'] = $now;
 		}
+		$run_at = '' !== $token ? $this->run_at() : 0;
+		if ( $run_at > 0 ) {
+			// The write of a run in WordPress under its lock (a transition made outside a run, without the token, is not
+			// one: Job::$wp_run_at).
+			$data['wp_run_at'] = max( $job->wp_run_at, $run_at ); // GREATEST(), as the other statements: never back.
+		}
 		$formats = array_fill( 0, count( $data ), '%s' );
 		foreach ( array_keys( $data ) as $i => $key ) {
-			if ( in_array( $key, array( 'updated_at', 'finished_at', 'locked_until', 'started_at', 'takeovers', 'cron_deferrals', 'cancel_requested' ), true ) ) {
+			if ( in_array( $key, array( 'updated_at', 'finished_at', 'locked_until', 'started_at', 'takeovers', 'cron_deferrals', 'cancel_requested', 'wp_run_at' ), true ) ) {
 				$formats[ $i ] = '%d';
 			}
 		}

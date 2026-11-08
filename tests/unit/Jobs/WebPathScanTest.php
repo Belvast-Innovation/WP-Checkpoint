@@ -114,6 +114,7 @@ final class WebPathScanTest extends TestCase {
 		'src/Restore/Maintenance.php:check_code'   => array(),
 		// JobStore: what WebJobs::__construct() gives it.
 		'src/Jobs/JobStore.php:now'                => array( 'WPCheckpoint\Jobs\WebJobs::now' ),
+		'src/Jobs/JobStore.php:run_at'             => array( 'WPCheckpoint\Jobs\WebRun::jobs' ), // The closure that gives 0.
 		'src/Jobs/JobStore.php:save_progress'      => array( 'WPCheckpoint\Jobs\WebJobs::__construct', 'WPCheckpoint\Jobs\PlainJson::encode', 'WPCheckpoint\Jobs\JobStore::cut_message' ),
 		'src/Jobs/JobStore.php:transition'         => array( 'WPCheckpoint\Jobs\WebJobs::__construct', 'WPCheckpoint\Jobs\PlainJson::encode' ), // No retry_check: WebJobs gives none (and refuses a retry).
 		'src/Jobs/JobStore.php:write_transition'   => array( 'WPCheckpoint\Support\Redactor::redact', 'WPCheckpoint\Jobs\JobStore::cut_message', 'WPCheckpoint\Jobs\PlainJson::encode' ),
@@ -291,7 +292,6 @@ final class WebPathScanTest extends TestCase {
 		$note    = static function ( string $line ): void {
 			unset( $line );
 		};
-		$jobs    = new WebJobs( $session, 'wp_', ABSPATH, $note );
 		$run     = new WebRun(
 			Credentials::from_values(
 				array(
@@ -307,6 +307,7 @@ final class WebPathScanTest extends TestCase {
 			'wp-checkpoint/wp-checkpoint.php',
 			$note
 		);
+		$jobs    = $run->jobs( $session );
 		$runner  = $run->runner( $jobs );
 		$this->assertSame( array(), self::prop( $run, 'seams' ), 'no test seams: the swap\'s parts and the type\'s id are the defaults' );
 		$this->assertSame( self::BINDINGS[ \WPCheckpoint\Jobs\WebPace::class ], array( get_class( self::prop( $run, 'pace' ) ) ), 'WebPace => the class WebRun makes' );
@@ -383,5 +384,9 @@ final class WebPathScanTest extends TestCase {
 		$this->assertSame( array( JobStore::class, 'cut_message' ), self::prop( $store, 'fit' ) );
 		$this->assertInstanceOf( \Closure::class, self::prop( $store, 'no_secrets' ) );
 		$this->assertInstanceOf( \Closure::class, self::prop( $store, 'fence_absent' ) );
+		// What such a run's writes stamp as wp_run_at: 0, so that they leave it (the grace period after a run in WordPress
+		// is never moved by a run without it: WebJobs::GRACE_SECONDS).
+		$this->assertSame( 0, call_user_func( self::prop( $store, 'run_at' ) ), 'WebRun gives WebJobs 0 for wp_run_at' );
+		$this->assertSame( 'site9_', self::prop( $jobs, 'prefix' ), 'the storage is over WebRun\'s prefix' );
 	}
 }

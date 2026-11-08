@@ -26,6 +26,7 @@ final class WebNoWordPressTest extends SwapTestCase {
 	 */
 	private function child( Job $job, int $max = 40 ): array {
 		global $table_prefix, $wpdb;
+		$this->past_grace( $job->id ); // The last run in WordPress stopped longer ago than the grace period.
 		$wpdb->query( 'COMMIT' );
 		$config = $this->sandbox . '/web-child-' . bin2hex( random_bytes( 4 ) ) . '.json';
 		file_put_contents(

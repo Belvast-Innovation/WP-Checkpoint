@@ -185,7 +185,8 @@ final class JobRepository implements RunnerRepository {
 			static function ( array $value ): void {
 				self::assert_cursor_has_no_secrets( $value );
 			},
-			array( UninstallFence::class, 'absent' )
+			array( UninstallFence::class, 'absent' ),
+			array( $this, 'now' ) // A run in WordPress stamps wp_run_at (Job::$wp_run_at).
 		);
 	}
 

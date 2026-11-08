@@ -175,7 +175,7 @@ final class WebRun {
 	private function tick_now( int $job_id, $started_at ): TickResult {
 		$session = ImportSession::open( $this->credentials );
 		try {
-			$jobs = new WebJobs( $session, $this->prefix, $this->abspath, $this->note );
+			$jobs = $this->jobs( $session );
 			$job  = $jobs->find( $job_id );
 			if ( null === $job ) {
 				return new TickResult( TickResult::MISSING, -1, null );
@@ -195,6 +195,25 @@ final class WebRun {
 		} finally {
 			$session->close();
 		}
+	}
+
+	/**
+	 * The jobs' storage of such a run, over a connection: its writes leave wp_run_at as it is (0, JobStore), so that the
+	 * grace period after a run in WordPress is never moved by a run without it (WebJobs::GRACE_SECONDS).
+	 *
+	 * @param ImportSession $session Connection.
+	 * @return WebJobs
+	 */
+	public function jobs( ImportSession $session ): WebJobs {
+		return new WebJobs(
+			$session,
+			$this->prefix,
+			$this->abspath,
+			$this->note,
+			static function (): int {
+				return 0;
+			}
+		);
 	}
 
 	/**
