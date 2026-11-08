@@ -14,7 +14,7 @@ use WPCheckpoint\Tests\Fixtures\Restore\SwapTestCase;
 
 /**
  * The files of a run without WordPress and the swap: written before the maintenance file (the runtime, then the visitor
- * file, each with a checkpoint after it, then the data file and the code), taken down after it (the code, the data file,
+ * file, then the runtime log, each with a checkpoint after it, then the data file and the code), taken down after it (the code, the data file,
  * the visitor file, the runtime, the runtime log last, its lines added to the job's log first). A WP-CLI run killed at
  * each point in between leaves a state the next run goes on from, to a site as it was and no file left; a take-down does
  * not wait on the job's log; two runs without WordPress at once (no lock between them) take the job one at a time.

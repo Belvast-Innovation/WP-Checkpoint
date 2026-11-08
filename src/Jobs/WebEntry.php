@@ -62,7 +62,13 @@ final class WebEntry {
 	public static function quietly( callable $note, callable $what ): void {
 		HostFunctions::ini_set( 'display_errors', '0' );
 		$level = ob_get_level();
-		ob_start();
+		// A buffer that gives nothing whenever it is flushed: at shutdown after a fatal error (the finally below does not
+		// run then), or by a flush from inside $what.
+		ob_start(
+			static function (): string {
+				return '';
+			}
+		);
 		set_error_handler( // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_set_error_handler -- what PHP says during the run goes to the runtime log, never to the visitor.
 			static function ( int $number, string $message ) use ( $note ): bool {
 				if ( 0 === ( error_reporting() & $number ) ) { // phpcs:ignore WordPress.PHP.DevelopmentFunctions.prevent_path_disclosure_error_reporting,WordPress.PHP.DiscouragedPHPFunctions.runtime_configuration_error_reporting -- read, not changed: whether "@" silenced it.

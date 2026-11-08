@@ -88,6 +88,53 @@ final class WebEntryTest extends TestCase {
 		}
 	}
 
+	/**
+	 * What ends the callable early: an exception (the handler and the buffer as they were), a flush from inside, and a
+	 * fatal error (the request ends there: what it printed, and PHP's message, never reach the visitor).
+	 *
+	 * @return array<string, array{0: string, 1: bool}>
+	 */
+	public function endings(): array {
+		return array(
+			'an exception' => array( 'echo "LEAKED-OUTPUT"; throw new \\RuntimeException( "stopped" );', false ),
+			'a flush'      => array( 'echo "LEAKED-OUTPUT"; ob_end_flush(); ob_start();', false ),
+			'a fatal'      => array( 'echo "LEAKED-OUTPUT"; ini_set( "memory_limit", "8M" ); $x = str_repeat( "x", 64 * 1048576 );', true ),
+		);
+	}
+
+	/**
+	 * @dataProvider endings
+	 */
+	public function test_nothing_reaches_the_visitor_however_the_run_ends( string $what, bool $fatal ): void {
+		$dir = Sandbox::make( 'web-entry-ending' );
+		try {
+			$script = $dir . '/run.php';
+			file_put_contents(
+				$script,
+				'<?php define( "ABSPATH", ' . var_export( $dir . '/', true ) . ' ); require ' . var_export( dirname( __DIR__, 3 ) . '/vendor/autoload.php', true ) . ';'
+				. ' $level = ob_get_level();'
+				. ' try { \WPCheckpoint\Jobs\WebEntry::quietly( static function ( string $line ): void {}, static function () { ' . $what . ' } ); } catch ( \RuntimeException $e ) { echo "CAUGHT:"; }'
+				. ' echo "AFTER:" . json_encode( array( ob_get_level() === $level, null === set_error_handler( null ) ) );'
+			);
+			$pipes   = array();
+			$process = proc_open( array( PHP_BINARY, '-d', 'display_errors=1', '-d', 'error_reporting=-1', $script ), array( 1 => array( 'pipe', 'w' ), 2 => array( 'pipe', 'w' ) ), $pipes );
+			$out     = (string) stream_get_contents( $pipes[1] );
+			stream_get_contents( $pipes[2] );
+			fclose( $pipes[1] );
+			fclose( $pipes[2] );
+			proc_close( $process );
+			$this->assertStringNotContainsString( 'LEAKED-OUTPUT', $out );
+			$this->assertStringNotContainsString( 'Allowed memory size', $out, 'nor PHP\'s message' );
+			if ( $fatal ) {
+				$this->assertSame( '', $out, 'the request ended there, and gave nothing' );
+				return;
+			}
+			$this->assertStringEndsWith( 'AFTER:[true,true]', $out, 'the handler and the buffers as they were: ' . $out );
+		} finally {
+			Sandbox::remove( $dir );
+		}
+	}
+
 	public function test_nothing_the_run_says_reaches_the_visitor_and_it_leaves_no_handler_or_buffer(): void {
 		$dir = Sandbox::make( 'web-entry' );
 		try {
