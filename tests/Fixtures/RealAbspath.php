@@ -98,6 +98,19 @@ final class RealAbspath {
 	}
 
 	/**
+	 * Set the time of one of the files (the visitor file's time is when the maintenance file's code may next run the
+	 * runtime).
+	 *
+	 * @param string $name A name the Deleter takes for a maintenance file.
+	 * @param int    $time Unix time.
+	 * @return void
+	 */
+	public static function touch( string $name, int $time ): void {
+		Assert::assertSame( 1, preg_match( Deleter::MAINTENANCE_NAMES, $name ), 'only the files of the maintenance file are touched in ABSPATH' );
+		Assert::assertTrue( touch( self::checked() . '/' . $name, $time ), 'touched: ' . $name );
+	}
+
+	/**
 	 * Delete one of the two files (or a temporary name of one), through the Deleter.
 	 *
 	 * @param string $name A name the Deleter takes for a maintenance file.
