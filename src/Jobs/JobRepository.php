@@ -2917,6 +2917,51 @@ final class JobRepository implements RunnerRepository {
 				continue;
 			}
 		}
+		// The swap's must-use plugin (and its temporary files), left by a run that died: once old enough, with no
+		// maintenance code of the plugin's in place, no data file naming a restore and no job holding the site (read
+		// again right before the deletion). By its contents only: another file under its name stays.
+		foreach ( Residue::scan_loader( (string) ( $this->site_directories()['mu-plugins'] ?? '' ) ) as $entry ) {
+			if ( $budget <= 0 ) {
+				return;
+			}
+			if ( ! Residue::is_expired( $entry, $now ) ) {
+				continue;
+			}
+			$unused = function (): bool {
+				if ( false !== Maintenance::code_in( Residue::maintenance_dir() ) || '' !== Maintenance::data_mark( Residue::maintenance_dir() ) ) {
+					return false;
+				}
+				try {
+					return array() === $this->holding_site();
+				} catch ( \RuntimeException $e ) {
+					return false;
+				}
+			};
+			if ( ! $unused() ) {
+				continue;
+			}
+			--$budget;
+			try {
+				$gone = Deleter::delete_loader_file(
+					dirname( $entry['path'] ),
+					basename( $entry['path'] ),
+					\WPCheckpoint\Restore\Loader::digests(),
+					static function () use ( $unused ): void {
+						if ( ! $unused() ) {
+							throw new \RuntimeException( 'A restore holds the site meanwhile.' );
+						}
+					}
+				);
+				if ( ! $gone ) {
+					$this->directories->log_event( 'The must-use plugin of a restore that ended could not be removed.' );
+				}
+			} catch ( DeletionRefused $e ) {
+				// Not this plugin's contents (or not a file it deletes): kept, and said once a day at most by its age.
+				$this->directories->log_event( 'A file under the name of the restore\'s must-use plugin is not one this plugin wrote; it was kept.' );
+			} catch ( \RuntimeException $e ) {
+				continue; // A restore holds the site meanwhile: it stays.
+			}
+		}
 		$this->drop_tables_of(
 			$token,
 			0,

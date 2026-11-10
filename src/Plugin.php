@@ -659,5 +659,22 @@ final class Plugin {
 	 */
 	public static function deactivate(): void {
 		// T093: remove troubleshooting mu-plugin if present.
+		self::remove_loader( Restore\Loader::dir( (string) ABSPATH ) );
+	}
+
+	/**
+	 * Remove the must-use plugin a restore's swap put up, should one be left (the swap removes it when it ends): only a
+	 * file whose contents this plugin wrote (Restore\Loader::remove()); another file under its name stays. Never
+	 * throws: a deactivation must not fail on it.
+	 *
+	 * @param string $dir The must-use plugins directory.
+	 * @return bool Whether none of this plugin's is there now.
+	 */
+	public static function remove_loader( string $dir ): bool {
+		try {
+			return Restore\Loader::remove( $dir );
+		} catch ( \Throwable $e ) {
+			return false;
+		}
 	}
 }

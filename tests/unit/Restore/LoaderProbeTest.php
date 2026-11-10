@@ -48,11 +48,11 @@ final class LoaderProbeTest extends TestCase {
 		};
 	}
 
-	public function test_a_directory_it_created_is_removed_again_and_one_that_was_there_stays(): void {
+	public function test_a_directory_it_created_stays_empty_and_one_that_was_there_stays_as_it_was(): void {
 		LoaderProbe::run( $this->mu, $this->name, self::noop() );
-		$this->assertDirectoryDoesNotExist( $this->mu, 'created for the probe and empty: removed' );
+		$this->assertDirectoryExists( $this->mu, 'created for the probe: kept for the swap, which puts its loader there' );
+		$this->assertSame( array(), array_values( array_diff( scandir( $this->mu ), array( '.', '..' ) ) ), 'and empty' );
 
-		mkdir( $this->mu );
 		file_put_contents( $this->mu . '/other.php', '<?php' );
 		LoaderProbe::run( $this->mu, $this->name, self::noop() );
 		$this->assertSame( array( 'other.php' ), array_values( array_diff( scandir( $this->mu ), array( '.', '..' ) ) ), 'only what was there' );

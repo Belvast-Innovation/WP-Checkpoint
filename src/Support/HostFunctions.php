@@ -205,6 +205,28 @@ final class HostFunctions {
 	}
 
 	/**
+	 * The user the process runs as and the owner of a directory, with their names, where the system tells them (POSIX):
+	 * array( effective user id, owner's id, the user's name, the owner's name ); an id is null and a name '' when it is
+	 * not known (no POSIX functions, the directory cannot be read, no entry in the password database).
+	 *
+	 * @param string $dir Directory.
+	 * @return array{0: int|null, 1: int|null, 2: string, 3: string}
+	 */
+	public static function users_of( string $dir ): array {
+		$user  = self::available( 'posix_geteuid' ) ? posix_geteuid() : null;
+		$owner = @fileowner( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- unreadable: not known.
+		$owner = false === $owner || ! self::available( 'posix_geteuid' ) ? null : (int) $owner; // Without POSIX (Windows) the owner is always 0.
+		$name  = static function ( $id ): string {
+			if ( null === $id || ! self::available( 'posix_getpwuid' ) ) {
+				return '';
+			}
+			$info = posix_getpwuid( $id );
+			return is_array( $info ) ? (string) $info['name'] : '';
+		};
+		return array( $user, $owner, $name( $user ), $name( $owner ) );
+	}
+
+	/**
 	 * Whether a stream is a terminal; false when unknown.
 	 *
 	 * @param resource $stream Stream.

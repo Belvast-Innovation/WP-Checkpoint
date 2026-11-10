@@ -52,6 +52,7 @@ $at   = static function ( string $point ) use ( $config, &$seen, &$ran ): void {
 
 $parts = array(
 	'abspath'   => (string) $config['abspath'],
+	'mu_dir'    => (string) ( $config['dirs']['mu-plugins'] ?? '' ),
 	'site_dirs' => static function () use ( $config ): array {
 		return (array) $config['dirs'];
 	},

@@ -105,11 +105,16 @@ final class WebPathScanTest extends TestCase {
 		'src/Jobs/SwapHost.php:network_id'         => array( 'WPCheckpoint\Jobs\SwapHost::without_wordpress' ),
 		'src/Jobs/SwapHost.php:plugin'             => array( 'WPCheckpoint\Jobs\SwapHost::without_wordpress' ),
 		'src/Jobs/SwapHost.php:flush'              => array(),
+		'src/Jobs/SwapHost.php:mu_dir'             => array( 'WPCheckpoint\Jobs\SwapHost::without_wordpress' ),
+		// Told that only the flush is left: WebRun's closure, which records it in the visitor file.
+		'src/Jobs/SwapHost.php:await_flush'        => array( 'WPCheckpoint\Jobs\WebRun::runner' ),
 		// StateCarry's seam: the closure SwapStep::state_carry() gives (to SwapStep::at()).
 		'src/Restore/StateCarry.php:at'            => array( 'WPCheckpoint\Jobs\SwapStep::state_carry' ),
 		// Callables their callers give as arguments: closures read with those callers, named ones edges there.
 		'src/Support/AtomicFile.php:write'         => array(),
 		'src/Support/Deleter.php:delete_maintenance_file' => array(),
+		'src/Support/Deleter.php:delete_loader_file' => array(),
+		'src/Restore/Loader.php:remove'            => array(),
 		'src/Restore/JobFence.php:within'          => array(),
 		// A closure of its own.
 		'src/Restore/Maintenance.php:check_code'   => array(),
@@ -132,7 +137,7 @@ final class WebPathScanTest extends TestCase {
 		'src/Jobs/WebEntry.php:quietly'            => array( 'WPCheckpoint\Jobs\WebEntry::run' ), // The note and the run, closures of run(); its own error handler.
 		'src/Jobs/WebEntry.php:go'                 => array(), // Its own closure, the note.
 		// VisitorFile: the changes its own methods give.
-		'src/Jobs/VisitorFile.php:change'          => array( 'WPCheckpoint\Jobs\VisitorFile::held_up', 'WPCheckpoint\Jobs\VisitorFile::cleared' ),
+		'src/Jobs/VisitorFile.php:change'          => array( 'WPCheckpoint\Jobs\VisitorFile::held_up', 'WPCheckpoint\Jobs\VisitorFile::cleared', 'WPCheckpoint\Jobs\VisitorFile::await_flush' ),
 		// The merge of the runtime log: SwapStep's closure.
 		'src/Restore/Maintenance.php:merge_log'    => array( 'WPCheckpoint\Jobs\SwapStep::log_merge' ),
 	);

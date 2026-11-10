@@ -68,6 +68,9 @@ abstract class SwapTestCase extends RestoreTestCase {
 	/** @var array<string, mixed> Test seams of the preflight for this test (RestorePreflightStep). */
 	protected $preflight_parts = array();
 
+	/** @var array<string, string>|null The files of the swap backup for this test (archive paths); backup_files() when null. */
+	protected $backup_has = null;
+
 	/** @var string[] What the swap step's crash seam saw, in order. */
 	protected $seams = array();
 
@@ -181,6 +184,8 @@ abstract class SwapTestCase extends RestoreTestCase {
 				return time() + $this->clock_offset;
 			},
 			'abspath'   => $this->abspath,
+			// The sandbox's must-use plugins directory: where the swap puts its loader (Restore\Loader).
+			'mu_dir'    => $content . '/mu-plugins',
 			'site_dirs' => function (): array {
 				return $this->dirs;
 			},
@@ -384,7 +389,7 @@ abstract class SwapTestCase extends RestoreTestCase {
 		$wpdb->query( "INSERT INTO `{$keep}` (id, v) VALUES (3, 'backup')" );
 		$wpdb->query( "INSERT INTO `{$new}` (id, v) VALUES (1, 'backup')" );
 		$tables = array_values( array_diff( self::live_tables(), array( $gone ) ) );
-		$base   = $this->backup( $tables, null, null, array( 'files' => self::backup_files() ) );
+		$base   = $this->backup( $tables, null, null, array( 'files' => null === $this->backup_has ? self::backup_files() : $this->backup_has ) );
 		// The live site as it is before the restore: the backup's rows were only for the export.
 		$wpdb->query( "DELETE FROM `{$keep}` WHERE id = 3" );
 		$wpdb->query( "UPDATE `{$keep}` SET v = 'live'" );
@@ -1153,14 +1158,19 @@ abstract class SwapTestCase extends RestoreTestCase {
 
 	/**
 	 * The site as the swap could change it: the sandbox's directories (without the staging roots) and the test's
-	 * tables (rows), and whether a maintenance file is up.
+	 * tables (rows), and whether a maintenance file is up (or the swap's loader still in the must-use plugins directory).
 	 *
 	 * @return array<string, mixed>
 	 */
 	protected function site(): array {
 		global $wpdb;
 		$files = array();
+		$loader = false;
 		foreach ( self::tree( $this->dirs['other-content'] ) as $path => $text ) {
+			if ( 'mu-plugins/' . \WPCheckpoint\Restore\Loader::NAME === $path && in_array( $text, \WPCheckpoint\Restore\Loader::KNOWN, true ) ) {
+				$loader = true; // The swap's own, with its maintenance file: not the site's (said under "maintenance").
+				continue;
+			}
 			if ( 0 !== strpos( $path, 'wp-checkpoint-' ) ) { // Staging roots and probes: the restore's, not the site's.
 				$files[ $path ] = $text;
 			}
@@ -1175,7 +1185,8 @@ abstract class SwapTestCase extends RestoreTestCase {
 		return array(
 			'files'       => $files,
 			'tables'      => $tables,
-			'maintenance' => file_exists( $this->abspath . '/.maintenance' ) || file_exists( $this->abspath . '/' . \WPCheckpoint\Restore\Maintenance::DATA ),
+			// The swap's loader in the must-use plugins directory counts: it goes with the maintenance file.
+			'maintenance' => file_exists( $this->abspath . '/.maintenance' ) || file_exists( $this->abspath . '/' . \WPCheckpoint\Restore\Maintenance::DATA ) || $loader,
 		);
 	}
 

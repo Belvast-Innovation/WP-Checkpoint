@@ -72,6 +72,15 @@ use WPCheckpoint\Support\Paths;
  *   maintenance code, no data file of a form names a restore, and no job
  *   that holds the site has the mark the file names (JobRepository and the
  *   uninstall decide that).
+ * - loader: the must-use plugin the swap puts into the must-use plugins
+ *   directory before its maintenance file (Restore\Loader::NAME) and
+ *   removes when it takes the maintenance file down, or a temporary file
+ *   of it (AtomicFile). Left alone it does nothing (it acts only next to
+ *   the runtime and a held data file). An orphan after VERIFY_TTL when
+ *   .maintenance is positively not the maintenance code, no data file
+ *   names a restore and no job holds the site (JobRepository and the
+ *   uninstall decide that); the file itself goes only when its contents
+ *   are a code this plugin wrote (Deleter::delete_loader_file()).
  * - stray_table: a table the swap's rollback renamed out of the way
  *   (TempTables::stray()): someone else's, created under a name the old
  *   site's table had to go back to. Never an orphan: it is reported, and
@@ -103,11 +112,12 @@ final class Residue {
 	const MAINTENANCE_TMP  = 'maintenance_tmp';
 	const MAINTENANCE_DATA = 'maintenance_data';
 	const MAINTENANCE_WEB  = 'maintenance_web';
+	const LOADER           = 'loader';
 	const STRAY_TABLE      = 'stray_table';
 
 	const PUT_BACK_EVIDENCE = 'put_back_evidence';
 
-	const KINDS = array( self::WORK_DIR, self::TEMP_TABLE, self::VERIFY_DIR, self::STRAY, self::STAGE_DIR, self::PROBE, self::MAINTENANCE_TMP, self::MAINTENANCE_DATA, self::MAINTENANCE_WEB, self::STRAY_TABLE, self::PUT_BACK_EVIDENCE );
+	const KINDS = array( self::WORK_DIR, self::TEMP_TABLE, self::VERIFY_DIR, self::STRAY, self::STAGE_DIR, self::PROBE, self::MAINTENANCE_TMP, self::MAINTENANCE_DATA, self::MAINTENANCE_WEB, self::LOADER, self::STRAY_TABLE, self::PUT_BACK_EVIDENCE );
 
 	/**
 	 * The directory in a staging root where the swap's rollback moves what is in its way.
@@ -379,6 +389,31 @@ final class Residue {
 	}
 
 	/**
+	 * The swap's must-use plugin and its temporary files in a directory (the must-use plugins directory): regular files
+	 * under the loader's name or one of its temporary names (Deleter::LOADER_NAMES). Whether the file under the loader's
+	 * own name is this plugin's is told by its contents, when it is deleted.
+	 *
+	 * @param string $dir The must-use plugins directory ('' for none).
+	 * @return array<int, array{kind: string, path: string, id: int, mtime: int}>
+	 */
+	public static function scan_loader( string $dir ): array {
+		$out     = array();
+		$entries = '' === $dir ? false : @scandir( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- no such directory, or unreadable: nothing to reap.
+		foreach ( is_array( $entries ) ? $entries : array() as $name ) {
+			if ( 1 !== preg_match( \WPCheckpoint\Support\Deleter::LOADER_NAMES, (string) $name ) ) {
+				continue;
+			}
+			$path = rtrim( $dir, '/\\' ) . DIRECTORY_SEPARATOR . $name;
+			$stat = @lstat( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- gone meanwhile: skipped.
+			if ( false === $stat || 0100000 !== ( $stat['mode'] & 0170000 ) ) {
+				continue;
+			}
+			$out[] = self::entry( self::LOADER, $path, 0, (int) $stat['mtime'] );
+		}
+		return $out;
+	}
+
+	/**
 	 * Whether an unowned entry (verify_dir, stray, maintenance_tmp, maintenance_data) is old enough to remove.
 	 *
 	 * @param array{kind: string, path: string, id: int, mtime: int} $entry Entry from scan().
@@ -394,6 +429,7 @@ final class Residue {
 			case self::MAINTENANCE_TMP:
 			case self::MAINTENANCE_DATA:
 			case self::MAINTENANCE_WEB:
+			case self::LOADER:
 				return $entry['mtime'] + self::VERIFY_TTL <= $now;
 			default:
 				return false;

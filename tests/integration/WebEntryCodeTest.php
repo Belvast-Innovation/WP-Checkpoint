@@ -5,17 +5,24 @@ namespace WPCheckpoint\Tests\Integration;
 use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\JobRepository;
 use WPCheckpoint\Jobs\RestoreJob;
+use WPCheckpoint\Jobs\VisitorFile;
 use WPCheckpoint\Plugin;
+use WPCheckpoint\Restore\Loader;
 use WPCheckpoint\Restore\Maintenance;
 use WPCheckpoint\Tests\Fixtures\Restore\SwapTestCase;
+use WPCheckpoint\Tests\Fixtures\Sandbox;
 
 /**
- * The whole path of a visitor's request while a swap holds the site, in a process that has only what wp-config.php
- * gives (code-child.php: no WordPress, no autoloader): the maintenance file the swap put up requires the runtime it wrote
- * (WebRuntime, every class the run needs in it), which puts the half-made swap back as WP-CLI would (stopping before the
- * object cache's flush, the site held, for WP-CLI to end; or, nothing swapped, ending the job itself), the request ending
- * with the maintenance page. A runtime that is another build than the one the data file names does nothing but say
- * so; what the runs said is in the job's log once the files are taken down, and nothing of them is left.
+ * The whole path of a visitor's request while a swap holds the site, each request a php-cgi process that has only what
+ * wp-config.php gives (code-child.php: no WordPress, no autoloader): the maintenance file the swap put up requires the
+ * runtime it wrote (WebRuntime, every class the run needs in it), which puts the half-made swap back as WP-CLI would
+ * and stops before the object cache's flush, recording that the flush is all that is left; the request ends with the
+ * maintenance page. The next request whose time has come is let through by the maintenance file's code as far as the
+ * must-use plugins, where the swap's loader runs the runtime with WordPress's flush: the job ends, every file of the
+ * swap is taken down, the loader with them, and that request too gets the maintenance page's answer. Without the
+ * loader nothing is let through: the site stays held for WP-CLI to flush and end. A runtime that is another build than
+ * the one the data file names does nothing but say so; what the runs said is in the job's log once the files are taken
+ * down.
  */
 final class WebEntryCodeTest extends SwapTestCase {
 
@@ -27,15 +34,57 @@ final class WebEntryCodeTest extends SwapTestCase {
 	private $last = '';
 
 	/**
-	 * One request of the child.
+	 * How many requests ran the runtime from the maintenance file's code, and how many the loader ended.
+	 *
+	 * @var array{ran: int, let: int}
+	 */
+	private $seen = array(
+		'ran' => 0,
+		'let' => 0,
+	);
+
+	/**
+	 * Where the stand-in for the object cache's flush writes a byte for each call.
+	 *
+	 * @return string
+	 */
+	private function flushed(): string {
+		return $this->sandbox . '/flushed';
+	}
+
+	/**
+	 * While this file is there, the stand-in for the flush throws.
+	 *
+	 * @return string
+	 */
+	private function flush_fails(): string {
+		return $this->sandbox . '/flush-fails';
+	}
+
+	/**
+	 * How often the object cache was flushed by a request.
+	 *
+	 * @return int
+	 */
+	private function flushes(): int {
+		clearstatcache();
+		return is_file( $this->flushed() ) ? strlen( (string) file_get_contents( $this->flushed() ) ) : 0;
+	}
+
+	/**
+	 * One request of the child, by php-cgi (a request's SAPI: the loader does nothing on the command line).
 	 *
 	 * @param Job $job Job (its type is set to the restore's for the run: the runtime knows no other).
-	 * @return array<string, mixed>
+	 * @return array<string, mixed> What the child printed ("let" false), or, when the loader ended the request, "let"
+	 *                              true with its "status" and "page".
 	 */
 	private function request( Job $job ): array {
 		global $table_prefix, $wpdb;
 		$this->past_grace( $job->id );
-		touch( $this->abspath . '/' . Maintenance::VISITOR, time() - 60 ); // Its time has come (the last request's five seconds over).
+		clearstatcache();
+		if ( file_exists( $this->abspath . '/' . Maintenance::VISITOR ) ) {
+			touch( $this->abspath . '/' . Maintenance::VISITOR, time() - 60 ); // Its time has come (the last request's five seconds over).
+		}
 		$wpdb->update( JobRepository::table(), array( 'type' => RestoreJob::ID ), array( 'id' => $job->id ) );
 		$wpdb->query( 'COMMIT' );
 		$config = $this->sandbox . '/code-child-' . bin2hex( random_bytes( 4 ) ) . '.json';
@@ -43,43 +92,71 @@ final class WebEntryCodeTest extends SwapTestCase {
 			$config,
 			(string) wp_json_encode(
 				array(
-					'abspath'   => $this->abspath,
-					'db'        => array(
+					'abspath'     => $this->abspath,
+					'content'     => $this->dirs['other-content'],
+					'db'          => array(
 						'name'     => DB_NAME,
 						'user'     => DB_USER,
 						'password' => DB_PASSWORD,
 						'host'     => DB_HOST,
 						'prefix'   => $table_prefix,
 					),
-					'multisite' => is_multisite(),
-					'host'      => 'visitor.example.org',
+					'multisite'   => is_multisite(),
+					'host'        => 'visitor.example.org',
+					'flushed'     => $this->flushed(),
+					'flush_fails' => $this->flush_fails(),
 				)
 			)
 		);
+		$cgi = dirname( PHP_BINARY ) . '/php-cgi';
+		$this->assertTrue( is_executable( $cgi ), 'php-cgi is next to the PHP binary (the test site\'s image has it): a request\'s SAPI is needed' );
 		$pipes   = array();
-		$process = proc_open( array( PHP_BINARY, dirname( __DIR__ ) . '/Fixtures/Restore/code-child.php', $config ), array( 1 => array( 'pipe', 'w' ), 2 => array( 'pipe', 'w' ) ), $pipes );
+		$process = proc_open( array( $cgi, dirname( __DIR__ ) . '/Fixtures/Restore/code-child.php', $config ), array( 1 => array( 'pipe', 'w' ), 2 => array( 'pipe', 'w' ) ), $pipes );
 		$this->assertIsResource( $process );
 		$out    = (string) stream_get_contents( $pipes[1] );
 		$err    = (string) stream_get_contents( $pipes[2] );
 		$status = proc_close( $process );
 		$wpdb->update( JobRepository::table(), array( 'type' => $this->type ), array( 'id' => $job->id ) );
 		$wpdb->query( 'COMMIT' );
-		$said = "exit {$status}\nstdout:\n{$out}\nstderr:\n{$err}";
+		$said       = "exit {$status}\nstdout:\n{$out}\nstderr:\n{$err}";
+		$this->last = $said;
 		$this->assertSame( 0, $status, $said );
 		$this->assertStringNotContainsString( 'CODE-CHILD-FATAL', $out, $said );
-		$lines  = array_values( array_filter( explode( "\n", trim( $out ) ) ) );
+		$parts = explode( "\r\n\r\n", $out, 2 );
+		$this->assertCount( 2, $parts, 'the answer has its headers: ' . $said );
+		list( $headers, $body ) = $parts;
+		$lines  = array_values( array_filter( explode( "\n", trim( $body ) ) ) );
 		$report = json_decode( (string) end( $lines ), true );
-		$this->assertIsArray( $report, $said );
+		if ( ! is_array( $report ) ) {
+			// No line of the child's: the loader ended the request, with the maintenance page's answer.
+			$this->assertSame( 1, preg_match( '/^Status: 503\b/m', $headers ), 'the loader answers 503: ' . $said );
+			$this->assertSame( 1, preg_match( '/^Retry-After: 600\r?$/m', $headers ), 'with Retry-After: ' . $said );
+			$this->assertStringContainsString( 'Briefly unavailable for scheduled maintenance', $body, $said );
+			$this->assertStringNotContainsString( 'visitor.example.org', $out, 'nothing of the site in the answer' );
+			$this->assertStringNotContainsString( $this->sandbox, $out, 'no path in the answer' );
+			++$this->seen['let'];
+			return array(
+				'let'  => true,
+				'said' => $said,
+			);
+		}
+		$this->assertSame( 'cgi-fcgi', $report['sapi'], 'the control: a request\'s SAPI' );
 		$this->assertSame( array(), $report['wordpress'], 'WordPress never loaded: ' . $said );
 		$this->assertFalse( $report['autoloader'], 'no autoloader: every class from the runtime' );
+		$this->assertFalse( $report['site'], 'no request gets past the must-use plugins while the site is held: ' . $said );
 		$this->assertSame( 'double', $report['type'], 'the request ends with the maintenance page: ' . $said );
+		$this->assertSame( '', trim( implode( "\n", array_slice( $lines, 0, -1 ) ) ), 'nothing else is printed: ' . $said );
+		if ( $report['entry'] ) {
+			++$this->seen['ran'];
+		}
+		$report['let']  = false;
 		$report['said'] = $said;
-		$this->last     = $said;
 		return $report;
 	}
 
 	/**
-	 * Requests until the job ends or stands still (two requests in a row leave its row as it was).
+	 * Requests until the job ends or stands still (two requests in a row leave its row and the visitor file's record
+	 * as they were).
 	 *
 	 * @param Job $job Job.
 	 * @return Job
@@ -87,10 +164,9 @@ final class WebEntryCodeTest extends SwapTestCase {
 	private function requests( Job $job ): Job {
 		$last = null;
 		for ( $i = 0; $i < 40; $i++ ) {
-			$report = $this->request( $job );
-			$this->assertTrue( $report['entry'], 'the runtime ran: ' . $report['said'] . "\n" . $this->runtime_log() );
+			$this->request( $job );
 			$now = Plugin::instance()->jobs()->find( $job->id );
-			$row = wp_json_encode( array( $now->status, $now->step, $now->cursor, $now->site_state ) );
+			$row = wp_json_encode( array( $now->status, $now->step, $now->cursor, $now->site_state, ( new VisitorFile( $this->abspath, (string) ( $now->cursor['mark'] ?? '' ) ) )->flush() ) );
 			if ( ! in_array( $now->status, array( Job::QUEUED, Job::RUNNING ), true ) || $row === $last ) {
 				return $now;
 			}
@@ -123,6 +199,46 @@ final class WebEntryCodeTest extends SwapTestCase {
 		} ) );
 	}
 
+	/**
+	 * Where the swap's loader is now: "live" (the must-use plugins directory), "old", "stage" (the plan's places of that
+	 * directory).
+	 *
+	 * @param Job $job Job.
+	 * @return string[]
+	 */
+	private function loader_in( Job $job ): array {
+		$out = array();
+		clearstatcache();
+		foreach ( $this->plan_of( $job )['dirs'] as $entry ) {
+			if ( 'mu-plugins' !== basename( $entry['live'] ) ) {
+				continue;
+			}
+			foreach ( array( 'live', 'old', 'stage' ) as $place ) {
+				if ( file_exists( Loader::path( $entry[ $place ] ) ) ) {
+					$out[] = $place;
+				}
+			}
+		}
+		return $out;
+	}
+
+	/**
+	 * Take the loader away wherever it is: the fallback is not available.
+	 *
+	 * @param Job $job Job.
+	 * @return void
+	 */
+	private function without_loader( Job $job ): void {
+		foreach ( $this->plan_of( $job )['dirs'] as $entry ) {
+			foreach ( array( 'live', 'old', 'stage' ) as $place ) {
+				if ( 'mu-plugins' === basename( $entry['live'] ) && file_exists( Loader::path( $entry[ $place ] ) ) ) {
+					Sandbox::remove( Loader::path( $entry[ $place ] ) );
+				}
+			}
+		}
+		$this->assertSame( array(), $this->loader_in( $job ) );
+	}
+
 	public function test_the_swap_puts_up_the_runtime_and_the_visitor_file_with_the_maintenance_file(): void {
 		$job = $this->at_swap();
 		$this->killed_at( $job, 'dir_in' );
@@ -136,6 +252,8 @@ final class WebEntryCodeTest extends SwapTestCase {
 		$this->assertSame( (string) $now->cursor['mark'], Maintenance::web_mark( $this->abspath . '/' . Maintenance::RUNTIME ), 'the runtime names the restore' );
 		$this->assertSame( (string) $now->cursor['mark'], Maintenance::web_mark( $this->abspath . '/' . Maintenance::VISITOR ) );
 		$this->assertSame( Maintenance::CODE, file_get_contents( $this->abspath . '/' . Maintenance::FILE ) );
+		$this->assertSame( array( 'live' ), $this->loader_in( $now ), 'the loader is in the must-use plugins directory (not moved yet)' );
+		$this->assertSame( Loader::CODE, file_get_contents( Loader::path( $this->dirs['mu-plugins'] ) ) );
 	}
 
 	/**
@@ -146,7 +264,7 @@ final class WebEntryCodeTest extends SwapTestCase {
 	public function kills(): array {
 		return array(
 			'dirs'           => array( 'dir_in', 2, false ),
-			'carry'          => array( 'carried', 1, false ),
+			'all dirs'       => array( 'carried', 1, false ),
 			'a commit'       => array( 'committed', 1, false ),
 			'nothing swaped' => array( 'maintenance', 1, true ),
 		);
@@ -155,43 +273,101 @@ final class WebEntryCodeTest extends SwapTestCase {
 	/**
 	 * @dataProvider kills
 	 */
-	public function test_a_visitors_request_puts_the_swap_back_from_the_runtime_alone( string $seam, int $nth, bool $nothing ): void {
+	public function test_visitors_requests_put_the_swap_back_flush_and_end_it_from_the_files_alone( string $seam, int $nth, bool $nothing ): void {
 		$job    = $this->at_swap();
 		$before = $this->site();
 		$this->killed_at( $job, $seam, $nth );
-		$now = $this->requests( Plugin::instance()->jobs()->find( $job->id ) );
+		$killed = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertNotSame( array(), $this->loader_in( $killed ), 'the control: the loader is up, in the must-use plugins directory or where the swap moved it' );
+		$now = $this->requests( $killed );
+		$this->assertSame( Job::FAILED, $now->status, $this->runtime_log() . ' ' . $now->last_error );
+		$this->assertSame( Job::SITE_UNTOUCHED, $now->site_state );
+		$this->assertSame( $before, $this->site(), 'the files and the tables as they were, no maintenance file and no loader: ' . $this->runtime_log() );
+		$this->assertSame( array(), $this->swap_files(), 'the run took every file down' );
+		$this->assertSame( array(), $this->loader_in( $now ), 'the loader is nowhere: not in place, not where the swap moved the directory' );
+		$this->assertGreaterThan( 0, $this->seen['ran'], 'the runtime ran from the maintenance file\'s code' );
 		if ( $nothing ) {
-			$this->assertSame( Job::FAILED, $now->status, $this->runtime_log() . ' ' . $now->last_error );
-			$this->assertSame( $before, $this->site() );
-			$this->assertSame( array(), $this->swap_files(), 'the run took every file down' );
+			$this->assertSame( 0, $this->seen['let'], 'nothing was swapped: no flush, the first run ended it' );
+			$this->assertSame( 0, $this->flushes() );
 			return;
 		}
+		$this->assertSame( 1, $this->seen['let'], 'one request was let through, and the loader ended it' );
+		$this->assertSame( 1, $this->flushes(), 'the object cache was flushed once, by that request' );
+		$log = Plugin::instance()->job_presenter()->log_tail( $now );
+		$this->assertStringContainsString( 'object cache cannot be flushed from here', $log, 'what the runs said is in the job\'s log' );
+		$this->assertStringContainsString( 'a request was let through to flush it (try 1)', $log );
+	}
+
+	public function test_without_the_loader_the_site_is_put_back_and_stays_held_for_wp_cli_to_flush(): void {
+		$job    = $this->at_swap();
+		$before = $this->site();
+		$this->killed_at( $job, 'dir_in', 2 );
+		$this->without_loader( Plugin::instance()->jobs()->find( $job->id ) );
+		$now  = $this->requests( Plugin::instance()->jobs()->find( $job->id ) );
 		$site = $this->site();
 		$this->assertTrue( $site['maintenance'], 'held: the flush is WP-CLI\'s' );
 		$site['maintenance'] = false;
 		$this->assertSame( $before, $site, 'the files and the tables put back by the runtime: ' . $this->runtime_log() );
-		$this->assertStringContainsString( 'object cache can only be flushed by WP-CLI', $this->runtime_log() );
+		$this->assertStringContainsString( 'object cache cannot be flushed from here', $this->runtime_log() );
+		$this->assertSame( array( 'n' => 0, 'next' => 0 ), ( new VisitorFile( $this->abspath, (string) $now->cursor['mark'] ) )->flush(), 'the flush is awaited, and no request was let through for it' );
+		$this->assertSame( 0, $this->seen['let'] );
+		$this->assertSame( 0, $this->flushes() );
+		$ran = $this->seen['ran'];
+		$this->request( $now );
+		$this->assertSame( $ran, $this->seen['ran'], 'and no runtime is run any more: nothing is left for it to rename' );
 		$done = $this->cli_run( $now );
 		$this->assertSame( Job::FAILED, $done->status, (string) $done->last_error );
 		$this->assertSame( $before, $this->site() );
 		$this->assertSame( array(), $this->swap_files(), 'WP-CLI took every file down, the runtime log last' );
-		$this->assertStringContainsString( 'object cache can only be flushed by WP-CLI', Plugin::instance()->job_presenter()->log_tail( $done ), 'what the runs said is in the job\'s log' );
+		$this->assertStringContainsString( 'object cache cannot be flushed from here', Plugin::instance()->job_presenter()->log_tail( $done ), 'what the runs said is in the job\'s log' );
 	}
 
-	public function test_a_visitors_request_puts_back_tables_renamed_in_batches(): void {
+	public function test_a_flush_that_fails_is_tried_three_times_then_every_five_minutes_and_ends_it_once_it_works(): void {
+		$job    = $this->at_swap();
+		$before = $this->site();
+		$this->killed_at( $job, 'dir_in', 2 );
+		touch( $this->flush_fails() );
+		$now     = $this->requests( Plugin::instance()->jobs()->find( $job->id ) );
+		$visitor = new VisitorFile( $this->abspath, (string) $now->cursor['mark'] );
+		$record  = $visitor->flush();
+		$this->assertSame( Maintenance::FLUSH_TRIES, $record['n'], 'three requests were let through: ' . $this->runtime_log() );
+		$this->assertSame( Maintenance::FLUSH_TRIES, $this->seen['let'] );
+		$this->assertGreaterThan( time() + Maintenance::FLUSH_WAIT - 60, $record['next'], 'the next waits five minutes' );
+		$this->assertSame( 0, $this->flushes(), 'the control: no flush went through' );
+		$this->assertContains( $now->status, array( Job::QUEUED, Job::RUNNING ), 'the job is not given up: ' . $now->last_error );
+		$site = $this->site();
+		$this->assertTrue( $site['maintenance'] );
+		$site['maintenance'] = false;
+		$this->assertSame( $before, $site, 'the site is put back, held' );
+		// The flush works again, the wait is not over: still nothing let through.
+		Sandbox::remove( $this->flush_fails() );
+		$this->request( $now );
+		$this->assertSame( Maintenance::FLUSH_TRIES, $this->seen['let'] );
+		$this->assertSame( 0, $this->flushes() );
+		// The wait over (the record's time moved back, as five minutes later): the next request ends it.
+		$path = $this->abspath . '/' . Maintenance::VISITOR;
+		file_put_contents( $path, str_replace( '"next":' . $record['next'], '"next":' . ( time() - 1 ), (string) file_get_contents( $path ) ) );
+		$done = $this->requests( $now );
+		$this->assertSame( Job::FAILED, $done->status, $this->runtime_log() . ' ' . $done->last_error );
+		$this->assertSame( Maintenance::FLUSH_TRIES + 1, $this->seen['let'] );
+		$this->assertSame( 1, $this->flushes() );
+		$this->assertSame( $before, $this->site() );
+		$this->assertSame( array(), $this->swap_files() );
+		$this->assertSame( array(), $this->loader_in( $done ) );
+		$this->assertStringContainsString( '(try ' . ( Maintenance::FLUSH_TRIES + 1 ) . ')', Plugin::instance()->job_presenter()->log_tail( $done ), 'each one let through is said' );
+	}
+
+	public function test_visitors_requests_put_back_tables_renamed_in_batches(): void {
 		$this->swap_parts['batch'] = 1;
 		$this->register_type();
 		$job    = $this->at_swap();
 		$before = $this->site();
 		$this->killed_at( $job, 'batch_sent', 2 );
-		$now  = $this->requests( Plugin::instance()->jobs()->find( $job->id ) );
-		$site = $this->site();
-		$this->assertTrue( $site['maintenance'] );
-		$site['maintenance'] = false;
-		$this->assertSame( $before, $site, $this->runtime_log() );
-		$done = $this->cli_run( $now );
-		$this->assertSame( Job::FAILED, $done->status, (string) $done->last_error );
+		$now = $this->requests( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( Job::FAILED, $now->status, $this->runtime_log() . ' ' . $now->last_error );
+		$this->assertSame( $before, $this->site(), $this->runtime_log() );
 		$this->assertSame( array(), $this->swap_files() );
+		$this->assertSame( 1, $this->flushes() );
 	}
 
 	public function test_a_runtime_of_another_build_does_nothing_and_what_it_said_ends_in_the_jobs_log(): void {

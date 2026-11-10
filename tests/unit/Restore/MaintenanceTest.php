@@ -418,8 +418,12 @@ echo json_encode( array( "upgrading" => $upgrading, "type" => gettype( $upgradin
 	public function test_the_code_is_pinned_and_every_code_written_is_known(): void {
 		// A change of CODE turns every file an earlier version put up into someone else's unless that version's code
 		// stays in KNOWN_CODES: once a version with it is released, add the old code there, then update this digest.
-		$this->assertSame( '0442b598fef21dcfa20c2b1c411aa3a38a46a6253f4addd8b1a43ee9d7c52714', hash( 'sha256', Maintenance::CODE ) );
+		$this->assertSame( 'd6df989b7329ade9dfd2db0a126a30f6c3ae59eef178d00241b0a1c76b462e78', hash( 'sha256', Maintenance::CODE ) );
 		$this->assertContains( Maintenance::CODE, Maintenance::KNOWN_CODES );
+		// The code released with the run without WordPress (2026-11-10): byte for byte what it was, still known.
+		$this->assertSame( '0442b598fef21dcfa20c2b1c411aa3a38a46a6253f4addd8b1a43ee9d7c52714', hash( 'sha256', Maintenance::CODE_2 ) );
+		$this->assertContains( Maintenance::CODE_2, Maintenance::KNOWN_CODES );
+		$this->assertLessThanOrEqual( Maintenance::MAX_READ, strlen( Maintenance::CODE ), 'the longest code is read whole (a longer file is someone else\'s)' );
 		// The code released before the run without WordPress (2026-11-08): byte for byte what it was, still known.
 		$this->assertSame( 'ffb703a94f78f6b2da4ef5fe748e29f7c888f05eed7b1be58f45b83a42d0ed8b', hash( 'sha256', Maintenance::CODE_1 ) );
 		$this->assertContains( Maintenance::CODE_1, Maintenance::KNOWN_CODES );

@@ -452,10 +452,44 @@ final class JobPresenter {
 		// A job that holds the site and is managed elsewhere: why it is not run here, and the WP-CLI commands.
 		$held                   = Job::SITE_UNTOUCHED !== $job->site_state && is_callable( $this->held ) ? call_user_func( $this->held, $job->id ) : null;
 		$data['held_elsewhere'] = is_array( $held ) ? $this->clean( implode( "\n", self::held_lines( $held['job'], $held['assessment'] ) ), $extra ) : '';
+		$data['web_fallback']   = $this->clean( implode( "\n", self::fallback_lines( $job ) ), $extra );
 		if ( $with_log ) {
 			$data['log_tail'] = $this->log_tail( $job );
 		}
 		return $data;
+	}
+
+	/**
+	 * What the swap recorded of the fallback for visitors' requests on a job that has not ended (SwapStep's
+	 * FALLBACK_RECORD and OWNER_RECORD): that the restore's must-use plugin could not be put up, that WP-CLI's user is
+	 * not the owner of the site's files. No user's name (the terminal alone was told those).
+	 *
+	 * @param Job $job Job.
+	 * @return string[]
+	 */
+	public static function fallback_lines( Job $job ): array {
+		$recorded = $job->options['recorded'] ?? null;
+		if ( ! is_array( $recorded ) || in_array( $job->status, array( Job::COMPLETED, Job::CANCELLED ), true ) ) {
+			return array();
+		}
+		$lines = array();
+		$why   = $recorded[ SwapStep::FALLBACK_RECORD ] ?? '';
+		if ( is_string( $why ) && '' !== $why ) {
+			$reasons = array(
+				\WPCheckpoint\Restore\Loader::MISSING    => __( 'the must-use plugins directory is no longer there', 'wp-checkpoint' ),
+				\WPCheckpoint\Restore\Loader::UNWRITABLE => __( 'a file can no longer be written into the must-use plugins directory', 'wp-checkpoint' ),
+				\WPCheckpoint\Restore\Loader::TAKEN      => __( 'another file has the name of the restore\'s must-use plugin', 'wp-checkpoint' ),
+			);
+			$lines[] = sprintf(
+				/* translators: %s: why */
+				__( 'The fallback for visitors\' requests is not available for this restore: %s. Should the restore stop half way, only WP-CLI flushes the object cache after the site is put back, and nothing stands in for the maintenance file if it is deleted meanwhile.', 'wp-checkpoint' ),
+				$reasons[ $why ] ?? __( 'what is in the must-use plugins directory cannot be told', 'wp-checkpoint' )
+			);
+		}
+		if ( true === ( $recorded[ SwapStep::OWNER_RECORD ] ?? false ) ) {
+			$lines[] = __( 'The user running WP-CLI is not the owner of the site\'s files: on this site a visitor\'s request cannot put a half-made restore back. Should the restore stop half way, WP-CLI puts the site back.', 'wp-checkpoint' );
+		}
+		return $lines;
 	}
 
 	/**

@@ -94,7 +94,7 @@ final class WebNoWordPressTest extends SwapTestCase {
 			return;
 		}
 		$this->assertSame( TickResult::LEFT, $last['status'], wp_json_encode( $report ) );
-		$this->assertStringContainsString( 'object cache can only be flushed by WP-CLI', (string) $last['message'] );
+		$this->assertStringContainsString( 'object cache cannot be flushed from here', (string) $last['message'] );
 		$site = $this->site();
 		$this->assertTrue( $site['maintenance'], 'held' );
 		$site['maintenance'] = false;

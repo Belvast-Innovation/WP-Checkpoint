@@ -24,6 +24,11 @@ defined( 'ABSPATH' ) || exit;
  * where the file system has locks; the lock spares the other requests work, it is not what keeps two runs apart (the
  * database lease is): where it does not hold (a file system without locks), a write may be lost or read half made, and
  * a contents that cannot be read is no pace (the run is tried, and held up again if it must be).
+ *
+ * "flush" (await_flush()): a run without WordPress put the site back and only the flush of the object cache is left.
+ * The maintenance file's code reads and counts it (Restore\Maintenance::CODE: "n" requests let through to flush, "next"
+ * the Unix time before which none is), by a pattern over this file's bytes: the two numbers stay plain integers, in this
+ * order.
  */
 final class VisitorFile implements WebPace {
 
@@ -157,6 +162,47 @@ final class VisitorFile implements WebPace {
 			static function (): int {
 				return 0; // The file's time stays as it is.
 			}
+		);
+	}
+
+	/**
+	 * A run without WordPress put the site back and only the flush of the object cache is left: recorded for the
+	 * maintenance file's code, which lets a request through to flush it. A record already there is kept as it is (how
+	 * many were let through so far).
+	 *
+	 * @return void
+	 */
+	public function await_flush(): void {
+		$this->change(
+			static function ( array $data ): array {
+				if ( ! isset( $data['flush'] ) || ! is_array( $data['flush'] ) ) {
+					$data['flush'] = array(
+						'n'    => 0,
+						'next' => 0,
+					);
+				}
+				return $data;
+			},
+			static function (): int {
+				return 0; // The file's time stays as it is.
+			}
+		);
+	}
+
+	/**
+	 * The record of the awaited flush: how many requests were let through for it and when the next may be; null when
+	 * none is awaited (or the file cannot be read).
+	 *
+	 * @return array{n: int, next: int}|null
+	 */
+	public function flush() {
+		$data = $this->read();
+		if ( null === $data || ! isset( $data['flush'] ) || ! is_array( $data['flush'] ) ) {
+			return null;
+		}
+		return array(
+			'n'    => (int) ( $data['flush']['n'] ?? 0 ),
+			'next' => (int) ( $data['flush']['next'] ?? 0 ),
 		);
 	}
 

@@ -7,7 +7,15 @@
  * its type, whether WordPress or an autoloader was there at the end (they must never be), and whether the runtime's
  * entry class was declared. A fatal error prints CODE-CHILD-FATAL and its message.
  *
- * Usage: php code-child.php <config.json>. Config: abspath, db (name, user, password, host, prefix), multisite, host.
+ * WP_CONTENT_DIR is defined before the maintenance file, as WordPress defines it ("content"). A request the maintenance
+ * file lets through (as WordPress judges it: its time ten minutes ago or more) goes on as WordPress does, as far as
+ * the must-use plugins: the object cache's flush is there by then (a stand-in that writes a byte to "flushed" each
+ * time it is called, and throws while the file "flush_fails" is there), and each .php file of the must-use plugins
+ * directory is included in the order WordPress sorts them. The JSON line then says "site": the request got past them
+ * (run by php-cgi, the swap's loader ends it before with its own answer, and no JSON line is printed).
+ *
+ * Usage: php code-child.php <config.json>. Config: abspath, content, db (name, user, password, host, prefix),
+ * multisite, host, flushed, flush_fails.
  *
  * @package WPCheckpoint
  */
@@ -16,7 +24,7 @@
 
 $config = json_decode( (string) file_get_contents( $argv[1] ), true );
 if ( ! is_array( $config ) ) {
-	fwrite( STDERR, "no config\n" );
+	error_log( 'no config' );
 	exit( 2 );
 }
 
@@ -24,13 +32,16 @@ register_shutdown_function(
 	static function (): void {
 		$error = error_get_last();
 		if ( null !== $error && in_array( $error['type'], array( E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR ), true ) ) {
-			fwrite( STDOUT, 'CODE-CHILD-FATAL ' . $error['message'] . ' in ' . $error['file'] . ':' . $error['line'] . "\n" );
+			echo 'CODE-CHILD-FATAL ' . $error['message'] . ' in ' . $error['file'] . ':' . $error['line'] . "\n"; // Not STDOUT: php-cgi has no such constant.
 		}
 	}
 );
 
 // What wp-config.php defines.
 define( 'ABSPATH', rtrim( (string) $config['abspath'], '/' ) . '/' );
+if ( isset( $config['content'] ) ) {
+	define( 'WP_CONTENT_DIR', (string) $config['content'] ); // wp_initial_constants(), before the maintenance file.
+}
 define( 'DB_NAME', (string) $config['db']['name'] );
 define( 'DB_USER', (string) $config['db']['user'] );
 define( 'DB_PASSWORD', (string) $config['db']['password'] );
@@ -48,8 +59,38 @@ $upgrading = null;
 	require ABSPATH . '.maintenance';
 } )();
 
+$site = false;
+if ( is_numeric( $upgrading ) && ( time() - $upgrading ) >= 600 ) {
+	// Not in maintenance mode, as wp_is_maintenance_mode() judges it: WordPress goes on to its must-use plugins.
+	if ( isset( $config['flushed'] ) ) {
+		function wp_cache_flush() {
+			global $config;
+			if ( isset( $config['flush_fails'] ) && file_exists( (string) $config['flush_fails'] ) ) {
+				throw new RuntimeException( 'The object cache\'s server does not answer.' );
+			}
+			file_put_contents( (string) $config['flushed'], 'x', FILE_APPEND );
+			return true;
+		}
+	}
+	$mu    = defined( 'WPMU_PLUGIN_DIR' ) ? WPMU_PLUGIN_DIR : ( defined( 'WP_CONTENT_DIR' ) ? WP_CONTENT_DIR : ABSPATH . 'wp-content' ) . '/mu-plugins';
+	$names = array();
+	foreach ( is_dir( $mu ) ? (array) scandir( $mu ) : array() as $name ) {
+		if ( '.php' === substr( (string) $name, -4 ) ) {
+			$names[] = $mu . '/' . $name;
+		}
+	}
+	sort( $names ); // wp_get_mu_plugins().
+	foreach ( $names as $file ) {
+		include_once $file;
+	}
+	$site = true;
+}
+
 echo json_encode(
 	array(
+		'site'       => $site,
+		'sapi'       => PHP_SAPI,
+		'flush_pass' => defined( 'WPCHECKPOINT_FLUSH_PASS' ),
 		'upgrading'  => $upgrading,
 		'type'       => gettype( $upgrading ),
 		'wordpress'  => array_values( array_filter( array( 'add_action', '__', 'apply_filters', 'is_multisite', 'get_option' ), 'function_exists' ) ),

@@ -86,7 +86,7 @@ final class Maintenance {
 	/**
 	 * Most bytes read of either file: ours are far shorter, so a longer one is someone else's.
 	 */
-	const MAX_READ = 4096;
+	const MAX_READ = 16384;
 
 	/**
 	 * The time of a held file on a 64-bit PHP: 2100-01-01, which WordPress's ten minutes never reach.
@@ -163,7 +163,8 @@ final class Maintenance {
 		. '}' . "\n";
 
 	/**
-	 * The code of .maintenance, the same for every restore. WordPress require()s it inside wp_is_maintenance_mode(),
+	 * The code of .maintenance as released with the run without WordPress (CODE now), still told as this plugin's: the
+	 * same for every restore. WordPress require()s it inside wp_is_maintenance_mode(),
 	 * with $upgrading global: it declares nothing (a second require must not fail: the runtime is included only while
 	 * its entry class is not declared, and the constant is defined only when it is not), and what else it sets is
 	 * local. passes() is the same rule for the plugin's own code; MaintenanceTest runs both on the same requests. While
@@ -183,7 +184,7 @@ final class Maintenance {
 	 * directory, the mark, the hash the data file names and the one the runtime said. Nothing it throws goes further.
 	 * The request still ends with the maintenance page: $upgrading is not changed.
 	 */
-	const CODE =
+	const CODE_2 =
 		'<?php' . "\n"
 		. '// WP Checkpoint: a restore holds this site. Its mark, its time and its pass are in .wpcheckpoint-maintenance.php; .wpcheckpoint-runtime.php puts a half-made restore back.' . "\n"
 		. '$upgrading         = (float) time();' . "\n"
@@ -225,7 +226,103 @@ final class Maintenance {
 		. '	}' . "\n"
 		. '}' . "\n";
 
-	const KNOWN_CODES = array( self::CODE_1, self::CODE );
+	/**
+	 * The code of .maintenance, the same for every restore. WordPress require()s it inside wp_is_maintenance_mode(),
+	 * with $upgrading global: it declares nothing (a second require must not fail), and what else it sets is local.
+	 * Pinned (MaintenanceTest), and written line by line with "\n" (see CODE_1). passes() is its rule for the pass key.
+	 *
+	 * Beyond CODE_2 (whose every rule it keeps): once a run without WordPress put the site back and only the flush of
+	 * the object cache is left, which nothing can do before WordPress is loaded, that run records it in the visitor file
+	 * (Jobs\VisitorFile::await_flush(): "flush", how many requests were let through for it and when the next may be).
+	 * A held request whose time has come (the visitor file's time and lock, as for the runtime) then finds the record,
+	 * of this restore's mark, and runs no runtime (there is nothing left for it to rename). It is let through
+	 * ($upgrading 0, DISABLE_WP_CRON and WPCHECKPOINT_FLUSH_PASS defined) only when the file under Loader::NAME in the
+	 * must-use plugins directory (WPMU_PLUGIN_DIR when wp-config.php defined it, else WordPress's default under
+	 * WP_CONTENT_DIR: wp_plugin_directory_constants() runs after this file) holds the loader's code, by its SHA-256
+	 * (the loader ends that request with the maintenance page's answer after the flush; any other file there would let
+	 * the whole site run on what the cache still holds), and when the record's next time has come: still under the
+	 * lock, the count is raised and written first, the request let through after. The first FLUSH_TRIES go at the
+	 * runtime's own pace; after them one is let through every FLUSH_WAIT seconds, each said in the runtime log. Without
+	 * the loader nothing is let through: WP-CLI flushes and ends it.
+	 */
+	const CODE =
+		'<?php' . "\n"
+		. '// WP Checkpoint: a restore holds this site. Its mark, its time and its pass are in .wpcheckpoint-maintenance.php; .wpcheckpoint-runtime.php puts a half-made restore back.' . "\n"
+		. '$upgrading         = (float) time();' . "\n"
+		. '$wpcheckpoint_data = @file_get_contents( __DIR__ . \'/.wpcheckpoint-maintenance.php\' );' . "\n"
+		. 'if ( is_string( $wpcheckpoint_data ) && 1 === preg_match( \'/\\A<\\?php exit; \\?>\\n(WP Checkpoint restore [0-9a-f]{32})\\n([0-9]{1,19})\\n([0-9a-f]{64}|-)\\n(?:([0-9a-f]{64})\\n)?\\z/\', $wpcheckpoint_data, $wpcheckpoint_found ) ) {' . "\n"
+		. '	$upgrading         = (float) $wpcheckpoint_found[2];' . "\n"
+		. '	$wpcheckpoint_pass = isset( $_SERVER[\'HTTP_X_WPCHECKPOINT_PASS\'] ) && is_string( $_SERVER[\'HTTP_X_WPCHECKPOINT_PASS\'] ) ? $_SERVER[\'HTTP_X_WPCHECKPOINT_PASS\'] : \'\';' . "\n"
+		. '	if ( \'-\' !== $wpcheckpoint_found[3] && 1 === preg_match( \'/\\A[0-9a-f]{64}\\z/\', $wpcheckpoint_pass ) && hash_equals( $wpcheckpoint_found[3], hash( \'sha256\', $wpcheckpoint_pass ) ) ) {' . "\n"
+		. '		$upgrading = 0;' . "\n"
+		. '		if ( ! defined( \'DISABLE_WP_CRON\' ) ) {' . "\n"
+		. '			define( \'DISABLE_WP_CRON\', true );' . "\n"
+		. '		}' . "\n"
+		. '	} elseif ( ! empty( $wpcheckpoint_found[4] ) && empty( $wpcheckpoint_check ) && ! ( defined( \'WP_CLI\' ) && WP_CLI ) && ! class_exists( \'WPCheckpoint\\Jobs\\WebEntry\', false ) ) {' . "\n"
+		. '		$wpcheckpoint_visitor = __DIR__ . \'/.wpcheckpoint-visitor.php\';' . "\n"
+		. '		$wpcheckpoint_lock    = @fopen( $wpcheckpoint_visitor, \'r+\' );' . "\n"
+		. '		$wpcheckpoint_busy    = 0;' . "\n"
+		. '		$wpcheckpoint_let     = false;' . "\n"
+		. '		if ( false !== $wpcheckpoint_lock && ( ! function_exists( \'posix_geteuid\' ) || @fileowner( $wpcheckpoint_visitor ) === posix_geteuid() ) && ( @flock( $wpcheckpoint_lock, LOCK_EX | LOCK_NB, $wpcheckpoint_busy ) || 1 !== $wpcheckpoint_busy ) ) {' . "\n"
+		. '			clearstatcache( true, $wpcheckpoint_visitor );' . "\n"
+		. '			$wpcheckpoint_next = @filemtime( $wpcheckpoint_visitor );' . "\n"
+		. '			$wpcheckpoint_due  = false !== $wpcheckpoint_next && $wpcheckpoint_next <= time() && @touch( $wpcheckpoint_visitor, time() + 5 );' . "\n"
+		. '			$wpcheckpoint_text = $wpcheckpoint_due ? @stream_get_contents( $wpcheckpoint_lock ) : false;' . "\n"
+		. '			if ( is_string( $wpcheckpoint_text ) && 1 === preg_match( \'/\\A(<\\?php exit; \\?>\\n# (WP Checkpoint restore [0-9a-f]{32})\\n\\{[^\\n]*"flush":\\{"n":)([0-9]{1,9})(,"next":)([0-9]{1,10})(\\}[^\\n]*\\}\\n)\\z/\', $wpcheckpoint_text, $wpcheckpoint_flush ) && $wpcheckpoint_flush[2] === $wpcheckpoint_found[1] ) {' . "\n"
+		. '				$wpcheckpoint_due    = false;' . "\n"
+		. '				$wpcheckpoint_loader = @file_get_contents( ( defined( \'WPMU_PLUGIN_DIR\' ) ? WPMU_PLUGIN_DIR : ( defined( \'WP_CONTENT_DIR\' ) ? WP_CONTENT_DIR : __DIR__ . \'/wp-content\' ) . \'/mu-plugins\' ) . \'/!wpcheckpoint-runtime.php\', false, null, 0, 8193 );' . "\n"
+		. '				if ( (int) $wpcheckpoint_flush[5] <= time() && is_string( $wpcheckpoint_loader ) && in_array( hash( \'sha256\', $wpcheckpoint_loader ), array( \'e1ba77d7c466b93d01a56c5afe2075cc6abfd9ace30c5f96109986b4b8fb0d63\' ), true ) ) {' . "\n"
+		. '					$wpcheckpoint_tries = (int) $wpcheckpoint_flush[3] + 1;' . "\n"
+		. '					$wpcheckpoint_text  = $wpcheckpoint_flush[1] . $wpcheckpoint_tries . $wpcheckpoint_flush[4] . ( $wpcheckpoint_tries >= 3 ? time() + 300 : 0 ) . $wpcheckpoint_flush[6];' . "\n"
+		. '					if ( @rewind( $wpcheckpoint_lock ) && @ftruncate( $wpcheckpoint_lock, 0 ) && strlen( $wpcheckpoint_text ) === @fwrite( $wpcheckpoint_lock, $wpcheckpoint_text ) && @fflush( $wpcheckpoint_lock ) ) {' . "\n"
+		. '						@touch( $wpcheckpoint_visitor, time() + 5 );' . "\n"
+		. '						$wpcheckpoint_let = true;' . "\n"
+		. '						$wpcheckpoint_log = @fopen( __DIR__ . \'/.wpcheckpoint-runtime-log.php\', \'r+\' );' . "\n"
+		. '						if ( false !== $wpcheckpoint_log ) {' . "\n"
+		. '							@fseek( $wpcheckpoint_log, 0, SEEK_END );' . "\n"
+		. '							@fwrite( $wpcheckpoint_log, gmdate( \'Y-m-d H:i:s\' ) . \' The site is put back and waits for its object cache to be flushed: a request was let through to flush it (try \' . $wpcheckpoint_tries . ").\\n" );' . "\n"
+		. '							@fclose( $wpcheckpoint_log );' . "\n"
+		. '						}' . "\n"
+		. '					}' . "\n"
+		. '				}' . "\n"
+		. '			}' . "\n"
+		. '			@flock( $wpcheckpoint_lock, LOCK_UN );' . "\n"
+		. '			@fclose( $wpcheckpoint_lock );' . "\n"
+		. '			if ( $wpcheckpoint_let ) {' . "\n"
+		. '				$upgrading = 0;' . "\n"
+		. '				if ( ! defined( \'DISABLE_WP_CRON\' ) ) {' . "\n"
+		. '					define( \'DISABLE_WP_CRON\', true );' . "\n"
+		. '				}' . "\n"
+		. '				if ( ! defined( \'WPCHECKPOINT_FLUSH_PASS\' ) ) {' . "\n"
+		. '					define( \'WPCHECKPOINT_FLUSH_PASS\', true );' . "\n"
+		. '				}' . "\n"
+		. '			} elseif ( $wpcheckpoint_due ) {' . "\n"
+		. '				if ( ! defined( \'WPCHECKPOINT_WEB_ENTRY\' ) ) {' . "\n"
+		. '					define( \'WPCHECKPOINT_WEB_ENTRY\', true );' . "\n"
+		. '				}' . "\n"
+		. '				try {' . "\n"
+		. '					$wpcheckpoint_said = @include __DIR__ . \'/.wpcheckpoint-runtime.php\';' . "\n"
+		. '					if ( is_string( $wpcheckpoint_said ) && class_exists( \'WPCheckpoint\\Jobs\\WebEntry\', false ) ) {' . "\n"
+		. '						\\WPCheckpoint\\Jobs\\WebEntry::run( __DIR__, $wpcheckpoint_found[1], $wpcheckpoint_found[4], $wpcheckpoint_said );' . "\n"
+		. '					}' . "\n"
+		. '				} catch ( \\Throwable $wpcheckpoint_error ) {' . "\n"
+		. '					unset( $wpcheckpoint_error );' . "\n"
+		. '				}' . "\n"
+		. '			}' . "\n"
+		. '		} elseif ( false !== $wpcheckpoint_lock ) {' . "\n"
+		. '			@fclose( $wpcheckpoint_lock );' . "\n"
+		. '		}' . "\n"
+		. '	}' . "\n"
+		. '}' . "\n";
+
+	/**
+	 * How many requests are let through to flush at the runtime's pace, and the seconds between them after that
+	 * (Jobs\WebPace's longest wait): CODE says both.
+	 */
+	const FLUSH_TRIES = 3;
+	const FLUSH_WAIT  = 300;
+
+	const KNOWN_CODES = array( self::CODE_1, self::CODE_2, self::CODE );
 
 	/**
 	 * The time of a held file (held_for() this PHP's integer size).
