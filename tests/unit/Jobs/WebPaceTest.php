@@ -4,7 +4,6 @@ namespace WPCheckpoint\Tests\Unit\Jobs;
 
 use WPCheckpoint\Jobs\MemoryPace;
 use WPCheckpoint\Jobs\TickResult;
-use WPCheckpoint\Jobs\TransientFailure;
 use WPCheckpoint\Jobs\WebPace;
 use WPCheckpoint\Jobs\WebRun;
 use WPCheckpoint\Standalone\Credentials;
@@ -78,9 +77,8 @@ final class WebPaceTest extends TestCase {
 	}
 
 	public function test_a_job_due_is_tried(): void {
-		// The control of the test above: with no wait the run does open its connection (here refused).
-		$this->expectException( TransientFailure::class );
-		self::web_run( new MemoryPace() )->tick( 7 );
+		// The control of the test above: with no wait the run does try its connection (here refused: UNAVAILABLE, said so).
+		$this->assertSame( TickResult::UNAVAILABLE, self::web_run( new MemoryPace() )->tick( 7 )->status );
 	}
 
 	public function test_a_held_up_run_waits_longer_busy_says_nothing_and_anything_else_starts_over(): void {

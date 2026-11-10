@@ -24,7 +24,7 @@ defined( 'ABSPATH' ) || exit;
 final class Schema {
 
 	const OPTION  = StoredNames::DB_VERSION;
-	const CURRENT = 15;
+	const CURRENT = 16;
 
 	/**
 	 * Jobs table name without the prefix.
@@ -70,6 +70,7 @@ final class Schema {
 		'held_by'          => "varchar(32) NOT NULL DEFAULT ''",
 		'site_mark'        => "varchar(64) NOT NULL DEFAULT ''",
 		'committed_at'     => 'bigint(20) unsigned NOT NULL DEFAULT 0',
+		'wp_run_at'        => 'bigint(20) unsigned NOT NULL DEFAULT 0',
 	);
 
 	/**
@@ -563,6 +564,12 @@ final class Schema {
 			case 15:
 				// Adds committed_at (0): when a restore's swap was last committed, which an undo is measured from. Older
 				// code neither reads nor writes it, so min_compatible stays 1.
+				self::create_jobs_table();
+				return 1;
+			case 16:
+				// Adds wp_run_at (0): when a run in WordPress (WP-CLI, cron, the page) last wrote the job, which a run
+				// without WordPress waits a grace period after (WebJobs::GRACE_SECONDS). Older code neither reads nor
+				// writes it, so min_compatible stays 1.
 				self::create_jobs_table();
 				return 1;
 			case 10:

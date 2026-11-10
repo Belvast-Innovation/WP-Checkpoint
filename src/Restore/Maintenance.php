@@ -94,9 +94,40 @@ final class Maintenance {
 	const HELD_64 = 4102444800;
 
 	/**
-	 * The data file: the mark, the time, the pass hash (64 lowercase hex characters, or NO_PASS).
+	 * The data file: the mark, the time, the pass hash (64 lowercase hex characters, or NO_PASS), and, written since the
+	 * run without WordPress (b2), the SHA-256 of the runtime the swap wrote next to it (RUNTIME, Jobs\WebRuntime): CODE
+	 * runs the runtime only when it says that hash of itself. The four lines of the earlier form are read as ever.
 	 */
-	const DATA_FORM = '/\A<\?php exit; \?>\n(WP Checkpoint restore [0-9a-f]{32})\n([0-9]{1,19})\n([0-9a-f]{64}|-)\n\z/';
+	const DATA_FORM = '/\A<\?php exit; \?>\n(WP Checkpoint restore [0-9a-f]{32})\n([0-9]{1,19})\n([0-9a-f]{64}|-)\n(?:([0-9a-f]{64})\n)?\z/';
+
+	/**
+	 * The runtime a request held by the maintenance file runs to put a half-made swap back (Jobs\WebRuntime::write()):
+	 * the classes a run without WordPress needs, in one file next to the maintenance file (the plugin's own directory is
+	 * one the swap renames).
+	 */
+	const RUNTIME = '.wpcheckpoint-runtime.php';
+
+	/**
+	 * The visitor file (Jobs\VisitorFile): its modification time is when CODE may next run the runtime (the throttle,
+	 * set before any database query), its contents the pace of runs held up (Jobs\WebPace).
+	 */
+	const VISITOR = '.wpcheckpoint-visitor.php';
+
+	/**
+	 * The runtime's log (Jobs\RuntimeLog): what runs without WordPress did not take on, while the site is held.
+	 */
+	const LOG = '.wpcheckpoint-runtime-log.php';
+
+	/**
+	 * The files of a run without WordPress, in the order they are taken down after the data file (the log last: it is
+	 * added to the job's log first).
+	 */
+	const WEB_FILES = array( self::VISITOR, self::RUNTIME, self::LOG );
+
+	/**
+	 * How a file of WEB_FILES names its restore: a line of its own with the mark (its first lines).
+	 */
+	const WEB_MARK = '/^# (WP Checkpoint restore [0-9a-f]{32})$/m';
 
 	/**
 	 * The single file #82 wrote: the time and the mark.
@@ -104,7 +135,8 @@ final class Maintenance {
 	const LEGACY_FORM = '/\A<\?php\n\$upgrading = ([0-9]{1,19}); \/\/ (WP Checkpoint restore [0-9a-f]{32})\n\z/';
 
 	/**
-	 * The code of .maintenance, the same for every restore. WordPress require()s it inside wp_is_maintenance_mode(),
+	 * The code of .maintenance as released before the run without WordPress (CODE now), still told as this plugin's:
+	 * the same for every restore. WordPress require()s it inside wp_is_maintenance_mode(),
 	 * with $upgrading global: it declares nothing (a second require must not fail), and what else it sets is local.
 	 * passes() is the same rule for the plugin's own code; MaintenanceTest runs both on the same requests. While it
 	 * blocks, $upgrading is a float, never an integer: WordPress lets a request through a maintenance file whose time is
@@ -114,7 +146,7 @@ final class Maintenance {
 	 * not as a nowdoc: the line breaks of a nowdoc are the source file's, which a checkout on Windows (or an upload in
 	 * text mode) turns into "\r\n", and a file that version put up would no longer be told as this plugin's.
 	 */
-	const CODE =
+	const CODE_1 =
 		'<?php' . "\n"
 		. '// WP Checkpoint: a restore holds this site. Its mark, its time and its pass are in .wpcheckpoint-maintenance.php.' . "\n"
 		. '$upgrading         = (float) time();' . "\n"
@@ -131,10 +163,69 @@ final class Maintenance {
 		. '}' . "\n";
 
 	/**
-	 * Every code of .maintenance a version of the plugin wrote (CODE among them): a held file of an earlier version is
-	 * read as this plugin's.
+	 * The code of .maintenance, the same for every restore. WordPress require()s it inside wp_is_maintenance_mode(),
+	 * with $upgrading global: it declares nothing (a second require must not fail: the runtime is included only while
+	 * its entry class is not declared, and the constant is defined only when it is not), and what else it sets is
+	 * local. passes() is the same rule for the plugin's own code; MaintenanceTest runs both on the same requests. While
+	 * it blocks, $upgrading is a float, never an integer: WordPress lets a request through a maintenance file whose
+	 * time is an integer when it carries that time and its MD5 (wp_scrape_key, wp_scrape_nonce: its check for fatal
+	 * errors after a plugin or theme edit), and a held file's time is public. Pinned (MaintenanceTest): code a released
+	 * version wrote stays in KNOWN_CODES. Written line by line with "\n", not as a nowdoc (see CODE_1).
+	 *
+	 * Beyond CODE_1: a request held (not let through) by a data file that names the runtime's hash (DATA_FORM's fifth
+	 * line), outside WP-CLI and outside check_code(), in a process running as the visitor file's owner where POSIX can
+	 * tell (not a cron of root's that loads WordPress: the files the run writes would be root's), runs the runtime when
+	 * the visitor file's time has come: under a
+	 * non-blocking lock of the visitor file where the file system has locks (only a lock someone else holds stops it:
+	 * the database lease is what lets one run in, the lock only spares the others the include), it sets that time five
+	 * seconds on (before the runtime opens any connection), defines WPCHECKPOINT_WEB_ENTRY (the runtime's first statement
+	 * returns without it), includes the runtime (which returns its own hash) and gives Jobs\WebEntry::run() the
+	 * directory, the mark, the hash the data file names and the one the runtime said. Nothing it throws goes further.
+	 * The request still ends with the maintenance page: $upgrading is not changed.
 	 */
-	const KNOWN_CODES = array( self::CODE );
+	const CODE =
+		'<?php' . "\n"
+		. '// WP Checkpoint: a restore holds this site. Its mark, its time and its pass are in .wpcheckpoint-maintenance.php; .wpcheckpoint-runtime.php puts a half-made restore back.' . "\n"
+		. '$upgrading         = (float) time();' . "\n"
+		. '$wpcheckpoint_data = @file_get_contents( __DIR__ . \'/.wpcheckpoint-maintenance.php\' );' . "\n"
+		. 'if ( is_string( $wpcheckpoint_data ) && 1 === preg_match( \'/\\A<\\?php exit; \\?>\\n(WP Checkpoint restore [0-9a-f]{32})\\n([0-9]{1,19})\\n([0-9a-f]{64}|-)\\n(?:([0-9a-f]{64})\\n)?\\z/\', $wpcheckpoint_data, $wpcheckpoint_found ) ) {' . "\n"
+		. '	$upgrading         = (float) $wpcheckpoint_found[2];' . "\n"
+		. '	$wpcheckpoint_pass = isset( $_SERVER[\'HTTP_X_WPCHECKPOINT_PASS\'] ) && is_string( $_SERVER[\'HTTP_X_WPCHECKPOINT_PASS\'] ) ? $_SERVER[\'HTTP_X_WPCHECKPOINT_PASS\'] : \'\';' . "\n"
+		. '	if ( \'-\' !== $wpcheckpoint_found[3] && 1 === preg_match( \'/\\A[0-9a-f]{64}\\z/\', $wpcheckpoint_pass ) && hash_equals( $wpcheckpoint_found[3], hash( \'sha256\', $wpcheckpoint_pass ) ) ) {' . "\n"
+		. '		$upgrading = 0;' . "\n"
+		. '		if ( ! defined( \'DISABLE_WP_CRON\' ) ) {' . "\n"
+		. '			define( \'DISABLE_WP_CRON\', true );' . "\n"
+		. '		}' . "\n"
+		. '	} elseif ( ! empty( $wpcheckpoint_found[4] ) && empty( $wpcheckpoint_check ) && ! ( defined( \'WP_CLI\' ) && WP_CLI ) && ! class_exists( \'WPCheckpoint\\Jobs\\WebEntry\', false ) ) {' . "\n"
+		. '		$wpcheckpoint_visitor = __DIR__ . \'/.wpcheckpoint-visitor.php\';' . "\n"
+		. '		$wpcheckpoint_lock    = @fopen( $wpcheckpoint_visitor, \'r+\' );' . "\n"
+		. '		$wpcheckpoint_busy    = 0;' . "\n"
+		. '		if ( false !== $wpcheckpoint_lock && ( ! function_exists( \'posix_geteuid\' ) || @fileowner( $wpcheckpoint_visitor ) === posix_geteuid() ) && ( @flock( $wpcheckpoint_lock, LOCK_EX | LOCK_NB, $wpcheckpoint_busy ) || 1 !== $wpcheckpoint_busy ) ) {' . "\n"
+		. '			clearstatcache( true, $wpcheckpoint_visitor );' . "\n"
+		. '			$wpcheckpoint_next = @filemtime( $wpcheckpoint_visitor );' . "\n"
+		. '			$wpcheckpoint_due  = false !== $wpcheckpoint_next && $wpcheckpoint_next <= time() && @touch( $wpcheckpoint_visitor, time() + 5 );' . "\n"
+		. '			@flock( $wpcheckpoint_lock, LOCK_UN );' . "\n"
+		. '			@fclose( $wpcheckpoint_lock );' . "\n"
+		. '			if ( $wpcheckpoint_due ) {' . "\n"
+		. '				if ( ! defined( \'WPCHECKPOINT_WEB_ENTRY\' ) ) {' . "\n"
+		. '					define( \'WPCHECKPOINT_WEB_ENTRY\', true );' . "\n"
+		. '				}' . "\n"
+		. '				try {' . "\n"
+		. '					$wpcheckpoint_said = @include __DIR__ . \'/.wpcheckpoint-runtime.php\';' . "\n"
+		. '					if ( is_string( $wpcheckpoint_said ) && class_exists( \'WPCheckpoint\\Jobs\\WebEntry\', false ) ) {' . "\n"
+		. '						\\WPCheckpoint\\Jobs\\WebEntry::run( __DIR__, $wpcheckpoint_found[1], $wpcheckpoint_found[4], $wpcheckpoint_said );' . "\n"
+		. '					}' . "\n"
+		. '				} catch ( \\Throwable $wpcheckpoint_error ) {' . "\n"
+		. '					unset( $wpcheckpoint_error );' . "\n"
+		. '				}' . "\n"
+		. '			}' . "\n"
+		. '		} elseif ( false !== $wpcheckpoint_lock ) {' . "\n"
+		. '			@fclose( $wpcheckpoint_lock );' . "\n"
+		. '		}' . "\n"
+		. '	}' . "\n"
+		. '}' . "\n";
+
+	const KNOWN_CODES = array( self::CODE_1, self::CODE );
 
 	/**
 	 * The time of a held file (held_for() this PHP's integer size).
@@ -259,7 +350,8 @@ final class Maintenance {
 	 */
 	public static function check_code( string $path ): void {
 		$include = static function ( string $file ): void {
-			$upgrading = null;
+			$upgrading          = null;
+			$wpcheckpoint_check = true; // CODE runs no runtime here (the check is in the swap's own process).
 			include $file;
 		};
 		try {
@@ -287,14 +379,24 @@ final class Maintenance {
 	private $mark;
 
 	/**
+	 * The SHA-256 of the runtime the data file names, or null to keep what this restore's data file names now.
+	 *
+	 * @var string|null
+	 */
+	private $runtime;
+
+	/**
 	 * Constructor.
 	 *
-	 * @param string $dir  Directory the files are in (ABSPATH).
-	 * @param string $mark mark() of the restore.
+	 * @param string      $dir     Directory the files are in (ABSPATH).
+	 * @param string      $mark    mark() of the restore.
+	 * @param string|null $runtime The runtime's SHA-256 for the data file to name ('' for none), or null to keep what
+	 *                             this restore's data file names (a put() that refreshes the time or the pass).
 	 */
-	public function __construct( string $dir, string $mark ) {
-		$this->dir  = rtrim( $dir, '/\\' );
-		$this->mark = $mark;
+	public function __construct( string $dir, string $mark, $runtime = null ) {
+		$this->dir     = rtrim( $dir, '/\\' );
+		$this->mark    = $mark;
+		$this->runtime = null === $runtime ? null : (string) $runtime;
 	}
 
 	/**
@@ -308,14 +410,25 @@ final class Maintenance {
 	}
 
 	/**
-	 * This restore's data file for a time and a pass hash.
+	 * This restore's data file for a time and a pass hash, and the runtime's hash when one is named (the fifth line).
 	 *
 	 * @param int    $time      Unix time.
 	 * @param string $pass_hash SHA-256 of the pass key (64 lowercase hex characters), or NO_PASS.
+	 * @param string $runtime   SHA-256 of the runtime (64 lowercase hex characters), or '' for none.
 	 * @return string
 	 */
-	public function data( int $time, string $pass_hash = self::NO_PASS ): string {
-		return "<?php exit; ?>\n" . $this->mark . "\n" . $time . "\n" . $pass_hash . "\n";
+	public function data( int $time, string $pass_hash = self::NO_PASS, string $runtime = '' ): string {
+		return "<?php exit; ?>\n" . $this->mark . "\n" . $time . "\n" . $pass_hash . "\n" . ( '' === $runtime ? '' : $runtime . "\n" );
+	}
+
+	/**
+	 * The runtime's hash this restore's data file names ('' for none, or when the data file is not this restore's).
+	 *
+	 * @return string
+	 */
+	public function runtime_hash(): string {
+		$data = self::parse( self::look( $this->data_path() ) );
+		return null !== $data && $this->mark === $data['mark'] ? $data['runtime'] : '';
 	}
 
 	/**
@@ -395,8 +508,12 @@ final class Maintenance {
 		if ( self::OTHER === $state || self::UNKNOWN === $state ) {
 			throw new \RuntimeException( self::OTHER === $state ? 'Another maintenance file is in place.' : 'Whether a maintenance file is in place cannot be told.' );
 		}
+		$runtime = null === $this->runtime ? $this->runtime_hash() : $this->runtime;
+		if ( '' !== $runtime && 1 !== preg_match( '/\A[0-9a-f]{64}\z/', $runtime ) ) {
+			throw new \InvalidArgumentException( 'Not a runtime hash.' );
+		}
 		$options = null === $confirm ? array() : array( 'confirm' => $confirm );
-		AtomicFile::write( $this->dir, self::DATA, $this->data( $time, $pass_hash ), $options );
+		AtomicFile::write( $this->dir, self::DATA, $this->data( $time, $pass_hash, $runtime ), $options );
 		HostFunctions::opcache_invalidate( $this->data_path() );
 		if ( self::CODE !== self::look( $this->path() )[1] ) {
 			AtomicFile::write( $this->dir, self::FILE, self::CODE, $options + array( 'check' => array( self::class, 'check_code' ) ) );
@@ -426,19 +543,147 @@ final class Maintenance {
 	}
 
 	/**
-	 * Take this restore's file down: .maintenance when it is this restore's (or bare), then the data file when it is
-	 * this restore's (or of no form) and .maintenance is not CODE. Anything else stays.
+	 * Take this restore's file down: its runtime log first added to the job's log ($merge), then .maintenance when it
+	 * is this restore's (or bare), then the data file when it is this restore's (or of no form) and .maintenance is not
+	 * a code this plugin wrote, then the files of a run without WordPress that name this restore (WEB_FILES, the log
+	 * last). Anything else stays. The take-down does not wait on the log: a $merge that throws (or none given) puts its
+	 * lines in PHP's log instead, redacted (they were masked when written), and the take-down goes on.
 	 *
 	 * @param callable|null $confirm Called right before each file is deleted (a lease check; throws to stop).
+	 * @param callable|null $merge   function( string[] $lines ): void, adds the runtime log's lines to the job's log.
 	 * @return bool Whether none of this restore's is there now (removed, or none was).
 	 * @throws \WPCheckpoint\Support\DeletionRefused When the Deleter refuses the path (not ABSPATH).
 	 * @throws \RuntimeException What $confirm throws to stop; nothing more is deleted then.
 	 */
-	public function remove( $confirm = null ): bool {
+	public function remove( $confirm = null, $merge = null ): bool {
 		$state = $this->state();
 		if ( self::UNKNOWN === $state ) {
 			return false;
 		}
+		$this->merge_log( $merge );
+		return $this->remove_files( $state, $confirm ) && $this->remove_web_files( $confirm );
+	}
+
+	/**
+	 * The runtime log of this restore, added to the job's log (merge_log()'s rule).
+	 *
+	 * @param callable|null $merge function( string[] $lines ): void.
+	 * @return void
+	 */
+	private function merge_log( $merge ): void {
+		$path  = $this->dir . DIRECTORY_SEPARATOR . self::LOG;
+		$lines = self::web_mark( $path ) === $this->mark ? self::log_lines( $path ) : array();
+		if ( array() === $lines ) {
+			return;
+		}
+		$merged = false;
+		if ( is_callable( $merge ) ) {
+			try {
+				call_user_func( $merge, $lines );
+				$merged = true;
+			} catch ( \Throwable $e ) {
+				unset( $e ); // Said below, with the lines.
+			}
+		}
+		if ( ! $merged ) {
+			$redactor = new \WPCheckpoint\Support\Redactor( \WPCheckpoint\Support\Redactor::installation_secrets() );
+			error_log( 'WP Checkpoint: the log of the runs without WordPress could not be added to the job\'s log; it is taken down with the maintenance file. Its lines follow.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- the job's log cannot take them.
+			foreach ( $lines as $line ) {
+				$masked = \WPCheckpoint\Support\Report::mask_paths( $redactor->redact( $line ), array( '{abspath}' => $this->dir ) );
+				error_log( 'WP Checkpoint (runs without WordPress): ' . ( is_string( $masked ) ? $masked : 'A line could not be cleaned safely.' ) ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- as above.
+			}
+		}
+	}
+
+	/**
+	 * The lines of a runtime log (its header lines left out), or none when it cannot be read.
+	 *
+	 * @param string $path Path.
+	 * @return string[]
+	 */
+	public static function log_lines( string $path ): array {
+		$text = @file_get_contents( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- unreadable: nothing to add.
+		if ( ! is_string( $text ) ) {
+			return array();
+		}
+		$out = array();
+		foreach ( explode( "\n", $text ) as $line ) {
+			if ( '' === $line || 0 === strpos( $line, '<?php' ) || 0 === strpos( $line, '# ' ) ) {
+				continue;
+			}
+			$out[] = $line;
+		}
+		return $out;
+	}
+
+	/**
+	 * The mark a file of WEB_FILES names (in its first 512 bytes), '' when none (or it is not a regular file, or cannot
+	 * be read).
+	 *
+	 * @param string $path Path.
+	 * @return string
+	 */
+	public static function web_mark( string $path ): string {
+		$read = self::web_head( $path );
+		return is_string( $read ) && 1 === preg_match( self::WEB_MARK, $read, $found ) ? $found[1] : '';
+	}
+
+	/**
+	 * The first 512 bytes of a file of WEB_FILES; false when it is positively not a regular file there (not there, a
+	 * link, a directory), null when it is a regular file that cannot be read.
+	 *
+	 * @param string $path Path.
+	 * @return string|false|null
+	 */
+	private static function web_head( string $path ) {
+		clearstatcache( true, $path );
+		$stat = @lstat( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a warning would name the path.
+		if ( false === $stat || 0100000 !== ( $stat['mode'] & 0170000 ) ) {
+			return false;
+		}
+		$handle = @fopen( $path, 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
+		if ( false === $handle ) {
+			return null;
+		}
+		$head = @fread( $handle, 512 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
+		@fclose( $handle ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
+		return is_string( $head ) ? $head : null;
+	}
+
+	/**
+	 * The files of a run without WordPress that name this restore, taken down in WEB_FILES' order; one that cannot be
+	 * read goes too (the names are this plugin's, and no other restore's maintenance file stands here: remove_files()
+	 * stopped before this otherwise), so that a take-down never waits on a file it cannot read.
+	 *
+	 * @param callable|null $confirm Called right before each file is deleted.
+	 * @return bool Whether none of them is there now.
+	 * @throws \WPCheckpoint\Support\DeletionRefused When the Deleter refuses the path.
+	 */
+	private function remove_web_files( $confirm ): bool {
+		$gone = true;
+		foreach ( self::WEB_FILES as $name ) {
+			$path = $this->dir . DIRECTORY_SEPARATOR . $name;
+			if ( null !== self::web_head( $path ) && self::web_mark( $path ) !== $this->mark ) {
+				clearstatcache( true, $path );
+				$gone = $gone && ( false === @lstat( $path ) ? Paths::positively_gone( $path ) : true ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- another restore's, or none: not this restore's to take down.
+				continue;
+			}
+			$deleted = Deleter::delete_maintenance_file( $this->dir, $name, $confirm );
+			HostFunctions::opcache_invalidate( $path );
+			$gone = $gone && $deleted;
+		}
+		return $gone;
+	}
+
+	/**
+	 * .maintenance and the data file (remove()).
+	 *
+	 * @param string        $state   state() as read.
+	 * @param callable|null $confirm Called right before each file is deleted.
+	 * @return bool
+	 * @throws \WPCheckpoint\Support\DeletionRefused When the Deleter refuses the path.
+	 */
+	private function remove_files( string $state, $confirm ): bool {
 		if ( self::OURS === $state || self::BARE === $state ) {
 			$gone = Deleter::delete_maintenance_file( $this->dir, self::FILE, $confirm );
 			HostFunctions::opcache_invalidate( $this->path() );
@@ -512,16 +757,17 @@ final class Maintenance {
 	 * A data file's mark and time, or null when it is not a regular file in DATA_FORM.
 	 *
 	 * @param array{0: string, 1: string} $look look() of it.
-	 * @return array{mark: string, time: int, pass: string}|null
+	 * @return array{mark: string, time: int, pass: string, runtime: string}|null
 	 */
 	private static function parse( array $look ) {
 		if ( 'file' !== $look[0] || 1 !== preg_match( self::DATA_FORM, $look[1], $found ) ) {
 			return null;
 		}
 		return array(
-			'mark' => $found[1],
-			'time' => (int) $found[2],
-			'pass' => $found[3],
+			'mark'    => $found[1],
+			'time'    => (int) $found[2],
+			'pass'    => $found[3],
+			'runtime' => isset( $found[4] ) ? $found[4] : '',
 		);
 	}
 }

@@ -714,7 +714,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			// This restore's file only: a bare one (no data file names its restore) is the holder's to take down, and
 			// this job's once it was recorded as untouched after it held the site (its file put up, then let go).
 			$own = in_array( (string) ( $cursor['phase'] ?? '' ), array( 'reverted', 'rejudged' ), true );
-			if ( ( $own || Maintenance::BARE !== $file->state() ) && ! $file->remove() ) {
+			if ( ( $own || Maintenance::BARE !== $file->state() ) && ! $file->remove( null, $this->log_merge( $context ) ) ) {
 				$context->logger()->warning( 'The restore\'s maintenance file could not be taken down' );
 			}
 		} catch ( NotHere $e ) {
@@ -1034,6 +1034,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		try {
 			$guard = null;
 			$this->at( 'entered' );
+			$file = $this->web_files( $context, $cursor );
 			$file->put( $this->now(), array( $context, 'confirm_lease' ) );
 			$this->at( 'maintenance' );
 			if ( $redo > 0 ) {
@@ -3850,11 +3851,65 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 */
 	private function take_down( JobContext $context, array $cursor ): void {
 		$file    = $this->maintenance( $cursor );
-		$confirm = array( $context, 'confirm_lease' );
-		$removed = isset( $this->parts['remove'] ) ? (bool) call_user_func( $this->parts['remove'], $file, $confirm ) : $file->remove( $confirm );
+		$confirm = function () use ( $context ): void {
+			$this->at( 'take_down' ); // Right before each file goes (tests: a run killed between two of them).
+			$context->confirm_lease();
+		};
+		$removed = isset( $this->parts['remove'] ) ? (bool) call_user_func( $this->parts['remove'], $file, $confirm ) : $file->remove( $confirm, $this->log_merge( $context ) );
 		if ( ! $removed ) {
 			throw new TransientFailure( 'The maintenance file could not be taken down yet.' );
 		}
+	}
+
+	/**
+	 * What adds the log of the runs without WordPress to the job's log before the maintenance file is taken down
+	 * (Maintenance::remove()): each line through the job's logger, which masks it again and, when the job's log cannot
+	 * be written, puts it in PHP's log (Logger's fallback).
+	 *
+	 * @param JobContext $context Context.
+	 * @return callable function( string[] $lines ): void.
+	 */
+	private function log_merge( JobContext $context ): callable {
+		return static function ( array $lines ) use ( $context ): void {
+			foreach ( $lines as $line ) {
+				$context->logger()->info( 'A run without WordPress noted', array( 'line' => (string) $line ) );
+			}
+		};
+	}
+
+	/**
+	 * Before the maintenance file is first put up: the runtime that puts a half-made swap back from a visitor's request
+	 * (WebRuntime), then the visitor file (VisitorFile) and the runtime log (RuntimeLog, empty: runs only append to it),
+	 * each a unit of its own with a checkpoint after it that records it in the cursor (its hash; that they are there);
+	 * the maintenance file that names the runtime's hash comes after both
+	 * (the data file, then CODE). In that order a run that dies between two of them leaves files that nothing runs (CODE
+	 * runs the runtime only once the data file names it, and a run without WordPress takes no job without this job's
+	 * maintenance file), and the next run, finding the swap at "enter", rolls it back, which takes them down with the
+	 * maintenance file (Maintenance::remove(): every file that names this restore).
+	 *
+	 * @param JobContext           $context Context.
+	 * @param array<string, mixed> $cursor  The cursor of the "enter" phase (updated with what was written).
+	 * @return Maintenance The maintenance file, naming the runtime's hash.
+	 * @throws LockLost When the lease is gone (checked right before each file goes in place).
+	 */
+	private function web_files( JobContext $context, array &$cursor ): Maintenance {
+		$dir               = (string) ( $this->parts['abspath'] ?? ABSPATH );
+		$mark              = (string) $cursor['mark'];
+		$cursor['runtime'] = WebRuntime::write( $dir, $mark, array( $context, 'confirm_lease' ) );
+		$this->at( 'runtime_written' );
+		$context->checkpoint( $cursor, 20, __( 'Swapping in the restored site', 'wp-checkpoint' ) );
+		$this->at( 'runtime_recorded' );
+		VisitorFile::create( $dir, $mark, isset( $this->parts['plugin'] ) ? (string) $this->parts['plugin'] : $this->host->plugin(), array( $context, 'confirm_lease' ) );
+		$this->at( 'visitor_written' );
+		$cursor['visitor'] = true;
+		$context->checkpoint( $cursor, 20, __( 'Swapping in the restored site', 'wp-checkpoint' ) );
+		$this->at( 'visitor_recorded' );
+		RuntimeLog::create( $dir, $mark, array( $context, 'confirm_lease' ) );
+		$this->at( 'log_written' );
+		$cursor['log'] = true;
+		$context->checkpoint( $cursor, 20, __( 'Swapping in the restored site', 'wp-checkpoint' ) );
+		$this->at( 'log_recorded' );
+		return new Maintenance( $dir, $mark, $cursor['runtime'] );
 	}
 
 	/**

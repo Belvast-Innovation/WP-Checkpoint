@@ -98,10 +98,11 @@ final class Connection {
 	 *
 	 * @param Credentials $credentials Settings.
 	 * @param int         $timeout     Seconds a connection attempt may take.
+	 * @param int         $read        Seconds a read from the server may take (where MYSQLI_OPT_READ_TIMEOUT exists).
 	 * @return \mysqli
 	 * @throws Failure When the database cannot be used.
 	 */
-	public static function connect( Credentials $credentials, int $timeout = self::CONNECT_TIMEOUT ): \mysqli {
+	public static function connect( Credentials $credentials, int $timeout = self::CONNECT_TIMEOUT, int $read = self::READ_TIMEOUT ): \mysqli {
 		if ( ! class_exists( 'mysqli' ) || ! function_exists( 'mysqli_init' ) ) {
 			throw new Failure( Failure::NO_MYSQLI );
 		}
@@ -115,14 +116,14 @@ final class Connection {
 		}
 		$flags = $credentials->flags() & ~self::MULTI_STATEMENTS;
 		return self::quietly(
-			static function () use ( $credentials, $host, $port, $socket, $timeout, $flags ): \mysqli {
+			static function () use ( $credentials, $host, $port, $socket, $timeout, $read, $flags ): \mysqli {
 				$mysqli = mysqli_init();
 				if ( ! $mysqli instanceof \mysqli ) {
 					throw new Failure( Failure::NO_MYSQLI );
 				}
 				mysqli_options( $mysqli, MYSQLI_OPT_CONNECT_TIMEOUT, max( 1, $timeout ) );
 				if ( defined( 'MYSQLI_OPT_READ_TIMEOUT' ) ) {
-					mysqli_options( $mysqli, MYSQLI_OPT_READ_TIMEOUT, self::READ_TIMEOUT );
+					mysqli_options( $mysqli, MYSQLI_OPT_READ_TIMEOUT, max( 1, $read ) );
 				}
 				if ( ! mysqli_real_connect( $mysqli, $host, $credentials->get( 'user' ), $credentials->get( 'password' ), '', $port, $socket, $flags ) ) {
 					throw self::failure( mysqli_connect_errno() );

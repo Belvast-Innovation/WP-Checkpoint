@@ -155,6 +155,23 @@ final class WebPathScanner {
 				}
 			}
 		}
+		// What a loaded class needs declared first: its parent, its interfaces, its traits, and theirs (a file holding all
+		// of them, the runtime, declares them in that order: Jobs\WebRuntime); and the classes its constants' values,
+		// its properties' and its parameters' defaults name (evaluated with it).
+		$ancestry = array_keys( $loaded );
+		while ( array() !== $ancestry ) {
+			$class = $this->class_of( (string) array_shift( $ancestry ) );
+			if ( null === $class ) {
+				continue;
+			}
+			foreach ( array_merge( array( $class['parent'] ), $class['interfaces'], $class['traits'], $class['statics'] ) as $name ) {
+				$fq = '' === $name ? null : $this->resolve( $name, $class );
+				if ( null !== $fq && ! isset( $loaded[ $fq ] ) && null !== $this->class_of( $fq ) ) {
+					$loaded[ $fq ] = true;
+					$ancestry[]    = $fq;
+				}
+			}
+		}
 		foreach ( array_keys( $loaded ) as $cls ) {
 			$class = $this->class_of( $cls );
 			if ( null !== $class && '' !== trim( (string) preg_replace( "/defined\\s*\\(\\s*'ABSPATH'\\s*\\)\\s*\\|\\s*\\|\\s*exit\\s*;/", '', $class['outside'] ) ) ) {
@@ -649,7 +666,9 @@ final class WebPathScanner {
 			'kind'       => '',
 			'final'      => false,
 			'parent'     => '',
+			'interfaces' => array(),
 			'traits'     => array(),
+			'statics'    => array(),
 			'properties' => array(),
 			'methods'    => array(),
 		);
@@ -681,9 +700,18 @@ final class WebPathScanner {
 				for ( $j = $i - 1; $j >= 0 && is_array( $tokens[ $j ] ) && in_array( $tokens[ $j ][0], array( T_FINAL, T_ABSTRACT ), true ); $j-- ) {
 					$out['final'] = $out['final'] || T_FINAL === $tokens[ $j ][0];
 				}
+				$listing = '';
 				for ( $j = $i + 1; $j < $count && '{' !== $tokens[ $j ]; $j++ ) {
 					if ( is_array( $tokens[ $j ] ) && T_EXTENDS === $tokens[ $j ][0] && 'class' === $out['kind'] ) {
 						$out['parent'] = self::name( $tokens, $j + 1 )[0];
+					} elseif ( is_array( $tokens[ $j ] ) && ( T_IMPLEMENTS === $tokens[ $j ][0] || ( T_EXTENDS === $tokens[ $j ][0] && 'interface' === $out['kind'] ) ) ) {
+						$listing = 'interfaces';
+					} elseif ( 'interfaces' === $listing && ',' !== $tokens[ $j ] && ! ( is_array( $tokens[ $j ] ) && T_WHITESPACE === $tokens[ $j ][0] ) ) {
+						list( $name, $after ) = self::name( $tokens, $j );
+						if ( '' !== $name ) {
+							$out['interfaces'][] = $name; // What it implements (or, an interface, extends): loaded with it.
+							$j                   = $after - 1;
+						}
 					}
 				}
 				continue;
@@ -701,6 +729,14 @@ final class WebPathScanner {
 			}
 			if ( 1 !== $depth || '' === $out['kind'] ) {
 				continue;
+			}
+			// In the class body, outside its methods' bodies: a class named before "::" (a constant's value, a property's
+			// default, a parameter's default) is evaluated with the class, so it is loaded with it.
+			if ( is_array( $t ) && in_array( $t[0], array_merge( array( T_STRING, T_NS_SEPARATOR ), defined( 'T_NAME_QUALIFIED' ) ? array( T_NAME_QUALIFIED, T_NAME_FULLY_QUALIFIED, T_NAME_RELATIVE ) : array() ), true ) && ! ( isset( $tokens[ $i - 1 ] ) && is_array( $tokens[ $i - 1 ] ) && in_array( $tokens[ $i - 1 ][0], array( T_STRING, T_NS_SEPARATOR, T_DOUBLE_COLON, T_OBJECT_OPERATOR ), true ) ) ) {
+				list( $named, $after ) = self::name( $tokens, $i );
+				if ( '' !== $named && isset( $tokens[ $after ] ) && is_array( $tokens[ $after ] ) && T_DOUBLE_COLON === $tokens[ $after ][0] ) {
+					$out['statics'][] = $named;
+				}
 			}
 			// In the class body.
 			if ( is_array( $t ) && T_USE === $t[0] ) {

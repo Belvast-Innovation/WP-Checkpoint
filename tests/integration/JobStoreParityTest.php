@@ -83,6 +83,9 @@ final class JobStoreParityTest extends WP_UnitTestCase {
 			},
 			static function (): bool {
 				return false;
+			},
+			static function () use ( &$now ): int {
+				return $now;
 			}
 		);
 	}

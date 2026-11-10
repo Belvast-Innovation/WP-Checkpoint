@@ -46,6 +46,11 @@ final class AtomicFile {
 	const MAX_BYTES = 1048576;
 
 	/**
+	 * Most bytes of the runtime of a run without WordPress (Restore\Maintenance::RUNTIME): the classes it needs in one file.
+	 */
+	const MAX_RUNTIME_BYTES = 4194304;
+
+	/**
 	 * Files written into a staging root (its protection from web access).
 	 */
 	const ROOT_FILES = array( 'index.php', '.htaccess' );
@@ -56,9 +61,10 @@ final class AtomicFile {
 	 * @param string               $dir      Directory (exists).
 	 * @param string               $name     File name (no separator; a name StagingLayout::parse() recognises, as
 	 *                                       its temporary name must be too, one of ROOT_FILES in a staging root, or
-	 *                                       the maintenance file or its data file in ABSPATH, whose temporary names
-	 *                                       the residue catalogue knows there: Residue::scan_maintenance()).
-	 * @param string               $contents Contents (at most MAX_BYTES).
+	 *                                       the maintenance file, its data file, the runtime or the visitor file in
+	 *                                       ABSPATH, whose temporary names the residue catalogue knows there:
+	 *                                       Residue::scan_maintenance()).
+	 * @param string               $contents Contents (at most MAX_BYTES; the runtime at most MAX_RUNTIME_BYTES).
 	 * @param array<string, mixed> $options  "check": function( string $temporary ): void, called with the written
 	 *                                       temporary file before "confirm" (throws to stop; the temporary file is
 	 *                                       removed);
@@ -78,11 +84,11 @@ final class AtomicFile {
 		// a probe's name, or a protection file of a staging root (the root is reclaimed whole, whatever is in it).
 		$registered = null !== StagingLayout::parse( $name ) && null !== StagingLayout::parse( $name . $suffix );
 		$protection = in_array( $name, self::ROOT_FILES, true ) && 'stage' === ( StagingLayout::parse( basename( rtrim( $dir, '/\\' ) ) )['kind'] ?? '' );
-		$upgrading  = in_array( $name, array( '.maintenance', '.wpcheckpoint-maintenance.php' ), true ) && self::maintenance_dir( $dir );
+		$upgrading  = in_array( $name, array( '.maintenance', '.wpcheckpoint-maintenance.php', '.wpcheckpoint-runtime.php', '.wpcheckpoint-visitor.php', '.wpcheckpoint-runtime-log.php' ), true ) && self::maintenance_dir( $dir );
 		if ( '' === $name || false !== strpbrk( $name, "/\\\0" ) || ! ( $registered || $protection || $upgrading ) ) {
 			throw new \InvalidArgumentException( 'Not a file name this plugin writes.' );
 		}
-		if ( strlen( $contents ) > self::MAX_BYTES ) {
+		if ( strlen( $contents ) > ( '.wpcheckpoint-runtime.php' === $name ? self::MAX_RUNTIME_BYTES : self::MAX_BYTES ) ) {
 			throw new \InvalidArgumentException( 'Too large to write this way.' );
 		}
 		$check   = isset( $options['check'] ) && is_callable( $options['check'] ) ? $options['check'] : null;

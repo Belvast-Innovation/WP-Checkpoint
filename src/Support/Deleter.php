@@ -390,9 +390,10 @@ final class Deleter {
 
 	/**
 	 * The names delete_maintenance_file() deletes: the maintenance file the swap writes, its data file
-	 * (Restore\Maintenance::DATA), and their temporary names (AtomicFile).
+	 * (Restore\Maintenance::DATA), the files of a run without WordPress next to them (Restore\Maintenance::WEB_FILES),
+	 * and their temporary names (AtomicFile).
 	 */
-	const MAINTENANCE_NAMES = '/\A(?:\.maintenance|\.wpcheckpoint-maintenance\.php)(?:\.[0-9a-f]{16}\.tmp)?\z/';
+	const MAINTENANCE_NAMES = '/\A(?:\.maintenance|\.wpcheckpoint-maintenance\.php|\.wpcheckpoint-runtime\.php|\.wpcheckpoint-visitor\.php|\.wpcheckpoint-runtime-log\.php)(?:\.[0-9a-f]{16}\.tmp)?\z/';
 
 	/**
 	 * Delete the maintenance file a restore's swap wrote in ABSPATH, its data file, or a temporary file of either. The

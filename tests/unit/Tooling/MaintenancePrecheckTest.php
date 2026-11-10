@@ -125,6 +125,43 @@ final class MaintenancePrecheckTest extends TestCase {
 		$this->assertSame( $out['stderr'], $this->check( array( 'WPCHECKPOINT_TEST_MAINTENANCE_REMOVE' => '1' ) )['stderr'] );
 	}
 
+	/**
+	 * Each file of a run without WordPress (and a temporary name of the runtime) stops the run with 77, listed with what
+	 * else is there, and nothing is removed, asked to remove or not.
+	 *
+	 * @return array<string, array{0: string}>
+	 */
+	public function web_files(): array {
+		return array(
+			'runtime'      => array( '.wpcheckpoint-runtime.php' ),
+			'visitor'      => array( '.wpcheckpoint-visitor.php' ),
+			'log'          => array( '.wpcheckpoint-runtime-log.php' ),
+			'runtime temp' => array( '.wpcheckpoint-runtime.php.0123456789abcdef.tmp' ),
+		);
+	}
+
+	/**
+	 * @dataProvider web_files
+	 */
+	public function test_a_file_of_a_run_without_wordpress_stops_the_run_and_nothing_is_removed( string $name ): void {
+		file_put_contents( $this->sandbox . '/site/.wpcheckpoint-maintenance.php', $this->data_file() );
+		$out = $this->check();
+		$this->assertSame( 0, $out['code'], 'the control: without it, the run starts: ' . $out['stderr'] );
+		file_put_contents( $this->sandbox . '/site/' . $name, "<?php exit; ?>\n# WP Checkpoint restore " . str_repeat( 'a', 32 ) . "\n" );
+		file_put_contents( $this->sandbox . '/site/.maintenance', Maintenance::CODE );
+		foreach ( array( '1', '0' ) as $remove ) {
+			$out = $this->check( array( 'WPCHECKPOINT_TEST_MAINTENANCE_REMOVE' => $remove ) );
+			$this->assertSame( 77, $out['code'], $out['stderr'] );
+			$this->assertStringContainsString( ExpectedPath::slashed( $this->sandbox, 'site', $name ), $out['stderr'] );
+			$this->assertStringContainsString( ExpectedPath::slashed( $this->sandbox, 'site', '.maintenance' ), $out['stderr'], 'listed with the rest' );
+			$this->assertStringContainsString( 'nothing was removed', $out['stderr'] );
+			clearstatcache();
+			$this->assertFileExists( $this->sandbox . '/site/' . $name );
+			$this->assertFileExists( $this->sandbox . '/site/.maintenance' );
+			$this->assertFileExists( $this->sandbox . '/site/.wpcheckpoint-maintenance.php' );
+		}
+	}
+
 	public function test_a_maintenance_file_is_listed_left_and_stops_the_run(): void {
 		file_put_contents( $this->sandbox . '/site/.maintenance', Maintenance::CODE );
 		$out = $this->check();

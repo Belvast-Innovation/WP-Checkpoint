@@ -131,9 +131,9 @@ final class FencedWritesTest extends TestCase {
 		'src/Jobs/TempTableCount.php' => array(),
 		'src/Jobs/JobStore.php'       => array(
 			array( '$this->db->execute( $this->claim_template( $managing ), $params );', self::EXCEPTION, 'The claim: a compare-and-set whose WHERE takes the job only when no live lease holds it (lock_token = \'\' OR locked_until < now, claim_template()); the lease it writes is the condition of every later write of the run.' ),
-			array( 'SET locked_until = %d, updated_at = %d WHERE id = %d AND lock_token = %s', self::CONDITIONED ),
-			array( "SET lock_token = '', locked_until = 0, updated_at = %d WHERE id = %d AND lock_token = %s", self::CONDITIONED ),
-			array( 'SET options_json = %s, updated_at = %d WHERE id = %d AND lock_token = %s', self::CONDITIONED ),
+			array( 'SET locked_until = %d, updated_at = %d, wp_run_at = GREATEST(wp_run_at, %d) WHERE id = %d AND lock_token = %s', self::CONDITIONED ),
+			array( "SET lock_token = '', locked_until = 0, updated_at = %d, wp_run_at = GREATEST(wp_run_at, %d) WHERE id = %d AND lock_token = %s", self::CONDITIONED ),
+			array( 'SET options_json = %s, updated_at = %d, wp_run_at = GREATEST(wp_run_at, %d) WHERE id = %d AND lock_token = %s', self::CONDITIONED ),
 			array( 'UninstallFence::entering_template(', self::EXCEPTION, 'Entering the site: one multi-table UPDATE of the job\'s row and the uninstall fence\'s row, its WHERE on the run\'s lock token (UninstallFence::entering_template()); built there, so its text is not here.' ),
 			array( '$this->db->update( $this->table, $data, $formats, $where, $where_formats );', self::EXCEPTION, 'A checkpoint (save_progress()): $where holds the run\'s lock_token (and no cancel request for an undo); wpdb::update() and UpdateSql build the statement from it, so its text does not name the column.' ),
 			array( '$this->db->update( $this->table, $data, $formats, $guard, $guard_formats );', self::EXCEPTION, 'A transition (write_transition()): on the status as read, and on the run\'s lock_token when a run writes it; one written with no token (a cancel, a failure from outside) only on a job whose site is untouched. Built by wpdb::update() and UpdateSql from $guard.' ),

@@ -148,7 +148,7 @@ final class SchemaColumnsTest extends JobTestCase {
 			Options::set( Schema::OPTION, array( 'version' => 14, 'min_compatible' => 1 ) );
 			$result = Schema::ensure();
 			$this->assertSame( 'migrated', $result['action'], wp_json_encode( $result ) );
-			$this->assertSame( 15, Options::get( Schema::OPTION )['version'] );
+			$this->assertSame( Schema::CURRENT, Options::get( Schema::OPTION )['version'], 'migrated from 14 to the current version' );
 			$this->assertSame( 1, Options::get( Schema::OPTION )['min_compatible'], 'older code neither reads nor writes it' );
 			$this->assertContains( 'committed_at', $wpdb->get_col( "SHOW COLUMNS FROM {$table}" ) );
 			$job = Plugin::instance()->jobs()->find( $id );

@@ -217,7 +217,8 @@ final class WebGuardsTest extends JobTestCase {
 		$this->assertTrue( $reached, 'the control: the step ran' );
 		$this->assertSame( TickResult::LEFT, $result->status, $result->message );
 		$this->assertStringContainsString( '(' . $word . ')', (string) $result->message );
-		$lease = array_flip( array( 'lock_token', 'locked_until', 'updated_at' ) );
+		// The lease, and wp_run_at: the storage here is WordPress's (JobRepository), whose claim and release stamp it.
+		$lease = array_flip( array( 'lock_token', 'locked_until', 'updated_at', 'wp_run_at' ) );
 		$this->assertSame( array_diff_key( $before, $lease ), array_diff_key( self::row( $id ), $lease ), 'the row as it was but its lease' );
 		$this->assertSame( '', self::row( $id )['lock_token'], 'the lease let go' );
 	}

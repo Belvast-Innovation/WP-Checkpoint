@@ -27,6 +27,9 @@ final class JobsTableNameTest extends WP_UnitTestCase {
 				ABSPATH,
 				static function ( string $line ): void {
 					unset( $line );
+				},
+				static function (): int {
+					return 0;
 				}
 			);
 			$this->assertSame( $before, Schema::jobs_table() );

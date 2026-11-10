@@ -358,6 +358,17 @@ final class Job {
 	public $committed_at = 0;
 
 	/**
+	 * Unix time (the database's clock) a run in WordPress last wrote the job under its lock (its claim, heartbeat,
+	 * release, checkpoint, record or transition), or WordPress last moved it to another status (a retry from WP-CLI)
+	 * (JobStore, given the time by JobRepository). A run without WordPress
+	 * never writes it (WebJobs gives 0), and waits WebJobs::GRACE_SECONDS after it before it takes the job. 0 when no
+	 * run in WordPress wrote it since the column was added.
+	 *
+	 * @var int
+	 */
+	public $wp_run_at = 0;
+
+	/**
 	 * Log file path relative to the storage base directory, e.g. "logs/job-3-ab12cd34.log".
 	 *
 	 * @var string

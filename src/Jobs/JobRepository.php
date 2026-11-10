@@ -185,7 +185,8 @@ final class JobRepository implements RunnerRepository {
 			static function ( array $value ): void {
 				self::assert_cursor_has_no_secrets( $value );
 			},
-			array( UninstallFence::class, 'absent' )
+			array( UninstallFence::class, 'absent' ),
+			array( $this, 'now' ) // A run in WordPress stamps wp_run_at (Job::$wp_run_at).
 		);
 	}
 
@@ -2882,13 +2883,18 @@ final class JobRepository implements RunnerRepository {
 				if ( false !== Maintenance::code_in( Residue::maintenance_dir() ) || $this->holder_has_mark( Maintenance::data_mark( Residue::maintenance_dir() ) ) ) {
 					return false;
 				}
+				// A file of a run without WordPress: only with no data file of a form naming a restore (which would name
+				// the runtime), and the mark it names no holder's.
+				if ( Residue::MAINTENANCE_WEB === $entry['kind'] && ( '' !== Maintenance::data_mark( Residue::maintenance_dir() ) || $this->holder_has_mark( Maintenance::web_mark( $entry['path'] ) ) ) ) {
+					return false;
+				}
 				// Its age last, after the slower reads: a file written anew meanwhile is seen.
 				clearstatcache( true, $entry['path'] );
 				$mtime = @filemtime( $entry['path'] ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- gone or unreadable: not old enough (it stays).
 				return false !== $mtime && Residue::is_expired( array( 'mtime' => (int) $mtime ) + $entry, $now );
 			};
 			$confirm = null;
-			if ( Residue::MAINTENANCE_DATA === $entry['kind'] ) {
+			if ( in_array( $entry['kind'], array( Residue::MAINTENANCE_DATA, Residue::MAINTENANCE_WEB ), true ) ) {
 				if ( ! $unread() ) {
 					continue;
 				}

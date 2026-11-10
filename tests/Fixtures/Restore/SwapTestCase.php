@@ -459,6 +459,28 @@ abstract class SwapTestCase extends RestoreTestCase {
 	protected $web_notes = array();
 
 	/**
+	 * Whether a run made without WordPress (tick_without_wordpress(), a killed one of killed_at()) comes after the grace
+	 * period: the last write of a run in WordPress moved back past it first (past_grace()). The tests of the grace
+	 * period itself set it false.
+	 *
+	 * @var bool
+	 */
+	protected $grace_over = true;
+
+	/**
+	 * The last write of a run in WordPress on the job moved back past the grace period (WebJobs::GRACE_SECONDS), by the
+	 * database's clock, as if that run had stopped longer ago: a run without WordPress waits that long after it.
+	 *
+	 * @param int $job_id Job id.
+	 * @return void
+	 */
+	protected function past_grace( int $job_id ): void {
+		global $wpdb;
+		$wpdb->query( $wpdb->prepare( 'UPDATE ' . JobRepository::table() . ' SET wp_run_at = LEAST(wp_run_at, UNIX_TIMESTAMP() - %d) WHERE id = %d', \WPCheckpoint\Jobs\WebJobs::GRACE_SECONDS + 1, $job_id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- the plugin's table.
+		$wpdb->query( 'COMMIT' );
+	}
+
+	/**
 	 * One tick of this test's restore made without WordPress: WebRun, as the entries of b2 make it (the database
 	 * settings and the table prefix from wp-config.php's values, Credentials::from_wordpress(); this sandbox's WordPress
 	 * directory), with the test's restore type and the swap's parts as its seams. $flush false: the object cache cannot
@@ -475,6 +497,9 @@ abstract class SwapTestCase extends RestoreTestCase {
 		$parts = $more + $this->swap_parts;
 		if ( ! $flush ) {
 			unset( $parts['flush'] );
+		}
+		if ( $this->grace_over ) {
+			$this->past_grace( $job->id );
 		}
 		$this->web_notes = array();
 		$notes           = &$this->web_notes;
@@ -876,6 +901,9 @@ abstract class SwapTestCase extends RestoreTestCase {
 
 	protected function killed_at( Job $job, string $seam, int $nth = 1, bool $web = false ): void {
 		$this->assertTrue( function_exists( 'posix_kill' ), 'the crash tests need the posix extension (a process killed for real, not exit())' );
+		if ( $web && $this->grace_over ) {
+			$this->past_grace( $job->id ); // The killed run is one without WordPress: it claims the job first.
+		}
 		$GLOBALS['wpdb']->query( 'COMMIT' );
 		$config = $this->sandbox . '/child-' . bin2hex( random_bytes( 4 ) ) . '.json';
 		file_put_contents(
@@ -932,7 +960,10 @@ abstract class SwapTestCase extends RestoreTestCase {
 		}
 		$set     = Plugin::instance()->jobs()->now() - 1;
 		$started = microtime( true );
-		$GLOBALS['wpdb']->query( $GLOBALS['wpdb']->prepare( 'UPDATE ' . \WPCheckpoint\Jobs\JobRepository::table() . ' SET locked_until = %d WHERE id = %d', $set, $job->id ) );
+		// With the grace period over (grace_over): the killed run's last write moved back past it too, in the same
+		// statement (a run without WordPress waits WebJobs::GRACE_SECONDS after it).
+		$grace = $this->grace_over ? $set - \WPCheckpoint\Jobs\WebJobs::GRACE_SECONDS : PHP_INT_MAX;
+		$GLOBALS['wpdb']->query( $GLOBALS['wpdb']->prepare( 'UPDATE ' . \WPCheckpoint\Jobs\JobRepository::table() . ' SET locked_until = %d, wp_run_at = LEAST(wp_run_at, %d) WHERE id = %d', $set, $grace, $job->id ) );
 		$this->kills[] = array(
 			'seam'                         => $seam . ' #' . $nth,
 			'child connection'             => $child,

@@ -13,18 +13,19 @@ namespace WPCheckpoint\Jobs;
  */
 final class TickResult {
 
-	const MORE      = 'more';       // Budget spent, more work; tick again.
-	const WAITING   = 'waiting';    // A step or a transient failure asked for a pause.
-	const PAUSED    = 'paused';     // A step asked the user a question; nothing to do until it is answered.
-	const BLOCKED   = 'blocked';    // Storage gate refused; back off.
-	const BUSY      = 'busy';       // Another driver holds the lock.
-	const COMPLETED = 'completed';
-	const FAILED    = 'failed';
-	const LOST      = 'lost';       // Lock lost mid-tick (cancelled or taken over); reload the job.
-	const FINISHED  = 'finished';   // The job was already in a state that cannot be ticked.
-	const MISSING   = 'missing';
-	const CLI       = 'cli';        // The job stands at a step only WP-CLI runs (CliOnly); no other driver goes on.
-	const LEFT      = 'left';       // A run made without WordPress left the job to WP-CLI, as it was (StepResult::LEAVE, NotHere).
+	const MORE        = 'more';       // Budget spent, more work; tick again.
+	const WAITING     = 'waiting';    // A step or a transient failure asked for a pause.
+	const PAUSED      = 'paused';     // A step asked the user a question; nothing to do until it is answered.
+	const BLOCKED     = 'blocked';    // Storage gate refused; back off.
+	const BUSY        = 'busy';       // Another driver holds the lock.
+	const COMPLETED   = 'completed';
+	const FAILED      = 'failed';
+	const LOST        = 'lost';       // Lock lost mid-tick (cancelled or taken over); reload the job.
+	const FINISHED    = 'finished';   // The job was already in a state that cannot be ticked.
+	const MISSING     = 'missing';
+	const CLI         = 'cli';        // The job stands at a step only WP-CLI runs (CliOnly); no other driver goes on.
+	const LEFT        = 'left';       // A run made without WordPress left the job to WP-CLI, as it was (StepResult::LEAVE, NotHere).
+	const UNAVAILABLE = 'unavailable'; // A run made without WordPress could not open its connection or read the job: nothing was written.
 
 	/**
 	 * One of the constants.

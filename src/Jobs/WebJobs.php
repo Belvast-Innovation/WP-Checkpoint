@@ -33,6 +33,18 @@ final class WebJobs implements RunnerRepository {
 	const CAN = array( 'files_base', 'owns_files_of', 'log_event' );
 
 	/**
+	 * Seconds after the last write of a run in WordPress (Job::$wp_run_at) before such a run takes the job: an admin
+	 * who stepped away from a WP-CLI swap finds it as they left it, not put back. In the claim's statement itself.
+	 */
+	const GRACE_SECONDS = 600;
+
+	/**
+	 * The claim's condition on who manages the job (JobStore::claim_template()): it holds the site, the managing token
+	 * and the maintenance file's mark are the ones read, and no run in WordPress wrote it since the given time.
+	 */
+	const MANAGING = 'site_state <> 0 AND ' . Job::MANAGING_SQL . ' = %s AND site_mark = %s AND wp_run_at <= %d';
+
+	/**
 	 * Connection.
 	 *
 	 * @var ImportSession
@@ -81,8 +93,10 @@ final class WebJobs implements RunnerRepository {
 	 * @param string        $prefix  The table prefix (wp-config.php's $table_prefix).
 	 * @param string        $abspath The WordPress directory.
 	 * @param callable      $note    function( string $line ): void, for what this run did not take on or could not tell.
+	 * @param callable      $run_at  function(): int, what this run's writes stamp as wp_run_at: 0 (WebRun gives it), so
+	 *                               they leave it as it is (JobStore).
 	 */
-	public function __construct( ImportSession $session, string $prefix, string $abspath, callable $note ) {
+	public function __construct( ImportSession $session, string $prefix, string $abspath, callable $note, callable $run_at ) {
 		$this->session = $session;
 		$this->prefix  = $prefix;
 		$this->abspath = $abspath;
@@ -101,7 +115,8 @@ final class WebJobs implements RunnerRepository {
 			},
 			static function (): bool {
 				return false; // Such a run never enters the site: it is never asked.
-			}
+			},
+			$run_at
 		);
 	}
 
@@ -148,6 +163,22 @@ final class WebJobs implements RunnerRepository {
 	 */
 	public function find( int $id ) {
 		return $this->store->find( $id );
+	}
+
+	/**
+	 * The job that holds the site with a maintenance file of this mark: its id, 0 when none does, -1 when more than one
+	 * row says so (not this run's to choose).
+	 *
+	 * @param string $mark The mark the data file names.
+	 * @return int
+	 * @throws \RuntimeException When the jobs cannot be read.
+	 */
+	public function held_by_mark( string $mark ): int {
+		$rows = $this->session->rows( 'SELECT id FROM ' . SqlWriter::identifier( $this->jobs_table() ) . ' WHERE site_mark = ? AND site_state <> 0 AND status IN (?, ?, ?) ORDER BY id LIMIT 2', array( $mark, Job::QUEUED, Job::RUNNING, Job::PAUSED ) );
+		if ( array() === $rows ) {
+			return 0;
+		}
+		return 1 === count( $rows ) ? (int) $rows[0][0] : -1;
 	}
 
 	/**
@@ -272,6 +303,99 @@ final class WebJobs implements RunnerRepository {
 	}
 
 	/**
+	 * Most rows of a network's sites (and networks) read for the masks; past it, every unknown first path segment is
+	 * masked too (Report::mask_hosts()'s coarse mode), as for a large network in WordPress.
+	 */
+	const SITE_NAMES_LIMIT = 50;
+
+	/**
+	 * The site's names as its tables hold them, for the masks of what such a run says (no WordPress to ask): siteurl
+	 * and home of the main site's options table, and on a network its sites and networks (at most SITE_NAMES_LIMIT rows
+	 * of each: past it, coarse), each table at its live name and at every other name the swap's plan gives it (staged,
+	 * moved aside: a restore that moved the site from another domain holds both). Bounded: one read of the plan's rows
+	 * for those three tables, then at most three reads of each (a single site has no sites table: its reads fail and
+	 * are passed over). A table that cannot be read at a name is passed over:
+	 * what is not read is not masked by name (the masks still hide every other URL's host).
+	 *
+	 * @param Job $job Job.
+	 * @return array{hosts: string[], paths: string[], coarse: bool}
+	 * @throws NotHere When a run without WordPress cannot go on here (rethrown unchanged).
+	 */
+	public function site_names( Job $job ): array {
+		$hosts  = array();
+		$paths  = array();
+		$coarse = false;
+		$site   = $this->site_entry( $job );
+		$tables = array(
+			$this->prefix . 'options' => 'SELECT option_value FROM %s WHERE option_name IN (\'siteurl\', \'home\')',
+			$this->prefix . 'blogs'   => 'SELECT domain, path FROM %s ORDER BY domain, path LIMIT ' . ( self::SITE_NAMES_LIMIT + 1 ),
+			$this->prefix . 'site'    => 'SELECT domain, path FROM %s ORDER BY domain, path LIMIT ' . ( self::SITE_NAMES_LIMIT + 1 ),
+		);
+		$rows   = array();
+		if ( null !== $site ) {
+			try {
+				$rows = $this->session->rows( 'SELECT live, stage, old FROM ' . SqlWriter::identifier( $this->prefix . SwapPlan::TABLE ) . ' WHERE job_id = ? AND attempt = ? AND kind = ? AND live IN (?, ?, ?)', array_merge( array( (string) $job->id, (string) $site['attempt'], SwapPlan::TABLE_OF ), array_keys( $tables ) ) );
+			} catch ( NotHere $e ) {
+				throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged.
+			} catch ( \RuntimeException $e ) {
+				$rows = array();
+			}
+		}
+		// Each table at its live name (whether or not the plan swaps it: a network's global tables may not be in the
+		// backup), and at the staged and moved-aside names the plan gives it.
+		$names = array();
+		foreach ( array_keys( $tables ) as $live ) {
+			$names[ $live ] = array( $live );
+		}
+		foreach ( $rows as $entry ) {
+			if ( isset( $names[ (string) $entry[0] ] ) ) {
+				$names[ (string) $entry[0] ] = array_merge( $names[ (string) $entry[0] ], array( (string) $entry[1], (string) $entry[2] ) );
+			}
+		}
+		foreach ( $names as $live => $each ) {
+			$sql = $tables[ $live ];
+			foreach ( array_unique( array_filter( $each ) ) as $name ) {
+				try {
+					$read = $this->session->rows( sprintf( $sql, SqlWriter::identifier( $name ) ) );
+				} catch ( NotHere $e ) {
+					throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged.
+				} catch ( \RuntimeException $e ) {
+					continue; // Not at this name now (renamed, not made yet).
+				}
+				if ( count( $read ) > self::SITE_NAMES_LIMIT ) {
+					$coarse = true;
+					$read   = array_slice( $read, 0, self::SITE_NAMES_LIMIT );
+				}
+				foreach ( $read as $row ) {
+					if ( 2 === count( $row ) ) {
+						$hosts[] = strtolower( (string) $row[0] );
+						$paths[] = (string) $row[1];
+						continue;
+					}
+					$parts = parse_url( (string) $row[0] ); // phpcs:ignore WordPress.WP.AlternativeFunctions.parse_url_parse_url -- without WordPress.
+					if ( is_array( $parts ) && isset( $parts['host'] ) ) {
+						$hosts[] = strtolower( (string) $parts['host'] );
+						$paths[] = isset( $parts['path'] ) ? (string) $parts['path'] : '';
+					}
+				}
+			}
+		}
+		$paths = array_values(
+			array_filter(
+				array_unique( $paths ),
+				static function ( string $path ): bool {
+					return '' !== trim( $path, '/' );
+				}
+			)
+		);
+		return array(
+			'hosts'  => array_values( array_unique( array_filter( $hosts ) ) ),
+			'paths'  => $paths,
+			'coarse' => $coarse,
+		);
+	}
+
+	/**
 	 * Whether something is at a path (positive evidence: lstat() answered).
 	 *
 	 * @param string $path Path.
@@ -282,8 +406,10 @@ final class WebJobs implements RunnerRepository {
 	}
 
 	/**
-	 * Take a job that holds the site, on the evidence (here()): the claim's statement, with who manages it as read
-	 * and the mark the maintenance file carries.
+	 * Take a job that holds the site, on the evidence (here()): the claim's statement, with who manages it as read,
+	 * the mark the maintenance file carries, and no write of a run in WordPress in the last GRACE_SECONDS: the cut-off is
+	 * read from the database's clock before (now(): local time when it cannot be read), and compared in the statement
+	 * itself, so that a WP-CLI run that writes between the two is never taken over.
 	 *
 	 * @param int $id    Job id.
 	 * @param int $lease Lock duration in seconds.
@@ -300,7 +426,7 @@ final class WebJobs implements RunnerRepository {
 		// true when it no longer is: this run is left once more, and the next reads the position moved.
 		$at_limit = $job->takeovers >= Runner::MAX_TAKEOVERS && $this->at_takeover_mark( $id );
 		$token    = bin2hex( random_bytes( 16 ) );
-		if ( ! $this->store->claim( $id, $token, $lease, 'site_state <> 0 AND ' . Job::MANAGING_SQL . ' = %s AND site_mark = %s', array( $job->managing_token(), $job->site_mark ) ) ) {
+		if ( ! $this->store->claim( $id, $token, $lease, self::MANAGING, array( $job->managing_token(), $job->site_mark, $this->now() - self::GRACE_SECONDS ) ) ) {
 			return null;
 		}
 		$held = $this->find( $id );

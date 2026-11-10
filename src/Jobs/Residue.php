@@ -65,6 +65,13 @@ use WPCheckpoint\Support\Paths;
  *   orphan after VERIFY_TTL when .maintenance is positively not the
  *   maintenance code (which would read it) and no job that holds the site
  *   has its mark (JobRepository and the uninstall decide that).
+ * - maintenance_web: a file of a run without WordPress the swap writes next
+ *   to the maintenance file (Restore\Maintenance::WEB_FILES: the runtime,
+ *   the visitor file, the runtime log), taken down with it. Left alone, it
+ *   is an orphan after VERIFY_TTL when .maintenance is positively not the
+ *   maintenance code, no data file of a form names a restore, and no job
+ *   that holds the site has the mark the file names (JobRepository and the
+ *   uninstall decide that).
  * - stray_table: a table the swap's rollback renamed out of the way
  *   (TempTables::stray()): someone else's, created under a name the old
  *   site's table had to go back to. Never an orphan: it is reported, and
@@ -95,11 +102,12 @@ final class Residue {
 
 	const MAINTENANCE_TMP  = 'maintenance_tmp';
 	const MAINTENANCE_DATA = 'maintenance_data';
+	const MAINTENANCE_WEB  = 'maintenance_web';
 	const STRAY_TABLE      = 'stray_table';
 
 	const PUT_BACK_EVIDENCE = 'put_back_evidence';
 
-	const KINDS = array( self::WORK_DIR, self::TEMP_TABLE, self::VERIFY_DIR, self::STRAY, self::STAGE_DIR, self::PROBE, self::MAINTENANCE_TMP, self::MAINTENANCE_DATA, self::STRAY_TABLE, self::PUT_BACK_EVIDENCE );
+	const KINDS = array( self::WORK_DIR, self::TEMP_TABLE, self::VERIFY_DIR, self::STRAY, self::STAGE_DIR, self::PROBE, self::MAINTENANCE_TMP, self::MAINTENANCE_DATA, self::MAINTENANCE_WEB, self::STRAY_TABLE, self::PUT_BACK_EVIDENCE );
 
 	/**
 	 * The directory in a staging root where the swap's rollback moves what is in its way.
@@ -110,7 +118,12 @@ final class Residue {
 	 * The temporary names of the maintenance file and its data file (AtomicFile: the name, a dot, 16 hex characters,
 	 * ".tmp").
 	 */
-	const MAINTENANCE_TMP_NAME = '/\A(?:\.maintenance|\.wpcheckpoint-maintenance\.php)\.[0-9a-f]{16}\.tmp\z/';
+	const MAINTENANCE_TMP_NAME = '/\A(?:\.maintenance|\.wpcheckpoint-maintenance\.php|\.wpcheckpoint-runtime\.php|\.wpcheckpoint-visitor\.php|\.wpcheckpoint-runtime-log\.php)\.[0-9a-f]{16}\.tmp\z/';
+
+	/**
+	 * The files of a run without WordPress next to the maintenance file (Restore\Maintenance::WEB_FILES).
+	 */
+	const MAINTENANCE_WEB_NAMES = array( '.wpcheckpoint-visitor.php', '.wpcheckpoint-runtime.php', '.wpcheckpoint-runtime-log.php' );
 
 	/**
 	 * The data file of the maintenance file (Restore\Maintenance::DATA).
@@ -351,7 +364,8 @@ final class Residue {
 		$entries = '' === $dir ? false : @scandir( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- an unreadable directory is simply nothing to reap.
 		foreach ( is_array( $entries ) ? $entries : array() as $name ) {
 			$data = self::MAINTENANCE_DATA_NAME === $name;
-			if ( ! $data && 1 !== preg_match( self::MAINTENANCE_TMP_NAME, (string) $name ) ) {
+			$web  = in_array( $name, self::MAINTENANCE_WEB_NAMES, true );
+			if ( ! $data && ! $web && 1 !== preg_match( self::MAINTENANCE_TMP_NAME, (string) $name ) ) {
 				continue;
 			}
 			$path = rtrim( $dir, '/\\' ) . DIRECTORY_SEPARATOR . $name;
@@ -359,7 +373,7 @@ final class Residue {
 			if ( false === $stat || 0100000 !== ( $stat['mode'] & 0170000 ) ) {
 				continue; // Only a regular file: AtomicFile never makes anything else.
 			}
-			$out[] = self::entry( $data ? self::MAINTENANCE_DATA : self::MAINTENANCE_TMP, $path, 0, (int) $stat['mtime'] );
+			$out[] = self::entry( $data ? self::MAINTENANCE_DATA : ( $web ? self::MAINTENANCE_WEB : self::MAINTENANCE_TMP ), $path, 0, (int) $stat['mtime'] );
 		}
 		return $out;
 	}
@@ -379,6 +393,7 @@ final class Residue {
 				return $entry['mtime'] + self::STRAY_TTL <= $now;
 			case self::MAINTENANCE_TMP:
 			case self::MAINTENANCE_DATA:
+			case self::MAINTENANCE_WEB:
 				return $entry['mtime'] + self::VERIFY_TTL <= $now;
 			default:
 				return false;
