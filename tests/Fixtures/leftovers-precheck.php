@@ -4,9 +4,11 @@
  * fail for a reason not its own, and the run does not start: an entry of the test site's uploads directory whose name
  * starts with one the tests make there (UploadsLeftovers::names(), read from the tests; a test that makes it again
  * meets it, or packs it with its own), and a restore's loader probe in its must-use plugins directory
- * (ContentLeftovers::probes(); the site loads it as a must-use plugin). They are listed; nothing is removed.
+ * (ContentLeftovers::probes(); the site loads it as a must-use plugin), a file under the name of a restore's loader
+ * there (RealMuPlugins), and a page cache drop-in in its wp-content directory (RealAdvancedCache), the last two
+ * whatever they hold. They are listed; nothing is removed.
  *
- * Usage: php leftovers-precheck.php [<uploads directory> <must-use plugins directory>]. Without them, the test site's
+ * Usage: php leftovers-precheck.php [<uploads directory> <must-use plugins directory> [<wp-content directory>]]. Without them, the test site's
  * (the tests configuration's ABSPATH, WP_CONTENT_DIR and WPMU_PLUGIN_DIR; WordPress is not loaded); without the tests
  * configuration nothing is checked.
  *
@@ -18,6 +20,7 @@
 // phpcs:disable -- a test fixture run as a script.
 
 use WPCheckpoint\Tests\Fixtures\ContentLeftovers;
+use WPCheckpoint\Tests\Fixtures\RealAdvancedCache;
 use WPCheckpoint\Tests\Fixtures\UploadsLeftovers;
 
 $wpcheckpoint_config = '';
@@ -41,7 +44,8 @@ if ( '' !== $wpcheckpoint_config ) {
 }
 $wpcheckpoint_uploads = isset( $argv[1] ) ? (string) $argv[1] : UploadsLeftovers::dir();
 $wpcheckpoint_mu      = isset( $argv[2] ) ? (string) $argv[2] : ContentLeftovers::mu_dir();
-$wpcheckpoint_refusal = UploadsLeftovers::refusal( rtrim( $wpcheckpoint_uploads, '/' ), UploadsLeftovers::names() ) . ContentLeftovers::refusal( rtrim( $wpcheckpoint_mu, '/' ) );
+$wpcheckpoint_content = isset( $argv[3] ) ? (string) $argv[3] : ( isset( $argv[1] ) ? '' : ContentLeftovers::dir() );
+$wpcheckpoint_refusal = UploadsLeftovers::refusal( rtrim( $wpcheckpoint_uploads, '/' ), UploadsLeftovers::names() ) . ContentLeftovers::refusal( rtrim( $wpcheckpoint_mu, '/' ) ) . ( '' === $wpcheckpoint_content ? '' : RealAdvancedCache::refusal_before_run( rtrim( $wpcheckpoint_content, '/' ) ) );
 if ( '' !== $wpcheckpoint_refusal ) {
 	fwrite( STDERR, $wpcheckpoint_refusal );
 	exit( 77 );

@@ -14,7 +14,9 @@ use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Tests\Fixtures\ActivePlugin;
 use WPCheckpoint\Tests\Fixtures\ContentLeftovers;
 use WPCheckpoint\Tests\Fixtures\RealAbspath;
+use WPCheckpoint\Tests\Fixtures\RealAdvancedCache;
 use WPCheckpoint\Tests\Fixtures\RealMuPlugins;
+use WPCheckpoint\Tests\Fixtures\Sandbox;
 use WPCheckpoint\Tests\Fixtures\StorageDirs;
 
 /**
@@ -26,6 +28,10 @@ use WPCheckpoint\Tests\Fixtures\StorageDirs;
  *   through, counted before it goes; the loader ends that one too with the maintenance page.
  * - With the site held, the loader up and .maintenance deleted, the web server's requests are held by the loader (the
  *   control), and WP-CLI's "job status" and "job run" run as ever: the loader does nothing on the command line.
+ * - With a page cache drop-in in the real wp-content (RealAdvancedCache, the third registered exception) and WP_CACHE
+ *   true for the request (php-cgi on the test site's own index.php, the constant from an auto_prepend_file: the test
+ *   site's wp-config.php is not changed), the request let through does not load the drop-in and reaches the loader;
+ *   with the same code less its filter, the cache answers it and the loader is never reached (the control).
  */
 final class LoaderRealSiteTest extends WP_UnitTestCase {
 
@@ -35,6 +41,9 @@ final class LoaderRealSiteTest extends WP_UnitTestCase {
 	/** @var string The Host header its WordPress answers to. */
 	private $header = '';
 
+	/** @var string A sandbox of the test's own ('' when none was made). */
+	private $sandbox = '';
+
 	public function set_up(): void {
 		parent::set_up();
 		$this->host = rtrim( (string) getenv( 'WPCHECKPOINT_TEST_LOOPBACK_HOST' ), '/' );
@@ -43,6 +52,7 @@ final class LoaderRealSiteTest extends WP_UnitTestCase {
 		}
 		RealAbspath::claim();
 		RealMuPlugins::claim();
+		RealAdvancedCache::claim();
 		$index        = wp_remote_get( $this->host . '/?rest_route=/', array( 'timeout' => 20 ) );
 		$home         = (string) ( json_decode( (string) wp_remote_retrieve_body( $index ), true )['home'] ?? '' );
 		$this->header = (string) wp_parse_url( $home, PHP_URL_HOST ) . ( null !== wp_parse_url( $home, PHP_URL_PORT ) ? ':' . (int) wp_parse_url( $home, PHP_URL_PORT ) : '' );
@@ -50,6 +60,13 @@ final class LoaderRealSiteTest extends WP_UnitTestCase {
 	}
 
 	public function tear_down(): void {
+		foreach ( RealAdvancedCache::listing() as $left ) {
+			RealAdvancedCache::clear( $left );
+		}
+		if ( '' !== $this->sandbox ) {
+			Sandbox::remove( $this->sandbox );
+			$this->sandbox = '';
+		}
 		foreach ( RealMuPlugins::listing() as $left ) {
 			RealMuPlugins::remove( basename( $left ) );
 		}
@@ -165,6 +182,76 @@ final class LoaderRealSiteTest extends WP_UnitTestCase {
 		RealAbspath::touch( Maintenance::VISITOR, time() - 1 );
 		$this->at_once( 3 );
 		$this->assertSame( 2, $visitor->flush()['n'], 'no loader, no request let through' );
+	}
+
+	/**
+	 * One request of the test site's own WordPress by php-cgi, with WP_CACHE true (defined by an auto_prepend_file).
+	 *
+	 * @return array{headers: string, body: string, said: string}
+	 */
+	private function cached_request(): array {
+		$cgi = dirname( PHP_BINARY ) . '/php-cgi';
+		$this->assertTrue( is_executable( $cgi ), 'php-cgi is next to the PHP binary (the test site\'s image has it)' );
+		if ( '' === $this->sandbox ) {
+			$this->sandbox = Sandbox::make( 'loader-real' );
+			file_put_contents( $this->sandbox . '/prepend.php', "<?php\ndefine( 'WP_CACHE', true );\n" );
+		}
+		$index = rtrim( ABSPATH, '/' ) . '/index.php';
+		$env   = array(
+			'REDIRECT_STATUS' => '200',
+			'SCRIPT_FILENAME' => $index,
+			'SCRIPT_NAME'     => '/index.php',
+			'REQUEST_METHOD'  => 'GET',
+			'REQUEST_URI'     => '/?wpcheckpoint_nocache=' . bin2hex( random_bytes( 4 ) ),
+			'QUERY_STRING'    => '',
+			'HTTP_HOST'       => $this->header,
+			'SERVER_NAME'     => (string) strtok( $this->header, ':' ),
+			'SERVER_PROTOCOL' => 'HTTP/1.1',
+			'REMOTE_ADDR'     => '127.0.0.1',
+		) + (array) getenv();
+		$pipes   = array();
+		$process = proc_open( array( $cgi, '-d', 'auto_prepend_file=' . $this->sandbox . '/prepend.php', '-d', 'display_errors=1', $index ), array( 1 => array( 'pipe', 'w' ), 2 => array( 'pipe', 'w' ) ), $pipes, rtrim( ABSPATH, '/' ), $env );
+		$this->assertIsResource( $process );
+		$out    = (string) stream_get_contents( $pipes[1] );
+		$err    = (string) stream_get_contents( $pipes[2] );
+		$status = proc_close( $process );
+		$parts  = explode( "\r\n\r\n", $out, 2 );
+		return array(
+			'headers' => $parts[0],
+			'body'    => (string) ( $parts[1] ?? '' ),
+			'said'    => "exit {$status}\nstdout:\n" . substr( $out, 0, 1500 ) . "\nstderr:\n" . substr( $err, 0, 1500 ),
+		);
+	}
+
+	public function test_the_request_let_through_loads_no_page_cache_and_reaches_the_loader(): void {
+		$mark = Maintenance::new_mark();
+		$this->held( $mark, false, true );
+		RealMuPlugins::put();
+		RealAdvancedCache::put();
+		$visitor = new VisitorFile( rtrim( ABSPATH, '/' ), $mark );
+		$ran     = 'No job holds the site with this maintenance file'; // What the runtime says when the loader runs it here.
+
+		// The control: the same code less the filter (a test's fixture under the maintenance file's name). The request
+		// is let through and counted, WP_CACHE is true, and the page cache answers it: the loader is never reached.
+		$filter = "\t\t\t\tif ( function_exists( 'add_filter' ) ) {\n\t\t\t\t\tadd_filter( 'enable_loading_advanced_cache_dropin', static function () { return false; }, PHP_INT_MAX );\n\t\t\t\t}\n";
+		$this->assertSame( 1, substr_count( Maintenance::CODE, $filter ), 'the code has the filter, once' );
+		RealAbspath::write( Maintenance::FILE, RealAbspath::fixture( str_replace( $filter, '', Maintenance::CODE ) ) );
+		$cached = $this->cached_request();
+		$this->assertStringContainsString( RealAdvancedCache::PAGE, $cached['body'], 'the control: the page cache answered: ' . $cached['said'] );
+		$this->assertSame( 1, $visitor->flush()['n'], 'the request was let through, and counted' );
+		$this->assertStringNotContainsString( $ran, self::runtime_log(), 'and never reached the loader' );
+		RealAbspath::remove( Maintenance::FILE );
+
+		// The code as it is: the request let through loads no page cache, reaches the loader, which runs the runtime
+		// and ends the request with the maintenance page's answer.
+		RealAbspath::write( Maintenance::FILE, Maintenance::CODE );
+		RealAbspath::touch( Maintenance::VISITOR, time() - 1 );
+		$let = $this->cached_request();
+		$this->assertStringNotContainsString( RealAdvancedCache::PAGE, $let['body'], 'not answered from the page cache: ' . $let['said'] );
+		$this->assertSame( 1, preg_match( '/^Status: 503\b/m', $let['headers'] ), 'the loader ended it: ' . $let['said'] );
+		$this->assertStringContainsString( 'Briefly unavailable for scheduled maintenance', $let['body'] );
+		$this->assertSame( 2, $visitor->flush()['n'], 'let through, and counted' );
+		$this->assertSame( 1, substr_count( self::runtime_log(), $ran ), 'the loader ran the runtime: ' . self::runtime_log() );
 	}
 
 	/**

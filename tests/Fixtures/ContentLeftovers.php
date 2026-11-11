@@ -189,6 +189,10 @@ final class ContentLeftovers {
 	public static function remove( string $path, bool $mu ): void {
 		$dir  = $mu ? self::mu_dir() : self::dir();
 		$name = basename( $path );
+		if ( ! $mu && RealAdvancedCache::is_name( $name ) ) {
+			RealAdvancedCache::clear( $path ); // The tests' own page cache drop-in, by its contents; anything else is said.
+			return;
+		}
 		if ( $mu && RealMuPlugins::is_loader( $name ) ) {
 			RealMuPlugins::clear( $path ); // A restore's loader, by its contents; anything else under its name is said.
 			return;
