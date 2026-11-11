@@ -312,12 +312,12 @@ final class FlushPassTest extends TestCase {
 		Loader::put( $this->mu );
 		$this->visitor()->await_flush();
 		$path = $this->dir . '/' . Maintenance::VISITOR;
-		// Its time comes in two seconds: the request is held; WordPress requires the file again when the request ends
-		// (three seconds on, here), and the time has come by then.
-		$soon = time() + 2;
+		// Its time comes in three seconds: the request is held; WordPress requires the file again when the request ends
+		// (four seconds on, here), and the time has come by then.
+		$soon = time() + 3;
 		touch( $path, $soon );
 		clearstatcache();
-		$report = $this->request( array( 'again' => 3 ) );
+		$report = $this->request( array( 'again' => 4 ) );
 		$this->assertHeld( $report, 'held at its start: its time had not come' );
 		$this->assertGreaterThan( 1000000000, $report['again']['upgrading'], 'and held as it ends' );
 		$this->assertFalse( $report['again']['flush'], 'not let through as it ends' );
@@ -428,6 +428,7 @@ final class FlushPassTest extends TestCase {
 			'a request that stops before the must-use plugins (SHORTINIT)'    => array( 'shortinit' ),
 			'a data file that is not a held one'                             => array( 'not held' ),
 			'no runtime next to the maintenance file'                        => array( 'no runtime' ),
+			'a request past its must-use plugins (it began before the hold)' => array( 'past mu' ),
 		);
 	}
 
@@ -447,7 +448,7 @@ final class FlushPassTest extends TestCase {
 		}
 		$this->due();
 		$time_before = $this->visitor_time();
-		$report      = $this->request( 'shortinit' === $what ? array( 'define' => array( 'SHORTINIT' => true ) ) : array(), 'cli' === $what );
+		$report      = $this->request( 'shortinit' === $what ? array( 'define' => array( 'SHORTINIT' => true ) ) : ( 'past mu' === $what ? array( 'past_mu' => true ) : array() ), 'cli' === $what );
 		$this->assertSame( 'double', $report['type'], 'not let through: WordPress answers with its maintenance page' );
 		$this->assertSame( (float) ( 'not held' === $what ? $time : Maintenance::held() ), (float) $report['upgrading'] );
 		$this->assertFalse( $report['flush'] );

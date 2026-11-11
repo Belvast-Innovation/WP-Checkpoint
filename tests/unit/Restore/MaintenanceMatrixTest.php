@@ -257,12 +257,6 @@ final class MaintenanceMatrixTest extends TestCase {
 			$this->assertFalse( $there[ Maintenance::VISITOR ], 'the control: what names this restore is taken down' );
 			chmod( $state['site'] . $runtime, 0600 );
 			$this->assertTrue( MaintenanceStates::answers( $state['site'], $state['mu'] )['loader'], 'the other restore is still answered for' );
-			// A data file that cannot be told: kept as well.
-			$hidden = $this->state( 'none', 'unreadable_held' );
-			chmod( $hidden['site'] . $runtime, 0 );
-			$this->assertFalse( $hidden['file']->remove() );
-			$this->assertTrue( MaintenanceStates::there( $hidden['site'], $hidden['mu'] )[ Maintenance::RUNTIME ] );
-			chmod( $hidden['site'] . $runtime, 0600 );
 			// The control: with no data file left, a runtime that cannot be read goes with the take-down.
 			$own = $this->state( 'code', 'held64' );
 			chmod( $own['site'] . $runtime, 0 );

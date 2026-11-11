@@ -22,6 +22,12 @@ define( 'ABSPATH', rtrim( (string) $config['abspath'], '/' ) . '/' );
 foreach ( (array) ( $config['define'] ?? array() ) as $name => $value ) {
 	define( (string) $name, $value );
 }
+if ( ! empty( $config['past_mu'] ) ) {
+	// As in a request that is past its must-use plugins (it began before the site was held).
+	function did_action( $hook ) {
+		return 'muplugins_loaded' === $hook ? 1 : 0;
+	}
+}
 if ( isset( $config['gate'] ) ) {
 	$until = microtime( true ) + 10;
 	while ( ! file_exists( (string) $config['gate'] ) && microtime( true ) < $until ) {

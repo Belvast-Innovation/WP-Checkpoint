@@ -297,7 +297,7 @@ final class LoaderRealSiteTest extends WP_UnitTestCase {
 		RealAbspath::touch( Maintenance::VISITOR, time() - 60 );
 		RealAbspath::write( Maintenance::LOG, "<?php exit; ?>\n# " . $mark . "\n" );
 		$count   = 0;
-		$without = str_replace( ' && ! defined( \'WPCHECKPOINT_MAINTENANCE_READ\' )', '', Maintenance::CODE, $count );
+		$without = str_replace( ' && $wpcheckpoint_first && ', ' && ', Maintenance::CODE, $count );
 		$this->assertSame( 1, $count, 'the code has the check, once' );
 		RealAbspath::write( Maintenance::FILE, RealAbspath::fixture( $without ) );
 		$began = microtime( true );

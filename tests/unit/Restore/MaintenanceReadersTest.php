@@ -37,20 +37,20 @@ final class MaintenanceReadersTest extends TestCase {
 		),
 		'src/Jobs/HeldSite.php'       => array(
 			array(
-				'reader' => 2,
+				'reader' => 3,
 				'object' => 3,
 				'asked'  => 4,
 			),
-			array( 'unit:test_once_a_take_down_says_gone_nothing_answers_as_held_for_the_restore_and_nothing_of_anyone_elses_is_deleted', 'unit:test_a_job_is_taken_on_only_by_its_own_files_read_and_always_then', 'unit:test_every_reading_of_the_two_files_is_one_of_three_states', 'not in the matrix as a whole: assess() says whether the job\'s files are here (claimable()) and whether that can be told (code_in(), names_restore()); an abandon gives nothing up where it cannot (HeldSiteTest)' ),
+			array( 'unit:test_once_a_take_down_says_gone_nothing_answers_as_held_for_the_restore_and_nothing_of_anyone_elses_is_deleted', 'unit:test_a_job_is_taken_on_only_by_its_own_files_read_and_always_then', 'unit:test_every_reading_of_the_two_files_is_one_of_three_states', 'not in the matrix as a whole: assess() says whether the job\'s files are here (claimable(), or its data file by data_in()) and whether that can be told (code_in(), names_restore()); an abandon gives nothing up where it cannot (HeldSiteTest)' ),
 		),
 		'src/Jobs/JobActions.php'     => array(
 			array(
 				'reader' => 1,
 				'object' => 1,
-				'name'   => 1,
+				'name'   => 3,
 				'asked'  => 2,
 			),
-			array( 'unit:test_once_a_take_down_says_gone_nothing_answers_as_held_for_the_restore_and_nothing_of_anyone_elses_is_deleted', 'mark_in() finds the job whose file was left; the name is in a message' ),
+			array( 'unit:test_once_a_take_down_says_gone_nothing_answers_as_held_for_the_restore_and_nothing_of_anyone_elses_is_deleted', 'mark_in() finds the job whose file was left; the names are in messages' ),
 		),
 		'src/Jobs/JobRepository.php'  => array(
 			array(

@@ -261,14 +261,20 @@ final class Maintenance {
 	 * shutdown handler for fatal errors asks wp_is_maintenance_mode() whenever a request ends). A request let through
 	 * that ends before the loader, five seconds or more after it was let through, would find its time come again and
 	 * be counted twice; one held at its start whose time comes before it ends would be counted and said at its
-	 * shutdown, with nothing left of it to flush. WPCHECKPOINT_MAINTENANCE_READ is defined at this file's end; with
-	 * it defined (a request let through has WPCHECKPOINT_FLUSH_PASS defined too) the file only says the data file's
-	 * time.
+	 * shutdown, with nothing left of it to flush. WPCHECKPOINT_MAINTENANCE_READ is defined at this file's start (a
+	 * reading that dies half way is one too); once it was defined before (a request let through has
+	 * WPCHECKPOINT_FLUSH_PASS defined too) the file only says the data file's time. Nor is a request let through
+	 * that is past its must-use plugins (did_action( 'muplugins_loaded' )): one that began before the site was held
+	 * reads this file for the first time as it ends, and the loader will not run in it any more.
 	 */
 	const CODE =
 		'<?php' . "\n"
 		. '// WP Checkpoint: a restore holds this site. Its mark, its time and its pass are in .wpcheckpoint-maintenance.php; .wpcheckpoint-runtime.php puts a half-made restore back.' . "\n"
 		. '$upgrading         = (float) time();' . "\n"
+		. '$wpcheckpoint_first = ! defined( \'WPCHECKPOINT_MAINTENANCE_READ\' );' . "\n"
+		. 'if ( $wpcheckpoint_first ) {' . "\n"
+		. '	define( \'WPCHECKPOINT_MAINTENANCE_READ\', true );' . "\n"
+		. '}' . "\n"
 		. '$wpcheckpoint_data = @file_get_contents( __DIR__ . \'/.wpcheckpoint-maintenance.php\' );' . "\n"
 		. 'if ( is_string( $wpcheckpoint_data ) && 1 === preg_match( \'/\\A<\\?php exit; \\?>\\n(WP Checkpoint restore [0-9a-f]{32})\\n([0-9]{1,19})\\n([0-9a-f]{64}|-)\\n(?:([0-9a-f]{64})\\n)?\\z/\', $wpcheckpoint_data, $wpcheckpoint_found ) ) {' . "\n"
 		. '	$upgrading         = (float) $wpcheckpoint_found[2];' . "\n"
@@ -278,7 +284,7 @@ final class Maintenance {
 		. '		if ( ! defined( \'DISABLE_WP_CRON\' ) ) {' . "\n"
 		. '			define( \'DISABLE_WP_CRON\', true );' . "\n"
 		. '		}' . "\n"
-		. '	} elseif ( ! empty( $wpcheckpoint_found[4] ) && empty( $wpcheckpoint_check ) && \'cli\' !== PHP_SAPI && ! ( defined( \'WP_CLI\' ) && WP_CLI ) && ! defined( \'WPCHECKPOINT_MAINTENANCE_READ\' ) && ! class_exists( \'WPCheckpoint\\Jobs\\WebEntry\', false ) ) {' . "\n"
+		. '	} elseif ( ! empty( $wpcheckpoint_found[4] ) && empty( $wpcheckpoint_check ) && \'cli\' !== PHP_SAPI && ! ( defined( \'WP_CLI\' ) && WP_CLI ) && $wpcheckpoint_first && ! class_exists( \'WPCheckpoint\\Jobs\\WebEntry\', false ) ) {' . "\n"
 		. '		$wpcheckpoint_visitor = __DIR__ . \'/.wpcheckpoint-visitor.php\';' . "\n"
 		. '		$wpcheckpoint_lock    = @fopen( $wpcheckpoint_visitor, \'r+\' );' . "\n"
 		. '		$wpcheckpoint_busy    = 0;' . "\n"
@@ -289,7 +295,7 @@ final class Maintenance {
 		. '			$wpcheckpoint_text = @stream_get_contents( $wpcheckpoint_lock );' . "\n"
 		. '			if ( is_string( $wpcheckpoint_text ) && 1 === preg_match( \'/\\A(<\\?php exit; \\?>\\n# (WP Checkpoint restore [0-9a-f]{32})\\n\\{[^\\n]*"flush":\\{"n":)([0-9]{1,9})(,"next":)([0-9]{1,10})(\\}[^\\n]*\\}\\n)\\z/\', $wpcheckpoint_text, $wpcheckpoint_flush ) && $wpcheckpoint_flush[2] === $wpcheckpoint_found[1] ) {' . "\n"
 		. '				$wpcheckpoint_due    = false;' . "\n"
-		. '				$wpcheckpoint_loader = false !== $wpcheckpoint_next && $wpcheckpoint_next <= time() && (int) $wpcheckpoint_flush[5] <= time() && ! ( defined( \'SHORTINIT\' ) && SHORTINIT ) && in_array( $wpcheckpoint_found[2], array( \'' . self::HELD_VALUES[0] . '\', \'' . self::HELD_VALUES[1] . '\' ), true ) && @file_exists( __DIR__ . \'/.wpcheckpoint-runtime.php\' ) ? @file_get_contents( ( defined( \'WPMU_PLUGIN_DIR\' ) ? WPMU_PLUGIN_DIR : ( defined( \'WP_CONTENT_DIR\' ) ? WP_CONTENT_DIR : __DIR__ . \'/wp-content\' ) . \'/mu-plugins\' ) . \'/!wpcheckpoint-runtime.php\', false, null, 0, 8193 ) : false;' . "\n"
+		. '				$wpcheckpoint_loader = false !== $wpcheckpoint_next && $wpcheckpoint_next <= time() && (int) $wpcheckpoint_flush[5] <= time() && ! ( defined( \'SHORTINIT\' ) && SHORTINIT ) && ! ( function_exists( \'did_action\' ) && did_action( \'muplugins_loaded\' ) ) && in_array( $wpcheckpoint_found[2], array( \'' . self::HELD_VALUES[0] . '\', \'' . self::HELD_VALUES[1] . '\' ), true ) && @file_exists( __DIR__ . \'/.wpcheckpoint-runtime.php\' ) ? @file_get_contents( ( defined( \'WPMU_PLUGIN_DIR\' ) ? WPMU_PLUGIN_DIR : ( defined( \'WP_CONTENT_DIR\' ) ? WP_CONTENT_DIR : __DIR__ . \'/wp-content\' ) . \'/mu-plugins\' ) . \'/!wpcheckpoint-runtime.php\', false, null, 0, 8193 ) : false;' . "\n"
 		. '				if ( is_string( $wpcheckpoint_loader ) && in_array( hash( \'sha256\', $wpcheckpoint_loader ), array( \'e1ba77d7c466b93d01a56c5afe2075cc6abfd9ace30c5f96109986b4b8fb0d63\' ), true ) ) {' . "\n"
 		. '					$wpcheckpoint_tries = (int) $wpcheckpoint_flush[3] + 1;' . "\n"
 		. '					$wpcheckpoint_text  = $wpcheckpoint_flush[1] . $wpcheckpoint_tries . $wpcheckpoint_flush[4] . ( $wpcheckpoint_tries >= 3 ? time() + 300 : 0 ) . $wpcheckpoint_flush[6];' . "\n"
@@ -337,9 +343,6 @@ final class Maintenance {
 		. '			@fclose( $wpcheckpoint_lock );' . "\n"
 		. '		}' . "\n"
 		. '	}' . "\n"
-		. '}' . "\n"
-		. 'if ( ! defined( \'WPCHECKPOINT_MAINTENANCE_READ\' ) ) {' . "\n"
-		. '	define( \'WPCHECKPOINT_MAINTENANCE_READ\', true );' . "\n"
 		. '}' . "\n";
 
 	/**

@@ -447,6 +447,9 @@ final class JobActions {
 		} catch ( \RuntimeException $e ) {
 			$gone = false;
 		}
+		if ( ! $held['assessment']['file_told'] ) {
+			return self::outcome( false, __( 'Whether this job\'s maintenance file is in this WordPress directory cannot be told (.maintenance or .wpcheckpoint-maintenance.php there cannot be read, or is a link), so the job was not abandoned; nothing was changed. Make them readable, or remove a link, and try again.', 'wp-checkpoint' ) );
+		}
 		if ( ! $gone ) {
 			return self::outcome( false, __( 'This job\'s maintenance file could not be taken down, so the job was not abandoned; nothing else was changed. Try again.', 'wp-checkpoint' ) );
 		}

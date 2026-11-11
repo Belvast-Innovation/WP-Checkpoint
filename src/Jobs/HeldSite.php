@@ -107,7 +107,9 @@ final class HeldSite {
 			'here'      => $here,
 			'differs'   => self::another( $recorded, $here ),
 			'direction' => in_array( $phase, array( 'committed', 'done' ), true ) ? 'committed' : ( 'restored' === $phase ? 'restored' : ( 'reverse' === $phase ? 'back' : '' ) ),
-			'file_here' => '' !== $mark && ( new Maintenance( $this->abspath(), $mark ) )->claimable(),
+			// Anything of this job's here: its maintenance file, or its data file whatever is in .maintenance's place
+			// (the restore's must-use plugin answers for a held one whatever that is).
+			'file_here' => '' !== $mark && ( ( new Maintenance( $this->abspath(), $mark ) )->claimable() || Maintenance::data_in( $this->abspath() )[1] === $mark ),
 			'file_told' => '' === $mark || ( null !== Maintenance::code_in( $this->abspath() ) && null !== Maintenance::names_restore( $this->abspath() ) ),
 			'finishes'  => 'rename' === $phase ? $this->renamed_all( $job ) : false,
 		);
