@@ -277,9 +277,25 @@ final class LoaderRealSiteTest extends WP_UnitTestCase {
 			return is_file( $content . '/ran' ) ? (int) filesize( $content . '/ran' ) : 0;
 		};
 
-		// The control: the same code less its check of WPCHECKPOINT_FLUSH_PASS (a test's fixture under the maintenance
-		// file's name). WordPress requires .maintenance again when the request ends (its shutdown handler asks
-		// wp_is_maintenance_mode()); the window has come again by then, and the one request is let through twice.
+		// The code as it is: one request, counted once, said once.
+		$began = microtime( true );
+		$once  = $this->cached_request( $prepend );
+		$this->assertGreaterThanOrEqual( 6.0, microtime( true ) - $began, 'the request hung past its window: ' . $once['said'] );
+		$this->assertSame( 1, $ran(), 'it was let through to the drop-in, once: ' . $once['said'] );
+		$this->assertSame( 1, $visitor->flush()['n'], 'one request, counted once: ' . self::runtime_log() );
+		$this->assertSame( 1, substr_count( self::runtime_log(), 'a request was let through to flush it (try ' ), 'and said once: ' . self::runtime_log() );
+		$this->assertStringNotContainsString( 'No job holds the site with this maintenance file', self::runtime_log(), 'it ended before the loader' );
+
+		// The control, from the start again: the same code less its check of WPCHECKPOINT_FLUSH_PASS (a test's fixture
+		// under the maintenance file's name). WordPress requires .maintenance again when the request ends (its shutdown
+		// handler asks wp_is_maintenance_mode()); the window has come again by then, and the one request is let through
+		// twice.
+		RealAbspath::remove( Maintenance::FILE );
+		RealAbspath::remove( Maintenance::VISITOR );
+		RealAbspath::remove( Maintenance::LOG );
+		RealAbspath::write( Maintenance::VISITOR, "<?php exit; ?>\n# " . $mark . "\n{\"plugin\":\"wp-checkpoint\\/wp-checkpoint.php\",\"flush\":{\"n\":0,\"next\":0}}\n" );
+		RealAbspath::touch( Maintenance::VISITOR, time() - 60 );
+		RealAbspath::write( Maintenance::LOG, "<?php exit; ?>\n# " . $mark . "\n" );
 		$count   = 0;
 		$without = str_replace( ' && ! defined( \'WPCHECKPOINT_FLUSH_PASS\' )', '', Maintenance::CODE, $count );
 		$this->assertSame( 1, $count, 'the code has the check, once' );
@@ -287,25 +303,9 @@ final class LoaderRealSiteTest extends WP_UnitTestCase {
 		$began = microtime( true );
 		$twice = $this->cached_request( $prepend );
 		$this->assertGreaterThanOrEqual( 6.0, microtime( true ) - $began, 'the control: the request hung past its window: ' . $twice['said'] );
-		$this->assertSame( 1, $ran(), 'the control: one request, let through to the drop-in once: ' . $twice['said'] );
+		$this->assertSame( 2, $ran(), 'the control: one request, let through to the drop-in once more: ' . $twice['said'] );
 		$this->assertSame( 2, $visitor->flush()['n'], 'the control: without the check the one request is counted twice: ' . self::runtime_log() );
 		$this->assertSame( 1, substr_count( self::runtime_log(), '(try 2)' ), self::runtime_log() );
-		RealAbspath::remove( Maintenance::FILE );
-
-		// The code as it is, from the start: one request, counted once, said once.
-		RealAbspath::remove( Maintenance::VISITOR );
-		RealAbspath::remove( Maintenance::LOG );
-		RealAbspath::write( Maintenance::VISITOR, "<?php exit; ?>\n# " . $mark . "\n{\"plugin\":\"wp-checkpoint\\/wp-checkpoint.php\",\"flush\":{\"n\":0,\"next\":0}}\n" );
-		RealAbspath::touch( Maintenance::VISITOR, time() - 60 );
-		RealAbspath::write( Maintenance::LOG, "<?php exit; ?>\n# " . $mark . "\n" );
-		RealAbspath::write( Maintenance::FILE, Maintenance::CODE );
-		$began = microtime( true );
-		$once  = $this->cached_request( $prepend );
-		$this->assertGreaterThanOrEqual( 6.0, microtime( true ) - $began, 'the request hung past its window: ' . $once['said'] );
-		$this->assertSame( 2, $ran(), 'it was let through to the drop-in, once more: ' . $once['said'] );
-		$this->assertSame( 1, $visitor->flush()['n'], 'one request, counted once: ' . self::runtime_log() );
-		$this->assertSame( 1, substr_count( self::runtime_log(), 'a request was let through to flush it (try ' ), 'and said once: ' . self::runtime_log() );
-		$this->assertStringNotContainsString( 'No job holds the site with this maintenance file', self::runtime_log(), 'it ended before the loader' );
 	}
 
 	/**
