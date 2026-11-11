@@ -2,11 +2,14 @@
 
 namespace WPCheckpoint\Tests\Unit\Tooling;
 
+use WPCheckpoint\Restore\Loader;
 use WPCheckpoint\Restore\StagingLayout;
+use WPCheckpoint\Support\Deleter;
 use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Tests\Fixtures\ContentLeftovers;
 use WPCheckpoint\Tests\Fixtures\ExpectedPath;
 use WPCheckpoint\Tests\Fixtures\ProbeDir;
+use WPCheckpoint\Tests\Fixtures\RealMuPlugins;
 use WPCheckpoint\Tests\Fixtures\Sandbox;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
@@ -110,5 +113,68 @@ final class ContentLeftoversTest extends TestCase {
 		$this->assertSame( 77, $status, $err );
 		$this->assertStringContainsString( StagingLayout::PROBE_PREFIX, $err );
 		$this->assertStringNotContainsString( 'someone-elses', $err );
+	}
+
+	/**
+	 * What is under the loader's name, each stopping the run with nothing removed.
+	 *
+	 * @return array<string, array{0: string, 1: string, 2: string}>
+	 */
+	public function loaders_left(): array {
+		return array(
+			'the loader itself'            => array( Loader::NAME, Loader::CODE, "(this plugin's)" ),
+			'another file under its name'  => array( Loader::NAME, "<?php // someone else's\n", "(not this plugin's)" ),
+			'a temporary name of a write'  => array( Loader::NAME . '.0123456789abcdef.tmp', 'half', "(this plugin's)" ),
+		);
+	}
+
+	/**
+	 * @dataProvider loaders_left
+	 */
+	public function test_a_file_under_the_loaders_name_stops_the_run_and_nothing_is_removed( string $name, string $contents, string $said ): void {
+		mkdir( $this->sandbox . '/uploads' );
+		mkdir( $this->sandbox . '/mu-plugins' );
+		file_put_contents( $this->sandbox . '/mu-plugins/wpcheckpoint-runtime.php', Loader::CODE ); // Not its name: someone else's.
+		$run = function (): array {
+			$pipes   = array();
+			$process = proc_open( array( PHP_BINARY, dirname( __DIR__, 2 ) . '/Fixtures/leftovers-precheck.php', $this->sandbox . '/uploads', $this->sandbox . '/mu-plugins' ), array( 1 => array( 'pipe', 'w' ), 2 => array( 'pipe', 'w' ) ), $pipes );
+			stream_get_contents( $pipes[1] );
+			$err = (string) stream_get_contents( $pipes[2] );
+			return array( proc_close( $process ), $err );
+		};
+		list( $status, $err ) = $run();
+		$this->assertSame( 0, $status, 'the control: without it the run starts: ' . $err );
+		file_put_contents( $this->sandbox . '/mu-plugins/' . $name, $contents );
+		list( $status, $err ) = $run();
+		$this->assertSame( 77, $status, $err );
+		$this->assertStringContainsString( $name . ' ' . $said, $err );
+		$this->assertSame( $contents, file_get_contents( $this->sandbox . '/mu-plugins/' . $name ), 'nothing removed' );
+	}
+
+	public function test_only_a_loader_this_plugin_wrote_is_cleared_and_only_in_the_directory_given(): void {
+		$mu = $this->sandbox . '/mu-plugins';
+		mkdir( $mu );
+		mkdir( $this->sandbox . '/elsewhere' );
+		Deleter::allow( $this->sandbox );
+		$path = $mu . '/' . Loader::NAME;
+		// Someone else's file under the name: listed, said, kept.
+		file_put_contents( $path, "<?php // someone else's\n" );
+		$this->assertSame( array( ExpectedPath::slashed( $mu, Loader::NAME ) ), RealMuPlugins::listing( $mu ) );
+		$this->assertFalse( RealMuPlugins::ours( $path ) );
+		RealMuPlugins::clear( $path, $mu );
+		$this->assertFileExists( $path, 'not this plugin\'s: kept' );
+		// The loader in another directory than the one given: kept.
+		file_put_contents( $this->sandbox . '/elsewhere/' . Loader::NAME, Loader::CODE );
+		RealMuPlugins::clear( $this->sandbox . '/elsewhere/' . Loader::NAME, $mu );
+		$this->assertFileExists( $this->sandbox . '/elsewhere/' . Loader::NAME, 'not in the directory: kept' );
+		// The loader, and a temporary name: removed (the control: the clearing removes).
+		file_put_contents( $path, Loader::CODE );
+		file_put_contents( $path . '.0123456789abcdef.tmp', 'half' );
+		$this->assertTrue( RealMuPlugins::ours( $path ) );
+		foreach ( RealMuPlugins::listing( $mu ) as $item ) {
+			RealMuPlugins::clear( $item, $mu );
+		}
+		$this->assertSame( array(), RealMuPlugins::listing( $mu ) );
+		$this->assertFalse( RealMuPlugins::is_loader( 'wpcheckpoint-runtime.php' ) );
 	}
 }
