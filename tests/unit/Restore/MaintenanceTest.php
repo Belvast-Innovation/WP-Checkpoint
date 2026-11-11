@@ -139,23 +139,23 @@ final class MaintenanceTest extends TestCase {
 		$loader = \WPCheckpoint\Restore\Loader::path( $mu );
 		file_put_contents( $data, $this->ours()->data( 1800000000 ) );
 		file_put_contents( $loader, \WPCheckpoint\Restore\Loader::CODE );
-		$old = time() - 100000;
-		foreach ( array( $data, $loader ) as $path ) {
-			// This process looks at the file (PHP remembers the answer), then another process changes its time: PHP's
-			// own touch() forgets the answer on some versions and not on others (7.4 does not), another process's
-			// never does.
+		$old  = time() - 100000;
+		$aged = function ( string $path ) use ( $old ): void {
+			// This process looks at the file (PHP remembers the answer of its last look), then another process changes
+			// its time: PHP's own touch() forgets the answer on some versions and not on others (7.4 does not), another
+			// process's never does. Nothing else is looked at before the scan: the remembered answer is this file's.
 			$this->assertGreaterThan( $old, lstat( $path )['mtime'], 'the control: new' );
 			$out = array();
 			$rc  = 1;
 			exec( escapeshellarg( PHP_BINARY ) . ' -r ' . escapeshellarg( 'exit( touch( $argv[1], (int) $argv[2] ) ? 0 : 1 );' ) . ' ' . escapeshellarg( $path ) . ' ' . $old, $out, $rc );
 			$this->assertSame( 0, $rc );
 			$this->assertGreaterThan( $old, lstat( $path )['mtime'], 'the control: this process still remembers the time before' );
-		}
-		lstat( $data );
+		};
+		$aged( $data );
 		$found = Residue::scan_maintenance( $this->dir );
 		$this->assertCount( 1, $found );
 		$this->assertSame( $old, $found[0]['mtime'], 'the data file\'s age is read anew' );
-		lstat( $loader );
+		$aged( $loader );
 		$found = Residue::scan_loader( $mu );
 		$this->assertCount( 1, $found );
 		$this->assertSame( $old, $found[0]['mtime'], 'the loader\'s age is read anew' );
