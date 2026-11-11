@@ -200,6 +200,31 @@ final class LoaderSwapTest extends SwapTestCase {
 		$this->assertSame( array(), $this->loader_in( $done ) );
 	}
 
+	public function test_a_backup_that_holds_the_loader_itself_leaves_none_either_made_or_put_back(): void {
+		// A backup made of a site's files while a restore held it: the loader's own code among its must-use plugins.
+		$this->backup_has = self::backup_files() + array( 'wp-content/mu-plugins/' . Loader::NAME => Loader::CODE );
+		$done             = $this->swapped();
+		$this->assertSame( Job::COMPLETED, $done->status, (string) $done->last_error );
+		$this->assertSame( array( 'live', 'stage' ), $this->where['maintenance'], 'the control: the staged copy holds one' );
+		$this->assertSame( array( 'live', 'old' ), $this->where['carried'], 'the control: in place with the restored copy, aside with the site\'s own' );
+		$this->assertSame( array(), $this->loader_in( $done ), 'none once it is done: not the restored one in place either' );
+		$this->assertFileExists( $this->dirs['mu-plugins'] . '/restored-mu.php' );
+	}
+
+	public function test_a_backup_that_holds_the_loader_leaves_none_staged_when_the_swap_is_put_back(): void {
+		$this->backup_has = self::backup_files() + array( 'wp-content/mu-plugins/' . Loader::NAME => Loader::CODE );
+		$before           = $this->site();
+		$job              = $this->at_swap();
+		$this->killed_at( $job, 'carried' );
+		$killed = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertSame( array( 'live', 'old' ), $this->loader_in( $killed ) );
+		$done = $this->cli_run( $killed );
+		$this->assertSame( Job::FAILED, $done->status, (string) $done->last_error );
+		$this->assertSame( $before, $this->site() );
+		$this->assertDirectoryExists( $this->places( $done )['stage'], 'the control: the staged copy is back in its place' );
+		$this->assertSame( array(), $this->loader_in( $done ), 'taken out of the staged copy too' );
+	}
+
 	/**
 	 * Whether the backup holds must-use plugins.
 	 *

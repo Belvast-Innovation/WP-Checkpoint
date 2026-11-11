@@ -34,6 +34,7 @@ final class WebNoWordPressTest extends SwapTestCase {
 			(string) wp_json_encode(
 				array(
 					'abspath'   => $this->abspath,
+					'content'   => $this->dirs['other-content'],
 					'db'        => array(
 						'name'     => DB_NAME,
 						'user'     => DB_USER,

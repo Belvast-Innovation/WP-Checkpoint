@@ -15,7 +15,8 @@
  * (run by php-cgi, the swap's loader ends it before with its own answer, and no JSON line is printed).
  *
  * Usage: php code-child.php <config.json>. Config: abspath, content, db (name, user, password, host, prefix),
- * multisite, host, flushed, flush_fails.
+ * multisite, host, flushed, flush_fails, pass (the request's X-WPCheckpoint-Pass header). Without a maintenance file the
+ * request goes on to the must-use plugins as well.
  *
  * @package WPCheckpoint
  */
@@ -52,15 +53,21 @@ if ( ! empty( $config['multisite'] ) ) {
 }
 $_SERVER['HTTP_HOST']          = (string) ( $config['host'] ?? '' );
 $_SERVER['REQUEST_TIME_FLOAT'] = microtime( true );
+if ( isset( $config['pass'] ) ) {
+	$_SERVER['HTTP_X_WPCHECKPOINT_PASS'] = (string) $config['pass'];
+}
 
 $upgrading = null;
-( static function (): void {
-	global $upgrading;
-	require ABSPATH . '.maintenance';
-} )();
+$held = file_exists( ABSPATH . '.maintenance' ); // wp_is_maintenance_mode(): no file, no maintenance mode.
+if ( $held ) {
+	( static function (): void {
+		global $upgrading;
+		require ABSPATH . '.maintenance';
+	} )();
+}
 
 $site = false;
-if ( is_numeric( $upgrading ) && ( time() - $upgrading ) >= 600 ) {
+if ( ! $held || ( is_numeric( $upgrading ) && ( time() - $upgrading ) >= 600 ) ) {
 	// Not in maintenance mode, as wp_is_maintenance_mode() judges it: WordPress goes on to its must-use plugins.
 	if ( isset( $config['flushed'] ) ) {
 		function wp_cache_flush() {

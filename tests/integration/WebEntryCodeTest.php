@@ -74,15 +74,20 @@ final class WebEntryCodeTest extends SwapTestCase {
 	/**
 	 * One request of the child, by php-cgi (a request's SAPI: the loader does nothing on the command line).
 	 *
-	 * @param Job $job Job (its type is set to the restore's for the run: the runtime knows no other).
+	 * @param Job                  $job  Job (its type is set to the restore's for the run: the runtime knows no other).
+	 * @param array<string, mixed> $more "pass" (the request's X-WPCheckpoint-Pass header), "due" false (the visitor
+	 *                                   file's time is left as it is), "site" true (the request may get past the
+	 *                                   must-use plugins).
 	 * @return array<string, mixed> What the child printed ("let" false), or, when the loader ended the request, "let"
 	 *                              true with its "status" and "page".
 	 */
-	private function request( Job $job ): array {
+	private function request( Job $job, array $more = array() ): array {
 		global $table_prefix, $wpdb;
 		$this->past_grace( $job->id );
 		clearstatcache();
-		if ( file_exists( $this->abspath . '/' . Maintenance::VISITOR ) ) {
+		$due = ! isset( $more['due'] ) || $more['due'];
+		unset( $more['due'] );
+		if ( $due && file_exists( $this->abspath . '/' . Maintenance::VISITOR ) ) {
 			touch( $this->abspath . '/' . Maintenance::VISITOR, time() - 60 ); // Its time has come (the last request's five seconds over).
 		}
 		$wpdb->update( JobRepository::table(), array( 'type' => RestoreJob::ID ), array( 'id' => $job->id ) );
@@ -105,7 +110,7 @@ final class WebEntryCodeTest extends SwapTestCase {
 					'host'        => 'visitor.example.org',
 					'flushed'     => $this->flushed(),
 					'flush_fails' => $this->flush_fails(),
-				)
+				) + array_intersect_key( $more, array( 'pass' => true ) )
 			)
 		);
 		$cgi = dirname( PHP_BINARY ) . '/php-cgi';
@@ -143,8 +148,10 @@ final class WebEntryCodeTest extends SwapTestCase {
 		$this->assertSame( 'cgi-fcgi', $report['sapi'], 'the control: a request\'s SAPI' );
 		$this->assertSame( array(), $report['wordpress'], 'WordPress never loaded: ' . $said );
 		$this->assertFalse( $report['autoloader'], 'no autoloader: every class from the runtime' );
-		$this->assertFalse( $report['site'], 'no request gets past the must-use plugins while the site is held: ' . $said );
-		$this->assertSame( 'double', $report['type'], 'the request ends with the maintenance page: ' . $said );
+		if ( empty( $more['site'] ) ) {
+			$this->assertFalse( $report['site'], 'no request gets past the must-use plugins while the site is held: ' . $said );
+			$this->assertSame( 'double', $report['type'], 'the request ends with the maintenance page: ' . $said );
+		}
 		$this->assertSame( '', trim( implode( "\n", array_slice( $lines, 0, -1 ) ) ), 'nothing else is printed: ' . $said );
 		if ( $report['entry'] ) {
 			++$this->seen['ran'];
@@ -355,6 +362,71 @@ final class WebEntryCodeTest extends SwapTestCase {
 		$this->assertSame( array(), $this->swap_files() );
 		$this->assertSame( array(), $this->loader_in( $done ) );
 		$this->assertStringContainsString( '(try ' . ( Maintenance::FLUSH_TRIES + 1 ) . ')', Plugin::instance()->job_presenter()->log_tail( $done ), 'each one let through is said' );
+	}
+
+	public function test_with_the_maintenance_file_deleted_the_loader_holds_the_site_until_wp_cli_puts_it_back(): void {
+		$job    = $this->at_swap();
+		$before = $this->site();
+		$this->killed_at( $job, 'dir_in', 2 ); // Half swapped, the must-use plugins directory (and the loader in it) still in place.
+		$killed = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertSame( array( 'live' ), $this->loader_in( $killed ) );
+		Sandbox::remove( $this->abspath . '/' . Maintenance::FILE ); // Someone deletes .maintenance to "get the site back".
+		$half = $this->site();
+		$this->assertNotSame( $before, array( 'maintenance' => false ) + $half, 'the control: the site is half swapped' );
+		// Not its time yet: held all the same, and no runtime run.
+		touch( $this->abspath . '/' . Maintenance::VISITOR, time() + 100 );
+		$report = $this->request( $killed, array( 'due' => false ) );
+		$this->assertTrue( $report['let'], 'the loader ended the request with the maintenance page\'s answer: ' . $report['said'] );
+		$this->assertSame( array(), Maintenance::log_lines( $this->abspath . '/' . Maintenance::LOG ), 'nothing run within the visitor file\'s time' );
+		// Its time come: the loader runs the runtime, which does not take the job on without its maintenance file (the
+		// evidence that this site is the job's: WebJobs::here()), and says so; the request is held as before.
+		$report = $this->request( $killed );
+		$this->assertTrue( $report['let'], $report['said'] );
+		$this->assertStringContainsString( 'The maintenance file here is not this job\'s.', $this->runtime_log(), 'the control: the runtime ran' );
+		$this->assertSame( $half, $this->site(), 'nothing renamed' );
+		$this->assertSame( 0, $this->seen['ran'], 'no maintenance file ran anything: both requests were the loader\'s' );
+		$this->assertSame( 2, $this->seen['let'] );
+		// WP-CLI puts the site back, and takes the loader down with the rest.
+		$done = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( Job::FAILED, $done->status, (string) $done->last_error );
+		$this->assertSame( $before, $this->site() );
+		$this->assertSame( array(), $this->swap_files() );
+		$this->assertSame( array(), $this->loader_in( $done ) );
+		// The control: with the swap's files gone, a request gets past the must-use plugins (the site is open).
+		$open = $this->request( $done, array( 'site' => true ) );
+		$this->assertFalse( $open['let'] );
+		$this->assertTrue( $open['site'] );
+	}
+
+	public function test_the_loader_lets_a_request_with_the_pass_through_and_no_other(): void {
+		$job = $this->at_swap();
+		$this->killed_at( $job, 'dir_in', 2 );
+		$killed = Plugin::instance()->jobs()->find( $job->id );
+		$file   = new Maintenance( $this->abspath, (string) $killed->cursor['mark'] );
+		$key    = str_repeat( '0f', 32 );
+		// The data file as the swap writes it while its own checks are let through, and no .maintenance.
+		file_put_contents( $this->abspath . '/' . Maintenance::DATA, $file->data( Maintenance::held(), hash( 'sha256', $key ), $file->runtime_hash() ) );
+		Sandbox::remove( $this->abspath . '/' . Maintenance::FILE );
+		touch( $this->abspath . '/' . Maintenance::VISITOR, time() + 100 ); // No run in these requests: only who is held.
+		$row = wp_json_encode( Plugin::instance()->jobs()->find( $job->id )->cursor );
+		foreach ( array(
+			'no header'          => null,
+			'another key'        => str_repeat( 'f0', 32 ),
+			'the key upper-case' => strtoupper( $key ),
+			'the key\'s hash'    => hash( 'sha256', $key ),
+			'an empty header'    => '',
+		) as $what => $header ) {
+			$report = $this->request( $killed, array( 'due' => false ) + ( null === $header ? array() : array( 'pass' => $header ) ) );
+			$this->assertTrue( $report['let'], $what . ': held by the loader. ' . $report['said'] );
+		}
+		$through = $this->request( $killed, array( 'due' => false, 'pass' => $key, 'site' => true ) );
+		$this->assertFalse( $through['let'], 'the pass: not held. ' . $through['said'] );
+		$this->assertTrue( $through['site'], 'it got past the must-use plugins' );
+		$this->assertFalse( $through['entry'], 'and ran no runtime' );
+		$this->assertSame( $row, wp_json_encode( Plugin::instance()->jobs()->find( $job->id )->cursor ), 'nothing was run by any of them' );
+		// Put the swap back and end it (the test's own tear-down expects no held site).
+		$file->hold();
+		$this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
 	}
 
 	public function test_visitors_requests_put_back_tables_renamed_in_batches(): void {
