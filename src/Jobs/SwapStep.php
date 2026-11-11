@@ -1644,7 +1644,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			$this->unit_done( $context, $back, $started );
 		}
 		$this->at( 'dirs_back' );
-		$this->loader_aside( $context, $entries['dirs'], false );
+		$this->loader_aside( $context, $entries['dirs'] );
 		// What requests cached of the half-swapped site (a persistent cache outlives this process). A cache that
 		// cannot be flushed now is waited out: the site is back, and the maintenance file stays held until then.
 		if ( ! $this->host->can_flush() && ! isset( $this->parts['flush'] ) ) {
@@ -4071,8 +4071,8 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 
 	/**
 	 * A swap that is made and recorded as done: the site's own must-use plugins went aside with the loader in them, and
-	 * are kept there for an undo. The loader goes from there now (and from the staged place and the directory in place:
-	 * loader_aside()), so that an undo never puts it back in place. Until here it stayed: a swap reversed before it is
+	 * are kept there for an undo. The loader goes from there now (and from the staged place: loader_aside(); the
+	 * directory in place is take_down()'s, right after), so that an undo never puts it back in place. Until here it stayed: a swap reversed before it is
 	 * done brings it back in place with the directory, where a request let through can flush after the put-back. A
 	 * plan that cannot be read stops nothing: said in the job's log, and the loader left does nothing once the
 	 * restore's files next to the maintenance file are gone.
@@ -4096,22 +4096,19 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			$context->logger()->warning( 'The swap\'s plan could not be read to take the restore\'s must-use plugin out of the directory moved aside', array( 'error' => $e->getMessage() ) );
 			return;
 		}
-		$this->loader_aside( $context, $dirs, true );
+		$this->loader_aside( $context, $dirs );
 	}
 
 	/**
-	 * The loader out of where the swap moved the must-use plugins directory: the plan's entry of that directory (its
-	 * moved-aside place and its staged one), and,
-	 * with $live, the directory in place too (a swap that is made: the restored copy has none, but a backup may hold
-	 * one a restore left).
+	 * The loader out of where the swap moved the must-use plugins directory: the plan's entry of that directory, its
+	 * moved-aside place and its staged one (the directory in place is take_down()'s).
 	 *
 	 * @param JobContext                                                  $context Context.
 	 * @param array<int, array{live: string, stage: string, old: string}> $dirs    The plan's directory entries.
-	 * @param bool                                                        $live    Whether the directory in place too.
 	 * @return void
 	 * @throws LockLost When the lease is gone.
 	 */
-	private function loader_aside( JobContext $context, array $dirs, bool $live ): void {
+	private function loader_aside( JobContext $context, array $dirs ): void {
 		$mu = $this->mu_dir();
 		if ( '' === $mu ) {
 			return;
@@ -4127,9 +4124,6 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			}
 			$this->loader_down( $context, $entry['old'], $confirm );
 			$this->loader_down( $context, $entry['stage'], $confirm );
-		}
-		if ( $live ) {
-			$this->loader_down( $context, $mu, $confirm );
 		}
 	}
 
