@@ -238,7 +238,9 @@ final class MaintenanceMatrixDbTest extends JobTestCase {
 				Residue::replace_maintenance_dir( $prev );
 			}
 			$there = MaintenanceStates::there( $dirs['site'], $dirs['mu'] );
-			chmod( $dirs['site'] . '/' . Maintenance::RUNTIME, 0600 );
+			if ( $there[ Maintenance::RUNTIME ] ) {
+				chmod( $dirs['site'] . '/' . Maintenance::RUNTIME, 0600 );
+			}
 			return $there;
 		};
 		$kept = $reap( true );
