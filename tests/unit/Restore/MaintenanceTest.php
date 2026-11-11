@@ -89,41 +89,47 @@ final class MaintenanceTest extends TestCase {
 		$this->assertNotSame( $one, Maintenance::new_mark() );
 	}
 
-	public function test_a_held_data_file_with_no_code_of_the_plugins_to_read_it_is_told_and_let_go_alone(): void {
-		$file  = $this->ours();
-		$data  = $this->dir . '/' . Maintenance::DATA;
-		$code  = $this->dir . '/' . Maintenance::FILE;
-		$other = new Maintenance( $this->dir, 'WP Checkpoint restore ffffffffffffffffffffffffffffffff' );
-		$file->hold();
-		// With the plugin's code in place it is not alone: nothing is written.
-		$this->assertFalse( $file->left_held() );
-		$this->assertFalse( $file->held_alone() );
-		$this->assertFalse( $file->lapse_alone( 1800000000 ) );
-		$this->assertTrue( $file->is_held(), 'nothing written' );
-		// .maintenance deleted: left held, and alone.
-		Sandbox::remove( $code );
+	public function test_a_held_data_file_with_no_code_of_the_plugins_to_read_it_is_let_go_alone(): void {
+		$runtime = str_repeat( 'c', 64 );
+		$pass    = str_repeat( 'ab', 32 );
+		$file    = new Maintenance( $this->dir, self::MARK, $runtime );
+		$data    = $this->dir . '/' . Maintenance::DATA;
+		$code    = $this->dir . '/' . Maintenance::FILE;
+		$other   = new Maintenance( $this->dir, 'WP Checkpoint restore ffffffffffffffffffffffffffffffff' );
+		$file->hold( null, $pass );
 		$held = (string) file_get_contents( $data );
+		$this->assertSame( "<?php exit; ?>\n" . self::MARK . "\n" . Maintenance::held() . "\n" . $pass . "\n" . $runtime . "\n", $held, 'the control: held, with a pass and a runtime named' );
+		$this->assertFalse( $file->left_held(), 'with the plugin\'s code in place it is not left alone' );
+		$this->assertTrue( $file->claimable(), 'its own maintenance file' );
+		// .maintenance deleted: left held; a run may take the job on by it.
+		Sandbox::remove( $code );
 		$this->assertTrue( $file->left_held() );
-		$this->assertTrue( $file->held_alone() );
+		$this->assertTrue( $file->claimable() );
 		$this->assertTrue( Maintenance::names_restore( $this->dir ) );
-		// Someone else's .maintenance (an update's): not left held (the claim's rule), but alone.
+		// Someone else's .maintenance (an update's): not left held, and not the job's to be taken on by.
 		file_put_contents( $code, '<?php $upgrading = ' . time() . '; ?>' );
 		$this->assertFalse( $file->left_held(), 'anything in .maintenance\'s place is not "deleted"' );
-		$this->assertTrue( $file->held_alone() );
-		// Another restore's data file, or one with the time: not this restore's held one, nothing written.
-		$this->assertFalse( $other->held_alone() );
-		$this->assertFalse( $other->lapse_alone( 1800000000 ) );
+		$this->assertFalse( $file->claimable() );
+		// Another restore's: nothing of it to let go, nothing written.
+		$this->assertSame( Maintenance::NONE, $other->let_go( 1800000000 ) );
 		$this->assertSame( $held, file_get_contents( $data ), 'nothing written for another restore' );
-		// Let go: the data file alone is rewritten with the time, someone else's .maintenance is left, none is made.
-		$this->assertTrue( $file->lapse_alone( 1800000000 ) );
-		$this->assertSame( $file->data( 1800000000, Maintenance::NO_PASS, $file->runtime_hash() ), file_get_contents( $data ) );
+		// Let go: the data file alone is rewritten: the time, no pass any more, the runtime it named kept; someone
+		// else's .maintenance is left, none is made.
+		$this->assertSame( Maintenance::ALONE, $file->let_go( 1800000000 ) );
+		$this->assertSame( "<?php exit; ?>\n" . self::MARK . "\n1800000000\n-\n" . $runtime . "\n", file_get_contents( $data ), 'the time, no pass, the runtime kept' );
 		$this->assertSame( 1, preg_match( '/^<\?php \$upgrading = \d+; \?>$/', (string) file_get_contents( $code ) ), 'someone else\'s file is as it was' );
-		$this->assertFalse( $file->held_alone(), 'no longer held' );
-		$this->assertFalse( $file->lapse_alone( 1900000000 ), 'and not written again' );
+		$this->assertSame( Maintenance::NONE, $file->let_go( 1900000000 ), 'no longer held: not written again' );
+		$this->assertStringContainsString( "\n1800000000\n", (string) file_get_contents( $data ) );
 		Sandbox::remove( $code );
 		$this->assertFalse( $file->left_held() );
+		$this->assertFalse( $file->claimable(), 'a data file with the time is not a held one' );
 		$this->assertFileDoesNotExist( $code, 'no .maintenance was made' );
 		$this->assertTrue( Maintenance::names_restore( $this->dir ), 'it still names the restore' );
+		// With its own maintenance file up, letting go rewrites it with the time (and no pass).
+		$file->hold( null, $pass );
+		$this->assertSame( Maintenance::LET_GO, $file->let_go( 1800000001 ) );
+		$this->assertSame( "<?php exit; ?>\n" . self::MARK . "\n1800000001\n-\n" . $runtime . "\n", file_get_contents( $data ) );
+		$this->assertSame( Maintenance::CODE, file_get_contents( $code ) );
 	}
 
 	public function test_whether_a_data_file_names_a_restore_is_true_false_or_not_to_be_told(): void {
@@ -371,7 +377,7 @@ final class MaintenanceTest extends TestCase {
 		file_put_contents( $target, $file->data( 1800000000 ) );
 		symlink( $target, $this->dir . '/.wpcheckpoint-maintenance.php' );
 		$this->assertSame( Maintenance::OTHER, $file->state(), 'a link in place of the data file' );
-		$this->assertTrue( $file->remove() );
+		$this->assertFalse( $file->remove(), 'the code reads through the link: what it reads may be this restore\'s, so it is not said to be gone' );
 		$this->assertTrue( is_link( $this->dir . '/.wpcheckpoint-maintenance.php' ), 'that link stays' );
 		$this->assertSame( Maintenance::CODE, $this->code() );
 		Sandbox::remove( $this->dir . '/.maintenance' );
@@ -476,7 +482,7 @@ echo json_encode( array( "upgrading" => $upgrading, "type" => gettype( $upgradin
 	public function test_the_code_is_pinned_and_every_code_written_is_known(): void {
 		// A change of CODE turns every file an earlier version put up into someone else's unless that version's code
 		// stays in KNOWN_CODES: once a version with it is released, add the old code there, then update this digest.
-		$this->assertSame( '008ef906e6af45e9d3558ce503039dab02d97fd0b5348857301ac5bf2c06ee59', hash( 'sha256', Maintenance::CODE ) );
+		$this->assertSame( '66e4947a6d618a1d55576e767bf377e46f58da423b33bd41e5df3f1280685c32', hash( 'sha256', Maintenance::CODE ) );
 		$this->assertContains( Maintenance::CODE, Maintenance::KNOWN_CODES );
 		// The code released with the run without WordPress (2026-11-10): byte for byte what it was, still known.
 		$this->assertSame( '0442b598fef21dcfa20c2b1c411aa3a38a46a6253f4addd8b1a43ee9d7c52714', hash( 'sha256', Maintenance::CODE_2 ) );

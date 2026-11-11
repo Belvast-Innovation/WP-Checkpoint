@@ -89,9 +89,13 @@ final class Maintenance {
 	const MAX_READ = 16384;
 
 	/**
-	 * The time of a held file on a 64-bit PHP: 2100-01-01, which WordPress's ten minutes never reach.
+	 * The times of a held file, as the data file says them: 2100-01-01, which WordPress's ten minutes never reach, on a
+	 * 64-bit PHP, and the largest integer of a 32-bit one (held_for()). The one source of the set: the loader's code
+	 * (Loader::CODE) and this file's (CODE) are written from it, and every judgment of this class asks is_held_time(),
+	 * so a file written by a PHP of the other integer size (WP-CLI's and the web server's may differ) is told as held
+	 * by all of them alike.
 	 */
-	const HELD_64 = 4102444800;
+	const HELD_VALUES = array( '4102444800', '2147483647' );
 
 	/**
 	 * The data file: the mark, the time, the pass hash (64 lowercase hex characters, or NO_PASS), and, written since the
@@ -252,7 +256,11 @@ final class Maintenance {
 	 * record a SHORTINIT request runs the runtime as any other (the runtime needs nothing of WordPress). The request
 	 * let through does not load a page cache (the advanced-cache.php drop-in, which WordPress includes before the
 	 * must-use plugins and which would answer it from its cache): enable_loading_advanced_cache_dropin is filtered to
-	 * false for it (plugin.php is loaded before this file is required).
+	 * false for it (plugin.php is loaded before this file is required). A request is let through once: WordPress
+	 * requires this file again in the same request (its shutdown handler for fatal errors asks
+	 * wp_is_maintenance_mode() whenever a request ends), and a request let through that ends before the loader, five
+	 * seconds or more after it was let through, would find its time come again; with WPCHECKPOINT_FLUSH_PASS defined
+	 * none of this is entered, and the file says the data file's time.
 	 */
 	const CODE =
 		'<?php' . "\n"
@@ -267,7 +275,7 @@ final class Maintenance {
 		. '		if ( ! defined( \'DISABLE_WP_CRON\' ) ) {' . "\n"
 		. '			define( \'DISABLE_WP_CRON\', true );' . "\n"
 		. '		}' . "\n"
-		. '	} elseif ( ! empty( $wpcheckpoint_found[4] ) && empty( $wpcheckpoint_check ) && \'cli\' !== PHP_SAPI && ! ( defined( \'WP_CLI\' ) && WP_CLI ) && ! class_exists( \'WPCheckpoint\\Jobs\\WebEntry\', false ) ) {' . "\n"
+		. '	} elseif ( ! empty( $wpcheckpoint_found[4] ) && empty( $wpcheckpoint_check ) && \'cli\' !== PHP_SAPI && ! ( defined( \'WP_CLI\' ) && WP_CLI ) && ! defined( \'WPCHECKPOINT_FLUSH_PASS\' ) && ! class_exists( \'WPCheckpoint\\Jobs\\WebEntry\', false ) ) {' . "\n"
 		. '		$wpcheckpoint_visitor = __DIR__ . \'/.wpcheckpoint-visitor.php\';' . "\n"
 		. '		$wpcheckpoint_lock    = @fopen( $wpcheckpoint_visitor, \'r+\' );' . "\n"
 		. '		$wpcheckpoint_busy    = 0;' . "\n"
@@ -278,7 +286,7 @@ final class Maintenance {
 		. '			$wpcheckpoint_text = @stream_get_contents( $wpcheckpoint_lock );' . "\n"
 		. '			if ( is_string( $wpcheckpoint_text ) && 1 === preg_match( \'/\\A(<\\?php exit; \\?>\\n# (WP Checkpoint restore [0-9a-f]{32})\\n\\{[^\\n]*"flush":\\{"n":)([0-9]{1,9})(,"next":)([0-9]{1,10})(\\}[^\\n]*\\}\\n)\\z/\', $wpcheckpoint_text, $wpcheckpoint_flush ) && $wpcheckpoint_flush[2] === $wpcheckpoint_found[1] ) {' . "\n"
 		. '				$wpcheckpoint_due    = false;' . "\n"
-		. '				$wpcheckpoint_loader = false !== $wpcheckpoint_next && $wpcheckpoint_next <= time() && (int) $wpcheckpoint_flush[5] <= time() && ! ( defined( \'SHORTINIT\' ) && SHORTINIT ) && in_array( $wpcheckpoint_found[2], array( \'4102444800\', \'2147483647\' ), true ) && @file_exists( __DIR__ . \'/.wpcheckpoint-runtime.php\' ) ? @file_get_contents( ( defined( \'WPMU_PLUGIN_DIR\' ) ? WPMU_PLUGIN_DIR : ( defined( \'WP_CONTENT_DIR\' ) ? WP_CONTENT_DIR : __DIR__ . \'/wp-content\' ) . \'/mu-plugins\' ) . \'/!wpcheckpoint-runtime.php\', false, null, 0, 8193 ) : false;' . "\n"
+		. '				$wpcheckpoint_loader = false !== $wpcheckpoint_next && $wpcheckpoint_next <= time() && (int) $wpcheckpoint_flush[5] <= time() && ! ( defined( \'SHORTINIT\' ) && SHORTINIT ) && in_array( $wpcheckpoint_found[2], array( \'' . self::HELD_VALUES[0] . '\', \'' . self::HELD_VALUES[1] . '\' ), true ) && @file_exists( __DIR__ . \'/.wpcheckpoint-runtime.php\' ) ? @file_get_contents( ( defined( \'WPMU_PLUGIN_DIR\' ) ? WPMU_PLUGIN_DIR : ( defined( \'WP_CONTENT_DIR\' ) ? WP_CONTENT_DIR : __DIR__ . \'/wp-content\' ) . \'/mu-plugins\' ) . \'/!wpcheckpoint-runtime.php\', false, null, 0, 8193 ) : false;' . "\n"
 		. '				if ( is_string( $wpcheckpoint_loader ) && in_array( hash( \'sha256\', $wpcheckpoint_loader ), array( \'e1ba77d7c466b93d01a56c5afe2075cc6abfd9ace30c5f96109986b4b8fb0d63\' ), true ) ) {' . "\n"
 		. '					$wpcheckpoint_tries = (int) $wpcheckpoint_flush[3] + 1;' . "\n"
 		. '					$wpcheckpoint_text  = $wpcheckpoint_flush[1] . $wpcheckpoint_tries . $wpcheckpoint_flush[4] . ( $wpcheckpoint_tries >= 3 ? time() + 300 : 0 ) . $wpcheckpoint_flush[6];' . "\n"
@@ -354,7 +362,18 @@ final class Maintenance {
 	 * @return int
 	 */
 	public static function held_for( int $int_size ): int {
-		return $int_size >= 8 ? (int) self::HELD_64 : 2147483647;
+		return (int) self::HELD_VALUES[ $int_size >= 8 ? 0 : 1 ];
+	}
+
+	/**
+	 * Whether a time, as a file says it (its digits), is a held one: any of HELD_VALUES, whatever this PHP's integer
+	 * size.
+	 *
+	 * @param string $digits The time as written.
+	 * @return bool
+	 */
+	public static function is_held_time( string $digits ): bool {
+		return in_array( $digits, self::HELD_VALUES, true );
 	}
 
 	/**
@@ -372,13 +391,13 @@ final class Maintenance {
 			return false;
 		}
 		if ( 1 === preg_match( self::LEGACY_FORM, $code, $legacy ) ) {
-			return self::held() === (int) $legacy[1];
+			return self::is_held_time( $legacy[1] );
 		}
 		if ( ! in_array( $code, self::KNOWN_CODES, true ) ) {
 			return false;
 		}
 		$data = self::parse( self::look( $dir . DIRECTORY_SEPARATOR . self::DATA ) );
-		return null === $data || self::held() === $data['time'];
+		return null === $data || $data['held'];
 	}
 
 	/**
@@ -404,17 +423,35 @@ final class Maintenance {
 
 	/**
 	 * Whether .maintenance in a directory is CODE, which reads the data file next to it: true, false (positively not:
-	 * not there, or anything else, the single file included), or null when it cannot be told.
+	 * not there, or a regular file or a directory that is anything else, the single file included), or null when it
+	 * cannot be told (it cannot be read; or it is a link or another kind of file, which WordPress requires through).
 	 *
 	 * @param string $dir Directory (ABSPATH).
 	 * @return bool|null
 	 */
 	public static function code_in( string $dir ) {
-		list( $kind, $code ) = self::look( rtrim( $dir, '/\\' ) . DIRECTORY_SEPARATOR . self::FILE );
-		if ( self::UNKNOWN === $kind ) {
+		$path                = rtrim( $dir, '/\\' ) . DIRECTORY_SEPARATOR . self::FILE;
+		list( $kind, $code ) = self::look( $path );
+		if ( self::UNKNOWN === $kind || ( self::OTHER === $kind && ! self::plain( $path ) ) ) {
 			return null;
 		}
 		return 'file' === $kind && in_array( $code, self::KNOWN_CODES, true );
+	}
+
+	/**
+	 * What a directory's data file says, in three states and never fewer: array( NONE, '' ) when it is positively not
+	 * there; array( 'data', mark ) for a regular file of DATA_FORM; array( 'not', '' ) for what is positively no data
+	 * file (a regular file of another form or longer than any, a directory); array( UNKNOWN, '' ) when it cannot be
+	 * told: it cannot be read now, or it is a link (or another kind of file), which the codes that read it read
+	 * through. The one reading every judgment of the data file outside a restore's own is made from (names_restore(),
+	 * the reaper).
+	 *
+	 * @param string $dir Directory (ABSPATH).
+	 * @return array{0: string, 1: string}
+	 */
+	public static function data_in( string $dir ): array {
+		$told = self::data_at( rtrim( $dir, '/\\' ) . DIRECTORY_SEPARATOR . self::DATA );
+		return array( $told[0], null === $told[1] ? '' : $told[1]['mark'] );
 	}
 
 	/**
@@ -429,22 +466,16 @@ final class Maintenance {
 	}
 
 	/**
-	 * Whether a directory's data file names a restore: true (a regular file of DATA_FORM), false (positively not: not
-	 * there, or a regular file of another form), or null when it cannot be told (it cannot be read, or it is not a
-	 * regular file: a link to a data file is read as one by the code that includes it).
+	 * Whether a directory's data file names a restore (data_in()): true (a regular file of DATA_FORM), false
+	 * (positively not: not there, a regular file of another form, a directory), or null when it cannot be told (it
+	 * cannot be read, or it is a link: a link to a data file is read as one by the code that includes it).
 	 *
 	 * @param string $dir Directory (ABSPATH).
 	 * @return bool|null
 	 */
 	public static function names_restore( string $dir ) {
-		$look = self::look( rtrim( $dir, '/\\' ) . DIRECTORY_SEPARATOR . self::DATA );
-		if ( self::NONE === $look[0] ) {
-			return false;
-		}
-		if ( 'file' !== $look[0] ) {
-			return null;
-		}
-		return null !== self::parse( $look );
+		$told = self::data_in( $dir )[0];
+		return self::UNKNOWN === $told ? null : 'data' === $told;
 	}
 
 	/**
@@ -573,7 +604,9 @@ final class Maintenance {
 	/**
 	 * What is there: NONE (no .maintenance, positively), OURS (this restore's, either form), BARE (CODE with no data
 	 * file of a form it reads), OTHER (anything else, a link included, or CODE with another restore's data file), or
-	 * UNKNOWN (it could not be told).
+	 * UNKNOWN (it could not be told). Not this restore's to write over or to take down, OTHER says; it does not say
+	 * that nothing of this restore's is read there: CODE reads a data file through a link (let_go() and remove() ask
+	 * data_at() for that).
 	 *
 	 * @return string
 	 */
@@ -668,7 +701,8 @@ final class Maintenance {
 	 * @return bool
 	 */
 	public function is_held(): bool {
-		return self::OURS === $this->state() && self::held() === $this->time();
+		$time = $this->time();
+		return self::OURS === $this->state() && null !== $time && self::is_held_time( (string) $time );
 	}
 
 	/**
@@ -684,47 +718,55 @@ final class Maintenance {
 			return false;
 		}
 		$data = self::parse( self::look( $this->data_path() ) );
-		return null !== $data && $this->mark === $data['mark'] && self::held() === $data['time'];
+		return null !== $data && $this->mark === $data['mark'] && $data['held'];
 	}
 
 	/**
-	 * Whether this restore's held data file is there while .maintenance is positively not a code of this plugin's
-	 * (which alone would read it and let it lapse): not there at all (left_held()), or someone else's (an update's,
-	 * which its own end deletes). What cannot be told is not it.
+	 * Whether what is here is this restore's for a run to take the job on by (the third piece of evidence of
+	 * Jobs\WebJobs::here()): its maintenance file (state() is OURS), or, with .maintenance positively not there, its
+	 * held data file alone (left_held()). Anything else in .maintenance's place, and whatever cannot be told, is not.
 	 *
 	 * @return bool
 	 */
-	public function held_alone(): bool {
-		list( $kind, $code ) = self::look( $this->path() );
-		if ( self::UNKNOWN === $kind || ( 'file' === $kind && in_array( $code, self::KNOWN_CODES, true ) ) ) {
-			return false;
-		}
-		$data = self::parse( self::look( $this->data_path() ) );
-		return null !== $data && $this->mark === $data['mark'] && self::held() === $data['time'];
+	public function claimable(): bool {
+		return self::OURS === $this->state() || $this->left_held();
 	}
 
+	const LET_GO = 'put';
+	const ALONE  = 'alone';
+
 	/**
-	 * Where this restore's held data file is there with no code of this plugin's to read it (held_alone()), rewrite
-	 * the data file alone with a time, so that it is no longer a held one: the restore's must-use plugin (Loader),
-	 * which answers for a deleted .maintenance only while the data file is held, stops answering. No .maintenance is
-	 * made, and someone else's is left as it is.
+	 * Let this restore's hold of the site go: once it returns, nothing answers as held for this restore, by the
+	 * maintenance file's code or by the restore's must-use plugin (Loader), which answers for a held data file whatever
+	 * is in .maintenance's place. Its maintenance file (or this plugin's code with no data file of a form it reads) is
+	 * rewritten with the time (put(): LET_GO); with anything else in .maintenance's place, or nothing, a held data file
+	 * of this restore's is rewritten alone, with the time, no pass and the runtime it names, and no .maintenance is
+	 * made (ALONE); otherwise there is nothing of this restore's to let go (NONE). What cannot be told of either file
+	 * (it cannot be read, a link in the data file's place) is not taken for "nothing there": it throws, for the caller
+	 * to wait and try again.
 	 *
 	 * @param int           $time    Unix time.
-	 * @param callable|null $confirm Called right before the file is put in place (a lease check; throws to stop).
-	 * @return bool Whether it was rewritten (false: not held alone, nothing written).
+	 * @param callable|null $confirm Called right before each file is put in place (a lease check; throws to stop).
+	 * @return string LET_GO, ALONE or NONE.
+	 * @throws \RuntimeException When what is there cannot be told; nothing is written.
 	 * @throws AtomicWriteFailed When it could not be written.
 	 */
-	public function lapse_alone( int $time, $confirm = null ): bool {
-		if ( ! $this->held_alone() ) {
-			return false;
+	public function let_go( int $time, $confirm = null ): string {
+		$told = self::data_at( $this->data_path() );
+		if ( self::UNKNOWN === self::look( $this->path() )[0] || self::UNKNOWN === $told[0] ) {
+			throw new \RuntimeException( 'What is in place of the maintenance file or its data file cannot be told.' );
 		}
-		$data = self::parse( self::look( $this->data_path() ) );
-		if ( null === $data || $this->mark !== $data['mark'] ) {
-			return false;
+		$state = $this->state();
+		if ( self::OURS === $state || self::BARE === $state ) {
+			$this->put( $time, $confirm );
+			return self::LET_GO;
 		}
-		AtomicFile::write( $this->dir, self::DATA, $this->data( $time, self::NO_PASS, $data['runtime'] ), null === $confirm ? array() : array( 'confirm' => $confirm ) );
+		if ( null === $told[1] || $this->mark !== $told[1]['mark'] || ! $told[1]['held'] ) {
+			return self::NONE;
+		}
+		AtomicFile::write( $this->dir, self::DATA, $this->data( $time, self::NO_PASS, $told[1]['runtime'] ), null === $confirm ? array() : array( 'confirm' => $confirm ) );
 		HostFunctions::opcache_invalidate( $this->data_path() );
-		return true;
+		return self::ALONE;
 	}
 
 	/**
@@ -814,6 +856,21 @@ final class Maintenance {
 	}
 
 	/**
+	 * The mark a file of WEB_FILES names, in three states: the mark, '' when it positively names none (a regular file
+	 * read, without one; or no regular file there), or null when it is a regular file that cannot be read.
+	 *
+	 * @param string $path Path.
+	 * @return string|null
+	 */
+	public static function web_names( string $path ) {
+		$read = self::web_head( $path );
+		if ( null === $read ) {
+			return null;
+		}
+		return is_string( $read ) && 1 === preg_match( self::WEB_MARK, $read, $found ) ? $found[1] : '';
+	}
+
+	/**
 	 * The first 512 bytes of a file of WEB_FILES; false when it is positively not a regular file there (not there, a
 	 * link, a directory), null when it is a regular file that cannot be read.
 	 *
@@ -878,8 +935,9 @@ final class Maintenance {
 		}
 		list( $kind, $code ) = self::look( $this->path() );
 		if ( self::UNKNOWN === $kind || ( 'file' === $kind && in_array( $code, self::KNOWN_CODES, true ) ) ) {
-			// CODE (another restore's, once this one's is down) reads the data file: it stays.
-			return self::UNKNOWN !== $kind && self::OURS !== $this->state();
+			// CODE (another restore's, once this one's is down) reads the data file: it stays. One it reads through a
+			// link may be this restore's: that cannot be told, and is not "gone".
+			return self::UNKNOWN !== $kind && self::OURS !== $this->state() && self::UNKNOWN !== self::data_at( $this->data_path() )[0];
 		}
 		$look = self::look( $this->data_path() );
 		$data = self::parse( $look );
@@ -888,7 +946,8 @@ final class Maintenance {
 			HostFunctions::opcache_invalidate( $this->data_path() );
 			return $gone;
 		}
-		return self::UNKNOWN !== $look[0];
+		// What cannot be told (it cannot be read; a link, which the codes read through) may be this restore's: not gone.
+		return self::UNKNOWN !== $look[0] && ( self::OTHER !== $look[0] || self::plain( $this->data_path() ) );
 	}
 
 	/**
@@ -907,6 +966,38 @@ final class Maintenance {
 	 */
 	public function data_path(): string {
 		return $this->dir . DIRECTORY_SEPARATOR . self::DATA;
+	}
+
+	/**
+	 * What look() calls OTHER, told further: whether it is a regular file (a longer one) or a directory, which no code
+	 * reads as this plugin's; a link, or any other kind of file, is read through by whatever includes or reads it, and
+	 * is not.
+	 *
+	 * @param string $path Path.
+	 * @return bool
+	 */
+	private static function plain( string $path ): bool {
+		clearstatcache( true, $path );
+		$stat = @lstat( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a warning would name the path.
+		return false !== $stat && in_array( $stat['mode'] & 0170000, array( 0100000, 0040000 ), true );
+	}
+
+	/**
+	 * The data file at a path (data_in()): array( NONE|UNKNOWN|'not', null ) or array( 'data', parse() of it ).
+	 *
+	 * @param string $path Path.
+	 * @return array{0: string, 1: array{mark: string, time: int, held: bool, pass: string, runtime: string}|null}
+	 */
+	private static function data_at( string $path ): array {
+		$look = self::look( $path );
+		if ( self::NONE === $look[0] || self::UNKNOWN === $look[0] ) {
+			return array( $look[0], null );
+		}
+		if ( 'file' !== $look[0] ) {
+			return array( self::plain( $path ) ? 'not' : self::UNKNOWN, null );
+		}
+		$data = self::parse( $look );
+		return null === $data ? array( 'not', null ) : array( 'data', $data );
 	}
 
 	/**
@@ -942,7 +1033,7 @@ final class Maintenance {
 	 * A data file's mark and time, or null when it is not a regular file in DATA_FORM.
 	 *
 	 * @param array{0: string, 1: string} $look look() of it.
-	 * @return array{mark: string, time: int, pass: string, runtime: string}|null
+	 * @return array{mark: string, time: int, held: bool, pass: string, runtime: string}|null
 	 */
 	private static function parse( array $look ) {
 		if ( 'file' !== $look[0] || 1 !== preg_match( self::DATA_FORM, $look[1], $found ) ) {
@@ -951,6 +1042,7 @@ final class Maintenance {
 		return array(
 			'mark'    => $found[1],
 			'time'    => (int) $found[2],
+			'held'    => self::is_held_time( $found[2] ),
 			'pass'    => $found[3],
 			'runtime' => isset( $found[4] ) ? $found[4] : '',
 		);

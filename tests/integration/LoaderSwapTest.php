@@ -40,6 +40,9 @@ final class LoaderSwapTest extends SwapTestCase {
 	/** @var Job|null The job the seams look at. */
 	private $watched = null;
 
+	/** @var callable|null function( string $point ): void, called at every seam. */
+	private $on = null;
+
 	public function set_up(): void {
 		parent::set_up();
 		$this->swap_parts['say'] = function ( string $text ): void {
@@ -47,6 +50,9 @@ final class LoaderSwapTest extends SwapTestCase {
 		};
 		$this->swap_parts['at']  = function ( string $point ): void {
 			$this->seams[] = $point;
+			if ( null !== $this->on ) {
+				call_user_func( $this->on, $point );
+			}
 			if ( null !== $this->watched && in_array( $point, array( 'log_recorded', 'loader_recorded', 'maintenance', 'carried', 'committed' ), true ) ) {
 				$this->where[ $point ]     = $this->loader_in( $this->watched );
 				$this->status_at[ $point ] = (string) Plugin::instance()->job_presenter()->present( Plugin::instance()->jobs()->find( $this->watched->id ), false )['web_fallback'];
@@ -198,6 +204,51 @@ final class LoaderSwapTest extends SwapTestCase {
 			$this->assertSame( $before, $this->site() );
 		}
 		$this->assertSame( array(), $this->loader_in( $done ) );
+	}
+
+	public function test_a_release_that_cannot_tell_the_data_file_waits_and_says_so_and_goes_on_once_it_can(): void {
+		if ( ! \WPCheckpoint\Tests\Fixtures\Restore\MaintenanceStates::can_hide() ) {
+			$this->markTestSkipped( 'Files cannot be made unreadable here (root, or Windows).' );
+		}
+		$job      = $this->at_swap();
+		$data     = $this->abspath . '/' . \WPCheckpoint\Restore\Maintenance::DATA;
+		$code     = $this->abspath . '/' . \WPCheckpoint\Restore\Maintenance::FILE;
+		$held     = '';
+		$this->on = function ( string $point ) use ( $data, $code, &$held ): void {
+			if ( 'self_check_removed' === $point && '' === $held ) {
+				// The swap is made and checked; the release is next. An update's end deletes .maintenance, and the data
+				// file cannot be read just now.
+				$held = (string) file_get_contents( $data );
+				Sandbox::remove( $code );
+				chmod( $data, 0 );
+			}
+		};
+		$said     = 'The maintenance file could not be let go yet; the restore waits and tries again';
+		try {
+			for ( $i = 0; $i < 12 && ! in_array( 'self_check_removed', $this->seams, true ); $i++ ) {
+				$this->cli_tick( $job );
+			}
+			$this->assertContains( 'self_check_removed', $this->seams, 'the control: the swap came to its release' );
+			$this->assertStringContainsString( "\n" . \WPCheckpoint\Restore\Maintenance::held() . "\n", $held, 'the control: the data file was a held one' );
+			$this->cli_tick( $job );
+			$this->cli_tick( $job );
+			$now = Plugin::instance()->jobs()->find( $job->id );
+			$this->assertContains( $now->status, array( Job::QUEUED, Job::RUNNING ), 'it waits, not failed and not gone on: ' . (string) $now->last_error );
+			$this->assertNotContains( 'unheld_commit', $this->seams, 'the release did not return: what cannot be read was not taken for nothing there' );
+			$this->assertStringContainsString( $said, Plugin::instance()->job_presenter()->log_tail( $now ), 'said in the job\'s log' );
+			clearstatcache();
+			$this->assertFileDoesNotExist( $code, 'no .maintenance was made' );
+			$this->assertSame( 0, fileperms( $data ) & 0777, 'the data file is as it was' );
+		} finally {
+			chmod( $data, 0600 );
+		}
+		$this->assertSame( $held, file_get_contents( $data ), 'nothing was written while it could not be told' );
+		// It can be read again: the release lets the data file go alone, and the swap goes on to its end.
+		$done = $this->cli_run( $job );
+		$this->assertSame( Job::COMPLETED, $done->status, (string) $done->last_error );
+		$this->assertContains( 'unheld_commit', $this->seams );
+		$this->assertStringContainsString( 'its data file was let go', Plugin::instance()->job_presenter()->log_tail( $done ) );
+		$this->assertSame( array(), $this->maintenance_files(), 'and everything of the restore\'s is taken down' );
 	}
 
 	public function test_a_backup_that_holds_the_loader_itself_leaves_none_either_made_or_put_back(): void {

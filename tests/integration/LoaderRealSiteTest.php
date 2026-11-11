@@ -185,17 +185,19 @@ final class LoaderRealSiteTest extends WP_UnitTestCase {
 	}
 
 	/**
-	 * One request of the test site's own WordPress by php-cgi, with WP_CACHE true (defined by an auto_prepend_file).
+	 * One request of the test site's own WordPress by php-cgi, with WP_CACHE true (defined by an auto_prepend_file), or
+	 * with another auto_prepend_file's code.
 	 *
+	 * @param string $prepend The auto_prepend_file's code.
 	 * @return array{headers: string, body: string, said: string}
 	 */
-	private function cached_request(): array {
+	private function cached_request( string $prepend = "<?php\ndefine( 'WP_CACHE', true );\n" ): array {
 		$cgi = dirname( PHP_BINARY ) . '/php-cgi';
 		$this->assertTrue( is_executable( $cgi ), 'php-cgi is next to the PHP binary (the test site\'s image has it)' );
 		if ( '' === $this->sandbox ) {
 			$this->sandbox = Sandbox::make( 'loader-real' );
-			file_put_contents( $this->sandbox . '/prepend.php', "<?php\ndefine( 'WP_CACHE', true );\n" );
 		}
+		file_put_contents( $this->sandbox . '/prepend.php', $prepend );
 		$index = rtrim( ABSPATH, '/' ) . '/index.php';
 		$env   = array(
 			'REDIRECT_STATUS' => '200',
@@ -254,6 +256,56 @@ final class LoaderRealSiteTest extends WP_UnitTestCase {
 		$this->assertStringContainsString( 'Briefly unavailable for scheduled maintenance', $let['body'] );
 		$this->assertSame( 2, $visitor->flush()['n'], 'let through, and counted' );
 		$this->assertSame( 1, substr_count( self::runtime_log(), $ran ), 'the loader ran the runtime: ' . self::runtime_log() );
+	}
+
+	public function test_a_request_let_through_that_ends_before_the_loader_after_its_window_is_let_through_once(): void {
+		$mark = Maintenance::new_mark();
+		$this->held( $mark, true, true );
+		$visitor = new VisitorFile( rtrim( ABSPATH, '/' ), $mark );
+		// A content directory of the test's own (WP_CONTENT_DIR from the auto_prepend_file: the test site's is not
+		// touched): the loader where WordPress would load it from, and an object cache drop-in that stands for a
+		// request that hangs: WordPress includes it after .maintenance let the request through and before the
+		// must-use plugins; it waits past the window of the request let through (five seconds), and ends.
+		$this->sandbox = Sandbox::make( 'loader-real' );
+		$content       = $this->sandbox . '/content';
+		mkdir( $content . '/mu-plugins', 0755, true );
+		file_put_contents( Loader::path( $content . '/mu-plugins' ), Loader::CODE );
+		file_put_contents( $content . '/object-cache.php', "<?php\nfile_put_contents( __DIR__ . '/ran', 'x', FILE_APPEND );\nsleep( 6 );\nexit;\n" );
+		$prepend = "<?php\ndefine( 'WP_CONTENT_DIR', " . var_export( $content, true ) . " );\n";
+		$ran     = static function () use ( $content ): int {
+			clearstatcache();
+			return is_file( $content . '/ran' ) ? (int) filesize( $content . '/ran' ) : 0;
+		};
+
+		// The control: the same code less its check of WPCHECKPOINT_FLUSH_PASS (a test's fixture under the maintenance
+		// file's name). WordPress requires .maintenance again when the request ends (its shutdown handler asks
+		// wp_is_maintenance_mode()); the window has come again by then, and the one request is let through twice.
+		$count   = 0;
+		$without = str_replace( ' && ! defined( \'WPCHECKPOINT_FLUSH_PASS\' )', '', Maintenance::CODE, $count );
+		$this->assertSame( 1, $count, 'the code has the check, once' );
+		RealAbspath::write( Maintenance::FILE, RealAbspath::fixture( $without ) );
+		$began = microtime( true );
+		$twice = $this->cached_request( $prepend );
+		$this->assertGreaterThanOrEqual( 6.0, microtime( true ) - $began, 'the control: the request hung past its window: ' . $twice['said'] );
+		$this->assertSame( 1, $ran(), 'the control: one request, let through to the drop-in once: ' . $twice['said'] );
+		$this->assertSame( 2, $visitor->flush()['n'], 'the control: without the check the one request is counted twice: ' . self::runtime_log() );
+		$this->assertSame( 1, substr_count( self::runtime_log(), '(try 2)' ), self::runtime_log() );
+		RealAbspath::remove( Maintenance::FILE );
+
+		// The code as it is, from the start: one request, counted once, said once.
+		RealAbspath::remove( Maintenance::VISITOR );
+		RealAbspath::remove( Maintenance::LOG );
+		RealAbspath::write( Maintenance::VISITOR, "<?php exit; ?>\n# " . $mark . "\n{\"plugin\":\"wp-checkpoint\\/wp-checkpoint.php\",\"flush\":{\"n\":0,\"next\":0}}\n" );
+		RealAbspath::touch( Maintenance::VISITOR, time() - 60 );
+		RealAbspath::write( Maintenance::LOG, "<?php exit; ?>\n# " . $mark . "\n" );
+		RealAbspath::write( Maintenance::FILE, Maintenance::CODE );
+		$began = microtime( true );
+		$once  = $this->cached_request( $prepend );
+		$this->assertGreaterThanOrEqual( 6.0, microtime( true ) - $began, 'the request hung past its window: ' . $once['said'] );
+		$this->assertSame( 2, $ran(), 'it was let through to the drop-in, once more: ' . $once['said'] );
+		$this->assertSame( 1, $visitor->flush()['n'], 'one request, counted once: ' . self::runtime_log() );
+		$this->assertSame( 1, substr_count( self::runtime_log(), 'a request was let through to flush it (try ' ), 'and said once: ' . self::runtime_log() );
+		$this->assertStringNotContainsString( 'No job holds the site with this maintenance file', self::runtime_log(), 'it ended before the loader' );
 	}
 
 	/**

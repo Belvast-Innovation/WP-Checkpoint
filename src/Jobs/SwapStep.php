@@ -3693,9 +3693,10 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * while it was held): it is rewritten with the time, so a run that dies before it takes the file down leaves a
 	 * file that lapses after WordPress's ten minutes, not one held for good. Someone else's file in its place is
 	 * left, and none is made where there is none; a held data file left without its .maintenance is rewritten alone
-	 * (Maintenance::lapse_alone()), so the restore's must-use plugin no longer answers for it: what answers 503 has a
-	 * job a run can take behind it, or a time that lapses. What cannot be told or written is waited out: until then the job
-	 * is recorded as holding the site (changing it, or swapped), and every WP-CLI command of the plugin says so.
+	 * (Maintenance::let_go()), so the restore's must-use plugin no longer answers for it: what answers 503 has a
+	 * job a run can take behind it, or a time that lapses. What cannot be told (a file that cannot be read now is not
+	 * taken for none) or written is said in the job's log and waited out: until then the job is recorded as holding the
+	 * site (changing it, or swapped), and every WP-CLI command of the plugin says so.
 	 *
 	 * @param JobContext  $context Context.
 	 * @param Maintenance $file    The file.
@@ -3708,17 +3709,13 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			$context->logger()->warning( 'Another maintenance file is in place of this restore\'s; it is left as it is' );
 		}
 		try {
-			if ( Maintenance::NONE === $state || Maintenance::OTHER === $state ) {
-				// None of ours to let go, and none is made. Its held data file with no code of the plugin's to read it
-				// (.maintenance deleted, or someone else's in its place, which its own end deletes) is let go all the
-				// same: the restore's must-use plugin answers for it while it is held, and after this point no run
-				// without WordPress takes the job to take it down.
-				if ( $file->lapse_alone( $this->now(), array( $context, 'confirm_lease' ) ) ) {
-					$context->logger()->info( 'No maintenance file of this restore\'s was in place; its data file was let go' );
-				}
-				return;
+			// None of ours in .maintenance's place: none is made, and its held data file with no code of the plugin's to
+			// read it (.maintenance deleted, or someone else's in its place, which its own end deletes) is let go all the
+			// same: the restore's must-use plugin answers for it while it is held, and after this point no run without
+			// WordPress takes the job to take it down.
+			if ( Maintenance::ALONE === $file->let_go( $this->now(), array( $context, 'confirm_lease' ) ) ) {
+				$context->logger()->info( 'No maintenance file of this restore\'s was in place; its data file was let go' );
 			}
-			$file->put( $this->now(), array( $context, 'confirm_lease' ) );
 		} catch ( LockLost $e ) {
 			throw $e;
 		} catch ( StaleJob $e ) {
@@ -3726,6 +3723,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		} catch ( NotHere $e ) {
 			throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged: a run without WordPress leaves the job as it is (Runner).
 		} catch ( \Throwable $e ) {
+			$context->logger()->warning( 'The maintenance file could not be let go yet; the restore waits and tries again', array( 'error' => $e->getMessage() ) );
 			throw new TransientFailure( 'The maintenance file could not be let go yet: ' . $e->getMessage() );
 		}
 	}

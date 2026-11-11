@@ -208,7 +208,7 @@ final class WebJobs implements RunnerRepository {
 	 * 2. The table prefix is the one the plan records.
 	 * 3. The maintenance file here is this job's: its data file carries the job's mark. With .maintenance positively
 	 *    not there (deleted: WordPress's upgrader deletes it at the end of an update, whoever put it up), the held data
-	 *    file with the job's mark alone (Maintenance::left_held()); anything else in .maintenance's place, or what
+	 *    file with the job's mark alone (Maintenance::claimable()); anything else in .maintenance's place, or what
 	 *    cannot be told, is not this job's. The rollback puts .maintenance up again before its first rename
 	 *    (SwapStep::hold_for_renames()).
 	 * 4. The job's storage directory is here, with the job's own files in it (its log, its lock or its work directory).
@@ -240,7 +240,7 @@ final class WebJobs implements RunnerRepository {
 			return 'The maintenance file here is not this job\'s.';
 		}
 		$file = new Maintenance( $this->abspath, $job->site_mark );
-		if ( Maintenance::OURS !== $file->state() && ! $file->left_held() ) {
+		if ( ! $file->claimable() ) {
 			return 'The maintenance file here is not this job\'s.';
 		}
 		if ( '' === $this->files_base( $job ) ) {

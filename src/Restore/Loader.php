@@ -64,7 +64,7 @@ final class Loader {
 		. '			return;' . "\n"
 		. '		}' . "\n"
 		. '		$data = @file_get_contents( $dir . \'/.wpcheckpoint-maintenance.php\' );' . "\n"
-		. '		if ( ! is_string( $data ) || 1 !== preg_match( \'/\\A<\\?php exit; \\?>\\n(WP Checkpoint restore [0-9a-f]{32})\\n(?:4102444800|2147483647)\\n([0-9a-f]{64}|-)\\n([0-9a-f]{64})\\n\\z/\', $data, $found ) ) {' . "\n"
+		. '		if ( ! is_string( $data ) || 1 !== preg_match( \'/\\A<\\?php exit; \\?>\\n(WP Checkpoint restore [0-9a-f]{32})\\n(?:' . Maintenance::HELD_VALUES[0] . '|' . Maintenance::HELD_VALUES[1] . ')\\n([0-9a-f]{64}|-)\\n([0-9a-f]{64})\\n\\z/\', $data, $found ) ) {' . "\n"
 		. '			return;' . "\n"
 		. '		}' . "\n"
 		. '		$pass = isset( $_SERVER[\'HTTP_X_WPCHECKPOINT_PASS\'] ) && is_string( $_SERVER[\'HTTP_X_WPCHECKPOINT_PASS\'] ) ? $_SERVER[\'HTTP_X_WPCHECKPOINT_PASS\'] : \'\';' . "\n"
