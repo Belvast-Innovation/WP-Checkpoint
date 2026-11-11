@@ -233,9 +233,11 @@ final class LoaderRealSiteTest extends WP_UnitTestCase {
 
 		// The control: the same code less the filter (a test's fixture under the maintenance file's name). The request
 		// is let through and counted, WP_CACHE is true, and the page cache answers it: the loader is never reached.
-		$filter = "\t\t\t\tif ( function_exists( 'add_filter' ) ) {\n\t\t\t\t\tadd_filter( 'enable_loading_advanced_cache_dropin', static function () { return false; }, PHP_INT_MAX );\n\t\t\t\t}\n";
-		$this->assertSame( 1, substr_count( Maintenance::CODE, $filter ), 'the code has the filter, once' );
-		RealAbspath::write( Maintenance::FILE, RealAbspath::fixture( str_replace( $filter, '', Maintenance::CODE ) ) );
+		$count   = 0;
+		$without = preg_replace( '/^\t+if \( function_exists\( \'add_filter\' \) \) \{\n\t+add_filter\( \'enable_loading_advanced_cache_dropin\'[^\n]*\n\t+\}\n/m', '', Maintenance::CODE, -1, $count );
+		$this->assertSame( 1, $count, 'the code has the filter, once' );
+		$this->assertStringNotContainsString( 'enable_loading_advanced_cache_dropin', (string) $without );
+		RealAbspath::write( Maintenance::FILE, RealAbspath::fixture( (string) $without ) );
 		$cached = $this->cached_request();
 		$this->assertStringContainsString( RealAdvancedCache::PAGE, $cached['body'], 'the control: the page cache answered: ' . $cached['said'] );
 		$this->assertSame( 1, $visitor->flush()['n'], 'the request was let through, and counted' );
