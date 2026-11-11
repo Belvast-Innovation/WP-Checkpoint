@@ -379,6 +379,7 @@ final class Residue {
 				continue;
 			}
 			$path = rtrim( $dir, '/\\' ) . DIRECTORY_SEPARATOR . $name;
+			clearstatcache( true, $path ); // Its age decides: not what an earlier look at it in this process remembers.
 			$stat = @lstat( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- gone meanwhile: skipped.
 			if ( false === $stat || 0100000 !== ( $stat['mode'] & 0170000 ) ) {
 				continue; // Only a regular file: AtomicFile never makes anything else.
@@ -404,6 +405,7 @@ final class Residue {
 				continue;
 			}
 			$path = rtrim( $dir, '/\\' ) . DIRECTORY_SEPARATOR . $name;
+			clearstatcache( true, $path ); // Its age decides: not what an earlier look at it in this process remembers.
 			$stat = @lstat( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- gone meanwhile: skipped.
 			if ( false === $stat || 0100000 !== ( $stat['mode'] & 0170000 ) ) {
 				continue;
