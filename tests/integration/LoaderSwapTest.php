@@ -385,6 +385,22 @@ final class LoaderSwapTest extends SwapTestCase {
 		$this->assertTrue( Loader::needed( $this->abspath ), 'the data file alone names a restore' );
 		$this->assertFalse( Plugin::remove_loader( $mu, $this->abspath ) );
 		$this->assertFileExists( Loader::path( $mu ), 'kept while a data file names a restore' );
+		// The data file cannot be read now, or is a link to one: whether it names a restore cannot be told, and the
+		// loader stays.
+		$data = $file->data_path();
+		if ( function_exists( 'posix_geteuid' ) && 0 !== posix_geteuid() ) {
+			chmod( $data, 0 );
+			$this->assertTrue( Loader::needed( $this->abspath ), 'a data file that cannot be read may be a held one' );
+			$this->assertFalse( Plugin::remove_loader( $mu, $this->abspath ) );
+			$this->assertFileExists( Loader::path( $mu ) );
+			chmod( $data, 0600 );
+		}
+		rename( $data, $this->sandbox . '/data-elsewhere' );
+		$this->assertTrue( symlink( $this->sandbox . '/data-elsewhere', $data ) );
+		$this->assertTrue( Loader::needed( $this->abspath ), 'a link to a data file is read as one by the loader' );
+		$this->assertFalse( Plugin::remove_loader( $mu, $this->abspath ) );
+		$this->assertFileExists( Loader::path( $mu ) );
+		Sandbox::remove( $data );
 		// The control: no file of a restore left, the deactivation removes it.
 		$this->remove_maintenance();
 		$this->assertFalse( Loader::needed( $this->abspath ) );

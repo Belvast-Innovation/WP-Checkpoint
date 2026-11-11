@@ -422,13 +422,16 @@ final class WebEntryCodeTest extends SwapTestCase {
 			'before the runtime goes'       => array( 'take_down', 4 ),
 			'before the runtime log goes'   => array( 'take_down', 5 ),
 			'every file down'               => array( 'maintenance_down', 1 ),
+			// Someone else's .maintenance in its place while the job ends (an update begun meanwhile), gone after.
+			'recorded as put back, an update\'s file in place' => array( 'reverted', 1, true ),
+			'before the loader goes, an update\'s file in place' => array( 'take_down', 1, true ),
 		);
 	}
 
 	/**
 	 * @dataProvider endings
 	 */
-	public function test_with_the_maintenance_file_deleted_a_run_killed_while_it_ends_the_job_leaves_no_site_held_for_good( string $seam, int $nth ): void {
+	public function test_with_the_maintenance_file_deleted_a_run_killed_while_it_ends_the_job_leaves_no_site_held_for_good( string $seam, int $nth, bool $foreign = false ): void {
 		$job    = $this->at_swap();
 		$before = $this->site();
 		$this->killed_at( $job, 'dir_in', 2 );
@@ -445,8 +448,16 @@ final class WebEntryCodeTest extends SwapTestCase {
 		$held = $this->request( $restored, array( 'due' => false ) );
 		$this->assertTrue( $held['let'], 'the control: the loader answers for the deleted file: ' . $held['said'] );
 		$this->assertSame( 'restored', Plugin::instance()->jobs()->find( $job->id )->cursor['phase'] ?? '', 'the control: and no run was made' );
+		if ( $foreign ) {
+			file_put_contents( $file->path(), '<?php $upgrading = ' . time() . '; ?>' ); // As WordPress's upgrader writes it.
+			$this->assertSame( Maintenance::OTHER, $file->state() );
+		}
 		// The run that ends the job, killed on its way.
 		$this->killed_at( $restored, $seam, $nth );
+		if ( $foreign ) {
+			$this->assertSame( 1, preg_match( '/^<\?php \$upgrading = \d+; \?>$/', (string) file_get_contents( $file->path() ) ), 'the control: the update\'s file was left as it is' );
+			Sandbox::remove( $file->path() ); // The update ends.
+		}
 		$this->assertNotContains( Maintenance::FILE, $this->swap_files(), 'the control: no .maintenance was made meanwhile' );
 		// Visitors alone: within a few requests one reaches the site (the loader answers for nothing that no run can
 		// end and no time lets lapse).

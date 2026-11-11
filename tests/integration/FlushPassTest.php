@@ -273,16 +273,38 @@ final class FlushPassTest extends TestCase {
 		}
 		$this->visitor()->await_flush();
 		$this->due();
+		$time = $this->visitor_time();
 		$this->assertHeld( $this->request() );
 		$this->assertSame( array( 'n' => 0, 'next' => 0 ), $this->visitor()->flush(), 'nothing counted' );
 		$this->assertSame( array(), $this->passes_logged() );
 		$this->assertSame( 0, $this->included(), 'and no runtime run: the site is put back, the flush is WP-CLI\'s' );
-		// The control: with the loader's code there, the same request is let through.
+		$this->assertSame( $time, $this->visitor_time(), 'nor is the visitor file\'s time set on' );
+		// The control: with the loader's code there, the very next request is let through.
 		if ( null !== $contents ) {
 			Sandbox::remove( Loader::path( $this->mu ) );
 		}
 		Loader::put( $this->mu );
+		$this->assertLet( $this->request() );
+		$this->assertGreaterThan( $time, $this->visitor_time(), 'the control: the one let through set the time on' );
+	}
+
+	public function test_while_the_records_next_time_has_not_come_nothing_is_let_through_and_the_time_is_not_touched(): void {
+		Loader::put( $this->mu );
+		$this->visitor()->await_flush();
+		$path = $this->dir . '/' . Maintenance::VISITOR;
+		$soon = time() + 600;
+		file_put_contents( $path, str_replace( '"next":0', '"next":' . $soon, (string) file_get_contents( $path ) ) );
+		$this->assertSame( array( 'n' => 0, 'next' => $soon ), $this->visitor()->flush(), 'the control: the record waits' );
 		$this->due();
+		$time = $this->visitor_time();
+		$this->assertHeld( $this->request() );
+		$this->assertSame( array( 'n' => 0, 'next' => $soon ), $this->visitor()->flush() );
+		$this->assertSame( $time, $this->visitor_time(), 'the visitor file\'s time is not touched' );
+		$this->assertSame( 0, $this->included() );
+		// The control: its time come (the record's moved back, nothing else), the next request is let through.
+		$mtime = $this->visitor_time();
+		file_put_contents( $path, str_replace( '"next":' . $soon, '"next":' . ( time() - 1 ), (string) file_get_contents( $path ) ) );
+		touch( $path, $mtime );
 		$this->assertLet( $this->request() );
 	}
 

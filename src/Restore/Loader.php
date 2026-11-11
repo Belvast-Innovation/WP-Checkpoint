@@ -140,14 +140,15 @@ final class Loader {
 	/**
 	 * Whether a loader is still a restore's to have: a maintenance code of this plugin's is in the WordPress directory,
 	 * or a data file there names a restore (held or not: with .maintenance deleted, the loader is what holds a half
-	 * swapped site, and what lets a visitor's request put it back). The rule of every removal outside a swap (the
-	 * reaper, a deactivation, an uninstall): none of them takes the loader while this holds.
+	 * swapped site, and what lets a visitor's request put it back). What cannot be told of either file counts as
+	 * needed (a data file that cannot be read now, or is a link, may be a held one). The rule of every removal outside
+	 * a swap (the reaper, a deactivation, an uninstall): none of them takes the loader while this holds.
 	 *
 	 * @param string $dir The WordPress directory.
 	 * @return bool
 	 */
 	public static function needed( string $dir ): bool {
-		return false !== Maintenance::code_in( $dir ) || '' !== Maintenance::data_mark( $dir );
+		return false !== Maintenance::code_in( $dir ) || false !== Maintenance::names_restore( $dir );
 	}
 
 	/**

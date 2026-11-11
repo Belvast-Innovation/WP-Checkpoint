@@ -89,6 +89,64 @@ final class MaintenanceTest extends TestCase {
 		$this->assertNotSame( $one, Maintenance::new_mark() );
 	}
 
+	public function test_a_held_data_file_with_no_code_of_the_plugins_to_read_it_is_told_and_let_go_alone(): void {
+		$file  = $this->ours();
+		$data  = $this->dir . '/' . Maintenance::DATA;
+		$code  = $this->dir . '/' . Maintenance::FILE;
+		$other = new Maintenance( $this->dir, 'WP Checkpoint restore ffffffffffffffffffffffffffffffff' );
+		$file->hold();
+		// With the plugin's code in place it is not alone: nothing is written.
+		$this->assertFalse( $file->left_held() );
+		$this->assertFalse( $file->held_alone() );
+		$this->assertFalse( $file->lapse_alone( 1800000000 ) );
+		$this->assertTrue( $file->is_held(), 'nothing written' );
+		// .maintenance deleted: left held, and alone.
+		Sandbox::remove( $code );
+		$held = (string) file_get_contents( $data );
+		$this->assertTrue( $file->left_held() );
+		$this->assertTrue( $file->held_alone() );
+		$this->assertTrue( Maintenance::names_restore( $this->dir ) );
+		// Someone else's .maintenance (an update's): not left held (the claim's rule), but alone.
+		file_put_contents( $code, '<?php $upgrading = ' . time() . '; ?>' );
+		$this->assertFalse( $file->left_held(), 'anything in .maintenance\'s place is not "deleted"' );
+		$this->assertTrue( $file->held_alone() );
+		// Another restore's data file, or one with the time: not this restore's held one, nothing written.
+		$this->assertFalse( $other->held_alone() );
+		$this->assertFalse( $other->lapse_alone( 1800000000 ) );
+		$this->assertSame( $held, file_get_contents( $data ), 'nothing written for another restore' );
+		// Let go: the data file alone is rewritten with the time, someone else's .maintenance is left, none is made.
+		$this->assertTrue( $file->lapse_alone( 1800000000 ) );
+		$this->assertSame( $file->data( 1800000000, Maintenance::NO_PASS, $file->runtime_hash() ), file_get_contents( $data ) );
+		$this->assertSame( 1, preg_match( '/^<\?php \$upgrading = \d+; \?>$/', (string) file_get_contents( $code ) ), 'someone else\'s file is as it was' );
+		$this->assertFalse( $file->held_alone(), 'no longer held' );
+		$this->assertFalse( $file->lapse_alone( 1900000000 ), 'and not written again' );
+		Sandbox::remove( $code );
+		$this->assertFalse( $file->left_held() );
+		$this->assertFileDoesNotExist( $code, 'no .maintenance was made' );
+		$this->assertTrue( Maintenance::names_restore( $this->dir ), 'it still names the restore' );
+	}
+
+	public function test_whether_a_data_file_names_a_restore_is_true_false_or_not_to_be_told(): void {
+		$data = $this->dir . '/' . Maintenance::DATA;
+		$this->assertFalse( Maintenance::names_restore( $this->dir ), 'none there' );
+		file_put_contents( $data, "<?php exit; ?>\nsomething else\n" );
+		$this->assertFalse( Maintenance::names_restore( $this->dir ), 'a regular file of another form' );
+		Sandbox::remove( $data );
+		$real = $this->dir . '/real-data';
+		file_put_contents( $real, $this->ours()->data( Maintenance::held() ) );
+		if ( @symlink( $real, $data ) ) {
+			$this->assertNull( Maintenance::names_restore( $this->dir ), 'a link (the code that includes it reads through it): not to be told' );
+			Sandbox::remove( $data );
+		}
+		copy( $real, $data );
+		$this->assertTrue( Maintenance::names_restore( $this->dir ) );
+		if ( function_exists( 'posix_geteuid' ) && 0 !== posix_geteuid() && '\\' !== DIRECTORY_SEPARATOR ) {
+			chmod( $data, 0 );
+			$this->assertNull( Maintenance::names_restore( $this->dir ), 'it cannot be read: not to be told' );
+			chmod( $data, 0600 );
+		}
+	}
+
 	public function test_a_held_file_never_lapses_and_is_still_this_restores(): void {
 		$file = $this->ours();
 		$file->put( 1800000000 );

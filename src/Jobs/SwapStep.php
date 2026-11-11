@@ -3706,15 +3706,15 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		$state = $file->state();
 		if ( Maintenance::OTHER === $state ) {
 			$context->logger()->warning( 'Another maintenance file is in place of this restore\'s; it is left as it is' );
-			return;
 		}
 		try {
-			if ( Maintenance::NONE === $state ) {
-				// None of ours to let go, and none is made. Its held data file left alone (.maintenance deleted) is
-				// let go all the same: the restore's must-use plugin answers for it while it is held, and after
-				// this point no run without WordPress takes the job to take it down.
+			if ( Maintenance::NONE === $state || Maintenance::OTHER === $state ) {
+				// None of ours to let go, and none is made. Its held data file with no code of the plugin's to read it
+				// (.maintenance deleted, or someone else's in its place, which its own end deletes) is let go all the
+				// same: the restore's must-use plugin answers for it while it is held, and after this point no run
+				// without WordPress takes the job to take it down.
 				if ( $file->lapse_alone( $this->now(), array( $context, 'confirm_lease' ) ) ) {
-					$context->logger()->info( 'The maintenance file was gone; its data file was let go' );
+					$context->logger()->info( 'No maintenance file of this restore\'s was in place; its data file was let go' );
 				}
 				return;
 			}

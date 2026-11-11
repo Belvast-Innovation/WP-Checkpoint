@@ -429,6 +429,25 @@ final class Maintenance {
 	}
 
 	/**
+	 * Whether a directory's data file names a restore: true (a regular file of DATA_FORM), false (positively not: not
+	 * there, or a regular file of another form), or null when it cannot be told (it cannot be read, or it is not a
+	 * regular file: a link to a data file is read as one by the code that includes it).
+	 *
+	 * @param string $dir Directory (ABSPATH).
+	 * @return bool|null
+	 */
+	public static function names_restore( string $dir ) {
+		$look = self::look( rtrim( $dir, '/\\' ) . DIRECTORY_SEPARATOR . self::DATA );
+		if ( self::NONE === $look[0] ) {
+			return false;
+		}
+		if ( 'file' !== $look[0] ) {
+			return null;
+		}
+		return null !== self::parse( $look );
+	}
+
+	/**
 	 * Whether a request with this pass key is let through the maintenance file in a directory: the rule CODE applies,
 	 * read the way CODE reads (file_get_contents(), through a link as well), for the plugin's own code in a request
 	 * CODE let through.
@@ -669,24 +688,41 @@ final class Maintenance {
 	}
 
 	/**
-	 * Where this restore's held data file is left with no .maintenance (left_held()), rewrite the data file alone
-	 * with a time, so that it is no longer a held one: the restore's must-use plugin (Loader), which answers for a
-	 * deleted .maintenance only while the data file is held, stops answering. No .maintenance is made.
+	 * Whether this restore's held data file is there while .maintenance is positively not a code of this plugin's
+	 * (which alone would read it and let it lapse): not there at all (left_held()), or someone else's (an update's,
+	 * which its own end deletes). What cannot be told is not it.
+	 *
+	 * @return bool
+	 */
+	public function held_alone(): bool {
+		list( $kind, $code ) = self::look( $this->path() );
+		if ( self::UNKNOWN === $kind || ( 'file' === $kind && in_array( $code, self::KNOWN_CODES, true ) ) ) {
+			return false;
+		}
+		$data = self::parse( self::look( $this->data_path() ) );
+		return null !== $data && $this->mark === $data['mark'] && self::held() === $data['time'];
+	}
+
+	/**
+	 * Where this restore's held data file is there with no code of this plugin's to read it (held_alone()), rewrite
+	 * the data file alone with a time, so that it is no longer a held one: the restore's must-use plugin (Loader),
+	 * which answers for a deleted .maintenance only while the data file is held, stops answering. No .maintenance is
+	 * made, and someone else's is left as it is.
 	 *
 	 * @param int           $time    Unix time.
 	 * @param callable|null $confirm Called right before the file is put in place (a lease check; throws to stop).
-	 * @return bool Whether it was rewritten (false: not left held, nothing written).
+	 * @return bool Whether it was rewritten (false: not held alone, nothing written).
 	 * @throws AtomicWriteFailed When it could not be written.
 	 */
 	public function lapse_alone( int $time, $confirm = null ): bool {
-		if ( ! $this->left_held() ) {
+		if ( ! $this->held_alone() ) {
 			return false;
 		}
 		$data = self::parse( self::look( $this->data_path() ) );
 		if ( null === $data || $this->mark !== $data['mark'] ) {
 			return false;
 		}
-		AtomicFile::write( $this->dir, self::DATA, $this->data( $time, $data['pass'], $data['runtime'] ), null === $confirm ? array() : array( 'confirm' => $confirm ) );
+		AtomicFile::write( $this->dir, self::DATA, $this->data( $time, self::NO_PASS, $data['runtime'] ), null === $confirm ? array() : array( 'confirm' => $confirm ) );
 		HostFunctions::opcache_invalidate( $this->data_path() );
 		return true;
 	}
