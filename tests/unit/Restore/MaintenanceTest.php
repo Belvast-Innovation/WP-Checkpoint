@@ -132,6 +132,19 @@ final class MaintenanceTest extends TestCase {
 		$this->assertSame( Maintenance::CODE, file_get_contents( $code ) );
 	}
 
+	/**
+	 * A script that sets a file's time, in a sandbox of its own (not in the directory the scans list; removed with the
+	 * test's sandbox would be a deletion, which makes PHP forget what it remembers of files: it is made before any look).
+	 *
+	 * @return string Its path.
+	 */
+	private function root_of_scripts(): string {
+		$script = $this->dir . '/age-script/age.php';
+		mkdir( dirname( $script ) );
+		file_put_contents( $script, '<?php exit( touch( $argv[1], (int) $argv[2] ) ? 0 : 1 );' );
+		return $script;
+	}
+
 	public function test_the_scans_read_a_files_age_anew_and_not_what_an_earlier_look_remembers(): void {
 		$mu = $this->dir . '/mu';
 		mkdir( $mu );
@@ -139,16 +152,19 @@ final class MaintenanceTest extends TestCase {
 		$loader = \WPCheckpoint\Restore\Loader::path( $mu );
 		file_put_contents( $data, $this->ours()->data( 1800000000 ) );
 		file_put_contents( $loader, \WPCheckpoint\Restore\Loader::CODE );
-		$old  = time() - 100000;
-		$aged = function ( string $path ) use ( $old ): bool {
+		$old    = time() - 100000;
+		$script = $this->root_of_scripts();
+		$aged   = function ( string $path ) use ( $old, $script ): bool {
 			// This process looks at the file (PHP remembers the answer of its last look), then another process changes
 			// its time: PHP's own touch() forgets the answer on some versions and not on others (7.4 does not), another
 			// process's never does. Nothing else is looked at before the scan: the remembered answer is this file's.
 			$this->assertGreaterThan( $old, lstat( $path )['mtime'], 'the control: new' );
-			$out = array();
-			$rc  = 1;
-			exec( escapeshellarg( PHP_BINARY ) . ' -r ' . escapeshellarg( 'exit( touch( $argv[1], (int) $argv[2] ) ? 0 : 1 );' ) . ' ' . escapeshellarg( $path ) . ' ' . $old, $out, $rc );
-			$this->assertSame( 0, $rc );
+			// Not through a shell: on Windows escapeshellarg() turns the "!" of the loader's name into a space.
+			$pipes   = array();
+			$process = proc_open( array( PHP_BINARY, $script, $path, (string) $old ), array( 1 => array( 'pipe', 'w' ), 2 => array( 'pipe', 'w' ) ), $pipes );
+			$this->assertIsResource( $process );
+			$said = stream_get_contents( $pipes[1] ) . stream_get_contents( $pipes[2] );
+			$this->assertSame( 0, proc_close( $process ), 'another process set the file\'s time: ' . $said );
 			// The control: this process still remembers the time before. Where it does not (a PHP that forgets what
 			// it remembers whenever it starts a process), what the scan forgets itself cannot be shown.
 			return lstat( $path )['mtime'] > $old;
