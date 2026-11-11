@@ -41,6 +41,7 @@ echo json_encode(
 		'cron'      => defined( 'DISABLE_WP_CRON' ),
 		'flush'     => defined( 'WPCHECKPOINT_FLUSH_PASS' ),
 		'entry'     => defined( 'WPCHECKPOINT_WEB_ENTRY' ),
+		'sapi'      => PHP_SAPI,
 	)
 ) . "\n";
 exit( 0 );

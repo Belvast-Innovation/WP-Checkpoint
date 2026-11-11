@@ -243,7 +243,10 @@ final class Maintenance {
 	 * the whole site run on what the cache still holds), and when the record's next time has come: still under the
 	 * lock, the count is raised and written first, the request let through after. The first FLUSH_TRIES go at the
 	 * runtime's own pace; after them one is let through every FLUSH_WAIT seconds, each said in the runtime log. Without
-	 * the loader nothing is let through: WP-CLI flushes and ends it.
+	 * the loader nothing is let through: WP-CLI flushes and ends it. Nor is anything let through that the loader would
+	 * not end (its own conditions, checked here before the count is written): a process on the command line (any, not
+	 * WP-CLI alone), a request for which SHORTINIT is defined (WordPress stops before the must-use plugins), a data file
+	 * whose time is not a held one, no runtime file next to this one.
 	 */
 	const CODE =
 		'<?php' . "\n"
@@ -271,7 +274,7 @@ final class Maintenance {
 		. '			if ( is_string( $wpcheckpoint_text ) && 1 === preg_match( \'/\\A(<\\?php exit; \\?>\\n# (WP Checkpoint restore [0-9a-f]{32})\\n\\{[^\\n]*"flush":\\{"n":)([0-9]{1,9})(,"next":)([0-9]{1,10})(\\}[^\\n]*\\}\\n)\\z/\', $wpcheckpoint_text, $wpcheckpoint_flush ) && $wpcheckpoint_flush[2] === $wpcheckpoint_found[1] ) {' . "\n"
 		. '				$wpcheckpoint_due    = false;' . "\n"
 		. '				$wpcheckpoint_loader = @file_get_contents( ( defined( \'WPMU_PLUGIN_DIR\' ) ? WPMU_PLUGIN_DIR : ( defined( \'WP_CONTENT_DIR\' ) ? WP_CONTENT_DIR : __DIR__ . \'/wp-content\' ) . \'/mu-plugins\' ) . \'/!wpcheckpoint-runtime.php\', false, null, 0, 8193 );' . "\n"
-		. '				if ( (int) $wpcheckpoint_flush[5] <= time() && is_string( $wpcheckpoint_loader ) && in_array( hash( \'sha256\', $wpcheckpoint_loader ), array( \'e1ba77d7c466b93d01a56c5afe2075cc6abfd9ace30c5f96109986b4b8fb0d63\' ), true ) ) {' . "\n"
+		. '				if ( (int) $wpcheckpoint_flush[5] <= time() && \'cli\' !== PHP_SAPI && ! ( defined( \'SHORTINIT\' ) && SHORTINIT ) && in_array( $wpcheckpoint_found[2], array( \'4102444800\', \'2147483647\' ), true ) && @file_exists( __DIR__ . \'/.wpcheckpoint-runtime.php\' ) && is_string( $wpcheckpoint_loader ) && in_array( hash( \'sha256\', $wpcheckpoint_loader ), array( \'e1ba77d7c466b93d01a56c5afe2075cc6abfd9ace30c5f96109986b4b8fb0d63\' ), true ) ) {' . "\n"
 		. '					$wpcheckpoint_tries = (int) $wpcheckpoint_flush[3] + 1;' . "\n"
 		. '					$wpcheckpoint_text  = $wpcheckpoint_flush[1] . $wpcheckpoint_tries . $wpcheckpoint_flush[4] . ( $wpcheckpoint_tries >= 3 ? time() + 300 : 0 ) . $wpcheckpoint_flush[6];' . "\n"
 		. '					if ( @rewind( $wpcheckpoint_lock ) && @ftruncate( $wpcheckpoint_lock, 0 ) && strlen( $wpcheckpoint_text ) === @fwrite( $wpcheckpoint_lock, $wpcheckpoint_text ) && @fflush( $wpcheckpoint_lock ) ) {' . "\n"

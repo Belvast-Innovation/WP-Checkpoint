@@ -1,6 +1,6 @@
 <?php
 
-namespace WPCheckpoint\Tests\Unit\Restore;
+namespace WPCheckpoint\Tests\Integration;
 
 use WPCheckpoint\Jobs\VisitorFile;
 use WPCheckpoint\Restore\Loader;
@@ -10,11 +10,14 @@ use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 /**
  * The maintenance file's code lets a request through to flush the object cache (Maintenance::CODE), each request a
- * process of its own with nothing of WordPress (maintenance-child.php): only once a run recorded that the flush is all
+ * process of its own with nothing of WordPress (maintenance-child.php, by php-cgi: a request's SAPI, which the test
+ * site's image has; nothing here needs WordPress or the database): only once a run recorded that the flush is all
  * that is left (VisitorFile::await_flush()), only while the file under the loader's name in the must-use plugins
  * directory is the loader's code, one request for each time the visitor file's time comes, counted and written before
  * it is let through; the first Maintenance::FLUSH_TRIES at that pace, then one every Maintenance::FLUSH_WAIT seconds,
- * each said in the runtime log; and of several requests at once, one.
+ * each said in the runtime log; and of several requests at once, one. Nothing is let through that the loader would
+ * not end: a process on the command line, a request that stops before the must-use plugins (SHORTINIT), a data file
+ * that is not a held one, no runtime next to it.
  */
 final class FlushPassTest extends TestCase {
 
@@ -65,6 +68,28 @@ final class FlushPassTest extends TestCase {
 	}
 
 	/**
+	 * php-cgi, next to the PHP binary.
+	 *
+	 * @return string
+	 */
+	private function cgi(): string {
+		$cgi = dirname( PHP_BINARY ) . '/php-cgi';
+		$this->assertTrue( is_executable( $cgi ), 'php-cgi is next to the PHP binary (the test site\'s image has it): a request\'s SAPI is needed' );
+		return $cgi;
+	}
+
+	/**
+	 * What the child printed: the last line of its output (php-cgi puts its headers first).
+	 *
+	 * @param string $out Its standard output.
+	 * @return mixed
+	 */
+	private static function report( string $out ) {
+		$lines = array_values( array_filter( array_map( 'trim', explode( "\n", $out ) ), 'strlen' ) );
+		return json_decode( (string) end( $lines ), true );
+	}
+
+	/**
 	 * The config of a request's process.
 	 *
 	 * @param array<string, mixed> $more More of it.
@@ -80,19 +105,21 @@ final class FlushPassTest extends TestCase {
 	 * One request.
 	 *
 	 * @param array<string, mixed> $more More of its config ("define").
+	 * @param bool                 $cli  Whether it is a process on the command line instead.
 	 * @return array<string, mixed> What maintenance-child.php printed.
 	 */
-	private function request( array $more = array() ): array {
+	private function request( array $more = array(), bool $cli = false ): array {
 		$pipes   = array();
-		$process = proc_open( array( PHP_BINARY, dirname( __DIR__, 2 ) . '/Fixtures/Restore/maintenance-child.php', $this->config( $more ) ), array( 1 => array( 'pipe', 'w' ), 2 => array( 'pipe', 'w' ) ), $pipes );
+		$process = proc_open( array( $cli ? PHP_BINARY : $this->cgi(), dirname( __DIR__ ) . '/Fixtures/Restore/maintenance-child.php', $this->config( $more ) ), array( 1 => array( 'pipe', 'w' ), 2 => array( 'pipe', 'w' ) ), $pipes );
 		$this->assertIsResource( $process );
 		$out    = (string) stream_get_contents( $pipes[1] );
 		$err    = (string) stream_get_contents( $pipes[2] );
 		$status = proc_close( $process );
 		$said   = "exit {$status}\nstdout:\n{$out}\nstderr:\n{$err}";
 		$this->assertSame( 0, $status, $said );
-		$report = json_decode( trim( $out ), true );
+		$report = self::report( $out );
 		$this->assertIsArray( $report, $said );
+		$this->assertSame( $cli ? 'cli' : 'cgi-fcgi', $report['sapi'], 'the control: the SAPI meant' );
 		clearstatcache();
 		return $report;
 	}
@@ -310,7 +337,7 @@ final class FlushPassTest extends TestCase {
 		$processes = array();
 		for ( $i = 0; $i < 8; $i++ ) {
 			$pipes       = array();
-			$process     = proc_open( array( PHP_BINARY, dirname( __DIR__, 2 ) . '/Fixtures/Restore/maintenance-child.php', $this->config( array( 'gate' => $gate ) ) ), array( 1 => array( 'pipe', 'w' ), 2 => array( 'pipe', 'w' ) ), $pipes );
+			$process     = proc_open( array( $this->cgi(), dirname( __DIR__ ) . '/Fixtures/Restore/maintenance-child.php', $this->config( array( 'gate' => $gate ) ) ), array( 1 => array( 'pipe', 'w' ), 2 => array( 'pipe', 'w' ) ), $pipes );
 			$this->assertIsResource( $process );
 			$processes[] = array( $process, $pipes );
 		}
@@ -321,7 +348,7 @@ final class FlushPassTest extends TestCase {
 			$out    = (string) stream_get_contents( $entry[1][1] );
 			$err    = (string) stream_get_contents( $entry[1][2] );
 			$status = proc_close( $entry[0] );
-			$report = json_decode( trim( $out ), true );
+			$report = self::report( $out );
 			$this->assertIsArray( $report, "exit {$status}\n{$out}\n{$err}" );
 			if ( 0 === $report['upgrading'] ) {
 				++$let;
@@ -334,6 +361,51 @@ final class FlushPassTest extends TestCase {
 		$this->assertSame( 1, $let, 'one request was let through' );
 		$this->assertSame( 1, $this->visitor()->flush()['n'], 'and one counted' );
 		$this->assertCount( 1, $this->passes_logged() );
+	}
+
+	/**
+	 * What the loader would not end, each alone.
+	 *
+	 * @return array<string, array{0: string}>
+	 */
+	public function not_ended_by_the_loader(): array {
+		return array(
+			'a process on the command line (a system cron\'s php wp-cron.php)' => array( 'cli' ),
+			'a request that stops before the must-use plugins (SHORTINIT)'    => array( 'shortinit' ),
+			'a data file that is not a held one'                             => array( 'not held' ),
+			'no runtime next to the maintenance file'                        => array( 'no runtime' ),
+		);
+	}
+
+	/**
+	 * @dataProvider not_ended_by_the_loader
+	 */
+	public function test_nothing_is_let_through_that_the_loader_would_not_end( string $what ): void {
+		Loader::put( $this->mu );
+		$this->visitor()->await_flush();
+		$data    = (string) file_get_contents( $this->dir . '/' . Maintenance::DATA );
+		$runtime = (string) file_get_contents( $this->dir . '/' . Maintenance::RUNTIME );
+		$time    = time() + 600;
+		if ( 'not held' === $what ) {
+			file_put_contents( $this->dir . '/' . Maintenance::DATA, ( new Maintenance( $this->dir, $this->mark ) )->data( $time, Maintenance::NO_PASS, str_repeat( 'a', 64 ) ) );
+		} elseif ( 'no runtime' === $what ) {
+			Sandbox::remove( $this->dir . '/' . Maintenance::RUNTIME );
+		}
+		$this->due();
+		$report = $this->request( 'shortinit' === $what ? array( 'define' => array( 'SHORTINIT' => true ) ) : array(), 'cli' === $what );
+		$this->assertSame( 'double', $report['type'], 'not let through: WordPress answers with its maintenance page' );
+		$this->assertSame( (float) ( 'not held' === $what ? $time : Maintenance::held() ), (float) $report['upgrading'] );
+		$this->assertFalse( $report['flush'] );
+		$this->assertFalse( $report['cron'] );
+		$this->assertFalse( $report['entry'], 'and no runtime is run: the flush is all that is left' );
+		$this->assertSame( array( 'n' => 0, 'next' => 0 ), $this->visitor()->flush(), 'nothing counted: the try is not spent' );
+		$this->assertSame( array(), $this->passes_logged() );
+		// The control: put right, the next request is let through.
+		file_put_contents( $this->dir . '/' . Maintenance::DATA, $data );
+		file_put_contents( $this->dir . '/' . Maintenance::RUNTIME, $runtime );
+		$this->due();
+		$this->assertLet( $this->request() );
+		$this->assertSame( 1, $this->visitor()->flush()['n'] );
 	}
 
 	public function test_the_check_of_the_code_before_it_is_put_up_lets_nothing_through(): void {
