@@ -515,7 +515,9 @@ final class StagingResidueTest extends JobTestCase {
 			// second read of the holders is the one right before the deletion.
 			$put( $old );
 			$reads = 0;
-			$swap  = static function ( string $sql ) use ( &$reads, $put ): string {
+			$asked = array();
+			$swap  = static function ( string $sql ) use ( &$reads, &$asked, $put ): string {
+				$asked[] = substr( (string) preg_replace( '/\s+/', ' ', $sql ), 0, 140 );
 				if ( false !== strpos( $sql, 'WHERE site_state <>' ) && 2 === ++$reads ) {
 					$put( 0 );
 				}
@@ -553,6 +555,9 @@ final class StagingResidueTest extends JobTestCase {
 					'base'       => '' !== $storage->base(),
 					'log_tail'   => is_file( $log ) ? array_slice( array_map( static function ( string $line ): string { return substr( $line, 0, 220 ); }, (array) file( $log, FILE_IGNORE_NEW_LINES ) ), -6 ) : 'no storage.log',
 					'last_error' => $wpdb->last_error,
+					'asked'      => array_slice( $asked, -25 ),
+					'asked_all'  => count( $asked ),
+					'tmp'        => array_slice( (array) @scandir( $storage->base() . '/tmp' ), 0, 30 ),
 				)
 			);
 			$this->assertSame( 2, $reads, 'the control: read again right before the deletion. What the reaper saw: ' . $saw );
