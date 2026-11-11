@@ -286,7 +286,7 @@ final class LoaderRealSiteTest extends WP_UnitTestCase {
 		$this->assertSame( 1, substr_count( self::runtime_log(), 'a request was let through to flush it (try ' ), 'and said once: ' . self::runtime_log() );
 		$this->assertStringNotContainsString( 'No job holds the site with this maintenance file', self::runtime_log(), 'it ended before the loader' );
 
-		// The control, from the start again: the same code less its check of WPCHECKPOINT_FLUSH_PASS (a test's fixture
+		// The control, from the start again: the same code less its check of WPCHECKPOINT_MAINTENANCE_READ (a test's fixture
 		// under the maintenance file's name). WordPress requires .maintenance again when the request ends (its shutdown
 		// handler asks wp_is_maintenance_mode()); the window has come again by then, and the one request is let through
 		// twice.
@@ -297,7 +297,7 @@ final class LoaderRealSiteTest extends WP_UnitTestCase {
 		RealAbspath::touch( Maintenance::VISITOR, time() - 60 );
 		RealAbspath::write( Maintenance::LOG, "<?php exit; ?>\n# " . $mark . "\n" );
 		$count   = 0;
-		$without = str_replace( ' && ! defined( \'WPCHECKPOINT_FLUSH_PASS\' )', '', Maintenance::CODE, $count );
+		$without = str_replace( ' && ! defined( \'WPCHECKPOINT_MAINTENANCE_READ\' )', '', Maintenance::CODE, $count );
 		$this->assertSame( 1, $count, 'the code has the check, once' );
 		RealAbspath::write( Maintenance::FILE, RealAbspath::fixture( $without ) );
 		$began = microtime( true );

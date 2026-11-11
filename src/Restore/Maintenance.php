@@ -256,11 +256,14 @@ final class Maintenance {
 	 * record a SHORTINIT request runs the runtime as any other (the runtime needs nothing of WordPress). The request
 	 * let through does not load a page cache (the advanced-cache.php drop-in, which WordPress includes before the
 	 * must-use plugins and which would answer it from its cache): enable_loading_advanced_cache_dropin is filtered to
-	 * false for it (plugin.php is loaded before this file is required). A request is let through once: WordPress
-	 * requires this file again in the same request (its shutdown handler for fatal errors asks
-	 * wp_is_maintenance_mode() whenever a request ends), and a request let through that ends before the loader, five
-	 * seconds or more after it was let through, would find its time come again; with WPCHECKPOINT_FLUSH_PASS defined
-	 * none of this is entered, and the file says the data file's time.
+	 * false for it (plugin.php is loaded before this file is required). All of this (the runtime, the request let
+	 * through) is the first require's of a request only: WordPress requires this file again in the same request (its
+	 * shutdown handler for fatal errors asks wp_is_maintenance_mode() whenever a request ends). A request let through
+	 * that ends before the loader, five seconds or more after it was let through, would find its time come again and
+	 * be counted twice; one held at its start whose time comes before it ends would be counted and said at its
+	 * shutdown, with nothing left of it to flush. WPCHECKPOINT_MAINTENANCE_READ is defined at this file's end; with
+	 * it defined (a request let through has WPCHECKPOINT_FLUSH_PASS defined too) the file only says the data file's
+	 * time.
 	 */
 	const CODE =
 		'<?php' . "\n"
@@ -275,7 +278,7 @@ final class Maintenance {
 		. '		if ( ! defined( \'DISABLE_WP_CRON\' ) ) {' . "\n"
 		. '			define( \'DISABLE_WP_CRON\', true );' . "\n"
 		. '		}' . "\n"
-		. '	} elseif ( ! empty( $wpcheckpoint_found[4] ) && empty( $wpcheckpoint_check ) && \'cli\' !== PHP_SAPI && ! ( defined( \'WP_CLI\' ) && WP_CLI ) && ! defined( \'WPCHECKPOINT_FLUSH_PASS\' ) && ! class_exists( \'WPCheckpoint\\Jobs\\WebEntry\', false ) ) {' . "\n"
+		. '	} elseif ( ! empty( $wpcheckpoint_found[4] ) && empty( $wpcheckpoint_check ) && \'cli\' !== PHP_SAPI && ! ( defined( \'WP_CLI\' ) && WP_CLI ) && ! defined( \'WPCHECKPOINT_MAINTENANCE_READ\' ) && ! class_exists( \'WPCheckpoint\\Jobs\\WebEntry\', false ) ) {' . "\n"
 		. '		$wpcheckpoint_visitor = __DIR__ . \'/.wpcheckpoint-visitor.php\';' . "\n"
 		. '		$wpcheckpoint_lock    = @fopen( $wpcheckpoint_visitor, \'r+\' );' . "\n"
 		. '		$wpcheckpoint_busy    = 0;' . "\n"
@@ -334,6 +337,9 @@ final class Maintenance {
 		. '			@fclose( $wpcheckpoint_lock );' . "\n"
 		. '		}' . "\n"
 		. '	}' . "\n"
+		. '}' . "\n"
+		. 'if ( ! defined( \'WPCHECKPOINT_MAINTENANCE_READ\' ) ) {' . "\n"
+		. '	define( \'WPCHECKPOINT_MAINTENANCE_READ\', true );' . "\n"
 		. '}' . "\n";
 
 	/**
@@ -701,8 +707,15 @@ final class Maintenance {
 	 * @return bool
 	 */
 	public function is_held(): bool {
-		$time = $this->time();
-		return self::OURS === $this->state() && null !== $time && self::is_held_time( (string) $time );
+		if ( self::OURS !== $this->state() ) {
+			return false;
+		}
+		list( $kind, $code ) = self::look( $this->path() );
+		if ( 'file' === $kind && 1 === preg_match( self::LEGACY_FORM, $code, $legacy ) ) {
+			return self::is_held_time( $legacy[1] );
+		}
+		$data = self::parse( self::look( $this->data_path() ) );
+		return null !== $data && $this->mark === $data['mark'] && $data['held'];
 	}
 
 	/**
@@ -894,8 +907,9 @@ final class Maintenance {
 
 	/**
 	 * The files of a run without WordPress that name this restore, taken down in WEB_FILES' order; one that cannot be
-	 * read goes too (the names are this plugin's, and no other restore's maintenance file stands here: remove_files()
-	 * stopped before this otherwise), so that a take-down never waits on a file it cannot read.
+	 * read goes too where no data file stands (the names are this plugin's), so that a take-down does not wait on a
+	 * file it cannot read; with a data file there (another restore's, left without its .maintenance, or one that
+	 * cannot be told) it is kept.
 	 *
 	 * @param callable|null $confirm Called right before each file is deleted.
 	 * @return bool Whether none of them is there now.
@@ -908,6 +922,12 @@ final class Maintenance {
 			if ( null !== self::web_head( $path ) && self::web_mark( $path ) !== $this->mark ) {
 				clearstatcache( true, $path );
 				$gone = $gone && ( false === @lstat( $path ) ? Paths::positively_gone( $path ) : true ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- another restore's, or none: not this restore's to take down.
+				continue;
+			}
+			if ( null === self::web_head( $path ) && ! in_array( self::data_at( $this->data_path() )[0], array( self::NONE, 'not' ), true ) ) {
+				// It cannot be read, and a data file stands (another restore's: this one's went before) or cannot be
+				// told: the file may be what that restore's must-use plugin holds the site by. Kept, and not "gone".
+				$gone = false;
 				continue;
 			}
 			$deleted = Deleter::delete_maintenance_file( $this->dir, $name, $confirm );

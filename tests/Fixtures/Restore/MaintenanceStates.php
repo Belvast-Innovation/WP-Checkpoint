@@ -286,8 +286,11 @@ final class MaintenanceStates {
 		);
 		$file = @file_get_contents( $site . '/' . Maintenance::FILE );
 		$data = @file_get_contents( $site . '/' . Maintenance::DATA );
+		// The code reads the data file next to itself (__DIR__): of a link, next to what it points to.
+		$real = realpath( $site . '/' . Maintenance::FILE );
+		$own  = false === $real ? false : @file_get_contents( dirname( $real ) . '/' . Maintenance::DATA );
 		if ( is_string( $file ) && in_array( $file, Maintenance::KNOWN_CODES, true ) ) {
-			if ( is_string( $data ) && 1 === preg_match( self::pattern_of( Maintenance::CODE ), $data, $found ) ) {
+			if ( is_string( $own ) && 1 === preg_match( self::pattern_of( Maintenance::CODE ), $own, $found ) ) {
 				// Held when the time is not within WordPress's ten minutes of now, for good when it is a held one.
 				if ( in_array( $found[2], Maintenance::HELD_VALUES, true ) ) {
 					$out['code']      = true;

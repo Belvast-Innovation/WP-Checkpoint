@@ -684,6 +684,23 @@ final class HeldSiteTest extends SwapTestCase {
 			$this->assertSame( $before, $this->row( $job->id ) );
 			$this->assertFileExists( $this->copy_dir() . '/.maintenance' );
 		}
+		if ( \WPCheckpoint\Tests\Fixtures\Restore\MaintenanceStates::can_hide() ) {
+			// The copy's data file cannot be read just now: whether the job's files are here cannot be told, and the
+			// job is not given up on "none here" (it would leave them for the copy's must-use plugin to answer by).
+			$data = $this->copy_dir() . '/' . \WPCheckpoint\Restore\Maintenance::DATA;
+			chmod( $data, 0 );
+			try {
+				$this->assertFalse( $acts->held_elsewhere( $job->id )['assessment']['file_told'], 'the control: it cannot be told' );
+				$refused = $acts->abandon( $job->id, $code );
+			} finally {
+				chmod( $data, 0600 );
+			}
+			$this->assertFalse( $refused['ok'], 'not given up while the files here cannot be told' );
+			$this->assertStringContainsString( 'could not be taken down, so the job was not abandoned', $refused['message'] );
+			$this->assertSame( $before, $this->row( $job->id ) );
+			$this->assertFileExists( $this->copy_dir() . '/.maintenance' );
+			$this->assertTrue( $acts->held_elsewhere( $job->id )['assessment']['file_told'], 'the control: read again, it can be told' );
+		}
 		$tables = $this->tables_of( $job );
 		$this->assertNotSame( array(), $tables, 'the control: it made tables' );
 		$held = \WPCheckpoint\Support\Uninstaller::holding();

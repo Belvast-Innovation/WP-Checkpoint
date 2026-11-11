@@ -9,7 +9,8 @@ use Yoast\PHPUnitPolyfills\TestCases\TestCase;
  * Whoever in the plugin's code reads .maintenance or its data file is in the matrix (MaintenanceMatrixTest,
  * MaintenanceMatrixDbTest), or says why not. The scan (scan_source(), comments left out) counts, per file: calls of
  * the readings of Restore\Maintenance that take a directory ("reader"), its objects made ("object": everything else
- * of the class is asked of one), calls of Loader::needed() ("needed"), and the two files' names, written out or by
+ * of the class is asked of one; what is asked, by method name, is counted as "asked" in a source that makes an object
+ * or is given one), calls of Loader::needed() ("needed"), and the two files' names, written out or by
  * the class's constants ("name": whoever names a file may read it). READERS registers every file the scan finds, with
  * its counts and what covers each use; a file the scan finds that is not registered fails, a count that changed fails
  * (a new use, or a registration gone stale), and a registration for a file the scan no longer finds fails.
@@ -35,14 +36,19 @@ final class MaintenanceReadersTest extends TestCase {
 			array( 'not in the matrix: held_in() for the WP-CLI guard, which writes and deletes nothing; what it answers where .maintenance is deleted or cannot be read is a change of its own, to be made before a release; the names are in its message' ),
 		),
 		'src/Jobs/HeldSite.php'       => array(
-			array( 'object' => 3 ),
-			array( 'unit:test_once_a_take_down_says_gone_nothing_answers_as_held_for_the_restore_and_nothing_of_anyone_elses_is_deleted', 'state() for what job status shows: nothing follows from it' ),
+			array(
+				'reader' => 2,
+				'object' => 3,
+				'asked'  => 4,
+			),
+			array( 'unit:test_once_a_take_down_says_gone_nothing_answers_as_held_for_the_restore_and_nothing_of_anyone_elses_is_deleted', 'unit:test_a_job_is_taken_on_only_by_its_own_files_read_and_always_then', 'unit:test_every_reading_of_the_two_files_is_one_of_three_states', 'not in the matrix as a whole: assess() says whether the job\'s files are here (claimable()) and whether that can be told (code_in(), names_restore()); an abandon gives nothing up where it cannot (HeldSiteTest)' ),
 		),
 		'src/Jobs/JobActions.php'     => array(
 			array(
 				'reader' => 1,
 				'object' => 1,
 				'name'   => 1,
+				'asked'  => 2,
 			),
 			array( 'unit:test_once_a_take_down_says_gone_nothing_answers_as_held_for_the_restore_and_nothing_of_anyone_elses_is_deleted', 'mark_in() finds the job whose file was left; the name is in a message' ),
 		),
@@ -69,6 +75,7 @@ final class MaintenanceReadersTest extends TestCase {
 			array(
 				'object' => 2,
 				'name'   => 7,
+				'asked'  => 22,
 			),
 			array(
 				'unit:test_once_a_release_returns_nothing_answers_as_held_for_the_restore_and_it_waits_where_a_file_cannot_be_told',
@@ -78,7 +85,10 @@ final class MaintenanceReadersTest extends TestCase {
 			),
 		),
 		'src/Jobs/WebJobs.php'        => array(
-			array( 'object' => 1 ),
+			array(
+				'object' => 1,
+				'asked'  => 1,
+			),
 			array( 'unit:test_a_job_is_taken_on_only_by_its_own_files_read_and_always_then' ),
 		),
 		'src/Plugin.php'              => array(
@@ -141,7 +151,7 @@ final class MaintenanceReadersTest extends TestCase {
 		'time'          => 'not in the matrix: this restore\'s own time, for is_held() and what job status shows',
 		'put'           => 'unit:test_a_put_up_writes_nothing_where_the_place_is_someone_elses_or_cannot_be_told',
 		'hold'          => 'unit:test_a_put_up_writes_nothing_where_the_place_is_someone_elses_or_cannot_be_told',
-		'is_held'       => 'not in the matrix: whether the swap holds its file again (hold(), which refuses what cannot be told)',
+		'is_held'       => 'not in the matrix: asked by tests only; this restore\'s own file read, by the same held times (MaintenanceTest)',
 		'left_held'     => 'unit:test_a_job_is_taken_on_only_by_its_own_files_read_and_always_then',
 		'claimable'     => 'unit:test_a_job_is_taken_on_only_by_its_own_files_read_and_always_then',
 		'let_go'        => 'unit:test_once_a_release_returns_nothing_answers_as_held_for_the_restore_and_it_waits_where_a_file_cannot_be_told',
@@ -178,6 +188,14 @@ final class MaintenanceReadersTest extends TestCase {
 			$count = (int) preg_match_all( $pattern, $code );
 			if ( $count > 0 ) {
 				$out[ $kind ] = $count;
+			}
+		}
+		// What is asked of an object of the class: counted where the source makes one or is given one, so that a new
+		// question in a file already registered changes its counts too.
+		if ( isset( $out['object'] ) || 1 === preg_match( '/\bMaintenance\s+\$/', $code ) ) {
+			$count = (int) preg_match_all( '/->\s*(?:state|time|is_held|left_held|claimable|let_go|remove|put|hold|runtime_hash)\s*\(/', $code );
+			if ( $count > 0 ) {
+				$out['asked'] = $count;
 			}
 		}
 		return $out;
@@ -286,7 +304,17 @@ final class MaintenanceReadersTest extends TestCase {
 		$this->assertSame( array( 'src/Support/NewReader.php reads .maintenance or its data file and is not registered: {"name":1}' ), self::differences( $new, self::READERS ) );
 		$more                               = $found;
 		$more['src/Jobs/WebJobs.php']['object'] = 2;
-		$this->assertSame( array( 'src/Jobs/WebJobs.php: registered {"object":1}, found {"object":2}' ), self::differences( $more, self::READERS ) );
+		$this->assertSame( array( 'src/Jobs/WebJobs.php: registered {"object":1,"asked":1}, found {"object":2,"asked":1}' ), self::differences( $more, self::READERS ) );
+		// A new question asked of an object in a file already registered changes its counts.
+		$this->assertSame(
+			array(
+				'object' => 1,
+				'asked'  => 2,
+			),
+			self::scan_source( "<?php\n\$file = new Maintenance( \$dir, \$mark );\nif ( Maintenance::OURS !== \$file->state() ) {\n\t\$file->remove();\n}\n" )
+		);
+		$this->assertSame( array( 'asked' => 1 ), self::scan_source( "<?php\nfunction wpcheckpoint_given( Maintenance \$file ): bool {\n\treturn \$file->claimable();\n}\n" ) );
+		$this->assertSame( array(), self::scan_source( "<?php\n\$wpdb->remove( 1 );\n\$cache->put( 2 );\n" ), 'the same names asked of other objects, where no object of the class is made or given' );
 		$less = $found;
 		unset( $less['src/Jobs/RuntimeLog.php'] );
 		$this->assertSame( array( 'src/Jobs/RuntimeLog.php is registered and reads neither file any more' ), self::differences( $less, self::READERS ) );

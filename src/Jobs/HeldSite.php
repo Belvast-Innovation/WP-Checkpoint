@@ -69,7 +69,7 @@ final class HeldSite {
 	 *         records ('' when it records none); here: this WordPress directory resolved ('' when it cannot be);
 	 *         differs: whether here is positively another directory than recorded; direction: "committed",
 	 *         "restored", "back" (a swap that was made is being swapped back out after a failed check: recorded,
-	 *         the next run only puts the site back) or '' (not recorded yet); file_here: whether this job's
+	 *         the next run only puts the site back) or '' (not recorded yet); file_told: whether what is in the two files' places here can be told (abandon gives nothing up otherwise); file_here: whether this job's
 	 *         maintenance file is in this WordPress directory.
 	 */
 	public function assess( Job $job ): array {
@@ -107,7 +107,8 @@ final class HeldSite {
 			'here'      => $here,
 			'differs'   => self::another( $recorded, $here ),
 			'direction' => in_array( $phase, array( 'committed', 'done' ), true ) ? 'committed' : ( 'restored' === $phase ? 'restored' : ( 'reverse' === $phase ? 'back' : '' ) ),
-			'file_here' => '' !== $mark && Maintenance::OURS === ( new Maintenance( $this->abspath(), $mark ) )->state(),
+			'file_here' => '' !== $mark && ( new Maintenance( $this->abspath(), $mark ) )->claimable(),
+			'file_told' => '' === $mark || ( null !== Maintenance::code_in( $this->abspath() ) && null !== Maintenance::names_restore( $this->abspath() ) ),
 			'finishes'  => 'rename' === $phase ? $this->renamed_all( $job ) : false,
 		);
 	}

@@ -308,6 +308,28 @@ final class FlushPassTest extends TestCase {
 		$this->assertLet( $this->request() );
 	}
 
+	public function test_a_request_held_at_its_start_is_not_let_through_when_the_file_is_required_again_as_it_ends(): void {
+		Loader::put( $this->mu );
+		$this->visitor()->await_flush();
+		$path = $this->dir . '/' . Maintenance::VISITOR;
+		// Its time comes in two seconds: the request is held; WordPress requires the file again when the request ends
+		// (three seconds on, here), and the time has come by then.
+		$soon = time() + 2;
+		touch( $path, $soon );
+		clearstatcache();
+		$report = $this->request( array( 'again' => 3 ) );
+		$this->assertHeld( $report, 'held at its start: its time had not come' );
+		$this->assertGreaterThan( 1000000000, $report['again']['upgrading'], 'and held as it ends' );
+		$this->assertFalse( $report['again']['flush'], 'not let through as it ends' );
+		$this->assertSame( array( 'n' => 0, 'next' => 0 ), $this->visitor()->flush(), 'no try taken' );
+		$this->assertSame( $soon, $this->visitor_time(), 'the time not touched' );
+		$this->assertSame( array(), $this->passes_logged(), 'nothing said' );
+		// The control: the time has come, and the next request is let through at its start.
+		$this->assertLessThanOrEqual( time(), $soon, 'the control: the time had come when the file was required again' );
+		$this->assertLet( $this->request() );
+		$this->assertSame( 1, $this->visitor()->flush()['n'] );
+	}
+
 	public function test_the_loader_is_looked_for_where_wordpress_loads_must_use_plugins_from(): void {
 		$this->visitor()->await_flush();
 		$content = $this->root . '/content';

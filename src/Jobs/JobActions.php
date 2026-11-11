@@ -442,7 +442,8 @@ final class JobActions {
 			return self::outcome( false, __( 'This installation holds no storage token of its own yet (it was found to be a copy, and that is not settled): settle it on the plugin\'s page first, then abandon the job. Nothing was changed.', 'wp-checkpoint' ) );
 		}
 		try {
-			$gone = ! $held['assessment']['file_here'] || $this->held->release( $job, $held['assessment'] );
+			// What cannot be told of the files here is not taken for "none of the job's here".
+			$gone = $held['assessment']['file_told'] && ( ! $held['assessment']['file_here'] || $this->held->release( $job, $held['assessment'] ) );
 		} catch ( \RuntimeException $e ) {
 			$gone = false;
 		}

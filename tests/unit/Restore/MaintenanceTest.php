@@ -482,7 +482,7 @@ echo json_encode( array( "upgrading" => $upgrading, "type" => gettype( $upgradin
 	public function test_the_code_is_pinned_and_every_code_written_is_known(): void {
 		// A change of CODE turns every file an earlier version put up into someone else's unless that version's code
 		// stays in KNOWN_CODES: once a version with it is released, add the old code there, then update this digest.
-		$this->assertSame( '66e4947a6d618a1d55576e767bf377e46f58da423b33bd41e5df3f1280685c32', hash( 'sha256', Maintenance::CODE ) );
+		$this->assertSame( '7e46a0ec14cbfbb0f201f6c153be7771e488424f8dc1db589639468a66af7fa8', hash( 'sha256', Maintenance::CODE ) );
 		$this->assertContains( Maintenance::CODE, Maintenance::KNOWN_CODES );
 		// The code released with the run without WordPress (2026-11-10): byte for byte what it was, still known.
 		$this->assertSame( '0442b598fef21dcfa20c2b1c411aa3a38a46a6253f4addd8b1a43ee9d7c52714', hash( 'sha256', Maintenance::CODE_2 ) );

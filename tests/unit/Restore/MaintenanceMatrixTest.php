@@ -112,7 +112,9 @@ final class MaintenanceMatrixTest extends TestCase {
 		$this->assertFalse( MaintenanceStates::answers( $hidden['site'], $hidden['mu'] )['loader'], 'what cannot be read is no file to the loader' );
 		$this->assertSame( 'loader', $this->held_for_us( $hidden ), 'and once it can be read it answers' );
 		$this->assertSame( 'loader', $this->held_for_us( $this->state( 'none', 'link_held' ) ), 'the loader reads through a link' );
-		$this->assertSame( 'code', $this->held_for_us( $this->state( 'link_code', 'link_held' ) ), 'as WordPress requires through one' );
+		$linked = $this->state( 'link_code', 'held64' );
+		$this->assertTrue( MaintenanceStates::answers( $linked['site'], $linked['mu'] )['code'], 'a linked code blocks' );
+		$this->assertSame( '', MaintenanceStates::answers( $linked['site'], $linked['mu'] )['code_mark'], 'and reads the data file next to what the link points to (none there), not the site\'s' );
 		$bare = $this->state( 'code', 'none' );
 		$this->assertTrue( MaintenanceStates::answers( $bare['site'], $bare['mu'] )['code'], 'the code with no data file blocks' );
 		$this->assertSame( '', $this->held_for_us( $bare ), 'and names no restore' );
@@ -239,6 +241,38 @@ final class MaintenanceMatrixTest extends TestCase {
 			$this->assertTrue( $now['loader'], 'the loader is not the take-down\'s to remove: ' . $state['case'] );
 		}
 		$this->assertSame( 56, $gone, 'the control: the states in which it says gone' );
+	}
+
+	public function test_a_take_down_keeps_a_runtime_it_cannot_read_while_another_restores_data_file_stands(): void {
+		$runtime = '/' . Maintenance::RUNTIME;
+		try {
+			// Another restore's held data file left without its .maintenance, and a runtime that cannot be read: it may
+			// be what that restore's must-use plugin holds the site by.
+			$state = $this->state( 'none', 'foreign_held' );
+			chmod( $state['site'] . $runtime, 0 );
+			$this->assertFalse( $state['file']->remove(), 'not said to be gone' );
+			$there = MaintenanceStates::there( $state['site'], $state['mu'] );
+			$this->assertTrue( $there[ Maintenance::RUNTIME ], 'the runtime that cannot be read is kept' );
+			$this->assertTrue( $there[ Maintenance::DATA ] );
+			$this->assertFalse( $there[ Maintenance::VISITOR ], 'the control: what names this restore is taken down' );
+			chmod( $state['site'] . $runtime, 0600 );
+			$this->assertTrue( MaintenanceStates::answers( $state['site'], $state['mu'] )['loader'], 'the other restore is still answered for' );
+			// A data file that cannot be told: kept as well.
+			$hidden = $this->state( 'none', 'unreadable_held' );
+			chmod( $hidden['site'] . $runtime, 0 );
+			$this->assertFalse( $hidden['file']->remove() );
+			$this->assertTrue( MaintenanceStates::there( $hidden['site'], $hidden['mu'] )[ Maintenance::RUNTIME ] );
+			chmod( $hidden['site'] . $runtime, 0600 );
+			// The control: with no data file left, a runtime that cannot be read goes with the take-down.
+			$own = $this->state( 'code', 'held64' );
+			chmod( $own['site'] . $runtime, 0 );
+			$this->assertTrue( $own['file']->remove() );
+			$this->assertFalse( MaintenanceStates::there( $own['site'], $own['mu'] )[ Maintenance::RUNTIME ], 'the control: it goes' );
+		} finally {
+			foreach ( (array) glob( $this->root . '/*/site' . $runtime ) as $path ) {
+				chmod( (string) $path, 0600 );
+			}
+		}
 	}
 
 	public function test_a_put_up_writes_nothing_where_the_place_is_someone_elses_or_cannot_be_told(): void {

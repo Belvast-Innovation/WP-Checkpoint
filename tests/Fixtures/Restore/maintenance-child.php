@@ -34,12 +34,30 @@ $upgrading = null;
 	global $upgrading;
 	require ABSPATH . '.maintenance';
 } )();
+$again = null;
+$first = null;
+if ( isset( $config['again'] ) ) {
+	// As WordPress's shutdown handler does when the request ends: the file is required once more.
+	$first     = array( $upgrading, defined( 'WPCHECKPOINT_FLUSH_PASS' ) );
+	usleep( (int) ( 1000000 * (float) $config['again'] ) );
+	$upgrading = null;
+	( static function (): void {
+		global $upgrading;
+		require ABSPATH . '.maintenance';
+	} )();
+	$again     = array(
+		'upgrading' => $upgrading,
+		'flush'     => defined( 'WPCHECKPOINT_FLUSH_PASS' ),
+	);
+	$upgrading = $first[0];
+}
 echo json_encode(
 	array(
+		'again'     => $again,
 		'upgrading' => $upgrading,
 		'type'      => gettype( $upgrading ),
 		'cron'      => defined( 'DISABLE_WP_CRON' ),
-		'flush'     => defined( 'WPCHECKPOINT_FLUSH_PASS' ),
+		'flush'     => null === $first ? defined( 'WPCHECKPOINT_FLUSH_PASS' ) : $first[1],
 		'entry'     => defined( 'WPCHECKPOINT_WEB_ENTRY' ),
 		'sapi'      => PHP_SAPI,
 	)
