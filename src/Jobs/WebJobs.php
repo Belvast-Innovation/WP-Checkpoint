@@ -206,7 +206,11 @@ final class WebJobs implements RunnerRepository {
 	 *
 	 * 1. The WordPress directory, resolved, is the one the swap's plan was written for (its site entry).
 	 * 2. The table prefix is the one the plan records.
-	 * 3. The maintenance file here is this job's: its data file carries the job's mark.
+	 * 3. The maintenance file here is this job's: its data file carries the job's mark. With .maintenance positively
+	 *    not there (deleted: WordPress's upgrader deletes it at the end of an update, whoever put it up), the held data
+	 *    file with the job's mark alone (Maintenance::left_held()); anything else in .maintenance's place, or what
+	 *    cannot be told, is not this job's. The rollback puts .maintenance up again before its first rename
+	 *    (SwapStep::hold_for_renames()).
 	 * 4. The job's storage directory is here, with the job's own files in it (its log, its lock or its work directory).
 	 * 5. Of each directory the plan swaps that the site had, the staged copy or the moved-aside one is here (their names
 	 *    are the job's own). Of each the site did not have (no moved-aside copy, and once swapped in no staged one
@@ -232,7 +236,11 @@ final class WebJobs implements RunnerRepository {
 		if ( $this->prefix !== $site['stage'] ) {
 			return 'The table prefix is not the one the swap was planned for.';
 		}
-		if ( '' === $job->site_mark || Maintenance::OURS !== ( new Maintenance( $this->abspath, $job->site_mark ) )->state() ) {
+		if ( '' === $job->site_mark ) {
+			return 'The maintenance file here is not this job\'s.';
+		}
+		$file = new Maintenance( $this->abspath, $job->site_mark );
+		if ( Maintenance::OURS !== $file->state() && ! $file->left_held() ) {
 			return 'The maintenance file here is not this job\'s.';
 		}
 		if ( '' === $this->files_base( $job ) ) {

@@ -640,6 +640,22 @@ final class Maintenance {
 	}
 
 	/**
+	 * Whether this restore's held data file is there with no .maintenance at all: .maintenance positively not there
+	 * (not unknown, not anything else in its place), the data file of DATA_FORM with this restore's mark and the held
+	 * time. WordPress's upgrader ends an update by deleting .maintenance whatever it holds, so an update made while
+	 * the site is held leaves this.
+	 *
+	 * @return bool
+	 */
+	public function left_held(): bool {
+		if ( self::NONE !== self::look( $this->path() )[0] ) {
+			return false;
+		}
+		$data = self::parse( self::look( $this->data_path() ) );
+		return null !== $data && $this->mark === $data['mark'] && self::held() === $data['time'];
+	}
+
+	/**
 	 * Take this restore's file down: its runtime log first added to the job's log ($merge), then .maintenance when it
 	 * is this restore's (or bare), then the data file when it is this restore's (or of no form) and .maintenance is not
 	 * a code this plugin wrote, then the files of a run without WordPress that name this restore (WEB_FILES, the log

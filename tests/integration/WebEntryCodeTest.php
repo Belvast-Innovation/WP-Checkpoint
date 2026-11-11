@@ -364,13 +364,13 @@ final class WebEntryCodeTest extends SwapTestCase {
 		$this->assertStringContainsString( '(try ' . ( Maintenance::FLUSH_TRIES + 1 ) . ')', Plugin::instance()->job_presenter()->log_tail( $done ), 'each one let through is said' );
 	}
 
-	public function test_with_the_maintenance_file_deleted_the_loader_holds_the_site_until_wp_cli_puts_it_back(): void {
+	public function test_with_the_maintenance_file_deleted_the_loader_holds_the_site_and_visitors_requests_put_it_back(): void {
 		$job    = $this->at_swap();
 		$before = $this->site();
 		$this->killed_at( $job, 'dir_in', 2 ); // Half swapped, the must-use plugins directory (and the loader in it) still in place.
 		$killed = Plugin::instance()->jobs()->find( $job->id );
 		$this->assertSame( array( 'live' ), $this->loader_in( $killed ) );
-		Sandbox::remove( $this->abspath . '/' . Maintenance::FILE ); // Someone deletes .maintenance to "get the site back".
+		Sandbox::remove( $this->abspath . '/' . Maintenance::FILE ); // Deleted: by hand, or by an update's end (the upgrader's maintenance_mode( false )).
 		$half = $this->site();
 		$this->assertNotSame( $before, array( 'maintenance' => false ) + $half, 'the control: the site is half swapped' );
 		// Not its time yet: held all the same, and no runtime run.
@@ -378,20 +378,26 @@ final class WebEntryCodeTest extends SwapTestCase {
 		$report = $this->request( $killed, array( 'due' => false ) );
 		$this->assertTrue( $report['let'], 'the loader ended the request with the maintenance page\'s answer: ' . $report['said'] );
 		$this->assertSame( array(), Maintenance::log_lines( $this->abspath . '/' . Maintenance::LOG ), 'nothing run within the visitor file\'s time' );
-		// Its time come: the loader runs the runtime, which does not take the job on without its maintenance file (the
-		// evidence that this site is the job's: WebJobs::here()), and says so; the request is held as before.
+		$this->assertSame( $half, $this->site(), 'nothing renamed' );
+		$this->assertNotContains( Maintenance::FILE, $this->swap_files(), 'the control: still no .maintenance' );
+		// Its time come: the loader runs the runtime, which takes the job on its held data file (no .maintenance at
+		// all) and puts the site back (.maintenance up again before the first rename: WebClaimTest); WordPress is
+		// loaded as far as the must-use plugins here, so the same run flushes the object cache and ends the job. The
+		// request is held as before.
 		$report = $this->request( $killed );
 		$this->assertTrue( $report['let'], $report['said'] );
-		$this->assertStringContainsString( 'The maintenance file here is not this job\'s.', $this->runtime_log(), 'the control: the runtime ran' );
-		$this->assertSame( $half, $this->site(), 'nothing renamed' );
 		$this->assertSame( 0, $this->seen['ran'], 'no maintenance file ran anything: both requests were the loader\'s' );
 		$this->assertSame( 2, $this->seen['let'] );
-		// WP-CLI puts the site back, and takes the loader down with the rest.
-		$done = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
-		$this->assertSame( Job::FAILED, $done->status, (string) $done->last_error );
-		$this->assertSame( $before, $this->site() );
+		$done = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertSame( Job::FAILED, $done->status, $this->runtime_log() . ' ' . $done->last_error );
+		$this->assertSame( Job::SITE_UNTOUCHED, $done->site_state );
+		$this->assertSame( $before, $this->site(), 'the files and the tables as they were: ' . $this->runtime_log() );
+		$this->assertSame( 1, $this->flushes(), 'the object cache was flushed once, by the run the loader made' );
 		$this->assertSame( array(), $this->swap_files() );
 		$this->assertSame( array(), $this->loader_in( $done ) );
+		$log = Plugin::instance()->job_presenter()->log_tail( $done );
+		$this->assertStringContainsString( 'A visitor\'s request put the site back', (string) $done->last_error );
+		$this->assertStringNotContainsString( 'a request was let through to flush it', $log, 'no request had to be let through' );
 		// The control: with the swap's files gone, a request gets past the must-use plugins (the site is open).
 		$open = $this->request( $done, array( 'site' => true ) );
 		$this->assertFalse( $open['let'] );

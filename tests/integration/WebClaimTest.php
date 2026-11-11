@@ -6,6 +6,7 @@ use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\JobRepository;
 use WPCheckpoint\Jobs\TickResult;
 use WPCheckpoint\Plugin;
+use WPCheckpoint\Restore\Maintenance;
 use WPCheckpoint\Restore\SwapPlan;
 use WPCheckpoint\Tests\Fixtures\Restore\SwapTestCase;
 
@@ -136,6 +137,125 @@ final class WebClaimTest extends SwapTestCase {
 			},
 			'The maintenance file here is not this job\'s.'
 		);
+	}
+
+	/**
+	 * What takes the place of the job's maintenance file, each not this job's.
+	 *
+	 * @return array<string, array{0: string}>
+	 */
+	public function not_this_jobs(): array {
+		return array(
+			'someone else\'s .maintenance (an update\'s) with the job\'s data file' => array( 'foreign' ),
+			'.maintenance deleted, and no data file'                               => array( 'no data' ),
+			'.maintenance deleted, the data file another restore\'s'               => array( 'other mark' ),
+			'.maintenance deleted, the data file not a held one'                   => array( 'not held' ),
+			'.maintenance deleted, the data file of no form'                       => array( 'no form' ),
+		);
+	}
+
+	/**
+	 * @dataProvider not_this_jobs
+	 */
+	public function test_with_its_maintenance_file_deleted_only_the_held_data_file_of_the_job_is_this_site( string $what ): void {
+		$job  = $this->killed();
+		$mark = (string) $job->site_mark;
+		$keep = $this->sandbox . '/kept-maintenance';
+		mkdir( $keep );
+		$file = new Maintenance( $this->abspath, $mark );
+		$this->assertTrue( $file->is_held(), 'the control: the killed run left the site held' );
+		$this->refused_until_mended(
+			$job,
+			function () use ( $keep, $what, $file, $mark ): void {
+				$this->copy_maintenance( $this->abspath, $keep );
+				if ( 'foreign' === $what ) {
+					file_put_contents( $file->path(), '<?php $upgrading = ' . time() . '; ?>' ); // As WordPress's upgrader writes it.
+					return;
+				}
+				$this->remove_maintenance();
+				if ( 'other mark' === $what ) {
+					file_put_contents( $file->data_path(), ( new Maintenance( $this->abspath, 'WP Checkpoint restore ' . str_repeat( 'ab', 16 ) ) )->data( Maintenance::held() ) );
+				} elseif ( 'not held' === $what ) {
+					file_put_contents( $file->data_path(), $file->data( time() ) );
+				} elseif ( 'no form' === $what ) {
+					file_put_contents( $file->data_path(), $mark . "\n" . Maintenance::held() . "\n" );
+				}
+			},
+			function () use ( $keep ): void {
+				$this->remove_maintenance();
+				$this->copy_maintenance( $keep, $this->abspath );
+			},
+			'The maintenance file here is not this job\'s.'
+		);
+	}
+
+	/**
+	 * Where the first rename of the put-back is: a directory's, a table's.
+	 *
+	 * @return array<string, array{0: string, 1: int, 2: string}>
+	 */
+	public function first_renames(): array {
+		return array(
+			'a directory\'s' => array( 'dir_in', 1, 'rename' ),
+			'a table\'s'     => array( 'committed', 1, 'table_back' ),
+		);
+	}
+
+	/**
+	 * @dataProvider first_renames
+	 */
+	public function test_with_its_maintenance_file_deleted_the_job_is_taken_and_the_file_is_up_again_at_the_first_rename( string $seam, int $nth, string $first ): void {
+		$job = $this->at_swap();
+		$this->killed_at( $job, $seam, $nth );
+		$job  = Plugin::instance()->jobs()->find( $job->id );
+		$file = new Maintenance( $this->abspath, (string) $job->site_mark );
+		$this->assertTrue( $file->is_held(), 'the control: the killed run left the site held' );
+		\WPCheckpoint\Tests\Fixtures\Sandbox::remove( $file->path() ); // As the upgrader's maintenance_mode( false ) does.
+		$this->assertTrue( $file->left_held() );
+		$seen = array();
+		$look = function ( string $at ) use ( &$seen, $file ): void {
+			clearstatcache();
+			$seen[] = array( $at, $this->maintenance_files()['.maintenance'] ?? null, $file->is_held() );
+		};
+		$this->seams = array();
+		$result      = $this->tick_without_wordpress(
+			$job,
+			array(
+				'at'     => function ( string $point ) use ( $look ): void {
+					$this->seams[] = $point;
+					$look( $point );
+				},
+				'rename' => static function ( string $from, string $to ) use ( $look ): bool {
+					$look( 'rename' ); // Within the unit, right before the directory is renamed.
+					return rename( $from, $to );
+				},
+			)
+		);
+		$this->assertNotSame( TickResult::LEFT, $result->status, 'taken on the held data file alone: ' . $result->message . ' ' . implode( ' | ', $this->web_notes ) );
+		$starts = array_values(
+			array_filter(
+				$seen,
+				static function ( array $one ): bool {
+					return 'rollback' === $one[0];
+				}
+			)
+		);
+		$this->assertSame( array( array( 'rollback', null, false ) ), $starts, 'the control: the put-back started with no .maintenance, and the observation tells' );
+		$renames = array_values(
+			array_filter(
+				$seen,
+				static function ( array $one ): bool {
+					return in_array( $one[0], array( 'rename', 'table_back' ), true );
+				}
+			)
+		);
+		$this->assertNotSame( array(), $renames, 'the control: something was renamed: ' . implode( ' ', $this->seams ) );
+		$this->assertSame( $first, $renames[0][0], 'the first rename is the one this case is about' );
+		foreach ( $renames as $one ) {
+			$this->assertSame( Maintenance::CODE, $one[1], 'at ' . $one[0] . ': .maintenance is this plugin\'s code again' );
+			$this->assertTrue( $one[2], 'at ' . $one[0] . ': and held for this job' );
+		}
+		$this->assertContains( Maintenance::CODE, Maintenance::KNOWN_CODES );
 	}
 
 	public function test_a_storage_directory_not_here_is_not_this_site(): void {
