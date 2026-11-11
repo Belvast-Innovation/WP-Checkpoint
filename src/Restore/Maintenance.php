@@ -669,6 +669,29 @@ final class Maintenance {
 	}
 
 	/**
+	 * Where this restore's held data file is left with no .maintenance (left_held()), rewrite the data file alone
+	 * with a time, so that it is no longer a held one: the restore's must-use plugin (Loader), which answers for a
+	 * deleted .maintenance only while the data file is held, stops answering. No .maintenance is made.
+	 *
+	 * @param int           $time    Unix time.
+	 * @param callable|null $confirm Called right before the file is put in place (a lease check; throws to stop).
+	 * @return bool Whether it was rewritten (false: not left held, nothing written).
+	 * @throws AtomicWriteFailed When it could not be written.
+	 */
+	public function lapse_alone( int $time, $confirm = null ): bool {
+		if ( ! $this->left_held() ) {
+			return false;
+		}
+		$data = self::parse( self::look( $this->data_path() ) );
+		if ( null === $data || $this->mark !== $data['mark'] ) {
+			return false;
+		}
+		AtomicFile::write( $this->dir, self::DATA, $this->data( $time, $data['pass'], $data['runtime'] ), null === $confirm ? array() : array( 'confirm' => $confirm ) );
+		HostFunctions::opcache_invalidate( $this->data_path() );
+		return true;
+	}
+
+	/**
 	 * Take this restore's file down: its runtime log first added to the job's log ($merge), then .maintenance when it
 	 * is this restore's (or bare), then the data file when it is this restore's (or of no form) and .maintenance is not
 	 * a code this plugin wrote, then the files of a run without WordPress that name this restore (WEB_FILES, the log

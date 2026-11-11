@@ -404,6 +404,119 @@ final class WebEntryCodeTest extends SwapTestCase {
 		$this->assertTrue( $open['site'] );
 	}
 
+	/**
+	 * Where a run that ends the job is killed, the maintenance file deleted before it: after it let the file go, after
+	 * it recorded the site as put back, before each file of the take-down goes (the loader, the data file, the visitor
+	 * file, the runtime, the runtime log; the log of the runs without WordPress is added to the job's before the second),
+	 * and with all of them down.
+	 *
+	 * @return array<string, array{0: string, 1: int}>
+	 */
+	public function endings(): array {
+		return array(
+			'let go'                        => array( 'unheld', 1 ),
+			'recorded as put back'          => array( 'reverted', 1 ),
+			'before the loader goes'        => array( 'take_down', 1 ),
+			'before the data file goes'     => array( 'take_down', 2 ),
+			'before the visitor file goes'  => array( 'take_down', 3 ),
+			'before the runtime goes'       => array( 'take_down', 4 ),
+			'before the runtime log goes'   => array( 'take_down', 5 ),
+			'every file down'               => array( 'maintenance_down', 1 ),
+		);
+	}
+
+	/**
+	 * @dataProvider endings
+	 */
+	public function test_with_the_maintenance_file_deleted_a_run_killed_while_it_ends_the_job_leaves_no_site_held_for_good( string $seam, int $nth ): void {
+		$job    = $this->at_swap();
+		$before = $this->site();
+		$this->killed_at( $job, 'dir_in', 2 );
+		// WP-CLI puts everything back and is killed once that is recorded: the site is whole, and still held.
+		$this->killed_at( Plugin::instance()->jobs()->find( $job->id ), 'restored' );
+		$restored = Plugin::instance()->jobs()->find( $job->id );
+		$this->assertSame( 'restored', $restored->cursor['phase'] ?? '', 'the control: put back, and recorded' );
+		$file = new Maintenance( $this->abspath, (string) $restored->site_mark );
+		$this->assertTrue( $file->is_held(), 'the control: held' );
+		$this->assertContains( 'live', $this->loader_in( $restored ), 'the control: the loader is in the must-use plugins directory' );
+		Sandbox::remove( $file->path() ); // An update's end deletes .maintenance, whoever put it up.
+		$this->assertTrue( $file->left_held() );
+		touch( $this->abspath . '/' . Maintenance::VISITOR, time() + 100 ); // Not its time: the loader answers, and runs nothing.
+		$held = $this->request( $restored, array( 'due' => false ) );
+		$this->assertTrue( $held['let'], 'the control: the loader answers for the deleted file: ' . $held['said'] );
+		$this->assertSame( 'restored', Plugin::instance()->jobs()->find( $job->id )->cursor['phase'] ?? '', 'the control: and no run was made' );
+		// The run that ends the job, killed on its way.
+		$this->killed_at( $restored, $seam, $nth );
+		$this->assertNotContains( Maintenance::FILE, $this->swap_files(), 'the control: no .maintenance was made meanwhile' );
+		// Visitors alone: within a few requests one reaches the site (the loader answers for nothing that no run can
+		// end and no time lets lapse).
+		$open = null;
+		for ( $i = 0; $i < 10 && null === $open; $i++ ) {
+			$report = $this->request( Plugin::instance()->jobs()->find( $job->id ), array( 'site' => true ) );
+			if ( ! $report['let'] ) {
+				$this->assertTrue( $report['site'], $report['said'] );
+				$this->assertSame( 'NULL', $report['type'], 'no maintenance file held it: ' . $report['said'] );
+				$open = $i;
+			}
+		}
+		$this->assertNotNull( $open, "killed at {$seam} #{$nth}: ten requests later the site is still held: " . $this->runtime_log() . ' files: ' . implode( ', ', $this->swap_files() ) );
+		$site                = $this->site();
+		$site['maintenance'] = false;
+		$this->assertSame( $before, $site, 'the files and the tables as they were' );
+		// WP-CLI ends what is left of the job.
+		$now  = Plugin::instance()->jobs()->find( $job->id );
+		$done = in_array( $now->status, array( Job::QUEUED, Job::RUNNING ), true ) ? $this->cli_run( $now ) : $now;
+		$this->assertSame( Job::FAILED, $done->status, (string) $done->last_error );
+		$this->assertSame( Job::SITE_UNTOUCHED, $done->site_state );
+		$this->assertSame( array(), $this->swap_files() );
+		$this->assertSame( array(), $this->loader_in( $done ) );
+		$this->assertSame( $before, $this->site() );
+	}
+
+	/**
+	 * The site held when the plugin is deactivated: with its maintenance file, and with that file deleted.
+	 *
+	 * @return array<string, array{0: bool}>
+	 */
+	public function held_when_deactivated(): array {
+		return array(
+			'the maintenance file up'      => array( false ),
+			'the maintenance file deleted' => array( true ),
+		);
+	}
+
+	/**
+	 * @dataProvider held_when_deactivated
+	 */
+	public function test_a_deactivation_while_the_site_is_held_keeps_the_loader_and_visitors_requests_put_the_site_back( bool $deleted ): void {
+		$job    = $this->at_swap();
+		$before = $this->site();
+		$this->killed_at( $job, 'dir_in', 2 );
+		$killed = Plugin::instance()->jobs()->find( $job->id );
+		$mu     = (string) $this->swap_parts['mu_dir'];
+		$this->assertSame( array( 'live' ), $this->loader_in( $killed ), 'the control: the loader is in the must-use plugins directory' );
+		if ( $deleted ) {
+			Sandbox::remove( $this->abspath . '/' . Maintenance::FILE );
+		}
+		// What Plugin::deactivate() does, in the sandbox's directories.
+		$this->assertFalse( Plugin::remove_loader( $mu, $this->abspath ), 'not removed: a restore holds the site' );
+		$this->assertSame( array( 'live' ), $this->loader_in( $killed ), 'the loader stays' );
+		$this->assertContains( Maintenance::RUNTIME, $this->swap_files(), 'and so does the runtime' );
+		$this->assertContains( Maintenance::DATA, $this->swap_files() );
+		// Held as before, and visitors' requests put the site back and end the job.
+		$now = $this->requests( $killed );
+		$this->assertSame( Job::FAILED, $now->status, $this->runtime_log() . ' ' . $now->last_error );
+		$this->assertSame( Job::SITE_UNTOUCHED, $now->site_state );
+		$this->assertSame( $before, $this->site(), 'the files and the tables as they were: ' . $this->runtime_log() );
+		$this->assertSame( 1, $this->flushes(), 'the object cache flushed once' );
+		$this->assertSame( array(), $this->swap_files() );
+		$this->assertSame( array(), $this->loader_in( $now ) );
+		// The control: with no restore's files left, the same call removes a loader.
+		$this->assertSame( '', Loader::put( $mu ) );
+		$this->assertTrue( Plugin::remove_loader( $mu, $this->abspath ) );
+		$this->assertFileDoesNotExist( Loader::path( $mu ) );
+	}
+
 	public function test_the_loader_lets_a_request_with_the_pass_through_and_no_other(): void {
 		$job = $this->at_swap();
 		$this->killed_at( $job, 'dir_in', 2 );

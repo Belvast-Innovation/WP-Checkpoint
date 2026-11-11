@@ -3692,7 +3692,9 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * Let this restore's maintenance file lapse again once the direction is recorded ("committed" or "restored",
 	 * while it was held): it is rewritten with the time, so a run that dies before it takes the file down leaves a
 	 * file that lapses after WordPress's ten minutes, not one held for good. Someone else's file in its place is
-	 * left, and none is made where there is none. What cannot be told or written is waited out: until then the job
+	 * left, and none is made where there is none; a held data file left without its .maintenance is rewritten alone
+	 * (Maintenance::lapse_alone()), so the restore's must-use plugin no longer answers for it: what answers 503 has a
+	 * job a run can take behind it, or a time that lapses. What cannot be told or written is waited out: until then the job
 	 * is recorded as holding the site (changing it, or swapped), and every WP-CLI command of the plugin says so.
 	 *
 	 * @param JobContext  $context Context.
@@ -3702,14 +3704,20 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 */
 	private function release( JobContext $context, Maintenance $file ): void {
 		$state = $file->state();
-		if ( Maintenance::NONE === $state ) {
-			return; // None of ours: nothing to let go, and none is made.
-		}
 		if ( Maintenance::OTHER === $state ) {
 			$context->logger()->warning( 'Another maintenance file is in place of this restore\'s; it is left as it is' );
 			return;
 		}
 		try {
+			if ( Maintenance::NONE === $state ) {
+				// None of ours to let go, and none is made. Its held data file left alone (.maintenance deleted) is
+				// let go all the same: the restore's must-use plugin answers for it while it is held, and after
+				// this point no run without WordPress takes the job to take it down.
+				if ( $file->lapse_alone( $this->now(), array( $context, 'confirm_lease' ) ) ) {
+					$context->logger()->info( 'The maintenance file was gone; its data file was let go' );
+				}
+				return;
+			}
 			$file->put( $this->now(), array( $context, 'confirm_lease' ) );
 		} catch ( LockLost $e ) {
 			throw $e;

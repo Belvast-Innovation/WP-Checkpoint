@@ -360,6 +360,38 @@ final class LoaderSwapTest extends SwapTestCase {
 		$this->assertFileExists( $mu . '/live-mu.php', 'and nothing else' );
 	}
 
+	public function test_a_deactivation_and_an_uninstall_leave_a_loader_a_restore_may_use(): void {
+		$mu   = $this->dirs['mu-plugins'];
+		$mark = \WPCheckpoint\Restore\Maintenance::new_mark();
+		$file = new \WPCheckpoint\Restore\Maintenance( $this->abspath, $mark );
+		$this->assertSame( '', Loader::put( $mu ) );
+		$uninstall = function () use ( $mu ): void {
+			$before = Residue::replace_maintenance_dir( $this->abspath );
+			try {
+				Uninstaller::delete_site_residue( null, $mu );
+			} finally {
+				Residue::replace_maintenance_dir( $before );
+			}
+		};
+		// A restore's maintenance file is up (its code and its data file): both leave the loader.
+		$this->put_maintenance( $mark, \WPCheckpoint\Restore\Maintenance::held() );
+		$this->assertTrue( Loader::needed( $this->abspath ) );
+		$this->assertFalse( Plugin::remove_loader( $mu, $this->abspath ) );
+		$uninstall();
+		$this->assertFileExists( Loader::path( $mu ), 'kept while the maintenance file is up' );
+		// .maintenance deleted, the data file names the restore: a deactivation leaves the loader (it is what holds
+		// the site then).
+		Sandbox::remove( $file->path() );
+		$this->assertTrue( Loader::needed( $this->abspath ), 'the data file alone names a restore' );
+		$this->assertFalse( Plugin::remove_loader( $mu, $this->abspath ) );
+		$this->assertFileExists( Loader::path( $mu ), 'kept while a data file names a restore' );
+		// The control: no file of a restore left, the deactivation removes it.
+		$this->remove_maintenance();
+		$this->assertFalse( Loader::needed( $this->abspath ) );
+		$this->assertTrue( Plugin::remove_loader( $mu, $this->abspath ) );
+		$this->assertFileDoesNotExist( Loader::path( $mu ) );
+	}
+
 	public function test_the_reaper_leaves_a_loader_that_is_new_or_that_a_restore_may_use(): void {
 		$mu   = $this->dirs['mu-plugins'];
 		$reap = function (): void {

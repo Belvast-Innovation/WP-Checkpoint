@@ -697,8 +697,9 @@ final class Uninstaller {
 			}
 		}
 		// The swap's must-use plugin, when a run that died left it (nothing is uninstalled while a job holds the site): by
-		// its contents only; another file under its name is not the plugin's, and stays.
-		if ( false === Maintenance::code_in( Residue::maintenance_dir() ) ) {
+		// its contents only; another file under its name is not the plugin's, and stays. Not while a maintenance code of
+		// the plugin's or a data file naming a restore is there (Loader::needed(), the reaper's rule).
+		if ( ! \WPCheckpoint\Restore\Loader::needed( Residue::maintenance_dir() ) ) {
 			foreach ( Residue::scan_loader( null === $mu_dir ? (string) ( ScanRoots::site_directories()['mu-plugins'] ?? '' ) : $mu_dir ) as $entry ) {
 				try {
 					if ( Deleter::delete_loader_file( dirname( $entry['path'] ), basename( $entry['path'] ), \WPCheckpoint\Restore\Loader::digests(), $confirm ) ) {

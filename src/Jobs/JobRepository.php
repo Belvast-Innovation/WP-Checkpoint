@@ -2928,7 +2928,7 @@ final class JobRepository implements RunnerRepository {
 				continue;
 			}
 			$unused = function (): bool {
-				if ( false !== Maintenance::code_in( Residue::maintenance_dir() ) || '' !== Maintenance::data_mark( Residue::maintenance_dir() ) ) {
+				if ( \WPCheckpoint\Restore\Loader::needed( Residue::maintenance_dir() ) ) {
 					return false;
 				}
 				try {
