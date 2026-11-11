@@ -4,18 +4,18 @@ namespace WPCheckpoint\Tests\Integration;
 
 use WP_UnitTestCase;
 use WPCheckpoint\Backups\Estimate;
-use WPCheckpoint\Jobs\EstimateJob;
 use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\JobRepository;
 use WPCheckpoint\Jobs\VisitorFile;
 use WPCheckpoint\Jobs\WebRuntime;
-use WPCheckpoint\Plugin;
 use WPCheckpoint\Restore\Loader;
 use WPCheckpoint\Restore\Maintenance;
+use WPCheckpoint\Support\Directories;
 use WPCheckpoint\Tests\Fixtures\ActivePlugin;
 use WPCheckpoint\Tests\Fixtures\ContentLeftovers;
 use WPCheckpoint\Tests\Fixtures\RealAbspath;
 use WPCheckpoint\Tests\Fixtures\RealMuPlugins;
+use WPCheckpoint\Tests\Fixtures\StorageDirs;
 
 /**
  * The restore's must-use plugin (Restore\Loader) on the test site itself: loaded by its web server and by real WP-CLI
@@ -186,14 +186,52 @@ final class LoaderRealSiteTest extends WP_UnitTestCase {
 		return array( proc_close( $process ), $out, $err );
 	}
 
+	/**
+	 * The stored state of the storage directory as the database has it (null for none), past any cache.
+	 *
+	 * @return string|null
+	 */
+	private static function stored_state() {
+		global $wpdb;
+		$wpdb->query( 'COMMIT' );
+		return is_multisite()
+			? $wpdb->get_var( $wpdb->prepare( "SELECT meta_value FROM {$wpdb->sitemeta} WHERE meta_key = %s AND site_id = %d", Directories::OPTION, get_current_network_id() ) )
+			: $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s", Directories::OPTION ) );
+	}
+
+	/**
+	 * Put the stored state back as it was in the database (the WP-CLI processes may have made a storage directory of
+	 * their own and stored it: this process's is in its transaction or its cache only).
+	 *
+	 * @param string|null $was stored_state() before.
+	 * @return void
+	 */
+	private static function restore_state( $was ): void {
+		global $wpdb;
+		if ( self::stored_state() === $was ) {
+			return;
+		}
+		if ( is_multisite() ) {
+			$where = array(
+				'meta_key' => Directories::OPTION, // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_key -- one row of the test's.
+				'site_id'  => get_current_network_id(),
+			);
+			null === $was ? $wpdb->delete( $wpdb->sitemeta, $where ) : $wpdb->update( $wpdb->sitemeta, array( 'meta_value' => $was ), $where ); // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_value -- as above.
+		} else {
+			$where = array( 'option_name' => Directories::OPTION );
+			null === $was ? $wpdb->delete( $wpdb->options, $where ) : $wpdb->update( $wpdb->options, array( 'option_value' => $was ), $where );
+		}
+		$wpdb->query( 'COMMIT' );
+	}
+
 	public function test_with_the_loader_up_and_the_maintenance_file_deleted_wp_cli_shows_and_runs_a_job_as_ever(): void {
 		global $wpdb;
-		$mark = Maintenance::new_mark();
-		$job  = null;
+		$mark    = Maintenance::new_mark();
+		$id      = 0;
+		$storage = StorageDirs::listing();
+		$state   = self::stored_state();
 		ActivePlugin::on();
 		try {
-			$job = Plugin::instance()->jobs()->create( EstimateJob::ID, 0 );
-			$wpdb->query( 'COMMIT' );
 			$this->held( $mark, false, false ); // Held by its data file; .maintenance deleted.
 			RealMuPlugins::put();
 			$this->assertTrue( ( new Maintenance( rtrim( ABSPATH, '/' ), $mark ) )->left_held() );
@@ -204,28 +242,35 @@ final class LoaderRealSiteTest extends WP_UnitTestCase {
 			$this->assertStringContainsString( 'Briefly unavailable for scheduled maintenance', $held[0]['body'] );
 			$this->assertStringContainsString( 'No job holds the site with this maintenance file', self::runtime_log(), 'and ran the runtime' );
 
-			list( $status, $out, $err ) = $this->wp( 'wpcheckpoint', 'job', 'status', (string) $job->id, '--format=json' );
+			// A job of the WP-CLI processes' own making (their storage directory is the one the database names, which
+			// need not be this process's): an estimate, which changes nothing of the site.
+			list( $status, $out, $err ) = $this->wp( 'eval', 'echo \WPCheckpoint\Plugin::instance()->jobs()->create( \WPCheckpoint\Jobs\EstimateJob::ID, 0 )->id;' );
+			$this->assertSame( 0, $status, "WP-CLI runs with the loader up.\nstdout: {$out}\nstderr: {$err}" );
+			$this->assertSame( 1, preg_match( '/\A[0-9]+\z/', trim( $out ) ), $out . $err );
+			$id = (int) trim( $out );
+
+			list( $status, $out, $err ) = $this->wp( 'wpcheckpoint', 'job', 'status', (string) $id, '--format=json' );
 			$this->assertSame( 0, $status, "job status runs.\nstdout: {$out}\nstderr: {$err}" );
 			$shown = json_decode( $out, true );
 			$this->assertIsArray( $shown, $out );
 			$this->assertStringContainsString( Job::QUEUED, (string) wp_json_encode( $shown ), 'it shows the job as it is' );
 			$this->assertStringNotContainsString( 'Briefly unavailable', $out . $err, 'the loader said nothing on the command line' );
 
-			list( $status, $out, $err ) = $this->wp( 'wpcheckpoint', 'job', 'run', (string) $job->id, '--wait' );
+			list( $status, $out, $err ) = $this->wp( 'wpcheckpoint', 'job', 'run', (string) $id, '--wait' );
 			$this->assertSame( 0, $status, "job run runs.\nstdout: {$out}\nstderr: {$err}" );
 			$this->assertStringNotContainsString( 'Briefly unavailable', $out . $err );
 			$wpdb->query( 'COMMIT' );
-			$done = Plugin::instance()->jobs()->find( $job->id );
-			$this->assertSame( Job::COMPLETED, $done->status, "the job ran to its end.\nstdout: {$out}\nstderr: {$err}\n" . $done->last_error );
+			$this->assertSame( Job::COMPLETED, $wpdb->get_var( $wpdb->prepare( 'SELECT status FROM ' . JobRepository::table() . ' WHERE id = %d', $id ) ), "the job ran to its end.\nstdout: {$out}\nstderr: {$err}" ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- the jobs table.
 			$this->assertSame( array( ContentLeftovers::mu_dir() . '/' . Loader::NAME ), RealMuPlugins::listing(), 'the control: the loader was there all along' );
 		} finally {
-			if ( null !== $job ) {
-				Plugin::instance()->jobs()->reclaim_work( Plugin::instance()->jobs()->find( $job->id ) );
-				$wpdb->delete( JobRepository::table(), array( 'id' => $job->id ) );
-				delete_option( Estimate::OPTION );
-				delete_site_option( Estimate::OPTION );
-				$wpdb->query( 'COMMIT' );
+			if ( $id > 0 ) {
+				$wpdb->delete( JobRepository::table(), array( 'id' => $id ) );
 			}
+			delete_option( Estimate::OPTION );
+			delete_site_option( Estimate::OPTION );
+			$wpdb->query( 'COMMIT' );
+			self::restore_state( $state );
+			StorageDirs::remove_made_since( $storage );
 			ActivePlugin::off();
 		}
 	}

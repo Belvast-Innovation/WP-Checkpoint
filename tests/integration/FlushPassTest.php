@@ -408,6 +408,35 @@ final class FlushPassTest extends TestCase {
 		$this->assertSame( 1, $this->visitor()->flush()['n'] );
 	}
 
+	/**
+	 * What a request WordPress takes all the way looks like, each let through.
+	 *
+	 * @return array<string, array{0: string}>
+	 */
+	public function ended_by_the_loader(): array {
+		return array(
+			'SHORTINIT defined as false (as WordPress defines it for every other request)' => array( 'shortinit false' ),
+			'the held time of a 32-bit PHP'                                                => array( 'held 32' ),
+		);
+	}
+
+	/**
+	 * @dataProvider ended_by_the_loader
+	 */
+	public function test_a_request_the_loader_ends_is_let_through( string $what ): void {
+		Loader::put( $this->mu );
+		$this->visitor()->await_flush();
+		if ( 'held 32' === $what ) {
+			$this->assertNotSame( Maintenance::held_for( 4 ), Maintenance::held(), 'the control: not the value the other cases use' );
+			file_put_contents( $this->dir . '/' . Maintenance::DATA, ( new Maintenance( $this->dir, $this->mark ) )->data( Maintenance::held_for( 4 ), Maintenance::NO_PASS, str_repeat( 'a', 64 ) ) );
+		}
+		$this->due();
+		$report = $this->request( 'shortinit false' === $what ? array( 'define' => array( 'SHORTINIT' => false ) ) : array() );
+		$this->assertSame( 0, $report['upgrading'] );
+		$this->assertTrue( $report['flush'] );
+		$this->assertSame( 1, $this->visitor()->flush()['n'] );
+	}
+
 	public function test_the_check_of_the_code_before_it_is_put_up_lets_nothing_through(): void {
 		Loader::put( $this->mu );
 		$this->visitor()->await_flush();
