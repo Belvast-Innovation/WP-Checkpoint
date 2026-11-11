@@ -134,6 +134,16 @@ final class FlushPassTest extends TestCase {
 	}
 
 	/**
+	 * The visitor file's time as it is now.
+	 *
+	 * @return int
+	 */
+	private function visitor_time(): int {
+		clearstatcache();
+		return (int) filemtime( $this->dir . '/' . Maintenance::VISITOR );
+	}
+
+	/**
 	 * How often the runtime was included.
 	 *
 	 * @return int
@@ -392,7 +402,8 @@ final class FlushPassTest extends TestCase {
 			Sandbox::remove( $this->dir . '/' . Maintenance::RUNTIME );
 		}
 		$this->due();
-		$report = $this->request( 'shortinit' === $what ? array( 'define' => array( 'SHORTINIT' => true ) ) : array(), 'cli' === $what );
+		$time_before = $this->visitor_time();
+		$report      = $this->request( 'shortinit' === $what ? array( 'define' => array( 'SHORTINIT' => true ) ) : array(), 'cli' === $what );
 		$this->assertSame( 'double', $report['type'], 'not let through: WordPress answers with its maintenance page' );
 		$this->assertSame( (float) ( 'not held' === $what ? $time : Maintenance::held() ), (float) $report['upgrading'] );
 		$this->assertFalse( $report['flush'] );
@@ -400,12 +411,52 @@ final class FlushPassTest extends TestCase {
 		$this->assertFalse( $report['entry'], 'and no runtime is run: the flush is all that is left' );
 		$this->assertSame( array( 'n' => 0, 'next' => 0 ), $this->visitor()->flush(), 'nothing counted: the try is not spent' );
 		$this->assertSame( array(), $this->passes_logged() );
-		// The control: put right, the next request is let through.
+		$this->assertSame( $time_before, $this->visitor_time(), 'nor is the visitor file\'s time set on: the pace\'s window is not taken' );
+		// The control: put right, the very next request is let through (the visitor file's time is as it was).
 		file_put_contents( $this->dir . '/' . Maintenance::DATA, $data );
 		file_put_contents( $this->dir . '/' . Maintenance::RUNTIME, $runtime );
-		$this->due();
+		$this->assertSame( $time_before, $this->visitor_time(), 'the control: putting it right did not touch the visitor file' );
 		$this->assertLet( $this->request() );
+		$this->assertGreaterThan( $time_before, $this->visitor_time(), 'the control: a request let through sets the time on (the observation tells)' );
 		$this->assertSame( 1, $this->visitor()->flush()['n'] );
+	}
+
+	public function test_while_the_flush_is_awaited_shortinit_requests_and_command_line_processes_take_neither_a_try_nor_the_window(): void {
+		Loader::put( $this->mu );
+		$this->visitor()->await_flush();
+		$this->due();
+		$time = $this->visitor_time();
+		$this->assertLessThan( time(), $time, 'the control: the visitor file\'s time has come' );
+		foreach ( array( 'shortinit', 'cli', 'shortinit', 'cli', 'shortinit' ) as $i => $what ) {
+			$report = $this->request( 'shortinit' === $what ? array( 'define' => array( 'SHORTINIT' => true ) ) : array(), 'cli' === $what );
+			$this->assertSame( 'double', $report['type'], "#{$i} {$what}: held" );
+			$this->assertFalse( $report['flush'], "#{$i} {$what}" );
+			$this->assertFalse( $report['entry'], "#{$i} {$what}: no runtime run" );
+			$this->assertSame( $time, $this->visitor_time(), "#{$i} {$what}: the visitor file's time is not touched" );
+			$this->assertSame( array( 'n' => 0, 'next' => 0 ), $this->visitor()->flush(), "#{$i} {$what}: nothing counted" );
+		}
+		$this->assertSame( 0, $this->included() );
+		// Right after them, with nothing set back: an ordinary request is let through.
+		$this->assertLet( $this->request() );
+		$this->assertSame( array( 'n' => 1, 'next' => 0 ), $this->visitor()->flush() );
+		$this->assertGreaterThan( $time, $this->visitor_time(), 'the control: the one let through set the time on' );
+	}
+
+	public function test_without_the_record_a_command_line_process_touches_nothing_and_a_shortinit_request_runs_the_runtime(): void {
+		Loader::put( $this->mu );
+		$this->assertNull( $this->visitor()->flush(), 'the control: no flush is awaited (the put-back is still to do)' );
+		$time   = $this->visitor_time();
+		$report = $this->request( array(), true );
+		$this->assertHeld( $report );
+		$this->assertFalse( $report['entry'], 'a process on the command line runs no runtime' );
+		$this->assertSame( 0, $this->included() );
+		$this->assertSame( $time, $this->visitor_time(), 'and does not touch the visitor file\'s time' );
+		// A SHORTINIT request is a request like any other here: the runtime needs nothing of WordPress.
+		$report = $this->request( array( 'define' => array( 'SHORTINIT' => true ) ) );
+		$this->assertHeld( $report );
+		$this->assertTrue( $report['entry'] );
+		$this->assertSame( 1, $this->included(), 'the runtime ran' );
+		$this->assertGreaterThan( $time, $this->visitor_time(), 'at the pace: the time set on' );
 	}
 
 	/**
