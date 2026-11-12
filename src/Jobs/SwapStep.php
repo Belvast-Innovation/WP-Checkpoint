@@ -3899,11 +3899,11 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		// The loader first: while the maintenance file stands, nothing is missed without it.
 		$this->loader_down( $context, $this->mu_dir(), $confirm );
 		$removed = isset( $this->parts['remove'] ) ? (bool) call_user_func( $this->parts['remove'], $file, $confirm ) : $file->remove( $confirm, $this->log_merge( $context ) );
-		if ( $file->left_unknown() ) {
-			$context->logger()->warning( self::LEFT_UNKNOWN );
-		}
 		if ( ! $removed ) {
 			throw new TransientFailure( 'The maintenance file could not be taken down yet.' );
+		}
+		if ( $file->left_unknown() ) {
+			$context->logger()->warning( self::LEFT_UNKNOWN );
 		}
 	}
 

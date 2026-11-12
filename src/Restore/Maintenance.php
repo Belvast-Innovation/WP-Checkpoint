@@ -848,8 +848,11 @@ final class Maintenance {
 	}
 
 	/**
-	 * Whether the last remove() left in the data file's place something that is positively no data file (a
-	 * directory, a longer file, a file of another form): it is nobody's this plugin knows, and stays as it is.
+	 * Whether the last remove() took this plugin's code down and left in the data file's place something that is
+	 * positively no data file (a directory, a longer file, a file of another form): it is nobody's this plugin knows,
+	 * and the take-down leaves it as it is. (Not more than that: a release before it, let_go() on a bare code, writes
+	 * this restore's data file over a regular file of another form as ever, and the reaper removes a regular file
+	 * left under the data file's name once it is old.)
 	 *
 	 * @return bool
 	 */
@@ -1019,8 +1022,8 @@ final class Maintenance {
 			HostFunctions::opcache_invalidate( $this->data_path() );
 			return $gone;
 		}
-		if ( 'not' === self::data_at( $this->data_path() )[0] ) {
-			$this->left = true; // Positively no data file: not this restore's, nor anyone's this plugin knows.
+		if ( self::BARE === $state && 'not' === self::data_at( $this->data_path() )[0] ) {
+			$this->left = true; // The code was taken down; what is positively no data file is nobody's this plugin knows.
 		}
 		// What cannot be told (it cannot be read; a link, which the codes read through) may be this restore's: not gone.
 		return self::UNKNOWN !== $look[0] && ( self::OTHER !== $look[0] || self::plain( $this->data_path() ) );

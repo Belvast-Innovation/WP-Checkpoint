@@ -229,6 +229,8 @@ final class MaintenanceMatrixTest extends TestCase {
 					$this->assertTrue( $state['file']->left_unknown(), 'and says what it left: ' . $state['case'] );
 					$this->assertFalse( MaintenanceStates::answers( $state['site'], $state['mu'] )['code'], 'nothing is held by the code any more: ' . $state['case'] );
 					++$left;
+				} else {
+					$this->assertFalse( $state['file']->left_unknown(), 'said only where the code was taken down: ' . $state['case'] );
 				}
 			} elseif ( 'code' === $m ) {
 				$this->assertSame( 'none' === $d, $unnamed, 'only the code with no data file at all is unnamed otherwise: ' . $state['case'] );
