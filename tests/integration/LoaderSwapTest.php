@@ -251,6 +251,37 @@ final class LoaderSwapTest extends SwapTestCase {
 		$this->assertSame( array(), $this->maintenance_files(), 'and everything of the restore\'s is taken down' );
 	}
 
+	public function test_a_swap_that_ends_beside_what_is_no_data_file_takes_its_code_down_leaves_that_thing_and_says_so(): void {
+		$job      = $this->at_swap();
+		$data     = $this->abspath . '/' . \WPCheckpoint\Restore\Maintenance::DATA;
+		$code     = $this->abspath . '/' . \WPCheckpoint\Restore\Maintenance::FILE;
+		$put      = false;
+		$this->on = function ( string $point ) use ( $data, &$put ): void {
+			if ( 'self_check_removed' === $point && ! $put ) {
+				// The swap is made and checked; the release and the take-down are next. In the data file's place there
+				// is now a directory: the code next to it holds every request, with no restore named.
+				$put = true;
+				Sandbox::remove( $data );
+				mkdir( $data );
+				file_put_contents( $data . '/kept', 'x' );
+			}
+		};
+		try {
+			$done = $this->cli_run( $job );
+			$this->assertTrue( $put, 'the control: the swap came to its release' );
+			$this->assertSame( Job::COMPLETED, $done->status, 'the job ends as ever: ' . (string) $done->last_error );
+			clearstatcache();
+			$this->assertFileDoesNotExist( $code, 'the code is taken down: nothing holds the site with no job behind it' );
+			$this->assertFalse( \WPCheckpoint\Restore\Maintenance::held_in( $this->abspath ) );
+			$this->assertSame( 'x', file_get_contents( $data . '/kept' ), 'what is no data file is left as it is' );
+			$this->assertStringContainsString( SwapStep::LEFT_UNKNOWN, Plugin::instance()->job_presenter()->log_tail( $done ), 'said in the job\'s log' );
+		} finally {
+			if ( is_dir( $data ) ) {
+				Sandbox::remove( $data );
+			}
+		}
+	}
+
 	public function test_a_backup_that_holds_the_loader_itself_leaves_none_either_made_or_put_back(): void {
 		// A backup made of a site's files while a restore held it: the loader's own code among its must-use plugins.
 		$this->backup_has = self::backup_files() + array( 'wp-content/mu-plugins/' . Loader::NAME => Loader::CODE );

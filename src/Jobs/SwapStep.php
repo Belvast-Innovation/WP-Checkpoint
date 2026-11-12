@@ -323,6 +323,11 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	const STOOD_DOWN = 'The swap stopped before it renamed anything, and took its maintenance file down: the site is as it was.';
 
 	/**
+	 * Said when the maintenance file was taken down beside what is no data file (Maintenance::left_unknown()).
+	 */
+	const LEFT_UNKNOWN = 'What stands in place of the maintenance file\'s data file is not a data file of this plugin: it was left as it is, and the maintenance file was taken down.';
+
+	/**
 	 * Phases in which the site is being changed (or put back), and in which it is swapped.
 	 */
 	const CHANGING = array( 'enter', 'dirs', 'carry', 'rename', 'rollback', 'reverse', 'restored' );
@@ -736,8 +741,11 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			// this job's once it was recorded as untouched after it held the site (its file put up, then let go).
 			$own = in_array( (string) ( $cursor['phase'] ?? '' ), array( 'reverted', 'rejudged' ), true );
 			$this->loader_down( $context, $this->mu_dir(), null );
-			if ( ( $own || Maintenance::BARE !== $file->state() ) && ! $file->remove( null, $this->log_merge( $context ) ) ) {
+			if ( ( $own || ! $file->unnamed() ) && ! $file->remove( null, $this->log_merge( $context ) ) ) {
 				$context->logger()->warning( 'The restore\'s maintenance file could not be taken down' );
+			}
+			if ( $file->left_unknown() ) {
+				$context->logger()->warning( self::LEFT_UNKNOWN );
 			}
 		} catch ( NotHere $e ) {
 			throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged: a run without WordPress leaves the job as it is (Runner).
@@ -3891,6 +3899,9 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		// The loader first: while the maintenance file stands, nothing is missed without it.
 		$this->loader_down( $context, $this->mu_dir(), $confirm );
 		$removed = isset( $this->parts['remove'] ) ? (bool) call_user_func( $this->parts['remove'], $file, $confirm ) : $file->remove( $confirm, $this->log_merge( $context ) );
+		if ( $file->left_unknown() ) {
+			$context->logger()->warning( self::LEFT_UNKNOWN );
+		}
 		if ( ! $removed ) {
 			throw new TransientFailure( 'The maintenance file could not be taken down yet.' );
 		}

@@ -75,7 +75,7 @@ final class MaintenanceReadersTest extends TestCase {
 			array(
 				'object' => 2,
 				'name'   => 7,
-				'asked'  => 22,
+				'asked'  => 24,
 			),
 			array(
 				'unit:test_once_a_release_returns_nothing_answers_as_held_for_the_restore_and_it_waits_where_a_file_cannot_be_told',
@@ -156,6 +156,8 @@ final class MaintenanceReadersTest extends TestCase {
 		'claimable'     => 'unit:test_a_job_is_taken_on_only_by_its_own_files_read_and_always_then',
 		'let_go'        => 'unit:test_once_a_release_returns_nothing_answers_as_held_for_the_restore_and_it_waits_where_a_file_cannot_be_told',
 		'remove'        => 'unit:test_once_a_take_down_says_gone_nothing_answers_as_held_for_the_restore_and_nothing_of_anyone_elses_is_deleted',
+		'unnamed'       => 'unit:test_once_a_take_down_says_gone_nothing_answers_as_held_for_the_restore_and_nothing_of_anyone_elses_is_deleted',
+		'left_unknown'  => 'unit:test_once_a_take_down_says_gone_nothing_answers_as_held_for_the_restore_and_nothing_of_anyone_elses_is_deleted',
 		'log_lines'     => 'not in the matrix: the runtime log, not one of the two files',
 		'web_mark'      => 'not in the matrix: a file of a run without WordPress, not one of the two files',
 		'web_names'     => 'db:test_the_reaper_keeps_a_file_of_a_run_without_wordpress_it_cannot_read_while_a_job_holds_the_site',
@@ -193,7 +195,7 @@ final class MaintenanceReadersTest extends TestCase {
 		// What is asked of an object of the class: counted where the source makes one or is given one, so that a new
 		// question in a file already registered changes its counts too.
 		if ( isset( $out['object'] ) || 1 === preg_match( '/\bMaintenance\s+\$/', $code ) ) {
-			$count = (int) preg_match_all( '/->\s*(?:state|time|is_held|left_held|claimable|let_go|remove|put|hold|runtime_hash)\s*\(/', $code );
+			$count = (int) preg_match_all( '/->\s*(?:state|time|is_held|left_held|claimable|let_go|remove|unnamed|left_unknown|put|hold|runtime_hash)\s*\(/', $code );
 			if ( $count > 0 ) {
 				$out['asked'] = $count;
 			}

@@ -466,6 +466,78 @@ final class FlushPassTest extends TestCase {
 		$this->assertSame( 1, $this->visitor()->flush()['n'] );
 	}
 
+	/**
+	 * The lines the runtime wrote into its log on finding its classes there already.
+	 *
+	 * @return string[]
+	 */
+	private function loaded_logged(): array {
+		return array_values(
+			array_filter(
+				Maintenance::log_lines( $this->dir . '/' . Maintenance::LOG ),
+				static function ( string $line ): bool {
+					return false !== strpos( $line, \WPCheckpoint\Jobs\WebRuntime::LOADED );
+				}
+			)
+		);
+	}
+
+	public function test_a_request_past_its_must_use_plugins_that_reads_the_file_as_it_ends_runs_no_runtime_and_takes_no_window(): void {
+		// A request that began before the site was held (it is past its must-use plugins) reads the maintenance file
+		// for the first time when WordPress's fatal error handler looks at it, as the request ends.
+		$before = $this->visitor_time();
+		$report = $this->request(
+			array(
+				'shutdown' => true,
+				'past_mu'  => true,
+			)
+		);
+		$this->assertTrue( $report['later'], 'the shutdown functions after it ran' );
+		$this->assertSame( (float) Maintenance::held(), (float) $report['upgrading'], 'the control: it read the held file' );
+		$this->assertFalse( $report['entry'], 'no runtime is run in it' );
+		$this->assertSame( 0, $this->included(), 'nor included' );
+		$this->assertSame( $before, $this->visitor_time(), 'and the window is left to a request the file holds' );
+		// The control: the same request not past its must-use plugins (one the file holds) runs the runtime.
+		$held = $this->request( array( 'shutdown' => true ) );
+		$this->assertTrue( $held['entry'] );
+		$this->assertSame( 1, $this->included(), 'the control: the runtime is included when the request is one the file holds' );
+		$this->assertGreaterThan( $before, $this->visitor_time(), 'the control: and the window taken (the observation tells)' );
+	}
+
+	public function test_the_runtime_included_where_one_of_its_classes_is_there_already_declares_nothing_and_says_so(): void {
+		// The swap's own runtime, in place of the stand-in: every class a run without WordPress needs.
+		$built = \WPCheckpoint\Jobs\WebRuntime::build( $this->mark );
+		file_put_contents( $this->dir . '/' . Maintenance::RUNTIME, $built['code'] );
+		// The data file names another hash: the entry, where it runs (the control below), does nothing with this directory.
+		$autoload = dirname( __DIR__, 2 ) . '/vendor/autoload.php';
+		$this->assertFileExists( $autoload );
+		// A request that had loaded one of those classes (the plugin loaded in it) and reads the file as it ends. It is
+		// not past its must-use plugins as far as the code can tell (no did_action()): only the runtime's own check is
+		// between it and declaring the class again.
+		$report = $this->request(
+			array(
+				'shutdown' => true,
+				'autoload' => $autoload,
+				'preload'  => array( 'WPCheckpoint\\Archive\\Limits' ),
+			)
+		);
+		$this->assertTrue( $report['later'], 'no fatal error: the shutdown functions after it ran' );
+		$this->assertTrue( $report['entry'], 'the control: the runtime was included (the code ran its branch)' );
+		$this->assertFalse( $report['web_entry'], 'it declared nothing' );
+		$this->assertCount( 1, $this->loaded_logged(), 'and said so, once' );
+		// The control: without that class there already, the same request declares the runtime's classes.
+		$this->due();
+		$clean = $this->request(
+			array(
+				'shutdown' => true,
+				'autoload' => $autoload,
+			)
+		);
+		$this->assertTrue( $clean['later'] );
+		$this->assertTrue( $clean['web_entry'], 'the control: the runtime declares its classes where none is there' );
+		$this->assertCount( 1, $this->loaded_logged(), 'and says nothing more' );
+	}
+
 	public function test_while_the_flush_is_awaited_shortinit_requests_and_command_line_processes_take_neither_a_try_nor_the_window(): void {
 		Loader::put( $this->mu );
 		$this->visitor()->await_flush();

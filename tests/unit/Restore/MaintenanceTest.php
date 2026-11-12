@@ -221,6 +221,46 @@ final class MaintenanceTest extends TestCase {
 		$this->assertFalse( Maintenance::held_in( $this->dir ), 'someone else\'s, whatever its time' );
 	}
 
+	public function test_the_code_beside_a_directory_or_a_longer_file_in_the_data_files_place_is_taken_down_and_that_thing_left(): void {
+		$file = $this->ours();
+		$data = $this->dir . '/.wpcheckpoint-maintenance.php';
+		foreach ( array( 'a directory', 'a longer file' ) as $what ) {
+			file_put_contents( $this->dir . '/.maintenance', Maintenance::CODE );
+			if ( 'a directory' === $what ) {
+				mkdir( $data );
+				file_put_contents( $data . '/kept', 'x' );
+			} else {
+				file_put_contents( $data, str_repeat( 'x', 100000 ) );
+			}
+			// The code holds every request, names no restore (no job is found by it) and says a time that never passes.
+			$this->assertTrue( Maintenance::held_in( $this->dir ), $what . ': the control: it blocks every request' );
+			$this->assertSame( '', Maintenance::mark_in( $this->dir ), $what );
+			$this->assertFalse( $file->claimable(), $what . ': no job takes it on' );
+			$this->assertTrue( $file->unnamed(), $what );
+			$this->assertSame( Maintenance::NONE, $file->let_go( 1800000000 ), $what . ': letting go writes nothing over it' );
+			$this->assertTrue( $file->remove(), $what . ': the job ends' );
+			clearstatcache();
+			$this->assertFileDoesNotExist( $this->dir . '/.maintenance', $what . ': the code is taken down: nothing holds the site without a job' );
+			$this->assertFalse( Maintenance::held_in( $this->dir ), $what );
+			$this->assertTrue( $file->left_unknown(), $what . ': and the take-down says what it left' );
+			if ( 'a directory' === $what ) {
+				$this->assertSame( 'x', file_get_contents( $data . '/kept' ), 'the directory as it was' );
+			} else {
+				$this->assertSame( 100000, filesize( $data ), 'the file as it was' );
+			}
+			Sandbox::remove( $data );
+		}
+		// What cannot be told is waited on as ever: a link in the data file's place may lead to a data file.
+		file_put_contents( $this->dir . '/.maintenance', Maintenance::CODE );
+		$target = $this->dir . '/elsewhere';
+		file_put_contents( $target, 'x' );
+		symlink( $target, $data );
+		$this->assertFalse( $file->unnamed(), 'a link: it cannot be told' );
+		$this->assertFalse( $file->remove(), 'not gone' );
+		$this->assertFileExists( $this->dir . '/.maintenance', 'and the code stays' );
+		$this->assertFalse( $file->left_unknown() );
+	}
+
 	public function test_the_code_with_no_data_file_it_reads_blocks_the_site_and_is_taken_down_by_the_restore(): void {
 		$file = $this->ours();
 		foreach ( array(
@@ -237,8 +277,14 @@ final class MaintenanceTest extends TestCase {
 			$this->assertSame( '', Maintenance::mark_in( $this->dir ), $what . ': it names no restore' );
 			$this->assertTrue( Maintenance::code_in( $this->dir ), $what );
 			$this->assertNull( $file->time(), $what );
+			$this->assertTrue( $file->unnamed(), $what );
 			$this->assertTrue( $file->remove(), $what );
-			$this->assertSame( array(), $this->names(), $what . ': the code, and a data file of no form, are gone' );
+			$this->assertSame( null === $data ? array() : array( '.wpcheckpoint-maintenance.php' ), $this->names(), $what . ': the code is gone; what is no data file is not this plugin\'s to delete' );
+			$this->assertSame( null !== $data, $file->left_unknown(), $what . ': and the take-down says what it left' );
+			if ( null !== $data ) {
+				$this->assertSame( $data, file_get_contents( $this->dir . '/.wpcheckpoint-maintenance.php' ), $what . ': as it was' );
+				Sandbox::remove( $this->dir . '/.wpcheckpoint-maintenance.php' );
+			}
 		}
 		// A restore that holds the site writes its data file next to it.
 		file_put_contents( $this->dir . '/.maintenance', Maintenance::CODE );
@@ -532,7 +578,7 @@ echo json_encode( array( "upgrading" => $upgrading, "type" => gettype( $upgradin
 	public function test_the_code_is_pinned_and_every_code_written_is_known(): void {
 		// A change of CODE turns every file an earlier version put up into someone else's unless that version's code
 		// stays in KNOWN_CODES: once a version with it is released, add the old code there, then update this digest.
-		$this->assertSame( '5b33e8fde85f90d2ae9a52c88d391d5238c73010868b3944695c7880817fff58', hash( 'sha256', Maintenance::CODE ) );
+		$this->assertSame( 'abda8abb64b7a033c12942a896352f12a125dcc4a2bc5e46effd0ad558315acb', hash( 'sha256', Maintenance::CODE ) );
 		$this->assertContains( Maintenance::CODE, Maintenance::KNOWN_CODES );
 		// The code released with the run without WordPress (2026-11-10): byte for byte what it was, still known.
 		$this->assertSame( '0442b598fef21dcfa20c2b1c411aa3a38a46a6253f4addd8b1a43ee9d7c52714', hash( 'sha256', Maintenance::CODE_2 ) );

@@ -208,6 +208,7 @@ final class MaintenanceMatrixTest extends TestCase {
 
 	public function test_once_a_take_down_says_gone_nothing_answers_as_held_for_the_restore_and_nothing_of_anyone_elses_is_deleted(): void {
 		$gone = 0;
+		$left = 0;
 		foreach ( MaintenanceStates::all() as $pair ) {
 			list( $m, $d ) = $pair;
 			$state         = $this->state( $m, $d );
@@ -215,8 +216,24 @@ final class MaintenanceMatrixTest extends TestCase {
 			$was           = MaintenanceStates::there( $state['site'], $state['mu'] );
 			$before        = MaintenanceStates::digest( $state['site'] . '/' . Maintenance::FILE );
 			$foreign       = 'foreign_held' === $d ? (string) file_get_contents( $state['site'] . '/' . Maintenance::DATA ) : null;
+			$thing         = MaintenanceStates::digest( $state['site'] . '/' . Maintenance::DATA );
+			$unnamed       = $state['file']->unnamed();
 			$said          = $state['file']->remove();
 			$now           = MaintenanceStates::there( $state['site'], $state['mu'] );
+			if ( in_array( $d, array( 'form', 'long', 'dir' ), true ) ) {
+				// What is positively no data file (another form, a longer file, a directory) is nobody's this plugin knows.
+				$this->assertSame( $thing, MaintenanceStates::digest( $state['site'] . '/' . Maintenance::DATA ), 'what is no data file stays as it is: ' . $state['case'] );
+				if ( 'code' === $m ) {
+					$this->assertTrue( $unnamed, 'the code beside it names no restore: ' . $state['case'] );
+					$this->assertTrue( $said, 'and the take-down is done: ' . $state['case'] );
+					$this->assertTrue( $state['file']->left_unknown(), 'and says what it left: ' . $state['case'] );
+					$this->assertFalse( MaintenanceStates::answers( $state['site'], $state['mu'] )['code'], 'nothing is held by the code any more: ' . $state['case'] );
+					++$left;
+				}
+			} elseif ( 'code' === $m ) {
+				$this->assertSame( 'none' === $d, $unnamed, 'only the code with no data file at all is unnamed otherwise: ' . $state['case'] );
+				$this->assertFalse( $state['file']->left_unknown(), $state['case'] );
+			}
 			if ( in_array( $m, array( 'code_unreadable', 'other_unreadable' ), true ) || ( 'code' === $m && $truth['d_untellable'] ) ) {
 				$this->assertFalse( $said, 'what cannot be told is not gone: ' . $state['case'] );
 				$this->assertSame( $was, $now, 'and nothing is deleted: ' . $state['case'] );
@@ -229,7 +246,7 @@ final class MaintenanceMatrixTest extends TestCase {
 				$this->assertSame( '', $this->held_for_us( $state ), 'said gone, and nothing answers as held for the restore: ' . $state['case'] );
 				++$gone;
 			}
-			$ours = 'legacy' === $m || ( 'code' === $m && in_array( $d, array( 'none', 'form', 'held64', 'held32', 'lapsed' ), true ) );
+			$ours = 'legacy' === $m || ( 'code' === $m && in_array( $d, array( 'none', 'form', 'long', 'dir', 'held64', 'held32', 'lapsed' ), true ) );
 			if ( ! $ours ) {
 				$this->assertSame( $before, MaintenanceStates::digest( $state['site'] . '/' . Maintenance::FILE ), 'a .maintenance that is not this restore\'s is as it was: ' . $state['case'] );
 			} elseif ( ! $truth['d_untellable'] ) {
@@ -241,6 +258,7 @@ final class MaintenanceMatrixTest extends TestCase {
 			$this->assertTrue( $now['loader'], 'the loader is not the take-down\'s to remove: ' . $state['case'] );
 		}
 		$this->assertSame( 56, $gone, 'the control: the states in which it says gone' );
+		$this->assertSame( 3, $left, 'the control: the code beside what is no data file, in each of its three kinds' );
 	}
 
 	public function test_a_take_down_keeps_a_runtime_it_cannot_read_while_another_restores_data_file_stands(): void {

@@ -6,7 +6,13 @@
  * type, and which constants the maintenance file's code defined. With "gate" it waits for that file first (up to ten
  * seconds), so that several of these start their request at once.
  *
- * Usage: php maintenance-child.php <config.json>. Config: abspath, define (name => value), gate.
+ * With "shutdown" it is a request that began before the site was held: it loads the classes "preload" names by the
+ * autoloader "autoload" names (as the plugin, loaded, would have), and requires the maintenance file for the first time
+ * in a shutdown function, as WordPress's fatal error handler does when a request ends; a shutdown function registered
+ * after that one prints the JSON line (so the line says that later shutdown functions still ran).
+ *
+ * Usage: php maintenance-child.php <config.json>. Config: abspath, define (name => value), gate, past_mu, again,
+ * shutdown, autoload, preload.
  *
  * @package WPCheckpoint
  */
@@ -34,6 +40,42 @@ if ( isset( $config['gate'] ) ) {
 		usleep( 1000 );
 		clearstatcache( true, (string) $config['gate'] );
 	}
+}
+if ( ! empty( $config['shutdown'] ) ) {
+	if ( isset( $config['autoload'] ) ) {
+		require (string) $config['autoload'];
+	}
+	foreach ( (array) ( $config['preload'] ?? array() ) as $class ) {
+		if ( ! class_exists( (string) $class ) ) {
+			fwrite( STDERR, "no class {$class}\n" );
+			exit( 2 );
+		}
+	}
+	$upgrading = null;
+	register_shutdown_function(
+		static function (): void {
+			global $upgrading;
+			require ABSPATH . '.maintenance';
+		}
+	);
+	register_shutdown_function(
+		static function (): void {
+			global $upgrading;
+			echo json_encode(
+				array(
+					'later'     => true,
+					'upgrading' => $upgrading,
+					'type'      => gettype( $upgrading ),
+					'entry'     => defined( 'WPCHECKPOINT_WEB_ENTRY' ),
+					'web_entry' => class_exists( 'WPCheckpoint\\Jobs\\WebEntry', false ),
+					'flush'     => defined( 'WPCHECKPOINT_FLUSH_PASS' ),
+					'cron'      => defined( 'DISABLE_WP_CRON' ),
+					'sapi'      => PHP_SAPI,
+				)
+			) . "\n";
+		}
+	);
+	return;
 }
 $upgrading = null;
 ( static function (): void {

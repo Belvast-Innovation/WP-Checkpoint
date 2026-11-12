@@ -263,9 +263,12 @@ final class Maintenance {
 	 * be counted twice; one held at its start whose time comes before it ends would be counted and said at its
 	 * shutdown, with nothing left of it to flush. WPCHECKPOINT_MAINTENANCE_READ is defined at this file's start (a
 	 * reading that dies half way is one too); once it was defined before (a request let through has
-	 * WPCHECKPOINT_FLUSH_PASS defined too) the file only says the data file's time. Nor is a request let through
-	 * that is past its must-use plugins (did_action( 'muplugins_loaded' )): one that began before the site was held
-	 * reads this file for the first time as it ends, and the loader will not run in it any more.
+	 * WPCHECKPOINT_FLUSH_PASS defined too) the file only says the data file's time. Nor does a request that is past
+	 * its must-use plugins (did_action( 'muplugins_loaded' )) run the runtime or get let through: one that began
+	 * before the site was held reads this file for the first time as it ends. The loader will not run in it any more,
+	 * and it may have loaded this plugin: the runtime declares the plugin's classes, and declaring one again is a fatal
+	 * error in WordPress's shutdown function (the shutdown functions after it, the shutdown action among them, would
+	 * not run). The runtime looks for its classes itself as well, before it declares any (Jobs\WebRuntime).
 	 */
 	const CODE =
 		'<?php' . "\n"
@@ -284,7 +287,7 @@ final class Maintenance {
 		. '		if ( ! defined( \'DISABLE_WP_CRON\' ) ) {' . "\n"
 		. '			define( \'DISABLE_WP_CRON\', true );' . "\n"
 		. '		}' . "\n"
-		. '	} elseif ( ! empty( $wpcheckpoint_found[4] ) && empty( $wpcheckpoint_check ) && \'cli\' !== PHP_SAPI && ! ( defined( \'WP_CLI\' ) && WP_CLI ) && $wpcheckpoint_first && ! class_exists( \'WPCheckpoint\\Jobs\\WebEntry\', false ) ) {' . "\n"
+		. '	} elseif ( ! empty( $wpcheckpoint_found[4] ) && empty( $wpcheckpoint_check ) && \'cli\' !== PHP_SAPI && ! ( defined( \'WP_CLI\' ) && WP_CLI ) && $wpcheckpoint_first && ! ( function_exists( \'did_action\' ) && did_action( \'muplugins_loaded\' ) ) && ! class_exists( \'WPCheckpoint\\Jobs\\WebEntry\', false ) ) {' . "\n"
 		. '		$wpcheckpoint_visitor = __DIR__ . \'/.wpcheckpoint-visitor.php\';' . "\n"
 		. '		$wpcheckpoint_lock    = @fopen( $wpcheckpoint_visitor, \'r+\' );' . "\n"
 		. '		$wpcheckpoint_busy    = 0;' . "\n"
@@ -295,7 +298,7 @@ final class Maintenance {
 		. '			$wpcheckpoint_text = @stream_get_contents( $wpcheckpoint_lock );' . "\n"
 		. '			if ( is_string( $wpcheckpoint_text ) && 1 === preg_match( \'/\\A(<\\?php exit; \\?>\\n# (WP Checkpoint restore [0-9a-f]{32})\\n\\{[^\\n]*"flush":\\{"n":)([0-9]{1,9})(,"next":)([0-9]{1,10})(\\}[^\\n]*\\}\\n)\\z/\', $wpcheckpoint_text, $wpcheckpoint_flush ) && $wpcheckpoint_flush[2] === $wpcheckpoint_found[1] ) {' . "\n"
 		. '				$wpcheckpoint_due    = false;' . "\n"
-		. '				$wpcheckpoint_loader = false !== $wpcheckpoint_next && $wpcheckpoint_next <= time() && (int) $wpcheckpoint_flush[5] <= time() && ! ( defined( \'SHORTINIT\' ) && SHORTINIT ) && ! ( function_exists( \'did_action\' ) && did_action( \'muplugins_loaded\' ) ) && in_array( $wpcheckpoint_found[2], array( \'' . self::HELD_VALUES[0] . '\', \'' . self::HELD_VALUES[1] . '\' ), true ) && @file_exists( __DIR__ . \'/.wpcheckpoint-runtime.php\' ) ? @file_get_contents( ( defined( \'WPMU_PLUGIN_DIR\' ) ? WPMU_PLUGIN_DIR : ( defined( \'WP_CONTENT_DIR\' ) ? WP_CONTENT_DIR : __DIR__ . \'/wp-content\' ) . \'/mu-plugins\' ) . \'/!wpcheckpoint-runtime.php\', false, null, 0, 8193 ) : false;' . "\n"
+		. '				$wpcheckpoint_loader = false !== $wpcheckpoint_next && $wpcheckpoint_next <= time() && (int) $wpcheckpoint_flush[5] <= time() && ! ( defined( \'SHORTINIT\' ) && SHORTINIT ) && in_array( $wpcheckpoint_found[2], array( \'' . self::HELD_VALUES[0] . '\', \'' . self::HELD_VALUES[1] . '\' ), true ) && @file_exists( __DIR__ . \'/.wpcheckpoint-runtime.php\' ) ? @file_get_contents( ( defined( \'WPMU_PLUGIN_DIR\' ) ? WPMU_PLUGIN_DIR : ( defined( \'WP_CONTENT_DIR\' ) ? WP_CONTENT_DIR : __DIR__ . \'/wp-content\' ) . \'/mu-plugins\' ) . \'/!wpcheckpoint-runtime.php\', false, null, 0, 8193 ) : false;' . "\n"
 		. '				if ( is_string( $wpcheckpoint_loader ) && in_array( hash( \'sha256\', $wpcheckpoint_loader ), array( \'e1ba77d7c466b93d01a56c5afe2075cc6abfd9ace30c5f96109986b4b8fb0d63\' ), true ) ) {' . "\n"
 		. '					$wpcheckpoint_tries = (int) $wpcheckpoint_flush[3] + 1;' . "\n"
 		. '					$wpcheckpoint_text  = $wpcheckpoint_flush[1] . $wpcheckpoint_tries . $wpcheckpoint_flush[4] . ( $wpcheckpoint_tries >= 3 ? time() + 300 : 0 ) . $wpcheckpoint_flush[6];' . "\n"
@@ -555,6 +558,13 @@ final class Maintenance {
 	private $runtime;
 
 	/**
+	 * Whether the last remove() left what is positively no data file in the data file's place (left_unknown()).
+	 *
+	 * @var bool
+	 */
+	private $left = false;
+
+	/**
 	 * Constructor.
 	 *
 	 * @param string      $dir     Directory the files are in (ABSPATH).
@@ -787,8 +797,10 @@ final class Maintenance {
 
 	/**
 	 * Take this restore's file down: its runtime log first added to the job's log ($merge), then .maintenance when it
-	 * is this restore's (or bare), then the data file when it is this restore's (or of no form) and .maintenance is not
-	 * a code this plugin wrote, then the files of a run without WordPress that name this restore (WEB_FILES, the log
+	 * is this restore's (or bare, or this plugin's code with what is positively no data file in the data file's place:
+	 * that code holds every request with no job to claim it and no time that passes), then the data file when it is
+	 * this restore's and .maintenance is not a code this plugin wrote (what is positively no data file there, a
+	 * directory, a longer file, a file of another form, stays as it is: left_unknown()), then the files of a run without WordPress that name this restore (WEB_FILES, the log
 	 * last). Anything else stays. The take-down does not wait on the log: a $merge that throws (or none given) puts its
 	 * lines in PHP's log instead, redacted (they were masked when written), and the take-down goes on.
 	 *
@@ -799,12 +811,50 @@ final class Maintenance {
 	 * @throws \RuntimeException What $confirm throws to stop; nothing more is deleted then.
 	 */
 	public function remove( $confirm = null, $merge = null ): bool {
-		$state = $this->state();
+		$this->left = false;
+		$state      = $this->state();
 		if ( self::UNKNOWN === $state ) {
 			return false;
 		}
+		if ( self::OTHER === $state && $this->stray() ) {
+			// This plugin's code, and in the data file's place what is positively no data file: the code holds every
+			// request with no restore named and no time that passes. As a bare one, it goes; the other thing stays.
+			$state = self::BARE;
+		}
 		$this->merge_log( $merge );
 		return $this->remove_files( $state, $confirm ) && $this->remove_web_files( $confirm );
+	}
+
+	/**
+	 * Whether .maintenance is this plugin's code (positively) and what stands in the data file's place is positively
+	 * no data file and not a regular file of a form's length either (a directory, a longer file): what state() calls
+	 * OTHER, and holds the site as a bare code does.
+	 *
+	 * @return bool
+	 */
+	private function stray(): bool {
+		return true === self::code_in( $this->dir ) && 'not' === self::data_at( $this->data_path() )[0];
+	}
+
+	/**
+	 * Whether .maintenance is this plugin's code with no restore named next to it: BARE, or the code with what is
+	 * positively no data file in the data file's place. Every request is held by it, and no job can be found by it.
+	 *
+	 * @return bool
+	 */
+	public function unnamed(): bool {
+		$state = $this->state();
+		return self::BARE === $state || ( self::OTHER === $state && $this->stray() );
+	}
+
+	/**
+	 * Whether the last remove() left in the data file's place something that is positively no data file (a
+	 * directory, a longer file, a file of another form): it is nobody's this plugin knows, and stays as it is.
+	 *
+	 * @return bool
+	 */
+	public function left_unknown(): bool {
+		return $this->left;
 	}
 
 	/**
@@ -964,10 +1014,13 @@ final class Maintenance {
 		}
 		$look = self::look( $this->data_path() );
 		$data = self::parse( $look );
-		if ( 'file' === $look[0] && ( null === $data || $this->mark === $data['mark'] ) ) {
+		if ( 'file' === $look[0] && null !== $data && $this->mark === $data['mark'] ) {
 			$gone = Deleter::delete_maintenance_file( $this->dir, self::DATA, $confirm );
 			HostFunctions::opcache_invalidate( $this->data_path() );
 			return $gone;
+		}
+		if ( 'not' === self::data_at( $this->data_path() )[0] ) {
+			$this->left = true; // Positively no data file: not this restore's, nor anyone's this plugin knows.
 		}
 		// What cannot be told (it cannot be read; a link, which the codes read through) may be this restore's: not gone.
 		return self::UNKNOWN !== $look[0] && ( self::OTHER !== $look[0] || self::plain( $this->data_path() ) );
