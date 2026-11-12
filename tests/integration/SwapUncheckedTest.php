@@ -256,6 +256,26 @@ final class SwapUncheckedTest extends SwapTestCase {
 		$this->assertSame( array(), $this->maintenance_files(), 'its own file goes with the cancel' );
 	}
 
+	public function test_a_cancel_leaves_the_code_beside_a_directory_in_the_data_files_place_when_it_never_held_the_site(): void {
+		$job  = $this->at_swap();
+		$data = $this->abspath . '/' . Maintenance::DATA;
+		file_put_contents( $this->abspath . '/.maintenance', Maintenance::CODE );
+		mkdir( $data ); // What is no data file: the code names no restore.
+		try {
+			$result = $this->cli_tick( $job );
+			$this->assertSame( TickResult::WAITING, $result->status, 'the control: the swap waits for what is in its place: ' . $result->message );
+			$this->assertNotSame( '', (string) ( Plugin::instance()->jobs()->find( $job->id )->cursor['mark'] ?? '' ), 'the control: its mark is recorded (the cleanup looks)' );
+			Plugin::instance()->job_actions()->cancel( $job->id );
+			$this->assertSame( Job::CANCELLED, Plugin::instance()->jobs()->find( $job->id )->status );
+			clearstatcache();
+			$this->assertSame( Maintenance::CODE, file_get_contents( $this->abspath . '/.maintenance' ), 'not this restore\'s to take down: it never held the site' );
+			$this->assertDirectoryExists( $data );
+		} finally {
+			\WPCheckpoint\Tests\Fixtures\Sandbox::remove( $data );
+			$this->remove_maintenance();
+		}
+	}
+
 	public function test_the_policy_undo_puts_the_site_back_in_maintenance_mode_without_letting_it_out(): void {
 		$before = $this->site();
 		$job    = $this->at_swap( array( 'policy' => array( 'unverified' => 'undo' ) ) );
