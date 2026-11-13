@@ -36,7 +36,8 @@ final class ContentLeftovers {
 	 * out: whether they are out of date cannot be told from a site that never made them).
 	 */
 	const MAY_BE_ABSENT = array(
-		'upgrade' => 'WordPress makes it the first time it downloads a package: a new test site (CI\'s) has none',
+		'upgrade'    => 'WordPress makes it the first time it downloads a package: a new test site (CI\'s) has none',
+		'mu-plugins' => 'made by the first test that needs it (a restore\'s preflight, the loader\'s tests): a new test site (CI\'s) has none, and in a random order this check may come before any of them',
 	);
 
 	/**

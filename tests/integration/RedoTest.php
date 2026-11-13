@@ -49,8 +49,20 @@ final class RedoTest extends SwapTestCase {
 		$this->evidence_before = array_column( Residue::scan_evidence( Plugin::instance()->directories()->base() ), 'path' );
 	}
 
+	/** @var array<string, true> The options write_state() committed on the site (removed at the test's end). */
+	private $state_written = array();
+
 	public function tear_down(): void {
 		global $wpdb;
+		// write_state() commits its row, and a swap or an undo may carry it into the table that ends up in place: left
+		// there, it is "the site before the restore" of whichever test runs next.
+		foreach ( array_keys( $this->state_written ) as $name ) {
+			$wpdb->query( $wpdb->prepare( "DELETE FROM `{$wpdb->base_prefix}options` WHERE option_name = %s", $name ) );
+		}
+		if ( array() !== $this->state_written ) {
+			$wpdb->query( 'COMMIT' );
+		}
+		$this->state_written = array();
 		$base = Plugin::instance()->directories()->base();
 		if ( '' !== $base ) {
 			foreach ( Residue::scan_evidence( $base ) as $entry ) {
@@ -194,6 +206,7 @@ final class RedoTest extends SwapTestCase {
 		$wpdb->query( $wpdb->prepare( "DELETE FROM `{$table}` WHERE option_name = %s", $name ) );
 		$wpdb->query( $wpdb->prepare( "INSERT INTO `{$table}` (option_name, option_value, autoload) VALUES (%s, %s, 'no')", $name, $value ) );
 		$wpdb->query( 'COMMIT' );
+		$this->state_written[ $name ] = true;
 	}
 
 	private function state( string $name = StoredNames::DELETE_DATA ): ?string {
