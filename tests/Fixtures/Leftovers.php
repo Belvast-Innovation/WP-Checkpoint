@@ -404,9 +404,18 @@ final class Leftovers implements TestListener {
 		}
 		$start = (array) array_pop( $this->suites );
 		if ( array() === $this->suites && ! $this->given && array() !== OwnOptions::summary() ) {
-			$lines = array();
+			// By row, with how many tests left it (most leave the same few: the schema's version, a transient), and the
+			// first of them by name.
+			$by = array();
 			foreach ( OwnOptions::summary() as $name => $diffs ) {
-				$lines[] = $name . ': ' . implode( ', ', $diffs );
+				foreach ( $diffs as $diff ) {
+					$by[ $diff ][] = $name;
+				}
+			}
+			ksort( $by );
+			$lines = array();
+			foreach ( $by as $diff => $names ) {
+				$lines[] = sprintf( '%s: %d test(s), first %s', $diff, count( $names ), implode( '; ', array_slice( $names, 0, 2 ) ) );
 			}
 			$this->say( "\nOption rows of this plugin that tests left committed (put back after each):\n  " . implode( "\n  ", $lines ) . "\n" );
 		}
