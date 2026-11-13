@@ -191,14 +191,34 @@ final class StorageDirs {
 	}
 
 	/**
-	 * Remove the storage directories that are there now and were not in $before (listing() then), other than the
-	 * stored one: registered with the Deleter for this deletion only (one may have lost its owner marker).
+	 * Remove the storage directories a test made: those there now that were not in $before (listing() then) and are
+	 * not the one the run settled for the test (Leftovers::before_run(): a test's listing() leaves the stored one out,
+	 * so that after the test deleted the state the settled directory would count as made by it). The one the stored
+	 * state names goes too when the test made it, with the state: a state the test wrote and left committed (its
+	 * deletion rolled back with the test's transaction) names a directory of the test's, and the tests after it would
+	 * read it. Registered with the Deleter for this deletion only (one may have lost its owner marker).
 	 *
 	 * @param string[] $before listing() at the start.
 	 * @return void
 	 */
 	public static function remove_made_since( array $before ): void {
-		self::remove( array_values( array_diff( self::listing(), $before ) ) );
+		global $wpdb;
+		if ( ! defined( 'WP_CONTENT_DIR' ) ) {
+			return;
+		}
+		$all    = glob( WP_CONTENT_DIR . '/' . Directories::DIR_PREFIX . '*', GLOB_ONLYDIR ) ?: array();
+		$made   = array_values( array_diff( $all, $before, Leftovers::before_run() ) );
+		$stored = self::stored_path();
+		if ( '' !== $stored && in_array( $stored, $made, true ) ) {
+			if ( is_multisite() ) {
+				$wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->sitemeta} WHERE meta_key = %s AND site_id = %d", Directories::OPTION, get_current_network_id() ) );
+			} else {
+				$wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->options} WHERE option_name = %s", Directories::OPTION ) );
+			}
+			$wpdb->query( 'COMMIT' );
+			wp_cache_flush();
+		}
+		self::remove( $made );
 	}
 
 	/**

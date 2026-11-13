@@ -257,6 +257,35 @@ final class LeftoversCheckTest extends WP_UnitTestCase {
 		$this->assertSame( $found, $dirs::stored_row() );
 	}
 
+	public function test_removing_what_a_test_made_keeps_the_settled_directory_and_takes_the_state_the_test_left(): void {
+		$dirs   = '\\WPCheckpoint\\Tests\\Fixtures\\StorageDirs';
+		$found  = $dirs::stored_row();
+		$this->assertNotNull( $found, 'the run settled a state before this test' );
+		$own    = $dirs::path_in( $found['value'] );
+		$before = $dirs::listing(); // As a test notes it: without the stored one.
+		$this->assertNotContains( $own, $before );
+		$made   = WP_CONTENT_DIR . '/wp-checkpoint-' . bin2hex( random_bytes( 6 ) );
+		$left   = $found;
+		$left['value'] = str_replace( basename( $own ), basename( $made ), $found['value'] );
+		try {
+			// A test that made a directory of its own and left its state committed.
+			$this->assertTrue( mkdir( $made ) );
+			$dirs::put_back( $left );
+			$this->assertSame( $made, $dirs::stored_path(), 'the state the test left is the stored one' );
+			$dirs::remove_made_since( $before );
+			clearstatcache( true );
+			$this->assertDirectoryDoesNotExist( $made );
+			$this->assertNull( $dirs::stored_row(), 'the state that named it' );
+			$this->assertDirectoryExists( $own, 'the directory the run settled' );
+		} finally {
+			$dirs::put_back( $found );
+			if ( is_dir( $made ) ) {
+				$dirs::remove( array( $made ) );
+			}
+		}
+		$this->assertSame( $found, $dirs::stored_row() );
+	}
+
 	public function test_it_sees_an_entry_of_the_uploads_directory_and_removes_it_only_under_a_tests_name(): void {
 		$dir    = \WPCheckpoint\Tests\Fixtures\UploadsLeftovers::dir();
 		$tests  = $dir . '/wpcexport-leftovercheck';
