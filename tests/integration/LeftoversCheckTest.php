@@ -46,6 +46,36 @@ final class LeftoversCheckTest extends WP_UnitTestCase {
 		$this->assertDirectoryDoesNotExist( $dir );
 	}
 
+	public function test_the_plugins_option_rows_a_test_committed_are_put_back_as_they_were(): void {
+		global $wpdb;
+		$name   = 'wpcheckpoint_leftover_check';
+		$before = \WPCheckpoint\Tests\Fixtures\OwnOptions::note();
+		$this->assertArrayNotHasKey( 'o:' . $name, $before, 'the control: not there before' );
+		// Committed, as a row is that a test wrote before a statement that commits.
+		$wpdb->query( $wpdb->prepare( "INSERT INTO `{$wpdb->base_prefix}options` (option_name, option_value, autoload) VALUES (%s, 'left', 'no')", $name ) );
+		$expect = array( 'added ' . $name );
+		if ( is_multisite() ) {
+			$wpdb->query( $wpdb->prepare( "INSERT INTO {$wpdb->sitemeta} (site_id, meta_key, meta_value) VALUES (%d, %s, 'left')", get_current_network_id(), $name . '_network' ) );
+			$expect[] = 'added ' . $name . '_network';
+		}
+		$wpdb->query( 'COMMIT' );
+		try {
+			$this->assertSame( $expect, \WPCheckpoint\Tests\Fixtures\OwnOptions::differences( $before, \WPCheckpoint\Tests\Fixtures\OwnOptions::note() ), 'the control: the rows are read' );
+			$this->assertSame( $expect, \WPCheckpoint\Tests\Fixtures\OwnOptions::put_back( $before, 'the check of the put-back (LeftoversCheckTest)' ) );
+			$this->assertSame( $before, \WPCheckpoint\Tests\Fixtures\OwnOptions::note(), 'as they were' );
+			$this->assertSame( '0', (string) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM `{$wpdb->base_prefix}options` WHERE option_name = %s", $name ) ) );
+			$this->assertSame( array(), \WPCheckpoint\Tests\Fixtures\OwnOptions::put_back( $before, 'nothing to put back' ), 'and nothing more to put back' );
+			$this->assertArrayHasKey( 'the check of the put-back (LeftoversCheckTest)', \WPCheckpoint\Tests\Fixtures\OwnOptions::summary(), 'said when the run ends' );
+			$this->assertArrayNotHasKey( 'nothing to put back', \WPCheckpoint\Tests\Fixtures\OwnOptions::summary() );
+		} finally {
+			$wpdb->query( $wpdb->prepare( "DELETE FROM `{$wpdb->base_prefix}options` WHERE option_name = %s", $name ) );
+			if ( is_multisite() ) {
+				$wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->sitemeta} WHERE meta_key = %s", $name . '_network' ) );
+			}
+			$wpdb->query( 'COMMIT' );
+		}
+	}
+
 	public function test_it_sees_and_removes_a_real_sites_tables_and_on_a_network_its_row(): void {
 		global $wpdb;
 		// On the connection itself: through wpdb a test's CREATE TABLE becomes a temporary table, and its rows are rolled

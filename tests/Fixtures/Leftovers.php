@@ -140,6 +140,9 @@ final class Leftovers implements TestListener {
 	/** @var array{value: string, autoload: string}|null The stored storage state's row as the running test found it (StorageDirs::settle()). */
 	private $state = null;
 
+	/** @var array<string, array{0: string, 1: string}>|null The plugin's own option rows as the running test found them (OwnOptions::note()). */
+	private $options = null;
+
 	/** @var TestResult|null The run's result, for failures of a class or of the run. */
 	private $result = null;
 
@@ -399,6 +402,13 @@ final class Leftovers implements TestListener {
 			return;
 		}
 		$start = (array) array_pop( $this->suites );
+		if ( array() === $this->suites && ! $this->given && array() !== OwnOptions::summary() ) {
+			$lines = array();
+			foreach ( OwnOptions::summary() as $name => $diffs ) {
+				$lines[] = $name . ': ' . implode( ', ', $diffs );
+			}
+			$this->say( "\nOption rows of this plugin that tests left committed (put back after each):\n  " . implode( "\n  ", $lines ) . "\n" );
+		}
 		$gone  = $this->gone( $now );
 		if ( array() !== $gone ) {
 			$this->fail_as( 'removals of ' . $suite->getName(), sprintf( "%s removed what it did not create (there when the run started):\n  %s", $suite->getName(), implode( "\n  ", $gone ) ) );
@@ -420,10 +430,12 @@ final class Leftovers implements TestListener {
 		if ( $test instanceof TestCase && null !== $test->getTestResultObject() ) {
 			$this->result = $test->getTestResultObject();
 		}
-		$this->state = null;
+		$this->state   = null;
+		$this->options = null;
 		if ( ! $this->given && 'integration' === getenv( 'WPCHECKPOINT_TEST_SUITE' ) && isset( $GLOBALS['wpdb'] ) ) {
 			// The plugin's own storage directory, there and stored before the test's transaction starts.
-			$this->state = StorageDirs::settle();
+			$this->state   = StorageDirs::settle();
+			$this->options = OwnOptions::note(); // The plugin's own option rows as the test finds them.
 		}
 		$this->before = $this->now();
 		if ( null !== $this->before && ! $this->given && $test instanceof TestCase ) {
@@ -447,6 +459,11 @@ final class Leftovers implements TestListener {
 		if ( null !== $this->state ) {
 			StorageDirs::put_back( $this->state ); // The stored state as the test found it.
 			$this->state = null;
+		}
+		if ( null !== $this->options ) {
+			// Put back, and said when the run ends (not a failure of the test: see OwnOptions).
+			OwnOptions::put_back( $this->options, $test instanceof TestCase ? get_class( $test ) . '::' . $test->getName( false ) : get_class( $test ) );
+			$this->options = null;
 		}
 		$now          = $this->now();
 		if ( null === $before || null === $now ) {
