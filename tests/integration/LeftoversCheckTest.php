@@ -330,6 +330,7 @@ final class LeftoversCheckTest extends WP_UnitTestCase {
 			if ( null !== $settled && $dirs::path_in( $settled['value'] ) !== $dirs::path_in( $found['value'] ) ) {
 				$dirs::remove( array_filter( array( $dirs::path_in( $settled['value'] ) ), 'is_dir' ) );
 			}
+			\WPCheckpoint\Plugin::instance()->reset_directories(); // The plugin's own no longer names the directory removed.
 		}
 		$this->assertSame( $found, $dirs::stored_row() );
 	}

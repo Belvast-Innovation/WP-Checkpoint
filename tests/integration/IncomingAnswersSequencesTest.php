@@ -34,6 +34,7 @@ final class IncomingAnswersSequencesTest extends RestoreTestCase {
 
 	public function tear_down(): void {
 		global $wpdb;
+		$wpdb->query( 'ROLLBACK' ); // What else the test left uncommitted is not committed with the removal.
 		foreach ( $this->meta as $id ) {
 			$wpdb->delete( $wpdb->usermeta, array( 'umeta_id' => $id ) );
 		}

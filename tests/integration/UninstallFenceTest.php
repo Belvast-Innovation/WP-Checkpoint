@@ -29,7 +29,7 @@ final class UninstallFenceTest extends SwapTestCase {
 
 	public function tear_down(): void {
 		global $wpdb;
-		$wpdb->query( 'COMMIT' );
+		$wpdb->query( 'ROLLBACK' ); // What the test left uncommitted is not committed with what follows.
 		UninstallFence::create(); // The table and its row, made again if a test dropped them.
 		UninstallFence::open();
 		UninstallSetting::save( false ); // A setting a test committed does not delete a later test's data.

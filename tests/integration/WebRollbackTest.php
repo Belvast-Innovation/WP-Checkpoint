@@ -29,6 +29,7 @@ final class WebRollbackTest extends SwapTestCase {
 	public function tear_down(): void {
 		global $wpdb;
 		if ( $this->own_written ) {
+			$wpdb->query( 'ROLLBACK' ); // What else the test left uncommitted is not committed with the removal.
 			$wpdb->query( $wpdb->prepare( "DELETE FROM `{$wpdb->base_prefix}options` WHERE option_name = %s", StoredNames::DELETE_DATA ) );
 			$wpdb->query( 'COMMIT' );
 			$this->own_written = false;

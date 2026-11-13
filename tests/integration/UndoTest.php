@@ -37,10 +37,11 @@ final class UndoTest extends SwapTestCase {
 		global $wpdb;
 		// write_state() commits its row, and a swap or an undo may carry it into the table that ends up in place: left
 		// there, it is "the site before the restore" of whichever test runs next.
-		foreach ( array_keys( $this->state_written ) as $name ) {
-			$wpdb->query( $wpdb->prepare( "DELETE FROM `{$wpdb->base_prefix}options` WHERE option_name = %s", $name ) );
-		}
 		if ( array() !== $this->state_written ) {
+			$wpdb->query( 'ROLLBACK' ); // What else the test left uncommitted is not committed with the removal.
+			foreach ( array_keys( $this->state_written ) as $name ) {
+				$wpdb->query( $wpdb->prepare( "DELETE FROM `{$wpdb->base_prefix}options` WHERE option_name = %s", $name ) );
+			}
 			$wpdb->query( 'COMMIT' );
 		}
 		$this->state_written = array();
