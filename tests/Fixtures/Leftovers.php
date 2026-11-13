@@ -471,6 +471,7 @@ final class Leftovers implements TestListener {
 		}
 		$before       = $this->before;
 		$this->before = null;
+		$found = $this->state;
 		if ( null !== $this->state ) {
 			StorageDirs::put_back( $this->state ); // The stored state as the test found it.
 			$this->state = null;
@@ -494,7 +495,7 @@ final class Leftovers implements TestListener {
 		}
 		if ( null !== $this->result ) {
 			// No time of its own: the test's was counted when it ended.
-			$this->result->addFailure( $test, new AssertionFailedError( "The test left behind (removed now):\n  " . implode( "\n  ", $left ) ), 0.0 );
+			$this->result->addFailure( $test, new AssertionFailedError( "The test left behind (removed now):\n  " . implode( "\n  ", $left ) . ( '' === ( $told = StorageDirs::evidence( $found, $left ) ) ? '' : "\nWhat was there:\n  " . $told ) ), 0.0 );
 		}
 		$this->remove( $left );
 	}

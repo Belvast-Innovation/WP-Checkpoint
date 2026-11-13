@@ -134,6 +134,42 @@ final class StorageDirs {
 	}
 
 	/**
+	 * What a failure over a storage directory left behind is told with: the stored state the test found and the one
+	 * there now, and of the directory the state named and of each one left, whether it is there, its owner marker and
+	 * the end of its storage log. Read before anything is removed.
+	 *
+	 * @param array{value: string, autoload: string}|null $row  settle()'s.
+	 * @param string[]                                    $left What the test left ("storage:<path>" among it).
+	 * @return string '' when no storage directory is among it.
+	 */
+	public static function evidence( ?array $row, array $left ): string {
+		$dirs = array();
+		foreach ( $left as $item ) {
+			if ( 0 === strpos( $item, 'storage:' ) ) {
+				$dirs[] = substr( $item, 8 );
+			}
+		}
+		if ( array() === $dirs ) {
+			return '';
+		}
+		$now   = self::stored_row();
+		$lines = array(
+			'stored state before the test: ' . ( null === $row ? '(no row)' : $row['value'] ),
+			'stored state now: ' . ( null === $now ? '(no row)' : ( $now === $row ? '(the same)' : $now['value'] ) ),
+		);
+		$named = null === $row ? '' : self::path_in( $row['value'] );
+		foreach ( array_merge( '' === $named ? array() : array( $named ), $dirs ) as $dir ) {
+			clearstatcache( true );
+			$marker  = $dir . '/' . \WPCheckpoint\Support\OwnerMarker::FILENAME;
+			$log     = $dir . '/logs/storage.log';
+			$lines[] = $dir . ( $dir === $named ? ' (named by the state before)' : ' (left)' ) . ': ' . ( is_dir( $dir ) ? 'a directory' : 'not a directory' );
+			$lines[] = '  marker: ' . ( is_file( $marker ) ? trim( (string) file_get_contents( $marker ) ) : '(none)' );
+			$lines[] = '  storage log, last lines: ' . ( is_file( $log ) ? "\n    " . implode( "\n    ", array_slice( (array) file( $log, FILE_IGNORE_NEW_LINES ), -6 ) ) : '(none)' );
+		}
+		return implode( "\n  ", $lines );
+	}
+
+	/**
 	 * The "path" of a serialized state, '' when it has none; read by the string's length, nothing unserialized.
 	 *
 	 * @param string $raw Serialized state.
