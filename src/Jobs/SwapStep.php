@@ -14,6 +14,7 @@ use WPCheckpoint\Restore\DeadlineQueries;
 use WPCheckpoint\Restore\ImportSession;
 use WPCheckpoint\Restore\IncomingTables;
 use WPCheckpoint\Restore\Ledger;
+use WPCheckpoint\Restore\Loader;
 use WPCheckpoint\Restore\Maintenance;
 use WPCheckpoint\Restore\SelfCheck;
 use WPCheckpoint\Restore\Queries;
@@ -177,6 +178,20 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	const NETWORK_RECORD = 'network_id';
 
 	/**
+	 * Recorded on the job (JobContext::record()) while the swap's must-use plugin (Restore\Loader) could not be put up:
+	 * why (Loader::MISSING, UNWRITABLE, TAKEN, UNKNOWN), '' once it could. Without it, a request cannot stand in for a
+	 * maintenance file that was deleted, and none is let through to flush the object cache after a put-back.
+	 */
+	const FALLBACK_RECORD = 'no_loader';
+
+	/**
+	 * Recorded on the job while the user WP-CLI runs as is not the owner of the WordPress directory (true; false once
+	 * it is): the maintenance file's code runs the runtime only as the visitor file's owner, so no visitor's request
+	 * puts the site back. Never the users' names: the terminal alone is told those (SwapHost::say()).
+	 */
+	const OWNER_RECORD = 'owner_differs';
+
+	/**
 	 * In a rollback's cursor: nothing was swapped when it was turned back (decided only then; roll_back()).
 	 */
 	const NOTHING_SWAPPED = 'nothing_swapped';
@@ -308,6 +323,11 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	const STOOD_DOWN = 'The swap stopped before it renamed anything, and took its maintenance file down: the site is as it was.';
 
 	/**
+	 * Said when the maintenance file was taken down beside what is no data file (Maintenance::left_unknown()).
+	 */
+	const LEFT_UNKNOWN = 'What stands in place of the maintenance file\'s data file is not a data file of this plugin: it was left as it is, and the maintenance file was taken down.';
+
+	/**
 	 * Phases in which the site is being changed (or put back), and in which it is swapped.
 	 */
 	const CHANGING = array( 'enter', 'dirs', 'carry', 'rename', 'rollback', 'reverse', 'restored' );
@@ -333,7 +353,12 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * self-check row: true passed; a string, the id of the check that failed (CHECKS), reverses the swap; an array
 	 * is SiteCheck's result), "http" function( string $url, array $headers ): array (in place of http(), each request
 	 * of the checks), "urls" function(): array (in place of check_urls(), where the checks go), "left" function(
-	 * string $dir, callable $lease ): array (in place of JobActions::release_left()).
+	 * string $dir, callable $lease ): array (in place of JobActions::release_left()), "mu_dir" (the must-use plugins
+	 * directory, in place of the site's; with "abspath" given and no "mu_dir", there is none: a stand-in for the
+	 * WordPress directory never has the real site's must-use plugins written to), "users" function(): array{0:
+	 * int|null, 1: int|null, 2: string, 3: string} (the user the process runs as and the WordPress directory's owner,
+	 * then their names, in place of asking the system), "say" function( string $text ): void (in place of the
+	 * terminal).
 	 *
 	 * @var array<string, mixed>
 	 */
@@ -595,6 +620,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			}
 			if ( 'done' === $phase ) {
 				// Recorded as swapped; the maintenance file comes down last (again, if a run died before).
+				$this->loader_out( $context, $db, $cursor );
 				$this->take_down( $context, $cursor );
 				return $this->completed( $context );
 			}
@@ -714,8 +740,12 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			// This restore's file only: a bare one (no data file names its restore) is the holder's to take down, and
 			// this job's once it was recorded as untouched after it held the site (its file put up, then let go).
 			$own = in_array( (string) ( $cursor['phase'] ?? '' ), array( 'reverted', 'rejudged' ), true );
-			if ( ( $own || Maintenance::BARE !== $file->state() ) && ! $file->remove( null, $this->log_merge( $context ) ) ) {
+			$this->loader_down( $context, $this->mu_dir(), null );
+			if ( ( $own || ! $file->unnamed() ) && ! $file->remove( null, $this->log_merge( $context ) ) ) {
 				$context->logger()->warning( 'The restore\'s maintenance file could not be taken down' );
+			}
+			if ( $file->left_unknown() ) {
+				$context->logger()->warning( self::LEFT_UNKNOWN );
 			}
 		} catch ( NotHere $e ) {
 			throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged: a run without WordPress leaves the job as it is (Runner).
@@ -1622,13 +1652,17 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			$this->unit_done( $context, $back, $started );
 		}
 		$this->at( 'dirs_back' );
+		$this->loader_aside( $context, $entries['dirs'] );
 		// What requests cached of the half-swapped site (a persistent cache outlives this process). A cache that
 		// cannot be flushed now is waited out: the site is back, and the maintenance file stays held until then.
 		if ( ! $this->host->can_flush() && ! isset( $this->parts['flush'] ) ) {
 			if ( empty( $cursor[ self::NOTHING_SWAPPED ] ) ) {
 				// Here the cache cannot be flushed (a run without WordPress): stopped before the flush, the file held and
-				// nothing recorded, for WP-CLI to flush and end it.
-				throw new SwapPause( StepResult::leave( 'The site is put back, but its object cache can only be flushed by WP-CLI: the maintenance file stays until then.' ) );
+				// nothing recorded, for WP-CLI to flush and end it. Whoever made the run is told first (a request's run
+				// records it for the maintenance file's code, which then lets a request through to the loader's flush).
+				$this->host->await_flush();
+				$this->at( 'flush_awaited' );
+				throw new SwapPause( StepResult::leave( 'The site is put back, but its object cache cannot be flushed from here: the maintenance file stays until WP-CLI flushes it, or a request let through to the restore\'s must-use plugin does.' ) );
 			}
 			$context->logger()->info( 'Nothing of the restored site was swapped in: the object cache is not flushed' );
 		} else {
@@ -3125,6 +3159,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 					);
 					$context->checkpoint( $cursor, 100, __( 'The restored site is in place', 'wp-checkpoint' ) );
 					$this->at( 'done_recorded' );
+					$this->loader_out( $context, $db, $cursor );
 					$this->take_down( $context, $cursor );
 					$this->at( 'exited' );
 					return $this->completed( $context );
@@ -3665,8 +3700,11 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 * Let this restore's maintenance file lapse again once the direction is recorded ("committed" or "restored",
 	 * while it was held): it is rewritten with the time, so a run that dies before it takes the file down leaves a
 	 * file that lapses after WordPress's ten minutes, not one held for good. Someone else's file in its place is
-	 * left, and none is made where there is none. What cannot be told or written is waited out: until then the job
-	 * is recorded as holding the site (changing it, or swapped), and every WP-CLI command of the plugin says so.
+	 * left, and none is made where there is none; a held data file left without its .maintenance is rewritten alone
+	 * (Maintenance::let_go()), so the restore's must-use plugin no longer answers for it: what answers 503 has a
+	 * job a run can take behind it, or a time that lapses. What cannot be told (a file that cannot be read now is not
+	 * taken for none) or written is said in the job's log and waited out: until then the job is recorded as holding the
+	 * site (changing it, or swapped), and every WP-CLI command of the plugin says so.
 	 *
 	 * @param JobContext  $context Context.
 	 * @param Maintenance $file    The file.
@@ -3675,15 +3713,17 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	 */
 	private function release( JobContext $context, Maintenance $file ): void {
 		$state = $file->state();
-		if ( Maintenance::NONE === $state ) {
-			return; // None of ours: nothing to let go, and none is made.
-		}
 		if ( Maintenance::OTHER === $state ) {
 			$context->logger()->warning( 'Another maintenance file is in place of this restore\'s; it is left as it is' );
-			return;
 		}
 		try {
-			$file->put( $this->now(), array( $context, 'confirm_lease' ) );
+			// None of ours in .maintenance's place: none is made, and its held data file with no code of the plugin's to
+			// read it (.maintenance deleted, or someone else's in its place, which its own end deletes) is let go all the
+			// same: the restore's must-use plugin answers for it while it is held, and after this point no run without
+			// WordPress takes the job to take it down.
+			if ( Maintenance::ALONE === $file->let_go( $this->now(), array( $context, 'confirm_lease' ) ) ) {
+				$context->logger()->info( 'No maintenance file of this restore\'s was in place; its data file was let go' );
+			}
 		} catch ( LockLost $e ) {
 			throw $e;
 		} catch ( StaleJob $e ) {
@@ -3691,6 +3731,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		} catch ( NotHere $e ) {
 			throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged: a run without WordPress leaves the job as it is (Runner).
 		} catch ( \Throwable $e ) {
+			$context->logger()->warning( 'The maintenance file could not be let go yet; the restore waits and tries again', array( 'error' => $e->getMessage() ) );
 			throw new TransientFailure( 'The maintenance file could not be let go yet: ' . $e->getMessage() );
 		}
 	}
@@ -3855,9 +3896,14 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			$this->at( 'take_down' ); // Right before each file goes (tests: a run killed between two of them).
 			$context->confirm_lease();
 		};
+		// The loader first: while the maintenance file stands, nothing is missed without it.
+		$this->loader_down( $context, $this->mu_dir(), $confirm );
 		$removed = isset( $this->parts['remove'] ) ? (bool) call_user_func( $this->parts['remove'], $file, $confirm ) : $file->remove( $confirm, $this->log_merge( $context ) );
 		if ( ! $removed ) {
 			throw new TransientFailure( 'The maintenance file could not be taken down yet.' );
+		}
+		if ( $file->left_unknown() ) {
+			$context->logger()->warning( self::LEFT_UNKNOWN );
 		}
 	}
 
@@ -3909,7 +3955,193 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		$cursor['log'] = true;
 		$context->checkpoint( $cursor, 20, __( 'Swapping in the restored site', 'wp-checkpoint' ) );
 		$this->at( 'log_recorded' );
+		$why = Loader::put( $this->mu_dir(), array( $context, 'confirm_lease' ) );
+		$this->at( 'loader_written' );
+		$this->no_fallback( $context, $why );
+		$cursor['loader'] = '' === $why;
+		$context->checkpoint( $cursor, 20, __( 'Swapping in the restored site', 'wp-checkpoint' ) );
+		$this->at( 'loader_recorded' );
+		$this->owner_differs( $context, $dir );
 		return new Maintenance( $dir, $mark, $cursor['runtime'] );
+	}
+
+	/**
+	 * The must-use plugins directory the loader goes into ('' for none): the site's (SwapHost), a test's ("mu_dir"),
+	 * and none where a test gives a stand-in for the WordPress directory without one.
+	 *
+	 * @return string
+	 */
+	private function mu_dir(): string {
+		if ( isset( $this->parts['mu_dir'] ) ) {
+			return (string) $this->parts['mu_dir'];
+		}
+		return isset( $this->parts['abspath'] ) ? '' : $this->host->mu_dir();
+	}
+
+	/**
+	 * Whether the loader could be put up, recorded on the job (FALLBACK_RECORD: job status says it), and, when it could
+	 * not, said in the job's log and at the terminal. The swap goes on either way: the preflight had put a file there
+	 * (LoaderProbe), so the directory changed since; without the loader only WP-CLI flushes after a put-back, and
+	 * nothing stands in for a maintenance file that is deleted.
+	 *
+	 * @param JobContext $context Context.
+	 * @param string     $why     Loader::put()'s answer ('' when the loader is there).
+	 * @return void
+	 */
+	private function no_fallback( JobContext $context, string $why ): void {
+		$before = $context->options()['recorded'][ self::FALLBACK_RECORD ] ?? '';
+		if ( $before !== $why ) {
+			$context->record( self::FALLBACK_RECORD, $why );
+		}
+		if ( '' === $why ) {
+			return;
+		}
+		$context->logger()->warning( self::no_fallback_text( $why ) );
+		$this->say( self::no_fallback_text( $why ) );
+	}
+
+	/**
+	 * What is said when the loader could not be put up.
+	 *
+	 * @param string $why Loader::MISSING, UNWRITABLE, TAKEN or UNKNOWN.
+	 * @return string
+	 */
+	public static function no_fallback_text( string $why ): string {
+		$reasons = array(
+			Loader::MISSING    => 'the must-use plugins directory is no longer there',
+			Loader::UNWRITABLE => 'a file can no longer be written into the must-use plugins directory',
+			Loader::TAKEN      => 'another file has the name of the restore\'s must-use plugin',
+		);
+		return sprintf( 'The fallback for visitors\' requests is not available for this restore: %s. The restore goes on. Should it stop half way, only WP-CLI flushes the object cache after the site is put back, and nothing stands in for the maintenance file if it is deleted meanwhile.', $reasons[ $why ] ?? 'what is in the must-use plugins directory cannot be told' );
+	}
+
+	/**
+	 * Under WP-CLI, whether the user it runs as is the owner of the WordPress directory, where the system tells both:
+	 * the maintenance file's code runs the runtime only as the visitor file's owner (this user's), so with another
+	 * user's web server no visitor's request puts a half-made swap back. Recorded on the job (OWNER_RECORD) and said in
+	 * its log, without the users' names; the terminal alone is told those. The swap goes on.
+	 *
+	 * @param JobContext $context Context.
+	 * @param string     $dir     The WordPress directory.
+	 * @return void
+	 */
+	private function owner_differs( JobContext $context, string $dir ): void {
+		if ( ! $context->is_cli() ) {
+			return;
+		}
+		$users   = isset( $this->parts['users'] ) ? (array) call_user_func( $this->parts['users'] ) : HostFunctions::users_of( $dir );
+		$differs = is_int( $users[0] ?? null ) && is_int( $users[1] ?? null ) && $users[0] !== $users[1];
+		if ( (bool) ( $context->options()['recorded'][ self::OWNER_RECORD ] ?? false ) !== $differs ) {
+			$context->record( self::OWNER_RECORD, $differs );
+		}
+		if ( ! $differs ) {
+			return;
+		}
+		$context->logger()->warning( self::OWNER_TEXT );
+		$runs = (string) ( $users[2] ?? '' );
+		$owns = (string) ( $users[3] ?? '' );
+		$this->say( sprintf( 'WP-CLI runs as %1$s, and the site\'s files belong to %2$s. %3$s', '' === $runs ? 'user ' . $users[0] : $runs, '' === $owns ? 'user ' . $users[1] : $owns, self::OWNER_TEXT ) );
+	}
+
+	/**
+	 * What the job's log and status say when WP-CLI's user is not the files' owner.
+	 */
+	const OWNER_TEXT = 'The user running WP-CLI is not the owner of the site\'s files: on this site a visitor\'s request cannot put a half-made restore back (the web server runs it as another user). The restore goes on; should it stop half way, WP-CLI puts the site back.';
+
+	/**
+	 * To the person at the terminal only (SwapHost::say(); a test's "say").
+	 *
+	 * @param string $text Text.
+	 * @return void
+	 */
+	private function say( string $text ): void {
+		if ( isset( $this->parts['say'] ) && is_callable( $this->parts['say'] ) ) {
+			call_user_func( $this->parts['say'], $text );
+			return;
+		}
+		$this->host->say( $text );
+	}
+
+	/**
+	 * Remove the loader from a directory (by its contents: Loader::remove()); what was kept or could not be removed is
+	 * said in the job's log, and never stops the swap (a loader left does nothing without the restore's files next to
+	 * the maintenance file, and the reaper removes it: Residue).
+	 *
+	 * @param JobContext    $context Context.
+	 * @param string        $dir     Directory ('' for none).
+	 * @param callable|null $confirm Called right before the file is deleted.
+	 * @return void
+	 * @throws LockLost When the lease is gone ($confirm).
+	 */
+	private function loader_down( JobContext $context, string $dir, $confirm ): void {
+		if ( '' === $dir ) {
+			return;
+		}
+		Loader::remove(
+			$dir,
+			$confirm,
+			static function ( string $line ) use ( $context, $dir ): void {
+				$context->logger()->warning( $line, array( 'directory' => $dir ) );
+			}
+		);
+	}
+
+	/**
+	 * A swap that is made and recorded as done: the site's own must-use plugins went aside with the loader in them, and
+	 * are kept there for an undo. The loader goes from there now (and from the staged place: loader_aside(); the
+	 * directory in place is take_down()'s, right after), so that an undo never puts it back in place. Until here it stayed: a swap reversed before it is
+	 * done brings it back in place with the directory, where a request let through can flush after the put-back. A
+	 * plan that cannot be read stops nothing: said in the job's log, and the loader left does nothing once the
+	 * restore's files next to the maintenance file are gone.
+	 *
+	 * @param JobContext           $context Context.
+	 * @param Queries              $db      Connection.
+	 * @param array<string, mixed> $cursor  Cursor (its attempt).
+	 * @return void
+	 * @throws LockLost When the lease is gone.
+	 */
+	private function loader_out( JobContext $context, Queries $db, array $cursor ): void {
+		try {
+			$dirs = $this->entries( $context, $db, $cursor )['dirs'];
+		} catch ( LockLost $e ) {
+			throw $e;
+		} catch ( StaleJob $e ) {
+			throw $e;
+		} catch ( NotHere $e ) {
+			throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged: the Runner's.
+		} catch ( \Throwable $e ) {
+			$context->logger()->warning( 'The swap\'s plan could not be read to take the restore\'s must-use plugin out of the directory moved aside', array( 'error' => $e->getMessage() ) );
+			return;
+		}
+		$this->loader_aside( $context, $dirs );
+	}
+
+	/**
+	 * The loader out of where the swap moved the must-use plugins directory: the plan's entry of that directory, its
+	 * moved-aside place and its staged one (the directory in place is take_down()'s).
+	 *
+	 * @param JobContext                                                  $context Context.
+	 * @param array<int, array{live: string, stage: string, old: string}> $dirs    The plan's directory entries.
+	 * @return void
+	 * @throws LockLost When the lease is gone.
+	 */
+	private function loader_aside( JobContext $context, array $dirs ): void {
+		$mu = $this->mu_dir();
+		if ( '' === $mu ) {
+			return;
+		}
+		$confirm = array( $context, 'confirm_lease' );
+		foreach ( $dirs as $entry ) {
+			// The must-use plugins group's entry, by how the final check wrote it (its moved-aside place is "old/mu-plugins"
+			// in the staging root: SwapCheckStep), or by its live directory as written: neither needs the directory to
+			// be in place now.
+			$group = 'mu-plugins' === basename( $entry['old'] ) && 'old' === basename( dirname( $entry['old'] ) );
+			if ( ! $group && rtrim( Paths::normalize( $entry['live'] ), '/' ) !== rtrim( Paths::normalize( $mu ), '/' ) ) {
+				continue;
+			}
+			$this->loader_down( $context, $entry['old'], $confirm );
+			$this->loader_down( $context, $entry['stage'], $confirm );
+		}
 	}
 
 	/**

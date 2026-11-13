@@ -16,6 +16,11 @@ defined( 'ABSPATH' ) || exit;
  * are English, and it cannot flush the object cache unless it is given a way to (the swap then stops before the flush
  * and leaves the rest to WP-CLI). Whether the run is made without WordPress (web()) also decides the swap's guards:
  * there, every way into a part of the swap that is not putting the site back leaves the job to WP-CLI.
+ *
+ * Also here: the must-use plugins directory (where the swap puts its loader, Restore\Loader), what a run without
+ * WordPress does when it stops before the flush (await_flush(): its caller records it for the maintenance file's
+ * code), and what is said to the person at the terminal only (say(): WP-CLI's warning; it may name the system's users,
+ * which the job's log and status never do).
  */
 final class SwapHost {
 
@@ -62,6 +67,20 @@ final class SwapHost {
 	private $flush;
 
 	/**
+	 * Returns the must-use plugins directory: function(): string.
+	 *
+	 * @var callable
+	 */
+	private $mu_dir;
+
+	/**
+	 * Told that the site is put back and only the flush is left: function(): void; null when no one is to be told.
+	 *
+	 * @var callable|null
+	 */
+	private $await;
+
+	/**
 	 * Constructor.
 	 *
 	 * @param bool          $web         Whether the run is made without WordPress.
@@ -70,14 +89,18 @@ final class SwapHost {
 	 * @param callable      $network_id  function(): int.
 	 * @param callable      $plugin      function(): string.
 	 * @param callable|null $flush       function(): mixed, or null.
+	 * @param callable      $mu_dir      function(): string.
+	 * @param callable|null $await       function(): void, or null.
 	 */
-	private function __construct( bool $web, callable $base_prefix, callable $multisite, callable $network_id, callable $plugin, $flush ) {
+	private function __construct( bool $web, callable $base_prefix, callable $multisite, callable $network_id, callable $plugin, $flush, callable $mu_dir, $await = null ) {
 		$this->web         = $web;
 		$this->base_prefix = $base_prefix;
 		$this->multisite   = $multisite;
 		$this->network_id  = $network_id;
 		$this->plugin      = $plugin;
 		$this->flush       = is_callable( $flush ) ? $flush : null;
+		$this->mu_dir      = $mu_dir;
+		$this->await       = is_callable( $await ) ? $await : null;
 	}
 
 	/**
@@ -103,6 +126,9 @@ final class SwapHost {
 			},
 			static function () {
 				return wp_cache_flush();
+			},
+			static function (): string {
+				return \WPCheckpoint\Restore\Loader::dir( '' ); // WordPress has defined its content directory.
 			}
 		);
 	}
@@ -115,9 +141,11 @@ final class SwapHost {
 	 * @param int           $network_id  The network's id, as the swap recorded it (0 on a single site).
 	 * @param string        $plugin      This plugin's basename.
 	 * @param callable|null $flush       A way to flush the object cache, or null when there is none.
+	 * @param string        $mu_dir      The must-use plugins directory ('' when it is not known: no loader is looked for).
+	 * @param callable|null $await       Told that the site is put back and only the flush is left, or null.
 	 * @return self
 	 */
-	public static function without_wordpress( string $base_prefix, bool $multisite, int $network_id, string $plugin, $flush = null ): self {
+	public static function without_wordpress( string $base_prefix, bool $multisite, int $network_id, string $plugin, $flush = null, string $mu_dir = '', $await = null ): self {
 		return new self(
 			true,
 			static function () use ( $base_prefix ): string {
@@ -132,7 +160,11 @@ final class SwapHost {
 			static function () use ( $plugin ): string {
 				return $plugin;
 			},
-			$flush
+			$flush,
+			static function () use ( $mu_dir ): string {
+				return $mu_dir;
+			},
+			$await
 		);
 	}
 
@@ -201,6 +233,49 @@ final class SwapHost {
 			throw new \LogicException( 'The object cache cannot be flushed here.' );
 		}
 		return call_user_func( $this->flush );
+	}
+
+	/**
+	 * The must-use plugins directory ('' when it is not known).
+	 *
+	 * @return string
+	 */
+	public function mu_dir(): string {
+		return (string) call_user_func( $this->mu_dir );
+	}
+
+	/**
+	 * The site is put back and only the flush of the object cache is left, which cannot be done here: whoever made the
+	 * run is told (a run without WordPress records it in the visitor file). Nothing it throws goes further, but a
+	 * NotHere.
+	 *
+	 * @return void
+	 * @throws NotHere Rethrown unchanged.
+	 */
+	public function await_flush(): void {
+		if ( null === $this->await ) {
+			return;
+		}
+		try {
+			call_user_func( $this->await );
+		} catch ( NotHere $e ) {
+			throw $e; // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- rethrown unchanged: the Runner's.
+		} catch ( \Throwable $e ) {
+			unset( $e ); // Not recorded: WP-CLI flushes and ends it.
+		}
+	}
+
+	/**
+	 * Say something to the person at the terminal, and nowhere else: under WP-CLI its warning; nothing otherwise (a
+	 * run without WordPress, a request).
+	 *
+	 * @param string $text Text (it may name the system's users: it goes to no log).
+	 * @return void
+	 */
+	public function say( string $text ): void {
+		if ( ! $this->web && defined( 'WP_CLI' ) && constant( 'WP_CLI' ) && class_exists( '\WP_CLI', false ) ) {
+			\WP_CLI::warning( $text );
+		}
 	}
 
 	/**

@@ -82,4 +82,19 @@ final class HostFunctionsTest extends TestCase {
 		}
 		unlink( $path );
 	}
+
+	public function test_the_user_of_the_process_and_the_owner_of_a_directory_are_told_where_posix_tells_them(): void {
+		$dir   = \WPCheckpoint\Tests\Fixtures\Sandbox::make( 'users' );
+		$users = HostFunctions::users_of( $dir );
+		\WPCheckpoint\Tests\Fixtures\Sandbox::remove( $dir );
+		if ( ! function_exists( 'posix_geteuid' ) ) {
+			$this->assertSame( array( null, null, '', '' ), $users, 'without POSIX nothing is known (never "user 0 owns it")' );
+			return;
+		}
+		$this->assertSame( posix_geteuid(), $users[0] );
+		$this->assertSame( $users[0], $users[1], 'a directory this process made is its own' );
+		$this->assertSame( $users[2], $users[3] );
+		$this->assertSame( (string) ( posix_getpwuid( posix_geteuid() )['name'] ?? '' ), $users[2] );
+		$this->assertSame( array( $users[0], null, $users[2], '' ), HostFunctions::users_of( $dir ), 'a directory that is not there: its owner is not known' );
+	}
 }

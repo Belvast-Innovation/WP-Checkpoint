@@ -44,6 +44,9 @@ register_shutdown_function(
 );
 
 define( 'ABSPATH', rtrim( (string) $config['abspath'], '/' ) . '/' );
+if ( isset( $config['content'] ) ) {
+	define( 'WP_CONTENT_DIR', (string) $config['content'] ); // As WordPress has defined it before its maintenance file.
+}
 $src = dirname( __DIR__, 3 ) . '/src/';
 spl_autoload_register(
 	static function ( $class_name ) use ( $src ) {

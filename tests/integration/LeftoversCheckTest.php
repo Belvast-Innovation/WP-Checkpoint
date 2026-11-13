@@ -279,6 +279,23 @@ final class LeftoversCheckTest extends WP_UnitTestCase {
 		}
 	}
 
+	public function test_it_sees_a_restores_loader_left_in_the_must_use_plugins_and_removes_it(): void {
+		\WPCheckpoint\Tests\Fixtures\RealMuPlugins::claim();
+		$path = \WPCheckpoint\Tests\Fixtures\ContentLeftovers::mu_dir() . '/' . \WPCheckpoint\Restore\Loader::NAME;
+		try {
+			$this->assertNotContains( 'mu-plugins:' . $path, Leftovers::listing(), 'the control: not listed while it is not there' );
+			\WPCheckpoint\Tests\Fixtures\RealMuPlugins::put();
+			$this->assertContains( 'mu-plugins:' . $path, Leftovers::listing(), 'listed: the test that left it fails' );
+			Leftovers::removal( array( 'mu-plugins:' . $path ) );
+			clearstatcache();
+			$this->assertFileDoesNotExist( $path, 'this plugin\'s loader, by its contents: removed (another file under its name is kept: ContentLeftoversTest, in a sandbox)' );
+		} finally {
+			foreach ( \WPCheckpoint\Tests\Fixtures\RealMuPlugins::listing() as $left ) {
+				\WPCheckpoint\Tests\Fixtures\RealMuPlugins::remove( basename( $left ) );
+			}
+		}
+	}
+
 	public function test_every_wp_content_entry_registered_by_name_is_there(): void {
 		$content = \WPCheckpoint\Tests\Fixtures\ContentLeftovers::dir();
 		foreach ( array_keys( \WPCheckpoint\Tests\Fixtures\ContentLeftovers::OWN ) as $name ) {

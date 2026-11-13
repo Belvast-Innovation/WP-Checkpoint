@@ -152,23 +152,35 @@ final class ContentLeftovers {
 	}
 
 	/**
-	 * Why a run does not start ('' when it may): the loader probes a run left in the must-use plugins directory.
+	 * Why a run does not start ('' when it may): the loader probes a run left in the must-use plugins directory, and
+	 * any file there under the name of a restore's loader or a temporary name of it, whatever it holds (RealMuPlugins).
 	 *
 	 * @param string $dir The must-use plugins directory.
 	 * @return string
 	 */
 	public static function refusal( string $dir ): string {
-		$probes = self::probes( $dir );
-		if ( array() === $probes ) {
-			return '';
+		$probes  = self::probes( $dir );
+		$loaders = RealMuPlugins::listing( $dir );
+		$out     = '';
+		if ( array() !== $probes ) {
+			$out .= "The test site's must-use plugins directory holds a restore's loader probe an earlier run left; the run does not start. Remove them first:\n  " . implode( "\n  ", $probes ) . "\n";
 		}
-		return "The test site's must-use plugins directory holds a restore's loader probe an earlier run left; the run does not start. Remove them first:\n  " . implode( "\n  ", $probes ) . "\n";
+		if ( array() !== $loaders ) {
+			$lines = array_map(
+				static function ( string $path ): string {
+					return $path . ( RealMuPlugins::ours( $path ) ? ' (this plugin\'s)' : ' (not this plugin\'s)' );
+				},
+				$loaders
+			);
+			$out  .= "The test site's must-use plugins directory holds a file under the name of a restore's must-use plugin; the run does not start, and nothing was removed. Remove them first (quote the name in an interactive shell: it starts with !):\n  " . implode( "\n  ", $lines ) . "\n";
+		}
+		return $out;
 	}
 
 	/**
 	 * Remove what a test left: in wp-content, an entry under one of the tests' temporary prefixes (Leftovers::TEMP_PREFIXES,
-	 * "wpc-"); in the must-use plugins directory, a loader probe; anything else is said and left alone (Deleter,
-	 * registered for that deletion only).
+	 * "wpc-"); in the must-use plugins directory, a loader probe, and a restore's loader by its contents
+	 * (RealMuPlugins::clear()); anything else is said and left alone (Deleter, registered for that deletion only).
 	 *
 	 * @param string $path The entry.
 	 * @param bool   $mu   Whether it is the must-use plugins directory's.
@@ -177,6 +189,14 @@ final class ContentLeftovers {
 	public static function remove( string $path, bool $mu ): void {
 		$dir  = $mu ? self::mu_dir() : self::dir();
 		$name = basename( $path );
+		if ( ! $mu && RealAdvancedCache::is_name( $name ) ) {
+			RealAdvancedCache::clear( $path ); // The tests' own page cache drop-in, by its contents; anything else is said.
+			return;
+		}
+		if ( $mu && RealMuPlugins::is_loader( $name ) ) {
+			RealMuPlugins::clear( $path ); // A restore's loader, by its contents; anything else under its name is said.
+			return;
+		}
 		$ours = $mu ? self::is_probe( $name ) : ( 0 === strpos( $name, 'wpc-' ) || 0 === strpos( $name, 'wpcheckpoint-' ) );
 		if ( dirname( $path ) !== $dir || ! $ours ) {
 			fwrite( STDERR, "\nNot an entry the tests make there, left alone: {$path}\n" );

@@ -100,6 +100,7 @@ final class WebClasses {
 		'WPCheckpoint\\Restore\\JobFence',
 		'WPCheckpoint\\Restore\\LedgerOutdated',
 		'WPCheckpoint\\Restore\\LinkedTargets',
+		'WPCheckpoint\\Restore\\Loader',
 		'WPCheckpoint\\Restore\\Maintenance',
 		'WPCheckpoint\\Restore\\PlatformUnsupported',
 		'WPCheckpoint\\Restore\\PluginList',

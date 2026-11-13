@@ -350,7 +350,19 @@ final class WebRun {
 				return $this->connection();
 			},
 			isset( $this->seams['parts'] ) && is_array( $this->seams['parts'] ) ? $this->seams['parts'] : array(),
-			SwapHost::without_wordpress( $this->prefix, $this->multisite, $network, $this->plugin, $this->flush )
+			SwapHost::without_wordpress(
+				$this->prefix,
+				$this->multisite,
+				$network,
+				$this->plugin,
+				$this->flush,
+				\WPCheckpoint\Restore\Loader::dir( $this->abspath ),
+				function (): void {
+					if ( $this->pace instanceof VisitorFile ) {
+						$this->pace->await_flush(); // For the maintenance file's code, which lets a request through to flush.
+					}
+				}
+			)
 		);
 		$types = new JobTypes( false );
 		$types->add( new WebRestoreJob( $swap, isset( $this->seams['type'] ) && is_string( $this->seams['type'] ) ? $this->seams['type'] : RestoreJob::ID ) );

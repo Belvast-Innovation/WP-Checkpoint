@@ -89,6 +89,120 @@ final class MaintenanceTest extends TestCase {
 		$this->assertNotSame( $one, Maintenance::new_mark() );
 	}
 
+	public function test_a_held_data_file_with_no_code_of_the_plugins_to_read_it_is_let_go_alone(): void {
+		$runtime = str_repeat( 'c', 64 );
+		$pass    = str_repeat( 'ab', 32 );
+		$file    = new Maintenance( $this->dir, self::MARK, $runtime );
+		$data    = $this->dir . '/' . Maintenance::DATA;
+		$code    = $this->dir . '/' . Maintenance::FILE;
+		$other   = new Maintenance( $this->dir, 'WP Checkpoint restore ffffffffffffffffffffffffffffffff' );
+		$file->hold( null, $pass );
+		$held = (string) file_get_contents( $data );
+		$this->assertSame( "<?php exit; ?>\n" . self::MARK . "\n" . Maintenance::held() . "\n" . $pass . "\n" . $runtime . "\n", $held, 'the control: held, with a pass and a runtime named' );
+		$this->assertFalse( $file->left_held(), 'with the plugin\'s code in place it is not left alone' );
+		$this->assertTrue( $file->claimable(), 'its own maintenance file' );
+		// .maintenance deleted: left held; a run may take the job on by it.
+		Sandbox::remove( $code );
+		$this->assertTrue( $file->left_held() );
+		$this->assertTrue( $file->claimable() );
+		$this->assertTrue( Maintenance::names_restore( $this->dir ) );
+		// Someone else's .maintenance (an update's): not left held, and not the job's to be taken on by.
+		file_put_contents( $code, '<?php $upgrading = ' . time() . '; ?>' );
+		$this->assertFalse( $file->left_held(), 'anything in .maintenance\'s place is not "deleted"' );
+		$this->assertFalse( $file->claimable() );
+		// Another restore's: nothing of it to let go, nothing written.
+		$this->assertSame( Maintenance::NONE, $other->let_go( 1800000000 ) );
+		$this->assertSame( $held, file_get_contents( $data ), 'nothing written for another restore' );
+		// Let go: the data file alone is rewritten: the time, no pass any more, the runtime it named kept; someone
+		// else's .maintenance is left, none is made.
+		$this->assertSame( Maintenance::ALONE, $file->let_go( 1800000000 ) );
+		$this->assertSame( "<?php exit; ?>\n" . self::MARK . "\n1800000000\n-\n" . $runtime . "\n", file_get_contents( $data ), 'the time, no pass, the runtime kept' );
+		$this->assertSame( 1, preg_match( '/^<\?php \$upgrading = \d+; \?>$/', (string) file_get_contents( $code ) ), 'someone else\'s file is as it was' );
+		$this->assertSame( Maintenance::NONE, $file->let_go( 1900000000 ), 'no longer held: not written again' );
+		$this->assertStringContainsString( "\n1800000000\n", (string) file_get_contents( $data ) );
+		Sandbox::remove( $code );
+		$this->assertFalse( $file->left_held() );
+		$this->assertFalse( $file->claimable(), 'a data file with the time is not a held one' );
+		$this->assertFileDoesNotExist( $code, 'no .maintenance was made' );
+		$this->assertTrue( Maintenance::names_restore( $this->dir ), 'it still names the restore' );
+		// With its own maintenance file up, letting go rewrites it with the time (and no pass).
+		$file->hold( null, $pass );
+		$this->assertSame( Maintenance::LET_GO, $file->let_go( 1800000001 ) );
+		$this->assertSame( "<?php exit; ?>\n" . self::MARK . "\n1800000001\n-\n" . $runtime . "\n", file_get_contents( $data ) );
+		$this->assertSame( Maintenance::CODE, file_get_contents( $code ) );
+	}
+
+	/**
+	 * A script that sets a file's time, in a sandbox of its own (not in the directory the scans list; removed with the
+	 * test's sandbox would be a deletion, which makes PHP forget what it remembers of files: it is made before any look).
+	 *
+	 * @return string Its path.
+	 */
+	private function root_of_scripts(): string {
+		$script = $this->dir . '/age-script/age.php';
+		mkdir( dirname( $script ) );
+		file_put_contents( $script, '<?php exit( touch( $argv[1], (int) $argv[2] ) ? 0 : 1 );' );
+		return $script;
+	}
+
+	public function test_the_scans_read_a_files_age_anew_and_not_what_an_earlier_look_remembers(): void {
+		$mu = $this->dir . '/mu';
+		mkdir( $mu );
+		$data   = $this->dir . '/' . Maintenance::DATA;
+		$loader = \WPCheckpoint\Restore\Loader::path( $mu );
+		file_put_contents( $data, $this->ours()->data( 1800000000 ) );
+		file_put_contents( $loader, \WPCheckpoint\Restore\Loader::CODE );
+		$old    = time() - 100000;
+		$script = $this->root_of_scripts();
+		$aged   = function ( string $path ) use ( $old, $script ): bool {
+			// This process looks at the file (PHP remembers the answer of its last look), then another process changes
+			// its time: PHP's own touch() forgets the answer on some versions and not on others (7.4 does not), another
+			// process's never does. Nothing else is looked at before the scan: the remembered answer is this file's.
+			$this->assertGreaterThan( $old, lstat( $path )['mtime'], 'the control: new' );
+			// Not through a shell: on Windows escapeshellarg() turns the "!" of the loader's name into a space.
+			$pipes   = array();
+			$process = proc_open( array( PHP_BINARY, $script, $path, (string) $old ), array( 1 => array( 'pipe', 'w' ), 2 => array( 'pipe', 'w' ) ), $pipes );
+			$this->assertIsResource( $process );
+			$said = stream_get_contents( $pipes[1] ) . stream_get_contents( $pipes[2] );
+			$this->assertSame( 0, proc_close( $process ), 'another process set the file\'s time: ' . $said );
+			// The control: this process still remembers the time before. Where it does not (a PHP that forgets what
+			// it remembers whenever it starts a process), what the scan forgets itself cannot be shown.
+			return lstat( $path )['mtime'] > $old;
+		};
+		$shown = $aged( $data );
+		$found = Residue::scan_maintenance( $this->dir );
+		$this->assertCount( 1, $found );
+		$this->assertSame( $old, $found[0]['mtime'], 'the data file\'s age is read anew' );
+		$shown = $aged( $loader ) && $shown;
+		$found = Residue::scan_loader( $mu );
+		$this->assertCount( 1, $found );
+		$this->assertSame( $old, $found[0]['mtime'], 'the loader\'s age is read anew' );
+		if ( ! $shown ) {
+			$this->markTestSkipped( 'PHP ' . PHP_VERSION . ' on ' . PHP_OS_FAMILY . ' forgets a file\'s remembered time when it starts a process: the scans read the right age, but that they read it anew cannot be shown here.' );
+		}
+	}
+
+	public function test_whether_a_data_file_names_a_restore_is_true_false_or_not_to_be_told(): void {
+		$data = $this->dir . '/' . Maintenance::DATA;
+		$this->assertFalse( Maintenance::names_restore( $this->dir ), 'none there' );
+		file_put_contents( $data, "<?php exit; ?>\nsomething else\n" );
+		$this->assertFalse( Maintenance::names_restore( $this->dir ), 'a regular file of another form' );
+		Sandbox::remove( $data );
+		$real = $this->dir . '/real-data';
+		file_put_contents( $real, $this->ours()->data( Maintenance::held() ) );
+		if ( @symlink( $real, $data ) ) {
+			$this->assertNull( Maintenance::names_restore( $this->dir ), 'a link (the code that includes it reads through it): not to be told' );
+			Sandbox::remove( $data );
+		}
+		copy( $real, $data );
+		$this->assertTrue( Maintenance::names_restore( $this->dir ) );
+		if ( function_exists( 'posix_geteuid' ) && 0 !== posix_geteuid() && '\\' !== DIRECTORY_SEPARATOR ) {
+			chmod( $data, 0 );
+			$this->assertNull( Maintenance::names_restore( $this->dir ), 'it cannot be read: not to be told' );
+			chmod( $data, 0600 );
+		}
+	}
+
 	public function test_a_held_file_never_lapses_and_is_still_this_restores(): void {
 		$file = $this->ours();
 		$file->put( 1800000000 );
@@ -107,6 +221,46 @@ final class MaintenanceTest extends TestCase {
 		$this->assertFalse( Maintenance::held_in( $this->dir ), 'someone else\'s, whatever its time' );
 	}
 
+	public function test_the_code_beside_a_directory_or_a_longer_file_in_the_data_files_place_is_taken_down_and_that_thing_left(): void {
+		$file = $this->ours();
+		$data = $this->dir . '/.wpcheckpoint-maintenance.php';
+		foreach ( array( 'a directory', 'a longer file' ) as $what ) {
+			file_put_contents( $this->dir . '/.maintenance', Maintenance::CODE );
+			if ( 'a directory' === $what ) {
+				mkdir( $data );
+				file_put_contents( $data . '/kept', 'x' );
+			} else {
+				file_put_contents( $data, str_repeat( 'x', 100000 ) );
+			}
+			// The code holds every request, names no restore (no job is found by it) and says a time that never passes.
+			$this->assertTrue( Maintenance::held_in( $this->dir ), $what . ': the control: it blocks every request' );
+			$this->assertSame( '', Maintenance::mark_in( $this->dir ), $what );
+			$this->assertFalse( $file->claimable(), $what . ': no job takes it on' );
+			$this->assertTrue( $file->unnamed(), $what );
+			$this->assertSame( Maintenance::NONE, $file->let_go( 1800000000 ), $what . ': letting go writes nothing over it' );
+			$this->assertTrue( $file->remove(), $what . ': the job ends' );
+			clearstatcache();
+			$this->assertFileDoesNotExist( $this->dir . '/.maintenance', $what . ': the code is taken down: nothing holds the site without a job' );
+			$this->assertFalse( Maintenance::held_in( $this->dir ), $what );
+			$this->assertTrue( $file->left_unknown(), $what . ': and the take-down says what it left' );
+			if ( 'a directory' === $what ) {
+				$this->assertSame( 'x', file_get_contents( $data . '/kept' ), 'the directory as it was' );
+			} else {
+				$this->assertSame( 100000, filesize( $data ), 'the file as it was' );
+			}
+			Sandbox::remove( $data );
+		}
+		// What cannot be told is waited on as ever: a link in the data file's place may lead to a data file.
+		file_put_contents( $this->dir . '/.maintenance', Maintenance::CODE );
+		$target = $this->dir . '/elsewhere';
+		file_put_contents( $target, 'x' );
+		symlink( $target, $data );
+		$this->assertFalse( $file->unnamed(), 'a link: it cannot be told' );
+		$this->assertFalse( $file->remove(), 'not gone' );
+		$this->assertFileExists( $this->dir . '/.maintenance', 'and the code stays' );
+		$this->assertFalse( $file->left_unknown() );
+	}
+
 	public function test_the_code_with_no_data_file_it_reads_blocks_the_site_and_is_taken_down_by_the_restore(): void {
 		$file = $this->ours();
 		foreach ( array(
@@ -123,8 +277,14 @@ final class MaintenanceTest extends TestCase {
 			$this->assertSame( '', Maintenance::mark_in( $this->dir ), $what . ': it names no restore' );
 			$this->assertTrue( Maintenance::code_in( $this->dir ), $what );
 			$this->assertNull( $file->time(), $what );
+			$this->assertTrue( $file->unnamed(), $what );
 			$this->assertTrue( $file->remove(), $what );
-			$this->assertSame( array(), $this->names(), $what . ': the code, and a data file of no form, are gone' );
+			$this->assertSame( null === $data ? array() : array( '.wpcheckpoint-maintenance.php' ), $this->names(), $what . ': the code is gone; what is no data file is not this plugin\'s to delete' );
+			$this->assertSame( null !== $data, $file->left_unknown(), $what . ': and the take-down says what it left' );
+			if ( null !== $data ) {
+				$this->assertSame( $data, file_get_contents( $this->dir . '/.wpcheckpoint-maintenance.php' ), $what . ': as it was' );
+				Sandbox::remove( $this->dir . '/.wpcheckpoint-maintenance.php' );
+			}
 		}
 		// A restore that holds the site writes its data file next to it.
 		file_put_contents( $this->dir . '/.maintenance', Maintenance::CODE );
@@ -313,7 +473,7 @@ final class MaintenanceTest extends TestCase {
 		file_put_contents( $target, $file->data( 1800000000 ) );
 		symlink( $target, $this->dir . '/.wpcheckpoint-maintenance.php' );
 		$this->assertSame( Maintenance::OTHER, $file->state(), 'a link in place of the data file' );
-		$this->assertTrue( $file->remove() );
+		$this->assertFalse( $file->remove(), 'the code reads through the link: what it reads may be this restore\'s, so it is not said to be gone' );
 		$this->assertTrue( is_link( $this->dir . '/.wpcheckpoint-maintenance.php' ), 'that link stays' );
 		$this->assertSame( Maintenance::CODE, $this->code() );
 		Sandbox::remove( $this->dir . '/.maintenance' );
@@ -418,8 +578,12 @@ echo json_encode( array( "upgrading" => $upgrading, "type" => gettype( $upgradin
 	public function test_the_code_is_pinned_and_every_code_written_is_known(): void {
 		// A change of CODE turns every file an earlier version put up into someone else's unless that version's code
 		// stays in KNOWN_CODES: once a version with it is released, add the old code there, then update this digest.
-		$this->assertSame( '0442b598fef21dcfa20c2b1c411aa3a38a46a6253f4addd8b1a43ee9d7c52714', hash( 'sha256', Maintenance::CODE ) );
+		$this->assertSame( 'abda8abb64b7a033c12942a896352f12a125dcc4a2bc5e46effd0ad558315acb', hash( 'sha256', Maintenance::CODE ) );
 		$this->assertContains( Maintenance::CODE, Maintenance::KNOWN_CODES );
+		// The code released with the run without WordPress (2026-11-10): byte for byte what it was, still known.
+		$this->assertSame( '0442b598fef21dcfa20c2b1c411aa3a38a46a6253f4addd8b1a43ee9d7c52714', hash( 'sha256', Maintenance::CODE_2 ) );
+		$this->assertContains( Maintenance::CODE_2, Maintenance::KNOWN_CODES );
+		$this->assertLessThanOrEqual( Maintenance::MAX_READ, strlen( Maintenance::CODE ), 'the longest code is read whole (a longer file is someone else\'s)' );
 		// The code released before the run without WordPress (2026-11-08): byte for byte what it was, still known.
 		$this->assertSame( 'ffb703a94f78f6b2da4ef5fe748e29f7c888f05eed7b1be58f45b83a42d0ed8b', hash( 'sha256', Maintenance::CODE_1 ) );
 		$this->assertContains( Maintenance::CODE_1, Maintenance::KNOWN_CODES );

@@ -515,7 +515,9 @@ final class StagingResidueTest extends JobTestCase {
 			// second read of the holders is the one right before the deletion.
 			$put( $old );
 			$reads = 0;
-			$swap  = static function ( string $sql ) use ( &$reads, $put ): string {
+			$asked = array();
+			$swap  = static function ( string $sql ) use ( &$reads, &$asked, $put ): string {
+				$asked[] = substr( (string) preg_replace( '/\s+/', ' ', $sql ), 0, 140 );
 				if ( false !== strpos( $sql, 'WHERE site_state <>' ) && 2 === ++$reads ) {
 					$put( 0 );
 				}
@@ -527,7 +529,38 @@ final class StagingResidueTest extends JobTestCase {
 			} finally {
 				remove_filter( 'query', $swap );
 			}
-			$this->assertSame( 2, $reads, 'the control: read again right before the deletion' );
+			// What the reaper saw, for a failure that only one environment shows (said with the failure).
+			clearstatcache();
+			$jobs     = Plugin::instance()->jobs();
+			$storage  = Plugin::instance()->directories();
+			$log      = $storage->logs() . '/storage.log';
+			$found    = Residue::scan_maintenance( Residue::maintenance_dir() );
+			$saw      = wp_json_encode(
+				array(
+					'php'        => PHP_VERSION,
+					'time'       => time(),
+					'now'        => $jobs->now(),
+					'mtime'      => @filemtime( $data ),
+					'ttl'        => Residue::VERIFY_TTL,
+					'is_dir'     => Residue::maintenance_dir() === $dir,
+					'entries'    => array_map(
+						static function ( array $entry ) use ( $jobs ): array {
+							return array( $entry['kind'], basename( $entry['path'] ), $entry['mtime'], Residue::is_expired( $entry, $jobs->now() ) );
+						},
+						$found
+					),
+					'code_in'    => \WPCheckpoint\Restore\Maintenance::code_in( $dir ),
+					'data_in'    => \WPCheckpoint\Restore\Maintenance::data_in( $dir )[0],
+					'holding'    => $jobs->holding_site(),
+					'base'       => '' !== $storage->base(),
+					'log_tail'   => is_file( $log ) ? array_slice( array_map( static function ( string $line ): string { return substr( $line, 0, 220 ); }, (array) file( $log, FILE_IGNORE_NEW_LINES ) ), -6 ) : 'no storage.log',
+					'last_error' => $wpdb->last_error,
+					'asked'      => array_slice( $asked, -25 ),
+					'asked_all'  => count( $asked ),
+					'tmp'        => array_slice( (array) @scandir( $storage->base() . '/tmp' ), 0, 30 ),
+				)
+			);
+			$this->assertSame( 2, $reads, 'the control: read again right before the deletion. What the reaper saw: ' . $saw );
 			$this->assertFileExists( $data, 'written anew meanwhile: kept' );
 			// The control: old, read by nothing, and no holder has its mark: reaped.
 			$put( $old );

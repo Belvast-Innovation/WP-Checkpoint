@@ -442,9 +442,13 @@ final class JobActions {
 			return self::outcome( false, __( 'This installation holds no storage token of its own yet (it was found to be a copy, and that is not settled): settle it on the plugin\'s page first, then abandon the job. Nothing was changed.', 'wp-checkpoint' ) );
 		}
 		try {
-			$gone = ! $held['assessment']['file_here'] || $this->held->release( $job, $held['assessment'] );
+			// What cannot be told of the files here is not taken for "none of the job's here".
+			$gone = $held['assessment']['file_told'] && ( ! $held['assessment']['file_here'] || $this->held->release( $job, $held['assessment'] ) );
 		} catch ( \RuntimeException $e ) {
 			$gone = false;
+		}
+		if ( ! $held['assessment']['file_told'] ) {
+			return self::outcome( false, __( 'Whether this job\'s maintenance file is in this WordPress directory cannot be told (.maintenance or .wpcheckpoint-maintenance.php there cannot be read, or is a link), so the job was not abandoned; nothing was changed. Make them readable, or remove a link, and try again.', 'wp-checkpoint' ) );
 		}
 		if ( ! $gone ) {
 			return self::outcome( false, __( 'This job\'s maintenance file could not be taken down, so the job was not abandoned; nothing else was changed. Try again.', 'wp-checkpoint' ) );

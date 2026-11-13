@@ -659,5 +659,28 @@ final class Plugin {
 	 */
 	public static function deactivate(): void {
 		// T093: remove troubleshooting mu-plugin if present.
+		self::remove_loader( Restore\Loader::dir( (string) ABSPATH ), (string) ABSPATH );
+	}
+
+	/**
+	 * Remove the must-use plugin a restore's swap put up, should one be left (the swap removes it when it ends): only a
+	 * file whose contents this plugin wrote (Restore\Loader::remove()); another file under its name stays. Not while
+	 * a restore still has its maintenance code or its data file in the WordPress directory (Restore\Loader::needed()):
+	 * with .maintenance deleted the loader is what holds a half swapped site, and a deactivation must not open it.
+	 * Never throws: a deactivation must not fail on it.
+	 *
+	 * @param string      $dir  The must-use plugins directory.
+	 * @param string|null $site The WordPress directory (ABSPATH when null).
+	 * @return bool Whether none of this plugin's is there now.
+	 */
+	public static function remove_loader( string $dir, $site = null ): bool {
+		try {
+			if ( Restore\Loader::needed( null === $site ? (string) ABSPATH : (string) $site ) ) {
+				return false;
+			}
+			return Restore\Loader::remove( $dir );
+		} catch ( \Throwable $e ) {
+			return false;
+		}
 	}
 }

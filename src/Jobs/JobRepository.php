@@ -1336,10 +1336,12 @@ final class JobRepository implements RunnerRepository {
 	 * Whether a job that holds the site has this site mark, or that cannot be told (the safe direction for removing
 	 * a maintenance data file).
 	 *
-	 * @param string $mark Site mark ('' for a data file with none: no job has it).
+	 * @param string $mark Site mark ('' for a file that positively names none: no job has it).
+	 * @param bool   $any  Whether any job that holds the site counts (the file's mark cannot be read: it may be any
+	 *                     holder's).
 	 * @return bool
 	 */
-	private function holder_has_mark( string $mark ): bool {
+	private function holder_has_mark( string $mark, bool $any = false ): bool {
 		try {
 			$ids = $this->holding_site();
 		} catch ( \RuntimeException $e ) {
@@ -1347,7 +1349,7 @@ final class JobRepository implements RunnerRepository {
 		}
 		foreach ( $ids as $id ) {
 			$job = $this->find( $id );
-			if ( null === $job || ( '' !== $mark && $mark === $job->site_mark ) ) {
+			if ( $any || null === $job || ( '' !== $mark && $mark === $job->site_mark ) ) {
 				return true;
 			}
 		}
@@ -2879,14 +2881,21 @@ final class JobRepository implements RunnerRepository {
 			}
 			$unread  = function () use ( $entry, $now ): bool {
 				// Read again right before the deletion too: a swap may have written a new data file meanwhile (its
-				// code follows), which must not go.
-				if ( false !== Maintenance::code_in( Residue::maintenance_dir() ) || $this->holder_has_mark( Maintenance::data_mark( Residue::maintenance_dir() ) ) ) {
+				// code follows), which must not go. Each file in three states: what cannot be told (it cannot be read
+				// now, a link) is not taken for "names no restore" (it may be the held file of a job that holds the
+				// site: with .maintenance deleted, the data file is what the restore's must-use plugin holds the site by).
+				$data = Maintenance::data_in( Residue::maintenance_dir() );
+				if ( false !== Maintenance::code_in( Residue::maintenance_dir() ) || Maintenance::UNKNOWN === $data[0] || $this->holder_has_mark( $data[1] ) ) {
 					return false;
 				}
-				// A file of a run without WordPress: only with no data file of a form naming a restore (which would name
-				// the runtime), and the mark it names no holder's.
-				if ( Residue::MAINTENANCE_WEB === $entry['kind'] && ( '' !== Maintenance::data_mark( Residue::maintenance_dir() ) || $this->holder_has_mark( Maintenance::web_mark( $entry['path'] ) ) ) ) {
-					return false;
+				// A file of a run without WordPress: only with a data file that positively names no restore (one would
+				// name the runtime), and the mark it names no holder's; one that cannot be read, while no job holds the
+				// site at all.
+				if ( Residue::MAINTENANCE_WEB === $entry['kind'] ) {
+					$names = Maintenance::web_names( $entry['path'] );
+					if ( 'data' === $data[0] || $this->holder_has_mark( null === $names ? '' : $names, null === $names ) ) {
+						return false;
+					}
 				}
 				// Its age last, after the slower reads: a file written anew meanwhile is seen.
 				clearstatcache( true, $entry['path'] );
@@ -2915,6 +2924,51 @@ final class JobRepository implements RunnerRepository {
 				// Written anew or read meanwhile: it stays (the trace of how often this window is hit).
 				$this->directories->log_event( 'A maintenance data file was read or written anew right before the reaper would remove it; it was left.' );
 				continue;
+			}
+		}
+		// The swap's must-use plugin (and its temporary files), left by a run that died: once old enough, with no
+		// maintenance code of the plugin's in place, no data file naming a restore and no job holding the site (read
+		// again right before the deletion). By its contents only: another file under its name stays.
+		foreach ( Residue::scan_loader( (string) ( $this->site_directories()['mu-plugins'] ?? '' ) ) as $entry ) {
+			if ( $budget <= 0 ) {
+				return;
+			}
+			if ( ! Residue::is_expired( $entry, $now ) ) {
+				continue;
+			}
+			$unused = function (): bool {
+				if ( \WPCheckpoint\Restore\Loader::needed( Residue::maintenance_dir() ) ) {
+					return false;
+				}
+				try {
+					return array() === $this->holding_site();
+				} catch ( \RuntimeException $e ) {
+					return false;
+				}
+			};
+			if ( ! $unused() ) {
+				continue;
+			}
+			--$budget;
+			try {
+				$gone = Deleter::delete_loader_file(
+					dirname( $entry['path'] ),
+					basename( $entry['path'] ),
+					\WPCheckpoint\Restore\Loader::digests(),
+					static function () use ( $unused ): void {
+						if ( ! $unused() ) {
+							throw new \RuntimeException( 'A restore holds the site meanwhile.' );
+						}
+					}
+				);
+				if ( ! $gone ) {
+					$this->directories->log_event( 'The must-use plugin of a restore that ended could not be removed.' );
+				}
+			} catch ( DeletionRefused $e ) {
+				// Not this plugin's contents (or not a file it deletes): kept, and said once a day at most by its age.
+				$this->directories->log_event( 'A file under the name of the restore\'s must-use plugin is not one this plugin wrote; it was kept.' );
+			} catch ( \RuntimeException $e ) {
+				continue; // A restore holds the site meanwhile: it stays.
 			}
 		}
 		$this->drop_tables_of(

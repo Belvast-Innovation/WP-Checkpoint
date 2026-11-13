@@ -643,9 +643,10 @@ final class Uninstaller {
 	 * deletion; what it throws stops the deletion before that one.
 	 *
 	 * @param callable|null $confirm function(): void, right before each deletion; may throw.
+	 * @param string|null   $mu_dir  The must-use plugins directory (tests); the site's when null.
 	 * @return array{deleted: int, failed: string[]}
 	 */
-	public static function delete_site_residue( $confirm = null ): array {
+	public static function delete_site_residue( $confirm = null, $mu_dir = null ): array {
 		$result = array(
 			'deleted' => 0,
 			'failed'  => array(),
@@ -693,6 +694,22 @@ final class Uninstaller {
 				}
 			} catch ( DeletionRefused $e ) {
 				$result['failed'][] = $entry['path'];
+			}
+		}
+		// The swap's must-use plugin, when a run that died left it (nothing is uninstalled while a job holds the site): by
+		// its contents only; another file under its name is not the plugin's, and stays. Not while a maintenance code of
+		// the plugin's or a data file naming a restore is there (Loader::needed(), the reaper's rule).
+		if ( ! \WPCheckpoint\Restore\Loader::needed( Residue::maintenance_dir() ) ) {
+			foreach ( Residue::scan_loader( null === $mu_dir ? (string) ( ScanRoots::site_directories()['mu-plugins'] ?? '' ) : $mu_dir ) as $entry ) {
+				try {
+					if ( Deleter::delete_loader_file( dirname( $entry['path'] ), basename( $entry['path'] ), \WPCheckpoint\Restore\Loader::digests(), $confirm ) ) {
+						++$result['deleted'];
+					} else {
+						$result['failed'][] = $entry['path'];
+					}
+				} catch ( DeletionRefused $e ) {
+					continue; // Someone else's file under the name: kept, not a failure of the uninstall.
+				}
 			}
 		}
 		return $result;

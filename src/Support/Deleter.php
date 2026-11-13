@@ -431,6 +431,58 @@ final class Deleter {
 	}
 
 	/**
+	 * The names delete_loader_file() deletes: the must-use plugin a restore's swap puts up (Restore\Loader::NAME) and its
+	 * temporary names (AtomicFile).
+	 */
+	const LOADER_NAMES = '/\A!wpcheckpoint-runtime\.php(\.[0-9a-f]{16}\.tmp)?\z/';
+
+	/**
+	 * Most bytes of a loader read to tell its contents (Restore\Loader::MAX_READ).
+	 */
+	const LOADER_MAX_READ = 8192;
+
+	/**
+	 * Delete the must-use plugin a restore's swap put up, wherever it is (the must-use plugins directory, or where the
+	 * swap moved that directory): by its contents, not its name. A regular file, not a link, under one of LOADER_NAMES,
+	 * never a protected directory or one that holds one; under the loader's own name only when the SHA-256 of its
+	 * contents, read right before the deletion, is one of $digests (a file of another content under that name is
+	 * someone else's); a temporary name (a write that died before its rename) whatever it holds.
+	 *
+	 * @param string        $dir     Directory.
+	 * @param string        $name    One of LOADER_NAMES.
+	 * @param string[]      $digests The SHA-256 of each code the plugin wrote (Restore\Loader::digests()).
+	 * @param callable|null $confirm Called right before the file is deleted (a job's lease check; throws to stop).
+	 * @return bool Whether it is gone (deleted now, or not there).
+	 * @throws DeletionRefused When it is not such a file; nothing is deleted.
+	 */
+	public static function delete_loader_file( string $dir, string $name, array $digests, $confirm = null ): bool {
+		$path = rtrim( $dir, '/\\' ) . DIRECTORY_SEPARATOR . $name;
+		$why  = 1 === preg_match( self::LOADER_NAMES, $name, $found ) ? self::basic_refusal( $path ) : 'it is not the restore\'s must-use plugin';
+		clearstatcache( true, $path );
+		$stat = @lstat( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- not there: nothing to delete.
+		if ( '' === $why && false !== $stat && 0100000 !== ( $stat['mode'] & 0170000 ) ) {
+			$why = 'it is not a regular file';
+		}
+		if ( '' !== $why ) {
+			throw new DeletionRefused( sprintf( 'Nothing was deleted: %1$s is not deleted because %2$s.', $path, $why ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+		}
+		if ( false === $stat ) {
+			return Paths::positively_gone( $path );
+		}
+		if ( is_callable( $confirm ) ) {
+			call_user_func( $confirm );
+		}
+		if ( ! isset( $found[1] ) ) {
+			// Its contents last, right before it goes: the file there now is the one judged.
+			$contents = @file_get_contents( $path, false, null, 0, self::LOADER_MAX_READ + 1 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- unreadable: not deleted.
+			if ( ! is_string( $contents ) || ! in_array( hash( 'sha256', $contents ), $digests, true ) ) {
+				throw new DeletionRefused( sprintf( 'Nothing was deleted: %s is not deleted because its contents are not the must-use plugin this plugin wrote.', $path ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
+			}
+		}
+		return @unlink( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- the result says it.
+	}
+
+	/**
 	 * Delete a file or directory tree strictly inside $base.
 	 *
 	 * With $max_entries > 0 the call stops after that many entries were

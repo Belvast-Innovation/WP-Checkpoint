@@ -684,6 +684,41 @@ final class HeldSiteTest extends SwapTestCase {
 			$this->assertSame( $before, $this->row( $job->id ) );
 			$this->assertFileExists( $this->copy_dir() . '/.maintenance' );
 		}
+		if ( \WPCheckpoint\Tests\Fixtures\Restore\MaintenanceStates::can_hide() ) {
+			// The copy's data file cannot be read just now: whether the job's files are here cannot be told, and the
+			// job is not given up on "none here" (it would leave them for the copy's must-use plugin to answer by).
+			$data = $this->copy_dir() . '/' . \WPCheckpoint\Restore\Maintenance::DATA;
+			chmod( $data, 0 );
+			try {
+				$this->assertFalse( $acts->held_elsewhere( $job->id )['assessment']['file_told'], 'the control: it cannot be told' );
+				$refused = $acts->abandon( $job->id, $code );
+			} finally {
+				chmod( $data, 0600 );
+			}
+			$this->assertFalse( $refused['ok'], 'not given up while the files here cannot be told' );
+			$this->assertStringContainsString( 'cannot be told', $refused['message'] );
+			$this->assertSame( $before, $this->row( $job->id ) );
+			$this->assertFileExists( $this->copy_dir() . '/.maintenance' );
+			$this->assertTrue( $acts->held_elsewhere( $job->id )['assessment']['file_told'], 'the control: read again, it can be told' );
+			// The same of .maintenance itself.
+			chmod( $this->copy_dir() . '/.maintenance', 0 );
+			try {
+				$refused = $acts->abandon( $job->id, $code );
+			} finally {
+				chmod( $this->copy_dir() . '/.maintenance', 0600 );
+			}
+			$this->assertFalse( $refused['ok'], 'nor while .maintenance cannot be told' );
+			$this->assertStringContainsString( 'cannot be told', $refused['message'] );
+			$this->assertSame( $before, $this->row( $job->id ) );
+			// Someone else's .maintenance in its place (an update's), the job's data file still here: the job's files
+			// are here all the same, and go before it is given up.
+			$own = (string) file_get_contents( $this->copy_dir() . '/.maintenance' );
+			file_put_contents( $this->copy_dir() . '/.maintenance', '<?php $upgrading = time();' );
+			$see_other = $acts->held_elsewhere( $job->id )['assessment'];
+			$this->assertTrue( $see_other['file_told'] );
+			$this->assertTrue( $see_other['file_here'], 'its data file is here, whatever is in .maintenance\'s place' );
+			file_put_contents( $this->copy_dir() . '/.maintenance', $own );
+		}
 		$tables = $this->tables_of( $job );
 		$this->assertNotSame( array(), $tables, 'the control: it made tables' );
 		$held = \WPCheckpoint\Support\Uninstaller::holding();

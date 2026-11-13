@@ -114,7 +114,7 @@ final class WebRollbackTest extends SwapTestCase {
 		list( $now, $runs )   = $this->run_without_wordpress( $job, array(), false );
 		$last                 = end( $runs );
 		$this->assertSame( TickResult::LEFT, $last->status, $last->message );
-		$this->assertStringContainsString( 'object cache can only be flushed by WP-CLI', $last->message );
+		$this->assertStringContainsString( 'object cache cannot be flushed from here', $last->message );
 		$site = $this->site();
 		$this->assertTrue( $site['maintenance'], 'the maintenance file stays' );
 		$site['maintenance'] = false;

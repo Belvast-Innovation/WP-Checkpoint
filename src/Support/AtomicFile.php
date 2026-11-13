@@ -63,7 +63,9 @@ final class AtomicFile {
 	 *                                       its temporary name must be too, one of ROOT_FILES in a staging root, or
 	 *                                       the maintenance file, its data file, the runtime or the visitor file in
 	 *                                       ABSPATH, whose temporary names the residue catalogue knows there:
-	 *                                       Residue::scan_maintenance()).
+	 *                                       Residue::scan_maintenance(); or the restore's must-use plugin,
+	 *                                       Restore\Loader::NAME, whose temporary names it knows too:
+	 *                                       Residue::scan_loader()).
 	 * @param string               $contents Contents (at most MAX_BYTES; the runtime at most MAX_RUNTIME_BYTES).
 	 * @param array<string, mixed> $options  "check": function( string $temporary ): void, called with the written
 	 *                                       temporary file before "confirm" (throws to stop; the temporary file is
@@ -85,7 +87,8 @@ final class AtomicFile {
 		$registered = null !== StagingLayout::parse( $name ) && null !== StagingLayout::parse( $name . $suffix );
 		$protection = in_array( $name, self::ROOT_FILES, true ) && 'stage' === ( StagingLayout::parse( basename( rtrim( $dir, '/\\' ) ) )['kind'] ?? '' );
 		$upgrading  = in_array( $name, array( '.maintenance', '.wpcheckpoint-maintenance.php', '.wpcheckpoint-runtime.php', '.wpcheckpoint-visitor.php', '.wpcheckpoint-runtime-log.php' ), true ) && self::maintenance_dir( $dir );
-		if ( '' === $name || false !== strpbrk( $name, "/\\\0" ) || ! ( $registered || $protection || $upgrading ) ) {
+		$loader     = '!wpcheckpoint-runtime.php' === $name; // In the must-use plugins directory: Residue::scan_loader() knows its temporary names.
+		if ( '' === $name || false !== strpbrk( $name, "/\\\0" ) || ! ( $registered || $protection || $upgrading || $loader ) ) {
 			throw new \InvalidArgumentException( 'Not a file name this plugin writes.' );
 		}
 		if ( strlen( $contents ) > ( '.wpcheckpoint-runtime.php' === $name ? self::MAX_RUNTIME_BYTES : self::MAX_BYTES ) ) {

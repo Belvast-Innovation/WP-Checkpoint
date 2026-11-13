@@ -23,19 +23,24 @@ defined( 'ABSPATH' ) || exit;
  * log (RuntimeLog), cleaned (redacted, paths and the site's hosts masked: the request's host among them). Of the request
  * it reads only its host (for the masks) and when it started (the run's budget counts from then). The request then ends
  * with the maintenance page, whatever happened here.
+ *
+ * The restore's must-use plugin (Restore\Loader) calls it the same way once WordPress is loaded that far, and gives
+ * WordPress's flush of the object cache: a put-back that only waits for the flush is ended by that run.
  */
 final class WebEntry {
 
 	/**
 	 * One run, from the maintenance file's code.
 	 *
-	 * @param string $dir      The WordPress directory (the maintenance file's).
-	 * @param string $mark     The mark the data file names.
-	 * @param string $expected The runtime's hash the data file names.
-	 * @param string $said     The hash the runtime said of itself.
+	 * @param string        $dir      The WordPress directory (the maintenance file's).
+	 * @param string        $mark     The mark the data file names.
+	 * @param string        $expected The runtime's hash the data file names.
+	 * @param string        $said     The hash the runtime said of itself.
+	 * @param callable|null $flush    function(): mixed, flushes the object cache (WordPress is loaded: the loader's
+	 *                                call), or null when it cannot be flushed here (the maintenance file's code's).
 	 * @return void
 	 */
-	public static function run( string $dir, string $mark, string $expected, string $said ): void {
+	public static function run( string $dir, string $mark, string $expected, string $said, $flush = null ): void {
 		$host  = self::request_host();
 		$hosts = '' === $host ? array() : array( $host );
 		$log   = new RuntimeLog( $dir, $mark );
@@ -44,8 +49,8 @@ final class WebEntry {
 		};
 		self::quietly(
 			$note,
-			static function () use ( $dir, $mark, $expected, $said, $note, $hosts ): void {
-				self::go( $dir, $mark, $expected, $said, $note, $hosts );
+			static function () use ( $dir, $mark, $expected, $said, $note, $hosts, $flush ): void {
+				self::go( $dir, $mark, $expected, $said, $note, $hosts, is_callable( $flush ) ? $flush : null );
 			}
 		);
 	}
@@ -91,15 +96,16 @@ final class WebEntry {
 	/**
 	 * The run (run()).
 	 *
-	 * @param string   $dir      The WordPress directory.
-	 * @param string   $mark     The mark the data file names.
-	 * @param string   $expected The runtime's hash the data file names.
-	 * @param string   $said     The hash the runtime said of itself.
-	 * @param callable $note     function( string $line ): void, into the runtime log.
-	 * @param string[] $hosts    The request's host, when it is a domain name.
+	 * @param string        $dir      The WordPress directory.
+	 * @param string        $mark     The mark the data file names.
+	 * @param string        $expected The runtime's hash the data file names.
+	 * @param string        $said     The hash the runtime said of itself.
+	 * @param callable      $note     function( string $line ): void, into the runtime log.
+	 * @param string[]      $hosts    The request's host, when it is a domain name.
+	 * @param callable|null $flush    function(): mixed, or null.
 	 * @return void
 	 */
-	private static function go( string $dir, string $mark, string $expected, string $said, callable $note, array $hosts ): void {
+	private static function go( string $dir, string $mark, string $expected, string $said, callable $note, array $hosts, $flush = null ): void {
 		if ( 1 !== preg_match( '/\A[0-9a-f]{64}\z/', $expected ) || ! hash_equals( $expected, $said ) ) {
 			HostFunctions::opcache_invalidate( rtrim( $dir, '/\\' ) . DIRECTORY_SEPARATOR . Maintenance::RUNTIME );
 			$note( 'The runtime here is not the one the restore wrote (its hash is not the one the maintenance file names: an older copy may still be cached); nothing was done. WP-CLI puts the site back: wp wpcheckpoint job list shows the restore.' );
@@ -117,7 +123,7 @@ final class WebEntry {
 			$note( 'The database settings of wp-config.php cannot be read here; nothing was done.' );
 			return;
 		}
-		$run = new WebRun( $credentials, $dir, self::multisite(), $plugin, $note, null, array(), $pace, $hosts );
+		$run = new WebRun( $credentials, $dir, self::multisite(), $plugin, $note, $flush, array(), $pace, $hosts );
 		$run->tick_mark( $mark, self::started() );
 	}
 

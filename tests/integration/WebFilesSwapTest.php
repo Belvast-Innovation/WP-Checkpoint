@@ -8,31 +8,34 @@ use WPCheckpoint\Jobs\RuntimeLog;
 use WPCheckpoint\Jobs\TickResult;
 use WPCheckpoint\Jobs\WebRun;
 use WPCheckpoint\Plugin;
+use WPCheckpoint\Restore\Loader;
 use WPCheckpoint\Restore\Maintenance;
 use WPCheckpoint\Standalone\Credentials;
 use WPCheckpoint\Tests\Fixtures\Restore\SwapTestCase;
 
 /**
  * The files of a run without WordPress and the swap: written before the maintenance file (the runtime, then the visitor
- * file, then the runtime log, each with a checkpoint after it, then the data file and the code), taken down after it (the code, the data file,
- * the visitor file, the runtime, the runtime log last, its lines added to the job's log first). A WP-CLI run killed at
+ * file, then the runtime log, then the loader in the must-use plugins directory, each with a checkpoint after it, then
+ * the data file and the code), taken down the loader first, then the code, the data file, the visitor file, the runtime,
+ * the runtime log last, its lines added to the job's log first. A WP-CLI run killed at
  * each point in between leaves a state the next run goes on from, to a site as it was and no file left; a take-down does
  * not wait on the job's log; two runs without WordPress at once (no lock between them) take the job one at a time.
  */
 final class WebFilesSwapTest extends SwapTestCase {
 
 	/**
-	 * The files of the swap in the WordPress directory, in WEB order.
+	 * The files of the swap: the loader in the must-use plugins directory (by its name there), then those in the
+	 * WordPress directory, in the order they are taken down.
 	 *
 	 * @return string[]
 	 */
 	private function swap_files(): array {
 		return array_values(
 			array_filter(
-				array( Maintenance::FILE, Maintenance::DATA, Maintenance::VISITOR, Maintenance::RUNTIME, Maintenance::LOG ),
+				array( Loader::NAME, Maintenance::FILE, Maintenance::DATA, Maintenance::VISITOR, Maintenance::RUNTIME, Maintenance::LOG ),
 				function ( string $name ): bool {
 					clearstatcache();
-					return file_exists( $this->abspath . '/' . $name );
+					return file_exists( ( Loader::NAME === $name ? $this->dirs['mu-plugins'] : $this->abspath ) . '/' . $name );
 				}
 			)
 		);
@@ -63,7 +66,9 @@ final class WebFilesSwapTest extends SwapTestCase {
 			'visitor recorded' => array( 'visitor_recorded', array( Maintenance::VISITOR, Maintenance::RUNTIME ) ),
 			'log written'      => array( 'log_written', array( Maintenance::VISITOR, Maintenance::RUNTIME, Maintenance::LOG ) ),
 			'log recorded'     => array( 'log_recorded', array( Maintenance::VISITOR, Maintenance::RUNTIME, Maintenance::LOG ) ),
-			'maintenance up'   => array( 'maintenance', array( Maintenance::FILE, Maintenance::DATA, Maintenance::VISITOR, Maintenance::RUNTIME, Maintenance::LOG ) ),
+			'loader written'   => array( 'loader_written', array( Loader::NAME, Maintenance::VISITOR, Maintenance::RUNTIME, Maintenance::LOG ) ),
+			'loader recorded'  => array( 'loader_recorded', array( Loader::NAME, Maintenance::VISITOR, Maintenance::RUNTIME, Maintenance::LOG ) ),
+			'maintenance up'   => array( 'maintenance', array( Loader::NAME, Maintenance::FILE, Maintenance::DATA, Maintenance::VISITOR, Maintenance::RUNTIME, Maintenance::LOG ) ),
 		);
 	}
 
@@ -97,7 +102,7 @@ final class WebFilesSwapTest extends SwapTestCase {
 	 * @return array<string, array{0: int, 1: string[]}>
 	 */
 	public function take_down_points(): array {
-		$all = array( Maintenance::FILE, Maintenance::DATA, Maintenance::VISITOR, Maintenance::RUNTIME, Maintenance::LOG );
+		$all = array( Loader::NAME, Maintenance::FILE, Maintenance::DATA, Maintenance::VISITOR, Maintenance::RUNTIME, Maintenance::LOG );
 		$out = array();
 		foreach ( $all as $i => $name ) {
 			$out[ 'before ' . $name ] = array( $i + 1, array_slice( $all, $i ) );

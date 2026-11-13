@@ -34,6 +34,7 @@ final class WebNoWordPressTest extends SwapTestCase {
 			(string) wp_json_encode(
 				array(
 					'abspath'   => $this->abspath,
+					'content'   => $this->dirs['other-content'],
 					'db'        => array(
 						'name'     => DB_NAME,
 						'user'     => DB_USER,
@@ -94,7 +95,7 @@ final class WebNoWordPressTest extends SwapTestCase {
 			return;
 		}
 		$this->assertSame( TickResult::LEFT, $last['status'], wp_json_encode( $report ) );
-		$this->assertStringContainsString( 'object cache can only be flushed by WP-CLI', (string) $last['message'] );
+		$this->assertStringContainsString( 'object cache cannot be flushed from here', (string) $last['message'] );
 		$site = $this->site();
 		$this->assertTrue( $site['maintenance'], 'held' );
 		$site['maintenance'] = false;

@@ -1,6 +1,6 @@
 <?php
 
-namespace WPCheckpoint\Tests\Unit\Restore;
+namespace WPCheckpoint\Tests\Integration;
 
 use WPCheckpoint\Restore\Maintenance;
 use WPCheckpoint\Tests\Fixtures\Sandbox;
@@ -13,7 +13,8 @@ use Yoast\PHPUnitPolyfills\TestCases\TestCase;
  * that time five seconds on before the runtime opens anything, never in WP-CLI, in its own check, nor twice, and the
  * request still ends with the maintenance page; the take-down adds the runtime log to the job's log first, then takes
  * down .maintenance, the data file, the visitor file, the runtime and the log, in that order, and does not wait on the
- * log.
+ * log. Each request is a process of php-cgi (a request's SAPI, which the test site's image has: on the command line the
+ * code runs no runtime); nothing here needs WordPress or the database.
  */
 final class MaintenanceWebTest extends TestCase {
 
@@ -231,14 +232,17 @@ final class MaintenanceWebTest extends TestCase {
 		$script = $this->aux . '/request.php';
 		file_put_contents( $script, '<?php ' . $before . ' $upgrading = null; for ( $i = 0; $i < ' . $times . '; $i++ ) { ( static function () { global $upgrading; ' . $scope . ' require ' . var_export( $this->dir . '/.maintenance', true ) . '; } )(); } echo json_encode( array( $upgrading, gettype( $upgrading ) ) );' );
 		$pipes   = array();
-		$process = proc_open( array( PHP_BINARY, $script ), array( 1 => array( 'pipe', 'w' ), 2 => array( 'pipe', 'w' ) ), $pipes );
+		$cgi = dirname( PHP_BINARY ) . '/php-cgi';
+		$this->assertTrue( is_executable( $cgi ), 'php-cgi is next to the PHP binary (the test site\'s image has it): a request\'s SAPI is needed' );
+		$process = proc_open( array( $cgi, $script ), array( 1 => array( 'pipe', 'w' ), 2 => array( 'pipe', 'w' ) ), $pipes );
 		$out     = (string) stream_get_contents( $pipes[1] );
 		$err     = (string) stream_get_contents( $pipes[2] );
 		fclose( $pipes[1] );
 		fclose( $pipes[2] );
 		proc_close( $process );
 		self::gone( $script );
-		$said   = json_decode( $out, true );
+		$parts  = explode( "\r\n\r\n", $out, 2 ); // php-cgi puts its headers first.
+		$said   = json_decode( trim( (string) end( $parts ) ), true );
 		$called = is_file( $this->dir . '/called.json' ) ? json_decode( (string) file_get_contents( $this->dir . '/called.json' ), true ) : null;
 		return array(
 			'upgrading' => is_array( $said ) ? $said[0] : null,
