@@ -63,7 +63,8 @@ final class JobsTableCheckTest extends TestCase {
 	}
 
 	public function test_the_script_is_run_by_the_integration_script_before_phpunit_and_its_refusal_stops_the_run(): void {
-		$script = (string) file_get_contents( dirname( __DIR__, 3 ) . '/bin/test-integration.sh' );
+		// Line ends as in the repository: a checkout on Windows may have turned them into CRLF.
+		$script = str_replace( "\r\n", "\n", (string) file_get_contents( dirname( __DIR__, 3 ) . '/bin/test-integration.sh' ) );
 		$check  = strpos( $script, 'php "$PLUGIN/tests/Fixtures/jobs-table-precheck.php"' );
 		$run    = strpos( $script, 'php "$PHPUNIT"' );
 		$this->assertNotFalse( $check );
