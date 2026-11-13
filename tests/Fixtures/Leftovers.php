@@ -223,7 +223,8 @@ final class Leftovers implements TestListener {
 	}
 
 	/**
-	 * The storage directories there when this run started: no test's to remove.
+	 * The storage directories there when this run started, and the plugin's own as each test found it
+	 * (StorageDirs::settle()): no test's to remove, and none a test made.
 	 *
 	 * @return string[]
 	 */
@@ -435,6 +436,11 @@ final class Leftovers implements TestListener {
 		if ( ! $this->given && 'integration' === getenv( 'WPCHECKPOINT_TEST_SUITE' ) && isset( $GLOBALS['wpdb'] ) ) {
 			// The plugin's own storage directory, there and stored before the test's transaction starts.
 			$this->state   = StorageDirs::settle();
+			$own           = StorageDirs::stored_path();
+			if ( '' !== $own && ! in_array( $own, self::$before_run, true ) ) {
+				// No test's to remove, and no test's "other directory made" (before_run()): it was there before the test.
+				self::$before_run[] = $own;
+			}
 			$this->options = OwnOptions::note(); // The plugin's own option rows as the test finds them.
 		}
 		$this->before = $this->now();
