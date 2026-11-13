@@ -7,8 +7,12 @@ use PHPUnit\Framework\TestCase;
 /**
  * A test's tear-down that commits (a removal of rows the test had committed) rolls back first: a COMMIT with the
  * test's transaction still open commits whatever else the test wrote and left uncommitted, onto the site the tests
- * after it run on. Every tear_down() in tests/ whose body has a COMMIT before the parent's tear-down has a ROLLBACK
- * before that COMMIT.
+ * after it run on. Every tear_down() in tests/ whose body has a COMMIT statement before the parent's tear-down has a
+ * ROLLBACK before that COMMIT.
+ *
+ * Only that is checked: a COMMIT written in the tear-down's own body. A commit made by a method the tear-down calls,
+ * and the commit a DDL statement makes (the tear-downs that drop a table, the base test cases among them), are not
+ * seen; those tear-downs still commit what the test left uncommitted.
  */
 final class TearDownCommitTest extends TestCase {
 

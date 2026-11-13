@@ -58,7 +58,14 @@ trap 'rm -f "$body" "$log"' EXIT
 if [ -n "$number" ]; then
 	gh issue comment "$number" --body-file "$body" || exit $?
 else
-	# The label is made when it is not there yet (and left as it is when it is).
-	gh label create "$LABEL" --description "The daily integration run in random order" --color BFD4F2 2> /dev/null || gh label list --search "$LABEL" --json name --jq '.[].name' | grep -qxF "$LABEL" || exit 1
+	# The label is made when it is not there yet (and left as it is when it is: making it then fails, and the list
+	# says whether it is there).
+	if ! made="$(gh label create "$LABEL" --description "The daily integration run in random order" --color BFD4F2 2>&1)"; then
+		labels="$(gh label list --search "$LABEL" --limit 100 --json name --jq '.[].name')" || exit $?
+		if ! printf '%s\n' "$labels" | grep -xF -- "$LABEL" > /dev/null; then
+			echo "The label $LABEL is not there and could not be made: $made" >&2
+			exit 1
+		fi
+	fi
 	gh issue create --title "$TITLE" --label "$LABEL" --body-file "$body" || exit $?
 fi
