@@ -69,6 +69,68 @@ final class StorageDirs {
 	}
 
 	/**
+	 * The stored state's row as the database has it now (its serialized value; on a single site its autoload too), or
+	 * null for none.
+	 *
+	 * @return array{value: string, autoload: string}|null
+	 */
+	public static function stored_row(): ?array {
+		global $wpdb;
+		$row = is_multisite()
+			? $wpdb->get_row( $wpdb->prepare( "SELECT meta_value AS value, '' AS autoload FROM {$wpdb->sitemeta} WHERE meta_key = %s AND site_id = %d", Directories::OPTION, get_current_network_id() ), ARRAY_A )
+			: $wpdb->get_row( $wpdb->prepare( "SELECT option_value AS value, autoload FROM {$wpdb->options} WHERE option_name = %s", Directories::OPTION ), ARRAY_A );
+		return is_array( $row ) ? array(
+			'value'    => (string) $row['value'],
+			'autoload' => (string) $row['autoload'],
+		) : null;
+	}
+
+	/**
+	 * Before a test, outside its transaction: the plugin's own storage directory is there and the stored state,
+	 * committed, names it; made now when not (the first test of a run; after a test that removed it). Without this the
+	 * test that first needs the directory makes it inside its transaction: the state is rolled back with the test,
+	 * and the directory is counted as left behind by it (which test that is depends on the order of the run).
+	 *
+	 * @return array{value: string, autoload: string}|null The stored state's row as the test finds it.
+	 */
+	public static function settle(): ?array {
+		global $wpdb;
+		$path = self::stored_path();
+		if ( '' === $path || ! is_dir( $path ) ) {
+			wp_cache_flush(); // The cache may still hold the state of a test whose transaction was rolled back.
+			( new Directories() )->base();
+			$wpdb->query( 'COMMIT' ); // The core test case leaves autocommit off between tests.
+			wp_cache_flush();
+		}
+		return self::stored_row();
+	}
+
+	/**
+	 * After a test (its transaction over): the stored state's row is put back as the test found it when the test
+	 * left another, or none, committed (a DROP TABLE after the option was deleted commits the deletion) and the
+	 * directory it named is still there. A directory the test made and left under another state is then listed, and
+	 * counted as left behind by it.
+	 *
+	 * @param array{value: string, autoload: string}|null $row settle()'s.
+	 * @return void
+	 */
+	public static function put_back( ?array $row ): void {
+		global $wpdb;
+		if ( null === $row || self::stored_row() === $row || ! is_dir( self::path_in( $row['value'] ) ) ) {
+			return;
+		}
+		if ( is_multisite() ) {
+			$wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->sitemeta} WHERE meta_key = %s AND site_id = %d", Directories::OPTION, get_current_network_id() ) );
+			$wpdb->query( $wpdb->prepare( "INSERT INTO {$wpdb->sitemeta} (site_id, meta_key, meta_value) VALUES (%d, %s, %s)", get_current_network_id(), Directories::OPTION, $row['value'] ) );
+		} else {
+			$wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->options} WHERE option_name = %s", Directories::OPTION ) );
+			$wpdb->query( $wpdb->prepare( "INSERT INTO {$wpdb->options} (option_name, option_value, autoload) VALUES (%s, %s, %s)", Directories::OPTION, $row['value'], $row['autoload'] ) );
+		}
+		$wpdb->query( 'COMMIT' );
+		wp_cache_flush();
+	}
+
+	/**
 	 * The "path" of a serialized state, '' when it has none; read by the string's length, nothing unserialized.
 	 *
 	 * @param string $raw Serialized state.

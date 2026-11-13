@@ -137,6 +137,9 @@ final class Leftovers implements TestListener {
 	 */
 	private static $before_run = array();
 
+	/** @var array{value: string, autoload: string}|null The stored storage state's row as the running test found it (StorageDirs::settle()). */
+	private $state = null;
+
 	/** @var TestResult|null The run's result, for failures of a class or of the run. */
 	private $result = null;
 
@@ -417,6 +420,11 @@ final class Leftovers implements TestListener {
 		if ( $test instanceof TestCase && null !== $test->getTestResultObject() ) {
 			$this->result = $test->getTestResultObject();
 		}
+		$this->state = null;
+		if ( ! $this->given && 'integration' === getenv( 'WPCHECKPOINT_TEST_SUITE' ) && isset( $GLOBALS['wpdb'] ) ) {
+			// The plugin's own storage directory, there and stored before the test's transaction starts.
+			$this->state = StorageDirs::settle();
+		}
 		$this->before = $this->now();
 		if ( null !== $this->before && ! $this->given && $test instanceof TestCase ) {
 			self::$watching = get_class( $test ) . '::' . $test->getName( false );
@@ -436,6 +444,10 @@ final class Leftovers implements TestListener {
 		}
 		$before       = $this->before;
 		$this->before = null;
+		if ( null !== $this->state ) {
+			StorageDirs::put_back( $this->state ); // The stored state as the test found it.
+			$this->state = null;
+		}
 		$now          = $this->now();
 		if ( null === $before || null === $now ) {
 			return;

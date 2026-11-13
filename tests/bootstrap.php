@@ -133,12 +133,6 @@ function wpcheckpoint_bootstrap_integration() {
 	// The restores the tests run read a small stand-in for the running plugin, not the mounted working copy.
 	\WPCheckpoint\Tests\Fixtures\Restore\PluginStandIn::install();
 
-	// The plugin's storage directory, made now and its stored state committed: made by whichever test first needs
-	// it, inside that test's transaction, the state would be rolled back with it, and the directory counted as left
-	// behind by that test (in the suite's own order an earlier test happened to commit it; alone or in a random
-	// order, the test that came first failed).
-	\WPCheckpoint\Plugin::instance()->directories()->base();
-
 	// A run killed with SIGKILL could not remove its probe directory; bin/test-integration.sh names that run as it
 	// takes the lock over, and the directory goes now.
 	$stale = \WPCheckpoint\Tests\Fixtures\ProbeDir::remove_stale( WP_CONTENT_DIR, (string) getenv( 'WPCHECKPOINT_TEST_STALE_RUN_ID' ) );
