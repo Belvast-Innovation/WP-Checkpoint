@@ -95,10 +95,13 @@ final class StorageDirs {
 	 */
 	public static function settle(): ?array {
 		global $wpdb;
+		// The plugin's own objects go: the Directories a test before this one left in memory may name a directory that
+		// test's transaction made and its rollback forgot, and the first use of it here would make that directory again.
+		\WPCheckpoint\Plugin::instance()->reset_directories();
 		$path = self::stored_path();
 		if ( '' === $path || ! is_dir( $path ) ) {
 			wp_cache_flush(); // The cache may still hold the state of a test whose transaction was rolled back.
-			( new Directories() )->base();
+			\WPCheckpoint\Plugin::instance()->directories()->base();
 			$wpdb->query( 'COMMIT' ); // The core test case leaves autocommit off between tests.
 			wp_cache_flush();
 		}
