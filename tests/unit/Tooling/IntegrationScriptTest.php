@@ -443,6 +443,7 @@ final class IntegrationScriptTest extends TestCase {
 		copy( dirname( __DIR__, 2 ) . '/Fixtures/maintenance-precheck.php', $this->sandbox . '/plugin/tests/Fixtures/maintenance-precheck.php' ); // The check before PHPUnit.
 		copy( dirname( __DIR__, 2 ) . '/Fixtures/plugin-entries.php', $this->sandbox . '/plugin/tests/Fixtures/plugin-entries.php' ); // And the count.
 		copy( dirname( __DIR__, 2 ) . '/Fixtures/leftovers-precheck.php', $this->sandbox . '/plugin/tests/Fixtures/leftovers-precheck.php' ); // And what an earlier run left.
+		copy( dirname( __DIR__, 2 ) . '/Fixtures/jobs-table-precheck.php', $this->sandbox . '/plugin/tests/Fixtures/jobs-table-precheck.php' ); // And the jobs table.
 		file_put_contents( $this->sandbox . '/plugin/phpunit.xml.dist', '<phpunit/>' );
 		file_put_contents( $this->sandbox . '/plugin/src/Code.php', '<?php // the code' );
 		file_put_contents( $this->sandbox . '/plugin/tests/CodeTest.php', '<?php // its test' );
