@@ -238,6 +238,25 @@ final class LeftoversCheckTest extends WP_UnitTestCase {
 		$this->assertDirectoryDoesNotExist( $stored );
 	}
 
+	public function test_a_stored_state_left_after_its_directory_was_removed_goes_and_one_whose_directory_is_there_is_put_back(): void {
+		$dirs  = '\\WPCheckpoint\\Tests\\Fixtures\\StorageDirs';
+		$found = $dirs::stored_row();
+		$this->assertNotNull( $found, 'the run settled a state before this test' );
+		$this->assertDirectoryExists( $dirs::path_in( $found['value'] ) );
+		try {
+			// The test found a state whose directory is gone now, and left another: the one it left goes.
+			$gone          = $found;
+			$gone['value'] = str_replace( basename( $dirs::path_in( $found['value'] ) ), 'wp-checkpoint-0123456789ab', $found['value'] );
+			$this->assertDirectoryDoesNotExist( $dirs::path_in( $gone['value'] ) );
+			$dirs::put_back( $gone );
+			$this->assertNull( $dirs::stored_row(), 'the row left after the directory was removed' );
+		} finally {
+			// The control, and the row as this test found it: its directory is there, so it is put back.
+			$dirs::put_back( $found );
+		}
+		$this->assertSame( $found, $dirs::stored_row() );
+	}
+
 	public function test_it_sees_an_entry_of_the_uploads_directory_and_removes_it_only_under_a_tests_name(): void {
 		$dir    = \WPCheckpoint\Tests\Fixtures\UploadsLeftovers::dir();
 		$tests  = $dir . '/wpcexport-leftovercheck';

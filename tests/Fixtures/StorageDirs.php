@@ -111,23 +111,30 @@ final class StorageDirs {
 	/**
 	 * After a test (its transaction over): the stored state's row is put back as the test found it when the test
 	 * left another, or none, committed (a DROP TABLE after the option was deleted commits the deletion) and the
-	 * directory it named is still there. A directory the test made and left under another state is then listed, and
-	 * counted as left behind by it.
+	 * directory it named is still there; when the test removed that directory, the row the test left goes instead (a
+	 * state written for a stand-in WordPress directory would be a copy's to the tests after it, each of which then
+	 * makes a directory of its own) and settle() makes the next test's. A directory the test made and left under
+	 * another state is then listed, and counted as left behind by it.
 	 *
 	 * @param array{value: string, autoload: string}|null $row settle()'s.
 	 * @return void
 	 */
 	public static function put_back( ?array $row ): void {
 		global $wpdb;
-		if ( null === $row || self::stored_row() === $row || ! is_dir( self::path_in( $row['value'] ) ) ) {
+		if ( null === $row || self::stored_row() === $row ) {
 			return;
 		}
+		$there = is_dir( self::path_in( $row['value'] ) );
 		if ( is_multisite() ) {
 			$wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->sitemeta} WHERE meta_key = %s AND site_id = %d", Directories::OPTION, get_current_network_id() ) );
-			$wpdb->query( $wpdb->prepare( "INSERT INTO {$wpdb->sitemeta} (site_id, meta_key, meta_value) VALUES (%d, %s, %s)", get_current_network_id(), Directories::OPTION, $row['value'] ) );
+			if ( $there ) {
+				$wpdb->query( $wpdb->prepare( "INSERT INTO {$wpdb->sitemeta} (site_id, meta_key, meta_value) VALUES (%d, %s, %s)", get_current_network_id(), Directories::OPTION, $row['value'] ) );
+			}
 		} else {
 			$wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->options} WHERE option_name = %s", Directories::OPTION ) );
-			$wpdb->query( $wpdb->prepare( "INSERT INTO {$wpdb->options} (option_name, option_value, autoload) VALUES (%s, %s, %s)", Directories::OPTION, $row['value'], $row['autoload'] ) );
+			if ( $there ) {
+				$wpdb->query( $wpdb->prepare( "INSERT INTO {$wpdb->options} (option_name, option_value, autoload) VALUES (%s, %s, %s)", Directories::OPTION, $row['value'], $row['autoload'] ) );
+			}
 		}
 		$wpdb->query( 'COMMIT' );
 		wp_cache_flush();
