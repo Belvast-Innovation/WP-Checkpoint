@@ -37,6 +37,9 @@ final class JobsTableCheck {
 		return $out;
 	}
 
+	/** The command that makes the jobs table of the local tests site again, as the refusal gives it. */
+	public const REBUILD = 'npx wp-env run tests-cli wp eval \'require_once "/var/www/html/wp-content/plugins/wp-checkpoint/wp-checkpoint.php"; echo json_encode( \\WPCheckpoint\\Support\\Schema::ensure() );\'';
+
 	/**
 	 * Why the run does not start, '' when the table is whole.
 	 *
@@ -51,7 +54,8 @@ final class JobsTableCheck {
 		}
 		return "The jobs table of the tests database ({$table}) is not as schema version " . Schema::CURRENT . " makes it:\n  " . implode( "\n  ", $problems ) . "\n"
 			. "A run stopped in the middle of a test that had dropped it leaves it so; the tests that read it from another process would fail. The run does not start.\n"
-			. "Make it again in the tests container, then start the run again:\n"
-			. "  wp eval 'require_once \"wp-content/plugins/wp-checkpoint/wp-checkpoint.php\"; echo json_encode( \\WPCheckpoint\\Support\\Schema::ensure() );'\n";
+			. "Make it again (an older one is brought to this version) with this command, run in the repository on the host with the\n"
+			. "WP_ENV_PORT and WP_ENV_TESTS_PORT wp-env was started with; then start the run again:\n"
+			. '  ' . self::REBUILD . "\n";
 	}
 }

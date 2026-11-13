@@ -1,0 +1,18 @@
+# Line ends are LF in the repository and in every checkout (PHP, fixtures, scripts): tests match the text of these
+# files across lines, and the shell scripts run in Linux containers from a checkout made on any system.
+* text=auto eol=lf
+
+# Not text: never converted.
+tests/extractors/check.php -text
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.zip binary
+*.gz binary
+*.tar binary
+*.woff binary
+*.woff2 binary
+*.mo binary

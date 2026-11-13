@@ -39,6 +39,7 @@ final class JobsTableCheckTest extends TestCase {
 		$this->assertStringContainsString( 'schema version ' . Schema::CURRENT, $said );
 		$this->assertStringContainsString( 'The run does not start.', $said );
 		$this->assertStringContainsString( 'Schema::ensure()', $said, 'what to run' );
+		$this->assertStringContainsString( "\n  npx wp-env run tests-cli wp eval 'require_once \"/var/www/html/wp-content/plugins/wp-checkpoint/wp-checkpoint.php\"; echo json_encode( \\WPCheckpoint\\Support\\Schema::ensure() );'\n", $said, 'the whole command, as it is typed on the host' );
 	}
 
 	public function test_every_missing_column_and_every_narrower_one_is_named(): void {
@@ -63,8 +64,7 @@ final class JobsTableCheckTest extends TestCase {
 	}
 
 	public function test_the_script_is_run_by_the_integration_script_before_phpunit_and_its_refusal_stops_the_run(): void {
-		// Line ends as in the repository: a checkout on Windows may have turned them into CRLF.
-		$script = str_replace( "\r\n", "\n", (string) file_get_contents( dirname( __DIR__, 3 ) . '/bin/test-integration.sh' ) );
+		$script = (string) file_get_contents( dirname( __DIR__, 3 ) . '/bin/test-integration.sh' ); // LF in every checkout (.gitattributes).
 		$check  = strpos( $script, 'php "$PLUGIN/tests/Fixtures/jobs-table-precheck.php"' );
 		$run    = strpos( $script, 'php "$PHPUNIT"' );
 		$this->assertNotFalse( $check );
