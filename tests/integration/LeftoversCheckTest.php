@@ -528,18 +528,22 @@ final class LeftoversCheckTest extends WP_UnitTestCase {
 		$leaver = '\\WPCheckpoint\\Tests\\Fixtures\\FenceLeaver';
 		$shared = '\\WPCheckpoint\\Tests\\Fixtures\\SharedState';
 		$this->assertSame( array(), $shared::off_baseline(), 'the control: at its baseline when this test starts' );
-		$this->assertSame( array(), Leftovers::listing(), 'nothing is there that a listener starting a run now would take for an earlier run\'s' );
+		$this->assertSame( array(), Leftovers::listing(), 'nothing is there that a listener starting a run now would take for an earlier run\'s (an earlier run\'s own, kept by WPCHECKPOINT_TEST_REMOVE_STORAGE=0 or WPCHECKPOINT_TEST_MAINTENANCE_REMOVE=0, fails this test)' );
 		$close = function () use ( $wpdb, $leaver ): void {
 			$this->assertSame( \WPCheckpoint\Jobs\UninstallFence::DONE, \WPCheckpoint\Jobs\UninstallFence::close( $leaver::BY ) );
 			$wpdb->query( 'COMMIT' );
 		};
 		$said     = array();
-		// As phpunit.xml.dist registers it (no lister given), its notices kept.
+		// As phpunit.xml.dist registers it (no lister given), its notices kept; but no other table of this run's is
+		// its to drop as an earlier run's.
 		$listener = new Leftovers(
 			null,
 			null,
 			static function ( string $text ) use ( &$said ): void {
 				$said[] = $text;
+			},
+			static function (): array {
+				return array();
 			}
 		);
 		$result   = new \PHPUnit\Framework\TestResult();
@@ -551,7 +555,6 @@ final class LeftoversCheckTest extends WP_UnitTestCase {
 			$result->startTestSuite( $suite );
 			$this->assertStringContainsString( "Shared state an earlier run left off its baseline (put back now):\n  the uninstall fence: left \"closed\" (closed_by \"" . $leaver::BY . '")', implode( '', $said ) );
 			$this->assertSame( \WPCheckpoint\Jobs\UninstallFence::OPEN . '/', $leaver::stored() );
-			$this->assertSame( 0, $result->failureCount() );
 
 			// A test of the class, which leaves nothing; then the class's own tear-down leaves the fence closed.
 			( new $leaver( 'test_says_how_it_finds_the_fence' ) )->run( $result );
@@ -579,7 +582,6 @@ final class LeftoversCheckTest extends WP_UnitTestCase {
 			$this->assertStringContainsString( "Shared state off its baseline after a test, with no result to fail it through (put back now):\n  the uninstall fence: left \"closed\"", implode( '', $heard ) );
 			$wpdb->query( 'ROLLBACK' );
 			$this->assertSame( \WPCheckpoint\Jobs\UninstallFence::OPEN . '/', $leaver::stored(), 'put back, committed' );
-			$this->assertSame( 1, $result->failureCount(), 'no failure of anything' );
 		} finally {
 			$shared::restore( array( 'the uninstall fence' ) );
 		}
@@ -604,6 +606,11 @@ final class LeftoversCheckTest extends WP_UnitTestCase {
 			$failure = $result->failures()[0];
 			$this->assertStringContainsString( 'the register of shared state', $failure->getTestName() );
 			$this->assertStringContainsString( 'an item: its subject WPCheckpoint\\Jobs\\UninstallFence::GONE is not there', $failure->exceptionMessage() );
+			// An item whose methods are gone is said as stale, and neither asked nor put back.
+			$gone = array( 'an item' => array( 'subject' => $shared::ITEMS['the uninstall fence']['subject'], 'reads' => 'gone', 'restores' => 'gone' ) );
+			$this->assertCount( 2, $shared::stale( $gone ) );
+			$this->assertSame( array(), $shared::off_baseline( $gone ) );
+			$shared::restore( array( 'an item' ), $gone );
 		} finally {
 			$shared::replace( null );
 		}

@@ -8,7 +8,7 @@ use WPCheckpoint\Jobs\UninstallFence;
  * The register of state every test shares and must leave at its baseline: what one test leaves committed off it, the
  * tests after it start from, and which of them meets it depends on the order of the run. The listener (Leftovers)
  * asks after each test (and each class): an item off its baseline fails that test by name, and is put back, so the
- * tests after it are not affected.
+ * tests after it are not affected. It asks when a run starts too: what an earlier run left is said and put back.
  *
  * An item: what it is about in the plugin ("subject": a class constant, by name), the method here that says how it is
  * off its baseline ("reads": '' when it is at it), and the method here that puts it back ("restores"). An item whose
