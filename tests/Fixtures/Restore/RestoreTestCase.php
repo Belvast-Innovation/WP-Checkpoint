@@ -98,6 +98,7 @@ abstract class RestoreTestCase extends JobTestCase {
 		global $wpdb;
 		// Job ids start over with every test: plan rows of an earlier test's job would be this one's.
 		$wpdb->query( 'DELETE FROM `' . $wpdb->base_prefix . 'wpcheckpoint_swap_plan`' );
+		$wpdb->query( 'COMMIT' ); // The restores committed the rows; the tear-down above this one begins with a rollback.
 		$wpdb->query( 'SET FOREIGN_KEY_CHECKS=0' );
 		foreach ( $this->created as $table ) {
 			$wpdb->query( "DROP TABLE IF EXISTS `{$table}`" );
