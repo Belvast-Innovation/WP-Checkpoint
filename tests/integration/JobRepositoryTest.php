@@ -1379,7 +1379,10 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 			Schema::ensure( true );
 			$this->assertSame( \WPCheckpoint\Jobs\UninstallFence::CLOSED, \WPCheckpoint\Jobs\UninstallFence::row()['state'], 'a fence closed just now stays closed' );
 		} finally {
+			// The check of the schema committed the close (it creates tables): the opening is committed too, or the
+			// tear-down's rollback leaves the fence closed for the tests after this one.
 			\WPCheckpoint\Jobs\UninstallFence::open();
+			$wpdb->query( 'COMMIT' );
 		}
 	}
 

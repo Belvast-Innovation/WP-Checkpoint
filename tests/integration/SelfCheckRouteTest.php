@@ -64,6 +64,7 @@ final class SelfCheckRouteTest extends WP_UnitTestCase {
 		}
 		$GLOBALS['wp_rest_server'] = null;
 		parent::tear_down();
+		\WPCheckpoint\Tests\Fixtures\RunTables::drop_temporary(); // The plugin's schema was checked under the core test case's filters.
 		Plugin::instance()->reset_directories();
 		if ( null !== $this->storage_before ) {
 			StorageDirs::remove_made_since( $this->storage_before );

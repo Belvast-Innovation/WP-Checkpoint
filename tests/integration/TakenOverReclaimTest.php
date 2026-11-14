@@ -195,6 +195,7 @@ final class TakenOverReclaimTest extends SwapTestCase {
 		\WPCheckpoint\Support\Schema::drop();
 		$this->assertSame( array(), $this->left( $job->id )['tables'], 'dropped by uninstall, by the names it made' );
 		\WPCheckpoint\Support\Schema::ensure(); // The test's tables back for what follows.
+		$GLOBALS['wpdb']->query( 'COMMIT' ); // With the fence's row, which the tear-down's rollback would take again.
 	}
 
 	public function test_uninstall_keeps_the_tables_of_a_job_abandoned_from_here(): void {
@@ -214,6 +215,7 @@ final class TakenOverReclaimTest extends SwapTestCase {
 			$wpdb->query( 'DROP TABLE `' . $table . '`' ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- a listed table name.
 		}
 		\WPCheckpoint\Support\Schema::ensure(); // The test's tables back for what follows.
+		$GLOBALS['wpdb']->query( 'COMMIT' ); // With the fence's row, which the tear-down's rollback would take again.
 	}
 
 	public function test_a_take_over_or_abandon_read_before_another_take_over_writes_nothing(): void {
