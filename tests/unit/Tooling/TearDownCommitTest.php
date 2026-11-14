@@ -14,13 +14,14 @@ use PHPUnit\Framework\TestCase;
  * statements written as string literals in its body before the call of the parent's method, and in the bodies of the
  * methods it calls there, the first that ends a transaction has a ROLLBACK before it. Calls are followed through
  * $this->, self::, static::, parent:: and Name:: to the classes and traits of tests/: a method is looked for in the
- * class, then in the traits it uses, then up its parents. Every class is checked with the tear-down it inherits as
- * well, so that $this-> and static:: find a helper the class itself replaces.
+ * class, then in the traits it uses, then up its parents. Every class is checked with its own tear-down and with
+ * each one above it, so that $this-> and static:: there find a helper the class itself replaces.
  *
  * Not seen: a statement that is not a literal beginning with its keyword (built in a variable, returned by a
  * function), a call on another object ($other->method()), a plain function, and whatever the plugin's own code does
- * when a tear-down calls it. A call by Name:: goes to the first class of tests/ read under that short name (each
- * class's own tear-downs are checked whatever its name). Any 'ROLLBACK' literal met before counts: one inside a
+ * when a tear-down calls it. A call by Name::, and a parent, go to the first class of tests/ read under that short
+ * name (each class's own tear-downs are checked whatever its name). In a trait, self:: is looked for in the trait,
+ * not in the class that uses it. SET SESSION autocommit and SET @@autocommit are not among the statements. Any 'ROLLBACK' literal met before counts: one inside a
  * condition, in a closure that is never called, or passed as an argument is taken as a rollback.
  */
 final class TearDownCommitTest extends TestCase {
@@ -235,31 +236,36 @@ final class TearDownCommitTest extends TestCase {
 		$out = array();
 		foreach ( $all as $name => $class ) {
 			foreach ( self::TEAR_DOWNS as $method ) {
-				$hit = self::method( $all, $name, $method );
-				if ( null === $hit ) {
-					continue;
-				}
-				$body   = $all[ $hit[0] ]['methods'][ $method ];
-				$tokens = $body['tokens'];
-				$count  = count( $tokens );
-				for ( $i = 0; $i + 2 < $count; $i++ ) {
-					if ( 'parent' === strtolower( $tokens[ $i ][1] ) && 'T_DOUBLE_COLON' === $tokens[ $i + 1 ][0] && $method === $tokens[ $i + 2 ][1] ) {
-						$tokens = array_slice( $tokens, 0, $i );
+				// Its own tear-down and each one above it (reached by parent::), all with this class's helpers.
+				$from = $name;
+				for ( $up = 0; $up < 30; $up++ ) {
+					$hit = self::method( $all, $from, $method );
+					if ( null === $hit ) {
 						break;
 					}
-				}
-				$says = array();
-				foreach ( self::literals( $all, $name, $hit[0], $tokens, array( $hit[0] . '::' . $method => true ) ) as $literal ) {
-					if ( 1 === preg_match( self::ROLLBACK, $literal ) ) {
-						$says[] = 'ROLLBACK';
-					} elseif ( 1 === preg_match( self::ENDS, $literal, $m ) ) {
-						$says[] = strtoupper( (string) preg_replace( '/\s+/', ' ', $m[1] ) );
+					$from   = $all[ $hit[0] ]['parent'];
+					$body   = $all[ $hit[0] ]['methods'][ $method ];
+					$tokens = $body['tokens'];
+					$count  = count( $tokens );
+					for ( $i = 0; $i + 2 < $count; $i++ ) {
+						if ( 'parent' === strtolower( $tokens[ $i ][1] ) && 'T_DOUBLE_COLON' === $tokens[ $i + 1 ][0] && $method === $tokens[ $i + 2 ][1] ) {
+							$tokens = array_slice( $tokens, 0, $i );
+							break;
+						}
 					}
+					$says = array();
+					foreach ( self::literals( $all, $name, $hit[0], $tokens, array( $hit[0] . '::' . $method => true ) ) as $literal ) {
+						if ( 1 === preg_match( self::ROLLBACK, $literal ) ) {
+							$says[] = 'ROLLBACK';
+						} elseif ( 1 === preg_match( self::ENDS, $literal, $m ) ) {
+							$says[] = strtoupper( (string) preg_replace( '/\s+/', ' ', $m[1] ) );
+						}
+					}
+					$out[ $name . '::' . $method . ( 0 === $up ? '' : ' in ' . $hit[0] ) ] = array(
+						'at'   => $where[ $hit[0] ] . ':' . $body['line'],
+						'says' => $says,
+					);
 				}
-				$out[ $name . '::' . $method ] = array(
-					'at'   => $where[ $hit[0] ] . ':' . $body['line'],
-					'says' => $says,
-				);
 			}
 		}
 		ksort( $out );
@@ -343,6 +349,10 @@ final class TearDownCommitTest extends TestCase {
 		$found = self::found( self::source( "\t\t\$this->put_away();\n", 'tear_down', "\tprotected function put_away(): void {\n\t}\n" ) + $child );
 		$this->assertCount( 1, $found );
 		$this->assertStringContainsString( ' D::tear_down (', $found[0], 'the class that replaces the helper' );
+		$own   = array( 'd.php' => "<?php\nfinal class D extends A {\n\tpublic function tear_down(): void {\n\t\tparent::tear_down();\n\t}\n\tprotected function put_away(): void {\n{$query}\t}\n}\n" );
+		$found = self::found( self::source( "\t\t\$this->put_away();\n", 'tear_down', "\tprotected function put_away(): void {\n\t}\n" ) + $own );
+		$this->assertCount( 1, $found, 'the class has a tear-down of its own that only calls the parent\'s' );
+		$this->assertStringContainsString( ' D::tear_down in A (', $found[0] );
 		$this->assertCount( 2, self::found( self::source( $query ) + array( 'again/a.php' => self::source( $query )['a.php'] ) ), 'both classes named A' );
 	}
 
