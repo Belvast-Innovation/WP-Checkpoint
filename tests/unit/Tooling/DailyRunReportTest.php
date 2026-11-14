@@ -34,7 +34,7 @@ final class DailyRunReportTest extends TestCase {
 			. "case \"\$*\" in\n"
 			. "\t'api --paginate -X GET repos/owner/repo/issues '*) [ -n \"\${GH_LIST_FAILS:-}\" ] && exit 4; cat \"\$GH_LISTING\" ;;\n"
 			. "\t'label create '*) [ -n \"\${GH_LABELS:-}\" ] && { echo 'already exists or refused' >&2; exit 1; } ;;\n"
-			. "\t'label list '*) printf '%b' \"\${GH_LABELS:-}\" ;;\n"
+			. "\t'label list '*) [ -n \"\${GH_LABELS_UNREAD:-}\" ] && exit 6; printf '%b' \"\${GH_LABELS:-}\" ;;\n"
 			. "esac\n"
 			. "exit 0\n"
 		);
@@ -189,7 +189,11 @@ final class DailyRunReportTest extends TestCase {
 		list( $status, $asked, $out ) = $this->report( 'failure', '', array( 'GH_LABELS' => 'daily-run-old\nnot-daily-run\n' ) );
 		$this->assertSame( 1, $status, $out );
 		$this->assertSame( array(), self::changes( $asked ), 'without its label the issue would not be found again: none is opened' );
-		$this->assertStringContainsString( 'already exists or refused', $out, 'why the label could not be made is said' );
+		$this->assertStringContainsString( 'The label daily-run is not there and could not be made: already exists or refused', $out, 'why the label could not be made is said, in the script\'s own line' );
+
+		list( $status, $asked, $out ) = $this->report( 'failure', '', array( 'GH_LABELS' => 'daily-run\n', 'GH_LABELS_UNREAD' => '1' ) );
+		$this->assertSame( 6, $status, $out );
+		$this->assertSame( array(), self::changes( $asked ), 'the labels could not be listed: whether its label is there is not known, and no issue is opened' );
 	}
 
 	public function test_the_workflow_runs_the_script_and_only_its_report_job_may_write_issues(): void {

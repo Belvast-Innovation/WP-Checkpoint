@@ -12,18 +12,21 @@ use PHPUnit\Framework\TestCase;
  *
  * Checked, for every tear_down(), tearDown(), tear_down_after_class() and tearDownAfterClass() in tests/: of the
  * statements written as string literals in its body before the call of the parent's method, and in the bodies of the
- * methods it calls there (followed through $this->, self::, static::, parent:: and Name:: to the classes and traits
- * of tests/, by their short names and up their parents), the first that ends a transaction has a ROLLBACK before it.
+ * methods it calls there, the first that ends a transaction has a ROLLBACK before it. Calls are followed through
+ * $this->, self::, static::, parent:: and Name:: to the classes and traits of tests/: a method is looked for in the
+ * class, then in the traits it uses, then up its parents. Every class is checked with the tear-down it inherits as
+ * well, so that $this-> and static:: find a helper the class itself replaces.
  *
  * Not seen: a statement that is not a literal beginning with its keyword (built in a variable, returned by a
  * function), a call on another object ($other->method()), a plain function, and whatever the plugin's own code does
- * when a tear-down calls it. Two classes of tests/ with one short name are taken as the one read last. A ROLLBACK
- * inside a condition counts as one.
+ * when a tear-down calls it. A call by Name:: goes to the first class of tests/ read under that short name (each
+ * class's own tear-downs are checked whatever its name). Any 'ROLLBACK' literal met before counts: one inside a
+ * condition, in a closure that is never called, or passed as an argument is taken as a rollback.
  */
 final class TearDownCommitTest extends TestCase {
 
 	/** The statements that end a transaction, as a literal begins with them. */
-	private const ENDS = '/^\s*(COMMIT|DROP|CREATE|ALTER|TRUNCATE|RENAME|LOCK\s+TABLES?|UNLOCK\s+TABLES?|START\s+TRANSACTION|BEGIN|SET\s+autocommit|ANALYZE|OPTIMIZE|REPAIR|FLUSH)(?=\s|;|$)/i';
+	private const ENDS = '/^\s*(COMMIT|DROP|CREATE|ALTER|TRUNCATE|RENAME|LOCK\s+TABLES?|UNLOCK\s+TABLES?|START\s+TRANSACTION|BEGIN|SET\s+autocommit|ANALYZE|OPTIMIZE|REPAIR|FLUSH)(?=\s|;|=|$)/i';
 
 	private const ROLLBACK = '/^\s*ROLLBACK\s*;?\s*$/i';
 
@@ -64,7 +67,7 @@ final class TearDownCommitTest extends TestCase {
 	 * The classes and traits of a source with their methods.
 	 *
 	 * @param string $source A PHP source.
-	 * @return array<string, array{parent: string, methods: array<string, array{line: int, tokens: array<int, array{0: string, 1: string, 2: int}>}>}>
+	 * @return array<string, array{parent: string, traits: string[], methods: array<string, array{line: int, tokens: array<int, array{0: string, 1: string, 2: int}>}>}>
 	 */
 	private static function classes( string $source ): array {
 		$tokens = self::tokens( $source );
@@ -107,10 +110,20 @@ final class TearDownCommitTest extends TestCase {
 				}
 				$out[ $class ] = array(
 					'parent'  => $parent,
+					'traits'  => array(),
 					'methods' => array(),
 				);
 				$inside[0]     = $depth;
 				$i             = $j - 1;
+				continue;
+			}
+			if ( null !== $class && null === $method && 'T_USE' === $kind && $depth === $inside[0] + 1 ) {
+				for ( $j = $i + 1; $j < $count && ';' !== $tokens[ $j ][0] && '{' !== $tokens[ $j ][0]; $j++ ) {
+					if ( in_array( $tokens[ $j ][0], array( 'T_STRING', 'T_NAME_QUALIFIED', 'T_NAME_FULLY_QUALIFIED' ), true ) && ! in_array( $tokens[ $j + 1 ][0] ?? '', array( 'T_NS_SEPARATOR' ), true ) ) {
+						$out[ $class ]['traits'][] = self::short( $tokens[ $j ][1] );
+					}
+				}
+				$i = $j - 1;
 				continue;
 			}
 			if ( null !== $class && null === $method && 'T_FUNCTION' === $kind && 'T_STRING' === $next[0] && $depth === $inside[0] + 1 ) {
@@ -133,7 +146,7 @@ final class TearDownCommitTest extends TestCase {
 	}
 
 	/**
-	 * A method of a class, its own or the nearest parent's.
+	 * A method of a class: its own, one of a trait it uses, or the nearest parent's.
 	 *
 	 * @param array<string, array<string, mixed>> $all   The classes.
 	 * @param string                              $class Class.
@@ -145,6 +158,11 @@ final class TearDownCommitTest extends TestCase {
 			if ( isset( $all[ $class ]['methods'][ $name ] ) ) {
 				return array( $class, $all[ $class ]['methods'][ $name ]['tokens'] );
 			}
+			foreach ( $all[ $class ]['traits'] as $trait ) {
+				if ( isset( $all[ $trait ]['methods'][ $name ] ) ) {
+					return array( $trait, $all[ $trait ]['methods'][ $name ]['tokens'] );
+				}
+			}
 			$class = $all[ $class ]['parent'];
 		}
 		return null;
@@ -154,12 +172,13 @@ final class TearDownCommitTest extends TestCase {
 	 * The string literals of some tokens in their order, those of the methods called among them in the call's place.
 	 *
 	 * @param array<string, array<string, mixed>>             $all    The classes.
-	 * @param string                                          $class  The class the tokens are in.
+	 * @param string                                          $self   The class whose test runs them ($this, static).
+	 * @param string                                          $class  The class the tokens are written in (self, parent).
 	 * @param array<int, array{0: string, 1: string, 2: int}> $tokens Tokens.
 	 * @param array<string, bool>                             $seen   The methods being read (none is read in itself).
 	 * @return string[]
 	 */
-	private static function literals( array $all, string $class, array $tokens, array $seen ): array {
+	private static function literals( array $all, string $self, string $class, array $tokens, array $seen ): array {
 		$out   = array();
 		$count = count( $tokens );
 		for ( $i = 0; $i < $count; $i++ ) {
@@ -178,9 +197,9 @@ final class TearDownCommitTest extends TestCase {
 			$by = $tokens[ $i - 1 ][0];
 			$of = $tokens[ $i - 2 ];
 			$in = null;
-			if ( 'T_OBJECT_OPERATOR' === $by && '$this' === $of[1] ) {
-				$in = $class;
-			} elseif ( 'T_DOUBLE_COLON' === $by && ( 'T_STATIC' === $of[0] || 'self' === strtolower( $of[1] ) ) ) {
+			if ( ( 'T_OBJECT_OPERATOR' === $by && '$this' === $of[1] ) || ( 'T_DOUBLE_COLON' === $by && 'T_STATIC' === $of[0] ) ) {
+				$in = $self;
+			} elseif ( 'T_DOUBLE_COLON' === $by && 'self' === strtolower( $of[1] ) ) {
 				$in = $class;
 			} elseif ( 'T_DOUBLE_COLON' === $by && 'parent' === strtolower( $of[1] ) ) {
 				$in = $all[ $class ]['parent'] ?? '';
@@ -191,7 +210,7 @@ final class TearDownCommitTest extends TestCase {
 			if ( null === $hit || isset( $seen[ $hit[0] . '::' . $text ] ) ) {
 				continue;
 			}
-			$out = array_merge( $out, self::literals( $all, $hit[0], $hit[1], $seen + array( $hit[0] . '::' . $text => true ) ) );
+			$out = array_merge( $out, self::literals( $all, $self, $hit[0], $hit[1], $seen + array( $hit[0] . '::' . $text => true ) ) );
 		}
 		return $out;
 	}
@@ -208,16 +227,19 @@ final class TearDownCommitTest extends TestCase {
 		$where = array();
 		foreach ( $sources as $path => $source ) {
 			foreach ( self::classes( $source ) as $name => $class ) {
+				$name           = isset( $all[ $name ] ) ? $name . ' of ' . $path : $name; // A short name met again.
 				$all[ $name ]   = $class;
 				$where[ $name ] = $path;
 			}
 		}
 		$out = array();
 		foreach ( $all as $name => $class ) {
-			foreach ( $class['methods'] as $method => $body ) {
-				if ( ! in_array( $method, self::TEAR_DOWNS, true ) ) {
+			foreach ( self::TEAR_DOWNS as $method ) {
+				$hit = self::method( $all, $name, $method );
+				if ( null === $hit ) {
 					continue;
 				}
+				$body   = $all[ $hit[0] ]['methods'][ $method ];
 				$tokens = $body['tokens'];
 				$count  = count( $tokens );
 				for ( $i = 0; $i + 2 < $count; $i++ ) {
@@ -227,7 +249,7 @@ final class TearDownCommitTest extends TestCase {
 					}
 				}
 				$says = array();
-				foreach ( self::literals( $all, $name, $tokens, array( $name . '::' . $method => true ) ) as $literal ) {
+				foreach ( self::literals( $all, $name, $hit[0], $tokens, array( $hit[0] . '::' . $method => true ) ) as $literal ) {
 					if ( 1 === preg_match( self::ROLLBACK, $literal ) ) {
 						$says[] = 'ROLLBACK';
 					} elseif ( 1 === preg_match( self::ENDS, $literal, $m ) ) {
@@ -235,7 +257,7 @@ final class TearDownCommitTest extends TestCase {
 					}
 				}
 				$out[ $name . '::' . $method ] = array(
-					'at'   => $where[ $name ] . ':' . $body['line'],
+					'at'   => $where[ $hit[0] ] . ':' . $body['line'],
 					'says' => $says,
 				);
 			}
@@ -278,7 +300,7 @@ final class TearDownCommitTest extends TestCase {
 	 */
 	public function ending(): array {
 		$out = array();
-		foreach ( array( 'COMMIT', 'DROP TABLE t', 'DROP TABLE IF EXISTS t', 'CREATE TABLE t ( id int )', 'ALTER TABLE t ENGINE=InnoDB', 'TRUNCATE TABLE t', 'TRUNCATE t', 'RENAME TABLE t TO u', 'LOCK TABLES t WRITE', 'UNLOCK TABLES', 'START TRANSACTION', 'BEGIN', 'SET autocommit = 1', 'ANALYZE TABLE t', 'OPTIMIZE TABLE t', 'REPAIR TABLE t', 'FLUSH TABLES', 'commit', ' drop table t', 'COMMIT;' ) as $statement ) {
+		foreach ( array( 'COMMIT', 'DROP TABLE t', 'DROP TABLE IF EXISTS t', 'CREATE TABLE t ( id int )', 'ALTER TABLE t ENGINE=InnoDB', 'TRUNCATE TABLE t', 'TRUNCATE t', 'RENAME TABLE t TO u', 'LOCK TABLES t WRITE', 'UNLOCK TABLES', 'START TRANSACTION', 'BEGIN', 'SET autocommit = 1', 'SET autocommit=1', 'ANALYZE TABLE t', 'OPTIMIZE TABLE t', 'REPAIR TABLE t', 'FLUSH TABLES', 'commit', ' drop table t', 'COMMIT;' ) as $statement ) {
 			$out[ $statement ] = array( $statement );
 		}
 		return $out;
@@ -312,6 +334,16 @@ final class TearDownCommitTest extends TestCase {
 		$this->assertCount( 1, self::found( self::source( "\t\tC::off();\n" ) + $other ) );
 		$this->assertCount( 1, self::found( self::source( "\t\t\\N\\C::off();\n" ) + $other ) );
 		$this->assertSame( array(), self::found( self::source( "\t\t\\N\\C::off();\n" ) + array( 'c.php' => str_replace( $query, $roll . $query, $other['c.php'] ) ) ) );
+		// In a trait the class uses; in a helper a class replaces under the tear-down it inherits; in a class whose short
+		// name another file has too.
+		$trait = array( 't.php' => "<?php\nnamespace N;\ntrait T {\n\tprivate function put_away(): void {\n{$query}\t}\n}\n" );
+		$this->assertCount( 1, self::found( self::source( "\t\t\$this->put_away();\n", 'tear_down', "\tuse T;\n" ) + $trait ) );
+		$this->assertCount( 1, self::found( self::source( "\t\t\$this->put_away();\n", 'tear_down', "\tuse \\N\\T;\n" ) + $trait ) );
+		$child = array( 'd.php' => "<?php\nfinal class D extends A {\n\tprotected function put_away(): void {\n{$query}\t}\n}\n" );
+		$found = self::found( self::source( "\t\t\$this->put_away();\n", 'tear_down', "\tprotected function put_away(): void {\n\t}\n" ) + $child );
+		$this->assertCount( 1, $found );
+		$this->assertStringContainsString( ' D::tear_down (', $found[0], 'the class that replaces the helper' );
+		$this->assertCount( 2, self::found( self::source( $query ) + array( 'again/a.php' => self::source( $query )['a.php'] ) ), 'both classes named A' );
 	}
 
 	public function test_what_does_not_end_the_tests_transaction_is_not_found(): void {

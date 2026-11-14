@@ -72,6 +72,9 @@ final class RestoreStateCarryTest extends RestoreTestCase {
 		if ( null !== $this->db ) {
 			$this->db->close();
 		}
+		// Before what follows, not only in the parent's tear-down: there it would take these removals with it, and
+		// the rows the restores committed would stay on the site.
+		\WPCheckpoint\Tests\Fixtures\OpenTransaction::roll_back();
 		foreach ( $this->saved as $name => $value ) {
 			if ( null === $value ) {
 				Options::delete( $name );
