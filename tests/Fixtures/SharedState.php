@@ -15,8 +15,8 @@ use WPCheckpoint\Jobs\UninstallFence;
  * subject or methods are no longer there is stale, and fails the run (stale()): a check of something that is gone
  * passes for ever.
  *
- * Read and written through the test site's connection after the test's transaction is over: what the next test would
- * find. The plugin's own option rows are not in the register (OwnOptions puts them back and says them when the run
+ * Read and written on the test site's connection itself (not through wpdb's filters) after the test's transaction is
+ * over: what the next test would find. The plugin's own option rows are not in the register (OwnOptions puts them back and says them when the run
  * ends, without failing the test).
  */
 final class SharedState {
@@ -24,8 +24,9 @@ final class SharedState {
 	/**
 	 * The items, by the name a failure says.
 	 *
-	 * The uninstall fence: its table there, its one row there and open. Left closed, every later swap is refused and
-	 * every later uninstall finds it held.
+	 * The uninstall fence: its own table what the test site's connection reads (no temporary table of its name over
+	 * it), its one row there and open. Left closed, every later swap is refused and every later uninstall finds it
+	 * held.
 	 */
 	const ITEMS = array(
 		'the uninstall fence' => array(
@@ -93,19 +94,58 @@ final class SharedState {
 	}
 
 	/**
-	 * How the uninstall fence is off its baseline, '' when its row is there and open.
+	 * A statement on the test site's connection itself: through wpdb a test's CREATE TABLE and DROP TABLE become
+	 * those of a temporary table (the core test case's filters), and the fence's base table would not be reached.
+	 *
+	 * @param string $sql Statement.
+	 * @return array<int, array<string, string|null>>|string Its rows (none for a statement without a result), or the error.
+	 */
+	private static function on_connection( string $sql ) {
+		global $wpdb;
+		try {
+			$done = mysqli_query( $wpdb->dbh, $sql );
+		} catch ( \mysqli_sql_exception $e ) {
+			return '' === $e->getMessage() ? 'failed' : $e->getMessage();
+		}
+		if ( false === $done ) {
+			$error = (string) mysqli_error( $wpdb->dbh );
+			return '' === $error ? 'failed' : $error;
+		}
+		if ( true === $done ) {
+			return array();
+		}
+		$rows = mysqli_fetch_all( $done, MYSQLI_ASSOC );
+		mysqli_free_result( $done );
+		return $rows;
+	}
+
+	/**
+	 * Whether a temporary table of the fence's name is on the test site's connection (it hides the fence's own table
+	 * from every statement of that connection); null when it cannot be told (no table of the name at all).
+	 *
+	 * @return bool|null
+	 */
+	private static function fence_hidden(): ?bool {
+		$shown = self::on_connection( 'SHOW CREATE TABLE `' . str_replace( '`', '``', UninstallFence::name() ) . '`' );
+		if ( ! is_array( $shown ) || ! isset( $shown[0]['Create Table'] ) ) {
+			return null;
+		}
+		return 0 === strpos( (string) $shown[0]['Create Table'], 'CREATE TEMPORARY TABLE' );
+	}
+
+	/**
+	 * How the uninstall fence is off its baseline, '' when its own table is what the connection reads, and its row is
+	 * there and open.
 	 *
 	 * @return string
 	 */
 	public static function fence(): string {
-		global $wpdb;
-		$quiet            = $wpdb->suppress_errors( true );
-		$wpdb->last_error = '';
-		$rows             = $wpdb->get_results( $wpdb->prepare( 'SELECT * FROM `' . str_replace( '`', '``', UninstallFence::name() ) . '` WHERE id = %d', UninstallFence::ROW ), ARRAY_A ); // phpcs:ignore -- a fixture's own statement.
-		$error            = (string) $wpdb->last_error;
-		$wpdb->suppress_errors( $quiet );
-		if ( '' !== $error || ! is_array( $rows ) ) {
-			return 'its row cannot be read (' . ( '' === $error ? 'no result' : $error ) . ')';
+		if ( true === self::fence_hidden() ) {
+			return 'a temporary table of its name hides it on the test site\'s connection';
+		}
+		$rows = self::on_connection( 'SELECT * FROM `' . str_replace( '`', '``', UninstallFence::name() ) . '` WHERE id = ' . (int) UninstallFence::ROW );
+		if ( ! is_array( $rows ) ) {
+			return 'its row cannot be read (' . $rows . ')';
 		}
 		if ( array() === $rows ) {
 			return 'its row is not there';
@@ -118,12 +158,20 @@ final class SharedState {
 	}
 
 	/**
-	 * The uninstall fence's table and row there, the row open.
+	 * The uninstall fence's own table and row there, the row open and no one's; temporary tables of its name gone.
 	 *
 	 * @return void
 	 */
 	public static function open_fence(): void {
-		UninstallFence::create();
-		UninstallFence::open();
+		$name = '`' . str_replace( '`', '``', UninstallFence::name() ) . '`';
+		for ( $i = 0; $i < 8 && true === self::fence_hidden(); $i++ ) {
+			self::on_connection( 'DROP TEMPORARY TABLE ' . $name );
+		}
+		self::on_connection( UninstallFence::create_sql( UninstallFence::name() ) );
+		self::on_connection( 'INSERT IGNORE INTO ' . $name . ' (id, state) VALUES (' . (int) UninstallFence::ROW . ", '" . UninstallFence::OPEN . "')" );
+		if ( ! is_array( self::on_connection( 'UPDATE ' . $name . " SET state = '" . UninstallFence::OPEN . "', closed_by = '' WHERE id = " . (int) UninstallFence::ROW ) ) ) {
+			// A table as version 12 made it has no owner to clear (its shape is the table-shape check's to say).
+			self::on_connection( 'UPDATE ' . $name . " SET state = '" . UninstallFence::OPEN . "' WHERE id = " . (int) UninstallFence::ROW );
+		}
 	}
 }

@@ -490,7 +490,7 @@ final class LeftoversCheckTest extends WP_UnitTestCase {
 		}
 	}
 
-	public function test_the_fences_row_gone_or_its_table_gone_is_off_the_baseline_and_put_back_open(): void {
+	public function test_the_fences_row_gone_its_table_hidden_or_gone_is_off_the_baseline_and_put_back_open(): void {
 		global $wpdb;
 		$shared = '\\WPCheckpoint\\Tests\\Fixtures\\SharedState';
 		$fence  = \WPCheckpoint\Jobs\UninstallFence::name();
@@ -498,6 +498,14 @@ final class LeftoversCheckTest extends WP_UnitTestCase {
 		try {
 			$wpdb->query( "DELETE FROM `{$fence}`" );
 			$this->assertSame( array( 'the uninstall fence' => 'its row is not there' ), $shared::off_baseline() );
+			$shared::restore( array( 'the uninstall fence' ) );
+			$this->assertSame( array(), $shared::off_baseline() );
+			$this->assertSame( \WPCheckpoint\Jobs\UninstallFence::OPEN . '/', \WPCheckpoint\Tests\Fixtures\FenceLeaver::stored() );
+
+			// A temporary table of its name, as a test's CREATE TABLE through wpdb makes: the connection reads it, not the fence.
+			$wpdb->query( \WPCheckpoint\Jobs\UninstallFence::create_sql( $fence ) );
+			$this->assertSame( array( 'the uninstall fence' => 'a temporary table of its name hides it on the test site\'s connection' ), $shared::off_baseline() );
+			$this->assertSame( '', \WPCheckpoint\Tests\Fixtures\FenceLeaver::stored(), 'the control: the temporary table is what is read (it has no row)' );
 			$shared::restore( array( 'the uninstall fence' ) );
 			$this->assertSame( array(), $shared::off_baseline() );
 			$this->assertSame( \WPCheckpoint\Jobs\UninstallFence::OPEN . '/', \WPCheckpoint\Tests\Fixtures\FenceLeaver::stored() );

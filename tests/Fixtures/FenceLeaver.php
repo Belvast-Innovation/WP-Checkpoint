@@ -19,13 +19,14 @@ final class FenceLeaver extends TestCase {
 	public static $seen = null;
 
 	/**
-	 * The fence's row as stored, read on the test site's connection.
+	 * The fence's row as stored, read on the test site's connection itself.
 	 *
 	 * @return string "state/closed_by", '' when it is not there.
 	 */
 	public static function stored(): string {
 		global $wpdb;
-		$row = $wpdb->get_row( $wpdb->prepare( 'SELECT state, closed_by FROM `' . UninstallFence::name() . '` WHERE id = %d', UninstallFence::ROW ), ARRAY_A ); // phpcs:ignore -- a fixture's own statement.
+		$read = mysqli_query( $wpdb->dbh, 'SELECT state, closed_by FROM `' . UninstallFence::name() . '` WHERE id = ' . (int) UninstallFence::ROW );
+		$row  = $read instanceof \mysqli_result ? mysqli_fetch_assoc( $read ) : null;
 		return is_array( $row ) ? $row['state'] . '/' . $row['closed_by'] : '';
 	}
 
