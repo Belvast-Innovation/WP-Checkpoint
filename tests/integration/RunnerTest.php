@@ -74,6 +74,7 @@ final class RunnerTest extends WP_UnitTestCase {
 	}
 
 	public function tear_down(): void {
+		\WPCheckpoint\Tests\Fixtures\OpenTransaction::roll_back(); // What the test left uncommitted is not committed by what follows.
 		global $wpdb;
 		$wpdb->query( 'DROP TABLE IF EXISTS ' . Schema::jobs_table() );
 		Deleter::empty_directory( $this->root );

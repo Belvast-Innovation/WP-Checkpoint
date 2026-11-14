@@ -94,6 +94,7 @@ abstract class RestoreTestCase extends JobTestCase {
 	}
 
 	public function tear_down(): void {
+		\WPCheckpoint\Tests\Fixtures\OpenTransaction::roll_back(); // What the test left uncommitted is not committed by what follows.
 		global $wpdb;
 		// Job ids start over with every test: plan rows of an earlier test's job would be this one's.
 		$wpdb->query( 'DELETE FROM `' . $wpdb->base_prefix . 'wpcheckpoint_swap_plan`' );

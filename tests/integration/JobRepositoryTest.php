@@ -70,6 +70,7 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 	}
 
 	public function tear_down(): void {
+		\WPCheckpoint\Tests\Fixtures\OpenTransaction::roll_back(); // What the test left uncommitted is not committed by what follows.
 		global $wpdb;
 		$wpdb->query( 'DROP TABLE IF EXISTS ' . Schema::jobs_table() );
 		// The temporary tables this test made (live work the reap rightly kept), and no other's.

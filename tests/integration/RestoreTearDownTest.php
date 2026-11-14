@@ -22,6 +22,7 @@ final class RestoreTearDownTest extends RestoreTestCase {
 	}
 
 	public static function tear_down_after_class(): void {
+		\WPCheckpoint\Tests\Fixtures\OpenTransaction::roll_back(); // What the test left uncommitted is not committed by what follows.
 		self::query( 'DROP TABLE IF EXISTS `' . self::NEIGHBOUR . '`' );
 		parent::tear_down_after_class();
 	}

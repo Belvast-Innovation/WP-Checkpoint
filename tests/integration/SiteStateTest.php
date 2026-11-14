@@ -81,6 +81,7 @@ final class SiteStateTest extends WP_UnitTestCase {
 	}
 
 	public function tear_down(): void {
+		\WPCheckpoint\Tests\Fixtures\OpenTransaction::roll_back(); // What the test left uncommitted is not committed by what follows.
 		global $wpdb;
 		// The DROP TABLE below commits what the test wrote: the settings the uninstall tests changed are put back.
 		UninstallSetting::save( false );
