@@ -72,8 +72,9 @@ final class RestoreStateCarryTest extends RestoreTestCase {
 		if ( null !== $this->db ) {
 			$this->db->close();
 		}
-		// Before what follows, not only in the parent's tear-down: there it would take these removals with it, and
-		// the rows the restores committed would stay on the site.
+		// The rows below were committed by the restores the test ran: they are removed and the removal committed here,
+		// after what the test left uncommitted is rolled back (the parent's tear-down rolls back before anything else,
+		// and would take an uncommitted removal with it).
 		\WPCheckpoint\Tests\Fixtures\OpenTransaction::roll_back();
 		foreach ( $this->saved as $name => $value ) {
 			if ( null === $value ) {
@@ -87,6 +88,7 @@ final class RestoreStateCarryTest extends RestoreTestCase {
 		delete_site_transient( StoredNames::loopback_job( 99 ) );
 		delete_site_option( 'wpcheckpoint_carry_marker' );
 		delete_option( 'wpcheckpoint_user_roles' );
+		$GLOBALS['wpdb']->query( 'COMMIT' );
 		parent::tear_down();
 	}
 
