@@ -564,6 +564,22 @@ final class LeftoversCheckTest extends WP_UnitTestCase {
 			$this->assertStringContainsString( "A class of the check left shared state off its baseline (put back now):\n  the uninstall fence: left \"closed\"", $failure->exceptionMessage() );
 			$wpdb->query( 'ROLLBACK' );
 			$this->assertSame( \WPCheckpoint\Jobs\UninstallFence::OPEN . '/', $leaver::stored(), 'put back, committed' );
+
+			// A listener with no result to fail a test through says it, and puts it back all the same.
+			$heard = array();
+			$quiet = new Leftovers(
+				null,
+				null,
+				static function ( string $text ) use ( &$heard ): void {
+					$heard[] = $text;
+				}
+			);
+			$close();
+			$quiet->endTest( $this, 0.0 );
+			$this->assertStringContainsString( "Shared state off its baseline after a test, with no result to fail it through (put back now):\n  the uninstall fence: left \"closed\"", implode( '', $heard ) );
+			$wpdb->query( 'ROLLBACK' );
+			$this->assertSame( \WPCheckpoint\Jobs\UninstallFence::OPEN . '/', $leaver::stored(), 'put back, committed' );
+			$this->assertSame( 1, $result->failureCount(), 'no failure of anything' );
 		} finally {
 			$shared::restore( array( 'the uninstall fence' ) );
 		}
