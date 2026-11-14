@@ -522,4 +522,75 @@ final class LeftoversCheckTest extends WP_UnitTestCase {
 			$shared::restore( array( 'the uninstall fence' ) );
 		}
 	}
+
+	public function test_an_earlier_runs_fence_is_put_back_and_said_and_a_classes_own_fails_as_the_class(): void {
+		global $wpdb;
+		$leaver = '\\WPCheckpoint\\Tests\\Fixtures\\FenceLeaver';
+		$shared = '\\WPCheckpoint\\Tests\\Fixtures\\SharedState';
+		$this->assertSame( array(), $shared::off_baseline(), 'the control: at its baseline when this test starts' );
+		$this->assertSame( array(), Leftovers::listing(), 'nothing is there that a listener starting a run now would take for an earlier run\'s' );
+		$close = function () use ( $wpdb, $leaver ): void {
+			$this->assertSame( \WPCheckpoint\Jobs\UninstallFence::DONE, \WPCheckpoint\Jobs\UninstallFence::close( $leaver::BY ) );
+			$wpdb->query( 'COMMIT' );
+		};
+		$said     = array();
+		// As phpunit.xml.dist registers it (no lister given), its notices kept.
+		$listener = new Leftovers(
+			null,
+			null,
+			static function ( string $text ) use ( &$said ): void {
+				$said[] = $text;
+			}
+		);
+		$result   = new \PHPUnit\Framework\TestResult();
+		$result->addListener( $listener );
+		$suite = new \PHPUnit\Framework\TestSuite( 'A class of the check' );
+		try {
+			// The start of a run that finds the fence closed: no test's of this run.
+			$close();
+			$result->startTestSuite( $suite );
+			$this->assertStringContainsString( "Shared state an earlier run left off its baseline (put back now):\n  the uninstall fence: left \"closed\" (closed_by \"" . $leaver::BY . '")', implode( '', $said ) );
+			$this->assertSame( \WPCheckpoint\Jobs\UninstallFence::OPEN . '/', $leaver::stored() );
+			$this->assertSame( 0, $result->failureCount() );
+
+			// A test of the class, which leaves nothing; then the class's own tear-down leaves the fence closed.
+			( new $leaver( 'test_says_how_it_finds_the_fence' ) )->run( $result );
+			$this->assertSame( 0, $result->failureCount(), 'the control: no failure before the class ends' );
+			$close();
+			$result->endTestSuite( $suite );
+			$this->assertSame( 1, $result->failureCount() );
+			$failure = $result->failures()[0];
+			$this->assertStringContainsString( 'shared state after A class of the check', $failure->getTestName(), 'failed as the class' );
+			$this->assertStringContainsString( "A class of the check left shared state off its baseline (put back now):\n  the uninstall fence: left \"closed\"", $failure->exceptionMessage() );
+			$wpdb->query( 'ROLLBACK' );
+			$this->assertSame( \WPCheckpoint\Jobs\UninstallFence::OPEN . '/', $leaver::stored(), 'put back, committed' );
+		} finally {
+			$shared::restore( array( 'the uninstall fence' ) );
+		}
+	}
+
+	public function test_a_stale_item_of_the_register_fails_the_run_at_its_first_test(): void {
+		$leaver = '\\WPCheckpoint\\Tests\\Fixtures\\FenceLeaver';
+		$shared = '\\WPCheckpoint\\Tests\\Fixtures\\SharedState';
+		$run    = static function () use ( $leaver ): \PHPUnit\Framework\TestResult {
+			$result = new \PHPUnit\Framework\TestResult();
+			$result->addListener( new Leftovers() );
+			( new $leaver( 'test_says_how_it_finds_the_fence' ) )->run( $result );
+			( new $leaver( 'test_says_how_it_finds_the_fence' ) )->run( $result );
+			return $result;
+		};
+		try {
+			$result = $run();
+			$this->assertSame( 0, $result->failureCount(), 'the control: the register as it is fails nothing' );
+			$shared::replace( array( 'an item' => array( 'subject' => 'WPCheckpoint\\Jobs\\UninstallFence::GONE' ) + $shared::ITEMS['the uninstall fence'] ) );
+			$result = $run();
+			$this->assertSame( 1, $result->failureCount(), 'once a run, not once a test' );
+			$failure = $result->failures()[0];
+			$this->assertStringContainsString( 'the register of shared state', $failure->getTestName() );
+			$this->assertStringContainsString( 'an item: its subject WPCheckpoint\\Jobs\\UninstallFence::GONE is not there', $failure->exceptionMessage() );
+		} finally {
+			$shared::replace( null );
+		}
+		$this->assertSame( $shared::ITEMS, $shared::items() );
+	}
 }

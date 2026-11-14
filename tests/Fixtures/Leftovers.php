@@ -458,7 +458,8 @@ final class Leftovers implements TestListener {
 			}
 			$this->say( "\nOption rows of this plugin that tests left committed (put back after each):\n  " . implode( "\n  ", $lines ) . "\n" );
 		}
-		// What a class's own set-up or tear-down left (a test's was put back at its end).
+		// What a class's tear-down after its tests left (a test's was put back at its end; what a class's set-up
+		// before its tests left was found at the end of its first test, and failed that one).
 		$off = $this->shared_put_back();
 		if ( '' !== $off ) {
 			$this->fail_as( 'shared state after ' . $suite->getName(), sprintf( "%s left shared state off its baseline (put back now):\n  %s", $suite->getName(), $off ) );
@@ -538,6 +539,8 @@ final class Leftovers implements TestListener {
 		$off = $this->shared_put_back();
 		if ( '' !== $off && null !== $this->result ) {
 			$this->result->addFailure( $test, new AssertionFailedError( "The test left shared state off its baseline (put back now):\n  " . $off ), 0.0 );
+		} elseif ( '' !== $off ) {
+			$this->say( "\nShared state off its baseline after a test, with no result to fail it through (put back now):\n  " . $off . "\n" );
 		}
 		$now          = $this->now();
 		if ( null === $before || null === $now ) {

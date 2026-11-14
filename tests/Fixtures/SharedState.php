@@ -36,14 +36,37 @@ final class SharedState {
 		),
 	);
 
+	/** @var array<string, array<string, string>>|null The items a test put in the register's place (replace()). */
+	private static $replaced = null;
+
+	/**
+	 * The items the listener asks about: ITEMS, or what a test of the listener put in their place.
+	 *
+	 * @return array<string, array<string, string>>
+	 */
+	public static function items(): array {
+		return null === self::$replaced ? self::ITEMS : self::$replaced;
+	}
+
+	/**
+	 * Put other items in the register's place (a test of the listener; null: the register again).
+	 *
+	 * @param array<string, array<string, string>>|null $items The items.
+	 * @return void
+	 */
+	public static function replace( ?array $items ): void {
+		self::$replaced = $items;
+	}
+
 	/**
 	 * The items that are stale, each with why.
 	 *
-	 * @param array<string, array<string, string>> $items The items.
+	 * @param array<string, array<string, string>>|null $items The items (null: items()).
 	 * @return string[]
 	 */
-	public static function stale( array $items = self::ITEMS ): array {
-		$out = array();
+	public static function stale( ?array $items = null ): array {
+		$items = null === $items ? self::items() : $items;
+		$out   = array();
 		foreach ( $items as $name => $item ) {
 			$subject = (string) ( $item['subject'] ?? '' );
 			if ( '' === $subject || ! defined( $subject ) ) {
@@ -62,12 +85,16 @@ final class SharedState {
 	/**
 	 * The items off their baseline now: name => how.
 	 *
-	 * @param array<string, array<string, string>> $items The items.
+	 * @param array<string, array<string, string>>|null $items The items (null: items()).
 	 * @return array<string, string>
 	 */
-	public static function off_baseline( array $items = self::ITEMS ): array {
-		$out = array();
+	public static function off_baseline( ?array $items = null ): array {
+		$items = null === $items ? self::items() : $items;
+		$out   = array();
 		foreach ( $items as $name => $item ) {
+			if ( ! is_callable( array( self::class, (string) ( $item['reads'] ?? '' ) ) ) ) {
+				continue; // Stale: said by stale().
+			}
 			$how = (string) call_user_func( array( self::class, $item['reads'] ) );
 			if ( '' !== $how ) {
 				$out[ $name ] = $how;
@@ -79,14 +106,15 @@ final class SharedState {
 	/**
 	 * Put the named items back at their baseline, committed.
 	 *
-	 * @param string[]                             $names Names.
-	 * @param array<string, array<string, string>> $items The items.
+	 * @param string[]                                  $names Names.
+	 * @param array<string, array<string, string>>|null $items The items (null: items()).
 	 * @return void
 	 */
-	public static function restore( array $names, array $items = self::ITEMS ): void {
+	public static function restore( array $names, ?array $items = null ): void {
 		global $wpdb;
+		$items = null === $items ? self::items() : $items;
 		foreach ( $names as $name ) {
-			if ( isset( $items[ $name ] ) ) {
+			if ( isset( $items[ $name ] ) && is_callable( array( self::class, (string) ( $items[ $name ]['restores'] ?? '' ) ) ) ) {
 				call_user_func( array( self::class, $items[ $name ]['restores'] ) );
 			}
 		}
@@ -167,7 +195,10 @@ final class SharedState {
 		for ( $i = 0; $i < 8 && true === self::fence_hidden(); $i++ ) {
 			self::on_connection( 'DROP TEMPORARY TABLE ' . $name );
 		}
-		self::on_connection( UninstallFence::create_sql( UninstallFence::name() ) );
+		if ( ! is_array( self::on_connection( 'SELECT id FROM ' . $name . ' LIMIT 1' ) ) ) {
+			// Not there (or not readable): made again. Not otherwise: the statement commits and waits for the table.
+			self::on_connection( UninstallFence::create_sql( UninstallFence::name() ) );
+		}
 		self::on_connection( 'INSERT IGNORE INTO ' . $name . ' (id, state) VALUES (' . (int) UninstallFence::ROW . ", '" . UninstallFence::OPEN . "')" );
 		if ( ! is_array( self::on_connection( 'UPDATE ' . $name . " SET state = '" . UninstallFence::OPEN . "', closed_by = '' WHERE id = " . (int) UninstallFence::ROW ) ) ) {
 			// A table as version 12 made it has no owner to clear (its shape is the table-shape check's to say).
