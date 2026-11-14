@@ -129,7 +129,7 @@ final class PluginStandInUsageTest extends TestCase {
 			$items = new \RecursiveIteratorIterator( new \RecursiveDirectoryIterator( $tests . '/' . $dir, \FilesystemIterator::SKIP_DOTS ) );
 			foreach ( $items as $path => $item ) {
 				if ( $item->isFile() && '.php' === substr( (string) $path, -4 ) ) {
-					$out[ str_replace( '\\', '/', substr( (string) $path, strlen( $tests ) + 1 ) ) ] = str_replace( "\r\n", "\n", (string) file_get_contents( (string) $path ) );
+					$out[ str_replace( '\\', '/', substr( (string) $path, strlen( $tests ) + 1 ) ) ] = (string) file_get_contents( (string) $path );
 				}
 			}
 		}

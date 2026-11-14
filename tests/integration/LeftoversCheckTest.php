@@ -46,6 +46,36 @@ final class LeftoversCheckTest extends WP_UnitTestCase {
 		$this->assertDirectoryDoesNotExist( $dir );
 	}
 
+	public function test_the_plugins_option_rows_a_test_committed_are_put_back_as_they_were(): void {
+		global $wpdb;
+		$name   = 'wpcheckpoint_leftover_check';
+		$before = \WPCheckpoint\Tests\Fixtures\OwnOptions::note();
+		$this->assertArrayNotHasKey( 'o:' . $name, $before, 'the control: not there before' );
+		// Committed, as a row is that a test wrote before a statement that commits.
+		$wpdb->query( $wpdb->prepare( "INSERT INTO `{$wpdb->base_prefix}options` (option_name, option_value, autoload) VALUES (%s, 'left', 'no')", $name ) );
+		$expect = array( 'added ' . $name );
+		if ( is_multisite() ) {
+			$wpdb->query( $wpdb->prepare( "INSERT INTO {$wpdb->sitemeta} (site_id, meta_key, meta_value) VALUES (%d, %s, 'left')", get_current_network_id(), $name . '_network' ) );
+			$expect[] = 'added ' . $name . '_network';
+		}
+		$wpdb->query( 'COMMIT' );
+		try {
+			$this->assertSame( $expect, \WPCheckpoint\Tests\Fixtures\OwnOptions::differences( $before, \WPCheckpoint\Tests\Fixtures\OwnOptions::note() ), 'the control: the rows are read' );
+			$this->assertSame( $expect, \WPCheckpoint\Tests\Fixtures\OwnOptions::put_back( $before, 'the check of the put-back (LeftoversCheckTest)' ) );
+			$this->assertSame( $before, \WPCheckpoint\Tests\Fixtures\OwnOptions::note(), 'as they were' );
+			$this->assertSame( '0', (string) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM `{$wpdb->base_prefix}options` WHERE option_name = %s", $name ) ) );
+			$this->assertSame( array(), \WPCheckpoint\Tests\Fixtures\OwnOptions::put_back( $before, 'nothing to put back' ), 'and nothing more to put back' );
+			$this->assertArrayHasKey( 'the check of the put-back (LeftoversCheckTest)', \WPCheckpoint\Tests\Fixtures\OwnOptions::summary(), 'said when the run ends' );
+			$this->assertArrayNotHasKey( 'nothing to put back', \WPCheckpoint\Tests\Fixtures\OwnOptions::summary() );
+		} finally {
+			$wpdb->query( $wpdb->prepare( "DELETE FROM `{$wpdb->base_prefix}options` WHERE option_name = %s", $name ) );
+			if ( is_multisite() ) {
+				$wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->sitemeta} WHERE meta_key = %s", $name . '_network' ) );
+			}
+			$wpdb->query( 'COMMIT' );
+		}
+	}
+
 	public function test_it_sees_and_removes_a_real_sites_tables_and_on_a_network_its_row(): void {
 		global $wpdb;
 		// On the connection itself: through wpdb a test's CREATE TABLE becomes a temporary table, and its rows are rolled
@@ -206,6 +236,103 @@ final class LeftoversCheckTest extends WP_UnitTestCase {
 		clearstatcache();
 		$this->assertDirectoryDoesNotExist( $dir );
 		$this->assertDirectoryDoesNotExist( $stored );
+	}
+
+	public function test_a_stored_state_left_after_its_directory_was_removed_goes_and_one_whose_directory_is_there_is_put_back(): void {
+		$dirs  = '\\WPCheckpoint\\Tests\\Fixtures\\StorageDirs';
+		$found = $dirs::stored_row();
+		$this->assertNotNull( $found, 'the run settled a state before this test' );
+		$this->assertDirectoryExists( $dirs::path_in( $found['value'] ) );
+		try {
+			// The test found a state whose directory is gone now, and left another: the one it left goes.
+			$gone          = $found;
+			$gone['value'] = str_replace( basename( $dirs::path_in( $found['value'] ) ), 'wp-checkpoint-0123456789ab', $found['value'] );
+			$this->assertDirectoryDoesNotExist( $dirs::path_in( $gone['value'] ) );
+			$dirs::put_back( $gone );
+			$this->assertNull( $dirs::stored_row(), 'the row left after the directory was removed' );
+		} finally {
+			// The control, and the row as this test found it: its directory is there, so it is put back.
+			$dirs::put_back( $found );
+		}
+		$this->assertSame( $found, $dirs::stored_row() );
+	}
+
+	public function test_removing_what_a_test_made_keeps_the_settled_directory_and_takes_the_state_the_test_left(): void {
+		$dirs   = '\\WPCheckpoint\\Tests\\Fixtures\\StorageDirs';
+		$found  = $dirs::stored_row();
+		$this->assertNotNull( $found, 'the run settled a state before this test' );
+		$own    = $dirs::path_in( $found['value'] );
+		$before = $dirs::listing(); // As a test notes it: without the stored one.
+		$this->assertNotContains( $own, $before );
+		$made   = WP_CONTENT_DIR . '/wp-checkpoint-' . bin2hex( random_bytes( 6 ) );
+		$left   = $found;
+		$left['value'] = str_replace( basename( $own ), basename( $made ), $found['value'] );
+		try {
+			// A test that made a directory of its own and left its state committed.
+			$this->assertTrue( mkdir( $made ) );
+			$dirs::put_back( $left );
+			$this->assertSame( $made, $dirs::stored_path(), 'the state the test left is the stored one' );
+			$dirs::remove_made_since( $before );
+			clearstatcache( true );
+			$this->assertDirectoryDoesNotExist( $made );
+			$this->assertNull( $dirs::stored_row(), 'the state that named it' );
+			$this->assertDirectoryExists( $own, 'the directory the run settled' );
+		} finally {
+			$dirs::put_back( $found );
+			if ( is_dir( $made ) ) {
+				$dirs::remove( array( $made ) );
+			}
+		}
+		$this->assertSame( $found, $dirs::stored_row() );
+	}
+
+	public function test_the_listener_itself_settles_the_storage_before_a_test_and_puts_state_and_rows_back_after_it(): void {
+		global $wpdb;
+		$dirs   = '\\WPCheckpoint\\Tests\\Fixtures\\StorageDirs';
+		$found  = $dirs::stored_row();
+		$this->assertNotNull( $found, 'the run settled a state before this test' );
+		$name   = 'wpcheckpoint_leftover_wiring';
+		$count  = static function () use ( $wpdb, $name ): string {
+			return (string) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM `{$wpdb->base_prefix}options` WHERE option_name = %s", $name ) );
+		};
+		$forget = static function () use ( $wpdb ): void {
+			if ( is_multisite() ) {
+				$wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->sitemeta} WHERE meta_key = %s AND site_id = %d", \WPCheckpoint\Support\Directories::OPTION, get_current_network_id() ) );
+			} else {
+				$wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->options} WHERE option_name = %s", \WPCheckpoint\Support\Directories::OPTION ) );
+			}
+			$wpdb->query( 'COMMIT' );
+			wp_cache_flush();
+		};
+		// A listener as phpunit.xml.dist registers it (nothing given), taken through a test of its own.
+		$listener = new Leftovers();
+		$settled  = null;
+		try {
+			$forget(); // The test before it left no state.
+			$this->assertNull( $dirs::stored_row(), 'the control: no state is stored' );
+			$listener->startTest( $this );
+			$settled = $dirs::stored_row();
+			$this->assertNotNull( $settled, 'a state is stored before the test starts' );
+			$this->assertDirectoryExists( $dirs::path_in( $settled['value'] ) );
+
+			// The test commits a row of the plugin's and leaves no state.
+			$wpdb->query( $wpdb->prepare( "INSERT INTO `{$wpdb->base_prefix}options` (option_name, option_value, autoload) VALUES (%s, 'left', 'no')", $name ) );
+			$forget();
+			$this->assertSame( '1', $count(), 'the control: the row is committed' );
+			$this->assertNull( $dirs::stored_row() );
+			$listener->endTest( $this, 0.0 );
+			$this->assertSame( '0', $count(), 'the row the test left committed' );
+			$this->assertSame( $settled, $dirs::stored_row(), 'the state as the test found it' );
+		} finally {
+			$wpdb->query( $wpdb->prepare( "DELETE FROM `{$wpdb->base_prefix}options` WHERE option_name = %s", $name ) );
+			$wpdb->query( 'COMMIT' );
+			$dirs::put_back( $found ); // This test's own, as the registered listener settled it.
+			if ( null !== $settled && $dirs::path_in( $settled['value'] ) !== $dirs::path_in( $found['value'] ) ) {
+				$dirs::remove( array_filter( array( $dirs::path_in( $settled['value'] ) ), 'is_dir' ) );
+			}
+			\WPCheckpoint\Plugin::instance()->reset_directories(); // The plugin's own no longer names the directory removed.
+		}
+		$this->assertSame( $found, $dirs::stored_row() );
 	}
 
 	public function test_it_sees_an_entry_of_the_uploads_directory_and_removes_it_only_under_a_tests_name(): void {

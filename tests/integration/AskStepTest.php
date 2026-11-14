@@ -77,11 +77,11 @@ final class AskStepTest extends WP_UnitTestCase {
 
 	public function tear_down(): void {
 		global $wpdb;
-		$wpdb->query( 'DROP TABLE IF EXISTS ' . Schema::jobs_table() );
 		Deleter::empty_directory( $this->root );
 		@rmdir( $this->root );
 		Options::delete( Schema::OPTION );
 		Options::delete( Directories::OPTION );
+		$wpdb->query( 'DROP TABLE IF EXISTS ' . Schema::jobs_table() ); // After the options: it commits their deletion.
 		\WPCheckpoint\Tests\Fixtures\RunTables::put_back(); // The tables as the test found them, for the tests after it.
 		parent::tear_down();
 		if ( null !== $this->storage_before ) {

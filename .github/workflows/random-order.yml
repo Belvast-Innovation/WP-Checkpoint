@@ -89,3 +89,27 @@ jobs:
       - name: Show wp-env logs on failure
         if: failure()
         run: npx wp-env logs tests --watch=false
+
+  # A failed daily run is said where people look: one issue, opened by the first failed run and added to by the next
+  # ones, closed by the first run that passes. Runs started by hand (to repeat a seed) say nothing.
+  report:
+    name: Report the daily run
+    runs-on: ubuntu-latest
+    needs: random-order
+    if: always() && github.event_name == 'schedule'
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RESULT: ${{ needs.random-order.result }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      RUN_ID: ${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+      # The issue is the workflow's own only by its author, its label and its title together (bin/daily-run-report.sh):
+      # one that somebody else opened under the same title is neither commented on nor closed.
+      - name: Open, add to or close the issue
+        run: bash bin/daily-run-report.sh

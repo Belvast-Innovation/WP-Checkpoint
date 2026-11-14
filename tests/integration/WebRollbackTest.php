@@ -12,6 +12,7 @@ use WPCheckpoint\Plugin;
 use WPCheckpoint\Restore\ImportSession;
 use WPCheckpoint\Restore\Maintenance;
 use WPCheckpoint\Standalone\Credentials;
+use WPCheckpoint\Support\StoredNames;
 use WPCheckpoint\Tests\Fixtures\Restore\SwapTestCase;
 
 /**
@@ -21,6 +22,36 @@ use WPCheckpoint\Tests\Fixtures\Restore\SwapTestCase;
  * one deadline and counted as busy, never left out; a NotHere in it leaves the job to WP-CLI.
  */
 final class WebRollbackTest extends SwapTestCase {
+
+	/** @var bool Whether own_state() committed its row on the site (removed at the test's end). */
+	private $own_written = false;
+
+	public function tear_down(): void {
+		global $wpdb;
+		if ( $this->own_written ) {
+			$wpdb->query( 'ROLLBACK' ); // What else the test left uncommitted is not committed with the removal.
+			$wpdb->query( $wpdb->prepare( "DELETE FROM `{$wpdb->base_prefix}options` WHERE option_name = %s", StoredNames::DELETE_DATA ) );
+			$wpdb->query( 'COMMIT' );
+			$this->own_written = false;
+		}
+		parent::tear_down();
+	}
+
+	/**
+	 * A row of this plugin's own state on the site before the restore, committed: what the carry back replaces in the
+	 * table the swap moved aside. Written by the test itself: whether any such row is there otherwise depends on what
+	 * the tests before this one left (on a network the plugin's stored state is not in this table at all).
+	 *
+	 * @return void
+	 */
+	private function own_state(): void {
+		global $wpdb;
+		$table = $wpdb->base_prefix . 'options';
+		$wpdb->query( $wpdb->prepare( "DELETE FROM `{$table}` WHERE option_name = %s", StoredNames::DELETE_DATA ) );
+		$wpdb->query( $wpdb->prepare( "INSERT INTO `{$table}` (option_name, option_value, autoload) VALUES (%s, %s, 'no')", StoredNames::DELETE_DATA, '1' ) );
+		$wpdb->query( 'COMMIT' );
+		$this->own_written = true;
+	}
 
 	/**
 	 * A restore killed once two of its table batches were renamed (every entry a batch of its own: the options table
@@ -181,6 +212,7 @@ final class WebRollbackTest extends SwapTestCase {
 	}
 
 	public function test_a_carry_back_held_up_by_locks_ends_by_its_deadline_counted_as_busy_and_goes_on_later(): void {
+		$this->own_state();
 		list( $job, $before )    = $this->half();
 		list( $old, $old_rows )  = $this->moved_aside_options( $job );
 		$this->assertNotSame( array(), $old_rows, 'the control: the old table has rows of this plugin\'s own' );
@@ -218,6 +250,7 @@ final class WebRollbackTest extends SwapTestCase {
 
 	public function test_a_carry_back_whose_tries_are_spent_is_left_held_up_and_put_back_once_the_locks_are_gone(): void {
 		global $wpdb;
+		$this->own_state();
 		list( $job, $before )   = $this->half();
 		list( $old, $old_rows ) = $this->moved_aside_options( $job );
 		// The last try left (as a run that took the job over after three would find it).
@@ -354,6 +387,7 @@ final class WebRollbackTest extends SwapTestCase {
 	}
 
 	public function test_a_not_here_in_the_carry_back_leaves_the_job_to_wp_cli_with_nothing_carried_or_left_out(): void {
+		$this->own_state();
 		list( $job, $before )   = $this->half();
 		list( $old, $old_rows ) = $this->moved_aside_options( $job );
 		$row                    = self::row( $job->id );

@@ -137,6 +137,12 @@ final class Leftovers implements TestListener {
 	 */
 	private static $before_run = array();
 
+	/** @var array{value: string, autoload: string}|null The stored storage state's row as the running test found it (StorageDirs::settle()). */
+	private $state = null;
+
+	/** @var array<string, array{0: string, 1: string}>|null The plugin's own option rows as the running test found them (OwnOptions::note()). */
+	private $options = null;
+
 	/** @var TestResult|null The run's result, for failures of a class or of the run. */
 	private $result = null;
 
@@ -217,7 +223,8 @@ final class Leftovers implements TestListener {
 	}
 
 	/**
-	 * The storage directories there when this run started: no test's to remove.
+	 * The storage directories there when this run started, and the plugin's own as each test found it
+	 * (StorageDirs::settle()): no test's to remove, and none a test made.
 	 *
 	 * @return string[]
 	 */
@@ -396,6 +403,22 @@ final class Leftovers implements TestListener {
 			return;
 		}
 		$start = (array) array_pop( $this->suites );
+		if ( array() === $this->suites && ! $this->given && array() !== OwnOptions::summary() ) {
+			// By row, with how many tests left it (most leave the same few: the schema's version, a transient), and the
+			// first of them by name.
+			$by = array();
+			foreach ( OwnOptions::summary() as $name => $diffs ) {
+				foreach ( $diffs as $diff ) {
+					$by[ $diff ][] = $name;
+				}
+			}
+			ksort( $by );
+			$lines = array();
+			foreach ( $by as $diff => $names ) {
+				$lines[] = sprintf( '%s: %d test(s), first %s', $diff, count( $names ), implode( '; ', array_slice( $names, 0, 2 ) ) );
+			}
+			$this->say( "\nOption rows of this plugin that tests left committed (put back after each):\n  " . implode( "\n  ", $lines ) . "\n" );
+		}
 		$gone  = $this->gone( $now );
 		if ( array() !== $gone ) {
 			$this->fail_as( 'removals of ' . $suite->getName(), sprintf( "%s removed what it did not create (there when the run started):\n  %s", $suite->getName(), implode( "\n  ", $gone ) ) );
@@ -417,6 +440,18 @@ final class Leftovers implements TestListener {
 		if ( $test instanceof TestCase && null !== $test->getTestResultObject() ) {
 			$this->result = $test->getTestResultObject();
 		}
+		$this->state   = null;
+		$this->options = null;
+		if ( ! $this->given && 'integration' === getenv( 'WPCHECKPOINT_TEST_SUITE' ) && isset( $GLOBALS['wpdb'] ) ) {
+			// The plugin's own storage directory, there and stored before the test's transaction starts.
+			$this->state   = StorageDirs::settle();
+			$own           = StorageDirs::stored_path();
+			if ( '' !== $own && ! in_array( $own, self::$before_run, true ) ) {
+				// No test's to remove, and no test's "other directory made" (before_run()): it was there before the test.
+				self::$before_run[] = $own;
+			}
+			$this->options = OwnOptions::note(); // The plugin's own option rows as the test finds them.
+		}
 		$this->before = $this->now();
 		if ( null !== $this->before && ! $this->given && $test instanceof TestCase ) {
 			self::$watching = get_class( $test ) . '::' . $test->getName( false );
@@ -436,6 +471,16 @@ final class Leftovers implements TestListener {
 		}
 		$before       = $this->before;
 		$this->before = null;
+		$found = $this->state;
+		if ( null !== $this->state ) {
+			StorageDirs::put_back( $this->state ); // The stored state as the test found it.
+			$this->state = null;
+		}
+		if ( null !== $this->options ) {
+			// Put back, and said when the run ends (not a failure of the test: see OwnOptions).
+			OwnOptions::put_back( $this->options, $test instanceof TestCase ? get_class( $test ) . '::' . $test->getName( false ) : get_class( $test ) );
+			$this->options = null;
+		}
 		$now          = $this->now();
 		if ( null === $before || null === $now ) {
 			return;
@@ -450,7 +495,7 @@ final class Leftovers implements TestListener {
 		}
 		if ( null !== $this->result ) {
 			// No time of its own: the test's was counted when it ended.
-			$this->result->addFailure( $test, new AssertionFailedError( "The test left behind (removed now):\n  " . implode( "\n  ", $left ) ), 0.0 );
+			$this->result->addFailure( $test, new AssertionFailedError( "The test left behind (removed now):\n  " . implode( "\n  ", $left ) . ( '' === ( $told = StorageDirs::evidence( $found, $left ) ) ? '' : "\nWhat was there:\n  " . $told ) ), 0.0 );
 		}
 		$this->remove( $left );
 	}

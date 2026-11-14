@@ -46,7 +46,7 @@ final class UninstallSequencesTest extends SwapTestCase {
 		global $wpdb;
 		$this->seam( null );
 		$this->beat_every( null );
-		$wpdb->query( 'COMMIT' );
+		$wpdb->query( 'ROLLBACK' ); // What the test left uncommitted is not committed with what follows.
 		Options::delete( Schema::OPTION );
 		Schema::ensure();
 		UninstallFence::create();

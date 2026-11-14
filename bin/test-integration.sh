@@ -32,7 +32,10 @@
 # file, the runtime log) it does not start either and nothing is removed (status 77). Then tests/Fixtures/leftovers-precheck.php lists the entries of the
 # test site's uploads directory under a name the tests make there (read from the tests) and a restore's loader probe
 # in its must-use plugins directory: an earlier run left them, and the run does not start (status 77) until they are
-# removed. Then tests/Fixtures/plugin-entries.php counts the entries of this plugin's
+# removed. Then tests/Fixtures/jobs-table-precheck.php asks the tests database for the jobs table: a run stopped in the
+# middle of a test that had dropped it leaves the database without it, and the tests that read it from another process
+# fail for a reason not their own; without the table, or without a column of the schema's version, the run does not
+# start (status 77) and the message says how to make it again. Then tests/Fixtures/plugin-entries.php counts the entries of this plugin's
 # directory, as the restore counts its own copy, and warns when they come near the restore's limit: the suite's
 # restores read a stand-in (tests/Fixtures/Restore/PluginStandIn.php), but the test of the count on the real directory
 # fails past it.
@@ -266,6 +269,14 @@ if [ "$PRECHECK" -eq 77 ]; then
 	exit 77
 elif [ "$PRECHECK" -ne 0 ]; then
 	echo "The check of what an earlier run left in the test site's files failed (status $PRECHECK); the run does not start." >&2
+	exit 1
+fi
+php "$PLUGIN/tests/Fixtures/jobs-table-precheck.php"
+PRECHECK=$?
+if [ "$PRECHECK" -eq 77 ]; then
+	exit 77
+elif [ "$PRECHECK" -ne 0 ]; then
+	echo "The check of the tests database's jobs table failed (status $PRECHECK); the run does not start." >&2
 	exit 1
 fi
 php "$PLUGIN/tests/Fixtures/plugin-entries.php" "$PLUGIN"
