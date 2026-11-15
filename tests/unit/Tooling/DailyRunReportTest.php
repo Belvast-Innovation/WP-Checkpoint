@@ -49,9 +49,10 @@ final class DailyRunReportTest extends TestCase {
 		file_put_contents(
 			$this->sandbox . '/bin/curl',
 			"#!/usr/bin/env bash\n"
-			. "out=''; url=''\n"
+			. "out=''; url=''; asked=\"\$(printf '<%s>' \"\$@\")\"\n"
 			. "while [ \$# -gt 0 ]; do case \"\$1\" in -o) out=\"\$2\"; shift ;; -H) shift ;; -*) ;; *) url=\"\$1\" ;; esac; shift; done\n"
 			. "printf '%s\\n' \"\$url\" >> \"\$CURL_RECORD\"\n"
+			. "printf '%s\\n' \"\$asked\" >> \"\$CURL_RECORD.args\"\n"
 			. "job=\"\$(printf '%s' \"\$url\" | sed -E 's#.*/jobs/([0-9]+)/logs\$#\\1#')\"\n"
 			. "[ -f \"\$CURL_LOGS/\$job\" ] || { echo 'curl: (22) The requested URL returned error: 403' >&2; exit 22; }\n"
 			. "cat \"\$CURL_LOGS/\$job\" > \"\$out\"\n"
@@ -224,6 +225,15 @@ final class DailyRunReportTest extends TestCase {
 		);
 		// The logs are not asked of gh, which refuses a response with escape sequences (the stand-in does too).
 		$this->assertSame( array(), preg_grep( '#/logs#', $asked ) );
+		$this->assertContains( 'api repos/owner/repo/actions/runs/9/jobs --jq .jobs[] | select(.conclusion == "failure") | .id', $asked, 'the control: what is asked of gh through its API is recorded' );
+		// How curl is asked: a failure of the server is one of curl's, the redirect to where the log is kept is
+		// followed, it does not wait for ever, and the token goes in the header (and, the control for the line
+		// after: it did reach curl) and nowhere a reader of the issue or of the job's log sees it.
+		$args = array_values( array_filter( explode( "\n", (string) file_get_contents( $this->sandbox . '/curl-record.args' ) ), 'strlen' ) );
+		$this->assertCount( 2, $args );
+		foreach ( array( '<-f>', '<-L>', '<--max-time><120>', '<-H><Authorization: Bearer not-a-token>' ) as $flag ) {
+			$this->assertStringContainsString( $flag, $args[0], $flag );
+		}
 		$this->assertStringNotContainsString( 'not-a-token', $body . $out );
 	}
 

@@ -55,7 +55,7 @@ trap 'rm -f "$body" "$log"' EXIT
 	for job in $(gh api "repos/${GH_REPO}/actions/runs/${RUN_ID}/jobs" --jq '.jobs[] | select(.conclusion == "failure") | .id'); do
 		gh api "repos/${GH_REPO}/actions/jobs/${job}" --jq '.name'
 		: > "$log"
-		if ! why="$(curl -sS -f -L -H "Authorization: Bearer ${GH_TOKEN}" -H 'Accept: application/vnd.github+json' -o "$log" "${GITHUB_API_URL:-https://api.github.com}/repos/${GH_REPO}/actions/jobs/${job}/logs" 2>&1)"; then
+		if ! why="$(curl -sS -f -L --max-time 120 -H "Authorization: Bearer ${GH_TOKEN}" -H 'Accept: application/vnd.github+json' -o "$log" "${GITHUB_API_URL:-https://api.github.com}/repos/${GH_REPO}/actions/jobs/${job}/logs" 2>&1)"; then
 			echo "  (its log could not be read: $(printf '%s' "$why" | tr -d '\033' | tr '\n' ' ' | cut -c1-200))"
 			continue
 		fi

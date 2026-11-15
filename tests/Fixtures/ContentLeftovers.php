@@ -83,7 +83,16 @@ final class ContentLeftovers {
 			return '';
 		}
 		$why = RealAbspath::refusal();
-		return '' !== $why ? $why : self::make_mu( self::dir(), $dir );
+		if ( '' !== $why ) {
+			return $why;
+		}
+		// As RealMuPlugins::refusal() asks of the directory: not the repository's, and not the working directory.
+		$content    = realpath( self::dir() );
+		$repository = (string) realpath( dirname( __DIR__, 2 ) );
+		if ( false === $content || $repository === $content || 0 === strpos( $content . '/', $repository . '/' ) || (string) realpath( (string) getcwd() ) === $content ) {
+			return 'The wp-content directory is not the test site\'s (it does not resolve, is the repository or inside it, or is the working directory); no must-use plugins directory is made there.';
+		}
+		return self::make_mu( self::dir(), $dir );
 	}
 
 	/**
