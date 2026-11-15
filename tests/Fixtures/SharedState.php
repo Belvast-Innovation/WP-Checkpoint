@@ -21,7 +21,7 @@ use WPCheckpoint\Support\StoredNames;
  * passes for ever.
  *
  * Read on the test site's connection itself (not through wpdb's filters) after the test's transaction is over: what
- * the next test would find; written there too, but for the cron option (WordPress's own functions). INVENTORY lists every state the plugin owns with its baseline and its item
+ * the next test would find; written there too, but for the cron option (WordPress's own functions) and the commit. INVENTORY lists every state the plugin owns with its baseline and its item
  * here, or why it has none (the plugin's own option rows: OwnOptions puts them back and says them when the run ends,
  * without failing the test).
  */
@@ -195,6 +195,9 @@ final class SharedState {
 		return $out;
 	}
 
+	/** @var int The server's error number for the last statement of on_connection() (0: none). */
+	private static $errno = 0;
+
 	/** @var array<string, array<string, string>>|null The items a test put in the register's place (replace()). */
 	private static $replaced = null;
 
@@ -289,13 +292,16 @@ final class SharedState {
 	 */
 	private static function on_connection( string $sql ) {
 		global $wpdb;
+		self::$errno = 0;
 		try {
 			$done = mysqli_query( $wpdb->dbh, $sql );
 		} catch ( \mysqli_sql_exception $e ) {
+			self::$errno = (int) $e->getCode();
 			return '' === $e->getMessage() ? 'failed' : $e->getMessage();
 		}
 		if ( false === $done ) {
-			$error = (string) mysqli_error( $wpdb->dbh );
+			self::$errno = (int) mysqli_errno( $wpdb->dbh );
+			$error       = (string) mysqli_error( $wpdb->dbh );
 			return '' === $error ? 'failed' : $error;
 		}
 		if ( true === $done ) {
@@ -389,7 +395,7 @@ final class SharedState {
 		$rows = self::on_connection( 'SELECT COUNT(*) AS n FROM `' . str_replace( '`', '``', $table ) . '`' );
 		if ( ! is_array( $rows ) ) {
 			// Not there: the table-shape check's to say. Anything else is not "no row".
-			return false !== strpos( $rows, 'doesn\'t exist' ) ? '' : 'its rows cannot be read (' . $rows . ')';
+			return 1146 === self::$errno ? '' : 'its rows cannot be read (' . $rows . ')';
 		}
 		if ( ! isset( $rows[0]['n'] ) || 0 === (int) $rows[0]['n'] ) {
 			return '';
@@ -470,8 +476,8 @@ final class SharedState {
 
 	/**
 	 * The events of the plugin's hook taken out of the main site's cron option, through WordPress's own functions
-	 * (and so through wpdb), which read the stored value, not a cached one: after a rollback the cache may say the
-	 * events are gone that the table still holds, and nothing would be written.
+	 * (and so through wpdb), with the option's cached values dropped first so that they read the stored one: after
+	 * a rollback the cache may say the events are gone that the table still holds, and nothing would be written.
 	 *
 	 * @return void
 	 */
@@ -521,8 +527,9 @@ final class SharedState {
 	}
 
 	/**
-	 * End the transaction the reads above began on the test site's connection: a table read in one stays locked
-	 * against a change of its shape from another connection (the table-shape check's rebuild) until it ends.
+	 * End the transaction reads began on the test site's connection: a table read in one stays locked against a
+	 * change of its shape from another connection (the table-shape check's rebuild) until it ends. The listener
+	 * calls it last at the end of every test, after all it reads there (its own lists too).
 	 *
 	 * @return void
 	 */

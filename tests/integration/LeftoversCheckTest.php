@@ -673,8 +673,9 @@ final class LeftoversCheckTest extends WP_UnitTestCase {
 			$this->assertStringNotContainsString( 'i:2000007200;', $stored(), 'a time left with no event goes' );
 			$this->assertSame( array( '0' ), $on( "SELECT COUNT(*) FROM `{$wpdb->usermeta}` WHERE meta_key = '" . \WPCheckpoint\Admin\Notices::USER_META . "'" ) );
 
-			// A read that finds nothing off leaves no transaction open over the tables it read: another connection
-			// can change their shape (the table-shape check's rebuild). The control: a read alone holds them.
+			// When the listener's end of a test returns, it has left no transaction open over any table it read
+			// (the plugin's, and the site's it lists from): another connection can change their shape (the
+			// table-shape check's rebuild). The control: a read alone holds each of them.
 			$other = mysqli_init();
 			$host  = (string) DB_HOST;
 			$port  = null;
@@ -684,23 +685,31 @@ final class LeftoversCheckTest extends WP_UnitTestCase {
 			}
 			$this->assertTrue( mysqli_real_connect( $other, $host, (string) DB_USER, (string) DB_PASSWORD, (string) DB_NAME, $port ) );
 			mysqli_query( $other, 'SET SESSION lock_wait_timeout = 1' );
-			$renames = static function () use ( $other, $plan ): bool {
+			$renames = static function ( string $table ) use ( $other ): bool {
 				try {
-					return true === mysqli_query( $other, "RENAME TABLE `{$plan}` TO `{$plan}_probe`, `{$plan}_probe` TO `{$plan}`" );
+					return true === mysqli_query( $other, "RENAME TABLE `{$table}` TO `{$table}_probe`, `{$table}_probe` TO `{$table}`" );
 				} catch ( \mysqli_sql_exception $e ) {
 					return false;
 				}
 			};
-			$this->assertSame( array(), $shared::off_baseline() );
-			$this->assertFalse( $renames(), 'the control: the read holds the table against another connection' );
+			$read = array( $jobs, $plan, \WPCheckpoint\Jobs\UninstallFence::name(), $wpdb->usermeta, $wpdb->base_prefix . 'options' );
+			if ( is_multisite() ) {
+				$read[] = $wpdb->sitemeta;
+				$read[] = $wpdb->blogs;
+			}
 			$quiet = new Leftovers(
 				null,
 				null,
 				static function ( string $text ): void {
 				}
 			);
-			$quiet->endTest( $this, 0.0 );
-			$this->assertTrue( $renames(), mysqli_error( $other ) );
+			foreach ( $read as $table ) {
+				$this->assertSame( array(), $shared::off_baseline() );
+				$this->assertNotFalse( $on( "SELECT 1 FROM `{$table}` LIMIT 1" ) );
+				$this->assertFalse( $renames( $table ), 'the control: a read holds ' . $table . ' against another connection' );
+				$quiet->endTest( $this, 0.0 );
+				$this->assertTrue( $renames( $table ), $table . ': ' . mysqli_error( $other ) );
+			}
 			mysqli_close( $other );
 
 			// A temporary table of the name over the table (a schema check under the core test case's filters).

@@ -15,7 +15,7 @@ final class RestoreTearDownPlanTest extends RestoreTestCase {
 
 	const PLAN_JOB = 987654;
 
-	/** @var bool Whether the test that commits a row of the plan ran. */
+	/** @var bool Whether the test that commits a row of the plan and an event ran. */
 	private static $planned = false;
 
 	/** @var array{0: int, 1: string}|null The plan's rows and the cron option (SharedState::cron()) after the first test's tear-down. */
