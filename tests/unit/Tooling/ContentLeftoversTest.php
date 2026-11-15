@@ -96,6 +96,45 @@ final class ContentLeftoversTest extends TestCase {
 		return '';
 	}
 
+	public function test_a_must_use_plugins_directory_that_is_not_there_is_made_and_nothing_else_is(): void {
+		$content = $this->sandbox . '/content';
+		mkdir( $content );
+		$mu = ExpectedPath::slashed( $content, 'mu-plugins' );
+		$this->assertDirectoryDoesNotExist( $mu, 'the control: a site that has none' );
+		$this->assertSame( '', ContentLeftovers::make_mu( $content, $mu ) );
+		$this->assertDirectoryExists( $mu );
+		file_put_contents( $mu . '/kept.php', '<?php' );
+		$this->assertSame( '', ContentLeftovers::make_mu( $content, $mu ), 'there already: as it is' );
+		$this->assertFileExists( $mu . '/kept.php' );
+
+		// Under no other name, in no other place, and not where the content directory is not there.
+		foreach ( array( $content . '/other', $this->sandbox . '/mu-plugins', $content . '/sub/mu-plugins', $this->sandbox . '/none/mu-plugins' ) as $dir ) {
+			$why = ContentLeftovers::make_mu( 0 === strpos( $dir, $this->sandbox . '/none' ) ? $this->sandbox . '/none' : $content, $dir );
+			$this->assertStringContainsString( 'is not made', $why, $dir );
+			$this->assertFileDoesNotExist( $dir, $dir );
+		}
+	}
+
+	public function test_a_file_or_a_link_under_the_must_use_plugins_name_is_not_written_over(): void {
+		$content = $this->sandbox . '/content';
+		mkdir( $content );
+		$mu = $content . '/mu-plugins';
+		file_put_contents( $mu, 'a file' );
+		$this->assertStringContainsString( 'not written over', ContentLeftovers::make_mu( $content, $mu ) );
+		$this->assertSame( 'a file', file_get_contents( $mu ) );
+		Sandbox::remove( $mu );
+		mkdir( $this->sandbox . '/elsewhere' );
+		if ( ! @symlink( $this->sandbox . '/elsewhere', $mu ) ) {
+			$this->markTestSkipped( 'No links here.' );
+		}
+		$this->assertStringContainsString( 'not written over', ContentLeftovers::make_mu( $content, $mu ) );
+		$this->assertTrue( is_link( $mu ), 'the link as it was' );
+		// A link whose target is gone is not made into a directory either.
+		Sandbox::remove( $this->sandbox . '/elsewhere' );
+		$this->assertStringContainsString( 'not written over', ContentLeftovers::make_mu( $content, $mu ) );
+		$this->assertTrue( is_link( $mu ) );
+	}
+
 	public function test_a_loader_probe_left_stops_the_run_listed(): void {
 		mkdir( $this->sandbox . '/uploads' );
 		mkdir( $this->sandbox . '/mu-plugins' );

@@ -16,6 +16,10 @@ use WPCheckpoint\Support\Directories;
  * plugins directory stops it: a run stopped part way left it, and with it there the test site loads it as a must-use
  * plugin. The registered names are checked to be there (an integration test): a registration that names nothing
  * there is out of date, but for those a test site may not have yet (MAY_BE_ABSENT, each with why).
+ *
+ * The must-use plugins directory itself is made before every test when it is not there (settle_mu(), from the
+ * listener, as the plugin's storage directory is): a new test site (CI's) has none, and a test that needs it may be
+ * the first to run.
  */
 final class ContentLeftovers {
 
@@ -36,8 +40,7 @@ final class ContentLeftovers {
 	 * out: whether they are out of date cannot be told from a site that never made them).
 	 */
 	const MAY_BE_ABSENT = array(
-		'upgrade'    => 'WordPress makes it the first time it downloads a package: a new test site (CI\'s) has none',
-		'mu-plugins' => 'made by the first test that needs it (a restore\'s preflight, the loader\'s tests): a new test site (CI\'s) has none, and in a random order this check may come before any of them',
+		'upgrade' => 'WordPress makes it the first time it downloads a package: a new test site (CI\'s) has none',
 	);
 
 	/**
@@ -65,6 +68,49 @@ final class ContentLeftovers {
 	 */
 	public static function mu_dir(): string {
 		return defined( 'WPMU_PLUGIN_DIR' ) ? rtrim( str_replace( '\\', '/', (string) WPMU_PLUGIN_DIR ), '/' ) : self::dir() . '/mu-plugins';
+	}
+
+	/**
+	 * Before a test: the test site's must-use plugins directory is there, made when it is not. Only as the directory
+	 * "mu-plugins" of the test site's own wp-content directory (RealAbspath::refusal(), make_mu()).
+	 *
+	 * @return string Why it is not there and was not made, or ''.
+	 */
+	public static function settle_mu(): string {
+		$dir = self::mu_dir();
+		clearstatcache( true, $dir );
+		if ( is_dir( $dir ) && ! is_link( $dir ) ) {
+			return '';
+		}
+		$why = RealAbspath::refusal();
+		return '' !== $why ? $why : self::make_mu( self::dir(), $dir );
+	}
+
+	/**
+	 * Make a must-use plugins directory that is not there: only directly in the content directory, which is there,
+	 * and under no name but "mu-plugins"; nothing that is there under the name (a file, a link) is written over.
+	 *
+	 * @param string $content The wp-content directory.
+	 * @param string $dir     The must-use plugins directory.
+	 * @return string Why it was not made, or ''.
+	 */
+	public static function make_mu( string $content, string $dir ): string {
+		$content = rtrim( str_replace( '\\', '/', $content ), '/' );
+		$dir     = rtrim( str_replace( '\\', '/', $dir ), '/' );
+		clearstatcache( true, $dir );
+		if ( is_link( $dir ) || ( file_exists( $dir ) && ! is_dir( $dir ) ) ) {
+			return 'The must-use plugins directory is a link or a file, and is not written over: ' . $dir;
+		}
+		if ( is_dir( $dir ) ) {
+			return '';
+		}
+		if ( $content . '/mu-plugins' !== $dir || ! is_dir( $content ) || is_link( $content ) ) {
+			return 'The must-use plugins directory is not "mu-plugins" in a wp-content directory that is there, and is not made: ' . $dir;
+		}
+		if ( ! @mkdir( $dir, 0755 ) && ! is_dir( $dir ) ) {
+			return 'The must-use plugins directory could not be made: ' . $dir;
+		}
+		return '';
 	}
 
 	/**

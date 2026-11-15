@@ -7,12 +7,17 @@
 # one without the label, is never commented on and never closed: with no issue of its own, a failed run opens one.
 #
 # Environment: RESULT (the run's result), RUN_URL, RUN_ID, GH_REPO, GITHUB_SHA, and gh's GH_TOKEN. TITLE, LABEL and
-# AUTHOR have the defaults below. Needs gh.
+# AUTHOR have the defaults below; GITHUB_API_URL is the API's address (the runner sets it). Needs gh and curl.
+#
+# A failed job's log is read with curl, not with gh: a log holds terminal escape sequences (the colours of the steps'
+# commands), and gh on the runners refuses to print a response that does ("the response contains terminal escape
+# sequences"), so the issue said of every failed job that its log could not be read. When it cannot be read, the
+# issue says why (curl's own words), and no line of another job's log stands in for it.
 #
 # Exit status: 0 when the issue is as the result asks, else the status of the command that failed.
 
 set -u -o pipefail
-: "${RESULT:?}" "${RUN_URL:?}" "${RUN_ID:?}" "${GH_REPO:?}" "${GITHUB_SHA:?}"
+: "${RESULT:?}" "${RUN_URL:?}" "${RUN_ID:?}" "${GH_REPO:?}" "${GITHUB_SHA:?}" "${GH_TOKEN:?}"
 TITLE="${TITLE:-The daily integration run in random order fails on main}"
 LABEL="${LABEL:-daily-run}"
 AUTHOR="${AUTHOR:-github-actions[bot]}"
@@ -49,8 +54,12 @@ trap 'rm -f "$body" "$log"' EXIT
 	# its jobs' logs are read one by one); the whole log is in the run.
 	for job in $(gh api "repos/${GH_REPO}/actions/runs/${RUN_ID}/jobs" --jq '.jobs[] | select(.conclusion == "failure") | .id'); do
 		gh api "repos/${GH_REPO}/actions/jobs/${job}" --jq '.name'
-		gh api "repos/${GH_REPO}/actions/jobs/${job}/logs" > "$log" || echo "  (its log could not be read)"
-		grep -E 'SEED: [0-9]+|[0-9]+\) [A-Za-z\\]+Test::|Fatal error|Tests: [0-9]+' "$log" | sed -E 's/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z //' | awk '!seen[$0]++' | head -n 30 | sed 's/^/  /' || true
+		: > "$log"
+		if ! why="$(curl -sS -f -L -H "Authorization: Bearer ${GH_TOKEN}" -H 'Accept: application/vnd.github+json' -o "$log" "${GITHUB_API_URL:-https://api.github.com}/repos/${GH_REPO}/actions/jobs/${job}/logs" 2>&1)"; then
+			echo "  (its log could not be read: $(printf '%s' "$why" | tr -d '\033' | tr '\n' ' ' | cut -c1-200))"
+			continue
+		fi
+		grep -a -E 'SEED: [0-9]+|[0-9]+\) [A-Za-z\\]+Test::|Fatal error|Tests: [0-9]+' "$log" | sed -E -e 's/\x1b\[[0-9;]*[A-Za-z]//g' -e 's/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z //' | awk '!seen[$0]++' | head -n 30 | sed 's/^/  /' || true
 	done
 	echo '```'
 } > "$body"
