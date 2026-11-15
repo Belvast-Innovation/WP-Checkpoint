@@ -81,8 +81,9 @@ final class SiteStateTest extends WP_UnitTestCase {
 	}
 
 	public function tear_down(): void {
+		\WPCheckpoint\Tests\Fixtures\OpenTransaction::roll_back(); // What the test left uncommitted is not committed by what follows.
 		global $wpdb;
-		// The DROP TABLE below commits what the test wrote: the settings the uninstall tests changed are put back.
+		// What the uninstall tests changed and committed is put back; the DROP TABLE below commits that.
 		UninstallSetting::save( false );
 		false === $this->version ? delete_option( Uninstaller::OPTION_VERSION ) : update_option( Uninstaller::OPTION_VERSION, $this->version );
 		// Before the DROP TABLE, which commits them: after it, parent::tear_down()'s rollback would undo the deletes and

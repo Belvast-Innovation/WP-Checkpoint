@@ -1019,6 +1019,7 @@ abstract class SwapTestCase extends RestoreTestCase {
 	 */
 	protected function discard_abandoned(): void {
 		global $wpdb;
+		\WPCheckpoint\Tests\Fixtures\OpenTransaction::roll_back(); // What the test left uncommitted is not committed by what follows.
 		$wpdb->query( 'COMMIT' );
 		if ( ! \WPCheckpoint\Support\Schema::table_exists() ) {
 			return; // Dropped already (a test's own tear-down drops it first): no job, none abandoned, nothing to read.

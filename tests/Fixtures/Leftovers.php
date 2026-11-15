@@ -146,6 +146,9 @@ final class Leftovers implements TestListener {
 	/** @var TestResult|null The run's result, for failures of a class or of the run. */
 	private $result = null;
 
+	/** @var bool Whether the register of shared state (SharedState) was looked at for stale items in this run. */
+	private $register_read = false;
+
 	/**
 	 * Constructor.
 	 *
@@ -180,6 +183,37 @@ final class Leftovers implements TestListener {
 		}
 		global $wpdb;
 		return self::database_refusal( (string) $wpdb->dbname, (string) $wpdb->get_var( 'SELECT DATABASE()' ), (string) $wpdb->dbhost );
+	}
+
+	/**
+	 * Whether this listener looks at the shared state (SharedState): the registered one, in the integration suite.
+	 *
+	 * @return bool
+	 */
+	private function shares(): bool {
+		return ! $this->given && 'integration' === getenv( 'WPCHECKPOINT_TEST_SUITE' ) && isset( $GLOBALS['wpdb'] );
+	}
+
+	/**
+	 * The shared state off its baseline now, put back: '' when all of it is at its baseline, else what was off, a
+	 * line an item.
+	 *
+	 * @return string
+	 */
+	private function shared_put_back(): string {
+		if ( ! $this->shares() ) {
+			return '';
+		}
+		$off = SharedState::off_baseline();
+		if ( array() === $off ) {
+			return '';
+		}
+		SharedState::restore( array_keys( $off ) );
+		$lines = array();
+		foreach ( $off as $name => $how ) {
+			$lines[] = $name . ': ' . $how;
+		}
+		return implode( "\n  ", $lines );
 	}
 
 	/**
@@ -304,6 +338,11 @@ final class Leftovers implements TestListener {
 		if ( array() === $this->suites ) {
 			$now = array_values( array_unique( array_merge( $now, $this->strays() ) ) );
 			sort( $now );
+			// Shared state an earlier run left off its baseline: no test's of this run.
+			$off = $this->shared_put_back();
+			if ( '' !== $off ) {
+				$this->say( "\nShared state an earlier run left off its baseline (put back now):\n  " . $off . "\n" );
+			}
 		}
 		if ( array() === $this->suites && array() !== $now ) {
 			// The tables go: they carry no site's prefix, and the tests database is taken to be this run's while it
@@ -419,6 +458,12 @@ final class Leftovers implements TestListener {
 			}
 			$this->say( "\nOption rows of this plugin that tests left committed (put back after each):\n  " . implode( "\n  ", $lines ) . "\n" );
 		}
+		// What a class's tear-down after its tests left (a test's was put back at its end; what a class's set-up
+		// before its tests left was found at the end of its first test, and failed that one).
+		$off = $this->shared_put_back();
+		if ( '' !== $off ) {
+			$this->fail_as( 'shared state after ' . $suite->getName(), sprintf( "%s left shared state off its baseline (put back now):\n  %s", $suite->getName(), $off ) );
+		}
 		$gone  = $this->gone( $now );
 		if ( array() !== $gone ) {
 			$this->fail_as( 'removals of ' . $suite->getName(), sprintf( "%s removed what it did not create (there when the run started):\n  %s", $suite->getName(), implode( "\n  ", $gone ) ) );
@@ -442,6 +487,14 @@ final class Leftovers implements TestListener {
 		}
 		$this->state   = null;
 		$this->options = null;
+		if ( ! $this->register_read && null !== $this->result && $this->shares() ) {
+			// Once a run, as soon as there is a result to fail through: an item about something that is gone.
+			$this->register_read = true;
+			$stale               = SharedState::stale();
+			if ( array() !== $stale ) {
+				$this->fail_as( 'the register of shared state', "Stale items in the register of shared state (tests/Fixtures/SharedState.php):\n  " . implode( "\n  ", $stale ) );
+			}
+		}
 		if ( ! $this->given && 'integration' === getenv( 'WPCHECKPOINT_TEST_SUITE' ) && isset( $GLOBALS['wpdb'] ) ) {
 			// The plugin's own storage directory, there and stored before the test's transaction starts.
 			$this->state   = StorageDirs::settle();
@@ -480,6 +533,14 @@ final class Leftovers implements TestListener {
 			// Put back, and said when the run ends (not a failure of the test: see OwnOptions).
 			OwnOptions::put_back( $this->options, $test instanceof TestCase ? get_class( $test ) . '::' . $test->getName( false ) : get_class( $test ) );
 			$this->options = null;
+		}
+		// Shared state the test left committed off its baseline: the test fails by name, and the next one finds it
+		// at its baseline.
+		$off = $this->shared_put_back();
+		if ( '' !== $off && null !== $this->result ) {
+			$this->result->addFailure( $test, new AssertionFailedError( "The test left shared state off its baseline (put back now):\n  " . $off ), 0.0 );
+		} elseif ( '' !== $off ) {
+			$this->say( "\nShared state off its baseline after a test, with no result to fail it through (put back now):\n  " . $off . "\n" );
 		}
 		$now          = $this->now();
 		if ( null === $before || null === $now ) {

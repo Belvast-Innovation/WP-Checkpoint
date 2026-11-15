@@ -56,6 +56,7 @@ final class SiteIdentityTest extends WP_UnitTestCase {
 	}
 
 	public function tear_down(): void {
+		\WPCheckpoint\Tests\Fixtures\OpenTransaction::roll_back(); // What the test left uncommitted is not committed by what follows.
 		global $wpdb;
 		// Before the DROP TABLE, which commits them.
 		Options::delete( Schema::OPTION );

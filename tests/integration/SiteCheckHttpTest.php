@@ -90,6 +90,7 @@ final class SiteCheckHttpTest extends SwapTestCase {
 	}
 
 	public function tear_down(): void {
+		\WPCheckpoint\Tests\Fixtures\OpenTransaction::roll_back(); // What the test left uncommitted is not committed by what follows.
 		ActivePlugin::off();
 		$job = null === $this->swap_job ? null : Plugin::instance()->jobs()->find( $this->swap_job->id );
 		if ( null !== $job && '' !== (string) ( $job->cursor['mark'] ?? $job->site_mark ) ) {

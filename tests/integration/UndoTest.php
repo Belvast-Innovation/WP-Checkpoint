@@ -390,6 +390,9 @@ final class UndoTest extends SwapTestCase {
 			$property->setValue( null, null );
 			ini_set( 'error_log', (string) $was );
 			\WPCheckpoint\Support\UninstallSetting::save( false );
+			// As the uninstall's own process ends: what it wrote last (the fence it opened again when it was stopped) is
+			// committed, not left to the test's transaction, which the tear-down rolls back.
+			$GLOBALS['wpdb']->query( 'COMMIT' );
 		}
 		clearstatcache();
 		return array(

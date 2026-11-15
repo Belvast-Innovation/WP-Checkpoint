@@ -104,6 +104,7 @@ final class ExportPipelineTest extends JobTestCase {
 	}
 
 	public function tear_down(): void {
+		\WPCheckpoint\Tests\Fixtures\OpenTransaction::roll_back(); // What the test left uncommitted is not committed by what follows.
 		global $wpdb;
 		Deleter::empty_directory( $this->uploads );
 		@rmdir( $this->uploads );

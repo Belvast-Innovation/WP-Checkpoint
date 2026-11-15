@@ -70,6 +70,7 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 	}
 
 	public function tear_down(): void {
+		\WPCheckpoint\Tests\Fixtures\OpenTransaction::roll_back(); // What the test left uncommitted is not committed by what follows.
 		global $wpdb;
 		$wpdb->query( 'DROP TABLE IF EXISTS ' . Schema::jobs_table() );
 		// The temporary tables this test made (live work the reap rightly kept), and no other's.
@@ -1378,7 +1379,10 @@ final class JobRepositoryTest extends WP_UnitTestCase {
 			Schema::ensure( true );
 			$this->assertSame( \WPCheckpoint\Jobs\UninstallFence::CLOSED, \WPCheckpoint\Jobs\UninstallFence::row()['state'], 'a fence closed just now stays closed' );
 		} finally {
+			// The check of the schema committed the close (it creates tables): the opening is committed too, or the
+			// tear-down's rollback leaves the fence closed for the tests after this one.
 			\WPCheckpoint\Jobs\UninstallFence::open();
+			$wpdb->query( 'COMMIT' );
 		}
 	}
 

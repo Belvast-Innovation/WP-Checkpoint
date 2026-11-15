@@ -18,6 +18,7 @@ final class AdminPageTest extends WP_UnitTestCase {
 		unset( $_GET['tab'] );
 		remove_all_filters( 'wpcheckpoint_admin_tabs' );
 		parent::tear_down();
+		\WPCheckpoint\Tests\Fixtures\RunTables::drop_temporary(); // The plugin's schema was checked under the core test case's filters.
 	}
 
 	private function render( Page $page ): string {

@@ -77,6 +77,34 @@ final class RunTables {
 	}
 
 	/**
+	 * Drop the temporary tables of the run tables' names on the test site's connection: what a test under the core
+	 * test case's filters makes when the plugin checks its schema (CREATE TABLE IF NOT EXISTS becomes CREATE TEMPORARY
+	 * TABLE IF NOT EXISTS, though the table is there). Such a table stays for the rest of the run and hides the
+	 * plugin's own from every statement of that connection, while other connections read the plugin's own. For the
+	 * tear-down of a test that activates the plugin or checks its schema; it ends no transaction.
+	 *
+	 * @return void
+	 */
+	public static function drop_temporary(): void {
+		global $wpdb;
+		foreach ( self::names() as $table ) {
+			$name = '`' . str_replace( '`', '``', $table ) . '`';
+			for ( $i = 0; $i < 8; $i++ ) {
+				try {
+					$shown = mysqli_query( $wpdb->dbh, 'SHOW CREATE TABLE ' . $name );
+				} catch ( \mysqli_sql_exception $e ) {
+					$shown = false;
+				}
+				$row = $shown instanceof \mysqli_result ? mysqli_fetch_row( $shown ) : null;
+				if ( ! is_array( $row ) || ! isset( $row[1] ) || 0 !== strpos( (string) $row[1], 'CREATE TEMPORARY TABLE' ) ) {
+					break;
+				}
+				mysqli_query( $wpdb->dbh, 'DROP TEMPORARY TABLE ' . $name );
+			}
+		}
+	}
+
+	/**
 	 * Make again the noted run tables that are not there (when a test ends), the fence with its row open.
 	 *
 	 * @return void

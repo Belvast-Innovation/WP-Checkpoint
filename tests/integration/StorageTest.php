@@ -58,6 +58,7 @@ final class StorageTest extends WP_UnitTestCase {
 		remove_all_filters( 'pre_http_request' );
 		remove_all_filters( 'content_url' );
 		parent::tear_down();
+		\WPCheckpoint\Tests\Fixtures\RunTables::drop_temporary(); // The plugin's schema was checked under the core test case's filters.
 	}
 
 	private function cli_context( array $extra = array() ): array {
