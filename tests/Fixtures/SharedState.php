@@ -2,6 +2,7 @@
 
 namespace WPCheckpoint\Tests\Fixtures;
 
+use WPCheckpoint\Admin\Notices;
 use WPCheckpoint\Jobs\Loopback;
 use WPCheckpoint\Jobs\UninstallFence;
 use WPCheckpoint\Restore\SwapPlan;
@@ -19,8 +20,8 @@ use WPCheckpoint\Support\StoredNames;
  * subject or methods are no longer there is stale, and fails the run (stale()): a check of something that is gone
  * passes for ever.
  *
- * Read and written on the test site's connection itself (not through wpdb's filters) after the test's transaction is
- * over: what the next test would find. INVENTORY lists every state the plugin owns with its baseline and its item
+ * Read on the test site's connection itself (not through wpdb's filters) after the test's transaction is over: what
+ * the next test would find; written there too, but for the cron option (WordPress's own functions). INVENTORY lists every state the plugin owns with its baseline and its item
  * here, or why it has none (the plugin's own option rows: OwnOptions puts them back and says them when the run ends,
  * without failing the test).
  */
@@ -54,15 +55,22 @@ final class SharedState {
 			'reads'    => 'cron',
 			'restores' => 'clear_cron',
 		),
+		'the dismissed notices' => array(
+			'subject'  => Notices::class . '::USER_META',
+			'reads'    => 'dismissed',
+			'restores' => 'clear_dismissed',
+		),
 	);
 
 	/** Why an option row of the plugin's is not an item of the register. */
 	const OPTION_ROWS = 'put back as the test found it after every test, and listed with the tests that left it when the run ends (OwnOptions): no later test meets it; not failed test by test';
 
 	/**
-	 * Every state the plugin owns that outlasts a request, but for its files (the listener's own lists): each table
+	 * The state the plugin owns that outlasts a request, but for its files (the listener's own lists): each table
 	 * src/ creates (Database\OwnTables) and each name it stores under (Support\StoredNames: exact names and the
-	 * prefixes of built ones, whatever they are stored as), and the one option of WordPress's it writes into. For
+	 * prefixes of built ones, whatever they are stored as), the user meta it removes on uninstall
+	 * (Support\Uninstaller::USER_META), and the one option of WordPress's it writes into (the events of its one
+	 * cron hook: a second hook scheduled in src/ is not noticed here). For
 	 * each: what a test must leave ("baseline"), and the item of the register that holds it to that ("item"), or why
 	 * none does ("why"). A table or name added to the plugin and not here fails SharedStateTest.
 	 */
@@ -86,6 +94,10 @@ final class SharedState {
 		'option:cron'                              => array(
 			'baseline' => 'no event of the plugin\'s hook in the main site\'s stored cron option',
 			'item'     => 'the cron option',
+		),
+		'usermeta:' . Notices::USER_META           => array(
+			'baseline' => 'no row of the key',
+			'item'     => 'the dismissed notices',
 		),
 		'name:' . StoredNames::STORAGE             => array(
 			'baseline' => 'the state the run settled before the test, its directory there',
@@ -122,11 +134,12 @@ final class SharedState {
 	 * @param array<string, string>                $sources   The files of src/ that create a table => what (OwnTables::SOURCES).
 	 * @param string[]                             $exact     The exact stored names.
 	 * @param string[]                             $built     The prefixes of the built names.
+	 * @param string[]                             $usermeta  The user meta keys.
 	 * @param array<string, array<string, string>> $inventory The inventory.
 	 * @param array<string, array<string, string>> $items     The register's items.
 	 * @return string[]
 	 */
-	public static function inventory_problems( array $tables, array $sources, array $exact, array $built, array $inventory, array $items ): array {
+	public static function inventory_problems( array $tables, array $sources, array $exact, array $built, array $usermeta, array $inventory, array $items ): array {
 		$expect = array( 'option:cron' );
 		foreach ( $tables as $table ) {
 			$expect[] = 'table:' . $table;
@@ -149,6 +162,9 @@ final class SharedState {
 		}
 		foreach ( $built as $prefix ) {
 			$expect[] = 'built:' . $prefix;
+		}
+		foreach ( $usermeta as $key ) {
+			$expect[] = 'usermeta:' . $key;
 		}
 		foreach ( array_diff( $expect, array_keys( $inventory ) ) as $key ) {
 			$out[] = $key . ': not in the inventory';
@@ -371,7 +387,11 @@ final class SharedState {
 			return 'a temporary table of its name hides it on the test site\'s connection';
 		}
 		$rows = self::on_connection( 'SELECT COUNT(*) AS n FROM `' . str_replace( '`', '``', $table ) . '`' );
-		if ( ! is_array( $rows ) || ! isset( $rows[0]['n'] ) || 0 === (int) $rows[0]['n'] ) {
+		if ( ! is_array( $rows ) ) {
+			// Not there: the table-shape check's to say. Anything else is not "no row".
+			return false !== strpos( $rows, 'doesn\'t exist' ) ? '' : 'its rows cannot be read (' . $rows . ')';
+		}
+		if ( ! isset( $rows[0]['n'] ) || 0 === (int) $rows[0]['n'] ) {
 			return '';
 		}
 		return (int) $rows[0]['n'] . ' row(s) left in it';
@@ -438,7 +458,10 @@ final class SharedState {
 	public static function cron(): string {
 		global $wpdb;
 		$rows = self::on_connection( 'SELECT option_value FROM `' . str_replace( '`', '``', $wpdb->base_prefix . 'options' ) . "` WHERE option_name = 'cron'" );
-		if ( ! is_array( $rows ) || ! isset( $rows[0]['option_value'] ) ) {
+		if ( ! is_array( $rows ) ) {
+			return 'it cannot be read (' . $rows . ')';
+		}
+		if ( ! isset( $rows[0]['option_value'] ) ) {
 			return '';
 		}
 		$events = substr_count( (string) $rows[0]['option_value'], '"' . Loopback::HOOK . '"' );
@@ -446,8 +469,9 @@ final class SharedState {
 	}
 
 	/**
-	 * The events of the plugin's hook taken out of the main site's cron option, through WordPress (which reads the
-	 * stored value, not a cached one).
+	 * The events of the plugin's hook taken out of the main site's cron option, through WordPress's own functions
+	 * (and so through wpdb), which read the stored value, not a cached one: after a rollback the cache may say the
+	 * events are gone that the table still holds, and nothing would be written.
 	 *
 	 * @return void
 	 */
@@ -469,5 +493,40 @@ final class SharedState {
 		if ( $switched ) {
 			restore_current_blog();
 		}
+	}
+
+	/**
+	 * How the user meta of dismissed notices is off its baseline: rows of the key.
+	 *
+	 * @return string
+	 */
+	public static function dismissed(): string {
+		global $wpdb;
+		$rows = self::on_connection( 'SELECT COUNT(*) AS n FROM `' . str_replace( '`', '``', $wpdb->usermeta ) . "` WHERE meta_key = '" . Notices::USER_META . "'" );
+		if ( ! is_array( $rows ) ) {
+			return 'it cannot be read (' . $rows . ')';
+		}
+		return 0 === (int) ( $rows[0]['n'] ?? 0 ) ? '' : (int) $rows[0]['n'] . ' row(s) of the key left';
+	}
+
+	/**
+	 * The rows of the key gone.
+	 *
+	 * @return void
+	 */
+	public static function clear_dismissed(): void {
+		global $wpdb;
+		self::on_connection( 'DELETE FROM `' . str_replace( '`', '``', $wpdb->usermeta ) . "` WHERE meta_key = '" . Notices::USER_META . "'" );
+		wp_cache_flush();
+	}
+
+	/**
+	 * End the transaction the reads above began on the test site's connection: a table read in one stays locked
+	 * against a change of its shape from another connection (the table-shape check's rebuild) until it ends.
+	 *
+	 * @return void
+	 */
+	public static function release(): void {
+		self::on_connection( 'ROLLBACK' );
 	}
 }

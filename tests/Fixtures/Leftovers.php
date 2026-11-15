@@ -206,6 +206,7 @@ final class Leftovers implements TestListener {
 		}
 		$off = SharedState::off_baseline();
 		if ( array() === $off ) {
+			SharedState::release(); // No transaction left open over the tables read (a restore ends it by committing).
 			return '';
 		}
 		SharedState::restore( array_keys( $off ) );
