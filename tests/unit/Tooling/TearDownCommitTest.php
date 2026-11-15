@@ -378,7 +378,10 @@ final class TearDownCommitTest extends TestCase {
 		}
 		$said = self::said( $sources );
 		// The controls: the scan read the base test cases, followed their helpers, and found what they say.
-		$this->assertSame( array( 'ROLLBACK', 'DROP' ), array_slice( $said['JobTestCase::tear_down']['says'] ?? array(), 0, 2 ) );
+		$job = $said['JobTestCase::tear_down']['says'] ?? array();
+		$this->assertSame( 'ROLLBACK', $job[0] ?? '' );
+		$this->assertContains( 'COMMIT', $job, 'its own, of what it takes committed' );
+		$this->assertContains( 'DROP', $job );
 		$this->assertSame( array( 'ROLLBACK', 'COMMIT' ), array_slice( $said['SwapTestCase::tear_down']['says'] ?? array(), 0, 2 ), 'through tear_down_swap() and discard_abandoned()' );
 		$this->assertSame( array( 'ROLLBACK', 'COMMIT' ), $said['SiteCheckHttpTest::tear_down']['says'] ?? array(), 'through ActivePlugin::off()' );
 		$this->assertSame( array( 'ROLLBACK', 'DROP' ), $said['RestoreTearDownTest::tear_down_after_class']['says'] ?? array() );

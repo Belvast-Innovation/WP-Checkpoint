@@ -5,8 +5,8 @@ namespace WPCheckpoint\Tests\Integration;
 use WPCheckpoint\Tests\Fixtures\Restore\RestoreTestCase;
 
 /**
- * A restore test's tear-down takes the rows of the swap plan its test's restores committed, committed: the tear-down
- * above it begins with a rollback, and job ids start over with every test.
+ * A job test's tear-down (JobTestCase) takes the rows of the swap plan its test's restores committed, committed: it
+ * ends in a rollback, and job ids start over with every test.
  *
  * Two tests and no other in the class, so that the second follows the first in any order of the run: another test's
  * tear-down between them could drop a table, which commits.
