@@ -616,4 +616,57 @@ final class LeftoversCheckTest extends WP_UnitTestCase {
 		}
 		$this->assertSame( $shared::ITEMS, $shared::items() );
 	}
+
+	public function test_rows_left_in_the_run_tables_and_the_plugins_cron_events_are_off_the_baseline_and_taken(): void {
+		global $wpdb;
+		$shared = '\\WPCheckpoint\\Tests\\Fixtures\\SharedState';
+		$jobs   = \WPCheckpoint\Support\Schema::jobs_table();
+		$plan   = $wpdb->base_prefix . \WPCheckpoint\Restore\SwapPlan::TABLE;
+		$hook   = \WPCheckpoint\Jobs\Loopback::HOOK;
+		$on     = static function ( string $sql ) use ( $wpdb ) {
+			$done = mysqli_query( $wpdb->dbh, $sql );
+			return $done instanceof \mysqli_result ? mysqli_fetch_row( $done ) : $done;
+		};
+		$stored = static function () use ( $on, $wpdb ): string {
+			$row = $on( "SELECT option_value FROM `{$wpdb->base_prefix}options` WHERE option_name = 'cron'" );
+			return is_array( $row ) ? (string) $row[0] : '';
+		};
+		$this->assertSame( array(), $shared::off_baseline(), 'the control: at its baseline when this test starts' );
+		$core = 'wpcheckpoint_check_not_the_plugins_hook';
+		try {
+			// Committed, as a test leaves them that commits midway.
+			$this->assertTrue( $on( "INSERT IGNORE INTO `{$jobs}` () VALUES ()" ), mysqli_error( $wpdb->dbh ) );
+			$this->assertTrue( $on( "INSERT INTO `{$plan}` (job_id, attempt, seq, kind, live, stage, old, had_live) VALUES (987655, 1, 0, 'move', 'a', '', 'b', 0)" ), mysqli_error( $wpdb->dbh ) );
+			$this->assertTrue( $on( "INSERT INTO `{$plan}` (job_id, attempt, seq, kind, live, stage, old, had_live) VALUES (987655, 1, 1, 'move', 'c', '', 'd', 0)" ), mysqli_error( $wpdb->dbh ) );
+			wp_schedule_single_event( time() + 3600, $hook, array( 987655 ) );
+			wp_schedule_single_event( time() + 3600, $core, array( 1 ) ); // Another's event: stays.
+			$wpdb->query( 'COMMIT' );
+			$this->assertSame(
+				array(
+					'the jobs table'  => '1 row(s) left in it',
+					'the swap plan'   => '2 row(s) left in it',
+					'the cron option' => '1 time(s) with an event of ' . $hook,
+				),
+				$shared::off_baseline()
+			);
+			$shared::restore( array( 'the jobs table', 'the swap plan', 'the cron option' ) );
+			$wpdb->query( 'ROLLBACK' ); // What is stored.
+			$this->assertSame( array(), $shared::off_baseline() );
+			$this->assertSame( array( '0' ), $on( "SELECT COUNT(*) FROM `{$jobs}`" ) );
+			$this->assertSame( array( '0' ), $on( "SELECT COUNT(*) FROM `{$plan}`" ) );
+			$this->assertStringNotContainsString( '"' . $hook . '"', $stored() );
+			$this->assertStringContainsString( '"' . $core . '"', $stored(), 'the control: the option is read, and another\'s event is left' );
+
+			// A temporary table of the name over the table (a schema check under the core test case's filters).
+			$this->assertTrue( $on( "CREATE TEMPORARY TABLE `{$plan}` ( id int )" ), mysqli_error( $wpdb->dbh ) );
+			$this->assertSame( array( 'the swap plan' => 'a temporary table of its name hides it on the test site\'s connection' ), $shared::off_baseline() );
+			$shared::restore( array( 'the swap plan' ) );
+			$this->assertSame( array(), $shared::off_baseline() );
+			$this->assertStringNotContainsString( 'TEMPORARY', (string) $on( "SHOW CREATE TABLE `{$plan}`" )[1] );
+		} finally {
+			$on( "DROP TEMPORARY TABLE IF EXISTS `{$plan}`" );
+			wp_clear_scheduled_hook( $core, array( 1 ) );
+			$shared::restore( array( 'the jobs table', 'the swap plan', 'the cron option' ) );
+		}
+	}
 }
