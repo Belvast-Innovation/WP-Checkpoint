@@ -206,6 +206,7 @@ final class Leftovers implements TestListener {
 		}
 		$off = SharedState::off_baseline();
 		if ( array() === $off ) {
+			SharedState::release(); // At the start and the end of a suite nothing is read after this (a restore ends its own by committing).
 			return '';
 		}
 		SharedState::restore( array_keys( $off ) );
@@ -519,6 +520,25 @@ final class Leftovers implements TestListener {
 	 * @return void
 	 */
 	public function endTest( Test $test, float $time ): void {
+		try {
+			$this->end_test( $test );
+		} finally {
+			if ( $this->shares() ) {
+				// Whatever this listener read, on any way out: no transaction of its own is left open on the test
+				// site's connection, and so no table locked against a change of its shape from another connection
+				// (the table-shape check, which listens after this one, rebuilds through its own).
+				SharedState::release();
+			}
+		}
+	}
+
+	/**
+	 * The end of a test (endTest(), which ends the transaction this opens).
+	 *
+	 * @param Test $test Test.
+	 * @return void
+	 */
+	private function end_test( Test $test ): void {
 		if ( ! $this->given ) {
 			self::$watching = '';
 		}

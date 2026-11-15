@@ -43,4 +43,51 @@ final class SharedStateTest extends TestCase {
 		$this->assertSame( array(), SharedState::stale( array( 'an item' => SharedState::ITEMS['the uninstall fence'] ) ), 'the control: the item it was made from is not stale' );
 		$this->assertSame( $expect, SharedState::stale( array( 'an item' => $item ) ) );
 	}
+
+	/**
+	 * @return array{0: string[], 1: array<string, string>, 2: string[], 3: string[], 4: string[]}
+	 */
+	private static function owned(): array {
+		return array(
+			\WPCheckpoint\Database\OwnTables::names( '' ),
+			\WPCheckpoint\Database\OwnTables::SOURCES,
+			\WPCheckpoint\Support\StoredNames::EXACT,
+			array_keys( \WPCheckpoint\Support\StoredNames::BUILT ),
+			\WPCheckpoint\Support\Uninstaller::USER_META,
+		);
+	}
+
+	public function test_every_table_and_stored_name_of_the_plugin_is_in_the_inventory_with_its_baseline(): void {
+		list( $tables, $sources, $exact, $built, $meta ) = self::owned();
+		$this->assertSame( array(), SharedState::inventory_problems( $tables, $sources, $exact, $built, $meta, SharedState::INVENTORY, SharedState::ITEMS ) );
+		$this->assertSame( array( \WPCheckpoint\Admin\Notices::USER_META ), $meta, 'the control: the user meta the plugin removes is the key it writes' );
+		$this->assertGreaterThanOrEqual( 3, count( $tables ), 'the control: the plugin\'s tables were read' );
+		$this->assertGreaterThanOrEqual( 19, count( $exact ), 'the control: its stored names were read' );
+		$this->assertSame( 'the cron option', SharedState::INVENTORY['option:cron']['item'] );
+		$this->assertSame( 'the swap plan', SharedState::INVENTORY['table:wpcheckpoint_swap_plan']['item'] );
+	}
+
+	public function test_a_table_or_name_added_to_the_plugin_and_not_in_the_inventory_is_said(): void {
+		list( $tables, $sources, $exact, $built, $meta ) = self::owned();
+		$inventory = SharedState::INVENTORY;
+		$items     = SharedState::ITEMS;
+		$problems  = static function ( array $tables, array $sources, array $exact, array $built, ?array $inv = null, ?array $its = null, ?array $keys = null ) use ( $inventory, $items, $meta ): array {
+			return SharedState::inventory_problems( $tables, $sources, $exact, $built, null === $keys ? $meta : $keys, null === $inv ? $inventory : $inv, null === $its ? $items : $its );
+		};
+		$this->assertSame( array( 'usermeta:wpcheckpoint_new: not in the inventory' ), $problems( $tables, $sources, $exact, $built, null, null, array_merge( $meta, array( 'wpcheckpoint_new' ) ) ) );
+		$this->assertSame( array( 'table:wpcheckpoint_new: not in the inventory' ), $problems( array_merge( $tables, array( 'wpcheckpoint_new' ) ), $sources + array( 'src/New.php' => 'a new table (names())' ), $exact, $built ) );
+		$this->assertSame( array( '4 table(s) kept by name and 3 source(s) said to create one', 'table:wpcheckpoint_new: not in the inventory' ), $problems( array_merge( $tables, array( 'wpcheckpoint_new' ) ), $sources, $exact, $built ) );
+		$this->assertSame( array( 'tables:src/New.php: not in the inventory' ), $problems( $tables, $sources + array( 'src/New.php' => 'tables of a new kind (generated())' ), $exact, $built ) );
+		$this->assertSame( array( 'name:wpcheckpoint_new: not in the inventory' ), $problems( $tables, $sources, array_merge( $exact, array( 'wpcheckpoint_new' ) ), $built ) );
+		$this->assertSame( array( 'built:wpcheckpoint_new_: not in the inventory' ), $problems( $tables, $sources, $exact, array_merge( $built, array( 'wpcheckpoint_new_' ) ) ) );
+		$this->assertSame( array( 'name:' . $exact[0] . ': in the inventory, and no longer the plugin\'s' ), $problems( $tables, $sources, array_slice( $exact, 1 ), $built ) );
+		$this->assertSame( array( 'table:' . $tables[0] . ': in the inventory, and no longer the plugin\'s' ), $problems( array_slice( $tables, 1 ), array_slice( $sources, 1, null, true ), $exact, $built ) );
+
+		$key = 'name:' . $exact[1];
+		$this->assertSame( array( $key . ': no baseline' ), $problems( $tables, $sources, $exact, $built, array( $key => array( 'why' => 'x' ) ) + $inventory ) );
+		$this->assertSame( array( $key . ': an item of the register, or why none (one of the two)' ), $problems( $tables, $sources, $exact, $built, array( $key => array( 'baseline' => 'absent' ) ) + $inventory ) );
+		$this->assertSame( array( $key . ': an item of the register, or why none (one of the two)' ), $problems( $tables, $sources, $exact, $built, array( $key => array( 'baseline' => 'absent', 'item' => 'the swap plan', 'why' => 'x' ) ) + $inventory ) );
+		$this->assertSame( array( $key . ': its item "an item gone" is not in the register' ), $problems( $tables, $sources, $exact, $built, array( $key => array( 'baseline' => 'absent', 'item' => 'an item gone' ) ) + $inventory ) );
+		$this->assertSame( array( 'the register\'s item "an item more": of nothing in the inventory' ), $problems( $tables, $sources, $exact, $built, null, $items + array( 'an item more' => $items['the uninstall fence'] ) ) );
+	}
 }

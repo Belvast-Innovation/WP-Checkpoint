@@ -88,6 +88,12 @@ abstract class JobTestCase extends WP_UnitTestCase {
 	public function tear_down(): void {
 		\WPCheckpoint\Tests\Fixtures\OpenTransaction::roll_back(); // What the test left uncommitted is not committed by what follows.
 		global $wpdb;
+		// What the test's ticks and restores committed for its jobs, taken committed (the rollback at the end of this
+		// tear-down would bring it back): job ids start over with the table, and an event or a plan row of this
+		// test's job would be the next test's job's of the same id.
+		\WPCheckpoint\Tests\Fixtures\SharedState::clear_cron();
+		\WPCheckpoint\Tests\Fixtures\SharedState::empty_plan(); // On the connection itself: a test may have dropped the table.
+		$wpdb->query( 'COMMIT' );
 		$this->restore_plugin();
 		$wpdb->query( 'DROP TABLE IF EXISTS ' . Schema::jobs_table() );
 		foreach ( StorageDirs::removable() as $dir ) { // Not an earlier run's.
