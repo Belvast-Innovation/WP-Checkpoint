@@ -185,6 +185,9 @@ final class Leftovers implements TestListener {
 		return self::database_refusal( (string) $wpdb->dbname, (string) $wpdb->get_var( 'SELECT DATABASE()' ), (string) $wpdb->dbhost );
 	}
 
+	/** @var bool Whether why the must-use plugins directory is not there was said (once a run). */
+	private static $mu_said = false;
+
 	/**
 	 * Whether this listener looks at the shared state (SharedState): the registered one, in the integration suite.
 	 *
@@ -505,6 +508,12 @@ final class Leftovers implements TestListener {
 				self::$before_run[] = $own;
 			}
 			$this->options = OwnOptions::note(); // The plugin's own option rows as the test finds them.
+			// The test site's must-use plugins directory, there before the test: a new site has none.
+			$no_mu = ContentLeftovers::settle_mu();
+			if ( '' !== $no_mu && ! self::$mu_said ) {
+				self::$mu_said = true;
+				fwrite( STDERR, "\n" . $no_mu . "\n" );
+			}
 		}
 		$this->before = $this->now();
 		if ( null !== $this->before && ! $this->given && $test instanceof TestCase ) {

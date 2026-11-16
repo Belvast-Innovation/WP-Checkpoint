@@ -35,10 +35,30 @@ final class DailyRunReportTest extends TestCase {
 			. "\t'api --paginate -X GET repos/owner/repo/issues '*) [ -n \"\${GH_LIST_FAILS:-}\" ] && exit 4; cat \"\$GH_LISTING\" ;;\n"
 			. "\t'label create '*) [ -n \"\${GH_LABELS:-}\" ] && { echo 'already exists or refused' >&2; exit 1; } ;;\n"
 			. "\t'label list '*) [ -n \"\${GH_LABELS_UNREAD:-}\" ] && exit 6; printf '%b' \"\${GH_LABELS:-}\" ;;\n"
+			// The run's failed jobs (the ids the test gives), a job's name, and the issue's body kept for the test.
+			. "\t'api repos/owner/repo/actions/runs/9/jobs '*) printf '%b' \"\${GH_FAILED_JOBS:-}\" ;;\n"
+			. "\t'api repos/owner/repo/actions/jobs/'*'/logs'*) echo 'the response contains terminal escape sequences' >&2; exit 1 ;;\n"
+			. "\t'api repos/owner/repo/actions/jobs/'*) echo \"job \${2##*/}\" ;;\n"
+			. "\t'issue create '*|'issue comment '*) while [ \$# -gt 0 ]; do [ \"\$1\" = --body-file ] && cp \"\$2\" \"\$GH_BODY\"; shift; done ;;\n"
 			. "esac\n"
 			. "exit 0\n"
 		);
 		chmod( $this->sandbox . '/bin/gh', 0755 );
+		// The stand-in for curl: the log of the job the address names, from the file the test wrote for that job;
+		// without one, curl's failure. What it was asked is recorded, the token left out.
+		file_put_contents(
+			$this->sandbox . '/bin/curl',
+			"#!/usr/bin/env bash\n"
+			. "out=''; url=''; asked=\"\$(printf '<%s>' \"\$@\")\"\n"
+			. "while [ \$# -gt 0 ]; do case \"\$1\" in -o) out=\"\$2\"; shift ;; -H) shift ;; -*) ;; *) url=\"\$1\" ;; esac; shift; done\n"
+			. "printf '%s\\n' \"\$url\" >> \"\$CURL_RECORD\"\n"
+			. "printf '%s\\n' \"\$asked\" >> \"\$CURL_RECORD.args\"\n"
+			. "job=\"\$(printf '%s' \"\$url\" | sed -E 's#.*/jobs/([0-9]+)/logs\$#\\1#')\"\n"
+			. "[ -f \"\$CURL_LOGS/\$job\" ] || { echo 'curl: (22) The requested URL returned error: 403' >&2; exit 22; }\n"
+			. "cat \"\$CURL_LOGS/\$job\" > \"\$out\"\n"
+		);
+		chmod( $this->sandbox . '/bin/curl', 0755 );
+		mkdir( $this->sandbox . '/logs' );
 	}
 
 	protected function tearDown(): void {
@@ -85,6 +105,10 @@ final class DailyRunReportTest extends TestCase {
 				'PATH'       => $this->sandbox . '/bin' . PATH_SEPARATOR . (string) getenv( 'PATH' ),
 				'TMPDIR'     => $this->sandbox,
 				'GH_RECORD'  => $this->sandbox . '/record',
+				'GH_BODY'    => $this->sandbox . '/body',
+				'GH_TOKEN'   => 'not-a-token',
+				'CURL_RECORD' => $this->sandbox . '/curl-record',
+				'CURL_LOGS'  => $this->sandbox . '/logs',
 				'GH_LISTING' => $this->sandbox . '/listing',
 				'RESULT'     => $result,
 				'RUN_URL'    => 'https://example.test/run/9',
@@ -172,6 +196,45 @@ final class DailyRunReportTest extends TestCase {
 		list( $status, $asked, $out ) = $this->report( 'success', $both );
 		$this->assertSame( 0, $status, $out );
 		$this->assertSame( array( 'close 7' ), self::changes( $asked ) );
+	}
+
+	public function test_a_failed_jobs_log_is_read_and_its_seed_and_failed_tests_are_in_the_issue(): void {
+		$esc = "\x1b";
+		// A job's log as the API gives it: a time before every line, the steps' commands in colours.
+		file_put_contents(
+			$this->sandbox . '/logs/41',
+			"2026-11-15T11:10:30.0293828Z {$esc}[36;1mnpx wp-env run tests-cli{$esc}[0m\n"
+			. "2026-11-15T11:10:30.0360743Z   SEED: 2943672378\n"
+			. "2026-11-15T11:45:14.0079425Z There was 1 failure:\n"
+			. "2026-11-15T11:45:14.0079999Z 1) WPCheckpoint\\Tests\\Integration\\SomeTest::test_it_fails\n"
+			. "2026-11-15T11:45:14.0092892Z {$esc}[37;41mTests: 1381, Assertions: 77084, Failures: 1.{$esc}[0m\n"
+		);
+		list( $status, $asked, $out ) = $this->report( 'failure', '', array( 'GH_FAILED_JOBS' => "41\n42\n" ) );
+		$this->assertSame( 0, $status, $out );
+		$this->assertSame( array( 'create labelled daily-run' ), self::changes( $asked ) );
+		$body = (string) file_get_contents( $this->sandbox . '/body' );
+		$this->assertStringContainsString( "job 41\n    SEED: 2943672378\n  1) WPCheckpoint\\Tests\\Integration\\SomeTest::test_it_fails\n  Tests: 1381, Assertions: 77084, Failures: 1.\n", $body, 'the lines of the log, without their times and colours' );
+		$this->assertStringNotContainsString( $esc, $body );
+		// The job whose log cannot be read: said with why, and no line of the job before it in its place.
+		$this->assertStringContainsString( "job 42\n  (its log could not be read: curl: (22) The requested URL returned error: 403", $body );
+		$this->assertSame( 1, substr_count( $body, 'SEED: 2943672378' ), $body );
+		$this->assertSame(
+			array( 'https://api.github.com/repos/owner/repo/actions/jobs/41/logs', 'https://api.github.com/repos/owner/repo/actions/jobs/42/logs' ),
+			array_values( array_filter( explode( "\n", (string) file_get_contents( $this->sandbox . '/curl-record' ) ), 'strlen' ) ),
+			'each failed job\'s log, asked of the API'
+		);
+		// The logs are not asked of gh, which refuses a response with escape sequences (the stand-in does too).
+		$this->assertSame( array(), preg_grep( '#/logs#', $asked ) );
+		$this->assertContains( 'api repos/owner/repo/actions/runs/9/jobs --jq .jobs[] | select(.conclusion == "failure") | .id', $asked, 'the control: what is asked of gh through its API is recorded' );
+		// How curl is asked: a failure of the server is one of curl's, the redirect to where the log is kept is
+		// followed, it does not wait for ever, and the token goes in the header (and, the control for the line
+		// after: it did reach curl) and nowhere a reader of the issue or of the job's log sees it.
+		$args = array_values( array_filter( explode( "\n", (string) file_get_contents( $this->sandbox . '/curl-record.args' ) ), 'strlen' ) );
+		$this->assertCount( 2, $args );
+		foreach ( array( '<-f>', '<-L>', '<--max-time><120>', '<-H><Authorization: Bearer not-a-token>' ) as $flag ) {
+			$this->assertStringContainsString( $flag, $args[0], $flag );
+		}
+		$this->assertStringNotContainsString( 'not-a-token', $body . $out );
 	}
 
 	public function test_a_list_that_cannot_be_read_ends_the_script_and_no_issue_is_changed_or_opened(): void {
