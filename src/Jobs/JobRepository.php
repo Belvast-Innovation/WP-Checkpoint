@@ -1333,6 +1333,25 @@ final class JobRepository implements RunnerRepository {
 	}
 
 	/**
+	 * The latest restore job this installation manages (its managing token, Job::MANAGING_SQL, one this request
+	 * holds: held_tokens()), or null when there is none or the table cannot be read. One statement, by the index on
+	 * the type; a newer restore of another installation that shares the database is not this one's.
+	 *
+	 * @return Job|null
+	 */
+	public function latest_restore() {
+		global $wpdb;
+		$held = $this->held_tokens();
+		if ( array() === $held ) {
+			return null;
+		}
+		$quiet = $wpdb->suppress_errors( true ); // A table that is not there yet is no news for an admin page.
+		$row   = $wpdb->get_row( $wpdb->prepare( 'SELECT * FROM ' . self::table() . ' WHERE type = %s AND ' . Job::MANAGING_SQL . ' IN (' . self::held_sql( $held ) . ') ORDER BY id DESC LIMIT 1', RestoreJob::ID ), ARRAY_A ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- plugin table name from the prefix; the list is prepared by held_sql().
+		$wpdb->suppress_errors( $quiet );
+		return is_array( $row ) ? self::hydrate( $row ) : null;
+	}
+
+	/**
 	 * Whether a job that holds the site has this site mark, or that cannot be told (the safe direction for removing
 	 * a maintenance data file).
 	 *

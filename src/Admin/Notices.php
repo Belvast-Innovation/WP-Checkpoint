@@ -7,6 +7,7 @@
 
 namespace WPCheckpoint\Admin;
 
+use WPCheckpoint\Jobs\JobRepository;
 use WPCheckpoint\Support\AutoUpdateHold;
 use WPCheckpoint\Support\CloneClassifier;
 use WPCheckpoint\Support\Directories;
@@ -19,8 +20,11 @@ defined( 'ABSPATH' ) || exit;
 
 /**
  * Warns about a detected clone, an exposed or unverified directory, or
- * unusable storage. Notices never leave the plugin page and can be closed;
- * the choice is remembered per user and per storage token.
+ * unusable storage. These notices never leave the plugin page and can be
+ * closed; the choice is remembered per user and per storage token. One
+ * notice is shown on every admin page (everywhere()): that the latest
+ * restore ended with the site put back as it was; its dismissal is
+ * remembered per user and per job.
  */
 final class Notices {
 
@@ -192,26 +196,41 @@ final class Notices {
 			);
 		}
 
-		return $notices;
+		return $notices + $this->everywhere();
 	}
 
 	/**
-	 * Print the notices on the plugin page.
+	 * The notices shown on every admin page, keyed by id: that the latest restore this installation manages ended
+	 * with the site put back (PutBackNotice). At most one statement on the jobs table.
+	 *
+	 * @return array<string, array<string, mixed>>
+	 */
+	public function everywhere(): array {
+		$job    = ( new JobRepository( $this->directories ) )->latest_restore();
+		$notice = null === $job ? array() : PutBackNotice::notice( $job );
+		return array() === $notice ? array() : array( PutBackNotice::ID => $notice );
+	}
+
+	/**
+	 * Print the notices: all of them on the plugin page, on any other admin page those of everywhere(). A user
+	 * who may not manage the plugin is shown none, and nothing is read for one.
 	 *
 	 * @return void
 	 */
 	public function render(): void {
-		$screen = function_exists( 'get_current_screen' ) ? get_current_screen() : null;
-		if ( ! $screen || ! Page::is_screen( (string) $screen->id ) || ! Guard::current_user_can() ) {
+		if ( ! Guard::current_user_can() ) {
 			return;
 		}
-		$dismissed = $this->dismissed();
-		$token     = (string) $this->directories->state()['token'];
+		$screen    = function_exists( 'get_current_screen' ) ? get_current_screen() : null;
+		$on_page   = $screen && Page::is_screen( (string) $screen->id );
+		$notices   = $on_page ? $this->notices() : $this->everywhere();
+		$dismissed = array() === $notices ? array() : $this->dismissed();
+		$token     = $on_page ? (string) $this->directories->state()['token'] : '';
 		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- read-only navigation state.
 		$on_tools = isset( $_GET['tab'] ) && 'tools' === sanitize_key( wp_unslash( $_GET['tab'] ) );
 
-		foreach ( $this->notices() as $id => $notice ) {
-			if ( $notice['dismissible'] && isset( $dismissed[ $id ] ) && $dismissed[ $id ] === $token ) {
+		foreach ( $notices as $id => $notice ) {
+			if ( $notice['dismissible'] && isset( $dismissed[ $id ] ) && ( isset( $notice['seen'] ) ? $notice['seen'] : $token ) === $dismissed[ $id ] ) {
 				continue;
 			}
 			// The Tools tab shows the same facts as rows with actions; avoid two copies of the server rule.
@@ -263,19 +282,22 @@ final class Notices {
 	}
 
 	/**
-	 * Store the dismissal for the current user; a clone notice is acknowledged in the state instead.
+	 * Store the dismissal for the current user; a clone notice is acknowledged in the state instead. A notice
+	 * that names what it was seen for ("seen": the put-back notice's job id) is dismissed for that, under its one id;
+	 * the others for the storage token.
 	 *
 	 * @param string $id Notice id.
 	 * @return void
 	 */
 	public function record_dismissal( string $id ): void {
-		if ( ! array_key_exists( $id, $this->notices() ) ) {
+		$notices = $this->notices();
+		if ( ! array_key_exists( $id, $notices ) ) {
 			return;
 		}
 		if ( 'clone_detected' === $id ) {
 			$this->directories->acknowledge_clone();
 			// Jobs bound to the previous directory can never continue now.
-			( new \WPCheckpoint\Jobs\JobRepository( $this->directories ) )->settle_storage();
+			( new JobRepository( $this->directories ) )->settle_storage();
 			return;
 		}
 		if ( 'auto_reclaimed' === $id ) {
@@ -283,7 +305,7 @@ final class Notices {
 			return;
 		}
 		$dismissed        = $this->dismissed();
-		$dismissed[ $id ] = (string) $this->directories->state()['token'];
+		$dismissed[ $id ] = isset( $notices[ $id ]['seen'] ) ? (string) $notices[ $id ]['seen'] : (string) $this->directories->state()['token'];
 		update_user_meta( get_current_user_id(), self::USER_META, $dismissed );
 	}
 

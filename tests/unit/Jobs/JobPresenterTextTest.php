@@ -125,4 +125,56 @@ final class JobPresenterTextTest extends TestCase {
 		$this->assertSame( 'Importing the database', JobPresenter::step_label( DatabaseImportStep::ID ) );
 		$this->assertSame( 'restore_unknown', JobPresenter::step_label( 'restore_unknown' ), 'the control: an id it does not know is shown as it is' );
 	}
+
+	public function test_a_jobs_maintenance_files_here_are_said_to_be_here(): void {
+		$line = JobPresenter::file_line( array( 'file_here' => true, 'file_told' => true ) );
+		$this->assertStringContainsString( 'Maintenance files of it are in this WordPress directory too', $line );
+		$this->assertStringContainsString( 'while they hold', $line, 'a data file alone holds nothing: the page is not promised' );
+		$this->assertSame( $line, JobPresenter::file_line( array( 'file_here' => true, 'file_told' => false ) ), 'seen here, whatever else cannot be told' );
+	}
+
+	public function test_no_maintenance_file_of_a_job_here_is_said_only_when_that_can_be_told(): void {
+		$this->assertSame( 'This WordPress directory holds no maintenance file of it.', JobPresenter::file_line( array( 'file_here' => false, 'file_told' => true ) ) );
+	}
+
+	public function test_what_cannot_be_told_of_a_jobs_maintenance_files_here_is_said_so_and_not_as_none(): void {
+		$line = JobPresenter::file_line( array( 'file_here' => false, 'file_told' => false ) );
+		$this->assertStringContainsString( 'cannot be told', $line );
+		$this->assertStringNotContainsString( 'holds no maintenance file', $line );
+		$this->assertStringNotContainsString( 'answers only with a maintenance page', $line );
+		$this->assertSame( $line, JobPresenter::file_line( array() ), 'nothing known: not told' );
+	}
+
+	public function test_the_lines_of_a_job_held_elsewhere_say_one_of_the_three(): void {
+		$job     = self::job( Job::RUNNING, '', array(), RestoreJob::ID );
+		$job->id = 7;
+		$see     = array(
+			'branch'   => \WPCheckpoint\Jobs\HeldSite::OTHER,
+			'why'      => 'its plan was written for another table prefix',
+			'recorded' => '',
+			'here'     => '',
+			'differs'  => false,
+		);
+		$said    = array();
+		foreach ( array( array( true, true ), array( false, true ), array( false, false ) ) as $case ) {
+			$lines  = JobPresenter::held_lines(
+				$job,
+				array(
+					'file_here' => $case[0],
+					'file_told' => $case[1],
+				) + $see
+			);
+			$said[] = $lines[1];
+			$this->assertSame(
+				JobPresenter::file_line(
+					array(
+						'file_here' => $case[0],
+						'file_told' => $case[1],
+					)
+				),
+				$lines[1]
+			);
+		}
+		$this->assertCount( 3, array_unique( $said ) );
+	}
 }
