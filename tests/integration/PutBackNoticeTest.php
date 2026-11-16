@@ -415,6 +415,7 @@ final class PutBackNoticeTest extends SwapTestCase {
 					return ( new Notices( $this->installation() ) )->everywhere();
 				};
 				$else = $this->sandbox . '/another-wordpress';
+				$loop = $this->sandbox . '/loop';
 				mkdir( $else );
 				try {
 					// A copied site no request has detected yet: the original's state, tokens and job rows.
@@ -434,6 +435,19 @@ final class PutBackNoticeTest extends SwapTestCase {
 						) + $state
 					);
 					$this->assertSame( array(), $said(), 'a recorded directory that is not there' );
+					// A recorded directory that cannot be looked at from here (through a link to itself: it does not resolve,
+					// and is not shown to be gone): whether it is this one cannot be told.
+					$this->assertTrue( symlink( 'loop', $loop ) );
+					$this->assertFalse( realpath( $loop . '/wordpress' ), 'the control: it does not resolve' );
+					$this->assertFalse( \WPCheckpoint\Support\Paths::positively_gone( $loop . '/wordpress' ), 'the control: nor is it shown to be gone' );
+					\WPCheckpoint\Support\Options::set(
+						$option,
+						array(
+							'abspath'      => $loop . '/wordpress/',
+							'abspath_real' => '',
+						) + $state
+					);
+					$this->assertSame( array(), $said(), 'what cannot be told is not taken as this directory' );
 					\WPCheckpoint\Support\Options::set( $option, array( 'abspath' => '' ) + $state );
 					$this->assertSame( array(), $said(), 'state that never took a directory up' );
 					// This directory under another spelling is this directory.
@@ -448,6 +462,7 @@ final class PutBackNoticeTest extends SwapTestCase {
 				} finally {
 					\WPCheckpoint\Support\Options::set( $option, $state );
 					\WPCheckpoint\Tests\Fixtures\Sandbox::remove( $else );
+					\WPCheckpoint\Tests\Fixtures\Sandbox::remove( $loop );
 				}
 				$this->assertNotSame( array(), $said(), 'the control: shown again with the state as it was' );
 			}
