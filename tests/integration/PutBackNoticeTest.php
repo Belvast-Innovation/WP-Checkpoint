@@ -127,7 +127,7 @@ final class PutBackNoticeTest extends SwapTestCase {
 		$this->assertStringContainsString( esc_html( PutBackNotice::sentence( $reason ) ), $out, $what );
 		$this->assertStringContainsString( 'as it was before the restore', $out, $what );
 		$this->assertStringContainsString( 'wp wpcheckpoint job retry ' . $done->id . '<', $out, $what . ': the one command' );
-		$this->assertSame( 1, substr_count( $out, 'wpcheckpoint-notice' ), $what . ': one notice, no other on a page that is not the plugin\'s' );
+		$this->assertSame( 1, substr_count( $out, '<div class="notice ' ), $what . ': one notice, no other on a page that is not the plugin\'s' );
 		foreach ( array( 'Step &quot;', 'Step "', 'RetryFrom', 'as no WP-CLI run went on', 'The swap was rolled back', 'The swap was reversed', 'What failed' ) as $not ) {
 			$this->assertStringNotContainsString( $not, $out, $what . ': nothing of the row\'s error' );
 		}
