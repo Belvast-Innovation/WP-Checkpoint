@@ -131,8 +131,11 @@ final class PutBackNoticeTest extends SwapTestCase {
 		foreach ( array( 'Step &quot;', 'Step "', 'RetryFrom', 'as no WP-CLI run went on', 'The swap was rolled back', 'The swap was reversed', 'What failed' ) as $not ) {
 			$this->assertStringNotContainsString( $not, $out, $what . ': nothing of the row\'s error' );
 		}
-		$this->assertStringNotContainsString( $this->sandbox, $out, $what );
-		$this->assertStringNotContainsString( (string) wp_parse_url( home_url(), PHP_URL_HOST ), $out, $what );
+		// What is read on the page (the link to dismiss it is the admin's own address, as every link there).
+		$text = wp_strip_all_tags( $out );
+		$this->assertStringContainsString( 'job retry ' . $done->id, $text, $what . ': the control, the text as read' );
+		$this->assertStringNotContainsString( $this->sandbox, $text, $what );
+		$this->assertStringNotContainsString( (string) wp_parse_url( home_url(), PHP_URL_HOST ), $text, $what );
 		$this->assertSame( '', $this->shown(), $what . ': the control, with the row under the test\'s own type again there is no notice' );
 	}
 
