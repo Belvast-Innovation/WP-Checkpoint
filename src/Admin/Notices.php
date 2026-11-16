@@ -204,12 +204,14 @@ final class Notices {
 	 * with the site put back (PutBackNotice). One statement on the jobs table at most, and the storage directories
 	 * are not resolved for it (that looks at the file system, and may choose a new directory when the site moved:
 	 * not what opening the dashboard does): which jobs are this installation's is told by the tokens of the stored
-	 * state (Directories::own_tokens(): none while a detected copy is not resolved, and then no notice).
+	 * state, taken only when that state is of this WordPress directory (Directories::settled_tokens(): none for a
+	 * site copied or moved until a request that resolves the directories has seen to it, none while a detected copy
+	 * is not resolved, and then no notice).
 	 *
 	 * @return array<string, array<string, mixed>>
 	 */
 	public function everywhere(): array {
-		$job    = JobRepository::latest_restore( Directories::own_tokens() );
+		$job    = JobRepository::latest_restore( Directories::settled_tokens() );
 		$notice = null === $job ? array() : PutBackNotice::notice( $job );
 		return array() === $notice ? array() : array( PutBackNotice::ID => $notice );
 	}

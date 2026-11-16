@@ -401,6 +401,59 @@ final class PutBackNoticeTest extends SwapTestCase {
 		);
 	}
 
+	public function test_it_is_not_shown_on_a_site_whose_stored_state_was_taken_up_in_another_wordpress_directory(): void {
+		$done = $this->cli_run( $this->half() );
+		wp_set_current_user( self::$admin_id );
+		$this->as_restore(
+			$done,
+			function (): void {
+				$option = \WPCheckpoint\Support\Directories::OPTION;
+				$state  = (array) \WPCheckpoint\Support\Options::get( $option, array() );
+				$this->assertNotSame( '', (string) ( $state['abspath'] ?? '' ), 'the control: the state records where it was taken up' );
+				$this->assertNotSame( '', $this->shown(), 'the control: shown' );
+				$said = function (): array {
+					return ( new Notices( $this->installation() ) )->everywhere();
+				};
+				$else = $this->sandbox . '/another-wordpress';
+				mkdir( $else );
+				try {
+					// A copied site no request has detected yet: the original's state, tokens and job rows.
+					\WPCheckpoint\Support\Options::set(
+						$option,
+						array(
+							'abspath'      => $else . '/',
+							'abspath_real' => (string) realpath( $else ),
+						) + $state
+					);
+					$this->assertSame( array(), $said(), 'the state of another WordPress directory: its jobs are not said to be this site\'s' );
+					\WPCheckpoint\Support\Options::set(
+						$option,
+						array(
+							'abspath'      => $this->sandbox . '/gone/',
+							'abspath_real' => '',
+						) + $state
+					);
+					$this->assertSame( array(), $said(), 'a recorded directory that is not there' );
+					\WPCheckpoint\Support\Options::set( $option, array( 'abspath' => '' ) + $state );
+					$this->assertSame( array(), $said(), 'state that never took a directory up' );
+					// This directory under another spelling is this directory.
+					\WPCheckpoint\Support\Options::set(
+						$option,
+						array(
+							'abspath'      => rtrim( ABSPATH, '/' ) . '/wp-includes/../',
+							'abspath_real' => '',
+						) + $state
+					);
+					$this->assertNotSame( array(), $said(), 'the same directory, spelled otherwise' );
+				} finally {
+					\WPCheckpoint\Support\Options::set( $option, $state );
+					\WPCheckpoint\Tests\Fixtures\Sandbox::remove( $else );
+				}
+				$this->assertNotSame( array(), $said(), 'the control: shown again with the state as it was' );
+			}
+		);
+	}
+
 	public function test_it_is_not_shown_while_a_detected_copy_is_not_resolved(): void {
 		$done = $this->cli_run( $this->half() );
 		wp_set_current_user( self::$admin_id );

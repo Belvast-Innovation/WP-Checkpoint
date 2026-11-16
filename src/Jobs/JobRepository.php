@@ -1339,7 +1339,7 @@ final class JobRepository implements RunnerRepository {
 	 * database is not found. Static, for a caller that has the tokens from the stored state and must not resolve the
 	 * storage directories to ask (an admin page that is not the plugin's: Admin\Notices).
 	 *
-	 * @param string[] $held Storage tokens (Directories::own_tokens()).
+	 * @param string[] $held Storage tokens (Directories::settled_tokens()).
 	 * @return Job|null
 	 */
 	public static function latest_restore( array $held ) {

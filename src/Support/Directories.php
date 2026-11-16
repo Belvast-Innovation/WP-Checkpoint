@@ -1660,6 +1660,26 @@ final class Directories {
 	}
 
 	/**
+	 * This installation's storage tokens as the stored state has them (own_tokens()), for a reader that must not
+	 * resolve the storage directories to ask (an admin page that is not the plugin's): given only when the state was
+	 * last taken up at this request's WordPress directory, shown positively (spelled alike, or resolving to one:
+	 * same_place()). None otherwise: state taken up elsewhere may be a copied site's whose copy no request has
+	 * detected yet (its tokens the original's), or a new release's before it is taken over; and none when that
+	 * cannot be told. Nothing is detected, written or made here. Not seen, as by the detection itself: a copy at the
+	 * very same directory on another host.
+	 *
+	 * @param string $abspath The WordPress directory of this request.
+	 * @return string[]
+	 */
+	public static function settled_tokens( string $abspath = ABSPATH ): array {
+		$state = self::load_state();
+		if ( '' === (string) $state['abspath'] || true !== self::same_place( (string) $state['abspath'], (string) $state['abspath_real'], $abspath ) ) {
+			return array();
+		}
+		return self::own_tokens( $state );
+	}
+
+	/**
 	 * This installation's storage tokens, the current one first: the ones its staging roots and probes may carry.
 	 * None while a clone is detected: the tokens in the copied state may be the original installation's (a custom
 	 * directory keeps the original's current token while refusing it), so nothing is claimed until the notice is
