@@ -416,6 +416,19 @@ final class PutBackNoticeTest extends SwapTestCase {
 			$GLOBALS['wpdb']->query( $GLOBALS['wpdb']->prepare( 'DELETE FROM ' . JobRepository::table() . ' WHERE id = %d', $asked ) );
 		}
 
+		// A restore that failed while it was still being put back: the site is not said to be as it was.
+		$mid = $this->row_like(
+			$done,
+			array(
+				'type'        => RestoreJob::ID,
+				'cursor_json' => (string) wp_json_encode( array( 'phase' => 'rollback' ) + $done->cursor ),
+			)
+		);
+		$this->assertSame( '', $this->shown(), 'not put back to its end: not told of' );
+		$GLOBALS['wpdb']->query( $GLOBALS['wpdb']->prepare( 'UPDATE ' . JobRepository::table() . ' SET cursor_json = %s WHERE id = %d', (string) wp_json_encode( $done->cursor ), $mid ) );
+		$this->assertStringContainsString( $sentence, $this->shown(), 'the control: the same row at the end of its put-back' );
+		$GLOBALS['wpdb']->query( $GLOBALS['wpdb']->prepare( 'DELETE FROM ' . JobRepository::table() . ' WHERE id = %d', $mid ) );
+
 		// Retried: gone while it runs, and once it succeeded.
 		$this->assertNotNull( Plugin::instance()->job_actions()->retry( $done->id ) );
 		$queued = Plugin::instance()->jobs()->find( $done->id );
