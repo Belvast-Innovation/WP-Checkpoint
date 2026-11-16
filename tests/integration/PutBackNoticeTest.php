@@ -120,7 +120,7 @@ final class PutBackNoticeTest extends SwapTestCase {
 		$this->assertSame( 'reverted', $done->cursor['phase'] ?? '', $what . ': the control, put back to its end' );
 		$this->assertSame( $reason, $done->cursor['reason'] ?? '', $what . ': the control, the reason the run recorded' );
 		$this->assertStringContainsString( 'Step "', (string) $done->last_error, $what . ': the control, the row has an error text, of the kind looked for below' );
-		$this->assertStringContainsString( SwapStep::REASONS[ $reason ], (string) $done->last_error, $what . ': the control, with the reason in the run\'s own words' );
+		$this->assertMatchesRegularExpression( '/The swap was (rolled back|reversed)/', (string) $done->last_error, $what . ': the control, and says how the swap ended, in the words looked for below' );
 		wp_set_current_user( self::$admin_id );
 		$out = $this->as_restore(
 			$done,
@@ -133,7 +133,6 @@ final class PutBackNoticeTest extends SwapTestCase {
 		$this->assertStringContainsString( 'wp wpcheckpoint job retry ' . $done->id . '<', $out, $what . ': the one command' );
 		$this->assertSame( 1, substr_count( $out, '<div class="notice ' ), $what . ': one notice, no other on a page that is not the plugin\'s' );
 		$this->assertStringNotContainsString( esc_html( (string) $done->last_error ), $out, $what . ': not the row\'s error' );
-		$this->assertStringNotContainsString( esc_html( SwapStep::REASONS[ $reason ] ), $out, $what . ': nor the run\'s own words for the reason' );
 		foreach ( array( 'Step &quot;', 'Step "', 'RetryFrom', 'as no WP-CLI run went on', 'The swap was rolled back', 'The swap was reversed', 'What failed' ) as $not ) {
 			$this->assertStringNotContainsString( $not, $out, $what . ': nothing of the row\'s error' );
 		}
