@@ -1664,15 +1664,19 @@ final class Directories {
 	 * resolve the storage directories to ask (an admin page that is not the plugin's): given only when the state was
 	 * last taken up at this request's WordPress directory, shown positively (spelled alike, or resolving to one:
 	 * same_place()). None otherwise: state taken up elsewhere may be a copied site's whose copy no request has
-	 * detected yet (its tokens the original's), or a new release's before it is taken over; and none when that
-	 * cannot be told. Nothing is detected, written or made here. Not seen, as by the detection itself: a copy at the
-	 * very same directory on another host.
+	 * detected yet (its tokens the original's); and none when that cannot be told. Nothing is detected, written or
+	 * made here. The owner marker is not read, so what only it shows is not seen: a copy at the very same directory
+	 * on another host, and a new release behind a link whose WordPress directory is spelled through the link (the
+	 * same site and database: its tokens are given before the release is taken over).
 	 *
 	 * @param string $abspath The WordPress directory of this request.
 	 * @return string[]
 	 */
 	public static function settled_tokens( string $abspath = ABSPATH ): array {
 		$state = self::load_state();
+		if ( '' !== (string) $state['abspath'] && ! Paths::same( (string) $state['abspath'], $abspath, Paths::is_windows() ) ) {
+			clearstatcache( true ); // Links are resolved next: not from what a worker resolved before a link was changed.
+		}
 		if ( '' === (string) $state['abspath'] || true !== self::same_place( (string) $state['abspath'], (string) $state['abspath_real'], $abspath ) ) {
 			return array();
 		}

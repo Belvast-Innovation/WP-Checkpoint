@@ -459,6 +459,15 @@ final class PutBackNoticeTest extends SwapTestCase {
 						) + $state
 					);
 					$this->assertNotSame( array(), $said(), 'the same directory, spelled otherwise' );
+					// Recorded under a spelling that says nothing here, with the directory it resolved to then: this one.
+					\WPCheckpoint\Support\Options::set(
+						$option,
+						array(
+							'abspath'      => $this->sandbox . '/gone/',
+							'abspath_real' => (string) realpath( ABSPATH ),
+						) + $state
+					);
+					$this->assertNotSame( array(), $said(), 'the directory it resolved to when recorded is this one' );
 				} finally {
 					\WPCheckpoint\Support\Options::set( $option, $state );
 					\WPCheckpoint\Tests\Fixtures\Sandbox::remove( $else );
