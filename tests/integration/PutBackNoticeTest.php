@@ -39,6 +39,9 @@ final class PutBackNoticeTest extends SwapTestCase {
 		}
 		$wpdb->query( $wpdb->prepare( "DELETE FROM `{$wpdb->usermeta}` WHERE meta_key = %s", Notices::USER_META ) );
 		foreach ( $this->users as $id ) {
+			if ( is_multisite() ) {
+				revoke_super_admin( $id ); // Whether or not the test granted it: the network's list names no user that is gone.
+			}
 			$wpdb->query( $wpdb->prepare( "DELETE FROM `{$wpdb->usermeta}` WHERE user_id = %d", $id ) );
 			$wpdb->query( $wpdb->prepare( "DELETE FROM `{$wpdb->users}` WHERE ID = %d", $id ) );
 		}
@@ -116,7 +119,8 @@ final class PutBackNoticeTest extends SwapTestCase {
 		$this->assertSame( Job::FAILED, $done->status, $what . ': ' . $done->last_error );
 		$this->assertSame( 'reverted', $done->cursor['phase'] ?? '', $what . ': the control, put back to its end' );
 		$this->assertSame( $reason, $done->cursor['reason'] ?? '', $what . ': the control, the reason the run recorded' );
-		$this->assertNotSame( '', (string) $done->last_error, $what . ': the control, the row has an error text' );
+		$this->assertStringContainsString( 'Step "', (string) $done->last_error, $what . ': the control, the row has an error text, of the kind looked for below' );
+		$this->assertStringContainsString( SwapStep::REASONS[ $reason ], (string) $done->last_error, $what . ': the control, with the reason in the run\'s own words' );
 		wp_set_current_user( self::$admin_id );
 		$out = $this->as_restore(
 			$done,
@@ -128,6 +132,8 @@ final class PutBackNoticeTest extends SwapTestCase {
 		$this->assertStringContainsString( 'as it was before the restore', $out, $what );
 		$this->assertStringContainsString( 'wp wpcheckpoint job retry ' . $done->id . '<', $out, $what . ': the one command' );
 		$this->assertSame( 1, substr_count( $out, '<div class="notice ' ), $what . ': one notice, no other on a page that is not the plugin\'s' );
+		$this->assertStringNotContainsString( esc_html( (string) $done->last_error ), $out, $what . ': not the row\'s error' );
+		$this->assertStringNotContainsString( esc_html( SwapStep::REASONS[ $reason ] ), $out, $what . ': nor the run\'s own words for the reason' );
 		foreach ( array( 'Step &quot;', 'Step "', 'RetryFrom', 'as no WP-CLI run went on', 'The swap was rolled back', 'The swap was reversed', 'What failed' ) as $not ) {
 			$this->assertStringNotContainsString( $not, $out, $what . ': nothing of the row\'s error' );
 		}
@@ -293,6 +299,7 @@ final class PutBackNoticeTest extends SwapTestCase {
 			$other->close();
 		}
 		$this->assertTrue( $moved, 'the control: the table was taken' );
+		$this->assertSame( 1, count( array_keys( $this->seams, 'batch_sent', true ) ), 'the control: one batch, so it was taken after every rename' );
 		$this->assert_told( $done, SwapStep::INCOMPLETE, 'incomplete' );
 	}
 
@@ -335,8 +342,9 @@ final class PutBackNoticeTest extends SwapTestCase {
 				$this->assertStringContainsString( JobRepository::table(), $asked[0], 'the control: the count sees the statement on the jobs table' );
 				$this->assertStringContainsString( ' ORDER BY id DESC LIMIT 1', $asked[0] );
 				$this->assertStringContainsString( "type = 'restore' AND " . Job::MANAGING_SQL . ' IN (', $asked[0], 'who manages it is part of the statement' );
+				// Which index the server takes on a table of a few rows says little: only that the one on the type is there for it.
 				$plan = $GLOBALS['wpdb']->get_results( 'EXPLAIN ' . $asked[0], ARRAY_A );
-				$this->assertSame( 'type', (string) ( $plan[0]['key'] ?? '' ), 'by the index on the type: ' . wp_json_encode( $plan ) );
+				$this->assertContains( 'type', array_map( 'trim', explode( ',', (string) ( $plan[0]['possible_keys'] ?? '' ) ) ), 'the index on the type serves it: ' . wp_json_encode( $plan ) );
 
 				// One who may not manage the plugin: no notice, and nothing read.
 				foreach ( array( $subscriber, is_multisite() ? $administrator : 0, 0 ) as $user ) {
@@ -361,6 +369,53 @@ final class PutBackNoticeTest extends SwapTestCase {
 					$this->assertStringContainsString( $sentence, $this->shown(), 'the control: another administrator of a single site is shown it' );
 				}
 				wp_set_current_user( self::$admin_id );
+			}
+		);
+	}
+
+	public function test_a_page_that_is_not_the_plugins_does_not_resolve_the_storage_directories_to_tell(): void {
+		$done = $this->cli_run( $this->half() );
+		wp_set_current_user( self::$admin_id );
+		$this->as_restore(
+			$done,
+			function (): void {
+				$dirs     = new \WPCheckpoint\Support\Directories();
+				$resolved = static function () use ( $dirs ): bool {
+					$base = new \ReflectionProperty( $dirs, 'base' );
+					$base->setAccessible( true );
+					return null !== $base->getValue( $dirs );
+				};
+				$notices  = new Notices( $dirs );
+				wp_cache_flush();
+				set_current_screen( 'dashboard' );
+				ob_start();
+				$notices->render();
+				$out = (string) ob_get_clean();
+				$this->assertStringContainsString( esc_html( PutBackNotice::sentence( SwapStep::INTERRUPTED ) ), $out, 'the control: the notice was shown' );
+				$this->assertFalse( $resolved(), 'the dashboard did not resolve the storage directories' );
+				set_current_screen( 'toplevel_page_wp-checkpoint' );
+				ob_start();
+				$notices->render();
+				ob_get_clean();
+				$this->assertTrue( $resolved(), 'the control: the plugin\'s page does, and that is seen' );
+			}
+		);
+	}
+
+	public function test_it_is_not_shown_while_a_detected_copy_is_not_resolved(): void {
+		$done = $this->cli_run( $this->half() );
+		wp_set_current_user( self::$admin_id );
+		$this->as_restore(
+			$done,
+			function (): void {
+				$this->assertNotSame( '', $this->shown(), 'the control: shown' );
+				$state = \WPCheckpoint\Support\Options::get( \WPCheckpoint\Support\Directories::OPTION, array() );
+				\WPCheckpoint\Support\Options::set( \WPCheckpoint\Support\Directories::OPTION, array( 'clone_detected' => true ) + (array) $state );
+				try {
+					$this->assertSame( array(), ( new Notices( $this->installation() ) )->everywhere(), 'whose the jobs are is not known: nothing is said' );
+				} finally {
+					\WPCheckpoint\Support\Options::set( \WPCheckpoint\Support\Directories::OPTION, $state );
+				}
 			}
 		);
 	}
@@ -414,6 +469,21 @@ final class PutBackNoticeTest extends SwapTestCase {
 			$GLOBALS['wpdb']->query( $GLOBALS['wpdb']->prepare( 'UPDATE ' . JobRepository::table() . ' SET cursor_json = %s WHERE id = %d', (string) wp_json_encode( array( 'reason' => SwapStep::BUSY ) + $done->cursor ), $asked ) );
 			$this->assertStringContainsString( esc_html( PutBackNotice::sentence( SwapStep::BUSY ) ), $this->shown(), $reason . ': the control, the same row with a reason told of' );
 			$GLOBALS['wpdb']->query( $GLOBALS['wpdb']->prepare( 'DELETE FROM ' . JobRepository::table() . ' WHERE id = %d', $asked ) );
+		}
+
+		// A put-back after the restored site was let out, or of an undone restore swapped in again: an undo, not told of.
+		foreach ( array( 'out' => true, 'undone_at' => 1700000000 ) as $key => $value ) {
+			$undo = $this->row_like(
+				$done,
+				array(
+					'type'        => RestoreJob::ID,
+					'cursor_json' => (string) wp_json_encode( array( $key => $value, 'reason' => SwapStep::UNDONE ) + $done->cursor ),
+				)
+			);
+			$this->assertSame( '', $this->shown(), $key . ': not told of' );
+			$GLOBALS['wpdb']->query( $GLOBALS['wpdb']->prepare( 'UPDATE ' . JobRepository::table() . ' SET cursor_json = %s WHERE id = %d', (string) wp_json_encode( array( 'reason' => SwapStep::UNDONE ) + $done->cursor ), $undo ) );
+			$this->assertStringContainsString( esc_html( PutBackNotice::sentence( SwapStep::UNDONE ) ), $this->shown(), $key . ': the control, the same row without it' );
+			$GLOBALS['wpdb']->query( $GLOBALS['wpdb']->prepare( 'DELETE FROM ' . JobRepository::table() . ' WHERE id = %d', $undo ) );
 		}
 
 		// A restore that failed while it was still being put back: the site is not said to be as it was.

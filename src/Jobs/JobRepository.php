@@ -1333,15 +1333,18 @@ final class JobRepository implements RunnerRepository {
 	}
 
 	/**
-	 * The latest restore job this installation manages (its managing token, Job::MANAGING_SQL, one this request
-	 * holds: held_tokens()), or null when there is none or the table cannot be read. One statement, by the index on
-	 * the type; a newer restore of another installation that shares the database is not this one's.
+	 * The latest restore job whose managing token (Job::MANAGING_SQL) is one of the given, or null when there is
+	 * none, no token is given or the table cannot be read. One statement (the type is indexed; the rows it looks at
+	 * are the restores newer than the one it finds); a newer restore of another installation that shares the
+	 * database is not found. Static, for a caller that has the tokens from the stored state and must not resolve the
+	 * storage directories to ask (an admin page that is not the plugin's: Admin\Notices).
 	 *
+	 * @param string[] $held Storage tokens (Directories::own_tokens()).
 	 * @return Job|null
 	 */
-	public function latest_restore() {
+	public static function latest_restore( array $held ) {
 		global $wpdb;
-		$held = $this->held_tokens();
+		$held = array_values( array_filter( $held, array( Directories::class, 'is_valid_token' ) ) );
 		if ( array() === $held ) {
 			return null;
 		}

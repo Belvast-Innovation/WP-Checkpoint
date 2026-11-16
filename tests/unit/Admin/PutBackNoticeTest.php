@@ -20,6 +20,7 @@ final class PutBackNoticeTest extends TestCase {
 		$job->id     = 41;
 		$job->type   = RestoreJob::ID;
 		$job->status = Job::FAILED;
+		$job->step   = SwapStep::ID;
 		$job->cursor = array(
 			'phase'  => 'reverted',
 			'mark'   => 'abc',
@@ -77,6 +78,14 @@ final class PutBackNoticeTest extends TestCase {
 			$this->assertSame( '', PutBackNotice::reason( $job ), 'phase "' . $phase . '"' );
 		}
 		$this->assertSame( '', PutBackNotice::reason( self::job( $told, array( 'cursor' => array() ) ) ), 'a cursor emptied by a retry' );
+		$this->assertSame( '', PutBackNotice::reason( self::job( $told, array( 'step' => 'restore_swap_check' ) ) ), 'not at the swap' );
+		foreach ( array( 'out' => true, 'undone_at' => 1700000000 ) as $key => $value ) {
+			$job                 = self::job( SwapStep::UNDONE );
+			$job->cursor[ $key ] = $value;
+			$this->assertSame( '', PutBackNotice::reason( $job ), $key . ': an undo of a site that was let out, or a redo' );
+			$job->cursor[ $key ] = 'out' === $key ? false : 0;
+			$this->assertSame( SwapStep::UNDONE, PutBackNotice::reason( $job ), $key . ': the control, recorded as not so' );
+		}
 		$this->assertSame( '', PutBackNotice::reason( self::job( 'some_new_reason' ) ), 'a reason it does not know' );
 		$job                   = self::job( $told );
 		$job->cursor['reason'] = array( $told );
@@ -111,5 +120,8 @@ final class PutBackNoticeTest extends TestCase {
 		$this->assertStringContainsString( 'cannot be tried again', $notice['message'] );
 		$this->assertStringContainsString( PutBackNotice::sentence( SwapStep::REVERSED ), $notice['message'] );
 		$this->assertStringContainsString( 'job retry', PutBackNotice::notice( self::job( SwapStep::REVERSED ) )['extra'], 'the control: while they are there, the command' );
+		$final = PutBackNotice::notice( self::job( SwapStep::REVERSED, array( 'failure_kind' => Job::FAILURE_FINAL ) ) );
+		$this->assertSame( '', $final['extra'], 'a final failure: no Retry on the plugin\'s page, no command here' );
+		$this->assertStringContainsString( 'cannot be tried again', $final['message'] );
 	}
 }

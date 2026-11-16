@@ -201,12 +201,15 @@ final class Notices {
 
 	/**
 	 * The notices shown on every admin page, keyed by id: that the latest restore this installation manages ended
-	 * with the site put back (PutBackNotice). At most one statement on the jobs table.
+	 * with the site put back (PutBackNotice). One statement on the jobs table at most, and the storage directories
+	 * are not resolved for it (that looks at the file system, and may choose a new directory when the site moved:
+	 * not what opening the dashboard does): which jobs are this installation's is told by the tokens of the stored
+	 * state (Directories::own_tokens(): none while a detected copy is not resolved, and then no notice).
 	 *
 	 * @return array<string, array<string, mixed>>
 	 */
 	public function everywhere(): array {
-		$job    = ( new JobRepository( $this->directories ) )->latest_restore();
+		$job    = JobRepository::latest_restore( Directories::own_tokens() );
 		$notice = null === $job ? array() : PutBackNotice::notice( $job );
 		return array() === $notice ? array() : array( PutBackNotice::ID => $notice );
 	}

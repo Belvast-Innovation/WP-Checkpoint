@@ -47,13 +47,19 @@ final class PutBackNotice {
 
 	/**
 	 * The reason code the notice tells of for this job, or '' when the job is not one it tells of: a restore that
-	 * failed, its cursor at the end of a put-back, with one of the reasons of TELLS.
+	 * failed at its swap, its cursor at the end of a put-back, with one of the reasons of TELLS. Not one put back
+	 * after the restored site was let out to visitors ("out"), nor an undone restore being swapped in again
+	 * ("undone_at"): those are undos, their sites served the restored copy meanwhile, and a retry ends the undo
+	 * rather than trying the restore again.
 	 *
 	 * @param Job $job Job.
 	 * @return string
 	 */
 	public static function reason( Job $job ): string {
-		if ( RestoreJob::ID !== $job->type || Job::FAILED !== $job->status ) {
+		if ( RestoreJob::ID !== $job->type || Job::FAILED !== $job->status || SwapStep::ID !== $job->step ) {
+			return '';
+		}
+		if ( ! empty( $job->cursor['out'] ) || ! empty( $job->cursor['undone_at'] ) ) {
 			return '';
 		}
 		$phase  = isset( $job->cursor['phase'] ) && is_string( $job->cursor['phase'] ) ? $job->cursor['phase'] : '';
@@ -101,12 +107,12 @@ final class PutBackNotice {
 		if ( '' === $sentence ) {
 			return array();
 		}
-		$retry = $job->can_retry();
+		$retry = $job->retry_useful(); // As the plugin's page offers Retry: the work files there, the failure not final.
 		return array(
 			'type'        => 'warning',
 			'message'     => $sentence . ' ' . ( $retry
 				? __( 'To try the restore again, run this in WP-CLI:', 'wp-checkpoint' )
-				: __( 'Its work files have been removed since, so it cannot be tried again: start a new restore.', 'wp-checkpoint' ) ),
+				: __( 'It cannot be tried again (its work files have been removed since, or its failure is final): start a new restore.', 'wp-checkpoint' ) ),
 			'extra'       => $retry ? 'wp wpcheckpoint job retry ' . $job->id : '',
 			'dismissible' => true,
 			'seen'        => (string) $job->id,
