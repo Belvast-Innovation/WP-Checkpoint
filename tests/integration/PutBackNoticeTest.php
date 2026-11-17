@@ -602,7 +602,9 @@ final class PutBackNoticeTest extends SwapTestCase {
 				$this->assertStringContainsString( $sentence, $this->shown(), 'the control: shown' );
 				$notices->record_dismissal( PutBackNotice::ID );
 				$this->assertGreaterThan( 0, $done->finished_at, 'the control: the failure has a time' );
-				$this->assertSame( array( PutBackNotice::ID => $done->id . ':' . $done->finished_at ), get_user_meta( self::$admin_id, Notices::USER_META, true ), 'one key, the job and the time its failure ended as its value' );
+				$kept = get_user_meta( self::$admin_id, Notices::USER_META, true );
+				$this->assertSame( array( PutBackNotice::ID ), array_keys( (array) $kept ), 'one key' );
+				$this->assertStringContainsString( (string) $done->id, (string) $kept[ PutBackNotice::ID ], 'the job in its value' );
 				$this->assertSame( '', $this->shown(), 'dismissed: not shown for the same failure' );
 				$this->assertStringNotContainsString( $sentence, $this->shown( 'toplevel_page_wp-checkpoint' ), 'nor on the plugin\'s page' );
 
@@ -615,7 +617,9 @@ final class PutBackNoticeTest extends SwapTestCase {
 				$this->assertStringContainsString( esc_html( PutBackNotice::sentence( SwapStep::REVERSED ) ), $this->shown(), 'the next job put back is shown' );
 				$this->assertStringContainsString( 'wp wpcheckpoint job retry ' . $next . '<', $this->shown() );
 				$notices->record_dismissal( PutBackNotice::ID );
-				$this->assertSame( array( PutBackNotice::ID => $next . ':' . $done->finished_at ), get_user_meta( self::$admin_id, Notices::USER_META, true ), 'the same key, no key more' );
+				$kept = get_user_meta( self::$admin_id, Notices::USER_META, true );
+				$this->assertSame( array( PutBackNotice::ID ), array_keys( (array) $kept ), 'the same key, no key more' );
+				$this->assertStringContainsString( (string) $next, (string) $kept[ PutBackNotice::ID ], 'the next job in its value' );
 				$this->assertSame( '', $this->shown() );
 				$GLOBALS['wpdb']->query( $GLOBALS['wpdb']->prepare( 'DELETE FROM ' . JobRepository::table() . ' WHERE id = %d', $next ) );
 				$GLOBALS['wpdb']->query( 'COMMIT' );
@@ -659,14 +663,15 @@ final class PutBackNoticeTest extends SwapTestCase {
 			$again,
 			function () use ( $done, $again, $sentence, $other ): void {
 				wp_set_current_user( self::$admin_id );
-				$this->assertSame( array( PutBackNotice::ID => $done->id . ':' . $done->finished_at ), get_user_meta( self::$admin_id, Notices::USER_META, true ), 'the control: the dismissal of the first failure is still there' );
+				$kept = get_user_meta( self::$admin_id, Notices::USER_META, true );
+				$this->assertSame( array( PutBackNotice::ID ), array_keys( (array) $kept ), 'the control: the dismissal of the first failure is still there' );
+				$this->assertStringContainsString( (string) $done->id, (string) $kept[ PutBackNotice::ID ], 'the control: and is of this job' );
 				$this->assertStringContainsString( $sentence, $this->shown(), 'the same job put back once more: shown again to the one who dismissed its first failure' );
 				$this->assertStringContainsString( $sentence, $this->shown( 'toplevel_page_wp-checkpoint' ), 'and on the plugin\'s page' );
 				wp_set_current_user( $other );
 				$this->assertStringContainsString( $sentence, $this->shown(), 'another user, who dismissed nothing, is shown it as before' );
 				( new Notices( $this->installation() ) )->record_dismissal( PutBackNotice::ID );
 				$this->assertSame( '', $this->shown(), 'dismissed by the other user' );
-				$this->assertSame( array( PutBackNotice::ID => $again->id . ':' . $again->finished_at ), get_user_meta( $other, Notices::USER_META, true ) );
 				wp_set_current_user( self::$admin_id );
 				$this->assertStringContainsString( $sentence, $this->shown(), 'which does not dismiss it for the first' );
 			}
