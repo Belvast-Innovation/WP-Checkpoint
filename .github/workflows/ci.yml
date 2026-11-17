@@ -186,6 +186,17 @@ jobs:
       # starts, so that Docker does not make it as root.
       - run: mkdir -p ../wp-checkpoint-test-output
       - run: npx wp-env start
+      # On the new test site, which has no must-use plugins directory, one test that needs that directory, alone and
+      # before the suite: the tests' listener makes the directory before every test, and in the suite's own order a
+      # restore's preflight would have made it first, so only this step fails when the listener stops making it. The
+      # step says so when the site already has the directory or the test did not run, rather than pass for nothing;
+      # with pipefail, so that the run's own status counts and not the status of the tee after it.
+      - name: One test that needs the must-use plugins directory, alone on the new site
+        run: |
+          set -o pipefail
+          npx wp-env run tests-cli sh -c 'if [ -e /var/www/html/wp-content/mu-plugins ]; then echo "The test site already has a must-use plugins directory: this step would show nothing."; exit 1; fi'
+          npx wp-env run tests-cli --env-cwd=wp-content/plugins/wp-checkpoint sh -c 'WPCHECKPOINT_TEST_LOOPBACK_HOST=http://tests-wordpress sh bin/test-integration.sh --filter test_it_sees_a_restores_loader_left_in_the_must_use_plugins_and_removes_it' 2>&1 | tee ../wp-checkpoint-test-output/mu-alone.txt
+          grep -q 'OK (1 test, ' ../wp-checkpoint-test-output/mu-alone.txt
       - run: npm run test:integration
 
       - name: Show wp-env logs on failure
@@ -384,6 +395,17 @@ jobs:
       # starts, so that Docker does not make it as root.
       - run: mkdir -p ../wp-checkpoint-test-output
       - run: npx wp-env start
+      # On the new test site, which has no must-use plugins directory, one test that needs that directory, alone and
+      # before the suite: the tests' listener makes the directory before every test, and in the suite's own order a
+      # restore's preflight would have made it first, so only this step fails when the listener stops making it. The
+      # step says so when the site already has the directory or the test did not run, rather than pass for nothing;
+      # with pipefail, so that the run's own status counts and not the status of the tee after it.
+      - name: One test that needs the must-use plugins directory, alone on the new site
+        run: |
+          set -o pipefail
+          npx wp-env run tests-cli sh -c 'if [ -e /var/www/html/wp-content/mu-plugins ]; then echo "The test site already has a must-use plugins directory: this step would show nothing."; exit 1; fi'
+          npx wp-env run tests-cli --env-cwd=wp-content/plugins/wp-checkpoint sh -c 'WP_TESTS_MULTISITE=1 WPCHECKPOINT_TEST_LOOPBACK_HOST=http://tests-wordpress sh bin/test-integration.sh --filter test_it_sees_a_restores_loader_left_in_the_must_use_plugins_and_removes_it' 2>&1 | tee ../wp-checkpoint-test-output/mu-alone.txt
+          grep -q 'OK (1 test, ' ../wp-checkpoint-test-output/mu-alone.txt
       - run: npm run test:integration:multisite
 
       - name: Show wp-env logs on failure

@@ -1333,6 +1333,28 @@ final class JobRepository implements RunnerRepository {
 	}
 
 	/**
+	 * The latest restore job whose managing token (Job::MANAGING_SQL) is one of the given, or null when there is
+	 * none, no token is given or the table cannot be read. One statement (the type is indexed; the rows it looks at
+	 * are the restores newer than the one it finds); a newer restore of another installation that shares the
+	 * database is not found. Static, for a caller that has the tokens from the stored state and must not resolve the
+	 * storage directories to ask (an admin page that is not the plugin's: Admin\Notices).
+	 *
+	 * @param string[] $held Storage tokens (Directories::settled_tokens()).
+	 * @return Job|null
+	 */
+	public static function latest_restore( array $held ) {
+		global $wpdb;
+		$held = array_values( array_filter( $held, array( Directories::class, 'is_valid_token' ) ) );
+		if ( array() === $held ) {
+			return null;
+		}
+		$quiet = $wpdb->suppress_errors( true ); // A table that is not there yet is no news for an admin page.
+		$row   = $wpdb->get_row( $wpdb->prepare( 'SELECT * FROM ' . self::table() . ' WHERE type = %s AND ' . Job::MANAGING_SQL . ' IN (' . self::held_sql( $held ) . ') ORDER BY id DESC LIMIT 1', RestoreJob::ID ), ARRAY_A ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared -- plugin table name from the prefix; the list is prepared by held_sql().
+		$wpdb->suppress_errors( $quiet );
+		return is_array( $row ) ? self::hydrate( $row ) : null;
+	}
+
+	/**
 	 * Whether a job that holds the site has this site mark, or that cannot be told (the safe direction for removing
 	 * a maintenance data file).
 	 *

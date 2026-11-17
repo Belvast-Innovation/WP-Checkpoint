@@ -175,11 +175,28 @@ final class JobPresenter {
 		}
 		/* translators: 1: job id, 2: why it is not taken to be this site's, 3: the WordPress directory its plan records */
 		$lines   = array( sprintf( __( 'Restore job %1$d changed a site and still holds it. Another installation of WP Checkpoint manages it, so it is never run here: as far as can be told, that site is not this one (%2$s). Its plan was written for the WordPress directory %3$s.', 'wp-checkpoint' ), $id, $see['why'], '' === $see['recorded'] ? __( '(not recorded)', 'wp-checkpoint' ) : $see['recorded'] ) );
-		$lines[] = $see['file_here']
-			? __( 'Its maintenance file is in this WordPress directory too, so this site answers only with a maintenance page.', 'wp-checkpoint' )
-			: __( 'This WordPress directory holds no maintenance file of it.', 'wp-checkpoint' );
+		$lines[] = self::file_line( $see );
 		$lines[] = JobActions::holding_paths( $job, $see );
 		return $lines;
+	}
+
+	/**
+	 * What is said of a job's maintenance files in this WordPress directory, one of three: files of it are here
+	 * (its maintenance file, or its data file alone, which holds only with a maintenance file or the restore's
+	 * must-use plugin beside it: so "while they hold"), none is, or that cannot be told (a file there cannot be read,
+	 * or is a link), which is not said as "none".
+	 *
+	 * @param array<string, mixed> $see HeldSite::assess().
+	 * @return string
+	 */
+	public static function file_line( array $see ): string {
+		if ( ! empty( $see['file_here'] ) ) {
+			return __( 'Maintenance files of it are in this WordPress directory too: while they hold, this site answers only with a maintenance page.', 'wp-checkpoint' );
+		}
+		if ( empty( $see['file_told'] ) ) {
+			return __( 'Whether a maintenance file of it is in this WordPress directory cannot be told (a file in the place of one there cannot be read, or is a link).', 'wp-checkpoint' );
+		}
+		return __( 'This WordPress directory holds no maintenance file of it.', 'wp-checkpoint' );
 	}
 
 	/**
