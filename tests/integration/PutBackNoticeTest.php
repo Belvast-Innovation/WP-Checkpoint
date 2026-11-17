@@ -632,6 +632,22 @@ final class PutBackNoticeTest extends SwapTestCase {
 		$this->assertNotNull( Plugin::instance()->job_actions()->retry( $done->id ) );
 		$queued = Plugin::instance()->jobs()->find( $done->id );
 		$this->assertSame( Job::QUEUED, $queued->status, 'the control: retried' );
+		// Up to the swap again as a request drives it (the retry begins at the check before the swap), then killed in it.
+		$runner = Plugin::instance()->runner();
+		for ( $i = 0; $i < 200; $i++ ) {
+			$result = $this->autocommit(
+				static function () use ( $runner, $queued ): TickResult {
+					return $runner->tick( $queued->id, microtime( true ) );
+				}
+			);
+			if ( TickResult::CLI === $result->status || ! in_array( Plugin::instance()->jobs()->find( $done->id )->status, array( Job::QUEUED, Job::RUNNING ), true ) ) {
+				break;
+			}
+		}
+		$GLOBALS['wpdb']->query( 'COMMIT' );
+		$queued = Plugin::instance()->jobs()->find( $done->id );
+		$this->assertSame( SwapStep::ID, $queued->step, 'the control: the retry reached the swap: ' . $queued->status . ' ' . $queued->last_error );
+		$this->assertContains( $queued->status, array( Job::QUEUED, Job::RUNNING ) );
 		$this->killed_at( $queued, 'batch_sent', 2 );
 		$again = $this->cli_run( Plugin::instance()->jobs()->find( $done->id ) );
 		$this->assertSame( $done->id, $again->id, 'the control: the same job' );
