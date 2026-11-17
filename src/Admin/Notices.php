@@ -24,7 +24,7 @@ defined( 'ABSPATH' ) || exit;
  * closed; the choice is remembered per user and per storage token. One
  * notice is shown on every admin page (everywhere()): that the latest
  * restore ended with the site put back as it was; its dismissal is
- * remembered per user and per job.
+ * remembered per user and per failure of the job.
  */
 final class Notices {
 
@@ -288,7 +288,8 @@ final class Notices {
 
 	/**
 	 * Store the dismissal for the current user; a clone notice is acknowledged in the state instead. A notice
-	 * that names what it was seen for ("seen": the put-back notice's job id) is dismissed for that, under its one id;
+	 * that names what it was seen for ("seen": the put-back notice's job and the time its failure ended) is dismissed for
+	 * that, under its one id;
 	 * the others for the storage token.
 	 *
 	 * @param string $id Notice id.

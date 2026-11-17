@@ -25,7 +25,10 @@ defined( 'ABSPATH' ) || exit;
 final class PutBackNotice {
 
 	/**
-	 * The notice's id, under which a user's dismissal is kept (with the job's id as its value).
+	 * The notice's id, under which a user's dismissal is kept: with the failure it was dismissed for as its value (the
+	 * job's id and the time this failure ended, "id:finished_at"). A retry keeps the job's id, so the id alone would
+	 * hide the notice of the same job put back once more. The time is in whole seconds: a job retried and put back
+	 * again within the second its earlier failure ended in would count as the same failure.
 	 */
 	const ID = 'put_back';
 
@@ -115,7 +118,7 @@ final class PutBackNotice {
 				: __( 'It cannot be tried again (its work files have been removed since, or its failure is final): start a new restore.', 'wp-checkpoint' ) ),
 			'extra'       => $retry ? 'wp wpcheckpoint job retry ' . $job->id : '',
 			'dismissible' => true,
-			'seen'        => (string) $job->id,
+			'seen'        => $job->id . ':' . $job->finished_at,
 		);
 	}
 }

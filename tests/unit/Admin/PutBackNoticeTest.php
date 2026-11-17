@@ -21,6 +21,7 @@ final class PutBackNoticeTest extends TestCase {
 		$job->type   = RestoreJob::ID;
 		$job->status = Job::FAILED;
 		$job->step   = SwapStep::ID;
+		$job->finished_at = 1700000000;
 		$job->cursor = array(
 			'phase'  => 'reverted',
 			'mark'   => 'abc',
@@ -103,7 +104,11 @@ final class PutBackNoticeTest extends TestCase {
 		);
 		$notice = PutBackNotice::notice( $job );
 		$this->assertSame( 'wp wpcheckpoint job retry 41', $notice['extra'] );
-		$this->assertSame( '41', $notice['seen'], 'dismissed for this job' );
+		$this->assertSame( '41:1700000000', $notice['seen'], 'dismissed for this failure of the job' );
+		$this->assertGreaterThan( 0, $job->finished_at, 'the control: the failure has a time' );
+		$later              = clone $job;
+		$later->finished_at = $job->finished_at + 1;
+		$this->assertNotSame( $notice['seen'], PutBackNotice::notice( $later )['seen'], 'the same job failing again is another failure' );
 		$this->assertTrue( $notice['dismissible'] );
 		$this->assertSame( PutBackNotice::sentence( SwapStep::BUSY ) . ' To try the restore again, run this in WP-CLI:', $notice['message'] );
 		$all = implode( ' ', array_map( 'strval', $notice ) );

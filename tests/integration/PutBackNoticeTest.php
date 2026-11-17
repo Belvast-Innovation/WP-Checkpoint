@@ -585,7 +585,7 @@ final class PutBackNoticeTest extends SwapTestCase {
 		$this->assertSame( '', $this->as_restore( $again, $show ), 'the restore succeeded: gone' );
 	}
 
-	public function test_it_is_dismissed_for_one_job_and_one_user_under_one_key(): void {
+	public function test_it_is_dismissed_for_one_failure_of_a_job_and_one_user_under_one_key(): void {
 		$done     = $this->cli_run( $this->half() );
 		$sentence = esc_html( PutBackNotice::sentence( SwapStep::INTERRUPTED ) );
 		$other    = self::factory()->user->create( array( 'role' => 'administrator' ) );
@@ -601,8 +601,9 @@ final class PutBackNoticeTest extends SwapTestCase {
 				$notices = new Notices( $this->installation() );
 				$this->assertStringContainsString( $sentence, $this->shown(), 'the control: shown' );
 				$notices->record_dismissal( PutBackNotice::ID );
-				$this->assertSame( array( PutBackNotice::ID => (string) $done->id ), get_user_meta( self::$admin_id, Notices::USER_META, true ), 'one key, the job as its value' );
-				$this->assertSame( '', $this->shown(), 'dismissed: not shown for the same job' );
+				$this->assertGreaterThan( 0, $done->finished_at, 'the control: the failure has a time' );
+				$this->assertSame( array( PutBackNotice::ID => $done->id . ':' . $done->finished_at ), get_user_meta( self::$admin_id, Notices::USER_META, true ), 'one key, the job and the time its failure ended as its value' );
+				$this->assertSame( '', $this->shown(), 'dismissed: not shown for the same failure' );
 				$this->assertStringNotContainsString( $sentence, $this->shown( 'toplevel_page_wp-checkpoint' ), 'nor on the plugin\'s page' );
 
 				wp_set_current_user( $other );
@@ -614,8 +615,44 @@ final class PutBackNoticeTest extends SwapTestCase {
 				$this->assertStringContainsString( esc_html( PutBackNotice::sentence( SwapStep::REVERSED ) ), $this->shown(), 'the next job put back is shown' );
 				$this->assertStringContainsString( 'wp wpcheckpoint job retry ' . $next . '<', $this->shown() );
 				$notices->record_dismissal( PutBackNotice::ID );
-				$this->assertSame( array( PutBackNotice::ID => (string) $next ), get_user_meta( self::$admin_id, Notices::USER_META, true ), 'the same key, no key more' );
+				$this->assertSame( array( PutBackNotice::ID => $next . ':' . $done->finished_at ), get_user_meta( self::$admin_id, Notices::USER_META, true ), 'the same key, no key more' );
 				$this->assertSame( '', $this->shown() );
+				$GLOBALS['wpdb']->query( $GLOBALS['wpdb']->prepare( 'DELETE FROM ' . JobRepository::table() . ' WHERE id = %d', $next ) );
+				$GLOBALS['wpdb']->query( 'COMMIT' );
+				$this->assertStringContainsString( $sentence, $this->shown(), 'the control: the first job\'s is the latest again, and its dismissal was written over' );
+				$notices->record_dismissal( PutBackNotice::ID );
+				$this->assertSame( '', $this->shown(), 'the control: dismissed for the first job\'s failure again' );
+			}
+		);
+
+		// Retried, and put back once more: the same job, another failure. Shown again to the one who dismissed the first.
+		while ( Plugin::instance()->jobs()->now() <= $done->finished_at ) {
+			usleep( 200000 ); // The failures are told apart by the second they ended in.
+		}
+		$this->assertNotNull( Plugin::instance()->job_actions()->retry( $done->id ) );
+		$queued = Plugin::instance()->jobs()->find( $done->id );
+		$this->assertSame( Job::QUEUED, $queued->status, 'the control: retried' );
+		$this->killed_at( $queued, 'batch_sent', 2 );
+		$again = $this->cli_run( Plugin::instance()->jobs()->find( $done->id ) );
+		$this->assertSame( $done->id, $again->id, 'the control: the same job' );
+		$this->assertSame( Job::FAILED, $again->status, 'the control: put back once more: ' . $again->last_error );
+		$this->assertSame( 'reverted', $again->cursor['phase'] ?? '' );
+		$this->assertSame( SwapStep::INTERRUPTED, $again->cursor['reason'] ?? '' );
+		$this->assertGreaterThan( $done->finished_at, $again->finished_at, 'the control: this failure ended later' );
+		$this->as_restore(
+			$again,
+			function () use ( $done, $again, $sentence, $other ): void {
+				wp_set_current_user( self::$admin_id );
+				$this->assertSame( array( PutBackNotice::ID => $done->id . ':' . $done->finished_at ), get_user_meta( self::$admin_id, Notices::USER_META, true ), 'the control: the dismissal of the first failure is still there' );
+				$this->assertStringContainsString( $sentence, $this->shown(), 'the same job put back once more: shown again to the one who dismissed its first failure' );
+				$this->assertStringContainsString( $sentence, $this->shown( 'toplevel_page_wp-checkpoint' ), 'and on the plugin\'s page' );
+				wp_set_current_user( $other );
+				$this->assertStringContainsString( $sentence, $this->shown(), 'another user, who dismissed nothing, is shown it as before' );
+				( new Notices( $this->installation() ) )->record_dismissal( PutBackNotice::ID );
+				$this->assertSame( '', $this->shown(), 'dismissed by the other user' );
+				$this->assertSame( array( PutBackNotice::ID => $again->id . ':' . $again->finished_at ), get_user_meta( $other, Notices::USER_META, true ) );
+				wp_set_current_user( self::$admin_id );
+				$this->assertStringContainsString( $sentence, $this->shown(), 'which does not dismiss it for the first' );
 			}
 		);
 	}
