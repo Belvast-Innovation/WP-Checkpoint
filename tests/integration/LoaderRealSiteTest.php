@@ -365,6 +365,98 @@ final class LoaderRealSiteTest extends WP_UnitTestCase {
 		$wpdb->query( 'COMMIT' );
 	}
 
+	/**
+	 * REPRODUCTION ONLY (not for a pull request): what the readers of the two files do in a WP-CLI process whose
+	 * --path is spelled with a "." segment, next to the same in a process with the plain path. Observations are
+	 * printed, nothing is asserted but the set-up.
+	 */
+	public function test_repro_dotted_path(): void {
+		$wp     = trim( (string) shell_exec( 'command -v wp' ) );
+		$plain  = ABSPATH;
+		$dotted = dirname( rtrim( ABSPATH, '/' ) ) . '/./' . basename( rtrim( ABSPATH, '/' ) ) . '/';
+		$mark   = Maintenance::new_mark();
+		$pre    = 'spl_autoload_register( function ( $c ) { if ( 0 === strpos( $c, "WPCheckpoint\\\\" ) ) { $f = WP_PLUGIN_DIR . "/wp-checkpoint/src/" . str_replace( "\\\\", "/", substr( $c, 13 ) ) . ".php"; if ( is_file( $f ) ) { require $f; } } } ); $f = new \WPCheckpoint\Restore\Maintenance( ABSPATH, ' . var_export( $mark, true ) . ' ); echo "ABSPATH=", ABSPATH, " ; ";';
+		$run    = function ( string $path, string $code, bool $plugins = false ) use ( $wp, $pre ): string {
+			$args    = array_merge( array( $wp, '--path=' . $path ), $plugins ? array() : array( '--skip-plugins' ), array( 'eval', ( $plugins ? '' : $pre ) . $code ) );
+			$pipes   = array();
+			$process = proc_open( $args, array( 1 => array( 'pipe', 'w' ), 2 => array( 'pipe', 'w' ) ), $pipes );
+			$out     = (string) stream_get_contents( $pipes[1] );
+			$err     = (string) stream_get_contents( $pipes[2] );
+			fclose( $pipes[1] );
+			fclose( $pipes[2] );
+			return 'exit ' . proc_close( $process ) . ' | out: ' . trim( $out ) . ( '' === trim( $err ) ? '' : ' | err: ' . substr( trim( $err ), 0, 300 ) );
+		};
+		$there  = static function (): string {
+			clearstatcache();
+			$out = array();
+			foreach ( RealAbspath::contents() as $name => $contents ) {
+				$lines = explode( "\n", $contents );
+				$out[] = $name . ( Maintenance::DATA === $name ? ' (time ' . ( $lines[2] ?? '?' ) . ( Maintenance::is_held_time( (string) ( $lines[2] ?? '' ) ) ? ', HELD' : ', not held' ) . ')' : '' );
+			}
+			$out[] = 'loader ' . ( array() === RealMuPlugins::listing() ? 'absent' : 'present' );
+			return array() === $out ? '(nothing)' : implode( ', ', $out );
+		};
+		$clear  = static function (): void {
+			foreach ( RealMuPlugins::listing() as $left ) {
+				RealMuPlugins::remove( basename( $left ) );
+			}
+			foreach ( RealAbspath::listing() as $left ) {
+				RealAbspath::remove( basename( $left ) );
+			}
+		};
+		$say    = static function ( string $line ): void {
+			fwrite( STDERR, "\nREPRO " . $line );
+		};
+		$try    = 'try { %s } catch ( \Throwable $e ) { echo get_class( $e ), ": ", $e->getMessage(); }';
+		$held   = function () use ( $mark ): void {
+			RealAbspath::write( Maintenance::DATA, ( new Maintenance( ABSPATH, $mark ) )->data( Maintenance::held() ) );
+			RealAbspath::write( Maintenance::FILE, Maintenance::CODE );
+		};
+		ActivePlugin::on();
+		try {
+			foreach ( array( 'plain' => $plain, 'dotted' => $dotted ) as $how => $path ) {
+				$clear();
+				$say( "S1 put on a clean site [$how]: " . $run( $path, sprintf( $try, 'echo "state=", $f->state(), " ; "; $f->put( time() ); echo "put ok";' ) ) );
+				$say( "S1 after [$how]: " . $there() );
+
+				$clear();
+				$held();
+				$say( "S2 remove with both files up, held [$how]: " . $run( $path, sprintf( $try, 'echo "state=", $f->state(), " ; remove="; var_export( $f->remove() );' ) ) );
+				$say( "S2 after [$how]: " . $there() );
+
+				$clear();
+				RealMuPlugins::put();
+				$say( "S3 loader, neither file there [$how]: " . $run( $path, sprintf( $try, 'echo "needed="; var_export( \WPCheckpoint\Restore\Loader::needed( ABSPATH ) ); echo " ; remove_loader="; var_export( \WPCheckpoint\Plugin::remove_loader( \WPCheckpoint\Restore\Loader::dir( ABSPATH ) ) );' ) ) );
+				$say( "S3 after [$how]: " . $there() );
+
+				$clear();
+				$say( "S4 start by the plain path (put, hold): " . $run( $plain, sprintf( $try, '$f->put( time() ); $f->hold(); echo "held=", var_export( $f->is_held(), true );' ) ) );
+				$say( 'S4 after the start: ' . $there() );
+				$say( "S4 end [$how] (let_go, remove): " . $run( $path, sprintf( $try, 'echo "let_go=", $f->let_go( time() ), " ; remove="; var_export( $f->remove() );' ) ) );
+				$say( "S4 after the end [$how]: " . $there() );
+				$say( "S4 then a WP-CLI command with the plugin loaded, plain path [$how]: " . $run( $plain, 'echo "ran";', true ) );
+				$say( "S4 held_evidence here [$how]: " . implode( ':', Maintenance::held_evidence( ABSPATH ) ) );
+
+				$clear();
+				$held();
+				$say( "S5 end without a let-go [$how] (remove only, held): " . $run( $path, sprintf( $try, 'echo "remove="; var_export( $f->remove() );' ) ) );
+				$say( "S5 after [$how]: " . $there() );
+				$say( "S5 then a WP-CLI command with the plugin loaded, plain path [$how]: " . $run( $plain, 'echo "ran";', true ) );
+				$say( "S5 then this plugin's command, plain path [$how]: " . $run( $plain, 'echo 1;', true ) );
+
+				$clear();
+				RealAbspath::write( Maintenance::DATA, ( new Maintenance( ABSPATH, $mark ) )->data( Maintenance::held() ) );
+				$say( "S6 let_go with .maintenance already gone, data held [$how]: " . $run( $path, sprintf( $try, 'echo "let_go=", $f->let_go( time() );' ) ) );
+				$say( "S6 after [$how]: " . $there() );
+			}
+			$say( "done\n" );
+		} finally {
+			$clear();
+			ActivePlugin::off();
+		}
+		$this->assertTrue( true );
+	}
+
 	public function test_with_the_loader_up_and_the_maintenance_file_deleted_wp_cli_shows_and_runs_a_job_as_ever(): void {
 		global $wpdb;
 		$mark    = Maintenance::new_mark();
