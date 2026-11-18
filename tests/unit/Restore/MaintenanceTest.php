@@ -317,8 +317,8 @@ final class MaintenanceTest extends TestCase {
 		$file = $this->ours();
 		// Put up: the data file first, the code never written (the run died between).
 		file_put_contents( $this->dir . '/.wpcheckpoint-maintenance.php', $file->data( Maintenance::held() ) );
-		$this->assertSame( Maintenance::NONE, $file->state(), 'no .maintenance: the site is not blocked' );
-		$this->assertFalse( Maintenance::held_in( $this->dir ) );
+		$this->assertSame( Maintenance::NONE, $file->state(), 'no .maintenance: no request is blocked by it' );
+		$this->assertSame( array( Maintenance::HELD, Maintenance::BY_DATA ), Maintenance::held_evidence( $this->dir ), 'the held data file alone says a restore holds the site (the WP-CLI guard\'s judgment)' );
 		$this->assertFalse( Maintenance::code_in( $this->dir ) );
 		$this->assertSame( self::MARK, Maintenance::data_mark( $this->dir ) );
 		$this->assertTrue( $file->remove(), 'the data file goes' );
@@ -349,7 +349,8 @@ final class MaintenanceTest extends TestCase {
 			$this->assertSame( 'stopped between the two files', $e->getMessage() );
 		}
 		$this->assertSame( array( '.wpcheckpoint-maintenance.php' ), $this->names(), 'put up: the data file first, nothing reads it yet' );
-		$this->assertFalse( Maintenance::held_in( $this->dir ), 'the site is not blocked' );
+		$this->assertSame( Maintenance::NONE, $file->state(), 'no request is blocked by .maintenance' );
+		$this->assertSame( array( Maintenance::HELD, Maintenance::BY_DATA ), Maintenance::held_evidence( $this->dir ), 'and the held data file says a restore holds the site' );
 		$file->hold();
 		$this->assertTrue( $file->is_held(), 'the control: put up whole' );
 		$calls = 0;

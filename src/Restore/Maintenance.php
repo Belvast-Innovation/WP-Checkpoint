@@ -84,6 +84,16 @@ final class Maintenance {
 	const BARE    = 'bare';
 
 	/**
+	 * What held_evidence() answers with: held, and by what; or why it cannot be told.
+	 */
+	const HELD        = 'held';
+	const BY_DATA     = 'data';
+	const BY_CODE     = 'code';
+	const BY_SINGLE   = 'single';
+	const UNTOLD_DATA = 'untold_data';
+	const UNTOLD_FILE = 'untold_file';
+
+	/**
 	 * Most bytes read of either file: ours are far shorter, so a longer one is someone else's.
 	 */
 	const MAX_READ = 16384;
@@ -389,27 +399,57 @@ final class Maintenance {
 	}
 
 	/**
-	 * Whether a directory holds a held maintenance file of this plugin's (any restore's): the site answers with the
-	 * maintenance page, and it does not lapse. CODE with a data file it cannot read counts as held: it blocks every
-	 * request, and nothing lets it lapse.
+	 * Whether a restore holds the site in a directory, told from the two files and from nothing else (not the
+	 * database, which may be the one half swapped; not the files of a run without WordPress): array( HELD, why ),
+	 * array( NONE, '' ) when positively none does, or array( UNKNOWN, why ) when it cannot be told, which every caller
+	 * takes as held. The one judgment of it: the WP-CLI guard (Cli\HeldGuard), the plugin's warnings, held_in().
+	 *
+	 * Held, by any restore:
+	 * - BY_DATA: the data file has a held time, whatever is in .maintenance's place (deleted, someone else's, not
+	 *   readable): the tables and directories may be half swapped, and the restore's must-use plugin answers for it.
+	 * - BY_CODE: .maintenance is a code of this plugin's with no data file of its form next to it (positively): it
+	 *   answers every request with the maintenance page, and no time lets it lapse.
+	 * - BY_SINGLE: the single file of the earlier form with a held time.
+	 * Not told: the data file cannot be read or is a link (UNTOLD_DATA: it may hold a held time), or .maintenance
+	 * cannot be read or is a link while the data file names no held time (UNTOLD_FILE: it may be the single file, or
+	 * the code with nothing next to it).
+	 *
+	 * @param string $dir Directory (ABSPATH).
+	 * @return array{0: string, 1: string}
+	 */
+	public static function held_evidence( string $dir ): array {
+		$dir  = rtrim( $dir, '/\\' );
+		$path = $dir . DIRECTORY_SEPARATOR . self::FILE;
+		$told = self::data_at( $dir . DIRECTORY_SEPARATOR . self::DATA );
+		if ( 'data' === $told[0] && null !== $told[1] && $told[1]['held'] ) {
+			return array( self::HELD, self::BY_DATA );
+		}
+		list( $kind, $code ) = self::look( $path );
+		$untold              = self::UNKNOWN === $kind || ( self::OTHER === $kind && ! self::plain( $path ) );
+		if ( 'file' === $kind && 1 === preg_match( self::LEGACY_FORM, $code, $legacy ) ) {
+			if ( self::is_held_time( $legacy[1] ) ) {
+				return array( self::HELD, self::BY_SINGLE );
+			}
+		} elseif ( 'file' === $kind && in_array( $code, self::KNOWN_CODES, true ) ) {
+			if ( 'data' === $told[0] ) {
+				return array( self::NONE, '' ); // The code reads a time that is not a held one: it lapses.
+			}
+			return self::UNKNOWN === $told[0] ? array( self::UNKNOWN, self::UNTOLD_DATA ) : array( self::HELD, self::BY_CODE );
+		}
+		if ( self::UNKNOWN === $told[0] ) {
+			return array( self::UNKNOWN, self::UNTOLD_DATA );
+		}
+		return $untold ? array( self::UNKNOWN, self::UNTOLD_FILE ) : array( self::NONE, '' );
+	}
+
+	/**
+	 * Whether a restore holds the site in a directory, or may (held_evidence(): what cannot be told counts as held).
 	 *
 	 * @param string $dir Directory (ABSPATH).
 	 * @return bool
 	 */
 	public static function held_in( string $dir ): bool {
-		$dir                 = rtrim( $dir, '/\\' );
-		list( $kind, $code ) = self::look( $dir . DIRECTORY_SEPARATOR . self::FILE );
-		if ( 'file' !== $kind ) {
-			return false;
-		}
-		if ( 1 === preg_match( self::LEGACY_FORM, $code, $legacy ) ) {
-			return self::is_held_time( $legacy[1] );
-		}
-		if ( ! in_array( $code, self::KNOWN_CODES, true ) ) {
-			return false;
-		}
-		$data = self::parse( self::look( $dir . DIRECTORY_SEPARATOR . self::DATA ) );
-		return null === $data || $data['held'];
+		return self::NONE !== self::held_evidence( $dir )[0];
 	}
 
 	/**

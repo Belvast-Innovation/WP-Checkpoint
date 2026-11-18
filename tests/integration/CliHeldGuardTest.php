@@ -8,9 +8,10 @@ use WPCheckpoint\Tests\Fixtures\RealAbspath;
 use WP_UnitTestCase;
 
 /**
- * While a restore holds the site (a held maintenance file of this plugin's in the WordPress directory), another WP-CLI
- * process runs no command but this plugin's own and help: "wp cron event run --due-now" is refused and runs no event.
- * Without the held file the same command runs the event (the control).
+ * While a restore holds the site (a held maintenance file of this plugin's in the WordPress directory, or its held data
+ * file alone once .maintenance was deleted), another WP-CLI process runs no command but this plugin's own and help:
+ * "wp cron event run --due-now" is refused and runs no event. With neither file the same command runs the event (the
+ * control).
  *
  * Real WP-CLI processes on the test site: the plugin is made active in its tables for the test (and put back after),
  * and the maintenance file is put in the real ABSPATH through RealAbspath (the registered exception).
@@ -85,8 +86,20 @@ final class CliHeldGuardTest extends WP_UnitTestCase {
 			$this->assertSame( 0, $status, "help runs.\nstdout: {$out}\nstderr: {$err}" );
 			$this->assertFalse( $this->ran(), 'and still no event ran' );
 
-			// The control: the same command once the site is not held runs the event.
+			// .maintenance deleted (by a person, a deployment, a cleaner), the held data file still there: the site's
+			// tables and directories may be half swapped all the same, and the command is refused as before.
 			RealAbspath::remove( Maintenance::FILE );
+			$this->assertSame( array( Maintenance::HELD, Maintenance::BY_DATA ), Maintenance::held_evidence( ABSPATH ), 'the control: only the held data file is there' );
+			list( $status, $out, $err ) = $this->wp( $hook, 'cron', 'event', 'run', '--due-now' );
+			$this->assertSame( 1, $status, "refused with .maintenance deleted.\nstdout: {$out}\nstderr: {$err}" );
+			$this->assertSame( '', $out, 'nothing ran' );
+			$this->assertStringContainsString( 'A restore holds this site: its data file says so', $err, 'refused for the data file, and said so' );
+			$this->assertStringContainsString( 'remove .wpcheckpoint-maintenance.php', $err, 'with what ends it' );
+			$this->assertFalse( $this->ran(), 'no event ran' );
+			list( $status, $out, $err ) = $this->wp( 'wpcheckpoint', 'job', 'list', '--format=json' );
+			$this->assertSame( 0, $status, "this plugin's commands run.\nstdout: {$out}\nstderr: {$err}" );
+
+			// The control: the same command once the site is not held runs the event.
 			RealAbspath::remove( Maintenance::DATA );
 			list( $status, $out, $err ) = $this->wp( $hook, 'cron', 'event', 'run', '--due-now' );
 			$this->assertSame( 0, $status, "not held: it runs.\nstdout: {$out}\nstderr: {$err}" );

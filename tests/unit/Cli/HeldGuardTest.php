@@ -3,6 +3,7 @@
 namespace WPCheckpoint\Tests\Unit\Cli;
 
 use WPCheckpoint\Cli\HeldGuard;
+use WPCheckpoint\Restore\Maintenance;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 /**
@@ -28,13 +29,37 @@ final class HeldGuardTest extends TestCase {
 			'a word like ours'       => array( array( 'wpcheckpoints' ), false ),
 			'cannot be read'         => array( null, false ),
 		) as $what => list( $args, $runs ) ) {
-			$why = HeldGuard::refusal( $args, true );
+			$why = HeldGuard::refusal( $args, array( Maintenance::HELD, Maintenance::BY_SINGLE ) );
 			$this->assertSame( $runs, '' === $why, $what );
 			if ( ! $runs ) {
 				$this->assertStringContainsString( 'A restore holds this site', $why, $what );
 				$this->assertStringContainsString( 'wp wpcheckpoint job list', $why, $what );
 			}
-			$this->assertSame( '', HeldGuard::refusal( $args, false ), $what . ': not held, it runs' );
+			$this->assertSame( '', HeldGuard::refusal( $args, array( Maintenance::NONE, '' ) ), $what . ': not held, it runs' );
+			// What cannot be told is refused as what is held is, and lets the same commands run.
+			foreach ( array( Maintenance::UNTOLD_DATA, Maintenance::UNTOLD_FILE ) as $untold ) {
+				$this->assertSame( $runs, '' === HeldGuard::refusal( $args, array( Maintenance::UNKNOWN, $untold ) ), $what . ', ' . $untold );
+			}
 		}
+	}
+
+	public function test_the_refusal_says_what_holds_the_site_and_what_ends_it(): void {
+		$args = array( 'cron', 'event', 'run' );
+		$said = array();
+		foreach ( array(
+			Maintenance::BY_DATA     => array( Maintenance::HELD, 'A restore holds this site', array( '.wpcheckpoint-maintenance.php', 'whether .maintenance is still there or not', 'remove .wpcheckpoint-maintenance.php' ) ),
+			Maintenance::BY_CODE     => array( Maintenance::HELD, 'A restore holds this site', array( 'no data file next to it', 'remove .maintenance' ) ),
+			Maintenance::BY_SINGLE   => array( Maintenance::HELD, 'A restore holds this site', array( 'its maintenance file is up', 'remove .maintenance' ) ),
+			Maintenance::UNTOLD_DATA => array( Maintenance::UNKNOWN, 'Whether a restore holds this site cannot be told', array( '.wpcheckpoint-maintenance.php in the WordPress directory cannot be read', 'make the file readable', 'remove the file' ) ),
+			Maintenance::UNTOLD_FILE => array( Maintenance::UNKNOWN, 'Whether a restore holds this site cannot be told', array( '.maintenance in the WordPress directory cannot be read', 'make the file readable', 'remove it' ) ),
+		) as $why => list( $state, $begins, $names ) ) {
+			$text = HeldGuard::refusal( $args, array( $state, $why ) );
+			$this->assertStringStartsWith( $begins, $text, $why );
+			foreach ( array_merge( $names, array( 'wp wpcheckpoint job list', 'no command here but wp wpcheckpoint (and wp help)' ) ) as $part ) {
+				$this->assertStringContainsString( $part, $text, $why . ': ' . $part );
+			}
+			$said[] = $text;
+		}
+		$this->assertCount( 5, array_unique( $said ), 'each its own words' );
 	}
 }
