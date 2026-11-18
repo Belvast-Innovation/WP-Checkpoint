@@ -146,7 +146,9 @@ final class MaintenanceMatrixTest extends TestCase {
 		foreach ( MaintenanceStates::all() as $pair ) {
 			$state = $this->state( $pair[0], $pair[1] );
 			$truth = $state['truth'];
+			$as_is = self::both( $state['site'] );
 			$said  = Maintenance::held_evidence( $state['site'] );
+			$this->assertSame( $as_is, self::both( $state['site'] ), 'the judgment writes and deletes nothing ' . $state['case'] );
 			$now   = MaintenanceStates::answers( $state['site'], $state['mu'] );
 			$this->assertContains( $said[0], array( Maintenance::HELD, Maintenance::NONE, Maintenance::UNKNOWN ), $state['case'] );
 			// By construction: a held data file that can be read holds whatever .maintenance is; the single file holds;
@@ -174,7 +176,6 @@ final class MaintenanceMatrixTest extends TestCase {
 				$this->assertTrue( $truth['m_untellable'] || $truth['d_untellable'], 'not told only where a file cannot be told ' . $state['case'] );
 			}
 			// No fixed code answers as held, now or once every file can be read, where the judgment says none.
-			$before = self::both( $state['site'] );
 			MaintenanceStates::reveal( $state['site'] );
 			$then  = MaintenanceStates::answers( $state['site'], $state['mu'] );
 			$codes = $now['code'] || $now['legacy'] || $now['loader'] || $then['code'] || $then['legacy'] || $then['loader'];
@@ -187,7 +188,6 @@ final class MaintenanceMatrixTest extends TestCase {
 			}
 			$seen[ $said[0] . ( '' === $said[1] ? '' : ':' . $said[1] ) ] = ( $seen[ $said[0] . ( '' === $said[1] ? '' : ':' . $said[1] ) ] ?? 0 ) + 1;
 			$seen['a code holds'] = ( $seen['a code holds'] ?? 0 ) + ( $codes ? 1 : 0 );
-			unset( $before );
 		}
 		ksort( $seen );
 		// The controls: every answer occurs, and the fixed codes hold in many of the states.

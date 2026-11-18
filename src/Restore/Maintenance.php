@@ -414,11 +414,17 @@ final class Maintenance {
 	 * cannot be read or is a link while the data file names no held time (UNTOLD_FILE: it may be the single file, or
 	 * the code with nothing next to it).
 	 *
+	 * The directory is resolved first (links, "." and ".." segments: WP-CLI's --path may be spelled with them), since
+	 * whether a file is positively not there is told only for a path without such segments; a directory that cannot be
+	 * resolved is looked at as it is spelled.
+	 *
 	 * @param string $dir Directory (ABSPATH).
 	 * @return array{0: string, 1: string}
 	 */
 	public static function held_evidence( string $dir ): array {
-		$dir  = rtrim( $dir, '/\\' );
+		clearstatcache( true );
+		$real = realpath( $dir );
+		$dir  = rtrim( false === $real ? $dir : $real, '/\\' );
 		$path = $dir . DIRECTORY_SEPARATOR . self::FILE;
 		$told = self::data_at( $dir . DIRECTORY_SEPARATOR . self::DATA );
 		if ( 'data' === $told[0] && null !== $told[1] && $told[1]['held'] ) {
