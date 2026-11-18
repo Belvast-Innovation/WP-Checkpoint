@@ -373,6 +373,15 @@ final class LoaderRealSiteTest extends WP_UnitTestCase {
 		$state   = self::stored_state();
 		ActivePlugin::on();
 		try {
+			// A job of the WP-CLI processes' own making (their storage directory is the one the database names, which
+			// need not be this process's): an estimate, which changes nothing of the site. Made before the site is held:
+			// held, WP-CLI runs no command but this plugin's (Cli\HeldGuard), the data file alone being enough.
+			$make                       = 'echo \WPCheckpoint\Plugin::instance()->jobs()->create( \WPCheckpoint\Jobs\EstimateJob::ID, 0 )->id;';
+			list( $status, $out, $err ) = $this->wp( 'eval', $make );
+			$this->assertSame( 0, $status, "the control: not held, WP-CLI runs any command.\nstdout: {$out}\nstderr: {$err}" );
+			$this->assertSame( 1, preg_match( '/\A[0-9]+\z/', trim( $out ) ), $out . $err );
+			$id = (int) trim( $out );
+
 			$this->held( $mark, false, false ); // Held by its data file; .maintenance deleted.
 			RealMuPlugins::put();
 			$this->assertTrue( ( new Maintenance( rtrim( ABSPATH, '/' ), $mark ) )->left_held() );
@@ -383,12 +392,13 @@ final class LoaderRealSiteTest extends WP_UnitTestCase {
 			$this->assertStringContainsString( 'Briefly unavailable for scheduled maintenance', $held[0]['body'] );
 			$this->assertStringContainsString( 'No job holds the site with this maintenance file', self::runtime_log(), 'and ran the runtime' );
 
-			// A job of the WP-CLI processes' own making (their storage directory is the one the database names, which
-			// need not be this process's): an estimate, which changes nothing of the site.
-			list( $status, $out, $err ) = $this->wp( 'eval', 'echo \WPCheckpoint\Plugin::instance()->jobs()->create( \WPCheckpoint\Jobs\EstimateJob::ID, 0 )->id;' );
-			$this->assertSame( 0, $status, "WP-CLI runs with the loader up.\nstdout: {$out}\nstderr: {$err}" );
-			$this->assertSame( 1, preg_match( '/\A[0-9]+\z/', trim( $out ) ), $out . $err );
-			$id = (int) trim( $out );
+			// Another command is refused, with .maintenance deleted and the data file held: by this plugin's guard, not
+			// by the loader, which says nothing on the command line.
+			list( $status, $out, $err ) = $this->wp( 'eval', $make );
+			$this->assertSame( 1, $status, "a command that is not this plugin's is refused.\nstdout: {$out}\nstderr: {$err}" );
+			$this->assertSame( '', $out, 'and made no job' );
+			$this->assertStringContainsString( 'A restore holds this site: its data file says so', $err );
+			$this->assertStringNotContainsString( 'Briefly unavailable', $out . $err );
 
 			list( $status, $out, $err ) = $this->wp( 'wpcheckpoint', 'job', 'status', (string) $id, '--format=json' );
 			$this->assertSame( 0, $status, "job status runs.\nstdout: {$out}\nstderr: {$err}" );
