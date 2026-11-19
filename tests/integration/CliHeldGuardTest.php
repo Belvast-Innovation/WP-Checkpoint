@@ -62,21 +62,50 @@ final class CliHeldGuardTest extends WP_UnitTestCase {
 		return 'yes' === $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s", self::RAN ) );
 	}
 
+	/**
+	 * Run wp on the test site with its --path spelled as given: exit status, standard output, standard error.
+	 *
+	 * @param string $path    The WordPress directory, as WP-CLI is told it.
+	 * @param string ...$args Arguments.
+	 * @return array{0: int, 1: string, 2: string}
+	 */
+	private function wp_at( string $path, string ...$args ): array {
+		$pipes   = array();
+		$process = proc_open( array_merge( array( $this->wp, '--path=' . $path ), $args ), array( 1 => array( 'pipe', 'w' ), 2 => array( 'pipe', 'w' ) ), $pipes );
+		$this->assertIsResource( $process );
+		$out = (string) stream_get_contents( $pipes[1] );
+		$err = (string) stream_get_contents( $pipes[2] );
+		fclose( $pipes[1] );
+		fclose( $pipes[2] );
+		return array( proc_close( $process ), $out, $err );
+	}
+
 	public function test_a_wordpress_directory_spelled_with_dots_is_not_taken_for_one_that_cannot_be_told(): void {
+		$site    = rtrim( ABSPATH, '/' );
+		$spelled = array(
+			'a "." segment'  => dirname( $site ) . '/./' . basename( $site ) . '/',
+			'a ".." segment' => $site . '/wp-includes/../',
+		);
 		ActivePlugin::on();
 		try {
-			$dotted = dirname( rtrim( ABSPATH, '/' ) ) . '/./' . basename( rtrim( ABSPATH, '/' ) ) . '/';
-			$this->assertSame( realpath( ABSPATH ), realpath( $dotted ), 'the control: the same directory' );
-			$pipes   = array();
-			$process = proc_open( array( $this->wp, '--path=' . $dotted, 'eval', 'echo ABSPATH;' ), array( 1 => array( 'pipe', 'w' ), 2 => array( 'pipe', 'w' ) ), $pipes );
-			$this->assertIsResource( $process );
-			$out = (string) stream_get_contents( $pipes[1] );
-			$err = (string) stream_get_contents( $pipes[2] );
-			fclose( $pipes[1] );
-			fclose( $pipes[2] );
-			$this->assertSame( 0, proc_close( $process ), "no restore holds the site: the command runs.\nstdout: {$out}\nstderr: {$err}" );
-			$this->assertStringContainsString( '/./', $out, 'the control: WP-CLI kept the spelling in ABSPATH, the case looked for' );
-			$this->assertSame( array( Maintenance::NONE, '' ), Maintenance::held_evidence( $dotted ) );
+			foreach ( $spelled as $what => $dotted ) {
+				$this->assertSame( realpath( ABSPATH ), realpath( $dotted ), $what . ': the control: the same directory' );
+				list( $status, $out, $err ) = $this->wp_at( $dotted, 'eval', 'echo ABSPATH;' );
+				$this->assertSame( 0, $status, "{$what}: no restore holds the site: the command runs.\nstdout: {$out}\nstderr: {$err}" );
+				$this->assertSame( $dotted, $out, $what . ': the control: WP-CLI kept the spelling in ABSPATH, the case looked for' );
+				$this->assertSame( array( Maintenance::NONE, '' ), Maintenance::held_evidence( $dotted ), $what );
+				// The control: the guard is loaded in a process with this path, and judges there. With the held data
+				// file it refuses the same command, for the data file.
+				RealAbspath::write( Maintenance::DATA, ( new Maintenance( ABSPATH, Maintenance::new_mark() ) )->data( Maintenance::held() ) );
+				try {
+					list( $status, $out, $err ) = $this->wp_at( $dotted, 'eval', 'echo ABSPATH;' );
+					$this->assertSame( 1, $status, "{$what}: held: refused.\nstdout: {$out}\nstderr: {$err}" );
+					$this->assertSame( '', $out, $what . ': nothing ran' );
+					$this->assertStringContainsString( 'A restore holds this site: its data file says so', $err, $what );
+				} finally {
+					RealAbspath::remove( Maintenance::DATA );
+				}
+			}
 		} finally {
 			ActivePlugin::off();
 		}
