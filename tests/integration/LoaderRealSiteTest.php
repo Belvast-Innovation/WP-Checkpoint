@@ -471,6 +471,36 @@ final class LoaderRealSiteTest extends WP_UnitTestCase {
 		}
 	}
 
+	public function test_draft_storage_observations(): void {
+		$storage = StorageDirs::listing();
+		$state   = self::stored_state();
+		$see     = 'try { $d = \WPCheckpoint\Plugin::instance()->directories(); $b = $d->base(); $s = \WPCheckpoint\Support\Directories::load_state(); echo json_encode( array( "abspath" => ABSPATH, "content" => WP_CONTENT_DIR, "base" => $b, "error" => $d->last_error(), "path" => $s["path"] ?? null, "token" => $s["token"] ?? null, "state_abspath" => $s["abspath"] ?? null, "clone" => ! empty( $s["clone_detected"] ) ) ); } catch ( \Throwable $e ) { echo get_class( $e ), ": ", $e->getMessage(); }';
+		$say     = static function ( string $line ): void {
+			fwrite( STDERR, "\nDRAFT " . $line );
+		};
+		ActivePlugin::on();
+		try {
+			$say( 'stored before: ' . var_export( $state, true ) );
+			$say( 'dirs before: ' . implode( ', ', $storage ) );
+			foreach ( self::dotted_paths() as $what => $path ) {
+				self::restore_state( null );
+				$say( "[$what] state deleted, dotted first: " . implode( ' | ', $this->wp_at( $path, 'eval', $see ) ) );
+				$say( "[$what] then plain: " . implode( ' | ', $this->wp_at( ABSPATH, 'eval', $see ) ) );
+				$say( "[$what] then dotted again: " . implode( ' | ', $this->wp_at( $path, 'eval', $see ) ) );
+				$say( "[$what] dirs: " . implode( ', ', StorageDirs::listing() ) );
+				self::restore_state( null );
+				$say( "[$what] state deleted, plain first: " . implode( ' | ', $this->wp_at( ABSPATH, 'eval', $see ) ) );
+				$say( "[$what] then dotted: " . implode( ' | ', $this->wp_at( $path, 'eval', $see ) ) );
+			}
+			$say( "done\n" );
+		} finally {
+			self::restore_state( $state );
+			StorageDirs::remove_made_since( $storage );
+			ActivePlugin::off();
+		}
+		$this->assertTrue( true );
+	}
+
 	public function test_with_the_loader_up_and_the_maintenance_file_deleted_wp_cli_shows_and_runs_a_job_as_ever(): void {
 		global $wpdb;
 		$mark    = Maintenance::new_mark();
