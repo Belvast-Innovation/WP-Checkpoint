@@ -1243,6 +1243,13 @@ final class Directories {
 			return false;
 		}
 		if ( ! wp_mkdir_p( $dir ) || ! is_dir( $dir ) || ! wp_is_writable( $dir ) ) {
+			clearstatcache( true, $dir );
+			if ( ! file_exists( $dir ) && 1 === preg_match( '#(^|/)\.\.(/|$)#', Paths::normalize( $dir ) ) ) {
+				// wp_mkdir_p() makes no directory whose path has a "../" in it. WP-CLI's --path spelled with one
+				// gives such paths; a request without it makes the directory, which is then found from here too.
+				$this->error = sprintf( /* translators: %s: directory path */ __( 'Cannot create %s: WordPress makes no directory at a path with a ".." segment in it, as this one has (from the path WP-CLI was started with, or from a constant in wp-config.php). Run the command once with a path without "..", or open the plugin\'s page in the admin: the directory made then is used from here too.', 'wp-checkpoint' ), $dir );
+				return false;
+			}
 			$this->error = sprintf( /* translators: %s: directory path */ __( 'Cannot create or write to %s.', 'wp-checkpoint' ), $dir );
 			return false;
 		}
