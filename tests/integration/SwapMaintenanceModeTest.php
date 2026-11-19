@@ -434,8 +434,7 @@ final class SwapMaintenanceModeTest extends SwapTestCase {
 			$this->assertSame( 0, $status, "abandoned.\nstdout: {$out}\nstderr: {$err}" );
 			$this->assertStringContainsString( 'was abandoned', $out . $err );
 			$this->assertSame( array(), RealAbspath::contents(), 'its maintenance file and data file were taken down here' );
-			$wpdb->query( 'COMMIT' );
-			$this->assertSame( Job::REASON_ABANDONED, $wpdb->get_var( $wpdb->prepare( 'SELECT failure_reason FROM ' . JobRepository::table() . ' WHERE id = %d', $job->id ) ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- the jobs table.
+			$this->assertSame( Job::REASON_ABANDONED, self::fresh( $job->id )->failure_reason );
 
 			list( $status, $out, $err ) = $this->wp_at( $path, 'eval', 'echo ABSPATH;' );
 			$this->assertSame( 0, $status, "nothing holds the site here now: any command runs.\nstdout: {$out}\nstderr: {$err}" );
