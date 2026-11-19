@@ -168,6 +168,31 @@ final class SiteIdentityTest extends WP_UnitTestCase {
 		$this->assertFalse( $this->runs( $job, 's1/real' ), 'the jobs started before are not run here' );
 	}
 
+	public function test_state_written_under_a_dotted_path_that_is_gone_is_another_place_without_asking(): void {
+		foreach ( array( 'plain' => 's5/old', 'dotted' => 's6/./up/../old' ) as $what => $spelled ) {
+			$site = substr( $spelled, 0, 2 );
+			mkdir( $this->root . '/' . $site . '/old/wp-includes', 0755, true );
+			mkdir( $this->root . '/' . $site . '/up' );
+			mkdir( $this->root . '/' . $site . '/new/wp-includes', 0755, true );
+			Options::delete( Directories::OPTION );
+			$cli  = $this->dirs( $spelled );
+			$base = $cli->base();
+			$this->assertNotSame( '', $base, $what . ': ' . $cli->last_error() );
+			$state = Options::get( Directories::OPTION, array() );
+			$this->assertSame( $this->root . '/' . $spelled . '/', $state['abspath'], $what . ': the control: the path is recorded as it was spelled' );
+			unset( $state['abspath_real'] ); // As the version before wrote it: only the spelling is left to go by.
+			Options::set( Directories::OPTION, $state );
+			// The site is copied to another directory and the original removed.
+			Sandbox::remove( $this->root . '/' . $site . '/old' );
+			$web  = $this->dirs( $site . '/new' );
+			$next = $web->base();
+			$this->assertNotSame( '', $next, $what . ': told, not asked: ' . $web->last_error() );
+			$this->assertNull( $web->identity_question(), $what );
+			$this->assertNotSame( $base, $next, $what . ': a directory of its own' );
+			$this->assertContains( $state['token'], $web->state()['copied_tokens'], $what . ': the tokens it was copied with are not its own' );
+		}
+	}
+
 	public function test_an_undecidable_site_answered_as_the_same_keeps_its_token(): void {
 		list( , $job ) = $this->undecidable();
 		$web           = $this->dirs( 's1/real' );
