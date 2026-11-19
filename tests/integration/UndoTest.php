@@ -877,6 +877,32 @@ final class UndoTest extends SwapTestCase {
 		}
 	}
 
+	public function test_an_undo_that_died_taking_its_file_down_to_ask_lets_go_when_the_deadline_keeps_the_restored_site(): void {
+		$job   = $this->completed();
+		$after = $this->site();
+		$this->retype( $job );
+		$told = $this->actions()->undo( $job->id, '' );
+		$this->assertTrue( $this->actions()->undo( $job->id, $told['code'] )['ok'] );
+		$this->break_old_options( $job );
+		// The run dies taking the maintenance file down to ask: the file stays, held, and nothing is asked yet.
+		$this->killed_at( Plugin::instance()->jobs()->find( $job->id ), 'take_down' );
+		$this->assertArrayHasKey( '.maintenance', $this->maintenance_files(), 'the control: the file is still up' );
+		$this->assertTrue( \WPCheckpoint\Restore\Maintenance::held_in( $this->abspath ), 'the control: held, it does not lapse' );
+		$this->assertSame( 'carry_ask', Plugin::instance()->jobs()->find( $job->id )->cursor['phase'] ?? '', 'the control: at the question' );
+		// The next run comes after the deadline: the restored site is kept, whatever would have been answered. It dies
+		// once that is recorded, before the file is down: the file it leaves lapses.
+		$this->set( $job->id, array( 'committed_at' => time() - Undo::WINDOW_SECONDS - 60 ) );
+		$this->killed_at( Plugin::instance()->jobs()->find( $job->id ), 'done_recorded' );
+		$this->assertArrayHasKey( '.maintenance', $this->maintenance_files(), 'the control: the file is still up' );
+		$this->assertFalse( \WPCheckpoint\Restore\Maintenance::held_in( $this->abspath ), 'let go: visitors are let in once it lapses, with no run to come' );
+		$done = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( Job::COMPLETED, $done->status, (string) $done->last_error );
+		$this->assertSame( $after, $this->site(), 'the restored site stays' );
+		$this->assertSame( array(), $this->maintenance_files() );
+		$this->assertSame( array(), Plugin::instance()->jobs()->holding_site() );
+		$this->assertStringContainsString( 'The deadline to answer passed', Plugin::instance()->job_presenter()->log_tail( $done ) );
+	}
+
 	/**
 	 * The old options table's id no longer AUTO_INCREMENT: the carry back refuses it before it writes (not a failure
 	 * of the moment), in this process and in a child alike.
