@@ -358,7 +358,7 @@ final class RestoreStorageTest extends JobTestCase {
 		$this->assertSame( $b, Plugin::instance()->directories()->base(), 'the plugin goes on in the new directory' );
 	}
 
-	public function test_a_stored_directory_gone_under_a_dotted_spelling_is_replaced_and_its_restore_holds_nothing(): void {
+	public function test_a_restore_whose_own_directory_is_gone_under_a_dotted_spelling_does_not_hold_an_unreachable_one(): void {
 		$this->register( RestoreJob::ID, array( $this->counting_step( 'r', 5 ) ) );
 		$id       = $this->job_of( RestoreJob::ID );
 		$base     = Plugin::instance()->directories()->base();
@@ -378,14 +378,23 @@ final class RestoreStorageTest extends JobTestCase {
 			// unreachable one.
 			self::set( $id, array( 'storage_path' => dirname( $base ) . '/./' . basename( $base ) . '-gone-restore' ) );
 			$this->assertNotSame( '', ( new Directories() )->base(), 'its restore is gone: another directory is chosen' );
-			// The stored directory itself, the restore's own, positively gone under a dotted spelling.
-			$gone = $base . '/../' . basename( $base ) . '-gone-dir';
-			$remember( $gone );
-			self::set( $id, array( 'storage_path' => $gone ) );
-			$this->assertNotSame( '', ( new Directories() )->base(), 'gone: another directory is chosen' );
 		} finally {
 			\WPCheckpoint\Tests\Fixtures\Sandbox::remove( $box );
 		}
+	}
+
+	public function test_a_stored_directory_of_a_restore_gone_under_a_dotted_spelling_is_replaced(): void {
+		$this->register( RestoreJob::ID, array( $this->counting_step( 'r', 5 ) ) );
+		$id   = $this->job_of( RestoreJob::ID );
+		$base = Plugin::instance()->directories()->base();
+		// The stored directory, the restore's own, positively gone: ".." after what is there, then a name its parent
+		// lists nothing under.
+		$gone          = $base . '/../' . basename( $base ) . '-gone-dir';
+		$state         = Directories::load_state();
+		$state['path'] = $gone;
+		\WPCheckpoint\Support\Options::set( Directories::OPTION, $state );
+		self::set( $id, array( 'storage_path' => $gone ) );
+		$this->assertNotSame( '', ( new Directories() )->base(), 'gone: another directory is chosen' );
 	}
 
 	public function test_unfinished_jobs_are_read_from_the_table_and_an_unreadable_table_is_no_answer(): void {
