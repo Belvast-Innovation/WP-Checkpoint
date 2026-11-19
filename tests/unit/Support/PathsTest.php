@@ -262,9 +262,10 @@ final class PathsTest extends TestCase {
 
 	public function test_positively_gone_climbs_only_through_what_is_not_there(): void {
 		$this->assertTrue( Paths::positively_gone( $this->root . '/no-such/deeper/x' ), 'a whole missing tree: the nearest ancestor that exists lists without it' );
-		$this->assertFalse( Paths::positively_gone( $this->root . '/base/nothing/../sub' ), 'a ".." path is there once resolved: the lexical climb is no evidence' );
+		// ".." after what is not there: the file system resolves no such path (PathsDotsTest has the rest).
+		$this->assertFalse( Paths::positively_gone( $this->root . '/base/nothing/../sub' ), 'a lexical climb would be no evidence' );
 		$this->assertFalse( Paths::positively_gone( $this->root . '/base/nothing/../gone' ), 'nor for a path that is not there either' );
-		$this->assertFalse( Paths::positively_gone( $this->root . '/base/./nothing' ) );
+		$this->assertTrue( Paths::positively_gone( $this->root . '/base/./nothing' ), 'a "." is dropped' );
 		$this->assertFalse( Paths::positively_gone( $this->root . "/base/nothing\0x" ), 'a NUL byte: no answer from the file system' );
 		// Ancestors that could not be listed, up to a root that is there: no evidence.
 		$listings = array(
