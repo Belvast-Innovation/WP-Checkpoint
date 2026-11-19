@@ -565,11 +565,12 @@ final class LoaderRealSiteTest extends WP_UnitTestCase {
 			// No directory chosen yet: this process would have to make one, at a path with ".." in it, which
 			// WordPress (wp_mkdir_p()) refuses.
 			self::restore_state( null );
-			$seen = $this->storage_seen( $dotted );
+			$before = StorageDirs::listing(); // With what this process made for itself meanwhile, if anything.
+			$seen   = $this->storage_seen( $dotted );
 			$this->assertSame( '', $seen['base'] );
 			$this->assertStringContainsString( 'WordPress makes no directory at a path with a ".." segment in it', $seen['error'] );
 			$this->assertStringContainsString( 'Run the command once with a path without ".."', $seen['error'], 'and what to do' );
-			$this->assertSame( $storage, StorageDirs::listing(), 'nothing was made' );
+			$this->assertSame( $before, StorageDirs::listing(), 'nothing was made' );
 			$this->assertNull( self::stored_state(), 'nothing was stored' );
 			// As it says: made by a process with a path without "..", it is used by this one too.
 			$plain = $this->storage_seen( ABSPATH );
