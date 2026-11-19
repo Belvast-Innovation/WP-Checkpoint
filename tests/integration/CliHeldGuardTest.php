@@ -164,7 +164,7 @@ final class CliHeldGuardTest extends WP_UnitTestCase {
 			};
 			$said = implode( "\n", Plugin::instance()->half_swapped_warnings( $none ) );
 			$this->assertStringContainsString( 'A restore\'s data file says the site is held', $said );
-			$this->assertStringContainsString( 'No restore holds the site now; check with wp wpcheckpoint job list, and if none does, remove that file.', $said );
+			$this->assertStringContainsString( 'No restore holds the site now; check with wp wpcheckpoint job list, and if none does, remove .wpcheckpoint-maintenance.php.', $said );
 			$this->assertStringNotContainsString( 'job release', $said );
 			$this->assertStringNotContainsString( 'maintenance file is up', $said, 'not the words of a .maintenance in place' );
 			$one  = static function (): array {
@@ -174,7 +174,7 @@ final class CliHeldGuardTest extends WP_UnitTestCase {
 			$fail = static function (): array {
 				throw new \RuntimeException( 'not read' );
 			};
-			$this->assertStringContainsString( 'The jobs could not be read: do not remove that file', implode( "\n", Plugin::instance()->half_swapped_warnings( $fail ) ) );
+			$this->assertStringContainsString( 'The jobs could not be read: do not remove .wpcheckpoint-maintenance.php until', implode( "\n", Plugin::instance()->half_swapped_warnings( $fail ) ) );
 
 			// The control: the same command once the site is not held runs the event.
 			RealAbspath::remove( Maintenance::DATA );

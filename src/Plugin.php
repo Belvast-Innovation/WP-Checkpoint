@@ -275,9 +275,9 @@ final class Plugin {
 			if ( array() !== $ids ) {
 				$out[] = __( 'A restore\'s data file says the site is held and does not lapse (.wpcheckpoint-maintenance.php in the WordPress directory), while .maintenance there is not this plugin\'s maintenance code (deleted, replaced, or not readable): WP-CLI runs only wp wpcheckpoint commands here until the restore above ends.', 'wp-checkpoint' );
 			} elseif ( $read ) {
-				$out[] = __( 'A restore\'s data file says the site is held and does not lapse (.wpcheckpoint-maintenance.php in the WordPress directory), while .maintenance there is not this plugin\'s maintenance code (deleted, replaced, or not readable): WP-CLI runs only wp wpcheckpoint commands here. No restore holds the site now; check with wp wpcheckpoint job list, and if none does, remove that file.', 'wp-checkpoint' );
+				$out[] = __( 'A restore\'s data file says the site is held and does not lapse (.wpcheckpoint-maintenance.php in the WordPress directory), while .maintenance there is not this plugin\'s maintenance code (deleted, replaced, or not readable): WP-CLI runs only wp wpcheckpoint commands here. No restore holds the site now; check with wp wpcheckpoint job list, and if none does, remove .wpcheckpoint-maintenance.php.', 'wp-checkpoint' );
 			} else {
-				$out[] = __( 'A restore\'s data file says the site is held and does not lapse (.wpcheckpoint-maintenance.php in the WordPress directory), while .maintenance there is not this plugin\'s maintenance code (deleted, replaced, or not readable): WP-CLI runs only wp wpcheckpoint commands here. The jobs could not be read: do not remove that file until wp wpcheckpoint job list shows no restore that holds the site.', 'wp-checkpoint' );
+				$out[] = __( 'A restore\'s data file says the site is held and does not lapse (.wpcheckpoint-maintenance.php in the WordPress directory), while .maintenance there is not this plugin\'s maintenance code (deleted, replaced, or not readable): WP-CLI runs only wp wpcheckpoint commands here. The jobs could not be read: do not remove .wpcheckpoint-maintenance.php until wp wpcheckpoint job list shows no restore that holds the site.', 'wp-checkpoint' );
 			}
 		} elseif ( $file_up ) {
 			$owner = array() === $ids && $read ? $this->ended_owner() : null;
