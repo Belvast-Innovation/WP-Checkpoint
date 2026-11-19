@@ -571,7 +571,7 @@ final class LoaderRealSiteTest extends WP_UnitTestCase {
 			$this->assertStringContainsString( 'WordPress makes no directory at a path with a ".." segment in it', $seen['error'] );
 			$this->assertStringContainsString( 'Run the command once with a path without ".."', $seen['error'], 'and what to do' );
 			$this->assertSame( $before, StorageDirs::listing(), 'nothing was made' );
-			$this->assertNull( self::stored_state(), 'nothing was stored' );
+			$this->assertSame( array( '', '' ), array( $seen['path'], $seen['token'] ), 'no directory was chosen or stored' );
 			// As it says: made by a process with a path without "..", it is used by this one too.
 			$plain = $this->storage_seen( ABSPATH );
 			$this->assertNotSame( '', $plain['base'], $plain['error'] );
