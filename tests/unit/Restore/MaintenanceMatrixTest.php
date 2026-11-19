@@ -2,6 +2,7 @@
 
 namespace WPCheckpoint\Tests\Unit\Restore;
 
+use PHPUnit\Framework\Assert;
 use WPCheckpoint\Cli\HeldGuard;
 use WPCheckpoint\Restore\Loader;
 use WPCheckpoint\Restore\Maintenance;
@@ -39,6 +40,23 @@ final class MaintenanceMatrixTest extends TestCase {
 	/** @var int States built. */
 	private $built = 0;
 
+	/** @var string How the directory is spelled in this test (spellings()). */
+	private $spelling = 'plain';
+
+	/**
+	 * The spellings every state is run under: WP-CLI's --path may carry dot segments, which ABSPATH then keeps.
+	 *
+	 * @return array<string, array{0: string}>
+	 */
+	public function spellings(): array {
+		return array(
+			'plain'                 => array( 'plain' ),
+			'a dot'                 => array( 'a dot' ),
+			'two dots'              => array( 'two dots' ),
+			'two dots after a link' => array( 'two dots after a link' ),
+		);
+	}
+
 	protected function set_up(): void {
 		parent::set_up();
 		if ( ! MaintenanceStates::can_hide() ) {
@@ -66,6 +84,16 @@ final class MaintenanceMatrixTest extends TestCase {
 	 */
 	private function state( string $m, string $d ): array {
 		$dirs = MaintenanceStates::build( $this->root . '/' . ( ++$this->built ), $m, $d, self::MARK, 3600 );
+		// The same directory under another spelling, for the code under test and for the fixture alike.
+		if ( 'a dot' === $this->spelling ) {
+			$dirs['site'] = dirname( $dirs['site'] ) . '/./' . basename( $dirs['site'] );
+		} elseif ( 'two dots' === $this->spelling ) {
+			$dirs['site'] = $dirs['site'] . '/../' . basename( $dirs['site'] );
+		} elseif ( 'two dots after a link' === $this->spelling ) {
+			$link = dirname( $dirs['site'] ) . '/link-to-site';
+			Assert::assertTrue( symlink( $dirs['site'], $link ) );
+			$dirs['site'] = $link . '/../' . basename( $dirs['site'] );
+		}
 		return $dirs + array(
 			'file'  => new Maintenance( $dirs['site'], self::MARK ),
 			'truth' => MaintenanceStates::truth( $m, $d ),
@@ -100,7 +128,13 @@ final class MaintenanceMatrixTest extends TestCase {
 		return MaintenanceStates::digest( $site . '/' . Maintenance::FILE ) . ' | ' . MaintenanceStates::digest( $site . '/' . Maintenance::DATA );
 	}
 
-	public function test_the_fixture_tells_what_the_fixed_codes_would_answer(): void {
+	/**
+	 * @dataProvider spellings
+	 *
+	 * @param string $spelling How the directory is spelled.
+	 */
+	public function test_the_fixture_tells_what_the_fixed_codes_would_answer( string $spelling ): void {
+		$this->spelling = $spelling;
 		// The controls of the oracle itself: it sees a held site by each of the three, and none where there is none.
 		$held = $this->state( 'code', 'held64' );
 		$this->assertSame( 'code', $this->held_for_us( $held ) );
@@ -124,7 +158,13 @@ final class MaintenanceMatrixTest extends TestCase {
 		$this->assertSame( Maintenance::DATA_FORM, MaintenanceStates::pattern_of( Maintenance::CODE ) );
 	}
 
-	public function test_every_reading_of_the_two_files_is_one_of_three_states(): void {
+	/**
+	 * @dataProvider spellings
+	 *
+	 * @param string $spelling How the directory is spelled.
+	 */
+	public function test_every_reading_of_the_two_files_is_one_of_three_states( string $spelling ): void {
+		$this->spelling = $spelling;
 		foreach ( MaintenanceStates::all() as $pair ) {
 			$state = $this->state( $pair[0], $pair[1] );
 			$truth = $state['truth'];
@@ -141,7 +181,13 @@ final class MaintenanceMatrixTest extends TestCase {
 		$this->assertSame( 90, $this->built );
 	}
 
-	public function test_whether_a_restore_holds_the_site_is_one_judgment_that_no_fixed_code_answers_past(): void {
+	/**
+	 * @dataProvider spellings
+	 *
+	 * @param string $spelling How the directory is spelled.
+	 */
+	public function test_whether_a_restore_holds_the_site_is_one_judgment_that_no_fixed_code_answers_past( string $spelling ): void {
+		$this->spelling = $spelling;
 		$seen = array();
 		foreach ( MaintenanceStates::all() as $pair ) {
 			$state = $this->state( $pair[0], $pair[1] );
@@ -205,7 +251,13 @@ final class MaintenanceMatrixTest extends TestCase {
 		);
 	}
 
-	public function test_a_job_is_taken_on_only_by_its_own_files_read_and_always_then(): void {
+	/**
+	 * @dataProvider spellings
+	 *
+	 * @param string $spelling How the directory is spelled.
+	 */
+	public function test_a_job_is_taken_on_only_by_its_own_files_read_and_always_then( string $spelling ): void {
+		$this->spelling = $spelling;
 		$taken = 0;
 		foreach ( MaintenanceStates::all() as $pair ) {
 			list( $m, $d ) = $pair;
@@ -219,7 +271,13 @@ final class MaintenanceMatrixTest extends TestCase {
 		$this->assertSame( 15, $taken, 'the control: the states in which it is taken on' );
 	}
 
-	public function test_once_a_release_returns_nothing_answers_as_held_for_the_restore_and_it_waits_where_a_file_cannot_be_told(): void {
+	/**
+	 * @dataProvider spellings
+	 *
+	 * @param string $spelling How the directory is spelled.
+	 */
+	public function test_once_a_release_returns_nothing_answers_as_held_for_the_restore_and_it_waits_where_a_file_cannot_be_told( string $spelling ): void {
+		$this->spelling = $spelling;
 		$said = array();
 		foreach ( MaintenanceStates::all() as $pair ) {
 			list( $m, $d ) = $pair;
@@ -271,7 +329,13 @@ final class MaintenanceMatrixTest extends TestCase {
 		);
 	}
 
-	public function test_once_a_take_down_says_gone_nothing_answers_as_held_for_the_restore_and_nothing_of_anyone_elses_is_deleted(): void {
+	/**
+	 * @dataProvider spellings
+	 *
+	 * @param string $spelling How the directory is spelled.
+	 */
+	public function test_once_a_take_down_says_gone_nothing_answers_as_held_for_the_restore_and_nothing_of_anyone_elses_is_deleted( string $spelling ): void {
+		$this->spelling = $spelling;
 		$gone = 0;
 		$left = 0;
 		foreach ( MaintenanceStates::all() as $pair ) {
@@ -328,7 +392,13 @@ final class MaintenanceMatrixTest extends TestCase {
 		$this->assertSame( 3, $left, 'the control: the code beside what is no data file, in each of its three kinds' );
 	}
 
-	public function test_a_take_down_keeps_a_runtime_it_cannot_read_while_another_restores_data_file_stands(): void {
+	/**
+	 * @dataProvider spellings
+	 *
+	 * @param string $spelling How the directory is spelled.
+	 */
+	public function test_a_take_down_keeps_a_runtime_it_cannot_read_while_another_restores_data_file_stands( string $spelling ): void {
+		$this->spelling = $spelling;
 		$runtime = '/' . Maintenance::RUNTIME;
 		try {
 			// Another restore's held data file left without its .maintenance, and a runtime that cannot be read: it may
@@ -354,7 +424,13 @@ final class MaintenanceMatrixTest extends TestCase {
 		}
 	}
 
-	public function test_a_put_up_writes_nothing_where_the_place_is_someone_elses_or_cannot_be_told(): void {
+	/**
+	 * @dataProvider spellings
+	 *
+	 * @param string $spelling How the directory is spelled.
+	 */
+	public function test_a_put_up_writes_nothing_where_the_place_is_someone_elses_or_cannot_be_told( string $spelling ): void {
+		$this->spelling = $spelling;
 		$put = 0;
 		foreach ( MaintenanceStates::all() as $pair ) {
 			list( $m, $d ) = $pair;
