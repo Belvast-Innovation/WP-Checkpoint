@@ -378,6 +378,108 @@ final class SwapMaintenanceModeTest extends SwapTestCase {
 		}
 	}
 
+	/**
+	 * Run wp on the test site with its --path spelled as given: exit status, standard output, standard error.
+	 *
+	 * @param string $path    The WordPress directory, as WP-CLI is told it.
+	 * @param string ...$args Arguments.
+	 * @return array{0: int, 1: string, 2: string}
+	 */
+	private function wp_at( string $path, string ...$args ): array {
+		$wp = trim( (string) shell_exec( 'command -v wp' ) );
+		if ( '' === $wp ) {
+			$this->markTestSkipped( 'Needs WP-CLI (wp) on the PATH.' );
+		}
+		$pipes   = array();
+		$process = proc_open( array_merge( array( $wp, '--path=' . $path ), $args ), array( 1 => array( 'pipe', 'w' ), 2 => array( 'pipe', 'w' ) ), $pipes );
+		$this->assertIsResource( $process );
+		$out = (string) stream_get_contents( $pipes[1] );
+		$err = (string) stream_get_contents( $pipes[2] );
+		fclose( $pipes[1] );
+		fclose( $pipes[2] );
+		return array( proc_close( $process ), $out, $err );
+	}
+
+	/**
+	 * @dataProvider dotted_paths
+	 *
+	 * @param string $path The test site's WordPress directory, spelled with a dot segment.
+	 */
+	public function test_wp_cli_started_with_a_dotted_path_abandons_a_job_and_releases_its_file_as_with_any_path( string $path ): void {
+		global $wpdb;
+		$job = $this->at_swap();
+		$this->killed_at( $job, 'dir_aside_recorded' );
+		$job      = Plugin::instance()->jobs()->find( $job->id );
+		$file     = new Maintenance( $this->abspath, (string) $job->site_mark );
+		$plan     = $wpdb->base_prefix . \WPCheckpoint\Restore\SwapPlan::TABLE;
+		$recorded = (string) $wpdb->get_var( $wpdb->prepare( "SELECT live FROM `{$plan}` WHERE job_id = %d AND kind = 'site'", $job->id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the plan table.
+		$copy     = $this->sandbox . '/copy';
+		mkdir( $copy . '/wp-content/uploads', 0755, true );
+		\WPCheckpoint\Tests\Fixtures\ActivePlugin::on();
+		try {
+			$this->assertTrue( $file->is_held(), 'the control: the site here is behind its held file' );
+			// Managed by another installation, its plan written for another WordPress directory: not this site's as
+			// far as can be told from here, so it can be given up here.
+			$wpdb->update( JobRepository::table(), array( 'held_by' => 'ffffffffffff' ), array( 'id' => $job->id ) );
+			$wpdb->query( $wpdb->prepare( "UPDATE `{$plan}` SET live = %s WHERE job_id = %d AND kind = 'site'", (string) realpath( $copy ), $job->id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the plan table.
+			$wpdb->query( 'COMMIT' );
+			$see  = ( new \WPCheckpoint\Jobs\HeldSite() )->assess( Plugin::instance()->jobs()->find( $job->id ) );
+			$code = \WPCheckpoint\Jobs\HeldSite::code( \WPCheckpoint\Jobs\HeldSite::ABANDON, Plugin::instance()->jobs()->find( $job->id ), $see['recorded'] );
+
+			list( $status, $out, $err ) = $this->wp_at( $path, 'eval', 'echo ABSPATH;' );
+			$this->assertSame( 1, $status, "the control: held, the guard refuses another command in a process with this path.\nstdout: {$out}\nstderr: {$err}" );
+			$this->assertStringContainsString( 'A restore holds this site', $err );
+
+			list( $status, $out, $err ) = $this->wp_at( $path, 'wpcheckpoint', 'job', 'abandon', (string) $job->id, '--confirm=' . $code );
+			$this->assertSame( 0, $status, "abandoned.\nstdout: {$out}\nstderr: {$err}" );
+			$this->assertStringContainsString( 'was abandoned', $out . $err );
+			$this->assertSame( array(), RealAbspath::contents(), 'its maintenance file and data file were taken down here' );
+			$wpdb->query( 'COMMIT' );
+			$this->assertSame( Job::REASON_ABANDONED, $wpdb->get_var( $wpdb->prepare( 'SELECT failure_reason FROM ' . JobRepository::table() . ' WHERE id = %d', $job->id ) ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- the jobs table.
+
+			list( $status, $out, $err ) = $this->wp_at( $path, 'eval', 'echo ABSPATH;' );
+			$this->assertSame( 0, $status, "nothing holds the site here now: any command runs.\nstdout: {$out}\nstderr: {$err}" );
+			$this->assertSame( $path, $out, 'the control: WP-CLI kept the spelling in ABSPATH' );
+
+			// Its file is up here again (as a copy of the site's files would bring it): released, by the job it names.
+			$file->hold();
+			$this->assertTrue( Maintenance::held_in( $this->abspath ), 'the control: held again' );
+			$now                        = self::fresh( $job->id );
+			$code                       = \WPCheckpoint\Jobs\HeldSite::code( \WPCheckpoint\Jobs\HeldSite::RELEASE, $now, ( new \WPCheckpoint\Jobs\HeldSite() )->assess( $now )['recorded'] );
+			list( $status, $out, $err ) = $this->wp_at( $path, 'wpcheckpoint', 'job', 'release', (string) $job->id, '--confirm=' . $code );
+			$this->assertSame( 0, $status, "released.\nstdout: {$out}\nstderr: {$err}" );
+			$this->assertStringContainsString( 'maintenance file was taken down', $out . $err );
+			$this->assertSame( array(), RealAbspath::contents(), 'neither file is left' );
+		} finally {
+			$wpdb->query( $wpdb->prepare( "UPDATE `{$plan}` SET live = %s WHERE job_id = %d AND kind = 'site'", $recorded, $job->id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the plan table.
+			$wpdb->query( 'COMMIT' );
+			$file->remove();
+			\WPCheckpoint\Tests\Fixtures\ActivePlugin::off();
+		}
+	}
+
+	/**
+	 * The test site's WordPress directory as WP-CLI's --path may spell it, with dot segments.
+	 *
+	 * @return array<string, array{0: string}>
+	 */
+	public function dotted_paths(): array {
+		$site = rtrim( ABSPATH, '/' );
+		return array(
+			'a "." segment'  => array( dirname( $site ) . '/./' . basename( $site ) . '/' ),
+			'a ".." segment' => array( $site . '/wp-includes/../' ),
+		);
+	}
+
+	/**
+	 * A job's row as the database has it now, past this process's cache.
+	 */
+	private static function fresh( int $id ): Job {
+		$GLOBALS['wpdb']->query( 'COMMIT' );
+		wp_cache_flush();
+		return Plugin::instance()->jobs()->find( $id );
+	}
+
 	public function test_the_advice_to_remove_a_held_file_needs_the_jobs_read(): void {
 		$file = new Maintenance( $this->abspath, Maintenance::new_mark() );
 		try {
