@@ -12,13 +12,17 @@ use Yoast\PHPUnitPolyfills\TestCases\TestCase;
  * Scanned (the plugin's code: src/, restore/ and the entry files, by token, so comments and other strings do not count):
  * - every call of it is Paths::positively_gone(), and every file that calls it (or hands it on as a callable) is in
  *   CALLERS with how often: a reader that is new, or gone, fails here and is looked at;
- * - no caller resolves the path first (realpath(), Paths::real(), OwnerMarker::real() in the argument): a caller's own
+ * - no call resolves the path in its argument (realpath(), Paths::real(), OwnerMarker::real() there): a caller's own
  *   resolution is a second place that decides what the path is, and where it fails the caller would have to choose
  *   between the spelling and nothing, which is the function's to say;
  * - no other function or method of that name is declared.
  *
- * Not seen by a scan: a reader that takes a failed lstat() or file_exists() for "not there" without asking at all.
- * That is the convention the callers follow (a failed look is no evidence), kept by their own tests.
+ * Not seen by this scan: a path resolved in a statement before the call and handed over in a variable
+ * (LinkedTargets::resolve() asks about a parent it resolved, which is what it means to ask); the function
+ * reached through a callable string that names the class (call_user_func( '…Paths::positively_gone' ), a string put
+ * together), which the plugin's code does not do; and a reader that takes a failed lstat() or file_exists() for "not
+ * there" without asking at all, which is the convention the callers follow (a failed look is no evidence), kept by
+ * their own tests.
  */
 final class PositivelyGoneUsageTest extends TestCase {
 
@@ -78,7 +82,11 @@ final class PositivelyGoneUsageTest extends TestCase {
 				$out['problems'][] = 'line ' . $line . ': another function of the name is declared';
 				continue;
 			}
-			$class = $i > 1 ? $text( $tokens[ $i - 2 ] ) : '';
+			// The class as written, with its namespace where one is given (tokens apart before PHP 8, one token since).
+			$class = '';
+			for ( $k = $i - 2; $k >= 0 && is_array( $tokens[ $k ] ) && in_array( token_name( $tokens[ $k ][0] ), array( 'T_STRING', 'T_NS_SEPARATOR', 'T_NAME_QUALIFIED', 'T_NAME_FULLY_QUALIFIED', 'T_STATIC', 'T_VARIABLE' ), true ); $k-- ) {
+				$class = $tokens[ $k ][1] . $class;
+			}
 			if ( ! is_array( $before ) || T_DOUBLE_COLON !== $before[0] || ! in_array( ltrim( $class, '\\' ), array( 'Paths', 'WPCheckpoint\\Support\\Paths' ), true ) ) {
 				$out['problems'][] = 'line ' . $line . ': not called as Paths::positively_gone()';
 				continue;
@@ -121,6 +129,8 @@ final class PositivelyGoneUsageTest extends TestCase {
 				'<?php Paths::positively_gone( (string) Paths::real( $dir ) );' => 'the path is resolved before it is asked about (real())',
 				'<?php Paths::positively_gone( rtrim( OwnerMarker::real( $dir ), "/" ) );' => 'the path is resolved before it is asked about (real())',
 				'<?php Other::positively_gone( $dir );'            => 'not called as Paths::positively_gone()',
+				'<?php Other\\Paths::positively_gone( $dir );'      => 'not called as Paths::positively_gone()',
+				'<?php static::positively_gone( $dir );'           => 'not called as Paths::positively_gone()',
 				'<?php $this->positively_gone( $dir );'            => 'not called as Paths::positively_gone()',
 				'<?php positively_gone( $dir );'                   => 'not called as Paths::positively_gone()',
 				'<?php function positively_gone( $dir ) {}'        => 'another function of the name is declared',
