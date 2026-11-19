@@ -471,34 +471,116 @@ final class LoaderRealSiteTest extends WP_UnitTestCase {
 		}
 	}
 
-	public function test_draft_storage_observations(): void {
+	/**
+	 * What a WP-CLI process on the test site takes for its storage directory: the directory (base), why none
+	 * (error), and from the stored state the path, the token and whether a copy was detected.
+	 *
+	 * @param string $path The WordPress directory, as WP-CLI is told it.
+	 * @return array<string, mixed>
+	 */
+	private function storage_seen( string $path ): array {
+		$see                        = '$d = \WPCheckpoint\Plugin::instance()->directories(); $b = $d->base(); $s = \WPCheckpoint\Support\Directories::load_state(); echo json_encode( array( "abspath" => ABSPATH, "base" => $b, "error" => $d->last_error(), "path" => (string) ( $s["path"] ?? "" ), "token" => (string) ( $s["token"] ?? "" ), "clone" => ! empty( $s["clone_detected"] ) ) );';
+		list( $status, $out, $err ) = $this->wp_at( $path, 'eval', $see );
+		$this->assertSame( 0, $status, "the process ran.\nstdout: {$out}\nstderr: {$err}" );
+		$seen = json_decode( $out, true );
+		$this->assertIsArray( $seen, $out . $err );
+		$this->assertSame( $path, $seen['abspath'], 'the control: WP-CLI kept the spelling in ABSPATH' );
+		return $seen;
+	}
+
+	/**
+	 * A job made by a WP-CLI process started with $made, run to its end by one started with $run.
+	 *
+	 * @param string $made The path of the process that makes it.
+	 * @param string $run  The path of the process that runs it.
+	 * @param int[]  $ids  The jobs made (by reference, for the test's clean-up).
+	 * @return void
+	 */
+	private function made_and_run( string $made, string $run, array &$ids ): void {
+		global $wpdb;
+		list( $status, $out, $err ) = $this->wp_at( $made, 'eval', 'echo \WPCheckpoint\Plugin::instance()->jobs()->create( \WPCheckpoint\Jobs\EstimateJob::ID, 0 )->id;' );
+		$this->assertSame( 0, $status, "a job is made.\nstdout: {$out}\nstderr: {$err}" );
+		$this->assertSame( 1, preg_match( '/\A[0-9]+\z/', trim( $out ) ), $out . $err );
+		$id                         = (int) trim( $out );
+		$ids[]                      = $id;
+		list( $status, $out, $err ) = $this->wp_at( $run, 'wpcheckpoint', 'job', 'run', (string) $id, '--wait' );
+		$this->assertSame( 0, $status, "job run runs.\nstdout: {$out}\nstderr: {$err}" );
+		$wpdb->query( 'COMMIT' );
+		$this->assertSame( Job::COMPLETED, $wpdb->get_var( $wpdb->prepare( 'SELECT status FROM ' . JobRepository::table() . ' WHERE id = %d', $id ) ), "the job ran to its end.\nstdout: {$out}\nstderr: {$err}" ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- the jobs table.
+	}
+
+	public function test_a_storage_directory_chosen_by_a_process_with_a_dotted_path_and_by_one_without_is_one_for_both(): void {
+		global $wpdb;
 		$storage = StorageDirs::listing();
 		$state   = self::stored_state();
-		$see     = 'try { $d = \WPCheckpoint\Plugin::instance()->directories(); $b = $d->base(); $s = \WPCheckpoint\Support\Directories::load_state(); echo json_encode( array( "abspath" => ABSPATH, "content" => WP_CONTENT_DIR, "base" => $b, "error" => $d->last_error(), "path" => $s["path"] ?? null, "token" => $s["token"] ?? null, "state_abspath" => $s["abspath"] ?? null, "clone" => ! empty( $s["clone_detected"] ) ) ); } catch ( \Throwable $e ) { echo get_class( $e ), ": ", $e->getMessage(); }';
-		$say     = static function ( string $line ): void {
-			fwrite( STDERR, "\nDRAFT " . $line );
-		};
+		$ids     = array();
+		$dotted  = self::dotted_paths()['a "." segment'];
 		ActivePlugin::on();
 		try {
-			$say( 'stored before: ' . var_export( $state, true ) );
-			$say( 'dirs before: ' . implode( ', ', $storage ) );
-			foreach ( self::dotted_paths() as $what => $path ) {
-				self::restore_state( null );
-				$say( "[$what] state deleted, dotted first: " . implode( ' | ', $this->wp_at( $path, 'eval', $see ) ) );
-				$say( "[$what] then plain: " . implode( ' | ', $this->wp_at( ABSPATH, 'eval', $see ) ) );
-				$say( "[$what] then dotted again: " . implode( ' | ', $this->wp_at( $path, 'eval', $see ) ) );
-				$say( "[$what] dirs: " . implode( ', ', StorageDirs::listing() ) );
-				self::restore_state( null );
-				$say( "[$what] state deleted, plain first: " . implode( ' | ', $this->wp_at( ABSPATH, 'eval', $see ) ) );
-				$say( "[$what] then dotted: " . implode( ' | ', $this->wp_at( $path, 'eval', $see ) ) );
+			// Chosen by the process with the dotted path: the state and the job's row carry the path as it spelled it.
+			self::restore_state( null );
+			$first = $this->storage_seen( $dotted );
+			$this->assertNotSame( '', $first['base'], $first['error'] );
+			$this->assertStringContainsString( '/./', $first['path'], 'the control: the stored path has the dot segment' );
+			$this->made_and_run( $dotted, ABSPATH, $ids );
+			$this->assertStringContainsString( '/./', (string) $wpdb->get_var( $wpdb->prepare( 'SELECT storage_path FROM ' . JobRepository::table() . ' WHERE id = %d', $ids[0] ) ), 'the control: so has the job\'s row' ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- the jobs table.
+			$plain = $this->storage_seen( ABSPATH );
+			$again = $this->storage_seen( $dotted );
+			foreach ( array( 'the plain path' => $plain, 'the dotted path again' => $again ) as $who => $seen ) {
+				$this->assertSame( array( $first['base'], $first['token'], false ), array( $seen['base'], $seen['token'], $seen['clone'] ), $who . ': the same directory and token, no copy detected: ' . $seen['error'] );
 			}
-			$say( "done\n" );
+			$this->made_and_run( ABSPATH, $dotted, $ids );
+
+			// Chosen by the process with the plain path, then used by one with each dotted spelling.
+			self::restore_state( null );
+			$first = $this->storage_seen( ABSPATH );
+			$this->assertNotSame( '', $first['base'], $first['error'] );
+			foreach ( self::dotted_paths() as $what => $path ) {
+				$seen = $this->storage_seen( $path );
+				$this->assertSame( array( $first['base'], $first['token'], false ), array( $seen['base'], $seen['token'], $seen['clone'] ), $what . ': the same directory and token, no copy detected: ' . $seen['error'] );
+				$this->made_and_run( ABSPATH, $path, $ids );
+				$this->made_and_run( $path, ABSPATH, $ids );
+			}
+			$last = $this->storage_seen( ABSPATH );
+			$this->assertSame( array( $first['base'], $first['token'], false ), array( $last['base'], $last['token'], $last['clone'] ) );
+		} finally {
+			foreach ( $ids as $id ) {
+				$wpdb->delete( JobRepository::table(), array( 'id' => $id ) );
+			}
+			delete_option( Estimate::OPTION );
+			delete_site_option( Estimate::OPTION );
+			$wpdb->query( 'COMMIT' );
+			self::restore_state( $state );
+			StorageDirs::remove_made_since( $storage );
+			ActivePlugin::off();
+		}
+	}
+
+	public function test_a_process_whose_path_has_two_dots_makes_no_storage_directory_and_says_why(): void {
+		$storage = StorageDirs::listing();
+		$state   = self::stored_state();
+		$dotted  = self::dotted_paths()['a ".." segment'];
+		ActivePlugin::on();
+		try {
+			// No directory chosen yet: this process would have to make one, at a path with ".." in it, which
+			// WordPress (wp_mkdir_p()) refuses.
+			self::restore_state( null );
+			$seen = $this->storage_seen( $dotted );
+			$this->assertSame( '', $seen['base'] );
+			$this->assertStringContainsString( 'WordPress makes no directory at a path with a ".." segment in it', $seen['error'] );
+			$this->assertStringContainsString( 'Run the command once with a path without ".."', $seen['error'], 'and what to do' );
+			$this->assertSame( $storage, StorageDirs::listing(), 'nothing was made' );
+			$this->assertNull( self::stored_state(), 'nothing was stored' );
+			// As it says: made by a process with a path without "..", it is used by this one too.
+			$plain = $this->storage_seen( ABSPATH );
+			$this->assertNotSame( '', $plain['base'], $plain['error'] );
+			$again = $this->storage_seen( $dotted );
+			$this->assertSame( array( $plain['base'], $plain['token'], '' ), array( $again['base'], $again['token'], $again['error'] ) );
 		} finally {
 			self::restore_state( $state );
 			StorageDirs::remove_made_since( $storage );
 			ActivePlugin::off();
 		}
-		$this->assertTrue( true );
 	}
 
 	public function test_with_the_loader_up_and_the_maintenance_file_deleted_wp_cli_shows_and_runs_a_job_as_ever(): void {
