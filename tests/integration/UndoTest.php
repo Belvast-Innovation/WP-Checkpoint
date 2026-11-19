@@ -883,7 +883,24 @@ final class UndoTest extends SwapTestCase {
 		$this->retype( $job );
 		$told = $this->actions()->undo( $job->id, '' );
 		$this->assertTrue( $this->actions()->undo( $job->id, $told['code'] )['ok'] );
+		$old = $this->old_options( $job );
 		$this->break_old_options( $job );
+		try {
+			$this->died_taking_down_then_kept_at_the_deadline( $job, $after );
+		} finally {
+			// The table the test changed, wherever it is by now, as it was.
+			global $wpdb;
+			$wpdb->query( 'COMMIT' );
+			$name = array() === $wpdb->get_col( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $old ) ) ) ? $wpdb->base_prefix . 'options' : $old;
+			$wpdb->query( "ALTER TABLE `{$name}` MODIFY option_id bigint(20) unsigned NOT NULL AUTO_INCREMENT" );
+		}
+	}
+
+	/**
+	 * @param Job                  $job   The undo, claimed, its carry back failing.
+	 * @param array<string, mixed> $after The restored site.
+	 */
+	private function died_taking_down_then_kept_at_the_deadline( Job $job, array $after ): void {
 		// The run dies taking the maintenance file down to ask: the file stays, held, and nothing is asked yet.
 		$this->killed_at( Plugin::instance()->jobs()->find( $job->id ), 'take_down' );
 		$this->assertArrayHasKey( '.maintenance', $this->maintenance_files(), 'the control: the file is still up' );

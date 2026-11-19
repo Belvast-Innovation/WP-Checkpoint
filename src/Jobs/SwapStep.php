@@ -3149,6 +3149,10 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 					$cursor['post'] = 'exit';
 					break;
 				case 'exit':
+					// Let go first: an undo given up comes here with the file still held when a run died taking it down
+					// to ask (carry_question()), and what a run that dies from here on leaves must lapse. Let go
+					// before (the "release" above), this changes nothing.
+					$this->release( $context, $this->maintenance( $cursor ) );
 					// Again: requests that came while a stopped run waited may have cached the restored options before
 					// the writes above.
 					$this->flush( $context );
