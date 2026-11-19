@@ -315,10 +315,21 @@ final class LoaderRealSiteTest extends WP_UnitTestCase {
 	 * @return array{0: int, 1: string, 2: string}
 	 */
 	private function wp( string ...$args ): array {
+		return $this->wp_at( ABSPATH, ...$args );
+	}
+
+	/**
+	 * Run wp on the test site with its --path spelled as given: exit status, standard output, standard error.
+	 *
+	 * @param string $path    The WordPress directory, as WP-CLI is told it.
+	 * @param string ...$args Arguments.
+	 * @return array{0: int, 1: string, 2: string}
+	 */
+	private function wp_at( string $path, string ...$args ): array {
 		$wp = trim( (string) shell_exec( 'command -v wp' ) );
 		$this->assertNotSame( '', $wp, 'WP-CLI (wp) is on the PATH of the test site\'s container' );
 		$pipes   = array();
-		$process = proc_open( array_merge( array( $wp, '--path=' . ABSPATH ), $args ), array( 1 => array( 'pipe', 'w' ), 2 => array( 'pipe', 'w' ) ), $pipes );
+		$process = proc_open( array_merge( array( $wp, '--path=' . $path ), $args ), array( 1 => array( 'pipe', 'w' ), 2 => array( 'pipe', 'w' ) ), $pipes );
 		$this->assertIsResource( $process );
 		$out = (string) stream_get_contents( $pipes[1] );
 		$err = (string) stream_get_contents( $pipes[2] );
@@ -363,6 +374,89 @@ final class LoaderRealSiteTest extends WP_UnitTestCase {
 			null === $was ? $wpdb->delete( $wpdb->options, $where ) : $wpdb->update( $wpdb->options, array( 'option_value' => $was ), $where );
 		}
 		$wpdb->query( 'COMMIT' );
+	}
+
+	/**
+	 * The test site's WordPress directory as WP-CLI's --path may spell it, with dot segments.
+	 *
+	 * @return array<string, string>
+	 */
+	private static function dotted_paths(): array {
+		$site = rtrim( ABSPATH, '/' );
+		return array(
+			'a "." segment'  => dirname( $site ) . '/./' . basename( $site ) . '/',
+			'a ".." segment' => $site . '/wp-includes/../',
+		);
+	}
+
+	public function test_a_wp_cli_process_whose_path_has_dot_segments_puts_up_lets_go_and_takes_down_as_any_other(): void {
+		$mark = Maintenance::new_mark();
+		// The processes take --skip-plugins and load the plugin's classes themselves, to call the methods as they are:
+		// with the plugin loaded and the site held, WP-CLI runs no eval (Cli\HeldGuard).
+		$pre   = 'spl_autoload_register( function ( $c ) { if ( 0 === strpos( $c, "WPCheckpoint\\\\" ) ) { $f = WP_PLUGIN_DIR . "/wp-checkpoint/src/" . str_replace( "\\\\", "/", substr( $c, 13 ) ) . ".php"; if ( is_file( $f ) ) { require $f; } } } ); $f = new \WPCheckpoint\Restore\Maintenance( ABSPATH, ' . var_export( $mark, true ) . ' ); echo "ABSPATH=", ABSPATH, "\n";';
+		$run   = function ( string $path, string $code ) use ( $pre ): string {
+			list( $status, $out, $err ) = $this->wp_at( $path, '--skip-plugins', 'eval', $pre . $code );
+			$this->assertSame( 0, $status, "the process ran.\nstdout: {$out}\nstderr: {$err}" );
+			return $out;
+		};
+		$clear = static function (): void {
+			foreach ( RealMuPlugins::listing() as $left ) {
+				RealMuPlugins::remove( basename( $left ) );
+			}
+			foreach ( RealAbspath::listing() as $left ) {
+				RealAbspath::remove( basename( $left ) );
+			}
+		};
+		$files = static function (): array {
+			clearstatcache();
+			$names = array_keys( RealAbspath::contents() );
+			sort( $names );
+			return $names;
+		};
+		$both  = array( Maintenance::DATA, Maintenance::FILE );
+		sort( $both );
+		$held = static function () use ( $mark ): void {
+			RealAbspath::write( Maintenance::DATA, ( new Maintenance( ABSPATH, $mark ) )->data( Maintenance::held() ) );
+			RealAbspath::write( Maintenance::FILE, Maintenance::CODE );
+		};
+		try {
+			foreach ( self::dotted_paths() as $what => $path ) {
+				// On a site with neither file: the place is told as free, and both files are put up.
+				$out = $run( $path, '$f->put( time() ); echo "state=", $f->state();' );
+				$this->assertStringContainsString( 'ABSPATH=' . $path . "\n", $out, $what . ': the control: WP-CLI kept the spelling in ABSPATH' );
+				$this->assertStringContainsString( 'state=' . Maintenance::OURS, $out, $what );
+				$this->assertSame( $both, $files(), $what . ': put up' );
+				$clear();
+
+				// The held data file alone (.maintenance deleted): let go.
+				RealAbspath::write( Maintenance::DATA, ( new Maintenance( ABSPATH, $mark ) )->data( Maintenance::held() ) );
+				$this->assertTrue( Maintenance::held_in( ABSPATH ), $what . ': the control: held' );
+				$this->assertStringContainsString( 'let_go=' . Maintenance::ALONE, $run( $path, 'echo "let_go=", $f->let_go( time() );' ), $what );
+				$this->assertFalse( Maintenance::held_in( ABSPATH ), $what . ': let go' );
+				$clear();
+
+				// Both files up and held: taken down, the data file too.
+				$held();
+				$this->assertStringContainsString( 'remove=true', $run( $path, 'echo "remove=", var_export( $f->remove(), true );' ), $what );
+				$this->assertSame( array(), $files(), $what . ': neither file is left' );
+
+				// The loader with neither file there: no longer needed, and removed.
+				RealMuPlugins::put();
+				$this->assertNotSame( array(), RealMuPlugins::listing(), $what . ': the control: the loader is up' );
+				$out = $run( $path, 'echo "needed=", var_export( \WPCheckpoint\Restore\Loader::needed( ABSPATH ), true ), " removed=", var_export( \WPCheckpoint\Plugin::remove_loader( \WPCheckpoint\Restore\Loader::dir( ABSPATH ) ), true );' );
+				$this->assertStringContainsString( 'needed=false removed=true', $out, $what );
+				$this->assertSame( array(), RealMuPlugins::listing(), $what . ': the loader is gone' );
+
+				// Put up and held by a process with the plain path, let go and taken down by one with the dotted path.
+				$this->assertStringContainsString( 'held=true', $run( ABSPATH, '$f->put( time() ); $f->hold(); echo "held=", var_export( $f->is_held(), true );' ), $what );
+				$this->assertTrue( Maintenance::held_in( ABSPATH ), $what . ': the control: held' );
+				$out = $run( $path, 'echo "let_go=", $f->let_go( time() ), " remove=", var_export( $f->remove(), true );' );
+				$this->assertStringContainsString( 'let_go=' . Maintenance::LET_GO . ' remove=true', $out, $what );
+				$this->assertSame( array(), $files(), $what . ': neither file is left' );
+			}
+		} finally {
+			$clear();
+		}
 	}
 
 	public function test_with_the_loader_up_and_the_maintenance_file_deleted_wp_cli_shows_and_runs_a_job_as_ever(): void {
