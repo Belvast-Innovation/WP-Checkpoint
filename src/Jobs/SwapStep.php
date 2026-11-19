@@ -4135,12 +4135,15 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			return;
 		}
 		$confirm = array( $context, 'confirm_lease' );
+		clearstatcache( true ); // Paths::same_location() resolves: not from what this process resolved before.
 		foreach ( $dirs as $entry ) {
 			// The must-use plugins group's entry, by how the final check wrote it (its moved-aside place is "old/mu-plugins"
-			// in the staging root: SwapCheckStep), or by its live directory as written: neither needs the directory to
-			// be in place now.
+			// in the staging root: SwapCheckStep), which does not need the directory to be in place now; or an entry
+			// of another group whose live directory is this process's must-use plugins directory, as written or once
+			// both are resolved (the plan has it resolved, the process as WordPress spells it: dot segments of
+			// WP-CLI's --path, a link on the way).
 			$group = 'mu-plugins' === basename( $entry['old'] ) && 'old' === basename( dirname( $entry['old'] ) );
-			if ( ! $group && rtrim( Paths::normalize( $entry['live'] ), '/' ) !== rtrim( Paths::normalize( $mu ), '/' ) ) {
+			if ( ! $group && ! Paths::same_location( $entry['live'], $mu ) ) {
 				continue;
 			}
 			$this->loader_down( $context, $entry['old'], $confirm );
