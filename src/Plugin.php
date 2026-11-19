@@ -260,7 +260,26 @@ final class Plugin {
 				$out[ count( $out ) - 1 ] .= ' ' . sprintf( __( 'Its last try failed: %s', 'wp-checkpoint' ), $this->job_presenter()->clean( (string) $job->last_error ) );
 			}
 		}
-		if ( defined( 'ABSPATH' ) && Restore\Maintenance::held_in( (string) ABSPATH ) ) {
+		// Whether a restore holds the site, as the WP-CLI guard judges it (Restore\Maintenance::held_evidence()): said
+		// in the words of what holds it. A held data file whose .maintenance is not this plugin's code (deleted,
+		// replaced, not readable) holds the site as well, and so does what cannot be told.
+		$evidence = defined( 'ABSPATH' ) ? Restore\Maintenance::held_evidence( (string) ABSPATH ) : array( Restore\Maintenance::NONE, '' );
+		$file_up  = Restore\Maintenance::HELD === $evidence[0] && ( Restore\Maintenance::BY_DATA !== $evidence[1] || true === Restore\Maintenance::code_in( (string) ABSPATH ) );
+		if ( Restore\Maintenance::UNKNOWN === $evidence[0] ) {
+			$out[] = Restore\Maintenance::UNTOLD_DATA === $evidence[1]
+				? __( 'Whether a restore holds this site cannot be told: .wpcheckpoint-maintenance.php in the WordPress directory cannot be read, or is a link. It is taken as held: WP-CLI runs only wp wpcheckpoint commands here until the file can be read or is removed. wp wpcheckpoint job list shows whether a restore holds the site.', 'wp-checkpoint' )
+				: __( 'Whether a restore holds this site cannot be told: .maintenance in the WordPress directory cannot be read, or is a link. It is taken as held: WP-CLI runs only wp wpcheckpoint commands here until the file can be read or is removed. wp wpcheckpoint job list shows whether a restore holds the site.', 'wp-checkpoint' );
+		} elseif ( Restore\Maintenance::HELD === $evidence[0] && ! $file_up ) {
+			// No release is offered for a job that ended: release takes down a job's maintenance file, and here there is
+			// none of it in place (JobActions::release()); the file is removed by hand, or by the reaper once it is old.
+			if ( array() !== $ids ) {
+				$out[] = __( 'A restore\'s data file says the site is held and does not lapse (.wpcheckpoint-maintenance.php in the WordPress directory), while .maintenance there is not this plugin\'s maintenance code (deleted, replaced, or not readable): WP-CLI runs only wp wpcheckpoint commands here until the restore above ends.', 'wp-checkpoint' );
+			} elseif ( $read ) {
+				$out[] = __( 'A restore\'s data file says the site is held and does not lapse (.wpcheckpoint-maintenance.php in the WordPress directory), while .maintenance there is not this plugin\'s maintenance code (deleted, replaced, or not readable): WP-CLI runs only wp wpcheckpoint commands here. No restore holds the site now; check with wp wpcheckpoint job list, and if none does, remove that file.', 'wp-checkpoint' );
+			} else {
+				$out[] = __( 'A restore\'s data file says the site is held and does not lapse (.wpcheckpoint-maintenance.php in the WordPress directory), while .maintenance there is not this plugin\'s maintenance code (deleted, replaced, or not readable): WP-CLI runs only wp wpcheckpoint commands here. The jobs could not be read: do not remove that file until wp wpcheckpoint job list shows no restore that holds the site.', 'wp-checkpoint' );
+			}
+		} elseif ( $file_up ) {
 			$owner = array() === $ids && $read ? $this->ended_owner() : null;
 			if ( array() !== $ids ) {
 				$out[] = __( 'A restore\'s maintenance file is up and does not lapse (.maintenance in the WordPress directory): visitors see the maintenance page until the restore above ends.', 'wp-checkpoint' );

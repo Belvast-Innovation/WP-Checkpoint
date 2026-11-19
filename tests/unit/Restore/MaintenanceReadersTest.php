@@ -31,9 +31,9 @@ final class MaintenanceReadersTest extends TestCase {
 		'src/Cli/HeldGuard.php'       => array(
 			array(
 				'reader' => 1,
-				'name'   => 3,
+				'name'   => 11,
 			),
-			array( 'not in the matrix: held_in() for the WP-CLI guard, which writes and deletes nothing; what it answers where .maintenance is deleted or cannot be read is a change of its own, to be made before a release; the names are in its message' ),
+			array( 'unit:test_whether_a_restore_holds_the_site_is_one_judgment_that_no_fixed_code_answers_past', 'the names are in its messages' ),
 		),
 		'src/Jobs/HeldSite.php'       => array(
 			array(
@@ -93,11 +93,11 @@ final class MaintenanceReadersTest extends TestCase {
 		),
 		'src/Plugin.php'              => array(
 			array(
-				'reader' => 3,
+				'reader' => 4,
 				'needed' => 1,
-				'name'   => 6,
+				'name'   => 14,
 			),
-			array( 'db:test_a_deactivation_takes_the_loader_only_where_both_files_positively_name_no_restore', 'not in the matrix: held_in() and mark_in() for the notices (nothing is written or deleted by them), passes() for the cron rule of a request let through (MaintenanceTest: the same answer as the code\'s); the names are in messages' ),
+			array( 'db:test_a_deactivation_takes_the_loader_only_where_both_files_positively_name_no_restore', 'unit:test_whether_a_restore_holds_the_site_is_one_judgment_that_no_fixed_code_answers_past', 'held_evidence() for the warnings, the WP-CLI guard\'s judgment (their words: CliHeldGuardTest); not in the matrix: code_in() chooses the warning\'s words and mark_in() finds the job for it (nothing is written or deleted by them), passes() for the cron rule of a request let through (MaintenanceTest: the same answer as the code\'s); the names are in messages' ),
 		),
 		'src/Restore/Loader.php'      => array(
 			array(
@@ -134,7 +134,8 @@ final class MaintenanceReadersTest extends TestCase {
 		'held'          => 'unit:test_the_held_times_are_one_set_for_the_loader_the_maintenance_code_and_the_plugin',
 		'held_for'      => 'unit:test_the_held_times_are_one_set_for_the_loader_the_maintenance_code_and_the_plugin',
 		'is_held_time'  => 'unit:test_the_held_times_are_one_set_for_the_loader_the_maintenance_code_and_the_plugin',
-		'held_in'       => 'not in the matrix: the notices and the WP-CLI guard; nothing is written or deleted by its answer (the guard: a change of its own)',
+		'held_evidence' => 'unit:test_whether_a_restore_holds_the_site_is_one_judgment_that_no_fixed_code_answers_past',
+		'held_in'       => 'unit:test_whether_a_restore_holds_the_site_is_one_judgment_that_no_fixed_code_answers_past',
 		'mark_in'       => 'not in the matrix: finds a job by the file\'s mark, for a notice and for the take-down of a file left (remove() judges the file again)',
 		'code_in'       => 'unit:test_every_reading_of_the_two_files_is_one_of_three_states',
 		'data_in'       => 'unit:test_every_reading_of_the_two_files_is_one_of_three_states',
@@ -180,7 +181,7 @@ final class MaintenanceReadersTest extends TestCase {
 			$code .= is_array( $token ) ? $token[1] : $token;
 		}
 		$kinds = array(
-			'reader' => '/\bMaintenance::(?:held_in|mark_in|code_in|data_in|data_mark|names_restore|passes)\s*\(/',
+			'reader' => '/\bMaintenance::(?:held_evidence|held_in|mark_in|code_in|data_in|data_mark|names_restore|passes)\s*\(/',
 			'object' => '/\bnew\s+(?:\\\\?(?:WPCheckpoint\\\\)?(?:Restore\\\\)?)?Maintenance\s*\(/',
 			'needed' => '/\bLoader::needed\s*\(/',
 			'name'   => '/(?<![A-Za-z0-9_-])\.maintenance(?![A-Za-z0-9_.-]*\.tmp)\b|\.wpcheckpoint-maintenance\.php|\bMaintenance::(?:FILE|DATA)\b|\bself::(?:FILE|DATA)\b/',

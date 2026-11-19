@@ -2,6 +2,7 @@
 
 namespace WPCheckpoint\Tests\Unit\Restore;
 
+use WPCheckpoint\Cli\HeldGuard;
 use WPCheckpoint\Restore\Loader;
 use WPCheckpoint\Restore\Maintenance;
 use WPCheckpoint\Tests\Fixtures\Restore\MaintenanceStates;
@@ -138,6 +139,70 @@ final class MaintenanceMatrixTest extends TestCase {
 			$this->assertSame( ! ( $truth['m_not_code'] && $truth['d_not'] ), Loader::needed( $state['site'] ), 'the loader is needed unless both positively name no restore ' . $state['case'] );
 		}
 		$this->assertSame( 90, $this->built );
+	}
+
+	public function test_whether_a_restore_holds_the_site_is_one_judgment_that_no_fixed_code_answers_past(): void {
+		$seen = array();
+		foreach ( MaintenanceStates::all() as $pair ) {
+			$state = $this->state( $pair[0], $pair[1] );
+			$truth = $state['truth'];
+			$as_is = self::both( $state['site'] );
+			$said  = Maintenance::held_evidence( $state['site'] );
+			$this->assertSame( $as_is, self::both( $state['site'] ), 'the judgment writes and deletes nothing ' . $state['case'] );
+			$now   = MaintenanceStates::answers( $state['site'], $state['mu'] );
+			$this->assertContains( $said[0], array( Maintenance::HELD, Maintenance::NONE, Maintenance::UNKNOWN ), $state['case'] );
+			// By construction: a held data file that can be read holds whatever .maintenance is; the single file holds;
+			// then what cannot be told of either; the code holds with nothing of the form next to it, and lapses with a
+			// time that is not a held one; nothing else holds.
+			if ( $truth['d_held'] && ! $truth['d_untellable'] ) {
+				$want = array( Maintenance::HELD, Maintenance::BY_DATA );
+			} elseif ( 'legacy' === $pair[0] ) {
+				$want = array( Maintenance::HELD, Maintenance::BY_SINGLE );
+			} elseif ( $truth['d_untellable'] ) {
+				$want = array( Maintenance::UNKNOWN, Maintenance::UNTOLD_DATA );
+			} elseif ( $truth['m_untellable'] ) {
+				$want = array( Maintenance::UNKNOWN, Maintenance::UNTOLD_FILE );
+			} elseif ( 'code' === $pair[0] && $truth['d_not'] ) {
+				$want = array( Maintenance::HELD, Maintenance::BY_CODE );
+			} else {
+				$want = array( Maintenance::NONE, '' );
+			}
+			$this->assertSame( $want, $said, 'held_evidence ' . $state['case'] );
+			$this->assertSame( Maintenance::NONE !== $said[0], Maintenance::held_in( $state['site'] ), 'held_in is the same judgment ' . $state['case'] );
+			$this->assertSame( Maintenance::NONE === $said[0], '' === HeldGuard::refusal( array( 'cron', 'event', 'run' ), $said ), 'the WP-CLI guard refuses by it ' . $state['case'] );
+			$this->assertSame( '', HeldGuard::refusal( array( 'wpcheckpoint', 'job', 'list' ), $said ), 'and never this plugin\'s commands ' . $state['case'] );
+			// Unknown only where a file cannot be told.
+			if ( Maintenance::UNKNOWN === $said[0] ) {
+				$this->assertTrue( $truth['m_untellable'] || $truth['d_untellable'], 'not told only where a file cannot be told ' . $state['case'] );
+			}
+			// No fixed code answers as held, now or once every file can be read, where the judgment says none.
+			MaintenanceStates::reveal( $state['site'] );
+			$then  = MaintenanceStates::answers( $state['site'], $state['mu'] );
+			$codes = $now['code'] || $now['legacy'] || $now['loader'] || $then['code'] || $then['legacy'] || $then['loader'];
+			if ( Maintenance::NONE === $said[0] ) {
+				$this->assertFalse( $codes, 'judged not held, and a fixed code would hold ' . $state['case'] );
+				$this->assertSame( Maintenance::NONE, Maintenance::held_evidence( $state['site'] )[0], 'still none once read ' . $state['case'] );
+			}
+			if ( Maintenance::HELD === $said[0] ) {
+				$this->assertSame( Maintenance::HELD, Maintenance::held_evidence( $state['site'] )[0], 'what is held stays held once every file can be read ' . $state['case'] );
+			}
+			$seen[ $said[0] . ( '' === $said[1] ? '' : ':' . $said[1] ) ] = ( $seen[ $said[0] . ( '' === $said[1] ? '' : ':' . $said[1] ) ] ?? 0 ) + 1;
+			$seen['a code holds'] = ( $seen['a code holds'] ?? 0 ) + ( $codes ? 1 : 0 );
+		}
+		ksort( $seen );
+		// The controls: every answer occurs, and the fixed codes hold in many of the states.
+		$this->assertSame(
+			array(
+				'a code holds'        => 63,
+				'held:code'           => 4,
+				'held:data'           => 27,
+				'held:single'         => 7,
+				'none'                => 21,
+				'unknown:untold_data' => 16,
+				'unknown:untold_file' => 15,
+			),
+			$seen
+		);
 	}
 
 	public function test_a_job_is_taken_on_only_by_its_own_files_read_and_always_then(): void {
