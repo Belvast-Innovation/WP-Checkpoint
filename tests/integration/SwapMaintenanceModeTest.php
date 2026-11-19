@@ -403,9 +403,11 @@ final class SwapMaintenanceModeTest extends SwapTestCase {
 	/**
 	 * @dataProvider dotted_paths
 	 *
-	 * @param string $path The test site's WordPress directory, spelled with a dot segment.
+	 * @param string $path    The test site's WordPress directory, spelled with a dot segment.
+	 * @param string $command The command the process with that path runs: "abandon" (then "release" too), or "release"
+	 *                        alone, after a process with the plain path abandoned the job.
 	 */
-	public function test_wp_cli_started_with_a_dotted_path_abandons_a_job_and_releases_its_file_as_with_any_path( string $path ): void {
+	public function test_wp_cli_started_with_a_dotted_path_abandons_a_job_and_releases_its_file_as_with_any_path( string $path, string $command ): void {
 		global $wpdb;
 		$job = $this->at_swap();
 		$this->killed_at( $job, 'dir_aside_recorded' );
@@ -430,7 +432,7 @@ final class SwapMaintenanceModeTest extends SwapTestCase {
 			$this->assertSame( 1, $status, "the control: held, the guard refuses another command in a process with this path.\nstdout: {$out}\nstderr: {$err}" );
 			$this->assertStringContainsString( 'A restore holds this site', $err );
 
-			list( $status, $out, $err ) = $this->wp_at( $path, 'wpcheckpoint', 'job', 'abandon', (string) $job->id, '--confirm=' . $code );
+			list( $status, $out, $err ) = $this->wp_at( 'abandon' === $command ? $path : ABSPATH, 'wpcheckpoint', 'job', 'abandon', (string) $job->id, '--confirm=' . $code );
 			$this->assertSame( 0, $status, "abandoned.\nstdout: {$out}\nstderr: {$err}" );
 			$this->assertStringContainsString( 'was abandoned', $out . $err );
 			$this->assertSame( array(), RealAbspath::contents(), 'its maintenance file and data file were taken down here' );
@@ -460,14 +462,16 @@ final class SwapMaintenanceModeTest extends SwapTestCase {
 	/**
 	 * The test site's WordPress directory as WP-CLI's --path may spell it, with dot segments.
 	 *
-	 * @return array<string, array{0: string}>
+	 * @return array<string, array{0: string, 1: string}>
 	 */
 	public function dotted_paths(): array {
 		$site = rtrim( ABSPATH, '/' );
-		return array(
-			'a "." segment'  => array( dirname( $site ) . '/./' . basename( $site ) . '/' ),
-			'a ".." segment' => array( $site . '/wp-includes/../' ),
-		);
+		$out  = array();
+		foreach ( array( 'abandon', 'release' ) as $command ) {
+			$out[ $command . ', a "." segment' ]  = array( dirname( $site ) . '/./' . basename( $site ) . '/', $command );
+			$out[ $command . ', a ".." segment' ] = array( $site . '/wp-includes/../', $command );
+		}
+		return $out;
 	}
 
 	/**
