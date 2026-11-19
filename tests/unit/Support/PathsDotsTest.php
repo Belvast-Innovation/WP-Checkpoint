@@ -68,6 +68,13 @@ final class PathsDotsTest extends TestCase {
 		$this->assertFalse( Paths::positively_gone( $this->root . '/base/./sub' ), 'there' );
 		$this->assertFalse( Paths::positively_gone( $this->root . '/base/./file.txt/.' ), 'the file is there, whatever the file system says of the dot after it' );
 		$this->assertFalse( Paths::positively_gone( $this->root . '/base/file.txt/./x' ), 'a parent that is a file cannot be listed' );
+		// A listing kept from before never makes what is there gone, under its resolved spelling either.
+		$listings = array();
+		$this->assertTrue( Paths::positively_gone( $this->root . '/base/later/.', $listings ) );
+		touch( $this->root . '/base/later' );
+		$this->assertTrue( Paths::positively_gone( $this->root . '/base/later-too', $listings ), 'the control: the listing is the one kept' );
+		touch( $this->root . '/base/later-too' );
+		$this->assertFalse( Paths::positively_gone( $this->root . '/base/later/.', $listings ) );
 	}
 
 	public function test_two_dots_take_the_parent_of_what_is_before_them(): void {
@@ -130,9 +137,12 @@ final class PathsDotsTest extends TestCase {
 		symlink( $this->root . '/a/inner', $this->root . '/site/link' );
 		$this->assertTrue( Paths::positively_gone( $this->root . '/site/link/../nothing' ) );
 		$this->assertNotFalse( realpath( $this->root . '/site/link' ), 'the resolved path is now in this process\'s cache' );
-		// chmod() does not clear the cache of resolved paths (unlink() and symlink() would).
+		// chmod() does not clear the cache of resolved paths (unlink() and symlink() would). The directory can still
+		// be listed, so an answer from the resolved path remembered would be "gone"; it cannot be searched, so the
+		// link resolves no more.
 		$this->closed[] = $this->root . '/a';
-		chmod( $this->root . '/a', 0000 );
+		chmod( $this->root . '/a', 0400 );
+		$this->assertIsArray( scandir( $this->root . '/a' ), 'the control: it lists' );
 		$this->assertFalse( Paths::positively_gone( $this->root . '/site/link/../nothing' ), 'the link no longer resolves: not told' );
 	}
 
