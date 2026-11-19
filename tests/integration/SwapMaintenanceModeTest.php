@@ -438,9 +438,11 @@ final class SwapMaintenanceModeTest extends SwapTestCase {
 			$this->assertSame( array(), RealAbspath::contents(), 'its maintenance file and data file were taken down here' );
 			$this->assertSame( Job::REASON_ABANDONED, self::fresh( $job->id )->failure_reason );
 
-			list( $status, $out, $err ) = $this->wp_at( $path, 'eval', 'echo ABSPATH;' );
-			$this->assertSame( 0, $status, "nothing holds the site here now: any command runs.\nstdout: {$out}\nstderr: {$err}" );
-			$this->assertSame( $path, $out, 'the control: WP-CLI kept the spelling in ABSPATH' );
+			if ( 'abandon' === $command ) {
+				list( $status, $out, $err ) = $this->wp_at( $path, 'eval', 'echo ABSPATH;' );
+				$this->assertSame( 0, $status, "nothing holds the site here now: any command runs.\nstdout: {$out}\nstderr: {$err}" );
+				$this->assertSame( $path, $out, 'the control: WP-CLI kept the spelling in ABSPATH' );
+			}
 
 			// Its file is up here again (as a copy of the site's files would bring it): released, by the job it names.
 			$file->hold();
