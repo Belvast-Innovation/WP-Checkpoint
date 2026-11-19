@@ -389,7 +389,29 @@ final class LoaderRealSiteTest extends WP_UnitTestCase {
 		);
 	}
 
-	public function test_a_wp_cli_process_whose_path_has_dot_segments_puts_up_lets_go_and_takes_down_as_any_other(): void {
+	/**
+	 * Each use of the two files and of the loader, under each spelling.
+	 *
+	 * @return array<string, array{0: string, 1: string}>
+	 */
+	public function dotted_cases(): array {
+		$out = array();
+		foreach ( array( 'put up', 'let go alone', 'taken down', 'loader', 'started plainly' ) as $case ) {
+			foreach ( array( 'a "." segment', 'a ".." segment' ) as $what ) {
+				$out[ $case . ', ' . $what ] = array( $case, $what );
+			}
+		}
+		return $out;
+	}
+
+	/**
+	 * @dataProvider dotted_cases
+	 *
+	 * @param string $case What is done.
+	 * @param string $what The spelling (dotted_paths()).
+	 */
+	public function test_a_wp_cli_process_whose_path_has_dot_segments_puts_up_lets_go_and_takes_down_as_any_other( string $case, string $what ): void {
+		$path = self::dotted_paths()[ $what ];
 		$mark = Maintenance::new_mark();
 		// The processes take --skip-plugins and load the plugin's classes themselves, to call the methods as they are:
 		// with the plugin loaded and the site held, WP-CLI runs no eval (Cli\HeldGuard).
@@ -399,14 +421,6 @@ final class LoaderRealSiteTest extends WP_UnitTestCase {
 			$this->assertSame( 0, $status, "the process ran.\nstdout: {$out}\nstderr: {$err}" );
 			return $out;
 		};
-		$clear = static function (): void {
-			foreach ( RealMuPlugins::listing() as $left ) {
-				RealMuPlugins::remove( basename( $left ) );
-			}
-			foreach ( RealAbspath::listing() as $left ) {
-				RealAbspath::remove( basename( $left ) );
-			}
-		};
 		$files = static function (): array {
 			clearstatcache();
 			$names = array_keys( RealAbspath::contents() );
@@ -415,47 +429,45 @@ final class LoaderRealSiteTest extends WP_UnitTestCase {
 		};
 		$both  = array( Maintenance::DATA, Maintenance::FILE );
 		sort( $both );
-		$held = static function () use ( $mark ): void {
-			RealAbspath::write( Maintenance::DATA, ( new Maintenance( ABSPATH, $mark ) )->data( Maintenance::held() ) );
-			RealAbspath::write( Maintenance::FILE, Maintenance::CODE );
-		};
-		try {
-			foreach ( self::dotted_paths() as $what => $path ) {
+		// What tear_down() removes: the two files and the loader, whoever of these processes wrote them.
+		switch ( $case ) {
+			case 'put up':
 				// On a site with neither file: the place is told as free, and both files are put up.
 				$out = $run( $path, '$f->put( time() ); echo "state=", $f->state();' );
-				$this->assertStringContainsString( 'ABSPATH=' . $path . "\n", $out, $what . ': the control: WP-CLI kept the spelling in ABSPATH' );
-				$this->assertStringContainsString( 'state=' . Maintenance::OURS, $out, $what );
-				$this->assertSame( $both, $files(), $what . ': put up' );
-				$clear();
-
+				$this->assertStringContainsString( 'ABSPATH=' . $path . "\n", $out, 'the control: WP-CLI kept the spelling in ABSPATH' );
+				$this->assertStringContainsString( 'state=' . Maintenance::OURS, $out );
+				$this->assertSame( $both, $files(), 'put up' );
+				break;
+			case 'let go alone':
 				// The held data file alone (.maintenance deleted): let go.
 				RealAbspath::write( Maintenance::DATA, ( new Maintenance( ABSPATH, $mark ) )->data( Maintenance::held() ) );
-				$this->assertTrue( Maintenance::held_in( ABSPATH ), $what . ': the control: held' );
-				$this->assertStringContainsString( 'let_go=' . Maintenance::ALONE, $run( $path, 'echo "let_go=", $f->let_go( time() );' ), $what );
-				$this->assertFalse( Maintenance::held_in( ABSPATH ), $what . ': let go' );
-				$clear();
-
+				$this->assertTrue( Maintenance::held_in( ABSPATH ), 'the control: held' );
+				$this->assertStringContainsString( 'let_go=' . Maintenance::ALONE, $run( $path, 'echo "let_go=", $f->let_go( time() );' ) );
+				$this->assertFalse( Maintenance::held_in( ABSPATH ), 'let go' );
+				break;
+			case 'taken down':
 				// Both files up and held: taken down, the data file too.
-				$held();
-				$this->assertStringContainsString( 'remove=true', $run( $path, 'echo "remove=", var_export( $f->remove(), true );' ), $what );
-				$this->assertSame( array(), $files(), $what . ': neither file is left' );
-
+				RealAbspath::write( Maintenance::DATA, ( new Maintenance( ABSPATH, $mark ) )->data( Maintenance::held() ) );
+				RealAbspath::write( Maintenance::FILE, Maintenance::CODE );
+				$this->assertSame( $both, $files(), 'the control: both are up' );
+				$this->assertStringContainsString( 'remove=true', $run( $path, 'echo "remove=", var_export( $f->remove(), true );' ) );
+				$this->assertSame( array(), $files(), 'neither file is left' );
+				break;
+			case 'loader':
 				// The loader with neither file there: no longer needed, and removed.
 				RealMuPlugins::put();
-				$this->assertNotSame( array(), RealMuPlugins::listing(), $what . ': the control: the loader is up' );
+				$this->assertNotSame( array(), RealMuPlugins::listing(), 'the control: the loader is up' );
 				$out = $run( $path, 'echo "needed=", var_export( \WPCheckpoint\Restore\Loader::needed( ABSPATH ), true ), " removed=", var_export( \WPCheckpoint\Plugin::remove_loader( \WPCheckpoint\Restore\Loader::dir( ABSPATH ) ), true );' );
-				$this->assertStringContainsString( 'needed=false removed=true', $out, $what );
-				$this->assertSame( array(), RealMuPlugins::listing(), $what . ': the loader is gone' );
-
+				$this->assertStringContainsString( 'needed=false removed=true', $out );
+				$this->assertSame( array(), RealMuPlugins::listing(), 'the loader is gone' );
+				break;
+			default:
 				// Put up and held by a process with the plain path, let go and taken down by one with the dotted path.
-				$this->assertStringContainsString( 'held=true', $run( ABSPATH, '$f->put( time() ); $f->hold(); echo "held=", var_export( $f->is_held(), true );' ), $what );
-				$this->assertTrue( Maintenance::held_in( ABSPATH ), $what . ': the control: held' );
+				$this->assertStringContainsString( 'held=true', $run( ABSPATH, '$f->put( time() ); $f->hold(); echo "held=", var_export( $f->is_held(), true );' ) );
+				$this->assertTrue( Maintenance::held_in( ABSPATH ), 'the control: held' );
 				$out = $run( $path, 'echo "let_go=", $f->let_go( time() ), " remove=", var_export( $f->remove(), true );' );
-				$this->assertStringContainsString( 'let_go=' . Maintenance::LET_GO . ' remove=true', $out, $what );
-				$this->assertSame( array(), $files(), $what . ': neither file is left' );
-			}
-		} finally {
-			$clear();
+				$this->assertStringContainsString( 'let_go=' . Maintenance::LET_GO . ' remove=true', $out );
+				$this->assertSame( array(), $files(), 'neither file is left' );
 		}
 	}
 
