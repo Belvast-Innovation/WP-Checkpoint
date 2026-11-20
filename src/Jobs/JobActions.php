@@ -439,6 +439,12 @@ final class JobActions {
 		}
 		if ( ! $this->repository->holds_own_token() ) {
 			// abandon_held() would refuse: the file must not go first for a refusal known in advance.
+			$why = $this->repository->storage_problem();
+			if ( '' !== $why ) {
+				// No storage directory in this request, so no token: said as what it is, not as a copy to settle.
+				/* translators: %s: why there is no storage directory, a sentence or more */
+				return self::outcome( false, sprintf( __( 'This installation has no storage directory in this request, and so no storage token of its own to abandon the job with: %s Nothing was changed.', 'wp-checkpoint' ), $why ) );
+			}
 			return self::outcome( false, __( 'This installation holds no storage token of its own yet (it was found to be a copy, and that is not settled): settle it on the plugin\'s page first, then abandon the job. Nothing was changed.', 'wp-checkpoint' ) );
 		}
 		try {

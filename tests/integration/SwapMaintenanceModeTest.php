@@ -476,6 +476,60 @@ final class SwapMaintenanceModeTest extends SwapTestCase {
 		}
 	}
 
+	public function test_a_process_that_can_make_no_storage_directory_abandons_nothing_and_says_why(): void {
+		global $wpdb;
+		$dotted  = rtrim( ABSPATH, '/' ) . '/wp-includes/../';
+		$storage = StorageDirs::listing();
+		$state   = StorageDirs::cli_state();
+		$job     = $this->at_swap();
+		$this->killed_at( $job, 'dir_aside_recorded' );
+		$job      = Plugin::instance()->jobs()->find( $job->id );
+		$file     = new Maintenance( $this->abspath, (string) $job->site_mark );
+		$plan     = $wpdb->base_prefix . \WPCheckpoint\Restore\SwapPlan::TABLE;
+		$recorded = (string) $wpdb->get_var( $wpdb->prepare( "SELECT live FROM `{$plan}` WHERE job_id = %d AND kind = 'site'", $job->id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the plan table.
+		$copy     = $this->sandbox . '/copy';
+		mkdir( $copy . '/wp-content/uploads', 0755, true );
+		\WPCheckpoint\Tests\Fixtures\ActivePlugin::on();
+		try {
+			$wpdb->update( JobRepository::table(), array( 'held_by' => 'ffffffffffff' ), array( 'id' => $job->id ) );
+			$wpdb->query( $wpdb->prepare( "UPDATE `{$plan}` SET live = %s WHERE job_id = %d AND kind = 'site'", (string) realpath( $copy ), $job->id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the plan table.
+			$wpdb->query( 'COMMIT' );
+			$see  = ( new \WPCheckpoint\Jobs\HeldSite() )->assess( Plugin::instance()->jobs()->find( $job->id ) );
+			$code = \WPCheckpoint\Jobs\HeldSite::code( \WPCheckpoint\Jobs\HeldSite::ABANDON, Plugin::instance()->jobs()->find( $job->id ), $see['recorded'] );
+			$held = RealAbspath::contents();
+			$this->assertNotSame( array(), $held, 'the control: the job\'s files are up here' );
+
+			// No storage directory chosen yet for the processes, and this one can make none: WordPress makes no
+			// directory at a path with "..".
+			StorageDirs::put_cli_state( null );
+			$before                     = StorageDirs::listing(); // With what this process made for itself, no longer the stored one.
+			list( $status, $out, $err ) = $this->wp_at( $dotted, 'wpcheckpoint', 'job', 'abandon', (string) $job->id, '--confirm=' . $code );
+			$this->assertSame( 1, $status, "refused.\nstdout: {$out}\nstderr: {$err}" );
+			$this->assertStringContainsString( 'has no storage directory in this request, and so no storage token of its own to abandon the job with', $err );
+			$this->assertStringContainsString( 'WordPress makes no directory at a path with a ".." segment in it', $err, 'why' );
+			$this->assertStringContainsString( 'Run the command once with a path without ".."', $err, 'and what to do' );
+			$this->assertStringContainsString( 'Nothing was changed.', $err );
+			$this->assertStringNotContainsString( 'found to be a copy', $err, 'not said to be a copy, which it is not' );
+			$this->assertStringContainsString( 'Cannot create ', $err, 'the control: the directory is named' );
+			$this->assertStringNotContainsString( rtrim( ABSPATH, '/' ), $out . $err, 'in the mask\'s words, not as the server has it' );
+			$this->assertSame( $held, RealAbspath::contents(), 'its files stay up' );
+			$this->assertSame( '', (string) self::fresh( $job->id )->failure_reason, 'not abandoned' );
+			$this->assertSame( $before, StorageDirs::listing(), 'no directory was made' );
+
+			// As it says: with the path without "..", the same command and code abandon it.
+			list( $status, $out, $err ) = $this->wp_at( ABSPATH, 'wpcheckpoint', 'job', 'abandon', (string) $job->id, '--confirm=' . $code );
+			$this->assertSame( 0, $status, "the control: abandoned by a process that can make the directory.\nstdout: {$out}\nstderr: {$err}" );
+			$this->assertSame( Job::REASON_ABANDONED, self::fresh( $job->id )->failure_reason );
+		} finally {
+			$wpdb->query( $wpdb->prepare( "UPDATE `{$plan}` SET live = %s WHERE job_id = %d AND kind = 'site'", $recorded, $job->id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- the plan table.
+			$wpdb->query( 'COMMIT' );
+			$file->remove();
+			\WPCheckpoint\Tests\Fixtures\ActivePlugin::off();
+			StorageDirs::put_cli_state( $state );
+			StorageDirs::remove_made_since( $storage );
+		}
+	}
+
 	/**
 	 * The test site's WordPress directory as WP-CLI's --path may spell it, with dot segments.
 	 *
