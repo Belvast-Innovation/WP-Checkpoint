@@ -10,6 +10,7 @@ use WPCheckpoint\Restore\Maintenance;
 use WPCheckpoint\Tests\Fixtures\Leftovers;
 use WPCheckpoint\Tests\Fixtures\RealAbspath;
 use WPCheckpoint\Tests\Fixtures\Restore\SwapTestCase;
+use WPCheckpoint\Tests\Fixtures\StorageDirs;
 
 /**
  * The site in maintenance mode while the swap has it half changed, as WordPress itself says it
@@ -409,6 +410,18 @@ final class SwapMaintenanceModeTest extends SwapTestCase {
 	 */
 	public function test_wp_cli_started_with_a_dotted_path_abandons_a_job_and_releases_its_file_as_with_any_path( string $path, string $command ): void {
 		global $wpdb;
+		// The processes have a storage directory already, chosen by one with a plain path, as on a site whose plugin
+		// page was ever opened: a process whose path has ".." makes none (WordPress refuses the path), and without a
+		// token of its own an installation abandons nothing. What it says then is LoaderRealSiteTest's.
+		$storage = StorageDirs::listing();
+		$state   = StorageDirs::cli_state();
+		\WPCheckpoint\Tests\Fixtures\ActivePlugin::on();
+		try {
+			list( $status, $out, $err ) = $this->wp_at( ABSPATH, 'eval', 'echo \WPCheckpoint\Plugin::instance()->directories()->base();' );
+		} finally {
+			\WPCheckpoint\Tests\Fixtures\ActivePlugin::off();
+		}
+		$this->assertSame( array( 0, true ), array( $status, '' !== trim( $out ) ), "the processes have a storage directory.\nstdout: {$out}\nstderr: {$err}" );
 		$job = $this->at_swap();
 		$this->killed_at( $job, 'dir_aside_recorded' );
 		$job      = Plugin::instance()->jobs()->find( $job->id );
@@ -458,6 +471,8 @@ final class SwapMaintenanceModeTest extends SwapTestCase {
 			$wpdb->query( 'COMMIT' );
 			$file->remove();
 			\WPCheckpoint\Tests\Fixtures\ActivePlugin::off();
+			StorageDirs::put_cli_state( $state );
+			StorageDirs::remove_made_since( $storage );
 		}
 	}
 

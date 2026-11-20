@@ -86,6 +86,43 @@ final class StorageDirs {
 	}
 
 	/**
+	 * The stored state as the test site's WP-CLI processes read it (null for none), past any cache: the row in the
+	 * main site's options table. The test site's wp-config.php defines no network, so its WP-CLI processes are a
+	 * single site's in a multisite run of the tests too, and neither read nor write the network's row.
+	 *
+	 * @return string|null
+	 */
+	public static function cli_state() {
+		global $wpdb;
+		$wpdb->query( 'COMMIT' );
+		return $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM `{$wpdb->base_prefix}options` WHERE option_name = %s", Directories::OPTION ) );
+	}
+
+	/**
+	 * Put that row back as it was, committed.
+	 *
+	 * @param string|null $was cli_state() before.
+	 * @return void
+	 */
+	public static function put_cli_state( $was ): void {
+		global $wpdb;
+		$now = self::cli_state();
+		if ( $now === $was ) {
+			return;
+		}
+		$table = $wpdb->base_prefix . 'options';
+		$where = array( 'option_name' => Directories::OPTION );
+		if ( null === $was ) {
+			$wpdb->delete( $table, $where );
+		} elseif ( null === $now ) {
+			$wpdb->insert( $table, $where + array( 'option_value' => $was, 'autoload' => 'no' ) );
+		} else {
+			$wpdb->update( $table, array( 'option_value' => $was ), $where );
+		}
+		$wpdb->query( 'COMMIT' );
+	}
+
+	/**
 	 * Before a test, outside its transaction: the plugin's own storage directory is there and the stored state,
 	 * committed, names it; made now when not (the first test of a run; after a test that removed it). Without this the
 	 * test that first needs the directory makes it inside its transaction: the state is rolled back with the test,

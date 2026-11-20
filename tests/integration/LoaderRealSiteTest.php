@@ -339,41 +339,23 @@ final class LoaderRealSiteTest extends WP_UnitTestCase {
 	}
 
 	/**
-	 * The stored state of the storage directory as the database has it (null for none), past any cache.
+	 * The stored state of the storage directory as the WP-CLI processes read it (StorageDirs::cli_state()).
 	 *
 	 * @return string|null
 	 */
 	private static function stored_state() {
-		global $wpdb;
-		$wpdb->query( 'COMMIT' );
-		return is_multisite()
-			? $wpdb->get_var( $wpdb->prepare( "SELECT meta_value FROM {$wpdb->sitemeta} WHERE meta_key = %s AND site_id = %d", Directories::OPTION, get_current_network_id() ) )
-			: $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s", Directories::OPTION ) );
+		return StorageDirs::cli_state();
 	}
 
 	/**
-	 * Put the stored state back as it was in the database (the WP-CLI processes may have made a storage directory of
-	 * their own and stored it: this process's is in its transaction or its cache only).
+	 * Put that state back as it was (the WP-CLI processes may have made a storage directory of their own and stored
+	 * it: this process's is in its transaction or its cache only).
 	 *
 	 * @param string|null $was stored_state() before.
 	 * @return void
 	 */
 	private static function restore_state( $was ): void {
-		global $wpdb;
-		if ( self::stored_state() === $was ) {
-			return;
-		}
-		if ( is_multisite() ) {
-			$where = array(
-				'meta_key' => Directories::OPTION, // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_key -- one row of the test's.
-				'site_id'  => get_current_network_id(),
-			);
-			null === $was ? $wpdb->delete( $wpdb->sitemeta, $where ) : $wpdb->update( $wpdb->sitemeta, array( 'meta_value' => $was ), $where ); // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_value -- as above.
-		} else {
-			$where = array( 'option_name' => Directories::OPTION );
-			null === $was ? $wpdb->delete( $wpdb->options, $where ) : $wpdb->update( $wpdb->options, array( 'option_value' => $was ), $where );
-		}
-		$wpdb->query( 'COMMIT' );
+		StorageDirs::put_cli_state( $was );
 	}
 
 	/**
