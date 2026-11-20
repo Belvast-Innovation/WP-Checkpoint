@@ -892,7 +892,10 @@ final class UndoTest extends SwapTestCase {
 			global $wpdb;
 			$wpdb->query( 'COMMIT' );
 			$name = array() === $wpdb->get_col( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $old ) ) ) ? $wpdb->base_prefix . 'options' : $old;
-			$wpdb->query( "ALTER TABLE `{$name}` MODIFY option_id bigint(20) unsigned NOT NULL AUTO_INCREMENT" );
+			$alter = "ALTER TABLE `{$name}` MODIFY option_id bigint(20) unsigned NOT NULL AUTO_INCREMENT";
+			$done  = $wpdb->query( $alter );
+			$now   = (string) ( $wpdb->get_row( "SHOW CREATE TABLE `{$name}`", ARRAY_N )[1] ?? '' );
+			$this->assertTrue( false !== $done && false !== stripos( $now, 'AUTO_INCREMENT,' ), "The test took AUTO_INCREMENT off option_id of {$name} and could not put it back ({$wpdb->last_error}): every later test that adds an option fails until it is. Put it back by hand in the test database: {$alter} (a row with option_id 0, if one was added meanwhile, has to go or get another id first). The table now: {$now}" );
 		}
 	}
 
