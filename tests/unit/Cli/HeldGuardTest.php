@@ -64,7 +64,7 @@ final class HeldGuardTest extends TestCase {
 	}
 
 	public function test_on_windows_a_directory_spelled_with_two_dots_is_named_as_what_may_not_be_told(): void {
-		$said = 'which directory is read cannot be determined. Give the path without ".." (--path) and it is told.';
+		$said = 'which directory is read cannot be determined, so that nothing can be told of a file there, present or not. With the path written without ".." it is told.';
 		foreach ( array( 'C:\\sites\\current\\..\\wp', 'C:/sites/current/../wp/', 'C:\\sites\\wp\\..', '../wp', 'C:\\sites/current\\../wp' ) as $dir ) {
 			$this->assertStringContainsString( $said, HeldGuard::dotted( $dir, true ), $dir );
 			$this->assertSame( '', HeldGuard::dotted( $dir, false ), $dir . ': elsewhere ".." is gone through, and nothing is added' );

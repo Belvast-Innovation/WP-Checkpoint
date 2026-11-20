@@ -83,7 +83,7 @@ final class HeldGuard {
 			return '';
 		}
 		// Not translated, as the refusal it is added to.
-		return ' It may be neither of the two: the WordPress directory was given to WP-CLI with ".." in its path, and on Windows, where ".." comes after a link, a junction or a short name, which directory is read cannot be determined. Give the path without ".." (--path) and it is told.';
+		return ' The file may also be neither unreadable nor a link: the WordPress directory reached WP-CLI with ".." in its path (--path, or path in wp-cli.yml), and on Windows, where ".." comes after a link, a junction or a short name, which directory is read cannot be determined, so that nothing can be told of a file there, present or not. With the path written without ".." it is told.';
 	}
 
 	/**

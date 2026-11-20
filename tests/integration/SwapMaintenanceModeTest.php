@@ -412,7 +412,7 @@ final class SwapMaintenanceModeTest extends SwapTestCase {
 		global $wpdb;
 		// The processes have a storage directory already, chosen by one with a plain path, as on a site whose plugin
 		// page was ever opened: a process whose path has ".." makes none (WordPress refuses the path), and without a
-		// token of its own an installation abandons nothing. What it says then is LoaderRealSiteTest's.
+		// token of its own an installation abandons nothing (what it says then: the test after this one).
 		$storage = StorageDirs::listing();
 		$state   = StorageDirs::cli_state();
 		\WPCheckpoint\Tests\Fixtures\ActivePlugin::on();
