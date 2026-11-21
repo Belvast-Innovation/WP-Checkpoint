@@ -333,8 +333,13 @@ final class MaintenanceTest extends TestCase {
 		foreach ( $spelled as $what => $dir ) {
 			$this->assertSame( array( Maintenance::HELD, Maintenance::BY_DATA ), Maintenance::held_evidence( $dir ), $what . ': the control, the held data file is seen' );
 		}
-		// A directory that cannot be resolved is not "none": nothing is known of it.
-		$this->assertSame( Maintenance::UNKNOWN, Maintenance::held_evidence( $this->dir . '/gone/./' )[0] );
+		// A directory that cannot be resolved is not "none": nothing is known of it. One that is positively not there
+		// has neither file, however it is spelled. Windows drops "gone/.." by its spelling before it looks, so there
+		// the path is the directory itself and its held data file is read.
+		$told = Maintenance::held_evidence( $this->dir . '/gone/../' );
+		$this->assertSame( '\\' === DIRECTORY_SEPARATOR ? array( Maintenance::HELD, Maintenance::BY_DATA ) : array( Maintenance::UNKNOWN ), '\\' === DIRECTORY_SEPARATOR ? $told : array( $told[0] ), 'told: ' . implode( ', ', $told ) );
+		$this->assertSame( Maintenance::NONE, Maintenance::held_evidence( $this->dir . '/gone/' )[0], 'the control: a directory that is not there, spelled plainly' );
+		$this->assertSame( Maintenance::NONE, Maintenance::held_evidence( $this->dir . '/gone/./' )[0] );
 	}
 
 	public function test_a_run_that_died_between_the_two_files_leaves_a_data_file_that_blocks_nothing_and_goes(): void {

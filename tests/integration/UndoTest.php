@@ -877,6 +877,52 @@ final class UndoTest extends SwapTestCase {
 		}
 	}
 
+	public function test_an_undo_that_died_taking_its_file_down_to_ask_lets_go_when_the_deadline_keeps_the_restored_site(): void {
+		$job   = $this->completed();
+		$after = $this->site();
+		$this->retype( $job );
+		$told = $this->actions()->undo( $job->id, '' );
+		$this->assertTrue( $this->actions()->undo( $job->id, $told['code'] )['ok'] );
+		$old = $this->old_options( $job );
+		$this->break_old_options( $job );
+		try {
+			$this->died_taking_down_then_kept_at_the_deadline( $job, $after );
+		} finally {
+			// The table the test changed, wherever it is by now, as it was.
+			global $wpdb;
+			$wpdb->query( 'COMMIT' );
+			$name = array() === $wpdb->get_col( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $old ) ) ) ? $wpdb->base_prefix . 'options' : $old;
+			$alter = "ALTER TABLE `{$name}` MODIFY option_id bigint(20) unsigned NOT NULL AUTO_INCREMENT";
+			$done  = $wpdb->query( $alter );
+			$now   = (string) ( $wpdb->get_row( "SHOW CREATE TABLE `{$name}`", ARRAY_N )[1] ?? '' );
+			$this->assertTrue( false !== $done && false !== stripos( $now, 'AUTO_INCREMENT,' ), "(This failure replaces any earlier one of this test.) The test took AUTO_INCREMENT off option_id of {$name} and could not put it back ({$wpdb->last_error}): every later test that adds an option fails until it is. Put it back by hand in the test database: {$alter} (a row with option_id 0, if one was added meanwhile, has to go or get another id first). The table now: {$now}" );
+		}
+	}
+
+	/**
+	 * @param Job                  $job   The undo, claimed, its carry back failing.
+	 * @param array<string, mixed> $after The restored site.
+	 */
+	private function died_taking_down_then_kept_at_the_deadline( Job $job, array $after ): void {
+		// The run dies taking the maintenance file down to ask: the file stays, held, and nothing is asked yet.
+		$this->killed_at( Plugin::instance()->jobs()->find( $job->id ), 'take_down' );
+		$this->assertArrayHasKey( '.maintenance', $this->maintenance_files(), 'the control: the file is still up' );
+		$this->assertTrue( \WPCheckpoint\Restore\Maintenance::held_in( $this->abspath ), 'the control: held, it does not lapse' );
+		$this->assertSame( 'carry_ask', Plugin::instance()->jobs()->find( $job->id )->cursor['phase'] ?? '', 'the control: at the question' );
+		// The next run comes after the deadline: the restored site is kept, whatever would have been answered. It dies
+		// once that is recorded, before the file is down: the file it leaves lapses.
+		$this->set( $job->id, array( 'committed_at' => time() - Undo::WINDOW_SECONDS - 60 ) );
+		$this->killed_at( Plugin::instance()->jobs()->find( $job->id ), 'done_recorded' );
+		$this->assertArrayHasKey( '.maintenance', $this->maintenance_files(), 'the control: the file is still up' );
+		$this->assertFalse( \WPCheckpoint\Restore\Maintenance::held_in( $this->abspath ), 'let go: visitors are let in once it lapses, with no run to come' );
+		$done = $this->cli_run( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( Job::COMPLETED, $done->status, (string) $done->last_error );
+		$this->assertSame( $after, $this->site(), 'the restored site stays' );
+		$this->assertSame( array(), $this->maintenance_files() );
+		$this->assertSame( array(), Plugin::instance()->jobs()->holding_site() );
+		$this->assertStringContainsString( 'The deadline to answer passed', Plugin::instance()->job_presenter()->log_tail( $done ) );
+	}
+
 	/**
 	 * The old options table's id no longer AUTO_INCREMENT: the carry back refuses it before it writes (not a failure
 	 * of the moment), in this process and in a child alike.

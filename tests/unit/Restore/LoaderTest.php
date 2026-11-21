@@ -124,6 +124,22 @@ final class LoaderTest extends TestCase {
 		$this->assertSame( array(), array_values( array_diff( scandir( $this->mu ), array( '.', '..' ) ) ), 'nothing put, no temporary file left' );
 	}
 
+	public function test_a_directory_spelled_with_dot_segments_is_looked_at_and_written_as_any_other(): void {
+		// As WPMU_PLUGIN_DIR is when WP-CLI's --path carries dot segments.
+		$dotted = $this->root . '/./mu-plugins/../mu-plugins';
+		$this->assertSame( array( 'none' ), Loader::look( $this->mu ), 'the control: positively nothing, spelled plainly' );
+		$this->assertSame( array( 'none' ), Loader::look( $dotted ) );
+		$this->assertSame( Loader::MISSING, Loader::put( $this->root . '/not-there' ), 'the control: no such directory, spelled plainly' );
+		$this->assertSame( Loader::MISSING, Loader::put( $this->root . '/./mu-plugins/../not-there' ) );
+		$this->assertSame( Loader::UNKNOWN, Loader::put( $this->root . '/not-there/../mu-plugins-too' ), 'what is before the ".." is not there: not told' );
+		$this->assertSame( '', Loader::put( $dotted ) );
+		$this->assertSame( array( 'ours', Loader::CODE ), Loader::look( $dotted ) );
+		$this->assertFileExists( Loader::path( $this->mu ), 'in the directory itself' );
+		$this->assertTrue( Loader::remove( $dotted ) );
+		$this->assertSame( array( 'none' ), Loader::look( $dotted ) );
+		$this->assertFileDoesNotExist( Loader::path( $this->mu ) );
+	}
+
 	public function test_it_is_removed_by_its_contents_only(): void {
 		$notes = array();
 		$note  = static function ( string $line ) use ( &$notes ): void {

@@ -308,6 +308,95 @@ final class RestoreStorageTest extends JobTestCase {
 		}
 	}
 
+	/**
+	 * A path as a WP-CLI process started with a dotted --path writes it: the same place, with a "." and a ".." segment.
+	 */
+	private static function dotted( string $path ): string {
+		return dirname( $path ) . '/./' . basename( $path ) . '/../' . basename( $path );
+	}
+
+	public function test_a_job_whose_directory_is_gone_is_failed_however_its_path_is_spelled(): void {
+		$this->register( ExportJob::ID, array( $this->counting_step( 'e', 5 ) ) );
+		$base  = Plugin::instance()->directories()->base();
+		$gone  = $this->job_of( ExportJob::ID );
+		$here  = $this->job_of( ExportJob::ID );
+		$blind = $this->job_of( ExportJob::ID );
+		$box = \WPCheckpoint\Tests\Fixtures\Sandbox::make( 'blind' );
+		file_put_contents( $box . '/file', 'not a directory' );
+		// ".." after what is there (the storage directory), then a name its parent lists nothing under.
+		self::set( $gone, array( 'storage_path' => $base . '/../' . basename( $base ) . '-gone/.' ) );
+		self::set( $here, array( 'storage_path' => self::dotted( $base ) ) );
+		self::set( $blind, array( 'storage_path' => $box . '/file/./x' ) ); // Its parent cannot be listed.
+		try {
+			Plugin::instance()->jobs()->settle_storage();
+		} finally {
+			\WPCheckpoint\Tests\Fixtures\Sandbox::remove( $box );
+		}
+		$gone = Plugin::instance()->jobs()->find( $gone );
+		$this->assertSame( Job::FAILED, $gone->status, 'its parent lists and holds no such directory' );
+		$this->assertSame( Job::FAILURE_FINAL, $gone->failure_kind );
+		$this->assertStringContainsString( 'is no longer at the path it was started in', $gone->last_error );
+		$this->assertSame( Job::RUNNING, Plugin::instance()->jobs()->find( $here )->status, 'the control: this directory under a dotted spelling is this directory' );
+		$this->assertSame( Job::RUNNING, Plugin::instance()->jobs()->find( $blind )->status, 'the control: a parent that cannot be listed is no evidence' );
+	}
+
+	public function test_a_restore_whose_directory_is_gone_under_a_dotted_spelling_does_not_hold_the_plugin(): void {
+		$a = $this->custom_storage( 'a-' . wp_generate_password( 6, false ) );
+		$this->register( RestoreJob::ID, array( $this->counting_step( 'r', 5 ) ) );
+		$id = $this->job_of( RestoreJob::ID );
+		// Started by a WP-CLI process whose paths carry dot segments; then moved away (mv A B) and the constant set
+		// to the new place everywhere.
+		self::set( $id, array( 'storage_path' => dirname( $a ) . '/./' . basename( $a ) ) );
+		$b              = get_temp_dir() . 'wpc-custom-b-' . wp_generate_password( 6, false );
+		$this->custom[] = $b;
+		// The control: while the restore's directory is there, another one is not taken.
+		$this->custom_storage_at( $b );
+		$this->assertSame( '', Plugin::instance()->directories()->base() );
+		$this->assertStringContainsString( 'A restore is in progress in a storage directory that this request cannot confirm', Plugin::instance()->directories()->last_error() );
+		rename( $a, $b );
+		$this->custom_storage_at( $b );
+		$this->assertSame( $b, Plugin::instance()->directories()->base(), 'the plugin goes on in the new directory' );
+	}
+
+	public function test_a_restore_whose_own_directory_is_gone_under_a_dotted_spelling_does_not_hold_an_unreachable_one(): void {
+		$this->register( RestoreJob::ID, array( $this->counting_step( 'r', 5 ) ) );
+		$id       = $this->job_of( RestoreJob::ID );
+		$base     = Plugin::instance()->directories()->base();
+		$remember = function ( string $path ): void {
+			$state         = Directories::load_state();
+			$state['path'] = $path;
+			\WPCheckpoint\Support\Options::set( Directories::OPTION, $state );
+		};
+		$box = \WPCheckpoint\Tests\Fixtures\Sandbox::make( 'blind' );
+		file_put_contents( $box . '/file', 'not a directory' );
+		try {
+			// The control: the stored directory cannot be reached and nothing shows it gone, the restore's own: held.
+			$remember( $box . '/file/./x' );
+			self::set( $id, array( 'storage_path' => $box . '/file/./x' ) );
+			$this->assertSame( '', ( new Directories() )->base(), 'held' );
+			// The restore's own directory is positively gone, as a dotted path says it: it does not hold the
+			// unreachable one.
+			self::set( $id, array( 'storage_path' => dirname( $base ) . '/./' . basename( $base ) . '-gone-restore' ) );
+			$this->assertNotSame( '', ( new Directories() )->base(), 'its restore is gone: another directory is chosen' );
+		} finally {
+			\WPCheckpoint\Tests\Fixtures\Sandbox::remove( $box );
+		}
+	}
+
+	public function test_a_stored_directory_of_a_restore_gone_under_a_dotted_spelling_is_replaced(): void {
+		$this->register( RestoreJob::ID, array( $this->counting_step( 'r', 5 ) ) );
+		$id   = $this->job_of( RestoreJob::ID );
+		$base = Plugin::instance()->directories()->base();
+		// The stored directory, the restore's own, positively gone: ".." after what is there, then a name its parent
+		// lists nothing under.
+		$gone          = $base . '/../' . basename( $base ) . '-gone-dir';
+		$state         = Directories::load_state();
+		$state['path'] = $gone;
+		\WPCheckpoint\Support\Options::set( Directories::OPTION, $state );
+		self::set( $id, array( 'storage_path' => $gone ) );
+		$this->assertNotSame( '', ( new Directories() )->base(), 'gone: another directory is chosen' );
+	}
+
 	public function test_unfinished_jobs_are_read_from_the_table_and_an_unreadable_table_is_no_answer(): void {
 		global $wpdb;
 		$this->register( ExportJob::ID, array( $this->counting_step( 'e', 5 ) ) );

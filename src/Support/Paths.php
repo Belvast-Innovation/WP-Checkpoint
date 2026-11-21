@@ -150,7 +150,8 @@ final class Paths {
 	 * Unicode forms the way the file system does), and the nearest ancestor
 	 * that exists can be listed and has no entry for the next segment down,
 	 * not even one that differs only in case. A path with "." or ".."
-	 * segments is never gone (the climb is lexical), nor one with a NUL byte. Only ancestors that do not
+	 * segments is answered as its resolved spelling is (resolved_dots()), or not told when it has none; one with a
+	 * NUL byte is never gone. Only ancestors that do not
 	 * exist are climbed past: one that exists but cannot be listed
 	 * (permissions, open_basedir) is no evidence, and neither is reaching
 	 * the root of a network share (\\server\share, or //server/share) or
@@ -167,10 +168,15 @@ final class Paths {
 		$path     = rtrim( self::normalize( $path ), '/' );
 		$drive    = self::is_windows() && 1 === preg_match( '#^[A-Za-z]:/#', $path );
 		$absolute = '' !== $path && ( '/' === $path[0] || $drive );
-		// The climb is lexical: through a "." or ".." segment it would list a directory the path does not lie in.
-		$dots = 1 === preg_match( '#(^|/)\.{1,2}(/|$)#', $path );
-		if ( ! $absolute || $dots || false !== strpos( $path, "\0" ) || false !== @lstat( $path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a warning would put the path into the error log.
+		if ( ! $absolute || false !== strpos( $path, "\0" ) || false !== @lstat( $path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a warning would put the path into the error log.
 			return false;
+		}
+		// The climb is lexical: through a "." or ".." segment it would list a directory the path does not lie in.
+		if ( 1 === preg_match( '#(^|/)\.{1,2}(/|$)#', $path ) ) {
+			$path = self::resolved_dots( $path );
+			if ( null === $path || false !== @lstat( $path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
+				return false;
+			}
 		}
 		$child  = $path;
 		$parent = self::parent_of( $child );
@@ -190,6 +196,59 @@ final class Paths {
 			$parent = self::parent_of( $child );
 		}
 		return false;
+	}
+
+	/**
+	 * A normalised absolute path without its "." and ".." segments, as the file system itself resolves them, or null
+	 * when it has no such spelling that can be told. A "." is dropped. A ".." is the parent of what the path before
+	 * it resolves to (realpath(), after the cache of resolved paths is cleared): after a link that is the parent of
+	 * the link's target, not of the link, so the spelling given back is where the file system would look. Above a
+	 * root is the root. Not told (null): what is before a ".." cannot be resolved (it is not there, a directory on
+	 * the way cannot be searched, open_basedir hides it) or is not a directory; a network share's path; and on
+	 * Windows a ".." after anything that resolves to another spelling (a junction or link, a short name): Windows
+	 * takes ".." off the spelling before it looks at links, so neither reading is safe to answer for there.
+	 *
+	 * Only the part before a ".." is resolved; what comes after the last one stays as written, links included, as
+	 * in a path without dots.
+	 *
+	 * @param string $path Normalised absolute path with dot segments.
+	 * @return string|null
+	 */
+	private static function resolved_dots( string $path ) {
+		if ( 0 === strpos( $path, '//' ) ) {
+			return null;
+		}
+		$root    = '/' === $path[0] ? '/' : substr( $path, 0, 3 );
+		$built   = $root;
+		$cleared = false;
+		foreach ( explode( '/', (string) substr( $path, strlen( $root ) ) ) as $segment ) {
+			if ( '' === $segment || '.' === $segment ) {
+				continue;
+			}
+			if ( '..' !== $segment ) {
+				$built = rtrim( $built, '/' ) . '/' . $segment;
+				continue;
+			}
+			if ( null === self::parent_of( $built ) ) {
+				continue;
+			}
+			if ( ! $cleared ) {
+				clearstatcache( true );
+				$cleared = true;
+			}
+			$real = self::real( $built );
+			if ( false === $real || ! @is_dir( $real ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a warning would put the path into the error log.
+				return null;
+			}
+			$real = self::normalize( $real );
+			if ( 0 === strpos( $real, '//' ) || ( self::is_windows() && ! self::same( $real, $built, true ) ) ) {
+				return null;
+			}
+			$real   = strlen( $real ) > 3 ? rtrim( $real, '/' ) : $real;
+			$parent = self::parent_of( $real );
+			$built  = null === $parent ? $real : $parent;
+		}
+		return $built;
 	}
 
 	/**

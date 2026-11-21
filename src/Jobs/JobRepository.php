@@ -704,6 +704,16 @@ final class JobRepository implements RunnerRepository {
 	}
 
 	/**
+	 * Why this request has no storage directory, in the words of the directories ('' when it has one): an
+	 * installation without one holds no token either (holds_own_token()).
+	 *
+	 * @return string
+	 */
+	public function storage_problem(): string {
+		return '' === $this->directories->base() ? $this->directories->last_error() : '';
+	}
+
+	/**
 	 * Give up a job that holds the site changed (wp wpcheckpoint job abandon): failed, final, with the reason
 	 * Job::REASON_ABANDONED, and its site_state kept (what it did to a site stays recorded); held_by becomes this
 	 * installation's token, so that what may be reclaimed of it (its tables: reclaim_scope()) is this installation's

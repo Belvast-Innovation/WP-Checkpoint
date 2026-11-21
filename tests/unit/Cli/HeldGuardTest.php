@@ -62,4 +62,26 @@ final class HeldGuardTest extends TestCase {
 		}
 		$this->assertCount( 5, array_unique( $said ), 'each its own words' );
 	}
+
+	public function test_on_windows_a_directory_spelled_with_two_dots_is_named_as_what_may_not_be_told(): void {
+		$said = 'which directory is read cannot be determined, so that nothing can be told of a file there, present or not. With the path written without ".." it is told.';
+		foreach ( array( 'C:\\sites\\current\\..\\wp', 'C:/sites/current/../wp/', 'C:\\sites\\wp\\..', '../wp', 'C:\\sites/current\\../wp' ) as $dir ) {
+			$this->assertStringContainsString( $said, HeldGuard::dotted( $dir, true ), $dir );
+			$this->assertSame( '', HeldGuard::dotted( $dir, false ), $dir . ': elsewhere ".." is gone through, and nothing is added' );
+		}
+		foreach ( array( 'C:\\sites\\wp', 'C:/sites/./wp/', 'C:/sites/..wp/', 'C:/sites/wp../x', 'C:/sites/.../wp', '' ) as $dir ) {
+			$this->assertSame( '', HeldGuard::dotted( $dir, true ), $dir . ': no ".." segment' );
+		}
+		// Added where it cannot be told, and only there: a file that holds is read, whatever the spelling.
+		$dotted = HeldGuard::dotted( 'C:/sites/current/../wp/', true );
+		foreach ( array( Maintenance::UNTOLD_DATA, Maintenance::UNTOLD_FILE ) as $why ) {
+			$plain = HeldGuard::refusal( array( 'eval' ), array( Maintenance::UNKNOWN, $why ) );
+			$this->assertStringNotContainsString( $said, $plain, 'the control: not said without it' );
+			$this->assertSame( $plain . $dotted, HeldGuard::refusal( array( 'eval' ), array( Maintenance::UNKNOWN, $why ), $dotted ) );
+			$this->assertSame( '', HeldGuard::refusal( array( 'wpcheckpoint', 'job', 'list' ), array( Maintenance::UNKNOWN, $why ), $dotted ), 'this plugin\'s commands run all the same' );
+		}
+		foreach ( array( Maintenance::BY_DATA, Maintenance::BY_CODE, '' ) as $why ) {
+			$this->assertStringNotContainsString( $said, HeldGuard::refusal( array( 'eval' ), array( Maintenance::HELD, $why ), $dotted ), 'held by ' . $why );
+		}
+	}
 }
