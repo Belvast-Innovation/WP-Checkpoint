@@ -7,7 +7,8 @@
  * names the way the writer meant; the plugin's own reader cannot.
  *
  * Usage: php tests/extractors/check.php TOOL [TOOL ...]
- * Tools: unzip-c-utf8, unzip-no-locale, 7z, bsdtar, python, ditto, expand-archive.
+ * Tools: unzip-c-utf8, unzip-no-locale, 7z, bsdtar, python, ditto, expand-archive (Windows PowerShell),
+ * expand-archive-pwsh (PowerShell 7).
  * A tool that cannot be run is a failure: CI names the tools each runner has.
  *
  * @package WPCheckpoint
@@ -196,9 +197,38 @@ function tool_command( string $tool, string $zip, string $dest, bool $windows ):
 		case 'ditto':
 			return array( array( 'ditto', '-x', '-k', $zip, $dest ), null );
 		case 'expand-archive':
-			return array( array( 'powershell', '-NoProfile', '-NonInteractive', '-Command', "Expand-Archive -LiteralPath '" . str_replace( "'", "''", $zip ) . "' -DestinationPath '" . str_replace( "'", "''", $dest ) . "'" ), null );
+			return array( array( 'powershell', '-NoProfile', '-NonInteractive', '-Command', expand_archive_script( $zip, $dest ) ), windows_powershell_environment() );
+		case 'expand-archive-pwsh':
+			return array( array( 'pwsh', '-NoProfile', '-NonInteractive', '-Command', expand_archive_script( $zip, $dest ) ), null );
 	}
 	return null;
+}
+
+/** The Expand-Archive call of both PowerShells. */
+function expand_archive_script( string $zip, string $dest ): string {
+	return "Expand-Archive -LiteralPath '" . str_replace( "'", "''", $zip ) . "' -DestinationPath '" . str_replace( "'", "''", $dest ) . "'";
+}
+
+/**
+ * The environment Windows PowerShell (powershell.exe, 5.1) is started with: this process's without PSModulePath,
+ * so that it makes its own module path, as it does in a window a person opens.
+ *
+ * Started from PowerShell 7 through another program (CI's step shell is pwsh, and php passes its environment on),
+ * it inherits a module path with PowerShell 7's module directory before its own. It then loads PowerShell 7's
+ * Microsoft.PowerShell.Archive, which calls an ExtractToDirectory overload the .NET Framework does not have:
+ * a non-terminating error, exit code 0, nothing extracted. That is a matter of how it was started, not of the
+ * archive. Expand-Archive in PowerShell 7 itself is the tool "expand-archive-pwsh".
+ *
+ * @return array<string, string>
+ */
+function windows_powershell_environment(): array {
+	$env = array();
+	foreach ( getenv() as $name => $value ) {
+		if ( 0 !== strcasecmp( (string) $name, 'PSModulePath' ) ) {
+			$env[ $name ] = $value;
+		}
+	}
+	return $env;
 }
 
 /**
@@ -259,12 +289,14 @@ function run_report( int $code, string $out, string $err, string $dest ): array 
 
 /**
  * The versions behind Expand-Archive on this runner, one line each: PowerShell, the module the command comes
- * from (name, version, where it is), the runtime and Windows. With the exit code and the error output when the
- * question itself failed.
+ * from (name, version, where it is), the runtime and Windows. Asked of the same program in the same environment
+ * as the tool's own run. With the exit code and the error output when the question itself failed.
  *
+ * @param string                     $exe The PowerShell ("powershell", "pwsh").
+ * @param array<string, string>|null $env Its environment (null: inherited).
  * @return string[]
  */
-function expand_archive_versions(): array {
+function expand_archive_versions( string $exe, ?array $env ): array {
 	$ask = '$c = Get-Command Expand-Archive; '
 		. '"PowerShell " + $PSVersionTable.PSVersion.ToString() + " (" + $PSVersionTable.PSEdition + ")"; '
 		. '"Expand-Archive: " + $c.CommandType + " of module " + $c.ModuleName + " " + $c.Version.ToString(); '
@@ -274,9 +306,10 @@ function expand_archive_versions(): array {
 		. '"module path of this PowerShell: " + $env:PSModulePath; '
 		. 'Get-Item "$env:ProgramFiles\\PowerShell\\*\\pwsh.exe" -ErrorAction SilentlyContinue | ForEach-Object { "installed beside it: " + $_.FullName + " " + $_.VersionInfo.ProductVersion }; '
 		. 'Get-Module -ListAvailable Microsoft.PowerShell.Archive | ForEach-Object { "available: " + $_.Name + " " + $_.Version.ToString() + " at " + $_.ModuleBase }';
-	list( $code, , $out, $err ) = run_command( array( 'powershell', '-NoProfile', '-NonInteractive', '-Command', $ask ), null );
+	list( $code, , $out, $err ) = run_command( array( $exe, '-NoProfile', '-NonInteractive', '-Command', $ask ), $env );
 	$lines = array_values( array_filter( array_map( 'trim', explode( "\n", str_replace( "\r", '', $out ) ) ), 'strlen' ) );
 	$lines[] = 'module path this process was started with: ' . ( false === getenv( 'PSModulePath' ) ? '(not set)' : (string) getenv( 'PSModulePath' ) );
+	$lines[] = 'module path passed on to it: ' . ( null === $env ? 'inherited' : ( isset( $env['PSModulePath'] ) ? $env['PSModulePath'] : 'none (it makes its own)' ) );
 	if ( 0 !== $code || '' !== trim( $err ) ) {
 		$lines[] = sprintf( 'asking for the versions: exit code %d, error output: %s', $code, trim( $err ) );
 	}
@@ -343,9 +376,9 @@ foreach ( $names as $name ) {
 }
 $failed = false;
 foreach ( $tools as $tool ) {
-	if ( 'expand-archive' === $tool ) {
-		printf( "%-16s versions\n", $tool );
-		foreach ( expand_archive_versions() as $line ) {
+	if ( 'expand-archive' === $tool || 'expand-archive-pwsh' === $tool ) {
+		printf( "%-19s versions\n", $tool );
+		foreach ( expand_archive_versions( 'expand-archive' === $tool ? 'powershell' : 'pwsh', 'expand-archive' === $tool ? windows_powershell_environment() : null ) as $line ) {
 			printf( "    %s\n", $line );
 		}
 	}
@@ -374,7 +407,7 @@ foreach ( $tools as $tool ) {
 		if ( array() !== $problems && ! $informational ) {
 			$problems = array_merge( $problems, run_report( $code, $out, $err, $dest ) );
 		}
-		printf( "%-16s %-16s %s\n", $tool, $label, array() === $problems ? 'ok' : ( $informational ? 'differs (informational: the previous writer)' : 'FAILED' ) );
+		printf( "%-19s %-16s %s\n", $tool, $label, array() === $problems ? 'ok' : ( $informational ? 'differs (informational: the previous writer)' : 'FAILED' ) );
 		foreach ( array_merge( $problems, $notes ) as $line ) {
 			printf( "    %s\n", $line );
 		}

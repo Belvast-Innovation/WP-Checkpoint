@@ -96,7 +96,7 @@ jobs:
           - os: macos-latest
             tools: ditto unzip-c-utf8 unzip-no-locale bsdtar python
           - os: windows-latest
-            tools: expand-archive bsdtar 7z python
+            tools: expand-archive expand-archive-pwsh bsdtar 7z python
     steps:
       - uses: actions/checkout@v4
 
