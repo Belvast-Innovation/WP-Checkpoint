@@ -153,9 +153,7 @@ function windows_bsdtar_difference( string $tool, bool $windows, array $names ):
 function compare_under_difference( array $difference, int $code, string $output, string $dir, array $expected, bool $windows ): array {
 	$problems = array();
 	$skipped  = count( $difference['skipped'] );
-	$lines    = array_values( array_filter( array_map( 'trim', explode( "
-", str_replace( "
-", '', $output ) ) ), 'strlen' ) );
+	$lines    = array_values( array_filter( array_map( 'trim', explode( "\n", str_replace( "\r", '', $output ) ) ), 'strlen' ) );
 	$expect   = array_fill( 0, $skipped, 'tar: Archive entry has empty or unreadable filename ... skipping' );
 	$expect[] = 'tar: Error exit delayed from previous errors';
 	if ( 0 === $code ) {
@@ -273,9 +271,12 @@ function expand_archive_versions(): array {
 		. '"module base: " + $c.Module.ModuleBase; '
 		. '"CLR " + $PSVersionTable.CLRVersion.ToString(); '
 		. '"Windows " + [System.Environment]::OSVersion.Version.ToString(); '
+		. '"module path of this PowerShell: " + $env:PSModulePath; '
+		. 'Get-Item "$env:ProgramFiles\\PowerShell\\*\\pwsh.exe" -ErrorAction SilentlyContinue | ForEach-Object { "installed beside it: " + $_.FullName + " " + $_.VersionInfo.ProductVersion }; '
 		. 'Get-Module -ListAvailable Microsoft.PowerShell.Archive | ForEach-Object { "available: " + $_.Name + " " + $_.Version.ToString() + " at " + $_.ModuleBase }';
 	list( $code, , $out, $err ) = run_command( array( 'powershell', '-NoProfile', '-NonInteractive', '-Command', $ask ), null );
 	$lines = array_values( array_filter( array_map( 'trim', explode( "\n", str_replace( "\r", '', $out ) ) ), 'strlen' ) );
+	$lines[] = 'module path this process was started with: ' . ( false === getenv( 'PSModulePath' ) ? '(not set)' : (string) getenv( 'PSModulePath' ) );
 	if ( 0 !== $code || '' !== trim( $err ) ) {
 		$lines[] = sprintf( 'asking for the versions: exit code %d, error output: %s', $code, trim( $err ) );
 	}
