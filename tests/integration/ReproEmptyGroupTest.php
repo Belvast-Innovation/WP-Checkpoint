@@ -62,7 +62,7 @@ final class ReproEmptyGroupTest extends SwapTestCase {
 		return $out;
 	}
 
-	private function tree(): string {
+	private function whole(): string {
 		clearstatcache( true );
 		return implode( "\n", $this->listing( $this->sandbox ) );
 	}
@@ -95,12 +95,12 @@ final class ReproEmptyGroupTest extends SwapTestCase {
 		}
 		$this->out( 'an export of THIS layout would record (ScanRoots::resolve_dirs)', implode( "\n", array_merge( $said, $export['warnings'] ) ) );
 		$this->out( 'the backup\'s files', array_keys( $backup ) );
-		$this->out( 'tree before', $this->tree() );
+		$this->out( 'tree before', $this->whole() );
 		try {
 			$job = $this->at_swap( $options );
 		} catch ( \Throwable $e ) {
 			$this->out( 'the restore did not reach the swap', $e->getMessage() );
-			$this->out( 'tree now', $this->tree() );
+			$this->out( 'tree now', $this->whole() );
 			$this->assertTrue( true );
 			return;
 		}
@@ -114,11 +114,11 @@ final class ReproEmptyGroupTest extends SwapTestCase {
 			$units[] = sprintf( 'live %s <= stage %s ; old => %s ; had_live %s', $entry['live'], $entry['stage'], $entry['old'], $entry['had_live'] ? 'yes' : 'no' );
 		}
 		$this->out( 'the plan\'s directory units', implode( "\n", $units ) );
-		$this->out( 'tree at the swap (staged, not swapped)', $this->tree() );
+		$this->out( 'tree at the swap (staged, not swapped)', $this->whole() );
 
 		$done = $this->cli_run( $job );
 		$this->out( 'after the restore: status ' . $done->status . ', site_state ' . $done->site_state . ', error "' . $done->last_error . '", message "' . $done->progress_message . '"' );
-		$this->out( 'tree after the restore', $this->tree() );
+		$this->out( 'tree after the restore', $this->whole() );
 		if ( Job::COMPLETED !== $done->status ) {
 			$this->assertTrue( true );
 			return;
@@ -144,7 +144,7 @@ final class ReproEmptyGroupTest extends SwapTestCase {
 				$this->out( 'after the undo: status ' . $undone->status . ', site_state ' . $undone->site_state . ', error "' . $undone->last_error . '", message "' . $undone->progress_message . '"' );
 			}
 		}
-		$this->out( 'tree after the undo', $this->tree() );
+		$this->out( 'tree after the undo', $this->whole() );
 		$this->assertTrue( true );
 	}
 
