@@ -154,7 +154,8 @@ function compare_under_difference( array $difference, int $code, string $output,
 	$problems = array();
 	$skipped  = count( $difference['skipped'] );
 	$lines    = array_values( array_filter( array_map( 'trim', explode( "
-", str_replace( "", '', $output ) ) ), 'strlen' ) );
+", str_replace( "
+", '', $output ) ) ), 'strlen' ) );
 	$expect   = array_fill( 0, $skipped, 'tar: Archive entry has empty or unreadable filename ... skipping' );
 	$expect[] = 'tar: Error exit delayed from previous errors';
 	if ( 0 === $code ) {
@@ -203,20 +204,82 @@ function tool_command( string $tool, string $zip, string $dest, bool $windows ):
 }
 
 /**
- * Run a command; returns [exit code, output].
+ * Run a command; returns [exit code, output, standard output, error output]: the two streams are read apart, and
+ * "output" is the first followed by the second.
  *
  * @param string[]                   $argv
  * @param array<string, string>|null $env
- * @return array{0: int, 1: string}
+ * @return array{0: int, 1: string, 2: string, 3: string}
  */
 function run_command( array $argv, ?array $env ): array {
 	$proc = @proc_open( $argv, array( 0 => array( 'pipe', 'r' ), 1 => array( 'pipe', 'w' ), 2 => array( 'pipe', 'w' ) ), $pipes, null, $env );
 	if ( ! is_resource( $proc ) ) {
-		return array( 127, 'cannot start ' . $argv[0] );
+		return array( 127, 'cannot start ' . $argv[0], '', 'cannot start ' . $argv[0] );
 	}
 	fclose( $pipes[0] );
-	$out = stream_get_contents( $pipes[1] ) . stream_get_contents( $pipes[2] );
-	return array( proc_close( $proc ), (string) $out );
+	$out = (string) stream_get_contents( $pipes[1] );
+	$err = (string) stream_get_contents( $pipes[2] );
+	return array( proc_close( $proc ), $out . $err, $out, $err );
+}
+
+/**
+ * What a failed row says of the tool's run, so that the first failing log shows the reason: the exit code, the
+ * standard output and the error output (apart), and what is at the destination (at most 60 entries, each name
+ * with its bytes: a name decoded another way is another name).
+ *
+ * @return string[]
+ */
+function run_report( int $code, string $out, string $err, string $dest ): array {
+	$lines = array( sprintf( 'the tool: exit code %d', $code ) );
+	foreach ( array( 'standard output' => $out, 'error output' => $err ) as $label => $text ) {
+		$text = trim( str_replace( "\r", '', $text ) );
+		if ( '' === $text ) {
+			$lines[] = 'the tool: ' . $label . ' empty';
+			continue;
+		}
+		$lines[] = sprintf( 'the tool: %s (%d bytes):', $label, strlen( $text ) );
+		foreach ( explode( "\n", strlen( $text ) > 8192 ? substr( $text, 0, 8192 ) . "\n[cut at 8192 bytes]" : $text ) as $line ) {
+			$lines[] = '    | ' . $line;
+		}
+	}
+	if ( ! is_dir( $dest ) ) {
+		$lines[] = 'the destination is not a directory any more';
+		return $lines;
+	}
+	$it    = new RecursiveIteratorIterator( new RecursiveDirectoryIterator( $dest, FilesystemIterator::SKIP_DOTS ), RecursiveIteratorIterator::SELF_FIRST, RecursiveIteratorIterator::CATCH_GET_CHILD );
+	$count = 0;
+	foreach ( $it as $f ) {
+		if ( ++$count > 60 ) {
+			continue;
+		}
+		$rel     = str_replace( '\\', '/', substr( $f->getPathname(), strlen( $dest ) + 1 ) );
+		$lines[] = sprintf( 'at the destination: %s%s (bytes %s)', $rel, $f->isDir() ? '/' : '', bin2hex( $rel ) );
+	}
+	$lines[] = 0 === $count ? 'at the destination: nothing' : sprintf( 'at the destination: %d entries in all', $count );
+	return $lines;
+}
+
+/**
+ * The versions behind Expand-Archive on this runner, one line each: PowerShell, the module the command comes
+ * from (name, version, where it is), the runtime and Windows. With the exit code and the error output when the
+ * question itself failed.
+ *
+ * @return string[]
+ */
+function expand_archive_versions(): array {
+	$ask = '$c = Get-Command Expand-Archive; '
+		. '"PowerShell " + $PSVersionTable.PSVersion.ToString() + " (" + $PSVersionTable.PSEdition + ")"; '
+		. '"Expand-Archive: " + $c.CommandType + " of module " + $c.ModuleName + " " + $c.Version.ToString(); '
+		. '"module base: " + $c.Module.ModuleBase; '
+		. '"CLR " + $PSVersionTable.CLRVersion.ToString(); '
+		. '"Windows " + [System.Environment]::OSVersion.Version.ToString(); '
+		. 'Get-Module -ListAvailable Microsoft.PowerShell.Archive | ForEach-Object { "available: " + $_.Name + " " + $_.Version.ToString() + " at " + $_.ModuleBase }';
+	list( $code, , $out, $err ) = run_command( array( 'powershell', '-NoProfile', '-NonInteractive', '-Command', $ask ), null );
+	$lines = array_values( array_filter( array_map( 'trim', explode( "\n", str_replace( "\r", '', $out ) ) ), 'strlen' ) );
+	if ( 0 !== $code || '' !== trim( $err ) ) {
+		$lines[] = sprintf( 'asking for the versions: exit code %d, error output: %s', $code, trim( $err ) );
+	}
+	return $lines;
 }
 
 /**
@@ -279,6 +342,12 @@ foreach ( $names as $name ) {
 }
 $failed = false;
 foreach ( $tools as $tool ) {
+	if ( 'expand-archive' === $tool ) {
+		printf( "%-16s versions\n", $tool );
+		foreach ( expand_archive_versions() as $line ) {
+			printf( "    %s\n", $line );
+		}
+	}
 	foreach ( array( 'packer' => $volumes[0], 'directory entry' => $crafted, 'legacy host 0' => $legacy ) as $label => $zip ) {
 		$dest = $root . DIRECTORY_SEPARATOR . $tool . '-' . str_replace( ' ', '-', $label );
 		mkdir( $dest, 0700 );
@@ -287,7 +356,7 @@ foreach ( $tools as $tool ) {
 			fwrite( STDERR, "Unknown tool {$tool}.\n" );
 			exit( 2 );
 		}
-		list( $code, $output ) = run_command( $command[0], $command[1] );
+		list( $code, $output, $out, $err ) = run_command( $command[0], $command[1] );
 		$notes      = array();
 		$difference = 'directory entry' === $label ? null : windows_bsdtar_difference( $tool, $windows, $names );
 		if ( null !== $difference ) {
@@ -301,6 +370,9 @@ foreach ( $tools as $tool ) {
 			list( $problems, $notes ) = compare_tree( $dest . DIRECTORY_SEPARATOR . 'files' . DIRECTORY_SEPARATOR . 'wp-content' . DIRECTORY_SEPARATOR . 'uploads' . DIRECTORY_SEPARATOR . 'names', $expected_names, $windows );
 		}
 		$informational = 'legacy host 0' === $label;
+		if ( array() !== $problems && ! $informational ) {
+			$problems = array_merge( $problems, run_report( $code, $out, $err, $dest ) );
+		}
 		printf( "%-16s %-16s %s\n", $tool, $label, array() === $problems ? 'ok' : ( $informational ? 'differs (informational: the previous writer)' : 'FAILED' ) );
 		foreach ( array_merge( $problems, $notes ) as $line ) {
 			printf( "    %s\n", $line );
