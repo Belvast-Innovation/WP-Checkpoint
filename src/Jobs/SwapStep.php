@@ -18,6 +18,7 @@ use WPCheckpoint\Restore\Loader;
 use WPCheckpoint\Restore\Maintenance;
 use WPCheckpoint\Restore\SelfCheck;
 use WPCheckpoint\Restore\Queries;
+use WPCheckpoint\Restore\OtherEntries;
 use WPCheckpoint\Restore\RestoreFiles;
 use WPCheckpoint\Restore\SiteChanged;
 use WPCheckpoint\Restore\SiteCheck;
@@ -3210,6 +3211,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		if ( 1 !== count( $entries['site'] ) || 0 !== ( $site['seq'] ?? -1 ) || false === $real || rtrim( Paths::normalize( (string) $real ), '/' ) !== $site['live'] || $this->base_prefix() !== $site['stage'] ) {
 			throw new SiteChanged( 'The swap\'s plan was written for a WordPress directory or table prefix other than this site\'s now. The swap was refused before it changed anything, and its plan is kept as it was written. Start the restore again.' );
 		}
+		$names = array();
 		foreach ( $entries['dirs'] as $entry ) {
 			$want = null;
 			foreach ( StagingLayout::GROUPS as $group ) {
@@ -3221,11 +3223,19 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 			$prefix = $layout->stage_dir( $other ) . '/';
 			$name   = 0 === strncmp( $entry['stage'], $prefix, strlen( $prefix ) ) ? (string) substr( $entry['stage'], strlen( $prefix ) ) : '';
 			if ( null === $want && in_array( $other, $staged, true ) && '' !== $name && false === strpos( $name, '/' ) && ! in_array( $name, SwapCheckStep::DROP_INS, true ) ) {
-				$want = array( $layout->live_dir( $other ) . '/' . $name, $layout->root( $other ) . '/old/' . $other . '/' . $name );
+				$want    = array( $layout->live_dir( $other ) . '/' . $name, $layout->root( $other ) . '/old/' . $other . '/' . $name );
+				$names[] = $name;
 			}
 			if ( null === $want || $want[0] !== $entry['live'] || $want[1] !== $entry['old'] ) {
 				throw new RetryFrom( 'The swap\'s plan holds a directory entry the final check does not write; the swap was not started, and the final check writes the plan again.', SwapCheckStep::ID );
 			}
+		}
+		// The entries of the content directory are where the files preflight saw them (as the final check checked;
+		// once more here, right before the swap): the plan's, and the ones recorded (OtherEntries).
+		clearstatcache( true );
+		$changed = OtherEntries::changed( $layout->live_dir( $other ), (array) ( $staging['entries'] ?? array() ), $names );
+		if ( null !== $changed ) {
+			throw new SiteChanged( sprintf( 'The entry %1$s of the content directory %2$s is not what it was when the restore read the backup\'s files: a link was put there, taken away or pointed elsewhere since. The swap was refused before it changed anything. Start the restore again.', $changed, $layout->live_dir( $other ) ) );
 		}
 		$plan   = $loaded['plan'];
 		$site   = $plan->site_prefix();
@@ -4224,6 +4234,28 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 				_n( '%d collation the backup uses was written under a name this server knows; the job log says which.', '%d collations the backup uses were written under names this server knows; the job log says which.', $recorded, 'wp-checkpoint' ),
 				$recorded
 			);
+		}
+		// What the files preflight decided or was told (RestoreFilesPreflightStep's records): said only when read
+		// back as recorded, in the fixed words below (the groups are named by their fixed names).
+		$kept = $context->options()['recorded'][ RestoreFilesPreflightStep::RECORD_KEPT ] ?? null;
+		$kept = is_string( $kept ) && '' !== $kept ? array_values( array_intersect( StagingLayout::GROUPS, explode( ',', $kept ) ) ) : array();
+		if ( array() !== $kept ) {
+			$text .= ' ' . sprintf(
+				/* translators: %s: names of content directories, comma-separated */
+				__( 'Not restored, and left as they were, as you chose: %s (the backup lists no file for them).', 'wp-checkpoint' ),
+				implode( ', ', $kept )
+			);
+		}
+		$skipped = $context->options()['recorded'][ RestoreFilesPreflightStep::RECORD_SKIPPED ] ?? null;
+		if ( is_int( $skipped ) && $skipped > 0 ) {
+			$text .= ' ' . sprintf(
+				/* translators: %d: number of paths */
+				_n( '%d path of the backup was not restored: it belongs to none of this site\'s content directories; the job log says which.', '%d paths of the backup were not restored: they belong to none of this site\'s content directories; the job log names the first.', $skipped, 'wp-checkpoint' ),
+				$skipped
+			);
+		}
+		if ( 1 === ( $context->options()['recorded'][ RestoreFilesPreflightStep::RECORD_OTHER ] ?? null ) ) {
+			$text .= ' ' . __( 'In the content directory itself, only what the backup holds was replaced: files and directories there that the backup does not have are as they were.', 'wp-checkpoint' );
 		}
 		return StepResult::done( $text );
 	}

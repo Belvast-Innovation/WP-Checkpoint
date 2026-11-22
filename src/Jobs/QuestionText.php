@@ -82,6 +82,13 @@ final class QuestionText {
 			if ( LinkedTargets::KIND === $kind && '' !== $work ) {
 				$listed = self::linked( $id, $work, $clean );
 			}
+			if ( RestoreFilesPreflightStep::UNMAPPED_KIND === $kind && '' !== $work ) {
+				$listed = self::unmapped( $work );
+			}
+			if ( RestoreFilesPreflightStep::EMPTY_KIND === $kind && '' !== $work ) {
+				$shown  = self::empty_groups( $id, $work );
+				$listed = array_slice( array_filter( (array) ( $shown['groups'] ?? array() ), 'is_string' ), 0, self::MAX_LISTED );
+			}
 			$carry = null;
 			if ( SwapStep::CARRY_KIND === $kind || SwapStep::REDO_CARRY_KIND === $kind ) {
 				$carry = self::carry_file( $work, SwapStep::CARRY_KIND === $kind ? RestoreFiles::CARRY_BACK : RestoreFiles::REDO_CARRY );
@@ -316,6 +323,56 @@ final class QuestionText {
 	}
 
 	/**
+	 * The first of the backup's paths that belong to no content group (RestoreFiles::UNMAPPED, a JSON line each).
+	 *
+	 * @param string $work Work directory.
+	 * @return string[]
+	 */
+	private static function unmapped( string $work ): array {
+		$out    = array();
+		$handle = @fopen( RestoreFiles::path( $work, RestoreFiles::UNMAPPED ), 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- a work file; a warning would put its path into the error log.
+		if ( false === $handle ) {
+			return $out;
+		}
+		for ( $read = 0; $read < self::MAX_LISTED; $read++ ) {
+			$text = fgets( $handle, 65536 );
+			if ( false === $text ) {
+				break;
+			}
+			$data = json_decode( $text, true );
+			if ( is_array( $data ) && isset( $data['p'] ) && is_string( $data['p'] ) ) {
+				$out[] = $data['p'];
+			}
+		}
+		fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- as above.
+		return $out;
+	}
+
+	/**
+	 * What the question about groups the backup lists no file for was asked about (RestoreFiles::EMPTY_GROUPS):
+	 * its groups and how many paths of the backup belong to no group; empty when the file is gone or is another
+	 * question's.
+	 *
+	 * @param string $id   The question's id.
+	 * @param string $work Work directory.
+	 * @return array<string, mixed>
+	 */
+	private static function empty_groups( string $id, string $work ): array {
+		try {
+			$file = ExportPlan::exists( $work, RestoreFiles::EMPTY_GROUPS ) ? ExportPlan::read( $work, RestoreFiles::EMPTY_GROUPS ) : array();
+		} catch ( \RuntimeException $e ) {
+			return array();
+		}
+		if ( ! is_string( $file['id'] ?? null ) || ! hash_equals( $file['id'], $id ) || ! is_array( $file['groups'] ?? null ) ) {
+			return array();
+		}
+		return array(
+			'groups'   => array_values( array_filter( $file['groups'], 'is_string' ) ),
+			'unmapped' => (int) ( $file['unmapped'] ?? 0 ),
+		);
+	}
+
+	/**
 	 * Bytes from hex as the work file holds them, or false when it is not hex.
 	 *
 	 * @param mixed $hex Hex.
@@ -373,6 +430,44 @@ final class QuestionText {
 			return sprintf( 'This server does not say how much disk space is free, so whether the restore\'s staged files (%d MB with a margin) fit cannot be confirmed. Continue anyway, or stop?', (int) ceil( (int) ( $question['bytes'] ?? 0 ) / 1048576 ) );
 		}
 		$kind = (string) ( $question['kind'] ?? '' );
+		if ( RestoreFilesPreflightStep::UNMAPPED_KIND === $kind ) {
+			return sprintf(
+				/* translators: %d: number of paths */
+				_n(
+					'%d path of the backup belongs to none of this site\'s content directories (plugins, themes, uploads, must-use plugins, or the rest of the content directory), so the restore has no place for it; it is listed below. This happens when the site the backup was made on kept a directory under another name or in another place. Skip: restore everything else and leave this file out. Stop: end the restore; nothing of the site was changed.',
+					'%d paths of the backup belong to none of this site\'s content directories (plugins, themes, uploads, must-use plugins, or the rest of the content directory), so the restore has no place for them; the first are listed below, all of them in the job\'s work files. This happens when the site the backup was made on kept a directory under another name or in another place. Skip: restore everything else and leave these files out. Stop: end the restore; nothing of the site was changed.',
+					$count,
+					'wp-checkpoint'
+				),
+				$count
+			);
+		}
+		if ( RestoreFilesPreflightStep::EMPTY_KIND === $kind ) {
+			$lost = (int) ( $tables['unmapped'] ?? 0 );
+			$text = sprintf(
+				/* translators: %d: number of content directories */
+				_n(
+					'The backup says it holds %d content directory (listed below) for which it lists no file, while this site\'s directory holds files. Keep: leave this site\'s directory as it is; it is not restored. Replace: put an empty directory in its place; what is there now is moved aside, and comes back only if the restore is undone.',
+					'The backup says it holds %d content directories (listed below) for which it lists no file, while this site\'s directories hold files. Keep: leave this site\'s directories as they are; they are not restored. Replace: put empty directories in their place; what is there now is moved aside, and comes back only if the restore is undone.',
+					$count,
+					'wp-checkpoint'
+				),
+				$count
+			);
+			if ( $lost > 0 ) {
+				$text .= ' ' . sprintf(
+					/* translators: %d: number of paths */
+					_n(
+						'%d path of the backup belongs to no content directory of this site (the other question is about it): it may be a file of these very directories, kept under another name on the site the backup was made on.',
+						'%d paths of the backup belong to no content directory of this site (the other question is about them): they may be the files of these very directories, kept under another name on the site the backup was made on.',
+						$lost,
+						'wp-checkpoint'
+					),
+					$lost
+				);
+			}
+			return $text;
+		}
 		if ( 'tables_of_either_installation' === $kind ) {
 			return sprintf(
 				/* translators: %d: number of tables */

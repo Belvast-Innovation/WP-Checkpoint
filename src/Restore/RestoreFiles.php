@@ -30,11 +30,21 @@ defined( 'ABSPATH' ) || exit;
  *   into, one at a time.
  * - STAGING: where the files are staged (the site's directories as the
  *   files preflight resolved them, the groups staged, the random part of
- *   the staging roots' names), fixed once.
+ *   the staging roots' names, what the backup calls its content directory),
+ *   written once by the layout; written whole once more at the end of the
+ *   files preflight when groups are kept as they are (its "kept").
  * - KEYS: a directory of name-key buckets (NameClashes), appended under
  *   committed lengths.
  * - UNMAPPED: the backup's paths that belong to no content group and are
  *   not restored (one JSON line each, appended under a committed length).
+ * - OTHER_ENTRIES: the backup's entries of the content directory that on
+ *   this site are somewhere else than spelled, or cannot be told
+ *   (OtherEntries), each with what was seen and whether it is left out; one
+ *   line each, appended under a committed length by the files preflight.
+ * - EMPTY_GROUPS: the content groups the backup lists no file for while
+ *   this site's directory holds some, and how many paths of the backup
+ *   belong to no group, written whole by the files preflight before it asks
+ *   about them; the question names this file.
  * - SOURCES: what the check checked (each volume's size and modification
  *   time, the depth), to judge a later hash mismatch by.
  * - STAGE_PLAN: which of the backup's plugin directories are this plugin
@@ -87,6 +97,10 @@ final class RestoreFiles {
 	const STAGING     = 'restore-staging.json';
 	const KEYS        = 'restore-keys';
 	const UNMAPPED    = 'restore-unmapped.jsonl';
+
+	const OTHER_ENTRIES = 'restore-other-entries.jsonl';
+	const EMPTY_GROUPS  = 'restore-empty-groups.json';
+
 	const SOURCES     = 'restore-sources.json';
 	const STAGE_PLAN  = 'restore-stage-plan.json';
 	const REPORT      = 'restore-stage-report.jsonl';

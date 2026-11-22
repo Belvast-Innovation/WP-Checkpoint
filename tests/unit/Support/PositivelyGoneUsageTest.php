@@ -32,6 +32,7 @@ final class PositivelyGoneUsageTest extends TestCase {
 		'src/Jobs/JobRepository.php'      => array( 1, 0 ),
 		'src/Jobs/PreviousAttempt.php'    => array( 1, 0 ),
 		'src/Jobs/Residue.php'            => array( 1, 0 ),
+		'src/Jobs/RestoreFilesPreflightStep.php' => array( 1, 0 ),
 		'src/Jobs/SwapCheckStep.php'      => array( 3, 0 ),
 		'src/Jobs/SwapStep.php'           => array( 1, 0 ),
 		'src/Jobs/Undo.php'               => array( 1, 0 ),

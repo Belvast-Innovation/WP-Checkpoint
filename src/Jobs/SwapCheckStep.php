@@ -17,7 +17,9 @@ use WPCheckpoint\Restore\ImportSession;
 use WPCheckpoint\Restore\Ledger;
 use WPCheckpoint\Restore\StateCarry;
 use WPCheckpoint\Restore\Queries;
+use WPCheckpoint\Restore\OtherEntries;
 use WPCheckpoint\Restore\RestoreFiles;
+use WPCheckpoint\Restore\SiteChanged;
 use WPCheckpoint\Restore\SiteTables;
 use WPCheckpoint\Restore\StagingLayout;
 use WPCheckpoint\Restore\SwapPlan;
@@ -733,6 +735,8 @@ final class SwapCheckStep implements Step {
 	 * @param array<string, mixed> $run     This run.
 	 * @return array<string, mixed>
 	 * @throws RetryFrom When a directory of the site is no longer where the layout has it (a retry checks all again).
+	 * @throws SiteChanged When an entry of the content directory is not where the files preflight saw it.
+	 * @throws TransientFailure When the staged other content cannot be listed.
 	 */
 	private function live( JobContext $context, array $cursor, array $run ): array {
 		$file = RestoreFiles::path( $context->work_path(), RestoreFiles::SWAP_LIVE );
@@ -743,6 +747,21 @@ final class SwapCheckStep implements Step {
 				if ( ! isset( $now[ $group ] ) || ! Paths::same_location( (string) $now[ $group ], $was ) ) {
 					// A retry checks everything again from the start: the site may have changed more than this.
 					throw new RetryFrom( sprintf( 'The %1$s directory of the site moved since the restore staged its files (it was %2$s, it is %3$s now): the swap would put the files in the wrong place. Put it back and retry, or start the restore again.', $group, $was, (string) ( $now[ $group ] ?? '?' ) ), self::ID );
+				}
+			}
+			// The entries of the content directory as the files preflight saw them (OtherEntries): the staged ones,
+			// and the ones it recorded. A link put there, taken away or pointed elsewhere since is a final failure
+			// (the record is what the files were staged by; it is not written again).
+			if ( in_array( StagingLayout::OTHER, (array) $run['staging']['staged'], true ) ) {
+				$stage = $run['layout']->stage_dir( StagingLayout::OTHER );
+				$names = isset( $this->parts['scandir'] ) ? call_user_func( $this->parts['scandir'], $stage ) : @scandir( $stage );
+				if ( ! is_array( $names ) ) {
+					throw new TransientFailure( 'The staged other content cannot be listed.' );
+				}
+				clearstatcache( true );
+				$changed = OtherEntries::changed( $run['layout']->live_dir( StagingLayout::OTHER ), (array) $run['staging']['entries'], array_values( array_diff( array_map( 'strval', $names ), array( '.', '..' ) ) ) );
+				if ( null !== $changed ) {
+					throw new SiteChanged( sprintf( 'The entry %1$s of the content directory %2$s is not what it was when the restore read the backup\'s files: a link was put there, taken away or pointed elsewhere since. The restore decided by where it was what to stage, so the swap was refused before it changed anything. Start the restore again.', $changed, $run['layout']->live_dir( StagingLayout::OTHER ) ) );
 				}
 			}
 			self::append( $file, 0, '' );

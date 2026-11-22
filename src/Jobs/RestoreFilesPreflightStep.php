@@ -16,6 +16,7 @@ use WPCheckpoint\Restore\DirectoryProbe;
 use WPCheckpoint\Restore\LinkedTargets;
 use WPCheckpoint\Restore\LoaderProbe;
 use WPCheckpoint\Restore\NameClashes;
+use WPCheckpoint\Restore\OtherEntries;
 use WPCheckpoint\Restore\RestoreFiles;
 use WPCheckpoint\Restore\StagingLayout;
 use WPCheckpoint\Restore\StagingSpace;
@@ -105,6 +106,29 @@ final class RestoreFilesPreflightStep implements Step {
 	const MAX_PLUGIN_ENTRIES = 20000;
 
 	/**
+	 * The question about the backup's paths that belong to no content group (its id starts with this and ends
+	 * with their count), and its kind.
+	 */
+	const UNMAPPED_QUESTION = 'unmapped_paths';
+	const UNMAPPED_KIND     = 'unmapped_paths';
+
+	/**
+	 * The question about the groups the backup lists no file for while this site's directory holds some (its id
+	 * starts with this and ends with a digest of the groups), and its kind.
+	 */
+	const EMPTY_QUESTION = 'empty_groups';
+	const EMPTY_KIND     = 'empty_groups';
+
+	/**
+	 * What this step records on the job for the restore's last word (JobContext::record()): the groups kept as
+	 * they are (their names, joined by commas), how many paths of the backup were not restored, and whether other
+	 * content is restored (1 or 0).
+	 */
+	const RECORD_KEPT    = 'groups_kept';
+	const RECORD_SKIPPED = 'paths_not_restored';
+	const RECORD_OTHER   = 'other_content_restored';
+
+	/**
 	 * Injected parts (tests): "directories" function(): array<string, string> (group => live directory, resolved
 	 * here like ScanRoots's), "free" function( string $dir ): ?int, "random" function(): string, "names"
 	 * function( string $parent, TargetNames $probed ): TargetNames, "dev" function( string $path ): ?int (the
@@ -172,18 +196,13 @@ final class RestoreFilesPreflightStep implements Step {
 			}
 			$first = false;
 			LoaderProbe::run( $staging['groups']['mu-plugins'], $layout->probe_name( '.php' ), array( $context, 'confirm_lease' ), (int) ( $this->parts['dir_mode'] ?? ( defined( 'FS_CHMOD_DIR' ) ? FS_CHMOD_DIR : 0755 ) ) );
-			$cursor = array_merge(
-				$cursor,
-				array(
-					'phase'    => 'index',
-					'offset'   => 0,
-					'prev'     => -1,
-					'lengths'  => array_fill( 0, NameClashes::BUCKETS, 0 ),
-					'unmapped' => 0,
-					'count'    => 0,
-					'bytes'    => array_fill( 0, count( $staging['parents'] ), 0.0 ),
-				)
-			);
+			$cursor = self::index_start( $cursor, $staging );
+			$context->checkpoint( $cursor, 65, __( 'Reading the backup\'s files', 'wp-checkpoint' ) );
+		}
+		if ( in_array( $cursor['phase'], array( 'index', 'clashes', 'space' ), true ) && ! isset( $cursor['mapped'] ) ) {
+			// A cursor an earlier version wrote: it did not count the files of each group, which the last phase
+			// decides by. The index is read again from its start.
+			$cursor = self::index_start( $cursor, $staging );
 			$context->checkpoint( $cursor, 65, __( 'Reading the backup\'s files', 'wp-checkpoint' ) );
 		}
 		if ( 'index' === $cursor['phase'] ) {
@@ -272,8 +291,13 @@ final class RestoreFilesPreflightStep implements Step {
 				throw new CannotStage( sprintf( 'The storage directory of WP Checkpoint is inside %s, which the restore replaces whole: the restore\'s own files would be swapped out with it. Set WPCHECKPOINT_STORAGE_DIR to a directory outside it, then start the restore again.', $live ) );
 			}
 		}
-		$random  = isset( $this->parts['random'] ) ? (string) call_user_func( $this->parts['random'] ) : StagingLayout::new_random();
-		$layout  = new StagingLayout( $groups, $context->job()->storage_token, $context->job()->id, $random, $storage );
+		$random = isset( $this->parts['random'] ) ? (string) call_user_func( $this->parts['random'] ) : StagingLayout::new_random();
+		$site   = (array) $manifest->to_array()['site'];
+		$prefix = StagingLayout::content_prefix( (string) ( $site['abspath'] ?? '' ), (string) ( $site['content_dir'] ?? '' ) );
+		$layout = new StagingLayout( $groups, $context->job()->storage_token, $context->job()->id, $random, $storage, $prefix );
+		if ( '' !== $prefix ) {
+			$context->logger()->info( 'The backup was made where the content directory is inside the WordPress directory under another name; its paths under that name are read as the content directory\'s', array( 'name' => $prefix ) );
+		}
 		$parents = array();
 		foreach ( $staged as $group ) {
 			$parents[ $layout->parent( $group ) ] = true;
@@ -288,6 +312,8 @@ final class RestoreFilesPreflightStep implements Step {
 				'storage'  => $storage,
 				'random'   => $random,
 				'left_out' => $left_out,
+				'kept'     => array(),
+				'prefix'   => $prefix,
 			)
 		);
 		return array(
@@ -376,6 +402,17 @@ final class RestoreFilesPreflightStep implements Step {
 		}
 		$unmapped = RestoreFiles::path( $work, RestoreFiles::UNMAPPED );
 		self::truncate_to( $unmapped, (int) $cursor['unmapped'] );
+		// The entries judged by where they are, as committed: the layout leaves out the ones recorded so.
+		$entries = RestoreFiles::path( $work, RestoreFiles::OTHER_ENTRIES );
+		self::truncate_to( $entries, (int) $cursor['entries'] );
+		$staging = self::staging( $work );
+		$layout  = self::layout_of( $staging, $context->job() );
+		$seen    = (array) $staging['entries'];
+		$content = $layout->live_dir( StagingLayout::OTHER );
+		$off     = array_map( 'strval', (array) $staging['storage'] );
+		foreach ( array_diff( StagingLayout::GROUPS, array( StagingLayout::OTHER ) ) as $group ) {
+			$off[] = $layout->live_dir( $group );
+		}
 		$handle = @fopen( $path, 'rb' );
 		if ( false === $handle ) {
 			throw new WorkLost( 'The files index the check extracted cannot be read from the work directory.' );
@@ -393,6 +430,7 @@ final class RestoreFilesPreflightStep implements Step {
 				'parent' => -1,
 				'top'    => '',
 				'raw'    => '',
+				'any'    => '',
 			);
 			if ( (int) $cursor['prev'] >= 0 ) {
 				$prev = self::position( $layout, $parent, self::line_at( $handle, (int) $cursor['prev'], $manifest ) );
@@ -408,9 +446,11 @@ final class RestoreFilesPreflightStep implements Step {
 				$first   = false;
 				$records = array();
 				$lost    = '';
-				$lines   = 0;
-				$read    = 0;
-				$page    = (int) ( $this->parts['page_lines'] ?? self::PAGE_LINES );
+				$found   = '';
+				clearstatcache( true ); // Where an entry is is resolved below: not from what this process resolved before.
+				$lines = 0;
+				$read  = 0;
+				$page  = (int) ( $this->parts['page_lines'] ?? self::PAGE_LINES );
 				while ( $lines < $page && $read < self::PAGE_BYTES ) {
 					$at   = (int) $cursor['offset'] + $read;
 					$text = fgets( $handle, IndexLine::MAX_LINE_BYTES + 2 );
@@ -419,12 +459,35 @@ final class RestoreFilesPreflightStep implements Step {
 					}
 					$read += strlen( $text );
 					++$lines;
-					$line = self::parse( $text, $manifest );
-					$raw  = self::top_entry( $line['p'] );
+					$line    = self::parse( $text, $manifest );
+					$as_read = $layout->canonical( $line['p'] );
+					$raw     = self::top_entry( $as_read );
 					if ( '' !== $raw && $raw !== $prev['raw'] ) {
 						$this->check_storage_entry( $layout, $raw, array_map( 'strval', (array) $staging['storage'] ) );
 					}
 					$prev['raw'] = $raw;
+					$any         = self::other_top( $as_read );
+					if ( '' !== $any && $any !== $prev['any'] && ! isset( $seen[ $any ] ) ) {
+						// Where the entry is on this site, seen once and recorded: a link to a group's directory
+						// is not other content, however it is spelled (OtherEntries).
+						$state = OtherEntries::state( $content, $any );
+						if ( OtherEntries::recorded( $state ) ) {
+							if ( (int) $cursor['records'] >= OtherEntries::MAX_RECORDS ) {
+								throw new CannotStage( sprintf( 'More than %1$d entries of the backup\'s content directory are links on this site, or cannot be told to be there or not (the last one looked at: %2$s). The restore records where each of them is, at most %1$d; this is not a content directory it can restore into.', OtherEntries::MAX_RECORDS, $content . '/' . $any ) );
+							}
+							$out          = OtherEntries::off( $state, $off );
+							$found       .= OtherEntries::line( $any, $state, $out );
+							$seen[ $any ] = array(
+								'state' => $state,
+								'off'   => $out,
+							);
+							++$cursor['records'];
+							if ( $out ) {
+								$layout->leave_out( $any );
+							}
+						}
+					}
+					$prev['any'] = $any;
 					$map         = $layout->map( $line['p'] );
 					$index       = null === $map ? null : ( $parent[ $layout->parent( $map['group'] ) ] ?? null );
 					if ( null !== $map && in_array( $map['group'], (array) ( $staging['left_out'] ?? array() ), true ) ) {
@@ -434,6 +497,9 @@ final class RestoreFilesPreflightStep implements Step {
 						$lost .= self::json( array( 'p' => $line['p'] ) ) . "\n";
 						++$cursor['count'];
 						continue;
+					}
+					if ( StagingLayout::OTHER !== $map['group'] ) {
+						$cursor['mapped'][ $map['group'] ] = (int) ( $cursor['mapped'][ $map['group'] ] ?? 0 ) + 1;
 					}
 					$bad = $names[ $index ]->unstorable( $map['relative'] );
 					if ( null !== $bad ) {
@@ -468,6 +534,10 @@ final class RestoreFilesPreflightStep implements Step {
 					self::append( $unmapped, $lost );
 					$cursor['unmapped'] = (int) $cursor['unmapped'] + strlen( $lost );
 				}
+				if ( '' !== $found ) {
+					self::append( $entries, $found );
+					$cursor['entries'] = (int) $cursor['entries'] + strlen( $found );
+				}
 				if ( isset( $this->parts['at'] ) ) {
 					call_user_func( $this->parts['at'], 'appended' );
 				}
@@ -489,7 +559,7 @@ final class RestoreFilesPreflightStep implements Step {
 		}
 		if ( (int) $cursor['count'] > 0 ) {
 			$context->logger()->warning(
-				'Paths of the backup that belong to no content group are not restored',
+				'Paths of the backup belong to no content group of this site; the restore asks whether to go on without them',
 				array(
 					'count'   => (int) $cursor['count'],
 					'example' => self::listed( $unmapped ),
@@ -502,6 +572,8 @@ final class RestoreFilesPreflightStep implements Step {
 			'lengths' => $cursor['lengths'],
 			'fs'      => $cursor['fs'],
 			'bytes'   => $cursor['bytes'],
+			'count'   => (int) $cursor['count'],
+			'mapped'  => $cursor['mapped'],
 		);
 		$context->checkpoint( $cursor, 67, __( 'Checking the backup\'s file names', 'wp-checkpoint' ) );
 		return null;
@@ -562,6 +634,45 @@ final class RestoreFilesPreflightStep implements Step {
 	}
 
 	/**
+	 * The entry of the content directory a backup path (as the layout reads it) is or is in, when it is not a
+	 * group directory or named like this plugin's own; '' otherwise. Unlike top_entry(), a file directly in the
+	 * content directory counts.
+	 *
+	 * @param string $path Backup path (StagingLayout::canonical()).
+	 * @return string
+	 */
+	private static function other_top( string $path ): string {
+		$parts = explode( '/', $path );
+		if ( count( $parts ) < 2 || StagingLayout::CONTENT !== $parts[0] || '' === $parts[1] || in_array( $parts[1], array( 'plugins', 'themes', 'uploads', 'mu-plugins' ), true ) || 0 === stripos( $parts[1], 'wp-checkpoint-' ) ) {
+			return '';
+		}
+		return $parts[1];
+	}
+
+	/**
+	 * The cursor the index phase starts with.
+	 *
+	 * @param array<string, mixed> $cursor  Cursor (its "fs" is kept).
+	 * @param array<string, mixed> $staging Staging file.
+	 * @return array<string, mixed>
+	 */
+	private static function index_start( array $cursor, array $staging ): array {
+		return array(
+			'phase'    => 'index',
+			'fs'       => $cursor['fs'] ?? array(),
+			'offset'   => 0,
+			'prev'     => -1,
+			'lengths'  => array_fill( 0, NameClashes::BUCKETS, 0 ),
+			'unmapped' => 0,
+			'count'    => 0,
+			'entries'  => 0,
+			'records'  => 0,
+			'mapped'   => array_fill_keys( array_values( array_diff( StagingLayout::GROUPS, array( StagingLayout::OTHER ) ) ), 0 ),
+			'bytes'    => array_fill( 0, count( $staging['parents'] ), 0.0 ),
+		);
+	}
+
+	/**
 	 * One bucket of the clashes phase: the next cursor.
 	 *
 	 * @param JobContext           $context Context.
@@ -575,9 +686,11 @@ final class RestoreFilesPreflightStep implements Step {
 		$b = (int) $cursor['bucket'];
 		if ( $b >= NameClashes::BUCKETS ) {
 			$cursor = array(
-				'phase' => 'space',
-				'fs'    => $cursor['fs'],
-				'bytes' => $cursor['bytes'],
+				'phase'  => 'space',
+				'fs'     => $cursor['fs'],
+				'bytes'  => $cursor['bytes'],
+				'count'  => (int) $cursor['count'],
+				'mapped' => $cursor['mapped'],
 			);
 			$context->checkpoint( $cursor, 69, __( 'Checking the free space', 'wp-checkpoint' ) );
 			return $cursor;
@@ -649,30 +762,192 @@ final class RestoreFilesPreflightStep implements Step {
 		foreach ( $check['short'] as $fs => $short ) {
 			throw new CannotStage( sprintf( 'There is not enough free space on the disk of %1$s: the restore stages %2$s MB of files there and needs %3$s MB free with a margin, and %4$s MB are free. Free some space (or remove older backups), then try again.', $where[ $fs ], self::mb( ceil( $staged[ $fs ] / 1048576 ) ), self::mb( ceil( $short['need'] / 1048576 ) ), self::mb( floor( $short['free'] / 1048576 ) ) ) );
 		}
+		// Everything this phase may ask is asked at once: the free space that cannot be read, the backup's paths
+		// that belong to no group, and the groups that would be swapped for empty directories.
+		$answers = isset( $context->options()['answers'] ) && is_array( $context->options()['answers'] ) ? $context->options()['answers'] : array();
+		$ask     = array();
+		$stopped = array();
+		$why     = array();
 		if ( array() !== $check['unknown'] ) {
-			$answers = isset( $context->options()['answers'] ) && is_array( $context->options()['answers'] ) ? $context->options()['answers'] : array();
-			$answer  = $answers['free_space'] ?? null;
+			$answer = $answers['free_space'] ?? null;
 			if ( 'stop' === $answer ) {
-				throw new Stopped( 'The restore was stopped because the free space for its staged files could not be confirmed.', array( 'free_space' ) );
-			}
-			if ( 'continue' !== $answer ) {
-				return RestoreAsk::ask(
-					$context,
-					$cursor,
-					array(
-						array(
-							'id'      => 'free_space',
-							'kind'    => 'free_space_unknown',
-							'bytes'   => self::question_bytes( max( $check['unknown'] ) ),
-							'choices' => array( 'continue', 'stop' ),
-						),
-					),
-					__( 'Waiting for your decision on 1 question', 'wp-checkpoint' )
+				$stopped[] = 'free_space';
+				$why[]     = 'The restore was stopped because the free space for its staged files could not be confirmed.';
+			} elseif ( 'continue' !== $answer ) {
+				$ask[] = array(
+					'id'      => 'free_space',
+					'kind'    => 'free_space_unknown',
+					'bytes'   => self::question_bytes( max( $check['unknown'] ) ),
+					'choices' => array( 'continue', 'stop' ),
 				);
 			}
+		}
+		$unmapped = (int) ( $cursor['count'] ?? 0 );
+		$lost     = self::UNMAPPED_QUESTION . '_' . $unmapped; // An answer holds for this many paths.
+		if ( $unmapped > 0 ) {
+			$answer = $answers[ $lost ] ?? null;
+			if ( 'stop' === $answer ) {
+				$stopped[] = $lost;
+				$why[]     = 'The restore was stopped because paths of the backup belong to no content group of this site and would not have been restored.';
+			} elseif ( 'skip' !== $answer ) {
+				$ask[] = array(
+					'id'      => $lost,
+					'kind'    => self::UNMAPPED_KIND,
+					'count'   => $unmapped,
+					'file'    => RestoreFiles::UNMAPPED,
+					'choices' => array( 'skip', 'stop' ),
+				);
+			}
+		}
+		$empty = $this->empty_groups( $staging, (array) ( $cursor['mapped'] ?? array() ) );
+		$id    = self::EMPTY_QUESTION . '_' . substr( hash( 'sha256', implode( ',', $empty ) ), 0, 16 ); // An answer holds for these groups.
+		$keep  = array();
+		if ( array() !== $empty ) {
+			$answer = $answers[ $id ] ?? null;
+			if ( 'keep' === $answer ) {
+				$keep = $empty;
+			} elseif ( 'replace' !== $answer ) {
+				try {
+					ExportPlan::write(
+						$context->work_path(),
+						RestoreFiles::EMPTY_GROUPS,
+						array(
+							'id'       => $id,
+							'groups'   => $empty,
+							'unmapped' => $unmapped,
+						)
+					);
+				} catch ( \RuntimeException $e ) {
+					throw new TransientFailure( 'A work file of the restore could not be written: ' . $e->getMessage() );
+				}
+				$ask[] = array(
+					'id'      => $id,
+					'kind'    => self::EMPTY_KIND,
+					'count'   => count( $empty ),
+					'file'    => RestoreFiles::EMPTY_GROUPS,
+					'choices' => array( 'keep', 'replace' ),
+				);
+			}
+		}
+		foreach ( array_keys( $answers ) as $other ) {
+			foreach ( array(
+				self::UNMAPPED_QUESTION => $lost,
+				self::EMPTY_QUESTION    => $id,
+			) as $start => $now ) {
+				if ( 0 === strpos( (string) $other, $start . '_' ) && $other !== $now ) {
+					// Given for another count of paths, or for other groups (the site changed since): it holds for none of these.
+					$context->logger()->warning( 'An answer given for other paths or content groups than the restore would now ask about is not used', array( 'question' => (string) $other ) );
+				}
+			}
+		}
+		if ( array() !== $stopped ) {
+			throw new Stopped( implode( ' ', $why ), $stopped );
+		}
+		if ( array() !== $ask ) {
+			$context->logger()->info(
+				'The restore asks before it stages any file',
+				array(
+					'questions'    => array_column( $ask, 'kind' ),
+					'empty_groups' => $empty,
+					'unmapped'     => $unmapped,
+				)
+			);
+			return RestoreAsk::ask(
+				$context,
+				$cursor,
+				$ask,
+				sprintf(
+					/* translators: %d: number of questions */
+					_n( 'Waiting for your decision on %d question', 'Waiting for your decision on %d questions', count( $ask ), 'wp-checkpoint' ),
+					count( $ask )
+				)
+			);
+		}
+		if ( array() !== $check['unknown'] ) {
 			$context->logger()->warning( 'The free space for the staged files could not be read; the restore continues as you chose', array( 'need' => $check['unknown'] ) );
 		}
+		if ( $unmapped > 0 ) {
+			$context->logger()->warning( 'Paths of the backup that belong to no content group are not restored, as chosen', array( 'count' => $unmapped ) );
+		}
+		// The groups kept as they are leave the staged ones: one write of the whole staging file, the same again
+		// when this unit is replayed (the answer is on the job, and the groups are judged from staged and kept).
+		$all    = array_merge( (array) $staging['staged'], (array) $staging['kept'] );
+		$staged = array_values( array_diff( array_values( array_intersect( StagingLayout::GROUPS, $all ) ), $keep ) );
+		if ( array_values( (array) $staging['staged'] ) !== $staged || array_values( (array) $staging['kept'] ) !== $keep ) {
+			$stored           = array_diff_key( $staging, array( 'entries' => true ) );
+			$stored['staged'] = $staged;
+			$stored['kept']   = $keep;
+			try {
+				ExportPlan::write( $context->work_path(), RestoreFiles::STAGING, $stored );
+			} catch ( \RuntimeException $e ) {
+				throw new TransientFailure( 'A work file of the restore could not be written: ' . $e->getMessage() );
+			}
+		}
+		foreach ( $keep as $group ) {
+			$context->logger()->warning( 'A content group of the backup is not restored: the backup lists no file for it while its directory on this site holds some, and the restore was told to keep the directory as it is', array( 'group' => $group ) );
+		}
+		foreach ( array_diff( $empty, $keep ) as $group ) {
+			$context->logger()->warning( 'A content group\'s directory is replaced by an empty one, as chosen: the backup lists no file for it', array( 'group' => $group ) );
+		}
+		// What the restore says at its end (SwapStep::completed()).
+		$context->record( self::RECORD_KEPT, implode( ',', $keep ) );
+		$context->record( self::RECORD_SKIPPED, $unmapped );
+		$context->record( self::RECORD_OTHER, in_array( StagingLayout::OTHER, $staged, true ) ? 1 : 0 );
 		return StepResult::done( __( 'The backup\'s files can be staged here', 'wp-checkpoint' ) );
+	}
+
+	/**
+	 * The named groups the swap would replace by an empty directory although there is something to lose: staged
+	 * (or kept already, when this is a replay), no file of the backup mapped into it, and its directory on this
+	 * site holds an entry (for plugins: one besides this plugin's own directory, which the restore stages a copy
+	 * of whatever the backup holds). By positive evidence only: a directory that is there and cannot be listed
+	 * counts as holding something (it is asked about), one that is positively not there does not.
+	 *
+	 * @param array<string, mixed> $staging Staging file.
+	 * @param array<string, mixed> $mapped  Group => files of the backup mapped into it.
+	 * @return string[] In the groups' order.
+	 */
+	private function empty_groups( array $staging, array $mapped ): array {
+		$out = array();
+		$all = array_merge( (array) $staging['staged'], (array) $staging['kept'] );
+		$own = basename( rtrim( str_replace( '\\', '/', (string) ( $this->parts['plugin_dir'] ?? WPCHECKPOINT_DIR ) ), '/' ) );
+		foreach ( array_diff( StagingLayout::GROUPS, array( StagingLayout::OTHER ) ) as $group ) {
+			if ( ! in_array( $group, $all, true ) || (int) ( $mapped[ $group ] ?? 0 ) > 0 ) {
+				continue;
+			}
+			if ( false !== self::holds_entries( (string) $staging['groups'][ $group ], 'plugins' === $group ? $own : '' ) ) {
+				$out[] = $group;
+			}
+		}
+		return $out;
+	}
+
+	/**
+	 * Whether a directory holds an entry (besides one name): true, false (it lists without one, or is positively
+	 * not there), or null when that cannot be told. Stops at the first entry found.
+	 *
+	 * @param string $dir  Directory.
+	 * @param string $skip A name that does not count ('' for none).
+	 * @return bool|null
+	 */
+	private static function holds_entries( string $dir, string $skip ) {
+		clearstatcache( true, $dir );
+		if ( false === @lstat( $dir ) ) {
+			return Paths::positively_gone( $dir ) ? false : null;
+		}
+		$handle = @opendir( $dir );
+		if ( false === $handle ) {
+			return null;
+		}
+		$found = false;
+		while ( false !== ( $entry = readdir( $handle ) ) ) { // phpcs:ignore Generic.CodeAnalysis.AssignmentInCondition.FoundInWhileCondition,WordPress.CodeAnalysis.AssignmentInCondition.FoundInWhileCondition -- the idiom of readdir().
+			if ( '.' !== $entry && '..' !== $entry && ( '' === $skip || $entry !== $skip ) ) {
+				$found = true;
+				break;
+			}
+		}
+		closedir( $handle );
+		return $found;
 	}
 
 	/**
@@ -904,6 +1179,15 @@ final class RestoreFilesPreflightStep implements Step {
 		if ( ! isset( $data['random'], $data['storage'] ) || ! is_string( $data['random'] ) || ! is_array( $data['storage'] ) ) {
 			throw new WorkLost( 'The restore\'s staging layout in the work directory is damaged.' );
 		}
+		// What a staging file of an earlier version does not have: no group kept, no other name of the content directory.
+		$data['kept']   = isset( $data['kept'] ) && is_array( $data['kept'] ) ? array_values( array_map( 'strval', $data['kept'] ) ) : array();
+		$data['prefix'] = isset( $data['prefix'] ) && is_string( $data['prefix'] ) ? $data['prefix'] : '';
+		// Not of the staging file: the entries of the content directory judged by where they are, from their own record.
+		try {
+			$data['entries'] = OtherEntries::read( RestoreFiles::path( $work, RestoreFiles::OTHER_ENTRIES ) );
+		} catch ( \UnexpectedValueException $e ) {
+			throw new WorkLost( 'A work file of the restore is damaged: ' . $e->getMessage() );
+		}
 		return $data;
 	}
 
@@ -917,7 +1201,13 @@ final class RestoreFilesPreflightStep implements Step {
 	 */
 	public static function layout_of( array $staging, Job $job ): StagingLayout {
 		try {
-			return new StagingLayout( $staging['groups'], $job->storage_token, $job->id, (string) $staging['random'], array_map( 'strval', $staging['storage'] ) );
+			$off = array();
+			foreach ( (array) ( $staging['entries'] ?? array() ) as $name => $entry ) {
+				if ( ! empty( $entry['off'] ) ) {
+					$off[] = (string) $name;
+				}
+			}
+			return new StagingLayout( $staging['groups'], $job->storage_token, $job->id, (string) $staging['random'], array_map( 'strval', $staging['storage'] ), (string) ( $staging['prefix'] ?? '' ), $off );
 		} catch ( \InvalidArgumentException $e ) {
 			throw new WorkLost( 'The restore\'s staging layout in the work directory is damaged.' );
 		}
@@ -929,7 +1219,7 @@ final class RestoreFilesPreflightStep implements Step {
 	 * @param StagingLayout      $layout Layout.
 	 * @param array<string, int> $parents Parent => index.
 	 * @param array{p: string}   $line    Parsed line.
-	 * @return array{path: string, parent: int, top: string, raw: string}
+	 * @return array{path: string, parent: int, top: string, raw: string, any: string}
 	 */
 	private static function position( StagingLayout $layout, array $parents, array $line ): array {
 		$map = $layout->map( $line['p'] );
@@ -938,14 +1228,16 @@ final class RestoreFilesPreflightStep implements Step {
 				'path'   => '',
 				'parent' => -1,
 				'top'    => '',
-				'raw'    => self::top_entry( $line['p'] ),
+				'raw'    => self::top_entry( $layout->canonical( $line['p'] ) ),
+				'any'    => self::other_top( $layout->canonical( $line['p'] ) ),
 			);
 		}
 		return array(
 			'path'   => $map['group'] . '/' . $map['relative'],
 			'parent' => $parents[ $layout->parent( $map['group'] ) ],
 			'top'    => StagingLayout::OTHER === $map['group'] ? explode( '/', $map['relative'] )[0] : '',
-			'raw'    => self::top_entry( $line['p'] ),
+			'raw'    => self::top_entry( $layout->canonical( $line['p'] ) ),
+			'any'    => self::other_top( $layout->canonical( $line['p'] ) ),
 		);
 	}
 
