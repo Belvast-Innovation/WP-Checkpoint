@@ -7,7 +7,8 @@
  * names the way the writer meant; the plugin's own reader cannot.
  *
  * Usage: php tests/extractors/check.php TOOL [TOOL ...]
- * Tools: unzip-c-utf8, unzip-no-locale, 7z, bsdtar, python, ditto, expand-archive.
+ * Tools: unzip-c-utf8, unzip-no-locale, 7z, bsdtar, python, ditto, expand-archive (Windows PowerShell),
+ * expand-archive-pwsh (PowerShell 7).
  * A tool that cannot be run is a failure: CI names the tools each runner has.
  *
  * @package WPCheckpoint
@@ -153,8 +154,7 @@ function windows_bsdtar_difference( string $tool, bool $windows, array $names ):
 function compare_under_difference( array $difference, int $code, string $output, string $dir, array $expected, bool $windows ): array {
 	$problems = array();
 	$skipped  = count( $difference['skipped'] );
-	$lines    = array_values( array_filter( array_map( 'trim', explode( "
-", str_replace( "", '', $output ) ) ), 'strlen' ) );
+	$lines    = array_values( array_filter( array_map( 'trim', explode( "\n", str_replace( "\r", '', $output ) ) ), 'strlen' ) );
 	$expect   = array_fill( 0, $skipped, 'tar: Archive entry has empty or unreadable filename ... skipping' );
 	$expect[] = 'tar: Error exit delayed from previous errors';
 	if ( 0 === $code ) {
@@ -197,26 +197,123 @@ function tool_command( string $tool, string $zip, string $dest, bool $windows ):
 		case 'ditto':
 			return array( array( 'ditto', '-x', '-k', $zip, $dest ), null );
 		case 'expand-archive':
-			return array( array( 'powershell', '-NoProfile', '-NonInteractive', '-Command', "Expand-Archive -LiteralPath '" . str_replace( "'", "''", $zip ) . "' -DestinationPath '" . str_replace( "'", "''", $dest ) . "'" ), null );
+			return array( array( 'powershell', '-NoProfile', '-NonInteractive', '-Command', expand_archive_script( $zip, $dest ) ), windows_powershell_environment() );
+		case 'expand-archive-pwsh':
+			return array( array( 'pwsh', '-NoProfile', '-NonInteractive', '-Command', expand_archive_script( $zip, $dest ) ), null );
 	}
 	return null;
 }
 
+/** The Expand-Archive call of both PowerShells. */
+function expand_archive_script( string $zip, string $dest ): string {
+	return "Expand-Archive -LiteralPath '" . str_replace( "'", "''", $zip ) . "' -DestinationPath '" . str_replace( "'", "''", $dest ) . "'";
+}
+
 /**
- * Run a command; returns [exit code, output].
+ * The environment Windows PowerShell (powershell.exe, 5.1) is started with: this process's without PSModulePath,
+ * so that it makes its own module path, as it does in a window a person opens.
+ *
+ * Started from PowerShell 7 through another program (CI's step shell is pwsh, and php passes its environment on),
+ * it inherits a module path with PowerShell 7's module directory before its own. It then loads PowerShell 7's
+ * Microsoft.PowerShell.Archive, which calls an ExtractToDirectory overload the .NET Framework does not have:
+ * a non-terminating error, exit code 0, nothing extracted. That is a matter of how it was started, not of the
+ * archive. Expand-Archive in PowerShell 7 itself is the tool "expand-archive-pwsh".
+ *
+ * @return array<string, string>
+ */
+function windows_powershell_environment(): array {
+	$env = array();
+	foreach ( getenv() as $name => $value ) {
+		if ( 0 !== strcasecmp( (string) $name, 'PSModulePath' ) ) {
+			$env[ $name ] = $value;
+		}
+	}
+	return $env;
+}
+
+/**
+ * Run a command; returns [exit code, output, standard output, error output]: the two streams are read apart, and
+ * "output" is the first followed by the second.
  *
  * @param string[]                   $argv
  * @param array<string, string>|null $env
- * @return array{0: int, 1: string}
+ * @return array{0: int, 1: string, 2: string, 3: string}
  */
 function run_command( array $argv, ?array $env ): array {
 	$proc = @proc_open( $argv, array( 0 => array( 'pipe', 'r' ), 1 => array( 'pipe', 'w' ), 2 => array( 'pipe', 'w' ) ), $pipes, null, $env );
 	if ( ! is_resource( $proc ) ) {
-		return array( 127, 'cannot start ' . $argv[0] );
+		return array( 127, 'cannot start ' . $argv[0], '', 'cannot start ' . $argv[0] );
 	}
 	fclose( $pipes[0] );
-	$out = stream_get_contents( $pipes[1] ) . stream_get_contents( $pipes[2] );
-	return array( proc_close( $proc ), (string) $out );
+	$out = (string) stream_get_contents( $pipes[1] );
+	$err = (string) stream_get_contents( $pipes[2] );
+	return array( proc_close( $proc ), $out . $err, $out, $err );
+}
+
+/**
+ * What a failed row says of the tool's run, so that the first failing log shows the reason: the exit code, the
+ * standard output and the error output (apart), and what is at the destination (at most 60 entries, each name
+ * with its bytes: a name decoded another way is another name).
+ *
+ * @return string[]
+ */
+function run_report( int $code, string $out, string $err, string $dest ): array {
+	$lines = array( sprintf( 'the tool: exit code %d', $code ) );
+	foreach ( array( 'standard output' => $out, 'error output' => $err ) as $label => $text ) {
+		$text = trim( str_replace( "\r", '', $text ) );
+		if ( '' === $text ) {
+			$lines[] = 'the tool: ' . $label . ' empty';
+			continue;
+		}
+		$lines[] = sprintf( 'the tool: %s (%d bytes):', $label, strlen( $text ) );
+		foreach ( explode( "\n", strlen( $text ) > 8192 ? substr( $text, 0, 8192 ) . "\n[cut at 8192 bytes]" : $text ) as $line ) {
+			$lines[] = '    | ' . $line;
+		}
+	}
+	if ( ! is_dir( $dest ) ) {
+		$lines[] = 'the destination is not a directory any more';
+		return $lines;
+	}
+	$it    = new RecursiveIteratorIterator( new RecursiveDirectoryIterator( $dest, FilesystemIterator::SKIP_DOTS ), RecursiveIteratorIterator::SELF_FIRST, RecursiveIteratorIterator::CATCH_GET_CHILD );
+	$count = 0;
+	foreach ( $it as $f ) {
+		if ( ++$count > 60 ) {
+			continue;
+		}
+		$rel     = str_replace( '\\', '/', substr( $f->getPathname(), strlen( $dest ) + 1 ) );
+		$lines[] = sprintf( 'at the destination: %s%s (bytes %s)', $rel, $f->isDir() ? '/' : '', bin2hex( $rel ) );
+	}
+	$lines[] = 0 === $count ? 'at the destination: nothing' : sprintf( 'at the destination: %d entries in all', $count );
+	return $lines;
+}
+
+/**
+ * The versions behind Expand-Archive on this runner, one line each: PowerShell, the module the command comes
+ * from (name, version, where it is), the runtime and Windows. Asked of the same program in the same environment
+ * as the tool's own run. With the exit code and the error output when the question itself failed.
+ *
+ * @param string                     $exe The PowerShell ("powershell", "pwsh").
+ * @param array<string, string>|null $env Its environment (null: inherited).
+ * @return string[]
+ */
+function expand_archive_versions( string $exe, ?array $env ): array {
+	$ask = '$c = Get-Command Expand-Archive; '
+		. '"PowerShell " + $PSVersionTable.PSVersion.ToString() + " (" + $PSVersionTable.PSEdition + ")"; '
+		. '"Expand-Archive: " + $c.CommandType + " of module " + $c.ModuleName + " " + $c.Version.ToString(); '
+		. '"module base: " + $c.Module.ModuleBase; '
+		. '"CLR " + $PSVersionTable.CLRVersion.ToString(); '
+		. '"Windows " + [System.Environment]::OSVersion.Version.ToString(); '
+		. '"module path of this PowerShell: " + $env:PSModulePath; '
+		. 'Get-Item "$env:ProgramFiles\\PowerShell\\*\\pwsh.exe" -ErrorAction SilentlyContinue | ForEach-Object { "installed beside it: " + $_.FullName + " " + $_.VersionInfo.ProductVersion }; '
+		. 'Get-Module -ListAvailable Microsoft.PowerShell.Archive | ForEach-Object { "available: " + $_.Name + " " + $_.Version.ToString() + " at " + $_.ModuleBase }';
+	list( $code, , $out, $err ) = run_command( array( $exe, '-NoProfile', '-NonInteractive', '-Command', $ask ), $env );
+	$lines = array_values( array_filter( array_map( 'trim', explode( "\n", str_replace( "\r", '', $out ) ) ), 'strlen' ) );
+	$lines[] = 'module path this process was started with: ' . ( false === getenv( 'PSModulePath' ) ? '(not set)' : (string) getenv( 'PSModulePath' ) );
+	$lines[] = 'module path passed on to it: ' . ( null === $env ? 'inherited' : ( isset( $env['PSModulePath'] ) ? $env['PSModulePath'] : 'none (it makes its own)' ) );
+	if ( 0 !== $code || '' !== trim( $err ) ) {
+		$lines[] = sprintf( 'asking for the versions: exit code %d, error output: %s', $code, trim( $err ) );
+	}
+	return $lines;
 }
 
 /**
@@ -279,6 +376,12 @@ foreach ( $names as $name ) {
 }
 $failed = false;
 foreach ( $tools as $tool ) {
+	if ( 'expand-archive' === $tool || 'expand-archive-pwsh' === $tool ) {
+		printf( "%-19s versions\n", $tool );
+		foreach ( expand_archive_versions( 'expand-archive' === $tool ? 'powershell' : 'pwsh', 'expand-archive' === $tool ? windows_powershell_environment() : null ) as $line ) {
+			printf( "    %s\n", $line );
+		}
+	}
 	foreach ( array( 'packer' => $volumes[0], 'directory entry' => $crafted, 'legacy host 0' => $legacy ) as $label => $zip ) {
 		$dest = $root . DIRECTORY_SEPARATOR . $tool . '-' . str_replace( ' ', '-', $label );
 		mkdir( $dest, 0700 );
@@ -287,7 +390,7 @@ foreach ( $tools as $tool ) {
 			fwrite( STDERR, "Unknown tool {$tool}.\n" );
 			exit( 2 );
 		}
-		list( $code, $output ) = run_command( $command[0], $command[1] );
+		list( $code, $output, $out, $err ) = run_command( $command[0], $command[1] );
 		$notes      = array();
 		$difference = 'directory entry' === $label ? null : windows_bsdtar_difference( $tool, $windows, $names );
 		if ( null !== $difference ) {
@@ -301,7 +404,10 @@ foreach ( $tools as $tool ) {
 			list( $problems, $notes ) = compare_tree( $dest . DIRECTORY_SEPARATOR . 'files' . DIRECTORY_SEPARATOR . 'wp-content' . DIRECTORY_SEPARATOR . 'uploads' . DIRECTORY_SEPARATOR . 'names', $expected_names, $windows );
 		}
 		$informational = 'legacy host 0' === $label;
-		printf( "%-16s %-16s %s\n", $tool, $label, array() === $problems ? 'ok' : ( $informational ? 'differs (informational: the previous writer)' : 'FAILED' ) );
+		if ( array() !== $problems && ! $informational ) {
+			$problems = array_merge( $problems, run_report( $code, $out, $err, $dest ) );
+		}
+		printf( "%-19s %-16s %s\n", $tool, $label, array() === $problems ? 'ok' : ( $informational ? 'differs (informational: the previous writer)' : 'FAILED' ) );
 		foreach ( array_merge( $problems, $notes ) as $line ) {
 			printf( "    %s\n", $line );
 		}
