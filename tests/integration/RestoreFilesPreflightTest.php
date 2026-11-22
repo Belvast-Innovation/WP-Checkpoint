@@ -286,6 +286,41 @@ final class RestoreFilesPreflightTest extends RestoreTestCase {
 		$this->assertSame( array( 'free_space' ), array_column( $job->questions, 'id' ) );
 	}
 
+	public function test_an_unattended_restore_fails_where_the_free_space_cannot_be_read_and_is_not_left_waiting(): void {
+		$base     = $this->with_files( array( 'wp-content/uploads/a.txt' => str_repeat( 'a', 1000 ) ) );
+		$policy   = array(
+			'uncertain_tables'        => 'exclude',
+			'shared_tables'           => 'exclude',
+			LinkedTargets::POLICY_KEY => 'swap',
+			'unverified'              => 'keep',
+		);
+		$attended = array( 'policy' => $policy );
+		$nobody   = array(
+			'unattended' => true,
+			'policy'     => $policy,
+		);
+		$known    = $this->type(
+			array(
+				'free' => static function (): int {
+					return 1073741824;
+				},
+			)
+		);
+		$this->assertSame( Job::COMPLETED, $this->run_restore( $this->job_for( $known, $base, $nobody ) )->status, 'the control: unattended, and the free space is known' );
+		$unknown = $this->type(
+			array(
+				'free' => static function () {
+					return null;
+				},
+			)
+		);
+		$this->assertSame( Job::PAUSED, $this->run_restore( $this->job_for( $unknown, $base, $attended ) )->status, 'the control: attended under the same policy, it is asked' );
+		$job = $this->run_restore( $this->job_for( $unknown, $base, $nobody ) );
+		$this->assertSame( Job::FAILED, $job->status, 'nobody would answer: it does not wait' );
+		$this->assertSame( array(), $job->questions );
+		$this->assertStringContainsString( 'This restore runs unattended, and it came to a decision only a person can make: whether to go on although this server does not say how much free space there is for the files the restore stages', (string) $job->last_error );
+	}
+
 	public function test_a_storage_directory_the_swap_would_move_stops_the_restore_as_named_and_as_resolved(): void {
 		$base    = $this->with_files( array( 'wp-content/uploads/a.txt' => 'a' ) );
 		$storage = (string) realpath( Plugin::instance()->directories()->base() );

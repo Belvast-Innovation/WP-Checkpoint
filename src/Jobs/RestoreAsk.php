@@ -47,7 +47,7 @@ final class RestoreAsk {
 		'tables_shared_with_another_installation' => array( self::POLICY, 'shared_tables' ),
 		LinkedTargets::KIND                       => array( self::POLICY, LinkedTargets::POLICY_KEY ),
 		SwapStep::UNVERIFIED_KIND                 => array( self::POLICY, RestoreJob::UNVERIFIED ),
-		'free_space_unknown'                      => array( self::ASKS, 'As before this entry existed: the free space for the staged files could not be read, and the restore waits for someone to say whether to go on.' ),
+		'free_space_unknown'                      => array( self::FAILS, 'whether to go on although this server does not say how much free space there is for the files the restore stages (nothing of the site was changed)' ),
 		SwapStep::CARRY_KIND                      => array( self::ASKS, 'Asked by an undo, which a person starts for a restore that has completed; the site is open as it is while it waits, and failing here would end the undo halfway.' ),
 		SwapStep::REDO_CARRY_KIND                 => array( self::ASKS, 'Asked by a redo, which a person starts after an undo; the site is open as the undo left it while it waits.' ),
 		SwapStep::AFTER_UNDO_KIND                 => array( self::ASKS, 'Asked at the end of an undo, which a person starts; the site the undo put back is open while it waits, and either answer is a decision about a site already changed.' ),
