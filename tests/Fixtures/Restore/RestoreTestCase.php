@@ -248,6 +248,13 @@ abstract class RestoreTestCase extends JobTestCase {
 			$by_id[ $question['id'] ] = $answers[ $question['kind'] ];
 		}
 		$this->assertNotNull( Plugin::instance()->job_actions()->answer( $job->id, $by_id ) );
+		// Answered, it is paused still: the next tick takes it up.
+		$runner = Plugin::instance()->runner();
+		$this->autocommit(
+			static function () use ( $runner, $job ): void {
+				$runner->tick( $job->id, microtime( true ) );
+			}
+		);
 		return $this->run_restore( Plugin::instance()->jobs()->find( $job->id ) );
 	}
 

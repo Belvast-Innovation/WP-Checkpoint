@@ -180,7 +180,7 @@ final class SwapCheckTest extends RestoreTestCase {
 			)
 		);
 		$this->assertSame( array( 'plugins', 'uploads', 'languages' ), $dirs, 'every staged group (the ones the backup holds), then each top-level entry of other content but the drop-in' );
-		$this->assertSame( 5, $kinds[ SwapPlan::DIR ] ?? 0 );
+		$this->assertSame( 3, $kinds[ SwapPlan::DIR ] ?? 0 );
 		$this->assertNotContains( 'object-cache.php', array_map( 'basename', array_column( $entries, 1 ) ), 'the live drop-in stays' );
 		$tables = array_values( array_filter( $entries, static function ( array $e ): bool {
 			return SwapPlan::TABLE_OF === $e[0];

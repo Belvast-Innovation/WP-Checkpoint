@@ -392,7 +392,16 @@ abstract class SwapTestCase extends RestoreTestCase {
 		$wpdb->query( "INSERT INTO `{$keep}` (id, v) VALUES (3, 'backup')" );
 		$wpdb->query( "INSERT INTO `{$new}` (id, v) VALUES (1, 'backup')" );
 		$tables = array_values( array_diff( self::live_tables(), array( $gone ) ) );
-		$base   = $this->backup( $tables, null, null, array( 'files' => null === $this->backup_has ? self::backup_files() : $this->backup_has ) );
+		// Every group named, as a backup of a whole site names them, whether or not this test's files are in each.
+		$base = $this->backup(
+			$tables,
+			null,
+			null,
+			array(
+				'files'  => null === $this->backup_has ? self::backup_files() : $this->backup_has,
+				'groups' => \WPCheckpoint\Restore\StagingLayout::GROUPS,
+			)
+		);
 		// The live site as it is before the restore: the backup's rows were only for the export.
 		$wpdb->query( "DELETE FROM `{$keep}` WHERE id = 3" );
 		$wpdb->query( "UPDATE `{$keep}` SET v = 'live'" );
