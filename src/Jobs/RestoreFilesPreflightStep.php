@@ -656,7 +656,8 @@ final class RestoreFilesPreflightStep implements Step {
 				throw new Stopped( 'The restore was stopped because the free space for its staged files could not be confirmed.', array( 'free_space' ) );
 			}
 			if ( 'continue' !== $answer ) {
-				return StepResult::ask(
+				return RestoreAsk::ask(
+					$context,
 					$cursor,
 					array(
 						array(
@@ -768,7 +769,8 @@ final class RestoreFilesPreflightStep implements Step {
 				throw new TransientFailure( 'A work file of the restore could not be written: ' . $e->getMessage() ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- internal message.
 			}
 			$context->logger()->info( 'Content directories that are not positively this site\'s; asked what to do with them', array( 'groups' => $linked ) );
-			return StepResult::ask(
+			return RestoreAsk::ask(
+				$context,
 				array( 'phase' => 'layout' ),
 				array(
 					array(

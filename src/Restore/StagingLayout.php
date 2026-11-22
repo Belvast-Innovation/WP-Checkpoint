@@ -23,7 +23,11 @@ defined( 'ABSPATH' ) || exit;
  * without case), a name another name reaches on some file system, or an
  * entry on, above or inside one of this site's group directories or a
  * reserved directory (uploads kept in the content directory under another
- * name, the storage directory).
+ * name, the storage directory), or an entry left out for where it is on
+ * this site (leave_out()). A backup made where the content directory is
+ * inside the WordPress directory under another name has its paths under
+ * that name; they are read as "wp-content/" ones (content_prefix(),
+ * canonical()).
  *
  * Each group is staged in the parent directory of its live directory
  * (other-content in the content directory itself, where its entries live),
@@ -88,6 +92,22 @@ final class StagingLayout {
 	private $reserved = array();
 
 	/**
+	 * What the backup calls the content directory when that is not "wp-content" ('' when it is): a path that
+	 * starts with it is read as one in "wp-content/" (canonical()).
+	 *
+	 * @var string
+	 */
+	private $prefix = '';
+
+	/**
+	 * Entries of the content directory that are not staged as other-content because of where they are on this
+	 * site (name => true; leave_out()).
+	 *
+	 * @var array<string, bool>
+	 */
+	private $off = array();
+
+	/**
 	 * Constructor.
 	 *
 	 * The directories are compared as given: the caller passes them resolved (realpath()), so that two
@@ -98,9 +118,11 @@ final class StagingLayout {
 	 * @param int                   $job_id   Job id.
 	 * @param string                $random   32 lowercase hex (new_random()).
 	 * @param string[]              $reserved Directories other-content must not land on, above or in (the storage directory).
+	 * @param string                $prefix   What the backup calls the content directory when not "wp-content" (content_prefix()), or ''.
+	 * @param string[]              $off      Entries of the content directory left out for where they are on this site.
 	 * @throws \InvalidArgumentException When a part is not of its shape.
 	 */
-	public function __construct( array $groups, string $token, int $job_id, string $random, array $reserved = array() ) {
+	public function __construct( array $groups, string $token, int $job_id, string $random, array $reserved = array(), string $prefix = '', array $off = array() ) {
 		foreach ( self::GROUPS as $group ) {
 			if ( ! isset( $groups[ $group ] ) || '' === rtrim( (string) $groups[ $group ], '/' ) ) {
 				throw new \InvalidArgumentException( 'Every content group needs its directory.' );
@@ -120,6 +142,94 @@ final class StagingLayout {
 				$this->reserved[] = $dir;
 			}
 		}
+		if ( '' !== $prefix && ( self::CONTENT === $prefix || null === self::segments( '/' . $prefix ) ) ) {
+			throw new \InvalidArgumentException( 'Not a content directory prefix.' );
+		}
+		$this->prefix = $prefix;
+		foreach ( $off as $name ) {
+			$this->leave_out( (string) $name );
+		}
+	}
+
+	/**
+	 * What a backup calls its content directory, from the two paths its manifest records of the site it was made
+	 * on, when that is not "wp-content": the content directory's path below the WordPress directory ("app",
+	 * "site/content"). '' when it is "wp-content", when the content directory is not inside the WordPress
+	 * directory (the export then wrote "wp-content/" itself), and when either value is not a canonical absolute
+	 * path: the manifest is not trusted, so a value with a backslash, a control character, an empty segment or a
+	 * "." or ".." segment is not used for anything (one trailing "/" is allowed).
+	 *
+	 * @param string $abspath The manifest's site.abspath.
+	 * @param string $content The manifest's site.content_dir.
+	 * @return string
+	 */
+	public static function content_prefix( string $abspath, string $content ): string {
+		$base = self::segments( $abspath );
+		$dir  = self::segments( $content );
+		if ( null === $base || null === $dir || count( $dir ) <= count( $base ) || array_slice( $dir, 0, count( $base ) ) !== $base ) {
+			return '';
+		}
+		$prefix = implode( '/', array_slice( $dir, count( $base ) ) );
+		return self::CONTENT === $prefix ? '' : $prefix;
+	}
+
+	/**
+	 * The segments of a canonical absolute path (the drive of a Windows path first, as "c:"), or null when it is
+	 * not one (content_prefix()).
+	 *
+	 * @param string $path Path.
+	 * @return string[]|null
+	 */
+	private static function segments( string $path ) {
+		if ( '' === $path || false !== strpos( $path, '\\' ) || 1 === preg_match( '/[\x00-\x1F\x7F]/', $path ) ) {
+			return null;
+		}
+		$drive = array();
+		if ( 1 === preg_match( '#\A([A-Za-z]:)(/.*)\z#s', $path, $m ) ) {
+			$drive = array( $m[1] );
+			$path  = $m[2];
+		}
+		if ( '/' !== $path[0] ) {
+			return null;
+		}
+		$path = '/' === substr( $path, -1 ) ? (string) substr( $path, 0, -1 ) : $path;
+		if ( '' === $path ) {
+			return $drive;
+		}
+		$parts = explode( '/', (string) substr( $path, 1 ) );
+		foreach ( $parts as $part ) {
+			if ( '' === $part || '.' === $part || '..' === $part ) {
+				return null;
+			}
+		}
+		return array_merge( $drive, $parts );
+	}
+
+	/**
+	 * A backup path as the layout reads it: one that starts with the backup's own name of the content directory
+	 * (the constructor's $prefix) starts with "wp-content" instead. Applied once to a path of the backup, never to
+	 * its result.
+	 *
+	 * @param string $path Backup path.
+	 * @return string
+	 */
+	public function canonical( string $path ): string {
+		if ( '' !== $this->prefix && 0 === strncmp( $path, $this->prefix . '/', strlen( $this->prefix ) + 1 ) ) {
+			return self::CONTENT . substr( $path, strlen( $this->prefix ) );
+		}
+		return $path;
+	}
+
+	/**
+	 * Leave an entry of the content directory out of other-content from here on: map() gives no place to a path
+	 * in it. For an entry that, on this site, is somewhere the swap must not replace (the files preflight judges
+	 * that, by where the entry is, and records it).
+	 *
+	 * @param string $name The entry's name in the content directory.
+	 * @return void
+	 */
+	public function leave_out( string $name ): void {
+		$this->off[ $name ] = true;
 	}
 
 	/**
@@ -140,7 +250,7 @@ final class StagingLayout {
 	 * @return array{group: string, relative: string, target: string, staged: string}|null
 	 */
 	public function map( string $path ) {
-		$parts = explode( '/', $path );
+		$parts = explode( '/', $this->canonical( $path ) );
 		if ( count( $parts ) < 2 || self::CONTENT !== $parts[0] || '' === $parts[ count( $parts ) - 1 ] ) {
 			return null;
 		}
@@ -149,7 +259,7 @@ final class StagingLayout {
 			$group    = $parts[1];
 			$relative = implode( '/', array_slice( $parts, 2 ) );
 		} else {
-			if ( $named || ! $this->other_content_entry( $parts[1] ) ) {
+			if ( $named || isset( $this->off[ $parts[1] ] ) || ! $this->other_content_entry( $parts[1] ) ) {
 				return null;
 			}
 			$group    = self::OTHER;

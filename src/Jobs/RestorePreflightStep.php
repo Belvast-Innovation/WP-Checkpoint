@@ -600,7 +600,8 @@ final class RestorePreflightStep implements Step {
 			}
 			// Without the walk: after the answers the usermeta table is walked again, as the live tables are read again,
 			// so the questions' ids (the evidence among them) are those of what is there then.
-			return StepResult::ask(
+			return RestoreAsk::ask(
+				$context,
 				array( 'phase' => 'plan' ),
 				$questions,
 				sprintf(

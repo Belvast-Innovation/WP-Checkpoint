@@ -1289,7 +1289,8 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	private function redo_question( JobContext $context, array $cursor, $names ): StepResult {
 		$this->take_down( $context, $cursor );
 		$this->at( 'redo_asked' );
-		return StepResult::ask(
+		return RestoreAsk::ask(
+			$context,
 			$cursor,
 			array(
 				array(
@@ -1967,7 +1968,8 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 	private function carry_question( JobContext $context, array $cursor, $names ): StepResult {
 		$this->take_down( $context, $cursor );
 		$this->at( 'carry_asked' );
-		return StepResult::ask(
+		return RestoreAsk::ask(
+			$context,
 			$cursor,
 			array(
 				array(
@@ -2698,17 +2700,19 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		$context->checkpoint( $cursor, 100, __( 'Waiting for your decision on 1 question', 'wp-checkpoint' ) );
 		$this->at( 'undone_ask_recorded' );
 		$context->logger()->warning( 'The site as put back by the undo did not pass its check; it is open, and the undo asks whether to keep it or swap the restored copy back in', array( 'found' => $found ) );
-		return $this->after_undo_question( $cursor );
+		return $this->after_undo_question( $context, $cursor );
 	}
 
 	/**
 	 * The question of "undone_ask".
 	 *
-	 * @param array<string, mixed> $cursor Cursor ("undone_ask").
+	 * @param JobContext           $context Context.
+	 * @param array<string, mixed> $cursor  Cursor ("undone_ask").
 	 * @return StepResult
 	 */
-	private function after_undo_question( array $cursor ): StepResult {
-		return StepResult::ask(
+	private function after_undo_question( JobContext $context, array $cursor ): StepResult {
+		return RestoreAsk::ask(
+			$context,
 			$cursor,
 			array(
 				array(
@@ -2744,7 +2748,7 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		}
 		if ( self::REDO !== $answer ) {
 			$this->take_down( $context, $cursor );
-			return $this->after_undo_question( $cursor );
+			return $this->after_undo_question( $context, $cursor );
 		}
 		$context->logger()->warning( 'The restored copy is swapped back in, as answered after the undo' );
 		try {
@@ -3132,7 +3136,8 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 						$this->flush( $context );
 						$this->take_down( $context, $cursor );
 						$this->at( 'asked' );
-						return StepResult::ask(
+						return RestoreAsk::ask(
+							$context,
 							$cursor,
 							array(
 								array(

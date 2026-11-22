@@ -38,6 +38,7 @@ final class PositivelyGoneUsageTest extends TestCase {
 		'src/Restore/LinkedTargets.php'   => array( 2, 0 ),
 		'src/Restore/Loader.php'          => array( 2, 0 ),
 		'src/Restore/Maintenance.php'     => array( 2, 0 ),
+		'src/Restore/OtherEntries.php'    => array( 1, 0 ),
 		'src/Support/CloneClassifier.php' => array( 0, 1 ),
 		'src/Support/Deleter.php'         => array( 2, 0 ),
 		'src/Support/Directories.php'     => array( 4, 0 ),
