@@ -68,6 +68,9 @@ abstract class SwapTestCase extends RestoreTestCase {
 	/** @var array<string, mixed> Test seams of the preflight for this test (RestorePreflightStep). */
 	protected $preflight_parts = array();
 
+	/** @var array<string, mixed> More parts of the files preflight (RestoreFilesPreflightStep), before register_type(). */
+	protected $files_preflight_parts = array();
+
 	/** @var array<string, string>|null The files of the swap backup for this test (archive paths); backup_files() when null. */
 	protected $backup_has = null;
 
@@ -283,7 +286,7 @@ abstract class SwapTestCase extends RestoreTestCase {
 					break;
 				case RestoreFilesPreflightStep::ID:
 					$steps[] = new RestoreFilesPreflightStep(
-						array(
+						$this->files_preflight_parts + array(
 							'directories'  => $dirs,
 							// The sandbox stands for the site's own directories (its WordPress directory is elsewhere).
 							'trusted_root' => function (): string {

@@ -133,7 +133,7 @@ final class RestoreFilesPreflightStep implements Step {
 	 * here like ScanRoots's), "free" function( string $dir ): ?int, "random" function(): string, "names"
 	 * function( string $parent, TargetNames $probed ): TargetNames, "dev" function( string $path ): ?int (the
 	 * file system of a live directory, null when it is not there), "page_lines" int, "at" function( string
-	 * $point ): void ("appended": the index unit's bytes are written, its cursor is not), "plugin_dir" string,
+	 * $point ): void ("appended": the index unit's bytes are written, its cursor is not; "kept": the staging file is written again without the groups kept, the step has not ended), "plugin_dir" string,
 	 * "dir_mode" int, "config_dir" function(): string (the directory of the site's wp-config.php, as found). Not a
 	 * test part: "trusted_root" function(): string, the trusted deployment root ('' when none; RestoreJob passes it
 	 * from the storage directories' state).
@@ -881,6 +881,9 @@ final class RestoreFilesPreflightStep implements Step {
 				ExportPlan::write( $context->work_path(), RestoreFiles::STAGING, $stored );
 			} catch ( \RuntimeException $e ) {
 				throw new TransientFailure( 'A work file of the restore could not be written: ' . $e->getMessage() );
+			}
+			if ( isset( $this->parts['at'] ) ) {
+				call_user_func( $this->parts['at'], 'kept' );
 			}
 		}
 		foreach ( $keep as $group ) {
