@@ -142,7 +142,7 @@ final class StagingLayout {
 				$this->reserved[] = $dir;
 			}
 		}
-		if ( '' !== $prefix && ( self::CONTENT === $prefix || null === self::segments( '/' . $prefix ) ) ) {
+		if ( '' !== $prefix && ( self::CONTENT === $prefix || '/' === substr( $prefix, -1 ) || null === self::segments( '/' . $prefix ) ) ) {
 			throw new \InvalidArgumentException( 'Not a content directory prefix.' );
 		}
 		$this->prefix = $prefix;

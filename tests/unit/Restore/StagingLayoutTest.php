@@ -122,6 +122,114 @@ final class StagingLayoutTest extends TestCase {
 		}
 	}
 
+	/**
+	 * The standard layout, reading a backup that calls its content directory $prefix, with $off left out.
+	 *
+	 * @param string   $prefix Prefix.
+	 * @param string[] $off    Entries left out.
+	 */
+	private static function reading( string $prefix, array $off = array() ): StagingLayout {
+		return new StagingLayout(
+			array(
+				'plugins'       => '/srv/wp/wp-content/plugins',
+				'themes'        => '/srv/wp/wp-content/themes',
+				'uploads'       => '/srv/wp/wp-content/uploads',
+				'mu-plugins'    => '/srv/wp/wp-content/mu-plugins',
+				'other-content' => '/srv/wp/wp-content',
+			),
+			self::TOKEN,
+			7,
+			self::RANDOM,
+			array(),
+			$prefix,
+			$off
+		);
+	}
+
+	public function test_the_backups_own_name_of_the_content_directory_is_read_from_two_canonical_paths_only(): void {
+		// The control: what a site with its content directory in the WordPress directory under another name records.
+		$this->assertSame( 'app', StagingLayout::content_prefix( '/var/www/html/', '/var/www/html/app' ) );
+		$this->assertSame( 'app', StagingLayout::content_prefix( '/var/www/html', '/var/www/html/app/' ), 'one trailing slash on either' );
+		$this->assertSame( 'site/content', StagingLayout::content_prefix( '/var/www/html/', '/var/www/html/site/content' ) );
+		$this->assertSame( 'app', StagingLayout::content_prefix( 'C:/inetpub/wwwroot/', 'C:/inetpub/wwwroot/app' ) );
+		$this->assertSame( 'app', StagingLayout::content_prefix( '/', '/app' ), 'the WordPress directory at the top of the disk' );
+		// Nothing to read differently.
+		$this->assertSame( '', StagingLayout::content_prefix( '/var/www/html/', '/var/www/html/wp-content' ), 'the usual name' );
+		$this->assertSame( '', StagingLayout::content_prefix( '/var/www/html/', '/srv/content' ), 'outside the WordPress directory: the export wrote wp-content/ itself' );
+		$this->assertSame( '', StagingLayout::content_prefix( '/var/www/html/', '/var/www/html' ), 'the WordPress directory itself' );
+		$this->assertSame( '', StagingLayout::content_prefix( '/var/www/html/app', '/var/www/html/' ), 'the other way round' );
+		$this->assertSame( '', StagingLayout::content_prefix( '/var/www/html/', '/var/www/html-other/app' ), 'a name that only starts alike' );
+		// Not canonical: not used, whatever it would resolve to.
+		$bad = array(
+			'a dot-dot segment in the WordPress directory'    => array( '/var/www/other/../html/', '/var/www/html/app' ),
+			'a dot-dot segment in the content directory'      => array( '/var/www/html/', '/var/www/html/x/../app' ),
+			'a dot-dot segment that leaves the directory'     => array( '/var/www/html/', '/var/www/html/../../etc' ),
+			'a dot segment'                                   => array( '/var/www/html/', '/var/www/html/./app' ),
+			'a trailing dot-dot'                              => array( '/var/www/html/', '/var/www/html/app/..' ),
+			'an empty segment'                                => array( '/var/www/html/', '/var/www/html//app' ),
+			'two trailing slashes'                            => array( '/var/www/html//', '/var/www/html/app' ),
+			'a backslash'                                     => array( 'C:\\inetpub\\wwwroot\\', 'C:\\inetpub\\wwwroot\\app' ),
+			'a backslash in a segment'                        => array( '/var/www/html/', '/var/www/html/a\\b' ),
+			'a relative WordPress directory'                  => array( 'var/www/html/', 'var/www/html/app' ),
+			'a relative content directory'                    => array( '/var/www/html/', 'app' ),
+			'a drive without a path'                          => array( 'C:', 'C:/app' ),
+			'another drive'                                   => array( 'C:/www/', 'D:/www/app' ),
+			'a network share'                                 => array( '//server/share/', '//server/share/app' ),
+			'a line break'                                    => array( "/var/www/html/", "/var/www/html/ap\np" ),
+			'a NUL byte'                                      => array( "/var/www/html/", "/var/www/html/app\0" ),
+			'an empty WordPress directory'                    => array( '', '/var/www/html/app' ),
+			'an empty content directory'                      => array( '/var/www/html/', '' ),
+		);
+		foreach ( $bad as $what => $pair ) {
+			$this->assertSame( '', StagingLayout::content_prefix( $pair[0], $pair[1] ), $what );
+		}
+	}
+
+	public function test_a_backup_path_under_its_own_name_of_the_content_directory_is_read_once(): void {
+		$layout = self::reading( 'app' );
+		$this->assertSame( 'wp-content/plugins/demo/demo.php', $layout->canonical( 'app/plugins/demo/demo.php' ) );
+		$this->assertSame( 'plugins', $layout->map( 'app/plugins/demo/demo.php' )['group'] );
+		$this->assertSame( '/srv/wp/wp-content/plugins/demo/demo.php', $layout->map( 'app/plugins/demo/demo.php' )['target'] );
+		$this->assertSame( 'other-content', $layout->map( 'app/languages/de_DE.mo' )['group'] );
+		$this->assertSame( 'other-content', $layout->map( 'app/object-cache.php' )['group'] );
+		$this->assertNull( $layout->map( 'application/plugins/demo.php' ), 'a name that only starts alike is outside the content directory' );
+		$this->assertNull( $layout->map( 'app' ), 'the name alone is no path in it' );
+		$this->assertSame( 'plugins', $layout->map( 'wp-content/plugins/demo/demo.php' )['group'], 'a path already under wp-content/ is read as it is' );
+		// Once: the result is not read again, even where it starts with the name.
+		$nested = self::reading( 'wp-content/app' );
+		$this->assertSame( 'wp-content/plugins/x.php', $nested->canonical( 'wp-content/app/plugins/x.php' ) );
+		$this->assertSame( 'wp-content/app/x.php', $nested->canonical( 'wp-content/app/app/x.php' ), 'the control for "once": this result starts with the name again' );
+		$this->assertSame( 'other-content', $nested->map( 'wp-content/app/app/x.php' )['group'] );
+		$this->assertSame( 'app/x.php', $nested->map( 'wp-content/app/app/x.php' )['relative'], 'read once, not twice' );
+		// Without a name of its own nothing is read differently.
+		$this->assertNull( self::reading( '' )->map( 'app/plugins/demo/demo.php' ) );
+		$this->assertSame( 'app/plugins/demo/demo.php', self::reading( '' )->canonical( 'app/plugins/demo/demo.php' ) );
+	}
+
+	public function test_a_prefix_that_is_not_a_relative_path_is_refused(): void {
+		foreach ( array( 'wp-content', '../x', 'a/../b', 'a//b', '/a', 'a/', 'a\\b', './a' ) as $prefix ) {
+			try {
+				self::reading( $prefix );
+				$this->fail( 'accepted ' . $prefix );
+			} catch ( \InvalidArgumentException $e ) {
+				$this->assertSame( 'Not a content directory prefix.', $e->getMessage(), $prefix );
+			}
+		}
+		$this->assertSame( 'wp-content/x', self::reading( 'a/b' )->canonical( 'a/b/x' ), 'the control: a relative path of two segments' );
+	}
+
+	public function test_an_entry_left_out_for_where_it_is_maps_to_nothing(): void {
+		$layout = self::reading( '', array( 'mu-link' ) );
+		$this->assertNull( $layout->map( 'wp-content/mu-link/a.php' ) );
+		$this->assertNull( $layout->map( 'wp-content/mu-link' ), 'the entry itself, as a file' );
+		$this->assertSame( 'other-content', $layout->map( 'wp-content/mu-link-2/a.php' )['group'], 'the control: another entry' );
+		$this->assertSame( 'other-content', $layout->map( 'wp-content/languages/mu-link/a.php' )['group'], 'the name deeper down is not the entry' );
+		$this->assertSame( 'other-content', self::standard()->map( 'wp-content/mu-link/a.php' )['group'], 'the control: not left out, it is other content' );
+		$layout->leave_out( 'languages' );
+		$this->assertNull( $layout->map( 'wp-content/languages/de_DE.mo' ), 'left out from here on' );
+		$this->assertSame( 'plugins', $layout->map( 'wp-content/plugins/languages/x.php' )['group'], 'a group directory is not an entry of other content' );
+	}
+
 	public function test_each_parent_holds_one_staging_root(): void {
 		$layout = new StagingLayout(
 			array(
