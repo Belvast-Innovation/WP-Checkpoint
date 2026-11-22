@@ -165,7 +165,11 @@ abstract class RestoreTestCase extends JobTestCase {
 		$rows    = array();
 		$counts  = $options['rows'] ?? array();
 		$files   = $options['files'] ?? array();
-		$groups  = $options['groups'] ?? null;
+		// The content groups the manifest says the backup holds: the ones given, or the ones the files are in (by
+		// the path as written: "wp-content/<group>/", anything else under "wp-content/" other content; a file outside
+		// it is in none). A backup that names a group it has no file for is a case of its own (RestoreGroupGuardTest):
+		// the restore asks before it swaps such a group's directory for an empty one.
+		$groups = $options['groups'] ?? self::groups_of( array_keys( $files ) );
 		unset( $options['rows'], $options['files'], $options['groups'] );
 		$builder = new ArchiveBuilder(
 			$options + array(
@@ -211,6 +215,25 @@ abstract class RestoreTestCase extends JobTestCase {
 	 *
 	 * @return string
 	 */
+	/**
+	 * The content groups a backup's files are in, in the manifest's order.
+	 *
+	 * @param array<int, int|string> $paths Archive paths.
+	 * @return string[]
+	 */
+	protected static function groups_of( array $paths ): array {
+		$in = array();
+		foreach ( $paths as $path ) {
+			$parts = explode( '/', (string) $path );
+			if ( count( $parts ) < 2 || 'wp-content' !== $parts[0] ) {
+				continue;
+			}
+			$named                                       = count( $parts ) >= 3 && in_array( $parts[1], array( 'plugins', 'themes', 'uploads', 'mu-plugins' ), true );
+			$in[ $named ? $parts[1] : 'other-content' ] = true;
+		}
+		return array_values( array_intersect( array( 'plugins', 'themes', 'uploads', 'mu-plugins', 'other-content' ), array_keys( $in ) ) );
+	}
+
 	protected function backups_dir(): string {
 		return Plugin::instance()->directories()->backups();
 	}

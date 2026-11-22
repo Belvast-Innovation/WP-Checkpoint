@@ -16,6 +16,7 @@ use WPCheckpoint\Plugin;
 use WPCheckpoint\Restore\LinkedTargets;
 use WPCheckpoint\Restore\OtherEntries;
 use WPCheckpoint\Restore\RestoreFiles;
+use WPCheckpoint\Restore\StagingLayout;
 use WPCheckpoint\Tests\Fixtures\Restore\SwapTestCase;
 
 /**
@@ -133,7 +134,16 @@ final class RestoreGroupGuardTest extends SwapTestCase {
 		$wpdb->query( "INSERT INTO `{$keep}` (id, v) VALUES (3, 'backup')" );
 		$wpdb->query( "INSERT INTO `{$new}` (id, v) VALUES (1, 'backup')" );
 		$tables = array_values( array_diff( self::live_tables(), array( $gone ) ) );
-		$base   = $this->backup( $tables, null, $site, array( 'files' => $files ) );
+		// Every group named, as an export of a whole site names them, whether or not it has a file for each.
+		$base = $this->backup(
+			$tables,
+			null,
+			$site,
+			array(
+				'files'  => $files,
+				'groups' => StagingLayout::GROUPS,
+			)
+		);
 		$wpdb->query( "DELETE FROM `{$keep}` WHERE id = 3" );
 		$wpdb->query( "UPDATE `{$keep}` SET v = 'live'" );
 		$wpdb->query( "DROP TABLE `{$new}`" );
