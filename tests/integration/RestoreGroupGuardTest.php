@@ -316,8 +316,21 @@ final class RestoreGroupGuardTest extends SwapTestCase {
 		$this->assertFileExists( $this->dirs['mu-plugins'] . '/live-mu.php' );
 		$this->assertFileExists( $this->dirs['plugins'] . '/live-plugin/live.php' );
 		$this->assertFileExists( $this->dirs['themes'] . '/live-theme/style.css' );
-		// Other content is swapped entry by entry: what the backup does not have stays, and the restore says so.
+		// Other content is swapped entry by entry: what the backup does not have stays.
 		$this->assertFileExists( $this->dirs['other-content'] . '/after-export-other-content.txt' );
+		$this->assertSame( Job::COMPLETED, $done->status );
+	}
+
+	/**
+	 * What the control's restore says when it ends. Apart from the control, which asserts only what held before
+	 * this change as well.
+	 */
+	public function test_the_default_layout_restore_says_what_it_did_with_other_content_and_names_nothing_left_out(): void {
+		$base = $this->real_export();
+		$this->after_export();
+		$job = $this->restore( $base );
+		$this->assertSame( array(), $job->questions );
+		$done = $this->swapped( $job );
 		$this->assertStringContainsString( 'only what the backup holds was replaced', (string) $done->progress_message );
 		$this->assertStringNotContainsString( 'Not restored', (string) $done->progress_message );
 		$this->assertSame( array(), RestoreFilesPreflightStep::staging( $this->work( $done ) )['kept'] );
