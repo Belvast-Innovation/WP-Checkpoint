@@ -12,6 +12,7 @@ use WPCheckpoint\Jobs\QuestionText;
 use WPCheckpoint\Jobs\RestoreFilesPreflightStep;
 use WPCheckpoint\Jobs\SwapStep;
 use WPCheckpoint\Jobs\TickResult;
+use WPCheckpoint\Jobs\WorkLost;
 use WPCheckpoint\Plugin;
 use WPCheckpoint\Restore\LinkedTargets;
 use WPCheckpoint\Restore\OtherEntries;
@@ -927,6 +928,80 @@ final class RestoreGroupGuardTest extends SwapTestCase {
 		$this->assertStringContainsString( 'A work file of the restore is shorter than recorded; the work directory was changed.', (string) $job->last_error );
 		clearstatcache();
 		$this->assertSame( $short, filesize( $file ), 'not padded' );
+	}
+
+	public function test_the_record_cut_at_a_line_or_taken_away_after_it_was_complete_fails_the_restore(): void {
+		$base = $this->with_links_elsewhere( 3 );
+		$job  = $this->restore( $base );
+		$this->assertSame( SwapStep::ID, $job->step, (string) $job->last_error );
+		$work = $this->work( $job );
+		$file = RestoreFiles::path( $work, RestoreFiles::OTHER_ENTRIES );
+		$this->assertCount( 3, RestoreFilesPreflightStep::staging( $work )['entries'], 'the control: the record as the index phase left it is read' );
+		$lines = $this->record_lines( $job );
+		$whole = (string) file_get_contents( $file );
+
+		// One whole line less: every line left is a record's, and the record is not the one that was left.
+		$handle = fopen( $file, 'r+b' );
+		ftruncate( $handle, strlen( $whole ) - strlen( $lines[2] ) - 1 );
+		fclose( $handle );
+		$this->assertCount( 2, OtherEntries::read( $file ), 'the control: what is left reads as a record' );
+		try {
+			RestoreFilesPreflightStep::staging( $work );
+			$this->fail( 'read a record shorter than it was left' );
+		} catch ( WorkLost $e ) {
+			$this->assertStringContainsString( 'not as long as recorded', $e->getMessage() );
+		}
+
+		// As long as it was, with another entry in a line's place.
+		file_put_contents( $file, $lines[0] . "\n" . $lines[1] . "\n" . $lines[1] . "\n" );
+		$this->assertSame( strlen( $whole ), strlen( (string) file_get_contents( $file ) ), 'the control: the same length' );
+		try {
+			RestoreFilesPreflightStep::staging( $work );
+			$this->fail( 'read a record with fewer entries than it was left with' );
+		} catch ( WorkLost $e ) {
+			$this->assertStringContainsString( 'not as long as recorded', $e->getMessage() );
+		}
+
+		// Taken away (moved aside: tests do not delete): no file would read as "nothing was recorded".
+		rename( $file, $this->sandbox . '/record-aside' );
+		$this->assertSame( array(), OtherEntries::read( $file ) );
+		try {
+			RestoreFilesPreflightStep::staging( $work );
+			$this->fail( 'read no record where one was left' );
+		} catch ( WorkLost $e ) {
+			$this->assertStringContainsString( 'not as long as recorded', $e->getMessage() );
+		}
+
+		// And the restore itself: the swap does not start.
+		$before = self::tree( $this->dirs['other-content'] );
+		$done   = $this->cli_run( $job );
+		$this->assertSame( Job::FAILED, $done->status );
+		$this->assertStringContainsString( 'not as long as recorded', (string) $done->last_error );
+		$this->assertSame( $before, self::tree( $this->dirs['other-content'] ), 'nothing was swapped' );
+		clearstatcache();
+		$this->assertFileDoesNotExist( $file, 'not written again' );
+	}
+
+	public function test_a_run_that_dies_after_the_records_length_is_written_goes_on_to_the_same_end(): void {
+		$base                        = $this->with_links_elsewhere( 3 );
+		$died                        = 0;
+		$this->files_preflight_parts = array(
+			'page_lines' => 1,
+			'at'         => static function ( string $point ) use ( &$died ): void {
+				if ( 'entries' === $point && 1 === ++$died ) {
+					throw new \RuntimeException( 'simulated: the run is killed here' );
+				}
+			},
+		);
+		$job                         = $this->restore( $base );
+		$this->assertSame( Job::FAILED, $job->status );
+		$this->assertStringContainsString( 'simulated', (string) $job->last_error, 'the control: killed right after the length was written' );
+		$this->assertSame( 'index', $job->cursor['phase'] ?? '', 'the cursor has not left the index phase' );
+		Plugin::instance()->job_actions()->retry( $job->id );
+		$job = $this->drive( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( SwapStep::ID, $job->step, (string) $job->last_error );
+		$this->assertSame( 2, $died, 'the control: the phase ended a second time' );
+		$this->assertSame( array( 'ext-0', 'ext-1', 'ext-2' ), array_keys( RestoreFilesPreflightStep::staging( $this->work( $job ) )['entries'] ) );
 	}
 
 	public function test_the_most_entries_are_recorded_and_one_more_is_refused(): void {

@@ -186,7 +186,7 @@ final class RestoreFilesPreflightStep implements Step {
 			// died wrote past that (index() cuts its other files back the same way).
 			self::truncate_to( RestoreFiles::path( $work, RestoreFiles::OTHER_ENTRIES ), (int) $cursor['entries'] );
 		}
-		$staging = self::staging( $work );
+		$staging = self::staging( $work, in_array( $cursor['phase'], array( 'clashes', 'space' ), true ) );
 		$layout  = self::layout_of( $staging, $context->job() );
 		while ( 'probe' === $cursor['phase'] ) {
 			if ( ! $first && $context->should_stop() ) {
@@ -215,7 +215,8 @@ final class RestoreFilesPreflightStep implements Step {
 			if ( null !== $result ) {
 				return $result;
 			}
-			$first = false;
+			$first   = false;
+			$staging = self::staging( $work ); // With the record of entries as the index phase left it, and held to its length.
 		}
 		while ( 'clashes' === $cursor['phase'] ) {
 			if ( ! $first && $context->should_stop() ) {
@@ -410,7 +411,7 @@ final class RestoreFilesPreflightStep implements Step {
 		// The entries judged by where they are, as committed: the layout leaves out the ones recorded so.
 		$entries = RestoreFiles::path( $work, RestoreFiles::OTHER_ENTRIES );
 		self::truncate_to( $entries, (int) $cursor['entries'] );
-		$staging = self::staging( $work );
+		$staging = self::staging( $work, false );
 		$layout  = self::layout_of( $staging, $context->job() );
 		$seen    = (array) $staging['entries'];
 		$content = $layout->live_dir( StagingLayout::OTHER );
@@ -570,6 +571,20 @@ final class RestoreFilesPreflightStep implements Step {
 					'example' => self::listed( $unmapped ),
 				)
 			);
+		}
+		// The record of entries is complete: its length and count go into the staging file, which every later read
+		// holds the record to (the cursor of the next phases no longer carries them). Written before the cursor
+		// leaves this phase: a run that dies in between reads the index's last unit again and writes the same.
+		$stored                  = array_diff_key( $staging, array( 'entries' => true ) );
+		$stored['entries_bytes'] = (int) $cursor['entries'];
+		$stored['entries_count'] = (int) $cursor['records'];
+		try {
+			ExportPlan::write( $work, RestoreFiles::STAGING, $stored );
+		} catch ( \RuntimeException $e ) {
+			throw new TransientFailure( 'A work file of the restore could not be written: ' . $e->getMessage() );
+		}
+		if ( isset( $this->parts['at'] ) ) {
+			call_user_func( $this->parts['at'], 'entries' );
 		}
 		$cursor = array(
 			'phase'   => 'clashes',
@@ -1169,11 +1184,13 @@ final class RestoreFilesPreflightStep implements Step {
 	/**
 	 * The staging file.
 	 *
-	 * @param string $work Work directory.
+	 * @param string $work    Work directory.
+	 * @param bool   $settled Whether the record of entries is held to the length and count the staging file has for
+	 *                        it (false only while the index phase is still writing the record).
 	 * @return array<string, mixed>
-	 * @throws WorkLost When it is gone or not the staging file.
+	 * @throws WorkLost When it is gone or not the staging file, or the record of entries is not as it was left.
 	 */
-	public static function staging( string $work ): array {
+	public static function staging( string $work, bool $settled = true ): array {
 		try {
 			$data = ExportPlan::read( $work, RestoreFiles::STAGING );
 		} catch ( \RuntimeException $e ) {
@@ -1191,10 +1208,20 @@ final class RestoreFilesPreflightStep implements Step {
 		$data['kept']   = isset( $data['kept'] ) && is_array( $data['kept'] ) ? array_values( array_map( 'strval', $data['kept'] ) ) : array();
 		$data['prefix'] = isset( $data['prefix'] ) && is_string( $data['prefix'] ) ? $data['prefix'] : '';
 		// Not of the staging file: the entries of the content directory judged by where they are, from their own record.
+		$record = RestoreFiles::path( $work, RestoreFiles::OTHER_ENTRIES );
 		try {
-			$data['entries'] = OtherEntries::read( RestoreFiles::path( $work, RestoreFiles::OTHER_ENTRIES ) );
+			$data['entries'] = OtherEntries::read( $record );
 		} catch ( \UnexpectedValueException $e ) {
 			throw new WorkLost( 'A work file of the restore is damaged: ' . $e->getMessage() );
+		}
+		// Once the index phase has left the record, it is as long as it was then and holds as many entries. A staging
+		// file of an earlier version, or of a restore still in that phase, says neither.
+		if ( $settled && isset( $data['entries_bytes'], $data['entries_count'] ) ) {
+			clearstatcache( true, $record );
+			$size = is_file( $record ) ? (int) filesize( $record ) : 0;
+			if ( ! is_int( $data['entries_bytes'] ) || ! is_int( $data['entries_count'] ) || $size !== $data['entries_bytes'] || count( $data['entries'] ) !== $data['entries_count'] ) {
+				throw new WorkLost( 'A work file of the restore is not as long as recorded; the work directory was changed.' );
+			}
 		}
 		return $data;
 	}
