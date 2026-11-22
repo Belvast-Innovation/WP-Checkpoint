@@ -234,6 +234,23 @@ abstract class RestoreTestCase extends JobTestCase {
 		return array_values( array_intersect( array( 'plugins', 'themes', 'uploads', 'mu-plugins', 'other-content' ), array_keys( $in ) ) );
 	}
 
+	/**
+	 * Answer every question a paused restore asks, each by its kind, and run it on.
+	 *
+	 * @param Job                   $job     Paused job.
+	 * @param array<string, string> $answers Kind => choice.
+	 * @return Job
+	 */
+	protected function answer_and_run( Job $job, array $answers ): Job {
+		$by_id = array();
+		foreach ( $job->questions as $question ) {
+			$this->assertArrayHasKey( $question['kind'], $answers, 'an answer for every question asked' );
+			$by_id[ $question['id'] ] = $answers[ $question['kind'] ];
+		}
+		$this->assertNotNull( Plugin::instance()->job_actions()->answer( $job->id, $by_id ) );
+		return $this->run_restore( Plugin::instance()->jobs()->find( $job->id ) );
+	}
+
 	protected function backups_dir(): string {
 		return Plugin::instance()->directories()->backups();
 	}

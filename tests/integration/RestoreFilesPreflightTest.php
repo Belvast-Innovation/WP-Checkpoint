@@ -175,6 +175,11 @@ final class RestoreFilesPreflightTest extends RestoreTestCase {
 			)
 		);
 		$job = $this->run_restore( $this->start_restore( $base ) );
+		// The two paths that belong to no group are asked about before anything is staged.
+		$this->assertSame( Job::PAUSED, $job->status, (string) $job->last_error );
+		$this->assertSame( array( RestoreFilesPreflightStep::UNMAPPED_KIND ), array_column( $job->questions, 'kind' ) );
+		$this->assertSame( 2, $job->questions[0]['count'] );
+		$job = $this->answer_and_run( $job, array( RestoreFilesPreflightStep::UNMAPPED_KIND => 'skip' ) );
 		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
 
 		$work    = $this->work( $job );
@@ -226,7 +231,13 @@ final class RestoreFilesPreflightTest extends RestoreTestCase {
 	}
 
 	public function test_a_file_system_that_is_too_full_stops_the_restore_and_one_that_does_not_say_asks(): void {
-		$base   = $this->with_files( array( 'wp-content/uploads/a.txt' => str_repeat( 'a', 1000 ) ) );
+		// 1000 bytes in all; a plugin among them, so that the plugins are staged and this plugin's copy with them.
+		$base   = $this->with_files(
+			array(
+				'wp-content/uploads/a.txt'         => str_repeat( 'a', 995 ),
+				'wp-content/plugins/demo/demo.php' => '<?php',
+			)
+		);
 		$plugin = $this->plugin_dir( 2097152 );
 		$full   = $this->type(
 			array(
@@ -378,7 +389,8 @@ final class RestoreFilesPreflightTest extends RestoreTestCase {
 	}
 
 	public function test_layouts_the_swap_cannot_undo_are_refused_before_anything_is_probed(): void {
-		$base  = $this->with_files( array( 'wp-content/uploads/a.txt' => 'a' ) );
+		// Every group named, as a backup of a whole site names them: each case is about a group's directory.
+		$base  = $this->with_files( array( 'wp-content/uploads/a.txt' => 'a' ), array( 'groups' => StagingLayout::GROUPS ) );
 		$site  = ScanRoots::site_directories();
 		$cases = array(
 			'at the top of its disk'           => array( 'uploads' => '/wpc-uploads-at-the-root' ),
@@ -469,7 +481,9 @@ final class RestoreFilesPreflightTest extends RestoreTestCase {
 			$files[ 'outside-' . $i . '.txt' ]                                 = (string) $i;
 		}
 		$base  = $this->with_files( $files );
-		$clean = $this->run_restore( $this->job_for( $this->type( array( 'page_lines' => 4 ) ), $base ) );
+		// The nine paths outside the content directory are asked about once the index is read; skipped, as before.
+		$skip  = array( RestoreFilesPreflightStep::UNMAPPED_KIND => 'skip' );
+		$clean = $this->answer_and_run( $this->run_restore( $this->job_for( $this->type( array( 'page_lines' => 4 ) ), $base ) ), $skip );
 		$this->assertSame( Job::COMPLETED, $clean->status, (string) $clean->last_error );
 		$died  = 0;
 		$crash = $this->type(
@@ -494,7 +508,7 @@ final class RestoreFilesPreflightTest extends RestoreTestCase {
 		}
 		$this->assertGreaterThan( 0, $torn, 'the control: the dead unit wrote buckets' );
 		Plugin::instance()->job_actions()->retry( $job->id );
-		$job = $this->run_restore( $job );
+		$job = $this->answer_and_run( $this->run_restore( $job ), $skip );
 		$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
 		$lines = array_filter( explode( "\n", (string) file_get_contents( RestoreFiles::path( $this->work( $job ), RestoreFiles::UNMAPPED ) ) ) );
 		$this->assertCount( 9, $lines, 'each unmapped path once: the dead unit\'s bytes were cut back' );

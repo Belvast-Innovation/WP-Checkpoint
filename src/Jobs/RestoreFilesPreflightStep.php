@@ -181,6 +181,11 @@ final class RestoreFilesPreflightStep implements Step {
 			$context->checkpoint( $cursor, 62, __( 'Checking where the files go', 'wp-checkpoint' ) );
 			$first = false; // The layout was this tick's first unit.
 		}
+		if ( 'index' === $cursor['phase'] && isset( $cursor['entries'] ) ) {
+			// Before the staging file is read with it: the record of entries as committed, without what a run that
+			// died wrote past that (index() cuts its other files back the same way).
+			self::truncate_to( RestoreFiles::path( $work, RestoreFiles::OTHER_ENTRIES ), (int) $cursor['entries'] );
+		}
 		$staging = self::staging( $work );
 		$layout  = self::layout_of( $staging, $context->job() );
 		while ( 'probe' === $cursor['phase'] ) {
