@@ -962,6 +962,17 @@ final class RestoreGroupGuardTest extends SwapTestCase {
 			$this->assertStringContainsString( 'not as long as recorded', $e->getMessage() );
 		}
 
+		// As many entries as it was left with, one of them at another place: another length.
+		file_put_contents( $file, $lines[0] . "\n" . $lines[1] . "\n" . OtherEntries::line( 'ext-2', OtherEntries::AT . bin2hex( '/srv/x' ), false ) );
+		$this->assertCount( 3, OtherEntries::read( $file ), 'the control: three entries, read as a record' );
+		$this->assertNotSame( strlen( $whole ), strlen( (string) file_get_contents( $file ) ), 'the control: not the same length' );
+		try {
+			RestoreFilesPreflightStep::staging( $work );
+			$this->fail( 'read a record of another length than it was left with' );
+		} catch ( WorkLost $e ) {
+			$this->assertStringContainsString( 'not as long as recorded', $e->getMessage() );
+		}
+
 		// Taken away (moved aside: tests do not delete): no file would read as "nothing was recorded".
 		rename( $file, $this->sandbox . '/record-aside' );
 		$this->assertSame( array(), OtherEntries::read( $file ) );
