@@ -6,6 +6,7 @@ use WPCheckpoint\Jobs\Budget;
 use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\JobContext;
 use WPCheckpoint\Jobs\RestoreAsk;
+use WPCheckpoint\Jobs\RestoreFilesPreflightStep;
 use WPCheckpoint\Jobs\RestoreJob;
 use WPCheckpoint\Jobs\StepResult;
 use WPCheckpoint\Jobs\Stopped;
@@ -143,14 +144,75 @@ final class RestoreAskUsageTest extends TestCase {
 		);
 	}
 
-	public function test_every_kind_the_restore_asks_is_registered(): void {
-		$kinds = array_merge(
-			array_values( IncomingQuestions::QUESTION_KINDS ),
-			array( LinkedTargets::KIND, SwapStep::UNVERIFIED_KIND, SwapStep::CARRY_KIND, SwapStep::REDO_CARRY_KIND, SwapStep::AFTER_UNDO_KIND, 'free_space_unknown' )
+	/**
+	 * The kinds a file gives its questions, read from its source: every `'kind' => …` of a file that calls the
+	 * entry is a question's (the files that call it name nothing else so). A value that is not a literal or a
+	 * constant of a class cannot be read, and is reported as such.
+	 *
+	 * @param string $file    Path relative to the plugin.
+	 * @param string $content Its content.
+	 * @return array{kinds: string[], unreadable: string[]}
+	 */
+	private static function kinds_of( string $file, string $content ): array {
+		$out = array(
+			'kinds'      => array(),
+			'unreadable' => array(),
 		);
-		foreach ( $kinds as $kind ) {
-			$this->assertArrayHasKey( $kind, RestoreAsk::KINDS );
+		if ( ! preg_match_all( '/\'kind\'\s*=>\s*([^,\n]+),/', $content, $found ) ) {
+			return $out;
 		}
+		$class = 'WPCheckpoint\\' . str_replace( '/', '\\', substr( $file, strlen( 'src/' ), -strlen( '.php' ) ) );
+		foreach ( $found[1] as $value ) {
+			$value = trim( $value );
+			if ( 1 === preg_match( '/\A\'([a-z_]+)\'\z/', $value, $m ) ) {
+				$out['kinds'][] = $m[1];
+			} elseif ( 1 === preg_match( '/\A(self|[A-Z][A-Za-z]*)::([A-Z_]+)\z/', $value, $m ) ) {
+				$name = ( 'self' === $m[1] ? $class : ( false !== strpos( $content, 'use WPCheckpoint\\Restore\\' . $m[1] . ';' ) ? 'WPCheckpoint\\Restore\\' . $m[1] : substr( $class, 0, (int) strrpos( $class, '\\' ) + 1 ) . $m[1] ) ) . '::' . $m[2];
+				if ( defined( $name ) && is_string( constant( $name ) ) ) {
+					$out['kinds'][] = constant( $name );
+				} else {
+					$out['unreadable'][] = $value;
+				}
+			} else {
+				$out['unreadable'][] = $value;
+			}
+		}
+		return $out;
+	}
+
+	/**
+	 * The callers of the entry whose questions are built elsewhere, and the kinds those are given there.
+	 *
+	 * @return array<string, string[]>
+	 */
+	private static function built_elsewhere(): array {
+		return array(
+			'src/Jobs/RestorePreflightStep.php' => array_values( IncomingQuestions::QUESTION_KINDS ), // IncomingQuestions::questions().
+		);
+	}
+
+	public function test_every_kind_the_restore_asks_is_registered(): void {
+		$asked   = array();
+		$callers = 0;
+		foreach ( self::plugin_files() as $file => $content ) {
+			if ( 'src/Jobs/RestoreAsk.php' === $file || false === strpos( $content, 'RestoreAsk::ask(' ) ) {
+				continue;
+			}
+			++$callers;
+			$read = self::kinds_of( $file, $content );
+			$this->assertSame( array(), $read['unreadable'], $file . ' gives a question a kind the scan cannot read' );
+			$kinds = array_merge( $read['kinds'], self::built_elsewhere()[ $file ] ?? array() );
+			$this->assertNotSame( array(), $kinds, $file . ' asks, and the scan finds no kind in it: list where its questions are built' );
+			foreach ( $kinds as $kind ) {
+				$this->assertArrayHasKey( $kind, RestoreAsk::KINDS, $file . ' asks a kind that is not registered' );
+				$asked[ $kind ] = true;
+			}
+		}
+		$this->assertGreaterThanOrEqual( 3, $callers, 'the control: the scan finds the steps that ask' );
+		foreach ( array( LinkedTargets::KIND, SwapStep::UNVERIFIED_KIND, SwapStep::CARRY_KIND, RestoreFilesPreflightStep::UNMAPPED_KIND, RestoreFilesPreflightStep::EMPTY_KIND, 'free_space_unknown' ) as $kind ) {
+			$this->assertArrayHasKey( $kind, $asked, 'the control: the scan reads this kind from the source' );
+		}
+		$this->assertSame( array(), array_values( array_diff( array_keys( RestoreAsk::KINDS ), array_keys( $asked ) ) ), 'a registered kind that no step asks' );
 		foreach ( RestoreAsk::KINDS as $kind => $entry ) {
 			$this->assertContains( $entry[0], array( RestoreAsk::POLICY, RestoreAsk::FAILS, RestoreAsk::ASKS ), $kind );
 			$this->assertNotSame( '', trim( (string) $entry[1] ), $kind . ' says its policy, its subject or its reason' );
@@ -158,6 +220,15 @@ final class RestoreAskUsageTest extends TestCase {
 				$this->assertArrayHasKey( $entry[1], RestoreJob::POLICIES, $kind . ' names a policy the restore has' );
 			}
 		}
+	}
+
+	public function test_the_scan_of_kinds_reads_literals_and_constants_and_reports_what_it_cannot_read(): void {
+		$read = self::kinds_of(
+			'src/Jobs/SwapStep.php',
+			"<?php\n\$a = array(\n'kind' => 'free_space_unknown',\n'kind'    => self::CARRY_KIND,\n'kind' => LinkedTargets::KIND,\n'kind' => \$kind,\n'kind' => self::NOT_A_CONSTANT,\n'kind' => self::KINDS[ \$key ],\n);\nuse WPCheckpoint\\Restore\\LinkedTargets;"
+		);
+		$this->assertSame( array( 'free_space_unknown', SwapStep::CARRY_KIND, LinkedTargets::KIND ), $read['kinds'] );
+		$this->assertSame( array( '$kind', 'self::NOT_A_CONSTANT', 'self::KINDS[ $key ]' ), $read['unreadable'] );
 	}
 
 	/**

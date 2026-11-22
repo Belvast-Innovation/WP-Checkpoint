@@ -78,6 +78,30 @@ final class OtherEntriesTest extends TestCase {
 		$this->assertTrue( OtherEntries::recorded( $state ) );
 	}
 
+	/**
+	 * A junction is the link a Windows account without the privilege for symbolic links can make, and the one
+	 * hosting panels there make. It is judged like any entry that is somewhere else than spelled.
+	 */
+	public function test_a_junction_to_a_directory_of_the_site_is_not_a_plain_entry(): void {
+		if ( '\\' !== DIRECTORY_SEPARATOR ) {
+			$this->markTestSkipped( 'Junctions are of Windows; the links of other systems are in the test above.' );
+		}
+		$link    = str_replace( '/', '\\', $this->content . '/mu-junction' );
+		$target  = str_replace( '/', '\\', $this->dir . '/shared/mu' );
+		$process = proc_open( 'cmd /c mklink /J "' . $link . '" "' . $target . '"', array( 1 => array( 'pipe', 'w' ), 2 => array( 'pipe', 'w' ) ), $pipes );
+		$this->assertIsResource( $process );
+		$out  = (string) stream_get_contents( $pipes[1] );
+		$err  = (string) stream_get_contents( $pipes[2] );
+		$code = proc_close( $process );
+		$this->assertSame( 0, $code, 'mklink: exit ' . $code . "\nstdout: " . $out . "\nstderr: " . $err );
+		clearstatcache( true );
+		$this->assertSame( OtherEntries::PLAIN, OtherEntries::state( $this->content, 'languages' ), 'the control: a directory that is no junction' );
+		$state = OtherEntries::state( $this->content, 'mu-junction' );
+		$seen  = 'state ' . $state . ', place ' . var_export( OtherEntries::place( $state ), true ) . ', realpath ' . var_export( realpath( $link ), true ) . ', is_link ' . var_export( is_link( $link ), true );
+		$this->assertTrue( OtherEntries::recorded( $state ), $seen );
+		$this->assertTrue( OtherEntries::off( $state, array( $this->dir . '/shared/mu' ) ), $seen );
+	}
+
 	public function test_an_entry_is_left_out_when_it_is_holds_or_is_inside_a_directory_of_the_site_or_cannot_be_told(): void {
 		$dirs = array( $this->dir . '/shared/mu', $this->content . '/plugins' );
 		$at   = static function ( string $place ): string {
