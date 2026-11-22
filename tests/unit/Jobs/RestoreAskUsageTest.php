@@ -247,6 +247,22 @@ final class RestoreAskUsageTest extends TestCase {
 		}
 	}
 
+	public function test_an_unattended_restore_fails_on_a_question_without_a_policy_and_says_what_it_was(): void {
+		$kind = self::kind_of( RestoreAsk::FAILS );
+		$this->assertNotSame( '', $kind );
+		try {
+			RestoreAsk::ask( $this->context( true ), array(), self::question( $kind ), 'm' );
+			$this->fail( 'asked an unattended restore' );
+		} catch ( Stopped $e ) {
+			$this->assertStringContainsString( 'This restore runs unattended, and it came to a decision only a person can make: ' . RestoreAsk::KINDS[ $kind ][1], $e->getMessage() );
+			$this->assertStringNotContainsString( 'restore policy', $e->getMessage(), 'there is no policy to name' );
+			$this->assertSame( array( 'q1' ), $e->questions() );
+		}
+		foreach ( array( 'free_space_unknown', 'unmapped_paths', 'empty_groups' ) as $fails ) {
+			$this->assertSame( RestoreAsk::FAILS, RestoreAsk::KINDS[ $fails ][0], $fails . ' has no policy and nothing answers it' );
+		}
+	}
+
 	public function test_an_unattended_restore_is_asked_what_is_registered_as_asked_all_the_same(): void {
 		$kind = self::kind_of( RestoreAsk::ASKS );
 		$this->assertNotSame( '', $kind );

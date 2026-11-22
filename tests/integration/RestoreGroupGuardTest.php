@@ -640,6 +640,26 @@ final class RestoreGroupGuardTest extends SwapTestCase {
 		$this->swapped( $job );
 	}
 
+	public function test_a_plugins_directory_that_holds_only_this_plugin_is_not_asked_about(): void {
+		$files = self::backup_files();
+		unset( $files['wp-content/plugins/demo/demo.php'] );
+		$base    = $this->made_backup( $files );
+		$plugins = $this->dirs['plugins'];
+		// This plugin's own directory there (named as the running plugin's is), and nothing else.
+		mkdir( $plugins . '/wp-checkpoint' );
+		file_put_contents( $plugins . '/wp-checkpoint/wp-checkpoint.php', '<?php' );
+		$asked = $this->restore( $base );
+		$this->assertSame( array( RestoreFilesPreflightStep::EMPTY_KIND ), self::asked( $asked ), 'the control: with another plugin there, it is asked about' );
+		$this->assertSame( array( 'plugins' ), $this->words( $asked, RestoreFilesPreflightStep::EMPTY_KIND )['listed'] );
+		Plugin::instance()->job_actions()->cancel( $asked->id );
+		$this->drive( Plugin::instance()->jobs()->find( $asked->id ) );
+		rename( $plugins . '/live-plugin', $this->sandbox . '/live-plugin-moved-away' );
+		$job = $this->restore( $base );
+		$this->assertSame( array(), $job->questions, 'the restore stages this plugin\'s copy whatever the backup holds: nothing is lost' );
+		$this->assertSame( SwapStep::ID, $job->step, (string) $job->last_error );
+		$this->swapped( $job );
+	}
+
 	public function test_an_answer_given_for_groups_that_are_no_longer_asked_about_is_not_used(): void {
 		$files = self::backup_files();
 		unset( $files['wp-content/mu-plugins/restored-mu.php'] );
