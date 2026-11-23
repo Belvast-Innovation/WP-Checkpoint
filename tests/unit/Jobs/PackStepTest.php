@@ -752,6 +752,40 @@ final class PackStepTest extends TestCase {
 		$this->assertStringContainsString( 'File left out: its content directory changed after the scan', $this->ctx->log() );
 	}
 
+	/**
+	 * Where the scan left no record of its roots (a summary an earlier version wrote), the root of a line is the
+	 * one whose prefix is the longest that holds the path, wherever it comes in the list: uploads outside the
+	 * content directory are listed as wp-content/uploads, and a directory of that name in the content directory is
+	 * not where they are.
+	 */
+	public function test_a_line_is_read_from_the_root_with_the_longest_prefix_whatever_the_order_of_the_roots(): void {
+		$photo     = $this->file( '2026/photo.txt', 500, 31 ); // In the content directory: not the uploads.
+		$elsewhere = $this->ctx->root . '/elsewhere/uploads';
+		mkdir( $elsewhere . '/2026', 0700, true );
+		file_put_contents( $elsewhere . '/2026/photo.txt', 'the uploads directory' );
+		$this->index( array( $photo ) );
+		$content = array(
+			'group'  => 'other-content',
+			'path'   => dirname( $this->site ),
+			'prefix' => 'wp-content',
+			'skip'   => array(),
+		);
+		$uploads = array(
+			'group'  => 'uploads',
+			'path'   => $elsewhere,
+			'prefix' => 'wp-content/uploads',
+			'skip'   => array(),
+		);
+		foreach ( array( array( $content, $uploads ), array( $uploads, $content ) ) as $roots ) {
+			list( $result ) = $this->drive( new PackStep( $roots, $this->options(), self::CHUNK ) );
+			$this->assertSame( StepResult::DONE, $result->kind );
+			$packed = $this->packed();
+			$this->assertCount( 1, $packed );
+			$this->assertSame( strlen( 'the uploads directory' ), $packed[0]['b'], 'read from the uploads root, not from the directory of that name in the content directory' );
+			$this->assertSame( hash( 'sha256', 'the uploads directory' ), $packed[0]['h'] );
+		}
+	}
+
 	public function test_where_two_roots_share_a_path_the_one_not_refused_packs_the_line(): void {
 		// Another group was set to the same archive path and is refused (never scanned); it comes first in scan order.
 		$photo = $this->file( '2026/photo.txt', 500, 26 );
