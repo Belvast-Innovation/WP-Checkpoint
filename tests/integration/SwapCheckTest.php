@@ -157,6 +157,61 @@ final class SwapCheckTest extends RestoreTestCase {
 		$this->assertStringContainsString( $message, (string) $job->last_error );
 	}
 
+	/**
+	 * The directories of a plan's directory entries, by name, in the plan's order.
+	 *
+	 * @return string[]
+	 */
+	private function plan_dirs( Job $job ): array {
+		return array_map(
+			'basename',
+			array_column(
+				array_filter(
+					$this->entries( $job ),
+					static function ( array $e ): bool {
+						return SwapPlan::DIR === $e[0];
+					}
+				),
+				1
+			)
+		);
+	}
+
+	/**
+	 * The rule for a group the backup names and has no file for: staged (its directory replaced by an empty one, as
+	 * answered or because the live one holds nothing), it has an entry of the plan like any staged group; kept as it
+	 * is, it has none.
+	 */
+	public function test_a_staged_group_without_files_has_a_plan_entry_and_a_kept_one_has_none(): void {
+		$named = array( 'plugins', 'themes', 'uploads', 'mu-plugins' );
+		$kept  = array();
+		foreach ( array( 'replace', 'keep' ) as $choice ) {
+			$base = $this->backup(
+				self::site_tables(),
+				null,
+				null,
+				array(
+					'files'  => self::files(),
+					'groups' => array( 'plugins', 'themes', 'uploads', 'mu-plugins', 'other-content' ),
+				)
+			);
+			$job  = $this->run_restore( $this->start_restore( $base ) );
+			$this->assertSame( Job::PAUSED, $job->status, 'the control: a group without files whose directory holds something is asked about: ' . $job->last_error );
+			$job = $this->answer_and_run( $job, array( RestoreFilesPreflightStep::EMPTY_KIND => $choice ) );
+			$this->assertSame( Job::COMPLETED, $job->status, (string) $job->last_error );
+			$staging = RestoreFilesPreflightStep::staging( $this->work( $job ) );
+			$kept    = $staging['kept'];
+			if ( 'replace' === $choice ) {
+				$this->assertSame( array(), $kept );
+				$this->assertSame( array_merge( $named, array( 'languages' ) ), $this->plan_dirs( $job ), 'every staged group, the ones without a file too, then the entries of other content' );
+			} else {
+				$this->assertNotSame( array(), $kept, 'the control: a group was kept' );
+				$this->assertSame( array(), array_values( array_diff( $kept, array( 'themes', 'mu-plugins' ) ) ), 'only groups the backup has no file for' );
+				$this->assertSame( array_merge( array_values( array_diff( $named, $kept ) ), array( 'languages' ) ), $this->plan_dirs( $job ), 'no entry for a kept group' );
+			}
+		}
+	}
+
 	public function test_a_restore_left_as_it_was_written_passes_and_its_plan_is_complete(): void {
 		global $wpdb;
 		$q = $wpdb->base_prefix;

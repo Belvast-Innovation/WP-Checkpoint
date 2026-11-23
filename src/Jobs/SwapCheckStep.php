@@ -734,7 +734,8 @@ final class SwapCheckStep implements Step {
 	 * @param array<string, mixed> $cursor  Cursor.
 	 * @param array<string, mixed> $run     This run.
 	 * @return array<string, mixed>
-	 * @throws RetryFrom When a directory of the site is no longer where the layout has it (a retry checks all again).
+	 * @throws RetryFrom When a directory of the site is no longer where the layout has it (a retry checks all again), or
+	 *                   one the backup has no file for, empty when the files preflight looked, is not empty now.
 	 * @throws SiteChanged When an entry of the content directory is not where the files preflight saw it.
 	 * @throws TransientFailure When the staged other content cannot be listed.
 	 */
@@ -747,6 +748,16 @@ final class SwapCheckStep implements Step {
 				if ( ! isset( $now[ $group ] ) || ! Paths::same_location( (string) $now[ $group ], $was ) ) {
 					// A retry checks everything again from the start: the site may have changed more than this.
 					throw new RetryFrom( sprintf( 'The %1$s directory of the site moved since the restore staged its files (it was %2$s, it is %3$s now): the swap would put the files in the wrong place. Put it back and retry, or start the restore again.', $group, $was, (string) ( $now[ $group ] ?? '?' ) ), self::ID );
+				}
+			}
+			// The named groups staged with no file of the backup, which the files preflight did not ask about because
+			// their directories held nothing then: looked at once more. One that holds something now (or cannot be
+			// listed) would be swapped for an empty directory without anybody having been asked. A retry starts the
+			// restore's checks again, and the files preflight asks.
+			$own = basename( rtrim( str_replace( '\\', '/', $this->plugin_dir() ), '/' ) );
+			foreach ( (array) ( $run['staging']['unasked'] ?? array() ) as $group ) {
+				if ( in_array( $group, (array) $run['staging']['staged'], true ) && false !== RestoreFilesPreflightStep::holds_entries( (string) ( $run['staging']['groups'][ $group ] ?? '' ), 'plugins' === $group ? $own : '' ) ) {
+					throw new RetryFrom( sprintf( 'The backup holds no file for the "%1$s" group, and its directory on this site, %2$s, was empty when the restore checked; it holds something now, or cannot be listed. The swap would have replaced it with an empty directory, so it was not started: the site is as it was. Retry: the restore checks again from the start and asks what to do with this directory.', $group, (string) ( $run['staging']['groups'][ $group ] ?? '' ) ), RestorePreflightStep::ID );
 				}
 			}
 			// The entries of the content directory as the files preflight saw them (OtherEntries): the staged ones,

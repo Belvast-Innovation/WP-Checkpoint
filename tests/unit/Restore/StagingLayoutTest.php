@@ -155,6 +155,9 @@ final class StagingLayoutTest extends TestCase {
 		$this->assertSame( 'app', StagingLayout::content_prefix( '/', '/app' ), 'the WordPress directory at the top of the disk' );
 		// Nothing to read differently.
 		$this->assertSame( '', StagingLayout::content_prefix( '/var/www/html/', '/var/www/html/wp-content' ), 'the usual name' );
+		$this->assertSame( '', StagingLayout::content_prefix( '/var/www/html/', '/var/www/html/wp-content/uploads' ), 'a name that starts with the usual one: a path under it would be read into another group than it is spelled in' );
+		$this->assertSame( '', StagingLayout::content_prefix( '/var/www/html/', '/var/www/html/wp-content/a/b' ) );
+		$this->assertSame( 'wp-content-2', StagingLayout::content_prefix( '/var/www/html/', '/var/www/html/wp-content-2' ), 'the control: a name that only starts alike' );
 		$this->assertSame( '', StagingLayout::content_prefix( '/var/www/html/', '/srv/content' ), 'outside the WordPress directory: the export wrote wp-content/ itself' );
 		$this->assertSame( '', StagingLayout::content_prefix( '/var/www/html/', '/var/www/html' ), 'the WordPress directory itself' );
 		$this->assertSame( '', StagingLayout::content_prefix( '/var/www/html/app', '/var/www/html/' ), 'the other way round' );
@@ -195,19 +198,22 @@ final class StagingLayoutTest extends TestCase {
 		$this->assertNull( $layout->map( 'application/plugins/demo.php' ), 'a name that only starts alike is outside the content directory' );
 		$this->assertNull( $layout->map( 'app' ), 'the name alone is no path in it' );
 		$this->assertSame( 'plugins', $layout->map( 'wp-content/plugins/demo/demo.php' )['group'], 'a path already under wp-content/ is read as it is' );
-		// Once: the result is not read again, even where it starts with the name.
-		$nested = self::reading( 'wp-content/app' );
-		$this->assertSame( 'wp-content/plugins/x.php', $nested->canonical( 'wp-content/app/plugins/x.php' ) );
-		$this->assertSame( 'wp-content/app/x.php', $nested->canonical( 'wp-content/app/app/x.php' ), 'the control for "once": this result starts with the name again' );
-		$this->assertSame( 'other-content', $nested->map( 'wp-content/app/app/x.php' )['group'] );
-		$this->assertSame( 'app/x.php', $nested->map( 'wp-content/app/app/x.php' )['relative'], 'read once, not twice' );
+		// Once: only the start of the path is the name; the same name further in is the path's own.
+		$this->assertSame( 'wp-content/app/x.php', $layout->canonical( 'app/app/x.php' ) );
+		$this->assertSame( 'other-content', $layout->map( 'app/app/x.php' )['group'] );
+		$this->assertSame( 'app/x.php', $layout->map( 'app/app/x.php' )['relative'], 'read once, not twice' );
+		// Which paths were read differently than written.
+		$this->assertTrue( $layout->reread( 'app/plugins/demo/demo.php' ) );
+		$this->assertFalse( $layout->reread( 'wp-content/plugins/demo/demo.php' ) );
+		$this->assertFalse( $layout->reread( 'application/plugins/demo.php' ) );
+		$this->assertFalse( self::reading( '' )->reread( 'app/plugins/demo/demo.php' ) );
 		// Without a name of its own nothing is read differently.
 		$this->assertNull( self::reading( '' )->map( 'app/plugins/demo/demo.php' ) );
 		$this->assertSame( 'app/plugins/demo/demo.php', self::reading( '' )->canonical( 'app/plugins/demo/demo.php' ) );
 	}
 
 	public function test_a_prefix_that_is_not_a_relative_path_is_refused(): void {
-		foreach ( array( 'wp-content', '../x', 'a/../b', 'a//b', '/a', 'a/', 'a\\b', './a' ) as $prefix ) {
+		foreach ( array( 'wp-content', 'wp-content/app', 'wp-content/a/b', '../x', 'a/../b', 'a//b', '/a', 'a/', 'a\\b', './a' ) as $prefix ) {
 			try {
 				self::reading( $prefix );
 				$this->fail( 'accepted ' . $prefix );
@@ -216,6 +222,7 @@ final class StagingLayoutTest extends TestCase {
 			}
 		}
 		$this->assertSame( 'wp-content/x', self::reading( 'a/b' )->canonical( 'a/b/x' ), 'the control: a relative path of two segments' );
+		$this->assertSame( 'wp-content/x', self::reading( 'wp-content-2' )->canonical( 'wp-content-2/x' ), 'the control: a name that only starts like wp-content' );
 	}
 
 	public function test_an_entry_left_out_for_where_it_is_maps_to_nothing(): void {

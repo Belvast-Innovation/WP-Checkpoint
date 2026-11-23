@@ -10,6 +10,7 @@ use WPCheckpoint\Jobs\Job;
 use WPCheckpoint\Jobs\PackStep;
 use WPCheckpoint\Jobs\QuestionText;
 use WPCheckpoint\Jobs\RestoreFilesPreflightStep;
+use WPCheckpoint\Jobs\SwapCheckStep;
 use WPCheckpoint\Jobs\SwapStep;
 use WPCheckpoint\Jobs\TickResult;
 use WPCheckpoint\Jobs\WorkLost;
@@ -427,13 +428,21 @@ final class RestoreGroupGuardTest extends SwapTestCase {
 		$this->assertSame( Job::FAILED, $stopped->status );
 		$this->assertStringContainsString( 'The restore was stopped because paths of the backup belong to no content group of this site and would not have been restored.', (string) $stopped->last_error );
 		$this->assertSame( $before, self::tree( $content ), 'nothing of the site was changed' );
-		// A retry asks what stopped it again; the other answer was the user's and stands.
+		// A retry asks both again: the other answer was given together with the one that stopped it.
 		Plugin::instance()->job_actions()->retry( $stopped->id );
 		$again = $this->drive( Plugin::instance()->jobs()->find( $stopped->id ) );
 		$this->assertSame( Job::PAUSED, $again->status, (string) $again->last_error );
-		$this->assertSame( array( RestoreFilesPreflightStep::UNMAPPED_KIND ), self::asked( $again ) );
+		$this->assertSame( array( RestoreFilesPreflightStep::EMPTY_KIND, RestoreFilesPreflightStep::UNMAPPED_KIND ), self::asked( $again ) );
 		$mine = self::tree( $content . '/my-plugins' );
-		$done = $this->swapped( $this->answered( $again, array( RestoreFilesPreflightStep::UNMAPPED_KIND => 'skip' ) ) );
+		$done = $this->swapped(
+			$this->answered(
+				$again,
+				array(
+					RestoreFilesPreflightStep::UNMAPPED_KIND => 'skip',
+					RestoreFilesPreflightStep::EMPTY_KIND    => 'keep',
+				)
+			)
+		);
 		$this->assertSame( $mine, self::tree( $content . '/my-plugins' ), 'the plugins directory is as it was' );
 		$this->assertStringContainsString( 'as you chose: plugins', (string) $done->progress_message );
 	}
@@ -529,6 +538,175 @@ final class RestoreGroupGuardTest extends SwapTestCase {
 	}
 
 	/**
+	 * The backup of a site whose content directory is "app" in its WordPress directory: these files, the manifest
+	 * naming the directory.
+	 *
+	 * @param array<string, string> $files Path => content.
+	 */
+	private function backup_of_app( array $files ): string {
+		return $this->made_backup(
+			$files,
+			static function ( array $site ): array {
+				$site['abspath']     = '/var/www/html/';
+				$site['content_dir'] = '/var/www/html/app';
+				return $site;
+			}
+		);
+	}
+
+	/**
+	 * The files of the fixture's backup under the name "app".
+	 *
+	 * @return array<string, string>
+	 */
+	private static function app_files(): array {
+		$files = array();
+		foreach ( self::backup_files() as $path => $text ) {
+			$files[ 'app/' . substr( $path, strlen( 'wp-content/' ) ) ] = $text;
+		}
+		return $files;
+	}
+
+	/**
+	 * Where the file written as wp-content/uploads/… is among the backup's files: before the ones under the
+	 * backup's own name, or after them.
+	 *
+	 * @return array<string, array{0: bool}>
+	 */
+	public function data_as_written_first_or_last(): array {
+		return array(
+			'the path as written comes first' => array( true ),
+			'the path as written comes last'  => array( false ),
+		);
+	}
+
+	/**
+	 * @dataProvider data_as_written_first_or_last
+	 */
+	public function test_a_group_under_both_names_fails_the_restore_before_anything_changes( bool $first ): void {
+		// The uploads of a site whose uploads directory is outside its WordPress directory are written as
+		// wp-content/uploads/…; a directory "uploads" left in its content directory as app/uploads/….
+		$real  = array( 'wp-content/uploads/real.txt' => 'the uploads directory' );
+		$base  = $this->backup_of_app( $first ? $real + self::app_files() : self::app_files() + $real );
+		$trees = array();
+		foreach ( $this->dirs as $group => $dir ) {
+			$trees[ $group ] = self::tree( $dir );
+		}
+		$job = $this->restore( $base );
+		$this->assertSame( Job::FAILED, $job->status, 'it fails: ' . $job->step . ' ' . wp_json_encode( $job->questions ) );
+		$this->assertSame( RestoreFilesPreflightStep::ID, $job->step, 'in the files preflight: nothing is staged yet' );
+		$this->assertStringContainsString( 'The backup holds files for the "uploads" group under two names', (string) $job->last_error );
+		$this->assertStringContainsString( 'Make a new backup of the original site', (string) $job->last_error );
+		$this->assertStringContainsString( 'restore by hand', (string) $job->last_error );
+		$this->assertSame( array(), $job->questions );
+		foreach ( $this->dirs as $group => $dir ) {
+			$this->assertSame( $trees[ $group ], self::tree( $dir ), $group . ' is as it was' );
+		}
+		// A retry reads the same backup and fails the same way.
+		Plugin::instance()->job_actions()->retry( $job->id );
+		$again = $this->drive( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( Job::FAILED, $again->status );
+		$this->assertStringContainsString( 'under two names', (string) $again->last_error );
+	}
+
+	public function test_a_backup_with_every_path_as_written_is_restored_although_its_manifest_names_another_content_directory(): void {
+		// The control of the case above, with the test of the backup read under its own name: one spelling only.
+		$base = $this->backup_of_app( self::backup_files() );
+		$this->after_export();
+		$job = $this->restore( $base );
+		$this->assertSame( array(), $job->questions, 'nothing to ask about: ' . $job->last_error );
+		$this->assertSame( 'app', RestoreFilesPreflightStep::staging( $this->work( $job ) )['prefix'], 'the control: the name is read from the manifest' );
+		$this->swapped( $job );
+		$this->assertFileExists( $this->dirs['uploads'] . '/2026/10/restored.txt' );
+		$this->assertFileExists( $this->dirs['plugins'] . '/demo/demo.php' );
+	}
+
+	public function test_an_answer_to_replace_is_not_kept_when_the_other_question_is_answered_stop(): void {
+		$base = $this->made_backup(
+			self::app_files(),
+			static function ( array $site ): array {
+				$site['abspath']     = '/var/www/html/';
+				$site['content_dir'] = '/srv/app'; // Not in the WordPress directory: no path is read under another name.
+				return $site;
+			}
+		);
+		$job  = $this->restore( $base );
+		$this->assertSame( array( RestoreFilesPreflightStep::EMPTY_KIND, RestoreFilesPreflightStep::UNMAPPED_KIND ), self::asked( $job ) );
+		$stopped = $this->answered(
+			$job,
+			array(
+				RestoreFilesPreflightStep::UNMAPPED_KIND => 'stop',
+				RestoreFilesPreflightStep::EMPTY_KIND    => 'replace',
+			)
+		);
+		$this->assertSame( Job::FAILED, $stopped->status );
+		$this->assertSame( array(), (array) ( $stopped->options['answers'] ?? array() ), 'neither answer is kept' );
+		Plugin::instance()->job_actions()->retry( $stopped->id );
+		$again = $this->drive( Plugin::instance()->jobs()->find( $stopped->id ) );
+		$this->assertSame( Job::PAUSED, $again->status, (string) $again->last_error );
+		$this->assertSame( array( RestoreFilesPreflightStep::EMPTY_KIND, RestoreFilesPreflightStep::UNMAPPED_KIND ), self::asked( $again ), 'both are asked again' );
+	}
+
+	/**
+	 * A backup without a must-use plugin, restored into a site whose must-use plugins directory holds nothing: not
+	 * asked about. $late is run when the final check starts on the site's directories.
+	 *
+	 * @param callable|null $late function(): void.
+	 */
+	private function restore_with_nothing_in_the_must_use_plugins( $late ): Job {
+		$files = self::backup_files();
+		unset( $files['wp-content/mu-plugins/restored-mu.php'] );
+		$base = $this->made_backup( $files );
+		rename( $this->dirs['mu-plugins'] . '/live-mu.php', $this->sandbox . '/moved-away.php' );
+		$this->check_more = array(
+			'site_dirs' => function () use ( $late ): array {
+				++$this->dir_reads;
+				if ( null !== $late && 1 === $this->dir_reads ) {
+					$late();
+				}
+				return $this->dirs;
+			},
+		);
+		return $this->restore( $base );
+	}
+
+	/** @var int How often the final check read the site's directories. */
+	private $dir_reads = 0;
+
+	public function test_a_group_without_files_that_holds_something_by_the_final_check_is_not_swapped_and_a_retry_asks(): void {
+		$job = $this->restore_with_nothing_in_the_must_use_plugins(
+			function (): void {
+				file_put_contents( $this->dirs['mu-plugins'] . '/late.php', '<?php // put there after the files preflight' );
+			}
+		);
+		$this->assertGreaterThan( 0, $this->dir_reads, 'the control: the final check read the directories' );
+		$this->assertSame( Job::FAILED, $job->status, 'refused: ' . $job->step . ' ' . wp_json_encode( $job->questions ) );
+		$this->assertSame( SwapCheckStep::ID, $job->step );
+		$this->assertNotSame( Job::FAILURE_FINAL, $job->failure_kind, 'a retry is offered' );
+		$this->assertStringContainsString( 'The backup holds no file for the "mu-plugins" group', (string) $job->last_error );
+		$this->assertStringContainsString( 'the site is as it was', (string) $job->last_error );
+		$this->assertFileExists( $this->dirs['mu-plugins'] . '/late.php', 'nothing was swapped' );
+		$this->assertFileExists( $this->dirs['plugins'] . '/live-plugin/live.php' );
+		$this->assertFileDoesNotExist( $this->dirs['plugins'] . '/demo/demo.php' );
+		// The retry starts the checks again, and the files preflight asks about the directory.
+		Plugin::instance()->job_actions()->retry( $job->id );
+		$again = $this->drive( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( Job::PAUSED, $again->status, (string) $again->last_error );
+		$this->assertSame( array( RestoreFilesPreflightStep::EMPTY_KIND ), self::asked( $again ) );
+		$this->assertSame( array( 'mu-plugins' ), $this->words( $again, RestoreFilesPreflightStep::EMPTY_KIND )['listed'] );
+		$done = $this->swapped( $this->answered( $again, array( RestoreFilesPreflightStep::EMPTY_KIND => 'keep' ) ) );
+		$this->assertFileExists( $this->dirs['mu-plugins'] . '/late.php' );
+		$this->assertStringContainsString( 'as you chose: mu-plugins', (string) $done->progress_message );
+	}
+
+	public function test_a_group_without_files_that_still_holds_nothing_by_the_final_check_is_swapped(): void {
+		$job = $this->restore_with_nothing_in_the_must_use_plugins( null );
+		$this->assertGreaterThan( 0, $this->dir_reads, 'the control: the final check read the directories' );
+		$this->assertSame( array( 'mu-plugins' ), RestoreFilesPreflightStep::staging( $this->work( $job ) )['unasked'], 'the group is recorded as one that was not asked about' );
+		$this->swapped( $job );
+	}
+
+	/**
 	 * Manifest values that must not be used to read the backup's paths differently: site.abspath, site.content_dir.
 	 *
 	 * @return array<string, array{0: string, 1: string}>
@@ -542,6 +720,7 @@ final class RestoreGroupGuardTest extends SwapTestCase {
 			'the content directory somewhere else'         => array( '/var/www/html/', '/srv/app' ),
 			'the WordPress directory inside the content'   => array( '/var/www/html/app/core/', '/var/www/html/app' ),
 			'backslashes'                                  => array( 'C:\\www\\', 'C:\\www\\app' ),
+			'a name that starts with wp-content'           => array( '/var/www/html/', '/var/www/html/wp-content/app' ),
 			'relative paths'                               => array( 'www/', 'www/app' ),
 		);
 	}

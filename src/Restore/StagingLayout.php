@@ -142,7 +142,7 @@ final class StagingLayout {
 				$this->reserved[] = $dir;
 			}
 		}
-		if ( '' !== $prefix && ( self::CONTENT === $prefix || '/' === substr( $prefix, -1 ) || null === self::segments( '/' . $prefix ) ) ) {
+		if ( '' !== $prefix && ( self::CONTENT === $prefix || 0 === strpos( $prefix, self::CONTENT . '/' ) || '/' === substr( $prefix, -1 ) || null === self::segments( '/' . $prefix ) ) ) {
 			throw new \InvalidArgumentException( 'Not a content directory prefix.' );
 		}
 		$this->prefix = $prefix;
@@ -169,8 +169,10 @@ final class StagingLayout {
 		if ( null === $base || null === $dir || count( $dir ) <= count( $base ) || array_slice( $dir, 0, count( $base ) ) !== $base ) {
 			return '';
 		}
-		$prefix = implode( '/', array_slice( $dir, count( $base ) ) );
-		return self::CONTENT === $prefix ? '' : $prefix;
+		$under = array_slice( $dir, count( $base ) );
+		// A name that starts with "wp-content" reads nothing differently: a path under it is one under "wp-content"
+		// as it is written, and reading it again would put it in another group than it is spelled in.
+		return self::CONTENT === $under[0] ? '' : implode( '/', $under );
 	}
 
 	/**
@@ -218,6 +220,16 @@ final class StagingLayout {
 			return self::CONTENT . substr( $path, strlen( $this->prefix ) );
 		}
 		return $path;
+	}
+
+	/**
+	 * Whether canonical() reads a backup path differently than it is written.
+	 *
+	 * @param string $path Backup path.
+	 * @return bool
+	 */
+	public function reread( string $path ): bool {
+		return $this->canonical( $path ) !== $path;
 	}
 
 	/**
