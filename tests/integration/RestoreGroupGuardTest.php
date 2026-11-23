@@ -699,6 +699,26 @@ final class RestoreGroupGuardTest extends SwapTestCase {
 		$this->assertStringContainsString( 'as you chose: mu-plugins', (string) $done->progress_message );
 	}
 
+	public function test_a_group_without_files_whose_directory_cannot_be_listed_by_the_final_check_is_not_swapped(): void {
+		// Something that is there and does not list: a file where the directory was (the tests run as root, which a
+		// directory's mode does not keep from listing it).
+		$job = $this->restore_with_nothing_in_the_must_use_plugins(
+			function (): void {
+				rename( $this->dirs['mu-plugins'], $this->sandbox . '/mu-plugins-as-it-was' );
+				file_put_contents( $this->dirs['mu-plugins'], 'not a directory' );
+				clearstatcache( true );
+			}
+		);
+		$this->assertGreaterThan( 0, $this->dir_reads, 'the control: the final check read the directories' );
+		$this->assertSame( Job::FAILED, $job->status, 'refused: ' . $job->step . ' ' . wp_json_encode( $job->questions ) );
+		$this->assertSame( SwapCheckStep::ID, $job->step );
+		$this->assertStringContainsString( 'The backup holds no file for the "mu-plugins" group', (string) $job->last_error );
+		$this->assertStringContainsString( 'or cannot be listed', (string) $job->last_error );
+		clearstatcache( true );
+		$this->assertSame( 'not a directory', file_get_contents( $this->dirs['mu-plugins'] ), 'nothing was swapped' );
+		$this->assertFileDoesNotExist( $this->dirs['plugins'] . '/demo/demo.php' );
+	}
+
 	public function test_a_group_without_files_that_still_holds_nothing_by_the_final_check_is_swapped(): void {
 		$job = $this->restore_with_nothing_in_the_must_use_plugins( null );
 		$this->assertGreaterThan( 0, $this->dir_reads, 'the control: the final check read the directories' );
