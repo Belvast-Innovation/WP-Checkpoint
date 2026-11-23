@@ -243,8 +243,11 @@ final class Manifest {
 		$out['files'] = array(
 			'count' => self::int_field( $files, 'count', 'files', 0, self::MAX_BYTES ),
 			'bytes' => self::int_field( $files, 'bytes', 'files', 0, self::MAX_BYTES ),
-			'index' => self::content_entry( self::object_field( $files, 'index', 'files' ), 'files.index', $chunk_bytes, $paths, self::FILES_INDEX ),
 		);
+		if ( array_key_exists( 'groups', $files ) ) {
+			$out['files']['groups'] = self::group_counts( self::object_field( $files, 'groups', 'files' ), $out['contents']['files'], $out['files']['count'] );
+		}
+		$out['files']['index'] = self::content_entry( self::object_field( $files, 'index', 'files' ), 'files.index', $chunk_bytes, $paths, self::FILES_INDEX );
 
 		$out['volumes'] = array();
 		foreach ( self::list_field( $data, 'volumes', '', self::MAX_VOLUMES ) as $i => $volume ) {
@@ -414,6 +417,67 @@ final class Manifest {
 			throw new ManifestError( self::path( $prefix, $key ), 'Not an ISO 8601 timestamp.' );
 		}
 		return $value;
+	}
+
+	/**
+	 * The count of each content group's files (files.groups): present, it names exactly the groups of
+	 * contents.files, each with a count, and the counts add up to files.count. Anything else rejects the manifest:
+	 * a count that says something else than the archive holds is found by the restore, which counts the files it
+	 * puts into each group; one that is not a count is not read as "no count".
+	 *
+	 * @param array<string, mixed> $groups The decoded object.
+	 * @param string[]             $names  contents.files.
+	 * @param int                  $total  files.count.
+	 * @return array<string, array{count: int}> In the order of contents.files.
+	 * @throws ManifestError When the object is not as described.
+	 */
+	private static function group_counts( array $groups, array $names, int $total ): array {
+		foreach ( array_keys( $groups ) as $key ) {
+			if ( ! in_array( (string) $key, $names, true ) ) {
+				throw new ManifestError( 'files.groups', 'Names a content group that contents.files does not.' );
+			}
+		}
+		$out = array();
+		$sum = 0;
+		foreach ( $names as $name ) {
+			if ( isset( $out[ $name ] ) ) {
+				throw new ManifestError( 'contents.files', 'Names a content group twice.' );
+			}
+			if ( ! array_key_exists( $name, $groups ) ) {
+				throw new ManifestError( 'files.groups', sprintf( 'Has no count for the "%s" content group.', $name ) );
+			}
+			$field = self::path( 'files.groups', $name );
+			if ( ! $groups[ $name ] instanceof \stdClass ) {
+				throw new ManifestError( $field, 'Not an object.' );
+			}
+			$count        = self::int_field( get_object_vars( $groups[ $name ] ), 'count', $field, 0, self::MAX_BYTES );
+			$out[ $name ] = array( 'count' => $count );
+			if ( $count > $total - $sum ) {
+				throw new ManifestError( 'files.groups', 'The counts of the content groups add up to more than files.count.' );
+			}
+			$sum += $count;
+		}
+		if ( $sum !== $total ) {
+			throw new ManifestError( 'files.groups', 'The counts of the content groups do not add up to files.count.' );
+		}
+		return $out;
+	}
+
+	/**
+	 * The count of each content group's files as the manifest declares it, or null when it declares none (an
+	 * archive written before the counts were).
+	 *
+	 * @return array<string, int>|null
+	 */
+	public function group_counts_declared() {
+		if ( ! isset( $this->data['files']['groups'] ) ) {
+			return null;
+		}
+		$out = array();
+		foreach ( $this->data['files']['groups'] as $name => $group ) {
+			$out[ (string) $name ] = (int) $group['count'];
+		}
+		return $out;
 	}
 
 	/**

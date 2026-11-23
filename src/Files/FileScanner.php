@@ -354,6 +354,8 @@ final class FileScanner {
 		}
 		// Where the root leads, for the pack step to see whether it still leads there (a hash, not a path).
 		$state['root_ids'][ $root['prefix'] ] = Links::fingerprint( $root['path'] );
+		// The group whose files are listed under this prefix, for the manifest step to count each group's files.
+		$state['root_groups'][ $root['prefix'] ] = $root['group'];
 		return true;
 	}
 

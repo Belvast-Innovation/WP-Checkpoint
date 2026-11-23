@@ -344,4 +344,68 @@ final class ManifestStepTest extends TestCase {
 		ksort( $out );
 		return $out;
 	}
+
+	/**
+	 * The scan summary as the scan writes it now: with the group of each root it listed files under.
+	 *
+	 * @param array<string, string> $root_groups Prefix => group.
+	 */
+	private function scanned( array $root_groups ): void {
+		file_put_contents( $this->ctx->work() . '/scan.summary.json', json_encode( array( 'counts' => array(), 'lists' => array(), 'warnings' => array( 'A scan warning.' ), 'root_groups' => $root_groups ) ) );
+	}
+
+	private function manifest(): Manifest {
+		return Manifest::from_json( (string) file_get_contents( $this->volumes() . '/' . self::BASE . '.manifest.json' ) );
+	}
+
+	public function test_the_manifest_counts_the_files_of_each_group_backed_up(): void {
+		$this->scanned( array( 'wp-content/uploads' => 'uploads' ) );
+		$this->drive( $this->step() );
+		$this->assertSame( array( 'uploads' => 2 ), $this->manifest()->group_counts_declared() );
+		$this->assertSame( array( 'count' => 2 ), $this->manifest()->to_array()['files']['groups']['uploads'] );
+		$this->assertStringContainsString( 'Self-check passed', $this->ctx->log() );
+		// The copy inside the archive says the same.
+		$volumes = glob( $this->volumes() . '/*.wpcheckpoint.zip' ) ?: array();
+		$reader  = ZipReader::open( (string) end( $volumes ) );
+		$this->assertSame( array( 'uploads' => 2 ), Manifest::from_json( $reader->read( $reader->find( 'manifest.json' ) ) )->group_counts_declared() );
+	}
+
+	public function test_a_group_backed_up_without_a_file_is_counted_as_none(): void {
+		ExportPlan::write( $this->ctx->work(), ExportPlan::PLAN, array( 'base' => self::BASE, 'tables' => array( 'wp_posts' ), 'notes' => array(), 'groups' => array( 'plugins', 'uploads' ), 'exclusions' => array( 'wp-content/cache' ) ) );
+		$this->scanned( array( 'wp-content/uploads' => 'uploads', 'wp-content/plugins' => 'plugins' ) );
+		$this->drive( $this->step() );
+		$this->assertSame( array( 'plugins' => 0, 'uploads' => 2 ), $this->manifest()->group_counts_declared() );
+	}
+
+	public function test_a_scan_that_recorded_no_groups_gives_a_manifest_without_the_counts(): void {
+		// The summary of set_up() is one an earlier version's scan wrote.
+		$this->drive( $this->step() );
+		$this->assertNull( $this->manifest()->group_counts_declared() );
+		$this->assertArrayNotHasKey( 'groups', $this->manifest()->to_array()['files'] );
+	}
+
+	public function test_an_audit_an_earlier_version_began_is_finished_without_the_counts(): void {
+		$this->scanned( array( 'wp-content/uploads' => 'uploads' ) );
+		// The cursor of an audit begun before the counts were: its files state has no groups.
+		$cursor = array( 'phase' => 'audit', 'audit' => array( 'database' => \WPCheckpoint\Archive\IndexAudit::database_start(), 'files' => \WPCheckpoint\Archive\IndexAudit::files_start() ) );
+		$this->drive( $this->step(), $cursor );
+		$this->assertNull( $this->manifest()->group_counts_declared() );
+	}
+
+	public function test_files_of_a_group_that_is_not_backed_up_stop_the_step(): void {
+		$this->scanned( array( 'wp-content/uploads' => 'themes' ) );
+		try {
+			$this->drive( $this->step() );
+			$this->fail( 'described an archive with files of a group it does not name' );
+		} catch ( \RuntimeException $e ) {
+			$this->assertStringContainsString( 'files of the "themes" content group, which is not part of this backup', $e->getMessage() );
+		}
+		$this->assertFileDoesNotExist( $this->volumes() . '/' . self::BASE . '.manifest.json' );
+	}
+
+	public function test_a_manifest_with_the_counts_is_replayed_to_the_same_archive_from_every_phase(): void {
+		$this->scanned( array( 'wp-content/uploads' => 'uploads' ) );
+		$this->replay_every_phase( $this->packer_options() );
+		$this->assertSame( array( 'uploads' => 2 ), $this->manifest()->group_counts_declared() );
+	}
 }

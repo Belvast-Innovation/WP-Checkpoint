@@ -4246,6 +4246,15 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 				implode( ', ', $kept )
 			);
 		}
+		$emptied = $context->options()['recorded'][ RestoreFilesPreflightStep::RECORD_EMPTIED ] ?? null;
+		$emptied = is_string( $emptied ) && '' !== $emptied ? array_values( array_intersect( StagingLayout::GROUPS, explode( ',', $emptied ) ) ) : array();
+		if ( array() !== $emptied ) {
+			$text .= ' ' . sprintf(
+				/* translators: %s: names of content directories, comma-separated */
+				__( 'Restored empty, as in the backup, which has no file for them: %s (what they held before was replaced).', 'wp-checkpoint' ),
+				implode( ', ', $emptied )
+			);
+		}
 		$skipped = $context->options()['recorded'][ RestoreFilesPreflightStep::RECORD_SKIPPED ] ?? null;
 		if ( is_int( $skipped ) && $skipped > 0 ) {
 			$text .= ' ' . sprintf(

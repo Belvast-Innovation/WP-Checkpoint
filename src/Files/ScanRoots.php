@@ -173,6 +173,27 @@ final class ScanRoots {
 	}
 
 	/**
+	 * The prefix an archive path is under: the longest of the prefixes that is the path or holds it ('' when none
+	 * does). The one rule by which a path of the files index belongs to a root, and so to a content group: the
+	 * pack step finds the directory a line is read from by it, and the manifest step counts each group's files by
+	 * it.
+	 *
+	 * @param string[] $prefixes Root prefixes (no trailing slash).
+	 * @param string   $p        Archive path.
+	 * @return string
+	 */
+	public static function prefix_of( array $prefixes, string $p ): string {
+		$best = '';
+		foreach ( $prefixes as $candidate ) {
+			$candidate = (string) $candidate;
+			if ( '' !== $candidate && ( $p === $candidate || 0 === strpos( $p, $candidate . '/' ) ) && strlen( $candidate ) > strlen( $best ) ) {
+				$best = $candidate;
+			}
+		}
+		return $best;
+	}
+
+	/**
 	 * The archive path prefix of a group directory.
 	 *
 	 * @param string $group   Group.
