@@ -992,8 +992,9 @@ final class RestoreGroupGuardTest extends SwapTestCase {
 		$before = self::tree( $this->dirs['other-content'] );
 		$job    = $this->restore( $base );
 		$this->assertSame( Job::FAILED, $job->status, 'it fails: ' . $job->step . ' ' . wp_json_encode( $job->questions ) );
-		$this->assertNotSame( SwapStep::ID, $job->step );
-		$this->assertStringContainsString( 'files.groups', (string) $job->last_error );
+		$this->assertSame( RestoreVerifyStep::ID, $job->step, 'where a manifest that cannot be read is refused: before anything of the restore' );
+		$this->assertStringContainsString( 'This backup cannot be restored', (string) $job->last_error );
+		$this->assertStringContainsString( 'files.groups', self::log_of( $job ) . ' ' . $job->last_error, 'the field is named' );
 		$this->assertSame( $before, self::tree( $this->dirs['other-content'] ) );
 	}
 
