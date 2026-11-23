@@ -4,6 +4,7 @@ namespace WPCheckpoint\Tests\Unit\Tooling;
 
 use WPCheckpoint\Tests\Fixtures\ExpectedPath;
 use WPCheckpoint\Tests\Fixtures\Sandbox;
+use WPCheckpoint\Tests\Fixtures\SandboxGit;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 /**
@@ -26,7 +27,7 @@ final class MutateToolTest extends TestCase {
 
 	protected function set_up(): void {
 		parent::set_up();
-		if ( 'Windows' === PHP_OS_FAMILY || '' === trim( (string) shell_exec( 'command -v git' ) ) ) {
+		if ( 'Windows' === PHP_OS_FAMILY || ! SandboxGit::available() ) {
 			$this->markTestSkipped( 'Needs git and a POSIX shell.' );
 		}
 		$this->sandbox = Sandbox::make( 'mutate-tool' );
@@ -63,11 +64,9 @@ exit( $fail ? 1 : 0 );
 	}
 
 	private function git( string $args ): string {
-		$out = array();
-		$rc  = 0;
-		exec( 'cd ' . escapeshellarg( $this->repo ) . ' && git -c user.name=t -c user.email=t@example.invalid ' . $args . ' 2>&1', $out, $rc );
-		$this->assertSame( 0, $rc, 'git ' . $args . ': ' . implode( "\n", $out ) );
-		return implode( "\n", $out );
+		$run = SandboxGit::run( $this->repo, $args );
+		$this->assertSame( 0, $run['code'], 'git ' . $args . ': ' . $run['stdout'] . $run['stderr'] );
+		return rtrim( $run['stdout'] . $run['stderr'], "\n" );
 	}
 
 	/**
@@ -87,15 +86,11 @@ exit( $fail ? 1 : 0 );
 				)
 			)
 		);
-		$pipes   = array();
-		$process = proc_open( array( PHP_BINARY, dirname( __DIR__, 3 ) . '/bin/mutate.php', $spec ), array( 1 => array( 'pipe', 'w' ), 2 => array( 'pipe', 'w' ) ), $pipes, $this->repo . '/src', array( 'PATH' => (string) getenv( 'PATH' ), 'HOME' => $this->sandbox ) );
-		$this->assertIsResource( $process );
-		$out = (string) stream_get_contents( $pipes[1] ) . (string) stream_get_contents( $pipes[2] );
-		fclose( $pipes[1] );
-		fclose( $pipes[2] );
+		// The tool asks git for the repository it is in: started as git commands of a test are.
+		$run = SandboxGit::command( $this->repo . '/src', array( PHP_BINARY, dirname( __DIR__, 3 ) . '/bin/mutate.php', $spec ) );
 		return array(
-			'code' => proc_close( $process ),
-			'out'  => $out,
+			'code' => $run['code'],
+			'out'  => $run['stdout'] . $run['stderr'],
 		);
 	}
 

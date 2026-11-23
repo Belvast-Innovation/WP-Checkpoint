@@ -9,6 +9,11 @@
 #
 # Exit status: 0 when every step passed, else the status of the step that failed.
 
+# git's own environment is not the checks': started from a hook, they would inherit GIT_DIR, and a git command of a
+# test would act on the hook's repository, whatever directory it ran in (tests/Fixtures/SandboxGit.php).
+for name in $(env | sed -n 's/^\(GIT_[A-Za-z0-9_]*\)=.*/\1/p'); do
+	unset "$name"
+done
 set -u
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${WPCHECKPOINT_TEST_OUTPUT:-$REPO/../wp-checkpoint-test-output}"

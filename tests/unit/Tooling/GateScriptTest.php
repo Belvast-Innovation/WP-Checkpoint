@@ -32,10 +32,11 @@ final class GateScriptTest extends TestCase {
 	/**
 	 * Run the gate with steps.
 	 *
-	 * @param string[] $steps Steps.
+	 * @param string[]              $steps Steps.
+	 * @param array<string, string> $more  More environment variables.
 	 * @return array{0: int, 1: string, 2: string} Its status, standard output and error output.
 	 */
-	private function gate( array $steps ): array {
+	private function gate( array $steps, array $more = array() ): array {
 		$pipes   = array();
 		$process = proc_open(
 			array_merge( array( 'bash', dirname( __DIR__, 3 ) . '/bin/gate.sh' ), $steps ),
@@ -49,12 +50,31 @@ final class GateScriptTest extends TestCase {
 				'WPCHECKPOINT_TEST_OUTPUT' => $this->sandbox . '/out',
 				'PATH'                     => (string) getenv( 'PATH' ),
 				'MARK'                     => $this->sandbox . '/ran',
-			)
+			) + $more
 		);
 		$this->assertIsResource( $process );
 		$out = (string) stream_get_contents( $pipes[1] );
 		$err = (string) stream_get_contents( $pipes[2] );
 		return array( proc_close( $process ), $out, $err );
+	}
+
+	/**
+	 * Started from a git hook, the gate would hand the hook's GIT_DIR on to its steps, and a git command of a test
+	 * would then act on the hook's repository (tests/Fixtures/SandboxGit.php).
+	 */
+	public function test_git_s_environment_is_not_handed_on_to_the_steps(): void {
+		list( $status, $out, $err ) = $this->gate(
+			array( '( env | grep "^GIT_" ; echo "kept=$WPCHECKPOINT_KEPT" ) >> "$MARK"' ),
+			array(
+				'GIT_DIR'           => $this->sandbox . '/somewhere/.git',
+				'GIT_WORK_TREE'     => $this->sandbox . '/somewhere',
+				'GIT_INDEX_FILE'    => $this->sandbox . '/somewhere/.git/index',
+				'GIT_AUTHOR_NAME'   => 'Somebody',
+				'WPCHECKPOINT_KEPT' => 'kept',
+			)
+		);
+		$this->assertSame( 0, $status, $out . $err );
+		$this->assertSame( "kept=kept\n", file_get_contents( $this->sandbox . '/ran' ), 'no GIT_* variable reaches a step; the control: another variable given the same way does' );
 	}
 
 	public function test_steps_that_pass_let_the_gate_pass_and_each_is_run(): void {

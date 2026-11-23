@@ -14,6 +14,10 @@
 
 require_once dirname( __DIR__ ) . '/vendor/autoload.php';
 
+// What the process that started the tests had of git's environment is not the tests': started from a hook, they
+// would inherit GIT_DIR, and a git command of a test would act on the hook's repository (SandboxGit).
+\WPCheckpoint\Tests\Fixtures\SandboxGit::forget_inherited();
+
 $wpcheckpoint_suite = getenv( 'WPCHECKPOINT_TEST_SUITE' ) ?: 'unit';
 
 if ( 'integration' === $wpcheckpoint_suite ) {
