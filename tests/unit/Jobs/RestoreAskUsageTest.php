@@ -213,6 +213,16 @@ final class RestoreAskUsageTest extends TestCase {
 			$this->assertArrayHasKey( $kind, $asked, 'the control: the scan reads this kind from the source' );
 		}
 		$this->assertSame( array(), array_values( array_diff( array_keys( RestoreAsk::KINDS ), array_keys( $asked ) ) ), 'a registered kind that no step asks' );
+		// The kinds asked of a restore nobody attends are these and no other: the three an undo or a redo asks, each
+		// with its reason and what becomes of it unanswered. Another one is a decision, made here as well.
+		$asks = array();
+		foreach ( RestoreAsk::KINDS as $kind => $entry ) {
+			if ( RestoreAsk::ASKS === $entry[0] ) {
+				$asks[] = $kind;
+				$this->assertStringContainsString( 'Not answered by the end of the time', (string) $entry[1], $kind . ' says what becomes of it unanswered' );
+			}
+		}
+		$this->assertSame( array( SwapStep::CARRY_KIND, SwapStep::REDO_CARRY_KIND, SwapStep::AFTER_UNDO_KIND ), $asks );
 		foreach ( RestoreAsk::KINDS as $kind => $entry ) {
 			$this->assertContains( $entry[0], array( RestoreAsk::POLICY, RestoreAsk::FAILS, RestoreAsk::ASKS ), $kind );
 			$this->assertNotSame( '', trim( (string) $entry[1] ), $kind . ' says its policy, its subject or its reason' );
