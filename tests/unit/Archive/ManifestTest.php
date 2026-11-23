@@ -84,6 +84,30 @@ final class ManifestTest extends TestCase {
 		$this->assertSame( 'wp_', $manifest->site()['table_prefix'] );
 	}
 
+	public function test_the_counts_of_each_groups_files_are_read_and_written_back_the_same(): void {
+		$manifest = Manifest::from_json( (string) file_get_contents( self::FIXTURES . '/valid/group_counts.json' ) );
+		$this->assertSame( array( 'plugins' => 234, 'themes' => 1000, 'uploads' => 16000, 'mu-plugins' => 0, 'other-content' => 1000 ), $manifest->group_counts_declared() );
+		$out = $manifest->to_json();
+		$this->assertStringContainsString( '"files":{"count":18234,"bytes":2143233211,"groups":{"plugins":{"count":234},"themes":{"count":1000},"uploads":{"count":16000},"mu-plugins":{"count":0},"other-content":{"count":1000}},"index":', $out );
+		$this->assertSame( $out, Manifest::from_json( $out )->to_json(), 'stable' );
+		$this->assertTrue( $this->schema_accepts( $out ) );
+
+		// A key of a group this version does not know is dropped, like any unknown key.
+		$more = Manifest::from_json( (string) file_get_contents( self::FIXTURES . '/valid/group_counts_with_an_unknown_key_in_a_group.json' ) );
+		$this->assertSame( $out, $more->to_json() );
+
+		// The control: a manifest without the counts has none, and none are written.
+		$base = Manifest::from_json( (string) file_get_contents( self::FIXTURES . '/valid/base.json' ) );
+		$this->assertNull( $base->group_counts_declared() );
+		$this->assertStringNotContainsString( '"groups"', $base->to_json() );
+
+		// The counts of no group are not kept: an empty list would not be read back.
+		$none = Manifest::from_json( (string) file_get_contents( self::FIXTURES . '/valid/group_counts_of_no_group.json' ) );
+		$this->assertNull( $none->group_counts_declared() );
+		$this->assertStringNotContainsString( '"groups"', $none->to_json() );
+		$this->assertSame( $none->to_json(), Manifest::from_json( $none->to_json() )->to_json() );
+	}
+
 	public function test_document_level_rejections(): void {
 		foreach ( array( '', 'null', '[]', '"x"', '{"format": ', str_repeat( '[', 40 ) . str_repeat( ']', 40 ) ) as $json ) {
 			try {

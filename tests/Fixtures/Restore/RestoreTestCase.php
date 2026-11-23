@@ -157,7 +157,7 @@ abstract class RestoreTestCase extends JobTestCase {
 	 * @param string[]      $tables  Tables in order.
 	 * @param callable|null $edit    function( string $table, string[] $chunks ): string[].
 	 * @param callable|null $site    function( array $site ): array, the manifest's site.
-	 * @param array         $options ArchiveBuilder options; rows: table => row count where edited chunks change it; files: path => content; groups: the manifest's content groups.
+	 * @param array         $options ArchiveBuilder options; rows: table => row count where edited chunks change it; files: path => content; groups: the manifest's content groups; counts: group => the manifest's count of its files (none: a manifest without the counts, as archives were written before them).
 	 * @return string The backup's base name.
 	 */
 	protected function backup( array $tables, $edit = null, $site = null, array $options = array() ): string {
@@ -169,13 +169,20 @@ abstract class RestoreTestCase extends JobTestCase {
 		// the path as written: "wp-content/<group>/", anything else under "wp-content/" other content; a file outside
 		// it is in none). A backup that names a group it has no file for is a case of its own (RestoreGroupGuardTest):
 		// the restore asks before it swaps such a group's directory for an empty one.
-		$groups = $options['groups'] ?? self::groups_of( array_keys( $files ) );
-		unset( $options['rows'], $options['files'], $options['groups'] );
+		$groups     = $options['groups'] ?? self::groups_of( array_keys( $files ) );
+		$group_nums = $options['counts'] ?? null;
+		unset( $options['rows'], $options['files'], $options['groups'], $options['counts'] );
 		$builder = new ArchiveBuilder(
 			$options + array(
-				'manifest' => static function ( array $manifest ) use ( &$rows, $site, $wpdb, $groups ): array {
+				'manifest' => static function ( array $manifest ) use ( &$rows, $site, $wpdb, $groups, $group_nums ): array {
 					if ( null !== $groups ) {
 						$manifest['contents']['files'] = $groups;
+					}
+					if ( null !== $group_nums ) {
+						$manifest['files']['groups'] = array();
+						foreach ( $group_nums as $group => $count ) {
+							$manifest['files']['groups'][ $group ] = array( 'count' => $count );
+						}
 					}
 					foreach ( $manifest['database']['tables'] as $i => $table ) {
 						$manifest['database']['tables'][ $i ]['rows'] = $rows[ $table['name'] ];

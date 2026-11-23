@@ -379,7 +379,7 @@ final class ManifestStep implements Step {
 
 	/**
 	 * The manifest's files.groups: how many files of the archive each backed-up content group has, as the audit
-	 * counted them (a group without a file: 0). Nothing when the audit did not count by group.
+	 * counted them (a group without a file: 0). Nothing when the audit did not count by group, or no group is backed up.
 	 *
 	 * @param array<string, mixed> $audit  The files audit's final state.
 	 * @param string[]             $groups The content groups backed up (the manifest's contents.files).
@@ -398,7 +398,8 @@ final class ManifestStep implements Step {
 		foreach ( $groups as $group ) {
 			$out[ (string) $group ] = array( 'count' => isset( $audit['groups'][ $group ] ) ? (int) $audit['groups'][ $group ] : 0 );
 		}
-		return array( 'groups' => $out );
+		// A backup of no group has nothing to count (and an empty list is not the object the manifest's reader takes).
+		return array() === $out ? array() : array( 'groups' => $out );
 	}
 
 	/**

@@ -2,14 +2,21 @@
 
 namespace WPCheckpoint\Tests\Integration;
 
+use WPCheckpoint\Archive\Manifest;
 use WPCheckpoint\Files\Exclusions;
 use WPCheckpoint\Files\ScanRoots;
 use WPCheckpoint\Jobs\ExportJob;
+use WPCheckpoint\Jobs\ExportPlan;
 use WPCheckpoint\Jobs\FileScanStep;
 use WPCheckpoint\Jobs\Job;
+use WPCheckpoint\Jobs\JobContext;
+use WPCheckpoint\Jobs\JobRepository;
 use WPCheckpoint\Jobs\PackStep;
 use WPCheckpoint\Jobs\QuestionText;
 use WPCheckpoint\Jobs\RestoreFilesPreflightStep;
+use WPCheckpoint\Jobs\RestorePreflightStep;
+use WPCheckpoint\Jobs\RestoreVerifyStep;
+use WPCheckpoint\Jobs\StepResult;
 use WPCheckpoint\Jobs\SwapCheckStep;
 use WPCheckpoint\Jobs\SwapStep;
 use WPCheckpoint\Jobs\TickResult;
@@ -19,6 +26,7 @@ use WPCheckpoint\Restore\LinkedTargets;
 use WPCheckpoint\Restore\OtherEntries;
 use WPCheckpoint\Restore\RestoreFiles;
 use WPCheckpoint\Restore\StagingLayout;
+use WPCheckpoint\Tests\Fixtures\Jobs\ClosureStep;
 use WPCheckpoint\Tests\Fixtures\Restore\SwapTestCase;
 
 /**
@@ -53,8 +61,12 @@ final class RestoreGroupGuardTest extends SwapTestCase {
 	/**
 	 * A real export of the sandbox's site as it stands: the plugin's own export steps, the scan and the pack given
 	 * the sandbox's directories in place of WordPress's (ScanRoots::resolve_dirs()). Returns the backup's base name.
+	 *
+	 * @param bool $counted Whether the manifest counts each group's files, as an export does now. False: the scan
+	 *                      summary is left as an earlier version's scan wrote it (without the group of each root),
+	 *                      which gives an archive as they were written before the counts.
 	 */
-	private function real_export(): string {
+	private function real_export( bool $counted = true ): string {
 		global $wpdb;
 		$resolved = ScanRoots::resolve_dirs(
 			array_merge(
@@ -77,6 +89,17 @@ final class RestoreGroupGuardTest extends SwapTestCase {
 		foreach ( $export->steps() as $step ) {
 			if ( $step instanceof FileScanStep ) {
 				$steps[] = new FileScanStep( $resolved['roots'], new Exclusions(), $resolved['warnings'] );
+				if ( ! $counted ) {
+					$steps[] = new ClosureStep(
+						'scan_as_before',
+						static function ( JobContext $context ): StepResult {
+							$summary = ExportPlan::read( $context->work_path(), FileScanStep::SUMMARY );
+							unset( $summary['root_groups'] );
+							ExportPlan::write( $context->work_path(), FileScanStep::SUMMARY, $summary );
+							return StepResult::done( 'The scan summary is as an earlier version wrote it' );
+						}
+					);
+				}
 			} elseif ( $step instanceof PackStep ) {
 				$steps[] = new PackStep( $resolved['roots'] );
 			} else {
@@ -123,10 +146,11 @@ final class RestoreGroupGuardTest extends SwapTestCase {
 	/**
 	 * A backup of the fixture's tables with these files, its manifest's site values changed by $site.
 	 *
-	 * @param array<string, string> $files Archive path => content.
-	 * @param callable|null         $site  function( array $site ): array.
+	 * @param array<string, string>   $files  Archive path => content.
+	 * @param callable|null           $site   function( array $site ): array.
+	 * @param array<string, int>|null $counts The manifest's count of each group's files (null: a manifest without).
 	 */
-	private function made_backup( array $files, $site = null ): string {
+	private function made_backup( array $files, $site = null, $counts = null ): string {
 		global $wpdb;
 		$keep = $wpdb->prefix . 'swt_keep';
 		$new  = $wpdb->prefix . 'swt_new';
@@ -144,7 +168,7 @@ final class RestoreGroupGuardTest extends SwapTestCase {
 			array(
 				'files'  => $files,
 				'groups' => StagingLayout::GROUPS,
-			)
+			) + ( null === $counts ? array() : array( 'counts' => $counts ) )
 		);
 		$wpdb->query( "DELETE FROM `{$keep}` WHERE id = 3" );
 		$wpdb->query( "UPDATE `{$keep}` SET v = 'live'" );
@@ -342,7 +366,7 @@ final class RestoreGroupGuardTest extends SwapTestCase {
 		$content = $this->dirs['other-content'];
 		rename( $content . '/mu-plugins', $content . '/my-mu' );
 		$this->dirs['mu-plugins'] = $content . '/my-mu';
-		$base                     = $this->real_export();
+		$base                     = $this->real_export( false ); // An archive written before the counts: with them, the restore fails (below).
 		$this->after_export();
 		$before = self::tree( $content . '/my-mu' );
 		$job    = $this->restore( $base );
@@ -387,7 +411,7 @@ final class RestoreGroupGuardTest extends SwapTestCase {
 		$content = $this->dirs['other-content'];
 		rename( $content . '/mu-plugins', $content . '/my-mu' );
 		$this->dirs['mu-plugins'] = $content . '/my-mu';
-		$base                     = $this->real_export();
+		$base                     = $this->real_export( false ); // An archive written before the counts: with them, the restore fails (below).
 		// The target site: the default layout.
 		rename( $content . '/my-mu', $content . '/mu-plugins' );
 		$this->dirs['mu-plugins'] = $content . '/mu-plugins';
@@ -410,7 +434,7 @@ final class RestoreGroupGuardTest extends SwapTestCase {
 		$content = $this->dirs['other-content'];
 		rename( $content . '/plugins', $content . '/my-plugins' );
 		$this->dirs['plugins'] = $content . '/my-plugins';
-		$base                  = $this->real_export();
+		$base                  = $this->real_export( false ); // An archive written before the counts: with them, the restore fails (below).
 		$this->after_export();
 		$before = self::tree( $content );
 		$job    = $this->restore( $base );
@@ -451,7 +475,7 @@ final class RestoreGroupGuardTest extends SwapTestCase {
 		$content = $this->dirs['other-content'];
 		rename( $content . '/plugins', $content . '/my-plugins' );
 		$this->dirs['plugins'] = $content . '/my-plugins';
-		$base                  = $this->real_export();
+		$base                  = $this->real_export( false ); // An archive written before the counts: with them, the restore fails (below).
 		rename( $content . '/my-plugins', $content . '/plugins' );
 		$this->dirs['plugins'] = $content . '/plugins';
 		$this->after_export();
@@ -482,7 +506,7 @@ final class RestoreGroupGuardTest extends SwapTestCase {
 			$this->dirs[ $group ] = $new . substr( $dir, strlen( $old ) );
 		}
 		$this->export_abspath = $this->sandbox;
-		$base                 = $this->real_export();
+		$base                 = $this->real_export( false ); // An archive written before the counts: with them, the restore fails (below).
 		$this->after_export();
 		$before = self::tree( $new );
 		$job    = $this->restore( $base );
@@ -684,10 +708,10 @@ final class RestoreGroupGuardTest extends SwapTestCase {
 	 *
 	 * @param callable|null $late function(): void.
 	 */
-	private function restore_with_nothing_in_the_must_use_plugins( $late ): Job {
+	private function restore_with_nothing_in_the_must_use_plugins( $late, bool $counted = false ): Job {
 		$files = self::backup_files();
 		unset( $files['wp-content/mu-plugins/restored-mu.php'] );
-		$base = $this->made_backup( $files );
+		$base = $this->made_backup( $files, null, $counted ? self::counted( $files ) : null );
 		rename( $this->dirs['mu-plugins'] . '/live-mu.php', $this->sandbox . '/moved-away.php' );
 		$this->check_more = array(
 			'site_dirs' => function () use ( $late ): array {
@@ -758,6 +782,366 @@ final class RestoreGroupGuardTest extends SwapTestCase {
 	}
 
 	/**
+	 * The count of each group's files an export of a site in the default layout records for these files: counted
+	 * here by the path as written, apart from the restore's own reading.
+	 *
+	 * @param array<string, string> $files Archive path => content.
+	 * @return array<string, int>
+	 */
+	private static function counted( array $files ): array {
+		$out = array_fill_keys( StagingLayout::GROUPS, 0 );
+		foreach ( array_keys( $files ) as $path ) {
+			$parts = explode( '/', (string) $path );
+			++$out[ 'wp-content' === $parts[0] && count( $parts ) >= 3 && in_array( $parts[1], self::NAMED, true ) ? $parts[1] : 'other-content' ];
+		}
+		return $out;
+	}
+
+	/**
+	 * What the manifest counts for each group, and what the restore's reading of the same archive's paths gives
+	 * (StagingLayout::spelled() over the files index the restore extracted): the export's count against the
+	 * restore's, each by its own code.
+	 *
+	 * @return array{0: array<string, int>|null, 1: array<string, int>} Declared, spelled ('' for no group).
+	 */
+	private function both_counts( Job $job ): array {
+		$work     = $this->work( $job );
+		$manifest = RestorePreflightStep::manifest( $work );
+		$staging  = RestoreFilesPreflightStep::staging( $work, false );
+		$layout   = new StagingLayout( $staging['groups'], 'a1b2c3d4e5f6', 7, str_repeat( '0', 32 ), array(), (string) $staging['prefix'] );
+		$declared = $manifest->group_counts_declared();
+		$spelled  = array_fill_keys( array_keys( (array) $declared ), 0 );
+		$lines    = 0;
+		foreach ( (array) file( RestoreVerifyStep::index_path( $work, $manifest->files_index() ), FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES ) as $line ) {
+			$group             = $layout->spelled( (string) json_decode( (string) $line, true )['p'] );
+			$spelled[ $group ] = ( $spelled[ $group ] ?? 0 ) + 1;
+			++$lines;
+		}
+		$this->assertGreaterThan( 0, $lines, 'the files index was read' );
+		$this->assertSame( $manifest->files_summary()['count'], $lines );
+		return array( $declared, $spelled );
+	}
+
+	/**
+	 * The files in a directory, the ones in $skip (entries of it) left out.
+	 *
+	 * @param string[] $skip Entries.
+	 */
+	private static function files_in( string $dir, array $skip = array() ): int {
+		$count = 0;
+		foreach ( self::tree( $dir ) as $relative => $what ) {
+			if ( '<dir>' !== $what && ! in_array( explode( '/', str_replace( '\\', '/', (string) $relative ) )[0], $skip, true ) ) {
+				++$count;
+			}
+		}
+		return $count;
+	}
+
+	/**
+	 * The round trip in the default layout: the export counts each group's files by the directory it read them
+	 * from, the restore reads each path's group from its spelling, and the two agree, group by group.
+	 */
+	public function test_an_export_counts_each_groups_files_and_the_restore_reads_the_same_counts_from_the_paths(): void {
+		$on_disk = array();
+		foreach ( self::NAMED as $group ) {
+			$on_disk[ $group ] = self::files_in( $this->dirs[ $group ] );
+		}
+		$on_disk['other-content'] = self::files_in( $this->dirs['other-content'], self::NAMED );
+		$base                     = $this->real_export();
+		$manifest                 = Manifest::from_json( (string) file_get_contents( Plugin::instance()->directories()->backups() . '/' . $base . '.manifest.json' ) );
+		$declared                 = $manifest->group_counts_declared();
+		$this->assertNotNull( $declared, 'the manifest counts the groups\' files' );
+		$this->assertSame( StagingLayout::GROUPS, array_values( array_intersect( StagingLayout::GROUPS, array_keys( $declared ) ) ), 'every group backed up has a count' );
+		ksort( $on_disk );
+		$sorted = $declared;
+		ksort( $sorted );
+		$this->assertSame( $on_disk, $sorted, 'the counts are of the files in each group\'s directory' );
+		$this->assertGreaterThan( 0, $declared['mu-plugins'], 'the control: the groups have files' );
+		$this->after_export();
+		$job = $this->restore( $base );
+		$this->assertSame( array(), $job->questions, 'nothing to ask about: ' . $job->last_error );
+		list( $said, $spelled ) = $this->both_counts( $job );
+		$this->assertSame( $declared, $said );
+		$this->assertSame( $said, $spelled, 'the restore reads from the paths what the export counted' );
+		$this->swapped( $job );
+	}
+
+	/**
+	 * Layouts in which a group's directory is not where the restore reads it from the paths. An export counts the
+	 * group's files by its directory; the restore's reading of the paths gives other counts, and the restore fails
+	 * before it stages anything, where an archive without the counts is asked about (the tests of each layout
+	 * above).
+	 *
+	 * UNTIL THE EXPORT WRITES CANONICAL PATHS (the next change of T042): each of these then becomes a round trip
+	 * like the default layout's, and is to be turned into one (the counts agree, the restore completes).
+	 *
+	 * @return array<string, array{0: string}>
+	 */
+	public function data_layouts_the_restore_reads_differently(): array {
+		return array(
+			'must-use plugins under a name of their own'        => array( 'my-mu' ),
+			'plugins under a name of their own'                 => array( 'my-plugins' ),
+			'the content directory inside WordPress as app'     => array( 'app' ),
+			'uploads in the WordPress directory'                => array( 'files' ),
+		);
+	}
+
+	/**
+	 * @dataProvider data_layouts_the_restore_reads_differently
+	 */
+	public function test_an_export_of_a_layout_the_restore_reads_differently_fails_the_restore_before_anything_changes( string $layout ): void {
+		$content = $this->dirs['other-content'];
+		if ( 'my-mu' === $layout ) {
+			rename( $content . '/mu-plugins', $content . '/my-mu' );
+			$this->dirs['mu-plugins'] = $content . '/my-mu';
+		} elseif ( 'my-plugins' === $layout ) {
+			rename( $content . '/plugins', $content . '/my-plugins' );
+			$this->dirs['plugins'] = $content . '/my-plugins';
+		} elseif ( 'app' === $layout ) {
+			rename( $content, $this->sandbox . '/app' );
+			foreach ( $this->dirs as $group => $dir ) {
+				$this->dirs[ $group ] = $this->sandbox . '/app' . substr( $dir, strlen( $content ) );
+			}
+			$this->export_abspath = $this->sandbox;
+		} else {
+			rename( $this->dirs['uploads'], $this->sandbox . '/files' );
+			$this->dirs['uploads'] = $this->sandbox . '/files';
+			$this->export_abspath  = $this->sandbox;
+		}
+		$base = $this->real_export();
+		$this->after_export();
+		$trees = array();
+		foreach ( $this->dirs as $group => $dir ) {
+			$trees[ $group ] = self::tree( $dir );
+		}
+		$job = $this->restore( $base );
+		$this->assertSame( Job::FAILED, $job->status, 'it fails: ' . $job->step . ' ' . wp_json_encode( $job->questions ) );
+		$this->assertSame( RestoreFilesPreflightStep::ID, $job->step, 'in the files preflight: nothing is staged yet' );
+		$this->assertSame( array(), $job->questions );
+		$this->assertStringContainsString( 'The backup records', (string) $job->last_error );
+		$this->assertStringContainsString( 'the restore stopped before it changed anything', (string) $job->last_error );
+		$this->assertStringContainsString( 'Restore by hand', (string) $job->last_error );
+		foreach ( $this->dirs as $group => $dir ) {
+			$this->assertSame( $trees[ $group ], self::tree( $dir ), $group . ' is as it was' );
+		}
+		// The export's counts against the restore's reading: they differ. This is the assertion that turns into
+		// equality when the export writes canonical paths.
+		list( $declared, $spelled ) = $this->both_counts( $job );
+		$this->assertNotNull( $declared );
+		$this->assertNotSame( $declared, $spelled, 'until the export writes canonical paths' );
+		Plugin::instance()->job_actions()->retry( $job->id );
+		$again = $this->drive( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( Job::FAILED, $again->status, 'a retry reads the same backup and fails the same way' );
+		$this->assertStringContainsString( 'The backup records', (string) $again->last_error );
+	}
+
+	public function test_a_backup_whose_counts_are_what_its_paths_say_is_restored_without_a_question(): void {
+		$files = self::backup_files();
+		$base  = $this->made_backup( $files, null, self::counted( $files ) );
+		$this->after_export();
+		$job = $this->restore( $base );
+		$this->assertSame( array(), $job->questions, 'nothing to ask about: ' . $job->last_error );
+		list( $declared, $spelled ) = $this->both_counts( $job );
+		$this->assertSame( $declared, $spelled, 'the control: the counts are the paths\'' );
+		$done = $this->swapped( $job );
+		$this->assertFileExists( $this->dirs['mu-plugins'] . '/restored-mu.php' );
+		$this->assertStringNotContainsString( 'Restored empty', (string) $done->progress_message );
+	}
+
+	/**
+	 * A count that says something else than the archive's paths: one group's larger and another's smaller by as
+	 * much, so that the manifest still adds up (one that does not is not read at all, see the next test).
+	 *
+	 * @return array<string, array{0: string, 1: string, 2: string}>
+	 */
+	public function data_counts_that_differ(): array {
+		return array(
+			'plugins larger, themes smaller'         => array( 'plugins', 'themes', 'The backup records 2 files for its "plugins" content group, and 1 of its paths are spelled as files of that group.' ),
+			'mu-plugins smaller, other-content larger' => array( 'other-content', 'mu-plugins', 'The backup records 0 files for its "mu-plugins" content group, and 1 of its paths are spelled as files of that group.' ),
+		);
+	}
+
+	/**
+	 * @dataProvider data_counts_that_differ
+	 */
+	public function test_a_count_that_differs_from_the_backups_paths_fails_the_restore_before_anything_changes( string $more, string $less, string $says ): void {
+		$files  = self::backup_files();
+		$counts = self::counted( $files );
+		++$counts[ $more ];
+		--$counts[ $less ];
+		$base = $this->made_backup( $files, null, $counts );
+		$this->after_export();
+		$trees = array();
+		foreach ( $this->dirs as $group => $dir ) {
+			$trees[ $group ] = self::tree( $dir );
+		}
+		$job = $this->restore( $base );
+		$this->assertSame( Job::FAILED, $job->status, 'it fails: ' . $job->step . ' ' . wp_json_encode( $job->questions ) );
+		$this->assertSame( RestoreFilesPreflightStep::ID, $job->step );
+		$this->assertStringContainsString( $says, (string) $job->last_error );
+		foreach ( $this->dirs as $group => $dir ) {
+			$this->assertSame( $trees[ $group ], self::tree( $dir ), $group . ' is as it was' );
+		}
+	}
+
+	public function test_a_manifest_whose_counts_do_not_add_up_is_not_restored_from(): void {
+		$files  = self::backup_files();
+		$counts = self::counted( $files );
+		++$counts['uploads'];
+		$base   = $this->made_backup( $files, null, $counts );
+		$before = self::tree( $this->dirs['other-content'] );
+		$job    = $this->restore( $base );
+		$this->assertSame( Job::FAILED, $job->status, 'it fails: ' . $job->step . ' ' . wp_json_encode( $job->questions ) );
+		$this->assertNotSame( SwapStep::ID, $job->step );
+		$this->assertStringContainsString( 'files.groups', (string) $job->last_error );
+		$this->assertSame( $before, self::tree( $this->dirs['other-content'] ) );
+	}
+
+	/**
+	 * A group's files written as other content, and the group's directory on this site empty: an archive without
+	 * the counts is restored without a word (nothing is there to lose, so nothing is asked). With the counts the
+	 * export says the group had a file, the paths say it has none, and the restore fails.
+	 */
+	public function test_a_groups_files_spelled_as_other_content_fail_the_restore_although_its_directory_is_empty(): void {
+		$files = array();
+		foreach ( self::backup_files() as $path => $text ) {
+			$files[ 0 === strpos( $path, 'wp-content/mu-plugins/' ) ? 'wp-content/my-mu/' . substr( $path, strlen( 'wp-content/mu-plugins/' ) ) : $path ] = $text;
+		}
+		// As the export of that site counts: the file is of the must-use plugins, whose directory it is in.
+		$counts = self::counted( self::backup_files() );
+		rename( $this->dirs['mu-plugins'] . '/live-mu.php', $this->sandbox . '/moved-away.php' );
+		$plain = $this->restore( $this->made_backup( $files ) );
+		$this->assertSame( array(), $plain->questions, 'the control: without the counts nothing is asked' );
+		$this->assertSame( SwapStep::ID, $plain->step, 'the control: without the counts the restore goes on: ' . $plain->last_error );
+		Plugin::instance()->job_actions()->cancel( $plain->id );
+		$this->drive( Plugin::instance()->jobs()->find( $plain->id ) );
+		$this->swap_job = null;
+
+		$job = $this->restore( $this->made_backup( $files, null, $counts ) );
+		$this->assertSame( Job::FAILED, $job->status, 'it fails: ' . $job->step . ' ' . wp_json_encode( $job->questions ) );
+		$this->assertSame( RestoreFilesPreflightStep::ID, $job->step );
+		$this->assertStringContainsString( 'The backup records 1 files for its "mu-plugins" content group, and 0 of its paths are spelled as files of that group.', (string) $job->last_error );
+		$this->assertSame( array(), self::tree( $this->dirs['mu-plugins'] ), 'nothing was changed' );
+		$this->assertFileDoesNotExist( $this->dirs['other-content'] . '/my-mu' );
+	}
+
+	/**
+	 * A group the manifest counts no file for, while its directory on this site holds some: the backup has the
+	 * group empty, the directory is replaced by an empty one without a question, and the restore says so when it
+	 * ends. (Without the count it is asked about: the tests above.)
+	 */
+	public function test_a_group_the_manifest_counts_no_file_for_is_replaced_by_an_empty_directory_and_the_restore_says_so(): void {
+		$files = self::backup_files();
+		unset( $files['wp-content/mu-plugins/restored-mu.php'] );
+		$counts = self::counted( $files );
+		$this->assertSame( 0, $counts['mu-plugins'] );
+		$base = $this->made_backup( $files, null, $counts );
+		$this->after_export();
+		$this->assertNotSame( array(), self::tree( $this->dirs['mu-plugins'] ), 'the control: the directory holds something' );
+		$job = $this->restore( $base );
+		$this->assertSame( array(), $job->questions, 'not asked about: ' . $job->last_error );
+		$staging = RestoreFilesPreflightStep::staging( $this->work( $job ) );
+		$this->assertContains( 'mu-plugins', $staging['staged'] );
+		$this->assertSame( array(), $staging['kept'] );
+		$this->assertSame( array(), $staging['unasked'], 'not a group the final check looks at again' );
+		$done = $this->swapped( $job );
+		$this->assertSame( array(), self::tree( $this->dirs['mu-plugins'] ), 'as the backup has it: empty' );
+		$this->assertStringContainsString( 'Restored empty, as in the backup, which has no file for them: mu-plugins (what they held before was replaced).', (string) $done->progress_message );
+		$this->assertStringNotContainsString( 'Not restored', (string) $done->progress_message );
+		$this->assertStringContainsString( 'the backup\'s manifest counts no file for it', self::log_of( $done ) );
+	}
+
+	public function test_a_group_the_manifest_counts_no_file_for_is_swapped_whatever_its_directory_holds_by_the_final_check(): void {
+		$job = $this->restore_with_nothing_in_the_must_use_plugins(
+			function (): void {
+				file_put_contents( $this->dirs['mu-plugins'] . '/late.php', '<?php // put there after the files preflight' );
+			},
+			true
+		);
+		$this->assertGreaterThan( 0, $this->dir_reads, 'the control: the final check read the directories' );
+		$done = $this->swapped( $job );
+		$this->assertFileDoesNotExist( $this->dirs['mu-plugins'] . '/late.php', 'the backup has the group empty' );
+		// Its directory held nothing when the files preflight looked: nothing was replaced that the restore could name.
+		$this->assertStringNotContainsString( 'Restored empty', (string) $done->progress_message );
+	}
+
+	/**
+	 * The counts are compared with the backup's spelling, not with where a path can go on this site: an entry of
+	 * the content directory that is a link to a group's directory here is left out and asked about as before.
+	 */
+	public function test_a_path_left_out_for_what_this_site_is_does_not_count_against_the_manifest(): void {
+		$content = $this->dirs['other-content'];
+		if ( file_exists( $content . '/languages' ) ) {
+			rename( $content . '/languages', $this->sandbox . '/languages-as-it-was' );
+		}
+		symlink( $this->dirs['mu-plugins'], $content . '/languages' );
+		$files = self::backup_files();
+		$base  = $this->made_backup( $files, null, self::counted( $files ) );
+		$job   = $this->restore( $base );
+		$this->assertSame( Job::PAUSED, $job->status, 'it asks: ' . $job->last_error );
+		$this->assertSame( array( RestoreFilesPreflightStep::UNMAPPED_KIND ), self::asked( $job ) );
+		$this->assertSame( array( 'wp-content/languages/restored.mo' ), $this->unmapped( $job ) );
+		list( $declared, $spelled ) = $this->both_counts( $job );
+		$this->assertSame( $declared, $spelled );
+		Plugin::instance()->job_actions()->cancel( $job->id );
+		$this->drive( Plugin::instance()->jobs()->find( $job->id ) );
+	}
+
+	/**
+	 * A restore an earlier version left in the files preflight (its cursor without what this version counts) reads
+	 * the index again from its start, and so compares the counts.
+	 *
+	 * @return array<string, array{0: string}>
+	 */
+	public function data_cursors_of_an_earlier_version(): array {
+		return array(
+			'in the index phase, without the counts by spelling' => array( 'spelled' ),
+			'past the index phase, without the comparison'       => array( 'counted' ),
+		);
+	}
+
+	/**
+	 * @dataProvider data_cursors_of_an_earlier_version
+	 */
+	public function test_a_cursor_an_earlier_version_wrote_reads_the_index_again_and_compares_the_counts( string $key ): void {
+		global $wpdb;
+		$files                       = self::backup_files();
+		$ended                       = 0;
+		$die                         = 'spelled' === $key;
+		$this->files_preflight_parts = array(
+			'at' => static function ( string $point ) use ( &$ended, $die ): void {
+				if ( 'entries' === $point && 1 === ++$ended && $die ) {
+					throw new \RuntimeException( 'simulated: the run is killed here' );
+				}
+			},
+		);
+		if ( ! $die ) {
+			// Stopped past the index phase: a question (an entry that is a link to a group's directory here).
+			$content = $this->dirs['other-content'];
+			if ( file_exists( $content . '/languages' ) ) {
+				rename( $content . '/languages', $this->sandbox . '/languages-as-it-was' );
+			}
+			symlink( $this->dirs['mu-plugins'], $content . '/languages' );
+		}
+		$job = $this->restore( $this->made_backup( $files, null, self::counted( $files ) ) );
+		$this->assertSame( 1, $ended, 'the control: the index phase ended once' );
+		$this->assertSame( $die ? 'index' : 'space', $job->cursor['phase'] ?? '', $job->status . ' ' . $job->last_error );
+		$this->assertArrayHasKey( $key, $job->cursor, 'the control: this version\'s cursor has it' );
+		$cursor = $job->cursor;
+		unset( $cursor[ $key ] );
+		$wpdb->query( $wpdb->prepare( 'UPDATE ' . JobRepository::table() . ' SET cursor_json = %s WHERE id = %d', wp_json_encode( $cursor ), $job->id ) );
+		$wpdb->query( 'COMMIT' );
+		if ( $die ) {
+			Plugin::instance()->job_actions()->retry( $job->id );
+			$job = $this->drive( Plugin::instance()->jobs()->find( $job->id ) );
+		} else {
+			$job = $this->answered( Plugin::instance()->jobs()->find( $job->id ), array( RestoreFilesPreflightStep::UNMAPPED_KIND => 'skip' ) );
+		}
+		$this->assertSame( SwapStep::ID, $job->step, $job->status . ' ' . $job->last_error . ' ' . wp_json_encode( $job->questions ) );
+		$this->assertSame( 2, $ended, 'the index was read again to its end' );
+	}
+
+	/**
 	 * Manifest values that must not be used to read the backup's paths differently: site.abspath, site.content_dir.
 	 *
 	 * @return array<string, array{0: string, 1: string}>
@@ -807,7 +1191,7 @@ final class RestoreGroupGuardTest extends SwapTestCase {
 		rename( $this->dirs['uploads'], $this->sandbox . '/files' );
 		$this->dirs['uploads'] = $this->sandbox . '/files';
 		$this->export_abspath  = $this->sandbox;
-		$base                  = $this->real_export();
+		$base                  = $this->real_export( false ); // An archive written before the counts: with them, the restore fails (below).
 		$this->after_export();
 		$before = self::tree( $this->sandbox . '/files' );
 		$job    = $this->restore( $base );

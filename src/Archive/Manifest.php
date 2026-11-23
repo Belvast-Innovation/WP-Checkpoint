@@ -245,7 +245,12 @@ final class Manifest {
 			'bytes' => self::int_field( $files, 'bytes', 'files', 0, self::MAX_BYTES ),
 		);
 		if ( array_key_exists( 'groups', $files ) ) {
-			$out['files']['groups'] = self::group_counts( self::object_field( $files, 'groups', 'files' ), $out['contents']['files'], $out['files']['count'] );
+			// The counts of no group (a backup without files) say nothing and are not kept: written out again they
+			// would be an empty list, which is not the object this reads.
+			$counts = self::group_counts( self::object_field( $files, 'groups', 'files' ), $out['contents']['files'], $out['files']['count'] );
+			if ( array() !== $counts ) {
+				$out['files']['groups'] = $counts;
+			}
 		}
 		$out['files']['index'] = self::content_entry( self::object_field( $files, 'index', 'files' ), 'files.index', $chunk_bytes, $paths, self::FILES_INDEX );
 
