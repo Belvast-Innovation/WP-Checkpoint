@@ -919,7 +919,7 @@ final class RestoreGroupGuardTest extends SwapTestCase {
 		$this->assertSame( RestoreFilesPreflightStep::ID, $job->step, 'in the files preflight: nothing is staged yet' );
 		$this->assertSame( array(), $job->questions );
 		$this->assertStringContainsString( 'The backup records', (string) $job->last_error );
-		$this->assertStringContainsString( 'the restore stopped before it changed anything', (string) $job->last_error );
+		$this->assertStringContainsString( 'it stopped before it changed anything', (string) $job->last_error );
 		$this->assertStringContainsString( 'Restore by hand', (string) $job->last_error );
 		foreach ( $this->dirs as $group => $dir ) {
 			$this->assertSame( $trees[ $group ], self::tree( $dir ), $group . ' is as it was' );
@@ -956,8 +956,8 @@ final class RestoreGroupGuardTest extends SwapTestCase {
 	 */
 	public function data_counts_that_differ(): array {
 		return array(
-			'plugins larger, themes smaller'         => array( 'plugins', 'themes', 'The backup records 2 files for its "plugins" content group, and 1 of its paths are spelled as files of that group.' ),
-			'mu-plugins smaller, other-content larger' => array( 'other-content', 'mu-plugins', 'The backup records 0 files for its "mu-plugins" content group, and 1 of its paths are spelled as files of that group.' ),
+			'plugins larger, themes smaller'         => array( 'plugins', 'themes', 'The backup records 2 files for its "plugins" content group, and its paths spell 1 as files of that group.' ),
+			'mu-plugins smaller, other-content larger' => array( 'other-content', 'mu-plugins', 'The backup records 0 files for its "mu-plugins" content group, and its paths spell 1 as files of that group.' ),
 		);
 	}
 
@@ -1021,7 +1021,7 @@ final class RestoreGroupGuardTest extends SwapTestCase {
 		$job = $this->restore( $this->made_backup( $files, null, $counts ) );
 		$this->assertSame( Job::FAILED, $job->status, 'it fails: ' . $job->step . ' ' . wp_json_encode( $job->questions ) );
 		$this->assertSame( RestoreFilesPreflightStep::ID, $job->step );
-		$this->assertStringContainsString( 'The backup records 1 files for its "mu-plugins" content group, and 0 of its paths are spelled as files of that group.', (string) $job->last_error );
+		$this->assertStringContainsString( 'The backup records 1 files for its "mu-plugins" content group, and its paths spell 0 as files of that group.', (string) $job->last_error );
 		$this->assertSame( array(), self::tree( $this->dirs['mu-plugins'] ), 'nothing was changed' );
 		$this->assertFileDoesNotExist( $this->dirs['other-content'] . '/my-mu' );
 	}
@@ -1052,6 +1052,27 @@ final class RestoreGroupGuardTest extends SwapTestCase {
 		$this->assertStringContainsString( 'the backup\'s manifest counts no file for it', self::log_of( $done ) );
 	}
 
+	/**
+	 * A restore an earlier version paused on the question about such a group, answered "keep" after the update:
+	 * this version would not ask, and the answer stands.
+	 */
+	public function test_an_answer_to_keep_a_group_given_to_an_earlier_versions_question_stands(): void {
+		$files = self::backup_files();
+		unset( $files['wp-content/mu-plugins/restored-mu.php'] );
+		$base   = $this->made_backup( $files, null, self::counted( $files ) );
+		$before = self::tree( $this->dirs['mu-plugins'] );
+		$this->assertNotSame( array(), $before );
+		$id  = RestoreFilesPreflightStep::EMPTY_QUESTION . '_' . substr( hash( 'sha256', 'mu-plugins' ), 0, 16 );
+		$job = $this->restore( $base, array( 'answers' => array( $id => 'keep' ) ) );
+		$this->assertSame( array(), $job->questions, (string) $job->last_error );
+		$staging = RestoreFilesPreflightStep::staging( $this->work( $job ) );
+		$this->assertSame( array( 'mu-plugins' ), $staging['kept'] );
+		$done = $this->swapped( $job );
+		$this->assertSame( $before, self::tree( $this->dirs['mu-plugins'] ), 'the directory is as it was' );
+		$this->assertStringContainsString( 'as you chose: mu-plugins', (string) $done->progress_message );
+		$this->assertStringNotContainsString( 'Restored empty', (string) $done->progress_message );
+	}
+
 	public function test_a_group_the_manifest_counts_no_file_for_is_swapped_whatever_its_directory_holds_by_the_final_check(): void {
 		$job = $this->restore_with_nothing_in_the_must_use_plugins(
 			function (): void {
@@ -1076,12 +1097,13 @@ final class RestoreGroupGuardTest extends SwapTestCase {
 			rename( $content . '/languages', $this->sandbox . '/languages-as-it-was' );
 		}
 		symlink( $this->dirs['mu-plugins'], $content . '/languages' );
-		$files = self::backup_files();
+		// Two files in the entry: it is left out from its first path on, and both are counted by their spelling.
+		$files = self::backup_files() + array( 'wp-content/languages/second.mo' => 'another' );
 		$base  = $this->made_backup( $files, null, self::counted( $files ) );
 		$job   = $this->restore( $base );
 		$this->assertSame( Job::PAUSED, $job->status, 'it asks: ' . $job->last_error );
 		$this->assertSame( array( RestoreFilesPreflightStep::UNMAPPED_KIND ), self::asked( $job ) );
-		$this->assertSame( array( 'wp-content/languages/restored.mo' ), $this->unmapped( $job ) );
+		$this->assertSame( array( 'wp-content/languages/restored.mo', 'wp-content/languages/second.mo' ), $this->unmapped( $job ) );
 		list( $declared, $spelled ) = $this->both_counts( $job );
 		$this->assertSame( $declared, $spelled );
 		Plugin::instance()->job_actions()->cancel( $job->id );

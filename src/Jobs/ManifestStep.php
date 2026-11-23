@@ -366,15 +366,24 @@ final class ManifestStep implements Step {
 	}
 
 	/**
-	 * The scan's roots, prefix => content group, or null when the scan summary has no record of them (a scan an
-	 * earlier version made): the archive is then written without the count of each group's files.
+	 * The scan's roots, prefix => content group, or null when the scan summary does not record the group of every
+	 * root it listed files under (a scan an earlier version made, or began: the roots it entered are in root_ids
+	 * without a group): the archive is then written without the count of each group's files. Counting with some
+	 * of the roots would count a root's files for the root above it.
 	 *
 	 * @param string $work Work directory.
 	 * @return array<string, string>|null
 	 */
 	private static function root_groups( string $work ) {
 		$scanned = ExportPlan::exists( $work, FileScanStep::SUMMARY ) ? ExportPlan::read( $work, FileScanStep::SUMMARY ) : array();
-		return isset( $scanned['root_groups'] ) && is_array( $scanned['root_groups'] ) ? array_map( 'strval', $scanned['root_groups'] ) : null;
+		if ( ! isset( $scanned['root_groups'], $scanned['root_ids'] ) || ! is_array( $scanned['root_groups'] ) || ! is_array( $scanned['root_ids'] ) ) {
+			return null;
+		}
+		$with = array_map( 'strval', array_keys( $scanned['root_groups'] ) );
+		$all  = array_map( 'strval', array_keys( $scanned['root_ids'] ) );
+		sort( $with );
+		sort( $all );
+		return $with === $all ? array_map( 'strval', $scanned['root_groups'] ) : null;
 	}
 
 	/**

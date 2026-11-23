@@ -349,9 +349,34 @@ final class ManifestStepTest extends TestCase {
 	 * The scan summary as the scan writes it now: with the group of each root it listed files under.
 	 *
 	 * @param array<string, string> $root_groups Prefix => group.
+	 * @param array<string, string> $more_ids    Roots the scan listed files under without recording their group.
 	 */
-	private function scanned( array $root_groups ): void {
-		file_put_contents( $this->ctx->work() . '/scan.summary.json', json_encode( array( 'counts' => array(), 'lists' => array(), 'warnings' => array( 'A scan warning.' ), 'root_groups' => $root_groups ) ) );
+	private function scanned( array $root_groups, array $more_ids = array() ): void {
+		file_put_contents( $this->ctx->work() . '/scan.summary.json', json_encode( array( 'counts' => array(), 'lists' => array(), 'warnings' => array( 'A scan warning.' ), 'root_ids' => array_fill_keys( array_keys( $root_groups ), 'id' ) + $more_ids, 'root_groups' => $root_groups ) ) );
+	}
+
+	/**
+	 * A scan an earlier version began and this one ended: some roots (or all) are in root_ids without a group.
+	 * Counting by the roots that have one would count a root's files for the root above it.
+	 *
+	 * @return array<string, array{0: array<string, string>, 1: array<string, string>}>
+	 */
+	public function data_scans_that_did_not_record_every_group(): array {
+		return array(
+			'no root has a group'           => array( array(), array( 'wp-content/uploads' => 'id' ) ),
+			'the root of the files has none' => array( array( 'wp-content' => 'other-content' ), array( 'wp-content/uploads' => 'id' ) ),
+		);
+	}
+
+	/**
+	 * @dataProvider data_scans_that_did_not_record_every_group
+	 */
+	public function test_a_scan_that_did_not_record_the_group_of_every_root_gives_a_manifest_without_the_counts( array $root_groups, array $more_ids ): void {
+		ExportPlan::write( $this->ctx->work(), ExportPlan::PLAN, array( 'base' => self::BASE, 'tables' => array( 'wp_posts' ), 'notes' => array(), 'groups' => array( 'uploads', 'other-content' ), 'exclusions' => array( 'wp-content/cache' ) ) );
+		$this->scanned( $root_groups, $more_ids );
+		$this->drive( $this->step() );
+		$this->assertNull( $this->manifest()->group_counts_declared() );
+		$this->assertSame( 2, $this->manifest()->files_summary()['count'], 'the control: the archive has its files' );
 	}
 
 	private function manifest(): Manifest {

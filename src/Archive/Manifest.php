@@ -438,7 +438,8 @@ final class Manifest {
 	 */
 	private static function group_counts( array $groups, array $names, int $total ): array {
 		foreach ( array_keys( $groups ) as $key ) {
-			if ( ! in_array( (string) $key, $names, true ) ) {
+			// A group's name as this format has them: nothing a JSON object's key turns into in PHP (a number), and not empty.
+			if ( 1 !== preg_match( '/\A[a-z][a-z0-9-]{0,63}\z/', (string) $key ) || ! in_array( (string) $key, $names, true ) ) {
 				throw new ManifestError( 'files.groups', 'Names a content group that contents.files does not.' );
 			}
 		}

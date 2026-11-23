@@ -742,7 +742,7 @@ final class RestoreFilesPreflightStep implements Step {
 		foreach ( $declared as $group => $says ) {
 			$found = (int) ( $spelled[ $group ] ?? 0 );
 			if ( (int) $says !== $found ) {
-				throw new CannotStage( sprintf( 'The backup records %1$d files for its "%2$s" content group, and %3$d of its paths are spelled as files of that group. The directories of the site it was made on are not where this version of the restore reads them from the paths, so files would be restored into the wrong directory or left out; the restore stopped before it changed anything. Restore by hand: the backup is a standard zip archive whose files and database (as SQL) can be restored without WP Checkpoint.', (int) $says, (string) $group, $found ) );
+				throw new CannotStage( sprintf( 'The backup records %1$d files for its "%2$s" content group, and its paths spell %3$d as files of that group. Where the two differ the restore would put files into the wrong directory or leave them out, so it stopped before it changed anything. (The usual reason: a directory of the site the backup was made on is not where this version of the restore reads it from the paths.) Restore by hand: the backup is a standard zip archive whose files and database (as SQL) can be restored without WP Checkpoint.', (int) $says, (string) $group, $found ) );
 			}
 		}
 		return true;
@@ -883,6 +883,12 @@ final class RestoreFilesPreflightStep implements Step {
 			// backup has them empty. Not asked about; said when the restore ends.
 			$emptied = $empty;
 			$empty   = array();
+			// Unless an earlier version asked about them and was told to keep them: that answer stands.
+			$asked = self::EMPTY_QUESTION . '_' . substr( hash( 'sha256', implode( ',', $emptied ) ), 0, 16 );
+			if ( array() !== $emptied && 'keep' === ( $answers[ $asked ] ?? null ) ) {
+				$empty   = $emptied;
+				$emptied = array();
+			}
 		}
 		$id   = self::EMPTY_QUESTION . '_' . substr( hash( 'sha256', implode( ',', $empty ) ), 0, 16 ); // An answer holds for these groups.
 		$keep = array();
@@ -1004,7 +1010,8 @@ final class RestoreFilesPreflightStep implements Step {
 	 * (or kept already, when this is a replay), no file of the backup mapped into it, and its directory on this
 	 * site holds an entry (for plugins: one besides this plugin's own directory, which the restore stages a copy
 	 * of whatever the backup holds). By positive evidence only: a directory that is there and cannot be listed
-	 * counts as holding something (it is asked about), one that is positively not there does not.
+	 * counts as holding something, one that is positively not there does not. What is done about them is the
+	 * caller's: asked about, or (where the manifest counts no file for them) replaced and said.
 	 *
 	 * @param array<string, mixed> $staging Staging file.
 	 * @param array<string, mixed> $mapped  Group => files of the backup mapped into it.

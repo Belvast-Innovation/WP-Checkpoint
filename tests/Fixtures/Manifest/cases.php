@@ -21,6 +21,8 @@ return array(
 	'invalid/group_counts_add_up_to_less' => array( 'valid' => false, 'field' => 'files.groups', 'runtime_only' => true ),
 	'invalid/group_counts_without_a_group' => array( 'valid' => false, 'field' => 'files.groups', 'runtime_only' => true ),
 	'invalid/group_counts_for_a_group_not_backed_up' => array( 'valid' => false, 'field' => 'files.groups', 'runtime_only' => true ),
+	'invalid/group_counts_for_a_numeric_name' => array( 'valid' => false, 'field' => 'files.groups', 'runtime_only' => true ),
+	'invalid/group_counts_for_an_empty_name' => array( 'valid' => false, 'field' => 'files.groups', 'runtime_only' => true ),
 	'invalid/group_counts_with_a_group_named_twice' => array( 'valid' => false, 'field' => 'contents.files', 'runtime_only' => true ),
 	'invalid/group_count_not_an_integer' => array( 'valid' => false, 'field' => 'files.groups.themes.count', 'runtime_only' => false ),
 	'invalid/group_count_as_string' => array( 'valid' => false, 'field' => 'files.groups.themes.count', 'runtime_only' => false ),
