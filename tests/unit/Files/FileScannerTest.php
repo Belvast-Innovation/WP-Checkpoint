@@ -264,6 +264,7 @@ final class FileScannerTest extends TestCase {
 		$this->assertSame( 0, $state['counts']['unreadable'], 'a followed root is not a finding the pre-flight asks about' );
 		$this->assertSame( array( 'The "uploads" content directory is a link; the directory it leads to was backed up (wp-content/uploads -> {root}/shared/uploads).' ), $state['warnings'] );
 		$this->assertSame( array( 'wp-content/uploads' => Links::fingerprint( $this->root . '/shared/uploads' ) ), $state['root_ids'], 'where the root led, for the pack step' );
+		$this->assertSame( array( 'wp-content/uploads' => 'uploads' ), $state['root_groups'], 'the group whose files are under the prefix, for the manifest step' );
 
 		// Where it leads is shown only through the mask: without one it is not shown at all.
 		$plain                 = new FileScanner( array( array( 'group' => 'uploads', 'path' => $this->root . '/uploads', 'prefix' => 'wp-content/uploads' ) ), new Exclusions( array(), array() ), PHP_INT_SIZE, Manifest::DEFAULT_CHUNK, array( 'abspath' => $this->root . '/site' ) );

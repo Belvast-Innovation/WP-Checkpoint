@@ -730,23 +730,20 @@ final class RestoreFilesPreflightStep implements Step {
 	 * @param array<string, int>|null $declared The manifest's counts, or null when it has none.
 	 * @param array<string, mixed>    $spelled  Group ('' for none) => paths the backup spells into it.
 	 * @return bool Whether the manifest declares counts (they agree).
-	 * @throws CannotStage When a count differs, or a path is spelled into no group or one the manifest does not count.
+	 * @throws CannotStage When a count differs.
 	 */
 	private static function compare_counts( $declared, array $spelled ): bool {
 		if ( null === $declared ) {
 			return false;
 		}
-		foreach ( array_unique( array_merge( array_keys( $declared ), array_map( 'strval', array_keys( $spelled ) ) ) ) as $group ) {
-			$group = (string) $group;
-			$says  = isset( $declared[ $group ] ) ? (int) $declared[ $group ] : 0;
+		// Every group the manifest counts: its counts add up to the number of files (Manifest), which the check of
+		// the archive holds the files index to, so a path spelled into no group, or into one that is not counted,
+		// leaves a counted group short.
+		foreach ( $declared as $group => $says ) {
 			$found = (int) ( $spelled[ $group ] ?? 0 );
-			if ( $says === $found ) {
-				continue;
+			if ( (int) $says !== $found ) {
+				throw new CannotStage( sprintf( 'The backup records %1$d files for its "%2$s" content group, and %3$d of its paths are spelled as files of that group. The directories of the site it was made on are not where this version of the restore reads them from the paths, so files would be restored into the wrong directory or left out; the restore stopped before it changed anything. Restore by hand: the backup is a standard zip archive whose files and database (as SQL) can be restored without WP Checkpoint.', (int) $says, (string) $group, $found ) );
 			}
-			if ( ! isset( $declared[ $group ] ) ) {
-				throw new CannotStage( sprintf( 'The backup records how many files each of its content groups has, and %1$d of its paths are spelled as files of %2$s, which it does not count. The directories of the site it was made on are not where this version of the restore reads them from the paths, so files would be restored into the wrong directory or left out; the restore stopped before it changed anything. Restore by hand: the backup is a standard zip archive whose files and database (as SQL) can be restored without WP Checkpoint.', $found, '' === $group ? 'no content group' : 'the "' . $group . '" group' ) );
-			}
-			throw new CannotStage( sprintf( 'The backup records %1$d files for its "%2$s" content group, and %3$d of its paths are spelled as files of that group. The directories of the site it was made on are not where this version of the restore reads them from the paths, so files would be restored into the wrong directory or left out; the restore stopped before it changed anything. Restore by hand: the backup is a standard zip archive whose files and database (as SQL) can be restored without WP Checkpoint.', $says, $group, $found ) );
 		}
 		return true;
 	}

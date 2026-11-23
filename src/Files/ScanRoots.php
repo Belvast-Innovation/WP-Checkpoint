@@ -186,7 +186,7 @@ final class ScanRoots {
 		$best = '';
 		foreach ( $prefixes as $candidate ) {
 			$candidate = (string) $candidate;
-			if ( '' !== $candidate && ( $p === $candidate || 0 === strpos( $p, $candidate . '/' ) ) && strlen( $candidate ) > strlen( $best ) ) {
+			if ( ( $p === $candidate || 0 === strpos( $p, $candidate . '/' ) ) && strlen( $candidate ) > strlen( $best ) ) {
 				$best = $candidate;
 			}
 		}

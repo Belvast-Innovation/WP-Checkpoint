@@ -457,10 +457,7 @@ final class Manifest {
 			}
 			$count        = self::int_field( get_object_vars( $groups[ $name ] ), 'count', $field, 0, self::MAX_BYTES );
 			$out[ $name ] = array( 'count' => $count );
-			if ( $count > $total - $sum ) {
-				throw new ManifestError( 'files.groups', 'The counts of the content groups add up to more than files.count.' );
-			}
-			$sum += $count;
+			$sum         += $count;
 		}
 		if ( $sum !== $total ) {
 			throw new ManifestError( 'files.groups', 'The counts of the content groups do not add up to files.count.' );
