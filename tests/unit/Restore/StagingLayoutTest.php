@@ -188,6 +188,24 @@ final class StagingLayoutTest extends TestCase {
 		}
 	}
 
+	public function test_the_entry_a_manifest_places_the_content_directory_under_is_named(): void {
+		$this->assertSame( 'app', StagingLayout::content_apart( '/var/www/html/', '/var/www/html/wp-content/app' ) );
+		$this->assertSame( 'app', StagingLayout::content_apart( '/var/www/html', '/var/www/html/wp-content/app/content/' ), 'the entry of wp-content, however deep the directory is' );
+		$this->assertSame( 'uploads', StagingLayout::content_apart( 'C:/www/', 'C:/www/wp-content/uploads' ) );
+		$this->assertSame( '', StagingLayout::content_apart( '/var/www/html/', '/var/www/html/wp-content' ), 'the usual place' );
+		$this->assertSame( '', StagingLayout::content_apart( '/var/www/html/', '/var/www/html/wp-content/' ) );
+		$this->assertSame( '', StagingLayout::content_apart( '/var/www/html/', '/var/www/html/app' ), 'a name of its own: content_prefix() reads it' );
+		$this->assertSame( '', StagingLayout::content_apart( '/var/www/html/', '/srv/wp-content/app' ), 'not in the WordPress directory' );
+		$this->assertSame( '', StagingLayout::content_apart( '/var/www/html/', '/var/www/html/wp-content/../app' ), 'not canonical' );
+		$this->assertSame( '', StagingLayout::content_apart( '/var/www/html/', '/var/www/html/x/wp-content/app' ), 'wp-content further in is a name like any' );
+		$this->assertSame( 'x/wp-content/app', StagingLayout::content_prefix( '/var/www/html/', '/var/www/html/x/wp-content/app' ), 'the control: that one is read as a name of its own' );
+		// With the entry left out, a path in it has no group; the others are as they were.
+		$layout = self::reading( '', array( 'app' ) );
+		$this->assertNull( $layout->map( 'wp-content/app/plugins/demo/demo.php' ) );
+		$this->assertSame( 'plugins', $layout->map( 'wp-content/plugins/demo/demo.php' )['group'] );
+		$this->assertSame( 'other-content', self::reading( '' )->map( 'wp-content/app/plugins/demo/demo.php' )['group'], 'the control: not left out, it is other content' );
+	}
+
 	public function test_a_backup_path_under_its_own_name_of_the_content_directory_is_read_once(): void {
 		$layout = self::reading( 'app' );
 		$this->assertSame( 'wp-content/plugins/demo/demo.php', $layout->canonical( 'app/plugins/demo/demo.php' ) );

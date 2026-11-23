@@ -176,6 +176,26 @@ final class StagingLayout {
 	}
 
 	/**
+	 * The entry of "wp-content" that a backup's manifest places its content directory in or at, when it places it
+	 * under the WordPress directory's "wp-content" (as "wp-content/app": "app"), or ''. content_prefix() reads no
+	 * path differently for such a name, and as written the backup's paths would all be other content under that
+	 * entry, its groups among them: the caller leaves the entry out (the constructor's $off), so its paths belong
+	 * to no group and are asked about.
+	 *
+	 * @param string $abspath The manifest's site.abspath.
+	 * @param string $content The manifest's site.content_dir.
+	 * @return string
+	 */
+	public static function content_apart( string $abspath, string $content ): string {
+		$base = self::segments( $abspath );
+		$dir  = self::segments( $content );
+		if ( null === $base || null === $dir || count( $dir ) < count( $base ) + 2 || array_slice( $dir, 0, count( $base ) ) !== $base ) {
+			return '';
+		}
+		return self::CONTENT === $dir[ count( $base ) ] ? $dir[ count( $base ) + 1 ] : '';
+	}
+
+	/**
 	 * The segments of a canonical absolute path (the drive of a Windows path first, as "c:"), or null when it is
 	 * not one (content_prefix()).
 	 *

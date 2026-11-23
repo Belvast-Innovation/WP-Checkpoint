@@ -300,7 +300,11 @@ final class RestoreFilesPreflightStep implements Step {
 		$random = isset( $this->parts['random'] ) ? (string) call_user_func( $this->parts['random'] ) : StagingLayout::new_random();
 		$site   = (array) $manifest->to_array()['site'];
 		$prefix = StagingLayout::content_prefix( (string) ( $site['abspath'] ?? '' ), (string) ( $site['content_dir'] ?? '' ) );
+		$apart  = StagingLayout::content_apart( (string) ( $site['abspath'] ?? '' ), (string) ( $site['content_dir'] ?? '' ) );
 		$layout = new StagingLayout( $groups, $context->job()->storage_token, $context->job()->id, $random, $storage, $prefix );
+		if ( '' !== $apart ) {
+			$context->logger()->warning( 'The backup was made where the content directory is under the WordPress directory\'s wp-content; its paths there are not read as a content directory\'s, and the restore asks about them', array( 'name' => $apart ) );
+		}
 		if ( '' !== $prefix ) {
 			$context->logger()->info( 'The backup was made where the content directory is inside the WordPress directory under another name; its paths under that name are read as the content directory\'s', array( 'name' => $prefix ) );
 		}
@@ -320,6 +324,7 @@ final class RestoreFilesPreflightStep implements Step {
 				'left_out' => $left_out,
 				'kept'     => array(),
 				'prefix'   => $prefix,
+				'apart'    => $apart,
 			)
 		);
 		return array(
@@ -514,7 +519,7 @@ final class RestoreFilesPreflightStep implements Step {
 						if ( $reread > 0 && (int) $cursor['mapped'][ $group ] > $reread ) {
 							// Files of one group under two names: as written, and under the backup's own name of the
 							// content directory. Nothing says which of the two was the group's directory.
-							throw new CannotStage( sprintf( 'The backup holds files for the "%1$s" group under two names: under wp-content/%1$s, and under the name its site had for the content directory. A backup of this version does not record which of the two was the site\'s %1$s directory, so the restore cannot tell which to restore, and stopped before it changed anything. Make a new backup of the original site with a current version of WP Checkpoint, which records where each directory was; or restore by hand: the backup is a standard zip archive whose files and database (as SQL) can be restored without WP Checkpoint.', $group ) );
+							throw new CannotStage( sprintf( 'The backup holds files for the "%1$s" group under two names: under wp-content/%1$s, and under the name its site had for the content directory. The backup does not record which of the two was the site\'s %1$s directory, so the restore cannot tell which to restore, and stopped before it changed anything. On the original site, move the directory named %1$s that is not the site\'s %1$s directory out of its content directory and make a new backup; or restore by hand: the backup is a standard zip archive whose files and database (as SQL) can be restored without WP Checkpoint.', $group ) );
 						}
 					}
 					$bad = $names[ $index ]->unstorable( $map['relative'] );
@@ -1229,6 +1234,7 @@ final class RestoreFilesPreflightStep implements Step {
 		// What a staging file of an earlier version does not have: no group kept, no other name of the content directory.
 		$data['kept']    = isset( $data['kept'] ) && is_array( $data['kept'] ) ? array_values( array_map( 'strval', $data['kept'] ) ) : array();
 		$data['prefix']  = isset( $data['prefix'] ) && is_string( $data['prefix'] ) ? $data['prefix'] : '';
+		$data['apart']   = isset( $data['apart'] ) && is_string( $data['apart'] ) && false === strpos( $data['apart'], '/' ) ? $data['apart'] : '';
 		$data['unasked'] = isset( $data['unasked'] ) && is_array( $data['unasked'] ) ? array_values( array_map( 'strval', $data['unasked'] ) ) : array();
 		// Not of the staging file: the entries of the content directory judged by where they are, from their own record.
 		$record = RestoreFiles::path( $work, RestoreFiles::OTHER_ENTRIES );
@@ -1259,7 +1265,10 @@ final class RestoreFilesPreflightStep implements Step {
 	 */
 	public static function layout_of( array $staging, Job $job ): StagingLayout {
 		try {
-			$off = array();
+			// The entries of the content directory that are no other content of this restore: the one the backup's
+			// manifest places its content directory under (StagingLayout::content_apart()), and the ones left out
+			// for where they are on this site.
+			$off = '' === (string) ( $staging['apart'] ?? '' ) ? array() : array( (string) $staging['apart'] );
 			foreach ( (array) ( $staging['entries'] ?? array() ) as $name => $entry ) {
 				if ( ! empty( $entry['off'] ) ) {
 					$off[] = (string) $name;

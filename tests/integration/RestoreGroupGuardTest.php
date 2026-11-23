@@ -596,7 +596,7 @@ final class RestoreGroupGuardTest extends SwapTestCase {
 		$this->assertSame( Job::FAILED, $job->status, 'it fails: ' . $job->step . ' ' . wp_json_encode( $job->questions ) );
 		$this->assertSame( RestoreFilesPreflightStep::ID, $job->step, 'in the files preflight: nothing is staged yet' );
 		$this->assertStringContainsString( 'The backup holds files for the "uploads" group under two names', (string) $job->last_error );
-		$this->assertStringContainsString( 'Make a new backup of the original site', (string) $job->last_error );
+		$this->assertStringContainsString( 'move the directory named uploads that is not the site\'s uploads directory out of its content directory and make a new backup', (string) $job->last_error );
 		$this->assertStringContainsString( 'restore by hand', (string) $job->last_error );
 		$this->assertSame( array(), $job->questions );
 		foreach ( $this->dirs as $group => $dir ) {
@@ -619,6 +619,37 @@ final class RestoreGroupGuardTest extends SwapTestCase {
 		$this->swapped( $job );
 		$this->assertFileExists( $this->dirs['uploads'] . '/2026/10/restored.txt' );
 		$this->assertFileExists( $this->dirs['plugins'] . '/demo/demo.php' );
+	}
+
+	public function test_a_backup_whose_manifest_places_the_content_directory_under_wp_content_is_asked_about(): void {
+		// Such a site's export writes every path under wp-content/app/…: as written they would all be other content
+		// in an entry "app", the groups' files among them, and nothing would say so.
+		$files = array();
+		foreach ( self::backup_files() as $path => $text ) {
+			$files[ 'wp-content/app/' . substr( $path, strlen( 'wp-content/' ) ) ] = $text;
+		}
+		$base   = $this->made_backup(
+			$files,
+			static function ( array $site ): array {
+				$site['abspath']     = '/var/www/html/';
+				$site['content_dir'] = '/var/www/html/wp-content/app';
+				return $site;
+			}
+		);
+		$before = self::tree( $this->dirs['other-content'] );
+		$job    = $this->restore( $base );
+		$this->assertSame( Job::PAUSED, $job->status, 'it asks: ' . $job->last_error );
+		$staging = RestoreFilesPreflightStep::staging( $this->work( $job ) );
+		$this->assertSame( '', $staging['prefix'], 'no path is read under another name' );
+		$this->assertSame( 'app', $staging['apart'] );
+		$expected = array_keys( $files );
+		sort( $expected );
+		$this->assertSame( $expected, $this->unmapped( $job ), 'every path is without a group: none is other content under "app"' );
+		$this->assertSame( array( RestoreFilesPreflightStep::EMPTY_KIND, RestoreFilesPreflightStep::UNMAPPED_KIND ), self::asked( $job ) );
+		$this->assertSame( $before, self::tree( $this->dirs['other-content'] ) );
+		// The control: without the manifest saying so, the same paths are other content of the usual content directory.
+		$plain = $this->restore( $this->made_backup( $files ) );
+		$this->assertSame( array(), $this->unmapped( $plain ), 'the control: an entry "app" of wp-content is other content' );
 	}
 
 	public function test_an_answer_to_replace_is_not_kept_when_the_other_question_is_answered_stop(): void {
