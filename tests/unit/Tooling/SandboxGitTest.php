@@ -263,6 +263,10 @@ final class SandboxGitTest extends TestCase {
 		$this->assertSame( 'm', $env['MUTATION'] ?? null );
 		$this->assertSame( $this->sandbox, $env['GIT_CEILING_DIRECTORIES'] ?? null );
 		$this->assertSame( '1', $env['GIT_CONFIG_NOSYSTEM'] ?? null );
+		$this->assertSame( ExpectedPath::native( $this->sandbox, '.sandbox-git-home/gitconfig' ), $env['GIT_CONFIG_GLOBAL'] ?? null );
+		$this->assertSame( ExpectedPath::native( $this->sandbox, '.sandbox-git-home/xdg' ), $env['XDG_CONFIG_HOME'] ?? null );
+		$this->assertSame( '0', $env['GIT_TERMINAL_PROMPT'] ?? null );
+		$this->assertSame( (string) getenv( 'PATH' ), $env['PATH'] ?? null );
 		$this->assertSame( ExpectedPath::native( $this->sandbox, '.sandbox-git-home' ), $env['HOME'] ?? null );
 		$this->assertArrayNotHasKey( 'GIT_AUTHOR_NAME', $env, 'nothing of this process\'s environment but PATH' );
 		$this->assertArrayNotHasKey( 'WPCHECKPOINT_NOT_PASSED', $env );
@@ -287,7 +291,9 @@ final class SandboxGitTest extends TestCase {
 		$this->assertSame( $this->sandbox, Sandbox::root_of( $this->sandbox ) );
 		$this->assertSame( $this->sandbox, Sandbox::root_of( $this->sandbox . '/repo/.git' ) );
 		$this->assertNull( Sandbox::root_of( $this->outside ) );
-		$this->assertNull( Sandbox::root_of( $this->sandbox . '-not' ), 'a name that only starts alike' );
+		mkdir( $this->sandbox . '-not' );
+		$this->assertNull( Sandbox::root_of( $this->sandbox . '-not' ), 'a directory whose name only starts alike' );
+		Sandbox::remove( $this->sandbox . '-not' );
 		$this->assertNull( Sandbox::root_of( dirname( $this->sandbox ) ), 'the directory the sandbox is in' );
 		$this->assertNull( Sandbox::root_of( $this->sandbox . '/repo/a.txt' ), 'a file' );
 		$this->assertNull( Sandbox::root_of( '' ) );
