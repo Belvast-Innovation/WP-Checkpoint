@@ -17,8 +17,10 @@ defined( 'ABSPATH' ) || exit;
  * job's options (JobRepository::transition()), so a retry asks those
  * questions again rather than stopping for the same answers. The step
  * names every question answered "stop" at once, so one retry asks all of
- * them. The other answers ("continue", "exclude") stay: they are still the
- * user's choices. A policy is not an answer and stays: a retry under it
+ * them. The answers to questions it does not name stay: they are still the
+ * user's choices. (The last phase of the restore's files preflight names
+ * every question it asks, whichever was answered "stop": the answers were
+ * given together.) A policy is not an answer and stays: a retry under it
  * stops again. What a retry asks about is whatever the step finds then:
  * the export's review asks from what its pre-flight recorded, the
  * restore's free space check measures again.

@@ -165,7 +165,11 @@ abstract class RestoreTestCase extends JobTestCase {
 		$rows    = array();
 		$counts  = $options['rows'] ?? array();
 		$files   = $options['files'] ?? array();
-		$groups  = $options['groups'] ?? null;
+		// The content groups the manifest says the backup holds: the ones given, or the ones the files are in (by
+		// the path as written: "wp-content/<group>/", anything else under "wp-content/" other content; a file outside
+		// it is in none). A backup that names a group it has no file for is a case of its own (RestoreGroupGuardTest):
+		// the restore asks before it swaps such a group's directory for an empty one.
+		$groups = $options['groups'] ?? self::groups_of( array_keys( $files ) );
 		unset( $options['rows'], $options['files'], $options['groups'] );
 		$builder = new ArchiveBuilder(
 			$options + array(
@@ -211,6 +215,49 @@ abstract class RestoreTestCase extends JobTestCase {
 	 *
 	 * @return string
 	 */
+	/**
+	 * The content groups a backup's files are in, in the manifest's order.
+	 *
+	 * @param array<int, int|string> $paths Archive paths.
+	 * @return string[]
+	 */
+	protected static function groups_of( array $paths ): array {
+		$in = array();
+		foreach ( $paths as $path ) {
+			$parts = explode( '/', (string) $path );
+			if ( count( $parts ) < 2 || 'wp-content' !== $parts[0] ) {
+				continue;
+			}
+			$named                                       = count( $parts ) >= 3 && in_array( $parts[1], array( 'plugins', 'themes', 'uploads', 'mu-plugins' ), true );
+			$in[ $named ? $parts[1] : 'other-content' ] = true;
+		}
+		return array_values( array_intersect( array( 'plugins', 'themes', 'uploads', 'mu-plugins', 'other-content' ), array_keys( $in ) ) );
+	}
+
+	/**
+	 * Answer every question a paused restore asks, each by its kind, and run it on.
+	 *
+	 * @param Job                   $job     Paused job.
+	 * @param array<string, string> $answers Kind => choice.
+	 * @return Job
+	 */
+	protected function answer_and_run( Job $job, array $answers ): Job {
+		$by_id = array();
+		foreach ( $job->questions as $question ) {
+			$this->assertArrayHasKey( $question['kind'], $answers, 'an answer for every question asked' );
+			$by_id[ $question['id'] ] = $answers[ $question['kind'] ];
+		}
+		$this->assertNotNull( Plugin::instance()->job_actions()->answer( $job->id, $by_id ) );
+		// Answered, it is paused still: the next tick takes it up.
+		$runner = Plugin::instance()->runner();
+		$this->autocommit(
+			static function () use ( $runner, $job ): void {
+				$runner->tick( $job->id, microtime( true ) );
+			}
+		);
+		return $this->run_restore( Plugin::instance()->jobs()->find( $job->id ) );
+	}
+
 	protected function backups_dir(): string {
 		return Plugin::instance()->directories()->backups();
 	}
