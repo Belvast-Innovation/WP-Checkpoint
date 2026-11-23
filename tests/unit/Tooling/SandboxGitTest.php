@@ -107,7 +107,7 @@ final class SandboxGitTest extends TestCase {
 
 	public function test_a_command_runs_in_a_sandboxs_repository_with_an_identity_written_nowhere(): void {
 		$repo = $this->sandbox . '/repo';
-		$this->assertSame( 'T <t@example.invalid>', $this->ok( $repo, 'log -1 --format=%an\\ \\<%ae\\>' ) );
+		$this->assertSame( 'T/t@example.invalid', $this->ok( $repo, 'log -1 --format=%an/%ae' ) );
 		$this->assertStringNotContainsString( '[user]', (string) file_get_contents( $repo . '/.git/config' ), 'the identity is not in the repository\'s configuration' );
 		file_put_contents( $repo . '/src.txt', 'b' );
 		mkdir( $repo . '/deep/er', 0755, true );
@@ -196,6 +196,27 @@ final class SandboxGitTest extends TestCase {
 		// And a directory of the sandbox with no repository at all: nothing is found, nothing is run.
 		mkdir( $this->sandbox . '/plain' );
 		$this->assertStringContainsString( 'none found', $this->refused( $this->sandbox . '/plain', 'status' ) );
+		// A script is not started there either; where git finds no repository it is (it may make one, or say so).
+		try {
+			SandboxGit::command( $this->sandbox . '/pointing', array( PHP_BINARY, '-r', 'file_put_contents( $argv[1], "ran" );', $this->sandbox . '/script-ran' ) );
+			$this->fail( 'a script was started where git finds the repository outside' );
+		} catch ( \LogicException $e ) {
+			$this->assertStringContainsString( 'is not inside the sandbox', $e->getMessage() );
+		}
+		$this->assertFileDoesNotExist( $this->sandbox . '/script-ran' );
+		$this->assertSame( 0, SandboxGit::command( $this->sandbox . '/plain', array( PHP_BINARY, '-r', 'file_put_contents( $argv[1], "ran" );', $this->sandbox . '/script-ran' ) )['code'] );
+		$this->assertFileExists( $this->sandbox . '/script-ran', 'the control: the script runs where no repository is found' );
+		$this->assertSame( $before, self::bytes( $this->outside ) );
+	}
+
+	public function test_a_repository_whose_references_are_kept_outside_the_sandbox_is_refused(): void {
+		$before = self::bytes( $this->outside );
+		// Its own directory in the sandbox, and git told (as for a linked worktree) that the common one is elsewhere.
+		self::copy_tree( $this->sandbox . '/repo', $this->sandbox . '/shared' );
+		file_put_contents( $this->sandbox . '/shared/.git/commondir', $this->outside . "/repo/.git\n" );
+		$why = $this->refused( $this->sandbox . '/shared', 'commit -q --allow-empty -m stray' );
+		$this->assertStringContainsString( 'is not inside the sandbox', $why );
+		$this->assertSame( $before, self::bytes( $this->outside ) );
 	}
 
 	public function test_init_is_refused_where_git_finds_a_repository_already(): void {
@@ -219,6 +240,11 @@ final class SandboxGitTest extends TestCase {
 		foreach ( array( '-C ' . escapeshellarg( $this->outside . '/repo' ) . ' commit -q --allow-empty -m stray', '--git-dir=' . escapeshellarg( $this->outside . '/repo/.git' ) . ' config user.name Stray', '', ' status' ) as $args ) {
 			$this->assertStringContainsString( 'the arguments start with the git command', $this->refused( $this->sandbox . '/repo', $args ), $args );
 		}
+		// One command: nothing a shell would run as another.
+		$stray = 'git -C ' . escapeshellarg( $this->outside . '/repo' ) . ' commit -q --allow-empty -m stray';
+		foreach ( array( 'status; ' . $stray, 'status && ' . $stray, 'status | ' . $stray, 'status $(' . $stray . ')', 'status `' . $stray . '`', "status\n" . $stray, 'status > ' . escapeshellarg( $this->outside . '/repo/a.txt' ) ) as $args ) {
+			$this->assertStringContainsString( 'nothing a shell reads as another', $this->refused( $this->sandbox . '/repo', $args ), $args );
+		}
 		$this->assertSame( $before, self::bytes( $this->outside ) );
 	}
 
@@ -238,7 +264,7 @@ final class SandboxGitTest extends TestCase {
 		$this->set_env( 'XDG_CONFIG_HOME', $home . '/xdg' );
 		$this->ok( $repo, 'commit -q --allow-empty -m unsigned' );
 		$this->assertFileDoesNotExist( $this->sandbox . '/global-hook-ran', 'the hooks of the home are not run' );
-		$this->assertSame( 'T N', $this->ok( $repo, 'log -1 --format=%an\\ %G?' ), 'our identity, not signed' );
+		$this->assertSame( 'T/N', $this->ok( $repo, 'log -1 --format=%an/%G?' ), 'our identity, not signed' );
 		// A hook of the repository itself still runs: the control for "no hook ran".
 		file_put_contents( $repo . '/.git/hooks/pre-commit', "#!/bin/sh\necho ran > " . escapeshellarg( $this->sandbox . '/own-hook-ran' ) . "\n" );
 		chmod( $repo . '/.git/hooks/pre-commit', 0755 );

@@ -64,7 +64,7 @@ final class GateScriptTest extends TestCase {
 	 */
 	public function test_git_s_environment_is_not_handed_on_to_the_steps(): void {
 		list( $status, $out, $err ) = $this->gate(
-			array( '( env | grep "^GIT_" ; echo "kept=$WPCHECKPOINT_KEPT" ) >> "$MARK"' ),
+			array( '( env | grep "^GIT_\\|^WPCHECKPOINT_KEPT=" ) >> "$MARK"' ),
 			array(
 				'GIT_DIR'           => $this->sandbox . '/somewhere/.git',
 				'GIT_WORK_TREE'     => $this->sandbox . '/somewhere',
@@ -74,7 +74,7 @@ final class GateScriptTest extends TestCase {
 			)
 		);
 		$this->assertSame( 0, $status, $out . $err );
-		$this->assertSame( "kept=kept\n", file_get_contents( $this->sandbox . '/ran' ), 'no GIT_* variable reaches a step; the control: another variable given the same way does' );
+		$this->assertSame( "WPCHECKPOINT_KEPT=kept\n", file_get_contents( $this->sandbox . '/ran' ), 'no GIT_* variable reaches a step; the control: another variable given the same way, and looked for the same way, does' );
 	}
 
 	public function test_steps_that_pass_let_the_gate_pass_and_each_is_run(): void {

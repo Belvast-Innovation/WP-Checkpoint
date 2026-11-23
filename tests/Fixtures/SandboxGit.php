@@ -20,11 +20,15 @@ namespace WPCheckpoint\Tests\Fixtures;
  *   prompts, and GIT_CEILING_DIRECTORIES at the sandbox, so that no repository at or above it is found from a
  *   directory below it.
  * - Before the command, git itself is asked in that directory and environment where its repository is (git
- *   rev-parse --absolute-git-dir): for "init" there must be none; for anything else the answer must be inside
- *   the sandbox.
+ *   rev-parse --absolute-git-dir, and --git-common-dir: a linked worktree's references and configuration are in
+ *   the common one): for "init" there must be none; for any other git command both answers must be inside the
+ *   sandbox; for a script (command()) they must be inside it when git finds a repository at all.
+ * - A git command is one command: arguments with what a shell reads as more (";", "&", "|", "$", a backtick, "<",
+ *   ">", a line break) are refused.
  *
  * Anything else is refused with a LogicException and no command is run. What is not judged: where a command's own
- * arguments point (a path given to "worktree add" or "push"); the tests give paths of their sandbox.
+ * arguments point (a path given to "init", "clone", "worktree add" or "push", a value given to "config"), and
+ * what a script does once it runs; the tests give paths of their sandbox.
  */
 final class SandboxGit {
 
@@ -83,23 +87,52 @@ final class SandboxGit {
 	 * @throws \LogicException When the command is refused (see the class); nothing was run.
 	 */
 	public static function run( string $dir, string $args ): array {
+		if ( 1 === preg_match( '/[;&|$`<>\r\n]/', $args ) ) {
+			throw new \LogicException( 'SandboxGit::run() refused: the arguments are those of one git command, with nothing a shell reads as another. Nothing was run.' );
+		}
 		if ( 1 !== preg_match( '/\A([a-z][a-z-]*)(?:\s|\z)/', $args, $m ) ) {
 			throw new \LogicException( 'SandboxGit::run() refused: the arguments start with the git command, without options before it. Nothing was run.' );
 		}
 		$root  = self::root( $dir );
 		$env   = self::environment( $root );
-		$found = self::launch( 'git rev-parse --absolute-git-dir', $dir, $env );
+		$found = self::repository( $dir, $root, $env );
 		if ( 'init' === $m[1] ) {
-			if ( 0 === $found['code'] ) {
-				throw new \LogicException( sprintf( 'SandboxGit::run( init ) refused: git finds a repository from %s already (%s). Nothing was run.', $dir, trim( $found['stdout'] ) ) );
+			if ( null !== $found['where'] ) {
+				throw new \LogicException( sprintf( 'SandboxGit::run( init ) refused: git finds a repository from %s already (%s). Nothing was run.', $dir, $found['where'] ) );
 			}
-		} else {
-			$where = 0 === $found['code'] ? realpath( trim( $found['stdout'] ) ) : false;
-			if ( false === $where || 0 !== strpos( $where . DIRECTORY_SEPARATOR, $root . DIRECTORY_SEPARATOR ) ) {
-				throw new \LogicException( sprintf( 'SandboxGit::run( %s ) refused: the repository git finds from %s is not inside the sandbox (%s). Nothing was run.', $m[1], $dir, 0 === $found['code'] ? trim( $found['stdout'] ) : 'none found' ) );
-			}
+		} elseif ( ! $found['inside'] ) {
+			throw new \LogicException( sprintf( 'SandboxGit::run( %s ) refused: the repository git finds from %s is not inside the sandbox (%s). Nothing was run.', $m[1], $dir, null === $found['where'] ? 'none found' : $found['where'] ) );
 		}
 		return self::launch( 'git ' . self::IDENTITY . ' ' . $args, $dir, $env );
+	}
+
+	/**
+	 * The repository git finds from a directory, in the environment commands get: where it says its directory and
+	 * its common directory are (null when it finds none), and whether both are inside the sandbox.
+	 *
+	 * @param string                $dir  Directory.
+	 * @param string                $root The sandbox.
+	 * @param array<string, string> $env  Environment.
+	 * @return array{where: string|null, inside: bool}
+	 */
+	private static function repository( string $dir, string $root, array $env ): array {
+		$said   = array();
+		$inside = true;
+		foreach ( array( '--absolute-git-dir', '--git-common-dir' ) as $which ) {
+			$found = self::launch( 'git rev-parse ' . $which, $dir, $env );
+			if ( 0 !== $found['code'] ) {
+				continue;
+			}
+			$path   = trim( $found['stdout'] );
+			$said[] = $path;
+			// The common directory is given as from the directory the command ran in.
+			$real   = realpath( 1 === preg_match( '#\A(?:/|[A-Za-z]:[\\\\/])#', $path ) ? $path : $dir . DIRECTORY_SEPARATOR . $path );
+			$inside = $inside && false !== $real && 0 === strpos( $real . DIRECTORY_SEPARATOR, $root . DIRECTORY_SEPARATOR );
+		}
+		return array(
+			'where'  => array() === $said ? null : implode( ', ', array_unique( $said ) ),
+			'inside' => array() !== $said && $inside,
+		);
 	}
 
 	/**
@@ -119,7 +152,12 @@ final class SandboxGit {
 				throw new \LogicException( 'SandboxGit::command() refused: ' . $name . ' is not given to a command. Nothing was run.' );
 			}
 		}
-		return self::launch( $command, $dir, $more + self::environment( $root ) );
+		$env   = self::environment( $root );
+		$found = self::repository( $dir, $root, $env );
+		if ( null !== $found['where'] && ! $found['inside'] ) {
+			throw new \LogicException( sprintf( 'SandboxGit::command() refused: the repository git finds from %s is not inside the sandbox (%s). Nothing was run.', $dir, $found['where'] ) );
+		}
+		return self::launch( $command, $dir, $more + $env );
 	}
 
 	/**

@@ -57,29 +57,36 @@ final class GitInHookTest extends TestCase {
 	}
 
 	/**
-	 * What a repository holds that a stray git command changes: its configuration, where every reference points,
-	 * its index, and the names of everything in its directory but the objects and the logs.
+	 * What a repository holds that a stray git command changes: what git says of its working trees and its
+	 * references, and every file of its directory, byte for byte, but the objects and the logs (a command that
+	 * only adds an object or a log line changes nothing a later command reads as the repository's state). The
+	 * configuration, HEAD and the index are named apart, for a failure to say which.
 	 *
+	 * @param string   $repo  Repository.
+	 * @param string[] $trees Its working trees (the repository's own and the linked ones).
 	 * @return array<string, string>
 	 */
-	private function state( string $repo ): array {
-		$names = array();
-		$it    = new \RecursiveIteratorIterator( new \RecursiveDirectoryIterator( $repo . '/.git', \FilesystemIterator::SKIP_DOTS ), \RecursiveIteratorIterator::SELF_FIRST );
+	private function state( string $repo, array $trees ): array {
+		// What git says first: a status may write the index's cached stat data, once.
+		$out = array();
+		foreach ( $trees as $tree ) {
+			$out[ 'status of ' . basename( $tree ) ] = $this->said( $tree, 'status --porcelain --branch' );
+		}
+		$out['references'] = $this->said( $repo, 'for-each-ref' );
+		$out['config']     = (string) file_get_contents( $repo . '/.git/config' );
+		$out['HEAD']       = (string) file_get_contents( $repo . '/.git/HEAD' );
+		$out['index']      = bin2hex( (string) file_get_contents( $repo . '/.git/index' ) );
+		$files             = array();
+		$it                = new \RecursiveIteratorIterator( new \RecursiveDirectoryIterator( $repo . '/.git', \FilesystemIterator::SKIP_DOTS ), \RecursiveIteratorIterator::SELF_FIRST );
 		foreach ( $it as $file ) {
-			$relative = substr( $file->getPathname(), strlen( $repo . '/.git/' ) );
-			if ( 0 !== strpos( $relative, 'objects' ) && 0 !== strpos( $relative, 'logs' ) ) {
-				$names[] = $relative;
+			$relative = str_replace( '\\', '/', substr( $file->getPathname(), strlen( $repo . '/.git/' ) ) );
+			if ( 1 !== preg_match( '#\A(?:objects|logs)(?:/|\z)|\Aworktrees/[^/]+/logs(?:/|\z)#', $relative ) ) {
+				$files[] = $relative . ' ' . ( $file->isDir() ? 'dir' : hash_file( 'sha256', $file->getPathname() ) );
 			}
 		}
-		sort( $names );
-		return array(
-			'config'     => (string) file_get_contents( $repo . '/.git/config' ),
-			'HEAD'       => (string) file_get_contents( $repo . '/.git/HEAD' ),
-			'references' => $this->said( $repo, 'for-each-ref' ),
-			'index'      => bin2hex( (string) file_get_contents( $repo . '/.git/index' ) ),
-			'names'      => implode( "\n", $names ),
-			'status'     => $this->said( $repo, 'status --porcelain' ),
-		);
+		sort( $files );
+		$out['files'] = implode( "\n", $files );
+		return $out;
 	}
 
 	public function test_the_tests_that_run_git_leave_the_repository_whose_hook_started_them_as_it_was(): void {
@@ -105,8 +112,10 @@ final class GitInHookTest extends TestCase {
 			. "exit 0\n"
 		);
 		chmod( $repo . '/.git/hooks/pre-push', 0755 );
-		$before = $this->state( $repo );
-		$linked = (string) file_get_contents( $repo . '/.git/worktrees/tree/index' );
+		$this->state( $repo, array( $repo, $tree ) ); // Once before the one compared: the first status settles the indexes.
+		$before = $this->state( $repo, array( $repo, $tree ) );
+		$this->assertStringContainsString( 'worktrees/tree/index ', $before['files'], 'the control: the linked worktree\'s files are among the ones compared' );
+		$this->assertStringContainsString( 'hooks/pre-push ', $before['files'] );
 
 		$push = SandboxGit::run( $tree, 'push --dry-run ' . escapeshellarg( $remote ) . ' HEAD:refs/heads/pushed' );
 		$this->assertSame( 0, $push['code'], $push['stdout'] . $push['stderr'] );
@@ -117,11 +126,10 @@ final class GitInHookTest extends TestCase {
 		$log = (string) file_get_contents( $this->sandbox . '/hook.log' );
 		$this->assertMatchesRegularExpression( '/(?:OK \(|Tests: )\d+/', $log, 'the tests ran in the hook' );
 
-		$after = $this->state( $repo );
+		$after = $this->state( $repo, array( $repo, $tree ) );
 		foreach ( $before as $what => $was ) {
 			$this->assertSame( $was, $after[ $what ], 'the repository\'s ' . $what . ' after the tests ran in its hook' );
 		}
-		$this->assertSame( bin2hex( $linked ), bin2hex( (string) file_get_contents( $repo . '/.git/worktrees/tree/index' ) ), 'the index of the worktree the push was made from' );
 		$this->assertSame( '0', trim( (string) file_get_contents( $this->sandbox . '/hook.status' ) ), "the tests passed in the hook:\n" . $log );
 	}
 }

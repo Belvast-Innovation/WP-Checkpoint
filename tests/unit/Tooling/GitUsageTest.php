@@ -11,7 +11,10 @@ use Yoast\PHPUnitPolyfills\TestCases\TestCase;
  * pcntl_exec(), a backtick string) and names git, or one of those scripts, in a string of its arguments.
  *
  * Not seen: a command put together in a variable before the call (as the entry itself starts its commands, which
- * is why it is not reported), and a program that runs git without the test naming it. A new script of bin/ that
+ * is why it is not reported), a function called by a name in a string or through a wrapper (array_map( 'exec',
+ * … ), call_user_func(), a helper that calls exec()), and a program that runs git without the test naming it. The
+ * list of scripts is kept by a search for git at the start of a command line of a script: one that runs git only
+ * after "if", "then" or "exec", or only with options before the command, is not found and is added by hand. A new script of bin/ that
  * runs git is added to SCRIPTS (the last test here fails until it is).
  */
 final class GitUsageTest extends TestCase {
@@ -30,7 +33,8 @@ final class GitUsageTest extends TestCase {
 		$tokens  = token_get_all( $source );
 		$count   = count( $tokens );
 		$lines   = array();
-		$pattern = '/(?<![\w.\/-])git(?:\.exe)?(?![\w.-])|' . implode( '|', array_map( 'preg_quote', self::SCRIPTS ) ) . '/';
+		// Not ".git" (a repository's directory) or a longer word; "/usr/bin/git" is git.
+		$pattern = '/(?<![\w.-])git(?:\.exe)?(?![\w.-])|' . implode( '|', array_map( 'preg_quote', self::SCRIPTS ) ) . '/';
 		$line    = 1;
 		for ( $i = 0; $i < $count; $i++ ) {
 			$token = $tokens[ $i ];
@@ -93,6 +97,9 @@ final class GitUsageTest extends TestCase {
 			'$p = proc_open( array( PHP_BINARY, $root . \'/bin/mutate.php\', $spec ), array(), $pipes );',
 			'$p = proc_open( array( \'bash\', $repo . \'/bin/worktree.sh\' ), array(), $pipes );',
 			'$h = popen( \'git.exe status\', \'r\' );',
+			'exec( \'/usr/bin/git status\' );',
+			'$p = proc_open( array( \'/usr/bin/git\', \'init\' ), array(), $pipes );',
+			'exec( \'./git init\' );',
 			'$out = `git status`;',
 		);
 		foreach ( $found as $code ) {
@@ -135,6 +142,27 @@ final class GitUsageTest extends TestCase {
 		foreach ( self::SCRIPTS as $script ) {
 			$this->assertFileExists( $root . '/bin/' . $script );
 		}
+	}
+
+	/**
+	 * The test classes that run git are run from a hook by GitInHookTest: one that is not on its list would not be
+	 * shown to leave the hook's repository alone.
+	 */
+	public function test_every_test_class_that_runs_git_is_run_from_a_hook(): void {
+		$root  = dirname( __DIR__, 3 );
+		$using = array();
+		$it    = new \RecursiveIteratorIterator( new \RecursiveDirectoryIterator( $root . '/tests', \FilesystemIterator::SKIP_DOTS ) );
+		foreach ( $it as $file ) {
+			$name = $file->getBasename( '.php' );
+			// But the proof itself (it would start itself) and the entry's own test (which names repositories to the environment on purpose).
+			if ( 'php' === $file->getExtension() && 'Test' === substr( $name, -4 ) && ! in_array( $name, array( 'GitInHookTest', 'SandboxGitTest', 'GitUsageTest' ), true ) && false !== strpos( (string) file_get_contents( $file->getPathname() ), 'SandboxGit::' ) ) {
+				$using[] = $name;
+			}
+		}
+		sort( $using );
+		$listed = explode( '|', GitInHookTest::CLASSES );
+		sort( $listed );
+		$this->assertSame( $listed, $using );
 	}
 
 	/**
