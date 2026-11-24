@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Nothing is pushed that bin/gate.sh has not passed (lint, analysis, the unit suite).
+# Installed by bin/install-hooks.sh, which knows a hook of this plugin by this line: wp-checkpoint pre-push hook.
+#
+# In the common git directory: the main working copy and every linked worktree run it. git names the repository to
+# a hook by its environment when the push is made from a linked worktree (GIT_DIR, GIT_INDEX_FILE), and a command
+# that inherits that acts on this repository whatever directory it runs in. So: what the hook needs from git is
+# asked first, without writing anything (--no-optional-locks); then every GIT_* variable is removed; only then is
+# anything else started.
+#
+# - A push that only deletes references is let through.
+# - The gate checks the working tree, so what is pushed must be it: the tree is clean and every commit pushed is
+#   the one checked out here. Anything else is refused (push it from where it is checked out).
+# - A tree the hook has passed is not checked again (its hash is in wpcheckpoint-gate-passed beside the hooks).
+set -u
+top="$(git rev-parse --show-toplevel)" || exit 1
+common="$(cd "$(git rev-parse --git-common-dir)" && pwd)" || exit 1
+head="$(git rev-parse HEAD)" || exit 1
+tree="$(git rev-parse 'HEAD^{tree}')" || exit 1
+dirty="$(git --no-optional-locks status --porcelain)" || exit 1
+[ -n "${WPCHECKPOINT_HOOK_TRACE:-}" ] && echo "pre-push: git set GIT_DIR for this hook: ${GIT_DIR:-no}" >&2
+
+zero='0000000000000000000000000000000000000000'
+any=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+	[ -z "${local_ref:-}" ] && continue
+	[ "$local_sha" = "$zero" ] && continue
+	any=1
+	if [ "$local_sha" != "$head" ]; then
+		echo "pre-push: $local_ref is at $local_sha, not the commit checked out here ($head); the gate checks the working tree. Push it from where it is checked out." >&2
+		exit 1
+	fi
+done
+[ "$any" -eq 0 ] && exit 0
+
+# From here on, nothing of git's environment.
+for name in $(env | sed -n 's/^\(GIT_[A-Za-z0-9_]*\)=.*/\1/p'); do
+	unset "$name"
+done
+cd "$top" || exit 1
+
+if [ -n "$dirty" ]; then
+	echo "pre-push: the working tree is not clean; the gate would check something else than what is pushed." >&2
+	exit 1
+fi
+if [ ! -x "$top/bin/gate.sh" ]; then
+	echo "pre-push: bin/gate.sh is not in this working tree; nothing is pushed unchecked." >&2
+	exit 1
+fi
+passed="$common/wpcheckpoint-gate-passed"
+if [ -f "$passed" ] && grep -qx "$tree" "$passed"; then
+	echo "pre-push: the gate has passed this tree ($tree)." >&2
+	exit 0
+fi
+"$top/bin/gate.sh" </dev/null >&2
+status=$?
+if [ "$status" -ne 0 ]; then
+	echo "pre-push: the gate failed (status $status); nothing was pushed." >&2
+	exit "$status"
+fi
+echo "$tree" >> "$passed"
+exit 0
