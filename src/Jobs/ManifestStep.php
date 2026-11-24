@@ -369,8 +369,9 @@ final class ManifestStep implements Step {
 	/**
 	 * The scan's roots, prefix => content group, or null when the scan summary does not record the group of every
 	 * root it listed files under (a scan an earlier version made, or began: the roots it entered are in root_ids
-	 * without a group): the archive is then written without the count of each group's files. Counting with some
-	 * of the roots would count a root's files for the root above it.
+	 * without a group), or what it knows of every one of those groups (group_states): the archive is then written
+	 * without the count of each group's files. Counting with some of the roots would count a root's files for the
+	 * root above it.
 	 *
 	 * @param string $work Work directory.
 	 * @return array<string, string>|null
@@ -388,7 +389,7 @@ final class ManifestStep implements Step {
 			return null;
 		}
 		// And what the scan knows of every one of those groups (a scan an earlier state of this code began says it
-		// of the roots it entered later only).
+		// only of the roots it listed after that).
 		foreach ( $scanned['root_groups'] as $group ) {
 			if ( ! isset( $scanned['group_states'][ (string) $group ] ) ) {
 				return null;
@@ -409,7 +410,7 @@ final class ManifestStep implements Step {
 	}
 
 	/**
-	 * How many entries each listed group's own directory had at the scan, from its summary.
+	 * The most entries a listing of each listed group's own directory had during the scan, from its summary.
 	 *
 	 * @param string $work Work directory.
 	 * @return array<string, int>
@@ -427,7 +428,7 @@ final class ManifestStep implements Step {
 	 * @param array<string, mixed>  $audit  The files audit's final state.
 	 * @param string[]              $groups The content groups backed up (the manifest's contents.files).
 	 * @param array<string, string> $states  What the scan knows of each group (the summary's group_states).
-	 * @param array<string, int>    $entries How many entries each listed group's own directory had (root_entries).
+	 * @param array<string, int>    $entries The most entries a listing of each listed group's own directory had (root_entries).
 	 * @return array<string, array<string, array{count: int, state: string}>> array( 'groups' => … ) or an empty array.
 	 * @throws \RuntimeException When the audit counted files for a group that is not backed up, or whose directory was not read.
 	 */
