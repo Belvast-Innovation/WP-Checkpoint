@@ -100,6 +100,38 @@ final class FileScannerTest extends TestCase {
 		$this->assertArrayNotHasKey( 'root_entries', $state2 );
 	}
 
+	/**
+	 * The root's own directory is listed again each time the scan comes back to it. A directory whose entries went
+	 * away while it was scanned had entries: the last listing's "none" does not say it was empty.
+	 */
+	public function test_a_root_that_loses_its_entries_during_the_scan_is_not_said_to_have_had_none(): void {
+		$this->put( 'content/uploads/2024/a.jpg' );
+		$this->put( 'content/uploads/2025/b.jpg' );
+		$scanner = new FileScanner( array( array( 'group' => 'uploads', 'path' => $this->root . '/content/uploads', 'prefix' => 'wp-content/uploads' ) ), new Exclusions( array(), array() ) );
+		$lines   = array();
+		$state   = FileScanner::initial_state();
+		$moved   = false;
+		for ( $i = 0; $i < 1000 && empty( $state['done'] ); $i++ ) {
+			$state = $scanner->scan_unit(
+				$state,
+				function ( array $line ) use ( &$lines, &$moved ): void {
+					$lines[] = $line['p'];
+					if ( ! $moved ) {
+						// Everything in the root goes away while the scan is inside its first directory.
+						rename( $this->root . '/content/uploads/2024', $this->root . '/gone-2024' );
+						rename( $this->root . '/content/uploads/2025', $this->root . '/gone-2025' );
+						$moved = true;
+					}
+				}
+			);
+		}
+		$this->assertTrue( $moved, 'the control: the scan was inside the root when its entries went' );
+		$this->assertSame( array( 'wp-content/uploads/2024/a.jpg' ), $lines );
+		$this->assertSame( array(), array_values( array_diff( (array) scandir( $this->root . '/content/uploads' ), array( '.', '..' ) ) ), 'the control: the root is empty now' );
+		$this->assertSame( array( 'uploads' => 'listed' ), $state['group_states'] );
+		$this->assertSame( array( 'uploads' => 2 ), $state['root_entries'], 'the most a listing of it had' );
+	}
+
 	public function test_a_root_that_cannot_be_listed_is_not_read(): void {
 		if ( 'Windows' === PHP_OS_FAMILY || ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) ) {
 			$this->markTestSkipped( 'A directory\'s mode does not keep this user from listing it.' );

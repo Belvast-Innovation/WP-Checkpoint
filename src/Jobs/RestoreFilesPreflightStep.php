@@ -1021,7 +1021,7 @@ final class RestoreFilesPreflightStep implements Step {
 	 * site holds an entry (for plugins: one besides this plugin's own directory, which the restore stages a copy
 	 * of whatever the backup holds). By positive evidence only: a directory that is there and cannot be listed
 	 * counts as holding something, one that is positively not there does not. What is done about them is the
-	 * caller's: asked about, or (where the manifest counts no file for them) replaced and said.
+	 * caller's: asked about, or (where the backup read the group's directory and found it without an entry) replaced and said.
 	 *
 	 * @param array<string, mixed> $staging Staging file.
 	 * @param array<string, mixed> $mapped  Group => files of the backup mapped into it.

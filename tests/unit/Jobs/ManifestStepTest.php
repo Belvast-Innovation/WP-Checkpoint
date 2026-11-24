@@ -445,6 +445,21 @@ final class ManifestStepTest extends TestCase {
 		}
 	}
 
+	public function test_a_scan_that_says_nothing_of_a_group_it_listed_files_under_gives_a_manifest_without_the_counts(): void {
+		// A scan begun before the states were recorded and ended after: the root of the files has a group, and no state.
+		$this->scanned( array( 'wp-content/uploads' => 'uploads' ), array(), array( 'group_states' => array( 'plugins' => 'listed' ) ) );
+		$this->drive( $this->step() );
+		$this->assertNull( $this->manifest()->group_counts_declared() );
+		$this->assertSame( 2, $this->manifest()->files_summary()['count'], 'the control: the archive has its files' );
+	}
+
+	public function test_an_entry_count_that_is_no_count_is_not_read_as_none(): void {
+		ExportPlan::write( $this->ctx->work(), ExportPlan::PLAN, array( 'base' => self::BASE, 'tables' => array( 'wp_posts' ), 'notes' => array(), 'groups' => array( 'plugins', 'uploads' ), 'exclusions' => array( 'wp-content/cache' ) ) );
+		$this->scanned( array( 'wp-content/uploads' => 'uploads', 'wp-content/plugins' => 'plugins' ), array(), array( 'root_entries' => array( 'uploads' => 2, 'plugins' => null ) ) );
+		$this->drive( $this->step() );
+		$this->assertSame( array( 'plugins' => 'unread', 'uploads' => 'listed' ), $this->manifest()->group_states_declared() );
+	}
+
 	public function test_a_scan_summary_without_the_groups_states_gives_a_manifest_without_the_counts(): void {
 		// As a scan of this change's earlier state wrote it: the roots' groups, and nothing of what was read.
 		file_put_contents( $this->ctx->work() . '/scan.summary.json', json_encode( array( 'counts' => array(), 'lists' => array(), 'warnings' => array(), 'root_ids' => array( 'wp-content/uploads' => 'id' ), 'root_groups' => array( 'wp-content/uploads' => 'uploads' ) ) ) );

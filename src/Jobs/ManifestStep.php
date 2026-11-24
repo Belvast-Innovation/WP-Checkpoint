@@ -384,7 +384,17 @@ final class ManifestStep implements Step {
 		$all  = array_map( 'strval', array_keys( $scanned['root_ids'] ) );
 		sort( $with );
 		sort( $all );
-		return $with === $all ? array_map( 'strval', $scanned['root_groups'] ) : null;
+		if ( $with !== $all ) {
+			return null;
+		}
+		// And what the scan knows of every one of those groups (a scan an earlier state of this code began says it
+		// of the roots it entered later only).
+		foreach ( $scanned['root_groups'] as $group ) {
+			if ( ! isset( $scanned['group_states'][ (string) $group ] ) ) {
+				return null;
+			}
+		}
+		return array_map( 'strval', $scanned['root_groups'] );
 	}
 
 	/**
@@ -406,7 +416,8 @@ final class ManifestStep implements Step {
 	 */
 	private static function root_entries( string $work ): array {
 		$scanned = ExportPlan::exists( $work, FileScanStep::SUMMARY ) ? ExportPlan::read( $work, FileScanStep::SUMMARY ) : array();
-		return isset( $scanned['root_entries'] ) && is_array( $scanned['root_entries'] ) ? array_map( 'intval', $scanned['root_entries'] ) : array();
+		// Only what is a count: anything else is "not said", which is not "no entry".
+		return isset( $scanned['root_entries'] ) && is_array( $scanned['root_entries'] ) ? array_filter( $scanned['root_entries'], 'is_int' ) : array();
 	}
 
 	/**

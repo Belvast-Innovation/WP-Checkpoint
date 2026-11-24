@@ -261,10 +261,10 @@ final class FileScanStep implements Step {
 			'normalization_available' => PathKey::normalization_available(),
 			'root_ids'                => isset( $state['root_ids'] ) && is_array( $state['root_ids'] ) ? $state['root_ids'] : array(),
 			'root_groups'             => isset( $state['root_groups'] ) && is_array( $state['root_groups'] ) ? $state['root_groups'] : array(),
+			// The most entries a listing of each listed group's own directory had (none: the group was empty).
+			'root_entries'            => isset( $state['root_entries'] ) && is_array( $state['root_entries'] ) ? $state['root_entries'] : array(),
 			// What is known of each group the backup was to hold: the scanner's word for the ones with a root, the
 			// resolver's for the ones without.
-			// How many entries each listed group's own directory had (none: the group was empty).
-			'root_entries'            => isset( $state['root_entries'] ) && is_array( $state['root_entries'] ) ? $state['root_entries'] : array(),
 			'group_states'            => ( isset( $state['group_states'] ) && is_array( $state['group_states'] ) ? $state['group_states'] : array() ) + $this->unscanned,
 			'exclusions'              => $this->exclusions->globs(),
 		);

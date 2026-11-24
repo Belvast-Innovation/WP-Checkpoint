@@ -289,9 +289,11 @@ final class FileScanner {
 				continue;
 			}
 			if ( '' === $frame['dir'] ) {
-				// The root's own directory was listed, and how many entries it has: with none, the group was empty.
+				// The root's own directory was listed, and the most entries a listing of it had (it is listed again
+				// each time the scan comes back to it): with none in any listing, the group was empty. A directory
+				// that lost its entries while it was scanned did not have none.
 				$state['group_states'][ $root['group'] ] = ScanRoots::LISTED;
-				$state['root_entries'][ $root['group'] ] = count( $names );
+				$state['root_entries'][ $root['group'] ] = max( count( $names ), (int) ( $state['root_entries'][ $root['group'] ] ?? 0 ) );
 			}
 			if ( '' === $frame['after'] ) {
 				++$state['counts']['directories'];
@@ -364,7 +366,7 @@ final class FileScanner {
 		$state['root_ids'][ $root['prefix'] ] = Links::fingerprint( $root['path'] );
 		// The group whose files are listed under this prefix, for the manifest step to count each group's files.
 		$state['root_groups'][ $root['prefix'] ] = $root['group'];
-		// Not read yet: listed when its own directory has been (scan()).
+		// Not read yet: listed when its own directory has been (scan_unit()).
 		$state['group_states'][ $root['group'] ] = ScanRoots::UNREAD;
 		return true;
 	}
