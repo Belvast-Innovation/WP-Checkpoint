@@ -266,9 +266,9 @@ final class ExportJobTest extends JobTestCase {
 	 * An export is of the network, whichever of its sites the request that runs it is for: WP-CLI with --url of a
 	 * sub-site, a REST request or a cron run on a sub-site's address. There WordPress gives that site's upload
 	 * directory ("uploads/sites/N"), and the export took it for the uploads group's. The manifest and the files
-	 * index of an export run as a sub-site are the main site's, byte for byte, but for what names the run or its
-	 * time: created_at, the volumes (their names carry the time, their bytes the manifest's copy), warnings that
-	 * name the job's own storage.
+	 * index of an export run as a sub-site are the main site's, byte for byte, but for what differs between any two
+	 * runs: created_at; the volumes (their names carry the time, their bytes the manifest's copy); and the database
+	 * part (when it was exported, and the rows the first run itself changed).
 	 */
 	public function test_an_export_run_for_a_sub_site_is_the_same_as_one_run_for_the_main_site(): void {
 		if ( ! is_multisite() ) {
@@ -298,7 +298,7 @@ final class ExportJobTest extends JobTestCase {
 				$this->assertSame( RunLoop::EXIT_COMPLETED, $code, $which . ': ' . implode( "\n", $this->err ) );
 				$base     = (string) ExportPlan::read( $this->work( $id ), ExportPlan::PLAN )['base'];
 				$manifest = json_decode( (string) file_get_contents( Plugin::instance()->directories()->backups() . '/' . $base . '.manifest.json' ), true );
-				unset( $manifest['created_at'], $manifest['volumes'] );
+				unset( $manifest['created_at'], $manifest['volumes'], $manifest['database'] );
 				$described[ $which ] = array(
 					'roots'    => $roots,
 					'manifest' => $manifest,
@@ -310,6 +310,7 @@ final class ExportJobTest extends JobTestCase {
 			$this->assertSame( $described['main']['roots'], $described['sub']['roots'], 'the roots of every group' );
 			$this->assertSame( $described['main']['index'], $described['sub']['index'], 'the files index, byte for byte' );
 			$this->assertSame( $described['main']['manifest'], $described['sub']['manifest'], 'the manifest' );
+			$this->assertSame( array( 'format', 'format_version', 'required_features', 'kind', 'trigger', 'generator', 'site', 'contents', 'exclusions', 'hashing', 'files', 'embedded', 'encryption', 'warnings' ), array_keys( $described['main']['manifest'] ), 'the control: everything else of the manifest was compared' );
 		} finally {
 			Leftovers::remove_site( $site ); // Created with real tables (the filters are off): committed.
 		}
