@@ -7,6 +7,7 @@
 
 namespace WPCheckpoint\Archive;
 
+use WPCheckpoint\Files\ScanRoots;
 use WPCheckpoint\Jobs\WorkLost;
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- messages carry line numbers, table names and counts; the runner stores them through the redactor.
@@ -30,36 +31,46 @@ final class IndexAudit {
 	const BYTES_PER_UNIT = 16777216;
 
 	/**
-	 * The state a files audit starts from.
+	 * The state a files audit starts from. With $by_group, the audit also counts the files of each content group
+	 * (state key "groups", group => count, only the groups that have a file); a state without that key (one an
+	 * earlier version began, or a scan that recorded no groups) is audited without the counts to its end.
 	 *
-	 * @return array{offset: int, n: int, count: int, bytes: int, done: bool}
+	 * @param bool $by_group Whether each group's files are counted.
+	 * @return array<string, mixed> {offset: int, n: int, count: int, bytes: int, done: bool, groups?: array<string, int>}
 	 */
-	public static function files_start(): array {
-		return array(
+	public static function files_start( bool $by_group = false ): array {
+		$state = array(
 			'offset' => 0,
 			'n'      => 0,
 			'count'  => 0,
 			'bytes'  => 0,
 			'done'   => false,
 		);
+		if ( $by_group ) {
+			$state['groups'] = array();
+		}
+		return $state;
 	}
 
 	/**
 	 * One unit of the files audit.
 	 *
-	 * @param string               $path        Index file.
-	 * @param array<string, mixed> $state       State from files_start() or a previous unit.
-	 * @param int                  $chunk_bytes Content chunk size the lines were made with.
-	 * @return array{offset: int, n: int, count: int, bytes: int, done: bool}
-	 * @throws \RuntimeException When a line is malformed or has no hash, with its number.
+	 * @param string                $path        Index file.
+	 * @param array<string, mixed>  $state       State from files_start() or a previous unit.
+	 * @param int                   $chunk_bytes Content chunk size the lines were made with.
+	 * @param array<string, string> $groups     The scan's roots, prefix => content group; read when the state counts by group.
+	 * @return array<string, mixed> The state after the unit.
+	 * @throws \RuntimeException When a line is malformed, has no hash, or (counting by group) is under no root the scan listed; with its number.
 	 */
-	public static function files_step( string $path, array $state, int $chunk_bytes ): array {
+	public static function files_step( string $path, array $state, int $chunk_bytes, array $groups = array() ): array {
 		if ( ! empty( $state['done'] ) ) {
 			return $state;
 		}
-		$handle = self::open( $path, 'The files index is missing; the work directory was lost or changed.', (int) $state['offset'] );
-		$read   = 0;
-		$lines  = 0;
+		$by_group = isset( $state['groups'] ) && is_array( $state['groups'] );
+		$prefixes = array_map( 'strval', array_keys( $groups ) );
+		$handle   = self::open( $path, 'The files index is missing; the work directory was lost or changed.', (int) $state['offset'] );
+		$read     = 0;
+		$lines    = 0;
 		try {
 			$line = fgets( $handle, IndexLine::MAX_LINE_BYTES + 2 );
 			while ( false !== $line ) {
@@ -76,6 +87,15 @@ final class IndexAudit {
 					}
 					if ( null === $data['h'] ) {
 						throw new \RuntimeException( sprintf( 'Files index line %d has no content hash; an archive without content hashes cannot be verified and is not written.', $state['n'] ) );
+					}
+					if ( $by_group ) {
+						// The rule the pack step read the file by (ScanRoots::prefix_of()): the root is the group's.
+						$prefix = ScanRoots::prefix_of( $prefixes, (string) $data['p'] );
+						if ( '' === $prefix ) {
+							throw new \RuntimeException( sprintf( 'Files index line %d is under no content directory the scan listed; the archive cannot be described.', $state['n'] ) );
+						}
+						$group                     = (string) $groups[ $prefix ];
+						$state['groups'][ $group ] = ( isset( $state['groups'][ $group ] ) ? (int) $state['groups'][ $group ] : 0 ) + 1;
 					}
 					++$state['count'];
 					$state['bytes'] += (int) $data['b'];

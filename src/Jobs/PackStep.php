@@ -948,54 +948,44 @@ final class PackStep implements Step {
 	 * @return string
 	 */
 	private static function scanned_prefix( array $scanned, string $p ): string {
-		$best = '';
-		foreach ( $scanned as $candidate ) {
-			if ( ( $p === $candidate || 0 === strpos( $p, $candidate . '/' ) ) && strlen( $candidate ) > strlen( $best ) ) {
-				$best = $candidate;
-			}
-		}
-		return $best;
+		return ScanRoots::prefix_of( $scanned, $p );
 	}
 
 
 	/**
-	 * The root an archive path belongs to (longest prefix wins).
+	 * The root an archive path belongs to (ScanRoots::prefix_of(); of two roots with one prefix, the first).
 	 *
 	 * @param array<int, array<string, mixed>> $roots Roots.
 	 * @param string                           $p     Archive path.
 	 * @return array<string, mixed>|null
 	 */
 	private static function root_of( array $roots, string $p ) {
-		$best = null;
-		$len  = -1;
+		$prefix = ScanRoots::prefix_of( array_column( $roots, 'prefix' ), $p );
+		if ( '' === $prefix ) {
+			return null;
+		}
 		foreach ( $roots as $root ) {
-			$prefix = (string) $root['prefix'];
-			if ( ( $p === $prefix || 0 === strpos( $p, $prefix . '/' ) ) && strlen( $prefix ) > $len ) {
-				$best = $root;
-				$len  = strlen( $prefix );
+			if ( (string) $root['prefix'] === $prefix ) {
+				return $root;
 			}
 		}
-		return $best;
+		return null;
 	}
 
 	/**
-	 * The absolute path of an archive path under the roots (longest prefix wins).
+	 * The absolute path of an archive path under the roots (the root by root_of()).
 	 *
 	 * @param array<int, array<string, mixed>> $roots Roots.
 	 * @param string                           $p     Archive path.
 	 * @return string|null
 	 */
 	private static function source_of( array $roots, string $p ) {
-		$best = null;
-		$len  = -1;
-		foreach ( $roots as $root ) {
-			$prefix = (string) $root['prefix'];
-			if ( ( $p === $prefix || 0 === strpos( $p, $prefix . '/' ) ) && strlen( $prefix ) > $len ) {
-				$best = rtrim( (string) $root['path'], '/\\' ) . ( $p === $prefix ? '' : '/' . substr( $p, strlen( $prefix ) + 1 ) );
-				$len  = strlen( $prefix );
-			}
+		$root = self::root_of( $roots, $p );
+		if ( null === $root ) {
+			return null;
 		}
-		return $best;
+		$prefix = (string) $root['prefix'];
+		return rtrim( (string) $root['path'], '/\\' ) . ( $p === $prefix ? '' : '/' . substr( $p, strlen( $prefix ) + 1 ) );
 	}
 
 	/**

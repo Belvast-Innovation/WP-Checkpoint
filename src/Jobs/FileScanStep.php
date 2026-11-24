@@ -52,6 +52,13 @@ final class FileScanStep implements Step {
 	private $root_warnings;
 
 	/**
+	 * The groups that have no root, group => ScanRoots::ABSENT or ::UNREAD.
+	 *
+	 * @var array<string, string>
+	 */
+	private $unscanned = array();
+
+	/**
 	 * Whether roots and exclusions come from plan.json in the work
 	 * directory (the export job) instead of the constructor (tests).
 	 *
@@ -82,8 +89,10 @@ final class FileScanStep implements Step {
 	 * @param string[]                                                                        $root_warnings Warnings from ScanRoots::resolve().
 	 * @param int                                                                             $chunk_bytes   Content chunk size (bounds the largest indexable file).
 	 * @param callable|null                                                                   $clean         Text cleaner for where a root that is a link leads; null: not shown.
+	 * @param array<string, string>                                                           $unscanned     The groups ScanRoots::resolve() gave no root, with what is known of each (its "states").
 	 */
-	public function __construct( array $roots, Exclusions $exclusions, array $root_warnings = array(), int $chunk_bytes = Manifest::DEFAULT_CHUNK, $clean = null ) {
+	public function __construct( array $roots, Exclusions $exclusions, array $root_warnings = array(), int $chunk_bytes = Manifest::DEFAULT_CHUNK, $clean = null, array $unscanned = array() ) {
+		$this->unscanned     = $unscanned;
 		$this->roots         = $roots;
 		$this->exclusions    = $exclusions;
 		$this->root_warnings = $root_warnings;
@@ -130,6 +139,7 @@ final class FileScanStep implements Step {
 			$resolved            = ScanRoots::resolve( $groups, $context->storage_path() );
 			$this->roots         = $resolved['roots'];
 			$this->root_warnings = $resolved['warnings'];
+			$this->unscanned     = $resolved['states'];
 			$this->exclusions    = new Exclusions( isset( $plan['exclusions'] ) && is_array( $plan['exclusions'] ) ? array_map( 'strval', $plan['exclusions'] ) : array() );
 		}
 		$cursor  = $context->cursor();
@@ -250,9 +260,15 @@ final class FileScanStep implements Step {
 			'warnings'                => array_merge( $this->root_warnings, $state['warnings'], PathKey::normalization_available() ? array() : array( self::normalization_warning() ) ),
 			'normalization_available' => PathKey::normalization_available(),
 			'root_ids'                => isset( $state['root_ids'] ) && is_array( $state['root_ids'] ) ? $state['root_ids'] : array(),
+			'root_groups'             => isset( $state['root_groups'] ) && is_array( $state['root_groups'] ) ? $state['root_groups'] : array(),
+			// The most entries a listing of each listed group's own directory had (none: the group was empty).
+			'root_entries'            => isset( $state['root_entries'] ) && is_array( $state['root_entries'] ) ? $state['root_entries'] : array(),
+			// What is known of each group the backup was to hold: the scanner's word for the ones with a root, the
+			// resolver's for the ones without.
+			'group_states'            => ( isset( $state['group_states'] ) && is_array( $state['group_states'] ) ? $state['group_states'] : array() ) + $this->unscanned,
 			'exclusions'              => $this->exclusions->globs(),
 		);
-		$json    = wp_json_encode( $summary, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE );
+		$json = wp_json_encode( $summary, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE );
 		if ( ! is_string( $json ) || false === @file_put_contents( $path, $json ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- small file in the job's own work directory; failure is thrown.
 			throw new TransientFailure( 'The scan summary could not be written.' );
 		}

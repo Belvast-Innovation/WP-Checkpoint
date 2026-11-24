@@ -340,4 +340,36 @@ final class StagingLayoutTest extends TestCase {
 		$this->expectException( \InvalidArgumentException::class );
 		new StagingLayout( array( 'plugins' => '/srv' ), self::TOKEN, 7, self::RANDOM );
 	}
+
+	/**
+	 * The group a path is spelled into is read from the backup alone: what the manifest's count of each group's
+	 * files is compared with. map() also knows this site, and gives no place where spelled() still names a group.
+	 */
+	public function test_the_group_a_path_is_spelled_into_does_not_depend_on_this_site(): void {
+		$layout = self::standard();
+		$this->assertSame( 'plugins', $layout->spelled( 'wp-content/plugins/akismet/akismet.php' ) );
+		$this->assertSame( 'mu-plugins', $layout->spelled( 'wp-content/mu-plugins/loader.php' ) );
+		$this->assertSame( 'uploads', $layout->spelled( 'wp-content/uploads/2026/a.jpg' ) );
+		$this->assertSame( 'themes', $layout->spelled( 'wp-content/themes/x/style.css' ) );
+		$this->assertSame( 'other-content', $layout->spelled( 'wp-content/languages/de_DE.mo' ) );
+		$this->assertSame( 'other-content', $layout->spelled( 'wp-content/object-cache.php' ) );
+		$this->assertSame( 'other-content', $layout->spelled( 'wp-content/plugins' ), 'a file of that name in the content directory: the export lists it there' );
+		$this->assertSame( '', $layout->spelled( 'uploads/2026/a.jpg' ), 'outside wp-content' );
+		$this->assertSame( '', $layout->spelled( 'wp-content' ) );
+		$this->assertSame( '', $layout->spelled( 'wp-content/' ) );
+		$this->assertSame( '', $layout->spelled( 'wp-contents/plugins/a.php' ), 'a name that only starts alike' );
+
+		// Where map() gives no place for what it knows of this site, the spelling is the same.
+		$off = self::reading( '', array( 'languages' ) );
+		$this->assertNull( $off->map( 'wp-content/languages/de_DE.mo' ), 'the control: left out on this site' );
+		$this->assertSame( 'other-content', $off->spelled( 'wp-content/languages/de_DE.mo' ) );
+		$this->assertNull( $layout->map( 'wp-content/wp-checkpoint-abc/x' ), 'the control: not a name this site takes' );
+		$this->assertSame( 'other-content', $layout->spelled( 'wp-content/wp-checkpoint-abc/x' ) );
+
+		// Read under the backup's own name of the content directory, as map() reads it.
+		$app = self::reading( 'app' );
+		$this->assertSame( 'plugins', $app->spelled( 'app/plugins/a/a.php' ) );
+		$this->assertSame( 'other-content', $app->spelled( 'app/languages/x.mo' ) );
+		$this->assertSame( 'plugins', $app->map( 'app/plugins/a/a.php' )['group'], 'the control: map() reads the same' );
+	}
 }

@@ -288,6 +288,13 @@ final class FileScanner {
 				$this->leave( $state );
 				continue;
 			}
+			if ( '' === $frame['dir'] ) {
+				// The root's own directory was listed, and the most entries a listing of it had (it is listed again
+				// each time the scan comes back to it): with none in any listing, the group was empty. A directory
+				// that lost its entries while it was scanned did not have none.
+				$state['group_states'][ $root['group'] ] = ScanRoots::LISTED;
+				$state['root_entries'][ $root['group'] ] = max( count( $names ), (int) ( $state['root_entries'][ $root['group'] ] ?? 0 ) );
+			}
 			if ( '' === $frame['after'] ) {
 				++$state['counts']['directories'];
 				foreach ( PathKey::collisions( $names ) as $group ) {
@@ -334,6 +341,7 @@ final class FileScanner {
 	private function root_usable( array &$state, array $root ): bool {
 		if ( '' !== $root['refuse'] ) {
 			$this->warn( $state, 'unreadable', sprintf( 'The "%1$s" content directory was not scanned: %2$s (%3$s).', $root['group'], $root['refuse'], $root['prefix'] ), true );
+			$state['group_states'][ $root['group'] ] = ScanRoots::UNREAD;
 			return false;
 		}
 		$verdict = Links::root_verdict( $root['path'], $this->abspath, $root['skip'], $this->link_state, $root['hold'] );
@@ -342,10 +350,12 @@ final class FileScanner {
 		}
 		if ( '' !== $verdict['refusal'] ) {
 			$this->warn( $state, 'unreadable', sprintf( $verdict['link'] ? 'The "%1$s" content directory is a link and was not scanned: %2$s (%3$s).' : 'The "%1$s" content directory was not scanned: %2$s (%3$s).', $root['group'], Links::refusal_text( $verdict['refusal'], $verdict['link'] ), $root['prefix'] ), true );
+			$state['group_states'][ $root['group'] ] = ScanRoots::UNREAD;
 			return false;
 		}
 		if ( ! $verdict['link'] && ! is_dir( $root['path'] ) ) {
 			$this->warn( $state, 'unreadable', 'A content directory is missing and was not scanned: ' . $root['prefix'], true );
+			$state['group_states'][ $root['group'] ] = Paths::positively_gone( $root['path'] ) ? ScanRoots::ABSENT : ScanRoots::UNREAD;
 			return false;
 		}
 		if ( $verdict['link'] ) {
@@ -354,6 +364,10 @@ final class FileScanner {
 		}
 		// Where the root leads, for the pack step to see whether it still leads there (a hash, not a path).
 		$state['root_ids'][ $root['prefix'] ] = Links::fingerprint( $root['path'] );
+		// The group whose files are listed under this prefix, for the manifest step to count each group's files.
+		$state['root_groups'][ $root['prefix'] ] = $root['group'];
+		// Not read yet: listed when its own directory has been (scan_unit()).
+		$state['group_states'][ $root['group'] ] = ScanRoots::UNREAD;
 		return true;
 	}
 

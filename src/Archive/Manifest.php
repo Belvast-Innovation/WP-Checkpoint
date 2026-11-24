@@ -67,6 +67,15 @@ final class Manifest {
 	const MAX_FEATURES       = 100;
 	const MAX_TABLE_NAME     = 64;
 
+	/**
+	 * What a backup knows of a content group it names (files.groups.<group>.state): its directory was read (the
+	 * count is what it held); it was not there; it was not read. The writer's names are Files\ScanRoots's.
+	 */
+	const GROUP_LISTED = 'listed';
+	const GROUP_ABSENT = 'absent';
+	const GROUP_UNREAD = 'unread';
+	const GROUP_STATES = array( self::GROUP_LISTED, self::GROUP_ABSENT, self::GROUP_UNREAD );
+
 	const INTEGER                        = 'integer';
 	const INTEGER_TOO_LARGE_FOR_PLATFORM = 'too_large_for_platform';
 	const NOT_AN_INTEGER                 = 'not_an_integer';
@@ -243,8 +252,16 @@ final class Manifest {
 		$out['files'] = array(
 			'count' => self::int_field( $files, 'count', 'files', 0, self::MAX_BYTES ),
 			'bytes' => self::int_field( $files, 'bytes', 'files', 0, self::MAX_BYTES ),
-			'index' => self::content_entry( self::object_field( $files, 'index', 'files' ), 'files.index', $chunk_bytes, $paths, self::FILES_INDEX ),
 		);
+		if ( array_key_exists( 'groups', $files ) && self::groups_have_states( $files['groups'] ) ) {
+			// The counts of no group (a backup without files) say nothing and are not kept: written out again they
+			// would be an empty list, which is not the object this reads.
+			$counts = self::group_counts( self::object_field( $files, 'groups', 'files' ), $out['contents']['files'], $out['files']['count'] );
+			if ( array() !== $counts ) {
+				$out['files']['groups'] = $counts;
+			}
+		}
+		$out['files']['index'] = self::content_entry( self::object_field( $files, 'index', 'files' ), 'files.index', $chunk_bytes, $paths, self::FILES_INDEX );
 
 		$out['volumes'] = array();
 		foreach ( self::list_field( $data, 'volumes', '', self::MAX_VOLUMES ) as $i => $volume ) {
@@ -414,6 +431,117 @@ final class Manifest {
 			throw new ManifestError( self::path( $prefix, $key ), 'Not an ISO 8601 timestamp.' );
 		}
 		return $value;
+	}
+
+	/**
+	 * The count of each content group's files (files.groups): present, it names exactly the groups of
+	 * contents.files, each with a count, and the counts add up to files.count. Anything else rejects the manifest:
+	 * a count that says something else than the archive holds is found by the restore, which counts the files it
+	 * puts into each group; one that is not a count is not read as "no count".
+	 *
+	 * @param array<string, mixed> $groups The decoded object.
+	 * @param string[]             $names  contents.files.
+	 * @param int                  $total  files.count.
+	 * @return array<string, array{count: int, state: string}> In the order of contents.files.
+	 * @throws ManifestError When the object is not as described.
+	 */
+	private static function group_counts( array $groups, array $names, int $total ): array {
+		foreach ( array_keys( $groups ) as $key ) {
+			// A group's name as this format has them: nothing a JSON object's key turns into in PHP (a number), and not empty.
+			if ( 1 !== preg_match( '/\A[a-z][a-z0-9-]{0,63}\z/', (string) $key ) || ! in_array( (string) $key, $names, true ) ) {
+				throw new ManifestError( 'files.groups', 'Names a content group that contents.files does not.' );
+			}
+		}
+		$out = array();
+		$sum = 0;
+		foreach ( $names as $name ) {
+			if ( isset( $out[ $name ] ) ) {
+				throw new ManifestError( 'contents.files', 'Names a content group twice.' );
+			}
+			if ( ! array_key_exists( $name, $groups ) ) {
+				throw new ManifestError( 'files.groups', sprintf( 'Has no count for the "%s" content group.', $name ) );
+			}
+			$field = self::path( 'files.groups', $name );
+			if ( ! $groups[ $name ] instanceof \stdClass ) {
+				throw new ManifestError( $field, 'Not an object.' );
+			}
+			$group = get_object_vars( $groups[ $name ] );
+			$count = self::int_field( $group, 'count', $field, 0, self::MAX_BYTES );
+			// What the backup knows of the group: only "listed" says what it held, so only a listed group has files.
+			$state = self::enum_field( $group, 'state', $field, self::GROUP_STATES );
+			if ( $count > 0 && self::GROUP_LISTED !== $state ) {
+				throw new ManifestError( self::path( $field, 'count' ), 'A content group whose directory was not read has no files.' );
+			}
+			$out[ $name ] = array(
+				'count' => $count,
+				'state' => $state,
+			);
+			$sum         += $count;
+		}
+		if ( $sum !== $total ) {
+			throw new ManifestError( 'files.groups', 'The counts of the content groups do not add up to files.count.' );
+		}
+		return $out;
+	}
+
+	/**
+	 * Whether files.groups is one this version reads: not one whose groups all lack "state" (written before the
+	 * state was, by a version that was never released: read as an archive without the counts, since a count of
+	 * none does not say there whether the group was empty or not read). One in which some groups have it and
+	 * some do not is read, and refused for the ones that do not.
+	 *
+	 * @param mixed $groups The decoded files.groups.
+	 * @return bool
+	 */
+	private static function groups_have_states( $groups ): bool {
+		if ( ! $groups instanceof \stdClass ) {
+			return true; // Not an object: refused where it is read.
+		}
+		$any = false;
+		foreach ( get_object_vars( $groups ) as $group ) {
+			if ( ! $group instanceof \stdClass ) {
+				return true;
+			}
+			$any = true;
+			if ( property_exists( $group, 'state' ) ) {
+				return true;
+			}
+		}
+		return ! $any;
+	}
+
+	/**
+	 * What the manifest knows of each content group (GROUP_LISTED, GROUP_ABSENT, GROUP_UNREAD), or null when it
+	 * declares no counts.
+	 *
+	 * @return array<string, string>|null
+	 */
+	public function group_states_declared() {
+		if ( ! isset( $this->data['files']['groups'] ) ) {
+			return null;
+		}
+		$out = array();
+		foreach ( $this->data['files']['groups'] as $name => $group ) {
+			$out[ (string) $name ] = (string) $group['state'];
+		}
+		return $out;
+	}
+
+	/**
+	 * The count of each content group's files as the manifest declares it, or null when it declares none (an
+	 * archive written before the counts were).
+	 *
+	 * @return array<string, int>|null
+	 */
+	public function group_counts_declared() {
+		if ( ! isset( $this->data['files']['groups'] ) ) {
+			return null;
+		}
+		$out = array();
+		foreach ( $this->data['files']['groups'] as $name => $group ) {
+			$out[ (string) $name ] = (int) $group['count'];
+		}
+		return $out;
 	}
 
 	/**

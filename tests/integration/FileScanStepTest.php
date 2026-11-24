@@ -181,6 +181,7 @@ final class FileScanStepTest extends JobTestCase {
 		$this->assertStringEndsWith( '/shared/uploads).', $warning );
 		$this->assertStringNotContainsString( $this->root, $warning );
 		$this->assertSame( array( 'wp-content/uploads' => \WPCheckpoint\Files\Links::fingerprint( $shared ) ), $summary['root_ids'], 'the summary tells the pack step where the root led' );
+		$this->assertSame( array( 'wp-content/uploads' => 'uploads' ), $summary['root_groups'], 'and the manifest step which group\'s files are under the prefix' );
 		$log = (string) file_get_contents( $this->dirs->base() . '/' . $this->repo->find( $job->id )->log_path );
 		$this->assertStringContainsString( 'content directory is a link', $log, 'the control: the job log has the warning' );
 		$this->assertStringNotContainsString( $this->root, $log );

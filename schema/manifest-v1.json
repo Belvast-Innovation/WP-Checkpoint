@@ -261,6 +261,27 @@
         "bytes": {
           "$ref": "#/definitions/count"
         },
+        "groups": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "count"
+            ],
+            "properties": {
+              "count": {
+                "$ref": "#/definitions/count"
+              },
+              "state": {
+                "enum": [
+                  "listed",
+                  "absent",
+                  "unread"
+                ]
+              }
+            }
+          }
+        },
         "index": {
           "$ref": "#/definitions/content_entry"
         }

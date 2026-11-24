@@ -13,6 +13,7 @@ use WPCheckpoint\Archive\IndexAudit;
 use WPCheckpoint\Archive\Manifest;
 use WPCheckpoint\Archive\Packer;
 use WPCheckpoint\Archive\VerificationResult;
+use WPCheckpoint\Files\ScanRoots;
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- messages carry line numbers, table names and the verifier's cleaned report; the runner stores them through the redactor and the presenter cleans them before display.
 
@@ -172,7 +173,8 @@ final class ManifestStep implements Step {
 				'phase'    => 'audit',
 				'audit'    => array(
 					'database' => IndexAudit::database_start(),
-					'files'    => IndexAudit::files_start(),
+					// Decided with the first checkpoint: an audit an earlier version began goes on without the counts.
+					'files'    => IndexAudit::files_start( null !== self::root_groups( $work ) ),
 				),
 				'indexes'  => array(),
 				'mtime'    => 0,
@@ -347,11 +349,12 @@ final class ManifestStep implements Step {
 			// complete: the last line of defence behind the listing and the pre-flight checks.
 			throw new \RuntimeException( 'The backup was to contain the database, but no table was exported. It is stopped rather than finished without the database. If the database is meant to be left out, back up the files only (wp wpcheckpoint export --files-only).' );
 		}
+		$groups = (array) self::root_groups( $work );
 		while ( empty( $cursor['audit']['database']['done'] ) || empty( $cursor['audit']['files']['done'] ) ) {
 			if ( empty( $cursor['audit']['database']['done'] ) ) {
 				$cursor['audit']['database'] = IndexAudit::database_step( $work . DIRECTORY_SEPARATOR . Manifest::DATABASE_INDEX, $tables, $cursor['audit']['database'], $this->chunk_bytes );
 			} else {
-				$cursor['audit']['files'] = IndexAudit::files_step( $work . DIRECTORY_SEPARATOR . PackStep::PACKED_INDEX, $cursor['audit']['files'], $this->chunk_bytes );
+				$cursor['audit']['files'] = IndexAudit::files_step( $work . DIRECTORY_SEPARATOR . PackStep::PACKED_INDEX, $cursor['audit']['files'], $this->chunk_bytes, $groups );
 			}
 			$context->checkpoint( $cursor, 10, __( 'Auditing the indexes', 'wp-checkpoint' ) );
 			if ( $context->should_stop() ) {
@@ -361,6 +364,103 @@ final class ManifestStep implements Step {
 		$cursor['phase'] = 'hash';
 		$context->checkpoint( $cursor, 20, __( 'Indexes audited', 'wp-checkpoint' ) );
 		return null;
+	}
+
+	/**
+	 * The scan's roots, prefix => content group, or null when the scan summary does not record the group of every
+	 * root it listed files under (a scan an earlier version made, or began: the roots it entered are in root_ids
+	 * without a group), or what it knows of every one of those groups (group_states): the archive is then written
+	 * without the count of each group's files. Counting with some of the roots would count a root's files for the
+	 * root above it.
+	 *
+	 * @param string $work Work directory.
+	 * @return array<string, string>|null
+	 */
+	private static function root_groups( string $work ) {
+		$scanned = ExportPlan::exists( $work, FileScanStep::SUMMARY ) ? ExportPlan::read( $work, FileScanStep::SUMMARY ) : array();
+		if ( ! isset( $scanned['root_groups'], $scanned['root_ids'], $scanned['group_states'] ) || ! is_array( $scanned['root_groups'] ) || ! is_array( $scanned['root_ids'] ) || ! is_array( $scanned['group_states'] ) ) {
+			return null;
+		}
+		$with = array_map( 'strval', array_keys( $scanned['root_groups'] ) );
+		$all  = array_map( 'strval', array_keys( $scanned['root_ids'] ) );
+		sort( $with );
+		sort( $all );
+		if ( $with !== $all ) {
+			return null;
+		}
+		// And what the scan knows of every one of those groups (a scan an earlier state of this code began says it
+		// only of the roots it listed after that).
+		foreach ( $scanned['root_groups'] as $group ) {
+			if ( ! isset( $scanned['group_states'][ (string) $group ] ) ) {
+				return null;
+			}
+		}
+		return array_map( 'strval', $scanned['root_groups'] );
+	}
+
+	/**
+	 * What the scan knows of each group (ScanRoots::LISTED, ABSENT, UNREAD), from its summary.
+	 *
+	 * @param string $work Work directory.
+	 * @return array<string, string>
+	 */
+	private static function group_states( string $work ): array {
+		$scanned = ExportPlan::exists( $work, FileScanStep::SUMMARY ) ? ExportPlan::read( $work, FileScanStep::SUMMARY ) : array();
+		return isset( $scanned['group_states'] ) && is_array( $scanned['group_states'] ) ? array_map( 'strval', $scanned['group_states'] ) : array();
+	}
+
+	/**
+	 * The most entries a listing of each listed group's own directory had during the scan, from its summary.
+	 *
+	 * @param string $work Work directory.
+	 * @return array<string, int>
+	 */
+	private static function root_entries( string $work ): array {
+		$scanned = ExportPlan::exists( $work, FileScanStep::SUMMARY ) ? ExportPlan::read( $work, FileScanStep::SUMMARY ) : array();
+		// Only what is a count: anything else is "not said", which is not "no entry".
+		return isset( $scanned['root_entries'] ) && is_array( $scanned['root_entries'] ) ? array_filter( $scanned['root_entries'], 'is_int' ) : array();
+	}
+
+	/**
+	 * The manifest's files.groups: how many files of the archive each backed-up content group has, as the audit
+	 * counted them (a group without a file: 0). Nothing when the audit did not count by group, or no group is backed up.
+	 *
+	 * @param array<string, mixed>  $audit  The files audit's final state.
+	 * @param string[]              $groups The content groups backed up (the manifest's contents.files).
+	 * @param array<string, string> $states  What the scan knows of each group (the summary's group_states).
+	 * @param array<string, int>    $entries The most entries a listing of each listed group's own directory had (root_entries).
+	 * @return array<string, array<string, array{count: int, state: string}>> array( 'groups' => … ) or an empty array.
+	 * @throws \RuntimeException When the audit counted files for a group that is not backed up, or whose directory was not read.
+	 */
+	private static function group_counts( array $audit, array $groups, array $states, array $entries ): array {
+		if ( ! isset( $audit['groups'] ) || ! is_array( $audit['groups'] ) ) {
+			return array();
+		}
+		$other = array_diff( array_map( 'strval', array_keys( $audit['groups'] ) ), $groups );
+		if ( array() !== $other ) {
+			throw new \RuntimeException( sprintf( 'The files index holds files of the "%s" content group, which is not part of this backup; the archive cannot be described.', (string) reset( $other ) ) );
+		}
+		$out = array();
+		foreach ( $groups as $group ) {
+			$count = isset( $audit['groups'][ $group ] ) ? (int) $audit['groups'][ $group ] : 0;
+			// What the scan knows of the group; nothing known is "not read", never "empty".
+			$state = isset( $states[ $group ] ) && in_array( $states[ $group ], ScanRoots::STATES, true ) ? (string) $states[ $group ] : ScanRoots::UNREAD;
+			// Read, and no file of it in the archive, although its directory had entries (left out by a pattern or
+			// in the review, not readable, gone before they were packed, or directories only): the archive does not
+			// say what the group held. "Listed" with no file is said only of a directory that had no entry.
+			if ( 0 === $count && ScanRoots::LISTED === $state && 0 !== (int) ( $entries[ $group ] ?? -1 ) ) {
+				$state = ScanRoots::UNREAD;
+			}
+			if ( $count > 0 && ScanRoots::LISTED !== $state ) {
+				throw new \RuntimeException( sprintf( 'The files index holds files of the "%s" content group, whose directory the scan did not read; the archive cannot be described.', (string) $group ) );
+			}
+			$out[ (string) $group ] = array(
+				'count' => $count,
+				'state' => $state,
+			);
+		}
+		// A backup of no group has nothing to count (and an empty list is not the object the manifest's reader takes).
+		return array() === $out ? array() : array( 'groups' => $out );
 	}
 
 	/**
@@ -608,10 +708,13 @@ final class ManifestStep implements Step {
 				isset( $database['exported'] ) && is_array( $database['exported'] ) ? array( 'exported' => $database['exported'] ) : array(),
 				array( 'tables' => $tables )
 			),
-			'files'             => array(
-				'count' => (int) $cursor['audit']['files']['count'],
-				'bytes' => (int) $cursor['audit']['files']['bytes'],
-				'index' => $this->content_entry( $cursor, 'files', Manifest::FILES_INDEX ),
+			'files'             => array_merge(
+				array(
+					'count' => (int) $cursor['audit']['files']['count'],
+					'bytes' => (int) $cursor['audit']['files']['bytes'],
+				),
+				self::group_counts( $cursor['audit']['files'], $active['groups'], self::group_states( $work ), self::root_entries( $work ) ),
+				array( 'index' => $this->content_entry( $cursor, 'files', Manifest::FILES_INDEX ) )
 			),
 			'volumes'           => $packer->volume_entries(),
 			'embedded'          => $embedded,

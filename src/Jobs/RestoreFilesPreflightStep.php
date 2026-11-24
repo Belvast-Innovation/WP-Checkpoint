@@ -127,6 +127,11 @@ final class RestoreFilesPreflightStep implements Step {
 	const RECORD_KEPT    = 'groups_kept';
 	const RECORD_SKIPPED = 'paths_not_restored';
 	const RECORD_OTHER   = 'other_content_restored';
+	/**
+	 * The groups whose directory held something and is replaced by an empty one because the backup read the
+	 * group's directory and counts no file for it (their names, joined by commas).
+	 */
+	const RECORD_EMPTIED = 'groups_emptied';
 
 	/**
 	 * Injected parts (tests): "directories" function(): array<string, string> (group => live directory, resolved
@@ -204,9 +209,9 @@ final class RestoreFilesPreflightStep implements Step {
 			$cursor = self::index_start( $cursor, $staging );
 			$context->checkpoint( $cursor, 65, __( 'Reading the backup\'s files', 'wp-checkpoint' ) );
 		}
-		if ( in_array( $cursor['phase'], array( 'index', 'clashes', 'space' ), true ) && ! isset( $cursor['mapped'] ) ) {
+		if ( in_array( $cursor['phase'], array( 'index', 'clashes', 'space' ), true ) && ( ! isset( $cursor['mapped'] ) || ! isset( $cursor[ 'index' === $cursor['phase'] ? 'spelled' : 'counted' ] ) ) ) {
 			// A cursor an earlier version wrote: it did not count the files of each group, which the last phase
-			// decides by. The index is read again from its start.
+			// decides by, or did not compare the counts with the manifest's. The index is read again from its start.
 			$cursor = self::index_start( $cursor, $staging );
 			$context->checkpoint( $cursor, 65, __( 'Reading the backup\'s files', 'wp-checkpoint' ) );
 		}
@@ -470,9 +475,12 @@ final class RestoreFilesPreflightStep implements Step {
 					}
 					$read += strlen( $text );
 					++$lines;
-					$line    = self::parse( $text, $manifest );
-					$as_read = $layout->canonical( $line['p'] );
-					$raw     = self::top_entry( $as_read );
+					$line = self::parse( $text, $manifest );
+					// By the backup's spelling alone, for the manifest's count of each group's files ('' for no group).
+					$spelled                       = $layout->spelled( $line['p'] );
+					$cursor['spelled'][ $spelled ] = (int) ( $cursor['spelled'][ $spelled ] ?? 0 ) + 1;
+					$as_read                       = $layout->canonical( $line['p'] );
+					$raw                           = self::top_entry( $as_read );
 					if ( '' !== $raw && $raw !== $prev['raw'] ) {
 						$this->check_storage_entry( $layout, $raw, array_map( 'strval', (array) $staging['storage'] ) );
 					}
@@ -578,6 +586,7 @@ final class RestoreFilesPreflightStep implements Step {
 		if ( (int) $cursor['offset'] !== (int) $spec['bytes'] ) {
 			throw new WorkLost( 'The files index the check extracted ended before its recorded size.' );
 		}
+		$counted = self::compare_counts( $manifest->group_counts_declared(), (array) $cursor['spelled'] );
 		if ( (int) $cursor['count'] > 0 ) {
 			$context->logger()->warning(
 				'Paths of the backup belong to no content group of this site; the restore asks whether to go on without them',
@@ -609,6 +618,7 @@ final class RestoreFilesPreflightStep implements Step {
 			'bytes'   => $cursor['bytes'],
 			'count'   => (int) $cursor['count'],
 			'mapped'  => $cursor['mapped'],
+			'counted' => $counted ? 1 : 0,
 		);
 		$context->checkpoint( $cursor, 67, __( 'Checking the backup\'s file names', 'wp-checkpoint' ) );
 		return null;
@@ -704,8 +714,38 @@ final class RestoreFilesPreflightStep implements Step {
 			'records'  => 0,
 			'mapped'   => array_fill_keys( array_values( array_diff( StagingLayout::GROUPS, array( StagingLayout::OTHER ) ) ), 0 ),
 			'reread'   => array(), // Group => how many of its files were under the backup's own name of the content directory.
+			'spelled'  => array(), // Group ('' for none) => how many paths the backup spells into it (StagingLayout::spelled()).
 			'bytes'    => array_fill( 0, count( $staging['parents'] ), 0.0 ),
 		);
+	}
+
+	/**
+	 * Hold the files the backup spells into each group to the count its manifest declares for the group
+	 * (Manifest::group_counts_declared()). The export counts a group's files by the directory it read them from;
+	 * the restore puts a path into a group by its spelling. Where the two disagree the restore would put files
+	 * into another group than they came from, or leave them out, so it fails here, before anything is staged.
+	 * The counts are there to find that, not to find a manifest somebody changed: one without them is restored
+	 * as an archive written before they were.
+	 *
+	 * @param array<string, int>|null $declared The manifest's counts, or null when it has none.
+	 * @param array<string, mixed>    $spelled  Group ('' for none) => paths the backup spells into it.
+	 * @return bool Whether the manifest declares counts (they agree).
+	 * @throws CannotStage When a count differs.
+	 */
+	private static function compare_counts( $declared, array $spelled ): bool {
+		if ( null === $declared ) {
+			return false;
+		}
+		// Every group the manifest counts: its counts add up to the number of files (Manifest), which the check of
+		// the archive holds the files index to, so a path spelled into no group, or into one that is not counted,
+		// leaves a counted group short.
+		foreach ( $declared as $group => $says ) {
+			$found = (int) ( $spelled[ $group ] ?? 0 );
+			if ( (int) $says !== $found ) {
+				throw new CannotStage( sprintf( 'The backup records %1$d files for its "%2$s" content group, and its paths spell %3$d as files of that group. Where the two differ the restore would put files into the wrong directory or leave them out, so it stopped before it changed anything. (The usual reason: a directory of the site the backup was made on is not where this version of the restore reads it from the paths.) Restore by hand: the backup is a standard zip archive whose files and database (as SQL) can be restored without WP Checkpoint.', (int) $says, (string) $group, $found ) );
+			}
+		}
+		return true;
 	}
 
 	/**
@@ -722,11 +762,12 @@ final class RestoreFilesPreflightStep implements Step {
 		$b = (int) $cursor['bucket'];
 		if ( $b >= NameClashes::BUCKETS ) {
 			$cursor = array(
-				'phase'  => 'space',
-				'fs'     => $cursor['fs'],
-				'bytes'  => $cursor['bytes'],
-				'count'  => (int) $cursor['count'],
-				'mapped' => $cursor['mapped'],
+				'phase'   => 'space',
+				'fs'      => $cursor['fs'],
+				'bytes'   => $cursor['bytes'],
+				'count'   => (int) $cursor['count'],
+				'mapped'  => $cursor['mapped'],
+				'counted' => (int) $cursor['counted'],
 			);
 			$context->checkpoint( $cursor, 69, __( 'Checking the free space', 'wp-checkpoint' ) );
 			return $cursor;
@@ -835,9 +876,30 @@ final class RestoreFilesPreflightStep implements Step {
 				);
 			}
 		}
-		$empty = $this->empty_groups( $staging, (array) ( $cursor['mapped'] ?? array() ) );
-		$id    = self::EMPTY_QUESTION . '_' . substr( hash( 'sha256', implode( ',', $empty ) ), 0, 16 ); // An answer holds for these groups.
-		$keep  = array();
+		$empty   = $this->empty_groups( $staging, (array) ( $cursor['mapped'] ?? array() ) );
+		$emptied = array();
+		$states  = array();
+		if ( 1 === (int) ( $cursor['counted'] ?? 0 ) ) {
+			// What the backup knows of each group (its manifest): only of one whose directory it read does a count
+			// of no file say the group was empty. Such a group is not asked about; it is said when the restore
+			// ends. One that was not there, or not read, is asked about as in a backup without the counts.
+			$states = (array) RestorePreflightStep::manifest( $context->work_path() )->group_states_declared();
+			$all    = $empty;
+			foreach ( $all as $group ) {
+				if ( Manifest::GROUP_LISTED === ( $states[ $group ] ?? '' ) ) {
+					$emptied[] = $group;
+				}
+			}
+			$empty = array_values( array_diff( $all, $emptied ) );
+			// Unless an earlier version asked about them all and was told to keep them: that answer stands.
+			$asked = self::EMPTY_QUESTION . '_' . substr( hash( 'sha256', implode( ',', $all ) ), 0, 16 );
+			if ( array() !== $emptied && 'keep' === ( $answers[ $asked ] ?? null ) ) {
+				$empty   = $all;
+				$emptied = array();
+			}
+		}
+		$id   = self::EMPTY_QUESTION . '_' . substr( hash( 'sha256', implode( ',', $empty ) ), 0, 16 ); // An answer holds for these groups.
+		$keep = array();
 		if ( array() !== $empty ) {
 			$answer = $answers[ $id ] ?? null;
 			if ( 'keep' === $answer ) {
@@ -851,6 +913,8 @@ final class RestoreFilesPreflightStep implements Step {
 							'id'       => $id,
 							'groups'   => $empty,
 							'unmapped' => $unmapped,
+							// What the backup's manifest knows of each (none for a backup without the counts).
+							'states'   => array_intersect_key( $states, array_flip( $empty ) ),
 						)
 					);
 				} catch ( \RuntimeException $e ) {
@@ -915,7 +979,8 @@ final class RestoreFilesPreflightStep implements Step {
 		// final check looks at their directories once more (SwapCheckStep).
 		$unasked = array();
 		foreach ( array_diff( $staged, array( StagingLayout::OTHER ), $empty ) as $group ) {
-			if ( 0 === (int) ( $cursor['mapped'][ $group ] ?? 0 ) ) {
+			// Not a group the backup read and found empty: its directory is replaced whatever it holds.
+			if ( 0 === (int) ( $cursor['mapped'][ $group ] ?? 0 ) && Manifest::GROUP_LISTED !== ( $states[ $group ] ?? '' ) ) {
 				$unasked[] = $group;
 			}
 		}
@@ -940,7 +1005,11 @@ final class RestoreFilesPreflightStep implements Step {
 			$context->logger()->warning( 'A content group\'s directory is replaced by an empty one, as chosen: the backup lists no file for it', array( 'group' => $group ) );
 		}
 		// What the restore says at its end (SwapStep::completed()).
+		foreach ( array_intersect( $emptied, $staged ) as $group ) {
+			$context->logger()->warning( 'A content group\'s directory is replaced by an empty one: the backup\'s manifest counts no file for it', array( 'group' => $group ) );
+		}
 		$context->record( self::RECORD_KEPT, implode( ',', $keep ) );
+		$context->record( self::RECORD_EMPTIED, implode( ',', array_values( array_intersect( $emptied, $staged ) ) ) );
 		$context->record( self::RECORD_SKIPPED, $unmapped );
 		$context->record( self::RECORD_OTHER, in_array( StagingLayout::OTHER, $staged, true ) ? 1 : 0 );
 		return StepResult::done( __( 'The backup\'s files can be staged here', 'wp-checkpoint' ) );
@@ -951,7 +1020,8 @@ final class RestoreFilesPreflightStep implements Step {
 	 * (or kept already, when this is a replay), no file of the backup mapped into it, and its directory on this
 	 * site holds an entry (for plugins: one besides this plugin's own directory, which the restore stages a copy
 	 * of whatever the backup holds). By positive evidence only: a directory that is there and cannot be listed
-	 * counts as holding something (it is asked about), one that is positively not there does not.
+	 * counts as holding something, one that is positively not there does not. What is done about them is the
+	 * caller's: asked about, or (where the backup read the group's directory and found it without an entry) replaced and said.
 	 *
 	 * @param array<string, mixed> $staging Staging file.
 	 * @param array<string, mixed> $mapped  Group => files of the backup mapped into it.

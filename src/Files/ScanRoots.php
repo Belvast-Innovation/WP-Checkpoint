@@ -31,7 +31,7 @@ final class ScanRoots {
 	 * @param string[]              $groups      Content groups (subset of GROUPS).
 	 * @param string                $storage_dir The plugin's storage directory, never scanned.
 	 * @param array<string, string> $overrides   Group => absolute directory (tests); defaults come from WordPress.
-	 * @return array{roots: array<int, array{group: string, path: string, prefix: string, skip: string[], also_skip: string[], collide: string[], hold: string[], refuse: string}>, warnings: string[]}
+	 * @return array{roots: array<int, array{group: string, path: string, prefix: string, skip: string[], also_skip: string[], collide: string[], hold: string[], refuse: string}>, warnings: string[], states: array<string, string>}
 	 */
 	public static function resolve( array $groups, string $storage_dir = '', array $overrides = array() ): array {
 		return self::resolve_dirs( array_merge( self::wordpress_directories(), $overrides ), $groups, $storage_dir );
@@ -44,12 +44,13 @@ final class ScanRoots {
 	 * @param array<string, string> $dirs        Directories.
 	 * @param string[]              $groups      Content groups (subset of GROUPS).
 	 * @param string                $storage_dir The plugin's storage directory, never scanned.
-	 * @return array{roots: array<int, array{group: string, path: string, prefix: string, skip: string[], also_skip: string[], collide: string[], hold: string[], refuse: string}>, warnings: string[]}
+	 * @return array{roots: array<int, array{group: string, path: string, prefix: string, skip: string[], also_skip: string[], collide: string[], hold: string[], refuse: string}>, warnings: string[], states: array<string, string>}
 	 */
 	public static function resolve_dirs( array $dirs, array $groups, string $storage_dir = '' ): array {
 		$warnings = array();
 		$chosen   = array();
 		$others   = array();
+		$states   = array();
 		foreach ( self::GROUPS as $group ) {
 			$path = rtrim( Paths::normalize( (string) $dirs[ $group ] ), '/' );
 			if ( ! in_array( $group, $groups, true ) ) {
@@ -60,6 +61,8 @@ final class ScanRoots {
 			}
 			if ( '' === $path || ! is_dir( $path ) ) {
 				$warnings[] = 'The directory of the "' . $group . '" group does not exist and was not backed up.';
+				// Not there by positive evidence, or not read: which of the two the backup's manifest says of the group.
+				$states[ $group ] = Paths::positively_gone( $path ) ? self::ABSENT : self::UNREAD;
 				continue;
 			}
 			$chosen[ $group ] = $path;
@@ -108,6 +111,8 @@ final class ScanRoots {
 			foreach ( $kept as $other => $unused ) {
 				if ( ! isset( $refused[ $other ] ) && $real[ $other ] === $real[ $group ] ) {
 					$warnings[] = 'The "' . $group . '" directory is the same directory as the "' . $other . '" directory and is backed up as part of it.';
+					// Its files are in the backup as the other group's: nothing was read as this group's.
+					$states[ $group ] = self::UNREAD;
 					continue 2;
 				}
 			}
@@ -168,8 +173,43 @@ final class ScanRoots {
 		}
 		return array(
 			'roots'    => $roots,
+			'states'   => $states,
 			'warnings' => $warnings,
 		);
+	}
+
+	/**
+	 * What a backup knows of a content group it was to hold (the manifest's files.groups.<group>.state): its
+	 * directory was read (LISTED: the files counted for it are the files it had; with none counted, the directory
+	 * had no entry at all); it was not there, by positive evidence (ABSENT); or the backup does not say what it
+	 * held (UNREAD: refused, not listable, backed up as part of another group, whether it was there could not be
+	 * told, or it had entries and the archive has no file of it: left out, unreadable, directories only). Only
+	 * LISTED says what the group held.
+	 */
+	const LISTED = 'listed';
+	const ABSENT = 'absent';
+	const UNREAD = 'unread';
+	const STATES = array( self::LISTED, self::ABSENT, self::UNREAD );
+
+	/**
+	 * The prefix an archive path is under: the longest of the prefixes that is the path or holds it ('' when none
+	 * does). The one rule by which a path of the files index belongs to a root, and so to a content group: the
+	 * pack step finds the directory a line is read from by it, and the manifest step counts each group's files by
+	 * it.
+	 *
+	 * @param string[] $prefixes Root prefixes (no trailing slash).
+	 * @param string   $p        Archive path.
+	 * @return string
+	 */
+	public static function prefix_of( array $prefixes, string $p ): string {
+		$best = '';
+		foreach ( $prefixes as $candidate ) {
+			$candidate = (string) $candidate;
+			if ( ( $p === $candidate || 0 === strpos( $p, $candidate . '/' ) ) && strlen( $candidate ) > strlen( $best ) ) {
+				$best = $candidate;
+			}
+		}
+		return $best;
 	}
 
 	/**
@@ -212,21 +252,13 @@ final class ScanRoots {
 	/**
 	 * Each content group's live directory as WordPress reports it, normalised but not resolved: a directory that is
 	 * a link is named by the link (the restore judges each by where it finally is, LinkedTargets).
-	 * On a multisite network, uploads is the main site's upload directory, as in site_directories().
+	 * On a multisite network they are the main site's, whichever site the request runs for (wordpress_directories()).
 	 *
 	 * @return array<string, string>
 	 */
 	public static function site_directories_as_given(): array {
 		$dirs = self::wordpress_directories();
-		if ( function_exists( 'is_multisite' ) && is_multisite() && ! is_main_site() ) {
-			switch_to_blog( get_main_site_id() );
-			$uploads = wp_upload_dir( null, false );
-			restore_current_blog();
-			if ( isset( $uploads['basedir'] ) ) {
-				$dirs['uploads'] = Paths::normalize( (string) $uploads['basedir'] );
-			}
-		}
-		$out = array();
+		$out  = array();
 		foreach ( self::GROUPS as $group ) {
 			$out[ $group ] = rtrim( $dirs[ $group ], '/' );
 		}
@@ -255,13 +287,27 @@ final class ScanRoots {
 	 * @return array<string, string>
 	 */
 	private static function wordpress_directories(): array {
-		$uploads = function_exists( 'wp_upload_dir' ) ? wp_upload_dir( null, false ) : array();
+		// The network's directories, whichever of its sites the request runs for: WordPress answers for the current
+		// site (another site's uploads are "uploads/sites/N", inside the main site's; a site's own theme root
+		// setting or filter), and a backup, like a restore, is of the network. Asked as the main site.
+		$switched = function_exists( 'is_multisite' ) && is_multisite() && ! is_main_site();
+		if ( $switched ) {
+			switch_to_blog( get_main_site_id() );
+		}
+		try {
+			$uploads = function_exists( 'wp_upload_dir' ) ? wp_upload_dir( null, false ) : array();
+			$themes  = function_exists( 'get_theme_root' ) ? Paths::normalize( get_theme_root() ) : Paths::normalize( WP_CONTENT_DIR ) . '/themes';
+		} finally {
+			if ( $switched ) {
+				restore_current_blog();
+			}
+		}
 		return array(
 			'abspath'       => Paths::normalize( ABSPATH ),
 			'content'       => Paths::normalize( WP_CONTENT_DIR ),
 			'plugins'       => defined( 'WP_PLUGIN_DIR' ) ? Paths::normalize( WP_PLUGIN_DIR ) : Paths::normalize( WP_CONTENT_DIR ) . '/plugins',
 			'mu-plugins'    => defined( 'WPMU_PLUGIN_DIR' ) ? Paths::normalize( WPMU_PLUGIN_DIR ) : Paths::normalize( WP_CONTENT_DIR ) . '/mu-plugins',
-			'themes'        => function_exists( 'get_theme_root' ) ? Paths::normalize( get_theme_root() ) : Paths::normalize( WP_CONTENT_DIR ) . '/themes',
+			'themes'        => $themes,
 			'uploads'       => isset( $uploads['basedir'] ) ? Paths::normalize( (string) $uploads['basedir'] ) : Paths::normalize( WP_CONTENT_DIR ) . '/uploads',
 			'other-content' => Paths::normalize( WP_CONTENT_DIR ),
 		);

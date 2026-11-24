@@ -274,6 +274,23 @@ final class StagingLayout {
 	}
 
 	/**
+	 * The content group a backup path is spelled into, by the backup alone: the same reading as map()'s (the
+	 * path under "wp-content/", after canonical()), without what map() knows of this site (an entry left out, a
+	 * name this site cannot take as other content). '' when the spelling is of no group. What the count of each
+	 * group's files in the manifest is compared with: that count says what the archive holds, not where it can go.
+	 *
+	 * @param string $path Backup path.
+	 * @return string
+	 */
+	public function spelled( string $path ): string {
+		$parts = explode( '/', $this->canonical( $path ) );
+		if ( count( $parts ) < 2 || self::CONTENT !== $parts[0] || '' === $parts[ count( $parts ) - 1 ] ) {
+			return '';
+		}
+		return in_array( $parts[1], array( 'plugins', 'themes', 'uploads', 'mu-plugins' ), true ) && count( $parts ) >= 3 ? $parts[1] : self::OTHER;
+	}
+
+	/**
 	 * Where a backup path goes: its group, the path inside the group, the live target and the staged file.
 	 * Null when it belongs to no group (see the class description; other_content_entry()), or has no name
 	 * inside its group.

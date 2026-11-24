@@ -121,4 +121,88 @@ final class IndexAuditTest extends TestCase {
 			$this->assertStringContainsString( 'declares no chunks but bytes or a hash', $e->getMessage() );
 		}
 	}
+
+	/**
+	 * @param string[] $paths Archive paths.
+	 */
+	private function files_index( array $paths ): string {
+		$h     = str_repeat( 'ab', 32 );
+		$lines = array();
+		foreach ( $paths as $p ) {
+			$lines[] = array( 'p' => $p, 'b' => 3, 'm' => 1, 'h' => $h );
+		}
+		return $this->lines( 'files.index.jsonl', $lines );
+	}
+
+	/**
+	 * @param array<string, mixed>  $state  State.
+	 * @param array<string, string> $groups Prefix => group.
+	 * @return array<string, mixed> The final state.
+	 */
+	private function audit( string $path, array $state, array $groups, int &$units = 0 ): array {
+		while ( empty( $state['done'] ) ) {
+			$state = IndexAudit::files_step( $path, $state, 1048576, $groups );
+			++$units;
+			// As the cursor keeps it between units.
+			$state = json_decode( (string) json_encode( $state ), true );
+		}
+		return $state;
+	}
+
+	public function test_the_files_of_each_group_are_counted_by_the_root_the_scan_listed_them_under(): void {
+		$groups = array(
+			'wp-content'            => 'other-content',
+			'wp-content/plugins'    => 'plugins',
+			'wp-content/app-mu'     => 'mu-plugins', // A directory with a name of its own.
+			'uploads'               => 'uploads',    // In the WordPress directory.
+		);
+		$path   = $this->files_index( array(
+			'wp-content/plugins/a/a.php',
+			'wp-content/plugins/b.php',
+			'wp-content/plugins-extra/c.php', // A name that only starts alike: the content directory's.
+			'wp-content/app-mu/loader.php',
+			'wp-content/languages/de.mo',
+			'wp-content/index.php',
+			'uploads/2026/a.jpg',
+			'uploads/2026/b.jpg',
+			'uploads/2026/c.jpg',
+		) );
+		$state  = $this->audit( $path, IndexAudit::files_start( true ), $groups );
+		$this->assertSame( 9, $state['count'] );
+		$this->assertSame( array( 'plugins' => 2, 'other-content' => 3, 'mu-plugins' => 1, 'uploads' => 3 ), $state['groups'] );
+		$this->assertSame( $state['count'], array_sum( $state['groups'] ) );
+
+		// The control: the same index, audited without the counts (a state an earlier version began), says nothing of groups.
+		$plain = $this->audit( $path, IndexAudit::files_start(), $groups );
+		$this->assertSame( 9, $plain['count'] );
+		$this->assertArrayNotHasKey( 'groups', $plain );
+	}
+
+	public function test_a_line_under_no_root_of_the_scan_stops_the_audit_that_counts_by_group(): void {
+		$path = $this->files_index( array( 'wp-content/plugins/a.php', 'uploads/2026/a.jpg' ) );
+		try {
+			$this->audit( $path, IndexAudit::files_start( true ), array( 'wp-content/plugins' => 'plugins' ) );
+			$this->fail( 'counted a line under no root' );
+		} catch ( \RuntimeException $e ) {
+			$this->assertStringContainsString( 'line 2 is under no content directory the scan listed', $e->getMessage() );
+		}
+		// The control: without the counts the same index is audited to its end.
+		$this->assertSame( 2, $this->audit( $path, IndexAudit::files_start(), array( 'wp-content/plugins' => 'plugins' ) )['count'] );
+	}
+
+	public function test_the_counts_are_the_same_however_many_units_the_audit_takes(): void {
+		$paths = array();
+		for ( $i = 0; $i < IndexAudit::LINES_PER_UNIT + 7; $i++ ) {
+			$paths[] = ( 0 === $i % 3 ? 'wp-content/uploads/' : ( 1 === $i % 3 ? 'wp-content/plugins/' : 'wp-content/' ) ) . 'f' . $i;
+		}
+		$groups = array( 'wp-content' => 'other-content', 'wp-content/plugins' => 'plugins', 'wp-content/uploads' => 'uploads' );
+		$units  = 0;
+		$state  = $this->audit( $this->files_index( $paths ), IndexAudit::files_start( true ), $groups, $units );
+		$this->assertGreaterThan( 1, $units, 'the index takes more than one unit' );
+		$expect = array( 'uploads' => 0, 'plugins' => 0, 'other-content' => 0 );
+		foreach ( $paths as $i => $p ) {
+			++$expect[ 0 === $i % 3 ? 'uploads' : ( 1 === $i % 3 ? 'plugins' : 'other-content' ) ];
+		}
+		$this->assertSame( $expect, $state['groups'] );
+	}
 }

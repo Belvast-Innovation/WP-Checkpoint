@@ -26,6 +26,7 @@ final class UploadsLeftovers {
 	const UNREAD = array(
 		'tests/Fixtures/UploadsLeftovers.php'         => array( 1, 'dir(): the uploads directory itself, which this class reads' ),
 		'tests/integration/DeleterProtectionTest.php' => array( 1, 'the Deleter\'s refusal of the uploads directory itself' ),
+		'tests/integration/ExportJobTest.php'         => array( 2, 'the main site\'s uploads directory and a sub-site\'s, compared (the control of the export run for a sub-site), nothing created (the second argument is false)' ),
 		'tests/integration/RestoreGroupGuardTest.php' => array( 4, 'WordPress\'s own answer read again after the upload_path option changed (its third argument), nothing created (its second is false)' ),
 		'tests/integration/StagingResidueTest.php'    => array( 1, 'a site\'s own uploads directory, compared with the main site\'s' ),
 		'tests/integration/StorageTest.php'           => array( 3, 'the storage location\'s refusal of the uploads directories, read, not written' ),
