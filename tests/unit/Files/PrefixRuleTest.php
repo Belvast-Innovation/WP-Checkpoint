@@ -64,6 +64,11 @@ final class PrefixRuleTest extends TestCase {
 			);
 			$resolved = ScanRoots::resolve_dirs( $dirs, ScanRoots::GROUPS );
 			$this->assertSame( array( 'mu-plugins' => 'absent', 'themes' => 'unread' ), $resolved['states'] );
+			// Something that is no directory is where the group's should be: it is not "not there".
+			file_put_contents( $dirs['mu-plugins'], 'a file' );
+			$this->assertSame( 'unread', ScanRoots::resolve_dirs( $dirs, ScanRoots::GROUPS )['states']['mu-plugins'] );
+			rename( $dirs['mu-plugins'], $site . '/the-file-moved-away' );
+			$this->assertSame( 'unread', ScanRoots::resolve_dirs( array( 'mu-plugins' => '' ) + $dirs, ScanRoots::GROUPS )['states']['mu-plugins'], 'no directory named at all' );
 			$this->assertSame( array( 'plugins', 'uploads', 'other-content' ), array_column( $resolved['roots'], 'group' ), 'the control: the others have their roots' );
 			// The control: every group with a directory of its own has a root, and nothing is said of it here.
 			$dirs['themes'] = $site . '/wp-content/themes';
