@@ -61,6 +61,11 @@
 # directory's wpcheckpoint-test-output, which .wp-env.json maps to ../wp-checkpoint-test-output beside the plugin's
 # repository. A relative output path with no such directory stops the run (status 1). Inputs (--bootstrap, test paths)
 # are still named as from the plugin's directory.
+# git's own environment is not the tests': started from a hook, they would inherit GIT_DIR, and a git command of a
+# test would act on the hook's repository, whatever directory it ran in (tests/Fixtures/SandboxGit.php).
+for name in $(env | sed -n 's/^\(GIT_[A-Za-z0-9_]*\)=.*/\1/p'); do
+	unset "$name"
+done
 PLUGIN=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 OUTPUT=${WPCHECKPOINT_TEST_OUTPUT_DIR:-$PLUGIN/../../../wpcheckpoint-test-output}
 PHPUNIT=${WPCHECKPOINT_TEST_PHPUNIT:-$PLUGIN/vendor/bin/phpunit}

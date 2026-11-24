@@ -32,7 +32,7 @@ final class IntegrationScriptTest extends TestCase {
 			. 'if ( getenv( "FAKE_PID" ) ) { file_put_contents( getenv( "FAKE_PID" ), (string) getmypid() ); }' . "\n"
 			. 'if ( getenv( "FAKE_WAIT" ) ) { $t = time(); while ( ! file_exists( getenv( "FAKE_WAIT" ) ) && time() - $t < 30 ) { usleep( 20000 ); } }' . "\n"
 			. 'if ( getenv( "FAKE_TEMP" ) ) { mkdir( getenv( "TMPDIR" ) . "/wpc-left-in-temp" ); file_put_contents( getenv( "TMPDIR" ) . "/wpc-left-in-temp/x", "x" ); }' . "\n"
-			. 'file_put_contents( getenv( "FAKE_RECORD" ), json_encode( array( "cwd" => getcwd(), "argv" => array_slice( $argv, 1 ), "suite" => getenv( "WPCHECKPOINT_TEST_SUITE" ), "tmpdir" => getenv( "TMPDIR" ), "run_tmp" => getenv( "WPCHECKPOINT_TEST_RUN_TMP" ), "left_in_temp" => is_file( getenv( "TMPDIR" ) . "/wpc-left-in-temp/x" ), "run_id" => getenv( "WPCHECKPOINT_TEST_RUN_ID" ), "stale_run_id" => getenv( "WPCHECKPOINT_TEST_STALE_RUN_ID" ) ) ) );' . "\n"
+			. 'file_put_contents( getenv( "FAKE_RECORD" ), json_encode( array( "cwd" => getcwd(), "argv" => array_slice( $argv, 1 ), "suite" => getenv( "WPCHECKPOINT_TEST_SUITE" ), "tmpdir" => getenv( "TMPDIR" ), "run_tmp" => getenv( "WPCHECKPOINT_TEST_RUN_TMP" ), "left_in_temp" => is_file( getenv( "TMPDIR" ) . "/wpc-left-in-temp/x" ), "run_id" => getenv( "WPCHECKPOINT_TEST_RUN_ID" ), "stale_run_id" => getenv( "WPCHECKPOINT_TEST_STALE_RUN_ID" ), "git" => array_values( array_filter( array_keys( getenv() ), static function ( $name ) { return 0 === strpos( $name, "GIT_" ); } ) ), "kept" => getenv( "WPCHECKPOINT_KEPT" ) ) ) );' . "\n"
 			. 'if ( getenv( "FAKE_LEAVE" ) ) { file_put_contents( "left.txt", "x" ); }' . "\n"
 			. 'if ( getenv( "FAKE_HIDE" ) ) { chmod( getenv( "FAKE_HIDE" ), 0 ); }' . "\n"
 			. 'if ( getenv( "FAKE_CHANGE" ) ) { file_put_contents( getenv( "FAKE_CHANGE" ), "changed during the run" ); }' . "\n"
@@ -120,6 +120,26 @@ final class IntegrationScriptTest extends TestCase {
 		$this->assertFileDoesNotExist( $this->sandbox . '/call.json', 'PHPUnit was not called' );
 		$run = $this->run_script( array( '--log-junit', '/abs/junit.xml' ), array( 'WPCHECKPOINT_TEST_OUTPUT_DIR' => $this->sandbox . '/not-there' ) );
 		$this->assertSame( 0, $run['code'], 'the control: an absolute output needs no such directory: ' . $run['stderr'] );
+	}
+
+	/**
+	 * Started from a git hook, the script would hand the hook's GIT_DIR on to the tests, whose git commands would
+	 * then act on the hook's repository (tests/Fixtures/SandboxGit.php).
+	 */
+	public function test_git_s_environment_is_not_handed_on_to_the_suite(): void {
+		$run = $this->run_script(
+			array(),
+			array(
+				'GIT_DIR'           => $this->sandbox . '/somewhere/.git',
+				'GIT_WORK_TREE'     => $this->sandbox . '/somewhere',
+				'GIT_INDEX_FILE'    => $this->sandbox . '/somewhere/.git/index',
+				'GIT_AUTHOR_NAME'   => 'Somebody',
+				'WPCHECKPOINT_KEPT' => 'kept',
+			)
+		);
+		$this->assertSame( 0, $run['code'], $run['stderr'] );
+		$this->assertSame( array(), $run['call']['git'], 'no GIT_* variable reaches PHPUnit' );
+		$this->assertSame( 'kept', $run['call']['kept'], 'the control: another variable given the same way does' );
 	}
 
 	public function test_the_suite_runs_from_a_directory_of_its_own_with_the_configuration_in_full(): void {
