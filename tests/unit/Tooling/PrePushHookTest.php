@@ -312,5 +312,15 @@ final class PrePushHookTest extends TestCase {
 		$this->assertSame( 0, $run['code'], $run['stdout'] . $run['stderr'] );
 		$this->assertSame( '', $run['stderr'], 'installed: nothing is said' );
 		$this->assertStringContainsString( 'step 1 passed', $run['stdout'], 'the control: the gate ran' );
+		// Where there is no repository there is no hook to miss.
+		$apart = $this->sandbox . '/apart';
+		mkdir( $apart . '/bin/hooks', 0777, true );
+		foreach ( array( 'gate.sh', 'install-hooks.sh', 'hooks/pre-push' ) as $script ) {
+			copy( dirname( __DIR__, 3 ) . '/bin/' . $script, $apart . '/bin/' . $script );
+		}
+		$run = SandboxGit::command( $apart, array( 'bash', $apart . '/bin/gate.sh', 'echo step-ran' ), array( 'WPCHECKPOINT_TEST_OUTPUT' => $this->sandbox . '/out' ) );
+		$this->assertSame( 0, $run['code'], $run['stdout'] . $run['stderr'] );
+		$this->assertSame( '', $run['stderr'] );
+		$this->assertStringContainsString( 'step 1 passed', $run['stdout'] );
 	}
 }
