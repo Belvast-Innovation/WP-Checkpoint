@@ -88,7 +88,7 @@ final class RestoreGroupGuardTest extends SwapTestCase {
 		$steps    = array();
 		foreach ( $export->steps() as $step ) {
 			if ( $step instanceof FileScanStep ) {
-				$steps[] = new FileScanStep( $resolved['roots'], new Exclusions(), $resolved['warnings'] );
+				$steps[] = new FileScanStep( $resolved['roots'], new Exclusions(), $resolved['warnings'], Manifest::DEFAULT_CHUNK, null, $resolved['states'] );
 				if ( ! $counted ) {
 					$steps[] = new ClosureStep(
 						'scan_as_before',
@@ -149,8 +149,9 @@ final class RestoreGroupGuardTest extends SwapTestCase {
 	 * @param array<string, string>   $files  Archive path => content.
 	 * @param callable|null           $site   function( array $site ): array.
 	 * @param array<string, int>|null $counts The manifest's count of each group's files (null: a manifest without).
+	 * @param array<string, string>   $states What the manifest says it knows of a group, where not "listed".
 	 */
-	private function made_backup( array $files, $site = null, $counts = null ): string {
+	private function made_backup( array $files, $site = null, $counts = null, array $states = array() ): string {
 		global $wpdb;
 		$keep = $wpdb->prefix . 'swt_keep';
 		$new  = $wpdb->prefix . 'swt_new';
@@ -168,7 +169,10 @@ final class RestoreGroupGuardTest extends SwapTestCase {
 			array(
 				'files'  => $files,
 				'groups' => StagingLayout::GROUPS,
-			) + ( null === $counts ? array() : array( 'counts' => $counts ) )
+			) + ( null === $counts ? array() : array(
+				'counts' => $counts,
+				'states' => $states,
+			) )
 		);
 		$wpdb->query( "DELETE FROM `{$keep}` WHERE id = 3" );
 		$wpdb->query( "UPDATE `{$keep}` SET v = 'live'" );
@@ -1047,7 +1051,7 @@ final class RestoreGroupGuardTest extends SwapTestCase {
 		$this->assertSame( array(), $staging['unasked'], 'not a group the final check looks at again' );
 		$done = $this->swapped( $job );
 		$this->assertSame( array(), self::tree( $this->dirs['mu-plugins'] ), 'as the backup has it: empty' );
-		$this->assertStringContainsString( 'Restored empty, as in the backup, which has no file for them: mu-plugins (what they held before was replaced).', (string) $done->progress_message );
+		$this->assertStringContainsString( 'Restored empty, as in the backup, whose site had them empty: mu-plugins (what they held before was replaced).', (string) $done->progress_message );
 		$this->assertStringNotContainsString( 'Not restored', (string) $done->progress_message );
 		$this->assertStringContainsString( 'the backup\'s manifest counts no file for it', self::log_of( $done ) );
 	}
@@ -1070,6 +1074,182 @@ final class RestoreGroupGuardTest extends SwapTestCase {
 		$done = $this->swapped( $job );
 		$this->assertSame( $before, self::tree( $this->dirs['mu-plugins'] ), 'the directory is as it was' );
 		$this->assertStringContainsString( 'as you chose: mu-plugins', (string) $done->progress_message );
+		$this->assertStringNotContainsString( 'Restored empty', (string) $done->progress_message );
+	}
+
+	/**
+	 * A count of no file says the group was empty only where the backup read its directory and found no entry. Of
+	 * a directory that was not there, or that the backup does not say it read, the question is asked as for a
+	 * backup without the counts: keep first, and an unattended restore fails.
+	 *
+	 * @return array<string, array{0: string, 1: string}>
+	 */
+	public function data_states_that_do_not_say_the_group_was_empty(): array {
+		return array(
+			'the directory was not there' => array( 'absent', 'The site the backup was made on did not have 1 of them' ),
+			'the directory was not read'  => array( 'unread', 'Of 1 of them the backup holds no file although it did not find the directory empty' ),
+		);
+	}
+
+	/**
+	 * @dataProvider data_states_that_do_not_say_the_group_was_empty
+	 */
+	public function test_a_group_without_files_that_the_backup_does_not_say_was_empty_is_asked_about( string $state, string $says ): void {
+		$files = self::backup_files();
+		unset( $files['wp-content/mu-plugins/restored-mu.php'] );
+		$base = $this->made_backup( $files, null, self::counted( $files ), array( 'mu-plugins' => $state ) );
+		$this->after_export();
+		$before = self::tree( $this->dirs['mu-plugins'] );
+		$job    = $this->restore( $base );
+		$this->assertSame( Job::PAUSED, $job->status, 'it asks: ' . $job->step . ' ' . $job->last_error );
+		$this->assertSame( array( RestoreFilesPreflightStep::EMPTY_KIND ), self::asked( $job ) );
+		$this->assertSame( array( 'keep', 'replace' ), $this->question( $job, RestoreFilesPreflightStep::EMPTY_KIND )['choices'], 'keep comes first' );
+		$words = $this->words( $job, RestoreFilesPreflightStep::EMPTY_KIND );
+		$this->assertSame( array( 'mu-plugins' ), $words['listed'] );
+		$this->assertStringContainsString( $says, $words['text'] );
+		$this->assertStringNotContainsString( 'absent' === $state ? 'did not find the directory empty' : 'did not have', $words['text'], 'and not the words of the other state' );
+		$this->assertSame( $before, self::tree( $this->dirs['mu-plugins'] ), 'nothing was changed before the answer' );
+		$done = $this->swapped( $this->answered( $job, array( RestoreFilesPreflightStep::EMPTY_KIND => 'keep' ) ) );
+		$this->assertSame( $before, self::tree( $this->dirs['mu-plugins'] ), 'kept' );
+		$this->assertStringContainsString( 'as you chose: mu-plugins', (string) $done->progress_message );
+		$this->assertStringNotContainsString( 'Restored empty', (string) $done->progress_message );
+
+		// Unattended, nobody would answer: it fails, and nothing is changed.
+		$after = self::tree( $this->dirs['other-content'] );
+		$alone = $this->restore(
+			$base,
+			array(
+				'unattended' => true,
+				'policy'     => array(
+					'uncertain_tables'        => 'exclude',
+					'shared_tables'           => 'exclude',
+					LinkedTargets::POLICY_KEY => 'swap',
+					'unverified'              => 'keep',
+				),
+			)
+		);
+		$this->assertSame( Job::FAILED, $alone->status, 'nobody would answer' );
+		$this->assertStringContainsString( 'whether to keep or replace the content directories', (string) $alone->last_error );
+		$this->assertSame( $after, self::tree( $this->dirs['other-content'] ) );
+	}
+
+	/**
+	 * A group whose directory was empty when the files preflight looked, and of which the backup does not say it
+	 * was empty: the final check looks at it again, as for a backup without the counts.
+	 */
+	public function test_a_group_the_backup_did_not_read_is_looked_at_again_by_the_final_check(): void {
+		$files = self::backup_files();
+		unset( $files['wp-content/mu-plugins/restored-mu.php'] );
+		$base = $this->made_backup( $files, null, self::counted( $files ), array( 'mu-plugins' => 'unread' ) );
+		rename( $this->dirs['mu-plugins'] . '/live-mu.php', $this->sandbox . '/moved-away.php' );
+		$this->check_more = array(
+			'site_dirs' => function (): array {
+				if ( 1 === ++$this->dir_reads ) {
+					file_put_contents( $this->dirs['mu-plugins'] . '/late.php', '<?php // put there after the files preflight' );
+				}
+				return $this->dirs;
+			},
+		);
+		$job              = $this->restore( $base );
+		$this->assertGreaterThan( 0, $this->dir_reads, 'the control: the final check read the directories' );
+		$this->assertSame( Job::FAILED, $job->status, 'refused: ' . $job->step . ' ' . wp_json_encode( $job->questions ) );
+		$this->assertSame( SwapCheckStep::ID, $job->step );
+		$this->assertFileExists( $this->dirs['mu-plugins'] . '/late.php', 'nothing was swapped' );
+	}
+
+	/**
+	 * Real exports in which a group gets no file although the site has its files: the backup's count for it is 0,
+	 * and it must not say the group was empty. Each is restored onto the site in its default layout, where the
+	 * group's directory holds files: the restore asks, and does not put an empty directory there on its own.
+	 *
+	 * @return array<string, array{0: string, 1: string}>
+	 */
+	public function data_exports_that_did_not_read_a_group(): array {
+		return array(
+			'its directory is a link the scan refuses'      => array( 'refused', 'unread' ),
+			'a file is where its directory should be'       => array( 'file', 'unread' ),
+			'its directory is another group\'s directory'   => array( 'merged', 'unread' ),
+			'its directory holds a directory and no file'   => array( 'dirs-only', 'unread' ),
+			'its directory is not there'                    => array( 'gone', 'absent' ),
+		);
+	}
+
+	/**
+	 * @dataProvider data_exports_that_did_not_read_a_group
+	 */
+	public function test_an_export_that_did_not_read_a_group_does_not_let_the_restore_empty_it_unasked( string $how, string $state ): void {
+		$content = $this->dirs['other-content'];
+		$mu      = $content . '/mu-plugins';
+		rename( $mu, $this->sandbox . '/mu-as-it-is' );
+		if ( 'refused' === $how ) {
+			symlink( '/', $mu ); // The root of the file system: no scan follows it.
+		} elseif ( 'file' === $how ) {
+			file_put_contents( $mu, 'not a directory' );
+		} elseif ( 'merged' === $how ) {
+			$this->dirs['mu-plugins'] = $this->dirs['uploads'];
+		} elseif ( 'dirs-only' === $how ) {
+			mkdir( $mu . '/kept-empty', 0755, true );
+		}
+		$base     = $this->real_export();
+		$manifest = Manifest::from_json( (string) file_get_contents( Plugin::instance()->directories()->backups() . '/' . $base . '.manifest.json' ) );
+		$this->assertSame( 0, $manifest->group_counts_declared()['mu-plugins'] ?? null, 'the backup has no file of the group' );
+		$this->assertSame( $state, $manifest->group_states_declared()['mu-plugins'] ?? null, 'and says what it knows of it' );
+		$this->assertSame( 'listed', $manifest->group_states_declared()['uploads'] ?? null, 'the control: a group it read' );
+		// The site the backup is restored onto: the default layout, the group's directory with its files.
+		clearstatcache( true );
+		if ( is_link( $mu ) || is_file( $mu ) ) {
+			rename( $mu, $this->sandbox . '/in-its-place-at-the-export' );
+		} elseif ( is_dir( $mu ) ) {
+			rename( $mu, $this->sandbox . '/dir-at-the-export' );
+		}
+		rename( $this->sandbox . '/mu-as-it-is', $mu );
+		$this->dirs['mu-plugins'] = $mu;
+		$this->after_export();
+		$before = self::tree( $mu );
+		$this->assertNotSame( array(), $before, 'the control: the directory holds files' );
+		$job = $this->restore( $base );
+		$this->assertSame( Job::PAUSED, $job->status, 'it asks: ' . $job->step . ' ' . $job->status . ' ' . $job->last_error );
+		$this->assertContains( RestoreFilesPreflightStep::EMPTY_KIND, self::asked( $job ) );
+		$this->assertSame( array( 'mu-plugins' ), $this->words( $job, RestoreFilesPreflightStep::EMPTY_KIND )['listed'] );
+		$this->assertSame( $before, self::tree( $mu ), 'nothing was changed' );
+		Plugin::instance()->job_actions()->cancel( $job->id );
+		$this->drive( Plugin::instance()->jobs()->find( $job->id ) );
+		$this->assertSame( $before, self::tree( $mu ) );
+	}
+
+	/**
+	 * The other side: a group whose directory the export read and found without an entry. The backup says so, and
+	 * the restore puts an empty directory there without a question.
+	 */
+	public function test_an_export_of_a_group_with_an_empty_directory_says_so_and_the_restore_empties_it_unasked(): void {
+		$mu = $this->dirs['mu-plugins'];
+		rename( $mu . '/live-mu.php', $this->sandbox . '/moved-away.php' );
+		$this->assertSame( array(), self::tree( $mu ), 'the control: the directory is empty at the export' );
+		$base     = $this->real_export();
+		$manifest = Manifest::from_json( (string) file_get_contents( Plugin::instance()->directories()->backups() . '/' . $base . '.manifest.json' ) );
+		$this->assertSame( 0, $manifest->group_counts_declared()['mu-plugins'] ?? null );
+		$this->assertSame( 'listed', $manifest->group_states_declared()['mu-plugins'] ?? null );
+		$this->after_export();
+		$job = $this->restore( $base );
+		$this->assertSame( array(), $job->questions, 'not asked about: ' . $job->last_error );
+		$done = $this->swapped( $job );
+		$this->assertSame( array(), self::tree( $mu ), 'as the backup has it: empty' );
+		$this->assertStringContainsString( 'Restored empty, as in the backup, whose site had them empty: mu-plugins (what they held before was replaced).', (string) $done->progress_message );
+	}
+
+	/**
+	 * The plugins directory is not empty after a restore (this plugin's own copy is staged into it), so the
+	 * restore does not say it was restored empty.
+	 */
+	public function test_a_plugins_group_the_backup_found_empty_is_not_called_restored_empty(): void {
+		$files = self::backup_files();
+		unset( $files['wp-content/plugins/demo/demo.php'] );
+		$base = $this->made_backup( $files, null, self::counted( $files ) );
+		$job  = $this->restore( $base );
+		$this->assertSame( array(), $job->questions, 'not asked about: ' . $job->last_error );
+		$done = $this->swapped( $job );
+		$this->assertFileDoesNotExist( $this->dirs['plugins'] . '/live-plugin/live.php', 'what it held was replaced' );
+		$this->assertStringContainsString( 'The plugins directory holds WP Checkpoint only: the backup, whose site had no plugin in it, has no file for it (what it held before was replaced).', (string) $done->progress_message );
 		$this->assertStringNotContainsString( 'Restored empty', (string) $done->progress_message );
 	}
 

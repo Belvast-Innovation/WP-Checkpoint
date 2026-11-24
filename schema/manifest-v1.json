@@ -271,6 +271,13 @@
             "properties": {
               "count": {
                 "$ref": "#/definitions/count"
+              },
+              "state": {
+                "enum": [
+                  "listed",
+                  "absent",
+                  "unread"
+                ]
               }
             }
           }

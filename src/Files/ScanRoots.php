@@ -31,7 +31,7 @@ final class ScanRoots {
 	 * @param string[]              $groups      Content groups (subset of GROUPS).
 	 * @param string                $storage_dir The plugin's storage directory, never scanned.
 	 * @param array<string, string> $overrides   Group => absolute directory (tests); defaults come from WordPress.
-	 * @return array{roots: array<int, array{group: string, path: string, prefix: string, skip: string[], also_skip: string[], collide: string[], hold: string[], refuse: string}>, warnings: string[]}
+	 * @return array{roots: array<int, array{group: string, path: string, prefix: string, skip: string[], also_skip: string[], collide: string[], hold: string[], refuse: string}>, warnings: string[], states: array<string, string>}
 	 */
 	public static function resolve( array $groups, string $storage_dir = '', array $overrides = array() ): array {
 		return self::resolve_dirs( array_merge( self::wordpress_directories(), $overrides ), $groups, $storage_dir );
@@ -44,12 +44,13 @@ final class ScanRoots {
 	 * @param array<string, string> $dirs        Directories.
 	 * @param string[]              $groups      Content groups (subset of GROUPS).
 	 * @param string                $storage_dir The plugin's storage directory, never scanned.
-	 * @return array{roots: array<int, array{group: string, path: string, prefix: string, skip: string[], also_skip: string[], collide: string[], hold: string[], refuse: string}>, warnings: string[]}
+	 * @return array{roots: array<int, array{group: string, path: string, prefix: string, skip: string[], also_skip: string[], collide: string[], hold: string[], refuse: string}>, warnings: string[], states: array<string, string>}
 	 */
 	public static function resolve_dirs( array $dirs, array $groups, string $storage_dir = '' ): array {
 		$warnings = array();
 		$chosen   = array();
 		$others   = array();
+		$states   = array();
 		foreach ( self::GROUPS as $group ) {
 			$path = rtrim( Paths::normalize( (string) $dirs[ $group ] ), '/' );
 			if ( ! in_array( $group, $groups, true ) ) {
@@ -60,6 +61,8 @@ final class ScanRoots {
 			}
 			if ( '' === $path || ! is_dir( $path ) ) {
 				$warnings[] = 'The directory of the "' . $group . '" group does not exist and was not backed up.';
+				// Not there by positive evidence, or not read: which of the two the backup's manifest says of the group.
+				$states[ $group ] = '' !== $path && Paths::positively_gone( $path ) ? self::ABSENT : self::UNREAD;
 				continue;
 			}
 			$chosen[ $group ] = $path;
@@ -108,6 +111,8 @@ final class ScanRoots {
 			foreach ( $kept as $other => $unused ) {
 				if ( ! isset( $refused[ $other ] ) && $real[ $other ] === $real[ $group ] ) {
 					$warnings[] = 'The "' . $group . '" directory is the same directory as the "' . $other . '" directory and is backed up as part of it.';
+					// Its files are in the backup as the other group's: nothing was read as this group's.
+					$states[ $group ] = self::UNREAD;
 					continue 2;
 				}
 			}
@@ -168,9 +173,23 @@ final class ScanRoots {
 		}
 		return array(
 			'roots'    => $roots,
+			'states'   => $states,
 			'warnings' => $warnings,
 		);
 	}
+
+	/**
+	 * What a backup knows of a content group it was to hold (the manifest's files.groups.<group>.state): its
+	 * directory was read (LISTED: the files counted for it are the files it had; with none counted, the directory
+	 * had no entry at all); it was not there, by positive evidence (ABSENT); or the backup does not say what it
+	 * held (UNREAD: refused, not listable, backed up as part of another group, whether it was there could not be
+	 * told, or it had entries and the archive has no file of it: left out, unreadable, directories only). Only
+	 * LISTED says what the group held.
+	 */
+	const LISTED = 'listed';
+	const ABSENT = 'absent';
+	const UNREAD = 'unread';
+	const STATES = array( self::LISTED, self::ABSENT, self::UNREAD );
 
 	/**
 	 * The prefix an archive path is under: the longest of the prefixes that is the path or holds it ('' when none

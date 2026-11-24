@@ -350,9 +350,10 @@ final class ManifestStepTest extends TestCase {
 	 *
 	 * @param array<string, string> $root_groups Prefix => group.
 	 * @param array<string, string> $more_ids    Roots the scan listed files under without recording their group.
+	 * @param array<string, mixed>  $more        Other keys of the summary, in place of the ones made here.
 	 */
-	private function scanned( array $root_groups, array $more_ids = array() ): void {
-		file_put_contents( $this->ctx->work() . '/scan.summary.json', json_encode( array( 'counts' => array(), 'lists' => array(), 'warnings' => array( 'A scan warning.' ), 'root_ids' => array_fill_keys( array_keys( $root_groups ), 'id' ) + $more_ids, 'root_groups' => $root_groups ) ) );
+	private function scanned( array $root_groups, array $more_ids = array(), array $more = array() ): void {
+		file_put_contents( $this->ctx->work() . '/scan.summary.json', json_encode( array_merge( array( 'counts' => array(), 'lists' => array(), 'warnings' => array( 'A scan warning.' ), 'root_ids' => array_fill_keys( array_keys( $root_groups ), 'id' ) + $more_ids, 'root_groups' => $root_groups, 'group_states' => array_fill_keys( array_values( $root_groups ), 'listed' ), 'root_entries' => array_fill_keys( array_values( $root_groups ), 1 ) ), $more ) ) );
 	}
 
 	/**
@@ -387,7 +388,7 @@ final class ManifestStepTest extends TestCase {
 		$this->scanned( array( 'wp-content/uploads' => 'uploads' ) );
 		$this->drive( $this->step() );
 		$this->assertSame( array( 'uploads' => 2 ), $this->manifest()->group_counts_declared() );
-		$this->assertSame( array( 'count' => 2 ), $this->manifest()->to_array()['files']['groups']['uploads'] );
+		$this->assertSame( array( 'count' => 2, 'state' => 'listed' ), $this->manifest()->to_array()['files']['groups']['uploads'] );
 		$this->assertStringContainsString( 'Self-check passed', $this->ctx->log() );
 		// The copy inside the archive says the same.
 		$volumes = glob( $this->volumes() . '/*.wpcheckpoint.zip' ) ?: array();
@@ -400,6 +401,54 @@ final class ManifestStepTest extends TestCase {
 		$this->scanned( array( 'wp-content/uploads' => 'uploads', 'wp-content/plugins' => 'plugins' ) );
 		$this->drive( $this->step() );
 		$this->assertSame( array( 'plugins' => 0, 'uploads' => 2 ), $this->manifest()->group_counts_declared() );
+		// Its directory had an entry (the fixture's summary says one) and the archive has no file of it: not "empty".
+		$this->assertSame( array( 'plugins' => 'unread', 'uploads' => 'listed' ), $this->manifest()->group_states_declared() );
+	}
+
+	/**
+	 * What the manifest says of a group without a file, by what the scan knows of it.
+	 *
+	 * @return array<string, array{0: array<string, mixed>, 1: string}>
+	 */
+	public function data_groups_without_a_file(): array {
+		$roots = array( 'wp-content/uploads' => 'uploads', 'wp-content/plugins' => 'plugins' );
+		return array(
+			'its directory was listed and had no entry'       => array( array( 'group_states' => array( 'uploads' => 'listed', 'plugins' => 'listed' ), 'root_entries' => array( 'uploads' => 2, 'plugins' => 0 ) ), 'listed', $roots ),
+			'its directory was listed and had entries'        => array( array( 'group_states' => array( 'uploads' => 'listed', 'plugins' => 'listed' ), 'root_entries' => array( 'uploads' => 2, 'plugins' => 3 ) ), 'unread', $roots ),
+			'listed, and how many entries it had is not said' => array( array( 'group_states' => array( 'uploads' => 'listed', 'plugins' => 'listed' ), 'root_entries' => array( 'uploads' => 2 ) ), 'unread', $roots ),
+			'its directory was not there'                     => array( array( 'group_states' => array( 'uploads' => 'listed', 'plugins' => 'absent' ), 'root_entries' => array( 'uploads' => 2 ) ), 'absent', array( 'wp-content/uploads' => 'uploads' ) ),
+			'its directory was not read'                      => array( array( 'group_states' => array( 'uploads' => 'listed', 'plugins' => 'unread' ), 'root_entries' => array( 'uploads' => 2 ) ), 'unread', array( 'wp-content/uploads' => 'uploads' ) ),
+			'the scan says nothing of it'                     => array( array( 'group_states' => array( 'uploads' => 'listed' ), 'root_entries' => array( 'uploads' => 2 ) ), 'unread', array( 'wp-content/uploads' => 'uploads' ) ),
+			'the scan says something this version does not know' => array( array( 'group_states' => array( 'uploads' => 'listed', 'plugins' => 'empty' ), 'root_entries' => array( 'uploads' => 2 ) ), 'unread', array( 'wp-content/uploads' => 'uploads' ) ),
+		);
+	}
+
+	/**
+	 * @dataProvider data_groups_without_a_file
+	 */
+	public function test_a_group_without_a_file_is_called_listed_only_when_its_directory_had_no_entry( array $summary, string $state, array $roots ): void {
+		ExportPlan::write( $this->ctx->work(), ExportPlan::PLAN, array( 'base' => self::BASE, 'tables' => array( 'wp_posts' ), 'notes' => array(), 'groups' => array( 'plugins', 'uploads' ), 'exclusions' => array( 'wp-content/cache' ) ) );
+		$this->scanned( $roots, array(), $summary );
+		$this->drive( $this->step() );
+		$this->assertSame( array( 'plugins' => 0, 'uploads' => 2 ), $this->manifest()->group_counts_declared() );
+		$this->assertSame( array( 'plugins' => $state, 'uploads' => 'listed' ), $this->manifest()->group_states_declared() );
+	}
+
+	public function test_files_of_a_group_whose_directory_was_not_read_stop_the_step(): void {
+		$this->scanned( array( 'wp-content/uploads' => 'uploads' ), array(), array( 'group_states' => array( 'uploads' => 'unread' ) ) );
+		try {
+			$this->drive( $this->step() );
+			$this->fail( 'described an archive with files of a group it says it did not read' );
+		} catch ( \RuntimeException $e ) {
+			$this->assertStringContainsString( 'files of the "uploads" content group, whose directory the scan did not read', $e->getMessage() );
+		}
+	}
+
+	public function test_a_scan_summary_without_the_groups_states_gives_a_manifest_without_the_counts(): void {
+		// As a scan of this change's earlier state wrote it: the roots' groups, and nothing of what was read.
+		file_put_contents( $this->ctx->work() . '/scan.summary.json', json_encode( array( 'counts' => array(), 'lists' => array(), 'warnings' => array(), 'root_ids' => array( 'wp-content/uploads' => 'id' ), 'root_groups' => array( 'wp-content/uploads' => 'uploads' ) ) ) );
+		$this->drive( $this->step() );
+		$this->assertNull( $this->manifest()->group_counts_declared() );
 	}
 
 	public function test_a_scan_that_recorded_no_groups_gives_a_manifest_without_the_counts(): void {

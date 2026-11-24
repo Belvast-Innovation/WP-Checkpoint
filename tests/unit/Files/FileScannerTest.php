@@ -64,6 +64,57 @@ final class FileScannerTest extends TestCase {
 		}, $lines );
 	}
 
+	/**
+	 * What the scan says of each group it was given a root for (the manifest's files.groups.<group>.state comes
+	 * of it): its directory was listed, with how many entries; it is positively not there; or it was not read.
+	 */
+	public function test_the_scan_says_of_each_group_whether_its_directory_was_read_and_how_many_entries_it_had(): void {
+		$this->put( 'content/plugins/a/a.php' );
+		$this->put( 'content/plugins/b.php' );
+		mkdir( $this->root . '/content/themes' );                // Listed, and empty.
+		mkdir( $this->root . '/content/uploads/only-dirs', 0700, true ); // Listed, an entry, no file.
+		file_put_contents( $this->root . '/content/languages', 'a file where a directory was expected' );
+		$root = function ( string $group, string $dir, string $refuse = '' ): array {
+			return array( 'group' => $group, 'path' => $this->root . '/content/' . $dir, 'prefix' => 'wp-content/' . $dir, 'refuse' => $refuse );
+		};
+		$scanner = new FileScanner(
+			array(
+				$root( 'plugins', 'plugins' ),
+				$root( 'themes', 'themes' ),
+				$root( 'uploads', 'uploads' ),
+				$root( 'mu-plugins', 'mu-plugins' ),                 // Not there.
+				$root( 'other-content', 'languages' ),               // There, and no directory: whether "the directory" is gone is not positive.
+			),
+			new Exclusions( array(), array() )
+		);
+		list( $lines, $state ) = $this->run_all( $scanner, true );
+		$this->assertSame( array( 'wp-content/plugins/a/a.php', 'wp-content/plugins/b.php' ), $this->paths( $lines ) );
+		$this->assertSame( array( 'plugins' => 'listed', 'themes' => 'listed', 'uploads' => 'listed', 'mu-plugins' => 'absent', 'other-content' => 'unread' ), $state['group_states'] );
+		$this->assertSame( array( 'plugins' => 2, 'themes' => 0, 'uploads' => 1 ), $state['root_entries'], 'the entries of each listed directory itself' );
+
+		// A root that is refused is not read, whatever is there.
+		$refused               = new FileScanner( array( $root( 'plugins', 'plugins', 'another content group is backed up under the same path' ) ), new Exclusions( array(), array() ) );
+		list( $none, $state2 ) = $this->run_all( $refused );
+		$this->assertSame( array(), $none );
+		$this->assertSame( array( 'plugins' => 'unread' ), $state2['group_states'] );
+		$this->assertArrayNotHasKey( 'root_entries', $state2 );
+	}
+
+	public function test_a_root_that_cannot_be_listed_is_not_read(): void {
+		if ( 'Windows' === PHP_OS_FAMILY || ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) ) {
+			$this->markTestSkipped( 'A directory\'s mode does not keep this user from listing it.' );
+		}
+		$this->put( 'content/uploads/a.jpg' );
+		chmod( $this->root . '/content/uploads', 0000 );
+		$scanner               = new FileScanner( array( array( 'group' => 'uploads', 'path' => $this->root . '/content/uploads', 'prefix' => 'wp-content/uploads' ) ), new Exclusions( array(), array() ) );
+		list( $lines, $state ) = $this->run_all( $scanner );
+		chmod( $this->root . '/content/uploads', 0700 );
+		$this->assertSame( array(), $lines );
+		$this->assertSame( array( 'uploads' => 'unread' ), $state['group_states'], 'not "listed": nothing says what it holds' );
+		$this->assertArrayNotHasKey( 'root_entries', $state );
+		$this->assertSame( 1, $state['counts']['unreadable'], 'the control: the scan found it unreadable' );
+	}
+
 	public function test_files_are_listed_in_a_stable_byte_order_with_size_and_mtime_and_no_directories(): void {
 		$this->put( 'content/plugins/b/b.php', 'bb' );
 		$this->put( 'content/plugins/a/a.php', 'a' );

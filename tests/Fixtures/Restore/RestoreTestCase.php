@@ -157,7 +157,7 @@ abstract class RestoreTestCase extends JobTestCase {
 	 * @param string[]      $tables  Tables in order.
 	 * @param callable|null $edit    function( string $table, string[] $chunks ): string[].
 	 * @param callable|null $site    function( array $site ): array, the manifest's site.
-	 * @param array         $options ArchiveBuilder options; rows: table => row count where edited chunks change it; files: path => content; groups: the manifest's content groups; counts: group => the manifest's count of its files (none: a manifest without the counts, as archives were written before them).
+	 * @param array         $options ArchiveBuilder options; rows: table => row count where edited chunks change it; files: path => content; groups: the manifest's content groups; counts: group => the manifest's count of its files (none: a manifest without the counts, as archives were written before them); states: group => what the manifest says it knows of the group, where not "listed".
 	 * @return string The backup's base name.
 	 */
 	protected function backup( array $tables, $edit = null, $site = null, array $options = array() ): string {
@@ -171,17 +171,21 @@ abstract class RestoreTestCase extends JobTestCase {
 		// the restore asks before it swaps such a group's directory for an empty one.
 		$groups     = $options['groups'] ?? self::groups_of( array_keys( $files ) );
 		$group_nums = $options['counts'] ?? null;
-		unset( $options['rows'], $options['files'], $options['groups'], $options['counts'] );
+		$group_says = $options['states'] ?? array();
+		unset( $options['rows'], $options['files'], $options['groups'], $options['counts'], $options['states'] );
 		$builder = new ArchiveBuilder(
 			$options + array(
-				'manifest' => static function ( array $manifest ) use ( &$rows, $site, $wpdb, $groups, $group_nums ): array {
+				'manifest' => static function ( array $manifest ) use ( &$rows, $site, $wpdb, $groups, $group_nums, $group_says ): array {
 					if ( null !== $groups ) {
 						$manifest['contents']['files'] = $groups;
 					}
 					if ( null !== $group_nums ) {
 						$manifest['files']['groups'] = array();
 						foreach ( $group_nums as $group => $count ) {
-							$manifest['files']['groups'][ $group ] = array( 'count' => $count );
+							$manifest['files']['groups'][ $group ] = array(
+								'count' => $count,
+								'state' => $group_says[ $group ] ?? 'listed',
+							);
 						}
 					}
 					foreach ( $manifest['database']['tables'] as $i => $table ) {

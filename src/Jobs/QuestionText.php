@@ -369,6 +369,7 @@ final class QuestionText {
 		return array(
 			'groups'   => array_values( array_filter( $file['groups'], 'is_string' ) ),
 			'unmapped' => (int) ( $file['unmapped'] ?? 0 ),
+			'states'   => array_filter( (array) ( $file['states'] ?? array() ), 'is_string' ),
 		);
 	}
 
@@ -454,6 +455,33 @@ final class QuestionText {
 				),
 				$count
 			);
+			// What the backup knows of them, where it says (a backup that counts each directory's files): none of
+			// these was read and found empty, which is not asked about.
+			$states = array_count_values( array_map( 'strval', (array) ( $tables['states'] ?? array() ) ) );
+			if ( ( $states['absent'] ?? 0 ) > 0 ) {
+				$text .= ' ' . sprintf(
+					/* translators: %d: number of content directories */
+					_n(
+						'The site the backup was made on did not have %d of them: the backup holds nothing of it because nothing was there.',
+						'The site the backup was made on did not have %d of them: the backup holds nothing of them because nothing was there.',
+						(int) $states['absent'],
+						'wp-checkpoint'
+					),
+					(int) $states['absent']
+				);
+			}
+			if ( ( $states['unread'] ?? 0 ) > 0 ) {
+				$text .= ' ' . sprintf(
+					/* translators: %d: number of content directories */
+					_n(
+						'Of %d of them the backup holds no file although it did not find the directory empty when it was made (it could not read it, its files were left out, or it was backed up as part of another directory): the backup does not say what it held, and replacing it does not bring that back.',
+						'Of %d of them the backup holds no file although it did not find the directories empty when it was made (it could not read them, their files were left out, or they were backed up as part of another directory): the backup does not say what they held, and replacing them does not bring that back.',
+						(int) $states['unread'],
+						'wp-checkpoint'
+					),
+					(int) $states['unread']
+				);
+			}
 			if ( $lost > 0 ) {
 				$text .= ' ' . sprintf(
 					/* translators: %d: number of paths */

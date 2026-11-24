@@ -28,6 +28,8 @@ final class PositivelyGoneUsageTest extends TestCase {
 
 	/** File => array( calls, callables ). */
 	const CALLERS = array(
+		'src/Files/FileScanner.php'       => array( 1, 0 ), // A root that is no directory: absent only when positively gone, else "not read", which the restore asks about.
+		'src/Files/ScanRoots.php'         => array( 1, 0 ), // The same, for a group that gets no root.
 		'src/Jobs/HeldSite.php'           => array( 1, 0 ),
 		'src/Jobs/JobRepository.php'      => array( 1, 0 ),
 		'src/Jobs/PreviousAttempt.php'    => array( 1, 0 ),

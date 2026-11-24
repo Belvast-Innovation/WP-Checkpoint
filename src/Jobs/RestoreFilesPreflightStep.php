@@ -128,8 +128,8 @@ final class RestoreFilesPreflightStep implements Step {
 	const RECORD_SKIPPED = 'paths_not_restored';
 	const RECORD_OTHER   = 'other_content_restored';
 	/**
-	 * The groups whose directory held something and is replaced by an empty one because the backup's manifest
-	 * counts no file for them (their names, joined by commas).
+	 * The groups whose directory held something and is replaced by an empty one because the backup read the
+	 * group's directory and counts no file for it (their names, joined by commas).
 	 */
 	const RECORD_EMPTIED = 'groups_emptied';
 
@@ -878,15 +878,23 @@ final class RestoreFilesPreflightStep implements Step {
 		}
 		$empty   = $this->empty_groups( $staging, (array) ( $cursor['mapped'] ?? array() ) );
 		$emptied = array();
+		$states  = array();
 		if ( 1 === (int) ( $cursor['counted'] ?? 0 ) ) {
-			// The manifest counts no file for these groups, and the count was held to the backup's paths: the
-			// backup has them empty. Not asked about; said when the restore ends.
-			$emptied = $empty;
-			$empty   = array();
-			// Unless an earlier version asked about them and was told to keep them: that answer stands.
-			$asked = self::EMPTY_QUESTION . '_' . substr( hash( 'sha256', implode( ',', $emptied ) ), 0, 16 );
+			// What the backup knows of each group (its manifest): only of one whose directory it read does a count
+			// of no file say the group was empty. Such a group is not asked about; it is said when the restore
+			// ends. One that was not there, or not read, is asked about as in a backup without the counts.
+			$states = (array) RestorePreflightStep::manifest( $context->work_path() )->group_states_declared();
+			$all    = $empty;
+			foreach ( $all as $group ) {
+				if ( Manifest::GROUP_LISTED === ( $states[ $group ] ?? '' ) ) {
+					$emptied[] = $group;
+				}
+			}
+			$empty = array_values( array_diff( $all, $emptied ) );
+			// Unless an earlier version asked about them all and was told to keep them: that answer stands.
+			$asked = self::EMPTY_QUESTION . '_' . substr( hash( 'sha256', implode( ',', $all ) ), 0, 16 );
 			if ( array() !== $emptied && 'keep' === ( $answers[ $asked ] ?? null ) ) {
-				$empty   = $emptied;
+				$empty   = $all;
 				$emptied = array();
 			}
 		}
@@ -905,6 +913,8 @@ final class RestoreFilesPreflightStep implements Step {
 							'id'       => $id,
 							'groups'   => $empty,
 							'unmapped' => $unmapped,
+							// What the backup's manifest knows of each (none for a backup without the counts).
+							'states'   => array_intersect_key( $states, array_flip( $empty ) ),
 						)
 					);
 				} catch ( \RuntimeException $e ) {
@@ -969,8 +979,8 @@ final class RestoreFilesPreflightStep implements Step {
 		// final check looks at their directories once more (SwapCheckStep).
 		$unasked = array();
 		foreach ( array_diff( $staged, array( StagingLayout::OTHER ), $empty ) as $group ) {
-			// Not where the manifest counts no file for the group: its directory is replaced whatever it holds.
-			if ( 0 === (int) ( $cursor['mapped'][ $group ] ?? 0 ) && 1 !== (int) ( $cursor['counted'] ?? 0 ) ) {
+			// Not a group the backup read and found empty: its directory is replaced whatever it holds.
+			if ( 0 === (int) ( $cursor['mapped'][ $group ] ?? 0 ) && Manifest::GROUP_LISTED !== ( $states[ $group ] ?? '' ) ) {
 				$unasked[] = $group;
 			}
 		}

@@ -63,16 +63,20 @@
     "bytes": 2143233211,
     "groups": {
       "plugins": {
-        "count": 234
+        "count": 234,
+        "state": "listed"
       },
       "themes": {
-        "count": 1000
+        "count": 1000,
+        "state": "listed"
       },
       "uploads": {
-        "count": 16000
+        "count": 16000,
+        "state": "listed"
       },
       "other-content": {
-        "count": 1000
+        "count": 1000,
+        "state": "listed"
       }
     },
     "index": {

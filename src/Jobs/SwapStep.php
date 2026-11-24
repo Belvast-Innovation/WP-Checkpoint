@@ -4248,12 +4248,17 @@ final class SwapStep implements Step, HoldsSite, MarksSite, CliOnly {
 		}
 		$emptied = $context->options()['recorded'][ RestoreFilesPreflightStep::RECORD_EMPTIED ] ?? null;
 		$emptied = is_string( $emptied ) && '' !== $emptied ? array_values( array_intersect( StagingLayout::GROUPS, explode( ',', $emptied ) ) ) : array();
-		if ( array() !== $emptied ) {
+		// The plugins directory is never empty after a restore: this plugin's own copy is staged into it.
+		$others = array_values( array_diff( $emptied, array( 'plugins' ) ) );
+		if ( array() !== $others ) {
 			$text .= ' ' . sprintf(
 				/* translators: %s: names of content directories, comma-separated */
-				__( 'Restored empty, as in the backup, which has no file for them: %s (what they held before was replaced).', 'wp-checkpoint' ),
-				implode( ', ', $emptied )
+				__( 'Restored empty, as in the backup, whose site had them empty: %s (what they held before was replaced).', 'wp-checkpoint' ),
+				implode( ', ', $others )
 			);
+		}
+		if ( in_array( 'plugins', $emptied, true ) ) {
+			$text .= ' ' . __( 'The plugins directory holds WP Checkpoint only: the backup, whose site had no plugin in it, has no file for it (what it held before was replaced).', 'wp-checkpoint' );
 		}
 		$skipped = $context->options()['recorded'][ RestoreFilesPreflightStep::RECORD_SKIPPED ] ?? null;
 		if ( is_int( $skipped ) && $skipped > 0 ) {

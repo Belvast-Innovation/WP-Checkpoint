@@ -63,19 +63,24 @@
     "bytes": 2143233211,
     "groups": {
       "plugins": {
-        "count": 234
+        "count": 234,
+        "state": "listed"
       },
       "themes": {
-        "count": 1000
+        "count": 1000,
+        "state": "listed"
       },
       "uploads": {
-        "count": 16001
+        "count": 16001,
+        "state": "listed"
       },
       "mu-plugins": {
-        "count": 0
+        "count": 0,
+        "state": "absent"
       },
       "other-content": {
-        "count": 1000
+        "count": 1000,
+        "state": "listed"
       }
     },
     "index": {

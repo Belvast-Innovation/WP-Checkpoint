@@ -45,6 +45,37 @@ final class PrefixRuleTest extends TestCase {
 	}
 
 	/**
+	 * A group that is given no root is said to be absent (its directory is positively not there) or not read (it
+	 * is the same directory as another group's, whose files it is backed up with): never silently "empty".
+	 */
+	public function test_a_group_without_a_root_is_absent_or_not_read(): void {
+		$site = \WPCheckpoint\Tests\Fixtures\Sandbox::make( 'scan-roots' );
+		try {
+			mkdir( $site . '/wp-content/plugins', 0755, true );
+			mkdir( $site . '/wp-content/uploads' );
+			$dirs     = array(
+				'abspath'       => $site,
+				'content'       => $site . '/wp-content',
+				'plugins'       => $site . '/wp-content/plugins',
+				'themes'        => $site . '/wp-content/plugins',   // The same directory as the plugins'.
+				'uploads'       => $site . '/wp-content/uploads',
+				'mu-plugins'    => $site . '/wp-content/mu-plugins', // Not there.
+				'other-content' => $site . '/wp-content',
+			);
+			$resolved = ScanRoots::resolve_dirs( $dirs, ScanRoots::GROUPS );
+			$this->assertSame( array( 'mu-plugins' => 'absent', 'themes' => 'unread' ), $resolved['states'] );
+			$this->assertSame( array( 'plugins', 'uploads', 'other-content' ), array_column( $resolved['roots'], 'group' ), 'the control: the others have their roots' );
+			// The control: every group with a directory of its own has a root, and nothing is said of it here.
+			$dirs['themes'] = $site . '/wp-content/themes';
+			mkdir( $dirs['themes'] );
+			mkdir( $dirs['mu-plugins'] );
+			$this->assertSame( array(), ScanRoots::resolve_dirs( $dirs, ScanRoots::GROUPS )['states'] );
+		} finally {
+			\WPCheckpoint\Tests\Fixtures\Sandbox::remove( $site );
+		}
+	}
+
+	/**
 	 * Calls of strpos() that look for a prefix followed by "/" (the shape of the rule), and calls of the rule,
 	 * in PHP source, comments left out.
 	 *

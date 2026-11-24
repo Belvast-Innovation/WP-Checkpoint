@@ -59,7 +59,8 @@
     "bytes": 2143233211,
     "groups": {
       "0": {
-        "count": 18234
+        "count": 18234,
+        "state": "listed"
       }
     },
     "index": {

@@ -87,8 +87,9 @@ final class ManifestTest extends TestCase {
 	public function test_the_counts_of_each_groups_files_are_read_and_written_back_the_same(): void {
 		$manifest = Manifest::from_json( (string) file_get_contents( self::FIXTURES . '/valid/group_counts.json' ) );
 		$this->assertSame( array( 'plugins' => 234, 'themes' => 1000, 'uploads' => 16000, 'mu-plugins' => 0, 'other-content' => 1000 ), $manifest->group_counts_declared() );
+		$this->assertSame( array( 'plugins' => 'listed', 'themes' => 'listed', 'uploads' => 'listed', 'mu-plugins' => 'absent', 'other-content' => 'listed' ), $manifest->group_states_declared() );
 		$out = $manifest->to_json();
-		$this->assertStringContainsString( '"files":{"count":18234,"bytes":2143233211,"groups":{"plugins":{"count":234},"themes":{"count":1000},"uploads":{"count":16000},"mu-plugins":{"count":0},"other-content":{"count":1000}},"index":', $out );
+		$this->assertStringContainsString( '"files":{"count":18234,"bytes":2143233211,"groups":{"plugins":{"count":234,"state":"listed"},"themes":{"count":1000,"state":"listed"},"uploads":{"count":16000,"state":"listed"},"mu-plugins":{"count":0,"state":"absent"},"other-content":{"count":1000,"state":"listed"}},"index":', $out );
 		$this->assertSame( $out, Manifest::from_json( $out )->to_json(), 'stable' );
 		$this->assertTrue( $this->schema_accepts( $out ) );
 
@@ -99,7 +100,18 @@ final class ManifestTest extends TestCase {
 		// The control: a manifest without the counts has none, and none are written.
 		$base = Manifest::from_json( (string) file_get_contents( self::FIXTURES . '/valid/base.json' ) );
 		$this->assertNull( $base->group_counts_declared() );
+		$this->assertNull( $base->group_states_declared() );
 		$this->assertStringNotContainsString( '"groups"', $base->to_json() );
+
+		// Counts written before the state was (never released): read as a manifest without them, whatever they say.
+		$early = Manifest::from_json( (string) file_get_contents( self::FIXTURES . '/valid/group_counts_without_states.json' ) );
+		$this->assertNull( $early->group_counts_declared() );
+		$this->assertNull( $early->group_states_declared() );
+		$this->assertStringNotContainsString( '"groups"', $early->to_json() );
+
+		$each = Manifest::from_json( (string) file_get_contents( self::FIXTURES . '/valid/group_states_of_each_kind.json' ) );
+		$this->assertSame( array( 'plugins' => 'listed', 'themes' => 'unread', 'uploads' => 'listed', 'mu-plugins' => 'absent', 'other-content' => 'listed' ), $each->group_states_declared() );
+		$this->assertSame( 0, $each->group_counts_declared()['themes'] );
 
 		// The counts of no group are not kept: an empty list would not be read back.
 		$none = Manifest::from_json( (string) file_get_contents( self::FIXTURES . '/valid/group_counts_of_no_group.json' ) );
