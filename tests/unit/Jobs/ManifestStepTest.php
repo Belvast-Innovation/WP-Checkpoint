@@ -419,6 +419,7 @@ final class ManifestStepTest extends TestCase {
 			'its directory was not there'                     => array( array( 'group_states' => array( 'uploads' => 'listed', 'plugins' => 'absent' ), 'root_entries' => array( 'uploads' => 2 ) ), 'absent', array( 'wp-content/uploads' => 'uploads' ) ),
 			'its directory was not read'                      => array( array( 'group_states' => array( 'uploads' => 'listed', 'plugins' => 'unread' ), 'root_entries' => array( 'uploads' => 2 ) ), 'unread', array( 'wp-content/uploads' => 'uploads' ) ),
 			'the scan says nothing of it'                     => array( array( 'group_states' => array( 'uploads' => 'listed' ), 'root_entries' => array( 'uploads' => 2 ) ), 'unread', array( 'wp-content/uploads' => 'uploads' ) ),
+			'the scan says nothing of it, and that it had no entry' => array( array( 'group_states' => array( 'uploads' => 'listed' ), 'root_entries' => array( 'uploads' => 2, 'plugins' => 0 ) ), 'unread', array( 'wp-content/uploads' => 'uploads' ) ),
 			'the scan says something this version does not know' => array( array( 'group_states' => array( 'uploads' => 'listed', 'plugins' => 'empty' ), 'root_entries' => array( 'uploads' => 2 ) ), 'unread', array( 'wp-content/uploads' => 'uploads' ) ),
 		);
 	}

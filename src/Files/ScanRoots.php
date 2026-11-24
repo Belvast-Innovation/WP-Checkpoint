@@ -62,7 +62,7 @@ final class ScanRoots {
 			if ( '' === $path || ! is_dir( $path ) ) {
 				$warnings[] = 'The directory of the "' . $group . '" group does not exist and was not backed up.';
 				// Not there by positive evidence, or not read: which of the two the backup's manifest says of the group.
-				$states[ $group ] = '' !== $path && Paths::positively_gone( $path ) ? self::ABSENT : self::UNREAD;
+				$states[ $group ] = Paths::positively_gone( $path ) ? self::ABSENT : self::UNREAD;
 				continue;
 			}
 			$chosen[ $group ] = $path;
