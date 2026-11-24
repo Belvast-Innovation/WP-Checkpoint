@@ -252,21 +252,13 @@ final class ScanRoots {
 	/**
 	 * Each content group's live directory as WordPress reports it, normalised but not resolved: a directory that is
 	 * a link is named by the link (the restore judges each by where it finally is, LinkedTargets).
-	 * On a multisite network, uploads is the main site's upload directory, as in site_directories().
+	 * On a multisite network they are the main site's, whichever site the request runs for (wordpress_directories()).
 	 *
 	 * @return array<string, string>
 	 */
 	public static function site_directories_as_given(): array {
 		$dirs = self::wordpress_directories();
-		if ( function_exists( 'is_multisite' ) && is_multisite() && ! is_main_site() ) {
-			switch_to_blog( get_main_site_id() );
-			$uploads = wp_upload_dir( null, false );
-			restore_current_blog();
-			if ( isset( $uploads['basedir'] ) ) {
-				$dirs['uploads'] = Paths::normalize( (string) $uploads['basedir'] );
-			}
-		}
-		$out = array();
+		$out  = array();
 		foreach ( self::GROUPS as $group ) {
 			$out[ $group ] = rtrim( $dirs[ $group ], '/' );
 		}
@@ -295,13 +287,27 @@ final class ScanRoots {
 	 * @return array<string, string>
 	 */
 	private static function wordpress_directories(): array {
-		$uploads = function_exists( 'wp_upload_dir' ) ? wp_upload_dir( null, false ) : array();
+		// The network's directories, whichever of its sites the request runs for: WordPress answers for the current
+		// site (another site's uploads are "uploads/sites/N", inside the main site's; a site's own theme root
+		// setting or filter), and a backup, like a restore, is of the network. Asked as the main site.
+		$switched = function_exists( 'is_multisite' ) && is_multisite() && ! is_main_site();
+		if ( $switched ) {
+			switch_to_blog( get_main_site_id() );
+		}
+		try {
+			$uploads = function_exists( 'wp_upload_dir' ) ? wp_upload_dir( null, false ) : array();
+			$themes  = function_exists( 'get_theme_root' ) ? Paths::normalize( get_theme_root() ) : Paths::normalize( WP_CONTENT_DIR ) . '/themes';
+		} finally {
+			if ( $switched ) {
+				restore_current_blog();
+			}
+		}
 		return array(
 			'abspath'       => Paths::normalize( ABSPATH ),
 			'content'       => Paths::normalize( WP_CONTENT_DIR ),
 			'plugins'       => defined( 'WP_PLUGIN_DIR' ) ? Paths::normalize( WP_PLUGIN_DIR ) : Paths::normalize( WP_CONTENT_DIR ) . '/plugins',
 			'mu-plugins'    => defined( 'WPMU_PLUGIN_DIR' ) ? Paths::normalize( WPMU_PLUGIN_DIR ) : Paths::normalize( WP_CONTENT_DIR ) . '/mu-plugins',
-			'themes'        => function_exists( 'get_theme_root' ) ? Paths::normalize( get_theme_root() ) : Paths::normalize( WP_CONTENT_DIR ) . '/themes',
+			'themes'        => $themes,
 			'uploads'       => isset( $uploads['basedir'] ) ? Paths::normalize( (string) $uploads['basedir'] ) : Paths::normalize( WP_CONTENT_DIR ) . '/uploads',
 			'other-content' => Paths::normalize( WP_CONTENT_DIR ),
 		);

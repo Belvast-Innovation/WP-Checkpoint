@@ -263,6 +263,59 @@ final class ExportJobTest extends JobTestCase {
 	}
 
 	/**
+	 * An export is of the network, whichever of its sites the request that runs it is for: WP-CLI with --url of a
+	 * sub-site, a REST request or a cron run on a sub-site's address. There WordPress gives that site's upload
+	 * directory ("uploads/sites/N"), and the export took it for the uploads group's. The manifest and the files
+	 * index of an export run as a sub-site are the main site's, byte for byte, but for what names the run or its
+	 * time: created_at, the volumes (their names carry the time, their bytes the manifest's copy), warnings that
+	 * name the job's own storage.
+	 */
+	public function test_an_export_run_for_a_sub_site_is_the_same_as_one_run_for_the_main_site(): void {
+		if ( ! is_multisite() ) {
+			$this->markTestSkipped( 'Multisite only.' );
+		}
+		$site = self::factory()->blog->create();
+		try {
+			$this->assertNotSame( wp_upload_dir( null, false )['basedir'], ( function () use ( $site ) {
+				switch_to_blog( $site );
+				$dir = wp_upload_dir( null, false )['basedir'];
+				restore_current_blog();
+				return $dir;
+			} )(), 'the control: WordPress gives a sub-site another upload directory' );
+			$described = array();
+			foreach ( array( 'main', 'sub' ) as $which ) {
+				if ( 'sub' === $which ) {
+					switch_to_blog( $site );
+				}
+				try {
+					$roots             = array_column( \WPCheckpoint\Files\ScanRoots::resolve( \WPCheckpoint\Files\ScanRoots::GROUPS )['roots'], 'prefix', 'group' );
+					list( $code, $id ) = $this->run_export( array( 'yes' => true, 'files-only' => true ) );
+				} finally {
+					if ( 'sub' === $which ) {
+						restore_current_blog();
+					}
+				}
+				$this->assertSame( RunLoop::EXIT_COMPLETED, $code, $which . ': ' . implode( "\n", $this->err ) );
+				$base     = (string) ExportPlan::read( $this->work( $id ), ExportPlan::PLAN )['base'];
+				$manifest = json_decode( (string) file_get_contents( Plugin::instance()->directories()->backups() . '/' . $base . '.manifest.json' ), true );
+				unset( $manifest['created_at'], $manifest['volumes'] );
+				$described[ $which ] = array(
+					'roots'    => $roots,
+					'manifest' => $manifest,
+					'index'    => (string) file_get_contents( $this->work( $id ) . '/' . \WPCheckpoint\Jobs\PackStep::PACKED_INDEX ),
+				);
+			}
+			$this->assertGreaterThan( 0, $described['main']['manifest']['files']['count'], 'the control: the main site\'s export has the uploads' );
+			$this->assertStringContainsString( 'wpcexport/images/a.jpg', $described['main']['index'] );
+			$this->assertSame( $described['main']['roots'], $described['sub']['roots'], 'the roots of every group' );
+			$this->assertSame( $described['main']['index'], $described['sub']['index'], 'the files index, byte for byte' );
+			$this->assertSame( $described['main']['manifest'], $described['sub']['manifest'], 'the manifest' );
+		} finally {
+			Leftovers::remove_site( $site ); // Created with real tables (the filters are off): committed.
+		}
+	}
+
+	/**
 	 * A heavy directory: the review asks whether to include it.
 	 */
 	private function add_heavy_directory(): void {
