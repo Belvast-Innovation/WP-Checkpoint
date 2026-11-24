@@ -289,6 +289,8 @@ final class ExportJobTest extends JobTestCase {
 				}
 				try {
 					$roots             = array_column( \WPCheckpoint\Files\ScanRoots::resolve( \WPCheckpoint\Files\ScanRoots::GROUPS )['roots'], 'prefix', 'group' );
+					$this->assertSame( 'sub' === $which ? $site : get_main_site_id(), get_current_blog_id(), 'the request is still for the site it was for' );
+					$this->assertSame( 'sub' === $which, ms_is_switched(), 'and nothing is left switched' );
 					list( $code, $id ) = $this->run_export( array( 'yes' => true, 'files-only' => true ) );
 				} finally {
 					if ( 'sub' === $which ) {
