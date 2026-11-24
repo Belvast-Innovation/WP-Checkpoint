@@ -28,7 +28,37 @@ final class Sandbox {
 		if ( false === $real ) {
 			throw new \RuntimeException( 'The sandbox cannot be resolved: ' . $path );
 		}
+		self::$made[] = $real;
 		return $real;
+	}
+
+	/**
+	 * The sandboxes this process made (make()), by their real paths.
+	 *
+	 * @var string[]
+	 */
+	private static $made = array();
+
+	/**
+	 * The sandbox a directory is in: the one this process made (make()) that is the directory or holds it, both by
+	 * their real paths; null when the directory is in none, is not there, or cannot be resolved. Positive evidence:
+	 * a directory under the temporary directory is not in a sandbox for being there (the temporary directory is
+	 * wherever TMPDIR says, which a test may change).
+	 *
+	 * @param string $dir Directory.
+	 * @return string|null The sandbox's real path.
+	 */
+	public static function root_of( string $dir ): ?string {
+		$real = '' === $dir ? false : realpath( $dir );
+		if ( false === $real || ! is_dir( $real ) ) {
+			return null;
+		}
+		foreach ( self::$made as $root ) {
+			if ( $real === $root || 0 === strpos( $real, $root . DIRECTORY_SEPARATOR ) ) {
+				return $root;
+			}
+		}
+		return null;
 	}
 
 	/**

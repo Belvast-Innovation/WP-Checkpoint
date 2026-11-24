@@ -3,6 +3,7 @@
 namespace WPCheckpoint\Tests\Unit\Tooling;
 
 use WPCheckpoint\Tests\Fixtures\Sandbox;
+use WPCheckpoint\Tests\Fixtures\SandboxGit;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 /**
@@ -22,10 +23,8 @@ final class WorktreeScriptTest extends TestCase {
 		if ( 'Windows' === PHP_OS_FAMILY ) {
 			$this->markTestSkipped( 'A bash script for the development machine.' );
 		}
-		foreach ( array( 'bash', 'git' ) as $tool ) {
-			if ( '' === trim( (string) shell_exec( 'command -v ' . $tool ) ) ) {
-				$this->markTestSkipped( 'No ' . $tool . ' here.' );
-			}
+		if ( ! SandboxGit::available() || '' === trim( (string) shell_exec( 'command -v bash' ) ) ) {
+			$this->markTestSkipped( 'Needs bash and git.' );
 		}
 		$this->sandbox = Sandbox::make( 'worktree' );
 		$this->repo    = $this->sandbox . '/repo';
@@ -38,7 +37,7 @@ final class WorktreeScriptTest extends TestCase {
 		file_put_contents( $this->sandbox . '/docs-repo/CLAUDE.md', '# notes' );
 		symlink( $this->sandbox . '/docs-repo/docs', $this->repo . '/docs' );
 		symlink( $this->sandbox . '/docs-repo/CLAUDE.md', $this->repo . '/CLAUDE.md' );
-		foreach ( array( 'init -q -b main', 'config user.email t@example.com', 'config user.name T', 'add .gitignore bin', 'commit -q -m start' ) as $command ) {
+		foreach ( array( 'init -q -b main', 'add .gitignore bin', 'commit -q -m start' ) as $command ) {
 			$this->git( $this->repo, $command );
 		}
 	}
@@ -51,11 +50,9 @@ final class WorktreeScriptTest extends TestCase {
 	}
 
 	private function git( string $dir, string $args ): string {
-		$output = array();
-		$code   = 0;
-		exec( 'git -C ' . escapeshellarg( $dir ) . ' ' . $args . ' 2>&1', $output, $code );
-		$this->assertSame( 0, $code, 'git ' . $args . ': ' . implode( "\n", $output ) );
-		return implode( "\n", $output );
+		$run = SandboxGit::run( $dir, $args );
+		$this->assertSame( 0, $run['code'], 'git ' . $args . ': ' . $run['stdout'] . $run['stderr'] );
+		return rtrim( $run['stdout'] . $run['stderr'], "\n" );
 	}
 
 	/**
@@ -65,18 +62,8 @@ final class WorktreeScriptTest extends TestCase {
 	 * @return array{code: int, stdout: string, stderr: string}
 	 */
 	private function run_script( array $args ): array {
-		$pipes   = array();
-		$process = proc_open( array_merge( array( 'bash', $this->repo . '/bin/worktree.sh' ), $args ), array( 1 => array( 'pipe', 'w' ), 2 => array( 'pipe', 'w' ) ), $pipes, $this->repo, array( 'PATH' => (string) getenv( 'PATH' ), 'HOME' => $this->sandbox ) );
-		$this->assertIsResource( $process );
-		$stdout = (string) stream_get_contents( $pipes[1] );
-		$stderr = (string) stream_get_contents( $pipes[2] );
-		fclose( $pipes[1] );
-		fclose( $pipes[2] );
-		return array(
-			'code'   => proc_close( $process ),
-			'stdout' => $stdout,
-			'stderr' => $stderr,
-		);
+		// The script runs git: started as git commands of a test are.
+		return SandboxGit::command( $this->repo, array_merge( array( 'bash', $this->repo . '/bin/worktree.sh' ), $args ) );
 	}
 
 	public function test_a_worktree_gets_a_copy_of_vendor_the_docs_links_and_a_clean_status(): void {
