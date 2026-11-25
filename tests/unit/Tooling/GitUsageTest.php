@@ -22,7 +22,7 @@ final class GitUsageTest extends TestCase {
 	/**
 	 * The scripts of bin/ that run git.
 	 */
-	const SCRIPTS = array( 'worktree.sh', 'mutate.php' );
+	const SCRIPTS = array( 'worktree.sh', 'mutate.php', 'hooks/pre-push' );
 
 	/**
 	 * The lines of PHP source on which a program is started with git, or a script that runs git, named in a string.
@@ -34,7 +34,15 @@ final class GitUsageTest extends TestCase {
 		$count   = count( $tokens );
 		$lines   = array();
 		// Not ".git" (a repository's directory) or a longer word; "/usr/bin/git" is git.
-		$pattern = '/(?<![\w.-])git(?:\.exe)?(?![\w.-])|' . implode( '|', array_map( 'preg_quote', self::SCRIPTS ) ) . '/';
+		$pattern = '/(?<![\w.-])git(?:\.exe)?(?![\w.-])|' . implode(
+			'|',
+			array_map(
+				static function ( string $script ): string {
+					return preg_quote( $script, '/' );
+				},
+				self::SCRIPTS
+			)
+		) . '/';
 		$line    = 1;
 		for ( $i = 0; $i < $count; $i++ ) {
 			$token = $tokens[ $i ];
@@ -171,13 +179,19 @@ final class GitUsageTest extends TestCase {
 	public function test_the_scripts_that_run_git_are_the_listed_ones(): void {
 		$root = dirname( __DIR__, 3 );
 		$runs = array();
-		foreach ( glob( $root . '/bin/*' ) ?: array() as $file ) {
+		$read = 0;
+		foreach ( array_merge( glob( $root . '/bin/*' ) ?: array(), glob( $root . '/bin/*/*' ) ?: array() ) as $file ) {
+			if ( ! is_file( $file ) ) {
+				continue;
+			}
+			++$read;
 			$text = (string) file_get_contents( $file );
 			// A command line of git: at the start of a line or a command, after "$(" or in a quoted command.
 			if ( 1 === preg_match( '/(?:^|[;&|(`\'"]|\$\()\s*git\s+(?:-C\s|[a-z])/m', (string) preg_replace( '/^\s*(?:#|\/\/|\*).*$/m', '', $text ) ) ) {
-				$runs[] = basename( $file );
+				$runs[] = str_replace( '\\', '/', substr( $file, strlen( $root . '/bin/' ) ) );
 			}
 		}
+		$this->assertGreaterThan( 7, $read, 'the scan read the scripts, the ones in a directory of bin/ too' );
 		sort( $runs );
 		$listed = self::SCRIPTS;
 		sort( $listed );

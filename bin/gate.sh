@@ -8,6 +8,9 @@
 # default ../wp-checkpoint-test-output beside the repository), gate-<n>.txt, and its last lines are shown when it fails.
 #
 # Exit status: 0 when every step passed, else the status of the step that failed.
+#
+# Says in one line when the repository's pre-push hook is missing or is not bin/hooks/pre-push (bin/install-hooks.sh);
+# the gate runs all the same.
 
 # git's own environment is not the checks': started from a hook, they would inherit GIT_DIR, and a git command of a
 # test would act on the hook's repository, whatever directory it ran in (tests/Fixtures/SandboxGit.php).
@@ -18,6 +21,11 @@ set -u
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${WPCHECKPOINT_TEST_OUTPUT:-$REPO/../wp-checkpoint-test-output}"
 mkdir -p "$OUT" || exit 1
+# A hint, nothing more: the pre-push hook that runs this gate is not part of a clone.
+bash "$REPO/bin/install-hooks.sh" --check
+if [ "$?" -eq 1 ]; then
+	echo "gate: the pre-push hook is not installed, or is not bin/hooks/pre-push as it is now; run bin/install-hooks.sh" >&2
+fi
 if [ "$#" -eq 0 ]; then
 	set -- \
 		'vendor/bin/phpcs' \

@@ -22,7 +22,7 @@ final class GitInHookTest extends TestCase {
 	/**
 	 * The test classes that run git, or a script that does.
 	 */
-	const CLASSES = 'MutateToolTest|WorktreeScriptTest';
+	const CLASSES = 'MutateToolTest|PrePushHookTest|WorktreeScriptTest';
 
 	/** @var string The sandbox; '' before set_up() made it. */
 	private $sandbox = '';
